@@ -119,6 +119,75 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			unique (provider, provider_user_id)
 		)`,
 		`create index if not exists idx_oauth_accounts_user_id on oauth_accounts (user_id)`,
+		`create table if not exists oss_files (
+			id bigserial primary key,
+			bucket text not null default '',
+			endpoint text not null default '',
+			region text not null default '',
+			object_key text not null unique,
+			category text not null default '',
+			source text not null default '',
+			original_name text not null default '',
+			content_type text not null default '',
+			size_bytes bigint not null default 0,
+			sha256 text not null default '',
+			uploader_id bigint references users(id) on delete set null,
+			status text not null default 'active',
+			scan_status text not null default 'pending',
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now()
+		)`,
+		`create index if not exists idx_oss_files_category on oss_files (category, created_at desc)`,
+		`create index if not exists idx_oss_files_object_key_prefix on oss_files (object_key text_pattern_ops)`,
+		`create table if not exists oss_upload_logs (
+			id bigserial primary key,
+			file_id bigint references oss_files(id) on delete set null,
+			uploader_id bigint references users(id) on delete set null,
+			object_key text not null default '',
+			original_name text not null default '',
+			size_bytes bigint not null default 0,
+			ip text not null default '',
+			user_agent text not null default '',
+			result text not null default 'success',
+			message text not null default '',
+			created_at timestamptz not null default now()
+		)`,
+		`create index if not exists idx_oss_upload_logs_created_at on oss_upload_logs (created_at desc)`,
+		`create table if not exists oss_scan_logs (
+			id bigserial primary key,
+			file_id bigint references oss_files(id) on delete set null,
+			object_key text not null default '',
+			engine text not null default '',
+			result text not null default 'pending',
+			message text not null default '',
+			payload jsonb not null default '{}'::jsonb,
+			created_at timestamptz not null default now()
+		)`,
+		`create index if not exists idx_oss_scan_logs_created_at on oss_scan_logs (created_at desc)`,
+		`create table if not exists oss_download_stats (
+			object_key text primary key,
+			file_id bigint references oss_files(id) on delete set null,
+			downloads bigint not null default 0,
+			total_bytes bigint not null default 0,
+			last_download_at timestamptz
+		)`,
+		`create table if not exists app_logs (
+			id bigserial primary key,
+			category text not null,
+			level text not null default 'info',
+			actor_id bigint references users(id) on delete set null,
+			action text not null default '',
+			target text not null default '',
+			ip text not null default '',
+			user_agent text not null default '',
+			method text not null default '',
+			path text not null default '',
+			status integer not null default 0,
+			latency_ms bigint not null default 0,
+			payload jsonb not null default '{}'::jsonb,
+			created_at timestamptz not null default now()
+		)`,
+		`create index if not exists idx_app_logs_category_created_at on app_logs (category, created_at desc)`,
 	}
 
 	for _, statement := range statements {

@@ -24,7 +24,7 @@ func NewServer(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		mux:    http.NewServeMux(),
 	}
 	server.routes()
-	return server.cors(server.mux)
+	return server.cors(server.logAccess(server.mux))
 }
 
 func (s *Server) routes() {
@@ -44,6 +44,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/admin/config", s.requirePermission("admin.config.read", s.adminConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/mail", s.requirePermission("mail.write", s.updateMailConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/oauth", s.requirePermission("admin.config.write", s.updateOAuthConfig))
+	s.mux.HandleFunc("GET /api/v1/admin/config/oss", s.requirePermission("oss.read", s.getOSSConfig))
+	s.mux.HandleFunc("PUT /api/v1/admin/config/oss", s.requirePermission("oss.write", s.updateOSSConfig))
 	s.mux.HandleFunc("POST /api/v1/admin/mail/test", s.requirePermission("mail.write", s.sendTestMail))
 	s.mux.HandleFunc("GET /api/v1/admin/permissions", s.requirePermission("permission.read", s.permissionCatalog))
 	s.mux.HandleFunc("POST /api/v1/admin/permissions", s.requirePermission("permission.write", s.createPermission))
@@ -55,6 +57,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/admin/users/{id}/roles", s.requirePermission("permission.write", s.updateUserRoles))
 	s.mux.HandleFunc("GET /api/v1/admin/users/{id}/permissions", s.requirePermission("permission.read", s.userPermissionDetails))
 	s.mux.HandleFunc("PUT /api/v1/admin/users/{id}/permissions", s.requirePermission("permission.write", s.updateUserPermissions))
+	s.mux.HandleFunc("POST /api/v1/admin/oss/upload", s.requirePermission("oss.write", s.uploadOSSFile))
+	s.mux.HandleFunc("GET /api/v1/admin/oss/files", s.requirePermission("oss.read", s.ossFiles))
+	s.mux.HandleFunc("POST /api/v1/admin/oss/files/presign", s.requirePermission("oss.read", s.presignOSSFile))
+	s.mux.HandleFunc("GET /api/v1/admin/oss/uploads", s.requirePermission("oss.read", s.ossUploadLogs))
+	s.mux.HandleFunc("GET /api/v1/admin/oss/scans", s.requirePermission("oss.read", s.ossScanLogs))
+	s.mux.HandleFunc("GET /api/v1/admin/oss/downloads", s.requirePermission("oss.read", s.ossDownloadStats))
+	s.mux.HandleFunc("GET /api/v1/admin/logs", s.requirePermission("log.read", s.adminLogs))
+	s.mux.HandleFunc("GET /api/v1/admin/logs/config", s.requirePermission("log.read", s.getLogConfig))
+	s.mux.HandleFunc("PUT /api/v1/admin/logs/config", s.requirePermission("log.write", s.updateLogConfig))
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

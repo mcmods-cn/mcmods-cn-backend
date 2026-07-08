@@ -2,7 +2,10 @@ module mcmods-cn-backend
 
 go 1.26
 
-require github.com/jackc/pgx/v5 v5.7.5
+require (
+	github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.5.2
+	github.com/jackc/pgx/v5 v5.7.5
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
@@ -11,4 +14,5 @@ require (
 	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/sync v0.13.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
+	golang.org/x/time v0.4.0 // indirect
 )

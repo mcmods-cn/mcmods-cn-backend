@@ -100,7 +100,7 @@ func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminNav(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, adminNavigation())
+	writeJSON(w, http.StatusOK, adminNavigationV2())
 }
 
 func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
@@ -119,6 +119,7 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		},
 		"oauth": redactOAuthConfig(s.oauthConfig(r.Context())),
 		"mail":  redactMailConfig(mailCfg),
+		"oss":   redactOSSConfig(s.ossConfigFromSettings(r.Context())),
 		"permissions": map[string]any{
 			"mode":              "RBAC + user override",
 			"temporaryGrant":    true,
@@ -137,7 +138,8 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 			"contentReview":  true,
 			"emailSystem":    true,
 			"permissionRBAC": true,
-			"oss":            false,
+			"oss":            true,
+			"logSystem":      true,
 			"redis":          false,
 			"crawler":        false,
 			"ai":             false,
@@ -1472,6 +1474,21 @@ func redactMailConfig(payload mailConfigPayload) map[string]any {
 		"from":        payload.From,
 		"useTLS":      payload.UseTLS,
 		"hasPassword": strings.TrimSpace(payload.Password) != "",
+	}
+}
+
+func adminNavigationV2() []map[string]any {
+	return []map[string]any{
+		{"id": "overview", "label": "统计", "items": []string{"总览", "用户统计", "上传统计", "搜索统计", "AI 调用统计"}},
+		{"id": "content", "label": "内容管理", "items": []string{"模组 Mod", "整合包", "插件 Plugin", "衍生资源", "教程", "新闻", "问题 / 讨论"}},
+		{"id": "users", "label": "用户", "items": []string{"用户列表", "登录记录", "设备记录", "账号安全", "用户封禁"}},
+		{"id": "permissions", "label": "权限", "items": []string{"权限组", "用户权限", "权限列表", "权限模板", "临时权限", "权限审计日志"}},
+		{"id": "oss", "label": "OSS 管理", "items": []string{"OSS 链接设置", "OSS 文件目录", "文件上传记录", "文件查杀记录", "下载统计"}},
+		{"id": "logs", "label": "日志", "items": []string{"系统运行日志", "用户交互日志", "管理员操作日志", "权限变更日志", "登录安全日志", "API 访问日志", "文件上传日志", "AI 调用日志"}},
+		{"id": "review", "label": "审核", "items": []string{"待审核项", "新建内容审核", "编辑审核", "文件审核", "申请审核", "举报审核", "申诉审核"}},
+		{"id": "security", "label": "安全", "items": []string{"被封禁用户列表", "IP 黑名单", "设备黑名单", "风险账号"}},
+		{"id": "mail", "label": "邮件系统", "items": []string{"SMTP 配置", "验证码模板", "安全通知模板", "测试发送", "发送日志"}},
+		{"id": "settings", "label": "系统设置", "items": []string{"系统信息", "标签管理", "防御模式", "内容安全", "主题", "备份", "功能开关", "维护模式"}},
 	}
 }
 

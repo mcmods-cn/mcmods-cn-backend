@@ -70,6 +70,9 @@ func currentClaims(r *http.Request) security.Claims {
 
 func hasPermission(grants []string, required string) bool {
 	for _, grant := range grants {
+		if grant == "*" || grant == "admin.*" {
+			return true
+		}
 		if grant == required {
 			return true
 		}
