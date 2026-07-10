@@ -138,7 +138,14 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			updated_at timestamptz not null default now()
 		)`,
 		`create index if not exists idx_oss_files_category on oss_files (category, created_at desc)`,
+		`create index if not exists idx_oss_files_uploader_created_at on oss_files (uploader_id, created_at desc)`,
 		`create index if not exists idx_oss_files_object_key_prefix on oss_files (object_key text_pattern_ops)`,
+		`create index if not exists idx_oss_files_sha256_size on oss_files (sha256, size_bytes) where sha256 <> ''`,
+		`create table if not exists markdown_playground_drafts (
+			user_id bigint primary key references users(id) on delete cascade,
+			content text not null default '',
+			updated_at timestamptz not null default now()
+		)`,
 		`create table if not exists oss_upload_logs (
 			id bigserial primary key,
 			file_id bigint references oss_files(id) on delete set null,
@@ -188,6 +195,40 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			created_at timestamptz not null default now()
 		)`,
 		`create index if not exists idx_app_logs_category_created_at on app_logs (category, created_at desc)`,
+		`create table if not exists ai_tasks (
+			id bigserial primary key,
+			task_uid text not null unique,
+			task_type text not null,
+			provider text not null default '',
+			model text not null default '',
+			status text not null default 'queued',
+			priority integer not null default 0,
+			concurrency_key text not null default '',
+			input_tokens bigint not null default 0,
+			output_tokens bigint not null default 0,
+			cost_micros bigint not null default 0,
+			payload jsonb not null default '{}'::jsonb,
+			result jsonb not null default '{}'::jsonb,
+			error text not null default '',
+			created_by bigint references users(id) on delete set null,
+			created_at timestamptz not null default now(),
+			queued_at timestamptz,
+			started_at timestamptz,
+			finished_at timestamptz,
+			updated_at timestamptz not null default now()
+		)`,
+		`create index if not exists idx_ai_tasks_status_created_at on ai_tasks (status, created_at desc)`,
+		`create index if not exists idx_ai_tasks_type_created_at on ai_tasks (task_type, created_at desc)`,
+		`create table if not exists ai_task_logs (
+			id bigserial primary key,
+			task_id bigint references ai_tasks(id) on delete cascade,
+			level text not null default 'info',
+			event text not null,
+			message text not null default '',
+			payload jsonb not null default '{}'::jsonb,
+			created_at timestamptz not null default now()
+		)`,
+		`create index if not exists idx_ai_task_logs_task_created_at on ai_task_logs (task_id, created_at desc)`,
 	}
 
 	for _, statement := range statements {

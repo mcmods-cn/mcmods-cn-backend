@@ -7,20 +7,23 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/mailer"
+	"mcmods-cn-backend/internal/queue"
 )
 
 type Server struct {
 	cfg    config.Config
 	db     *pgxpool.Pool
 	mailer mailer.Mailer
+	queue  *queue.Client
 	mux    *http.ServeMux
 }
 
-func NewServer(cfg config.Config, db *pgxpool.Pool) http.Handler {
+func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client) http.Handler {
 	server := &Server{
 		cfg:    cfg,
 		db:     db,
 		mailer: mailer.New(cfg.SMTP),
+		queue:  queueClient,
 		mux:    http.NewServeMux(),
 	}
 	server.routes()
@@ -38,12 +41,25 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/auth/permissions/evaluate", s.requireAuth(s.evaluatePermission))
 	s.mux.HandleFunc("GET /api/v1/auth/me", s.requireAuth(s.me))
 	s.mux.HandleFunc("POST /api/v1/auth/logout", s.requireAuth(s.logout))
+	s.mux.HandleFunc("GET /api/v1/markdown/config", s.publicMarkdownConfig)
+	s.mux.HandleFunc("GET /api/v1/users/me/markdown-playground", s.requireAuth(s.getMarkdownPlaygroundDraft))
+	s.mux.HandleFunc("PUT /api/v1/users/me/markdown-playground", s.requireAuth(s.saveMarkdownPlaygroundDraft))
+	s.mux.HandleFunc("POST /api/v1/users/me/oss/uploads/presign", s.requireAuth(s.createUserOSSDirectUpload))
+	s.mux.HandleFunc("POST /api/v1/users/me/oss/uploads/complete", s.requireAuth(s.completeUserOSSDirectUpload))
+	s.mux.HandleFunc("GET /api/v1/users/me/files", s.requireAuth(s.userOSSFiles))
+	s.mux.HandleFunc("GET /api/v1/users/me/files/quota", s.requireAuth(s.userOSSFileQuota))
+	s.mux.HandleFunc("POST /api/v1/users/me/files/presign", s.requireAuth(s.presignUserOSSFile))
+	s.mux.HandleFunc("DELETE /api/v1/users/me/files", s.requireAuth(s.deleteUserOSSFile))
 
 	s.mux.HandleFunc("GET /api/v1/admin/dashboard", s.requirePermission("admin.access", s.adminDashboard))
 	s.mux.HandleFunc("GET /api/v1/admin/nav", s.requirePermission("admin.access", s.adminNav))
 	s.mux.HandleFunc("GET /api/v1/admin/config", s.requirePermission("admin.config.read", s.adminConfig))
+	s.mux.HandleFunc("GET /api/v1/admin/config/markdown", s.requirePermission("admin.config.read", s.adminMarkdownConfig))
+	s.mux.HandleFunc("PUT /api/v1/admin/config/markdown", s.requirePermission("admin.config.write", s.updateMarkdownConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/mail", s.requirePermission("mail.write", s.updateMailConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/oauth", s.requirePermission("admin.config.write", s.updateOAuthConfig))
+	s.mux.HandleFunc("GET /api/v1/admin/config/nats", s.requirePermission("admin.config.read", s.getNATSConfig))
+	s.mux.HandleFunc("PUT /api/v1/admin/config/nats", s.requirePermission("admin.config.write", s.updateNATSConfig))
 	s.mux.HandleFunc("GET /api/v1/admin/config/oss", s.requirePermission("oss.read", s.getOSSConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/oss", s.requirePermission("oss.write", s.updateOSSConfig))
 	s.mux.HandleFunc("POST /api/v1/admin/mail/test", s.requirePermission("mail.write", s.sendTestMail))
@@ -57,7 +73,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/admin/users/{id}/roles", s.requirePermission("permission.write", s.updateUserRoles))
 	s.mux.HandleFunc("GET /api/v1/admin/users/{id}/permissions", s.requirePermission("permission.read", s.userPermissionDetails))
 	s.mux.HandleFunc("PUT /api/v1/admin/users/{id}/permissions", s.requirePermission("permission.write", s.updateUserPermissions))
-	s.mux.HandleFunc("POST /api/v1/admin/oss/upload", s.requirePermission("oss.write", s.uploadOSSFile))
+	s.mux.HandleFunc("POST /api/v1/admin/oss/uploads/presign", s.requirePermission("oss.write", s.createOSSDirectUpload))
+	s.mux.HandleFunc("POST /api/v1/admin/oss/uploads/complete", s.requirePermission("oss.write", s.completeOSSDirectUpload))
 	s.mux.HandleFunc("GET /api/v1/admin/oss/files", s.requirePermission("oss.read", s.ossFiles))
 	s.mux.HandleFunc("POST /api/v1/admin/oss/files/presign", s.requirePermission("oss.read", s.presignOSSFile))
 	s.mux.HandleFunc("GET /api/v1/admin/oss/uploads", s.requirePermission("oss.read", s.ossUploadLogs))
@@ -66,6 +83,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/admin/logs", s.requirePermission("log.read", s.adminLogs))
 	s.mux.HandleFunc("GET /api/v1/admin/logs/config", s.requirePermission("log.read", s.getLogConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/logs/config", s.requirePermission("log.write", s.updateLogConfig))
+	s.mux.HandleFunc("GET /api/v1/admin/ai/config", s.requirePermission("ai.read", s.getAIConfig))
+	s.mux.HandleFunc("PUT /api/v1/admin/ai/config", s.requirePermission("ai.write", s.updateAIConfig))
+	s.mux.HandleFunc("GET /api/v1/admin/ai/tasks", s.requirePermission("ai.read", s.adminAITasks))
+	s.mux.HandleFunc("GET /api/v1/admin/ai/tasks/{id}", s.requirePermission("ai.read", s.adminAITask))
+	s.mux.HandleFunc("POST /api/v1/admin/ai/tasks", s.requirePermission("ai.task.enqueue", s.createAITask))
+	s.mux.HandleFunc("GET /api/v1/admin/ai/stats", s.requirePermission("ai.read", s.adminAIStats))
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

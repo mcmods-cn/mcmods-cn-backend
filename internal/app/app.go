@@ -13,6 +13,7 @@ import (
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/httpapi"
+	"mcmods-cn-backend/internal/queue"
 )
 
 func Run() {
@@ -33,9 +34,21 @@ func Run() {
 		log.Fatalf("seed permissions: %v", err)
 	}
 
+	natsCfg, err := database.LoadNATSConfig(ctx, db, cfg.NATS)
+	if err != nil {
+		log.Printf("load NATS config: %v", err)
+		natsCfg = cfg.NATS
+	}
+	queueClient := queue.New(ctx, natsCfg)
+	defer queueClient.Close()
+	aiWorker := httpapi.NewAIWorker(db, queueClient)
+	if err := aiWorker.Start(ctx); err != nil {
+		log.Printf("ai queue worker unavailable: %v", err)
+	}
+
 	server := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           httpapi.NewServer(cfg, db),
+		Handler:           httpapi.NewServer(cfg, db, queueClient),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

@@ -19,6 +19,7 @@ type Config struct {
 	JWTTTL         time.Duration
 	DB             DBConfig
 	SMTP           SMTPConfig
+	NATS           NATSConfig
 }
 
 type DBConfig struct {
@@ -38,6 +39,25 @@ type SMTPConfig struct {
 	Password string
 	From     string
 	UseTLS   bool
+}
+
+type NATSConfig struct {
+	Enabled       bool             `json:"enabled"`
+	URL           string           `json:"url"`
+	Username      string           `json:"username"`
+	Password      string           `json:"password,omitempty"`
+	Token         string           `json:"token,omitempty"`
+	SubjectPrefix string           `json:"subjectPrefix"`
+	Tasks         []NATSTaskConfig `json:"tasks"`
+}
+
+type NATSTaskConfig struct {
+	Code           string `json:"code"`
+	Enabled        bool   `json:"enabled"`
+	Subject        string `json:"subject"`
+	QueueGroup     string `json:"queueGroup"`
+	MaxConcurrent  int    `json:"maxConcurrent"`
+	TimeoutSeconds int    `json:"timeoutSeconds"`
 }
 
 func Load() Config {
@@ -65,6 +85,24 @@ func Load() Config {
 			Password: os.Getenv("SMTP_PASSWORD"),
 			From:     getenv("SMTP_FROM", "no-reply@mcmods.cn"),
 			UseTLS:   getenvBool("SMTP_USE_TLS", true),
+		},
+		NATS: NATSConfig{
+			Enabled:       getenvBool("NATS_ENABLED", true),
+			URL:           getenv("NATS_URL", "nats://127.0.0.1:4222"),
+			Username:      os.Getenv("NATS_USERNAME"),
+			Password:      os.Getenv("NATS_PASSWORD"),
+			Token:         os.Getenv("NATS_TOKEN"),
+			SubjectPrefix: getenv("NATS_SUBJECT_PREFIX", "mcmods"),
+			Tasks: []NATSTaskConfig{
+				{
+					Code:           "ai",
+					Enabled:        true,
+					Subject:        "ai.tasks",
+					QueueGroup:     getenv("NATS_QUEUE_GROUP", "mcmods-ai-workers"),
+					MaxConcurrent:  getenvInt("AI_MAX_CONCURRENT", 2),
+					TimeoutSeconds: 300,
+				},
+			},
 		},
 	}
 }

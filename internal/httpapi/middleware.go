@@ -87,6 +87,9 @@ func hasPermission(grants []string, required string) bool {
 }
 
 func numericPermissionValue(grants []string, permissionPrefix string) int32 {
+	if hasPermission(grants, "admin.*") {
+		return maxPermissionValue
+	}
 	if hasPermission(grants, permissionPrefix+".*") {
 		return maxPermissionValue
 	}
