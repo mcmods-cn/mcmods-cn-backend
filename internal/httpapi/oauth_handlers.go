@@ -100,12 +100,15 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	user, err := s.findOrCreateOAuthUser(r.Context(), profile)
+	location := requestClientLocation(r)
+	user, err := s.findOrCreateOAuthUser(r.Context(), profile, location)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "第三方账号登录失败")
 		return
 	}
 	user.Roles, user.Permissions = s.userGrants(r.Context(), user.ID)
+	_, _ = s.db.Exec(r.Context(), `update users set last_login_at = now(), updated_at = now() where id = $1`, user.ID)
+	s.recordLogin(r.Context(), &user.ID, profile.Provider+":"+profile.ProviderUserID, location, r.UserAgent(), true, "oauth_"+profile.Provider)
 	token, err := s.issueToken(user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "生成登录凭证失败")
@@ -535,17 +538,18 @@ func httpGetJSON(ctx context.Context, rawURL string, target any) error {
 	return json.Unmarshal([]byte(text), target)
 }
 
-func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProviderProfile) (domain.User, error) {
+func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProviderProfile, location clientLocation) (domain.User, error) {
 	var user domain.User
+	created := false
 	err := s.db.QueryRow(
 		ctx,
-		`select u.id, u.username, u.email, u.display_name, u.email_verified, u.status, u.created_at, u.last_login_at
+		`select u.id, u.username, u.email, u.display_name, u.email_verified, u.status, u.created_at, u.last_login_at, u.avatar_url, u.signature
 		 from oauth_accounts oa
 		 join users u on u.id = oa.user_id
 		 where oa.provider = $1 and oa.provider_user_id = $2`,
 		profile.Provider,
 		profile.ProviderUserID,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
+	).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
 	if err == nil {
 		return user, nil
 	}
@@ -565,6 +569,7 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProvide
 		}
 	}
 	if user.ID == 0 {
+		created = true
 		username := normalizeOAuthUsername(profile.Provider, defaultString(profile.Username, profile.ProviderUserID)+"_"+profile.ProviderUserID)
 		email := profile.Email
 		if email == "" {
@@ -572,14 +577,25 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProvide
 		}
 		err = tx.QueryRow(
 			ctx,
-			`insert into users (username, email, display_name, password_hash, email_verified, status)
-			 values ($1, $2, $3, 'oauth-login-disabled', true, 'active')
+			`insert into users (
+				username, email, display_name, password_hash, email_verified, status,
+				registration_ip, registration_country_code, registration_city
+			 )
+			 values ($1, $2, $3, 'oauth-login-disabled', true, 'active', $4, $5, $6)
 			 returning id, username, email, display_name, email_verified, status, created_at, last_login_at`,
 			username,
 			email,
 			defaultString(profile.DisplayName, username),
+			location.IP,
+			location.CountryCode,
+			location.City,
 		).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
 		if err != nil {
+			return user, err
+		}
+	}
+	if created {
+		if err := s.assignConfiguredRoleTx(ctx, tx, user.ID, "registered"); err != nil {
 			return user, err
 		}
 	}

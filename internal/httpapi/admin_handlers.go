@@ -121,6 +121,7 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		"mail":     redactMailConfig(mailCfg),
 		"oss":      redactOSSConfig(s.ossConfigFromSettings(r.Context())),
 		"markdown": s.markdownConfigFromSettings(r.Context()),
+		"profile":  s.profileConfigFromSettings(r.Context()),
 		"ai":       redactAIConfig(s.aiConfigFromSettings(r.Context())),
 		"permissions": map[string]any{
 			"mode":              "RBAC + user override",
@@ -439,12 +440,19 @@ func (s *Server) deleteRole(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	rows, err := s.db.Query(
 		r.Context(),
 		`select id, username, email, display_name, email_verified, status, created_at, last_login_at
 		 from users
+		 where $1 = ''
+		    or id::text = $1
+		    or username ilike '%' || $1 || '%'
+		    or email ilike '%' || $1 || '%'
+		    or display_name ilike '%' || $1 || '%'
 		 order by id desc
 		 limit 100`,
+		query,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取用户列表失败")
@@ -558,6 +566,14 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "权限组不存在: "+role)
 			return
 		}
+	}
+	defaultRoleKind := "registered"
+	if req.Status == "banned" {
+		defaultRoleKind = "banned"
+	}
+	if err := s.assignConfiguredRoleTx(r.Context(), tx, user.ID, defaultRoleKind); err != nil {
+		writeError(w, http.StatusInternalServerError, "分配默认权限组失败")
+		return
 	}
 	s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &user.ID, "create_user", map[string]any{
 		"username": user.Username,
@@ -1483,7 +1499,7 @@ func adminNavigation() []map[string]any {
 	return []map[string]any{
 		{"id": "overview", "label": "统计", "items": []string{"总览", "用户统计", "上传统计", "搜索统计", "AI 调用统计"}},
 		{"id": "content", "label": "内容管理", "items": []string{"模组 Mod", "整合包", "插件 Plugin", "衍生资源", "教程", "新闻", "问题 / 讨论"}},
-		{"id": "users", "label": "用户", "items": []string{"用户列表", "登录记录", "设备记录", "账号安全", "用户封禁"}},
+		{"id": "users", "label": "用户与通知", "items": []string{"用户列表", "系统通知", "登录记录", "设备记录", "账号安全", "用户封禁"}},
 		{"id": "permissions", "label": "权限", "items": []string{"权限组", "用户权限", "权限列表", "权限模板", "临时权限", "权限审计日志"}},
 		{"id": "oss", "label": "OSS 管理", "items": []string{"OSS 链接设置", "OSS 文件目录", "文件上传记录", "文件查杀记录", "下载统计"}},
 		{"id": "logs", "label": "日志", "items": []string{"系统运行日志", "用户交互日志", "管理员操作日志", "权限变更日志", "登录安全日志", "API 访问日志", "文件上传日志", "AI 调用日志"}},

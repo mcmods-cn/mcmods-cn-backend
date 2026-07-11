@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -249,7 +250,8 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		return
 	}
 	if scope == "user" {
-		if err := s.enforceUserFileUploadLimits(r, req.SizeBytes); err != nil {
+		deferStoredSizeCheck := shouldPersistMarkdownImageAsWebP(req.OriginalName, contentType, source, category)
+		if err := s.enforceUserFileUploadLimits(r, req.SizeBytes, deferStoredSizeCheck); err != nil {
 			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
@@ -380,17 +382,47 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	if head.ContentType != nil && *head.ContentType != "" {
 		contentType = *head.ContentType
 	}
+	sourceObjectKey := req.ObjectKey
+	sourceOriginalName := req.OriginalName
+	sourceSize := size
+	converted := false
+	if shouldPersistMarkdownImageAsWebP(req.OriginalName, contentType, req.Source, req.Category) {
+		convertedObject, conversionErr := persistImageAsWebP(r.Context(), client, cfg, req.ObjectKey, req.OriginalName)
+		if conversionErr != nil {
+			_, _ = client.DeleteObject(r.Context(), &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(req.ObjectKey)})
+			s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, req.ObjectKey, req.OriginalName, size, requestIP(r), r.UserAgent(), "failed", conversionErr.Error())
+			writeError(w, http.StatusBadGateway, imageProcessErrorMessage(conversionErr))
+			return
+		}
+		req.ObjectKey = convertedObject.ObjectKey
+		req.OriginalName = convertedObject.OriginalName
+		contentType = "image/webp"
+		size = convertedObject.SizeBytes
+		converted = true
+	}
+	if scope == "user" {
+		if err := s.enforceUserStoredFileLimit(r, size); err != nil {
+			_, _ = client.DeleteObject(r.Context(), &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(req.ObjectKey)})
+			if converted {
+				_, _ = client.DeleteObject(r.Context(), &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(sourceObjectKey)})
+			}
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
 	var fileID int64
 	err = s.db.QueryRow(
 		r.Context(),
-		`insert into oss_files (bucket, endpoint, region, object_key, category, source, original_name, content_type, size_bytes, sha256, uploader_id, status, scan_status)
-		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'active', 'pending')
+		`insert into oss_files (bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, uploader_id, status, scan_status)
+		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'active', 'pending')
 		 on conflict (object_key) do update
 		 set category = excluded.category,
 		     source = excluded.source,
 		     original_name = excluded.original_name,
+		     source_original_name = excluded.source_original_name,
 		     content_type = excluded.content_type,
 		     size_bytes = excluded.size_bytes,
+		     source_size_bytes = excluded.source_size_bytes,
 		     sha256 = excluded.sha256,
 		     uploader_id = excluded.uploader_id,
 		     updated_at = now()
@@ -402,16 +434,27 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		req.Category,
 		req.Source,
 		req.OriginalName,
+		sourceOriginalName,
 		contentType,
 		size,
+		sourceSize,
 		req.SHA256,
 		currentClaims(r).Subject,
 	).Scan(&fileID)
 	if err != nil {
+		if converted {
+			_, _ = client.DeleteObject(r.Context(), &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(req.ObjectKey)})
+			_, _ = client.DeleteObject(r.Context(), &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(sourceObjectKey)})
+		}
 		writeError(w, http.StatusInternalServerError, "保存 OSS 文件记录失败")
 		return
 	}
-	s.insertOSSUploadLog(r.Context(), &fileID, currentClaims(r).Subject, req.ObjectKey, req.OriginalName, size, requestIP(r), r.UserAgent(), "success", "direct-to-oss")
+	logMessage := "direct-to-oss"
+	if converted {
+		logMessage = "direct-to-oss; persisted-as-webp"
+		_, _ = client.DeleteObject(r.Context(), &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(sourceObjectKey)})
+	}
+	s.insertOSSUploadLog(r.Context(), &fileID, currentClaims(r).Subject, req.ObjectKey, sourceOriginalName, sourceSize, requestIP(r), r.UserAgent(), "success", logMessage)
 	_, _ = s.db.Exec(
 		r.Context(),
 		`insert into oss_scan_logs (file_id, object_key, engine, result, message)
@@ -420,18 +463,36 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		req.ObjectKey,
 	)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":           fileID,
-		"bucket":       cfg.Bucket,
-		"objectKey":    req.ObjectKey,
-		"category":     req.Category,
-		"source":       req.Source,
-		"originalName": req.OriginalName,
-		"contentType":  contentType,
-		"sizeBytes":    size,
-		"sha256":       req.SHA256,
-		"scanStatus":   "pending",
-		"url":          buildPublicOSSURL(cfg, req.ObjectKey),
+		"id":                 fileID,
+		"bucket":             cfg.Bucket,
+		"objectKey":          req.ObjectKey,
+		"category":           req.Category,
+		"source":             req.Source,
+		"originalName":       req.OriginalName,
+		"sourceOriginalName": sourceOriginalName,
+		"contentType":        contentType,
+		"sizeBytes":          size,
+		"sourceSizeBytes":    sourceSize,
+		"converted":          converted,
+		"sha256":             req.SHA256,
+		"scanStatus":         "pending",
+		"url":                buildPublicOSSURL(cfg, req.ObjectKey),
 	})
+}
+
+func imageProcessErrorMessage(err error) string {
+	var serviceError *aliyunoss.ServiceError
+	if errors.As(err, &serviceError) {
+		switch serviceError.Code {
+		case "AccessDenied":
+			return "OSS 图片转换为 WebP 失败，请确认 AccessKey 具有 oss:PostProcessTask 和 oss:PutObject 权限"
+		case "ImageDamage":
+			return "OSS 无法解析源图片，文件可能损坏或格式不受支持"
+		default:
+			return "OSS 图片转换为 WebP 失败: " + serviceError.Code
+		}
+	}
+	return "OSS 图片转换为 WebP 失败"
 }
 
 func (s *Server) ossFiles(w http.ResponseWriter, r *http.Request) {
@@ -451,7 +512,7 @@ func (s *Server) ossFiles(w http.ResponseWriter, r *http.Request) {
 	args = append(args, limit)
 	rows, err := s.db.Query(
 		r.Context(),
-		`select id, bucket, endpoint, region, object_key, category, source, original_name, content_type, size_bytes, sha256, status, scan_status, created_at, updated_at
+		`select id, bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, status, scan_status, created_at, updated_at
 		 from oss_files
 		 where `+strings.Join(where, " and ")+`
 		 order by created_at desc
@@ -466,14 +527,14 @@ func (s *Server) ossFiles(w http.ResponseWriter, r *http.Request) {
 
 	files := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, size int64
-		var bucket, endpoint, region, objectKey, category, source, originalName, contentType, sha, status, scanStatus string
+		var id, size, sourceSize int64
+		var bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, sha, status, scanStatus string
 		var createdAt, updatedAt time.Time
-		if err := rows.Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &contentType, &size, &sha, &status, &scanStatus, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &sourceOriginalName, &contentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "解析 OSS 文件目录失败")
 			return
 		}
-		files = append(files, ossFileRecord(id, bucket, endpoint, region, objectKey, category, source, originalName, contentType, size, sha, status, scanStatus, createdAt, updatedAt))
+		files = append(files, ossFileRecord(id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt))
 	}
 	writeJSON(w, http.StatusOK, files)
 }
@@ -490,47 +551,58 @@ func (s *Server) findExistingOSSFileByHashWithOwner(ctx context.Context, sha256 
 	if sha256 == "" || sizeBytes <= 0 {
 		return nil, false
 	}
-	var id, size int64
-	var bucket, endpoint, region, objectKey, category, source, originalName, contentType, sha, status, scanStatus string
+	var id, size, sourceSize int64
+	var bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, sha, status, scanStatus string
 	var createdAt, updatedAt time.Time
-	query := `select id, bucket, endpoint, region, object_key, category, source, original_name, content_type, size_bytes, sha256, status, scan_status, created_at, updated_at
+	query := `select id, bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, status, scan_status, created_at, updated_at
 		from oss_files
-		where sha256 = $1 and size_bytes = $2 and status = 'active'`
+		where sha256 = $1 and coalesce(nullif(source_size_bytes, 0), size_bytes) = $2 and status = 'active'`
 	args := []any{sha256, sizeBytes}
 	if uploaderID != nil {
 		args = append(args, *uploaderID)
 		query += ` and uploader_id = $3`
 	}
 	query += ` order by created_at asc limit 1`
-	err := s.db.QueryRow(ctx, query, args...).Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &contentType, &size, &sha, &status, &scanStatus, &createdAt, &updatedAt)
+	err := s.db.QueryRow(ctx, query, args...).Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &sourceOriginalName, &contentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt)
 	if err != nil {
 		_ = ignoreNoRows(err)
 		return nil, false
 	}
-	return ossFileRecord(id, bucket, endpoint, region, objectKey, category, source, originalName, contentType, size, sha, status, scanStatus, createdAt, updatedAt), true
+	return ossFileRecord(id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt), true
 }
 
-func ossFileRecord(id int64, bucket string, endpoint string, region string, objectKey string, category string, source string, originalName string, contentType string, size int64, sha string, status string, scanStatus string, createdAt time.Time, updatedAt time.Time) map[string]any {
+func ossFileRecord(id int64, bucket string, endpoint string, region string, objectKey string, category string, source string, originalName string, sourceOriginalName string, contentType string, size int64, sourceSize int64, sha string, status string, scanStatus string, createdAt time.Time, updatedAt time.Time) map[string]any {
+	if sourceOriginalName == "" {
+		sourceOriginalName = originalName
+	}
+	if sourceSize <= 0 {
+		sourceSize = size
+	}
+	sourceExtension := strings.ToLower(filepath.Ext(sourceOriginalName))
+	converted := contentType == "image/webp" && (sourceExtension == ".jpg" || sourceExtension == ".jpeg" || sourceExtension == ".png")
 	return map[string]any{
-		"id":           id,
-		"bucket":       bucket,
-		"endpoint":     endpoint,
-		"region":       region,
-		"objectKey":    objectKey,
-		"category":     category,
-		"source":       source,
-		"originalName": originalName,
-		"contentType":  contentType,
-		"sizeBytes":    size,
-		"sha256":       sha,
-		"status":       status,
-		"scanStatus":   scanStatus,
-		"createdAt":    createdAt,
-		"updatedAt":    updatedAt,
+		"id":                 id,
+		"bucket":             bucket,
+		"endpoint":           endpoint,
+		"region":             region,
+		"objectKey":          objectKey,
+		"category":           category,
+		"source":             source,
+		"originalName":       originalName,
+		"sourceOriginalName": sourceOriginalName,
+		"contentType":        contentType,
+		"sizeBytes":          size,
+		"sourceSizeBytes":    sourceSize,
+		"converted":          converted,
+		"sha256":             sha,
+		"status":             status,
+		"scanStatus":         scanStatus,
+		"createdAt":          createdAt,
+		"updatedAt":          updatedAt,
 	}
 }
 
-func (s *Server) enforceUserFileUploadLimits(r *http.Request, sizeBytes int64) error {
+func (s *Server) enforceUserFileUploadLimits(r *http.Request, sizeBytes int64, deferStoredSizeCheck bool) error {
 	claims := currentClaims(r)
 	singleLimit := permissionMiBToBytes(numericPermissionValue(claims.Permissions, "user.file.single_limit"))
 	dailyLimit := permissionMiBToBytes(numericPermissionValue(claims.Permissions, "user.file.daily_limit"))
@@ -551,7 +623,7 @@ func (s *Server) enforceUserFileUploadLimits(r *http.Request, sizeBytes int64) e
 	var dailyUsed, totalUsed int64
 	_ = s.db.QueryRow(
 		r.Context(),
-		`select coalesce(sum(size_bytes), 0)
+		`select coalesce(sum(coalesce(nullif(source_size_bytes, 0), size_bytes)), 0)
 		 from oss_files
 		 where uploader_id = $1 and object_key like $2 and status = 'active' and created_at >= current_date`,
 		claims.Subject,
@@ -568,7 +640,32 @@ func (s *Server) enforceUserFileUploadLimits(r *http.Request, sizeBytes int64) e
 	if dailyLimit != maxPermissionBytes && dailyUsed+sizeBytes > dailyLimit {
 		return fmt.Errorf("超过每日上传额度：%s", formatLimitBytes(dailyLimit))
 	}
-	if totalLimit != maxPermissionBytes && totalUsed+sizeBytes > totalLimit {
+	if totalLimit != maxPermissionBytes && !deferStoredSizeCheck && totalUsed+sizeBytes > totalLimit {
+		return fmt.Errorf("超过用户文件总容量：%s", formatLimitBytes(totalLimit))
+	}
+	return nil
+}
+
+func (s *Server) enforceUserStoredFileLimit(r *http.Request, sizeBytes int64) error {
+	claims := currentClaims(r)
+	totalLimit := permissionMiBToBytes(numericPermissionValue(claims.Permissions, "user.file.total_limit"))
+	if totalLimit <= 0 {
+		return errors.New("没有用户文件总容量额度")
+	}
+	if totalLimit == maxPermissionBytes {
+		return nil
+	}
+	userPrefix := path.Join(s.ossConfigFromSettings(r.Context()).Prefix, "user", strconv.FormatInt(claims.Subject, 10)) + "/%"
+	var totalUsed int64
+	_ = s.db.QueryRow(
+		r.Context(),
+		`select coalesce(sum(size_bytes), 0)
+		 from oss_files
+		 where uploader_id = $1 and object_key like $2 and status = 'active'`,
+		claims.Subject,
+		userPrefix,
+	).Scan(&totalUsed)
+	if totalUsed+sizeBytes > totalLimit {
 		return fmt.Errorf("超过用户文件总容量：%s", formatLimitBytes(totalLimit))
 	}
 	return nil
@@ -865,6 +962,64 @@ func (s *Server) insertOSSUploadLog(ctx context.Context, fileID *int64, uploader
 
 func buildOSSObjectKey(prefix string, category string) string {
 	return path.Join(prefix, category, randomObjectName())
+}
+
+type persistedWebPObject struct {
+	ObjectKey    string
+	OriginalName string
+	SizeBytes    int64
+}
+
+func shouldPersistMarkdownImageAsWebP(originalName string, contentType string, source string, category string) bool {
+	extension := strings.ToLower(filepath.Ext(originalName))
+	if extension != ".jpg" && extension != ".jpeg" && extension != ".png" {
+		return false
+	}
+	contentType = strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	if contentType != "image/jpeg" && contentType != "image/jpg" && contentType != "image/png" {
+		return false
+	}
+	source = normalizeObjectSegment(source)
+	category = strings.ToLower(strings.TrimSpace(category))
+	if source == "playground" || source == "comment" || source == "markdown" || source == "project_intro" || source == "projectintro" {
+		return true
+	}
+	return category == "user/playground" || category == "user/comment" || strings.HasSuffix(category, "/intro")
+}
+
+func persistImageAsWebP(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, sourceObjectKey string, sourceOriginalName string) (persistedWebPObject, error) {
+	destinationObjectKey := strings.TrimSuffix(sourceObjectKey, filepath.Ext(sourceObjectKey)) + ".webp"
+	if destinationObjectKey == sourceObjectKey {
+		destinationObjectKey += ".webp"
+	}
+	encodedDestination := base64.RawURLEncoding.EncodeToString([]byte(destinationObjectKey))
+	result, err := client.ProcessObject(ctx, &aliyunoss.ProcessObjectRequest{
+		Bucket:  aliyunoss.Ptr(cfg.Bucket),
+		Key:     aliyunoss.Ptr(sourceObjectKey),
+		Process: aliyunoss.Ptr("image/format,webp|sys/saveas,o_" + encodedDestination),
+	})
+	if err != nil {
+		return persistedWebPObject{}, err
+	}
+	if result.ProcessStatus != "" && !strings.EqualFold(result.ProcessStatus, "OK") {
+		return persistedWebPObject{}, fmt.Errorf("OSS image process status: %s", result.ProcessStatus)
+	}
+	head, err := client.HeadObject(ctx, &aliyunoss.HeadObjectRequest{
+		Bucket: aliyunoss.Ptr(cfg.Bucket),
+		Key:    aliyunoss.Ptr(destinationObjectKey),
+	})
+	if err != nil {
+		return persistedWebPObject{}, err
+	}
+	baseName := strings.TrimSuffix(path.Base(sourceOriginalName), filepath.Ext(sourceOriginalName))
+	if baseName == "" {
+		baseName = "image"
+	}
+	return persistedWebPObject{
+		ObjectKey:    destinationObjectKey,
+		OriginalName: baseName + ".webp",
+		SizeBytes:    head.ContentLength,
+	}, nil
 }
 
 func randomObjectName() string {

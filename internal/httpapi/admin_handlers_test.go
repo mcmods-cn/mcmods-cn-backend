@@ -61,3 +61,27 @@ func TestApplyRoleVariables(t *testing.T) {
 		t.Fatalf("expanded permission = %q", got)
 	}
 }
+
+func TestPermissionCandidatePriority(t *testing.T) {
+	candidates := map[string]permissionCandidate{}
+	applyPermissionCandidate(candidates, permissionCandidate{
+		effectivePermission: effectivePermission{Code: "project.edit.*", Allow: true, Priority: 10, Source: "group.editor"},
+		Depth:               0,
+	})
+	applyPermissionCandidate(candidates, permissionCandidate{
+		effectivePermission: effectivePermission{Code: "project.edit.*", Allow: false, Priority: 10, Source: "group.restricted"},
+		Depth:               0,
+	})
+	if candidates["project.edit.*"].Allow {
+		t.Fatal("deny must win when role priority and depth are equal")
+	}
+
+	applyPermissionCandidate(candidates, permissionCandidate{
+		effectivePermission: effectivePermission{Code: "project.edit.*", Allow: true, Priority: directUserPermissionPriority, Source: "user"},
+		Depth:               -1,
+	})
+	got := candidates["project.edit.*"]
+	if !got.Allow || got.Source != "user" {
+		t.Fatalf("direct user permission did not override role permission: %#v", got)
+	}
+}

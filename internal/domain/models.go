@@ -13,6 +13,8 @@ type User struct {
 	Permissions   []string   `json:"permissions"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	LastLoginAt   *time.Time `json:"lastLoginAt,omitempty"`
+	AvatarURL     string     `json:"avatarUrl,omitempty"`
+	Signature     string     `json:"signature,omitempty"`
 }
 
 type Role struct {

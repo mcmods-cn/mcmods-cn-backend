@@ -72,7 +72,7 @@ func (s *Server) userOSSFiles(w http.ResponseWriter, r *http.Request) {
 	limit := boundedLimit(r.URL.Query().Get("limit"), 100, 500)
 	rows, err := s.db.Query(
 		r.Context(),
-		`select id, bucket, endpoint, region, object_key, category, source, original_name, content_type, size_bytes, sha256, status, scan_status, created_at, updated_at
+		`select id, bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, status, scan_status, created_at, updated_at
 		 from oss_files
 		 where uploader_id = $1 and object_key like $2 and status = 'active'
 		 order by created_at desc
@@ -89,14 +89,14 @@ func (s *Server) userOSSFiles(w http.ResponseWriter, r *http.Request) {
 
 	files := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, size int64
-		var bucket, endpoint, region, objectKey, category, source, originalName, contentType, sha, status, scanStatus string
+		var id, size, sourceSize int64
+		var bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, sha, status, scanStatus string
 		var createdAt, updatedAt time.Time
-		if err := rows.Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &contentType, &size, &sha, &status, &scanStatus, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &sourceOriginalName, &contentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "解析用户文件失败")
 			return
 		}
-		record := ossFileRecord(id, bucket, endpoint, region, objectKey, category, source, originalName, contentType, size, sha, status, scanStatus, createdAt, updatedAt)
+		record := ossFileRecord(id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt)
 		record["url"] = buildPublicOSSURL(cfg, objectKey)
 		files = append(files, record)
 	}
@@ -107,37 +107,41 @@ func (s *Server) userOSSFileQuota(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	cfg := s.ossConfigFromSettings(r.Context())
 	userPrefix := path.Join(cfg.Prefix, "user", strconv.FormatInt(claims.Subject, 10)) + "/%"
-	var dailyUsed, totalUsed int64
+	var dailySourceUsed, dailyStoredUsed, totalSourceUsed, totalStoredUsed int64
 	_ = s.db.QueryRow(
 		r.Context(),
-		`select coalesce(sum(size_bytes), 0)
+		`select coalesce(sum(coalesce(nullif(source_size_bytes, 0), size_bytes)), 0), coalesce(sum(size_bytes), 0)
 		 from oss_files
 		 where uploader_id = $1 and object_key like $2 and status = 'active' and created_at >= current_date`,
 		claims.Subject,
 		userPrefix,
-	).Scan(&dailyUsed)
+	).Scan(&dailySourceUsed, &dailyStoredUsed)
 	_ = s.db.QueryRow(
 		r.Context(),
-		`select coalesce(sum(size_bytes), 0)
+		`select coalesce(sum(coalesce(nullif(source_size_bytes, 0), size_bytes)), 0), coalesce(sum(size_bytes), 0)
 		 from oss_files
 		 where uploader_id = $1 and object_key like $2 and status = 'active'`,
 		claims.Subject,
 		userPrefix,
-	).Scan(&totalUsed)
+	).Scan(&totalSourceUsed, &totalStoredUsed)
 
 	singleLimit := permissionMiBToBytes(numericPermissionValue(claims.Permissions, "user.file.single_limit"))
 	dailyLimit := permissionMiBToBytes(numericPermissionValue(claims.Permissions, "user.file.daily_limit"))
 	totalLimit := permissionMiBToBytes(numericPermissionValue(claims.Permissions, "user.file.total_limit"))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"daily": map[string]any{
-			"usedBytes":  dailyUsed,
-			"limitBytes": quotaLimitValue(dailyLimit),
-			"unlimited":  dailyLimit == maxPermissionBytes,
+			"usedBytes":       dailySourceUsed,
+			"sourceUsedBytes": dailySourceUsed,
+			"storedUsedBytes": dailyStoredUsed,
+			"limitBytes":      quotaLimitValue(dailyLimit),
+			"unlimited":       dailyLimit == maxPermissionBytes,
 		},
 		"total": map[string]any{
-			"usedBytes":  totalUsed,
-			"limitBytes": quotaLimitValue(totalLimit),
-			"unlimited":  totalLimit == maxPermissionBytes,
+			"usedBytes":       totalStoredUsed,
+			"sourceUsedBytes": totalSourceUsed,
+			"storedUsedBytes": totalStoredUsed,
+			"limitBytes":      quotaLimitValue(totalLimit),
+			"unlimited":       totalLimit == maxPermissionBytes,
 		},
 		"single": map[string]any{
 			"limitBytes": quotaLimitValue(singleLimit),

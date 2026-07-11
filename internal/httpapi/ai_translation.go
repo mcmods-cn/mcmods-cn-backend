@@ -50,7 +50,7 @@ func (worker *AIWorker) executeTask(
 	modelID string,
 	rawPayload []byte,
 ) (map[string]any, aiTaskUsage, error) {
-	if taskType != aiTaskPermissionTranslation && taskType != aiTaskI18nTranslation {
+	if taskType != aiTaskPermissionTranslation && taskType != aiTaskI18nTranslation && taskType != aiTaskNotificationTranslation {
 		return nil, aiTaskUsage{}, fmt.Errorf("unsupported AI task type: %s", taskType)
 	}
 	cfg := aiConfigFromDatabase(ctx, worker.db)
@@ -274,4 +274,39 @@ func calculateAICostMicros(model aiModelConfig, usage aiTaskUsage) int64 {
 	inputCost := float64(usage.InputTokens) * model.InputPricePerMillion
 	outputCost := float64(usage.OutputTokens) * model.OutputPricePerMillion
 	return int64(inputCost + outputCost)
+}
+
+func (worker *AIWorker) persistNotificationTranslation(ctx context.Context, userID int64, rawPayload []byte, result map[string]any) {
+	var payload struct {
+		NotificationID int64  `json:"notificationId"`
+		TargetLocale   string `json:"targetLocale"`
+	}
+	if json.Unmarshal(rawPayload, &payload) != nil || payload.NotificationID <= 0 || payload.TargetLocale == "" {
+		return
+	}
+	translated := map[string]string{}
+	items, _ := result["items"].([]any)
+	for _, rawItem := range items {
+		item, _ := rawItem.(map[string]any)
+		key, _ := item["key"].(string)
+		text, _ := item["text"].(string)
+		if key != "" && text != "" {
+			translated[key] = text
+		}
+	}
+	if translated["title"] == "" && translated["body"] == "" {
+		return
+	}
+	_, _ = worker.db.Exec(
+		ctx,
+		`insert into notification_translations (notification_id, user_id, locale, title, body)
+		 values ($1, $2, $3, $4, $5)
+		 on conflict (notification_id, user_id, locale) do update
+		 set title = excluded.title, body = excluded.body, created_at = now()`,
+		payload.NotificationID,
+		userID,
+		payload.TargetLocale,
+		translated["title"],
+		translated["body"],
+	)
 }

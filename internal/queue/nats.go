@@ -62,6 +62,14 @@ func DefaultTaskConfigs() []config.NATSTaskConfig {
 			MaxConcurrent:  2,
 			TimeoutSeconds: 300,
 		},
+		{
+			Code:           "notifications",
+			Enabled:        true,
+			Subject:        "notifications.events",
+			QueueGroup:     "mcmods-notification-workers",
+			MaxConcurrent:  8,
+			TimeoutSeconds: 300,
+		},
 	}
 }
 
@@ -107,8 +115,12 @@ func NormalizeConfig(cfg config.NATSConfig) config.NATSConfig {
 		}
 		tasks = append(tasks, task)
 	}
-	if len(tasks) == 0 && useDefaultTasks {
-		tasks = DefaultTaskConfigs()
+	for _, required := range DefaultTaskConfigs() {
+		if _, exists := seen[required.Code]; exists {
+			continue
+		}
+		seen[required.Code] = struct{}{}
+		tasks = append(tasks, required)
 	}
 	cfg.Tasks = tasks
 	return cfg

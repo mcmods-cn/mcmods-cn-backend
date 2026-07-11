@@ -39,6 +39,11 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		`alter table users add column if not exists preferred_content_language text not null default 'zh-CN'`,
 		`alter table users add column if not exists preferred_ui_language text not null default 'en'`,
 		`alter table users add column if not exists security_score integer not null default 100`,
+		`alter table users add column if not exists registration_ip text not null default ''`,
+		`alter table users add column if not exists registration_country_code text not null default ''`,
+		`alter table users add column if not exists registration_city text not null default ''`,
+		`alter table users add column if not exists signature text not null default ''`,
+		`alter table users add column if not exists avatar_url text not null default ''`,
 		`create table if not exists permissions (
 			id bigserial primary key,
 			code text not null unique,
@@ -90,6 +95,8 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			reason text not null default '',
 			created_at timestamptz not null default now()
 		)`,
+		`alter table user_login_logs add column if not exists country_code text not null default ''`,
+		`alter table user_login_logs add column if not exists city text not null default ''`,
 		`create table if not exists email_verification_codes (
 			id bigserial primary key,
 			email text not null,
@@ -137,10 +144,28 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now()
 		)`,
+		`alter table oss_files add column if not exists source_original_name text not null default ''`,
+		`alter table oss_files add column if not exists source_size_bytes bigint not null default 0`,
+		`alter table users add column if not exists avatar_file_id bigint references oss_files(id) on delete set null`,
 		`create index if not exists idx_oss_files_category on oss_files (category, created_at desc)`,
 		`create index if not exists idx_oss_files_uploader_created_at on oss_files (uploader_id, created_at desc)`,
 		`create index if not exists idx_oss_files_object_key_prefix on oss_files (object_key text_pattern_ops)`,
 		`create index if not exists idx_oss_files_sha256_size on oss_files (sha256, size_bytes) where sha256 <> ''`,
+		`create index if not exists idx_oss_files_sha256_source_size on oss_files (sha256, source_size_bytes) where sha256 <> ''`,
+		`create table if not exists permission_role_tracks (
+			code text primary key,
+			name text not null,
+			description text not null default '',
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now()
+		)`,
+		`create table if not exists permission_role_track_roles (
+			track_code text not null references permission_role_tracks(code) on delete cascade,
+			role_id bigint not null references roles(id) on delete cascade,
+			position integer not null,
+			primary key (track_code, position),
+			unique (track_code, role_id)
+		)`,
 		`create table if not exists markdown_playground_drafts (
 			user_id bigint primary key references users(id) on delete cascade,
 			content text not null default '',
@@ -195,6 +220,82 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			created_at timestamptz not null default now()
 		)`,
 		`create index if not exists idx_app_logs_category_created_at on app_logs (category, created_at desc)`,
+		`create table if not exists user_notification_settings (
+			user_id bigint primary key references users(id) on delete cascade,
+			email_enabled boolean not null default false,
+			updated_at timestamptz not null default now()
+		)`,
+		`create table if not exists user_follows (
+			follower_id bigint not null references users(id) on delete cascade,
+			followed_id bigint not null references users(id) on delete cascade,
+			created_at timestamptz not null default now(),
+			primary key (follower_id, followed_id),
+			check (follower_id <> followed_id)
+		)`,
+		`create index if not exists idx_user_follows_followed_created_at on user_follows (followed_id, created_at desc)`,
+		`create table if not exists notifications (
+			id bigserial primary key,
+			recipient_id bigint references users(id) on delete cascade,
+			kind text not null,
+			title text not null default '',
+			body text not null default '',
+			source_locale text not null default 'zh-CN',
+			data jsonb not null default '{}'::jsonb,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now()
+		)`,
+		`create index if not exists idx_notifications_recipient_updated_at on notifications (recipient_id, updated_at desc)`,
+		`create index if not exists idx_notifications_broadcast_updated_at on notifications (updated_at desc) where recipient_id is null`,
+		`create table if not exists notification_receipts (
+			notification_id bigint not null references notifications(id) on delete cascade,
+			user_id bigint not null references users(id) on delete cascade,
+			read_at timestamptz,
+			created_at timestamptz not null default now(),
+			primary key (notification_id, user_id)
+		)`,
+		`create index if not exists idx_notification_receipts_user_read on notification_receipts (user_id, read_at)`,
+		`create table if not exists notification_actors (
+			notification_id bigint not null references notifications(id) on delete cascade,
+			actor_id bigint not null references users(id) on delete cascade,
+			created_at timestamptz not null default now(),
+			primary key (notification_id, actor_id)
+		)`,
+		`create table if not exists notification_translations (
+			notification_id bigint not null references notifications(id) on delete cascade,
+			user_id bigint not null references users(id) on delete cascade,
+			locale text not null,
+			title text not null default '',
+			body text not null default '',
+			created_at timestamptz not null default now(),
+			primary key (notification_id, user_id, locale)
+		)`,
+		`create table if not exists direct_conversations (
+			id bigserial primary key,
+			user_low_id bigint not null references users(id) on delete cascade,
+			user_high_id bigint not null references users(id) on delete cascade,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			unique (user_low_id, user_high_id),
+			check (user_low_id < user_high_id)
+		)`,
+		`create index if not exists idx_direct_conversations_updated_at on direct_conversations (updated_at desc)`,
+		`create table if not exists direct_messages (
+			id bigserial primary key,
+			conversation_id bigint not null references direct_conversations(id) on delete cascade,
+			sender_id bigint not null references users(id) on delete cascade,
+			recipient_id bigint not null references users(id) on delete cascade,
+			body text not null,
+			read_at timestamptz,
+			created_at timestamptz not null default now()
+		)`,
+		`create index if not exists idx_direct_messages_conversation_created_at on direct_messages (conversation_id, created_at desc)`,
+		`create index if not exists idx_direct_messages_recipient_read on direct_messages (recipient_id, read_at, created_at desc)`,
+		`create table if not exists user_chat_presence (
+			user_id bigint primary key references users(id) on delete cascade,
+			conversation_id bigint not null references direct_conversations(id) on delete cascade,
+			expires_at timestamptz not null,
+			updated_at timestamptz not null default now()
+		)`,
 		`create table if not exists ai_tasks (
 			id bigserial primary key,
 			task_uid text not null unique,
@@ -219,6 +320,7 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		)`,
 		`create index if not exists idx_ai_tasks_status_created_at on ai_tasks (status, created_at desc)`,
 		`create index if not exists idx_ai_tasks_type_created_at on ai_tasks (task_type, created_at desc)`,
+		`alter table ai_tasks add column if not exists quota_reserved_tokens bigint not null default 0`,
 		`create table if not exists ai_task_logs (
 			id bigserial primary key,
 			task_id bigint references ai_tasks(id) on delete cascade,

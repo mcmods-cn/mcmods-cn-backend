@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	aiTaskPermissionTranslation = "permission_translation_completion"
-	aiTaskI18nTranslation       = "i18n_translation_completion"
+	aiTaskPermissionTranslation   = "permission_translation_completion"
+	aiTaskI18nTranslation         = "i18n_translation_completion"
+	aiTaskNotificationTranslation = "notification_translation_completion"
 )
 
 type aiTaskDefinition struct {
@@ -31,6 +32,7 @@ type aiTaskDefinition struct {
 var registeredAITaskDefinitions = []aiTaskDefinition{
 	{TaskType: aiTaskPermissionTranslation, ConcurrencyLimit: 2, TimeoutSeconds: 120},
 	{TaskType: aiTaskI18nTranslation, ConcurrencyLimit: 2, TimeoutSeconds: 120},
+	{TaskType: aiTaskNotificationTranslation, ConcurrencyLimit: 4, TimeoutSeconds: 90},
 }
 
 type aiConfigPayload struct {
@@ -152,12 +154,13 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 	worker.writeTaskLog(ctx, msg.TaskID, "info", "task_started", "AI task picked by NATS worker", msg)
 
 	var taskType, provider, model string
+	var createdBy int64
 	var rawPayload []byte
 	if err := worker.db.QueryRow(
 		ctx,
-		`select task_type, provider, model, payload from ai_tasks where id = $1`,
+		`select task_type, provider, model, payload, coalesce(created_by, 0) from ai_tasks where id = $1`,
 		msg.TaskID,
-	).Scan(&taskType, &provider, &model, &rawPayload); err != nil {
+	).Scan(&taskType, &provider, &model, &rawPayload, &createdBy); err != nil {
 		worker.failTask(ctx, msg.TaskID, err)
 		return err
 	}
@@ -188,6 +191,9 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 	if err != nil {
 		worker.failTask(ctx, msg.TaskID, err)
 		return err
+	}
+	if taskType == aiTaskNotificationTranslation && createdBy > 0 {
+		worker.persistNotificationTranslation(ctx, createdBy, rawPayload, result)
 	}
 	worker.writeTaskLog(ctx, msg.TaskID, "info", "task_completed", "AI task completed by placeholder executor", map[string]any{
 		"durationMs": time.Since(started).Milliseconds(),

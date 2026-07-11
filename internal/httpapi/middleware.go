@@ -32,6 +32,27 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func (s *Server) optionalAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(r.Header.Get("Authorization")) == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		token, err := security.BearerToken(r.Header.Get("Authorization"))
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "登录状态无效")
+			return
+		}
+		claims, err := security.ParseToken(s.cfg.JWTSecret, token)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "登录状态已失效")
+			return
+		}
+		ctx := context.WithValue(r.Context(), claimsContextKey, claims)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	}
+}
+
 func (s *Server) requirePermission(permission string, next http.HandlerFunc) http.HandlerFunc {
 	s.registerDeclaredPermission(permission)
 	return s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
@@ -112,4 +133,47 @@ func numericPermissionValue(grants []string, permissionPrefix string) int32 {
 		}
 	}
 	return best
+}
+
+func (s *Server) userHasPermission(ctx context.Context, userID int64, permission string) bool {
+	if _, permissions, err := s.resolveUserRootPermissions(ctx, userID); err == nil {
+		return resolvedPermissionAllows(permissions, permission)
+	}
+	_, grants := s.userGrants(ctx, userID)
+	return hasPermission(grants, permission)
+}
+
+func resolvedPermissionAllows(entries []effectivePermission, required string) bool {
+	var selected *effectivePermission
+	selectedSpecificity := -1
+	for index := range entries {
+		entry := &entries[index]
+		matches, specificity := permissionEntryMatches(entry.Code, required)
+		if !matches {
+			continue
+		}
+		if selected == nil || entry.Priority > selected.Priority ||
+			(entry.Priority == selected.Priority && specificity > selectedSpecificity) ||
+			(entry.Priority == selected.Priority && specificity == selectedSpecificity && !entry.Allow && selected.Allow) {
+			selected = entry
+			selectedSpecificity = specificity
+		}
+	}
+	return selected != nil && selected.Allow
+}
+
+func permissionEntryMatches(grant string, required string) (bool, int) {
+	if grant == "*" || grant == "admin.*" {
+		return true, 0
+	}
+	if grant == required {
+		return true, len(grant) + 10000
+	}
+	if strings.HasSuffix(grant, ".*") {
+		prefix := strings.TrimSuffix(grant, "*")
+		if strings.HasPrefix(required, prefix) {
+			return true, len(prefix)
+		}
+	}
+	return false, -1
 }

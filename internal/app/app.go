@@ -45,6 +45,10 @@ func Run() {
 	if err := aiWorker.Start(ctx); err != nil {
 		log.Printf("ai queue worker unavailable: %v", err)
 	}
+	notificationWorker := httpapi.NewNotificationWorker(db, queueClient, cfg.SMTP)
+	if err := notificationWorker.Start(); err != nil {
+		log.Printf("notification queue worker unavailable: %v", err)
+	}
 
 	server := &http.Server{
 		Addr:              cfg.Addr,

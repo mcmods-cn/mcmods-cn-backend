@@ -102,6 +102,14 @@ func Load() Config {
 					MaxConcurrent:  getenvInt("AI_MAX_CONCURRENT", 2),
 					TimeoutSeconds: 300,
 				},
+				{
+					Code:           "notifications",
+					Enabled:        true,
+					Subject:        "notifications.events",
+					QueueGroup:     getenv("NOTIFICATION_NATS_QUEUE_GROUP", "mcmods-notification-workers"),
+					MaxConcurrent:  getenvInt("NOTIFICATION_MAX_CONCURRENT", 8),
+					TimeoutSeconds: 300,
+				},
 			},
 		},
 	}

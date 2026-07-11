@@ -14,7 +14,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"mcmods-cn-backend/internal/domain"
-	"mcmods-cn-backend/internal/mailer"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -86,6 +85,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "密码处理失败")
 		return
 	}
+	location := requestClientLocation(r)
 
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -99,9 +99,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		`insert into users (
 		     username, email, display_name, password_hash,
-		     country, timezone, preferred_content_language, preferred_ui_language
+		     country, timezone, preferred_content_language, preferred_ui_language,
+		     registration_ip, registration_country_code, registration_city
 		 )
-		 values ($1, $2, $3, $4, $5, $6, $7, $8)
+		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 returning id, username, email, display_name, email_verified, status, created_at, last_login_at`,
 		req.Username,
 		req.Email,
@@ -111,9 +112,16 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		req.Timezone,
 		req.PreferredContentLanguage,
 		req.PreferredUILanguage,
+		location.IP,
+		location.CountryCode,
+		location.City,
 	).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
 	if err != nil {
 		writeError(w, http.StatusConflict, "用户名或邮箱已被占用")
+		return
+	}
+	if err := s.assignConfiguredRoleTx(r.Context(), tx, user.ID, "registered"); err != nil {
+		writeError(w, http.StatusInternalServerError, "分配新用户权限组失败")
 		return
 	}
 
@@ -138,15 +146,15 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	account := strings.TrimSpace(req.Account)
-	ip := mailer.LocalAddress(r.RemoteAddr)
+	location := requestClientLocation(r)
 	user, passwordHash, err := s.findUserForLogin(r.Context(), account)
 	if err != nil || !security.VerifyPassword(req.Password, passwordHash) {
-		s.recordLogin(r.Context(), nil, account, ip, r.UserAgent(), false, "invalid_credentials")
+		s.recordLogin(r.Context(), nil, account, location, r.UserAgent(), false, "invalid_credentials")
 		writeError(w, http.StatusUnauthorized, "账号或密码不正确")
 		return
 	}
 	if user.Status != "active" {
-		s.recordLogin(r.Context(), &user.ID, account, ip, r.UserAgent(), false, "disabled")
+		s.recordLogin(r.Context(), &user.ID, account, location, r.UserAgent(), false, "disabled")
 		writeError(w, http.StatusForbidden, "账号已被禁用")
 		return
 	}
@@ -158,7 +166,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = s.db.Exec(r.Context(), `update users set last_login_at = now(), updated_at = now() where id = $1`, user.ID)
-	s.recordLogin(r.Context(), &user.ID, account, ip, r.UserAgent(), true, "")
+	s.recordLogin(r.Context(), &user.ID, account, location, r.UserAgent(), true, "")
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": user})
 }
 
@@ -219,7 +227,7 @@ func (s *Server) emailLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Email = normalizeEmail(req.Email)
 	req.Code = strings.TrimSpace(req.Code)
-	ip := mailer.LocalAddress(r.RemoteAddr)
+	location := requestClientLocation(r)
 
 	var codeID int64
 	var codeHash string
@@ -240,12 +248,12 @@ func (s *Server) emailLogin(w http.ResponseWriter, r *http.Request) {
 
 	user, err := s.findUserByEmail(r.Context(), req.Email)
 	if err != nil {
-		s.recordLogin(r.Context(), nil, req.Email, ip, r.UserAgent(), false, "email_not_registered")
+		s.recordLogin(r.Context(), nil, req.Email, location, r.UserAgent(), false, "email_not_registered")
 		writeError(w, http.StatusNotFound, "该邮箱尚未注册")
 		return
 	}
 	if user.Status != "active" {
-		s.recordLogin(r.Context(), &user.ID, req.Email, ip, r.UserAgent(), false, "disabled")
+		s.recordLogin(r.Context(), &user.ID, req.Email, location, r.UserAgent(), false, "disabled")
 		writeError(w, http.StatusForbidden, "账号已被禁用")
 		return
 	}
@@ -256,7 +264,7 @@ func (s *Server) emailLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = s.db.Exec(r.Context(), `update users set last_login_at = now(), updated_at = now() where id = $1`, user.ID)
-	s.recordLogin(r.Context(), &user.ID, req.Email, ip, r.UserAgent(), true, "email_code")
+	s.recordLogin(r.Context(), &user.ID, req.Email, location, r.UserAgent(), true, "email_code")
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": user})
 }
 
@@ -298,7 +306,7 @@ func (s *Server) issueToken(user domain.User) (string, error) {
 func (s *Server) findUserForLogin(ctx context.Context, account string) (domain.User, string, error) {
 	var user domain.User
 	var passwordHash string
-	query := `select id, username, email, display_name, password_hash, email_verified, status, created_at, last_login_at
+	query := `select id, username, email, display_name, password_hash, email_verified, status, created_at, last_login_at, avatar_url, signature
 		from users
 		where lower(email) = lower($1) or lower(username) = lower($1)`
 	args := []any{account}
@@ -316,6 +324,8 @@ func (s *Server) findUserForLogin(ctx context.Context, account string) (domain.U
 		&user.Status,
 		&user.CreatedAt,
 		&user.LastLoginAt,
+		&user.AvatarURL,
+		&user.Signature,
 	)
 	return user, passwordHash, err
 }
@@ -324,10 +334,10 @@ func (s *Server) findUserByEmail(ctx context.Context, email string) (domain.User
 	var user domain.User
 	err := s.db.QueryRow(
 		ctx,
-		`select id, username, email, display_name, email_verified, status, created_at, last_login_at
+		`select id, username, email, display_name, email_verified, status, created_at, last_login_at, avatar_url, signature
 		 from users where lower(email) = lower($1)`,
 		email,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
+	).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
 	return user, err
 }
 
@@ -335,10 +345,10 @@ func (s *Server) findUserByID(ctx context.Context, id int64) (domain.User, error
 	var user domain.User
 	err := s.db.QueryRow(
 		ctx,
-		`select id, username, email, display_name, email_verified, status, created_at, last_login_at
+		`select id, username, email, display_name, email_verified, status, created_at, last_login_at, avatar_url, signature
 		 from users where id = $1`,
 		id,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
+	).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
 	return user, err
 }
 
@@ -381,14 +391,16 @@ func (s *Server) userGrants(ctx context.Context, userID int64) ([]string, []stri
 	return roles, normalizeCodes(permissions)
 }
 
-func (s *Server) recordLogin(ctx context.Context, userID *int64, account string, ip string, userAgent string, success bool, reason string) {
+func (s *Server) recordLogin(ctx context.Context, userID *int64, account string, location clientLocation, userAgent string, success bool, reason string) {
 	_, _ = s.db.Exec(
 		ctx,
-		`insert into user_login_logs (user_id, account, ip, user_agent, success, reason)
-		 values ($1, $2, $3, $4, $5, $6)`,
+		`insert into user_login_logs (user_id, account, ip, country_code, city, user_agent, success, reason)
+		 values ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		userID,
 		account,
-		ip,
+		location.IP,
+		location.CountryCode,
+		location.City,
 		userAgent,
 		success,
 		reason,
