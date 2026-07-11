@@ -1,0 +1,314 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+)
+
+type createModApplicationRequest struct {
+	Kind          string  `json:"kind"`
+	Proof         string  `json:"proof"`
+	AttachmentIDs []int64 `json:"attachmentIds"`
+}
+
+type reviewModApplicationRequest struct {
+	Status string `json:"status"`
+	Note   string `json:"note"`
+}
+
+type modApplicationAttachment struct {
+	ID           int64  `json:"id"`
+	OriginalName string `json:"originalName"`
+	ObjectKey    string `json:"objectKey"`
+	SizeBytes    int64  `json:"sizeBytes"`
+}
+
+type modApplicationResponse struct {
+	ID          int64                      `json:"id"`
+	ModID       int64                      `json:"modId"`
+	ModSiteID   string                     `json:"modSiteId"`
+	ModName     string                     `json:"modName"`
+	UserID      int64                      `json:"userId"`
+	Username    string                     `json:"username"`
+	DisplayName string                     `json:"displayName"`
+	Kind        string                     `json:"kind"`
+	Proof       string                     `json:"proof"`
+	Status      string                     `json:"status"`
+	ReviewNote  string                     `json:"reviewNote"`
+	Attachments []modApplicationAttachment `json:"attachments"`
+	CreatedAt   time.Time                  `json:"createdAt"`
+	ReviewedAt  *time.Time                 `json:"reviewedAt,omitempty"`
+}
+
+func (s *Server) modApplications(w http.ResponseWriter, r *http.Request) {
+	siteID := normalizeModSiteID(r.PathValue("siteId"))
+	claims := currentClaims(r)
+	identity, err := s.modIdentity(r.Context(), siteID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "模组不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取模组失败")
+		return
+	}
+	if r.Method == http.MethodPost && canEditMod(claims, identity) {
+		writeError(w, http.StatusConflict, "你已经拥有此模组的编辑权限")
+		return
+	}
+	if r.Method == http.MethodGet {
+		items, listErr := s.queryModApplications(r.Context(), `a.mod_id=$1 and a.user_id=$2`, identity.ID, claims.Subject)
+		if listErr != nil {
+			writeError(w, http.StatusInternalServerError, "读取申请失败")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		return
+	}
+	var req createModApplicationRequest
+	if err = decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		return
+	}
+	req.Kind = strings.TrimSpace(req.Kind)
+	req.Proof = strings.TrimSpace(req.Proof)
+	if req.Kind != "editor" && req.Kind != "developer" {
+		writeError(w, http.StatusBadRequest, "申请类型不正确")
+		return
+	}
+	if req.Proof == "" || len(req.Proof) > 10000 || len(req.AttachmentIDs) > 10 {
+		writeError(w, http.StatusBadRequest, "请填写有效证明，附件不能超过 10 个")
+		return
+	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "创建申请失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var id int64
+	err = tx.QueryRow(
+		r.Context(),
+		`insert into mod_membership_applications (mod_id,user_id,kind,proof) values ($1,$2,$3,$4) returning id`,
+		identity.ID, claims.Subject, req.Kind, req.Proof,
+	).Scan(&id)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			writeError(w, http.StatusConflict, "已有相同类型的申请正在审核")
+		} else {
+			writeError(w, http.StatusInternalServerError, "创建申请失败")
+		}
+		return
+	}
+	for _, fileID := range uniqueInt64(req.AttachmentIDs) {
+		var owned bool
+		if err = tx.QueryRow(r.Context(), `select exists(select 1 from oss_files where id=$1 and uploader_id=$2 and status='active')`, fileID, claims.Subject).Scan(&owned); err != nil || !owned {
+			writeError(w, http.StatusBadRequest, "申请附件不存在或不属于当前用户")
+			return
+		}
+		if _, err = tx.Exec(r.Context(), `insert into mod_application_attachments (application_id,oss_file_id) values ($1,$2)`, id, fileID); err != nil {
+			writeError(w, http.StatusInternalServerError, "保存申请附件失败")
+			return
+		}
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "提交申请失败")
+		return
+	}
+	items, queryErr := s.queryModApplications(r.Context(), `a.id=$1`, id)
+	if queryErr != nil || len(items) == 0 {
+		writeError(w, http.StatusInternalServerError, "读取已提交申请失败")
+		return
+	}
+	writeJSON(w, http.StatusCreated, items[0])
+}
+
+func (s *Server) adminModApplications(w http.ResponseWriter, r *http.Request) {
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	if kind != "editor" && kind != "developer" {
+		writeError(w, http.StatusBadRequest, "申请类型不正确")
+		return
+	}
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	if status == "" {
+		status = "pending"
+	}
+	items, err := s.queryModApplications(r.Context(), `a.kind=$1 and a.status=$2`, kind, status)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取申请列表失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) reviewModApplication(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "申请编号不正确")
+		return
+	}
+	var req reviewModApplicationRequest
+	if err = decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		return
+	}
+	req.Status = strings.TrimSpace(req.Status)
+	req.Note = strings.TrimSpace(req.Note)
+	if req.Status != "approved" && req.Status != "rejected" {
+		writeError(w, http.StatusBadRequest, "审核状态不正确")
+		return
+	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "创建审核事务失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var modID, userID int64
+	var kind, modName, projectID string
+	err = tx.QueryRow(r.Context(), `select a.mod_id,a.user_id,a.kind,m.primary_name,m.project_code from mod_membership_applications a join mods m on m.id=a.mod_id where a.id=$1 and a.status='pending' for update`, id).Scan(&modID, &userID, &kind, &modName, &projectID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusConflict, "申请不存在或已经审核")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取申请失败")
+		return
+	}
+	claims := currentClaims(r)
+	if _, err = tx.Exec(r.Context(), `update mod_membership_applications set status=$2,reviewed_by=$3,review_note=$4,reviewed_at=now(),updated_at=now() where id=$1`, id, req.Status, claims.Subject, req.Note); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存审核结果失败")
+		return
+	}
+	if req.Status == "approved" {
+		roles := []string{"editor"}
+		permissionDefaults := s.permissionDefaultsFromSettings(r.Context())
+		roleTemplate := permissionDefaults.EditorRole
+		if kind == "developer" {
+			roles = append(roles, "developer")
+			roleTemplate = permissionDefaults.DeveloperRole
+		}
+		if roleTemplate == "" {
+			writeError(w, http.StatusConflict, "请先在权限相关设置中配置对应的变量权限组")
+			return
+		}
+		for _, role := range roles {
+			if _, err = tx.Exec(r.Context(), `insert into mod_memberships (mod_id,user_id,role,granted_by) values ($1,$2,$3,$4) on conflict do nothing`, modID, userID, role, claims.Subject); err != nil {
+				writeError(w, http.StatusInternalServerError, "保存模组成员失败")
+				return
+			}
+		}
+		if err = s.bindProjectRoleTx(r.Context(), tx, userID, roleTemplate, projectID); err != nil {
+			writeError(w, http.StatusInternalServerError, "授予模组成员变量权限组失败")
+			return
+		}
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "提交审核结果失败")
+		return
+	}
+	statusText := "未通过"
+	if req.Status == "approved" {
+		statusText = "已通过"
+	}
+	s.enqueueOrCreateDirectNotification(r.Context(), userID, claims.Subject, "review", "模组成员申请审核结果", fmt.Sprintf("你对 %s 提交的申请%s。%s", modName, statusText, req.Note), map[string]any{"modId": modID, "applicationId": id})
+	writeJSON(w, http.StatusOK, map[string]any{"status": req.Status})
+}
+
+func (s *Server) presignModApplicationAttachment(w http.ResponseWriter, r *http.Request) {
+	applicationID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || applicationID <= 0 {
+		writeError(w, http.StatusBadRequest, "申请编号不正确")
+		return
+	}
+	fileID, err := strconv.ParseInt(r.PathValue("fileId"), 10, 64)
+	if err != nil || fileID <= 0 {
+		writeError(w, http.StatusBadRequest, "附件编号不正确")
+		return
+	}
+	var objectKey string
+	err = s.db.QueryRow(
+		r.Context(),
+		`select f.object_key from mod_application_attachments a join oss_files f on f.id=a.oss_file_id where a.application_id=$1 and f.id=$2 and f.status='active'`,
+		applicationID, fileID,
+	).Scan(&objectKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "审核附件不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取审核附件失败")
+		return
+	}
+	s.presignOSSFileWithRequest(w, r, ossPresignRequest{ObjectKey: objectKey})
+}
+
+func (s *Server) queryModApplications(ctx context.Context, where string, args ...any) ([]modApplicationResponse, error) {
+	rows, err := s.db.Query(ctx, `select a.id,a.mod_id,m.slug,m.primary_name,a.user_id,u.username,u.display_name,a.kind,a.proof,a.status,a.review_note,a.created_at,a.reviewed_at from mod_membership_applications a join mods m on m.id=a.mod_id join users u on u.id=a.user_id where `+where+` order by a.created_at desc`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]modApplicationResponse, 0)
+	for rows.Next() {
+		var item modApplicationResponse
+		if err = rows.Scan(&item.ID, &item.ModID, &item.ModSiteID, &item.ModName, &item.UserID, &item.Username, &item.DisplayName, &item.Kind, &item.Proof, &item.Status, &item.ReviewNote, &item.CreatedAt, &item.ReviewedAt); err != nil {
+			return nil, err
+		}
+		item.Attachments, err = s.modApplicationAttachments(ctx, item.ID)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Server) modApplicationAttachments(ctx context.Context, applicationID int64) ([]modApplicationAttachment, error) {
+	rows, err := s.db.Query(ctx, `select f.id,f.original_name,f.object_key,f.size_bytes from mod_application_attachments a join oss_files f on f.id=a.oss_file_id where a.application_id=$1 order by f.id`, applicationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]modApplicationAttachment, 0)
+	for rows.Next() {
+		var item modApplicationAttachment
+		if err = rows.Scan(&item.ID, &item.OriginalName, &item.ObjectKey, &item.SizeBytes); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Server) enqueueOrCreateDirectNotification(ctx context.Context, recipientID, actorID int64, kind, title, body string, data map[string]any) {
+	event := notificationEvent{Action: "direct", RecipientID: recipientID, ActorID: actorID, Kind: kind, Title: title, Body: body, SourceLocale: "zh-CN", Data: data}
+	if s.queue != nil && s.queue.PublishTask(ctx, notificationTaskCode, event) == nil {
+		return
+	}
+	raw, _ := json.Marshal(data)
+	var notificationID int64
+	if s.db.QueryRow(ctx, `insert into notifications (recipient_id,kind,title,body,source_locale,data) values ($1,$2,$3,$4,'zh-CN',$5::jsonb) returning id`, recipientID, kind, title, body, string(raw)).Scan(&notificationID) == nil && actorID > 0 {
+		_, _ = s.db.Exec(ctx, `insert into notification_actors (notification_id,actor_id) values ($1,$2) on conflict do nothing`, notificationID, actorID)
+	}
+}
+
+func uniqueInt64(values []int64) []int64 {
+	seen := map[int64]bool{}
+	result := make([]int64, 0, len(values))
+	for _, value := range values {
+		if value > 0 && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}

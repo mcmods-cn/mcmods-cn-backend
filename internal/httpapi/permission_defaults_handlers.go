@@ -14,6 +14,8 @@ const permissionDefaultsSettingKey = "permission.default_roles"
 type permissionDefaultsPayload struct {
 	RegisteredRole string `json:"registeredRole"`
 	BannedRole     string `json:"bannedRole"`
+	DeveloperRole  string `json:"developerRole"`
+	EditorRole     string `json:"editorRole"`
 }
 
 type updateUserStatusRequest struct {
@@ -35,13 +37,19 @@ func (s *Server) updatePermissionDefaults(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "新注册用户权限组和封禁用户权限组不能相同")
 		return
 	}
-	for _, role := range []string{payload.RegisteredRole, payload.BannedRole} {
+	for _, role := range []string{payload.RegisteredRole, payload.BannedRole, payload.DeveloperRole, payload.EditorRole} {
 		if role == "" {
 			continue
 		}
 		var exists bool
 		if err := s.db.QueryRow(r.Context(), `select exists(select 1 from roles where code = $1 and status = 'active')`, role).Scan(&exists); err != nil || !exists {
 			writeError(w, http.StatusBadRequest, "权限组不存在: "+role)
+			return
+		}
+	}
+	for _, role := range []string{payload.DeveloperRole, payload.EditorRole} {
+		if role != "" && !isProjectRoleTemplate(role) {
+			writeError(w, http.StatusBadRequest, "开发者和编辑员权限组必须包含 [ProjectID] 变量: "+role)
 			return
 		}
 	}
@@ -122,7 +130,50 @@ func (s *Server) permissionDefaultsFromSettings(ctx context.Context) permissionD
 func normalizePermissionDefaults(payload permissionDefaultsPayload) permissionDefaultsPayload {
 	payload.RegisteredRole = normalizeCode(payload.RegisteredRole)
 	payload.BannedRole = normalizeCode(payload.BannedRole)
+	payload.DeveloperRole = normalizeCode(payload.DeveloperRole)
+	payload.EditorRole = normalizeCode(payload.EditorRole)
 	return payload
+}
+
+func isProjectRoleTemplate(role string) bool {
+	for _, segment := range strings.Split(role, ".") {
+		if name, ok := templateVariableName(segment); ok && strings.EqualFold(name, "ProjectID") {
+			return true
+		}
+	}
+	return false
+}
+
+func concreteProjectRole(template string, projectID string) (string, bool) {
+	variables := map[string]string{}
+	for _, segment := range strings.Split(template, ".") {
+		if name, ok := templateVariableName(segment); ok && strings.EqualFold(name, "ProjectID") {
+			variables[name] = projectID
+		}
+	}
+	if len(variables) == 0 {
+		return "", false
+	}
+	return applyRoleVariables(template, variables), true
+}
+
+func (s *Server) bindProjectRoleTx(ctx context.Context, tx pgx.Tx, userID int64, template string, projectID string) error {
+	role, ok := concreteProjectRole(template, projectID)
+	if !ok {
+		return &requestError{message: "项目权限组必须包含 [ProjectID] 变量"}
+	}
+	if err := s.ensureRoleForBinding(ctx, tx, role); err != nil {
+		return err
+	}
+	_, err := tx.Exec(
+		ctx,
+		`insert into user_role_bindings (user_id, role_id)
+		 select $1, id from roles where code = $2 and status = 'active'
+		 on conflict do nothing`,
+		userID,
+		role,
+	)
+	return err
 }
 
 func (s *Server) assignConfiguredRoleTx(ctx context.Context, tx pgx.Tx, userID int64, kind string) error {

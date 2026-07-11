@@ -331,6 +331,274 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			created_at timestamptz not null default now()
 		)`,
 		`create index if not exists idx_ai_task_logs_task_created_at on ai_task_logs (task_id, created_at desc)`,
+		`create table if not exists mods (
+			id bigserial primary key,
+			project_code text unique,
+			slug text not null unique,
+			primary_name text not null,
+			secondary_name text not null default '',
+			abbreviation text not null default '',
+			summary text not null default '',
+			mod_id text not null default '',
+			environment text not null default 'bothRequired',
+			primary_category text not null default 'utility',
+			official_status text not null default 'development',
+			source_status text not null default 'unknown',
+			license text not null default 'Custom',
+			curseforge_project_id text not null default '',
+			modrinth_project_id text not null default '',
+			icon_url text not null default '',
+			body_markdown text not null default '',
+			search_keywords text[] not null default '{}'::text[],
+			submission_method text not null default 'manual',
+			review_status text not null default 'pending',
+			created_by bigint references users(id) on delete set null,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			published_at timestamptz,
+			check (environment in ('clientOnly', 'serverOnly', 'bothRequired', 'clientOptional', 'serverOptional')),
+			check (official_status in ('active', 'lowFrequency', 'discontinued', 'archived', 'development')),
+			check (source_status in ('open', 'partial', 'closed', 'unknown')),
+			check (submission_method in ('manual', 'modrinth', 'curseforge', 'github')),
+			check (review_status in ('pending', 'approved', 'rejected'))
+		)`,
+		`alter table mods add column if not exists project_code text`,
+		`update mods
+		 set project_code = 'm' || substr(md5(id::text || slug || created_at::text), 1, 5) || (id % 10)::text
+		 where project_code is null or project_code = ''`,
+		`create unique index if not exists idx_mods_project_code on mods (project_code)`,
+		`alter table mods alter column project_code set not null`,
+		`do $$ begin
+			if not exists (select 1 from pg_constraint where conname = 'mods_project_code_format') then
+				alter table mods add constraint mods_project_code_format check (project_code ~ '^[a-z0-9]{7}$');
+			end if;
+		end $$`,
+		`create or replace function prevent_mod_unique_id_update() returns trigger as $$
+		begin
+			if new.project_code is distinct from old.project_code then
+				raise exception 'mod unique ID is immutable';
+			end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`drop trigger if exists trg_mod_unique_id_immutable on mods`,
+		`create trigger trg_mod_unique_id_immutable before update of project_code on mods
+		 for each row execute function prevent_mod_unique_id_update()`,
+		`create index if not exists idx_mods_review_updated_at on mods (review_status, updated_at desc)`,
+		`create index if not exists idx_mods_created_by_updated_at on mods (created_by, updated_at desc)`,
+		`create index if not exists idx_mods_primary_name_lower on mods (lower(primary_name))`,
+		`create table if not exists mod_links (
+			id bigserial primary key,
+			mod_id bigint not null references mods(id) on delete cascade,
+			link_type text not null,
+			url text not null,
+			display_order integer not null default 0,
+			created_at timestamptz not null default now(),
+			unique (mod_id, link_type, url)
+		)`,
+		`create index if not exists idx_mod_links_mod_order on mod_links (mod_id, display_order, id)`,
+		`create table if not exists mod_tags (
+			mod_id bigint not null references mods(id) on delete cascade,
+			tag text not null,
+			primary key (mod_id, tag)
+		)`,
+		`create table if not exists mod_authors (
+			id bigserial primary key,
+			mod_id bigint not null references mods(id) on delete cascade,
+			name text not null,
+			role text not null default '',
+			display_order integer not null default 0,
+			created_at timestamptz not null default now()
+		)`,
+		`create index if not exists idx_mod_authors_mod_order on mod_authors (mod_id, display_order, id)`,
+		`create table if not exists mod_relationships (
+			id bigserial primary key,
+			mod_id bigint not null references mods(id) on delete cascade,
+			relation_type text not null,
+			related_mod_id bigint references mods(id) on delete set null,
+			related_mod_name text not null default '',
+			loader text not null default '',
+			minecraft_version text not null default '',
+			mod_version text not null default '',
+			notes text not null default '',
+			display_order integer not null default 0,
+			created_at timestamptz not null default now(),
+			check (relation_type in ('dependency', 'extension', 'integration')),
+			check (related_mod_id is not null or related_mod_name <> '')
+		)`,
+		`create index if not exists idx_mod_relationships_mod_order on mod_relationships (mod_id, display_order, id)`,
+		`create table if not exists mod_relationship_groups (
+			id bigserial primary key,
+			mod_id bigint not null references mods(id) on delete cascade,
+			label text not null default '',
+			loader text not null default '',
+			minecraft_version text not null default '',
+			mod_version text not null default '',
+			display_order integer not null default 0,
+			created_at timestamptz not null default now()
+		)`,
+		`create index if not exists idx_mod_relationship_groups_mod_order on mod_relationship_groups (mod_id, display_order, id)`,
+		`alter table mod_relationship_groups add column if not exists minecraft_versions text[] not null default '{}'::text[]`,
+		`update mod_relationship_groups set minecraft_versions = array[minecraft_version]
+		 where minecraft_version <> '' and cardinality(minecraft_versions) = 0`,
+		`alter table mod_relationships add column if not exists group_id bigint references mod_relationship_groups(id) on delete cascade`,
+		`create index if not exists idx_mod_relationships_group_order on mod_relationships (group_id, display_order, id)`,
+		`create table if not exists mod_download_sources (
+			id bigserial primary key,
+			mod_id bigint not null references mods(id) on delete cascade,
+			source_type text not null,
+			label text not null default '',
+			url text not null default '',
+			display_order integer not null default 0,
+			created_at timestamptz not null default now(),
+			check (source_type in ('internal', 'modrinth', 'curseforge')),
+			unique (mod_id, source_type, url)
+		)`,
+		`create index if not exists idx_mod_download_sources_mod_order on mod_download_sources (mod_id, display_order, id)`,
+		`create table if not exists mod_data_pages (
+			id bigserial primary key,
+			mod_id bigint not null references mods(id) on delete cascade,
+			minecraft_version text not null,
+			category text not null,
+			title text not null,
+			summary text not null default '',
+			content_markdown text not null default '',
+			status text not null default 'pending',
+			created_by bigint references users(id) on delete set null,
+			reviewed_by bigint references users(id) on delete set null,
+			review_note text not null default '',
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			reviewed_at timestamptz,
+			check (status in ('pending', 'approved', 'rejected'))
+		)`,
+		`create index if not exists idx_mod_data_pages_mod_version_category on mod_data_pages (mod_id, minecraft_version, category, status)`,
+		`create table if not exists mod_loader_compatibilities (
+			mod_id bigint not null references mods(id) on delete cascade,
+			loader text not null,
+			minecraft_version text not null,
+			created_at timestamptz not null default now(),
+			primary key (mod_id, loader, minecraft_version)
+		)`,
+		`insert into mod_loader_compatibilities (mod_id, loader, minecraft_version)
+		 select m.id, loader, version
+		 from mods m, unnest(m.supported_loaders) loader, unnest(m.supported_versions) version
+		 on conflict do nothing`,
+		`create index if not exists idx_mod_loader_compatibilities_lookup on mod_loader_compatibilities (loader, minecraft_version, mod_id)`,
+		`create table if not exists mod_data_versions (
+			id bigserial primary key,
+			mod_id bigint not null references mods(id) on delete cascade,
+			minecraft_version text not null,
+			display_order integer not null default 0,
+			created_by bigint references users(id) on delete set null,
+			created_at timestamptz not null default now(),
+			unique (mod_id, minecraft_version)
+		)`,
+		`insert into mod_data_versions (mod_id, minecraft_version, display_order, created_by)
+		 select mod_id, minecraft_version, row_number() over (partition by mod_id order by minecraft_version desc) - 1, min(created_by)
+		 from mod_data_pages group by mod_id, minecraft_version
+		 on conflict do nothing`,
+		`create table if not exists mod_membership_applications (
+			id bigserial primary key,
+			mod_id bigint not null references mods(id) on delete cascade,
+			user_id bigint not null references users(id) on delete cascade,
+			kind text not null,
+			proof text not null,
+			status text not null default 'pending',
+			reviewed_by bigint references users(id) on delete set null,
+			review_note text not null default '',
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			reviewed_at timestamptz,
+			check (kind in ('editor', 'developer')),
+			check (status in ('pending', 'approved', 'rejected'))
+		)`,
+		`create unique index if not exists idx_mod_membership_applications_pending on mod_membership_applications (mod_id, user_id, kind) where status = 'pending'`,
+		`create index if not exists idx_mod_membership_applications_review on mod_membership_applications (kind, status, created_at)`,
+		`create table if not exists mod_application_attachments (
+			application_id bigint not null references mod_membership_applications(id) on delete cascade,
+			oss_file_id bigint not null references oss_files(id) on delete restrict,
+			primary key (application_id, oss_file_id)
+		)`,
+		`create table if not exists mod_memberships (
+			mod_id bigint not null references mods(id) on delete cascade,
+			user_id bigint not null references users(id) on delete cascade,
+			role text not null,
+			granted_by bigint references users(id) on delete set null,
+			created_at timestamptz not null default now(),
+			primary key (mod_id, user_id, role),
+			check (role in ('editor', 'developer'))
+		)`,
+		`create table if not exists mod_comments (
+			id bigserial primary key,
+			mod_id bigint not null references mods(id) on delete cascade,
+			user_id bigint not null references users(id) on delete cascade,
+			parent_id bigint references mod_comments(id) on delete cascade,
+			root_id bigint references mod_comments(id) on delete cascade,
+			body text not null,
+			status text not null default 'visible',
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			check (status in ('visible', 'hidden', 'deleted'))
+		)`,
+		`create index if not exists idx_mod_comments_mod_created on mod_comments (mod_id, created_at, id)`,
+		`create index if not exists idx_mod_comments_root_created on mod_comments (root_id, created_at, id)`,
+		`create table if not exists mod_comment_reactions (
+			comment_id bigint not null references mod_comments(id) on delete cascade,
+			user_id bigint not null references users(id) on delete cascade,
+			reaction text not null,
+			created_at timestamptz not null default now(),
+			primary key (comment_id, user_id, reaction),
+			check (reaction in ('thumbs_up', 'thumbs_down', 'laugh', 'hooray', 'confused', 'heart', 'rocket', 'eyes'))
+		)`,
+		`create table if not exists mod_revisions (
+			id bigserial primary key,
+			mod_id bigint not null references mods(id) on delete cascade,
+			version integer not null,
+			status text not null default 'pending',
+			snapshot jsonb not null,
+			change_reason text not null default '',
+			submitted_by bigint references users(id) on delete set null,
+			reviewed_by bigint references users(id) on delete set null,
+			review_note text not null default '',
+			created_at timestamptz not null default now(),
+			reviewed_at timestamptz,
+			check (status in ('pending', 'approved', 'rejected')),
+			unique (mod_id, version)
+		)`,
+		`create index if not exists idx_mod_revisions_mod_version on mod_revisions (mod_id, version desc)`,
+		`create index if not exists idx_mod_revisions_status_created on mod_revisions (status, created_at)`,
+		`alter table mods add column if not exists current_revision_id bigint references mod_revisions(id) on delete set null`,
+		`alter table mods add column if not exists supported_versions text[] not null default '{}'::text[]`,
+		`alter table mods add column if not exists supported_loaders text[] not null default '{}'::text[]`,
+		`insert into mod_revisions (mod_id, version, status, snapshot, change_reason, submitted_by, reviewed_at)
+		 select m.id, 1, case when m.review_status in ('pending', 'approved', 'rejected') then m.review_status else 'pending' end,
+			jsonb_build_object(
+				'siteId', m.slug,
+				'primaryName', m.primary_name, 'secondaryName', m.secondary_name, 'abbreviation', m.abbreviation,
+				'summary', m.summary, 'modId', m.mod_id, 'environment', m.environment, 'primaryCategory', m.primary_category,
+				'supportedVersions', to_jsonb(m.supported_versions), 'supportedLoaders', to_jsonb(m.supported_loaders),
+				'tags', coalesce((select jsonb_agg(t.tag order by t.tag) from mod_tags t where t.mod_id = m.id), '[]'::jsonb),
+				'searchKeywords', to_jsonb(m.search_keywords),
+				'authors', coalesce((select jsonb_agg(jsonb_build_object('name', a.name, 'role', a.role) order by a.display_order, a.id) from mod_authors a where a.mod_id = m.id), '[]'::jsonb),
+				'officialStatus', m.official_status, 'sourceStatus', m.source_status, 'license', m.license,
+				'curseforgeProjectId', m.curseforge_project_id, 'modrinthProjectId', m.modrinth_project_id,
+				'iconUrl', m.icon_url, 'bodyMarkdown', m.body_markdown, 'submissionMethod', m.submission_method,
+				'links', coalesce((select jsonb_agg(jsonb_build_object('type', l.link_type, 'url', l.url) order by l.display_order, l.id) from mod_links l where l.mod_id = m.id), '[]'::jsonb),
+				'relationshipGroups', coalesce((
+					select jsonb_agg(jsonb_build_object(
+						'label', g.label, 'loader', g.loader, 'minecraftVersions', to_jsonb(g.minecraft_versions), 'modVersion', g.mod_version,
+						'relationships', coalesce((select jsonb_agg(jsonb_build_object('type', r.relation_type, 'relatedModId', r.related_mod_id, 'relatedModName', r.related_mod_name, 'notes', r.notes) order by r.display_order, r.id) from mod_relationships r where r.group_id = g.id), '[]'::jsonb)
+					) order by g.display_order, g.id) from mod_relationship_groups g where g.mod_id = m.id
+				), '[]'::jsonb)
+			),
+			'历史数据自动回填', m.created_by, case when m.review_status = 'pending' then null else coalesce(m.published_at, m.updated_at) end
+		 from mods m where not exists (select 1 from mod_revisions r where r.mod_id = m.id)`,
+		`update mod_revisions r
+		 set snapshot = jsonb_set(r.snapshot, '{siteId}', to_jsonb(m.slug), true)
+		 from mods m where m.id = r.mod_id and not (r.snapshot ? 'siteId')`,
+		`update mods m set current_revision_id = r.id
+		 from mod_revisions r where r.mod_id = m.id and r.version = 1 and m.current_revision_id is null and r.status = 'approved'`,
 	}
 
 	for _, statement := range statements {

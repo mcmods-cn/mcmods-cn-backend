@@ -66,15 +66,15 @@ type ossPresignRequest struct {
 }
 
 type ossDirectUploadRequest struct {
-	OriginalName   string `json:"originalName"`
-	ContentType    string `json:"contentType"`
-	SizeBytes      int64  `json:"sizeBytes"`
-	SHA256         string `json:"sha256"`
-	Category       string `json:"category"`
-	Source         string `json:"source"`
-	Prefix         string `json:"prefix"`
-	ProjectID      string `json:"projectId"`
-	ExpiresMinutes int    `json:"expiresMinutes"`
+	OriginalName    string `json:"originalName"`
+	ContentType     string `json:"contentType"`
+	SizeBytes       int64  `json:"sizeBytes"`
+	SHA256          string `json:"sha256"`
+	Category        string `json:"category"`
+	Source          string `json:"source"`
+	Prefix          string `json:"prefix"`
+	ProjectUniqueID string `json:"projectUniqueId"`
+	ExpiresMinutes  int    `json:"expiresMinutes"`
 }
 
 type ossCompleteUploadRequest struct {
@@ -209,11 +209,11 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		objectPrefix = cfg.Prefix
 		objectCategory = path.Join("user", strconv.FormatInt(currentClaims(r).Subject, 10), strings.TrimPrefix(category, "user/"))
 	} else if rawCategory == ossProjectIntroCategory || category == "project_intro" || category == "projectintro" {
-		category = path.Join("project", normalizeProjectObjectSegment(req.ProjectID), "intro")
+		category = path.Join("project", normalizeProjectObjectSegment(req.ProjectUniqueID), "intro")
 		objectCategory = category
 		objectPrefix = cfg.Prefix
 	} else if rawCategory == ossProjectDownloadCategory || category == "project_download" || category == "projectdownload" {
-		category = path.Join("project", normalizeProjectObjectSegment(req.ProjectID), "download")
+		category = path.Join("project", normalizeProjectObjectSegment(req.ProjectUniqueID), "download")
 		objectCategory = category
 		objectPrefix = cfg.Prefix
 	}
