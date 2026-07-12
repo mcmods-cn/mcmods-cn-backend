@@ -89,13 +89,12 @@ func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"cards": []map[string]any{
-			{"label": "用户数", "value": users, "tone": "green"},
-			{"label": "角色数", "value": roles, "tone": "blue"},
-			{"label": "权限节点", "value": permissions, "tone": "violet"},
-			{"label": "登录成功", "value": loginSuccess, "tone": "green"},
-			{"label": "登录失败", "value": loginFailed, "tone": "red"},
+			{"label": "users", "value": users, "tone": "green"},
+			{"label": "roles", "value": roles, "tone": "blue"},
+			{"label": "permissions", "value": permissions, "tone": "violet"},
+			{"label": "loginSuccess", "value": loginSuccess, "tone": "green"},
+			{"label": "loginFailed", "value": loginFailed, "tone": "red"},
 		},
-		"todo": []string{"配置 SMTP 邮件服务", "确认首个管理员账号", "补充内容审核规则", "接入 Redis 与 OSS"},
 	})
 }
 

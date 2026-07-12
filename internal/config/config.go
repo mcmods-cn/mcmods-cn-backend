@@ -70,7 +70,7 @@ func Load() Config {
 		JWTSecret:      getenv("JWT_SECRET", "change-this-in-production"),
 		JWTTTL:         time.Duration(getenvInt("JWT_TTL_HOURS", 24)) * time.Hour,
 		DB: DBConfig{
-			Host:     getenv("DB_HOST", "192.144.227.206"),
+			Host:     getenv("DB_HOST", "127.0.0.1"),
 			Port:     getenv("DB_PORT", "5432"),
 			Name:     getenv("DB_NAME", "mcmods"),
 			User:     getenv("DB_USER", "mcmods"),

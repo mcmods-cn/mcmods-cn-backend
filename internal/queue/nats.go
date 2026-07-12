@@ -70,6 +70,14 @@ func DefaultTaskConfigs() []config.NATSTaskConfig {
 			MaxConcurrent:  8,
 			TimeoutSeconds: 300,
 		},
+		{
+			Code:           "mod_export_import",
+			Enabled:        true,
+			Subject:        "export.import.requested",
+			QueueGroup:     "mcmods-export-import-workers",
+			MaxConcurrent:  2,
+			TimeoutSeconds: 3600,
+		},
 	}
 }
 

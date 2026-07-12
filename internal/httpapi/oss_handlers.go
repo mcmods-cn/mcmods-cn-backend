@@ -21,7 +21,7 @@ import (
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
 )
 
-const maxOSSUploadBytes = 1024 << 20
+const maxOSSUploadBytes = 2 << 30
 
 const (
 	ossDownloadModePresigned        = "oss_presigned"
@@ -30,6 +30,7 @@ const (
 	ossProjectDownloadCategory      = "project/download"
 	ossUserPlaygroundCategory       = "user/playground"
 	ossUserCommentCategory          = "user/comment"
+	ossModExportScopePrefix         = "mod_export:"
 )
 
 var defaultOSSAllowedExtensions = []string{
@@ -189,7 +190,9 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		return
 	}
 	ext := strings.ToLower(filepath.Ext(req.OriginalName))
-	if !allowedUploadExtension(ext, cfg.AllowedExtensions) {
+	modExportUniqueID := strings.TrimPrefix(scope, ossModExportScopePrefix)
+	isModExport := modExportUniqueID != scope && modExportUniqueID != ""
+	if (isModExport && ext != ".zip") || (!isModExport && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -199,6 +202,9 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		category = "misc"
 	}
 	source := strings.TrimSpace(req.Source)
+	if isModExport {
+		source = "mcmods_exporter"
+	}
 	objectPrefix := cfg.Prefix
 	if requestedPrefix := normalizeObjectPrefix(req.Prefix); requestedPrefix != "" {
 		objectPrefix = requestedPrefix
@@ -208,6 +214,10 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		category = normalizeOSSUserCategory(category, source)
 		objectPrefix = cfg.Prefix
 		objectCategory = path.Join("user", strconv.FormatInt(currentClaims(r).Subject, 10), strings.TrimPrefix(category, "user/"))
+	} else if isModExport {
+		category = path.Join("project", normalizeProjectObjectSegment(modExportUniqueID), "import-staging")
+		objectCategory = category
+		objectPrefix = cfg.Prefix
 	} else if rawCategory == ossProjectIntroCategory || category == "project_intro" || category == "projectintro" {
 		category = path.Join("project", normalizeProjectObjectSegment(req.ProjectUniqueID), "intro")
 		objectCategory = category
@@ -227,7 +237,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	}
 	var existing map[string]any
 	var exists bool
-	if scope == "user" {
+	if scope == "user" || isModExport {
 		existing, exists = s.findExistingOSSFileByHashForUploader(r.Context(), req.SHA256, req.SizeBytes, currentClaims(r).Subject)
 	} else {
 		existing, exists = s.findExistingOSSFileByHash(r.Context(), req.SHA256, req.SizeBytes)
@@ -324,6 +334,11 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	rawCategory := strings.TrimSpace(req.Category)
 	req.Category = normalizeObjectSegment(rawCategory)
 	req.Source = strings.TrimSpace(req.Source)
+	modExportUniqueID := strings.TrimPrefix(scope, ossModExportScopePrefix)
+	isModExport := modExportUniqueID != scope && modExportUniqueID != ""
+	if isModExport {
+		req.Source = "mcmods_exporter"
+	}
 	if req.ObjectKey == "" || !isAllowedObjectKey(req.ObjectKey, cfg.Prefix) {
 		writeError(w, http.StatusBadRequest, "OSS ObjectKey 不合法")
 		return
@@ -335,7 +350,8 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	if req.OriginalName == "" {
 		req.OriginalName = path.Base(req.ObjectKey)
 	}
-	if !allowedUploadExtension(strings.ToLower(filepath.Ext(req.OriginalName)), cfg.AllowedExtensions) {
+	ext := strings.ToLower(filepath.Ext(req.OriginalName))
+	if (isModExport && ext != ".zip") || (!isModExport && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -349,6 +365,13 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 			return
 		}
 		req.Category = userCategoryFromObjectKey(req.ObjectKey, userPrefix)
+	} else if isModExport {
+		exportPrefix := path.Join(cfg.Prefix, "project", normalizeProjectObjectSegment(modExportUniqueID), "import-staging")
+		if !isAllowedObjectKey(req.ObjectKey, exportPrefix) {
+			writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于模组导入临时目录")
+			return
+		}
+		req.Category = path.Join("project", normalizeProjectObjectSegment(modExportUniqueID), "import-staging")
 	} else if strings.HasPrefix(req.ObjectKey, path.Join(cfg.Prefix, "project")+"/") {
 		if rawCategory == ossProjectIntroCategory || req.Category == "project_intro" || req.Category == "projectintro" {
 			req.Category = projectCategoryFromObjectKey(req.ObjectKey, cfg.Prefix, "intro")
@@ -790,10 +813,7 @@ func (s *Server) ossDownloadClient(ctx context.Context, cfg ossConfigPayload) (*
 	if requiresSecurityToken(cfg.AccessKeyID) && cfg.SecurityToken == "" {
 		return nil, fmt.Errorf("OSS STS 临时凭证缺少 SecurityToken")
 	}
-	endpoint := cfg.PublicEndpoint
-	if endpoint == "" {
-		endpoint = cfg.Endpoint
-	}
+	endpoint := cfg.Endpoint
 	return newOSSClient(cfg, endpoint, isCustomOSSEndpoint(endpoint)), nil
 }
 

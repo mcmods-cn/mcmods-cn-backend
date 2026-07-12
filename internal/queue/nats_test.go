@@ -8,7 +8,7 @@ import (
 
 func TestNormalizeConfigAddsDefaultTaskForLegacyConfig(t *testing.T) {
 	cfg := NormalizeConfig(config.NATSConfig{SubjectPrefix: " mcmods "})
-	if len(cfg.Tasks) != 2 || cfg.Tasks[0].Code != "ai" || cfg.Tasks[1].Code != "notifications" {
+	if len(cfg.Tasks) != 3 || cfg.Tasks[0].Code != "ai" || cfg.Tasks[1].Code != "notifications" || cfg.Tasks[2].Code != "mod_export_import" {
 		t.Fatalf("expected required system tasks, got %#v", cfg.Tasks)
 	}
 	if cfg.URL != "nats://127.0.0.1:4222" {
@@ -18,7 +18,7 @@ func TestNormalizeConfigAddsDefaultTaskForLegacyConfig(t *testing.T) {
 
 func TestNormalizeConfigRestoresRequiredTasksForExplicitEmptyList(t *testing.T) {
 	cfg := NormalizeConfig(config.NATSConfig{Tasks: []config.NATSTaskConfig{}})
-	if len(cfg.Tasks) != 2 {
+	if len(cfg.Tasks) != 3 {
 		t.Fatalf("expected required system tasks, got %#v", cfg.Tasks)
 	}
 }
@@ -28,7 +28,7 @@ func TestNormalizeConfigNormalizesTaskLimitsAndDuplicates(t *testing.T) {
 		{Code: " AI ", Enabled: true, MaxConcurrent: 0, TimeoutSeconds: 0},
 		{Code: "ai", Enabled: true, MaxConcurrent: 20, TimeoutSeconds: 20},
 	}})
-	if len(cfg.Tasks) != 2 {
+	if len(cfg.Tasks) != 3 {
 		t.Fatalf("expected duplicate task codes to be removed and required tasks restored, got %#v", cfg.Tasks)
 	}
 	task := cfg.Tasks[0]

@@ -61,11 +61,11 @@ var seedPermissions = []seedPermission{
 	{Code: "project.create", Module: "project", Name: "创建项目", Description: "创建 Mod、插件、整合包等项目"},
 	{Code: "project.edit", Module: "project", Name: "编辑项目", Description: "编辑项目基础资料"},
 	{Code: "project.review", Module: "project", Name: "审核项目", Description: "审核项目内容"},
-	{Code: "project.no_review", Module: "project", Name: "项目免审", Description: "项目级免审核权限"},
+	{Code: "project.no-review", Module: "project", Name: "项目免审", Description: "项目级免审核权限"},
 	{Code: "project.edit.<projectID>", Module: "project", Name: "项目编辑模板", Description: "变量权限：编辑指定项目，授权时将 <projectID> 替换为具体项目 ID"},
 	{Code: "project.review.<projectID>", Module: "project", Name: "项目审核模板", Description: "变量权限：审核指定项目，授权时将 <projectID> 替换为具体项目 ID"},
 	{Code: "project.delete.<projectID>", Module: "project", Name: "项目删除模板", Description: "变量权限：删除指定项目，授权时将 <projectID> 替换为具体项目 ID"},
-	{Code: "project.no_review.<projectID>", Module: "project", Name: "项目免审模板", Description: "变量权限：指定项目免审核，授权时将 <projectID> 替换为具体项目 ID"},
+	{Code: "project.no-review.<projectID>", Module: "project", Name: "项目免审模板", Description: "变量权限：指定项目免审核，授权时将 <projectID> 替换为具体项目 ID"},
 }
 
 var seedUsers = []seedUser{

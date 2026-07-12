@@ -49,6 +49,10 @@ func Run() {
 	if err := notificationWorker.Start(); err != nil {
 		log.Printf("notification queue worker unavailable: %v", err)
 	}
+	modExportWorker := httpapi.NewModExportWorker(cfg, db, queueClient)
+	if err := modExportWorker.Start(); err != nil {
+		log.Printf("mcmods_exporter import worker unavailable; API fallback remains enabled: %v", err)
+	}
 
 	server := &http.Server{
 		Addr:              cfg.Addr,

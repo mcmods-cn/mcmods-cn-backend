@@ -417,9 +417,6 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			relation_type text not null,
 			related_mod_id bigint references mods(id) on delete set null,
 			related_mod_name text not null default '',
-			loader text not null default '',
-			minecraft_version text not null default '',
-			mod_version text not null default '',
 			notes text not null default '',
 			display_order integer not null default 0,
 			created_at timestamptz not null default now(),
@@ -432,15 +429,13 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			mod_id bigint not null references mods(id) on delete cascade,
 			label text not null default '',
 			loader text not null default '',
-			minecraft_version text not null default '',
+			minecraft_versions text[] not null default '{}'::text[],
 			mod_version text not null default '',
 			display_order integer not null default 0,
 			created_at timestamptz not null default now()
 		)`,
 		`create index if not exists idx_mod_relationship_groups_mod_order on mod_relationship_groups (mod_id, display_order, id)`,
 		`alter table mod_relationship_groups add column if not exists minecraft_versions text[] not null default '{}'::text[]`,
-		`update mod_relationship_groups set minecraft_versions = array[minecraft_version]
-		 where minecraft_version <> '' and cardinality(minecraft_versions) = 0`,
 		`alter table mod_relationships add column if not exists group_id bigint references mod_relationship_groups(id) on delete cascade`,
 		`create index if not exists idx_mod_relationships_group_order on mod_relationships (group_id, display_order, id)`,
 		`create table if not exists mod_download_sources (
@@ -455,24 +450,6 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			unique (mod_id, source_type, url)
 		)`,
 		`create index if not exists idx_mod_download_sources_mod_order on mod_download_sources (mod_id, display_order, id)`,
-		`create table if not exists mod_data_pages (
-			id bigserial primary key,
-			mod_id bigint not null references mods(id) on delete cascade,
-			minecraft_version text not null,
-			category text not null,
-			title text not null,
-			summary text not null default '',
-			content_markdown text not null default '',
-			status text not null default 'pending',
-			created_by bigint references users(id) on delete set null,
-			reviewed_by bigint references users(id) on delete set null,
-			review_note text not null default '',
-			created_at timestamptz not null default now(),
-			updated_at timestamptz not null default now(),
-			reviewed_at timestamptz,
-			check (status in ('pending', 'approved', 'rejected'))
-		)`,
-		`create index if not exists idx_mod_data_pages_mod_version_category on mod_data_pages (mod_id, minecraft_version, category, status)`,
 		`create table if not exists mod_loader_compatibilities (
 			mod_id bigint not null references mods(id) on delete cascade,
 			loader text not null,
@@ -480,24 +457,7 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			created_at timestamptz not null default now(),
 			primary key (mod_id, loader, minecraft_version)
 		)`,
-		`insert into mod_loader_compatibilities (mod_id, loader, minecraft_version)
-		 select m.id, loader, version
-		 from mods m, unnest(m.supported_loaders) loader, unnest(m.supported_versions) version
-		 on conflict do nothing`,
 		`create index if not exists idx_mod_loader_compatibilities_lookup on mod_loader_compatibilities (loader, minecraft_version, mod_id)`,
-		`create table if not exists mod_data_versions (
-			id bigserial primary key,
-			mod_id bigint not null references mods(id) on delete cascade,
-			minecraft_version text not null,
-			display_order integer not null default 0,
-			created_by bigint references users(id) on delete set null,
-			created_at timestamptz not null default now(),
-			unique (mod_id, minecraft_version)
-		)`,
-		`insert into mod_data_versions (mod_id, minecraft_version, display_order, created_by)
-		 select mod_id, minecraft_version, row_number() over (partition by mod_id order by minecraft_version desc) - 1, min(created_by)
-		 from mod_data_pages group by mod_id, minecraft_version
-		 on conflict do nothing`,
 		`create table if not exists mod_membership_applications (
 			id bigserial primary key,
 			mod_id bigint not null references mods(id) on delete cascade,
@@ -599,6 +559,172 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		 from mods m where m.id = r.mod_id and not (r.snapshot ? 'siteId')`,
 		`update mods m set current_revision_id = r.id
 		 from mod_revisions r where r.mod_id = m.id and r.version = 1 and m.current_revision_id is null and r.status = 'approved'`,
+		`create table if not exists mod_export_packages (
+			id text primary key,
+			sha256 text not null unique check (sha256 ~ '^[0-9a-f]{64}$'),
+			archive_file_id bigint references oss_files(id) on delete set null,
+			archive_name text not null,
+			schema_version text not null,
+			exporter_version text not null,
+			minecraft_version text not null,
+			loader text not null,
+			manifest jsonb not null,
+			namespaces text[] not null default '{}'::text[],
+			profile text not null default 'all',
+			uploaded_by bigint references users(id) on delete set null,
+			uploaded_at timestamptz not null default now(),
+			imported_at timestamptz
+		)`,
+		`create table if not exists mod_export_jobs (
+			id text primary key,
+			mod_id bigint not null references mods(id) on delete cascade,
+			package_id text not null references mod_export_packages(id) on delete cascade,
+			importer_version text not null,
+			status text not null default 'queued',
+			progress smallint not null default 0 check (progress between 0 and 100),
+			current_stage text not null default '',
+			error_code text not null default '',
+			error_detail jsonb not null default '{}'::jsonb,
+			created_by bigint references users(id) on delete set null,
+			created_at timestamptz not null default now(),
+			started_at timestamptz,
+			finished_at timestamptz,
+			updated_at timestamptz not null default now(),
+			unique (mod_id, package_id, importer_version),
+			check (status in ('queued','validating','importing','ready','partial','failed','cancelled'))
+		)`,
+		`create index if not exists idx_mod_export_jobs_status_created on mod_export_jobs(status, created_at)`,
+		`alter table mod_export_jobs add column if not exists heartbeat_at timestamptz`,
+		`alter table mod_export_jobs add column if not exists run_token text not null default ''`,
+		`alter table mod_export_jobs add column if not exists attempt_count integer not null default 0`,
+		`create index if not exists idx_mod_export_jobs_running_heartbeat
+		 on mod_export_jobs(heartbeat_at) where status in ('validating','importing')`,
+		`create table if not exists mod_export_revisions (
+			id text primary key,
+			mod_id bigint not null references mods(id) on delete cascade,
+			package_id text not null references mod_export_packages(id) on delete restrict,
+			revision_no bigint not null,
+			status text not null default 'staging',
+			minecraft_version text not null,
+			loader text not null,
+			exporter_version text not null,
+			source_namespace text not null,
+			source_metadata jsonb not null default '{}'::jsonb,
+			is_active boolean not null default false,
+			created_at timestamptz not null default now(),
+			activated_at timestamptz,
+			unique (mod_id, minecraft_version, loader, source_namespace, revision_no),
+			check (status in ('staging','ready','partial','rejected','superseded'))
+		)`,
+		`create unique index if not exists idx_mod_export_revisions_active
+		 on mod_export_revisions(mod_id, minecraft_version, loader, source_namespace) where is_active`,
+		`create index if not exists idx_mod_export_revisions_package on mod_export_revisions(package_id)`,
+		`alter table mod_export_revisions add column if not exists import_run_token text not null default ''`,
+		`create index if not exists idx_mod_export_revisions_import_run on mod_export_revisions(import_run_token) where status='staging'`,
+		`create table if not exists mod_export_locales (
+			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			locale text not null,
+			translation_count integer not null default 0,
+			primary key (revision_id, locale)
+		)`,
+		`create table if not exists mod_export_translations (
+			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			locale text not null,
+			translation_key text not null,
+			value text not null,
+			primary key (revision_id, locale, translation_key)
+		)`,
+		`create index if not exists idx_mod_export_translations_key on mod_export_translations(revision_id, translation_key)`,
+		`create table if not exists mod_export_registry_entries (
+			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			registry text not null,
+			object_id text not null,
+			namespace text not null,
+			object_path text not null,
+			translation_key text not null default '',
+			names jsonb not null default '{}'::jsonb,
+			data jsonb not null,
+			primary key (revision_id, registry, object_id)
+		)`,
+		`create index if not exists idx_mod_export_registry_object on mod_export_registry_entries(object_id)`,
+		`create table if not exists mod_export_text_assets (
+			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			asset_path text not null,
+			asset_kind text not null,
+			content_type text not null,
+			sha256 text not null,
+			byte_length bigint not null,
+			text_content text,
+			json_content jsonb,
+			primary key (revision_id, asset_path),
+			check ((text_content is not null)::integer + (json_content is not null)::integer = 1)
+		)`,
+		`create table if not exists mod_export_binary_assets (
+			id text primary key,
+			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			asset_path text not null,
+			asset_kind text not null,
+			content_type text not null default 'application/octet-stream',
+			sha256 text not null,
+			byte_length bigint not null,
+			data bytea not null,
+			unique (revision_id, asset_path)
+		)`,
+		`create table if not exists mod_export_media (
+			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			asset_path text not null,
+			media_kind text not null,
+			oss_file_id bigint not null references oss_files(id) on delete restrict,
+			sha256 text not null,
+			content_type text not null,
+			byte_length bigint not null,
+			width integer,
+			height integer,
+			has_alpha boolean,
+			primary key (revision_id, asset_path)
+		)`,
+		`create table if not exists mod_export_structures (
+			id text primary key,
+			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			structure_id text not null,
+			asset_path text not null,
+			source_format text not null,
+			template_blob_id text not null references mod_export_binary_assets(id) on delete cascade,
+			summary jsonb not null default '{}'::jsonb,
+			unique (revision_id, structure_id)
+		)`,
+		`create table if not exists mod_export_entry_contents (
+			mod_id bigint not null references mods(id) on delete cascade,
+			registry text not null,
+			object_id text not null,
+			locale text not null,
+			content_markdown text not null default '',
+			updated_by bigint references users(id) on delete set null,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			primary key (mod_id,registry,object_id,locale)
+		)`,
+		`create table if not exists mod_export_job_logs (
+			id bigserial primary key,
+			job_id text not null references mod_export_jobs(id) on delete cascade,
+			level text not null default 'info',
+			stage text not null default '',
+			message text not null default '',
+			created_at timestamptz not null default now()
+		)`,
+		`create table if not exists nats_outbox (
+			id bigserial primary key,
+			event_id text not null unique,
+			subject text not null,
+			aggregate_type text not null,
+			aggregate_id text not null,
+			payload jsonb not null,
+			created_at timestamptz not null default now(),
+			published_at timestamptz,
+			attempts integer not null default 0,
+			last_error text not null default ''
+		)`,
+		`create index if not exists idx_nats_outbox_pending on nats_outbox(created_at) where published_at is null`,
 	}
 
 	for _, statement := range statements {

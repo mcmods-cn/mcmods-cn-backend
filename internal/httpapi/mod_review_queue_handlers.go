@@ -2,12 +2,11 @@ package httpapi
 
 import (
 	"net/http"
-	"strconv"
 	"time"
 )
 
 type modContentReviewItem struct {
-	ID          int64     `json:"id"`
+	ID          string    `json:"id"`
 	Source      string    `json:"source"`
 	ModSiteID   string    `json:"modSiteId"`
 	ModName     string    `json:"modName"`
@@ -25,12 +24,16 @@ func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) 
 		r.Context(),
 		`select q.id,q.source,q.slug,q.mod_name,q.user_id,coalesce(u.username,''),coalesce(u.display_name,''),q.title,q.summary,q.created_at
 		 from (
-		   select r.id,'revision'::text source,m.slug,m.primary_name mod_name,r.submitted_by user_id,
+		   select r.id::text id,'revision'::text source,m.slug,m.primary_name mod_name,r.submitted_by user_id,
 		          '模组资料修订 #' || r.version title,r.change_reason summary,r.created_at
 		   from mod_revisions r join mods m on m.id=r.mod_id where r.status='pending'
 		   union all
-		   select p.id,'data'::text source,m.slug,m.primary_name mod_name,p.created_by user_id,p.title,p.summary,p.created_at
-		   from mod_data_pages p join mods m on m.id=p.mod_id where p.status='pending'
+		   select e.id,'export'::text source,m.slug,m.primary_name mod_name,j.created_by user_id,
+		          'mcmods_exporter ' || e.minecraft_version || ' / ' || e.loader title,
+		          e.source_namespace || ' · revision ' || e.revision_no summary,e.created_at
+		   from mod_export_revisions e join mods m on m.id=e.mod_id
+		   left join mod_export_jobs j on j.mod_id=e.mod_id and j.package_id=e.package_id
+		   where e.status in ('ready','partial') and not e.is_active
 		 ) q left join users u on u.id=q.user_id
 		 order by q.created_at asc`,
 	)
@@ -47,9 +50,9 @@ func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if item.Source == "revision" {
-			item.ReviewURL = "/api/v1/mods/" + item.ModSiteID + "/revisions/" + strconv.FormatInt(item.ID, 10)
+			item.ReviewURL = "/api/v1/mods/" + item.ModSiteID + "/revisions/" + item.ID
 		} else {
-			item.ReviewURL = "/api/v1/mods/" + item.ModSiteID + "/data/" + strconv.FormatInt(item.ID, 10)
+			item.ReviewURL = "/api/v1/admin/export-revisions/" + item.ID + "/activate"
 		}
 		items = append(items, item)
 	}

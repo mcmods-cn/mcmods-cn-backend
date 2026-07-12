@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"net"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -14,7 +16,14 @@ func Connect(ctx context.Context, cfg config.Config) (*pgxpool.Pool, error) {
 		return nil, err
 	}
 	poolConfig.MaxConns = 12
-	poolConfig.MinConns = 1
+	poolConfig.MinConns = 2
+	poolConfig.MaxConnIdleTime = 5 * time.Minute
+	poolConfig.MaxConnLifetime = 30 * time.Minute
+	poolConfig.HealthCheckPeriod = 30 * time.Second
+	poolConfig.ConnConfig.ConnectTimeout = 10 * time.Second
+	poolConfig.ConnConfig.RuntimeParams["application_name"] = "mcmods-cn-backend"
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	poolConfig.ConnConfig.DialFunc = dialer.DialContext
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
