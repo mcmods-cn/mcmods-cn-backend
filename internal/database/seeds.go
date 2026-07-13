@@ -80,6 +80,7 @@ var seedUsers = []seedUser{
 			"mail.read", "mail.write", "oss.read", "oss.write", "log.read", "log.write",
 			"ai.read", "ai.write", "ai.task.enqueue", "ai.task.consume",
 			"content.review", "content.write",
+			"project.create", "project.edit", "project.review",
 		},
 	},
 	{

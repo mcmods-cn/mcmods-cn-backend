@@ -28,8 +28,8 @@ const (
 	ossDownloadModeESAPrivateOrigin = "esa_private_origin"
 	ossProjectIntroCategory         = "project/intro"
 	ossProjectDownloadCategory      = "project/download"
-	ossUserPlaygroundCategory       = "user/playground"
-	ossUserCommentCategory          = "user/comment"
+	ossUserPlaygroundCategory       = "users/playground"
+	ossUserCommentCategory          = "users/comments"
 	ossModExportScopePrefix         = "mod_export:"
 )
 
@@ -213,17 +213,17 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	if scope == "user" {
 		category = normalizeOSSUserCategory(category, source)
 		objectPrefix = cfg.Prefix
-		objectCategory = path.Join("user", strconv.FormatInt(currentClaims(r).Subject, 10), strings.TrimPrefix(category, "user/"))
+		objectCategory = path.Join("users", strconv.FormatInt(currentClaims(r).Subject, 10), strings.TrimPrefix(category, "users/"))
 	} else if isModExport {
-		category = path.Join("project", normalizeProjectObjectSegment(modExportUniqueID), "import-staging")
+		category = path.Join("projects", normalizeProjectObjectSegment(modExportUniqueID), "imports", "packages")
 		objectCategory = category
 		objectPrefix = cfg.Prefix
 	} else if rawCategory == ossProjectIntroCategory || category == "project_intro" || category == "projectintro" {
-		category = path.Join("project", normalizeProjectObjectSegment(req.ProjectUniqueID), "intro")
+		category = path.Join("projects", normalizeProjectObjectSegment(req.ProjectUniqueID), "description")
 		objectCategory = category
 		objectPrefix = cfg.Prefix
 	} else if rawCategory == ossProjectDownloadCategory || category == "project_download" || category == "projectdownload" {
-		category = path.Join("project", normalizeProjectObjectSegment(req.ProjectUniqueID), "download")
+		category = path.Join("projects", normalizeProjectObjectSegment(req.ProjectUniqueID), "downloads")
 		objectCategory = category
 		objectPrefix = cfg.Prefix
 	}
@@ -359,25 +359,25 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		req.Category = "misc"
 	}
 	if scope == "user" {
-		userPrefix := path.Join(cfg.Prefix, "user", strconv.FormatInt(currentClaims(r).Subject, 10))
+		userPrefix := path.Join(cfg.Prefix, "users", strconv.FormatInt(currentClaims(r).Subject, 10))
 		if !isAllowedObjectKey(req.ObjectKey, userPrefix) {
 			writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于用户文件目录")
 			return
 		}
 		req.Category = userCategoryFromObjectKey(req.ObjectKey, userPrefix)
 	} else if isModExport {
-		exportPrefix := path.Join(cfg.Prefix, "project", normalizeProjectObjectSegment(modExportUniqueID), "import-staging")
+		exportPrefix := path.Join(cfg.Prefix, "projects", normalizeProjectObjectSegment(modExportUniqueID), "imports", "packages")
 		if !isAllowedObjectKey(req.ObjectKey, exportPrefix) {
 			writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于模组导入临时目录")
 			return
 		}
-		req.Category = path.Join("project", normalizeProjectObjectSegment(modExportUniqueID), "import-staging")
-	} else if strings.HasPrefix(req.ObjectKey, path.Join(cfg.Prefix, "project")+"/") {
+		req.Category = path.Join("projects", normalizeProjectObjectSegment(modExportUniqueID), "imports", "packages")
+	} else if strings.HasPrefix(req.ObjectKey, path.Join(cfg.Prefix, "projects")+"/") {
 		if rawCategory == ossProjectIntroCategory || req.Category == "project_intro" || req.Category == "projectintro" {
-			req.Category = projectCategoryFromObjectKey(req.ObjectKey, cfg.Prefix, "intro")
+			req.Category = projectCategoryFromObjectKey(req.ObjectKey, cfg.Prefix, "description")
 		}
 		if rawCategory == ossProjectDownloadCategory || req.Category == "project_download" || req.Category == "projectdownload" {
-			req.Category = projectCategoryFromObjectKey(req.ObjectKey, cfg.Prefix, "download")
+			req.Category = projectCategoryFromObjectKey(req.ObjectKey, cfg.Prefix, "downloads")
 		}
 	}
 	head, err := client.HeadObject(
@@ -642,7 +642,7 @@ func (s *Server) enforceUserFileUploadLimits(r *http.Request, sizeBytes int64, d
 	if singleLimit != maxPermissionBytes && sizeBytes > singleLimit {
 		return fmt.Errorf("文件超过单文件大小限制：%s", formatLimitBytes(singleLimit))
 	}
-	userPrefix := path.Join(s.ossConfigFromSettings(r.Context()).Prefix, "user", strconv.FormatInt(claims.Subject, 10)) + "/%"
+	userPrefix := path.Join(s.ossConfigFromSettings(r.Context()).Prefix, "users", strconv.FormatInt(claims.Subject, 10)) + "/%"
 	var dailyUsed, totalUsed int64
 	_ = s.db.QueryRow(
 		r.Context(),
@@ -678,7 +678,7 @@ func (s *Server) enforceUserStoredFileLimit(r *http.Request, sizeBytes int64) er
 	if totalLimit == maxPermissionBytes {
 		return nil
 	}
-	userPrefix := path.Join(s.ossConfigFromSettings(r.Context()).Prefix, "user", strconv.FormatInt(claims.Subject, 10)) + "/%"
+	userPrefix := path.Join(s.ossConfigFromSettings(r.Context()).Prefix, "users", strconv.FormatInt(claims.Subject, 10)) + "/%"
 	var totalUsed int64
 	_ = s.db.QueryRow(
 		r.Context(),
@@ -1004,7 +1004,7 @@ func shouldPersistMarkdownImageAsWebP(originalName string, contentType string, s
 	if source == "playground" || source == "comment" || source == "markdown" || source == "project_intro" || source == "projectintro" {
 		return true
 	}
-	return category == "user/playground" || category == "user/comment" || strings.HasSuffix(category, "/intro")
+	return category == "users/playground" || category == "users/comments" || strings.HasSuffix(category, "/description")
 }
 
 func persistImageAsWebP(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, sourceObjectKey string, sourceOriginalName string) (persistedWebPObject, error) {
@@ -1146,22 +1146,22 @@ func userCategoryFromObjectKey(objectKey string, userPrefix string) string {
 	relative := strings.TrimPrefix(objectKey, strings.TrimSuffix(userPrefix, "/")+"/")
 	parts := strings.Split(relative, "/")
 	if len(parts) == 0 || normalizeObjectSegment(parts[0]) == "" {
-		return "user/misc"
+		return "users/misc"
 	}
-	return path.Join("user", normalizeObjectSegment(parts[0]))
+	return path.Join("users", normalizeObjectSegment(parts[0]))
 }
 
 func projectCategoryFromObjectKey(objectKey string, prefix string, fallback string) string {
-	relative := strings.TrimPrefix(objectKey, path.Join(prefix, "project")+"/")
+	relative := strings.TrimPrefix(objectKey, path.Join(prefix, "projects")+"/")
 	parts := strings.Split(relative, "/")
 	if len(parts) >= 2 {
 		projectID := normalizeProjectObjectSegment(parts[0])
 		section := normalizeObjectSegment(parts[1])
 		if section != "" {
-			return path.Join("project", projectID, section)
+			return path.Join("projects", projectID, section)
 		}
 	}
-	return path.Join("project", "unassigned", fallback)
+	return path.Join("projects", "unassigned", fallback)
 }
 
 const maxPermissionBytes int64 = 1<<63 - 1

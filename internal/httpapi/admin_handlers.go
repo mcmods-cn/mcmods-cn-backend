@@ -143,7 +143,7 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 			"oss":            true,
 			"logSystem":      true,
 			"ai":             true,
-			"redis":          false,
+			"redis":          s.cfg.Redis.Enabled,
 			"crawler":        false,
 		},
 	})
@@ -1497,7 +1497,7 @@ func redactMailConfig(payload mailConfigPayload) map[string]any {
 func adminNavigation() []map[string]any {
 	return []map[string]any{
 		{"id": "overview", "label": "统计", "items": []string{"总览", "用户统计", "上传统计", "搜索统计", "AI 调用统计"}},
-		{"id": "content", "label": "内容管理", "items": []string{"模组 Mod", "整合包", "插件 Plugin", "衍生资源", "教程", "新闻", "问题 / 讨论"}},
+		{"id": "content", "label": "内容管理", "items": []string{"模组 Mod", "模组导入数据源", "整合包", "插件 Plugin", "衍生资源", "教程", "新闻", "问题 / 讨论"}},
 		{"id": "users", "label": "用户与通知", "items": []string{"用户列表", "系统通知", "登录记录", "设备记录", "账号安全", "用户封禁"}},
 		{"id": "permissions", "label": "权限", "items": []string{"权限组", "用户权限", "权限列表", "权限模板", "临时权限", "权限审计日志"}},
 		{"id": "oss", "label": "OSS 管理", "items": []string{"OSS 链接设置", "OSS 文件目录", "文件上传记录", "文件查杀记录", "下载统计"}},

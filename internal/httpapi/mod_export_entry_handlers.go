@@ -35,7 +35,9 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 	var modID int64
 	var namespace, objectPath string
 	var err error
-	if assetPath, arrayKey, ok := exportDocumentSource(registry); ok {
+	if assetPath, entriesSQL, ok := exportCustomDocumentSource(registry); ok {
+		err = s.db.QueryRow(r.Context(), entriesSQL, revisionID, assetPath, objectID).Scan(&modID)
+	} else if assetPath, arrayKey, ok := exportDocumentSource(registry); ok {
 		query := `select revision.mod_id from mod_export_revisions revision
 			join mod_export_text_assets asset on asset.revision_id=revision.id and asset.asset_path=$2
 			cross join lateral jsonb_array_elements(asset.json_content->'` + arrayKey + `') document
@@ -67,8 +69,12 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 		modelPath := "assets/" + namespace + "/blockstates/" + objectPath + ".json"
 		_ = s.db.QueryRow(r.Context(), `select exists(select 1 from mod_export_text_assets where revision_id=$1 and asset_path=$2)`, revisionID, modelPath).Scan(&response.ModelAvailable)
 	}
-	if registry != "advancements" && registry != "key_mappings" {
-		response.Recipes, response.Uses = s.modExportRecipesForObject(r.Context(), revisionID, objectID)
+	if registry == "items" || registry == "blocks" {
+		response.Recipes, response.Uses, err = s.modExportRecipesForObject(r.Context(), revisionID, objectID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read entry recipes")
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -105,7 +111,10 @@ func (s *Server) updateModExportEntryContent(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var exists bool
-	if assetPath, arrayKey, ok := exportDocumentSource(request.Registry); ok {
+	if assetPath, entriesSQL, ok := exportCustomDocumentSource(request.Registry); ok {
+		query := `select exists(` + strings.Replace(entriesSQL, "revision.id=$1", "revision.mod_id=$1", 1) + `)`
+		err = s.db.QueryRow(r.Context(), query, identity.ID, assetPath, request.ObjectID).Scan(&exists)
+	} else if assetPath, arrayKey, ok := exportDocumentSource(request.Registry); ok {
 		query := `select exists(select 1 from mod_export_revisions revision
 			join mod_export_text_assets asset on asset.revision_id=revision.id and asset.asset_path=$2
 			cross join lateral jsonb_array_elements(asset.json_content->'` + arrayKey + `') document
@@ -120,138 +129,134 @@ func (s *Server) updateModExportEntryContent(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusNotFound, "entry not found")
 		return
 	}
-	_, err = s.db.Exec(r.Context(), `
-		insert into mod_export_entry_contents(mod_id,registry,object_id,locale,content_markdown,updated_by)
-		values($1,$2,$3,$4,$5,$6)
-		on conflict(mod_id,registry,object_id,locale) do update
-		set content_markdown=excluded.content_markdown,updated_by=excluded.updated_by,updated_at=now()`,
-		identity.ID, request.Registry, request.ObjectID, request.Locale, request.ContentMarkdown, currentClaims(r).Subject)
+	claims := currentClaims(r)
+	aggregateKey := entryContentAggregateKey(identity.ID, request.Registry, request.ObjectID, request.Locale)
+	tx, err := s.db.Begin(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save entry content")
+		writeError(w, http.StatusInternalServerError, "failed to start entry revision")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"locale": request.Locale, "contentMarkdown": request.ContentMarkdown})
+	defer tx.Rollback(r.Context())
+	if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext($1))`, "mod_export_entry:"+aggregateKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock entry content")
+		return
+	}
+	var baseRevisionID *int64
+	err = tx.QueryRow(r.Context(), `select published_revision_id from mod_export_entry_contents
+		where mod_id=$1 and registry=$2 and object_id=$3 and locale=$4 for update`,
+		identity.ID, request.Registry, request.ObjectID, request.Locale).Scan(&baseRevisionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		baseRevisionID = nil
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load entry revision")
+		return
+	}
+	snapshot, err := json.Marshal(map[string]any{
+		"modId": identity.ID, "registry": request.Registry, "objectId": request.ObjectID,
+		"locale": request.Locale, "contentMarkdown": request.ContentMarkdown,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to encode entry revision")
+		return
+	}
+	status := "pending"
+	if canSkipProjectReview(claims, identity) {
+		status = "approved"
+	}
+	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
+		AggregateType: "mod_export_entry", AggregateKey: aggregateKey, BaseRevision: baseRevisionID,
+		Snapshot: snapshot, Reason: "Update exported entry introduction", ActorID: claims.Subject,
+		Source: "user", Status: status,
+		Metadata: map[string]any{"modId": identity.ID, "siteId": identity.SiteID, "registry": request.Registry, "objectId": request.ObjectID, "locale": request.Locale},
+		Request:  r,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create entry revision")
+		return
+	}
+	if status == "approved" {
+		if err = publishModExportEntryContentTx(r.Context(), tx, created.RevisionID, identity.ID, request.Registry, request.ObjectID, request.Locale, request.ContentMarkdown, claims.Subject); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to publish entry content")
+			return
+		}
+		if err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic approval", r); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record entry approval")
+			return
+		}
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit entry revision")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"locale": request.Locale, "contentMarkdown": request.ContentMarkdown,
+		"status": status, "revisionId": created.RevisionID, "changeRequestId": created.ChangeRequestID,
+	})
 }
 
-func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, objectID string) ([]any, []any) {
-	var raw []byte
-	if err := s.db.QueryRow(ctx, `select json_content from mod_export_text_assets where revision_id=$1 and asset_path='recipes/recipes.json'`, revisionID).Scan(&raw); err != nil {
-		return []any{}, []any{}
-	}
-	var document struct {
-		Recipes []json.RawMessage `json:"recipes"`
-	}
-	if json.Unmarshal(raw, &document) != nil {
-		return []any{}, []any{}
-	}
+func entryContentAggregateKey(modID int64, registry, objectID, locale string) string {
+	encoded, _ := json.Marshal([]any{modID, registry, objectID, locale})
+	return string(encoded)
+}
+
+func publishModExportEntryContentTx(ctx context.Context, tx pgx.Tx, revisionID, modID int64, registry, objectID, locale, markdown string, actorID int64) error {
+	_, err := tx.Exec(ctx, `
+		insert into mod_export_entry_contents(mod_id,registry,object_id,locale,content_markdown,updated_by,published_revision_id)
+		values($1,$2,$3,$4,$5,$6,$7)
+		on conflict(mod_id,registry,object_id,locale) do update set
+		content_markdown=excluded.content_markdown,updated_by=excluded.updated_by,
+		published_revision_id=excluded.published_revision_id,updated_at=now()`,
+		modID, registry, objectID, locale, markdown, nullableActorID(actorID), revisionID)
+	return err
+}
+
+func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, objectID string) ([]any, []any, error) {
 	produces := make([]any, 0, 8)
 	uses := make([]any, 0, 8)
-	for _, recipeRaw := range document.Recipes {
-		var recipe map[string]any
-		if json.Unmarshal(recipeRaw, &recipe) != nil {
-			continue
+	decorations := make([]map[string]any, 0, 16)
+	rows, err := s.db.Query(ctx, `with matches as (
+		select recipe_key,bool_or(role='output') produces,bool_or(role in ('input','catalyst')) uses
+		from mod_export_recipe_items where revision_id=$1 and item_id=$2 and ingredient_kind='item'
+		group by recipe_key limit 200)
+		select layout.recipe_id,layout.recipe_type_id,layout.compact_layout,matches.produces,matches.uses
+		from matches join lateral (
+			select recipe_id,recipe_type_id,compact_layout from mod_export_recipe_layouts
+			where revision_id=$1 and recipe_key=matches.recipe_key order by layout_path limit 1
+		) layout on true order by layout.recipe_id`, revisionID, objectID)
+	if err != nil {
+		return produces, uses, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var recipeID, recipeTypeID string
+		var raw json.RawMessage
+		var isProduced, isUsed bool
+		var layout map[string]any
+		if err = rows.Scan(&recipeID, &recipeTypeID, &raw, &isProduced, &isUsed); err != nil {
+			return produces, uses, err
 		}
-		if exportRecipeProduces(recipe, objectID) && len(produces) < 100 {
+		if err = json.Unmarshal(raw, &layout); err != nil {
+			return produces, uses, err
+		}
+		recipe := map[string]any{"id": recipeID, "type": recipeTypeID, "jeiLayout": layout}
+		decorations = append(decorations, map[string]any{"revisionId": revisionID, "layout": layout})
+		if isProduced && len(produces) < 100 {
 			produces = append(produces, recipe)
 		}
-		if exportRecipeUses(recipe, objectID) && len(uses) < 100 {
+		if isUsed && len(uses) < 100 {
 			uses = append(uses, recipe)
 		}
 	}
-	s.decorateModExportRecipeLayouts(ctx, revisionID, produces, uses)
-	return produces, uses
-}
-
-func (s *Server) decorateModExportRecipeLayouts(ctx context.Context, revisionID string, groups ...[]any) {
-	layoutPaths := make([]string, 0, 32)
-	recipeIDsByPath := make(map[string]string)
-	for _, group := range groups {
-		for _, value := range group {
-			recipe, _ := value.(map[string]any)
-			id, _ := recipe["id"].(string)
-			recipeType, _ := recipe["type"].(string)
-			if layoutPath := exportRecipeLayoutPath(recipeType, id); layoutPath != "" {
-				if _, exists := recipeIDsByPath[layoutPath]; !exists {
-					layoutPaths = append(layoutPaths, layoutPath)
-					recipeIDsByPath[layoutPath] = id
-				}
-			}
-		}
+	if err = rows.Err(); err != nil {
+		return produces, uses, err
 	}
-	if len(layoutPaths) == 0 {
-		return
+	if err = s.decorateGlobalRecipeTags(ctx, decorations); err != nil {
+		return produces, uses, err
 	}
-	rows, err := s.db.Query(ctx, `select asset_path,json_content from mod_export_text_assets
-		where revision_id=$1 and asset_path=any($2::text[])`, revisionID, layoutPaths)
-	if err != nil {
-		return
+	if err = s.decorateRecipeResources(ctx, decorations); err != nil {
+		return produces, uses, err
 	}
-	defer rows.Close()
-	layouts := make(map[string]map[string]any, len(layoutPaths))
-	for rows.Next() {
-		var assetPath string
-		var raw []byte
-		var layout map[string]any
-		if rows.Scan(&assetPath, &raw) != nil || json.Unmarshal(raw, &layout) != nil {
-			continue
-		}
-		id, _ := layout["recipe_id"].(string)
-		if id == "" {
-			id = recipeIDsByPath[assetPath]
-		}
-		if id != "" {
-			layouts[id] = layout
-		}
-	}
-	for _, group := range groups {
-		for _, value := range group {
-			recipe, _ := value.(map[string]any)
-			id, _ := recipe["id"].(string)
-			if layout := layouts[id]; layout != nil {
-				recipe["jeiLayout"] = layout
-			}
-		}
-	}
-}
-
-func exportRecipeLayoutPath(recipeType, recipeID string) string {
-	if recipeID == "" {
-		return ""
-	}
-	category := strings.TrimSpace(recipeType)
-	switch category {
-	case "minecraft:smelting":
-		category = "minecraft:furnace"
-	case "minecraft:campfire_cooking":
-		category = "minecraft:campfire"
-	}
-	parts := strings.SplitN(category, ":", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return ""
-	}
-	filePath := strings.Replace(recipeID, ":", "__", 1) + ".json"
-	return "recipes/jei/layouts/" + parts[0] + "/" + parts[1] + "/" + filePath
-}
-
-func exportRecipeProduces(recipe map[string]any, objectID string) bool {
-	result, _ := recipe["result"].(map[string]any)
-	item, _ := result["item"].(string)
-	return item == objectID
-}
-
-func exportRecipeUses(recipe map[string]any, objectID string) bool {
-	ingredients, _ := recipe["ingredients"].([]any)
-	for _, ingredientValue := range ingredients {
-		ingredient, _ := ingredientValue.(map[string]any)
-		alternatives, _ := ingredient["alternatives"].([]any)
-		for _, alternativeValue := range alternatives {
-			alternative, _ := alternativeValue.(map[string]any)
-			if item, _ := alternative["item"].(string); item == objectID {
-				return true
-			}
-		}
-	}
-	return false
+	return produces, uses, nil
 }
 
 func normalizeExportContentLocale(value string) string {
@@ -268,6 +273,35 @@ func exportDocumentSource(registry string) (assetPath, arrayKey string, ok bool)
 		return "advancements/advancements.json", "advancements", true
 	case "key_mappings":
 		return "registries/key_mappings.json", "entries", true
+	case "biomes":
+		return "worldgen/biomes.json", "biomes", true
+	case "dimensions":
+		return "worldgen/dimensions.json", "dimensions", true
+	case "world_structures":
+		return "worldgen/structures.json", "structures", true
+	case "loot_tables":
+		return "worldgen/loot_tables.json", "loot_tables", true
+	case "worldgen_data":
+		return "worldgen/data_files.json", "files", true
+	default:
+		return "", "", false
+	}
+}
+
+func exportCustomDocumentSource(registry string) (assetPath, entriesSQL string, ok bool) {
+	switch registry {
+	case "natural_generation":
+		return "worldgen/natural_generation.json", `select revision.mod_id from mod_export_revisions revision
+			join mod_export_text_assets asset on asset.revision_id=revision.id and asset.asset_path=$2
+			cross join lateral jsonb_array_elements(coalesce(asset.json_content->'categories','[]'::jsonb)) category(value)
+			cross join lateral jsonb_array_elements(coalesce(category.value->'entries','[]'::jsonb)) entry(value)
+			where revision.id=$1 and entry.value->>'id'=$3 limit 1`, true
+	case "ingredients":
+		return "ingredients/ingredients.json", `select revision.mod_id from mod_export_revisions revision
+			join mod_export_text_assets asset on asset.revision_id=revision.id and asset.asset_path=$2
+			cross join lateral jsonb_array_elements(coalesce(asset.json_content->'types','[]'::jsonb)) ingredient_type(value)
+			cross join lateral jsonb_array_elements(coalesce(ingredient_type.value->'entries','[]'::jsonb)) entry(value)
+			where revision.id=$1 and coalesce(entry.value->>'resource_location',entry.value->>'unique_id')=$3 limit 1`, true
 	default:
 		return "", "", false
 	}

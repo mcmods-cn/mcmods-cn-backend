@@ -98,6 +98,11 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer tx.Rollback(r.Context())
+	var baseRevisionID *int64
+	if err = tx.QueryRow(r.Context(), `select profile_revision_id from users where id=$1 for update`, claims.Subject).Scan(&baseRevisionID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock user profile")
+		return
+	}
 
 	if request.Signature != nil {
 		if _, err := tx.Exec(r.Context(), `update users set signature = $2, updated_at = now() where id = $1`, claims.Subject, *request.Signature); err != nil {
@@ -178,6 +183,47 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			avatarURL,
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存头像失败")
+			return
+		}
+	}
+	if request.Signature != nil || request.MessageReceive != nil || request.ClearAvatar || request.AvatarFileID != nil {
+		var signature, avatarURL string
+		var avatarFileID *int64
+		if err = tx.QueryRow(r.Context(), `select signature,avatar_url,avatar_file_id from users where id=$1`, claims.Subject).Scan(&signature, &avatarURL, &avatarFileID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read updated user profile")
+			return
+		}
+		var messageReceive bool
+		if err = tx.QueryRow(r.Context(), `select coalesce((select user_permission.allow from user_permissions user_permission
+			join permissions permission on permission.id=user_permission.permission_id
+			where user_permission.user_id=$1 and permission.code='user.message.receive' and (user_permission.expires_at is null or user_permission.expires_at>now())),false)`, claims.Subject).Scan(&messageReceive); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read updated message preference")
+			return
+		}
+		snapshot, marshalErr := json.Marshal(map[string]any{
+			"userId": claims.Subject, "signature": signature, "avatarUrl": avatarURL,
+			"avatarFileId": avatarFileID, "messageReceive": messageReceive,
+		})
+		if marshalErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to encode user profile revision")
+			return
+		}
+		created, createErr := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
+			AggregateType: "user_profile", AggregateKey: fmt.Sprintf("%d", claims.Subject),
+			BaseRevision: baseRevisionID, Snapshot: snapshot, Reason: "Update user profile settings",
+			ActorID: claims.Subject, Source: "user", Status: "approved",
+			Metadata: map[string]any{"userId": claims.Subject}, Request: r,
+		})
+		if createErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create user profile revision")
+			return
+		}
+		if _, err = tx.Exec(r.Context(), `update users set profile_revision_id=$2 where id=$1`, claims.Subject, created.RevisionID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to publish user profile revision")
+			return
+		}
+		if err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic profile approval", r); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record user profile revision")
 			return
 		}
 	}

@@ -7,6 +7,7 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/mailer"
+	"mcmods-cn-backend/internal/querycache"
 	"mcmods-cn-backend/internal/queue"
 )
 
@@ -15,6 +16,7 @@ type Server struct {
 	db     *pgxpool.Pool
 	mailer mailer.Mailer
 	queue  *queue.Client
+	cache  *querycache.Cache
 	mux    *http.ServeMux
 }
 
@@ -24,6 +26,7 @@ func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client) h
 		db:     db,
 		mailer: mailer.New(cfg.SMTP),
 		queue:  queueClient,
+		cache:  querycache.New(cfg.Redis),
 		mux:    http.NewServeMux(),
 	}
 	server.routes()
@@ -46,13 +49,24 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/location", s.visitorLocation)
 	s.mux.HandleFunc("GET /api/v1/markdown/config", s.publicMarkdownConfig)
 	s.mux.HandleFunc("GET /api/v1/minecraft/versions", s.publicMinecraftVersions)
+	s.mux.HandleFunc("GET /api/v1/mod-imports/providers", s.publicModImportProviders)
 	s.mux.HandleFunc("GET /api/v1/mods", s.optionalAuth(s.publicMods))
+	s.mux.HandleFunc("GET /api/v1/mod-tags", s.optionalAuth(s.globalModTags))
+	s.mux.HandleFunc("GET /api/v1/mod-tags/detail", s.optionalAuth(s.globalModTagDetail))
+	s.mux.HandleFunc("PUT /api/v1/mod-tags/detail", s.requireAuth(s.updateGlobalModTag))
+	s.mux.HandleFunc("GET /api/v1/recipe-types", s.optionalAuth(s.globalRecipeTypes))
+	s.mux.HandleFunc("GET /api/v1/recipe-types/detail", s.optionalAuth(s.globalRecipeTypeDetail))
+	s.mux.HandleFunc("PUT /api/v1/recipe-types/detail", s.requireAuth(s.updateGlobalRecipeType))
+	s.mux.HandleFunc("PUT /api/v1/recipes/{recipeKey}", s.requireAuth(s.updateGlobalRecipe))
 	s.mux.HandleFunc("GET /api/v1/mods/{siteId}", s.optionalAuth(s.publicModDetail))
 	s.mux.HandleFunc("POST /api/v1/mods", s.requirePermission("project.create", s.createMod))
+	s.mux.HandleFunc("POST /api/v1/mod-imports", s.requirePermission("project.create", s.createModMetadataImport))
+	s.mux.HandleFunc("GET /api/v1/mod-imports/{jobId}", s.requirePermission("project.create", s.getModMetadataImport))
 	s.mux.HandleFunc("GET /api/v1/mods/{siteId}/revisions", s.optionalAuth(s.modRevisionHistory))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/revisions", s.requireAuth(s.submitModRevision))
 	s.mux.HandleFunc("GET /api/v1/mods/{siteId}/revisions/compare", s.optionalAuth(s.compareModRevisions))
 	s.mux.HandleFunc("PATCH /api/v1/mods/{siteId}/revisions/{revisionId}", s.requirePermission("project.review", s.reviewModRevision))
+	s.mux.HandleFunc("PATCH /api/v1/content-revisions/{revisionId}", s.requirePermission("project.review", s.reviewContentRevision))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/export-imports/uploads/presign", s.requireAuth(s.createModExportUpload))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/export-imports/uploads/complete", s.requireAuth(s.completeModExportUpload))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/export-imports", s.requireAuth(s.createModExportJob))
@@ -63,6 +77,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/registries/{registry}", s.optionalAuth(s.modExportRegistry))
 	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/registry-entries", s.optionalAuth(s.modExportRegistryEntries))
 	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/document-entries", s.optionalAuth(s.modExportDocumentEntries))
+	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/tags", s.optionalAuth(s.modExportTags))
+	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/tag-detail", s.optionalAuth(s.modExportTagDetail))
 	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/entry-detail", s.optionalAuth(s.modExportEntryDetail))
 	s.mux.HandleFunc("PUT /api/v1/mods/{siteId}/export-entry-content", s.requireAuth(s.updateModExportEntryContent))
 	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/assets", s.optionalAuth(s.modExportAssetIndex))
@@ -113,6 +129,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/admin/config/oauth", s.requirePermission("admin.config.write", s.updateOAuthConfig))
 	s.mux.HandleFunc("GET /api/v1/admin/config/nats", s.requirePermission("admin.config.read", s.getNATSConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/nats", s.requirePermission("admin.config.write", s.updateNATSConfig))
+	s.mux.HandleFunc("GET /api/v1/admin/config/mod-imports", s.requirePermission("admin.config.read", s.getModImportConfig))
+	s.mux.HandleFunc("PUT /api/v1/admin/config/mod-imports", s.requirePermission("admin.config.write", s.updateModImportConfig))
 	s.mux.HandleFunc("GET /api/v1/admin/config/oss", s.requirePermission("oss.read", s.getOSSConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/oss", s.requirePermission("oss.write", s.updateOSSConfig))
 	s.mux.HandleFunc("POST /api/v1/admin/mail/test", s.requirePermission("mail.write", s.sendTestMail))

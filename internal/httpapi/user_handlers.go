@@ -68,7 +68,7 @@ func (s *Server) saveMarkdownPlaygroundDraft(w http.ResponseWriter, r *http.Requ
 func (s *Server) userOSSFiles(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	cfg := s.ossConfigFromSettings(r.Context())
-	userPrefix := path.Join(cfg.Prefix, "user", strconv.FormatInt(claims.Subject, 10)) + "/%"
+	userPrefix := path.Join(cfg.Prefix, "users", strconv.FormatInt(claims.Subject, 10)) + "/%"
 	limit := boundedLimit(r.URL.Query().Get("limit"), 100, 500)
 	rows, err := s.db.Query(
 		r.Context(),
@@ -106,7 +106,7 @@ func (s *Server) userOSSFiles(w http.ResponseWriter, r *http.Request) {
 func (s *Server) userOSSFileQuota(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	cfg := s.ossConfigFromSettings(r.Context())
-	userPrefix := path.Join(cfg.Prefix, "user", strconv.FormatInt(claims.Subject, 10)) + "/%"
+	userPrefix := path.Join(cfg.Prefix, "users", strconv.FormatInt(claims.Subject, 10)) + "/%"
 	var dailySourceUsed, dailyStoredUsed, totalSourceUsed, totalStoredUsed int64
 	_ = s.db.QueryRow(
 		r.Context(),
@@ -160,7 +160,7 @@ func (s *Server) presignUserOSSFile(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	cfg := s.ossConfigFromSettings(r.Context())
 	req.ObjectKey = strings.TrimSpace(req.ObjectKey)
-	if req.ObjectKey == "" || !isAllowedObjectKey(req.ObjectKey, path.Join(cfg.Prefix, "user", strconv.FormatInt(claims.Subject, 10))) {
+	if req.ObjectKey == "" || !isAllowedObjectKey(req.ObjectKey, path.Join(cfg.Prefix, "users", strconv.FormatInt(claims.Subject, 10))) {
 		writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于用户文件目录")
 		return
 	}
@@ -186,7 +186,7 @@ func (s *Server) deleteUserOSSFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.ObjectKey = strings.TrimSpace(req.ObjectKey)
-	userPrefix := path.Join(cfg.Prefix, "user", strconv.FormatInt(claims.Subject, 10))
+	userPrefix := path.Join(cfg.Prefix, "users", strconv.FormatInt(claims.Subject, 10))
 	if req.ObjectKey == "" || !isAllowedObjectKey(req.ObjectKey, userPrefix) {
 		writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于用户文件目录")
 		return
@@ -222,18 +222,28 @@ func normalizeOSSUserCategory(category string, source string) string {
 	category = normalizeObjectSegment(category)
 	source = normalizeObjectSegment(source)
 	switch category {
-	case "comment", ossUserCommentCategory:
+	case "comment", "comments", ossUserCommentCategory:
 		return ossUserCommentCategory
 	case "playground", "markdown", ossUserPlaygroundCategory:
 		return ossUserPlaygroundCategory
+	case "avatar", "avatars":
+		return "users/avatars"
+	case "message", "messages":
+		return "users/messages"
 	}
-	if source == "comment" {
+	if source == "comment" || source == "comments" {
 		return ossUserCommentCategory
 	}
 	if source == "playground" || source == "markdown" {
 		return ossUserPlaygroundCategory
 	}
-	return path.Join("user", defaultString(category, "misc"))
+	if source == "avatar" || source == "avatars" {
+		return "users/avatars"
+	}
+	if source == "message" || source == "messages" {
+		return "users/messages"
+	}
+	return path.Join("users", defaultString(category, "misc"))
 }
 
 func quotaLimitValue(value int64) int64 {

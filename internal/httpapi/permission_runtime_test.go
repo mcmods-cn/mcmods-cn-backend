@@ -12,7 +12,7 @@ import (
 
 func TestOSSFileRecordExposesConversionDetails(t *testing.T) {
 	record := ossFileRecord(
-		1, "bucket", "endpoint", "region", "mcmods/user/1/playground/id.webp", "user/playground", "playground",
+		1, "bucket", "endpoint", "region", "mcmods/users/1/playground/id.webp", "users/playground", "playground",
 		"image.webp", "image.png", "image/webp", 70, 158, "hash", "active", "pending", time.Time{}, time.Time{},
 	)
 	if record["converted"] != true {
@@ -75,12 +75,12 @@ func TestShouldPersistMarkdownImageAsWebP(t *testing.T) {
 		category    string
 		want        bool
 	}{
-		{name: "playground png", original: "image.png", contentType: "image/png", source: "playground", category: "user/playground", want: true},
-		{name: "comment jpeg", original: "photo.jpg", contentType: "image/jpeg", source: "comment", category: "user/comment", want: true},
-		{name: "project intro", original: "cover.jpeg", contentType: "image/jpeg", category: "project/42/intro", want: true},
-		{name: "avatar remains original", original: "avatar.png", contentType: "image/png", source: "avatar", category: "user/avatar", want: false},
-		{name: "webp remains original", original: "image.webp", contentType: "image/webp", source: "playground", category: "user/playground", want: false},
-		{name: "non image remains original", original: "notes.png", contentType: "text/plain", source: "playground", category: "user/playground", want: false},
+		{name: "playground png", original: "image.png", contentType: "image/png", source: "playground", category: "users/playground", want: true},
+		{name: "comment jpeg", original: "photo.jpg", contentType: "image/jpeg", source: "comment", category: "users/comments", want: true},
+		{name: "project description", original: "cover.jpeg", contentType: "image/jpeg", category: "projects/42/description", want: true},
+		{name: "avatar remains original", original: "avatar.png", contentType: "image/png", source: "avatar", category: "users/avatars", want: false},
+		{name: "webp remains original", original: "image.webp", contentType: "image/webp", source: "playground", category: "users/playground", want: false},
+		{name: "non image remains original", original: "notes.png", contentType: "text/plain", source: "playground", category: "users/playground", want: false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

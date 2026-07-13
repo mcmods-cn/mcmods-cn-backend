@@ -27,6 +27,15 @@ func Run() {
 	}
 	defer db.Close()
 
+	if cfg.DB.ResetOnStart {
+		if cfg.Env != "development" {
+			log.Fatal("DB_RESET_ON_START is only allowed when APP_ENV=development")
+		}
+		if err := database.ResetDevelopmentSchema(ctx, db); err != nil {
+			log.Fatalf("reset development database: %v", err)
+		}
+		log.Print("development database schema reset completed")
+	}
 	if err := database.Migrate(ctx, db); err != nil {
 		log.Fatalf("migrate database: %v", err)
 	}
@@ -53,7 +62,10 @@ func Run() {
 	if err := modExportWorker.Start(); err != nil {
 		log.Printf("mcmods_exporter import worker unavailable; API fallback remains enabled: %v", err)
 	}
-
+	modMetadataWorker := httpapi.NewModMetadataImportWorker(cfg, db, queueClient)
+	if err := modMetadataWorker.Start(ctx); err != nil {
+		log.Printf("mod metadata import worker unavailable: %v", err)
+	}
 	server := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           httpapi.NewServer(cfg, db, queueClient),

@@ -20,16 +20,18 @@ type Config struct {
 	DB             DBConfig
 	SMTP           SMTPConfig
 	NATS           NATSConfig
+	Redis          RedisConfig
 }
 
 type DBConfig struct {
-	Host     string
-	Port     string
-	Name     string
-	User     string
-	Password string
-	SSLMode  string
-	URL      string
+	Host         string
+	Port         string
+	Name         string
+	User         string
+	Password     string
+	SSLMode      string
+	URL          string
+	ResetOnStart bool
 }
 
 type SMTPConfig struct {
@@ -51,6 +53,16 @@ type NATSConfig struct {
 	Tasks         []NATSTaskConfig `json:"tasks"`
 }
 
+type RedisConfig struct {
+	Enabled  bool
+	Addr     string
+	Username string
+	Password string
+	DB       int
+	Prefix   string
+	TTL      time.Duration
+}
+
 type NATSTaskConfig struct {
 	Code           string `json:"code"`
 	Enabled        bool   `json:"enabled"`
@@ -70,13 +82,14 @@ func Load() Config {
 		JWTSecret:      getenv("JWT_SECRET", "change-this-in-production"),
 		JWTTTL:         time.Duration(getenvInt("JWT_TTL_HOURS", 24)) * time.Hour,
 		DB: DBConfig{
-			Host:     getenv("DB_HOST", "127.0.0.1"),
-			Port:     getenv("DB_PORT", "5432"),
-			Name:     getenv("DB_NAME", "mcmods"),
-			User:     getenv("DB_USER", "mcmods"),
-			Password: os.Getenv("DB_PASSWORD"),
-			SSLMode:  getenv("DB_SSLMODE", "disable"),
-			URL:      os.Getenv("DATABASE_URL"),
+			Host:         getenv("DB_HOST", "127.0.0.1"),
+			Port:         getenv("DB_PORT", "5432"),
+			Name:         getenv("DB_NAME", "mcmods"),
+			User:         getenv("DB_USER", "mcmods"),
+			Password:     os.Getenv("DB_PASSWORD"),
+			SSLMode:      getenv("DB_SSLMODE", "disable"),
+			URL:          os.Getenv("DATABASE_URL"),
+			ResetOnStart: getenvBool("DB_RESET_ON_START", false),
 		},
 		SMTP: SMTPConfig{
 			Host:     os.Getenv("SMTP_HOST"),
@@ -111,6 +124,15 @@ func Load() Config {
 					TimeoutSeconds: 300,
 				},
 			},
+		},
+		Redis: RedisConfig{
+			Enabled:  getenvBool("REDIS_ENABLED", false),
+			Addr:     getenv("REDIS_ADDR", "127.0.0.1:6379"),
+			Username: os.Getenv("REDIS_USERNAME"),
+			Password: os.Getenv("REDIS_PASSWORD"),
+			DB:       getenvInt("REDIS_DB", 0),
+			Prefix:   getenv("REDIS_PREFIX", "mcmods:query:"),
+			TTL:      time.Duration(getenvInt("REDIS_QUERY_TTL_SECONDS", 120)) * time.Second,
 		},
 	}
 }

@@ -1,12 +1,6 @@
 package database
 
-import (
-	"context"
-
-	"github.com/jackc/pgx/v5/pgxpool"
-)
-
-func Migrate(ctx context.Context, db *pgxpool.Pool) error {
+func baselineSchemaStatements() []string {
 	statements := []string{
 		`create table if not exists users (
 			id bigserial primary key,
@@ -647,6 +641,24 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			primary key (revision_id, registry, object_id)
 		)`,
 		`create index if not exists idx_mod_export_registry_object on mod_export_registry_entries(object_id)`,
+		`create table if not exists mod_export_tags (
+			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			registry text not null,
+			tag_id text not null,
+			member_count integer not null default 0,
+			primary key (revision_id, registry, tag_id)
+		)`,
+		`create index if not exists idx_mod_export_tags_revision_registry on mod_export_tags(revision_id, registry, tag_id)`,
+		`create table if not exists mod_export_tag_members (
+			revision_id text not null,
+			registry text not null,
+			tag_id text not null,
+			member_id text not null,
+			ordinal integer not null,
+			primary key (revision_id, registry, tag_id, member_id),
+			foreign key (revision_id, registry, tag_id) references mod_export_tags(revision_id, registry, tag_id) on delete cascade
+		)`,
+		`create index if not exists idx_mod_export_tag_members_member on mod_export_tag_members(revision_id, member_id)`,
 		`create table if not exists mod_export_text_assets (
 			revision_id text not null references mod_export_revisions(id) on delete cascade,
 			asset_path text not null,
@@ -659,6 +671,25 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			primary key (revision_id, asset_path),
 			check ((text_content is not null)::integer + (json_content is not null)::integer = 1)
 		)`,
+		`insert into mod_export_tags(revision_id,registry,tag_id,member_count)
+		 select a.revision_id,registry.value->>'registry',tag.value->>'id',jsonb_array_length(coalesce(tag.value->'values','[]'::jsonb))
+		 from mod_export_text_assets a
+		 cross join lateral jsonb_array_elements(coalesce(a.json_content->'registries','[]'::jsonb)) registry(value)
+		 cross join lateral jsonb_array_elements(coalesce(registry.value->'tags','[]'::jsonb)) tag(value)
+		 where a.asset_path='tags/tags.json'
+		   and not exists(select 1 from mod_export_tags existing where existing.revision_id=a.revision_id)
+		   and registry.value->>'registry'<>'' and tag.value->>'id'<>''
+		 on conflict(revision_id,registry,tag_id) do nothing`,
+		`insert into mod_export_tag_members(revision_id,registry,tag_id,member_id,ordinal)
+		 select a.revision_id,registry.value->>'registry',tag.value->>'id',member.value,(member.ordinality-1)::integer
+		 from mod_export_text_assets a
+		 cross join lateral jsonb_array_elements(coalesce(a.json_content->'registries','[]'::jsonb)) registry(value)
+		 cross join lateral jsonb_array_elements(coalesce(registry.value->'tags','[]'::jsonb)) tag(value)
+		 cross join lateral jsonb_array_elements_text(coalesce(tag.value->'values','[]'::jsonb)) with ordinality as member(value,ordinality)
+		 where a.asset_path='tags/tags.json'
+		   and not exists(select 1 from mod_export_tag_members existing where existing.revision_id=a.revision_id)
+		   and registry.value->>'registry'<>'' and tag.value->>'id'<>''
+		 on conflict(revision_id,registry,tag_id,member_id) do nothing`,
 		`create table if not exists mod_export_binary_assets (
 			id text primary key,
 			revision_id text not null references mod_export_revisions(id) on delete cascade,
@@ -725,12 +756,26 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 			last_error text not null default ''
 		)`,
 		`create index if not exists idx_nats_outbox_pending on nats_outbox(created_at) where published_at is null`,
+		`create table if not exists mod_metadata_import_jobs (
+			id text primary key,
+			user_id bigint not null references users(id) on delete cascade,
+			provider text not null,
+			source_url text not null,
+			status text not null default 'queued',
+			progress integer not null default 0,
+			result jsonb,
+			error text not null default '',
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			started_at timestamptz,
+			finished_at timestamptz,
+			check (provider in ('modrinth','curseforge','github')),
+			check (status in ('queued','running','completed','failed')),
+			check (progress between 0 and 100)
+		)`,
+		`create index if not exists idx_mod_metadata_import_jobs_user_created on mod_metadata_import_jobs(user_id, created_at desc)`,
+		`create index if not exists idx_mod_metadata_import_jobs_queued on mod_metadata_import_jobs(created_at) where status='queued'`,
 	}
 
-	for _, statement := range statements {
-		if _, err := db.Exec(ctx, statement); err != nil {
-			return err
-		}
-	}
-	return nil
+	return statements
 }

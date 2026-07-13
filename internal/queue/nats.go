@@ -78,6 +78,14 @@ func DefaultTaskConfigs() []config.NATSTaskConfig {
 			MaxConcurrent:  2,
 			TimeoutSeconds: 3600,
 		},
+		{
+			Code:           "mod_metadata_import",
+			Enabled:        true,
+			Subject:        "mods.metadata.import",
+			QueueGroup:     "mcmods-mod-metadata-import-workers",
+			MaxConcurrent:  4,
+			TimeoutSeconds: 180,
+		},
 	}
 }
 

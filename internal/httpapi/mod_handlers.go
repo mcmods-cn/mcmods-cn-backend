@@ -102,6 +102,7 @@ type modResponse struct {
 	CreatedAt           time.Time                       `json:"createdAt"`
 	UpdatedAt           time.Time                       `json:"updatedAt"`
 	PublishedAt         *time.Time                      `json:"publishedAt,omitempty"`
+	PublishedRevisionID *int64                          `json:"publishedRevisionId,omitempty"`
 	Tags                []string                        `json:"tags"`
 	Authors             []modAuthorPayload              `json:"authors"`
 	Links               []modLinkPayload                `json:"links"`
@@ -173,6 +174,14 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "生成模组唯一 ID 失败")
 		return
 	}
+	if req.IconURL != "" && req.SubmissionMethod != "manual" {
+		mirroredIconURL, mirrorErr := s.mirrorExternalModIcon(r.Context(), req.IconURL, uniqueID, claims.Subject)
+		if mirrorErr != nil {
+			writeError(w, http.StatusBadGateway, "failed to store imported mod icon")
+			return
+		}
+		req.IconURL = mirroredIconURL
+	}
 	var modID int64
 	err = tx.QueryRow(
 		r.Context(),
@@ -232,11 +241,16 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "生成审核快照失败")
 		return
 	}
-	if _, err = tx.Exec(
-		r.Context(),
-		`insert into mod_revisions (mod_id, version, status, snapshot, submitted_by) values ($1, 1, 'pending', $2, $3)`,
-		modID, snapshot, claims.Subject,
-	); err != nil {
+	if _, err = createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
+		AggregateType: "mod",
+		AggregateKey:  strconv.FormatInt(modID, 10),
+		Snapshot:      snapshot,
+		ActorID:       claims.Subject,
+		Source:        req.SubmissionMethod,
+		Status:        "pending",
+		Metadata:      map[string]any{"modId": modID, "siteId": req.SiteID, "initial": true},
+		Request:       r,
+	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存审核版本失败")
 		return
 	}
@@ -278,7 +292,7 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		`select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, mod_id, environment, primary_category,
 		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, icon_url,
-		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders
+		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders, published_revision_id
 		 from mods m
 		 where (m.review_status = 'approved' or m.created_by = $1)
 		   and ($2 = '' or m.slug ilike '%' || $2 || '%' or m.project_code ilike '%' || $2 || '%' or m.primary_name ilike '%' || $2 || '%' or m.secondary_name ilike '%' || $2 || '%'
@@ -343,7 +357,7 @@ func scanMod(row scanner) (modResponse, error) {
 		&mod.ID, &mod.UniqueID, &mod.SiteID, &mod.PrimaryName, &mod.SecondaryName, &mod.Abbreviation, &mod.Summary, &mod.ModID,
 		&mod.Environment, &mod.PrimaryCategory, &mod.OfficialStatus, &mod.SourceStatus, &mod.License,
 		&mod.CurseForgeProjectID, &mod.ModrinthProjectID, &mod.IconURL, &mod.BodyMarkdown, &mod.SearchKeywords,
-		&mod.SubmissionMethod, &mod.ReviewStatus, &mod.CreatedBy, &mod.CreatedAt, &mod.UpdatedAt, &mod.PublishedAt, &mod.SupportedVersions, &mod.SupportedLoaders,
+		&mod.SubmissionMethod, &mod.ReviewStatus, &mod.CreatedBy, &mod.CreatedAt, &mod.UpdatedAt, &mod.PublishedAt, &mod.SupportedVersions, &mod.SupportedLoaders, &mod.PublishedRevisionID,
 	)
 	mod.Tags = []string{}
 	mod.Authors = []modAuthorPayload{}
@@ -358,7 +372,7 @@ func (s *Server) modByID(ctx context.Context, id int64, viewerID int64) (modResp
 		ctx,
 		`select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, mod_id, environment, primary_category,
 		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, icon_url,
-		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders
+		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders, published_revision_id
 		 from mods where id = $1 and (review_status = 'approved' or created_by = $2)`,
 		id, viewerID,
 	)
@@ -375,7 +389,7 @@ func (s *Server) modBySiteID(ctx context.Context, siteID string, viewerID int64)
 		ctx,
 		`select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, mod_id, environment, primary_category,
 		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, icon_url,
-		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders
+		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders, published_revision_id
 		 from mods where slug = $1 and (review_status = 'approved' or created_by = $2)`,
 		siteID, viewerID,
 	)
