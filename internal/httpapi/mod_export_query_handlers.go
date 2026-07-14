@@ -84,15 +84,14 @@ func (s *Server) modExportRegistry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	registry := strings.ToLower(strings.TrimSpace(r.PathValue("registry")))
-	rows, err := s.db.Query(r.Context(),
-		`select e.object_id,e.namespace,e.object_path,e.translation_key,e.names,e.data,
-		 coalesce(icon128.asset_path,icon64.asset_path,icon32.asset_path,'')
-		 from mod_export_registry_entries e
-		 left join mod_export_media icon128 on icon128.revision_id=e.revision_id and icon128.asset_path=concat('icons/',e.registry,'/128/',e.namespace,'/',e.object_path,'.png')
-		 left join mod_export_media icon64 on icon64.revision_id=e.revision_id and icon64.asset_path=concat('icons/',e.registry,'/64/',e.namespace,'/',e.object_path,'.png')
-		 left join mod_export_media icon32 on icon32.revision_id=e.revision_id and icon32.asset_path=concat('icons/',e.registry,'/32/',e.namespace,'/',e.object_path,'.png')
-		 where e.revision_id=$1 and e.registry=$2 order by e.object_id`,
-		r.PathValue("revisionId"), registry)
+	rows, err := s.db.Query(r.Context(), `select resource.entity_id,entity.public_id,resource.canonical_id,
+		resource.namespace,resource.resource_path,snapshot.translation_key,snapshot.names,snapshot.data,
+		snapshot.icon_path,snapshot.preview_path
+		from game_resource_snapshots snapshot
+		join game_resources resource on resource.entity_id=snapshot.resource_id
+		join catalog_entities entity on entity.id=resource.entity_id
+		where snapshot.revision_id=$1 and snapshot.registry=$2
+		order by resource.canonical_id`, r.PathValue("revisionId"), registry)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read registry")
 		return
@@ -100,13 +99,15 @@ func (s *Server) modExportRegistry(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var objectID, namespace, objectPath, translationKey, iconPath string
+		var entityID, publicID, objectID, namespace, objectPath, translationKey, iconPath, previewPath string
 		var names, data []byte
-		if err = rows.Scan(&objectID, &namespace, &objectPath, &translationKey, &names, &data, &iconPath); err != nil {
+		if err = rows.Scan(&entityID, &publicID, &objectID, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode registry")
 			return
 		}
-		item := map[string]any{"id": objectID, "registry": registry, "namespace": namespace, "path": objectPath, "translationKey": translationKey, "iconPath": iconPath}
+		item := map[string]any{"entityId": entityID, "publicId": publicID, "id": objectID, "registry": registry,
+			"namespace": namespace, "path": objectPath, "translationKey": translationKey,
+			"iconPath": iconPath, "previewPath": previewPath}
 		item["names"] = jsonValue(names)
 		item["data"] = jsonValue(data)
 		items = append(items, item)
@@ -136,6 +137,7 @@ func (s *Server) modExportRegistryEntries(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "at least one registry is required")
 		return
 	}
+	canonicalItemsAndBlocks := seen["items"] && seen["blocks"]
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	locale := normalizeExportContentLocale(r.URL.Query().Get("locale"))
 	limit := boundedLimit(r.URL.Query().Get("limit"), 80, 100)
@@ -146,45 +148,42 @@ func (s *Server) modExportRegistryEntries(w http.ResponseWriter, r *http.Request
 	summaryOnly := r.URL.Query().Get("summary") == "1"
 	var total int
 	err := s.db.QueryRow(r.Context(), `
-		select count(*)::int from mod_export_registry_entries e
-		where e.revision_id=$1 and e.registry=any($2::text[])
-		  and ($3='' or e.object_id ilike '%' || $3 || '%' or e.names::text ilike '%' || $3 || '%')`,
-		revisionID, registries, query).Scan(&total)
+		select count(*)::int
+		from game_resource_snapshots snapshot
+		join game_resources resource on resource.entity_id=snapshot.resource_id
+		where snapshot.revision_id=$1 and snapshot.registry=any($2::text[])
+		  and ($3='' or resource.canonical_id ilike '%' || $3 || '%' or snapshot.names::text ilike '%' || $3 || '%')
+		  and (not $4 or snapshot.registry<>'items' or not exists(
+			select 1 from game_resource_asset_bindings binding
+			join game_resource_snapshots block_snapshot on block_snapshot.id=binding.snapshot_id
+			where binding.item_resource_id=resource.entity_id and block_snapshot.revision_id=snapshot.revision_id
+		  ))`,
+		revisionID, registries, query, canonicalItemsAndBlocks).Scan(&total)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count registry entries")
 		return
 	}
 	if summaryOnly {
-		s.writeModExportRegistryEntrySummaries(w, r, revisionID, registries, query, locale, total, limit, offset)
+		s.writeModExportRegistryEntrySummaries(w, r, revisionID, registries, query, locale, total, limit, offset, canonicalItemsAndBlocks)
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `
-		select e.object_id,e.registry,e.namespace,e.object_path,e.translation_key,
-			jsonb_strip_nulls(jsonb_build_object('zh_cn',e.names->>'zh_cn','en_us',e.names->>'en_us',$6::text,e.names->>($6::text))),e.data-'names',
-		 coalesce(icon32.asset_path,''),coalesce(preview256.asset_path,icon128.asset_path,icon32.asset_path,'')
-		from mod_export_registry_entries e
-		left join mod_export_media icon32 on icon32.revision_id=e.revision_id and icon32.asset_path=case e.registry
-			when 'items' then concat('icons/items/32/',e.namespace,'/',e.object_path,'.png')
-			when 'blocks' then concat('icons/blocks/32/',e.namespace,'/',e.object_path,'.png')
-			when 'entity_types' then concat('entities/renders/32/',e.namespace,'/',e.object_path,'.png')
-			when 'mob_effects' then concat('icons/mob_effects/32/',e.namespace,'/',e.object_path,'.png')
-			else '' end
-		left join mod_export_media icon128 on icon128.revision_id=e.revision_id and icon128.asset_path=case e.registry
-			when 'items' then concat('icons/items/128/',e.namespace,'/',e.object_path,'.png')
-			when 'blocks' then concat('icons/blocks/128/',e.namespace,'/',e.object_path,'.png')
-			when 'entity_types' then concat('entities/renders/128/',e.namespace,'/',e.object_path,'.png')
-			when 'mob_effects' then concat('icons/mob_effects/128/',e.namespace,'/',e.object_path,'.png')
-			else '' end
-		left join mod_export_media preview256 on preview256.revision_id=e.revision_id and preview256.asset_path=case e.registry
-			when 'items' then concat('icons/items/256/',e.namespace,'/',e.object_path,'.png')
-			when 'blocks' then concat('icons/blocks/256/',e.namespace,'/',e.object_path,'.png')
-			when 'entity_types' then concat('entities/renders/256/',e.namespace,'/',e.object_path,'.png')
-			when 'mob_effects' then concat('icons/mob_effects/256/',e.namespace,'/',e.object_path,'.png')
-			else '' end
-		where e.revision_id=$1 and e.registry=any($2::text[])
-		  and ($3='' or e.object_id ilike '%' || $3 || '%' or e.names::text ilike '%' || $3 || '%')
-		order by e.object_id,e.registry limit $4 offset $5`,
-		revisionID, registries, query, limit, offset, locale)
+		select resource.entity_id,entity.public_id,resource.canonical_id,snapshot.registry,
+			resource.namespace,resource.resource_path,snapshot.translation_key,
+			jsonb_strip_nulls(jsonb_build_object('zh_cn',snapshot.names->>'zh_cn','en_us',snapshot.names->>'en_us',$6::text,snapshot.names->>($6::text))),
+			snapshot.data-'names',snapshot.icon_path,snapshot.preview_path
+		from game_resource_snapshots snapshot
+		join game_resources resource on resource.entity_id=snapshot.resource_id
+		join catalog_entities entity on entity.id=resource.entity_id
+		where snapshot.revision_id=$1 and snapshot.registry=any($2::text[])
+		  and ($3='' or resource.canonical_id ilike '%' || $3 || '%' or snapshot.names::text ilike '%' || $3 || '%')
+		  and (not $7 or snapshot.registry<>'items' or not exists(
+			select 1 from game_resource_asset_bindings binding
+			join game_resource_snapshots block_snapshot on block_snapshot.id=binding.snapshot_id
+			where binding.item_resource_id=resource.entity_id and block_snapshot.revision_id=snapshot.revision_id
+		  ))
+		order by resource.canonical_id,snapshot.registry limit $4 offset $5`,
+		revisionID, registries, query, limit, offset, locale, canonicalItemsAndBlocks)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read registry entries")
 		return
@@ -192,52 +191,50 @@ func (s *Server) modExportRegistryEntries(w http.ResponseWriter, r *http.Request
 	defer rows.Close()
 	items := make([]map[string]any, 0, limit)
 	for rows.Next() {
-		var objectID, registry, namespace, objectPath, translationKey, iconPath, previewPath string
+		var entityID, publicID, objectID, registry, namespace, objectPath, translationKey, iconPath, previewPath string
 		var names, data []byte
-		if err = rows.Scan(&objectID, &registry, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); err != nil {
+		if err = rows.Scan(&entityID, &publicID, &objectID, &registry, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode registry entry")
 			return
 		}
 		items = append(items, map[string]any{
-			"id": objectID, "registry": registry, "namespace": namespace, "path": objectPath,
+			"entityId": entityID, "publicId": publicID, "id": objectID, "registry": registry, "namespace": namespace, "path": objectPath,
 			"translationKey": translationKey, "iconPath": iconPath, "previewPath": previewPath, "names": jsonValue(names), "data": jsonValue(data),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
 }
 
-func (s *Server) writeModExportRegistryEntrySummaries(w http.ResponseWriter, r *http.Request, revisionID string, registries []string, query, locale string, total, limit, offset int) {
-	cacheKey := fmt.Sprintf("export-registry-summary:v2:%s:%s:%s:%s:%d:%d", revisionID, strings.Join(registries, ","), query, locale, limit, offset)
+func (s *Server) writeModExportRegistryEntrySummaries(w http.ResponseWriter, r *http.Request, revisionID string, registries []string, query, locale string, total, limit, offset int, canonicalItemsAndBlocks bool) {
+	cacheKey := fmt.Sprintf("export-registry-summary:v5:%s:%s:%s:%s:%d:%d:%t", revisionID, strings.Join(registries, ","), query, locale, limit, offset, canonicalItemsAndBlocks)
 	payload, err := s.cache.GetOrLoad(r.Context(), cacheKey, func(ctx context.Context) ([]byte, error) {
-		rows, loadErr := s.db.Query(ctx, `select e.object_id,e.registry,e.namespace,e.object_path,e.translation_key,
-		jsonb_strip_nulls(jsonb_build_object('zh_cn',e.names->>'zh_cn','en_us',e.names->>'en_us',$6::text,e.names->>($6::text))),
-		'{}'::jsonb,
-		case e.registry
-			when 'items' then concat('icons/items/32/',e.namespace,'/',e.object_path,'.png')
-			when 'blocks' then concat('icons/blocks/32/',e.namespace,'/',e.object_path,'.png')
-			when 'entity_types' then concat('entities/renders/32/',e.namespace,'/',e.object_path,'.png')
-			when 'mob_effects' then concat('icons/mob_effects/32/',e.namespace,'/',e.object_path,'.png') else '' end,
-		case e.registry
-			when 'items' then concat('icons/items/256/',e.namespace,'/',e.object_path,'.png')
-			when 'blocks' then concat('icons/blocks/256/',e.namespace,'/',e.object_path,'.png')
-			when 'entity_types' then concat('entities/renders/256/',e.namespace,'/',e.object_path,'.png')
-			when 'mob_effects' then concat('icons/mob_effects/256/',e.namespace,'/',e.object_path,'.png') else '' end
-		from mod_export_registry_entries e
-		where e.revision_id=$1 and e.registry=any($2::text[])
-		  and ($3='' or e.object_id ilike '%' || $3 || '%' or e.names::text ilike '%' || $3 || '%')
-		order by e.object_id,e.registry limit $4 offset $5`, revisionID, registries, query, limit, offset, locale)
+		rows, loadErr := s.db.Query(ctx, `select resource.entity_id,entity.public_id,resource.canonical_id,snapshot.registry,
+		resource.namespace,resource.resource_path,snapshot.translation_key,
+		jsonb_strip_nulls(jsonb_build_object('zh_cn',snapshot.names->>'zh_cn','en_us',snapshot.names->>'en_us',$6::text,snapshot.names->>($6::text))),
+		'{}'::jsonb,snapshot.icon_path,snapshot.preview_path
+		from game_resource_snapshots snapshot
+		join game_resources resource on resource.entity_id=snapshot.resource_id
+		join catalog_entities entity on entity.id=resource.entity_id
+		where snapshot.revision_id=$1 and snapshot.registry=any($2::text[])
+		  and ($3='' or resource.canonical_id ilike '%' || $3 || '%' or snapshot.names::text ilike '%' || $3 || '%')
+		  and (not $7 or snapshot.registry<>'items' or not exists(
+			select 1 from game_resource_asset_bindings binding
+			join game_resource_snapshots block_snapshot on block_snapshot.id=binding.snapshot_id
+			where binding.item_resource_id=resource.entity_id and block_snapshot.revision_id=snapshot.revision_id
+		  ))
+		order by resource.canonical_id,snapshot.registry limit $4 offset $5`, revisionID, registries, query, limit, offset, locale, canonicalItemsAndBlocks)
 		if loadErr != nil {
 			return nil, loadErr
 		}
 		defer rows.Close()
 		items := make([]map[string]any, 0, limit)
 		for rows.Next() {
-			var objectID, registry, namespace, objectPath, translationKey, iconPath, previewPath string
+			var entityID, publicID, objectID, registry, namespace, objectPath, translationKey, iconPath, previewPath string
 			var names, data []byte
-			if loadErr = rows.Scan(&objectID, &registry, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); loadErr != nil {
+			if loadErr = rows.Scan(&entityID, &publicID, &objectID, &registry, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); loadErr != nil {
 				return nil, loadErr
 			}
-			items = append(items, map[string]any{"id": objectID, "registry": registry, "namespace": namespace, "path": objectPath,
+			items = append(items, map[string]any{"entityId": entityID, "publicId": publicID, "id": objectID, "registry": registry, "namespace": namespace, "path": objectPath,
 				"translationKey": translationKey, "iconPath": iconPath, "previewPath": previewPath, "names": jsonValue(names), "data": jsonValue(data)})
 		}
 		if loadErr = rows.Err(); loadErr != nil {
@@ -273,42 +270,54 @@ func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request
 	}
 	offset := boundedOffset(r.URL.Query().Get("offset"))
 	summaryOnly := r.URL.Query().Get("summary") == "1"
-	cacheKey := fmt.Sprintf("export-document:v3:%s:%s:%s:%s:%d:%d:%t", revisionID, kind, query, locale, limit, offset, summaryOnly)
+	cacheKey := fmt.Sprintf("export-document:v5:%s:%s:%s:%s:%d:%d:%t", revisionID, kind, query, locale, limit, offset, summaryOnly)
 	payload, err := s.cache.GetOrLoad(r.Context(), cacheKey, func(ctx context.Context) ([]byte, error) {
 		var total int
-		if loadErr := s.db.QueryRow(ctx, `select count(*)::int from mod_export_document_entries
-			where revision_id=$1 and kind=$2 and ($3='' or entry_id ilike '%' || $3 || '%' or names::text ilike '%' || $3 || '%')`,
+		if loadErr := s.db.QueryRow(ctx, `select count(*)::int
+			from game_resource_snapshots snapshot join game_resources resource on resource.entity_id=snapshot.resource_id
+			where snapshot.revision_id=$1 and snapshot.registry=$2
+			and ($3='' or resource.canonical_id ilike '%' || $3 || '%' or snapshot.names::text ilike '%' || $3 || '%')`,
 			revisionID, kind, query).Scan(&total); loadErr != nil {
 			return nil, loadErr
 		}
-		rows, loadErr := s.db.Query(ctx, `select entry_id,
-			jsonb_strip_nulls(jsonb_build_object('zh_cn',names->>'zh_cn','en_us',names->>'en_us',$6::text,names->>($6::text))),
-			namespace,icon_path,preview_path,
-			case when not $7 then data
-				when kind='advancements' then jsonb_strip_nulls(jsonb_build_object('parent',data->'parent','display',data->'display'))
+		rows, loadErr := s.db.Query(ctx, `select resource.entity_id,entity.public_id,resource.canonical_id,
+			jsonb_strip_nulls(jsonb_build_object('zh_cn',snapshot.names->>'zh_cn','en_us',snapshot.names->>'en_us',$6::text,snapshot.names->>($6::text))),
+			resource.namespace,snapshot.icon_path,snapshot.preview_path,
+			case when not $7 then snapshot.data
+				when snapshot.registry='advancements' then jsonb_strip_nulls(jsonb_build_object('parent',snapshot.data->'parent','display',snapshot.data->'display'))
+				when snapshot.registry='loot_tables' then jsonb_strip_nulls(jsonb_build_object(
+					'category',snapshot.data->'category','path',snapshot.data->'path','possible_item_ids',snapshot.data->'possible_item_ids'))
 				else '{}'::jsonb end
-			from mod_export_document_entries
-			where revision_id=$1 and kind=$2 and ($3='' or entry_id ilike '%' || $3 || '%' or names::text ilike '%' || $3 || '%')
-			order by entry_id,ordinal limit $4 offset $5`, revisionID, kind, query, limit, offset, locale, summaryOnly)
+			from game_resource_snapshots snapshot
+			join game_resources resource on resource.entity_id=snapshot.resource_id
+			join catalog_entities entity on entity.id=resource.entity_id
+			where snapshot.revision_id=$1 and snapshot.registry=$2
+			and ($3='' or resource.canonical_id ilike '%' || $3 || '%' or snapshot.names::text ilike '%' || $3 || '%')
+			order by resource.canonical_id limit $4 offset $5`, revisionID, kind, query, limit, offset, locale, summaryOnly)
 		if loadErr != nil {
 			return nil, loadErr
 		}
 		defer rows.Close()
 		items := make([]map[string]any, 0, limit)
 		for rows.Next() {
-			var id, namespace, iconPath, previewPath string
+			var entityID, publicID, id, namespace, iconPath, previewPath string
 			var names, data []byte
-			if loadErr = rows.Scan(&id, &names, &namespace, &iconPath, &previewPath, &data); loadErr != nil {
+			if loadErr = rows.Scan(&entityID, &publicID, &id, &names, &namespace, &iconPath, &previewPath, &data); loadErr != nil {
 				return nil, loadErr
 			}
 			items = append(items, map[string]any{
-				"id": id, "registry": kind, "namespace": namespace, "path": id,
+				"entityId": entityID, "publicId": publicID, "id": id, "registry": kind, "namespace": namespace, "path": id,
 				"translationKey": id, "iconPath": iconPath, "previewPath": previewPath,
 				"names": jsonValue(names), "data": jsonValue(data),
 			})
 		}
 		if loadErr = rows.Err(); loadErr != nil {
 			return nil, loadErr
+		}
+		if kind == "loot_tables" {
+			if loadErr = s.decorateLootTableResources(ctx, revisionID, items); loadErr != nil {
+				return nil, loadErr
+			}
 		}
 		return json.Marshal(apiResponse{Data: map[string]any{"items": items, "total": total, "limit": limit, "offset": offset}})
 	})

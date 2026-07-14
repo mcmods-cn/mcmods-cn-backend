@@ -128,30 +128,29 @@ func ensureModImportProviderAvailable(cfg modImportConfig, provider string) erro
 
 func parseModImportSource(provider, rawURL string) (string, string, string, error) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	rawURL = strings.TrimSpace(rawURL)
-	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Hostname() == "" {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Hostname() == "" || (parsed.Port() != "" && parsed.Port() != "443") {
 		return "", "", "", errors.New("请输入有效的 HTTPS 项目链接")
 	}
 	host := strings.ToLower(parsed.Hostname())
 	segments := splitURLPath(parsed.Path)
 	switch provider {
 	case "modrinth":
-		if host != "modrinth.com" && host != "www.modrinth.com" || len(segments) < 2 || segments[0] != "mod" {
+		if (host != "modrinth.com" && host != "www.modrinth.com") || len(segments) < 2 || segments[0] != "mod" || !isSafeImportReferenceSegment(segments[1]) {
 			return "", "", "", errors.New("请输入 Modrinth 模组项目链接")
 		}
 		return provider, "https://modrinth.com/mod/" + segments[1], segments[1], nil
 	case "curseforge":
-		if host != "curseforge.com" && host != "www.curseforge.com" || len(segments) < 3 || segments[0] != "minecraft" || segments[1] != "mc-mods" {
+		if (host != "curseforge.com" && host != "www.curseforge.com") || len(segments) < 3 || segments[0] != "minecraft" || segments[1] != "mc-mods" || !isSafeImportReferenceSegment(segments[2]) {
 			return "", "", "", errors.New("请输入 CurseForge Minecraft 模组链接")
 		}
 		return provider, "https://www.curseforge.com/minecraft/mc-mods/" + segments[2], segments[2], nil
 	case "github":
-		if host != "github.com" && host != "www.github.com" || len(segments) < 2 {
+		if (host != "github.com" && host != "www.github.com") || len(segments) < 2 {
 			return "", "", "", errors.New("请输入 GitHub 仓库链接")
 		}
 		repository := strings.TrimSuffix(segments[1], ".git")
-		if repository == "" {
+		if !isSafeImportReferenceSegment(segments[0]) || !isSafeImportReferenceSegment(repository) {
 			return "", "", "", errors.New("请输入 GitHub 仓库链接")
 		}
 		ref := segments[0] + "/" + repository
@@ -170,4 +169,17 @@ func splitURLPath(value string) []string {
 		}
 	}
 	return result
+}
+
+func isSafeImportReferenceSegment(value string) bool {
+	if value == "" || len(value) > 128 || value == "." || value == ".." {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') && character != '-' && character != '_' && character != '.' {
+			return false
+		}
+	}
+	return true
 }

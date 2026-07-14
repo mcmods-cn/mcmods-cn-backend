@@ -10,6 +10,18 @@ func baselineSchemaStatements() []string {
 			password_hash text not null,
 			email_verified boolean not null default false,
 			status text not null default 'active',
+			country text not null default '',
+			timezone text not null default 'Asia/Shanghai',
+			preferred_content_language text not null default 'zh-CN',
+			preferred_ui_language text not null default 'en',
+			security_score integer not null default 100,
+			registration_ip text not null default '',
+			registration_country_code text not null default '',
+			registration_city text not null default '',
+			signature text not null default '',
+			avatar_url text not null default '',
+			avatar_file_id bigint,
+			profile_revision_id bigint,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
 			last_login_at timestamptz
@@ -21,39 +33,27 @@ func baselineSchemaStatements() []string {
 			description text not null default '',
 			weight integer not null default 0,
 			parents text[] not null default '{}'::text[],
-			created_at timestamptz not null default now()
+			status text not null default 'active',
+			translations jsonb not null default '{}'::jsonb,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now()
 		)`,
-		`alter table roles add column if not exists weight integer not null default 0`,
-		`alter table roles add column if not exists parents text[] not null default '{}'::text[]`,
-		`alter table roles add column if not exists status text not null default 'active'`,
-		`alter table roles add column if not exists updated_at timestamptz not null default now()`,
-		`alter table roles add column if not exists translations jsonb not null default '{}'::jsonb`,
-		`alter table users add column if not exists country text not null default ''`,
-		`alter table users add column if not exists timezone text not null default 'Asia/Shanghai'`,
-		`alter table users add column if not exists preferred_content_language text not null default 'zh-CN'`,
-		`alter table users add column if not exists preferred_ui_language text not null default 'en'`,
-		`alter table users add column if not exists security_score integer not null default 100`,
-		`alter table users add column if not exists registration_ip text not null default ''`,
-		`alter table users add column if not exists registration_country_code text not null default ''`,
-		`alter table users add column if not exists registration_city text not null default ''`,
-		`alter table users add column if not exists signature text not null default ''`,
-		`alter table users add column if not exists avatar_url text not null default ''`,
 		`create table if not exists permissions (
 			id bigserial primary key,
 			code text not null unique,
 			module text not null,
 			name text not null,
-			description text not null default ''
+			description text not null default '',
+			translations jsonb not null default '{}'::jsonb
 		)`,
-		`alter table permissions add column if not exists translations jsonb not null default '{}'::jsonb`,
 		`create table if not exists role_permissions (
 			role_id bigint not null references roles(id) on delete cascade,
 			permission_id bigint not null references permissions(id) on delete cascade,
+			allow boolean not null default true,
+			expires_at timestamptz,
+			updated_at timestamptz not null default now(),
 			primary key (role_id, permission_id)
 		)`,
-		`alter table role_permissions add column if not exists allow boolean not null default true`,
-		`alter table role_permissions add column if not exists expires_at timestamptz`,
-		`alter table role_permissions add column if not exists updated_at timestamptz not null default now()`,
 		`create table if not exists user_role_bindings (
 			user_id bigint not null references users(id) on delete cascade,
 			role_id bigint not null references roles(id) on delete cascade,
@@ -67,10 +67,9 @@ func baselineSchemaStatements() []string {
 			context text not null default '',
 			expires_at timestamptz,
 			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
 			primary key (user_id, permission_id)
 		)`,
-		`alter table user_permissions add column if not exists context text not null default ''`,
-		`alter table user_permissions add column if not exists updated_at timestamptz not null default now()`,
 		`create table if not exists permission_audit_logs (
 			id bigserial primary key,
 			operator_id bigint references users(id) on delete set null,
@@ -85,12 +84,12 @@ func baselineSchemaStatements() []string {
 			account text not null,
 			ip text not null default '',
 			user_agent text not null default '',
+			country_code text not null default '',
+			city text not null default '',
 			success boolean not null,
 			reason text not null default '',
 			created_at timestamptz not null default now()
 		)`,
-		`alter table user_login_logs add column if not exists country_code text not null default ''`,
-		`alter table user_login_logs add column if not exists city text not null default ''`,
 		`create table if not exists email_verification_codes (
 			id bigserial primary key,
 			email text not null,
@@ -129,8 +128,10 @@ func baselineSchemaStatements() []string {
 			category text not null default '',
 			source text not null default '',
 			original_name text not null default '',
+			source_original_name text not null default '',
 			content_type text not null default '',
 			size_bytes bigint not null default 0,
+			source_size_bytes bigint not null default 0,
 			sha256 text not null default '',
 			uploader_id bigint references users(id) on delete set null,
 			status text not null default 'active',
@@ -138,9 +139,6 @@ func baselineSchemaStatements() []string {
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now()
 		)`,
-		`alter table oss_files add column if not exists source_original_name text not null default ''`,
-		`alter table oss_files add column if not exists source_size_bytes bigint not null default 0`,
-		`alter table users add column if not exists avatar_file_id bigint references oss_files(id) on delete set null`,
 		`create index if not exists idx_oss_files_category on oss_files (category, created_at desc)`,
 		`create index if not exists idx_oss_files_uploader_created_at on oss_files (uploader_id, created_at desc)`,
 		`create index if not exists idx_oss_files_object_key_prefix on oss_files (object_key text_pattern_ops)`,
@@ -302,6 +300,7 @@ func baselineSchemaStatements() []string {
 			input_tokens bigint not null default 0,
 			output_tokens bigint not null default 0,
 			cost_micros bigint not null default 0,
+			quota_reserved_tokens bigint not null default 0,
 			payload jsonb not null default '{}'::jsonb,
 			result jsonb not null default '{}'::jsonb,
 			error text not null default '',
@@ -314,7 +313,6 @@ func baselineSchemaStatements() []string {
 		)`,
 		`create index if not exists idx_ai_tasks_status_created_at on ai_tasks (status, created_at desc)`,
 		`create index if not exists idx_ai_tasks_type_created_at on ai_tasks (task_type, created_at desc)`,
-		`alter table ai_tasks add column if not exists quota_reserved_tokens bigint not null default 0`,
 		`create table if not exists ai_task_logs (
 			id bigserial primary key,
 			task_id bigint references ai_tasks(id) on delete cascade,
@@ -327,7 +325,7 @@ func baselineSchemaStatements() []string {
 		`create index if not exists idx_ai_task_logs_task_created_at on ai_task_logs (task_id, created_at desc)`,
 		`create table if not exists mods (
 			id bigserial primary key,
-			project_code text unique,
+			project_code text not null unique check (project_code ~ '^[a-z0-9]{7}$'),
 			slug text not null unique,
 			primary_name text not null,
 			secondary_name text not null default '',
@@ -344,9 +342,12 @@ func baselineSchemaStatements() []string {
 			icon_url text not null default '',
 			body_markdown text not null default '',
 			search_keywords text[] not null default '{}'::text[],
+			supported_versions text[] not null default '{}'::text[],
+			supported_loaders text[] not null default '{}'::text[],
 			submission_method text not null default 'manual',
 			review_status text not null default 'pending',
 			created_by bigint references users(id) on delete set null,
+			published_revision_id bigint,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
 			published_at timestamptz,
@@ -356,17 +357,7 @@ func baselineSchemaStatements() []string {
 			check (submission_method in ('manual', 'modrinth', 'curseforge', 'github')),
 			check (review_status in ('pending', 'approved', 'rejected'))
 		)`,
-		`alter table mods add column if not exists project_code text`,
-		`update mods
-		 set project_code = 'm' || substr(md5(id::text || slug || created_at::text), 1, 5) || (id % 10)::text
-		 where project_code is null or project_code = ''`,
 		`create unique index if not exists idx_mods_project_code on mods (project_code)`,
-		`alter table mods alter column project_code set not null`,
-		`do $$ begin
-			if not exists (select 1 from pg_constraint where conname = 'mods_project_code_format') then
-				alter table mods add constraint mods_project_code_format check (project_code ~ '^[a-z0-9]{7}$');
-			end if;
-		end $$`,
 		`create or replace function prevent_mod_unique_id_update() returns trigger as $$
 		begin
 			if new.project_code is distinct from old.project_code then
@@ -375,7 +366,6 @@ func baselineSchemaStatements() []string {
 			return new;
 		end;
 		$$ language plpgsql`,
-		`drop trigger if exists trg_mod_unique_id_immutable on mods`,
 		`create trigger trg_mod_unique_id_immutable before update of project_code on mods
 		 for each row execute function prevent_mod_unique_id_update()`,
 		`create index if not exists idx_mods_review_updated_at on mods (review_status, updated_at desc)`,
@@ -410,6 +400,7 @@ func baselineSchemaStatements() []string {
 			mod_id bigint not null references mods(id) on delete cascade,
 			relation_type text not null,
 			related_mod_id bigint references mods(id) on delete set null,
+			group_id bigint,
 			related_mod_name text not null default '',
 			notes text not null default '',
 			display_order integer not null default 0,
@@ -429,8 +420,6 @@ func baselineSchemaStatements() []string {
 			created_at timestamptz not null default now()
 		)`,
 		`create index if not exists idx_mod_relationship_groups_mod_order on mod_relationship_groups (mod_id, display_order, id)`,
-		`alter table mod_relationship_groups add column if not exists minecraft_versions text[] not null default '{}'::text[]`,
-		`alter table mod_relationships add column if not exists group_id bigint references mod_relationship_groups(id) on delete cascade`,
 		`create index if not exists idx_mod_relationships_group_order on mod_relationships (group_id, display_order, id)`,
 		`create table if not exists mod_download_sources (
 			id bigserial primary key,
@@ -505,54 +494,6 @@ func baselineSchemaStatements() []string {
 			primary key (comment_id, user_id, reaction),
 			check (reaction in ('thumbs_up', 'thumbs_down', 'laugh', 'hooray', 'confused', 'heart', 'rocket', 'eyes'))
 		)`,
-		`create table if not exists mod_revisions (
-			id bigserial primary key,
-			mod_id bigint not null references mods(id) on delete cascade,
-			version integer not null,
-			status text not null default 'pending',
-			snapshot jsonb not null,
-			change_reason text not null default '',
-			submitted_by bigint references users(id) on delete set null,
-			reviewed_by bigint references users(id) on delete set null,
-			review_note text not null default '',
-			created_at timestamptz not null default now(),
-			reviewed_at timestamptz,
-			check (status in ('pending', 'approved', 'rejected')),
-			unique (mod_id, version)
-		)`,
-		`create index if not exists idx_mod_revisions_mod_version on mod_revisions (mod_id, version desc)`,
-		`create index if not exists idx_mod_revisions_status_created on mod_revisions (status, created_at)`,
-		`alter table mods add column if not exists current_revision_id bigint references mod_revisions(id) on delete set null`,
-		`alter table mods add column if not exists supported_versions text[] not null default '{}'::text[]`,
-		`alter table mods add column if not exists supported_loaders text[] not null default '{}'::text[]`,
-		`insert into mod_revisions (mod_id, version, status, snapshot, change_reason, submitted_by, reviewed_at)
-		 select m.id, 1, case when m.review_status in ('pending', 'approved', 'rejected') then m.review_status else 'pending' end,
-			jsonb_build_object(
-				'siteId', m.slug,
-				'primaryName', m.primary_name, 'secondaryName', m.secondary_name, 'abbreviation', m.abbreviation,
-				'summary', m.summary, 'modId', m.mod_id, 'environment', m.environment, 'primaryCategory', m.primary_category,
-				'supportedVersions', to_jsonb(m.supported_versions), 'supportedLoaders', to_jsonb(m.supported_loaders),
-				'tags', coalesce((select jsonb_agg(t.tag order by t.tag) from mod_tags t where t.mod_id = m.id), '[]'::jsonb),
-				'searchKeywords', to_jsonb(m.search_keywords),
-				'authors', coalesce((select jsonb_agg(jsonb_build_object('name', a.name, 'role', a.role) order by a.display_order, a.id) from mod_authors a where a.mod_id = m.id), '[]'::jsonb),
-				'officialStatus', m.official_status, 'sourceStatus', m.source_status, 'license', m.license,
-				'curseforgeProjectId', m.curseforge_project_id, 'modrinthProjectId', m.modrinth_project_id,
-				'iconUrl', m.icon_url, 'bodyMarkdown', m.body_markdown, 'submissionMethod', m.submission_method,
-				'links', coalesce((select jsonb_agg(jsonb_build_object('type', l.link_type, 'url', l.url) order by l.display_order, l.id) from mod_links l where l.mod_id = m.id), '[]'::jsonb),
-				'relationshipGroups', coalesce((
-					select jsonb_agg(jsonb_build_object(
-						'label', g.label, 'loader', g.loader, 'minecraftVersions', to_jsonb(g.minecraft_versions), 'modVersion', g.mod_version,
-						'relationships', coalesce((select jsonb_agg(jsonb_build_object('type', r.relation_type, 'relatedModId', r.related_mod_id, 'relatedModName', r.related_mod_name, 'notes', r.notes) order by r.display_order, r.id) from mod_relationships r where r.group_id = g.id), '[]'::jsonb)
-					) order by g.display_order, g.id) from mod_relationship_groups g where g.mod_id = m.id
-				), '[]'::jsonb)
-			),
-			'历史数据自动回填', m.created_by, case when m.review_status = 'pending' then null else coalesce(m.published_at, m.updated_at) end
-		 from mods m where not exists (select 1 from mod_revisions r where r.mod_id = m.id)`,
-		`update mod_revisions r
-		 set snapshot = jsonb_set(r.snapshot, '{siteId}', to_jsonb(m.slug), true)
-		 from mods m where m.id = r.mod_id and not (r.snapshot ? 'siteId')`,
-		`update mods m set current_revision_id = r.id
-		 from mod_revisions r where r.mod_id = m.id and r.version = 1 and m.current_revision_id is null and r.status = 'approved'`,
 		`create table if not exists mod_export_packages (
 			id text primary key,
 			sha256 text not null unique check (sha256 ~ '^[0-9a-f]{64}$'),
@@ -583,14 +524,14 @@ func baselineSchemaStatements() []string {
 			created_at timestamptz not null default now(),
 			started_at timestamptz,
 			finished_at timestamptz,
+			heartbeat_at timestamptz,
+			run_token text not null default '',
+			attempt_count integer not null default 0,
 			updated_at timestamptz not null default now(),
 			unique (mod_id, package_id, importer_version),
 			check (status in ('queued','validating','importing','ready','partial','failed','cancelled'))
 		)`,
 		`create index if not exists idx_mod_export_jobs_status_created on mod_export_jobs(status, created_at)`,
-		`alter table mod_export_jobs add column if not exists heartbeat_at timestamptz`,
-		`alter table mod_export_jobs add column if not exists run_token text not null default ''`,
-		`alter table mod_export_jobs add column if not exists attempt_count integer not null default 0`,
 		`create index if not exists idx_mod_export_jobs_running_heartbeat
 		 on mod_export_jobs(heartbeat_at) where status in ('validating','importing')`,
 		`create table if not exists mod_export_revisions (
@@ -604,6 +545,7 @@ func baselineSchemaStatements() []string {
 			exporter_version text not null,
 			source_namespace text not null,
 			source_metadata jsonb not null default '{}'::jsonb,
+			import_run_token text not null default '',
 			is_active boolean not null default false,
 			created_at timestamptz not null default now(),
 			activated_at timestamptz,
@@ -613,7 +555,6 @@ func baselineSchemaStatements() []string {
 		`create unique index if not exists idx_mod_export_revisions_active
 		 on mod_export_revisions(mod_id, minecraft_version, loader, source_namespace) where is_active`,
 		`create index if not exists idx_mod_export_revisions_package on mod_export_revisions(package_id)`,
-		`alter table mod_export_revisions add column if not exists import_run_token text not null default ''`,
 		`create index if not exists idx_mod_export_revisions_import_run on mod_export_revisions(import_run_token) where status='staging'`,
 		`create table if not exists mod_export_locales (
 			revision_id text not null references mod_export_revisions(id) on delete cascade,
@@ -629,36 +570,6 @@ func baselineSchemaStatements() []string {
 			primary key (revision_id, locale, translation_key)
 		)`,
 		`create index if not exists idx_mod_export_translations_key on mod_export_translations(revision_id, translation_key)`,
-		`create table if not exists mod_export_registry_entries (
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
-			registry text not null,
-			object_id text not null,
-			namespace text not null,
-			object_path text not null,
-			translation_key text not null default '',
-			names jsonb not null default '{}'::jsonb,
-			data jsonb not null,
-			primary key (revision_id, registry, object_id)
-		)`,
-		`create index if not exists idx_mod_export_registry_object on mod_export_registry_entries(object_id)`,
-		`create table if not exists mod_export_tags (
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
-			registry text not null,
-			tag_id text not null,
-			member_count integer not null default 0,
-			primary key (revision_id, registry, tag_id)
-		)`,
-		`create index if not exists idx_mod_export_tags_revision_registry on mod_export_tags(revision_id, registry, tag_id)`,
-		`create table if not exists mod_export_tag_members (
-			revision_id text not null,
-			registry text not null,
-			tag_id text not null,
-			member_id text not null,
-			ordinal integer not null,
-			primary key (revision_id, registry, tag_id, member_id),
-			foreign key (revision_id, registry, tag_id) references mod_export_tags(revision_id, registry, tag_id) on delete cascade
-		)`,
-		`create index if not exists idx_mod_export_tag_members_member on mod_export_tag_members(revision_id, member_id)`,
 		`create table if not exists mod_export_text_assets (
 			revision_id text not null references mod_export_revisions(id) on delete cascade,
 			asset_path text not null,
@@ -671,25 +582,6 @@ func baselineSchemaStatements() []string {
 			primary key (revision_id, asset_path),
 			check ((text_content is not null)::integer + (json_content is not null)::integer = 1)
 		)`,
-		`insert into mod_export_tags(revision_id,registry,tag_id,member_count)
-		 select a.revision_id,registry.value->>'registry',tag.value->>'id',jsonb_array_length(coalesce(tag.value->'values','[]'::jsonb))
-		 from mod_export_text_assets a
-		 cross join lateral jsonb_array_elements(coalesce(a.json_content->'registries','[]'::jsonb)) registry(value)
-		 cross join lateral jsonb_array_elements(coalesce(registry.value->'tags','[]'::jsonb)) tag(value)
-		 where a.asset_path='tags/tags.json'
-		   and not exists(select 1 from mod_export_tags existing where existing.revision_id=a.revision_id)
-		   and registry.value->>'registry'<>'' and tag.value->>'id'<>''
-		 on conflict(revision_id,registry,tag_id) do nothing`,
-		`insert into mod_export_tag_members(revision_id,registry,tag_id,member_id,ordinal)
-		 select a.revision_id,registry.value->>'registry',tag.value->>'id',member.value,(member.ordinality-1)::integer
-		 from mod_export_text_assets a
-		 cross join lateral jsonb_array_elements(coalesce(a.json_content->'registries','[]'::jsonb)) registry(value)
-		 cross join lateral jsonb_array_elements(coalesce(registry.value->'tags','[]'::jsonb)) tag(value)
-		 cross join lateral jsonb_array_elements_text(coalesce(tag.value->'values','[]'::jsonb)) with ordinality as member(value,ordinality)
-		 where a.asset_path='tags/tags.json'
-		   and not exists(select 1 from mod_export_tag_members existing where existing.revision_id=a.revision_id)
-		   and registry.value->>'registry'<>'' and tag.value->>'id'<>''
-		 on conflict(revision_id,registry,tag_id,member_id) do nothing`,
 		`create table if not exists mod_export_binary_assets (
 			id text primary key,
 			revision_id text not null references mod_export_revisions(id) on delete cascade,
@@ -723,17 +615,6 @@ func baselineSchemaStatements() []string {
 			template_blob_id text not null references mod_export_binary_assets(id) on delete cascade,
 			summary jsonb not null default '{}'::jsonb,
 			unique (revision_id, structure_id)
-		)`,
-		`create table if not exists mod_export_entry_contents (
-			mod_id bigint not null references mods(id) on delete cascade,
-			registry text not null,
-			object_id text not null,
-			locale text not null,
-			content_markdown text not null default '',
-			updated_by bigint references users(id) on delete set null,
-			created_at timestamptz not null default now(),
-			updated_at timestamptz not null default now(),
-			primary key (mod_id,registry,object_id,locale)
 		)`,
 		`create table if not exists mod_export_job_logs (
 			id bigserial primary key,

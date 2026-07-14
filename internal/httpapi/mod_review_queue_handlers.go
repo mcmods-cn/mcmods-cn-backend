@@ -38,14 +38,14 @@ func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) 
 			from content_revisions revision
 			join change_requests request on request.proposed_revision_id=revision.id
 			join mods mod on mod.id=(request.metadata->>'modId')::bigint
-			where revision.aggregate_type='mod_export_entry' and request.status='pending'
+			where revision.aggregate_type='catalog_resource' and request.status='pending'
 			union all
 			select revision.id::text,'catalog'::text,''::text,'Global catalog'::text,request.submitted_by,
-			       case revision.aggregate_type when 'global_tag' then 'Tag: ' when 'global_recipe_type' then 'Recipe type: ' else 'Recipe: ' end || replace(revision.aggregate_key, chr(10), ' / '),
+			       case revision.aggregate_type when 'catalog_tag' then 'Tag: ' when 'catalog_recipe_type' then 'Recipe type: ' else 'Recipe: ' end || revision.aggregate_key,
 			       request.reason,revision.created_at
 			from content_revisions revision
 			join change_requests request on request.proposed_revision_id=revision.id
-			where revision.aggregate_type in ('global_tag','global_recipe_type','global_recipe') and request.status='pending'
+			where revision.aggregate_type in ('catalog_tag','catalog_recipe_type','catalog_recipe') and request.status='pending'
 			union all
 			select export_revision.id,'export'::text,mod.slug,mod.primary_name,job.created_by,
 			       'mcmods_exporter ' || export_revision.minecraft_version || ' / ' || export_revision.loader,

@@ -6,7 +6,7 @@ import (
 	"mcmods-cn-backend/internal/config"
 )
 
-func TestNormalizeConfigAddsDefaultTaskForLegacyConfig(t *testing.T) {
+func TestNormalizeConfigAddsDefaultTasks(t *testing.T) {
 	cfg := NormalizeConfig(config.NATSConfig{SubjectPrefix: " mcmods "})
 	if !hasRequiredTaskCodes(cfg.Tasks) {
 		t.Fatalf("expected required system tasks, got %#v", cfg.Tasks)

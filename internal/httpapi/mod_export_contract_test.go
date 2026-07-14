@@ -59,6 +59,34 @@ func TestExporterSamplePackageContracts(t *testing.T) {
 			if _, decodeErr := decodeModExportCapabilities(capabilityRaw, manifest); decodeErr != nil {
 				t.Fatal(decodeErr)
 			}
+			if files["registries/blocks.json"] != nil && files["registries/items.json"] != nil {
+				blocks, blockErr := readExportRegistryLinks(files["registries/blocks.json"])
+				if blockErr != nil {
+					t.Fatal(blockErr)
+				}
+				revisions := make(map[string]string)
+				for _, namespace := range normalizeExportNamespaces(manifest.Configuration.Namespaces) {
+					revisions[namespace] = "sample-revision-" + namespace
+				}
+				if len(revisions) == 0 {
+					for _, block := range blocks {
+						revisions[strings.ToLower(block.Namespace)] = "sample-revision-" + strings.ToLower(block.Namespace)
+					}
+				}
+				bindings, bindingErr := deriveModExportBlockBindings(files, revisions)
+				if bindingErr != nil {
+					t.Fatal(bindingErr)
+				}
+				expectedBindings := 0
+				for _, block := range blocks {
+					if revisions[strings.ToLower(block.Namespace)] != "" {
+						expectedBindings++
+					}
+				}
+				if len(bindings) != expectedBindings {
+					t.Fatalf("expected %d import-time block bindings, got %d", expectedBindings, len(bindings))
+				}
+			}
 
 			layoutFiles := 0
 			layoutRows := 0

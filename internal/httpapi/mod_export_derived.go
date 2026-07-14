@@ -19,12 +19,19 @@ func refreshModExportRevisionStats(ctx context.Context, tx pgx.Tx, revisionIDs [
 		)
 		select revision.id,
 			coalesce((select jsonb_object_agg(registry,total) from (
-				select registry,count(*)::int total from mod_export_registry_entries
-				where revision_id=revision.id group by registry
+				select entry.registry,count(*)::int total from game_resource_snapshots entry
+				where entry.revision_id=revision.id
+				  and not (entry.registry='items' and exists(
+					select 1 from game_resource_asset_bindings binding
+					join game_resource_snapshots block_snapshot on block_snapshot.id=binding.snapshot_id
+					where binding.item_resource_id=entry.resource_id and block_snapshot.revision_id=entry.revision_id
+				  ))
+				group by entry.registry
 			) counts),'{}'::jsonb),
 			coalesce((select jsonb_object_agg(kind,total) from (
-				select kind,count(*)::int total from mod_export_document_entries
-				where revision_id=revision.id group by kind
+				select registry kind,count(*)::int total from game_resource_snapshots
+				where revision_id=revision.id and registry in ('advancements','key_mappings','biomes','dimensions','natural_generation','world_structures','loot_tables','ingredients','worldgen_data')
+				group by registry
 			) counts),'{}'::jsonb),
 			(select count(*)::int from (
 				select asset_path from mod_export_text_assets where revision_id=revision.id
@@ -33,9 +40,9 @@ func refreshModExportRevisionStats(ctx context.Context, tx pgx.Tx, revisionIDs [
 			) assets),
 			(select count(*)::int from mod_export_structures where revision_id=revision.id),
 			coalesce((select jsonb_array_length(json_content->'advancements') from mod_export_text_assets where revision_id=revision.id and asset_path='advancements/advancements.json'),0),
-			(select count(*)::int from mod_export_registry_entries where revision_id=revision.id and registry='key_mappings'),
-			(select count(*)::int from mod_export_recipe_layouts where revision_id=revision.id),
-			(select count(*)::int from mod_export_tags where revision_id=revision.id),
+			(select count(*)::int from game_resource_snapshots where revision_id=revision.id and registry='key_mappings'),
+			(select count(*)::int from recipe_snapshots where revision_id=revision.id),
+			(select count(*)::int from catalog_tag_snapshots where revision_id=revision.id),
 			coalesce((select jsonb_object_agg(capability_id,jsonb_build_object(
 				'status',status,'source',source
 			)) from mod_export_capabilities where revision_id=revision.id),'{}'::jsonb),now()

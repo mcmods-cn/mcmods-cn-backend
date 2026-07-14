@@ -6,12 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
 
 type modExportEntryContentSnapshot struct {
+	EntityID        string `json:"entityId"`
 	ModID           int64  `json:"modId"`
 	Registry        string `json:"registry"`
 	ObjectID        string `json:"objectId"`
@@ -59,12 +59,12 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "revision has already been reviewed")
 		return
 	}
-	if aggregateType == "global_tag" || aggregateType == "global_recipe_type" || aggregateType == "global_recipe" {
+	if aggregateType == "catalog_tag" || aggregateType == "catalog_recipe_type" || aggregateType == "catalog_recipe" {
 		if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext($1))`, aggregateType+":"+aggregateKey); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to lock catalog content")
 			return
 		}
-		publishedRevisionID, publishedErr := globalCatalogPublishedRevisionTx(r.Context(), tx, aggregateType, aggregateKey)
+		publishedRevisionID, publishedErr := catalogPublishedRevisionTx(r.Context(), tx, aggregateType, aggregateKey)
 		if publishedErr != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load published catalog content")
 			return
@@ -101,7 +101,7 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionID, "status": request.Status})
 		return
 	}
-	if aggregateType != "mod_export_entry" {
+	if aggregateType != "catalog_resource" {
 		writeError(w, http.StatusBadRequest, "unsupported content revision")
 		return
 	}
@@ -115,9 +115,8 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var publishedRevisionID *int64
-	err = tx.QueryRow(r.Context(), `select published_revision_id from mod_export_entry_contents
-		where mod_id=$1 and registry=$2 and object_id=$3 and locale=$4 for update`,
-		snapshot.ModID, snapshot.Registry, snapshot.ObjectID, snapshot.Locale).Scan(&publishedRevisionID)
+	err = tx.QueryRow(r.Context(), `select published_revision_id from knowledge_pages
+		where entity_id=$1 and locale=$2 for update`, snapshot.EntityID, snapshot.Locale).Scan(&publishedRevisionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		publishedRevisionID = nil
 	} else if err != nil {
@@ -138,7 +137,7 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if request.Status == "approved" {
-		if err = publishModExportEntryContentTx(r.Context(), tx, revisionID, snapshot.ModID, snapshot.Registry, snapshot.ObjectID, snapshot.Locale, snapshot.ContentMarkdown, claims.Subject); err != nil {
+		if err = publishModExportEntryContentTx(r.Context(), tx, revisionID, snapshot.EntityID, snapshot.Locale, snapshot.ContentMarkdown, claims.Subject); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to publish entry content")
 			return
 		}
@@ -154,21 +153,20 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionID, "status": request.Status})
 }
 
-func globalCatalogPublishedRevisionTx(ctx context.Context, tx pgx.Tx, aggregateType, aggregateKey string) (*int64, error) {
+func catalogPublishedRevisionTx(ctx context.Context, tx pgx.Tx, aggregateType, entityID string) (*int64, error) {
 	var revisionID *int64
 	var err error
 	switch aggregateType {
-	case "global_tag":
-		registry, tagID, _ := strings.Cut(aggregateKey, globalCatalogKeySeparator)
+	case "catalog_tag":
 		err = tx.QueryRow(ctx, `select max(revision_id) from (
-			select published_revision_id revision_id from global_tag_contents where registry=$1 and tag_id=$2
-			union all select published_revision_id from global_tag_member_overrides where registry=$1 and tag_id=$2) revisions`, registry, tagID).Scan(&revisionID)
-	case "global_recipe_type":
+			select published_revision_id revision_id from knowledge_pages where entity_id=$1
+			union all select published_revision_id from tag_member_overrides where tag_id=$1) revisions`, entityID).Scan(&revisionID)
+	case "catalog_recipe_type":
 		err = tx.QueryRow(ctx, `select max(revision_id) from (
-			select published_revision_id revision_id from global_recipe_type_contents where recipe_type_id=$1
-			union all select published_revision_id from global_recipe_type_catalyst_overrides where recipe_type_id=$1) revisions`, aggregateKey).Scan(&revisionID)
-	case "global_recipe":
-		err = tx.QueryRow(ctx, `select published_revision_id from global_recipe_contents where recipe_key=$1`, aggregateKey).Scan(&revisionID)
+			select published_revision_id revision_id from knowledge_pages where entity_id=$1
+			union all select published_revision_id from recipe_type_catalyst_overrides where recipe_type_id=$1) revisions`, entityID).Scan(&revisionID)
+	case "catalog_recipe":
+		err = tx.QueryRow(ctx, `select published_revision_id from recipe_content_overrides where recipe_id=$1`, entityID).Scan(&revisionID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}

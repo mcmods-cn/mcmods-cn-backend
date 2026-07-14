@@ -35,6 +35,15 @@ func TestParseModImportSourceRejectsForeignHost(t *testing.T) {
 	if _, _, _, err := parseModImportSource("github", "https://example.com/owner/repo"); err == nil {
 		t.Fatal("expected foreign GitHub host to be rejected")
 	}
+	if _, _, _, err := parseModImportSource("modrinth", "https://github.com/mod/ferrite-core"); err == nil {
+		t.Fatal("expected a URL from another provider to be rejected")
+	}
+	if _, _, _, err := parseModImportSource("github", "https://github.com:8443/owner/repo"); err == nil {
+		t.Fatal("expected a non-standard provider port to be rejected")
+	}
+	if _, _, _, err := parseModImportSource("github", "https://github.com/owner/repo%20name"); err == nil {
+		t.Fatal("expected an invalid repository name to be rejected")
+	}
 }
 
 func TestEnvironmentFromSides(t *testing.T) {

@@ -23,17 +23,21 @@ func (s *Server) modExportTags(w http.ResponseWriter, r *http.Request) {
 	offset := boundedOffset(r.URL.Query().Get("offset"))
 	var total int
 	if err := s.db.QueryRow(r.Context(), `
-		select count(*)::int from mod_export_tags
-		where revision_id=$1 and ($2='' or registry=$2)
-		  and ($3='' or tag_id ilike '%' || $3 || '%')`, revisionID, registry, query).Scan(&total); err != nil {
+		select count(*)::int from catalog_tag_snapshots snapshot
+		join catalog_tags tag on tag.entity_id=snapshot.tag_id
+		where snapshot.revision_id=$1 and ($2='' or tag.registry=$2)
+		  and ($3='' or tag.canonical_id ilike '%' || $3 || '%')`, revisionID, registry, query).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count tags")
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `
-		select registry,tag_id,member_count from mod_export_tags
-		where revision_id=$1 and ($2='' or registry=$2)
-		  and ($3='' or tag_id ilike '%' || $3 || '%')
-		order by registry,tag_id limit $4 offset $5`, revisionID, registry, query, limit, offset)
+		select tag.entity_id,entity.public_id,tag.registry,tag.canonical_id,snapshot.member_count
+		from catalog_tag_snapshots snapshot
+		join catalog_tags tag on tag.entity_id=snapshot.tag_id
+		join catalog_entities entity on entity.id=tag.entity_id
+		where snapshot.revision_id=$1 and ($2='' or tag.registry=$2)
+		  and ($3='' or tag.canonical_id ilike '%' || $3 || '%')
+		order by tag.registry,tag.canonical_id limit $4 offset $5`, revisionID, registry, query, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read tags")
 		return
@@ -41,9 +45,9 @@ func (s *Server) modExportTags(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := make([]map[string]any, 0, limit)
 	for rows.Next() {
-		var registryName, tagID string
+		var entityID, publicID, registryName, tagID string
 		var memberCount int
-		if err = rows.Scan(&registryName, &tagID, &memberCount); err != nil {
+		if err = rows.Scan(&entityID, &publicID, &registryName, &tagID, &memberCount); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode tag")
 			return
 		}
@@ -53,7 +57,7 @@ func (s *Server) modExportTags(w http.ResponseWriter, r *http.Request) {
 			namespace, objectPath = parts[0], parts[1]
 		}
 		items = append(items, map[string]any{
-			"id": tagID, "registry": registryName, "namespace": namespace, "path": objectPath,
+			"entityId": entityID, "publicId": publicID, "id": tagID, "registry": registryName, "namespace": namespace, "path": objectPath,
 			"translationKey": "", "iconPath": "", "previewPath": "", "names": map[string]string{},
 			"data": map[string]any{"memberCount": memberCount},
 		})
@@ -68,12 +72,19 @@ func (s *Server) modExportTagDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	registry := strings.TrimSpace(r.URL.Query().Get("registry"))
 	tagID := strings.TrimSpace(r.URL.Query().Get("tagId"))
-	if registry == "" || tagID == "" || len(registry) > 160 || len(tagID) > 512 {
+	entityID := strings.TrimSpace(r.URL.Query().Get("entityId"))
+	if registry == "" || (tagID == "" && entityID == "") || len(registry) > 160 || len(tagID) > 512 {
 		writeError(w, http.StatusBadRequest, "registry and tagId are required")
 		return
 	}
 	var memberCount int
-	if err := s.db.QueryRow(r.Context(), `select member_count from mod_export_tags where revision_id=$1 and registry=$2 and tag_id=$3`, revisionID, registry, tagID).Scan(&memberCount); err != nil {
+	var publicID string
+	if err := s.db.QueryRow(r.Context(), `select tag.entity_id,entity.public_id,tag.canonical_id,snapshot.member_count
+		from catalog_tag_snapshots snapshot join catalog_tags tag on tag.entity_id=snapshot.tag_id
+		join catalog_entities entity on entity.id=tag.entity_id
+		where snapshot.revision_id=$1 and tag.registry=$2
+		and (($3<>'' and tag.entity_id=$3) or ($3='' and tag.canonical_id=$4))`,
+		revisionID, registry, entityID, tagID).Scan(&entityID, &publicID, &tagID, &memberCount); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "tag not found")
 		} else {
@@ -81,23 +92,21 @@ func (s *Server) modExportTagDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	entryRegistry := tagRegistryEntryRegistry(registry)
 	locale := normalizeExportContentLocale(r.URL.Query().Get("locale"))
 	rows, err := s.db.Query(r.Context(), `
-		select m.member_id,coalesce(e.registry,''),
-		 jsonb_strip_nulls(jsonb_build_object('zh_cn',e.names->>'zh_cn','en_us',e.names->>'en_us',$5::text,e.names->>($5::text))),
-		 coalesce(icon.asset_path,'')
-		from mod_export_tag_members m
-		left join mod_export_registry_entries e on e.revision_id=m.revision_id and e.registry=$4 and e.object_id=m.member_id
-		left join mod_export_media icon on icon.revision_id=e.revision_id and icon.asset_path=case e.registry
-		 when 'items' then concat('icons/items/32/',e.namespace,'/',e.object_path,'.png')
-		 when 'blocks' then concat('icons/blocks/32/',e.namespace,'/',e.object_path,'.png')
-		 when 'entity_types' then concat('entities/renders/32/',e.namespace,'/',e.object_path,'.png')
-		 when 'mob_effects' then concat('assets/',e.namespace,'/textures/mob_effect/',e.object_path,'.png')
-		 when 'potions' then concat('potions/potion/32/',e.namespace,'/',e.object_path,'.png')
-		 else '' end
-		where m.revision_id=$1 and m.registry=$2 and m.tag_id=$3
-		order by m.ordinal`, revisionID, registry, tagID, entryRegistry, locale)
+		select member.raw_member_id,coalesce(resource.entity_id,''),coalesce(entity.public_id,''),
+		coalesce(snapshot.registry,''),
+		jsonb_strip_nulls(jsonb_build_object('zh_cn',snapshot.names->>'zh_cn','en_us',snapshot.names->>'en_us',$3::text,snapshot.names->>($3::text))),
+		coalesce(snapshot.icon_path,'')
+		from catalog_tag_members member
+		join catalog_tag_snapshots tag_snapshot on tag_snapshot.id=member.tag_snapshot_id
+		left join game_resources resource on resource.entity_id=member.resource_id
+		left join catalog_entities entity on entity.id=resource.entity_id
+		left join lateral (select candidate.* from game_resource_snapshots candidate
+			where candidate.resource_id=resource.entity_id
+			order by (candidate.revision_id=$1) desc,candidate.created_at desc limit 1) snapshot on true
+		where tag_snapshot.revision_id=$1 and tag_snapshot.tag_id=$2
+		order by member.ordinal`, revisionID, entityID, locale)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read tag members")
 		return
@@ -105,38 +114,17 @@ func (s *Server) modExportTagDetail(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	members := make([]map[string]any, 0, memberCount)
 	for rows.Next() {
-		var memberID, memberRegistry, iconPath string
+		var memberID, memberEntityID, memberPublicID, memberRegistry, iconPath string
 		var names []byte
-		if err = rows.Scan(&memberID, &memberRegistry, &names, &iconPath); err != nil {
+		if err = rows.Scan(&memberID, &memberEntityID, &memberPublicID, &memberRegistry, &names, &iconPath); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode tag member")
 			return
 		}
 		var decodedNames map[string]string
 		_ = json.Unmarshal(names, &decodedNames)
-		members = append(members, map[string]any{"id": memberID, "registry": memberRegistry, "names": decodedNames, "iconPath": iconPath})
+		members = append(members, map[string]any{"entityId": memberEntityID, "publicId": memberPublicID, "id": memberID,
+			"registry": memberRegistry, "names": decodedNames, "iconPath": iconPath})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": tagID, "registry": registry, "memberCount": memberCount, "members": members})
-}
-
-func tagRegistryEntryRegistry(registry string) string {
-	switch strings.ToLower(strings.TrimSpace(registry)) {
-	case "minecraft:item":
-		return "items"
-	case "minecraft:block":
-		return "blocks"
-	case "minecraft:entity_type":
-		return "entity_types"
-	case "minecraft:biome", "minecraft:worldgen/biome":
-		return "biomes"
-	case "minecraft:enchantment":
-		return "enchantments"
-	case "minecraft:mob_effect":
-		return "mob_effects"
-	case "minecraft:potion":
-		return "potions"
-	case "minecraft:fluid":
-		return "fluids"
-	default:
-		return ""
-	}
+	writeJSON(w, http.StatusOK, map[string]any{"entityId": entityID, "publicId": publicID, "id": tagID,
+		"registry": registry, "memberCount": memberCount, "members": members})
 }

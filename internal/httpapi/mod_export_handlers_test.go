@@ -21,8 +21,8 @@ func TestQueueExportRecipeLayoutCollection(t *testing.T) {
 	if err := queueExportRecipeLayout(batch, "package", "revision", "recipes/jei/layouts/minecraft/crafting.json", raw); err != nil {
 		t.Fatal(err)
 	}
-	if batch.rows != 5 {
-		t.Fatalf("expected two layout rows and three item rows, got %d queued rows", batch.rows)
+	if batch.rows < 20 {
+		t.Fatalf("expected catalog entities, snapshots and ingredient references to be queued, got %d rows", batch.rows)
 	}
 	if tagID := exportRecipeSlotTagID(map[string]any{"item_tag_equivalent": " minecraft:logs "}); tagID != "minecraft:logs" {
 		t.Fatalf("unexpected precomputed tag ID %q", tagID)
@@ -163,6 +163,82 @@ func TestValidateExportZIPRejectsCaseInsensitiveDuplicates(t *testing.T) {
 	}
 }
 
+func TestDeriveModExportBlockBindingsUsesRegistryRelationships(t *testing.T) {
+	files := testExportZIPFiles(t, map[string]string{
+		"registries/blocks.json":                      `{"registry":"blocks","entries":[{"id":"example:machine","namespace":"example","path":"machine","item":"example:machine"}]}`,
+		"registries/items.json":                       `{"registry":"items","entries":[{"id":"example:machine","namespace":"example","path":"machine","block":"example:machine"},{"id":"example:wrench","namespace":"example","path":"wrench"}]}`,
+		"assets/example/blockstates/machine.json":     `{"variants":{"":{"model":"example:block/machine/on"}}}`,
+		"assets/example/models/block/machine/on.json": `{"parent":"minecraft:block/cube_all","textures":{"all":"example:block/machine"}}`,
+		"assets/example/models/item/machine.json":     `{"parent":"example:block/machine/on"}`,
+		"assets/example/models/item/wrench.json":      `{"parent":"minecraft:item/generated","textures":{"layer0":"example:item/wrench"}}`,
+		"assets/minecraft/models/block/cube_all.json": `{"textures":{"particle":"#all"}}`,
+		"assets/example/textures/block/machine.png":   "png",
+		"assets/example/textures/item/wrench.png":     "png",
+	})
+	bindings, err := deriveModExportBlockBindings(files, map[string]string{"example": "revision-example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected one block binding, got %#v", bindings)
+	}
+	binding := bindings[0]
+	if binding.BlockID != "example:machine" || binding.ItemID != "example:machine" {
+		t.Fatalf("unexpected registry relationship: %#v", binding)
+	}
+	if binding.Blockstate != "assets/example/blockstates/machine.json" || binding.ItemModel != "assets/example/models/item/machine.json" {
+		t.Fatalf("unexpected root assets: %#v", binding)
+	}
+	for _, expected := range []string{
+		"assets/example/models/block/machine/on.json",
+		"assets/example/models/item/machine.json",
+		"assets/minecraft/models/block/cube_all.json",
+	} {
+		if !containsString(binding.ModelPaths, expected) {
+			t.Fatalf("missing model %s in %#v", expected, binding.ModelPaths)
+		}
+	}
+	if !containsString(binding.TexturePaths, "assets/example/textures/block/machine.png") {
+		t.Fatalf("missing block texture in %#v", binding.TexturePaths)
+	}
+}
+
+func testExportZIPFiles(t *testing.T, values map[string]string) map[string]*zip.File {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	for name, value := range values {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = entry.Write([]byte(value)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(buffer.Bytes()), int64(buffer.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := validateExportZIP(reader.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func TestNormalizeExportNamespaces(t *testing.T) {
 	actual := normalizeExportNamespaces([]string{" Create ", "create", "example-mod", "../bad"})
 	if len(actual) != 2 || actual[0] != "create" || actual[1] != "example-mod" {
@@ -215,21 +291,6 @@ func TestDecodeExportTagsAssociatesSharedTagsWithRelevantRevisions(t *testing.T)
 	}
 }
 
-func TestTagRegistryEntryRegistry(t *testing.T) {
-	tests := map[string]string{
-		"minecraft:item":           "items",
-		"minecraft:block":          "blocks",
-		"minecraft:entity_type":    "entity_types",
-		"minecraft:worldgen/biome": "biomes",
-		"minecraft:unknown":        "",
-	}
-	for input, expected := range tests {
-		if actual := tagRegistryEntryRegistry(input); actual != expected {
-			t.Fatalf("tag registry %q mapped to %q, expected %q", input, actual, expected)
-		}
-	}
-}
-
 func TestDecodeExportTranslationValuesSupportsExporterWrapper(t *testing.T) {
 	values, skippedKeys, total, err := decodeExportTranslationValues([]byte(`{
 		"language":"zh_cn",
@@ -261,15 +322,15 @@ func TestShouldRetryModExportStatus(t *testing.T) {
 	}
 }
 
-func TestExportRecipeKeyScopesGeneratedIDsToPackage(t *testing.T) {
-	canonicalA := exportRecipeKey("package-a", "minecraft:crafting", "example:recipe", true)
-	canonicalB := exportRecipeKey("package-b", "minecraft:crafting", "example:recipe", true)
+func TestRecipeIdentityScope(t *testing.T) {
+	canonicalA := recipeIdentity("package-a", "minecraft:crafting", "example:recipe", true)
+	canonicalB := recipeIdentity("package-b", "minecraft:crafting", "example:recipe", true)
 	if canonicalA != canonicalB {
-		t.Fatalf("canonical recipe key changed across packages: %q != %q", canonicalA, canonicalB)
+		t.Fatalf("authoritative recipe identity changed across packages: %#v != %#v", canonicalA, canonicalB)
 	}
-	generatedA := exportRecipeKey("package-a", "minecraft:anvil", "example:anvil/__generated/recipe_000001", false)
-	generatedB := exportRecipeKey("package-b", "minecraft:anvil", "example:anvil/__generated/recipe_000001", false)
+	generatedA := recipeIdentity("package-a", "example:machine", "example:machine/__generated/recipe_000001", false)
+	generatedB := recipeIdentity("package-b", "example:machine", "example:machine/__generated/recipe_000001", false)
 	if generatedA == generatedB {
-		t.Fatalf("generated recipe key must be package scoped: %q", generatedA)
+		t.Fatalf("generated recipe identity must remain package scoped: %#v", generatedA)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/database"
@@ -46,6 +47,24 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	defer pool.Close()
 	if err = database.Migrate(context.Background(), pool); err != nil {
 		t.Fatal(err)
+	}
+	var existingRevisionID, existingItemID string
+	lookupErr := pool.QueryRow(context.Background(), `
+		select snapshot.revision_id,resource.canonical_id
+		from game_resource_snapshots snapshot
+		join game_resources resource on resource.entity_id=snapshot.resource_id
+		join mod_export_revisions revision on revision.id=snapshot.revision_id
+		where snapshot.registry='items' and revision.is_active
+		order by revision.created_at desc limit 1`).Scan(&existingRevisionID, &existingItemID)
+	if lookupErr == nil {
+		server := &Server{db: pool}
+		if _, resolveErr := server.resolveExportResources(context.Background(), []exportResourceKey{{
+			RevisionID: existingRevisionID, ResourceID: existingItemID, Kind: "item",
+		}}); resolveErr != nil {
+			t.Fatalf("resolve imported resource: %v", resolveErr)
+		}
+	} else if lookupErr != pgx.ErrNoRows {
+		t.Fatal(lookupErr)
 	}
 	tx, err := pool.Begin(context.Background())
 	if err != nil {
@@ -107,13 +126,14 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var recipeTypes, layouts, recipeItems int
-	if err = tx.QueryRow(context.Background(), `select count(*)::int from mod_export_recipe_types where revision_id=$1`, revisionID).Scan(&recipeTypes); err != nil {
+	if err = tx.QueryRow(context.Background(), `select count(*)::int from recipe_type_snapshots where revision_id=$1`, revisionID).Scan(&recipeTypes); err != nil {
 		t.Fatal(err)
 	}
-	if err = tx.QueryRow(context.Background(), `select count(*)::int from mod_export_recipe_layouts where revision_id=$1`, revisionID).Scan(&layouts); err != nil {
+	if err = tx.QueryRow(context.Background(), `select count(*)::int from recipe_snapshots where revision_id=$1`, revisionID).Scan(&layouts); err != nil {
 		t.Fatal(err)
 	}
-	if err = tx.QueryRow(context.Background(), `select count(*)::int from mod_export_recipe_items where revision_id=$1`, revisionID).Scan(&recipeItems); err != nil {
+	if err = tx.QueryRow(context.Background(), `select count(*)::int from recipe_ingredients ingredient
+		join recipe_snapshots snapshot on snapshot.id=ingredient.recipe_snapshot_id where snapshot.revision_id=$1`, revisionID).Scan(&recipeItems); err != nil {
 		t.Fatal(err)
 	}
 	if recipeTypes == 0 || layouts != expectedLayoutCount || layouts == 0 || recipeItems == 0 {
@@ -121,26 +141,29 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	}
 	var canonicalLayouts, generatedLayouts, invalidIdentities int
 	if err = tx.QueryRow(context.Background(), `select
-		count(*) filter(where recipe_id_canonical)::int,
-		count(*) filter(where recipe_id_source='generated_index')::int,
-		count(*) filter(where (recipe_id_source in ('minecraft_recipe','jei_category')) <> recipe_id_canonical
-			or (recipe_id_source='generated_index' and recipe_id_canonical)
-			or recipe_key='')::int
-		from mod_export_recipe_layouts where revision_id=$1`, revisionID).Scan(&canonicalLayouts, &generatedLayouts, &invalidIdentities); err != nil {
+		count(*) filter(where recipe.canonical_source_id is not null)::int,
+		count(*) filter(where snapshot.source_id_kind='generated_index')::int,
+		count(*) filter(where (snapshot.source_id_kind in ('minecraft_recipe','jei_category')) <> (recipe.canonical_source_id is not null)
+			or (snapshot.source_id_kind='generated_index' and recipe.canonical_source_id is not null)
+			or recipe.entity_id='')::int
+		from recipe_snapshots snapshot join recipes recipe on recipe.entity_id=snapshot.recipe_id
+		where snapshot.revision_id=$1`, revisionID).Scan(&canonicalLayouts, &generatedLayouts, &invalidIdentities); err != nil {
 		t.Fatal(err)
 	}
 	if canonicalLayouts == 0 || generatedLayouts == 0 || invalidIdentities != 0 {
 		t.Fatalf("unexpected recipe identity distribution: canonical=%d generated=%d invalid=%d", canonicalLayouts, generatedLayouts, invalidIdentities)
 	}
 	rows, err := tx.Query(context.Background(), `with `+latestGlobalExportScopeCTE+`
-		select recipe_type.recipe_type_id,(jsonb_agg(recipe_type.title_names order by revision.activated_at desc nulls last)->0),
-		(select count(distinct layout.recipe_key)::int from latest_revisions source
-		 join mod_export_recipe_layouts layout on layout.revision_id=source.id where layout.recipe_type_id=recipe_type.recipe_type_id),
-		coalesce(jsonb_agg(distinct (catalyst.value || jsonb_build_object('revisionId',recipe_type.revision_id)))
-		 filter(where catalyst.value is not null),'[]'::jsonb),(array_agg(recipe_type.revision_id order by revision.activated_at desc nulls last))[1]
-		from latest_revisions revision join mod_export_recipe_types recipe_type on recipe_type.revision_id=revision.id
-		left join lateral jsonb_array_elements(recipe_type.catalysts) catalyst(value) on true
-		group by recipe_type.recipe_type_id order by recipe_type.recipe_type_id`)
+		select recipe_type.canonical_id,(jsonb_agg(snapshot.title_names order by revision.activated_at desc nulls last)->0),
+		(select count(distinct recipe_snapshot.recipe_id)::int from latest_revisions source
+		 join recipe_snapshots recipe_snapshot on recipe_snapshot.revision_id=source.id
+		 join recipes recipe on recipe.entity_id=recipe_snapshot.recipe_id where recipe.recipe_type_id=recipe_type.entity_id),
+		coalesce(jsonb_agg(distinct (catalyst.value || jsonb_build_object('revisionId',snapshot.revision_id)))
+		 filter(where catalyst.value is not null),'[]'::jsonb),(array_agg(snapshot.revision_id order by revision.activated_at desc nulls last))[1]
+		from latest_revisions revision join recipe_type_snapshots snapshot on snapshot.revision_id=revision.id
+		join recipe_types recipe_type on recipe_type.entity_id=snapshot.recipe_type_id
+		left join lateral jsonb_array_elements(snapshot.catalysts) catalyst(value) on true
+		group by recipe_type.entity_id,recipe_type.canonical_id order by recipe_type.canonical_id`)
 	if err != nil {
 		t.Fatal(err)
 	}

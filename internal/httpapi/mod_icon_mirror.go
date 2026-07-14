@@ -13,9 +13,6 @@ import (
 	"time"
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
-	"github.com/jackc/pgx/v5/pgxpool"
-
-	"mcmods-cn-backend/internal/config"
 )
 
 const maxExternalModIconBytes = int64(8 << 20)
@@ -117,46 +114,6 @@ func modIconObjectKey(prefix, projectUniqueID, digest, extension string) string 
 		digest = digest[:16]
 	}
 	return path.Join(prefix, "projects", normalizeProjectObjectSegment(projectUniqueID), "branding", "icons", "icon-"+digest+extension)
-}
-
-func MirrorStoredExternalModIcons(ctx context.Context, cfg config.Config, db *pgxpool.Pool) error {
-	server := &Server{cfg: cfg, db: db}
-	rows, err := db.Query(ctx, `select id,project_code,icon_url,coalesce(created_by,0) from mods where icon_url like 'https://%' order by id`)
-	if err != nil {
-		return err
-	}
-	type candidate struct {
-		id         int64
-		projectID  string
-		iconURL    string
-		uploaderID int64
-	}
-	candidates := make([]candidate, 0)
-	for rows.Next() {
-		var item candidate
-		if err = rows.Scan(&item.id, &item.projectID, &item.iconURL, &item.uploaderID); err != nil {
-			rows.Close()
-			return err
-		}
-		candidates = append(candidates, item)
-	}
-	rows.Close()
-	for _, item := range candidates {
-		mirroredURL, mirrorErr := server.mirrorExternalModIcon(ctx, item.iconURL, item.projectID, item.uploaderID)
-		if mirrorErr != nil {
-			if errors.Is(mirrorErr, errUnsupportedExternalModIcon) {
-				continue
-			}
-			return fmt.Errorf("mirror icon for mod %d: %w", item.id, mirrorErr)
-		}
-		if mirroredURL == item.iconURL {
-			continue
-		}
-		if _, err = db.Exec(ctx, `update mods set icon_url=$2,updated_at=now() where id=$1 and icon_url=$3`, item.id, mirroredURL, item.iconURL); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func externalModIconFormat(data []byte) (string, string, error) {

@@ -753,6 +753,10 @@ func (s *Server) importModExportJob(ctx context.Context, jobID string) (resultEr
 			return err
 		}
 	}
+	blockBindings, err := deriveModExportBlockBindings(files, revisions)
+	if err != nil {
+		return err
+	}
 	if err = s.updateModExportJob(ctx, jobID, runToken, "importing", 96, "finalizing"); err != nil {
 		return err
 	}
@@ -777,6 +781,9 @@ func (s *Server) importModExportJob(ctx context.Context, jobID string) (resultEr
 	}
 	sort.Strings(revisionIDs)
 	err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		if bindingErr := persistModExportBlockBindings(ctx, tx, blockBindings); bindingErr != nil {
+			return bindingErr
+		}
 		for _, revisionID := range revisionIDs {
 			if canActivate {
 				var minecraftVersion, revisionLoader, namespace string
@@ -843,7 +850,8 @@ func importExportRecipeTypes(ctx context.Context, tx pgx.Tx, revisions map[strin
 	if document.SchemaVersion != "mcmods-jei-categories/v4" {
 		return fmt.Errorf("unsupported JEI category schema: %s", document.SchemaVersion)
 	}
-	rows := make([][]any, 0, len(document.Categories))
+	batch := &pgx.Batch{}
+	queued := 0
 	for _, category := range document.Categories {
 		category.RecipeTypeID = strings.TrimSpace(category.RecipeTypeID)
 		if category.RecipeTypeID == "" {
@@ -861,26 +869,33 @@ func importExportRecipeTypes(ctx context.Context, tx pgx.Tx, revisions map[strin
 		titleNames := nonEmptyJSON(category.TitleNames, `{}`)
 		canvas := nonEmptyJSON(category.Canvas, `{}`)
 		catalysts := nonEmptyJSON(category.Catalysts, `[]`)
-		recipes := nonEmptyJSON(category.Recipes, `[]`)
-		rows = append(rows, []any{revisionID, category.RecipeTypeID, category.TitleTranslationKey, titleNames,
-			category.Width, category.Height, category.Background, category.BackgroundContainsIngredients,
-			max(1, category.ImageScale), canvas, catalysts, recipes, category.CatalystCount, category.RecipeCount})
+		identity := recipeTypeIdentity(category.RecipeTypeID)
+		snapshotID := catalogSnapshotID("recipe-type", revisionID, identity.ID, "")
+		batch.Queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'recipe_type','active')
+			on conflict(id) do update set status='active',updated_at=now()`, identity.ID, identity.PublicID)
+		batch.Queue(`insert into recipe_types(entity_id,canonical_id) values($1,$2) on conflict(canonical_id) do nothing`, identity.ID, category.RecipeTypeID)
+		batch.Queue(`insert into recipe_type_snapshots(id,recipe_type_id,revision_id,title_translation_key,title_names,width,height,
+			background_path,background_contains_ingredients,image_scale,canvas,catalysts,recipe_count)
+			values($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13)
+			on conflict(recipe_type_id,revision_id) do update set title_translation_key=excluded.title_translation_key,
+			title_names=excluded.title_names,width=excluded.width,height=excluded.height,background_path=excluded.background_path,
+			background_contains_ingredients=excluded.background_contains_ingredients,image_scale=excluded.image_scale,
+			canvas=excluded.canvas,catalysts=excluded.catalysts,recipe_count=excluded.recipe_count`,
+			snapshotID, identity.ID, revisionID, category.TitleTranslationKey, titleNames, category.Width, category.Height,
+			category.Background, category.BackgroundContainsIngredients, max(1, category.ImageScale), canvas, catalysts, category.RecipeCount)
+		queued += 3
 	}
-	if len(rows) == 0 {
+	if queued == 0 {
 		return nil
 	}
-	copied, err := tx.CopyFrom(ctx, pgx.Identifier{"mod_export_recipe_types"}, []string{
-		"revision_id", "recipe_type_id", "title_translation_key", "title_names", "width", "height",
-		"background_path", "background_contains_ingredients", "image_scale", "canvas", "catalysts",
-		"recipes", "catalyst_count", "recipe_count",
-	}, pgx.CopyFromRows(rows))
-	if err != nil {
-		return err
+	results := tx.SendBatch(ctx, batch)
+	defer results.Close()
+	for index := 0; index < queued; index++ {
+		if _, err := results.Exec(); err != nil {
+			return fmt.Errorf("persist recipe type: %w", err)
+		}
 	}
-	if copied != int64(len(rows)) {
-		return fmt.Errorf("copy recipe types: copied %d of %d rows", copied, len(rows))
-	}
-	return nil
+	return results.Close()
 }
 
 func queueExportRecipeLayout(batch *modExportWriteBatch, packageID, revisionID, name string, raw []byte) error {
@@ -954,7 +969,9 @@ func queueExportRecipeLayoutValue(batch *modExportWriteBatch, packageID, revisio
 	}
 	layout["recipe_id_source"] = recipeIDSource
 	layout["recipe_id_canonical"] = recipeIDCanonical
-	recipeKey := exportRecipeKey(packageID, recipeTypeID, recipeID, recipeIDCanonical)
+	recipeType := recipeTypeIdentity(recipeTypeID)
+	recipe := recipeIdentity(packageID, recipeTypeID, recipeID, recipeIDCanonical)
+	recipeSnapshotID := catalogSnapshotID("recipe", revisionID, recipe.ID, name)
 	encoded, err := json.Marshal(layout)
 	if err != nil {
 		return err
@@ -963,11 +980,23 @@ func queueExportRecipeLayoutValue(batch *modExportWriteBatch, packageID, revisio
 	if err != nil {
 		return err
 	}
-	batch.queue(`insert into mod_export_recipe_layouts(revision_id,recipe_type_id,recipe_id,recipe_id_source,recipe_id_canonical,
-		recipe_key,semantic_fingerprint,layout_path,background_path,layout,compact_layout)
-		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb) on conflict(revision_id,recipe_type_id,recipe_id,layout_path) do nothing`,
-		int64(len(encoded)+len(compactEncoded)), revisionID, recipeTypeID, recipeID, recipeIDSource, recipeIDCanonical, recipeKey, fingerprint, name, background, string(encoded), string(compactEncoded))
-	queueExportRecipeItems(batch, revisionID, recipeKey, recipeTypeID, recipeID, layout)
+	batch.queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'recipe_type','active') on conflict(id) do nothing`, 0, recipeType.ID, recipeType.PublicID)
+	batch.queue(`insert into recipe_types(entity_id,canonical_id) values($1,$2) on conflict(canonical_id) do nothing`, 0, recipeType.ID, recipeTypeID)
+	batch.queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'recipe','active')
+		on conflict(id) do update set status='active',updated_at=now()`, 0, recipe.ID, recipe.PublicID)
+	canonicalSourceID := any(nil)
+	if recipeIDCanonical {
+		canonicalSourceID = recipeID
+	}
+	batch.queue(`insert into recipes(entity_id,recipe_type_id,canonical_source_id,semantic_fingerprint,owner_mod_id,identity_source)
+		select $1,$2,$3,$4,revision.mod_id,$5 from mod_export_revisions revision where revision.id=$6
+		on conflict(entity_id) do update set semantic_fingerprint=excluded.semantic_fingerprint`,
+		0, recipe.ID, recipeType.ID, canonicalSourceID, fingerprint, recipeIDSource, revisionID)
+	batch.queue(`insert into recipe_snapshots(id,recipe_id,revision_id,source_recipe_id,source_id_kind,layout_path,background_path,layout,compact_layout)
+		values($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)
+		on conflict(recipe_id,revision_id,layout_path) do update set background_path=excluded.background_path,layout=excluded.layout,compact_layout=excluded.compact_layout`,
+		int64(len(encoded)+len(compactEncoded)), recipeSnapshotID, recipe.ID, revisionID, recipeID, recipeIDSource, name, background, string(encoded), string(compactEncoded))
+	queueExportRecipeItems(batch, revisionID, recipe.ID, recipeSnapshotID, layout)
 	return nil
 }
 
@@ -998,7 +1027,7 @@ func compactRecipeLayoutValue(value any) any {
 	}
 }
 
-func queueExportRecipeItems(batch *modExportWriteBatch, revisionID, recipeKey, recipeTypeID, recipeID string, layout map[string]any) {
+func queueExportRecipeItems(batch *modExportWriteBatch, revisionID, recipeID, recipeSnapshotID string, layout map[string]any) {
 	slots, _ := layout["slots"].([]any)
 	for slotIndex, rawSlot := range slots {
 		slot, _ := rawSlot.(map[string]any)
@@ -1023,12 +1052,49 @@ func queueExportRecipeItems(batch *modExportWriteBatch, revisionID, recipeKey, r
 			uniqueID := strings.TrimSpace(exportString(alternative["unique_id"]))
 			nbtSNBT := strings.TrimSpace(exportString(alternative["nbt_snbt"]))
 			amount := exportRecipeAmount(alternative)
-			batch.queue(`insert into mod_export_recipe_items(revision_id,recipe_key,recipe_type_id,recipe_id,role,
-				slot_index,alternative_index,item_id,amount,tag_id,ingredient_kind,ingredient_type,unique_id,nbt_snbt)
-				values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) on conflict do nothing`,
-				int64(96+len(uniqueID)+len(nbtSNBT)), revisionID, recipeKey, recipeTypeID, recipeID, role,
-				slotIndex, alternativeIndex, itemID, amount, tagID, ingredientKind, ingredientType, uniqueID, nbtSNBT)
+			kindCode := resourceKindForIngredient(ingredientKind, ingredientType)
+			resource := resourceIdentity(kindCode, itemID)
+			namespace, resourcePath := resourceParts(itemID)
+			batch.queue(`insert into resource_kinds(code,family,user_visible) values($1,split_part($1,'.',1),true) on conflict(code) do nothing`, 0, kindCode)
+			batch.queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'resource','placeholder') on conflict(id) do nothing`, 0, resource.ID, resource.PublicID)
+			batch.queue(`insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path,resolved)
+				values($1,$2,$3,$4,$5,false) on conflict(kind_code,canonical_id) do nothing`, 0, resource.ID, kindCode, itemID, namespace, resourcePath)
+			var tagEntityID any
+			if tagID != "" {
+				tag := tagIdentity(registryForResourceKind(kindCode), tagID)
+				tagEntityID = tag.ID
+				batch.queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'tag','placeholder') on conflict(id) do nothing`, 0, tag.ID, tag.PublicID)
+				batch.queue(`insert into catalog_tags(entity_id,registry,canonical_id) values($1,$2,$3) on conflict(registry,canonical_id) do nothing`, 0, tag.ID, registryForResourceKind(kindCode), tagID)
+			}
+			ingredientID := catalogSnapshotID("ingredient", recipeSnapshotID, resource.ID, fmt.Sprintf("%s:%d:%d", role, slotIndex, alternativeIndex))
+			batch.queue(`insert into recipe_ingredients(id,recipe_snapshot_id,role,slot_index,alternative_index,resource_id,tag_id,
+				raw_resource_id,amount,ingredient_kind,ingredient_type,nbt_snbt)
+				values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+				on conflict(recipe_snapshot_id,role,slot_index,alternative_index,raw_resource_id) do update set
+				resource_id=excluded.resource_id,tag_id=excluded.tag_id,amount=excluded.amount,nbt_snbt=excluded.nbt_snbt`,
+				int64(96+len(uniqueID)+len(nbtSNBT)), ingredientID, recipeSnapshotID, role, slotIndex, alternativeIndex,
+				resource.ID, tagEntityID, itemID, amount, ingredientKind, ingredientType, nbtSNBT)
+			unresolvedID := catalogSnapshotID("reference", revisionID, recipeID, ingredientID)
+			batch.queue(`insert into unresolved_resource_references(id,source_entity_id,source_revision_id,field_path,kind_code,raw_resource_id,resolved_resource_id,status,resolved_at)
+				select $1,$2,$3,$4,$5,$6,$7,case when exists(select 1 from game_resource_snapshots where resource_id=$7) then 'resolved' else 'pending' end,
+				case when exists(select 1 from game_resource_snapshots where resource_id=$7) then now() else null end
+				on conflict(source_entity_id,source_revision_id,field_path,kind_code,raw_resource_id) do update set
+				resolved_resource_id=excluded.resolved_resource_id,status=excluded.status,resolved_at=excluded.resolved_at`,
+				0, unresolvedID, recipeID, revisionID, fmt.Sprintf("slots.%d.alternatives.%d", slotIndex, alternativeIndex), kindCode, itemID, resource.ID)
 		}
+	}
+}
+
+func registryForResourceKind(kindCode string) string {
+	switch kindCode {
+	case "minecraft.item":
+		return "items"
+	case "minecraft.block":
+		return "blocks"
+	case "minecraft.fluid":
+		return "fluids"
+	default:
+		return kindCode
 	}
 }
 
@@ -1069,13 +1135,6 @@ func exportRecipeAmount(alternative map[string]any) float64 {
 		}
 	}
 	return 1
-}
-
-func exportRecipeKey(packageID, recipeTypeID, recipeID string, canonical bool) string {
-	if canonical {
-		return "canonical:" + recipeTypeID + ":" + recipeID
-	}
-	return "package:" + packageID + ":" + recipeTypeID + ":" + recipeID
 }
 
 func canonicalRecipeLayout(layout map[string]any) ([]byte, error) {
@@ -1261,7 +1320,7 @@ func importExportRegistry(ctx context.Context, tx pgx.Tx, revisions map[string]s
 	if document.Registry == "" {
 		document.Registry = strings.TrimSuffix(path.Base(name), path.Ext(name))
 	}
-	rowsByKey := make(map[string][]any, len(document.Entries))
+	rowsByKey := make(map[string]catalogResourceImportRow, len(document.Entries))
 	for _, entryRaw := range document.Entries {
 		var entry map[string]any
 		if err := json.Unmarshal(entryRaw, &entry); err != nil {
@@ -1276,12 +1335,21 @@ func importExportRegistry(ctx context.Context, tx pgx.Tx, revisions map[string]s
 		if revisionID == "" {
 			continue
 		}
+		kindCode := resourceKindForRegistry(document.Registry)
+		identity := resourceIdentity(kindCode, objectID)
 		translationKey, _ := entry["translation_key"].(string)
 		names, _ := json.Marshal(entry["names"])
 		if string(names) == "null" || len(names) == 0 {
 			names = []byte("{}")
 		}
-		rowsByKey[revisionID+"\x00"+objectID] = []any{revisionID, document.Registry, objectID, strings.ToLower(parts[0]), parts[1], translationKey, string(names), string(entryRaw)}
+		iconPath, previewPath := exportRegistryMediaPaths(document.Registry, parts[0], parts[1])
+		rowsByKey[revisionID+"\x00"+kindCode+"\x00"+objectID] = catalogResourceImportRow{
+			EntityID: identity.ID, PublicID: identity.PublicID, KindCode: kindCode, CanonicalID: objectID,
+			Namespace: strings.ToLower(parts[0]), ResourcePath: parts[1], RevisionID: revisionID,
+			SnapshotID: catalogSnapshotID("resource", revisionID, identity.ID, ""), Registry: document.Registry,
+			TranslationKey: translationKey, Names: string(names), Data: string(entryRaw),
+			IconPath: iconPath, PreviewPath: previewPath,
+		}
 	}
 	rowKeys := make([]string, 0, len(rowsByKey))
 	for key := range rowsByKey {
@@ -1291,16 +1359,24 @@ func importExportRegistry(ctx context.Context, tx pgx.Tx, revisions map[string]s
 	if len(rowKeys) == 0 {
 		return nil
 	}
-	copied, err := tx.CopyFrom(ctx, pgx.Identifier{"mod_export_registry_entries"}, []string{"revision_id", "registry", "object_id", "namespace", "object_path", "translation_key", "names", "data"}, pgx.CopyFromSlice(len(rowKeys), func(index int) ([]any, error) {
-		return rowsByKey[rowKeys[index]], nil
-	}))
-	if err != nil {
-		return err
+	rows := make([]catalogResourceImportRow, len(rowKeys))
+	for index, key := range rowKeys {
+		rows[index] = rowsByKey[key]
 	}
-	if copied != int64(len(rowKeys)) {
-		return fmt.Errorf("copy registry %s: copied %d of %d rows", name, copied, len(rowKeys))
+	return persistCatalogResources(ctx, tx, rows)
+}
+
+func exportRegistryMediaPaths(registry, namespace, resourcePath string) (string, string) {
+	switch registry {
+	case "items", "blocks", "mob_effects":
+		return fmt.Sprintf("icons/%s/32/%s/%s.png", registry, namespace, resourcePath),
+			fmt.Sprintf("icons/%s/256/%s/%s.png", registry, namespace, resourcePath)
+	case "entity_types":
+		return fmt.Sprintf("entities/renders/32/%s/%s.png", namespace, resourcePath),
+			fmt.Sprintf("entities/renders/256/%s/%s.png", namespace, resourcePath)
+	default:
+		return "", ""
 	}
-	return nil
 }
 
 type exportTagRow struct {
@@ -1318,38 +1394,84 @@ func importExportTags(ctx context.Context, tx pgx.Tx, revisions map[string]strin
 	if len(rows) == 0 {
 		return nil
 	}
-	copied, err := tx.CopyFrom(ctx, pgx.Identifier{"mod_export_tags"}, []string{"revision_id", "registry", "tag_id", "member_count"}, pgx.CopyFromSlice(len(rows), func(index int) ([]any, error) {
-		row := rows[index]
-		return []any{row.RevisionID, row.Registry, row.TagID, len(row.Members)}, nil
-	}))
+	if _, err = tx.Exec(ctx, `create temporary table import_tag_stage(
+		entity_id text,public_id text,snapshot_id text,revision_id text,registry text,canonical_id text,member_count integer
+	) on commit drop`); err != nil {
+		return err
+	}
+	copied, err := tx.CopyFrom(ctx, pgx.Identifier{"import_tag_stage"},
+		[]string{"entity_id", "public_id", "snapshot_id", "revision_id", "registry", "canonical_id", "member_count"},
+		pgx.CopyFromSlice(len(rows), func(index int) ([]any, error) {
+			row := rows[index]
+			identity := tagIdentity(row.Registry, row.TagID)
+			return []any{identity.ID, identity.PublicID, catalogSnapshotID("tag", row.RevisionID, identity.ID, ""), row.RevisionID, row.Registry, row.TagID, len(row.Members)}, nil
+		}))
 	if err != nil {
 		return err
 	}
 	if copied != int64(len(rows)) {
 		return fmt.Errorf("copy tags: copied %d of %d rows", copied, len(rows))
 	}
+	if _, err = tx.Exec(ctx, `insert into catalog_entities(id,public_id,entity_type,status)
+		select distinct entity_id,public_id,'tag','active' from import_tag_stage on conflict(id) do update set status='active',updated_at=now()`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `insert into catalog_tags(entity_id,registry,canonical_id)
+		select distinct entity_id,registry,canonical_id from import_tag_stage on conflict(registry,canonical_id) do nothing`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `insert into catalog_tag_snapshots(id,tag_id,revision_id,member_count)
+		select snapshot_id,entity_id,revision_id,member_count from import_tag_stage
+		on conflict(tag_id,revision_id) do update set member_count=excluded.member_count`); err != nil {
+		return err
+	}
 	if memberCount == 0 {
 		return nil
 	}
+	if _, err = tx.Exec(ctx, `create temporary table import_tag_member_stage(
+		tag_snapshot_id text,resource_id text,resource_public_id text,kind_code text,raw_member_id text,namespace text,resource_path text,ordinal integer
+	) on commit drop`); err != nil {
+		return err
+	}
 	rowIndex, memberIndex := 0, 0
-	copied, err = tx.CopyFrom(ctx, pgx.Identifier{"mod_export_tag_members"}, []string{"revision_id", "registry", "tag_id", "member_id", "ordinal"}, pgx.CopyFromFunc(func() ([]any, error) {
-		for rowIndex < len(rows) && memberIndex >= len(rows[rowIndex].Members) {
-			rowIndex++
-			memberIndex = 0
-		}
-		if rowIndex >= len(rows) {
-			return nil, nil
-		}
-		row := rows[rowIndex]
-		values := []any{row.RevisionID, row.Registry, row.TagID, row.Members[memberIndex], memberIndex}
-		memberIndex++
-		return values, nil
-	}))
+	copied, err = tx.CopyFrom(ctx, pgx.Identifier{"import_tag_member_stage"},
+		[]string{"tag_snapshot_id", "resource_id", "resource_public_id", "kind_code", "raw_member_id", "namespace", "resource_path", "ordinal"},
+		pgx.CopyFromFunc(func() ([]any, error) {
+			for rowIndex < len(rows) && memberIndex >= len(rows[rowIndex].Members) {
+				rowIndex++
+				memberIndex = 0
+			}
+			if rowIndex >= len(rows) {
+				return nil, nil
+			}
+			row := rows[rowIndex]
+			tag := tagIdentity(row.Registry, row.TagID)
+			memberID := row.Members[memberIndex]
+			kindCode := resourceKindForRegistry(row.Registry)
+			resource := resourceIdentity(kindCode, memberID)
+			namespace, resourcePath := resourceParts(memberID)
+			values := []any{catalogSnapshotID("tag", row.RevisionID, tag.ID, ""), resource.ID, resource.PublicID, kindCode, memberID, namespace, resourcePath, memberIndex}
+			memberIndex++
+			return values, nil
+		}))
 	if err != nil {
 		return err
 	}
 	if copied != int64(memberCount) {
 		return fmt.Errorf("copy tag members: copied %d of %d rows", copied, memberCount)
+	}
+	statements := []string{
+		`insert into resource_kinds(code,family,user_visible) select distinct kind_code,split_part(kind_code,'.',1),true from import_tag_member_stage on conflict(code) do nothing`,
+		`insert into catalog_entities(id,public_id,entity_type,status) select distinct resource_id,resource_public_id,'resource','placeholder' from import_tag_member_stage on conflict(id) do nothing`,
+		`insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path,resolved)
+		 select distinct resource_id,kind_code,raw_member_id,namespace,resource_path,false from import_tag_member_stage on conflict(kind_code,canonical_id) do nothing`,
+		`insert into catalog_tag_members(tag_snapshot_id,resource_id,raw_member_id,ordinal)
+		 select tag_snapshot_id,resource_id,raw_member_id,ordinal from import_tag_member_stage on conflict(tag_snapshot_id,raw_member_id) do update set resource_id=excluded.resource_id,ordinal=excluded.ordinal`,
+	}
+	for _, statement := range statements {
+		if _, err = tx.Exec(ctx, statement); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -22,6 +22,7 @@ func Connect(ctx context.Context, cfg config.Config) (*pgxpool.Pool, error) {
 	poolConfig.HealthCheckPeriod = 30 * time.Second
 	poolConfig.ConnConfig.ConnectTimeout = 10 * time.Second
 	poolConfig.ConnConfig.RuntimeParams["application_name"] = "mcmods-cn-backend"
+	poolConfig.ConnConfig.RuntimeParams["lock_timeout"] = "10s"
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	poolConfig.ConnConfig.DialFunc = dialer.DialContext
 

@@ -34,13 +34,19 @@ func queueExportDocumentEntries(batch *modExportWriteBatch, revisionID, assetPat
 			return err
 		}
 		kind := exportDocumentKind(assetPath)
-		batch.queue(`insert into mod_export_document_entries(
-			revision_id,kind,entry_id,ordinal,namespace,names,icon_path,preview_path,data
-		) values($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9::jsonb)
-		on conflict(revision_id,kind,ordinal) do update set entry_id=excluded.entry_id,namespace=excluded.namespace,
-			names=excluded.names,icon_path=excluded.icon_path,preview_path=excluded.preview_path,data=excluded.data`,
-			int64(len(encodedNames)+len(encodedData)), revisionID, kind, entry.ID, ordinal, entry.Namespace,
-			string(encodedNames), entry.IconPath, entry.PreviewPath, string(encodedData))
+		kindCode := resourceKindForDocument(kind, entry.Data)
+		identity := resourceIdentity(kindCode, entry.ID)
+		namespace, resourcePath := resourceParts(entry.ID)
+		if entry.Namespace != "" {
+			namespace = strings.ToLower(entry.Namespace)
+		}
+		queueCatalogResource(batch, catalogResourceImportRow{
+			EntityID: identity.ID, PublicID: identity.PublicID, KindCode: kindCode, CanonicalID: entry.ID,
+			Namespace: namespace, ResourcePath: resourcePath, RevisionID: revisionID,
+			SnapshotID: catalogSnapshotID("resource", revisionID, identity.ID, ""), Registry: kind,
+			Names: string(encodedNames), Data: string(encodedData), IconPath: entry.IconPath, PreviewPath: entry.PreviewPath,
+		})
+		_ = ordinal
 	}
 	return nil
 }
