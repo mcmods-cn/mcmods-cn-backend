@@ -236,22 +236,21 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "recipe type identity is required")
 		return
 	}
-	key := fmt.Sprintf("recipe-types:v3:detail:%s:%s:%s:%s:%d:%d", entityID, id, primary, secondary, limit, offset)
+	key := fmt.Sprintf("recipe-types:v4:detail:%s:%s:%s:%s:%d:%d", entityID, id, primary, secondary, limit, offset)
 	s.writeCachedCatalog(w, r, key, func(ctx context.Context) (any, error) {
-		var publicID, revisionID, background string
+		var publicID, revisionID string
 		var names, catalysts []byte
 		var width, height, scale int
-		var contains bool
 		err := s.db.QueryRow(ctx, `with `+latestGlobalExportScopeCTE+`
 			select recipe_type.entity_id,entity.public_id,recipe_type.canonical_id,snapshot.title_names,snapshot.catalysts,
-				snapshot.revision_id,snapshot.background_path,snapshot.width,snapshot.height,snapshot.image_scale,snapshot.background_contains_ingredients
+				snapshot.revision_id,snapshot.width,snapshot.height,snapshot.image_scale
 			from latest_revisions revision
 			join recipe_type_snapshots snapshot on snapshot.revision_id=revision.id
 			join recipe_types recipe_type on recipe_type.entity_id=snapshot.recipe_type_id
 			join catalog_entities entity on entity.id=recipe_type.entity_id
 			where (($1<>'' and recipe_type.entity_id=$1) or ($1='' and recipe_type.canonical_id=$2))
 			order by coalesce(revision.activated_at,revision.created_at) desc limit 1`, entityID, id).Scan(
-			&entityID, &publicID, &id, &names, &catalysts, &revisionID, &background, &width, &height, &scale, &contains)
+			&entityID, &publicID, &id, &names, &catalysts, &revisionID, &width, &height, &scale)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errCatalogNotFound
 		}
@@ -283,7 +282,7 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 		rows, err := s.db.Query(ctx, `with `+latestGlobalExportScopeCTE+`, selected as (
 			select distinct on (recipe.entity_id) recipe.entity_id,entity.public_id,recipe.canonical_source_id,
 				recipe.semantic_fingerprint,recipe.identity_source,snapshot.id snapshot_id,snapshot.source_recipe_id,
-				snapshot.source_id_kind,snapshot.compact_layout,snapshot.revision_id,mod.slug,
+				snapshot.source_id_kind,snapshot.revision_id,mod.slug,
 				override.note,override.layout_override
 			from latest_revisions revision
 			join recipe_snapshots snapshot on snapshot.revision_id=revision.id
@@ -296,7 +295,7 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 		)
 		select entity_id,public_id,coalesce(canonical_source_id,source_recipe_id),source_id_kind,
 			(canonical_source_id is not null),semantic_fingerprint,snapshot_id,revision_id,slug,coalesce(note,''),
-			coalesce(layout_override,compact_layout)
+			layout_override
 		from selected order by entity_id limit $2 offset $3`, entityID, limit, offset)
 		if err != nil {
 			return nil, err
@@ -311,16 +310,20 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 				&snapshotID, &sourceRevisionID, &siteID, &note, &raw); err != nil {
 				return nil, err
 			}
-			var layout map[string]any
-			if err = json.Unmarshal(raw, &layout); err != nil {
-				return nil, err
+			layout, layoutErr := scanOptionalRecipeOverride(raw)
+			if layoutErr != nil {
+				return nil, layoutErr
 			}
-			recipes = append(recipes, map[string]any{"entityId": recipeEntityID, "publicId": recipePublicID,
+			recipeResult := map[string]any{"entityId": recipeEntityID, "publicId": recipePublicID,
 				"recipeKey": recipeEntityID, "recipeId": recipeID, "recipeIdSource": sourceKind,
 				"recipeIdCanonical": canonical, "semanticFingerprint": fingerprint, "recipeSnapshotId": snapshotID,
-				"revisionId": sourceRevisionID, "modSiteId": siteID, "note": note, "layout": layout})
+				"revisionId": sourceRevisionID, "modSiteId": siteID, "note": note}
+			if layout != nil {
+				recipeResult["layout"] = layout
+			}
+			recipes = append(recipes, recipeResult)
 		}
-		if err = s.decorateGlobalRecipeTags(ctx, recipes); err != nil {
+		if err = s.hydrateRecipeRenderLayouts(ctx, recipes); err != nil {
 			return nil, err
 		}
 		if err = s.decorateRecipeResources(ctx, recipes); err != nil {
@@ -328,50 +331,10 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 		}
 		return map[string]any{"entityId": entityID, "publicId": publicID, "recipeTypeId": id,
 			"names": json.RawMessage(names), "contentMarkdown": content, "contentLocale": contentLocale,
-			"publishedRevisionId": publishedRevisionID, "catalysts": decoratedCatalysts, "backgroundPath": background,
+			"publishedRevisionId": publishedRevisionID, "catalysts": decoratedCatalysts, "backgroundPath": "",
 			"revisionId": revisionID, "width": width, "height": height, "imageScale": scale,
-			"backgroundContainsIngredients": contains, "recipes": recipes, "total": total, "limit": limit, "offset": offset}, rows.Err()
+			"backgroundContainsIngredients": false, "recipes": recipes, "total": total, "limit": limit, "offset": offset}, rows.Err()
 	})
-}
-
-func (s *Server) decorateGlobalRecipeTags(ctx context.Context, recipes []map[string]any) error {
-	if len(recipes) == 0 {
-		return nil
-	}
-	snapshotIDs := make([]string, 0, len(recipes))
-	bySnapshot := make(map[string]map[string]any, len(recipes))
-	for _, recipe := range recipes {
-		snapshotID, _ := recipe["recipeSnapshotId"].(string)
-		if snapshotID != "" {
-			snapshotIDs = append(snapshotIDs, snapshotID)
-			bySnapshot[snapshotID] = recipe
-		}
-	}
-	rows, err := s.db.Query(ctx, `select ingredient.recipe_snapshot_id,ingredient.slot_index,tag.entity_id,tag.registry,tag.canonical_id
-		from recipe_ingredients ingredient join catalog_tags tag on tag.entity_id=ingredient.tag_id
-		where ingredient.recipe_snapshot_id=any($1::text[]) order by ingredient.recipe_snapshot_id,ingredient.slot_index`, snapshotIDs)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var snapshotID, tagEntityID, registry, tagID string
-		var slotIndex int
-		if err = rows.Scan(&snapshotID, &slotIndex, &tagEntityID, &registry, &tagID); err != nil {
-			return err
-		}
-		recipe := bySnapshot[snapshotID]
-		layout, _ := recipe["layout"].(map[string]any)
-		slots, _ := layout["slots"].([]any)
-		if slotIndex < 0 || slotIndex >= len(slots) {
-			continue
-		}
-		slot, _ := slots[slotIndex].(map[string]any)
-		slot["tag"] = tagID
-		slot["tagEntityId"] = tagEntityID
-		slot["tagRegistry"] = registry
-	}
-	return rows.Err()
 }
 
 func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[string]any) error {

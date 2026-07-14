@@ -7,7 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 1
+const schemaGeneration = 2
 
 // Migrate installs one coherent development schema. The catalog redesign does
 // not support in-place upgrades from the pre-entity data model; development

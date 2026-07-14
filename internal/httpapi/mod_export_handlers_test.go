@@ -6,52 +6,70 @@ import (
 	"testing"
 )
 
-func TestQueueExportRecipeLayoutCollection(t *testing.T) {
+func TestQueueExportRecipeTemplateAndBindings(t *testing.T) {
 	batch := newModExportWriteBatch()
-	raw := []byte(`{
-		"schema_version":"mcmods-jei-layout-collection/v1",
+	templateRaw := []byte(`{
+		"schema_version":"mcmods-jei-template-collection/v1",
 		"recipe_type_id":"minecraft:crafting",
-		"layouts":[
-			{"schema_version":"mcmods-jei-layout/v4","recipe_id":"minecraft:test","recipe_id_source":"minecraft_recipe","recipe_id_canonical":true,
-			 "layout_key":"minecraft__test","slots":[{"role":"input","item_tag_equivalent":"minecraft:logs","alternatives":[{"item":"minecraft:oak_log"},{"item":"minecraft:birch_log"}]}]},
-			{"schema_version":"mcmods-jei-layout/v4","recipe_id":"minecraft:crafting/__generated/recipe_000001","recipe_id_source":"generated_index","recipe_id_canonical":false,
-			 "layout_key":"generated_1","slots":[{"role":"output","alternatives":[{"item":"minecraft:stick","count":4}]}]}
-		]
+		"coordinate_space":"logical_pixels","image_scale":4,
+		"canvas":{"width":178,"height":86},"image_pixels":{"width":712,"height":344},
+		"template_count":1,"templates":[{"schema_version":"mcmods-jei-layout-template/v1",
+		"template_id":"template_test","background":"recipes/jei/backgrounds/minecraft/crafting/template_test.png",
+		"slot_count":2,"slots":[
+			{"slot_id":"input_0","role":"input","coordinates_available":true,"rect":{"x":30,"y":34,"width":18,"height":18}},
+			{"slot_id":"output_0","role":"output","coordinates_available":true,"rect":{"x":130,"y":34,"width":18,"height":18}}
+		]}]
 	}`)
-	if err := queueExportRecipeLayout(batch, "package", "revision", "recipes/jei/layouts/minecraft/crafting.json", raw); err != nil {
+	templateDocument, err := decodeExportJEITemplateCollection(templateRaw)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if batch.rows < 20 {
-		t.Fatalf("expected catalog entities, snapshots and ingredient references to be queued, got %d rows", batch.rows)
+	if err = queueExportJEITemplateCollection(batch, map[string]string{"minecraft": "revision"}, "recipes/jei/templates/minecraft/crafting.json", templateDocument); err != nil {
+		t.Fatal(err)
 	}
-	if tagID := exportRecipeSlotTagID(map[string]any{"item_tag_equivalent": " minecraft:logs "}); tagID != "minecraft:logs" {
-		t.Fatalf("unexpected precomputed tag ID %q", tagID)
+	recipeRaw := []byte(`{"schema_version":"mcmods-jei-recipe-collection/v1","recipe_type_id":"minecraft:crafting",
+		"template_collection":"recipes/jei/templates/minecraft/crafting.json","count":1,"recipes":[{
+		"schema_version":"mcmods-jei-recipe-bindings/v1","recipe_type_id":"minecraft:crafting",
+		"recipe_id":"minecraft:test","recipe_id_source":"minecraft_recipe","recipe_id_canonical":true,
+		"recipe_key":"minecraft:test#000000","template_id":"template_test","layout_kind":"shaped","ordered":true,
+		"layout_classification_source":"recipe_class","width":1,"height":1,"binding_count":2,"bindings":[
+			{"slot_id":"input_0","ingredient_present":true,"clickable":true,"item_tag_equivalent":"minecraft:logs","alternatives":[{"type":"minecraft:item_stack","item":"minecraft:oak_log","count":1}]},
+			{"slot_id":"output_0","ingredient_present":false,"clickable":false,"placeholder_item":"minecraft:air","alternatives":[]}
+		]}]}`)
+	recipeDocument, err := decodeExportJEIRecipeCollection(recipeRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = queueExportJEIRecipeCollection(batch, "package", map[string]string{"minecraft": "revision"}, "recipes/jei/recipes/minecraft/crafting.json", recipeDocument); err != nil {
+		t.Fatal(err)
+	}
+	if batch.rows < 15 {
+		t.Fatalf("expected templates, bindings, tag and resource references to be queued, got %d rows", batch.rows)
 	}
 }
 
-func TestQueueExportRecipeLayoutRejectsIncompleteIdentity(t *testing.T) {
+func TestValidateExportRecipeLayoutKind(t *testing.T) {
+	truth := true
+	falsehood := false
 	tests := []struct {
-		name string
-		raw  string
+		name    string
+		kind    string
+		ordered *bool
+		valid   bool
 	}{
-		{
-			name: "missing recipe id",
-			raw:  `{"schema_version":"mcmods-jei-layout/v4","recipe_type_id":"minecraft:crafting","recipe_id_source":"generated_index","recipe_id_canonical":false}`,
-		},
-		{
-			name: "missing identity source",
-			raw:  `{"schema_version":"mcmods-jei-layout/v4","recipe_type_id":"minecraft:crafting","recipe_id":"minecraft:test","recipe_id_canonical":true}`,
-		},
-		{
-			name: "unsupported identity source",
-			raw:  `{"schema_version":"mcmods-jei-layout/v4","recipe_type_id":"minecraft:crafting","recipe_id":"minecraft:test","recipe_id_source":"legacy","recipe_id_canonical":false}`,
-		},
+		{name: "shaped", kind: "shaped", ordered: &truth, valid: true},
+		{name: "shapeless", kind: "shapeless", ordered: &falsehood, valid: true},
+		{name: "machine", kind: "not_applicable", valid: true},
+		{name: "unknown", kind: "unknown", valid: true},
+		{name: "shaped without order", kind: "shaped"},
+		{name: "shapeless ordered", kind: "shapeless", ordered: &truth},
+		{name: "machine ordered", kind: "not_applicable", ordered: &falsehood},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			batch := newModExportWriteBatch()
-			if err := queueExportRecipeLayout(batch, "package", "revision", "layout.json", []byte(test.raw)); err == nil {
-				t.Fatal("expected incomplete recipe identity to be rejected")
+			err := validateExportRecipeLayoutKind(test.kind, test.ordered)
+			if (err == nil) != test.valid {
+				t.Fatalf("valid=%v, error=%v", test.valid, err)
 			}
 		})
 	}

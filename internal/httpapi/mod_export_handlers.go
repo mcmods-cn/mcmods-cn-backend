@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	modExportImporterVersion  = "1.3.0"
+	modExportImporterVersion  = "1.4.0"
 	modExportTaskCode         = "mod_export_import"
 	maxExportFileCount        = 200_000
 	maxExportUncompressedSize = int64(8 << 30)
@@ -41,6 +41,9 @@ const (
 	maxExportJSONSize         = int64(128 << 20)
 	maxExportWriteBatchRows   = 500
 	maxExportWriteBatchBytes  = int64(32 << 20)
+	maxExportReadBatchFiles   = 24
+	maxExportReadBatchBytes   = int64(64 << 20)
+	maxExportReadConcurrency  = 6
 	maxExportPNGConcurrency   = 8
 	maxExportTagCount         = 250_000
 	maxExportTagMemberCount   = 2_000_000
@@ -97,6 +100,11 @@ type modExportWriteBatch struct {
 	batch     *pgx.Batch
 	rows      int
 	byteCount int64
+}
+
+type modExportArchiveFile struct {
+	Name string
+	Data []byte
 }
 
 type modExportPNGMedia struct {
@@ -608,133 +616,171 @@ func (s *Server) importModExportJob(ctx context.Context, jobID string) (resultEr
 			return writeBatch.flush(ctx, tx)
 		})
 	}
-	for index, name := range fileNames {
-		if err = context.Cause(ctx); err != nil {
-			return err
-		}
-		file := files[name]
-		if file.FileInfo().IsDir() {
-			continue
-		}
-		data, readErr := readExportZIPFile(file, maxExportSingleFileSize)
+	categoryFile := files["recipes/jei/categories.json"]
+	if categoryFile == nil {
+		return fmt.Errorf("export package is missing recipes/jei/categories.json")
+	}
+	categoryData, readErr := readExportZIPFile(categoryFile, maxExportJSONSize)
+	if readErr != nil {
+		return fmt.Errorf("read recipes/jei/categories.json: %w", readErr)
+	}
+	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		return importExportRecipeTypesV5(ctx, tx, packageID, revisions, categoryData)
+	}); err != nil {
+		return err
+	}
+	if err = processExportRecipeJSONFiles(ctx, files, "recipes/jei/templates/", decodeExportJEITemplateCollection,
+		func(name string, document exportJEITemplateCollection) error {
+			if queueErr := queueExportJEITemplateCollection(writeBatch, revisions, name, document); queueErr != nil {
+				return queueErr
+			}
+			if writeBatch.shouldFlush() {
+				return flushWriteBatch()
+			}
+			return nil
+		}); err != nil {
+		return err
+	}
+	if err = flushWriteBatch(); err != nil {
+		return err
+	}
+	if err = processExportRecipeJSONFiles(ctx, files, "recipes/jei/recipes/", decodeExportJEIRecipeCollection,
+		func(name string, document exportJEIRecipeCollection) error {
+			if queueErr := queueExportJEIRecipeCollection(writeBatch, packageID, revisions, name, document); queueErr != nil {
+				return queueErr
+			}
+			if writeBatch.shouldFlush() {
+				return flushWriteBatch()
+			}
+			return nil
+		}); err != nil {
+		return err
+	}
+	if err = flushWriteBatch(); err != nil {
+		return err
+	}
+	assetFileNames := exportAssetFileNames(fileNames, files)
+	processedFiles := 0
+	for start := 0; start < len(assetFileNames); {
+		end := exportReadBatchEnd(assetFileNames, files, start)
+		loadedFiles, readErr := readExportZIPFiles(ctx, files, assetFileNames[start:end])
 		if readErr != nil {
-			return fmt.Errorf("read %s: %w", name, readErr)
+			return readErr
 		}
-		if strings.HasPrefix(name, "translations/") && strings.HasSuffix(name, ".json") && path.Base(name) != "languages.json" {
-			var skipped int
+
+		batchSkippedTranslations := 0
+		hasNormalizedFiles := false
+		for _, loaded := range loadedFiles {
+			if isExportTranslationFile(loaded.Name) || isExportRegistryFile(loaded.Name) || loaded.Name == "tags/tags.json" {
+				hasNormalizedFiles = true
+				break
+			}
+		}
+		if hasNormalizedFiles {
 			err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
-				var importErr error
-				skipped, importErr = importExportTranslations(ctx, tx, revisions, jobID, name, data)
-				return importErr
+				for _, loaded := range loadedFiles {
+					switch {
+					case isExportTranslationFile(loaded.Name):
+						skipped, importErr := importExportTranslations(ctx, tx, revisions, jobID, loaded.Name, loaded.Data)
+						if importErr != nil {
+							return importErr
+						}
+						batchSkippedTranslations += skipped
+					case isExportRegistryFile(loaded.Name):
+						if importErr := importExportRegistry(ctx, tx, revisions, loaded.Name, loaded.Data); importErr != nil {
+							return importErr
+						}
+					case loaded.Name == "tags/tags.json":
+						if importErr := importExportTags(ctx, tx, revisions, loaded.Data); importErr != nil {
+							return importErr
+						}
+					}
+				}
+				return nil
 			})
 			if err != nil {
 				return err
 			}
-			if skipped > 0 {
+			if batchSkippedTranslations > 0 {
 				partial = true
-				translationValuesSkipped += skipped
-			}
-			continue
-		}
-		if strings.HasPrefix(name, "registries/") && strings.HasSuffix(name, ".json") {
-			if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
-				return importExportRegistry(ctx, tx, revisions, name, data)
-			}); err != nil {
-				return err
+				translationValuesSkipped += batchSkippedTranslations
 			}
 		}
-		if name == "tags/tags.json" {
-			if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
-				return importExportTags(ctx, tx, revisions, data)
-			}); err != nil {
-				return err
+
+		for _, loaded := range loadedFiles {
+			name, data := loaded.Name, loaded.Data
+			processedFiles++
+			if isExportTranslationFile(name) {
+				continue
 			}
-			// Tags are shared across namespaces. Keep the source document with every
-			// revision represented by the package in addition to normalized rows.
-			for _, revisionID := range revisions {
+			if name == "tags/tags.json" {
+				// Tags are shared across namespaces. Keep the source document with every
+				// revision represented by the package in addition to normalized rows.
+				for _, revisionID := range revisions {
+					if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
+						return err
+					}
+					textAssetCount++
+				}
+				continue
+			}
+			if name == modExportCapabilitiesPath {
+				for _, revisionID := range revisions {
+					if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
+						return err
+					}
+					textAssetCount++
+				}
+				continue
+			}
+			revisionID := exportRevisionForPath(revisions, name)
+			if revisionID == "" {
+				continue
+			}
+			extension := strings.ToLower(path.Ext(name))
+			switch extension {
+			case ".png":
+				var media modExportPNGMedia
+				if media, err = inspectExportPNG(cfg, revisionID, uniqueID, name, data); err != nil {
+					return err
+				}
+				pngMedia = append(pngMedia, media)
+				if _, scheduled := scheduledPNGObjects[media.ObjectKey]; !scheduled {
+					scheduledPNGObjects[media.ObjectKey] = struct{}{}
+					pngPool.submit(media.ObjectKey, name, media.Digest, data)
+				}
+			case ".nbt", ".schem", ".schematic", ".litematic":
+				if err = queueExportBinary(writeBatch, revisionID, name, data); err != nil {
+					return err
+				}
+				binaryAssetCount++
+			case ".json", ".obj", ".mtl", ".snbt", ".mcmeta":
+				if int64(len(data)) > maxExportJSONSize && extension == ".json" {
+					return fmt.Errorf("JSON asset too large: %s", name)
+				}
+				if extension == ".json" && exportDocumentKind(name) != "" {
+					if err = queueExportDocumentEntries(writeBatch, revisionID, name, data); err != nil {
+						return err
+					}
+				}
 				if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
 					return err
 				}
 				textAssetCount++
 			}
-			continue
-		}
-		if name == "recipes/jei/categories.json" {
-			if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
-				return importExportRecipeTypes(ctx, tx, revisions, data)
-			}); err != nil {
-				return err
-			}
-			for _, revisionID := range revisions {
-				if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
-					return err
-				}
-				textAssetCount++
-			}
-			continue
-		}
-		if name == modExportCapabilitiesPath {
-			for _, revisionID := range revisions {
-				if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
-					return err
-				}
-				textAssetCount++
-			}
-			continue
-		}
-		revisionID := exportRevisionForPath(revisions, name)
-		if revisionID == "" {
-			continue
-		}
-		extension := strings.ToLower(path.Ext(name))
-		switch extension {
-		case ".png":
-			var media modExportPNGMedia
-			if media, err = inspectExportPNG(cfg, revisionID, uniqueID, name, data); err != nil {
-				return err
-			}
-			pngMedia = append(pngMedia, media)
-			if _, scheduled := scheduledPNGObjects[media.ObjectKey]; !scheduled {
-				scheduledPNGObjects[media.ObjectKey] = struct{}{}
-				pngPool.submit(media.ObjectKey, name, media.Digest, data)
-			}
-		case ".nbt", ".schem", ".schematic", ".litematic":
-			if err = queueExportBinary(writeBatch, revisionID, name, data); err != nil {
-				return err
-			}
-			binaryAssetCount++
-		case ".json", ".obj", ".mtl", ".snbt", ".mcmeta":
-			if int64(len(data)) > maxExportJSONSize && extension == ".json" {
-				return fmt.Errorf("JSON asset too large: %s", name)
-			}
-			if extension == ".json" && exportDocumentKind(name) != "" {
-				if err = queueExportDocumentEntries(writeBatch, revisionID, name, data); err != nil {
+			if writeBatch.shouldFlush() {
+				if err = flushWriteBatch(); err != nil {
 					return err
 				}
 			}
-			isRecipeLayout := strings.HasPrefix(name, "recipes/jei/layouts/") && extension == ".json"
-			if isRecipeLayout {
-				if err = queueExportRecipeLayout(writeBatch, packageID, revisionID, name, data); err != nil {
-					return err
-				}
-			} else {
-				if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
-					return err
-				}
-				textAssetCount++
-			}
 		}
-		if writeBatch.shouldFlush() {
-			if err = flushWriteBatch(); err != nil {
-				return err
-			}
-		}
-		if index%200 == 0 {
-			progress := 20 + int(float64(index+1)/float64(max(1, len(fileNames)))*65)
+		if (processedFiles-len(loadedFiles))/200 != processedFiles/200 {
+			progress := 20 + int(float64(processedFiles)/float64(max(1, len(assetFileNames)))*65)
 			if err = s.updateModExportJob(ctx, jobID, runToken, "importing", progress, "assets"); err != nil {
 				return err
 			}
 		}
+		start = end
 	}
 	if err = s.updateModExportJob(ctx, jobID, runToken, "importing", 88, "database_flush"); err != nil {
 		return err
@@ -823,279 +869,9 @@ func (s *Server) importModExportJob(ctx context.Context, jobID string) (resultEr
 	return nil
 }
 
-type exportRecipeTypeDocument struct {
-	SchemaVersion string `json:"schema_version"`
-	Categories    []struct {
-		RecipeTypeID                  string          `json:"recipe_type_id"`
-		TitleTranslationKey           string          `json:"title_translation_key"`
-		TitleNames                    json.RawMessage `json:"title_names"`
-		Width                         int             `json:"width"`
-		Height                        int             `json:"height"`
-		Background                    string          `json:"background"`
-		BackgroundContainsIngredients bool            `json:"background_contains_ingredients"`
-		ImageScale                    int             `json:"image_scale"`
-		Canvas                        json.RawMessage `json:"canvas"`
-		Catalysts                     json.RawMessage `json:"catalysts"`
-		Recipes                       json.RawMessage `json:"recipes"`
-		CatalystCount                 int             `json:"catalyst_count"`
-		RecipeCount                   int             `json:"recipe_count"`
-	} `json:"categories"`
-}
-
-func importExportRecipeTypes(ctx context.Context, tx pgx.Tx, revisions map[string]string, raw []byte) error {
-	var document exportRecipeTypeDocument
-	if err := json.Unmarshal(raw, &document); err != nil {
-		return fmt.Errorf("decode recipes/jei/categories.json: %w", err)
-	}
-	if document.SchemaVersion != "mcmods-jei-categories/v4" {
-		return fmt.Errorf("unsupported JEI category schema: %s", document.SchemaVersion)
-	}
-	batch := &pgx.Batch{}
-	queued := 0
-	for _, category := range document.Categories {
-		category.RecipeTypeID = strings.TrimSpace(category.RecipeTypeID)
-		if category.RecipeTypeID == "" {
-			continue
-		}
-		revisionID := revisions[exportResourceNamespace(category.RecipeTypeID)]
-		if revisionID == "" && len(revisions) == 1 {
-			for _, revisionID = range revisions {
-				break
-			}
-		}
-		if revisionID == "" {
-			continue
-		}
-		titleNames := nonEmptyJSON(category.TitleNames, `{}`)
-		canvas := nonEmptyJSON(category.Canvas, `{}`)
-		catalysts := nonEmptyJSON(category.Catalysts, `[]`)
-		identity := recipeTypeIdentity(category.RecipeTypeID)
-		snapshotID := catalogSnapshotID("recipe-type", revisionID, identity.ID, "")
-		batch.Queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'recipe_type','active')
-			on conflict(id) do update set status='active',updated_at=now()`, identity.ID, identity.PublicID)
-		batch.Queue(`insert into recipe_types(entity_id,canonical_id) values($1,$2) on conflict(canonical_id) do nothing`, identity.ID, category.RecipeTypeID)
-		batch.Queue(`insert into recipe_type_snapshots(id,recipe_type_id,revision_id,title_translation_key,title_names,width,height,
-			background_path,background_contains_ingredients,image_scale,canvas,catalysts,recipe_count)
-			values($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13)
-			on conflict(recipe_type_id,revision_id) do update set title_translation_key=excluded.title_translation_key,
-			title_names=excluded.title_names,width=excluded.width,height=excluded.height,background_path=excluded.background_path,
-			background_contains_ingredients=excluded.background_contains_ingredients,image_scale=excluded.image_scale,
-			canvas=excluded.canvas,catalysts=excluded.catalysts,recipe_count=excluded.recipe_count`,
-			snapshotID, identity.ID, revisionID, category.TitleTranslationKey, titleNames, category.Width, category.Height,
-			category.Background, category.BackgroundContainsIngredients, max(1, category.ImageScale), canvas, catalysts, category.RecipeCount)
-		queued += 3
-	}
-	if queued == 0 {
-		return nil
-	}
-	results := tx.SendBatch(ctx, batch)
-	defer results.Close()
-	for index := 0; index < queued; index++ {
-		if _, err := results.Exec(); err != nil {
-			return fmt.Errorf("persist recipe type: %w", err)
-		}
-	}
-	return results.Close()
-}
-
-func queueExportRecipeLayout(batch *modExportWriteBatch, packageID, revisionID, name string, raw []byte) error {
-	var document map[string]any
-	if err := json.Unmarshal(raw, &document); err != nil {
-		return fmt.Errorf("decode JEI layout %s: %w", name, err)
-	}
-	if rawLayouts, isCollection := document["layouts"].([]any); isCollection {
-		if exportString(document["schema_version"]) != "mcmods-jei-layout-collection/v1" {
-			return fmt.Errorf("unsupported JEI layout collection schema in %s", name)
-		}
-		recipeTypeID, _ := document["recipe_type_id"].(string)
-		for index, rawLayout := range rawLayouts {
-			layout, ok := rawLayout.(map[string]any)
-			if !ok {
-				return fmt.Errorf("decode JEI layout %s: layouts[%d] is not an object", name, index)
-			}
-			if strings.TrimSpace(exportString(layout["recipe_type_id"])) == "" {
-				layout["recipe_type_id"] = recipeTypeID
-			}
-			layoutName := fmt.Sprintf("%s#%d", name, index)
-			if layoutKey := strings.TrimSpace(exportString(layout["layout_key"])); layoutKey != "" {
-				layoutName = name + "#" + layoutKey
-			}
-			if err := queueExportRecipeLayoutValue(batch, packageID, revisionID, layoutName, layout); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	return queueExportRecipeLayoutValue(batch, packageID, revisionID, name, document)
-}
-
-func queueExportRecipeLayoutValue(batch *modExportWriteBatch, packageID, revisionID, name string, layout map[string]any) error {
-	if exportString(layout["schema_version"]) != "mcmods-jei-layout/v4" {
-		return fmt.Errorf("unsupported JEI layout schema in %s", name)
-	}
-	recipeTypeID, _ := layout["recipe_type_id"].(string)
-	recipeID, _ := layout["recipe_id"].(string)
-	recipeIDSource, _ := layout["recipe_id_source"].(string)
-	recipeIDCanonical, canonicalPresent := layout["recipe_id_canonical"].(bool)
-	background, _ := layout["background"].(string)
-	recipeTypeID = strings.TrimSpace(recipeTypeID)
-	recipeID = strings.TrimSpace(recipeID)
-	recipeIDSource = strings.TrimSpace(recipeIDSource)
-	if recipeTypeID == "" {
-		return nil
-	}
-	canonical, err := canonicalRecipeLayout(layout)
-	if err != nil {
-		return err
-	}
-	fingerprint := sha256Hex(canonical)
-	if recipeID == "" {
-		return fmt.Errorf("JEI layout %s has no recipe ID", name)
-	}
-	if recipeIDSource == "" || !canonicalPresent {
-		return fmt.Errorf("JEI layout %s has incomplete recipe identity", name)
-	}
-	switch recipeIDSource {
-	case "minecraft_recipe", "jei_category":
-		if !recipeIDCanonical {
-			return fmt.Errorf("JEI layout %s marks authoritative recipe ID %q as non-canonical", name, recipeID)
-		}
-	case "generated_index":
-		if recipeIDCanonical {
-			return fmt.Errorf("JEI layout %s marks generated recipe ID %q as canonical", name, recipeID)
-		}
-	default:
-		return fmt.Errorf("JEI layout %s uses unsupported recipe ID source %q", name, recipeIDSource)
-	}
-	layout["recipe_id_source"] = recipeIDSource
-	layout["recipe_id_canonical"] = recipeIDCanonical
-	recipeType := recipeTypeIdentity(recipeTypeID)
-	recipe := recipeIdentity(packageID, recipeTypeID, recipeID, recipeIDCanonical)
-	recipeSnapshotID := catalogSnapshotID("recipe", revisionID, recipe.ID, name)
-	encoded, err := json.Marshal(layout)
-	if err != nil {
-		return err
-	}
-	compactEncoded, err := json.Marshal(compactRecipeLayoutValue(layout))
-	if err != nil {
-		return err
-	}
-	batch.queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'recipe_type','active') on conflict(id) do nothing`, 0, recipeType.ID, recipeType.PublicID)
-	batch.queue(`insert into recipe_types(entity_id,canonical_id) values($1,$2) on conflict(canonical_id) do nothing`, 0, recipeType.ID, recipeTypeID)
-	batch.queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'recipe','active')
-		on conflict(id) do update set status='active',updated_at=now()`, 0, recipe.ID, recipe.PublicID)
-	canonicalSourceID := any(nil)
-	if recipeIDCanonical {
-		canonicalSourceID = recipeID
-	}
-	batch.queue(`insert into recipes(entity_id,recipe_type_id,canonical_source_id,semantic_fingerprint,owner_mod_id,identity_source)
-		select $1,$2,$3,$4,revision.mod_id,$5 from mod_export_revisions revision where revision.id=$6
-		on conflict(entity_id) do update set semantic_fingerprint=excluded.semantic_fingerprint`,
-		0, recipe.ID, recipeType.ID, canonicalSourceID, fingerprint, recipeIDSource, revisionID)
-	batch.queue(`insert into recipe_snapshots(id,recipe_id,revision_id,source_recipe_id,source_id_kind,layout_path,background_path,layout,compact_layout)
-		values($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)
-		on conflict(recipe_id,revision_id,layout_path) do update set background_path=excluded.background_path,layout=excluded.layout,compact_layout=excluded.compact_layout`,
-		int64(len(encoded)+len(compactEncoded)), recipeSnapshotID, recipe.ID, revisionID, recipeID, recipeIDSource, name, background, string(encoded), string(compactEncoded))
-	queueExportRecipeItems(batch, revisionID, recipe.ID, recipeSnapshotID, layout)
-	return nil
-}
-
 func exportString(value any) string {
 	result, _ := value.(string)
 	return result
-}
-
-func compactRecipeLayoutValue(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		result := make(map[string]any, len(typed))
-		for key, child := range typed {
-			if key == "names" || strings.HasSuffix(key, "_names") || key == "translation_key" || key == "title_component" {
-				continue
-			}
-			result[key] = compactRecipeLayoutValue(child)
-		}
-		return result
-	case []any:
-		result := make([]any, len(typed))
-		for index, child := range typed {
-			result[index] = compactRecipeLayoutValue(child)
-		}
-		return result
-	default:
-		return value
-	}
-}
-
-func queueExportRecipeItems(batch *modExportWriteBatch, revisionID, recipeID, recipeSnapshotID string, layout map[string]any) {
-	slots, _ := layout["slots"].([]any)
-	for slotIndex, rawSlot := range slots {
-		slot, _ := rawSlot.(map[string]any)
-		role, _ := slot["role"].(string)
-		if role != "input" && role != "output" && role != "catalyst" {
-			continue
-		}
-		tagID := exportRecipeSlotTagID(slot)
-		alternatives, _ := slot["alternatives"].([]any)
-		for alternativeIndex, rawAlternative := range alternatives {
-			alternative, _ := rawAlternative.(map[string]any)
-			ingredientType := strings.TrimSpace(exportString(alternative["type"]))
-			ingredientKind := exportIngredientKind(ingredientType)
-			itemID, _ := alternative["item"].(string)
-			if itemID == "" {
-				itemID, _ = alternative["resource_location"].(string)
-			}
-			itemID = strings.TrimSpace(itemID)
-			if itemID == "" {
-				continue
-			}
-			uniqueID := strings.TrimSpace(exportString(alternative["unique_id"]))
-			nbtSNBT := strings.TrimSpace(exportString(alternative["nbt_snbt"]))
-			amount := exportRecipeAmount(alternative)
-			kindCode := resourceKindForIngredient(ingredientKind, ingredientType)
-			resource := resourceIdentity(kindCode, itemID)
-			namespace, resourcePath := resourceParts(itemID)
-			batch.queue(`insert into resource_kinds(code,family,user_visible) values($1,split_part($1,'.',1),true) on conflict(code) do nothing`, 0, kindCode)
-			batch.queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'resource','placeholder') on conflict(id) do nothing`, 0, resource.ID, resource.PublicID)
-			batch.queue(`insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path,resolved)
-				values($1,$2,$3,$4,$5,false) on conflict(kind_code,canonical_id) do nothing`, 0, resource.ID, kindCode, itemID, namespace, resourcePath)
-			var tagEntityID any
-			if tagID != "" {
-				tag := tagIdentity(registryForResourceKind(kindCode), tagID)
-				tagEntityID = tag.ID
-				batch.queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'tag','placeholder') on conflict(id) do nothing`, 0, tag.ID, tag.PublicID)
-				batch.queue(`insert into catalog_tags(entity_id,registry,canonical_id) values($1,$2,$3) on conflict(registry,canonical_id) do nothing`, 0, tag.ID, registryForResourceKind(kindCode), tagID)
-			}
-			ingredientID := catalogSnapshotID("ingredient", recipeSnapshotID, resource.ID, fmt.Sprintf("%s:%d:%d", role, slotIndex, alternativeIndex))
-			batch.queue(`insert into recipe_ingredients(id,recipe_snapshot_id,role,slot_index,alternative_index,resource_id,tag_id,
-				raw_resource_id,amount,ingredient_kind,ingredient_type,nbt_snbt)
-				values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-				on conflict(recipe_snapshot_id,role,slot_index,alternative_index,raw_resource_id) do update set
-				resource_id=excluded.resource_id,tag_id=excluded.tag_id,amount=excluded.amount,nbt_snbt=excluded.nbt_snbt`,
-				int64(96+len(uniqueID)+len(nbtSNBT)), ingredientID, recipeSnapshotID, role, slotIndex, alternativeIndex,
-				resource.ID, tagEntityID, itemID, amount, ingredientKind, ingredientType, nbtSNBT)
-			unresolvedID := catalogSnapshotID("reference", revisionID, recipeID, ingredientID)
-			batch.queue(`insert into unresolved_resource_references(id,source_entity_id,source_revision_id,field_path,kind_code,raw_resource_id,resolved_resource_id,status,resolved_at)
-				select $1,$2,$3,$4,$5,$6,$7,case when exists(select 1 from game_resource_snapshots where resource_id=$7) then 'resolved' else 'pending' end,
-				case when exists(select 1 from game_resource_snapshots where resource_id=$7) then now() else null end
-				on conflict(source_entity_id,source_revision_id,field_path,kind_code,raw_resource_id) do update set
-				resolved_resource_id=excluded.resolved_resource_id,status=excluded.status,resolved_at=excluded.resolved_at`,
-				0, unresolvedID, recipeID, revisionID, fmt.Sprintf("slots.%d.alternatives.%d", slotIndex, alternativeIndex), kindCode, itemID, resource.ID)
-		}
-	}
-}
-
-func registryForResourceKind(kindCode string) string {
-	switch kindCode {
-	case "minecraft.item":
-		return "items"
-	case "minecraft.block":
-		return "blocks"
-	case "minecraft.fluid":
-		return "fluids"
-	default:
-		return kindCode
-	}
 }
 
 func exportIngredientKind(ingredientType string) string {
@@ -1120,14 +896,6 @@ func exportIngredientKind(ingredientType string) string {
 	}
 }
 
-func exportRecipeSlotTagID(slot map[string]any) string {
-	tagID := strings.TrimSpace(exportString(slot["item_tag_equivalent"]))
-	if tagID == "" {
-		tagID = strings.TrimSpace(exportString(slot["tag"]))
-	}
-	return tagID
-}
-
 func exportRecipeAmount(alternative map[string]any) float64 {
 	for _, key := range []string{"count", "amount"} {
 		if value, ok := alternative[key].(float64); ok && value > 0 {
@@ -1135,34 +903,6 @@ func exportRecipeAmount(alternative map[string]any) float64 {
 		}
 	}
 	return 1
-}
-
-func canonicalRecipeLayout(layout map[string]any) ([]byte, error) {
-	result := map[string]any{"recipeTypeId": layout["recipe_type_id"], "parameters": layout["parameters"]}
-	canonicalSlots := make([]map[string]any, 0)
-	if slots, ok := layout["slots"].([]any); ok {
-		for _, rawSlot := range slots {
-			slot, _ := rawSlot.(map[string]any)
-			canonicalSlot := map[string]any{"role": slot["role"], "tag": exportRecipeSlotTagID(slot)}
-			alternatives := make([]map[string]any, 0)
-			if rawAlternatives, ok := slot["alternatives"].([]any); ok {
-				for _, rawAlternative := range rawAlternatives {
-					alternative, _ := rawAlternative.(map[string]any)
-					value := make(map[string]any)
-					for _, key := range []string{"type", "resource_location", "unique_id", "item", "tag", "count", "amount", "nbt", "nbt_snbt"} {
-						if field, exists := alternative[key]; exists {
-							value[key] = field
-						}
-					}
-					alternatives = append(alternatives, value)
-				}
-			}
-			canonicalSlot["alternatives"] = alternatives
-			canonicalSlots = append(canonicalSlots, canonicalSlot)
-		}
-	}
-	result["slots"] = canonicalSlots
-	return json.Marshal(result)
 }
 
 func nonEmptyJSON(value json.RawMessage, fallback string) string {
@@ -1232,6 +972,93 @@ func readExportZIPFile(file *zip.File, limit int64) ([]byte, error) {
 		return nil, errors.New("ZIP entry exceeds read limit")
 	}
 	return data, nil
+}
+
+func exportAssetFileNames(fileNames []string, files map[string]*zip.File) []string {
+	result := make([]string, 0, len(fileNames))
+	for _, name := range fileNames {
+		file := files[name]
+		if file == nil || file.FileInfo().IsDir() || name == "recipes/jei/categories.json" ||
+			strings.HasPrefix(name, "recipes/jei/templates/") || strings.HasPrefix(name, "recipes/jei/recipes/") {
+			continue
+		}
+		result = append(result, name)
+	}
+	return result
+}
+
+func exportReadBatchEnd(names []string, files map[string]*zip.File, start int) int {
+	end := start
+	var byteCount int64
+	for end < len(names) && end-start < maxExportReadBatchFiles {
+		fileSize := int64(files[names[end]].UncompressedSize64)
+		if end > start && byteCount+fileSize > maxExportReadBatchBytes {
+			break
+		}
+		byteCount += fileSize
+		end++
+	}
+	return max(start+1, end)
+}
+
+func readExportZIPFiles(ctx context.Context, files map[string]*zip.File, names []string) ([]modExportArchiveFile, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	workerCount := min(len(names), maxExportReadConcurrency)
+	type readJob struct {
+		index int
+		name  string
+	}
+	jobs := make(chan readJob)
+	results := make([]modExportArchiveFile, len(names))
+	var waitGroup sync.WaitGroup
+	var firstErr error
+	var errorMutex sync.Mutex
+	for range workerCount {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			for job := range jobs {
+				if context.Cause(ctx) != nil {
+					continue
+				}
+				data, err := readExportZIPFile(files[job.name], maxExportSingleFileSize)
+				if err != nil {
+					errorMutex.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("read %s: %w", job.name, err)
+					}
+					errorMutex.Unlock()
+					continue
+				}
+				results[job.index] = modExportArchiveFile{Name: job.name, Data: data}
+			}
+		}()
+	}
+	for index, name := range names {
+		if context.Cause(ctx) != nil {
+			break
+		}
+		jobs <- readJob{index: index, name: name}
+	}
+	close(jobs)
+	waitGroup.Wait()
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return results, nil
+}
+
+func isExportTranslationFile(name string) bool {
+	return strings.HasPrefix(name, "translations/") && strings.HasSuffix(name, ".json") && path.Base(name) != "languages.json"
+}
+
+func isExportRegistryFile(name string) bool {
+	return strings.HasPrefix(name, "registries/") && strings.HasSuffix(name, ".json")
 }
 
 func importExportTranslations(ctx context.Context, tx pgx.Tx, revisions map[string]string, jobID, name string, raw []byte) (int, error) {

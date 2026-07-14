@@ -232,21 +232,23 @@ func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, reso
 	rows, err := s.db.Query(ctx, `with preferred as (
 		select minecraft_version,loader from mod_export_revisions where id=$1
 	), ranked as (
-		select ingredient.recipe_snapshot_id,bool_or(ingredient.role='output') produces,
-			bool_or(ingredient.role in ('input','catalyst')) uses,
+		select binding.recipe_snapshot_id,bool_or(slot.role='output') produces,
+			bool_or(slot.role in ('input','catalyst')) uses,
 			row_number() over(partition by snapshot.recipe_id order by (snapshot.revision_id=$1) desc,
 			(revision.minecraft_version=preferred.minecraft_version) desc,
 			(revision.loader=preferred.loader) desc,coalesce(revision.activated_at,revision.created_at) desc) rank
-		from recipe_ingredients ingredient
-		join recipe_snapshots snapshot on snapshot.id=ingredient.recipe_snapshot_id
+		from recipe_binding_alternatives alternative
+		join recipe_bindings binding on binding.id=alternative.binding_id
+		join recipe_template_slots slot on slot.id=binding.template_slot_id
+		join recipe_snapshots snapshot on snapshot.id=binding.recipe_snapshot_id
 		join mod_export_revisions revision on revision.id=snapshot.revision_id
 		cross join preferred
-		where ingredient.resource_id=$2 and (snapshot.revision_id=$1 or revision.is_active)
-		group by ingredient.recipe_snapshot_id,snapshot.recipe_id,snapshot.revision_id,
+		where alternative.resource_id=$2 and binding.ingredient_present and (snapshot.revision_id=$1 or revision.is_active)
+		group by binding.recipe_snapshot_id,snapshot.recipe_id,snapshot.revision_id,
 			revision.minecraft_version,revision.loader,preferred.minecraft_version,preferred.loader,
 			revision.activated_at,revision.created_at
 	)
-	select recipe.entity_id,recipe_type.canonical_id,snapshot.compact_layout,ranked.produces,ranked.uses,snapshot.revision_id
+	select recipe.entity_id,recipe_type.canonical_id,snapshot.id,ranked.produces,ranked.uses,snapshot.revision_id
 	from ranked join recipe_snapshots snapshot on snapshot.id=ranked.recipe_snapshot_id
 	join recipes recipe on recipe.entity_id=snapshot.recipe_id
 	join recipe_types recipe_type on recipe_type.entity_id=recipe.recipe_type_id
@@ -256,18 +258,14 @@ func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, reso
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var recipeID, recipeTypeID, sourceRevisionID string
-		var raw json.RawMessage
+		var recipeID, recipeTypeID, snapshotID, sourceRevisionID string
 		var isProduced, isUsed bool
-		var layout map[string]any
-		if err = rows.Scan(&recipeID, &recipeTypeID, &raw, &isProduced, &isUsed, &sourceRevisionID); err != nil {
+		if err = rows.Scan(&recipeID, &recipeTypeID, &snapshotID, &isProduced, &isUsed, &sourceRevisionID); err != nil {
 			return produces, uses, err
 		}
-		if err = json.Unmarshal(raw, &layout); err != nil {
-			return produces, uses, err
-		}
-		recipe := map[string]any{"entityId": recipeID, "id": recipeID, "type": recipeTypeID, "jeiLayout": layout}
-		decorations = append(decorations, map[string]any{"revisionId": sourceRevisionID, "layout": layout})
+		recipe := map[string]any{"entityId": recipeID, "id": recipeID, "type": recipeTypeID,
+			"recipeSnapshotId": snapshotID, "revisionId": sourceRevisionID}
+		decorations = append(decorations, recipe)
 		if isProduced && len(produces) < 100 {
 			produces = append(produces, recipe)
 		}
@@ -278,8 +276,11 @@ func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, reso
 	if err = rows.Err(); err != nil {
 		return produces, uses, err
 	}
-	if err = s.decorateGlobalRecipeTags(ctx, decorations); err != nil {
+	if err = s.hydrateRecipeRenderLayouts(ctx, decorations); err != nil {
 		return produces, uses, err
+	}
+	for _, recipe := range decorations {
+		recipe["jeiLayout"] = recipe["layout"]
 	}
 	if err = s.decorateRecipeResources(ctx, decorations); err != nil {
 		return produces, uses, err

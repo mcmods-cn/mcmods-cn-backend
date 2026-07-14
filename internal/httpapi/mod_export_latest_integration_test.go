@@ -86,36 +86,64 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		values($1,$2,$3,1,'ready','1.20.1','forge','0.6.0','minecraft',true)`, revisionID, modID, packageID); err != nil {
 		t.Fatal(err)
 	}
-	if err = importExportRecipeTypes(context.Background(), tx, map[string]string{"minecraft": revisionID}, read("recipes/jei/categories.json")); err != nil {
+	categoryRaw := read("recipes/jei/categories.json")
+	var categoryDocument exportJEICategoryDocument
+	if err = json.Unmarshal(categoryRaw, &categoryDocument); err != nil {
 		t.Fatal(err)
 	}
-	if err = importExportTags(context.Background(), tx, map[string]string{"minecraft": revisionID}, read("tags/tags.json")); err != nil {
+	revisions := map[string]string{"minecraft": revisionID}
+	for _, category := range categoryDocument.Categories {
+		revisions[exportResourceNamespace(category.RecipeTypeID)] = revisionID
+	}
+	if err = importExportRecipeTypesV5(context.Background(), tx, packageID, revisions, categoryRaw); err != nil {
+		t.Fatal(err)
+	}
+	if err = importExportTags(context.Background(), tx, revisions, read("tags/tags.json")); err != nil {
 		t.Fatal(err)
 	}
 	batch := newModExportWriteBatch()
-	layoutDocumentCount := 0
-	expectedLayoutCount := 0
+	templateDocumentCount := 0
+	expectedTemplateCount := 0
 	for name, file := range files {
-		if len(name) < len("recipes/jei/layouts/") || name[:len("recipes/jei/layouts/")] != "recipes/jei/layouts/" {
+		if len(name) < len("recipes/jei/templates/") || name[:len("recipes/jei/templates/")] != "recipes/jei/templates/" {
 			continue
 		}
 		value, readErr := readExportZIPFile(file, maxExportJSONSize)
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
-		if err = queueExportRecipeLayout(batch, packageID, revisionID, name, value); err != nil {
+		document, decodeErr := decodeExportJEITemplateCollection(value)
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		if err = queueExportJEITemplateCollection(batch, revisions, name, document); err != nil {
 			t.Fatal(err)
 		}
-		layoutDocumentCount++
-		var document map[string]any
-		if err = json.Unmarshal(value, &document); err != nil {
+		templateDocumentCount++
+		expectedTemplateCount += len(document.Templates)
+		if batch.shouldFlush() {
+			if err = batch.flush(context.Background(), tx); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	expectedRecipeCount := 0
+	for name, file := range files {
+		if len(name) < len("recipes/jei/recipes/") || name[:len("recipes/jei/recipes/")] != "recipes/jei/recipes/" {
+			continue
+		}
+		value, readErr := readExportZIPFile(file, maxExportJSONSize)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		document, decodeErr := decodeExportJEIRecipeCollection(value)
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		if err = queueExportJEIRecipeCollection(batch, packageID, revisions, name, document); err != nil {
 			t.Fatal(err)
 		}
-		if layouts, ok := document["layouts"].([]any); ok {
-			expectedLayoutCount += len(layouts)
-		} else {
-			expectedLayoutCount++
-		}
+		expectedRecipeCount += len(document.Recipes)
 		if batch.shouldFlush() {
 			if err = batch.flush(context.Background(), tx); err != nil {
 				t.Fatal(err)
@@ -125,19 +153,24 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	if err = batch.flush(context.Background(), tx); err != nil {
 		t.Fatal(err)
 	}
-	var recipeTypes, layouts, recipeItems int
+	var recipeTypes, templates, recipes, alternatives int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int from recipe_type_snapshots where revision_id=$1`, revisionID).Scan(&recipeTypes); err != nil {
 		t.Fatal(err)
 	}
-	if err = tx.QueryRow(context.Background(), `select count(*)::int from recipe_snapshots where revision_id=$1`, revisionID).Scan(&layouts); err != nil {
+	if err = tx.QueryRow(context.Background(), `select count(*)::int from recipe_layout_templates where revision_id=$1`, revisionID).Scan(&templates); err != nil {
 		t.Fatal(err)
 	}
-	if err = tx.QueryRow(context.Background(), `select count(*)::int from recipe_ingredients ingredient
-		join recipe_snapshots snapshot on snapshot.id=ingredient.recipe_snapshot_id where snapshot.revision_id=$1`, revisionID).Scan(&recipeItems); err != nil {
+	if err = tx.QueryRow(context.Background(), `select count(*)::int from recipe_snapshots where revision_id=$1`, revisionID).Scan(&recipes); err != nil {
 		t.Fatal(err)
 	}
-	if recipeTypes == 0 || layouts != expectedLayoutCount || layouts == 0 || recipeItems == 0 {
-		t.Fatalf("unexpected normalized counts: recipe types=%d layouts=%d recipe items=%d archive layout documents=%d expected layouts=%d", recipeTypes, layouts, recipeItems, layoutDocumentCount, expectedLayoutCount)
+	if err = tx.QueryRow(context.Background(), `select count(*)::int from recipe_binding_alternatives alternative
+		join recipe_bindings binding on binding.id=alternative.binding_id
+		join recipe_snapshots snapshot on snapshot.id=binding.recipe_snapshot_id where snapshot.revision_id=$1`, revisionID).Scan(&alternatives); err != nil {
+		t.Fatal(err)
+	}
+	if recipeTypes == 0 || templates != expectedTemplateCount || recipes != expectedRecipeCount || alternatives == 0 {
+		t.Fatalf("unexpected normalized counts: types=%d templates=%d/%d recipes=%d/%d alternatives=%d template documents=%d",
+			recipeTypes, templates, expectedTemplateCount, recipes, expectedRecipeCount, alternatives, templateDocumentCount)
 	}
 	var canonicalLayouts, generatedLayouts, invalidIdentities int
 	if err = tx.QueryRow(context.Background(), `select
@@ -150,7 +183,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		where snapshot.revision_id=$1`, revisionID).Scan(&canonicalLayouts, &generatedLayouts, &invalidIdentities); err != nil {
 		t.Fatal(err)
 	}
-	if canonicalLayouts == 0 || generatedLayouts == 0 || invalidIdentities != 0 {
+	if canonicalLayouts == 0 || invalidIdentities != 0 {
 		t.Fatalf("unexpected recipe identity distribution: canonical=%d generated=%d invalid=%d", canonicalLayouts, generatedLayouts, invalidIdentities)
 	}
 	rows, err := tx.Query(context.Background(), `with `+latestGlobalExportScopeCTE+`

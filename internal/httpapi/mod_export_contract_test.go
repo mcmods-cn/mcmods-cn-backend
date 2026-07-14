@@ -88,13 +88,37 @@ func TestExporterSamplePackageContracts(t *testing.T) {
 				}
 			}
 
-			layoutFiles := 0
-			layoutRows := 0
+			categoryFile := files["recipes/jei/categories.json"]
+			if categoryFile == nil {
+				t.Fatal("package contains no JEI v5 category index")
+			}
+			categoryRaw, readErr := readExportZIPFile(categoryFile, maxExportJSONSize)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			var categoryDocument exportJEICategoryDocument
+			if decodeErr := json.Unmarshal(categoryRaw, &categoryDocument); decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			if categoryDocument.SchemaVersion != "mcmods-jei-categories/v5" {
+				t.Fatalf("unexpected JEI category schema %q", categoryDocument.SchemaVersion)
+			}
+			for _, recipe := range categoryDocument.Recipes {
+				if validateErr := validateExportRecipeLayoutKind(recipe.LayoutKind, recipe.Ordered); validateErr != nil {
+					t.Fatalf("recipe index %s: %v", recipe.RecipeKey, validateErr)
+				}
+			}
+			templatesByType := make(map[string]map[string]struct{})
+			templateFiles := 0
+			recipeFiles := 0
+			recipeRows := 0
+			recipeDocuments := make([]exportJEIRecipeCollection, 0)
 			for name, file := range files {
 				if file.FileInfo().IsDir() || !strings.HasSuffix(name, ".json") {
 					continue
 				}
-				if !strings.HasPrefix(name, "recipes/jei/layouts/") &&
+				if !strings.HasPrefix(name, "recipes/jei/templates/") &&
+					!strings.HasPrefix(name, "recipes/jei/recipes/") &&
 					!(strings.HasPrefix(name, "translations/") && path.Base(name) != "languages.json") {
 					continue
 				}
@@ -108,15 +132,42 @@ func TestExporterSamplePackageContracts(t *testing.T) {
 					}
 					continue
 				}
-				batch := newModExportWriteBatch()
-				if queueErr := queueExportRecipeLayout(batch, "sample-package", "sample-revision", name, raw); queueErr != nil {
-					t.Fatal(queueErr)
+				if strings.HasPrefix(name, "recipes/jei/templates/") {
+					document, decodeErr := decodeExportJEITemplateCollection(raw)
+					if decodeErr != nil {
+						t.Fatalf("decode %s: %v", name, decodeErr)
+					}
+					ids := templatesByType[document.RecipeTypeID]
+					if ids == nil {
+						ids = make(map[string]struct{})
+						templatesByType[document.RecipeTypeID] = ids
+					}
+					for _, template := range document.Templates {
+						ids[template.TemplateID] = struct{}{}
+					}
+					templateFiles++
+					continue
 				}
-				layoutFiles++
-				layoutRows += batch.rows
+				document, decodeErr := decodeExportJEIRecipeCollection(raw)
+				if decodeErr != nil {
+					t.Fatalf("decode %s: %v", name, decodeErr)
+				}
+				recipeDocuments = append(recipeDocuments, document)
+				recipeFiles++
+				recipeRows += len(document.Recipes)
 			}
-			if layoutFiles == 0 || layoutRows == 0 {
-				t.Fatal("package contains no importable JEI layout collections")
+			for _, document := range recipeDocuments {
+				for _, recipe := range document.Recipes {
+					if validateErr := validateExportRecipeLayoutKind(recipe.LayoutKind, recipe.Ordered); validateErr != nil {
+						t.Fatalf("recipe %s: %v", recipe.RecipeKey, validateErr)
+					}
+					if _, exists := templatesByType[document.RecipeTypeID][recipe.TemplateID]; !exists {
+						t.Fatalf("recipe %s references missing template %s", recipe.RecipeKey, recipe.TemplateID)
+					}
+				}
+			}
+			if templateFiles == 0 || recipeFiles == 0 || recipeRows == 0 {
+				t.Fatalf("package contains no importable JEI v5 data: templates=%d recipe files=%d recipes=%d", templateFiles, recipeFiles, recipeRows)
 			}
 		})
 	}
