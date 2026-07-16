@@ -2,8 +2,34 @@ package database
 
 func baselineSchemaStatements() []string {
 	statements := []string{
+		`create table public_routes (
+			public_id text primary key check (public_id ~ '^[a-z0-9]{9}$'),
+			entity_type text not null,
+			entity_key text not null,
+			canonical_path text not null default '',
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			unique (entity_type, entity_key)
+		)`,
+		`create or replace function new_public_id() returns text as $$
+		declare
+			alphabet constant text := 'abcdefghjkmnpqrstuvwxyz23456789';
+			candidate text;
+			position integer;
+		begin
+			loop
+				candidate := '';
+				for position in 1..9 loop
+					candidate := candidate || substr(alphabet, 1 + floor(random() * length(alphabet))::integer, 1);
+				end loop;
+				exit when not exists (select 1 from public_routes where public_id = candidate);
+			end loop;
+			return candidate;
+		end;
+		$$ language plpgsql volatile`,
 		`create table if not exists users (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check (public_id ~ '^[a-z0-9]{9}$'),
 			username text not null unique,
 			email text not null unique,
 			display_name text not null,
@@ -26,6 +52,23 @@ func baselineSchemaStatements() []string {
 			updated_at timestamptz not null default now(),
 			last_login_at timestamptz
 		)`,
+		`create or replace function register_user_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id, entity_type, entity_key, canonical_path)
+			values(new.public_id, 'user', new.id::text, '/user/' || new.id::text);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_users_public_route after insert on users
+		 for each row execute function register_user_public_route()`,
+		`create or replace function remove_user_public_route() returns trigger as $$
+		begin
+			delete from public_routes where public_id = old.public_id and entity_type = 'user';
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_users_remove_public_route after delete on users
+		 for each row execute function remove_user_public_route()`,
 		`create table if not exists roles (
 			id bigserial primary key,
 			code text not null unique,
@@ -144,6 +187,120 @@ func baselineSchemaStatements() []string {
 		`create index if not exists idx_oss_files_object_key_prefix on oss_files (object_key text_pattern_ops)`,
 		`create index if not exists idx_oss_files_sha256_size on oss_files (sha256, size_bytes) where sha256 <> ''`,
 		`create index if not exists idx_oss_files_sha256_source_size on oss_files (sha256, source_size_bytes) where sha256 <> ''`,
+		`create table blueprints (
+			id bigserial primary key,
+			public_id text not null unique default new_public_id() check (public_id ~ '^[a-z0-9]{9}$'),
+			owner_id bigint not null references users(id) on delete cascade,
+			title text not null default '',
+			description_markdown text not null default '',
+			source_format text not null,
+			status text not null default 'uploading',
+			original_file_id bigint references oss_files(id) on delete set null,
+			cover_file_id bigint references oss_files(id) on delete set null,
+			original_object_key text not null default '',
+			cover_object_key text not null default '',
+			normalized_object_key text not null default '',
+			size_x integer not null default 0,
+			size_y integer not null default 0,
+			size_z integer not null default 0,
+			block_count bigint not null default 0,
+			palette_count integer not null default 0,
+			entity_count integer not null default 0,
+			data_version integer not null default 0,
+			last_error text not null default '',
+			review_status text not null default 'not_required',
+			published_revision_id bigint,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			check (status in ('uploading','queued','processing','ready','partial','failed','deleted')),
+			check (review_status in ('not_required','pending','approved','rejected'))
+		)`,
+		`create index idx_blueprints_owner_created on blueprints(owner_id, created_at desc)`,
+		`create index idx_blueprints_status_updated on blueprints(status, updated_at desc)`,
+		`create unique index idx_blueprints_owner_original_file on blueprints(owner_id, original_file_id)
+			where original_file_id is not null and status <> 'deleted'`,
+		`create table blueprint_variants (
+			id bigserial primary key,
+			blueprint_id bigint not null references blueprints(id) on delete cascade,
+			format text not null,
+			file_id bigint references oss_files(id) on delete set null,
+			object_key text not null,
+			original boolean not null default false,
+			recommended boolean not null default false,
+			status text not null default 'ready',
+			original_name text not null default '',
+			content_type text not null default 'application/octet-stream',
+			size_bytes bigint not null default 0,
+			sha256 text not null default '',
+			created_by bigint references users(id) on delete set null,
+			created_at timestamptz not null default now(),
+			unique (blueprint_id, object_key),
+			check (status in ('queued','processing','ready','failed'))
+		)`,
+		`create index idx_blueprint_variants_blueprint on blueprint_variants(blueprint_id, original desc, created_at)`,
+		`create table blueprint_materials (
+			blueprint_id bigint not null references blueprints(id) on delete cascade,
+			block_state text not null,
+			block_id text not null,
+			properties jsonb not null default '{}'::jsonb check (jsonb_typeof(properties) = 'object'),
+			block_count bigint not null,
+			primary key (blueprint_id, block_state)
+		)`,
+		`create index idx_blueprint_materials_count on blueprint_materials(blueprint_id, block_count desc)`,
+		`create table blueprint_jobs (
+			id bigserial primary key,
+			blueprint_id bigint not null references blueprints(id) on delete cascade,
+			operation text not null,
+			target_format text not null default '',
+			status text not null default 'queued',
+			progress integer not null default 0,
+			attempts integer not null default 0,
+			last_error text not null default '',
+			created_by bigint references users(id) on delete set null,
+			created_at timestamptz not null default now(),
+			started_at timestamptz,
+			finished_at timestamptz,
+			updated_at timestamptz not null default now(),
+			check (operation in ('normalize','convert')),
+			check (status in ('queued','processing','completed','failed')),
+			check (progress between 0 and 100)
+		)`,
+		`create index idx_blueprint_jobs_queue on blueprint_jobs(status, created_at)`,
+		`create table favorite_collections (
+			id bigserial primary key,
+			user_id bigint not null references users(id) on delete cascade,
+			name text not null,
+			is_default boolean not null default false,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			unique(user_id,name)
+		)`,
+		`create unique index idx_favorite_collections_default on favorite_collections(user_id) where is_default`,
+		`create table favorite_collection_items (
+			collection_id bigint not null references favorite_collections(id) on delete cascade,
+			entity_type text not null,
+			entity_key text not null,
+			created_at timestamptz not null default now(),
+			primary key(collection_id,entity_type,entity_key)
+		)`,
+		`create index idx_favorite_items_entity on favorite_collection_items(entity_type,entity_key)`,
+		`create or replace function register_blueprint_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id, entity_type, entity_key, canonical_path)
+			values(new.public_id, 'blueprint', new.id::text, '/blueprints/' || new.public_id);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_blueprints_public_route after insert on blueprints
+		 for each row execute function register_blueprint_public_route()`,
+		`create or replace function remove_blueprint_public_route() returns trigger as $$
+		begin
+			delete from public_routes where public_id = old.public_id and entity_type = 'blueprint';
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_blueprints_remove_public_route after delete on blueprints
+		 for each row execute function remove_blueprint_public_route()`,
 		`create table if not exists permission_role_tracks (
 			code text primary key,
 			name text not null,
@@ -325,7 +482,7 @@ func baselineSchemaStatements() []string {
 		`create index if not exists idx_ai_task_logs_task_created_at on ai_task_logs (task_id, created_at desc)`,
 		`create table if not exists mods (
 			id bigserial primary key,
-			project_code text not null unique check (project_code ~ '^[a-z0-9]{7}$'),
+			project_code text not null unique check (project_code ~ '^[a-z0-9]{9}$'),
 			slug text not null unique,
 			primary_name text not null,
 			secondary_name text not null default '',
@@ -368,6 +525,32 @@ func baselineSchemaStatements() []string {
 		$$ language plpgsql`,
 		`create trigger trg_mod_unique_id_immutable before update of project_code on mods
 		 for each row execute function prevent_mod_unique_id_update()`,
+		`create or replace function register_mod_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id, entity_type, entity_key, canonical_path)
+			values(new.project_code, 'mod', new.id::text, '/mods/' || new.slug);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mods_public_route after insert on mods
+		 for each row execute function register_mod_public_route()`,
+		`create or replace function update_mod_public_route() returns trigger as $$
+		begin
+			update public_routes set canonical_path = '/mods/' || new.slug, updated_at = now()
+			where public_id = new.project_code and entity_type = 'mod';
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mods_update_public_route after update of slug on mods
+		 for each row execute function update_mod_public_route()`,
+		`create or replace function remove_mod_public_route() returns trigger as $$
+		begin
+			delete from public_routes where public_id = old.project_code and entity_type = 'mod';
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mods_remove_public_route after delete on mods
+		 for each row execute function remove_mod_public_route()`,
 		`create index if not exists idx_mods_review_updated_at on mods (review_status, updated_at desc)`,
 		`create index if not exists idx_mods_created_by_updated_at on mods (created_by, updated_at desc)`,
 		`create index if not exists idx_mods_primary_name_lower on mods (lower(primary_name))`,

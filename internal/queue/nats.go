@@ -86,6 +86,14 @@ func DefaultTaskConfigs() []config.NATSTaskConfig {
 			MaxConcurrent:  4,
 			TimeoutSeconds: 180,
 		},
+		{
+			Code:           "blueprint_convert",
+			Enabled:        true,
+			Subject:        "blueprints.convert",
+			QueueGroup:     "mcmods-blueprint-workers",
+			MaxConcurrent:  4,
+			TimeoutSeconds: 1800,
+		},
 	}
 }
 

@@ -28,7 +28,7 @@ func catalogSchemaStatements() []string {
 		)`,
 		`create table catalog_entities (
 			id text primary key,
-			public_id text not null unique,
+			public_id text not null unique default new_public_id() check (public_id ~ '^[a-z0-9]{9}$'),
 			entity_type text not null,
 			status text not null default 'active',
 			created_at timestamptz not null default now(),
@@ -36,6 +36,37 @@ func catalogSchemaStatements() []string {
 			check (entity_type in ('resource','recipe','recipe_type','tag','structure','document')),
 			check (status in ('active','placeholder','archived'))
 		)`,
+		`create or replace function ensure_catalog_public_id() returns trigger as $$
+		begin
+			if exists (
+				select 1 from public_routes
+				where public_id = new.public_id
+				  and not (entity_type = new.entity_type and entity_key = new.id)
+			) then
+				new.public_id := new_public_id();
+			end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_catalog_entities_ensure_public_id before insert on catalog_entities
+		 for each row execute function ensure_catalog_public_id()`,
+		`create or replace function register_catalog_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id, entity_type, entity_key)
+			values(new.public_id, new.entity_type, new.id);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_catalog_entities_public_route after insert on catalog_entities
+		 for each row execute function register_catalog_public_route()`,
+		`create or replace function remove_catalog_public_route() returns trigger as $$
+		begin
+			delete from public_routes where public_id = old.public_id and entity_key = old.id;
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_catalog_entities_remove_public_route after delete on catalog_entities
+		 for each row execute function remove_catalog_public_route()`,
 		`create index idx_catalog_entities_type_status on catalog_entities(entity_type,status,id)`,
 		`create table resource_kinds (
 			code text primary key,

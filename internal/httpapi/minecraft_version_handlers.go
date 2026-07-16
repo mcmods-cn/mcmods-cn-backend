@@ -1,12 +1,27 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const minecraftVersionsSettingKey = "minecraft.versions"
+const (
+	minecraftVersionsSettingKey = "minecraft.versions"
+	mojangVersionManifestURL    = "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json"
+	maxMinecraftVersions        = 2500
+	maxMinecraftManifestBytes   = 8 << 20
+)
+
+var minecraftVersionSyncMu sync.Mutex
 
 type minecraftVersionOption struct {
 	Code string `json:"code"`
@@ -20,18 +35,33 @@ type minecraftLoaderOption struct {
 }
 
 type minecraftVersionConfig struct {
-	Versions []minecraftVersionOption `json:"versions"`
-	Loaders  []minecraftLoaderOption  `json:"loaders"`
+	Versions       []minecraftVersionOption `json:"versions"`
+	Loaders        []minecraftLoaderOption  `json:"loaders"`
+	SourceURL      string                   `json:"sourceUrl"`
+	LastSyncedAt   string                   `json:"lastSyncedAt,omitempty"`
+	LatestRelease  string                   `json:"latestRelease,omitempty"`
+	LatestSnapshot string                   `json:"latestSnapshot,omitempty"`
+}
+
+type mojangVersionManifest struct {
+	Latest struct {
+		Release  string `json:"release"`
+		Snapshot string `json:"snapshot"`
+	} `json:"latest"`
+	Versions []struct {
+		ID   string `json:"id"`
+		Type string `json:"type"`
+	} `json:"versions"`
 }
 
 func (s *Server) publicMinecraftVersions(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.minecraftVersionConfig(r))
+	writeJSON(w, http.StatusOK, loadMinecraftVersionConfig(r.Context(), s.db))
 }
 
 func (s *Server) updateMinecraftVersions(w http.ResponseWriter, r *http.Request) {
 	var payload minecraftVersionConfig
 	if err := decodeJSON(r, &payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		writeError(w, http.StatusBadRequest, "request body is invalid")
 		return
 	}
 	config, err := normalizeMinecraftVersionConfig(payload)
@@ -39,52 +69,156 @@ func (s *Server) updateMinecraftVersions(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	raw, _ := json.Marshal(config)
-	_, err = s.db.Exec(
-		r.Context(),
-		`insert into system_settings (key, value, updated_at) values ($1, $2::jsonb, now())
-		 on conflict (key) do update set value=excluded.value, updated_at=now()`,
-		minecraftVersionsSettingKey,
-		string(raw),
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "保存 Minecraft 版本设置失败")
+	current := loadMinecraftVersionConfig(r.Context(), s.db)
+	copyMinecraftSyncMetadata(&config, current)
+	if err = saveMinecraftVersionConfig(r.Context(), s.db, config); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save Minecraft version settings")
 		return
 	}
 	writeJSON(w, http.StatusOK, config)
 }
 
-func (s *Server) minecraftVersionConfig(r *http.Request) minecraftVersionConfig {
-	config := defaultMinecraftVersionConfig()
-	var raw []byte
-	if err := s.db.QueryRow(r.Context(), `select value from system_settings where key=$1`, minecraftVersionsSettingKey).Scan(&raw); err == nil {
-		var stored minecraftVersionConfig
-		if json.Unmarshal(raw, &stored) == nil {
-			if normalized, normalizeErr := normalizeMinecraftVersionConfig(stored); normalizeErr == nil {
-				config = mergeMinecraftVersionConfig(config, normalized)
-			}
-		}
+func (s *Server) syncMinecraftVersions(w http.ResponseWriter, r *http.Request) {
+	config, err := syncMinecraftVersionManifest(r.Context(), s.db)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
 	}
-	return config
+	writeJSON(w, http.StatusOK, config)
 }
 
-func mergeMinecraftVersionConfig(base minecraftVersionConfig, stored minecraftVersionConfig) minecraftVersionConfig {
-	index := make(map[string]int, len(base.Versions))
-	for position, version := range base.Versions {
-		index[version.Code] = position
+func loadMinecraftVersionConfig(ctx context.Context, db *pgxpool.Pool) minecraftVersionConfig {
+	config := defaultMinecraftVersionConfig()
+	var raw []byte
+	if err := db.QueryRow(ctx, `select value from system_settings where key=$1`, minecraftVersionsSettingKey).Scan(&raw); err != nil {
+		return config
 	}
-	for _, version := range stored.Versions {
-		if position, ok := index[version.Code]; ok {
-			base.Versions[position] = version
+	var stored minecraftVersionConfig
+	if json.Unmarshal(raw, &stored) != nil {
+		return config
+	}
+	normalized, err := normalizeMinecraftVersionConfig(stored)
+	if err != nil {
+		return config
+	}
+	return mergeMinecraftVersionConfig(config, normalized)
+}
+
+func saveMinecraftVersionConfig(ctx context.Context, db *pgxpool.Pool, config minecraftVersionConfig) error {
+	raw, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `insert into system_settings (key,value,updated_at) values ($1,$2::jsonb,now())
+		on conflict (key) do update set value=excluded.value,updated_at=now()`, minecraftVersionsSettingKey, string(raw))
+	return err
+}
+
+func syncMinecraftVersionManifest(ctx context.Context, db *pgxpool.Pool) (minecraftVersionConfig, error) {
+	minecraftVersionSyncMu.Lock()
+	defer minecraftVersionSyncMu.Unlock()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, mojangVersionManifestURL, nil)
+	if err != nil {
+		return minecraftVersionConfig{}, err
+	}
+	request.Header.Set("User-Agent", "mcmods.cn/version-sync")
+	response, err := (&http.Client{Timeout: 20 * time.Second}).Do(request)
+	if err != nil {
+		return minecraftVersionConfig{}, fmt.Errorf("failed to request Mojang version manifest: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return minecraftVersionConfig{}, fmt.Errorf("Mojang version manifest returned HTTP %d", response.StatusCode)
+	}
+
+	var manifest mojangVersionManifest
+	reader := io.LimitReader(response.Body, maxMinecraftManifestBytes+1)
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		return minecraftVersionConfig{}, fmt.Errorf("failed to read Mojang version manifest: %w", err)
+	}
+	if len(payload) > maxMinecraftManifestBytes {
+		return minecraftVersionConfig{}, fmt.Errorf("Mojang version manifest exceeds %d bytes", maxMinecraftManifestBytes)
+	}
+	if err = json.Unmarshal(payload, &manifest); err != nil {
+		return minecraftVersionConfig{}, fmt.Errorf("failed to decode Mojang version manifest: %w", err)
+	}
+
+	current := loadMinecraftVersionConfig(ctx, db)
+	knownTypes := make(map[string]string, len(current.Versions))
+	for _, version := range current.Versions {
+		knownTypes[version.Code] = version.Type
+	}
+	versions := make([]minecraftVersionOption, 0, len(manifest.Versions)+len(current.Versions))
+	seen := make(map[string]bool, cap(versions))
+	for _, version := range manifest.Versions {
+		code := strings.TrimSpace(version.ID)
+		if code == "" || seen[code] {
 			continue
 		}
-		index[version.Code] = len(base.Versions)
-		base.Versions = append(base.Versions, version)
+		versionType := minecraftVersionType(version.Type)
+		if knownTypes[code] == "april_fools" {
+			versionType = "april_fools"
+		}
+		seen[code] = true
+		versions = append(versions, minecraftVersionOption{Code: code, Type: versionType})
+	}
+	for _, version := range current.Versions {
+		if seen[version.Code] {
+			continue
+		}
+		seen[version.Code] = true
+		versions = append(versions, version)
+	}
+	current.Versions = versions
+	current.SourceURL = mojangVersionManifestURL
+	current.LastSyncedAt = time.Now().UTC().Format(time.RFC3339)
+	current.LatestRelease = strings.TrimSpace(manifest.Latest.Release)
+	current.LatestSnapshot = strings.TrimSpace(manifest.Latest.Snapshot)
+	normalized, err := normalizeMinecraftVersionConfig(current)
+	if err != nil {
+		return minecraftVersionConfig{}, err
+	}
+	if err = saveMinecraftVersionConfig(ctx, db, normalized); err != nil {
+		return minecraftVersionConfig{}, fmt.Errorf("failed to save synchronized Minecraft versions: %w", err)
+	}
+	return normalized, nil
+}
+
+func minecraftVersionType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "snapshot":
+		return "snapshot"
+	case "old_alpha", "old_beta":
+		return "legacy"
+	default:
+		return "release"
+	}
+}
+
+func mergeMinecraftVersionConfig(base, stored minecraftVersionConfig) minecraftVersionConfig {
+	if len(stored.Versions) > 0 {
+		base.Versions = stored.Versions
 	}
 	if len(stored.Loaders) > 0 {
 		base.Loaders = stored.Loaders
 	}
+	copyMinecraftSyncMetadata(&base, stored)
 	return base
+}
+
+func copyMinecraftSyncMetadata(target *minecraftVersionConfig, source minecraftVersionConfig) {
+	target.SourceURL = mojangVersionManifestURL
+	if target.LastSyncedAt == "" {
+		target.LastSyncedAt = source.LastSyncedAt
+	}
+	if target.LatestRelease == "" {
+		target.LatestRelease = source.LatestRelease
+	}
+	if target.LatestSnapshot == "" {
+		target.LatestSnapshot = source.LatestSnapshot
+	}
 }
 
 func normalizeMinecraftVersionConfig(payload minecraftVersionConfig) (minecraftVersionConfig, error) {
@@ -97,7 +231,7 @@ func normalizeMinecraftVersionConfig(payload minecraftVersionConfig) (minecraftV
 			continue
 		}
 		if len(version.Code) > 80 {
-			return minecraftVersionConfig{}, &requestError{message: "Minecraft 版本名称过长"}
+			return minecraftVersionConfig{}, &requestError{message: "Minecraft version name is too long"}
 		}
 		if version.Type != "release" && version.Type != "snapshot" && version.Type != "april_fools" && version.Type != "legacy" {
 			version.Type = "release"
@@ -105,9 +239,10 @@ func normalizeMinecraftVersionConfig(payload minecraftVersionConfig) (minecraftV
 		versionSet[version.Code] = true
 		versions = append(versions, version)
 	}
-	if len(versions) > 500 {
-		return minecraftVersionConfig{}, &requestError{message: "Minecraft 版本数量过多"}
+	if len(versions) > maxMinecraftVersions {
+		return minecraftVersionConfig{}, &requestError{message: "too many Minecraft versions"}
 	}
+
 	loaderSet := map[string]bool{}
 	loaders := make([]minecraftLoaderOption, 0, len(payload.Loaders))
 	for _, loader := range payload.Loaders {
@@ -117,10 +252,10 @@ func normalizeMinecraftVersionConfig(payload minecraftVersionConfig) (minecraftV
 			continue
 		}
 		if len(loader.Code) > 80 || len(loader.Name) > 120 {
-			return minecraftVersionConfig{}, &requestError{message: "模组加载器名称过长"}
+			return minecraftVersionConfig{}, &requestError{message: "Minecraft loader name is too long"}
 		}
 		loaderSet[loader.Code] = true
-		loader.Versions = uniqueTrimmed(loader.Versions, 500)
+		loader.Versions = uniqueTrimmed(loader.Versions, maxMinecraftVersions)
 		filtered := loader.Versions[:0]
 		for _, version := range loader.Versions {
 			if versionSet[version] {
@@ -134,37 +269,31 @@ func normalizeMinecraftVersionConfig(payload minecraftVersionConfig) (minecraftV
 		loaders = append(loaders, loader)
 	}
 	if len(loaders) > 100 {
-		return minecraftVersionConfig{}, &requestError{message: "模组加载器数量过多"}
+		return minecraftVersionConfig{}, &requestError{message: "too many Minecraft loaders"}
 	}
-	return minecraftVersionConfig{Versions: versions, Loaders: loaders}, nil
+	return minecraftVersionConfig{
+		Versions: versions, Loaders: loaders, SourceURL: mojangVersionManifestURL,
+		LastSyncedAt: strings.TrimSpace(payload.LastSyncedAt), LatestRelease: strings.TrimSpace(payload.LatestRelease),
+		LatestSnapshot: strings.TrimSpace(payload.LatestSnapshot),
+	}, nil
 }
 
 func defaultMinecraftVersionConfig() minecraftVersionConfig {
-	releases := []string{
-		"1.21.5", "1.21.4", "1.21.3", "1.21.2", "1.21.1", "1.21", "1.20.6", "1.20.5", "1.20.4", "1.20.3", "1.20.2", "1.20.1", "1.20",
-		"1.19.4", "1.19.3", "1.19.2", "1.19.1", "1.19", "1.18.2", "1.18.1", "1.18", "1.17.1", "1.17", "1.16.5", "1.16.4", "1.16.3", "1.16.2", "1.16.1", "1.16",
-		"1.15.2", "1.15.1", "1.15", "1.14.4", "1.14.3", "1.14.2", "1.14.1", "1.14", "1.13.2", "1.13.1", "1.13", "1.12.2", "1.12.1", "1.12", "1.11.2", "1.11.1", "1.11",
-		"1.10.2", "1.10.1", "1.10", "1.9.4", "1.9.3", "1.9.2", "1.9.1", "1.9", "1.8.9", "1.8.8", "1.8.7", "1.8.6", "1.8.5", "1.8.4", "1.8.3", "1.8.2", "1.8.1", "1.8",
-		"1.7.10", "1.7.9", "1.7.8", "1.7.7", "1.7.6", "1.7.5", "1.7.4", "1.7.3", "1.7.2", "1.6.4", "1.6.2", "1.6.1", "1.5.2", "1.5.1", "1.5", "1.4.7", "1.4.6", "1.4.5", "1.4.4", "1.4.2", "1.3.2", "1.3.1", "1.2.5", "1.2.4", "1.2.3", "1.2.2", "1.2.1", "1.1", "1.0.1", "1.0.0",
+	versions := []minecraftVersionOption{
+		{Code: "1.21.5", Type: "release"}, {Code: "1.21.4", Type: "release"}, {Code: "1.21.1", Type: "release"},
+		{Code: "1.20.6", Type: "release"}, {Code: "1.20.4", Type: "release"}, {Code: "1.20.1", Type: "release"},
+		{Code: "1.19.4", Type: "release"}, {Code: "1.19.2", Type: "release"}, {Code: "1.18.2", Type: "release"},
+		{Code: "1.17.1", Type: "release"}, {Code: "1.16.5", Type: "release"}, {Code: "1.15.2", Type: "release"},
+		{Code: "1.14.4", Type: "release"}, {Code: "1.13.2", Type: "release"}, {Code: "1.12.2", Type: "release"},
+		{Code: "1.11.2", Type: "release"}, {Code: "1.10.2", Type: "release"}, {Code: "1.9.4", Type: "release"},
+		{Code: "1.8.9", Type: "release"}, {Code: "1.7.10", Type: "release"}, {Code: "1.6.4", Type: "release"},
+		{Code: "25w10a", Type: "snapshot"},
+		{Code: "25w14craftmine", Type: "april_fools"}, {Code: "24w14potato", Type: "april_fools"},
+		{Code: "23w13a_or_b", Type: "april_fools"}, {Code: "22w13oneBlockAtATime", Type: "april_fools"},
+		{Code: "20w14infinite", Type: "april_fools"}, {Code: "3D Shareware v1.34", Type: "april_fools"},
+		{Code: "1.RV-Pre1", Type: "april_fools"}, {Code: "15w14a", Type: "april_fools"},
+		{Code: "b1.7.3", Type: "legacy"}, {Code: "a1.2.6", Type: "legacy"}, {Code: "rd-132211", Type: "legacy"},
 	}
-	snapshots := []string{"25w14craftmine", "25w10a", "25w09b", "25w09a", "25w08a", "25w07a", "25w06a", "25w05a", "25w04a", "25w03a", "25w02a", "24w46a", "24w45a", "24w44a", "24w40a", "24w39a", "24w38a", "24w37a", "24w36a", "24w35a", "24w34a", "24w33a", "24w21b", "24w21a", "24w20a", "24w19b", "24w19a", "24w18a", "23w51b", "23w51a", "23w46a", "23w45a", "23w44a", "23w43b", "23w43a", "23w42a", "23w41a", "23w40a", "23w35a", "23w33a", "23w32a", "23w31a"}
-	aprilFools := []string{"25w14craftmine", "24w14potato", "23w13a_or_b", "22w13oneBlockAtATime", "20w14∞", "3D Shareware v1.34", "1.RV-Pre1", "15w14a", "Minecraft 2.0"}
-	legacy := []string{"b1.8.1", "b1.7.3", "b1.6.6", "b1.5_01", "b1.4_01", "b1.3_01", "b1.2_02", "b1.1_02", "a1.2.6", "a1.2.5", "a1.2.4_01", "a1.2.3_04", "a1.2.2b", "a1.2.1_01", "a1.2.0_02", "a1.1.2_01", "a1.1.0", "a1.0.17_04", "a1.0.16", "a1.0.15", "a1.0.14", "a1.0.11", "a1.0.5_01", "inf-20100630", "c0.30_01c", "c0.0.23a_01", "rd-132211"}
-	versions := make([]minecraftVersionOption, 0, len(releases)+len(snapshots)+len(aprilFools)+len(legacy))
-	seen := map[string]bool{}
-	appendVersions := func(codes []string, versionType string) {
-		for _, code := range codes {
-			if seen[code] {
-				continue
-			}
-			seen[code] = true
-			versions = append(versions, minecraftVersionOption{Code: code, Type: versionType})
-		}
-	}
-	appendVersions(releases, "release")
-	appendVersions(aprilFools, "april_fools")
-	appendVersions(snapshots, "snapshot")
-	appendVersions(legacy, "legacy")
 	versionCodes := make([]string, 0, len(versions))
 	for _, version := range versions {
 		versionCodes = append(versionCodes, version.Code)
@@ -174,7 +303,40 @@ func defaultMinecraftVersionConfig() minecraftVersionConfig {
 	for _, name := range loaderNames {
 		loaders = append(loaders, minecraftLoaderOption{Code: name, Name: name, Versions: append([]string(nil), versionCodes...)})
 	}
-	return minecraftVersionConfig{Versions: versions, Loaders: loaders}
+	return minecraftVersionConfig{Versions: versions, Loaders: loaders, SourceURL: mojangVersionManifestURL}
+}
+
+func StartMinecraftVersionSyncScheduler(ctx context.Context, db *pgxpool.Pool) {
+	go func() {
+		for {
+			next := nextMinecraftVersionSync(time.Now())
+			timer := time.NewTimer(time.Until(next))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+				if _, err := syncMinecraftVersionManifest(ctx, db); err != nil {
+					log.Printf("synchronize Minecraft versions: %v", err)
+				} else {
+					log.Printf("Minecraft versions synchronized from Mojang")
+				}
+			}
+		}
+	}()
+}
+
+func nextMinecraftVersionSync(now time.Time) time.Time {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		location = time.FixedZone("Asia/Shanghai", 8*60*60)
+	}
+	localNow := now.In(location)
+	next := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 4, 0, 0, 0, location)
+	if !next.After(localNow) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
 }
 
 func compatibilitySummary(items []modLoaderCompatibilityPayload) ([]string, []string) {

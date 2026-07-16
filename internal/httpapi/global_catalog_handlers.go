@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -21,6 +22,14 @@ latest_packages as (
 	select revision.* from mod_export_revisions revision
 	join latest_packages package on package.mod_id=revision.mod_id and package.package_id=revision.package_id
 	where revision.is_active and revision.status in ('ready','partial')
+)`
+
+const latestGlobalResourceSnapshotCTE = `
+latest_resource_snapshots as (
+	select distinct on (snapshot.resource_id) snapshot.*
+	from latest_revisions source
+	join game_resource_snapshots snapshot on snapshot.revision_id=source.id
+	order by snapshot.resource_id,coalesce(source.activated_at,source.created_at) desc,source.created_at desc,snapshot.id desc
 )`
 
 type globalTagSnapshot struct {
@@ -52,7 +61,7 @@ func (s *Server) globalModTags(w http.ResponseWriter, r *http.Request) {
 	registry := strings.TrimSpace(r.URL.Query().Get("registry"))
 	limit := boundedLimit(r.URL.Query().Get("limit"), 24, 60)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
-	key := fmt.Sprintf("global-tags:v2:list:%s:%s:%d:%d", registry, query, limit, offset)
+	key := fmt.Sprintf("global-tags:v3:list:%s:%s:%d:%d", registry, query, limit, offset)
 	s.writeCachedCatalog(w, r, key, func(ctx context.Context) (any, error) {
 		var total int
 		if err := s.db.QueryRow(ctx, `with `+latestGlobalExportScopeCTE+`
@@ -65,7 +74,7 @@ func (s *Server) globalModTags(w http.ResponseWriter, r *http.Request) {
 		}
 		rows, err := s.db.Query(ctx, `with `+latestGlobalExportScopeCTE+`
 			select tag.entity_id,entity.public_id,tag.registry,tag.canonical_id,
-				count(distinct coalesce(member.resource_id,member.raw_member_id))::int
+				count(distinct member.raw_member_id)::int
 			from latest_revisions revision
 			join catalog_tag_snapshots snapshot on snapshot.revision_id=revision.id
 			join catalog_tags tag on tag.entity_id=snapshot.tag_id
@@ -85,7 +94,7 @@ func (s *Server) globalModTags(w http.ResponseWriter, r *http.Request) {
 			if err = rows.Scan(&entityID, &publicID, &registryName, &tagID, &memberCount); err != nil {
 				return nil, err
 			}
-			previews, previewErr := s.globalTagMemberRows(ctx, entityID, 10, 0)
+			previews, previewErr := s.globalTagMemberRows(ctx, entityID, registryName, 10, 0)
 			if previewErr != nil {
 				return nil, previewErr
 			}
@@ -107,7 +116,7 @@ func (s *Server) globalModTagDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "tag identity is required")
 		return
 	}
-	key := fmt.Sprintf("global-tags:v2:detail:%s:%s:%s:%s:%s:%d:%d", entityID, registry, tagID, primary, secondary, limit, offset)
+	key := fmt.Sprintf("global-tags:v3:detail:%s:%s:%s:%s:%s:%d:%d", entityID, registry, tagID, primary, secondary, limit, offset)
 	s.writeCachedCatalog(w, r, key, func(ctx context.Context) (any, error) {
 		var publicID string
 		err := s.db.QueryRow(ctx, `select tag.entity_id,entity.public_id,tag.registry,tag.canonical_id
@@ -124,7 +133,7 @@ func (s *Server) globalModTagDetail(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		members, err := s.globalTagMemberRows(ctx, entityID, limit, offset)
+		members, err := s.globalTagMemberRows(ctx, entityID, registry, limit, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -132,7 +141,7 @@ func (s *Server) globalModTagDetail(w http.ResponseWriter, r *http.Request) {
 		err = s.db.QueryRow(ctx, `select coalesce(cardinality(resource_ids),0) from tag_member_overrides where tag_id=$1`, entityID).Scan(&total)
 		if errors.Is(err, pgx.ErrNoRows) {
 			err = s.db.QueryRow(ctx, `with `+latestGlobalExportScopeCTE+`
-				select count(distinct coalesce(member.resource_id,member.raw_member_id))::int
+				select count(distinct member.raw_member_id)::int
 				from latest_revisions revision
 				join catalog_tag_snapshots snapshot on snapshot.revision_id=revision.id
 				join catalog_tag_members member on member.tag_snapshot_id=snapshot.id
@@ -475,6 +484,7 @@ func (s *Server) writeCachedCatalog(w http.ResponseWriter, r *http.Request, key 
 		return
 	}
 	if err != nil {
+		log.Printf("global catalog query %q failed: %v", key, err)
 		writeError(w, http.StatusInternalServerError, "failed to query catalog")
 		return
 	}
@@ -506,31 +516,37 @@ func (s *Server) localizedEntityContent(ctx context.Context, entityID, primary, 
 	return content, locale, revisionID, err
 }
 
-func (s *Server) globalTagMemberRows(ctx context.Context, tagEntityID string, limit, offset int) ([]map[string]any, error) {
+func (s *Server) globalTagMemberRows(ctx context.Context, tagEntityID, tagRegistry string, limit, offset int) ([]map[string]any, error) {
 	var override []string
 	if err := s.db.QueryRow(ctx, `select resource_ids from tag_member_overrides where tag_id=$1`, tagEntityID).Scan(&override); err == nil {
 		return s.globalResourceRows(ctx, override, limit, offset)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
-	rows, err := s.db.Query(ctx, `with `+latestGlobalExportScopeCTE+`, members as (
-		select distinct member.resource_id from latest_revisions revision
+	rows, err := s.db.Query(ctx, `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`, members as (
+		select distinct member.raw_member_id from latest_revisions revision
 		join catalog_tag_snapshots tag_snapshot on tag_snapshot.revision_id=revision.id
 		join catalog_tag_members member on member.tag_snapshot_id=tag_snapshot.id
-		where tag_snapshot.tag_id=$1 and member.resource_id is not null
-		order by member.resource_id limit $2 offset $3
+		where tag_snapshot.tag_id=$1
+		order by member.raw_member_id limit $2 offset $3
 	)
-	select resource.entity_id,entity.public_id,resource.canonical_id,snapshot.registry,snapshot.names,
-		snapshot.revision_id,mod.slug,snapshot.icon_path
+	select coalesce(resolved.entity_id,''),coalesce(entity.public_id,''),members.raw_member_id,
+		coalesce(resolved.registry,''),coalesce(resolved.names,'{}'::jsonb),coalesce(resolved.revision_id::text,''),
+		coalesce(mod.slug,''),coalesce(resolved.icon_path,'')
 	from members
-	join game_resources resource on resource.entity_id=members.resource_id
-	join catalog_entities entity on entity.id=resource.entity_id
-	left join lateral (select candidate.* from latest_revisions source
-		join game_resource_snapshots candidate on candidate.revision_id=source.id
-		where candidate.resource_id=resource.entity_id
-		order by coalesce(source.activated_at,source.created_at) desc limit 1) snapshot on true
-	left join mod_export_revisions revision on revision.id=snapshot.revision_id
-	left join mods mod on mod.id=revision.mod_id order by resource.canonical_id`, tagEntityID, limit, offset)
+	left join lateral (
+		select resource.entity_id,snapshot.registry,snapshot.names,snapshot.revision_id,snapshot.icon_path
+		from game_resources resource
+		join latest_resource_snapshots snapshot on snapshot.resource_id=resource.entity_id
+		where resource.canonical_id=members.raw_member_id
+		order by (coalesce(snapshot.icon_path,'')<>'') desc,
+			case when resource.kind_code=$4 then 0 when resource.kind_code='minecraft.item' then 1 when resource.kind_code='minecraft.block' then 2 else 3 end,
+			resource.entity_id
+		limit 1
+	) resolved on true
+	left join catalog_entities entity on entity.id=resolved.entity_id
+	left join mod_export_revisions revision on revision.id=resolved.revision_id
+	left join mods mod on mod.id=revision.mod_id order by members.raw_member_id`, tagEntityID, limit, offset, resourceKindForRegistry(tagRegistry))
 	if err != nil {
 		return nil, err
 	}
@@ -542,17 +558,15 @@ func (s *Server) globalResourceRows(ctx context.Context, resourceIDs []string, l
 		return []map[string]any{}, nil
 	}
 	selected := resourceIDs[offset:min(len(resourceIDs), offset+limit)]
-	rows, err := s.db.Query(ctx, `with `+latestGlobalExportScopeCTE+`
+	rows, err := s.db.Query(ctx, `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
 	select resource.entity_id,entity.public_id,resource.canonical_id,snapshot.registry,snapshot.names,
 		snapshot.revision_id,mod.slug,snapshot.icon_path
 	from unnest($1::text[]) with ordinality requested(entity_id,ordinal)
 	join game_resources resource on resource.entity_id=requested.entity_id
 	join catalog_entities entity on entity.id=resource.entity_id
-	left join lateral (select candidate.* from latest_revisions source
-		join game_resource_snapshots candidate on candidate.revision_id=source.id
-		where candidate.resource_id=resource.entity_id order by coalesce(source.activated_at,source.created_at) desc limit 1) snapshot on true
-	left join mod_export_revisions revision on revision.id=snapshot.revision_id
-	left join mods mod on mod.id=revision.mod_id order by requested.ordinal`, selected)
+	join latest_resource_snapshots snapshot on snapshot.resource_id=resource.entity_id
+	join mod_export_revisions revision on revision.id=snapshot.revision_id
+	join mods mod on mod.id=revision.mod_id order by requested.ordinal`, selected)
 	if err != nil {
 		return nil, err
 	}

@@ -135,6 +135,45 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 	return result, nil
 }
 
+func withdrawPendingContentRequestsTx(ctx context.Context, tx pgx.Tx, aggregateType, aggregateKey string, actorID int64, request *http.Request) error {
+	rows, err := tx.Query(ctx, `
+		update change_requests set status='withdrawn',resolved_at=now()
+		where aggregate_type=$1 and aggregate_key=$2 and status='pending'
+		returning id`, aggregateType, aggregateKey)
+	if err != nil {
+		return fmt.Errorf("withdraw pending content requests: %w", err)
+	}
+	defer rows.Close()
+	requestIDs := make([]int64, 0)
+	for rows.Next() {
+		var requestID int64
+		if err = rows.Scan(&requestID); err != nil {
+			return fmt.Errorf("scan withdrawn content request: %w", err)
+		}
+		requestIDs = append(requestIDs, requestID)
+	}
+	if err = rows.Err(); err != nil {
+		return fmt.Errorf("iterate withdrawn content requests: %w", err)
+	}
+	if len(requestIDs) == 0 {
+		return nil
+	}
+	actorSnapshot, err := actorSnapshotTx(ctx, tx, actorID)
+	if err != nil {
+		return err
+	}
+	ip, userAgent, _ := auditRequestValues(request)
+	for _, requestID := range requestIDs {
+		if _, err = tx.Exec(ctx, `
+			insert into review_events(change_request_id,event_type,actor_id,actor_snapshot,note,ip,user_agent)
+			values($1,'withdrawn',$2,$3,'Superseded by a newer initial submission',$4,$5)`,
+			requestID, nullableActorID(actorID), actorSnapshot, ip, userAgent); err != nil {
+			return fmt.Errorf("record withdrawn content request: %w", err)
+		}
+	}
+	return nil
+}
+
 type auditEventParams struct {
 	EntityID      string
 	AggregateType string

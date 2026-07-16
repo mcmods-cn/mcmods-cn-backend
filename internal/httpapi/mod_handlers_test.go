@@ -156,7 +156,7 @@ func TestNewModUniqueID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !regexp.MustCompile(`^[a-z][2-9][a-z2-9]{5}$`).MatchString(uniqueID) {
+	if !regexp.MustCompile(`^[a-z][2-9][a-z2-9]{7}$`).MatchString(uniqueID) {
 		t.Fatalf("newModUniqueID() = %q", uniqueID)
 	}
 }

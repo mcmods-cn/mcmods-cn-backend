@@ -125,7 +125,7 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status := "pending"
-	if canSkipProjectReview(claims, identity) {
+	if !loadReviewConfig(r.Context(), s.db).ModEdit || canSkipProjectReview(claims, identity) {
 		status = "approved"
 	}
 	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{

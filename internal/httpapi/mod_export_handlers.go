@@ -1632,23 +1632,19 @@ func (s *Server) notifyModExportResult(ctx context.Context, jobID, status string
 	if err != nil || recipientID <= 0 {
 		return
 	}
-	title := "模组资料导入完成"
-	body := fmt.Sprintf("%s 的 mcmods_exporter 资料已经导入完成。", modName)
+	code := "mod_import_success"
+	values := map[string]string{"name": modName, "skipped": fmt.Sprintf("%d", skipped), "error": ""}
 	if status == "partial" {
-		title = "模组资料部分导入完成"
-		body = fmt.Sprintf("%s 的资料已导入，但导入过程中存在警告。", modName)
-		if skipped > 0 {
-			body = fmt.Sprintf("%s 的资料已导入，但有 %d 条非字符串翻译被跳过。", modName, skipped)
-		}
+		code = "mod_import_partial"
 	}
 	if status == "failed" {
-		title = "模组资料导入失败"
-		body = fmt.Sprintf("%s 的 mcmods_exporter 资料导入失败。", modName)
+		code = "mod_import_failure"
+		values["error"] = "未知错误"
 		if failure != nil {
-			body += " " + failure.Error()
+			values["error"] = failure.Error()
 		}
 	}
-	s.enqueueOrCreateDirectNotification(ctx, recipientID, 0, "system", title, body, map[string]any{
+	s.sendTemplatedNotification(ctx, recipientID, code, values, map[string]any{
 		"type": "mod_export_import", "jobId": jobID, "modSiteId": siteID, "status": status, "translationValuesSkipped": skipped,
 	})
 }

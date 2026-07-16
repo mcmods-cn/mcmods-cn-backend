@@ -37,7 +37,7 @@ var defaultOSSAllowedExtensions = []string{
 	".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
 	".mp4", ".webm", ".mov", ".avi",
 	".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".md",
-	".txt", ".log", ".json", ".nbt", ".schem", ".schematic",
+	".txt", ".log", ".json", ".nbt", ".schem", ".schematic", ".litematic",
 	".zip", ".rar", ".7z", ".jar", ".gz", ".tar",
 }
 
@@ -190,6 +190,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		return
 	}
 	ext := strings.ToLower(filepath.Ext(req.OriginalName))
+	blueprintUpload := scope == "user" && isBlueprintExtension(ext)
 	modExportUniqueID := strings.TrimPrefix(scope, ossModExportScopePrefix)
 	isModExport := modExportUniqueID != scope && modExportUniqueID != ""
 	if (isModExport && ext != ".zip") || (!isModExport && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
@@ -202,6 +203,14 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		category = "misc"
 	}
 	source := strings.TrimSpace(req.Source)
+	coverBlueprintID, coverPublicID := int64(0), ""
+	if scope == "user" && strings.HasPrefix(source, "blueprint_cover:") {
+		coverPublicID = strings.TrimSpace(strings.TrimPrefix(source, "blueprint_cover:"))
+		if err := s.db.QueryRow(r.Context(), `select id from blueprints where public_id=$1 and owner_id=$2 and status<>'deleted'`, coverPublicID, currentClaims(r).Subject).Scan(&coverBlueprintID); err != nil {
+			writeError(w, http.StatusForbidden, "没有权限上传该蓝图的封面")
+			return
+		}
+	}
 	if isModExport {
 		source = "mcmods_exporter"
 	}
@@ -214,6 +223,10 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		category = normalizeOSSUserCategory(category, source)
 		objectPrefix = cfg.Prefix
 		objectCategory = path.Join("users", strconv.FormatInt(currentClaims(r).Subject, 10), strings.TrimPrefix(category, "users/"))
+		if coverBlueprintID > 0 {
+			category = path.Join("blueprints", coverPublicID, "cover")
+			objectCategory = category
+		}
 	} else if isModExport {
 		category = path.Join("projects", normalizeProjectObjectSegment(modExportUniqueID), "imports", "packages")
 		objectCategory = category
@@ -227,7 +240,6 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		objectCategory = category
 		objectPrefix = cfg.Prefix
 	}
-	objectKey := buildOSSObjectKey(objectPrefix, objectCategory)
 	contentType := strings.TrimSpace(req.ContentType)
 	if contentType == "" {
 		contentType = mime.TypeByExtension(ext)
@@ -237,13 +249,20 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	}
 	var existing map[string]any
 	var exists bool
-	if scope == "user" || isModExport {
+	if (scope == "user" || isModExport) && coverBlueprintID == 0 {
 		existing, exists = s.findExistingOSSFileByHashForUploader(r.Context(), req.SHA256, req.SizeBytes, currentClaims(r).Subject)
 	} else {
 		existing, exists = s.findExistingOSSFileByHash(r.Context(), req.SHA256, req.SizeBytes)
 	}
 	if exists {
-		writeJSON(w, http.StatusOK, map[string]any{
+		if coverBlueprintID > 0 {
+			fileID := int64Value(existing["id"])
+			if fileID > 0 {
+				_, _ = s.db.Exec(r.Context(), `update blueprints set cover_file_id=$2,cover_object_key=$3,updated_at=now()
+					where id=$1 and owner_id=$4`, coverBlueprintID, fileID, fmt.Sprint(existing["objectKey"]), currentClaims(r).Subject)
+			}
+		}
+		response := map[string]any{
 			"uploadRequired": false,
 			"file":           existing,
 			"id":             existing["id"],
@@ -256,7 +275,17 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 			"sizeBytes":      existing["sizeBytes"],
 			"sha256":         existing["sha256"],
 			"accessUrl":      buildPublicOSSURL(cfg, fmt.Sprint(existing["objectKey"])),
-		})
+		}
+		if blueprintUpload {
+			if blueprint := s.blueprintForExistingFile(r.Context(), existing["id"], currentClaims(r).Subject); blueprint != nil {
+				response["blueprint"] = blueprint
+				response["blueprintId"] = blueprint["id"]
+			}
+		}
+		if coverPublicID != "" {
+			response["blueprintId"] = coverPublicID
+		}
+		writeJSON(w, http.StatusOK, response)
 		return
 	}
 	if scope == "user" {
@@ -266,6 +295,23 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 			return
 		}
 	}
+	blueprintID := int64(0)
+	blueprintPublicID := ""
+	if blueprintUpload {
+		blueprintID, blueprintPublicID, err = s.createPendingBlueprint(r.Context(), currentClaims(r).Subject, req.OriginalName)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "创建蓝图记录失败")
+			return
+		}
+		category = path.Join("blueprints", blueprintPublicID, "original")
+		objectCategory = category
+		objectPrefix = cfg.Prefix
+	}
+	objectKey := buildOSSObjectKey(objectPrefix, objectCategory)
+	if blueprintID > 0 {
+		_, _ = s.db.Exec(r.Context(), `update blueprints set original_object_key=$2,updated_at=now() where id=$1`, blueprintID, objectKey)
+	}
+	_ = coverBlueprintID
 	expiresMinutes := req.ExpiresMinutes
 	if expiresMinutes <= 0 {
 		expiresMinutes = 10
@@ -290,7 +336,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadGateway, "生成 OSS 上传链接失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"method":         result.Method,
 		"url":            result.URL,
 		"headers":        result.SignedHeaders,
@@ -305,7 +351,12 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		"uploadRequired": true,
 		"expiresAt":      time.Now().Add(expires),
 		"accessUrl":      buildPublicOSSURL(cfg, objectKey),
-	})
+	}
+	if blueprintPublicID != "" {
+		response["blueprintId"] = blueprintPublicID
+		response["blueprint"] = map[string]any{"id": blueprintPublicID, "status": "uploading"}
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) completeOSSDirectUpload(w http.ResponseWriter, r *http.Request) {
@@ -360,11 +411,17 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	}
 	if scope == "user" {
 		userPrefix := path.Join(cfg.Prefix, "users", strconv.FormatInt(currentClaims(r).Subject, 10))
-		if !isAllowedObjectKey(req.ObjectKey, userPrefix) {
+		blueprintPrefix := path.Join(cfg.Prefix, "blueprints")
+		isBlueprintObject := isAllowedObjectKey(req.ObjectKey, blueprintPrefix) && (s.userOwnsPendingBlueprintObject(r.Context(), currentClaims(r).Subject, req.ObjectKey) || s.userOwnsBlueprintObject(r.Context(), currentClaims(r).Subject, req.ObjectKey))
+		if !isBlueprintObject && !isAllowedObjectKey(req.ObjectKey, userPrefix) {
 			writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于用户文件目录")
 			return
 		}
-		req.Category = userCategoryFromObjectKey(req.ObjectKey, userPrefix)
+		if isBlueprintObject {
+			req.Category = strings.TrimPrefix(path.Dir(req.ObjectKey), cfg.Prefix+"/")
+		} else {
+			req.Category = userCategoryFromObjectKey(req.ObjectKey, userPrefix)
+		}
 	} else if isModExport {
 		exportPrefix := path.Join(cfg.Prefix, "projects", normalizeProjectObjectSegment(modExportUniqueID), "imports", "packages")
 		if !isAllowedObjectKey(req.ObjectKey, exportPrefix) {
@@ -485,7 +542,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		fileID,
 		req.ObjectKey,
 	)
-	writeJSON(w, http.StatusCreated, map[string]any{
+	response := map[string]any{
 		"id":                 fileID,
 		"bucket":             cfg.Bucket,
 		"objectKey":          req.ObjectKey,
@@ -500,7 +557,19 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		"sha256":             req.SHA256,
 		"scanStatus":         "pending",
 		"url":                buildPublicOSSURL(cfg, req.ObjectKey),
-	})
+	}
+	if blueprint, blueprintErr := s.completeBlueprintUpload(r.Context(), fileID, currentClaims(r).Subject, req.ObjectKey, sourceOriginalName, contentType, size, req.SHA256); blueprintErr != nil {
+		writeError(w, http.StatusInternalServerError, "登记蓝图处理任务失败")
+		return
+	} else if blueprint != nil {
+		response["blueprint"] = blueprint
+		response["blueprintId"] = blueprint["id"]
+	}
+	if coverPublicID := strings.TrimSpace(strings.TrimPrefix(req.Source, "blueprint_cover:")); coverPublicID != req.Source && coverPublicID != "" {
+		_, _ = s.db.Exec(r.Context(), `update blueprints set cover_file_id=$2,cover_object_key=$3,updated_at=now() where public_id=$1 and owner_id=$4`, coverPublicID, fileID, req.ObjectKey, currentClaims(r).Subject)
+		response["blueprintId"] = coverPublicID
+	}
+	writeJSON(w, http.StatusCreated, response)
 }
 
 func imageProcessErrorMessage(err error) string {
@@ -642,23 +711,25 @@ func (s *Server) enforceUserFileUploadLimits(r *http.Request, sizeBytes int64, d
 	if singleLimit != maxPermissionBytes && sizeBytes > singleLimit {
 		return fmt.Errorf("文件超过单文件大小限制：%s", formatLimitBytes(singleLimit))
 	}
-	userPrefix := path.Join(s.ossConfigFromSettings(r.Context()).Prefix, "users", strconv.FormatInt(claims.Subject, 10)) + "/%"
+	userPrefix, blueprintPrefix := s.userStoragePatterns(r.Context(), claims.Subject)
 	var dailyUsed, totalUsed int64
 	_ = s.db.QueryRow(
 		r.Context(),
 		`select coalesce(sum(coalesce(nullif(source_size_bytes, 0), size_bytes)), 0)
 		 from oss_files
-		 where uploader_id = $1 and object_key like $2 and status = 'active' and created_at >= current_date`,
+		 where uploader_id = $1 and (object_key like $2 or object_key like $3) and status = 'active' and created_at >= current_date`,
 		claims.Subject,
 		userPrefix,
+		blueprintPrefix,
 	).Scan(&dailyUsed)
 	_ = s.db.QueryRow(
 		r.Context(),
 		`select coalesce(sum(size_bytes), 0)
 		 from oss_files
-		 where uploader_id = $1 and object_key like $2 and status = 'active'`,
+		 where uploader_id = $1 and (object_key like $2 or object_key like $3) and status = 'active'`,
 		claims.Subject,
 		userPrefix,
+		blueprintPrefix,
 	).Scan(&totalUsed)
 	if dailyLimit != maxPermissionBytes && dailyUsed+sizeBytes > dailyLimit {
 		return fmt.Errorf("超过每日上传额度：%s", formatLimitBytes(dailyLimit))
@@ -678,20 +749,26 @@ func (s *Server) enforceUserStoredFileLimit(r *http.Request, sizeBytes int64) er
 	if totalLimit == maxPermissionBytes {
 		return nil
 	}
-	userPrefix := path.Join(s.ossConfigFromSettings(r.Context()).Prefix, "users", strconv.FormatInt(claims.Subject, 10)) + "/%"
+	userPrefix, blueprintPrefix := s.userStoragePatterns(r.Context(), claims.Subject)
 	var totalUsed int64
 	_ = s.db.QueryRow(
 		r.Context(),
 		`select coalesce(sum(size_bytes), 0)
 		 from oss_files
-		 where uploader_id = $1 and object_key like $2 and status = 'active'`,
+		 where uploader_id = $1 and (object_key like $2 or object_key like $3) and status = 'active'`,
 		claims.Subject,
 		userPrefix,
+		blueprintPrefix,
 	).Scan(&totalUsed)
 	if totalUsed+sizeBytes > totalLimit {
 		return fmt.Errorf("超过用户文件总容量：%s", formatLimitBytes(totalLimit))
 	}
 	return nil
+}
+
+func (s *Server) userStoragePatterns(ctx context.Context, userID int64) (string, string) {
+	prefix := s.ossConfigFromSettings(ctx).Prefix
+	return path.Join(prefix, "users", strconv.FormatInt(userID, 10)) + "/%", path.Join(prefix, "blueprints") + "/%"
 }
 
 func (s *Server) presignOSSFile(w http.ResponseWriter, r *http.Request) {

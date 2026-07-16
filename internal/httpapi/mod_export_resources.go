@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 )
 
@@ -21,6 +22,7 @@ type exportResourceSource struct {
 	ObjectID    string
 	IconPath    string
 	PreviewPath string
+	Names       map[string]string
 }
 
 // resolveExportResources resolves exported resources in one query. It prefers
@@ -66,14 +68,14 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 	select requested.preferred_revision_id,requested.resource_id,requested.resource_kind,
 		coalesce(source.entity_id,''),coalesce(source.public_id,''),coalesce(source.revision_id,''),
 		coalesce(source.site_id,''),coalesce(source.kind_code,''),coalesce(source.registry,''),
-		coalesce(source.object_id,''),coalesce(source.icon_path,''),coalesce(source.preview_path,'')
+		coalesce(source.object_id,''),coalesce(source.icon_path,''),coalesce(source.preview_path,''),coalesce(source.names,'{}'::jsonb)
 	from requested left join lateral (
 		select candidate.entity_id,candidate.public_id,candidate.revision_id,candidate.site_id,candidate.kind_code,candidate.registry,candidate.object_id,
-			candidate.icon_path,candidate.preview_path
+			candidate.icon_path,candidate.preview_path,candidate.names
 		from (
 			select resource.entity_id,entity.public_id,snapshot.revision_id,mod.slug site_id,
 				resource.kind_code,snapshot.registry,resource.canonical_id object_id,
-				snapshot.icon_path,snapshot.preview_path,kind.family resource_kind,
+				snapshot.icon_path,snapshot.preview_path,snapshot.names,kind.family resource_kind,
 				revision.minecraft_version,revision.loader,revision.is_active,revision.status,
 				coalesce(revision.activated_at,revision.created_at) source_time,resource.namespace
 			from game_resources resource
@@ -101,10 +103,15 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 	for rows.Next() {
 		var key exportResourceKey
 		var source exportResourceSource
+		var names []byte
 		if err = rows.Scan(&key.RevisionID, &key.ResourceID, &key.Kind, &source.EntityID, &source.PublicID,
 			&source.RevisionID, &source.ModSiteID, &source.KindCode, &source.Registry, &source.ObjectID,
-			&source.IconPath, &source.PreviewPath); err != nil {
+			&source.IconPath, &source.PreviewPath, &names); err != nil {
 			return nil, err
+		}
+		_ = json.Unmarshal(names, &source.Names)
+		if source.Names == nil {
+			source.Names = map[string]string{}
 		}
 		if source.RevisionID != "" {
 			resolved[key] = source

@@ -145,8 +145,15 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := currentClaims(r)
-	reviewStatus := "pending"
+	reviewRequired := loadReviewConfig(r.Context(), s.db).ModCreate && !hasPermission(claims.Permissions, "admin.*")
+	reviewStatus := "approved"
 	var publishedAt *time.Time
+	if reviewRequired {
+		reviewStatus = "pending"
+	} else {
+		now := time.Now().UTC()
+		publishedAt = &now
+	}
 	permissionDefaults := s.permissionDefaultsFromSettings(r.Context())
 
 	tx, err := s.db.Begin(r.Context())
@@ -241,18 +248,29 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "生成审核快照失败")
 		return
 	}
-	if _, err = createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
+	createdRevision, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
 		AggregateType: "mod",
 		AggregateKey:  strconv.FormatInt(modID, 10),
 		Snapshot:      snapshot,
 		ActorID:       claims.Subject,
 		Source:        req.SubmissionMethod,
-		Status:        "pending",
+		Status:        reviewStatus,
 		Metadata:      map[string]any{"modId": modID, "siteId": req.SiteID, "initial": true},
 		Request:       r,
-	}); err != nil {
+	})
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "保存审核版本失败")
 		return
+	}
+	if !reviewRequired {
+		if _, err = tx.Exec(r.Context(), `update mods set published_revision_id=$2 where id=$1`, modID, createdRevision.RevisionID); err != nil {
+			writeError(w, http.StatusInternalServerError, "发布模组版本失败")
+			return
+		}
+		if err = appendReviewResolutionTx(r.Context(), tx, createdRevision.ChangeRequestID, "approved", claims.Subject, "automatic approval", r); err != nil {
+			writeError(w, http.StatusInternalServerError, "记录自动审核失败")
+			return
+		}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "提交模组资料失败")
@@ -792,7 +810,7 @@ func availableModUniqueID(ctx context.Context, query databaseQuery) (string, err
 			return "", err
 		}
 		var exists bool
-		if err := query.QueryRow(ctx, `select exists(select 1 from mods where project_code = $1)`, code).Scan(&exists); err != nil {
+		if err := query.QueryRow(ctx, `select exists(select 1 from public_routes where public_id = $1)`, code).Scan(&exists); err != nil {
 			return "", err
 		}
 		if !exists {
@@ -806,8 +824,8 @@ func newModUniqueID() (string, error) {
 	const letters = "abcdefghjkmnpqrstuvwxyz"
 	const digits = "23456789"
 	const alphabet = letters + digits
-	candidate := make([]byte, 7)
-	for index, characters := range []string{letters, digits, alphabet, alphabet, alphabet, alphabet, alphabet} {
+	candidate := make([]byte, 9)
+	for index, characters := range []string{letters, digits, alphabet, alphabet, alphabet, alphabet, alphabet, alphabet, alphabet} {
 		value, err := rand.Int(rand.Reader, big.NewInt(int64(len(characters))))
 		if err != nil {
 			return "", err

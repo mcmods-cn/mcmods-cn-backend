@@ -42,6 +42,7 @@ func Run() {
 	if err := database.SeedRBAC(ctx, db); err != nil {
 		log.Fatalf("seed permissions: %v", err)
 	}
+	httpapi.StartMinecraftVersionSyncScheduler(ctx, db)
 
 	natsCfg, err := database.LoadNATSConfig(ctx, db, cfg.NATS)
 	if err != nil {
@@ -65,6 +66,10 @@ func Run() {
 	modMetadataWorker := httpapi.NewModMetadataImportWorker(cfg, db, queueClient)
 	if err := modMetadataWorker.Start(ctx); err != nil {
 		log.Printf("mod metadata import worker unavailable: %v", err)
+	}
+	blueprintWorker := httpapi.NewBlueprintWorker(cfg, db, queueClient)
+	if err := blueprintWorker.Start(ctx); err != nil {
+		log.Printf("blueprint worker unavailable; queued jobs remain recoverable: %v", err)
 	}
 	server := &http.Server{
 		Addr:              cfg.Addr,

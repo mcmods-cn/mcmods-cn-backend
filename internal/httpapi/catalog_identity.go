@@ -25,7 +25,21 @@ func newCatalogIdentity(entityType, canonicalKey string) catalogIdentity {
 	if prefix == "" {
 		prefix = "ent"
 	}
-	return catalogIdentity{ID: prefix + "_" + encoded[:32], PublicID: encoded[:24]}
+	return catalogIdentity{ID: prefix + "_" + encoded[:32], PublicID: publicIDFromDigest(digest[:])}
+}
+
+func publicIDFromDigest(digest []byte) string {
+	const alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+	value := uint64(0)
+	for index := 0; index < 8 && index < len(digest); index++ {
+		value = value<<8 | uint64(digest[index])
+	}
+	result := make([]byte, 9)
+	for index := len(result) - 1; index >= 0; index-- {
+		result[index] = alphabet[value%uint64(len(alphabet))]
+		value /= uint64(len(alphabet))
+	}
+	return string(result)
 }
 
 func catalogSnapshotID(kind, revisionID, entityID, qualifier string) string {
@@ -35,6 +49,9 @@ func catalogSnapshotID(kind, revisionID, entityID, qualifier string) string {
 
 func resourceKindForRegistry(registry string) string {
 	normalized := strings.ToLower(strings.TrimSpace(registry))
+	// Tag exports use registry keys such as minecraft:item, while registry
+	// snapshots use their short names. They must resolve to the same identity.
+	normalized = strings.TrimPrefix(normalized, "minecraft:")
 	switch normalized {
 	case "items", "item":
 		return "minecraft.item"
