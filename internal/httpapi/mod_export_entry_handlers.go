@@ -127,7 +127,7 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if registry == "items" || registry == "blocks" {
-		response.Recipes, response.Uses, err = s.modExportRecipesForObject(r.Context(), revisionID, recipeResourceID)
+		response.Recipes, response.Uses, err = s.modExportRecipesForObject(r.Context(), revisionID, recipeResourceID, locale)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to read entry recipes")
 			return
@@ -308,7 +308,7 @@ func publishModExportEntryContentTx(ctx context.Context, tx pgx.Tx, revisionID i
 	return err
 }
 
-func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, resourceID string) ([]any, []any, error) {
+func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, resourceID, locale string) ([]any, []any, error) {
 	produces := make([]any, 0, 8)
 	uses := make([]any, 0, 8)
 	decorations := make([]map[string]any, 0, 16)
@@ -365,7 +365,7 @@ func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, reso
 	for _, recipe := range decorations {
 		recipe["jeiLayout"] = recipe["layout"]
 	}
-	if err = s.decorateRecipeResources(ctx, decorations); err != nil {
+	if err = s.decorateRecipeResources(ctx, decorations, locale); err != nil {
 		return produces, uses, err
 	}
 	return produces, uses, nil

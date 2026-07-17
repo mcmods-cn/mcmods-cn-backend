@@ -20,6 +20,22 @@ func TestNormalizeExportResourceKind(t *testing.T) {
 	}
 }
 
+func TestLocalizedExportResourceNames(t *testing.T) {
+	names := map[string]string{
+		"zh_cn": "Localized Water Vapor",
+		"en_us": "Water Vapor",
+		"ja_jp": "Localized Steam",
+		"de_de": "Wasserdampf",
+	}
+	expected := map[string]string{"zh_cn": "Localized Water Vapor", "en_us": "Water Vapor", "ja_jp": "Localized Steam"}
+	if actual := localizedExportResourceNames(names, "ja-JP", "zh_cn"); !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("localizedExportResourceNames() = %#v, want %#v", actual, expected)
+	}
+	if actual := localizedExportResourceNames(names, "fr_fr"); !reflect.DeepEqual(actual, map[string]string{"zh_cn": "Localized Water Vapor", "en_us": "Water Vapor"}) {
+		t.Fatalf("localizedExportResourceNames() fallback = %#v", actual)
+	}
+}
+
 func TestLootTableItemIDs(t *testing.T) {
 	data := map[string]any{
 		"possible_item_ids": []any{"minecraft:diamond", "example:part"},

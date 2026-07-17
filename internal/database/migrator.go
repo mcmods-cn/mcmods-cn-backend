@@ -7,7 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 8
+const schemaGeneration = 9
 
 // Migrate installs one coherent development schema. The catalog redesign does
 // not support in-place upgrades from the pre-entity data model; development
@@ -54,6 +54,7 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	statements = append(statements, immutableHistoryGuardStatements()...)
 	statements = append(statements, blueprintRelationSchemaStatements()...)
 	statements = append(statements, communitySchemaStatements()...)
+	statements = append(statements, skinSchemaStatements()...)
 	for _, statement := range statements {
 		if _, err = tx.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("install schema generation %d: %w", schemaGeneration, err)

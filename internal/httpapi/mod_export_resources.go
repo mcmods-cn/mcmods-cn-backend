@@ -149,7 +149,21 @@ func normalizeExportResourceKind(value string) string {
 	}
 }
 
-func (s *Server) decorateLootTableResources(ctx context.Context, revisionID string, items []map[string]any) error {
+func localizedExportResourceNames(names map[string]string, locales ...string) map[string]string {
+	result := make(map[string]string, len(locales)+2)
+	for _, locale := range append(locales, "zh_cn", "en_us") {
+		locale = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(locale), "-", "_"))
+		if locale == "" {
+			continue
+		}
+		if value := names[locale]; value != "" {
+			result[locale] = value
+		}
+	}
+	return result
+}
+
+func (s *Server) decorateLootTableResources(ctx context.Context, revisionID string, items []map[string]any, locales ...string) error {
 	keys := make([]exportResourceKey, 0, len(items)*8)
 	itemIDsByIndex := make([][]string, len(items))
 	for index, item := range items {
@@ -182,6 +196,7 @@ func (s *Server) decorateLootTableResources(ctx context.Context, revisionID stri
 				"sourceRevisionId": source.RevisionID, "sourceModSiteId": source.ModSiteID,
 				"kindCode":       source.KindCode,
 				"sourceRegistry": source.Registry, "sourceObjectId": source.ObjectID,
+				"names":    localizedExportResourceNames(source.Names, locales...),
 				"iconPath": source.IconPath, "previewPath": source.PreviewPath,
 			}
 			sources[itemID] = value

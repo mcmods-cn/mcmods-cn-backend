@@ -245,7 +245,7 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "recipe type identity is required")
 		return
 	}
-	key := fmt.Sprintf("recipe-types:v4:detail:%s:%s:%s:%s:%d:%d", entityID, id, primary, secondary, limit, offset)
+	key := fmt.Sprintf("recipe-types:v6:detail:%s:%s:%s:%s:%d:%d", entityID, id, primary, secondary, limit, offset)
 	s.writeCachedCatalog(w, r, key, func(ctx context.Context) (any, error) {
 		var publicID, revisionID string
 		var names, catalysts []byte
@@ -335,7 +335,7 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 		if err = s.hydrateRecipeRenderLayouts(ctx, recipes); err != nil {
 			return nil, err
 		}
-		if err = s.decorateRecipeResources(ctx, recipes); err != nil {
+		if err = s.decorateRecipeResources(ctx, recipes, primary, secondary); err != nil {
 			return nil, err
 		}
 		return map[string]any{"entityId": entityID, "publicId": publicID, "recipeTypeId": id,
@@ -346,7 +346,7 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[string]any) error {
+func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[string]any, locales ...string) error {
 	keys := make([]exportResourceKey, 0, len(recipes)*8)
 	for _, recipe := range recipes {
 		revisionID, _ := recipe["revisionId"].(string)
@@ -388,6 +388,7 @@ func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[stri
 				alternative["sourceModSiteId"] = source.ModSiteID
 				alternative["sourceRegistry"] = source.Registry
 				alternative["sourceObjectId"] = source.ObjectID
+				alternative["names"] = localizedExportResourceNames(source.Names, locales...)
 				alternative["iconPath"] = source.IconPath
 				alternative["previewPath"] = source.PreviewPath
 			}

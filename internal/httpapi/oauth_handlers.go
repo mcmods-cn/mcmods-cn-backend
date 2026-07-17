@@ -54,6 +54,11 @@ func (s *Server) oauthStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "第三方登录尚未配置")
 		return
 	}
+	next, validNext := normalizeOAuthNext(r.URL.Query().Get("next"))
+	if !validNext {
+		writeError(w, http.StatusBadRequest, "登录后跳转地址不安全")
+		return
+	}
 	state, err := randomState()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "生成登录状态失败")
@@ -67,6 +72,19 @@ func (s *Server) oauthStart(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
+	nextCookie := &http.Cookie{
+		Name:     oauthNextCookie(provider),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	if next == "" {
+		nextCookie.MaxAge = -1
+	} else {
+		nextCookie.Value = base64.RawURLEncoding.EncodeToString([]byte(next))
+		nextCookie.MaxAge = 600
+	}
+	http.SetCookie(w, nextCookie)
 	http.Redirect(w, r, oauthAuthorizeURL(provider, cfg, state), http.StatusFound)
 }
 
@@ -81,8 +99,17 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "第三方登录状态已失效")
 		return
 	}
+	next := oauthNextFromRequest(r, provider)
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthStateCookie(provider),
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthNextCookie(provider),
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
@@ -116,6 +143,9 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	rawUser, _ := json.Marshal(user)
 	redirectURL := s.cfg.FrontendOrigin + "/login?oauthToken=" + url.QueryEscape(token) + "&oauthUser=" + url.QueryEscape(string(rawUser))
+	if next != "" {
+		redirectURL += "&next=" + url.QueryEscape(next)
+	}
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
@@ -643,6 +673,45 @@ func randomState() (string, error) {
 
 func oauthStateCookie(provider string) string {
 	return "mcmods_oauth_state_" + provider
+}
+
+func oauthNextCookie(provider string) string {
+	return "mcmods_oauth_next_" + provider
+}
+
+func normalizeOAuthNext(raw string) (string, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", true
+	}
+	if len(value) > 2048 || !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") || strings.Contains(value, `\`) {
+		return "", false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" {
+		return "", false
+	}
+	decodedPath, err := url.PathUnescape(parsed.EscapedPath())
+	if err != nil || strings.HasPrefix(decodedPath, "//") || strings.Contains(decodedPath, `\`) {
+		return "", false
+	}
+	return value, true
+}
+
+func oauthNextFromRequest(r *http.Request, provider string) string {
+	cookie, err := r.Cookie(oauthNextCookie(provider))
+	if err != nil || cookie.Value == "" {
+		return ""
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cookie.Value)
+	if err != nil {
+		return ""
+	}
+	next, ok := normalizeOAuthNext(string(raw))
+	if !ok {
+		return ""
+	}
+	return next
 }
 
 func validOAuthState(r *http.Request, provider string) bool {

@@ -21,6 +21,7 @@ type Config struct {
 	SMTP           SMTPConfig
 	NATS           NATSConfig
 	Redis          RedisConfig
+	Yggdrasil      YggdrasilConfig
 }
 
 type DBConfig struct {
@@ -61,6 +62,18 @@ type RedisConfig struct {
 	DB       int
 	Prefix   string
 	TTL      time.Duration
+}
+
+type YggdrasilConfig struct {
+	PublicBaseURL     string
+	TextureBaseURL    string
+	ServerName        string
+	PrivateKeyBase64  string
+	TrustedProxyCIDRs []string
+	TokenTTL          time.Duration
+	MaxTokens         int
+	JoinTTL           time.Duration
+	TextureMaxBytes   int64
 }
 
 type NATSTaskConfig struct {
@@ -134,6 +147,17 @@ func Load() Config {
 			Prefix:   getenv("REDIS_PREFIX", "mcmods:query:"),
 			TTL:      time.Duration(getenvInt("REDIS_QUERY_TTL_SECONDS", 120)) * time.Second,
 		},
+		Yggdrasil: YggdrasilConfig{
+			PublicBaseURL:     getenv("YGGDRASIL_PUBLIC_BASE_URL", "http://127.0.0.1:8080/api/yggdrasil/"),
+			TextureBaseURL:    getenv("YGGDRASIL_TEXTURE_BASE_URL", "http://127.0.0.1:8080/api/yggdrasil/textures/"),
+			ServerName:        getenv("YGGDRASIL_SERVER_NAME", "Mcmods-cn"),
+			PrivateKeyBase64:  strings.TrimSpace(os.Getenv("YGGDRASIL_PRIVATE_KEY_BASE64")),
+			TrustedProxyCIDRs: splitCommaSeparated(os.Getenv("YGGDRASIL_TRUSTED_PROXY_CIDRS")),
+			TokenTTL:          time.Duration(getenvInt("YGGDRASIL_TOKEN_TTL_HOURS", 360)) * time.Hour,
+			MaxTokens:         getenvInt("YGGDRASIL_MAX_TOKENS", 10),
+			JoinTTL:           time.Duration(getenvInt("YGGDRASIL_JOIN_TTL_SECONDS", 30)) * time.Second,
+			TextureMaxBytes:   int64(getenvInt("YGGDRASIL_TEXTURE_MAX_BYTES", 2*1024*1024)),
+		},
 	}
 }
 
@@ -184,6 +208,17 @@ func getenvBool(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+func splitCommaSeparated(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }
 
 func loadDotEnv(path string) {

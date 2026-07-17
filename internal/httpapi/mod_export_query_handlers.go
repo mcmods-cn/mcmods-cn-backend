@@ -270,7 +270,7 @@ func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request
 	}
 	offset := boundedOffset(r.URL.Query().Get("offset"))
 	summaryOnly := r.URL.Query().Get("summary") == "1"
-	cacheKey := fmt.Sprintf("export-document:v5:%s:%s:%s:%s:%d:%d:%t", revisionID, kind, query, locale, limit, offset, summaryOnly)
+	cacheKey := fmt.Sprintf("export-document:v7:%s:%s:%s:%s:%d:%d:%t", revisionID, kind, query, locale, limit, offset, summaryOnly)
 	payload, err := s.cache.GetOrLoad(r.Context(), cacheKey, func(ctx context.Context) ([]byte, error) {
 		var total int
 		if loadErr := s.db.QueryRow(ctx, `select count(*)::int
@@ -315,7 +315,7 @@ func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request
 			return nil, loadErr
 		}
 		if kind == "loot_tables" {
-			if loadErr = s.decorateLootTableResources(ctx, revisionID, items); loadErr != nil {
+			if loadErr = s.decorateLootTableResources(ctx, revisionID, items, locale); loadErr != nil {
 				return nil, loadErr
 			}
 		}

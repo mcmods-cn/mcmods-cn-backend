@@ -20,6 +20,7 @@ type Server struct {
 	cache    *querycache.Cache
 	activity *activity.Monitor
 	mux      *http.ServeMux
+	ygg      *yggdrasilService
 }
 
 func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, activityMonitor *activity.Monitor) http.Handler {
@@ -32,12 +33,14 @@ func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, a
 		activity: activityMonitor,
 		mux:      http.NewServeMux(),
 	}
+	server.ygg = newYggdrasilService(cfg)
 	server.routes()
-	return server.cors(server.logAccess(server.mux))
+	return server.cors(server.yggdrasilALI(server.logAccess(server.mux)))
 }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /health", s.health)
+	s.yggdrasilRoutes()
 	s.mux.HandleFunc("POST /api/v1/auth/register", s.register)
 	s.mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	s.mux.HandleFunc("POST /api/v1/auth/email-code", s.requestEmailCode)
@@ -62,6 +65,26 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/recipe-types/detail", s.requireAuth(s.updateGlobalRecipeType))
 	s.mux.HandleFunc("PUT /api/v1/recipes/{recipeKey}", s.requireAuth(s.updateGlobalRecipe))
 	s.mux.HandleFunc("GET /api/v1/public-links/{publicId}", s.resolvePublicLink)
+	s.mux.HandleFunc("GET /api/v1/skin-service", s.optionalAuth(s.skinService))
+	s.mux.HandleFunc("GET /api/v1/skins", s.optionalAuth(s.skins))
+	s.mux.HandleFunc("POST /api/v1/skins", s.requirePermission("skin.library.upload", s.skins))
+	s.mux.HandleFunc("GET /api/v1/skins/{publicId}", s.optionalAuth(s.skinDetail))
+	s.mux.HandleFunc("PUT /api/v1/skins/{publicId}", s.requireAuth(s.skinDetail))
+	s.mux.HandleFunc("DELETE /api/v1/skins/{publicId}", s.requireAuth(s.skinDetail))
+	s.mux.HandleFunc("GET /api/v1/users/me/skin-wardrobe", s.requireAuth(s.skinWardrobe))
+	s.mux.HandleFunc("PUT /api/v1/users/me/skin-wardrobe/{publicId}", s.requireAuth(s.skinWardrobeItem))
+	s.mux.HandleFunc("DELETE /api/v1/users/me/skin-wardrobe/{publicId}", s.requireAuth(s.skinWardrobeItem))
+	s.mux.HandleFunc("GET /api/v1/users/me/player-profiles", s.requireAuth(s.myPlayerProfiles))
+	s.mux.HandleFunc("POST /api/v1/users/me/player-profiles", s.requirePermission("skin.profile.create", s.myPlayerProfiles))
+	s.mux.HandleFunc("PUT /api/v1/users/me/player-profiles/{publicId}", s.requirePermission("skin.profile.write", s.myPlayerProfile))
+	s.mux.HandleFunc("DELETE /api/v1/users/me/player-profiles/{publicId}", s.requirePermission("skin.profile.write", s.myPlayerProfile))
+	s.mux.HandleFunc("PUT /api/v1/users/me/player-profiles/{publicId}/textures", s.requirePermission("skin.profile.write", s.setPlayerProfileTexture))
+	s.mux.HandleFunc("GET /api/v1/users/{id}/player-profiles", s.optionalAuth(s.publicUserPlayerProfiles))
+	s.mux.HandleFunc("GET /api/v1/player-profiles/{publicId}", s.optionalAuth(s.playerProfileDetail))
+	s.mux.HandleFunc("PUT /api/v1/users/me/launcher-credential", s.requirePermission("skin.launcher.login", s.launcherCredential))
+	s.mux.HandleFunc("DELETE /api/v1/users/me/launcher-credential", s.requireAuth(s.launcherCredential))
+	s.mux.HandleFunc("GET /api/v1/users/me/launcher-sessions", s.requireAuth(s.launcherSessions))
+	s.mux.HandleFunc("DELETE /api/v1/users/me/launcher-sessions/{sessionId}", s.requireAuth(s.launcherSession))
 	s.mux.HandleFunc("GET /api/v1/creators", s.optionalAuth(s.creators))
 	s.mux.HandleFunc("POST /api/v1/creators", s.requirePermission("creator.create", s.createCreator))
 	s.mux.HandleFunc("GET /api/v1/creators/{publicId}", s.optionalAuth(s.creatorDetail))
@@ -249,10 +272,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Vary", "Origin")
 		origin := r.Header.Get("Origin")
 		if origin == s.cfg.FrontendOrigin || (s.cfg.Env == "development" && origin != "") {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")

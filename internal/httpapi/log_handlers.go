@@ -61,8 +61,12 @@ func (s *Server) logAccess(next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
+		loggedQuery := r.URL.RawQuery
+		if strings.HasPrefix(r.URL.Path, "/api/yggdrasil/") {
+			loggedQuery = ""
+		}
 		s.writeAppLog(context.Background(), "api_access", levelForStatus(status), r.Method, r.URL.Path, 0, r, status, time.Since(started), map[string]any{
-			"query": r.URL.RawQuery,
+			"query": loggedQuery,
 			"bytes": recorder.bytes,
 		})
 		if status >= http.StatusOK && status < http.StatusBadRequest {

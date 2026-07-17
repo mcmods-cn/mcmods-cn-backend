@@ -44,6 +44,14 @@ var seedPermissions = []seedPermission{
 	{Code: "user.file.total_limit.<num>", Module: "user", Name: "Total upload limit", Description: "Numeric permission; replace <num> with total stored bytes."},
 	{Code: "user.file.single_limit.<num>", Module: "user", Name: "Single file limit", Description: "Numeric permission; replace <num> with maximum bytes per file."},
 
+	{Code: "skin.library.upload", Module: "skin", Name: "Upload skin library assets", Description: "Allows uploading skins and capes to the user's library."},
+	{Code: "skin.library.limit.<num>", Module: "skin", Name: "Skin library asset limit", Description: "Numeric permission; replace <num> with the maximum number of active skin library assets."},
+	{Code: "skin.profile.create", Module: "skin", Name: "Create player profiles", Description: "Allows creating Minecraft player profiles."},
+	{Code: "skin.profile.write", Module: "skin", Name: "Manage player profiles", Description: "Allows editing owned Minecraft player profiles and their textures."},
+	{Code: "skin.launcher.login", Module: "skin", Name: "Use launcher login", Description: "Allows authenticating through the third-party Yggdrasil service."},
+	{Code: "skin.profile.limit.<num>", Module: "skin", Name: "Player profile limit", Description: "Numeric permission; replace <num> with the maximum number of player profiles."},
+	{Code: "skin.admin", Module: "skin", Name: "Manage the skin service", Description: "Allows moderating skin assets, player profiles and launcher sessions."},
+
 	{Code: "permission.read", Module: "permission", Name: "Read permissions", Description: "Allows reading permission groups, nodes and assignments."},
 	{Code: "permission.write", Module: "permission", Name: "Manage permissions", Description: "Allows changing permission groups, nodes and assignments."},
 
