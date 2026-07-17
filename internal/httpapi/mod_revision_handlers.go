@@ -441,7 +441,29 @@ func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, s
 		}
 	}
 	for index, author := range snapshot.Authors {
-		if _, err = tx.Exec(ctx, `insert into mod_authors(mod_id,name,role,display_order) values($1,$2,$3,$4)`, modID, author.Name, author.Role, index); err != nil {
+		var creatorID int64
+		var nameSnapshot string
+		if author.CreatorID != "" {
+			if err = tx.QueryRow(ctx, `select id,name from creators where public_id=$1`, author.CreatorID).Scan(&creatorID, &nameSnapshot); err != nil {
+				return err
+			}
+		} else {
+			if err = tx.QueryRow(ctx, `select id,name from creators
+				where normalized_name=$1 order by review_status='approved' desc,id limit 1`,
+				normalizeCreatorName(author.Name)).Scan(&creatorID, &nameSnapshot); err != nil {
+				return err
+			}
+		}
+		roleSnapshot, roleErr := creatorRoleNameTx(ctx, tx, author.RoleID)
+		if roleErr != nil {
+			return roleErr
+		}
+		if roleSnapshot == "" {
+			roleSnapshot = author.Role
+		}
+		if _, err = tx.Exec(ctx, `insert into mod_authors(
+			mod_id,creator_id,role_id,name_snapshot,role_snapshot,display_order
+		) values($1,$2,$3,$4,$5,$6)`, modID, creatorID, author.RoleID, nameSnapshot, roleSnapshot, index); err != nil {
 			return err
 		}
 	}

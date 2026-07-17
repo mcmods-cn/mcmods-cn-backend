@@ -10,9 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"mcmods-cn-backend/internal/activity"
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/httpapi"
+	"mcmods-cn-backend/internal/progression"
 	"mcmods-cn-backend/internal/queue"
 )
 
@@ -43,6 +45,8 @@ func Run() {
 		log.Fatalf("seed permissions: %v", err)
 	}
 	httpapi.StartMinecraftVersionSyncScheduler(ctx, db)
+	progressionService := progression.NewService(db)
+	activityMonitor := activity.NewMonitor(db, progressionService.ProcessActivityBatch)
 
 	natsCfg, err := database.LoadNATSConfig(ctx, db, cfg.NATS)
 	if err != nil {
@@ -73,7 +77,7 @@ func Run() {
 	}
 	server := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           httpapi.NewServer(cfg, db, queueClient),
+		Handler:           httpapi.NewServer(cfg, db, queueClient, activityMonitor),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -92,5 +96,8 @@ func Run() {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("http server shutdown: %v", err)
+	}
+	if err := activityMonitor.Close(shutdownCtx); err != nil {
+		log.Printf("activity monitor shutdown: %v", err)
 	}
 }

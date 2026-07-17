@@ -23,8 +23,12 @@ type modLinkPayload struct {
 }
 
 type modAuthorPayload struct {
-	Name string `json:"name"`
-	Role string `json:"role"`
+	CreatorID string `json:"creatorId,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Name      string `json:"name,omitempty"`
+	AvatarURL string `json:"avatarUrl,omitempty"`
+	RoleID    *int64 `json:"roleId,omitempty"`
+	Role      string `json:"role,omitempty"`
 }
 
 type modRelationshipPayload struct {
@@ -224,7 +228,14 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for index, author := range req.Authors {
-		if _, err = tx.Exec(r.Context(), `insert into mod_authors (mod_id, name, role, display_order) values ($1,$2,$3,$4)`, modID, author.Name, author.Role, index); err != nil {
+		creatorID, nameSnapshot, roleSnapshot, resolveErr := resolveModAuthorForCreateTx(r.Context(), tx, author, claims.Subject, r)
+		if resolveErr != nil {
+			writeError(w, http.StatusBadRequest, resolveErr.Error())
+			return
+		}
+		if _, err = tx.Exec(r.Context(), `insert into mod_authors(
+			mod_id,creator_id,role_id,name_snapshot,role_snapshot,display_order
+		) values ($1,$2,$3,$4,$5,$6)`, modID, creatorID, author.RoleID, nameSnapshot, roleSnapshot, index); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存作者资料失败")
 			return
 		}
@@ -300,7 +311,8 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		 where (m.review_status = 'approved' or m.created_by = $1)
 		   and ($2 = '' or m.slug ilike '%' || $2 || '%' or m.project_code ilike '%' || $2 || '%' or m.primary_name ilike '%' || $2 || '%' or m.secondary_name ilike '%' || $2 || '%'
 		        or m.abbreviation ilike '%' || $2 || '%' or m.mod_id ilike '%' || $2 || '%' or $2 = any(m.search_keywords)
-		        or exists (select 1 from mod_authors a where a.mod_id = m.id and a.name ilike '%' || $2 || '%'))`,
+		        or exists (select 1 from mod_authors a join creators creator on creator.id=a.creator_id
+		                   where a.mod_id = m.id and creator.name ilike '%' || $2 || '%'))`,
 		claims.Subject, query,
 	).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "读取模组总数失败")
@@ -315,7 +327,8 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		 where (m.review_status = 'approved' or m.created_by = $1)
 		   and ($2 = '' or m.slug ilike '%' || $2 || '%' or m.project_code ilike '%' || $2 || '%' or m.primary_name ilike '%' || $2 || '%' or m.secondary_name ilike '%' || $2 || '%'
 		        or m.abbreviation ilike '%' || $2 || '%' or m.mod_id ilike '%' || $2 || '%' or $2 = any(m.search_keywords)
-		        or exists (select 1 from mod_authors a where a.mod_id = m.id and a.name ilike '%' || $2 || '%'))
+		        or exists (select 1 from mod_authors a join creators creator on creator.id=a.creator_id
+		                   where a.mod_id = m.id and creator.name ilike '%' || $2 || '%'))
 		 order by m.updated_at desc, m.id desc
 		 limit $3`,
 		claims.Subject, query, limit,
@@ -474,13 +487,18 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	}
 	rows.Close()
 
-	rows, err = s.db.Query(ctx, `select name, role from mod_authors where mod_id = $1 order by display_order, id`, mod.ID)
+	rows, err = s.db.Query(ctx, `select creator.public_id,creator.kind,creator.name,creator.avatar_url,
+		author.role_id,coalesce(role.name,author.role_snapshot)
+		from mod_authors author
+		join creators creator on creator.id=author.creator_id
+		left join creator_role_definitions role on role.id=author.role_id
+		where author.mod_id=$1 order by author.display_order,author.id`, mod.ID)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var item modAuthorPayload
-		if err = rows.Scan(&item.Name, &item.Role); err != nil {
+		if err = rows.Scan(&item.CreatorID, &item.Kind, &item.Name, &item.AvatarURL, &item.RoleID, &item.Role); err != nil {
 			rows.Close()
 			return err
 		}
@@ -659,10 +677,18 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 
 	cleanAuthors := make([]modAuthorPayload, 0, len(req.Authors))
 	for _, item := range req.Authors {
+		item.CreatorID = strings.ToLower(strings.TrimSpace(item.CreatorID))
+		item.Kind = strings.ToLower(strings.TrimSpace(item.Kind))
 		item.Name = strings.TrimSpace(item.Name)
 		item.Role = strings.TrimSpace(item.Role)
-		if item.Name == "" {
+		if item.CreatorID == "" && item.Name == "" {
 			continue
+		}
+		if item.CreatorID != "" && len(item.CreatorID) != 9 {
+			return errors.New("作者或团队 ID 无效")
+		}
+		if item.Kind != "" && item.Kind != "author" && item.Kind != "team" {
+			return errors.New("作者资料类型无效")
 		}
 		if len(item.Name) > 160 || len(item.Role) > 80 {
 			return errors.New("作者或团队信息过长")
@@ -797,6 +823,65 @@ func stringSet(values ...string) map[string]bool {
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+func resolveModAuthorForCreateTx(ctx context.Context, tx pgx.Tx, author modAuthorPayload, actorID int64, r *http.Request) (int64, string, string, error) {
+	var creatorID int64
+	var creatorName string
+	if author.CreatorID != "" {
+		err := tx.QueryRow(ctx, `select id,name from creators where public_id=$1`, author.CreatorID).Scan(&creatorID, &creatorName)
+		if err != nil {
+			return 0, "", "", errors.New("selected author or team does not exist")
+		}
+	} else {
+		kind := author.Kind
+		if kind == "" {
+			kind = "author"
+		}
+		var err error
+		creatorID, _, err = ensureNamedCreatorTx(ctx, tx, kind, author.Name, actorID, r)
+		if err != nil {
+			return 0, "", "", err
+		}
+		creatorName, err = creatorNameTx(ctx, tx, creatorID)
+		if err != nil {
+			return 0, "", "", err
+		}
+	}
+	roleName, err := creatorRoleNameTx(ctx, tx, author.RoleID)
+	if err != nil {
+		return 0, "", "", errors.New("selected creator role does not exist")
+	}
+	if roleName == "" {
+		roleName = author.Role
+	}
+	return creatorID, creatorName, roleName, nil
+}
+
+func ensureNamedCreatorTx(ctx context.Context, tx pgx.Tx, kind, name string, actorID int64, r *http.Request) (int64, string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return 0, "", errors.New("creator name is required")
+	}
+	if kind != "author" && kind != "team" {
+		kind = "author"
+	}
+	var id int64
+	var publicID string
+	err := tx.QueryRow(ctx, `select id,public_id from creators
+		where kind=$1 and normalized_name=$2
+		order by review_status='approved' desc,id limit 1`, kind, normalizeCreatorName(name)).Scan(&id, &publicID)
+	if err == nil {
+		return id, publicID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, "", err
+	}
+	id, publicID, _, err = (&Server{}).createCreatorTx(ctx, tx, creatorSnapshot{Kind: kind, Name: name}, actorID, "pending", r)
+	if err != nil {
+		return 0, "", fmt.Errorf("create imported creator: %w", err)
+	}
+	return id, publicID, nil
 }
 
 type databaseQuery interface {

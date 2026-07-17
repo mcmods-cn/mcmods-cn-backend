@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -671,10 +672,11 @@ func (s *Server) downloadBlueprintVariant(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var objectKey string
+	var ownerID int64
 	claims := currentClaims(r)
-	err = s.db.QueryRow(r.Context(), `select v.object_key from blueprint_variants v join blueprints b on b.id=v.blueprint_id
+	err = s.db.QueryRow(r.Context(), `select v.object_key,b.owner_id from blueprint_variants v join blueprints b on b.id=v.blueprint_id
 		where b.public_id=$1 and v.id=$2 and v.status='ready' and (b.review_status in ('not_required','approved') or b.owner_id=$3 or $4)`,
-		publicID, variantID, claims.Subject, hasPermission(claims.Permissions, "admin.*")).Scan(&objectKey)
+		publicID, variantID, claims.Subject, hasPermission(claims.Permissions, "admin.*")).Scan(&objectKey, &ownerID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "蓝图格式文件不存在")
 		return
@@ -683,7 +685,12 @@ func (s *Server) downloadBlueprintVariant(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "读取蓝图格式文件失败")
 		return
 	}
-	s.presignOSSFileWithRequest(w, r, ossPresignRequest{ObjectKey: objectKey})
+	if s.presignOSSFileWithRequest(w, r, ossPresignRequest{ObjectKey: objectKey}) {
+		if rewardErr := s.recordOwnedContentDownload(r.Context(), "blueprint", publicID, ownerID, claims.Subject); rewardErr != nil {
+			log.Printf("blueprint download reward: public_id=%s owner=%d downloader=%d: %v",
+				publicID, ownerID, claims.Subject, rewardErr)
+		}
+	}
 }
 
 func (s *Server) blueprintOwnerAccess(r *http.Request, publicID string) (int64, bool) {

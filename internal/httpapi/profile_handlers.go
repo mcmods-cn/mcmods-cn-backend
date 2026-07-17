@@ -39,13 +39,14 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var username, displayName, status, avatarURL, signature string
+	var username, displayName, status, avatarURL, signature, profileBackgroundURL string
 	var createdAt time.Time
 	err := s.db.QueryRow(
 		r.Context(),
-		`select username, display_name, status, created_at, avatar_url, signature from users where id = $1`,
+		`select username, display_name, status, created_at, avatar_url, signature, profile_background_url
+		 from users where id = $1`,
 		userID,
-	).Scan(&username, &displayName, &status, &createdAt, &avatarURL, &signature)
+	).Scan(&username, &displayName, &status, &createdAt, &avatarURL, &signature, &profileBackgroundURL)
 	if err == pgx.ErrNoRows || status == "deleted" {
 		writeError(w, http.StatusNotFound, "用户不存在")
 		return
@@ -75,7 +76,7 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": userID, "username": username, "displayName": displayName, "status": status,
 		"createdAt": createdAt, "followers": followers, "following": following,
-		"avatarUrl": avatarURL, "signature": signature,
+		"avatarUrl": avatarURL, "signature": signature, "profileBackgroundUrl": profileBackgroundURL,
 		"isOwn": isOwn, "isFollowing": isFollowing, "canFollow": canFollow, "canMessage": canMessage,
 	})
 }

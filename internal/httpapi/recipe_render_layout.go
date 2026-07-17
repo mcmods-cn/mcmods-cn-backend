@@ -36,6 +36,8 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 
 	rows, err := s.db.Query(ctx, `select snapshot.id,snapshot.layout_available,snapshot.layout_kind,snapshot.ordered,
 		snapshot.layout_classification_source,snapshot.width,snapshot.height,snapshot.parameters,
+		snapshot.origin_kind,snapshot.underlying_recipe_type_id,snapshot.source_mod_id,snapshot.source_mod_version,
+		snapshot.source_mod_id_source,snapshot.render_locale,snapshot.source_data,
 		coalesce(template.source_template_id,''),coalesce(template.background_path,''),
 		coalesce(template.background_contains_ingredients,false),coalesce(template.coordinate_space,'logical_pixels'),
 		coalesce(template.image_scale,1),coalesce(template.canvas,'{}'::jsonb),
@@ -43,8 +45,12 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		coalesce(slot.id,''),coalesce(slot.source_slot_id,''),coalesce(slot.role,''),coalesce(slot.ordinal,0),
 		coalesce(slot.coordinates_available,false),coalesce(slot.rect,'{}'::jsonb),
 		coalesce(slot.visual_rect,'{}'::jsonb),coalesce(slot.data,'{}'::jsonb),
-		coalesce(binding.id,''),coalesce(binding.ingredient_present,false),coalesce(binding.clickable,false),
-		coalesce(binding.placeholder_item,''),coalesce(binding.item_tag_equivalent,''),
+		coalesce(binding.id,''),coalesce(binding.data,'{}'::jsonb),coalesce(binding.ingredient_present,false),coalesce(binding.clickable,false),
+		coalesce(binding.placeholder_item,''),coalesce(binding.item_tag_equivalent,''),coalesce(binding.semantic_role,''),
+		coalesce(binding.role_source,''),coalesce(binding.chance_available,false),binding.chance,binding.chance_percent,
+		coalesce(binding.chance_comparator,''),coalesce(binding.chance_source,''),coalesce(binding.chance_text,''),
+		coalesce(binding.chance_texts,'{}'::jsonb),coalesce(binding.chance_translation_key,''),
+		binding.chance_render_x,binding.chance_render_y,coalesce(binding.byproduct,false),
 		coalesce(tag.entity_id,''),coalesce(tag.registry,''),coalesce(tag.canonical_id,'')
 		from recipe_snapshots snapshot
 		left join recipe_layout_templates template on template.id=snapshot.template_id
@@ -58,20 +64,27 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 	}
 	for rows.Next() {
 		var snapshotID, layoutKind, classificationSource string
+		var originKind, underlyingRecipeTypeID, sourceModID, sourceModVersion, sourceModIDSource, renderLocale string
 		var sourceTemplateID, backgroundPath, coordinateSpace string
 		var slotDatabaseID, sourceSlotID, role, bindingID string
-		var placeholderItem, itemTagEquivalent, tagEntityID, tagRegistry, tagCanonicalID string
+		var placeholderItem, itemTagEquivalent, semanticRole, roleSource string
+		var chanceComparator, chanceSource, chanceText, chanceTranslationKey string
+		var tagEntityID, tagRegistry, tagCanonicalID string
 		var layoutAvailable, backgroundContainsIngredients, coordinatesAvailable bool
-		var ingredientPresent, clickable bool
+		var ingredientPresent, clickable, chanceAvailable, byproduct bool
 		var imageScale, slotOrdinal int
 		var ordered sql.NullBool
 		var width, height sql.NullInt64
-		var parameters, canvas, imagePixels, contentRect, rect, visualRect, slotData []byte
+		var chance, chancePercent, chanceRenderX, chanceRenderY sql.NullFloat64
+		var parameters, sourceData, canvas, imagePixels, contentRect, rect, visualRect, slotData, bindingData, chanceTexts []byte
 		if err = rows.Scan(&snapshotID, &layoutAvailable, &layoutKind, &ordered, &classificationSource, &width, &height,
-			&parameters, &sourceTemplateID, &backgroundPath, &backgroundContainsIngredients, &coordinateSpace,
+			&parameters, &originKind, &underlyingRecipeTypeID, &sourceModID, &sourceModVersion, &sourceModIDSource,
+			&renderLocale, &sourceData, &sourceTemplateID, &backgroundPath, &backgroundContainsIngredients, &coordinateSpace,
 			&imageScale, &canvas, &imagePixels, &contentRect, &slotDatabaseID, &sourceSlotID, &role, &slotOrdinal,
-			&coordinatesAvailable, &rect, &visualRect, &slotData, &bindingID, &ingredientPresent, &clickable,
-			&placeholderItem, &itemTagEquivalent, &tagEntityID, &tagRegistry, &tagCanonicalID); err != nil {
+			&coordinatesAvailable, &rect, &visualRect, &slotData, &bindingID, &bindingData, &ingredientPresent, &clickable,
+			&placeholderItem, &itemTagEquivalent, &semanticRole, &roleSource, &chanceAvailable, &chance, &chancePercent,
+			&chanceComparator, &chanceSource, &chanceText, &chanceTexts, &chanceTranslationKey,
+			&chanceRenderX, &chanceRenderY, &byproduct, &tagEntityID, &tagRegistry, &tagCanonicalID); err != nil {
 			rows.Close()
 			return err
 		}
@@ -89,6 +102,13 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 				"width":                           nullableSQLInt(width),
 				"height":                          nullableSQLInt(height),
 				"parameters":                      decodeJSONObject(parameters),
+				"origin_kind":                     originKind,
+				"underlying_recipe_type_id":       underlyingRecipeTypeID,
+				"source_mod_id":                   sourceModID,
+				"source_mod_version":              sourceModVersion,
+				"source_mod_id_source":            sourceModIDSource,
+				"render_locale":                   renderLocale,
+				"source_data":                     decodeJSONObject(sourceData),
 				"template_id":                     sourceTemplateID,
 				"background":                      backgroundPath,
 				"background_contains_ingredients": backgroundContainsIngredients,
@@ -105,6 +125,9 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 			continue
 		}
 		slot := decodeJSONObject(slotData)
+		if bindingID != "" {
+			slot = decodeJSONObject(bindingData)
+		}
 		slot["slot_id"] = sourceSlotID
 		slot["role"] = role
 		slot["ordinal"] = slotOrdinal
@@ -115,6 +138,19 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		slot["clickable"] = clickable
 		slot["placeholder_item"] = placeholderItem
 		slot["item_tag_equivalent"] = itemTagEquivalent
+		slot["semantic_role"] = semanticRole
+		slot["role_source"] = roleSource
+		slot["chance_available"] = chanceAvailable
+		slot["chance"] = nullableSQLFloat(chance)
+		slot["chance_percent"] = nullableSQLFloat(chancePercent)
+		slot["chance_comparator"] = chanceComparator
+		slot["chance_source"] = chanceSource
+		slot["chance_text"] = chanceText
+		slot["chance_texts"] = decodeJSONObject(chanceTexts)
+		slot["chance_translation_key"] = chanceTranslationKey
+		slot["chance_render_x"] = nullableSQLFloat(chanceRenderX)
+		slot["chance_render_y"] = nullableSQLFloat(chanceRenderY)
+		slot["byproduct"] = byproduct
 		slot["alternatives"] = []any{}
 		if tagCanonicalID != "" {
 			slot["tag"] = tagCanonicalID
@@ -201,6 +237,13 @@ func nullableSQLInt(value sql.NullInt64) any {
 		return nil
 	}
 	return int(value.Int64)
+}
+
+func nullableSQLFloat(value sql.NullFloat64) any {
+	if !value.Valid {
+		return nil
+	}
+	return value.Float64
 }
 
 func scanOptionalRecipeOverride(raw []byte) (map[string]any, error) {

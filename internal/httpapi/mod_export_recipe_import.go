@@ -54,6 +54,31 @@ type exportJEIRecipeIndexRow struct {
 	Ordered                    *bool  `json:"ordered"`
 	Width                      *int   `json:"width"`
 	Height                     *int   `json:"height"`
+	OriginKind                 string `json:"origin_kind"`
+	UnderlyingRecipeTypeID     string `json:"underlying_recipe_type_id"`
+	SourceModID                string `json:"source_mod_id"`
+	SourceModVersion           string `json:"source_mod_version"`
+	SourceModIDSource          string `json:"source_mod_id_source"`
+}
+
+type exportBaseRecipeDocument struct {
+	SchemaVersion string             `json:"schema_version"`
+	Count         int                `json:"count"`
+	Recipes       []exportBaseRecipe `json:"recipes"`
+}
+
+type exportBaseRecipe struct {
+	RecipeID                   string `json:"id"`
+	RecipeTypeID               string `json:"type"`
+	SerializerID               string `json:"serializer"`
+	SourceModID                string `json:"source_mod_id"`
+	SourceModVersion           string `json:"source_mod_version"`
+	SourceModIDSource          string `json:"source_mod_id_source"`
+	LayoutKind                 string `json:"layout_kind"`
+	LayoutClassificationSource string `json:"layout_classification_source"`
+	Ordered                    *bool  `json:"ordered"`
+	Width                      *int   `json:"width"`
+	Height                     *int   `json:"height"`
 }
 
 type exportJEITemplateCollection struct {
@@ -80,6 +105,8 @@ type exportJEITemplate struct {
 type exportJEITemplateSlot struct {
 	SlotID               string          `json:"slot_id"`
 	Role                 string          `json:"role"`
+	JEIRole              string          `json:"jei_role"`
+	OutputIndex          *int            `json:"output_index"`
 	CoordinatesAvailable bool            `json:"coordinates_available"`
 	Rect                 json.RawMessage `json:"rect"`
 	VisualRect           json.RawMessage `json:"visual_rect"`
@@ -109,23 +136,66 @@ type exportJEIRecipeBinding struct {
 	Parameters                 json.RawMessage    `json:"parameters"`
 	BindingCount               int                `json:"binding_count"`
 	Bindings                   []exportJEIBinding `json:"bindings"`
+	OriginKind                 string             `json:"origin_kind"`
+	UnderlyingRecipeTypeID     string             `json:"underlying_recipe_type_id"`
+	SourceModID                string             `json:"source_mod_id"`
+	SourceModVersion           string             `json:"source_mod_version"`
+	SourceModIDSource          string             `json:"source_mod_id_source"`
+	RenderLocale               string             `json:"render_locale"`
+	Raw                        json.RawMessage    `json:"-"`
 }
 
 type exportJEIBinding struct {
-	SlotID            string           `json:"slot_id"`
-	IngredientPresent bool             `json:"ingredient_present"`
-	Clickable         bool             `json:"clickable"`
-	PlaceholderItem   string           `json:"placeholder_item"`
-	ItemTagEquivalent string           `json:"item_tag_equivalent"`
-	Alternatives      []map[string]any `json:"alternatives"`
+	SlotID               string           `json:"slot_id"`
+	IngredientPresent    bool             `json:"ingredient_present"`
+	Clickable            bool             `json:"clickable"`
+	PlaceholderItem      string           `json:"placeholder_item"`
+	ItemTagEquivalent    string           `json:"item_tag_equivalent"`
+	SemanticRole         string           `json:"semantic_role"`
+	RoleSource           string           `json:"role_source"`
+	ChanceAvailable      bool             `json:"chance_available"`
+	Chance               *float64         `json:"chance"`
+	ChancePercent        *float64         `json:"chance_percent"`
+	ChanceComparator     string           `json:"chance_comparator"`
+	ChanceSource         string           `json:"chance_source"`
+	ChanceText           string           `json:"chance_text"`
+	ChanceTexts          json.RawMessage  `json:"chance_texts"`
+	ChanceTranslationKey string           `json:"chance_translation_key"`
+	ChanceRenderX        *float64         `json:"chance_render_x"`
+	ChanceRenderY        *float64         `json:"chance_render_y"`
+	Byproduct            bool             `json:"byproduct"`
+	Alternatives         []map[string]any `json:"alternatives"`
+	Raw                  json.RawMessage  `json:"-"`
 }
 
-func importExportRecipeTypesV5(ctx context.Context, tx pgx.Tx, packageID string, revisions map[string]string, raw []byte) error {
+func (binding *exportJEIRecipeBinding) UnmarshalJSON(data []byte) error {
+	type bindingAlias exportJEIRecipeBinding
+	var decoded bindingAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*binding = exportJEIRecipeBinding(decoded)
+	binding.Raw = append(binding.Raw[:0], data...)
+	return nil
+}
+
+func (binding *exportJEIBinding) UnmarshalJSON(data []byte) error {
+	type bindingAlias exportJEIBinding
+	var decoded bindingAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*binding = exportJEIBinding(decoded)
+	binding.Raw = append(binding.Raw[:0], data...)
+	return nil
+}
+
+func importExportRecipeTypes(ctx context.Context, tx pgx.Tx, packageID string, revisions map[string]string, raw []byte) error {
 	var document exportJEICategoryDocument
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return fmt.Errorf("decode recipes/jei/categories.json: %w", err)
 	}
-	if document.SchemaVersion != "mcmods-jei-categories/v5" {
+	if document.SchemaVersion != "mcmods-jei-categories/v6" {
 		return fmt.Errorf("unsupported JEI category schema: %s", document.SchemaVersion)
 	}
 	batch := &pgx.Batch{}
@@ -176,6 +246,9 @@ func importExportRecipeTypesV5(ctx context.Context, tx pgx.Tx, packageID string,
 		queued += 3
 	}
 	for _, recipeIndex := range document.Recipes {
+		if err := validateExportRecipeSource(recipeIndex.OriginKind, recipeIndex.SourceModID, recipeIndex.SourceModVersion, recipeIndex.SourceModIDSource); err != nil {
+			return fmt.Errorf("JEI recipe index %q: %w", recipeIndex.RecipeKey, err)
+		}
 		if err := validateExportRecipeLayoutKind(recipeIndex.LayoutKind, recipeIndex.Ordered); err != nil {
 			return fmt.Errorf("JEI recipe index %q: %w", recipeIndex.RecipeKey, err)
 		}
@@ -212,12 +285,18 @@ func importExportRecipeTypesV5(ctx context.Context, tx pgx.Tx, packageID string,
 			on conflict(entity_id) do update set semantic_fingerprint=excluded.semantic_fingerprint`, recipeIdentityValue.ID,
 			typeIdentity.ID, canonicalSourceID, sha256Hex(fingerprintRaw), recipeIndex.RecipeIDSource, revisionID)
 		batch.Queue(`insert into recipe_snapshots(id,recipe_id,revision_id,source_recipe_id,source_id_kind,source_recipe_key,
-			recipe_collection_path,template_id,layout_available,layout_kind,ordered,layout_classification_source,width,height,parameters,binding_count)
-			values($1,$2,$3,$4,$5,$6,$7,null,false,$8,$9,$10,$11,$12,'{}'::jsonb,0)
+			recipe_collection_path,origin_kind,underlying_recipe_type_id,source_mod_id,source_mod_version,source_mod_id_source,
+			render_locale,source_data,template_id,layout_available,layout_kind,ordered,layout_classification_source,width,height,parameters,binding_count)
+			values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'',$13::jsonb,null,false,$14,$15,$16,$17,$18,'{}'::jsonb,0)
 			on conflict(recipe_id,revision_id,source_recipe_key) do update set layout_available=false,layout_kind=excluded.layout_kind,
-			ordered=excluded.ordered,layout_classification_source=excluded.layout_classification_source`, snapshotID,
+			ordered=excluded.ordered,layout_classification_source=excluded.layout_classification_source,
+			origin_kind=excluded.origin_kind,underlying_recipe_type_id=excluded.underlying_recipe_type_id,
+			source_mod_id=excluded.source_mod_id,source_mod_version=excluded.source_mod_version,
+			source_mod_id_source=excluded.source_mod_id_source,source_data=excluded.source_data`, snapshotID,
 			recipeIdentityValue.ID, revisionID, recipeIndex.RecipeID, recipeIndex.RecipeIDSource, recipeKey,
-			recipeIndex.RecipeCollection, recipeIndex.LayoutKind, nullableRecipeOrdered(recipeIndex.Ordered),
+			recipeIndex.RecipeCollection, recipeIndex.OriginKind, recipeIndex.UnderlyingRecipeTypeID,
+			recipeIndex.SourceModID, recipeIndex.SourceModVersion, recipeIndex.SourceModIDSource, string(fingerprintRaw),
+			recipeIndex.LayoutKind, nullableRecipeOrdered(recipeIndex.Ordered),
 			recipeIndex.LayoutClassificationSource, recipeIndex.Width, recipeIndex.Height)
 		queued += 3
 	}
@@ -239,7 +318,7 @@ func decodeExportJEITemplateCollection(raw []byte) (exportJEITemplateCollection,
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return document, err
 	}
-	if document.SchemaVersion != "mcmods-jei-template-collection/v1" {
+	if document.SchemaVersion != "mcmods-jei-template-collection/v2" {
 		return document, fmt.Errorf("unsupported JEI template collection schema: %s", document.SchemaVersion)
 	}
 	if strings.TrimSpace(document.RecipeTypeID) == "" {
@@ -266,7 +345,7 @@ func queueExportJEITemplateCollection(batch *modExportWriteBatch, revisions map[
 	seenBackgrounds := make(map[string]struct{}, len(document.Templates))
 	for _, template := range document.Templates {
 		template.TemplateID = strings.TrimSpace(template.TemplateID)
-		if template.SchemaVersion != "mcmods-jei-layout-template/v1" || template.TemplateID == "" {
+		if template.SchemaVersion != "mcmods-jei-layout-template/v2" || template.TemplateID == "" {
 			return fmt.Errorf("invalid JEI template in %s", name)
 		}
 		if _, exists := seenTemplates[template.TemplateID]; exists {
@@ -308,11 +387,12 @@ func queueExportJEITemplateCollection(batch *modExportWriteBatch, revisions map[
 			seenSlots[slot.SlotID] = struct{}{}
 			slotID := exportRecipeTemplateSlotID(templateID, slot.SlotID)
 			slotData, _ := json.Marshal(slot)
-			batch.queue(`insert into recipe_template_slots(id,template_id,source_slot_id,role,ordinal,coordinates_available,rect,visual_rect,data)
-				values($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb)
-				on conflict(template_id,source_slot_id) do update set role=excluded.role,ordinal=excluded.ordinal,
+			batch.queue(`insert into recipe_template_slots(id,template_id,source_slot_id,role,jei_role,output_index,ordinal,coordinates_available,rect,visual_rect,data)
+				values($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb)
+				on conflict(template_id,source_slot_id) do update set role=excluded.role,jei_role=excluded.jei_role,
+				output_index=excluded.output_index,ordinal=excluded.ordinal,
 				coordinates_available=excluded.coordinates_available,rect=excluded.rect,visual_rect=excluded.visual_rect,data=excluded.data`,
-				int64(len(slotData)), slotID, templateID, slot.SlotID, slot.Role, ordinal, slot.CoordinatesAvailable,
+				int64(len(slotData)), slotID, templateID, slot.SlotID, slot.Role, slot.JEIRole, slot.OutputIndex, ordinal, slot.CoordinatesAvailable,
 				nonEmptyJSON(slot.Rect, `{}`), nonEmptyJSON(slot.VisualRect, `{}`), string(slotData))
 		}
 	}
@@ -324,7 +404,7 @@ func decodeExportJEIRecipeCollection(raw []byte) (exportJEIRecipeCollection, err
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return document, err
 	}
-	if document.SchemaVersion != "mcmods-jei-recipe-collection/v1" {
+	if document.SchemaVersion != "mcmods-jei-recipe-collection/v2" {
 		return document, fmt.Errorf("unsupported JEI recipe collection schema: %s", document.SchemaVersion)
 	}
 	if strings.TrimSpace(document.RecipeTypeID) == "" {
@@ -350,8 +430,11 @@ func queueExportJEIRecipeCollection(batch *modExportWriteBatch, packageID string
 		if strings.TrimSpace(recipeBinding.RecipeTypeID) == "" {
 			recipeBinding.RecipeTypeID = recipeTypeID
 		}
-		if strings.TrimSpace(recipeBinding.RecipeTypeID) != recipeTypeID || recipeBinding.SchemaVersion != "mcmods-jei-recipe-bindings/v1" {
+		if strings.TrimSpace(recipeBinding.RecipeTypeID) != recipeTypeID || recipeBinding.SchemaVersion != "mcmods-jei-recipe-bindings/v2" {
 			return fmt.Errorf("invalid JEI recipe binding in %s", name)
+		}
+		if err := validateExportRecipeSource(recipeBinding.OriginKind, recipeBinding.SourceModID, recipeBinding.SourceModVersion, recipeBinding.SourceModIDSource); err != nil {
+			return fmt.Errorf("JEI recipe %q: %w", recipeBinding.RecipeKey, err)
 		}
 		canonical, err := validateExportRecipeIdentity(recipeBinding.RecipeID, recipeBinding.RecipeIDSource, recipeBinding.RecipeIDCanonical)
 		if err != nil {
@@ -391,13 +474,19 @@ func queueExportJEIRecipeCollection(batch *modExportWriteBatch, packageID string
 			on conflict(entity_id) do update set semantic_fingerprint=excluded.semantic_fingerprint`, 0, recipeIdentityValue.ID,
 			typeIdentity.ID, canonicalSourceID, sha256Hex(fingerprintRaw), recipeBinding.RecipeIDSource, revisionID)
 		batch.queue(`insert into recipe_snapshots(id,recipe_id,revision_id,source_recipe_id,source_id_kind,source_recipe_key,
-			recipe_collection_path,template_id,layout_available,layout_kind,ordered,layout_classification_source,width,height,parameters,binding_count)
-			values($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11,$12,$13,$14::jsonb,$15)
+			recipe_collection_path,origin_kind,underlying_recipe_type_id,source_mod_id,source_mod_version,source_mod_id_source,
+			render_locale,source_data,template_id,layout_available,layout_kind,ordered,layout_classification_source,width,height,parameters,binding_count)
+			values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,true,$16,$17,$18,$19,$20,$21::jsonb,$22)
 			on conflict(recipe_id,revision_id,source_recipe_key) do update set template_id=excluded.template_id,layout_available=true,
 			layout_kind=excluded.layout_kind,ordered=excluded.ordered,layout_classification_source=excluded.layout_classification_source,
-			width=excluded.width,height=excluded.height,parameters=excluded.parameters,binding_count=excluded.binding_count`,
-			int64(len(recipeBinding.Parameters)), recipeSnapshotID, recipeIdentityValue.ID, revisionID, recipeBinding.RecipeID,
-			recipeBinding.RecipeIDSource, recipeKey, name, templateID, recipeBinding.LayoutKind,
+			width=excluded.width,height=excluded.height,parameters=excluded.parameters,binding_count=excluded.binding_count,
+			origin_kind=excluded.origin_kind,underlying_recipe_type_id=excluded.underlying_recipe_type_id,
+			source_mod_id=excluded.source_mod_id,source_mod_version=excluded.source_mod_version,
+			source_mod_id_source=excluded.source_mod_id_source,render_locale=excluded.render_locale,source_data=excluded.source_data`,
+			int64(len(recipeBinding.Raw)+len(recipeBinding.Parameters)), recipeSnapshotID, recipeIdentityValue.ID, revisionID, recipeBinding.RecipeID,
+			recipeBinding.RecipeIDSource, recipeKey, name, recipeBinding.OriginKind, recipeBinding.UnderlyingRecipeTypeID,
+			recipeBinding.SourceModID, recipeBinding.SourceModVersion, recipeBinding.SourceModIDSource,
+			recipeBinding.RenderLocale, nonEmptyJSON(recipeBinding.Raw, `{}`), templateID, recipeBinding.LayoutKind,
 			nullableRecipeOrdered(recipeBinding.Ordered), recipeBinding.LayoutClassificationSource, recipeBinding.Width,
 			recipeBinding.Height, nonEmptyJSON(recipeBinding.Parameters, `{}`), len(recipeBinding.Bindings))
 		if err = queueExportRecipeBindings(batch, revisionID, recipeIdentityValue.ID, recipeSnapshotID, templateID, recipeBinding.Bindings); err != nil {
@@ -424,6 +513,9 @@ func queueExportRecipeBindings(batch *modExportWriteBatch, revisionID, recipeID,
 		if !binding.IngredientPresent && (binding.Clickable || strings.TrimSpace(binding.PlaceholderItem) != "minecraft:air") {
 			return fmt.Errorf("empty slot %s must be non-clickable and use minecraft:air", binding.SlotID)
 		}
+		if err := validateExportRecipeChance(binding); err != nil {
+			return fmt.Errorf("slot %s: %w", binding.SlotID, err)
+		}
 		templateSlotID := exportRecipeTemplateSlotID(templateID, binding.SlotID)
 		bindingID := catalogSnapshotID("recipe-binding", recipeSnapshotID, templateSlotID, binding.SlotID)
 		tagID := strings.TrimSpace(binding.ItemTagEquivalent)
@@ -434,16 +526,29 @@ func queueExportRecipeBindings(batch *modExportWriteBatch, revisionID, recipeID,
 			batch.queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'tag','placeholder') on conflict(id) do nothing`, 0, tag.ID, tag.PublicID)
 			batch.queue(`insert into catalog_tags(entity_id,registry,canonical_id) values($1,'minecraft:item',$2) on conflict(registry,canonical_id) do nothing`, 0, tag.ID, tagID)
 		}
-		bindingData, _ := json.Marshal(map[string]any{"slot_id": binding.SlotID, "ingredient_present": binding.IngredientPresent,
-			"clickable": binding.Clickable, "placeholder_item": binding.PlaceholderItem, "item_tag_equivalent": tagID})
+		bindingData := binding.Raw
+		if len(bindingData) == 0 {
+			bindingData, _ = json.Marshal(binding)
+		}
+		byproduct := binding.Byproduct || strings.EqualFold(strings.TrimSpace(binding.SemanticRole), "byproduct")
 		batch.queue(`insert into recipe_bindings(id,recipe_snapshot_id,template_slot_id,source_slot_id,ordinal,ingredient_present,
-			clickable,placeholder_item,item_tag_equivalent,tag_id,data)
-			values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+			clickable,placeholder_item,item_tag_equivalent,semantic_role,role_source,chance_available,chance,chance_percent,
+			chance_comparator,chance_source,chance_text,chance_texts,chance_translation_key,chance_render_x,chance_render_y,
+			byproduct,tag_id,data)
+			values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20,$21,$22,$23,$24::jsonb)
 			on conflict(recipe_snapshot_id,source_slot_id) do update set template_slot_id=excluded.template_slot_id,
 			ordinal=excluded.ordinal,ingredient_present=excluded.ingredient_present,clickable=excluded.clickable,
-			placeholder_item=excluded.placeholder_item,item_tag_equivalent=excluded.item_tag_equivalent,tag_id=excluded.tag_id,data=excluded.data`,
+			placeholder_item=excluded.placeholder_item,item_tag_equivalent=excluded.item_tag_equivalent,
+			semantic_role=excluded.semantic_role,role_source=excluded.role_source,chance_available=excluded.chance_available,
+			chance=excluded.chance,chance_percent=excluded.chance_percent,chance_comparator=excluded.chance_comparator,
+			chance_source=excluded.chance_source,chance_text=excluded.chance_text,chance_texts=excluded.chance_texts,
+			chance_translation_key=excluded.chance_translation_key,chance_render_x=excluded.chance_render_x,
+			chance_render_y=excluded.chance_render_y,byproduct=excluded.byproduct,tag_id=excluded.tag_id,data=excluded.data`,
 			int64(len(bindingData)), bindingID, recipeSnapshotID, templateSlotID, binding.SlotID, ordinal,
-			binding.IngredientPresent, binding.Clickable, binding.PlaceholderItem, tagID, tagEntityID, string(bindingData))
+			binding.IngredientPresent, binding.Clickable, binding.PlaceholderItem, tagID, binding.SemanticRole,
+			binding.RoleSource, binding.ChanceAvailable, binding.Chance, binding.ChancePercent, binding.ChanceComparator,
+			binding.ChanceSource, binding.ChanceText, nonEmptyJSON(binding.ChanceTexts, `{}`), binding.ChanceTranslationKey,
+			binding.ChanceRenderX, binding.ChanceRenderY, byproduct, tagEntityID, string(bindingData))
 		for alternativeIndex, alternative := range binding.Alternatives {
 			ingredientType := strings.TrimSpace(exportString(alternative["type"]))
 			ingredientKind := exportIngredientKind(ingredientType)
@@ -624,6 +729,71 @@ func validateExportRecipeLayoutKind(kind string, ordered *bool) error {
 		}
 	default:
 		return fmt.Errorf("unsupported layout_kind %q", kind)
+	}
+	return nil
+}
+
+func validateExportBaseRecipeDocument(raw []byte) error {
+	var document exportBaseRecipeDocument
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return fmt.Errorf("decode recipes/recipes.json: %w", err)
+	}
+	if document.SchemaVersion != "mcmods-recipes/v2" {
+		return fmt.Errorf("unsupported base recipe schema: %s", document.SchemaVersion)
+	}
+	if document.Count != len(document.Recipes) {
+		return fmt.Errorf("base recipe count mismatch: declared %d, decoded %d", document.Count, len(document.Recipes))
+	}
+	seen := make(map[string]struct{}, len(document.Recipes))
+	for index, recipe := range document.Recipes {
+		recipe.RecipeID = strings.TrimSpace(recipe.RecipeID)
+		recipe.RecipeTypeID = strings.TrimSpace(recipe.RecipeTypeID)
+		if recipe.RecipeID == "" || recipe.RecipeTypeID == "" || strings.TrimSpace(recipe.SerializerID) == "" {
+			return fmt.Errorf("base recipe %d has incomplete identity", index)
+		}
+		if strings.TrimSpace(recipe.SourceModID) == "" || strings.TrimSpace(recipe.SourceModVersion) == "" || strings.TrimSpace(recipe.SourceModIDSource) == "" {
+			return fmt.Errorf("base recipe %s has incomplete source mod identity", recipe.RecipeID)
+		}
+		if strings.TrimSpace(recipe.LayoutClassificationSource) == "" {
+			return fmt.Errorf("base recipe %s has no layout classification source", recipe.RecipeID)
+		}
+		if err := validateExportRecipeLayoutKind(recipe.LayoutKind, recipe.Ordered); err != nil {
+			return fmt.Errorf("base recipe %s: %w", recipe.RecipeID, err)
+		}
+		if recipe.LayoutKind == "shaped" && (recipe.Width == nil || recipe.Height == nil || *recipe.Width <= 0 || *recipe.Height <= 0) {
+			return fmt.Errorf("shaped base recipe %s has invalid dimensions", recipe.RecipeID)
+		}
+		key := recipe.RecipeID + "\x00" + recipe.RecipeTypeID
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("duplicate base recipe %s for type %s", recipe.RecipeID, recipe.RecipeTypeID)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func validateExportRecipeSource(originKind, modID, modVersion, source string) error {
+	if strings.TrimSpace(originKind) == "" {
+		return fmt.Errorf("missing origin_kind")
+	}
+	if strings.TrimSpace(modID) == "" || strings.TrimSpace(modVersion) == "" || strings.TrimSpace(source) == "" {
+		return fmt.Errorf("incomplete source mod identity")
+	}
+	return nil
+}
+
+func validateExportRecipeChance(binding exportJEIBinding) error {
+	if !binding.ChanceAvailable {
+		return nil
+	}
+	if binding.Chance == nil && binding.ChancePercent == nil {
+		return fmt.Errorf("chance_available is true without a numeric chance")
+	}
+	if binding.Chance != nil && (*binding.Chance < 0 || *binding.Chance > 1) {
+		return fmt.Errorf("chance must be between 0 and 1")
+	}
+	if binding.ChancePercent != nil && (*binding.ChancePercent < 0 || *binding.ChancePercent > 100) {
+		return fmt.Errorf("chance_percent must be between 0 and 100")
 	}
 	return nil
 }

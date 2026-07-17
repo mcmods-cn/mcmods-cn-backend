@@ -572,10 +572,13 @@ func baselineSchemaStatements() []string {
 		`create table if not exists mod_authors (
 			id bigserial primary key,
 			mod_id bigint not null references mods(id) on delete cascade,
-			name text not null,
-			role text not null default '',
+			creator_id bigint not null,
+			role_id bigint,
+			name_snapshot text not null default '',
+			role_snapshot text not null default '',
 			display_order integer not null default 0,
-			created_at timestamptz not null default now()
+			created_at timestamptz not null default now(),
+			unique(mod_id,creator_id,role_id)
 		)`,
 		`create index if not exists idx_mod_authors_mod_order on mod_authors (mod_id, display_order, id)`,
 		`create table if not exists mod_relationships (

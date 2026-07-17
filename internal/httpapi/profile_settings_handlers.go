@@ -32,6 +32,7 @@ type userProfileSettingsResponse struct {
 	Signature            string `json:"signature"`
 	SignatureMaxBytes    int    `json:"signatureMaxBytes"`
 	AvatarURL            string `json:"avatarUrl"`
+	ProfileBackgroundURL string `json:"profileBackgroundUrl"`
 	MessageReceive       bool   `json:"messageReceive"`
 	CanUpdateAvatar      bool   `json:"canUpdateAvatar"`
 	CanUseAnimatedAvatar bool   `json:"canUseAnimatedAvatar"`
@@ -241,7 +242,8 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) loadUserProfileSettings(ctx context.Context, userID int64) (userProfileSettingsResponse, error) {
 	var response userProfileSettingsResponse
-	if err := s.db.QueryRow(ctx, `select signature, avatar_url from users where id = $1`, userID).Scan(&response.Signature, &response.AvatarURL); err != nil {
+	if err := s.db.QueryRow(ctx, `select signature, avatar_url, profile_background_url from users where id = $1`, userID).
+		Scan(&response.Signature, &response.AvatarURL, &response.ProfileBackgroundURL); err != nil {
 		return response, err
 	}
 	response.SignatureMaxBytes = s.profileConfigFromSettings(ctx).SignatureMaxBytes

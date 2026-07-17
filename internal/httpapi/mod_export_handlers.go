@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	modExportImporterVersion  = "1.4.0"
+	modExportImporterVersion  = "1.5.0"
 	modExportTaskCode         = "mod_export_import"
 	maxExportFileCount        = 200_000
 	maxExportUncompressedSize = int64(8 << 30)
@@ -616,6 +616,17 @@ func (s *Server) importModExportJob(ctx context.Context, jobID string) (resultEr
 			return writeBatch.flush(ctx, tx)
 		})
 	}
+	baseRecipeFile := files["recipes/recipes.json"]
+	if baseRecipeFile == nil {
+		return fmt.Errorf("export package is missing recipes/recipes.json")
+	}
+	baseRecipeData, readErr := readExportZIPFile(baseRecipeFile, maxExportJSONSize)
+	if readErr != nil {
+		return fmt.Errorf("read recipes/recipes.json: %w", readErr)
+	}
+	if err = validateExportBaseRecipeDocument(baseRecipeData); err != nil {
+		return err
+	}
 	categoryFile := files["recipes/jei/categories.json"]
 	if categoryFile == nil {
 		return fmt.Errorf("export package is missing recipes/jei/categories.json")
@@ -625,7 +636,7 @@ func (s *Server) importModExportJob(ctx context.Context, jobID string) (resultEr
 		return fmt.Errorf("read recipes/jei/categories.json: %w", readErr)
 	}
 	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
-		return importExportRecipeTypesV5(ctx, tx, packageID, revisions, categoryData)
+		return importExportRecipeTypes(ctx, tx, packageID, revisions, categoryData)
 	}); err != nil {
 		return err
 	}
@@ -803,6 +814,10 @@ func (s *Server) importModExportJob(ctx context.Context, jobID string) (resultEr
 	if err != nil {
 		return err
 	}
+	blockEntityModels, err := deriveModExportBlockEntityModels(files, revisions)
+	if err != nil {
+		return err
+	}
 	if err = s.updateModExportJob(ctx, jobID, runToken, "importing", 96, "finalizing"); err != nil {
 		return err
 	}
@@ -827,6 +842,9 @@ func (s *Server) importModExportJob(ctx context.Context, jobID string) (resultEr
 	}
 	sort.Strings(revisionIDs)
 	err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		if modelErr := persistModExportBlockEntityModels(ctx, tx, blockEntityModels); modelErr != nil {
+			return modelErr
+		}
 		if bindingErr := persistModExportBlockBindings(ctx, tx, blockBindings); bindingErr != nil {
 			return bindingErr
 		}

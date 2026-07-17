@@ -5,6 +5,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"mcmods-cn-backend/internal/activity"
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/mailer"
 	"mcmods-cn-backend/internal/querycache"
@@ -12,22 +13,24 @@ import (
 )
 
 type Server struct {
-	cfg    config.Config
-	db     *pgxpool.Pool
-	mailer mailer.Mailer
-	queue  *queue.Client
-	cache  *querycache.Cache
-	mux    *http.ServeMux
+	cfg      config.Config
+	db       *pgxpool.Pool
+	mailer   mailer.Mailer
+	queue    *queue.Client
+	cache    *querycache.Cache
+	activity *activity.Monitor
+	mux      *http.ServeMux
 }
 
-func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client) http.Handler {
+func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, activityMonitor *activity.Monitor) http.Handler {
 	server := &Server{
-		cfg:    cfg,
-		db:     db,
-		mailer: mailer.New(cfg.SMTP),
-		queue:  queueClient,
-		cache:  querycache.New(cfg.Redis),
-		mux:    http.NewServeMux(),
+		cfg:      cfg,
+		db:       db,
+		mailer:   mailer.New(cfg.SMTP),
+		queue:    queueClient,
+		cache:    querycache.New(cfg.Redis),
+		activity: activityMonitor,
+		mux:      http.NewServeMux(),
 	}
 	server.routes()
 	return server.cors(server.logAccess(server.mux))
@@ -59,6 +62,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/recipe-types/detail", s.requireAuth(s.updateGlobalRecipeType))
 	s.mux.HandleFunc("PUT /api/v1/recipes/{recipeKey}", s.requireAuth(s.updateGlobalRecipe))
 	s.mux.HandleFunc("GET /api/v1/public-links/{publicId}", s.resolvePublicLink)
+	s.mux.HandleFunc("GET /api/v1/creators", s.optionalAuth(s.creators))
+	s.mux.HandleFunc("POST /api/v1/creators", s.requirePermission("creator.create", s.createCreator))
+	s.mux.HandleFunc("GET /api/v1/creators/{publicId}", s.optionalAuth(s.creatorDetail))
+	s.mux.HandleFunc("PUT /api/v1/creators/{publicId}", s.requireAuth(s.updateCreator))
+	s.mux.HandleFunc("POST /api/v1/creators/{publicId}/claims", s.requirePermission("creator.claim", s.claimCreator))
+	s.mux.HandleFunc("GET /api/v1/creator-roles", s.optionalAuth(s.creatorRoles))
+	s.mux.HandleFunc("POST /api/v1/creator-roles", s.requirePermission("creator.role.write", s.createCreatorRole))
+	s.mux.HandleFunc("GET /api/v1/economy/currencies", s.optionalAuth(s.publicCurrencies))
+	s.mux.HandleFunc("GET /api/v1/shop/items", s.optionalAuth(s.publicShopItems))
 	s.mux.HandleFunc("GET /api/v1/blueprints", s.optionalAuth(s.blueprints))
 	s.mux.HandleFunc("GET /api/v1/blueprints/{publicId}", s.optionalAuth(s.blueprintDetail))
 	s.mux.HandleFunc("GET /api/v1/blueprints/{publicId}/render", s.optionalAuth(s.blueprintRenderData))
@@ -112,6 +124,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/users/me/profile-settings", s.requireAuth(s.getUserProfileSettings))
 	s.mux.HandleFunc("PUT /api/v1/users/me/profile-settings", s.requireAuth(s.updateUserProfileSettings))
 	s.mux.HandleFunc("GET /api/v1/users/me/overview", s.requireAuth(s.userOverview))
+	s.mux.HandleFunc("GET /api/v1/users/me/economy", s.requireAuth(s.userEconomyOverview))
+	s.mux.HandleFunc("POST /api/v1/users/me/economy/checkin", s.requirePermission("economy.checkin", s.checkIn))
+	s.mux.HandleFunc("POST /api/v1/users/me/economy/transfer", s.requirePermission("economy.transfer", s.transferCurrency))
+	s.mux.HandleFunc("POST /api/v1/users/me/shop/purchase", s.requirePermission("shop.purchase", s.purchaseShopItem))
+	s.mux.HandleFunc("POST /api/v1/users/me/shop/use", s.requirePermission("shop.use", s.useShopItem))
+	s.mux.HandleFunc("GET /api/v1/users/me/tasks", s.requireAuth(s.userTasks))
 	s.mux.HandleFunc("GET /api/v1/users/me/favorite-collections", s.requireAuth(s.favoriteCollections))
 	s.mux.HandleFunc("POST /api/v1/users/me/favorite-collections", s.requireAuth(s.createFavoriteCollection))
 	s.mux.HandleFunc("PUT /api/v1/users/me/favorite-collections/{id}", s.requireAuth(s.updateFavoriteCollection))
@@ -179,6 +197,23 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /api/v1/admin/mod-applications/{id}", s.requirePermission("project.review", s.reviewModApplication))
 	s.mux.HandleFunc("POST /api/v1/admin/mod-applications/{id}/attachments/{fileId}/presign", s.requirePermission("project.review", s.presignModApplicationAttachment))
 	s.mux.HandleFunc("GET /api/v1/admin/mod-content-reviews", s.requirePermission("project.review", s.adminModContentReviews))
+	s.mux.HandleFunc("GET /api/v1/admin/creator-claims", s.requirePermission("creator.claim.review", s.adminCreatorClaims))
+	s.mux.HandleFunc("PATCH /api/v1/admin/creator-claims/{id}", s.requirePermission("creator.claim.review", s.reviewCreatorClaim))
+	s.mux.HandleFunc("GET /api/v1/admin/activity", s.requirePermission("activity.read", s.adminActivityEvents))
+	s.mux.HandleFunc("GET /api/v1/admin/economy/config", s.requirePermission("economy.read", s.adminEconomyConfig))
+	s.mux.HandleFunc("PUT /api/v1/admin/economy/config", s.requirePermission("economy.write", s.updateEconomyConfig))
+	s.mux.HandleFunc("GET /api/v1/admin/economy/currencies", s.requirePermission("economy.read", s.adminCurrencies))
+	s.mux.HandleFunc("POST /api/v1/admin/economy/currencies", s.requirePermission("economy.write", s.createCurrency))
+	s.mux.HandleFunc("PUT /api/v1/admin/economy/currencies/{publicId}", s.requirePermission("economy.write", s.updateCurrency))
+	s.mux.HandleFunc("GET /api/v1/admin/shop/items", s.requirePermission("shop.read", s.adminShopItems))
+	s.mux.HandleFunc("POST /api/v1/admin/shop/items", s.requirePermission("shop.write", s.createShopItem))
+	s.mux.HandleFunc("PUT /api/v1/admin/shop/items/{publicId}", s.requirePermission("shop.write", s.updateShopItem))
+	s.mux.HandleFunc("GET /api/v1/admin/levels/config", s.requirePermission("level.read", s.adminLevelConfig))
+	s.mux.HandleFunc("PUT /api/v1/admin/levels/config", s.requirePermission("level.write", s.updateLevelConfig))
+	s.mux.HandleFunc("GET /api/v1/admin/tasks", s.requirePermission("task.read", s.adminTasks))
+	s.mux.HandleFunc("POST /api/v1/admin/tasks", s.requirePermission("task.write", s.createTask))
+	s.mux.HandleFunc("PUT /api/v1/admin/tasks/{publicId}", s.requirePermission("task.write", s.updateTask))
+	s.mux.HandleFunc("DELETE /api/v1/admin/tasks/{publicId}", s.requirePermission("task.write", s.deleteTask))
 	s.mux.HandleFunc("PATCH /api/v1/admin/export-revisions/{revisionId}/activate", s.requirePermission("project.review", s.activateModExportRevision))
 	s.mux.HandleFunc("POST /api/v1/admin/oss/uploads/presign", s.requirePermission("oss.write", s.createOSSDirectUpload))
 	s.mux.HandleFunc("POST /api/v1/admin/oss/uploads/complete", s.requirePermission("oss.write", s.completeOSSDirectUpload))

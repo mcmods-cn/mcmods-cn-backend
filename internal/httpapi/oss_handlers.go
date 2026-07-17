@@ -780,11 +780,11 @@ func (s *Server) presignOSSFile(w http.ResponseWriter, r *http.Request) {
 	s.presignOSSFileWithRequest(w, r, req)
 }
 
-func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Request, req ossPresignRequest) {
+func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Request, req ossPresignRequest) bool {
 	req.ObjectKey = strings.TrimSpace(req.ObjectKey)
 	if req.ObjectKey == "" {
 		writeError(w, http.StatusBadRequest, "missing OSS ObjectKey")
-		return
+		return false
 	}
 	cfg := s.ossConfigFromSettings(r.Context())
 	if req.ExpiresMinutes <= 0 {
@@ -803,7 +803,7 @@ func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Reques
 		client, err := s.ossDownloadClient(r.Context(), cfg)
 		if err != nil {
 			writeError(w, http.StatusServiceUnavailable, err.Error())
-			return
+			return false
 		}
 		result, err := client.Presign(
 			r.Context(),
@@ -816,7 +816,7 @@ func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Reques
 		)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "failed to generate OSS download URL")
-			return
+			return false
 		}
 		downloadURL = result.URL
 	}
@@ -834,6 +834,7 @@ func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Reques
 		"downloadUrlMode": cfg.DownloadURLMode,
 		"filename":        originalName,
 	})
+	return true
 }
 
 func (s *Server) ossUploadLogs(w http.ResponseWriter, r *http.Request) {

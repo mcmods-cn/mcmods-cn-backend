@@ -19,14 +19,15 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, err := security.BearerToken(r.Header.Get("Authorization"))
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "请先登录")
+			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
 		claims, err := security.ParseToken(s.cfg.JWTSecret, token)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "登录状态已失效")
+			writeError(w, http.StatusUnauthorized, "authentication session has expired")
 			return
 		}
+		markActivityUser(r, claims.Subject)
 		ctx := context.WithValue(r.Context(), claimsContextKey, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	}
@@ -40,14 +41,15 @@ func (s *Server) optionalAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		token, err := security.BearerToken(r.Header.Get("Authorization"))
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "登录状态无效")
+			writeError(w, http.StatusUnauthorized, "authentication session is invalid")
 			return
 		}
 		claims, err := security.ParseToken(s.cfg.JWTSecret, token)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "登录状态已失效")
+			writeError(w, http.StatusUnauthorized, "authentication session has expired")
 			return
 		}
+		markActivityUser(r, claims.Subject)
 		ctx := context.WithValue(r.Context(), claimsContextKey, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	}
@@ -58,7 +60,7 @@ func (s *Server) requirePermission(permission string, next http.HandlerFunc) htt
 	return s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		claims := currentClaims(r)
 		if !hasPermission(claims.Permissions, permission) {
-			writeError(w, http.StatusForbidden, "权限不足")
+			writeError(w, http.StatusForbidden, "permission denied")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -77,7 +79,7 @@ func (s *Server) registerDeclaredPermission(permission string) {
 	_, _ = s.db.Exec(
 		context.Background(),
 		`insert into permissions (code, module, name, description)
-		 values ($1, $2, $1, '代码声明的权限节点')
+		 values ($1, $2, $1, 'Permission declared by application code')
 		 on conflict (code) do nothing`,
 		permission,
 		module,

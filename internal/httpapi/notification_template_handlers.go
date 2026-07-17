@@ -3,11 +3,9 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -35,10 +33,22 @@ type reviewConfig struct {
 	BlueprintEdit   bool `json:"blueprintEdit"`
 	ModCreate       bool `json:"modCreate"`
 	ModEdit         bool `json:"modEdit"`
+	AuthorCreate    bool `json:"authorCreate"`
+	AuthorEdit      bool `json:"authorEdit"`
+	AuthorClaim     bool `json:"authorClaim"`
+	TeamCreate      bool `json:"teamCreate"`
+	TeamEdit        bool `json:"teamEdit"`
+	TeamClaim       bool `json:"teamClaim"`
 }
 
 func defaultNotificationTemplateConfig() notificationTemplateConfig {
-	definitions := []struct{ code, zhTitle, zhBody, enTitle, enBody string }{
+	definitions := []struct {
+		code    string
+		zhTitle string
+		zhBody  string
+		enTitle string
+		enBody  string
+	}{
 		{"mod_import_success", "模组资料导入完成", "{name} 的资料已经导入完成。", "Mod import completed", "The data for {name} has been imported."},
 		{"mod_import_partial", "模组资料部分导入完成", "{name} 的资料已经导入，但存在警告；共跳过 {skipped} 条非字符串翻译。", "Mod import partially completed", "The data for {name} was imported with warnings; {skipped} non-string translation values were skipped."},
 		{"mod_import_failure", "模组资料导入失败", "{name} 的资料导入失败：{error}", "Mod import failed", "The data import for {name} failed: {error}"},
@@ -47,13 +57,18 @@ func defaultNotificationTemplateConfig() notificationTemplateConfig {
 		{"blueprint_format_success", "蓝图格式转换完成", "{name} 已转换为 {format} 格式。", "Blueprint format converted", "{name} has been converted to {format}."},
 		{"review_approved", "内容审核通过", "您提交的 {name} 已通过审核。", "Content approved", "Your submission for {name} was approved."},
 		{"review_rejected", "内容审核未通过", "您提交的 {name} 未通过审核。原因：{reason}", "Content rejected", "Your submission for {name} was rejected. Reason: {reason}"},
+		{"creator_claim_approved", "作者或团队认领已通过", "您对 {name} 的认领已通过审核。", "Creator claim approved", "Your claim for {name} was approved."},
+		{"creator_claim_rejected", "作者或团队认领未通过", "您对 {name} 的认领未通过审核。原因：{reason}", "Creator claim rejected", "Your claim for {name} was rejected. Reason: {reason}"},
 	}
 	result := notificationTemplateConfig{Templates: make([]notificationTemplateDefinition, 0, len(definitions))}
 	for _, value := range definitions {
-		result.Templates = append(result.Templates, notificationTemplateDefinition{Code: value.code, Translations: map[string]localizedNotificationTemplate{
-			"zh-CN": {Title: value.zhTitle, Body: value.zhBody},
-			"en":    {Title: value.enTitle, Body: value.enBody},
-		}})
+		result.Templates = append(result.Templates, notificationTemplateDefinition{
+			Code: value.code,
+			Translations: map[string]localizedNotificationTemplate{
+				"zh-CN": {Title: value.zhTitle, Body: value.zhBody},
+				"en":    {Title: value.enTitle, Body: value.enBody},
+			},
+		})
 	}
 	return result
 }
@@ -135,7 +150,8 @@ func (s *Server) sendTemplatedNotification(ctx context.Context, userID int64, co
 		return
 	}
 	raw, _ := json.Marshal(data)
-	_, _ = s.db.Exec(ctx, `insert into notifications(recipient_id,kind,title,body,source_locale,data) values($1,'system',$2,$3,$4,$5::jsonb)`, userID, title, body, locale, string(raw))
+	_, _ = s.db.Exec(ctx, `insert into notifications(recipient_id,kind,title,body,source_locale,data)
+		values($1,'system',$2,$3,$4,$5::jsonb)`, userID, title, body, locale, string(raw))
 }
 
 func languageBase(locale string) string {
@@ -157,8 +173,11 @@ func (s *Server) updateNotificationTemplates(w http.ResponseWriter, r *http.Requ
 	}
 	request = mergeNotificationTemplates(request)
 	raw, _ := json.Marshal(request)
-	_, err := s.db.Exec(r.Context(), `insert into system_settings(key,value,updated_by,updated_at) values($1,$2::jsonb,$3,now())
-		on conflict(key) do update set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`, notificationTemplatesSettingKey, string(raw), currentClaims(r).Subject)
+	_, err := s.db.Exec(r.Context(), `insert into system_settings(key,value,updated_by,updated_at)
+		values($1,$2::jsonb,$3,now())
+		on conflict(key) do update
+		set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`,
+		notificationTemplatesSettingKey, string(raw), currentClaims(r).Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "保存通知模板失败")
 		return
@@ -177,8 +196,11 @@ func (s *Server) updateReviewConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, _ := json.Marshal(request)
-	_, err := s.db.Exec(r.Context(), `insert into system_settings(key,value,updated_by,updated_at) values($1,$2::jsonb,$3,now())
-		on conflict(key) do update set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`, reviewConfigSettingKey, string(raw), currentClaims(r).Subject)
+	_, err := s.db.Exec(r.Context(), `insert into system_settings(key,value,updated_by,updated_at)
+		values($1,$2::jsonb,$3,now())
+		on conflict(key) do update
+		set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`,
+		reviewConfigSettingKey, string(raw), currentClaims(r).Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "保存审核设置失败")
 		return
@@ -188,13 +210,47 @@ func (s *Server) updateReviewConfig(w http.ResponseWriter, r *http.Request) {
 
 func loadReviewConfig(ctx context.Context, db *pgxpool.Pool) reviewConfig {
 	var raw []byte
-	var config reviewConfig
+	config := defaultReviewConfig()
 	err := db.QueryRow(ctx, `select value from system_settings where key=$1`, reviewConfigSettingKey).Scan(&raw)
 	if err == nil {
 		_ = json.Unmarshal(raw, &config)
 	}
-	if errors.Is(err, pgx.ErrNoRows) {
-		return reviewConfig{ModCreate: true, ModEdit: true}
-	}
 	return config
+}
+
+func defaultReviewConfig() reviewConfig {
+	return reviewConfig{
+		ModCreate:    true,
+		ModEdit:      true,
+		AuthorCreate: true,
+		AuthorEdit:   true,
+		AuthorClaim:  true,
+		TeamCreate:   true,
+		TeamEdit:     true,
+		TeamClaim:    true,
+	}
+}
+
+func creatorReviewRequired(config reviewConfig, kind, action string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "team":
+		switch action {
+		case "create":
+			return config.TeamCreate
+		case "edit":
+			return config.TeamEdit
+		case "claim":
+			return config.TeamClaim
+		}
+	default:
+		switch action {
+		case "create":
+			return config.AuthorCreate
+		case "edit":
+			return config.AuthorEdit
+		case "claim":
+			return config.AuthorClaim
+		}
+	}
+	return true
 }

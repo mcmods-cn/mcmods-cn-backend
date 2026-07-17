@@ -7,7 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 5
+const schemaGeneration = 8
 
 // Migrate installs one coherent development schema. The catalog redesign does
 // not support in-place upgrades from the pre-entity data model; development
@@ -35,18 +35,6 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	if err != nil {
 		return fmt.Errorf("read schema generation: %w", err)
 	}
-	if currentGeneration == 3 {
-		if err = upgradeSchema3To4(ctx, conn); err != nil {
-			return err
-		}
-		currentGeneration = 4
-	}
-	if currentGeneration == 4 {
-		if err = upgradeSchema4To5(ctx, conn); err != nil {
-			return err
-		}
-		return nil
-	}
 	if currentGeneration != 0 && currentGeneration != schemaGeneration {
 		return fmt.Errorf("database schema generation %d is incompatible with generation %d; reset the development database", currentGeneration, schemaGeneration)
 	}
@@ -64,7 +52,8 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	statements = append(statements, catalogSchemaStatements()...)
 	statements = append(statements, reviewSchemaStatements()...)
 	statements = append(statements, immutableHistoryGuardStatements()...)
-	statements = append(statements, schemaGeneration5Statements()...)
+	statements = append(statements, blueprintRelationSchemaStatements()...)
+	statements = append(statements, communitySchemaStatements()...)
 	for _, statement := range statements {
 		if _, err = tx.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("install schema generation %d: %w", schemaGeneration, err)
@@ -86,27 +75,7 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	return nil
 }
 
-func upgradeSchema4To5(ctx context.Context, conn *pgxpool.Conn) error {
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin schema generation 5 upgrade: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	for _, statement := range schemaGeneration5Statements() {
-		if _, err = tx.Exec(ctx, statement); err != nil {
-			return fmt.Errorf("upgrade schema generation 4 to 5: %w", err)
-		}
-	}
-	if _, err = tx.Exec(ctx, `update schema_metadata set generation=$1,installed_at=now() where singleton`, schemaGeneration); err != nil {
-		return fmt.Errorf("record schema generation 5: %w", err)
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit schema generation 5: %w", err)
-	}
-	return nil
-}
-
-func schemaGeneration5Statements() []string {
+func blueprintRelationSchemaStatements() []string {
 	return []string{
 		`create table if not exists blueprint_mods (
 			blueprint_id bigint not null references blueprints(id) on delete cascade,
@@ -116,77 +85,6 @@ func schemaGeneration5Statements() []string {
 			primary key (blueprint_id, source_namespace)
 		)`,
 		`create index if not exists idx_blueprint_mods_mod_blueprint on blueprint_mods(mod_id, blueprint_id)`,
-		`insert into blueprint_mods(blueprint_id,source_namespace,mod_id)
-		 select namespace.blueprint_id,namespace.source_namespace,source.mod_id
-		 from (
-			select distinct blueprint_id,split_part(block_id,':',1) source_namespace
-			from blueprint_materials where position(':' in block_id) > 1
-		 ) namespace
-		 join lateral (
-			select candidate.mod_id from (
-				select revision.mod_id,0 priority,coalesce(revision.activated_at,revision.created_at) matched_at
-				from mod_export_revisions revision
-				where revision.source_namespace=namespace.source_namespace
-				  and revision.is_active and revision.status in ('ready','partial')
-				union all
-				select mod.id,1 priority,mod.updated_at matched_at from mods mod
-				where lower(mod.mod_id)=lower(namespace.source_namespace) and mod.review_status='approved'
-			) candidate order by candidate.priority,candidate.matched_at desc limit 1
-		 ) source on true
-		 on conflict(blueprint_id,source_namespace) do update set mod_id=excluded.mod_id`,
-	}
-}
-
-func upgradeSchema3To4(ctx context.Context, conn *pgxpool.Conn) error {
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin schema generation 4 upgrade: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	for _, statement := range schemaGeneration4Statements() {
-		if _, err = tx.Exec(ctx, statement); err != nil {
-			return fmt.Errorf("upgrade schema generation 3 to 4: %w", err)
-		}
-	}
-	if _, err = tx.Exec(ctx, `update schema_metadata set generation=4,installed_at=now() where singleton`); err != nil {
-		return fmt.Errorf("record schema generation 4: %w", err)
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit schema generation 4: %w", err)
-	}
-	return nil
-}
-
-func schemaGeneration4Statements() []string {
-	return []string{
-		`alter table blueprints add column if not exists cover_file_id bigint references oss_files(id) on delete set null`,
-		`alter table blueprints add column if not exists cover_object_key text not null default ''`,
-		`alter table blueprints add column if not exists review_status text not null default 'not_required'`,
-		`alter table blueprints add column if not exists published_revision_id bigint references content_revisions(id) on delete restrict`,
-		`do $$ begin
-			alter table blueprints add constraint chk_blueprints_review_status
-			check (review_status in ('not_required','pending','approved','rejected'));
-		exception when duplicate_object then null; end $$`,
-		`create table if not exists favorite_collections (
-			id bigserial primary key,
-			user_id bigint not null references users(id) on delete cascade,
-			name text not null,
-			is_default boolean not null default false,
-			created_at timestamptz not null default now(),
-			updated_at timestamptz not null default now(),
-			unique(user_id,name)
-		)`,
-		`create unique index if not exists idx_favorite_collections_default
-			on favorite_collections(user_id) where is_default`,
-		`create table if not exists favorite_collection_items (
-			collection_id bigint not null references favorite_collections(id) on delete cascade,
-			entity_type text not null,
-			entity_key text not null,
-			created_at timestamptz not null default now(),
-			primary key(collection_id,entity_type,entity_key)
-		)`,
-		`create index if not exists idx_favorite_items_entity
-			on favorite_collection_items(entity_type,entity_key)`,
 	}
 }
 

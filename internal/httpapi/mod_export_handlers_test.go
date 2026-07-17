@@ -9,15 +9,15 @@ import (
 func TestQueueExportRecipeTemplateAndBindings(t *testing.T) {
 	batch := newModExportWriteBatch()
 	templateRaw := []byte(`{
-		"schema_version":"mcmods-jei-template-collection/v1",
+		"schema_version":"mcmods-jei-template-collection/v2",
 		"recipe_type_id":"minecraft:crafting",
 		"coordinate_space":"logical_pixels","image_scale":4,
 		"canvas":{"width":178,"height":86},"image_pixels":{"width":712,"height":344},
-		"template_count":1,"templates":[{"schema_version":"mcmods-jei-layout-template/v1",
+		"template_count":1,"templates":[{"schema_version":"mcmods-jei-layout-template/v2",
 		"template_id":"template_test","background":"recipes/jei/backgrounds/minecraft/crafting/template_test.png",
 		"slot_count":2,"slots":[
-			{"slot_id":"input_0","role":"input","coordinates_available":true,"rect":{"x":30,"y":34,"width":18,"height":18}},
-			{"slot_id":"output_0","role":"output","coordinates_available":true,"rect":{"x":130,"y":34,"width":18,"height":18}}
+			{"slot_id":"input_0","role":"input","jei_role":"input","coordinates_available":true,"rect":{"x":30,"y":34,"width":18,"height":18}},
+			{"slot_id":"output_0","role":"output","jei_role":"output","output_index":0,"coordinates_available":true,"rect":{"x":130,"y":34,"width":18,"height":18}}
 		]}]
 	}`)
 	templateDocument, err := decodeExportJEITemplateCollection(templateRaw)
@@ -27,14 +27,19 @@ func TestQueueExportRecipeTemplateAndBindings(t *testing.T) {
 	if err = queueExportJEITemplateCollection(batch, map[string]string{"minecraft": "revision"}, "recipes/jei/templates/minecraft/crafting.json", templateDocument); err != nil {
 		t.Fatal(err)
 	}
-	recipeRaw := []byte(`{"schema_version":"mcmods-jei-recipe-collection/v1","recipe_type_id":"minecraft:crafting",
+	recipeRaw := []byte(`{"schema_version":"mcmods-jei-recipe-collection/v2","recipe_type_id":"minecraft:crafting",
 		"template_collection":"recipes/jei/templates/minecraft/crafting.json","count":1,"recipes":[{
-		"schema_version":"mcmods-jei-recipe-bindings/v1","recipe_type_id":"minecraft:crafting",
+		"schema_version":"mcmods-jei-recipe-bindings/v2","recipe_type_id":"minecraft:crafting",
 		"recipe_id":"minecraft:test","recipe_id_source":"minecraft_recipe","recipe_id_canonical":true,
+		"origin_kind":"registered_recipe","underlying_recipe_type_id":"minecraft:crafting",
+		"source_mod_id":"minecraft","source_mod_version":"1.20.1","source_mod_id_source":"recipe_id_namespace",
 		"recipe_key":"minecraft:test#000000","template_id":"template_test","layout_kind":"shaped","ordered":true,
 		"layout_classification_source":"recipe_class","width":1,"height":1,"binding_count":2,"bindings":[
 			{"slot_id":"input_0","ingredient_present":true,"clickable":true,"item_tag_equivalent":"minecraft:logs","alternatives":[{"type":"minecraft:item_stack","item":"minecraft:oak_log","count":1}]},
-			{"slot_id":"output_0","ingredient_present":false,"clickable":false,"placeholder_item":"minecraft:air","alternatives":[]}
+			{"slot_id":"output_0","semantic_role":"byproduct","role_source":"jei_slot_tooltip","ingredient_present":true,"clickable":true,
+			"chance_available":true,"chance":0.4,"chance_percent":40,"chance_comparator":"exact","chance_source":"jei_slot_tooltip",
+			"chance_text":"40% Chance","chance_texts":{"zh_cn":"40% 概率"},"chance_translation_key":"recipe.chance","byproduct":true,
+			"alternatives":[{"type":"minecraft:item_stack","item":"minecraft:stick","count":1}]}
 		]}]}`)
 	recipeDocument, err := decodeExportJEIRecipeCollection(recipeRaw)
 	if err != nil {
@@ -72,6 +77,21 @@ func TestValidateExportRecipeLayoutKind(t *testing.T) {
 				t.Fatalf("valid=%v, error=%v", test.valid, err)
 			}
 		})
+	}
+}
+
+func TestValidateExportBaseRecipeDocumentV2Only(t *testing.T) {
+	valid := []byte(`{"schema_version":"mcmods-recipes/v2","count":1,"recipes":[{
+		"id":"minecraft:oak_planks","type":"minecraft:crafting","serializer":"minecraft:crafting_shapeless",
+		"source_mod_id":"minecraft","source_mod_version":"1.20.1","source_mod_id_source":"recipe_id_namespace",
+		"layout_kind":"shapeless","ordered":false,"layout_classification_source":"recipe_class"
+	}]}`)
+	if err := validateExportBaseRecipeDocument(valid); err != nil {
+		t.Fatal(err)
+	}
+	old := bytes.Replace(valid, []byte("mcmods-recipes/v2"), []byte("mcmods-recipes/v1"), 1)
+	if err := validateExportBaseRecipeDocument(old); err == nil {
+		t.Fatal("expected the legacy base recipe schema to be rejected")
 	}
 }
 

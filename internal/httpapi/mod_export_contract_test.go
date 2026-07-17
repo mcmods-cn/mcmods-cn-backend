@@ -48,6 +48,10 @@ func TestExporterSamplePackageContracts(t *testing.T) {
 			if validateErr = validateModExportManifest(manifest); validateErr != nil {
 				t.Fatal(validateErr)
 			}
+			revisions := make(map[string]string)
+			for _, namespace := range normalizeExportNamespaces(manifest.Configuration.Namespaces) {
+				revisions[namespace] = "sample-revision-" + namespace
+			}
 			capabilityFile := files[modExportCapabilitiesPath]
 			if capabilityFile == nil {
 				t.Fatalf("%s is missing", modExportCapabilitiesPath)
@@ -63,10 +67,6 @@ func TestExporterSamplePackageContracts(t *testing.T) {
 				blocks, blockErr := readExportRegistryLinks(files["registries/blocks.json"])
 				if blockErr != nil {
 					t.Fatal(blockErr)
-				}
-				revisions := make(map[string]string)
-				for _, namespace := range normalizeExportNamespaces(manifest.Configuration.Namespaces) {
-					revisions[namespace] = "sample-revision-" + namespace
 				}
 				if len(revisions) == 0 {
 					for _, block := range blocks {
@@ -87,10 +87,30 @@ func TestExporterSamplePackageContracts(t *testing.T) {
 					t.Fatalf("expected %d import-time block bindings, got %d", expectedBindings, len(bindings))
 				}
 			}
+			if files[modExportBlockEntityIndexPath] != nil {
+				models, modelErr := deriveModExportBlockEntityModels(files, revisions)
+				if modelErr != nil {
+					t.Fatal(modelErr)
+				}
+				if len(models) == 0 {
+					t.Fatal("block entity index contains no importable models")
+				}
+			}
+			baseRecipeFile := files["recipes/recipes.json"]
+			if baseRecipeFile == nil {
+				t.Fatal("package contains no base recipe v2 document")
+			}
+			baseRecipeRaw, readErr := readExportZIPFile(baseRecipeFile, maxExportJSONSize)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if validateErr := validateExportBaseRecipeDocument(baseRecipeRaw); validateErr != nil {
+				t.Fatal(validateErr)
+			}
 
 			categoryFile := files["recipes/jei/categories.json"]
 			if categoryFile == nil {
-				t.Fatal("package contains no JEI v5 category index")
+				t.Fatal("package contains no JEI v6 category index")
 			}
 			categoryRaw, readErr := readExportZIPFile(categoryFile, maxExportJSONSize)
 			if readErr != nil {
@@ -100,10 +120,13 @@ func TestExporterSamplePackageContracts(t *testing.T) {
 			if decodeErr := json.Unmarshal(categoryRaw, &categoryDocument); decodeErr != nil {
 				t.Fatal(decodeErr)
 			}
-			if categoryDocument.SchemaVersion != "mcmods-jei-categories/v5" {
+			if categoryDocument.SchemaVersion != "mcmods-jei-categories/v6" {
 				t.Fatalf("unexpected JEI category schema %q", categoryDocument.SchemaVersion)
 			}
 			for _, recipe := range categoryDocument.Recipes {
+				if validateErr := validateExportRecipeSource(recipe.OriginKind, recipe.SourceModID, recipe.SourceModVersion, recipe.SourceModIDSource); validateErr != nil {
+					t.Fatalf("recipe index %s: %v", recipe.RecipeKey, validateErr)
+				}
 				if validateErr := validateExportRecipeLayoutKind(recipe.LayoutKind, recipe.Ordered); validateErr != nil {
 					t.Fatalf("recipe index %s: %v", recipe.RecipeKey, validateErr)
 				}
@@ -158,8 +181,16 @@ func TestExporterSamplePackageContracts(t *testing.T) {
 			}
 			for _, document := range recipeDocuments {
 				for _, recipe := range document.Recipes {
+					if validateErr := validateExportRecipeSource(recipe.OriginKind, recipe.SourceModID, recipe.SourceModVersion, recipe.SourceModIDSource); validateErr != nil {
+						t.Fatalf("recipe %s: %v", recipe.RecipeKey, validateErr)
+					}
 					if validateErr := validateExportRecipeLayoutKind(recipe.LayoutKind, recipe.Ordered); validateErr != nil {
 						t.Fatalf("recipe %s: %v", recipe.RecipeKey, validateErr)
+					}
+					for _, binding := range recipe.Bindings {
+						if validateErr := validateExportRecipeChance(binding); validateErr != nil {
+							t.Fatalf("recipe %s slot %s: %v", recipe.RecipeKey, binding.SlotID, validateErr)
+						}
 					}
 					if _, exists := templatesByType[document.RecipeTypeID][recipe.TemplateID]; !exists {
 						t.Fatalf("recipe %s references missing template %s", recipe.RecipeKey, recipe.TemplateID)
@@ -167,7 +198,7 @@ func TestExporterSamplePackageContracts(t *testing.T) {
 				}
 			}
 			if templateFiles == 0 || recipeFiles == 0 || recipeRows == 0 {
-				t.Fatalf("package contains no importable JEI v5 data: templates=%d recipe files=%d recipes=%d", templateFiles, recipeFiles, recipeRows)
+				t.Fatalf("package contains no importable JEI v6 data: templates=%d recipe files=%d recipes=%d", templateFiles, recipeFiles, recipeRows)
 			}
 		})
 	}

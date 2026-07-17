@@ -56,6 +56,15 @@ func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) 
 			join blueprints blueprint on blueprint.public_id=revision.aggregate_key
 			where revision.aggregate_type='blueprint' and request.status='pending'
 			union all
+			select revision.id::text,'creator'::text,creator.public_id,creator.name,request.submitted_by,
+			       case creator.kind when 'team' then 'Team: ' else 'Author: ' end || creator.name,
+			       coalesce((select string_agg(change.path || ': ' || coalesce(change.before_value::text,'empty') || ' -> ' || coalesce(change.after_value::text,'empty'), E'\n')
+			                 from content_change_items change where change.revision_id=revision.id),request.reason),revision.created_at
+			from content_revisions revision
+			join change_requests request on request.proposed_revision_id=revision.id
+			join creators creator on creator.public_id=revision.aggregate_key
+			where revision.aggregate_type='creator' and request.status='pending'
+			union all
 			select export_revision.id,'export'::text,mod.slug,mod.primary_name,job.created_by,
 			       'mcmods_exporter ' || export_revision.minecraft_version || ' / ' || export_revision.loader,
 			       export_revision.source_namespace || ' revision ' || export_revision.revision_no,
@@ -84,7 +93,7 @@ func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) 
 		}
 		if item.Source == "revision" {
 			item.ReviewURL = "/api/v1/mods/" + item.ModSiteID + "/revisions/" + item.ID
-		} else if item.Source == "entry" || item.Source == "catalog" || item.Source == "blueprint" {
+		} else if item.Source == "entry" || item.Source == "catalog" || item.Source == "blueprint" || item.Source == "creator" {
 			item.ReviewURL = "/api/v1/content-revisions/" + item.ID
 		} else {
 			item.ReviewURL = "/api/v1/admin/export-revisions/" + item.ID + "/activate"

@@ -95,7 +95,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	for _, category := range categoryDocument.Categories {
 		revisions[exportResourceNamespace(category.RecipeTypeID)] = revisionID
 	}
-	if err = importExportRecipeTypesV5(context.Background(), tx, packageID, revisions, categoryRaw); err != nil {
+	if err = importExportRecipeTypes(context.Background(), tx, packageID, revisions, categoryRaw); err != nil {
 		t.Fatal(err)
 	}
 	if err = importExportTags(context.Background(), tx, revisions, read("tags/tags.json")); err != nil {

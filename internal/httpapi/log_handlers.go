@@ -52,6 +52,8 @@ func (s *Server) logAccess(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		annotation := &requestActivity{}
+		r = r.WithContext(context.WithValue(r.Context(), requestActivityContextKey, annotation))
 		started := time.Now()
 		recorder := &responseRecorder{ResponseWriter: w}
 		next.ServeHTTP(recorder, r)
@@ -63,6 +65,9 @@ func (s *Server) logAccess(next http.Handler) http.Handler {
 			"query": r.URL.RawQuery,
 			"bytes": recorder.bytes,
 		})
+		if status >= http.StatusOK && status < http.StatusBadRequest {
+			s.recordRequestActivity(r, annotation)
+		}
 	})
 }
 

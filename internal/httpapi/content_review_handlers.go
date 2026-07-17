@@ -60,6 +60,63 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "revision has already been reviewed")
 		return
 	}
+	if aggregateType == "creator" {
+		var snapshot creatorSnapshot
+		if err = json.Unmarshal(snapshotRaw, &snapshot); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode creator revision")
+			return
+		}
+		var creatorID int64
+		var kind, name string
+		var publishedRevisionID *int64
+		if err = tx.QueryRow(r.Context(), `select id,kind,name,published_revision_id
+			from creators where public_id=$1 for update`, aggregateKey).
+			Scan(&creatorID, &kind, &name, &publishedRevisionID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load creator")
+			return
+		}
+		claims := currentClaims(r)
+		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
+			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record creator conflict")
+				return
+			}
+			if err = tx.Commit(r.Context()); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to commit creator conflict")
+				return
+			}
+			writeError(w, http.StatusConflict, "creator changed after this request was submitted")
+			return
+		}
+		if request.Status == "approved" {
+			if err = applyCreatorSnapshotTx(r.Context(), tx, creatorID, revisionID, snapshot); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to publish creator")
+				return
+			}
+		} else if _, err = tx.Exec(r.Context(), `update creators set
+			review_status=case when published_revision_id is null then 'rejected' else 'approved' end,
+			updated_at=now() where id=$1`, creatorID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to reject creator")
+			return
+		}
+		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record creator review")
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit creator review")
+			return
+		}
+		code := "review_approved"
+		if request.Status == "rejected" {
+			code = "review_rejected"
+		}
+		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": name, "reason": request.Note}, map[string]any{
+			"creatorId": aggregateKey, "url": creatorPath(kind, aggregateKey),
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionID, "status": request.Status})
+		return
+	}
 	if aggregateType == "catalog_tag" || aggregateType == "catalog_recipe_type" || aggregateType == "catalog_recipe" {
 		if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext($1))`, aggregateType+":"+aggregateKey); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to lock catalog content")
