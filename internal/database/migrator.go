@@ -7,11 +7,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 9
+const schemaGeneration = 17
 
-// Migrate installs one coherent development schema. The catalog redesign does
-// not support in-place upgrades from the pre-entity data model; development
-// databases must be reset before this generation is installed.
+// Migrate installs one coherent development schema. The editor redesign does
+// not support in-place upgrades from earlier import-first/editor models;
+// development databases must be reset before this generation is installed.
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	conn, err := db.Acquire(ctx)
 	if err != nil {
@@ -50,11 +50,14 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	statements := make([]string, 0, 256)
 	statements = append(statements, baselineSchemaStatements()...)
 	statements = append(statements, catalogSchemaStatements()...)
+	statements = append(statements, catalogEditorSchemaStatements()...)
+	statements = append(statements, skinSchemaStatements()...)
 	statements = append(statements, reviewSchemaStatements()...)
 	statements = append(statements, immutableHistoryGuardStatements()...)
 	statements = append(statements, blueprintRelationSchemaStatements()...)
 	statements = append(statements, communitySchemaStatements()...)
-	statements = append(statements, skinSchemaStatements()...)
+	statements = append(statements, projectFileSchemaStatements()...)
+	statements = append(statements, modContentSchemaStatements()...)
 	for _, statement := range statements {
 		if _, err = tx.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("install schema generation %d: %w", schemaGeneration, err)
@@ -195,6 +198,14 @@ func reviewSchemaStatements() []string {
 		)`,
 		`create index idx_audit_events_entity on audit_events(entity_id,created_at desc,id desc) where entity_id is not null`,
 		`create index idx_audit_events_aggregate on audit_events(aggregate_type,aggregate_key,created_at desc,id desc)`,
+		`alter table catalog_entities add constraint fk_catalog_entities_published_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
+		`alter table content_localizations add constraint fk_content_localizations_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
+		`alter table catalog_resource_definitions add constraint fk_catalog_resource_definitions_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
+		`alter table catalog_tag_members add constraint fk_catalog_tag_members_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
+		`alter table recipe_type_definitions add constraint fk_recipe_type_definitions_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
+		`alter table recipe_type_catalysts add constraint fk_recipe_type_catalysts_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
+		`alter table recipe_layout_templates add constraint fk_recipe_layout_templates_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
+		`alter table recipe_definitions add constraint fk_recipe_definitions_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
 		`alter table knowledge_pages add constraint fk_knowledge_pages_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
 		`alter table tag_member_overrides add constraint fk_tag_member_overrides_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
 		`alter table recipe_type_catalyst_overrides add constraint fk_recipe_type_overrides_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
@@ -202,6 +213,8 @@ func reviewSchemaStatements() []string {
 		`alter table users add constraint fk_users_avatar_file foreign key(avatar_file_id) references oss_files(id) on delete set null`,
 		`alter table mod_relationships add constraint fk_mod_relationships_group foreign key(group_id) references mod_relationship_groups(id) on delete cascade`,
 		`alter table mods add constraint fk_mods_published_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
+		`alter table mod_gallery_images add constraint fk_mod_gallery_images_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
+		`alter table skin_assets add constraint fk_skin_assets_published_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
 		`alter table users add constraint fk_users_profile_revision foreign key(profile_revision_id) references content_revisions(id) on delete restrict`,
 		`alter table blueprints add constraint fk_blueprints_published_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
 	}

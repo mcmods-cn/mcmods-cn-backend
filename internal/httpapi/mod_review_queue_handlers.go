@@ -69,9 +69,9 @@ func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) 
 			       'mcmods_exporter ' || export_revision.minecraft_version || ' / ' || export_revision.loader,
 			       export_revision.source_namespace || ' revision ' || export_revision.revision_no,
 			       export_revision.created_at
-			from mod_export_revisions export_revision
+			from catalog_import_revisions export_revision
 			join mods mod on mod.id=export_revision.mod_id
-			left join mod_export_jobs job on job.mod_id=export_revision.mod_id and job.package_id=export_revision.package_id
+			left join catalog_import_jobs job on job.mod_id=export_revision.mod_id and job.package_id=export_revision.package_id
 			where export_revision.status in ('ready','partial') and not export_revision.is_active
 		) queue
 		left join users user_account on user_account.id=queue.user_id

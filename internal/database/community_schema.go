@@ -102,15 +102,15 @@ func communitySchemaStatements() []string {
 		`create index if not exists idx_creator_claims_queue
 			on creator_claims(status,created_at,id)`,
 		`do $$ begin
-			alter table mod_authors add constraint fk_mod_authors_creator
+			alter table content_creator_bindings add constraint fk_content_creator_bindings_creator
 				foreign key(creator_id) references creators(id) on delete restrict;
 			exception when duplicate_object then null; end $$`,
 		`do $$ begin
-			alter table mod_authors add constraint fk_mod_authors_role
+			alter table content_creator_bindings add constraint fk_content_creator_bindings_role
 				foreign key(role_id) references creator_role_definitions(id) on delete set null;
 			exception when duplicate_object then null; end $$`,
-		`create index if not exists idx_mod_authors_creator
-			on mod_authors(creator_id,mod_id) where creator_id is not null`,
+		`create index if not exists idx_content_creator_bindings_creator
+			on content_creator_bindings(creator_id,subject_type,subject_public_id)`,
 		`create or replace function register_creator_public_route() returns trigger as $$
 		begin
 			insert into public_routes(public_id,entity_type,entity_key,canonical_path)
@@ -153,7 +153,7 @@ func communitySchemaStatements() []string {
 			(4,'plugin','Plugin'),(5,'author','Author'),(6,'team','Team'),
 			(7,'user','User'),(8,'comment','Comment'),(9,'tag','Tag'),
 			(10,'file','File'),(11,'economy','Economy'),(12,'task','Task'),
-			(13,'shop_item','Shop item')
+			(13,'shop_item','Shop item'),(14,'resource','Resource')
 		 on conflict(id) do update set code=excluded.code,name=excluded.name`,
 		`create table if not exists user_activity_events (
 			id bigserial primary key,

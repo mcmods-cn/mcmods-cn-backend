@@ -39,6 +39,7 @@ func skinSchemaStatements() []string {
 			review_status text not null default 'approved' check(review_status in ('approved','pending','rejected')),
 			status text not null default 'active' check(status in ('active','deleted')),
 			downloads bigint not null default 0 check(downloads >= 0),
+			published_revision_id bigint,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now()
 		)`,

@@ -29,16 +29,21 @@ type notificationTemplateConfig struct {
 }
 
 type reviewConfig struct {
-	BlueprintCreate bool `json:"blueprintCreate"`
-	BlueprintEdit   bool `json:"blueprintEdit"`
-	ModCreate       bool `json:"modCreate"`
-	ModEdit         bool `json:"modEdit"`
-	AuthorCreate    bool `json:"authorCreate"`
-	AuthorEdit      bool `json:"authorEdit"`
-	AuthorClaim     bool `json:"authorClaim"`
-	TeamCreate      bool `json:"teamCreate"`
-	TeamEdit        bool `json:"teamEdit"`
-	TeamClaim       bool `json:"teamClaim"`
+	BlueprintCreate         bool `json:"blueprintCreate"`
+	BlueprintEdit           bool `json:"blueprintEdit"`
+	ModCreate               bool `json:"modCreate"`
+	ModEdit                 bool `json:"modEdit"`
+	AuthorCreate            bool `json:"authorCreate"`
+	AuthorEdit              bool `json:"authorEdit"`
+	AuthorClaim             bool `json:"authorClaim"`
+	TeamCreate              bool `json:"teamCreate"`
+	TeamEdit                bool `json:"teamEdit"`
+	TeamClaim               bool `json:"teamClaim"`
+	CatalogCreate           bool `json:"catalogCreate"`
+	CatalogEdit             bool `json:"catalogEdit"`
+	CatalogDelete           bool `json:"catalogDelete"`
+	ModContentSectionCreate bool `json:"modContentSectionCreate"`
+	AITranslation           bool `json:"aiTranslation"`
 }
 
 func defaultNotificationTemplateConfig() notificationTemplateConfig {
@@ -220,14 +225,19 @@ func loadReviewConfig(ctx context.Context, db *pgxpool.Pool) reviewConfig {
 
 func defaultReviewConfig() reviewConfig {
 	return reviewConfig{
-		ModCreate:    true,
-		ModEdit:      true,
-		AuthorCreate: true,
-		AuthorEdit:   true,
-		AuthorClaim:  true,
-		TeamCreate:   true,
-		TeamEdit:     true,
-		TeamClaim:    true,
+		ModCreate:               true,
+		ModEdit:                 true,
+		AuthorCreate:            true,
+		AuthorEdit:              true,
+		AuthorClaim:             true,
+		TeamCreate:              true,
+		TeamEdit:                true,
+		TeamClaim:               true,
+		CatalogCreate:           true,
+		CatalogEdit:             true,
+		CatalogDelete:           true,
+		ModContentSectionCreate: false,
+		AITranslation:           false,
 	}
 }
 

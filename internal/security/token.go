@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -62,10 +61,6 @@ func ParseToken(secret string, token string) (Claims, error) {
 		return claims, errors.New("token expired")
 	}
 	return claims, nil
-}
-
-func (claims Claims) SubjectString() string {
-	return strconv.FormatInt(claims.Subject, 10)
 }
 
 func sign(secret string, payload string) string {

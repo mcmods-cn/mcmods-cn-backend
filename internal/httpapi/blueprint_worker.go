@@ -217,7 +217,7 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID, bl
 		join lateral (
 			select candidate.mod_id from (
 				select revision.mod_id,0 priority,coalesce(revision.activated_at,revision.created_at) matched_at
-				from mod_export_revisions revision
+				from catalog_import_revisions revision
 				where revision.source_namespace=namespace.source_namespace
 				  and revision.is_active and revision.status in ('ready','partial')
 				union all

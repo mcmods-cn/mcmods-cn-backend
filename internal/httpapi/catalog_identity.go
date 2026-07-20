@@ -1,14 +1,73 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type catalogIdentity struct {
 	ID       string
 	PublicID string
+}
+
+type catalogResourceNamespaceOwner struct {
+	ProjectCode       string
+	PrimaryIdentifier string
+}
+
+type catalogResourceIdentityResolver map[string]catalogResourceNamespaceOwner
+
+type catalogResolvedResourceIdentity struct {
+	catalogIdentity
+	CanonicalID  string
+	Namespace    string
+	ResourcePath string
+	RawID        string
+}
+
+type catalogResourceResolverQuery interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func loadCatalogResourceIdentityResolver(ctx context.Context, query catalogResourceResolverQuery) (catalogResourceIdentityResolver, error) {
+	rows, err := query.Query(ctx, `select lower(identifier.identifier),mod.project_code,primary_identifier.identifier
+		from mod_identifiers identifier
+		join mods mod on mod.id=identifier.mod_id
+		join mod_identifiers primary_identifier on primary_identifier.mod_id=mod.id and primary_identifier.is_primary`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	resolver := catalogResourceIdentityResolver{}
+	for rows.Next() {
+		var namespace string
+		var owner catalogResourceNamespaceOwner
+		if err = rows.Scan(&namespace, &owner.ProjectCode, &owner.PrimaryIdentifier); err != nil {
+			return nil, err
+		}
+		resolver[namespace] = owner
+	}
+	return resolver, rows.Err()
+}
+
+func (resolver catalogResourceIdentityResolver) resolve(kindCode, rawID string) catalogResolvedResourceIdentity {
+	rawID = strings.TrimSpace(rawID)
+	namespace, resourcePath := resourceParts(rawID)
+	owner, aliased := resolver[strings.ToLower(namespace)]
+	if !aliased || strings.TrimSpace(resourcePath) == "" {
+		identity := resourceIdentity(kindCode, rawID)
+		return catalogResolvedResourceIdentity{catalogIdentity: identity, CanonicalID: rawID, Namespace: namespace, ResourcePath: resourcePath, RawID: rawID}
+	}
+	canonicalID := owner.PrimaryIdentifier + ":" + resourcePath
+	identity := newCatalogIdentity("resource", kindCode+"\x00mod\x00"+owner.ProjectCode+"\x00"+resourcePath)
+	return catalogResolvedResourceIdentity{
+		catalogIdentity: identity, CanonicalID: canonicalID, Namespace: strings.ToLower(owner.PrimaryIdentifier),
+		ResourcePath: resourcePath, RawID: rawID,
+	}
 }
 
 func newCatalogIdentity(entityType, canonicalKey string) catalogIdentity {
@@ -116,6 +175,8 @@ func resourceKindForDocument(kind string, data map[string]any) string {
 		return "minecraft.dimension"
 	case "world_structures":
 		return "minecraft.structure"
+	case "natural_generation":
+		return "minecraft.natural_generation"
 	case "loot_tables":
 		return "minecraft.loot_table"
 	default:

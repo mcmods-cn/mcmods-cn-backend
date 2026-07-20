@@ -45,11 +45,58 @@ func TestQueueExportRecipeTemplateAndBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = queueExportJEIRecipeCollection(batch, "package", map[string]string{"minecraft": "revision"}, "recipes/jei/recipes/minecraft/crafting.json", recipeDocument); err != nil {
+	if err = queueExportJEIRecipeCollection(batch, catalogResourceIdentityResolver{}, "package", map[string]string{"minecraft": "revision"}, "recipes/jei/recipes/minecraft/crafting.json", recipeDocument); err != nil {
 		t.Fatal(err)
 	}
 	if batch.rows < 15 {
 		t.Fatalf("expected templates, bindings, tag and resource references to be queued, got %d rows", batch.rows)
+	}
+}
+
+func TestCanonicalImportedTemplatePromotionGeometryAndIdentity(t *testing.T) {
+	document, err := decodeExportJEITemplateCollection([]byte(`{
+		"schema_version":"mcmods-jei-template-collection/v2","recipe_type_id":"example:machine",
+		"coordinate_space":"logical_pixels","image_scale":4,
+		"canvas":{"x":0,"y":0,"width":120,"height":64},"image_pixels":{"width":480,"height":256},
+		"template_count":1,"templates":[{"schema_version":"mcmods-jei-layout-template/v2",
+		"template_id":"template_stable","background":"recipes/jei/backgrounds/example/machine/template_stable.png",
+		"slot_count":3,"slots":[
+			{"slot_id":"input_0","role":"input","coordinates_available":true,"rect":{"x":4,"y":5,"width":16,"height":16}},
+			{"slot_id":"byproduct_0","role":"byproduct","coordinates_available":true,"rect":{"x":90,"y":5,"width":16,"height":16}},
+			{"slot_id":"decoration","role":"render_only","coordinates_available":false,"rect":{}}
+		]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	canvas, err := canonicalImportedTemplateCanvas(document)
+	if err != nil || canvas.Width != 120 || canvas.Height != 64 {
+		t.Fatalf("unexpected canonical canvas: %#v, error=%v", canvas, err)
+	}
+	role, editable := canonicalImportedTemplateSlotRole("byproduct")
+	if !editable || role != "output" {
+		t.Fatalf("byproduct slot mapped to role=%q editable=%v", role, editable)
+	}
+	if _, editable = canonicalImportedTemplateSlotRole("render_only"); editable {
+		t.Fatal("render-only source slots must not become selectable canonical slots")
+	}
+	rect, err := canonicalImportedTemplateSlotRect(document.Templates[0].Slots[0], canvas, 0)
+	if err != nil || rect.X != 4 || rect.Y != 5 || rect.Width != 16 || rect.Height != 16 {
+		t.Fatalf("unexpected canonical slot rect: %#v, error=%v", rect, err)
+	}
+	typeIdentity := recipeTypeIdentity(document.RecipeTypeID)
+	canonicalA := catalogEditorIdentityForTemplate(typeIdentity.ID, document.Templates[0].TemplateID)
+	canonicalB := catalogEditorIdentityForTemplate(typeIdentity.ID, document.Templates[0].TemplateID)
+	if canonicalA != canonicalB {
+		t.Fatalf("canonical template identity is not stable: %#v != %#v", canonicalA, canonicalB)
+	}
+	if exportRecipeTemplateID("revision-a", document.RecipeTypeID, document.Templates[0].TemplateID) ==
+		exportRecipeTemplateID("revision-b", document.RecipeTypeID, document.Templates[0].TemplateID) {
+		t.Fatal("import observation ids must remain revision scoped")
+	}
+	definition := canonicalImportedTemplateDefinition(document, document.Templates[0], "snapshot-a", "revision-a", "recipes/jei/templates/example/machine.json")
+	if !bytes.Contains([]byte(definition), []byte(`"source":"import"`)) ||
+		!bytes.Contains([]byte(definition), []byte(`"backgroundPath":"recipes/jei/backgrounds/example/machine/template_stable.png"`)) {
+		t.Fatalf("canonical import metadata is incomplete: %s", definition)
 	}
 }
 
@@ -77,6 +124,24 @@ func TestValidateExportRecipeLayoutKind(t *testing.T) {
 				t.Fatalf("valid=%v, error=%v", test.valid, err)
 			}
 		})
+	}
+}
+
+func TestValidateExportRecipeChanceBelongsToOutputItem(t *testing.T) {
+	chance := 0.4
+	percent := 40.0
+	valid := exportJEIBinding{SemanticRole: "output", ChanceAvailable: true, Chance: &chance, ChancePercent: &percent}
+	if err := validateExportRecipeChance(valid); err != nil {
+		t.Fatalf("output chance should be valid: %v", err)
+	}
+	invalid := valid
+	invalid.SemanticRole = "input"
+	if err := validateExportRecipeChance(invalid); err == nil {
+		t.Fatal("input candidate must not carry output probability")
+	}
+	inconsistent := exportJEIBinding{SemanticRole: "output", Chance: &chance}
+	if err := validateExportRecipeChance(inconsistent); err == nil {
+		t.Fatal("numeric chance without chance_available must be rejected")
 	}
 }
 
@@ -158,13 +223,32 @@ func TestExportDocumentEntriesPrecomputesNestedIndexes(t *testing.T) {
 	}
 
 	naturalGeneration := exportDocumentEntries("worldgen/natural_generation.json", map[string]any{
-		"categories": []any{map[string]any{
-			"category": "configured_feature", "registry": "minecraft:worldgen/configured_feature",
-			"entries": []any{map[string]any{"id": "minecraft:ore_coal"}},
+		"schema_version": "mcmods-natural-generation/v2",
+		"export_mode":    "normalized_catalog",
+		"entries": []any{map[string]any{
+			"id": "minecraft:ore_coal", "generation_id": "minecraft:ore_coal", "entry_kind": "placed_feature", "category": "ore",
 		}},
 	})
-	if len(naturalGeneration) != 1 || naturalGeneration[0].Data["category"] != "configured_feature" {
+	if len(naturalGeneration) != 1 || naturalGeneration[0].ID != "minecraft:ore_coal" || naturalGeneration[0].Data["category"] != "ore" {
 		t.Fatalf("unexpected natural generation projection: %#v", naturalGeneration)
+	}
+}
+
+func TestValidateCatalogDocumentContractRequiresNormalizedWorldgenV2(t *testing.T) {
+	validNatural := map[string]any{"schema_version": "mcmods-natural-generation/v2", "export_mode": "normalized_catalog"}
+	if err := validateCatalogDocumentContract("worldgen/natural_generation.json", validNatural); err != nil {
+		t.Fatalf("valid natural generation document rejected: %v", err)
+	}
+	if err := validateCatalogDocumentContract("worldgen/natural_generation.json", map[string]any{"schema_version": "mcmods-natural-generation/v1"}); err == nil {
+		t.Fatal("legacy natural generation document should be rejected")
+	}
+	validStructures := map[string]any{"schema_version": "mcmods-structures/v2", "export_mode": "catalog_only", "internal_templates_exported": false}
+	if err := validateCatalogDocumentContract("worldgen/structures.json", validStructures); err != nil {
+		t.Fatalf("valid structures document rejected: %v", err)
+	}
+	invalidStructures := map[string]any{"schema_version": "mcmods-structures/v2", "export_mode": "catalog_only", "internal_templates_exported": true}
+	if err := validateCatalogDocumentContract("worldgen/structures.json", invalidStructures); err == nil {
+		t.Fatal("structure catalog with internal templates should be rejected")
 	}
 }
 
@@ -213,7 +297,7 @@ func TestDeriveModExportBlockBindingsUsesRegistryRelationships(t *testing.T) {
 		"assets/example/textures/block/machine.png":   "png",
 		"assets/example/textures/item/wrench.png":     "png",
 	})
-	bindings, err := deriveModExportBlockBindings(files, map[string]string{"example": "revision-example"})
+	bindings, err := deriveModExportBlockBindings(files, catalogResourceIdentityResolver{}, map[string]string{"example": "revision-example"})
 	if err != nil {
 		t.Fatal(err)
 	}

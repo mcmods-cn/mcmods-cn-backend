@@ -99,7 +99,7 @@ type modExportBlockEntityVariantRow struct {
 	Data            string
 }
 
-func deriveModExportBlockEntityModels(files map[string]*zip.File, revisions map[string]string) ([]modExportBlockEntityModelRow, error) {
+func deriveModExportBlockEntityModels(files map[string]*zip.File, resolver catalogResourceIdentityResolver, revisions map[string]string) ([]modExportBlockEntityModelRow, error) {
 	indexFile := files[modExportBlockEntityIndexPath]
 	if indexFile == nil {
 		return nil, nil
@@ -139,7 +139,7 @@ func deriveModExportBlockEntityModels(files map[string]*zip.File, revisions map[
 		if revisionID == "" {
 			continue
 		}
-		resource := resourceIdentity(resourceKindForRegistry("blocks"), model.BlockID)
+		resource := resolver.resolve(resourceKindForRegistry("blocks"), model.BlockID)
 		modelID := catalogSnapshotID("block-entity-model", revisionID, resource.ID, "")
 		row := modExportBlockEntityModelRow{
 			ID: modelID, ResourceSnapshotID: catalogSnapshotID("resource", revisionID, resource.ID, ""),

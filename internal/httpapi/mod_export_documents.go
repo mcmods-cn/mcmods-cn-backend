@@ -18,10 +18,13 @@ type exportDocumentEntry struct {
 // queueExportDocumentEntries materializes stable list projections while the
 // source JSON is already in memory. Request handlers can then paginate normal
 // rows instead of repeatedly expanding large JSON documents in PostgreSQL.
-func queueExportDocumentEntries(batch *modExportWriteBatch, revisionID, assetPath string, raw []byte) error {
+func queueExportDocumentEntries(batch *modExportWriteBatch, resolver catalogResourceIdentityResolver, revisionID, assetPath string, raw []byte) error {
 	var document map[string]any
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return fmt.Errorf("decode document index %s: %w", assetPath, err)
+	}
+	if err := validateCatalogDocumentContract(assetPath, document); err != nil {
+		return err
 	}
 	entries := exportDocumentEntries(assetPath, document)
 	for ordinal, entry := range entries {
@@ -35,18 +38,37 @@ func queueExportDocumentEntries(batch *modExportWriteBatch, revisionID, assetPat
 		}
 		kind := exportDocumentKind(assetPath)
 		kindCode := resourceKindForDocument(kind, entry.Data)
-		identity := resourceIdentity(kindCode, entry.ID)
-		namespace, resourcePath := resourceParts(entry.ID)
+		identity := resolver.resolve(kindCode, entry.ID)
+		namespace, resourcePath := identity.Namespace, identity.ResourcePath
 		if entry.Namespace != "" {
 			namespace = strings.ToLower(entry.Namespace)
 		}
 		queueCatalogResource(batch, catalogResourceImportRow{
-			EntityID: identity.ID, PublicID: identity.PublicID, KindCode: kindCode, CanonicalID: entry.ID,
+			EntityID: identity.ID, PublicID: identity.PublicID, KindCode: kindCode, CanonicalID: identity.CanonicalID, RawID: identity.RawID,
 			Namespace: namespace, ResourcePath: resourcePath, RevisionID: revisionID,
 			SnapshotID: catalogSnapshotID("resource", revisionID, identity.ID, ""), Registry: kind,
 			Names: string(encodedNames), Data: string(encodedData), IconPath: entry.IconPath, PreviewPath: entry.PreviewPath,
 		})
 		_ = ordinal
+	}
+	return nil
+}
+
+func validateCatalogDocumentContract(assetPath string, document map[string]any) error {
+	schemaVersion := strings.TrimSpace(exportString(document["schema_version"]))
+	exportMode := strings.TrimSpace(exportString(document["export_mode"]))
+	switch assetPath {
+	case "worldgen/natural_generation.json":
+		if schemaVersion != "mcmods-natural-generation/v2" || exportMode != "normalized_catalog" {
+			return fmt.Errorf("%s must use mcmods-natural-generation/v2 normalized_catalog", assetPath)
+		}
+	case "worldgen/structures.json":
+		if schemaVersion != "mcmods-structures/v2" || exportMode != "catalog_only" {
+			return fmt.Errorf("%s must use mcmods-structures/v2 catalog_only", assetPath)
+		}
+		if exported, exists := document["internal_templates_exported"]; exists && exported != false {
+			return fmt.Errorf("%s must not export internal structure templates", assetPath)
+		}
 	}
 	return nil
 }
@@ -94,13 +116,7 @@ func exportDocumentEntries(assetPath string, document map[string]any) []exportDo
 	case "worldgen/data_files.json":
 		values = exportObjectArray(document["files"])
 	case "worldgen/natural_generation.json":
-		for _, category := range exportObjectArray(document["categories"]) {
-			for _, entry := range exportObjectArray(category["entries"]) {
-				entry["category"] = category["category"]
-				entry["registry"] = category["registry"]
-				values = append(values, entry)
-			}
-		}
+		values = exportObjectArray(document["entries"])
 	case "ingredients/ingredients.json":
 		for _, ingredientType := range exportObjectArray(document["types"]) {
 			for _, entry := range exportObjectArray(ingredientType["entries"]) {
@@ -116,6 +132,12 @@ func exportDocumentEntries(assetPath string, document map[string]any) []exportDo
 	for _, value := range values {
 		entry := exportDocumentEntry{Data: value, Names: exportObject(value["names"])}
 		entry.ID = strings.TrimSpace(exportString(value["id"]))
+		if assetPath == "worldgen/natural_generation.json" {
+			entry.ID = strings.TrimSpace(exportString(value["generation_id"]))
+		}
+		if assetPath == "worldgen/structures.json" {
+			entry.ID = strings.TrimSpace(exportString(value["structure_id"]))
+		}
 		if assetPath == "ingredients/ingredients.json" && entry.ID == "" {
 			entry.ID = strings.TrimSpace(exportString(value["resource_location"]))
 			if entry.ID == "" {

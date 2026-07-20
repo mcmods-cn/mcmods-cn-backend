@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -58,6 +59,200 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 	}
 	if status != "pending" {
 		writeError(w, http.StatusConflict, "revision has already been reviewed")
+		return
+	}
+	if modContentAggregate(aggregateType) {
+		var snapshot modContentSnapshot
+		if err = json.Unmarshal(snapshotRaw, &snapshot); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode mod content revision")
+			return
+		}
+		if snapshot.PublicID != aggregateKey {
+			writeError(w, http.StatusConflict, "mod content revision identity mismatch")
+			return
+		}
+		if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext($1))`, aggregateType+":"+aggregateKey); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to lock mod content")
+			return
+		}
+		publishedRevisionID, publishedErr := publishedModContentRevisionTx(r.Context(), tx, snapshot)
+		if publishedErr != nil {
+			writeError(w, http.StatusNotFound, "mod content subject not found")
+			return
+		}
+		claims := currentClaims(r)
+		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
+			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record mod content conflict")
+				return
+			}
+			if err = tx.Commit(r.Context()); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to commit mod content conflict")
+				return
+			}
+			writeError(w, http.StatusConflict, "mod content changed after this request was submitted")
+			return
+		}
+		if request.Status == "approved" {
+			if err = publishModContentSnapshotTx(r.Context(), tx, revisionID, snapshot, claims.Subject); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to publish mod content")
+				return
+			}
+		} else if err = rejectPendingModContentCreateTx(r.Context(), tx, snapshot); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to reject mod content")
+			return
+		}
+		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record mod content review")
+			return
+		}
+		if request.Status == "approved" {
+			if err = appendCatalogPublishedReviewEventTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record mod content publication")
+				return
+			}
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit mod content review")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionID, "status": request.Status, "publicId": snapshot.PublicID})
+		return
+	}
+	if catalogEditorAggregate(aggregateType) {
+		if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext($1))`, aggregateType+":"+aggregateKey); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to lock catalog content")
+			return
+		}
+		publishedRevisionID, publishedErr := publishedCatalogEditorRevisionTx(r.Context(), tx, aggregateKey)
+		if publishedErr != nil {
+			writeError(w, catalogEditorHTTPStatus(publishedErr), catalogEditorErrorMessage(publishedErr))
+			return
+		}
+		claims := currentClaims(r)
+		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
+			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record catalog conflict")
+				return
+			}
+			if err = tx.Commit(r.Context()); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to commit catalog conflict")
+				return
+			}
+			writeError(w, http.StatusConflict, "catalog content changed after this request was submitted")
+			return
+		}
+		if request.Status == "approved" {
+			if err = publishCatalogEditorSnapshotTx(r.Context(), tx, revisionID, snapshotRaw, claims.Subject); err != nil {
+				writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
+				return
+			}
+		}
+		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record catalog review")
+			return
+		}
+		if request.Status == "approved" {
+			if err = appendCatalogPublishedReviewEventTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record catalog publication")
+				return
+			}
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit catalog review")
+			return
+		}
+		s.cache.InvalidatePrefix(r.Context(), "global-tags:")
+		s.cache.InvalidatePrefix(r.Context(), "recipe-types:")
+		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionID, "status": request.Status})
+		return
+	}
+	if aggregateType == catalogAggregateLocalization {
+		var snapshot catalogLocalizationSnapshot
+		if err = json.Unmarshal(snapshotRaw, &snapshot); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode localization revision")
+			return
+		}
+		if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext($1))`, aggregateType+":"+aggregateKey); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to lock localization")
+			return
+		}
+		publicID := strings.ToLower(strings.TrimSpace(snapshot.SubjectPublicID))
+		entityType := strings.TrimSpace(snapshot.SubjectType)
+		entityKey := strings.TrimSpace(snapshot.EntityID)
+		if publicID == "" || entityType == "" {
+			if err = tx.QueryRow(r.Context(), `select public_id,entity_type from catalog_entities where id=$1`, entityKey).Scan(&publicID, &entityType); err != nil {
+				writeError(w, http.StatusNotFound, "localized content subject not found")
+				return
+			}
+		}
+		var routedEntityKey string
+		if err = tx.QueryRow(r.Context(), `select entity_key from public_routes where public_id=$1 and entity_type=$2`, publicID, entityType).Scan(&routedEntityKey); err != nil || (entityKey != "" && entityKey != routedEntityKey) {
+			writeError(w, http.StatusNotFound, "localized content subject not found")
+			return
+		}
+		var publishedRevisionID *int64
+		err = tx.QueryRow(r.Context(), `select published_revision_id from content_localizations
+			where subject_public_id=$1 and subject_type=$2 and locale=$3 for update`, publicID, entityType, normalizeContentLocale(snapshot.Locale)).Scan(&publishedRevisionID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			publishedRevisionID, err = nil, nil
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read published localization")
+			return
+		}
+		claims := currentClaims(r)
+		if request.Status == "approved" && snapshot.Provenance == "ai" && snapshot.SourceRevisionNo > 0 {
+			var sourceRevisionNo int64
+			sourceErr := tx.QueryRow(r.Context(), `select revision_no from content_localizations
+				where subject_public_id=$1 and subject_type=$2 and locale=$3 and review_status='approved'`,
+				publicID, entityType, normalizeContentLocale(snapshot.SourceLocale)).Scan(&sourceRevisionNo)
+			if sourceErr != nil || sourceRevisionNo != snapshot.SourceRevisionNo {
+				if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, "translation source changed after this request was submitted", r); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to record localization source conflict")
+					return
+				}
+				if err = tx.Commit(r.Context()); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to commit localization source conflict")
+					return
+				}
+				writeError(w, http.StatusConflict, "translation source changed after this request was submitted")
+				return
+			}
+		}
+		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
+			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record localization conflict")
+				return
+			}
+			if err = tx.Commit(r.Context()); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to commit localization conflict")
+				return
+			}
+			writeError(w, http.StatusConflict, "localization changed after this request was submitted")
+			return
+		}
+		if request.Status == "approved" {
+			if err = publishCatalogLocalizationSnapshotTx(r.Context(), tx, revisionID, snapshotRaw, claims.Subject); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to publish localization")
+				return
+			}
+		}
+		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record localization review")
+			return
+		}
+		if request.Status == "approved" {
+			if err = appendCatalogPublishedReviewEventTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record localization publication")
+				return
+			}
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit localization review")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionID, "status": request.Status})
 		return
 	}
 	if aggregateType == "creator" {
@@ -145,6 +340,10 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "failed to publish catalog content")
 				return
 			}
+			if _, err = tx.Exec(r.Context(), `update catalog_entities set published_revision_id=$2,updated_at=now() where id=$1`, aggregateKey, revisionID); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to update published catalog revision")
+				return
+			}
 		}
 		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to record catalog review")
@@ -169,8 +368,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to lock blueprint")
 			return
 		}
+		var blueprintID int64
 		var publishedRevisionID *int64
-		if err = tx.QueryRow(r.Context(), `select published_revision_id from blueprints where public_id=$1 for update`, aggregateKey).Scan(&publishedRevisionID); err != nil {
+		if err = tx.QueryRow(r.Context(), `select id,published_revision_id from blueprints where public_id=$1 for update`, aggregateKey).Scan(&blueprintID, &publishedRevisionID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load published blueprint")
 			return
 		}
@@ -188,8 +388,7 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if request.Status == "approved" {
-			if _, err = tx.Exec(r.Context(), `update blueprints set title=$2,description_markdown=$3,cover_file_id=nullif($4,0),cover_object_key=$5,
-				published_revision_id=$6,review_status='approved',updated_at=now() where public_id=$1`, aggregateKey, snapshot.Title, snapshot.Description, snapshot.CoverFileID, snapshot.CoverKey, revisionID); err != nil {
+			if err = applyBlueprintContentSnapshotTx(r.Context(), tx, blueprintID, revisionID, submittedBy, snapshot); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to publish blueprint")
 				return
 			}
@@ -210,6 +409,58 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			code = "review_rejected"
 		}
 		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": snapshot.Title, "reason": request.Note}, map[string]any{"blueprintId": aggregateKey, "url": "/blueprints/" + aggregateKey})
+		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionID, "status": request.Status})
+		return
+	}
+	if aggregateType == "skin" {
+		var snapshot skinAssetContentSnapshot
+		if err = json.Unmarshal(snapshotRaw, &snapshot); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode skin revision")
+			return
+		}
+		if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext($1))`, aggregateType+":"+aggregateKey); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to lock skin revision")
+			return
+		}
+		var assetID, ownerID int64
+		var publishedRevisionID *int64
+		if err = tx.QueryRow(r.Context(), `select id,owner_id,published_revision_id from skin_assets
+			where public_id=$1 and status='active' for update`, aggregateKey).Scan(&assetID, &ownerID, &publishedRevisionID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load published skin")
+			return
+		}
+		claims := currentClaims(r)
+		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
+			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record skin conflict")
+				return
+			}
+			if err = tx.Commit(r.Context()); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to commit skin conflict")
+				return
+			}
+			writeError(w, http.StatusConflict, "skin changed after this request was submitted")
+			return
+		}
+		if request.Status == "approved" {
+			if err = applySkinAssetSnapshotTx(r.Context(), tx, assetID, ownerID, revisionID, snapshot); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to publish skin revision")
+				return
+			}
+		}
+		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record skin review")
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit skin review")
+			return
+		}
+		code := "review_approved"
+		if request.Status == "rejected" {
+			code = "review_rejected"
+		}
+		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": snapshot.DisplayName, "reason": request.Note}, map[string]any{"skinId": aggregateKey, "url": "/skins/" + aggregateKey})
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionID, "status": request.Status})
 		return
 	}

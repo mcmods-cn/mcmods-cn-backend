@@ -63,7 +63,7 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 		select distinct request.preferred_revision_id,request.resource_id,request.resource_kind,
 			preferred.minecraft_version,preferred.loader
 		from unnest($1::text[],$2::text[],$3::text[]) request(preferred_revision_id,resource_id,resource_kind)
-		join mod_export_revisions preferred on preferred.id::text=request.preferred_revision_id
+		join catalog_import_revisions preferred on preferred.id::text=request.preferred_revision_id
 	)
 	select requested.preferred_revision_id,requested.resource_id,requested.resource_kind,
 		coalesce(source.entity_id,''),coalesce(source.public_id,''),coalesce(source.revision_id,''),
@@ -81,8 +81,8 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 			from game_resources resource
 			join resource_kinds kind on kind.code=resource.kind_code
 			join catalog_entities entity on entity.id=resource.entity_id
-			join game_resource_snapshots snapshot on snapshot.resource_id=resource.entity_id
-			join mod_export_revisions revision on revision.id=snapshot.revision_id
+			join resource_import_snapshots snapshot on snapshot.resource_id=resource.entity_id
+			join catalog_import_revisions revision on revision.id=snapshot.revision_id
 			join mods mod on mod.id=revision.mod_id
 			where resource.canonical_id=requested.resource_id
 		) candidate

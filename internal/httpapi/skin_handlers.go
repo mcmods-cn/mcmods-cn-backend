@@ -57,14 +57,16 @@ type skinAssetRecord struct {
 }
 
 type skinAssetCreateRequest struct {
-	FileID      int64    `json:"fileId"`
-	Kind        string   `json:"kind"`
-	Model       string   `json:"model"`
-	Name        string   `json:"name"`
-	DisplayName string   `json:"displayName"`
-	Description string   `json:"description"`
-	Tags        []string `json:"tags"`
-	Visibility  string   `json:"visibility"`
+	FileID        int64                     `json:"fileId"`
+	Kind          string                    `json:"kind"`
+	Model         string                    `json:"model"`
+	Name          string                    `json:"name"`
+	DisplayName   string                    `json:"displayName"`
+	Description   string                    `json:"description"`
+	Tags          []string                  `json:"tags"`
+	Visibility    string                    `json:"visibility"`
+	DefaultLocale string                    `json:"defaultLocale"`
+	Localizations []catalogLocalizationEdit `json:"localizations"`
 }
 
 type skinAssetUpdateRequest struct {
@@ -74,6 +76,16 @@ type skinAssetUpdateRequest struct {
 	Description *string   `json:"description,omitempty"`
 	Tags        *[]string `json:"tags,omitempty"`
 	Visibility  *string   `json:"visibility,omitempty"`
+	Reason      string    `json:"reason,omitempty"`
+}
+
+type skinAssetContentSnapshot struct {
+	PublicID    string   `json:"publicId"`
+	Model       string   `json:"model"`
+	DisplayName string   `json:"displayName"`
+	Description string   `json:"description"`
+	Tags        []string `json:"tags"`
+	Visibility  string   `json:"visibility"`
 }
 
 type skinOwnerResponse struct {
@@ -405,6 +417,20 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to record skin asset")
 		return
 	}
+	if _, err = tx.Exec(r.Context(), `update content_subjects set default_locale=$2,updated_at=now()
+		where public_id=$1 and subject_type='skin'`, publicID, request.DefaultLocale); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to set skin content language")
+		return
+	}
+	for _, localization := range request.Localizations {
+		if _, err = tx.Exec(r.Context(), `insert into content_localizations(
+			subject_public_id,subject_type,locale,name,summary,content_markdown,provenance,editable,review_status,updated_by)
+			values($1,'skin',$2,$3,$4,$5,'human',true,'approved',$6)`, publicID, localization.Locale,
+			localization.Name, localization.Summary, localization.ContentMarkdown, claims.Subject); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record localized skin content")
+			return
+		}
+	}
 	if _, err = addSkinToWardrobeTx(r.Context(), tx, claims.Subject, assetID, claims.Subject); errors.Is(err, errSkinWardrobeLimit) {
 		writeError(w, http.StatusForbidden, errSkinWardrobeLimit.Error())
 		return
@@ -474,12 +500,13 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		return
 	}
 	var record skinAssetRecord
+	var baseRevisionID *int64
 	err = tx.QueryRow(r.Context(), `select id,public_id,owner_id,blob_hash,kind,model,display_name,description,tags,
-		visibility,review_status,status,downloads,created_at,updated_at
+		visibility,review_status,status,downloads,created_at,updated_at,published_revision_id
 		from skin_assets where public_id=$1 for update`, publicID).
 		Scan(&record.ID, &record.PublicID, &record.OwnerID, &record.BlobHash, &record.Kind, &record.Model,
 			&record.DisplayName, &record.Description, &record.Tags, &record.Visibility, &record.ReviewStatus,
-			&record.Status, &record.Downloads, &record.CreatedAt, &record.UpdatedAt)
+			&record.Status, &record.Downloads, &record.CreatedAt, &record.UpdatedAt, &baseRevisionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "skin asset was not found")
 		return
@@ -496,48 +523,51 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
-	oldModel := record.Model
 	if err = applySkinAssetUpdate(&record, request); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	profileIDs, err := lockProfilesUsingAsset(r.Context(), tx, record.ID)
+	snapshot := skinAssetContentSnapshot{
+		PublicID: publicID, Model: record.Model, DisplayName: record.DisplayName,
+		Description: record.Description, Tags: record.Tags, Visibility: record.Visibility,
+	}
+	snapshotRaw, err := json.Marshal(snapshot)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to lock equipped player profiles")
+		writeError(w, http.StatusInternalServerError, "failed to encode skin revision")
 		return
 	}
-	if oldModel != record.Model {
-		if _, err = tx.Exec(r.Context(), `update player_profile_textures set model=$2 where asset_id=$1`, record.ID, record.Model); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update equipped skin model")
-			return
-		}
+	reviewRequired := loadReviewConfig(r.Context(), s.db).CatalogEdit && !catalogMutationBypassesReview(claims.Permissions)
+	reviewStatus := "approved"
+	if reviewRequired {
+		reviewStatus = "pending"
 	}
-	if record.Visibility == "private" {
-		if _, err = tx.Exec(r.Context(), `delete from player_profile_textures texture using player_profiles profile
-			where texture.profile_id=profile.id and texture.asset_id=$1 and profile.user_id<>$2`, record.ID, record.OwnerID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to revoke private skin asset bindings")
-			return
-		}
-		if _, err = tx.Exec(r.Context(), `delete from skin_wardrobe where asset_id=$1 and user_id<>$2`, record.ID, record.OwnerID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to revoke private skin asset wardrobes")
-			return
-		}
+	reason := strings.TrimSpace(request.Reason)
+	if reason == "" {
+		reason = "Skin information update"
 	}
-	if (oldModel != record.Model || record.Visibility == "private") && len(profileIDs) > 0 {
-		if _, err = tx.Exec(r.Context(), `update player_profiles set updated_at=now() where id=any($1::bigint[])`, profileIDs); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update affected player profiles")
-			return
-		}
-	}
-	command, err := tx.Exec(r.Context(), `update skin_assets set model=$2,display_name=$3,description=$4,tags=$5,
-		visibility=$6,review_status='approved',updated_at=now() where id=$1 and status='active'`, record.ID, record.Model,
-		record.DisplayName, record.Description, record.Tags, record.Visibility)
-	if err != nil || command.RowsAffected() != 1 {
-		writeError(w, http.StatusInternalServerError, "failed to update skin asset")
+	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
+		AggregateType: "skin", AggregateKey: publicID, BaseRevision: baseRevisionID, Snapshot: snapshotRaw,
+		Reason: reason, ActorID: claims.Subject, Status: reviewStatus, Source: "skin_metadata",
+		Metadata: map[string]any{"skinId": publicID, "name": record.DisplayName, "operation": "edit"}, Request: r,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create skin revision")
 		return
+	}
+	if !reviewRequired {
+		if err = applySkinAssetSnapshotTx(r.Context(), tx, record.ID, record.OwnerID, created.RevisionID, snapshot); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to publish skin revision")
+			return
+		}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update skin asset")
+		return
+	}
+	if reviewRequired {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"updated": false, "reviewRequired": true, "revisionId": created.RevisionID, "changeRequestId": created.ChangeRequestID,
+		})
 		return
 	}
 	record, err = s.skinAssetByPublicID(r.Context(), publicID, claims.Subject)
@@ -546,6 +576,46 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		return
 	}
 	writeJSON(w, http.StatusOK, skinAssetJSON(record, claims.Subject))
+}
+
+func applySkinAssetSnapshotTx(ctx context.Context, tx pgx.Tx, assetID, ownerID, revisionID int64, snapshot skinAssetContentSnapshot) error {
+	var oldModel string
+	if err := tx.QueryRow(ctx, `select model from skin_assets where id=$1 and status='active' for update`, assetID).Scan(&oldModel); err != nil {
+		return err
+	}
+	profileIDs, err := lockProfilesUsingAsset(ctx, tx, assetID)
+	if err != nil {
+		return err
+	}
+	if oldModel != snapshot.Model {
+		if _, err = tx.Exec(ctx, `update player_profile_textures set model=$2 where asset_id=$1`, assetID, snapshot.Model); err != nil {
+			return err
+		}
+	}
+	if snapshot.Visibility == "private" {
+		if _, err = tx.Exec(ctx, `delete from player_profile_textures texture using player_profiles profile
+			where texture.profile_id=profile.id and texture.asset_id=$1 and profile.user_id<>$2`, assetID, ownerID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `delete from skin_wardrobe where asset_id=$1 and user_id<>$2`, assetID, ownerID); err != nil {
+			return err
+		}
+	}
+	if (oldModel != snapshot.Model || snapshot.Visibility == "private") && len(profileIDs) > 0 {
+		if _, err = tx.Exec(ctx, `update player_profiles set updated_at=now() where id=any($1::bigint[])`, profileIDs); err != nil {
+			return err
+		}
+	}
+	command, err := tx.Exec(ctx, `update skin_assets set model=$2,display_name=$3,description=$4,tags=$5,
+		visibility=$6,review_status='approved',published_revision_id=$7,updated_at=now() where id=$1 and status='active'`,
+		assetID, snapshot.Model, snapshot.DisplayName, snapshot.Description, snapshot.Tags, snapshot.Visibility, revisionID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return errors.New("skin asset was not updated")
+	}
+	return nil
 }
 
 func (s *Server) deleteSkin(w http.ResponseWriter, r *http.Request, publicID string) {
@@ -1577,6 +1647,25 @@ func normalizeSkinAssetCreate(request *skinAssetCreateRequest) error {
 	request.Description = strings.TrimSpace(request.Description)
 	if len([]rune(request.Description)) > 1000 {
 		return fmt.Errorf("description is too long")
+	}
+	request.DefaultLocale, request.Localizations, err = normalizeCatalogLocalizations(request.DefaultLocale, request.Localizations)
+	if err != nil {
+		return fmt.Errorf("localized skin content is invalid")
+	}
+	if len(request.Localizations) == 0 {
+		request.Localizations = []catalogLocalizationEdit{{Locale: request.DefaultLocale, Name: request.DisplayName, Summary: request.Description}}
+		request.DefaultLocale, request.Localizations, err = normalizeCatalogLocalizations(request.DefaultLocale, request.Localizations)
+	}
+	if err != nil || requireCatalogCreateDefaultLocalization(request.DefaultLocale, request.Localizations) != nil {
+		return fmt.Errorf("the default language must have a localized skin name")
+	}
+	for _, localization := range request.Localizations {
+		if localization.Locale == request.DefaultLocale {
+			request.DisplayName = localization.Name
+			request.Name = localization.Name
+			request.Description = localization.Summary
+			break
+		}
 	}
 	request.Tags, err = normalizeSkinTags(request.Tags)
 	if err != nil {

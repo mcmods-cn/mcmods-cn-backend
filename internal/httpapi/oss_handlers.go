@@ -31,6 +31,7 @@ const (
 	ossUserPlaygroundCategory       = "users/playground"
 	ossUserCommentCategory          = "users/comments"
 	ossModExportScopePrefix         = "mod_export:"
+	ossProjectDownloadScopePrefix   = "project_download:"
 )
 
 var defaultOSSAllowedExtensions = []string{
@@ -193,7 +194,9 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	blueprintUpload := scope == "user" && isBlueprintExtension(ext)
 	modExportUniqueID := strings.TrimPrefix(scope, ossModExportScopePrefix)
 	isModExport := modExportUniqueID != scope && modExportUniqueID != ""
-	if (isModExport && ext != ".zip") || (!isModExport && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
+	projectDownloadID := strings.TrimPrefix(scope, ossProjectDownloadScopePrefix)
+	isProjectDownload := projectDownloadID != scope && projectDownloadID != ""
+	if (isModExport && ext != ".zip") || (isProjectDownload && ext != ".jar") || (!isModExport && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -213,6 +216,8 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	}
 	if isModExport {
 		source = "mcmods_exporter"
+	} else if isProjectDownload {
+		source = "project_download"
 	}
 	objectPrefix := cfg.Prefix
 	if requestedPrefix := normalizeObjectPrefix(req.Prefix); requestedPrefix != "" {
@@ -229,6 +234,10 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		}
 	} else if isModExport {
 		category = path.Join("projects", normalizeProjectObjectSegment(modExportUniqueID), "imports", "packages")
+		objectCategory = category
+		objectPrefix = cfg.Prefix
+	} else if isProjectDownload {
+		category = path.Join("projects", normalizeProjectObjectSegment(projectDownloadID), "downloads")
 		objectCategory = category
 		objectPrefix = cfg.Prefix
 	} else if rawCategory == ossProjectIntroCategory || category == "project_intro" || category == "projectintro" {
@@ -249,7 +258,11 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	}
 	var existing map[string]any
 	var exists bool
-	if (scope == "user" || isModExport) && coverBlueprintID == 0 {
+	if isProjectDownload {
+		// Project files keep their own immutable object path even when another
+		// project happens to upload the same JAR.
+		exists = false
+	} else if (scope == "user" || isModExport) && coverBlueprintID == 0 {
 		existing, exists = s.findExistingOSSFileByHashForUploader(r.Context(), req.SHA256, req.SizeBytes, currentClaims(r).Subject)
 	} else {
 		existing, exists = s.findExistingOSSFileByHash(r.Context(), req.SHA256, req.SizeBytes)
@@ -387,8 +400,12 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	req.Source = strings.TrimSpace(req.Source)
 	modExportUniqueID := strings.TrimPrefix(scope, ossModExportScopePrefix)
 	isModExport := modExportUniqueID != scope && modExportUniqueID != ""
+	projectDownloadID := strings.TrimPrefix(scope, ossProjectDownloadScopePrefix)
+	isProjectDownload := projectDownloadID != scope && projectDownloadID != ""
 	if isModExport {
 		req.Source = "mcmods_exporter"
+	} else if isProjectDownload {
+		req.Source = "project_download"
 	}
 	if req.ObjectKey == "" || !isAllowedObjectKey(req.ObjectKey, cfg.Prefix) {
 		writeError(w, http.StatusBadRequest, "OSS ObjectKey 不合法")
@@ -402,7 +419,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		req.OriginalName = path.Base(req.ObjectKey)
 	}
 	ext := strings.ToLower(filepath.Ext(req.OriginalName))
-	if (isModExport && ext != ".zip") || (!isModExport && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
+	if (isModExport && ext != ".zip") || (isProjectDownload && ext != ".jar") || (!isModExport && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -429,6 +446,13 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 			return
 		}
 		req.Category = path.Join("projects", normalizeProjectObjectSegment(modExportUniqueID), "imports", "packages")
+	} else if isProjectDownload {
+		downloadPrefix := path.Join(cfg.Prefix, "projects", normalizeProjectObjectSegment(projectDownloadID), "downloads")
+		if !isAllowedObjectKey(req.ObjectKey, downloadPrefix) {
+			writeError(w, http.StatusBadRequest, "OSS ObjectKey does not belong to this project download directory")
+			return
+		}
+		req.Category = path.Join("projects", normalizeProjectObjectSegment(projectDownloadID), "downloads")
 	} else if strings.HasPrefix(req.ObjectKey, path.Join(cfg.Prefix, "projects")+"/") {
 		if rawCategory == ossProjectIntroCategory || req.Category == "project_intro" || req.Category == "projectintro" {
 			req.Category = projectCategoryFromObjectKey(req.ObjectKey, cfg.Prefix, "description")

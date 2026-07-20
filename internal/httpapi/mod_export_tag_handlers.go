@@ -23,7 +23,7 @@ func (s *Server) modExportTags(w http.ResponseWriter, r *http.Request) {
 	offset := boundedOffset(r.URL.Query().Get("offset"))
 	var total int
 	if err := s.db.QueryRow(r.Context(), `
-		select count(*)::int from catalog_tag_snapshots snapshot
+		select count(*)::int from tag_import_snapshots snapshot
 		join catalog_tags tag on tag.entity_id=snapshot.tag_id
 		where snapshot.revision_id=$1 and ($2='' or tag.registry=$2)
 		  and ($3='' or tag.canonical_id ilike '%' || $3 || '%')`, revisionID, registry, query).Scan(&total); err != nil {
@@ -32,7 +32,7 @@ func (s *Server) modExportTags(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.db.Query(r.Context(), `
 		select tag.entity_id,entity.public_id,tag.registry,tag.canonical_id,snapshot.member_count
-		from catalog_tag_snapshots snapshot
+		from tag_import_snapshots snapshot
 		join catalog_tags tag on tag.entity_id=snapshot.tag_id
 		join catalog_entities entity on entity.id=tag.entity_id
 		where snapshot.revision_id=$1 and ($2='' or tag.registry=$2)
@@ -80,7 +80,7 @@ func (s *Server) modExportTagDetail(w http.ResponseWriter, r *http.Request) {
 	var memberCount int
 	var publicID string
 	if err := s.db.QueryRow(r.Context(), `select tag.entity_id,entity.public_id,tag.canonical_id,snapshot.member_count
-		from catalog_tag_snapshots snapshot join catalog_tags tag on tag.entity_id=snapshot.tag_id
+		from tag_import_snapshots snapshot join catalog_tags tag on tag.entity_id=snapshot.tag_id
 		join catalog_entities entity on entity.id=tag.entity_id
 		where snapshot.revision_id=$1 and tag.registry=$2
 		and (($3<>'' and tag.entity_id=$3) or ($3='' and tag.canonical_id=$4))`,
@@ -98,11 +98,11 @@ func (s *Server) modExportTagDetail(w http.ResponseWriter, r *http.Request) {
 		coalesce(snapshot.registry,''),
 		jsonb_strip_nulls(jsonb_build_object('zh_cn',snapshot.names->>'zh_cn','en_us',snapshot.names->>'en_us',$3::text,snapshot.names->>($3::text))),
 		coalesce(snapshot.icon_path,'')
-		from catalog_tag_members member
-		join catalog_tag_snapshots tag_snapshot on tag_snapshot.id=member.tag_snapshot_id
+		from tag_import_members member
+		join tag_import_snapshots tag_snapshot on tag_snapshot.id=member.tag_snapshot_id
 		left join game_resources resource on resource.entity_id=member.resource_id
 		left join catalog_entities entity on entity.id=resource.entity_id
-		left join lateral (select candidate.* from game_resource_snapshots candidate
+		left join lateral (select candidate.* from resource_import_snapshots candidate
 			where candidate.resource_id=resource.entity_id
 			order by (candidate.revision_id=$1) desc,candidate.created_at desc limit 1) snapshot on true
 		where tag_snapshot.revision_id=$1 and tag_snapshot.tag_id=$2

@@ -20,6 +20,7 @@ import (
 type modLinkPayload struct {
 	Type string `json:"type"`
 	URL  string `json:"url"`
+	Note string `json:"note"`
 }
 
 type modAuthorPayload struct {
@@ -43,12 +44,31 @@ type modRelationshipGroupPayload struct {
 	Loader            string                   `json:"loader"`
 	MinecraftVersions []string                 `json:"minecraftVersions"`
 	ModVersion        string                   `json:"modVersion"`
+	Direction         string                   `json:"direction,omitempty"`
 	Relationships     []modRelationshipPayload `json:"relationships"`
 }
 
 type modLoaderCompatibilityPayload struct {
 	Loader   string   `json:"loader"`
 	Versions []string `json:"versions"`
+}
+
+type modIdentifierPayload struct {
+	ID                  int64    `json:"id,omitempty"`
+	Identifier          string   `json:"identifier"`
+	Primary             bool     `json:"primary"`
+	MinecraftVersionMin string   `json:"minecraftVersionMin,omitempty"`
+	MinecraftVersionMax string   `json:"minecraftVersionMax,omitempty"`
+	MinecraftVersions   []string `json:"minecraftVersions"`
+}
+
+type modGalleryImagePayload struct {
+	PublicID    string `json:"publicId,omitempty"`
+	FileID      int64  `json:"fileId"`
+	Name        string `json:"name,omitempty"`
+	ContentType string `json:"contentType,omitempty"`
+	SizeBytes   int64  `json:"sizeBytes,omitempty"`
+	URL         string `json:"url,omitempty"`
 }
 
 type createModRequest struct {
@@ -58,6 +78,9 @@ type createModRequest struct {
 	Abbreviation        string                          `json:"abbreviation"`
 	Summary             string                          `json:"summary"`
 	ModID               string                          `json:"modId"`
+	ModIDs              []modIdentifierPayload          `json:"modIds"`
+	DefaultLocale       string                          `json:"defaultLocale"`
+	Localizations       []catalogLocalizationEdit       `json:"localizations"`
 	Environment         string                          `json:"environment"`
 	PrimaryCategory     string                          `json:"primaryCategory"`
 	SupportedVersions   []string                        `json:"supportedVersions"`
@@ -71,11 +94,13 @@ type createModRequest struct {
 	License             string                          `json:"license"`
 	CurseForgeProjectID string                          `json:"curseforgeProjectId"`
 	ModrinthProjectID   string                          `json:"modrinthProjectId"`
+	GitHubProjectPath   string                          `json:"githubProjectPath"`
 	IconURL             string                          `json:"iconUrl"`
 	BodyMarkdown        string                          `json:"bodyMarkdown"`
 	SubmissionMethod    string                          `json:"submissionMethod"`
 	Links               []modLinkPayload                `json:"links"`
 	RelationshipGroups  []modRelationshipGroupPayload   `json:"relationshipGroups"`
+	GalleryImages       []modGalleryImagePayload        `json:"galleryImages"`
 }
 
 type modResponse struct {
@@ -87,6 +112,9 @@ type modResponse struct {
 	Abbreviation        string                          `json:"abbreviation"`
 	Summary             string                          `json:"summary"`
 	ModID               string                          `json:"modId"`
+	ModIDs              []modIdentifierPayload          `json:"modIds"`
+	DefaultLocale       string                          `json:"defaultLocale"`
+	Localizations       []catalogLocalizationEdit       `json:"localizations"`
 	Environment         string                          `json:"environment"`
 	PrimaryCategory     string                          `json:"primaryCategory"`
 	SupportedVersions   []string                        `json:"supportedVersions"`
@@ -97,6 +125,7 @@ type modResponse struct {
 	License             string                          `json:"license"`
 	CurseForgeProjectID string                          `json:"curseforgeProjectId"`
 	ModrinthProjectID   string                          `json:"modrinthProjectId"`
+	GitHubProjectPath   string                          `json:"githubProjectPath"`
 	IconURL             string                          `json:"iconUrl"`
 	BodyMarkdown        string                          `json:"bodyMarkdown"`
 	SearchKeywords      []string                        `json:"searchKeywords"`
@@ -111,6 +140,7 @@ type modResponse struct {
 	Authors             []modAuthorPayload              `json:"authors"`
 	Links               []modLinkPayload                `json:"links"`
 	RelationshipGroups  []modRelationshipGroupPayload   `json:"relationshipGroups"`
+	GalleryImages       []modGalleryImagePayload        `json:"galleryImages"`
 }
 
 type modListResponse struct {
@@ -198,12 +228,12 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		`insert into mods (
 			project_code, slug, primary_name, secondary_name, abbreviation, summary, mod_id, environment, primary_category,
-			official_status, source_status, license, curseforge_project_id, modrinth_project_id, icon_url,
+			official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
 			body_markdown, search_keywords, submission_method, review_status, created_by, published_at, supported_versions, supported_loaders
-		 ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+		 ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
 		 returning id`,
 		uniqueID, req.SiteID, req.PrimaryName, req.SecondaryName, req.Abbreviation, req.Summary, req.ModID, req.Environment, req.PrimaryCategory,
-		req.OfficialStatus, req.SourceStatus, req.License, req.CurseForgeProjectID, req.ModrinthProjectID, req.IconURL,
+		req.OfficialStatus, req.SourceStatus, req.License, req.CurseForgeProjectID, req.ModrinthProjectID, req.GitHubProjectPath, req.IconURL,
 		req.BodyMarkdown, req.SearchKeywords, req.SubmissionMethod, reviewStatus, claims.Subject, publishedAt, req.SupportedVersions, req.SupportedLoaders,
 	).Scan(&modID)
 	if err != nil {
@@ -214,9 +244,21 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存模组资料失败")
 		return
 	}
+	if err = insertModIdentifiersTx(r.Context(), tx, modID, req.ModIDs); err != nil {
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "a mod ID is already assigned to another mod")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to save mod IDs")
+		return
+	}
+	if err = validateModGalleryFilesTx(r.Context(), tx, 0, claims.Subject, req.GalleryImages); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	for index, link := range req.Links {
-		if _, err = tx.Exec(r.Context(), `insert into mod_links (mod_id, link_type, url, display_order) values ($1,$2,$3,$4)`, modID, link.Type, link.URL, index); err != nil {
+		if _, err = tx.Exec(r.Context(), `insert into mod_links (mod_id, link_type, url, note, display_order) values ($1,$2,$3,$4,$5)`, modID, link.Type, link.URL, link.Note, index); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存相关链接失败")
 			return
 		}
@@ -233,9 +275,9 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, resolveErr.Error())
 			return
 		}
-		if _, err = tx.Exec(r.Context(), `insert into mod_authors(
-			mod_id,creator_id,role_id,name_snapshot,role_snapshot,display_order
-		) values ($1,$2,$3,$4,$5,$6)`, modID, creatorID, author.RoleID, nameSnapshot, roleSnapshot, index); err != nil {
+		if _, err = tx.Exec(r.Context(), `insert into content_creator_bindings(
+			subject_public_id,subject_type,creator_id,role_id,name_snapshot,role_snapshot,display_order
+		) values ($1,'mod',$2,$3,$4,$5,$6)`, uniqueID, creatorID, author.RoleID, nameSnapshot, roleSnapshot, index); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存作者资料失败")
 			return
 		}
@@ -274,7 +316,7 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !reviewRequired {
-		if _, err = tx.Exec(r.Context(), `update mods set published_revision_id=$2 where id=$1`, modID, createdRevision.RevisionID); err != nil {
+		if err = applyModSnapshot(r.Context(), tx, modID, createdRevision.RevisionID, req); err != nil {
 			writeError(w, http.StatusInternalServerError, "发布模组版本失败")
 			return
 		}
@@ -311,8 +353,9 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		 where (m.review_status = 'approved' or m.created_by = $1)
 		   and ($2 = '' or m.slug ilike '%' || $2 || '%' or m.project_code ilike '%' || $2 || '%' or m.primary_name ilike '%' || $2 || '%' or m.secondary_name ilike '%' || $2 || '%'
 		        or m.abbreviation ilike '%' || $2 || '%' or m.mod_id ilike '%' || $2 || '%' or $2 = any(m.search_keywords)
-		        or exists (select 1 from mod_authors a join creators creator on creator.id=a.creator_id
-		                   where a.mod_id = m.id and creator.name ilike '%' || $2 || '%'))`,
+		        or exists (select 1 from mod_identifiers identifier where identifier.mod_id=m.id and identifier.identifier ilike '%' || $2 || '%')
+		        or exists (select 1 from content_creator_bindings a join creators creator on creator.id=a.creator_id
+		                   where a.subject_public_id=m.project_code and a.subject_type='mod' and creator.name ilike '%' || $2 || '%'))`,
 		claims.Subject, query,
 	).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "读取模组总数失败")
@@ -321,14 +364,15 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(
 		r.Context(),
 		`select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, mod_id, environment, primary_category,
-		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, icon_url,
+		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
 		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders, published_revision_id
 		 from mods m
 		 where (m.review_status = 'approved' or m.created_by = $1)
 		   and ($2 = '' or m.slug ilike '%' || $2 || '%' or m.project_code ilike '%' || $2 || '%' or m.primary_name ilike '%' || $2 || '%' or m.secondary_name ilike '%' || $2 || '%'
 		        or m.abbreviation ilike '%' || $2 || '%' or m.mod_id ilike '%' || $2 || '%' or $2 = any(m.search_keywords)
-		        or exists (select 1 from mod_authors a join creators creator on creator.id=a.creator_id
-		                   where a.mod_id = m.id and creator.name ilike '%' || $2 || '%'))
+		        or exists (select 1 from mod_identifiers identifier where identifier.mod_id=m.id and identifier.identifier ilike '%' || $2 || '%')
+		        or exists (select 1 from content_creator_bindings a join creators creator on creator.id=a.creator_id
+		                   where a.subject_public_id=m.project_code and a.subject_type='mod' and creator.name ilike '%' || $2 || '%'))
 		 order by m.updated_at desc, m.id desc
 		 limit $3`,
 		claims.Subject, query, limit,
@@ -375,6 +419,33 @@ func (s *Server) publicModDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取模组详情失败")
 		return
 	}
+	if err = s.loadIncomingModRelationships(r.Context(), &mod); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取反向模组关系失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, mod)
+}
+
+func (s *Server) modEditorDetail(w http.ResponseWriter, r *http.Request) {
+	siteID := normalizeModSiteID(r.PathValue("siteId"))
+	identity, err := s.modIdentity(r.Context(), siteID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "mod does not exist")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load mod")
+		return
+	}
+	if !canEditMod(currentClaims(r), identity) {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	mod, err := s.modBySiteIDForEditor(r.Context(), siteID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load mod editor")
+		return
+	}
 	writeJSON(w, http.StatusOK, mod)
 }
 
@@ -387,10 +458,13 @@ func scanMod(row scanner) (modResponse, error) {
 	err := row.Scan(
 		&mod.ID, &mod.UniqueID, &mod.SiteID, &mod.PrimaryName, &mod.SecondaryName, &mod.Abbreviation, &mod.Summary, &mod.ModID,
 		&mod.Environment, &mod.PrimaryCategory, &mod.OfficialStatus, &mod.SourceStatus, &mod.License,
-		&mod.CurseForgeProjectID, &mod.ModrinthProjectID, &mod.IconURL, &mod.BodyMarkdown, &mod.SearchKeywords,
+		&mod.CurseForgeProjectID, &mod.ModrinthProjectID, &mod.GitHubProjectPath, &mod.IconURL, &mod.BodyMarkdown, &mod.SearchKeywords,
 		&mod.SubmissionMethod, &mod.ReviewStatus, &mod.CreatedBy, &mod.CreatedAt, &mod.UpdatedAt, &mod.PublishedAt, &mod.SupportedVersions, &mod.SupportedLoaders, &mod.PublishedRevisionID,
 	)
 	mod.Tags = []string{}
+	mod.ModIDs = []modIdentifierPayload{}
+	mod.Localizations = []catalogLocalizationEdit{}
+	mod.GalleryImages = []modGalleryImagePayload{}
 	mod.Authors = []modAuthorPayload{}
 	mod.Links = []modLinkPayload{}
 	mod.RelationshipGroups = []modRelationshipGroupPayload{}
@@ -402,7 +476,7 @@ func (s *Server) modByID(ctx context.Context, id int64, viewerID int64) (modResp
 	row := s.db.QueryRow(
 		ctx,
 		`select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, mod_id, environment, primary_category,
-		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, icon_url,
+		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
 		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders, published_revision_id
 		 from mods where id = $1 and (review_status = 'approved' or created_by = $2)`,
 		id, viewerID,
@@ -419,7 +493,7 @@ func (s *Server) modBySiteID(ctx context.Context, siteID string, viewerID int64)
 	row := s.db.QueryRow(
 		ctx,
 		`select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, mod_id, environment, primary_category,
-		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, icon_url,
+		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
 		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders, published_revision_id
 		 from mods where slug = $1 and (review_status = 'approved' or created_by = $2)`,
 		siteID, viewerID,
@@ -432,14 +506,92 @@ func (s *Server) modBySiteID(ctx context.Context, siteID string, viewerID int64)
 	return mod, err
 }
 
+func (s *Server) modBySiteIDForEditor(ctx context.Context, siteID string) (modResponse, error) {
+	row := s.db.QueryRow(ctx, `select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, mod_id, environment, primary_category,
+		official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
+		body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders, published_revision_id
+		from mods where slug=$1`, siteID)
+	mod, err := scanMod(row)
+	if err != nil {
+		return mod, err
+	}
+	err = s.loadModAssociations(ctx, &mod)
+	return mod, err
+}
+
 func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) error {
-	rows, err := s.db.Query(ctx, `select link_type, url from mod_links where mod_id = $1 order by display_order, id`, mod.ID)
+	if err := s.db.QueryRow(ctx, `select default_locale from content_subjects where public_id=$1 and subject_type='mod'`, mod.UniqueID).Scan(&mod.DefaultLocale); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if mod.DefaultLocale == "" {
+		mod.DefaultLocale = "en"
+	}
+	rows, err := s.db.Query(ctx, `select id,identifier,is_primary,minecraft_version_min,minecraft_version_max,minecraft_versions
+		from mod_identifiers where mod_id=$1 order by is_primary desc,display_order,id`, mod.ID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var item modIdentifierPayload
+		if err = rows.Scan(&item.ID, &item.Identifier, &item.Primary, &item.MinecraftVersionMin, &item.MinecraftVersionMax, &item.MinecraftVersions); err != nil {
+			rows.Close()
+			return err
+		}
+		mod.ModIDs = append(mod.ModIDs, item)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	rows, err = s.db.Query(ctx, `select locale,name,summary,content_markdown from content_localizations
+		where subject_public_id=$1 and subject_type='mod' and review_status='approved' order by locale`, mod.UniqueID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var item catalogLocalizationEdit
+		if err = rows.Scan(&item.Locale, &item.Name, &item.Summary, &item.ContentMarkdown); err != nil {
+			rows.Close()
+			return err
+		}
+		mod.Localizations = append(mod.Localizations, item)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	rows, err = s.db.Query(ctx, `select gallery.public_id,gallery.oss_file_id,file.original_name,file.content_type,file.size_bytes
+		from mod_gallery_images gallery join oss_files file on file.id=gallery.oss_file_id
+		where gallery.mod_id=$1 and file.status='active' order by gallery.display_order,gallery.id`, mod.ID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var item modGalleryImagePayload
+		if err = rows.Scan(&item.PublicID, &item.FileID, &item.Name, &item.ContentType, &item.SizeBytes); err != nil {
+			rows.Close()
+			return err
+		}
+		item.URL = fmt.Sprintf("/api/v1/mods/%s/gallery/%s", url.PathEscape(mod.SiteID), item.PublicID)
+		mod.GalleryImages = append(mod.GalleryImages, item)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	rows, err = s.db.Query(ctx, `select link_type, url, note from mod_links where mod_id = $1 order by display_order, id`, mod.ID)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var item modLinkPayload
-		if err = rows.Scan(&item.Type, &item.URL); err != nil {
+		if err = rows.Scan(&item.Type, &item.URL, &item.Note); err != nil {
 			rows.Close()
 			return err
 		}
@@ -489,10 +641,11 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 
 	rows, err = s.db.Query(ctx, `select creator.public_id,creator.kind,creator.name,creator.avatar_url,
 		author.role_id,coalesce(role.name,author.role_snapshot)
-		from mod_authors author
+		from content_creator_bindings author
 		join creators creator on creator.id=author.creator_id
 		left join creator_role_definitions role on role.id=author.role_id
-		where author.mod_id=$1 order by author.display_order,author.id`, mod.ID)
+		where author.subject_public_id=$1 and author.subject_type='mod'
+		order by author.display_order,author.id`, mod.UniqueID)
 	if err != nil {
 		return err
 	}
@@ -527,6 +680,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 			rows.Close()
 			return err
 		}
+		item.group.Direction = "outgoing"
 		item.group.Relationships = []modRelationshipPayload{}
 		groups = append(groups, item)
 	}
@@ -558,6 +712,43 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	return nil
 }
 
+func (s *Server) loadIncomingModRelationships(ctx context.Context, mod *modResponse) error {
+	rows, err := s.db.Query(ctx, `select relationship_group.id,relationship_group.label,relationship_group.loader,
+		relationship_group.minecraft_versions,relationship_group.mod_version,relationship.relation_type,
+		source_mod.id,source_mod.primary_name,relationship.notes
+		from mod_relationships relationship
+		join mod_relationship_groups relationship_group on relationship_group.id=relationship.group_id
+		join mods source_mod on source_mod.id=relationship.mod_id
+		where relationship.related_mod_id=$1 and source_mod.review_status='approved'
+		order by relationship_group.display_order,relationship_group.id,relationship.display_order,relationship.id`, mod.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	groupIndexes := map[int64]int{}
+	for rows.Next() {
+		var groupID, sourceModID int64
+		var label, loader, modVersion, relationshipType, sourceModName, notes string
+		var minecraftVersions []string
+		if err = rows.Scan(&groupID, &label, &loader, &minecraftVersions, &modVersion, &relationshipType, &sourceModID, &sourceModName, &notes); err != nil {
+			return err
+		}
+		index, exists := groupIndexes[groupID]
+		if !exists {
+			index = len(mod.RelationshipGroups)
+			groupIndexes[groupID] = index
+			mod.RelationshipGroups = append(mod.RelationshipGroups, modRelationshipGroupPayload{
+				Label: label, Loader: loader, MinecraftVersions: minecraftVersions, ModVersion: modVersion,
+				Direction: "incoming", Relationships: []modRelationshipPayload{},
+			})
+		}
+		mod.RelationshipGroups[index].Relationships = append(mod.RelationshipGroups[index].Relationships, modRelationshipPayload{
+			Type: relationshipType, RelatedModID: &sourceModID, RelatedModName: sourceModName, Notes: notes,
+		})
+	}
+	return rows.Err()
+}
+
 func normalizeAndValidateModRequest(req *createModRequest) error {
 	req.SiteID = normalizeModSiteID(req.SiteID)
 	req.PrimaryName = strings.TrimSpace(req.PrimaryName)
@@ -565,6 +756,33 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 	req.Abbreviation = strings.TrimSpace(req.Abbreviation)
 	req.Summary = strings.TrimSpace(req.Summary)
 	req.ModID = strings.TrimSpace(req.ModID)
+	defaultLocale, localizations, localizationErr := normalizeCatalogLocalizations(req.DefaultLocale, req.Localizations)
+	if localizationErr != nil {
+		return errors.New("localized mod content is invalid")
+	}
+	if len(localizations) == 0 {
+		localizedName := req.SecondaryName
+		if strings.TrimSpace(localizedName) == "" {
+			localizedName = req.PrimaryName
+		}
+		localizations = []catalogLocalizationEdit{{Locale: defaultLocale, Name: localizedName, Summary: req.Summary, ContentMarkdown: req.BodyMarkdown}}
+		defaultLocale, localizations, localizationErr = normalizeCatalogLocalizations(defaultLocale, localizations)
+		if localizationErr != nil {
+			return errors.New("localized mod content is invalid")
+		}
+	}
+	if err := requireCatalogCreateDefaultLocalization(defaultLocale, localizations); err != nil {
+		return errors.New("the default language must have a localized mod name")
+	}
+	req.DefaultLocale, req.Localizations = defaultLocale, localizations
+	for _, localization := range localizations {
+		if localization.Locale == defaultLocale {
+			req.SecondaryName = localization.Name
+			req.Summary = localization.Summary
+			req.BodyMarkdown = localization.ContentMarkdown
+			break
+		}
+	}
 	req.Environment = strings.TrimSpace(req.Environment)
 	req.PrimaryCategory = strings.TrimSpace(req.PrimaryCategory)
 	req.OfficialStatus = strings.TrimSpace(req.OfficialStatus)
@@ -572,6 +790,7 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 	req.License = strings.TrimSpace(req.License)
 	req.CurseForgeProjectID = strings.TrimSpace(req.CurseForgeProjectID)
 	req.ModrinthProjectID = strings.TrimSpace(req.ModrinthProjectID)
+	req.GitHubProjectPath = normalizeGitHubProjectPath(req.GitHubProjectPath)
 	req.IconURL = strings.TrimSpace(req.IconURL)
 	req.BodyMarkdown = strings.TrimSpace(req.BodyMarkdown)
 	req.SubmissionMethod = strings.TrimSpace(req.SubmissionMethod)
@@ -594,9 +813,41 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 	if len(req.Summary) > 500 {
 		return errors.New("简介不能超过 500 个字符")
 	}
-	if len(req.ModID) > 128 || len(req.CurseForgeProjectID) > 128 || len(req.ModrinthProjectID) > 128 {
+	if len(req.ModID) > 128 || len(req.CurseForgeProjectID) > 128 || len(req.ModrinthProjectID) > 128 || len(req.GitHubProjectPath) > 201 {
 		return errors.New("项目标识不能超过 128 个字符")
 	}
+	if req.GitHubProjectPath != "" && !validGitHubProjectPath(req.GitHubProjectPath) {
+		return errors.New("GitHub 项目地址必须使用 owner/repository 格式")
+	}
+	identifiers, err := normalizeModIdentifiers(req.ModID, req.ModIDs)
+	if err != nil {
+		return err
+	}
+	req.ModIDs = identifiers
+	for _, identifier := range identifiers {
+		if identifier.Primary {
+			req.ModID = identifier.Identifier
+			break
+		}
+	}
+	if len(req.GalleryImages) > 32 {
+		return errors.New("a mod gallery can contain at most 32 images")
+	}
+	seenGalleryFiles := map[int64]bool{}
+	seenGalleryIDs := map[string]bool{}
+	cleanGallery := make([]modGalleryImagePayload, 0, len(req.GalleryImages))
+	for _, image := range req.GalleryImages {
+		image.PublicID = strings.ToLower(strings.TrimSpace(image.PublicID))
+		if image.FileID <= 0 || seenGalleryFiles[image.FileID] || (image.PublicID != "" && (!validCatalogPublicID(image.PublicID) || seenGalleryIDs[image.PublicID])) {
+			return errors.New("mod gallery contains an invalid or duplicate image")
+		}
+		seenGalleryFiles[image.FileID] = true
+		if image.PublicID != "" {
+			seenGalleryIDs[image.PublicID] = true
+		}
+		cleanGallery = append(cleanGallery, modGalleryImagePayload{PublicID: image.PublicID, FileID: image.FileID})
+	}
+	req.GalleryImages = cleanGallery
 	if len(req.BodyMarkdown) > 2*1024*1024 {
 		return errors.New("正文内容过长")
 	}
@@ -639,7 +890,7 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 		}
 		for _, version := range compatibility.Versions {
 			if len(version) > 80 {
-				return errors.New("Minecraft 版本名称不能超过 80 个字符")
+				return errors.New("关系条件的 Minecraft 版本必须来自该模组支持的版本")
 			}
 		}
 		seenCompatibility[compatibility.Loader] = true
@@ -647,6 +898,14 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 	}
 	req.Compatibilities = cleanCompatibilities
 	req.SupportedLoaders, req.SupportedVersions = compatibilitySummary(req.Compatibilities)
+	supportedVersionSet := stringSet(req.SupportedVersions...)
+	for index := range req.ModIDs {
+		for _, version := range req.ModIDs[index].MinecraftVersions {
+			if len(version) > 80 || (len(supportedVersionSet) > 0 && !supportedVersionSet[version]) {
+				return errors.New("Mod ID 的适用版本必须来自该模组支持的 Minecraft 版本")
+			}
+		}
+	}
 	for _, value := range append(append([]string{}, req.SupportedVersions...), req.SupportedLoaders...) {
 		if len(value) > 80 {
 			return errors.New("版本或加载器名称不能超过 80 个字符")
@@ -661,10 +920,11 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 	for _, item := range req.Links {
 		item.Type = strings.TrimSpace(item.Type)
 		item.URL = strings.TrimSpace(item.URL)
+		item.Note = strings.TrimSpace(item.Note)
 		if item.Type == "" && item.URL == "" {
 			continue
 		}
-		if !allowedModLinkTypes[item.Type] || !validHTTPURL(item.URL) {
+		if !allowedModLinkTypes[item.Type] || !validHTTPURL(item.URL) || len(item.Note) > 240 {
 			return errors.New("相关链接的类型或地址无效")
 		}
 		key := item.Type + "\x00" + item.URL
@@ -673,7 +933,7 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 			cleanLinks = append(cleanLinks, item)
 		}
 	}
-	req.Links = cleanLinks
+	req.GitHubProjectPath, req.Links = synchronizeGitHubProjectLink(req.GitHubProjectPath, cleanLinks)
 
 	cleanAuthors := make([]modAuthorPayload, 0, len(req.Authors))
 	for _, item := range req.Authors {
@@ -699,6 +959,7 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 
 	cleanGroups := make([]modRelationshipGroupPayload, 0, len(req.RelationshipGroups))
 	relationshipCount := 0
+	supportedLoaderSet := stringSet(req.SupportedLoaders...)
 	for _, group := range req.RelationshipGroups {
 		group.Label = strings.TrimSpace(group.Label)
 		group.Loader = strings.TrimSpace(group.Loader)
@@ -707,8 +968,11 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 		if len(group.Label) > 160 || len(group.Loader) > 80 || len(group.ModVersion) > 160 {
 			return errors.New("模组关系条件字段过长")
 		}
+		if group.Loader != "" && len(supportedLoaderSet) > 0 && !supportedLoaderSet[group.Loader] {
+			return errors.New("关系条件的加载器必须来自该模组支持的加载器")
+		}
 		for _, version := range group.MinecraftVersions {
-			if len(version) > 80 {
+			if len(version) > 80 || (len(supportedVersionSet) > 0 && !supportedVersionSet[version]) {
 				return errors.New("Minecraft 版本名称不能超过 80 个字符")
 			}
 		}
@@ -742,6 +1006,187 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 	return nil
 }
 
+func normalizeModIdentifiers(legacy string, values []modIdentifierPayload) ([]modIdentifierPayload, error) {
+	if len(values) == 0 && strings.TrimSpace(legacy) != "" {
+		values = []modIdentifierPayload{{Identifier: legacy, Primary: true}}
+	}
+	if len(values) > 32 {
+		return nil, errors.New("a mod can have at most 32 Mod IDs")
+	}
+	result := make([]modIdentifierPayload, 0, len(values))
+	seen := map[string]bool{}
+	primaryCount := 0
+	for _, value := range values {
+		value.Identifier = strings.TrimSpace(value.Identifier)
+		value.MinecraftVersionMin = strings.TrimSpace(value.MinecraftVersionMin)
+		value.MinecraftVersionMax = strings.TrimSpace(value.MinecraftVersionMax)
+		value.MinecraftVersions = uniqueTrimmed(value.MinecraftVersions, 500)
+		if value.Identifier == "" {
+			continue
+		}
+		if !validModIdentifier(value.Identifier) {
+			return nil, errors.New("Mod ID may only contain ASCII letters, numbers, underscores, dots and hyphens")
+		}
+		key := strings.ToLower(value.Identifier)
+		if seen[key] {
+			return nil, errors.New("duplicate Mod ID")
+		}
+		seen[key] = true
+		if value.Primary {
+			primaryCount++
+		}
+		result = append(result, value)
+	}
+	if len(result) > 0 && primaryCount == 0 {
+		result[0].Primary = true
+		primaryCount = 1
+	}
+	if primaryCount > 1 {
+		return nil, errors.New("only one Mod ID can be primary")
+	}
+	return result, nil
+}
+
+func validModIdentifier(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || (index > 0 && (character == '_' || character == '.' || character == '-')) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func normalizeGitHubProjectPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(value); err == nil && strings.EqualFold(parsed.Hostname(), "github.com") {
+		value = parsed.Path
+	}
+	value = strings.Trim(strings.TrimSpace(value), "/")
+	value = strings.TrimSuffix(value, ".git")
+	parts := strings.Split(value, "/")
+	if len(parts) >= 2 {
+		return parts[0] + "/" + parts[1]
+	}
+	return value
+}
+
+func validGitHubProjectPath(value string) bool {
+	parts := strings.Split(value, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || len(parts[0]) > 100 || len(parts[1]) > 100 {
+		return false
+	}
+	for partIndex, part := range parts {
+		for index, character := range part {
+			valid := character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '-'
+			if partIndex == 1 {
+				valid = valid || character == '_' || character == '.'
+			}
+			if !valid || (partIndex == 0 && (index == 0 || index == len(part)-1) && character == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func synchronizeGitHubProjectLink(projectPath string, links []modLinkPayload) (string, []modLinkPayload) {
+	if projectPath == "" {
+		for _, link := range links {
+			if link.Type == "github" {
+				candidate := normalizeGitHubProjectPath(link.URL)
+				if validGitHubProjectPath(candidate) {
+					projectPath = candidate
+					break
+				}
+			}
+		}
+	}
+	if projectPath == "" {
+		return "", links
+	}
+	canonicalURL := "https://github.com/" + projectPath
+	for index := range links {
+		if links[index].Type == "github" {
+			links[index].URL = canonicalURL
+			return projectPath, links
+		}
+	}
+	return projectPath, append(links, modLinkPayload{Type: "github", URL: canonicalURL})
+}
+
+func insertModIdentifiersTx(ctx context.Context, tx pgx.Tx, modID int64, values []modIdentifierPayload) error {
+	for index, item := range values {
+		if _, err := tx.Exec(ctx, `insert into mod_identifiers(
+			mod_id,identifier,is_primary,minecraft_version_min,minecraft_version_max,minecraft_versions,display_order
+		) values($1,$2,$3,$4,$5,$6,$7)`, modID, item.Identifier, item.Primary,
+			item.MinecraftVersionMin, item.MinecraftVersionMax, item.MinecraftVersions, index); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func replaceModIdentifiersTx(ctx context.Context, tx pgx.Tx, modID int64, values []modIdentifierPayload) error {
+	if _, err := tx.Exec(ctx, `delete from mod_identifiers where mod_id=$1`, modID); err != nil {
+		return err
+	}
+	return insertModIdentifiersTx(ctx, tx, modID, values)
+}
+
+func validateModGalleryFilesTx(ctx context.Context, tx pgx.Tx, modID, actorID int64, images []modGalleryImagePayload) error {
+	for _, image := range images {
+		if image.PublicID != "" {
+			var existingModID, existingFileID int64
+			err := tx.QueryRow(ctx, `select mod_id,oss_file_id from mod_gallery_images where public_id=$1`, image.PublicID).
+				Scan(&existingModID, &existingFileID)
+			if err == nil && existingModID == modID && existingFileID == image.FileID {
+				continue
+			}
+			if err == nil || !errors.Is(err, pgx.ErrNoRows) {
+				return errors.New("mod gallery contains an invalid image reference")
+			}
+		}
+		var valid bool
+		if err := tx.QueryRow(ctx, `select exists(select 1 from oss_files
+			where id=$1 and uploader_id=$2 and status='active' and content_type ilike 'image/%')`, image.FileID, actorID).Scan(&valid); err != nil {
+			return err
+		}
+		if !valid {
+			return errors.New("a gallery image does not exist, is not an image, or is not owned by the editor")
+		}
+	}
+	return nil
+}
+
+func replaceModGalleryImagesTx(ctx context.Context, tx pgx.Tx, modID, revisionID, actorID int64, images []modGalleryImagePayload) error {
+	if _, err := tx.Exec(ctx, `delete from mod_gallery_images where mod_id=$1`, modID); err != nil {
+		return err
+	}
+	for index, image := range images {
+		if image.PublicID == "" {
+			if _, err := tx.Exec(ctx, `insert into mod_gallery_images(mod_id,oss_file_id,display_order,created_by,published_revision_id)
+				values($1,$2,$3,$4,$5)`, modID, image.FileID, index, nullableActorID(actorID), revisionID); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := tx.Exec(ctx, `insert into mod_gallery_images(public_id,mod_id,oss_file_id,display_order,created_by,published_revision_id)
+			values($1,$2,$3,$4,$5,$6)`, image.PublicID, modID, image.FileID, index, nullableActorID(actorID), revisionID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func insertModRelationshipGroups(ctx context.Context, tx pgx.Tx, modID int64, groups []modRelationshipGroupPayload) error {
 	for groupIndex, group := range groups {
 		var groupID int64
@@ -754,6 +1199,18 @@ func insertModRelationshipGroups(ctx context.Context, tx pgx.Tx, modID int64, gr
 			return err
 		}
 		for relationshipIndex, relationship := range group.Relationships {
+			if relationship.RelatedModID == nil || *relationship.RelatedModID == modID {
+				return errors.New("模组关系必须选择网站中另一个已有模组")
+			}
+			if err := tx.QueryRow(ctx, `select primary_name from mods where id=$1`, *relationship.RelatedModID).Scan(&relationship.RelatedModName); err != nil {
+				return errors.New("关联模组不存在")
+			}
+			if relationship.Type == "integration" {
+				if _, err := tx.Exec(ctx, `delete from mod_relationships
+					where relation_type='integration' and mod_id=$1 and related_mod_id=$2`, *relationship.RelatedModID, modID); err != nil {
+					return err
+				}
+			}
 			if _, err := tx.Exec(
 				ctx,
 				`insert into mod_relationships (mod_id, group_id, relation_type, related_mod_id, related_mod_name, notes, display_order)
@@ -763,6 +1220,10 @@ func insertModRelationshipGroups(ctx context.Context, tx pgx.Tx, modID int64, gr
 				return err
 			}
 		}
+	}
+	if _, err := tx.Exec(ctx, `delete from mod_relationship_groups relationship_group
+		where not exists(select 1 from mod_relationships relationship where relationship.group_id=relationship_group.id)`); err != nil {
+		return err
 	}
 	return nil
 }

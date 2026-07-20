@@ -39,6 +39,7 @@ const (
 	ObjectEconomy   int16 = 11
 	ObjectTask      int16 = 12
 	ObjectShopItem  int16 = 13
+	ObjectResource  int16 = 14
 )
 
 const (

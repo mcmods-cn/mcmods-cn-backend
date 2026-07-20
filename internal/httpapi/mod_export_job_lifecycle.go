@@ -20,7 +20,7 @@ var errModExportLeaseLost = errors.New("mod export job lease was lost")
 func (s *Server) claimModExportJob(ctx context.Context, jobID string) (string, error) {
 	runToken := newExportID()
 	tag, err := s.db.Exec(ctx, `
-		update mod_export_jobs
+		update catalog_import_jobs
 		set status='validating',progress=5,current_stage='download',started_at=now(),finished_at=null,
 			heartbeat_at=now(),updated_at=now(),run_token=$2,attempt_count=attempt_count+1,
 			error_code='',error_detail='{}'::jsonb
@@ -46,7 +46,7 @@ func (s *Server) startModExportHeartbeat(parent context.Context, jobID, runToken
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				tag, err := s.db.Exec(ctx, `update mod_export_jobs set heartbeat_at=now(),updated_at=now() where id=$1 and run_token=$2 and status in ('validating','importing')`, jobID, runToken)
+				tag, err := s.db.Exec(ctx, `update catalog_import_jobs set heartbeat_at=now(),updated_at=now() where id=$1 and run_token=$2 and status in ('validating','importing')`, jobID, runToken)
 				if err == nil && tag.RowsAffected() == 0 {
 					cancel(errModExportLeaseLost)
 					return
@@ -62,7 +62,7 @@ func (s *Server) startModExportHeartbeat(parent context.Context, jobID, runToken
 
 func (s *Server) updateModExportJob(ctx context.Context, jobID, runToken, status string, progress int, stage string) error {
 	tag, err := s.db.Exec(ctx, `
-		update mod_export_jobs
+		update catalog_import_jobs
 		set status=$3,progress=$4,current_stage=$5,heartbeat_at=now(),updated_at=now()
 		where id=$1 and run_token=$2`, jobID, runToken, status, progress, stage)
 	if err != nil {
@@ -80,7 +80,7 @@ func (s *Server) failModExportJob(jobID, runToken, code string, failure error) {
 	for attempt := 0; attempt < 4; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		tag, err := s.db.Exec(ctx, `
-			update mod_export_jobs
+			update catalog_import_jobs
 			set status='failed',error_code=$3,error_detail=$4::jsonb,finished_at=now(),heartbeat_at=now(),updated_at=now(),run_token=''
 			where id=$1 and run_token=$2`, jobID, runToken, code, string(detail))
 		cancel()
@@ -95,13 +95,13 @@ func (s *Server) failModExportJob(jobID, runToken, code string, failure error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, _ = s.db.Exec(ctx, `insert into mod_export_job_logs(job_id,level,stage,message) values($1,'error','failed',$2)`, jobID, failure.Error())
+	_, _ = s.db.Exec(ctx, `insert into catalog_import_job_logs(job_id,level,stage,message) values($1,'error','failed',$2)`, jobID, failure.Error())
 	s.notifyModExportResult(ctx, jobID, "failed", failure)
 }
 
 func (s *Server) recoverStaleModExportJobs(ctx context.Context) error {
 	_, err := s.db.Exec(ctx, `
-		update mod_export_jobs
+		update catalog_import_jobs
 		set status='queued',progress=0,current_stage='recovery',run_token='',heartbeat_at=null,
 			started_at=null,finished_at=null,error_code='',error_detail='{}'::jsonb,updated_at=now()
 		where status in ('validating','importing')
@@ -112,7 +112,7 @@ func (s *Server) recoverStaleModExportJobs(ctx context.Context) error {
 func (s *Server) markStalledModExportJob(ctx context.Context, jobID string, modID int64) (bool, error) {
 	detail, _ := json.Marshal(map[string]string{"message": "The import worker stopped updating this job. Retry the import."})
 	tag, err := s.db.Exec(ctx, `
-		update mod_export_jobs
+		update catalog_import_jobs
 		set status='failed',error_code='worker_stalled',error_detail=$3::jsonb,finished_at=now(),run_token='',updated_at=now()
 		where id=$1 and mod_id=$2 and status in ('validating','importing')
 		  and coalesce(heartbeat_at,updated_at) < now() - $4::interval`, jobID, modID, string(detail), pgInterval(modExportStaleAfter))
@@ -121,7 +121,7 @@ func (s *Server) markStalledModExportJob(ctx context.Context, jobID string, modI
 
 func (s *Server) resetModExportJobForRetry(ctx context.Context, jobID string, modID, actorID int64) (bool, error) {
 	tag, err := s.db.Exec(ctx, `
-		update mod_export_jobs
+		update catalog_import_jobs
 		set status='queued',progress=0,current_stage='recovery',error_code='',error_detail='{}'::jsonb,
 			created_by=$3,started_at=null,finished_at=null,heartbeat_at=null,run_token='',updated_at=now()
 		where id=$1 and mod_id=$2 and (
@@ -156,7 +156,7 @@ func (s *Server) cleanupModExportStaging(ctx context.Context, packageID string, 
 	if packageID == "" || modID <= 0 || runToken == "" {
 		return nil
 	}
-	_, err := s.db.Exec(ctx, `delete from mod_export_revisions where package_id=$1 and mod_id=$2 and status='staging' and import_run_token=$3`, packageID, modID, runToken)
+	_, err := s.db.Exec(ctx, `delete from catalog_import_revisions where package_id=$1 and mod_id=$2 and status='staging' and import_run_token=$3`, packageID, modID, runToken)
 	return err
 }
 

@@ -21,11 +21,14 @@ import (
 var blueprintFormats = map[string]bool{"nbt": true, "schem": true, "schematic": true, "litematic": true, "json": true}
 
 type blueprintContentSnapshot struct {
-	PublicID    string `json:"publicId"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	CoverFileID int64  `json:"coverFileId,omitempty"`
-	CoverKey    string `json:"coverObjectKey,omitempty"`
+	PublicID             string                    `json:"publicId"`
+	Title                string                    `json:"title"`
+	Description          string                    `json:"description"`
+	CoverFileID          int64                     `json:"coverFileId,omitempty"`
+	CoverKey             string                    `json:"coverObjectKey,omitempty"`
+	DefaultLocale        string                    `json:"defaultLocale,omitempty"`
+	Localizations        []catalogLocalizationEdit `json:"localizations,omitempty"`
+	ReplaceLocalizations bool                      `json:"replaceLocalizations,omitempty"`
 }
 
 type blueprintRequiredMod struct {
@@ -55,8 +58,22 @@ func (s *Server) createPendingBlueprint(ctx context.Context, ownerID int64, orig
 	title := strings.TrimSuffix(filepath.Base(originalName), filepath.Ext(originalName))
 	var id int64
 	var publicID string
-	err := s.db.QueryRow(ctx, `insert into blueprints(owner_id,title,source_format) values($1,$2,$3) returning id,public_id`, ownerID, title, format).Scan(&id, &publicID)
-	return id, publicID, err
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, "", err
+	}
+	defer tx.Rollback(ctx)
+	if err = tx.QueryRow(ctx, `insert into blueprints(owner_id,title,source_format) values($1,$2,$3) returning id,public_id`, ownerID, title, format).Scan(&id, &publicID); err != nil {
+		return 0, "", err
+	}
+	if _, err = tx.Exec(ctx, `insert into content_localizations(subject_public_id,subject_type,locale,name,provenance,editable,review_status,updated_by)
+		values($1,'blueprint','en',$2,'human',true,'approved',$3)`, publicID, title, ownerID); err != nil {
+		return 0, "", err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, "", err
+	}
+	return id, publicID, nil
 }
 
 func (s *Server) enqueueBlueprintJob(ctx context.Context, blueprintID, createdBy int64, operation, targetFormat string) (int64, error) {
@@ -340,15 +357,15 @@ func (s *Server) blueprintAssetRevisions(ctx context.Context, blueprintID int64)
 	rows, err := s.db.Query(ctx, `with namespaces as (
 		select distinct split_part(block_id,':',1) namespace from blueprint_materials where blueprint_id=$1
 	), paths as (
-		select revision.id revision_id,asset.asset_path from mod_export_revisions revision join namespaces on namespaces.namespace=revision.source_namespace
-		join mod_export_text_assets asset on asset.revision_id=revision.id where revision.is_active
-		union select revision.id,asset.asset_path from mod_export_revisions revision join namespaces on namespaces.namespace=revision.source_namespace
-		join mod_export_binary_assets asset on asset.revision_id=revision.id where revision.is_active
-		union select revision.id,asset.asset_path from mod_export_revisions revision join namespaces on namespaces.namespace=revision.source_namespace
-		join mod_export_media asset on asset.revision_id=revision.id where revision.is_active
+		select revision.id revision_id,asset.asset_path from catalog_import_revisions revision join namespaces on namespaces.namespace=revision.source_namespace
+		join catalog_import_text_assets asset on asset.revision_id=revision.id where revision.is_active
+		union select revision.id,asset.asset_path from catalog_import_revisions revision join namespaces on namespaces.namespace=revision.source_namespace
+		join catalog_import_binary_assets asset on asset.revision_id=revision.id where revision.is_active
+		union select revision.id,asset.asset_path from catalog_import_revisions revision join namespaces on namespaces.namespace=revision.source_namespace
+		join catalog_import_media asset on asset.revision_id=revision.id where revision.is_active
 	)
 	select paths.revision_id,mods.slug,array_agg(paths.asset_path order by paths.asset_path)
-	from paths join mod_export_revisions revision on revision.id=paths.revision_id
+	from paths join catalog_import_revisions revision on revision.id=paths.revision_id
 	join mods on mods.id=revision.mod_id
 	group by paths.revision_id,mods.slug order by paths.revision_id`, blueprintID)
 	if err != nil {
@@ -416,7 +433,7 @@ func (s *Server) blueprintMaterialRows(ctx context.Context, blueprintID int64, l
 		return nil, err
 	}
 	revisions := make(map[string]string)
-	revisionRows, revisionErr := s.db.Query(ctx, `select distinct on(source_namespace) source_namespace,id::text from mod_export_revisions
+	revisionRows, revisionErr := s.db.Query(ctx, `select distinct on(source_namespace) source_namespace,id::text from catalog_import_revisions
 		where is_active and status in ('ready','partial') order by source_namespace,coalesce(activated_at,created_at) desc`)
 	if revisionErr == nil {
 		defer revisionRows.Close()
@@ -523,8 +540,10 @@ func (s *Server) blueprintRenderData(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("publicId")))
 	var request struct {
-		Title       string `json:"title"`
-		Description string `json:"description"`
+		Title         string                    `json:"title"`
+		Description   string                    `json:"description"`
+		DefaultLocale string                    `json:"defaultLocale"`
+		Localizations []catalogLocalizationEdit `json:"localizations"`
 	}
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
@@ -534,6 +553,22 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 	if request.Title == "" || len([]rune(request.Title)) > 120 {
 		writeError(w, http.StatusBadRequest, "蓝图名称不能为空且不能超过 120 个字符")
 		return
+	}
+	replaceLocalizations := request.Localizations != nil
+	if replaceLocalizations {
+		var localizationErr error
+		request.DefaultLocale, request.Localizations, localizationErr = normalizeCatalogLocalizations(request.DefaultLocale, request.Localizations)
+		if localizationErr != nil || requireCatalogCreateDefaultLocalization(request.DefaultLocale, request.Localizations) != nil {
+			writeError(w, http.StatusBadRequest, "the default language must have a localized blueprint name")
+			return
+		}
+		for _, localization := range request.Localizations {
+			if localization.Locale == request.DefaultLocale {
+				request.Title = localization.Name
+				request.Description = localization.ContentMarkdown
+				break
+			}
+		}
 	}
 	ownerID, allowed := s.blueprintOwnerAccess(r, publicID)
 	if !allowed {
@@ -558,7 +593,9 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取蓝图版本失败")
 		return
 	}
-	snapshot, _ := json.Marshal(blueprintContentSnapshot{PublicID: publicID, Title: request.Title, Description: request.Description, CoverFileID: coverFileID, CoverKey: coverKey})
+	snapshotValue := blueprintContentSnapshot{PublicID: publicID, Title: request.Title, Description: request.Description, CoverFileID: coverFileID, CoverKey: coverKey,
+		DefaultLocale: request.DefaultLocale, Localizations: request.Localizations, ReplaceLocalizations: replaceLocalizations}
+	snapshot, _ := json.Marshal(snapshotValue)
 	var latestRevisionSource string
 	latestRevisionErr := tx.QueryRow(r.Context(), `select source from content_revisions where aggregate_type='blueprint' and aggregate_key=$1 order by revision_no desc limit 1`, publicID).Scan(&latestRevisionSource)
 	if latestRevisionErr != nil && !errors.Is(latestRevisionErr, pgx.ErrNoRows) {
@@ -598,7 +635,7 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "提交蓝图审核失败")
 			return
 		}
-	} else if _, err = tx.Exec(r.Context(), `update blueprints set title=$2,description_markdown=$3,published_revision_id=$4,review_status='approved',updated_at=now() where id=$1`, blueprintID, request.Title, request.Description, created.RevisionID); err != nil {
+	} else if err = applyBlueprintContentSnapshotTx(r.Context(), tx, blueprintID, created.RevisionID, currentClaims(r).Subject, snapshotValue); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存蓝图失败")
 		return
 	}
@@ -607,6 +644,41 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"updated": !reviewRequired, "reviewRequired": reviewRequired, "revisionId": created.RevisionID})
+}
+
+func applyBlueprintContentSnapshotTx(ctx context.Context, tx pgx.Tx, blueprintID, revisionID, actorID int64, snapshot blueprintContentSnapshot) error {
+	command, err := tx.Exec(ctx, `update blueprints set title=$2,description_markdown=$3,cover_file_id=nullif($4,0),cover_object_key=$5,
+		published_revision_id=$6,review_status='approved',updated_at=now() where id=$1`, blueprintID, snapshot.Title,
+		snapshot.Description, snapshot.CoverFileID, snapshot.CoverKey, revisionID)
+	if err != nil || command.RowsAffected() != 1 {
+		if err != nil {
+			return err
+		}
+		return errors.New("blueprint was not updated")
+	}
+	if !snapshot.ReplaceLocalizations {
+		return nil
+	}
+	if _, err = tx.Exec(ctx, `update content_subjects set default_locale=$2,updated_at=now()
+		where public_id=$1 and subject_type='blueprint'`, snapshot.PublicID, snapshot.DefaultLocale); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `delete from content_localizations where subject_public_id=$1 and subject_type='blueprint'`, snapshot.PublicID); err != nil {
+		return err
+	}
+	for _, localization := range snapshot.Localizations {
+		if _, err = tx.Exec(ctx, `insert into content_localizations(
+			subject_public_id,subject_type,locale,name,summary,content_markdown,provenance,editable,review_status,published_revision_id,updated_by)
+			values($1,'blueprint',$2,$3,$4,$5,'human',true,'approved',$6,$7)
+			on conflict(subject_public_id,subject_type,locale) do update set name=excluded.name,summary=excluded.summary,
+			content_markdown=excluded.content_markdown,provenance=case when content_localizations.provenance='ai' then 'human_corrected' else 'human' end,
+			editable=true,review_status='approved',published_revision_id=excluded.published_revision_id,
+			revision_no=content_localizations.revision_no+1,updated_by=excluded.updated_by,updated_at=now()`,
+			snapshot.PublicID, localization.Locale, localization.Name, localization.Summary, localization.ContentMarkdown, revisionID, actorID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) convertBlueprint(w http.ResponseWriter, r *http.Request) {
@@ -619,7 +691,7 @@ func (s *Server) convertBlueprint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	format := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(request.Format)), ".")
-	if format != "nbt" && format != "schem" {
+	if format != "nbt" && format != "schem" && format != "litematic" {
 		writeError(w, http.StatusBadRequest, "目前支持转换为 nbt 或 schem")
 		return
 	}
@@ -739,8 +811,8 @@ func (s *Server) catalogPublicTarget(ctx context.Context, entityType, entityKey 
 	case "resource", "structure", "document":
 		var revisionID, siteID, registry, kind string
 		err := s.db.QueryRow(ctx, `select snapshot.revision_id,mod.slug,snapshot.registry,resource.kind_code
-			from game_resources resource join game_resource_snapshots snapshot on snapshot.resource_id=resource.entity_id
-			join mod_export_revisions revision on revision.id=snapshot.revision_id and revision.is_active
+			from game_resources resource join resource_import_snapshots snapshot on snapshot.resource_id=resource.entity_id
+			join catalog_import_revisions revision on revision.id=snapshot.revision_id and revision.is_active
 			join mods mod on mod.id=revision.mod_id where resource.entity_id=$1 order by revision.activated_at desc nulls last limit 1`, entityKey).
 			Scan(&revisionID, &siteID, &registry, &kind)
 		if err != nil {

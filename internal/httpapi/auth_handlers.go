@@ -32,6 +32,7 @@ type registerRequest struct {
 	Country                  string `json:"country"`
 	Timezone                 string `json:"timezone"`
 	PreferredContentLanguage string `json:"preferredContentLanguage"`
+	SecondaryContentLanguage string `json:"secondaryContentLanguage"`
 	PreferredUILanguage      string `json:"preferredUILanguage"`
 }
 
@@ -61,8 +62,13 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
 	req.Country = strings.TrimSpace(req.Country)
 	req.Timezone = defaultString(strings.TrimSpace(req.Timezone), "Asia/Shanghai")
-	req.PreferredContentLanguage = defaultString(strings.TrimSpace(req.PreferredContentLanguage), "zh-CN")
+	req.PreferredContentLanguage = normalizeContentLocale(defaultString(strings.TrimSpace(req.PreferredContentLanguage), "zh-CN"))
+	req.SecondaryContentLanguage = normalizeContentLocale(defaultString(strings.TrimSpace(req.SecondaryContentLanguage), "en"))
 	req.PreferredUILanguage = defaultString(strings.TrimSpace(req.PreferredUILanguage), "en")
+	if !validContentLocaleTag(req.PreferredContentLanguage) || !validContentLocaleTag(req.SecondaryContentLanguage) {
+		writeError(w, http.StatusBadRequest, "content language preference is invalid")
+		return
+	}
 	if req.DisplayName == "" {
 		req.DisplayName = req.Username
 	}
@@ -99,10 +105,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		`insert into users (
 		     username, email, display_name, password_hash,
-		     country, timezone, preferred_content_language, preferred_ui_language,
+		     country, timezone, preferred_content_language, secondary_content_language, preferred_ui_language,
 		     registration_ip, registration_country_code, registration_city
 		 )
-		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 returning id, username, email, display_name, email_verified, status, created_at, last_login_at`,
 		req.Username,
 		req.Email,
@@ -111,6 +117,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		req.Country,
 		req.Timezone,
 		req.PreferredContentLanguage,
+		req.SecondaryContentLanguage,
 		req.PreferredUILanguage,
 		location.IP,
 		location.CountryCode,

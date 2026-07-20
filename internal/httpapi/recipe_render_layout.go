@@ -47,15 +47,12 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		coalesce(slot.visual_rect,'{}'::jsonb),coalesce(slot.data,'{}'::jsonb),
 		coalesce(binding.id,''),coalesce(binding.data,'{}'::jsonb),coalesce(binding.ingredient_present,false),coalesce(binding.clickable,false),
 		coalesce(binding.placeholder_item,''),coalesce(binding.item_tag_equivalent,''),coalesce(binding.semantic_role,''),
-		coalesce(binding.role_source,''),coalesce(binding.chance_available,false),binding.chance,binding.chance_percent,
-		coalesce(binding.chance_comparator,''),coalesce(binding.chance_source,''),coalesce(binding.chance_text,''),
-		coalesce(binding.chance_texts,'{}'::jsonb),coalesce(binding.chance_translation_key,''),
-		binding.chance_render_x,binding.chance_render_y,coalesce(binding.byproduct,false),
+		coalesce(binding.role_source,''),
 		coalesce(tag.entity_id,''),coalesce(tag.registry,''),coalesce(tag.canonical_id,'')
-		from recipe_snapshots snapshot
-		left join recipe_layout_templates template on template.id=snapshot.template_id
-		left join recipe_template_slots slot on slot.template_id=template.id
-		left join recipe_bindings binding on binding.recipe_snapshot_id=snapshot.id and binding.template_slot_id=slot.id
+		from recipe_import_snapshots snapshot
+		left join recipe_template_import_snapshots template on template.id=snapshot.template_id
+		left join recipe_template_import_slots slot on slot.template_id=template.id
+		left join recipe_import_bindings binding on binding.recipe_snapshot_id=snapshot.id and binding.template_slot_id=slot.id
 		left join catalog_tags tag on tag.entity_id=binding.tag_id
 		where snapshot.id=any($1::text[])
 		order by snapshot.id,slot.ordinal`, snapshotIDs)
@@ -68,23 +65,20 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		var sourceTemplateID, backgroundPath, coordinateSpace string
 		var slotDatabaseID, sourceSlotID, role, bindingID string
 		var placeholderItem, itemTagEquivalent, semanticRole, roleSource string
-		var chanceComparator, chanceSource, chanceText, chanceTranslationKey string
 		var tagEntityID, tagRegistry, tagCanonicalID string
 		var layoutAvailable, backgroundContainsIngredients, coordinatesAvailable bool
-		var ingredientPresent, clickable, chanceAvailable, byproduct bool
+		var ingredientPresent, clickable bool
 		var imageScale, slotOrdinal int
 		var ordered sql.NullBool
 		var width, height sql.NullInt64
-		var chance, chancePercent, chanceRenderX, chanceRenderY sql.NullFloat64
-		var parameters, sourceData, canvas, imagePixels, contentRect, rect, visualRect, slotData, bindingData, chanceTexts []byte
+		var parameters, sourceData, canvas, imagePixels, contentRect, rect, visualRect, slotData, bindingData []byte
 		if err = rows.Scan(&snapshotID, &layoutAvailable, &layoutKind, &ordered, &classificationSource, &width, &height,
 			&parameters, &originKind, &underlyingRecipeTypeID, &sourceModID, &sourceModVersion, &sourceModIDSource,
 			&renderLocale, &sourceData, &sourceTemplateID, &backgroundPath, &backgroundContainsIngredients, &coordinateSpace,
 			&imageScale, &canvas, &imagePixels, &contentRect, &slotDatabaseID, &sourceSlotID, &role, &slotOrdinal,
 			&coordinatesAvailable, &rect, &visualRect, &slotData, &bindingID, &bindingData, &ingredientPresent, &clickable,
-			&placeholderItem, &itemTagEquivalent, &semanticRole, &roleSource, &chanceAvailable, &chance, &chancePercent,
-			&chanceComparator, &chanceSource, &chanceText, &chanceTexts, &chanceTranslationKey,
-			&chanceRenderX, &chanceRenderY, &byproduct, &tagEntityID, &tagRegistry, &tagCanonicalID); err != nil {
+			&placeholderItem, &itemTagEquivalent, &semanticRole, &roleSource,
+			&tagEntityID, &tagRegistry, &tagCanonicalID); err != nil {
 			rows.Close()
 			return err
 		}
@@ -140,17 +134,13 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		slot["item_tag_equivalent"] = itemTagEquivalent
 		slot["semantic_role"] = semanticRole
 		slot["role_source"] = roleSource
-		slot["chance_available"] = chanceAvailable
-		slot["chance"] = nullableSQLFloat(chance)
-		slot["chance_percent"] = nullableSQLFloat(chancePercent)
-		slot["chance_comparator"] = chanceComparator
-		slot["chance_source"] = chanceSource
-		slot["chance_text"] = chanceText
-		slot["chance_texts"] = decodeJSONObject(chanceTexts)
-		slot["chance_translation_key"] = chanceTranslationKey
-		slot["chance_render_x"] = nullableSQLFloat(chanceRenderX)
-		slot["chance_render_y"] = nullableSQLFloat(chanceRenderY)
-		slot["byproduct"] = byproduct
+		// Probability is an attribute of each output item. The exporter source
+		// stores it beside the slot, so remove those raw keys here and attach the
+		// normalized values to each candidate in the query below.
+		for _, key := range []string{"chance_available", "chance", "chance_percent", "chance_comparator", "chance_source",
+			"chance_text", "chance_texts", "chance_translation_key", "chance_render_x", "chance_render_y", "byproduct"} {
+			delete(slot, key)
+		}
 		slot["alternatives"] = []any{}
 		if tagCanonicalID != "" {
 			slot["tag"] = tagCanonicalID
@@ -183,8 +173,9 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		bindingIDs = append(bindingIDs, bindingID)
 	}
 	alternativeRows, err := s.db.Query(ctx, `select binding_id,alternative_index,raw_resource_id,amount,
-		ingredient_kind,ingredient_type,unique_id,nbt_snbt,data
-		from recipe_binding_alternatives where binding_id=any($1::text[])
+		ingredient_kind,ingredient_type,unique_id,nbt_snbt,chance_available,chance,chance_percent,
+		chance_comparator,chance_source,chance_text,chance_texts,chance_translation_key,chance_render_x,chance_render_y,byproduct,data
+		from recipe_import_binding_candidates where binding_id=any($1::text[])
 		order by binding_id,alternative_index`, bindingIDs)
 	if err != nil {
 		return err
@@ -192,11 +183,16 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 	defer alternativeRows.Close()
 	for alternativeRows.Next() {
 		var bindingID, resourceID, ingredientKind, ingredientType, uniqueID, nbtSNBT string
+		var chanceComparator, chanceSource, chanceText, chanceTranslationKey string
 		var alternativeIndex int
 		var amount float64
-		var data []byte
+		var chanceAvailable, byproduct bool
+		var chance, chancePercent, chanceRenderX, chanceRenderY sql.NullFloat64
+		var chanceTexts, data []byte
 		if err = alternativeRows.Scan(&bindingID, &alternativeIndex, &resourceID, &amount, &ingredientKind,
-			&ingredientType, &uniqueID, &nbtSNBT, &data); err != nil {
+			&ingredientType, &uniqueID, &nbtSNBT, &chanceAvailable, &chance, &chancePercent,
+			&chanceComparator, &chanceSource, &chanceText, &chanceTexts, &chanceTranslationKey,
+			&chanceRenderX, &chanceRenderY, &byproduct, &data); err != nil {
 			return err
 		}
 		slot := bindingStates[bindingID]
@@ -211,6 +207,17 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		alternative["ingredient_type"] = ingredientType
 		alternative["unique_id"] = uniqueID
 		alternative["nbt_snbt"] = nbtSNBT
+		alternative["chance_available"] = chanceAvailable
+		alternative["chance"] = nullableSQLFloat(chance)
+		alternative["chance_percent"] = nullableSQLFloat(chancePercent)
+		alternative["chance_comparator"] = chanceComparator
+		alternative["chance_source"] = chanceSource
+		alternative["chance_text"] = chanceText
+		alternative["chance_texts"] = decodeJSONObject(chanceTexts)
+		alternative["chance_translation_key"] = chanceTranslationKey
+		alternative["chance_render_x"] = nullableSQLFloat(chanceRenderX)
+		alternative["chance_render_y"] = nullableSQLFloat(chanceRenderY)
+		alternative["byproduct"] = byproduct
 		alternatives, _ := slot["alternatives"].([]any)
 		slot["alternatives"] = append(alternatives, alternative)
 	}

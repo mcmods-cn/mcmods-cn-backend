@@ -21,6 +21,7 @@ const (
 	aiTaskPermissionTranslation   = "permission_translation_completion"
 	aiTaskI18nTranslation         = "i18n_translation_completion"
 	aiTaskNotificationTranslation = "notification_translation_completion"
+	aiTaskContentTranslation      = "content_translation_completion"
 )
 
 type aiTaskDefinition struct {
@@ -33,6 +34,7 @@ var registeredAITaskDefinitions = []aiTaskDefinition{
 	{TaskType: aiTaskPermissionTranslation, ConcurrencyLimit: 2, TimeoutSeconds: 120},
 	{TaskType: aiTaskI18nTranslation, ConcurrencyLimit: 2, TimeoutSeconds: 120},
 	{TaskType: aiTaskNotificationTranslation, ConcurrencyLimit: 4, TimeoutSeconds: 90},
+	{TaskType: aiTaskContentTranslation, ConcurrencyLimit: 4, TimeoutSeconds: 120},
 }
 
 type aiConfigPayload struct {
@@ -194,6 +196,12 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 	}
 	if taskType == aiTaskNotificationTranslation && createdBy > 0 {
 		worker.persistNotificationTranslation(ctx, createdBy, rawPayload, result)
+	}
+	if taskType == aiTaskContentTranslation {
+		if err = worker.persistCatalogContentTranslation(ctx, msg.TaskID, createdBy, rawPayload, result); err != nil {
+			worker.failTask(ctx, msg.TaskID, err)
+			return err
+		}
 	}
 	worker.writeTaskLog(ctx, msg.TaskID, "info", "task_completed", "AI task completed by placeholder executor", map[string]any{
 		"durationMs": time.Since(started).Milliseconds(),

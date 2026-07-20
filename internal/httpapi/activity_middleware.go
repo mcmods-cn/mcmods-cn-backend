@@ -151,6 +151,8 @@ func inferredActivityObject(path string) int16 {
 		return activity.ObjectRecipe
 	case strings.Contains(path, "/mod-tags"):
 		return activity.ObjectTag
+	case strings.Contains(path, "/catalog/resources"):
+		return activity.ObjectResource
 	case strings.Contains(path, "/blueprints"):
 		return activity.ObjectBlueprint
 	case strings.Contains(path, "/authors"):

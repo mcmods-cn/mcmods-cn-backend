@@ -50,7 +50,8 @@ func (worker *AIWorker) executeTask(
 	modelID string,
 	rawPayload []byte,
 ) (map[string]any, aiTaskUsage, error) {
-	if taskType != aiTaskPermissionTranslation && taskType != aiTaskI18nTranslation && taskType != aiTaskNotificationTranslation {
+	if taskType != aiTaskPermissionTranslation && taskType != aiTaskI18nTranslation &&
+		taskType != aiTaskNotificationTranslation && taskType != aiTaskContentTranslation {
 		return nil, aiTaskUsage{}, fmt.Errorf("unsupported AI task type: %s", taskType)
 	}
 	cfg := aiConfigFromDatabase(ctx, worker.db)

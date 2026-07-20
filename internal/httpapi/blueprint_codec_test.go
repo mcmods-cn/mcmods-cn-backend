@@ -15,7 +15,7 @@ func TestBlueprintCodecRoundTrips(t *testing.T) {
 		},
 	}
 
-	for _, format := range []string{"nbt", "schem"} {
+	for _, format := range []string{"nbt", "schem", "litematic"} {
 		t.Run(format, func(t *testing.T) {
 			encoded, _, err := encodeBlueprint(document, format)
 			if err != nil {

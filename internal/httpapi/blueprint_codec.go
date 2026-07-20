@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Tnze/go-mc/nbt"
 )
@@ -309,9 +310,98 @@ func encodeBlueprint(document blueprintDocument, format string) ([]byte, string,
 		return encodeVanillaStructure(document)
 	case "schem":
 		return encodeSpongeSchematic(document)
+	case "litematic":
+		return encodeLitematic(document)
 	default:
 		return nil, "", fmt.Errorf("unsupported target format %q", format)
 	}
+}
+
+func encodeLitematic(document blueprintDocument) ([]byte, string, error) {
+	if document.Size[0] <= 0 || document.Size[1] <= 0 || document.Size[2] <= 0 {
+		return nil, "", errors.New("blueprint dimensions are invalid")
+	}
+	palette := []blueprintBlockState{{ID: "minecraft:air"}}
+	lookup := map[string]int{"minecraft:air": 0}
+	volume := document.Size[0] * document.Size[1] * document.Size[2]
+	indices := make([]int, volume)
+	for _, block := range document.Blocks {
+		x, y, z := block.Position[0], block.Position[1], block.Position[2]
+		if x < 0 || y < 0 || z < 0 || x >= document.Size[0] || y >= document.Size[1] || z >= document.Size[2] {
+			continue
+		}
+		key := formatBlockState(block.State)
+		paletteIndex, exists := lookup[key]
+		if !exists {
+			paletteIndex = len(palette)
+			lookup[key] = paletteIndex
+			palette = append(palette, block.State)
+		}
+		indices[x+z*document.Size[0]+y*document.Size[0]*document.Size[2]] = paletteIndex
+	}
+	paletteNBT := make([]map[string]any, 0, len(palette))
+	for _, state := range palette {
+		entry := map[string]any{"Name": state.ID}
+		if len(state.Properties) > 0 {
+			entry["Properties"] = state.Properties
+		}
+		paletteNBT = append(paletteNBT, entry)
+	}
+	bits := maxInt(2, int(math.Ceil(math.Log2(float64(len(palette))))))
+	packed := packLitematicValues(indices, bits)
+	regionSize := map[string]any{"x": int32(document.Size[0]), "y": int32(document.Size[1]), "z": int32(document.Size[2])}
+	region := map[string]any{
+		"BlockStatePalette": paletteNBT,
+		"BlockStates":       packed,
+		"Entities":          []map[string]any{},
+		"PendingBlockTicks": []map[string]any{},
+		"PendingFluidTicks": []map[string]any{},
+		"Position":          map[string]any{"x": int32(0), "y": int32(0), "z": int32(0)},
+		"Size":              regionSize,
+		"TileEntities":      []map[string]any{},
+	}
+	now := time.Now().UnixMilli()
+	name := strings.TrimSpace(document.Name)
+	if name == "" {
+		name = "Mcmods blueprint"
+	}
+	root := map[string]any{
+		"Version":              int32(6),
+		"SubVersion":           int32(1),
+		"MinecraftDataVersion": int32(document.DataVersion),
+		"Metadata": map[string]any{
+			"Author":        "mcmods.cn",
+			"Description":   "Converted by mcmods.cn",
+			"EnclosingSize": regionSize,
+			"Name":          name,
+			"RegionCount":   int32(1),
+			"TimeCreated":   now,
+			"TimeModified":  now,
+			"TotalBlocks":   int32(len(document.Blocks)),
+			"TotalVolume":   int32(volume),
+		},
+		"Regions": map[string]any{"Main": region},
+	}
+	return encodeGzipNBT(root, "Litematic")
+}
+
+func packLitematicValues(values []int, bits int) []int64 {
+	if len(values) == 0 || bits <= 0 {
+		return []int64{}
+	}
+	result := make([]int64, (len(values)*bits+63)/64)
+	mask := uint64((uint64(1) << bits) - 1)
+	for index, raw := range values {
+		value := uint64(raw) & mask
+		bitIndex := index * bits
+		word := bitIndex / 64
+		offset := bitIndex % 64
+		result[word] = int64(uint64(result[word]) | value<<offset)
+		if offset+bits > 64 {
+			result[word+1] = int64(uint64(result[word+1]) | value>>(64-offset))
+		}
+	}
+	return result
 }
 
 func encodeVanillaStructure(document blueprintDocument) ([]byte, string, error) {

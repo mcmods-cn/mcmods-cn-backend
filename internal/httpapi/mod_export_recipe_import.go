@@ -2,9 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"sort"
 	"strings"
@@ -110,6 +112,20 @@ type exportJEITemplateSlot struct {
 	CoordinatesAvailable bool            `json:"coordinates_available"`
 	Rect                 json.RawMessage `json:"rect"`
 	VisualRect           json.RawMessage `json:"visual_rect"`
+}
+
+type exportJEIRect struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+type exportJEICanvas struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  int     `json:"width"`
+	Height int     `json:"height"`
 }
 
 type exportJEIRecipeCollection struct {
@@ -229,7 +245,7 @@ func importExportRecipeTypes(ctx context.Context, tx pgx.Tx, packageID string, r
 		batch.Queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'recipe_type','active')
 			on conflict(id) do update set status='active',updated_at=now()`, identity.ID, identity.PublicID)
 		batch.Queue(`insert into recipe_types(entity_id,canonical_id) values($1,$2) on conflict(canonical_id) do nothing`, identity.ID, category.RecipeTypeID)
-		batch.Queue(`insert into recipe_type_snapshots(id,recipe_type_id,revision_id,title_translation_key,title_names,width,height,
+		batch.Queue(`insert into recipe_type_import_snapshots(id,recipe_type_id,revision_id,title_translation_key,title_names,width,height,
 			image_scale,canvas,catalysts,recipe_count,exported_recipe_count,template_count,background_count,
 			template_collection_path,recipe_collection_path)
 			values($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15,$16)
@@ -281,10 +297,10 @@ func importExportRecipeTypes(ctx context.Context, tx pgx.Tx, packageID string, r
 		batch.Queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'recipe','active')
 			on conflict(id) do update set status='active',updated_at=now()`, recipeIdentityValue.ID, recipeIdentityValue.PublicID)
 		batch.Queue(`insert into recipes(entity_id,recipe_type_id,canonical_source_id,semantic_fingerprint,owner_mod_id,identity_source)
-			select $1,$2,$3,$4,revision.mod_id,$5 from mod_export_revisions revision where revision.id=$6
+			select $1,$2,$3,$4,revision.mod_id,$5 from catalog_import_revisions revision where revision.id=$6
 			on conflict(entity_id) do update set semantic_fingerprint=excluded.semantic_fingerprint`, recipeIdentityValue.ID,
 			typeIdentity.ID, canonicalSourceID, sha256Hex(fingerprintRaw), recipeIndex.RecipeIDSource, revisionID)
-		batch.Queue(`insert into recipe_snapshots(id,recipe_id,revision_id,source_recipe_id,source_id_kind,source_recipe_key,
+		batch.Queue(`insert into recipe_import_snapshots(id,recipe_id,revision_id,source_recipe_id,source_id_kind,source_recipe_key,
 			recipe_collection_path,origin_kind,underlying_recipe_type_id,source_mod_id,source_mod_version,source_mod_id_source,
 			render_locale,source_data,template_id,layout_available,layout_kind,ordered,layout_classification_source,width,height,parameters,binding_count)
 			values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'',$13::jsonb,null,false,$14,$15,$16,$17,$18,'{}'::jsonb,0)
@@ -333,6 +349,90 @@ func decodeExportJEITemplateCollection(raw []byte) (exportJEITemplateCollection,
 	return document, nil
 }
 
+func canonicalImportedTemplateCanvas(document exportJEITemplateCollection) (exportJEICanvas, error) {
+	var canvas exportJEICanvas
+	if err := json.Unmarshal(document.Canvas, &canvas); err != nil {
+		return canvas, fmt.Errorf("decode JEI template canvas: %w", err)
+	}
+	if canvas.Width <= 0 || canvas.Width > 8192 || canvas.Height <= 0 || canvas.Height > 8192 || document.ImageScale < 1 || document.ImageScale > 32 {
+		return canvas, errors.New("JEI template collection has an invalid canonical canvas")
+	}
+	return canvas, nil
+}
+
+func canonicalImportedTemplateSlotRole(sourceRole string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(sourceRole)) {
+	case "input":
+		return "input", true
+	case "output", "byproduct":
+		return "output", true
+	case "catalyst":
+		return "catalyst", true
+	default:
+		// render_only and unknown JEI roles remain in the immutable import
+		// observation and template definition, but they are not selectable
+		// ingredient slots in the canonical editor.
+		return "", false
+	}
+}
+
+func canonicalImportedTemplateSlotRect(slot exportJEITemplateSlot, canvas exportJEICanvas, ordinal int) (exportJEIRect, error) {
+	var rect exportJEIRect
+	if len(slot.Rect) > 0 && json.Unmarshal(slot.Rect, &rect) == nil {
+		rect.X -= canvas.X
+		rect.Y -= canvas.Y
+		if !math.IsNaN(rect.X) && !math.IsNaN(rect.Y) && !math.IsNaN(rect.Width) && !math.IsNaN(rect.Height) &&
+			!math.IsInf(rect.X, 0) && !math.IsInf(rect.Y, 0) && !math.IsInf(rect.Width, 0) && !math.IsInf(rect.Height, 0) &&
+			rect.X >= 0 && rect.Y >= 0 && rect.Width > 0 && rect.Height > 0 &&
+			rect.X+rect.Width <= float64(canvas.Width) && rect.Y+rect.Height <= float64(canvas.Height) {
+			return rect, nil
+		}
+	}
+	if slot.CoordinatesAvailable {
+		return rect, fmt.Errorf("JEI template slot %s has invalid canonical coordinates", slot.SlotID)
+	}
+	// Some JEI plugins expose a logical ingredient without coordinates. Keep
+	// it editable by placing a deterministic 16px placeholder inside the
+	// canvas; the unavailable source geometry is retained in definition.
+	size := math.Min(16, math.Min(float64(canvas.Width), float64(canvas.Height)))
+	if size <= 0 {
+		return rect, fmt.Errorf("JEI template slot %s has no usable canvas", slot.SlotID)
+	}
+	columns := max(1, canvas.Width/18)
+	rect = exportJEIRect{X: float64((ordinal % columns) * 18), Y: float64((ordinal / columns) * 18), Width: size, Height: size}
+	if rect.X+rect.Width > float64(canvas.Width) {
+		rect.X = float64(canvas.Width) - rect.Width
+	}
+	if rect.Y+rect.Height > float64(canvas.Height) {
+		rect.Y = float64(canvas.Height) - rect.Height
+	}
+	return rect, nil
+}
+
+func canonicalImportedTemplateDefinition(document exportJEITemplateCollection, template exportJEITemplate, snapshotID, revisionID, collectionPath string) string {
+	value := map[string]any{
+		"source": "import",
+		"import": map[string]any{
+			"snapshotId": snapshotID, "revisionId": revisionID, "schemaVersion": template.SchemaVersion,
+			"templateCollectionPath": collectionPath, "backgroundPath": template.Background,
+			"backgroundContainsIngredients": template.BackgroundContainsIngredients, "coordinateSpace": document.CoordinateSpace,
+			"canvas": jsonValue(document.Canvas), "imagePixels": jsonValue(document.ImagePixels), "contentRect": jsonValue(document.Content),
+			"sourceSlotCount": len(template.Slots),
+		},
+	}
+	raw, _ := json.Marshal(value)
+	return string(raw)
+}
+
+func canonicalImportedTemplateSlotDefinition(slot exportJEITemplateSlot, snapshotID string) string {
+	value := map[string]any{
+		"source": "import", "importSnapshotId": snapshotID, "sourceRole": slot.Role, "jeiRole": slot.JEIRole,
+		"coordinatesAvailable": slot.CoordinatesAvailable, "sourceRect": jsonValue(slot.Rect), "visualRect": jsonValue(slot.VisualRect),
+	}
+	raw, _ := json.Marshal(value)
+	return string(raw)
+}
+
 func queueExportJEITemplateCollection(batch *modExportWriteBatch, revisions map[string]string, name string, document exportJEITemplateCollection) error {
 	recipeTypeID := strings.TrimSpace(document.RecipeTypeID)
 	revisionID := exportRevisionForRecipeType(revisions, recipeTypeID)
@@ -341,6 +441,10 @@ func queueExportJEITemplateCollection(batch *modExportWriteBatch, revisions map[
 	}
 	typeIdentity := recipeTypeIdentity(recipeTypeID)
 	typeSnapshotID := catalogSnapshotID("recipe-type", revisionID, typeIdentity.ID, "")
+	canvas, err := canonicalImportedTemplateCanvas(document)
+	if err != nil {
+		return fmt.Errorf("JEI template collection %s: %w", recipeTypeID, err)
+	}
 	seenTemplates := make(map[string]struct{}, len(document.Templates))
 	seenBackgrounds := make(map[string]struct{}, len(document.Templates))
 	for _, template := range document.Templates {
@@ -363,17 +467,49 @@ func queueExportJEITemplateCollection(batch *modExportWriteBatch, revisions map[
 		}
 		seenBackgrounds[template.Background] = struct{}{}
 		templateID := exportRecipeTemplateID(revisionID, recipeTypeID, template.TemplateID)
-		batch.queue(`insert into recipe_layout_templates(id,recipe_type_snapshot_id,revision_id,recipe_type_id,source_template_id,
+		canonicalIdentity := catalogEditorIdentityForTemplate(typeIdentity.ID, template.TemplateID)
+		batch.queue(`insert into catalog_entities(id,public_id,entity_type,status)
+			select $1,$2,'recipe_template',case when revision.is_active then 'active' else 'placeholder' end
+			from catalog_import_revisions revision where revision.id=$3
+			on conflict(id) do update set status='active',updated_at=now()
+			where excluded.status='active' and catalog_entities.status='placeholder'
+			and catalog_entities.published_revision_id is null`, 0, canonicalIdentity.ID, canonicalIdentity.PublicID, revisionID)
+		batch.queue(`insert into recipe_template_import_snapshots(id,recipe_type_snapshot_id,revision_id,recipe_type_id,canonical_template_id,source_template_id,
 			schema_version,template_collection_path,background_path,background_contains_ingredients,coordinate_space,image_scale,
 			canvas,image_pixels,content_rect,slot_count)
-			values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14::jsonb,$15)
+			values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15::jsonb,$16)
 			on conflict(recipe_type_snapshot_id,source_template_id) do update set background_path=excluded.background_path,
 			background_contains_ingredients=excluded.background_contains_ingredients,coordinate_space=excluded.coordinate_space,
 			image_scale=excluded.image_scale,canvas=excluded.canvas,image_pixels=excluded.image_pixels,
-			content_rect=excluded.content_rect,slot_count=excluded.slot_count`, int64(len(document.Canvas)+len(document.ImagePixels)+len(document.Content)),
-			templateID, typeSnapshotID, revisionID, typeIdentity.ID, template.TemplateID, template.SchemaVersion, name,
+			content_rect=excluded.content_rect,slot_count=excluded.slot_count,canonical_template_id=excluded.canonical_template_id`, int64(len(document.Canvas)+len(document.ImagePixels)+len(document.Content)),
+			templateID, typeSnapshotID, revisionID, typeIdentity.ID, canonicalIdentity.ID, template.TemplateID, template.SchemaVersion, name,
 			template.Background, template.BackgroundContainsIngredients, document.CoordinateSpace, max(1, document.ImageScale),
 			nonEmptyJSON(document.Canvas, `{}`), nonEmptyJSON(document.ImagePixels, `{}`), nonEmptyJSON(document.Content, `{}`), len(template.Slots))
+		definition := canonicalImportedTemplateDefinition(document, template, templateID, revisionID, name)
+		batch.queue(`insert into recipe_layout_templates(entity_id,recipe_type_id,template_key,import_snapshot_id,background_file_id,
+			canvas_width,canvas_height,image_scale,definition,published_revision_id,updated_by)
+			select $1,$2,$3,$4,null,$5,$6,$7,$8::jsonb,null,null from catalog_entities entity
+			where entity.id=$1 and entity.status='active' and entity.published_revision_id is null
+			and exists(select 1 from catalog_import_revisions revision where revision.id=$9 and revision.is_active)
+			on conflict(entity_id) do update set recipe_type_id=excluded.recipe_type_id,template_key=excluded.template_key,
+			import_snapshot_id=excluded.import_snapshot_id,background_file_id=null,canvas_width=excluded.canvas_width,
+			canvas_height=excluded.canvas_height,image_scale=excluded.image_scale,definition=excluded.definition,updated_by=null,updated_at=now()
+			where recipe_layout_templates.published_revision_id is null and exists(
+				select 1 from catalog_entities entity where entity.id=recipe_layout_templates.entity_id
+				and entity.published_revision_id is null and entity.status='active')`, int64(len(definition)),
+			canonicalIdentity.ID, typeIdentity.ID, template.TemplateID, templateID, canvas.Width, canvas.Height, document.ImageScale, definition, revisionID)
+		batch.queue(`update recipe_template_slots slot set ordinal=slot.ordinal+1000000
+			where slot.template_id=$1 and exists(select 1 from recipe_layout_templates template
+				join catalog_entities entity on entity.id=template.entity_id where template.entity_id=$1
+				and template.published_revision_id is null and template.import_snapshot_id is not null
+				and entity.published_revision_id is null and entity.status='active')
+			and exists(select 1 from catalog_import_revisions revision where revision.id=$2 and revision.is_active)`, 0, canonicalIdentity.ID, revisionID)
+		batch.queue(`delete from recipe_template_slots slot where slot.template_id=$1
+			and not exists(select 1 from recipe_bindings binding where binding.template_slot_id=slot.id)
+			and exists(select 1 from recipe_layout_templates template join catalog_entities entity on entity.id=template.entity_id
+				where template.entity_id=$1 and template.published_revision_id is null and template.import_snapshot_id is not null
+				and entity.published_revision_id is null and entity.status='active')
+			and exists(select 1 from catalog_import_revisions revision where revision.id=$2 and revision.is_active)`, 0, canonicalIdentity.ID, revisionID)
 		seenSlots := make(map[string]struct{}, len(template.Slots))
 		for ordinal, slot := range template.Slots {
 			slot.SlotID = strings.TrimSpace(slot.SlotID)
@@ -387,16 +523,137 @@ func queueExportJEITemplateCollection(batch *modExportWriteBatch, revisions map[
 			seenSlots[slot.SlotID] = struct{}{}
 			slotID := exportRecipeTemplateSlotID(templateID, slot.SlotID)
 			slotData, _ := json.Marshal(slot)
-			batch.queue(`insert into recipe_template_slots(id,template_id,source_slot_id,role,jei_role,output_index,ordinal,coordinates_available,rect,visual_rect,data)
+			batch.queue(`insert into recipe_template_import_slots(id,template_id,source_slot_id,role,jei_role,output_index,ordinal,coordinates_available,rect,visual_rect,data)
 				values($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb)
 				on conflict(template_id,source_slot_id) do update set role=excluded.role,jei_role=excluded.jei_role,
 				output_index=excluded.output_index,ordinal=excluded.ordinal,
 				coordinates_available=excluded.coordinates_available,rect=excluded.rect,visual_rect=excluded.visual_rect,data=excluded.data`,
 				int64(len(slotData)), slotID, templateID, slot.SlotID, slot.Role, slot.JEIRole, slot.OutputIndex, ordinal, slot.CoordinatesAvailable,
 				nonEmptyJSON(slot.Rect, `{}`), nonEmptyJSON(slot.VisualRect, `{}`), string(slotData))
+			canonicalRole, editable := canonicalImportedTemplateSlotRole(slot.Role)
+			if !editable {
+				continue
+			}
+			rect, rectErr := canonicalImportedTemplateSlotRect(slot, canvas, ordinal)
+			if rectErr != nil {
+				return fmt.Errorf("JEI template %s: %w", template.TemplateID, rectErr)
+			}
+			canonicalSlotID := catalogSnapshotID("canonical-template-slot", "stable", canonicalIdentity.ID, slot.SlotID)
+			slotDefinition := canonicalImportedTemplateSlotDefinition(slot, templateID)
+			batch.queue(`insert into recipe_template_slots(id,template_id,slot_key,role,output_index,ordinal,x,y,width,height,definition)
+				select $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb from recipe_layout_templates template
+				join catalog_entities entity on entity.id=template.entity_id where template.entity_id=$2
+				and template.published_revision_id is null and template.import_snapshot_id is not null
+				and entity.published_revision_id is null and entity.status='active'
+				and exists(select 1 from catalog_import_revisions revision where revision.id=$12 and revision.is_active)
+				on conflict(template_id,slot_key) do update set
+				role=case when exists(select 1 from recipe_bindings binding where binding.template_slot_id=recipe_template_slots.id)
+					then recipe_template_slots.role else excluded.role end,
+				output_index=case when exists(select 1 from recipe_bindings binding where binding.template_slot_id=recipe_template_slots.id)
+					then recipe_template_slots.output_index else excluded.output_index end,
+				ordinal=excluded.ordinal,x=excluded.x,y=excluded.y,width=excluded.width,height=excluded.height,
+				definition=excluded.definition`, int64(len(slotDefinition)), canonicalSlotID, canonicalIdentity.ID, slot.SlotID,
+				canonicalRole, slot.OutputIndex, ordinal, rect.X, rect.Y, rect.Width, rect.Height, slotDefinition, revisionID)
 		}
 	}
 	return nil
+}
+
+type importedRecipeTemplatePromotion struct {
+	RecipeTypeID                  string
+	SchemaVersion                 string
+	TemplateCollectionPath        string
+	SourceTemplateID              string
+	BackgroundPath                string
+	BackgroundContainsIngredients bool
+	CoordinateSpace               string
+	ImageScale                    int
+	Canvas                        json.RawMessage
+	ImagePixels                   json.RawMessage
+	ContentRect                   json.RawMessage
+	Slots                         []exportJEITemplateSlot
+}
+
+// promoteImportedRecipeTemplatesTx replays normalized observations only after
+// a revision becomes active. Pending/rejected imports therefore never replace
+// the public canonical editor state, while manual publication remains protected
+// by the published_revision_id guards in queueExportJEITemplateCollection.
+func promoteImportedRecipeTemplatesTx(ctx context.Context, tx pgx.Tx, revisionID string) error {
+	rows, err := tx.Query(ctx, `select recipe_type.canonical_id,snapshot.schema_version,snapshot.template_collection_path,
+		snapshot.source_template_id,snapshot.background_path,snapshot.background_contains_ingredients,
+		snapshot.coordinate_space,snapshot.image_scale,snapshot.canvas,snapshot.image_pixels,snapshot.content_rect
+		from recipe_template_import_snapshots snapshot
+		join catalog_import_revisions revision on revision.id=snapshot.revision_id
+		join recipe_types recipe_type on recipe_type.entity_id=snapshot.recipe_type_id
+		where snapshot.revision_id=$1 and revision.is_active and revision.status in ('ready','partial')
+		order by recipe_type.canonical_id,snapshot.source_template_id`, revisionID)
+	if err != nil {
+		return err
+	}
+	promotions := []importedRecipeTemplatePromotion{}
+	for rows.Next() {
+		var promotion importedRecipeTemplatePromotion
+		if err = rows.Scan(&promotion.RecipeTypeID, &promotion.SchemaVersion, &promotion.TemplateCollectionPath,
+			&promotion.SourceTemplateID, &promotion.BackgroundPath, &promotion.BackgroundContainsIngredients,
+			&promotion.CoordinateSpace, &promotion.ImageScale, &promotion.Canvas, &promotion.ImagePixels, &promotion.ContentRect); err != nil {
+			rows.Close()
+			return err
+		}
+		promotions = append(promotions, promotion)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	batch := newModExportWriteBatch()
+	for index := range promotions {
+		promotion := &promotions[index]
+		templateSnapshotID := exportRecipeTemplateID(revisionID, promotion.RecipeTypeID, promotion.SourceTemplateID)
+		slotRows, slotErr := tx.Query(ctx, `select source_slot_id,role,jei_role,output_index,coordinates_available,rect,visual_rect
+			from recipe_template_import_slots where template_id=$1 order by ordinal`, templateSnapshotID)
+		if slotErr != nil {
+			return slotErr
+		}
+		for slotRows.Next() {
+			var slot exportJEITemplateSlot
+			var outputIndex sql.NullInt64
+			if slotErr = slotRows.Scan(&slot.SlotID, &slot.Role, &slot.JEIRole, &outputIndex, &slot.CoordinatesAvailable,
+				&slot.Rect, &slot.VisualRect); slotErr != nil {
+				slotRows.Close()
+				return slotErr
+			}
+			if outputIndex.Valid {
+				value := int(outputIndex.Int64)
+				slot.OutputIndex = &value
+			}
+			promotion.Slots = append(promotion.Slots, slot)
+		}
+		if slotErr = slotRows.Err(); slotErr != nil {
+			slotRows.Close()
+			return slotErr
+		}
+		slotRows.Close()
+		document := exportJEITemplateCollection{
+			SchemaVersion: "mcmods-jei-template-collection/v2", RecipeTypeID: promotion.RecipeTypeID,
+			CoordinateSpace: promotion.CoordinateSpace, ImageScale: promotion.ImageScale, Canvas: promotion.Canvas,
+			ImagePixels: promotion.ImagePixels, Content: promotion.ContentRect, TemplateCount: 1,
+			Templates: []exportJEITemplate{{SchemaVersion: promotion.SchemaVersion, TemplateID: promotion.SourceTemplateID,
+				Background: promotion.BackgroundPath, BackgroundContainsIngredients: promotion.BackgroundContainsIngredients,
+				SlotCount: len(promotion.Slots), Slots: promotion.Slots}},
+		}
+		revisions := map[string]string{exportResourceNamespace(promotion.RecipeTypeID): revisionID}
+		if err = queueExportJEITemplateCollection(batch, revisions, promotion.TemplateCollectionPath, document); err != nil {
+			return err
+		}
+		if batch.shouldFlush() {
+			if err = batch.flush(ctx, tx); err != nil {
+				return err
+			}
+		}
+	}
+	return batch.flush(ctx, tx)
 }
 
 func decodeExportJEIRecipeCollection(raw []byte) (exportJEIRecipeCollection, error) {
@@ -419,7 +676,7 @@ func decodeExportJEIRecipeCollection(raw []byte) (exportJEIRecipeCollection, err
 	return document, nil
 }
 
-func queueExportJEIRecipeCollection(batch *modExportWriteBatch, packageID string, revisions map[string]string, name string, document exportJEIRecipeCollection) error {
+func queueExportJEIRecipeCollection(batch *modExportWriteBatch, resolver catalogResourceIdentityResolver, packageID string, revisions map[string]string, name string, document exportJEIRecipeCollection) error {
 	recipeTypeID := strings.TrimSpace(document.RecipeTypeID)
 	revisionID := exportRevisionForRecipeType(revisions, recipeTypeID)
 	if revisionID == "" {
@@ -470,10 +727,10 @@ func queueExportJEIRecipeCollection(batch *modExportWriteBatch, packageID string
 		batch.queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'recipe','active')
 			on conflict(id) do update set status='active',updated_at=now()`, 0, recipeIdentityValue.ID, recipeIdentityValue.PublicID)
 		batch.queue(`insert into recipes(entity_id,recipe_type_id,canonical_source_id,semantic_fingerprint,owner_mod_id,identity_source)
-			select $1,$2,$3,$4,revision.mod_id,$5 from mod_export_revisions revision where revision.id=$6
+			select $1,$2,$3,$4,revision.mod_id,$5 from catalog_import_revisions revision where revision.id=$6
 			on conflict(entity_id) do update set semantic_fingerprint=excluded.semantic_fingerprint`, 0, recipeIdentityValue.ID,
 			typeIdentity.ID, canonicalSourceID, sha256Hex(fingerprintRaw), recipeBinding.RecipeIDSource, revisionID)
-		batch.queue(`insert into recipe_snapshots(id,recipe_id,revision_id,source_recipe_id,source_id_kind,source_recipe_key,
+		batch.queue(`insert into recipe_import_snapshots(id,recipe_id,revision_id,source_recipe_id,source_id_kind,source_recipe_key,
 			recipe_collection_path,origin_kind,underlying_recipe_type_id,source_mod_id,source_mod_version,source_mod_id_source,
 			render_locale,source_data,template_id,layout_available,layout_kind,ordered,layout_classification_source,width,height,parameters,binding_count)
 			values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,true,$16,$17,$18,$19,$20,$21::jsonb,$22)
@@ -489,14 +746,14 @@ func queueExportJEIRecipeCollection(batch *modExportWriteBatch, packageID string
 			recipeBinding.RenderLocale, nonEmptyJSON(recipeBinding.Raw, `{}`), templateID, recipeBinding.LayoutKind,
 			nullableRecipeOrdered(recipeBinding.Ordered), recipeBinding.LayoutClassificationSource, recipeBinding.Width,
 			recipeBinding.Height, nonEmptyJSON(recipeBinding.Parameters, `{}`), len(recipeBinding.Bindings))
-		if err = queueExportRecipeBindings(batch, revisionID, recipeIdentityValue.ID, recipeSnapshotID, templateID, recipeBinding.Bindings); err != nil {
+		if err = queueExportRecipeBindings(batch, resolver, revisionID, recipeIdentityValue.ID, recipeSnapshotID, templateID, recipeBinding.Bindings); err != nil {
 			return fmt.Errorf("JEI recipe %q: %w", recipeKey, err)
 		}
 	}
 	return nil
 }
 
-func queueExportRecipeBindings(batch *modExportWriteBatch, revisionID, recipeID, recipeSnapshotID, templateID string, bindings []exportJEIBinding) error {
+func queueExportRecipeBindings(batch *modExportWriteBatch, resolver catalogResourceIdentityResolver, revisionID, recipeID, recipeSnapshotID, templateID string, bindings []exportJEIBinding) error {
 	seen := make(map[string]struct{}, len(bindings))
 	for ordinal, binding := range bindings {
 		binding.SlotID = strings.TrimSpace(binding.SlotID)
@@ -531,24 +788,16 @@ func queueExportRecipeBindings(batch *modExportWriteBatch, revisionID, recipeID,
 			bindingData, _ = json.Marshal(binding)
 		}
 		byproduct := binding.Byproduct || strings.EqualFold(strings.TrimSpace(binding.SemanticRole), "byproduct")
-		batch.queue(`insert into recipe_bindings(id,recipe_snapshot_id,template_slot_id,source_slot_id,ordinal,ingredient_present,
-			clickable,placeholder_item,item_tag_equivalent,semantic_role,role_source,chance_available,chance,chance_percent,
-			chance_comparator,chance_source,chance_text,chance_texts,chance_translation_key,chance_render_x,chance_render_y,
-			byproduct,tag_id,data)
-			values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20,$21,$22,$23,$24::jsonb)
+		batch.queue(`insert into recipe_import_bindings(id,recipe_snapshot_id,template_slot_id,source_slot_id,ordinal,ingredient_present,
+			clickable,placeholder_item,item_tag_equivalent,semantic_role,role_source,tag_id,data)
+			values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
 			on conflict(recipe_snapshot_id,source_slot_id) do update set template_slot_id=excluded.template_slot_id,
 			ordinal=excluded.ordinal,ingredient_present=excluded.ingredient_present,clickable=excluded.clickable,
 			placeholder_item=excluded.placeholder_item,item_tag_equivalent=excluded.item_tag_equivalent,
-			semantic_role=excluded.semantic_role,role_source=excluded.role_source,chance_available=excluded.chance_available,
-			chance=excluded.chance,chance_percent=excluded.chance_percent,chance_comparator=excluded.chance_comparator,
-			chance_source=excluded.chance_source,chance_text=excluded.chance_text,chance_texts=excluded.chance_texts,
-			chance_translation_key=excluded.chance_translation_key,chance_render_x=excluded.chance_render_x,
-			chance_render_y=excluded.chance_render_y,byproduct=excluded.byproduct,tag_id=excluded.tag_id,data=excluded.data`,
+			semantic_role=excluded.semantic_role,role_source=excluded.role_source,tag_id=excluded.tag_id,data=excluded.data`,
 			int64(len(bindingData)), bindingID, recipeSnapshotID, templateSlotID, binding.SlotID, ordinal,
 			binding.IngredientPresent, binding.Clickable, binding.PlaceholderItem, tagID, binding.SemanticRole,
-			binding.RoleSource, binding.ChanceAvailable, binding.Chance, binding.ChancePercent, binding.ChanceComparator,
-			binding.ChanceSource, binding.ChanceText, nonEmptyJSON(binding.ChanceTexts, `{}`), binding.ChanceTranslationKey,
-			binding.ChanceRenderX, binding.ChanceRenderY, byproduct, tagEntityID, string(bindingData))
+			binding.RoleSource, tagEntityID, string(bindingData))
 		for alternativeIndex, alternative := range binding.Alternatives {
 			ingredientType := strings.TrimSpace(exportString(alternative["type"]))
 			ingredientKind := exportIngredientKind(ingredientType)
@@ -560,29 +809,40 @@ func queueExportRecipeBindings(batch *modExportWriteBatch, revisionID, recipeID,
 				continue
 			}
 			kindCode := resourceKindForIngredient(ingredientKind, ingredientType)
-			resource := resourceIdentity(kindCode, resourceID)
-			namespace, resourcePath := resourceParts(resourceID)
+			resource := resolver.resolve(kindCode, resourceID)
+			namespace, resourcePath := resource.Namespace, resource.ResourcePath
 			uniqueID := strings.TrimSpace(exportString(alternative["unique_id"]))
 			nbtSNBT := strings.TrimSpace(exportString(alternative["nbt_snbt"]))
 			alternativeData, _ := json.Marshal(alternative)
 			batch.queue(`insert into resource_kinds(code,family,user_visible) values($1,split_part($1,'.',1),true) on conflict(code) do nothing`, 0, kindCode)
 			batch.queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'resource','placeholder') on conflict(id) do nothing`, 0, resource.ID, resource.PublicID)
 			batch.queue(`insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path,resolved)
-				values($1,$2,$3,$4,$5,false) on conflict(kind_code,canonical_id) do nothing`, 0, resource.ID, kindCode, resourceID, namespace, resourcePath)
+				values($1,$2,$3,$4,$5,false) on conflict(kind_code,canonical_id) do nothing`, 0, resource.ID, kindCode, resource.CanonicalID, namespace, resourcePath)
+			batch.queue(`insert into game_resource_aliases(kind_code,alias_id,resource_id,source) values($1,$2,$3,'mod_id')
+				on conflict(kind_code,alias_id) do update set resource_id=excluded.resource_id,source=excluded.source,updated_at=now()`, 0,
+				kindCode, resource.RawID, resource.ID)
 			alternativeID := catalogSnapshotID("recipe-alternative", bindingID, resource.ID, fmt.Sprintf("%d", alternativeIndex))
-			batch.queue(`insert into recipe_binding_alternatives(id,binding_id,alternative_index,resource_id,raw_resource_id,amount,
-				ingredient_kind,ingredient_type,unique_id,nbt_snbt,data)
-				values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+			batch.queue(`insert into recipe_import_binding_candidates(id,binding_id,alternative_index,resource_id,raw_resource_id,amount,
+				ingredient_kind,ingredient_type,unique_id,nbt_snbt,chance_available,chance,chance_percent,chance_comparator,
+				chance_source,chance_text,chance_texts,chance_translation_key,chance_render_x,chance_render_y,byproduct,data)
+				values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,$19,$20,$21,$22::jsonb)
 				on conflict(binding_id,alternative_index,raw_resource_id) do update set resource_id=excluded.resource_id,
 				amount=excluded.amount,ingredient_kind=excluded.ingredient_kind,ingredient_type=excluded.ingredient_type,
-				unique_id=excluded.unique_id,nbt_snbt=excluded.nbt_snbt,data=excluded.data`, int64(len(alternativeData)),
+				unique_id=excluded.unique_id,nbt_snbt=excluded.nbt_snbt,chance_available=excluded.chance_available,
+				chance=excluded.chance,chance_percent=excluded.chance_percent,chance_comparator=excluded.chance_comparator,
+				chance_source=excluded.chance_source,chance_text=excluded.chance_text,chance_texts=excluded.chance_texts,
+				chance_translation_key=excluded.chance_translation_key,chance_render_x=excluded.chance_render_x,
+				chance_render_y=excluded.chance_render_y,byproduct=excluded.byproduct,data=excluded.data`, int64(len(alternativeData)),
 				alternativeID, bindingID, alternativeIndex, resource.ID, resourceID, exportRecipeAmount(alternative),
-				ingredientKind, ingredientType, uniqueID, nbtSNBT, string(alternativeData))
+				ingredientKind, ingredientType, uniqueID, nbtSNBT, binding.ChanceAvailable, binding.Chance,
+				binding.ChancePercent, binding.ChanceComparator, binding.ChanceSource, binding.ChanceText,
+				nonEmptyJSON(binding.ChanceTexts, `{}`), binding.ChanceTranslationKey, binding.ChanceRenderX,
+				binding.ChanceRenderY, byproduct, string(alternativeData))
 			unresolvedID := catalogSnapshotID("reference", revisionID, recipeID, alternativeID)
 			batch.queue(`insert into unresolved_resource_references(id,source_entity_id,source_revision_id,field_path,kind_code,
 				raw_resource_id,resolved_resource_id,status,resolved_at)
-				select $1,$2,$3,$4,$5,$6,$7,case when exists(select 1 from game_resource_snapshots where resource_id=$7) then 'resolved' else 'pending' end,
-				case when exists(select 1 from game_resource_snapshots where resource_id=$7) then now() else null end
+				select $1,$2,$3,$4,$5,$6,$7,case when exists(select 1 from resource_import_snapshots where resource_id=$7) then 'resolved' else 'pending' end,
+				case when exists(select 1 from resource_import_snapshots where resource_id=$7) then now() else null end
 				on conflict(source_entity_id,source_revision_id,field_path,kind_code,raw_resource_id) do update set
 				resolved_resource_id=excluded.resolved_resource_id,status=excluded.status,resolved_at=excluded.resolved_at`, 0,
 				unresolvedID, recipeID, revisionID, fmt.Sprintf("bindings.%s.alternatives.%d", binding.SlotID, alternativeIndex),
@@ -783,7 +1043,15 @@ func validateExportRecipeSource(originKind, modID, modVersion, source string) er
 }
 
 func validateExportRecipeChance(binding exportJEIBinding) error {
+	role := strings.ToLower(strings.TrimSpace(binding.SemanticRole))
+	byproduct := binding.Byproduct || role == "byproduct"
+	if (binding.ChanceAvailable || binding.Chance != nil || binding.ChancePercent != nil || byproduct) && role != "output" && role != "byproduct" {
+		return fmt.Errorf("chance and byproduct are only valid for output items")
+	}
 	if !binding.ChanceAvailable {
+		if binding.Chance != nil || binding.ChancePercent != nil {
+			return fmt.Errorf("numeric chance requires chance_available")
+		}
 		return nil
 	}
 	if binding.Chance == nil && binding.ChancePercent == nil {

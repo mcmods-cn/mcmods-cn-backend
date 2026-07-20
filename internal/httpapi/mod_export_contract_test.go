@@ -73,7 +73,7 @@ func TestExporterSamplePackageContracts(t *testing.T) {
 						revisions[strings.ToLower(block.Namespace)] = "sample-revision-" + strings.ToLower(block.Namespace)
 					}
 				}
-				bindings, bindingErr := deriveModExportBlockBindings(files, revisions)
+				bindings, bindingErr := deriveModExportBlockBindings(files, catalogResourceIdentityResolver{}, revisions)
 				if bindingErr != nil {
 					t.Fatal(bindingErr)
 				}
@@ -88,7 +88,7 @@ func TestExporterSamplePackageContracts(t *testing.T) {
 				}
 			}
 			if files[modExportBlockEntityIndexPath] != nil {
-				models, modelErr := deriveModExportBlockEntityModels(files, revisions)
+				models, modelErr := deriveModExportBlockEntityModels(files, catalogResourceIdentityResolver{}, revisions)
 				if modelErr != nil {
 					t.Fatal(modelErr)
 				}

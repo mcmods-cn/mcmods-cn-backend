@@ -15,11 +15,11 @@ import (
 const latestGlobalExportScopeCTE = `
 latest_packages as (
 	select distinct on (mod_id) mod_id,package_id
-	from mod_export_revisions
+	from catalog_import_revisions
 	where is_active and status in ('ready','partial')
 	order by mod_id,coalesce(activated_at,created_at) desc,created_at desc,package_id desc
 ), latest_revisions as (
-	select revision.* from mod_export_revisions revision
+	select revision.* from catalog_import_revisions revision
 	join latest_packages package on package.mod_id=revision.mod_id and package.package_id=revision.package_id
 	where revision.is_active and revision.status in ('ready','partial')
 )`
@@ -28,7 +28,7 @@ const latestGlobalResourceSnapshotCTE = `
 latest_resource_snapshots as (
 	select distinct on (snapshot.resource_id) snapshot.*
 	from latest_revisions source
-	join game_resource_snapshots snapshot on snapshot.revision_id=source.id
+	join resource_import_snapshots snapshot on snapshot.revision_id=source.id
 	order by snapshot.resource_id,coalesce(source.activated_at,source.created_at) desc,source.created_at desc,snapshot.id desc
 )`
 
@@ -67,7 +67,7 @@ func (s *Server) globalModTags(w http.ResponseWriter, r *http.Request) {
 		if err := s.db.QueryRow(ctx, `with `+latestGlobalExportScopeCTE+`
 			select count(distinct tag.entity_id)::int
 			from latest_revisions revision
-			join catalog_tag_snapshots snapshot on snapshot.revision_id=revision.id
+			join tag_import_snapshots snapshot on snapshot.revision_id=revision.id
 			join catalog_tags tag on tag.entity_id=snapshot.tag_id
 			where ($1='' or tag.registry=$1) and ($2='' or tag.canonical_id ilike '%'||$2||'%')`, registry, query).Scan(&total); err != nil {
 			return nil, err
@@ -76,10 +76,10 @@ func (s *Server) globalModTags(w http.ResponseWriter, r *http.Request) {
 			select tag.entity_id,entity.public_id,tag.registry,tag.canonical_id,
 				count(distinct member.raw_member_id)::int
 			from latest_revisions revision
-			join catalog_tag_snapshots snapshot on snapshot.revision_id=revision.id
+			join tag_import_snapshots snapshot on snapshot.revision_id=revision.id
 			join catalog_tags tag on tag.entity_id=snapshot.tag_id
 			join catalog_entities entity on entity.id=tag.entity_id
-			left join catalog_tag_members member on member.tag_snapshot_id=snapshot.id
+			left join tag_import_members member on member.tag_snapshot_id=snapshot.id
 			where ($1='' or tag.registry=$1) and ($2='' or tag.canonical_id ilike '%'||$2||'%')
 			group by tag.entity_id,entity.public_id,tag.registry,tag.canonical_id
 			order by tag.registry,tag.canonical_id limit $3 offset $4`, registry, query, limit, offset)
@@ -143,8 +143,8 @@ func (s *Server) globalModTagDetail(w http.ResponseWriter, r *http.Request) {
 			err = s.db.QueryRow(ctx, `with `+latestGlobalExportScopeCTE+`
 				select count(distinct member.raw_member_id)::int
 				from latest_revisions revision
-				join catalog_tag_snapshots snapshot on snapshot.revision_id=revision.id
-				join catalog_tag_members member on member.tag_snapshot_id=snapshot.id
+				join tag_import_snapshots snapshot on snapshot.revision_id=revision.id
+				join tag_import_members member on member.tag_snapshot_id=snapshot.id
 				where snapshot.tag_id=$1`, entityID).Scan(&total)
 		}
 		if err != nil {
@@ -185,33 +185,49 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 	primary, secondary := requestedContentLocales(r)
 	limit := boundedLimit(r.URL.Query().Get("limit"), 24, 60)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
-	key := fmt.Sprintf("recipe-types:v3:list:%s:%s:%s:%d:%d", query, primary, secondary, limit, offset)
+	key := fmt.Sprintf("recipe-types:v4:list:%s:%s:%s:%d:%d", query, primary, secondary, limit, offset)
 	s.writeCachedCatalog(w, r, key, func(ctx context.Context) (any, error) {
 		var total int
-		if err := s.db.QueryRow(ctx, `with `+latestGlobalExportScopeCTE+`
-			select count(distinct recipe_type.entity_id)::int from latest_revisions revision
-			join recipe_type_snapshots snapshot on snapshot.revision_id=revision.id
-			join recipe_types recipe_type on recipe_type.entity_id=snapshot.recipe_type_id
-			where $1='' or recipe_type.canonical_id ilike '%'||$1||'%' or snapshot.title_names->>$2 ilike '%'||$1||'%' or snapshot.title_names->>$3 ilike '%'||$1||'%'`,
+		if err := s.db.QueryRow(ctx, `with `+latestGlobalExportScopeCTE+`, imported as (
+			select distinct on (snapshot.recipe_type_id) snapshot.recipe_type_id,snapshot.title_names
+			from latest_revisions revision join recipe_type_import_snapshots snapshot on snapshot.revision_id=revision.id
+			order by snapshot.recipe_type_id,coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc
+		)
+			select count(*)::int from recipe_types recipe_type
+			join catalog_entities entity on entity.id=recipe_type.entity_id
+			left join imported on imported.recipe_type_id=recipe_type.entity_id
+			where entity.status='active' and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
+			 or imported.title_names->>$2 ilike '%'||$1||'%' or imported.title_names->>$3 ilike '%'||$1||'%'
+			 or exists(select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%'))`,
 			query, primary, secondary).Scan(&total); err != nil {
 			return nil, err
 		}
-		rows, err := s.db.Query(ctx, `with `+latestGlobalExportScopeCTE+`, selected as (
-			select distinct on (recipe_type.entity_id) recipe_type.entity_id,entity.public_id,recipe_type.canonical_id,
-				snapshot.title_names,snapshot.catalysts,snapshot.revision_id
-			from latest_revisions revision
-			join recipe_type_snapshots snapshot on snapshot.revision_id=revision.id
-			join recipe_types recipe_type on recipe_type.entity_id=snapshot.recipe_type_id
-			join catalog_entities entity on entity.id=recipe_type.entity_id
-			where $1='' or recipe_type.canonical_id ilike '%'||$1||'%' or snapshot.title_names->>$2 ilike '%'||$1||'%' or snapshot.title_names->>$3 ilike '%'||$1||'%'
-			order by recipe_type.entity_id,coalesce(revision.activated_at,revision.created_at) desc
+		rows, err := s.db.Query(ctx, `with `+latestGlobalExportScopeCTE+`, imported as (
+			select distinct on (snapshot.recipe_type_id) snapshot.recipe_type_id,snapshot.title_names,snapshot.catalysts,snapshot.revision_id
+			from latest_revisions revision join recipe_type_import_snapshots snapshot on snapshot.revision_id=revision.id
+			order by snapshot.recipe_type_id,coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc
 		)
-		select selected.entity_id,selected.public_id,selected.canonical_id,selected.title_names,selected.catalysts,selected.revision_id,
-			(select count(distinct recipe_snapshot.recipe_id)::int from latest_revisions source
-			 join recipe_snapshots recipe_snapshot on recipe_snapshot.revision_id=source.id
-			 join recipes recipe on recipe.entity_id=recipe_snapshot.recipe_id
-			 where recipe.recipe_type_id=selected.entity_id)
-		from selected order by selected.canonical_id limit $4 offset $5`, query, primary, secondary, limit, offset)
+		select recipe_type.entity_id,entity.public_id,recipe_type.canonical_id,
+			coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
+			 where localization.catalog_entity_id=entity.id and localization.name<>''),imported.title_names,'{}'::jsonb),
+			case when exists(select 1 from recipe_type_catalysts catalyst where catalyst.recipe_type_id=recipe_type.entity_id)
+			 then coalesce((select jsonb_agg(jsonb_build_object('entityId',resource.entity_id,'publicId',resource_entity.public_id,
+			  'kindCode',resource.kind_code,'canonicalId',resource.canonical_id,'item',resource.canonical_id,'resource_location',resource.canonical_id)
+			  order by catalyst.ordinal) from recipe_type_catalysts catalyst join game_resources resource on resource.entity_id=catalyst.resource_id
+			  join catalog_entities resource_entity on resource_entity.id=resource.entity_id where catalyst.recipe_type_id=recipe_type.entity_id),'[]'::jsonb)
+			 else coalesce(imported.catalysts,'[]'::jsonb) end,
+			coalesce(entity.published_revision_id::text,imported.revision_id::text,''),
+			exists(select 1 from recipe_type_catalysts catalyst where catalyst.recipe_type_id=recipe_type.entity_id),
+			(select count(*)::int from recipes recipe join catalog_entities recipe_entity on recipe_entity.id=recipe.entity_id
+			 where recipe.recipe_type_id=recipe_type.entity_id and recipe_entity.status='active'),
+			(select count(*)::int from recipe_layout_templates template join catalog_entities template_entity on template_entity.id=template.entity_id
+			 where template.recipe_type_id=recipe_type.entity_id and template_entity.status='active')
+		from recipe_types recipe_type join catalog_entities entity on entity.id=recipe_type.entity_id
+		left join imported on imported.recipe_type_id=recipe_type.entity_id
+		where entity.status='active' and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
+		 or imported.title_names->>$2 ilike '%'||$1||'%' or imported.title_names->>$3 ilike '%'||$1||'%'
+		 or exists(select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%'))
+		order by recipe_type.canonical_id limit $4 offset $5`, query, primary, secondary, limit, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -220,16 +236,25 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 		for rows.Next() {
 			var entityID, publicID, id, revisionID string
 			var names, catalysts []byte
-			var recipeCount int
-			if err = rows.Scan(&entityID, &publicID, &id, &names, &catalysts, &revisionID, &recipeCount); err != nil {
+			var canonicalCatalysts bool
+			var recipeCount, templateCount int
+			if err = rows.Scan(&entityID, &publicID, &id, &names, &catalysts, &revisionID, &canonicalCatalysts, &recipeCount, &templateCount); err != nil {
 				return nil, err
 			}
-			decorated, err := s.decorateCatalysts(ctx, catalysts, revisionID)
-			if err != nil {
-				return nil, err
+			var decorated []map[string]any
+			if canonicalCatalysts {
+				if err = json.Unmarshal(catalysts, &decorated); err != nil {
+					return nil, err
+				}
+			} else {
+				decorated, err = s.decorateCatalysts(ctx, catalysts, revisionID)
+				if err != nil {
+					return nil, err
+				}
 			}
 			items = append(items, map[string]any{"entityId": entityID, "publicId": publicID, "recipeTypeId": id,
-				"names": json.RawMessage(names), "recipeCount": recipeCount, "catalysts": decorated, "revisionId": revisionID})
+				"canonicalId": id, "names": json.RawMessage(names), "recipeCount": recipeCount, "templateCount": templateCount,
+				"catalysts": decorated, "revisionId": revisionID})
 		}
 		return map[string]any{"items": items, "total": total, "limit": limit, "offset": offset}, rows.Err()
 	})
@@ -254,7 +279,7 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 			select recipe_type.entity_id,entity.public_id,recipe_type.canonical_id,snapshot.title_names,snapshot.catalysts,
 				snapshot.revision_id,snapshot.width,snapshot.height,snapshot.image_scale
 			from latest_revisions revision
-			join recipe_type_snapshots snapshot on snapshot.revision_id=revision.id
+			join recipe_type_import_snapshots snapshot on snapshot.revision_id=revision.id
 			join recipe_types recipe_type on recipe_type.entity_id=snapshot.recipe_type_id
 			join catalog_entities entity on entity.id=recipe_type.entity_id
 			where (($1<>'' and recipe_type.entity_id=$1) or ($1='' and recipe_type.canonical_id=$2))
@@ -284,7 +309,7 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 		var total int
 		if err = s.db.QueryRow(ctx, `with `+latestGlobalExportScopeCTE+`
 			select count(distinct snapshot.recipe_id)::int from latest_revisions revision
-			join recipe_snapshots snapshot on snapshot.revision_id=revision.id
+			join recipe_import_snapshots snapshot on snapshot.revision_id=revision.id
 			join recipes recipe on recipe.entity_id=snapshot.recipe_id where recipe.recipe_type_id=$1`, entityID).Scan(&total); err != nil {
 			return nil, err
 		}
@@ -294,7 +319,7 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 				snapshot.source_id_kind,snapshot.revision_id,mod.slug,
 				override.note,override.layout_override
 			from latest_revisions revision
-			join recipe_snapshots snapshot on snapshot.revision_id=revision.id
+			join recipe_import_snapshots snapshot on snapshot.revision_id=revision.id
 			join recipes recipe on recipe.entity_id=snapshot.recipe_id
 			join catalog_entities entity on entity.id=recipe.entity_id
 			join mods mod on mod.id=revision.mod_id
@@ -526,8 +551,8 @@ func (s *Server) globalTagMemberRows(ctx context.Context, tagEntityID, tagRegist
 	}
 	rows, err := s.db.Query(ctx, `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`, members as (
 		select distinct member.raw_member_id from latest_revisions revision
-		join catalog_tag_snapshots tag_snapshot on tag_snapshot.revision_id=revision.id
-		join catalog_tag_members member on member.tag_snapshot_id=tag_snapshot.id
+		join tag_import_snapshots tag_snapshot on tag_snapshot.revision_id=revision.id
+		join tag_import_members member on member.tag_snapshot_id=tag_snapshot.id
 		where tag_snapshot.tag_id=$1
 		order by member.raw_member_id limit $2 offset $3
 	)
@@ -546,7 +571,7 @@ func (s *Server) globalTagMemberRows(ctx context.Context, tagEntityID, tagRegist
 		limit 1
 	) resolved on true
 	left join catalog_entities entity on entity.id=resolved.entity_id
-	left join mod_export_revisions revision on revision.id=resolved.revision_id
+	left join catalog_import_revisions revision on revision.id=resolved.revision_id
 	left join mods mod on mod.id=revision.mod_id order by members.raw_member_id`, tagEntityID, limit, offset, resourceKindForRegistry(tagRegistry))
 	if err != nil {
 		return nil, err
@@ -566,7 +591,7 @@ func (s *Server) globalResourceRows(ctx context.Context, resourceIDs []string, l
 	join game_resources resource on resource.entity_id=requested.entity_id
 	join catalog_entities entity on entity.id=resource.entity_id
 	join latest_resource_snapshots snapshot on snapshot.resource_id=resource.entity_id
-	join mod_export_revisions revision on revision.id=snapshot.revision_id
+	join catalog_import_revisions revision on revision.id=snapshot.revision_id
 	join mods mod on mod.id=revision.mod_id order by requested.ordinal`, selected)
 	if err != nil {
 		return nil, err
@@ -670,7 +695,10 @@ func (s *Server) submitGlobalCatalogRevision(w http.ResponseWriter, r *http.Requ
 	}
 	defer tx.Rollback(r.Context())
 	var baseRevisionID *int64
-	_ = tx.QueryRow(r.Context(), `select max(id) from content_revisions where entity_id=$1 and aggregate_type=$2`, entityID, aggregateType).Scan(&baseRevisionID)
+	if err = tx.QueryRow(r.Context(), `select published_revision_id from catalog_entities where id=$1 for update`, entityID).Scan(&baseRevisionID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load published catalog revision")
+		return
+	}
 	status := "pending"
 	if hasPermission(claims.Permissions, "content.review") {
 		status = "approved"
@@ -687,6 +715,10 @@ func (s *Server) submitGlobalCatalogRevision(w http.ResponseWriter, r *http.Requ
 	if status == "approved" {
 		if err = publishGlobalCatalogSnapshotTx(r.Context(), tx, created.RevisionID, aggregateType, encoded, claims.Subject); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to publish catalog revision")
+			return
+		}
+		if _, err = tx.Exec(r.Context(), `update catalog_entities set published_revision_id=$2,updated_at=now() where id=$1`, entityID, created.RevisionID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update published catalog revision")
 			return
 		}
 		if err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic approval", r); err != nil {
@@ -716,8 +748,9 @@ func publishGlobalCatalogSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID i
 		var resourceIDs []string
 		if err := tx.QueryRow(ctx, `select coalesce(array_agg(resource.entity_id order by requested.ordinal) filter(where resource.entity_id is not null),'{}'::text[])
 			from unnest($1::text[]) with ordinality requested(canonical_id,ordinal)
-			left join lateral (select entity_id from game_resources where canonical_id=requested.canonical_id
-				order by (kind_code='minecraft.item') desc limit 1) resource on true`, snapshot.MemberIDs).Scan(&resourceIDs); err != nil {
+			left join lateral (select resource.entity_id from game_resource_aliases alias
+				join game_resources resource on resource.entity_id=alias.resource_id
+				where alias.alias_id=requested.canonical_id order by (resource.kind_code='minecraft.item') desc limit 1) resource on true`, snapshot.MemberIDs).Scan(&resourceIDs); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `insert into tag_member_overrides(tag_id,resource_ids,updated_by,published_revision_id)
@@ -742,7 +775,8 @@ func publishGlobalCatalogSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID i
 		var resourceIDs []string
 		if err := tx.QueryRow(ctx, `select coalesce(array_agg(resource.entity_id order by requested.ordinal) filter(where resource.entity_id is not null),'{}'::text[])
 			from unnest($1::text[]) with ordinality requested(canonical_id,ordinal)
-			left join game_resources resource on resource.canonical_id=requested.canonical_id and resource.kind_code='minecraft.item'`, canonicalIDs).Scan(&resourceIDs); err != nil {
+			left join game_resource_aliases alias on alias.alias_id=requested.canonical_id and alias.kind_code='minecraft.item'
+			left join game_resources resource on resource.entity_id=alias.resource_id`, canonicalIDs).Scan(&resourceIDs); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `insert into recipe_type_catalyst_overrides(recipe_type_id,catalyst_resource_ids,updated_by,published_revision_id)

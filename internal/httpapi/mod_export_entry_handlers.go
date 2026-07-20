@@ -13,15 +13,19 @@ import (
 const maxModExportEntryMarkdownBytes = 256 * 1024
 
 type modExportEntryDetailResponse struct {
-	EntityID         string                           `json:"entityId"`
-	PublicID         string                           `json:"publicId"`
-	ContentMarkdown  string                           `json:"contentMarkdown"`
-	ContentLocale    string                           `json:"contentLocale"`
-	ModelAvailable   bool                             `json:"modelAvailable"`
-	ModelAssetPaths  []string                         `json:"modelAssetPaths"`
-	BlockEntityModel *modExportBlockEntityModelDetail `json:"blockEntityModel,omitempty"`
-	Recipes          []any                            `json:"recipes"`
-	Uses             []any                            `json:"uses"`
+	EntityID          string                           `json:"entityId"`
+	PublicID          string                           `json:"publicId"`
+	Name              string                           `json:"name"`
+	Summary           string                           `json:"summary"`
+	ContentMarkdown   string                           `json:"contentMarkdown"`
+	ContentLocale     string                           `json:"contentLocale"`
+	ContentProvenance string                           `json:"contentProvenance"`
+	ModelAvailable    bool                             `json:"modelAvailable"`
+	ModelAssetPaths   []string                         `json:"modelAssetPaths"`
+	BlockEntityModel  *modExportBlockEntityModelDetail `json:"blockEntityModel,omitempty"`
+	Recipes           []any                            `json:"recipes"`
+	Uses              []any                            `json:"uses"`
+	Versions          []map[string]any                 `json:"versions"`
 }
 
 type modExportBlockEntityModelDetail struct {
@@ -62,10 +66,10 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 	var modID int64
 	var publicID string
 	err := s.db.QueryRow(r.Context(), `select resource.entity_id,entity.public_id,resource.canonical_id,revision.mod_id
-		from game_resource_snapshots snapshot
+		from resource_import_snapshots snapshot
 		join game_resources resource on resource.entity_id=snapshot.resource_id
 		join catalog_entities entity on entity.id=resource.entity_id
-		join mod_export_revisions revision on revision.id=snapshot.revision_id
+		join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		where snapshot.revision_id=$1 and snapshot.registry=$2
 		and (($3<>'' and resource.entity_id=$3) or ($3='' and resource.canonical_id=$4))`,
 		revisionID, registry, entityID, objectID).Scan(&entityID, &publicID, &objectID, &modID)
@@ -77,20 +81,54 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to read entry")
 		return
 	}
-	response := modExportEntryDetailResponse{EntityID: entityID, PublicID: publicID, ModelAssetPaths: []string{}, Recipes: []any{}, Uses: []any{}}
+	response := modExportEntryDetailResponse{EntityID: entityID, PublicID: publicID, ModelAssetPaths: []string{}, Recipes: []any{}, Uses: []any{}, Versions: []map[string]any{}}
 	recipeResourceID := entityID
-	_ = s.db.QueryRow(r.Context(), `
-		select locale,content_markdown from knowledge_pages
-		where entity_id=$1 and locale=any($2::text[])
-		order by case locale when $3 then 0 when 'zh_cn' then 1 when 'en_us' then 2 else 3 end limit 1`,
-		entityID, []string{locale, "zh_cn", "en_us"}, locale).Scan(&response.ContentLocale, &response.ContentMarkdown)
+	primary, secondary := s.requestContentLocales(r)
+	if requested := normalizeContentLocale(locale); requested != "" {
+		primary = requested
+	}
+	if requested := normalizeContentLocale(r.URL.Query().Get("secondaryLocale")); requested != "" {
+		secondary = requested
+	}
+	localized, localizationErr := s.loadCatalogEntityLocalizations(r.Context(), publicID)
+	if localizationErr != nil && !errors.Is(localizationErr, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to resolve entry localization")
+		return
+	}
+	if localizationErr == nil {
+		available := make([]string, 0, len(localized.Localizations))
+		for availableLocale := range localized.Localizations {
+			available = append(available, availableLocale)
+		}
+		resolution := resolveContentLocale(primary, secondary, localized.DefaultLocale, available)
+		if content, ok := localized.Localizations[resolution.ResolvedLocale]; ok {
+			response.Name = content.Name
+			response.Summary = content.Summary
+			response.ContentMarkdown = content.ContentMarkdown
+			response.ContentLocale = content.Locale
+			response.ContentProvenance = content.Provenance
+		}
+	}
+	if response.ContentLocale == "" {
+		_ = s.db.QueryRow(r.Context(), `
+			select locale,content_markdown from knowledge_pages
+			where entity_id=$1 and locale=any($2::text[])
+			order by case locale when $3 then 0 when 'zh_cn' then 1 when 'en_us' then 2 else 3 end limit 1`,
+			entityID, []string{locale, "zh_cn", "en_us"}, locale).Scan(&response.ContentLocale, &response.ContentMarkdown)
+	}
+	versionCarrier := map[string]any{"entityId": entityID, "versions": []map[string]any{}}
+	if err = s.decorateResourceVersionRows(r.Context(), []map[string]any{versionCarrier}, primary, secondary); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve entry versions")
+		return
+	}
+	response.Versions, _ = versionCarrier["versions"].([]map[string]any)
 	if registry == "blocks" {
 		var itemResourceID, blockstatePath, itemModelPath string
 		var modelPaths, texturePaths []string
 		bindingErr := s.db.QueryRow(r.Context(), `
 			select coalesce(binding.item_resource_id,''),binding.blockstate_path,binding.item_model_path,binding.model_paths,binding.texture_paths
 			from game_resource_asset_bindings binding
-			join game_resource_snapshots snapshot on snapshot.id=binding.snapshot_id
+			join resource_import_snapshots snapshot on snapshot.id=binding.snapshot_id
 			where snapshot.revision_id=$1 and binding.block_resource_id=$2`,
 			revisionID, entityID).Scan(&itemResourceID, &blockstatePath, &itemModelPath, &modelPaths, &texturePaths)
 		if bindingErr != nil && !errors.Is(bindingErr, pgx.ErrNoRows) {
@@ -132,6 +170,9 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to read entry recipes")
 			return
 		}
+	}
+	if response.ContentLocale != "" {
+		w.Header().Set("Content-Language", response.ContentLocale)
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -213,9 +254,9 @@ func (s *Server) updateModExportEntryContent(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	err = s.db.QueryRow(r.Context(), `select resource.entity_id,resource.canonical_id
-		from game_resource_snapshots snapshot
+		from resource_import_snapshots snapshot
 		join game_resources resource on resource.entity_id=snapshot.resource_id
-		join mod_export_revisions revision on revision.id=snapshot.revision_id
+		join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		where revision.mod_id=$1 and snapshot.registry=$2
 		and (($3<>'' and resource.entity_id=$3) or ($3='' and resource.canonical_id=$4))
 		order by revision.is_active desc,revision.revision_no desc limit 1`,
@@ -313,18 +354,18 @@ func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, reso
 	uses := make([]any, 0, 8)
 	decorations := make([]map[string]any, 0, 16)
 	rows, err := s.db.Query(ctx, `with preferred as (
-		select minecraft_version,loader from mod_export_revisions where id=$1
+		select minecraft_version,loader from catalog_import_revisions where id=$1
 	), ranked as (
 		select binding.recipe_snapshot_id,bool_or(slot.role='output') produces,
 			bool_or(slot.role in ('input','catalyst')) uses,
 			row_number() over(partition by snapshot.recipe_id order by (snapshot.revision_id=$1) desc,
 			(revision.minecraft_version=preferred.minecraft_version) desc,
 			(revision.loader=preferred.loader) desc,coalesce(revision.activated_at,revision.created_at) desc) rank
-		from recipe_binding_alternatives alternative
-		join recipe_bindings binding on binding.id=alternative.binding_id
-		join recipe_template_slots slot on slot.id=binding.template_slot_id
-		join recipe_snapshots snapshot on snapshot.id=binding.recipe_snapshot_id
-		join mod_export_revisions revision on revision.id=snapshot.revision_id
+		from recipe_import_binding_candidates alternative
+		join recipe_import_bindings binding on binding.id=alternative.binding_id
+		join recipe_template_import_slots slot on slot.id=binding.template_slot_id
+		join recipe_import_snapshots snapshot on snapshot.id=binding.recipe_snapshot_id
+		join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		cross join preferred
 		where alternative.resource_id=$2 and binding.ingredient_present and (snapshot.revision_id=$1 or revision.is_active)
 		group by binding.recipe_snapshot_id,snapshot.recipe_id,snapshot.revision_id,
@@ -332,7 +373,7 @@ func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, reso
 			revision.activated_at,revision.created_at
 	)
 	select recipe.entity_id,recipe_type.canonical_id,snapshot.id,ranked.produces,ranked.uses,snapshot.revision_id
-	from ranked join recipe_snapshots snapshot on snapshot.id=ranked.recipe_snapshot_id
+	from ranked join recipe_import_snapshots snapshot on snapshot.id=ranked.recipe_snapshot_id
 	join recipes recipe on recipe.entity_id=snapshot.recipe_id
 	join recipe_types recipe_type on recipe_type.entity_id=recipe.recipe_type_id
 	where ranked.rank=1 order by recipe.entity_id limit 200`, revisionID, resourceID)

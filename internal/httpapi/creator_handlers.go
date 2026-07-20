@@ -69,10 +69,10 @@ func (s *Server) creators(w http.ResponseWriter, r *http.Request) {
 	admin := hasPermission(claims.Permissions, "admin.*") || hasPermission(claims.Permissions, "content.review")
 	rows, err := s.db.Query(r.Context(), `
 		select creator.public_id,creator.kind,creator.name,creator.avatar_url,creator.review_status,
-		       creator.claimed_by is not null,count(distinct mod_author.mod_id)
+		       creator.claimed_by is not null,count(distinct mod.project_code)
 		from creators creator
-		left join mod_authors mod_author on mod_author.creator_id=creator.id
-		left join mods mod on mod.id=mod_author.mod_id and mod.review_status='approved'
+		left join content_creator_bindings binding on binding.creator_id=creator.id and binding.subject_type='mod'
+		left join mods mod on mod.project_code=binding.subject_public_id and mod.review_status='approved'
 		where ($1='' or creator.kind=$1)
 		  and ($2='' or creator.name ilike '%' || $2 || '%')
 		  and (creator.review_status='approved' or creator.created_by=$3 or creator.claimed_by=$3 or $4)
@@ -649,7 +649,9 @@ func (s *Server) approveCreatorClaimTx(ctx context.Context, tx pgx.Tx, creatorID
 	}
 	defaults := s.permissionDefaultsFromSettings(ctx)
 	rows, err := tx.Query(ctx, `select distinct mod.id,mod.project_code
-		from mod_authors author join mods mod on mod.id=author.mod_id where author.creator_id=$1`, creatorID)
+		from content_creator_bindings binding
+		join mods mod on mod.project_code=binding.subject_public_id
+		where binding.creator_id=$1 and binding.subject_type='mod'`, creatorID)
 	if err != nil {
 		return err
 	}
@@ -706,8 +708,9 @@ func (s *Server) creatorCollaborators(ctx context.Context, creatorID int64) ([]c
 	rows, err := s.db.Query(ctx, `
 		select distinct collaborator.public_id,collaborator.kind,collaborator.name,collaborator.avatar_url,
 		       collaborator.review_status,collaborator.claimed_by is not null,
-		       (select count(distinct author.mod_id) from mod_authors author join mods mod on mod.id=author.mod_id
-		        where author.creator_id=collaborator.id and mod.review_status='approved')
+		       (select count(distinct mod.project_code) from content_creator_bindings binding
+		        join mods mod on mod.project_code=binding.subject_public_id
+		        where binding.creator_id=collaborator.id and binding.subject_type='mod' and mod.review_status='approved')
 		from (
 			select collaborator_id id from creator_collaborations where creator_id=$1
 			union select creator_id from creator_collaborations where collaborator_id=$1
@@ -759,8 +762,8 @@ func (s *Server) creatorMembers(ctx context.Context, creatorID int64) ([]map[str
 func (s *Server) creatorWorks(ctx context.Context, creatorID int64) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, `
 		select distinct mod.project_code,mod.slug,mod.primary_name,mod.secondary_name,mod.summary,mod.icon_url
-		from mod_authors author join mods mod on mod.id=author.mod_id
-		where author.creator_id=$1 and mod.review_status='approved'
+		from content_creator_bindings binding join mods mod on mod.project_code=binding.subject_public_id
+		where binding.creator_id=$1 and binding.subject_type='mod' and mod.review_status='approved'
 		order by mod.primary_name`, creatorID)
 	if err != nil {
 		return nil, err

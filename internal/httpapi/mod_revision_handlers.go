@@ -123,6 +123,10 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "the proposed base revision is no longer current")
 		return
 	}
+	if err = validateModGalleryFilesTx(r.Context(), tx, identity.ID, claims.Subject, request.Snapshot.GalleryImages); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	status := "pending"
 	if !loadReviewConfig(r.Context(), s.db).ModEdit || canSkipProjectReview(claims, identity) {
@@ -388,10 +392,20 @@ func scanModRevision(row scanner) (modRevisionResponse, error) {
 }
 
 func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, snapshot createModRequest) error {
+	var projectCode, currentSiteID string
+	var revisionActorID *int64
+	if err := tx.QueryRow(ctx, `select project_code,slug from mods where id=$1`, modID).Scan(&projectCode, &currentSiteID); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(ctx, `select created_by from content_revisions where id=$1`, revisionID).Scan(&revisionActorID); err != nil {
+		return err
+	}
+	actorID := int64(0)
+	if revisionActorID != nil {
+		actorID = *revisionActorID
+	}
 	if snapshot.SiteID == "" {
-		if err := tx.QueryRow(ctx, `select slug from mods where id=$1`, modID).Scan(&snapshot.SiteID); err != nil {
-			return err
-		}
+		snapshot.SiteID = currentSiteID
 	}
 	if err := ensureModSiteIDAvailable(ctx, tx, snapshot.SiteID, modID); err != nil {
 		return err
@@ -405,12 +419,12 @@ func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, s
 	_, err := tx.Exec(ctx, `update mods set
 		primary_name=$2,secondary_name=$3,abbreviation=$4,summary=$5,mod_id=$6,environment=$7,
 		primary_category=$8,official_status=$9,source_status=$10,license=$11,curseforge_project_id=$12,
-		modrinth_project_id=$13,icon_url=$14,body_markdown=$15,search_keywords=$16,submission_method=$17,
-		review_status='approved',published_revision_id=$18,supported_versions=$19,supported_loaders=$20,
-		slug=$21,published_at=coalesce(published_at,now()),updated_at=now() where id=$1`,
+		modrinth_project_id=$13,github_project_path=$14,icon_url=$15,body_markdown=$16,search_keywords=$17,submission_method=$18,
+		review_status='approved',published_revision_id=$19,supported_versions=$20,supported_loaders=$21,
+		slug=$22,published_at=coalesce(published_at,now()),updated_at=now() where id=$1`,
 		modID, snapshot.PrimaryName, snapshot.SecondaryName, snapshot.Abbreviation, snapshot.Summary, snapshot.ModID,
 		snapshot.Environment, snapshot.PrimaryCategory, snapshot.OfficialStatus, snapshot.SourceStatus, snapshot.License,
-		snapshot.CurseForgeProjectID, snapshot.ModrinthProjectID, snapshot.IconURL, snapshot.BodyMarkdown,
+		snapshot.CurseForgeProjectID, snapshot.ModrinthProjectID, snapshot.GitHubProjectPath, snapshot.IconURL, snapshot.BodyMarkdown,
 		snapshot.SearchKeywords, snapshot.SubmissionMethod, revisionID, snapshot.SupportedVersions, snapshot.SupportedLoaders, snapshot.SiteID,
 	)
 	if err != nil {
@@ -419,10 +433,22 @@ func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, s
 		}
 		return err
 	}
+	if err = replaceModIdentifiersTx(ctx, tx, modID, snapshot.ModIDs); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `update content_subjects set default_locale=$3,updated_at=now()
+		where public_id=$1 and subject_type=$2`, projectCode, "mod", snapshot.DefaultLocale); err != nil {
+		return err
+	}
+	if err = publishCatalogLocalizationsTx(ctx, tx, "", projectCode, "mod", snapshot.Localizations, revisionID, actorID); err != nil {
+		return err
+	}
+	if err = replaceModGalleryImagesTx(ctx, tx, modID, revisionID, actorID, snapshot.GalleryImages); err != nil {
+		return err
+	}
 	for _, statement := range []string{
 		`delete from mod_links where mod_id=$1`,
 		`delete from mod_tags where mod_id=$1`,
-		`delete from mod_authors where mod_id=$1`,
 		`delete from mod_loader_compatibilities where mod_id=$1`,
 		`delete from mod_relationship_groups where mod_id=$1`,
 	} {
@@ -430,8 +456,12 @@ func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, s
 			return err
 		}
 	}
+	if _, err = tx.Exec(ctx, `delete from content_creator_bindings
+		where subject_public_id=$1 and subject_type='mod'`, projectCode); err != nil {
+		return err
+	}
 	for index, link := range snapshot.Links {
-		if _, err = tx.Exec(ctx, `insert into mod_links(mod_id,link_type,url,display_order) values($1,$2,$3,$4)`, modID, link.Type, link.URL, index); err != nil {
+		if _, err = tx.Exec(ctx, `insert into mod_links(mod_id,link_type,url,note,display_order) values($1,$2,$3,$4,$5)`, modID, link.Type, link.URL, link.Note, index); err != nil {
 			return err
 		}
 	}
@@ -461,9 +491,9 @@ func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, s
 		if roleSnapshot == "" {
 			roleSnapshot = author.Role
 		}
-		if _, err = tx.Exec(ctx, `insert into mod_authors(
-			mod_id,creator_id,role_id,name_snapshot,role_snapshot,display_order
-		) values($1,$2,$3,$4,$5,$6)`, modID, creatorID, author.RoleID, nameSnapshot, roleSnapshot, index); err != nil {
+		if _, err = tx.Exec(ctx, `insert into content_creator_bindings(
+			subject_public_id,subject_type,creator_id,role_id,name_snapshot,role_snapshot,display_order
+		) values($1,'mod',$2,$3,$4,$5,$6)`, projectCode, creatorID, author.RoleID, nameSnapshot, roleSnapshot, index); err != nil {
 			return err
 		}
 	}

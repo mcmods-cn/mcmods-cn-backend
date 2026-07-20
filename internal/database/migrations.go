@@ -9,7 +9,8 @@ func baselineSchemaStatements() []string {
 			canonical_path text not null default '',
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
-			unique (entity_type, entity_key)
+			unique (entity_type, entity_key),
+			unique (public_id, entity_type)
 		)`,
 		`create or replace function new_public_id() returns text as $$
 		declare
@@ -496,6 +497,7 @@ func baselineSchemaStatements() []string {
 			license text not null default 'Custom',
 			curseforge_project_id text not null default '',
 			modrinth_project_id text not null default '',
+			github_project_path text not null default '',
 			icon_url text not null default '',
 			body_markdown text not null default '',
 			search_keywords text[] not null default '{}'::text[],
@@ -554,11 +556,40 @@ func baselineSchemaStatements() []string {
 		`create index if not exists idx_mods_review_updated_at on mods (review_status, updated_at desc)`,
 		`create index if not exists idx_mods_created_by_updated_at on mods (created_by, updated_at desc)`,
 		`create index if not exists idx_mods_primary_name_lower on mods (lower(primary_name))`,
+		`create table if not exists mod_identifiers (
+			id bigserial primary key,
+			mod_id bigint not null references mods(id) on delete cascade,
+			identifier text not null,
+			is_primary boolean not null default false,
+			minecraft_version_min text not null default '',
+			minecraft_version_max text not null default '',
+			minecraft_versions text[] not null default '{}'::text[],
+			display_order integer not null default 0,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			check (identifier ~ '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
+		)`,
+		`create unique index if not exists idx_mod_identifiers_namespace on mod_identifiers(lower(identifier))`,
+		`create unique index if not exists idx_mod_identifiers_primary on mod_identifiers(mod_id) where is_primary`,
+		`create index if not exists idx_mod_identifiers_mod_order on mod_identifiers(mod_id,display_order,id)`,
+		`create table if not exists mod_gallery_images (
+			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
+			mod_id bigint not null references mods(id) on delete cascade,
+			oss_file_id bigint not null references oss_files(id) on delete restrict,
+			display_order integer not null default 0,
+			created_by bigint references users(id) on delete set null,
+			published_revision_id bigint,
+			created_at timestamptz not null default now(),
+			unique(mod_id,oss_file_id)
+		)`,
+		`create index if not exists idx_mod_gallery_images_mod_order on mod_gallery_images(mod_id,display_order,id)`,
 		`create table if not exists mod_links (
 			id bigserial primary key,
 			mod_id bigint not null references mods(id) on delete cascade,
 			link_type text not null,
 			url text not null,
+			note text not null default '',
 			display_order integer not null default 0,
 			created_at timestamptz not null default now(),
 			unique (mod_id, link_type, url)
@@ -569,18 +600,22 @@ func baselineSchemaStatements() []string {
 			tag text not null,
 			primary key (mod_id, tag)
 		)`,
-		`create table if not exists mod_authors (
+		`create table if not exists content_creator_bindings (
 			id bigserial primary key,
-			mod_id bigint not null references mods(id) on delete cascade,
+			subject_public_id text not null,
+			subject_type text not null,
 			creator_id bigint not null,
 			role_id bigint,
 			name_snapshot text not null default '',
 			role_snapshot text not null default '',
 			display_order integer not null default 0,
 			created_at timestamptz not null default now(),
-			unique(mod_id,creator_id,role_id)
+			foreign key(subject_public_id,subject_type) references public_routes(public_id,entity_type) on delete cascade
 		)`,
-		`create index if not exists idx_mod_authors_mod_order on mod_authors (mod_id, display_order, id)`,
+		`create unique index if not exists idx_content_creator_bindings_unique
+			on content_creator_bindings(subject_public_id,subject_type,creator_id,coalesce(role_id,0))`,
+		`create index if not exists idx_content_creator_bindings_subject_order
+			on content_creator_bindings(subject_public_id,subject_type,display_order,id)`,
 		`create table if not exists mod_relationships (
 			id bigserial primary key,
 			mod_id bigint not null references mods(id) on delete cascade,
@@ -680,7 +715,7 @@ func baselineSchemaStatements() []string {
 			primary key (comment_id, user_id, reaction),
 			check (reaction in ('thumbs_up', 'thumbs_down', 'laugh', 'hooray', 'confused', 'heart', 'rocket', 'eyes'))
 		)`,
-		`create table if not exists mod_export_packages (
+		`create table if not exists catalog_import_packages (
 			id text primary key,
 			sha256 text not null unique check (sha256 ~ '^[0-9a-f]{64}$'),
 			archive_file_id bigint references oss_files(id) on delete set null,
@@ -696,10 +731,12 @@ func baselineSchemaStatements() []string {
 			uploaded_at timestamptz not null default now(),
 			imported_at timestamptz
 		)`,
-		`create table if not exists mod_export_jobs (
+		`create table if not exists catalog_import_jobs (
 			id text primary key,
 			mod_id bigint not null references mods(id) on delete cascade,
-			package_id text not null references mod_export_packages(id) on delete cascade,
+			package_id text not null references catalog_import_packages(id) on delete cascade,
+			target_version_public_id text not null,
+			overwrite_existing boolean not null default false,
 			importer_version text not null,
 			status text not null default 'queued',
 			progress smallint not null default 0 check (progress between 0 and 100),
@@ -714,16 +751,18 @@ func baselineSchemaStatements() []string {
 			run_token text not null default '',
 			attempt_count integer not null default 0,
 			updated_at timestamptz not null default now(),
-			unique (mod_id, package_id, importer_version),
+			unique (mod_id, package_id, importer_version, target_version_public_id, overwrite_existing),
 			check (status in ('queued','validating','importing','ready','partial','failed','cancelled'))
 		)`,
-		`create index if not exists idx_mod_export_jobs_status_created on mod_export_jobs(status, created_at)`,
-		`create index if not exists idx_mod_export_jobs_running_heartbeat
-		 on mod_export_jobs(heartbeat_at) where status in ('validating','importing')`,
-		`create table if not exists mod_export_revisions (
+		`create index if not exists idx_catalog_import_jobs_status_created on catalog_import_jobs(status, created_at)`,
+		`create index if not exists idx_catalog_import_jobs_running_heartbeat
+		 on catalog_import_jobs(heartbeat_at) where status in ('validating','importing')`,
+		`create table if not exists catalog_import_revisions (
 			id text primary key,
 			mod_id bigint not null references mods(id) on delete cascade,
-			package_id text not null references mod_export_packages(id) on delete restrict,
+			package_id text not null references catalog_import_packages(id) on delete restrict,
+			job_id text not null references catalog_import_jobs(id) on delete cascade,
+			target_version_public_id text not null,
 			revision_no bigint not null,
 			status text not null default 'staging',
 			minecraft_version text not null,
@@ -735,29 +774,29 @@ func baselineSchemaStatements() []string {
 			is_active boolean not null default false,
 			created_at timestamptz not null default now(),
 			activated_at timestamptz,
-			unique (mod_id, minecraft_version, loader, source_namespace, revision_no),
+			unique (mod_id, target_version_public_id, source_namespace, revision_no),
 			check (status in ('staging','ready','partial','rejected','superseded'))
 		)`,
-		`create unique index if not exists idx_mod_export_revisions_active
-		 on mod_export_revisions(mod_id, minecraft_version, loader, source_namespace) where is_active`,
-		`create index if not exists idx_mod_export_revisions_package on mod_export_revisions(package_id)`,
-		`create index if not exists idx_mod_export_revisions_import_run on mod_export_revisions(import_run_token) where status='staging'`,
-		`create table if not exists mod_export_locales (
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
+		`create unique index if not exists idx_catalog_import_revisions_active
+		 on catalog_import_revisions(mod_id, target_version_public_id, source_namespace) where is_active`,
+		`create index if not exists idx_catalog_import_revisions_package on catalog_import_revisions(package_id)`,
+		`create index if not exists idx_catalog_import_revisions_import_run on catalog_import_revisions(import_run_token) where status='staging'`,
+		`create table if not exists catalog_import_locales (
+			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			locale text not null,
 			translation_count integer not null default 0,
 			primary key (revision_id, locale)
 		)`,
-		`create table if not exists mod_export_translations (
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
+		`create table if not exists catalog_import_translations (
+			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			locale text not null,
 			translation_key text not null,
 			value text not null,
 			primary key (revision_id, locale, translation_key)
 		)`,
-		`create index if not exists idx_mod_export_translations_key on mod_export_translations(revision_id, translation_key)`,
-		`create table if not exists mod_export_text_assets (
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
+		`create index if not exists idx_catalog_import_translations_key on catalog_import_translations(revision_id, translation_key)`,
+		`create table if not exists catalog_import_text_assets (
+			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			asset_path text not null,
 			asset_kind text not null,
 			content_type text not null,
@@ -768,9 +807,9 @@ func baselineSchemaStatements() []string {
 			primary key (revision_id, asset_path),
 			check ((text_content is not null)::integer + (json_content is not null)::integer = 1)
 		)`,
-		`create table if not exists mod_export_binary_assets (
+		`create table if not exists catalog_import_binary_assets (
 			id text primary key,
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			asset_path text not null,
 			asset_kind text not null,
 			content_type text not null default 'application/octet-stream',
@@ -779,8 +818,8 @@ func baselineSchemaStatements() []string {
 			data bytea not null,
 			unique (revision_id, asset_path)
 		)`,
-		`create table if not exists mod_export_media (
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
+		`create table if not exists catalog_import_media (
+			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			asset_path text not null,
 			media_kind text not null,
 			oss_file_id bigint not null references oss_files(id) on delete restrict,
@@ -792,19 +831,19 @@ func baselineSchemaStatements() []string {
 			has_alpha boolean,
 			primary key (revision_id, asset_path)
 		)`,
-		`create table if not exists mod_export_structures (
+		`create table if not exists catalog_import_structures (
 			id text primary key,
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			structure_id text not null,
 			asset_path text not null,
 			source_format text not null,
-			template_blob_id text not null references mod_export_binary_assets(id) on delete cascade,
+			template_blob_id text not null references catalog_import_binary_assets(id) on delete cascade,
 			summary jsonb not null default '{}'::jsonb,
 			unique (revision_id, structure_id)
 		)`,
-		`create table if not exists mod_export_job_logs (
+		`create table if not exists catalog_import_job_logs (
 			id bigserial primary key,
-			job_id text not null references mod_export_jobs(id) on delete cascade,
+			job_id text not null references catalog_import_jobs(id) on delete cascade,
 			level text not null default 'info',
 			stage text not null default '',
 			message text not null default '',

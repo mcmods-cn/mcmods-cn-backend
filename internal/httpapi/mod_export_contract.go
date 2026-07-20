@@ -106,7 +106,7 @@ func importExportCapabilities(ctx context.Context, tx pgx.Tx, revisions map[stri
 		revisionIDs = append(revisionIDs, revisionID)
 	}
 	rows := len(revisionIDs) * len(capabilities)
-	copied, err := tx.CopyFrom(ctx, pgx.Identifier{"mod_export_capabilities"}, []string{
+	copied, err := tx.CopyFrom(ctx, pgx.Identifier{"catalog_import_capabilities"}, []string{
 		"revision_id", "capability_id", "status", "source", "data",
 	}, pgx.CopyFromSlice(rows, func(index int) ([]any, error) {
 		revisionID := revisionIDs[index/len(capabilities)]

@@ -94,6 +94,8 @@ var seedPermissions = []seedPermission{
 	{Code: "notification.translate", Module: "notification", Name: "Translate notifications", Description: "Allows AI translation of received notifications."},
 	{Code: "content.review", Module: "review", Name: "Review content", Description: "Allows reviewing content changes, files and reports."},
 	{Code: "content.write", Module: "content", Name: "Manage content", Description: "Allows creating and editing site content."},
+	{Code: "content.no-review", Module: "content", Name: "Bypass content review", Description: "Allows catalog and localized content changes to publish without review."},
+	{Code: "content.translate", Module: "content", Name: "Translate content", Description: "Allows requesting quota-backed AI translations for unsupported content languages."},
 
 	{Code: "project.create", Module: "project", Name: "Create projects", Description: "Allows creating mods and other projects."},
 	{Code: "project.edit", Module: "project", Name: "Edit projects", Description: "Allows editing project metadata."},
@@ -103,6 +105,7 @@ var seedPermissions = []seedPermission{
 	{Code: "project.review.<projectID>", Module: "project", Name: "Project review template", Description: "Variable permission; replace <projectID> with a project unique ID."},
 	{Code: "project.delete.<projectID>", Module: "project", Name: "Project delete template", Description: "Variable permission; replace <projectID> with a project unique ID."},
 	{Code: "project.no-review.<projectID>", Module: "project", Name: "Project review bypass template", Description: "Variable permission; replace <projectID> with a project unique ID."},
+	{Code: "project.download.upload.<projectID>", Module: "project", Name: "Project file upload template", Description: "Variable permission; replace <projectID> with a project unique ID to upload and manage on-site download files."},
 }
 
 var seedUsers = []seedUser{
@@ -122,7 +125,7 @@ var seedUsers = []seedUser{
 			"mail.read", "mail.write", "oss.read", "oss.write", "log.read", "log.write",
 			"ai.read", "ai.write", "ai.task.enqueue", "ai.task.consume",
 			"notification.system.publish", "notification.translate",
-			"content.review", "content.write",
+			"content.review", "content.write", "content.no-review", "content.translate",
 			"project.create", "project.edit", "project.review",
 		},
 	},

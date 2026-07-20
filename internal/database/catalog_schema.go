@@ -1,20 +1,20 @@
 package database
 
-// catalogSchemaStatements defines the durable identity layer used by every
-// imported Minecraft object. Import revisions are snapshots; catalog entities
-// are stable identities shared by revisions, mods and user-authored content.
+// catalogSchemaStatements defines stable catalog identities and the import
+// observation layer. Import snapshots describe source observations only;
+// canonical, user-authored content is published independently of an import run.
 func catalogSchemaStatements() []string {
 	return []string{
-		`create table mod_export_capabilities (
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
+		`create table catalog_import_capabilities (
+			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			capability_id text not null,
 			status text not null,
 			source text not null default '',
 			data jsonb not null default '{}'::jsonb,
 			primary key(revision_id,capability_id)
 		)`,
-		`create table mod_export_revision_stats (
-			revision_id text primary key references mod_export_revisions(id) on delete cascade,
+		`create table catalog_import_revision_stats (
+			revision_id text primary key references catalog_import_revisions(id) on delete cascade,
 			registry_counts jsonb not null default '{}'::jsonb,
 			document_counts jsonb not null default '{}'::jsonb,
 			capability_statuses jsonb not null default '{}'::jsonb,
@@ -101,7 +101,7 @@ func catalogSchemaStatements() []string {
 			namespace text not null,
 			resource_path text not null,
 			owner_mod_id bigint references mods(id) on delete set null,
-			created_from_revision_id text references mod_export_revisions(id) on delete set null,
+			created_from_revision_id text references catalog_import_revisions(id) on delete set null,
 			resolved boolean not null default false,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
@@ -113,13 +113,15 @@ func catalogSchemaStatements() []string {
 			kind_code text not null references resource_kinds(code),
 			alias_id text not null,
 			resource_id text not null references game_resources(entity_id) on delete cascade,
+			source text not null default 'manual',
 			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
 			primary key(kind_code,alias_id)
 		)`,
-		`create table game_resource_snapshots (
+		`create table resource_import_snapshots (
 			id text primary key,
 			resource_id text not null references game_resources(entity_id) on delete cascade,
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			registry text not null,
 			translation_key text not null default '',
 			names jsonb not null default '{}'::jsonb,
@@ -130,10 +132,10 @@ func catalogSchemaStatements() []string {
 			unique(resource_id,revision_id),
 			unique(revision_id,registry,resource_id)
 		)`,
-		`create index idx_game_resource_snapshots_revision_registry on game_resource_snapshots(revision_id,registry,resource_id)`,
-		`create index idx_game_resource_snapshots_resource on game_resource_snapshots(resource_id,revision_id)`,
+		`create index idx_resource_import_snapshots_revision_registry on resource_import_snapshots(revision_id,registry,resource_id)`,
+		`create index idx_resource_import_snapshots_resource on resource_import_snapshots(resource_id,revision_id)`,
 		`create table game_resource_asset_bindings (
-			snapshot_id text primary key references game_resource_snapshots(id) on delete cascade,
+			snapshot_id text primary key references resource_import_snapshots(id) on delete cascade,
 			item_resource_id text references game_resources(entity_id) on delete set null,
 			block_resource_id text references game_resources(entity_id) on delete set null,
 			blockstate_path text not null default '',
@@ -144,8 +146,8 @@ func catalogSchemaStatements() []string {
 		`create index idx_game_resource_asset_bindings_item on game_resource_asset_bindings(item_resource_id) where item_resource_id is not null`,
 		`create table block_entity_model_snapshots (
 			id text primary key,
-			resource_snapshot_id text not null unique references game_resource_snapshots(id) on delete cascade,
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			resource_snapshot_id text not null unique references resource_import_snapshots(id) on delete cascade,
+			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			block_resource_id text not null references game_resources(entity_id) on delete cascade,
 			block_id text not null,
 			block_entity_type_id text not null,
@@ -180,29 +182,29 @@ func catalogSchemaStatements() []string {
 			canonical_id text not null,
 			unique(registry,canonical_id)
 		)`,
-		`create table catalog_tag_snapshots (
+		`create table tag_import_snapshots (
 			id text primary key,
 			tag_id text not null references catalog_tags(entity_id) on delete cascade,
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			member_count integer not null default 0,
 			unique(tag_id,revision_id)
 		)`,
-		`create table catalog_tag_members (
-			tag_snapshot_id text not null references catalog_tag_snapshots(id) on delete cascade,
+		`create table tag_import_members (
+			tag_snapshot_id text not null references tag_import_snapshots(id) on delete cascade,
 			resource_id text references game_resources(entity_id) on delete set null,
 			raw_member_id text not null,
 			ordinal integer not null,
 			primary key(tag_snapshot_id,raw_member_id)
 		)`,
-		`create index idx_catalog_tag_members_resource on catalog_tag_members(resource_id) where resource_id is not null`,
+		`create index idx_tag_import_members_resource on tag_import_members(resource_id) where resource_id is not null`,
 		`create table recipe_types (
 			entity_id text primary key references catalog_entities(id) on delete cascade,
 			canonical_id text not null unique
 		)`,
-		`create table recipe_type_snapshots (
+		`create table recipe_type_import_snapshots (
 			id text primary key,
 			recipe_type_id text not null references recipe_types(entity_id) on delete cascade,
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			title_translation_key text not null default '',
 			title_names jsonb not null default '{}'::jsonb,
 			width integer not null default 0,
@@ -218,11 +220,12 @@ func catalogSchemaStatements() []string {
 			recipe_collection_path text not null default '',
 			unique(recipe_type_id,revision_id)
 		)`,
-		`create table recipe_layout_templates (
+		`create table recipe_template_import_snapshots (
 			id text primary key,
-			recipe_type_snapshot_id text not null references recipe_type_snapshots(id) on delete cascade,
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			recipe_type_snapshot_id text not null references recipe_type_import_snapshots(id) on delete cascade,
+			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			recipe_type_id text not null references recipe_types(entity_id) on delete cascade,
+			canonical_template_id text references catalog_entities(id) on delete set null,
 			source_template_id text not null,
 			schema_version text not null,
 			template_collection_path text not null,
@@ -236,10 +239,12 @@ func catalogSchemaStatements() []string {
 			slot_count integer not null default 0,
 			unique(recipe_type_snapshot_id,source_template_id)
 		)`,
-		`create index idx_recipe_layout_templates_revision_type on recipe_layout_templates(revision_id,recipe_type_id)`,
-		`create table recipe_template_slots (
+		`create index idx_recipe_template_import_snapshots_revision_type on recipe_template_import_snapshots(revision_id,recipe_type_id)`,
+		`create index idx_recipe_template_import_snapshots_canonical on recipe_template_import_snapshots(canonical_template_id,revision_id)
+			where canonical_template_id is not null`,
+		`create table recipe_template_import_slots (
 			id text primary key,
-			template_id text not null references recipe_layout_templates(id) on delete cascade,
+			template_id text not null references recipe_template_import_snapshots(id) on delete cascade,
 			source_slot_id text not null,
 			role text not null,
 			jei_role text not null default '',
@@ -263,10 +268,10 @@ func catalogSchemaStatements() []string {
 		)`,
 		`create unique index idx_recipes_authoritative_identity on recipes(recipe_type_id,canonical_source_id) where canonical_source_id is not null`,
 		`create index idx_recipes_semantic_identity on recipes(recipe_type_id,semantic_fingerprint)`,
-		`create table recipe_snapshots (
+		`create table recipe_import_snapshots (
 			id text primary key,
 			recipe_id text not null references recipes(entity_id) on delete cascade,
-			revision_id text not null references mod_export_revisions(id) on delete cascade,
+			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			source_recipe_id text not null,
 			source_id_kind text not null,
 			source_recipe_key text not null,
@@ -278,7 +283,7 @@ func catalogSchemaStatements() []string {
 			source_mod_id_source text not null default '',
 			render_locale text not null default '',
 			source_data jsonb not null default '{}'::jsonb,
-			template_id text references recipe_layout_templates(id) on delete restrict,
+			template_id text references recipe_template_import_snapshots(id) on delete restrict,
 			layout_available boolean not null default true,
 			layout_kind text not null default 'unknown',
 			ordered boolean,
@@ -293,11 +298,11 @@ func catalogSchemaStatements() []string {
 				(layout_kind='shapeless' and ordered is false) or
 				(layout_kind in ('not_applicable','unknown') and ordered is null))
 		)`,
-		`create index idx_recipe_snapshots_revision on recipe_snapshots(revision_id,recipe_id)`,
-		`create table recipe_bindings (
+		`create index idx_recipe_import_snapshots_revision on recipe_import_snapshots(revision_id,recipe_id)`,
+		`create table recipe_import_bindings (
 			id text primary key,
-			recipe_snapshot_id text not null references recipe_snapshots(id) on delete cascade,
-			template_slot_id text not null references recipe_template_slots(id) on delete restrict,
+			recipe_snapshot_id text not null references recipe_import_snapshots(id) on delete cascade,
+			template_slot_id text not null references recipe_template_import_slots(id) on delete restrict,
 			source_slot_id text not null,
 			ordinal integer not null,
 			ingredient_present boolean not null default false,
@@ -306,6 +311,22 @@ func catalogSchemaStatements() []string {
 			item_tag_equivalent text not null default '',
 			semantic_role text not null default '',
 			role_source text not null default '',
+			tag_id text references catalog_tags(entity_id) on delete set null,
+			data jsonb not null default '{}'::jsonb,
+			unique(recipe_snapshot_id,source_slot_id)
+		)`,
+		`create index idx_recipe_import_bindings_tag on recipe_import_bindings(tag_id,recipe_snapshot_id) where tag_id is not null`,
+		`create table recipe_import_binding_candidates (
+			id text primary key,
+			binding_id text not null references recipe_import_bindings(id) on delete cascade,
+			alternative_index integer not null,
+			resource_id text references game_resources(entity_id) on delete set null,
+			raw_resource_id text not null default '',
+			amount double precision not null default 1,
+			ingredient_kind text not null,
+			ingredient_type text not null,
+			unique_id text not null default '',
+			nbt_snbt text not null default '',
 			chance_available boolean not null default false,
 			chance double precision,
 			chance_percent double precision,
@@ -317,30 +338,34 @@ func catalogSchemaStatements() []string {
 			chance_render_x double precision,
 			chance_render_y double precision,
 			byproduct boolean not null default false,
-			tag_id text references catalog_tags(entity_id) on delete set null,
 			data jsonb not null default '{}'::jsonb,
-			unique(recipe_snapshot_id,source_slot_id)
+			unique(binding_id,alternative_index,raw_resource_id),
+			check(chance is null or (chance >= 0 and chance <= 1)),
+			check(chance_percent is null or (chance_percent >= 0 and chance_percent <= 100)),
+			check(chance_available or (chance is null and chance_percent is null))
 		)`,
-		`create index idx_recipe_bindings_tag on recipe_bindings(tag_id,recipe_snapshot_id) where tag_id is not null`,
-		`create table recipe_binding_alternatives (
-			id text primary key,
-			binding_id text not null references recipe_bindings(id) on delete cascade,
-			alternative_index integer not null,
-			resource_id text references game_resources(entity_id) on delete set null,
-			raw_resource_id text not null default '',
-			amount double precision not null default 1,
-			ingredient_kind text not null,
-			ingredient_type text not null,
-			unique_id text not null default '',
-			nbt_snbt text not null default '',
-			data jsonb not null default '{}'::jsonb,
-			unique(binding_id,alternative_index,raw_resource_id)
-		)`,
-		`create index idx_recipe_binding_alternatives_resource on recipe_binding_alternatives(resource_id,binding_id) where resource_id is not null`,
+		`create index idx_recipe_import_binding_candidates_resource on recipe_import_binding_candidates(resource_id,binding_id) where resource_id is not null`,
+		`create or replace function validate_recipe_import_candidate_output_fields() returns trigger as $$
+		declare candidate_role text;
+		begin
+			select lower(coalesce(nullif(binding.semantic_role,''),nullif(slot.role,''),nullif(slot.jei_role,''),''))
+			into candidate_role
+			from recipe_import_bindings binding
+			join recipe_template_import_slots slot on slot.id=binding.template_slot_id
+			where binding.id=new.binding_id;
+			if candidate_role not in ('output','result','byproduct') and
+			   (new.chance_available or new.chance is not null or new.chance_percent is not null or new.byproduct) then
+				raise exception 'chance and byproduct are only valid for output candidates';
+			end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_recipe_import_candidate_output_fields before insert or update on recipe_import_binding_candidates
+			for each row execute function validate_recipe_import_candidate_output_fields()`,
 		`create table unresolved_resource_references (
 			id text primary key,
 			source_entity_id text not null references catalog_entities(id) on delete cascade,
-			source_revision_id text references mod_export_revisions(id) on delete cascade,
+			source_revision_id text references catalog_import_revisions(id) on delete cascade,
 			field_path text not null,
 			kind_code text not null,
 			raw_resource_id text not null,
