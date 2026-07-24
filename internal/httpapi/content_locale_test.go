@@ -6,7 +6,7 @@ import (
 )
 
 func TestResolveContentLocaleChinesePairBeforeEnglish(t *testing.T) {
-	resolution := resolveContentLocale("zh-TW", "en", "en", []string{"en", "zh-CN"})
+	resolution := resolveContentLocale("zh-TW", "en", "en-US", []string{"en_us", "zh-CN"})
 	if resolution.ResolvedLocale != "zh-CN" || resolution.Reason != "chinese_pair" {
 		t.Fatalf("unexpected resolution: %#v", resolution)
 	}
@@ -16,8 +16,8 @@ func TestResolveContentLocaleChinesePairBeforeEnglish(t *testing.T) {
 }
 
 func TestResolveContentLocaleUnsupportedUsesSecondary(t *testing.T) {
-	resolution := resolveContentLocale("pt-BR", "ja", "en", []string{"en", "ja"})
-	if resolution.ResolvedLocale != "ja" || resolution.Reason != "secondary" {
+	resolution := resolveContentLocale("pt-BR", "ja", "en-US", []string{"en-US", "ja_jp"})
+	if resolution.ResolvedLocale != "ja-JP" || resolution.Reason != "secondary" {
 		t.Fatalf("unexpected resolution: %#v", resolution)
 	}
 	if resolution.ShouldAutoTranslate || !resolution.CanRequestTranslation || resolution.RequestedEditable {
@@ -26,7 +26,7 @@ func TestResolveContentLocaleUnsupportedUsesSecondary(t *testing.T) {
 }
 
 func TestResolveContentLocaleStoredUnsupportedTranslation(t *testing.T) {
-	resolution := resolveContentLocale("pt_br", "en", "en", []string{"pt-BR", "en"})
+	resolution := resolveContentLocale("pt_br", "en", "en-US", []string{"pt-BR", "en-US"})
 	if resolution.ResolvedLocale != "pt-BR" || resolution.Reason != "exact" || !resolution.RequestedExists {
 		t.Fatalf("unexpected resolution: %#v", resolution)
 	}
@@ -40,6 +40,8 @@ func TestNormalizeContentLocaleChineseAliases(t *testing.T) {
 		"zh_hans": "zh-CN",
 		"zh-HK":   "zh-TW",
 		"PT_br":   "pt-BR",
+		"en":      "en-US",
+		"ja_jp":   "ja-JP",
 	}
 	for input, want := range tests {
 		if got := normalizeContentLocale(input); got != want {
@@ -49,7 +51,7 @@ func TestNormalizeContentLocaleChineseAliases(t *testing.T) {
 }
 
 func TestValidContentLocaleTag(t *testing.T) {
-	for _, locale := range []string{"zh-CN", "pt-BR", "sr-Latn-RS", "en"} {
+	for _, locale := range []string{"zh-CN", "pt-BR", "sr-Latn-RS", "en-US"} {
 		if !validContentLocaleTag(locale) {
 			t.Fatalf("expected %q to be accepted", locale)
 		}

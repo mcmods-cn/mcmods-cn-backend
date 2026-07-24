@@ -193,6 +193,24 @@ func (s *Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"read": true})
 }
 
+func (s *Server) markAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
+	claims := currentClaims(r)
+	tag, err := s.db.Exec(
+		r.Context(),
+		`insert into notification_receipts (notification_id, user_id, read_at)
+		 select id, $1, now() from notifications
+		 where recipient_id is null or recipient_id = $1
+		 on conflict (notification_id, user_id) do update set read_at = now()
+		 where notification_receipts.read_at is null`,
+		claims.Subject,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "更新通知状态失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"read": true, "updated": tag.RowsAffected()})
+}
+
 func (s *Server) unreadSummary(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	var notificationsCount, messagesCount int64

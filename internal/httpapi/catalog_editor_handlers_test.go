@@ -16,7 +16,7 @@ func TestImportedCatalogLocalizationRowsNormalizeMinecraftLocales(t *testing.T) 
 			t.Fatalf("imported row did not retain provenance/editability: %#v", row)
 		}
 	}
-	want := map[string]string{"en": "Copper Block", "zh-CN": "铜块", "zh-TW": "銅塊"}
+	want := map[string]string{"en-US": "Copper Block", "zh-CN": "铜块", "zh-TW": "銅塊"}
 	encodedGot, _ := json.Marshal(got)
 	encodedWant, _ := json.Marshal(want)
 	if string(encodedGot) != string(encodedWant) {
@@ -26,10 +26,10 @@ func TestImportedCatalogLocalizationRowsNormalizeMinecraftLocales(t *testing.T) 
 
 func TestCatalogImportedEditorLocalizationsPreferImportedTitleNames(t *testing.T) {
 	rows, defaultLocale := catalogImportedEditorLocalizations([]byte(`{"ja_jp":"圧縮","en_us":"Compressing"}`), "zh-CN", "mod:compressing")
-	if defaultLocale != "en" || len(rows) != 2 {
+	if defaultLocale != "en-US" || len(rows) != 2 {
 		t.Fatalf("unexpected import localization fallback: default=%q rows=%#v", defaultLocale, rows)
 	}
-	if !catalogLocalizationMapContains(rows, "en") || !catalogLocalizationMapContains(rows, "ja") {
+	if !catalogLocalizationMapContains(rows, "en-US") || !catalogLocalizationMapContains(rows, "ja-JP") {
 		t.Fatalf("title_names were not normalized into editable site locales: %#v", rows)
 	}
 }

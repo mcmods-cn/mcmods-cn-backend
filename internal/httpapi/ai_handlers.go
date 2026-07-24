@@ -519,7 +519,7 @@ func defaultAIConfig() aiConfigPayload {
 		Translation: aiTranslationConfig{
 			Enabled:       false,
 			SourceLocale:  "zh-CN",
-			TargetLocales: []string{"en"},
+			TargetLocales: []string{"en-US"},
 			TaskType:      "translation",
 			AutoSubmit:    false,
 		},

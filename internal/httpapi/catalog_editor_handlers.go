@@ -69,7 +69,7 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
 		left join mods owner on owner.id=resource.owner_mod_id
 		left join lateral (select candidate.* from content_localizations candidate where candidate.catalog_entity_id=entity.id
-		 order by case candidate.locale when $4 then 0 when $5 then 1 when entity.default_locale then 2 when 'en' then 3 else 4 end limit 1) localization on true
+			 order by case candidate.locale when $4 then 0 when $5 then 1 when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
 		where entity.status='active' and ($1='' or resource.kind_code=$1) and ($3='' or resource.namespace=$3) and
 		($2='' or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations candidate
 		 where candidate.catalog_entity_id=entity.id and candidate.name ilike '%'||$2||'%')
@@ -309,7 +309,7 @@ func catalogImportedEditorLocalizations(raw []byte, defaultLocale, fallbackName 
 	localizations := importedCatalogLocalizationRows(raw)
 	defaultLocale = normalizeContentLocale(defaultLocale)
 	if !isEditableContentLocale(defaultLocale) {
-		defaultLocale = "en"
+		defaultLocale = "en-US"
 	}
 	if len(localizations) == 0 {
 		fallbackName = strings.TrimSpace(fallbackName)
@@ -326,8 +326,8 @@ func catalogImportedEditorLocalizations(raw []byte, defaultLocale, fallbackName 
 	if catalogLocalizationMapContains(localizations, defaultLocale) {
 		return localizations, defaultLocale
 	}
-	if catalogLocalizationMapContains(localizations, "en") {
-		return localizations, "en"
+	if catalogLocalizationMapContains(localizations, "en-US") {
+		return localizations, "en-US"
 	}
 	resolved, _ := localizations[0]["locale"].(string)
 	return localizations, resolved
@@ -387,7 +387,7 @@ func (s *Server) catalogTags(w http.ResponseWriter, r *http.Request) {
 		from catalog_tags tag join catalog_entities entity on entity.id=tag.entity_id
 		left join lateral (select candidate.locale,candidate.name from content_localizations candidate
 		 where candidate.catalog_entity_id=entity.id order by case candidate.locale when $2 then 0 when $3 then 1
-		 when entity.default_locale then 2 when 'en' then 3 else 4 end limit 1) localization on true
+			 when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
 		where entity.status='active' and ($1='' or tag.canonical_id ilike '%'||$1||'%' or exists(
 		 select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%'))
 		order by tag.registry,tag.canonical_id limit $4 offset $5`, query, primary, secondary, limit, offset)
@@ -875,6 +875,40 @@ func (s *Server) catalogRecipeTemplateDetail(w http.ResponseWriter, r *http.Requ
 		"reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID), "source": source, "importMetadata": importMetadata})
 }
 
+func (s *Server) catalogRecipeSourceVersions(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	limit := boundedLimit(r.URL.Query().Get("limit"), 500, 1000)
+	claims := currentClaims(r)
+	rows, err := s.db.Query(r.Context(), `select version.public_id,mod.project_code,mod.slug,mod.primary_name,
+		version.label,version.minecraft_versions,version.loaders,version.mod_version
+		from mod_content_versions version join mods mod on mod.id=version.mod_id
+		where version.status='active' and (mod.review_status='approved' or mod.created_by=$1)
+		and ($2='' or mod.primary_name ilike '%'||$2||'%' or mod.secondary_name ilike '%'||$2||'%'
+			or mod.slug ilike '%'||$2||'%' or version.label ilike '%'||$2||'%' or version.mod_version ilike '%'||$2||'%')
+		order by lower(mod.primary_name),mod.id,version.updated_at desc,version.id desc limit $3`, claims.Subject, query, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read recipe source versions")
+		return
+	}
+	defer rows.Close()
+	items := make([]map[string]any, 0)
+	for rows.Next() {
+		var publicID, modPublicID, modSiteID, modName, label, modVersion string
+		var minecraftVersions, loaders []string
+		if err = rows.Scan(&publicID, &modPublicID, &modSiteID, &modName, &label, &minecraftVersions, &loaders, &modVersion); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode recipe source versions")
+			return
+		}
+		items = append(items, map[string]any{"publicId": publicID, "modPublicId": modPublicID, "modSiteId": modSiteID,
+			"modName": modName, "label": label, "minecraftVersions": minecraftVersions, "loaders": loaders, "modVersion": modVersion})
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read recipe source versions")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
 func (s *Server) createCatalogRecipe(w http.ResponseWriter, r *http.Request) {
 	var edit catalogRecipeEdit
 	if decodeJSON(r, &edit) != nil || edit.BaseRevisionID != nil {
@@ -933,16 +967,24 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 		case when definition.recipe_id is not null then (select count(*)::int from recipe_bindings binding where binding.recipe_id=recipe.entity_id)
 		 else coalesce(observation.binding_count,0) end,
 		coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-		 where localization.catalog_entity_id=entity.id and localization.name<>''),'{}'::jsonb),definition.recipe_id is not null
+		 where localization.catalog_entity_id=entity.id and localization.name<>''),'{}'::jsonb),definition.recipe_id is not null,
+		coalesce(effective_source_version.public_id,''),coalesce(source_mod.project_code,''),coalesce(source_mod.slug,''),
+		coalesce(source_mod.primary_name,''),coalesce(effective_source_version.label,''),
+		coalesce(effective_source_version.minecraft_versions,'{}'::text[]),coalesce(effective_source_version.loaders,'{}'::text[]),
+		coalesce(effective_source_version.mod_version,'')
 		from recipes recipe join catalog_entities entity on entity.id=recipe.entity_id
 		left join recipe_definitions definition on definition.recipe_id=recipe.entity_id
 		left join catalog_entities template_entity on template_entity.id=definition.template_id
-		left join lateral (select snapshot.* from recipe_import_snapshots snapshot
+		left join lateral (select snapshot.*,revision.target_version_public_id as source_version_public_id from recipe_import_snapshots snapshot
 		 join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		 where snapshot.recipe_id=recipe.entity_id and revision.is_active and revision.status in ('ready','partial')
 		 order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1) observation on true
 		left join recipe_template_import_snapshots import_template on import_template.id=observation.template_id
 		left join catalog_entities imported_template_entity on imported_template_entity.id=import_template.canonical_template_id
+		left join mod_content_versions canonical_source_version on canonical_source_version.id=definition.source_mod_content_version_id
+		left join mod_content_versions effective_source_version on effective_source_version.public_id=
+			case when definition.recipe_id is not null then canonical_source_version.public_id else observation.source_version_public_id end
+		left join mods source_mod on source_mod.id=effective_source_version.mod_id
 		where recipe.recipe_type_id=$1 and entity.status='active' and ($2='' or coalesce(recipe.canonical_source_id,'') ilike '%'||$2||'%')
 		order by coalesce(recipe.canonical_source_id,''),entity.public_id limit $3 offset $4`, typeEntity.ID, query, limit, offset)
 	if err != nil {
@@ -954,23 +996,34 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0, limit)
 	for rows.Next() {
 		var publicID, canonicalID, identitySource, templatePublicID, observationID, importRevisionID string
+		var sourceVersionPublicID, sourceModPublicID, sourceModSiteID, sourceModName, sourceVersionLabel, sourceModVersion string
+		var sourceMinecraftVersions, sourceLoaders []string
 		var publishedRevisionID sql.NullInt64
 		var definition, names []byte
 		var bindingCount int
 		var canonicalDefinition bool
 		if err = rows.Scan(&publicID, &canonicalID, &identitySource, &publishedRevisionID, &templatePublicID, &definition,
-			&observationID, &importRevisionID, &bindingCount, &names, &canonicalDefinition); err != nil {
+			&observationID, &importRevisionID, &bindingCount, &names, &canonicalDefinition,
+			&sourceVersionPublicID, &sourceModPublicID, &sourceModSiteID, &sourceModName, &sourceVersionLabel,
+			&sourceMinecraftVersions, &sourceLoaders, &sourceModVersion); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode recipes")
 			return
 		}
-		locale, name := catalogResolvedName(names, primary, secondary, "en")
+		locale, name := catalogResolvedName(names, primary, secondary, "en-US")
 		source := "canonical"
 		if !canonicalDefinition && observationID != "" {
 			source = "import"
 		}
+		var sourceVersion any
+		if sourceVersionPublicID != "" {
+			sourceVersion = map[string]any{"publicId": sourceVersionPublicID, "modPublicId": sourceModPublicID, "modSiteId": sourceModSiteID,
+				"modName": sourceModName, "label": sourceVersionLabel, "minecraftVersions": sourceMinecraftVersions,
+				"loaders": sourceLoaders, "modVersion": sourceModVersion}
+		}
 		items = append(items, map[string]any{"publicId": publicID, "canonicalSourceId": canonicalID,
 			"identitySource": identitySource, "templatePublicId": templatePublicID, "publishedRevisionId": nullableCatalogInt64(publishedRevisionID),
 			"definition": json.RawMessage(definition), "bindingCount": bindingCount, "source": source,
+			"sourceVersionPublicId": sourceVersionPublicID, "sourceVersion": sourceVersion,
 			"importRevisionId": importRevisionID, "locale": locale, "name": name, "names": json.RawMessage(names)})
 	}
 	if err = rows.Err(); err != nil {
@@ -983,6 +1036,10 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 func (s *Server) normalizeCatalogRecipeEdit(ctx context.Context, typeID string, edit *catalogRecipeEdit) error {
 	var err error
 	edit.TemplatePublicID, err = canonicalCatalogString(edit.TemplatePublicID, 32)
+	if err != nil {
+		return err
+	}
+	edit.SourceVersionPublicID, err = normalizeCatalogOptionalPublicID(edit.SourceVersionPublicID)
 	if err != nil {
 		return err
 	}
@@ -1049,22 +1106,34 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var typePublicID, templatePublicID, canonicalID, observationID, importRevisionID, importTemplateKey string
+	var sourceVersionPublicID, sourceModPublicID, sourceModSiteID, sourceModName, sourceVersionLabel, sourceModVersion string
+	var sourceMinecraftVersions, sourceLoaders []string
 	var canonicalDefinition bool
 	var definition []byte
 	if err = s.db.QueryRow(r.Context(), `select type_entity.public_id,coalesce(template_entity.public_id,imported_template_entity.public_id,''),coalesce(recipe.canonical_source_id,''),
 		coalesce(definition.definition,observation.source_data,'{}'::jsonb),coalesce(observation.id,''),coalesce(observation.revision_id,''),
-		coalesce(import_template.source_template_id,''),definition.recipe_id is not null
+		coalesce(import_template.source_template_id,''),definition.recipe_id is not null,
+		coalesce(effective_source_version.public_id,''),coalesce(source_mod.project_code,''),coalesce(source_mod.slug,''),
+		coalesce(source_mod.primary_name,''),coalesce(effective_source_version.label,''),
+		coalesce(effective_source_version.minecraft_versions,'{}'::text[]),coalesce(effective_source_version.loaders,'{}'::text[]),
+		coalesce(effective_source_version.mod_version,'')
 		from recipes recipe join catalog_entities type_entity on type_entity.id=recipe.recipe_type_id
 		left join recipe_definitions definition on definition.recipe_id=recipe.entity_id
 		left join catalog_entities template_entity on template_entity.id=definition.template_id
-		left join lateral (select snapshot.* from recipe_import_snapshots snapshot
-		 join catalog_import_revisions revision on revision.id=snapshot.revision_id
-		 where snapshot.recipe_id=recipe.entity_id and revision.is_active and revision.status in ('ready','partial')
-		 order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1) observation on true
+		left join lateral (select snapshot.*,revision.target_version_public_id as source_version_public_id from recipe_import_snapshots snapshot
+			join catalog_import_revisions revision on revision.id=snapshot.revision_id
+			where snapshot.recipe_id=recipe.entity_id and revision.is_active and revision.status in ('ready','partial')
+			order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1) observation on true
 		left join recipe_template_import_snapshots import_template on import_template.id=observation.template_id
 		left join catalog_entities imported_template_entity on imported_template_entity.id=import_template.canonical_template_id
+		left join mod_content_versions canonical_source_version on canonical_source_version.id=definition.source_mod_content_version_id
+		left join mod_content_versions effective_source_version on effective_source_version.public_id=
+			case when definition.recipe_id is not null then canonical_source_version.public_id else observation.source_version_public_id end
+		left join mods source_mod on source_mod.id=effective_source_version.mod_id
 		where recipe.entity_id=$1`, entity.ID).
-		Scan(&typePublicID, &templatePublicID, &canonicalID, &definition, &observationID, &importRevisionID, &importTemplateKey, &canonicalDefinition); err != nil {
+		Scan(&typePublicID, &templatePublicID, &canonicalID, &definition, &observationID, &importRevisionID, &importTemplateKey, &canonicalDefinition,
+			&sourceVersionPublicID, &sourceModPublicID, &sourceModSiteID, &sourceModName, &sourceVersionLabel,
+			&sourceMinecraftVersions, &sourceLoaders, &sourceModVersion); err != nil {
 		writeError(w, http.StatusNotFound, "recipe not found")
 		return
 	}
@@ -1089,8 +1158,15 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 	if !canonicalDefinition && observationID != "" {
 		source = "import"
 	}
+	var sourceVersion any
+	if sourceVersionPublicID != "" {
+		sourceVersion = map[string]any{"publicId": sourceVersionPublicID, "modPublicId": sourceModPublicID, "modSiteId": sourceModSiteID,
+			"modName": sourceModName, "label": sourceVersionLabel, "minecraftVersions": sourceMinecraftVersions,
+			"loaders": sourceLoaders, "modVersion": sourceModVersion}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"publicId": entity.PublicID, "recipeTypePublicId": typePublicID,
-		"templatePublicId": templatePublicID, "canonicalSourceId": canonicalID, "definition": json.RawMessage(definition), "bindings": bindings,
+		"templatePublicId": templatePublicID, "sourceVersionPublicId": sourceVersionPublicID, "sourceVersion": sourceVersion,
+		"canonicalSourceId": canonicalID, "definition": json.RawMessage(definition), "bindings": bindings,
 		"defaultLocale": defaultLocale, "localizations": localizations, "publishedRevisionId": entity.PublishedRevisionID,
 		"reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID), "source": source,
 		"importRevisionId": importRevisionID, "importTemplateKey": importTemplateKey})
@@ -1118,7 +1194,7 @@ func writeCatalogMutationResult(w http.ResponseWriter, result catalogEditResult,
 
 func defaultCatalogLocale(value string) string {
 	if strings.TrimSpace(value) == "" {
-		return "en"
+		return "en-US"
 	}
 	return value
 }

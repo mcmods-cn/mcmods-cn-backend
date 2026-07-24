@@ -524,7 +524,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 		return err
 	}
 	if mod.DefaultLocale == "" {
-		mod.DefaultLocale = "en"
+		mod.DefaultLocale = "en-US"
 	}
 	rows, err := s.db.Query(ctx, `select id,identifier,is_primary,minecraft_version_min,minecraft_version_max,minecraft_versions
 		from mod_identifiers where mod_id=$1 order by is_primary desc,display_order,id`, mod.ID)

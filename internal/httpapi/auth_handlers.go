@@ -63,8 +63,8 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	req.Country = strings.TrimSpace(req.Country)
 	req.Timezone = defaultString(strings.TrimSpace(req.Timezone), "Asia/Shanghai")
 	req.PreferredContentLanguage = normalizeContentLocale(defaultString(strings.TrimSpace(req.PreferredContentLanguage), "zh-CN"))
-	req.SecondaryContentLanguage = normalizeContentLocale(defaultString(strings.TrimSpace(req.SecondaryContentLanguage), "en"))
-	req.PreferredUILanguage = defaultString(strings.TrimSpace(req.PreferredUILanguage), "en")
+	req.SecondaryContentLanguage = normalizeContentLocale(defaultString(strings.TrimSpace(req.SecondaryContentLanguage), "en-US"))
+	req.PreferredUILanguage = normalizeContentLocale(defaultString(strings.TrimSpace(req.PreferredUILanguage), "en-US"))
 	if !validContentLocaleTag(req.PreferredContentLanguage) || !validContentLocaleTag(req.SecondaryContentLanguage) {
 		writeError(w, http.StatusBadRequest, "content language preference is invalid")
 		return

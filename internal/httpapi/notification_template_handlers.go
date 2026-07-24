@@ -71,7 +71,7 @@ func defaultNotificationTemplateConfig() notificationTemplateConfig {
 			Code: value.code,
 			Translations: map[string]localizedNotificationTemplate{
 				"zh-CN": {Title: value.zhTitle, Body: value.zhBody},
-				"en":    {Title: value.enTitle, Body: value.enBody},
+				"en-US": {Title: value.enTitle, Body: value.enBody},
 			},
 		})
 	}
@@ -130,7 +130,7 @@ func renderNotificationTemplate(ctx context.Context, db *pgxpool.Pool, userID in
 			selected = item.Translations["zh-CN"]
 		}
 		if selected.Title == "" && selected.Body == "" {
-			selected = item.Translations["en"]
+			selected = item.Translations["en-US"]
 		}
 		break
 	}

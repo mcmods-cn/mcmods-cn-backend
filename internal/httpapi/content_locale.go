@@ -11,12 +11,12 @@ import (
 var supportedEditableContentLocales = map[string]struct{}{
 	"zh-CN": {},
 	"zh-TW": {},
-	"en":    {},
-	"ja":    {},
-	"ru":    {},
-	"fr":    {},
-	"de":    {},
-	"es":    {},
+	"en-US": {},
+	"ja-JP": {},
+	"ru-RU": {},
+	"fr-FR": {},
+	"de-DE": {},
+	"es-ES": {},
 }
 
 type contentLocaleResolution struct {
@@ -56,6 +56,18 @@ func normalizeContentLocale(value string) string {
 		return "zh-CN"
 	case "zh-tw", "zh-hk", "zh-mo", "zh-hant", "zh-hant-tw", "zh-hant-hk":
 		return "zh-TW"
+	case "en":
+		return "en-US"
+	case "ja":
+		return "ja-JP"
+	case "ru":
+		return "ru-RU"
+	case "fr":
+		return "fr-FR"
+	case "de":
+		return "de-DE"
+	case "es":
+		return "es-ES"
 	}
 	return locale
 }
@@ -135,10 +147,10 @@ func resolveContentLocale(primary, secondary, defaultLocale string, available []
 		primary = "zh-CN"
 	}
 	if secondary == "" {
-		secondary = "en"
+		secondary = "en-US"
 	}
 	if defaultLocale == "" {
-		defaultLocale = "en"
+		defaultLocale = "en-US"
 	}
 
 	availableSet := make(map[string]struct{}, len(available))
@@ -200,7 +212,7 @@ func resolveContentLocale(primary, secondary, defaultLocale string, available []
 		appendCandidate("zh-CN", "secondary_chinese_pair")
 	}
 	appendCandidate(defaultLocale, "default")
-	appendCandidate("en", "english")
+	appendCandidate("en-US", "english")
 	for _, item := range candidates {
 		if _, ok := availableSet[item.locale]; ok {
 			result.ResolvedLocale = item.locale

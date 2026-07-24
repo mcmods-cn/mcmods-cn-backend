@@ -40,7 +40,7 @@ func baselineSchemaStatements() []string {
 			country text not null default '',
 			timezone text not null default 'Asia/Shanghai',
 			preferred_content_language text not null default 'zh-CN',
-			preferred_ui_language text not null default 'en',
+			preferred_ui_language text not null default 'en-US',
 			security_score integer not null default 100,
 			registration_ip text not null default '',
 			registration_country_code text not null default '',

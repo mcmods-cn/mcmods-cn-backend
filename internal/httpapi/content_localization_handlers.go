@@ -532,7 +532,7 @@ func contentVisibilityBypassed(ctx context.Context) bool {
 
 func (s *Server) requestContentLocales(r *http.Request) (string, string) {
 	primary := firstAcceptedContentLocale(r.Header.Get("Accept-Language"))
-	secondary := "en"
+	secondary := "en-US"
 	claims := currentClaims(r)
 	if claims.Subject > 0 {
 		_ = s.db.QueryRow(r.Context(), `
@@ -545,7 +545,7 @@ func (s *Server) requestContentLocales(r *http.Request) (string, string) {
 		primary = "zh-CN"
 	}
 	if secondary == "" {
-		secondary = "en"
+		secondary = "en-US"
 	}
 	return primary, secondary
 }

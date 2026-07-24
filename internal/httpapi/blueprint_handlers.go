@@ -67,7 +67,7 @@ func (s *Server) createPendingBlueprint(ctx context.Context, ownerID int64, orig
 		return 0, "", err
 	}
 	if _, err = tx.Exec(ctx, `insert into content_localizations(subject_public_id,subject_type,locale,name,provenance,editable,review_status,updated_by)
-		values($1,'blueprint','en',$2,'human',true,'approved',$3)`, publicID, title, ownerID); err != nil {
+		values($1,'blueprint','en-US',$2,'human',true,'approved',$3)`, publicID, title, ownerID); err != nil {
 		return 0, "", err
 	}
 	if err = tx.Commit(ctx); err != nil {

@@ -63,7 +63,7 @@ func (s *Server) decorateResourceVersionRows(ctx context.Context, items []map[st
 			&revisionID, &registry, &iconPath, &modSiteID, &names, &iconFileID); err != nil {
 			return err
 		}
-		locale, name := catalogResolvedName(names, primary, secondary, "en")
+		locale, name := catalogResolvedName(names, primary, secondary, "en-US")
 		detailURL := ""
 		if hasManualDetail {
 			detailURL = "/mods/" + modSiteID + "/resources/" + resourcePublicID + "?version=" + publicID

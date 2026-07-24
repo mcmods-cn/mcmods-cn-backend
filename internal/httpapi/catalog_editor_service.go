@@ -700,18 +700,28 @@ func publishCatalogRecipeTx(ctx context.Context, tx pgx.Tx, snapshot catalogEdit
 	if canonicalSourceID != "" {
 		canonical = canonicalSourceID
 	}
+	var sourceVersionID, sourceModID any
+	if edit.SourceVersionPublicID != "" {
+		var versionID, modID int64
+		if err = tx.QueryRow(ctx, `select id,mod_id from mod_content_versions where public_id=$1 and status='active'`,
+			edit.SourceVersionPublicID).Scan(&versionID, &modID); err != nil {
+			return errCatalogEditorReference
+		}
+		sourceVersionID, sourceModID = versionID, modID
+	}
 	fingerprint := sha256Hex(catalogJSON(edit))
 	if _, err = tx.Exec(ctx, `insert into recipes(entity_id,recipe_type_id,canonical_source_id,semantic_fingerprint,owner_mod_id,identity_source)
 		values($1,$2,$3,$4,$5,'manual') on conflict(entity_id) do update set recipe_type_id=excluded.recipe_type_id,
 		canonical_source_id=excluded.canonical_source_id,semantic_fingerprint=excluded.semantic_fingerprint,
-		owner_mod_id=coalesce(excluded.owner_mod_id,recipes.owner_mod_id),identity_source='manual'`, snapshot.EntityID,
-		snapshot.ParentEntityID, canonical, fingerprint, snapshot.OwnerModID); err != nil {
+		owner_mod_id=excluded.owner_mod_id,identity_source='manual'`, snapshot.EntityID,
+		snapshot.ParentEntityID, canonical, fingerprint, sourceModID); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `insert into recipe_definitions(recipe_id,template_id,definition,published_revision_id,updated_by)
-		values($1,$2,$3::jsonb,$4,$5) on conflict(recipe_id) do update set template_id=excluded.template_id,
-		definition=excluded.definition,published_revision_id=excluded.published_revision_id,updated_by=excluded.updated_by,updated_at=now()`,
-		snapshot.EntityID, templateID, string(catalogJSON(nonNilCatalogDefinition(edit.Definition))), revisionID, nullableActorID(actorID)); err != nil {
+	if _, err = tx.Exec(ctx, `insert into recipe_definitions(recipe_id,template_id,source_mod_content_version_id,definition,published_revision_id,updated_by)
+		values($1,$2,$3,$4::jsonb,$5,$6) on conflict(recipe_id) do update set template_id=excluded.template_id,
+		source_mod_content_version_id=excluded.source_mod_content_version_id,definition=excluded.definition,
+		published_revision_id=excluded.published_revision_id,updated_by=excluded.updated_by,updated_at=now()`,
+		snapshot.EntityID, templateID, sourceVersionID, string(catalogJSON(nonNilCatalogDefinition(edit.Definition))), revisionID, nullableActorID(actorID)); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `delete from recipe_bindings where recipe_id=$1`, snapshot.EntityID); err != nil {
@@ -817,6 +827,18 @@ func validateCatalogSnapshotReferencesTx(ctx context.Context, tx pgx.Tx, snapsho
 		rows.Close()
 		if err = validateCatalogRecipeBindings(snapshot.Recipe, roles); err != nil {
 			return err
+		}
+		if snapshot.Recipe.SourceVersionPublicID != "" {
+			var valid bool
+			if err = tx.QueryRow(ctx, `select exists(select 1 from mod_content_versions version
+				join mods mod on mod.id=version.mod_id
+				where version.public_id=$1 and version.status='active' and (mod.review_status='approved' or mod.created_by=$2))`,
+				snapshot.Recipe.SourceVersionPublicID, actorID).Scan(&valid); err != nil {
+				return err
+			}
+			if !valid {
+				return errCatalogEditorReference
+			}
 		}
 		for _, binding := range snapshot.Recipe.Bindings {
 			publicIDs := make([]string, len(binding.Candidates))

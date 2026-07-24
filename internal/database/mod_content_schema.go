@@ -23,6 +23,10 @@ func modContentSchemaStatements() []string {
 			check(status in ('active','pending','superseded','archived'))
 		)`,
 		`create index idx_mod_content_versions_mod_status on mod_content_versions(mod_id,status,updated_at desc)`,
+		`alter table recipe_definitions add column source_mod_content_version_id bigint
+			references mod_content_versions(id) on delete set null`,
+		`create index idx_recipe_definitions_source_version on recipe_definitions(source_mod_content_version_id)
+			where source_mod_content_version_id is not null`,
 		`alter table catalog_import_jobs add constraint fk_catalog_import_jobs_target_version
 			foreign key(target_version_public_id) references mod_content_versions(public_id) on delete cascade`,
 		`alter table catalog_import_revisions add constraint fk_catalog_import_revisions_target_version
@@ -34,7 +38,7 @@ func modContentSchemaStatements() []string {
 			code text not null,
 			builtin boolean not null default false,
 			i18n_key text not null default '',
-			default_locale text not null default 'en',
+			default_locale text not null default 'en-US',
 			default_display_mode text not null default 'compact',
 			definition jsonb not null default '{}'::jsonb,
 			status text not null default 'active',
@@ -82,7 +86,7 @@ func modContentSchemaStatements() []string {
 			version_id bigint not null references mod_content_versions(id) on delete cascade,
 			template_id bigint not null references mod_content_templates(id) on delete restrict,
 			parent_id bigint references mod_content_sections(id) on delete cascade,
-			default_locale text not null default 'en',
+			default_locale text not null default 'en-US',
 			display_mode text not null,
 			ordinal integer not null default 0 check(ordinal>=0),
 			status text not null default 'active',
@@ -125,7 +129,7 @@ func modContentSchemaStatements() []string {
 		`create table mod_resource_version_details (
 			resource_id text not null references mod_resource_bindings(resource_id) on delete cascade,
 			version_id bigint not null references mod_content_versions(id) on delete cascade,
-			default_locale text not null default 'en',
+			default_locale text not null default 'en-US',
 			definition jsonb not null default '{}'::jsonb,
 			icon_file_id bigint references oss_files(id) on delete set null,
 			render_file_id bigint references oss_files(id) on delete set null,

@@ -29,7 +29,7 @@ func syncImportedResourcesToContentVersionTx(ctx context.Context, tx pgx.Tx, rev
 	}
 	if _, err := tx.Exec(ctx, `insert into mod_resource_version_details(
 		resource_id,version_id,default_locale,definition,icon_file_id,render_file_id,status,created_by,updated_by)
-		select distinct on (snapshot.resource_id) snapshot.resource_id,$2::bigint,'en',snapshot.data,icon.oss_file_id,preview.oss_file_id,'active',nullif($4::bigint,0),nullif($4::bigint,0)
+		select distinct on (snapshot.resource_id) snapshot.resource_id,$2::bigint,'en-US',snapshot.data,icon.oss_file_id,preview.oss_file_id,'active',nullif($4::bigint,0),nullif($4::bigint,0)
 		from resource_import_snapshots snapshot
 		left join catalog_import_media icon on icon.revision_id=snapshot.revision_id and icon.asset_path=snapshot.icon_path
 		left join catalog_import_media preview on preview.revision_id=snapshot.revision_id and preview.asset_path=snapshot.preview_path

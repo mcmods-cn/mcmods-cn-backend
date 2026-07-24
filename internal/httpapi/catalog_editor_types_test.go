@@ -9,7 +9,7 @@ import (
 func TestNormalizeCatalogLocalizationsRestrictsHumanEditing(t *testing.T) {
 	editable := false
 	defaultLocale, localizations, err := normalizeCatalogLocalizations("zh_cn", []catalogLocalizationEdit{{
-		Locale: "zh_cn", Name: "  名称  ", Provenance: "ai", SourceLocale: "en", Editable: &editable,
+		Locale: "zh_cn", Name: "  名称  ", Provenance: "ai", SourceLocale: "en-US", Editable: &editable,
 	}})
 	if err != nil {
 		t.Fatalf("normalize supported localization: %v", err)
@@ -30,16 +30,16 @@ func TestNormalizeCatalogLocalizationsAllowsPartialEditPatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("partial non-default locale edit should be accepted: %v", err)
 	}
-	if defaultLocale != "en" || len(localizations) != 1 || localizations[0].Locale != "ja" {
+	if defaultLocale != "en-US" || len(localizations) != 1 || localizations[0].Locale != "ja-JP" {
 		t.Fatalf("unexpected normalized partial patch: default=%q values=%+v", defaultLocale, localizations)
 	}
 	if err = requireCatalogCreateDefaultLocalization(defaultLocale, localizations); !errors.Is(err, errCatalogEditorInvalid) {
 		t.Fatalf("create must still require its default locale, got %v", err)
 	}
-	if err = requireCatalogCreateDefaultLocalization(defaultLocale, []catalogLocalizationEdit{{Locale: "en", Name: "Compressing"}}); err != nil {
+	if err = requireCatalogCreateDefaultLocalization(defaultLocale, []catalogLocalizationEdit{{Locale: "en-US", Name: "Compressing"}}); err != nil {
 		t.Fatalf("create with its default locale should pass: %v", err)
 	}
-	if err = requireCatalogCreateDefaultLocalization(defaultLocale, []catalogLocalizationEdit{{Locale: "en", Name: "   "}}); !errors.Is(err, errCatalogEditorInvalid) {
+	if err = requireCatalogCreateDefaultLocalization(defaultLocale, []catalogLocalizationEdit{{Locale: "en-US", Name: "   "}}); !errors.Is(err, errCatalogEditorInvalid) {
 		t.Fatalf("create with an empty default-locale name should fail, got %v", err)
 	}
 }
@@ -81,6 +81,18 @@ func TestRecipeProbabilityBelongsToEachOutputCandidate(t *testing.T) {
 	}}}
 	if err := validateCatalogRecipeBindings(edit, roles); !errors.Is(err, errCatalogEditorInvalid) {
 		t.Fatalf("input probability should fail, got %v", err)
+	}
+}
+
+func TestRecipeSourceVersionPublicIDIsOptional(t *testing.T) {
+	if value, err := normalizeCatalogOptionalPublicID(""); err != nil || value != "" {
+		t.Fatalf("empty optional source version = %q, %v", value, err)
+	}
+	if value, err := normalizeCatalogOptionalPublicID(" ABC234567 "); err != nil || value != "abc234567" {
+		t.Fatalf("normalized source version = %q, %v", value, err)
+	}
+	if _, err := normalizeCatalogOptionalPublicID("not-a-public-id"); !errors.Is(err, errCatalogEditorInvalid) {
+		t.Fatalf("invalid source version should fail, got %v", err)
 	}
 }
 

@@ -7,7 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 17
+const schemaGeneration = 19
 
 // Migrate installs one coherent development schema. The editor redesign does
 // not support in-place upgrades from earlier import-first/editor models;

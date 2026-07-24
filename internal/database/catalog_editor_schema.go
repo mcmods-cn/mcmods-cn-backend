@@ -9,14 +9,14 @@ func catalogEditorSchemaStatements() []string {
 		`alter table catalog_entities add constraint catalog_entities_entity_type_check
 			check (entity_type in ('resource','recipe','recipe_type','recipe_template','tag','structure','document'))`,
 		`alter table catalog_entities
-			add column default_locale text not null default 'en',
+			add column default_locale text not null default 'en-US',
 			add column published_revision_id bigint,
 			add column archived_at timestamptz`,
-		`alter table users add column secondary_content_language text not null default 'en'`,
+		`alter table users add column secondary_content_language text not null default 'en-US'`,
 		`create table content_subjects (
 			public_id text not null,
 			subject_type text not null,
-			default_locale text not null default 'en',
+			default_locale text not null default 'en-US',
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
 			primary key(public_id,subject_type),

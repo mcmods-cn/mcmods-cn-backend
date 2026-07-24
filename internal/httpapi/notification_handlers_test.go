@@ -1,6 +1,9 @@
 package httpapi
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+)
 
 func TestFollowerNotificationBody(t *testing.T) {
 	tests := []struct {
@@ -32,5 +35,18 @@ func TestRemainingTokens(t *testing.T) {
 	}
 	if got := remainingTokens(1000, 1200); got != 0 {
 		t.Fatalf("over-limit remaining tokens = %d", got)
+	}
+}
+
+func TestMarkAllNotificationsReadRouteIsRegistered(t *testing.T) {
+	server := &Server{mux: http.NewServeMux()}
+	server.routes()
+	request, err := http.NewRequest(http.MethodPost, "/api/v1/notifications/read-all", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pattern := server.mux.Handler(request)
+	if pattern == "" {
+		t.Fatal("mark-all-notifications-read route is not registered")
 	}
 }

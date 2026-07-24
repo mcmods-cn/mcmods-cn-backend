@@ -113,11 +113,12 @@ type catalogRecipeBindingEdit struct {
 
 type catalogRecipeEdit struct {
 	catalogEditBase
-	RecipeTypePublicID string                              `json:"recipeTypePublicId,omitempty"`
-	TemplatePublicID   string                              `json:"templatePublicId"`
-	CanonicalSourceID  string                              `json:"canonicalSourceId"`
-	Definition         map[string]any                      `json:"definition"`
-	Bindings           map[string]catalogRecipeBindingEdit `json:"bindings"`
+	RecipeTypePublicID    string                              `json:"recipeTypePublicId,omitempty"`
+	TemplatePublicID      string                              `json:"templatePublicId"`
+	SourceVersionPublicID string                              `json:"sourceVersionPublicId,omitempty"`
+	CanonicalSourceID     string                              `json:"canonicalSourceId"`
+	Definition            map[string]any                      `json:"definition"`
+	Bindings              map[string]catalogRecipeBindingEdit `json:"bindings"`
 }
 
 type catalogEditorSnapshot struct {
@@ -203,7 +204,7 @@ func normalizeCatalogLocalizations(defaultLocale string, localizations []catalog
 		localizations[index].ReviewStatus = "approved"
 	}
 	if strings.TrimSpace(defaultLocale) == "" {
-		defaultLocale = "en"
+		defaultLocale = "en-US"
 	}
 	normalizedDefault, err := normalizeCatalogLocale(defaultLocale)
 	if err != nil {
@@ -228,6 +229,17 @@ func requireCatalogCreateDefaultLocalization(defaultLocale string, localizations
 		}
 	}
 	return fmt.Errorf("%w: default locale is missing", errCatalogEditorInvalid)
+}
+
+func normalizeCatalogOptionalPublicID(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "", nil
+	}
+	if !validCatalogPublicID(value) {
+		return "", errCatalogEditorInvalid
+	}
+	return value, nil
 }
 
 func validateCatalogTemplate(edit *catalogRecipeTemplateEdit) error {
