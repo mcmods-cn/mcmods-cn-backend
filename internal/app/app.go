@@ -65,7 +65,7 @@ func Run() {
 	}
 	modExportWorker := httpapi.NewModExportWorker(cfg, db, queueClient)
 	if err := modExportWorker.Start(); err != nil {
-		log.Printf("mcmods_exporter import worker unavailable; API fallback remains enabled: %v", err)
+		log.Printf("mod catalog import worker unavailable; API fallback remains enabled: %v", err)
 	}
 	modMetadataWorker := httpapi.NewModMetadataImportWorker(cfg, db, queueClient)
 	if err := modMetadataWorker.Start(ctx); err != nil {

@@ -330,6 +330,9 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !reviewRequired {
+		s.scheduleModGalleryOSSRehome(modID)
+	}
 	mod, err := s.modByID(r.Context(), modID, claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取已创建模组失败")
@@ -1143,7 +1146,12 @@ func replaceModIdentifiersTx(ctx context.Context, tx pgx.Tx, modID int64, values
 }
 
 func validateModGalleryFilesTx(ctx context.Context, tx pgx.Tx, modID, actorID int64, images []modGalleryImagePayload) error {
+	seenFileIDs := make(map[int64]struct{}, len(images))
 	for _, image := range images {
+		if _, duplicate := seenFileIDs[image.FileID]; duplicate {
+			return errors.New("mod gallery cannot contain the same uploaded file more than once")
+		}
+		seenFileIDs[image.FileID] = struct{}{}
 		if image.PublicID != "" {
 			var existingModID, existingFileID int64
 			err := tx.QueryRow(ctx, `select mod_id,oss_file_id from mod_gallery_images where public_id=$1`, image.PublicID).
@@ -1156,8 +1164,10 @@ func validateModGalleryFilesTx(ctx context.Context, tx pgx.Tx, modID, actorID in
 			}
 		}
 		var valid bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from oss_files
-			where id=$1 and uploader_id=$2 and status='active' and content_type ilike 'image/%')`, image.FileID, actorID).Scan(&valid); err != nil {
+		if err := tx.QueryRow(ctx, `select exists(select 1 from oss_files file
+			where file.id=$1 and file.uploader_id=$2 and file.status='active' and file.content_type ilike 'image/%'
+			and not exists(select 1 from mod_gallery_images gallery where gallery.oss_file_id=file.id and gallery.mod_id<>$3))`,
+			image.FileID, actorID, modID).Scan(&valid); err != nil {
 			return err
 		}
 		if !valid {

@@ -166,6 +166,9 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit revision")
 		return
 	}
+	if status == "approved" {
+		s.scheduleModGalleryOSSRehome(identity.ID)
+	}
 	revision, err := s.modRevisionByID(r.Context(), created.RevisionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read revision")
@@ -329,6 +332,9 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit review")
 		return
+	}
+	if request.Status == "approved" {
+		s.scheduleModGalleryOSSRehome(modID)
 	}
 	updated, _ := s.modRevisionByID(r.Context(), revisionID)
 	writeJSON(w, http.StatusOK, updated)

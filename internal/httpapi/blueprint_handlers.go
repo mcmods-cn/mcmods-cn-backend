@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -96,8 +97,9 @@ func (s *Server) userOwnsPendingBlueprintObject(ctx context.Context, ownerID int
 
 func (s *Server) userOwnsBlueprintObject(ctx context.Context, ownerID int64, objectKey string) bool {
 	var exists bool
+	blueprintRoot := path.Join(ossRoot(s.ossConfigFromSettings(ctx).Prefix), ossProjectDirectory, normalizeOSSProjectKind("blueprint")) + "/"
 	_ = s.db.QueryRow(ctx, `select exists(select 1 from blueprints where owner_id=$1 and status<>'deleted'
-		and $2 like '%' || '/blueprints/' || public_id || '/%')`, ownerID, objectKey).Scan(&exists)
+		and $2 like $3 || public_id || '/%')`, ownerID, objectKey, blueprintRoot).Scan(&exists)
 	return exists
 }
 

@@ -275,7 +275,8 @@ func persistSanitizedMinecraftTextureWithStore(ctx context.Context, store minecr
 	if client == nil {
 		return result, fmt.Errorf("texture object storage client is unavailable")
 	}
-	objectKey := path.Join(cfg.Prefix, "textures", computedHash+".png")
+	textureCategory := ossSharedSkinTextureCategory()
+	objectKey := path.Join(ossObjectPrefix(cfg.Prefix, textureCategory), computedHash+".png")
 	_, err = client.PutObject(ctx, &aliyunoss.PutObjectRequest{
 		Bucket:        aliyunoss.Ptr(cfg.Bucket),
 		Key:           aliyunoss.Ptr(objectKey),
@@ -292,9 +293,9 @@ func persistSanitizedMinecraftTextureWithStore(ctx context.Context, store minecr
 	err = store.QueryRow(ctx, `insert into oss_files(
 		bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
 		content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status)
-		values($1,$2,$3,$4,'textures','minecraft_texture',$5,$5,'image/png',$6,$6,$7,$8,'active','trusted_generated')
+		values($1,$2,$3,$4,$5,'minecraft_texture',$6,$6,'image/png',$7,$7,$8,$9,'active','trusted_generated')
 		on conflict(object_key) do update set status='active',updated_at=now()
-		returning id`, cfg.Bucket, cfg.displayEndpoint(), cfg.Region, objectKey, computedHash+".png",
+		returning id`, cfg.Bucket, cfg.displayEndpoint(), cfg.Region, objectKey, textureCategory, computedHash+".png",
 		len(texture.Data), computedHash, ownerID).Scan(&fileID)
 	if err != nil {
 		return result, fmt.Errorf("record sanitized texture: %w", err)

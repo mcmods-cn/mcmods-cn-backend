@@ -7,7 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 19
+const schemaGeneration = 22
 
 // Migrate installs one coherent development schema. The editor redesign does
 // not support in-place upgrades from earlier import-first/editor models;
@@ -58,6 +58,7 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	statements = append(statements, communitySchemaStatements()...)
 	statements = append(statements, projectFileSchemaStatements()...)
 	statements = append(statements, modContentSchemaStatements()...)
+	statements = append(statements, commentSchemaStatements()...)
 	for _, statement := range statements {
 		if _, err = tx.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("install schema generation %d: %w", schemaGeneration, err)

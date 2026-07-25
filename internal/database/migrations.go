@@ -693,28 +693,6 @@ func baselineSchemaStatements() []string {
 			primary key (mod_id, user_id, role),
 			check (role in ('editor', 'developer'))
 		)`,
-		`create table if not exists mod_comments (
-			id bigserial primary key,
-			mod_id bigint not null references mods(id) on delete cascade,
-			user_id bigint not null references users(id) on delete cascade,
-			parent_id bigint references mod_comments(id) on delete cascade,
-			root_id bigint references mod_comments(id) on delete cascade,
-			body text not null,
-			status text not null default 'visible',
-			created_at timestamptz not null default now(),
-			updated_at timestamptz not null default now(),
-			check (status in ('visible', 'hidden', 'deleted'))
-		)`,
-		`create index if not exists idx_mod_comments_mod_created on mod_comments (mod_id, created_at, id)`,
-		`create index if not exists idx_mod_comments_root_created on mod_comments (root_id, created_at, id)`,
-		`create table if not exists mod_comment_reactions (
-			comment_id bigint not null references mod_comments(id) on delete cascade,
-			user_id bigint not null references users(id) on delete cascade,
-			reaction text not null,
-			created_at timestamptz not null default now(),
-			primary key (comment_id, user_id, reaction),
-			check (reaction in ('thumbs_up', 'thumbs_down', 'laugh', 'hooray', 'confused', 'heart', 'rocket', 'eyes'))
-		)`,
 		`create table if not exists catalog_import_packages (
 			id text primary key,
 			sha256 text not null unique check (sha256 ~ '^[0-9a-f]{64}$'),
@@ -769,16 +747,17 @@ func baselineSchemaStatements() []string {
 			loader text not null,
 			exporter_version text not null,
 			source_namespace text not null,
+			source_kind text not null default 'mcmods_exporter',
 			source_metadata jsonb not null default '{}'::jsonb,
 			import_run_token text not null default '',
 			is_active boolean not null default false,
 			created_at timestamptz not null default now(),
 			activated_at timestamptz,
-			unique (mod_id, target_version_public_id, source_namespace, revision_no),
+			unique (mod_id, target_version_public_id, source_kind, source_namespace, revision_no),
 			check (status in ('staging','ready','partial','rejected','superseded'))
 		)`,
 		`create unique index if not exists idx_catalog_import_revisions_active
-		 on catalog_import_revisions(mod_id, target_version_public_id, source_namespace) where is_active`,
+		 on catalog_import_revisions(mod_id, target_version_public_id, source_kind, source_namespace) where is_active`,
 		`create index if not exists idx_catalog_import_revisions_package on catalog_import_revisions(package_id)`,
 		`create index if not exists idx_catalog_import_revisions_import_run on catalog_import_revisions(import_run_token) where status='staging'`,
 		`create table if not exists catalog_import_locales (

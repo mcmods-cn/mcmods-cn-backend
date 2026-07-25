@@ -13,7 +13,7 @@ import (
 )
 
 var notificationKinds = map[string]bool{
-	"system": true, "reply_mention": true, "review": true, "new_follower": true,
+	"system": true, "reply_mention": true, "comment_watch_reply": true, "review": true, "new_follower": true,
 }
 
 type publishSystemNotificationRequest struct {

@@ -38,7 +38,7 @@ func TestExternalModIconFormat(t *testing.T) {
 }
 
 func TestURLUnderEndpoint(t *testing.T) {
-	if !isURLUnderEndpoint("https://oss.mcmods.cn/mcmods/projects/m123abc/branding/icons/icon.webp", "https://oss.mcmods.cn") {
+	if !isURLUnderEndpoint("https://oss.mcmods.cn/mcmods/project/mods/m123abc/icons/project/original/icon.webp", "https://oss.mcmods.cn") {
 		t.Fatal("expected OSS object URL to match public endpoint")
 	}
 	if isURLUnderEndpoint("https://oss.mcmods.cn.example.org/mcmods/icon.webp", "https://oss.mcmods.cn") {

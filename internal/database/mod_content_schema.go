@@ -164,11 +164,11 @@ func modContentSchemaStatements() []string {
 			with recursive parents as (
 				select section.id,section.parent_id,section.mod_id,section.version_id,1 depth from mod_content_sections section where section.id=new.parent_id
 				union all select section.id,section.parent_id,section.mod_id,section.version_id,parents.depth+1
-				from mod_content_sections section join parents on section.id=parents.parent_id where parents.depth<5
+				from mod_content_sections section join parents on section.id=parents.parent_id where parents.depth<6
 			) select max(mod_id),max(version_id),max(depth) into parent_mod,parent_version,parent_depth from parents;
 			if parent_mod is null or parent_mod<>new.mod_id then raise exception 'section parent must belong to the same mod'; end if;
 			if parent_version<>new.version_id then raise exception 'section parent must belong to the same data version'; end if;
-			if parent_depth>=4 then raise exception 'content section depth cannot exceed four levels'; end if;
+			if parent_depth>=5 then raise exception 'content category depth cannot exceed four levels'; end if;
 			if new.parent_id=new.id then raise exception 'content section cannot be its own parent'; end if;
 			return new;
 		end;

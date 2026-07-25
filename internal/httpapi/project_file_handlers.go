@@ -231,7 +231,7 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 		writeError(w, http.StatusInternalServerError, "failed to inspect uploaded file")
 		return
 	}
-	expectedCategory := "projects/" + normalizeProjectObjectSegment(project.ProjectID) + "/downloads"
+	expectedCategory := ossProjectReleaseCategory(project.ProjectType, project.ProjectID)
 	if uploaderID != currentClaims(r).Subject || category != expectedCategory || strings.ToLower(filepath.Ext(fileName)) != ".jar" {
 		writeError(w, http.StatusBadRequest, "the uploaded file does not belong to this project or is not a JAR")
 		return
@@ -281,7 +281,7 @@ func (s *Server) createProjectFileUpload(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	s.createOSSDirectUploadWithScope(w, r, ossProjectDownloadScopePrefix+project.ProjectID)
+	s.createOSSDirectUploadWithScope(w, r, ossProjectDownloadScope(project.ProjectType, project.ProjectID))
 }
 
 func (s *Server) completeProjectFileUpload(w http.ResponseWriter, r *http.Request) {
@@ -289,7 +289,7 @@ func (s *Server) completeProjectFileUpload(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	s.completeOSSDirectUploadWithScope(w, r, ossProjectDownloadScopePrefix+project.ProjectID)
+	s.completeOSSDirectUploadWithScope(w, r, ossProjectDownloadScope(project.ProjectType, project.ProjectID))
 }
 
 func (s *Server) authorizeProjectFileUpload(w http.ResponseWriter, r *http.Request) (projectFileContext, bool) {

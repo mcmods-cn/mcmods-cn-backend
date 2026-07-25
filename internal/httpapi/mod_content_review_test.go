@@ -13,12 +13,35 @@ func TestDefaultReviewConfigAutoApprovesEmptyModContentSections(t *testing.T) {
 	if modContentReviewRequired(config, modContentSnapshot{Kind: "section", Operation: "create"}) {
 		t.Fatal("empty section creation should be auto-approved under the default config")
 	}
+	if !modContentReviewRequired(config, modContentSnapshot{
+		Kind: "section", Operation: "create",
+		Section: &modContentSectionEdit{ParentPublicID: "category"},
+	}) {
+		t.Fatal("category creation must use the catalog create review setting")
+	}
+	if !modContentReviewRequired(config, modContentSnapshot{Kind: "layout", Operation: "edit"}) {
+		t.Fatal("category layout changes must use the catalog edit review setting")
+	}
 	if !modContentReviewRequired(config, modContentSnapshot{Kind: "version", Operation: "create"}) {
 		t.Fatal("other mod content creation should continue using catalog create review")
 	}
 	config.ModContentSectionCreate = true
 	if !modContentReviewRequired(config, modContentSnapshot{Kind: "section", Operation: "create"}) {
 		t.Fatal("the dedicated setting should send empty section creation to review")
+	}
+}
+
+func TestNormalizeModContentLayoutRejectsDuplicateResources(t *testing.T) {
+	edit := modContentLayoutEdit{
+		VersionPublicID:     "version01",
+		RootSectionPublicID: "section01",
+		Resources: []modContentLayoutResourceEdit{
+			{ResourcePublicID: "resource1", SectionPublicID: "section01"},
+			{ResourcePublicID: "resource1", SectionPublicID: "section01"},
+		},
+	}
+	if err := normalizeModContentLayoutEdit(&edit); err == nil {
+		t.Fatal("a resource may only occur once within a content layout")
 	}
 }
 

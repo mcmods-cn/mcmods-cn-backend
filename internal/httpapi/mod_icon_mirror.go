@@ -99,7 +99,7 @@ func (s *Server) mirrorExternalModIcon(ctx context.Context, sourceURL, projectUn
 			values($1,$2,$3,$4,$5,'mod_metadata_import',$6,$6,$7,$8,$8,$9,$10,'active','pending')
 			on conflict(object_key) do update set updated_at=now(),status='active'`,
 			ossCfg.Bucket, ossCfg.displayEndpoint(), ossCfg.Region, objectKey,
-			path.Join("projects", projectUniqueID, "branding", "icons"), originalName, contentType, len(data), digest, nullableUserID(uploaderID))
+			ossProjectCategory("mod", projectUniqueID, "icons", "project", "original"), originalName, contentType, len(data), digest, nullableUserID(uploaderID))
 		if err != nil {
 			_, _ = ossClient.DeleteObject(context.Background(), &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(ossCfg.Bucket), Key: aliyunoss.Ptr(objectKey)})
 			return "", err
@@ -113,7 +113,7 @@ func modIconObjectKey(prefix, projectUniqueID, digest, extension string) string 
 	if len(digest) > 16 {
 		digest = digest[:16]
 	}
-	return path.Join(prefix, "projects", normalizeProjectObjectSegment(projectUniqueID), "branding", "icons", "icon-"+digest+extension)
+	return path.Join(ossObjectPrefix(prefix, ossProjectCategory("mod", projectUniqueID, "icons", "project", "original")), "icon-"+digest+extension)
 }
 
 func externalModIconFormat(data []byte) (string, string, error) {

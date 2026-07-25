@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -55,6 +56,8 @@ func (worker *NotificationWorker) handleEvent(ctx context.Context, raw []byte) e
 		return worker.createSystemNotification(ctx, event)
 	case "direct":
 		return worker.createDirectNotification(ctx, event)
+	case "comment_watch":
+		return worker.aggregateCommentWatchNotification(ctx, event)
 	case "follow":
 		return worker.aggregateFollowerNotification(ctx, event)
 	case "email":
@@ -119,6 +122,58 @@ func (worker *NotificationWorker) createDirectNotification(ctx context.Context, 
 		worker.enqueueUserEmail(ctx, event.RecipientID, event.Title, event.Body)
 	}
 	return nil
+}
+
+func (worker *NotificationWorker) aggregateCommentWatchNotification(ctx context.Context, event notificationEvent) error {
+	if event.RecipientID <= 0 {
+		return fmt.Errorf("comment watch notification recipient is required")
+	}
+	watchID := fmt.Sprint(event.Data["watchId"])
+	if watchID == "" || watchID == "<nil>" {
+		return fmt.Errorf("comment watch notification watch ID is required")
+	}
+	tx, err := worker.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, event.RecipientID); err != nil {
+		return err
+	}
+	var notificationID int64
+	var replyCount int
+	err = tx.QueryRow(ctx, `select id,coalesce((data->>'replyCount')::integer,1)
+		from notifications where recipient_id=$1 and kind='comment_watch_reply'
+		  and data->>'watchId'=$2 and updated_at>now()-interval '5 minutes'
+		order by updated_at desc,id desc limit 1 for update`, event.RecipientID, watchID).
+		Scan(&notificationID, &replyCount)
+	rawData, _ := json.Marshal(event.Data)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `insert into notifications(recipient_id,kind,title,body,source_locale,data)
+			values($1,'comment_watch_reply',$2,$3,$4,$5::jsonb) returning id`,
+			event.RecipientID, strings.TrimSpace(event.Title), strings.TrimSpace(event.Body),
+			defaultString(event.SourceLocale, "zh-CN"), string(rawData)).Scan(&notificationID)
+	} else if err == nil {
+		replyCount++
+		event.Data["replyCount"] = replyCount
+		rawData, _ = json.Marshal(event.Data)
+		_, err = tx.Exec(ctx, `update notifications set title=$2,
+			body=$3,data=data||$4::jsonb,updated_at=now() where id=$1`,
+			notificationID, fmt.Sprintf("插眼的评论有了 %d 条新回复", replyCount),
+			strings.TrimSpace(event.Body), string(rawData))
+		if err == nil {
+			_, err = tx.Exec(ctx, `delete from notification_receipts where notification_id=$1 and user_id=$2`,
+				notificationID, event.RecipientID)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if event.ActorID > 0 {
+		_, _ = tx.Exec(ctx, `insert into notification_actors(notification_id,actor_id)
+			values($1,$2) on conflict do nothing`, notificationID, event.ActorID)
+	}
+	return tx.Commit(ctx)
 }
 
 func (worker *NotificationWorker) aggregateFollowerNotification(ctx context.Context, event notificationEvent) error {

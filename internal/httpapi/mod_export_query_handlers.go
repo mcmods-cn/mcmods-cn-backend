@@ -23,6 +23,7 @@ type modExportRevisionSummary struct {
 	MinecraftVersion      string         `json:"minecraftVersion"`
 	Loader                string         `json:"loader"`
 	ExporterVersion       string         `json:"exporterVersion"`
+	SourceKind            string         `json:"sourceKind"`
 	Namespace             string         `json:"namespace"`
 	TargetVersionPublicID string         `json:"targetVersionPublicId"`
 	IsActive              bool           `json:"isActive"`
@@ -51,14 +52,14 @@ func (s *Server) modExportDataSummary(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	canSeePending := canEditMod(claims, identity) || hasPermission(claims.Permissions, "project.review")
 	rows, err := s.db.Query(r.Context(),
-		`select r.id,r.revision_no,r.status,r.minecraft_version,r.loader,r.exporter_version,r.source_namespace,r.target_version_public_id,r.is_active,r.created_at,
+		`select r.id,r.revision_no,r.status,r.minecraft_version,r.loader,r.exporter_version,r.source_kind,r.source_namespace,r.target_version_public_id,r.is_active,r.created_at,
 		 coalesce(stats.registry_counts,'{}'::jsonb),coalesce(stats.document_counts,'{}'::jsonb),
 		 coalesce(stats.asset_count,0),coalesce(stats.structure_count,0),coalesce(stats.advancement_count,0),
 		 coalesce(stats.key_mapping_count,0),coalesce(stats.recipe_count,0),coalesce(stats.tag_count,0),
 		 coalesce(stats.capability_statuses,'{}'::jsonb)
 		 from catalog_import_revisions r left join catalog_import_revision_stats stats on stats.revision_id=r.id
 		 where r.mod_id=$1 and (r.is_active or $2)
-		 order by r.minecraft_version desc,r.loader,r.source_namespace,r.revision_no desc`, identity.ID, canSeePending)
+		 order by r.minecraft_version desc,r.loader,r.source_kind,r.source_namespace,r.revision_no desc`, identity.ID, canSeePending)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read export revisions")
 		return
@@ -68,7 +69,7 @@ func (s *Server) modExportDataSummary(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var item modExportRevisionSummary
 		var counts, documentCounts, capabilities []byte
-		if err = rows.Scan(&item.ID, &item.RevisionNo, &item.Status, &item.MinecraftVersion, &item.Loader, &item.ExporterVersion, &item.Namespace, &item.TargetVersionPublicID, &item.IsActive, &item.CreatedAt, &counts, &documentCounts, &item.AssetCount, &item.StructureCount, &item.AdvancementCount, &item.KeyMappingCount, &item.RecipeCount, &item.TagCount, &capabilities); err != nil {
+		if err = rows.Scan(&item.ID, &item.RevisionNo, &item.Status, &item.MinecraftVersion, &item.Loader, &item.ExporterVersion, &item.SourceKind, &item.Namespace, &item.TargetVersionPublicID, &item.IsActive, &item.CreatedAt, &counts, &documentCounts, &item.AssetCount, &item.StructureCount, &item.AdvancementCount, &item.KeyMappingCount, &item.RecipeCount, &item.TagCount, &capabilities); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode export revision")
 			return
 		}
@@ -534,11 +535,11 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 	}
 	defer tx.Rollback(r.Context())
 	var modID int64
-	var namespace, status, targetVersionPublicID string
+	var namespace, sourceKind, status, targetVersionPublicID string
 	var overwriteExistingImportData bool
-	err = tx.QueryRow(r.Context(), `select revision.mod_id,revision.source_namespace,revision.status,revision.target_version_public_id,job.overwrite_existing
+	err = tx.QueryRow(r.Context(), `select revision.mod_id,revision.source_namespace,revision.source_kind,revision.status,revision.target_version_public_id,job.overwrite_existing
 		from catalog_import_revisions revision join catalog_import_jobs job on job.id=revision.job_id where revision.id=$1 for update`, revisionID).
-		Scan(&modID, &namespace, &status, &targetVersionPublicID, &overwriteExistingImportData)
+		Scan(&modID, &namespace, &sourceKind, &status, &targetVersionPublicID, &overwriteExistingImportData)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "export revision not found")
 		return
@@ -559,7 +560,7 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusOK, map[string]any{"id": revisionID, "status": "rejected", "isActive": false})
 		return
 	}
-	if _, err = tx.Exec(r.Context(), `update catalog_import_revisions set is_active=false,status='superseded' where mod_id=$1 and target_version_public_id=$2 and source_namespace=$3 and id<>$4 and is_active`, modID, targetVersionPublicID, namespace, revisionID); err != nil {
+	if _, err = tx.Exec(r.Context(), `update catalog_import_revisions set is_active=false,status='superseded' where mod_id=$1 and target_version_public_id=$2 and source_namespace=$3 and source_kind=$4 and id<>$5 and is_active`, modID, targetVersionPublicID, namespace, sourceKind, revisionID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to supersede export revision")
 		return
 	}

@@ -152,7 +152,8 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID, bl
 		return err
 	}
 	_, _ = worker.db.Exec(ctx, `update blueprint_jobs set progress=55,updated_at=now() where id=$1`, jobID)
-	normalizedKey := path.Join(worker.api.ossConfigFromSettings(ctx).Prefix, "blueprints", publicID, "normalized", "blueprint.json")
+	normalizedConfig := worker.api.ossConfigFromSettings(ctx)
+	normalizedKey := path.Join(ossObjectPrefix(normalizedConfig.Prefix, ossBlueprintReleaseCategory(publicID, "normalized")), "blueprint.json")
 	fileID, err := worker.writeOSSObject(ctx, normalizedKey, "blueprint.json", "application/json", normalized, createdBy, "blueprint_normalized")
 	if err != nil {
 		return err
@@ -163,7 +164,8 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID, bl
 		if coverErr != nil {
 			log.Printf("render generated cover for blueprint %s: %v", publicID, coverErr)
 		} else {
-			generatedKey := path.Join(worker.api.ossConfigFromSettings(ctx).Prefix, "blueprints", publicID, "cover", "generated-"+randomObjectName()+".png")
+			generatedConfig := worker.api.ossConfigFromSettings(ctx)
+			generatedKey := path.Join(ossObjectPrefix(generatedConfig.Prefix, ossBlueprintTextCategory(publicID, "cover")), "generated-"+randomObjectName()+".png")
 			generatedFileID, writeErr := worker.writeOSSObject(ctx, generatedKey, "blueprint-cover.png", "image/png", cover, createdBy, "blueprint_generated_cover")
 			if writeErr != nil {
 				log.Printf("store generated cover for blueprint %s: %v", publicID, writeErr)
@@ -299,7 +301,8 @@ func (worker *BlueprintWorker) convertBlueprint(ctx context.Context, jobID, blue
 		return err
 	}
 	extension := strings.TrimPrefix(strings.ToLower(targetFormat), ".")
-	objectKey := path.Join(worker.api.ossConfigFromSettings(ctx).Prefix, "blueprints", publicID, "formats", extension, randomObjectName()+"."+extension)
+	conversionConfig := worker.api.ossConfigFromSettings(ctx)
+	objectKey := path.Join(ossObjectPrefix(conversionConfig.Prefix, ossBlueprintReleaseCategory(publicID, extension)), randomObjectName()+"."+extension)
 	filename := strings.TrimSuffix(title, "."+document.SourceFormat) + "." + extension
 	fileID, err := worker.writeOSSObject(ctx, objectKey, filename, contentType, encoded, createdBy, "blueprint_conversion")
 	if err != nil {
@@ -359,7 +362,7 @@ func (worker *BlueprintWorker) writeOSSObject(ctx context.Context, objectKey, or
 			category=excluded.category,source=excluded.source,original_name=excluded.original_name,source_original_name=excluded.source_original_name,
 			content_type=excluded.content_type,size_bytes=excluded.size_bytes,source_size_bytes=excluded.source_size_bytes,sha256=excluded.sha256,
 			uploader_id=excluded.uploader_id,status='active',scan_status='trusted_generated' returning id`,
-		cfg.Bucket, cfg.displayEndpoint(), cfg.Region, objectKey, path.Dir(strings.TrimPrefix(objectKey, cfg.Prefix+"/")), source, originalName, contentType, len(data), sha, uploaderID).Scan(&fileID)
+		cfg.Bucket, cfg.displayEndpoint(), cfg.Region, objectKey, ossCategoryFromObjectKey(objectKey, cfg.Prefix), source, originalName, contentType, len(data), sha, uploaderID).Scan(&fileID)
 	return fileID, err
 }
 

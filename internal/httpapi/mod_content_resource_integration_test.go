@@ -75,8 +75,8 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 		values($1,$2,'zh-CN','版本名称','版本简介','版本正文')`, resourceID, detailedVersionID); err != nil {
 		t.Fatal(err)
 	}
-	var templateID, sectionID int64
-	var sectionPublicID string
+	var templateID, sectionID, categoryID int64
+	var sectionPublicID, categoryPublicID string
 	if err = pool.QueryRow(ctx, `select id from mod_content_templates where builtin order by id limit 1`).Scan(&templateID); err != nil {
 		t.Fatal(err)
 	}
@@ -88,8 +88,16 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 		values($1,'zh-CN','测试分类','测试分类简介')`, sectionID); err != nil {
 		t.Fatal(err)
 	}
+	if err = pool.QueryRow(ctx, `insert into mod_content_sections(mod_id,version_id,template_id,parent_id,default_locale,display_mode,status)
+		values($1,$2,$3,$4,'zh-CN','compact','active') returning id,public_id`, modID, detailedVersionID, templateID, sectionID).Scan(&categoryID, &categoryPublicID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `insert into mod_content_section_localizations(section_id,locale,name,description)
+		values($1,'zh-CN','Nested category','Nested category description')`, categoryID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = pool.Exec(ctx, `insert into mod_content_section_resources(section_id,version_id,resource_id,ordinal)
-		values($1,$2,$3,0)`, sectionID, detailedVersionID, resourceID); err != nil {
+		values($1,$2,$3,0)`, categoryID, detailedVersionID, resourceID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -129,6 +137,8 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 	var sectionPayload struct {
 		Data struct {
 			Items []struct {
+				PublicID      string          `json:"publicId"`
+				ParentID      string          `json:"parentPublicId"`
 				ResourceCount int             `json:"resourceCount"`
 				Resources     json.RawMessage `json:"resources"`
 			} `json:"items"`
@@ -137,7 +147,9 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 	if err = json.Unmarshal(sectionResponse.Body.Bytes(), &sectionPayload); err != nil {
 		t.Fatal(err)
 	}
-	if len(sectionPayload.Data.Items) != 1 || sectionPayload.Data.Items[0].ResourceCount != 1 || len(sectionPayload.Data.Items[0].Resources) != 0 {
+	if len(sectionPayload.Data.Items) != 2 || sectionPayload.Data.Items[0].PublicID != sectionPublicID ||
+		sectionPayload.Data.Items[0].ResourceCount != 1 || len(sectionPayload.Data.Items[0].Resources) != 0 ||
+		sectionPayload.Data.Items[1].ParentID != sectionPublicID {
 		t.Fatalf("unexpected content section payload: %s", sectionResponse.Body.String())
 	}
 
@@ -153,19 +165,73 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 		Data struct {
 			Total int `json:"total"`
 			Items []struct {
-				CanonicalID string            `json:"canonicalId"`
-				KindCode    string            `json:"kindCode"`
-				Names       map[string]string `json:"names"`
-				Definition  map[string]any    `json:"definition"`
+				SectionPublicID string            `json:"sectionPublicId"`
+				CanonicalID     string            `json:"canonicalId"`
+				KindCode        string            `json:"kindCode"`
+				Names           map[string]string `json:"names"`
+				Definition      map[string]any    `json:"definition"`
 			} `json:"items"`
+			Categories []struct {
+				ParentPublicID string `json:"parentPublicId"`
+			} `json:"categories"`
 		} `json:"data"`
 	}
 	if err = json.Unmarshal(sectionPageResponse.Body.Bytes(), &sectionPagePayload); err != nil {
 		t.Fatal(err)
 	}
 	if sectionPagePayload.Data.Total != 1 || len(sectionPagePayload.Data.Items) != 1 || sectionPagePayload.Data.Items[0].CanonicalID != canonicalID ||
-		sectionPagePayload.Data.Items[0].KindCode != "minecraft.item" || len(sectionPagePayload.Data.Items[0].Definition) != 0 {
+		sectionPagePayload.Data.Items[0].KindCode != "minecraft.item" || sectionPagePayload.Data.Items[0].SectionPublicID == sectionPublicID ||
+		len(sectionPagePayload.Data.Categories) != 1 || sectionPagePayload.Data.Categories[0].ParentPublicID != sectionPublicID ||
+		len(sectionPagePayload.Data.Items[0].Definition) != 0 {
 		t.Fatalf("unexpected paginated content section payload: %s", sectionPageResponse.Body.String())
+	}
+
+	layoutTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer layoutTx.Rollback(ctx)
+	var actorID, revisionID int64
+	if err = layoutTx.QueryRow(ctx, `insert into users(username,email,display_name,password_hash,email_verified)
+		values($1,$2,'Layout test','test',true) returning id`, "layout-user-"+projectCode, "layout-"+projectCode+"@example.invalid").Scan(&actorID); err != nil {
+		t.Fatal(err)
+	}
+	if err = layoutTx.QueryRow(ctx, `insert into content_revisions(aggregate_type,aggregate_key,revision_no,snapshot,snapshot_hash,created_by,source)
+		values('mod_content_section',$1,1,'{}'::jsonb,$2,$3,'test') returning id`, sectionPublicID, "layout-"+projectCode, actorID).Scan(&revisionID); err != nil {
+		t.Fatal(err)
+	}
+	newCategoryPublicID := fmt.Sprintf("cat%06d", suffix)
+	layout := modContentLayoutEdit{
+		VersionPublicID:     detailedVersionPublicID,
+		RootSectionPublicID: sectionPublicID,
+		Categories: []modContentLayoutCategoryEdit{
+			{PublicID: categoryPublicID, ParentPublicID: sectionPublicID, DefaultLocale: "zh-CN", Ordinal: 0,
+				Localizations: []catalogLocalizationEdit{{Locale: "zh-CN", Name: "Nested category"}}},
+			{PublicID: newCategoryPublicID, ParentPublicID: categoryPublicID, DefaultLocale: "zh-CN", Ordinal: 0,
+				Localizations: []catalogLocalizationEdit{{Locale: "zh-CN", Name: "Nested child"}}},
+		},
+		Resources: []modContentLayoutResourceEdit{{ResourcePublicID: resourcePublicID, SectionPublicID: newCategoryPublicID, Ordinal: 0}},
+	}
+	if err = publishModContentLayoutTx(ctx, layoutTx, revisionID, modContentSnapshot{
+		Kind: "layout", Operation: "edit", ModID: modID, PublicID: sectionPublicID, Layout: &layout,
+	}, actorID); err != nil {
+		t.Fatal(err)
+	}
+	var publishedRevisionID int64
+	var movedSectionPublicID string
+	if err = layoutTx.QueryRow(ctx, `select published_revision_id from mod_content_sections where id=$1`, sectionID).Scan(&publishedRevisionID); err != nil {
+		t.Fatal(err)
+	}
+	if err = layoutTx.QueryRow(ctx, `select section.public_id from mod_content_section_resources member
+		join mod_content_sections section on section.id=member.section_id
+		where member.resource_id=$1 and member.version_id=$2`, resourceID, detailedVersionID).Scan(&movedSectionPublicID); err != nil {
+		t.Fatal(err)
+	}
+	if publishedRevisionID != revisionID || movedSectionPublicID != newCategoryPublicID {
+		t.Fatalf("layout publication did not move the resource atomically: revision=%d section=%s", publishedRevisionID, movedSectionPublicID)
+	}
+	if err = layoutTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
 	}
 
 	detailRequest := httptest.NewRequest(http.MethodGet, "/api/v1/mods/"+slug+"/content-resources/"+resourcePublicID, nil)

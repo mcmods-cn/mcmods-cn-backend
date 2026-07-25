@@ -28,9 +28,8 @@ const (
 	ossDownloadModeESAPrivateOrigin = "esa_private_origin"
 	ossProjectIntroCategory         = "project/intro"
 	ossProjectDownloadCategory      = "project/download"
-	ossUserPlaygroundCategory       = "users/playground"
-	ossUserCommentCategory          = "users/comments"
 	ossModExportScopePrefix         = "mod_export:"
+	ossModCatalogScopePrefix        = "mod_catalog:"
 	ossProjectDownloadScopePrefix   = "project_download:"
 )
 
@@ -76,17 +75,22 @@ type ossDirectUploadRequest struct {
 	Source          string `json:"source"`
 	Prefix          string `json:"prefix"`
 	ProjectUniqueID string `json:"projectUniqueId"`
+	ProjectType     string `json:"projectType"`
+	ContentPublicID string `json:"contentPublicId"`
+	PreferMultipart bool   `json:"preferMultipart"`
 	ExpiresMinutes  int    `json:"expiresMinutes"`
 }
 
 type ossCompleteUploadRequest struct {
-	ObjectKey    string `json:"objectKey"`
-	OriginalName string `json:"originalName"`
-	ContentType  string `json:"contentType"`
-	SizeBytes    int64  `json:"sizeBytes"`
-	SHA256       string `json:"sha256"`
-	Category     string `json:"category"`
-	Source       string `json:"source"`
+	ObjectKey         string `json:"objectKey"`
+	OriginalName      string `json:"originalName"`
+	ContentType       string `json:"contentType"`
+	SizeBytes         int64  `json:"sizeBytes"`
+	SHA256            string `json:"sha256"`
+	Category          string `json:"category"`
+	Source            string `json:"source"`
+	MultipartUploadID string `json:"multipartUploadId"`
+	MultipartAction   string `json:"multipartAction"`
 }
 
 func (s *Server) getOSSConfig(w http.ResponseWriter, r *http.Request) {
@@ -194,9 +198,10 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	blueprintUpload := scope == "user" && isBlueprintExtension(ext)
 	modExportUniqueID := strings.TrimPrefix(scope, ossModExportScopePrefix)
 	isModExport := modExportUniqueID != scope && modExportUniqueID != ""
-	projectDownloadID := strings.TrimPrefix(scope, ossProjectDownloadScopePrefix)
-	isProjectDownload := projectDownloadID != scope && projectDownloadID != ""
-	if (isModExport && ext != ".zip") || (isProjectDownload && ext != ".jar") || (!isModExport && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
+	modCatalogUniqueID := strings.TrimPrefix(scope, ossModCatalogScopePrefix)
+	isModCatalog := modCatalogUniqueID != scope && modCatalogUniqueID != ""
+	projectDownloadType, projectDownloadID, isProjectDownload := parseOSSProjectDownloadScope(scope)
+	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && ext != ".jar") || (!isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -206,6 +211,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		category = "misc"
 	}
 	source := strings.TrimSpace(req.Source)
+	isModGalleryUpload := scope == "user" && strings.HasPrefix(strings.ToLower(source), "mod_gallery:")
 	coverBlueprintID, coverPublicID := int64(0), ""
 	if scope == "user" && strings.HasPrefix(source, "blueprint_cover:") {
 		coverPublicID = strings.TrimSpace(strings.TrimPrefix(source, "blueprint_cover:"))
@@ -216,38 +222,54 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	}
 	if isModExport {
 		source = "mcmods_exporter"
+	} else if isModCatalog {
+		source = normalizeEmbeddedIconImportSource(source)
+		if source == "" {
+			writeError(w, http.StatusBadRequest, "unsupported catalog importer")
+			return
+		}
 	} else if isProjectDownload {
 		source = "project_download"
 	}
-	objectPrefix := cfg.Prefix
+	objectPrefix := ossRoot(cfg.Prefix)
 	if requestedPrefix := normalizeObjectPrefix(req.Prefix); requestedPrefix != "" {
 		objectPrefix = requestedPrefix
 	}
 	objectCategory := category
 	if scope == "user" {
-		category = normalizeOSSUserCategory(category, source)
-		objectPrefix = cfg.Prefix
-		objectCategory = path.Join("users", strconv.FormatInt(currentClaims(r).Subject, 10), strings.TrimPrefix(category, "users/"))
+		category, err = s.resolveUserOSSUploadCategory(r, category, source)
+		if err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		objectPrefix = ossRoot(cfg.Prefix)
+		objectCategory = category
 		if coverBlueprintID > 0 {
-			category = path.Join("blueprints", coverPublicID, "cover")
+			category = ossBlueprintTextCategory(coverPublicID, "cover")
 			objectCategory = category
 		}
 	} else if isModExport {
-		category = path.Join("projects", normalizeProjectObjectSegment(modExportUniqueID), "imports", "packages")
+		category = ossModImportCategory(modExportUniqueID, "mcmods-exporter", "packages")
 		objectCategory = category
-		objectPrefix = cfg.Prefix
+		objectPrefix = ossRoot(cfg.Prefix)
+	} else if isModCatalog {
+		category = ossModImportCategory(modCatalogUniqueID, source, "catalog")
+		objectCategory = category
+		objectPrefix = ossRoot(cfg.Prefix)
 	} else if isProjectDownload {
-		category = path.Join("projects", normalizeProjectObjectSegment(projectDownloadID), "downloads")
+		category = ossProjectReleaseCategory(projectDownloadType, projectDownloadID)
 		objectCategory = category
-		objectPrefix = cfg.Prefix
+		objectPrefix = ossRoot(cfg.Prefix)
 	} else if rawCategory == ossProjectIntroCategory || category == "project_intro" || category == "projectintro" {
-		category = path.Join("projects", normalizeProjectObjectSegment(req.ProjectUniqueID), "description")
+		projectType := defaultString(normalizeObjectSegment(req.ProjectType), "mod")
+		contentPublicID := defaultString(normalizeObjectSegment(req.ContentPublicID), req.ProjectUniqueID)
+		category = ossProjectTextCategory(projectType, req.ProjectUniqueID, contentPublicID)
 		objectCategory = category
-		objectPrefix = cfg.Prefix
+		objectPrefix = ossRoot(cfg.Prefix)
 	} else if rawCategory == ossProjectDownloadCategory || category == "project_download" || category == "projectdownload" {
-		category = path.Join("projects", normalizeProjectObjectSegment(req.ProjectUniqueID), "downloads")
+		category = ossProjectReleaseCategory(defaultString(normalizeObjectSegment(req.ProjectType), "mod"), req.ProjectUniqueID)
 		objectCategory = category
-		objectPrefix = cfg.Prefix
+		objectPrefix = ossRoot(cfg.Prefix)
 	}
 	contentType := strings.TrimSpace(req.ContentType)
 	if contentType == "" {
@@ -262,10 +284,19 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		// Project files keep their own immutable object path even when another
 		// project happens to upload the same JAR.
 		exists = false
-	} else if (scope == "user" || isModExport) && coverBlueprintID == 0 {
+	} else if (scope == "user" || isModExport || isModCatalog) && coverBlueprintID == 0 {
 		existing, exists = s.findExistingOSSFileByHashForUploader(r.Context(), req.SHA256, req.SizeBytes, currentClaims(r).Subject)
 	} else {
 		existing, exists = s.findExistingOSSFileByHash(r.Context(), req.SHA256, req.SizeBytes)
+	}
+	if exists && isModExport && fmt.Sprint(existing["category"]) != category {
+		exists = false
+	}
+	if exists && isModCatalog && (fmt.Sprint(existing["category"]) != category || fmt.Sprint(existing["source"]) != source) {
+		exists = false
+	}
+	if exists && scope == "user" && (blueprintUpload || isModGalleryUpload || fmt.Sprint(existing["category"]) != category) {
+		exists = false
 	}
 	if exists {
 		if coverBlueprintID > 0 {
@@ -316,11 +347,11 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 			writeError(w, http.StatusInternalServerError, "创建蓝图记录失败")
 			return
 		}
-		category = path.Join("blueprints", blueprintPublicID, "original")
+		category = ossBlueprintReleaseCategory(blueprintPublicID, "original")
 		objectCategory = category
-		objectPrefix = cfg.Prefix
+		objectPrefix = ossRoot(cfg.Prefix)
 	}
-	objectKey := buildOSSObjectKey(objectPrefix, objectCategory)
+	objectKey := buildOSSObjectKeyForFile(objectPrefix, objectCategory, req.OriginalName)
 	if blueprintID > 0 {
 		_, _ = s.db.Exec(r.Context(), `update blueprints set original_object_key=$2,updated_at=now() where id=$1`, blueprintID, objectKey)
 	}
@@ -333,6 +364,29 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		expiresMinutes = 60
 	}
 	expires := time.Duration(expiresMinutes) * time.Minute
+	if shouldUseOSSMultipart(req.PreferMultipart, req.SizeBytes) {
+		multipart, multipartErr := s.initiateOSSMultipartUpload(
+			r.Context(), client, cfg, objectKey, contentType, req.SHA256, req.SizeBytes, expires,
+		)
+		if multipartErr != nil {
+			s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, objectKey, req.OriginalName, req.SizeBytes, requestIP(r), r.UserAgent(), "failed", multipartErr.Error())
+			writeError(w, http.StatusBadGateway, "生成 OSS 分片上传请求失败")
+			return
+		}
+		response := map[string]any{
+			"method": "MULTIPART", "multipart": multipart,
+			"bucket": cfg.Bucket, "objectKey": objectKey, "category": category, "source": source,
+			"originalName": req.OriginalName, "contentType": contentType, "sizeBytes": req.SizeBytes,
+			"sha256": req.SHA256, "uploadRequired": true, "expiresAt": time.Now().Add(expires),
+			"accessUrl": buildPublicOSSURL(cfg, objectKey),
+		}
+		if blueprintPublicID != "" {
+			response["blueprintId"] = blueprintPublicID
+			response["blueprint"] = map[string]any{"id": blueprintPublicID, "status": "uploading"}
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
 	result, err := client.Presign(
 		r.Context(),
 		&aliyunoss.PutObjectRequest{
@@ -395,15 +449,24 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	req.OriginalName = strings.TrimSpace(req.OriginalName)
 	req.ContentType = strings.TrimSpace(req.ContentType)
 	req.SHA256 = normalizeSHA256(req.SHA256)
+	req.MultipartUploadID = strings.TrimSpace(req.MultipartUploadID)
+	req.MultipartAction = strings.ToLower(strings.TrimSpace(req.MultipartAction))
 	rawCategory := strings.TrimSpace(req.Category)
 	req.Category = normalizeObjectSegment(rawCategory)
 	req.Source = strings.TrimSpace(req.Source)
 	modExportUniqueID := strings.TrimPrefix(scope, ossModExportScopePrefix)
 	isModExport := modExportUniqueID != scope && modExportUniqueID != ""
-	projectDownloadID := strings.TrimPrefix(scope, ossProjectDownloadScopePrefix)
-	isProjectDownload := projectDownloadID != scope && projectDownloadID != ""
+	modCatalogUniqueID := strings.TrimPrefix(scope, ossModCatalogScopePrefix)
+	isModCatalog := modCatalogUniqueID != scope && modCatalogUniqueID != ""
+	projectDownloadType, projectDownloadID, isProjectDownload := parseOSSProjectDownloadScope(scope)
 	if isModExport {
 		req.Source = "mcmods_exporter"
+	} else if isModCatalog {
+		req.Source = normalizeEmbeddedIconImportSource(req.Source)
+		if req.Source == "" {
+			writeError(w, http.StatusBadRequest, "unsupported catalog importer")
+			return
+		}
 	} else if isProjectDownload {
 		req.Source = "project_download"
 	}
@@ -419,7 +482,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		req.OriginalName = path.Base(req.ObjectKey)
 	}
 	ext := strings.ToLower(filepath.Ext(req.OriginalName))
-	if (isModExport && ext != ".zip") || (isProjectDownload && ext != ".jar") || (!isModExport && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
+	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && ext != ".jar") || (!isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -427,38 +490,74 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		req.Category = "misc"
 	}
 	if scope == "user" {
-		userPrefix := path.Join(cfg.Prefix, "users", strconv.FormatInt(currentClaims(r).Subject, 10))
-		blueprintPrefix := path.Join(cfg.Prefix, "blueprints")
+		blueprintPrefix := path.Join(ossRoot(cfg.Prefix), ossProjectDirectory, normalizeOSSProjectKind("blueprint"))
 		isBlueprintObject := isAllowedObjectKey(req.ObjectKey, blueprintPrefix) && (s.userOwnsPendingBlueprintObject(r.Context(), currentClaims(r).Subject, req.ObjectKey) || s.userOwnsBlueprintObject(r.Context(), currentClaims(r).Subject, req.ObjectKey))
-		if !isBlueprintObject && !isAllowedObjectKey(req.ObjectKey, userPrefix) {
+		expectedCategory := ""
+		if !isBlueprintObject {
+			expectedCategory, err = s.resolveUserOSSUploadCategory(r, rawCategory, req.Source)
+			if err != nil {
+				writeError(w, http.StatusForbidden, err.Error())
+				return
+			}
+		}
+		if !isBlueprintObject && !isAllowedObjectKey(req.ObjectKey, ossObjectPrefix(cfg.Prefix, expectedCategory)) {
 			writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于用户文件目录")
 			return
 		}
 		if isBlueprintObject {
-			req.Category = strings.TrimPrefix(path.Dir(req.ObjectKey), cfg.Prefix+"/")
+			req.Category = ossCategoryFromObjectKey(req.ObjectKey, cfg.Prefix)
 		} else {
-			req.Category = userCategoryFromObjectKey(req.ObjectKey, userPrefix)
+			req.Category = ossCategoryFromObjectKey(req.ObjectKey, cfg.Prefix)
 		}
 	} else if isModExport {
-		exportPrefix := path.Join(cfg.Prefix, "projects", normalizeProjectObjectSegment(modExportUniqueID), "imports", "packages")
+		exportCategory := ossModImportCategory(modExportUniqueID, "mcmods-exporter", "packages")
+		exportPrefix := ossObjectPrefix(cfg.Prefix, exportCategory)
 		if !isAllowedObjectKey(req.ObjectKey, exportPrefix) {
 			writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于模组导入临时目录")
 			return
 		}
-		req.Category = path.Join("projects", normalizeProjectObjectSegment(modExportUniqueID), "imports", "packages")
+		req.Category = exportCategory
+	} else if isModCatalog {
+		catalogCategory := ossModImportCategory(modCatalogUniqueID, req.Source, "catalog")
+		catalogPrefix := ossObjectPrefix(cfg.Prefix, catalogCategory)
+		if !isAllowedObjectKey(req.ObjectKey, catalogPrefix) {
+			writeError(w, http.StatusBadRequest, "OSS ObjectKey does not belong to this mod catalog import directory")
+			return
+		}
+		req.Category = catalogCategory
 	} else if isProjectDownload {
-		downloadPrefix := path.Join(cfg.Prefix, "projects", normalizeProjectObjectSegment(projectDownloadID), "downloads")
+		downloadCategory := ossProjectReleaseCategory(projectDownloadType, projectDownloadID)
+		downloadPrefix := ossObjectPrefix(cfg.Prefix, downloadCategory)
 		if !isAllowedObjectKey(req.ObjectKey, downloadPrefix) {
 			writeError(w, http.StatusBadRequest, "OSS ObjectKey does not belong to this project download directory")
 			return
 		}
-		req.Category = path.Join("projects", normalizeProjectObjectSegment(projectDownloadID), "downloads")
-	} else if strings.HasPrefix(req.ObjectKey, path.Join(cfg.Prefix, "projects")+"/") {
+		req.Category = downloadCategory
+	} else if strings.HasPrefix(req.ObjectKey, path.Join(ossRoot(cfg.Prefix), ossProjectDirectory)+"/") {
 		if rawCategory == ossProjectIntroCategory || req.Category == "project_intro" || req.Category == "projectintro" {
-			req.Category = projectCategoryFromObjectKey(req.ObjectKey, cfg.Prefix, "description")
+			req.Category = ossCategoryFromObjectKey(req.ObjectKey, cfg.Prefix)
 		}
 		if rawCategory == ossProjectDownloadCategory || req.Category == "project_download" || req.Category == "projectdownload" {
-			req.Category = projectCategoryFromObjectKey(req.ObjectKey, cfg.Prefix, "downloads")
+			req.Category = ossCategoryFromObjectKey(req.ObjectKey, cfg.Prefix)
+		}
+	}
+	if req.MultipartUploadID != "" {
+		if req.MultipartAction == "abort" {
+			if abortErr := abortOSSMultipartUpload(r.Context(), client, cfg, req.ObjectKey, req.MultipartUploadID); abortErr != nil {
+				writeError(w, http.StatusBadGateway, "取消 OSS 分片上传失败")
+				return
+			}
+			s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, req.ObjectKey, req.OriginalName, req.SizeBytes, requestIP(r), r.UserAgent(), "cancelled", "multipart upload aborted")
+			writeJSON(w, http.StatusOK, map[string]any{"aborted": true})
+			return
+		}
+		if req.MultipartAction != "" && req.MultipartAction != "complete" {
+			writeError(w, http.StatusBadRequest, "OSS 分片上传操作不合法")
+			return
+		}
+		if completeErr := completeOSSMultipartUpload(r.Context(), client, cfg, req.ObjectKey, req.MultipartUploadID); completeErr != nil {
+			writeError(w, http.StatusBadGateway, "合并 OSS 分片失败")
+			return
 		}
 	}
 	head, err := client.HeadObject(
@@ -735,25 +834,20 @@ func (s *Server) enforceUserFileUploadLimits(r *http.Request, sizeBytes int64, d
 	if singleLimit != maxPermissionBytes && sizeBytes > singleLimit {
 		return fmt.Errorf("文件超过单文件大小限制：%s", formatLimitBytes(singleLimit))
 	}
-	userPrefix, blueprintPrefix := s.userStoragePatterns(r.Context(), claims.Subject)
 	var dailyUsed, totalUsed int64
 	_ = s.db.QueryRow(
 		r.Context(),
 		`select coalesce(sum(coalesce(nullif(source_size_bytes, 0), size_bytes)), 0)
 		 from oss_files
-		 where uploader_id = $1 and (object_key like $2 or object_key like $3) and status = 'active' and created_at >= current_date`,
+		 where uploader_id = $1 and status = 'active' and created_at >= current_date`,
 		claims.Subject,
-		userPrefix,
-		blueprintPrefix,
 	).Scan(&dailyUsed)
 	_ = s.db.QueryRow(
 		r.Context(),
 		`select coalesce(sum(size_bytes), 0)
 		 from oss_files
-		 where uploader_id = $1 and (object_key like $2 or object_key like $3) and status = 'active'`,
+		 where uploader_id = $1 and status = 'active'`,
 		claims.Subject,
-		userPrefix,
-		blueprintPrefix,
 	).Scan(&totalUsed)
 	if dailyLimit != maxPermissionBytes && dailyUsed+sizeBytes > dailyLimit {
 		return fmt.Errorf("超过每日上传额度：%s", formatLimitBytes(dailyLimit))
@@ -773,26 +867,18 @@ func (s *Server) enforceUserStoredFileLimit(r *http.Request, sizeBytes int64) er
 	if totalLimit == maxPermissionBytes {
 		return nil
 	}
-	userPrefix, blueprintPrefix := s.userStoragePatterns(r.Context(), claims.Subject)
 	var totalUsed int64
 	_ = s.db.QueryRow(
 		r.Context(),
 		`select coalesce(sum(size_bytes), 0)
 		 from oss_files
-		 where uploader_id = $1 and (object_key like $2 or object_key like $3) and status = 'active'`,
+		 where uploader_id = $1 and status = 'active'`,
 		claims.Subject,
-		userPrefix,
-		blueprintPrefix,
 	).Scan(&totalUsed)
 	if totalUsed+sizeBytes > totalLimit {
 		return fmt.Errorf("超过用户文件总容量：%s", formatLimitBytes(totalLimit))
 	}
 	return nil
-}
-
-func (s *Server) userStoragePatterns(ctx context.Context, userID int64) (string, string) {
-	prefix := s.ossConfigFromSettings(ctx).Prefix
-	return path.Join(prefix, "users", strconv.FormatInt(userID, 10)) + "/%", path.Join(prefix, "blueprints") + "/%"
 }
 
 func (s *Server) presignOSSFile(w http.ResponseWriter, r *http.Request) {
@@ -1082,8 +1168,91 @@ func (s *Server) insertOSSUploadLog(ctx context.Context, fileID *int64, uploader
 	)
 }
 
+func (s *Server) resolveUserOSSUploadCategory(r *http.Request, category, source string) (string, error) {
+	claims := currentClaims(r)
+	normalizedSource := strings.ToLower(strings.TrimSpace(source))
+	if strings.HasPrefix(normalizedSource, "recipe_gui:") {
+		parts := strings.Split(strings.TrimPrefix(normalizedSource, "recipe_gui:"), ":")
+		recipeTypePublicID := normalizeObjectSegment(parts[0])
+		templatePublicID := "staging"
+		if len(parts) > 1 && normalizeObjectSegment(parts[1]) != "" {
+			templatePublicID = normalizeObjectSegment(parts[1])
+		}
+		var exists bool
+		if recipeTypePublicID == "" || !hasPermission(claims.Permissions, "content.write") ||
+			s.db.QueryRow(r.Context(), `select exists(select 1 from catalog_entities where public_id=$1 and entity_type='recipe_type' and status='active')`, recipeTypePublicID).Scan(&exists) != nil || !exists {
+			return "", errors.New("没有权限向该配方模板目录上传文件")
+		}
+		return ossProjectCategory("catalog", "_shared", "recipe-gui", recipeTypePublicID, templatePublicID), nil
+	}
+	if strings.HasPrefix(normalizedSource, "creator_avatar:") {
+		parts := strings.SplitN(strings.TrimPrefix(normalizedSource, "creator_avatar:"), ":", 2)
+		if len(parts) != 2 {
+			return "", errors.New("作者头像上传目标不完整")
+		}
+		kind, publicID := normalizeObjectSegment(parts[0]), normalizeObjectSegment(parts[1])
+		var storedKind string
+		var createdBy, claimedBy *int64
+		if s.db.QueryRow(r.Context(), `select kind,created_by,claimed_by from creators where public_id=$1 and status='active'`, publicID).
+			Scan(&storedKind, &createdBy, &claimedBy) != nil {
+			return "", errors.New("作者或团队不存在")
+		}
+		canEdit := hasPermission(claims.Permissions, "admin.*") || hasPermission(claims.Permissions, "creator.edit") ||
+			(createdBy != nil && *createdBy == claims.Subject) || (claimedBy != nil && *claimedBy == claims.Subject)
+		if !canEdit || kind != normalizeObjectSegment(storedKind) {
+			return "", errors.New("没有权限向该作者或团队目录上传文件")
+		}
+		return ossProjectCategory(kind, publicID, "icons", "avatar", "original"), nil
+	}
+	for _, candidate := range []struct {
+		prefix      string
+		destination string
+	}{
+		{prefix: "mod_gallery:", destination: "gallery"},
+		{prefix: "iconexport:", destination: "iconexporter"},
+	} {
+		if !strings.HasPrefix(normalizedSource, candidate.prefix) {
+			continue
+		}
+		remainder := strings.TrimSpace(strings.TrimPrefix(normalizedSource, candidate.prefix))
+		siteID := strings.TrimSpace(strings.SplitN(remainder, ":", 2)[0])
+		if siteID == "" || siteID == "draft" {
+			return ossUserCategory(claims.Subject, normalizeOSSUserFileScope(category, source)), nil
+		}
+		identity, err := s.modIdentity(r.Context(), siteID)
+		if err != nil && candidate.destination == "gallery" {
+			return ossUserCategory(claims.Subject, normalizeOSSUserFileScope(category, source)), nil
+		}
+		if err != nil || !canEditMod(claims, identity) {
+			return "", errors.New("没有权限向该模组目录上传文件")
+		}
+		if candidate.destination == "gallery" {
+			return ossProjectTextCategory("mod", identity.UniqueID, identity.UniqueID, "gallery"), nil
+		}
+		return ossModImportCategory(identity.UniqueID, candidate.destination, "catalog"), nil
+	}
+	return ossUserCategory(claims.Subject, normalizeOSSUserFileScope(category, source)), nil
+}
+
+func ossProjectDownloadScope(projectType, projectID string) string {
+	return ossProjectDownloadScopePrefix + normalizeOSSProjectKind(projectType) + ":" + normalizeProjectObjectSegment(projectID)
+}
+
+func parseOSSProjectDownloadScope(scope string) (string, string, bool) {
+	if !strings.HasPrefix(scope, ossProjectDownloadScopePrefix) {
+		return "", "", false
+	}
+	value := strings.TrimPrefix(scope, ossProjectDownloadScopePrefix)
+	parts := strings.SplitN(value, ":", 2)
+	if len(parts) == 1 {
+		return "mod", normalizeProjectObjectSegment(parts[0]), parts[0] != ""
+	}
+	projectID := normalizeProjectObjectSegment(parts[1])
+	return parts[0], projectID, parts[1] != ""
+}
+
 func buildOSSObjectKey(prefix string, category string) string {
-	return path.Join(prefix, category, randomObjectName())
+	return buildOSSObjectKeyForFile(prefix, category, "")
 }
 
 type persistedWebPObject struct {
@@ -1106,7 +1275,12 @@ func shouldPersistMarkdownImageAsWebP(originalName string, contentType string, s
 	if source == "playground" || source == "comment" || source == "markdown" || source == "project_intro" || source == "projectintro" {
 		return true
 	}
-	return category == "users/playground" || category == "users/comments" || strings.HasSuffix(category, "/description")
+	return strings.Contains(category, "/files/text/") ||
+		strings.HasSuffix(category, "/files/playground") ||
+		strings.HasSuffix(category, "/files/comments") ||
+		category == "users/playground" ||
+		category == "users/comments" ||
+		strings.HasSuffix(category, "/description")
 }
 
 func persistImageAsWebP(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, sourceObjectKey string, sourceOriginalName string) (persistedWebPObject, error) {
@@ -1242,28 +1416,6 @@ func normalizeProjectObjectSegment(value string) string {
 		return "unassigned"
 	}
 	return value
-}
-
-func userCategoryFromObjectKey(objectKey string, userPrefix string) string {
-	relative := strings.TrimPrefix(objectKey, strings.TrimSuffix(userPrefix, "/")+"/")
-	parts := strings.Split(relative, "/")
-	if len(parts) == 0 || normalizeObjectSegment(parts[0]) == "" {
-		return "users/misc"
-	}
-	return path.Join("users", normalizeObjectSegment(parts[0]))
-}
-
-func projectCategoryFromObjectKey(objectKey string, prefix string, fallback string) string {
-	relative := strings.TrimPrefix(objectKey, path.Join(prefix, "projects")+"/")
-	parts := strings.Split(relative, "/")
-	if len(parts) >= 2 {
-		projectID := normalizeProjectObjectSegment(parts[0])
-		section := normalizeObjectSegment(parts[1])
-		if section != "" {
-			return path.Join("projects", projectID, section)
-		}
-	}
-	return path.Join("projects", "unassigned", fallback)
 }
 
 const maxPermissionBytes int64 = 1<<63 - 1

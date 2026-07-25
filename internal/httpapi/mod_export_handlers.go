@@ -237,7 +237,7 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取导入文件失败")
 		return
 	}
-	expectedPrefix := path.Join("projects", identity.UniqueID, "imports", "packages")
+	expectedPrefix := ossModImportCategory(identity.UniqueID, "mcmods-exporter", "packages")
 	if source != "mcmods_exporter" || !strings.HasPrefix(category, expectedPrefix) || strings.ToLower(filepath.Ext(archiveName)) != ".zip" || archiveSize <= 0 {
 		writeError(w, http.StatusBadRequest, "文件不是当前模组的 mcmods_exporter 导入包")
 		return
@@ -433,7 +433,7 @@ func (s *Server) requireModEditor(w http.ResponseWriter, r *http.Request) (modId
 	return identity, true
 }
 
-func (s *Server) importModExportJob(ctx context.Context, jobID string) (resultErr error) {
+func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resultErr error) {
 	importStarted := time.Now()
 	runToken, err := s.claimModExportJob(ctx, jobID)
 	if errors.Is(err, errModExportLeaseLost) {
@@ -785,7 +785,7 @@ func (s *Server) importModExportJob(ctx context.Context, jobID string) (resultEr
 			switch extension {
 			case ".png":
 				var media modExportPNGMedia
-				if media, err = inspectExportPNG(cfg, revisionID, uniqueID, name, data); err != nil {
+				if media, err = inspectExportPNG(cfg, revisionID, uniqueID, name, data, resourceResolver); err != nil {
 					return err
 				}
 				pngMedia = append(pngMedia, media)
@@ -838,7 +838,7 @@ func (s *Server) importModExportJob(ctx context.Context, jobID string) (resultEr
 	for start := 0; start < len(pngMedia); start += maxExportWriteBatchRows {
 		end := min(start+maxExportWriteBatchRows, len(pngMedia))
 		if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
-			return persistExportPNGMedia(ctx, tx, cfg, uniqueID, createdBy, pngMedia[start:end])
+			return persistExportPNGMedia(ctx, tx, cfg, uniqueID, createdBy, "mcmods_exporter", pngMedia[start:end])
 		}); err != nil {
 			return err
 		}
@@ -889,10 +889,11 @@ func (s *Server) importModExportJob(ctx context.Context, jobID string) (resultEr
 		for _, revisionID := range revisionIDs {
 			if canActivate {
 				var namespace string
-				if queryErr := tx.QueryRow(ctx, `select source_namespace from catalog_import_revisions where id=$1 and import_run_token=$2`, revisionID, runToken).Scan(&namespace); queryErr != nil {
+				var sourceKind string
+				if queryErr := tx.QueryRow(ctx, `select source_namespace,source_kind from catalog_import_revisions where id=$1 and import_run_token=$2`, revisionID, runToken).Scan(&namespace, &sourceKind); queryErr != nil {
 					return queryErr
 				}
-				if _, updateErr := tx.Exec(ctx, `update catalog_import_revisions set is_active=false,status='superseded' where mod_id=$1 and target_version_public_id=$2 and source_namespace=$3 and id<>$4 and is_active`, modID, targetVersionPublicID, namespace, revisionID); updateErr != nil {
+				if _, updateErr := tx.Exec(ctx, `update catalog_import_revisions set is_active=false,status='superseded' where mod_id=$1 and target_version_public_id=$2 and source_namespace=$3 and source_kind=$4 and id<>$5 and is_active`, modID, targetVersionPublicID, namespace, sourceKind, revisionID); updateErr != nil {
 					return updateErr
 				}
 			}
@@ -1525,17 +1526,33 @@ func queueExportBinary(batch *modExportWriteBatch, revisionID, name string, data
 	return nil
 }
 
-func inspectExportPNG(cfg ossConfigPayload, revisionID, uniqueID, name string, data []byte) (modExportPNGMedia, error) {
+func inspectExportPNG(cfg ossConfigPayload, revisionID, uniqueID, name string, data []byte, resolver catalogResourceIdentityResolver) (modExportPNGMedia, error) {
 	imageConfig, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil || imageConfig.Width <= 0 || imageConfig.Height <= 0 || int64(imageConfig.Width)*int64(imageConfig.Height) > 100_000_000 {
 		return modExportPNGMedia{}, fmt.Errorf("invalid or oversized PNG: %s", name)
 	}
 	digest := sha256Hex(data)
-	return modExportPNGMedia{RevisionID: revisionID, AssetPath: name, ObjectKey: modExportMediaObjectKey(cfg.Prefix, uniqueID, revisionID, name), Digest: digest, ByteLength: int64(len(data)), Width: imageConfig.Width, Height: imageConfig.Height, Original: path.Base(name)}, nil
+	return modExportPNGMedia{RevisionID: revisionID, AssetPath: name, ObjectKey: modExportResolvedMediaObjectKey(cfg.Prefix, uniqueID, revisionID, name, resolver), Digest: digest, ByteLength: int64(len(data)), Width: imageConfig.Width, Height: imageConfig.Height, Original: path.Base(name)}, nil
 }
 
 func modExportMediaObjectKey(prefix, projectUniqueID, revisionID, assetPath string) string {
-	return path.Join(prefix, "projects", normalizeProjectObjectSegment(projectUniqueID), "datasets", normalizeObjectSegment(revisionID), "media", assetPath)
+	category := modExportMediaObjectCategory(projectUniqueID, revisionID, assetPath)
+	return path.Join(ossObjectPrefix(prefix, category), modExportMediaObjectSuffix(assetPath))
+}
+
+func modExportResolvedMediaObjectKey(prefix, projectUniqueID, revisionID, assetPath string, resolver catalogResourceIdentityResolver) string {
+	cleaned := sanitizeOSSAssetPath(assetPath)
+	parts := strings.Split(cleaned, "/")
+	if len(parts) >= 5 && parts[0] == "icons" {
+		registry := parts[1]
+		resourcePath := strings.TrimSuffix(path.Join(parts[4:]...), path.Ext(parts[len(parts)-1]))
+		resolved := resolver.resolve(resourceKindForRegistry(registry), parts[3]+":"+resourcePath)
+		if resolved.PublicID != "" {
+			category := modExportMediaObjectCategory(projectUniqueID, revisionID, assetPath)
+			return path.Join(ossObjectPrefix(prefix, category), resolved.PublicID+".png")
+		}
+	}
+	return modExportMediaObjectKey(prefix, projectUniqueID, revisionID, assetPath)
 }
 
 func newModExportPNGUploadPool(ctx context.Context, client *aliyunoss.Client, bucket string) *modExportPNGUploadPool {
@@ -1575,7 +1592,7 @@ func (pool *modExportPNGUploadPool) wait() error {
 	return pool.firstErr
 }
 
-func persistExportPNGMedia(ctx context.Context, tx pgx.Tx, cfg ossConfigPayload, uniqueID string, uploaderID int64, media []modExportPNGMedia) error {
+func persistExportPNGMedia(ctx context.Context, tx pgx.Tx, cfg ossConfigPayload, uniqueID string, uploaderID int64, source string, media []modExportPNGMedia) error {
 	if len(media) == 0 {
 		return nil
 	}
@@ -1590,7 +1607,7 @@ func persistExportPNGMedia(ctx context.Context, tx pgx.Tx, cfg ossConfigPayload,
 		batch := &pgx.Batch{}
 		for index := start; index < end; index++ {
 			item := &media[index]
-			batch.Queue(`insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status) values($1,$2,$3,$4,$5,'mcmods_exporter',$6,$6,'image/png',$7,$7,$8,$9,'active','pending') on conflict(object_key) do update set updated_at=now() returning id`, cfg.Bucket, cfg.displayEndpoint(), cfg.Region, item.ObjectKey, path.Join("projects", uniqueID, "datasets", item.RevisionID, "media"), item.Original, item.ByteLength, item.Digest, nullableUserID(uploaderID))
+			batch.Queue(`insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status) values($1,$2,$3,$4,$5,$6,$7,$7,'image/png',$8,$8,$9,$10,'active','pending') on conflict(object_key) do update set updated_at=now() returning id`, cfg.Bucket, cfg.displayEndpoint(), cfg.Region, item.ObjectKey, ossCategoryFromObjectKey(item.ObjectKey, cfg.Prefix), source, item.Original, item.ByteLength, item.Digest, nullableUserID(uploaderID))
 		}
 		results := tx.SendBatch(ctx, batch)
 		for index := start; index < end; index++ {

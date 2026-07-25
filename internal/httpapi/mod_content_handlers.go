@@ -66,6 +66,7 @@ type modContentResourceEdit struct {
 	KindCode         string                    `json:"kindCode"`
 	CanonicalID      string                    `json:"canonicalId"`
 	VersionPublicID  string                    `json:"versionPublicId"`
+	SectionPublicID  *string                   `json:"sectionPublicId,omitempty"`
 	DefaultLocale    string                    `json:"defaultLocale"`
 	Definition       map[string]any            `json:"definition"`
 	Localizations    []catalogLocalizationEdit `json:"localizations"`
@@ -82,6 +83,7 @@ type modContentSnapshot struct {
 	Version         *modContentVersionEdit  `json:"version,omitempty"`
 	Template        *modContentTemplateEdit `json:"template,omitempty"`
 	Section         *modContentSectionEdit  `json:"section,omitempty"`
+	Layout          *modContentLayoutEdit   `json:"layout,omitempty"`
 	Resource        *modContentResourceEdit `json:"resource,omitempty"`
 	CreatedIdentity bool                    `json:"createdIdentity,omitempty"`
 }
@@ -103,6 +105,10 @@ func normalizeModContentResourceEdit(edit *modContentResourceEdit) error {
 	edit.KindCode = strings.ToLower(strings.TrimSpace(edit.KindCode))
 	edit.CanonicalID = strings.ToLower(strings.TrimSpace(edit.CanonicalID))
 	edit.VersionPublicID = strings.ToLower(strings.TrimSpace(edit.VersionPublicID))
+	if edit.SectionPublicID != nil {
+		value := strings.ToLower(strings.TrimSpace(*edit.SectionPublicID))
+		edit.SectionPublicID = &value
+	}
 	edit.Reason = strings.TrimSpace(edit.Reason)
 	if len(edit.Reason) > 500 || edit.VersionPublicID == "" || (edit.ResourcePublicID == "" && (edit.KindCode == "" || edit.CanonicalID == "")) {
 		return errCatalogEditorInvalid
@@ -450,7 +456,7 @@ func (s *Server) createModContentRevisionTx(r *http.Request, tx pgx.Tx, identity
 	aggregateType := modContentAggregateVersion
 	if snapshot.Kind == "template" {
 		aggregateType = modContentAggregateTemplate
-	} else if snapshot.Kind == "section" {
+	} else if snapshot.Kind == "section" || snapshot.Kind == "layout" {
 		aggregateType = modContentAggregateSection
 	} else if snapshot.Kind == "resource" {
 		aggregateType = modContentAggregateResource
@@ -462,6 +468,8 @@ func (s *Server) createModContentRevisionTx(r *http.Request, tx pgx.Tx, identity
 		reason = snapshot.Template.Reason
 	} else if snapshot.Section != nil && snapshot.Section.Reason != "" {
 		reason = snapshot.Section.Reason
+	} else if snapshot.Layout != nil && snapshot.Layout.Reason != "" {
+		reason = snapshot.Layout.Reason
 	} else if snapshot.Resource != nil && snapshot.Resource.Reason != "" {
 		reason = snapshot.Resource.Reason
 	}
@@ -499,6 +507,9 @@ func (s *Server) createModContentRevisionTx(r *http.Request, tx pgx.Tx, identity
 func modContentReviewRequired(config reviewConfig, snapshot modContentSnapshot) bool {
 	if snapshot.Operation == "create" {
 		if snapshot.Kind == "section" {
+			if snapshot.Section != nil && snapshot.Section.ParentPublicID != "" {
+				return config.CatalogCreate
+			}
 			return config.ModContentSectionCreate
 		}
 		return config.CatalogCreate
@@ -667,7 +678,10 @@ func (s *Server) modContentSections(w http.ResponseWriter, r *http.Request) {
 		section.ordinal,section.status,section.published_revision_id,
 		coalesce((select jsonb_agg(jsonb_build_object('locale',localization.locale,'name',localization.name,'summary',localization.description,'contentMarkdown','') order by localization.locale)
 		 from mod_content_section_localizations localization where localization.section_id=section.id),'[]'::jsonb),
-		coalesce((select count(*)::int from mod_content_section_resources resource where resource.section_id=section.id),0)
+		coalesce((with recursive subtree as (
+			select id from mod_content_sections where id=section.id and status='active'
+			union all select child.id from mod_content_sections child join subtree parent on child.parent_id=parent.id where child.status='active'
+		) select count(*)::int from mod_content_section_resources resource where resource.section_id in(select id from subtree)),0)
 		from mod_content_sections section join mod_content_versions version on version.id=section.version_id
 		join mod_content_templates template on template.id=section.template_id
 		left join mod_content_sections parent on parent.id=section.parent_id
@@ -707,7 +721,7 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 	// Advancement boards need the complete parent graph in one response. The
 	// public UI still requests 120 rows for ordinary sections, while explicitly
 	// requesting the larger bound only for the dedicated tree presentation.
-	limit := boundedLimit(r.URL.Query().Get("limit"), 120, 2000)
+	limit := boundedLimit(r.URL.Query().Get("limit"), 120, maxModContentResources)
 	offset, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("offset")))
 	if offset < 0 {
 		offset = 0
@@ -742,9 +756,15 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 	}
 
 	var total int
-	err = s.db.QueryRow(r.Context(), `select count(*)::int from mod_content_section_resources section_resource
+	err = s.db.QueryRow(r.Context(), `with recursive subtree as (
+			select id from mod_content_sections where id=$1 and status='active'
+			union all
+			select child.id from mod_content_sections child join subtree parent on child.parent_id=parent.id where child.status='active'
+		)
+		select count(*)::int from subtree
+		join mod_content_section_resources section_resource on section_resource.section_id=subtree.id
 		join game_resources resource on resource.entity_id=section_resource.resource_id
-		where section_resource.section_id=$1 and section_resource.version_id=$2 and ($3='' or resource.canonical_id ilike '%'||$3||'%'
+		where section_resource.version_id=$2 and ($3='' or resource.canonical_id ilike '%'||$3||'%'
 		 or exists(select 1 from mod_resource_version_detail_localizations localization
 		  where localization.resource_id=section_resource.resource_id and localization.version_id=$2 and localization.name ilike '%'||$3||'%')
 		 or exists(select 1 from resource_import_snapshots snapshot join catalog_import_revisions revision on revision.id=snapshot.revision_id
@@ -755,7 +775,13 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	rows, err := s.db.Query(r.Context(), `select entity.public_id,resource.kind_code,resource.canonical_id,section_resource.ordinal,
+	rows, err := s.db.Query(r.Context(), `with recursive subtree as (
+			select id,public_id,parent_id,array[ordinal::bigint,id] sort_path from mod_content_sections where id=$1 and status='active'
+			union all
+			select child.id,child.public_id,child.parent_id,parent.sort_path||array[child.ordinal::bigint,child.id]
+			from mod_content_sections child join subtree parent on child.parent_id=parent.id where child.status='active'
+		)
+		select entity.public_id,resource.kind_code,resource.canonical_id,subtree.public_id,section_resource.ordinal,
 		coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(detail.icon_file_id,0),
 		coalesce(nullif(version_names.names,'{}'::jsonb),nullif((select jsonb_object_agg(name.key,name.value)
 		 from jsonb_each_text(coalesce(imported.names,'{}'::jsonb)) name
@@ -763,7 +789,7 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 		case when resource.kind_code='minecraft.advancement' then jsonb_strip_nulls(jsonb_build_object(
 		 'parent',effective.data->'parent','display',jsonb_strip_nulls(jsonb_build_object(
 		  'x',effective.data#>'{display,x}','y',effective.data#>'{display,y}','frame',effective.data#>'{display,frame}')))) else '{}'::jsonb end
-		from mod_content_section_resources section_resource
+		from subtree join mod_content_section_resources section_resource on section_resource.section_id=subtree.id
 		join catalog_entities entity on entity.id=section_resource.resource_id
 		join game_resources resource on resource.entity_id=section_resource.resource_id
 		left join mod_resource_version_details detail on detail.resource_id=section_resource.resource_id and detail.version_id=$2 and detail.status='active'
@@ -777,11 +803,11 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 		 from mod_resource_version_detail_localizations localization
 		 where localization.resource_id=section_resource.resource_id and localization.version_id=$2
 		  and coalesce(localization.name,'')<>'' and replace(lower(localization.locale),'_','-')=any($4::text[])) version_names on true
-		where section_resource.section_id=$1 and section_resource.version_id=$2 and ($5='' or resource.canonical_id ilike '%'||$5||'%'
+		where section_resource.version_id=$2 and ($5='' or resource.canonical_id ilike '%'||$5||'%'
 		 or exists(select 1 from mod_resource_version_detail_localizations localization
 		  where localization.resource_id=section_resource.resource_id and localization.version_id=$2 and localization.name ilike '%'||$5||'%')
 		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$5||'%')
-		order by section_resource.ordinal,resource.canonical_id limit $6 offset $7`, sectionID, versionID, versionPublicID, localeCandidates, query, limit, offset)
+		order by subtree.sort_path,section_resource.ordinal,resource.canonical_id limit $6 offset $7`, sectionID, versionID, versionPublicID, localeCandidates, query, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read content section resources")
 		return
@@ -789,24 +815,29 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 	defer rows.Close()
 	resources := make([]map[string]any, 0, min(limit, total))
 	for rows.Next() {
-		var resourcePublicID, kindCode, canonicalID, sourceRevisionID, iconPath string
+		var resourcePublicID, kindCode, canonicalID, resourceSectionPublicID, sourceRevisionID, iconPath string
 		var resourceOrdinal int
 		var iconFileID int64
 		var names, definition []byte
-		if err = rows.Scan(&resourcePublicID, &kindCode, &canonicalID, &resourceOrdinal, &sourceRevisionID, &iconPath, &iconFileID, &names, &definition); err != nil {
+		if err = rows.Scan(&resourcePublicID, &kindCode, &canonicalID, &resourceSectionPublicID, &resourceOrdinal, &sourceRevisionID, &iconPath, &iconFileID, &names, &definition); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode content section resources")
 			return
 		}
 		resources = append(resources, map[string]any{"versionPublicId": versionPublicID, "resourcePublicId": resourcePublicID,
-			"kindCode": kindCode, "canonicalId": canonicalID, "ordinal": resourceOrdinal, "revisionId": sourceRevisionID, "iconPath": iconPath,
+			"sectionPublicId": resourceSectionPublicID, "kindCode": kindCode, "canonicalId": canonicalID, "ordinal": resourceOrdinal, "revisionId": sourceRevisionID, "iconPath": iconPath,
 			"iconFileId": iconFileID, "names": json.RawMessage(names), "definition": json.RawMessage(definition)})
+	}
+	categories, err := readModContentDescendantSections(r.Context(), s.db, identity.ID, sectionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read content categories")
+		return
 	}
 	section := map[string]any{"publicId": publicID, "versionPublicId": versionPublicID, "templatePublicId": templatePublicID,
 		"templateCode": templateCode, "templateBuiltin": templateBuiltin, "templateI18nKey": templateI18nKey,
 		"parentPublicId": parentPublicID, "defaultLocale": defaultLocale, "displayMode": displayMode, "ordinal": ordinal,
 		"status": status, "publishedRevisionId": revisionID, "localizations": json.RawMessage(localizations),
 		"resourceCount": total}
-	writeJSON(w, http.StatusOK, map[string]any{"section": section, "versionLabel": versionLabel, "items": resources, "total": total, "limit": limit, "offset": offset})
+	writeJSON(w, http.StatusOK, map[string]any{"section": section, "versionLabel": versionLabel, "categories": categories, "items": resources, "total": total, "limit": limit, "offset": offset})
 }
 
 func (s *Server) submitNewModContentSection(w http.ResponseWriter, r *http.Request, identity modIdentityRecord, edit modContentSectionEdit) {
@@ -954,8 +985,10 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if publicID != "" {
-		err = tx.QueryRow(r.Context(), `select resource.entity_id from catalog_entities entity join game_resources resource on resource.entity_id=entity.id
-			where entity.public_id=$1 and entity.status='active' and (resource.owner_mod_id=$2 or resource.owner_mod_id is null)`, publicID, identity.ID).Scan(&resourceID)
+		err = tx.QueryRow(r.Context(), `select resource.entity_id,resource.kind_code,resource.canonical_id
+			from catalog_entities entity join game_resources resource on resource.entity_id=entity.id
+			where entity.public_id=$1 and entity.status='active' and (resource.owner_mod_id=$2 or resource.owner_mod_id is null)`,
+			publicID, identity.ID).Scan(&resourceID, &edit.KindCode, &edit.CanonicalID)
 	} else {
 		resolver, resolveErr := loadCatalogResourceIdentityResolver(r.Context(), s.db)
 		if resolveErr != nil {
@@ -986,6 +1019,10 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 	var versionID int64
 	if err = tx.QueryRow(r.Context(), `select id from mod_content_versions where mod_id=$1 and status='active' and public_id=$2`, identity.ID, edit.VersionPublicID).Scan(&versionID); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "mod content version is invalid")
+		return
+	}
+	if err = validateModContentResourceSectionTx(r.Context(), tx, identity.ID, versionID, edit.KindCode, edit.SectionPublicID); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "the selected content category cannot contain this resource")
 		return
 	}
 	if _, err = tx.Exec(r.Context(), `insert into mod_resource_bindings(resource_id,mod_id) values($1,$2) on conflict(resource_id) do nothing`, resourceID, identity.ID); err != nil {
@@ -1066,14 +1103,27 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var publishedRevisionID *int64
-	if err := s.db.QueryRow(r.Context(), `select detail.published_revision_id from mod_resource_version_details detail
+	var actualKindCode, actualCanonicalID string
+	if err := s.db.QueryRow(r.Context(), `select detail.published_revision_id,resource.kind_code,resource.canonical_id from mod_resource_version_details detail
 		join mod_content_versions version on version.id=detail.version_id join catalog_entities entity on entity.id=detail.resource_id
-		where entity.public_id=$1 and version.public_id=$2 and version.mod_id=$3 and detail.status='active'`, publicID, edit.VersionPublicID, identity.ID).Scan(&publishedRevisionID); err != nil {
+		join game_resources resource on resource.entity_id=detail.resource_id
+		where entity.public_id=$1 and version.public_id=$2 and version.mod_id=$3 and detail.status='active'`,
+		publicID, edit.VersionPublicID, identity.ID).Scan(&publishedRevisionID, &actualKindCode, &actualCanonicalID); err != nil {
 		writeError(w, http.StatusNotFound, "mod resource version detail not found")
 		return
 	}
 	if !sameRevision(edit.BaseRevisionID, publishedRevisionID) {
 		writeError(w, http.StatusConflict, "mod resource version detail changed; reload the editor")
+		return
+	}
+	edit.KindCode, edit.CanonicalID = actualKindCode, actualCanonicalID
+	var versionID int64
+	if err := s.db.QueryRow(r.Context(), `select id from mod_content_versions where public_id=$1 and mod_id=$2 and status='active'`, edit.VersionPublicID, identity.ID).Scan(&versionID); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "mod content version is invalid")
+		return
+	}
+	if err := validateModContentResourceSection(r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "the selected content category cannot contain this resource")
 		return
 	}
 	edit.ResourcePublicID = publicID
@@ -1179,6 +1229,11 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 			}
 		}
 		return nil
+	case "layout":
+		if snapshot.Layout == nil {
+			return errCatalogEditorInvalid
+		}
+		return publishModContentLayoutTx(ctx, tx, revisionID, snapshot, actorID)
 	case "resource":
 		if snapshot.Resource == nil {
 			return errCatalogEditorInvalid
@@ -1208,6 +1263,11 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 				return err
 			}
 		}
+		if snapshot.Resource.SectionPublicID != nil {
+			if err := moveModContentResourceToSectionTx(ctx, tx, revisionID, snapshot.ModID, versionID, resourceID, *snapshot.Resource.SectionPublicID, actorID); err != nil {
+				return err
+			}
+		}
 		return nil
 	default:
 		return errCatalogEditorInvalid
@@ -1218,7 +1278,7 @@ func publishedModContentRevisionTx(ctx context.Context, tx pgx.Tx, snapshot modC
 	table := "mod_content_versions"
 	if snapshot.Kind == "template" {
 		table = "mod_content_templates"
-	} else if snapshot.Kind == "section" {
+	} else if snapshot.Kind == "section" || snapshot.Kind == "layout" {
 		table = "mod_content_sections"
 	} else if snapshot.Kind == "resource" {
 		if snapshot.Resource == nil {
