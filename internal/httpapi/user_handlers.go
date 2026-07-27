@@ -70,7 +70,7 @@ func (s *Server) userOSSFiles(w http.ResponseWriter, r *http.Request) {
 	limit := boundedLimit(r.URL.Query().Get("limit"), 100, 500)
 	rows, err := s.db.Query(
 		r.Context(),
-		`select id, bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, status, scan_status, created_at, updated_at
+		`select public_id, bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, status, scan_status, created_at, updated_at
 		 from oss_files
 		 where uploader_id = $1 and object_key like $2 and status = 'active'
 		 order by created_at desc
@@ -87,8 +87,8 @@ func (s *Server) userOSSFiles(w http.ResponseWriter, r *http.Request) {
 
 	files := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, size, sourceSize int64
-		var bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, sha, status, scanStatus string
+		var size, sourceSize int64
+		var id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, sha, status, scanStatus string
 		var createdAt, updatedAt time.Time
 		if err := rows.Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &sourceOriginalName, &contentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "解析用户文件失败")
@@ -209,7 +209,7 @@ func (s *Server) deleteUserOSSFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "更新文件记录失败")
 		return
 	}
-	s.insertOSSUploadLog(r.Context(), nil, claims.Subject, req.ObjectKey, originalName, 0, requestIP(r), r.UserAgent(), "deleted", "user-delete")
+	s.insertOSSUploadLog(r.Context(), nil, claims.Subject, req.ObjectKey, originalName, 0, s.requestClientLocation(r).IP, r.UserAgent(), "deleted", "user-delete")
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
 }
 

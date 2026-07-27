@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -57,13 +56,13 @@ type permissionCandidate struct {
 }
 
 func (s *Server) adminUserDetails(w http.ResponseWriter, r *http.Request) {
-	userID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || userID <= 0 {
+	identity, err := s.resolvePublicIdentity(r.Context(), r.PathValue("id"), "user")
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "用户 ID 不正确")
 		return
 	}
 
-	details, err := s.loadAdminUserDetails(r.Context(), userID)
+	details, err := s.loadAdminUserDetails(r.Context(), identity.InternalID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			writeError(w, http.StatusNotFound, "用户不存在")
@@ -80,13 +79,14 @@ func (s *Server) loadAdminUserDetails(ctx context.Context, userID int64) (adminU
 	result.OAuthProviders = []string{}
 	err := s.db.QueryRow(
 		ctx,
-		`select id, username, email, display_name, email_verified, status, created_at, last_login_at,
+		`select id, public_id, username, email, display_name, email_verified, status, created_at, last_login_at,
 		        country, timezone, preferred_content_language, preferred_ui_language,
 		        registration_ip, registration_country_code, registration_city
 		 from users where id = $1`,
 		userID,
 	).Scan(
 		&result.User.ID,
+		&result.User.PublicID,
 		&result.User.Username,
 		&result.User.Email,
 		&result.User.DisplayName,

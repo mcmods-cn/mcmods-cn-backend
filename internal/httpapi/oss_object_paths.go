@@ -60,10 +60,6 @@ func ossProjectCategory(projectType, publicID string, segments ...string) string
 	return path.Join(parts...)
 }
 
-func ossProjectPrefix(prefix, projectType, publicID string) string {
-	return path.Join(ossRoot(prefix), ossProjectCategory(projectType, publicID))
-}
-
 func ossProjectReleaseCategory(projectType, publicID string, segments ...string) string {
 	return ossProjectCategory(projectType, publicID, append([]string{"files", "releases"}, segments...)...)
 }

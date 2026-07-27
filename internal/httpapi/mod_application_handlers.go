@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -14,9 +13,9 @@ import (
 )
 
 type createModApplicationRequest struct {
-	Kind          string  `json:"kind"`
-	Proof         string  `json:"proof"`
-	AttachmentIDs []int64 `json:"attachmentIds"`
+	Kind          string   `json:"kind"`
+	Proof         string   `json:"proof"`
+	AttachmentIDs []string `json:"attachmentIds"`
 }
 
 type reviewModApplicationRequest struct {
@@ -25,18 +24,19 @@ type reviewModApplicationRequest struct {
 }
 
 type modApplicationAttachment struct {
-	ID           int64  `json:"id"`
+	ID           string `json:"id"`
 	OriginalName string `json:"originalName"`
 	ObjectKey    string `json:"objectKey"`
 	SizeBytes    int64  `json:"sizeBytes"`
 }
 
 type modApplicationResponse struct {
-	ID          int64                      `json:"id"`
-	ModID       int64                      `json:"modId"`
+	ID          string                     `json:"id"`
+	InternalID  int64                      `json:"-"`
+	ModID       string                     `json:"modId"`
 	ModSiteID   string                     `json:"modSiteId"`
 	ModName     string                     `json:"modName"`
-	UserID      int64                      `json:"userId"`
+	UserID      string                     `json:"userId"`
 	Username    string                     `json:"username"`
 	DisplayName string                     `json:"displayName"`
 	Kind        string                     `json:"kind"`
@@ -108,7 +108,12 @@ func (s *Server) modApplications(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	for _, fileID := range uniqueInt64(req.AttachmentIDs) {
+	for _, filePublicID := range uniquePublicIDs(req.AttachmentIDs) {
+		fileID, resolveErr := resolveOSSFilePublicID(r.Context(), tx, filePublicID)
+		if resolveErr != nil {
+			writeError(w, http.StatusBadRequest, "application attachment not found")
+			return
+		}
 		var owned bool
 		if err = tx.QueryRow(r.Context(), `select exists(select 1 from oss_files where id=$1 and uploader_id=$2 and status='active')`, fileID, claims.Subject).Scan(&owned); err != nil || !owned {
 			writeError(w, http.StatusBadRequest, "申请附件不存在或不属于当前用户")
@@ -150,13 +155,13 @@ func (s *Server) adminModApplications(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) reviewModApplication(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || id <= 0 {
+	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	if !validCatalogPublicID(publicID) {
 		writeError(w, http.StatusBadRequest, "申请编号不正确")
 		return
 	}
 	var req reviewModApplicationRequest
-	if err = decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
@@ -172,9 +177,9 @@ func (s *Server) reviewModApplication(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var modID, userID int64
+	var id, modID, userID int64
 	var kind, modName, projectID string
-	err = tx.QueryRow(r.Context(), `select a.mod_id,a.user_id,a.kind,m.primary_name,m.project_code from mod_membership_applications a join mods m on m.id=a.mod_id where a.id=$1 and a.status='pending' for update`, id).Scan(&modID, &userID, &kind, &modName, &projectID)
+	err = tx.QueryRow(r.Context(), `select a.id,a.mod_id,a.user_id,a.kind,m.primary_name,m.project_code from mod_membership_applications a join mods m on m.id=a.mod_id where a.public_id=$1 and a.status='pending' for update`, publicID).Scan(&id, &modID, &userID, &kind, &modName, &projectID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusConflict, "申请不存在或已经审核")
 		return
@@ -219,26 +224,30 @@ func (s *Server) reviewModApplication(w http.ResponseWriter, r *http.Request) {
 	if req.Status == "approved" {
 		statusText = "已通过"
 	}
-	s.enqueueOrCreateDirectNotification(r.Context(), userID, claims.Subject, "review", "模组成员申请审核结果", fmt.Sprintf("你对 %s 提交的申请%s。%s", modName, statusText, req.Note), map[string]any{"modId": modID, "applicationId": id})
+	s.enqueueOrCreateDirectNotification(r.Context(), userID, claims.Subject, "review", "模组成员申请审核结果", fmt.Sprintf("你对 %s 提交的申请%s。%s", modName, statusText, req.Note), map[string]any{"modId": projectID, "applicationId": publicID})
 	writeJSON(w, http.StatusOK, map[string]any{"status": req.Status})
 }
 
 func (s *Server) presignModApplicationAttachment(w http.ResponseWriter, r *http.Request) {
-	applicationID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || applicationID <= 0 {
+	applicationPublicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	if !validCatalogPublicID(applicationPublicID) {
 		writeError(w, http.StatusBadRequest, "申请编号不正确")
 		return
 	}
-	fileID, err := strconv.ParseInt(r.PathValue("fileId"), 10, 64)
-	if err != nil || fileID <= 0 {
+	filePublicID := strings.ToLower(strings.TrimSpace(r.PathValue("fileId")))
+	if !validCatalogPublicID(filePublicID) {
 		writeError(w, http.StatusBadRequest, "附件编号不正确")
 		return
 	}
 	var objectKey string
-	err = s.db.QueryRow(
+	err := s.db.QueryRow(
 		r.Context(),
-		`select f.object_key from mod_application_attachments a join oss_files f on f.id=a.oss_file_id where a.application_id=$1 and f.id=$2 and f.status='active'`,
-		applicationID, fileID,
+		`select file.object_key
+		 from mod_application_attachments attachment
+		 join mod_membership_applications application on application.id=attachment.application_id
+		 join oss_files file on file.id=attachment.oss_file_id
+		 where application.public_id=$1 and file.public_id=$2 and file.status='active'`,
+		applicationPublicID, filePublicID,
 	).Scan(&objectKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "审核附件不存在")
@@ -252,7 +261,7 @@ func (s *Server) presignModApplicationAttachment(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) queryModApplications(ctx context.Context, where string, args ...any) ([]modApplicationResponse, error) {
-	rows, err := s.db.Query(ctx, `select a.id,a.mod_id,m.slug,m.primary_name,a.user_id,u.username,u.display_name,a.kind,a.proof,a.status,a.review_note,a.created_at,a.reviewed_at from mod_membership_applications a join mods m on m.id=a.mod_id join users u on u.id=a.user_id where `+where+` order by a.created_at desc`, args...)
+	rows, err := s.db.Query(ctx, `select a.public_id,a.id,m.project_code,m.slug,m.primary_name,u.public_id,u.username,u.display_name,a.kind,a.proof,a.status,a.review_note,a.created_at,a.reviewed_at from mod_membership_applications a join mods m on m.id=a.mod_id join users u on u.id=a.user_id where `+where+` order by a.created_at desc`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -260,10 +269,10 @@ func (s *Server) queryModApplications(ctx context.Context, where string, args ..
 	items := make([]modApplicationResponse, 0)
 	for rows.Next() {
 		var item modApplicationResponse
-		if err = rows.Scan(&item.ID, &item.ModID, &item.ModSiteID, &item.ModName, &item.UserID, &item.Username, &item.DisplayName, &item.Kind, &item.Proof, &item.Status, &item.ReviewNote, &item.CreatedAt, &item.ReviewedAt); err != nil {
+		if err = rows.Scan(&item.ID, &item.InternalID, &item.ModID, &item.ModSiteID, &item.ModName, &item.UserID, &item.Username, &item.DisplayName, &item.Kind, &item.Proof, &item.Status, &item.ReviewNote, &item.CreatedAt, &item.ReviewedAt); err != nil {
 			return nil, err
 		}
-		item.Attachments, err = s.modApplicationAttachments(ctx, item.ID)
+		item.Attachments, err = s.modApplicationAttachments(ctx, item.InternalID)
 		if err != nil {
 			return nil, err
 		}
@@ -273,7 +282,7 @@ func (s *Server) queryModApplications(ctx context.Context, where string, args ..
 }
 
 func (s *Server) modApplicationAttachments(ctx context.Context, applicationID int64) ([]modApplicationAttachment, error) {
-	rows, err := s.db.Query(ctx, `select f.id,f.original_name,f.object_key,f.size_bytes from mod_application_attachments a join oss_files f on f.id=a.oss_file_id where a.application_id=$1 order by f.id`, applicationID)
+	rows, err := s.db.Query(ctx, `select f.public_id,f.original_name,f.object_key,f.size_bytes from mod_application_attachments a join oss_files f on f.id=a.oss_file_id where a.application_id=$1 order by f.id`, applicationID)
 	if err != nil {
 		return nil, err
 	}
@@ -299,16 +308,4 @@ func (s *Server) enqueueOrCreateDirectNotification(ctx context.Context, recipien
 	if s.db.QueryRow(ctx, `insert into notifications (recipient_id,kind,title,body,source_locale,data) values ($1,$2,$3,$4,'zh-CN',$5::jsonb) returning id`, recipientID, kind, title, body, string(raw)).Scan(&notificationID) == nil && actorID > 0 {
 		_, _ = s.db.Exec(ctx, `insert into notification_actors (notification_id,actor_id) values ($1,$2) on conflict do nothing`, notificationID, actorID)
 	}
-}
-
-func uniqueInt64(values []int64) []int64 {
-	seen := map[int64]bool{}
-	result := make([]int64, 0, len(values))
-	for _, value := range values {
-		if value > 0 && !seen[value] {
-			seen[value] = true
-			result = append(result, value)
-		}
-	}
-	return result
 }

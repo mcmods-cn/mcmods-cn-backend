@@ -2,9 +2,9 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -22,14 +22,16 @@ var commentMarkdownLinkPattern = regexp.MustCompile(`!?\[([^\]]*)\]\([^)]+\)`)
 var commentHTMLTagPattern = regexp.MustCompile(`<[^>]+>`)
 
 type commentTargetInfo struct {
-	Type  string `json:"type"`
-	Key   string `json:"key"`
-	Title string `json:"title"`
-	URL   string `json:"url"`
+	Type       string `json:"type"`
+	Key        string `json:"key"`
+	Title      string `json:"title"`
+	URL        string `json:"url"`
+	InternalID int64  `json:"-"`
+	VersionID  *int64 `json:"-"`
 }
 
 type commentAuthor struct {
-	ID          int64  `json:"id"`
+	ID          string `json:"id"`
 	Username    string `json:"username"`
 	DisplayName string `json:"displayName"`
 	AvatarURL   string `json:"avatarUrl"`
@@ -111,6 +113,19 @@ type pendingWatchNotification struct {
 	Muted       bool
 }
 
+type insertedCommentTree struct {
+	ID                int64
+	PublicID          string
+	ParentID          *int64
+	RootID            *int64
+	Depth             int
+	DirectRecipientID int64
+}
+
+type commentQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
 func (s *Server) commentsForTarget(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	target, err := s.resolveCommentTarget(r.Context(), r.PathValue("targetType"), r.PathValue("targetKey"), claims.Subject, claims.Permissions)
@@ -148,9 +163,9 @@ func (s *Server) listTargetComments(w http.ResponseWriter, r *http.Request, targ
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `select c.id from comments c
-		where c.target_type=$1 and c.target_key=$2 and c.parent_id is null
+		where c.target_type=$1 and c.target_id=$2 and c.target_version_id is not distinct from $3 and c.parent_id is null
 		  and c.status in ('published','deleted')
-		order by `+order+` limit $3 offset $4`, target.Type, target.Key, limit+1, offset)
+		order by `+order+` limit $4 offset $5`, target.Type, target.InternalID, target.VersionID, limit+1, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取评论失败")
 		return
@@ -174,7 +189,8 @@ func (s *Server) listTargetComments(w http.ResponseWriter, r *http.Request, targ
 	}
 	var total int
 	_ = s.db.QueryRow(r.Context(), `select count(*) from comments
-		where target_type=$1 and target_key=$2 and status in ('published','deleted')`, target.Type, target.Key).Scan(&total)
+		where target_type=$1 and target_id=$2 and target_version_id is not distinct from $3
+		  and status in ('published','deleted')`, target.Type, target.InternalID, target.VersionID).Scan(&total)
 	nextCursor := ""
 	if hasMore {
 		nextCursor = strconv.Itoa(offset + limit)
@@ -208,12 +224,6 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		writeError(w, http.StatusBadRequest, "评论不能为空且不能超过 10000 个字符")
 		return
 	}
-	var recent int
-	_ = s.db.QueryRow(r.Context(), `select count(*) from comments where author_id=$1 and created_at>now()-interval '1 minute'`, claims.Subject).Scan(&recent)
-	if recent >= 20 {
-		writeError(w, http.StatusTooManyRequests, "评论发布过于频繁，请稍后再试")
-		return
-	}
 	if request.ParentID != "" && isPureCY(request.Body) {
 		// “CY” is a private watch command rather than a public comment action.
 		skipRequestActivity(r)
@@ -242,7 +252,15 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 	}
 	defer tx.Rollback(r.Context())
 	var existingID int64
-	if err = tx.QueryRow(r.Context(), `select id from comments where author_id=$1 and idempotency_key=$2`, claims.Subject, request.IdempotencyKey).Scan(&existingID); err == nil {
+	var recent int
+	if err = tx.QueryRow(r.Context(), `select
+		coalesce((select id from comments where author_id=$1 and idempotency_key=$2 limit 1),0),
+		(select count(*) from comments where author_id=$1 and created_at>now()-interval '1 minute')`,
+		claims.Subject, request.IdempotencyKey).Scan(&existingID, &recent); err != nil {
+		writeError(w, http.StatusInternalServerError, "发布评论失败")
+		return
+	}
+	if existingID > 0 {
 		// A retried idempotent request must not create a duplicate activity record.
 		skipRequestActivity(r)
 		if err = tx.Commit(r.Context()); err != nil {
@@ -255,96 +273,34 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 			return
 		}
 	}
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusInternalServerError, "发布评论失败")
+	if recent >= 20 {
+		writeError(w, http.StatusTooManyRequests, "评论发布过于频繁，请稍后再试")
 		return
 	}
 
-	var parentID, rootID *int64
-	var depth int
-	var directRecipientID int64
-	if request.ParentID != "" {
-		var parentNumericID int64
-		var parentRootID *int64
-		if err = tx.QueryRow(r.Context(), `select id,root_id,depth,author_id from comments
-			where public_id=$1 and target_type=$2 and target_key=$3 and status in ('published','deleted') for update`,
-			request.ParentID, target.Type, target.Key).Scan(&parentNumericID, &parentRootID, &depth, &directRecipientID); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				writeError(w, http.StatusBadRequest, "回复目标不存在")
-			} else {
-				writeError(w, http.StatusInternalServerError, "读取回复目标失败")
-			}
-			return
-		}
-		parentID = &parentNumericID
-		if parentRootID != nil {
-			rootID = parentRootID
-		} else {
-			rootID = &parentNumericID
-		}
-		depth++
-	}
-
-	var commentID int64
-	var publicID string
-	if err = tx.QueryRow(r.Context(), `insert into comments
-		(target_type,target_key,author_id,parent_id,root_id,depth,body,idempotency_key)
-		values($1,$2,$3,$4,$5,$6,$7,$8) returning id,public_id`,
-		target.Type, target.Key, claims.Subject, parentID, rootID, depth, request.Body, request.IdempotencyKey,
-	).Scan(&commentID, &publicID); err != nil {
-		writeError(w, http.StatusInternalServerError, "发布评论失败")
+	inserted, err := insertCommentTree(r.Context(), tx, target, claims.Subject, request)
+	if errors.Is(err, pgx.ErrNoRows) && request.ParentID != "" {
+		writeError(w, http.StatusBadRequest, "回复目标不存在")
 		return
-	}
-	if parentID == nil {
-		_, err = tx.Exec(r.Context(), `insert into comment_closure(ancestor_id,descendant_id,depth) values($1,$1,0)`, commentID)
-	} else {
-		_, err = tx.Exec(r.Context(), `insert into comment_closure(ancestor_id,descendant_id,depth)
-			select ancestor_id,$1,depth+1 from comment_closure where descendant_id=$2
-			union all select $1,$1,0`, commentID, *parentID)
-		if err == nil {
-			_, err = tx.Exec(r.Context(), `update comments set descendant_count=descendant_count+1
-				where id in (select ancestor_id from comment_closure where descendant_id=$1 and depth>0)`, commentID)
-		}
-		if err == nil {
-			_, err = tx.Exec(r.Context(), `update comments set child_count=child_count+1 where id=$1`, *parentID)
-		}
 	}
 	if err != nil {
+		log.Printf("create comment tree target_type=%s target_id=%d parent_public_id=%s: %v",
+			target.Type, target.InternalID, request.ParentID, err)
 		writeError(w, http.StatusInternalServerError, "建立评论树失败")
 		return
 	}
+	commentID := inserted.ID
+	publicID := inserted.PublicID
+	parentID := inserted.ParentID
+	directRecipientID := inserted.DirectRecipientID
 
 	watchNotifications := make([]pendingWatchNotification, 0)
 	if parentID != nil {
-		rows, queryErr := tx.Query(r.Context(), `select watch.id,watch.user_id,
-			(watch.muted_forever or (watch.muted_until is not null and watch.muted_until>now()))
-			from comment_watches watch
-			join comment_closure path on path.ancestor_id=watch.comment_id
-			where path.descendant_id=$1 and watch.status='active' and watch.user_id<>$2`,
-			*parentID, claims.Subject)
-		if queryErr != nil {
+		watchNotifications, err = recordCommentWatchReplies(r.Context(), tx, *parentID, commentID, claims.Subject)
+		if err != nil {
+			log.Printf("record comment watch replies comment_id=%d parent_id=%d: %v", commentID, *parentID, err)
 			writeError(w, http.StatusInternalServerError, "更新插眼状态失败")
 			return
-		}
-		for rows.Next() {
-			var pending pendingWatchNotification
-			if rows.Scan(&pending.WatchID, &pending.RecipientID, &pending.Muted) == nil {
-				watchNotifications = append(watchNotifications, pending)
-			}
-		}
-		rows.Close()
-		for _, pending := range watchNotifications {
-			if _, err = tx.Exec(r.Context(), `insert into comment_watch_replies(watch_id,comment_id)
-				values($1,$2) on conflict do nothing`, pending.WatchID, commentID); err != nil {
-				writeError(w, http.StatusInternalServerError, "更新插眼状态失败")
-				return
-			}
-			if _, err = tx.Exec(r.Context(), `update comment_watches set unread_count=unread_count+1,
-				watched_reply_count=watched_reply_count+1,last_activity_at=now(),updated_at=now()
-				where id=$1`, pending.WatchID); err != nil {
-				writeError(w, http.StatusInternalServerError, "更新插眼状态失败")
-				return
-			}
 		}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
@@ -391,13 +347,99 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 	writeJSON(w, http.StatusCreated, map[string]string{"id": publicID})
 }
 
+func insertCommentTree(ctx context.Context, tx pgx.Tx, target commentTargetInfo, authorID int64, request createCommentRequest) (insertedCommentTree, error) {
+	var inserted insertedCommentTree
+	err := tx.QueryRow(ctx, `with parent as materialized (
+			select comment.id,coalesce(comment.root_id,comment.id) root_id,comment.depth+1 depth,comment.author_id
+			from comments comment
+			where $5::text<>'' and comment.public_id=$5::text
+			  and comment.target_type=$1::text and comment.target_id=$2::bigint
+			  and comment.target_version_id is not distinct from $3::bigint
+			  and comment.status in ('published','deleted')
+			for update
+		), inserted_comment as (
+			insert into comments
+				(target_type,target_id,target_version_id,author_id,parent_id,root_id,depth,body,idempotency_key)
+			select $1::text,$2::bigint,$3::bigint,$4::bigint,
+				parent.id,parent.root_id,coalesce(parent.depth,0),$6::text,$7::text
+			from (values (1)) seed(value)
+			left join parent on true
+			where $5::text='' or parent.id is not null
+			returning id,public_id,parent_id,root_id,depth
+		), inserted_path as (
+			insert into comment_closure(ancestor_id,descendant_id,depth)
+			select path.ancestor_id,inserted.id,path.depth+1
+			from inserted_comment inserted
+			join comment_closure path on path.descendant_id=inserted.parent_id
+			union all
+			select inserted.id,inserted.id,0 from inserted_comment inserted
+			returning ancestor_id,descendant_id,depth
+		), updated_counts as (
+			update comments comment
+			set descendant_count=comment.descendant_count+1,
+				child_count=comment.child_count+case when comment.id=inserted.parent_id then 1 else 0 end
+			from inserted_comment inserted
+			where inserted.parent_id is not null
+			  and comment.id in (select ancestor_id from inserted_path where depth>0)
+			returning comment.id
+		)
+		select inserted.id,inserted.public_id,inserted.parent_id,inserted.root_id,inserted.depth,
+			coalesce(parent.author_id,0)
+		from inserted_comment inserted
+		left join parent on parent.id=inserted.parent_id`,
+		target.Type, target.InternalID, target.VersionID, authorID, request.ParentID, request.Body, request.IdempotencyKey).
+		Scan(&inserted.ID, &inserted.PublicID, &inserted.ParentID, &inserted.RootID, &inserted.Depth, &inserted.DirectRecipientID)
+	return inserted, err
+}
+
+func recordCommentWatchReplies(ctx context.Context, tx pgx.Tx, parentID, commentID, authorID int64) ([]pendingWatchNotification, error) {
+	rows, err := tx.Query(ctx, `with relevant as materialized (
+			select watch.id
+			from comment_watches watch
+			join comment_closure path on path.ancestor_id=watch.comment_id
+			where path.descendant_id=$1::bigint and watch.status='active' and watch.user_id<>$3::bigint
+		), inserted_replies as (
+			insert into comment_watch_replies(watch_id,comment_id)
+			select relevant.id,$2::bigint from relevant
+			on conflict do nothing
+			returning watch_id
+		), updated_watches as (
+			update comment_watches watch
+			set unread_count=watch.unread_count+1,
+				watched_reply_count=watch.watched_reply_count+1,
+				last_activity_at=now(),updated_at=now()
+			from inserted_replies reply
+			where watch.id=reply.watch_id
+			returning watch.id,watch.user_id,
+				(watch.muted_forever or (watch.muted_until is not null and watch.muted_until>now())) muted
+		)
+		select id,user_id,muted from updated_watches`,
+		parentID, commentID, authorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]pendingWatchNotification, 0)
+	for rows.Next() {
+		var item pendingWatchNotification
+		if err = rows.Scan(&item.WatchID, &item.RecipientID, &item.Muted); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (s *Server) commentThread(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	var id, rootID int64
-	var targetType, targetKey string
-	err := s.db.QueryRow(r.Context(), `select id,coalesce(root_id,id),target_type,target_key from comments
+	var targetType string
+	var targetID int64
+	var targetVersionID *int64
+	err := s.db.QueryRow(r.Context(), `select id,coalesce(root_id,id),target_type,target_id,target_version_id from comments
 		where public_id=$1 and status in ('published','deleted')`, strings.ToLower(strings.TrimSpace(r.PathValue("commentId")))).
-		Scan(&id, &rootID, &targetType, &targetKey)
+		Scan(&id, &rootID, &targetType, &targetID, &targetVersionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "评论不存在")
 		return
@@ -411,7 +453,7 @@ func (s *Server) commentThread(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取评论失败")
 		return
 	}
-	target, err := s.resolveCommentTarget(r.Context(), targetType, targetKey, claims.Subject, claims.Permissions)
+	target, err := s.resolveCommentTargetByInternal(r.Context(), targetType, targetID, targetVersionID, claims.Subject, claims.Permissions)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "评论目标不存在或当前不可见")
 		return
@@ -658,7 +700,7 @@ func (s *Server) myCommentWatches(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.db.Query(r.Context(), `select watch.id,watch.public_id,watch.comment_id,watch.muted_until,
 		watch.muted_forever,watch.unread_count,watch.watched_reply_count,watch.created_at,watch.last_activity_at,
-		comment.target_type,comment.target_key
+		comment.target_type,comment.target_id,comment.target_version_id
 		from comment_watches watch join comments comment on comment.id=watch.comment_id
 		where `+where+` order by `+order+` limit $2 offset $3`, claims.Subject, limit+1, offset)
 	if err != nil {
@@ -666,19 +708,20 @@ func (s *Server) myCommentWatches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type watchRow struct {
-		id, commentID                   int64
-		publicID, targetType, targetKey string
-		mutedUntil                      *time.Time
-		mutedForever                    bool
-		unreadCount, watchedReplyCount  int
-		createdAt, lastActivityAt       time.Time
+		id, commentID, targetID        int64
+		publicID, targetType           string
+		targetVersionID                *int64
+		mutedUntil                     *time.Time
+		mutedForever                   bool
+		unreadCount, watchedReplyCount int
+		createdAt, lastActivityAt      time.Time
 	}
 	values := make([]watchRow, 0, limit+1)
 	for rows.Next() {
 		var value watchRow
 		if rows.Scan(&value.id, &value.publicID, &value.commentID, &value.mutedUntil, &value.mutedForever,
 			&value.unreadCount, &value.watchedReplyCount, &value.createdAt, &value.lastActivityAt,
-			&value.targetType, &value.targetKey) == nil {
+			&value.targetType, &value.targetID, &value.targetVersionID) == nil {
 			values = append(values, value)
 		}
 	}
@@ -693,9 +736,9 @@ func (s *Server) myCommentWatches(w http.ResponseWriter, r *http.Request) {
 		if queryErr != nil || len(comments) == 0 {
 			continue
 		}
-		target, queryErr := s.resolveCommentTarget(r.Context(), value.targetType, value.targetKey, claims.Subject, claims.Permissions)
+		target, queryErr := s.resolveCommentTargetByInternal(r.Context(), value.targetType, value.targetID, value.targetVersionID, claims.Subject, claims.Permissions)
 		if queryErr != nil {
-			target = commentTargetInfo{Type: value.targetType, Key: value.targetKey, Title: value.targetKey}
+			target = commentTargetInfo{Type: value.targetType, InternalID: value.targetID}
 		}
 		items = append(items, commentWatchListItem{
 			ID: value.publicID, Comment: comments[0], Target: target, MutedUntil: value.mutedUntil,
@@ -776,6 +819,10 @@ func (s *Server) commentWatchItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) queryCommentItems(ctx context.Context, ids []int64, includeTree bool, maxDepth int, viewerID int64) ([]commentResponse, error) {
+	return queryCommentItemsWithQueryer(ctx, s.db, ids, includeTree, maxDepth, viewerID)
+}
+
+func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, ids []int64, includeTree bool, maxDepth int, viewerID int64) ([]commentResponse, error) {
 	if len(ids) == 0 {
 		return []commentResponse{}, nil
 	}
@@ -790,28 +837,40 @@ func (s *Server) queryCommentItems(ctx context.Context, ids []int64, includeTree
 		viewerIndex = 3
 	}
 	args = append(args, viewerID)
-	rows, err := s.db.Query(ctx, fmt.Sprintf(`select c.id,c.public_id,coalesce(parent.public_id,''),
+	rows, err := queryer.Query(ctx, fmt.Sprintf(`select c.id,c.public_id,coalesce(parent.public_id,''),
 		coalesce(root.public_id,''),c.depth,c.body,c.status,c.child_count,c.descendant_count,
-		author.id,author.username,author.display_name,author.avatar_url,
+		author.public_id,author.username,author.display_name,author.avatar_url,
 		coalesce(parent_author.display_name,parent_author.username,''),coalesce(parent.body,''),coalesce(parent.status,''),
 		c.created_at,c.updated_at,
 		coalesce(watch.public_id,''),coalesce(watch.status,''),watch.muted_until,
-		coalesce(watch.muted_forever,false),coalesce(watch.unread_count,0),coalesce(watch.watched_reply_count,0)
+		coalesce(watch.muted_forever,false),coalesce(watch.unread_count,0),coalesce(watch.watched_reply_count,0),
+		coalesce(reaction_summary.names,array[]::text[]),
+		coalesce(reaction_summary.counts,array[]::bigint[]),
+		coalesce(reaction_summary.selected,array[]::text[])
 		from comments c
 		join users author on author.id=c.author_id
 		left join comments parent on parent.id=c.parent_id
 		left join users parent_author on parent_author.id=parent.author_id
 		left join comments root on root.id=c.root_id
 		left join comment_watches watch on watch.comment_id=c.id and watch.user_id=$%d
+		left join lateral (
+			select array_agg(grouped.reaction order by grouped.reaction) names,
+				array_agg(grouped.total order by grouped.reaction) counts,
+				array_agg(grouped.reaction order by grouped.reaction) filter(where grouped.selected) selected
+			from (
+				select reaction.reaction,count(*) total,bool_or(reaction.user_id=$%d) selected
+				from comment_reactions reaction
+				where reaction.comment_id=c.id
+				group by reaction.reaction
+			) grouped
+		) reaction_summary on true
 		where %s and c.status in ('published','deleted')
-		order by c.created_at,c.id`, viewerIndex, where), args...)
+		order by c.created_at,c.id`, viewerIndex, viewerIndex, where), args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	items := make([]commentResponse, 0)
-	numericIDs := make([]int64, 0)
-	indexByID := make(map[int64]int)
 	for rows.Next() {
 		var numericID int64
 		var parentID, rootID, status, parentAuthor, parentBody, parentStatus string
@@ -819,12 +878,14 @@ func (s *Server) queryCommentItems(ctx context.Context, ids []int64, includeTree
 		var mutedUntil *time.Time
 		var mutedForever bool
 		var watchUnread, watchedReplies int
+		var reactionNames, selectedReactions []string
+		var reactionCounts []int64
 		item := commentResponse{Reactions: map[string]int{}, UserReactions: []string{}}
 		if err = rows.Scan(&numericID, &item.ID, &parentID, &rootID, &item.Depth, &item.Body, &status,
 			&item.ChildCount, &item.DescendantCount, &item.Author.ID, &item.Author.Username,
 			&item.Author.DisplayName, &item.Author.AvatarURL, &parentAuthor, &parentBody, &parentStatus,
 			&item.CreatedAt, &item.UpdatedAt, &watchID, &watchStatus, &mutedUntil, &mutedForever,
-			&watchUnread, &watchedReplies); err != nil {
+			&watchUnread, &watchedReplies, &reactionNames, &reactionCounts, &selectedReactions); err != nil {
 			return nil, err
 		}
 		item.ParentID = parentID
@@ -846,34 +907,18 @@ func (s *Server) queryCommentItems(ctx context.Context, ids []int64, includeTree
 				MutedForever: mutedForever, UnreadCount: watchUnread, WatchedReplies: watchedReplies,
 			}
 		}
-		indexByID[numericID] = len(items)
-		numericIDs = append(numericIDs, numericID)
+		for index, reaction := range reactionNames {
+			if index < len(reactionCounts) {
+				item.Reactions[reaction] = int(reactionCounts[index])
+			}
+		}
+		item.UserReactions = selectedReactions
 		items = append(items, item)
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
-	reactionRows, err := s.db.Query(ctx, `select comment_id,reaction,count(*),bool_or(user_id=$2)
-		from comment_reactions where comment_id=any($1) group by comment_id,reaction`, numericIDs, viewerID)
-	if err != nil {
-		return nil, err
-	}
-	defer reactionRows.Close()
-	for reactionRows.Next() {
-		var commentID int64
-		var reaction string
-		var count int
-		var selected bool
-		if reactionRows.Scan(&commentID, &reaction, &count, &selected) == nil {
-			if index, ok := indexByID[commentID]; ok {
-				items[index].Reactions[reaction] = count
-				if selected {
-					items[index].UserReactions = append(items[index].UserReactions, reaction)
-				}
-			}
-		}
-	}
-	return items, reactionRows.Err()
+	return items, nil
 }
 
 func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey string, viewerID int64, permissions []string) (commentTargetInfo, error) {
@@ -883,56 +928,64 @@ func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey
 	moderator := hasPermission(permissions, "comment.moderate") || hasPermission(permissions, "admin.*")
 	switch targetType {
 	case "mod":
-		return info, s.db.QueryRow(ctx, `select mod.primary_name,route.canonical_path
+		err := s.db.QueryRow(ctx, `select mod.id,mod.primary_name,route.canonical_path
 			from mods mod join public_routes route on route.public_id=mod.project_code and route.entity_type='mod'
 			where mod.project_code=$1 and (mod.review_status='approved' or mod.created_by=$2 or $3)`,
-			targetKey, viewerID, moderator).Scan(&info.Title, &info.URL)
+			targetKey, viewerID, moderator).Scan(&info.InternalID, &info.Title, &info.URL)
+		return info, err
 	case "blueprint":
-		return info, s.db.QueryRow(ctx, `select blueprint.title,route.canonical_path
+		err := s.db.QueryRow(ctx, `select blueprint.id,blueprint.title,route.canonical_path
 			from blueprints blueprint join public_routes route on route.public_id=blueprint.public_id and route.entity_type='blueprint'
 			where blueprint.public_id=$1 and blueprint.status<>'deleted'
 			  and (blueprint.review_status in ('not_required','approved') or blueprint.owner_id=$2 or $3)`,
-			targetKey, viewerID, moderator).Scan(&info.Title, &info.URL)
+			targetKey, viewerID, moderator).Scan(&info.InternalID, &info.Title, &info.URL)
+		return info, err
 	case "skin":
-		return info, s.db.QueryRow(ctx, `select asset.display_name,route.canonical_path
+		err := s.db.QueryRow(ctx, `select asset.id,asset.display_name,route.canonical_path
 			from skin_assets asset join public_routes route on route.public_id=asset.public_id and route.entity_type='skin'
 			where asset.public_id=$1 and asset.status='active'
 			  and ((asset.visibility in ('public','unlisted') and asset.review_status='approved') or asset.owner_id=$2 or $3)`,
-			targetKey, viewerID, moderator).Scan(&info.Title, &info.URL)
+			targetKey, viewerID, moderator).Scan(&info.InternalID, &info.Title, &info.URL)
+		return info, err
 	case "creator":
-		return info, s.db.QueryRow(ctx, `select creator.name,
+		err := s.db.QueryRow(ctx, `select creator.id,creator.name,
 			case when creator.kind='team' then '/teams/' else '/authors/' end||creator.public_id
 			from creators creator where creator.public_id=$1
 			  and (creator.review_status='approved' or creator.created_by=$2 or creator.claimed_by=$2 or $3)`,
-			targetKey, viewerID, moderator).Scan(&info.Title, &info.URL)
+			targetKey, viewerID, moderator).Scan(&info.InternalID, &info.Title, &info.URL)
+		return info, err
 	case "player_profile":
-		return info, s.db.QueryRow(ctx, `select profile.name,'/players/'||profile.public_id
+		err := s.db.QueryRow(ctx, `select profile.id,profile.name,'/players/'||profile.public_id
 			from player_profiles profile where profile.public_id=$1 and profile.status='active'
 			  and (profile.visibility in ('public','unlisted') or profile.user_id=$2 or $3)`,
-			targetKey, viewerID, moderator).Scan(&info.Title, &info.URL)
+			targetKey, viewerID, moderator).Scan(&info.InternalID, &info.Title, &info.URL)
+		return info, err
 	case "tag":
-		return info, s.db.QueryRow(ctx, `select coalesce(nullif(localization.name,''),'#'||definition.canonical_id),
+		err := s.db.QueryRow(ctx, `select entity.id,coalesce(nullif(localization.name,''),'#'||definition.canonical_id),
 			'/mods-tag?publicId='||entity.public_id
 			from catalog_entities entity join catalog_tags definition on definition.entity_id=entity.id
 			left join lateral (select name from content_localizations where catalog_entity_id=entity.id
 				and name<>'' order by case locale when 'zh-CN' then 0 when 'en-US' then 1 else 2 end limit 1) localization on true
 			where entity.public_id=$1 and entity.entity_type='tag' and entity.status='active'`,
-			targetKey).Scan(&info.Title, &info.URL)
+			targetKey).Scan(&info.InternalID, &info.Title, &info.URL)
+		return info, err
 	case "recipe_type":
-		return info, s.db.QueryRow(ctx, `select coalesce(nullif(localization.name,''),definition.canonical_id),
+		err := s.db.QueryRow(ctx, `select entity.id,coalesce(nullif(localization.name,''),definition.canonical_id),
 			'/recipe-types?publicId='||entity.public_id
 			from catalog_entities entity join recipe_types definition on definition.entity_id=entity.id
 			left join lateral (select name from content_localizations where catalog_entity_id=entity.id
 				and name<>'' order by case locale when 'zh-CN' then 0 when 'en-US' then 1 else 2 end limit 1) localization on true
 			where entity.public_id=$1 and entity.entity_type='recipe_type' and entity.status='active'`,
-			targetKey).Scan(&info.Title, &info.URL)
+			targetKey).Scan(&info.InternalID, &info.Title, &info.URL)
+		return info, err
 	case "mod_resource":
 		parts := strings.Split(targetKey, "~")
 		if len(parts) != 2 || len(parts[0]) != 9 || len(parts[1]) != 9 {
 			return info, pgx.ErrNoRows
 		}
-		var siteID, resourceID, versionID, canonicalID, versionLabel, localizedName string
-		err := s.db.QueryRow(ctx, `select mod.slug,entity.public_id,version.public_id,resource.canonical_id,
+		var siteID, resourcePublicID, versionPublicID, canonicalID, versionLabel, localizedName string
+		var versionInternalID int64
+		err := s.db.QueryRow(ctx, `select resource.entity_id,version.id,mod.slug,entity.public_id,version.public_id,resource.canonical_id,
 			version.label,coalesce((select name from mod_resource_version_detail_localizations localization
 				where localization.resource_id=resource.entity_id and localization.version_id=version.id
 				and localization.name<>'' order by case localization.locale when 'zh-CN' then 0 when 'en-US' then 1 else 2 end limit 1),'')
@@ -945,7 +998,7 @@ func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey
 			where entity.public_id=$1 and entity.status='active' and detail.status='active'
 			  and version.status='active' and (mod.review_status='approved' or mod.created_by=$3 or $4)`,
 			parts[0], parts[1], viewerID, moderator).Scan(
-			&siteID, &resourceID, &versionID, &canonicalID, &versionLabel, &localizedName,
+			&info.InternalID, &versionInternalID, &siteID, &resourcePublicID, &versionPublicID, &canonicalID, &versionLabel, &localizedName,
 		)
 		if err != nil {
 			return info, err
@@ -957,11 +1010,36 @@ func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey
 		if versionLabel != "" {
 			info.Title += " · " + versionLabel
 		}
-		info.URL = "/mods/" + siteID + "/resources/" + resourceID + "?version=" + versionID
+		info.VersionID = &versionInternalID
+		info.URL = "/mods/" + siteID + "/resources/" + resourcePublicID + "?version=" + versionPublicID
 		return info, nil
 	default:
 		return info, pgx.ErrNoRows
 	}
+}
+
+func (s *Server) resolveCommentTargetByInternal(ctx context.Context, targetType string, targetID int64, targetVersionID *int64, viewerID int64, permissions []string) (commentTargetInfo, error) {
+	var targetKey string
+	if targetType == "mod_resource" {
+		if targetVersionID == nil {
+			return commentTargetInfo{}, pgx.ErrNoRows
+		}
+		var resourcePublicID, versionPublicID string
+		err := s.db.QueryRow(ctx, `select entity.public_id,version.public_id
+			from catalog_entities entity
+			join mod_content_versions version on version.id=$2
+			where entity.id=$1`, targetID, *targetVersionID).Scan(&resourcePublicID, &versionPublicID)
+		if err != nil {
+			return commentTargetInfo{}, err
+		}
+		targetKey = resourcePublicID + "~" + versionPublicID
+	} else {
+		if err := s.db.QueryRow(ctx, `select public_id from public_routes
+			where entity_type=$1 and internal_id=$2`, targetType, targetID).Scan(&targetKey); err != nil {
+			return commentTargetInfo{}, err
+		}
+	}
+	return s.resolveCommentTarget(ctx, targetType, targetKey, viewerID, permissions)
 }
 
 func (s *Server) numericCommentID(ctx context.Context, publicID string) (int64, error) {
@@ -973,8 +1051,9 @@ func (s *Server) numericCommentID(ctx context.Context, publicID string) (int64, 
 
 func (s *Server) commentIDForTarget(ctx context.Context, publicID string, target commentTargetInfo) (int64, error) {
 	var id int64
-	err := s.db.QueryRow(ctx, `select id from comments where public_id=$1 and target_type=$2 and target_key=$3
-		and status in ('published','deleted')`, publicID, target.Type, target.Key).Scan(&id)
+	err := s.db.QueryRow(ctx, `select id from comments where public_id=$1 and target_type=$2 and target_id=$3
+		and target_version_id is not distinct from $4 and status in ('published','deleted')`,
+		publicID, target.Type, target.InternalID, target.VersionID).Scan(&id)
 	return id, err
 }
 
@@ -1049,11 +1128,6 @@ func nonNegativeInt(value string) int {
 		return 0
 	}
 	return number
-}
-
-func marshalCommentData(value any) string {
-	raw, _ := json.Marshal(value)
-	return string(raw)
 }
 
 func (s *Server) enqueueOrCreateCommentWatchNotification(ctx context.Context, recipientID, actorID int64, title, body string, data map[string]any) {

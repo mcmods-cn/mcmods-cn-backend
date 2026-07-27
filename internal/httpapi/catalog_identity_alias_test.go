@@ -9,7 +9,7 @@ func TestCatalogResourceIdentityResolverUnifiesModIDAliases(t *testing.T) {
 	}
 	modern := resolver.resolve("minecraft.item", "ae2:black1")
 	legacy := resolver.resolve("minecraft.item", "AppliedEnergistics2:black1")
-	if modern.ID != legacy.ID || modern.PublicID != legacy.PublicID {
+	if modern.ID != legacy.ID {
 		t.Fatalf("Mod ID aliases must share one global resource identity: modern=%+v legacy=%+v", modern, legacy)
 	}
 	if legacy.CanonicalID != "ae2:black1" || legacy.RawID != "AppliedEnergistics2:black1" {

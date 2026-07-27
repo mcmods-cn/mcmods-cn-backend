@@ -10,7 +10,7 @@ import (
 )
 
 type contentTranslationTaskPayload struct {
-	EntityID         string `json:"entityId"`
+	EntityID         int64  `json:"internalEntityId"`
 	PublicID         string `json:"publicId"`
 	EntityType       string `json:"entityType"`
 	SourceLocale     string `json:"sourceLocale"`
@@ -32,7 +32,7 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 	}
 	payload.SourceLocale = normalizeContentLocale(payload.SourceLocale)
 	payload.TargetLocale = normalizeContentLocale(payload.TargetLocale)
-	if payload.EntityID == "" || !validCatalogPublicID(payload.PublicID) || payload.SourceLocale == "" || payload.TargetLocale == "" || payload.SourceRevisionNo <= 0 {
+	if payload.EntityID <= 0 || !validCatalogPublicID(payload.PublicID) || payload.SourceLocale == "" || payload.TargetLocale == "" || payload.SourceRevisionNo <= 0 {
 		return errors.New("catalog translation payload is incomplete")
 	}
 	translated := translationItemsToMap(result)
@@ -45,22 +45,27 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 		return err
 	}
 	defer tx.Rollback(ctx)
+	var taskUID string
+	if err = tx.QueryRow(ctx, `select task_uid from ai_tasks where id=$1`, taskID).Scan(&taskUID); err != nil {
+		return fmt.Errorf("resolve AI task public identity: %w", err)
+	}
 	var alreadyRecorded bool
 	if err = tx.QueryRow(ctx, `
 		select exists(
 		 select 1 from change_requests
 		 where aggregate_type=$1 and metadata->>'aiTaskId'=$2
-		)`, catalogAggregateLocalization, fmt.Sprintf("%d", taskID)).Scan(&alreadyRecorded); err != nil {
+		)`, catalogAggregateLocalization, taskUID).Scan(&alreadyRecorded); err != nil {
 		return err
 	}
 	if alreadyRecorded {
 		return tx.Commit(ctx)
 	}
-	var entityType, entityKey string
+	var entityType string
+	var entityID int64
 	if err = tx.QueryRow(ctx, `
-		select route.entity_type,route.entity_key from public_routes route
-		join content_subjects subject on subject.public_id=route.public_id and subject.subject_type=route.entity_type
-		where route.entity_key=$1 and route.public_id=$2 for update`, payload.EntityID, payload.PublicID).Scan(&entityType, &entityKey); err != nil {
+		select route.entity_type,route.internal_id from public_routes route
+		join content_subjects subject on subject.subject_id=route.internal_id and subject.subject_type=route.entity_type
+		where route.internal_id=$1 and route.public_id=$2 for update`, payload.EntityID, payload.PublicID).Scan(&entityType, &entityID); err != nil {
 		return fmt.Errorf("load translated content subject: %w", err)
 	}
 	if payload.EntityType != "" && payload.EntityType != entityType {
@@ -68,20 +73,18 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 	}
 	var currentSourceRevisionNo int64
 	if err = tx.QueryRow(ctx, `select revision_no from content_localizations
-		where subject_public_id=$1 and subject_type=$2 and locale=$3 and review_status='approved'`,
-		payload.PublicID, entityType, payload.SourceLocale).Scan(&currentSourceRevisionNo); err != nil {
+		where subject_id=$1 and subject_type=$2 and locale=$3 and review_status='approved'`,
+		entityID, entityType, payload.SourceLocale).Scan(&currentSourceRevisionNo); err != nil {
 		return fmt.Errorf("load content translation source revision: %w", err)
 	}
 	if currentSourceRevisionNo != payload.SourceRevisionNo {
 		return errors.New("content translation source changed while the task was running")
 	}
-	var revisionEntityID string
-	_ = tx.QueryRow(ctx, `select id from catalog_entities where id=$1 and public_id=$2 and entity_type=$3 and status<>'archived'`,
-		entityKey, payload.PublicID, entityType).Scan(&revisionEntityID)
+	revisionEntityID := entityID
 	var baseRevisionID *int64
 	err = tx.QueryRow(ctx, `
 		select published_revision_id from content_localizations
-		where subject_public_id=$1 and subject_type=$2 and locale=$3`, payload.PublicID, entityType, payload.TargetLocale).Scan(&baseRevisionID)
+		where subject_id=$1 and subject_type=$2 and locale=$3`, entityID, entityType, payload.TargetLocale).Scan(&baseRevisionID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
@@ -94,6 +97,7 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 		reviewStatus = "pending"
 	}
 	taskIDCopy := taskID
+	taskUIDCopy := taskUID
 	snapshot := catalogLocalizationSnapshot{
 		SubjectPublicID:  payload.PublicID,
 		SubjectType:      entityType,
@@ -108,12 +112,14 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 		Editable:         isEditableContentLocale(payload.TargetLocale),
 		ReviewStatus:     reviewStatus,
 		AITaskID:         &taskIDCopy,
+		AITaskPublicID:   &taskUIDCopy,
 	}
 	rawSnapshot, err := json.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
 	created, err := createContentRevisionTx(ctx, tx, createContentRevisionParams{
+		EntityType:    entityType,
 		EntityID:      revisionEntityID,
 		AggregateType: catalogAggregateLocalization,
 		AggregateKey:  contentLocalizationAggregateKey(payload.PublicID, entityType, payload.TargetLocale),
@@ -124,7 +130,7 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 		Source:        "ai",
 		Status:        reviewStatus,
 		Metadata: map[string]any{
-			"aiTaskId": taskID, "publicId": payload.PublicID, "entityType": entityType,
+			"aiTaskId": taskUID, "publicId": payload.PublicID, "entityType": entityType,
 			"sourceLocale": payload.SourceLocale, "targetLocale": payload.TargetLocale,
 			"quotaBacked": payload.QuotaBacked,
 		},

@@ -53,18 +53,20 @@ func (s *Server) createModMetadataImport(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	jobID := newExportID()
 	userID := currentClaims(r).Subject
-	if _, err = s.db.Exec(r.Context(),
-		`insert into mod_metadata_import_jobs(id,user_id,provider,source_url,status,progress) values($1,$2,$3,$4,'queued',0)`,
-		jobID, userID, provider, sourceURL,
-	); err != nil {
+	var jobID string
+	if err = s.db.QueryRow(r.Context(),
+		`insert into mod_metadata_import_jobs(user_id,provider,source_url,status,progress)
+		 values($1,$2,$3,'queued',0) returning public_id`,
+		userID, provider, sourceURL,
+	).Scan(&jobID); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建模组导入任务失败")
 		return
 	}
 	message := modMetadataImportMessage{JobID: jobID}
 	if s.queue == nil || s.queue.PublishTask(r.Context(), modMetadataImportTaskCode, message) != nil {
-		_, _ = s.db.Exec(r.Context(), `update mod_metadata_import_jobs set status='failed',error='NATS queue unavailable',finished_at=now(),updated_at=now() where id=$1`, jobID)
+		_, _ = s.db.Exec(r.Context(), `update mod_metadata_import_jobs set status='failed',error='NATS queue unavailable',
+			finished_at=now(),updated_at=now() where public_id=$1`, jobID)
 		writeError(w, http.StatusServiceUnavailable, "NATS 模组导入任务队列不可用")
 		return
 	}
@@ -90,8 +92,8 @@ func (s *Server) modMetadataImportJob(ctx context.Context, jobID string, userID 
 	var job modMetadataImportJobResponse
 	var result []byte
 	err := s.db.QueryRow(ctx,
-		`select id,provider,source_url,status,progress,coalesce(result,'null'::jsonb),error,created_at,updated_at
-		 from mod_metadata_import_jobs where id=$1 and user_id=$2`,
+		`select public_id,provider,source_url,status,progress,coalesce(result,'null'::jsonb),error,created_at,updated_at
+		 from mod_metadata_import_jobs where public_id=$1 and user_id=$2`,
 		jobID, userID,
 	).Scan(&job.ID, &job.Provider, &job.SourceURL, &job.Status, &job.Progress, &result, &job.Error, &job.CreatedAt, &job.UpdatedAt)
 	if err != nil {
@@ -107,7 +109,7 @@ func ensureModImportProviderAvailable(cfg modImportConfig, provider string) erro
 	switch provider {
 	case "modrinth":
 		if !cfg.Modrinth.Enabled {
-			return errors.New("Modrinth 自动导入已在后台关闭")
+			return errors.New("modrinth 自动导入已在后台关闭")
 		}
 	case "curseforge":
 		if !cfg.CurseForge.Enabled {

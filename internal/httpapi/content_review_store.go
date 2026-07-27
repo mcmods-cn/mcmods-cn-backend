@@ -17,7 +17,8 @@ import (
 const currentContentSchemaVersion = 1
 
 type createContentRevisionParams struct {
-	EntityID      string
+	EntityType    string
+	EntityID      int64
 	AggregateType string
 	AggregateKey  string
 	BaseRevision  *int64
@@ -31,10 +32,12 @@ type createContentRevisionParams struct {
 }
 
 type createdContentRevision struct {
-	RevisionID      int64
-	RevisionNo      int64
-	ChangeRequestID int64
-	SnapshotHash    string
+	RevisionID            int64
+	RevisionPublicID      string
+	RevisionNo            int64
+	ChangeRequestID       int64
+	ChangeRequestPublicID string
+	SnapshotHash          string
 }
 
 type contentChange struct {
@@ -48,8 +51,12 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 	var result createdContentRevision
 	params.AggregateType = strings.TrimSpace(params.AggregateType)
 	params.AggregateKey = strings.TrimSpace(params.AggregateKey)
+	params.EntityType = strings.TrimSpace(params.EntityType)
 	if params.AggregateType == "" || params.AggregateKey == "" || len(params.Snapshot) == 0 {
 		return result, fmt.Errorf("invalid content revision")
+	}
+	if (params.EntityID > 0) != (params.EntityType != "") {
+		return result, fmt.Errorf("content revision entity type and id must be provided together")
 	}
 	if params.Source == "" {
 		params.Source = "user"
@@ -77,12 +84,12 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 	result.SnapshotHash = hex.EncodeToString(hash[:])
 	if err = tx.QueryRow(ctx, `
 		insert into content_revisions(
-			entity_id,aggregate_type,aggregate_key,revision_no,base_revision_id,schema_version,snapshot,snapshot_hash,
+			entity_type,entity_id,aggregate_type,aggregate_key,revision_no,base_revision_id,schema_version,snapshot,snapshot_hash,
 			created_by,created_by_snapshot,source
-		) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning id`,
-		nullableEntityID(params.EntityID), params.AggregateType, params.AggregateKey, result.RevisionNo, params.BaseRevision,
+		) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) returning id,public_id`,
+		nullableEntityType(params.EntityType), nullableEntityID(params.EntityID), params.AggregateType, params.AggregateKey, result.RevisionNo, params.BaseRevision,
 		currentContentSchemaVersion, params.Snapshot, result.SnapshotHash, nullableActorID(params.ActorID), actorSnapshot, params.Source,
-	).Scan(&result.RevisionID); err != nil {
+	).Scan(&result.RevisionID, &result.RevisionPublicID); err != nil {
 		return result, fmt.Errorf("insert content revision: %w", err)
 	}
 
@@ -96,12 +103,12 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 	}
 	if err = tx.QueryRow(ctx, `
 		insert into change_requests(
-			entity_id,aggregate_type,aggregate_key,base_revision_id,proposed_revision_id,status,reason,
+			entity_type,entity_id,aggregate_type,aggregate_key,base_revision_id,proposed_revision_id,status,reason,
 			submitted_by,submitted_by_snapshot,metadata,resolved_at
-		) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning id`,
-		nullableEntityID(params.EntityID), params.AggregateType, params.AggregateKey, params.BaseRevision, result.RevisionID, params.Status,
+		) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) returning id,public_id`,
+		nullableEntityType(params.EntityType), nullableEntityID(params.EntityID), params.AggregateType, params.AggregateKey, params.BaseRevision, result.RevisionID, params.Status,
 		params.Reason, nullableActorID(params.ActorID), actorSnapshot, metadata, resolvedAt,
-	).Scan(&result.ChangeRequestID); err != nil {
+	).Scan(&result.ChangeRequestID, &result.ChangeRequestPublicID); err != nil {
 		return result, fmt.Errorf("insert change request: %w", err)
 	}
 
@@ -118,6 +125,7 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 		return result, err
 	}
 	if err = appendAuditEventTx(ctx, tx, auditEventParams{
+		EntityType:    params.EntityType,
 		EntityID:      params.EntityID,
 		AggregateType: params.AggregateType,
 		AggregateKey:  params.AggregateKey,
@@ -175,7 +183,8 @@ func withdrawPendingContentRequestsTx(ctx context.Context, tx pgx.Tx, aggregateT
 }
 
 type auditEventParams struct {
-	EntityID      string
+	EntityType    string
+	EntityID      int64
 	AggregateType string
 	AggregateKey  string
 	ActorID       int64
@@ -196,10 +205,10 @@ func appendAuditEventTx(ctx context.Context, tx pgx.Tx, params auditEventParams)
 	}
 	_, err = tx.Exec(ctx, `
 		insert into audit_events(
-			entity_id,aggregate_type,aggregate_key,actor_id,actor_snapshot,action,before_hash,after_hash,
+			entity_type,entity_id,aggregate_type,aggregate_key,actor_id,actor_snapshot,action,before_hash,after_hash,
 			trace_id,ip,user_agent,metadata
-		) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-		nullableEntityID(params.EntityID), params.AggregateType, params.AggregateKey, nullableActorID(params.ActorID), params.ActorSnapshot,
+		) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		nullableEntityType(params.EntityType), nullableEntityID(params.EntityID), params.AggregateType, params.AggregateKey, nullableActorID(params.ActorID), params.ActorSnapshot,
 		params.Action, params.BeforeHash, params.AfterHash, params.TraceID, params.IP, params.UserAgent, metadata,
 	)
 	return err
@@ -323,11 +332,19 @@ func nullableActorID(actorID int64) any {
 	return actorID
 }
 
-func nullableEntityID(entityID string) any {
-	if strings.TrimSpace(entityID) == "" {
+func nullableEntityID(entityID int64) any {
+	if entityID <= 0 {
 		return nil
 	}
 	return entityID
+}
+
+func nullableEntityType(entityType string) any {
+	entityType = strings.TrimSpace(entityType)
+	if entityType == "" {
+		return nil
+	}
+	return entityType
 }
 
 func auditRequestValues(r *http.Request) (ip, userAgent, traceID string) {

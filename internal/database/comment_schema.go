@@ -1,16 +1,16 @@
 package database
 
 // commentSchemaStatements installs the shared tree-comment model used by every
-// public content page. target_key is intentionally polymorphic: most targets
-// use a nine-character public ID, while version-scoped mod resources use
-// "<resource public ID>~<content version public ID>".
+// public content page. Public IDs are resolved once at the API boundary;
+// comment rows and indexes use numeric object IDs exclusively.
 func commentSchemaStatements() []string {
 	return []string{
 		`create table comments (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			target_type text not null,
-			target_key text not null,
+			target_id bigint not null,
+			target_version_id bigint references mod_content_versions(id) on delete cascade,
 			author_id bigint not null references users(id) on delete restrict,
 			parent_id bigint references comments(id) on delete restrict,
 			root_id bigint references comments(id) on delete restrict,
@@ -24,15 +24,18 @@ func commentSchemaStatements() []string {
 			updated_at timestamptz not null default now(),
 			deleted_at timestamptz,
 			check(target_type ~ '^[a-z][a-z0-9_]{1,63}$'),
-			check(char_length(target_key) between 1 and 255),
 			check(status in ('published','pending','hidden','deleted','spam')),
+			check((target_type='mod_resource' and target_version_id is not null) or
+			      (target_type<>'mod_resource' and target_version_id is null)),
 			check((parent_id is null and root_id is null and depth=0) or
 			      (parent_id is not null and root_id is not null and depth>0))
 		)`,
 		`create unique index idx_comments_author_idempotency
 			on comments(author_id,idempotency_key) where idempotency_key<>''`,
+		`create index idx_comments_author_created
+			on comments(author_id,created_at desc)`,
 		`create index idx_comments_target_roots
-			on comments(target_type,target_key,created_at desc,id desc) where parent_id is null`,
+			on comments(target_type,target_id,target_version_id,created_at desc,id desc) where parent_id is null`,
 		`create index idx_comments_root_created on comments(root_id,created_at,id)`,
 		`create index idx_comments_parent_created on comments(parent_id,created_at,id)`,
 		`create table comment_closure (
@@ -97,8 +100,8 @@ func commentSchemaStatements() []string {
 		`create index idx_comment_reports_queue on comment_reports(status,created_at,id)`,
 		`create or replace function register_comment_public_route() returns trigger as $$
 		begin
-			insert into public_routes(public_id,entity_type,entity_key,canonical_path)
-			values(new.public_id,'comment',new.id::text,'/comments/'||new.public_id);
+			insert into public_routes(public_id,entity_type,internal_id,canonical_path)
+			values(new.public_id,'comment',new.id,'/comments/'||new.public_id);
 			return new;
 		end;
 		$$ language plpgsql`,

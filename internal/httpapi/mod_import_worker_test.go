@@ -3,6 +3,7 @@ package httpapi
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"reflect"
 	"testing"
 )
@@ -107,5 +108,17 @@ func TestProviderClientRejectsCrossHostRedirect(t *testing.T) {
 	}
 	if _, err = client.Get(source.URL); err == nil {
 		t.Fatal("expected redirect to a different API host to be rejected")
+	}
+}
+
+func TestPrivateProviderAddressClassification(t *testing.T) {
+	privateAddresses := []string{"127.0.0.1", "::1", "10.0.0.1", "172.16.0.1", "192.168.1.1", "169.254.1.1"}
+	for _, raw := range privateAddresses {
+		if !isPrivateProviderAddress(netip.MustParseAddr(raw)) {
+			t.Fatalf("expected %s to be classified as private", raw)
+		}
+	}
+	if isPrivateProviderAddress(netip.MustParseAddr("1.1.1.1")) {
+		t.Fatal("public provider address was classified as private")
 	}
 }

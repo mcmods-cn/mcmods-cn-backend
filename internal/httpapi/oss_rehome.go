@@ -66,7 +66,7 @@ func (s *Server) scheduleModGalleryOSSRehome(modID int64) {
 
 func runOSSRehomeWorker() {
 	for task := range ossRehomeQueue {
-		key := ossRehomeTaskKey{server: task.server, modID: task.modID}
+		key := ossRehomeTaskKey(task)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		err := task.server.rehomeModGalleryOSSObjects(ctx, task.modID)
 		cancel()

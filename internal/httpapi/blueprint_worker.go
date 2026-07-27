@@ -86,7 +86,7 @@ func (worker *BlueprintWorker) dispatchQueuedJobs(ctx context.Context) {
 		}
 		if err := worker.queue.PublishTask(ctx, "blueprint_convert", blueprintJobMessage{JobID: jobID}); err != nil {
 			go func(id int64) {
-				jobContext, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+				jobContext, cancel := context.WithTimeout(ctx, 30*time.Minute)
 				defer cancel()
 				if processErr := worker.processJob(jobContext, id); processErr != nil {
 					log.Printf("blueprint fallback worker job %d: %v", id, processErr)
@@ -250,8 +250,19 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID, bl
 			revisionStatus = "pending"
 			reviewStatus = "pending"
 		}
-		snapshot, _ := json.Marshal(blueprintContentSnapshot{PublicID: publicID, Title: title, Description: description, CoverFileID: coverFileID, CoverKey: coverKey})
+		var coverFilePublicID string
+		if coverFileID > 0 {
+			value, resolveErr := ossFilePublicIDForInternal(ctx, tx, &coverFileID)
+			if resolveErr != nil {
+				return resolveErr
+			}
+			if value != nil {
+				coverFilePublicID = *value
+			}
+		}
+		snapshot, _ := json.Marshal(blueprintContentSnapshot{PublicID: publicID, Title: title, Description: description, CoverFileID: coverFilePublicID, CoverKey: coverKey})
 		created, createErr := createContentRevisionTx(ctx, tx, createContentRevisionParams{
+			EntityType: "blueprint", EntityID: blueprintID,
 			AggregateType: "blueprint", AggregateKey: publicID, Snapshot: snapshot, Reason: "New blueprint",
 			ActorID: createdBy, Status: revisionStatus, Source: "blueprint_upload",
 			Metadata: map[string]any{"blueprintId": publicID, "title": title, "operation": "create"},

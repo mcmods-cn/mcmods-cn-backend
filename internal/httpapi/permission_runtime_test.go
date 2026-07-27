@@ -12,7 +12,7 @@ import (
 
 func TestOSSFileRecordExposesConversionDetails(t *testing.T) {
 	record := ossFileRecord(
-		1, "bucket", "endpoint", "region", "mcmods/user/1/files/playground/id.webp", "user/1/files/playground", "playground",
+		"file23456", "bucket", "endpoint", "region", "mcmods/user/1/files/playground/id.webp", "user/1/files/playground", "playground",
 		"image.webp", "image.png", "image/webp", 70, 158, "hash", "active", "pending", time.Time{}, time.Time{},
 	)
 	if record["converted"] != true {

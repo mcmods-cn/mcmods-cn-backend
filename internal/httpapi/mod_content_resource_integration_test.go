@@ -37,9 +37,9 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 	projectCode := fmt.Sprintf("mcr%06d", suffix)
 	resourcePublicID := fmt.Sprintf("rcr%06d", suffix)
 	slug := fmt.Sprintf("content-resource-smoke-%06d", suffix)
-	resourceID := fmt.Sprintf("resource:content-resource-smoke:%06d", suffix)
+	resourceIdentityKey := fmt.Sprintf("resource:content-resource-smoke:%06d", suffix)
 	canonicalID := fmt.Sprintf("smokemod:gear_%06d", suffix)
-	var modID, detailedVersionID int64
+	var modID, resourceID, detailedVersionID int64
 	if err = pool.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,review_status)
 		values($1,$2,'Content resource smoke','approved') returning id`, projectCode, slug).Scan(&modID); err != nil {
 		t.Fatal(err)
@@ -48,7 +48,8 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 		_, _ = pool.Exec(ctx, `delete from mods where id=$1`, modID)
 		_, _ = pool.Exec(ctx, `delete from catalog_entities where id=$1`, resourceID)
 	}()
-	if _, err = pool.Exec(ctx, `insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'resource','active')`, resourceID, resourcePublicID); err != nil {
+	if err = pool.QueryRow(ctx, `insert into catalog_entities(identity_key,public_id,entity_type,status)
+		values($1,$2,'resource','active') returning id`, resourceIdentityKey, resourcePublicID).Scan(&resourceID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path,owner_mod_id,resolved)
@@ -196,8 +197,42 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 		values($1,$2,'Layout test','test',true) returning id`, "layout-user-"+projectCode, "layout-"+projectCode+"@example.invalid").Scan(&actorID); err != nil {
 		t.Fatal(err)
 	}
-	if err = layoutTx.QueryRow(ctx, `insert into content_revisions(aggregate_type,aggregate_key,revision_no,snapshot,snapshot_hash,created_by,source)
-		values('mod_content_section',$1,1,'{}'::jsonb,$2,$3,'test') returning id`, sectionPublicID, "layout-"+projectCode, actorID).Scan(&revisionID); err != nil {
+	advancementParentPublicID := fmt.Sprintf("apr%06d", suffix)
+	advancementChildPublicID := fmt.Sprintf("ach%06d", suffix)
+	advancementParentCanonicalID := fmt.Sprintf("smokemod:root_%06d", suffix)
+	advancementChildCanonicalID := fmt.Sprintf("smokemod:child_%06d", suffix)
+	var advancementParentID, advancementChildID int64
+	if err = layoutTx.QueryRow(ctx, `insert into catalog_entities(identity_key,public_id,entity_type,status)
+		values($1,$2,'resource','active') returning id`,
+		"resource:"+advancementParentCanonicalID, advancementParentPublicID).Scan(&advancementParentID); err != nil {
+		t.Fatal(err)
+	}
+	if err = layoutTx.QueryRow(ctx, `insert into catalog_entities(identity_key,public_id,entity_type,status)
+		values($1,$2,'resource','active') returning id`,
+		"resource:"+advancementChildCanonicalID, advancementChildPublicID).Scan(&advancementChildID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = layoutTx.Exec(ctx, `insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path,owner_mod_id,resolved)
+		values($1,'minecraft.advancement',$2,'smokemod',$3,$5,true),
+		      ($4,'minecraft.advancement',$6,'smokemod',$7,$5,true)`,
+		advancementParentID, advancementParentCanonicalID, fmt.Sprintf("root_%06d", suffix),
+		advancementChildID, modID, advancementChildCanonicalID, fmt.Sprintf("child_%06d", suffix)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = layoutTx.Exec(ctx, `insert into mod_resource_bindings(resource_id,mod_id) values($1,$3),($2,$3)`,
+		advancementParentID, advancementChildID, modID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = layoutTx.Exec(ctx, `insert into mod_resource_version_details(resource_id,version_id,default_locale,definition,status)
+		values($1,$3,'en-US','{"criterion":"parent"}'::jsonb,'active'),
+		      ($2,$3,'en-US','{"criterion":"child"}'::jsonb,'active')`,
+		advancementParentID, advancementChildID, detailedVersionID); err != nil {
+		t.Fatal(err)
+	}
+	if err = layoutTx.QueryRow(ctx, `insert into content_revisions(entity_type,entity_id,aggregate_type,aggregate_key,revision_no,snapshot,snapshot_hash,created_by,source)
+		select route.entity_type,route.internal_id,'mod_content_section',$1,1,'{}'::jsonb,$2,$3,'test'
+		from public_routes route where route.public_id=$1 and route.entity_type='mod_content_section' returning id`,
+		sectionPublicID, "layout-"+projectCode, actorID).Scan(&revisionID); err != nil {
 		t.Fatal(err)
 	}
 	newCategoryPublicID := fmt.Sprintf("cat%06d", suffix)
@@ -210,7 +245,17 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 			{PublicID: newCategoryPublicID, ParentPublicID: categoryPublicID, DefaultLocale: "zh-CN", Ordinal: 0,
 				Localizations: []catalogLocalizationEdit{{Locale: "zh-CN", Name: "Nested child"}}},
 		},
-		Resources: []modContentLayoutResourceEdit{{ResourcePublicID: resourcePublicID, SectionPublicID: newCategoryPublicID, Ordinal: 0}},
+		Resources: []modContentLayoutResourceEdit{
+			{ResourcePublicID: resourcePublicID, SectionPublicID: newCategoryPublicID, Ordinal: 0},
+			{ResourcePublicID: advancementParentPublicID, SectionPublicID: newCategoryPublicID, Ordinal: 1,
+				Advancement: &modContentAdvancementLayoutEdit{X: 1.5, Y: 2.5}},
+			{ResourcePublicID: advancementChildPublicID, SectionPublicID: newCategoryPublicID, Ordinal: 2,
+				Advancement: &modContentAdvancementLayoutEdit{
+					ParentResourcePublicID: advancementParentPublicID,
+					X:                      3.5,
+					Y:                      4.5,
+				}},
+		},
 	}
 	if err = publishModContentLayoutTx(ctx, layoutTx, revisionID, modContentSnapshot{
 		Kind: "layout", Operation: "edit", ModID: modID, PublicID: sectionPublicID, Layout: &layout,
@@ -229,6 +274,32 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 	}
 	if publishedRevisionID != revisionID || movedSectionPublicID != newCategoryPublicID {
 		t.Fatalf("layout publication did not move the resource atomically: revision=%d section=%s", publishedRevisionID, movedSectionPublicID)
+	}
+	var advancementParentDefinition, advancementChildDefinition []byte
+	if err = layoutTx.QueryRow(ctx, `select definition from mod_resource_version_details
+		where resource_id=$1 and version_id=$2`, advancementParentID, detailedVersionID).Scan(&advancementParentDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if err = layoutTx.QueryRow(ctx, `select definition from mod_resource_version_details
+		where resource_id=$1 and version_id=$2`, advancementChildID, detailedVersionID).Scan(&advancementChildDefinition); err != nil {
+		t.Fatal(err)
+	}
+	var parentDefinition, childDefinition map[string]any
+	if err = json.Unmarshal(advancementParentDefinition, &parentDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(advancementChildDefinition, &childDefinition); err != nil {
+		t.Fatal(err)
+	}
+	parentDisplay, _ := parentDefinition["display"].(map[string]any)
+	childDisplay, _ := childDefinition["display"].(map[string]any)
+	if parentDefinition["criterion"] != "parent" || parentDefinition["parent"] != nil ||
+		parentDisplay["x"] != float64(1.5) || parentDisplay["y"] != float64(2.5) {
+		t.Fatalf("unexpected parent advancement layout: %#v", parentDefinition)
+	}
+	if childDefinition["criterion"] != "child" || childDefinition["parent"] != advancementParentCanonicalID ||
+		childDisplay["x"] != float64(3.5) || childDisplay["y"] != float64(4.5) {
+		t.Fatalf("unexpected child advancement layout: %#v", childDefinition)
 	}
 	if err = layoutTx.Rollback(ctx); err != nil {
 		t.Fatal(err)

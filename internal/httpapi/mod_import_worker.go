@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"sort"
@@ -63,7 +65,7 @@ func (worker *ModMetadataImportWorker) republishQueued(ctx context.Context) {
 }
 
 func (worker *ModMetadataImportWorker) publishQueued(ctx context.Context) error {
-	rows, err := worker.server.db.Query(ctx, `select id from mod_metadata_import_jobs where status='queued' order by created_at limit 200`)
+	rows, err := worker.server.db.Query(ctx, `select public_id from mod_metadata_import_jobs where status='queued' order by created_at limit 200`)
 	if err != nil {
 		return err
 	}
@@ -90,14 +92,14 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 	var userID int64
 	err := s.db.QueryRow(ctx,
 		`update mod_metadata_import_jobs set status='running',progress=10,error='',started_at=now(),updated_at=now()
-		 where id=$1 and status='queued' returning provider,source_url,user_id`, jobID,
+		 where public_id=$1 and status='queued' returning provider,source_url,user_id`, jobID,
 	).Scan(&provider, &sourceURL, &userID)
 	if err != nil {
 		return nil
 	}
 	fail := func(importErr error) error {
 		_, _ = s.db.Exec(context.Background(),
-			`update mod_metadata_import_jobs set status='failed',error=$2,finished_at=now(),updated_at=now() where id=$1`,
+			`update mod_metadata_import_jobs set status='failed',error=$2,finished_at=now(),updated_at=now() where public_id=$1`,
 			jobID, truncateRunes(importErr.Error(), 2000))
 		return nil
 	}
@@ -122,7 +124,7 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 	if err != nil {
 		return fail(err)
 	}
-	_, _ = s.db.Exec(ctx, `update mod_metadata_import_jobs set progress=25,updated_at=now() where id=$1`, jobID)
+	_, _ = s.db.Exec(ctx, `update mod_metadata_import_jobs set progress=25,updated_at=now() where public_id=$1`, jobID)
 	var draft createModRequest
 	switch provider {
 	case "modrinth":
@@ -137,7 +139,7 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 	if err != nil {
 		return fail(err)
 	}
-	_, _ = s.db.Exec(ctx, `update mod_metadata_import_jobs set progress=85,updated_at=now() where id=$1`, jobID)
+	_, _ = s.db.Exec(ctx, `update mod_metadata_import_jobs set progress=85,updated_at=now() where public_id=$1`, jobID)
 	if err = normalizeAndValidateModRequest(&draft); err != nil {
 		return fail(fmt.Errorf("导入数据校验失败: %w", err))
 	}
@@ -146,7 +148,8 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 		return fail(err)
 	}
 	if _, err = s.db.Exec(ctx,
-		`update mod_metadata_import_jobs set status='completed',progress=100,result=$2::jsonb,error='',finished_at=now(),updated_at=now() where id=$1`,
+		`update mod_metadata_import_jobs set status='completed',progress=100,result=$2::jsonb,error='',
+		 finished_at=now(),updated_at=now() where public_id=$1`,
 		jobID, string(result)); err != nil {
 		return err
 	}
@@ -410,8 +413,34 @@ func newProviderHTTPClient(timeout time.Duration, baseURL string) (*http.Client,
 		return nil, errors.New("invalid provider base URL")
 	}
 	allowedHost := strings.ToLower(parsed.Host)
+	allowLoopback := strings.EqualFold(parsed.Hostname(), "localhost")
+	if address := net.ParseIP(parsed.Hostname()); address != nil && address.IsLoopback() {
+		allowLoopback = true
+	}
+	dialer := &net.Dialer{Timeout: min(timeout, 15*time.Second), KeepAlive: 30 * time.Second}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, splitErr := net.SplitHostPort(address)
+		if splitErr != nil {
+			return nil, splitErr
+		}
+		addresses, lookupErr := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		if len(addresses) == 0 {
+			return nil, errors.New("provider host did not resolve")
+		}
+		for _, resolved := range addresses {
+			if isPrivateProviderAddress(resolved) && !allowLoopback {
+				return nil, errors.New("provider host resolves to a private network")
+			}
+		}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(addresses[0].String(), port))
+	}
 	return &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: transport,
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return errors.New("too many provider redirects")
@@ -422,6 +451,15 @@ func newProviderHTTPClient(timeout time.Duration, baseURL string) (*http.Client,
 			return nil
 		},
 	}, nil
+}
+
+func isPrivateProviderAddress(address netip.Addr) bool {
+	return address.IsPrivate() ||
+		address.IsLoopback() ||
+		address.IsLinkLocalUnicast() ||
+		address.IsLinkLocalMulticast() ||
+		address.IsUnspecified() ||
+		address.IsMulticast()
 }
 
 func getProviderJSON(ctx context.Context, client *http.Client, endpoint string, headers http.Header, target any) error {

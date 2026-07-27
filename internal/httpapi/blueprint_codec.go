@@ -17,7 +17,13 @@ import (
 	"github.com/Tnze/go-mc/nbt"
 )
 
-const blueprintSchemaVersion = "mcmods-blueprint/v1"
+const (
+	blueprintSchemaVersion       = "mcmods-blueprint/v1"
+	maxBlueprintDecodedNBTBytes  = int64(256 << 20)
+	maxBlueprintDimension        = 4096
+	maxBlueprintVolume           = 16 << 20
+	maxBlueprintNonAirBlockCount = 8 << 20
+)
 
 type blueprintDocument struct {
 	SchemaVersion string           `json:"schemaVersion"`
@@ -58,7 +64,8 @@ func decodeBlueprint(data []byte, format, name string) (blueprintDocument, error
 		if document.SchemaVersion != blueprintSchemaVersion {
 			return blueprintDocument{}, fmt.Errorf("unsupported normalized blueprint schema %q", document.SchemaVersion)
 		}
-		return finalizeBlueprint(document, name, format), nil
+		document = finalizeBlueprint(document, name, format)
+		return document, validateBlueprintDocument(document)
 	}
 	root, err := decodeNBTMap(data)
 	if err != nil {
@@ -81,7 +88,8 @@ func decodeBlueprint(data []byte, format, name string) (blueprintDocument, error
 		return blueprintDocument{}, err
 	}
 	document.SourceFormat = format
-	return finalizeBlueprint(document, name, format), nil
+	document = finalizeBlueprint(document, name, format)
+	return document, validateBlueprintDocument(document)
 }
 
 func finalizeBlueprint(document blueprintDocument, name, format string) blueprintDocument {
@@ -121,11 +129,49 @@ func decodeNBTMap(data []byte) (map[string]any, error) {
 	if closer != nil {
 		defer closer.Close()
 	}
+	limited := &io.LimitedReader{R: reader, N: maxBlueprintDecodedNBTBytes + 1}
 	result := map[string]any{}
-	if _, err := nbt.NewDecoder(reader).Decode(&result); err != nil {
+	if _, err := nbt.NewDecoder(limited).Decode(&result); err != nil {
 		return nil, err
 	}
+	if limited.N <= 0 {
+		return nil, errors.New("decoded blueprint NBT exceeds processing limit")
+	}
 	return result, nil
+}
+
+func validateBlueprintDocument(document blueprintDocument) error {
+	if _, err := checkedBlueprintVolume(document.Size); err != nil {
+		return err
+	}
+	if document.DataVersion < 0 || int64(document.DataVersion) > math.MaxInt32 {
+		return errors.New("blueprint data version is out of range")
+	}
+	if len(document.Blocks) > maxBlueprintNonAirBlockCount {
+		return errors.New("blueprint contains too many non-air blocks")
+	}
+	for _, block := range document.Blocks {
+		for axis, coordinate := range block.Position {
+			if coordinate < 0 || coordinate >= document.Size[axis] {
+				return errors.New("blueprint contains a block outside its declared dimensions")
+			}
+		}
+	}
+	return nil
+}
+
+func checkedBlueprintVolume(size [3]int) (int, error) {
+	volume := 1
+	for _, dimension := range size {
+		if dimension <= 0 || dimension > maxBlueprintDimension {
+			return 0, errors.New("blueprint dimensions exceed the processing limit")
+		}
+		if volume > maxBlueprintVolume/dimension {
+			return 0, errors.New("blueprint volume exceeds the processing limit")
+		}
+		volume *= dimension
+	}
+	return volume, nil
 }
 
 func decodeVanillaStructure(root map[string]any) (blueprintDocument, error) {
@@ -144,6 +190,9 @@ func decodeVanillaStructure(root map[string]any) (blueprintDocument, error) {
 	if len(palette) == 0 {
 		return blueprintDocument{}, errors.New("structure palette is empty")
 	}
+	if _, err := checkedBlueprintVolume(size); err != nil {
+		return blueprintDocument{}, err
+	}
 	document := blueprintDocument{Size: size, DataVersion: intValue(root["DataVersion"])}
 	for _, raw := range anySlice(root["blocks"]) {
 		block := anyMap(raw)
@@ -151,7 +200,14 @@ func decodeVanillaStructure(root map[string]any) (blueprintDocument, error) {
 		if stateIndex < 0 || stateIndex >= len(palette) {
 			continue
 		}
-		document.Blocks = append(document.Blocks, blueprintBlock{Position: intTriplet(block["pos"]), State: palette[stateIndex]})
+		state := palette[stateIndex]
+		if state.ID == "" || state.ID == "minecraft:air" || state.ID == "air" {
+			continue
+		}
+		if len(document.Blocks) >= maxBlueprintNonAirBlockCount {
+			return blueprintDocument{}, errors.New("blueprint contains too many non-air blocks")
+		}
+		document.Blocks = append(document.Blocks, blueprintBlock{Position: intTriplet(block["pos"]), State: state})
 		if entity := anyMap(block["nbt"]); len(entity) > 0 {
 			document.BlockEntities = append(document.BlockEntities, entity)
 		}
@@ -179,6 +235,10 @@ func decodeSpongeSchematic(root map[string]any) (blueprintDocument, error) {
 	if size[0] <= 0 || size[1] <= 0 || size[2] <= 0 || len(paletteRaw) == 0 {
 		return blueprintDocument{}, errors.New("schematic dimensions or palette are missing")
 	}
+	volume, err := checkedBlueprintVolume(size)
+	if err != nil {
+		return blueprintDocument{}, err
+	}
 	maxPalette := 0
 	for _, value := range paletteRaw {
 		if index := intValue(value); index > maxPalette {
@@ -189,7 +249,7 @@ func decodeSpongeSchematic(root map[string]any) (blueprintDocument, error) {
 	for state, value := range paletteRaw {
 		palette[intValue(value)] = parseBlockState(state)
 	}
-	indices, err := decodeVarInts(byteSlice(dataRaw), size[0]*size[1]*size[2])
+	indices, err := decodeVarInts(byteSlice(dataRaw), volume)
 	if err != nil {
 		return blueprintDocument{}, err
 	}
@@ -198,10 +258,17 @@ func decodeSpongeSchematic(root map[string]any) (blueprintDocument, error) {
 		if paletteIndex < 0 || paletteIndex >= len(palette) {
 			continue
 		}
+		state := palette[paletteIndex]
+		if state.ID == "" || state.ID == "minecraft:air" || state.ID == "air" {
+			continue
+		}
+		if len(document.Blocks) >= maxBlueprintNonAirBlockCount {
+			return blueprintDocument{}, errors.New("blueprint contains too many non-air blocks")
+		}
 		x := linear % size[0]
 		z := (linear / size[0]) % size[2]
 		y := linear / (size[0] * size[2])
-		document.Blocks = append(document.Blocks, blueprintBlock{Position: [3]int{x, y, z}, State: palette[paletteIndex]})
+		document.Blocks = append(document.Blocks, blueprintBlock{Position: [3]int{x, y, z}, State: state})
 	}
 	return document, nil
 }
@@ -231,6 +298,9 @@ func decodeLitematic(root map[string]any) (blueprintDocument, error) {
 		if size[0] == 0 || size[1] == 0 || size[2] == 0 {
 			continue
 		}
+		if _, err := checkedBlueprintVolume(size); err != nil {
+			return blueprintDocument{}, err
+		}
 		states := make([]blueprintBlockState, 0)
 		for _, state := range anySlice(region["BlockStatePalette"]) {
 			states = append(states, blockStateFromMap(anyMap(state)))
@@ -253,20 +323,33 @@ func decodeLitematic(root map[string]any) (blueprintDocument, error) {
 		return blueprintDocument{}, errors.New("litematic regions contain no palette data")
 	}
 	document.Size = [3]int{max[0] - min[0] + 1, max[1] - min[1] + 1, max[2] - min[2] + 1}
+	if _, err := checkedBlueprintVolume(document.Size); err != nil {
+		return blueprintDocument{}, err
+	}
 	for _, region := range parsed {
 		bits := maxInt(2, int(math.Ceil(math.Log2(float64(len(region.states))))))
-		total := region.size[0] * region.size[1] * region.size[2]
+		total, err := checkedBlueprintVolume(region.size)
+		if err != nil {
+			return blueprintDocument{}, err
+		}
 		for linear := 0; linear < total; linear++ {
 			paletteIndex := packedValue(region.packed, linear, bits)
 			if paletteIndex < 0 || paletteIndex >= len(region.states) {
 				continue
+			}
+			state := region.states[paletteIndex]
+			if state.ID == "" || state.ID == "minecraft:air" || state.ID == "air" {
+				continue
+			}
+			if len(document.Blocks) >= maxBlueprintNonAirBlockCount {
+				return blueprintDocument{}, errors.New("blueprint contains too many non-air blocks")
 			}
 			x := linear % region.size[0]
 			z := (linear / region.size[0]) % region.size[2]
 			y := linear / (region.size[0] * region.size[2])
 			document.Blocks = append(document.Blocks, blueprintBlock{
 				Position: [3]int{region.origin[0] + x*region.step[0] - min[0], region.origin[1] + y*region.step[1] - min[1], region.origin[2] + z*region.step[2] - min[2]},
-				State:    region.states[paletteIndex],
+				State:    state,
 			})
 		}
 	}
@@ -280,10 +363,20 @@ func decodeLegacySchematic(root map[string]any) (blueprintDocument, error) {
 	if size[0] <= 0 || size[1] <= 0 || size[2] <= 0 || len(blocks) == 0 {
 		return blueprintDocument{}, errors.New("legacy schematic dimensions or block data are missing")
 	}
+	volume, err := checkedBlueprintVolume(size)
+	if err != nil {
+		return blueprintDocument{}, err
+	}
 	document := blueprintDocument{Size: size}
-	limit := minInt(len(blocks), size[0]*size[1]*size[2])
+	limit := minInt(len(blocks), volume)
 	for linear := 0; linear < limit; linear++ {
 		id := int(blocks[linear])
+		if id == 0 {
+			continue
+		}
+		if len(document.Blocks) >= maxBlueprintNonAirBlockCount {
+			return blueprintDocument{}, errors.New("blueprint contains too many non-air blocks")
+		}
 		data := 0
 		if linear < len(metadata) {
 			data = int(metadata[linear])
@@ -301,6 +394,9 @@ func decodeLegacySchematic(root map[string]any) (blueprintDocument, error) {
 }
 
 func encodeBlueprint(document blueprintDocument, format string) ([]byte, string, error) {
+	if err := validateBlueprintDocument(document); err != nil {
+		return nil, "", err
+	}
 	format = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(format)), ".")
 	switch format {
 	case "json":
@@ -318,12 +414,12 @@ func encodeBlueprint(document blueprintDocument, format string) ([]byte, string,
 }
 
 func encodeLitematic(document blueprintDocument) ([]byte, string, error) {
-	if document.Size[0] <= 0 || document.Size[1] <= 0 || document.Size[2] <= 0 {
-		return nil, "", errors.New("blueprint dimensions are invalid")
+	volume, err := checkedBlueprintVolume(document.Size)
+	if err != nil {
+		return nil, "", err
 	}
 	palette := []blueprintBlockState{{ID: "minecraft:air"}}
 	lookup := map[string]int{"minecraft:air": 0}
-	volume := document.Size[0] * document.Size[1] * document.Size[2]
 	indices := make([]int, volume)
 	for _, block := range document.Blocks {
 		x, y, z := block.Position[0], block.Position[1], block.Position[2]
@@ -349,7 +445,7 @@ func encodeLitematic(document blueprintDocument) ([]byte, string, error) {
 	}
 	bits := maxInt(2, int(math.Ceil(math.Log2(float64(len(palette))))))
 	packed := packLitematicValues(indices, bits)
-	regionSize := map[string]any{"x": int32(document.Size[0]), "y": int32(document.Size[1]), "z": int32(document.Size[2])}
+	regionSize := map[string]any{"x": blueprintInt32(document.Size[0]), "y": blueprintInt32(document.Size[1]), "z": blueprintInt32(document.Size[2])}
 	region := map[string]any{
 		"BlockStatePalette": paletteNBT,
 		"BlockStates":       packed,
@@ -368,7 +464,7 @@ func encodeLitematic(document blueprintDocument) ([]byte, string, error) {
 	root := map[string]any{
 		"Version":              int32(6),
 		"SubVersion":           int32(1),
-		"MinecraftDataVersion": int32(document.DataVersion),
+		"MinecraftDataVersion": blueprintInt32(document.DataVersion),
 		"Metadata": map[string]any{
 			"Author":        "mcmods.cn",
 			"Description":   "Converted by mcmods.cn",
@@ -377,8 +473,8 @@ func encodeLitematic(document blueprintDocument) ([]byte, string, error) {
 			"RegionCount":   int32(1),
 			"TimeCreated":   now,
 			"TimeModified":  now,
-			"TotalBlocks":   int32(len(document.Blocks)),
-			"TotalVolume":   int32(volume),
+			"TotalBlocks":   blueprintInt32(len(document.Blocks)),
+			"TotalVolume":   blueprintInt32(volume),
 		},
 		"Regions": map[string]any{"Main": region},
 	}
@@ -386,19 +482,22 @@ func encodeLitematic(document blueprintDocument) ([]byte, string, error) {
 }
 
 func packLitematicValues(values []int, bits int) []int64 {
-	if len(values) == 0 || bits <= 0 {
+	if len(values) == 0 || bits <= 0 || bits > 63 {
 		return []int64{}
 	}
 	result := make([]int64, (len(values)*bits+63)/64)
 	mask := uint64((uint64(1) << bits) - 1)
 	for index, raw := range values {
-		value := uint64(raw) & mask
+		if raw < 0 {
+			continue
+		}
+		value := uint64(raw) & mask // #nosec G115 -- non-negative palette index is deliberately packed as unsigned bits.
 		bitIndex := index * bits
 		word := bitIndex / 64
 		offset := bitIndex % 64
-		result[word] = int64(uint64(result[word]) | value<<offset)
+		result[word] = int64(uint64(result[word]) | value<<offset) // #nosec G115 -- NBT long arrays carry packed unsigned bit patterns in signed int64 words.
 		if offset+bits > 64 {
-			result[word+1] = int64(uint64(result[word+1]) | value>>(64-offset))
+			result[word+1] = int64(uint64(result[word+1]) | value>>(64-offset)) // #nosec G115 -- intentional packed-bit reinterpretation.
 		}
 	}
 	return result
@@ -416,11 +515,11 @@ func encodeVanillaStructure(document blueprintDocument) ([]byte, string, error) 
 	}
 	blocks := make([]map[string]any, 0, len(document.Blocks))
 	for index, block := range document.Blocks {
-		blocks = append(blocks, map[string]any{"pos": []int32{int32(block.Position[0]), int32(block.Position[1]), int32(block.Position[2])}, "state": int32(indices[index])})
+		blocks = append(blocks, map[string]any{"pos": []int32{blueprintInt32(block.Position[0]), blueprintInt32(block.Position[1]), blueprintInt32(block.Position[2])}, "state": blueprintInt32(indices[index])})
 	}
 	root := map[string]any{
-		"DataVersion": int32(document.DataVersion),
-		"size":        []int32{int32(document.Size[0]), int32(document.Size[1]), int32(document.Size[2])},
+		"DataVersion": blueprintInt32(document.DataVersion),
+		"size":        []int32{blueprintInt32(document.Size[0]), blueprintInt32(document.Size[1]), blueprintInt32(document.Size[2])},
 		"palette":     paletteNBT,
 		"blocks":      blocks,
 		"entities":    []map[string]any{},
@@ -429,6 +528,9 @@ func encodeVanillaStructure(document blueprintDocument) ([]byte, string, error) 
 }
 
 func encodeSpongeSchematic(document blueprintDocument) ([]byte, string, error) {
+	if document.Size[0] > math.MaxInt16 || document.Size[1] > math.MaxInt16 || document.Size[2] > math.MaxInt16 {
+		return nil, "", errors.New("schematic dimensions exceed the format limit")
+	}
 	palette := []blueprintBlockState{{ID: "minecraft:air"}}
 	indices := make([]int, len(document.Blocks))
 	lookup := map[string]int{"minecraft:air": 0}
@@ -461,10 +563,10 @@ func encodeSpongeSchematic(document blueprintDocument) ([]byte, string, error) {
 	}
 	root := map[string]any{
 		"Version":     int32(3),
-		"DataVersion": int32(document.DataVersion),
-		"Width":       int16(document.Size[0]),
-		"Height":      int16(document.Size[1]),
-		"Length":      int16(document.Size[2]),
+		"DataVersion": blueprintInt32(document.DataVersion),
+		"Width":       blueprintInt16(document.Size[0]),
+		"Height":      blueprintInt16(document.Size[1]),
+		"Length":      blueprintInt16(document.Size[2]),
 		"Blocks": map[string]any{
 			"Palette": paletteNBT,
 			"Data":    encoded,
@@ -477,8 +579,7 @@ func encodeGzipNBT(root map[string]any, rootName string) ([]byte, string, error)
 	var output bytes.Buffer
 	compressed := gzip.NewWriter(&output)
 	if err := nbt.NewEncoder(compressed).Encode(root, rootName); err != nil {
-		compressed.Close()
-		return nil, "", err
+		return nil, "", errors.Join(err, compressed.Close())
 	}
 	if err := compressed.Close(); err != nil {
 		return nil, "", err
@@ -618,7 +719,7 @@ func appendVarInt(destination []byte, value int) []byte {
 }
 
 func packedValue(values []int64, index, bits int) int {
-	if bits <= 0 || len(values) == 0 {
+	if bits <= 0 || bits > 63 || len(values) == 0 || index < 0 {
 		return 0
 	}
 	bitIndex := index * bits
@@ -628,11 +729,15 @@ func packedValue(values []int64, index, bits int) int {
 		return 0
 	}
 	mask := uint64((uint64(1) << bits) - 1)
-	value := uint64(values[word]) >> offset
+	value := uint64(values[word]) >> offset // #nosec G115 -- NBT signed longs are intentionally interpreted as packed unsigned bits.
 	if offset+bits > 64 && word+1 < len(values) {
-		value |= uint64(values[word+1]) << (64 - offset)
+		value |= uint64(values[word+1]) << (64 - offset) // #nosec G115 -- intentional packed-bit reinterpretation.
 	}
-	return int(value & mask)
+	value &= mask
+	if value > uint64(math.MaxInt) {
+		return 0
+	}
+	return int(value)
 }
 
 func anyMap(value any) map[string]any {
@@ -656,13 +761,17 @@ func byteSlice(value any) []byte {
 	case []int8:
 		result := make([]byte, len(typed))
 		for index, entry := range typed {
-			result[index] = byte(entry)
+			result[index] = byte(entry) // #nosec G115 -- NBT byte arrays use signed int8 storage for raw octets.
 		}
 		return result
 	case []any:
 		result := make([]byte, len(typed))
 		for index, entry := range typed {
-			result[index] = byte(intValue(entry))
+			number := intValue(entry)
+			if number < 0 || number > math.MaxUint8 {
+				return nil
+			}
+			result[index] = byte(number)
 		}
 		return result
 	default:
@@ -737,6 +846,9 @@ func intValue(value any) int {
 	case int32:
 		return int(typed)
 	case int64:
+		if typed > int64(math.MaxInt) || typed < int64(math.MinInt) {
+			return 0
+		}
 		return int(typed)
 	case uint8:
 		return int(typed)
@@ -745,14 +857,31 @@ func intValue(value any) int {
 	case uint32:
 		return int(typed)
 	case uint64:
+		if typed > uint64(math.MaxInt) {
+			return 0
+		}
 		return int(typed)
 	case float32:
+		if typed > float32(math.MaxInt) || typed < float32(math.MinInt) {
+			return 0
+		}
 		return int(typed)
 	case float64:
+		if typed > float64(math.MaxInt) || typed < float64(math.MinInt) {
+			return 0
+		}
 		return int(typed)
 	default:
 		return 0
 	}
+}
+
+func blueprintInt32(value int) int32 {
+	return int32(value) // #nosec G115 -- validateBlueprintDocument bounds every caller to int32-safe values.
+}
+
+func blueprintInt16(value int) int16 {
+	return int16(value) // #nosec G115 -- encodeSpongeSchematic validates dimensions against MaxInt16.
 }
 
 func stringValue(value any) string {
@@ -775,6 +904,9 @@ func stringMap(value any) map[string]string {
 }
 
 func absInt(value int) int {
+	if value == math.MinInt {
+		return math.MaxInt
+	}
 	if value < 0 {
 		return -value
 	}

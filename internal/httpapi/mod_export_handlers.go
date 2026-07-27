@@ -40,6 +40,7 @@ const (
 	maxExportSingleFileSize   = int64(512 << 20)
 	maxExportJSONSize         = int64(128 << 20)
 	maxExportWriteBatchRows   = 500
+	maxExportBulkWriteRows    = 50_000
 	maxExportWriteBatchBytes  = int64(32 << 20)
 	maxExportReadBatchFiles   = 24
 	maxExportReadBatchBytes   = int64(64 << 20)
@@ -78,7 +79,7 @@ type modExportJobMessage struct {
 }
 
 type createModExportJobRequest struct {
-	OSSFileID                   int64  `json:"ossFileId"`
+	OSSFileID                   string `json:"ossFileId"`
 	TargetVersionPublicID       string `json:"targetVersionPublicId"`
 	OverwriteExistingImportData bool   `json:"overwriteExistingImportData"`
 }
@@ -101,14 +102,36 @@ type modExportJobResponse struct {
 }
 
 type modExportWriteBatch struct {
-	batch     *pgx.Batch
-	rows      int
-	byteCount int64
+	batch             *pgx.Batch
+	catalogRows       []catalogResourceImportRow
+	textAssets        []exportTextAssetWrite
+	recipes           []recipeImportRecipeWrite
+	recipeBindings    []recipeImportBindingWrite
+	recipeCandidates  []recipeImportCandidateWrite
+	onStage           func(string) error
+	rows              int
+	byteCount         int64
+	flushCount        int
+	recipeCount       int
+	bindingCount      int
+	candidateCount    int
+	payloadBytes      int64
+	queuedDuration    time.Duration
+	catalogDuration   time.Duration
+	textAssetDuration time.Duration
+	recipeDuration    time.Duration
+	bindingDuration   time.Duration
 }
 
 type modExportArchiveFile struct {
 	Name string
 	Data []byte
+}
+
+type preparedExportNormalizedFile struct {
+	catalogRows    []catalogResourceImportRow
+	tagRows        []exportTagRow
+	tagMemberCount int
 }
 
 type modExportPNGMedia struct {
@@ -192,6 +215,94 @@ func (s *Server) createModExportUpload(w http.ResponseWriter, r *http.Request) {
 	s.createOSSDirectUploadWithScope(w, r, ossModExportScopePrefix+identity.UniqueID)
 }
 
+type resumeModExportUploadRequest struct {
+	ObjectKey         string `json:"objectKey"`
+	OriginalName      string `json:"originalName"`
+	ContentType       string `json:"contentType"`
+	SizeBytes         int64  `json:"sizeBytes"`
+	SHA256            string `json:"sha256"`
+	MultipartUploadID string `json:"multipartUploadId"`
+}
+
+func (s *Server) resumeModExportUpload(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.requireModEditor(w, r)
+	if !ok {
+		return
+	}
+	var request resumeModExportUploadRequest
+	if decodeJSON(r, &request) != nil {
+		writeError(w, http.StatusBadRequest, "Invalid upload task")
+		return
+	}
+	request.ObjectKey = strings.TrimSpace(request.ObjectKey)
+	request.OriginalName = strings.TrimSpace(request.OriginalName)
+	request.ContentType = strings.TrimSpace(request.ContentType)
+	request.SHA256 = normalizeSHA256(request.SHA256)
+	request.MultipartUploadID = strings.TrimSpace(request.MultipartUploadID)
+	expectedCategory := ossModImportCategory(identity.UniqueID, "mcmods-exporter", "packages")
+	client, cfg, err := s.ossClient(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	if request.ObjectKey == "" ||
+		!isAllowedObjectKey(request.ObjectKey, ossObjectPrefix(cfg.Prefix, expectedCategory)) ||
+		request.OriginalName == "" ||
+		strings.ToLower(filepath.Ext(request.OriginalName)) != ".zip" ||
+		request.SizeBytes <= 0 ||
+		request.SHA256 == "" ||
+		(request.MultipartUploadID != "" && !validOSSMultipartUploadID(request.MultipartUploadID)) {
+		writeError(w, http.StatusBadRequest, "Invalid upload task")
+		return
+	}
+	if request.ContentType == "" {
+		request.ContentType = "application/zip"
+	}
+	expires := 60 * time.Minute
+	if request.MultipartUploadID == "" {
+		result, presignErr := client.Presign(
+			r.Context(),
+			&aliyunoss.PutObjectRequest{
+				Bucket:      aliyunoss.Ptr(cfg.Bucket),
+				Key:         aliyunoss.Ptr(request.ObjectKey),
+				ContentType: aliyunoss.Ptr(request.ContentType),
+				Metadata:    map[string]string{"sha256": request.SHA256},
+			},
+			aliyunoss.PresignExpires(expires),
+		)
+		if presignErr != nil {
+			writeError(w, http.StatusBadGateway, "Failed to resume the OSS upload")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"method": result.Method, "url": result.URL, "headers": result.SignedHeaders,
+			"bucket": cfg.Bucket, "objectKey": request.ObjectKey,
+			"category": expectedCategory, "source": "mcmods_exporter",
+			"originalName": request.OriginalName, "contentType": request.ContentType,
+			"sizeBytes": request.SizeBytes, "sha256": request.SHA256,
+			"uploadRequired": true, "expiresAt": time.Now().Add(expires),
+			"accessUrl": buildPublicOSSURL(cfg, request.ObjectKey),
+		})
+		return
+	}
+	multipart, err := presignExistingOSSMultipartUpload(
+		r.Context(), client, cfg, request.ObjectKey, request.MultipartUploadID, request.SizeBytes, expires,
+	)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to resume the OSS multipart upload")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"method": "MULTIPART", "multipart": multipart,
+		"bucket": cfg.Bucket, "objectKey": request.ObjectKey,
+		"category": expectedCategory, "source": "mcmods_exporter",
+		"originalName": request.OriginalName, "contentType": request.ContentType,
+		"sizeBytes": request.SizeBytes, "sha256": request.SHA256,
+		"uploadRequired": true, "expiresAt": time.Now().Add(expires),
+		"accessUrl": buildPublicOSSURL(cfg, request.ObjectKey),
+	})
+}
+
 func (s *Server) completeModExportUpload(w http.ResponseWriter, r *http.Request) {
 	identity, ok := s.requireModEditor(w, r)
 	if !ok {
@@ -211,24 +322,25 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	request.TargetVersionPublicID = strings.ToLower(strings.TrimSpace(request.TargetVersionPublicID))
-	if request.OSSFileID <= 0 || request.TargetVersionPublicID == "" {
+	request.OSSFileID = strings.ToLower(strings.TrimSpace(request.OSSFileID))
+	if !validCatalogPublicID(request.OSSFileID) || request.TargetVersionPublicID == "" {
 		writeError(w, http.StatusBadRequest, "导入文件记录不正确")
 		return
 	}
-	var targetVersionExists bool
-	if err := s.db.QueryRow(r.Context(), `select exists(select 1 from mod_content_versions where mod_id=$1 and public_id=$2 and status='active')`, identity.ID, request.TargetVersionPublicID).Scan(&targetVersionExists); err != nil || !targetVersionExists {
+	var targetVersionID int64
+	if err := s.db.QueryRow(r.Context(), `select id from mod_content_versions where mod_id=$1 and public_id=$2 and status='active'`, identity.ID, request.TargetVersionPublicID).Scan(&targetVersionID); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "请选择当前模组中有效的资料版本")
 		return
 	}
 	claims := currentClaims(r)
 	var archiveName, objectKey, archiveHash, source, category string
-	var archiveSize int64
+	var archiveFileID, archiveSize int64
 	err := s.db.QueryRow(
 		r.Context(),
-		`select original_name, object_key, sha256, size_bytes, source, category
-		 from oss_files where id=$1 and uploader_id=$2 and status='active'`,
+		`select id,original_name, object_key, sha256, size_bytes, source, category
+		 from oss_files where public_id=$1 and uploader_id=$2 and status='active'`,
 		request.OSSFileID, claims.Subject,
-	).Scan(&archiveName, &objectKey, &archiveHash, &archiveSize, &source, &category)
+	).Scan(&archiveFileID, &archiveName, &objectKey, &archiveHash, &archiveSize, &source, &category)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusBadRequest, "导入文件不存在或不属于当前用户")
 		return
@@ -258,7 +370,7 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 		 values ($1,$2,$3,$4,'','','','unknown','{}'::jsonb,'{}'::text[],'all',$5)
 		 on conflict (sha256) do update set archive_file_id=excluded.archive_file_id,archive_name=excluded.archive_name,uploaded_by=excluded.uploaded_by
 		 returning id`,
-		packageID, archiveHash, request.OSSFileID, archiveName, claims.Subject,
+		packageID, archiveHash, archiveFileID, archiveName, claims.Subject,
 	).Scan(&packageID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "保存导出包失败")
@@ -271,15 +383,15 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 	var existingStalled bool
 	err = tx.QueryRow(r.Context(),
 		`select id,status,status in ('validating','importing') and coalesce(heartbeat_at,updated_at) < now() - $6::interval
-		 from catalog_import_jobs where mod_id=$1 and package_id=$2 and importer_version=$3 and target_version_public_id=$4 and overwrite_existing=$5 for update`,
-		identity.ID, packageID, modExportImporterVersion, request.TargetVersionPublicID, request.OverwriteExistingImportData, pgInterval(modExportStaleAfter),
+		 from catalog_import_jobs where mod_id=$1 and package_id=$2 and importer_version=$3 and target_version_id=$4 and overwrite_existing=$5 for update`,
+		identity.ID, packageID, modExportImporterVersion, targetVersionID, request.OverwriteExistingImportData, pgInterval(modExportStaleAfter),
 	).Scan(&jobID, &existingStatus, &existingStalled)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		jobID = newExportID()
 		_, err = tx.Exec(r.Context(),
-			`insert into catalog_import_jobs (id,mod_id,package_id,importer_version,target_version_public_id,overwrite_existing,created_by) values ($1,$2,$3,$4,$5,$6,$7)`,
-			jobID, identity.ID, packageID, modExportImporterVersion, request.TargetVersionPublicID, request.OverwriteExistingImportData, claims.Subject,
+			`insert into catalog_import_jobs (id,mod_id,package_id,importer_version,target_version_id,overwrite_existing,created_by) values ($1,$2,$3,$4,$5,$6,$7)`,
+			jobID, identity.ID, packageID, modExportImporterVersion, targetVersionID, request.OverwriteExistingImportData, claims.Subject,
 		)
 		shouldPublish = err == nil
 	case err == nil && (shouldRetryModExportStatus(existingStatus) || existingStalled):
@@ -320,8 +432,8 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 		if client, cfg, clientErr := s.ossClient(r.Context()); clientErr == nil {
 			_, _ = client.DeleteObject(r.Context(), &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey)})
 		}
-		_, _ = s.db.Exec(r.Context(), `update oss_files set status='deleted',updated_at=now() where id=$1`, request.OSSFileID)
-		_, _ = s.db.Exec(r.Context(), `update catalog_import_packages set archive_file_id=null where id=$1 and archive_file_id=$2`, packageID, request.OSSFileID)
+		_, _ = s.db.Exec(r.Context(), `update oss_files set status='deleted',updated_at=now() where id=$1`, archiveFileID)
+		_, _ = s.db.Exec(r.Context(), `update catalog_import_packages set archive_file_id=null where id=$1 and archive_file_id=$2`, packageID, archiveFileID)
 	}
 	response, _ := s.modExportJobByID(r.Context(), jobID, identity.ID)
 	response.Deduplicated = deduplicated
@@ -356,6 +468,48 @@ func (s *Server) getModExportJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, job)
 }
 
+func (s *Server) getActiveModExportJob(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.requireModEditor(w, r)
+	if !ok {
+		return
+	}
+	targetVersionPublicID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("targetVersionId")))
+	if !validCatalogPublicID(targetVersionPublicID) {
+		writeError(w, http.StatusBadRequest, "Invalid target data version")
+		return
+	}
+	var jobID string
+	err := s.db.QueryRow(r.Context(), `select job.id
+		from catalog_import_jobs job
+		join catalog_import_packages package on package.id=job.package_id
+		join mod_content_versions version on version.id=job.target_version_id
+		where job.mod_id=$1 and version.public_id=$2 and version.status='active'
+		  and package.profile='all'
+		  and job.status in ('queued','validating','importing')
+		order by job.created_at desc,job.id desc limit 1`,
+		identity.ID, targetVersionPublicID).Scan(&jobID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeJSON(w, http.StatusOK, map[string]any{"job": nil})
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to inspect active import jobs")
+		return
+	}
+	if stalled, markErr := s.markStalledModExportJob(r.Context(), jobID, identity.ID); markErr != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to inspect the active import job")
+		return
+	} else if stalled {
+		s.notifyModExportResult(r.Context(), jobID, "failed", errors.New("import worker stopped responding"))
+	}
+	job, err := s.modExportJobByID(r.Context(), jobID, identity.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to read the active import job")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
 func (s *Server) retryModExportJob(w http.ResponseWriter, r *http.Request) {
 	identity, ok := s.requireModEditor(w, r)
 	if !ok {
@@ -385,7 +539,11 @@ func (s *Server) cancelModExportJob(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	tag, err := s.db.Exec(r.Context(), `update catalog_import_jobs set status='cancelled',finished_at=now(),updated_at=now() where id=$1 and mod_id=$2 and status='queued'`, r.PathValue("jobId"), identity.ID)
+	tag, err := s.db.Exec(r.Context(), `update catalog_import_jobs
+		set status='cancelled',progress=least(progress,99),current_stage='cancelled',
+			finished_at=now(),heartbeat_at=now(),run_token='',updated_at=now()
+		where id=$1 and mod_id=$2 and status in ('queued','validating','importing')`,
+		r.PathValue("jobId"), identity.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "取消导入任务失败")
 		return
@@ -402,9 +560,11 @@ func (s *Server) modExportJobByID(ctx context.Context, jobID string, modID int64
 	var detail []byte
 	err := s.db.QueryRow(
 		ctx,
-		`select j.id,m.slug,j.package_id,j.target_version_public_id,j.overwrite_existing,j.status,j.progress,j.current_stage,j.error_code,j.error_detail,j.created_at,j.updated_at,
+		`select j.id,m.slug,j.package_id,version.public_id,j.overwrite_existing,j.status,j.progress,j.current_stage,j.error_code,j.error_detail,j.created_at,j.updated_at,
 		 exists(select 1 from catalog_import_revisions r where r.job_id=j.id and r.status in ('ready','partial') and not r.is_active)
-		 from catalog_import_jobs j join mods m on m.id=j.mod_id where j.id=$1 and j.mod_id=$2`,
+		 from catalog_import_jobs j join mods m on m.id=j.mod_id
+		 join mod_content_versions version on version.id=j.target_version_id
+		 where j.id=$1 and j.mod_id=$2`,
 		jobID, modID,
 	).Scan(&result.ID, &result.ModSiteID, &result.PackageID, &result.TargetVersionPublicID, &result.OverwriteExistingImportData, &result.Status, &result.Progress, &result.CurrentStage, &result.ErrorCode, &detail, &result.CreatedAt, &result.UpdatedAt, &result.ReviewRequired)
 	if len(detail) > 0 {
@@ -447,25 +607,30 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	var modID int64
 	defer func() {
 		stopHeartbeat()
-		if resultErr == nil || errors.Is(resultErr, errModExportLeaseLost) || errors.Is(context.Cause(ctx), errModExportLeaseLost) {
+		if resultErr == nil {
 			return
 		}
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		_ = s.cleanupModExportStaging(cleanupContext, packageID, modID, runToken)
 		cancel()
+		if errors.Is(resultErr, errModExportLeaseLost) || errors.Is(context.Cause(ctx), errModExportLeaseLost) {
+			return
+		}
 		s.failModExportJob(jobID, runToken, "import_failed", resultErr)
 	}()
 
 	var expectedHash, objectKey, archiveName, uniqueID, targetVersionPublicID string
+	var targetVersionID int64
 	var overwriteExistingImportData bool
 	var sourceFileID, createdBy int64
 	err = s.db.QueryRow(
 		ctx,
-		`select j.package_id,j.mod_id,coalesce(j.created_by,0),j.target_version_public_id,j.overwrite_existing,p.sha256,coalesce(f.id,0),coalesce(f.object_key,''),p.archive_name,m.project_code
+		`select j.package_id,j.mod_id,coalesce(j.created_by,0),j.target_version_id,version.public_id,j.overwrite_existing,p.sha256,coalesce(f.id,0),coalesce(f.object_key,''),p.archive_name,m.project_code
 		 from catalog_import_jobs j join catalog_import_packages p on p.id=j.package_id join mods m on m.id=j.mod_id
+		 join mod_content_versions version on version.id=j.target_version_id
 		 left join oss_files f on f.id=p.archive_file_id where j.id=$1`,
 		jobID,
-	).Scan(&packageID, &modID, &createdBy, &targetVersionPublicID, &overwriteExistingImportData, &expectedHash, &sourceFileID, &objectKey, &archiveName, &uniqueID)
+	).Scan(&packageID, &modID, &createdBy, &targetVersionID, &targetVersionPublicID, &overwriteExistingImportData, &expectedHash, &sourceFileID, &objectKey, &archiveName, &uniqueID)
 	if err != nil {
 		return err
 	}
@@ -484,15 +649,17 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	defer os.Remove(temporaryPath)
 	getResult, err := client.GetObject(ctx, &aliyunoss.GetObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey)})
 	if err != nil {
-		temporary.Close()
-		return fmt.Errorf("download export archive: %w", err)
+		return errors.Join(fmt.Errorf("download export archive: %w", err), temporary.Close())
 	}
 	hasher := sha256.New()
 	_, copyErr := io.Copy(io.MultiWriter(temporary, hasher), io.LimitReader(getResult.Body, maxOSSUploadBytes+1))
-	getResult.Body.Close()
+	bodyCloseErr := getResult.Body.Close()
 	closeErr := temporary.Close()
 	if copyErr != nil {
-		return copyErr
+		return errors.Join(copyErr, bodyCloseErr, closeErr)
+	}
+	if bodyCloseErr != nil {
+		return errors.Join(bodyCloseErr, closeErr)
 	}
 	if closeErr != nil {
 		return closeErr
@@ -530,10 +697,10 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}
 	loader := normalizeExportLoader(manifest.Loader)
 	var targetVersionCompatible bool
-	if err = s.db.QueryRow(ctx, `select exists(select 1 from mod_content_versions where mod_id=$1 and public_id=$2 and status='active'
+	if err = s.db.QueryRow(ctx, `select exists(select 1 from mod_content_versions where mod_id=$1 and id=$2 and status='active'
 		and (cardinality(minecraft_versions)=0 or $3=any(minecraft_versions))
 		and (cardinality(loaders)=0 or exists(select 1 from unnest(loaders) selected_loader where lower(selected_loader)=lower($4))))`,
-		modID, targetVersionPublicID, manifest.MinecraftVersion, loader).Scan(&targetVersionCompatible); err != nil {
+		modID, targetVersionID, manifest.MinecraftVersion, loader).Scan(&targetVersionCompatible); err != nil {
 		return err
 	}
 	if !targetVersionCompatible {
@@ -600,16 +767,16 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			var revisionNo int64
 			if queryErr := tx.QueryRow(
 				ctx,
-				`select coalesce(max(revision_no),0)+1 from catalog_import_revisions where mod_id=$1 and target_version_public_id=$2 and source_namespace=$3`,
-				modID, targetVersionPublicID, namespace,
+				`select coalesce(max(revision_no),0)+1 from catalog_import_revisions where mod_id=$1 and target_version_id=$2 and source_namespace=$3`,
+				modID, targetVersionID, namespace,
 			).Scan(&revisionNo); queryErr != nil {
 				return queryErr
 			}
 			_, insertErr := tx.Exec(
 				ctx,
-				`insert into catalog_import_revisions(id,mod_id,package_id,job_id,target_version_public_id,revision_no,minecraft_version,loader,exporter_version,source_namespace,source_metadata,import_run_token)
+				`insert into catalog_import_revisions(id,mod_id,package_id,job_id,target_version_id,revision_no,minecraft_version,loader,exporter_version,source_namespace,source_metadata,import_run_token)
 				 values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12)`,
-				revisionID, modID, packageID, jobID, targetVersionPublicID, revisionNo, manifest.MinecraftVersion, loader, manifest.ExporterVersion, namespace, string(manifestJSON), runToken,
+				revisionID, modID, packageID, jobID, targetVersionID, revisionNo, manifest.MinecraftVersion, loader, manifest.ExporterVersion, namespace, string(manifestJSON), runToken,
 			)
 			if insertErr != nil {
 				return insertErr
@@ -619,6 +786,9 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 		return importExportCapabilities(ctx, tx, revisions, capabilities)
 	})
 	if err != nil {
+		return err
+	}
+	if err = s.updateModExportJob(ctx, jobID, runToken, "importing", 24, "database_flush"); err != nil {
 		return err
 	}
 	resourceResolver, err := loadCatalogResourceIdentityResolver(ctx, s.db)
@@ -641,9 +811,11 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 		_ = pngPool.wait()
 	}()
 	pngMedia := make([]modExportPNGMedia, 0)
+	localeBundles := make([]modExportLocaleBundleMedia, 0)
 	scheduledPNGObjects := make(map[string]struct{})
 	textAssetCount := 0
 	binaryAssetCount := 0
+	supportedTranslations := make(map[string]map[string]string, len(exportContentLocaleByCode))
 	flushWriteBatch := func() error {
 		return s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
 			return writeBatch.flush(ctx, tx)
@@ -673,6 +845,9 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}); err != nil {
 		return err
 	}
+	if err = s.updateModExportJob(ctx, jobID, runToken, "importing", 30, "database_flush"); err != nil {
+		return err
+	}
 	if err = processExportRecipeJSONFiles(ctx, files, "recipes/jei/templates/", decodeExportJEITemplateCollection,
 		func(name string, document exportJEITemplateCollection) error {
 			if queueErr := queueExportJEITemplateCollection(writeBatch, revisions, name, document); queueErr != nil {
@@ -687,6 +862,20 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}
 	if err = flushWriteBatch(); err != nil {
 		return err
+	}
+	if err = s.updateModExportJob(ctx, jobID, runToken, "importing", 36, "database_flush"); err != nil {
+		return err
+	}
+	writeBatch.onStage = func(stage string) error {
+		progress := map[string]int{
+			"recipes":           42,
+			"recipe_bindings":   54,
+			"recipe_candidates": 64,
+		}[stage]
+		if progress == 0 {
+			return nil
+		}
+		return s.updateModExportJob(ctx, jobID, runToken, "importing", progress, "database_flush")
 	}
 	if err = processExportRecipeJSONFiles(ctx, files, "recipes/jei/recipes/", decodeExportJEIRecipeCollection,
 		func(name string, document exportJEIRecipeCollection) error {
@@ -703,6 +892,14 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	if err = flushWriteBatch(); err != nil {
 		return err
 	}
+	writeBatch.onStage = nil
+	if err = s.updateModExportJob(ctx, jobID, runToken, "importing", 70, "assets"); err != nil {
+		return err
+	}
+	fallbackAssetPaths, err := normalizedExportFallbackAssetPaths(files)
+	if err != nil {
+		return err
+	}
 	assetFileNames := exportAssetFileNames(fileNames, files)
 	processedFiles := 0
 	for start := 0; start < len(assetFileNames); {
@@ -713,30 +910,57 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 		}
 
 		batchSkippedTranslations := 0
-		hasNormalizedFiles := false
+		preparedNormalized := make([]preparedExportNormalizedFile, 0)
 		for _, loaded := range loadedFiles {
-			if isExportTranslationFile(loaded.Name) || isExportRegistryFile(loaded.Name) || loaded.Name == "tags/tags.json" {
-				hasNormalizedFiles = true
-				break
+			switch {
+			case isExportTranslationFile(loaded.Name):
+				translation, prepareErr := prepareExportTranslation(loaded.Name, loaded.Data)
+				if prepareErr != nil {
+					return prepareErr
+				}
+				batchSkippedTranslations += translation.Total - len(translation.Values)
+				if _, editable := supportedEditableContentLocales[translation.Locale]; editable {
+					supportedTranslations[translation.Locale] = translation.Values
+				}
+				bundles, compressed, bundleErr := prepareExportLocaleBundles(cfg, uniqueID, revisions, translation)
+				if bundleErr != nil {
+					return bundleErr
+				}
+				for _, bundle := range bundles {
+					localeBundles = append(localeBundles, bundle)
+					pngPool.submitAsset(bundle.ObjectKey, bundle.AssetPath, bundle.Digest, bundle.ContentType, compressed)
+				}
+			case isExportRegistryFile(loaded.Name):
+				rows, prepareErr := prepareExportRegistryResources(resourceResolver, revisions, loaded.Name, loaded.Data)
+				if prepareErr != nil {
+					return prepareErr
+				}
+				if len(rows) > 0 {
+					preparedNormalized = append(preparedNormalized, preparedExportNormalizedFile{catalogRows: rows})
+				}
+			case loaded.Name == "tags/tags.json":
+				rows, memberCount, prepareErr := decodeExportTags(revisions, loaded.Data)
+				if prepareErr != nil {
+					return prepareErr
+				}
+				if len(rows) > 0 {
+					preparedNormalized = append(preparedNormalized, preparedExportNormalizedFile{
+						tagRows: rows, tagMemberCount: memberCount,
+					})
+				}
 			}
 		}
-		if hasNormalizedFiles {
+		if len(preparedNormalized) > 0 {
 			err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
-				for _, loaded := range loadedFiles {
+				for _, prepared := range preparedNormalized {
 					switch {
-					case isExportTranslationFile(loaded.Name):
-						skipped, importErr := importExportTranslations(ctx, tx, revisions, jobID, loaded.Name, loaded.Data)
-						if importErr != nil {
-							return importErr
+					case len(prepared.catalogRows) > 0:
+						if persistErr := persistCatalogResources(ctx, tx, prepared.catalogRows); persistErr != nil {
+							return persistErr
 						}
-						batchSkippedTranslations += skipped
-					case isExportRegistryFile(loaded.Name):
-						if importErr := importExportRegistry(ctx, tx, resourceResolver, revisions, loaded.Name, loaded.Data); importErr != nil {
-							return importErr
-						}
-					case loaded.Name == "tags/tags.json":
-						if importErr := importExportTags(ctx, tx, resourceResolver, revisions, loaded.Data); importErr != nil {
-							return importErr
+					case len(prepared.tagRows) > 0:
+						if persistErr := persistExportTags(ctx, tx, resourceResolver, prepared.tagRows, prepared.tagMemberCount); persistErr != nil {
+							return persistErr
 						}
 					}
 				}
@@ -745,10 +969,10 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			if err != nil {
 				return err
 			}
-			if batchSkippedTranslations > 0 {
-				partial = true
-				translationValuesSkipped += batchSkippedTranslations
-			}
+		}
+		if batchSkippedTranslations > 0 {
+			partial = true
+			translationValuesSkipped += batchSkippedTranslations
 		}
 
 		for _, loaded := range loadedFiles {
@@ -758,14 +982,6 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 				continue
 			}
 			if name == "tags/tags.json" {
-				// Tags are shared across namespaces. Keep the source document with every
-				// revision represented by the package in addition to normalized rows.
-				for _, revisionID := range revisions {
-					if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
-						return err
-					}
-					textAssetCount++
-				}
 				continue
 			}
 			if name == modExportCapabilitiesPath {
@@ -807,10 +1023,12 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 						return err
 					}
 				}
-				if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
-					return err
+				if extension != ".json" || retainExportTextAsset(name, fallbackAssetPaths) {
+					if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
+						return err
+					}
+					textAssetCount++
 				}
-				textAssetCount++
 			}
 			if writeBatch.shouldFlush() {
 				if err = flushWriteBatch(); err != nil {
@@ -819,7 +1037,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			}
 		}
 		if (processedFiles-len(loadedFiles))/200 != processedFiles/200 {
-			progress := 20 + int(float64(processedFiles)/float64(max(1, len(assetFileNames)))*65)
+			progress := 70 + int(float64(processedFiles)/float64(max(1, len(assetFileNames)))*16)
 			if err = s.updateModExportJob(ctx, jobID, runToken, "importing", progress, "assets"); err != nil {
 				return err
 			}
@@ -830,6 +1048,9 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 		return err
 	}
 	if err = flushWriteBatch(); err != nil {
+		return err
+	}
+	if err = s.updateModExportJob(ctx, jobID, runToken, "importing", 90, "language_bundles"); err != nil {
 		return err
 	}
 	if err = pngPool.wait(); err != nil {
@@ -844,7 +1065,12 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 		}
 	}
 	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
-		return importExportIconCatalogResources(ctx, tx, resourceResolver, pngMedia)
+		return persistExportLocaleBundles(ctx, tx, cfg, createdBy, "mcmods_exporter", localeBundles)
+	}); err != nil {
+		return fmt.Errorf("persist locale bundles: %w", err)
+	}
+	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		return importExportIconCatalogResources(ctx, tx, resourceResolver, pngMedia, supportedTranslations)
 	}); err != nil {
 		return fmt.Errorf("import normalized icon catalogs: %w", err)
 	}
@@ -893,7 +1119,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 				if queryErr := tx.QueryRow(ctx, `select source_namespace,source_kind from catalog_import_revisions where id=$1 and import_run_token=$2`, revisionID, runToken).Scan(&namespace, &sourceKind); queryErr != nil {
 					return queryErr
 				}
-				if _, updateErr := tx.Exec(ctx, `update catalog_import_revisions set is_active=false,status='superseded' where mod_id=$1 and target_version_public_id=$2 and source_namespace=$3 and source_kind=$4 and id<>$5 and is_active`, modID, targetVersionPublicID, namespace, sourceKind, revisionID); updateErr != nil {
+				if _, updateErr := tx.Exec(ctx, `update catalog_import_revisions set is_active=false,status='superseded' where mod_id=$1 and target_version_id=$2 and source_namespace=$3 and source_kind=$4 and id<>$5 and is_active`, modID, targetVersionID, namespace, sourceKind, revisionID); updateErr != nil {
 					return updateErr
 				}
 			}
@@ -907,7 +1133,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			}
 		}
 		if canActivate {
-			if syncErr := syncImportedResourcesToContentVersionTx(ctx, tx, revisionIDs, targetVersionPublicID, overwriteExistingImportData, createdBy); syncErr != nil {
+			if syncErr := syncImportedResourcesToContentVersionTx(ctx, tx, revisionIDs, targetVersionID, overwriteExistingImportData, createdBy); syncErr != nil {
 				return syncErr
 			}
 		}
@@ -1023,7 +1249,7 @@ func normalizeExportPath(value string) (string, error) {
 }
 
 func readExportZIPFile(file *zip.File, limit int64) ([]byte, error) {
-	if int64(file.UncompressedSize64) > limit {
+	if limit < 0 || file.UncompressedSize64 > uint64(limit) {
 		return nil, errors.New("ZIP entry exceeds read limit")
 	}
 	reader, err := file.Open()
@@ -1056,10 +1282,10 @@ func exportAssetFileNames(fileNames []string, files map[string]*zip.File) []stri
 
 func exportReadBatchEnd(names []string, files map[string]*zip.File, start int) int {
 	end := start
-	var byteCount int64
+	var byteCount uint64
 	for end < len(names) && end-start < maxExportReadBatchFiles {
-		fileSize := int64(files[names[end]].UncompressedSize64)
-		if end > start && byteCount+fileSize > maxExportReadBatchBytes {
+		fileSize := files[names[end]].UncompressedSize64
+		if end > start && (fileSize > uint64(maxExportReadBatchBytes) || byteCount > uint64(maxExportReadBatchBytes)-fileSize) {
 			break
 		}
 		byteCount += fileSize
@@ -1124,51 +1350,47 @@ func isExportTranslationFile(name string) bool {
 	return strings.HasPrefix(name, "translations/") && strings.HasSuffix(name, ".json") && path.Base(name) != "languages.json"
 }
 
+func isSupportedExportTranslationFile(name string) bool {
+	if !isExportTranslationFile(name) {
+		return false
+	}
+	_, supported := canonicalExportLocaleTag(strings.TrimSuffix(path.Base(name), path.Ext(name)))
+	return supported
+}
+
 func isExportRegistryFile(name string) bool {
 	return strings.HasPrefix(name, "registries/") && strings.HasSuffix(name, ".json")
 }
 
-func importExportTranslations(ctx context.Context, tx pgx.Tx, revisions map[string]string, jobID, name string, raw []byte) (int, error) {
-	locale := strings.ToLower(strings.TrimSuffix(path.Base(name), path.Ext(name)))
+type preparedExportTranslation struct {
+	Name        string
+	Locale      string
+	Values      map[string]string
+	SkippedKeys []string
+	Total       int
+}
+
+func prepareExportTranslation(name string, raw []byte) (preparedExportTranslation, error) {
+	sourceLocale := strings.TrimSuffix(path.Base(name), path.Ext(name))
+	locale, valid := canonicalExportLocaleTag(sourceLocale)
+	if !valid {
+		return preparedExportTranslation{}, fmt.Errorf("invalid translation locale: %s", sourceLocale)
+	}
+	if supported, exists := exportContentLocale(sourceLocale); exists {
+		locale = supported
+	}
+	prepared := preparedExportTranslation{
+		Name:   name,
+		Locale: locale,
+	}
 	values, skippedKeys, total, err := decodeExportTranslationValues(raw)
 	if err != nil {
-		return 0, fmt.Errorf("decode translations %s: %w", name, err)
+		return prepared, fmt.Errorf("decode translations %s: %w", name, err)
 	}
-	skipped := total - len(values)
-	if skipped > 0 {
-		message := fmt.Sprintf("%s skipped %d non-string translation values", name, skipped)
-		if len(skippedKeys) > 0 {
-			message += ": " + strings.Join(skippedKeys, ", ")
-		}
-		if _, err := tx.Exec(ctx, `insert into catalog_import_job_logs(job_id,level,stage,message) values($1,'warning','translations',$2)`, jobID, message); err != nil {
-			return 0, err
-		}
-	}
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, revisionID := range revisions {
-		_, err := tx.Exec(ctx, `insert into catalog_import_locales(revision_id,locale,translation_count) values($1,$2,$3) on conflict(revision_id,locale) do update set translation_count=excluded.translation_count`, revisionID, locale, len(values))
-		if err != nil {
-			return 0, err
-		}
-		if len(keys) == 0 {
-			continue
-		}
-		copied, err := tx.CopyFrom(ctx, pgx.Identifier{"catalog_import_translations"}, []string{"revision_id", "locale", "translation_key", "value"}, pgx.CopyFromSlice(len(keys), func(index int) ([]any, error) {
-			key := keys[index]
-			return []any{revisionID, locale, key, values[key]}, nil
-		}))
-		if err != nil {
-			return 0, err
-		}
-		if copied != int64(len(keys)) {
-			return 0, fmt.Errorf("copy translations %s: copied %d of %d rows", name, copied, len(keys))
-		}
-	}
-	return skipped, nil
+	prepared.Values = values
+	prepared.SkippedKeys = skippedKeys
+	prepared.Total = total
+	return prepared, nil
 }
 
 func decodeExportTranslationValues(raw []byte) (map[string]string, []string, int, error) {
@@ -1203,13 +1425,13 @@ func decodeExportTranslationValues(raw []byte) (map[string]string, []string, int
 	return values, skippedKeys, len(rawValues), nil
 }
 
-func importExportRegistry(ctx context.Context, tx pgx.Tx, resolver catalogResourceIdentityResolver, revisions map[string]string, name string, raw []byte) error {
+func prepareExportRegistryResources(resolver catalogResourceIdentityResolver, revisions map[string]string, name string, raw []byte) ([]catalogResourceImportRow, error) {
 	var document struct {
 		Registry string            `json:"registry"`
 		Entries  []json.RawMessage `json:"entries"`
 	}
 	if err := json.Unmarshal(raw, &document); err != nil {
-		return fmt.Errorf("decode registry %s: %w", name, err)
+		return nil, fmt.Errorf("decode registry %s: %w", name, err)
 	}
 	if document.Registry == "" {
 		document.Registry = strings.TrimSuffix(path.Base(name), path.Ext(name))
@@ -1218,7 +1440,7 @@ func importExportRegistry(ctx context.Context, tx pgx.Tx, resolver catalogResour
 	for _, entryRaw := range document.Entries {
 		var entry map[string]any
 		if err := json.Unmarshal(entryRaw, &entry); err != nil {
-			return err
+			return nil, err
 		}
 		objectID, _ := entry["id"].(string)
 		parts := strings.SplitN(objectID, ":", 2)
@@ -1232,7 +1454,12 @@ func importExportRegistry(ctx context.Context, tx pgx.Tx, resolver catalogResour
 		kindCode := resourceKindForRegistry(document.Registry)
 		identity := resolver.resolve(kindCode, objectID)
 		translationKey, _ := entry["translation_key"].(string)
-		names, _ := json.Marshal(entry["names"])
+		names, _ := json.Marshal(supportedExportNames(entry["names"]))
+		filterSupportedExportLocalizedFields(entry)
+		filteredEntry, marshalErr := json.Marshal(entry)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
 		if string(names) == "null" || len(names) == 0 {
 			names = []byte("{}")
 		}
@@ -1241,7 +1468,10 @@ func importExportRegistry(ctx context.Context, tx pgx.Tx, resolver catalogResour
 			EntityID: identity.ID, PublicID: identity.PublicID, KindCode: kindCode, CanonicalID: identity.CanonicalID, RawID: identity.RawID,
 			Namespace: identity.Namespace, ResourcePath: identity.ResourcePath, RevisionID: revisionID,
 			SnapshotID: catalogSnapshotID("resource", revisionID, identity.ID, ""), Registry: document.Registry,
-			TranslationKey: translationKey, Names: string(names), Data: string(entryRaw),
+			TranslationKey: translationKey, Names: string(names), Data: string(compactImportJSONObject(
+				filteredEntry,
+				"id", "namespace", "path", "translation_key", "names",
+			)),
 			IconPath: iconPath, PreviewPath: previewPath,
 		}
 	}
@@ -1251,13 +1481,13 @@ func importExportRegistry(ctx context.Context, tx pgx.Tx, resolver catalogResour
 	}
 	sort.Strings(rowKeys)
 	if len(rowKeys) == 0 {
-		return nil
+		return nil, nil
 	}
 	rows := make([]catalogResourceImportRow, len(rowKeys))
 	for index, key := range rowKeys {
 		rows[index] = rowsByKey[key]
 	}
-	return persistCatalogResources(ctx, tx, rows)
+	return rows, nil
 }
 
 func exportRegistryMediaPaths(registry, namespace, resourcePath string) (string, string) {
@@ -1285,10 +1515,14 @@ func importExportTags(ctx context.Context, tx pgx.Tx, resolver catalogResourceId
 	if err != nil {
 		return err
 	}
+	return persistExportTags(ctx, tx, resolver, rows, memberCount)
+}
+
+func persistExportTags(ctx context.Context, tx pgx.Tx, resolver catalogResourceIdentityResolver, rows []exportTagRow, memberCount int) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	if _, err = tx.Exec(ctx, `create temporary table import_tag_stage(
+	if _, err := tx.Exec(ctx, `create temporary table import_tag_stage(
 		entity_id text,public_id text,snapshot_id text,revision_id text,registry text,canonical_id text,member_count integer
 	) on commit drop`); err != nil {
 		return err
@@ -1306,16 +1540,19 @@ func importExportTags(ctx context.Context, tx pgx.Tx, resolver catalogResourceId
 	if copied != int64(len(rows)) {
 		return fmt.Errorf("copy tags: copied %d of %d rows", copied, len(rows))
 	}
-	if _, err = tx.Exec(ctx, `insert into catalog_entities(id,public_id,entity_type,status)
-		select distinct entity_id,public_id,'tag','active' from import_tag_stage on conflict(id) do update set status='active',updated_at=now()`); err != nil {
+	if _, err = tx.Exec(ctx, `insert into catalog_entities(identity_key,public_id,entity_type,status)
+		select distinct entity_id,public_id,'tag','active' from import_tag_stage on conflict(identity_key) do update set status='active',updated_at=now()`); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `insert into catalog_tags(entity_id,registry,canonical_id)
-		select distinct entity_id,registry,canonical_id from import_tag_stage on conflict(registry,canonical_id) do nothing`); err != nil {
+		select distinct entity.id,stage.registry,stage.canonical_id from import_tag_stage stage
+		join catalog_entities entity on entity.identity_key=stage.entity_id
+		on conflict(registry,canonical_id) do nothing`); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `insert into tag_import_snapshots(id,tag_id,revision_id,member_count)
-		select snapshot_id,entity_id,revision_id,member_count from import_tag_stage
+		select stage.snapshot_id,entity.id,stage.revision_id,stage.member_count from import_tag_stage stage
+		join catalog_entities entity on entity.identity_key=stage.entity_id
 		on conflict(tag_id,revision_id) do update set member_count=excluded.member_count`); err != nil {
 		return err
 	}
@@ -1355,14 +1592,33 @@ func importExportTags(ctx context.Context, tx pgx.Tx, resolver catalogResourceId
 	}
 	statements := []string{
 		`insert into resource_kinds(code,family,user_visible) select distinct kind_code,split_part(kind_code,'.',1),true from import_tag_member_stage on conflict(code) do nothing`,
-		`insert into catalog_entities(id,public_id,entity_type,status) select distinct resource_id,resource_public_id,'resource','placeholder' from import_tag_member_stage on conflict(id) do nothing`,
+		`insert into catalog_entities(identity_key,public_id,entity_type,status)
+		 select distinct stage.resource_id,stage.resource_public_id,'resource','placeholder'
+		 from import_tag_member_stage stage
+		 left join game_resources existing
+		  on existing.kind_code=stage.kind_code and existing.canonical_id=stage.canonical_id
+		 where existing.entity_id is null
+		 on conflict(identity_key) do nothing`,
 		`insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path,resolved)
-		 select distinct resource_id,kind_code,canonical_id,namespace,resource_path,false from import_tag_member_stage on conflict(kind_code,canonical_id) do nothing`,
+		 select distinct coalesce(existing.entity_id,entity.id),stage.kind_code,stage.canonical_id,stage.namespace,stage.resource_path,false
+		 from import_tag_member_stage stage
+		 left join game_resources existing
+		  on existing.kind_code=stage.kind_code and existing.canonical_id=stage.canonical_id
+		 left join catalog_entities entity on entity.identity_key=stage.resource_id
+		 where existing.entity_id is not null or entity.id is not null
+		 on conflict(kind_code,canonical_id) do nothing`,
 		`insert into game_resource_aliases(kind_code,alias_id,resource_id,source)
-		 select distinct kind_code,raw_member_id,resource_id,'mod_id' from import_tag_member_stage
+		 select distinct stage.kind_code,stage.raw_member_id,resource.entity_id,'mod_id'
+		 from import_tag_member_stage stage
+		 join game_resources resource
+		  on resource.kind_code=stage.kind_code and resource.canonical_id=stage.canonical_id
 		 on conflict(kind_code,alias_id) do update set resource_id=excluded.resource_id,source=excluded.source,updated_at=now()`,
 		`insert into tag_import_members(tag_snapshot_id,resource_id,raw_member_id,ordinal)
-		 select tag_snapshot_id,resource_id,raw_member_id,ordinal from import_tag_member_stage on conflict(tag_snapshot_id,raw_member_id) do update set resource_id=excluded.resource_id,ordinal=excluded.ordinal`,
+		 select stage.tag_snapshot_id,resource.entity_id,stage.raw_member_id,stage.ordinal
+		 from import_tag_member_stage stage
+		 join game_resources resource
+		  on resource.kind_code=stage.kind_code and resource.canonical_id=stage.canonical_id
+		 on conflict(tag_snapshot_id,raw_member_id) do update set resource_id=excluded.resource_id,ordinal=excluded.ordinal`,
 	}
 	for _, statement := range statements {
 		if _, err = tx.Exec(ctx, statement); err != nil {
@@ -1468,27 +1724,77 @@ func (batch *modExportWriteBatch) queue(query string, byteCount int64, arguments
 }
 
 func (batch *modExportWriteBatch) shouldFlush() bool {
-	return batch.rows >= maxExportWriteBatchRows || batch.byteCount >= maxExportWriteBatchBytes
+	bulkRows := len(batch.catalogRows) + len(batch.textAssets) + len(batch.recipes) + len(batch.recipeBindings) + len(batch.recipeCandidates)
+	return batch.rows >= maxExportWriteBatchRows ||
+		bulkRows >= maxExportBulkWriteRows ||
+		batch.byteCount >= maxExportWriteBatchBytes
 }
 
 func (batch *modExportWriteBatch) flush(ctx context.Context, tx pgx.Tx) error {
-	if batch.rows == 0 {
-		return nil
-	}
-	results := tx.SendBatch(ctx, batch.batch)
-	var firstErr error
-	for index := 0; index < batch.rows; index++ {
-		if _, err := results.Exec(); err != nil && firstErr == nil {
+	batch.flushCount++
+	batch.recipeCount += len(batch.recipes)
+	batch.bindingCount += len(batch.recipeBindings)
+	batch.candidateCount += len(batch.recipeCandidates)
+	batch.payloadBytes += batch.byteCount
+	if batch.rows > 0 {
+		started := time.Now()
+		results := tx.SendBatch(ctx, batch.batch)
+		var firstErr error
+		for index := 0; index < batch.rows; index++ {
+			if _, err := results.Exec(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if err := results.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+		if firstErr != nil {
+			return firstErr
+		}
+		batch.queuedDuration += time.Since(started)
 	}
-	if err := results.Close(); err != nil && firstErr == nil {
-		firstErr = err
+	if len(batch.catalogRows) > 0 {
+		started := time.Now()
+		if err := persistCatalogResources(ctx, tx, batch.catalogRows); err != nil {
+			return err
+		}
+		batch.catalogDuration += time.Since(started)
+	}
+	if len(batch.textAssets) > 0 {
+		started := time.Now()
+		if err := persistExportTextAssets(ctx, tx, batch.textAssets); err != nil {
+			return err
+		}
+		batch.textAssetDuration += time.Since(started)
+	}
+	if len(batch.recipes) > 0 {
+		if batch.onStage != nil {
+			if err := batch.onStage("recipes"); err != nil {
+				return err
+			}
+		}
+		started := time.Now()
+		if err := persistRecipeImports(ctx, tx, batch.recipes); err != nil {
+			return err
+		}
+		batch.recipeDuration += time.Since(started)
+	}
+	if len(batch.recipeBindings) > 0 || len(batch.recipeCandidates) > 0 {
+		started := time.Now()
+		if err := persistRecipeImportBindings(ctx, tx, batch.recipeBindings, batch.recipeCandidates, batch.onStage); err != nil {
+			return err
+		}
+		batch.bindingDuration += time.Since(started)
 	}
 	batch.batch = &pgx.Batch{}
+	batch.catalogRows = batch.catalogRows[:0]
+	batch.textAssets = batch.textAssets[:0]
+	batch.recipes = batch.recipes[:0]
+	batch.recipeBindings = batch.recipeBindings[:0]
+	batch.recipeCandidates = batch.recipeCandidates[:0]
 	batch.rows = 0
 	batch.byteCount = 0
-	return firstErr
+	return nil
 }
 
 func queueExportTextAsset(batch *modExportWriteBatch, revisionID, name string, data []byte) error {
@@ -1505,13 +1811,23 @@ func queueExportTextAsset(batch *modExportWriteBatch, revisionID, name string, d
 			return fmt.Errorf("decode JSON asset %s: %w", name, err)
 		}
 		canonical, _ := json.Marshal(value)
-		batch.queue(`insert into catalog_import_text_assets(revision_id,asset_path,asset_kind,content_type,sha256,byte_length,json_content) values($1,$2,$3,'application/json',$4,$5,$6::jsonb) on conflict(revision_id,asset_path) do nothing`, int64(len(canonical)), revisionID, name, assetKind, digest, len(data), string(canonical))
+		batch.textAssets = append(batch.textAssets, exportTextAssetWrite{
+			RevisionID: revisionID, AssetPath: name, AssetKind: assetKind,
+			ContentType: "application/json", Digest: digest, ByteLength: int64(len(data)),
+			Content: string(canonical), JSON: true,
+		})
+		batch.byteCount += int64(len(canonical))
 		return nil
 	}
 	if !utf8Text(data) {
 		return fmt.Errorf("text asset is not valid UTF-8: %s", name)
 	}
-	batch.queue(`insert into catalog_import_text_assets(revision_id,asset_path,asset_kind,content_type,sha256,byte_length,text_content) values($1,$2,$3,$4,$5,$6,$7) on conflict(revision_id,asset_path) do nothing`, int64(len(data)), revisionID, name, assetKind, contentType, digest, len(data), string(data))
+	batch.textAssets = append(batch.textAssets, exportTextAssetWrite{
+		RevisionID: revisionID, AssetPath: name, AssetKind: assetKind,
+		ContentType: contentType, Digest: digest, ByteLength: int64(len(data)),
+		Content: string(data),
+	})
+	batch.byteCount += int64(len(data))
 	return nil
 }
 
@@ -1560,6 +1876,10 @@ func newModExportPNGUploadPool(ctx context.Context, client *aliyunoss.Client, bu
 }
 
 func (pool *modExportPNGUploadPool) submit(objectKey, name, digest string, data []byte) {
+	pool.submitAsset(objectKey, name, digest, "image/png", data)
+}
+
+func (pool *modExportPNGUploadPool) submitAsset(objectKey, name, digest, contentType string, data []byte) {
 	select {
 	case pool.semaphore <- struct{}{}:
 	case <-pool.ctx.Done():
@@ -1570,9 +1890,9 @@ func (pool *modExportPNGUploadPool) submit(objectKey, name, digest string, data 
 	go func() {
 		defer pool.waitGroup.Done()
 		defer func() { <-pool.semaphore }()
-		_, err := pool.client.PutObject(pool.ctx, &aliyunoss.PutObjectRequest{Bucket: aliyunoss.Ptr(pool.bucket), Key: aliyunoss.Ptr(objectKey), ContentType: aliyunoss.Ptr("image/png"), ContentLength: aliyunoss.Ptr(int64(len(data))), Body: bytes.NewReader(data), Metadata: map[string]string{"sha256": digest}})
+		_, err := pool.client.PutObject(pool.ctx, &aliyunoss.PutObjectRequest{Bucket: aliyunoss.Ptr(pool.bucket), Key: aliyunoss.Ptr(objectKey), ContentType: aliyunoss.Ptr(contentType), ContentLength: aliyunoss.Ptr(int64(len(data))), Body: bytes.NewReader(data), Metadata: map[string]string{"sha256": digest}})
 		if err != nil {
-			pool.setError(fmt.Errorf("upload PNG %s: %w", name, err))
+			pool.setError(fmt.Errorf("upload import asset %s: %w", name, err))
 		}
 	}()
 }
@@ -1607,7 +1927,7 @@ func persistExportPNGMedia(ctx context.Context, tx pgx.Tx, cfg ossConfigPayload,
 		batch := &pgx.Batch{}
 		for index := start; index < end; index++ {
 			item := &media[index]
-			batch.Queue(`insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status) values($1,$2,$3,$4,$5,$6,$7,$7,'image/png',$8,$8,$9,$10,'active','pending') on conflict(object_key) do update set updated_at=now() returning id`, cfg.Bucket, cfg.displayEndpoint(), cfg.Region, item.ObjectKey, ossCategoryFromObjectKey(item.ObjectKey, cfg.Prefix), source, item.Original, item.ByteLength, item.Digest, nullableUserID(uploaderID))
+			batch.Queue(`insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status) values($1,$2,$3,$4,$5,$6,$7,$7,'image/png',$8,$8,$9,$10,'active','clean') on conflict(object_key) do update set status='active',scan_status='clean',updated_at=now() returning id`, cfg.Bucket, cfg.displayEndpoint(), cfg.Region, item.ObjectKey, ossCategoryFromObjectKey(item.ObjectKey, cfg.Prefix), source, item.Original, item.ByteLength, item.Digest, nullableUserID(uploaderID))
 		}
 		results := tx.SendBatch(ctx, batch)
 		for index := start; index < end; index++ {
@@ -1682,7 +2002,10 @@ func normalizeExportLoader(value string) string {
 func newExportID() string {
 	value := make([]byte, 16)
 	if _, err := rand.Read(value); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+		// Import identifiers are visible outside the process. Continuing with a
+		// timestamp fallback would make them predictable, so fail closed if the
+		// operating system CSPRNG is unavailable.
+		panic(fmt.Errorf("generate secure import identifier: %w", err))
 	}
 	value[6] = (value[6] & 0x0f) | 0x40
 	value[8] = (value[8] & 0x3f) | 0x80

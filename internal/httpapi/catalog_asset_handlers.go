@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func validateCatalogImageReferenceTx(ctx context.Context, tx pgx.Tx, revisionID int64, fileID *int64) error {
+func validateCatalogImageReferenceTx(ctx context.Context, tx pgx.Tx, revisionID int64, fileID *string) error {
 	if fileID == nil {
 		return nil
 	}
@@ -19,7 +19,8 @@ func validateCatalogImageReferenceTx(ctx context.Context, tx pgx.Tx, revisionID 
 	if err := tx.QueryRow(ctx, `select exists(
 		select 1 from oss_files file
 		join content_revisions revision on revision.id=$1 and revision.created_by=file.uploader_id
-		where file.id=$2 and file.status='active'
+		where file.public_id=$2 and file.status='active'
+		  and file.scan_status in ('clean','trusted_generated')
 		  and lower(split_part(file.content_type,';',1)) in ('image/png','image/jpeg','image/webp','image/gif','image/apng')
 	)`, revisionID, *fileID).Scan(&valid); err != nil {
 		return err
@@ -37,17 +38,37 @@ func (s *Server) catalogResourceAsset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "catalog resource asset path is invalid")
 		return
 	}
-	column := "definition.icon_file_id"
+	versionColumn := "detail.icon_file_id"
+	legacyColumn := "definition.icon_file_id"
 	if assetKind == "render" {
-		column = "definition.render_file_id"
+		versionColumn = "detail.render_file_id"
+		legacyColumn = "definition.render_file_id"
 	}
 	var objectKey, contentType string
+	versionPublicID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("version")))
+	if versionPublicID != "" && !validCatalogPublicID(versionPublicID) {
+		writeError(w, http.StatusBadRequest, "catalog resource version is invalid")
+		return
+	}
 	err := s.db.QueryRow(r.Context(), `select file.object_key,file.content_type
 		from catalog_entities entity
-		join catalog_resource_definitions definition on definition.resource_id=entity.id
-		join oss_files file on file.id=`+column+`
+		join mod_resource_version_details detail on detail.resource_id=entity.id and detail.status='active'
+		join mod_content_versions version on version.id=detail.version_id and version.status='active'
+		join oss_files file on file.id=`+versionColumn+` and file.status='active'
+		  and file.scan_status in ('clean','trusted_generated')
 		where entity.public_id=$1 and entity.entity_type='resource' and entity.status='active'
-		  and entity.archived_at is null and file.status='active'`, publicID).Scan(&objectKey, &contentType)
+		  and entity.archived_at is null and ($2='' or version.public_id=$2)
+		order by case when version.public_id=$2 then 0 else 1 end,detail.updated_at desc
+		limit 1`, publicID, versionPublicID).Scan(&objectKey, &contentType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = s.db.QueryRow(r.Context(), `select file.object_key,file.content_type
+		from catalog_entities entity
+		join catalog_resource_definitions definition on definition.resource_id=entity.id
+		join oss_files file on file.id=`+legacyColumn+`
+		where entity.public_id=$1 and entity.entity_type='resource' and entity.status='active'
+		  and entity.archived_at is null and file.status='active'
+		  and file.scan_status in ('clean','trusted_generated')`, publicID).Scan(&objectKey, &contentType)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "catalog resource asset does not exist")
 		return
@@ -73,7 +94,7 @@ func (s *Server) catalogRecipeTemplateBackground(w http.ResponseWriter, r *http.
 		join oss_files file on file.id=template.background_file_id
 		where entity.public_id=$1 and entity.entity_type='recipe_template' and entity.status='active'
 		  and entity.archived_at is null and type_entity.status='active' and type_entity.archived_at is null
-		  and file.status='active'`, publicID).Scan(&objectKey, &contentType)
+		  and file.status='active' and file.scan_status in ('clean','trusted_generated')`, publicID).Scan(&objectKey, &contentType)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var revisionID, assetPath string
 		err = s.db.QueryRow(r.Context(), `select snapshot.revision_id,snapshot.background_path

@@ -10,12 +10,17 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/queue"
+	"mcmods-cn-backend/internal/security"
 )
 
-func LoadNATSConfig(ctx context.Context, db *pgxpool.Pool, fallback config.NATSConfig) (config.NATSConfig, error) {
+func LoadNATSConfig(ctx context.Context, db *pgxpool.Pool, fallback config.NATSConfig, settingsEncryptionKey string) (config.NATSConfig, error) {
 	var raw []byte
 	err := db.QueryRow(ctx, `select value from system_settings where key = 'nats.config'`).Scan(&raw)
 	if err == nil {
+		raw, err = security.DecryptSetting(settingsEncryptionKey, raw)
+		if err != nil {
+			return queue.NormalizeConfig(fallback), err
+		}
 		var stored config.NATSConfig
 		if err := json.Unmarshal(raw, &stored); err != nil {
 			return queue.NormalizeConfig(fallback), err

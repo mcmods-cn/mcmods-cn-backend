@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,6 +16,7 @@ const maxModExportEntryMarkdownBytes = 256 * 1024
 type modExportEntryDetailResponse struct {
 	EntityID          string                           `json:"entityId"`
 	PublicID          string                           `json:"publicId"`
+	Data              map[string]any                   `json:"data"`
 	Name              string                           `json:"name"`
 	Summary           string                           `json:"summary"`
 	ContentMarkdown   string                           `json:"contentMarkdown"`
@@ -57,22 +59,23 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	registry := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("registry")))
 	objectID := strings.TrimSpace(r.URL.Query().Get("objectId"))
-	entityID := strings.TrimSpace(r.URL.Query().Get("entityId"))
+	entityPublicID := strings.TrimSpace(r.URL.Query().Get("entityId"))
 	locale := normalizeExportContentLocale(r.URL.Query().Get("locale"))
-	if !isExportRegistryName(registry) || (objectID == "" && entityID == "") {
+	if !isExportRegistryName(registry) || (objectID == "" && entityPublicID == "") {
 		writeError(w, http.StatusBadRequest, "registry and entityId or objectId are required")
 		return
 	}
-	var modID int64
+	var resourceID, modID int64
 	var publicID string
-	err := s.db.QueryRow(r.Context(), `select resource.entity_id,entity.public_id,resource.canonical_id,revision.mod_id
+	var snapshotData []byte
+	err := s.db.QueryRow(r.Context(), `select resource.entity_id,entity.public_id,resource.canonical_id,revision.mod_id,snapshot.data
 		from resource_import_snapshots snapshot
 		join game_resources resource on resource.entity_id=snapshot.resource_id
 		join catalog_entities entity on entity.id=resource.entity_id
 		join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		where snapshot.revision_id=$1 and snapshot.registry=$2
-		and (($3<>'' and resource.entity_id=$3) or ($3='' and resource.canonical_id=$4))`,
-		revisionID, registry, entityID, objectID).Scan(&entityID, &publicID, &objectID, &modID)
+		and (($3<>'' and entity.public_id=$3) or ($3='' and resource.canonical_id=$4))`,
+		revisionID, registry, entityPublicID, objectID).Scan(&resourceID, &publicID, &objectID, &modID, &snapshotData)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "entry not found")
 		return
@@ -81,14 +84,29 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to read entry")
 		return
 	}
-	response := modExportEntryDetailResponse{EntityID: entityID, PublicID: publicID, ModelAssetPaths: []string{}, Recipes: []any{}, Uses: []any{}, Versions: []map[string]any{}}
-	recipeResourceID := entityID
+	data, err := decodeModExportEntryData(snapshotData)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to decode entry data")
+		return
+	}
+	response := modExportEntryDetailResponse{
+		EntityID: publicID, PublicID: publicID, Data: data,
+		ModelAssetPaths: []string{}, Recipes: []any{}, Uses: []any{}, Versions: []map[string]any{},
+	}
+	recipeResourceID := resourceID
 	primary, secondary := s.requestContentLocales(r)
 	if requested := normalizeContentLocale(locale); requested != "" {
 		primary = requested
 	}
 	if requested := normalizeContentLocale(r.URL.Query().Get("secondaryLocale")); requested != "" {
 		secondary = requested
+	}
+	if registry == "loot_tables" {
+		items := []map[string]any{{"data": response.Data}}
+		if err = s.decorateLootTableResources(r.Context(), revisionID, items, primary, secondary); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to resolve loot table resources")
+			return
+		}
 	}
 	localized, localizationErr := s.loadCatalogEntityLocalizations(r.Context(), publicID)
 	if localizationErr != nil && !errors.Is(localizationErr, pgx.ErrNoRows) {
@@ -109,28 +127,67 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 			response.ContentProvenance = content.Provenance
 		}
 	}
-	if response.ContentLocale == "" {
-		_ = s.db.QueryRow(r.Context(), `
+	if response.Name == "" {
+		var translationKey string
+		var importedNames []byte
+		nameErr := s.db.QueryRow(r.Context(), `select translation_key,names
+			from resource_import_snapshots where revision_id=$1 and resource_id=$2`,
+			revisionID, resourceID).Scan(&translationKey, &importedNames)
+		if nameErr != nil && !errors.Is(nameErr, pgx.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "failed to resolve imported entry name")
+			return
+		}
+		if nameErr == nil {
+			names := map[string]any{}
+			_ = json.Unmarshal(importedNames, &names)
+			item := map[string]any{"translationKey": translationKey, "names": names}
+			if nameErr = s.decorateExportTranslationNames(r.Context(), revisionID, primary, []map[string]any{item}); nameErr != nil {
+				writeError(w, http.StatusInternalServerError, "failed to resolve imported entry translation")
+				return
+			}
+			names, _ = item["names"].(map[string]any)
+			available := make([]string, 0, len(names))
+			for availableLocale := range names {
+				available = append(available, availableLocale)
+			}
+			resolution := resolveContentLocale(primary, secondary, "en-US", available)
+			response.Name, _ = names[resolution.ResolvedLocale].(string)
+			if response.Name != "" {
+				response.ContentLocale = resolution.ResolvedLocale
+				response.ContentProvenance = "import"
+			}
+		}
+	}
+	if response.ContentMarkdown == "" {
+		var pageLocale, pageMarkdown string
+		pageErr := s.db.QueryRow(r.Context(), `
 			select locale,content_markdown from knowledge_pages
 			where entity_id=$1 and locale=any($2::text[])
-			order by case locale when $3 then 0 when 'zh_cn' then 1 when 'en_us' then 2 else 3 end limit 1`,
-			entityID, []string{locale, "zh_cn", "en_us"}, locale).Scan(&response.ContentLocale, &response.ContentMarkdown)
+			order by case locale when $3 then 0 when 'zh-CN' then 1 when 'zh-TW' then 2 when 'en-US' then 3 else 4 end limit 1`,
+			resourceID, []string{locale, "zh-CN", "zh-TW", "en-US"}, locale).Scan(&pageLocale, &pageMarkdown)
+		if pageErr == nil && pageMarkdown != "" {
+			response.ContentMarkdown = pageMarkdown
+			if response.ContentLocale == "" {
+				response.ContentLocale = pageLocale
+			}
+		}
 	}
-	versionCarrier := map[string]any{"entityId": entityID, "versions": []map[string]any{}}
+	versionCarrier := map[string]any{"entityId": publicID, "versions": []map[string]any{}}
 	if err = s.decorateResourceVersionRows(r.Context(), []map[string]any{versionCarrier}, primary, secondary); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve entry versions")
 		return
 	}
 	response.Versions, _ = versionCarrier["versions"].([]map[string]any)
 	if registry == "blocks" {
-		var itemResourceID, blockstatePath, itemModelPath string
+		var itemResourceID sql.NullInt64
+		var blockstatePath, itemModelPath string
 		var modelPaths, texturePaths []string
 		bindingErr := s.db.QueryRow(r.Context(), `
-			select coalesce(binding.item_resource_id,''),binding.blockstate_path,binding.item_model_path,binding.model_paths,binding.texture_paths
+			select binding.item_resource_id,binding.blockstate_path,binding.item_model_path,binding.model_paths,binding.texture_paths
 			from game_resource_asset_bindings binding
 			join resource_import_snapshots snapshot on snapshot.id=binding.snapshot_id
 			where snapshot.revision_id=$1 and binding.block_resource_id=$2`,
-			revisionID, entityID).Scan(&itemResourceID, &blockstatePath, &itemModelPath, &modelPaths, &texturePaths)
+			revisionID, resourceID).Scan(&itemResourceID, &blockstatePath, &itemModelPath, &modelPaths, &texturePaths)
 		if bindingErr != nil && !errors.Is(bindingErr, pgx.ErrNoRows) {
 			writeError(w, http.StatusInternalServerError, "failed to read block resource binding")
 			return
@@ -141,7 +198,7 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 				paths[assetPath] = struct{}{}
 			}
 		}
-		response.BlockEntityModel, err = s.loadModExportBlockEntityModel(r.Context(), revisionID, entityID)
+		response.BlockEntityModel, err = s.loadModExportBlockEntityModel(r.Context(), revisionID, resourceID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to read block entity model")
 			return
@@ -160,8 +217,8 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		response.ModelAssetPaths = sortedExportPaths(paths)
 		response.ModelAvailable = response.ModelAvailable || blockstatePath != ""
-		if itemResourceID != "" {
-			recipeResourceID = itemResourceID
+		if itemResourceID.Valid {
+			recipeResourceID = itemResourceID.Int64
 		}
 	}
 	if registry == "items" || registry == "blocks" {
@@ -177,7 +234,21 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *Server) loadModExportBlockEntityModel(ctx context.Context, revisionID, resourceID string) (*modExportBlockEntityModelDetail, error) {
+func decodeModExportEntryData(raw []byte) (map[string]any, error) {
+	data := make(map[string]any)
+	if len(raw) == 0 {
+		return data, nil
+	}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return nil, err
+	}
+	if data == nil {
+		data = make(map[string]any)
+	}
+	return data, nil
+}
+
+func (s *Server) loadModExportBlockEntityModel(ctx context.Context, revisionID string, resourceID int64) (*modExportBlockEntityModelDetail, error) {
 	var modelID string
 	model := &modExportBlockEntityModelDetail{Variants: []modExportBlockEntityVariantDetail{}}
 	err := s.db.QueryRow(ctx, `select id,block_id,block_entity_type_id,model_source,model_available
@@ -220,125 +291,7 @@ func (s *Server) loadModExportBlockEntityModel(ctx context.Context, revisionID, 
 	return model, nil
 }
 
-func (s *Server) updateModExportEntryContent(w http.ResponseWriter, r *http.Request) {
-	identity, err := s.modIdentity(r.Context(), r.PathValue("siteId"))
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "mod not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to read mod")
-		return
-	}
-	if !canEditMod(currentClaims(r), identity) {
-		writeError(w, http.StatusForbidden, "permission denied")
-		return
-	}
-	var request struct {
-		EntityID        string `json:"entityId"`
-		Registry        string `json:"registry"`
-		ObjectID        string `json:"objectId"`
-		Locale          string `json:"locale"`
-		ContentMarkdown string `json:"contentMarkdown"`
-	}
-	if err = decodeJSON(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	request.Registry = strings.ToLower(strings.TrimSpace(request.Registry))
-	request.EntityID = strings.TrimSpace(request.EntityID)
-	request.ObjectID = strings.TrimSpace(request.ObjectID)
-	request.Locale = normalizeExportContentLocale(request.Locale)
-	if !isExportRegistryName(request.Registry) || (request.EntityID == "" && request.ObjectID == "") || len(request.ContentMarkdown) > maxModExportEntryMarkdownBytes {
-		writeError(w, http.StatusBadRequest, "invalid entry content")
-		return
-	}
-	err = s.db.QueryRow(r.Context(), `select resource.entity_id,resource.canonical_id
-		from resource_import_snapshots snapshot
-		join game_resources resource on resource.entity_id=snapshot.resource_id
-		join catalog_import_revisions revision on revision.id=snapshot.revision_id
-		where revision.mod_id=$1 and snapshot.registry=$2
-		and (($3<>'' and resource.entity_id=$3) or ($3='' and resource.canonical_id=$4))
-		order by revision.is_active desc,revision.revision_no desc limit 1`,
-		identity.ID, request.Registry, request.EntityID, request.ObjectID).Scan(&request.EntityID, &request.ObjectID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "entry not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to resolve entry")
-		return
-	}
-	claims := currentClaims(r)
-	aggregateKey := entryContentAggregateKey(request.EntityID, request.Locale)
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to start entry revision")
-		return
-	}
-	defer tx.Rollback(r.Context())
-	if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext($1))`, "catalog_resource:"+aggregateKey); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to lock entry content")
-		return
-	}
-	var baseRevisionID *int64
-	err = tx.QueryRow(r.Context(), `select published_revision_id from knowledge_pages
-		where entity_id=$1 and locale=$2 for update`, request.EntityID, request.Locale).Scan(&baseRevisionID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		baseRevisionID = nil
-	} else if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load entry revision")
-		return
-	}
-	snapshot, err := json.Marshal(map[string]any{
-		"entityId": request.EntityID, "modId": identity.ID, "registry": request.Registry, "objectId": request.ObjectID,
-		"locale": request.Locale, "contentMarkdown": request.ContentMarkdown,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to encode entry revision")
-		return
-	}
-	status := "pending"
-	if canSkipProjectReview(claims, identity) {
-		status = "approved"
-	}
-	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
-		EntityID: request.EntityID, AggregateType: "catalog_resource", AggregateKey: aggregateKey, BaseRevision: baseRevisionID,
-		Snapshot: snapshot, Reason: "Update exported entry introduction", ActorID: claims.Subject,
-		Source: "user", Status: status,
-		Metadata: map[string]any{"modId": identity.ID, "siteId": identity.SiteID, "registry": request.Registry, "objectId": request.ObjectID, "locale": request.Locale},
-		Request:  r,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create entry revision")
-		return
-	}
-	if status == "approved" {
-		if err = publishModExportEntryContentTx(r.Context(), tx, created.RevisionID, request.EntityID, request.Locale, request.ContentMarkdown, claims.Subject); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to publish entry content")
-			return
-		}
-		if err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic approval", r); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to record entry approval")
-			return
-		}
-	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to commit entry revision")
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"locale": request.Locale, "contentMarkdown": request.ContentMarkdown,
-		"status": status, "revisionId": created.RevisionID, "changeRequestId": created.ChangeRequestID,
-	})
-}
-
-func entryContentAggregateKey(entityID, locale string) string {
-	encoded, _ := json.Marshal([]any{entityID, locale})
-	return string(encoded)
-}
-
-func publishModExportEntryContentTx(ctx context.Context, tx pgx.Tx, revisionID int64, entityID, locale, markdown string, actorID int64) error {
+func publishModExportEntryContentTx(ctx context.Context, tx pgx.Tx, revisionID, entityID int64, locale, markdown string, actorID int64) error {
 	_, err := tx.Exec(ctx, `
 		insert into knowledge_pages(entity_id,locale,content_markdown,updated_by,published_revision_id)
 		values($1,$2,$3,$4,$5)
@@ -349,7 +302,7 @@ func publishModExportEntryContentTx(ctx context.Context, tx pgx.Tx, revisionID i
 	return err
 }
 
-func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, resourceID, locale string) ([]any, []any, error) {
+func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID string, resourceID int64, locale string) ([]any, []any, error) {
 	produces := make([]any, 0, 8)
 	uses := make([]any, 0, 8)
 	decorations := make([]map[string]any, 0, 16)
@@ -372,9 +325,11 @@ func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, reso
 			revision.minecraft_version,revision.loader,preferred.minecraft_version,preferred.loader,
 			revision.activated_at,revision.created_at
 	)
-	select recipe.entity_id,recipe_type.canonical_id,snapshot.id,ranked.produces,ranked.uses,snapshot.revision_id
+	select recipe_entity.public_id,recipe_type.canonical_id,snapshot.id,ranked.produces,ranked.uses,snapshot.revision_id,
+		coalesce(recipe.canonical_source_id,snapshot.source_recipe_id)
 	from ranked join recipe_import_snapshots snapshot on snapshot.id=ranked.recipe_snapshot_id
 	join recipes recipe on recipe.entity_id=snapshot.recipe_id
+	join catalog_entities recipe_entity on recipe_entity.id=recipe.entity_id
 	join recipe_types recipe_type on recipe_type.entity_id=recipe.recipe_type_id
 	where ranked.rank=1 order by recipe.entity_id limit 200`, revisionID, resourceID)
 	if err != nil {
@@ -382,12 +337,12 @@ func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, reso
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var recipeID, recipeTypeID, snapshotID, sourceRevisionID string
+		var recipePublicID, recipeTypeID, snapshotID, sourceRevisionID, sourceRecipeID string
 		var isProduced, isUsed bool
-		if err = rows.Scan(&recipeID, &recipeTypeID, &snapshotID, &isProduced, &isUsed, &sourceRevisionID); err != nil {
+		if err = rows.Scan(&recipePublicID, &recipeTypeID, &snapshotID, &isProduced, &isUsed, &sourceRevisionID, &sourceRecipeID); err != nil {
 			return produces, uses, err
 		}
-		recipe := map[string]any{"entityId": recipeID, "id": recipeID, "type": recipeTypeID,
+		recipe := map[string]any{"entityId": recipePublicID, "id": recipePublicID, "recipeId": sourceRecipeID, "type": recipeTypeID,
 			"recipeSnapshotId": snapshotID, "revisionId": sourceRevisionID}
 		decorations = append(decorations, recipe)
 		if isProduced && len(produces) < 100 {
@@ -413,9 +368,9 @@ func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID, reso
 }
 
 func normalizeExportContentLocale(value string) string {
-	value = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "-", "_"))
-	if value == "" || len(value) > 32 {
-		return "zh_cn"
+	value = normalizeContentLocale(value)
+	if value == "" || len(value) > 32 || !validContentLocaleTag(value) {
+		return "zh-CN"
 	}
 	return value
 }

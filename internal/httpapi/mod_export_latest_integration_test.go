@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -64,6 +65,13 @@ func TestLatestExporterWorldgenV2Contract(t *testing.T) {
 }
 
 func TestLatestExporterCatalogImportIntegration(t *testing.T) {
+	checkpoint := time.Now()
+	mark := func(label string) {
+		t.Helper()
+		now := time.Now()
+		t.Logf("%s: %s", label, now.Sub(checkpoint).Round(time.Millisecond))
+		checkpoint = now
+	}
 	archivePath := os.Getenv("MCMODS_EXPORT_TEST_ZIP")
 	databaseURL := os.Getenv("MCMODS_TEST_DATABASE_URL")
 	if archivePath == "" {
@@ -127,6 +135,13 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(context.Background())
+	// Production connections enforce an idle-in-transaction timeout. Keep a
+	// deliberately tighter value here so bulk imports must stream rows while
+	// PostgreSQL is actively processing COPY instead of encoding giant array
+	// parameters while the transaction sits idle.
+	if _, err = tx.Exec(context.Background(), `set local idle_in_transaction_session_timeout='15s'`); err != nil {
+		t.Fatal(err)
+	}
 	var modID int64
 	if err = tx.QueryRow(context.Background(), `insert into mods(project_code,slug,primary_name,review_status)
 		values('tst9z9x01','catalog-import-integration-test','Catalog import integration test','approved') returning id`).Scan(&modID); err != nil {
@@ -139,17 +154,18 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		values($1,$2,'test.zip','mcmods-export/v1','0.6.0','1.20.1','forge','{}')`, packageID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); err != nil {
 		t.Fatal(err)
 	}
+	var versionID int64
 	var versionPublicID string
 	if err = tx.QueryRow(context.Background(), `insert into mod_content_versions(mod_id,label,minecraft_versions,loaders,status)
-		values($1,'1.20.1 / forge',array['1.20.1'],array['forge'],'active') returning public_id`, modID).Scan(&versionPublicID); err != nil {
+		values($1,'1.20.1 / forge',array['1.20.1'],array['forge'],'active') returning id,public_id`, modID).Scan(&versionID, &versionPublicID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = tx.Exec(context.Background(), `insert into catalog_import_jobs(id,mod_id,package_id,target_version_public_id,importer_version,status)
-		values($1,$2,$3,$4,$5,'ready')`, jobID, modID, packageID, versionPublicID, modExportImporterVersion); err != nil {
+	if _, err = tx.Exec(context.Background(), `insert into catalog_import_jobs(id,mod_id,package_id,target_version_id,importer_version,status)
+		values($1,$2,$3,$4,$5,'ready')`, jobID, modID, packageID, versionID, modExportImporterVersion); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = tx.Exec(context.Background(), `insert into catalog_import_revisions(id,mod_id,package_id,job_id,target_version_public_id,revision_no,status,minecraft_version,loader,exporter_version,source_namespace,is_active)
-		values($1,$2,$3,$4,$5,1,'ready','1.20.1','forge','0.6.0','minecraft',false)`, revisionID, modID, packageID, jobID, versionPublicID); err != nil {
+	if _, err = tx.Exec(context.Background(), `insert into catalog_import_revisions(id,mod_id,package_id,job_id,target_version_id,revision_no,status,minecraft_version,loader,exporter_version,source_namespace,is_active)
+		values($1,$2,$3,$4,$5,1,'ready','1.20.1','forge','0.6.0','minecraft',false)`, revisionID, modID, packageID, jobID, versionID); err != nil {
 		t.Fatal(err)
 	}
 	categoryRaw := read("recipes/jei/categories.json")
@@ -167,7 +183,122 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	if err = importExportTags(context.Background(), tx, catalogResourceIdentityResolver{}, revisions, read("tags/tags.json")); err != nil {
 		t.Fatal(err)
 	}
+	mark("recipe types and tags")
+	supportedTranslations := make(map[string]map[string]string, len(exportContentLocaleByCode))
+	seenLocales := make(map[string]string)
+	allLocaleCount := 0
+	expectedTranslationValues := 0
+	compressedTranslationBytes := int64(0)
+	for name, file := range files {
+		if !isSupportedExportTranslationFile(name) {
+			continue
+		}
+		value, readErr := readExportZIPFile(file, maxExportJSONSize)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		translation, prepareErr := prepareExportTranslation(name, value)
+		if prepareErr != nil {
+			t.Fatal(prepareErr)
+		}
+		if previousFile, exists := seenLocales[translation.Locale]; exists {
+			t.Fatalf("translation files %s and %s resolve to the same locale %s", previousFile, name, translation.Locale)
+		}
+		seenLocales[translation.Locale] = name
+		allLocaleCount++
+		expectedTranslationValues += len(translation.Values)
+		if _, editable := supportedEditableContentLocales[translation.Locale]; editable {
+			supportedTranslations[translation.Locale] = translation.Values
+		}
+		bundles, compressed, bundleErr := prepareExportLocaleBundles(
+			ossConfigPayload{Prefix: "mcmods"},
+			"prj_test",
+			map[string]string{"minecraft": revisionID},
+			translation,
+		)
+		if bundleErr != nil || len(bundles) != 1 {
+			t.Fatalf("prepare locale bundle %s: bundles=%d error=%v", translation.Locale, len(bundles), bundleErr)
+		}
+		compressedTranslationBytes += int64(len(compressed))
+	}
+	if len(supportedTranslations) != len(exportContentLocaleByCode) {
+		t.Fatalf("expected %d supported in-memory locales, got %d", len(exportContentLocaleByCode), len(supportedTranslations))
+	}
+	if allLocaleCount <= len(supportedTranslations) {
+		t.Fatalf("expected cold locale bundles beyond the %d editable locales, got %d total", len(supportedTranslations), allLocaleCount)
+	}
+	t.Logf("exported_locales=%d in_memory_editable_locales=%d translation_values=%d compressed_bundle_bytes=%d",
+		allLocaleCount, len(supportedTranslations), expectedTranslationValues, compressedTranslationBytes)
+	mark("supported translations")
+	fallbackAssetPaths, err := normalizedExportFallbackAssetPaths(files)
+	if err != nil {
+		t.Fatal(err)
+	}
 	batch := newModExportWriteBatch()
+	registryResourceCount := 0
+	textAssetCount := 0
+	for name, file := range files {
+		if !isExportRegistryFile(name) {
+			continue
+		}
+		value, readErr := readExportZIPFile(file, maxExportJSONSize)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		rows, prepareErr := prepareExportRegistryResources(catalogResourceIdentityResolver{}, revisions, name, value)
+		if prepareErr != nil {
+			t.Fatal(prepareErr)
+		}
+		for _, row := range rows {
+			queueCatalogResource(batch, row)
+		}
+		registryResourceCount += len(rows)
+		if batch.shouldFlush() {
+			if err = batch.flush(context.Background(), tx); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	documentResourceCount := 0
+	for name, file := range files {
+		if exportDocumentKind(name) == "" {
+			continue
+		}
+		value, readErr := readExportZIPFile(file, maxExportJSONSize)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		var document map[string]any
+		if err = json.Unmarshal(value, &document); err != nil {
+			t.Fatal(err)
+		}
+		documentResourceCount += len(exportDocumentEntries(name, document))
+		if err = queueExportDocumentEntries(batch, catalogResourceIdentityResolver{}, revisionID, name, value); err != nil {
+			t.Fatal(err)
+		}
+		if retainExportTextAsset(name, fallbackAssetPaths) {
+			if err = queueExportTextAsset(batch, revisionID, name, value); err != nil {
+				t.Fatal(err)
+			}
+			textAssetCount++
+		}
+	}
+	if err = batch.flush(context.Background(), tx); err != nil {
+		t.Fatal(err)
+	}
+	var persistedTextAssetCount int
+	if err = tx.QueryRow(context.Background(), `select count(*)::int from catalog_import_text_assets where revision_id=$1`, revisionID).Scan(&persistedTextAssetCount); err != nil {
+		t.Fatal(err)
+	}
+	if persistedTextAssetCount != textAssetCount {
+		t.Fatalf("expected %d text assets, got %d", textAssetCount, persistedTextAssetCount)
+	}
+	t.Logf(
+		"staged registry_resources=%d document_resources=%d text_assets=%d catalog_duration=%s text_asset_duration=%s",
+		registryResourceCount, documentResourceCount, textAssetCount,
+		batch.catalogDuration.Round(time.Millisecond), batch.textAssetDuration.Round(time.Millisecond),
+	)
+	mark("catalog document resources")
 	templateDocumentCount := 0
 	expectedTemplateCount := 0
 	var firstTemplateDocument exportJEITemplateCollection
@@ -199,6 +330,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 			}
 		}
 	}
+	mark("recipe templates")
 	expectedRecipeCount := 0
 	for name, file := range files {
 		if len(name) < len("recipes/jei/recipes/") || name[:len("recipes/jei/recipes/")] != "recipes/jei/recipes/" {
@@ -225,6 +357,43 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	if err = batch.flush(context.Background(), tx); err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("batch flushes=%d payload_bytes=%d queued=%s catalog=%s text_assets=%s recipes=%s bindings=%s expected_recipes=%d staged_recipes=%d staged_bindings=%d staged_candidates=%d",
+		batch.flushCount, batch.payloadBytes, batch.queuedDuration.Round(time.Millisecond), batch.catalogDuration.Round(time.Millisecond),
+		batch.textAssetDuration.Round(time.Millisecond), batch.recipeDuration.Round(time.Millisecond), batch.bindingDuration.Round(time.Millisecond), expectedRecipeCount,
+		batch.recipeCount, batch.bindingCount, batch.candidateCount)
+	mark("recipe rows and bindings")
+	blockEntityModels, err := deriveModExportBlockEntityModels(files, catalogResourceIdentityResolver{}, revisions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockBindings, err := deriveModExportBlockBindings(files, catalogResourceIdentityResolver{}, revisions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = persistModExportBlockEntityModels(context.Background(), tx, blockEntityModels); err != nil {
+		t.Fatal(err)
+	}
+	if err = persistModExportBlockBindings(context.Background(), tx, blockBindings); err != nil {
+		t.Fatal(err)
+	}
+	var persistedBlockEntityModels int
+	if err = tx.QueryRow(context.Background(), `select count(*)::int from block_entity_model_snapshots where revision_id=$1`, revisionID).Scan(&persistedBlockEntityModels); err != nil {
+		t.Fatal(err)
+	}
+	if persistedBlockEntityModels != len(blockEntityModels) {
+		t.Fatalf("expected %d block entity models, got %d", len(blockEntityModels), persistedBlockEntityModels)
+	}
+	var persistedBlockBindings int
+	if err = tx.QueryRow(context.Background(), `select count(*)::int from game_resource_asset_bindings binding
+		join resource_import_snapshots snapshot on snapshot.id=binding.snapshot_id
+		where snapshot.revision_id=$1`, revisionID).Scan(&persistedBlockBindings); err != nil {
+		t.Fatal(err)
+	}
+	if persistedBlockBindings != len(blockBindings) {
+		t.Fatalf("expected %d block bindings, got %d", len(blockBindings), persistedBlockBindings)
+	}
+	t.Logf("block_entity_models=%d block_bindings=%d", len(blockEntityModels), len(blockBindings))
+	mark("block model and asset bindings")
 	// The promotion helper is deliberately defensive: even an accidental
 	// caller cannot publish a pending import before the revision is activated.
 	if err = promoteImportedRecipeTemplatesTx(context.Background(), tx, revisionID); err != nil {
@@ -245,19 +414,18 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	if err = promoteImportedRecipeTemplatesTx(context.Background(), tx, revisionID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = tx.Exec(context.Background(), `insert into catalog_import_translations(revision_id,locale,translation_key,value)
-		values($1,'en_us','effect.minecraft.speed','Speed'),($1,'zh_cn','effect.minecraft.speed','速度')`, revisionID); err != nil {
-		t.Fatal(err)
-	}
+	supportedTranslations["en-US"]["effect.minecraft.speed"] = "Speed"
+	supportedTranslations["zh-CN"]["effect.minecraft.speed"] = "速度"
 	if err = importExportIconCatalogResources(context.Background(), tx, catalogResourceIdentityResolver{}, []modExportPNGMedia{
 		{RevisionID: revisionID, AssetPath: "icons/mob_effects/32/minecraft/speed.png"},
 		{RevisionID: revisionID, AssetPath: "icons/mob_effects/256/minecraft/speed.png"},
-	}); err != nil {
+	}, supportedTranslations); err != nil {
 		t.Fatal(err)
 	}
-	if err = syncImportedResourcesToContentVersionTx(context.Background(), tx, []string{revisionID}, versionPublicID, false, 0); err != nil {
+	if err = syncImportedResourcesToContentVersionTx(context.Background(), tx, []string{revisionID}, versionID, false, 0); err != nil {
 		t.Fatalf("sync imported resources into the selected content version: %v", err)
 	}
+	mark("promotion and content-version sync")
 	var effectSectionResources int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int from mod_content_section_resources section_resource
 		join mod_content_sections section on section.id=section_resource.section_id
@@ -268,6 +436,67 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	}
 	if effectSectionResources != 1 {
 		t.Fatalf("normalized icon effect was not attached to the unified content section: got %d", effectSectionResources)
+	}
+	var itemBlockRootsWithSystemCategories int
+	if err = tx.QueryRow(context.Background(), `select count(*)::int from (
+		select root.id
+		from mod_content_sections root
+		join mod_content_templates template on template.id=root.template_id
+		join mod_content_sections child on child.parent_id=root.id
+		  and child.version_id=root.version_id and child.template_id=root.template_id
+		  and child.status='active'
+		where root.version_id=$1 and root.parent_id is null and root.status='active'
+		  and template.code='item_block' and template.builtin
+		group by root.id
+		having count(*) filter(where child.system_key='items')=1
+		   and count(*) filter(where child.system_key='blocks')=1
+	) valid_roots`, versionID).
+		Scan(&itemBlockRootsWithSystemCategories); err != nil {
+		t.Fatal(err)
+	}
+	if itemBlockRootsWithSystemCategories != 1 {
+		t.Fatalf("expected exactly one item/block root with real items and blocks child categories, got %d", itemBlockRootsWithSystemCategories)
+	}
+	var misplacedItemBlockResources int
+	if err = tx.QueryRow(context.Background(), `select count(*)::int
+		from mod_content_section_resources placement
+		join mod_content_sections section on section.id=placement.section_id
+		join mod_content_templates template on template.id=section.template_id
+		where placement.version_id=$1 and template.code='item_block'
+		  and section.system_key not in ('items','blocks')`, versionID).Scan(&misplacedItemBlockResources); err != nil {
+		t.Fatal(err)
+	}
+	if misplacedItemBlockResources != 0 {
+		t.Fatalf("expected every imported item/block placement under its real child category, got %d misplaced rows", misplacedItemBlockResources)
+	}
+	var duplicatedItemBlockIDs int
+	if err = tx.QueryRow(context.Background(), `select count(*)::int from (
+		select resource.canonical_id
+		from mod_content_section_resources placement
+		join mod_content_sections section on section.id=placement.section_id
+		join mod_content_templates template on template.id=section.template_id
+		join game_resources resource on resource.entity_id=placement.resource_id
+		where placement.version_id=$1 and template.code='item_block'
+		group by resource.canonical_id having count(*)>1
+	) duplicates`, versionID).Scan(&duplicatedItemBlockIDs); err != nil {
+		t.Fatal(err)
+	}
+	if duplicatedItemBlockIDs != 0 {
+		t.Fatalf("item/block content still contains %d duplicated canonical IDs", duplicatedItemBlockIDs)
+	}
+	var boundItemAliases int
+	if err = tx.QueryRow(context.Background(), `select count(*)::int
+		from mod_content_section_resources placement
+		join game_resource_asset_bindings binding on binding.item_resource_id=placement.resource_id
+		join resource_import_snapshots block_snapshot on block_snapshot.id=binding.snapshot_id
+		where placement.version_id=$1 and block_snapshot.revision_id=$2
+		  and binding.block_resource_id is not null
+		  and binding.block_resource_id is distinct from binding.item_resource_id`,
+		versionID, revisionID).Scan(&boundItemAliases); err != nil {
+		t.Fatal(err)
+	}
+	if boundItemAliases != 0 {
+		t.Fatalf("item/block content still contains %d item aliases that have authoritative block bindings", boundItemAliases)
 	}
 	var recipeTypes, templates, recipes, alternatives int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int from recipe_type_import_snapshots where revision_id=$1`, revisionID).Scan(&recipeTypes); err != nil {
@@ -322,26 +551,32 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		protectedSource := firstTemplateDocument.Templates[0]
 		typeIdentity := recipeTypeIdentity(firstTemplateDocument.RecipeTypeID)
 		protectedIdentity := catalogEditorIdentityForTemplate(typeIdentity.ID, protectedSource.TemplateID)
+		var protectedInternalID int64
+		var protectedPublicID string
+		if err = tx.QueryRow(context.Background(), `select id,public_id from catalog_entities where identity_key=$1`, protectedIdentity.ID).
+			Scan(&protectedInternalID, &protectedPublicID); err != nil {
+			t.Fatal(err)
+		}
 		var beforeWidth int
 		var beforeDefinition string
-		if err = tx.QueryRow(context.Background(), `select canvas_width,definition::text from recipe_layout_templates where entity_id=$1`, protectedIdentity.ID).
+		if err = tx.QueryRow(context.Background(), `select canvas_width,definition::text from recipe_layout_templates where entity_id=$1`, protectedInternalID).
 			Scan(&beforeWidth, &beforeDefinition); err != nil {
 			t.Fatal(err)
 		}
 		var nextRevisionNumber, humanRevisionID int64
 		if err = tx.QueryRow(context.Background(), `select coalesce(max(revision_no),0)+1 from content_revisions
-			where aggregate_type=$1 and aggregate_key=$2`, catalogAggregateRecipeTemplate, protectedIdentity.ID).Scan(&nextRevisionNumber); err != nil {
+			where aggregate_type=$1 and aggregate_key=$2`, catalogAggregateRecipeTemplate, protectedPublicID).Scan(&nextRevisionNumber); err != nil {
 			t.Fatal(err)
 		}
-		if err = tx.QueryRow(context.Background(), `insert into content_revisions(entity_id,aggregate_type,aggregate_key,revision_no,
-			snapshot,snapshot_hash,source) values($1,$2,$1,$3,'{}'::jsonb,$4,'user') returning id`, protectedIdentity.ID,
-			catalogAggregateRecipeTemplate, nextRevisionNumber, "integration-human-template").Scan(&humanRevisionID); err != nil {
+		if err = tx.QueryRow(context.Background(), `insert into content_revisions(entity_type,entity_id,aggregate_type,aggregate_key,revision_no,
+			snapshot,snapshot_hash,source) values('recipe_template',$1,$2,$3,$4,'{}'::jsonb,$5,'user') returning id`, protectedInternalID,
+			catalogAggregateRecipeTemplate, protectedPublicID, nextRevisionNumber, "integration-human-template").Scan(&humanRevisionID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err = tx.Exec(context.Background(), `update catalog_entities set published_revision_id=$2 where id=$1`, protectedIdentity.ID, humanRevisionID); err != nil {
+		if _, err = tx.Exec(context.Background(), `update catalog_entities set published_revision_id=$2 where id=$1`, protectedInternalID, humanRevisionID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err = tx.Exec(context.Background(), `update recipe_layout_templates set published_revision_id=$2 where entity_id=$1`, protectedIdentity.ID, humanRevisionID); err != nil {
+		if _, err = tx.Exec(context.Background(), `update recipe_layout_templates set published_revision_id=$2 where entity_id=$1`, protectedInternalID, humanRevisionID); err != nil {
 			t.Fatal(err)
 		}
 		canvas, canvasErr := canonicalImportedTemplateCanvas(firstTemplateDocument)
@@ -362,7 +597,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		var afterDefinition string
 		if err = tx.QueryRow(context.Background(), `select template.canvas_width,template.definition::text,
 			(snapshot.canvas->>'width')::int from recipe_layout_templates template
-			join recipe_template_import_snapshots snapshot on snapshot.id=template.import_snapshot_id where template.entity_id=$1`, protectedIdentity.ID).
+			join recipe_template_import_snapshots snapshot on snapshot.id=template.import_snapshot_id where template.entity_id=$1`, protectedInternalID).
 			Scan(&afterWidth, &afterDefinition, &observedWidth); err != nil {
 			t.Fatal(err)
 		}
@@ -377,7 +612,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		count(*) filter(where snapshot.source_id_kind='generated_index')::int,
 		count(*) filter(where (snapshot.source_id_kind in ('minecraft_recipe','jei_category')) <> (recipe.canonical_source_id is not null)
 			or (snapshot.source_id_kind='generated_index' and recipe.canonical_source_id is not null)
-			or recipe.entity_id='')::int
+			or recipe.entity_id is null)::int
 		from recipe_import_snapshots snapshot join recipes recipe on recipe.entity_id=snapshot.recipe_id
 		where snapshot.revision_id=$1`, revisionID).Scan(&canonicalLayouts, &generatedLayouts, &invalidIdentities); err != nil {
 		t.Fatal(err)
@@ -416,4 +651,5 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	if globalTypes < recipeTypes {
 		t.Fatalf("global recipe type query returned %d types, expected at least %d", globalTypes, recipeTypes)
 	}
+	mark("assertions")
 }

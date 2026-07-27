@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -29,7 +29,7 @@ type modContentVersionEdit struct {
 	Loaders           []string `json:"loaders"`
 	ModVersion        string   `json:"modVersion"`
 	Reason            string   `json:"reason"`
-	BaseRevisionID    *int64   `json:"baseRevisionId,omitempty"`
+	BaseRevisionID    *string  `json:"baseRevisionId,omitempty"`
 }
 
 type modContentTemplateEdit struct {
@@ -39,7 +39,7 @@ type modContentTemplateEdit struct {
 	Definition         map[string]any            `json:"definition"`
 	Localizations      []catalogLocalizationEdit `json:"localizations"`
 	Reason             string                    `json:"reason"`
-	BaseRevisionID     *int64                    `json:"baseRevisionId,omitempty"`
+	BaseRevisionID     *string                   `json:"baseRevisionId,omitempty"`
 }
 
 type modContentSectionResourceEdit struct {
@@ -58,26 +58,36 @@ type modContentSectionEdit struct {
 	Localizations    []catalogLocalizationEdit       `json:"localizations"`
 	Resources        []modContentSectionResourceEdit `json:"resources"`
 	Reason           string                          `json:"reason"`
-	BaseRevisionID   *int64                          `json:"baseRevisionId,omitempty"`
+	BaseRevisionID   *string                         `json:"baseRevisionId,omitempty"`
 }
 
 type modContentResourceEdit struct {
-	ResourcePublicID string                    `json:"resourcePublicId"`
-	KindCode         string                    `json:"kindCode"`
-	CanonicalID      string                    `json:"canonicalId"`
-	VersionPublicID  string                    `json:"versionPublicId"`
-	SectionPublicID  *string                   `json:"sectionPublicId,omitempty"`
-	DefaultLocale    string                    `json:"defaultLocale"`
-	Definition       map[string]any            `json:"definition"`
-	Localizations    []catalogLocalizationEdit `json:"localizations"`
-	Reason           string                    `json:"reason"`
-	BaseRevisionID   *int64                    `json:"baseRevisionId,omitempty"`
+	ResourcePublicID   string                    `json:"resourcePublicId"`
+	KindCode           string                    `json:"kindCode"`
+	CanonicalID        string                    `json:"canonicalId"`
+	VersionPublicID    string                    `json:"versionPublicId"`
+	SectionPublicID    *string                   `json:"sectionPublicId,omitempty"`
+	DefaultLocale      string                    `json:"defaultLocale"`
+	Definition         map[string]any            `json:"definition"`
+	IconFilePublicID   *string                   `json:"iconFilePublicId,omitempty"`
+	RenderFilePublicID *string                   `json:"renderFilePublicId,omitempty"`
+	Localizations      []catalogLocalizationEdit `json:"localizations"`
+	Reason             string                    `json:"reason"`
+	BaseRevisionID     *string                   `json:"baseRevisionId,omitempty"`
+}
+
+type modContentResourceLocalizationState struct {
+	Name            string
+	Summary         string
+	ContentMarkdown string
+	Provenance      string
 }
 
 type modContentSnapshot struct {
 	Kind            string                  `json:"kind"`
 	Operation       string                  `json:"operation"`
-	ModID           int64                   `json:"modId"`
+	ModID           int64                   `json:"-"`
+	ModPublicID     string                  `json:"modId"`
 	ModSiteID       string                  `json:"modSiteId"`
 	PublicID        string                  `json:"publicId"`
 	Version         *modContentVersionEdit  `json:"version,omitempty"`
@@ -90,10 +100,10 @@ type modContentSnapshot struct {
 
 type modContentMutationResult struct {
 	PublicID        string `json:"publicId"`
-	RevisionID      int64  `json:"revisionId"`
-	ChangeRequestID int64  `json:"changeRequestId"`
+	RevisionID      string `json:"revisionId"`
+	ChangeRequestID string `json:"changeRequestId"`
 	ReviewStatus    string `json:"reviewStatus"`
-	ActivityEventID int64  `json:"activityEventId"`
+	ActivityEventID string `json:"activityEventId"`
 }
 
 func modContentAggregate(aggregateType string) bool {
@@ -101,6 +111,14 @@ func modContentAggregate(aggregateType string) bool {
 }
 
 func normalizeModContentResourceEdit(edit *modContentResourceEdit) error {
+	return normalizeModContentResourceEditWithPolicy(edit, false)
+}
+
+func normalizeModContentResourceUpdateEdit(edit *modContentResourceEdit) error {
+	return normalizeModContentResourceEditWithPolicy(edit, true)
+}
+
+func normalizeModContentResourceEditWithPolicy(edit *modContentResourceEdit, allowImmutableNonEditableLocales bool) error {
 	edit.ResourcePublicID = strings.ToLower(strings.TrimSpace(edit.ResourcePublicID))
 	edit.KindCode = strings.ToLower(strings.TrimSpace(edit.KindCode))
 	edit.CanonicalID = strings.ToLower(strings.TrimSpace(edit.CanonicalID))
@@ -109,6 +127,15 @@ func normalizeModContentResourceEdit(edit *modContentResourceEdit) error {
 		value := strings.ToLower(strings.TrimSpace(*edit.SectionPublicID))
 		edit.SectionPublicID = &value
 	}
+	for _, filePublicID := range []*string{edit.IconFilePublicID, edit.RenderFilePublicID} {
+		if filePublicID == nil {
+			continue
+		}
+		*filePublicID = strings.ToLower(strings.TrimSpace(*filePublicID))
+		if *filePublicID != "" && !validCatalogPublicID(*filePublicID) {
+			return errCatalogEditorInvalid
+		}
+	}
 	edit.Reason = strings.TrimSpace(edit.Reason)
 	if len(edit.Reason) > 500 || edit.VersionPublicID == "" || (edit.ResourcePublicID == "" && (edit.KindCode == "" || edit.CanonicalID == "")) {
 		return errCatalogEditorInvalid
@@ -116,12 +143,185 @@ func normalizeModContentResourceEdit(edit *modContentResourceEdit) error {
 	if edit.Definition == nil {
 		edit.Definition = map[string]any{}
 	}
-	defaultLocale, localizations, err := normalizeCatalogLocalizations(edit.DefaultLocale, edit.Localizations)
+	if encoded, err := json.Marshal(edit.Definition); err != nil || len(encoded) > 512*1024 {
+		return errCatalogEditorInvalid
+	}
+	defaultLocale, localizations, err := normalizeModContentResourceLocalizations(edit.DefaultLocale, edit.Localizations, allowImmutableNonEditableLocales)
 	if err != nil || requireCatalogCreateDefaultLocalization(defaultLocale, localizations) != nil {
 		return errCatalogEditorInvalid
 	}
 	edit.DefaultLocale, edit.Localizations = defaultLocale, localizations
 	return nil
+}
+
+func normalizeModContentResourceLocalizations(defaultLocale string, localizations []catalogLocalizationEdit, allowNonEditable bool) (string, []catalogLocalizationEdit, error) {
+	if !allowNonEditable {
+		return normalizeCatalogLocalizations(defaultLocale, localizations)
+	}
+	seen := make(map[string]struct{}, len(localizations))
+	for index := range localizations {
+		locale, err := normalizeCatalogLocale(localizations[index].Locale)
+		if err != nil {
+			return "", nil, fmt.Errorf("%w: invalid locale", errCatalogEditorInvalid)
+		}
+		if _, exists := seen[locale]; exists {
+			return "", nil, fmt.Errorf("%w: duplicate locale", errCatalogEditorInvalid)
+		}
+		seen[locale] = struct{}{}
+		localizations[index].Locale = locale
+		if isEditableContentLocale(locale) {
+			localizations[index].Name = strings.TrimSpace(localizations[index].Name)
+			localizations[index].Summary = strings.TrimSpace(localizations[index].Summary)
+			localizations[index].Provenance = "human"
+			localizations[index].SourceLocale = ""
+			editable := true
+			localizations[index].Editable = &editable
+			localizations[index].ReviewStatus = "approved"
+		}
+		if len(localizations[index].Name) > 512 || len(localizations[index].Summary) > 4096 || len(localizations[index].ContentMarkdown) > maxModExportEntryMarkdownBytes {
+			return "", nil, fmt.Errorf("%w: localized content is too large", errCatalogEditorInvalid)
+		}
+	}
+	if strings.TrimSpace(defaultLocale) == "" {
+		defaultLocale = "en-US"
+	}
+	normalizedDefault, err := normalizeCatalogLocale(defaultLocale)
+	if err != nil {
+		return "", nil, fmt.Errorf("%w: invalid default locale", errCatalogEditorInvalid)
+	}
+	return normalizedDefault, localizations, nil
+}
+
+func preserveImmutableModContentResourceLocales(existingDefaultLocale string, existing map[string]modContentResourceLocalizationState, edit *modContentResourceEdit) error {
+	existingDefaultLocale = normalizeContentLocale(existingDefaultLocale)
+	if !isEditableContentLocale(existingDefaultLocale) && edit.DefaultLocale != existingDefaultLocale {
+		return fmt.Errorf("%w: non-editable default locale cannot be changed", errCatalogEditorInvalid)
+	}
+	submitted := make(map[string]int, len(edit.Localizations))
+	for index := range edit.Localizations {
+		localization := &edit.Localizations[index]
+		submitted[localization.Locale] = index
+		if isEditableContentLocale(localization.Locale) {
+			continue
+		}
+		current, exists := existing[localization.Locale]
+		if !exists ||
+			current.Name != localization.Name ||
+			current.Summary != localization.Summary ||
+			current.ContentMarkdown != localization.ContentMarkdown {
+			return fmt.Errorf("%w: non-editable localization cannot be added or changed", errCatalogEditorInvalid)
+		}
+		localization.Provenance = current.Provenance
+		localization.SourceLocale = ""
+		editable := false
+		localization.Editable = &editable
+		localization.ReviewStatus = "approved"
+	}
+	for locale := range existing {
+		if isEditableContentLocale(locale) {
+			continue
+		}
+		if _, exists := submitted[locale]; !exists {
+			return fmt.Errorf("%w: non-editable localization cannot be removed", errCatalogEditorInvalid)
+		}
+	}
+	if !isEditableContentLocale(edit.DefaultLocale) && edit.DefaultLocale != existingDefaultLocale {
+		return fmt.Errorf("%w: non-editable default locale cannot be selected", errCatalogEditorInvalid)
+	}
+	return nil
+}
+
+type modContentResourceStateQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func loadModContentResourceLocalizationState(ctx context.Context, query modContentResourceStateQuerier, resourceID, versionID int64, lock bool) (string, map[string]modContentResourceLocalizationState, error) {
+	detailQuery := `select default_locale from mod_resource_version_details where resource_id=$1 and version_id=$2`
+	localizationQuery := `select locale,name,summary,content_markdown,provenance
+		from mod_resource_version_detail_localizations where resource_id=$1 and version_id=$2`
+	if lock {
+		detailQuery += ` for update`
+		localizationQuery += ` for update`
+	}
+	var defaultLocale string
+	if err := query.QueryRow(ctx, detailQuery, resourceID, versionID).Scan(&defaultLocale); err != nil {
+		return "", nil, err
+	}
+	rows, err := query.Query(ctx, localizationQuery, resourceID, versionID)
+	if err != nil {
+		return "", nil, err
+	}
+	defer rows.Close()
+	localizations := make(map[string]modContentResourceLocalizationState)
+	for rows.Next() {
+		var locale string
+		var localization modContentResourceLocalizationState
+		if err = rows.Scan(&locale, &localization.Name, &localization.Summary, &localization.ContentMarkdown, &localization.Provenance); err != nil {
+			return "", nil, err
+		}
+		localizations[normalizeContentLocale(locale)] = localization
+	}
+	if err = rows.Err(); err != nil {
+		return "", nil, err
+	}
+	return normalizeContentLocale(defaultLocale), localizations, nil
+}
+
+func reserveModContentResourceDetailTx(ctx context.Context, tx pgx.Tx, resourceID, versionID, modID int64, defaultLocale string, definition []byte, iconFileID, renderFileID *int64, actorID int64) error {
+	var reservedResourceID int64
+	err := tx.QueryRow(ctx, `insert into mod_resource_version_details(resource_id,version_id,default_locale,definition,icon_file_id,render_file_id,status,created_by,updated_by)
+		values($1,$2,$3,$4::jsonb,$5,$6,'pending',$7,$7)
+		on conflict(resource_id,version_id) do update set
+			default_locale=excluded.default_locale,
+			definition=excluded.definition,
+			icon_file_id=excluded.icon_file_id,
+			render_file_id=excluded.render_file_id,
+			status='pending',
+			published_revision_id=null,
+			updated_by=excluded.updated_by,
+			updated_at=now()
+		where mod_resource_version_details.status='archived'
+		  and exists(select 1 from mod_resource_bindings binding
+			where binding.resource_id=excluded.resource_id and binding.mod_id=$8)
+		returning resource_id`, resourceID, versionID, defaultLocale, string(definition), iconFileID, renderFileID, actorID, modID).Scan(&reservedResourceID)
+	if err != nil {
+		return err
+	}
+	if reservedResourceID != resourceID {
+		return errCatalogEditorInvalid
+	}
+	_, err = tx.Exec(ctx, `delete from mod_resource_version_detail_localizations where resource_id=$1 and version_id=$2`, resourceID, versionID)
+	return err
+}
+
+type modContentImageQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func resolveModContentImageFileID(ctx context.Context, query modContentImageQuerier, filePublicID *string, actorID, resourceID, versionID int64, trustedSnapshot bool) (*int64, error) {
+	if filePublicID == nil || strings.TrimSpace(*filePublicID) == "" {
+		return nil, nil
+	}
+	var fileID int64
+	err := query.QueryRow(ctx, `select file.id
+		from oss_files file
+		where file.public_id=$1 and file.status='active'
+		  and file.scan_status in ('clean','trusted_generated')
+		  and lower(split_part(file.content_type,';',1)) in ('image/png','image/jpeg','image/webp','image/gif','image/apng')
+		  and ($2 or file.uploader_id=$3 or exists(
+			select 1 from mod_resource_version_details detail
+			where detail.resource_id=$4 and detail.version_id=$5
+			  and (detail.icon_file_id=file.id or detail.render_file_id=file.id)
+		  ))`,
+		*filePublicID, trustedSnapshot, actorID, resourceID, versionID).Scan(&fileID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errCatalogEditorReference
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &fileID, nil
 }
 
 func normalizeStringList(values []string, maximum int) ([]string, error) {
@@ -334,7 +534,8 @@ func (s *Server) modContentVersions(w http.ResponseWriter, r *http.Request) {
 	}
 	includePending := canEditMod(currentClaims(r), identity) || hasPermission(currentClaims(r).Permissions, "content.review")
 	rows, err := s.db.Query(r.Context(), `select public_id,label,minecraft_versions,loaders,mod_version,status,
-		published_revision_id,created_at,updated_at from mod_content_versions where mod_id=$1 and ($2 or status='active')
+		(select revision.public_id from content_revisions revision where revision.id=mod_content_versions.published_revision_id),
+		created_at,updated_at from mod_content_versions where mod_id=$1 and ($2 or status='active')
 		order by status='active' desc,updated_at desc,id desc`, identity.ID, includePending)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read mod content versions")
@@ -345,7 +546,7 @@ func (s *Server) modContentVersions(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var publicID, label, modVersion, status string
 		var minecraftVersions, loaders []string
-		var publishedRevisionID *int64
+		var publishedRevisionID *string
 		var createdAt, updatedAt time.Time
 		if err = rows.Scan(&publicID, &label, &minecraftVersions, &loaders, &modVersion, &status, &publishedRevisionID, &createdAt, &updatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode mod content versions")
@@ -392,7 +593,8 @@ func (s *Server) modContentVersion(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if !sameRevision(edit.BaseRevisionID, publishedRevisionID) {
+	requestedBaseRevisionID, baseErr := resolveRevisionPublicID(r.Context(), s.db, edit.BaseRevisionID)
+	if baseErr != nil || !sameRevision(requestedBaseRevisionID, publishedRevisionID) {
 		writeError(w, http.StatusConflict, "mod content version changed; reload the editor")
 		return
 	}
@@ -442,6 +644,8 @@ func (s *Server) submitExistingModContentMutation(w http.ResponseWriter, r *http
 }
 
 func (s *Server) createModContentRevisionTx(r *http.Request, tx pgx.Tx, identity modIdentityRecord, snapshot modContentSnapshot, baseRevisionID *int64) (modContentMutationResult, error) {
+	snapshot.ModID = identity.ID
+	snapshot.ModPublicID = identity.UniqueID
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
 		return modContentMutationResult{}, err
@@ -473,14 +677,21 @@ func (s *Server) createModContentRevisionTx(r *http.Request, tx pgx.Tx, identity
 	} else if snapshot.Resource != nil && snapshot.Resource.Reason != "" {
 		reason = snapshot.Resource.Reason
 	}
-	aggregateKey := snapshot.PublicID
-	if snapshot.Kind == "resource" && snapshot.Resource != nil {
-		aggregateKey += ":" + snapshot.Resource.VersionPublicID
+	aggregateKey := modContentSnapshotAggregateKey(snapshot)
+	entityType := aggregateType
+	if snapshot.Kind == "resource" {
+		entityType = "resource"
+	}
+	var entityID int64
+	if err = tx.QueryRow(r.Context(), `select internal_id from public_routes where public_id=$1 and entity_type=$2`,
+		snapshot.PublicID, entityType).Scan(&entityID); err != nil {
+		return modContentMutationResult{}, fmt.Errorf("resolve mod content public identity: %w", err)
 	}
 	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
+		EntityType: entityType, EntityID: entityID,
 		AggregateType: aggregateType, AggregateKey: aggregateKey, BaseRevision: baseRevisionID, Snapshot: raw,
 		Reason: reason, ActorID: claims.Subject, Source: "user", Status: status,
-		Metadata: map[string]any{"kind": snapshot.Kind, "operation": snapshot.Operation, "modId": identity.ID, "siteId": identity.SiteID, "publicId": snapshot.PublicID}, Request: r,
+		Metadata: map[string]any{"kind": snapshot.Kind, "operation": snapshot.Operation, "modId": identity.UniqueID, "siteId": identity.SiteID, "publicId": snapshot.PublicID}, Request: r,
 	})
 	if err != nil {
 		return modContentMutationResult{}, err
@@ -501,7 +712,15 @@ func (s *Server) createModContentRevisionTx(r *http.Request, tx pgx.Tx, identity
 		return modContentMutationResult{}, err
 	}
 	skipRequestActivity(r)
-	return modContentMutationResult{PublicID: snapshot.PublicID, RevisionID: created.RevisionID, ChangeRequestID: created.ChangeRequestID, ReviewStatus: status, ActivityEventID: activityID}, nil
+	return modContentMutationResult{PublicID: snapshot.PublicID, RevisionID: created.RevisionPublicID, ChangeRequestID: created.ChangeRequestPublicID, ReviewStatus: status, ActivityEventID: activityID}, nil
+}
+
+func modContentSnapshotAggregateKey(snapshot modContentSnapshot) string {
+	aggregateKey := snapshot.PublicID
+	if snapshot.Kind == "resource" && snapshot.Resource != nil {
+		aggregateKey += ":" + snapshot.Resource.VersionPublicID
+	}
+	return aggregateKey
 }
 
 func modContentReviewRequired(config reviewConfig, snapshot modContentSnapshot) bool {
@@ -520,22 +739,22 @@ func modContentReviewRequired(config reviewConfig, snapshot modContentSnapshot) 
 	return config.CatalogEdit
 }
 
-func insertModContentActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, snapshot modContentSnapshot, created createdContentRevision, reviewStatus string) (int64, error) {
+func insertModContentActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, snapshot modContentSnapshot, created createdContentRevision, reviewStatus string) (string, error) {
 	actionID := activity.ActionEdit
 	if snapshot.Operation == "create" {
 		actionID = activity.ActionCreate
 	} else if snapshot.Operation == "delete" {
 		actionID = activity.ActionDelete
 	}
-	metadata, err := json.Marshal(map[string]any{"revisionId": created.RevisionID, "changeRequestId": created.ChangeRequestID,
-		"kind": snapshot.Kind, "operation": snapshot.Operation, "reviewStatus": reviewStatus, "modId": snapshot.ModID})
+	metadata, err := json.Marshal(map[string]any{"revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID,
+		"kind": snapshot.Kind, "operation": snapshot.Operation, "reviewStatus": reviewStatus, "modPublicId": snapshot.ModPublicID})
 	if err != nil {
-		return 0, err
+		return "", err
 	}
-	var id int64
+	var publicID string
 	err = tx.QueryRow(ctx, `insert into user_activity_events(user_id,action_id,object_type_id,object_public_id,metadata,occurred_at)
-		values($1,$2,$3,$4,$5::jsonb,$6) returning id`, actorID, actionID, activity.ObjectMod, snapshot.PublicID, string(metadata), time.Now().UTC()).Scan(&id)
-	return id, err
+		values($1,$2,$3,$4,$5::jsonb,$6) returning public_id`, actorID, actionID, activity.ObjectMod, snapshot.PublicID, string(metadata), time.Now().UTC()).Scan(&publicID)
+	return publicID, err
 }
 
 func (s *Server) requireEditableMod(w http.ResponseWriter, r *http.Request) (modIdentityRecord, bool) {
@@ -570,7 +789,8 @@ func (s *Server) modContentTemplates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `select template.public_id,template.code,template.builtin,template.i18n_key,template.default_locale,
-		template.default_display_mode,template.definition,template.status,template.published_revision_id,
+		template.default_display_mode,template.definition,template.status,
+		(select revision.public_id from content_revisions revision where revision.id=template.published_revision_id),
 		coalesce((select jsonb_agg(jsonb_build_object('locale',localization.locale,'name',localization.name,'summary',localization.description,'contentMarkdown','') order by localization.locale)
 		 from mod_content_template_localizations localization where localization.template_id=template.id),'[]'::jsonb)
 		from mod_content_templates template where template.builtin or (template.owner_mod_id=$1 and template.status='active')
@@ -585,7 +805,7 @@ func (s *Server) modContentTemplates(w http.ResponseWriter, r *http.Request) {
 		var publicID, code, i18nKey, defaultLocale, displayMode, status string
 		var builtin bool
 		var definition, localizations []byte
-		var revisionID *int64
+		var revisionID *string
 		if err = rows.Scan(&publicID, &code, &builtin, &i18nKey, &defaultLocale, &displayMode, &definition, &status, &revisionID, &localizations); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode content templates")
 			return
@@ -648,7 +868,8 @@ func (s *Server) modContentTemplate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "invalid content template")
 		return
 	}
-	if !sameRevision(edit.BaseRevisionID, publishedRevisionID) {
+	requestedBaseRevisionID, baseErr := resolveRevisionPublicID(r.Context(), s.db, edit.BaseRevisionID)
+	if baseErr != nil || !sameRevision(requestedBaseRevisionID, publishedRevisionID) {
 		writeError(w, http.StatusConflict, "content template changed; reload the editor")
 		return
 	}
@@ -656,11 +877,13 @@ func (s *Server) modContentTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) modContentSections(w http.ResponseWriter, r *http.Request) {
-	identity, ok := s.requireEditableMod(w, r)
-	if !ok {
-		return
-	}
+	var identity modIdentityRecord
 	if r.Method == http.MethodPost {
+		var ok bool
+		identity, ok = s.requireEditableMod(w, r)
+		if !ok {
+			return
+		}
 		var edit modContentSectionEdit
 		if decodeJSON(r, &edit) != nil || edit.BaseRevisionID != nil || normalizeModContentSectionEdit(&edit) != nil {
 			writeError(w, http.StatusUnprocessableEntity, "invalid content section")
@@ -673,9 +896,20 @@ func (s *Server) modContentSections(w http.ResponseWriter, r *http.Request) {
 		s.submitNewModContentSection(w, r, identity, edit)
 		return
 	}
+	var err error
+	identity, err = s.modIdentity(r.Context(), r.PathValue("siteId"))
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "mod not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read mod")
+		return
+	}
 	rows, err := s.db.Query(r.Context(), `select section.public_id,version.public_id,template.public_id,template.code,template.builtin,template.i18n_key,
-		coalesce(parent.public_id,''),section.default_locale,section.display_mode,
-		section.ordinal,section.status,section.published_revision_id,
+		coalesce(parent.public_id,''),section.system_key,section.default_locale,section.display_mode,
+		section.ordinal,section.status,
+		(select revision.public_id from content_revisions revision where revision.id=section.published_revision_id),
 		coalesce((select jsonb_agg(jsonb_build_object('locale',localization.locale,'name',localization.name,'summary',localization.description,'contentMarkdown','') order by localization.locale)
 		 from mod_content_section_localizations localization where localization.section_id=section.id),'[]'::jsonb),
 		coalesce((with recursive subtree as (
@@ -685,7 +919,8 @@ func (s *Server) modContentSections(w http.ResponseWriter, r *http.Request) {
 		from mod_content_sections section join mod_content_versions version on version.id=section.version_id
 		join mod_content_templates template on template.id=section.template_id
 		left join mod_content_sections parent on parent.id=section.parent_id
-		where section.mod_id=$1 and section.status='active' order by section.ordinal,section.id`, identity.ID)
+		where section.mod_id=$1 and section.status='active' and version.status='active'
+		order by section.ordinal,section.id`, identity.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read content sections")
 		return
@@ -693,17 +928,17 @@ func (s *Server) modContentSections(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var publicID, versionPublicID, templatePublicID, templateCode, templateI18nKey, parentPublicID, defaultLocale, displayMode, status string
+		var publicID, versionPublicID, templatePublicID, templateCode, templateI18nKey, parentPublicID, systemKey, defaultLocale, displayMode, status string
 		var templateBuiltin bool
 		var ordinal, resourceCount int
-		var revisionID *int64
+		var revisionID *string
 		var localizations []byte
-		if err = rows.Scan(&publicID, &versionPublicID, &templatePublicID, &templateCode, &templateBuiltin, &templateI18nKey, &parentPublicID, &defaultLocale, &displayMode, &ordinal, &status, &revisionID, &localizations, &resourceCount); err != nil {
+		if err = rows.Scan(&publicID, &versionPublicID, &templatePublicID, &templateCode, &templateBuiltin, &templateI18nKey, &parentPublicID, &systemKey, &defaultLocale, &displayMode, &ordinal, &status, &revisionID, &localizations, &resourceCount); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode content sections")
 			return
 		}
 		items = append(items, map[string]any{"publicId": publicID, "versionPublicId": versionPublicID, "templatePublicId": templatePublicID,
-			"templateCode": templateCode, "templateBuiltin": templateBuiltin, "templateI18nKey": templateI18nKey, "parentPublicId": parentPublicID, "defaultLocale": defaultLocale,
+			"templateCode": templateCode, "templateBuiltin": templateBuiltin, "templateI18nKey": templateI18nKey, "parentPublicId": parentPublicID, "systemKey": systemKey, "defaultLocale": defaultLocale,
 			"displayMode": displayMode, "ordinal": ordinal, "status": status, "publishedRevisionId": revisionID,
 			"localizations": json.RawMessage(localizations), "resourceCount": resourceCount})
 	}
@@ -711,41 +946,54 @@ func (s *Server) modContentSections(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Request) {
-	identity, ok := s.requireEditableMod(w, r)
-	if !ok {
+	identity, err := s.modIdentity(r.Context(), r.PathValue("siteId"))
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "mod not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read mod")
 		return
 	}
 	sectionPublicID := strings.ToLower(strings.TrimSpace(r.PathValue("sectionId")))
 	primary, secondary := s.requestContentLocales(r)
+	if requestedLocale := normalizeContentLocale(r.URL.Query().Get("locale")); requestedLocale != "" {
+		primary = requestedLocale
+	}
 	localeCandidates := []string{strings.ToLower(normalizeContentLocale(primary)), strings.ToLower(normalizeContentLocale(secondary)), "en", "en-us", "zh-cn", "zh-tw"}
 	// Advancement boards need the complete parent graph in one response. The
 	// public UI still requests 120 rows for ordinary sections, while explicitly
 	// requesting the larger bound only for the dedicated tree presentation.
 	limit := boundedLimit(r.URL.Query().Get("limit"), 120, maxModContentResources)
 	offset, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("offset")))
+	if r.URL.Query().Get("all") == "1" {
+		limit = maxModContentResources
+		offset = 0
+	}
 	if offset < 0 {
 		offset = 0
 	}
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 
 	var sectionID, versionID int64
-	var publicID, versionPublicID, versionLabel, templatePublicID, templateCode, templateI18nKey, parentPublicID, defaultLocale, displayMode, status string
+	var publicID, versionPublicID, versionLabel, templatePublicID, templateCode, templateI18nKey, parentPublicID, systemKey, defaultLocale, displayMode, status string
 	var templateBuiltin bool
 	var ordinal int
-	var revisionID *int64
+	var revisionID *string
 	var localizations []byte
-	err := s.db.QueryRow(r.Context(), `select section.id,section.version_id,section.public_id,version.public_id,version.label,
-		template.public_id,template.code,template.builtin,template.i18n_key,coalesce(parent.public_id,''),section.default_locale,
-		section.display_mode,section.ordinal,section.status,section.published_revision_id,
+	err = s.db.QueryRow(r.Context(), `select section.id,section.version_id,section.public_id,version.public_id,version.label,
+		template.public_id,template.code,template.builtin,template.i18n_key,coalesce(parent.public_id,''),section.system_key,section.default_locale,
+		section.display_mode,section.ordinal,section.status,
+		(select revision.public_id from content_revisions revision where revision.id=section.published_revision_id),
 		coalesce((select jsonb_agg(jsonb_build_object('locale',localization.locale,'name',localization.name,
 		 'summary',localization.description,'contentMarkdown','') order by localization.locale)
 		 from mod_content_section_localizations localization where localization.section_id=section.id),'[]'::jsonb)
 		from mod_content_sections section join mod_content_versions version on version.id=section.version_id
 		join mod_content_templates template on template.id=section.template_id
 		left join mod_content_sections parent on parent.id=section.parent_id
-		where section.mod_id=$1 and section.public_id=$2 and section.status='active'`, identity.ID, sectionPublicID).
+		where section.mod_id=$1 and section.public_id=$2 and section.status='active' and version.status='active'`, identity.ID, sectionPublicID).
 		Scan(&sectionID, &versionID, &publicID, &versionPublicID, &versionLabel, &templatePublicID, &templateCode,
-			&templateBuiltin, &templateI18nKey, &parentPublicID, &defaultLocale, &displayMode, &ordinal, &status, &revisionID, &localizations)
+			&templateBuiltin, &templateI18nKey, &parentPublicID, &systemKey, &defaultLocale, &displayMode, &ordinal, &status, &revisionID, &localizations)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "content section not found")
 		return
@@ -764,12 +1012,15 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 		select count(*)::int from subtree
 		join mod_content_section_resources section_resource on section_resource.section_id=subtree.id
 		join game_resources resource on resource.entity_id=section_resource.resource_id
+		join catalog_entities entity on entity.id=resource.entity_id and entity.status='active' and entity.archived_at is null
 		where section_resource.version_id=$2 and ($3='' or resource.canonical_id ilike '%'||$3||'%'
 		 or exists(select 1 from mod_resource_version_detail_localizations localization
+		  join mod_resource_version_details active_detail on active_detail.resource_id=localization.resource_id
+		   and active_detail.version_id=localization.version_id and active_detail.status='active'
 		  where localization.resource_id=section_resource.resource_id and localization.version_id=$2 and localization.name ilike '%'||$3||'%')
 		 or exists(select 1 from resource_import_snapshots snapshot join catalog_import_revisions revision on revision.id=snapshot.revision_id
-		  where snapshot.resource_id=section_resource.resource_id and revision.target_version_public_id=$4 and revision.is_active
-		   and snapshot.names::text ilike '%'||$3||'%'))`, sectionID, versionID, query, versionPublicID).Scan(&total)
+		  where snapshot.resource_id=section_resource.resource_id and revision.target_version_id=$2 and revision.is_active
+		   and snapshot.names::text ilike '%'||$3||'%'))`, sectionID, versionID, query).Scan(&total)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count content section resources")
 		return
@@ -782,10 +1033,10 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 			from mod_content_sections child join subtree parent on child.parent_id=parent.id where child.status='active'
 		)
 		select entity.public_id,resource.kind_code,resource.canonical_id,subtree.public_id,section_resource.ordinal,
-		coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(detail.icon_file_id,0),
+		coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(icon_file.public_id,''),
 		coalesce(nullif(version_names.names,'{}'::jsonb),nullif((select jsonb_object_agg(name.key,name.value)
 		 from jsonb_each_text(coalesce(imported.names,'{}'::jsonb)) name
-		 where replace(lower(name.key),'_','-')=any($4::text[])),'{}'::jsonb),'{}'::jsonb),
+		 where replace(lower(name.key),'_','-')=any($3::text[])),'{}'::jsonb),'{}'::jsonb),
 		case when resource.kind_code='minecraft.advancement' then jsonb_strip_nulls(jsonb_build_object(
 		 'parent',effective.data->'parent','display',jsonb_strip_nulls(jsonb_build_object(
 		  'x',effective.data#>'{display,x}','y',effective.data#>'{display,y}','frame',effective.data#>'{display,frame}')))) else '{}'::jsonb end
@@ -793,21 +1044,26 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 		join catalog_entities entity on entity.id=section_resource.resource_id
 		join game_resources resource on resource.entity_id=section_resource.resource_id
 		left join mod_resource_version_details detail on detail.resource_id=section_resource.resource_id and detail.version_id=$2 and detail.status='active'
+		left join oss_files icon_file on icon_file.id=detail.icon_file_id and icon_file.status='active'
+		 and icon_file.scan_status in ('clean','trusted_generated')
 		left join lateral (select snapshot.revision_id,snapshot.icon_path,snapshot.names,snapshot.data from resource_import_snapshots snapshot
 		 join catalog_import_revisions revision on revision.id=snapshot.revision_id
-		 where snapshot.resource_id=section_resource.resource_id and revision.target_version_public_id=$3 and revision.is_active
+		 where snapshot.resource_id=section_resource.resource_id and revision.target_version_id=$2 and revision.is_active
 		 order by (snapshot.icon_path<>'') desc,revision.created_at desc limit 1) imported on true
 		left join lateral (select case when detail.definition is not null and detail.definition<>'{}'::jsonb
 		 then detail.definition else coalesce(imported.data,'{}'::jsonb) end data) effective on true
 		left join lateral (select jsonb_object_agg(localization.locale,localization.name) names
 		 from mod_resource_version_detail_localizations localization
-		 where localization.resource_id=section_resource.resource_id and localization.version_id=$2
-		  and coalesce(localization.name,'')<>'' and replace(lower(localization.locale),'_','-')=any($4::text[])) version_names on true
-		where section_resource.version_id=$2 and ($5='' or resource.canonical_id ilike '%'||$5||'%'
+		 where detail.resource_id is not null and localization.resource_id=section_resource.resource_id and localization.version_id=$2
+		  and coalesce(localization.name,'')<>'' and replace(lower(localization.locale),'_','-')=any($3::text[])) version_names on true
+		where section_resource.version_id=$2 and entity.status='active' and entity.archived_at is null
+		 and ($4='' or resource.canonical_id ilike '%'||$4||'%'
 		 or exists(select 1 from mod_resource_version_detail_localizations localization
-		  where localization.resource_id=section_resource.resource_id and localization.version_id=$2 and localization.name ilike '%'||$5||'%')
-		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$5||'%')
-		order by subtree.sort_path,section_resource.ordinal,resource.canonical_id limit $6 offset $7`, sectionID, versionID, versionPublicID, localeCandidates, query, limit, offset)
+		  join mod_resource_version_details active_detail on active_detail.resource_id=localization.resource_id
+		   and active_detail.version_id=localization.version_id and active_detail.status='active'
+		  where localization.resource_id=section_resource.resource_id and localization.version_id=$2 and localization.name ilike '%'||$4||'%')
+		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$4||'%')
+		order by subtree.sort_path,section_resource.ordinal,resource.canonical_id limit $5 offset $6`, sectionID, versionID, localeCandidates, query, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read content section resources")
 		return
@@ -815,9 +1071,8 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 	defer rows.Close()
 	resources := make([]map[string]any, 0, min(limit, total))
 	for rows.Next() {
-		var resourcePublicID, kindCode, canonicalID, resourceSectionPublicID, sourceRevisionID, iconPath string
+		var resourcePublicID, kindCode, canonicalID, resourceSectionPublicID, sourceRevisionID, iconPath, iconFileID string
 		var resourceOrdinal int
-		var iconFileID int64
 		var names, definition []byte
 		if err = rows.Scan(&resourcePublicID, &kindCode, &canonicalID, &resourceSectionPublicID, &resourceOrdinal, &sourceRevisionID, &iconPath, &iconFileID, &names, &definition); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode content section resources")
@@ -834,7 +1089,7 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 	}
 	section := map[string]any{"publicId": publicID, "versionPublicId": versionPublicID, "templatePublicId": templatePublicID,
 		"templateCode": templateCode, "templateBuiltin": templateBuiltin, "templateI18nKey": templateI18nKey,
-		"parentPublicId": parentPublicID, "defaultLocale": defaultLocale, "displayMode": displayMode, "ordinal": ordinal,
+		"parentPublicId": parentPublicID, "systemKey": systemKey, "defaultLocale": defaultLocale, "displayMode": displayMode, "ordinal": ordinal,
 		"status": status, "publishedRevisionId": revisionID, "localizations": json.RawMessage(localizations),
 		"resourceCount": total}
 	writeJSON(w, http.StatusOK, map[string]any{"section": section, "versionLabel": versionLabel, "categories": categories, "items": resources, "total": total, "limit": limit, "offset": offset})
@@ -917,7 +1172,8 @@ func (s *Server) modContentSection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "content section cannot be its own parent")
 		return
 	}
-	if !sameRevision(edit.BaseRevisionID, publishedRevisionID) {
+	requestedBaseRevisionID, baseErr := resolveRevisionPublicID(r.Context(), s.db, edit.BaseRevisionID)
+	if baseErr != nil || !sameRevision(requestedBaseRevisionID, publishedRevisionID) {
 		writeError(w, http.StatusConflict, "content section changed; reload the editor")
 		return
 	}
@@ -940,15 +1196,25 @@ func (s *Server) modContentResources(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.db.Query(r.Context(), `select entity.public_id,resource.kind_code,resource.canonical_id,
 		coalesce((select jsonb_agg(jsonb_build_object('versionPublicId',version.public_id,'defaultLocale',detail.default_locale,
-		'definition',detail.definition,'status',detail.status,'publishedRevisionId',detail.published_revision_id,
+		'sectionPublicId',coalesce((select section.public_id from mod_content_section_resources member
+		 join mod_content_sections section on section.id=member.section_id and section.version_id=member.version_id
+		 where member.resource_id=resource.entity_id and member.version_id=version.id and section.status='active'
+		 order by section.ordinal,section.id limit 1),''),
+		'definition',detail.definition,'status',detail.status,'publishedRevisionId',
+		(select revision.public_id from content_revisions revision where revision.id=detail.published_revision_id),
+		'iconFilePublicId',coalesce((select file.public_id from oss_files file where file.id=detail.icon_file_id and file.status='active'
+		 and file.scan_status in ('clean','trusted_generated')),''),
+		'renderFilePublicId',coalesce((select file.public_id from oss_files file where file.id=detail.render_file_id and file.status='active'
+		 and file.scan_status in ('clean','trusted_generated')),''),
 		'localizations',coalesce((select jsonb_agg(jsonb_build_object('locale',localization.locale,'name',localization.name,
 		'summary',localization.summary,'contentMarkdown',localization.content_markdown,'provenance',localization.provenance)
 		order by localization.locale) from mod_resource_version_detail_localizations localization
 		where localization.resource_id=resource.entity_id and localization.version_id=version.id),'[]'::jsonb)) order by version.updated_at desc)
-		from mod_resource_version_details detail join mod_content_versions version on version.id=detail.version_id
+		from mod_resource_version_details detail join mod_content_versions version on version.id=detail.version_id and version.status='active'
 		where detail.resource_id=resource.entity_id and detail.status='active'),'[]'::jsonb)
 		from mod_resource_bindings binding join game_resources resource on resource.entity_id=binding.resource_id
 		join catalog_entities entity on entity.id=resource.entity_id where binding.mod_id=$1
+		and entity.status='active' and entity.archived_at is null
 		and exists(select 1 from mod_resource_version_details detail where detail.resource_id=binding.resource_id and detail.status='active')
 		order by resource.updated_at desc`, identity.ID)
 	if err != nil {
@@ -977,7 +1243,8 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	defer tx.Rollback(r.Context())
-	resourceID, publicID := "", edit.ResourcePublicID
+	var resourceID int64
+	publicID := edit.ResourcePublicID
 	createdIdentity := false
 	var validKind bool
 	if err = tx.QueryRow(r.Context(), `select exists(select 1 from resource_kinds where code=$1 and user_visible)`, edit.KindCode).Scan(&validKind); err != nil || !validKind {
@@ -996,23 +1263,25 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		resolved := resolver.resolve(edit.KindCode, edit.CanonicalID)
-		resourceID, publicID = resolved.ID, resolved.PublicID
-		inserted, insertErr := tx.Exec(r.Context(), `insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'resource','placeholder') on conflict(id) do nothing`, resourceID, publicID)
-		err = insertErr
+		publicID = resolved.PublicID
+		var entityStatus string
+		err = tx.QueryRow(r.Context(), `insert into catalog_entities(identity_key,public_id,entity_type,status)
+			values($1,$2,'resource','placeholder')
+			on conflict(identity_key) do update set updated_at=catalog_entities.updated_at
+			returning id,public_id,status`, resolved.ID, publicID).Scan(&resourceID, &publicID, &entityStatus)
 		if err == nil {
-			createdIdentity = inserted.RowsAffected() == 1
+			createdIdentity = entityStatus == "placeholder"
 			_, err = tx.Exec(r.Context(), `insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path,owner_mod_id,resolved)
 				values($1,$2,$3,$4,$5,$6,true) on conflict(entity_id) do nothing`, resourceID, edit.KindCode, resolved.CanonicalID, resolved.Namespace, resolved.ResourcePath, identity.ID)
 		}
 		if err == nil {
-			var entityStatus string
 			err = tx.QueryRow(r.Context(), `select entity.public_id,entity.status from catalog_entities entity join game_resources resource on resource.entity_id=entity.id
 				where entity.id=$1 and entity.entity_type='resource' and resource.kind_code=$2 and resource.canonical_id=$3
 				and (resource.owner_mod_id=$4 or resource.owner_mod_id is null)`, resourceID, edit.KindCode, resolved.CanonicalID, identity.ID).Scan(&publicID, &entityStatus)
 			createdIdentity = createdIdentity || entityStatus == "placeholder"
 		}
 	}
-	if err != nil || resourceID == "" {
+	if err != nil || resourceID <= 0 {
 		writeError(w, http.StatusUnprocessableEntity, "resource identity is unavailable for this mod")
 		return
 	}
@@ -1034,10 +1303,25 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusConflict, "resource identity belongs to another mod")
 		return
 	}
+	actorID := currentClaims(r).Subject
+	iconFileID, err := resolveModContentImageFileID(r.Context(), tx, edit.IconFilePublicID, actorID, resourceID, versionID, false)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "resource icon is unavailable")
+		return
+	}
+	renderFileID, err := resolveModContentImageFileID(r.Context(), tx, edit.RenderFilePublicID, actorID, resourceID, versionID, false)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "resource render image is unavailable")
+		return
+	}
 	definition, _ := json.Marshal(edit.Definition)
-	if _, err = tx.Exec(r.Context(), `insert into mod_resource_version_details(resource_id,version_id,default_locale,definition,status,created_by,updated_by)
-		values($1,$2,$3,$4::jsonb,'pending',$5,$5)`, resourceID, versionID, edit.DefaultLocale, string(definition), currentClaims(r).Subject); err != nil {
+	err = reserveModContentResourceDetailTx(r.Context(), tx, resourceID, versionID, identity.ID, edit.DefaultLocale, definition, iconFileID, renderFileID, actorID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusConflict, "this resource already has detail content for the selected version")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to reserve resource detail")
 		return
 	}
 	edit.ResourcePublicID = publicID
@@ -1051,36 +1335,76 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
-	identity, ok := s.requireEditableMod(w, r)
-	if !ok {
-		return
+	var identity modIdentityRecord
+	if r.Method == http.MethodGet {
+		var err error
+		identity, err = s.modIdentity(r.Context(), r.PathValue("siteId"))
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "mod not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read mod")
+			return
+		}
+	} else {
+		var ok bool
+		identity, ok = s.requireEditableMod(w, r)
+		if !ok {
+			return
+		}
 	}
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("resourceId")))
 	if r.Method == http.MethodGet {
-		var entityID, kindCode, canonicalID string
+		var entityID int64
+		var kindCode, canonicalID string
 		var details []byte
+		claims := currentClaims(r)
+		canPreviewInactive := canEditMod(claims, identity) || hasPermission(claims.Permissions, "content.review")
 		if err := s.db.QueryRow(r.Context(), `select resource.entity_id,resource.kind_code,resource.canonical_id,
 			coalesce((select jsonb_agg(jsonb_build_object('versionPublicId',version.public_id,'defaultLocale',detail.default_locale,
-			'definition',detail.definition,'status',detail.status,'publishedRevisionId',detail.published_revision_id,
+			'sectionPublicId',coalesce((select section.public_id from mod_content_section_resources member
+			 join mod_content_sections section on section.id=member.section_id and section.version_id=member.version_id
+			 where member.resource_id=resource.entity_id and member.version_id=version.id and section.status='active'
+			 order by section.ordinal,section.id limit 1),''),
+			'definition',detail.definition,'status',detail.status,'publishedRevisionId',
+			(select revision.public_id from content_revisions revision where revision.id=detail.published_revision_id),
+			'iconFilePublicId',coalesce((select file.public_id from oss_files file where file.id=detail.icon_file_id and file.status='active'
+			 and file.scan_status in ('clean','trusted_generated')),''),
+			'renderFilePublicId',coalesce((select file.public_id from oss_files file where file.id=detail.render_file_id and file.status='active'
+			 and file.scan_status in ('clean','trusted_generated')),''),
 			'localizations',coalesce((select jsonb_agg(jsonb_build_object('locale',localization.locale,'name',localization.name,
 			'summary',localization.summary,'contentMarkdown',localization.content_markdown,'provenance',localization.provenance)
 			order by localization.locale) from mod_resource_version_detail_localizations localization
 			where localization.resource_id=resource.entity_id and localization.version_id=version.id),'[]'::jsonb)) order by version.updated_at desc)
 			from mod_resource_version_details detail join mod_content_versions version on version.id=detail.version_id
-			where detail.resource_id=resource.entity_id and detail.status='active'),'[]'::jsonb)
+			where detail.resource_id=resource.entity_id
+			  and (detail.status='active' or ($3 and detail.status='pending'))
+			  and (version.status='active' or $3)),'[]'::jsonb)
 			from mod_resource_bindings binding join game_resources resource on resource.entity_id=binding.resource_id
-			join catalog_entities entity on entity.id=resource.entity_id where entity.public_id=$1 and binding.mod_id=$2`, publicID, identity.ID).
+			join catalog_entities entity on entity.id=resource.entity_id where entity.public_id=$1 and binding.mod_id=$2
+			  and ((entity.status='active' and entity.archived_at is null and exists(
+			    select 1 from mod_resource_version_details published_detail
+			    join mod_content_versions published_version on published_version.id=published_detail.version_id and published_version.status='active'
+			    where published_detail.resource_id=resource.entity_id and published_detail.status='active'
+			  )) or (entity.status='active' and entity.archived_at is null and exists(
+			    select 1 from resource_import_snapshots imported
+			    join catalog_import_revisions import_revision on import_revision.id=imported.revision_id and import_revision.is_active
+			    join mod_content_versions import_version on import_version.id=import_revision.target_version_id
+			      and import_version.status='active' and import_version.mod_id=binding.mod_id
+			    where imported.resource_id=resource.entity_id
+			  )) or $3)`, publicID, identity.ID, canPreviewInactive).
 			Scan(&entityID, &kindCode, &canonicalID, &details); err != nil {
 			writeError(w, http.StatusNotFound, "mod resource detail not found")
 			return
 		}
 		primary, secondary := s.requestContentLocales(r)
-		carrier := map[string]any{"entityId": entityID, "versions": []map[string]any{}}
+		carrier := map[string]any{"entityId": publicID, "versions": []map[string]any{}}
 		if err := s.decorateResourceVersionRows(r.Context(), []map[string]any{carrier}, primary, secondary); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to resolve resource versions")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"entityId": entityID, "publicId": publicID, "kindCode": kindCode,
+		writeJSON(w, http.StatusOK, map[string]any{"entityId": publicID, "publicId": publicID, "kindCode": kindCode,
 			"canonicalId": canonicalID, "details": json.RawMessage(details), "versions": carrier["versions"]})
 		return
 	}
@@ -1088,7 +1412,8 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		versionPublicID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("version")))
 		var publishedRevisionID *int64
 		if err := s.db.QueryRow(r.Context(), `select detail.published_revision_id from mod_resource_version_details detail
-			join mod_content_versions version on version.id=detail.version_id join catalog_entities entity on entity.id=detail.resource_id
+			join mod_content_versions version on version.id=detail.version_id and version.status='active'
+			join catalog_entities entity on entity.id=detail.resource_id
 			where entity.public_id=$1 and version.public_id=$2 and version.mod_id=$3 and detail.status='active'`, publicID, versionPublicID, identity.ID).Scan(&publishedRevisionID); err != nil {
 			writeError(w, http.StatusNotFound, "mod resource version detail not found")
 			return
@@ -1098,21 +1423,30 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var edit modContentResourceEdit
-	if decodeJSON(r, &edit) != nil || normalizeModContentResourceEdit(&edit) != nil {
+	if decodeJSON(r, &edit) != nil || normalizeModContentResourceUpdateEdit(&edit) != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid or stale mod resource detail")
 		return
 	}
 	var publishedRevisionID *int64
-	var actualKindCode, actualCanonicalID string
-	if err := s.db.QueryRow(r.Context(), `select detail.published_revision_id,resource.kind_code,resource.canonical_id from mod_resource_version_details detail
-		join mod_content_versions version on version.id=detail.version_id join catalog_entities entity on entity.id=detail.resource_id
+	var resourceID int64
+	var actualKindCode, actualCanonicalID, currentIconFilePublicID, currentRenderFilePublicID string
+	if err := s.db.QueryRow(r.Context(), `select detail.published_revision_id,resource.entity_id,resource.kind_code,resource.canonical_id,
+		coalesce(icon_file.public_id,''),coalesce(render_file.public_id,'')
+		from mod_resource_version_details detail
+		join mod_content_versions version on version.id=detail.version_id and version.status='active'
+		join catalog_entities entity on entity.id=detail.resource_id
 		join game_resources resource on resource.entity_id=detail.resource_id
+		left join oss_files icon_file on icon_file.id=detail.icon_file_id and icon_file.status='active'
+		 and icon_file.scan_status in ('clean','trusted_generated')
+		left join oss_files render_file on render_file.id=detail.render_file_id and render_file.status='active'
+		 and render_file.scan_status in ('clean','trusted_generated')
 		where entity.public_id=$1 and version.public_id=$2 and version.mod_id=$3 and detail.status='active'`,
-		publicID, edit.VersionPublicID, identity.ID).Scan(&publishedRevisionID, &actualKindCode, &actualCanonicalID); err != nil {
+		publicID, edit.VersionPublicID, identity.ID).Scan(&publishedRevisionID, &resourceID, &actualKindCode, &actualCanonicalID, &currentIconFilePublicID, &currentRenderFilePublicID); err != nil {
 		writeError(w, http.StatusNotFound, "mod resource version detail not found")
 		return
 	}
-	if !sameRevision(edit.BaseRevisionID, publishedRevisionID) {
+	requestedBaseRevisionID, baseErr := resolveRevisionPublicID(r.Context(), s.db, edit.BaseRevisionID)
+	if baseErr != nil || !sameRevision(requestedBaseRevisionID, publishedRevisionID) {
 		writeError(w, http.StatusConflict, "mod resource version detail changed; reload the editor")
 		return
 	}
@@ -1120,6 +1454,30 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 	var versionID int64
 	if err := s.db.QueryRow(r.Context(), `select id from mod_content_versions where public_id=$1 and mod_id=$2 and status='active'`, edit.VersionPublicID, identity.ID).Scan(&versionID); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "mod content version is invalid")
+		return
+	}
+	existingDefaultLocale, existingLocalizations, err := loadModContentResourceLocalizationState(r.Context(), s.db, resourceID, versionID, false)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read existing resource localizations")
+		return
+	}
+	if err = preserveImmutableModContentResourceLocales(existingDefaultLocale, existingLocalizations, &edit); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "non-editable resource localizations must be preserved unchanged")
+		return
+	}
+	if edit.IconFilePublicID == nil {
+		edit.IconFilePublicID = &currentIconFilePublicID
+	}
+	if edit.RenderFilePublicID == nil {
+		edit.RenderFilePublicID = &currentRenderFilePublicID
+	}
+	actorID := currentClaims(r).Subject
+	if _, err := resolveModContentImageFileID(r.Context(), s.db, edit.IconFilePublicID, actorID, resourceID, versionID, false); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "resource icon is unavailable")
+		return
+	}
+	if _, err := resolveModContentImageFileID(r.Context(), s.db, edit.RenderFilePublicID, actorID, resourceID, versionID, false); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "resource render image is unavailable")
 		return
 	}
 	if err := validateModContentResourceSection(r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID); err != nil {
@@ -1144,6 +1502,16 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 			_, err := tx.Exec(ctx, `update mod_resource_version_details detail set status='archived',published_revision_id=$3,updated_at=now()
 				from catalog_entities entity,mod_content_versions version where entity.public_id=$1 and detail.resource_id=entity.id
 				and version.public_id=$2 and detail.version_id=version.id and version.mod_id=$4`, snapshot.PublicID, snapshot.Resource.VersionPublicID, revisionID, snapshot.ModID)
+			return err
+		}
+		if snapshot.Kind == "version" {
+			var versionID int64
+			if err := tx.QueryRow(ctx, `update mod_content_versions set status='archived',published_revision_id=$2,updated_at=now()
+				where public_id=$1 and mod_id=$3 returning id`, snapshot.PublicID, revisionID, snapshot.ModID).Scan(&versionID); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `update catalog_import_revisions set is_active=false,status='superseded'
+				where target_version_id=$1 and is_active`, versionID)
 			return err
 		}
 		_, err := tx.Exec(ctx, `update `+table+` set status='archived',published_revision_id=$2,updated_at=now() where public_id=$1`, snapshot.PublicID, revisionID)
@@ -1186,7 +1554,8 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 			return err
 		}
 		var templateID int64
-		if err := tx.QueryRow(ctx, `select id from mod_content_templates where public_id=$1 and status='active' and (builtin or owner_mod_id=$2)`, snapshot.Section.TemplatePublicID, snapshot.ModID).Scan(&templateID); err != nil {
+		var templateCode string
+		if err := tx.QueryRow(ctx, `select id,code from mod_content_templates where public_id=$1 and status='active' and (builtin or owner_mod_id=$2)`, snapshot.Section.TemplatePublicID, snapshot.ModID).Scan(&templateID, &templateCode); err != nil {
 			return err
 		}
 		var parentID *int64
@@ -1211,12 +1580,20 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 				return err
 			}
 		}
+		if parentID == nil && templateCode == "item_block" {
+			if err := ensureItemBlockSystemCategoriesTx(
+				ctx, tx, sectionID, versionID, snapshot.ModID, templateID, actorID,
+				snapshot.Section.DefaultLocale, snapshot.Section.DisplayMode,
+			); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(ctx, `delete from mod_content_section_resources where section_id=$1`, sectionID); err != nil {
 			return err
 		}
 		for _, resource := range snapshot.Section.Resources {
 			var versionID int64
-			var resourceID string
+			var resourceID int64
 			if err := tx.QueryRow(ctx, `select id from mod_content_versions where public_id=$1 and mod_id=$2 and status='active'`, resource.VersionPublicID, snapshot.ModID).Scan(&versionID); err != nil {
 				return err
 			}
@@ -1224,7 +1601,13 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 				where entity.public_id=$1 and entity.status='active' and resource.owner_mod_id=$2`, resource.ResourcePublicID, snapshot.ModID).Scan(&resourceID); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, `insert into mod_content_section_resources(section_id,version_id,resource_id,ordinal) values($1,$2,$3,$4)`, sectionID, versionID, resourceID, resource.Ordinal); err != nil {
+			if _, err := tx.Exec(ctx, `delete from mod_content_section_resources placement using mod_content_sections section
+				where section.id=placement.section_id and section.mod_id=$1 and placement.version_id=$2 and placement.resource_id=$3`,
+				snapshot.ModID, versionID, resourceID); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `insert into mod_content_section_resources(section_id,version_id,resource_id,ordinal,placement_source)
+				values($1,$2,$3,$4,'manual')`, sectionID, versionID, resourceID, resource.Ordinal); err != nil {
 				return err
 			}
 		}
@@ -1239,14 +1622,40 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 			return errCatalogEditorInvalid
 		}
 		definition, _ := json.Marshal(snapshot.Resource.Definition)
-		var resourceID string
+		var resourceID int64
 		var versionID int64
 		if err := tx.QueryRow(ctx, `select id from mod_content_versions where public_id=$1 and mod_id=$2 and status='active'`, snapshot.Resource.VersionPublicID, snapshot.ModID).Scan(&versionID); err != nil {
 			return err
 		}
-		if err := tx.QueryRow(ctx, `update mod_resource_version_details detail set default_locale=$3,definition=$4::jsonb,status='active',published_revision_id=$5,
-			updated_by=$6,updated_at=now() from catalog_entities entity where entity.public_id=$1 and detail.resource_id=entity.id
-			and detail.version_id=$2 returning detail.resource_id`, snapshot.PublicID, versionID, snapshot.Resource.DefaultLocale, string(definition), revisionID, actorID).Scan(&resourceID); err != nil {
+		if err := tx.QueryRow(ctx, `select entity.id from catalog_entities entity
+			join mod_resource_version_details detail on detail.resource_id=entity.id and detail.version_id=$2
+			where entity.public_id=$1`, snapshot.PublicID, versionID).Scan(&resourceID); err != nil {
+			return err
+		}
+		existingDefaultLocale, existingLocalizations, err := loadModContentResourceLocalizationState(ctx, tx, resourceID, versionID, true)
+		if err != nil {
+			return err
+		}
+		if err = preserveImmutableModContentResourceLocales(existingDefaultLocale, existingLocalizations, snapshot.Resource); err != nil {
+			return err
+		}
+		iconFileID, iconErr := resolveModContentImageFileID(ctx, tx, snapshot.Resource.IconFilePublicID, actorID, resourceID, versionID, true)
+		if iconErr != nil {
+			return iconErr
+		}
+		renderFileID, renderErr := resolveModContentImageFileID(ctx, tx, snapshot.Resource.RenderFilePublicID, actorID, resourceID, versionID, true)
+		if renderErr != nil {
+			return renderErr
+		}
+		if _, err := tx.Exec(ctx, `update mod_resource_version_details detail set default_locale=$3,definition=$4::jsonb,
+			icon_file_id=case when $5 then $6 else detail.icon_file_id end,
+			render_file_id=case when $7 then $8 else detail.render_file_id end,
+			status='active',published_revision_id=$9,updated_by=$10,updated_at=now()
+			from catalog_entities entity where entity.public_id=$1 and detail.resource_id=entity.id and detail.version_id=$2`,
+			snapshot.PublicID, versionID, snapshot.Resource.DefaultLocale, string(definition),
+			snapshot.Resource.IconFilePublicID != nil, iconFileID,
+			snapshot.Resource.RenderFilePublicID != nil, renderFileID,
+			revisionID, actorID); err != nil {
 			return err
 		}
 		if snapshot.CreatedIdentity {
@@ -1254,12 +1663,18 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 				return err
 			}
 		}
-		if _, err := tx.Exec(ctx, `delete from mod_resource_version_detail_localizations where resource_id=$1 and version_id=$2`, resourceID, versionID); err != nil {
+		if _, err = tx.Exec(ctx, `delete from mod_resource_version_detail_localizations where resource_id=$1 and version_id=$2`, resourceID, versionID); err != nil {
 			return err
 		}
 		for _, localization := range snapshot.Resource.Localizations {
+			existing, exists := existingLocalizations[localization.Locale]
+			unchanged := exists &&
+				existing.Name == localization.Name &&
+				existing.Summary == localization.Summary &&
+				existing.ContentMarkdown == localization.ContentMarkdown
+			provenance := modContentResourceLocalizationProvenance(existing.Provenance, unchanged)
 			if _, err := tx.Exec(ctx, `insert into mod_resource_version_detail_localizations(resource_id,version_id,locale,name,summary,content_markdown,provenance)
-				values($1,$2,$3,$4,$5,$6,'human')`, resourceID, versionID, localization.Locale, localization.Name, localization.Summary, localization.ContentMarkdown); err != nil {
+				values($1,$2,$3,$4,$5,$6,$7)`, resourceID, versionID, localization.Locale, localization.Name, localization.Summary, localization.ContentMarkdown, provenance); err != nil {
 				return err
 			}
 		}
@@ -1272,6 +1687,19 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 	default:
 		return errCatalogEditorInvalid
 	}
+}
+
+func modContentResourceLocalizationProvenance(existing string, unchanged bool) string {
+	if unchanged {
+		switch existing {
+		case "ai", "human_corrected", "human", "import":
+			return existing
+		}
+	}
+	if existing == "ai" || existing == "human_corrected" {
+		return "human_corrected"
+	}
+	return "human"
 }
 
 func publishedModContentRevisionTx(ctx context.Context, tx pgx.Tx, snapshot modContentSnapshot) (*int64, error) {
@@ -1315,10 +1743,4 @@ func rejectPendingModContentCreateTx(ctx context.Context, tx pgx.Tx, snapshot mo
 	}
 	_, err := tx.Exec(ctx, `update `+table+` set status='archived',updated_at=now() where public_id=$1 and status='pending'`, snapshot.PublicID)
 	return err
-}
-
-func sortModContentVersions(items []map[string]any) {
-	sort.SliceStable(items, func(i, j int) bool {
-		return strings.Compare(strings.ToLower(items[i]["label"].(string)), strings.ToLower(items[j]["label"].(string))) > 0
-	})
 }

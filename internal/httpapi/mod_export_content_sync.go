@@ -14,12 +14,12 @@ import (
 // syncImportedResourcesToContentVersionTx materializes importer-owned fields in
 // the selected, neutral content version. Human summaries and Markdown bodies
 // are intentionally stored in different columns and are never replaced here.
-func syncImportedResourcesToContentVersionTx(ctx context.Context, tx pgx.Tx, revisionIDs []string, versionPublicID string, overwrite bool, actorID int64) error {
-	if len(revisionIDs) == 0 || versionPublicID == "" {
+func syncImportedResourcesToContentVersionTx(ctx context.Context, tx pgx.Tx, revisionIDs []string, versionID int64, overwrite bool, actorID int64) error {
+	if len(revisionIDs) == 0 || versionID <= 0 {
 		return nil
 	}
-	var versionID, modID int64
-	if err := tx.QueryRow(ctx, `select id,mod_id from mod_content_versions where public_id=$1 and status='active'`, versionPublicID).Scan(&versionID, &modID); err != nil {
+	var modID int64
+	if err := tx.QueryRow(ctx, `select mod_id from mod_content_versions where id=$1 and status='active'`, versionID).Scan(&modID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `insert into mod_resource_bindings(resource_id,mod_id)
@@ -92,35 +92,132 @@ func ensureImportedContentSectionsTx(ctx context.Context, tx pgx.Tx, revisionIDs
 		from missing cross join offset_value`, revisionIDs, versionID, modID, actorID); err != nil {
 		return fmt.Errorf("create imported content sections: %w", err)
 	}
-	_, err := tx.Exec(ctx, `with imported as (
-		select distinct snapshot.resource_id,resource.canonical_id,case
-			when resource.kind_code in ('minecraft.item','minecraft.block') then 'item_block'
-			when resource.kind_code='minecraft.fluid' then 'fluid'
-			when resource.kind_code='minecraft.dimension' then 'dimension'
-			when resource.kind_code='minecraft.biome' then 'biome'
-			when resource.kind_code='minecraft.entity_type' then 'entity'
-			when resource.kind_code='minecraft.enchantment' then 'enchantment'
-			when resource.kind_code in ('minecraft.mob_effect','minecraft.potion') then 'mob_effect'
-			when resource.kind_code='minecraft.natural_generation' then 'natural_generation'
-			when resource.kind_code='minecraft.structure' then 'world_structure'
-			when resource.kind_code='minecraft.key_mapping' then 'key_mapping'
-			when resource.kind_code='minecraft.advancement' then 'advancement'
-			when resource.kind_code like 'mekanism.%' then 'chemical'
-		end template_code
-		from resource_import_snapshots snapshot join game_resources resource on resource.entity_id=snapshot.resource_id
+
+	// Item/block is one documentation page with two real, arrangeable child
+	// classifications. These are data-model categories, not presentation-only
+	// headings, so a later manual layout starts with the imported classification.
+	if _, err := tx.Exec(ctx, `with root as (
+		select section.id,section.mod_id,section.version_id,section.template_id,section.default_locale,section.display_mode
+		from mod_content_sections section
+		join mod_content_templates template on template.id=section.template_id
+		where section.version_id=$1 and section.parent_id is null and section.status='active'
+		  and template.code='item_block' and template.builtin
+		order by section.ordinal,section.id limit 1
+	), requested(system_key) as (values ('blocks'::text),('items'::text)),
+	missing as (
+		select requested.system_key,row_number() over(order by case requested.system_key when 'blocks' then 0 else 1 end)-1 ordinal
+		from root cross join requested
+		where not exists(select 1 from mod_content_sections child
+			where child.version_id=root.version_id and child.parent_id=root.id
+			  and child.system_key=requested.system_key and child.status='active')
+	), offset_value as (
+		select coalesce(max(child.ordinal)+1,0) value
+		from root left join mod_content_sections child on child.parent_id=root.id and child.status='active'
+	)
+	insert into mod_content_sections(mod_id,version_id,template_id,parent_id,system_key,default_locale,display_mode,ordinal,status,created_by,updated_by)
+	select root.mod_id,root.version_id,root.template_id,root.id,missing.system_key,root.default_locale,root.display_mode,
+		offset_value.value+missing.ordinal,'active',nullif($2::bigint,0),nullif($2::bigint,0)
+	from root cross join missing cross join offset_value`, versionID, actorID); err != nil {
+		return fmt.Errorf("create imported item and block categories: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `insert into mod_content_section_localizations(section_id,locale,name,description)
+		select section.id,localization.locale,localization.name,''
+		from mod_content_sections section
+		cross join (values
+			('blocks'::text,'en-US'::text,'Blocks'::text),('blocks','zh-CN','方块'),('blocks','zh-TW','方塊'),
+			('items','en-US','Items'),('items','zh-CN','物品'),('items','zh-TW','物品')
+		) localization(system_key,locale,name)
+		where section.version_id=$1 and section.status='active'
+		  and section.system_key=localization.system_key
+		on conflict(section_id,locale) do nothing`, versionID); err != nil {
+		return fmt.Errorf("localize imported item and block categories: %w", err)
+	}
+
+	// Reimport owns only its previous automatic placements. Human layout is
+	// preserved, while stale imported placements (including block-item aliases)
+	// are removed before the canonical set is materialized again.
+	if _, err := tx.Exec(ctx, `delete from mod_content_section_resources placement
+		using resource_import_snapshots snapshot
+		where placement.version_id=$2 and placement.placement_source='import'
+		  and placement.resource_id=snapshot.resource_id
+		  and snapshot.revision_id=any($1::text[])`, revisionIDs, versionID); err != nil {
+		return fmt.Errorf("clear previous imported resource placements: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `with bound_item_ids as materialized (
+			select distinct binding.item_resource_id
+			from game_resource_asset_bindings binding
+			join resource_import_snapshots block_snapshot on block_snapshot.id=binding.snapshot_id
+			where block_snapshot.revision_id=any($1::text[]) and binding.item_resource_id is not null
+		), imported_block_ids as materialized (
+			select distinct block_resource.canonical_id
+			from resource_import_snapshots block_snapshot
+			join game_resources block_resource on block_resource.entity_id=block_snapshot.resource_id
+			where block_snapshot.revision_id=any($1::text[])
+			  and block_resource.kind_code='minecraft.block'
+		)
+		delete from mod_content_section_resources placement using game_resources item_resource
+		where placement.version_id=$2 and placement.placement_source='import'
+		  and item_resource.entity_id=placement.resource_id
+		  and item_resource.kind_code='minecraft.item'
+		  and (
+			placement.resource_id in (select item_resource_id from bound_item_ids)
+			or item_resource.canonical_id in (select canonical_id from imported_block_ids)
+		  )`, revisionIDs, versionID); err != nil {
+		return fmt.Errorf("clear imported block-item alias placements: %w", err)
+	}
+
+	_, err := tx.Exec(ctx, `with imported_snapshots as materialized (
+		select snapshot.resource_id,resource.canonical_id,resource.kind_code
+		from resource_import_snapshots snapshot
+		join game_resources resource on resource.entity_id=snapshot.resource_id
 		where snapshot.revision_id=any($1::text[])
+	), bound_item_ids as materialized (
+		select distinct binding.item_resource_id
+		from game_resource_asset_bindings binding
+		join resource_import_snapshots block_snapshot on block_snapshot.id=binding.snapshot_id
+		where block_snapshot.revision_id=any($1::text[]) and binding.item_resource_id is not null
+	), imported_block_ids as materialized (
+		select distinct canonical_id from imported_snapshots where kind_code='minecraft.block'
+	), imported as (
+		select distinct snapshot.resource_id,snapshot.canonical_id,snapshot.kind_code,case
+			when snapshot.kind_code in ('minecraft.item','minecraft.block') then 'item_block'
+			when snapshot.kind_code='minecraft.fluid' then 'fluid'
+			when snapshot.kind_code='minecraft.dimension' then 'dimension'
+			when snapshot.kind_code='minecraft.biome' then 'biome'
+			when snapshot.kind_code='minecraft.entity_type' then 'entity'
+			when snapshot.kind_code='minecraft.enchantment' then 'enchantment'
+			when snapshot.kind_code in ('minecraft.mob_effect','minecraft.potion') then 'mob_effect'
+			when snapshot.kind_code='minecraft.natural_generation' then 'natural_generation'
+			when snapshot.kind_code='minecraft.structure' then 'world_structure'
+			when snapshot.kind_code='minecraft.key_mapping' then 'key_mapping'
+			when snapshot.kind_code='minecraft.advancement' then 'advancement'
+			when snapshot.kind_code like 'mekanism.%' then 'chemical'
+		end template_code
+		from imported_snapshots snapshot
+		where snapshot.kind_code<>'minecraft.item'
+		   or (
+			snapshot.resource_id not in (select item_resource_id from bound_item_ids)
+			and snapshot.canonical_id not in (select canonical_id from imported_block_ids)
+		   )
 	), target as (
-		select imported.resource_id,imported.canonical_id,section.id section_id,
-			row_number() over(partition by section.id order by imported.canonical_id)-1 ordinal
+		select imported.resource_id,imported.canonical_id,coalesce(child.id,section.id) section_id
 		from imported join mod_content_templates template on template.code=imported.template_code and template.builtin
 		join lateral (select id from mod_content_sections where version_id=$2 and template_id=template.id and parent_id is null and status='active' order by ordinal,id limit 1) section on true
+		left join mod_content_sections child on child.parent_id=section.id and child.version_id=$2 and child.status='active'
+		  and child.system_key=case imported.kind_code when 'minecraft.block' then 'blocks' when 'minecraft.item' then 'items' else '' end
 		where imported.template_code is not null
+		  and (imported.template_code<>'item_block' or child.id is not null)
+		  and not exists(select 1 from mod_content_section_resources existing
+			where existing.version_id=$2 and existing.resource_id=imported.resource_id)
+	), numbered as (
+		select target.*,row_number() over(partition by target.section_id order by target.canonical_id,target.resource_id)-1 ordinal
+		from target
 	), offsets as (
 		select section_id,coalesce(max(ordinal)+1,0) value from mod_content_section_resources where version_id=$2 group by section_id
 	)
-	insert into mod_content_section_resources(section_id,version_id,resource_id,ordinal)
-	select target.section_id,$2::bigint,target.resource_id,coalesce(offsets.value,0)+target.ordinal from target left join offsets on offsets.section_id=target.section_id
-	where not exists(select 1 from mod_content_section_resources existing where existing.section_id=target.section_id and existing.version_id=$2 and existing.resource_id=target.resource_id)
+	insert into mod_content_section_resources(section_id,version_id,resource_id,ordinal,placement_source)
+	select numbered.section_id,$2::bigint,numbered.resource_id,coalesce(offsets.value,0)+numbered.ordinal,'import'
+	from numbered left join offsets on offsets.section_id=numbered.section_id
 	on conflict do nothing`, revisionIDs, versionID)
 	if err != nil {
 		return fmt.Errorf("attach imported resources to content sections: %w", err)

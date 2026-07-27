@@ -25,16 +25,16 @@ type catalogLocalizationPayload struct {
 	Editable            bool      `json:"editable"`
 	ReviewStatus        string    `json:"reviewStatus"`
 	RevisionNo          int64     `json:"revisionNo"`
-	PublishedRevisionID *int64    `json:"publishedRevisionId,omitempty"`
+	PublishedRevisionID *string   `json:"publishedRevisionId,omitempty"`
 	UpdatedAt           time.Time `json:"updatedAt"`
 }
 
 type contentTranslationState struct {
-	Status                      string `json:"status"`
-	TaskID                      *int64 `json:"taskId,omitempty"`
-	Automatic                   bool   `json:"automatic"`
-	CanRequest                  bool   `json:"canRequest"`
-	CountsTowardDailyTokenQuota bool   `json:"countsTowardDailyTokenQuota"`
+	Status                      string  `json:"status"`
+	TaskID                      *string `json:"taskId,omitempty"`
+	Automatic                   bool    `json:"automatic"`
+	CanRequest                  bool    `json:"canRequest"`
+	CountsTowardDailyTokenQuota bool    `json:"countsTowardDailyTokenQuota"`
 }
 
 type contentResolutionResponse struct {
@@ -51,7 +51,7 @@ type contentResolutionResponse struct {
 }
 
 type catalogEntityLocalizationSet struct {
-	EntityID      string
+	EntityID      int64
 	PublicID      string
 	EntityType    string
 	DefaultLocale string
@@ -64,12 +64,12 @@ type requestContentTranslationPayload struct {
 }
 
 type updateContentLocalizationPayload struct {
-	BaseRevisionID  *int64 `json:"baseRevisionId"`
-	Locale          string `json:"locale"`
-	Name            string `json:"name"`
-	Summary         string `json:"summary"`
-	ContentMarkdown string `json:"contentMarkdown"`
-	Reason          string `json:"reason"`
+	BaseRevisionID  *string `json:"baseRevisionId"`
+	Locale          string  `json:"locale"`
+	Name            string  `json:"name"`
+	Summary         string  `json:"summary"`
+	ContentMarkdown string  `json:"contentMarkdown"`
+	Reason          string  `json:"reason"`
 }
 
 type enqueuedContentTranslation struct {
@@ -145,7 +145,7 @@ func (s *Server) catalogEntityContent(w http.ResponseWriter, r *http.Request) {
 		)
 		if queueErr == nil {
 			response.Translation.Status = task.Status
-			response.Translation.TaskID = &task.TaskID
+			response.Translation.TaskID = &task.TaskUID
 			if task.Created {
 				s.publishContentTranslationTask(r.Context(), task)
 			}
@@ -200,8 +200,8 @@ func (s *Server) updateCatalogEntityContent(w http.ResponseWriter, r *http.Reque
 	var currentRevisionID *int64
 	var existingProvenance string
 	err = tx.QueryRow(r.Context(), `select published_revision_id,provenance from content_localizations
-		where subject_public_id=$1 and subject_type=$2 and locale=$3 for update`,
-		publicID, entity.EntityType, localization.Locale).Scan(&currentRevisionID, &existingProvenance)
+		where subject_type=$1 and subject_id=$2 and locale=$3 for update`,
+		entity.EntityType, entity.EntityID, localization.Locale).Scan(&currentRevisionID, &existingProvenance)
 	if errors.Is(err, pgx.ErrNoRows) {
 		currentRevisionID, existingProvenance, err = nil, "", nil
 	}
@@ -209,7 +209,8 @@ func (s *Server) updateCatalogEntityContent(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "failed to load localized content revision")
 		return
 	}
-	if !sameRevision(request.BaseRevisionID, currentRevisionID) {
+	requestedBaseRevisionID, resolveErr := resolveRevisionPublicID(r.Context(), tx, request.BaseRevisionID)
+	if resolveErr != nil || !sameRevision(requestedBaseRevisionID, currentRevisionID) {
 		writeError(w, http.StatusConflict, "localized content changed after this edit was loaded")
 		return
 	}
@@ -239,7 +240,7 @@ func (s *Server) updateCatalogEntityContent(w http.ResponseWriter, r *http.Reque
 		reason = "Localized content edit"
 	}
 	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
-		EntityID: revisionEntityID, AggregateType: catalogAggregateLocalization,
+		EntityType: entity.EntityType, EntityID: revisionEntityID, AggregateType: catalogAggregateLocalization,
 		AggregateKey: contentLocalizationAggregateKey(publicID, entity.EntityType, localization.Locale),
 		BaseRevision: currentRevisionID, Snapshot: rawSnapshot, Reason: reason, ActorID: claims.Subject,
 		Source: "user", Status: reviewStatus,
@@ -278,47 +279,46 @@ func (s *Server) updateCatalogEntityContent(w http.ResponseWriter, r *http.Reque
 	skipRequestActivity(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"publicId": publicID, "entityType": entity.EntityType, "locale": localization.Locale,
-		"provenance": provenance, "revisionId": created.RevisionID, "changeRequestId": created.ChangeRequestID,
+		"provenance": provenance, "revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID,
 		"reviewStatus": reviewStatus, "activityEventId": activityID,
 	})
 }
 
-func loadEditableContentSubjectTx(ctx context.Context, tx pgx.Tx, publicID string) (catalogEntityLocalizationSet, string, error) {
+func loadEditableContentSubjectTx(ctx context.Context, tx pgx.Tx, publicID string) (catalogEntityLocalizationSet, int64, error) {
 	var entity catalogEntityLocalizationSet
-	if err := tx.QueryRow(ctx, `select route.entity_key,route.public_id,route.entity_type,subject.default_locale
+	if err := tx.QueryRow(ctx, `select route.internal_id,route.public_id,route.entity_type,subject.default_locale
 		from public_routes route join content_subjects subject
-		 on subject.public_id=route.public_id and subject.subject_type=route.entity_type
+		 on subject.subject_id=route.internal_id and subject.subject_type=route.entity_type
 		where route.public_id=$1 for update of subject`, publicID).Scan(
 		&entity.EntityID, &entity.PublicID, &entity.EntityType, &entity.DefaultLocale,
 	); err != nil {
-		return entity, "", err
+		return entity, 0, err
 	}
-	revisionEntityID := ""
 	switch entity.EntityType {
 	case "mod":
 		var exists bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from mods where id::text=$1 and review_status='approved')`, entity.EntityID).Scan(&exists); err != nil || !exists {
+		if err := tx.QueryRow(ctx, `select exists(select 1 from mods where id=$1 and review_status='approved')`, entity.EntityID).Scan(&exists); err != nil || !exists {
 			if err == nil {
 				err = pgx.ErrNoRows
 			}
-			return entity, "", err
+			return entity, 0, err
 		}
 	case "blueprint":
 		var exists bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from blueprints where id::text=$1 and status<>'deleted'
+		if err := tx.QueryRow(ctx, `select exists(select 1 from blueprints where id=$1 and status<>'deleted'
 			and ($2 or review_status in ('not_required','approved')))`, entity.EntityID, contentVisibilityBypassed(ctx)).Scan(&exists); err != nil || !exists {
 			if err == nil {
 				err = pgx.ErrNoRows
 			}
-			return entity, "", err
+			return entity, 0, err
 		}
 	case "skin":
 		var exists bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from skin_assets where id::text=$1 and status='active')`, entity.EntityID).Scan(&exists); err != nil || !exists {
+		if err := tx.QueryRow(ctx, `select exists(select 1 from skin_assets where id=$1 and status='active')`, entity.EntityID).Scan(&exists); err != nil || !exists {
 			if err == nil {
 				err = pgx.ErrNoRows
 			}
-			return entity, "", err
+			return entity, 0, err
 		}
 	case "resource", "tag", "recipe_type", "recipe_template", "recipe":
 		var exists bool
@@ -327,13 +327,12 @@ func loadEditableContentSubjectTx(ctx context.Context, tx pgx.Tx, publicID strin
 			if err == nil {
 				err = pgx.ErrNoRows
 			}
-			return entity, "", err
+			return entity, 0, err
 		}
-		revisionEntityID = entity.EntityID
 	default:
-		return entity, "", errCatalogEditorNotFound
+		return entity, 0, errCatalogEditorNotFound
 	}
-	return entity, revisionEntityID, nil
+	return entity, entity.EntityID, nil
 }
 
 func contentLocalizationReviewRequired(config reviewConfig, entityType string) bool {
@@ -415,16 +414,16 @@ func (s *Server) requestCatalogContentTranslation(w http.ResponseWriter, r *http
 		return
 	}
 	annotateActivity(r, 0, catalogActivityObjectType(entity.EntityType), publicID, 0, map[string]any{
-		"operation": "translate", "targetLocale": request.TargetLocale, "aiTaskId": task.TaskID,
+		"operation": "translate", "targetLocale": request.TargetLocale, "aiTaskId": task.TaskUID,
 	})
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"cached": false, "taskId": task.TaskID, "status": task.Status, "countsTowardDailyTokenQuota": true,
+		"cached": false, "taskId": task.TaskUID, "status": task.Status, "countsTowardDailyTokenQuota": true,
 	})
 }
 
 func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.Request) {
-	taskID, err := strconv.ParseInt(strings.TrimSpace(r.PathValue("taskId")), 10, 64)
-	if err != nil || taskID <= 0 {
+	taskUID := strings.ToLower(strings.TrimSpace(r.PathValue("taskId")))
+	if taskUID == "" || len(taskUID) > 80 {
 		writeError(w, http.StatusBadRequest, "taskId is invalid")
 		return
 	}
@@ -433,9 +432,9 @@ func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.
 	var resultRaw, payloadRaw []byte
 	var createdBy *int64
 	var inputTokens, outputTokens int64
-	err = s.db.QueryRow(r.Context(), `
+	err := s.db.QueryRow(r.Context(), `
 		select status,result,payload,error,created_by,input_tokens,output_tokens
-		from ai_tasks where id=$1 and task_type=$2`, taskID, aiTaskContentTranslation).Scan(
+		from ai_tasks where task_uid=$1 and task_type=$2`, taskUID, aiTaskContentTranslation).Scan(
 		&status, &resultRaw, &payloadRaw, &errorMessage, &createdBy, &inputTokens, &outputTokens,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -451,7 +450,7 @@ func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.
 		return
 	}
 	response := map[string]any{
-		"taskId": taskID, "status": status, "error": errorMessage,
+		"taskId": taskUID, "status": status, "error": errorMessage,
 		"inputTokens": inputTokens, "outputTokens": outputTokens,
 	}
 	if status == "completed" {
@@ -468,19 +467,19 @@ func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.
 func (s *Server) loadCatalogEntityLocalizations(ctx context.Context, publicID string) (catalogEntityLocalizationSet, error) {
 	result := catalogEntityLocalizationSet{Localizations: map[string]catalogLocalizationPayload{}}
 	err := s.db.QueryRow(ctx, `
-		select route.entity_key,route.public_id,route.entity_type,subject.default_locale
+		select route.internal_id,route.public_id,route.entity_type,subject.default_locale
 		from public_routes route
-		join content_subjects subject on subject.public_id=route.public_id and subject.subject_type=route.entity_type
+		join content_subjects subject on subject.subject_id=route.internal_id and subject.subject_type=route.entity_type
 		where route.public_id=$1
 		  and (route.entity_type<>'mod' or exists(
-		    select 1 from mods where id::text=route.entity_key and review_status='approved'
+		    select 1 from mods where id=route.internal_id and review_status='approved'
 		  ))
 		  and (route.entity_type<>'blueprint' or $2 or exists(
-		    select 1 from blueprints where id::text=route.entity_key and status<>'deleted'
+		    select 1 from blueprints where id=route.internal_id and status<>'deleted'
 		      and review_status in ('not_required','approved')
 		  ))
 		  and (route.entity_type<>'skin' or $2 or exists(
-		    select 1 from skin_assets where id::text=route.entity_key and status='active'
+		    select 1 from skin_assets where id=route.internal_id and status='active'
 		      and review_status='approved' and visibility<>'private'
 		  ))
 		  and (not exists(select 1 from catalog_entities where public_id=route.public_id) or exists(
@@ -488,11 +487,11 @@ func (s *Server) loadCatalogEntityLocalizations(ctx context.Context, publicID st
 		  ))
 		  and (route.entity_type<>'recipe_template' or exists(
 		    select 1 from recipe_layout_templates template join catalog_entities parent on parent.id=template.recipe_type_id
-		    where template.entity_id=route.entity_key and parent.status='active' and parent.archived_at is null
+		    where template.entity_id=route.internal_id and parent.status='active' and parent.archived_at is null
 		  ))
 		  and (route.entity_type<>'recipe' or exists(
 		    select 1 from recipes recipe join catalog_entities parent on parent.id=recipe.recipe_type_id
-		    where recipe.entity_id=route.entity_key and parent.status='active' and parent.archived_at is null
+		    where recipe.entity_id=route.internal_id and parent.status='active' and parent.archived_at is null
 		  ))`, publicID, contentVisibilityBypassed(ctx)).Scan(
 		&result.EntityID, &result.PublicID, &result.EntityType, &result.DefaultLocale,
 	)
@@ -501,11 +500,13 @@ func (s *Server) loadCatalogEntityLocalizations(ctx context.Context, publicID st
 	}
 	result.DefaultLocale = normalizeContentLocale(result.DefaultLocale)
 	rows, err := s.db.Query(ctx, `
-		select locale,name,summary,content_markdown,provenance,source_locale,editable,review_status,
-		       revision_no,published_revision_id,updated_at
-		from content_localizations
-		where subject_public_id=$1 and subject_type=$2 and review_status='approved'
-		order by locale`, result.PublicID, result.EntityType)
+		select localization.locale,localization.name,localization.summary,localization.content_markdown,
+		       localization.provenance,localization.source_locale,localization.editable,localization.review_status,
+		       localization.revision_no,revision.public_id,localization.updated_at
+		from content_localizations localization
+		left join content_revisions revision on revision.id=localization.published_revision_id
+		where localization.subject_id=$1 and localization.subject_type=$2 and localization.review_status='approved'
+		order by localization.locale`, result.EntityID, result.EntityType)
 	if err != nil {
 		return result, err
 	}
@@ -580,7 +581,7 @@ func (s *Server) enqueueCatalogContentTranslation(
 		{"key": "contentMarkdown", "text": source.ContentMarkdown},
 	}
 	payload := map[string]any{
-		"entityId": entity.EntityID, "publicId": entity.PublicID, "entityType": entity.EntityType,
+		"internalEntityId": entity.EntityID, "publicId": entity.PublicID, "entityType": entity.EntityType,
 		"sourceLocale": source.Locale, "sourceRevisionNo": source.RevisionNo, "targetLocale": targetLocale, "items": items,
 		"quotaBacked": quotaBacked,
 	}
@@ -609,7 +610,7 @@ func (s *Server) enqueueCatalogContentTranslation(
 		  task.status='completed' and exists(
 		   select 1 from change_requests request
 		   where request.aggregate_type=$3 and request.status='pending'
-		     and request.metadata->>'aiTaskId'=task.id::text
+		     and request.metadata->>'aiTaskId'=task.task_uid
 		  )
 		 ))
 		order by task.created_at desc limit 1`, aiTaskContentTranslation, concurrencyKey, catalogAggregateLocalization).Scan(
@@ -665,10 +666,10 @@ func (s *Server) enqueueCatalogContentTranslation(
 	return enqueuedContentTranslation{TaskID: taskID, TaskUID: taskUID, Status: "queued", Created: true}, nil
 }
 
-func contentTranslationConcurrencyKey(entityID string, source catalogLocalizationPayload, targetLocale string, actorID int64, quotaBacked bool) string {
+func contentTranslationConcurrencyKey(entityID int64, source catalogLocalizationPayload, targetLocale string, actorID int64, quotaBacked bool) string {
 	parts := []string{
 		"catalog-content",
-		strings.TrimSpace(entityID),
+		strconv.FormatInt(entityID, 10),
 		normalizeContentLocale(source.Locale),
 		strconv.FormatInt(source.RevisionNo, 10),
 		normalizeContentLocale(targetLocale),

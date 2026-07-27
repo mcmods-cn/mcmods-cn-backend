@@ -95,6 +95,7 @@ func skinSchemaStatements() []string {
 		`create index idx_player_profile_name_history_profile on player_profile_name_history(profile_id,changed_at desc,id desc)`,
 		`create table yggdrasil_tokens (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			access_token_hash text not null unique check(access_token_hash ~ '^[0-9a-f]{64}$'),
 			user_id bigint not null references users(id) on delete cascade,
 			player_profile_id bigint references player_profiles(id) on delete set null,
@@ -108,6 +109,23 @@ func skinSchemaStatements() []string {
 			ip text not null default '',
 			user_agent text not null default ''
 		)`,
+		`create or replace function register_launcher_session_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id,entity_type,internal_id)
+			values(new.public_id,'launcher_session',new.id);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_yggdrasil_tokens_public_route after insert on yggdrasil_tokens
+			for each row execute function register_launcher_session_public_route()`,
+		`create or replace function remove_launcher_session_public_route() returns trigger as $$
+		begin
+			delete from public_routes where public_id=old.public_id and entity_type='launcher_session';
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_yggdrasil_tokens_remove_public_route after delete on yggdrasil_tokens
+			for each row execute function remove_launcher_session_public_route()`,
 		`create index idx_yggdrasil_tokens_user_sessions on yggdrasil_tokens(user_id,issued_at desc,id desc)`,
 		`create index idx_yggdrasil_tokens_active on yggdrasil_tokens(user_id,expires_at,id) where status in ('active','stale')`,
 		`create index idx_yggdrasil_tokens_profile on yggdrasil_tokens(player_profile_id,status,expires_at) where player_profile_id is not null`,
@@ -123,8 +141,8 @@ func skinSchemaStatements() []string {
 
 		`create or replace function register_skin_asset_public_route() returns trigger as $$
 		begin
-			insert into public_routes(public_id,entity_type,entity_key,canonical_path)
-			values(new.public_id,'skin',new.id::text,'/skins/'||new.public_id);
+			insert into public_routes(public_id,entity_type,internal_id,canonical_path)
+			values(new.public_id,'skin',new.id,'/skins/'||new.public_id);
 			return new;
 		end;
 		$$ language plpgsql`,
@@ -140,8 +158,8 @@ func skinSchemaStatements() []string {
 			for each row execute function remove_skin_asset_public_route()`,
 		`create or replace function register_player_profile_public_route() returns trigger as $$
 		begin
-			insert into public_routes(public_id,entity_type,entity_key,canonical_path)
-			values(new.public_id,'player_profile',new.id::text,'/players/'||new.public_id);
+			insert into public_routes(public_id,entity_type,internal_id,canonical_path)
+			values(new.public_id,'player_profile',new.id,'/players/'||new.public_id);
 			return new;
 		end;
 		$$ language plpgsql`,

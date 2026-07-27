@@ -63,19 +63,6 @@ type shopItemPayload struct {
 	Status             string         `json:"status"`
 }
 
-type currencyRecord struct {
-	ID             int64
-	PublicID       string
-	Code           string
-	Name           string
-	Description    string
-	Icon           string
-	Translations   map[string]any
-	TransferTaxBPS int
-	Status         string
-	DisplayOrder   int
-}
-
 func (s *Server) publicCurrencies(w http.ResponseWriter, r *http.Request) {
 	items, err := s.loadCurrencies(r.Context(), false)
 	if err != nil {
@@ -379,7 +366,7 @@ func (s *Server) purchaseShopItem(w http.ResponseWriter, r *http.Request) {
 func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		ItemCode string `json:"itemCode"`
-		FileID   int64  `json:"fileId"`
+		FileID   string `json:"fileId"`
 	}
 	if decodeJSON(r, &request) != nil {
 		writeError(w, http.StatusBadRequest, "invalid item use request")
@@ -418,13 +405,14 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch itemType {
 	case "profile_background":
-		if request.FileID <= 0 {
+		fileID, resolveErr := resolveOSSFilePublicID(r.Context(), tx, request.FileID)
+		if resolveErr != nil {
 			writeError(w, http.StatusBadRequest, "profile background file is required")
 			return
 		}
 		var objectKey, contentType string
 		if err = tx.QueryRow(r.Context(), `select object_key,content_type from oss_files
-			where id=$1 and uploader_id=$2 and status='active'`, request.FileID, userID).
+			where id=$1 and uploader_id=$2 and status='active'`, fileID, userID).
 			Scan(&objectKey, &contentType); err != nil {
 			writeError(w, http.StatusBadRequest, "profile background file was not found")
 			return
@@ -435,7 +423,7 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 		}
 		backgroundURL := buildPublicOSSURL(s.ossConfigFromSettings(r.Context()), objectKey)
 		if _, err = tx.Exec(r.Context(), `update users set profile_background_file_id=$2,
-			profile_background_url=$3,updated_at=now() where id=$1`, userID, request.FileID, backgroundURL); err != nil {
+			profile_background_url=$3,updated_at=now() where id=$1`, userID, fileID, backgroundURL); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to update profile background")
 			return
 		}
@@ -946,11 +934,11 @@ func (s *Server) recordOwnedContentDownload(
 	}
 	defer tx.Rollback(ctx)
 	var downloads int64
-	if err = tx.QueryRow(ctx, `insert into owned_content_downloads(
+	if err = tx.QueryRow(ctx, `insert into content_download_counters(
 		object_type,object_public_id,owner_id,downloads,last_download_at
 	) values($1,$2,$3,1,now())
 		on conflict(object_type,object_public_id,owner_id) do update
-		set downloads=owned_content_downloads.downloads+1,last_download_at=now()
+		set downloads=content_download_counters.downloads+1,last_download_at=now()
 		returning downloads`, objectType, objectPublicID, ownerID).Scan(&downloads); err != nil {
 		return err
 	}
@@ -961,11 +949,11 @@ func (s *Server) recordOwnedContentDownload(
 			return err
 		}
 		var rewardedSteps int64
-		if err = tx.QueryRow(ctx, `insert into owned_content_download_rewards(
+		if err = tx.QueryRow(ctx, `insert into content_download_reward_counters(
 			object_type,object_public_id,owner_id,currency_id,rewarded_steps
 		) values($1,$2,$3,$4,0)
 		on conflict(object_type,object_public_id,owner_id,currency_id) do update
-		set updated_at=owned_content_download_rewards.updated_at
+		set updated_at=content_download_reward_counters.updated_at
 		returning rewarded_steps`, objectType, objectPublicID, ownerID, currencyID).Scan(&rewardedSteps); err != nil {
 			return err
 		}
@@ -981,7 +969,7 @@ func (s *Server) recordOwnedContentDownload(
 		); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `update owned_content_download_rewards set rewarded_steps=$5,updated_at=now()
+		if _, err = tx.Exec(ctx, `update content_download_reward_counters set rewarded_steps=$5,updated_at=now()
 			where object_type=$1 and object_public_id=$2 and owner_id=$3 and currency_id=$4`,
 			objectType, objectPublicID, ownerID, currencyID, targetSteps); err != nil {
 			return err

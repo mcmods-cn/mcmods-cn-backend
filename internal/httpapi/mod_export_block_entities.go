@@ -72,7 +72,6 @@ type modExportBlockEntityModelRow struct {
 	ID                 string
 	ResourceSnapshotID string
 	RevisionID         string
-	BlockResourceID    string
 	BlockID            string
 	BlockEntityTypeID  string
 	ModelSource        string
@@ -143,7 +142,7 @@ func deriveModExportBlockEntityModels(files map[string]*zip.File, resolver catal
 		modelID := catalogSnapshotID("block-entity-model", revisionID, resource.ID, "")
 		row := modExportBlockEntityModelRow{
 			ID: modelID, ResourceSnapshotID: catalogSnapshotID("resource", revisionID, resource.ID, ""),
-			RevisionID: revisionID, BlockResourceID: resource.ID, BlockID: model.BlockID,
+			RevisionID: revisionID, BlockID: model.BlockID,
 			BlockEntityTypeID: model.BlockEntityType, ModelSource: strings.TrimSpace(model.ModelSource),
 			ModelAvailable: model.ModelAvailable, VariantCount: model.VariantCount, Data: string(modelRaw),
 			Variants: make([]modExportBlockEntityVariantRow, 0, len(model.Variants)),
@@ -225,25 +224,29 @@ func persistModExportBlockEntityModels(ctx context.Context, tx pgx.Tx, models []
 		return nil
 	}
 	if _, err := tx.Exec(ctx, `create temporary table import_block_entity_model_stage(
-		id text,resource_snapshot_id text,revision_id text,block_resource_id text,block_id text,
+		id text,resource_snapshot_id text,revision_id text,block_id text,
 		block_entity_type_id text,model_source text,model_available boolean,variant_count integer,data jsonb
 	) on commit drop`); err != nil {
 		return err
 	}
 	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"import_block_entity_model_stage"},
-		[]string{"id", "resource_snapshot_id", "revision_id", "block_resource_id", "block_id", "block_entity_type_id", "model_source", "model_available", "variant_count", "data"},
+		[]string{"id", "resource_snapshot_id", "revision_id", "block_id", "block_entity_type_id", "model_source", "model_available", "variant_count", "data"},
 		pgx.CopyFromSlice(len(models), func(index int) ([]any, error) {
 			row := models[index]
-			return []any{row.ID, row.ResourceSnapshotID, row.RevisionID, row.BlockResourceID, row.BlockID,
+			return []any{row.ID, row.ResourceSnapshotID, row.RevisionID, row.BlockID,
 				row.BlockEntityTypeID, row.ModelSource, row.ModelAvailable, row.VariantCount, row.Data}, nil
 		})); err != nil {
 		return fmt.Errorf("copy block entity models: %w", err)
 	}
 	tag, err := tx.Exec(ctx, `insert into block_entity_model_snapshots(id,resource_snapshot_id,revision_id,block_resource_id,
 		block_id,block_entity_type_id,model_source,model_available,variant_count,data)
-		select id,resource_snapshot_id,revision_id,block_resource_id,block_id,block_entity_type_id,model_source,
-		model_available,variant_count,data from import_block_entity_model_stage
+		select stage.id,stage.resource_snapshot_id,stage.revision_id,snapshot.resource_id,stage.block_id,
+		stage.block_entity_type_id,stage.model_source,stage.model_available,stage.variant_count,stage.data
+		from import_block_entity_model_stage stage
+		join resource_import_snapshots snapshot
+			on snapshot.id=stage.resource_snapshot_id and snapshot.revision_id=stage.revision_id
 		on conflict(revision_id,block_id) do update set block_entity_type_id=excluded.block_entity_type_id,
+		resource_snapshot_id=excluded.resource_snapshot_id,block_resource_id=excluded.block_resource_id,
 		model_source=excluded.model_source,model_available=excluded.model_available,variant_count=excluded.variant_count,data=excluded.data`)
 	if err != nil {
 		return fmt.Errorf("persist block entity models: %w", err)

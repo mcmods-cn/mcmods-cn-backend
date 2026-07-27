@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -89,7 +89,8 @@ func (s *Server) globalModTags(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 		items := make([]map[string]any, 0, limit)
 		for rows.Next() {
-			var entityID, publicID, registryName, tagID string
+			var entityID int64
+			var publicID, registryName, tagID string
 			var memberCount int
 			if err = rows.Scan(&entityID, &publicID, &registryName, &tagID, &memberCount); err != nil {
 				return nil, err
@@ -98,7 +99,7 @@ func (s *Server) globalModTags(w http.ResponseWriter, r *http.Request) {
 			if previewErr != nil {
 				return nil, previewErr
 			}
-			items = append(items, map[string]any{"entityId": entityID, "publicId": publicID, "registry": registryName,
+			items = append(items, map[string]any{"entityId": publicID, "publicId": publicID, "registry": registryName,
 				"tagId": tagID, "memberCount": memberCount, "previews": previews})
 		}
 		return map[string]any{"items": items, "total": total, "limit": limit, "offset": offset}, rows.Err()
@@ -108,21 +109,22 @@ func (s *Server) globalModTags(w http.ResponseWriter, r *http.Request) {
 func (s *Server) globalModTagDetail(w http.ResponseWriter, r *http.Request) {
 	registry := strings.TrimSpace(r.URL.Query().Get("registry"))
 	tagID := strings.TrimSpace(r.URL.Query().Get("tagId"))
-	entityID := strings.TrimSpace(r.URL.Query().Get("entityId"))
+	entityPublicID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("entityId")))
 	primary, secondary := requestedContentLocales(r)
 	limit := boundedLimit(r.URL.Query().Get("limit"), 80, 200)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
-	if (entityID == "" && (registry == "" || tagID == "")) || len(registry) > 160 || len(tagID) > 512 {
+	if (entityPublicID == "" && (registry == "" || tagID == "")) || len(registry) > 160 || len(tagID) > 512 {
 		writeError(w, http.StatusBadRequest, "tag identity is required")
 		return
 	}
-	key := fmt.Sprintf("global-tags:v3:detail:%s:%s:%s:%s:%s:%d:%d", entityID, registry, tagID, primary, secondary, limit, offset)
+	key := fmt.Sprintf("global-tags:v3:detail:%s:%s:%s:%s:%s:%d:%d", entityPublicID, registry, tagID, primary, secondary, limit, offset)
 	s.writeCachedCatalog(w, r, key, func(ctx context.Context) (any, error) {
+		var entityID int64
 		var publicID string
 		err := s.db.QueryRow(ctx, `select tag.entity_id,entity.public_id,tag.registry,tag.canonical_id
 			from catalog_tags tag join catalog_entities entity on entity.id=tag.entity_id
-			where (($1<>'' and tag.entity_id=$1) or ($1='' and tag.registry=$2 and tag.canonical_id=$3))`,
-			entityID, registry, tagID).Scan(&entityID, &publicID, &registry, &tagID)
+			where (($1<>'' and entity.public_id=$1) or ($1='' and tag.registry=$2 and tag.canonical_id=$3))`,
+			entityPublicID, registry, tagID).Scan(&entityID, &publicID, &registry, &tagID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errCatalogNotFound
 		}
@@ -150,34 +152,10 @@ func (s *Server) globalModTagDetail(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"entityId": entityID, "publicId": publicID, "registry": registry, "tagId": tagID,
+		return map[string]any{"entityId": publicID, "publicId": publicID, "registry": registry, "tagId": tagID,
 			"contentMarkdown": content, "contentLocale": contentLocale, "publishedRevisionId": publishedRevisionID,
 			"memberCount": total, "members": members, "limit": limit, "offset": offset}, nil
 	})
-}
-
-func (s *Server) updateGlobalModTag(w http.ResponseWriter, r *http.Request) {
-	var snapshot globalTagSnapshot
-	if err := decodeJSON(r, &snapshot); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	snapshot.EntityID = strings.TrimSpace(snapshot.EntityID)
-	snapshot.Registry = strings.TrimSpace(snapshot.Registry)
-	snapshot.TagID = strings.TrimSpace(snapshot.TagID)
-	snapshot.Locale = normalizeExportContentLocale(snapshot.Locale)
-	snapshot.MemberIDs = uniqueExportResourceIDs(snapshot.MemberIDs)
-	if (snapshot.EntityID == "" && (snapshot.Registry == "" || snapshot.TagID == "")) || len(snapshot.ContentMarkdown) > maxModExportEntryMarkdownBytes || len(snapshot.MemberIDs) > maxExportTagMemberCount {
-		writeError(w, http.StatusBadRequest, "invalid tag content")
-		return
-	}
-	if err := s.db.QueryRow(r.Context(), `select entity_id,registry,canonical_id from catalog_tags
-		where (($1<>'' and entity_id=$1) or ($1='' and registry=$2 and canonical_id=$3))`,
-		snapshot.EntityID, snapshot.Registry, snapshot.TagID).Scan(&snapshot.EntityID, &snapshot.Registry, &snapshot.TagID); err != nil {
-		writeError(w, http.StatusNotFound, "tag not found")
-		return
-	}
-	s.submitGlobalCatalogRevision(w, r, "catalog_tag", snapshot.EntityID, snapshot)
 }
 
 func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
@@ -211,12 +189,12 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 			coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
 			 where localization.catalog_entity_id=entity.id and localization.name<>''),imported.title_names,'{}'::jsonb),
 			case when exists(select 1 from recipe_type_catalysts catalyst where catalyst.recipe_type_id=recipe_type.entity_id)
-			 then coalesce((select jsonb_agg(jsonb_build_object('entityId',resource.entity_id,'publicId',resource_entity.public_id,
+			 then coalesce((select jsonb_agg(jsonb_build_object('entityId',resource_entity.public_id,'publicId',resource_entity.public_id,
 			  'kindCode',resource.kind_code,'canonicalId',resource.canonical_id,'item',resource.canonical_id,'resource_location',resource.canonical_id)
 			  order by catalyst.ordinal) from recipe_type_catalysts catalyst join game_resources resource on resource.entity_id=catalyst.resource_id
 			  join catalog_entities resource_entity on resource_entity.id=resource.entity_id where catalyst.recipe_type_id=recipe_type.entity_id),'[]'::jsonb)
 			 else coalesce(imported.catalysts,'[]'::jsonb) end,
-			coalesce(entity.published_revision_id::text,imported.revision_id::text,''),
+			coalesce((select content_revision.public_id from content_revisions content_revision where content_revision.id=entity.published_revision_id),imported.revision_id::text,''),
 			exists(select 1 from recipe_type_catalysts catalyst where catalyst.recipe_type_id=recipe_type.entity_id),
 			(select count(*)::int from recipes recipe join catalog_entities recipe_entity on recipe_entity.id=recipe.entity_id
 			 where recipe.recipe_type_id=recipe_type.entity_id and recipe_entity.status='active'),
@@ -234,7 +212,8 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 		items := make([]map[string]any, 0, limit)
 		for rows.Next() {
-			var entityID, publicID, id, revisionID string
+			var entityID int64
+			var publicID, id, revisionID string
 			var names, catalysts []byte
 			var canonicalCatalysts bool
 			var recipeCount, templateCount int
@@ -252,7 +231,7 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 					return nil, err
 				}
 			}
-			items = append(items, map[string]any{"entityId": entityID, "publicId": publicID, "recipeTypeId": id,
+			items = append(items, map[string]any{"entityId": publicID, "publicId": publicID, "recipeTypeId": id,
 				"canonicalId": id, "names": json.RawMessage(names), "recipeCount": recipeCount, "templateCount": templateCount,
 				"catalysts": decorated, "revisionId": revisionID})
 		}
@@ -262,16 +241,17 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
-	entityID := strings.TrimSpace(r.URL.Query().Get("entityId"))
+	entityPublicID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("entityId")))
 	primary, secondary := requestedContentLocales(r)
 	limit := boundedLimit(r.URL.Query().Get("limit"), 24, 80)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
-	if id == "" && entityID == "" {
+	if id == "" && entityPublicID == "" {
 		writeError(w, http.StatusBadRequest, "recipe type identity is required")
 		return
 	}
-	key := fmt.Sprintf("recipe-types:v6:detail:%s:%s:%s:%s:%d:%d", entityID, id, primary, secondary, limit, offset)
+	key := fmt.Sprintf("recipe-types:v7:detail:%s:%s:%s:%s:%d:%d", entityPublicID, id, primary, secondary, limit, offset)
 	s.writeCachedCatalog(w, r, key, func(ctx context.Context) (any, error) {
+		var entityID int64
 		var publicID, revisionID string
 		var names, catalysts []byte
 		var width, height, scale int
@@ -282,8 +262,8 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 			join recipe_type_import_snapshots snapshot on snapshot.revision_id=revision.id
 			join recipe_types recipe_type on recipe_type.entity_id=snapshot.recipe_type_id
 			join catalog_entities entity on entity.id=recipe_type.entity_id
-			where (($1<>'' and recipe_type.entity_id=$1) or ($1='' and recipe_type.canonical_id=$2))
-			order by coalesce(revision.activated_at,revision.created_at) desc limit 1`, entityID, id).Scan(
+			where (($1<>'' and entity.public_id=$1) or ($1='' and recipe_type.canonical_id=$2))
+			order by coalesce(revision.activated_at,revision.created_at) desc limit 1`, entityPublicID, id).Scan(
 			&entityID, &publicID, &id, &names, &catalysts, &revisionID, &width, &height, &scale)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errCatalogNotFound
@@ -291,12 +271,21 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			return nil, err
 		}
-		var catalystOverride []string
-		if overrideErr := s.db.QueryRow(ctx, `select catalyst_resource_ids from recipe_type_catalyst_overrides where recipe_type_id=$1`, entityID).Scan(&catalystOverride); overrideErr == nil {
-			catalysts, err = json.Marshal(catalystOverrideMaps(catalystOverride))
-			if err != nil {
-				return nil, err
-			}
+		var hasCatalystOverride bool
+		var overrideCatalysts []byte
+		if overrideErr := s.db.QueryRow(ctx, `select exists(select 1 from recipe_type_catalyst_overrides where recipe_type_id=$1),
+			coalesce(jsonb_agg(jsonb_build_object(
+			'entityId',entity.public_id,'publicId',entity.public_id,'item',resource.canonical_id,
+			'resource_location',resource.canonical_id,'canonicalId',resource.canonical_id,'kindCode',resource.kind_code)
+			order by requested.ordinal) filter(where resource.entity_id is not null),'[]'::jsonb)
+			from recipe_type_catalyst_overrides override
+			left join lateral unnest(override.catalyst_resource_ids) with ordinality requested(resource_id,ordinal) on true
+			left join game_resources resource on resource.entity_id=requested.resource_id
+			left join catalog_entities entity on entity.id=resource.entity_id
+			where override.recipe_type_id=$1`, entityID).Scan(&hasCatalystOverride, &overrideCatalysts); overrideErr != nil {
+			return nil, overrideErr
+		} else if hasCatalystOverride {
+			catalysts = overrideCatalysts
 		}
 		decoratedCatalysts, err := s.decorateCatalysts(ctx, catalysts, revisionID)
 		if err != nil {
@@ -306,11 +295,15 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			return nil, err
 		}
-		var total int
+		var total, templateCount int
 		if err = s.db.QueryRow(ctx, `with `+latestGlobalExportScopeCTE+`
-			select count(distinct snapshot.recipe_id)::int from latest_revisions revision
-			join recipe_import_snapshots snapshot on snapshot.revision_id=revision.id
-			join recipes recipe on recipe.entity_id=snapshot.recipe_id where recipe.recipe_type_id=$1`, entityID).Scan(&total); err != nil {
+			select
+				(select count(distinct snapshot.recipe_id)::int from latest_revisions revision
+				 join recipe_import_snapshots snapshot on snapshot.revision_id=revision.id
+				 join recipes recipe on recipe.entity_id=snapshot.recipe_id where recipe.recipe_type_id=$1),
+				(select count(*)::int from recipe_layout_templates template
+				 join catalog_entities entity on entity.id=template.entity_id
+				 where template.recipe_type_id=$1 and entity.status='active')`, entityID).Scan(&total, &templateCount); err != nil {
 			return nil, err
 		}
 		rows, err := s.db.Query(ctx, `with `+latestGlobalExportScopeCTE+`, selected as (
@@ -348,8 +341,8 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 			if layoutErr != nil {
 				return nil, layoutErr
 			}
-			recipeResult := map[string]any{"entityId": recipeEntityID, "publicId": recipePublicID,
-				"recipeKey": recipeEntityID, "recipeId": recipeID, "recipeIdSource": sourceKind,
+			recipeResult := map[string]any{"entityId": recipePublicID, "publicId": recipePublicID,
+				"recipeKey": recipePublicID, "recipeId": recipeID, "recipeIdSource": sourceKind,
 				"recipeIdCanonical": canonical, "semanticFingerprint": fingerprint, "recipeSnapshotId": snapshotID,
 				"revisionId": sourceRevisionID, "modSiteId": siteID, "note": note}
 			if layout != nil {
@@ -363,11 +356,12 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 		if err = s.decorateRecipeResources(ctx, recipes, primary, secondary); err != nil {
 			return nil, err
 		}
-		return map[string]any{"entityId": entityID, "publicId": publicID, "recipeTypeId": id,
+		return map[string]any{"entityId": publicID, "publicId": publicID, "recipeTypeId": id,
 			"names": json.RawMessage(names), "contentMarkdown": content, "contentLocale": contentLocale,
 			"publishedRevisionId": publishedRevisionID, "catalysts": decoratedCatalysts, "backgroundPath": "",
 			"revisionId": revisionID, "width": width, "height": height, "imageScale": scale,
-			"backgroundContainsIngredients": false, "recipes": recipes, "total": total, "limit": limit, "offset": offset}, rows.Err()
+			"backgroundContainsIngredients": false, "templateCount": templateCount,
+			"recipes": recipes, "total": total, "limit": limit, "offset": offset}, rows.Err()
 	})
 }
 
@@ -411,6 +405,8 @@ func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[stri
 				alternative["kindCode"] = source.KindCode
 				alternative["sourceRevisionId"] = source.RevisionID
 				alternative["sourceModSiteId"] = source.ModSiteID
+				alternative["sourceVersionPublicId"] = source.VersionPublicID
+				alternative["detailUrl"] = canonicalResourceDetailURL(source)
 				alternative["sourceRegistry"] = source.Registry
 				alternative["sourceObjectId"] = source.ObjectID
 				alternative["names"] = localizedExportResourceNames(source.Names, locales...)
@@ -442,52 +438,6 @@ func recipeAlternativeItemID(alternative map[string]any) string {
 	return itemID
 }
 
-func (s *Server) updateGlobalRecipeType(w http.ResponseWriter, r *http.Request) {
-	var snapshot globalRecipeTypeSnapshot
-	if err := decodeJSON(r, &snapshot); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	snapshot.EntityID = strings.TrimSpace(snapshot.EntityID)
-	snapshot.RecipeTypeID = strings.TrimSpace(snapshot.RecipeTypeID)
-	snapshot.Locale = normalizeExportContentLocale(snapshot.Locale)
-	if (snapshot.EntityID == "" && snapshot.RecipeTypeID == "") || len(snapshot.ContentMarkdown) > maxModExportEntryMarkdownBytes || len(snapshot.Catalysts) > 500 {
-		writeError(w, http.StatusBadRequest, "invalid recipe type content")
-		return
-	}
-	if err := s.db.QueryRow(r.Context(), `select entity_id,canonical_id from recipe_types
-		where (($1<>'' and entity_id=$1) or ($1='' and canonical_id=$2))`, snapshot.EntityID, snapshot.RecipeTypeID).
-		Scan(&snapshot.EntityID, &snapshot.RecipeTypeID); err != nil {
-		writeError(w, http.StatusNotFound, "recipe type not found")
-		return
-	}
-	s.submitGlobalCatalogRevision(w, r, "catalog_recipe_type", snapshot.EntityID, snapshot)
-}
-
-func (s *Server) updateGlobalRecipe(w http.ResponseWriter, r *http.Request) {
-	var snapshot globalRecipeSnapshot
-	if err := decodeJSON(r, &snapshot); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	pathKey := strings.TrimSpace(r.PathValue("recipeKey"))
-	if snapshot.RecipeKey != "" && strings.TrimSpace(snapshot.RecipeKey) != pathKey {
-		writeError(w, http.StatusBadRequest, "recipe key does not match request path")
-		return
-	}
-	snapshot.EntityID = pathKey
-	snapshot.RecipeKey = pathKey
-	if snapshot.EntityID == "" || len(snapshot.Note) > 4096 {
-		writeError(w, http.StatusBadRequest, "invalid recipe content")
-		return
-	}
-	if err := s.db.QueryRow(r.Context(), `select entity_id from recipes where entity_id=$1`, snapshot.EntityID).Scan(&snapshot.EntityID); err != nil {
-		writeError(w, http.StatusNotFound, "recipe not found")
-		return
-	}
-	s.submitGlobalCatalogRevision(w, r, "catalog_recipe", snapshot.EntityID, snapshot)
-}
-
 var errCatalogNotFound = errors.New("catalog entry not found")
 
 func (s *Server) writeCachedCatalog(w http.ResponseWriter, r *http.Request, key string, loader func(context.Context) (any, error)) {
@@ -510,30 +460,30 @@ func (s *Server) writeCachedCatalog(w http.ResponseWriter, r *http.Request, key 
 		return
 	}
 	if err != nil {
-		log.Printf("global catalog query %q failed: %v", key, err)
+		slog.Error("global catalog query failed", "cache_key", key, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to query catalog")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=30, stale-while-revalidate=90")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	writeJSONBytes(w, http.StatusOK, data)
 }
 
 func requestedContentLocales(r *http.Request) (string, string) {
 	primary := normalizeExportContentLocale(r.URL.Query().Get("locale"))
 	secondary := normalizeExportContentLocale(r.URL.Query().Get("secondaryLocale"))
 	if secondary == primary {
-		secondary = "en_us"
+		secondary = "en-US"
 	}
 	return primary, secondary
 }
 
-func (s *Server) localizedEntityContent(ctx context.Context, entityID, primary, secondary string) (string, string, *int64, error) {
-	locales := []string{primary, secondary, "en_us", "zh_cn"}
+func (s *Server) localizedEntityContent(ctx context.Context, entityID int64, primary, secondary string) (string, string, *string, error) {
+	locales := []string{primary, secondary, "en-US", "zh-CN"}
 	var content, locale string
-	var revisionID *int64
-	err := s.db.QueryRow(ctx, `select content_markdown,locale,published_revision_id from knowledge_pages
+	var revisionID *string
+	err := s.db.QueryRow(ctx, `select content_markdown,locale,
+		(select revision.public_id from content_revisions revision where revision.id=knowledge_pages.published_revision_id)
+		from knowledge_pages
 		where entity_id=$1 and locale=any($2::text[]) order by array_position($2::text[],locale) limit 1`, entityID, locales).
 		Scan(&content, &locale, &revisionID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -542,8 +492,8 @@ func (s *Server) localizedEntityContent(ctx context.Context, entityID, primary, 
 	return content, locale, revisionID, err
 }
 
-func (s *Server) globalTagMemberRows(ctx context.Context, tagEntityID, tagRegistry string, limit, offset int) ([]map[string]any, error) {
-	var override []string
+func (s *Server) globalTagMemberRows(ctx context.Context, tagEntityID int64, tagRegistry string, limit, offset int) ([]map[string]any, error) {
+	var override []int64
 	if err := s.db.QueryRow(ctx, `select resource_ids from tag_member_overrides where tag_id=$1`, tagEntityID).Scan(&override); err == nil {
 		return s.globalResourceRows(ctx, override, limit, offset)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -556,7 +506,7 @@ func (s *Server) globalTagMemberRows(ctx context.Context, tagEntityID, tagRegist
 		where tag_snapshot.tag_id=$1
 		order by member.raw_member_id limit $2 offset $3
 	)
-	select coalesce(resolved.entity_id,''),coalesce(entity.public_id,''),members.raw_member_id,
+	select coalesce(entity.public_id,''),coalesce(entity.public_id,''),members.raw_member_id,
 		coalesce(resolved.registry,''),coalesce(resolved.names,'{}'::jsonb),coalesce(resolved.revision_id::text,''),
 		coalesce(mod.slug,''),coalesce(resolved.icon_path,'')
 	from members
@@ -579,15 +529,15 @@ func (s *Server) globalTagMemberRows(ctx context.Context, tagEntityID, tagRegist
 	return scanGlobalResources(rows)
 }
 
-func (s *Server) globalResourceRows(ctx context.Context, resourceIDs []string, limit, offset int) ([]map[string]any, error) {
+func (s *Server) globalResourceRows(ctx context.Context, resourceIDs []int64, limit, offset int) ([]map[string]any, error) {
 	if offset >= len(resourceIDs) {
 		return []map[string]any{}, nil
 	}
 	selected := resourceIDs[offset:min(len(resourceIDs), offset+limit)]
 	rows, err := s.db.Query(ctx, `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
-	select resource.entity_id,entity.public_id,resource.canonical_id,snapshot.registry,snapshot.names,
+	select entity.public_id,entity.public_id,resource.canonical_id,snapshot.registry,snapshot.names,
 		snapshot.revision_id,mod.slug,snapshot.icon_path
-	from unnest($1::text[]) with ordinality requested(entity_id,ordinal)
+	from unnest($1::bigint[]) with ordinality requested(entity_id,ordinal)
 	join game_resources resource on resource.entity_id=requested.entity_id
 	join catalog_entities entity on entity.id=resource.entity_id
 	join latest_resource_snapshots snapshot on snapshot.resource_id=resource.entity_id
@@ -608,7 +558,7 @@ func scanGlobalResources(rows pgx.Rows) ([]map[string]any, error) {
 		if err := rows.Scan(&entityID, &publicID, &id, &registry, &names, &revisionID, &siteID, &iconPath); err != nil {
 			return nil, err
 		}
-		items = append(items, map[string]any{"entityId": entityID, "publicId": publicID, "id": id,
+		items = append(items, map[string]any{"entityId": publicID, "publicId": publicID, "id": id,
 			"registry": registry, "names": json.RawMessage(names), "revisionId": revisionID, "modSiteId": siteID, "iconPath": iconPath})
 	}
 	return items, rows.Err()
@@ -624,7 +574,8 @@ func (s *Server) decorateCatalysts(ctx context.Context, raw []byte, revisionID s
 		}
 	}
 	if len(entityIDs) > 0 {
-		rows, err := s.db.Query(ctx, `select entity_id::text,canonical_id from game_resources where entity_id::text=any($1::text[])`, entityIDs)
+		rows, err := s.db.Query(ctx, `select entity.public_id,resource.canonical_id from game_resources resource
+			join catalog_entities entity on entity.id=resource.entity_id where entity.public_id=any($1::text[])`, entityIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -668,71 +619,11 @@ func (s *Server) decorateCatalysts(ctx context.Context, raw []byte, revisionID s
 		catalyst["publicId"] = source.PublicID
 		catalyst["revisionId"] = source.RevisionID
 		catalyst["modSiteId"] = source.ModSiteID
+		catalyst["versionPublicId"] = source.VersionPublicID
+		catalyst["detailUrl"] = canonicalResourceDetailURL(source)
 		catalyst["iconPath"] = source.IconPath
 	}
 	return catalysts, nil
-}
-
-func catalystOverrideMaps(resourceIDs []string) []map[string]any {
-	result := make([]map[string]any, 0, len(resourceIDs))
-	for _, resourceID := range resourceIDs {
-		result = append(result, map[string]any{"entityId": resourceID})
-	}
-	return result
-}
-
-func (s *Server) submitGlobalCatalogRevision(w http.ResponseWriter, r *http.Request, aggregateType, entityID string, snapshot any) {
-	claims := currentClaims(r)
-	encoded, err := json.Marshal(snapshot)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid catalog content")
-		return
-	}
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to start catalog revision")
-		return
-	}
-	defer tx.Rollback(r.Context())
-	var baseRevisionID *int64
-	if err = tx.QueryRow(r.Context(), `select published_revision_id from catalog_entities where id=$1 for update`, entityID).Scan(&baseRevisionID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load published catalog revision")
-		return
-	}
-	status := "pending"
-	if hasPermission(claims.Permissions, "content.review") {
-		status = "approved"
-	}
-	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
-		EntityID: entityID, AggregateType: aggregateType, AggregateKey: entityID, BaseRevision: baseRevisionID,
-		Snapshot: encoded, Reason: "Update global catalog content", ActorID: claims.Subject, Source: "user", Status: status,
-		Metadata: map[string]any{"catalog": aggregateType, "entityId": entityID}, Request: r,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create catalog revision")
-		return
-	}
-	if status == "approved" {
-		if err = publishGlobalCatalogSnapshotTx(r.Context(), tx, created.RevisionID, aggregateType, encoded, claims.Subject); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to publish catalog revision")
-			return
-		}
-		if _, err = tx.Exec(r.Context(), `update catalog_entities set published_revision_id=$2,updated_at=now() where id=$1`, entityID, created.RevisionID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update published catalog revision")
-			return
-		}
-		if err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic approval", r); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to record catalog approval")
-			return
-		}
-	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to commit catalog revision")
-		return
-	}
-	s.cache.InvalidatePrefix(context.Background(), "global-tags:")
-	s.cache.InvalidatePrefix(context.Background(), "recipe-types:")
-	writeJSON(w, http.StatusAccepted, map[string]any{"status": status, "revisionId": created.RevisionID, "changeRequestId": created.ChangeRequestID})
 }
 
 func publishGlobalCatalogSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int64, aggregateType string, raw []byte, actorID int64) error {
@@ -742,11 +633,15 @@ func publishGlobalCatalogSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID i
 		if err := json.Unmarshal(raw, &snapshot); err != nil {
 			return err
 		}
-		if err := publishKnowledgePageTx(ctx, tx, snapshot.EntityID, snapshot.Locale, snapshot.ContentMarkdown, actorID, revisionID); err != nil {
+		var entityID int64
+		if err := tx.QueryRow(ctx, `select id from catalog_entities where public_id=$1 and entity_type='tag'`, snapshot.EntityID).Scan(&entityID); err != nil {
 			return err
 		}
-		var resourceIDs []string
-		if err := tx.QueryRow(ctx, `select coalesce(array_agg(resource.entity_id order by requested.ordinal) filter(where resource.entity_id is not null),'{}'::text[])
+		if err := publishKnowledgePageTx(ctx, tx, entityID, snapshot.Locale, snapshot.ContentMarkdown, actorID, revisionID); err != nil {
+			return err
+		}
+		var resourceIDs []int64
+		if err := tx.QueryRow(ctx, `select coalesce(array_agg(resource.entity_id order by requested.ordinal) filter(where resource.entity_id is not null),'{}'::bigint[])
 			from unnest($1::text[]) with ordinality requested(canonical_id,ordinal)
 			left join lateral (select resource.entity_id from game_resource_aliases alias
 				join game_resources resource on resource.entity_id=alias.resource_id
@@ -756,14 +651,18 @@ func publishGlobalCatalogSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID i
 		_, err := tx.Exec(ctx, `insert into tag_member_overrides(tag_id,resource_ids,updated_by,published_revision_id)
 			values($1,$2,$3,$4) on conflict(tag_id) do update set resource_ids=excluded.resource_ids,
 			updated_by=excluded.updated_by,published_revision_id=excluded.published_revision_id,updated_at=now()`,
-			snapshot.EntityID, resourceIDs, nullableActorID(actorID), revisionID)
+			entityID, resourceIDs, nullableActorID(actorID), revisionID)
 		return err
 	case "catalog_recipe_type":
 		var snapshot globalRecipeTypeSnapshot
 		if err := json.Unmarshal(raw, &snapshot); err != nil {
 			return err
 		}
-		if err := publishKnowledgePageTx(ctx, tx, snapshot.EntityID, snapshot.Locale, snapshot.ContentMarkdown, actorID, revisionID); err != nil {
+		var entityID int64
+		if err := tx.QueryRow(ctx, `select id from catalog_entities where public_id=$1 and entity_type='recipe_type'`, snapshot.EntityID).Scan(&entityID); err != nil {
+			return err
+		}
+		if err := publishKnowledgePageTx(ctx, tx, entityID, snapshot.Locale, snapshot.ContentMarkdown, actorID, revisionID); err != nil {
 			return err
 		}
 		canonicalIDs := make([]string, 0, len(snapshot.Catalysts))
@@ -772,8 +671,8 @@ func publishGlobalCatalogSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID i
 				canonicalIDs = append(canonicalIDs, id)
 			}
 		}
-		var resourceIDs []string
-		if err := tx.QueryRow(ctx, `select coalesce(array_agg(resource.entity_id order by requested.ordinal) filter(where resource.entity_id is not null),'{}'::text[])
+		var resourceIDs []int64
+		if err := tx.QueryRow(ctx, `select coalesce(array_agg(resource.entity_id order by requested.ordinal) filter(where resource.entity_id is not null),'{}'::bigint[])
 			from unnest($1::text[]) with ordinality requested(canonical_id,ordinal)
 			left join game_resource_aliases alias on alias.alias_id=requested.canonical_id and alias.kind_code='minecraft.item'
 			left join game_resources resource on resource.entity_id=alias.resource_id`, canonicalIDs).Scan(&resourceIDs); err != nil {
@@ -782,7 +681,7 @@ func publishGlobalCatalogSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID i
 		_, err := tx.Exec(ctx, `insert into recipe_type_catalyst_overrides(recipe_type_id,catalyst_resource_ids,updated_by,published_revision_id)
 			values($1,$2,$3,$4) on conflict(recipe_type_id) do update set catalyst_resource_ids=excluded.catalyst_resource_ids,
 			updated_by=excluded.updated_by,published_revision_id=excluded.published_revision_id,updated_at=now()`,
-			snapshot.EntityID, resourceIDs, nullableActorID(actorID), revisionID)
+			entityID, resourceIDs, nullableActorID(actorID), revisionID)
 		return err
 	case "catalog_recipe":
 		var snapshot globalRecipeSnapshot
@@ -794,18 +693,22 @@ func publishGlobalCatalogSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID i
 			encoded, _ := json.Marshal(snapshot.LayoutOverride)
 			override = string(encoded)
 		}
+		var entityID int64
+		if err := tx.QueryRow(ctx, `select id from catalog_entities where public_id=$1 and entity_type='recipe'`, snapshot.EntityID).Scan(&entityID); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx, `insert into recipe_content_overrides(recipe_id,note,layout_override,updated_by,published_revision_id)
 			values($1,$2,$3::jsonb,$4,$5) on conflict(recipe_id) do update set note=excluded.note,
 			layout_override=excluded.layout_override,updated_by=excluded.updated_by,
 			published_revision_id=excluded.published_revision_id,updated_at=now()`,
-			snapshot.EntityID, snapshot.Note, override, nullableActorID(actorID), revisionID)
+			entityID, snapshot.Note, override, nullableActorID(actorID), revisionID)
 		return err
 	default:
 		return errors.New("unsupported global catalog revision")
 	}
 }
 
-func publishKnowledgePageTx(ctx context.Context, tx pgx.Tx, entityID, locale, markdown string, actorID, revisionID int64) error {
+func publishKnowledgePageTx(ctx context.Context, tx pgx.Tx, entityID int64, locale, markdown string, actorID, revisionID int64) error {
 	_, err := tx.Exec(ctx, `insert into knowledge_pages(entity_id,locale,content_markdown,updated_by,published_revision_id)
 		values($1,$2,$3,$4,$5) on conflict(entity_id,locale) do update set content_markdown=excluded.content_markdown,
 		updated_by=excluded.updated_by,published_revision_id=excluded.published_revision_id,updated_at=now()`,

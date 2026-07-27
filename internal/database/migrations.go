@@ -2,32 +2,61 @@ package database
 
 func baselineSchemaStatements() []string {
 	statements := []string{
-		`create table public_routes (
-			public_id text primary key check (public_id ~ '^[a-z0-9]{9}$'),
-			entity_type text not null,
-			entity_key text not null,
-			canonical_path text not null default '',
-			created_at timestamptz not null default now(),
-			updated_at timestamptz not null default now(),
-			unique (entity_type, entity_key),
-			unique (public_id, entity_type)
+		`create table public_id_registry (
+			public_id varchar(16) primary key check (public_id ~ '^[a-z0-9]{9}$'),
+			created_at timestamptz not null default now()
 		)`,
 		`create or replace function new_public_id() returns text as $$
 		declare
 			alphabet constant text := 'abcdefghjkmnpqrstuvwxyz23456789';
 			candidate text;
+			entropy bytea;
 			position integer;
+			entropy_position integer;
+			entropy_value integer;
 		begin
 			loop
+				entropy := decode(replace(gen_random_uuid()::text, '-', ''), 'hex');
 				candidate := '';
-				for position in 1..9 loop
-					candidate := candidate || substr(alphabet, 1 + floor(random() * length(alphabet))::integer, 1);
+				position := 0;
+				entropy_position := 0;
+				while position < 9 loop
+					if entropy_position >= length(entropy) then
+						entropy := decode(replace(gen_random_uuid()::text, '-', ''), 'hex');
+						entropy_position := 0;
+					end if;
+					entropy_value := get_byte(entropy, entropy_position);
+					entropy_position := entropy_position + 1;
+					if entropy_value < 248 then
+						candidate := candidate || substr(alphabet, 1 + (entropy_value % length(alphabet)), 1);
+						position := position + 1;
+					end if;
 				end loop;
-				exit when not exists (select 1 from public_routes where public_id = candidate);
+				insert into public_id_registry(public_id) values(candidate)
+				on conflict do nothing;
+				exit when found;
 			end loop;
 			return candidate;
 		end;
 		$$ language plpgsql volatile`,
+		`create table public_routes (
+			public_id varchar(16) primary key check (public_id ~ '^[a-z0-9]{9}$'),
+			entity_type text not null,
+			internal_id bigint not null,
+			canonical_path text not null default '',
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			unique (entity_type, internal_id)
+		)`,
+		`create or replace function reserve_public_route_id() returns trigger as $$
+		begin
+			insert into public_id_registry(public_id) values(new.public_id)
+			on conflict do nothing;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_public_routes_reserve_id before insert on public_routes
+		 for each row execute function reserve_public_route_id()`,
 		`create table if not exists users (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check (public_id ~ '^[a-z0-9]{9}$'),
@@ -41,6 +70,7 @@ func baselineSchemaStatements() []string {
 			timezone text not null default 'Asia/Shanghai',
 			preferred_content_language text not null default 'zh-CN',
 			preferred_ui_language text not null default 'en-US',
+			auth_version bigint not null default 1 check(auth_version > 0),
 			security_score integer not null default 100,
 			registration_ip text not null default '',
 			registration_country_code text not null default '',
@@ -55,8 +85,8 @@ func baselineSchemaStatements() []string {
 		)`,
 		`create or replace function register_user_public_route() returns trigger as $$
 		begin
-			insert into public_routes(public_id, entity_type, entity_key, canonical_path)
-			values(new.public_id, 'user', new.id::text, '/user/' || new.id::text);
+			insert into public_routes(public_id, entity_type, internal_id, canonical_path)
+			values(new.public_id, 'user', new.id, '/user/' || new.public_id);
 			return new;
 		end;
 		$$ language plpgsql`,
@@ -70,6 +100,10 @@ func baselineSchemaStatements() []string {
 		$$ language plpgsql`,
 		`create trigger trg_users_remove_public_route after delete on users
 		 for each row execute function remove_user_public_route()`,
+		`create unique index uq_users_username_ci on users(lower(username))`,
+		`create unique index uq_users_email_ci on users(lower(email))`,
+		`create index idx_users_registration_ip_created
+			on users(registration_ip,created_at desc) where registration_ip<>''`,
 		`create table if not exists roles (
 			id bigserial primary key,
 			code text not null unique,
@@ -114,6 +148,60 @@ func baselineSchemaStatements() []string {
 			updated_at timestamptz not null default now(),
 			primary key (user_id, permission_id)
 		)`,
+		`create index if not exists idx_role_permissions_permission_role
+			on role_permissions(permission_id,role_id)`,
+		`create index if not exists idx_user_role_bindings_role_user
+			on user_role_bindings(role_id,user_id)`,
+		`create index if not exists idx_user_permissions_permission_user
+			on user_permissions(permission_id,user_id)`,
+		`create or replace function bump_direct_user_auth_version() returns trigger as $$
+		begin
+			update users set auth_version=auth_version+1,updated_at=now()
+			where id=coalesce(new.user_id,old.user_id);
+			if tg_op='DELETE' then return old; end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_user_role_bindings_auth_version
+			after insert or update or delete on user_role_bindings
+			for each row execute function bump_direct_user_auth_version()`,
+		`create trigger trg_user_permissions_auth_version
+			after insert or update or delete on user_permissions
+			for each row execute function bump_direct_user_auth_version()`,
+		`create or replace function bump_role_users_auth_version() returns trigger as $$
+		begin
+			if exists (
+				select 1 from roles
+				where id in (coalesce(new.role_id,old.role_id),coalesce(old.role_id,new.role_id))
+				  and (code like '%[%' or code like '%<%')
+			) then
+				update users set auth_version=auth_version+1,updated_at=now();
+			else
+				update users set auth_version=auth_version+1,updated_at=now()
+				where id in (
+					select binding.user_id from user_role_bindings binding
+					where binding.role_id in (coalesce(new.role_id,old.role_id),coalesce(old.role_id,new.role_id))
+				);
+			end if;
+			if tg_op='DELETE' then return old; end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_role_permissions_auth_version
+			after insert or update or delete on role_permissions
+			for each row execute function bump_role_users_auth_version()`,
+		`create or replace function bump_all_user_auth_versions() returns trigger as $$
+		begin
+			update users set auth_version=auth_version+1,updated_at=now();
+			return null;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_roles_auth_version
+			after update of code,parents,status on roles
+			for each statement execute function bump_all_user_auth_versions()`,
+		`create trigger trg_permissions_auth_version
+			after update of code on permissions
+			for each statement execute function bump_all_user_auth_versions()`,
 		`create table if not exists permission_audit_logs (
 			id bigserial primary key,
 			operator_id bigint references users(id) on delete set null,
@@ -134,16 +222,45 @@ func baselineSchemaStatements() []string {
 			reason text not null default '',
 			created_at timestamptz not null default now()
 		)`,
+		`create index if not exists idx_user_login_logs_failed_ip
+			on user_login_logs(ip,created_at desc) where success=false`,
+		`create index if not exists idx_user_login_logs_failed_account
+			on user_login_logs(lower(account),created_at desc) where success=false`,
+		`create table if not exists user_registration_attempts (
+			id bigserial primary key,
+			ip text not null,
+			created_at timestamptz not null default now()
+		)`,
+		`create index if not exists idx_user_registration_attempts_ip
+			on user_registration_attempts(ip,created_at desc)`,
 		`create table if not exists email_verification_codes (
 			id bigserial primary key,
 			email text not null,
 			purpose text not null,
 			code_hash text not null,
+			request_ip text not null default '',
 			expires_at timestamptz not null,
 			consumed_at timestamptz,
 			created_at timestamptz not null default now()
 		)`,
 		`create index if not exists idx_email_verification_codes_lookup on email_verification_codes (email, purpose, expires_at desc)`,
+		`create index if not exists idx_email_verification_codes_rate_email
+			on email_verification_codes(email,purpose,created_at desc)`,
+		`create index if not exists idx_email_verification_codes_rate_ip
+			on email_verification_codes(request_ip,created_at desc) where request_ip<>''`,
+		`create table if not exists auth_sessions (
+			id bigserial primary key,
+			session_hash bytea not null unique check(octet_length(session_hash)=32),
+			user_id bigint not null references users(id) on delete cascade,
+			auth_version bigint not null check(auth_version>0),
+			expires_at timestamptz not null,
+			revoked_at timestamptz,
+			created_at timestamptz not null default now()
+		)`,
+		`create index if not exists idx_auth_sessions_user_active
+			on auth_sessions(user_id,expires_at desc) where revoked_at is null`,
+		`create index if not exists idx_auth_sessions_expiry
+			on auth_sessions(expires_at)`,
 		`create table if not exists system_settings (
 			key text primary key,
 			value jsonb not null,
@@ -165,6 +282,7 @@ func baselineSchemaStatements() []string {
 		`create index if not exists idx_oauth_accounts_user_id on oauth_accounts (user_id)`,
 		`create table if not exists oss_files (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			bucket text not null default '',
 			endpoint text not null default '',
 			region text not null default '',
@@ -181,13 +299,33 @@ func baselineSchemaStatements() []string {
 			status text not null default 'active',
 			scan_status text not null default 'pending',
 			created_at timestamptz not null default now(),
-			updated_at timestamptz not null default now()
+			updated_at timestamptz not null default now(),
+			check(status in ('active','deleted','quarantined')),
+			check(scan_status in ('pending','clean','rejected','trusted_generated'))
 		)`,
 		`create index if not exists idx_oss_files_category on oss_files (category, created_at desc)`,
 		`create index if not exists idx_oss_files_uploader_created_at on oss_files (uploader_id, created_at desc)`,
 		`create index if not exists idx_oss_files_object_key_prefix on oss_files (object_key text_pattern_ops)`,
 		`create index if not exists idx_oss_files_sha256_size on oss_files (sha256, size_bytes) where sha256 <> ''`,
 		`create index if not exists idx_oss_files_sha256_source_size on oss_files (sha256, source_size_bytes) where sha256 <> ''`,
+		`create index if not exists idx_oss_files_scan_status on oss_files (scan_status, created_at desc) where status = 'active'`,
+		`create or replace function register_oss_file_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id,entity_type,internal_id)
+			values(new.public_id,'oss_file',new.id);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_oss_files_public_route after insert on oss_files
+			for each row execute function register_oss_file_public_route()`,
+		`create or replace function remove_oss_file_public_route() returns trigger as $$
+		begin
+			delete from public_routes where public_id=old.public_id and entity_type='oss_file';
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_oss_files_remove_public_route after delete on oss_files
+			for each row execute function remove_oss_file_public_route()`,
 		`create table blueprints (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check (public_id ~ '^[a-z0-9]{9}$'),
@@ -222,6 +360,7 @@ func baselineSchemaStatements() []string {
 			where original_file_id is not null and status <> 'deleted'`,
 		`create table blueprint_variants (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			blueprint_id bigint not null references blueprints(id) on delete cascade,
 			format text not null,
 			file_id bigint references oss_files(id) on delete set null,
@@ -239,6 +378,23 @@ func baselineSchemaStatements() []string {
 			check (status in ('queued','processing','ready','failed'))
 		)`,
 		`create index idx_blueprint_variants_blueprint on blueprint_variants(blueprint_id, original desc, created_at)`,
+		`create or replace function register_blueprint_variant_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id,entity_type,internal_id)
+			values(new.public_id,'blueprint_variant',new.id);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_blueprint_variants_public_route after insert on blueprint_variants
+			for each row execute function register_blueprint_variant_public_route()`,
+		`create or replace function remove_blueprint_variant_public_route() returns trigger as $$
+		begin
+			delete from public_routes where public_id=old.public_id and entity_type='blueprint_variant';
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_blueprint_variants_remove_public_route after delete on blueprint_variants
+			for each row execute function remove_blueprint_variant_public_route()`,
 		`create table blueprint_materials (
 			blueprint_id bigint not null references blueprints(id) on delete cascade,
 			block_state text not null,
@@ -250,6 +406,7 @@ func baselineSchemaStatements() []string {
 		`create index idx_blueprint_materials_count on blueprint_materials(blueprint_id, block_count desc)`,
 		`create table blueprint_jobs (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			blueprint_id bigint not null references blueprints(id) on delete cascade,
 			operation text not null,
 			target_format text not null default '',
@@ -266,9 +423,27 @@ func baselineSchemaStatements() []string {
 			check (status in ('queued','processing','completed','failed')),
 			check (progress between 0 and 100)
 		)`,
+		`create or replace function register_blueprint_job_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id,entity_type,internal_id)
+			values(new.public_id,'blueprint_job',new.id);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_blueprint_jobs_public_route after insert on blueprint_jobs
+			for each row execute function register_blueprint_job_public_route()`,
+		`create or replace function remove_blueprint_job_public_route() returns trigger as $$
+		begin
+			delete from public_routes where public_id=old.public_id and entity_type='blueprint_job';
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_blueprint_jobs_remove_public_route after delete on blueprint_jobs
+			for each row execute function remove_blueprint_job_public_route()`,
 		`create index idx_blueprint_jobs_queue on blueprint_jobs(status, created_at)`,
 		`create table favorite_collections (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			user_id bigint not null references users(id) on delete cascade,
 			name text not null,
 			is_default boolean not null default false,
@@ -280,15 +455,16 @@ func baselineSchemaStatements() []string {
 		`create table favorite_collection_items (
 			collection_id bigint not null references favorite_collections(id) on delete cascade,
 			entity_type text not null,
-			entity_key text not null,
+			entity_id bigint not null,
 			created_at timestamptz not null default now(),
-			primary key(collection_id,entity_type,entity_key)
+			primary key(collection_id,entity_type,entity_id),
+			foreign key(entity_type,entity_id) references public_routes(entity_type,internal_id) on delete cascade
 		)`,
-		`create index idx_favorite_items_entity on favorite_collection_items(entity_type,entity_key)`,
+		`create index idx_favorite_items_entity on favorite_collection_items(entity_type,entity_id)`,
 		`create or replace function register_blueprint_public_route() returns trigger as $$
 		begin
-			insert into public_routes(public_id, entity_type, entity_key, canonical_path)
-			values(new.public_id, 'blueprint', new.id::text, '/blueprints/' || new.public_id);
+			insert into public_routes(public_id, entity_type, internal_id, canonical_path)
+			values(new.public_id, 'blueprint', new.id, '/blueprints/' || new.public_id);
 			return new;
 		end;
 		$$ language plpgsql`,
@@ -385,6 +561,7 @@ func baselineSchemaStatements() []string {
 		`create index if not exists idx_user_follows_followed_created_at on user_follows (followed_id, created_at desc)`,
 		`create table if not exists notifications (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			recipient_id bigint references users(id) on delete cascade,
 			kind text not null,
 			title text not null default '',
@@ -396,6 +573,23 @@ func baselineSchemaStatements() []string {
 		)`,
 		`create index if not exists idx_notifications_recipient_updated_at on notifications (recipient_id, updated_at desc)`,
 		`create index if not exists idx_notifications_broadcast_updated_at on notifications (updated_at desc) where recipient_id is null`,
+		`create or replace function register_notification_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id,entity_type,internal_id,canonical_path)
+			values(new.public_id,'notification',new.id,'/messages');
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_notifications_public_route after insert on notifications
+			for each row execute function register_notification_public_route()`,
+		`create or replace function remove_notification_public_route() returns trigger as $$
+		begin
+			delete from public_routes where public_id=old.public_id and entity_type='notification';
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_notifications_remove_public_route after delete on notifications
+			for each row execute function remove_notification_public_route()`,
 		`create table if not exists notification_receipts (
 			notification_id bigint not null references notifications(id) on delete cascade,
 			user_id bigint not null references users(id) on delete cascade,
@@ -421,6 +615,7 @@ func baselineSchemaStatements() []string {
 		)`,
 		`create table if not exists direct_conversations (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			user_low_id bigint not null references users(id) on delete cascade,
 			user_high_id bigint not null references users(id) on delete cascade,
 			created_at timestamptz not null default now(),
@@ -431,6 +626,7 @@ func baselineSchemaStatements() []string {
 		`create index if not exists idx_direct_conversations_updated_at on direct_conversations (updated_at desc)`,
 		`create table if not exists direct_messages (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			conversation_id bigint not null references direct_conversations(id) on delete cascade,
 			sender_id bigint not null references users(id) on delete cascade,
 			recipient_id bigint not null references users(id) on delete cascade,
@@ -529,8 +725,8 @@ func baselineSchemaStatements() []string {
 		 for each row execute function prevent_mod_unique_id_update()`,
 		`create or replace function register_mod_public_route() returns trigger as $$
 		begin
-			insert into public_routes(public_id, entity_type, entity_key, canonical_path)
-			values(new.project_code, 'mod', new.id::text, '/mods/' || new.slug);
+			insert into public_routes(public_id, entity_type, internal_id, canonical_path)
+			values(new.project_code, 'mod', new.id, '/mods/' || new.slug);
 			return new;
 		end;
 		$$ language plpgsql`,
@@ -602,20 +798,20 @@ func baselineSchemaStatements() []string {
 		)`,
 		`create table if not exists content_creator_bindings (
 			id bigserial primary key,
-			subject_public_id text not null,
 			subject_type text not null,
+			subject_id bigint not null,
 			creator_id bigint not null,
 			role_id bigint,
 			name_snapshot text not null default '',
 			role_snapshot text not null default '',
 			display_order integer not null default 0,
 			created_at timestamptz not null default now(),
-			foreign key(subject_public_id,subject_type) references public_routes(public_id,entity_type) on delete cascade
+			foreign key(subject_type,subject_id) references public_routes(entity_type,internal_id) on delete cascade
 		)`,
 		`create unique index if not exists idx_content_creator_bindings_unique
-			on content_creator_bindings(subject_public_id,subject_type,creator_id,coalesce(role_id,0))`,
+			on content_creator_bindings(subject_type,subject_id,creator_id,coalesce(role_id,0))`,
 		`create index if not exists idx_content_creator_bindings_subject_order
-			on content_creator_bindings(subject_public_id,subject_type,display_order,id)`,
+			on content_creator_bindings(subject_type,subject_id,display_order,id)`,
 		`create table if not exists mod_relationships (
 			id bigserial primary key,
 			mod_id bigint not null references mods(id) on delete cascade,
@@ -664,6 +860,7 @@ func baselineSchemaStatements() []string {
 		`create index if not exists idx_mod_loader_compatibilities_lookup on mod_loader_compatibilities (loader, minecraft_version, mod_id)`,
 		`create table if not exists mod_membership_applications (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			mod_id bigint not null references mods(id) on delete cascade,
 			user_id bigint not null references users(id) on delete cascade,
 			kind text not null,
@@ -679,6 +876,23 @@ func baselineSchemaStatements() []string {
 		)`,
 		`create unique index if not exists idx_mod_membership_applications_pending on mod_membership_applications (mod_id, user_id, kind) where status = 'pending'`,
 		`create index if not exists idx_mod_membership_applications_review on mod_membership_applications (kind, status, created_at)`,
+		`create or replace function register_mod_application_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id,entity_type,internal_id)
+			values(new.public_id,'mod_application',new.id);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mod_applications_public_route after insert on mod_membership_applications
+			for each row execute function register_mod_application_public_route()`,
+		`create or replace function remove_mod_application_public_route() returns trigger as $$
+		begin
+			delete from public_routes where public_id=old.public_id and entity_type='mod_application';
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mod_applications_remove_public_route after delete on mod_membership_applications
+			for each row execute function remove_mod_application_public_route()`,
 		`create table if not exists mod_application_attachments (
 			application_id bigint not null references mod_membership_applications(id) on delete cascade,
 			oss_file_id bigint not null references oss_files(id) on delete restrict,
@@ -713,7 +927,7 @@ func baselineSchemaStatements() []string {
 			id text primary key,
 			mod_id bigint not null references mods(id) on delete cascade,
 			package_id text not null references catalog_import_packages(id) on delete cascade,
-			target_version_public_id text not null,
+			target_version_id bigint not null,
 			overwrite_existing boolean not null default false,
 			importer_version text not null,
 			status text not null default 'queued',
@@ -729,7 +943,7 @@ func baselineSchemaStatements() []string {
 			run_token text not null default '',
 			attempt_count integer not null default 0,
 			updated_at timestamptz not null default now(),
-			unique (mod_id, package_id, importer_version, target_version_public_id, overwrite_existing),
+			unique (mod_id, package_id, importer_version, target_version_id, overwrite_existing),
 			check (status in ('queued','validating','importing','ready','partial','failed','cancelled'))
 		)`,
 		`create index if not exists idx_catalog_import_jobs_status_created on catalog_import_jobs(status, created_at)`,
@@ -740,7 +954,7 @@ func baselineSchemaStatements() []string {
 			mod_id bigint not null references mods(id) on delete cascade,
 			package_id text not null references catalog_import_packages(id) on delete restrict,
 			job_id text not null references catalog_import_jobs(id) on delete cascade,
-			target_version_public_id text not null,
+			target_version_id bigint not null,
 			revision_no bigint not null,
 			status text not null default 'staging',
 			minecraft_version text not null,
@@ -753,11 +967,11 @@ func baselineSchemaStatements() []string {
 			is_active boolean not null default false,
 			created_at timestamptz not null default now(),
 			activated_at timestamptz,
-			unique (mod_id, target_version_public_id, source_kind, source_namespace, revision_no),
+			unique (mod_id, target_version_id, source_kind, source_namespace, revision_no),
 			check (status in ('staging','ready','partial','rejected','superseded'))
 		)`,
 		`create unique index if not exists idx_catalog_import_revisions_active
-		 on catalog_import_revisions(mod_id, target_version_public_id, source_kind, source_namespace) where is_active`,
+		 on catalog_import_revisions(mod_id, target_version_id, source_kind, source_namespace) where is_active`,
 		`create index if not exists idx_catalog_import_revisions_package on catalog_import_revisions(package_id)`,
 		`create index if not exists idx_catalog_import_revisions_import_run on catalog_import_revisions(import_run_token) where status='staging'`,
 		`create table if not exists catalog_import_locales (
@@ -842,7 +1056,8 @@ func baselineSchemaStatements() []string {
 		)`,
 		`create index if not exists idx_nats_outbox_pending on nats_outbox(created_at) where published_at is null`,
 		`create table if not exists mod_metadata_import_jobs (
-			id text primary key,
+			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			user_id bigint not null references users(id) on delete cascade,
 			provider text not null,
 			source_url text not null,
@@ -858,6 +1073,23 @@ func baselineSchemaStatements() []string {
 			check (status in ('queued','running','completed','failed')),
 			check (progress between 0 and 100)
 		)`,
+		`create or replace function register_mod_metadata_import_job_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id,entity_type,internal_id)
+			values(new.public_id,'mod_metadata_import_job',new.id);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mod_metadata_import_jobs_public_route after insert on mod_metadata_import_jobs
+			for each row execute function register_mod_metadata_import_job_public_route()`,
+		`create or replace function remove_mod_metadata_import_job_public_route() returns trigger as $$
+		begin
+			delete from public_routes where public_id=old.public_id and entity_type='mod_metadata_import_job';
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mod_metadata_import_jobs_remove_public_route after delete on mod_metadata_import_jobs
+			for each row execute function remove_mod_metadata_import_job_public_route()`,
 		`create index if not exists idx_mod_metadata_import_jobs_user_created on mod_metadata_import_jobs(user_id, created_at desc)`,
 		`create index if not exists idx_mod_metadata_import_jobs_queued on mod_metadata_import_jobs(created_at) where status='queued'`,
 	}

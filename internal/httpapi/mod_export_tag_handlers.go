@@ -31,7 +31,7 @@ func (s *Server) modExportTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `
-		select tag.entity_id,entity.public_id,tag.registry,tag.canonical_id,snapshot.member_count
+		select entity.public_id,entity.public_id,tag.registry,tag.canonical_id,snapshot.member_count
 		from tag_import_snapshots snapshot
 		join catalog_tags tag on tag.entity_id=snapshot.tag_id
 		join catalog_entities entity on entity.id=tag.entity_id
@@ -79,12 +79,13 @@ func (s *Server) modExportTagDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	var memberCount int
 	var publicID string
+	var tagInternalID int64
 	if err := s.db.QueryRow(r.Context(), `select tag.entity_id,entity.public_id,tag.canonical_id,snapshot.member_count
 		from tag_import_snapshots snapshot join catalog_tags tag on tag.entity_id=snapshot.tag_id
 		join catalog_entities entity on entity.id=tag.entity_id
 		where snapshot.revision_id=$1 and tag.registry=$2
-		and (($3<>'' and tag.entity_id=$3) or ($3='' and tag.canonical_id=$4))`,
-		revisionID, registry, entityID, tagID).Scan(&entityID, &publicID, &tagID, &memberCount); err != nil {
+		and (($3<>'' and entity.public_id=$3) or ($3='' and tag.canonical_id=$4))`,
+		revisionID, registry, entityID, tagID).Scan(&tagInternalID, &publicID, &tagID, &memberCount); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "tag not found")
 		} else {
@@ -94,9 +95,9 @@ func (s *Server) modExportTagDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	locale := normalizeExportContentLocale(r.URL.Query().Get("locale"))
 	rows, err := s.db.Query(r.Context(), `
-		select member.raw_member_id,coalesce(resource.entity_id,''),coalesce(entity.public_id,''),
-		coalesce(snapshot.registry,''),
-		jsonb_strip_nulls(jsonb_build_object('zh_cn',snapshot.names->>'zh_cn','en_us',snapshot.names->>'en_us',$3::text,snapshot.names->>($3::text))),
+		select member.raw_member_id,coalesce(entity.public_id,''),coalesce(entity.public_id,''),
+		coalesce(snapshot.registry,''),coalesce(snapshot.translation_key,''),
+		coalesce(snapshot.names,'{}'::jsonb),
 		coalesce(snapshot.icon_path,'')
 		from tag_import_members member
 		join tag_import_snapshots tag_snapshot on tag_snapshot.id=member.tag_snapshot_id
@@ -106,7 +107,7 @@ func (s *Server) modExportTagDetail(w http.ResponseWriter, r *http.Request) {
 			where candidate.resource_id=resource.entity_id
 			order by (candidate.revision_id=$1) desc,candidate.created_at desc limit 1) snapshot on true
 		where tag_snapshot.revision_id=$1 and tag_snapshot.tag_id=$2
-		order by member.ordinal`, revisionID, entityID, locale)
+		order by member.ordinal`, revisionID, tagInternalID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read tag members")
 		return
@@ -114,17 +115,21 @@ func (s *Server) modExportTagDetail(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	members := make([]map[string]any, 0, memberCount)
 	for rows.Next() {
-		var memberID, memberEntityID, memberPublicID, memberRegistry, iconPath string
+		var memberID, memberEntityID, memberPublicID, memberRegistry, translationKey, iconPath string
 		var names []byte
-		if err = rows.Scan(&memberID, &memberEntityID, &memberPublicID, &memberRegistry, &names, &iconPath); err != nil {
+		if err = rows.Scan(&memberID, &memberEntityID, &memberPublicID, &memberRegistry, &translationKey, &names, &iconPath); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode tag member")
 			return
 		}
 		var decodedNames map[string]string
 		_ = json.Unmarshal(names, &decodedNames)
 		members = append(members, map[string]any{"entityId": memberEntityID, "publicId": memberPublicID, "id": memberID,
-			"registry": memberRegistry, "names": decodedNames, "iconPath": iconPath})
+			"registry": memberRegistry, "translationKey": translationKey, "names": decodedNames, "iconPath": iconPath})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"entityId": entityID, "publicId": publicID, "id": tagID,
+	if err = s.decorateExportTranslationNames(r.Context(), revisionID, locale, members); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve tag member translations")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entityId": publicID, "publicId": publicID, "id": tagID,
 		"registry": registry, "memberCount": memberCount, "members": members})
 }

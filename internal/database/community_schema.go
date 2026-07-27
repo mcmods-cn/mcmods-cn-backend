@@ -4,6 +4,7 @@ func communitySchemaStatements() []string {
 	return []string{
 		`create table if not exists creator_role_definitions (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			code text not null unique,
 			name text not null,
 			description text not null default '',
@@ -26,6 +27,26 @@ func communitySchemaStatements() []string {
 		 on conflict(id) do update set code=excluded.code,name=excluded.name,description=excluded.description`,
 		`select setval(pg_get_serial_sequence('creator_role_definitions','id'),
 			greatest(9,coalesce((select max(id) from creator_role_definitions),9)),true)`,
+		`create or replace function register_creator_role_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id,entity_type,internal_id)
+			values(new.public_id,'creator_role',new.id);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_creator_roles_public_route after insert on creator_role_definitions
+			for each row execute function register_creator_role_public_route()`,
+		`create or replace function remove_creator_role_public_route() returns trigger as $$
+		begin
+			delete from public_routes where public_id=old.public_id and entity_type='creator_role';
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_creator_roles_remove_public_route after delete on creator_role_definitions
+			for each row execute function remove_creator_role_public_route()`,
+		`insert into public_routes(public_id,entity_type,internal_id)
+			select public_id,'creator_role',id from creator_role_definitions
+			on conflict do nothing`,
 		`create table if not exists creators (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
@@ -87,6 +108,7 @@ func communitySchemaStatements() []string {
 			on creator_team_members(member_creator_id,team_id)`,
 		`create table if not exists creator_claims (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			creator_id bigint not null references creators(id) on delete cascade,
 			user_id bigint not null references users(id) on delete cascade,
 			proof_markdown text not null default '',
@@ -101,6 +123,23 @@ func communitySchemaStatements() []string {
 			on creator_claims(creator_id,user_id) where status='pending'`,
 		`create index if not exists idx_creator_claims_queue
 			on creator_claims(status,created_at,id)`,
+		`create or replace function register_creator_claim_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id,entity_type,internal_id)
+			values(new.public_id,'creator_claim',new.id);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_creator_claims_public_route after insert on creator_claims
+			for each row execute function register_creator_claim_public_route()`,
+		`create or replace function remove_creator_claim_public_route() returns trigger as $$
+		begin
+			delete from public_routes where public_id=old.public_id and entity_type='creator_claim';
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_creator_claims_remove_public_route after delete on creator_claims
+			for each row execute function remove_creator_claim_public_route()`,
 		`do $$ begin
 			alter table content_creator_bindings add constraint fk_content_creator_bindings_creator
 				foreign key(creator_id) references creators(id) on delete restrict;
@@ -110,11 +149,11 @@ func communitySchemaStatements() []string {
 				foreign key(role_id) references creator_role_definitions(id) on delete set null;
 			exception when duplicate_object then null; end $$`,
 		`create index if not exists idx_content_creator_bindings_creator
-			on content_creator_bindings(creator_id,subject_type,subject_public_id)`,
+			on content_creator_bindings(creator_id,subject_type,subject_id)`,
 		`create or replace function register_creator_public_route() returns trigger as $$
 		begin
-			insert into public_routes(public_id,entity_type,entity_key,canonical_path)
-			values(new.public_id,new.kind,new.id::text,
+			insert into public_routes(public_id,entity_type,internal_id,canonical_path)
+			values(new.public_id,new.kind,new.id,
 				case when new.kind='team' then '/teams/' else '/authors/' end || new.public_id);
 			return new;
 		end;
@@ -124,7 +163,7 @@ func communitySchemaStatements() []string {
 			for each row execute function register_creator_public_route()`,
 		`create or replace function remove_creator_public_route() returns trigger as $$
 		begin
-			delete from public_routes where public_id=old.public_id and entity_key=old.id::text;
+			delete from public_routes where public_id=old.public_id and internal_id=old.id;
 			return old;
 		end;
 		$$ language plpgsql`,
@@ -157,9 +196,12 @@ func communitySchemaStatements() []string {
 		 on conflict(id) do update set code=excluded.code,name=excluded.name`,
 		`create table if not exists user_activity_events (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			user_id bigint references users(id) on delete set null,
+			user_public_id text not null default '',
 			action_id smallint not null references activity_actions(id) on delete restrict,
 			object_type_id smallint not null references activity_object_types(id) on delete restrict,
+			object_id bigint,
 			object_public_id text not null default '',
 			markdown_added_bytes integer not null default 0 check(markdown_added_bytes >= 0),
 			metadata jsonb not null default '{}'::jsonb,
@@ -168,7 +210,7 @@ func communitySchemaStatements() []string {
 		`create index if not exists idx_activity_user_time
 			on user_activity_events(user_id,occurred_at desc,id desc)`,
 		`create index if not exists idx_activity_object_time
-			on user_activity_events(object_type_id,object_public_id,occurred_at desc,id desc)`,
+			on user_activity_events(object_type_id,object_id,occurred_at desc,id desc)`,
 		`create index if not exists idx_activity_action_time
 			on user_activity_events(action_id,occurred_at desc,id desc)`,
 		`create index if not exists idx_activity_time_brin
@@ -217,24 +259,26 @@ func communitySchemaStatements() []string {
 			on currency_transactions(user_id,currency_id,created_at desc,id desc)`,
 		`create index if not exists idx_currency_transactions_reference
 			on currency_transactions(reference_type,reference_key,created_at desc)`,
-		`create table if not exists owned_content_downloads (
+		`create table if not exists content_download_counters (
 			object_type text not null,
-			object_public_id text not null,
+			object_id bigint not null,
 			owner_id bigint not null references users(id) on delete cascade,
 			downloads bigint not null default 0 check(downloads >= 0),
 			last_download_at timestamptz,
-			primary key(object_type,object_public_id,owner_id)
+			primary key(object_type,object_id,owner_id),
+			foreign key(object_type,object_id) references public_routes(entity_type,internal_id) on delete cascade
 		)`,
-		`create index if not exists idx_owned_content_downloads_owner
-			on owned_content_downloads(owner_id,downloads desc)`,
-		`create table if not exists owned_content_download_rewards (
+		`create index if not exists idx_content_download_counters_owner
+			on content_download_counters(owner_id,downloads desc)`,
+		`create table if not exists content_download_reward_counters (
 			object_type text not null,
-			object_public_id text not null,
+			object_id bigint not null,
 			owner_id bigint not null references users(id) on delete cascade,
 			currency_id bigint not null references currencies(id) on delete restrict,
 			rewarded_steps bigint not null default 0 check(rewarded_steps >= 0),
 			updated_at timestamptz not null default now(),
-			primary key(object_type,object_public_id,owner_id,currency_id)
+			primary key(object_type,object_id,owner_id,currency_id),
+			foreign key(object_type,object_id) references public_routes(entity_type,internal_id) on delete cascade
 		)`,
 		`create table if not exists user_checkins (
 			user_id bigint not null references users(id) on delete cascade,
@@ -364,8 +408,8 @@ func communitySchemaStatements() []string {
 		begin
 			route_type := TG_ARGV[0];
 			route_path := TG_ARGV[1] || new.public_id;
-			insert into public_routes(public_id,entity_type,entity_key,canonical_path)
-			values(new.public_id,route_type,new.id::text,route_path);
+			insert into public_routes(public_id,entity_type,internal_id,canonical_path)
+			values(new.public_id,route_type,new.id,route_path);
 			return new;
 		end;
 		$$ language plpgsql`,
@@ -378,14 +422,14 @@ func communitySchemaStatements() []string {
 		`drop trigger if exists trg_task_definitions_public_route on task_definitions`,
 		`create trigger trg_task_definitions_public_route after insert on task_definitions
 			for each row execute function register_community_public_route('task','/tasks/')`,
-		`insert into public_routes(public_id,entity_type,entity_key,canonical_path)
-		 select public_id,'currency',id::text,'/economy/currencies/'||public_id from currencies
+		`insert into public_routes(public_id,entity_type,internal_id,canonical_path)
+		 select public_id,'currency',id,'/economy/currencies/'||public_id from currencies
 		 on conflict(public_id) do nothing`,
-		`insert into public_routes(public_id,entity_type,entity_key,canonical_path)
-		 select public_id,'shop_item',id::text,'/shop/'||public_id from shop_items
+		`insert into public_routes(public_id,entity_type,internal_id,canonical_path)
+		 select public_id,'shop_item',id,'/shop/'||public_id from shop_items
 		 on conflict(public_id) do nothing`,
-		`insert into public_routes(public_id,entity_type,entity_key,canonical_path)
-		 select public_id,'task',id::text,'/tasks/'||public_id from task_definitions
+		`insert into public_routes(public_id,entity_type,internal_id,canonical_path)
+		 select public_id,'task',id,'/tasks/'||public_id from task_definitions
 		 on conflict(public_id) do nothing`,
 	}
 }

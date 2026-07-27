@@ -181,14 +181,6 @@ func minecraftTextureTargetDimensions(kind string, width, height int) (int, int,
 	}
 }
 
-func (s *Server) persistMinecraftTextureBlob(ctx context.Context, ownerID, fileID int64, kind string) (minecraftTextureBlob, error) {
-	texture, _, _, err := s.loadMinecraftTextureUpload(ctx, ownerID, fileID, kind)
-	if err != nil {
-		return minecraftTextureBlob{}, err
-	}
-	return s.persistSanitizedMinecraftTexture(ctx, ownerID, texture)
-}
-
 func (s *Server) loadMinecraftTextureUpload(ctx context.Context, ownerID, fileID int64, kind string) (sanitizedMinecraftTexture, *aliyunoss.Client, ossConfigPayload, error) {
 	var texture sanitizedMinecraftTexture
 	var emptyConfig ossConfigPayload
@@ -222,14 +214,6 @@ func (s *Server) loadMinecraftTextureUpload(ctx context.Context, ownerID, fileID
 		return texture, nil, emptyConfig, err
 	}
 	return texture, client, cfg, nil
-}
-
-func (s *Server) persistSanitizedMinecraftTexture(ctx context.Context, ownerID int64, texture sanitizedMinecraftTexture) (minecraftTextureBlob, error) {
-	client, cfg, err := s.ossClient(ctx)
-	if err != nil {
-		return minecraftTextureBlob{}, err
-	}
-	return persistSanitizedMinecraftTextureWithStore(ctx, s.db, client, cfg, ownerID, texture)
 }
 
 func persistSanitizedMinecraftTextureTx(ctx context.Context, tx pgx.Tx, client *aliyunoss.Client, cfg ossConfigPayload, ownerID int64, texture sanitizedMinecraftTexture) (minecraftTextureBlob, error) {

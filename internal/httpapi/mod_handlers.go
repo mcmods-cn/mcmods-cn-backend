@@ -24,19 +24,19 @@ type modLinkPayload struct {
 }
 
 type modAuthorPayload struct {
-	CreatorID string `json:"creatorId,omitempty"`
-	Kind      string `json:"kind,omitempty"`
-	Name      string `json:"name,omitempty"`
-	AvatarURL string `json:"avatarUrl,omitempty"`
-	RoleID    *int64 `json:"roleId,omitempty"`
-	Role      string `json:"role,omitempty"`
+	CreatorID string  `json:"creatorId,omitempty"`
+	Kind      string  `json:"kind,omitempty"`
+	Name      string  `json:"name,omitempty"`
+	AvatarURL string  `json:"avatarUrl,omitempty"`
+	RoleID    *string `json:"roleId,omitempty"`
+	Role      string  `json:"role,omitempty"`
 }
 
 type modRelationshipPayload struct {
-	Type           string `json:"type"`
-	RelatedModID   *int64 `json:"relatedModId,omitempty"`
-	RelatedModName string `json:"relatedModName"`
-	Notes          string `json:"notes"`
+	Type               string `json:"type"`
+	RelatedModPublicID string `json:"relatedModId,omitempty"`
+	RelatedModName     string `json:"relatedModName"`
+	Notes              string `json:"notes"`
 }
 
 type modRelationshipGroupPayload struct {
@@ -54,7 +54,7 @@ type modLoaderCompatibilityPayload struct {
 }
 
 type modIdentifierPayload struct {
-	ID                  int64    `json:"id,omitempty"`
+	ID                  int64    `json:"-"`
 	Identifier          string   `json:"identifier"`
 	Primary             bool     `json:"primary"`
 	MinecraftVersionMin string   `json:"minecraftVersionMin,omitempty"`
@@ -64,7 +64,7 @@ type modIdentifierPayload struct {
 
 type modGalleryImagePayload struct {
 	PublicID    string `json:"publicId,omitempty"`
-	FileID      int64  `json:"fileId"`
+	FileID      string `json:"fileId"`
 	Name        string `json:"name,omitempty"`
 	ContentType string `json:"contentType,omitempty"`
 	SizeBytes   int64  `json:"sizeBytes,omitempty"`
@@ -104,7 +104,8 @@ type createModRequest struct {
 }
 
 type modResponse struct {
-	ID                  int64                           `json:"id"`
+	ID                  int64                           `json:"-"`
+	PublicID            string                          `json:"id"`
 	UniqueID            string                          `json:"uniqueId"`
 	SiteID              string                          `json:"siteId"`
 	PrimaryName         string                          `json:"primaryName"`
@@ -131,11 +132,12 @@ type modResponse struct {
 	SearchKeywords      []string                        `json:"searchKeywords"`
 	SubmissionMethod    string                          `json:"submissionMethod"`
 	ReviewStatus        string                          `json:"reviewStatus"`
-	CreatedBy           *int64                          `json:"createdBy,omitempty"`
+	CreatedByInternal   *int64                          `json:"-"`
+	CreatedBy           string                          `json:"createdBy,omitempty"`
 	CreatedAt           time.Time                       `json:"createdAt"`
 	UpdatedAt           time.Time                       `json:"updatedAt"`
 	PublishedAt         *time.Time                      `json:"publishedAt,omitempty"`
-	PublishedRevisionID *int64                          `json:"publishedRevisionId,omitempty"`
+	PublishedRevisionID *string                         `json:"publishedRevisionId,omitempty"`
 	Tags                []string                        `json:"tags"`
 	Authors             []modAuthorPayload              `json:"authors"`
 	Links               []modLinkPayload                `json:"links"`
@@ -275,9 +277,14 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, resolveErr.Error())
 			return
 		}
+		roleID, resolveErr := creatorRoleInternalIDTx(r.Context(), tx, author.RoleID)
+		if resolveErr != nil {
+			writeError(w, http.StatusBadRequest, "selected creator role does not exist")
+			return
+		}
 		if _, err = tx.Exec(r.Context(), `insert into content_creator_bindings(
-			subject_public_id,subject_type,creator_id,role_id,name_snapshot,role_snapshot,display_order
-		) values ($1,'mod',$2,$3,$4,$5,$6)`, uniqueID, creatorID, author.RoleID, nameSnapshot, roleSnapshot, index); err != nil {
+			subject_id,subject_type,creator_id,role_id,name_snapshot,role_snapshot,display_order
+		) values ($1,'mod',$2,$3,$4,$5,$6)`, modID, creatorID, roleID, nameSnapshot, roleSnapshot, index); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存作者资料失败")
 			return
 		}
@@ -302,8 +309,10 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	createdRevision, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
+		EntityType:    "mod",
+		EntityID:      modID,
 		AggregateType: "mod",
-		AggregateKey:  strconv.FormatInt(modID, 10),
+		AggregateKey:  uniqueID,
 		Snapshot:      snapshot,
 		ActorID:       claims.Subject,
 		Source:        req.SubmissionMethod,
@@ -358,7 +367,7 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		        or m.abbreviation ilike '%' || $2 || '%' or m.mod_id ilike '%' || $2 || '%' or $2 = any(m.search_keywords)
 		        or exists (select 1 from mod_identifiers identifier where identifier.mod_id=m.id and identifier.identifier ilike '%' || $2 || '%')
 		        or exists (select 1 from content_creator_bindings a join creators creator on creator.id=a.creator_id
-		                   where a.subject_public_id=m.project_code and a.subject_type='mod' and creator.name ilike '%' || $2 || '%'))`,
+		                   where a.subject_id=m.id and a.subject_type='mod' and creator.name ilike '%' || $2 || '%'))`,
 		claims.Subject, query,
 	).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "读取模组总数失败")
@@ -368,14 +377,15 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		`select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, mod_id, environment, primary_category,
 		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
-		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders, published_revision_id
+		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders,
+		        (select revision.public_id from content_revisions revision where revision.id=m.published_revision_id)
 		 from mods m
 		 where (m.review_status = 'approved' or m.created_by = $1)
 		   and ($2 = '' or m.slug ilike '%' || $2 || '%' or m.project_code ilike '%' || $2 || '%' or m.primary_name ilike '%' || $2 || '%' or m.secondary_name ilike '%' || $2 || '%'
 		        or m.abbreviation ilike '%' || $2 || '%' or m.mod_id ilike '%' || $2 || '%' or $2 = any(m.search_keywords)
 		        or exists (select 1 from mod_identifiers identifier where identifier.mod_id=m.id and identifier.identifier ilike '%' || $2 || '%')
 		        or exists (select 1 from content_creator_bindings a join creators creator on creator.id=a.creator_id
-		                   where a.subject_public_id=m.project_code and a.subject_type='mod' and creator.name ilike '%' || $2 || '%'))
+		                   where a.subject_id=m.id and a.subject_type='mod' and creator.name ilike '%' || $2 || '%'))
 		 order by m.updated_at desc, m.id desc
 		 limit $3`,
 		claims.Subject, query, limit,
@@ -462,8 +472,9 @@ func scanMod(row scanner) (modResponse, error) {
 		&mod.ID, &mod.UniqueID, &mod.SiteID, &mod.PrimaryName, &mod.SecondaryName, &mod.Abbreviation, &mod.Summary, &mod.ModID,
 		&mod.Environment, &mod.PrimaryCategory, &mod.OfficialStatus, &mod.SourceStatus, &mod.License,
 		&mod.CurseForgeProjectID, &mod.ModrinthProjectID, &mod.GitHubProjectPath, &mod.IconURL, &mod.BodyMarkdown, &mod.SearchKeywords,
-		&mod.SubmissionMethod, &mod.ReviewStatus, &mod.CreatedBy, &mod.CreatedAt, &mod.UpdatedAt, &mod.PublishedAt, &mod.SupportedVersions, &mod.SupportedLoaders, &mod.PublishedRevisionID,
+		&mod.SubmissionMethod, &mod.ReviewStatus, &mod.CreatedByInternal, &mod.CreatedAt, &mod.UpdatedAt, &mod.PublishedAt, &mod.SupportedVersions, &mod.SupportedLoaders, &mod.PublishedRevisionID,
 	)
+	mod.PublicID = mod.UniqueID
 	mod.Tags = []string{}
 	mod.ModIDs = []modIdentifierPayload{}
 	mod.Localizations = []catalogLocalizationEdit{}
@@ -480,7 +491,8 @@ func (s *Server) modByID(ctx context.Context, id int64, viewerID int64) (modResp
 		ctx,
 		`select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, mod_id, environment, primary_category,
 		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
-		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders, published_revision_id
+		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders,
+		        (select revision.public_id from content_revisions revision where revision.id=mods.published_revision_id)
 		 from mods where id = $1 and (review_status = 'approved' or created_by = $2)`,
 		id, viewerID,
 	)
@@ -497,7 +509,8 @@ func (s *Server) modBySiteID(ctx context.Context, siteID string, viewerID int64)
 		ctx,
 		`select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, mod_id, environment, primary_category,
 		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
-		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders, published_revision_id
+		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders,
+		        (select revision.public_id from content_revisions revision where revision.id=mods.published_revision_id)
 		 from mods where slug = $1 and (review_status = 'approved' or created_by = $2)`,
 		siteID, viewerID,
 	)
@@ -512,7 +525,8 @@ func (s *Server) modBySiteID(ctx context.Context, siteID string, viewerID int64)
 func (s *Server) modBySiteIDForEditor(ctx context.Context, siteID string) (modResponse, error) {
 	row := s.db.QueryRow(ctx, `select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, mod_id, environment, primary_category,
 		official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
-		body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders, published_revision_id
+		body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at, supported_versions, supported_loaders,
+		(select revision.public_id from content_revisions revision where revision.id=mods.published_revision_id)
 		from mods where slug=$1`, siteID)
 	mod, err := scanMod(row)
 	if err != nil {
@@ -523,7 +537,12 @@ func (s *Server) modBySiteIDForEditor(ctx context.Context, siteID string) (modRe
 }
 
 func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) error {
-	if err := s.db.QueryRow(ctx, `select default_locale from content_subjects where public_id=$1 and subject_type='mod'`, mod.UniqueID).Scan(&mod.DefaultLocale); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if mod.CreatedByInternal != nil {
+		if err := s.db.QueryRow(ctx, `select public_id from users where id=$1`, *mod.CreatedByInternal).Scan(&mod.CreatedBy); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+	}
+	if err := s.db.QueryRow(ctx, `select default_locale from content_subjects where subject_id=$1 and subject_type='mod'`, mod.ID).Scan(&mod.DefaultLocale); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
 	if mod.DefaultLocale == "" {
@@ -549,7 +568,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	rows.Close()
 
 	rows, err = s.db.Query(ctx, `select locale,name,summary,content_markdown from content_localizations
-		where subject_public_id=$1 and subject_type='mod' and review_status='approved' order by locale`, mod.UniqueID)
+		where subject_id=$1 and subject_type='mod' and review_status='approved' order by locale`, mod.ID)
 	if err != nil {
 		return err
 	}
@@ -567,7 +586,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	}
 	rows.Close()
 
-	rows, err = s.db.Query(ctx, `select gallery.public_id,gallery.oss_file_id,file.original_name,file.content_type,file.size_bytes
+	rows, err = s.db.Query(ctx, `select gallery.public_id,file.public_id,file.original_name,file.content_type,file.size_bytes
 		from mod_gallery_images gallery join oss_files file on file.id=gallery.oss_file_id
 		where gallery.mod_id=$1 and file.status='active' order by gallery.display_order,gallery.id`, mod.ID)
 	if err != nil {
@@ -643,12 +662,12 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	rows.Close()
 
 	rows, err = s.db.Query(ctx, `select creator.public_id,creator.kind,creator.name,creator.avatar_url,
-		author.role_id,coalesce(role.name,author.role_snapshot)
+		role.public_id,coalesce(role.name,author.role_snapshot)
 		from content_creator_bindings author
 		join creators creator on creator.id=author.creator_id
 		left join creator_role_definitions role on role.id=author.role_id
-		where author.subject_public_id=$1 and author.subject_type='mod'
-		order by author.display_order,author.id`, mod.UniqueID)
+		where author.subject_id=$1 and author.subject_type='mod'
+		order by author.display_order,author.id`, mod.ID)
 	if err != nil {
 		return err
 	}
@@ -693,13 +712,17 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	}
 	rows.Close()
 	for _, group := range groups {
-		rows, err = s.db.Query(ctx, `select relation_type, related_mod_id, related_mod_name, notes from mod_relationships where group_id = $1 order by display_order, id`, group.id)
+		rows, err = s.db.Query(ctx, `select relationship.relation_type,coalesce(related.project_code,''),
+			relationship.related_mod_name,relationship.notes
+			from mod_relationships relationship
+			left join mods related on related.id=relationship.related_mod_id
+			where relationship.group_id=$1 order by relationship.display_order,relationship.id`, group.id)
 		if err != nil {
 			return err
 		}
 		for rows.Next() {
 			var item modRelationshipPayload
-			if err = rows.Scan(&item.Type, &item.RelatedModID, &item.RelatedModName, &item.Notes); err != nil {
+			if err = rows.Scan(&item.Type, &item.RelatedModPublicID, &item.RelatedModName, &item.Notes); err != nil {
 				rows.Close()
 				return err
 			}
@@ -718,7 +741,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 func (s *Server) loadIncomingModRelationships(ctx context.Context, mod *modResponse) error {
 	rows, err := s.db.Query(ctx, `select relationship_group.id,relationship_group.label,relationship_group.loader,
 		relationship_group.minecraft_versions,relationship_group.mod_version,relationship.relation_type,
-		source_mod.id,source_mod.primary_name,relationship.notes
+		source_mod.project_code,source_mod.primary_name,relationship.notes
 		from mod_relationships relationship
 		join mod_relationship_groups relationship_group on relationship_group.id=relationship.group_id
 		join mods source_mod on source_mod.id=relationship.mod_id
@@ -730,10 +753,10 @@ func (s *Server) loadIncomingModRelationships(ctx context.Context, mod *modRespo
 	defer rows.Close()
 	groupIndexes := map[int64]int{}
 	for rows.Next() {
-		var groupID, sourceModID int64
-		var label, loader, modVersion, relationshipType, sourceModName, notes string
+		var groupID int64
+		var label, loader, modVersion, relationshipType, sourceModPublicID, sourceModName, notes string
 		var minecraftVersions []string
-		if err = rows.Scan(&groupID, &label, &loader, &minecraftVersions, &modVersion, &relationshipType, &sourceModID, &sourceModName, &notes); err != nil {
+		if err = rows.Scan(&groupID, &label, &loader, &minecraftVersions, &modVersion, &relationshipType, &sourceModPublicID, &sourceModName, &notes); err != nil {
 			return err
 		}
 		index, exists := groupIndexes[groupID]
@@ -746,7 +769,7 @@ func (s *Server) loadIncomingModRelationships(ctx context.Context, mod *modRespo
 			})
 		}
 		mod.RelationshipGroups[index].Relationships = append(mod.RelationshipGroups[index].Relationships, modRelationshipPayload{
-			Type: relationshipType, RelatedModID: &sourceModID, RelatedModName: sourceModName, Notes: notes,
+			Type: relationshipType, RelatedModPublicID: sourceModPublicID, RelatedModName: sourceModName, Notes: notes,
 		})
 	}
 	return rows.Err()
@@ -836,12 +859,13 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 	if len(req.GalleryImages) > 32 {
 		return errors.New("a mod gallery can contain at most 32 images")
 	}
-	seenGalleryFiles := map[int64]bool{}
+	seenGalleryFiles := map[string]bool{}
 	seenGalleryIDs := map[string]bool{}
 	cleanGallery := make([]modGalleryImagePayload, 0, len(req.GalleryImages))
 	for _, image := range req.GalleryImages {
 		image.PublicID = strings.ToLower(strings.TrimSpace(image.PublicID))
-		if image.FileID <= 0 || seenGalleryFiles[image.FileID] || (image.PublicID != "" && (!validCatalogPublicID(image.PublicID) || seenGalleryIDs[image.PublicID])) {
+		image.FileID = strings.ToLower(strings.TrimSpace(image.FileID))
+		if !validCatalogPublicID(image.FileID) || seenGalleryFiles[image.FileID] || (image.PublicID != "" && (!validCatalogPublicID(image.PublicID) || seenGalleryIDs[image.PublicID])) {
 			return errors.New("mod gallery contains an invalid or duplicate image")
 		}
 		seenGalleryFiles[image.FileID] = true
@@ -905,7 +929,7 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 	for index := range req.ModIDs {
 		for _, version := range req.ModIDs[index].MinecraftVersions {
 			if len(version) > 80 || (len(supportedVersionSet) > 0 && !supportedVersionSet[version]) {
-				return errors.New("Mod ID 的适用版本必须来自该模组支持的 Minecraft 版本")
+				return errors.New("mod ID 的适用版本必须来自该模组支持的 Minecraft 版本")
 			}
 		}
 	}
@@ -976,18 +1000,19 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 		}
 		for _, version := range group.MinecraftVersions {
 			if len(version) > 80 || (len(supportedVersionSet) > 0 && !supportedVersionSet[version]) {
-				return errors.New("Minecraft 版本名称不能超过 80 个字符")
+				return errors.New("minecraft 版本名称不能超过 80 个字符")
 			}
 		}
 		cleanRelationships := make([]modRelationshipPayload, 0, len(group.Relationships))
 		for _, item := range group.Relationships {
 			item.Type = strings.TrimSpace(item.Type)
+			item.RelatedModPublicID = strings.ToLower(strings.TrimSpace(item.RelatedModPublicID))
 			item.RelatedModName = strings.TrimSpace(item.RelatedModName)
 			item.Notes = strings.TrimSpace(item.Notes)
-			if item.Type == "" && item.RelatedModName == "" && item.RelatedModID == nil {
+			if item.Type == "" && item.RelatedModName == "" && item.RelatedModPublicID == "" {
 				continue
 			}
-			if !allowedModRelationshipTypes[item.Type] || (item.RelatedModName == "" && item.RelatedModID == nil) {
+			if !allowedModRelationshipTypes[item.Type] || (item.RelatedModName == "" && item.RelatedModPublicID == "") {
 				return errors.New("模组关系缺少有效的关系类型或关联模组")
 			}
 			if len(item.RelatedModName) > 160 || len(item.Notes) > 500 {
@@ -1028,7 +1053,7 @@ func normalizeModIdentifiers(legacy string, values []modIdentifierPayload) ([]mo
 			continue
 		}
 		if !validModIdentifier(value.Identifier) {
-			return nil, errors.New("Mod ID may only contain ASCII letters, numbers, underscores, dots and hyphens")
+			return nil, errors.New("mod ID may only contain ASCII letters, numbers, underscores, dots and hyphens")
 		}
 		key := strings.ToLower(value.Identifier)
 		if seen[key] {
@@ -1146,15 +1171,16 @@ func replaceModIdentifiersTx(ctx context.Context, tx pgx.Tx, modID int64, values
 }
 
 func validateModGalleryFilesTx(ctx context.Context, tx pgx.Tx, modID, actorID int64, images []modGalleryImagePayload) error {
-	seenFileIDs := make(map[int64]struct{}, len(images))
+	seenFileIDs := make(map[string]struct{}, len(images))
 	for _, image := range images {
 		if _, duplicate := seenFileIDs[image.FileID]; duplicate {
 			return errors.New("mod gallery cannot contain the same uploaded file more than once")
 		}
 		seenFileIDs[image.FileID] = struct{}{}
 		if image.PublicID != "" {
-			var existingModID, existingFileID int64
-			err := tx.QueryRow(ctx, `select mod_id,oss_file_id from mod_gallery_images where public_id=$1`, image.PublicID).
+			var existingModID int64
+			var existingFileID string
+			err := tx.QueryRow(ctx, `select gallery.mod_id,file.public_id from mod_gallery_images gallery join oss_files file on file.id=gallery.oss_file_id where gallery.public_id=$1`, image.PublicID).
 				Scan(&existingModID, &existingFileID)
 			if err == nil && existingModID == modID && existingFileID == image.FileID {
 				continue
@@ -1165,7 +1191,7 @@ func validateModGalleryFilesTx(ctx context.Context, tx pgx.Tx, modID, actorID in
 		}
 		var valid bool
 		if err := tx.QueryRow(ctx, `select exists(select 1 from oss_files file
-			where file.id=$1 and file.uploader_id=$2 and file.status='active' and file.content_type ilike 'image/%'
+			where file.public_id=$1 and file.uploader_id=$2 and file.status='active' and file.content_type ilike 'image/%'
 			and not exists(select 1 from mod_gallery_images gallery where gallery.oss_file_id=file.id and gallery.mod_id<>$3))`,
 			image.FileID, actorID, modID).Scan(&valid); err != nil {
 			return err
@@ -1184,13 +1210,15 @@ func replaceModGalleryImagesTx(ctx context.Context, tx pgx.Tx, modID, revisionID
 	for index, image := range images {
 		if image.PublicID == "" {
 			if _, err := tx.Exec(ctx, `insert into mod_gallery_images(mod_id,oss_file_id,display_order,created_by,published_revision_id)
-				values($1,$2,$3,$4,$5)`, modID, image.FileID, index, nullableActorID(actorID), revisionID); err != nil {
+				select $1,file.id,$3,$4,$5 from oss_files file where file.public_id=$2`,
+				modID, image.FileID, index, nullableActorID(actorID), revisionID); err != nil {
 				return err
 			}
 			continue
 		}
 		if _, err := tx.Exec(ctx, `insert into mod_gallery_images(public_id,mod_id,oss_file_id,display_order,created_by,published_revision_id)
-			values($1,$2,$3,$4,$5,$6)`, image.PublicID, modID, image.FileID, index, nullableActorID(actorID), revisionID); err != nil {
+			select $1,$2,file.id,$4,$5,$6 from oss_files file where file.public_id=$3`,
+			image.PublicID, modID, image.FileID, index, nullableActorID(actorID), revisionID); err != nil {
 			return err
 		}
 	}
@@ -1209,15 +1237,17 @@ func insertModRelationshipGroups(ctx context.Context, tx pgx.Tx, modID int64, gr
 			return err
 		}
 		for relationshipIndex, relationship := range group.Relationships {
-			if relationship.RelatedModID == nil || *relationship.RelatedModID == modID {
+			if relationship.RelatedModPublicID == "" {
 				return errors.New("模组关系必须选择网站中另一个已有模组")
 			}
-			if err := tx.QueryRow(ctx, `select primary_name from mods where id=$1`, *relationship.RelatedModID).Scan(&relationship.RelatedModName); err != nil {
+			var relatedModID int64
+			if err := tx.QueryRow(ctx, `select id,primary_name from mods where project_code=$1`, relationship.RelatedModPublicID).
+				Scan(&relatedModID, &relationship.RelatedModName); err != nil || relatedModID == modID {
 				return errors.New("关联模组不存在")
 			}
 			if relationship.Type == "integration" {
 				if _, err := tx.Exec(ctx, `delete from mod_relationships
-					where relation_type='integration' and mod_id=$1 and related_mod_id=$2`, *relationship.RelatedModID, modID); err != nil {
+					where relation_type='integration' and mod_id=$1 and related_mod_id=$2`, relatedModID, modID); err != nil {
 					return err
 				}
 			}
@@ -1225,7 +1255,7 @@ func insertModRelationshipGroups(ctx context.Context, tx pgx.Tx, modID int64, gr
 				ctx,
 				`insert into mod_relationships (mod_id, group_id, relation_type, related_mod_id, related_mod_name, notes, display_order)
 				 values ($1,$2,$3,$4,$5,$6,$7)`,
-				modID, groupID, relationship.Type, relationship.RelatedModID, relationship.RelatedModName, relationship.Notes, relationshipIndex,
+				modID, groupID, relationship.Type, relatedModID, relationship.RelatedModName, relationship.Notes, relationshipIndex,
 			); err != nil {
 				return err
 			}

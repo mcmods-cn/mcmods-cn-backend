@@ -13,16 +13,17 @@ type exportResourceKey struct {
 }
 
 type exportResourceSource struct {
-	EntityID    string
-	PublicID    string
-	RevisionID  string
-	ModSiteID   string
-	KindCode    string
-	Registry    string
-	ObjectID    string
-	IconPath    string
-	PreviewPath string
-	Names       map[string]string
+	EntityID        string
+	PublicID        string
+	RevisionID      string
+	ModSiteID       string
+	VersionPublicID string
+	KindCode        string
+	Registry        string
+	ObjectID        string
+	IconPath        string
+	PreviewPath     string
+	Names           map[string]string
 }
 
 // resolveExportResources resolves exported resources in one query. It prefers
@@ -66,14 +67,14 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 		join catalog_import_revisions preferred on preferred.id::text=request.preferred_revision_id
 	)
 	select requested.preferred_revision_id,requested.resource_id,requested.resource_kind,
-		coalesce(source.entity_id,''),coalesce(source.public_id,''),coalesce(source.revision_id,''),
-		coalesce(source.site_id,''),coalesce(source.kind_code,''),coalesce(source.registry,''),
+		coalesce(source.public_id,''),coalesce(source.public_id,''),coalesce(source.revision_id,''),
+		coalesce(source.site_id,''),coalesce(source.version_public_id,''),coalesce(source.kind_code,''),coalesce(source.registry,''),
 		coalesce(source.object_id,''),coalesce(source.icon_path,''),coalesce(source.preview_path,''),coalesce(source.names,'{}'::jsonb)
 	from requested left join lateral (
-		select candidate.entity_id,candidate.public_id,candidate.revision_id,candidate.site_id,candidate.kind_code,candidate.registry,candidate.object_id,
+		select candidate.entity_id,candidate.public_id,candidate.revision_id,candidate.site_id,candidate.version_public_id,candidate.kind_code,candidate.registry,candidate.object_id,
 			candidate.icon_path,candidate.preview_path,candidate.names
 		from (
-			select resource.entity_id,entity.public_id,snapshot.revision_id,mod.slug site_id,
+			select resource.entity_id,entity.public_id,snapshot.revision_id,mod.slug site_id,version.public_id version_public_id,
 				resource.kind_code,snapshot.registry,resource.canonical_id object_id,
 				snapshot.icon_path,snapshot.preview_path,snapshot.names,kind.family resource_kind,
 				revision.minecraft_version,revision.loader,revision.is_active,revision.status,
@@ -84,6 +85,7 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 			join resource_import_snapshots snapshot on snapshot.resource_id=resource.entity_id
 			join catalog_import_revisions revision on revision.id=snapshot.revision_id
 			join mods mod on mod.id=revision.mod_id
+			left join mod_content_versions version on version.id=revision.target_version_id
 			where resource.canonical_id=requested.resource_id
 		) candidate
 		where candidate.revision_id=requested.preferred_revision_id
@@ -105,7 +107,7 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 		var source exportResourceSource
 		var names []byte
 		if err = rows.Scan(&key.RevisionID, &key.ResourceID, &key.Kind, &source.EntityID, &source.PublicID,
-			&source.RevisionID, &source.ModSiteID, &source.KindCode, &source.Registry, &source.ObjectID,
+			&source.RevisionID, &source.ModSiteID, &source.VersionPublicID, &source.KindCode, &source.Registry, &source.ObjectID,
 			&source.IconPath, &source.PreviewPath, &names); err != nil {
 			return nil, err
 		}
@@ -151,12 +153,16 @@ func normalizeExportResourceKind(value string) string {
 
 func localizedExportResourceNames(names map[string]string, locales ...string) map[string]string {
 	result := make(map[string]string, len(locales)+2)
-	for _, locale := range append(locales, "zh_cn", "en_us") {
-		locale = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(locale), "-", "_"))
+	for _, locale := range append(locales, "zh-CN", "en-US") {
+		locale = normalizeContentLocale(locale)
 		if locale == "" {
 			continue
 		}
-		if value := names[locale]; value != "" {
+		value := names[locale]
+		if value == "" {
+			value = names[strings.ToLower(strings.ReplaceAll(locale, "-", "_"))]
+		}
+		if value != "" {
 			result[locale] = value
 		}
 	}
@@ -194,8 +200,10 @@ func (s *Server) decorateLootTableResources(ctx context.Context, revisionID stri
 			value := map[string]any{
 				"id": itemID, "entityId": source.EntityID, "publicId": source.PublicID,
 				"sourceRevisionId": source.RevisionID, "sourceModSiteId": source.ModSiteID,
-				"kindCode":       source.KindCode,
-				"sourceRegistry": source.Registry, "sourceObjectId": source.ObjectID,
+				"sourceVersionPublicId": source.VersionPublicID,
+				"detailUrl":             canonicalResourceDetailURL(source),
+				"kindCode":              source.KindCode,
+				"sourceRegistry":        source.Registry, "sourceObjectId": source.ObjectID,
 				"names":    localizedExportResourceNames(source.Names, locales...),
 				"iconPath": source.IconPath, "previewPath": source.PreviewPath,
 			}
@@ -208,6 +216,13 @@ func (s *Server) decorateLootTableResources(ctx context.Context, revisionID stri
 		data["previewResources"] = previews
 	}
 	return nil
+}
+
+func canonicalResourceDetailURL(source exportResourceSource) string {
+	if source.ModSiteID == "" || source.PublicID == "" || source.VersionPublicID == "" {
+		return ""
+	}
+	return "/mods/" + source.ModSiteID + "/resources/" + source.PublicID + "?version=" + source.VersionPublicID
 }
 
 func lootTableItemIDs(data map[string]any) []string {

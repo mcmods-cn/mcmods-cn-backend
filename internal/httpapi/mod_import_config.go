@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -95,7 +94,7 @@ func (s *Server) updateModImportConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	raw, err := json.Marshal(payload)
+	raw, err := s.sealSystemSetting(payload)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "模组数据源配置格式不正确")
 		return
@@ -103,7 +102,7 @@ func (s *Server) updateModImportConfig(w http.ResponseWriter, r *http.Request) {
 	if _, err = s.db.Exec(r.Context(),
 		`insert into system_settings(key,value,updated_by,updated_at) values($1,$2::jsonb,$3,now())
 		 on conflict(key) do update set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`,
-		modImportConfigSettingKey, string(raw), currentClaims(r).Subject,
+		modImportConfigSettingKey, raw, currentClaims(r).Subject,
 	); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存模组数据源配置失败")
 		return
@@ -125,7 +124,7 @@ func (s *Server) modImportConfigFromSettings(ctx context.Context) (modImportConf
 	if err != nil {
 		return modImportConfig{}, err
 	}
-	if err = json.Unmarshal(raw, &cfg); err != nil {
+	if err = s.openSystemSetting(raw, &cfg); err != nil {
 		return modImportConfig{}, err
 	}
 	if err = normalizeModImportConfig(&cfg); err != nil {

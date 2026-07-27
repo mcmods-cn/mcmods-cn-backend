@@ -372,9 +372,7 @@ func (s *Server) adminActivityEvents(w http.ResponseWriter, r *http.Request) {
 		conditions = append(conditions, strings.ReplaceAll(sql, "?", "$"+strconv.Itoa(len(args))))
 	}
 	if value := strings.TrimSpace(query.Get("userId")); value != "" {
-		if id, err := strconv.ParseInt(value, 10, 64); err == nil {
-			addCondition("event.user_id=?", id)
-		}
+		addCondition("account.public_id=?", strings.ToLower(value))
 	}
 	if value := normalizeCode(query.Get("action")); value != "" {
 		addCondition("action.code=?", value)
@@ -396,7 +394,7 @@ func (s *Server) adminActivityEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	args = append(args, limit, offset)
-	rows, err := s.db.Query(r.Context(), `select event.id,event.user_id,account.username,
+	rows, err := s.db.Query(r.Context(), `select event.public_id,account.public_id,account.username,
 		action.code,action.name,object_type.code,object_type.name,event.object_public_id,
 		event.markdown_added_bytes,event.metadata,event.occurred_at
 		from user_activity_events event
@@ -413,8 +411,8 @@ func (s *Server) adminActivityEvents(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var id int64
-		var userID *int64
+		var id string
+		var userID *string
 		var username *string
 		var actionCode, actionName, objectCode, objectName, objectPublicID string
 		var markdownAddedBytes int

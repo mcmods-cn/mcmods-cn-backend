@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -71,6 +72,12 @@ func (resolver catalogResourceIdentityResolver) resolve(kindCode, rawID string) 
 }
 
 func newCatalogIdentity(entityType, canonicalKey string) catalogIdentity {
+	identity := catalogIdentityKey(entityType, canonicalKey)
+	identity.PublicID = randomCatalogPublicID()
+	return identity
+}
+
+func catalogIdentityKey(entityType, canonicalKey string) catalogIdentity {
 	digest := sha256.Sum256([]byte("mcmods-catalog/v1\x00" + entityType + "\x00" + strings.ToLower(strings.TrimSpace(canonicalKey))))
 	encoded := hex.EncodeToString(digest[:])
 	prefix := map[string]string{
@@ -84,25 +91,34 @@ func newCatalogIdentity(entityType, canonicalKey string) catalogIdentity {
 	if prefix == "" {
 		prefix = "ent"
 	}
-	return catalogIdentity{ID: prefix + "_" + encoded[:32], PublicID: publicIDFromDigest(digest[:])}
+	return catalogIdentity{ID: prefix + "_" + encoded[:32]}
 }
 
-func publicIDFromDigest(digest []byte) string {
+func randomCatalogPublicID() string {
 	const alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
-	value := uint64(0)
-	for index := 0; index < 8 && index < len(digest); index++ {
-		value = value<<8 | uint64(digest[index])
-	}
 	result := make([]byte, 9)
-	for index := len(result) - 1; index >= 0; index-- {
-		result[index] = alphabet[value%uint64(len(alphabet))]
-		value /= uint64(len(alphabet))
+	entropy := make([]byte, 16)
+	position := 0
+	for position < len(result) {
+		if _, err := rand.Read(entropy); err != nil {
+			panic("generate catalog public ID: operating system CSPRNG unavailable")
+		}
+		for _, value := range entropy {
+			if value >= 248 {
+				continue
+			}
+			result[position] = alphabet[int(value)%len(alphabet)]
+			position++
+			if position == len(result) {
+				break
+			}
+		}
 	}
 	return string(result)
 }
 
 func catalogSnapshotID(kind, revisionID, entityID, qualifier string) string {
-	identity := newCatalogIdentity("document", kind+"\x00"+revisionID+"\x00"+entityID+"\x00"+qualifier)
+	identity := catalogIdentityKey("document", kind+"\x00"+revisionID+"\x00"+entityID+"\x00"+qualifier)
 	return "snp_" + strings.TrimPrefix(identity.ID, "doc_")
 }
 

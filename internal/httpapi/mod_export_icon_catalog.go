@@ -38,15 +38,18 @@ type exportIconCatalogCandidate struct {
 // The resulting rows use the same resource_import_snapshots table as manual
 // and registry imports, so sections, version details, and public pages do not
 // need source-specific behavior.
-func importExportIconCatalogResources(ctx context.Context, tx pgx.Tx, resolver catalogResourceIdentityResolver, media []modExportPNGMedia) error {
+func importExportIconCatalogResources(
+	ctx context.Context,
+	tx pgx.Tx,
+	resolver catalogResourceIdentityResolver,
+	media []modExportPNGMedia,
+	translations map[string]map[string]string,
+) error {
 	candidates := collectExportIconCatalogCandidates(media)
 	if len(candidates) == 0 {
 		return nil
 	}
-	names, err := exportIconCatalogNames(ctx, tx, candidates)
-	if err != nil {
-		return err
-	}
+	names := exportIconCatalogNames(candidates, translations)
 	rows := make([]catalogResourceImportRow, 0, len(candidates))
 	for index, candidate := range candidates {
 		definition := exportIconCatalogDefinitions[candidate.Registry]
@@ -64,7 +67,7 @@ func importExportIconCatalogResources(ctx context.Context, tx pgx.Tx, resolver c
 			IconPath: candidate.IconPath, PreviewPath: candidate.PreviewPath,
 		})
 	}
-	if err = persistCatalogResources(ctx, tx, rows); err != nil {
+	if err := persistCatalogResources(ctx, tx, rows); err != nil {
 		return fmt.Errorf("persist normalized icon catalog resources: %w", err)
 	}
 	return nil
@@ -133,34 +136,20 @@ func parseExportIconCatalogPath(assetPath string) (registry string, size int, ca
 	return parts[1], size, canonicalID, translationKey, true
 }
 
-func exportIconCatalogNames(ctx context.Context, tx pgx.Tx, candidates []exportIconCatalogCandidate) ([]string, error) {
-	revisionIDs := make([]string, len(candidates))
-	translationKeys := make([]string, len(candidates))
+func exportIconCatalogNames(candidates []exportIconCatalogCandidate, translations map[string]map[string]string) []string {
 	result := make([]string, len(candidates))
 	for index, candidate := range candidates {
-		revisionIDs[index] = candidate.RevisionID
-		translationKeys[index] = candidate.TranslationKey
-		result[index] = "{}"
-	}
-	rows, err := tx.Query(ctx, `select requested.ordinal,coalesce(jsonb_object_agg(translation.locale,translation.value)
-		filter(where translation.locale is not null),'{}'::jsonb)
-		from unnest($1::text[],$2::text[]) with ordinality requested(revision_id,translation_key,ordinal)
-		left join catalog_import_translations translation on translation.revision_id=requested.revision_id
-		 and translation.translation_key=requested.translation_key
-		group by requested.ordinal order by requested.ordinal`, revisionIDs, translationKeys)
-	if err != nil {
-		return nil, fmt.Errorf("load normalized icon catalog names: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var ordinal int
-		var names []byte
-		if err = rows.Scan(&ordinal, &names); err != nil {
-			return nil, err
+		names := make(map[string]string, len(translations))
+		for locale, values := range translations {
+			if value := values[candidate.TranslationKey]; value != "" {
+				names[locale] = value
+			}
 		}
-		if ordinal > 0 && ordinal <= len(result) {
-			result[ordinal-1] = string(names)
+		encoded, err := json.Marshal(names)
+		if err != nil {
+			encoded = []byte("{}")
 		}
+		result[index] = string(encoded)
 	}
-	return result, rows.Err()
+	return result
 }

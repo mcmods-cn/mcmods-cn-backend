@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/mail"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 )
 
 var usernamePattern = regexp.MustCompile(`^[\p{Han}A-Za-z0-9_]+$`)
+var verificationCodePattern = regexp.MustCompile(`^[0-9]{6}$`)
 
 var reservedUsernames = map[string]struct{}{
 	"admin": {}, "root": {}, "system": {}, "api": {}, "login": {}, "register": {},
@@ -77,22 +79,34 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !strings.Contains(req.Email, "@") {
+	if !validEmailAddress(req.Email) {
 		writeError(w, http.StatusBadRequest, "邮箱格式不正确")
 		return
 	}
-	if len(req.Password) < 8 {
-		writeError(w, http.StatusBadRequest, "密码至少需要 8 位")
+	if len(req.Password) < 8 || len(req.Password) > 1024 {
+		writeError(w, http.StatusBadRequest, "密码长度需要在 8 到 1024 字节之间")
+		return
+	}
+	if len([]rune(req.DisplayName)) > 64 || len(req.Country) > 64 || len(req.Timezone) > 128 {
+		writeError(w, http.StatusBadRequest, "注册资料过长")
 		return
 	}
 
+	location := s.requestClientLocation(r)
+	rateLimited, err := s.registrationRateLimited(r.Context(), location.IP)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "registration rate-limit check failed")
+		return
+	}
+	if rateLimited {
+		writeError(w, http.StatusTooManyRequests, "too many registration requests; please try again later")
+		return
+	}
 	passwordHash, err := security.HashPassword(req.Password)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "密码处理失败")
 		return
 	}
-	location := requestClientLocation(r)
-
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "数据库事务创建失败")
@@ -109,7 +123,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		     registration_ip, registration_country_code, registration_city
 		 )
 		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		 returning id, username, email, display_name, email_verified, status, created_at, last_login_at`,
+		 returning id, public_id, username, email, display_name, email_verified, status, created_at, last_login_at`,
 		req.Username,
 		req.Email,
 		req.DisplayName,
@@ -122,7 +136,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		location.IP,
 		location.CountryCode,
 		location.City,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
+	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
 	if err != nil {
 		writeError(w, http.StatusConflict, "用户名或邮箱已被占用")
 		return
@@ -138,12 +152,13 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user.Roles, user.Permissions = s.userGrants(r.Context(), user.ID)
-	token, err := s.issueToken(user)
+	token, err := s.issueToken(r.Context(), user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "生成登录凭证失败")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"token": token, "user": user})
+	s.setAuthSessionCookie(w, r, token)
+	writeJSON(w, http.StatusCreated, map[string]any{"user": user})
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -153,7 +168,20 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	account := strings.TrimSpace(req.Account)
-	location := requestClientLocation(r)
+	if account == "" || len(account) > 320 || len(req.Password) > 1024 {
+		writeError(w, http.StatusBadRequest, "账号或密码格式不正确")
+		return
+	}
+	location := s.requestClientLocation(r)
+	rateLimited, err := s.authAttemptRateLimited(r.Context(), account, location.IP)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "login rate-limit check failed")
+		return
+	}
+	if rateLimited {
+		writeError(w, http.StatusTooManyRequests, "too many failed login attempts; please try again later")
+		return
+	}
 	user, passwordHash, err := s.findUserForLogin(r.Context(), account)
 	if err != nil || !security.VerifyPassword(req.Password, passwordHash) {
 		s.recordLogin(r.Context(), nil, account, location, r.UserAgent(), false, "invalid_credentials")
@@ -167,14 +195,15 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user.Roles, user.Permissions = s.userGrants(r.Context(), user.ID)
-	token, err := s.issueToken(user)
+	token, err := s.issueToken(r.Context(), user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "生成登录凭证失败")
 		return
 	}
 	_, _ = s.db.Exec(r.Context(), `update users set last_login_at = now(), updated_at = now() where id = $1`, user.ID)
 	s.recordLogin(r.Context(), &user.ID, account, location, r.UserAgent(), true, "")
-	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": user})
+	s.setAuthSessionCookie(w, r, token)
+	writeJSON(w, http.StatusOK, map[string]any{"user": user})
 }
 
 func (s *Server) requestEmailCode(w http.ResponseWriter, r *http.Request) {
@@ -188,7 +217,11 @@ func (s *Server) requestEmailCode(w http.ResponseWriter, r *http.Request) {
 	if req.Purpose == "" {
 		req.Purpose = "login"
 	}
-	if !strings.Contains(req.Email, "@") {
+	if req.Purpose != "login" {
+		writeError(w, http.StatusBadRequest, "unsupported verification-code purpose")
+		return
+	}
+	if !validEmailAddress(req.Email) {
 		writeError(w, http.StatusBadRequest, "邮箱格式不正确")
 		return
 	}
@@ -203,16 +236,20 @@ func (s *Server) requestEmailCode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "验证码处理失败")
 		return
 	}
-	_, err = s.db.Exec(
+	location := s.requestClientLocation(r)
+	codeID, err := s.storeEmailVerificationCode(
 		r.Context(),
-		`insert into email_verification_codes (email, purpose, code_hash, expires_at)
-		 values ($1, $2, $3, $4)`,
 		req.Email,
 		req.Purpose,
 		codeHash,
+		location.IP,
 		time.Now().Add(10*time.Minute),
 	)
 	if err != nil {
+		if err == errAuthRateLimited {
+			writeError(w, http.StatusTooManyRequests, "too many verification-code requests; please try again later")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "验证码保存失败")
 		return
 	}
@@ -220,6 +257,7 @@ func (s *Server) requestEmailCode(w http.ResponseWriter, r *http.Request) {
 	subject := "Mcmods-cn 登录验证码"
 	body := fmt.Sprintf("你的验证码是：%s\n\n验证码 10 分钟内有效。如果不是你本人操作，请忽略这封邮件。", code)
 	if err := s.activeMailer(r.Context()).Send(req.Email, subject, body); err != nil {
+		_, _ = s.db.Exec(r.Context(), `update email_verification_codes set consumed_at=now() where id=$1`, codeID)
 		writeError(w, http.StatusServiceUnavailable, "验证码已生成，但邮件服务尚未配置或发送失败")
 		return
 	}
@@ -234,25 +272,27 @@ func (s *Server) emailLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Email = normalizeEmail(req.Email)
 	req.Code = strings.TrimSpace(req.Code)
-	location := requestClientLocation(r)
-
-	var codeID int64
-	var codeHash string
-	err := s.db.QueryRow(
-		r.Context(),
-		`select id, code_hash
-		 from email_verification_codes
-		 where email = $1 and purpose = 'login' and consumed_at is null and expires_at > now()
-		 order by id desc
-		 limit 1`,
-		req.Email,
-	).Scan(&codeID, &codeHash)
-	if err != nil || !security.VerifyCode(req.Code, codeHash) {
+	location := s.requestClientLocation(r)
+	if !validEmailAddress(req.Email) || !verificationCodePattern.MatchString(req.Code) {
+		s.recordLogin(r.Context(), nil, req.Email, location, r.UserAgent(), false, "invalid_email_code_format")
 		writeError(w, http.StatusUnauthorized, "验证码不正确或已过期")
 		return
 	}
-	_, _ = s.db.Exec(r.Context(), `update email_verification_codes set consumed_at = now() where id = $1`, codeID)
 
+	rateLimited, err := s.authAttemptRateLimited(r.Context(), req.Email, location.IP)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "login rate-limit check failed")
+		return
+	}
+	if rateLimited {
+		writeError(w, http.StatusTooManyRequests, "too many failed login attempts; please try again later")
+		return
+	}
+	if err := s.consumeEmailLoginCode(r.Context(), req.Email, req.Code); err != nil {
+		s.recordLogin(r.Context(), nil, req.Email, location, r.UserAgent(), false, "invalid_email_code")
+		writeError(w, http.StatusUnauthorized, "验证码不正确或已过期")
+		return
+	}
 	user, err := s.findUserByEmail(r.Context(), req.Email)
 	if err != nil {
 		s.recordLogin(r.Context(), nil, req.Email, location, r.UserAgent(), false, "email_not_registered")
@@ -265,14 +305,44 @@ func (s *Server) emailLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user.Roles, user.Permissions = s.userGrants(r.Context(), user.ID)
-	token, err := s.issueToken(user)
+	token, err := s.issueToken(r.Context(), user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "生成登录凭证失败")
 		return
 	}
 	_, _ = s.db.Exec(r.Context(), `update users set last_login_at = now(), updated_at = now() where id = $1`, user.ID)
 	s.recordLogin(r.Context(), &user.ID, req.Email, location, r.UserAgent(), true, "email_code")
-	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": user})
+	s.setAuthSessionCookie(w, r, token)
+	writeJSON(w, http.StatusOK, map[string]any{"user": user})
+}
+
+func (s *Server) consumeEmailLoginCode(ctx context.Context, email, code string) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var codeID int64
+	var codeHash string
+	if err = tx.QueryRow(
+		ctx,
+		`select id,code_hash
+		 from email_verification_codes
+		 where email=$1 and purpose='login' and consumed_at is null and expires_at>now()
+		 order by id desc
+		 limit 1
+		 for update`,
+		email,
+	).Scan(&codeID, &codeHash); err != nil {
+		return err
+	}
+	if !security.VerifyCode(code, codeHash) {
+		return fmt.Errorf("invalid email verification code")
+	}
+	if _, err = tx.Exec(ctx, `update email_verification_codes set consumed_at=now() where id=$1 and consumed_at is null`, codeID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
@@ -301,28 +371,44 @@ func (s *Server) evaluatePermission(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) logout(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	claims := currentClaims(r)
+	_, _ = s.db.Exec(r.Context(), `update auth_sessions set revoked_at=coalesce(revoked_at,now())
+		where session_hash=$1 and user_id=$2`, security.SessionFingerprint(claims.SessionID), claims.Subject)
+	s.clearAuthSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Server) issueToken(user domain.User) (string, error) {
-	claims := security.NewClaims(user.ID, user.Username, user.Email, user.Roles, user.Permissions, s.cfg.JWTTTL)
-	return security.SignToken(s.cfg.JWTSecret, claims)
+func (s *Server) issueToken(ctx context.Context, user domain.User) (string, error) {
+	var authVersion int64
+	if err := s.db.QueryRow(ctx, `select auth_version from users where id=$1 and status='active'`, user.ID).Scan(&authVersion); err != nil {
+		return "", err
+	}
+	claims, err := security.NewClaims(user.PublicID, user.Username, user.Email, user.Roles, user.Permissions, authVersion, s.cfg.JWTTTL)
+	if err != nil {
+		return "", err
+	}
+	token, err := security.SignToken(s.cfg.JWTSecret, claims)
+	if err != nil {
+		return "", err
+	}
+	if _, err = s.db.Exec(ctx, `insert into auth_sessions(session_hash,user_id,auth_version,expires_at)
+		values($1,$2,$3,$4)`, security.SessionFingerprint(claims.SessionID), user.ID, authVersion, time.Unix(claims.ExpiresAt, 0)); err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
 func (s *Server) findUserForLogin(ctx context.Context, account string) (domain.User, string, error) {
 	var user domain.User
 	var passwordHash string
-	query := `select id, username, email, display_name, password_hash, email_verified, status, created_at, last_login_at, avatar_url, signature
+	query := `select id, public_id, username, email, display_name, password_hash, email_verified, status, created_at, last_login_at, avatar_url, signature
 		from users
-		where lower(email) = lower($1) or lower(username) = lower($1)`
+		where lower(email) = lower($1) or lower(username) = lower($1) or public_id = lower($1)`
 	args := []any{account}
-	if id, err := strconv.ParseInt(account, 10, 64); err == nil {
-		query += ` or id = $2`
-		args = append(args, id)
-	}
 	err := s.db.QueryRow(ctx, query, args...).Scan(
 		&user.ID,
+		&user.PublicID,
 		&user.Username,
 		&user.Email,
 		&user.DisplayName,
@@ -341,10 +427,10 @@ func (s *Server) findUserByEmail(ctx context.Context, email string) (domain.User
 	var user domain.User
 	err := s.db.QueryRow(
 		ctx,
-		`select id, username, email, display_name, email_verified, status, created_at, last_login_at, avatar_url, signature
+		`select id, public_id, username, email, display_name, email_verified, status, created_at, last_login_at, avatar_url, signature
 		 from users where lower(email) = lower($1)`,
 		email,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
+	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
 	return user, err
 }
 
@@ -352,10 +438,10 @@ func (s *Server) findUserByID(ctx context.Context, id int64) (domain.User, error
 	var user domain.User
 	err := s.db.QueryRow(
 		ctx,
-		`select id, username, email, display_name, email_verified, status, created_at, last_login_at, avatar_url, signature
+		`select id, public_id, username, email, display_name, email_verified, status, created_at, last_login_at, avatar_url, signature
 		 from users where id = $1`,
 		id,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
+	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
 	return user, err
 }
 
@@ -372,18 +458,22 @@ func (s *Server) userGrants(ctx context.Context, userID int64) ([]string, []stri
 		}
 	}
 
-	permissions := make([]string, 0)
+	permissions := make([]string, 0, len(roles)*2)
 	for _, role := range roles {
 		permissions = append(permissions, "group."+role)
-		permissions = append(permissions, s.rolePermissions(ctx, role)...)
 	}
 	permissionRows, err := s.db.Query(
 		ctx,
 		`select p.code
 		 from permissions p
-		 join user_permissions up on up.permission_id = p.id
-		 where up.user_id = $1 and up.allow = true and (up.expires_at is null or up.expires_at > now())
-		 order by p.code`,
+		 join role_permissions rp on rp.permission_id=p.id
+		 join user_role_bindings urb on urb.role_id=rp.role_id
+		 where urb.user_id=$1 and rp.allow=true and (rp.expires_at is null or rp.expires_at>now())
+		 union all
+		 select p.code
+		 from permissions p
+		 join user_permissions up on up.permission_id=p.id
+		 where up.user_id=$1 and up.allow=true and (up.expires_at is null or up.expires_at>now())`,
 		userID,
 	)
 	if err == nil {
@@ -392,6 +482,38 @@ func (s *Server) userGrants(ctx context.Context, userID int64) ([]string, []stri
 			var permission string
 			if err := permissionRows.Scan(&permission); err == nil {
 				permissions = append(permissions, permission)
+			}
+		}
+	}
+	templateRows, err := s.db.Query(
+		ctx,
+		`select r.code,p.code
+		 from roles r
+		 join role_permissions rp on rp.role_id=r.id
+		 join permissions p on p.id=rp.permission_id
+		 where (r.code like '%[%' or r.code like '%<%')
+		   and rp.allow=true
+		   and (rp.expires_at is null or rp.expires_at>now())
+		 order by length(r.code) desc,r.code,p.code`,
+	)
+	if err == nil {
+		defer templateRows.Close()
+		templatePermissions := make(map[string][]string)
+		for templateRows.Next() {
+			var templateCode, permission string
+			if scanErr := templateRows.Scan(&templateCode, &permission); scanErr == nil {
+				templatePermissions[templateCode] = append(templatePermissions[templateCode], permission)
+			}
+		}
+		for _, role := range roles {
+			for templateCode, codes := range templatePermissions {
+				variables, matches := matchRoleTemplateCode(templateCode, role)
+				if !matches {
+					continue
+				}
+				for _, code := range codes {
+					permissions = append(permissions, applyRoleVariables(code, variables))
+				}
 			}
 		}
 	}
@@ -432,6 +554,14 @@ func validateUsername(username string) error {
 
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
+}
+
+func validEmailAddress(email string) bool {
+	if len(email) == 0 || len(email) > 320 {
+		return false
+	}
+	address, err := mail.ParseAddress(email)
+	return err == nil && strings.EqualFold(address.Address, email)
 }
 
 func defaultString(value string, fallback string) string {

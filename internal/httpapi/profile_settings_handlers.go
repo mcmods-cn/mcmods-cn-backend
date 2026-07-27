@@ -24,7 +24,7 @@ type profileConfigPayload struct {
 type userProfileSettingsRequest struct {
 	Signature      *string `json:"signature,omitempty"`
 	MessageReceive *bool   `json:"messageReceive,omitempty"`
-	AvatarFileID   *int64  `json:"avatarFileId,omitempty"`
+	AvatarFileID   *string `json:"avatarFileId,omitempty"`
 	ClearAvatar    bool    `json:"clearAvatar,omitempty"`
 }
 
@@ -145,13 +145,18 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusForbidden, "没有更换头像权限")
 			return
 		}
+		fileID, resolveErr := resolveOSSFilePublicID(r.Context(), tx, *request.AvatarFileID)
+		if resolveErr != nil {
+			writeError(w, http.StatusBadRequest, "avatar file does not exist")
+			return
+		}
 		var originalName, contentType, objectKey string
 		err := tx.QueryRow(
 			r.Context(),
 			`select original_name, content_type, object_key
 			 from oss_files
 			 where id = $1 and uploader_id = $2 and status = 'active'`,
-			*request.AvatarFileID,
+			fileID,
 			claims.Subject,
 		).Scan(&originalName, &contentType, &objectKey)
 		if err == pgx.ErrNoRows {
@@ -180,7 +185,7 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			r.Context(),
 			`update users set avatar_file_id = $2, avatar_url = $3, updated_at = now() where id = $1`,
 			claims.Subject,
-			*request.AvatarFileID,
+			fileID,
 			avatarURL,
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存头像失败")
@@ -189,8 +194,8 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 	}
 	if request.Signature != nil || request.MessageReceive != nil || request.ClearAvatar || request.AvatarFileID != nil {
 		var signature, avatarURL string
-		var avatarFileID *int64
-		if err = tx.QueryRow(r.Context(), `select signature,avatar_url,avatar_file_id from users where id=$1`, claims.Subject).Scan(&signature, &avatarURL, &avatarFileID); err != nil {
+		var avatarFileID *string
+		if err = tx.QueryRow(r.Context(), `select signature,avatar_url,(select public_id from oss_files where id=users.avatar_file_id) from users where id=$1`, claims.Subject).Scan(&signature, &avatarURL, &avatarFileID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to read updated user profile")
 			return
 		}
@@ -202,7 +207,7 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		snapshot, marshalErr := json.Marshal(map[string]any{
-			"userId": claims.Subject, "signature": signature, "avatarUrl": avatarURL,
+			"userId": claims.PublicSubject, "signature": signature, "avatarUrl": avatarURL,
 			"avatarFileId": avatarFileID, "messageReceive": messageReceive,
 		})
 		if marshalErr != nil {
@@ -210,7 +215,8 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		created, createErr := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
-			AggregateType: "user_profile", AggregateKey: fmt.Sprintf("%d", claims.Subject),
+			EntityType: "user", EntityID: claims.Subject,
+			AggregateType: "user_profile", AggregateKey: claims.PublicSubject,
 			BaseRevision: baseRevisionID, Snapshot: snapshot, Reason: "Update user profile settings",
 			ActorID: claims.Subject, Source: "user", Status: "approved",
 			Metadata: map[string]any{"userId": claims.Subject}, Request: r,

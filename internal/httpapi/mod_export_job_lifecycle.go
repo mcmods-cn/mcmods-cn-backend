@@ -137,7 +137,11 @@ func (s *Server) dispatchModExportJob(ctx context.Context, jobID string) {
 		_, _ = s.db.Exec(ctx, `update nats_outbox set published_at=now() where aggregate_type='mod_export_job' and aggregate_id=$1 and published_at is null`, jobID)
 		return
 	}
-	go func() { _ = s.importModExportJob(context.Background(), jobID) }()
+	jobContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Hour)
+	go func() {
+		defer cancel()
+		_ = s.importModExportJob(jobContext, jobID)
+	}()
 }
 
 func (s *Server) runModExportTransaction(ctx context.Context, action func(pgx.Tx) error) error {

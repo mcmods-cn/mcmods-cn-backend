@@ -2,6 +2,7 @@ package security
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -12,13 +13,16 @@ import (
 )
 
 type Claims struct {
-	Subject     int64    `json:"sub"`
-	Username    string   `json:"username"`
-	Email       string   `json:"email"`
-	Roles       []string `json:"roles"`
-	Permissions []string `json:"permissions"`
-	IssuedAt    int64    `json:"iat"`
-	ExpiresAt   int64    `json:"exp"`
+	Subject       int64    `json:"-"`
+	PublicSubject string   `json:"sub"`
+	SessionID     string   `json:"sid"`
+	AuthVersion   int64    `json:"ver"`
+	Username      string   `json:"username"`
+	Email         string   `json:"email"`
+	Roles         []string `json:"roles"`
+	Permissions   []string `json:"permissions"`
+	IssuedAt      int64    `json:"iat"`
+	ExpiresAt     int64    `json:"exp"`
 }
 
 func SignToken(secret string, claims Claims) (string, error) {
@@ -44,9 +48,20 @@ func ParseToken(secret string, token string) (Claims, error) {
 	if len(parts) != 3 {
 		return claims, errors.New("invalid token")
 	}
+	headerPayload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return claims, errors.New("invalid token header")
+	}
+	var header struct {
+		Algorithm string `json:"alg"`
+		Type      string `json:"typ"`
+	}
+	if err = json.Unmarshal(headerPayload, &header); err != nil || header.Algorithm != "HS256" || header.Type != "JWT" {
+		return claims, errors.New("unsupported token header")
+	}
 	unsigned := parts[0] + "." + parts[1]
 	expected := sign(secret, unsigned)
-	if subtleCompare(expected, parts[2]) == false {
+	if !subtleCompare(expected, parts[2]) {
 		return claims, errors.New("invalid token signature")
 	}
 
@@ -57,8 +72,15 @@ func ParseToken(secret string, token string) (Claims, error) {
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return claims, err
 	}
-	if claims.ExpiresAt <= time.Now().Unix() {
+	now := time.Now().Unix()
+	if claims.ExpiresAt <= now {
 		return claims, errors.New("token expired")
+	}
+	if claims.IssuedAt <= 0 || claims.IssuedAt > now+60 || claims.ExpiresAt <= claims.IssuedAt {
+		return claims, errors.New("invalid token lifetime")
+	}
+	if !validPublicID(claims.PublicSubject) || claims.SessionID == "" || claims.AuthVersion <= 0 {
+		return claims, errors.New("invalid token claims")
 	}
 	return claims, nil
 }
@@ -73,17 +95,28 @@ func subtleCompare(a string, b string) bool {
 	return hmac.Equal([]byte(a), []byte(b))
 }
 
-func NewClaims(userID int64, username string, email string, roles []string, permissions []string, ttl time.Duration) Claims {
+func NewClaims(publicUserID string, username string, email string, roles []string, permissions []string, authVersion int64, ttl time.Duration) (Claims, error) {
+	sessionBytes := make([]byte, 32)
+	if _, err := rand.Read(sessionBytes); err != nil {
+		return Claims{}, err
+	}
 	now := time.Now()
 	return Claims{
-		Subject:     userID,
-		Username:    username,
-		Email:       email,
-		Roles:       roles,
-		Permissions: permissions,
-		IssuedAt:    now.Unix(),
-		ExpiresAt:   now.Add(ttl).Unix(),
-	}
+		PublicSubject: publicUserID,
+		SessionID:     base64.RawURLEncoding.EncodeToString(sessionBytes),
+		AuthVersion:   authVersion,
+		Username:      username,
+		Email:         email,
+		Roles:         roles,
+		Permissions:   permissions,
+		IssuedAt:      now.Unix(),
+		ExpiresAt:     now.Add(ttl).Unix(),
+	}, nil
+}
+
+func SessionFingerprint(sessionID string) []byte {
+	sum := sha256.Sum256([]byte(sessionID))
+	return sum[:]
 }
 
 func BearerToken(header string) (string, error) {
@@ -96,4 +129,16 @@ func BearerToken(header string) (string, error) {
 		return "", fmt.Errorf("empty bearer token")
 	}
 	return token, nil
+}
+
+func validPublicID(value string) bool {
+	if len(value) != 9 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9') {
+			return false
+		}
+	}
+	return true
 }

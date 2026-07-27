@@ -14,7 +14,7 @@ type clientLocation struct {
 }
 
 func (s *Server) visitorLocation(w http.ResponseWriter, r *http.Request) {
-	location := requestClientLocation(r)
+	location := s.requestClientLocation(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ip":              location.IP,
 		"countryCode":     location.CountryCode,
@@ -23,13 +23,21 @@ func (s *Server) visitorLocation(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func requestClientLocation(r *http.Request) clientLocation {
+func (s *Server) requestClientLocation(r *http.Request) clientLocation {
+	peer := normalizeIPAddress(remoteIP(r.RemoteAddr))
+	if !networkContainsIP(s.trustedProxies, peer) {
+		return clientLocation{IP: peer}
+	}
+	return requestClientLocationFromProxy(r, peer)
+}
+
+func requestClientLocationFromProxy(r *http.Request, fallbackIP string) clientLocation {
 	ip := firstHeaderValue(r, "Ali-Real-Client-Ip", "Ali-Cdn-Real-Ip", "True-Client-IP")
 	if ip == "" {
 		ip = firstForwardedIP(r.Header.Get("X-Forwarded-For"))
 	}
 	if ip == "" {
-		ip = remoteIP(r.RemoteAddr)
+		ip = fallbackIP
 	}
 
 	countryCode := strings.ToUpper(firstHeaderValue(r, "Ali-Ip-Country", "IP-Country-Code", "CF-IPCountry"))
@@ -42,6 +50,41 @@ func requestClientLocation(r *http.Request) clientLocation {
 		CountryCode: countryCode,
 		City:        decodeLocationHeader(firstHeaderValue(r, "Ali-Ip-City", "IP-City")),
 	}
+}
+
+func parseTrustedProxyNetworks(values []string) []*net.IPNet {
+	result := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if ip := net.ParseIP(value); ip != nil {
+			bits := 128
+			if ip.To4() != nil {
+				bits = 32
+			}
+			result = append(result, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		if _, network, err := net.ParseCIDR(value); err == nil {
+			result = append(result, network)
+		}
+	}
+	return result
+}
+
+func networkContainsIP(networks []*net.IPNet, value string) bool {
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return false
+	}
+	for _, network := range networks {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstHeaderValue(r *http.Request, names ...string) string {

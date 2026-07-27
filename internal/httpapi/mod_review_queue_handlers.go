@@ -10,7 +10,7 @@ type modContentReviewItem struct {
 	Source      string    `json:"source"`
 	ModSiteID   string    `json:"modSiteId"`
 	ModName     string    `json:"modName"`
-	UserID      *int64    `json:"userId,omitempty"`
+	UserID      *string   `json:"userId,omitempty"`
 	Username    string    `json:"username"`
 	DisplayName string    `json:"displayName"`
 	Title       string    `json:"title"`
@@ -21,33 +21,33 @@ type modContentReviewItem struct {
 
 func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), `
-		select queue.id,queue.source,queue.slug,queue.mod_name,queue.user_id,
+		select queue.id,queue.source,queue.slug,queue.mod_name,user_account.public_id,
 		       coalesce(user_account.username,''),coalesce(user_account.display_name,''),
 		       queue.title,queue.summary,queue.created_at
 		from (
-			select revision.id::text id,'revision'::text source,mod.slug,mod.primary_name mod_name,
+			select revision.public_id id,'revision'::text source,mod.slug,mod.primary_name mod_name,
 			       request.submitted_by user_id,'Mod revision #' || revision.revision_no title,
 			       request.reason summary,revision.created_at
 			from content_revisions revision
 			join change_requests request on request.proposed_revision_id=revision.id
-			join mods mod on mod.id=revision.aggregate_key::bigint
+			join mods mod on mod.id=revision.entity_id
 			where revision.aggregate_type='mod' and request.status='pending'
 			union all
-			select revision.id::text,'entry'::text,mod.slug,mod.primary_name,request.submitted_by,
+			select revision.public_id,'entry'::text,mod.slug,mod.primary_name,request.submitted_by,
 			       'Entry introduction: ' || (request.metadata->>'objectId'),request.reason,revision.created_at
 			from content_revisions revision
 			join change_requests request on request.proposed_revision_id=revision.id
-			join mods mod on mod.id=(request.metadata->>'modId')::bigint
+			join mods mod on mod.slug=request.metadata->>'siteId'
 			where revision.aggregate_type='catalog_resource' and request.status='pending'
 			union all
-			select revision.id::text,'catalog'::text,''::text,'Global catalog'::text,request.submitted_by,
+			select revision.public_id,'catalog'::text,''::text,'Global catalog'::text,request.submitted_by,
 			       case revision.aggregate_type when 'catalog_tag' then 'Tag: ' when 'catalog_recipe_type' then 'Recipe type: ' else 'Recipe: ' end || revision.aggregate_key,
 			       request.reason,revision.created_at
 			from content_revisions revision
 			join change_requests request on request.proposed_revision_id=revision.id
 			where revision.aggregate_type in ('catalog_tag','catalog_recipe_type','catalog_recipe') and request.status='pending'
 			union all
-			select revision.id::text,'blueprint'::text,blueprint.public_id,blueprint.title,request.submitted_by,
+			select revision.public_id,'blueprint'::text,blueprint.public_id,blueprint.title,request.submitted_by,
 			       'Blueprint: ' || blueprint.title,
 			       coalesce((select string_agg(change.path || ': ' || coalesce(change.before_value::text,'∅') || ' → ' || coalesce(change.after_value::text,'∅'), E'\n')
 			                 from content_change_items change where change.revision_id=revision.id),request.reason),revision.created_at
@@ -56,7 +56,7 @@ func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) 
 			join blueprints blueprint on blueprint.public_id=revision.aggregate_key
 			where revision.aggregate_type='blueprint' and request.status='pending'
 			union all
-			select revision.id::text,'creator'::text,creator.public_id,creator.name,request.submitted_by,
+			select revision.public_id,'creator'::text,creator.public_id,creator.name,request.submitted_by,
 			       case creator.kind when 'team' then 'Team: ' else 'Author: ' end || creator.name,
 			       coalesce((select string_agg(change.path || ': ' || coalesce(change.before_value::text,'empty') || ' -> ' || coalesce(change.after_value::text,'empty'), E'\n')
 			                 from content_change_items change where change.revision_id=revision.id),request.reason),revision.created_at

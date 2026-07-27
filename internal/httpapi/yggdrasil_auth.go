@@ -63,7 +63,7 @@ var yggdrasilDummyPasswordHash = func() string {
 	return hash
 }()
 
-var errYggdrasilCredentialChanged = errors.New("Yggdrasil launcher credential changed")
+var errYggdrasilCredentialChanged = errors.New("yggdrasil launcher credential changed")
 
 type yggdrasilAccountRecord struct {
 	UserID             int64
@@ -537,7 +537,7 @@ func (s *Server) issueYggdrasilToken(ctx context.Context, userID int64, profile 
 		return "", nil, err
 	}
 	if !s.yggdrasilUserAllowed(ctx, userID) {
-		return "", nil, errors.New("Yggdrasil launcher permission denied")
+		return "", nil, errors.New("yggdrasil launcher permission denied")
 	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -554,7 +554,7 @@ func (s *Server) issueYggdrasilToken(ctx context.Context, userID int64, profile 
 	if limited, err := yggdrasilIssueRateLimitedTx(ctx, tx, userID); err != nil {
 		return "", nil, err
 	} else if limited {
-		return "", nil, errors.New("Yggdrasil token issuance rate exceeded")
+		return "", nil, errors.New("yggdrasil token issuance rate exceeded")
 	}
 	var profileID any
 	var selected *yggdrasilProfileRecord

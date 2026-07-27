@@ -48,12 +48,13 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		coalesce(binding.id,''),coalesce(binding.data,'{}'::jsonb),coalesce(binding.ingredient_present,false),coalesce(binding.clickable,false),
 		coalesce(binding.placeholder_item,''),coalesce(binding.item_tag_equivalent,''),coalesce(binding.semantic_role,''),
 		coalesce(binding.role_source,''),
-		coalesce(tag.entity_id,''),coalesce(tag.registry,''),coalesce(tag.canonical_id,'')
+		coalesce(tag_entity.public_id,''),coalesce(tag.registry,''),coalesce(tag.canonical_id,'')
 		from recipe_import_snapshots snapshot
 		left join recipe_template_import_snapshots template on template.id=snapshot.template_id
 		left join recipe_template_import_slots slot on slot.template_id=template.id
 		left join recipe_import_bindings binding on binding.recipe_snapshot_id=snapshot.id and binding.template_slot_id=slot.id
 		left join catalog_tags tag on tag.entity_id=binding.tag_id
+		left join catalog_entities tag_entity on tag_entity.id=tag.entity_id
 		where snapshot.id=any($1::text[])
 		order by snapshot.id,slot.ordinal`, snapshotIDs)
 	if err != nil {

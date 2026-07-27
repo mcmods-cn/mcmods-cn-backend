@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -162,7 +161,7 @@ func (s *Server) updateMailConfig(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(payload.Password) == "" {
 		payload.Password = current.Password
 	}
-	raw, err := json.Marshal(payload)
+	raw, err := s.sealSystemSetting(payload)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "邮件配置格式不正确")
 		return
@@ -174,7 +173,7 @@ func (s *Server) updateMailConfig(w http.ResponseWriter, r *http.Request) {
 		 values ('mail.smtp', $1::jsonb, $2, now())
 		 on conflict (key) do update
 		 set value = excluded.value, updated_by = excluded.updated_by, updated_at = now()`,
-		string(raw),
+		raw,
 		claims.Subject,
 	)
 	if err != nil {
@@ -442,10 +441,10 @@ func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	rows, err := s.db.Query(
 		r.Context(),
-		`select id, username, email, display_name, email_verified, status, created_at, last_login_at
+		`select id, public_id, username, email, display_name, email_verified, status, created_at, last_login_at
 		 from users
 		 where $1 = ''
-		    or id::text = $1
+		    or public_id = lower($1)
 		    or username ilike '%' || $1 || '%'
 		    or email ilike '%' || $1 || '%'
 		    or display_name ilike '%' || $1 || '%'
@@ -462,7 +461,7 @@ func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	users := make([]domain.User, 0)
 	for rows.Next() {
 		var user domain.User
-		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt); err != nil {
+		if err := rows.Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "读取用户数据失败")
 			return
 		}
@@ -529,13 +528,13 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		`insert into users (username, email, display_name, password_hash, email_verified, status)
 		 values ($1, $2, $3, $4, true, $5)
-		 returning id, username, email, display_name, email_verified, status, created_at, last_login_at`,
+		 returning id, public_id, username, email, display_name, email_verified, status, created_at, last_login_at`,
 		req.Username,
 		req.Email,
 		req.DisplayName,
 		passwordHash,
 		req.Status,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
+	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
 	if err != nil {
 		writeError(w, http.StatusConflict, "用户名或邮箱已被占用")
 		return
@@ -589,11 +588,12 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateUserRoles(w http.ResponseWriter, r *http.Request) {
-	userID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || userID <= 0 {
+	identity, err := s.resolvePublicIdentity(r.Context(), r.PathValue("id"), "user")
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "用户 ID 不正确")
 		return
 	}
+	userID := identity.InternalID
 	var req updateRolesRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
@@ -637,11 +637,12 @@ func (s *Server) updateUserRoles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) userPermissionDetails(w http.ResponseWriter, r *http.Request) {
-	userID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || userID <= 0 {
+	identity, err := s.resolvePublicIdentity(r.Context(), r.PathValue("id"), "user")
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "用户 ID 不正确")
 		return
 	}
+	userID := identity.InternalID
 	roles, effective := s.userGrants(r.Context(), userID)
 	rows, err := s.db.Query(
 		r.Context(),
@@ -685,11 +686,12 @@ func (s *Server) userPermissionDetails(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateUserPermissions(w http.ResponseWriter, r *http.Request) {
-	userID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || userID <= 0 {
+	identity, err := s.resolvePublicIdentity(r.Context(), r.PathValue("id"), "user")
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "用户 ID 不正确")
 		return
 	}
+	userID := identity.InternalID
 	var req updateUserPermissionsRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
@@ -791,7 +793,7 @@ func (s *Server) updateUserPermissions(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	s.auditPermissionChangeTx(r.Context(), tx, claims.Subject, &userID, "update_user_permissions", map[string]any{
 		"permissions": req.Permissions,
-		"ip":          mailer.LocalAddress(r.RemoteAddr),
+		"ip":          s.requestClientLocation(r).IP,
 		"userAgent":   r.UserAgent(),
 	})
 	if err := tx.Commit(r.Context()); err != nil {
@@ -946,44 +948,6 @@ func rolePermissionCodes(entries []domain.RolePermissionEntry) []string {
 	return codes
 }
 
-func (s *Server) rolePermissions(ctx context.Context, roleCode string) []string {
-	permissions := s.rolePermissionsExact(ctx, roleCode)
-	template, variables, ok := s.matchRoleTemplate(ctx, roleCode)
-	if ok && template.Code != roleCode {
-		for _, permission := range s.rolePermissionsExact(ctx, template.Code) {
-			permissions = append(permissions, applyRoleVariables(permission, variables))
-		}
-	}
-	return normalizeCodes(permissions)
-}
-
-func (s *Server) rolePermissionsExact(ctx context.Context, roleCode string) []string {
-	rows, err := s.db.Query(
-		ctx,
-		`select p.code
-		 from permissions p
-		 join role_permissions rp on rp.permission_id = p.id
-		 join roles r on r.id = rp.role_id
-		 where r.code = $1
-		   and rp.allow = true
-		   and (rp.expires_at is null or rp.expires_at > now())
-		 order by p.code`,
-		roleCode,
-	)
-	if err != nil {
-		return []string{}
-	}
-	defer rows.Close()
-	permissions := make([]string, 0)
-	for rows.Next() {
-		var permission string
-		if err := rows.Scan(&permission); err == nil {
-			permissions = append(permissions, permission)
-		}
-	}
-	return permissions
-}
-
 func (s *Server) ensureRoleForBinding(ctx context.Context, tx pgx.Tx, roleCode string) error {
 	var exists bool
 	if err := tx.QueryRow(ctx, `select exists(select 1 from roles where code = $1)`, roleCode).Scan(&exists); err != nil {
@@ -1029,30 +993,6 @@ func (s *Server) ensureRoleForBinding(ctx context.Context, tx pgx.Tx, roleCode s
 		}
 	}
 	return nil
-}
-
-func (s *Server) matchRoleTemplate(ctx context.Context, roleCode string) (domain.Role, map[string]string, bool) {
-	rows, err := s.db.Query(
-		ctx,
-		`select code, name, description, weight, parents
-		 from roles
-		 where code like '%[%' or code like '%<%'
-		 order by length(code) desc, code`,
-	)
-	if err != nil {
-		return domain.Role{}, nil, false
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var role domain.Role
-		if err := rows.Scan(&role.Code, &role.Name, &role.Description, &role.Weight, &role.Parents); err != nil {
-			continue
-		}
-		if variables, ok := matchRoleTemplateCode(role.Code, roleCode); ok {
-			return role, variables, true
-		}
-	}
-	return domain.Role{}, nil, false
 }
 
 func matchRoleTemplateTx(ctx context.Context, tx pgx.Tx, roleCode string) (domain.Role, map[string]string, bool, error) {
@@ -1463,7 +1403,7 @@ func (s *Server) mailConfigFromSettings(ctx context.Context) mailConfigPayload {
 		_ = ignoreNoRows(err)
 		return payload
 	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	if err := s.openSystemSetting(raw, &payload); err != nil {
 		return payload
 	}
 	payload.Enabled = strings.TrimSpace(payload.Host) != "" && strings.TrimSpace(payload.From) != ""

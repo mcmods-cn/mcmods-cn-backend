@@ -127,7 +127,7 @@ func (s *Server) appLogs(r *http.Request, filter logQueryFilter) []map[string]an
 	where := []string{"l.category = $1"}
 	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
 		"l.action", "l.target", "l.ip", "l.user_agent", "l.method", "l.path", "l.payload::text",
-		"actor.username", "actor.display_name", "actor.email", "l.actor_id::text",
+		"actor.username", "actor.display_name", "actor.email", "actor.public_id",
 	})
 	if filter.Level != "" {
 		args = append(args, filter.Level)
@@ -142,7 +142,7 @@ func (s *Server) appLogs(r *http.Request, filter logQueryFilter) []map[string]an
 	args = append(args, filter.Limit)
 	return s.querySimpleRows(
 		r,
-		`select l.id, l.category, l.level, l.actor_id,
+		`select l.id, l.category, l.level, actor.public_id as actor_id,
 		        actor.username as actor_username,
 		        actor.display_name as actor_display_name,
 		        l.action, l.target, l.ip, l.user_agent, l.method, l.path, l.status, l.latency_ms, l.payload, l.created_at
@@ -159,17 +159,17 @@ func (s *Server) permissionChangeLogs(r *http.Request, filter logQueryFilter) []
 	args := []any{}
 	where := []string{"1 = 1"}
 	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
-		"l.action", "l.payload::text", "l.operator_id::text", "l.target_user_id::text",
+		"l.action", "l.payload::text", "operator.public_id", "target.public_id",
 		"operator.username", "operator.display_name", "operator.email",
 		"target.username", "target.display_name", "target.email",
 	})
 	args = append(args, filter.Limit)
 	return s.querySimpleRows(
 		r,
-		`select l.id, l.operator_id,
+		`select l.id, operator.public_id as operator_id,
 		        operator.username as operator_username,
 		        operator.display_name as operator_display_name,
-		        l.target_user_id,
+		        target.public_id as target_user_id,
 		        target.username as target_username,
 		        target.display_name as target_display_name,
 		        l.action, l.payload, l.created_at
@@ -187,7 +187,7 @@ func (s *Server) loginSecurityLogs(r *http.Request, filter logQueryFilter) []map
 	args := []any{}
 	where := []string{"1 = 1"}
 	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
-		"l.account", "l.ip", "l.user_agent", "l.reason", "l.user_id::text",
+		"l.account", "l.ip", "l.user_agent", "l.reason", "u.public_id",
 		"u.username", "u.display_name", "u.email",
 	})
 	switch filter.Status {
@@ -199,7 +199,7 @@ func (s *Server) loginSecurityLogs(r *http.Request, filter logQueryFilter) []map
 	args = append(args, filter.Limit)
 	return s.querySimpleRows(
 		r,
-		`select l.id, l.user_id,
+		`select l.id, u.public_id as user_id,
 		        u.username,
 		        u.display_name,
 		        l.account, l.ip, l.user_agent, l.success, l.reason, l.created_at
@@ -216,7 +216,7 @@ func (s *Server) fileUploadLogs(r *http.Request, filter logQueryFilter) []map[st
 	args := []any{}
 	where := []string{"1 = 1"}
 	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
-		"l.object_key", "l.original_name", "l.ip", "l.user_agent", "l.result", "l.message", "l.uploader_id::text",
+		"l.object_key", "l.original_name", "l.ip", "l.user_agent", "l.result", "l.message", "uploader.public_id",
 		"uploader.username", "uploader.display_name", "uploader.email",
 	})
 	if filter.Status != "" {
@@ -226,12 +226,13 @@ func (s *Server) fileUploadLogs(r *http.Request, filter logQueryFilter) []map[st
 	args = append(args, filter.Limit)
 	return s.querySimpleRows(
 		r,
-		`select l.id, l.file_id, l.uploader_id,
+		`select l.id, file.public_id as file_id, uploader.public_id as uploader_id,
 		        uploader.username as uploader_username,
 		        uploader.display_name as uploader_display_name,
 		        l.object_key, l.original_name, l.size_bytes, l.ip, l.user_agent, l.result, l.message, l.created_at
 		 from oss_upload_logs l
 		 left join users uploader on uploader.id = l.uploader_id
+		 left join oss_files file on file.id = l.file_id
 		 where `+strings.Join(where, " and ")+`
 		 order by l.created_at desc
 		 limit $`+strconv.Itoa(len(args)),
@@ -252,7 +253,7 @@ func (s *Server) writeAppLog(ctx context.Context, category string, level string,
 	if r != nil {
 		method = r.Method
 		pathValue = r.URL.Path
-		ip = requestIP(r)
+		ip = s.requestClientLocation(r).IP
 		userAgent = r.UserAgent()
 	}
 	timeoutCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -321,10 +322,6 @@ func logFilterFromRequest(r *http.Request) logQueryFilter {
 		To:       strings.TrimSpace(r.URL.Query().Get("to")),
 		Limit:    boundedLimit(r.URL.Query().Get("limit"), 100, 500),
 	}
-}
-
-func addLogCommonFilters(where *[]string, args *[]any, filter logQueryFilter, searchColumns []string) {
-	addLogCommonFiltersForColumn(where, args, filter, "created_at", searchColumns)
 }
 
 func addLogCommonFiltersForColumn(where *[]string, args *[]any, filter logQueryFilter, createdAtColumn string, searchColumns []string) {
@@ -472,12 +469,5 @@ func levelForStatus(status int) string {
 }
 
 func requestIP(r *http.Request) string {
-	if value := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); value != "" {
-		parts := strings.Split(value, ",")
-		return strings.TrimSpace(parts[0])
-	}
-	if value := strings.TrimSpace(r.Header.Get("X-Real-IP")); value != "" {
-		return value
-	}
-	return r.RemoteAddr
+	return normalizeIPAddress(remoteIP(r.RemoteAddr))
 }

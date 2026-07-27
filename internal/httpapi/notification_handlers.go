@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -36,13 +37,13 @@ type aiDailyBalancePayload struct {
 }
 
 type notificationActor struct {
-	ID          int64  `json:"id"`
+	ID          string `json:"id"`
 	Username    string `json:"username"`
 	DisplayName string `json:"displayName"`
 }
 
 type notificationItem struct {
-	ID           int64               `json:"id"`
+	ID           string              `json:"id"`
 	Kind         string              `json:"kind"`
 	Title        string              `json:"title"`
 	Body         string              `json:"body"`
@@ -78,10 +79,15 @@ func (s *Server) publishSystemNotification(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusServiceUnavailable, "通知任务队列不可用")
 		return
 	}
-	err := s.queue.PublishTask(r.Context(), notificationTaskCode, notificationEvent{
+	publisherPublicID, err := s.publicIDForInternal(r.Context(), "user", currentClaims(r).Subject)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve publisher")
+		return
+	}
+	err = s.queue.PublishTask(r.Context(), notificationTaskCode, notificationEvent{
 		Action: "system", Title: req.Title, Body: req.Body,
 		SourceLocale: req.SourceLocale, SendEmail: req.SendEmail,
-		Data: map[string]any{"publishedBy": currentClaims(r).Subject},
+		Data: map[string]any{"publishedBy": publisherPublicID},
 	})
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "通知任务队列不可用")
@@ -91,7 +97,7 @@ func (s *Server) publishSystemNotification(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) deleteSystemNotification(w http.ResponseWriter, r *http.Request) {
-	notificationID, ok := pathNotificationID(w, r)
+	notificationID, ok := s.pathNotificationID(w, r)
 	if !ok {
 		return
 	}
@@ -124,9 +130,9 @@ func (s *Server) notifications(w http.ResponseWriter, r *http.Request) {
 	args = append(args, limit)
 	rows, err := s.db.Query(
 		r.Context(),
-		`select n.id, n.kind, n.title, n.body, n.source_locale, n.data,
+		`select n.public_id, n.kind, n.title, n.body, n.source_locale, n.data,
 		        coalesce(jsonb_agg(distinct jsonb_build_object(
-		          'id', actor.id, 'username', actor.username, 'displayName', actor.display_name
+		          'id', actor.public_id, 'username', actor.username, 'displayName', actor.display_name
 		        )) filter (where actor.id is not null), '[]'::jsonb),
 		        (receipt.read_at is not null), n.created_at, n.updated_at
 		 from notifications n
@@ -169,7 +175,7 @@ func (s *Server) notifications(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
-	notificationID, ok := pathNotificationID(w, r)
+	notificationID, ok := s.pathNotificationID(w, r)
 	if !ok {
 		return
 	}
@@ -235,7 +241,7 @@ func (s *Server) aiDailyBalance(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
-	notificationID, ok := pathNotificationID(w, r)
+	notificationID, ok := s.pathNotificationID(w, r)
 	if !ok {
 		return
 	}
@@ -362,12 +368,12 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeAITaskLog(r.Context(), taskID, "info", "task_queued", "Notification translation published to NATS", payload)
-	writeJSON(w, http.StatusAccepted, map[string]any{"cached": false, "taskId": taskID, "status": "queued"})
+	writeJSON(w, http.StatusAccepted, map[string]any{"cached": false, "taskId": taskUID, "status": "queued"})
 }
 
 func (s *Server) notificationTranslationResult(w http.ResponseWriter, r *http.Request) {
-	taskID, err := strconv.ParseInt(strings.TrimSpace(r.PathValue("id")), 10, 64)
-	if err != nil || taskID <= 0 {
+	taskUID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	if taskUID == "" || len(taskUID) > 80 {
 		writeError(w, http.StatusBadRequest, "AI 任务 ID 不正确")
 		return
 	}
@@ -375,11 +381,11 @@ func (s *Server) notificationTranslationResult(w http.ResponseWriter, r *http.Re
 	var status, errorMessage string
 	var resultRaw, payloadRaw []byte
 	var inputTokens, outputTokens int64
-	err = s.db.QueryRow(
+	err := s.db.QueryRow(
 		r.Context(),
 		`select status, result, payload, error, input_tokens, output_tokens
-		 from ai_tasks where id = $1 and created_by = $2 and task_type = $3`,
-		taskID,
+		 from ai_tasks where task_uid = $1 and created_by = $2 and task_type = $3`,
+		taskUID,
 		claims.Subject,
 		aiTaskNotificationTranslation,
 	).Scan(&status, &resultRaw, &payloadRaw, &errorMessage, &inputTokens, &outputTokens)
@@ -461,10 +467,19 @@ func remainingTokens(limit int64, used int64) int64 {
 	return limit - used
 }
 
-func pathNotificationID(w http.ResponseWriter, r *http.Request) (int64, bool) {
-	notificationID, err := strconv.ParseInt(strings.TrimSpace(r.PathValue("id")), 10, 64)
-	if err != nil || notificationID <= 0 {
+func (s *Server) pathNotificationID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	if !validCatalogPublicID(publicID) {
 		writeError(w, http.StatusBadRequest, "通知 ID 不正确")
+		return 0, false
+	}
+	var notificationID int64
+	if err := s.db.QueryRow(r.Context(), `select id from notifications where public_id=$1`, publicID).Scan(&notificationID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "notification not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to load notification")
+		}
 		return 0, false
 	}
 	return notificationID, true

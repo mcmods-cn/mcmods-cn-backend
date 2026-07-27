@@ -40,7 +40,7 @@ var embeddedIconResourceIDPattern = regexp.MustCompile(`^[a-z0-9_.-]+:[a-z0-9_./
 var minecraftFormattingCodePattern = regexp.MustCompile(`(?i)[§搂][0-9a-fk-or]`)
 
 type createEmbeddedIconImportJobRequest struct {
-	OSSFileID                   int64  `json:"ossFileId"`
+	OSSFileID                   string `json:"ossFileId"`
 	TargetVersionPublicID       string `json:"targetVersionPublicId"`
 	OverwriteExistingImportData bool   `json:"overwriteExistingImportData"`
 	Source                      string `json:"source"`
@@ -137,24 +137,25 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 	}
 	request.Source = normalizeEmbeddedIconImportSource(request.Source)
 	request.TargetVersionPublicID = strings.ToLower(strings.TrimSpace(request.TargetVersionPublicID))
+	request.OSSFileID = strings.ToLower(strings.TrimSpace(request.OSSFileID))
 	importerVersion := embeddedIconImporterVersion(request.Source)
-	if request.OSSFileID <= 0 || request.TargetVersionPublicID == "" || importerVersion == "" {
+	if !validCatalogPublicID(request.OSSFileID) || request.TargetVersionPublicID == "" || importerVersion == "" {
 		writeError(w, http.StatusBadRequest, "invalid catalog import request")
 		return
 	}
-	var targetVersionExists bool
-	if err := s.db.QueryRow(r.Context(), `select exists(select 1 from mod_content_versions where mod_id=$1 and public_id=$2 and status='active')`,
-		identity.ID, request.TargetVersionPublicID).Scan(&targetVersionExists); err != nil || !targetVersionExists {
+	var targetVersionID int64
+	if err := s.db.QueryRow(r.Context(), `select id from mod_content_versions where mod_id=$1 and public_id=$2 and status='active'`,
+		identity.ID, request.TargetVersionPublicID).Scan(&targetVersionID); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "select an active mod data version")
 		return
 	}
 
 	claims := currentClaims(r)
 	var originalName, objectKey, digest, source, category string
-	var size int64
-	err := s.db.QueryRow(r.Context(), `select original_name,object_key,sha256,size_bytes,source,category
-		from oss_files where id=$1 and uploader_id=$2 and status='active'`, request.OSSFileID, claims.Subject).
-		Scan(&originalName, &objectKey, &digest, &size, &source, &category)
+	var archiveFileID, size int64
+	err := s.db.QueryRow(r.Context(), `select id,original_name,object_key,sha256,size_bytes,source,category
+		from oss_files where public_id=$1 and uploader_id=$2 and status='active'`, request.OSSFileID, claims.Subject).
+		Scan(&archiveFileID, &originalName, &objectKey, &digest, &size, &source, &category)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusBadRequest, "catalog import file is unavailable")
 		return
@@ -183,7 +184,7 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 		values($1,$2,$3,$4,$5,$6,'','unknown',$7::jsonb,'{}'::text[],'icons',$8)
 		on conflict(sha256) do update set archive_file_id=excluded.archive_file_id,archive_name=excluded.archive_name,
 			schema_version=excluded.schema_version,exporter_version=excluded.exporter_version,manifest=excluded.manifest,uploaded_by=excluded.uploaded_by
-		returning id`, packageID, digest, request.OSSFileID, originalName, importerVersion, request.Source, string(manifest), claims.Subject).Scan(&packageID)
+		returning id`, packageID, digest, archiveFileID, originalName, importerVersion, request.Source, string(manifest), claims.Subject).Scan(&packageID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save catalog import package")
 		return
@@ -193,16 +194,16 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 	var existingStatus string
 	var existingStalled bool
 	err = tx.QueryRow(r.Context(), `select id,status,status in ('validating','importing') and coalesce(heartbeat_at,updated_at)<now()-$6::interval
-		from catalog_import_jobs where mod_id=$1 and package_id=$2 and importer_version=$3 and target_version_public_id=$4 and overwrite_existing=$5 for update`,
-		identity.ID, packageID, importerVersion, request.TargetVersionPublicID, request.OverwriteExistingImportData, pgInterval(modExportStaleAfter)).
+		from catalog_import_jobs where mod_id=$1 and package_id=$2 and importer_version=$3 and target_version_id=$4 and overwrite_existing=$5 for update`,
+		identity.ID, packageID, importerVersion, targetVersionID, request.OverwriteExistingImportData, pgInterval(modExportStaleAfter)).
 		Scan(&jobID, &existingStatus, &existingStalled)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		jobID = newExportID()
 		_, err = tx.Exec(r.Context(), `insert into catalog_import_jobs
-			(id,mod_id,package_id,importer_version,target_version_public_id,overwrite_existing,created_by)
+			(id,mod_id,package_id,importer_version,target_version_id,overwrite_existing,created_by)
 			values($1,$2,$3,$4,$5,$6,$7)`, jobID, identity.ID, packageID, importerVersion,
-			request.TargetVersionPublicID, request.OverwriteExistingImportData, claims.Subject)
+			targetVersionID, request.OverwriteExistingImportData, claims.Subject)
 		shouldPublish = err == nil
 	case err == nil && (shouldRetryModExportStatus(existingStatus) || existingStalled):
 		_, err = tx.Exec(r.Context(), `update catalog_import_jobs set status='queued',progress=0,current_stage='recovery',
@@ -241,8 +242,8 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 		if client, cfg, clientErr := s.ossClient(r.Context()); clientErr == nil {
 			_, _ = client.DeleteObject(r.Context(), &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey)})
 		}
-		_, _ = s.db.Exec(r.Context(), `update oss_files set status='deleted',updated_at=now() where id=$1`, request.OSSFileID)
-		_, _ = s.db.Exec(r.Context(), `update catalog_import_packages set archive_file_id=null where id=$1 and archive_file_id=$2`, packageID, request.OSSFileID)
+		_, _ = s.db.Exec(r.Context(), `update oss_files set status='deleted',updated_at=now() where id=$1`, archiveFileID)
+		_, _ = s.db.Exec(r.Context(), `update catalog_import_packages set archive_file_id=null where id=$1 and archive_file_id=$2`, packageID, archiveFileID)
 	}
 	response, _ := s.modExportJobByID(r.Context(), jobID, identity.ID)
 	response.Deduplicated = deduplicated
@@ -286,17 +287,17 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 		s.failModExportJob(jobID, runToken, "import_failed", resultErr)
 	}()
 
-	var createdBy, sourceFileID int64
+	var createdBy, sourceFileID, targetVersionID int64
 	var targetVersionPublicID, expectedHash, objectKey, uniqueID string
 	var overwrite bool
 	var minecraftVersions, loaders []string
-	err = s.db.QueryRow(ctx, `select job.package_id,job.mod_id,coalesce(job.created_by,0),job.target_version_public_id,
+	err = s.db.QueryRow(ctx, `select job.package_id,job.mod_id,coalesce(job.created_by,0),job.target_version_id,version.public_id,
 		job.overwrite_existing,package.sha256,coalesce(file.id,0),coalesce(file.object_key,''),mod.project_code,
 		version.minecraft_versions,version.loaders
 		from catalog_import_jobs job join catalog_import_packages package on package.id=job.package_id
-		join mods mod on mod.id=job.mod_id join mod_content_versions version on version.public_id=job.target_version_public_id and version.mod_id=job.mod_id
+		join mods mod on mod.id=job.mod_id join mod_content_versions version on version.id=job.target_version_id and version.mod_id=job.mod_id
 		left join oss_files file on file.id=package.archive_file_id where job.id=$1`, jobID).
-		Scan(&packageID, &modID, &createdBy, &targetVersionPublicID, &overwrite, &expectedHash, &sourceFileID,
+		Scan(&packageID, &modID, &createdBy, &targetVersionID, &targetVersionPublicID, &overwrite, &expectedHash, &sourceFileID,
 			&objectKey, &uniqueID, &minecraftVersions, &loaders)
 	if err != nil {
 		return err
@@ -350,15 +351,15 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 			revisionID := newExportID()
 			var revisionNo int64
 			if queryErr := tx.QueryRow(ctx, `select coalesce(max(revision_no),0)+1 from catalog_import_revisions
-				where mod_id=$1 and target_version_public_id=$2 and source_kind=$3 and source_namespace=$4`,
-				modID, targetVersionPublicID, source, namespace).Scan(&revisionNo); queryErr != nil {
+				where mod_id=$1 and target_version_id=$2 and source_kind=$3 and source_namespace=$4`,
+				modID, targetVersionID, source, namespace).Scan(&revisionNo); queryErr != nil {
 				return queryErr
 			}
 			if _, insertErr := tx.Exec(ctx, `insert into catalog_import_revisions
-				(id,mod_id,package_id,job_id,target_version_public_id,revision_no,minecraft_version,loader,exporter_version,
+				(id,mod_id,package_id,job_id,target_version_id,revision_no,minecraft_version,loader,exporter_version,
 				 source_namespace,source_kind,source_metadata,import_run_token)
 				values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)`,
-				revisionID, modID, packageID, jobID, targetVersionPublicID, revisionNo, minecraftVersion, loader,
+				revisionID, modID, packageID, jobID, targetVersionID, revisionNo, minecraftVersion, loader,
 				importerVersion, namespace, source, string(manifestJSON), runToken); insertErr != nil {
 				return insertErr
 			}
@@ -437,8 +438,8 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 					return queryErr
 				}
 				if _, updateErr := tx.Exec(ctx, `update catalog_import_revisions set is_active=false,status='superseded'
-					where mod_id=$1 and target_version_public_id=$2 and source_namespace=$3 and source_kind=$4 and id<>$5 and is_active`,
-					modID, targetVersionPublicID, namespace, revisionSource, revisionID); updateErr != nil {
+					where mod_id=$1 and target_version_id=$2 and source_namespace=$3 and source_kind=$4 and id<>$5 and is_active`,
+					modID, targetVersionID, namespace, revisionSource, revisionID); updateErr != nil {
 					return updateErr
 				}
 			}
@@ -449,7 +450,7 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 			}
 		}
 		if canActivate {
-			if syncErr := syncImportedResourcesToContentVersionTx(ctx, tx, revisionIDs, targetVersionPublicID, overwrite, createdBy); syncErr != nil {
+			if syncErr := syncImportedResourcesToContentVersionTx(ctx, tx, revisionIDs, targetVersionID, overwrite, createdBy); syncErr != nil {
 				return syncErr
 			}
 		}

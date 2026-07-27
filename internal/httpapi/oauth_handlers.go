@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -36,12 +38,17 @@ type oauthProviderProfile struct {
 	Username       string
 	DisplayName    string
 	Email          string
+	EmailVerified  bool
 	AvatarURL      string
 }
 
 var supportedOAuthProviders = map[string]struct{}{
 	"wechat": {}, "qq": {}, "google": {}, "github": {},
 }
+
+const maxOAuthResponseBytes = 1 << 20
+
+var oauthHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 func (s *Server) oauthStart(w http.ResponseWriter, r *http.Request) {
 	provider := strings.ToLower(strings.TrimSpace(r.PathValue("provider")))
@@ -64,20 +71,8 @@ func (s *Server) oauthStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "生成登录状态失败")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthStateCookie(provider),
-		Value:    state,
-		Path:     "/",
-		MaxAge:   600,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-	nextCookie := &http.Cookie{
-		Name:     oauthNextCookie(provider),
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	}
+	http.SetCookie(w, s.httpOnlyCookie(r, oauthStateCookie(provider), state, "/", 600, time.Time{}))
+	nextCookie := s.httpOnlyCookie(r, oauthNextCookie(provider), "", "/", 0, time.Time{}) // #nosec G124 -- helper enforces every security attribute.
 	if next == "" {
 		nextCookie.MaxAge = -1
 	} else {
@@ -100,22 +95,8 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	next := oauthNextFromRequest(r, provider)
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthStateCookie(provider),
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthNextCookie(provider),
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
+	http.SetCookie(w, s.httpOnlyCookie(r, oauthStateCookie(provider), "", "/", -1, time.Unix(1, 0)))
+	http.SetCookie(w, s.httpOnlyCookie(r, oauthNextCookie(provider), "", "/", -1, time.Unix(1, 0)))
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
 	if code == "" {
 		writeError(w, http.StatusBadRequest, "第三方登录缺少授权码")
@@ -124,10 +105,11 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 
 	profile, err := s.fetchOAuthProfile(r.Context(), provider, cfg, code)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		log.Printf("oauth callback failed provider=%s: %v", provider, err)
+		writeError(w, http.StatusBadGateway, "third-party login provider request failed")
 		return
 	}
-	location := requestClientLocation(r)
+	location := s.requestClientLocation(r)
 	user, err := s.findOrCreateOAuthUser(r.Context(), profile, location)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "第三方账号登录失败")
@@ -136,13 +118,13 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	user.Roles, user.Permissions = s.userGrants(r.Context(), user.ID)
 	_, _ = s.db.Exec(r.Context(), `update users set last_login_at = now(), updated_at = now() where id = $1`, user.ID)
 	s.recordLogin(r.Context(), &user.ID, profile.Provider+":"+profile.ProviderUserID, location, r.UserAgent(), true, "oauth_"+profile.Provider)
-	token, err := s.issueToken(user)
+	token, err := s.issueToken(r.Context(), user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "生成登录凭证失败")
 		return
 	}
-	rawUser, _ := json.Marshal(user)
-	redirectURL := s.cfg.FrontendOrigin + "/login?oauthToken=" + url.QueryEscape(token) + "&oauthUser=" + url.QueryEscape(string(rawUser))
+	s.setAuthSessionCookie(w, r, token)
+	redirectURL := s.cfg.FrontendOrigin + "/login?oauth=success"
 	if next != "" {
 		redirectURL += "&next=" + url.QueryEscape(next)
 	}
@@ -171,9 +153,25 @@ func (s *Server) updateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 		if cfg.ClientSecret == "" {
 			cfg.ClientSecret = current.Providers[provider].ClientSecret
 		}
+		if len(cfg.ClientID) > 512 || len(cfg.ClientSecret) > 4096 || len(cfg.RedirectURI) > 2048 {
+			writeError(w, http.StatusBadRequest, "第三方登录配置过长")
+			return
+		}
+		if cfg.RedirectURI != "" {
+			parsed, parseErr := url.Parse(cfg.RedirectURI)
+			if parseErr != nil || !validHTTPURL(cfg.RedirectURI) ||
+				(parsed.Scheme != "https" && !strings.EqualFold(parsed.Hostname(), "localhost") && parsed.Hostname() != "127.0.0.1") {
+				writeError(w, http.StatusBadRequest, "第三方登录回调必须使用 HTTPS；本地开发可使用 localhost")
+				return
+			}
+		}
+		if cfg.Enabled && (cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURI == "") {
+			writeError(w, http.StatusBadRequest, "启用第三方登录前必须完整填写客户端和回调配置")
+			return
+		}
 		current.Providers[provider] = cfg
 	}
-	raw, err := json.Marshal(current)
+	raw, err := s.sealSystemSetting(current)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "第三方登录配置格式不正确")
 		return
@@ -185,7 +183,7 @@ func (s *Server) updateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 		 values ('auth.oauth', $1::jsonb, $2, now())
 		 on conflict (key) do update
 		 set value = excluded.value, updated_by = excluded.updated_by, updated_at = now()`,
-		string(raw),
+		raw,
 		claims.Subject,
 	)
 	if err != nil {
@@ -206,7 +204,9 @@ func (s *Server) oauthConfig(ctx context.Context) oauthConfigPayload {
 		_ = ignoreNoRows(err)
 		return cfg
 	}
-	_ = json.Unmarshal(raw, &cfg)
+	if err := s.openSystemSetting(raw, &cfg); err != nil {
+		return cfg
+	}
 	if cfg.Providers == nil {
 		cfg.Providers = map[string]oauthProviderConfig{}
 	}
@@ -294,7 +294,7 @@ func fetchGitHubProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
 		return oauthProviderProfile{}, err
 	}
@@ -304,7 +304,7 @@ func fetchGitHubProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 		Error       string `json:"error"`
 		Description string `json:"error_description"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+	if err := decodeOAuthJSONResponse(resp, &tokenResp); err != nil {
 		return oauthProviderProfile{}, err
 	}
 	if tokenResp.Error != "" || tokenResp.AccessToken == "" {
@@ -313,7 +313,7 @@ func fetchGitHubProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 	userReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user", nil)
 	userReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
 	userReq.Header.Set("Accept", "application/vnd.github+json")
-	userResp, err := http.DefaultClient.Do(userReq)
+	userResp, err := oauthHTTPClient.Do(userReq)
 	if err != nil {
 		return oauthProviderProfile{}, err
 	}
@@ -321,7 +321,10 @@ func fetchGitHubProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 	if userResp.StatusCode < 200 || userResp.StatusCode >= 300 {
 		return oauthProviderProfile{}, fmt.Errorf("GitHub 用户信息请求失败: HTTP %d", userResp.StatusCode)
 	}
-	raw, _ := io.ReadAll(userResp.Body)
+	raw, err := readOAuthResponseBody(userResp)
+	if err != nil {
+		return oauthProviderProfile{}, err
+	}
 	var user struct {
 		ID        int64  `json:"id"`
 		Login     string `json:"login"`
@@ -332,15 +335,14 @@ func fetchGitHubProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 	if err := json.Unmarshal(raw, &user); err != nil {
 		return oauthProviderProfile{}, err
 	}
-	if user.Email == "" {
-		user.Email = fetchGitHubPrimaryEmail(ctx, tokenResp.AccessToken)
-	}
+	user.Email = fetchGitHubPrimaryEmail(ctx, tokenResp.AccessToken)
 	return oauthProviderProfile{
 		Provider:       "github",
 		ProviderUserID: fmt.Sprintf("%d", user.ID),
 		Username:       user.Login,
 		DisplayName:    defaultString(user.Name, user.Login),
 		Email:          user.Email,
+		EmailVerified:  user.Email != "",
 		AvatarURL:      user.AvatarURL,
 	}, nil
 }
@@ -352,7 +354,7 @@ func fetchGitHubPrimaryEmail(ctx context.Context, accessToken string) string {
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
 		return ""
 	}
@@ -365,7 +367,7 @@ func fetchGitHubPrimaryEmail(ctx context.Context, accessToken string) string {
 		Primary  bool   `json:"primary"`
 		Verified bool   `json:"verified"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&emails); err != nil {
+	if err := decodeOAuthJSONResponse(resp, &emails); err != nil {
 		return ""
 	}
 	for _, email := range emails {
@@ -393,7 +395,7 @@ func fetchGoogleProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 		return oauthProviderProfile{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
 		return oauthProviderProfile{}, err
 	}
@@ -403,7 +405,7 @@ func fetchGoogleProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 		Error       string `json:"error"`
 		Description string `json:"error_description"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+	if err := decodeOAuthJSONResponse(resp, &tokenResp); err != nil {
 		return oauthProviderProfile{}, err
 	}
 	if tokenResp.Error != "" || tokenResp.AccessToken == "" {
@@ -411,32 +413,38 @@ func fetchGoogleProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 	}
 	userReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.googleapis.com/oauth2/v3/userinfo", nil)
 	userReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
-	userResp, err := http.DefaultClient.Do(userReq)
+	userResp, err := oauthHTTPClient.Do(userReq)
 	if err != nil {
 		return oauthProviderProfile{}, err
 	}
 	defer userResp.Body.Close()
 	if userResp.StatusCode < 200 || userResp.StatusCode >= 300 {
-		return oauthProviderProfile{}, fmt.Errorf("Google 用户信息请求失败: HTTP %d", userResp.StatusCode)
+		return oauthProviderProfile{}, fmt.Errorf("google 用户信息请求失败: HTTP %d", userResp.StatusCode)
 	}
 	var user struct {
-		Sub     string `json:"sub"`
-		Name    string `json:"name"`
-		Email   string `json:"email"`
-		Picture string `json:"picture"`
+		Sub           string `json:"sub"`
+		Name          string `json:"name"`
+		Email         string `json:"email"`
+		EmailVerified bool   `json:"email_verified"`
+		Picture       string `json:"picture"`
 	}
-	if err := json.NewDecoder(userResp.Body).Decode(&user); err != nil {
+	if err := decodeOAuthJSONResponse(userResp, &user); err != nil {
 		return oauthProviderProfile{}, err
 	}
 	if user.Sub == "" {
-		return oauthProviderProfile{}, fmt.Errorf("Google 用户信息缺少 sub")
+		return oauthProviderProfile{}, fmt.Errorf("google 用户信息缺少 sub")
+	}
+	verifiedEmail := ""
+	if user.EmailVerified {
+		verifiedEmail = user.Email
 	}
 	return oauthProviderProfile{
 		Provider:       "google",
 		ProviderUserID: user.Sub,
 		Username:       strings.Split(defaultString(user.Email, user.Sub), "@")[0],
 		DisplayName:    defaultString(user.Name, user.Email),
-		Email:          user.Email,
+		Email:          verifiedEmail,
+		EmailVerified:  user.EmailVerified && verifiedEmail != "",
 		AvatarURL:      user.Picture,
 	}, nil
 }
@@ -548,12 +556,12 @@ func httpGetText(ctx context.Context, rawURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := readOAuthResponseBody(resp)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return string(raw), fmt.Errorf("第三方接口请求失败: HTTP %d", resp.StatusCode)
 	}
@@ -568,18 +576,43 @@ func httpGetJSON(ctx context.Context, rawURL string, target any) error {
 	return json.Unmarshal([]byte(text), target)
 }
 
+func readOAuthResponseBody(resp *http.Response) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxOAuthResponseBytes {
+		return nil, fmt.Errorf("OAuth provider response exceeds %d bytes", maxOAuthResponseBytes)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("OAuth provider request failed: HTTP %d", resp.StatusCode)
+	}
+	return raw, nil
+}
+
+func decodeOAuthJSONResponse(resp *http.Response, target any) error {
+	raw, err := readOAuthResponseBody(resp)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, target); err != nil {
+		return fmt.Errorf("decode OAuth provider response: %w", err)
+	}
+	return nil
+}
+
 func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProviderProfile, location clientLocation) (domain.User, error) {
 	var user domain.User
 	created := false
 	err := s.db.QueryRow(
 		ctx,
-		`select u.id, u.username, u.email, u.display_name, u.email_verified, u.status, u.created_at, u.last_login_at, u.avatar_url, u.signature
+		`select u.id, u.public_id, u.username, u.email, u.display_name, u.email_verified, u.status, u.created_at, u.last_login_at, u.avatar_url, u.signature
 		 from oauth_accounts oa
 		 join users u on u.id = oa.user_id
 		 where oa.provider = $1 and oa.provider_user_id = $2`,
 		profile.Provider,
 		profile.ProviderUserID,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
+	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
 	if err == nil {
 		return user, nil
 	}
@@ -592,8 +625,34 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProvide
 		return user, err
 	}
 	defer tx.Rollback(ctx)
-	if strings.TrimSpace(profile.Email) != "" {
-		user, err = s.findUserByEmail(ctx, profile.Email)
+	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended('oauth:'||$1||':'||$2,0))`, profile.Provider, profile.ProviderUserID); err != nil {
+		return user, err
+	}
+	err = tx.QueryRow(
+		ctx,
+		`select u.id,u.public_id,u.username,u.email,u.display_name,u.email_verified,u.status,u.created_at,u.last_login_at,u.avatar_url,u.signature
+		 from oauth_accounts oa
+		 join users u on u.id=oa.user_id
+		 where oa.provider=$1 and oa.provider_user_id=$2`,
+		profile.Provider,
+		profile.ProviderUserID,
+	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
+	if err == nil {
+		if err = tx.Commit(ctx); err != nil {
+			return user, err
+		}
+		return user, nil
+	}
+	if err != pgx.ErrNoRows {
+		return user, err
+	}
+	if profile.EmailVerified && strings.TrimSpace(profile.Email) != "" {
+		err = tx.QueryRow(
+			ctx,
+			`select id,public_id,username,email,display_name,email_verified,status,created_at,last_login_at,avatar_url,signature
+			 from users where lower(email)=lower($1)`,
+			profile.Email,
+		).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
 		if err != nil && err != pgx.ErrNoRows {
 			return user, err
 		}
@@ -611,15 +670,16 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProvide
 				username, email, display_name, password_hash, email_verified, status,
 				registration_ip, registration_country_code, registration_city
 			 )
-			 values ($1, $2, $3, 'oauth-login-disabled', true, 'active', $4, $5, $6)
-			 returning id, username, email, display_name, email_verified, status, created_at, last_login_at`,
+			 values ($1, $2, $3, 'oauth-login-disabled', $4, 'active', $5, $6, $7)
+			 returning id, public_id, username, email, display_name, email_verified, status, created_at, last_login_at`,
 			username,
 			email,
 			defaultString(profile.DisplayName, username),
+			profile.EmailVerified,
 			location.IP,
 			location.CountryCode,
 			location.City,
-		).Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
+		).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
 		if err != nil {
 			return user, err
 		}
@@ -719,7 +779,9 @@ func validOAuthState(r *http.Request, provider string) bool {
 	if err != nil {
 		return false
 	}
-	return cookie.Value == r.URL.Query().Get("state") && cookie.Value != "" && time.Now().Unix() > 0
+	provided := r.URL.Query().Get("state")
+	return cookie.Value != "" && len(cookie.Value) == len(provided) &&
+		subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(provided)) == 1
 }
 
 func trimJSONP(value string) string {

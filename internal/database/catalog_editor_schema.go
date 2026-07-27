@@ -14,21 +14,21 @@ func catalogEditorSchemaStatements() []string {
 			add column archived_at timestamptz`,
 		`alter table users add column secondary_content_language text not null default 'en-US'`,
 		`create table content_subjects (
-			public_id text not null,
 			subject_type text not null,
+			subject_id bigint not null,
 			default_locale text not null default 'en-US',
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
-			primary key(public_id,subject_type),
-			foreign key(public_id,subject_type) references public_routes(public_id,entity_type) on delete cascade,
+			primary key(subject_type,subject_id),
+			foreign key(subject_type,subject_id) references public_routes(entity_type,internal_id) on delete cascade,
 			check(default_locale ~ '^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$')
 		)`,
-		`insert into content_subjects(public_id,subject_type)
-			select public_id,entity_type from public_routes on conflict do nothing`,
+		`insert into content_subjects(subject_type,subject_id)
+			select entity_type,internal_id from public_routes on conflict do nothing`,
 		`create or replace function register_content_subject() returns trigger as $$
 		begin
-			insert into content_subjects(public_id,subject_type) values(new.public_id,new.entity_type)
-			on conflict(public_id,subject_type) do nothing;
+			insert into content_subjects(subject_type,subject_id) values(new.entity_type,new.internal_id)
+			on conflict(subject_type,subject_id) do nothing;
 			return new;
 		end;
 		$$ language plpgsql`,
@@ -37,16 +37,16 @@ func catalogEditorSchemaStatements() []string {
 		`create or replace function sync_catalog_content_subject_locale() returns trigger as $$
 		begin
 			update content_subjects set default_locale=new.default_locale,updated_at=now()
-			where public_id=new.public_id and subject_type=new.entity_type;
+			where subject_id=new.id and subject_type=new.entity_type;
 			return new;
 		end;
 		$$ language plpgsql`,
 		`create trigger trg_catalog_entities_content_subject_locale after update of default_locale on catalog_entities
 			for each row execute function sync_catalog_content_subject_locale()`,
 		`create table content_localizations (
-			subject_public_id text not null,
 			subject_type text not null,
-			catalog_entity_id text references catalog_entities(id) on delete cascade,
+			subject_id bigint not null,
+			catalog_entity_id bigint references catalog_entities(id) on delete cascade,
 			locale text not null,
 			name text not null default '',
 			summary text not null default '',
@@ -61,16 +61,18 @@ func catalogEditorSchemaStatements() []string {
 			updated_by bigint references users(id) on delete set null,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
-			primary key(subject_public_id,subject_type,locale),
-			foreign key(subject_public_id,subject_type) references content_subjects(public_id,subject_type) on delete cascade,
+			primary key(subject_type,subject_id,locale),
+			foreign key(subject_type,subject_id) references content_subjects(subject_type,subject_id) on delete cascade,
+			foreign key(catalog_entity_id,subject_type) references catalog_entities(id,entity_type) on delete cascade,
+			check(catalog_entity_id is null or catalog_entity_id=subject_id),
 			check(locale ~ '^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$'),
 			check(provenance in ('human','import','ai','human_corrected')),
 			check(review_status in ('pending','approved','rejected'))
 		)`,
 		`create index idx_content_localizations_catalog on content_localizations(catalog_entity_id,locale) where catalog_entity_id is not null`,
-		`create index idx_content_localizations_locale_name on content_localizations(locale,lower(name),subject_public_id,subject_type)`,
+		`create index idx_content_localizations_locale_name on content_localizations(locale,lower(name),subject_type,subject_id)`,
 		`create table catalog_resource_definitions (
-			resource_id text primary key references game_resources(entity_id) on delete cascade,
+			resource_id bigint primary key references game_resources(entity_id) on delete cascade,
 			definition jsonb not null default '{}'::jsonb,
 			icon_file_id bigint references oss_files(id) on delete set null,
 			render_file_id bigint references oss_files(id) on delete set null,
@@ -81,8 +83,8 @@ func catalogEditorSchemaStatements() []string {
 			check(jsonb_typeof(definition)='object')
 		)`,
 		`create table catalog_tag_members (
-			tag_id text not null references catalog_tags(entity_id) on delete cascade,
-			resource_id text not null references game_resources(entity_id) on delete restrict,
+			tag_id bigint not null references catalog_tags(entity_id) on delete cascade,
+			resource_id bigint not null references game_resources(entity_id) on delete restrict,
 			ordinal integer not null check(ordinal>=0),
 			published_revision_id bigint,
 			primary key(tag_id,resource_id),
@@ -90,7 +92,7 @@ func catalogEditorSchemaStatements() []string {
 		)`,
 		`create index idx_catalog_tag_members_resource on catalog_tag_members(resource_id,tag_id)`,
 		`create table recipe_type_definitions (
-			recipe_type_id text primary key references recipe_types(entity_id) on delete cascade,
+			recipe_type_id bigint primary key references recipe_types(entity_id) on delete cascade,
 			definition jsonb not null default '{}'::jsonb,
 			published_revision_id bigint,
 			updated_by bigint references users(id) on delete set null,
@@ -99,16 +101,16 @@ func catalogEditorSchemaStatements() []string {
 			check(jsonb_typeof(definition)='object')
 		)`,
 		`create table recipe_type_catalysts (
-			recipe_type_id text not null references recipe_types(entity_id) on delete cascade,
-			resource_id text not null references game_resources(entity_id) on delete restrict,
+			recipe_type_id bigint not null references recipe_types(entity_id) on delete cascade,
+			resource_id bigint not null references game_resources(entity_id) on delete restrict,
 			ordinal integer not null check(ordinal>=0),
 			published_revision_id bigint,
 			primary key(recipe_type_id,resource_id),
 			unique(recipe_type_id,ordinal)
 		)`,
 		`create table recipe_layout_templates (
-			entity_id text primary key references catalog_entities(id) on delete cascade,
-			recipe_type_id text not null references recipe_types(entity_id) on delete restrict,
+			entity_id bigint primary key references catalog_entities(id) on delete cascade,
+			recipe_type_id bigint not null references recipe_types(entity_id) on delete restrict,
 			template_key text not null,
 			import_snapshot_id text references recipe_template_import_snapshots(id) on delete set null,
 			background_file_id bigint references oss_files(id) on delete set null,
@@ -125,8 +127,9 @@ func catalogEditorSchemaStatements() []string {
 		)`,
 		`create index idx_recipe_layout_templates_type on recipe_layout_templates(recipe_type_id,template_key)`,
 		`create table recipe_template_slots (
-			id text primary key,
-			template_id text not null references recipe_layout_templates(entity_id) on delete cascade,
+			id bigserial primary key,
+			identity_key text not null unique,
+			template_id bigint not null references recipe_layout_templates(entity_id) on delete cascade,
 			slot_key text not null,
 			role text not null check(role in ('input','output','catalyst')),
 			output_index integer,
@@ -145,8 +148,8 @@ func catalogEditorSchemaStatements() []string {
 		`alter table recipes add constraint recipes_identity_source_check
 			check(identity_source in ('manual','import','minecraft_recipe','jei_category','generated_index'))`,
 		`create table recipe_definitions (
-			recipe_id text primary key references recipes(entity_id) on delete cascade,
-			template_id text not null references recipe_layout_templates(entity_id) on delete restrict,
+			recipe_id bigint primary key references recipes(entity_id) on delete cascade,
+			template_id bigint not null references recipe_layout_templates(entity_id) on delete restrict,
 			definition jsonb not null default '{}'::jsonb,
 			published_revision_id bigint,
 			updated_by bigint references users(id) on delete set null,
@@ -155,19 +158,21 @@ func catalogEditorSchemaStatements() []string {
 			check(jsonb_typeof(definition)='object')
 		)`,
 		`create table recipe_bindings (
-			id text primary key,
-			recipe_id text not null references recipes(entity_id) on delete cascade,
-			template_slot_id text not null references recipe_template_slots(id) on delete restrict,
+			id bigserial primary key,
+			identity_key text not null unique,
+			recipe_id bigint not null references recipes(entity_id) on delete cascade,
+			template_slot_id bigint not null references recipe_template_slots(id) on delete restrict,
 			ordinal integer not null check(ordinal>=0),
 			definition jsonb not null default '{}'::jsonb,
 			unique(recipe_id,template_slot_id),
 			check(jsonb_typeof(definition)='object')
 		)`,
 		`create table recipe_binding_candidates (
-			id text primary key,
-			binding_id text not null references recipe_bindings(id) on delete cascade,
+			id bigserial primary key,
+			identity_key text not null unique,
+			binding_id bigint not null references recipe_bindings(id) on delete cascade,
 			candidate_index integer not null check(candidate_index>=0),
-			resource_id text not null references game_resources(entity_id) on delete restrict,
+			resource_id bigint not null references game_resources(entity_id) on delete restrict,
 			amount numeric(20,6) not null default 1 check(amount>0),
 			probability numeric(9,8),
 			byproduct boolean not null default false,

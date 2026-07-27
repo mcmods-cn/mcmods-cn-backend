@@ -72,7 +72,7 @@ func (s *Server) updatePermissionDefaults(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) updateUserStatus(w http.ResponseWriter, r *http.Request) {
-	userID, ok := pathUserID(w, r)
+	userID, ok := s.pathUserID(w, r)
 	if !ok {
 		return
 	}
@@ -115,7 +115,7 @@ func (s *Server) updateUserStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "修改用户状态失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": userID, "status": request.Status})
+	writeJSON(w, http.StatusOK, map[string]any{"id": r.PathValue("id"), "status": request.Status})
 }
 
 func (s *Server) permissionDefaultsFromSettings(ctx context.Context) permissionDefaultsPayload {

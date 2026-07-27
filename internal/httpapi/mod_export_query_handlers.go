@@ -52,13 +52,16 @@ func (s *Server) modExportDataSummary(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	canSeePending := canEditMod(claims, identity) || hasPermission(claims.Permissions, "project.review")
 	rows, err := s.db.Query(r.Context(),
-		`select r.id,r.revision_no,r.status,r.minecraft_version,r.loader,r.exporter_version,r.source_kind,r.source_namespace,r.target_version_public_id,r.is_active,r.created_at,
+		`select r.id,r.revision_no,r.status,r.minecraft_version,r.loader,r.exporter_version,r.source_kind,r.source_namespace,version.public_id,
+		 (r.is_active and version.status='active'),r.created_at,
 		 coalesce(stats.registry_counts,'{}'::jsonb),coalesce(stats.document_counts,'{}'::jsonb),
 		 coalesce(stats.asset_count,0),coalesce(stats.structure_count,0),coalesce(stats.advancement_count,0),
 		 coalesce(stats.key_mapping_count,0),coalesce(stats.recipe_count,0),coalesce(stats.tag_count,0),
 		 coalesce(stats.capability_statuses,'{}'::jsonb)
-		 from catalog_import_revisions r left join catalog_import_revision_stats stats on stats.revision_id=r.id
-		 where r.mod_id=$1 and (r.is_active or $2)
+		 from catalog_import_revisions r
+		 join mod_content_versions version on version.id=r.target_version_id
+		 left join catalog_import_revision_stats stats on stats.revision_id=r.id
+		 where r.mod_id=$1 and ((r.is_active and version.status='active') or $2)
 		 order by r.minecraft_version desc,r.loader,r.source_kind,r.source_namespace,r.revision_no desc`, identity.ID, canSeePending)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read export revisions")
@@ -86,7 +89,7 @@ func (s *Server) modExportRegistry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	registry := strings.ToLower(strings.TrimSpace(r.PathValue("registry")))
-	rows, err := s.db.Query(r.Context(), `select resource.entity_id,entity.public_id,resource.canonical_id,
+	rows, err := s.db.Query(r.Context(), `select entity.public_id,resource.canonical_id,
 		resource.namespace,resource.resource_path,snapshot.translation_key,snapshot.names,snapshot.data,
 		snapshot.icon_path,snapshot.preview_path
 		from resource_import_snapshots snapshot
@@ -101,13 +104,13 @@ func (s *Server) modExportRegistry(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var entityID, publicID, objectID, namespace, objectPath, translationKey, iconPath, previewPath string
+		var publicID, objectID, namespace, objectPath, translationKey, iconPath, previewPath string
 		var names, data []byte
-		if err = rows.Scan(&entityID, &publicID, &objectID, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); err != nil {
+		if err = rows.Scan(&publicID, &objectID, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode registry")
 			return
 		}
-		item := map[string]any{"entityId": entityID, "publicId": publicID, "id": objectID, "registry": registry,
+		item := map[string]any{"entityId": publicID, "publicId": publicID, "id": objectID, "registry": registry,
 			"namespace": namespace, "path": objectPath, "translationKey": translationKey,
 			"iconPath": iconPath, "previewPath": previewPath}
 		item["names"] = jsonValue(names)
@@ -170,22 +173,22 @@ func (s *Server) modExportRegistryEntries(w http.ResponseWriter, r *http.Request
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `
-		select resource.entity_id,entity.public_id,resource.canonical_id,snapshot.registry,
+		select entity.public_id,resource.canonical_id,snapshot.registry,
 			resource.namespace,resource.resource_path,snapshot.translation_key,
-			jsonb_strip_nulls(jsonb_build_object('zh_cn',snapshot.names->>'zh_cn','en_us',snapshot.names->>'en_us',$6::text,snapshot.names->>($6::text))),
+			snapshot.names,
 			snapshot.data-'names',snapshot.icon_path,snapshot.preview_path
 		from resource_import_snapshots snapshot
 		join game_resources resource on resource.entity_id=snapshot.resource_id
 		join catalog_entities entity on entity.id=resource.entity_id
 		where snapshot.revision_id=$1 and snapshot.registry=any($2::text[])
 		  and ($3='' or resource.canonical_id ilike '%' || $3 || '%' or snapshot.names::text ilike '%' || $3 || '%')
-		  and (not $7 or snapshot.registry<>'items' or not exists(
+		  and (not $6 or snapshot.registry<>'items' or not exists(
 			select 1 from game_resource_asset_bindings binding
 			join resource_import_snapshots block_snapshot on block_snapshot.id=binding.snapshot_id
 			where binding.item_resource_id=resource.entity_id and block_snapshot.revision_id=snapshot.revision_id
 		  ))
 		order by resource.canonical_id,snapshot.registry limit $4 offset $5`,
-		revisionID, registries, query, limit, offset, locale, canonicalItemsAndBlocks)
+		revisionID, registries, query, limit, offset, canonicalItemsAndBlocks)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read registry entries")
 		return
@@ -193,53 +196,60 @@ func (s *Server) modExportRegistryEntries(w http.ResponseWriter, r *http.Request
 	defer rows.Close()
 	items := make([]map[string]any, 0, limit)
 	for rows.Next() {
-		var entityID, publicID, objectID, registry, namespace, objectPath, translationKey, iconPath, previewPath string
+		var publicID, objectID, registry, namespace, objectPath, translationKey, iconPath, previewPath string
 		var names, data []byte
-		if err = rows.Scan(&entityID, &publicID, &objectID, &registry, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); err != nil {
+		if err = rows.Scan(&publicID, &objectID, &registry, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode registry entry")
 			return
 		}
 		items = append(items, map[string]any{
-			"entityId": entityID, "publicId": publicID, "id": objectID, "registry": registry, "namespace": namespace, "path": objectPath,
+			"entityId": publicID, "publicId": publicID, "id": objectID, "registry": registry, "namespace": namespace, "path": objectPath,
 			"translationKey": translationKey, "iconPath": iconPath, "previewPath": previewPath, "names": jsonValue(names), "data": jsonValue(data),
 		})
+	}
+	if err = s.decorateExportTranslationNames(r.Context(), revisionID, locale, items); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve registry translations")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
 }
 
 func (s *Server) writeModExportRegistryEntrySummaries(w http.ResponseWriter, r *http.Request, revisionID string, registries []string, query, locale string, total, limit, offset int, canonicalItemsAndBlocks bool) {
-	cacheKey := fmt.Sprintf("export-registry-summary:v5:%s:%s:%s:%s:%d:%d:%t", revisionID, strings.Join(registries, ","), query, locale, limit, offset, canonicalItemsAndBlocks)
+	cacheKey := fmt.Sprintf("export-registry-summary:v6:%s:%s:%s:%s:%d:%d:%t", revisionID, strings.Join(registries, ","), query, locale, limit, offset, canonicalItemsAndBlocks)
 	payload, err := s.cache.GetOrLoad(r.Context(), cacheKey, func(ctx context.Context) ([]byte, error) {
-		rows, loadErr := s.db.Query(ctx, `select resource.entity_id,entity.public_id,resource.canonical_id,snapshot.registry,
+		rows, loadErr := s.db.Query(ctx, `select entity.public_id,resource.canonical_id,snapshot.registry,
 		resource.namespace,resource.resource_path,snapshot.translation_key,
-		jsonb_strip_nulls(jsonb_build_object('zh_cn',snapshot.names->>'zh_cn','en_us',snapshot.names->>'en_us',$6::text,snapshot.names->>($6::text))),
+		snapshot.names,
 		'{}'::jsonb,snapshot.icon_path,snapshot.preview_path
 		from resource_import_snapshots snapshot
 		join game_resources resource on resource.entity_id=snapshot.resource_id
 		join catalog_entities entity on entity.id=resource.entity_id
 		where snapshot.revision_id=$1 and snapshot.registry=any($2::text[])
 		  and ($3='' or resource.canonical_id ilike '%' || $3 || '%' or snapshot.names::text ilike '%' || $3 || '%')
-		  and (not $7 or snapshot.registry<>'items' or not exists(
+		  and (not $6 or snapshot.registry<>'items' or not exists(
 			select 1 from game_resource_asset_bindings binding
 			join resource_import_snapshots block_snapshot on block_snapshot.id=binding.snapshot_id
 			where binding.item_resource_id=resource.entity_id and block_snapshot.revision_id=snapshot.revision_id
 		  ))
-		order by resource.canonical_id,snapshot.registry limit $4 offset $5`, revisionID, registries, query, limit, offset, locale, canonicalItemsAndBlocks)
+		order by resource.canonical_id,snapshot.registry limit $4 offset $5`, revisionID, registries, query, limit, offset, canonicalItemsAndBlocks)
 		if loadErr != nil {
 			return nil, loadErr
 		}
 		defer rows.Close()
 		items := make([]map[string]any, 0, limit)
 		for rows.Next() {
-			var entityID, publicID, objectID, registry, namespace, objectPath, translationKey, iconPath, previewPath string
+			var publicID, objectID, registry, namespace, objectPath, translationKey, iconPath, previewPath string
 			var names, data []byte
-			if loadErr = rows.Scan(&entityID, &publicID, &objectID, &registry, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); loadErr != nil {
+			if loadErr = rows.Scan(&publicID, &objectID, &registry, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); loadErr != nil {
 				return nil, loadErr
 			}
-			items = append(items, map[string]any{"entityId": entityID, "publicId": publicID, "id": objectID, "registry": registry, "namespace": namespace, "path": objectPath,
+			items = append(items, map[string]any{"entityId": publicID, "publicId": publicID, "id": objectID, "registry": registry, "namespace": namespace, "path": objectPath,
 				"translationKey": translationKey, "iconPath": iconPath, "previewPath": previewPath, "names": jsonValue(names), "data": jsonValue(data)})
 		}
 		if loadErr = rows.Err(); loadErr != nil {
+			return nil, loadErr
+		}
+		if loadErr = s.decorateExportTranslationNames(ctx, revisionID, locale, items); loadErr != nil {
 			return nil, loadErr
 		}
 		return json.Marshal(apiResponse{Data: map[string]any{"items": items, "total": total, "limit": limit, "offset": offset}})
@@ -248,10 +258,8 @@ func (s *Server) writeModExportRegistryEntrySummaries(w http.ResponseWriter, r *
 		writeError(w, http.StatusInternalServerError, "failed to read registry entry summaries")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "public, max-age=60, stale-while-revalidate=120")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(payload)
+	setPublicCacheControlIfAllowed(w, "public, max-age=60, stale-while-revalidate=120")
+	writeJSONBytes(w, http.StatusOK, payload)
 }
 
 func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +280,7 @@ func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request
 	}
 	offset := boundedOffset(r.URL.Query().Get("offset"))
 	summaryOnly := r.URL.Query().Get("summary") == "1"
-	cacheKey := fmt.Sprintf("export-document:v8:%s:%s:%s:%s:%d:%d:%t", revisionID, kind, query, locale, limit, offset, summaryOnly)
+	cacheKey := fmt.Sprintf("export-document:v9:%s:%s:%s:%s:%d:%d:%t", revisionID, kind, query, locale, limit, offset, summaryOnly)
 	payload, err := s.cache.GetOrLoad(r.Context(), cacheKey, func(ctx context.Context) ([]byte, error) {
 		var total int
 		if loadErr := s.db.QueryRow(ctx, `select count(*)::int
@@ -282,10 +290,9 @@ func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request
 			revisionID, kind, query).Scan(&total); loadErr != nil {
 			return nil, loadErr
 		}
-		rows, loadErr := s.db.Query(ctx, `select resource.entity_id,entity.public_id,resource.canonical_id,
-			jsonb_strip_nulls(jsonb_build_object('zh_cn',snapshot.names->>'zh_cn','en_us',snapshot.names->>'en_us',$6::text,snapshot.names->>($6::text))),
-			resource.namespace,snapshot.icon_path,snapshot.preview_path,
-			case when not $7 then snapshot.data
+		rows, loadErr := s.db.Query(ctx, `select entity.public_id,resource.canonical_id,
+			snapshot.names,resource.namespace,snapshot.translation_key,snapshot.icon_path,snapshot.preview_path,
+			case when not $6 then snapshot.data
 				when snapshot.registry='advancements' then jsonb_strip_nulls(jsonb_build_object('parent',snapshot.data->'parent','display',snapshot.data->'display'))
 				when snapshot.registry='loot_tables' then jsonb_strip_nulls(jsonb_build_object(
 					'category',snapshot.data->'category','path',snapshot.data->'path','possible_item_ids',snapshot.data->'possible_item_ids'))
@@ -304,25 +311,28 @@ func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request
 			join catalog_entities entity on entity.id=resource.entity_id
 			where snapshot.revision_id=$1 and snapshot.registry=$2
 			and ($3='' or resource.canonical_id ilike '%' || $3 || '%' or snapshot.names::text ilike '%' || $3 || '%')
-			order by resource.canonical_id limit $4 offset $5`, revisionID, kind, query, limit, offset, locale, summaryOnly)
+			order by resource.canonical_id limit $4 offset $5`, revisionID, kind, query, limit, offset, summaryOnly)
 		if loadErr != nil {
 			return nil, loadErr
 		}
 		defer rows.Close()
 		items := make([]map[string]any, 0, limit)
 		for rows.Next() {
-			var entityID, publicID, id, namespace, iconPath, previewPath string
+			var publicID, id, namespace, translationKey, iconPath, previewPath string
 			var names, data []byte
-			if loadErr = rows.Scan(&entityID, &publicID, &id, &names, &namespace, &iconPath, &previewPath, &data); loadErr != nil {
+			if loadErr = rows.Scan(&publicID, &id, &names, &namespace, &translationKey, &iconPath, &previewPath, &data); loadErr != nil {
 				return nil, loadErr
 			}
 			items = append(items, map[string]any{
-				"entityId": entityID, "publicId": publicID, "id": id, "registry": kind, "namespace": namespace, "path": id,
-				"translationKey": id, "iconPath": iconPath, "previewPath": previewPath,
+				"entityId": publicID, "publicId": publicID, "id": id, "registry": kind, "namespace": namespace, "path": id,
+				"translationKey": translationKey, "iconPath": iconPath, "previewPath": previewPath,
 				"names": jsonValue(names), "data": jsonValue(data),
 			})
 		}
 		if loadErr = rows.Err(); loadErr != nil {
+			return nil, loadErr
+		}
+		if loadErr = s.decorateExportTranslationNames(ctx, revisionID, locale, items); loadErr != nil {
 			return nil, loadErr
 		}
 		if kind == "loot_tables" {
@@ -336,10 +346,8 @@ func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "failed to read document entry index")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "public, max-age=60, stale-while-revalidate=120")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(payload)
+	setPublicCacheControlIfAllowed(w, "public, max-age=60, stale-while-revalidate=120")
+	writeJSONBytes(w, http.StatusOK, payload)
 }
 
 func isExportDocumentKind(value string) bool {
@@ -438,7 +446,7 @@ func (s *Server) modExportAssetContent(w http.ResponseWriter, r *http.Request) {
 	err := s.db.QueryRow(r.Context(), `select content_type,coalesce(text_content,''),json_content::text from catalog_import_text_assets where revision_id=$1 and asset_path=$2`, revisionID, assetPath).Scan(&contentType, &text, &jsonContent)
 	if err == nil {
 		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		setPublicCacheControlIfAllowed(w, "public, max-age=31536000, immutable")
 		if len(jsonContent) > 0 && string(jsonContent) != "null" {
 			_, _ = w.Write(jsonContent)
 		} else {
@@ -453,7 +461,7 @@ func (s *Server) modExportAssetContent(w http.ResponseWriter, r *http.Request) {
 	err = s.db.QueryRow(r.Context(), `select content_type,data from catalog_import_binary_assets where revision_id=$1 and asset_path=$2`, revisionID, assetPath).Scan(&contentType, &binary)
 	if err == nil {
 		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		setPublicCacheControlIfAllowed(w, "public, max-age=31536000, immutable")
 		_, _ = w.Write(binary)
 		return
 	}
@@ -510,7 +518,7 @@ func (s *Server) modExportStructureTemplate(w http.ResponseWriter, r *http.Reque
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename*=UTF-8''%s", url.PathEscape(name)))
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	setPublicCacheControlIfAllowed(w, "public, max-age=31536000, immutable")
 	_, _ = w.Write(data)
 }
 
@@ -535,11 +543,12 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 	}
 	defer tx.Rollback(r.Context())
 	var modID int64
-	var namespace, sourceKind, status, targetVersionPublicID string
+	var namespace, sourceKind, status string
+	var targetVersionID int64
 	var overwriteExistingImportData bool
-	err = tx.QueryRow(r.Context(), `select revision.mod_id,revision.source_namespace,revision.source_kind,revision.status,revision.target_version_public_id,job.overwrite_existing
+	err = tx.QueryRow(r.Context(), `select revision.mod_id,revision.source_namespace,revision.source_kind,revision.status,revision.target_version_id,job.overwrite_existing
 		from catalog_import_revisions revision join catalog_import_jobs job on job.id=revision.job_id where revision.id=$1 for update`, revisionID).
-		Scan(&modID, &namespace, &sourceKind, &status, &targetVersionPublicID, &overwriteExistingImportData)
+		Scan(&modID, &namespace, &sourceKind, &status, &targetVersionID, &overwriteExistingImportData)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "export revision not found")
 		return
@@ -560,7 +569,7 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusOK, map[string]any{"id": revisionID, "status": "rejected", "isActive": false})
 		return
 	}
-	if _, err = tx.Exec(r.Context(), `update catalog_import_revisions set is_active=false,status='superseded' where mod_id=$1 and target_version_public_id=$2 and source_namespace=$3 and source_kind=$4 and id<>$5 and is_active`, modID, targetVersionPublicID, namespace, sourceKind, revisionID); err != nil {
+	if _, err = tx.Exec(r.Context(), `update catalog_import_revisions set is_active=false,status='superseded' where mod_id=$1 and target_version_id=$2 and source_namespace=$3 and source_kind=$4 and id<>$5 and is_active`, modID, targetVersionID, namespace, sourceKind, revisionID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to supersede export revision")
 		return
 	}
@@ -568,7 +577,7 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to activate export revision")
 		return
 	}
-	if err = syncImportedResourcesToContentVersionTx(r.Context(), tx, []string{revisionID}, targetVersionPublicID, overwriteExistingImportData, currentClaims(r).Subject); err != nil {
+	if err = syncImportedResourcesToContentVersionTx(r.Context(), tx, []string{revisionID}, targetVersionID, overwriteExistingImportData, currentClaims(r).Subject); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to merge imported data into the selected content version")
 		return
 	}
@@ -586,7 +595,12 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 func (s *Server) canReadModExportRevision(w http.ResponseWriter, r *http.Request, revisionID string) bool {
 	var identity modIdentityRecord
 	var active bool
-	err := s.db.QueryRow(r.Context(), `select m.id,m.project_code,m.slug,m.created_by,e.is_active from catalog_import_revisions e join mods m on m.id=e.mod_id where e.id=$1`, revisionID).Scan(&identity.ID, &identity.UniqueID, &identity.SiteID, &identity.OwnerID, &active)
+	err := s.db.QueryRow(r.Context(), `select m.id,m.project_code,m.slug,m.created_by,
+		(e.is_active and version.status='active')
+		from catalog_import_revisions e
+		join mods m on m.id=e.mod_id
+		join mod_content_versions version on version.id=e.target_version_id
+		where e.id=$1`, revisionID).Scan(&identity.ID, &identity.UniqueID, &identity.SiteID, &identity.OwnerID, &active)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "export revision not found")
 		return false
@@ -600,7 +614,18 @@ func (s *Server) canReadModExportRevision(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusForbidden, "export revision is awaiting review")
 		return false
 	}
+	if !active {
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Add("Vary", "Authorization")
+		w.Header().Add("Vary", "Cookie")
+	}
 	return true
+}
+
+func setPublicCacheControlIfAllowed(w http.ResponseWriter, value string) {
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", value)
+	}
 }
 
 func (s *Server) redirectModExportMedia(w http.ResponseWriter, r *http.Request, revisionID, assetPath string) {
@@ -633,7 +658,7 @@ func (s *Server) redirectModExportMedia(w http.ResponseWriter, r *http.Request, 
 		}
 		defer result.Body.Close()
 		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		setPublicCacheControlIfAllowed(w, "public, max-age=31536000, immutable")
 		_, _ = io.Copy(w, io.LimitReader(result.Body, byteLength+1))
 		return
 	}

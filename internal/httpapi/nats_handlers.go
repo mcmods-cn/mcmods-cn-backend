@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -22,7 +21,7 @@ type natsConfigResponse struct {
 }
 
 func (s *Server) getNATSConfig(w http.ResponseWriter, r *http.Request) {
-	cfg, err := database.LoadNATSConfig(r.Context(), s.db, s.cfg.NATS)
+	cfg, err := database.LoadNATSConfig(r.Context(), s.db, s.cfg.NATS, s.cfg.SettingsEncryptionKey)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取 NATS 配置失败")
 		return
@@ -36,7 +35,7 @@ func (s *Server) updateNATSConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	current, err := database.LoadNATSConfig(r.Context(), s.db, s.cfg.NATS)
+	current, err := database.LoadNATSConfig(r.Context(), s.db, s.cfg.NATS, s.cfg.SettingsEncryptionKey)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取 NATS 配置失败")
 		return
@@ -48,7 +47,7 @@ func (s *Server) updateNATSConfig(w http.ResponseWriter, r *http.Request) {
 		payload.Token = current.Token
 	}
 	payload = queue.NormalizeConfig(payload)
-	raw, err := json.Marshal(payload)
+	raw, err := s.sealSystemSetting(payload)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "NATS 配置格式不正确")
 		return
@@ -59,7 +58,7 @@ func (s *Server) updateNATSConfig(w http.ResponseWriter, r *http.Request) {
 		 values ('nats.config', $1::jsonb, $2, now())
 		 on conflict (key) do update
 		 set value = excluded.value, updated_by = excluded.updated_by, updated_at = now()`,
-		string(raw),
+		raw,
 		currentClaims(r).Subject,
 	)
 	if err != nil {

@@ -134,7 +134,7 @@ func (s *Server) downgradeUserRoleTrack(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, direction int) {
-	userID, ok := pathUserID(w, r)
+	userID, ok := s.pathUserID(w, r)
 	if !ok {
 		return
 	}

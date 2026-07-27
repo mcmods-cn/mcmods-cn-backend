@@ -73,6 +73,30 @@ func (s *Server) initiateOSSMultipartUpload(
 			Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey), UploadId: aliyunoss.Ptr(uploadID),
 		})
 	}
+	ticket, err = presignExistingOSSMultipartUpload(ctx, client, cfg, objectKey, uploadID, sizeBytes, expires)
+	if err != nil {
+		abort()
+		return ticket, err
+	}
+	return ticket, nil
+}
+
+func presignExistingOSSMultipartUpload(
+	ctx context.Context,
+	client *aliyunoss.Client,
+	cfg ossConfigPayload,
+	objectKey, uploadID string,
+	sizeBytes int64,
+	expires time.Duration,
+) (ossMultipartUploadTicket, error) {
+	var ticket ossMultipartUploadTicket
+	if !validOSSMultipartUploadID(uploadID) {
+		return ticket, errors.New("invalid OSS multipart upload ID")
+	}
+	partCount := ossMultipartPartCount(sizeBytes, ossMultipartPartSize)
+	if partCount <= 0 || partCount > ossMultipartMaxParts {
+		return ticket, errors.New("invalid OSS multipart upload size")
+	}
 	parts := make([]ossMultipartPartTicket, 0, partCount)
 	for partNumber := 1; partNumber <= partCount; partNumber++ {
 		partLength := min(ossMultipartPartSize, sizeBytes-int64(partNumber-1)*ossMultipartPartSize)
@@ -81,7 +105,6 @@ func (s *Server) initiateOSSMultipartUpload(
 			UploadId: aliyunoss.Ptr(uploadID), PartNumber: int32(partNumber),
 		}, aliyunoss.PresignExpires(expires))
 		if presignErr != nil {
-			abort()
 			return ticket, fmt.Errorf("presign OSS multipart part %d: %w", partNumber, presignErr)
 		}
 		parts = append(parts, ossMultipartPartTicket{

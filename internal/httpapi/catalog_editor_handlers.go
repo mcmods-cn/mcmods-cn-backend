@@ -13,8 +13,8 @@ import (
 )
 
 type catalogDeleteRequest struct {
-	BaseRevisionID *int64 `json:"baseRevisionId"`
-	Reason         string `json:"reason"`
+	BaseRevisionID *string `json:"baseRevisionId"`
+	Reason         string  `json:"reason"`
 }
 
 func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
@@ -57,8 +57,10 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.db.Query(r.Context(), `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
 		select entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,entity.default_locale,
-		entity.published_revision_id,coalesce(localization.locale,''),coalesce(localization.name,''),
-		definition.icon_file_id,definition.render_file_id,
+		(select revision.public_id from content_revisions revision where revision.id=entity.published_revision_id),
+		coalesce(localization.locale,''),coalesce(localization.name,''),
+		(select public_id from oss_files where id=definition.icon_file_id),
+		(select public_id from oss_files where id=definition.render_file_id),
 		coalesce(imported.names,'{}'::jsonb) || coalesce((select jsonb_object_agg(candidate.locale,candidate.name) from content_localizations candidate
 		 where candidate.catalog_entity_id=entity.id and candidate.name<>''),'{}'::jsonb),
 		coalesce((select jsonb_object_agg(candidate.locale,candidate.provenance) from content_localizations candidate
@@ -82,10 +84,12 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := make([]map[string]any, 0, limit)
 	for rows.Next() {
-		var entityID, publicID, kind, canonicalID, namespace, defaultLocale, contentLocale, name string
+		var entityID int64
+		var publicID, kind, canonicalID, namespace, defaultLocale, contentLocale, name string
 		var ownerPublicID, ownerSiteID, ownerName string
 		var names, provenances []byte
-		var revisionID, iconID, renderID sql.NullInt64
+		var revisionID sql.NullString
+		var iconID, renderID sql.NullString
 		if err = rows.Scan(&entityID, &publicID, &kind, &canonicalID, &namespace, &defaultLocale, &revisionID, &contentLocale, &name,
 			&iconID, &renderID, &names, &provenances, &ownerPublicID, &ownerSiteID, &ownerName); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode resource")
@@ -102,11 +106,11 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 			contentLocale, name = resolvedLocale, resolvedName
 		}
 		provenance := catalogLocalizationProvenance(provenances, contentLocale, name)
-		items = append(items, map[string]any{"entityId": entityID, "publicId": publicID, "id": canonicalID,
+		items = append(items, map[string]any{"entityId": publicID, "publicId": publicID, "id": canonicalID,
 			"kind": kind, "kindCode": kind, "registry": namespace, "canonicalId": canonicalID, "names": json.RawMessage(names),
-			"defaultLocale": defaultLocale, "publishedRevisionId": nullableCatalogInt64(revisionID), "locale": contentLocale,
+			"defaultLocale": defaultLocale, "publishedRevisionId": nullableCatalogString(revisionID), "locale": contentLocale,
 			"name": name, "provenance": provenance, "iconUrl": iconURL, "renderUrl": renderURL,
-			"iconFileId": nullableCatalogInt64(iconID), "renderFileId": nullableCatalogInt64(renderID),
+			"iconFileId": nullableCatalogString(iconID), "renderFileId": nullableCatalogString(renderID),
 			"source": map[string]any{"publicId": ownerPublicID, "siteId": ownerSiteID, "name": ownerName, "type": "mod", "version": ""}})
 	}
 	if err = rows.Err(); err != nil {
@@ -131,6 +135,7 @@ func catalogLocalizationProvenance(raw []byte, locale, name string) string {
 
 func (s *Server) createCatalogResource(w http.ResponseWriter, r *http.Request) {
 	var ownerModID *int64
+	var ownerModPublicID string
 	if siteID := strings.TrimSpace(r.PathValue("siteId")); siteID != "" {
 		identity, err := s.modIdentity(r.Context(), siteID)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -142,6 +147,7 @@ func (s *Server) createCatalogResource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ownerModID = &identity.ID
+		ownerModPublicID = identity.UniqueID
 	}
 	var edit catalogResourceEdit
 	if decodeJSON(r, &edit) != nil {
@@ -169,8 +175,9 @@ func (s *Server) createCatalogResource(w http.ResponseWriter, r *http.Request) {
 	edit.RawCanonicalID = resolvedIdentity.RawID
 	edit.CanonicalID = resolvedIdentity.CanonicalID
 	catalogIdentity := resolvedIdentity.catalogIdentity
-	snapshot := catalogEditorSnapshot{Operation: "create", Reason: edit.Reason, Kind: "resource", EntityID: catalogIdentity.ID,
-		PublicID: catalogIdentity.PublicID, OwnerModID: ownerModID, DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, Resource: &edit}
+	snapshot := catalogEditorSnapshot{Operation: "create", Reason: edit.Reason, Kind: "resource", IdentityKey: catalogIdentity.ID,
+		PublicID: catalogIdentity.PublicID, OwnerModID: ownerModID, OwnerModPublicID: ownerModPublicID,
+		DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, Resource: &edit}
 	result, err := s.submitCatalogEditorMutation(r, snapshot, nil)
 	writeCatalogMutationResult(w, result, err)
 }
@@ -209,13 +216,14 @@ func normalizeCatalogResourceEdit(edit *catalogResourceEdit) error {
 func (s *Server) writeCatalogResourceDetail(w http.ResponseWriter, r *http.Request, entity catalogEditorEntity) {
 	var kindCode, canonicalID string
 	var definition, importedNames []byte
-	var iconID, renderID sql.NullInt64
+	var iconID, renderID sql.NullString
 	err := s.db.QueryRow(r.Context(), `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
 		select resource.kind_code,resource.canonical_id,
 		case when definition.resource_id is not null then definition.definition
 		 when imported.resource_id is not null then jsonb_build_object('schemaVersion',$2::text,'imported',imported.data)
 		 else '{}'::jsonb end,
-		definition.icon_file_id,definition.render_file_id,coalesce(imported.names,'{}'::jsonb)
+		(select public_id from oss_files where id=definition.icon_file_id),
+		(select public_id from oss_files where id=definition.render_file_id),coalesce(imported.names,'{}'::jsonb)
 		from game_resources resource
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 		left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
@@ -245,9 +253,9 @@ func (s *Server) writeCatalogResourceDetail(w http.ResponseWriter, r *http.Reque
 		renderURL = "/api/v1/catalog/resources/" + entity.PublicID + "/render"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"publicId": entity.PublicID, "status": entity.Status, "defaultLocale": defaultLocale,
-		"publishedRevisionId": entity.PublishedRevisionID, "reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID),
-		"kindCode": kindCode, "canonicalId": canonicalID, "definition": json.RawMessage(definition), "iconFileId": nullableCatalogInt64(iconID),
-		"renderFileId": nullableCatalogInt64(renderID), "iconUrl": iconURL, "renderUrl": renderURL, "localizations": localizations})
+		"publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID), "reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID),
+		"kindCode": kindCode, "canonicalId": canonicalID, "definition": json.RawMessage(definition), "iconFileId": nullableCatalogString(iconID),
+		"renderFileId": nullableCatalogString(renderID), "iconUrl": iconURL, "renderUrl": renderURL, "localizations": localizations})
 }
 
 func catalogLocalizationMapContains(localizations []map[string]any, locale string) bool {
@@ -349,7 +357,7 @@ func (s *Server) catalogTags(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		identity := tagIdentity(edit.Registry, edit.CanonicalID)
-		snapshot := catalogEditorSnapshot{Operation: "create", Reason: edit.Reason, Kind: "tag", EntityID: identity.ID, PublicID: identity.PublicID,
+		snapshot := catalogEditorSnapshot{Operation: "create", Reason: edit.Reason, Kind: "tag", IdentityKey: identity.ID, PublicID: identity.PublicID,
 			DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, Tag: &edit}
 		result, err := s.submitCatalogEditorMutation(r, snapshot, nil)
 		writeCatalogMutationResult(w, result, err)
@@ -374,7 +382,8 @@ func (s *Server) catalogTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `select entity.id,entity.public_id,tag.registry,tag.canonical_id,entity.default_locale,
-		entity.published_revision_id,case when entity.published_revision_id is null then greatest(
+		(select revision.public_id from content_revisions revision where revision.id=entity.published_revision_id),
+		case when entity.published_revision_id is null then greatest(
 		 (select count(*)::int from catalog_tag_members member where member.tag_id=tag.entity_id),
 		 coalesce((select count(distinct member.resource_id)::int from tag_import_snapshots snapshot
 		  join catalog_import_revisions revision on revision.id=snapshot.revision_id
@@ -397,13 +406,14 @@ func (s *Server) catalogTags(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	items := make([]map[string]any, 0, limit)
-	previewTagIDs := make([]string, 0, limit)
-	previewFallback := make(map[string]bool, limit)
+	previewTagIDs := make([]int64, 0, limit)
+	previewFallback := make(map[int64]bool, limit)
 	for rows.Next() {
-		var entityID, publicID, registry, canonicalID, defaultLocale string
+		var entityID int64
+		var publicID, registry, canonicalID, defaultLocale string
 		var contentLocale, name string
 		var names []byte
-		var revisionID sql.NullInt64
+		var revisionID sql.NullString
 		var count int
 		if err = rows.Scan(&entityID, &publicID, &registry, &canonicalID, &defaultLocale, &revisionID, &count, &contentLocale, &name, &names); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode tags")
@@ -414,8 +424,8 @@ func (s *Server) catalogTags(w http.ResponseWriter, r *http.Request) {
 		}
 		previewTagIDs = append(previewTagIDs, entityID)
 		previewFallback[entityID] = !revisionID.Valid
-		items = append(items, map[string]any{"entityId": entityID, "publicId": publicID, "registry": registry, "canonicalId": canonicalID,
-			"defaultLocale": defaultLocale, "publishedRevisionId": nullableCatalogInt64(revisionID), "memberCount": count,
+		items = append(items, map[string]any{"entityId": publicID, "publicId": publicID, "registry": registry, "canonicalId": canonicalID,
+			"defaultLocale": defaultLocale, "publishedRevisionId": nullableCatalogString(revisionID), "memberCount": count,
 			"locale": contentLocale, "contentLocale": contentLocale, "name": name, "names": json.RawMessage(names)})
 	}
 	if err = rows.Err(); err != nil {
@@ -428,26 +438,26 @@ func (s *Server) catalogTags(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to read tag previews")
 		return
 	}
-	for _, item := range items {
-		item["previews"] = previews[item["entityId"].(string)]
+	for index, item := range items {
+		item["previews"] = previews[previewTagIDs[index]]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
 }
 
 const catalogTagPreviewLimit = 8
 
-func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []string, allowFallback map[string]bool, primary, secondary string) (map[string][]map[string]any, error) {
-	result := make(map[string][]map[string]any, len(tagIDs))
+func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []int64, allowFallback map[int64]bool, primary, secondary string) (map[int64][]map[string]any, error) {
+	result := make(map[int64][]map[string]any, len(tagIDs))
 	if len(tagIDs) == 0 {
 		return result, nil
 	}
 	rows, err := s.db.Query(ctx, `with selected_members as (
 		select member.tag_id,member.resource_id,member.ordinal,
 		 row_number() over(partition by member.tag_id order by member.ordinal,member.resource_id) preview_rank
-		from catalog_tag_members member where member.tag_id=any($1::text[])
+		from catalog_tag_members member where member.tag_id=any($1::bigint[])
 	)
 	select member.tag_id,entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,
-	 entity.default_locale,definition.icon_file_id,coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(imported.mod_site_id,''),
+	 entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(imported.mod_site_id,''),
 	 coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
 	  where localization.catalog_entity_id=entity.id and localization.name<>''),imported.names,'{}'::jsonb)
 	from selected_members member join game_resources resource on resource.entity_id=member.resource_id
@@ -465,7 +475,7 @@ func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []string, all
 	if err = scanCatalogTagPreviewRows(rows, result, primary, secondary); err != nil {
 		return nil, err
 	}
-	fallbackIDs := make([]string, 0, len(tagIDs))
+	fallbackIDs := make([]int64, 0, len(tagIDs))
 	for _, tagID := range tagIDs {
 		if len(result[tagID]) == 0 && allowFallback[tagID] {
 			fallbackIDs = append(fallbackIDs, tagID)
@@ -477,7 +487,7 @@ func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []string, all
 	rows, err = s.db.Query(ctx, `with selected as (
 		select snapshot.tag_id,snapshot.id,snapshot.revision_id
 		from tag_import_snapshots snapshot join catalog_import_revisions revision on revision.id=snapshot.revision_id
-		where snapshot.tag_id=any($1::text[]) and revision.is_active and revision.status in ('ready','partial')
+		where snapshot.tag_id=any($1::bigint[]) and revision.is_active and revision.status in ('ready','partial')
 	), selected_members as (
 		select distinct on(selected.tag_id,member.resource_id) selected.tag_id,selected.revision_id,member.resource_id,member.ordinal
 		from selected join tag_import_members member on member.tag_snapshot_id=selected.id
@@ -486,7 +496,7 @@ func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []string, all
 		select selected_members.*,row_number() over(partition by tag_id order by ordinal,resource_id) preview_rank from selected_members
 	)
 	select member.tag_id,entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,
-	 entity.default_locale,definition.icon_file_id,coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(mod.slug,''),
+	 entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(mod.slug,''),
 	 coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
 	  where localization.catalog_entity_id=entity.id and localization.name<>''),imported.names,'{}'::jsonb)
 	from ranked_members member join game_resources resource on resource.entity_id=member.resource_id
@@ -507,11 +517,12 @@ func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []string, all
 	return result, nil
 }
 
-func scanCatalogTagPreviewRows(rows pgx.Rows, result map[string][]map[string]any, primary, secondary string) error {
+func scanCatalogTagPreviewRows(rows pgx.Rows, result map[int64][]map[string]any, primary, secondary string) error {
 	defer rows.Close()
 	for rows.Next() {
-		var tagID, entityID, publicID, kindCode, canonicalID, registry, defaultLocale, revisionID, iconPath, modSiteID string
-		var iconID sql.NullInt64
+		var tagID, entityID int64
+		var publicID, kindCode, canonicalID, registry, defaultLocale, revisionID, iconPath, modSiteID string
+		var iconID sql.NullString
 		var names []byte
 		var ordinal int
 		if err := rows.Scan(&tagID, &entityID, &publicID, &kindCode, &canonicalID, &registry, &ordinal, &defaultLocale,
@@ -531,9 +542,9 @@ func scanCatalogTagPreviewRows(rows pgx.Rows, result map[string][]map[string]any
 			iconURL = "/api/v1/catalog/resources/" + publicID + "/icon"
 		}
 		result[tagID] = append(result[tagID], map[string]any{
-			"entityId": entityID, "publicId": publicID, "id": canonicalID, "canonicalId": canonicalID,
+			"entityId": publicID, "publicId": publicID, "id": canonicalID, "canonicalId": canonicalID,
 			"kind": kindCode, "kindCode": kindCode, "registry": registry, "ordinal": ordinal,
-			"locale": locale, "name": name, "names": compactNames, "iconFileId": nullableCatalogInt64(iconID),
+			"locale": locale, "name": name, "names": compactNames, "iconFileId": nullableCatalogString(iconID),
 			"iconUrl": iconURL, "revisionId": revisionID, "iconPath": iconPath, "modSiteId": modSiteID,
 		})
 	}
@@ -579,7 +590,7 @@ func (s *Server) catalogTagDetail(w http.ResponseWriter, r *http.Request) {
 			localizations, defaultLocale = catalogImportedEditorLocalizations(nil, defaultLocale, canonicalID)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"publicId": entity.PublicID, "registry": registry, "canonicalId": canonicalID,
-			"defaultLocale": defaultLocale, "publishedRevisionId": entity.PublishedRevisionID,
+			"defaultLocale": defaultLocale, "publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID),
 			"reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID), "localizations": localizations,
 			"memberCount": len(members), "members": members})
 	case http.MethodPut:
@@ -616,7 +627,7 @@ func (s *Server) createCatalogRecipeType(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	identity := recipeTypeIdentity(edit.CanonicalID)
-	snapshot := catalogEditorSnapshot{Operation: "create", Reason: edit.Reason, Kind: "recipe_type", EntityID: identity.ID, PublicID: identity.PublicID,
+	snapshot := catalogEditorSnapshot{Operation: "create", Reason: edit.Reason, Kind: "recipe_type", IdentityKey: identity.ID, PublicID: identity.PublicID,
 		DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, RecipeType: &edit}
 	result, err := s.submitCatalogEditorMutation(r, snapshot, nil)
 	writeCatalogMutationResult(w, result, err)
@@ -686,7 +697,7 @@ func (s *Server) catalogRecipeTypeDetail(w http.ResponseWriter, r *http.Request)
 	primary, secondary := s.catalogRequestedLocales(r)
 	catalysts, _ := s.catalogRecipeTypeCatalysts(r.Context(), entity.ID, primary, secondary, entity.PublishedRevisionID == nil)
 	writeJSON(w, http.StatusOK, map[string]any{"publicId": entity.PublicID, "canonicalId": canonicalID, "defaultLocale": defaultLocale,
-		"publishedRevisionId": entity.PublishedRevisionID, "reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID),
+		"publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID), "reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID),
 		"definition": json.RawMessage(definition), "localizations": localizations, "catalysts": catalysts,
 		"templateCount": templateCount, "recipeCount": recipeCount})
 }
@@ -711,15 +722,17 @@ func (s *Server) catalogRecipeTemplates(w http.ResponseWriter, r *http.Request) 
 			writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 			return
 		}
-		identity := catalogEditorIdentityForTemplate(typeEntity.ID, edit.TemplateKey)
-		snapshot := catalogEditorSnapshot{Operation: "create", Reason: edit.Reason, Kind: "recipe_template", EntityID: identity.ID,
-			PublicID: identity.PublicID, ParentEntityID: typeEntity.ID, DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, Template: &edit}
+		identity := catalogEditorIdentityForTemplate(typeEntity.IdentityKey, edit.TemplateKey)
+		snapshot := catalogEditorSnapshot{Operation: "create", Reason: edit.Reason, Kind: "recipe_template", IdentityKey: identity.ID,
+			PublicID: identity.PublicID, ParentEntityID: typeEntity.ID, ParentPublicID: typeEntity.PublicID,
+			DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, Template: &edit}
 		result, submitErr := s.submitCatalogEditorMutation(r, snapshot, nil)
 		writeCatalogMutationResult(w, result, submitErr)
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `select entity.public_id,template.template_key,template.canvas_width,template.canvas_height,
-		template.image_scale,template.background_file_id,entity.published_revision_id,
+		template.image_scale,(select public_id from oss_files where id=template.background_file_id),
+		(select revision.public_id from content_revisions revision where revision.id=entity.published_revision_id),
 		(select count(*)::int from recipe_template_slots slot where slot.template_id=template.entity_id),
 		coalesce(import_snapshot.id,''),coalesce(import_snapshot.revision_id,''),coalesce(import_snapshot.background_path,''),
 		coalesce(import_snapshot.background_contains_ingredients,false),coalesce(import_snapshot.coordinate_space,''),
@@ -738,7 +751,8 @@ func (s *Server) catalogRecipeTemplates(w http.ResponseWriter, r *http.Request) 
 		var publicID, key, importSnapshotID, importRevisionID, backgroundPath, coordinateSpace string
 		var width, height, scale, count int
 		var backgroundContainsIngredients bool
-		var backgroundID, revisionID sql.NullInt64
+		var backgroundID sql.NullString
+		var revisionID sql.NullString
 		var imagePixels, contentRect []byte
 		if err = rows.Scan(&publicID, &key, &width, &height, &scale, &backgroundID, &revisionID, &count,
 			&importSnapshotID, &importRevisionID, &backgroundPath, &backgroundContainsIngredients, &coordinateSpace,
@@ -768,8 +782,8 @@ func (s *Server) catalogRecipeTemplates(w http.ResponseWriter, r *http.Request) 
 				"coordinateSpace": coordinateSpace, "imagePixels": json.RawMessage(imagePixels), "contentRect": json.RawMessage(contentRect)}
 		}
 		items = append(items, map[string]any{"publicId": publicID, "templateKey": key, "canvas": map[string]any{"width": width, "height": height, "imageScale": scale},
-			"backgroundFileId": nullableCatalogInt64(backgroundID), "backgroundUrl": backgroundURL, "backgroundSource": backgroundSource,
-			"publishedRevisionId": nullableCatalogInt64(revisionID), "slotCount": count, "source": source, "importMetadata": importMetadata})
+			"backgroundFileId": nullableCatalogString(backgroundID), "backgroundUrl": backgroundURL, "backgroundSource": backgroundSource,
+			"publishedRevisionId": nullableCatalogString(revisionID), "slotCount": count, "source": source, "importMetadata": importMetadata})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
 }
@@ -794,7 +808,7 @@ func (s *Server) catalogRecipeTemplateDetail(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusNotFound, "recipe template not found")
 		return
 	}
-	var typeID string
+	var typeID int64
 	if err = s.db.QueryRow(r.Context(), `select recipe_type_id from recipe_layout_templates where entity_id=$1`, entity.ID).Scan(&typeID); err != nil && r.Method != http.MethodPut {
 		writeError(w, http.StatusNotFound, "recipe template not found")
 		return
@@ -813,8 +827,14 @@ func (s *Server) catalogRecipeTemplateDetail(w http.ResponseWriter, r *http.Requ
 			writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 			return
 		}
+		var typePublicID string
+		if err = s.db.QueryRow(r.Context(), `select public_id from catalog_entities where id=$1 and entity_type='recipe_type'`, typeID).Scan(&typePublicID); err != nil {
+			writeError(w, http.StatusNotFound, "recipe type not found")
+			return
+		}
 		snapshot := catalogEditorSnapshot{Operation: "edit", Reason: edit.Reason, Kind: "recipe_template", EntityID: entity.ID,
-			PublicID: entity.PublicID, ParentEntityID: typeID, DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, Template: &edit}
+			PublicID: entity.PublicID, ParentEntityID: typeID, ParentPublicID: typePublicID,
+			DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, Template: &edit}
 		result, submitErr := s.submitCatalogEditorMutation(r, snapshot, edit.BaseRevisionID)
 		writeCatalogMutationResult(w, result, submitErr)
 		return
@@ -826,10 +846,10 @@ func (s *Server) catalogRecipeTemplateDetail(w http.ResponseWriter, r *http.Requ
 	var typePublicID, key, importSnapshotID, importRevisionID, backgroundPath, coordinateSpace string
 	var width, height, scale int
 	var backgroundContainsIngredients bool
-	var backgroundID sql.NullInt64
+	var backgroundID sql.NullString
 	var definition, imagePixels, contentRect []byte
 	if err = s.db.QueryRow(r.Context(), `select type_entity.public_id,template.template_key,template.canvas_width,template.canvas_height,
-		template.image_scale,template.background_file_id,template.definition,coalesce(import_snapshot.id,''),
+		template.image_scale,(select public_id from oss_files where id=template.background_file_id),template.definition,coalesce(import_snapshot.id,''),
 		coalesce(import_snapshot.revision_id,''),coalesce(import_snapshot.background_path,''),
 		coalesce(import_snapshot.background_contains_ingredients,false),coalesce(import_snapshot.coordinate_space,''),
 		coalesce(import_snapshot.image_pixels,'{}'::jsonb),coalesce(import_snapshot.content_rect,'{}'::jsonb)
@@ -869,9 +889,9 @@ func (s *Server) catalogRecipeTemplateDetail(w http.ResponseWriter, r *http.Requ
 			"coordinateSpace": coordinateSpace, "imagePixels": json.RawMessage(imagePixels), "contentRect": json.RawMessage(contentRect)}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"publicId": entity.PublicID, "recipeTypePublicId": typePublicID, "templateKey": key,
-		"canvas": map[string]any{"width": width, "height": height, "imageScale": scale}, "backgroundFileId": nullableCatalogInt64(backgroundID),
+		"canvas": map[string]any{"width": width, "height": height, "imageScale": scale}, "backgroundFileId": nullableCatalogString(backgroundID),
 		"backgroundUrl": backgroundURL, "backgroundSource": backgroundSource, "definition": json.RawMessage(definition), "slots": slots, "defaultLocale": defaultLocale,
-		"localizations": localizations, "publishedRevisionId": entity.PublishedRevisionID,
+		"localizations": localizations, "publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID),
 		"reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID), "source": source, "importMetadata": importMetadata})
 }
 
@@ -937,9 +957,10 @@ func (s *Server) createCatalogRecipe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
-	identity := catalogEditorIdentityForRecipe(typeEntity.ID, edit.CanonicalSourceID)
-	snapshot := catalogEditorSnapshot{Operation: "create", Reason: edit.Reason, Kind: "recipe", EntityID: identity.ID, PublicID: identity.PublicID,
-		ParentEntityID: typeEntity.ID, DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, Recipe: &edit}
+	identity := catalogEditorIdentityForRecipe(typeEntity.IdentityKey, edit.CanonicalSourceID)
+	snapshot := catalogEditorSnapshot{Operation: "create", Reason: edit.Reason, Kind: "recipe", IdentityKey: identity.ID, PublicID: identity.PublicID,
+		ParentEntityID: typeEntity.ID, ParentPublicID: typeEntity.PublicID,
+		DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, Recipe: &edit}
 	result, submitErr := s.submitCatalogEditorMutation(r, snapshot, nil)
 	writeCatalogMutationResult(w, result, submitErr)
 }
@@ -962,7 +983,8 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `select entity.public_id,coalesce(recipe.canonical_source_id,''),recipe.identity_source,
-		entity.published_revision_id,coalesce(template_entity.public_id,imported_template_entity.public_id,''),
+		(select revision.public_id from content_revisions revision where revision.id=entity.published_revision_id),
+		coalesce(template_entity.public_id,imported_template_entity.public_id,''),
 		coalesce(definition.definition,observation.source_data,'{}'::jsonb),coalesce(observation.id,''),coalesce(observation.revision_id,''),
 		case when definition.recipe_id is not null then (select count(*)::int from recipe_bindings binding where binding.recipe_id=recipe.entity_id)
 		 else coalesce(observation.binding_count,0) end,
@@ -975,8 +997,9 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 		from recipes recipe join catalog_entities entity on entity.id=recipe.entity_id
 		left join recipe_definitions definition on definition.recipe_id=recipe.entity_id
 		left join catalog_entities template_entity on template_entity.id=definition.template_id
-		left join lateral (select snapshot.*,revision.target_version_public_id as source_version_public_id from recipe_import_snapshots snapshot
+		left join lateral (select snapshot.*,version.public_id as source_version_public_id from recipe_import_snapshots snapshot
 		 join catalog_import_revisions revision on revision.id=snapshot.revision_id
+		 join mod_content_versions version on version.id=revision.target_version_id
 		 where snapshot.recipe_id=recipe.entity_id and revision.is_active and revision.status in ('ready','partial')
 		 order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1) observation on true
 		left join recipe_template_import_snapshots import_template on import_template.id=observation.template_id
@@ -998,7 +1021,7 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 		var publicID, canonicalID, identitySource, templatePublicID, observationID, importRevisionID string
 		var sourceVersionPublicID, sourceModPublicID, sourceModSiteID, sourceModName, sourceVersionLabel, sourceModVersion string
 		var sourceMinecraftVersions, sourceLoaders []string
-		var publishedRevisionID sql.NullInt64
+		var publishedRevisionID sql.NullString
 		var definition, names []byte
 		var bindingCount int
 		var canonicalDefinition bool
@@ -1021,7 +1044,7 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 				"loaders": sourceLoaders, "modVersion": sourceModVersion}
 		}
 		items = append(items, map[string]any{"publicId": publicID, "canonicalSourceId": canonicalID,
-			"identitySource": identitySource, "templatePublicId": templatePublicID, "publishedRevisionId": nullableCatalogInt64(publishedRevisionID),
+			"identitySource": identitySource, "templatePublicId": templatePublicID, "publishedRevisionId": nullableCatalogString(publishedRevisionID),
 			"definition": json.RawMessage(definition), "bindingCount": bindingCount, "source": source,
 			"sourceVersionPublicId": sourceVersionPublicID, "sourceVersion": sourceVersion,
 			"importRevisionId": importRevisionID, "locale": locale, "name": name, "names": json.RawMessage(names)})
@@ -1033,7 +1056,7 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
 }
 
-func (s *Server) normalizeCatalogRecipeEdit(ctx context.Context, typeID string, edit *catalogRecipeEdit) error {
+func (s *Server) normalizeCatalogRecipeEdit(ctx context.Context, typeID int64, edit *catalogRecipeEdit) error {
 	var err error
 	edit.TemplatePublicID, err = canonicalCatalogString(edit.TemplatePublicID, 32)
 	if err != nil {
@@ -1076,7 +1099,7 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "recipe not found")
 		return
 	}
-	var typeID string
+	var typeID int64
 	if err = s.db.QueryRow(r.Context(), `select recipe_type_id from recipes where entity_id=$1`, entity.ID).Scan(&typeID); err != nil && r.Method != http.MethodPut {
 		writeError(w, http.StatusNotFound, "recipe not found")
 		return
@@ -1095,8 +1118,14 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 			writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 			return
 		}
+		var typePublicID string
+		if err = s.db.QueryRow(r.Context(), `select public_id from catalog_entities where id=$1 and entity_type='recipe_type'`, typeID).Scan(&typePublicID); err != nil {
+			writeError(w, http.StatusNotFound, "recipe type not found")
+			return
+		}
 		snapshot := catalogEditorSnapshot{Operation: "edit", Reason: edit.Reason, Kind: "recipe", EntityID: entity.ID, PublicID: entity.PublicID,
-			ParentEntityID: typeID, DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, Recipe: &edit}
+			ParentEntityID: typeID, ParentPublicID: typePublicID,
+			DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, Recipe: &edit}
 		result, submitErr := s.submitCatalogEditorMutation(r, snapshot, edit.BaseRevisionID)
 		writeCatalogMutationResult(w, result, submitErr)
 		return
@@ -1120,8 +1149,9 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 		from recipes recipe join catalog_entities type_entity on type_entity.id=recipe.recipe_type_id
 		left join recipe_definitions definition on definition.recipe_id=recipe.entity_id
 		left join catalog_entities template_entity on template_entity.id=definition.template_id
-		left join lateral (select snapshot.*,revision.target_version_public_id as source_version_public_id from recipe_import_snapshots snapshot
-			join catalog_import_revisions revision on revision.id=snapshot.revision_id
+		left join lateral (select snapshot.*,version.public_id as source_version_public_id from recipe_import_snapshots snapshot
+		 join catalog_import_revisions revision on revision.id=snapshot.revision_id
+		 join mod_content_versions version on version.id=revision.target_version_id
 			where snapshot.recipe_id=recipe.entity_id and revision.is_active and revision.status in ('ready','partial')
 			order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1) observation on true
 		left join recipe_template_import_snapshots import_template on import_template.id=observation.template_id
@@ -1167,7 +1197,7 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"publicId": entity.PublicID, "recipeTypePublicId": typePublicID,
 		"templatePublicId": templatePublicID, "sourceVersionPublicId": sourceVersionPublicID, "sourceVersion": sourceVersion,
 		"canonicalSourceId": canonicalID, "definition": json.RawMessage(definition), "bindings": bindings,
-		"defaultLocale": defaultLocale, "localizations": localizations, "publishedRevisionId": entity.PublishedRevisionID,
+		"defaultLocale": defaultLocale, "localizations": localizations, "publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID),
 		"reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID), "source": source,
 		"importRevisionId": importRevisionID, "importTemplateKey": importTemplateKey})
 }
@@ -1192,18 +1222,18 @@ func writeCatalogMutationResult(w http.ResponseWriter, result catalogEditResult,
 	writeJSON(w, http.StatusAccepted, result)
 }
 
-func defaultCatalogLocale(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return "en-US"
-	}
-	return value
-}
-
 func nullableCatalogInt64(value sql.NullInt64) any {
 	if !value.Valid {
 		return nil
 	}
 	return value.Int64
+}
+
+func nullableCatalogString(value sql.NullString) any {
+	if !value.Valid {
+		return nil
+	}
+	return value.String
 }
 
 func catalogResolvedName(raw []byte, primary, secondary, defaultLocale string) (string, string) {
@@ -1236,15 +1266,18 @@ func (s *Server) catalogRequestedLocales(r *http.Request) (string, string) {
 	return primary, secondary
 }
 
-func (s *Server) catalogRecipeTypeIsActive(ctx context.Context, typeID string) bool {
+func (s *Server) catalogRecipeTypeIsActive(ctx context.Context, typeID int64) bool {
 	var active bool
 	return s.db.QueryRow(ctx, `select exists(select 1 from catalog_entities
 		where id=$1 and entity_type='recipe_type' and status='active' and archived_at is null)`, typeID).Scan(&active) == nil && active
 }
 
-func (s *Server) catalogLocalizationRows(ctx context.Context, entityID string) ([]map[string]any, error) {
-	rows, err := s.db.Query(ctx, `select locale,name,summary,content_markdown,provenance,source_locale,ai_task_id,revision_no,
-		editable,review_status,published_revision_id from content_localizations where catalog_entity_id=$1 order by locale`, entityID)
+func (s *Server) catalogLocalizationRows(ctx context.Context, entityID int64) ([]map[string]any, error) {
+	rows, err := s.db.Query(ctx, `select locale,name,summary,content_markdown,provenance,source_locale,
+		(select task_uid from ai_tasks where id=content_localizations.ai_task_id),revision_no,
+		editable,review_status,
+		(select revision.public_id from content_revisions revision where revision.id=content_localizations.published_revision_id)
+		from content_localizations where catalog_entity_id=$1 order by locale`, entityID)
 	if err != nil {
 		return nil, err
 	}
@@ -1252,7 +1285,8 @@ func (s *Server) catalogLocalizationRows(ctx context.Context, entityID string) (
 	result := []map[string]any{}
 	for rows.Next() {
 		var locale, name, summary, markdown, provenance, sourceLocale, reviewStatus string
-		var aiTaskID, publishedRevisionID sql.NullInt64
+		var aiTaskID sql.NullString
+		var publishedRevisionID sql.NullString
 		var revisionNo int64
 		var editable bool
 		if err = rows.Scan(&locale, &name, &summary, &markdown, &provenance, &sourceLocale, &aiTaskID, &revisionNo, &editable,
@@ -1260,24 +1294,24 @@ func (s *Server) catalogLocalizationRows(ctx context.Context, entityID string) (
 			return nil, err
 		}
 		result = append(result, map[string]any{"locale": locale, "name": name, "summary": summary, "contentMarkdown": markdown,
-			"provenance": provenance, "sourceLocale": sourceLocale, "aiTaskId": nullableCatalogInt64(aiTaskID), "revisionNo": revisionNo,
-			"editable": editable, "reviewStatus": reviewStatus, "publishedRevisionId": nullableCatalogInt64(publishedRevisionID)})
+			"provenance": provenance, "sourceLocale": sourceLocale, "aiTaskId": nullableCatalogString(aiTaskID), "revisionNo": revisionNo,
+			"editable": editable, "reviewStatus": reviewStatus, "publishedRevisionId": nullableCatalogString(publishedRevisionID)})
 	}
 	return result, rows.Err()
 }
 
-func (s *Server) catalogPendingReviewStatus(ctx context.Context, entityID string) string {
+func (s *Server) catalogPendingReviewStatus(ctx context.Context, entityID int64) string {
 	var status string
-	err := s.db.QueryRow(ctx, `select status from change_requests where aggregate_key=$1 order by id desc limit 1`, entityID).Scan(&status)
+	err := s.db.QueryRow(ctx, `select status from change_requests where entity_id=$1 order by id desc limit 1`, entityID).Scan(&status)
 	if err != nil {
 		return "approved"
 	}
 	return status
 }
 
-func (s *Server) catalogTagMemberRows(ctx context.Context, tagID, primary, secondary string, allowImportFallback bool) ([]map[string]any, error) {
+func (s *Server) catalogTagMemberRows(ctx context.Context, tagID int64, primary, secondary string, allowImportFallback bool) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, `select entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,
-		entity.default_locale,definition.icon_file_id,coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(imported.mod_site_id,''),
+		entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(imported.mod_site_id,''),
 		coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
 		 where localization.catalog_entity_id=entity.id and localization.name<>''),imported.names,'{}'::jsonb)
 		from catalog_tag_members member join game_resources resource on resource.entity_id=member.resource_id
@@ -1293,8 +1327,9 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID, primary, secon
 	}
 	items := []map[string]any{}
 	for rows.Next() {
-		var entityID, publicID, kindCode, canonicalID, registry, defaultLocale, revisionID, iconPath, modSiteID string
-		var iconID sql.NullInt64
+		var entityID int64
+		var publicID, kindCode, canonicalID, registry, defaultLocale, revisionID, iconPath, modSiteID string
+		var iconID sql.NullString
 		var names []byte
 		var ordinal int
 		if err = rows.Scan(&entityID, &publicID, &kindCode, &canonicalID, &registry, &ordinal, &defaultLocale, &iconID, &revisionID, &iconPath, &modSiteID, &names); err != nil {
@@ -1305,9 +1340,9 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID, primary, secon
 		if iconID.Valid {
 			iconURL = "/api/v1/catalog/resources/" + publicID + "/icon"
 		}
-		items = append(items, map[string]any{"entityId": entityID, "publicId": publicID, "id": canonicalID, "kind": kindCode, "kindCode": kindCode,
+		items = append(items, map[string]any{"entityId": publicID, "publicId": publicID, "id": canonicalID, "kind": kindCode, "kindCode": kindCode,
 			"registry": registry, "canonicalId": canonicalID, "ordinal": ordinal, "locale": locale, "name": name,
-			"names": json.RawMessage(names), "iconFileId": nullableCatalogInt64(iconID), "iconUrl": iconURL,
+			"names": json.RawMessage(names), "iconFileId": nullableCatalogString(iconID), "iconUrl": iconURL,
 			"revisionId": revisionID, "iconPath": iconPath, "modSiteId": modSiteID})
 	}
 	if err = rows.Err(); err != nil {
@@ -1331,7 +1366,7 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID, primary, secon
 		order by member.resource_id,member.ordinal
 	)
 	select entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,entity.default_locale,
-		definition.icon_file_id,coalesce(resource_snapshot.revision_id,''),coalesce(resource_snapshot.icon_path,''),coalesce(mod.slug,''),
+		(select public_id from oss_files where id=definition.icon_file_id),coalesce(resource_snapshot.revision_id,''),coalesce(resource_snapshot.icon_path,''),coalesce(mod.slug,''),
 		coalesce((select jsonb_object_agg(localization.locale,localization.name)
 		 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name<>''),
 		 resource_snapshot.names,'{}'::jsonb)
@@ -1349,8 +1384,9 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID, primary, secon
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var entityID, publicID, kindCode, canonicalID, registry, defaultLocale, revisionID, iconPath, modSiteID string
-		var iconID sql.NullInt64
+		var entityID int64
+		var publicID, kindCode, canonicalID, registry, defaultLocale, revisionID, iconPath, modSiteID string
+		var iconID sql.NullString
 		var names []byte
 		var ordinal int
 		if err = rows.Scan(&entityID, &publicID, &kindCode, &canonicalID, &registry, &ordinal, &defaultLocale, &iconID, &revisionID, &iconPath, &modSiteID, &names); err != nil {
@@ -1361,9 +1397,9 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID, primary, secon
 		if iconID.Valid {
 			iconURL = "/api/v1/catalog/resources/" + publicID + "/icon"
 		}
-		items = append(items, map[string]any{"entityId": entityID, "publicId": publicID, "id": canonicalID, "kind": kindCode, "kindCode": kindCode,
+		items = append(items, map[string]any{"entityId": publicID, "publicId": publicID, "id": canonicalID, "kind": kindCode, "kindCode": kindCode,
 			"registry": registry, "canonicalId": canonicalID, "ordinal": ordinal, "locale": locale, "name": name,
-			"names": json.RawMessage(names), "iconFileId": nullableCatalogInt64(iconID), "iconUrl": iconURL,
+			"names": json.RawMessage(names), "iconFileId": nullableCatalogString(iconID), "iconUrl": iconURL,
 			"revisionId": revisionID, "iconPath": iconPath, "modSiteId": modSiteID, "source": "import"})
 	}
 	if err = rows.Err(); err != nil {
@@ -1375,9 +1411,9 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID, primary, secon
 	return items, nil
 }
 
-func (s *Server) catalogRecipeTypeCatalysts(ctx context.Context, typeID, primary, secondary string, allowImportFallback bool) ([]map[string]any, error) {
+func (s *Server) catalogRecipeTypeCatalysts(ctx context.Context, typeID int64, primary, secondary string, allowImportFallback bool) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, `select entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,catalyst.ordinal,
-		entity.default_locale,definition.icon_file_id,
+		entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),
 		coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
 		 where localization.catalog_entity_id=entity.id and localization.name<>''),'{}'::jsonb)
 		from recipe_type_catalysts catalyst join game_resources resource on resource.entity_id=catalyst.resource_id
@@ -1389,7 +1425,7 @@ func (s *Server) catalogRecipeTypeCatalysts(ctx context.Context, typeID, primary
 	items := []map[string]any{}
 	for rows.Next() {
 		var publicID, kindCode, canonicalID, registry, defaultLocale string
-		var iconID sql.NullInt64
+		var iconID sql.NullString
 		var names []byte
 		var ordinal int
 		if err = rows.Scan(&publicID, &kindCode, &canonicalID, &registry, &ordinal, &defaultLocale, &iconID, &names); err != nil {
@@ -1402,7 +1438,7 @@ func (s *Server) catalogRecipeTypeCatalysts(ctx context.Context, typeID, primary
 		}
 		items = append(items, map[string]any{"publicId": publicID, "id": canonicalID, "kind": kindCode, "kindCode": kindCode,
 			"registry": registry, "canonicalId": canonicalID, "ordinal": ordinal, "locale": locale, "name": name,
-			"names": json.RawMessage(names), "iconFileId": nullableCatalogInt64(iconID), "iconUrl": iconURL})
+			"names": json.RawMessage(names), "iconFileId": nullableCatalogString(iconID), "iconUrl": iconURL})
 	}
 	if err = rows.Err(); err != nil {
 		rows.Close()
@@ -1427,7 +1463,7 @@ func (s *Server) catalogRecipeTypeCatalysts(ctx context.Context, typeID, primary
 	return s.decorateCatalysts(ctx, raw, revisionID)
 }
 
-func (s *Server) catalogTemplateSlotRows(ctx context.Context, templateID string) ([]map[string]any, error) {
+func (s *Server) catalogTemplateSlotRows(ctx context.Context, templateID int64) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, `select slot_key,role,output_index,ordinal,x::float8,y::float8,width::float8,height::float8,definition
 		from recipe_template_slots where template_id=$1 order by ordinal`, templateID)
 	if err != nil {
@@ -1450,7 +1486,7 @@ func (s *Server) catalogTemplateSlotRows(ctx context.Context, templateID string)
 	return items, rows.Err()
 }
 
-func (s *Server) catalogRecipeBindingRows(ctx context.Context, recipeID string) (map[string]any, error) {
+func (s *Server) catalogRecipeBindingRows(ctx context.Context, recipeID int64) (map[string]any, error) {
 	rows, err := s.db.Query(ctx, `select binding.id,slot.slot_key,binding.definition
 		from recipe_bindings binding join recipe_template_slots slot on slot.id=binding.template_slot_id
 		where binding.recipe_id=$1 order by binding.ordinal`, recipeID)
@@ -1460,7 +1496,8 @@ func (s *Server) catalogRecipeBindingRows(ctx context.Context, recipeID string) 
 	defer rows.Close()
 	result := map[string]any{}
 	for rows.Next() {
-		var bindingID, slotKey string
+		var bindingID int64
+		var slotKey string
 		var definition []byte
 		if err = rows.Scan(&bindingID, &slotKey, &definition); err != nil {
 			return nil, err
@@ -1516,7 +1553,7 @@ func (s *Server) catalogImportedRecipeBindingRows(ctx context.Context, snapshotI
 	return result, rows.Err()
 }
 
-func (s *Server) catalogRecipeCandidateRows(ctx context.Context, bindingID string) ([]map[string]any, error) {
+func (s *Server) catalogRecipeCandidateRows(ctx context.Context, bindingID int64) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, `select entity.public_id,resource.kind_code,resource.canonical_id,candidate.amount::float8,
 		candidate.probability::float8,candidate.byproduct,candidate.definition
 		from recipe_binding_candidates candidate join game_resources resource on resource.entity_id=candidate.resource_id

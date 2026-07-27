@@ -77,13 +77,13 @@ func TestCatalogReviewAndBypassPermissionsAreSeparated(t *testing.T) {
 
 func TestContentTranslationConcurrencyKeyTracksSourceAndActor(t *testing.T) {
 	source := catalogLocalizationPayload{Locale: "zh_cn", RevisionNo: 3}
-	free := contentTranslationConcurrencyKey("entity", source, "ja", 0, false)
-	updated := contentTranslationConcurrencyKey("entity", catalogLocalizationPayload{Locale: "zh-CN", RevisionNo: 4}, "ja", 0, false)
+	free := contentTranslationConcurrencyKey(1, source, "ja", 0, false)
+	updated := contentTranslationConcurrencyKey(1, catalogLocalizationPayload{Locale: "zh-CN", RevisionNo: 4}, "ja", 0, false)
 	if free == updated {
 		t.Fatal("a source revision change must create a new translation task key")
 	}
-	firstUser := contentTranslationConcurrencyKey("entity", source, "pt-BR", 11, true)
-	secondUser := contentTranslationConcurrencyKey("entity", source, "pt-BR", 12, true)
+	firstUser := contentTranslationConcurrencyKey(1, source, "pt-BR", 11, true)
+	secondUser := contentTranslationConcurrencyKey(1, source, "pt-BR", 12, true)
 	if firstUser == secondUser {
 		t.Fatal("quota-backed tasks must be scoped to the requesting user")
 	}

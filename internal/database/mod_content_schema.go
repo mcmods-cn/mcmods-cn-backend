@@ -28,9 +28,9 @@ func modContentSchemaStatements() []string {
 		`create index idx_recipe_definitions_source_version on recipe_definitions(source_mod_content_version_id)
 			where source_mod_content_version_id is not null`,
 		`alter table catalog_import_jobs add constraint fk_catalog_import_jobs_target_version
-			foreign key(target_version_public_id) references mod_content_versions(public_id) on delete cascade`,
+			foreign key(target_version_id) references mod_content_versions(id) on delete cascade`,
 		`alter table catalog_import_revisions add constraint fk_catalog_import_revisions_target_version
-			foreign key(target_version_public_id) references mod_content_versions(public_id) on delete cascade`,
+			foreign key(target_version_id) references mod_content_versions(id) on delete cascade`,
 		`create table mod_content_templates (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
@@ -86,6 +86,7 @@ func modContentSchemaStatements() []string {
 			version_id bigint not null references mod_content_versions(id) on delete cascade,
 			template_id bigint not null references mod_content_templates(id) on delete restrict,
 			parent_id bigint references mod_content_sections(id) on delete cascade,
+			system_key text not null default '',
 			default_locale text not null default 'en-US',
 			display_mode text not null,
 			ordinal integer not null default 0 check(ordinal>=0),
@@ -101,6 +102,8 @@ func modContentSchemaStatements() []string {
 			unique(version_id,parent_id,ordinal)
 		)`,
 		`create index idx_mod_content_sections_tree on mod_content_sections(version_id,parent_id,ordinal)`,
+		`create unique index idx_mod_content_sections_system_key on mod_content_sections(version_id,parent_id,system_key)
+			where system_key<>'' and status='active'`,
 		`create table mod_content_section_localizations (
 			section_id bigint not null references mod_content_sections(id) on delete cascade,
 			locale text not null,
@@ -112,22 +115,56 @@ func modContentSchemaStatements() []string {
 		`create table mod_content_section_resources (
 			section_id bigint not null,
 			version_id bigint not null references mod_content_versions(id) on delete cascade,
-			resource_id text not null references game_resources(entity_id) on delete restrict,
+			resource_id bigint not null references game_resources(entity_id) on delete restrict,
+			placement_identity_key text not null,
 			ordinal integer not null default 0 check(ordinal>=0),
+			placement_source text not null default 'manual',
 			created_at timestamptz not null default now(),
 			primary key(section_id,version_id,resource_id),
 			foreign key(section_id,version_id) references mod_content_sections(id,version_id) on delete cascade,
-			unique(section_id,version_id,ordinal)
+			unique(section_id,version_id,ordinal),
+			unique(version_id,resource_id),
+			unique(version_id,placement_identity_key),
+			check(placement_source in ('manual','import'))
 		)`,
 		`create index idx_mod_content_section_resources_resource on mod_content_section_resources(resource_id,version_id)`,
+		`create or replace function assign_mod_content_placement_identity() returns trigger as $$
+		declare resource_kind text; resource_canonical_id text; block_representative_id bigint;
+		begin
+			select kind_code,canonical_id into strict resource_kind,resource_canonical_id
+			from game_resources where entity_id=new.resource_id;
+			if resource_kind in ('minecraft.item','minecraft.block') then
+				select binding.block_resource_id into block_representative_id
+				from game_resource_asset_bindings binding
+				join resource_import_snapshots snapshot on snapshot.id=binding.snapshot_id
+				join catalog_import_revisions revision on revision.id=snapshot.revision_id
+				where revision.target_version_id=new.version_id and revision.is_active
+				  and revision.status in ('ready','partial')
+				  and binding.block_resource_id is not null
+				  and new.resource_id in (binding.item_resource_id,binding.block_resource_id)
+				order by coalesce(revision.activated_at,revision.created_at) desc,binding.block_resource_id
+				limit 1;
+				if block_representative_id is not null then
+					new.placement_identity_key := 'item-block:resource:'||block_representative_id::text;
+				else
+					new.placement_identity_key := 'item-block:canonical:'||lower(resource_canonical_id);
+				end if;
+			else
+				new.placement_identity_key := 'resource:'||new.resource_id::text;
+			end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mod_content_placement_identity before insert or update of resource_id,version_id
+			on mod_content_section_resources for each row execute function assign_mod_content_placement_identity()`,
 		`create table mod_resource_bindings (
-			resource_id text primary key references game_resources(entity_id) on delete cascade,
+			resource_id bigint primary key references game_resources(entity_id) on delete cascade,
 			mod_id bigint not null references mods(id) on delete cascade,
 			created_at timestamptz not null default now()
 		)`,
 		`create index idx_mod_resource_bindings_mod on mod_resource_bindings(mod_id,resource_id)`,
 		`create table mod_resource_version_details (
-			resource_id text not null references mod_resource_bindings(resource_id) on delete cascade,
+			resource_id bigint not null references mod_resource_bindings(resource_id) on delete cascade,
 			version_id bigint not null references mod_content_versions(id) on delete cascade,
 			default_locale text not null default 'en-US',
 			definition jsonb not null default '{}'::jsonb,
@@ -145,7 +182,7 @@ func modContentSchemaStatements() []string {
 		)`,
 		`create index idx_mod_resource_version_details_status on mod_resource_version_details(version_id,status,updated_at desc)`,
 		`create table mod_resource_version_detail_localizations (
-			resource_id text not null,
+			resource_id bigint not null,
 			version_id bigint not null,
 			locale text not null,
 			name text not null default '',
@@ -175,5 +212,24 @@ func modContentSchemaStatements() []string {
 		$$ language plpgsql`,
 		`create trigger trg_mod_content_section_tree before insert or update of parent_id,mod_id,version_id on mod_content_sections
 			for each row execute function validate_mod_content_section_tree()`,
+		`create or replace function register_mod_content_public_route() returns trigger as $$
+		begin
+			insert into public_routes(public_id,entity_type,internal_id)
+			values(new.public_id,TG_ARGV[0],new.id);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mod_content_versions_public_route after insert on mod_content_versions
+			for each row execute function register_mod_content_public_route('mod_content_version')`,
+		`create trigger trg_mod_content_templates_public_route after insert on mod_content_templates
+			for each row execute function register_mod_content_public_route('mod_content_template')`,
+		`create trigger trg_mod_content_sections_public_route after insert on mod_content_sections
+			for each row execute function register_mod_content_public_route('mod_content_section')`,
+		`insert into public_routes(public_id,entity_type,internal_id)
+			select public_id,'mod_content_version',id from mod_content_versions on conflict do nothing`,
+		`insert into public_routes(public_id,entity_type,internal_id)
+			select public_id,'mod_content_template',id from mod_content_templates on conflict do nothing`,
+		`insert into public_routes(public_id,entity_type,internal_id)
+			select public_id,'mod_content_section',id from mod_content_sections on conflict do nothing`,
 	}
 }

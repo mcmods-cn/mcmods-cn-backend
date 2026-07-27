@@ -19,6 +19,7 @@ import (
 type projectFileContext struct {
 	ProjectType         string
 	ProjectID           string
+	ProjectInternalID   int64
 	SiteID              string
 	ReviewStatus        string
 	ModrinthProjectID   string
@@ -63,7 +64,7 @@ type providerProjectFile struct {
 }
 
 type createProjectFileRequest struct {
-	OSSFileID      int64    `json:"ossFileId"`
+	OSSFileID      string   `json:"ossFileId"`
 	DisplayName    string   `json:"displayName"`
 	VersionName    string   `json:"versionName"`
 	ReleaseChannel string   `json:"releaseChannel"`
@@ -177,7 +178,8 @@ func (s *Server) projectFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	command, err := tx.Exec(r.Context(), `update project_files set status='deleted',updated_at=now()
-		where public_id=$1 and project_type=$2 and project_id=$3 and status='active'`, publicID, project.ProjectType, project.ProjectID)
+		where public_id=$1 and project_type=$2 and project_internal_id=$3 and status='active'`,
+		publicID, project.ProjectType, project.ProjectInternalID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete project file")
 		return
@@ -188,7 +190,7 @@ func (s *Server) projectFile(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = tx.Exec(r.Context(), `insert into audit_events(aggregate_type,aggregate_key,actor_id,action,ip,user_agent,metadata)
 		values('project_file',$1,$2,'delete',$3,$4,jsonb_build_object('projectType',$5,'projectId',$6))`,
-		publicID, currentClaims(r).Subject, requestIP(r), r.UserAgent(), project.ProjectType, project.ProjectID)
+		publicID, currentClaims(r).Subject, s.requestClientLocation(r).IP, r.UserAgent(), project.ProjectType, project.ProjectID)
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit project file deletion")
 		return
@@ -207,7 +209,8 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 	request.ReleaseChannel = strings.ToLower(strings.TrimSpace(request.ReleaseChannel))
 	request.GameVersions = uniqueTrimmed(request.GameVersions, 100)
 	request.Loaders = normalizeLoaders(request.Loaders)
-	if request.OSSFileID <= 0 || request.VersionName == "" || len(request.GameVersions) == 0 || len(request.Loaders) == 0 {
+	request.OSSFileID = strings.ToLower(strings.TrimSpace(request.OSSFileID))
+	if !validCatalogPublicID(request.OSSFileID) || request.VersionName == "" || len(request.GameVersions) == 0 || len(request.Loaders) == 0 {
 		writeError(w, http.StatusBadRequest, "file, version, game version, and loader are required")
 		return
 	}
@@ -220,9 +223,9 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 	var fileName, contentType, sha256, category string
-	var sizeBytes, uploaderID int64
-	err := s.db.QueryRow(r.Context(), `select original_name,content_type,size_bytes,sha256,uploader_id,category
-		from oss_files where id=$1 and status='active'`, request.OSSFileID).Scan(&fileName, &contentType, &sizeBytes, &sha256, &uploaderID, &category)
+	var fileID, sizeBytes, uploaderID int64
+	err := s.db.QueryRow(r.Context(), `select id,original_name,content_type,size_bytes,sha256,uploader_id,category
+		from oss_files where public_id=$1 and status='active'`, request.OSSFileID).Scan(&fileID, &fileName, &contentType, &sizeBytes, &sha256, &uploaderID, &category)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusBadRequest, "uploaded OSS file not found")
 		return
@@ -247,10 +250,10 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 	defer tx.Rollback(r.Context())
 	var publicID string
 	err = tx.QueryRow(r.Context(), `insert into project_files(
-		project_type,project_id,oss_file_id,display_name,version_name,release_channel,game_versions,loaders,
+		project_type,project_internal_id,oss_file_id,display_name,version_name,release_channel,game_versions,loaders,
 		file_name,content_type,size_bytes,sha256,uploaded_by)
 		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning public_id`,
-		project.ProjectType, project.ProjectID, request.OSSFileID, request.DisplayName, request.VersionName,
+		project.ProjectType, project.ProjectInternalID, fileID, request.DisplayName, request.VersionName,
 		request.ReleaseChannel, request.GameVersions, request.Loaders, fileName, contentType, sizeBytes, sha256,
 		currentClaims(r).Subject).Scan(&publicID)
 	if err != nil {
@@ -263,7 +266,7 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 	}
 	metadata, _ := json.Marshal(map[string]any{"projectType": project.ProjectType, "projectId": project.ProjectID, "ossFileId": request.OSSFileID})
 	_, _ = tx.Exec(r.Context(), `insert into audit_events(aggregate_type,aggregate_key,actor_id,action,ip,user_agent,metadata)
-		values('project_file',$1,$2,'create',$3,$4,$5::jsonb)`, publicID, currentClaims(r).Subject, requestIP(r), r.UserAgent(), metadata)
+		values('project_file',$1,$2,'create',$3,$4,$5::jsonb)`, publicID, currentClaims(r).Subject, s.requestClientLocation(r).IP, r.UserAgent(), metadata)
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit project file creation")
 		return
@@ -316,9 +319,10 @@ func (s *Server) downloadProjectFile(w http.ResponseWriter, r *http.Request) {
 	if source == "internal" {
 		var objectKey, fileName string
 		err = s.db.QueryRow(r.Context(), `select oss.object_key,project_file.file_name
-			from project_files project_file join oss_files oss on oss.id=project_file.oss_file_id and oss.status='active'
-			where project_file.public_id=$1 and project_file.project_type=$2 and project_file.project_id=$3 and project_file.status='active'`,
-			strings.ToLower(fileID), project.ProjectType, project.ProjectID).Scan(&objectKey, &fileName)
+			from project_files project_file join oss_files oss
+				on oss.id=project_file.oss_file_id and oss.status='active' and oss.scan_status='clean'
+			where project_file.public_id=$1 and project_file.project_type=$2 and project_file.project_internal_id=$3 and project_file.status='active'`,
+			strings.ToLower(fileID), project.ProjectType, project.ProjectInternalID).Scan(&objectKey, &fileName)
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "project file not found")
 			return
@@ -387,8 +391,9 @@ func (s *Server) projectFileContext(ctx context.Context, rawType, rawID string) 
 		return projectFileContext{}, errors.New("project type is not connected to downloads yet")
 	}
 	result := projectFileContext{ProjectType: projectType, ProjectID: projectID}
-	err := s.db.QueryRow(ctx, `select slug,review_status,modrinth_project_id,curseforge_project_id
-		from mods where project_code=$1`, projectID).Scan(&result.SiteID, &result.ReviewStatus, &result.ModrinthProjectID, &result.CurseForgeProjectID)
+	err := s.db.QueryRow(ctx, `select id,slug,review_status,modrinth_project_id,curseforge_project_id
+		from mods where project_code=$1`, projectID).Scan(&result.ProjectInternalID, &result.SiteID, &result.ReviewStatus,
+		&result.ModrinthProjectID, &result.CurseForgeProjectID)
 	return result, err
 }
 
@@ -416,8 +421,8 @@ func (s *Server) internalProjectFiles(ctx context.Context, project projectFileCo
 		project_file.version_name,project_file.release_channel,project_file.game_versions,project_file.loaders,
 		project_file.created_at,project_file.size_bytes,project_file.download_count,project_file.sha256,oss.scan_status
 		from project_files project_file join oss_files oss on oss.id=project_file.oss_file_id and oss.status='active'
-		where project_file.project_type=$1 and project_file.project_id=$2 and project_file.status='active'
-		order by project_file.created_at desc,project_file.id desc`, project.ProjectType, project.ProjectID)
+		where project_file.project_type=$1 and project_file.project_internal_id=$2 and project_file.status='active'
+		order by project_file.created_at desc,project_file.id desc`, project.ProjectType, project.ProjectInternalID)
 	if err != nil {
 		return nil, err
 	}

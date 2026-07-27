@@ -20,6 +20,9 @@ import (
 
 func Run() {
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("invalid configuration: %v", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -48,18 +51,18 @@ func Run() {
 	progressionService := progression.NewService(db)
 	activityMonitor := activity.NewMonitor(db, progressionService.ProcessActivityBatch)
 
-	natsCfg, err := database.LoadNATSConfig(ctx, db, cfg.NATS)
+	natsCfg, err := database.LoadNATSConfig(ctx, db, cfg.NATS, cfg.SettingsEncryptionKey)
 	if err != nil {
 		log.Printf("load NATS config: %v", err)
 		natsCfg = cfg.NATS
 	}
 	queueClient := queue.New(ctx, natsCfg)
 	defer queueClient.Close()
-	aiWorker := httpapi.NewAIWorker(db, queueClient)
+	aiWorker := httpapi.NewAIWorker(db, queueClient, cfg.SettingsEncryptionKey)
 	if err := aiWorker.Start(ctx); err != nil {
 		log.Printf("ai queue worker unavailable: %v", err)
 	}
-	notificationWorker := httpapi.NewNotificationWorker(db, queueClient, cfg.SMTP)
+	notificationWorker := httpapi.NewNotificationWorker(db, queueClient, cfg.SMTP, cfg.SettingsEncryptionKey)
 	if err := notificationWorker.Start(); err != nil {
 		log.Printf("notification queue worker unavailable: %v", err)
 	}

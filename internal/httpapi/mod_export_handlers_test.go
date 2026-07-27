@@ -48,8 +48,242 @@ func TestQueueExportRecipeTemplateAndBindings(t *testing.T) {
 	if err = queueExportJEIRecipeCollection(batch, catalogResourceIdentityResolver{}, "package", map[string]string{"minecraft": "revision"}, "recipes/jei/recipes/minecraft/crafting.json", recipeDocument); err != nil {
 		t.Fatal(err)
 	}
-	if batch.rows < 15 {
-		t.Fatalf("expected templates, bindings, tag and resource references to be queued, got %d rows", batch.rows)
+	if batch.rows != 9 || len(batch.recipes) != 1 || len(batch.recipeBindings) != 2 || len(batch.recipeCandidates) != 2 {
+		t.Fatalf(
+			"expected template writes plus 1 recipe, 2 bindings and 2 candidates; got queued=%d recipes=%d bindings=%d candidates=%d",
+			batch.rows, len(batch.recipes), len(batch.recipeBindings), len(batch.recipeCandidates),
+		)
+	}
+}
+
+func TestCompactRecipeImportJSONRemovesDuplicatedChildren(t *testing.T) {
+	compacted := compactImportJSONObject(
+		[]byte(`{"recipe_id":"minecraft:test","bindings":[{"slot_id":"input"}],"metadata":{"source":"test"}}`),
+		"bindings",
+	)
+	if bytes.Contains(compacted, []byte(`"bindings"`)) {
+		t.Fatalf("nested bindings were retained: %s", compacted)
+	}
+	if !bytes.Contains(compacted, []byte(`"recipe_id":"minecraft:test"`)) ||
+		!bytes.Contains(compacted, []byte(`"metadata":{"source":"test"}`)) {
+		t.Fatalf("recipe metadata was lost: %s", compacted)
+	}
+}
+
+func TestCompactRegistryImportJSONRemovesNormalizedFields(t *testing.T) {
+	compacted := compactImportJSONObject(
+		[]byte(`{"id":"minecraft:stone","namespace":"minecraft","path":"stone","translation_key":"block.minecraft.stone","names":{"zh-CN":"石头"},"hardness":1.5,"technical":{"solid":true}}`),
+		"id", "namespace", "path", "translation_key", "names",
+	)
+	for _, field := range [][]byte{
+		[]byte(`"id"`),
+		[]byte(`"namespace"`),
+		[]byte(`"path"`),
+		[]byte(`"translation_key"`),
+		[]byte(`"names"`),
+	} {
+		if bytes.Contains(compacted, field) {
+			t.Fatalf("normalized field %s was retained: %s", field, compacted)
+		}
+	}
+	if !bytes.Contains(compacted, []byte(`"hardness":1.5`)) ||
+		!bytes.Contains(compacted, []byte(`"technical":{"solid":true}`)) {
+		t.Fatalf("technical resource metadata was lost: %s", compacted)
+	}
+}
+
+func TestQueueExportDocumentEntriesCompactsNormalizedNames(t *testing.T) {
+	batch := newModExportWriteBatch()
+	raw := []byte(`{"advancements":[{"id":"minecraft:test","namespace":"minecraft","display":{"title_names":{"zh-CN":"测试"},"description_names":{"zh-CN":"描述"},"icon":{"item":"minecraft:stone"},"frame":"task"},"criteria":{"done":{}}}]}`)
+	if err := queueExportDocumentEntries(
+		batch,
+		catalogResourceIdentityResolver{},
+		"revision",
+		"advancements/advancements.json",
+		raw,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.catalogRows) != 1 {
+		t.Fatalf("expected one document resource, got %d", len(batch.catalogRows))
+	}
+	row := batch.catalogRows[0]
+	if bytes.Contains([]byte(row.Data), []byte(`"title_names"`)) {
+		t.Fatalf("normalized advancement title names were retained: %s", row.Data)
+	}
+	if !bytes.Contains([]byte(row.Data), []byte(`"description_names":{"zh-CN":"描述"}`)) ||
+		!bytes.Contains([]byte(row.Data), []byte(`"criteria":{"done":{}}`)) {
+		t.Fatalf("advancement technical data was lost: %s", row.Data)
+	}
+	if !bytes.Contains([]byte(row.Names), []byte(`"zh-CN":"测试"`)) {
+		t.Fatalf("normalized advancement names were lost: %s", row.Names)
+	}
+}
+
+func TestQueueExportTextAssetUsesBulkStage(t *testing.T) {
+	batch := newModExportWriteBatch()
+	if err := queueExportTextAsset(
+		batch,
+		"revision",
+		"registries/items.json",
+		[]byte(`{"entries":[{"id":"minecraft:stone"}]}`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if batch.rows != 0 || len(batch.textAssets) != 1 {
+		t.Fatalf("expected one bulk text asset and no statement batch rows, got rows=%d assets=%d", batch.rows, len(batch.textAssets))
+	}
+	asset := batch.textAssets[0]
+	if !asset.JSON || asset.ContentType != "application/json" ||
+		!bytes.Contains([]byte(asset.Content), []byte(`"minecraft:stone"`)) {
+		t.Fatalf("unexpected staged text asset: %#v", asset)
+	}
+}
+
+func TestNormalizedExportSourceJSONRetention(t *testing.T) {
+	for _, name := range []string{
+		"registries/items.json",
+		"recipes/recipes.json",
+		"tags/tags.json",
+		"worldgen/natural_generation.json",
+		"block_entities/models/minecraft/chest/default.mesh.json",
+		"data/minecraft/worldgen/configured_feature/ore.json",
+	} {
+		if retainExportTextAsset(name, nil) {
+			t.Fatalf("normalized source JSON %s should not be retained", name)
+		}
+	}
+	if !retainExportTextAsset("assets/minecraft/models/block/stone.json", nil) {
+		t.Fatal("render dependency JSON should be retained")
+	}
+	fallbacks := map[string]struct{}{"worldgen/natural_generation.json": {}}
+	if !retainExportTextAsset("worldgen/natural_generation.json", fallbacks) {
+		t.Fatal("partial normalized catalog should be retained as a fallback")
+	}
+}
+
+func TestCollectPartialNormalizationFallbacks(t *testing.T) {
+	available := map[string]struct{}{
+		"data/example/worldgen/configured_feature/ore.json": {},
+	}
+	result := make(map[string]struct{})
+	found := collectPartialNormalizationFallbacks(map[string]any{
+		"entries": []any{
+			map[string]any{
+				"normalization_status":               "complete",
+				"configured_feature_definition_path": "data/example/worldgen/configured_feature/ignored.json",
+			},
+			map[string]any{
+				"normalization_status":               "partial",
+				"configured_feature_definition_path": "data/example/worldgen/configured_feature/ore.json",
+			},
+		},
+	}, available, result)
+	if !found {
+		t.Fatal("partial normalized entry was not detected")
+	}
+	if _, exists := result["data/example/worldgen/configured_feature/ore.json"]; !exists {
+		t.Fatalf("referenced fallback path was not retained: %#v", result)
+	}
+}
+
+func TestSupportedExportTranslationFiles(t *testing.T) {
+	for _, name := range []string{
+		"translations/zh_cn.json",
+		"translations/zh_tw.json",
+		"translations/en_us.json",
+		"translations/ja_jp.json",
+		"translations/ru_ru.json",
+		"translations/fr_fr.json",
+		"translations/de_de.json",
+		"translations/es_es.json",
+		"translations/ko_kr.json",
+		"translations/got_de.json",
+		"translations/zh_hk.json",
+	} {
+		if !isSupportedExportTranslationFile(name) {
+			t.Fatalf("supported translation file %s was rejected", name)
+		}
+	}
+	for _, name := range []string{
+		"translations/languages.json",
+		"translations/invalid@locale.json",
+		"other/en_us.json",
+	} {
+		if isSupportedExportTranslationFile(name) {
+			t.Fatalf("unsupported translation file %s was accepted", name)
+		}
+	}
+	translation, err := prepareExportTranslation(
+		"translations/zh_cn.json",
+		[]byte(`{"translation_count":1,"translations":{"item.minecraft.stone":"石头"}}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if translation.Locale != "zh-CN" {
+		t.Fatalf("expected BCP-47 locale zh-CN, got %s", translation.Locale)
+	}
+	traditionalTaiwan, err := prepareExportTranslation(
+		"translations/zh_tw.json",
+		[]byte(`{"translations":{"item.minecraft.stone":"石頭"}}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	traditionalHongKong, err := prepareExportTranslation(
+		"translations/zh_hk.json",
+		[]byte(`{"translations":{"item.minecraft.stone":"石頭"}}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if traditionalTaiwan.Locale != "zh-TW" || traditionalHongKong.Locale != "zh-HK" {
+		t.Fatalf(
+			"regional locales were collapsed: Taiwan=%s Hong Kong=%s",
+			traditionalTaiwan.Locale,
+			traditionalHongKong.Locale,
+		)
+	}
+}
+
+func TestSupportedExportNamesKeepsOnlyEditableBCP47Locales(t *testing.T) {
+	names := supportedExportNames(map[string]any{
+		"zh_cn": "石头",
+		"en_us": "Stone",
+		"ko_kr": "돌",
+		"zh_hk": "石頭",
+	})
+	if len(names) != 2 || names["zh-CN"] != "石头" || names["en-US"] != "Stone" {
+		t.Fatalf("unexpected supported names: %#v", names)
+	}
+	if _, exists := names["ko-KR"]; exists {
+		t.Fatal("unsupported locale ko-KR was retained")
+	}
+}
+
+func TestFilterSupportedExportLocalizedFieldsFiltersNestedTooltips(t *testing.T) {
+	entry := map[string]any{
+		"tooltips": map[string]any{
+			"zh_cn": []any{"Chinese tooltip"},
+			"en_us": []any{"English tooltip"},
+			"ko_kr": []any{"Korean tooltip"},
+		},
+		"display": map[string]any{
+			"description_names": map[string]any{
+				"zh_tw": "Traditional Chinese description",
+				"pl_pl": "Polish description",
+			},
+		},
+	}
+	filterSupportedExportLocalizedFields(entry)
+	tooltips := entry["tooltips"].(map[string]any)
+	if len(tooltips) != 2 || tooltips["zh-CN"] == nil || tooltips["en-US"] == nil {
+		t.Fatalf("unexpected filtered tooltips: %#v", tooltips)
+	}
+	descriptionNames := entry["display"].(map[string]any)["description_names"].(map[string]any)
+	if len(descriptionNames) != 1 || descriptionNames["zh-TW"] != "Traditional Chinese description" {
+		t.Fatalf("unexpected filtered descriptions: %#v", descriptionNames)
 	}
 }
 
@@ -86,8 +320,11 @@ func TestCanonicalImportedTemplatePromotionGeometryAndIdentity(t *testing.T) {
 	typeIdentity := recipeTypeIdentity(document.RecipeTypeID)
 	canonicalA := catalogEditorIdentityForTemplate(typeIdentity.ID, document.Templates[0].TemplateID)
 	canonicalB := catalogEditorIdentityForTemplate(typeIdentity.ID, document.Templates[0].TemplateID)
-	if canonicalA != canonicalB {
-		t.Fatalf("canonical template identity is not stable: %#v != %#v", canonicalA, canonicalB)
+	if canonicalA.ID != canonicalB.ID {
+		t.Fatalf("canonical template identity key is not stable: %#v != %#v", canonicalA, canonicalB)
+	}
+	if canonicalA.PublicID == canonicalB.PublicID {
+		t.Fatalf("new catalog identities must receive random public IDs: %#v", canonicalA)
 	}
 	if exportRecipeTemplateID("revision-a", document.RecipeTypeID, document.Templates[0].TemplateID) ==
 		exportRecipeTemplateID("revision-b", document.RecipeTypeID, document.Templates[0].TemplateID) {
@@ -447,12 +684,12 @@ func TestShouldRetryModExportStatus(t *testing.T) {
 func TestRecipeIdentityScope(t *testing.T) {
 	canonicalA := recipeIdentity("package-a", "minecraft:crafting", "example:recipe", true)
 	canonicalB := recipeIdentity("package-b", "minecraft:crafting", "example:recipe", true)
-	if canonicalA != canonicalB {
-		t.Fatalf("authoritative recipe identity changed across packages: %#v != %#v", canonicalA, canonicalB)
+	if canonicalA.ID != canonicalB.ID {
+		t.Fatalf("authoritative recipe identity key changed across packages: %#v != %#v", canonicalA, canonicalB)
 	}
 	generatedA := recipeIdentity("package-a", "example:machine", "example:machine/__generated/recipe_000001", false)
 	generatedB := recipeIdentity("package-b", "example:machine", "example:machine/__generated/recipe_000001", false)
-	if generatedA == generatedB {
+	if generatedA.ID == generatedB.ID {
 		t.Fatalf("generated recipe identity must remain package scoped: %#v", generatedA)
 	}
 }

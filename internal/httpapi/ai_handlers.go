@@ -109,12 +109,13 @@ type aiTaskMessage struct {
 }
 
 type AIWorker struct {
-	db    *pgxpool.Pool
-	queue *queue.Client
+	db                    *pgxpool.Pool
+	queue                 *queue.Client
+	settingsEncryptionKey string
 }
 
-func NewAIWorker(db *pgxpool.Pool, queueClient *queue.Client) *AIWorker {
-	return &AIWorker{db: db, queue: queueClient}
+func NewAIWorker(db *pgxpool.Pool, queueClient *queue.Client, settingsEncryptionKey string) *AIWorker {
+	return &AIWorker{db: db, queue: queueClient, settingsEncryptionKey: settingsEncryptionKey}
 }
 
 func (worker *AIWorker) Start(ctx context.Context) error {
@@ -276,7 +277,7 @@ func (s *Server) updateAIConfig(w http.ResponseWriter, r *http.Request) {
 			payload.Providers[index].APIKey = providerAPIKey(current.Providers, payload.Providers[index].Code)
 		}
 	}
-	raw, err := json.Marshal(payload)
+	raw, err := s.sealSystemSetting(payload)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "AI 配置格式不正确")
 		return
@@ -287,7 +288,7 @@ func (s *Server) updateAIConfig(w http.ResponseWriter, r *http.Request) {
 		 values ('ai.config', $1::jsonb, $2, now())
 		 on conflict (key) do update
 		 set value = excluded.value, updated_by = excluded.updated_by, updated_at = now()`,
-		string(raw),
+		raw,
 		currentClaims(r).Subject,
 	)
 	if err != nil {
@@ -331,9 +332,9 @@ func (s *Server) adminAITasks(w http.ResponseWriter, r *http.Request) {
 	args = append(args, boundedLimit(r.URL.Query().Get("limit"), 100, 500))
 	rows := s.querySimpleRows(
 		r,
-		`select t.id, t.task_uid, t.task_type, t.provider, t.model, t.status, t.priority,
+		`select t.task_uid as id, t.task_uid, t.task_type, t.provider, t.model, t.status, t.priority,
 		        t.concurrency_key, t.input_tokens, t.output_tokens, t.cost_micros, t.payload,
-		        t.result, t.error, t.created_by, u.username as created_by_username,
+		        t.result, t.error, u.public_id as created_by, u.username as created_by_username,
 		        u.display_name as created_by_display_name,
 		        t.created_at, t.queued_at, t.started_at, t.finished_at, t.updated_at
 		 from ai_tasks t
@@ -347,19 +348,19 @@ func (s *Server) adminAITasks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminAITask(w http.ResponseWriter, r *http.Request) {
-	taskID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || taskID <= 0 {
+	taskUID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	if taskUID == "" || len(taskUID) > 80 {
 		writeError(w, http.StatusBadRequest, "AI 任务 ID 不正确")
 		return
 	}
 	rows := s.querySimpleRows(
 		r,
-		`select id, task_uid, task_type, provider, model, status, input_tokens, output_tokens,
+		`select task_uid as id, task_uid, task_type, provider, model, status, input_tokens, output_tokens,
 		        cost_micros, result, error, created_at, started_at, finished_at, updated_at
 		 from ai_tasks
-		 where id = $1
+		 where task_uid = $1
 		 limit 1`,
-		taskID,
+		taskUID,
 	)
 	if len(rows) == 0 {
 		writeError(w, http.StatusNotFound, "AI 任务不存在")
@@ -445,7 +446,7 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeAITaskLog(r.Context(), taskID, "info", "task_queued", "AI task published to NATS", message)
-	writeJSON(w, http.StatusCreated, map[string]any{"id": taskID, "taskUid": taskUID, "status": "queued"})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": taskUID, "taskUid": taskUID, "status": "queued"})
 }
 
 func (s *Server) adminAIStats(w http.ResponseWriter, r *http.Request) {
@@ -482,7 +483,7 @@ func (s *Server) aiConfigFromSettings(ctx context.Context) aiConfigPayload {
 		_ = ignoreNoRows(err)
 		return payload
 	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	if err := s.openSystemSetting(raw, &payload); err != nil {
 		return defaultAIConfig()
 	}
 	return normalizeAIConfig(payload)

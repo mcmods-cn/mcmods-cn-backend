@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -11,17 +12,21 @@ import (
 	"time"
 )
 
+const defaultDevelopmentSettingsEncryptionKey = "development-only-settings-encryption-key"
+
 type Config struct {
-	Addr           string
-	Env            string
-	FrontendOrigin string
-	JWTSecret      string
-	JWTTTL         time.Duration
-	DB             DBConfig
-	SMTP           SMTPConfig
-	NATS           NATSConfig
-	Redis          RedisConfig
-	Yggdrasil      YggdrasilConfig
+	Addr                  string
+	Env                   string
+	FrontendOrigin        string
+	TrustedProxyCIDRs     []string
+	JWTSecret             string
+	SettingsEncryptionKey string
+	JWTTTL                time.Duration
+	DB                    DBConfig
+	SMTP                  SMTPConfig
+	NATS                  NATSConfig
+	Redis                 RedisConfig
+	Yggdrasil             YggdrasilConfig
 }
 
 type DBConfig struct {
@@ -87,13 +92,16 @@ type NATSTaskConfig struct {
 
 func Load() Config {
 	loadDotEnvUpwards(".env")
+	jwtSecret := getenv("JWT_SECRET", "change-this-in-production")
 
 	return Config{
-		Addr:           getenv("APP_ADDR", ":8080"),
-		Env:            getenv("APP_ENV", "development"),
-		FrontendOrigin: getenv("FRONTEND_ORIGIN", "http://localhost:3000"),
-		JWTSecret:      getenv("JWT_SECRET", "change-this-in-production"),
-		JWTTTL:         time.Duration(getenvInt("JWT_TTL_HOURS", 24)) * time.Hour,
+		Addr:                  getenv("APP_ADDR", ":8080"),
+		Env:                   getenv("APP_ENV", "development"),
+		FrontendOrigin:        strings.TrimRight(getenv("FRONTEND_ORIGIN", "http://localhost:3000"), "/"),
+		TrustedProxyCIDRs:     splitCommaSeparated(os.Getenv("TRUSTED_PROXY_CIDRS")),
+		JWTSecret:             jwtSecret,
+		SettingsEncryptionKey: getenv("SETTINGS_ENCRYPTION_KEY", defaultDevelopmentSettingsEncryptionKey),
+		JWTTTL:                time.Duration(getenvInt("JWT_TTL_HOURS", 24)) * time.Hour,
 		DB: DBConfig{
 			Host:         getenv("DB_HOST", "127.0.0.1"),
 			Port:         getenv("DB_PORT", "5432"),
@@ -178,6 +186,43 @@ func (db DBConfig) ConnString() string {
 	return u.String()
 }
 
+func (cfg Config) Validate() error {
+	var problems []error
+	environment := strings.ToLower(strings.TrimSpace(cfg.Env))
+	switch environment {
+	case "development", "test", "staging", "production":
+	default:
+		problems = append(problems, fmt.Errorf("unsupported APP_ENV %q", cfg.Env))
+	}
+	if cfg.DB.ResetOnStart && environment != "development" {
+		problems = append(problems, errors.New("DB_RESET_ON_START is only allowed in development"))
+	}
+	secret := strings.TrimSpace(cfg.JWTSecret)
+	settingsSecret := strings.TrimSpace(cfg.SettingsEncryptionKey)
+	if environment != "development" && environment != "test" {
+		if secret == "" || secret == "change-this-in-production" || len(secret) < 32 {
+			problems = append(problems, errors.New("JWT_SECRET must contain at least 32 characters outside development"))
+		}
+	}
+	if settingsSecret == "" || len(settingsSecret) < 32 {
+		problems = append(problems, errors.New("SETTINGS_ENCRYPTION_KEY must contain at least 32 characters"))
+	} else if environment != "development" && environment != "test" && settingsSecret == defaultDevelopmentSettingsEncryptionKey {
+		problems = append(problems, errors.New("SETTINGS_ENCRYPTION_KEY must be changed outside development"))
+	}
+	if cfg.JWTTTL < 5*time.Minute || cfg.JWTTTL > 30*24*time.Hour {
+		problems = append(problems, errors.New("JWT_TTL_HOURS must produce a duration between 5 minutes and 30 days"))
+	}
+	frontend, err := url.Parse(strings.TrimSpace(cfg.FrontendOrigin))
+	if err != nil || frontend.Scheme == "" || frontend.Host == "" || frontend.User != nil ||
+		(frontend.Scheme != "http" && frontend.Scheme != "https") ||
+		frontend.RawQuery != "" || frontend.Fragment != "" || (frontend.Path != "" && frontend.Path != "/") {
+		problems = append(problems, errors.New("FRONTEND_ORIGIN must be an absolute HTTP(S) origin without path, query, or fragment"))
+	} else if environment == "production" && frontend.Scheme != "https" {
+		problems = append(problems, errors.New("FRONTEND_ORIGIN must use HTTPS in production"))
+	}
+	return errors.Join(problems...)
+}
+
 func getenv(key string, fallback string) string {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
@@ -222,7 +267,7 @@ func splitCommaSeparated(value string) []string {
 }
 
 func loadDotEnv(path string) {
-	file, err := os.Open(path)
+	file, err := os.Open(path) // #nosec G304 -- callers supply fixed .env names or paths rooted at the executable directory.
 	if err != nil {
 		return
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -17,7 +16,8 @@ import (
 )
 
 type catalogEditorEntity struct {
-	ID                  string
+	ID                  int64
+	IdentityKey         string
 	PublicID            string
 	EntityType          string
 	Status              string
@@ -27,33 +27,16 @@ type catalogEditorEntity struct {
 
 func (s *Server) catalogEditorEntityByPublicID(ctx context.Context, publicID, entityType string) (catalogEditorEntity, error) {
 	var entity catalogEditorEntity
-	err := s.db.QueryRow(ctx, `select id,public_id,entity_type,status,default_locale,published_revision_id
+	err := s.db.QueryRow(ctx, `select id,identity_key,public_id,entity_type,status,default_locale,published_revision_id
 		from catalog_entities where public_id=$1 and entity_type=$2`, strings.ToLower(strings.TrimSpace(publicID)), entityType).
-		Scan(&entity.ID, &entity.PublicID, &entity.EntityType, &entity.Status, &entity.DefaultLocale, &entity.PublishedRevisionID)
+		Scan(&entity.ID, &entity.IdentityKey, &entity.PublicID, &entity.EntityType, &entity.Status, &entity.DefaultLocale, &entity.PublishedRevisionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return entity, errCatalogEditorNotFound
 	}
 	return entity, err
 }
 
-func reserveCatalogEditorEntityTx(ctx context.Context, tx pgx.Tx, identity catalogIdentity, entityType string) (catalogEditorEntity, error) {
-	if _, err := tx.Exec(ctx, `insert into catalog_entities(id,public_id,entity_type,status)
-		values($1,$2,$3,'placeholder') on conflict(id) do nothing`, identity.ID, identity.PublicID, entityType); err != nil {
-		return catalogEditorEntity{}, err
-	}
-	var entity catalogEditorEntity
-	if err := tx.QueryRow(ctx, `select id,public_id,entity_type,status,default_locale,published_revision_id
-		from catalog_entities where id=$1 for update`, identity.ID).Scan(
-		&entity.ID, &entity.PublicID, &entity.EntityType, &entity.Status, &entity.DefaultLocale, &entity.PublishedRevisionID); err != nil {
-		return entity, err
-	}
-	if entity.EntityType != entityType || entity.PublishedRevisionID != nil || entity.Status == "active" || entity.Status == "archived" {
-		return entity, errCatalogEditorConflict
-	}
-	return entity, nil
-}
-
-func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEditorSnapshot, requestedBase *int64) (catalogEditResult, error) {
+func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEditorSnapshot, requestedBase *string) (catalogEditResult, error) {
 	var result catalogEditResult
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -62,11 +45,20 @@ func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEd
 	defer tx.Rollback(r.Context())
 
 	if snapshot.Operation == "create" {
-		_, insertErr := tx.Exec(r.Context(), `insert into catalog_entities(id,public_id,entity_type,status)
-			values($1,$2,$3,'placeholder') on conflict(id) do nothing`, snapshot.EntityID, snapshot.PublicID, snapshot.Kind)
+		if strings.TrimSpace(snapshot.IdentityKey) == "" {
+			return result, errCatalogEditorInvalid
+		}
+		_, insertErr := tx.Exec(r.Context(), `insert into catalog_entities(identity_key,public_id,entity_type,status)
+			values($1,$2,$3,'placeholder') on conflict(identity_key) do nothing`, snapshot.IdentityKey, snapshot.PublicID, snapshot.Kind)
 		if insertErr != nil {
 			return result, insertErr
 		}
+		if err = tx.QueryRow(r.Context(), `select id from catalog_entities where identity_key=$1`, snapshot.IdentityKey).Scan(&snapshot.EntityID); err != nil {
+			return result, err
+		}
+	}
+	if snapshot.EntityID <= 0 {
+		return result, errCatalogEditorInvalid
 	}
 	var publishedRevisionID *int64
 	var status, publicID, entityType string
@@ -83,14 +75,18 @@ func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEd
 	if snapshot.Operation != "create" && snapshot.Operation != "edit" && snapshot.Operation != "delete" {
 		return result, errCatalogEditorInvalid
 	}
-	if !catalogMutationBaseMatches(snapshot.Operation, status, requestedBase, publishedRevisionID) {
+	requestedBaseID, err := resolveRevisionPublicID(r.Context(), tx, requestedBase)
+	if err != nil {
+		return result, errCatalogEditorConflict
+	}
+	if !catalogMutationBaseMatches(snapshot.Operation, status, requestedBaseID, publishedRevisionID) {
 		return result, errCatalogEditorConflict
 	}
 	if snapshot.Operation == "create" {
 		var pending bool
 		if err = tx.QueryRow(r.Context(), `select exists(select 1 from change_requests
 			where aggregate_type=$1 and aggregate_key=$2 and status='pending')`,
-			catalogAggregateForKind(snapshot.Kind), snapshot.EntityID).Scan(&pending); err != nil {
+			catalogAggregateForKind(snapshot.Kind), snapshot.PublicID).Scan(&pending); err != nil {
 			return result, err
 		}
 		// A rejected or withdrawn first submission leaves the deterministic
@@ -126,7 +122,7 @@ func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEd
 		reason = "Catalog " + snapshot.Operation
 	}
 	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
-		EntityID: snapshot.EntityID, AggregateType: catalogAggregateForKind(snapshot.Kind), AggregateKey: snapshot.EntityID,
+		EntityType: snapshot.Kind, EntityID: snapshot.EntityID, AggregateType: catalogAggregateForKind(snapshot.Kind), AggregateKey: snapshot.PublicID,
 		BaseRevision: publishedRevisionID, Snapshot: raw, Reason: reason, ActorID: claims.Subject, Source: "user",
 		Status: reviewStatus, Metadata: map[string]any{"kind": snapshot.Kind, "operation": snapshot.Operation, "publicId": snapshot.PublicID}, Request: r,
 	})
@@ -152,8 +148,8 @@ func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEd
 		return result, err
 	}
 	skipRequestActivity(r)
-	result = catalogEditResult{PublicID: snapshot.PublicID, ObjectPublicID: snapshot.PublicID, Operation: snapshot.Operation, RevisionID: created.RevisionID,
-		ChangeRequestID: created.ChangeRequestID, ReviewStatus: reviewStatus, ActivityEventID: activityEventID}
+	result = catalogEditResult{PublicID: snapshot.PublicID, ObjectPublicID: snapshot.PublicID, Operation: snapshot.Operation, RevisionID: created.RevisionPublicID,
+		ChangeRequestID: created.ChangeRequestPublicID, ReviewStatus: reviewStatus, ActivityEventID: activityEventID}
 	return result, nil
 }
 
@@ -235,22 +231,22 @@ func catalogActivityObjectType(kind string) int16 {
 	}
 }
 
-func insertCatalogActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, snapshot catalogEditorSnapshot, created createdContentRevision, reviewStatus string) (int64, error) {
+func insertCatalogActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, snapshot catalogEditorSnapshot, created createdContentRevision, reviewStatus string) (string, error) {
 	actionID := activity.ActionEdit
 	if snapshot.Operation == "create" {
 		actionID = activity.ActionCreate
 	} else if snapshot.Operation == "delete" {
 		actionID = activity.ActionDelete
 	}
-	metadata, err := json.Marshal(map[string]any{"revisionId": created.RevisionID, "changeRequestId": created.ChangeRequestID,
+	metadata, err := json.Marshal(map[string]any{"revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID,
 		"operation": snapshot.Operation, "kind": snapshot.Kind, "reviewStatus": reviewStatus, "source": "user"})
 	if err != nil {
-		return 0, err
+		return "", err
 	}
-	var id int64
+	var publicID string
 	err = tx.QueryRow(ctx, `insert into user_activity_events(user_id,action_id,object_type_id,object_public_id,markdown_added_bytes,metadata,occurred_at)
-		values($1,$2,$3,$4,0,$5::jsonb,$6) returning id`, actorID, actionID, catalogActivityObjectType(snapshot.Kind), snapshot.PublicID, string(metadata), time.Now().UTC()).Scan(&id)
-	return id, err
+		values($1,$2,$3,$4,0,$5::jsonb,$6) returning public_id`, actorID, actionID, catalogActivityObjectType(snapshot.Kind), snapshot.PublicID, string(metadata), time.Now().UTC()).Scan(&publicID)
+	return publicID, err
 }
 
 func appendCatalogPublishedReviewEventTx(ctx context.Context, tx pgx.Tx, requestID, actorID int64, note string, r *http.Request) error {
@@ -269,8 +265,8 @@ func publishCatalogEditorSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID i
 	if err := json.Unmarshal(raw, &snapshot); err != nil {
 		return err
 	}
-	if snapshot.EntityID == "" {
-		return errCatalogEditorInvalid
+	if err := hydrateCatalogEditorSnapshotTx(ctx, tx, &snapshot); err != nil {
+		return err
 	}
 	if snapshot.Operation == "delete" {
 		result, err := tx.Exec(ctx, `update catalog_entities set status='archived',archived_at=now(),published_revision_id=$2,updated_at=now()
@@ -308,6 +304,37 @@ func publishCatalogEditorSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID i
 	default:
 		return errCatalogEditorInvalid
 	}
+}
+
+// Revision snapshots contain public identities only. Internal keys are resolved
+// again inside the publishing transaction so review payloads never expose or
+// depend on database primary keys.
+func hydrateCatalogEditorSnapshotTx(ctx context.Context, tx pgx.Tx, snapshot *catalogEditorSnapshot) error {
+	if snapshot == nil || strings.TrimSpace(snapshot.PublicID) == "" || strings.TrimSpace(snapshot.Kind) == "" {
+		return errCatalogEditorInvalid
+	}
+	if err := tx.QueryRow(ctx, `select id from catalog_entities where public_id=$1 and entity_type=$2`,
+		snapshot.PublicID, snapshot.Kind).Scan(&snapshot.EntityID); err != nil {
+		return errCatalogEditorReference
+	}
+	if snapshot.Operation != "delete" && (snapshot.Kind == "recipe_template" || snapshot.Kind == "recipe") {
+		if strings.TrimSpace(snapshot.ParentPublicID) == "" {
+			return errCatalogEditorInvalid
+		}
+		if err := tx.QueryRow(ctx, `select id from catalog_entities
+			where public_id=$1 and entity_type='recipe_type' and status='active'`,
+			snapshot.ParentPublicID).Scan(&snapshot.ParentEntityID); err != nil {
+			return errCatalogEditorReference
+		}
+	}
+	if snapshot.OwnerModPublicID != "" {
+		var ownerModID int64
+		if err := tx.QueryRow(ctx, `select id from mods where project_code=$1`, snapshot.OwnerModPublicID).Scan(&ownerModID); err != nil {
+			return errCatalogEditorReference
+		}
+		snapshot.OwnerModID = &ownerModID
+	}
+	return nil
 }
 
 // materializeCatalogImportLocalizationsTx preserves the imported starting
@@ -373,27 +400,27 @@ func materializeCatalogImportLocalizationsTx(ctx context.Context, tx pgx.Tx, sna
 		if locale == "" || strings.TrimSpace(name) == "" {
 			continue
 		}
-		if _, err = tx.Exec(ctx, `insert into content_localizations(subject_public_id,subject_type,catalog_entity_id,locale,name,summary,content_markdown,
+		if _, err = tx.Exec(ctx, `insert into content_localizations(subject_type,subject_id,catalog_entity_id,locale,name,summary,content_markdown,
 			provenance,source_locale,ai_task_id,revision_no,editable,review_status,published_revision_id,updated_by)
-			values($1,$2,$3,$4,$5,'','','import','',null,1,true,'approved',$6,null)
-			on conflict(subject_public_id,subject_type,locale) do nothing`, snapshot.PublicID, snapshot.Kind, snapshot.EntityID, locale, name, revisionID); err != nil {
+			values($1,$2,$2,$3,$4,'','','import','',null,1,true,'approved',$5,null)
+			on conflict(subject_type,subject_id,locale) do nothing`, snapshot.Kind, snapshot.EntityID, locale, name, revisionID); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func publishCatalogLocalizationsTx(ctx context.Context, tx pgx.Tx, entityID, publicID, subjectType string, localizations []catalogLocalizationEdit, revisionID, actorID int64) error {
+func publishCatalogLocalizationsTx(ctx context.Context, tx pgx.Tx, entityID int64, _ string, subjectType string, localizations []catalogLocalizationEdit, revisionID, actorID int64) error {
 	for _, localization := range localizations {
 		var existingProvenance string
 		var existingRevision int64
-		err := tx.QueryRow(ctx, `select provenance,revision_no from content_localizations where subject_public_id=$1 and subject_type=$2 and locale=$3 for update`, publicID, subjectType, localization.Locale).
+		err := tx.QueryRow(ctx, `select provenance,revision_no from content_localizations where subject_type=$1 and subject_id=$2 and locale=$3 for update`, subjectType, entityID, localization.Locale).
 			Scan(&existingProvenance, &existingRevision)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
 		provenance := catalogHumanEditProvenance(existingProvenance)
-		if err = invalidateAIDerivedLocalizationsTx(ctx, tx, publicID, subjectType, localization.Locale); err != nil {
+		if err = invalidateAIDerivedLocalizationsTx(ctx, tx, entityID, subjectType, localization.Locale); err != nil {
 			return err
 		}
 		if existingRevision == 0 {
@@ -401,12 +428,12 @@ func publishCatalogLocalizationsTx(ctx context.Context, tx pgx.Tx, entityID, pub
 		} else {
 			existingRevision++
 		}
-		if _, err = tx.Exec(ctx, `insert into content_localizations(subject_public_id,subject_type,catalog_entity_id,locale,name,summary,content_markdown,provenance,source_locale,ai_task_id,revision_no,editable,review_status,published_revision_id,updated_by)
-			values($1,$2,$3,$4,$5,$6,$7,$8,'',null,$9,true,'approved',$10,$11)
-			on conflict(subject_public_id,subject_type,locale) do update set catalog_entity_id=excluded.catalog_entity_id,name=excluded.name,summary=excluded.summary,
+		if _, err = tx.Exec(ctx, `insert into content_localizations(subject_type,subject_id,catalog_entity_id,locale,name,summary,content_markdown,provenance,source_locale,ai_task_id,revision_no,editable,review_status,published_revision_id,updated_by)
+			values($1,$2,(select id from catalog_entities where id=$2 and entity_type=$1),$3,$4,$5,$6,$7,'',null,$8,true,'approved',$9,$10)
+			on conflict(subject_type,subject_id,locale) do update set catalog_entity_id=excluded.catalog_entity_id,name=excluded.name,summary=excluded.summary,
 			content_markdown=excluded.content_markdown,provenance=excluded.provenance,source_locale='',ai_task_id=null,
 			revision_no=excluded.revision_no,editable=true,review_status='approved',published_revision_id=excluded.published_revision_id,
-			updated_by=excluded.updated_by,updated_at=now()`, publicID, subjectType, nullableEntityID(entityID), localization.Locale, localization.Name, localization.Summary,
+			updated_by=excluded.updated_by,updated_at=now()`, subjectType, entityID, localization.Locale, localization.Name, localization.Summary,
 			localization.ContentMarkdown, provenance, existingRevision, revisionID, nullableActorID(actorID)); err != nil {
 			return err
 		}
@@ -433,27 +460,33 @@ func publishCatalogLocalizationSnapshotTx(ctx context.Context, tx pgx.Tx, revisi
 	var revisionNo int64
 	publicID := strings.ToLower(strings.TrimSpace(snapshot.SubjectPublicID))
 	subjectType := strings.TrimSpace(snapshot.SubjectType)
-	entityKey := strings.TrimSpace(snapshot.EntityID)
 	if publicID == "" || subjectType == "" {
-		if entityKey == "" {
+		if snapshot.EntityID <= 0 {
 			return errCatalogEditorInvalid
 		}
-		if err = tx.QueryRow(ctx, `select public_id,entity_type from catalog_entities where id=$1`, entityKey).Scan(&publicID, &subjectType); err != nil {
+		if err = tx.QueryRow(ctx, `select public_id,entity_type from catalog_entities where id=$1`, snapshot.EntityID).Scan(&publicID, &subjectType); err != nil {
 			return err
 		}
 	}
-	var routedEntityKey string
-	if err = tx.QueryRow(ctx, `select entity_key from public_routes where public_id=$1 and entity_type=$2`, publicID, subjectType).Scan(&routedEntityKey); err != nil {
+	var subjectID int64
+	if err = tx.QueryRow(ctx, `select internal_id from public_routes where public_id=$1 and entity_type=$2`, publicID, subjectType).Scan(&subjectID); err != nil {
 		return errCatalogEditorReference
 	}
-	if entityKey != "" && entityKey != routedEntityKey {
+	if snapshot.EntityID > 0 && snapshot.EntityID != subjectID {
 		return errCatalogEditorConflict
 	}
-	entityKey = routedEntityKey
-	var catalogEntityID string
+	snapshot.EntityID = subjectID
+	if snapshot.AITaskPublicID != nil {
+		var aiTaskID int64
+		if err = tx.QueryRow(ctx, `select id from ai_tasks where task_uid=$1`, *snapshot.AITaskPublicID).Scan(&aiTaskID); err != nil {
+			return errCatalogEditorReference
+		}
+		snapshot.AITaskID = &aiTaskID
+	}
+	var catalogEntityID *int64
 	_ = tx.QueryRow(ctx, `select id from catalog_entities where id=$1 and public_id=$2 and entity_type=$3 and status<>'archived'`,
-		entityKey, publicID, subjectType).Scan(&catalogEntityID)
-	_ = tx.QueryRow(ctx, `select revision_no+1 from content_localizations where subject_public_id=$1 and subject_type=$2 and locale=$3`, publicID, subjectType, locale).Scan(&revisionNo)
+		subjectID, publicID, subjectType).Scan(&catalogEntityID)
+	_ = tx.QueryRow(ctx, `select revision_no+1 from content_localizations where subject_type=$1 and subject_id=$2 and locale=$3`, subjectType, subjectID, locale).Scan(&revisionNo)
 	if revisionNo == 0 {
 		revisionNo = 1
 	}
@@ -462,26 +495,26 @@ func publishCatalogLocalizationSnapshotTx(ctx context.Context, tx pgx.Tx, revisi
 		return errCatalogEditorInvalid
 	}
 	if provenance == "human" || provenance == "human_corrected" {
-		if err = invalidateAIDerivedLocalizationsTx(ctx, tx, publicID, subjectType, locale); err != nil {
+		if err = invalidateAIDerivedLocalizationsTx(ctx, tx, subjectID, subjectType, locale); err != nil {
 			return err
 		}
 	}
-	if _, err = tx.Exec(ctx, `insert into content_localizations(subject_public_id,subject_type,catalog_entity_id,locale,name,summary,content_markdown,provenance,source_locale,ai_task_id,revision_no,editable,review_status,published_revision_id,updated_by)
+	if _, err = tx.Exec(ctx, `insert into content_localizations(subject_type,subject_id,catalog_entity_id,locale,name,summary,content_markdown,provenance,source_locale,ai_task_id,revision_no,editable,review_status,published_revision_id,updated_by)
 		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'approved',$13,$14)
-		on conflict(subject_public_id,subject_type,locale) do update set catalog_entity_id=excluded.catalog_entity_id,name=excluded.name,summary=excluded.summary,content_markdown=excluded.content_markdown,
+		on conflict(subject_type,subject_id,locale) do update set catalog_entity_id=excluded.catalog_entity_id,name=excluded.name,summary=excluded.summary,content_markdown=excluded.content_markdown,
 		provenance=excluded.provenance,source_locale=excluded.source_locale,ai_task_id=excluded.ai_task_id,revision_no=excluded.revision_no,
 		editable=excluded.editable,review_status='approved',published_revision_id=excluded.published_revision_id,updated_by=excluded.updated_by,updated_at=now()`,
-		publicID, subjectType, nullableEntityID(catalogEntityID), locale, snapshot.Name, snapshot.Summary, snapshot.ContentMarkdown, provenance, snapshot.SourceLocale,
+		subjectType, subjectID, catalogEntityID, locale, snapshot.Name, snapshot.Summary, snapshot.ContentMarkdown, provenance, snapshot.SourceLocale,
 		snapshot.AITaskID, revisionNo, snapshot.Editable, revisionID, nullableActorID(actorID)); err != nil {
 		return err
 	}
 	return nil
 }
 
-func invalidateAIDerivedLocalizationsTx(ctx context.Context, tx pgx.Tx, publicID, subjectType, sourceLocale string) error {
+func invalidateAIDerivedLocalizationsTx(ctx context.Context, tx pgx.Tx, subjectID int64, subjectType, sourceLocale string) error {
 	_, err := tx.Exec(ctx, `delete from content_localizations
-		where subject_public_id=$1 and subject_type=$2 and source_locale=$3 and locale<>$3 and provenance='ai'`,
-		publicID, subjectType, normalizeContentLocale(sourceLocale))
+		where subject_id=$1 and subject_type=$2 and source_locale=$3 and locale<>$3 and provenance='ai'`,
+		subjectID, subjectType, normalizeContentLocale(sourceLocale))
 	return err
 }
 
@@ -509,6 +542,14 @@ func publishCatalogResourceTx(ctx context.Context, tx pgx.Tx, snapshot catalogEd
 			return err
 		}
 	}
+	iconFileID, err := resolveOptionalOSSFilePublicID(ctx, tx, edit.IconFileID)
+	if err != nil {
+		return errCatalogEditorReference
+	}
+	renderFileID, err := resolveOptionalOSSFilePublicID(ctx, tx, edit.RenderFileID)
+	if err != nil {
+		return errCatalogEditorReference
+	}
 	if _, err := tx.Exec(ctx, `insert into resource_kinds(code,family,user_visible) values($1,split_part($1,'.',1),true) on conflict(code) do nothing`, kindCode); err != nil {
 		return err
 	}
@@ -527,10 +568,10 @@ func publishCatalogResourceTx(ctx context.Context, tx pgx.Tx, snapshot catalogEd
 		}
 	}
 	definition := string(catalogJSON(nonNilCatalogDefinition(edit.Definition)))
-	_, err := tx.Exec(ctx, `insert into catalog_resource_definitions(resource_id,definition,icon_file_id,render_file_id,published_revision_id,updated_by)
+	_, err = tx.Exec(ctx, `insert into catalog_resource_definitions(resource_id,definition,icon_file_id,render_file_id,published_revision_id,updated_by)
 		values($1,$2::jsonb,$3,$4,$5,$6) on conflict(resource_id) do update set definition=excluded.definition,
 		icon_file_id=excluded.icon_file_id,render_file_id=excluded.render_file_id,published_revision_id=excluded.published_revision_id,
-		updated_by=excluded.updated_by,updated_at=now()`, snapshot.EntityID, definition, edit.IconFileID, edit.RenderFileID, revisionID, nullableActorID(actorID))
+		updated_by=excluded.updated_by,updated_at=now()`, snapshot.EntityID, definition, iconFileID, renderFileID, revisionID, nullableActorID(actorID))
 	return err
 }
 
@@ -594,7 +635,7 @@ func publishCatalogRecipeTypeTx(ctx context.Context, tx pgx.Tx, snapshot catalog
 
 func publishCatalogRecipeTemplateTx(ctx context.Context, tx pgx.Tx, snapshot catalogEditorSnapshot, revisionID, actorID int64) error {
 	edit := snapshot.Template
-	if edit == nil || snapshot.ParentEntityID == "" {
+	if edit == nil || snapshot.ParentEntityID <= 0 {
 		return errCatalogEditorInvalid
 	}
 	if err := validateCatalogTemplate(edit); err != nil {
@@ -607,6 +648,10 @@ func publishCatalogRecipeTemplateTx(ctx context.Context, tx pgx.Tx, snapshot cat
 	} else if err := validateCatalogImageReferenceTx(ctx, tx, revisionID, edit.BackgroundFileID); err != nil {
 		return err
 	}
+	backgroundFileID, err := resolveOptionalOSSFilePublicID(ctx, tx, edit.BackgroundFileID)
+	if err != nil {
+		return errCatalogEditorReference
+	}
 	definition := string(catalogJSON(nonNilCatalogDefinition(edit.Definition)))
 	if _, err := tx.Exec(ctx, `insert into recipe_layout_templates(entity_id,recipe_type_id,template_key,import_snapshot_id,background_file_id,
 		canvas_width,canvas_height,image_scale,definition,published_revision_id,updated_by)
@@ -616,7 +661,7 @@ func publishCatalogRecipeTemplateTx(ctx context.Context, tx pgx.Tx, snapshot cat
 		background_file_id=excluded.background_file_id,canvas_width=excluded.canvas_width,canvas_height=excluded.canvas_height,
 		image_scale=excluded.image_scale,definition=excluded.definition,published_revision_id=excluded.published_revision_id,
 		updated_by=excluded.updated_by,updated_at=now()`, snapshot.EntityID, snapshot.ParentEntityID, strings.TrimSpace(edit.TemplateKey),
-		edit.BackgroundFileID, edit.Canvas.Width, edit.Canvas.Height, edit.Canvas.ImageScale, definition, revisionID, nullableActorID(actorID)); err != nil {
+		backgroundFileID, edit.Canvas.Width, edit.Canvas.Height, edit.Canvas.ImageScale, definition, revisionID, nullableActorID(actorID)); err != nil {
 		return err
 	}
 	slotKeys := make([]string, len(edit.Slots))
@@ -650,8 +695,8 @@ func publishCatalogRecipeTemplateTx(ctx context.Context, tx pgx.Tx, snapshot cat
 		if referencedRoleChange {
 			return errCatalogEditorConflict
 		}
-		slotID := catalogSnapshotID("canonical-template-slot", "stable", snapshot.EntityID, slot.SlotKey)
-		if _, err := tx.Exec(ctx, `insert into recipe_template_slots(id,template_id,slot_key,role,output_index,ordinal,x,y,width,height,definition)
+		slotID := catalogSnapshotID("canonical-template-slot", "stable", strconv.FormatInt(snapshot.EntityID, 10), slot.SlotKey)
+		if _, err := tx.Exec(ctx, `insert into recipe_template_slots(identity_key,template_id,slot_key,role,output_index,ordinal,x,y,width,height,definition)
 			values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
 			on conflict(template_id,slot_key) do update set role=excluded.role,output_index=excluded.output_index,
 			ordinal=excluded.ordinal,x=excluded.x,y=excluded.y,width=excluded.width,height=excluded.height,definition=excluded.definition`, slotID, snapshot.EntityID, slot.SlotKey, slot.Role,
@@ -665,10 +710,10 @@ func publishCatalogRecipeTemplateTx(ctx context.Context, tx pgx.Tx, snapshot cat
 
 func publishCatalogRecipeTx(ctx context.Context, tx pgx.Tx, snapshot catalogEditorSnapshot, revisionID, actorID int64) error {
 	edit := snapshot.Recipe
-	if edit == nil || snapshot.ParentEntityID == "" {
+	if edit == nil || snapshot.ParentEntityID <= 0 {
 		return errCatalogEditorInvalid
 	}
-	var templateID string
+	var templateID int64
 	if err := tx.QueryRow(ctx, `select template.entity_id from recipe_layout_templates template
 		join catalog_entities entity on entity.id=template.entity_id
 		where entity.public_id=$1 and entity.status='active' and template.recipe_type_id=$2`, edit.TemplatePublicID, snapshot.ParentEntityID).Scan(&templateID); err != nil {
@@ -678,9 +723,11 @@ func publishCatalogRecipeTx(ctx context.Context, tx pgx.Tx, snapshot catalogEdit
 	if err != nil {
 		return err
 	}
-	slotIDs, slotRoles := map[string]string{}, map[string]string{}
+	slotIDs := map[string]int64{}
+	slotRoles := map[string]string{}
 	for slotRows.Next() {
-		var id, key, role string
+		var id int64
+		var key, role string
 		if err = slotRows.Scan(&id, &key, &role); err != nil {
 			slotRows.Close()
 			return err
@@ -734,10 +781,11 @@ func publishCatalogRecipeTx(ctx context.Context, tx pgx.Tx, snapshot catalogEdit
 	sort.Strings(slotKeys)
 	for ordinal, slotKey := range slotKeys {
 		binding := edit.Bindings[slotKey]
-		bindingID := catalogSnapshotID("canonical-recipe-binding", strconv.FormatInt(revisionID, 10), snapshot.EntityID, slotKey)
-		if _, err = tx.Exec(ctx, `insert into recipe_bindings(id,recipe_id,template_slot_id,ordinal,definition)
-			values($1,$2,$3,$4,$5::jsonb)`, bindingID, snapshot.EntityID, slotIDs[slotKey], ordinal,
-			string(catalogJSON(nonNilCatalogDefinition(binding.Definition)))); err != nil {
+		bindingID := catalogSnapshotID("canonical-recipe-binding", strconv.FormatInt(revisionID, 10), strconv.FormatInt(snapshot.EntityID, 10), slotKey)
+		var bindingInternalID int64
+		if err = tx.QueryRow(ctx, `insert into recipe_bindings(identity_key,recipe_id,template_slot_id,ordinal,definition)
+			values($1,$2,$3,$4,$5::jsonb) returning id`, bindingID, snapshot.EntityID, slotIDs[slotKey], ordinal,
+			string(catalogJSON(nonNilCatalogDefinition(binding.Definition)))).Scan(&bindingInternalID); err != nil {
 			return err
 		}
 		publicIDs := make([]string, len(binding.Candidates))
@@ -750,8 +798,8 @@ func publishCatalogRecipeTx(ctx context.Context, tx pgx.Tx, snapshot catalogEdit
 		}
 		for index, candidate := range binding.Candidates {
 			candidateID := catalogSnapshotID("canonical-recipe-candidate", strconv.FormatInt(revisionID, 10), bindingID, strconv.Itoa(index))
-			if _, err = tx.Exec(ctx, `insert into recipe_binding_candidates(id,binding_id,candidate_index,resource_id,amount,probability,byproduct,definition)
-				values($1,$2,$3,$4,$5,$6,$7,$8::jsonb)`, candidateID, bindingID, index, resourceIDs[index], candidate.Amount,
+			if _, err = tx.Exec(ctx, `insert into recipe_binding_candidates(identity_key,binding_id,candidate_index,resource_id,amount,probability,byproduct,definition)
+				values($1,$2,$3,$4,$5,$6,$7,$8::jsonb)`, candidateID, bindingInternalID, index, resourceIDs[index], candidate.Amount,
 				candidate.Probability, candidate.Byproduct, string(catalogJSON(nonNilCatalogDefinition(candidate.Definition)))); err != nil {
 				return err
 			}
@@ -783,7 +831,7 @@ func validateCatalogSnapshotReferencesTx(ctx context.Context, tx pgx.Tx, snapsho
 		_, err := resolveActiveResourcePublicIDsTx(ctx, tx, append([]string(nil), snapshot.RecipeType.CatalystResourcePublicIDs...))
 		return err
 	case "recipe_template":
-		if snapshot.Template == nil || snapshot.ParentEntityID == "" {
+		if snapshot.Template == nil || snapshot.ParentEntityID <= 0 {
 			return errCatalogEditorInvalid
 		}
 		var active bool
@@ -797,10 +845,10 @@ func validateCatalogSnapshotReferencesTx(ctx context.Context, tx pgx.Tx, snapsho
 		}
 		return validateCatalogImageFileReferences(ctx, tx, actorID, allowForeignFiles, snapshot.Template.BackgroundFileID)
 	case "recipe":
-		if snapshot.Recipe == nil || snapshot.ParentEntityID == "" {
+		if snapshot.Recipe == nil || snapshot.ParentEntityID <= 0 {
 			return errCatalogEditorInvalid
 		}
-		var templateID string
+		var templateID int64
 		if err := tx.QueryRow(ctx, `select template.entity_id from recipe_layout_templates template
 			join catalog_entities entity on entity.id=template.entity_id
 			where entity.public_id=$1 and entity.status='active' and template.recipe_type_id=$2`,
@@ -855,9 +903,9 @@ func validateCatalogSnapshotReferencesTx(ctx context.Context, tx pgx.Tx, snapsho
 	}
 }
 
-func resolveActiveResourcePublicIDsTx(ctx context.Context, tx pgx.Tx, publicIDs []string) ([]string, error) {
+func resolveActiveResourcePublicIDsTx(ctx context.Context, tx pgx.Tx, publicIDs []string) ([]int64, error) {
 	if len(publicIDs) == 0 {
-		return []string{}, nil
+		return []int64{}, nil
 	}
 	seen := make(map[string]struct{}, len(publicIDs))
 	for index := range publicIDs {
@@ -877,9 +925,9 @@ func resolveActiveResourcePublicIDsTx(ctx context.Context, tx pgx.Tx, publicIDs 
 		return nil, err
 	}
 	defer rows.Close()
-	result := make([]string, 0, len(publicIDs))
+	result := make([]int64, 0, len(publicIDs))
 	for rows.Next() {
-		var entityID string
+		var entityID int64
 		if err = rows.Scan(&entityID); err != nil {
 			return nil, err
 		}
@@ -950,18 +998,20 @@ func catalogEditorIdentityForTemplate(recipeTypeID, templateKey string) catalogI
 	return newCatalogIdentity("recipe_template", recipeTypeID+"\x00"+strings.TrimSpace(templateKey))
 }
 
-func validateCatalogImageFileReferences(ctx context.Context, tx pgx.Tx, actorID int64, allowForeign bool, fileIDs ...*int64) error {
+func validateCatalogImageFileReferences(ctx context.Context, tx pgx.Tx, actorID int64, allowForeign bool, fileIDs ...*string) error {
 	for _, fileID := range fileIDs {
 		if fileID == nil {
 			continue
 		}
-		if *fileID <= 0 {
+		publicID := strings.ToLower(strings.TrimSpace(*fileID))
+		if !validCatalogPublicID(publicID) {
 			return errCatalogEditorReference
 		}
 		var valid bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from oss_files where id=$1 and status='active'
+		if err := tx.QueryRow(ctx, `select exists(select 1 from oss_files where public_id=$1 and status='active'
+			and scan_status in ('clean','trusted_generated')
 			and lower(split_part(content_type,';',1)) in ('image/png','image/jpeg','image/webp','image/gif','image/apng')
-			and ($2 or uploader_id=$3))`, *fileID, allowForeign, actorID).Scan(&valid); err != nil {
+			and ($2 or uploader_id=$3))`, publicID, allowForeign, actorID).Scan(&valid); err != nil {
 			return err
 		}
 		if !valid {
@@ -977,11 +1027,4 @@ func canonicalCatalogString(value string, maximum int) (string, error) {
 		return "", errCatalogEditorInvalid
 	}
 	return value, nil
-}
-
-func catalogEditorDebugError(prefix string, err error) error {
-	if err == nil {
-		return nil
-	}
-	return fmt.Errorf("%s: %w", prefix, err)
 }

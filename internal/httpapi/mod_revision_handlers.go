@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +17,7 @@ import (
 type submitModRevisionRequest struct {
 	Snapshot       createModRequest `json:"snapshot"`
 	ChangeReason   string           `json:"changeReason"`
-	BaseRevisionID *int64           `json:"baseRevisionId,omitempty"`
+	BaseRevisionID *string          `json:"baseRevisionId,omitempty"`
 }
 
 type reviewModRevisionRequest struct {
@@ -27,19 +26,20 @@ type reviewModRevisionRequest struct {
 }
 
 type modRevisionResponse struct {
-	ID              int64            `json:"id"`
-	ModID           int64            `json:"modId"`
+	ID              string           `json:"id"`
+	ModID           string           `json:"modId"`
+	ModInternalID   int64            `json:"-"`
 	Version         int              `json:"version"`
 	Status          string           `json:"status"`
 	Snapshot        createModRequest `json:"snapshot"`
 	ChangeReason    string           `json:"changeReason"`
-	SubmittedBy     *int64           `json:"submittedBy,omitempty"`
-	ReviewedBy      *int64           `json:"reviewedBy,omitempty"`
+	SubmittedBy     *string          `json:"submittedBy,omitempty"`
+	ReviewedBy      *string          `json:"reviewedBy,omitempty"`
 	ReviewNote      string           `json:"reviewNote"`
 	CreatedAt       time.Time        `json:"createdAt"`
 	ReviewedAt      *time.Time       `json:"reviewedAt,omitempty"`
-	BaseRevisionID  *int64           `json:"baseRevisionId,omitempty"`
-	ChangeRequestID int64            `json:"changeRequestId"`
+	BaseRevisionID  *string          `json:"baseRevisionId,omitempty"`
+	ChangeRequestID string           `json:"changeRequestId"`
 	SchemaVersion   int              `json:"schemaVersion"`
 	SnapshotHash    string           `json:"snapshotHash"`
 }
@@ -110,16 +110,21 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to lock mod")
 		return
 	}
+	requestedBaseRevisionID, resolveErr := resolveRevisionPublicID(r.Context(), tx, request.BaseRevisionID)
+	if resolveErr != nil {
+		writeError(w, http.StatusConflict, "the proposed base revision is no longer current")
+		return
+	}
 	if publishedRevisionID != nil {
-		if request.BaseRevisionID == nil {
+		if requestedBaseRevisionID == nil {
 			writeError(w, http.StatusConflict, "base revision is required; reload the editor")
 			return
 		}
-		if *request.BaseRevisionID != *publishedRevisionID {
+		if *requestedBaseRevisionID != *publishedRevisionID {
 			writeError(w, http.StatusConflict, "the mod changed while you were editing; reload and compare changes")
 			return
 		}
-	} else if request.BaseRevisionID != nil {
+	} else if requestedBaseRevisionID != nil {
 		writeError(w, http.StatusConflict, "the proposed base revision is no longer current")
 		return
 	}
@@ -133,8 +138,10 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		status = "approved"
 	}
 	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
+		EntityType:    "mod",
+		EntityID:      identity.ID,
 		AggregateType: "mod",
-		AggregateKey:  strconv.FormatInt(identity.ID, 10),
+		AggregateKey:  identity.UniqueID,
 		BaseRevision:  publishedRevisionID,
 		Snapshot:      snapshot,
 		Reason:        request.ChangeReason,
@@ -192,7 +199,7 @@ func (s *Server) modRevisionHistory(w http.ResponseWriter, r *http.Request) {
 	canSeePending := canEditMod(claims, identity) || hasPermission(claims.Permissions, "project.review")
 	rows, err := s.db.Query(r.Context(), modRevisionSelect+`
 		where revision.aggregate_type='mod' and revision.aggregate_key=$1 and ($2 or request.status='approved')
-		order by revision.revision_no desc`, strconv.FormatInt(identity.ID, 10), canSeePending)
+		order by revision.revision_no desc`, identity.UniqueID, canSeePending)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load revision history")
 		return
@@ -220,19 +227,19 @@ func (s *Server) compareModRevisions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "mod not found")
 		return
 	}
-	beforeID, beforeErr := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
-	afterID, afterErr := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
-	if beforeErr != nil || afterErr != nil {
+	beforeID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("before")))
+	afterID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("after")))
+	if !validCatalogPublicID(beforeID) || !validCatalogPublicID(afterID) {
 		writeError(w, http.StatusBadRequest, "invalid revision comparison")
 		return
 	}
-	before, err := s.modRevisionByID(r.Context(), beforeID)
-	if err != nil || before.ModID != identity.ID {
+	before, err := s.modRevisionByPublicID(r.Context(), beforeID)
+	if err != nil || before.ModInternalID != identity.ID {
 		writeError(w, http.StatusNotFound, "base revision not found")
 		return
 	}
-	after, err := s.modRevisionByID(r.Context(), afterID)
-	if err != nil || after.ModID != identity.ID {
+	after, err := s.modRevisionByPublicID(r.Context(), afterID)
+	if err != nil || after.ModInternalID != identity.ID {
 		writeError(w, http.StatusNotFound, "target revision not found")
 		return
 	}
@@ -249,13 +256,13 @@ func (s *Server) compareModRevisions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
-	revisionID, err := strconv.ParseInt(r.PathValue("revisionId"), 10, 64)
-	if err != nil {
+	revisionPublicID := strings.ToLower(strings.TrimSpace(r.PathValue("revisionId")))
+	if !validCatalogPublicID(revisionPublicID) {
 		writeError(w, http.StatusBadRequest, "invalid revision")
 		return
 	}
 	var request reviewModRevisionRequest
-	if err = decodeJSON(r, &request); err != nil {
+	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
@@ -277,12 +284,12 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 	var baseRevisionID, publishedRevisionID *int64
 	var snapshotRaw []byte
 	err = tx.QueryRow(r.Context(), `
-		select request.id,request.status,request.base_revision_id,revision.aggregate_key::bigint,
+		select request.id,request.status,request.base_revision_id,revision.entity_id,
 		       revision.snapshot,mod.published_revision_id
 		from change_requests request
 		join content_revisions revision on revision.id=request.proposed_revision_id and revision.aggregate_type='mod'
-		join mods mod on mod.id=revision.aggregate_key::bigint
-		where revision.id=$1 for update of request,mod`, revisionID,
+		join mods mod on mod.id=revision.entity_id
+		where revision.public_id=$1 for update of request,mod`, revisionPublicID,
 	).Scan(&changeRequestID, &status, &baseRevisionID, &modID, &snapshotRaw, &publishedRevisionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "revision not found")
@@ -316,6 +323,11 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to decode revision")
 			return
 		}
+		var revisionID int64
+		if err = tx.QueryRow(r.Context(), `select id from content_revisions where public_id=$1`, revisionPublicID).Scan(&revisionID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to resolve revision")
+			return
+		}
 		if err = applyModSnapshot(r.Context(), tx, modID, revisionID, snapshot); err != nil {
 			if errors.Is(err, errModSiteIDTaken) {
 				writeError(w, http.StatusConflict, "mod site ID is already in use")
@@ -336,7 +348,7 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 	if request.Status == "approved" {
 		s.scheduleModGalleryOSSRehome(modID)
 	}
-	updated, _ := s.modRevisionByID(r.Context(), revisionID)
+	updated, _ := s.modRevisionByPublicID(r.Context(), revisionPublicID)
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -369,24 +381,30 @@ func canSkipProjectReview(claims security.Claims, identity modIdentityRecord) bo
 }
 
 const modRevisionSelect = `select
-	revision.id,revision.aggregate_key::bigint,revision.revision_no,request.status,revision.snapshot,request.reason,
-	request.submitted_by,
-	(select event.actor_id from review_events event where event.change_request_id=request.id and event.event_type in ('approved','rejected','conflicted') order by event.id desc limit 1),
+	revision.public_id,revision.entity_id,revision.aggregate_key,revision.revision_no,request.status,revision.snapshot,request.reason,
+	(select account.public_id from users account where account.id=request.submitted_by),
+	(select account.public_id from review_events event join users account on account.id=event.actor_id
+	 where event.change_request_id=request.id and event.event_type in ('approved','rejected','conflicted') order by event.id desc limit 1),
 	coalesce((select event.note from review_events event where event.change_request_id=request.id and event.event_type in ('approved','rejected','conflicted') order by event.id desc limit 1),''),
 	revision.created_at,
 	(select event.created_at from review_events event where event.change_request_id=request.id and event.event_type in ('approved','rejected','conflicted') order by event.id desc limit 1),
-	revision.base_revision_id,request.id,revision.schema_version,revision.snapshot_hash
+	(select base.public_id from content_revisions base where base.id=revision.base_revision_id),
+	request.public_id,revision.schema_version,revision.snapshot_hash
 	from content_revisions revision join change_requests request on request.proposed_revision_id=revision.id `
 
 func (s *Server) modRevisionByID(ctx context.Context, id int64) (modRevisionResponse, error) {
 	return scanModRevision(s.db.QueryRow(ctx, modRevisionSelect+`where revision.id=$1 and revision.aggregate_type='mod'`, id))
 }
 
+func (s *Server) modRevisionByPublicID(ctx context.Context, publicID string) (modRevisionResponse, error) {
+	return scanModRevision(s.db.QueryRow(ctx, modRevisionSelect+`where revision.public_id=$1 and revision.aggregate_type='mod'`, publicID))
+}
+
 func scanModRevision(row scanner) (modRevisionResponse, error) {
 	var result modRevisionResponse
 	var snapshot []byte
 	err := row.Scan(
-		&result.ID, &result.ModID, &result.Version, &result.Status, &snapshot, &result.ChangeReason,
+		&result.ID, &result.ModInternalID, &result.ModID, &result.Version, &result.Status, &snapshot, &result.ChangeReason,
 		&result.SubmittedBy, &result.ReviewedBy, &result.ReviewNote, &result.CreatedAt, &result.ReviewedAt,
 		&result.BaseRevisionID, &result.ChangeRequestID, &result.SchemaVersion, &result.SnapshotHash,
 	)
@@ -443,10 +461,10 @@ func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, s
 		return err
 	}
 	if _, err = tx.Exec(ctx, `update content_subjects set default_locale=$3,updated_at=now()
-		where public_id=$1 and subject_type=$2`, projectCode, "mod", snapshot.DefaultLocale); err != nil {
+		where subject_id=$1 and subject_type=$2`, modID, "mod", snapshot.DefaultLocale); err != nil {
 		return err
 	}
-	if err = publishCatalogLocalizationsTx(ctx, tx, "", projectCode, "mod", snapshot.Localizations, revisionID, actorID); err != nil {
+	if err = publishCatalogLocalizationsTx(ctx, tx, modID, projectCode, "mod", snapshot.Localizations, revisionID, actorID); err != nil {
 		return err
 	}
 	if err = replaceModGalleryImagesTx(ctx, tx, modID, revisionID, actorID, snapshot.GalleryImages); err != nil {
@@ -463,7 +481,7 @@ func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, s
 		}
 	}
 	if _, err = tx.Exec(ctx, `delete from content_creator_bindings
-		where subject_public_id=$1 and subject_type='mod'`, projectCode); err != nil {
+		where subject_id=$1 and subject_type='mod'`, modID); err != nil {
 		return err
 	}
 	for index, link := range snapshot.Links {
@@ -497,9 +515,13 @@ func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, s
 		if roleSnapshot == "" {
 			roleSnapshot = author.Role
 		}
+		roleID, roleIDErr := creatorRoleInternalIDTx(ctx, tx, author.RoleID)
+		if roleIDErr != nil {
+			return roleIDErr
+		}
 		if _, err = tx.Exec(ctx, `insert into content_creator_bindings(
-			subject_public_id,subject_type,creator_id,role_id,name_snapshot,role_snapshot,display_order
-		) values($1,'mod',$2,$3,$4,$5,$6)`, projectCode, creatorID, author.RoleID, nameSnapshot, roleSnapshot, index); err != nil {
+			subject_id,subject_type,creator_id,role_id,name_snapshot,role_snapshot,display_order
+		) values($1,'mod',$2,$3,$4,$5,$6)`, modID, creatorID, roleID, nameSnapshot, roleSnapshot, index); err != nil {
 			return err
 		}
 	}
@@ -528,15 +550,24 @@ func appendReviewResolutionTx(ctx context.Context, tx pgx.Tx, requestID int64, s
 		return err
 	}
 	var aggregateType, aggregateKey, snapshotHash string
+	var entityType *string
+	var entityID *int64
 	var revisionID int64
 	var baseRevisionID *int64
-	if err = tx.QueryRow(ctx, `select revision.aggregate_type,revision.aggregate_key,revision.id,revision.base_revision_id,revision.snapshot_hash
+	if err = tx.QueryRow(ctx, `select revision.entity_type,revision.entity_id,revision.aggregate_type,revision.aggregate_key,revision.id,revision.base_revision_id,revision.snapshot_hash
 		from change_requests request join content_revisions revision on revision.id=request.proposed_revision_id where request.id=$1`, requestID).Scan(
-		&aggregateType, &aggregateKey, &revisionID, &baseRevisionID, &snapshotHash,
+		&entityType, &entityID, &aggregateType, &aggregateKey, &revisionID, &baseRevisionID, &snapshotHash,
 	); err != nil {
 		return err
 	}
+	resolvedEntityType := ""
+	resolvedEntityID := int64(0)
+	if entityType != nil && entityID != nil {
+		resolvedEntityType = *entityType
+		resolvedEntityID = *entityID
+	}
 	return appendAuditEventTx(ctx, tx, auditEventParams{
+		EntityType: resolvedEntityType, EntityID: resolvedEntityID,
 		AggregateType: aggregateType, AggregateKey: aggregateKey, ActorID: actorID, ActorSnapshot: actorSnapshot,
 		Action: "content.revision." + status, BeforeHash: revisionHashTx(ctx, tx, baseRevisionID), AfterHash: snapshotHash,
 		TraceID: traceID, IP: ip, UserAgent: userAgent,
@@ -576,7 +607,7 @@ func revisionChanges(before, after createModRequest) []modRevisionChangeResponse
 	raw := diffJSON("", beforeValue, afterValue)
 	changes := make([]modRevisionChangeResponse, 0, len(raw))
 	for _, item := range raw {
-		changes = append(changes, modRevisionChangeResponse{Path: item.Path, Operation: item.Operation, Before: item.Before, After: item.After})
+		changes = append(changes, modRevisionChangeResponse(item))
 	}
 	return changes
 }

@@ -5,7 +5,7 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha1"
+	"crypto/sha1" // #nosec G505 -- Mojang's Yggdrasil protocol mandates SHA-1 signatures for texture properties.
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -118,35 +118,35 @@ func validateYggdrasilEndpoint(raw, label string, production bool) error {
 	value := strings.TrimSpace(raw)
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return fmt.Errorf("Yggdrasil %s URL must be an absolute HTTP(S) URL without credentials, query, or fragment", label)
+		return fmt.Errorf("yggdrasil %s URL must be an absolute HTTP(S) URL without credentials, query, or fragment", label)
 	}
 	if !production {
 		return nil
 	}
 	if parsed.Scheme != "https" {
-		return fmt.Errorf("Yggdrasil %s URL must use HTTPS in production", label)
+		return fmt.Errorf("yggdrasil %s URL must use HTTPS in production", label)
 	}
 	hostname := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
 	ip := net.ParseIP(hostname)
 	if hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") ||
 		(ip != nil && (ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast())) {
-		return fmt.Errorf("Yggdrasil %s URL cannot use a local or private address in production", label)
+		return fmt.Errorf("yggdrasil %s URL cannot use a local or private address in production", label)
 	}
 	return nil
 }
 
 func validateYggdrasilLimits(tokenTTL, joinTTL time.Duration, maxTokens int, textureMaxBytes int64) error {
 	if tokenTTL < time.Minute || tokenTTL > 30*24*time.Hour {
-		return errors.New("Yggdrasil token TTL must be between 1 minute and 30 days")
+		return errors.New("yggdrasil token TTL must be between 1 minute and 30 days")
 	}
 	if joinTTL < 5*time.Second || joinTTL > 5*time.Minute {
-		return errors.New("Yggdrasil join TTL must be between 5 seconds and 5 minutes")
+		return errors.New("yggdrasil join TTL must be between 5 seconds and 5 minutes")
 	}
 	if maxTokens < 1 || maxTokens > 100 {
-		return errors.New("Yggdrasil maximum token count must be between 1 and 100")
+		return errors.New("yggdrasil maximum token count must be between 1 and 100")
 	}
 	if textureMaxBytes < 1024 || textureMaxBytes > maxMinecraftTextureUploadBytes {
-		return fmt.Errorf("Yggdrasil texture upload limit must be between 1024 and %d bytes", maxMinecraftTextureUploadBytes)
+		return fmt.Errorf("yggdrasil texture upload limit must be between 1024 and %d bytes", maxMinecraftTextureUploadBytes)
 	}
 	return nil
 }
@@ -180,7 +180,7 @@ func yggdrasilServiceFromPrivateKey(key *rsa.PrivateKey) *yggdrasilService {
 		return &yggdrasilService{disabledReason: errors.New("nil Yggdrasil private key")}
 	}
 	if key.N.BitLen() < 2048 {
-		return &yggdrasilService{disabledReason: errors.New("Yggdrasil RSA private key must be at least 2048 bits")}
+		return &yggdrasilService{disabledReason: errors.New("yggdrasil RSA private key must be at least 2048 bits")}
 	}
 	publicDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
 	if err != nil {
@@ -214,7 +214,7 @@ func parseYggdrasilPrivateKey(encoded string) (*rsa.PrivateKey, error) {
 			var ok bool
 			key, ok = parsed.(*rsa.PrivateKey)
 			if !ok {
-				err = errors.New("Yggdrasil private key is not RSA")
+				err = errors.New("yggdrasil private key is not RSA")
 			}
 		}
 	default:
@@ -306,9 +306,9 @@ func normalizedYggdrasilBaseURL(value string) string {
 
 func (service *yggdrasilService) signPropertyValue(value string) (string, error) {
 	if service == nil || service.privateKey == nil {
-		return "", errors.New("Yggdrasil signing key unavailable")
+		return "", errors.New("yggdrasil signing key unavailable")
 	}
-	digest := sha1.Sum([]byte(value))
+	digest := sha1.Sum([]byte(value)) // #nosec G401 -- protocol compatibility; this is a signature digest, not password hashing.
 	signature, err := rsa.SignPKCS1v15(rand.Reader, service.privateKey, crypto.SHA1, digest[:])
 	if err != nil {
 		return "", err
@@ -412,7 +412,7 @@ func (s *Server) yggdrasilClientLocation(r *http.Request) clientLocation {
 	if s.ygg == nil || parsedPeer == nil || !s.ygg.isTrustedProxy(parsedPeer) {
 		return clientLocation{IP: peer}
 	}
-	location := requestClientLocation(r)
+	location := requestClientLocationFromProxy(r, peer)
 	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
 		parts := strings.Split(forwarded, ",")
 		for index := len(parts) - 1; index >= 0; index-- {

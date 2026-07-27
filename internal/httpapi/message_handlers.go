@@ -2,13 +2,14 @@ package httpapi
 
 import (
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type startConversationRequest struct {
-	UserID int64 `json:"userId"`
+	UserID string `json:"userId"`
 }
 
 type sendDirectMessageRequest struct {
@@ -16,8 +17,8 @@ type sendDirectMessageRequest struct {
 }
 
 type directConversationSummary struct {
-	ID          int64      `json:"id"`
-	PartnerID   int64      `json:"partnerId"`
+	ID          string     `json:"id"`
+	PartnerID   string     `json:"partnerId"`
 	Username    string     `json:"username"`
 	DisplayName string     `json:"displayName"`
 	LastMessage string     `json:"lastMessage"`
@@ -26,10 +27,10 @@ type directConversationSummary struct {
 }
 
 type directMessageItem struct {
-	ID             int64      `json:"id"`
-	ConversationID int64      `json:"conversationId"`
-	SenderID       int64      `json:"senderId"`
-	RecipientID    int64      `json:"recipientId"`
+	ID             string     `json:"id"`
+	ConversationID string     `json:"conversationId"`
+	SenderID       string     `json:"senderId"`
+	RecipientID    string     `json:"recipientId"`
 	Body           string     `json:"body"`
 	ReadAt         *time.Time `json:"readAt,omitempty"`
 	CreatedAt      time.Time  `json:"createdAt"`
@@ -37,22 +38,18 @@ type directMessageItem struct {
 
 func (s *Server) conversations(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	rows, err := s.db.Query(
-		r.Context(),
-		`select c.id, partner.id, partner.username, partner.display_name,
-		        coalesce(last_message.body, ''), last_message.created_at,
-		        (select count(*) from direct_messages unread
-		         where unread.conversation_id = c.id and unread.recipient_id = $1 and unread.read_at is null)
-		 from direct_conversations c
-		 join users partner on partner.id = case when c.user_low_id = $1 then c.user_high_id else c.user_low_id end
-		 left join lateral (
-			select body, created_at from direct_messages m
-			where m.conversation_id = c.id order by m.created_at desc limit 1
-		 ) last_message on true
-		 where c.user_low_id = $1 or c.user_high_id = $1
-		 order by coalesce(last_message.created_at, c.updated_at) desc`,
-		claims.Subject,
-	)
+	rows, err := s.db.Query(r.Context(), `select c.public_id,partner.public_id,partner.username,partner.display_name,
+		coalesce(last_message.body,''),last_message.created_at,
+		(select count(*) from direct_messages unread
+		 where unread.conversation_id=c.id and unread.recipient_id=$1 and unread.read_at is null)
+		from direct_conversations c
+		join users partner on partner.id=case when c.user_low_id=$1 then c.user_high_id else c.user_low_id end
+		left join lateral (
+			select body,created_at from direct_messages message
+			where message.conversation_id=c.id order by message.id desc limit 1
+		) last_message on true
+		where c.user_low_id=$1 or c.user_high_id=$1
+		order by coalesce(last_message.created_at,c.updated_at) desc,c.id desc`, claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取私聊会话失败")
 		return
@@ -61,7 +58,7 @@ func (s *Server) conversations(w http.ResponseWriter, r *http.Request) {
 	items := make([]directConversationSummary, 0)
 	for rows.Next() {
 		var item directConversationSummary
-		if err := rows.Scan(&item.ID, &item.PartnerID, &item.Username, &item.DisplayName, &item.LastMessage, &item.LastAt, &item.UnreadCount); err != nil {
+		if err = rows.Scan(&item.ID, &item.PartnerID, &item.Username, &item.DisplayName, &item.LastMessage, &item.LastAt, &item.UnreadCount); err != nil {
 			writeError(w, http.StatusInternalServerError, "读取私聊会话失败")
 			return
 		}
@@ -71,40 +68,40 @@ func (s *Server) conversations(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startConversation(w http.ResponseWriter, r *http.Request) {
-	var req startConversationRequest
-	if err := decodeJSON(r, &req); err != nil || req.UserID <= 0 {
+	var request startConversationRequest
+	if decodeJSON(r, &request) != nil {
 		writeError(w, http.StatusBadRequest, "目标用户不正确")
 		return
 	}
-	claims := currentClaims(r)
-	if req.UserID == claims.Subject {
-		writeError(w, http.StatusBadRequest, "不能与自己创建私聊")
-		return
-	}
-	if !s.userHasPermission(r.Context(), req.UserID, "user.message.receive") {
-		writeError(w, http.StatusForbidden, "对方没有接收私聊的权限")
-		return
-	}
-	low, high := orderedUserIDs(claims.Subject, req.UserID)
-	var conversationID int64
-	err := s.db.QueryRow(
-		r.Context(),
-		`insert into direct_conversations (user_low_id, user_high_id)
-		 select $1, $2 where exists(select 1 from users where id = $2 and status = 'active')
-		 on conflict (user_low_id, user_high_id) do update set updated_at = direct_conversations.updated_at
-		 returning id`,
-		low,
-		high,
-	).Scan(&conversationID)
-	if err != nil {
+	request.UserID = strings.ToLower(strings.TrimSpace(request.UserID))
+	var targetUserID int64
+	if err := s.db.QueryRow(r.Context(), `select id from users where public_id=$1 and status='active'`, request.UserID).Scan(&targetUserID); err != nil {
 		writeError(w, http.StatusNotFound, "目标用户不存在")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]int64{"id": conversationID})
+	claims := currentClaims(r)
+	if targetUserID == claims.Subject {
+		writeError(w, http.StatusBadRequest, "不能与自己创建私聊")
+		return
+	}
+	if !s.userHasPermission(r.Context(), targetUserID, "user.message.receive") {
+		writeError(w, http.StatusForbidden, "对方没有接收私聊的权限")
+		return
+	}
+	low, high := orderedUserIDs(claims.Subject, targetUserID)
+	var conversationPublicID string
+	err := s.db.QueryRow(r.Context(), `insert into direct_conversations(user_low_id,user_high_id)
+		values($1,$2) on conflict(user_low_id,user_high_id)
+		do update set updated_at=direct_conversations.updated_at returning public_id`, low, high).Scan(&conversationPublicID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "创建私聊失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": conversationPublicID})
 }
 
 func (s *Server) conversationMessages(w http.ResponseWriter, r *http.Request) {
-	conversationID, ok := pathConversationID(w, r)
+	conversationID, conversationPublicID, ok := s.pathConversationID(w, r)
 	if !ok {
 		return
 	}
@@ -113,22 +110,17 @@ func (s *Server) conversationMessages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "无权访问该私聊")
 		return
 	}
-	_, _ = s.db.Exec(
-		r.Context(),
-		`update direct_messages set read_at = coalesce(read_at, now())
-		 where conversation_id = $1 and recipient_id = $2 and read_at is null`,
-		conversationID,
-		claims.Subject,
-	)
-	rows, err := s.db.Query(
-		r.Context(),
-		`select id, conversation_id, sender_id, recipient_id, body, read_at, created_at
-		 from (
-			select id, conversation_id, sender_id, recipient_id, body, read_at, created_at
-			from direct_messages where conversation_id = $1 order by created_at desc limit 100
-		 ) recent order by created_at`,
-		conversationID,
-	)
+	_, _ = s.db.Exec(r.Context(), `update direct_messages set read_at=coalesce(read_at,now())
+		where conversation_id=$1 and recipient_id=$2 and read_at is null`, conversationID, claims.Subject)
+	rows, err := s.db.Query(r.Context(), `select recent.public_id,sender.public_id,recipient.public_id,
+		recent.body,recent.read_at,recent.created_at
+		from (
+			select public_id,sender_id,recipient_id,body,read_at,created_at,id
+			from direct_messages where conversation_id=$1 order by id desc limit 100
+		) recent
+		join users sender on sender.id=recent.sender_id
+		join users recipient on recipient.id=recent.recipient_id
+		order by recent.id`, conversationID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取私聊消息失败")
 		return
@@ -137,7 +129,8 @@ func (s *Server) conversationMessages(w http.ResponseWriter, r *http.Request) {
 	items := make([]directMessageItem, 0)
 	for rows.Next() {
 		var item directMessageItem
-		if err := rows.Scan(&item.ID, &item.ConversationID, &item.SenderID, &item.RecipientID, &item.Body, &item.ReadAt, &item.CreatedAt); err != nil {
+		item.ConversationID = conversationPublicID
+		if err = rows.Scan(&item.ID, &item.SenderID, &item.RecipientID, &item.Body, &item.ReadAt, &item.CreatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "读取私聊消息失败")
 			return
 		}
@@ -147,23 +140,23 @@ func (s *Server) conversationMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) sendConversationMessage(w http.ResponseWriter, r *http.Request) {
-	conversationID, ok := pathConversationID(w, r)
+	conversationID, conversationPublicID, ok := s.pathConversationID(w, r)
 	if !ok {
 		return
 	}
-	var req sendDirectMessageRequest
-	if err := decodeJSON(r, &req); err != nil {
+	var request sendDirectMessageRequest
+	if decodeJSON(r, &request) != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	req.Body = strings.TrimSpace(req.Body)
-	if req.Body == "" || len([]rune(req.Body)) > 4000 {
+	request.Body = strings.TrimSpace(request.Body)
+	if request.Body == "" || len([]rune(request.Body)) > 4000 {
 		writeError(w, http.StatusBadRequest, "私聊消息长度需要在 1 到 4000 个字符之间")
 		return
 	}
 	claims := currentClaims(r)
 	var low, high int64
-	if err := s.db.QueryRow(r.Context(), `select user_low_id, user_high_id from direct_conversations where id = $1`, conversationID).Scan(&low, &high); err != nil {
+	if err := s.db.QueryRow(r.Context(), `select user_low_id,user_high_id from direct_conversations where id=$1`, conversationID).Scan(&low, &high); err != nil {
 		writeError(w, http.StatusNotFound, "私聊会话不存在")
 		return
 	}
@@ -180,38 +173,34 @@ func (s *Server) sendConversationMessage(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	active := false
-	_ = s.db.QueryRow(
-		r.Context(),
-		`select exists(select 1 from user_chat_presence where user_id = $1 and conversation_id = $2 and expires_at > now())`,
-		recipientID,
-		conversationID,
-	).Scan(&active)
+	_ = s.db.QueryRow(r.Context(), `select exists(select 1 from user_chat_presence
+		where user_id=$1 and conversation_id=$2 and expires_at>now())`, recipientID, conversationID).Scan(&active)
 	var item directMessageItem
-	err := s.db.QueryRow(
-		r.Context(),
-		`insert into direct_messages (conversation_id, sender_id, recipient_id, body, read_at)
-		 values ($1, $2, $3, $4, case when $5 then now() else null end)
-		 returning id, conversation_id, sender_id, recipient_id, body, read_at, created_at`,
-		conversationID,
-		claims.Subject,
-		recipientID,
-		req.Body,
-		active,
-	).Scan(&item.ID, &item.ConversationID, &item.SenderID, &item.RecipientID, &item.Body, &item.ReadAt, &item.CreatedAt)
+	item.ConversationID = conversationPublicID
+	err := s.db.QueryRow(r.Context(), `insert into direct_messages(conversation_id,sender_id,recipient_id,body,read_at)
+		values($1,$2,$3,$4,case when $5 then now() else null end)
+		returning public_id,body,read_at,created_at`,
+		conversationID, claims.Subject, recipientID, request.Body, active).
+		Scan(&item.ID, &item.Body, &item.ReadAt, &item.CreatedAt)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "发送私聊消息失败")
 		return
 	}
-	_, _ = s.db.Exec(r.Context(), `update direct_conversations set updated_at = now() where id = $1`, conversationID)
+	item.SenderID = claims.PublicSubject
+	if err = s.db.QueryRow(r.Context(), `select public_id from users where id=$1`, recipientID).Scan(&item.RecipientID); err != nil {
+		writeError(w, http.StatusInternalServerError, "发送私聊消息失败")
+		return
+	}
+	_, _ = s.db.Exec(r.Context(), `update direct_conversations set updated_at=now() where id=$1`, conversationID)
 	notificationQueued := false
 	if !active && s.queue != nil {
 		var senderName string
-		_ = s.db.QueryRow(r.Context(), `select coalesce(nullif(display_name, ''), username) from users where id = $1`, claims.Subject).Scan(&senderName)
-		preview := req.Body
+		_ = s.db.QueryRow(r.Context(), `select coalesce(nullif(display_name,''),username) from users where id=$1`, claims.Subject).Scan(&senderName)
+		preview := request.Body
 		if len([]rune(preview)) > 160 {
 			preview = string([]rune(preview)[:160]) + "..."
 		}
-		err := s.queue.PublishTask(r.Context(), notificationTaskCode, notificationEvent{
+		err = s.queue.PublishTask(r.Context(), notificationTaskCode, notificationEvent{
 			Action: "email", RecipientID: recipientID,
 			Title: senderName + " 给你发来一条私聊", Body: preview,
 		})
@@ -221,7 +210,7 @@ func (s *Server) sendConversationMessage(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) updateConversationPresence(w http.ResponseWriter, r *http.Request) {
-	conversationID, ok := pathConversationID(w, r)
+	conversationID, _, ok := s.pathConversationID(w, r)
 	if !ok {
 		return
 	}
@@ -230,15 +219,10 @@ func (s *Server) updateConversationPresence(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusForbidden, "无权访问该私聊")
 		return
 	}
-	_, err := s.db.Exec(
-		r.Context(),
-		`insert into user_chat_presence (user_id, conversation_id, expires_at, updated_at)
-		 values ($1, $2, now() + interval '30 seconds', now())
-		 on conflict (user_id) do update
-		 set conversation_id = excluded.conversation_id, expires_at = excluded.expires_at, updated_at = now()`,
-		claims.Subject,
-		conversationID,
-	)
+	_, err := s.db.Exec(r.Context(), `insert into user_chat_presence(user_id,conversation_id,expires_at,updated_at)
+		values($1,$2,now()+interval '30 seconds',now())
+		on conflict(user_id) do update set conversation_id=excluded.conversation_id,
+		expires_at=excluded.expires_at,updated_at=now()`, claims.Subject, conversationID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "更新会话状态失败")
 		return
@@ -246,29 +230,31 @@ func (s *Server) updateConversationPresence(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]bool{"active": true})
 }
 
-func (s *Server) isConversationMember(r *http.Request, conversationID int64, userID int64) bool {
+func (s *Server) isConversationMember(r *http.Request, conversationID, userID int64) bool {
 	var exists bool
-	_ = s.db.QueryRow(
-		r.Context(),
-		`select exists(select 1 from direct_conversations where id = $1 and (user_low_id = $2 or user_high_id = $2))`,
-		conversationID,
-		userID,
-	).Scan(&exists)
+	_ = s.db.QueryRow(r.Context(), `select exists(select 1 from direct_conversations
+		where id=$1 and (user_low_id=$2 or user_high_id=$2))`, conversationID, userID).Scan(&exists)
 	return exists
 }
 
-func orderedUserIDs(first int64, second int64) (int64, int64) {
+func orderedUserIDs(first, second int64) (int64, int64) {
 	if first < second {
 		return first, second
 	}
 	return second, first
 }
 
-func pathConversationID(w http.ResponseWriter, r *http.Request) (int64, bool) {
-	conversationID, err := strconv.ParseInt(strings.TrimSpace(r.PathValue("id")), 10, 64)
-	if err != nil || conversationID <= 0 {
-		writeError(w, http.StatusBadRequest, "会话 ID 不正确")
-		return 0, false
+func (s *Server) pathConversationID(w http.ResponseWriter, r *http.Request) (int64, string, bool) {
+	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	var internalID int64
+	err := s.db.QueryRow(r.Context(), `select id from direct_conversations where public_id=$1`, publicID).Scan(&internalID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			writeError(w, http.StatusNotFound, "会话不存在")
+		} else {
+			writeError(w, http.StatusInternalServerError, "读取会话失败")
+		}
+		return 0, "", false
 	}
-	return conversationID, true
+	return internalID, publicID, true
 }

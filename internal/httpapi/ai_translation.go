@@ -12,7 +12,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"mcmods-cn-backend/internal/security"
 )
+
+const maxAIProviderResponseBytes = int64(8 << 20)
 
 type aiTaskUsage struct {
 	InputTokens  int64
@@ -54,7 +58,7 @@ func (worker *AIWorker) executeTask(
 		taskType != aiTaskNotificationTranslation && taskType != aiTaskContentTranslation {
 		return nil, aiTaskUsage{}, fmt.Errorf("unsupported AI task type: %s", taskType)
 	}
-	cfg := aiConfigFromDatabase(ctx, worker.db)
+	cfg := aiConfigFromDatabase(ctx, worker.db, worker.settingsEncryptionKey)
 	provider, model, ok := resolveAIModel(cfg, providerCode+"/"+modelID)
 	if !ok {
 		return nil, aiTaskUsage{}, errors.New("AI task provider or model is unavailable")
@@ -86,11 +90,15 @@ func (worker *AIWorker) executeTask(
 	return result, usage, nil
 }
 
-func aiConfigFromDatabase(ctx context.Context, db *pgxpool.Pool) aiConfigPayload {
+func aiConfigFromDatabase(ctx context.Context, db *pgxpool.Pool, settingsEncryptionKey string) aiConfigPayload {
 	payload := defaultAIConfig()
 	var raw []byte
 	if err := db.QueryRow(ctx, `select value from system_settings where key = 'ai.config'`).Scan(&raw); err != nil {
 		return payload
+	}
+	raw, err := security.DecryptSetting(settingsEncryptionKey, raw)
+	if err != nil {
+		return defaultAIConfig()
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return defaultAIConfig()
@@ -227,7 +235,11 @@ func sendAIJSONRequest(ctx context.Context, endpoint string, headers map[string]
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
-	response, err := http.DefaultClient.Do(req)
+	client, err := newProviderHTTPClient(45*time.Second, endpoint)
+	if err != nil {
+		return fmt.Errorf("AI provider endpoint is invalid: %w", err)
+	}
+	response, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("AI provider request failed: %w", err)
 	}
@@ -236,7 +248,14 @@ func sendAIJSONRequest(ctx context.Context, endpoint string, headers map[string]
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		return fmt.Errorf("AI provider returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(message)))
 	}
-	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+	rawResponse, err := io.ReadAll(io.LimitReader(response.Body, maxAIProviderResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("AI provider response could not be read: %w", err)
+	}
+	if int64(len(rawResponse)) > maxAIProviderResponseBytes {
+		return errors.New("AI provider response is too large")
+	}
+	if err := json.Unmarshal(rawResponse, target); err != nil {
 		return fmt.Errorf("AI provider response is invalid: %w", err)
 	}
 	return nil

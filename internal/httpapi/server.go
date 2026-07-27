@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"net"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -13,29 +14,33 @@ import (
 )
 
 type Server struct {
-	cfg      config.Config
-	db       *pgxpool.Pool
-	mailer   mailer.Mailer
-	queue    *queue.Client
-	cache    *querycache.Cache
-	activity *activity.Monitor
-	mux      *http.ServeMux
-	ygg      *yggdrasilService
+	cfg            config.Config
+	db             *pgxpool.Pool
+	mailer         mailer.Mailer
+	queue          *queue.Client
+	cache          *querycache.Cache
+	activity       *activity.Monitor
+	mux            *http.ServeMux
+	ygg            *yggdrasilService
+	trustedProxies []*net.IPNet
 }
+
+const corsAllowedHeaders = "Authorization, Content-Type, Idempotency-Key, X-Request-ID"
 
 func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, activityMonitor *activity.Monitor) http.Handler {
 	server := &Server{
-		cfg:      cfg,
-		db:       db,
-		mailer:   mailer.New(cfg.SMTP),
-		queue:    queueClient,
-		cache:    querycache.New(cfg.Redis),
-		activity: activityMonitor,
-		mux:      http.NewServeMux(),
+		cfg:            cfg,
+		db:             db,
+		mailer:         mailer.New(cfg.SMTP),
+		queue:          queueClient,
+		cache:          querycache.New(cfg.Redis),
+		activity:       activityMonitor,
+		mux:            http.NewServeMux(),
+		trustedProxies: parseTrustedProxyNetworks(cfg.TrustedProxyCIDRs),
 	}
 	server.ygg = newYggdrasilService(cfg)
 	server.routes()
-	return server.cors(server.yggdrasilALI(server.logAccess(server.mux)))
+	return server.securityHeaders(server.cors(server.cookieRequestOrigin(server.yggdrasilALI(server.logAccess(server.mux)))))
 }
 
 func (s *Server) routes() {
@@ -179,8 +184,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /api/v1/mods/{siteId}/revisions/{revisionId}", s.requirePermission("project.review", s.reviewModRevision))
 	s.mux.HandleFunc("PATCH /api/v1/content-revisions/{revisionId}", s.requirePermission("content.review", s.reviewContentRevision))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/export-imports/uploads/presign", s.requireAuth(s.createModExportUpload))
+	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/export-imports/uploads/resume", s.requireAuth(s.resumeModExportUpload))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/export-imports/uploads/complete", s.requireAuth(s.completeModExportUpload))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/export-imports", s.requireAuth(s.createModExportJob))
+	s.mux.HandleFunc("GET /api/v1/mods/{siteId}/export-imports/active", s.requireAuth(s.getActiveModExportJob))
 	s.mux.HandleFunc("GET /api/v1/mods/{siteId}/export-imports/{jobId}", s.requireAuth(s.getModExportJob))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/export-imports/{jobId}/retry", s.requireAuth(s.retryModExportJob))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/export-imports/{jobId}/cancel", s.requireAuth(s.cancelModExportJob))
@@ -327,6 +334,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/admin/oss/uploads/presign", s.requirePermission("oss.write", s.createOSSDirectUpload))
 	s.mux.HandleFunc("POST /api/v1/admin/oss/uploads/complete", s.requirePermission("oss.write", s.completeOSSDirectUpload))
 	s.mux.HandleFunc("GET /api/v1/admin/oss/files", s.requirePermission("oss.read", s.ossFiles))
+	s.mux.HandleFunc("PATCH /api/v1/admin/oss/files/{publicId}/scan", s.requirePermission("oss.write", s.updateOSSFileScanStatus))
 	s.mux.HandleFunc("POST /api/v1/admin/oss/files/presign", s.requirePermission("oss.read", s.presignOSSFile))
 	s.mux.HandleFunc("GET /api/v1/admin/oss/uploads", s.requirePermission("oss.read", s.ossUploadLogs))
 	s.mux.HandleFunc("GET /api/v1/admin/oss/scans", s.requirePermission("oss.read", s.ossScanLogs))
@@ -360,16 +368,43 @@ func (s *Server) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Vary", "Origin")
 		origin := r.Header.Get("Origin")
-		if origin == s.cfg.FrontendOrigin || (s.cfg.Env == "development" && origin != "") {
+		if origin == s.cfg.FrontendOrigin {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", corsAllowedHeaders)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) cookieRequestOrigin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+			if _, err := r.Cookie(authSessionCookieName); err == nil && r.Header.Get("Authorization") == "" {
+				origin := r.Header.Get("Origin")
+				if origin != "" && origin != s.cfg.FrontendOrigin {
+					writeError(w, http.StatusForbidden, "request origin is not allowed")
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-site")
 		next.ServeHTTP(w, r)
 	})
 }

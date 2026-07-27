@@ -117,7 +117,7 @@ func TestCatalogMutationBaseSupportsFirstManualEditOfImport(t *testing.T) {
 }
 
 func TestCatalogMutationResponseIncludesActivityIdentity(t *testing.T) {
-	raw, err := json.Marshal(catalogEditResult{PublicID: "abc234567", ObjectPublicID: "abc234567", ActivityEventID: 91})
+	raw, err := json.Marshal(catalogEditResult{PublicID: "abc234567", ObjectPublicID: "abc234567", ActivityEventID: "evt234567"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestCatalogMutationResponseIncludesActivityIdentity(t *testing.T) {
 	if err = json.Unmarshal(raw, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["objectPublicId"] != "abc234567" || payload["activityEventId"] != float64(91) {
+	if payload["objectPublicId"] != "abc234567" || payload["activityEventId"] != "evt234567" {
 		t.Fatalf("mutation response is missing durable activity identity: %s", raw)
 	}
 }

@@ -17,7 +17,7 @@ const claimsContextKey contextKey = "claims"
 
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token, err := security.BearerToken(r.Header.Get("Authorization"))
+		token, err := authTokenFromRequest(r)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
@@ -25,6 +25,10 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		claims, err := security.ParseToken(s.cfg.JWTSecret, token)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "authentication session has expired")
+			return
+		}
+		if err := s.resolveClaimsSubject(r.Context(), &claims); err != nil {
+			writeError(w, http.StatusUnauthorized, "authentication account no longer exists")
 			return
 		}
 		markActivityUser(r, claims.Subject)
@@ -35,11 +39,11 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) optionalAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if strings.TrimSpace(r.Header.Get("Authorization")) == "" {
+		if !requestHasAuthToken(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		token, err := security.BearerToken(r.Header.Get("Authorization"))
+		token, err := authTokenFromRequest(r)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "authentication session is invalid")
 			return
@@ -49,10 +53,52 @@ func (s *Server) optionalAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "authentication session has expired")
 			return
 		}
+		if err := s.resolveClaimsSubject(r.Context(), &claims); err != nil {
+			writeError(w, http.StatusUnauthorized, "authentication account no longer exists")
+			return
+		}
 		markActivityUser(r, claims.Subject)
 		ctx := context.WithValue(r.Context(), claimsContextKey, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	}
+}
+
+func (s *Server) resolveClaimsSubject(ctx context.Context, claims *security.Claims) error {
+	return s.db.QueryRow(
+		ctx,
+		`select users.id
+		 from auth_sessions session
+		 join users on users.id=session.user_id
+		 where session.session_hash=$1
+		   and session.revoked_at is null
+		   and session.expires_at>now()
+		   and session.auth_version=$2
+		   and users.auth_version=$2
+		   and users.public_id=$3
+		   and users.status='active'`,
+		security.SessionFingerprint(claims.SessionID),
+		claims.AuthVersion,
+		claims.PublicSubject,
+	).Scan(&claims.Subject)
+}
+
+func authTokenFromRequest(r *http.Request) (string, error) {
+	if strings.TrimSpace(r.Header.Get("Authorization")) != "" {
+		return security.BearerToken(r.Header.Get("Authorization"))
+	}
+	cookie, err := r.Cookie(authSessionCookieName)
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		return security.BearerToken("")
+	}
+	return strings.TrimSpace(cookie.Value), nil
+}
+
+func requestHasAuthToken(r *http.Request) bool {
+	if strings.TrimSpace(r.Header.Get("Authorization")) != "" {
+		return true
+	}
+	cookie, err := r.Cookie(authSessionCookieName)
+	return err == nil && strings.TrimSpace(cookie.Value) != ""
 }
 
 func (s *Server) requirePermission(permission string, next http.HandlerFunc) http.HandlerFunc {

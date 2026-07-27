@@ -2,92 +2,296 @@ package httpapi
 
 import "testing"
 
-func TestDefaultReviewConfigAutoApprovesEmptyModContentSections(t *testing.T) {
-	config := defaultReviewConfig()
-	if config.ModContentSectionCreate {
-		t.Fatal("empty mod content section creation must be auto-approved by default")
-	}
-	if !config.CatalogCreate {
-		t.Fatal("the dedicated section setting must not disable review for other catalog creation")
-	}
-	if modContentReviewRequired(config, modContentSnapshot{Kind: "section", Operation: "create"}) {
-		t.Fatal("empty section creation should be auto-approved under the default config")
-	}
-	if !modContentReviewRequired(config, modContentSnapshot{
-		Kind: "section", Operation: "create",
-		Section: &modContentSectionEdit{ParentPublicID: "category"},
-	}) {
-		t.Fatal("category creation must use the catalog create review setting")
-	}
-	if !modContentReviewRequired(config, modContentSnapshot{Kind: "layout", Operation: "edit"}) {
-		t.Fatal("category layout changes must use the catalog edit review setting")
-	}
-	if !modContentReviewRequired(config, modContentSnapshot{Kind: "version", Operation: "create"}) {
-		t.Fatal("other mod content creation should continue using catalog create review")
-	}
-	config.ModContentSectionCreate = true
-	if !modContentReviewRequired(config, modContentSnapshot{Kind: "section", Operation: "create"}) {
-		t.Fatal("the dedicated setting should send empty section creation to review")
-	}
-}
-
-func TestNormalizeModContentLayoutRejectsDuplicateResources(t *testing.T) {
-	edit := modContentLayoutEdit{
-		VersionPublicID:     "version01",
-		RootSectionPublicID: "section01",
-		Resources: []modContentLayoutResourceEdit{
-			{ResourcePublicID: "resource1", SectionPublicID: "section01"},
-			{ResourcePublicID: "resource1", SectionPublicID: "section01"},
+func TestModContentSnapshotAggregateKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		snapshot modContentSnapshot
+		want     string
+	}{
+		{name: "version", snapshot: modContentSnapshot{Kind: "version", PublicID: "abc123456"}, want: "abc123456"},
+		{name: "section", snapshot: modContentSnapshot{Kind: "section", PublicID: "def123456"}, want: "def123456"},
+		{name: "layout", snapshot: modContentSnapshot{Kind: "layout", PublicID: "ghi123456"}, want: "ghi123456"},
+		{
+			name: "resource version",
+			snapshot: modContentSnapshot{
+				Kind:     "resource",
+				PublicID: "jkl123456",
+				Resource: &modContentResourceEdit{VersionPublicID: "mno123456"},
+			},
+			want: "jkl123456:mno123456",
 		},
 	}
-	if err := normalizeModContentLayoutEdit(&edit); err == nil {
-		t.Fatal("a resource may only occur once within a content layout")
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := modContentSnapshotAggregateKey(test.snapshot); got != test.want {
+				t.Fatalf("modContentSnapshotAggregateKey() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
-func TestNormalizeModContentVersionEditBuildsLabel(t *testing.T) {
-	edit := modContentVersionEdit{
-		Label:             "user supplied label is ignored",
-		MinecraftVersions: []string{"1.21.1", "1.20.1"},
-		Loaders:           []string{"NeoForge", "Forge"},
+func TestCanonicalizeModContentLayoutResourcesPrefersBoundBlock(t *testing.T) {
+	t.Parallel()
+	resources := []modContentLayoutResourceEdit{
+		{ResourcePublicID: "itm123456", SectionPublicID: "items1234", Ordinal: 0},
+		{ResourcePublicID: "blk123456", SectionPublicID: "blocks123", Ordinal: 0},
+		{ResourcePublicID: "itm654321", SectionPublicID: "items1234", Ordinal: 1},
 	}
-	if err := normalizeModContentVersionEdit(&edit); err != nil {
-		t.Fatal(err)
+	identities := map[string]modContentLayoutResourceIdentity{
+		"itm123456": {
+			KindCode: "minecraft.item", CanonicalID: "example:machine_item",
+			BlockRepresentativeID: 42, BlockRepresentativePublicID: "blk123456",
+		},
+		"blk123456": {
+			KindCode: "minecraft.block", CanonicalID: "example:machine_block",
+			BlockRepresentativeID: 42, BlockRepresentativePublicID: "blk123456",
+		},
+		"itm654321": {KindCode: "minecraft.item", CanonicalID: "example:wrench"},
 	}
-	if edit.Label != "1.21.1, 1.20.1 / NeoForge, Forge" {
-		t.Fatalf("unexpected generated label: %q", edit.Label)
+	got := canonicalizeModContentLayoutResources(resources, identities)
+	if len(got) != 2 {
+		t.Fatalf("canonicalized resources = %#v, want two logical entries", got)
 	}
-}
-
-func TestModContentVersionSelectionMustMatchCompatibilityMatrix(t *testing.T) {
-	compatibilities := []modLoaderCompatibilityPayload{
-		{Loader: "Forge", Versions: []string{"1.20.1", "1.19.2"}},
-		{Loader: "Fabric", Versions: []string{"1.20.1"}},
+	if got[0].ResourcePublicID != "blk123456" || got[0].SectionPublicID != "blocks123" {
+		t.Fatalf("bound block did not replace its item alias: %#v", got[0])
 	}
-	if !modContentVersionSelectionSupported(modContentVersionEdit{MinecraftVersions: []string{"1.20.1"}, Loaders: []string{"Forge", "Fabric"}}, compatibilities) {
-		t.Fatal("a fully supported selection should be accepted")
-	}
-	if modContentVersionSelectionSupported(modContentVersionEdit{MinecraftVersions: []string{"1.20.1", "1.19.2"}, Loaders: []string{"Forge", "Fabric"}}, compatibilities) {
-		t.Fatal("a selection containing an unsupported loader/version pair should be rejected")
-	}
-}
-
-func TestGlobalModContentCompatibilityFallbackAllowsEveryConfiguredVersion(t *testing.T) {
-	compatibilities := globalModContentCompatibilities(minecraftVersionConfig{
-		Versions: []minecraftVersionOption{{Code: "1.21.1"}, {Code: "1.20.1"}},
-		Loaders:  []minecraftLoaderOption{{Code: "Forge", Versions: []string{"1.20.1"}}, {Code: "Fabric"}},
-	})
-	selection := modContentVersionEdit{MinecraftVersions: []string{"1.21.1", "1.20.1"}, Loaders: []string{"Forge", "Fabric"}}
-	if !modContentVersionSelectionSupported(selection, compatibilities) {
-		t.Fatal("an unconfigured mod should allow all globally configured versions and loaders")
+	if got[1].ResourcePublicID != "itm654321" {
+		t.Fatalf("independent item was removed: %#v", got[1])
 	}
 }
 
-func TestAdvancementSectionUsesLockedPresentation(t *testing.T) {
-	if got := lockedModContentDisplayMode("advancement", "large", "compact"); got != "large" {
-		t.Fatalf("advancement display mode must be locked: got %q", got)
+func TestCanonicalizeModContentLayoutResourcesRewritesMappedItemOnly(t *testing.T) {
+	t.Parallel()
+	resources := []modContentLayoutResourceEdit{{
+		ResourcePublicID: "itm123456",
+		SectionPublicID:  "items1234",
+		Ordinal:          3,
+	}}
+	identities := map[string]modContentLayoutResourceIdentity{
+		"itm123456": {
+			KindCode: "minecraft.item", CanonicalID: "example:machine_item",
+			BlockRepresentativeID: 42, BlockRepresentativePublicID: "blk123456",
+		},
 	}
-	if got := lockedModContentDisplayMode("item_block", "compact", "large"); got != "large" {
-		t.Fatalf("ordinary section display mode should remain editable: got %q", got)
+	got := canonicalizeModContentLayoutResources(resources, identities)
+	if len(got) != 1 || got[0].ResourcePublicID != "blk123456" ||
+		got[0].SectionPublicID != "items1234" || got[0].Ordinal != 3 {
+		t.Fatalf("mapped item-only layout was not rewritten to its block representative: %#v", got)
+	}
+}
+
+func TestCanonicalizeModContentLayoutResourcesFallsBackToCanonicalID(t *testing.T) {
+	t.Parallel()
+	resources := []modContentLayoutResourceEdit{
+		{ResourcePublicID: "itm123456", SectionPublicID: "items1234"},
+		{ResourcePublicID: "blk123456", SectionPublicID: "blocks123"},
+	}
+	identities := map[string]modContentLayoutResourceIdentity{
+		"itm123456": {KindCode: "minecraft.item", CanonicalID: "example:machine"},
+		"blk123456": {KindCode: "minecraft.block", CanonicalID: "example:machine"},
+	}
+	got := canonicalizeModContentLayoutResources(resources, identities)
+	if len(got) != 1 || got[0].ResourcePublicID != "blk123456" {
+		t.Fatalf("canonical item/block duplicate was not collapsed to the block: %#v", got)
+	}
+}
+
+func TestValidateModContentAdvancementLayoutResolvesParents(t *testing.T) {
+	t.Parallel()
+	resources := []modContentLayoutResourceEdit{
+		{
+			ResourcePublicID: "adv123456",
+			Advancement:      &modContentAdvancementLayoutEdit{X: 1, Y: 2},
+		},
+		{
+			ResourcePublicID: "adv654321",
+			Advancement: &modContentAdvancementLayoutEdit{
+				ParentResourcePublicID: "adv123456",
+				X:                      3,
+				Y:                      4,
+			},
+		},
+	}
+	identities := map[string]modContentLayoutResourceIdentity{
+		"adv123456": {KindCode: "minecraft.advancement", CanonicalID: "example:root"},
+		"adv654321": {KindCode: "minecraft.advancement", CanonicalID: "example:child"},
+	}
+	if err := validateModContentAdvancementLayout(resources, identities); err != nil {
+		t.Fatalf("validateModContentAdvancementLayout() error = %v", err)
+	}
+}
+
+func TestValidateModContentAdvancementLayoutRejectsCycles(t *testing.T) {
+	t.Parallel()
+	resources := []modContentLayoutResourceEdit{
+		{
+			ResourcePublicID: "adv123456",
+			Advancement:      &modContentAdvancementLayoutEdit{ParentResourcePublicID: "adv654321"},
+		},
+		{
+			ResourcePublicID: "adv654321",
+			Advancement:      &modContentAdvancementLayoutEdit{ParentResourcePublicID: "adv123456"},
+		},
+	}
+	identities := map[string]modContentLayoutResourceIdentity{
+		"adv123456": {KindCode: "minecraft.advancement", CanonicalID: "example:root"},
+		"adv654321": {KindCode: "minecraft.advancement", CanonicalID: "example:child"},
+	}
+	if err := validateModContentAdvancementLayout(resources, identities); err == nil {
+		t.Fatal("validateModContentAdvancementLayout() accepted a cycle")
+	}
+}
+
+func TestModContentResourceLocalizationProvenance(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		existing  string
+		unchanged bool
+		want      string
+	}{
+		{name: "unchanged AI translation", existing: "ai", unchanged: true, want: "ai"},
+		{name: "edited AI translation", existing: "ai", unchanged: false, want: "human_corrected"},
+		{name: "unchanged imported text", existing: "import", unchanged: true, want: "import"},
+		{name: "edited imported text", existing: "import", unchanged: false, want: "human"},
+		{name: "unchanged human correction", existing: "human_corrected", unchanged: true, want: "human_corrected"},
+		{name: "edited human correction", existing: "human_corrected", unchanged: false, want: "human_corrected"},
+		{name: "new human text", existing: "", unchanged: false, want: "human"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := modContentResourceLocalizationProvenance(test.existing, test.unchanged); got != test.want {
+				t.Fatalf("modContentResourceLocalizationProvenance(%q, %t) = %q, want %q", test.existing, test.unchanged, got, test.want)
+			}
+		})
+	}
+}
+
+func TestModContentResourceCreateRejectsNonEditableLocale(t *testing.T) {
+	t.Parallel()
+	edit := modContentResourceEdit{
+		ResourcePublicID: "abc123456",
+		VersionPublicID:  "def123456",
+		DefaultLocale:    "en-US",
+		Localizations: []catalogLocalizationEdit{
+			{Locale: "en-US", Name: "Copper"},
+			{Locale: "pt-BR", Name: "Cobre"},
+		},
+	}
+	if err := normalizeModContentResourceEdit(&edit); err == nil {
+		t.Fatal("resource creation accepted a non-editable locale")
+	}
+}
+
+func TestModContentResourceUpdatePreservesNonEditableLocales(t *testing.T) {
+	t.Parallel()
+	existing := map[string]modContentResourceLocalizationState{
+		"pt-BR": {
+			Name:            "Cobre",
+			Summary:         "Resumo importado",
+			ContentMarkdown: "Conteúdo importado",
+			Provenance:      "import",
+		},
+	}
+	edit := modContentResourceEdit{
+		ResourcePublicID: "abc123456",
+		VersionPublicID:  "def123456",
+		DefaultLocale:    "en-US",
+		Definition:       map[string]any{"hardness": 4},
+		Localizations: []catalogLocalizationEdit{
+			{Locale: "en-US", Name: "Edited copper", Summary: "Edited summary"},
+			{Locale: "pt-BR", Name: "Cobre", Summary: "Resumo importado", ContentMarkdown: "Conteúdo importado"},
+		},
+	}
+	if err := normalizeModContentResourceUpdateEdit(&edit); err != nil {
+		t.Fatalf("normalizeModContentResourceUpdateEdit() error = %v", err)
+	}
+	if err := preserveImmutableModContentResourceLocales("en-US", existing, &edit); err != nil {
+		t.Fatalf("unchanged non-editable locale was rejected: %v", err)
+	}
+	if edit.Localizations[1].Provenance != "import" || edit.Localizations[1].Editable == nil || *edit.Localizations[1].Editable {
+		t.Fatalf("non-editable locale metadata was not preserved: %#v", edit.Localizations[1])
+	}
+	if got := edit.Definition["hardness"]; got != 4 {
+		t.Fatalf("structured fields were unexpectedly changed: %#v", edit.Definition)
+	}
+}
+
+func TestModContentResourceUpdateRejectsNonEditableLocaleMutation(t *testing.T) {
+	t.Parallel()
+	existing := map[string]modContentResourceLocalizationState{
+		"pt-BR": {
+			Name:            "Cobre",
+			Summary:         "Resumo importado",
+			ContentMarkdown: "Conteúdo importado",
+			Provenance:      "import",
+		},
+	}
+	tests := []struct {
+		name            string
+		existingDefault string
+		edit            modContentResourceEdit
+	}{
+		{
+			name:            "change localized text",
+			existingDefault: "en-US",
+			edit: modContentResourceEdit{
+				DefaultLocale: "en-US",
+				Localizations: []catalogLocalizationEdit{
+					{Locale: "en-US", Name: "Copper"},
+					{Locale: "pt-BR", Name: "Cobre alterado", Summary: "Resumo importado", ContentMarkdown: "Conteúdo importado"},
+				},
+			},
+		},
+		{
+			name:            "remove locale",
+			existingDefault: "en-US",
+			edit: modContentResourceEdit{
+				DefaultLocale: "en-US",
+				Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "Copper"}},
+			},
+		},
+		{
+			name:            "add locale",
+			existingDefault: "en-US",
+			edit: modContentResourceEdit{
+				DefaultLocale: "en-US",
+				Localizations: []catalogLocalizationEdit{
+					{Locale: "en-US", Name: "Copper"},
+					{Locale: "pt-BR", Name: "Cobre", Summary: "Resumo importado", ContentMarkdown: "Conteúdo importado"},
+					{Locale: "ko-KR", Name: "구리"},
+				},
+			},
+		},
+		{
+			name:            "change non-editable default",
+			existingDefault: "pt-BR",
+			edit: modContentResourceEdit{
+				DefaultLocale: "en-US",
+				Localizations: []catalogLocalizationEdit{
+					{Locale: "en-US", Name: "Copper"},
+					{Locale: "pt-BR", Name: "Cobre", Summary: "Resumo importado", ContentMarkdown: "Conteúdo importado"},
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			test.edit.ResourcePublicID = "abc123456"
+			test.edit.VersionPublicID = "def123456"
+			if err := normalizeModContentResourceUpdateEdit(&test.edit); err != nil {
+				t.Fatalf("update normalization failed before immutable comparison: %v", err)
+			}
+			if err := preserveImmutableModContentResourceLocales(test.existingDefault, existing, &test.edit); err == nil {
+				t.Fatal("non-editable locale mutation was accepted")
+			}
+		})
 	}
 }

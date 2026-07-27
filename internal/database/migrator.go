@@ -7,11 +7,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 22
+const schemaGeneration = 30
 
-// Migrate installs one coherent development schema. The editor redesign does
-// not support in-place upgrades from earlier import-first/editor models;
-// development databases must be reset before this generation is installed.
+// Migrate installs one coherent development schema. Generation 30 establishes
+// numeric internal keys, globally unique public IDs, revocable authentication
+// sessions, and version-scoped mod-content layout identities. Earlier
+// development data is intentionally not migrated and must be reset before
+// installation.
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	conn, err := db.Acquire(ctx)
 	if err != nil {
@@ -39,6 +41,11 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		return fmt.Errorf("database schema generation %d is incompatible with generation %d; reset the development database", currentGeneration, schemaGeneration)
 	}
 	if currentGeneration == schemaGeneration {
+		for _, statement := range compatibleSchemaStatements() {
+			if _, err = conn.Exec(ctx, statement); err != nil {
+				return fmt.Errorf("apply compatible schema update: %w", err)
+			}
+		}
 		return nil
 	}
 
@@ -59,6 +66,7 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	statements = append(statements, projectFileSchemaStatements()...)
 	statements = append(statements, modContentSchemaStatements()...)
 	statements = append(statements, commentSchemaStatements()...)
+	statements = append(statements, foreignKeyIndexStatement())
 	for _, statement := range statements {
 		if _, err = tx.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("install schema generation %d: %w", schemaGeneration, err)
@@ -78,6 +86,66 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		return fmt.Errorf("commit schema generation: %w", err)
 	}
 	return nil
+}
+
+// compatibleSchemaStatements contains additive, data-preserving updates that
+// are safe to install without changing the coherent schema generation.
+func compatibleSchemaStatements() []string {
+	statements := []string{
+		`create index if not exists idx_comments_author_created on comments(author_id,created_at desc)`,
+	}
+	return append(statements, compatibleModContentLayoutStatements()...)
+}
+
+func foreignKeyIndexStatement() string {
+	return `do $$
+	declare
+		foreign_key record;
+		index_name text;
+	begin
+		for foreign_key in
+			select
+				constraint_row.conname,
+				source.relname table_name,
+				constraint_row.conrelid table_oid,
+				string_agg(format('%I',attribute_row.attname),',' order by key_row.position) columns_sql
+			from pg_constraint constraint_row
+			join pg_class source on source.oid=constraint_row.conrelid
+			join pg_namespace namespace_row on namespace_row.oid=source.relnamespace
+			cross join lateral unnest(constraint_row.conkey) with ordinality key_row(attnum,position)
+			join pg_attribute attribute_row
+			  on attribute_row.attrelid=constraint_row.conrelid
+			 and attribute_row.attnum=key_row.attnum
+			where constraint_row.contype='f'
+			  and namespace_row.nspname='public'
+			  and not exists (
+				select 1
+				from pg_index index_row
+				where index_row.indrelid=constraint_row.conrelid
+				  and index_row.indisvalid
+				  and index_row.indisready
+				  and index_row.indpred is null
+				  and index_row.indexprs is null
+				  and index_row.indnkeyatts>=cardinality(constraint_row.conkey)
+				  and not exists (
+					select 1
+					from generate_subscripts(constraint_row.conkey,1) position
+					where (index_row.indkey::smallint[])[position-1]<>constraint_row.conkey[position]
+				  )
+			  )
+			group by constraint_row.conname,source.relname,constraint_row.conrelid
+			order by source.relname,constraint_row.conname
+		loop
+			index_name := left('idx_fk_'||foreign_key.table_name||'_'||foreign_key.conname,54)
+				||'_'||substr(md5(foreign_key.conname),1,8);
+			execute format(
+				'create index %I on %s (%s)',
+				index_name,
+				foreign_key.table_oid::regclass,
+				foreign_key.columns_sql
+			);
+		end loop;
+	end $$`
 }
 
 func blueprintRelationSchemaStatements() []string {
@@ -124,7 +192,9 @@ func reviewSchemaStatements() []string {
 	return []string{
 		`create table content_revisions (
 			id bigserial primary key,
-			entity_id text references catalog_entities(id) on delete restrict,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
+			entity_type text,
+			entity_id bigint,
 			aggregate_type text not null,
 			aggregate_key text not null,
 			revision_no bigint not null,
@@ -136,13 +206,17 @@ func reviewSchemaStatements() []string {
 			created_by_snapshot text not null default '',
 			source text not null default 'user',
 			created_at timestamptz not null default now(),
-			unique(aggregate_type,aggregate_key,revision_no)
+			unique(aggregate_type,aggregate_key,revision_no),
+			foreign key(entity_type,entity_id) references public_routes(entity_type,internal_id) on delete restrict,
+			check((entity_type is null)=(entity_id is null))
 		)`,
-		`create index idx_content_revisions_entity on content_revisions(entity_id,revision_no desc) where entity_id is not null`,
+		`create index idx_content_revisions_entity on content_revisions(entity_type,entity_id,revision_no desc) where entity_id is not null`,
 		`create index idx_content_revisions_aggregate on content_revisions(aggregate_type,aggregate_key,revision_no desc)`,
 		`create table change_requests (
 			id bigserial primary key,
-			entity_id text references catalog_entities(id) on delete restrict,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
+			entity_type text,
+			entity_id bigint,
 			aggregate_type text not null,
 			aggregate_key text not null,
 			base_revision_id bigint references content_revisions(id) on delete restrict,
@@ -154,11 +228,14 @@ func reviewSchemaStatements() []string {
 			metadata jsonb not null default '{}'::jsonb,
 			submitted_at timestamptz not null default now(),
 			resolved_at timestamptz,
-			check(status in ('pending','approved','rejected','conflicted','withdrawn'))
+			check(status in ('pending','approved','rejected','conflicted','withdrawn')),
+			foreign key(entity_type,entity_id) references public_routes(entity_type,internal_id) on delete restrict,
+			check((entity_type is null)=(entity_id is null))
 		)`,
 		`create index idx_change_requests_queue on change_requests(status,submitted_at,id)`,
 		`create table review_events (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			change_request_id bigint not null references change_requests(id) on delete restrict,
 			event_type text not null,
 			actor_id bigint references users(id) on delete set null,
@@ -183,7 +260,9 @@ func reviewSchemaStatements() []string {
 		`create index idx_content_change_items_revision on content_change_items(revision_id,id)`,
 		`create table audit_events (
 			id bigserial primary key,
-			entity_id text references catalog_entities(id) on delete restrict,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
+			entity_type text,
+			entity_id bigint,
 			aggregate_type text not null,
 			aggregate_key text not null,
 			actor_id bigint references users(id) on delete set null,
@@ -195,9 +274,11 @@ func reviewSchemaStatements() []string {
 			ip text not null default '',
 			user_agent text not null default '',
 			metadata jsonb not null default '{}'::jsonb,
-			created_at timestamptz not null default now()
+			created_at timestamptz not null default now(),
+			foreign key(entity_type,entity_id) references public_routes(entity_type,internal_id) on delete restrict,
+			check((entity_type is null)=(entity_id is null))
 		)`,
-		`create index idx_audit_events_entity on audit_events(entity_id,created_at desc,id desc) where entity_id is not null`,
+		`create index idx_audit_events_entity on audit_events(entity_type,entity_id,created_at desc,id desc) where entity_id is not null`,
 		`create index idx_audit_events_aggregate on audit_events(aggregate_type,aggregate_key,created_at desc,id desc)`,
 		`alter table catalog_entities add constraint fk_catalog_entities_published_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
 		`alter table content_localizations add constraint fk_content_localizations_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,

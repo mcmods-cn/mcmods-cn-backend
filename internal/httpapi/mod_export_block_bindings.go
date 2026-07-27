@@ -13,15 +13,15 @@ import (
 )
 
 type modExportBlockBinding struct {
-	RevisionID      string
-	BlockID         string
-	ItemID          string
-	BlockResourceID string
-	ItemResourceID  string
-	Blockstate      string
-	ItemModel       string
-	ModelPaths      []string
-	TexturePaths    []string
+	RevisionID              string
+	BlockID                 string
+	ItemID                  string
+	BlockResourceSnapshotID string
+	ItemResourceSnapshotID  string
+	Blockstate              string
+	ItemModel               string
+	ModelPaths              []string
+	TexturePaths            []string
 }
 
 type exportRegistryLinkEntry struct {
@@ -84,14 +84,16 @@ func deriveModExportBlockBindings(files map[string]*zip.File, resolver catalogRe
 			return nil, fmt.Errorf("derive block resources %s: %w", block.ID, collectErr)
 		}
 		blockResource := resolver.resolve("minecraft.block", block.ID)
-		itemResourceID := ""
+		itemResourceSnapshotID := ""
 		if itemID != "" {
-			itemResourceID = resolver.resolve("minecraft.item", itemID).ID
+			itemResource := resolver.resolve("minecraft.item", itemID)
+			itemResourceSnapshotID = catalogSnapshotID("resource", revisionID, itemResource.ID, "")
 		}
 		result = append(result, modExportBlockBinding{
 			RevisionID: revisionID, BlockID: block.ID, ItemID: itemID,
-			BlockResourceID: blockResource.ID, ItemResourceID: itemResourceID,
-			Blockstate: blockstate, ItemModel: itemModel,
+			BlockResourceSnapshotID: catalogSnapshotID("resource", revisionID, blockResource.ID, ""),
+			ItemResourceSnapshotID:  itemResourceSnapshotID,
+			Blockstate:              blockstate, ItemModel: itemModel,
 			ModelPaths: modelPaths, TexturePaths: texturePaths,
 		})
 	}
@@ -226,23 +228,30 @@ func persistModExportBlockBindings(ctx context.Context, tx pgx.Tx, bindings []mo
 	}
 	batch := &pgx.Batch{}
 	for _, binding := range bindings {
-		var itemID any
-		if binding.ItemResourceID != "" {
-			itemID = binding.ItemResourceID
+		var itemSnapshotID any
+		if binding.ItemResourceSnapshotID != "" {
+			itemSnapshotID = binding.ItemResourceSnapshotID
 		}
 		batch.Queue(`insert into game_resource_asset_bindings(snapshot_id,item_resource_id,block_resource_id,blockstate_path,item_model_path,model_paths,texture_paths)
-			select snapshot.id,$1,$2,$3,$4,$5,$6 from resource_import_snapshots snapshot
-			where snapshot.revision_id=$7 and snapshot.resource_id=$2
+			select snapshot.id,item_snapshot.resource_id,snapshot.resource_id,$3,$4,$5,$6
+			from resource_import_snapshots snapshot
+			left join resource_import_snapshots item_snapshot
+				on item_snapshot.id=$1 and item_snapshot.revision_id=snapshot.revision_id
+			where snapshot.id=$2 and snapshot.revision_id=$7
 			on conflict(snapshot_id) do update set item_resource_id=excluded.item_resource_id,block_resource_id=excluded.block_resource_id,
 			blockstate_path=excluded.blockstate_path,item_model_path=excluded.item_model_path,
-			model_paths=excluded.model_paths,texture_paths=excluded.texture_paths`, itemID, binding.BlockResourceID,
+			model_paths=excluded.model_paths,texture_paths=excluded.texture_paths`, itemSnapshotID, binding.BlockResourceSnapshotID,
 			binding.Blockstate, binding.ItemModel, binding.ModelPaths, binding.TexturePaths, binding.RevisionID)
 	}
 	results := tx.SendBatch(ctx, batch)
 	defer results.Close()
-	for range bindings {
-		if _, err := results.Exec(); err != nil {
+	for index := range bindings {
+		tag, err := results.Exec()
+		if err != nil {
 			return fmt.Errorf("persist block asset binding: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("persist block asset binding %s: matching resource snapshot not found", bindings[index].BlockID)
 		}
 	}
 	return results.Close()

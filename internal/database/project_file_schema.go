@@ -6,7 +6,7 @@ func projectFileSchemaStatements() []string {
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check (public_id ~ '^[a-z0-9]{9}$'),
 			project_type text not null,
-			project_id text not null check (project_id ~ '^[a-z0-9]{9}$'),
+			project_internal_id bigint not null,
 			oss_file_id bigint not null references oss_files(id) on delete restrict,
 			display_name text not null default '',
 			version_name text not null default '',
@@ -25,16 +25,18 @@ func projectFileSchemaStatements() []string {
 			check (project_type in ('mod','modpack','plugin','map','resource_pack','shader_pack','datapack')),
 			check (release_channel in ('release','beta','alpha')),
 			check (status in ('active','deleted')),
-			unique (project_type, project_id, oss_file_id)
+			unique (project_type, project_internal_id, oss_file_id),
+			foreign key(project_type,project_internal_id)
+				references public_routes(entity_type,internal_id) on delete cascade
 		)`,
 		`create index if not exists idx_project_files_project_published
-			on project_files(project_type,project_id,status,created_at desc,id desc)`,
+			on project_files(project_type,project_internal_id,status,created_at desc,id desc)`,
 		`create index if not exists idx_project_files_filters
-			on project_files(project_type,project_id,release_channel) where status='active'`,
+			on project_files(project_type,project_internal_id,release_channel) where status='active'`,
 		`create or replace function register_project_file_public_route() returns trigger as $$
 		begin
-			insert into public_routes(public_id,entity_type,entity_key,canonical_path)
-			values(new.public_id,'project_file',new.id::text,'/api/v1/project-files/' || new.public_id || '/download');
+			insert into public_routes(public_id,entity_type,internal_id,canonical_path)
+			values(new.public_id,'project_file',new.id,'/api/v1/project-files/' || new.public_id || '/download');
 			return new;
 		end;
 		$$ language plpgsql`,

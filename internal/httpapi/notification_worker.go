@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,7 @@ import (
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/mailer"
 	"mcmods-cn-backend/internal/queue"
+	"mcmods-cn-backend/internal/security"
 )
 
 const notificationTaskCode = "notifications"
@@ -30,13 +32,14 @@ type notificationEvent struct {
 }
 
 type NotificationWorker struct {
-	db       *pgxpool.Pool
-	queue    *queue.Client
-	fallback config.SMTPConfig
+	db                    *pgxpool.Pool
+	queue                 *queue.Client
+	fallback              config.SMTPConfig
+	settingsEncryptionKey string
 }
 
-func NewNotificationWorker(db *pgxpool.Pool, queueClient *queue.Client, fallback config.SMTPConfig) *NotificationWorker {
-	return &NotificationWorker{db: db, queue: queueClient, fallback: fallback}
+func NewNotificationWorker(db *pgxpool.Pool, queueClient *queue.Client, fallback config.SMTPConfig, settingsEncryptionKey string) *NotificationWorker {
+	return &NotificationWorker{db: db, queue: queueClient, fallback: fallback, settingsEncryptionKey: settingsEncryptionKey}
 }
 
 func (worker *NotificationWorker) Start() error {
@@ -291,9 +294,11 @@ func (worker *NotificationWorker) enqueueUserEmail(ctx context.Context, userID i
 	if worker.queue == nil || userID <= 0 {
 		return
 	}
-	_ = worker.queue.PublishTask(ctx, notificationTaskCode, notificationEvent{
+	if err := worker.queue.PublishTask(ctx, notificationTaskCode, notificationEvent{
 		Action: "email", RecipientID: userID, Title: subject, Body: body,
-	})
+	}); err != nil {
+		slog.Warn("queue notification email", "user_id", userID, "error", err)
+	}
 }
 
 func (worker *NotificationWorker) sendUserEmail(ctx context.Context, userID int64, subject string, body string) {
@@ -312,7 +317,9 @@ func (worker *NotificationWorker) sendUserEmail(ctx context.Context, userID int6
 	if err != nil {
 		return
 	}
-	_ = worker.activeMailer(ctx).Send(email, subject, body)
+	if err = worker.activeMailer(ctx).Send(email, subject, body); err != nil {
+		slog.Warn("send notification email", "user_id", userID, "error", err)
+	}
 }
 
 func (worker *NotificationWorker) activeMailer(ctx context.Context) mailer.Mailer {
@@ -326,8 +333,10 @@ func (worker *NotificationWorker) activeMailer(ctx context.Context) mailer.Maile
 		UseTLS:   worker.fallback.UseTLS,
 	}
 	var raw []byte
-	if err := worker.db.QueryRow(ctx, `select value from system_settings where key = 'mail.config'`).Scan(&raw); err == nil {
-		_ = json.Unmarshal(raw, &payload)
+	if err := worker.db.QueryRow(ctx, `select value from system_settings where key = 'mail.smtp'`).Scan(&raw); err == nil {
+		if decrypted, decryptErr := security.DecryptSetting(worker.settingsEncryptionKey, raw); decryptErr == nil {
+			_ = json.Unmarshal(decrypted, &payload)
+		}
 	}
 	return mailer.New(config.SMTPConfig{
 		Host: payload.Host, Port: payload.Port, Username: payload.Username,

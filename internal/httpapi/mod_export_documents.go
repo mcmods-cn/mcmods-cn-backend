@@ -7,12 +7,13 @@ import (
 )
 
 type exportDocumentEntry struct {
-	ID          string
-	Namespace   string
-	Names       map[string]any
-	IconPath    string
-	PreviewPath string
-	Data        map[string]any
+	ID             string
+	Namespace      string
+	TranslationKey string
+	Names          map[string]any
+	IconPath       string
+	PreviewPath    string
+	Data           map[string]any
 }
 
 // queueExportDocumentEntries materializes stable list projections while the
@@ -28,14 +29,19 @@ func queueExportDocumentEntries(batch *modExportWriteBatch, resolver catalogReso
 	}
 	entries := exportDocumentEntries(assetPath, document)
 	for ordinal, entry := range entries {
-		encodedNames, err := json.Marshal(entry.Names)
+		encodedNames, err := json.Marshal(supportedExportNames(entry.Names))
 		if err != nil {
 			return err
 		}
+		filterSupportedExportLocalizedFields(entry.Data)
 		encodedData, err := json.Marshal(entry.Data)
 		if err != nil {
 			return err
 		}
+		encodedData = compactImportJSONObject(
+			encodedData,
+			"id", "namespace", "path", "translation_key", "names",
+		)
 		kind := exportDocumentKind(assetPath)
 		kindCode := resourceKindForDocument(kind, entry.Data)
 		identity := resolver.resolve(kindCode, entry.ID)
@@ -47,7 +53,8 @@ func queueExportDocumentEntries(batch *modExportWriteBatch, resolver catalogReso
 			EntityID: identity.ID, PublicID: identity.PublicID, KindCode: kindCode, CanonicalID: identity.CanonicalID, RawID: identity.RawID,
 			Namespace: namespace, ResourcePath: resourcePath, RevisionID: revisionID,
 			SnapshotID: catalogSnapshotID("resource", revisionID, identity.ID, ""), Registry: kind,
-			Names: string(encodedNames), Data: string(encodedData), IconPath: entry.IconPath, PreviewPath: entry.PreviewPath,
+			TranslationKey: entry.TranslationKey, Names: string(encodedNames), Data: string(encodedData),
+			IconPath: entry.IconPath, PreviewPath: entry.PreviewPath,
 		})
 		_ = ordinal
 	}
@@ -132,6 +139,7 @@ func exportDocumentEntries(assetPath string, document map[string]any) []exportDo
 	for _, value := range values {
 		entry := exportDocumentEntry{Data: value, Names: exportObject(value["names"])}
 		entry.ID = strings.TrimSpace(exportString(value["id"]))
+		entry.TranslationKey = strings.TrimSpace(exportString(value["translation_key"]))
 		if assetPath == "worldgen/natural_generation.json" {
 			entry.ID = strings.TrimSpace(exportString(value["generation_id"]))
 		}
@@ -150,6 +158,11 @@ func exportDocumentEntries(assetPath string, document map[string]any) []exportDo
 		if assetPath == "advancements/advancements.json" {
 			display := exportObject(value["display"])
 			entry.Names = exportObject(display["title_names"])
+			entry.TranslationKey = strings.TrimSpace(exportString(display["title_translation_key"]))
+			// The complete advancement document is retained as a text asset and
+			// title names are normalized into resource_import_snapshots.names.
+			// Avoid sending the same large locale map twice to remote PostgreSQL.
+			delete(display, "title_names")
 			itemID := exportString(exportObject(display["icon"])["item"])
 			entry.IconPath = exportItemIconPath(itemID, 32)
 			entry.PreviewPath = exportItemIconPath(itemID, 256)

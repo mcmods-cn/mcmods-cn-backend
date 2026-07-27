@@ -25,7 +25,7 @@ var (
 )
 
 type catalogEditBase struct {
-	BaseRevisionID *int64                    `json:"baseRevisionId,omitempty"`
+	BaseRevisionID *string                   `json:"baseRevisionId,omitempty"`
 	Reason         string                    `json:"reason"`
 	DefaultLocale  string                    `json:"defaultLocale"`
 	Localizations  []catalogLocalizationEdit `json:"localizations"`
@@ -48,8 +48,8 @@ type catalogResourceEdit struct {
 	CanonicalID    string         `json:"canonicalId"`
 	RawCanonicalID string         `json:"rawCanonicalId,omitempty"`
 	Definition     map[string]any `json:"definition"`
-	IconFileID     *int64         `json:"iconFileId,omitempty"`
-	RenderFileID   *int64         `json:"renderFileId,omitempty"`
+	IconFileID     *string        `json:"iconFileId,omitempty"`
+	RenderFileID   *string        `json:"renderFileId,omitempty"`
 }
 
 type catalogTagEdit struct {
@@ -92,7 +92,7 @@ type catalogTemplateSlotEdit struct {
 type catalogRecipeTemplateEdit struct {
 	catalogEditBase
 	TemplateKey      string                    `json:"templateKey"`
-	BackgroundFileID *int64                    `json:"backgroundFileId,omitempty"`
+	BackgroundFileID *string                   `json:"backgroundFileId,omitempty"`
 	Canvas           catalogCanvas             `json:"canvas"`
 	Definition       map[string]any            `json:"definition"`
 	Slots            []catalogTemplateSlotEdit `json:"slots"`
@@ -125,10 +125,13 @@ type catalogEditorSnapshot struct {
 	Operation         string                     `json:"operation"`
 	Reason            string                     `json:"reason,omitempty"`
 	Kind              string                     `json:"kind"`
-	EntityID          string                     `json:"entityId"`
+	EntityID          int64                      `json:"-"`
+	IdentityKey       string                     `json:"-"`
 	PublicID          string                     `json:"publicId"`
-	ParentEntityID    string                     `json:"parentEntityId,omitempty"`
-	OwnerModID        *int64                     `json:"ownerModId,omitempty"`
+	ParentEntityID    int64                      `json:"-"`
+	ParentPublicID    string                     `json:"parentPublicId,omitempty"`
+	OwnerModID        *int64                     `json:"-"`
+	OwnerModPublicID  string                     `json:"ownerModId,omitempty"`
 	AllowForeignFiles bool                       `json:"allowForeignFiles,omitempty"`
 	DefaultLocale     string                     `json:"defaultLocale"`
 	Localizations     []catalogLocalizationEdit  `json:"localizations,omitempty"`
@@ -140,32 +143,30 @@ type catalogEditorSnapshot struct {
 }
 
 type catalogLocalizationSnapshot struct {
-	SubjectPublicID string `json:"subjectPublicId"`
-	SubjectType     string `json:"subjectType"`
-	// EntityID is the public route's stable internal key. For catalog subjects
-	// it is also the catalog_entities id; for mods and blueprints it is their
-	// numeric primary key encoded as text.
-	EntityID         string `json:"entityId"`
-	Locale           string `json:"locale"`
-	Name             string `json:"name"`
-	Summary          string `json:"summary"`
-	ContentMarkdown  string `json:"contentMarkdown"`
-	Provenance       string `json:"provenance"`
-	SourceLocale     string `json:"sourceLocale"`
-	SourceRevisionNo int64  `json:"sourceRevisionNo,omitempty"`
-	Editable         bool   `json:"editable"`
-	ReviewStatus     string `json:"reviewStatus"`
-	AITaskID         *int64 `json:"aiTaskId,omitempty"`
+	SubjectPublicID  string  `json:"subjectPublicId"`
+	SubjectType      string  `json:"subjectType"`
+	EntityID         int64   `json:"-"`
+	Locale           string  `json:"locale"`
+	Name             string  `json:"name"`
+	Summary          string  `json:"summary"`
+	ContentMarkdown  string  `json:"contentMarkdown"`
+	Provenance       string  `json:"provenance"`
+	SourceLocale     string  `json:"sourceLocale"`
+	SourceRevisionNo int64   `json:"sourceRevisionNo,omitempty"`
+	Editable         bool    `json:"editable"`
+	ReviewStatus     string  `json:"reviewStatus"`
+	AITaskID         *int64  `json:"-"`
+	AITaskPublicID   *string `json:"aiTaskId,omitempty"`
 }
 
 type catalogEditResult struct {
 	PublicID        string `json:"publicId"`
 	ObjectPublicID  string `json:"objectPublicId"`
 	Operation       string `json:"operation"`
-	RevisionID      int64  `json:"revisionId"`
-	ChangeRequestID int64  `json:"changeRequestId"`
+	RevisionID      string `json:"revisionId"`
+	ChangeRequestID string `json:"changeRequestId"`
 	ReviewStatus    string `json:"reviewStatus"`
-	ActivityEventID int64  `json:"activityEventId"`
+	ActivityEventID string `json:"activityEventId"`
 }
 
 func normalizeCatalogLocale(value string) (string, error) {

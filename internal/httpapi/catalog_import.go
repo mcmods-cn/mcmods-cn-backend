@@ -31,133 +31,186 @@ func persistCatalogResources(ctx context.Context, tx pgx.Tx, rows []catalogResou
 	if len(rows) == 0 {
 		return nil
 	}
-	entityIDs := make([]string, len(rows))
-	publicIDs := make([]string, len(rows))
-	kinds := make([]string, len(rows))
-	canonicalIDs := make([]string, len(rows))
-	rawIDs := make([]string, len(rows))
-	namespaces := make([]string, len(rows))
-	resourcePaths := make([]string, len(rows))
-	revisionIDs := make([]string, len(rows))
-	snapshotIDs := make([]string, len(rows))
-	registries := make([]string, len(rows))
-	translationKeys := make([]string, len(rows))
-	names := make([]string, len(rows))
-	data := make([]string, len(rows))
-	iconPaths := make([]string, len(rows))
-	previewPaths := make([]string, len(rows))
-	for index, row := range rows {
-		entityIDs[index] = row.EntityID
-		publicIDs[index] = row.PublicID
-		kinds[index] = row.KindCode
-		canonicalIDs[index] = row.CanonicalID
-		rawIDs[index] = row.RawID
-		if rawIDs[index] == "" {
-			rawIDs[index] = row.CanonicalID
-		}
-		namespaces[index] = row.Namespace
-		resourcePaths[index] = row.ResourcePath
-		revisionIDs[index] = row.RevisionID
-		snapshotIDs[index] = row.SnapshotID
-		registries[index] = row.Registry
-		translationKeys[index] = row.TranslationKey
-		names[index] = nonEmptyJSONObject(row.Names)
-		data[index] = nonEmptyJSONObject(row.Data)
-		iconPaths[index] = row.IconPath
-		previewPaths[index] = row.PreviewPath
+	if _, err := execImportStatement(ctx, tx, `create temporary table if not exists catalog_resource_import_stage (
+		ordinal bigint not null,
+		identity_key text not null,
+		public_id text not null,
+		kind_code text not null,
+		canonical_id text not null,
+		raw_id text not null,
+		namespace text not null,
+		resource_path text not null,
+		revision_id text not null,
+		snapshot_id text not null,
+		registry text not null,
+		translation_key text not null,
+		names jsonb not null,
+		data jsonb not null,
+		icon_path text not null,
+		preview_path text not null
+	) on commit drop`); err != nil {
+		return fmt.Errorf("create resource import stage: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `insert into resource_kinds(code,family,user_visible)
-		select distinct kind,split_part(kind,'.',1),true from unnest($1::text[]) kind
-		on conflict(code) do nothing`, kinds); err != nil {
+	if _, err := execImportStatement(ctx, tx, `truncate catalog_resource_import_stage`); err != nil {
+		return fmt.Errorf("truncate resource import stage: %w", err)
+	}
+	columns := []string{
+		"ordinal", "identity_key", "public_id", "kind_code", "canonical_id", "raw_id",
+		"namespace", "resource_path", "revision_id", "snapshot_id", "registry",
+		"translation_key", "names", "data", "icon_path", "preview_path",
+	}
+	if err := copyImportRows(ctx, tx, "catalog_resource_import_stage", columns, len(rows), func(index int) ([]any, error) {
+		row := rows[index]
+		rawID := row.RawID
+		if rawID == "" {
+			rawID = row.CanonicalID
+		}
+		return []any{
+			index, row.EntityID, row.PublicID, row.KindCode, row.CanonicalID, rawID,
+			row.Namespace, row.ResourcePath, row.RevisionID, row.SnapshotID, row.Registry,
+			row.TranslationKey, nonEmptyJSONObject(row.Names), nonEmptyJSONObject(row.Data),
+			row.IconPath, row.PreviewPath,
+		}, nil
+	}); err != nil {
+		return fmt.Errorf("stage resource imports: %w", err)
+	}
+	if _, err := execImportStatement(ctx, tx, `insert into resource_kinds(code,family,user_visible)
+		select distinct kind_code,split_part(kind_code,'.',1),true
+		from catalog_resource_import_stage
+		on conflict(code) do nothing`); err != nil {
 		return fmt.Errorf("upsert resource kinds: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `insert into catalog_entities(id,public_id,entity_type,status)
-		select distinct on (id) id,public_id,'resource','active'
-		from unnest($1::text[],$2::text[]) row(id,public_id)
-		on conflict(id) do update set status='active',updated_at=now()`, entityIDs, publicIDs); err != nil {
+	if _, err := execImportStatement(ctx, tx, `insert into catalog_entities(identity_key,public_id,entity_type,status)
+		select distinct on (stage.identity_key) stage.identity_key,stage.public_id,'resource','active'
+		from catalog_resource_import_stage stage
+		left join game_resources existing
+			on existing.kind_code=stage.kind_code and existing.canonical_id=stage.canonical_id
+		where existing.entity_id is null
+		order by stage.identity_key,stage.ordinal
+		on conflict(identity_key) do update set status='active',updated_at=now()`); err != nil {
 		return fmt.Errorf("upsert resource entities: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path,owner_mod_id,created_from_revision_id,resolved)
-		select distinct on (row.entity_id) row.entity_id,row.kind_code,row.canonical_id,row.namespace,row.resource_path,revision.mod_id,row.revision_id,true
-		from unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::text[],$6::text[])
-			row(entity_id,kind_code,canonical_id,namespace,resource_path,revision_id)
-		join catalog_import_revisions revision on revision.id=row.revision_id
+	if _, err := execImportStatement(ctx, tx, `insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path,owner_mod_id,created_from_revision_id,resolved)
+		select distinct on (stage.kind_code,stage.canonical_id)
+			coalesce(existing.entity_id,entity.id),stage.kind_code,stage.canonical_id,stage.namespace,stage.resource_path,
+			revision.mod_id,stage.revision_id,true
+		from catalog_resource_import_stage stage
+		left join game_resources existing
+			on existing.kind_code=stage.kind_code and existing.canonical_id=stage.canonical_id
+		left join catalog_entities entity on entity.identity_key=stage.identity_key
+		join catalog_import_revisions revision on revision.id=stage.revision_id
+		where existing.entity_id is not null or entity.id is not null
+		order by stage.kind_code,stage.canonical_id,stage.ordinal
 		on conflict(kind_code,canonical_id) do update set namespace=excluded.namespace,resource_path=excluded.resource_path,
 			owner_mod_id=coalesce(game_resources.owner_mod_id,excluded.owner_mod_id),
 			created_from_revision_id=coalesce(game_resources.created_from_revision_id,excluded.created_from_revision_id),
-			resolved=true,updated_at=now()`, entityIDs, kinds, canonicalIDs, namespaces, resourcePaths, revisionIDs); err != nil {
+			resolved=true,updated_at=now()`); err != nil {
 		return fmt.Errorf("upsert game resources: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `insert into game_resource_aliases(kind_code,alias_id,resource_id,source)
-		select distinct row.kind_code,row.alias_id,row.entity_id,'mod_id'
-		from unnest($1::text[],$2::text[],$3::text[]) row(kind_code,alias_id,entity_id)
-		where row.alias_id<>'' on conflict(kind_code,alias_id) do update set resource_id=excluded.resource_id,source=excluded.source,updated_at=now()`, kinds, rawIDs, entityIDs); err != nil {
+	if _, err := execImportStatement(ctx, tx, `update catalog_entities entity
+		set status='active',updated_at=now()
+		from game_resources resource
+		join catalog_resource_import_stage stage
+			on stage.kind_code=resource.kind_code and stage.canonical_id=resource.canonical_id
+		where entity.id=resource.entity_id and entity.status<>'active'`); err != nil {
+		return fmt.Errorf("activate resource entities: %w", err)
+	}
+	if _, err := execImportStatement(ctx, tx, `insert into game_resource_aliases(kind_code,alias_id,resource_id,source)
+		select distinct on (stage.kind_code,stage.raw_id) stage.kind_code,stage.raw_id,resource.entity_id,'mod_id'
+		from catalog_resource_import_stage stage
+		join game_resources resource
+			on resource.kind_code=stage.kind_code and resource.canonical_id=stage.canonical_id
+		where stage.raw_id<>''
+		order by stage.kind_code,stage.raw_id,stage.ordinal
+		on conflict(kind_code,alias_id) do update set resource_id=excluded.resource_id,source=excluded.source,updated_at=now()`); err != nil {
 		return fmt.Errorf("upsert resource aliases: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `insert into game_resource_aliases(kind_code,alias_id,resource_id,source)
-		select distinct row.kind_code,row.alias_id,row.entity_id,'canonical'
-		from unnest($1::text[],$2::text[],$3::text[]) row(kind_code,alias_id,entity_id)
-		where row.alias_id<>'' on conflict(kind_code,alias_id) do update set resource_id=excluded.resource_id,source=excluded.source,updated_at=now()`, kinds, canonicalIDs, entityIDs); err != nil {
+	if _, err := execImportStatement(ctx, tx, `insert into game_resource_aliases(kind_code,alias_id,resource_id,source)
+		select distinct on (stage.kind_code,stage.canonical_id) stage.kind_code,stage.canonical_id,resource.entity_id,'canonical'
+		from catalog_resource_import_stage stage
+		join game_resources resource
+			on resource.kind_code=stage.kind_code and resource.canonical_id=stage.canonical_id
+		where stage.canonical_id<>''
+		order by stage.kind_code,stage.canonical_id,stage.ordinal
+		on conflict(kind_code,alias_id) do update set resource_id=excluded.resource_id,source=excluded.source,updated_at=now()`); err != nil {
 		return fmt.Errorf("upsert canonical resource aliases: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `insert into resource_import_snapshots(
+	if _, err := execImportStatement(ctx, tx, `with snapshot_fields as materialized (
+			select identity_key,revision_id,
+				(array_agg(snapshot_id order by ordinal))[1] as snapshot_id,
+				(array_agg(kind_code order by ordinal))[1] as kind_code,
+				(array_agg(canonical_id order by ordinal))[1] as canonical_id,
+				coalesce((array_agg(registry order by ordinal desc) filter(where registry<>''))[1],'') as registry,
+				coalesce((array_agg(translation_key order by ordinal desc) filter(where translation_key<>''))[1],'') as translation_key,
+				coalesce((array_agg(icon_path order by ordinal desc) filter(where icon_path<>''))[1],'') as icon_path,
+				coalesce((array_agg(preview_path order by ordinal desc) filter(where preview_path<>''))[1],'') as preview_path
+			from catalog_resource_import_stage
+			group by identity_key,revision_id
+		),
+		snapshot_names as materialized (
+			select stage.identity_key,stage.revision_id,
+				jsonb_object_agg(entry.key,entry.value order by stage.ordinal) as names
+			from catalog_resource_import_stage stage
+			cross join lateral jsonb_each(stage.names) entry
+			group by stage.identity_key,stage.revision_id
+		),
+		snapshot_data as materialized (
+			select stage.identity_key,stage.revision_id,
+				jsonb_object_agg(entry.key,entry.value order by stage.ordinal) as data
+			from catalog_resource_import_stage stage
+			cross join lateral jsonb_each(stage.data) entry
+			group by stage.identity_key,stage.revision_id
+		)
+		insert into resource_import_snapshots(
 		id,resource_id,revision_id,registry,translation_key,names,data,icon_path,preview_path)
-		select row.snapshot_id,row.entity_id,row.revision_id,row.registry,row.translation_key,row.names::jsonb,row.data::jsonb,row.icon_path,row.preview_path
-		from unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::text[],$6::text[],$7::text[],$8::text[],$9::text[])
-			row(snapshot_id,entity_id,revision_id,registry,translation_key,names,data,icon_path,preview_path)
+		select fields.snapshot_id,resource.entity_id,fields.revision_id,fields.registry,fields.translation_key,
+			coalesce(names.names,'{}'::jsonb),coalesce(data.data,'{}'::jsonb),fields.icon_path,fields.preview_path
+		from snapshot_fields fields
+		join game_resources resource
+			on resource.kind_code=fields.kind_code and resource.canonical_id=fields.canonical_id
+		left join snapshot_names names using(identity_key,revision_id)
+		left join snapshot_data data using(identity_key,revision_id)
 		on conflict(resource_id,revision_id) do update set
 			registry=case when excluded.registry<>'' then excluded.registry else resource_import_snapshots.registry end,
 			translation_key=case when excluded.translation_key<>'' then excluded.translation_key else resource_import_snapshots.translation_key end,
 			names=resource_import_snapshots.names||excluded.names,
 			data=resource_import_snapshots.data||excluded.data,
 			icon_path=case when excluded.icon_path<>'' then excluded.icon_path else resource_import_snapshots.icon_path end,
-			preview_path=case when excluded.preview_path<>'' then excluded.preview_path else resource_import_snapshots.preview_path end`,
-		snapshotIDs, entityIDs, revisionIDs, registries, translationKeys, names, data, iconPaths, previewPaths); err != nil {
+			preview_path=case when excluded.preview_path<>'' then excluded.preview_path else resource_import_snapshots.preview_path end`); err != nil {
 		return fmt.Errorf("upsert resource snapshots: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `update unresolved_resource_references unresolved
-		set resolved_resource_id=resource.entity_id,status='resolved',resolved_at=now()
-		from game_resource_aliases alias join game_resources resource on resource.entity_id=alias.resource_id
-		where unresolved.status='pending' and unresolved.kind_code=alias.kind_code
-			and unresolved.raw_resource_id=alias.alias_id and resource.entity_id=any($1::text[])`, entityIDs); err != nil {
+	// Resolve only aliases represented by this import batch. The previous query
+	// joined every pending reference to the complete alias/resource catalog and
+	// filtered the imported entities afterwards. On large exporter packages that
+	// allowed PostgreSQL to choose a very expensive global join plan.
+	if _, err := execImportStatement(ctx, tx, `with imported_aliases as materialized (
+			select distinct source.kind_code,source.alias_id,resource.entity_id as resource_id
+			from (
+				select kind_code,raw_id as alias_id,canonical_id
+				from catalog_resource_import_stage
+				union
+				select kind_code,canonical_id as alias_id,canonical_id
+				from catalog_resource_import_stage
+			) source
+			join game_resources resource
+				on resource.kind_code=source.kind_code and resource.canonical_id=source.canonical_id
+			where source.alias_id<>''
+		)
+		update unresolved_resource_references unresolved
+		set resolved_resource_id=imported.resource_id,status='resolved',resolved_at=now()
+		from imported_aliases imported
+		where unresolved.status='pending'
+			and unresolved.kind_code=imported.kind_code
+			and unresolved.raw_resource_id=imported.alias_id
+			and unresolved.resolved_resource_id is distinct from imported.resource_id`); err != nil {
 		return fmt.Errorf("resolve resource references: %w", err)
 	}
 	return nil
 }
 
 func queueCatalogResource(batch *modExportWriteBatch, row catalogResourceImportRow) {
-	batch.queue(`insert into resource_kinds(code,family,user_visible) values($1,split_part($1,'.',1),true) on conflict(code) do nothing`, 0, row.KindCode)
-	batch.queue(`insert into catalog_entities(id,public_id,entity_type,status) values($1,$2,'resource','active')
-		on conflict(id) do update set status='active',updated_at=now()`, 0, row.EntityID, row.PublicID)
-	batch.queue(`insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path,owner_mod_id,created_from_revision_id,resolved)
-		select $1,$2,$3,$4,$5,revision.mod_id,$6,true from catalog_import_revisions revision where revision.id=$6
-		on conflict(kind_code,canonical_id) do update set namespace=excluded.namespace,resource_path=excluded.resource_path,
-			owner_mod_id=coalesce(game_resources.owner_mod_id,excluded.owner_mod_id),
-			created_from_revision_id=coalesce(game_resources.created_from_revision_id,excluded.created_from_revision_id),
-			resolved=true,updated_at=now()`,
-		0, row.EntityID, row.KindCode, row.CanonicalID, row.Namespace, row.ResourcePath, row.RevisionID)
-	rawID := row.RawID
-	if rawID == "" {
-		rawID = row.CanonicalID
-	}
-	batch.queue(`insert into game_resource_aliases(kind_code,alias_id,resource_id,source) values($1,$2,$3,'mod_id')
-		on conflict(kind_code,alias_id) do update set resource_id=excluded.resource_id,source=excluded.source,updated_at=now()`, 0,
-		row.KindCode, rawID, row.EntityID)
-	batch.queue(`insert into game_resource_aliases(kind_code,alias_id,resource_id,source) values($1,$2,$3,'canonical')
-		on conflict(kind_code,alias_id) do update set resource_id=excluded.resource_id,source=excluded.source,updated_at=now()`, 0,
-		row.KindCode, row.CanonicalID, row.EntityID)
-	batch.queue(`insert into resource_import_snapshots(id,resource_id,revision_id,registry,translation_key,names,data,icon_path,preview_path)
-		values($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9)
-		on conflict(resource_id,revision_id) do update set
-			registry=case when excluded.registry<>'' then excluded.registry else resource_import_snapshots.registry end,
-			translation_key=case when excluded.translation_key<>'' then excluded.translation_key else resource_import_snapshots.translation_key end,
-			names=resource_import_snapshots.names||excluded.names,data=resource_import_snapshots.data||excluded.data,
-			icon_path=case when excluded.icon_path<>'' then excluded.icon_path else resource_import_snapshots.icon_path end,
-			preview_path=case when excluded.preview_path<>'' then excluded.preview_path else resource_import_snapshots.preview_path end`,
-		int64(len(row.Names)+len(row.Data)), row.SnapshotID, row.EntityID, row.RevisionID, row.Registry, row.TranslationKey,
-		nonEmptyJSONObject(row.Names), nonEmptyJSONObject(row.Data), row.IconPath, row.PreviewPath)
-	batch.queue(`update unresolved_resource_references set resolved_resource_id=$1,status='resolved',resolved_at=now()
-		where status='pending' and kind_code=$2 and raw_resource_id in ($3,$4)`, 0, row.EntityID, row.KindCode, rawID, row.CanonicalID)
+	batch.catalogRows = append(batch.catalogRows, row)
+	batch.byteCount += int64(len(row.Names) + len(row.Data))
 }
 
 func nonEmptyJSONObject(value string) string {

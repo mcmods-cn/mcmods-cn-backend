@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -35,7 +34,7 @@ func (s *Server) userOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
-	userID, ok := pathUserID(w, r)
+	userID, ok := s.pathUserID(w, r)
 	if !ok {
 		return
 	}
@@ -82,7 +81,7 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) followUser(w http.ResponseWriter, r *http.Request) {
-	targetID, ok := pathUserID(w, r)
+	targetID, ok := s.pathUserID(w, r)
 	if !ok {
 		return
 	}
@@ -131,7 +130,7 @@ func (s *Server) followUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) unfollowUser(w http.ResponseWriter, r *http.Request) {
-	targetID, ok := pathUserID(w, r)
+	targetID, ok := s.pathUserID(w, r)
 	if !ok {
 		return
 	}
@@ -177,12 +176,11 @@ func (s *Server) updateNotificationSettings(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]bool{"emailEnabled": req.EmailEnabled})
 }
 
-func pathUserID(w http.ResponseWriter, r *http.Request) (int64, bool) {
-	value := strings.TrimSpace(r.PathValue("id"))
-	userID, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || userID <= 0 {
+func (s *Server) pathUserID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	identity, err := s.resolvePublicIdentity(r.Context(), strings.TrimSpace(r.PathValue("id")), "user")
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "用户 ID 不正确")
 		return 0, false
 	}
-	return userID, true
+	return identity.InternalID, true
 }

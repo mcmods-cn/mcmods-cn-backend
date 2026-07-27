@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -23,7 +22,7 @@ type creatorLinkPayload struct {
 
 type creatorMemberPayload struct {
 	CreatorID string `json:"creatorId"`
-	RoleID    int64  `json:"roleId"`
+	RoleID    string `json:"roleId"`
 	Title     string `json:"title"`
 }
 
@@ -32,7 +31,8 @@ type creatorSnapshot struct {
 	Name                string                 `json:"name"`
 	DescriptionMarkdown string                 `json:"descriptionMarkdown"`
 	AvatarURL           string                 `json:"avatarUrl"`
-	AvatarFileID        *int64                 `json:"avatarFileId,omitempty"`
+	AvatarFileID        *string                `json:"avatarFileId,omitempty"`
+	AvatarInternalID    *int64                 `json:"-"`
 	Links               []creatorLinkPayload   `json:"links"`
 	CollaboratorIDs     []string               `json:"collaboratorIds"`
 	Members             []creatorMemberPayload `json:"members"`
@@ -49,7 +49,7 @@ type creatorSummary struct {
 }
 
 type creatorRoleResponse struct {
-	ID           int64          `json:"id"`
+	ID           string         `json:"id"`
 	Code         string         `json:"code"`
 	Name         string         `json:"name"`
 	Description  string         `json:"description"`
@@ -72,7 +72,7 @@ func (s *Server) creators(w http.ResponseWriter, r *http.Request) {
 		       creator.claimed_by is not null,count(distinct mod.project_code)
 		from creators creator
 		left join content_creator_bindings binding on binding.creator_id=creator.id and binding.subject_type='mod'
-		left join mods mod on mod.project_code=binding.subject_public_id and mod.review_status='approved'
+		left join mods mod on mod.id=binding.subject_id and mod.review_status='approved'
 		where ($1='' or creator.kind=$1)
 		  and ($2='' or creator.name ilike '%' || $2 || '%')
 		  and (creator.review_status='approved' or creator.created_by=$3 or creator.claimed_by=$3 or $4)
@@ -150,7 +150,7 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 		if scanErr := s.db.QueryRow(r.Context(), `select public_id,username,display_name,avatar_url from users where id=$1`, *claimedBy).
 			Scan(&userPublicID, &username, &displayName, &avatarURL); scanErr == nil {
 			claimedUser = map[string]any{
-				"id": *claimedBy, "publicId": userPublicID, "username": username,
+				"id": userPublicID, "publicId": userPublicID, "username": username,
 				"displayName": displayName, "avatarUrl": avatarURL,
 			}
 		}
@@ -163,7 +163,7 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 		"collaborators": collaborators, "members": members, "works": works,
 		"claimedUser": claimedUser, "canEdit": canEdit,
 		"canClaim":            claims.Subject > 0 && claimedBy == nil && item.ReviewStatus == "approved",
-		"publishedRevisionId": publishedRevisionID,
+		"publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, publishedRevisionID),
 	})
 }
 
@@ -194,7 +194,7 @@ func (s *Server) createCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	id, publicID, revisionID, err := s.createCreatorTx(r.Context(), tx, snapshot, claims.Subject, status, r)
+	_, publicID, revisionID, err := s.createCreatorTx(r.Context(), tx, snapshot, claims.Subject, status, r)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, http.StatusConflict, "creator already exists")
@@ -207,7 +207,7 @@ func (s *Server) createCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit creator")
 		return
 	}
-	annotateActivity(r, activity.ActionCreate, creatorObjectType(snapshot.Kind), publicID, len(snapshot.DescriptionMarkdown), map[string]any{"creatorId": id})
+	annotateActivity(r, activity.ActionCreate, creatorObjectType(snapshot.Kind), publicID, len(snapshot.DescriptionMarkdown), map[string]any{"creatorId": publicID})
 	writeJSON(w, http.StatusCreated, map[string]any{"publicId": publicID, "revisionId": revisionID, "reviewStatus": status})
 }
 
@@ -231,8 +231,10 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var id int64
 	var kind, previousDescription string
-	var createdBy, claimedBy, baseRevisionID, currentAvatarFileID *int64
-	err = tx.QueryRow(r.Context(), `select id,kind,description_markdown,created_by,claimed_by,published_revision_id,avatar_file_id
+	var createdBy, claimedBy, baseRevisionID *int64
+	var currentAvatarFileID *string
+	err = tx.QueryRow(r.Context(), `select id,kind,description_markdown,created_by,claimed_by,published_revision_id,
+		(select public_id from oss_files where id=creators.avatar_file_id)
 		from creators where public_id=$1 for update`, publicID).
 		Scan(&id, &kind, &previousDescription, &createdBy, &claimedBy, &baseRevisionID, &currentAvatarFileID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -271,9 +273,9 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, _ := json.Marshal(snapshot)
 	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
-		AggregateType: "creator", AggregateKey: publicID, BaseRevision: baseRevisionID,
+		EntityType: "creator", EntityID: id, AggregateType: "creator", AggregateKey: publicID, BaseRevision: baseRevisionID,
 		Snapshot: raw, Reason: "Update creator profile", ActorID: claims.Subject,
-		Source: "user", Status: status, Metadata: map[string]any{"creatorId": id, "kind": kind}, Request: r,
+		Source: "user", Status: status, Metadata: map[string]any{"creatorId": publicID, "kind": kind}, Request: r,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create creator revision")
@@ -294,8 +296,8 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	addedBytes := activity.AddedMarkdownBytes(previousDescription, snapshot.DescriptionMarkdown)
-	annotateActivity(r, activity.ActionEdit, creatorObjectType(kind), publicID, addedBytes, map[string]any{"revisionId": created.RevisionID})
-	writeJSON(w, http.StatusOK, map[string]any{"revisionId": created.RevisionID, "reviewStatus": status})
+	annotateActivity(r, activity.ActionEdit, creatorObjectType(kind), publicID, addedBytes, map[string]any{"revisionId": created.RevisionPublicID})
+	writeJSON(w, http.StatusOK, map[string]any{"revisionId": created.RevisionPublicID, "reviewStatus": status})
 }
 
 func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
@@ -338,9 +340,10 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 		status = "approved"
 	}
 	var claimID int64
+	var claimPublicID string
 	err = tx.QueryRow(r.Context(), `insert into creator_claims(creator_id,user_id,proof_markdown,status,reviewed_by,reviewed_at)
 		values($1,$2,$3,$4,case when $4='approved' then $2 else null end,case when $4='approved' then now() else null end)
-		returning id`, creatorID, claims.Subject, request.ProofMarkdown, status).Scan(&claimID)
+		returning id,public_id`, creatorID, claims.Subject, request.ProofMarkdown, status).Scan(&claimID, &claimPublicID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, http.StatusConflict, "a claim is already pending")
@@ -359,13 +362,13 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit claim")
 		return
 	}
-	annotateActivity(r, activity.ActionClaim, creatorObjectType(kind), publicID, len(request.ProofMarkdown), map[string]any{"claimId": claimID})
-	writeJSON(w, http.StatusCreated, map[string]any{"id": claimID, "status": status, "name": name})
+	annotateActivity(r, activity.ActionClaim, creatorObjectType(kind), publicID, len(request.ProofMarkdown), map[string]any{"claimId": claimPublicID})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": claimPublicID, "status": status, "name": name})
 }
 
 func (s *Server) adminCreatorClaims(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), `
-		select claim.id,creator.public_id,creator.kind,creator.name,claim.user_id,
+		select claim.public_id,creator.public_id,creator.kind,creator.name,account.public_id,
 		       account.username,account.display_name,claim.proof_markdown,claim.status,claim.created_at
 		from creator_claims claim
 		join creators creator on creator.id=claim.creator_id
@@ -379,8 +382,7 @@ func (s *Server) adminCreatorClaims(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, userID int64
-		var publicID, kind, name, username, displayName, proof, status string
+		var id, publicID, kind, name, userID, username, displayName, proof, status string
 		var createdAt time.Time
 		if err = rows.Scan(&id, &publicID, &kind, &name, &userID, &username, &displayName, &proof, &status, &createdAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode creator claims")
@@ -396,8 +398,8 @@ func (s *Server) adminCreatorClaims(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
-	claimID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	claimPublicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	if !validCatalogPublicID(claimPublicID) {
 		writeError(w, http.StatusBadRequest, "invalid claim")
 		return
 	}
@@ -416,12 +418,12 @@ func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var creatorID, userID int64
+	var claimID, creatorID, userID int64
 	var publicID, kind, name, status string
-	err = tx.QueryRow(r.Context(), `select creator.id,claim.user_id,creator.public_id,creator.kind,creator.name,claim.status
+	err = tx.QueryRow(r.Context(), `select claim.id,creator.id,claim.user_id,creator.public_id,creator.kind,creator.name,claim.status
 		from creator_claims claim join creators creator on creator.id=claim.creator_id
-		where claim.id=$1 for update of claim,creator`, claimID).
-		Scan(&creatorID, &userID, &publicID, &kind, &name, &status)
+		where claim.public_id=$1 for update of claim,creator`, claimPublicID).
+		Scan(&claimID, &creatorID, &userID, &publicID, &kind, &name, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "claim not found")
 		return
@@ -452,11 +454,11 @@ func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
 	s.sendTemplatedNotification(r.Context(), userID, code, map[string]string{"name": name, "reason": request.Note}, map[string]any{
 		"creatorId": publicID, "url": creatorPath(kind, publicID),
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"id": claimID, "status": request.Status})
+	writeJSON(w, http.StatusOK, map[string]any{"id": claimPublicID, "status": request.Status})
 }
 
 func (s *Server) creatorRoles(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `select id,code,name,description,translations,is_custom
+	rows, err := s.db.Query(r.Context(), `select public_id,code,name,description,translations,is_custom
 		from creator_role_definitions order by is_custom,id`)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load creator roles")
@@ -498,10 +500,10 @@ func (s *Server) createCreatorRole(w http.ResponseWriter, r *http.Request) {
 		request.Code = "custom." + strings.ReplaceAll(normalizeCreatorName(request.Name), " ", "_")
 	}
 	raw, _ := json.Marshal(request.Translations)
-	var id int64
+	var id string
 	err := s.db.QueryRow(r.Context(), `insert into creator_role_definitions(
 		code,name,description,translations,is_custom,created_by
-	) values($1,$2,$3,$4,true,$5) returning id`,
+	) values($1,$2,$3,$4,true,$5) returning public_id`,
 		request.Code, request.Name, strings.TrimSpace(request.Description), raw, currentClaims(r).Subject,
 	).Scan(&id)
 	if err != nil {
@@ -515,47 +517,55 @@ func (s *Server) createCreatorRole(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "code": request.Code, "name": request.Name})
 }
 
-func (s *Server) createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, actorID int64, status string, r *http.Request) (int64, string, int64, error) {
+func (s *Server) createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, actorID int64, status string, r *http.Request) (int64, string, string, error) {
 	var id int64
 	var publicID string
 	err := tx.QueryRow(ctx, `insert into creators(
 		kind,name,normalized_name,description_markdown,avatar_url,avatar_file_id,created_by,review_status
 	) values($1,$2,$3,$4,$5,$6,$7,$8) returning id,public_id`,
 		snapshot.Kind, snapshot.Name, normalizeCreatorName(snapshot.Name), snapshot.DescriptionMarkdown,
-		snapshot.AvatarURL, snapshot.AvatarFileID, actorID, status,
+		snapshot.AvatarURL, snapshot.AvatarInternalID, actorID, status,
 	).Scan(&id, &publicID)
 	if err != nil {
-		return 0, "", 0, err
+		return 0, "", "", err
 	}
 	raw, _ := json.Marshal(snapshot)
 	created, err := createContentRevisionTx(ctx, tx, createContentRevisionParams{
-		AggregateType: "creator", AggregateKey: publicID, Snapshot: raw,
+		EntityType: "creator", EntityID: id, AggregateType: "creator", AggregateKey: publicID, Snapshot: raw,
 		Reason: "Create creator profile", ActorID: actorID, Source: "user", Status: status,
-		Metadata: map[string]any{"creatorId": id, "kind": snapshot.Kind}, Request: r,
+		Metadata: map[string]any{"creatorId": publicID, "kind": snapshot.Kind}, Request: r,
 	})
 	if err != nil {
-		return 0, "", 0, err
+		return 0, "", "", err
 	}
 	if err = applyCreatorRelationsTx(ctx, tx, id, snapshot); err != nil {
-		return 0, "", 0, err
+		return 0, "", "", err
 	}
 	if status == "approved" {
 		if _, err = tx.Exec(ctx, `update creators set published_revision_id=$2,review_status='approved' where id=$1`, id, created.RevisionID); err != nil {
-			return 0, "", 0, err
+			return 0, "", "", err
 		}
 		if err = appendReviewResolutionTx(ctx, tx, created.ChangeRequestID, "approved", actorID, "automatic approval", r); err != nil {
-			return 0, "", 0, err
+			return 0, "", "", err
 		}
 	}
-	return id, publicID, created.RevisionID, nil
+	return id, publicID, created.RevisionPublicID, nil
 }
 
 func applyCreatorSnapshotTx(ctx context.Context, tx pgx.Tx, creatorID, revisionID int64, snapshot creatorSnapshot) error {
+	var avatarFileID *int64
+	if snapshot.AvatarFileID != nil {
+		internalID, err := resolveOSSFilePublicID(ctx, tx, *snapshot.AvatarFileID)
+		if err != nil {
+			return err
+		}
+		avatarFileID = &internalID
+	}
 	if _, err := tx.Exec(ctx, `update creators set
 		name=$2,normalized_name=$3,description_markdown=$4,avatar_url=$5,avatar_file_id=$6,
 		review_status='approved',published_revision_id=$7,updated_at=now()
 		where id=$1`, creatorID, snapshot.Name, normalizeCreatorName(snapshot.Name),
-		snapshot.DescriptionMarkdown, snapshot.AvatarURL, snapshot.AvatarFileID, revisionID); err != nil {
+		snapshot.DescriptionMarkdown, snapshot.AvatarURL, avatarFileID, revisionID); err != nil {
 		return err
 	}
 	return applyCreatorRelationsTx(ctx, tx, creatorID, snapshot)
@@ -570,15 +580,21 @@ func (s *Server) resolveCreatorAvatarTx(
 	if snapshot.AvatarFileID == nil {
 		return nil
 	}
-	if *snapshot.AvatarFileID <= 0 {
+	publicID := strings.ToLower(strings.TrimSpace(*snapshot.AvatarFileID))
+	if publicID == "" {
 		snapshot.AvatarFileID = nil
+		snapshot.AvatarInternalID = nil
 		snapshot.AvatarURL = ""
 		return nil
 	}
+	internalID, err := resolveOSSFilePublicID(ctx, tx, publicID)
+	if err != nil {
+		return errors.New("creator avatar file was not found")
+	}
 	var objectKey, contentType string
-	err := tx.QueryRow(ctx, `select object_key,content_type from oss_files
+	err = tx.QueryRow(ctx, `select object_key,content_type from oss_files
 		where id=$1 and uploader_id=$2 and status='active'`,
-		*snapshot.AvatarFileID, actorID,
+		internalID, actorID,
 	).Scan(&objectKey, &contentType)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errors.New("creator avatar file was not found")
@@ -589,6 +605,8 @@ func (s *Server) resolveCreatorAvatarTx(
 	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
 		return errors.New("creator avatar must be an image")
 	}
+	snapshot.AvatarFileID = &publicID
+	snapshot.AvatarInternalID = &internalID
 	snapshot.AvatarURL = buildPublicOSSURL(s.ossConfigFromSettings(ctx), objectKey)
 	return nil
 }
@@ -627,9 +645,13 @@ func applyCreatorRelationsTx(ctx context.Context, tx pgx.Tx, creatorID int64, sn
 		if err := tx.QueryRow(ctx, `select id from creators where public_id=$1 and kind='author'`, member.CreatorID).Scan(&memberID); err != nil {
 			return err
 		}
+		var roleID int64
+		if err := tx.QueryRow(ctx, `select id from creator_role_definitions where public_id=$1`, member.RoleID).Scan(&roleID); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `insert into creator_team_members(
 			team_id,member_creator_id,role_id,title,display_order
-		) values($1,$2,$3,$4,$5)`, creatorID, memberID, member.RoleID, member.Title, index); err != nil {
+		) values($1,$2,$3,$4,$5)`, creatorID, memberID, roleID, member.Title, index); err != nil {
 			return err
 		}
 	}
@@ -650,7 +672,7 @@ func (s *Server) approveCreatorClaimTx(ctx context.Context, tx pgx.Tx, creatorID
 	defaults := s.permissionDefaultsFromSettings(ctx)
 	rows, err := tx.Query(ctx, `select distinct mod.id,mod.project_code
 		from content_creator_bindings binding
-		join mods mod on mod.project_code=binding.subject_public_id
+		join mods mod on mod.id=binding.subject_id
 		where binding.creator_id=$1 and binding.subject_type='mod'`, creatorID)
 	if err != nil {
 		return err
@@ -708,8 +730,8 @@ func (s *Server) creatorCollaborators(ctx context.Context, creatorID int64) ([]c
 	rows, err := s.db.Query(ctx, `
 		select distinct collaborator.public_id,collaborator.kind,collaborator.name,collaborator.avatar_url,
 		       collaborator.review_status,collaborator.claimed_by is not null,
-		       (select count(distinct mod.project_code) from content_creator_bindings binding
-		        join mods mod on mod.project_code=binding.subject_public_id
+		       (select count(distinct mod.id) from content_creator_bindings binding
+		        join mods mod on mod.id=binding.subject_id
 		        where binding.creator_id=collaborator.id and binding.subject_type='mod' and mod.review_status='approved')
 		from (
 			select collaborator_id id from creator_collaborations where creator_id=$1
@@ -734,7 +756,7 @@ func (s *Server) creatorCollaborators(ctx context.Context, creatorID int64) ([]c
 
 func (s *Server) creatorMembers(ctx context.Context, creatorID int64) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, `
-		select member.public_id,member.name,member.avatar_url,role.id,role.code,role.name,relation.title
+		select member.public_id,member.name,member.avatar_url,role.public_id,role.code,role.name,relation.title
 		from creator_team_members relation
 		join creators member on member.id=relation.member_creator_id
 		join creator_role_definitions role on role.id=relation.role_id
@@ -746,8 +768,7 @@ func (s *Server) creatorMembers(ctx context.Context, creatorID int64) ([]map[str
 	defer rows.Close()
 	result := make([]map[string]any, 0)
 	for rows.Next() {
-		var publicID, name, avatarURL, roleCode, roleName, title string
-		var roleID int64
+		var publicID, name, avatarURL, roleID, roleCode, roleName, title string
 		if err = rows.Scan(&publicID, &name, &avatarURL, &roleID, &roleCode, &roleName, &title); err != nil {
 			return nil, err
 		}
@@ -762,7 +783,7 @@ func (s *Server) creatorMembers(ctx context.Context, creatorID int64) ([]map[str
 func (s *Server) creatorWorks(ctx context.Context, creatorID int64) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, `
 		select distinct mod.project_code,mod.slug,mod.primary_name,mod.secondary_name,mod.summary,mod.icon_url
-		from content_creator_bindings binding join mods mod on mod.project_code=binding.subject_public_id
+		from content_creator_bindings binding join mods mod on mod.id=binding.subject_id
 		where binding.creator_id=$1 and binding.subject_type='mod' and mod.review_status='approved'
 		order by mod.primary_name`, creatorID)
 	if err != nil {
@@ -794,11 +815,8 @@ func normalizeCreatorSnapshot(snapshot *creatorSnapshot) error {
 	}
 	snapshot.DescriptionMarkdown = strings.TrimSpace(snapshot.DescriptionMarkdown)
 	snapshot.AvatarURL = strings.TrimSpace(snapshot.AvatarURL)
-	if snapshot.AvatarURL != "" {
-		parsed, err := url.ParseRequestURI(snapshot.AvatarURL)
-		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") {
-			return errors.New("avatar URL must use HTTP or HTTPS")
-		}
+	if snapshot.AvatarURL != "" && !validHTTPURL(snapshot.AvatarURL) {
+		return errors.New("avatar URL must use HTTP or HTTPS")
 	}
 	seenLinks := map[string]struct{}{}
 	cleanLinks := make([]creatorLinkPayload, 0, len(snapshot.Links))
@@ -806,8 +824,7 @@ func normalizeCreatorSnapshot(snapshot *creatorSnapshot) error {
 		link.Type = normalizeCode(link.Type)
 		link.URL = strings.TrimSpace(link.URL)
 		link.Label = strings.TrimSpace(link.Label)
-		parsed, err := url.ParseRequestURI(link.URL)
-		if link.Type == "" || err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+		if link.Type == "" || !validHTTPURL(link.URL) || len(link.Label) > 160 {
 			return errors.New("creator links must have a type and HTTP or HTTPS URL")
 		}
 		key := link.Type + "\x00" + link.URL
@@ -880,11 +897,22 @@ func creatorNameTx(ctx context.Context, tx pgx.Tx, creatorID int64) (string, err
 	return name, err
 }
 
-func creatorRoleNameTx(ctx context.Context, tx pgx.Tx, roleID *int64) (string, error) {
+func creatorRoleNameTx(ctx context.Context, tx pgx.Tx, roleID *string) (string, error) {
 	if roleID == nil {
 		return "", nil
 	}
 	var name string
-	err := tx.QueryRow(ctx, `select name from creator_role_definitions where id=$1`, *roleID).Scan(&name)
+	err := tx.QueryRow(ctx, `select name from creator_role_definitions where public_id=$1`, *roleID).Scan(&name)
 	return name, err
+}
+
+func creatorRoleInternalIDTx(ctx context.Context, tx pgx.Tx, roleID *string) (*int64, error) {
+	if roleID == nil {
+		return nil, nil
+	}
+	var internalID int64
+	if err := tx.QueryRow(ctx, `select id from creator_role_definitions where public_id=$1`, *roleID).Scan(&internalID); err != nil {
+		return nil, err
+	}
+	return &internalID, nil
 }
