@@ -5,6 +5,10 @@ package database
 // introduced. The statements are idempotent and preserve human-created trees.
 func compatibleModContentLayoutStatements() []string {
 	return []string{
+		`insert into mod_content_templates(code,builtin,i18n_key,default_display_mode,definition) values
+			('loot_table',true,'lootTable','large','{"resourceKinds":["minecraft.loot_table"]}'::jsonb),
+			('game_setting',true,'gameSetting','large','{"resourceKinds":["minecraft.game_setting"]}'::jsonb)
+			on conflict do nothing`,
 		`alter table mod_content_sections add column if not exists system_key text not null default ''`,
 		`alter table mod_content_section_resources add column if not exists placement_source text not null default 'manual'`,
 		`alter table mod_content_section_resources add column if not exists placement_identity_key text`,

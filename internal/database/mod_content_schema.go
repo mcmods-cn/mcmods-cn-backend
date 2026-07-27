@@ -75,6 +75,8 @@ func modContentSchemaStatements() []string {
 			('key_mapping',true,'keyMapping','large','{"resourceKinds":["minecraft.key_mapping"]}'::jsonb),
 			('command',true,'command','large','{"resourceKinds":["minecraft.command"]}'::jsonb),
 			('advancement',true,'advancement','large','{"resourceKinds":["minecraft.advancement"]}'::jsonb),
+			('loot_table',true,'lootTable','large','{"resourceKinds":["minecraft.loot_table"]}'::jsonb),
+			('game_setting',true,'gameSetting','large','{"resourceKinds":["minecraft.game_setting"]}'::jsonb),
 			('skill',true,'skill','large','{"resourceKinds":["mod.skill"]}'::jsonb),
 			('element',true,'element','large','{"resourceKinds":["mod.element"]}'::jsonb),
 			('chemical',true,'chemical','compact','{"resourceKinds":["mekanism.gas","mekanism.infusion","mekanism.pigment","mekanism.slurry"]}'::jsonb)

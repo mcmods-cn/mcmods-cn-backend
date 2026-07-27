@@ -378,7 +378,6 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 	}
 	deduplicated := false
 	shouldPublish := false
-	cleanupDuplicate := false
 	var existingStatus string
 	var existingStalled bool
 	err = tx.QueryRow(r.Context(),
@@ -394,7 +393,7 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 			jobID, identity.ID, packageID, modExportImporterVersion, targetVersionID, request.OverwriteExistingImportData, claims.Subject,
 		)
 		shouldPublish = err == nil
-	case err == nil && (shouldRetryModExportStatus(existingStatus) || existingStalled):
+	case err == nil && (shouldRestartModExportStatus(existingStatus) || existingStalled):
 		_, err = tx.Exec(r.Context(),
 			`update catalog_import_jobs set status='queued',progress=0,current_stage='recovery',error_code='',error_detail='{}'::jsonb,created_by=$2,started_at=null,finished_at=null,heartbeat_at=null,run_token='',updated_at=now() where id=$1`,
 			jobID, claims.Subject,
@@ -402,7 +401,6 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 		shouldPublish = err == nil
 	case err == nil:
 		deduplicated = true
-		cleanupDuplicate = existingStatus == "ready" || existingStatus == "partial"
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "保存导入任务失败")
@@ -427,19 +425,23 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if shouldPublish {
 		s.dispatchModExportJob(r.Context(), jobID)
-	} else if cleanupDuplicate {
-		// The already-imported package is immutable; the repeated staging object is no longer needed.
-		if client, cfg, clientErr := s.ossClient(r.Context()); clientErr == nil {
-			_, _ = client.DeleteObject(r.Context(), &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey)})
-		}
-		_, _ = s.db.Exec(r.Context(), `update oss_files set status='deleted',updated_at=now() where id=$1`, archiveFileID)
-		_, _ = s.db.Exec(r.Context(), `update catalog_import_packages set archive_file_id=null where id=$1 and archive_file_id=$2`, packageID, archiveFileID)
 	}
 	response, _ := s.modExportJobByID(r.Context(), jobID, identity.ID)
 	response.Deduplicated = deduplicated
 	writeJSON(w, http.StatusAccepted, response)
 }
 
+func shouldRestartModExportStatus(status string) bool {
+	switch status {
+	case "ready", "partial", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+// Embedded icon importers retry failed/cancelled jobs in place, but unlike a
+// full mcmods_exporter upload they do not intentionally rerun completed jobs.
 func shouldRetryModExportStatus(status string) bool {
 	return status == "failed" || status == "cancelled"
 }
@@ -993,11 +995,33 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 				}
 				continue
 			}
+			extension := strings.ToLower(path.Ext(name))
+			if extension == ".json" && exportDocumentKind(name) != "" {
+				if int64(len(data)) > maxExportJSONSize {
+					return fmt.Errorf("JSON asset too large: %s", name)
+				}
+				if err = queueExportDocumentEntries(writeBatch, resourceResolver, revisions, name, data); err != nil {
+					return err
+				}
+				if retainExportTextAsset(name, fallbackAssetPaths) {
+					for _, revisionID := range sortedExportRevisionIDs(revisions) {
+						if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
+							return err
+						}
+						textAssetCount++
+					}
+				}
+				if writeBatch.shouldFlush() {
+					if err = flushWriteBatch(); err != nil {
+						return err
+					}
+				}
+				continue
+			}
 			revisionID := exportRevisionForPath(revisions, name)
 			if revisionID == "" {
 				continue
 			}
-			extension := strings.ToLower(path.Ext(name))
 			switch extension {
 			case ".png":
 				var media modExportPNGMedia
@@ -1017,11 +1041,6 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			case ".json", ".obj", ".mtl", ".snbt", ".mcmeta":
 				if int64(len(data)) > maxExportJSONSize && extension == ".json" {
 					return fmt.Errorf("JSON asset too large: %s", name)
-				}
-				if extension == ".json" && exportDocumentKind(name) != "" {
-					if err = queueExportDocumentEntries(writeBatch, resourceResolver, revisionID, name, data); err != nil {
-						return err
-					}
 				}
 				if extension != ".json" || retainExportTextAsset(name, fallbackAssetPaths) {
 					if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
@@ -1443,16 +1462,16 @@ func prepareExportRegistryResources(resolver catalogResourceIdentityResolver, re
 			return nil, err
 		}
 		objectID, _ := entry["id"].(string)
-		parts := strings.SplitN(objectID, ":", 2)
-		if len(parts) != 2 {
+		namespace, resourcePath, valid := exportSourceResourceParts(document.Registry, objectID, "")
+		if !valid {
 			continue
 		}
-		revisionID := revisions[strings.ToLower(parts[0])]
+		revisionID := revisions[namespace]
 		if revisionID == "" {
 			continue
 		}
 		kindCode := resourceKindForRegistry(document.Registry)
-		identity := resolver.resolve(kindCode, objectID)
+		identity := resolveExportResourceIdentity(resolver, kindCode, document.Registry, objectID, namespace)
 		translationKey, _ := entry["translation_key"].(string)
 		names, _ := json.Marshal(supportedExportNames(entry["names"]))
 		filterSupportedExportLocalizedFields(entry)
@@ -1463,7 +1482,7 @@ func prepareExportRegistryResources(resolver catalogResourceIdentityResolver, re
 		if string(names) == "null" || len(names) == 0 {
 			names = []byte("{}")
 		}
-		iconPath, previewPath := exportRegistryMediaPaths(document.Registry, parts[0], parts[1])
+		iconPath, previewPath := exportRegistryMediaPaths(document.Registry, namespace, resourcePath)
 		rowsByKey[revisionID+"\x00"+kindCode+"\x00"+objectID] = catalogResourceImportRow{
 			EntityID: identity.ID, PublicID: identity.PublicID, KindCode: kindCode, CanonicalID: identity.CanonicalID, RawID: identity.RawID,
 			Namespace: identity.Namespace, ResourcePath: identity.ResourcePath, RevisionID: revisionID,
@@ -1966,6 +1985,21 @@ func exportRevisionForPath(revisions map[string]string, name string) string {
 		}
 	}
 	return ""
+}
+
+func sortedExportRevisionIDs(revisions map[string]string) []string {
+	unique := make(map[string]struct{}, len(revisions))
+	for _, revisionID := range revisions {
+		if revisionID != "" {
+			unique[revisionID] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(unique))
+	for revisionID := range unique {
+		result = append(result, revisionID)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func normalizeExportNamespaces(values []string) []string {

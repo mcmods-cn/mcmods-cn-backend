@@ -61,6 +61,9 @@ func syncImportedResourcesToContentVersionTx(ctx context.Context, tx pgx.Tx, rev
 }
 
 func ensureImportedContentSectionsTx(ctx context.Context, tx pgx.Tx, revisionIDs []string, versionID, modID, actorID int64) error {
+	if err := repairArchivedContentSectionTreesTx(ctx, tx, versionID, actorID); err != nil {
+		return fmt.Errorf("repair archived content section trees: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `with imported_templates as (
 		select distinct case
 			when resource.kind_code in ('minecraft.item','minecraft.block') then 'item_block'
@@ -74,6 +77,8 @@ func ensureImportedContentSectionsTx(ctx context.Context, tx pgx.Tx, revisionIDs
 			when resource.kind_code='minecraft.structure' then 'world_structure'
 			when resource.kind_code='minecraft.key_mapping' then 'key_mapping'
 			when resource.kind_code='minecraft.advancement' then 'advancement'
+			when resource.kind_code='minecraft.loot_table' then 'loot_table'
+			when resource.kind_code='minecraft.game_setting' then 'game_setting'
 			when resource.kind_code like 'mekanism.%' then 'chemical'
 		end template_code
 		from resource_import_snapshots snapshot join game_resources resource on resource.entity_id=snapshot.resource_id
@@ -191,6 +196,8 @@ func ensureImportedContentSectionsTx(ctx context.Context, tx pgx.Tx, revisionIDs
 			when snapshot.kind_code='minecraft.structure' then 'world_structure'
 			when snapshot.kind_code='minecraft.key_mapping' then 'key_mapping'
 			when snapshot.kind_code='minecraft.advancement' then 'advancement'
+			when snapshot.kind_code='minecraft.loot_table' then 'loot_table'
+			when snapshot.kind_code='minecraft.game_setting' then 'game_setting'
 			when snapshot.kind_code like 'mekanism.%' then 'chemical'
 		end template_code
 		from imported_snapshots snapshot
@@ -222,7 +229,54 @@ func ensureImportedContentSectionsTx(ctx context.Context, tx pgx.Tx, revisionIDs
 	if err != nil {
 		return fmt.Errorf("attach imported resources to content sections: %w", err)
 	}
+	if err = archiveLegacyEmptyImportedSectionsTx(ctx, tx, versionID, actorID); err != nil {
+		return fmt.Errorf("archive legacy empty imported sections: %w", err)
+	}
 	return nil
+}
+
+// archiveLegacyEmptyImportedSectionsTx removes empty roots created by the
+// former capability-driven importer. A manually created page has a published
+// revision and is therefore never selected by this compatibility cleanup.
+func archiveLegacyEmptyImportedSectionsTx(ctx context.Context, tx pgx.Tx, versionID, actorID int64) error {
+	_, err := tx.Exec(ctx, `update mod_content_sections section
+		set status='archived',updated_by=nullif($2::bigint,0),updated_at=now()
+		from mod_content_templates template
+		where section.version_id=$1 and section.template_id=template.id
+		  and section.parent_id is null and section.status='active'
+		  and section.published_revision_id is null
+		  and template.code in ('enchantment','biome','key_mapping')
+		  and not exists(select 1 from mod_content_section_localizations localization where localization.section_id=section.id)
+		  and not exists(select 1 from mod_content_sections child where child.parent_id=section.id and child.status='active')
+		  and not exists(select 1 from mod_content_section_resources placement where placement.section_id=section.id)`,
+		versionID, actorID)
+	return err
+}
+
+// repairArchivedContentSectionTreesTx repairs rows created by the former
+// root-only soft-delete behavior. Any descendant of an archived section is no
+// longer reachable and must be archived too. Placements on the whole invalid
+// tree are removed so the importer can attach those resources to rebuilt pages.
+func repairArchivedContentSectionTreesTx(ctx context.Context, tx pgx.Tx, versionID, actorID int64) error {
+	_, err := tx.Exec(ctx, `with recursive invalid_sections(id) as (
+			select id from mod_content_sections
+			where version_id=$1 and status<>'active'
+			union
+			select child.id
+			from mod_content_sections child
+			join invalid_sections parent on child.parent_id=parent.id
+			where child.version_id=$1
+		), deleted_placements as (
+			delete from mod_content_section_resources placement
+			using invalid_sections invalid
+			where placement.section_id=invalid.id
+			returning placement.section_id
+		)
+		update mod_content_sections section
+		set status='archived',updated_by=nullif($2::bigint,0),updated_at=now()
+		from invalid_sections invalid
+		where section.id=invalid.id and section.status='active'`, versionID, actorID)
+	return err
 }
 
 func insertModExportImportActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, jobID, versionPublicID string, overwrite bool) error {

@@ -273,7 +273,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		documentResourceCount += len(exportDocumentEntries(name, document))
-		if err = queueExportDocumentEntries(batch, catalogResourceIdentityResolver{}, revisionID, name, value); err != nil {
+		if err = queueExportDocumentEntries(batch, catalogResourceIdentityResolver{}, revisions, name, value); err != nil {
 			t.Fatal(err)
 		}
 		if retainExportTextAsset(name, fallbackAssetPaths) {
@@ -422,10 +422,72 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	}, supportedTranslations); err != nil {
 		t.Fatal(err)
 	}
+	if err = importExportCapabilities(context.Background(), tx, revisions, []modExportCapability{
+		{ID: "registries", Status: "available", Source: "integration-test", Data: json.RawMessage(`{"id":"registries","status":"available"}`)},
+		{ID: "worldgen", Status: "available", Source: "integration-test", Data: json.RawMessage(`{"id":"worldgen","status":"available"}`)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var legacyEmptySectionID int64
+	if err = tx.QueryRow(context.Background(), `insert into mod_content_sections(
+			mod_id,version_id,template_id,default_locale,display_mode,status)
+		select $1,$2,template.id,template.default_locale,template.default_display_mode,'active'
+		from mod_content_templates template where template.code='enchantment' and template.builtin
+		returning id`, modID, versionID).Scan(&legacyEmptySectionID); err != nil {
+		t.Fatal(err)
+	}
 	if err = syncImportedResourcesToContentVersionTx(context.Background(), tx, []string{revisionID}, versionID, false, 0); err != nil {
 		t.Fatalf("sync imported resources into the selected content version: %v", err)
 	}
 	mark("promotion and content-version sync")
+	var legacyEmptySectionStatus string
+	if err = tx.QueryRow(context.Background(), `select status from mod_content_sections where id=$1`, legacyEmptySectionID).
+		Scan(&legacyEmptySectionStatus); err != nil {
+		t.Fatal(err)
+	}
+	if legacyEmptySectionStatus != "archived" {
+		t.Fatalf("legacy capability-created empty page was not archived: %s", legacyEmptySectionStatus)
+	}
+	var populatedCatalogSections, emptyCatalogSections int
+	if err = tx.QueryRow(context.Background(), `select count(*)::int
+		from mod_content_sections section
+		join mod_content_templates template on template.id=section.template_id
+		where section.version_id=$1 and section.parent_id is null and section.status='active'
+		  and template.code='biome'`, versionID).
+		Scan(&populatedCatalogSections); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.QueryRow(context.Background(), `select count(*)::int
+		from mod_content_sections section
+		join mod_content_templates template on template.id=section.template_id
+		where section.version_id=$1 and section.parent_id is null and section.status='active'
+		  and template.code=any(array['enchantment','key_mapping'])`, versionID).
+		Scan(&emptyCatalogSections); err != nil {
+		t.Fatal(err)
+	}
+	if populatedCatalogSections != 1 || emptyCatalogSections != 0 {
+		t.Fatalf("expected populated biome page and no empty enchantment/key mapping pages, biome=%d empty=%d",
+			populatedCatalogSections, emptyCatalogSections)
+	}
+	var lootTableSections, lootTableResources int
+	if err = tx.QueryRow(context.Background(), `select count(*)::int
+		from mod_content_sections section
+		join mod_content_templates template on template.id=section.template_id
+		where section.version_id=$1 and section.parent_id is null and section.status='active'
+		  and template.code='loot_table'`, versionID).Scan(&lootTableSections); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.QueryRow(context.Background(), `select count(*)::int
+		from mod_content_section_resources placement
+		join mod_content_sections section on section.id=placement.section_id
+		join mod_content_templates template on template.id=section.template_id
+		where placement.version_id=$1 and template.code='loot_table'`, versionID).Scan(&lootTableResources); err != nil {
+		t.Fatal(err)
+	}
+	if lootTableSections != 1 || lootTableResources == 0 {
+		t.Fatalf("expected imported loot tables in one unified content page, sections=%d resources=%d",
+			lootTableSections, lootTableResources)
+	}
 	var effectSectionResources int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int from mod_content_section_resources section_resource
 		join mod_content_sections section on section.id=section_resource.section_id
@@ -498,6 +560,86 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	if boundItemAliases != 0 {
 		t.Fatalf("item/block content still contains %d item aliases that have authoritative block bindings", boundItemAliases)
 	}
+	var initialSectionPlacementCount int
+	if err = tx.QueryRow(context.Background(), `select count(*)::int
+		from mod_content_section_resources where version_id=$1`, versionID).
+		Scan(&initialSectionPlacementCount); err != nil {
+		t.Fatal(err)
+	}
+	if initialSectionPlacementCount == 0 {
+		t.Fatal("expected imported resources to be placed before the delete/reimport regression")
+	}
+
+	// Reproduce the former root-only soft delete. Before the fix this left the
+	// item/block children active and caused a repeated import of the same ZIP to
+	// report success without rebuilding any visible root pages.
+	if _, err = tx.Exec(context.Background(), `update mod_content_sections
+		set status='archived',updated_at=now()
+		where version_id=$1 and parent_id is null and status='active'`, versionID); err != nil {
+		t.Fatal(err)
+	}
+	if err = syncImportedResourcesToContentVersionTx(context.Background(), tx, []string{revisionID}, versionID, true, 0); err != nil {
+		t.Fatalf("rebuild content sections after all root pages were deleted: %v", err)
+	}
+	var rebuiltPlacementCount, activeOrphans, rebuiltDeclaredSections, rebuiltItemBlockRoots int
+	if err = tx.QueryRow(context.Background(), `select count(*)::int
+		from mod_content_section_resources where version_id=$1`, versionID).
+		Scan(&rebuiltPlacementCount); err != nil {
+		t.Fatal(err)
+	}
+	if rebuiltPlacementCount != initialSectionPlacementCount {
+		t.Fatalf("reimport rebuilt %d placements; expected the original %d", rebuiltPlacementCount, initialSectionPlacementCount)
+	}
+	if err = tx.QueryRow(context.Background(), `select count(*)::int
+		from mod_content_sections child
+		join mod_content_sections parent on parent.id=child.parent_id
+		where child.version_id=$1 and child.status='active' and parent.status<>'active'`, versionID).
+		Scan(&activeOrphans); err != nil {
+		t.Fatal(err)
+	}
+	if activeOrphans != 0 {
+		t.Fatalf("reimport left %d active child categories below archived parents", activeOrphans)
+	}
+	if err = tx.QueryRow(context.Background(), `select count(*)::int
+		from mod_content_sections section
+		join mod_content_templates template on template.id=section.template_id
+		where section.version_id=$1 and section.parent_id is null and section.status='active'
+		  and template.code=any(array['biome','loot_table'])`, versionID).
+		Scan(&rebuiltDeclaredSections); err != nil {
+		t.Fatal(err)
+	}
+	if rebuiltDeclaredSections != 2 {
+		t.Fatalf("reimport did not rebuild populated biome and loot table pages: got %d", rebuiltDeclaredSections)
+	}
+	if err = tx.QueryRow(context.Background(), `select count(*)::int
+		from mod_content_sections section
+		join mod_content_templates template on template.id=section.template_id
+		where section.version_id=$1 and section.parent_id is null and section.status='active'
+		  and template.code=any(array['enchantment','key_mapping'])`, versionID).
+		Scan(&emptyCatalogSections); err != nil {
+		t.Fatal(err)
+	}
+	if emptyCatalogSections != 0 {
+		t.Fatalf("reimport recreated %d empty enchantment/key mapping pages", emptyCatalogSections)
+	}
+	if err = tx.QueryRow(context.Background(), `select count(*)::int from (
+		select root.id
+		from mod_content_sections root
+		join mod_content_templates template on template.id=root.template_id
+		join mod_content_sections child on child.parent_id=root.id and child.status='active'
+		where root.version_id=$1 and root.parent_id is null and root.status='active'
+		  and template.code='item_block'
+		group by root.id
+		having count(*) filter(where child.system_key='items')=1
+		   and count(*) filter(where child.system_key='blocks')=1
+	) rebuilt`, versionID).Scan(&rebuiltItemBlockRoots); err != nil {
+		t.Fatal(err)
+	}
+	if rebuiltItemBlockRoots != 1 {
+		t.Fatalf("reimport did not rebuild exactly one item/block page with both child categories: got %d", rebuiltItemBlockRoots)
+	}
+	mark("delete-all and same-package reimport rebuild")
+
 	var recipeTypes, templates, recipes, alternatives int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int from recipe_type_import_snapshots where revision_id=$1`, revisionID).Scan(&recipeTypes); err != nil {
 		t.Fatal(err)

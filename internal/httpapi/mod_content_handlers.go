@@ -1494,7 +1494,7 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 		if snapshot.Kind == "template" {
 			table = "mod_content_templates"
 		} else if snapshot.Kind == "section" {
-			table = "mod_content_sections"
+			return archiveModContentSectionTreeTx(ctx, tx, snapshot.PublicID, snapshot.ModID, revisionID, actorID)
 		} else if snapshot.Kind == "resource" {
 			if snapshot.Resource == nil {
 				return errCatalogEditorInvalid
@@ -1687,6 +1687,32 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 	default:
 		return errCatalogEditorInvalid
 	}
+}
+
+// archiveModContentSectionTreeTx applies soft deletion to the complete
+// category subtree. Foreign-key cascades cannot help because the section rows
+// are archived rather than physically deleted. Their placements must also be
+// removed, or the version-wide resource uniqueness would block a later import
+// from rebuilding the deleted documentation pages.
+func archiveModContentSectionTreeTx(ctx context.Context, tx pgx.Tx, publicID string, modID, revisionID, actorID int64) error {
+	if _, err := tx.Exec(ctx, `with recursive subtree(id) as (
+			select id from mod_content_sections where public_id=$1 and mod_id=$2
+			union all
+			select child.id from mod_content_sections child join subtree parent on child.parent_id=parent.id
+		)
+		delete from mod_content_section_resources placement
+		using subtree where placement.section_id=subtree.id`, publicID, modID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `with recursive subtree(id) as (
+			select id from mod_content_sections where public_id=$1 and mod_id=$2
+			union all
+			select child.id from mod_content_sections child join subtree parent on child.parent_id=parent.id
+		)
+		update mod_content_sections section set status='archived',published_revision_id=$3,
+			updated_by=nullif($4::bigint,0),updated_at=now()
+		from subtree where section.id=subtree.id`, publicID, modID, revisionID, actorID)
+	return err
 }
 
 func modContentResourceLocalizationProvenance(existing string, unchanged bool) string {

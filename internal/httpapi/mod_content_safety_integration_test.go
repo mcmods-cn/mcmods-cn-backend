@@ -274,6 +274,97 @@ func TestModContentVersionArchiveAndResourceRevivalIntegration(t *testing.T) {
 		t.Fatalf("pending detail was reserved twice: %v", err)
 	}
 
+	var templateID, rootSectionID, childSectionID int64
+	var rootSectionPublicID string
+	if err = tx.QueryRow(ctx, `select id from mod_content_templates where builtin and code='item_block'`).Scan(&templateID); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.QueryRow(ctx, `insert into mod_content_sections(
+		mod_id,version_id,template_id,default_locale,display_mode,status,created_by,updated_by)
+		values($1,$2,$3,'en-US','compact','active',$4,$4) returning id,public_id`,
+		modID, versionID, templateID, actorID).Scan(&rootSectionID, &rootSectionPublicID); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.QueryRow(ctx, `insert into mod_content_sections(
+		mod_id,version_id,template_id,parent_id,system_key,default_locale,display_mode,status,created_by,updated_by)
+		values($1,$2,$3,$4,'items','en-US','compact','active',$5,$5) returning id`,
+		modID, versionID, templateID, rootSectionID, actorID).Scan(&childSectionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(ctx, `insert into mod_content_section_resources(
+		section_id,version_id,resource_id,ordinal,placement_source)
+		values($1,$2,$3,0,'manual')`, childSectionID, versionID, resourceID); err != nil {
+		t.Fatal(err)
+	}
+	var sectionRevisionID int64
+	if err = tx.QueryRow(ctx, `insert into content_revisions(
+		entity_type,entity_id,aggregate_type,aggregate_key,revision_no,snapshot,snapshot_hash,created_by,source)
+		select route.entity_type,route.internal_id,'mod_content_section',$1,1,'{}'::jsonb,$2,$3,'test'
+		from public_routes route where route.public_id=$1 and route.entity_type='mod_content_section'
+		returning id`, rootSectionPublicID, fmt.Sprintf("archive-section-%06d", suffix), actorID).Scan(&sectionRevisionID); err != nil {
+		t.Fatal(err)
+	}
+	if err = publishModContentSnapshotTx(ctx, tx, sectionRevisionID, modContentSnapshot{
+		Kind:      "section",
+		Operation: "delete",
+		ModID:     modID,
+		PublicID:  rootSectionPublicID,
+	}, actorID); err != nil {
+		t.Fatal(err)
+	}
+	var archivedSectionCount, remainingPlacementCount int
+	if err = tx.QueryRow(ctx, `select count(*)::int from mod_content_sections
+		where id=any($1::bigint[]) and status='archived'`, []int64{rootSectionID, childSectionID}).
+		Scan(&archivedSectionCount); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.QueryRow(ctx, `select count(*)::int from mod_content_section_resources
+		where section_id=any($1::bigint[])`, []int64{rootSectionID, childSectionID}).
+		Scan(&remainingPlacementCount); err != nil {
+		t.Fatal(err)
+	}
+	if archivedSectionCount != 2 || remainingPlacementCount != 0 {
+		t.Fatalf("section archive did not cascade through its subtree: archived=%d placements=%d",
+			archivedSectionCount, remainingPlacementCount)
+	}
+
+	var legacyRootID, legacyChildID int64
+	if err = tx.QueryRow(ctx, `insert into mod_content_sections(
+		mod_id,version_id,template_id,default_locale,display_mode,status,created_by,updated_by)
+		values($1,$2,$3,'en-US','compact','active',$4,$4) returning id`,
+		modID, versionID, templateID, actorID).Scan(&legacyRootID); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.QueryRow(ctx, `insert into mod_content_sections(
+		mod_id,version_id,template_id,parent_id,system_key,default_locale,display_mode,status,created_by,updated_by)
+		values($1,$2,$3,$4,'items','en-US','compact','active',$5,$5) returning id`,
+		modID, versionID, templateID, legacyRootID, actorID).Scan(&legacyChildID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(ctx, `insert into mod_content_section_resources(
+		section_id,version_id,resource_id,ordinal,placement_source)
+		values($1,$2,$3,0,'import')`, legacyChildID, versionID, resourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(ctx, `update mod_content_sections set status='archived' where id=$1`, legacyRootID); err != nil {
+		t.Fatal(err)
+	}
+	if err = repairArchivedContentSectionTreesTx(ctx, tx, versionID, actorID); err != nil {
+		t.Fatalf("repair legacy root-only section archive: %v", err)
+	}
+	var repairedChildStatus string
+	if err = tx.QueryRow(ctx, `select status from mod_content_sections where id=$1`, legacyChildID).
+		Scan(&repairedChildStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.QueryRow(ctx, `select count(*)::int from mod_content_section_resources where section_id=$1`, legacyChildID).
+		Scan(&remainingPlacementCount); err != nil {
+		t.Fatal(err)
+	}
+	if repairedChildStatus != "archived" || remainingPlacementCount != 0 {
+		t.Fatalf("legacy root-only archive repair failed: child=%s placements=%d", repairedChildStatus, remainingPlacementCount)
+	}
+
 	var contentRevisionID int64
 	if err = tx.QueryRow(ctx, `insert into content_revisions(
 		entity_type,entity_id,aggregate_type,aggregate_key,revision_no,snapshot,snapshot_hash,created_by,source)

@@ -19,7 +19,7 @@ type exportDocumentEntry struct {
 // queueExportDocumentEntries materializes stable list projections while the
 // source JSON is already in memory. Request handlers can then paginate normal
 // rows instead of repeatedly expanding large JSON documents in PostgreSQL.
-func queueExportDocumentEntries(batch *modExportWriteBatch, resolver catalogResourceIdentityResolver, revisionID, assetPath string, raw []byte) error {
+func queueExportDocumentEntries(batch *modExportWriteBatch, resolver catalogResourceIdentityResolver, revisions map[string]string, assetPath string, raw []byte) error {
 	var document map[string]any
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return fmt.Errorf("decode document index %s: %w", assetPath, err)
@@ -29,6 +29,10 @@ func queueExportDocumentEntries(batch *modExportWriteBatch, resolver catalogReso
 	}
 	entries := exportDocumentEntries(assetPath, document)
 	for ordinal, entry := range entries {
+		revisionID := exportRevisionForNamespace(revisions, entry.Namespace)
+		if revisionID == "" {
+			continue
+		}
 		encodedNames, err := json.Marshal(supportedExportNames(entry.Names))
 		if err != nil {
 			return err
@@ -44,7 +48,7 @@ func queueExportDocumentEntries(batch *modExportWriteBatch, resolver catalogReso
 		)
 		kind := exportDocumentKind(assetPath)
 		kindCode := resourceKindForDocument(kind, entry.Data)
-		identity := resolver.resolve(kindCode, entry.ID)
+		identity := resolveExportResourceIdentity(resolver, kindCode, kind, entry.ID, entry.Namespace)
 		namespace, resourcePath := identity.Namespace, identity.ResourcePath
 		if entry.Namespace != "" {
 			namespace = strings.ToLower(entry.Namespace)
@@ -59,6 +63,56 @@ func queueExportDocumentEntries(batch *modExportWriteBatch, resolver catalogReso
 		_ = ordinal
 	}
 	return nil
+}
+
+func exportRevisionForNamespace(revisions map[string]string, namespace string) string {
+	if revisionID := revisions[strings.ToLower(strings.TrimSpace(namespace))]; revisionID != "" {
+		return revisionID
+	}
+	if len(revisions) == 1 {
+		for _, revisionID := range revisions {
+			return revisionID
+		}
+	}
+	return ""
+}
+
+func resolveExportResourceIdentity(
+	resolver catalogResourceIdentityResolver,
+	kindCode, sourceKind, objectID, explicitNamespace string,
+) catalogResolvedResourceIdentity {
+	if strings.EqualFold(strings.TrimSpace(sourceKind), "key_mappings") {
+		namespace, resourcePath, valid := exportSourceResourceParts(sourceKind, objectID, explicitNamespace)
+		if valid {
+			identity := resolver.resolve(kindCode, namespace+":"+resourcePath)
+			identity.RawID = objectID
+			return identity
+		}
+	}
+	return resolver.resolve(kindCode, objectID)
+}
+
+func exportSourceResourceParts(sourceKind, objectID, explicitNamespace string) (string, string, bool) {
+	objectID = strings.TrimSpace(objectID)
+	namespace := strings.ToLower(strings.TrimSpace(explicitNamespace))
+	if strings.EqualFold(strings.TrimSpace(sourceKind), "key_mappings") {
+		resourcePath := objectID
+		if namespace == "" {
+			var found bool
+			namespace, resourcePath, found = strings.Cut(objectID, ".")
+			if !found {
+				return "", "", false
+			}
+		} else {
+			resourcePath = strings.TrimPrefix(objectID, namespace+".")
+		}
+		return namespace, strings.TrimSpace(resourcePath), namespace != "" && strings.TrimSpace(resourcePath) != ""
+	}
+	parsedNamespace, resourcePath, found := strings.Cut(objectID, ":")
+	if !found || strings.TrimSpace(parsedNamespace) == "" || strings.TrimSpace(resourcePath) == "" {
+		return "", "", false
+	}
+	return strings.ToLower(strings.TrimSpace(parsedNamespace)), strings.TrimSpace(resourcePath), true
 }
 
 func validateCatalogDocumentContract(assetPath string, document map[string]any) error {

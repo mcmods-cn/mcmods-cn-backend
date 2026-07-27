@@ -98,7 +98,7 @@ func TestQueueExportDocumentEntriesCompactsNormalizedNames(t *testing.T) {
 	if err := queueExportDocumentEntries(
 		batch,
 		catalogResourceIdentityResolver{},
-		"revision",
+		map[string]string{"minecraft": "revision"},
 		"advancements/advancements.json",
 		raw,
 	); err != nil {
@@ -117,6 +117,55 @@ func TestQueueExportDocumentEntriesCompactsNormalizedNames(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(row.Names), []byte(`"zh-CN":"测试"`)) {
 		t.Fatalf("normalized advancement names were lost: %s", row.Names)
+	}
+}
+
+func TestPrepareExportRegistryResourcesSupportsKeyMappingIDs(t *testing.T) {
+	rows, err := prepareExportRegistryResources(
+		catalogResourceIdentityResolver{},
+		map[string]string{"create": "revision-create"},
+		"registries/key_mappings.json",
+		[]byte(`{"registry":"key_mappings","entries":[{"id":"create.keyinfo.rotate_menu","translation_key":"create.keyinfo.rotate_menu","names":{"en-US":"Rotate menu"}}]}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one key mapping resource, got %d", len(rows))
+	}
+	row := rows[0]
+	if row.RevisionID != "revision-create" || row.KindCode != "minecraft.key_mapping" ||
+		row.Namespace != "create" || row.ResourcePath != "keyinfo.rotate_menu" ||
+		row.RawID != "create.keyinfo.rotate_menu" {
+		t.Fatalf("unexpected key mapping resource: %#v", row)
+	}
+}
+
+func TestQueueExportDocumentEntriesRoutesMergedDocumentsByNamespace(t *testing.T) {
+	batch := newModExportWriteBatch()
+	raw := []byte(`{"biomes":[
+		{"id":"minecraft:plains","namespace":"minecraft","names":{"en-US":"Plains"}},
+		{"id":"examplemod:crystal_fields","namespace":"examplemod","names":{"en-US":"Crystal Fields"}}
+	]}`)
+	if err := queueExportDocumentEntries(
+		batch,
+		catalogResourceIdentityResolver{},
+		map[string]string{"minecraft": "revision-minecraft", "examplemod": "revision-example"},
+		"worldgen/biomes.json",
+		raw,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.catalogRows) != 2 {
+		t.Fatalf("expected two biome resources, got %d", len(batch.catalogRows))
+	}
+	revisions := map[string]string{}
+	for _, row := range batch.catalogRows {
+		revisions[row.RawID] = row.RevisionID
+	}
+	if revisions["minecraft:plains"] != "revision-minecraft" ||
+		revisions["examplemod:crystal_fields"] != "revision-example" {
+		t.Fatalf("merged document entries used the wrong revisions: %#v", revisions)
 	}
 }
 
@@ -668,15 +717,15 @@ func TestDecodeExportTranslationValuesSupportsExporterWrapper(t *testing.T) {
 	}
 }
 
-func TestShouldRetryModExportStatus(t *testing.T) {
-	for _, status := range []string{"failed", "cancelled"} {
-		if !shouldRetryModExportStatus(status) {
-			t.Fatalf("expected %s to be retryable", status)
+func TestShouldRestartModExportStatus(t *testing.T) {
+	for _, status := range []string{"ready", "partial", "failed", "cancelled"} {
+		if !shouldRestartModExportStatus(status) {
+			t.Fatalf("expected terminal status %s to start a fresh import run", status)
 		}
 	}
-	for _, status := range []string{"queued", "validating", "importing", "ready", "partial"} {
-		if shouldRetryModExportStatus(status) {
-			t.Fatalf("expected %s not to be retryable", status)
+	for _, status := range []string{"queued", "validating", "importing"} {
+		if shouldRestartModExportStatus(status) {
+			t.Fatalf("expected active status %s to remain deduplicated", status)
 		}
 	}
 }

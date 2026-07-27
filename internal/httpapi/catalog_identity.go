@@ -150,6 +150,8 @@ func resourceKindForRegistry(registry string) string {
 		return "minecraft.advancement"
 	case "loot_tables", "loot_table":
 		return "minecraft.loot_table"
+	case "game_settings", "game_setting", "game_rules", "game_rule":
+		return "minecraft.game_setting"
 	case "structures", "world_structures", "structure":
 		return "minecraft.structure"
 	default:
@@ -195,6 +197,8 @@ func resourceKindForDocument(kind string, data map[string]any) string {
 		return "minecraft.natural_generation"
 	case "loot_tables":
 		return "minecraft.loot_table"
+	case "game_settings":
+		return "minecraft.game_setting"
 	default:
 		return resourceKindForRegistry(kind)
 	}
