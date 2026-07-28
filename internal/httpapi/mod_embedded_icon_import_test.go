@@ -87,6 +87,42 @@ func TestDecodeIRRCatalogSupportsItemsAndIconlessEntities(t *testing.T) {
 	}
 }
 
+func TestDecodeIconRendererCatalogSupportsEntityIcons(t *testing.T) {
+	icon := embeddedIconTestPNG(t, 128, 128)
+	raw := []byte(
+		`{"name":"方块","englishName":"Block","registerName":"example:block","type":"Block","maxStacksSize":64,"smallIcon":"` + icon + `"}` + "\n" +
+			`{"name":"实体","englishName":"Entity","registerName":"example:entities/test","mod":"example","type":"Entity","Icon":"` + icon + `"}`,
+	)
+	entries, err := decodeEmbeddedIconCatalogForSource(raw, iconRendererImportSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("decoded %d entries, want 2", len(entries))
+	}
+	if entries[0].Type != "block" || entries[0].MaxStackSize != 64 {
+		t.Fatalf("unexpected IconRenderer block: %#v", entries[0])
+	}
+	if entries[1].Type != "entity" || entries[1].SmallIcon == "" || entries[1].LargeIcon == "" {
+		t.Fatalf("unexpected IconRenderer entity: %#v", entries[1])
+	}
+
+	build, err := buildEmbeddedIconImport(
+		ossConfigPayload{Prefix: "mcmods"},
+		"mod000001", iconRendererImportSource, catalogResourceIdentityResolver{},
+		map[string]string{"example": "revision-1"}, entries[1],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if build.resource.KindCode != "minecraft.entity_type" || build.resource.Registry != "entities" {
+		t.Fatalf("unexpected entity resource: %#v", build.resource)
+	}
+	if build.resource.IconPath == "" || build.resource.PreviewPath == "" || len(build.media) != 3 || len(build.data) != 3 {
+		t.Fatalf("IconRenderer entity did not produce all icon sizes: %#v", build)
+	}
+}
+
 func TestDecodeIRRCatalogMergesDuplicateRegistryVariants(t *testing.T) {
 	icon := embeddedIconTestPNG(t, 32, 32)
 	raw := []byte(

@@ -57,6 +57,7 @@ type embeddedIconCatalogEntry struct {
 	Type            string                   `json:"type"`
 	OreDictList     string                   `json:"OredictList"`
 	MaxStackSize    int                      `json:"maxStackSize"`
+	MaxStacksSize   int                      `json:"maxStacksSize"`
 	MaxDurability   int                      `json:"maxDurability"`
 	SmallIcon       string                   `json:"smallIcon"`
 	LargeIcon       string                   `json:"largeIcon"`
@@ -545,13 +546,16 @@ func decodeEmbeddedIconCatalogForSource(raw []byte, source string) ([]embeddedIc
 		}
 		entry.RegisterName = strings.ToLower(strings.TrimSpace(entry.RegisterName))
 		entry.Type = strings.ToLower(strings.TrimSpace(entry.Type))
+		if source == iconRendererImportSource {
+			normalizeIconRendererCatalogEntry(entry)
+		}
 		if !embeddedIconResourceIDPattern.MatchString(entry.RegisterName) {
 			return nil, fmt.Errorf("entry %d has invalid registerName %q", index+1, entry.RegisterName)
 		}
 		if entry.Type != "item" && entry.Type != "block" && entry.Type != "entity" {
 			return nil, fmt.Errorf("entry %d has unsupported type %q", index+1, entry.Type)
 		}
-		if entry.Type == "entity" && source != irrImportSource {
+		if entry.Type == "entity" && source != irrImportSource && source != iconRendererImportSource {
 			return nil, fmt.Errorf("entry %d has unsupported type %q", index+1, entry.Type)
 		}
 		key := entry.Type + "\x00" + entry.RegisterName
@@ -563,7 +567,8 @@ func decodeEmbeddedIconCatalogForSource(raw []byte, source string) ([]embeddedIc
 			return nil, fmt.Errorf("entry %d duplicates %s", index+1, entry.RegisterName)
 		}
 		seen[key] = len(validated)
-		if entry.Type != "entity" && strings.TrimSpace(entry.SmallIcon) == "" && strings.TrimSpace(entry.LargeIcon) == "" {
+		if strings.TrimSpace(entry.SmallIcon) == "" && strings.TrimSpace(entry.LargeIcon) == "" &&
+			(entry.Type != "entity" || source != irrImportSource) {
 			return nil, fmt.Errorf("entry %d has no icon", index+1)
 		}
 		if source == irrImportSource {
@@ -589,6 +594,16 @@ func normalizeIRRCatalogEntry(entry *embeddedIconCatalogEntry) {
 	entry.LargeIcon = defaultString(strings.TrimSpace(entry.LargeIcon), strings.TrimSpace(entry.IRRIcon))
 	if strings.TrimSpace(entry.Type) == "" && strings.TrimSpace(entry.Mod) != "" {
 		entry.Type = "entity"
+	}
+}
+
+func normalizeIconRendererCatalogEntry(entry *embeddedIconCatalogEntry) {
+	if entry.MaxStackSize == 0 {
+		entry.MaxStackSize = entry.MaxStacksSize
+	}
+	if entry.Type == "entity" {
+		entry.SmallIcon = defaultString(strings.TrimSpace(entry.SmallIcon), strings.TrimSpace(entry.IRRIcon))
+		entry.LargeIcon = defaultString(strings.TrimSpace(entry.LargeIcon), strings.TrimSpace(entry.IRRIcon))
 	}
 }
 

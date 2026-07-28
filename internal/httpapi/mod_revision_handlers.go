@@ -372,6 +372,7 @@ func canEditMod(claims security.Claims, identity modIdentityRecord) bool {
 		return true
 	}
 	return hasPermission(claims.Permissions, "project.edit") ||
+		hasPermission(claims.Permissions, "project.edit."+identity.UniqueID) ||
 		hasPermission(claims.Permissions, "project.editor."+identity.UniqueID) ||
 		hasPermission(claims.Permissions, "project.owner."+identity.UniqueID)
 }

@@ -226,6 +226,13 @@ func exportDocumentEntries(assetPath string, document map[string]any) []exportDo
 			entry.IconPath = exportString(icons["32"])
 			entry.PreviewPath = exportString(icons["256"])
 		}
+		if assetPath == "worldgen/loot_tables.json" {
+			entry.Data["category"] = normalizeLootTableCategory(
+				entry.ID,
+				exportString(entry.Data["path"]),
+				exportString(entry.Data["category"]),
+			)
+		}
 		entry.Namespace = strings.TrimSpace(exportString(value["namespace"]))
 		if entry.Namespace == "" {
 			separator := ":"
@@ -239,6 +246,32 @@ func exportDocumentEntries(assetPath string, document map[string]any) []exportDo
 		}
 	}
 	return result
+}
+
+func normalizeLootTableCategory(id, path, category string) string {
+	category = strings.ToLower(strings.TrimSpace(category))
+	path = strings.ToLower(strings.TrimSpace(path))
+	if path == "" {
+		_, path, _ = strings.Cut(strings.ToLower(strings.TrimSpace(id)), ":")
+	}
+	switch {
+	case category == "block" || category == "blocks" || strings.HasPrefix(path, "blocks/"):
+		return "blocks"
+	case category == "chest" || category == "chests" || strings.HasPrefix(path, "chests/"):
+		return "chests"
+	case category == "entity" || category == "entities" || strings.HasPrefix(path, "entities/"):
+		return "entities"
+	case category == "fishing" || strings.HasPrefix(path, "gameplay/fishing") || strings.HasPrefix(path, "fishing/"):
+		return "fishing"
+	case category == "archaeology" || strings.HasPrefix(path, "archaeology/"):
+		return "archaeology"
+	case category == "equipment" || strings.HasPrefix(path, "equipment/"):
+		return "equipment"
+	case category == "gameplay" || strings.HasPrefix(path, "gameplay/"):
+		return "gameplay"
+	default:
+		return "other"
+	}
 }
 
 func exportObjectArray(value any) []map[string]any {

@@ -98,10 +98,10 @@ var seedPermissions = []seedPermission{
 	{Code: "content.translate", Module: "content", Name: "Translate content", Description: "Allows requesting quota-backed AI translations for unsupported content languages."},
 
 	{Code: "project.create", Module: "project", Name: "Create projects", Description: "Allows creating mods and other projects."},
-	{Code: "project.edit", Module: "project", Name: "Edit projects", Description: "Allows editing project metadata."},
+	{Code: "project.edit", Module: "project", Name: "Edit projects and project content", Description: "Allows editing every project and all content scoped to those projects."},
 	{Code: "project.review", Module: "project", Name: "Review projects", Description: "Allows reviewing project changes."},
 	{Code: "project.no-review", Module: "project", Name: "Bypass project review", Description: "Allows project changes to publish without review."},
-	{Code: "project.edit.<projectID>", Module: "project", Name: "Project edit template", Description: "Variable permission; replace <projectID> with a project unique ID."},
+	{Code: "project.edit.<projectID>", Module: "project", Name: "Edit one project and its content", Description: "Variable permission; replace <projectID> with a project unique ID to edit that project and all content scoped to it."},
 	{Code: "project.review.<projectID>", Module: "project", Name: "Project review template", Description: "Variable permission; replace <projectID> with a project unique ID."},
 	{Code: "project.delete.<projectID>", Module: "project", Name: "Project delete template", Description: "Variable permission; replace <projectID> with a project unique ID."},
 	{Code: "project.no-review.<projectID>", Module: "project", Name: "Project review bypass template", Description: "Variable permission; replace <projectID> with a project unique ID."},

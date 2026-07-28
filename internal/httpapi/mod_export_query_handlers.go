@@ -49,8 +49,6 @@ func (s *Server) modExportDataSummary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to read mod")
 		return
 	}
-	claims := currentClaims(r)
-	canSeePending := canEditMod(claims, identity) || hasPermission(claims.Permissions, "project.review")
 	rows, err := s.db.Query(r.Context(),
 		`select r.id,r.revision_no,r.status,r.minecraft_version,r.loader,r.exporter_version,r.source_kind,r.source_namespace,version.public_id,
 		 (r.is_active and version.status='active'),r.created_at,
@@ -61,8 +59,8 @@ func (s *Server) modExportDataSummary(w http.ResponseWriter, r *http.Request) {
 		 from catalog_import_revisions r
 		 join mod_content_versions version on version.id=r.target_version_id
 		 left join catalog_import_revision_stats stats on stats.revision_id=r.id
-		 where r.mod_id=$1 and ((r.is_active and version.status='active') or $2)
-		 order by r.minecraft_version desc,r.loader,r.source_kind,r.source_namespace,r.revision_no desc`, identity.ID, canSeePending)
+		 where r.mod_id=$1 and r.is_active and version.status='active'
+		 order by r.minecraft_version desc,r.loader,r.source_kind,r.source_namespace,r.revision_no desc`, identity.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read export revisions")
 		return
@@ -280,7 +278,7 @@ func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request
 	}
 	offset := boundedOffset(r.URL.Query().Get("offset"))
 	summaryOnly := r.URL.Query().Get("summary") == "1"
-	cacheKey := fmt.Sprintf("export-document:v9:%s:%s:%s:%s:%d:%d:%t", revisionID, kind, query, locale, limit, offset, summaryOnly)
+	cacheKey := fmt.Sprintf("export-document:v10:%s:%s:%s:%s:%d:%d:%t", revisionID, kind, query, locale, limit, offset, summaryOnly)
 	payload, err := s.cache.GetOrLoad(r.Context(), cacheKey, func(ctx context.Context) ([]byte, error) {
 		var total int
 		if loadErr := s.db.QueryRow(ctx, `select count(*)::int
@@ -337,6 +335,9 @@ func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request
 		}
 		if kind == "loot_tables" {
 			if loadErr = s.decorateLootTableResources(ctx, revisionID, items, locale); loadErr != nil {
+				return nil, loadErr
+			}
+			if loadErr = s.decorateLootTableReferences(ctx, revisionID, items, locale); loadErr != nil {
 				return nil, loadErr
 			}
 		}

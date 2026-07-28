@@ -138,6 +138,76 @@ func ensureImportedContentSectionsTx(ctx context.Context, tx pgx.Tx, revisionIDs
 		return fmt.Errorf("localize imported item and block categories: %w", err)
 	}
 
+	// Loot tables are imported into stable, real child classifications. The
+	// exporter historically used singular values (block/chest/entity), so the
+	// SQL also normalizes existing snapshots while new imports store the plural
+	// category directly.
+	if _, err := tx.Exec(ctx, `with root as (
+		select section.id,section.mod_id,section.version_id,section.template_id,section.default_locale,section.display_mode
+		from mod_content_sections section
+		join mod_content_templates template on template.id=section.template_id
+		where section.version_id=$1 and section.parent_id is null and section.status='active'
+		  and template.code='loot_table' and template.builtin
+		order by section.ordinal,section.id limit 1
+	), imported_categories as materialized (
+		select distinct case
+			when lower(coalesce(nullif(snapshot.data->>'path',''),split_part(resource.canonical_id,':',2))) like 'gameplay/fishing%'
+			  or lower(coalesce(snapshot.data->>'category',''))='fishing' then 'fishing'
+			when lower(coalesce(snapshot.data->>'category','')) in ('block','blocks')
+			  or lower(coalesce(nullif(snapshot.data->>'path',''),split_part(resource.canonical_id,':',2))) like 'blocks/%' then 'blocks'
+			when lower(coalesce(snapshot.data->>'category','')) in ('chest','chests')
+			  or lower(coalesce(nullif(snapshot.data->>'path',''),split_part(resource.canonical_id,':',2))) like 'chests/%' then 'chests'
+			when lower(coalesce(snapshot.data->>'category','')) in ('entity','entities')
+			  or lower(coalesce(nullif(snapshot.data->>'path',''),split_part(resource.canonical_id,':',2))) like 'entities/%' then 'entities'
+			when lower(coalesce(snapshot.data->>'category',''))='archaeology'
+			  or lower(coalesce(nullif(snapshot.data->>'path',''),split_part(resource.canonical_id,':',2))) like 'archaeology/%' then 'archaeology'
+			when lower(coalesce(snapshot.data->>'category',''))='equipment'
+			  or lower(coalesce(nullif(snapshot.data->>'path',''),split_part(resource.canonical_id,':',2))) like 'equipment/%' then 'equipment'
+			when lower(coalesce(snapshot.data->>'category',''))='gameplay'
+			  or lower(coalesce(nullif(snapshot.data->>'path',''),split_part(resource.canonical_id,':',2))) like 'gameplay/%' then 'gameplay'
+			else 'other'
+		end category
+		from resource_import_snapshots snapshot
+		join game_resources resource on resource.entity_id=snapshot.resource_id
+		where snapshot.revision_id=any($2::text[]) and resource.kind_code='minecraft.loot_table'
+	), requested(category,requested_ordinal) as (
+		values ('blocks'::text,0),('chests',1),('entities',2),('fishing',3),
+			('archaeology',4),('equipment',5),('gameplay',6),('other',7)
+	), missing as (
+		select requested.category,row_number() over(order by requested.requested_ordinal)-1 ordinal
+		from root cross join requested join imported_categories imported using(category)
+		where not exists(select 1 from mod_content_sections child
+			where child.version_id=root.version_id and child.parent_id=root.id
+			  and child.system_key='loot:'||requested.category and child.status='active')
+	), offset_value as (
+		select coalesce(max(child.ordinal)+1,0) value
+		from root left join mod_content_sections child on child.parent_id=root.id and child.status='active'
+	)
+	insert into mod_content_sections(mod_id,version_id,template_id,parent_id,system_key,default_locale,display_mode,ordinal,status,created_by,updated_by)
+	select root.mod_id,root.version_id,root.template_id,root.id,'loot:'||missing.category,root.default_locale,root.display_mode,
+		offset_value.value+missing.ordinal,'active',nullif($3::bigint,0),nullif($3::bigint,0)
+	from root cross join missing cross join offset_value`, versionID, revisionIDs, actorID); err != nil {
+		return fmt.Errorf("create imported loot table categories: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `insert into mod_content_section_localizations(section_id,locale,name,description)
+		select section.id,localization.locale,localization.name,''
+		from mod_content_sections section
+		cross join (values
+			('loot:blocks'::text,'en-US'::text,'Block loot tables'::text),('loot:blocks','zh-CN','方块战利品表'),('loot:blocks','zh-TW','方塊戰利品表'),
+			('loot:chests','en-US','Chest loot tables'),('loot:chests','zh-CN','宝藏箱战利品表'),('loot:chests','zh-TW','寶藏箱戰利品表'),
+			('loot:entities','en-US','Entity loot tables'),('loot:entities','zh-CN','生物战利品表'),('loot:entities','zh-TW','生物戰利品表'),
+			('loot:fishing','en-US','Fishing loot tables'),('loot:fishing','zh-CN','钓鱼战利品表'),('loot:fishing','zh-TW','釣魚戰利品表'),
+			('loot:archaeology','en-US','Archaeology loot tables'),('loot:archaeology','zh-CN','考古战利品表'),('loot:archaeology','zh-TW','考古戰利品表'),
+			('loot:equipment','en-US','Equipment loot tables'),('loot:equipment','zh-CN','装备战利品表'),('loot:equipment','zh-TW','裝備戰利品表'),
+			('loot:gameplay','en-US','Gameplay loot tables'),('loot:gameplay','zh-CN','玩法战利品表'),('loot:gameplay','zh-TW','玩法戰利品表'),
+			('loot:other','en-US','Other loot tables'),('loot:other','zh-CN','其他战利品表'),('loot:other','zh-TW','其他戰利品表')
+		) localization(system_key,locale,name)
+		where section.version_id=$1 and section.status='active'
+		  and section.system_key=localization.system_key
+		on conflict(section_id,locale) do nothing`, versionID); err != nil {
+		return fmt.Errorf("localize imported loot table categories: %w", err)
+	}
+
 	// Reimport owns only its previous automatic placements. Human layout is
 	// preserved, while stale imported placements (including block-item aliases)
 	// are removed before the canonical set is materialized again.
@@ -172,7 +242,7 @@ func ensureImportedContentSectionsTx(ctx context.Context, tx pgx.Tx, revisionIDs
 	}
 
 	_, err := tx.Exec(ctx, `with imported_snapshots as materialized (
-		select snapshot.resource_id,resource.canonical_id,resource.kind_code
+		select snapshot.resource_id,resource.canonical_id,resource.kind_code,snapshot.data
 		from resource_import_snapshots snapshot
 		join game_resources resource on resource.entity_id=snapshot.resource_id
 		where snapshot.revision_id=any($1::text[])
@@ -199,7 +269,24 @@ func ensureImportedContentSectionsTx(ctx context.Context, tx pgx.Tx, revisionIDs
 			when snapshot.kind_code='minecraft.loot_table' then 'loot_table'
 			when snapshot.kind_code='minecraft.game_setting' then 'game_setting'
 			when snapshot.kind_code like 'mekanism.%' then 'chemical'
-		end template_code
+		end template_code,
+		case when snapshot.kind_code='minecraft.loot_table' then case
+			when lower(coalesce(nullif(snapshot.data->>'path',''),split_part(snapshot.canonical_id,':',2))) like 'gameplay/fishing%'
+			  or lower(coalesce(snapshot.data->>'category',''))='fishing' then 'fishing'
+			when lower(coalesce(snapshot.data->>'category','')) in ('block','blocks')
+			  or lower(coalesce(nullif(snapshot.data->>'path',''),split_part(snapshot.canonical_id,':',2))) like 'blocks/%' then 'blocks'
+			when lower(coalesce(snapshot.data->>'category','')) in ('chest','chests')
+			  or lower(coalesce(nullif(snapshot.data->>'path',''),split_part(snapshot.canonical_id,':',2))) like 'chests/%' then 'chests'
+			when lower(coalesce(snapshot.data->>'category','')) in ('entity','entities')
+			  or lower(coalesce(nullif(snapshot.data->>'path',''),split_part(snapshot.canonical_id,':',2))) like 'entities/%' then 'entities'
+			when lower(coalesce(snapshot.data->>'category',''))='archaeology'
+			  or lower(coalesce(nullif(snapshot.data->>'path',''),split_part(snapshot.canonical_id,':',2))) like 'archaeology/%' then 'archaeology'
+			when lower(coalesce(snapshot.data->>'category',''))='equipment'
+			  or lower(coalesce(nullif(snapshot.data->>'path',''),split_part(snapshot.canonical_id,':',2))) like 'equipment/%' then 'equipment'
+			when lower(coalesce(snapshot.data->>'category',''))='gameplay'
+			  or lower(coalesce(nullif(snapshot.data->>'path',''),split_part(snapshot.canonical_id,':',2))) like 'gameplay/%' then 'gameplay'
+			else 'other'
+		end else '' end loot_category
 		from imported_snapshots snapshot
 		where snapshot.kind_code<>'minecraft.item'
 		   or (
@@ -211,9 +298,13 @@ func ensureImportedContentSectionsTx(ctx context.Context, tx pgx.Tx, revisionIDs
 		from imported join mod_content_templates template on template.code=imported.template_code and template.builtin
 		join lateral (select id from mod_content_sections where version_id=$2 and template_id=template.id and parent_id is null and status='active' order by ordinal,id limit 1) section on true
 		left join mod_content_sections child on child.parent_id=section.id and child.version_id=$2 and child.status='active'
-		  and child.system_key=case imported.kind_code when 'minecraft.block' then 'blocks' when 'minecraft.item' then 'items' else '' end
+		  and child.system_key=case imported.kind_code
+			when 'minecraft.block' then 'blocks'
+			when 'minecraft.item' then 'items'
+			when 'minecraft.loot_table' then 'loot:'||imported.loot_category
+			else '' end
 		where imported.template_code is not null
-		  and (imported.template_code<>'item_block' or child.id is not null)
+		  and (imported.template_code not in ('item_block','loot_table') or child.id is not null)
 		  and not exists(select 1 from mod_content_section_resources existing
 			where existing.version_id=$2 and existing.resource_id=imported.resource_id)
 	), numbered as (

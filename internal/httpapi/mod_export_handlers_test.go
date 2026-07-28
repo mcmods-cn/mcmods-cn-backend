@@ -120,6 +120,26 @@ func TestQueueExportDocumentEntriesCompactsNormalizedNames(t *testing.T) {
 	}
 }
 
+func TestExportDocumentEntriesNormalizesLootTableCategories(t *testing.T) {
+	entries := exportDocumentEntries("worldgen/loot_tables.json", map[string]any{
+		"loot_tables": []any{
+			map[string]any{"id": "minecraft:blocks/stone", "path": "blocks/stone", "category": "block"},
+			map[string]any{"id": "minecraft:chests/simple_dungeon", "path": "chests/simple_dungeon", "category": "chest"},
+			map[string]any{"id": "minecraft:gameplay/fishing", "path": "gameplay/fishing", "category": "gameplay"},
+			map[string]any{"id": "example:dispensers/test", "path": "dispensers/test", "category": "dispensers"},
+		},
+	})
+	if len(entries) != 4 {
+		t.Fatalf("expected four loot tables, got %d", len(entries))
+	}
+	expected := []string{"blocks", "chests", "fishing", "other"}
+	for index, category := range expected {
+		if actual := exportString(entries[index].Data["category"]); actual != category {
+			t.Errorf("entry %d category = %q, want %q", index, actual, category)
+		}
+	}
+}
+
 func TestPrepareExportRegistryResourcesSupportsKeyMappingIDs(t *testing.T) {
 	rows, err := prepareExportRegistryResources(
 		catalogResourceIdentityResolver{},

@@ -55,6 +55,69 @@ func TestLootTableItemIDs(t *testing.T) {
 	}
 }
 
+func TestLootTableIconPreviewsPreservesPossibleItemOrder(t *testing.T) {
+	data := map[string]any{
+		"possible_item_ids": []any{"minecraft:diamond", "minecraft:stick", "example:missing"},
+		"resourceSources": map[string]any{
+			"minecraft:diamond": map[string]any{"sourceRevisionId": "revision-a", "iconPath": "items/diamond.png"},
+			"minecraft:stick":   map[string]any{"sourceRevisionId": "revision-b", "iconPath": "items/stick.png"},
+			"example:missing":   map[string]any{"sourceRevisionId": "revision-c"},
+		},
+	}
+	expected := []map[string]string{
+		{"sourceRevisionId": "revision-a", "iconPath": "items/diamond.png"},
+		{"sourceRevisionId": "revision-b", "iconPath": "items/stick.png"},
+	}
+	if actual := lootTableIconPreviews(data); !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("lootTableIconPreviews() = %#v, want %#v", actual, expected)
+	}
+}
+
+func TestCompatibleEnchantmentIDs(t *testing.T) {
+	data := map[string]any{
+		"enchanting": map[string]any{
+			"compatible_enchantments": []any{
+				"minecraft:unbreaking",
+				"minecraft:mending",
+				"minecraft:unbreaking",
+				"",
+			},
+		},
+	}
+	expected := []string{"minecraft:unbreaking", "minecraft:mending"}
+	if actual := compatibleEnchantmentIDs(data); !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("compatibleEnchantmentIDs() = %#v, want %#v", actual, expected)
+	}
+}
+
+func TestLootTableReferenceIDs(t *testing.T) {
+	data := map[string]any{
+		"loot_table":         "minecraft:blocks/stone",
+		"default_loot_table": "minecraft:entities/cow",
+		"referenced_loot_tables": []any{
+			"minecraft:gameplay/fishing",
+			"minecraft:blocks/stone",
+		},
+		"definition": map[string]any{
+			"pools": []any{map[string]any{
+				"entries": []any{map[string]any{
+					"type": "minecraft:loot_table",
+					"name": "example:nested/reward",
+				}},
+			}},
+		},
+	}
+	expected := []string{
+		"minecraft:blocks/stone",
+		"minecraft:entities/cow",
+		"minecraft:gameplay/fishing",
+		"example:nested/reward",
+	}
+	if actual := lootTableReferenceIDs(data); !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("lootTableReferenceIDs() = %#v, want %#v", actual, expected)
+	}
+}
+
 func TestModExportEntryDetailPreservesFullSnapshotData(t *testing.T) {
 	raw := []byte(`{
 		"category": "blocks",

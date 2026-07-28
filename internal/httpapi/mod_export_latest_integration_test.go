@@ -428,47 +428,10 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var legacyEmptySectionID int64
-	if err = tx.QueryRow(context.Background(), `insert into mod_content_sections(
-			mod_id,version_id,template_id,default_locale,display_mode,status)
-		select $1,$2,template.id,template.default_locale,template.default_display_mode,'active'
-		from mod_content_templates template where template.code='enchantment' and template.builtin
-		returning id`, modID, versionID).Scan(&legacyEmptySectionID); err != nil {
-		t.Fatal(err)
-	}
 	if err = syncImportedResourcesToContentVersionTx(context.Background(), tx, []string{revisionID}, versionID, false, 0); err != nil {
 		t.Fatalf("sync imported resources into the selected content version: %v", err)
 	}
 	mark("promotion and content-version sync")
-	var legacyEmptySectionStatus string
-	if err = tx.QueryRow(context.Background(), `select status from mod_content_sections where id=$1`, legacyEmptySectionID).
-		Scan(&legacyEmptySectionStatus); err != nil {
-		t.Fatal(err)
-	}
-	if legacyEmptySectionStatus != "archived" {
-		t.Fatalf("legacy capability-created empty page was not archived: %s", legacyEmptySectionStatus)
-	}
-	var populatedCatalogSections, emptyCatalogSections int
-	if err = tx.QueryRow(context.Background(), `select count(*)::int
-		from mod_content_sections section
-		join mod_content_templates template on template.id=section.template_id
-		where section.version_id=$1 and section.parent_id is null and section.status='active'
-		  and template.code='biome'`, versionID).
-		Scan(&populatedCatalogSections); err != nil {
-		t.Fatal(err)
-	}
-	if err = tx.QueryRow(context.Background(), `select count(*)::int
-		from mod_content_sections section
-		join mod_content_templates template on template.id=section.template_id
-		where section.version_id=$1 and section.parent_id is null and section.status='active'
-		  and template.code=any(array['enchantment','key_mapping'])`, versionID).
-		Scan(&emptyCatalogSections); err != nil {
-		t.Fatal(err)
-	}
-	if populatedCatalogSections != 1 || emptyCatalogSections != 0 {
-		t.Fatalf("expected populated biome page and no empty enchantment/key mapping pages, biome=%d empty=%d",
-			populatedCatalogSections, emptyCatalogSections)
-	}
 	var lootTableSections, lootTableResources int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int
 		from mod_content_sections section
@@ -488,16 +451,64 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		t.Fatalf("expected imported loot tables in one unified content page, sections=%d resources=%d",
 			lootTableSections, lootTableResources)
 	}
-	var effectSectionResources int
+	var lootTableCategorySections, categorizedLootTableResources int
+	if err = tx.QueryRow(context.Background(), `select count(distinct child.id)::int,count(placement.resource_id)::int
+		from mod_content_sections root
+		join mod_content_templates template on template.id=root.template_id and template.code='loot_table'
+		join mod_content_sections child on child.parent_id=root.id and child.status='active' and child.system_key like 'loot:%'
+		left join mod_content_section_resources placement on placement.section_id=child.id and placement.version_id=root.version_id
+		where root.version_id=$1 and root.parent_id is null and root.status='active'`, versionID).
+		Scan(&lootTableCategorySections, &categorizedLootTableResources); err != nil {
+		t.Fatal(err)
+	}
+	if lootTableCategorySections == 0 || categorizedLootTableResources != lootTableResources {
+		t.Fatalf("expected every imported loot table in a classified child section, categories=%d categorized=%d total=%d",
+			lootTableCategorySections, categorizedLootTableResources, lootTableResources)
+	}
+	t.Logf("classified loot tables: categories=%d resources=%d", lootTableCategorySections, categorizedLootTableResources)
+	var legacyEmptySectionID int64
+	if err = tx.QueryRow(context.Background(), `insert into mod_content_sections(
+			mod_id,version_id,template_id,default_locale,display_mode,status)
+		select $1,$2,template.id,template.default_locale,template.default_display_mode,'active'
+		from mod_content_templates template where template.code='enchantment' and template.builtin
+		returning id`, modID, versionID).Scan(&legacyEmptySectionID); err != nil {
+		t.Fatal(err)
+	}
+	if err = archiveLegacyEmptyImportedSectionsTx(context.Background(), tx, versionID, 0); err != nil {
+		t.Fatalf("archive a legacy empty page: %v", err)
+	}
+	var legacyEmptySectionStatus string
+	if err = tx.QueryRow(context.Background(), `select status from mod_content_sections where id=$1`, legacyEmptySectionID).
+		Scan(&legacyEmptySectionStatus); err != nil {
+		t.Fatal(err)
+	}
+	if legacyEmptySectionStatus != "archived" {
+		t.Fatalf("legacy capability-created empty page was not archived: %s", legacyEmptySectionStatus)
+	}
+	var populatedCatalogSections int
+	if err = tx.QueryRow(context.Background(), `select count(*)::int
+		from mod_content_sections section
+		join mod_content_templates template on template.id=section.template_id
+		where section.version_id=$1 and section.parent_id is null and section.status='active'
+		  and template.code=any(array['biome','enchantment','key_mapping'])`, versionID).
+		Scan(&populatedCatalogSections); err != nil {
+		t.Fatal(err)
+	}
+	if populatedCatalogSections != 3 {
+		t.Fatalf("expected populated biome, enchantment, and key-mapping pages, got %d", populatedCatalogSections)
+	}
+	var speedEffectPlacements int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int from mod_content_section_resources section_resource
 		join mod_content_sections section on section.id=section_resource.section_id
 		join mod_content_templates template on template.id=section.template_id
-		where section.version_id=(select id from mod_content_versions where public_id=$1) and template.code='mob_effect'`, versionPublicID).
-		Scan(&effectSectionResources); err != nil {
+		join game_resources resource on resource.entity_id=section_resource.resource_id
+		where section.version_id=(select id from mod_content_versions where public_id=$1)
+		  and template.code='mob_effect' and resource.canonical_id='minecraft:speed'`, versionPublicID).
+		Scan(&speedEffectPlacements); err != nil {
 		t.Fatal(err)
 	}
-	if effectSectionResources != 1 {
-		t.Fatalf("normalized icon effect was not attached to the unified content section: got %d", effectSectionResources)
+	if speedEffectPlacements != 1 {
+		t.Fatalf("normalized icon effect was not attached to the unified content section: got %d", speedEffectPlacements)
 	}
 	var itemBlockRootsWithSystemCategories int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int from (
@@ -581,7 +592,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	if err = syncImportedResourcesToContentVersionTx(context.Background(), tx, []string{revisionID}, versionID, true, 0); err != nil {
 		t.Fatalf("rebuild content sections after all root pages were deleted: %v", err)
 	}
-	var rebuiltPlacementCount, activeOrphans, rebuiltDeclaredSections, rebuiltItemBlockRoots int
+	var rebuiltPlacementCount, activeOrphans, rebuiltDeclaredSections, rebuiltPopulatedCatalogSections, rebuiltItemBlockRoots int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int
 		from mod_content_section_resources where version_id=$1`, versionID).
 		Scan(&rebuiltPlacementCount); err != nil {
@@ -616,11 +627,11 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		join mod_content_templates template on template.id=section.template_id
 		where section.version_id=$1 and section.parent_id is null and section.status='active'
 		  and template.code=any(array['enchantment','key_mapping'])`, versionID).
-		Scan(&emptyCatalogSections); err != nil {
+		Scan(&rebuiltPopulatedCatalogSections); err != nil {
 		t.Fatal(err)
 	}
-	if emptyCatalogSections != 0 {
-		t.Fatalf("reimport recreated %d empty enchantment/key mapping pages", emptyCatalogSections)
+	if rebuiltPopulatedCatalogSections != 2 {
+		t.Fatalf("reimport did not rebuild populated enchantment and key-mapping pages: got %d", rebuiltPopulatedCatalogSections)
 	}
 	if err = tx.QueryRow(context.Background(), `select count(*)::int from (
 		select root.id

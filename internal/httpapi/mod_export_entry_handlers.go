@@ -101,12 +101,22 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 	if requested := normalizeContentLocale(r.URL.Query().Get("secondaryLocale")); requested != "" {
 		secondary = requested
 	}
+	items := []map[string]any{{"data": response.Data}}
 	if registry == "loot_tables" {
-		items := []map[string]any{{"data": response.Data}}
 		if err = s.decorateLootTableResources(r.Context(), revisionID, items, primary, secondary); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to resolve loot table resources")
 			return
 		}
+	}
+	if registry == "items" {
+		if err = s.decorateCompatibleEnchantmentResources(r.Context(), revisionID, items, primary, secondary); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to resolve compatible enchantments")
+			return
+		}
+	}
+	if err = s.decorateLootTableReferences(r.Context(), revisionID, items, primary, secondary); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve loot table references")
+		return
 	}
 	localized, localizationErr := s.loadCatalogEntityLocalizations(r.Context(), publicID)
 	if localizationErr != nil && !errors.Is(localizationErr, pgx.ErrNoRows) {

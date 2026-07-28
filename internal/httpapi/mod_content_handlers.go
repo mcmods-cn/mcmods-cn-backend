@@ -1039,7 +1039,9 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 		 where replace(lower(name.key),'_','-')=any($3::text[])),'{}'::jsonb),'{}'::jsonb),
 		case when resource.kind_code='minecraft.advancement' then jsonb_strip_nulls(jsonb_build_object(
 		 'parent',effective.data->'parent','display',jsonb_strip_nulls(jsonb_build_object(
-		  'x',effective.data#>'{display,x}','y',effective.data#>'{display,y}','frame',effective.data#>'{display,frame}')))) else '{}'::jsonb end
+		  'x',effective.data#>'{display,x}','y',effective.data#>'{display,y}','frame',effective.data#>'{display,frame}'))))
+		 when resource.kind_code='minecraft.loot_table' then jsonb_strip_nulls(jsonb_build_object(
+		  'possible_item_ids',effective.data->'possible_item_ids')) else '{}'::jsonb end
 		from subtree join mod_content_section_resources section_resource on section_resource.section_id=subtree.id
 		join catalog_entities entity on entity.id=section_resource.resource_id
 		join game_resources resource on resource.entity_id=section_resource.resource_id
@@ -1081,6 +1083,36 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 		resources = append(resources, map[string]any{"versionPublicId": versionPublicID, "resourcePublicId": resourcePublicID,
 			"sectionPublicId": resourceSectionPublicID, "kindCode": kindCode, "canonicalId": canonicalID, "ordinal": resourceOrdinal, "revisionId": sourceRevisionID, "iconPath": iconPath,
 			"iconFileId": iconFileID, "names": json.RawMessage(names), "definition": json.RawMessage(definition)})
+	}
+	lootItems := make([]map[string]any, 0)
+	lootResourceIndexes := make([]int, 0)
+	lootRevisionIDs := make([]string, 0)
+	for index, resource := range resources {
+		if resource["kindCode"] != "minecraft.loot_table" {
+			continue
+		}
+		var data map[string]any
+		raw, _ := resource["definition"].(json.RawMessage)
+		if err = json.Unmarshal(raw, &data); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode loot table summary")
+			return
+		}
+		lootItems = append(lootItems, map[string]any{"data": data})
+		lootResourceIndexes = append(lootResourceIndexes, index)
+		sourceRevisionID, _ := resource["revisionId"].(string)
+		lootRevisionIDs = append(lootRevisionIDs, sourceRevisionID)
+	}
+	if len(lootItems) > 0 {
+		if err = s.decorateLootTableResourcesByRevision(r.Context(), lootRevisionIDs, lootItems, primary, secondary); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to resolve loot table preview icons")
+			return
+		}
+		for index, item := range lootItems {
+			data, _ := item["data"].(map[string]any)
+			data["previewResources"] = lootTableIconPreviews(data)
+			delete(data, "resourceSources")
+			resources[lootResourceIndexes[index]]["definition"] = data
+		}
 	}
 	categories, err := readModContentDescendantSections(r.Context(), s.db, identity.ID, sectionID)
 	if err != nil {
