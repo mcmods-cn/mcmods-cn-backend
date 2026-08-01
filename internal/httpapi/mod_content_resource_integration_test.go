@@ -293,11 +293,11 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 	}
 	parentDisplay, _ := parentDefinition["display"].(map[string]any)
 	childDisplay, _ := childDefinition["display"].(map[string]any)
-	if parentDefinition["criterion"] != "parent" || parentDefinition["parent"] != nil ||
+	if parentDefinition["criterion"] != "parent" || parentDefinition["parentId"] != nil || parentDefinition["parent"] != nil ||
 		parentDisplay["x"] != float64(1.5) || parentDisplay["y"] != float64(2.5) {
 		t.Fatalf("unexpected parent advancement layout: %#v", parentDefinition)
 	}
-	if childDefinition["criterion"] != "child" || childDefinition["parent"] != advancementParentCanonicalID ||
+	if childDefinition["criterion"] != "child" || childDefinition["parentId"] != advancementParentCanonicalID || childDefinition["parent"] != nil ||
 		childDisplay["x"] != float64(3.5) || childDisplay["y"] != float64(4.5) {
 		t.Fatalf("unexpected child advancement layout: %#v", childDefinition)
 	}

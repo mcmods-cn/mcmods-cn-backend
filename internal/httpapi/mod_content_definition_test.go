@@ -122,17 +122,44 @@ func TestCanonicalWorldStructureBiomesPreservesTagSelector(t *testing.T) {
 	entryType := modContentEntryTypeDefinition{Code: "world_structure", Groups: []modContentEntryTypeGroup{{
 		Code: "website_data",
 		Fields: []modContentEntryTypeField{{
-			Code: "biomes", Type: "json", Paths: [][]string{{"biomes"}},
+			Code: "biomeTag", Type: "reference", ReferenceKind: "tag", Paths: [][]string{{"biome_tag"}},
 		}},
 	}}}
 	definition, err := canonicalModContentDefinition(entryType, map[string]any{
-		"biomes": "#minecraft:has_structure/ancient_city",
+		"biome_tag": "#minecraft:has_structure/ancient_city",
 	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if definition["biomes"] != "#minecraft:has_structure/ancient_city" {
-		t.Fatalf("biomes = %#v", definition["biomes"])
+	if definition["biomeTag"] != "#minecraft:has_structure/ancient_city" {
+		t.Fatalf("biomeTag = %#v", definition["biomeTag"])
+	}
+}
+
+func TestManualEntryTypeSelectionIsIndependentFromResourceKind(t *testing.T) {
+	entryTypes := []modContentEntryTypeDefinition{
+		{Code: "block", KindCodes: []string{"minecraft.block"}},
+		{Code: "tool", KindCodes: []string{"minecraft.item"}},
+	}
+	if _, err := selectModContentEntryType(entryTypes, "tool", "minecraft.block", false); err != nil {
+		t.Fatalf("manual category selection was coupled to resource kind: %v", err)
+	}
+	if _, err := selectModContentEntryType(entryTypes, "tool", "minecraft.block", true); err == nil {
+		t.Fatal("import category validation must still enforce its inferred resource kind")
+	}
+}
+
+func TestImportedDimensionBiomeRelationsAreBidirectional(t *testing.T) {
+	rows := []catalogResourceImportRow{{
+		KindCode: "minecraft.natural_generation",
+		Data:     `{"dimension_ids":["minecraft:overworld"],"resolved_biome_ids":["minecraft:plains","minecraft:forest"]}`,
+	}}
+	dimensions, biomes := importedDimensionBiomeRelations(rows)
+	if len(dimensions["minecraft:overworld"]) != 2 {
+		t.Fatalf("dimension biomes = %#v", dimensions)
+	}
+	if got := biomes["minecraft:forest"]; len(got) != 1 || got[0] != "minecraft:overworld" {
+		t.Fatalf("biome dimensions = %#v", biomes)
 	}
 }
 
@@ -145,5 +172,40 @@ func TestInferImportedEntryTypeCode(t *testing.T) {
 	}
 	if value := inferImportedEntryTypeCode("minecraft.entity_type", "cow", map[string]any{}); value != "entity" {
 		t.Fatalf("entity inference = %q", value)
+	}
+}
+
+func TestCanonicalAdvancementDefinitionPreservesGraphAndProgressData(t *testing.T) {
+	entryType := modContentEntryTypeDefinition{Code: "advancement", Groups: []modContentEntryTypeGroup{{
+		Code: "website_data",
+		Fields: []modContentEntryTypeField{
+			{Code: "parentId", Type: "reference", Paths: [][]string{{"parent"}}},
+			{Code: "childrenIds", Type: "reference-list", Paths: [][]string{{"children"}}},
+			{Code: "criteria", Type: "list", Paths: [][]string{{"criteria"}}},
+			{Code: "requirements", Type: "json", Paths: [][]string{{"requirements"}}},
+			{Code: "rewards", Type: "json", Paths: [][]string{{"rewards"}}},
+		},
+	}}}
+	definition, err := canonicalModContentDefinition(entryType, map[string]any{
+		"parent":       "minecraft:story/root",
+		"children":     []any{"minecraft:story/child"},
+		"criteria":     []any{"entered_world"},
+		"requirements": []any{[]any{"entered_world"}},
+		"rewards":      map[string]any{"experience": float64(100)},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if definition["parentId"] != "minecraft:story/root" {
+		t.Fatalf("parentId = %#v", definition["parentId"])
+	}
+	if got := definition["childrenIds"].([]string); len(got) != 1 || got[0] != "minecraft:story/child" {
+		t.Fatalf("childrenIds = %#v", got)
+	}
+	if _, exists := definition["requirements"]; !exists {
+		t.Fatal("advancement requirements were discarded")
+	}
+	if _, exists := definition["rewards"]; !exists {
+		t.Fatal("advancement rewards were discarded")
 	}
 }

@@ -52,8 +52,8 @@ func TestBuiltinCompatibilityFieldsAreConfigurable(t *testing.T) {
 				if len(field.Paths) == 0 {
 					t.Errorf("field %q has no import paths", field.Code)
 				}
-				if field.Type == "reference-list" && field.ReferenceKind == "" {
-					t.Errorf("reference-list field %q has no reference kind", field.Code)
+				if (field.Type == "reference" || field.Type == "reference-list") && field.ReferenceKind == "" {
+					t.Errorf("reference field %q has no reference kind", field.Code)
 				}
 			}
 			if !strings.Contains(schemaSQL, testCase.raw) {
@@ -79,10 +79,41 @@ func TestWorldStructureBiomesSupportsTagOrExplicitList(t *testing.T) {
 	t.Parallel()
 
 	schemaSQL := strings.Join(modContentCanonicalDocumentSchemaStatements(), "\n")
-	if !strings.Contains(schemaSQL, `{"code":"biomes","type":"json"`) {
-		t.Fatal("world structure biomes must preserve tag selectors and explicit lists")
+	if !strings.Contains(schemaSQL, `{"code":"biomeTag","type":"reference"`) ||
+		!strings.Contains(schemaSQL, `{"code":"biomeIds","type":"reference-list"`) {
+		t.Fatal("world structure biomes must normalize tag selectors and explicit biome references separately")
 	}
-	if strings.Contains(schemaSQL, `{"code":"biomes","type":"list"`) {
-		t.Fatal("world structure biomes is incorrectly restricted to a string list")
+	if strings.Contains(schemaSQL, `{"code":"biomes","type":"json"`) {
+		t.Fatal("world structure biomes must not remain an uneditable JSON value")
+	}
+}
+
+func TestCanonicalDocumentSchemasPreserveExporterSpecificFields(t *testing.T) {
+	t.Parallel()
+
+	statements := modContentCanonicalDocumentSchemaStatements()
+	cases := map[string][]string{
+		"advancement": {`"code":"parentId"`, `"code":"childrenIds"`, `"code":"criteria"`, `"code":"requirements"`, `"code":"rewards"`},
+		"enchantment": {`"code":"rarityWeight"`, `"code":"anvilCost"`, `"code":"supportedItems"`, `"code":"exclusiveWith"`, `"code":"costs"`},
+		"mob_effect":  {`"code":"colorRGB"`, `"code":"effectAttributeModifiers"`},
+		"fluid":       {`"code":"bucketItemId"`, `"code":"fluidTags"`, `"code":"amount"`},
+		"key_mapping": {`"code":"categoryNames"`, `"code":"defaultKey"`, `"code":"boundKey"`},
+	}
+	for templateCode, fields := range cases {
+		var schemaSQL string
+		for _, statement := range statements {
+			if strings.Contains(statement, `where code='`+templateCode+`' and builtin`) {
+				schemaSQL = statement
+				break
+			}
+		}
+		if schemaSQL == "" {
+			t.Fatalf("canonical schema for %s is not installed", templateCode)
+		}
+		for _, field := range fields {
+			if !strings.Contains(schemaSQL, field) {
+				t.Errorf("canonical schema for %s is missing %s", templateCode, field)
+			}
+		}
 	}
 }

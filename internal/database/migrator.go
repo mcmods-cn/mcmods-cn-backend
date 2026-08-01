@@ -7,14 +7,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 37
+const schemaGeneration = 39
 
-// Migrate installs one coherent development schema. Generation 37 establishes
+// Migrate installs one coherent development schema. Generation 39 establishes
 // numeric internal keys, globally unique public IDs, revocable authentication
 // sessions, version-scoped mod-content layout identities, and generalized
 // unresolved references together with the Minecraft server catalog, review,
 // proof, dependency, status-history, and data-driven resource entry subtype
-// models whose configurable fields also map imported compatibility data.
+// models whose configurable fields also map imported compatibility and
+// resource-specific encyclopedia data,
+// including generic collected/uncollected resource references and normalized
+// dimension/biome documents.
 // Earlier development data is
 // intentionally not migrated and must be reset before installation.
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {

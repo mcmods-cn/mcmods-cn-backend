@@ -328,11 +328,12 @@ type modContentEntryTypeGroup struct {
 }
 
 type modContentEntryTypeField struct {
-	Code          string     `json:"code"`
-	Type          string     `json:"type"`
-	ReferenceKind string     `json:"referenceKind"`
-	Paths         [][]string `json:"paths"`
-	Editable      *bool      `json:"editable,omitempty"`
+	Code              string     `json:"code"`
+	Type              string     `json:"type"`
+	ReferenceKind     string     `json:"referenceKind"`
+	ReferenceRegistry string     `json:"referenceRegistry"`
+	Paths             [][]string `json:"paths"`
+	Editable          *bool      `json:"editable,omitempty"`
 }
 
 type modContentTemplateDefinition struct {
@@ -372,7 +373,7 @@ func validateModContentTemplateDefinition(definition map[string]any) error {
 			seenGroups[groupCode] = struct{}{}
 			for _, field := range group.Fields {
 				fieldCode := strings.TrimSpace(field.Code)
-				if fieldCode == "" || len(fieldCode) > 64 || !catalogStringIn(field.Type, "number", "text", "boolean", "list", "reference-list", "json") ||
+				if fieldCode == "" || len(fieldCode) > 64 || !catalogStringIn(field.Type, "number", "text", "boolean", "list", "reference", "reference-list", "json") ||
 					len(field.Paths) == 0 || len(field.Paths) > 8 {
 					return errCatalogEditorInvalid
 				}
@@ -380,7 +381,10 @@ func validateModContentTemplateDefinition(definition map[string]any) error {
 					return errCatalogEditorInvalid
 				}
 				seenFields[fieldCode] = struct{}{}
-				if field.Type == "reference-list" && !catalogStringIn(field.ReferenceKind, "enchantment", "tag") {
+				if (field.Type == "reference" || field.Type == "reference-list") && !validModContentReferenceKind(field.ReferenceKind) {
+					return errCatalogEditorInvalid
+				}
+				if field.ReferenceRegistry != "" && (field.ReferenceKind != "tag" || len(field.ReferenceRegistry) > 128) {
 					return errCatalogEditorInvalid
 				}
 				for _, path := range field.Paths {
@@ -397,6 +401,23 @@ func validateModContentTemplateDefinition(definition map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func validModContentReferenceKind(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "tag" || value == "enchantment" {
+		return true
+	}
+	if len(value) < 3 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '.' || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validateModContentEntryType(ctx context.Context, query modContentImageQuerier, modID, versionID int64, kindCode string, sectionPublicID *string, entryTypeCode string, definition map[string]any) error {
@@ -1180,7 +1201,7 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 		 from jsonb_each_text(coalesce(imported.names,'{}'::jsonb)) name
 		 where replace(lower(name.key),'_','-')=any($3::text[])),'{}'::jsonb),'{}'::jsonb),
 		case when resource.kind_code='minecraft.advancement' then jsonb_strip_nulls(jsonb_build_object(
-		 'parent',effective.data->'parent','display',jsonb_strip_nulls(jsonb_build_object(
+		 'parent',coalesce(effective.data->'parentId',effective.data->'parent'),'display',jsonb_strip_nulls(jsonb_build_object(
 		  'x',effective.data#>'{display,x}','y',effective.data#>'{display,y}','frame',effective.data#>'{display,frame}'))))
 		 when resource.kind_code='minecraft.loot_table' then jsonb_strip_nulls(jsonb_build_object(
 		  'possible_item_ids',effective.data->'possible_item_ids')) else '{}'::jsonb end
@@ -1560,6 +1581,9 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		canPreviewInactive := canEditMod(claims, identity) || hasPermission(claims.Permissions, "content.review")
 		if err := s.db.QueryRow(r.Context(), `select resource.entity_id,resource.kind_code,resource.canonical_id,
 			coalesce((select jsonb_agg(jsonb_build_object('versionPublicId',version.public_id,'entryTypeCode',detail.entry_type_code,'definitionSchemaVersion',detail.definition_schema_version,'defaultLocale',detail.default_locale,
+			'sourceRevisionId',coalesce((select import_revision.id from catalog_import_revisions import_revision
+			 where import_revision.target_version_id=version.id and import_revision.is_active and import_revision.status in ('ready','partial')
+			 order by coalesce(import_revision.activated_at,import_revision.created_at) desc limit 1),''),
 			'sectionPublicId',coalesce((select section.public_id from mod_content_section_resources member
 			 join mod_content_sections section on section.id=member.section_id and section.version_id=member.version_id
 			 where member.resource_id=resource.entity_id and member.version_id=version.id and section.status='active'
@@ -1598,6 +1622,12 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		primary, secondary := s.requestContentLocales(r)
+		decoratedDetails, decorationErr := s.decorateModContentResourceDetailReferences(r.Context(), details, primary, secondary)
+		if decorationErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to resolve resource detail references")
+			return
+		}
+		details = decoratedDetails
 		carrier := map[string]any{"entityId": publicID, "versions": []map[string]any{}}
 		if err := s.decorateResourceVersionRows(r.Context(), []map[string]any{carrier}, primary, secondary); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to resolve resource versions")
@@ -1702,6 +1732,27 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 	edit.Definition = canonicalDefinition
 	edit.ResourcePublicID = publicID
 	s.submitExistingModContentMutation(w, r, identity, modContentSnapshot{Kind: "resource", Operation: "edit", ModID: identity.ID, ModSiteID: identity.SiteID, PublicID: publicID, Resource: &edit}, publishedRevisionID)
+}
+
+func (s *Server) decorateModContentResourceDetailReferences(ctx context.Context, raw []byte, locales ...string) ([]byte, error) {
+	var details []map[string]any
+	if err := json.Unmarshal(raw, &details); err != nil {
+		return nil, err
+	}
+	for _, detail := range details {
+		definition, _ := detail["definition"].(map[string]any)
+		if definition == nil {
+			continue
+		}
+		revisionID, _ := detail["sourceRevisionId"].(string)
+		items := []map[string]any{{"data": definition}}
+		if err := s.decorateCanonicalDefinitionReferences(ctx, revisionID, items, locales...); err != nil {
+			return nil, err
+		}
+		detail["definition"] = items[0]["data"]
+		delete(detail, "sourceRevisionId")
+	}
+	return json.Marshal(details)
 }
 
 func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int64, snapshot modContentSnapshot, actorID int64) error {
@@ -1941,57 +1992,107 @@ func syncModContentResourceUnresolvedReferencesTx(
 		  and field_path like $2`, resourceID, fieldPrefix+"%"); err != nil {
 		return err
 	}
-	enchantments := firstDefinitionStringList(definition,
-		[]string{"compatibleEnchantments"},
-		[]string{"enchanting", "compatible_enchantments"},
-		[]string{"compatible_enchantments"},
-	)
-	for index, identifier := range enchantments {
-		var resolvedID int64
-		err := tx.QueryRow(ctx, `select resource.entity_id
-			from game_resources resource
-			join catalog_entities entity on entity.id=resource.entity_id
-			left join game_resource_aliases alias
-			  on alias.resource_id=resource.entity_id and alias.kind_code=resource.kind_code
-			where resource.kind_code='minecraft.enchantment' and entity.status='active'
-			  and (lower(resource.canonical_id)=lower($1) or lower(alias.alias_id)=lower($1))
-			order by resource.resolved desc,resource.entity_id limit 1`, identifier).Scan(&resolvedID)
-		if err == nil {
-			continue
+	var rawTemplate []byte
+	var entryTypeCode string
+	if err := tx.QueryRow(ctx, `select template.definition,detail.entry_type_code
+		from mod_resource_version_details detail
+		join mod_content_section_resources member on member.resource_id=detail.resource_id and member.version_id=detail.version_id
+		join mod_content_sections section on section.id=member.section_id and section.version_id=member.version_id
+		join mod_content_templates template on template.id=section.template_id and template.status='active'
+		where detail.resource_id=$1 and detail.version_id=$2 and section.status='active'
+		order by section.ordinal,section.id limit 1`, resourceID, versionID).Scan(&rawTemplate, &entryTypeCode); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `insert into unresolved_resource_references(
-			source_entity_id,field_path,kind_code,raw_resource_id,status
-		) values($1,$2,'minecraft.enchantment',$3,'pending')`,
-			resourceID, fmt.Sprintf("%scompatibleEnchantments.%d", fieldPrefix, index), identifier); err != nil {
-			return err
-		}
+		return err
 	}
-	tags := firstDefinitionStringList(definition, []string{"itemTags"}, []string{"item_tags"}, []string{"tags"})
-	for index, identifier := range tags {
-		normalized := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(identifier)), "#")
-		var exists bool
-		if err := tx.QueryRow(ctx, `select exists(select 1
-			from catalog_tags tag join catalog_entities entity on entity.id=tag.entity_id
-			where entity.status='active' and lower(tag.canonical_id)=$1)`, normalized).Scan(&exists); err != nil {
-			return err
-		}
-		if exists {
-			continue
-		}
-		if _, err := tx.Exec(ctx, `insert into unresolved_references(
-			source_type,source_id,field_path,reference_type,raw_identifier,normalized_identifier,metadata
-		) values('mod_content_resource',$1,$2,'tag',$3,$4,jsonb_build_object('versionId',$5))
-		on conflict(source_type,source_id,field_path,reference_type,normalized_identifier) do update
-		set raw_identifier=excluded.raw_identifier,status='pending',resolved_type='',resolved_id=null,
-			resolved_at=null,metadata=excluded.metadata,updated_at=now()`,
-			resourceID, fmt.Sprintf("%sitem_tags.%d", fieldPrefix, index), identifier, normalized, versionID); err != nil {
-			return err
+	var template modContentTemplateDefinition
+	if err := json.Unmarshal(rawTemplate, &template); err != nil {
+		return err
+	}
+	entryType, err := selectModContentEntryType(template.EntryTypes, entryTypeCode, "", false)
+	if err != nil {
+		return err
+	}
+	for _, group := range entryType.Groups {
+		for _, field := range group.Fields {
+			if field.Type != "reference" && field.Type != "reference-list" {
+				continue
+			}
+			identifiers := firstDefinitionStringList(definition, []string{field.Code})
+			if field.Type == "reference" {
+				if identifier, ok := definition[field.Code].(string); ok {
+					identifiers = uniqueTrimmed([]string{identifier}, 1)
+				}
+			}
+			for index, identifier := range identifiers {
+				fieldPath := fieldPrefix + field.Code
+				if field.Type == "reference-list" {
+					fieldPath = fmt.Sprintf("%s.%d", fieldPath, index)
+				}
+				if field.ReferenceKind == "tag" {
+					normalized := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(identifier)), "#")
+					var exists bool
+					if err = tx.QueryRow(ctx, `select exists(select 1
+						from catalog_tags tag join catalog_entities entity on entity.id=tag.entity_id
+						where entity.status='active' and lower(tag.canonical_id)=$1
+						  and ($2='' or lower(tag.registry)=lower($2)))`, normalized, field.ReferenceRegistry).Scan(&exists); err != nil {
+						return err
+					}
+					if exists {
+						continue
+					}
+					if _, err = tx.Exec(ctx, `insert into unresolved_references(
+						source_type,source_id,field_path,reference_type,raw_identifier,normalized_identifier,metadata
+					) values('mod_content_resource',$1,$2,'tag',$3,$4,jsonb_build_object('versionId',$5,'registry',$6))
+					on conflict(source_type,source_id,field_path,reference_type,normalized_identifier) do update
+					set raw_identifier=excluded.raw_identifier,status='pending',resolved_type='',resolved_id=null,
+						resolved_at=null,metadata=excluded.metadata,updated_at=now()`,
+						resourceID, fieldPath, identifier, normalized, versionID, field.ReferenceRegistry); err != nil {
+						return err
+					}
+					continue
+				}
+				kindCode := normalizedModContentReferenceKind(field.ReferenceKind)
+				var resolvedID int64
+				err = tx.QueryRow(ctx, `select resource.entity_id
+					from game_resources resource
+					join catalog_entities entity on entity.id=resource.entity_id
+					left join game_resource_aliases alias on alias.resource_id=resource.entity_id and alias.kind_code=resource.kind_code
+					where resource.kind_code=$1 and entity.status='active'
+					  and (lower(resource.canonical_id)=lower($2) or lower(alias.alias_id)=lower($2))
+					order by resource.resolved desc,resource.entity_id limit 1`, kindCode, identifier).Scan(&resolvedID)
+				if err == nil {
+					continue
+				}
+				if !errors.Is(err, pgx.ErrNoRows) {
+					return err
+				}
+				if _, err = tx.Exec(ctx, `insert into unresolved_resource_references(
+					source_entity_id,field_path,kind_code,raw_resource_id,status
+				) values($1,$2,$3,$4,'pending')`, resourceID, fieldPath, kindCode, identifier); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
+}
+
+func normalizedModContentReferenceKind(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "enchantment":
+		return "minecraft.enchantment"
+	case "item":
+		return "minecraft.item"
+	case "block":
+		return "minecraft.block"
+	case "entity", "entity_type":
+		return "minecraft.entity_type"
+	default:
+		return value
+	}
 }
 
 func firstDefinitionStringList(definition map[string]any, paths ...[]string) []string {

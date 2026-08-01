@@ -291,7 +291,7 @@ func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request
 		rows, loadErr := s.db.Query(ctx, `select entity.public_id,resource.canonical_id,
 			snapshot.names,resource.namespace,snapshot.translation_key,snapshot.icon_path,snapshot.preview_path,
 			case when not $6 then snapshot.data
-				when snapshot.registry='advancements' then jsonb_strip_nulls(jsonb_build_object('parent',snapshot.data->'parentId','display',snapshot.data->'display'))
+				when snapshot.registry='advancements' then jsonb_strip_nulls(jsonb_build_object('parent',coalesce(snapshot.data->'parentId',snapshot.data->'parent'),'display',snapshot.data->'display'))
 				when snapshot.registry='loot_tables' then jsonb_strip_nulls(jsonb_build_object(
 					'category',snapshot.data->'category','path',snapshot.data->'path','possible_item_ids',snapshot.data->'possibleItemIds'))
 				when snapshot.registry='natural_generation' then jsonb_strip_nulls(jsonb_build_object(

@@ -520,6 +520,33 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	if speedEffectPlacements != 1 {
 		t.Fatalf("normalized icon effect was not attached to the unified content section: got %d", speedEffectPlacements)
 	}
+	var enchantmentsWithSpecificData, effectsWithSpecificData, fluidsWithSpecificData, advancementsWithSpecificData, advancementLinks int
+	if err = tx.QueryRow(context.Background(), `select
+		count(*) filter(where resource.kind_code='minecraft.enchantment'
+			and detail.definition ?& array['minimumLevel','maximumLevel','rarityWeight','supportedItems'])::int,
+		count(*) filter(where resource.kind_code='minecraft.mob_effect'
+			and detail.definition ?& array['category','colorRGB','instant'])::int,
+		count(*) filter(where resource.kind_code='minecraft.fluid'
+			and detail.definition ?& array['ingredientKind','amount','fluidTags'])::int,
+		count(*) filter(where resource.kind_code='minecraft.advancement'
+			and detail.definition ?& array['display','criteria','requirements','rewards'])::int,
+		count(*) filter(where resource.kind_code='minecraft.advancement'
+			and detail.definition ? 'parentId')::int
+		from mod_resource_version_details detail
+		join game_resources resource on resource.entity_id=detail.resource_id
+		where detail.version_id=$1`, versionID).Scan(
+		&enchantmentsWithSpecificData,
+		&effectsWithSpecificData,
+		&fluidsWithSpecificData,
+		&advancementsWithSpecificData,
+		&advancementLinks,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if enchantmentsWithSpecificData == 0 || effectsWithSpecificData == 0 || fluidsWithSpecificData == 0 || advancementsWithSpecificData == 0 || advancementLinks == 0 {
+		t.Fatalf("resource-specific canonical data was discarded: enchantments=%d effects=%d fluids=%d advancements=%d links=%d",
+			enchantmentsWithSpecificData, effectsWithSpecificData, fluidsWithSpecificData, advancementsWithSpecificData, advancementLinks)
+	}
 	var itemBlockRootsWithSystemCategories int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int from (
 		select root.id

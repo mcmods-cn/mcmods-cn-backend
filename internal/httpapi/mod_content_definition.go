@@ -45,14 +45,14 @@ func normalizeModContentEntryDefinition(
 	if err := json.Unmarshal(raw, &template); err != nil {
 		return nil, err
 	}
-	entryType, err := selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode)
+	entryType, err := selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode, false)
 	if err != nil {
 		return nil, err
 	}
 	return canonicalModContentDefinition(*entryType, definition, useImportAliases)
 }
 
-func selectModContentEntryType(entryTypes []modContentEntryTypeDefinition, entryTypeCode, kindCode string) (*modContentEntryTypeDefinition, error) {
+func selectModContentEntryType(entryTypes []modContentEntryTypeDefinition, entryTypeCode, kindCode string, enforceKind bool) (*modContentEntryTypeDefinition, error) {
 	if len(entryTypes) == 0 && strings.EqualFold(strings.TrimSpace(entryTypeCode), "default") {
 		return &modContentEntryTypeDefinition{Code: "default"}, nil
 	}
@@ -61,7 +61,7 @@ func selectModContentEntryType(entryTypes []modContentEntryTypeDefinition, entry
 		if !strings.EqualFold(strings.TrimSpace(entryType.Code), strings.TrimSpace(entryTypeCode)) {
 			continue
 		}
-		if len(entryType.KindCodes) == 0 {
+		if !enforceKind || len(entryType.KindCodes) == 0 {
 			return entryType, nil
 		}
 		for _, candidate := range entryType.KindCodes {
@@ -115,7 +115,7 @@ func normalizeModContentFieldValue(field modContentEntryTypeField, value any) (a
 			return nil, false, errCatalogEditorInvalid
 		}
 		return number, true, nil
-	case "text":
+	case "text", "reference":
 		text, ok := value.(string)
 		if !ok || len(text) > 4096 {
 			return nil, false, errCatalogEditorInvalid
@@ -130,6 +130,12 @@ func normalizeModContentFieldValue(field modContentEntryTypeField, value any) (a
 		return boolean, true, nil
 	case "list", "reference-list":
 		items, ok := value.([]any)
+		if !ok {
+			if text, valid := value.(string); valid {
+				items = []any{text}
+				ok = true
+			}
+		}
 		if !ok || len(items) > 2048 {
 			return nil, false, errCatalogEditorInvalid
 		}
@@ -168,11 +174,18 @@ func canonicalizeCatalogResourceRows(ctx context.Context, tx pgx.Tx, rows []cata
 	if err != nil {
 		return err
 	}
+	dimensionBiomes, biomeDimensions := importedDimensionBiomeRelations(rows)
 	for index := range rows {
 		row := &rows[index]
 		var source map[string]any
 		if err = json.Unmarshal([]byte(nonEmptyJSONObject(row.Data)), &source); err != nil {
 			return fmt.Errorf("decode %s definition: %w", row.CanonicalID, err)
+		}
+		if strings.EqualFold(row.KindCode, "minecraft.dimension") {
+			source["biome_ids"] = mergeImportedReferenceLists(source["biome_ids"], dimensionBiomes[strings.ToLower(row.CanonicalID)])
+		}
+		if strings.EqualFold(row.KindCode, "minecraft.biome") {
+			source["dimension_ids"] = mergeImportedReferenceLists(source["dimension_ids"], biomeDimensions[strings.ToLower(row.CanonicalID)])
 		}
 		entryTypeCode, canonical, normalizeErr := canonicalResourceDefinitionFromTemplates(templates, row.KindCode, row.ResourcePath, source)
 		if normalizeErr != nil {
@@ -190,6 +203,79 @@ func canonicalizeCatalogResourceRows(ctx context.Context, tx pgx.Tx, rows []cata
 	return nil
 }
 
+func importedDimensionBiomeRelations(rows []catalogResourceImportRow) (map[string][]string, map[string][]string) {
+	dimensionBiomes := make(map[string][]string)
+	biomeDimensions := make(map[string][]string)
+	for _, row := range rows {
+		if strings.EqualFold(strings.TrimSpace(row.KindCode), "minecraft.dimension") {
+			var source map[string]any
+			if json.Unmarshal([]byte(nonEmptyJSONObject(row.Data)), &source) == nil {
+				biomes := importedStringList(source["biome_ids"])
+				dimensionID := strings.ToLower(strings.TrimSpace(row.CanonicalID))
+				dimensionBiomes[dimensionID] = append(dimensionBiomes[dimensionID], biomes...)
+				for _, biomeID := range biomes {
+					key := strings.ToLower(biomeID)
+					biomeDimensions[key] = append(biomeDimensions[key], row.CanonicalID)
+				}
+			}
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(row.KindCode), "minecraft.natural_generation") {
+			continue
+		}
+		var source map[string]any
+		if json.Unmarshal([]byte(nonEmptyJSONObject(row.Data)), &source) != nil {
+			continue
+		}
+		dimensions := importedStringList(source["dimension_ids"])
+		biomes := importedStringList(source["resolved_biome_ids"])
+		for _, dimensionID := range dimensions {
+			key := strings.ToLower(dimensionID)
+			dimensionBiomes[key] = append(dimensionBiomes[key], biomes...)
+		}
+		for _, biomeID := range biomes {
+			key := strings.ToLower(biomeID)
+			biomeDimensions[key] = append(biomeDimensions[key], dimensions...)
+		}
+	}
+	for key, values := range dimensionBiomes {
+		dimensionBiomes[key] = uniqueTrimmed(values, 4096)
+	}
+	for key, values := range biomeDimensions {
+		biomeDimensions[key] = uniqueTrimmed(values, 256)
+	}
+	return dimensionBiomes, biomeDimensions
+}
+
+func mergeImportedReferenceLists(current any, additional []string) []any {
+	values := append(importedStringList(current), additional...)
+	values = uniqueTrimmed(values, 4096)
+	result := make([]any, len(values))
+	for index, value := range values {
+		result[index] = value
+	}
+	return result
+}
+
+func importedStringList(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return uniqueTrimmed(typed, 4096)
+	case []any:
+		result := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				result = append(result, text)
+			}
+		}
+		return uniqueTrimmed(result, 4096)
+	case string:
+		return uniqueTrimmed([]string{typed}, 1)
+	default:
+		return nil
+	}
+}
+
 func canonicalResourceDefinitionFromTemplates(
 	templates map[string]modContentTemplateDefinition,
 	kindCode, resourcePath string,
@@ -200,9 +286,9 @@ func canonicalResourceDefinitionFromTemplates(
 	if !exists {
 		return "default", map[string]any{}, nil
 	}
-	entryType, err := selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode)
+	entryType, err := selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode, true)
 	if err != nil {
-		entryType, err = selectModContentEntryType(template.EntryTypes, "default", kindCode)
+		entryType, err = selectModContentEntryType(template.EntryTypes, "default", kindCode, true)
 		entryTypeCode = "default"
 	}
 	if err != nil {
@@ -211,7 +297,7 @@ func canonicalResourceDefinitionFromTemplates(
 	canonical, err := canonicalModContentDefinition(*entryType, source, true)
 	if err != nil && strings.EqualFold(strings.TrimSpace(kindCode), "minecraft.item") &&
 		(entryTypeCode == "tool" || entryTypeCode == "equipment") {
-		itemType, selectErr := selectModContentEntryType(template.EntryTypes, "item", kindCode)
+		itemType, selectErr := selectModContentEntryType(template.EntryTypes, "item", kindCode, true)
 		if selectErr == nil {
 			if itemCanonical, fallbackErr := canonicalModContentDefinition(*itemType, source, true); fallbackErr == nil {
 				return "item", itemCanonical, nil

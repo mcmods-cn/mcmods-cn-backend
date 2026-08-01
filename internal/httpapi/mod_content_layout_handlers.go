@@ -760,7 +760,10 @@ func publishModContentLayoutResourcesTx(
 				return errCatalogEditorInvalid
 			}
 		}
-		currentParentCanonicalID, _ := definition["parent"].(string)
+		currentParentCanonicalID, _ := definition["parentId"].(string)
+		if currentParentCanonicalID == "" {
+			currentParentCanonicalID, _ = definition["parent"].(string)
+		}
 		display, _ := definition["display"].(map[string]any)
 		currentX, hasCurrentX := display["x"].(float64)
 		currentY, hasCurrentY := display["y"].(float64)
@@ -769,9 +772,11 @@ func publishModContentLayoutResourcesTx(
 			continue
 		}
 		if parentCanonicalID == "" {
+			delete(definition, "parentId")
 			delete(definition, "parent")
 		} else {
-			definition["parent"] = parentCanonicalID
+			definition["parentId"] = parentCanonicalID
+			delete(definition, "parent")
 		}
 		if display == nil {
 			display = make(map[string]any)

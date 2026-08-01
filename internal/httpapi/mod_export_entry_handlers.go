@@ -122,6 +122,10 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve loot table references")
 		return
 	}
+	if err = s.decorateCanonicalDefinitionReferences(r.Context(), revisionID, items, primary, secondary); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve resource references")
+		return
+	}
 	localized, localizationErr := s.loadCatalogEntityLocalizations(r.Context(), publicID)
 	if localizationErr != nil && !errors.Is(localizationErr, pgx.ErrNoRows) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve entry localization")

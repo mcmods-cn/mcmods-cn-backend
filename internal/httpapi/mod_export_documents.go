@@ -161,6 +161,7 @@ func exportDocumentKind(assetPath string) string {
 
 func exportDocumentEntries(assetPath string, document map[string]any) []exportDocumentEntry {
 	var values []map[string]any
+	dimensionTypes := make(map[string]map[string]any)
 	switch assetPath {
 	case "advancements/advancements.json":
 		values = exportObjectArray(document["advancements"])
@@ -170,6 +171,16 @@ func exportDocumentEntries(assetPath string, document map[string]any) []exportDo
 		values = exportObjectArray(document["biomes"])
 	case "worldgen/dimensions.json":
 		values = exportObjectArray(document["dimensions"])
+		for _, dimensionType := range exportObjectArray(document["dimension_types"]) {
+			identifier := strings.TrimSpace(exportString(dimensionType["id"]))
+			definition := exportObject(dimensionType["definition"])
+			if len(definition) == 0 {
+				definition = exportObject(dimensionType["runtime_definition"])
+			}
+			if identifier != "" && len(definition) > 0 {
+				dimensionTypes[identifier] = definition
+			}
+		}
 	case "worldgen/structures.json":
 		values = exportObjectArray(document["structures"])
 	case "worldgen/loot_tables.json":
@@ -233,6 +244,44 @@ func exportDocumentEntries(assetPath string, document map[string]any) []exportDo
 				exportString(entry.Data["category"]),
 			)
 		}
+		if assetPath == "worldgen/structures.json" {
+			biomeTag, biomeIDs := exportBiomeSelectorReferences(value["biomes"])
+			if biomeTag != "" {
+				entry.Data["biome_tag"] = biomeTag
+			}
+			if len(biomeIDs) > 0 {
+				entry.Data["biome_ids"] = biomeIDs
+			}
+		}
+		if assetPath == "worldgen/dimensions.json" {
+			runtimeDefinition := exportObject(value["runtime_definition"])
+			if len(runtimeDefinition) == 0 {
+				runtimeDefinition = exportObject(value["definition"])
+			}
+			typeID := strings.TrimSpace(exportString(runtimeDefinition["type"]))
+			if dimensionType := dimensionTypes[typeID]; len(dimensionType) > 0 {
+				entry.Data["dimension_type_definition"] = dimensionType
+			}
+			if biomeIDs := exportDimensionBiomeIDs(runtimeDefinition); len(biomeIDs) > 0 {
+				entry.Data["biome_ids"] = biomeIDs
+			}
+		}
+		if assetPath == "worldgen/biomes.json" {
+			runtimeDefinition := exportObject(value["runtime_definition"])
+			if len(runtimeDefinition) == 0 {
+				runtimeDefinition = exportObject(value["definition"])
+			}
+			spawners := exportObject(runtimeDefinition["spawners"])
+			if entityIDs := exportReferencedIDs(spawners, "type"); len(entityIDs) > 0 {
+				entry.Data["spawned_entity_ids"] = entityIDs
+			}
+			if featureIDs := exportStringLeaves(runtimeDefinition["features"]); len(featureIDs) > 0 {
+				entry.Data["feature_ids"] = featureIDs
+			}
+			if carverIDs := exportStringLeaves(runtimeDefinition["carvers"]); len(carverIDs) > 0 {
+				entry.Data["carver_ids"] = carverIDs
+			}
+		}
 		entry.Namespace = strings.TrimSpace(exportString(value["namespace"]))
 		if entry.Namespace == "" {
 			separator := ":"
@@ -246,6 +295,114 @@ func exportDocumentEntries(assetPath string, document map[string]any) []exportDo
 		}
 	}
 	return result
+}
+
+func exportReferencedIDs(value any, field string) []any {
+	result := make([]any, 0)
+	seen := make(map[string]struct{})
+	var visit func(any)
+	visit = func(current any) {
+		switch typed := current.(type) {
+		case map[string]any:
+			for key, nested := range typed {
+				if strings.EqualFold(strings.TrimSpace(key), field) {
+					for _, identifier := range exportStringLeaves(nested) {
+						identifier = strings.TrimPrefix(strings.TrimSpace(identifier), "#")
+						if identifier == "" {
+							continue
+						}
+						if _, exists := seen[identifier]; !exists {
+							seen[identifier] = struct{}{}
+							result = append(result, identifier)
+						}
+					}
+				}
+				visit(nested)
+			}
+		case []any:
+			for _, nested := range typed {
+				visit(nested)
+			}
+		}
+	}
+	visit(value)
+	return result
+}
+
+func exportDimensionBiomeIDs(definition map[string]any) []any {
+	result := exportReferencedIDs(definition, "biome")
+	seen := make(map[string]struct{}, len(result)+8)
+	for _, value := range result {
+		if identifier, ok := value.(string); ok {
+			seen[identifier] = struct{}{}
+		}
+	}
+	generator := exportObject(definition["generator"])
+	biomeSource := exportObject(generator["biome_source"])
+	typeID := strings.ToLower(strings.TrimSpace(exportString(biomeSource["type"])))
+	presetID := strings.ToLower(strings.TrimSpace(exportString(biomeSource["preset"])))
+	known := []string{}
+	switch {
+	case typeID == "minecraft:the_end":
+		known = []string{"minecraft:the_end", "minecraft:small_end_islands", "minecraft:end_midlands", "minecraft:end_highlands", "minecraft:end_barrens"}
+	case presetID == "minecraft:nether":
+		known = []string{"minecraft:nether_wastes", "minecraft:soul_sand_valley", "minecraft:crimson_forest", "minecraft:warped_forest", "minecraft:basalt_deltas"}
+	}
+	for _, identifier := range known {
+		if _, exists := seen[identifier]; exists {
+			continue
+		}
+		seen[identifier] = struct{}{}
+		result = append(result, identifier)
+	}
+	return result
+}
+
+func exportStringLeaves(value any) []string {
+	result := make([]string, 0)
+	seen := make(map[string]struct{})
+	var visit func(any)
+	visit = func(current any) {
+		switch typed := current.(type) {
+		case string:
+			identifier := strings.TrimSpace(typed)
+			if identifier != "" {
+				if _, exists := seen[identifier]; !exists {
+					seen[identifier] = struct{}{}
+					result = append(result, identifier)
+				}
+			}
+		case []any:
+			for _, nested := range typed {
+				visit(nested)
+			}
+		case map[string]any:
+			for _, nested := range typed {
+				visit(nested)
+			}
+		}
+	}
+	visit(value)
+	return result
+}
+
+func exportBiomeSelectorReferences(value any) (string, []any) {
+	values := exportStringLeaves(value)
+	result := make([]any, 0, len(values))
+	biomeTag := ""
+	for _, identifier := range values {
+		identifier = strings.TrimSpace(identifier)
+		if strings.HasPrefix(identifier, "#") {
+			if biomeTag == "" {
+				biomeTag = identifier
+			}
+			continue
+		}
+		if identifier != "" {
+			result = append(result, identifier)
+		}
+	}
+	return biomeTag, result
 }
 
 func normalizeLootTableCategory(id, path, category string) string {

@@ -119,7 +119,78 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 			resolved[key] = source
 		}
 	}
-	return resolved, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	missing := make([]exportResourceKey, 0)
+	for _, key := range unique {
+		if _, exists := resolved[key]; !exists {
+			missing = append(missing, key)
+		}
+	}
+	manual, err := s.resolveManualModContentResources(ctx, missing)
+	if err != nil {
+		return nil, err
+	}
+	for key, source := range manual {
+		resolved[key] = source
+	}
+	return resolved, nil
+}
+
+func (s *Server) resolveManualModContentResources(ctx context.Context, keys []exportResourceKey) (map[exportResourceKey]exportResourceSource, error) {
+	result := make(map[exportResourceKey]exportResourceSource)
+	if len(keys) == 0 {
+		return result, nil
+	}
+	revisions := make([]string, len(keys))
+	resourceIDs := make([]string, len(keys))
+	kinds := make([]string, len(keys))
+	for index, key := range keys {
+		revisions[index], resourceIDs[index], kinds[index] = key.RevisionID, key.ResourceID, key.Kind
+	}
+	rows, err := s.db.Query(ctx, `with requested as (
+		select request.preferred_revision_id,request.resource_id,request.resource_kind
+		from unnest($1::text[],$2::text[],$3::text[]) request(preferred_revision_id,resource_id,resource_kind)
+	)
+	select requested.preferred_revision_id,requested.resource_id,requested.resource_kind,
+		coalesce(source.public_id,''),coalesce(source.site_id,''),coalesce(source.version_public_id,''),
+		coalesce(source.kind_code,''),coalesce(source.object_id,''),coalesce(source.names,'{}'::jsonb)
+	from requested left join lateral (
+		select entity.public_id,mod.slug site_id,version.public_id version_public_id,
+			resource.kind_code,resource.canonical_id object_id,
+			coalesce((select jsonb_object_agg(localization.locale,localization.name)
+			 from mod_resource_version_detail_localizations localization
+			 where localization.resource_id=resource.entity_id and localization.version_id=version.id),'{}'::jsonb) names
+		from game_resources resource
+		join catalog_entities entity on entity.id=resource.entity_id and entity.status='active'
+		join mod_resource_bindings binding on binding.resource_id=resource.entity_id
+		join mods mod on mod.id=binding.mod_id and mod.status='active'
+		join mod_resource_version_details detail on detail.resource_id=resource.entity_id and detail.status='active'
+		join mod_content_versions version on version.id=detail.version_id and version.status='active'
+		where lower(resource.canonical_id)=lower(requested.resource_id)
+		order by (lower(resource.kind_code)=lower('minecraft.'||requested.resource_kind)) desc,
+			version.updated_at desc,resource.entity_id limit 1
+	) source on true`, revisions, resourceIDs, kinds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key exportResourceKey
+		var source exportResourceSource
+		var names []byte
+		if err = rows.Scan(&key.RevisionID, &key.ResourceID, &key.Kind, &source.PublicID, &source.ModSiteID,
+			&source.VersionPublicID, &source.KindCode, &source.ObjectID, &names); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(names, &source.Names)
+		if source.PublicID != "" {
+			result[key] = source
+		}
+	}
+	return result, rows.Err()
 }
 
 func normalizeExportResourceKind(value string) string {
@@ -231,6 +302,78 @@ func (s *Server) decorateLootTableReferences(ctx context.Context, revisionID str
 
 func (s *Server) decorateCompatibleEnchantmentResources(ctx context.Context, revisionID string, items []map[string]any, locales ...string) error {
 	return s.decorateReferencedResources(ctx, revisionID, "enchantment", items, compatibleEnchantmentIDs, locales...)
+}
+
+func (s *Server) decorateCanonicalDefinitionReferences(ctx context.Context, revisionID string, items []map[string]any, locales ...string) error {
+	type reference struct {
+		ID   string
+		Kind string
+	}
+	referencesByIndex := make([][]reference, len(items))
+	keys := make([]exportResourceKey, 0, len(items)*12)
+	fields := map[string][]string{
+		"enchantment":        {"compatibleEnchantments", "exclusiveWith"},
+		"loot_table":         {"lootTable", "defaultLootTable", "referencedLootTables"},
+		"item":               {"repairItems", "spawnEggs", "breedingMaterials", "possibleItemIds", "supportedItems", "bucketItemId", "iconItemId"},
+		"biome":              {"biomeIds", "resolvedBiomeIds"},
+		"dimension":          {"dimensionIds"},
+		"entity":             {"spawnedEntityIds"},
+		"natural_generation": {"featureIds", "carverIds"},
+		"advancement":        {"parentId", "childrenIds"},
+	}
+	for index, item := range items {
+		data, _ := item["data"].(map[string]any)
+		seen := make(map[string]struct{})
+		for kind, fieldNames := range fields {
+			for _, fieldName := range fieldNames {
+				for _, identifier := range canonicalReferenceValues(data[fieldName]) {
+					key := kind + "\x00" + identifier
+					if _, exists := seen[key]; exists {
+						continue
+					}
+					seen[key] = struct{}{}
+					referencesByIndex[index] = append(referencesByIndex[index], reference{ID: identifier, Kind: kind})
+					keys = append(keys, exportResourceKey{RevisionID: revisionID, ResourceID: identifier, Kind: kind})
+				}
+			}
+		}
+	}
+	resolved, err := s.resolveExportResources(ctx, keys)
+	if err != nil {
+		return err
+	}
+	for index, item := range items {
+		data, _ := item["data"].(map[string]any)
+		if data == nil {
+			data = make(map[string]any)
+			item["data"] = data
+		}
+		sources := exportResourceSourceMap(data)
+		for _, itemReference := range referencesByIndex[index] {
+			key := exportResourceKey{RevisionID: revisionID, ResourceID: itemReference.ID, Kind: normalizeExportResourceKind(itemReference.Kind)}
+			if source, exists := resolved[key]; exists && normalizeExportResourceKind(source.KindCode) == key.Kind {
+				sources[itemReference.ID] = exportResourceSourceValue(itemReference.ID, source, locales...)
+			}
+		}
+	}
+	return nil
+}
+
+func canonicalReferenceValues(value any) []string {
+	switch typed := value.(type) {
+	case string:
+		return uniqueTrimmed([]string{typed}, 1)
+	case []any:
+		result := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if identifier, ok := item.(string); ok {
+				result = append(result, identifier)
+			}
+		}
+		return uniqueTrimmed(result, 4096)
+	default:
+		return nil
+	}
 }
 
 func (s *Server) decorateReferencedResources(

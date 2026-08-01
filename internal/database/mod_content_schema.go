@@ -2,9 +2,9 @@ package database
 
 const builtinBlockCompatibilityFields = `[
   {"code":"requiredTier","type":"text","names":{"en-US":"Required tool tier","zh-CN":"最低工具等级","zh-TW":"最低工具等級"},"paths":[["required_tier"]]},
-  {"code":"miningTags","type":"list","names":{"en-US":"Mining tool tags","zh-CN":"挖掘工具标签","zh-TW":"挖掘工具標籤"},"paths":[["mining_tags"]]},
-  {"code":"tierTags","type":"list","names":{"en-US":"Mining tier tags","zh-CN":"挖掘等级标签","zh-TW":"挖掘等級標籤"},"paths":[["tier_tags"]]},
-  {"code":"blockTags","type":"list","names":{"en-US":"Block tags","zh-CN":"方块标签","zh-TW":"方塊標籤"},"paths":[["block_tags"]]},
+  {"code":"miningTags","type":"reference-list","referenceKind":"tag","referenceRegistry":"minecraft:block","names":{"en-US":"Mining tool tags","zh-CN":"挖掘工具标签","zh-TW":"挖掘工具標籤"},"paths":[["mining_tags"]]},
+  {"code":"tierTags","type":"reference-list","referenceKind":"tag","referenceRegistry":"minecraft:block","names":{"en-US":"Mining tier tags","zh-CN":"挖掘等级标签","zh-TW":"挖掘等級標籤"},"paths":[["tier_tags"]]},
+  {"code":"blockTags","type":"reference-list","referenceKind":"tag","referenceRegistry":"minecraft:block","names":{"en-US":"Block tags","zh-CN":"方块标签","zh-TW":"方塊標籤"},"paths":[["block_tags"]]},
   {"code":"solid","type":"boolean","names":{"en-US":"Solid","zh-CN":"固体","zh-TW":"固體"},"paths":[["solid"]]},
   {"code":"liquid","type":"boolean","names":{"en-US":"Liquid","zh-CN":"液体","zh-TW":"液體"},"paths":[["liquid"]]},
   {"code":"canOcclude","type":"boolean","names":{"en-US":"Can occlude","zh-CN":"可遮挡","zh-TW":"可遮擋"},"paths":[["can_occlude"],["occlusion"]]},
@@ -13,7 +13,7 @@ const builtinBlockCompatibilityFields = `[
   {"code":"hasBlockEntity","type":"boolean","names":{"en-US":"Has block entity","zh-CN":"包含方块实体","zh-TW":"包含方塊實體"},"paths":[["has_block_entity"]]},
   {"code":"randomlyTicking","type":"boolean","names":{"en-US":"Randomly ticking","zh-CN":"随机刻更新","zh-TW":"隨機刻更新"},"paths":[["randomly_ticking"]]},
   {"code":"pistonReaction","type":"text","names":{"en-US":"Piston reaction","zh-CN":"活塞反应","zh-TW":"活塞反應"},"paths":[["piston_reaction"]]},
-  {"code":"lootTable","type":"text","names":{"en-US":"Loot table","zh-CN":"战利品表","zh-TW":"戰利品表"},"paths":[["loot_table"]]}
+  {"code":"lootTable","type":"reference","referenceKind":"minecraft.loot_table","names":{"en-US":"Loot table","zh-CN":"战利品表","zh-TW":"戰利品表"},"paths":[["loot_table"]]}
 ]`
 
 const builtinItemCompatibilityFields = `[
@@ -22,7 +22,7 @@ const builtinItemCompatibilityFields = `[
   {"code":"primaryType","type":"text","names":{"en-US":"Primary type","zh-CN":"主要类型","zh-TW":"主要類型"},"paths":[["primary_type"]]},
   {"code":"itemTypes","type":"list","names":{"en-US":"Item types","zh-CN":"物品类型","zh-TW":"物品類型"},"paths":[["item_types"]]},
   {"code":"enchantable","type":"boolean","names":{"en-US":"Enchantable","zh-CN":"可附魔","zh-TW":"可附魔"},"paths":[["enchanting","enchantable"]]},
-  {"code":"repairItems","type":"list","names":{"en-US":"Repair materials","zh-CN":"修复材料","zh-TW":"修復材料"},"paths":[["repair_items"]]}
+  {"code":"repairItems","type":"reference-list","referenceKind":"minecraft.item","names":{"en-US":"Repair materials","zh-CN":"修复材料","zh-TW":"修復材料"},"paths":[["repair_items"]]}
 ]`
 
 const builtinToolCompatibilityFields = `[
@@ -36,8 +36,8 @@ const builtinToolCompatibilityFields = `[
   {"code":"attackDamageModifier","type":"number","names":{"en-US":"Attack damage modifier","zh-CN":"攻击伤害修饰值","zh-TW":"攻擊傷害修飾值"},"paths":[["combat","attack_damage_modifier"]]},
   {"code":"attackSpeedModifier","type":"number","names":{"en-US":"Attack speed modifier","zh-CN":"攻击速度修饰值","zh-TW":"攻擊速度修飾值"},"paths":[["combat","attack_speed_modifier"]]},
   {"code":"enchantable","type":"boolean","names":{"en-US":"Enchantable","zh-CN":"可附魔","zh-TW":"可附魔"},"paths":[["enchanting","enchantable"]]},
-  {"code":"repairItems","type":"list","names":{"en-US":"Repair materials","zh-CN":"修复材料","zh-TW":"修復材料"},"paths":[["tool","tier","repair_items"],["repair_items"]]},
-  {"code":"incorrectBlocksForDrops","type":"list","names":{"en-US":"Incorrect blocks for drops","zh-CN":"无法正确掉落的方块标签","zh-TW":"無法正確掉落的方塊標籤"},"paths":[["tool","tier","incorrect_blocks_for_drops"],["incorrect_blocks_for_drops"]]}
+  {"code":"repairItems","type":"reference-list","referenceKind":"minecraft.item","names":{"en-US":"Repair materials","zh-CN":"修复材料","zh-TW":"修復材料"},"paths":[["tool","tier","repair_items"],["repair_items"]]},
+  {"code":"incorrectBlocksForDrops","type":"reference-list","referenceKind":"tag","referenceRegistry":"minecraft:block","names":{"en-US":"Incorrect blocks for drops","zh-CN":"无法正确掉落的方块标签","zh-TW":"無法正確掉落的方塊標籤"},"paths":[["tool","tier","incorrect_blocks_for_drops"],["incorrect_blocks_for_drops"]]}
 ]`
 
 const builtinEquipmentCompatibilityFields = `[
@@ -46,7 +46,7 @@ const builtinEquipmentCompatibilityFields = `[
   {"code":"primaryType","type":"text","names":{"en-US":"Primary type","zh-CN":"主要类型","zh-TW":"主要類型"},"paths":[["primary_type"]]},
   {"code":"itemTypes","type":"list","names":{"en-US":"Item types","zh-CN":"物品类型","zh-TW":"物品類型"},"paths":[["item_types"]]},
   {"code":"enchantable","type":"boolean","names":{"en-US":"Enchantable","zh-CN":"可附魔","zh-TW":"可附魔"},"paths":[["enchanting","enchantable"]]},
-  {"code":"itemTags","type":"reference-list","referenceKind":"tag","names":{"en-US":"Item tags","zh-CN":"物品标签","zh-TW":"物品標籤"},"paths":[["item_tags"],["tags"]]}
+  {"code":"itemTags","type":"reference-list","referenceKind":"tag","referenceRegistry":"minecraft:item","names":{"en-US":"Item tags","zh-CN":"物品标签","zh-TW":"物品標籤"},"paths":[["item_tags"],["tags"]]}
 ]`
 
 const builtinEntityCompatibilityFields = `[
@@ -66,9 +66,9 @@ const builtinEntityCompatibilityFields = `[
   {"code":"updateInterval","type":"number","names":{"en-US":"Update interval","zh-CN":"更新间隔","zh-TW":"更新間隔"},"paths":[["update_interval"]]},
   {"code":"runtimePropertiesAvailable","type":"boolean","names":{"en-US":"Runtime properties available","zh-CN":"运行时属性可用","zh-TW":"執行時屬性可用"},"paths":[["runtime_properties_available"]]},
   {"code":"spawnEggCount","type":"number","names":{"en-US":"Spawn egg count","zh-CN":"刷怪蛋数量","zh-TW":"生怪蛋數量"},"paths":[["spawn_egg_count"]]},
-  {"code":"defaultLootTable","type":"text","names":{"en-US":"Default loot table","zh-CN":"默认战利品表","zh-TW":"預設戰利品表"},"paths":[["default_loot_table"]]},
-  {"code":"spawnEggs","type":"list","names":{"en-US":"Spawn eggs","zh-CN":"刷怪蛋","zh-TW":"生怪蛋"},"paths":[["spawn_eggs"]]},
-  {"code":"breedingMaterials","type":"list","names":{"en-US":"Breeding materials","zh-CN":"繁殖材料","zh-TW":"繁殖材料"},"paths":[["breeding_materials"],["breed_items"]]}
+  {"code":"defaultLootTable","type":"reference","referenceKind":"minecraft.loot_table","names":{"en-US":"Default loot table","zh-CN":"默认战利品表","zh-TW":"預設戰利品表"},"paths":[["default_loot_table"]]},
+  {"code":"spawnEggs","type":"reference-list","referenceKind":"minecraft.item","names":{"en-US":"Spawn eggs","zh-CN":"刷怪蛋","zh-TW":"生怪蛋"},"paths":[["spawn_eggs"]]},
+  {"code":"breedingMaterials","type":"reference-list","referenceKind":"minecraft.item","names":{"en-US":"Breeding materials","zh-CN":"繁殖材料","zh-TW":"繁殖材料"},"paths":[["breeding_materials"],["breed_items"]]}
 ]`
 
 // modContentSchemaStatements installs the human-authored, version-aware mod
@@ -173,7 +173,7 @@ func modContentSchemaStatements() []string {
 						{"code":"maxStackSize","type":"number","names":{"en-US":"Maximum stack size","zh-CN":"最大堆叠数量","zh-TW":"最大堆疊數量"},"paths":[["max_stack_size"],["stack_size"],["item","maxStackSize"]]},
 						{"code":"enchantability","type":"number","names":{"en-US":"Enchantability","zh-CN":"附魔能力","zh-TW":"附魔能力"},"paths":[["enchanting","enchantment_value"],["enchantment_value"],["item","enchantability"]]},
 						{"code":"compatibleEnchantments","type":"reference-list","referenceKind":"enchantment","names":{"en-US":"Compatible enchantments","zh-CN":"兼容附魔","zh-TW":"相容附魔"},"paths":[["enchanting","compatible_enchantments"],["compatible_enchantments"]]},
-						{"code":"itemTags","type":"reference-list","referenceKind":"tag","names":{"en-US":"Item tags","zh-CN":"包含的标签","zh-TW":"包含的標籤"},"paths":[["item_tags"],["tags"]]}
+						{"code":"itemTags","type":"reference-list","referenceKind":"tag","referenceRegistry":"minecraft:item","names":{"en-US":"Item tags","zh-CN":"包含的标签","zh-TW":"包含的標籤"},"paths":[["item_tags"],["tags"]]}
 					]}
 				]},
 				{"code":"tool","kindCodes":["minecraft.item"],"names":{"en-US":"Tool","zh-CN":"工具","zh-TW":"工具"},"groups":[
@@ -184,9 +184,9 @@ func modContentSchemaStatements() []string {
 						{"code":"attackDamage","type":"number","names":{"en-US":"Attack damage","zh-CN":"攻击伤害","zh-TW":"攻擊傷害"},"paths":[["combat","attack_damage"],["tool","attack_damage"],["attack_damage"]]},
 						{"code":"attackSpeed","type":"number","names":{"en-US":"Attack speed","zh-CN":"攻击速度","zh-TW":"攻擊速度"},"paths":[["combat","attack_speed"],["tool","attack_speed"],["attack_speed"]]},
 						{"code":"enchantability","type":"number","names":{"en-US":"Enchantability","zh-CN":"附魔能力","zh-TW":"附魔能力"},"paths":[["enchanting","enchantment_value"],["tool","tier","enchantment_value"],["enchantment_value"]]},
-						{"code":"repairTag","type":"text","names":{"en-US":"Repair material tag","zh-CN":"修复材料标签","zh-TW":"修復材料標籤"},"paths":[["tool","repair_tag"],["repair_tag"]]},
+						{"code":"repairTag","type":"reference","referenceKind":"tag","referenceRegistry":"minecraft:item","names":{"en-US":"Repair material tag","zh-CN":"修复材料标签","zh-TW":"修復材料標籤"},"paths":[["tool","repair_tag"],["repair_tag"]]},
 						{"code":"compatibleEnchantments","type":"reference-list","referenceKind":"enchantment","names":{"en-US":"Compatible enchantments","zh-CN":"兼容附魔","zh-TW":"相容附魔"},"paths":[["enchanting","compatible_enchantments"],["compatible_enchantments"]]},
-						{"code":"itemTags","type":"reference-list","referenceKind":"tag","names":{"en-US":"Item tags","zh-CN":"包含的标签","zh-TW":"包含的標籤"},"paths":[["item_tags"],["tags"]]}
+						{"code":"itemTags","type":"reference-list","referenceKind":"tag","referenceRegistry":"minecraft:item","names":{"en-US":"Item tags","zh-CN":"包含的标签","zh-TW":"包含的標籤"},"paths":[["item_tags"],["tags"]]}
 					]}
 				]},
 				{"code":"equipment","kindCodes":["minecraft.item"],"names":{"en-US":"Equipment","zh-CN":"装备","zh-TW":"裝備"},"groups":[
@@ -197,7 +197,7 @@ func modContentSchemaStatements() []string {
 						{"code":"knockbackResistance","type":"number","names":{"en-US":"Knockback resistance","zh-CN":"击退抗性","zh-TW":"擊退抗性"},"paths":[["armor","knockback_resistance"],["knockback_resistance"],["equipment","knockback_resistance"]]},
 						{"code":"equipmentSlot","type":"text","names":{"en-US":"Equipment slot","zh-CN":"装备槽位","zh-TW":"裝備欄位"},"paths":[["equipment_slot"],["slot"],["equipment","slot"]]},
 						{"code":"enchantability","type":"number","names":{"en-US":"Enchantability","zh-CN":"附魔能力","zh-TW":"附魔能力"},"paths":[["armor","enchantment_value"],["enchanting","enchantment_value"],["enchantment_value"],["equipment","enchantability"]]},
-						{"code":"repairItems","type":"list","names":{"en-US":"Repair materials","zh-CN":"修复材料","zh-TW":"修復材料"},"paths":[["armor","repair_items"],["equipment","repair_items"]]},
+						{"code":"repairItems","type":"reference-list","referenceKind":"minecraft.item","names":{"en-US":"Repair materials","zh-CN":"修复材料","zh-TW":"修復材料"},"paths":[["armor","repair_items"],["equipment","repair_items"]]},
 						{"code":"compatibleEnchantments","type":"reference-list","referenceKind":"enchantment","names":{"en-US":"Compatible enchantments","zh-CN":"兼容附魔","zh-TW":"相容附魔"},"paths":[["enchanting","compatible_enchantments"],["compatible_enchantments"]]}
 					]}
 				]}
