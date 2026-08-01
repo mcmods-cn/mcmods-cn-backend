@@ -7,13 +7,16 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 30
+const schemaGeneration = 37
 
-// Migrate installs one coherent development schema. Generation 30 establishes
+// Migrate installs one coherent development schema. Generation 37 establishes
 // numeric internal keys, globally unique public IDs, revocable authentication
-// sessions, and version-scoped mod-content layout identities. Earlier
-// development data is intentionally not migrated and must be reset before
-// installation.
+// sessions, version-scoped mod-content layout identities, and generalized
+// unresolved references together with the Minecraft server catalog, review,
+// proof, dependency, status-history, and data-driven resource entry subtype
+// models whose configurable fields also map imported compatibility data.
+// Earlier development data is
+// intentionally not migrated and must be reset before installation.
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	conn, err := db.Acquire(ctx)
 	if err != nil {
@@ -41,11 +44,6 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		return fmt.Errorf("database schema generation %d is incompatible with generation %d; reset the development database", currentGeneration, schemaGeneration)
 	}
 	if currentGeneration == schemaGeneration {
-		for _, statement := range compatibleSchemaStatements() {
-			if _, err = conn.Exec(ctx, statement); err != nil {
-				return fmt.Errorf("apply compatible schema update: %w", err)
-			}
-		}
 		return nil
 	}
 
@@ -66,6 +64,7 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	statements = append(statements, projectFileSchemaStatements()...)
 	statements = append(statements, modContentSchemaStatements()...)
 	statements = append(statements, commentSchemaStatements()...)
+	statements = append(statements, serverSchemaStatements()...)
 	statements = append(statements, foreignKeyIndexStatement())
 	for _, statement := range statements {
 		if _, err = tx.Exec(ctx, statement); err != nil {
@@ -86,15 +85,6 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		return fmt.Errorf("commit schema generation: %w", err)
 	}
 	return nil
-}
-
-// compatibleSchemaStatements contains additive, data-preserving updates that
-// are safe to install without changing the coherent schema generation.
-func compatibleSchemaStatements() []string {
-	statements := []string{
-		`create index if not exists idx_comments_author_created on comments(author_id,created_at desc)`,
-	}
-	return append(statements, compatibleModContentLayoutStatements()...)
 }
 
 func foreignKeyIndexStatement() string {
@@ -167,7 +157,14 @@ func ResetDevelopmentSchema(ctx context.Context, db *pgxpool.Pool) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `do $$
+	if _, err = tx.Exec(ctx, resetDevelopmentSchemaStatement()); err != nil {
+		return fmt.Errorf("drop development database objects: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+func resetDevelopmentSchemaStatement() string {
+	return `do $$
 	declare object record;
 	begin
 		for object in
@@ -182,10 +179,31 @@ func ResetDevelopmentSchema(ctx context.Context, db *pgxpool.Pool) error {
 		loop
 			execute format('drop sequence if exists public.%I cascade',object.name);
 		end loop;
-	end $$`); err != nil {
-		return fmt.Errorf("drop development database objects: %w", err)
-	}
-	return tx.Commit(ctx)
+		for object in
+			select
+				procedure_row.proname name,
+				case procedure_row.prokind when 'p' then 'procedure' else 'function' end kind,
+				pg_get_function_identity_arguments(procedure_row.oid) arguments
+			from pg_proc procedure_row
+			join pg_namespace namespace_row on namespace_row.oid=procedure_row.pronamespace
+			where namespace_row.nspname='public'
+			  and procedure_row.prokind in ('f','p')
+			  and not exists (
+				select 1
+				from pg_depend dependency_row
+				where dependency_row.classid='pg_proc'::regclass
+				  and dependency_row.objid=procedure_row.oid
+				  and dependency_row.deptype='e'
+			  )
+		loop
+			execute format(
+				'drop %s if exists public.%I(%s) cascade',
+				object.kind,
+				object.name,
+				object.arguments
+			);
+		end loop;
+	end $$`
 }
 
 func reviewSchemaStatements() []string {

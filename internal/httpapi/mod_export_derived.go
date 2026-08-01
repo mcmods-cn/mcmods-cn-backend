@@ -39,7 +39,7 @@ func refreshModExportRevisionStats(ctx context.Context, tx pgx.Tx, revisionIDs [
 				union all select asset_path from catalog_import_media where revision_id=revision.id
 			) assets),
 			(select count(*)::int from catalog_import_structures where revision_id=revision.id),
-			coalesce((select jsonb_array_length(json_content->'advancements') from catalog_import_text_assets where revision_id=revision.id and asset_path='advancements/advancements.json'),0),
+			(select count(*)::int from resource_import_snapshots where revision_id=revision.id and registry='advancements'),
 			(select count(*)::int from resource_import_snapshots where revision_id=revision.id and registry='key_mappings'),
 			(select count(*)::int from recipe_import_snapshots where revision_id=revision.id),
 			(select count(*)::int from tag_import_snapshots where revision_id=revision.id),

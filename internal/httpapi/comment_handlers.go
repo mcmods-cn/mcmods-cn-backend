@@ -35,6 +35,7 @@ type commentAuthor struct {
 	Username    string `json:"username"`
 	DisplayName string `json:"displayName"`
 	AvatarURL   string `json:"avatarUrl"`
+	ProjectRole string `json:"projectRole,omitempty"`
 }
 
 type commentParentPreview struct {
@@ -124,6 +125,22 @@ type insertedCommentTree struct {
 
 type commentQueryer interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+type commentProjectIdentity struct {
+	ID        int64
+	UniqueID  string
+	CreatedBy int64
+}
+
+type commentProjectRoleSignals struct {
+	ProjectCreator          bool
+	DeveloperMembership     bool
+	EditorMembership        bool
+	ConfiguredDeveloperRole bool
+	ConfiguredEditorRole    bool
+	ScopedOwnerPermission   bool
+	ScopedEditorPermission  bool
 }
 
 func (s *Server) commentsForTarget(w http.ResponseWriter, r *http.Request) {
@@ -819,7 +836,14 @@ func (s *Server) commentWatchItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) queryCommentItems(ctx context.Context, ids []int64, includeTree bool, maxDepth int, viewerID int64) ([]commentResponse, error) {
-	return queryCommentItemsWithQueryer(ctx, s.db, ids, includeTree, maxDepth, viewerID)
+	items, err := queryCommentItemsWithQueryer(ctx, s.db, ids, includeTree, maxDepth, viewerID)
+	if err != nil {
+		return nil, err
+	}
+	if err = s.annotateCommentProjectRoles(ctx, items); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, ids []int64, includeTree bool, maxDepth int, viewerID int64) ([]commentResponse, error) {
@@ -919,6 +943,185 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 		return nil, err
 	}
 	return items, nil
+}
+
+func (s *Server) annotateCommentProjectRoles(ctx context.Context, items []commentResponse) error {
+	if len(items) == 0 {
+		return nil
+	}
+	commentIDs := make([]string, 0, len(items))
+	itemsByID := make(map[string]*commentResponse, len(items))
+	for index := range items {
+		commentIDs = append(commentIDs, items[index].ID)
+		itemsByID[items[index].ID] = &items[index]
+	}
+
+	rows, err := s.db.Query(ctx, `select comment.public_id,comment.author_id,
+		coalesce(direct_mod.id,resource_mod.id,0),
+		coalesce(direct_mod.project_code,resource_mod.project_code,''),
+		coalesce(direct_mod.created_by,resource_mod.created_by,0)
+		from comments comment
+		left join mods direct_mod on comment.target_type='mod' and direct_mod.id=comment.target_id
+		left join mod_content_versions resource_version
+			on comment.target_type='mod_resource' and resource_version.id=comment.target_version_id
+		left join mods resource_mod on resource_mod.id=resource_version.mod_id
+		where comment.public_id=any($1::text[])`, commentIDs)
+	if err != nil {
+		return err
+	}
+	type projectUserKey struct {
+		ProjectID int64
+		UserID    int64
+	}
+	type projectGroup struct {
+		Identity commentProjectIdentity
+		UserIDs  map[int64]struct{}
+	}
+	assignments := make(map[string]projectUserKey, len(items))
+	groups := make(map[int64]*projectGroup)
+	for rows.Next() {
+		var commentID string
+		var authorID int64
+		var project commentProjectIdentity
+		if err = rows.Scan(&commentID, &authorID, &project.ID, &project.UniqueID, &project.CreatedBy); err != nil {
+			rows.Close()
+			return err
+		}
+		if project.ID == 0 || project.UniqueID == "" {
+			continue
+		}
+		key := projectUserKey{ProjectID: project.ID, UserID: authorID}
+		assignments[commentID] = key
+		group := groups[project.ID]
+		if group == nil {
+			group = &projectGroup{Identity: project, UserIDs: make(map[int64]struct{})}
+			groups[project.ID] = group
+		}
+		group.UserIDs[authorID] = struct{}{}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	defaults := s.permissionDefaultsFromSettings(ctx)
+	roles := make(map[projectUserKey]string)
+	for _, group := range groups {
+		userIDs := make([]int64, 0, len(group.UserIDs))
+		for userID := range group.UserIDs {
+			userIDs = append(userIDs, userID)
+		}
+		resolved, resolveErr := s.commentProjectRoles(ctx, group.Identity, userIDs, defaults)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		for userID, role := range resolved {
+			roles[projectUserKey{ProjectID: group.Identity.ID, UserID: userID}] = role
+		}
+	}
+	for commentID, key := range assignments {
+		if item := itemsByID[commentID]; item != nil {
+			item.Author.ProjectRole = roles[key]
+		}
+	}
+	return nil
+}
+
+func (s *Server) commentProjectRoles(
+	ctx context.Context,
+	project commentProjectIdentity,
+	userIDs []int64,
+	defaults permissionDefaultsPayload,
+) (map[int64]string, error) {
+	result := make(map[int64]string, len(userIDs))
+	if len(userIDs) == 0 {
+		return result, nil
+	}
+	developerRole, _ := concreteProjectRole(defaults.DeveloperRole, project.UniqueID)
+	editorRole, _ := concreteProjectRole(defaults.EditorRole, project.UniqueID)
+	ownerPermissions := []string{"project.owner." + project.UniqueID}
+	editorPermissions := []string{
+		"project.edit." + project.UniqueID,
+		"project.editor." + project.UniqueID,
+	}
+	rows, err := s.db.Query(ctx, `select candidate.user_id,
+		candidate.user_id=$3,
+		exists(select 1 from mod_memberships membership
+			where membership.mod_id=$1 and membership.user_id=candidate.user_id and membership.role='developer'),
+		exists(select 1 from mod_memberships membership
+			where membership.mod_id=$1 and membership.user_id=candidate.user_id and membership.role='editor'),
+		exists(select 1 from user_role_bindings binding join roles role on role.id=binding.role_id
+			where binding.user_id=candidate.user_id and role.code=$4 and role.status='active'),
+		exists(select 1 from user_role_bindings binding join roles role on role.id=binding.role_id
+			where binding.user_id=candidate.user_id and role.code=$5 and role.status='active'),
+		exists(
+			select 1 from user_permissions user_permission
+			join permissions permission on permission.id=user_permission.permission_id
+			where user_permission.user_id=candidate.user_id and user_permission.allow=true
+			  and (user_permission.expires_at is null or user_permission.expires_at>now())
+			  and permission.code=any($6::text[])
+			union all
+			select 1 from user_role_bindings binding
+			join roles role on role.id=binding.role_id and role.status='active'
+			join role_permissions role_permission on role_permission.role_id=role.id and role_permission.allow=true
+			join permissions permission on permission.id=role_permission.permission_id
+			where binding.user_id=candidate.user_id
+			  and (role_permission.expires_at is null or role_permission.expires_at>now())
+			  and permission.code=any($6::text[])
+		),
+		exists(
+			select 1 from user_permissions user_permission
+			join permissions permission on permission.id=user_permission.permission_id
+			where user_permission.user_id=candidate.user_id and user_permission.allow=true
+			  and (user_permission.expires_at is null or user_permission.expires_at>now())
+			  and permission.code=any($7::text[])
+			union all
+			select 1 from user_role_bindings binding
+			join roles role on role.id=binding.role_id and role.status='active'
+			join role_permissions role_permission on role_permission.role_id=role.id and role_permission.allow=true
+			join permissions permission on permission.id=role_permission.permission_id
+			where binding.user_id=candidate.user_id
+			  and (role_permission.expires_at is null or role_permission.expires_at>now())
+			  and permission.code=any($7::text[])
+		)
+		from unnest($2::bigint[]) candidate(user_id)`,
+		project.ID, userIDs, project.CreatedBy, developerRole, editorRole, ownerPermissions, editorPermissions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var userID int64
+		var signals commentProjectRoleSignals
+		if err = rows.Scan(
+			&userID,
+			&signals.ProjectCreator,
+			&signals.DeveloperMembership,
+			&signals.EditorMembership,
+			&signals.ConfiguredDeveloperRole,
+			&signals.ConfiguredEditorRole,
+			&signals.ScopedOwnerPermission,
+			&signals.ScopedEditorPermission,
+		); err != nil {
+			return nil, err
+		}
+		if role := resolveCommentProjectRole(signals); role != "" {
+			result[userID] = role
+		}
+	}
+	return result, rows.Err()
+}
+
+func resolveCommentProjectRole(signals commentProjectRoleSignals) string {
+	if signals.ProjectCreator || signals.DeveloperMembership ||
+		signals.ConfiguredDeveloperRole || signals.ScopedOwnerPermission {
+		return "owner"
+	}
+	if signals.EditorMembership || signals.ConfiguredEditorRole || signals.ScopedEditorPermission {
+		return "editor"
+	}
+	return ""
 }
 
 func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey string, viewerID int64, permissions []string) (commentTargetInfo, error) {

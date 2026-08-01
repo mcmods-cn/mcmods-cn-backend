@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -527,7 +528,12 @@ func publishCatalogResourceTx(ctx context.Context, tx pgx.Tx, snapshot catalogEd
 	if kindCode == "" || canonicalID == "" {
 		return errCatalogEditorInvalid
 	}
-	if err := validateCatalogResourceDefinition(kindCode, nonNilCatalogDefinition(edit.Definition)); err != nil {
+	canonicalDefinition, err := canonicalizeGlobalCatalogResourceDefinition(ctx, tx, kindCode, canonicalID, nonNilCatalogDefinition(edit.Definition))
+	if err != nil {
+		return err
+	}
+	edit.Definition = canonicalDefinition
+	if err = validateCatalogResourceDefinition(kindCode, canonicalDefinition); err != nil {
 		return err
 	}
 	if snapshot.AllowForeignFiles {
@@ -568,8 +574,8 @@ func publishCatalogResourceTx(ctx context.Context, tx pgx.Tx, snapshot catalogEd
 		}
 	}
 	definition := string(catalogJSON(nonNilCatalogDefinition(edit.Definition)))
-	_, err = tx.Exec(ctx, `insert into catalog_resource_definitions(resource_id,definition,icon_file_id,render_file_id,published_revision_id,updated_by)
-		values($1,$2::jsonb,$3,$4,$5,$6) on conflict(resource_id) do update set definition=excluded.definition,
+	_, err = tx.Exec(ctx, `insert into catalog_resource_definitions(resource_id,definition_schema_version,definition,icon_file_id,render_file_id,published_revision_id,updated_by)
+		values($1,1,$2::jsonb,$3,$4,$5,$6) on conflict(resource_id) do update set definition_schema_version=excluded.definition_schema_version,definition=excluded.definition,
 		icon_file_id=excluded.icon_file_id,render_file_id=excluded.render_file_id,published_revision_id=excluded.published_revision_id,
 		updated_by=excluded.updated_by,updated_at=now()`, snapshot.EntityID, definition, iconFileID, renderFileID, revisionID, nullableActorID(actorID))
 	return err
@@ -764,14 +770,19 @@ func publishCatalogRecipeTx(ctx context.Context, tx pgx.Tx, snapshot catalogEdit
 		snapshot.ParentEntityID, canonical, fingerprint, sourceModID); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `insert into recipe_definitions(recipe_id,template_id,source_mod_content_version_id,definition,published_revision_id,updated_by)
-		values($1,$2,$3,$4::jsonb,$5,$6) on conflict(recipe_id) do update set template_id=excluded.template_id,
+	if _, err = tx.Exec(ctx, `insert into recipe_definitions(recipe_id,template_id,source_mod_content_version_id,definition_schema_version,definition,published_revision_id,updated_by)
+		values($1,$2,$3,1,$4::jsonb,$5,$6) on conflict(recipe_id) do update set template_id=excluded.template_id,
 		source_mod_content_version_id=excluded.source_mod_content_version_id,definition=excluded.definition,
+		definition_schema_version=excluded.definition_schema_version,
 		published_revision_id=excluded.published_revision_id,updated_by=excluded.updated_by,updated_at=now()`,
 		snapshot.EntityID, templateID, sourceVersionID, string(catalogJSON(nonNilCatalogDefinition(edit.Definition))), revisionID, nullableActorID(actorID)); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `delete from recipe_bindings where recipe_id=$1`, snapshot.EntityID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `delete from unresolved_resource_references
+		where source_entity_id=$1 and source_revision_id is null and field_path like 'bindings.%'`, snapshot.EntityID); err != nil {
 		return err
 	}
 	slotKeys := make([]string, 0, len(edit.Bindings))
@@ -788,20 +799,34 @@ func publishCatalogRecipeTx(ctx context.Context, tx pgx.Tx, snapshot catalogEdit
 			string(catalogJSON(nonNilCatalogDefinition(binding.Definition)))).Scan(&bindingInternalID); err != nil {
 			return err
 		}
-		publicIDs := make([]string, len(binding.Candidates))
-		for index := range binding.Candidates {
-			publicIDs[index] = binding.Candidates[index].ResourcePublicID
-		}
-		resourceIDs, resolveErr := resolveActiveResourcePublicIDsTx(ctx, tx, publicIDs)
-		if resolveErr != nil {
-			return resolveErr
-		}
 		for index, candidate := range binding.Candidates {
+			var resourceID int64
+			if candidate.RawResourceID != "" {
+				resourceID, err = ensurePlaceholderGameResourceTx(ctx, tx, candidate.KindCode, candidate.RawResourceID)
+			} else {
+				var resourceIDs []int64
+				resourceIDs, err = resolveActiveResourcePublicIDsTx(ctx, tx, []string{candidate.ResourcePublicID})
+				if err == nil {
+					resourceID = resourceIDs[0]
+				}
+			}
+			if err != nil {
+				return err
+			}
 			candidateID := catalogSnapshotID("canonical-recipe-candidate", strconv.FormatInt(revisionID, 10), bindingID, strconv.Itoa(index))
 			if _, err = tx.Exec(ctx, `insert into recipe_binding_candidates(identity_key,binding_id,candidate_index,resource_id,amount,probability,byproduct,definition)
-				values($1,$2,$3,$4,$5,$6,$7,$8::jsonb)`, candidateID, bindingInternalID, index, resourceIDs[index], candidate.Amount,
+				values($1,$2,$3,$4,$5,$6,$7,$8::jsonb)`, candidateID, bindingInternalID, index, resourceID, candidate.Amount,
 				candidate.Probability, candidate.Byproduct, string(catalogJSON(nonNilCatalogDefinition(candidate.Definition)))); err != nil {
 				return err
+			}
+			if candidate.RawResourceID != "" {
+				if _, err = tx.Exec(ctx, `insert into unresolved_resource_references(
+					source_entity_id,field_path,kind_code,raw_resource_id,resolved_resource_id,status
+				) values($1,$2,$3,$4,$5,'pending')`,
+					snapshot.EntityID, fmt.Sprintf("bindings.%s.candidates.%d", slotKey, index),
+					candidate.KindCode, candidate.RawResourceID, resourceID); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -889,9 +914,11 @@ func validateCatalogSnapshotReferencesTx(ctx context.Context, tx pgx.Tx, snapsho
 			}
 		}
 		for _, binding := range snapshot.Recipe.Bindings {
-			publicIDs := make([]string, len(binding.Candidates))
+			publicIDs := make([]string, 0, len(binding.Candidates))
 			for index := range binding.Candidates {
-				publicIDs[index] = binding.Candidates[index].ResourcePublicID
+				if binding.Candidates[index].ResourcePublicID != "" {
+					publicIDs = append(publicIDs, binding.Candidates[index].ResourcePublicID)
+				}
 			}
 			if _, err = resolveActiveResourcePublicIDsTx(ctx, tx, publicIDs); err != nil {
 				return err
@@ -901,6 +928,55 @@ func validateCatalogSnapshotReferencesTx(ctx context.Context, tx pgx.Tx, snapsho
 	default:
 		return errCatalogEditorInvalid
 	}
+}
+
+func ensurePlaceholderGameResourceTx(ctx context.Context, tx pgx.Tx, kindCode, rawResourceID string) (int64, error) {
+	kindCode = strings.TrimSpace(kindCode)
+	rawResourceID = strings.TrimSpace(rawResourceID)
+	if kindCode == "" || rawResourceID == "" || len(rawResourceID) > 255 {
+		return 0, errCatalogEditorReference
+	}
+	var existingID int64
+	err := tx.QueryRow(ctx, `select entity_id from game_resources
+		where kind_code=$1 and canonical_id=$2`, kindCode, rawResourceID).Scan(&existingID)
+	if err == nil {
+		return existingID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, err
+	}
+	family := kindCode
+	if separator := strings.LastIndex(kindCode, "."); separator >= 0 && separator+1 < len(kindCode) {
+		family = kindCode[separator+1:]
+	}
+	if _, err = tx.Exec(ctx, `insert into resource_kinds(code,family,user_visible)
+		values($1,$2,true) on conflict(code) do nothing`, kindCode, family); err != nil {
+		return 0, err
+	}
+	identityKey := "placeholder:resource:" + sha256Hex([]byte(kindCode+"\x00"+strings.ToLower(rawResourceID)))
+	var entityID int64
+	if err = tx.QueryRow(ctx, `insert into catalog_entities(identity_key,entity_type,status)
+		values($1,'resource','placeholder')
+		on conflict(identity_key) do update set updated_at=now()
+		returning id`, identityKey).Scan(&entityID); err != nil {
+		return 0, err
+	}
+	namespace, resourcePath := "", rawResourceID
+	if separator := strings.Index(rawResourceID, ":"); separator > 0 {
+		namespace, resourcePath = rawResourceID[:separator], rawResourceID[separator+1:]
+	}
+	if _, err = tx.Exec(ctx, `insert into game_resources(
+		entity_id,kind_code,canonical_id,namespace,resource_path,resolved
+	) values($1,$2,$3,$4,$5,false)
+	on conflict(kind_code,canonical_id) do nothing`,
+		entityID, kindCode, rawResourceID, namespace, resourcePath); err != nil {
+		return 0, err
+	}
+	if err = tx.QueryRow(ctx, `select entity_id from game_resources
+		where kind_code=$1 and canonical_id=$2`, kindCode, rawResourceID).Scan(&entityID); err != nil {
+		return 0, err
+	}
+	return entityID, nil
 }
 
 func resolveActiveResourcePublicIDsTx(ctx context.Context, tx pgx.Tx, publicIDs []string) ([]int64, error) {

@@ -73,6 +73,7 @@ func catalogEditorSchemaStatements() []string {
 		`create index idx_content_localizations_locale_name on content_localizations(locale,lower(name),subject_type,subject_id)`,
 		`create table catalog_resource_definitions (
 			resource_id bigint primary key references game_resources(entity_id) on delete cascade,
+			definition_schema_version smallint not null default 1,
 			definition jsonb not null default '{}'::jsonb,
 			icon_file_id bigint references oss_files(id) on delete set null,
 			render_file_id bigint references oss_files(id) on delete set null,
@@ -80,7 +81,8 @@ func catalogEditorSchemaStatements() []string {
 			updated_by bigint references users(id) on delete set null,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
-			check(jsonb_typeof(definition)='object')
+			check(jsonb_typeof(definition)='object'),
+			check(definition_schema_version>=1)
 		)`,
 		`create table catalog_tag_members (
 			tag_id bigint not null references catalog_tags(entity_id) on delete cascade,
@@ -150,12 +152,14 @@ func catalogEditorSchemaStatements() []string {
 		`create table recipe_definitions (
 			recipe_id bigint primary key references recipes(entity_id) on delete cascade,
 			template_id bigint not null references recipe_layout_templates(entity_id) on delete restrict,
+			definition_schema_version smallint not null default 1,
 			definition jsonb not null default '{}'::jsonb,
 			published_revision_id bigint,
 			updated_by bigint references users(id) on delete set null,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
-			check(jsonb_typeof(definition)='object')
+			check(jsonb_typeof(definition)='object'),
+			check(definition_schema_version>=1)
 		)`,
 		`create table recipe_bindings (
 			id bigserial primary key,

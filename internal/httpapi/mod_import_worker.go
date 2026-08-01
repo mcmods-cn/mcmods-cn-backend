@@ -181,6 +181,15 @@ type modrinthProject struct {
 	} `json:"license"`
 }
 
+type modrinthTeamMember struct {
+	Role string `json:"role"`
+	User struct {
+		Username  string `json:"username"`
+		Name      string `json:"name"`
+		AvatarURL string `json:"avatar_url"`
+	} `json:"user"`
+}
+
 func importModrinthProject(ctx context.Context, client *http.Client, cfg modImportConfig, reference string) (createModRequest, error) {
 	var project modrinthProject
 	headers := providerHeaders(cfg.UserAgent, "", "")
@@ -195,20 +204,14 @@ func importModrinthProject(ctx context.Context, client *http.Client, cfg modImpo
 	}
 	authors := make([]modAuthorPayload, 0)
 	if project.Team != "" {
-		var members []struct {
-			Role string `json:"role"`
-			User struct {
-				Username string `json:"username"`
-				Name     string `json:"name"`
-			} `json:"user"`
-		}
+		var members []modrinthTeamMember
 		if getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/team/"+url.PathEscape(project.Team)+"/members", headers, &members) == nil {
 			for _, member := range members {
 				name := member.User.Name
 				if name == "" {
 					name = member.User.Username
 				}
-				authors = append(authors, modAuthorPayload{Name: name, Role: member.Role})
+				authors = append(authors, modAuthorPayload{Name: name, AvatarURL: member.User.AvatarURL, Role: member.Role})
 			}
 		}
 	}
@@ -258,8 +261,9 @@ type curseForgeMod struct {
 		ThumbnailURL string `json:"thumbnailUrl"`
 	} `json:"logo"`
 	Authors []struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
+		Name      string `json:"name"`
+		URL       string `json:"url"`
+		AvatarURL string `json:"avatarUrl"`
 	} `json:"authors"`
 	Categories []struct {
 		Name string `json:"name"`
@@ -309,7 +313,7 @@ func importCurseForgeProject(ctx context.Context, client *http.Client, cfg modIm
 	}
 	authors := make([]modAuthorPayload, 0, len(project.Authors))
 	for _, author := range project.Authors {
-		authors = append(authors, modAuthorPayload{Name: author.Name, Role: "Author"})
+		authors = append(authors, modAuthorPayload{Name: author.Name, AvatarURL: author.AvatarURL, Role: "Author"})
 	}
 	return createModRequest{
 		SiteID:              modSiteIDBase(project.Slug),
@@ -347,7 +351,8 @@ type githubRepository struct {
 	Archived    bool     `json:"archived"`
 	Private     bool     `json:"private"`
 	Owner       struct {
-		Login string `json:"login"`
+		Login     string `json:"login"`
+		AvatarURL string `json:"avatar_url"`
 	} `json:"owner"`
 	License *struct {
 		SPDXID string `json:"spdx_id"`
@@ -384,7 +389,7 @@ func importGitHubRepository(ctx context.Context, client *http.Client, cfg modImp
 		Compatibilities:  compatibilitiesForLoaders(loaders, nil),
 		Tags:             tagsFromExternal(repository.Topics),
 		SearchKeywords:   uniqueTrimmed(append([]string{repository.Name, repository.FullName}, repository.Topics...), 40),
-		Authors:          []modAuthorPayload{{Name: repository.Owner.Login, Role: "Repository owner"}},
+		Authors:          []modAuthorPayload{{Name: repository.Owner.Login, AvatarURL: repository.Owner.AvatarURL, Role: "Repository owner"}},
 		OfficialStatus:   statusFromExternal("active", repository.Archived),
 		SourceStatus:     sourceStatusFromLicense(licenseID),
 		License:          normalizeExternalLicense(licenseID),

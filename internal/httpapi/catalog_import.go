@@ -10,26 +10,31 @@ import (
 )
 
 type catalogResourceImportRow struct {
-	EntityID       string
-	PublicID       string
-	KindCode       string
-	CanonicalID    string
-	RawID          string
-	Namespace      string
-	ResourcePath   string
-	RevisionID     string
-	SnapshotID     string
-	Registry       string
-	TranslationKey string
-	Names          string
-	Data           string
-	IconPath       string
-	PreviewPath    string
+	EntityID                string
+	PublicID                string
+	KindCode                string
+	CanonicalID             string
+	RawID                   string
+	Namespace               string
+	ResourcePath            string
+	RevisionID              string
+	SnapshotID              string
+	Registry                string
+	EntryTypeCode           string
+	DefinitionSchemaVersion int
+	TranslationKey          string
+	Names                   string
+	Data                    string
+	IconPath                string
+	PreviewPath             string
 }
 
 func persistCatalogResources(ctx context.Context, tx pgx.Tx, rows []catalogResourceImportRow) error {
 	if len(rows) == 0 {
 		return nil
+	}
+	if err := canonicalizeCatalogResourceRows(ctx, tx, rows); err != nil {
+		return fmt.Errorf("normalize resource documents: %w", err)
 	}
 	if _, err := execImportStatement(ctx, tx, `create temporary table if not exists catalog_resource_import_stage (
 		ordinal bigint not null,
@@ -43,6 +48,8 @@ func persistCatalogResources(ctx context.Context, tx pgx.Tx, rows []catalogResou
 		revision_id text not null,
 		snapshot_id text not null,
 		registry text not null,
+		entry_type_code text not null,
+		definition_schema_version smallint not null,
 		translation_key text not null,
 		names jsonb not null,
 		data jsonb not null,
@@ -56,7 +63,7 @@ func persistCatalogResources(ctx context.Context, tx pgx.Tx, rows []catalogResou
 	}
 	columns := []string{
 		"ordinal", "identity_key", "public_id", "kind_code", "canonical_id", "raw_id",
-		"namespace", "resource_path", "revision_id", "snapshot_id", "registry",
+		"namespace", "resource_path", "revision_id", "snapshot_id", "registry", "entry_type_code", "definition_schema_version",
 		"translation_key", "names", "data", "icon_path", "preview_path",
 	}
 	if err := copyImportRows(ctx, tx, "catalog_resource_import_stage", columns, len(rows), func(index int) ([]any, error) {
@@ -68,6 +75,7 @@ func persistCatalogResources(ctx context.Context, tx pgx.Tx, rows []catalogResou
 		return []any{
 			index, row.EntityID, row.PublicID, row.KindCode, row.CanonicalID, rawID,
 			row.Namespace, row.ResourcePath, row.RevisionID, row.SnapshotID, row.Registry,
+			row.EntryTypeCode, row.DefinitionSchemaVersion,
 			row.TranslationKey, nonEmptyJSONObject(row.Names), nonEmptyJSONObject(row.Data),
 			row.IconPath, row.PreviewPath,
 		}, nil
@@ -141,6 +149,8 @@ func persistCatalogResources(ctx context.Context, tx pgx.Tx, rows []catalogResou
 				(array_agg(kind_code order by ordinal))[1] as kind_code,
 				(array_agg(canonical_id order by ordinal))[1] as canonical_id,
 				coalesce((array_agg(registry order by ordinal desc) filter(where registry<>''))[1],'') as registry,
+				coalesce((array_agg(entry_type_code order by (entry_type_code='default'),ordinal desc))[1],'default') as entry_type_code,
+				coalesce(max(definition_schema_version),1) as definition_schema_version,
 				coalesce((array_agg(translation_key order by ordinal desc) filter(where translation_key<>''))[1],'') as translation_key,
 				coalesce((array_agg(icon_path order by ordinal desc) filter(where icon_path<>''))[1],'') as icon_path,
 				coalesce((array_agg(preview_path order by ordinal desc) filter(where preview_path<>''))[1],'') as preview_path
@@ -162,8 +172,8 @@ func persistCatalogResources(ctx context.Context, tx pgx.Tx, rows []catalogResou
 			group by stage.identity_key,stage.revision_id
 		)
 		insert into resource_import_snapshots(
-		id,resource_id,revision_id,registry,translation_key,names,data,icon_path,preview_path)
-		select fields.snapshot_id,resource.entity_id,fields.revision_id,fields.registry,fields.translation_key,
+		id,resource_id,revision_id,registry,entry_type_code,definition_schema_version,translation_key,names,data,icon_path,preview_path)
+		select fields.snapshot_id,resource.entity_id,fields.revision_id,fields.registry,fields.entry_type_code,fields.definition_schema_version,fields.translation_key,
 			coalesce(names.names,'{}'::jsonb),coalesce(data.data,'{}'::jsonb),fields.icon_path,fields.preview_path
 		from snapshot_fields fields
 		join game_resources resource
@@ -172,6 +182,8 @@ func persistCatalogResources(ctx context.Context, tx pgx.Tx, rows []catalogResou
 		left join snapshot_data data using(identity_key,revision_id)
 		on conflict(resource_id,revision_id) do update set
 			registry=case when excluded.registry<>'' then excluded.registry else resource_import_snapshots.registry end,
+			entry_type_code=case when excluded.entry_type_code<>'default' then excluded.entry_type_code else resource_import_snapshots.entry_type_code end,
+			definition_schema_version=greatest(resource_import_snapshots.definition_schema_version,excluded.definition_schema_version),
 			translation_key=case when excluded.translation_key<>'' then excluded.translation_key else resource_import_snapshots.translation_key end,
 			names=resource_import_snapshots.names||excluded.names,
 			data=resource_import_snapshots.data||excluded.data,
@@ -195,14 +207,29 @@ func persistCatalogResources(ctx context.Context, tx pgx.Tx, rows []catalogResou
 			join game_resources resource
 				on resource.kind_code=source.kind_code and resource.canonical_id=source.canonical_id
 			where source.alias_id<>''
-		)
+		), matches as materialized (
+			select unresolved.id,unresolved.source_entity_id,
+				unresolved.resolved_resource_id old_resource_id,imported.resource_id new_resource_id
+			from unresolved_resource_references unresolved
+			join imported_aliases imported
+			  on unresolved.kind_code=imported.kind_code and unresolved.raw_resource_id=imported.alias_id
+			where unresolved.status='pending'
+		), updated as (
 		update unresolved_resource_references unresolved
 		set resolved_resource_id=imported.resource_id,status='resolved',resolved_at=now()
 		from imported_aliases imported
 		where unresolved.status='pending'
 			and unresolved.kind_code=imported.kind_code
 			and unresolved.raw_resource_id=imported.alias_id
-			and unresolved.resolved_resource_id is distinct from imported.resource_id`); err != nil {
+		returning unresolved.id
+		)
+		update recipe_binding_candidates candidate
+		set resource_id=matches.new_resource_id
+		from recipe_bindings binding,matches
+		where candidate.binding_id=binding.id
+		  and binding.recipe_id=matches.source_entity_id
+		  and candidate.resource_id=matches.old_resource_id
+		  and matches.old_resource_id is distinct from matches.new_resource_id`); err != nil {
 		return fmt.Errorf("resolve resource references: %w", err)
 	}
 	return nil

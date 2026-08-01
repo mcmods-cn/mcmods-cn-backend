@@ -475,6 +475,8 @@ func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, s
 		`delete from mod_links where mod_id=$1`,
 		`delete from mod_tags where mod_id=$1`,
 		`delete from mod_loader_compatibilities where mod_id=$1`,
+		`delete from unresolved_references unresolved using mod_relationships relationship
+			where unresolved.source_type='mod_relationship' and unresolved.source_id=relationship.id and relationship.mod_id=$1`,
 		`delete from mod_relationship_groups where mod_id=$1`,
 	} {
 		if _, err = tx.Exec(ctx, statement, modID); err != nil {
@@ -631,8 +633,4 @@ func topLevelChangedFields(changes []modRevisionChangeResponse) []string {
 	}
 	sort.Strings(fields)
 	return fields
-}
-
-func changedSnapshotFields(before, after createModRequest) []string {
-	return topLevelChangedFields(revisionChanges(before, after))
 }

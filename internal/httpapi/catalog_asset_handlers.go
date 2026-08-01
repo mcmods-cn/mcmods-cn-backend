@@ -34,13 +34,15 @@ func validateCatalogImageReferenceTx(ctx context.Context, tx pgx.Tx, revisionID 
 func (s *Server) catalogResourceAsset(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("publicId")))
 	assetKind := strings.ToLower(strings.TrimSpace(r.PathValue("assetKind")))
-	if !validCatalogPublicID(publicID) || (assetKind != "icon" && assetKind != "render") {
+	if !validCatalogPublicID(publicID) || (assetKind != "icon" && assetKind != "icon-small" && assetKind != "render") {
 		writeError(w, http.StatusBadRequest, "catalog resource asset path is invalid")
 		return
 	}
 	versionColumn := "detail.icon_file_id"
 	legacyColumn := "definition.icon_file_id"
-	if assetKind == "render" {
+	if assetKind == "icon-small" {
+		versionColumn = "detail.icon_small_file_id"
+	} else if assetKind == "render" {
 		versionColumn = "detail.render_file_id"
 		legacyColumn = "definition.render_file_id"
 	}
@@ -60,6 +62,18 @@ func (s *Server) catalogResourceAsset(w http.ResponseWriter, r *http.Request) {
 		  and entity.archived_at is null and ($2='' or version.public_id=$2)
 		order by case when version.public_id=$2 then 0 else 1 end,detail.updated_at desc
 		limit 1`, publicID, versionPublicID).Scan(&objectKey, &contentType)
+	if errors.Is(err, pgx.ErrNoRows) && assetKind == "icon-small" {
+		err = s.db.QueryRow(r.Context(), `select file.object_key,file.content_type
+			from catalog_entities entity
+			join mod_resource_version_details detail on detail.resource_id=entity.id and detail.status='active'
+			join mod_content_versions version on version.id=detail.version_id and version.status='active'
+			join oss_files file on file.id=detail.icon_file_id and file.status='active'
+			  and file.scan_status in ('clean','trusted_generated')
+			where entity.public_id=$1 and entity.entity_type='resource' and entity.status='active'
+			  and entity.archived_at is null and ($2='' or version.public_id=$2)
+			order by case when version.public_id=$2 then 0 else 1 end,detail.updated_at desc
+			limit 1`, publicID, versionPublicID).Scan(&objectKey, &contentType)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = s.db.QueryRow(r.Context(), `select file.object_key,file.content_type
 		from catalog_entities entity

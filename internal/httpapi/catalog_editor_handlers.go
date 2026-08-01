@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -158,7 +159,7 @@ func (s *Server) createCatalogResource(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "baseRevisionId must be empty when creating")
 		return
 	}
-	if err := normalizeCatalogResourceEdit(&edit); err != nil {
+	if err := normalizeCatalogResourceEdit(r.Context(), s.db, &edit); err != nil {
 		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
@@ -195,7 +196,7 @@ func (s *Server) catalogResourceDetail(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusMethodNotAllowed, "global resource identities are immutable; edit the mod's versioned resource detail instead")
 }
 
-func normalizeCatalogResourceEdit(edit *catalogResourceEdit) error {
+func normalizeCatalogResourceEdit(ctx context.Context, query modContentTemplateRows, edit *catalogResourceEdit) error {
 	var err error
 	edit.KindCode, err = canonicalCatalogString(edit.KindCode, 160)
 	if err != nil {
@@ -206,7 +207,11 @@ func normalizeCatalogResourceEdit(edit *catalogResourceEdit) error {
 		return err
 	}
 	edit.DefaultLocale, edit.Localizations, err = normalizeCatalogLocalizations(edit.DefaultLocale, edit.Localizations)
+	if err != nil {
+		return err
+	}
 	edit.Definition = nonNilCatalogDefinition(edit.Definition)
+	edit.Definition, err = canonicalizeGlobalCatalogResourceDefinition(ctx, query, edit.KindCode, edit.CanonicalID, edit.Definition)
 	if err != nil {
 		return err
 	}
@@ -216,19 +221,21 @@ func normalizeCatalogResourceEdit(edit *catalogResourceEdit) error {
 func (s *Server) writeCatalogResourceDetail(w http.ResponseWriter, r *http.Request, entity catalogEditorEntity) {
 	var kindCode, canonicalID string
 	var definition, importedNames []byte
+	var definitionSchemaVersion int
 	var iconID, renderID sql.NullString
 	err := s.db.QueryRow(r.Context(), `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
 		select resource.kind_code,resource.canonical_id,
 		case when definition.resource_id is not null then definition.definition
-		 when imported.resource_id is not null then jsonb_build_object('schemaVersion',$2::text,'imported',imported.data)
+		 when imported.resource_id is not null then imported.data
 		 else '{}'::jsonb end,
+		coalesce(definition.definition_schema_version,imported.definition_schema_version,1),
 		(select public_id from oss_files where id=definition.icon_file_id),
 		(select public_id from oss_files where id=definition.render_file_id),coalesce(imported.names,'{}'::jsonb)
 		from game_resources resource
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 		left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
-		where resource.entity_id=$1`, entity.ID, catalogResourceDefinitionSchema).
-		Scan(&kindCode, &canonicalID, &definition, &iconID, &renderID, &importedNames)
+		where resource.entity_id=$1`, entity.ID).
+		Scan(&kindCode, &canonicalID, &definition, &definitionSchemaVersion, &iconID, &renderID, &importedNames)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "resource not found")
 		return
@@ -254,7 +261,7 @@ func (s *Server) writeCatalogResourceDetail(w http.ResponseWriter, r *http.Reque
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"publicId": entity.PublicID, "status": entity.Status, "defaultLocale": defaultLocale,
 		"publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID), "reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID),
-		"kindCode": kindCode, "canonicalId": canonicalID, "definition": json.RawMessage(definition), "iconFileId": nullableCatalogString(iconID),
+		"kindCode": kindCode, "canonicalId": canonicalID, "definitionSchemaVersion": definitionSchemaVersion, "definition": json.RawMessage(definition), "iconFileId": nullableCatalogString(iconID),
 		"renderFileId": nullableCatalogString(renderID), "iconUrl": iconURL, "renderUrl": renderURL, "localizations": localizations})
 }
 
@@ -985,7 +992,7 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), `select entity.public_id,coalesce(recipe.canonical_source_id,''),recipe.identity_source,
 		(select revision.public_id from content_revisions revision where revision.id=entity.published_revision_id),
 		coalesce(template_entity.public_id,imported_template_entity.public_id,''),
-		coalesce(definition.definition,observation.source_data,'{}'::jsonb),coalesce(observation.id,''),coalesce(observation.revision_id,''),
+		coalesce(definition.definition,'{}'::jsonb),coalesce(observation.id,''),coalesce(observation.revision_id,''),
 		case when definition.recipe_id is not null then (select count(*)::int from recipe_bindings binding where binding.recipe_id=recipe.entity_id)
 		 else coalesce(observation.binding_count,0) end,
 		coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
@@ -1070,7 +1077,16 @@ func (s *Server) normalizeCatalogRecipeEdit(ctx context.Context, typeID int64, e
 	if err != nil {
 		return err
 	}
-	edit.Definition = nonNilCatalogDefinition(edit.Definition)
+	// Recipe structure is represented by the selected template, normalized
+	// bindings and candidates. Do not retain arbitrary client/exporter blobs.
+	edit.Definition = map[string]any{}
+	for slotKey, binding := range edit.Bindings {
+		binding.Definition = map[string]any{}
+		for index := range binding.Candidates {
+			binding.Candidates[index].Definition = map[string]any{}
+		}
+		edit.Bindings[slotKey] = binding
+	}
 	rows, err := s.db.Query(ctx, `select slot.slot_key,slot.role from recipe_layout_templates template
 		join catalog_entities entity on entity.id=template.entity_id and entity.status='active'
 		join recipe_template_slots slot on slot.template_id=template.entity_id
@@ -1140,7 +1156,7 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 	var canonicalDefinition bool
 	var definition []byte
 	if err = s.db.QueryRow(r.Context(), `select type_entity.public_id,coalesce(template_entity.public_id,imported_template_entity.public_id,''),coalesce(recipe.canonical_source_id,''),
-		coalesce(definition.definition,observation.source_data,'{}'::jsonb),coalesce(observation.id,''),coalesce(observation.revision_id,''),
+		coalesce(definition.definition,'{}'::jsonb),coalesce(observation.id,''),coalesce(observation.revision_id,''),
 		coalesce(import_template.source_template_id,''),definition.recipe_id is not null,
 		coalesce(effective_source_version.public_id,''),coalesce(source_mod.project_code,''),coalesce(source_mod.slug,''),
 		coalesce(source_mod.primary_name,''),coalesce(effective_source_version.label,''),
@@ -1512,14 +1528,19 @@ func (s *Server) catalogRecipeBindingRows(ctx context.Context, recipeID int64) (
 }
 
 func (s *Server) catalogImportedRecipeBindingRows(ctx context.Context, snapshotID string) (map[string]any, error) {
-	rows, err := s.db.Query(ctx, `select binding.id,binding.source_slot_id,coalesce(nullif(binding.semantic_role,''),slot.role,''),binding.data,
+	rows, err := s.db.Query(ctx, `select binding.id,binding.source_slot_id,coalesce(nullif(binding.semantic_role,''),slot.role,''),
 		candidate.alternative_index,coalesce(resource_entity.public_id,''),coalesce(candidate.raw_resource_id,''),candidate.amount,
-		coalesce(candidate.chance,candidate.chance_percent/100.0),candidate.byproduct,candidate.data
+		coalesce(candidate.chance,candidate.chance_percent/100.0),candidate.byproduct,
+		coalesce(icon_file.public_id,''),coalesce(imported.revision_id,''),coalesce(imported.icon_path,'')
 		from recipe_import_bindings binding
 		join recipe_template_import_slots slot on slot.id=binding.template_slot_id
 		left join recipe_import_binding_candidates candidate on candidate.binding_id=binding.id
 		left join game_resources resource on resource.entity_id=candidate.resource_id
 		left join catalog_entities resource_entity on resource_entity.id=resource.entity_id
+		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
+		left join oss_files icon_file on icon_file.id=definition.icon_file_id and icon_file.status='active'
+		left join lateral (select source.revision_id,source.icon_path from resource_import_snapshots source
+		 where source.resource_id=resource.entity_id order by (source.icon_path<>'') desc,source.created_at desc limit 1) imported on true
 		where binding.recipe_snapshot_id=$1 order by binding.ordinal,candidate.alternative_index`, snapshotID)
 	if err != nil {
 		return nil, err
@@ -1527,18 +1548,17 @@ func (s *Server) catalogImportedRecipeBindingRows(ctx context.Context, snapshotI
 	defer rows.Close()
 	result := map[string]any{}
 	for rows.Next() {
-		var bindingID, slotKey, role, resourcePublicID, rawResourceID string
-		var bindingDefinition, candidateDefinition []byte
+		var bindingID, slotKey, role, resourcePublicID, rawResourceID, iconFileID, revisionID, iconPath string
 		var candidateIndex sql.NullInt64
 		var amount, probability sql.NullFloat64
 		var byproduct sql.NullBool
-		if err = rows.Scan(&bindingID, &slotKey, &role, &bindingDefinition, &candidateIndex, &resourcePublicID, &rawResourceID,
-			&amount, &probability, &byproduct, &candidateDefinition); err != nil {
+		if err = rows.Scan(&bindingID, &slotKey, &role, &candidateIndex, &resourcePublicID, &rawResourceID,
+			&amount, &probability, &byproduct, &iconFileID, &revisionID, &iconPath); err != nil {
 			return nil, err
 		}
 		binding, exists := result[slotKey].(map[string]any)
 		if !exists {
-			binding = map[string]any{"role": role, "definition": json.RawMessage(bindingDefinition), "candidates": []map[string]any{}}
+			binding = map[string]any{"role": role, "definition": map[string]any{}, "candidates": []map[string]any{}}
 			result[slotKey] = binding
 		}
 		if !candidateIndex.Valid {
@@ -1546,7 +1566,10 @@ func (s *Server) catalogImportedRecipeBindingRows(ctx context.Context, snapshotI
 		}
 		candidate := map[string]any{"resourcePublicId": resourcePublicID, "rawResourceId": rawResourceID,
 			"amount": nullableSQLFloat(amount), "probability": nullableSQLFloat(probability), "byproduct": byproduct.Valid && byproduct.Bool,
-			"definition": json.RawMessage(candidateDefinition)}
+			"definition": map[string]any{}}
+		if rawResourceID == "" {
+			candidate["iconUrl"] = catalogRecipeResourceIconURL(resourcePublicID, iconFileID, revisionID, iconPath)
+		}
 		candidates, _ := binding["candidates"].([]map[string]any)
 		binding["candidates"] = append(candidates, candidate)
 	}
@@ -1554,30 +1577,60 @@ func (s *Server) catalogImportedRecipeBindingRows(ctx context.Context, snapshotI
 }
 
 func (s *Server) catalogRecipeCandidateRows(ctx context.Context, bindingID int64) ([]map[string]any, error) {
-	rows, err := s.db.Query(ctx, `select entity.public_id,resource.kind_code,resource.canonical_id,candidate.amount::float8,
-		candidate.probability::float8,candidate.byproduct,candidate.definition
+	rows, err := s.db.Query(ctx, `select entity.public_id,resource.kind_code,resource.canonical_id,resource.resolved,candidate.amount::float8,
+		candidate.probability::float8,candidate.byproduct,candidate.definition,
+		coalesce(icon_file.public_id,''),coalesce(imported.revision_id,''),coalesce(imported.icon_path,'')
 		from recipe_binding_candidates candidate join game_resources resource on resource.entity_id=candidate.resource_id
-		join catalog_entities entity on entity.id=resource.entity_id where candidate.binding_id=$1 order by candidate.candidate_index`, bindingID)
+		join catalog_entities entity on entity.id=resource.entity_id
+		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
+		left join oss_files icon_file on icon_file.id=definition.icon_file_id and icon_file.status='active'
+		left join lateral (select source.revision_id,source.icon_path from resource_import_snapshots source
+		 where source.resource_id=resource.entity_id order by (source.icon_path<>'') desc,source.created_at desc limit 1) imported on true
+		where candidate.binding_id=$1 order by candidate.candidate_index`, bindingID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	items := []map[string]any{}
 	for rows.Next() {
-		var publicID, kindCode, canonicalID string
+		var publicID, kindCode, canonicalID, iconFileID, revisionID, iconPath string
 		var amount float64
+		var resolved bool
 		var probability sql.NullFloat64
 		var byproduct bool
 		var definition []byte
-		if err = rows.Scan(&publicID, &kindCode, &canonicalID, &amount, &probability, &byproduct, &definition); err != nil {
+		if err = rows.Scan(&publicID, &kindCode, &canonicalID, &resolved, &amount, &probability, &byproduct, &definition,
+			&iconFileID, &revisionID, &iconPath); err != nil {
 			return nil, err
 		}
 		var probabilityValue any
 		if probability.Valid {
 			probabilityValue = probability.Float64
 		}
-		items = append(items, map[string]any{"resourcePublicId": publicID, "kindCode": kindCode, "canonicalId": canonicalID,
-			"amount": amount, "probability": probabilityValue, "byproduct": byproduct, "definition": json.RawMessage(definition)})
+		item := map[string]any{"resourcePublicId": publicID, "kindCode": kindCode, "canonicalId": canonicalID,
+			"unresolved": !resolved, "rawResourceId": catalogUnresolvedRawID(resolved, canonicalID),
+			"amount": amount, "probability": probabilityValue, "byproduct": byproduct, "definition": json.RawMessage(definition)}
+		if resolved {
+			item["iconUrl"] = catalogRecipeResourceIconURL(publicID, iconFileID, revisionID, iconPath)
+		}
+		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func catalogRecipeResourceIconURL(publicID, iconFileID, revisionID, iconPath string) string {
+	if publicID != "" && iconFileID != "" {
+		return "/api/v1/catalog/resources/" + url.PathEscape(publicID) + "/icon"
+	}
+	if revisionID != "" && iconPath != "" {
+		return "/api/v1/export-revisions/" + url.PathEscape(revisionID) + "/assets/content?path=" + url.QueryEscape(iconPath)
+	}
+	return ""
+}
+
+func catalogUnresolvedRawID(resolved bool, canonicalID string) string {
+	if resolved {
+		return ""
+	}
+	return canonicalID
 }

@@ -132,6 +132,8 @@ func catalogSchemaStatements() []string {
 			resource_id bigint not null references game_resources(entity_id) on delete cascade,
 			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			registry text not null,
+			entry_type_code text not null default 'default',
+			definition_schema_version smallint not null default 1,
 			translation_key text not null default '',
 			names jsonb not null default '{}'::jsonb,
 			data jsonb not null default '{}'::jsonb,
@@ -139,7 +141,8 @@ func catalogSchemaStatements() []string {
 			preview_path text not null default '',
 			created_at timestamptz not null default now(),
 			unique(resource_id,revision_id),
-			unique(revision_id,registry,resource_id)
+			unique(revision_id,registry,resource_id),
+			check(definition_schema_version>=1)
 		)`,
 		`create index idx_resource_import_snapshots_revision_registry on resource_import_snapshots(revision_id,registry,resource_id)`,
 		`create index idx_resource_import_snapshots_resource on resource_import_snapshots(resource_id,revision_id)`,
@@ -192,6 +195,21 @@ func catalogSchemaStatements() []string {
 			canonical_id text not null,
 			unique(registry,canonical_id)
 		)`,
+		`create or replace function resolve_catalog_tag_unresolved_references() returns trigger as $$
+		begin
+			update unresolved_references
+			set status='resolved',resolved_type='tag',resolved_id=new.entity_id,
+				resolved_at=now(),updated_at=now()
+			where status='pending' and reference_type='tag'
+			  and regexp_replace(normalized_identifier,'^#','') in (
+				lower(new.canonical_id),
+				lower(new.registry||':'||new.canonical_id)
+			  );
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_catalog_tags_resolve_unresolved after insert or update of registry,canonical_id on catalog_tags
+		 for each row execute function resolve_catalog_tag_unresolved_references()`,
 		`create table tag_import_snapshots (
 			id text primary key,
 			tag_id bigint not null references catalog_tags(entity_id) on delete cascade,
@@ -292,7 +310,7 @@ func catalogSchemaStatements() []string {
 			source_mod_version text not null default '',
 			source_mod_id_source text not null default '',
 			render_locale text not null default '',
-			source_data jsonb not null default '{}'::jsonb,
+			definition_schema_version smallint not null default 1,
 			template_id text references recipe_template_import_snapshots(id) on delete restrict,
 			layout_available boolean not null default true,
 			layout_kind text not null default 'unknown',
@@ -303,6 +321,7 @@ func catalogSchemaStatements() []string {
 			parameters jsonb not null default '{}'::jsonb,
 			binding_count integer not null default 0,
 			unique(recipe_id,revision_id,source_recipe_key),
+			check(definition_schema_version>=1),
 			check(layout_kind in ('shaped','shapeless','not_applicable','unknown')),
 			check((layout_kind='shaped' and ordered is true) or
 				(layout_kind='shapeless' and ordered is false) or
@@ -322,7 +341,6 @@ func catalogSchemaStatements() []string {
 			semantic_role text not null default '',
 			role_source text not null default '',
 			tag_id bigint references catalog_tags(entity_id) on delete set null,
-			data jsonb not null default '{}'::jsonb,
 			unique(recipe_snapshot_id,source_slot_id)
 		)`,
 		`create index idx_recipe_import_bindings_tag on recipe_import_bindings(tag_id,recipe_snapshot_id) where tag_id is not null`,
@@ -348,7 +366,6 @@ func catalogSchemaStatements() []string {
 			chance_render_x double precision,
 			chance_render_y double precision,
 			byproduct boolean not null default false,
-			data jsonb not null default '{}'::jsonb,
 			unique(binding_id,alternative_index,raw_resource_id),
 			check(chance is null or (chance >= 0 and chance <= 1)),
 			check(chance_percent is null or (chance_percent >= 0 and chance_percent <= 100)),

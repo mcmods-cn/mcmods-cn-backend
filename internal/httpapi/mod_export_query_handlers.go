@@ -291,18 +291,18 @@ func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request
 		rows, loadErr := s.db.Query(ctx, `select entity.public_id,resource.canonical_id,
 			snapshot.names,resource.namespace,snapshot.translation_key,snapshot.icon_path,snapshot.preview_path,
 			case when not $6 then snapshot.data
-				when snapshot.registry='advancements' then jsonb_strip_nulls(jsonb_build_object('parent',snapshot.data->'parent','display',snapshot.data->'display'))
+				when snapshot.registry='advancements' then jsonb_strip_nulls(jsonb_build_object('parent',snapshot.data->'parentId','display',snapshot.data->'display'))
 				when snapshot.registry='loot_tables' then jsonb_strip_nulls(jsonb_build_object(
-					'category',snapshot.data->'category','path',snapshot.data->'path','possible_item_ids',snapshot.data->'possible_item_ids'))
+					'category',snapshot.data->'category','path',snapshot.data->'path','possible_item_ids',snapshot.data->'possibleItemIds'))
 				when snapshot.registry='natural_generation' then jsonb_strip_nulls(jsonb_build_object(
-					'entry_kind',snapshot.data->'entry_kind','category',snapshot.data->'category',
-					'feature_type',snapshot.data->'feature_type','carver_type',snapshot.data->'carver_type',
-					'normalization_status',snapshot.data->'normalization_status','outputs',snapshot.data->'outputs',
-					'generation_steps',snapshot.data->'generation_steps'))
+					'entry_kind',snapshot.data->'entryKind','category',snapshot.data->'category',
+					'feature_type',snapshot.data->'featureType','carver_type',snapshot.data->'carverType',
+					'normalization_status',snapshot.data->'normalizationStatus','outputs',snapshot.data->'outputs',
+					'generation_steps',snapshot.data->'generationSteps'))
 				when snapshot.registry='world_structures' then jsonb_strip_nulls(jsonb_build_object(
-					'catalog_kind',snapshot.data->'catalog_kind','structure_type',snapshot.data->'structure_type',
-					'generation_step',snapshot.data->'generation_step','biomes',snapshot.data->'biomes',
-					'terrain_adaptation',snapshot.data->'terrain_adaptation','structure_set_ids',snapshot.data->'structure_set_ids'))
+					'catalog_kind',snapshot.data->'catalogKind','structure_type',snapshot.data->'structureType',
+					'generation_step',snapshot.data->'generationStep','biomes',snapshot.data->'biomes',
+					'terrain_adaptation',snapshot.data->'terrainAdaptation','structure_set_ids',snapshot.data->'structureSetIds'))
 				else '{}'::jsonb end
 			from resource_import_snapshots snapshot
 			join game_resources resource on resource.entity_id=snapshot.resource_id

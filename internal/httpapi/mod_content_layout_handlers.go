@@ -611,34 +611,8 @@ func publishModContentLayoutTx(ctx context.Context, tx pgx.Tx, revisionID int64,
 		activeCategoryIDs[category.PublicID] = struct{}{}
 	}
 
-	if _, err = tx.Exec(ctx, `with recursive subtree as (
-			select id from mod_content_sections where id=$1
-			union all select child.id from mod_content_sections child join subtree parent on child.parent_id=parent.id
-		)
-		delete from mod_content_section_resources where section_id in(select id from subtree)`, rootID); err != nil {
+	if err = publishModContentLayoutResourcesTx(ctx, tx, snapshot.ModID, versionID, rootID, revisionID, actorID, sectionIDs, layout.Resources); err != nil {
 		return err
-	}
-	for _, resource := range layout.Resources {
-		sectionID, ok := sectionIDs[resource.SectionPublicID]
-		if !ok {
-			return errCatalogEditorInvalid
-		}
-		var resourceID int64
-		if err = tx.QueryRow(ctx, `select entity.id from catalog_entities entity
-			join mod_resource_bindings binding on binding.resource_id=entity.id and binding.mod_id=$2
-			join mod_resource_version_details detail on detail.resource_id=entity.id and detail.version_id=$3 and detail.status='active'
-			where entity.public_id=$1 and entity.status='active'`, resource.ResourcePublicID, snapshot.ModID, versionID).Scan(&resourceID); err != nil {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `insert into mod_content_section_resources(section_id,version_id,resource_id,ordinal,placement_source)
-			values($1,$2,$3,$4,'manual')`, sectionID, versionID, resourceID, resource.Ordinal); err != nil {
-			return err
-		}
-		if resource.Advancement != nil {
-			if err = publishModContentAdvancementLayoutTx(ctx, tx, resourceID, versionID, revisionID, actorID, *resource.Advancement); err != nil {
-				return err
-			}
-		}
 	}
 	for publicID, categoryID := range existingIDs {
 		if _, keep := activeCategoryIDs[publicID]; keep {
@@ -654,23 +628,59 @@ func publishModContentLayoutTx(ctx context.Context, tx pgx.Tx, revisionID int64,
 	return err
 }
 
-func publishModContentAdvancementLayoutTx(
+type modContentLayoutPublishResource struct {
+	ID          int64
+	KindCode    string
+	CanonicalID string
+	Definition  []byte
+}
+
+type modContentLayoutPublishedPlacement struct {
+	SectionID int64
+	Ordinal   int32
+}
+
+func publishModContentLayoutResourcesTx(
 	ctx context.Context,
 	tx pgx.Tx,
-	resourceID, versionID, revisionID, actorID int64,
-	layout modContentAdvancementLayoutEdit,
+	modID, versionID, rootSectionID, revisionID, actorID int64,
+	sectionIDs map[string]int64,
+	resources []modContentLayoutResourceEdit,
 ) error {
-	parentCanonicalID := ""
-	if layout.ParentResourcePublicID != "" {
-		if err := tx.QueryRow(ctx, `select resource.canonical_id
-			from catalog_entities entity join game_resources resource on resource.entity_id=entity.id
-			where entity.public_id=$1 and entity.status='active' and resource.kind_code='minecraft.advancement'`,
-			layout.ParentResourcePublicID).Scan(&parentCanonicalID); err != nil {
+	existingPlacementRows, err := tx.Query(ctx, `with recursive subtree as (
+		select id from mod_content_sections where id=$1
+		union all select child.id from mod_content_sections child join subtree parent on child.parent_id=parent.id
+		)
+		select placement.resource_id,placement.section_id,placement.ordinal
+		from mod_content_section_resources placement
+		where placement.version_id=$2 and placement.section_id in(select id from subtree)`, rootSectionID, versionID)
+	if err != nil {
+		return err
+	}
+	existingPlacements := make(map[int64]modContentLayoutPublishedPlacement)
+	for existingPlacementRows.Next() {
+		var resourceID int64
+		var placement modContentLayoutPublishedPlacement
+		if err = existingPlacementRows.Scan(&resourceID, &placement.SectionID, &placement.Ordinal); err != nil {
+			existingPlacementRows.Close()
 			return err
 		}
+		existingPlacements[resourceID] = placement
 	}
-	var definition []byte
-	if err := tx.QueryRow(ctx, `select case
+	if err = existingPlacementRows.Err(); err != nil {
+		existingPlacementRows.Close()
+		return err
+	}
+	existingPlacementRows.Close()
+
+	publicIDs := make([]string, 0, len(resources))
+	for _, resource := range resources {
+		publicIDs = append(publicIDs, resource.ResourcePublicID)
+	}
+	resourcesByPublicID := make(map[string]modContentLayoutPublishResource, len(resources))
+	if len(publicIDs) > 0 {
+		rows, queryErr := tx.Query(ctx, `select entity.public_id,entity.id,resource.kind_code,resource.canonical_id,
+		case
 			when detail.definition is not null and detail.definition<>'{}'::jsonb then detail.definition
 			else coalesce((select snapshot.data from resource_import_snapshots snapshot
 				join catalog_import_revisions revision on revision.id=snapshot.revision_id
@@ -678,38 +688,142 @@ func publishModContentAdvancementLayoutTx(
 				 and revision.is_active and revision.status in ('ready','partial')
 				order by coalesce(revision.activated_at,revision.created_at) desc limit 1),'{}'::jsonb)
 			end
-		from mod_resource_version_details detail
-		where detail.resource_id=$1 and detail.version_id=$2 and detail.status='active'
-		for update`, resourceID, versionID).Scan(&definition); err != nil {
-		return err
+		from catalog_entities entity
+		join game_resources resource on resource.entity_id=entity.id
+		join mod_resource_bindings binding on binding.resource_id=entity.id and binding.mod_id=$2
+		join mod_resource_version_details detail on detail.resource_id=entity.id and detail.version_id=$3 and detail.status='active'
+		where entity.public_id=any($1::text[]) and entity.status='active'
+		for update of detail`, publicIDs, modID, versionID)
+		if queryErr != nil {
+			return queryErr
+		}
+		for rows.Next() {
+			var publicID string
+			var resource modContentLayoutPublishResource
+			if err = rows.Scan(&publicID, &resource.ID, &resource.KindCode, &resource.CanonicalID, &resource.Definition); err != nil {
+				rows.Close()
+				return err
+			}
+			resourcesByPublicID[publicID] = resource
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
 	}
-	value := make(map[string]any)
-	if len(definition) > 0 {
-		if err := json.Unmarshal(definition, &value); err != nil {
+	if len(resourcesByPublicID) != len(resources) {
+		return errCatalogEditorInvalid
+	}
+
+	placementSectionIDs := make([]int64, 0, len(resources))
+	placementResourceIDs := make([]int64, 0, len(resources))
+	placementOrdinals := make([]int32, 0, len(resources))
+	desiredResourceIDs := make(map[int64]struct{}, len(resources))
+	deletePlacementIDs := make(map[int64]struct{})
+	advancementResourceIDs := make([]int64, 0, len(resources))
+	advancementDefinitions := make([]string, 0, len(resources))
+	for _, edit := range resources {
+		sectionID, sectionExists := sectionIDs[edit.SectionPublicID]
+		resource, resourceExists := resourcesByPublicID[edit.ResourcePublicID]
+		if !sectionExists || !resourceExists {
 			return errCatalogEditorInvalid
 		}
+		desiredResourceIDs[resource.ID] = struct{}{}
+		desiredOrdinal := int32(edit.Ordinal)
+		currentPlacement, placementExists := existingPlacements[resource.ID]
+		if !placementExists || currentPlacement.SectionID != sectionID || currentPlacement.Ordinal != desiredOrdinal {
+			if placementExists {
+				deletePlacementIDs[resource.ID] = struct{}{}
+			}
+			placementSectionIDs = append(placementSectionIDs, sectionID)
+			placementResourceIDs = append(placementResourceIDs, resource.ID)
+			placementOrdinals = append(placementOrdinals, desiredOrdinal)
+		}
+		if edit.Advancement == nil {
+			continue
+		}
+		if resource.KindCode != "minecraft.advancement" {
+			return errCatalogEditorInvalid
+		}
+		parentCanonicalID := ""
+		if edit.Advancement.ParentResourcePublicID != "" {
+			parent, exists := resourcesByPublicID[edit.Advancement.ParentResourcePublicID]
+			if !exists || parent.KindCode != "minecraft.advancement" {
+				return errCatalogEditorInvalid
+			}
+			parentCanonicalID = parent.CanonicalID
+		}
+		definition := make(map[string]any)
+		if len(resource.Definition) > 0 {
+			if err = json.Unmarshal(resource.Definition, &definition); err != nil {
+				return errCatalogEditorInvalid
+			}
+		}
+		currentParentCanonicalID, _ := definition["parent"].(string)
+		display, _ := definition["display"].(map[string]any)
+		currentX, hasCurrentX := display["x"].(float64)
+		currentY, hasCurrentY := display["y"].(float64)
+		if currentParentCanonicalID == parentCanonicalID && hasCurrentX && hasCurrentY &&
+			currentX == edit.Advancement.X && currentY == edit.Advancement.Y {
+			continue
+		}
+		if parentCanonicalID == "" {
+			delete(definition, "parent")
+		} else {
+			definition["parent"] = parentCanonicalID
+		}
+		if display == nil {
+			display = make(map[string]any)
+		}
+		display["x"] = edit.Advancement.X
+		display["y"] = edit.Advancement.Y
+		definition["display"] = display
+		encoded, encodeErr := json.Marshal(definition)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		advancementResourceIDs = append(advancementResourceIDs, resource.ID)
+		advancementDefinitions = append(advancementDefinitions, string(encoded))
 	}
-	if parentCanonicalID == "" {
-		delete(value, "parent")
-	} else {
-		value["parent"] = parentCanonicalID
+	for resourceID := range existingPlacements {
+		if _, keep := desiredResourceIDs[resourceID]; !keep {
+			deletePlacementIDs[resourceID] = struct{}{}
+		}
 	}
-	display, _ := value["display"].(map[string]any)
-	if display == nil {
-		display = make(map[string]any)
+	if len(deletePlacementIDs) > 0 {
+		resourceIDs := make([]int64, 0, len(deletePlacementIDs))
+		for resourceID := range deletePlacementIDs {
+			resourceIDs = append(resourceIDs, resourceID)
+		}
+		if _, err = tx.Exec(ctx, `delete from mod_content_section_resources
+			where version_id=$2 and resource_id=any($1::bigint[])`, resourceIDs, versionID); err != nil {
+			return err
+		}
 	}
-	display["x"] = layout.X
-	display["y"] = layout.Y
-	value["display"] = display
-	encoded, err := json.Marshal(value)
+	if len(placementResourceIDs) > 0 {
+		if _, err = tx.Exec(ctx, `insert into mod_content_section_resources(section_id,version_id,resource_id,ordinal,placement_source)
+			select input.section_id,$2,input.resource_id,input.ordinal,'manual'
+			from unnest($1::bigint[],$3::bigint[],$4::integer[]) as input(section_id,resource_id,ordinal)`,
+			placementSectionIDs, versionID, placementResourceIDs, placementOrdinals); err != nil {
+			return err
+		}
+	}
+	if len(advancementResourceIDs) == 0 {
+		return nil
+	}
+	result, err := tx.Exec(ctx, `update mod_resource_version_details detail
+		set definition=input.definition::jsonb,published_revision_id=$3,updated_by=$4,updated_at=now()
+		from unnest($1::bigint[],$2::text[]) as input(resource_id,definition)
+		where detail.resource_id=input.resource_id and detail.version_id=$5 and detail.status='active'`,
+		advancementResourceIDs, advancementDefinitions, revisionID, actorID, versionID)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `update mod_resource_version_details
-		set definition=$3::jsonb,published_revision_id=$4,updated_by=$5,updated_at=now()
-		where resource_id=$1 and version_id=$2 and status='active'`,
-		resourceID, versionID, string(encoded), revisionID, actorID)
-	return err
+	if result.RowsAffected() != int64(len(advancementResourceIDs)) {
+		return errCatalogEditorInvalid
+	}
+	return nil
 }
 
 func validateModContentResourceSectionTx(ctx context.Context, tx pgx.Tx, modID, versionID int64, kindCode string, sectionPublicID *string) error {

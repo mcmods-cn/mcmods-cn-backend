@@ -37,7 +37,7 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 	rows, err := s.db.Query(ctx, `select snapshot.id,snapshot.layout_available,snapshot.layout_kind,snapshot.ordered,
 		snapshot.layout_classification_source,snapshot.width,snapshot.height,snapshot.parameters,
 		snapshot.origin_kind,snapshot.underlying_recipe_type_id,snapshot.source_mod_id,snapshot.source_mod_version,
-		snapshot.source_mod_id_source,snapshot.render_locale,snapshot.source_data,
+		snapshot.source_mod_id_source,snapshot.render_locale,
 		coalesce(template.source_template_id,''),coalesce(template.background_path,''),
 		coalesce(template.background_contains_ingredients,false),coalesce(template.coordinate_space,'logical_pixels'),
 		coalesce(template.image_scale,1),coalesce(template.canvas,'{}'::jsonb),
@@ -45,7 +45,7 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		coalesce(slot.id,''),coalesce(slot.source_slot_id,''),coalesce(slot.role,''),coalesce(slot.ordinal,0),
 		coalesce(slot.coordinates_available,false),coalesce(slot.rect,'{}'::jsonb),
 		coalesce(slot.visual_rect,'{}'::jsonb),coalesce(slot.data,'{}'::jsonb),
-		coalesce(binding.id,''),coalesce(binding.data,'{}'::jsonb),coalesce(binding.ingredient_present,false),coalesce(binding.clickable,false),
+		coalesce(binding.id,''),coalesce(binding.ingredient_present,false),coalesce(binding.clickable,false),
 		coalesce(binding.placeholder_item,''),coalesce(binding.item_tag_equivalent,''),coalesce(binding.semantic_role,''),
 		coalesce(binding.role_source,''),
 		coalesce(tag_entity.public_id,''),coalesce(tag.registry,''),coalesce(tag.canonical_id,'')
@@ -72,12 +72,12 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		var imageScale, slotOrdinal int
 		var ordered sql.NullBool
 		var width, height sql.NullInt64
-		var parameters, sourceData, canvas, imagePixels, contentRect, rect, visualRect, slotData, bindingData []byte
+		var parameters, canvas, imagePixels, contentRect, rect, visualRect, slotData []byte
 		if err = rows.Scan(&snapshotID, &layoutAvailable, &layoutKind, &ordered, &classificationSource, &width, &height,
 			&parameters, &originKind, &underlyingRecipeTypeID, &sourceModID, &sourceModVersion, &sourceModIDSource,
-			&renderLocale, &sourceData, &sourceTemplateID, &backgroundPath, &backgroundContainsIngredients, &coordinateSpace,
+			&renderLocale, &sourceTemplateID, &backgroundPath, &backgroundContainsIngredients, &coordinateSpace,
 			&imageScale, &canvas, &imagePixels, &contentRect, &slotDatabaseID, &sourceSlotID, &role, &slotOrdinal,
-			&coordinatesAvailable, &rect, &visualRect, &slotData, &bindingID, &bindingData, &ingredientPresent, &clickable,
+			&coordinatesAvailable, &rect, &visualRect, &slotData, &bindingID, &ingredientPresent, &clickable,
 			&placeholderItem, &itemTagEquivalent, &semanticRole, &roleSource,
 			&tagEntityID, &tagRegistry, &tagCanonicalID); err != nil {
 			rows.Close()
@@ -103,7 +103,6 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 				"source_mod_version":              sourceModVersion,
 				"source_mod_id_source":            sourceModIDSource,
 				"render_locale":                   renderLocale,
-				"source_data":                     decodeJSONObject(sourceData),
 				"template_id":                     sourceTemplateID,
 				"background":                      backgroundPath,
 				"background_contains_ingredients": backgroundContainsIngredients,
@@ -120,9 +119,6 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 			continue
 		}
 		slot := decodeJSONObject(slotData)
-		if bindingID != "" {
-			slot = decodeJSONObject(bindingData)
-		}
 		slot["slot_id"] = sourceSlotID
 		slot["role"] = role
 		slot["ordinal"] = slotOrdinal
@@ -175,7 +171,7 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 	}
 	alternativeRows, err := s.db.Query(ctx, `select binding_id,alternative_index,raw_resource_id,amount,
 		ingredient_kind,ingredient_type,unique_id,nbt_snbt,chance_available,chance,chance_percent,
-		chance_comparator,chance_source,chance_text,chance_texts,chance_translation_key,chance_render_x,chance_render_y,byproduct,data
+		chance_comparator,chance_source,chance_text,chance_texts,chance_translation_key,chance_render_x,chance_render_y,byproduct
 		from recipe_import_binding_candidates where binding_id=any($1::text[])
 		order by binding_id,alternative_index`, bindingIDs)
 	if err != nil {
@@ -189,18 +185,18 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		var amount float64
 		var chanceAvailable, byproduct bool
 		var chance, chancePercent, chanceRenderX, chanceRenderY sql.NullFloat64
-		var chanceTexts, data []byte
+		var chanceTexts []byte
 		if err = alternativeRows.Scan(&bindingID, &alternativeIndex, &resourceID, &amount, &ingredientKind,
 			&ingredientType, &uniqueID, &nbtSNBT, &chanceAvailable, &chance, &chancePercent,
 			&chanceComparator, &chanceSource, &chanceText, &chanceTexts, &chanceTranslationKey,
-			&chanceRenderX, &chanceRenderY, &byproduct, &data); err != nil {
+			&chanceRenderX, &chanceRenderY, &byproduct); err != nil {
 			return err
 		}
 		slot := bindingStates[bindingID]
 		if slot == nil {
 			continue
 		}
-		alternative := decodeJSONObject(data)
+		alternative := map[string]any{}
 		alternative["alternative_index"] = alternativeIndex
 		alternative["resource_location"] = resourceID
 		alternative["amount"] = amount

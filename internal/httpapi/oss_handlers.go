@@ -356,7 +356,8 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		return
 	}
 	if scope == "user" {
-		deferStoredSizeCheck := shouldPersistMarkdownImageAsWebP(req.OriginalName, contentType, source, category)
+		deferStoredSizeCheck := shouldPersistMarkdownImageAsWebP(req.OriginalName, contentType, source, category) ||
+			isModResourceRenderUploadSource(source)
 		if err := s.enforceUserFileUploadLimits(r, req.SizeBytes, deferStoredSizeCheck); err != nil {
 			writeError(w, http.StatusForbidden, err.Error())
 			return
@@ -621,6 +622,25 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	sourceOriginalName := req.OriginalName
 	sourceSize := size
 	converted := false
+	imageProcessLog := ""
+	if isModResourceRenderUploadSource(req.Source) {
+		resizedObject, resized, resizeErr := persistOversizedModResourceRender(
+			r.Context(), client, cfg, req.ObjectKey, contentType, size, req.SHA256,
+		)
+		if resizeErr != nil {
+			s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, req.ObjectKey)
+			s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, req.ObjectKey, req.OriginalName, size, s.requestClientLocation(r).IP, r.UserAgent(), "failed", resizeErr.Error())
+			writeError(w, http.StatusBadGateway, imageProcessErrorMessage(resizeErr))
+			return
+		}
+		if resized {
+			req.ObjectKey = resizedObject.ObjectKey
+			contentType = "image/png"
+			size = resizedObject.SizeBytes
+			converted = true
+			imageProcessLog = "render-resized-long-edge-to-1024"
+		}
+	}
 	if shouldPersistMarkdownImageAsWebP(req.OriginalName, contentType, req.Source, req.Category) {
 		convertedObject, conversionErr := persistImageAsWebP(r.Context(), client, cfg, req.ObjectKey, req.OriginalName)
 		if conversionErr != nil {
@@ -634,6 +654,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		contentType = "image/webp"
 		size = convertedObject.SizeBytes
 		converted = true
+		imageProcessLog = "persisted-as-webp"
 	}
 	scanStatus := "pending"
 	if requiresSynchronousCatalogImageValidation(req.Source) {
@@ -641,7 +662,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		if converted {
 			expectedRasterHash = ""
 		}
-		if inspectErr := validateOSSUploadedRaster(r.Context(), client, cfg, req.ObjectKey, contentType, size, expectedRasterHash); inspectErr != nil {
+		if inspectErr := validateOSSUploadedRaster(r.Context(), client, cfg, req.ObjectKey, contentType, size, expectedRasterHash, req.Source); inspectErr != nil {
 			s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, req.ObjectKey)
 			if converted {
 				s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, sourceObjectKey)
@@ -715,7 +736,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	}
 	logMessage := "direct-to-oss"
 	if converted {
-		logMessage = "direct-to-oss; persisted-as-webp"
+		logMessage = "direct-to-oss; " + imageProcessLog
 		s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, sourceObjectKey)
 	}
 	s.insertOSSUploadLog(r.Context(), &fileID, currentClaims(r).Subject, req.ObjectKey, sourceOriginalName, sourceSize, s.requestClientLocation(r).IP, r.UserAgent(), "success", logMessage)
@@ -784,6 +805,9 @@ func (s *Server) findCompletedOSSUpload(ctx context.Context, uploaderID int64, r
 	}
 	if shouldPersistMarkdownImageAsWebP(req.OriginalName, contentType, req.Source, req.Category) {
 		objectKeys = append(objectKeys, persistedWebPObjectKey(req.ObjectKey))
+	}
+	if isModResourceRenderUploadSource(req.Source) {
+		objectKeys = append(objectKeys, persistedModResourceRenderObjectKey(req.ObjectKey))
 	}
 	var internalID, size, sourceSize int64
 	var publicID, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, storedContentType, sha, status, scanStatus string
@@ -871,6 +895,23 @@ func persistedWebPObjectKey(sourceObjectKey string) string {
 	return destinationObjectKey
 }
 
+func isModResourceRenderUploadSource(source string) bool {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if !strings.HasPrefix(source, "mod_resource:") {
+		return false
+	}
+	return strings.HasSuffix(source, ":render") || strings.HasSuffix(source, ":render_256")
+}
+
+func persistedModResourceRenderObjectKey(sourceObjectKey string) string {
+	extension := filepath.Ext(sourceObjectKey)
+	destinationObjectKey := strings.TrimSuffix(sourceObjectKey, extension) + ".render-1024.png"
+	if destinationObjectKey == sourceObjectKey {
+		destinationObjectKey += ".render-1024.png"
+	}
+	return destinationObjectKey
+}
+
 func (s *Server) deleteOSSObjectIfUnregistered(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey string) {
 	if strings.TrimSpace(objectKey) == "" {
 		return
@@ -887,14 +928,14 @@ func imageProcessErrorMessage(err error) string {
 	if errors.As(err, &serviceError) {
 		switch serviceError.Code {
 		case "AccessDenied":
-			return "OSS 图片转换为 WebP 失败，请确认 AccessKey 具有 oss:PostProcessTask 和 oss:PutObject 权限"
+			return "OSS 图片处理失败，请确认 AccessKey 具有 oss:PostProcessTask 和 oss:PutObject 权限"
 		case "ImageDamage":
 			return "OSS 无法解析源图片，文件可能损坏或格式不受支持"
 		default:
-			return "OSS 图片转换为 WebP 失败: " + serviceError.Code
+			return "OSS 图片处理失败: " + serviceError.Code
 		}
 	}
-	return "OSS 图片转换为 WebP 失败"
+	return "OSS 图片处理失败"
 }
 
 func (s *Server) ossFiles(w http.ResponseWriter, r *http.Request) {
@@ -1019,12 +1060,6 @@ func (s *Server) updateOSSFileScanStatus(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"id": publicID, "scanStatus": request.Status, "status": fileStatus})
 }
 
-func (s *Server) findExistingOSSFileByHash(ctx context.Context, sha256 string, sizeBytes int64) (map[string]any, bool) {
-	return s.findExistingOSSFileByHashExact(ctx, sha256, sizeBytes, ossFileHashLookup{
-		ScanStatuses: []string{"pending", "clean", "trusted_generated"},
-	})
-}
-
 func (s *Server) resolveActiveOSSFileInternalIDForUploader(ctx context.Context, publicID string, uploaderID int64) (int64, error) {
 	var internalID int64
 	err := s.db.QueryRow(ctx, `select id from oss_files
@@ -1051,34 +1086,93 @@ func requiresSynchronousCatalogImageValidation(source string) bool {
 		strings.HasPrefix(source, "blueprint_cover:")
 }
 
-func validateOSSUploadedRaster(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey, declaredContentType string, expectedSize int64, expectedSHA256 string) error {
-	const maximumBytes = int64(16 << 20)
-	if expectedSize <= 0 || expectedSize > maximumBytes {
-		return errors.New("resource image exceeds the upload limit")
+const maximumSynchronousRasterBytes = int64(16 << 20)
+
+func readOSSUploadedRaster(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey string, expectedSize int64, expectedSHA256 string) ([]byte, error) {
+	if expectedSize <= 0 || expectedSize > maximumSynchronousRasterBytes {
+		return nil, errors.New("resource image exceeds the upload limit")
 	}
 	result, err := client.GetObject(ctx, &aliyunoss.GetObjectRequest{
 		Bucket: aliyunoss.Ptr(cfg.Bucket),
 		Key:    aliyunoss.Ptr(objectKey),
 	})
 	if err != nil {
-		return fmt.Errorf("read uploaded image: %w", err)
+		return nil, fmt.Errorf("read uploaded image: %w", err)
 	}
 	defer result.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(result.Body, maximumBytes+1))
+	data, err := io.ReadAll(io.LimitReader(result.Body, maximumSynchronousRasterBytes+1))
 	if err != nil {
-		return fmt.Errorf("read uploaded image body: %w", err)
+		return nil, fmt.Errorf("read uploaded image body: %w", err)
 	}
-	if int64(len(data)) != expectedSize || int64(len(data)) > maximumBytes {
-		return errors.New("uploaded image size mismatch")
+	if int64(len(data)) != expectedSize || int64(len(data)) > maximumSynchronousRasterBytes {
+		return nil, errors.New("uploaded image size mismatch")
 	}
 	if expectedSHA256 != "" {
 		digest := sha256.Sum256(data)
 		if hex.EncodeToString(digest[:]) != expectedSHA256 {
-			return errors.New("uploaded image hash mismatch")
+			return nil, errors.New("uploaded image hash mismatch")
 		}
 	}
-	_, err = validateRasterImageBytes(data, declaredContentType)
-	return err
+	return data, nil
+}
+
+func validateOSSUploadedRaster(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey, declaredContentType string, expectedSize int64, expectedSHA256, source string) error {
+	data, err := readOSSUploadedRaster(ctx, client, cfg, objectKey, expectedSize, expectedSHA256)
+	if err != nil {
+		return err
+	}
+	if _, err = validateRasterImageBytes(data, declaredContentType); err != nil {
+		return err
+	}
+	return validateModResourceImageSpec(data, declaredContentType, source)
+}
+
+const maxModResourceRenderEdge = 1024
+
+func validateModResourceImageSpec(data []byte, declaredContentType, source string) error {
+	source = strings.ToLower(strings.TrimSpace(source))
+	expectedWidth, expectedHeight := 0, 0
+	renderImage := false
+	switch {
+	case strings.HasSuffix(source, ":icon_32"):
+		expectedWidth, expectedHeight = 32, 32
+	case strings.HasSuffix(source, ":icon_128"):
+		expectedWidth, expectedHeight = 128, 128
+	case isModResourceRenderUploadSource(source):
+		renderImage = true
+	default:
+		return nil
+	}
+	config, err := validateModResourcePNGConfig(data, declaredContentType)
+	if err != nil {
+		return err
+	}
+	if renderImage {
+		if max(config.Width, config.Height) > maxModResourceRenderEdge {
+			return fmt.Errorf("mod resource rendered image longest edge must not exceed %dpx", maxModResourceRenderEdge)
+		}
+		return nil
+	}
+	if config.Width != expectedWidth || config.Height != expectedHeight {
+		return fmt.Errorf("mod resource image must be %dx%d PNG", expectedWidth, expectedHeight)
+	}
+	return nil
+}
+
+func validateModResourcePNGConfig(data []byte, declaredContentType string) (image.Config, error) {
+	if normalizeRasterContentType(declaredContentType) != "image/png" {
+		return image.Config{}, errors.New("mod resource images must use PNG")
+	}
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || format != "png" || config.Width <= 0 || config.Height <= 0 {
+		return image.Config{}, errors.New("mod resource image must be a valid PNG")
+	}
+	// PNG color types 4 and 6 have an alpha channel. Indexed PNG may carry
+	// transparency through a validated tRNS chunk.
+	if len(data) < 26 || (data[25] != 4 && data[25] != 6 && !bytes.Contains(data, []byte("tRNS"))) {
+		return image.Config{}, errors.New("mod resource PNG must support a transparent background")
+	}
+	return config, nil
 }
 
 func webPDimensions(data []byte) (int, int, bool) {
@@ -1234,13 +1328,6 @@ func supportedRasterContentType(value string) bool {
 	}
 }
 
-func (s *Server) findExistingOSSFileByHashForUploader(ctx context.Context, sha256 string, sizeBytes int64, uploaderID int64) (map[string]any, bool) {
-	return s.findExistingOSSFileByHashExact(ctx, sha256, sizeBytes, ossFileHashLookup{
-		UploaderID:   &uploaderID,
-		ScanStatuses: []string{"pending", "clean", "trusted_generated"},
-	})
-}
-
 type ossFileHashLookup struct {
 	UploaderID    *int64
 	Category      string
@@ -1299,7 +1386,8 @@ func ossFileRecord(id string, bucket string, endpoint string, region string, obj
 		sourceSize = size
 	}
 	sourceExtension := strings.ToLower(filepath.Ext(sourceOriginalName))
-	converted := contentType == "image/webp" && (sourceExtension == ".jpg" || sourceExtension == ".jpeg" || sourceExtension == ".png")
+	converted := (contentType == "image/webp" && (sourceExtension == ".jpg" || sourceExtension == ".jpeg" || sourceExtension == ".png")) ||
+		sourceSize != size || strings.HasSuffix(objectKey, ".render-1024.png")
 	return map[string]any{
 		"id":                 id,
 		"bucket":             bucket,
@@ -1807,6 +1895,59 @@ type persistedWebPObject struct {
 	ObjectKey    string
 	OriginalName string
 	SizeBytes    int64
+}
+
+type persistedModResourceRenderObject struct {
+	ObjectKey string
+	SizeBytes int64
+}
+
+func persistOversizedModResourceRender(
+	ctx context.Context,
+	client *aliyunoss.Client,
+	cfg ossConfigPayload,
+	sourceObjectKey string,
+	contentType string,
+	sourceSize int64,
+	sourceSHA256 string,
+) (persistedModResourceRenderObject, bool, error) {
+	data, err := readOSSUploadedRaster(ctx, client, cfg, sourceObjectKey, sourceSize, sourceSHA256)
+	if err != nil {
+		return persistedModResourceRenderObject{}, false, err
+	}
+	config, err := validateModResourcePNGConfig(data, contentType)
+	if err != nil {
+		return persistedModResourceRenderObject{}, false, err
+	}
+	if max(config.Width, config.Height) <= maxModResourceRenderEdge {
+		return persistedModResourceRenderObject{}, false, nil
+	}
+
+	destinationObjectKey := persistedModResourceRenderObjectKey(sourceObjectKey)
+	encodedDestination := base64.RawURLEncoding.EncodeToString([]byte(destinationObjectKey))
+	result, err := client.ProcessObject(ctx, &aliyunoss.ProcessObjectRequest{
+		Bucket: aliyunoss.Ptr(cfg.Bucket),
+		Key:    aliyunoss.Ptr(sourceObjectKey),
+		Process: aliyunoss.Ptr(
+			fmt.Sprintf("image/resize,l_%d,limit_1|image/format,png|sys/saveas,o_%s", maxModResourceRenderEdge, encodedDestination),
+		),
+	})
+	if err != nil {
+		return persistedModResourceRenderObject{}, false, err
+	}
+	if result.ProcessStatus != "" && !strings.EqualFold(result.ProcessStatus, "OK") {
+		_, _ = client.DeleteObject(ctx, &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(destinationObjectKey)})
+		return persistedModResourceRenderObject{}, false, fmt.Errorf("OSS image process status: %s", result.ProcessStatus)
+	}
+	head, err := client.HeadObject(ctx, &aliyunoss.HeadObjectRequest{
+		Bucket: aliyunoss.Ptr(cfg.Bucket),
+		Key:    aliyunoss.Ptr(destinationObjectKey),
+	})
+	if err != nil {
+		_, _ = client.DeleteObject(ctx, &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(destinationObjectKey)})
+		return persistedModResourceRenderObject{}, false, err
+	}
+	return persistedModResourceRenderObject{ObjectKey: destinationObjectKey, SizeBytes: head.ContentLength}, true, nil
 }
 
 func shouldPersistMarkdownImageAsWebP(originalName string, contentType string, source string, category string) bool {

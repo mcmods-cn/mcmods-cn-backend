@@ -819,13 +819,15 @@ func baselineSchemaStatements() []string {
 			related_mod_id bigint references mods(id) on delete set null,
 			group_id bigint,
 			related_mod_name text not null default '',
+			related_mod_identifier text not null default '',
 			notes text not null default '',
 			display_order integer not null default 0,
 			created_at timestamptz not null default now(),
 			check (relation_type in ('dependency', 'extension', 'integration')),
-			check (related_mod_id is not null or related_mod_name <> '')
+			check (related_mod_id is not null or related_mod_name <> '' or related_mod_identifier <> '')
 		)`,
 		`create index if not exists idx_mod_relationships_mod_order on mod_relationships (mod_id, display_order, id)`,
+		`create index if not exists idx_mod_relationships_related_mod on mod_relationships (related_mod_id, id) where related_mod_id is not null`,
 		`create table if not exists mod_relationship_groups (
 			id bigserial primary key,
 			mod_id bigint not null references mods(id) on delete cascade,
@@ -838,6 +840,38 @@ func baselineSchemaStatements() []string {
 		)`,
 		`create index if not exists idx_mod_relationship_groups_mod_order on mod_relationship_groups (mod_id, display_order, id)`,
 		`create index if not exists idx_mod_relationships_group_order on mod_relationships (group_id, display_order, id)`,
+		`create table if not exists unresolved_references (
+			id bigserial primary key,
+			source_type text not null,
+			source_id bigint not null,
+			field_path text not null default '',
+			reference_type text not null,
+			raw_identifier text not null,
+			normalized_identifier text not null,
+			resolved_type text not null default '',
+			resolved_id bigint,
+			status text not null default 'pending',
+			metadata jsonb not null default '{}'::jsonb,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			resolved_at timestamptz,
+			unique(source_type,source_id,field_path,reference_type,normalized_identifier),
+			check(status in ('pending','resolved','ignored')),
+			check(raw_identifier <> '' and normalized_identifier <> '')
+		)`,
+		`create index if not exists idx_unresolved_references_pending
+			on unresolved_references(reference_type,normalized_identifier,id) where status='pending'`,
+		`create index if not exists idx_unresolved_references_source
+			on unresolved_references(source_type,source_id,id)`,
+		`create or replace function remove_mod_relationship_unresolved_references() returns trigger as $$
+		begin
+			delete from unresolved_references
+			where source_type='mod_relationship' and source_id=old.id;
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mod_relationships_remove_unresolved after delete on mod_relationships
+		 for each row execute function remove_mod_relationship_unresolved_references()`,
 		`create table if not exists mod_download_sources (
 			id bigserial primary key,
 			mod_id bigint not null references mods(id) on delete cascade,

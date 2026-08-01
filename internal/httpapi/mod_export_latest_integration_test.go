@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path"
+	"strings"
 	"testing"
 	"time"
 
@@ -180,7 +182,11 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	if err = importExportRecipeTypes(context.Background(), tx, packageID, revisions, categoryRaw); err != nil {
 		t.Fatal(err)
 	}
-	if err = importExportTags(context.Background(), tx, catalogResourceIdentityResolver{}, revisions, read("tags/tags.json")); err != nil {
+	tagRows, tagMemberCount, err := decodeExportTags(revisions, read("tags/tags.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = persistExportTags(context.Background(), tx, catalogResourceIdentityResolver{}, tagRows, tagMemberCount); err != nil {
 		t.Fatal(err)
 	}
 	mark("recipe types and tags")
@@ -190,7 +196,11 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	expectedTranslationValues := 0
 	compressedTranslationBytes := int64(0)
 	for name, file := range files {
-		if !isSupportedExportTranslationFile(name) {
+		if !isExportTranslationFile(name) {
+			continue
+		}
+		sourceLocale := strings.TrimSuffix(path.Base(name), path.Ext(name))
+		if _, supported := canonicalExportLocaleTag(sourceLocale); !supported {
 			continue
 		}
 		value, readErr := readExportZIPFile(file, maxExportJSONSize)

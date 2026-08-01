@@ -29,6 +29,7 @@ var reservedUsernames = map[string]struct{}{
 type registerRequest struct {
 	Username                 string `json:"username"`
 	Email                    string `json:"email"`
+	Code                     string `json:"code"`
 	Password                 string `json:"password"`
 	DisplayName              string `json:"displayName"`
 	Country                  string `json:"country"`
@@ -61,6 +62,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Username = strings.TrimSpace(req.Username)
 	req.Email = normalizeEmail(req.Email)
+	req.Code = strings.TrimSpace(req.Code)
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
 	req.Country = strings.TrimSpace(req.Country)
 	req.Timezone = defaultString(strings.TrimSpace(req.Timezone), "Asia/Shanghai")
@@ -81,6 +83,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	if !validEmailAddress(req.Email) {
 		writeError(w, http.StatusBadRequest, "邮箱格式不正确")
+		return
+	}
+	if !verificationCodePattern.MatchString(req.Code) {
+		writeError(w, http.StatusBadRequest, "邮箱验证码格式不正确")
 		return
 	}
 	if len(req.Password) < 8 || len(req.Password) > 1024 {
@@ -113,6 +119,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if err := consumeEmailVerificationCodeTx(r.Context(), tx, req.Email, "register", req.Code); err != nil {
+		writeError(w, http.StatusUnauthorized, "验证码不正确或已过期")
+		return
+	}
 
 	var user domain.User
 	err = tx.QueryRow(
@@ -120,9 +130,9 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		`insert into users (
 		     username, email, display_name, password_hash,
 		     country, timezone, preferred_content_language, secondary_content_language, preferred_ui_language,
-		     registration_ip, registration_country_code, registration_city
+		     registration_ip, registration_country_code, registration_city, email_verified
 		 )
-		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true)
 		 returning id, public_id, username, email, display_name, email_verified, status, created_at, last_login_at`,
 		req.Username,
 		req.Email,
@@ -217,13 +227,24 @@ func (s *Server) requestEmailCode(w http.ResponseWriter, r *http.Request) {
 	if req.Purpose == "" {
 		req.Purpose = "login"
 	}
-	if req.Purpose != "login" {
+	if req.Purpose != "login" && req.Purpose != "register" {
 		writeError(w, http.StatusBadRequest, "unsupported verification-code purpose")
 		return
 	}
 	if !validEmailAddress(req.Email) {
 		writeError(w, http.StatusBadRequest, "邮箱格式不正确")
 		return
+	}
+	if req.Purpose == "register" {
+		var exists bool
+		if err := s.db.QueryRow(r.Context(), `select exists(select 1 from users where lower(email)=lower($1))`, req.Email).Scan(&exists); err != nil {
+			writeError(w, http.StatusInternalServerError, "邮箱检查失败")
+			return
+		}
+		if exists {
+			writeError(w, http.StatusConflict, "该邮箱已被注册")
+			return
+		}
 	}
 
 	code, err := randomCode()
@@ -255,6 +276,9 @@ func (s *Server) requestEmailCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	subject := "Mcmods-cn 登录验证码"
+	if req.Purpose == "register" {
+		subject = "Mcmods-cn 注册验证码"
+	}
 	body := fmt.Sprintf("你的验证码是：%s\n\n验证码 10 分钟内有效。如果不是你本人操作，请忽略这封邮件。", code)
 	if err := s.activeMailer(r.Context()).Send(req.Email, subject, body); err != nil {
 		_, _ = s.db.Exec(r.Context(), `update email_verification_codes set consumed_at=now() where id=$1`, codeID)
@@ -322,27 +346,35 @@ func (s *Server) consumeEmailLoginCode(ctx context.Context, email, code string) 
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := consumeEmailVerificationCodeTx(ctx, tx, email, "login", code); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func consumeEmailVerificationCodeTx(ctx context.Context, tx pgx.Tx, email, purpose, code string) error {
 	var codeID int64
 	var codeHash string
-	if err = tx.QueryRow(
+	if err := tx.QueryRow(
 		ctx,
 		`select id,code_hash
 		 from email_verification_codes
-		 where email=$1 and purpose='login' and consumed_at is null and expires_at>now()
+		 where email=$1 and purpose=$2 and consumed_at is null and expires_at>now()
 		 order by id desc
 		 limit 1
 		 for update`,
 		email,
+		purpose,
 	).Scan(&codeID, &codeHash); err != nil {
 		return err
 	}
 	if !security.VerifyCode(code, codeHash) {
 		return fmt.Errorf("invalid email verification code")
 	}
-	if _, err = tx.Exec(ctx, `update email_verification_codes set consumed_at=now() where id=$1 and consumed_at is null`, codeID); err != nil {
+	if _, err := tx.Exec(ctx, `update email_verification_codes set consumed_at=now() where id=$1 and consumed_at is null`, codeID); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {

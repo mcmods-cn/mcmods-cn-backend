@@ -273,7 +273,7 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, _ := json.Marshal(snapshot)
 	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
-		EntityType: "creator", EntityID: id, AggregateType: "creator", AggregateKey: publicID, BaseRevision: baseRevisionID,
+		EntityType: kind, EntityID: id, AggregateType: "creator", AggregateKey: publicID, BaseRevision: baseRevisionID,
 		Snapshot: raw, Reason: "Update creator profile", ActorID: claims.Subject,
 		Source: "user", Status: status, Metadata: map[string]any{"creatorId": publicID, "kind": kind}, Request: r,
 	})
@@ -531,7 +531,7 @@ func (s *Server) createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creato
 	}
 	raw, _ := json.Marshal(snapshot)
 	created, err := createContentRevisionTx(ctx, tx, createContentRevisionParams{
-		EntityType: "creator", EntityID: id, AggregateType: "creator", AggregateKey: publicID, Snapshot: raw,
+		EntityType: snapshot.Kind, EntityID: id, AggregateType: "creator", AggregateKey: publicID, Snapshot: raw,
 		Reason: "Create creator profile", ActorID: actorID, Source: "user", Status: status,
 		Metadata: map[string]any{"creatorId": publicID, "kind": snapshot.Kind}, Request: r,
 	})

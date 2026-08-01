@@ -89,7 +89,6 @@ type recipeImportRecipeWrite struct {
 	SourceModVersion           string          `json:"source_mod_version"`
 	SourceModIDSource          string          `json:"source_mod_id_source"`
 	RenderLocale               string          `json:"render_locale"`
-	SourceData                 json.RawMessage `json:"source_data"`
 	TemplateID                 string          `json:"template_id"`
 	LayoutKind                 string          `json:"layout_kind"`
 	Ordered                    *bool           `json:"ordered"`
@@ -101,21 +100,20 @@ type recipeImportRecipeWrite struct {
 }
 
 type recipeImportBindingWrite struct {
-	ID                string          `json:"id"`
-	RecipeSnapshotID  string          `json:"recipe_snapshot_id"`
-	TemplateSlotID    string          `json:"template_slot_id"`
-	SourceSlotID      string          `json:"source_slot_id"`
-	Ordinal           int             `json:"ordinal"`
-	IngredientPresent bool            `json:"ingredient_present"`
-	Clickable         bool            `json:"clickable"`
-	PlaceholderItem   string          `json:"placeholder_item"`
-	ItemTagEquivalent string          `json:"item_tag_equivalent"`
-	SemanticRole      string          `json:"semantic_role"`
-	RoleSource        string          `json:"role_source"`
-	TagIdentity       string          `json:"tag_identity"`
-	TagPublicID       string          `json:"tag_public_id"`
-	TagCanonicalID    string          `json:"tag_canonical_id"`
-	Data              json.RawMessage `json:"data"`
+	ID                string `json:"id"`
+	RecipeSnapshotID  string `json:"recipe_snapshot_id"`
+	TemplateSlotID    string `json:"template_slot_id"`
+	SourceSlotID      string `json:"source_slot_id"`
+	Ordinal           int    `json:"ordinal"`
+	IngredientPresent bool   `json:"ingredient_present"`
+	Clickable         bool   `json:"clickable"`
+	PlaceholderItem   string `json:"placeholder_item"`
+	ItemTagEquivalent string `json:"item_tag_equivalent"`
+	SemanticRole      string `json:"semantic_role"`
+	RoleSource        string `json:"role_source"`
+	TagIdentity       string `json:"tag_identity"`
+	TagPublicID       string `json:"tag_public_id"`
+	TagCanonicalID    string `json:"tag_canonical_id"`
 }
 
 type recipeImportCandidateWrite struct {
@@ -145,7 +143,6 @@ type recipeImportCandidateWrite struct {
 	ChanceRenderX        *float64        `json:"chance_render_x"`
 	ChanceRenderY        *float64        `json:"chance_render_y"`
 	Byproduct            bool            `json:"byproduct"`
-	Data                 json.RawMessage `json:"data"`
 }
 
 type recipeImportCandidateResourceWrite struct {
@@ -191,7 +188,7 @@ func persistRecipeImports(ctx context.Context, tx pgx.Tx, recipes []recipeImport
 		canonical_source_id text,semantic_fingerprint text,identity_source text,revision_id text,snapshot_id text,
 		source_recipe_id text,source_recipe_key text,collection_path text,origin_kind text,
 		underlying_recipe_type_id text,source_mod_id text,source_mod_version text,source_mod_id_source text,
-		render_locale text,source_data jsonb,template_id text,layout_kind text,ordered boolean,
+		render_locale text,template_id text,layout_kind text,ordered boolean,
 		layout_classification_source text,width integer,height integer,parameters jsonb,binding_count integer
 	) on commit drop`); err != nil {
 		return fmt.Errorf("create recipe import stage: %w", err)
@@ -203,7 +200,7 @@ func persistRecipeImports(ctx context.Context, tx pgx.Tx, recipes []recipeImport
 		"type_identity", "type_public_id", "recipe_type_id", "recipe_identity", "recipe_public_id",
 		"canonical_source_id", "semantic_fingerprint", "identity_source", "revision_id", "snapshot_id",
 		"source_recipe_id", "source_recipe_key", "collection_path", "origin_kind", "underlying_recipe_type_id",
-		"source_mod_id", "source_mod_version", "source_mod_id_source", "render_locale", "source_data",
+		"source_mod_id", "source_mod_version", "source_mod_id_source", "render_locale",
 		"template_id", "layout_kind", "ordered", "layout_classification_source", "width", "height",
 		"parameters", "binding_count",
 	}
@@ -213,7 +210,7 @@ func persistRecipeImports(ctx context.Context, tx pgx.Tx, recipes []recipeImport
 			item.TypeIdentity, item.TypePublicID, item.RecipeTypeID, item.RecipeIdentity, item.RecipePublicID,
 			item.CanonicalSourceID, item.SemanticFingerprint, item.IdentitySource, item.RevisionID, item.SnapshotID,
 			item.SourceRecipeID, item.SourceRecipeKey, item.CollectionPath, item.OriginKind, item.UnderlyingRecipeTypeID,
-			item.SourceModID, item.SourceModVersion, item.SourceModIDSource, item.RenderLocale, recipeImportJSONValue(item.SourceData),
+			item.SourceModID, item.SourceModVersion, item.SourceModIDSource, item.RenderLocale,
 			item.TemplateID, item.LayoutKind, recipeImportOptional(item.Ordered), item.LayoutClassificationSource,
 			recipeImportOptional(item.Width), recipeImportOptional(item.Height), recipeImportJSONValue(item.Parameters),
 			item.BindingCount,
@@ -257,11 +254,11 @@ func persistRecipeImports(ctx context.Context, tx pgx.Tx, recipes []recipeImport
 	if _, err = execImportStatement(ctx, tx, `insert into recipe_import_snapshots(
 			id,recipe_id,revision_id,source_recipe_id,source_id_kind,source_recipe_key,recipe_collection_path,
 			origin_kind,underlying_recipe_type_id,source_mod_id,source_mod_version,source_mod_id_source,
-			render_locale,source_data,template_id,layout_available,layout_kind,ordered,
+			render_locale,definition_schema_version,template_id,layout_available,layout_kind,ordered,
 			layout_classification_source,width,height,parameters,binding_count)
 		select stage.snapshot_id,recipe_entity.id,stage.revision_id,stage.source_recipe_id,stage.identity_source,
 			stage.source_recipe_key,stage.collection_path,stage.origin_kind,stage.underlying_recipe_type_id,stage.source_mod_id,
-			stage.source_mod_version,stage.source_mod_id_source,stage.render_locale,stage.source_data,stage.template_id,true,stage.layout_kind,
+			stage.source_mod_version,stage.source_mod_id_source,stage.render_locale,1,stage.template_id,true,stage.layout_kind,
 			stage.ordered,stage.layout_classification_source,stage.width,stage.height,stage.parameters,stage.binding_count
 		from recipe_import_stage stage
 		join catalog_entities recipe_entity on recipe_entity.identity_key=stage.recipe_identity
@@ -272,7 +269,7 @@ func persistRecipeImports(ctx context.Context, tx pgx.Tx, recipes []recipeImport
 			binding_count=excluded.binding_count,origin_kind=excluded.origin_kind,
 			underlying_recipe_type_id=excluded.underlying_recipe_type_id,source_mod_id=excluded.source_mod_id,
 			source_mod_version=excluded.source_mod_version,source_mod_id_source=excluded.source_mod_id_source,
-			render_locale=excluded.render_locale,source_data=excluded.source_data`); err != nil {
+			render_locale=excluded.render_locale,definition_schema_version=excluded.definition_schema_version`); err != nil {
 		return fmt.Errorf("persist imported recipe snapshots: %w", err)
 	}
 	return nil
@@ -295,7 +292,7 @@ func persistRecipeImportBindings(
 		if _, err = execImportStatement(ctx, tx, `create temporary table if not exists recipe_binding_import_stage (
 			id text,recipe_snapshot_id text,template_slot_id text,source_slot_id text,ordinal integer,
 			ingredient_present boolean,clickable boolean,placeholder_item text,item_tag_equivalent text,
-			semantic_role text,role_source text,tag_identity text,tag_public_id text,tag_canonical_id text,data jsonb
+			semantic_role text,role_source text,tag_identity text,tag_public_id text,tag_canonical_id text
 		) on commit drop`); err != nil {
 			return fmt.Errorf("create recipe binding import stage: %w", err)
 		}
@@ -305,14 +302,14 @@ func persistRecipeImportBindings(
 		columns := []string{
 			"id", "recipe_snapshot_id", "template_slot_id", "source_slot_id", "ordinal",
 			"ingredient_present", "clickable", "placeholder_item", "item_tag_equivalent", "semantic_role",
-			"role_source", "tag_identity", "tag_public_id", "tag_canonical_id", "data",
+			"role_source", "tag_identity", "tag_public_id", "tag_canonical_id",
 		}
 		if err = copyImportRows(ctx, tx, "recipe_binding_import_stage", columns, len(bindings), func(index int) ([]any, error) {
 			item := bindings[index]
 			return []any{
 				item.ID, item.RecipeSnapshotID, item.TemplateSlotID, item.SourceSlotID, item.Ordinal,
 				item.IngredientPresent, item.Clickable, item.PlaceholderItem, item.ItemTagEquivalent, item.SemanticRole,
-				item.RoleSource, item.TagIdentity, item.TagPublicID, item.TagCanonicalID, recipeImportJSONValue(item.Data),
+				item.RoleSource, item.TagIdentity, item.TagPublicID, item.TagCanonicalID,
 			}, nil
 		}); err != nil {
 			return fmt.Errorf("stage recipe bindings: %w", err)
@@ -335,10 +332,10 @@ func persistRecipeImportBindings(
 		}
 		if _, err = execImportStatement(ctx, tx, `insert into recipe_import_bindings(
 				id,recipe_snapshot_id,template_slot_id,source_slot_id,ordinal,ingredient_present,clickable,
-				placeholder_item,item_tag_equivalent,semantic_role,role_source,tag_id,data)
+				placeholder_item,item_tag_equivalent,semantic_role,role_source,tag_id)
 			select stage.id,stage.recipe_snapshot_id,stage.template_slot_id,stage.source_slot_id,stage.ordinal,
 				stage.ingredient_present,stage.clickable,stage.placeholder_item,stage.item_tag_equivalent,
-				stage.semantic_role,stage.role_source,tag_entity.id,stage.data
+				stage.semantic_role,stage.role_source,tag_entity.id
 			from recipe_binding_import_stage stage
 			left join catalog_entities tag_entity
 				on stage.tag_identity<>'' and tag_entity.identity_key=stage.tag_identity
@@ -347,7 +344,7 @@ func persistRecipeImportBindings(
 				ingredient_present=excluded.ingredient_present,clickable=excluded.clickable,
 				placeholder_item=excluded.placeholder_item,item_tag_equivalent=excluded.item_tag_equivalent,
 				semantic_role=excluded.semantic_role,role_source=excluded.role_source,
-				tag_id=excluded.tag_id,data=excluded.data`); err != nil {
+				tag_id=excluded.tag_id`); err != nil {
 			return fmt.Errorf("persist recipe bindings: %w", err)
 		}
 	}
@@ -374,7 +371,7 @@ func persistRecipeImportBindings(
 		amount double precision,ingredient_kind text,ingredient_type text,unique_id text,nbt_snbt text,
 		chance_available boolean,chance double precision,chance_percent double precision,chance_comparator text,
 		chance_source text,chance_text text,chance_texts jsonb,chance_translation_key text,
-		chance_render_x double precision,chance_render_y double precision,byproduct boolean,data jsonb
+		chance_render_x double precision,chance_render_y double precision,byproduct boolean
 	) on commit drop`); err != nil {
 		return fmt.Errorf("create recipe candidate import stage: %w", err)
 	}
@@ -400,7 +397,7 @@ func persistRecipeImportBindings(
 		"binding_id", "alternative_index", "resource_identity", "resource_raw_id",
 		"amount", "ingredient_kind", "ingredient_type", "unique_id", "nbt_snbt",
 		"chance_available", "chance", "chance_percent", "chance_comparator", "chance_source", "chance_text",
-		"chance_texts", "chance_translation_key", "chance_render_x", "chance_render_y", "byproduct", "data",
+		"chance_texts", "chance_translation_key", "chance_render_x", "chance_render_y", "byproduct",
 	}
 	if err = copyImportRows(ctx, tx, "recipe_candidate_import_stage", columns, len(candidates), func(index int) ([]any, error) {
 		item := candidates[index]
@@ -410,7 +407,7 @@ func persistRecipeImportBindings(
 			item.ChanceAvailable, recipeImportOptional(item.Chance), recipeImportOptional(item.ChancePercent),
 			item.ChanceComparator, item.ChanceSource, item.ChanceText, recipeImportJSONValue(item.ChanceTexts),
 			item.ChanceTranslationKey, recipeImportOptional(item.ChanceRenderX), recipeImportOptional(item.ChanceRenderY),
-			item.Byproduct, recipeImportJSONValue(item.Data),
+			item.Byproduct,
 		}, nil
 	}); err != nil {
 		return fmt.Errorf("stage recipe candidates: %w", err)
@@ -462,12 +459,12 @@ func persistRecipeImportBindings(
 	if _, err = execImportStatement(ctx, tx, `insert into recipe_import_binding_candidates(
 			binding_id,alternative_index,resource_id,raw_resource_id,amount,ingredient_kind,ingredient_type,
 			unique_id,nbt_snbt,chance_available,chance,chance_percent,chance_comparator,chance_source,chance_text,
-			chance_texts,chance_translation_key,chance_render_x,chance_render_y,byproduct,data)
+			chance_texts,chance_translation_key,chance_render_x,chance_render_y,byproduct)
 		select stage.binding_id,stage.alternative_index,resource_entity.entity_id,stage.resource_raw_id,
 			stage.amount,stage.ingredient_kind,stage.ingredient_type,stage.unique_id,stage.nbt_snbt,
 			stage.chance_available,stage.chance,stage.chance_percent,stage.chance_comparator,
 			stage.chance_source,stage.chance_text,stage.chance_texts,stage.chance_translation_key,
-			stage.chance_render_x,stage.chance_render_y,stage.byproduct,stage.data
+			stage.chance_render_x,stage.chance_render_y,stage.byproduct
 		from recipe_candidate_import_stage stage
 		join recipe_candidate_resource_stage definition
 			on definition.resource_identity=stage.resource_identity
@@ -480,7 +477,7 @@ func persistRecipeImportBindings(
 			chance_comparator=excluded.chance_comparator,chance_source=excluded.chance_source,
 			chance_text=excluded.chance_text,chance_texts=excluded.chance_texts,
 			chance_translation_key=excluded.chance_translation_key,chance_render_x=excluded.chance_render_x,
-			chance_render_y=excluded.chance_render_y,byproduct=excluded.byproduct,data=excluded.data`); err != nil {
+			chance_render_y=excluded.chance_render_y,byproduct=excluded.byproduct`); err != nil {
 		return fmt.Errorf("persist recipe candidates: %w", err)
 	}
 	if _, err = execImportStatement(ctx, tx, `insert into unresolved_resource_references(

@@ -230,6 +230,8 @@ func normalizeOSSUserFileScope(category string, source string) string {
 			return "profile"
 		case "application", "applications":
 			return "applications"
+		case "server", "servers", "server-proof", "server-content":
+			return "servers"
 		case "minecraft-skin", "minecraft-cape", "skin", "cape":
 			return "skins"
 		case "blueprint-library", "blueprint-cover":

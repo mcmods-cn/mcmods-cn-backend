@@ -60,6 +60,10 @@ func TestApplyRoleVariables(t *testing.T) {
 	if got != "project.edit.112345.*" {
 		t.Fatalf("expanded permission = %q", got)
 	}
+	got = applyRoleVariables("project.edit.<projectID>", variables)
+	if got != "project.edit.112345" {
+		t.Fatalf("case-insensitive variable expansion = %q", got)
+	}
 }
 
 func TestPermissionCandidatePriority(t *testing.T) {

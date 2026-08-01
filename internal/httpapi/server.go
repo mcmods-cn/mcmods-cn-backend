@@ -40,7 +40,7 @@ func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, a
 	}
 	server.ygg = newYggdrasilService(cfg)
 	server.routes()
-	return server.securityHeaders(server.cors(server.cookieRequestOrigin(server.yggdrasilALI(server.logAccess(server.mux)))))
+	return server.securityHeaders(server.cors(server.cookieRequestOrigin(server.yggdrasilALI(server.compression(server.logAccess(server.mux))))))
 }
 
 func (s *Server) routes() {
@@ -60,6 +60,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/location", s.visitorLocation)
 	s.mux.HandleFunc("GET /api/v1/markdown/config", s.publicMarkdownConfig)
 	s.mux.HandleFunc("GET /api/v1/minecraft/versions", s.publicMinecraftVersions)
+	s.mux.HandleFunc("GET /api/v1/servers/settings", s.publicServerSettings)
+	s.mux.HandleFunc("GET /api/v1/servers", s.optionalAuth(s.publicMinecraftServers))
+	s.mux.HandleFunc("POST /api/v1/servers/probe", s.requirePermission("server.create", s.probeMinecraftServer))
+	s.mux.HandleFunc("POST /api/v1/servers", s.requirePermission("server.create", s.createMinecraftServer))
+	s.mux.HandleFunc("GET /api/v1/servers/{serverId}", s.optionalAuth(s.publicMinecraftServerDetail))
+	s.mux.HandleFunc("PATCH /api/v1/servers/{serverId}", s.requireAuth(s.updateMinecraftServer))
+	s.mux.HandleFunc("GET /api/v1/servers/{serverId}/history", s.optionalAuth(s.minecraftServerHistory))
 	s.mux.HandleFunc("GET /api/v1/mod-imports/providers", s.publicModImportProviders)
 	s.mux.HandleFunc("GET /api/v1/mods", s.optionalAuth(s.publicMods))
 	s.mux.HandleFunc("GET /api/v1/catalog/resources", s.optionalAuth(s.catalogResources))
@@ -312,7 +319,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/admin/mod-applications", s.requirePermission("project.review", s.adminModApplications))
 	s.mux.HandleFunc("PATCH /api/v1/admin/mod-applications/{id}", s.requirePermission("project.review", s.reviewModApplication))
 	s.mux.HandleFunc("POST /api/v1/admin/mod-applications/{id}/attachments/{fileId}/presign", s.requirePermission("project.review", s.presignModApplicationAttachment))
+	s.mux.HandleFunc("GET /api/v1/admin/server-reviews", s.requirePermission("server.review", s.adminMinecraftServerReviews))
+	s.mux.HandleFunc("PATCH /api/v1/admin/server-reviews/{serverId}", s.requirePermission("server.review", s.reviewMinecraftServer))
+	s.mux.HandleFunc("POST /api/v1/admin/server-reviews/{serverId}/attachments/{fileId}/presign", s.requirePermission("server.review", s.presignMinecraftServerProof))
+	s.mux.HandleFunc("GET /api/v1/admin/server-settings", s.requirePermission("admin.config.read", s.adminServerSettings))
+	s.mux.HandleFunc("PUT /api/v1/admin/server-settings", s.requirePermission("admin.config.write", s.adminServerSettings))
 	s.mux.HandleFunc("GET /api/v1/admin/mod-content-reviews", s.requirePermission("content.review", s.adminModContentReviews))
+	s.mux.HandleFunc("GET /api/v1/admin/unresolved-references", s.requirePermission("reference.unresolved.read", s.adminUnresolvedReferences))
 	s.mux.HandleFunc("GET /api/v1/admin/creator-claims", s.requirePermission("creator.claim.review", s.adminCreatorClaims))
 	s.mux.HandleFunc("PATCH /api/v1/admin/creator-claims/{id}", s.requirePermission("creator.claim.review", s.reviewCreatorClaim))
 	s.mux.HandleFunc("GET /api/v1/admin/activity", s.requirePermission("activity.read", s.adminActivityEvents))

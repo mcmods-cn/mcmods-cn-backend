@@ -257,6 +257,13 @@ func TestCollectPartialNormalizationFallbacks(t *testing.T) {
 }
 
 func TestSupportedExportTranslationFiles(t *testing.T) {
+	isSupported := func(name string) bool {
+		if !isExportTranslationFile(name) {
+			return false
+		}
+		_, err := prepareExportTranslation(name, []byte(`{}`))
+		return err == nil
+	}
 	for _, name := range []string{
 		"translations/zh_cn.json",
 		"translations/zh_tw.json",
@@ -270,7 +277,7 @@ func TestSupportedExportTranslationFiles(t *testing.T) {
 		"translations/got_de.json",
 		"translations/zh_hk.json",
 	} {
-		if !isSupportedExportTranslationFile(name) {
+		if !isSupported(name) {
 			t.Fatalf("supported translation file %s was rejected", name)
 		}
 	}
@@ -279,7 +286,7 @@ func TestSupportedExportTranslationFiles(t *testing.T) {
 		"translations/invalid@locale.json",
 		"other/en_us.json",
 	} {
-		if isSupportedExportTranslationFile(name) {
+		if isSupported(name) {
 			t.Fatalf("unsupported translation file %s was accepted", name)
 		}
 	}

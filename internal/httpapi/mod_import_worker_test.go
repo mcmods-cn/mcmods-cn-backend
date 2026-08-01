@@ -1,12 +1,39 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"reflect"
 	"testing"
 )
+
+func TestProviderAuthorAvatarFieldsDecode(t *testing.T) {
+	var modrinthMember modrinthTeamMember
+	if err := json.Unmarshal([]byte(`{"role":"Developer","user":{"username":"alice","avatar_url":"https://cdn.modrinth.com/user/alice.png"}}`), &modrinthMember); err != nil {
+		t.Fatal(err)
+	}
+	if modrinthMember.User.AvatarURL != "https://cdn.modrinth.com/user/alice.png" {
+		t.Fatalf("Modrinth avatar URL was not decoded: %#v", modrinthMember)
+	}
+
+	var curseForgeProject curseForgeMod
+	if err := json.Unmarshal([]byte(`{"authors":[{"name":"bob","avatarUrl":"https://media.forgecdn.net/avatars/bob.png"}]}`), &curseForgeProject); err != nil {
+		t.Fatal(err)
+	}
+	if len(curseForgeProject.Authors) != 1 || curseForgeProject.Authors[0].AvatarURL == "" {
+		t.Fatalf("CurseForge avatar URL was not decoded: %#v", curseForgeProject.Authors)
+	}
+
+	var repository githubRepository
+	if err := json.Unmarshal([]byte(`{"owner":{"login":"carol","avatar_url":"https://avatars.githubusercontent.com/u/1?v=4"}}`), &repository); err != nil {
+		t.Fatal(err)
+	}
+	if repository.Owner.AvatarURL != "https://avatars.githubusercontent.com/u/1?v=4" {
+		t.Fatalf("GitHub avatar URL was not decoded: %#v", repository.Owner)
+	}
+}
 
 func TestParseModImportSource(t *testing.T) {
 	tests := []struct {

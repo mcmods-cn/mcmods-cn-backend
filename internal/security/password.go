@@ -16,7 +16,6 @@ import (
 )
 
 const (
-	passwordIterations   = 210000
 	passwordSaltBytes    = 16
 	passwordKeyBytes     = 32
 	argon2Time           = uint32(3)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -62,18 +63,20 @@ type modContentSectionEdit struct {
 }
 
 type modContentResourceEdit struct {
-	ResourcePublicID   string                    `json:"resourcePublicId"`
-	KindCode           string                    `json:"kindCode"`
-	CanonicalID        string                    `json:"canonicalId"`
-	VersionPublicID    string                    `json:"versionPublicId"`
-	SectionPublicID    *string                   `json:"sectionPublicId,omitempty"`
-	DefaultLocale      string                    `json:"defaultLocale"`
-	Definition         map[string]any            `json:"definition"`
-	IconFilePublicID   *string                   `json:"iconFilePublicId,omitempty"`
-	RenderFilePublicID *string                   `json:"renderFilePublicId,omitempty"`
-	Localizations      []catalogLocalizationEdit `json:"localizations"`
-	Reason             string                    `json:"reason"`
-	BaseRevisionID     *string                   `json:"baseRevisionId,omitempty"`
+	ResourcePublicID      string                    `json:"resourcePublicId"`
+	KindCode              string                    `json:"kindCode"`
+	CanonicalID           string                    `json:"canonicalId"`
+	VersionPublicID       string                    `json:"versionPublicId"`
+	SectionPublicID       *string                   `json:"sectionPublicId,omitempty"`
+	EntryTypeCode         string                    `json:"entryTypeCode"`
+	DefaultLocale         string                    `json:"defaultLocale"`
+	Definition            map[string]any            `json:"definition"`
+	IconSmallFilePublicID *string                   `json:"iconSmallFilePublicId,omitempty"`
+	IconFilePublicID      *string                   `json:"iconFilePublicId,omitempty"`
+	RenderFilePublicID    *string                   `json:"renderFilePublicId,omitempty"`
+	Localizations         []catalogLocalizationEdit `json:"localizations"`
+	Reason                string                    `json:"reason"`
+	BaseRevisionID        *string                   `json:"baseRevisionId,omitempty"`
 }
 
 type modContentResourceLocalizationState struct {
@@ -123,11 +126,15 @@ func normalizeModContentResourceEditWithPolicy(edit *modContentResourceEdit, all
 	edit.KindCode = strings.ToLower(strings.TrimSpace(edit.KindCode))
 	edit.CanonicalID = strings.ToLower(strings.TrimSpace(edit.CanonicalID))
 	edit.VersionPublicID = strings.ToLower(strings.TrimSpace(edit.VersionPublicID))
+	edit.EntryTypeCode = strings.ToLower(strings.TrimSpace(edit.EntryTypeCode))
+	if edit.EntryTypeCode == "" {
+		edit.EntryTypeCode = "default"
+	}
 	if edit.SectionPublicID != nil {
 		value := strings.ToLower(strings.TrimSpace(*edit.SectionPublicID))
 		edit.SectionPublicID = &value
 	}
-	for _, filePublicID := range []*string{edit.IconFilePublicID, edit.RenderFilePublicID} {
+	for _, filePublicID := range []*string{edit.IconSmallFilePublicID, edit.IconFilePublicID, edit.RenderFilePublicID} {
 		if filePublicID == nil {
 			continue
 		}
@@ -137,7 +144,8 @@ func normalizeModContentResourceEditWithPolicy(edit *modContentResourceEdit, all
 		}
 	}
 	edit.Reason = strings.TrimSpace(edit.Reason)
-	if len(edit.Reason) > 500 || edit.VersionPublicID == "" || (edit.ResourcePublicID == "" && (edit.KindCode == "" || edit.CanonicalID == "")) {
+	if len(edit.Reason) > 500 || edit.VersionPublicID == "" || !modContentTemplateCodePattern.MatchString(edit.EntryTypeCode) ||
+		(edit.ResourcePublicID == "" && (edit.KindCode == "" || edit.CanonicalID == "")) {
 		return errCatalogEditorInvalid
 	}
 	if edit.Definition == nil {
@@ -269,12 +277,21 @@ func loadModContentResourceLocalizationState(ctx context.Context, query modConte
 }
 
 func reserveModContentResourceDetailTx(ctx context.Context, tx pgx.Tx, resourceID, versionID, modID int64, defaultLocale string, definition []byte, iconFileID, renderFileID *int64, actorID int64) error {
+	return reserveModContentResourceDetailWithSubtypeTx(
+		ctx, tx, resourceID, versionID, modID, "default", defaultLocale,
+		definition, nil, iconFileID, renderFileID, actorID,
+	)
+}
+
+func reserveModContentResourceDetailWithSubtypeTx(ctx context.Context, tx pgx.Tx, resourceID, versionID, modID int64, entryTypeCode, defaultLocale string, definition []byte, iconSmallFileID, iconFileID, renderFileID *int64, actorID int64) error {
 	var reservedResourceID int64
-	err := tx.QueryRow(ctx, `insert into mod_resource_version_details(resource_id,version_id,default_locale,definition,icon_file_id,render_file_id,status,created_by,updated_by)
-		values($1,$2,$3,$4::jsonb,$5,$6,'pending',$7,$7)
+	err := tx.QueryRow(ctx, `insert into mod_resource_version_details(resource_id,version_id,entry_type_code,default_locale,definition,icon_small_file_id,icon_file_id,render_file_id,status,created_by,updated_by)
+		values($1,$2,$3,$4,$5::jsonb,$6,$7,$8,'pending',$9,$9)
 		on conflict(resource_id,version_id) do update set
 			default_locale=excluded.default_locale,
+			entry_type_code=excluded.entry_type_code,
 			definition=excluded.definition,
+			icon_small_file_id=excluded.icon_small_file_id,
 			icon_file_id=excluded.icon_file_id,
 			render_file_id=excluded.render_file_id,
 			status='pending',
@@ -283,8 +300,8 @@ func reserveModContentResourceDetailTx(ctx context.Context, tx pgx.Tx, resourceI
 			updated_at=now()
 		where mod_resource_version_details.status='archived'
 		  and exists(select 1 from mod_resource_bindings binding
-			where binding.resource_id=excluded.resource_id and binding.mod_id=$8)
-		returning resource_id`, resourceID, versionID, defaultLocale, string(definition), iconFileID, renderFileID, actorID, modID).Scan(&reservedResourceID)
+			where binding.resource_id=excluded.resource_id and binding.mod_id=$10)
+		returning resource_id`, resourceID, versionID, entryTypeCode, defaultLocale, string(definition), iconSmallFileID, iconFileID, renderFileID, actorID, modID).Scan(&reservedResourceID)
 	if err != nil {
 		return err
 	}
@@ -299,7 +316,118 @@ type modContentImageQuerier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-func resolveModContentImageFileID(ctx context.Context, query modContentImageQuerier, filePublicID *string, actorID, resourceID, versionID int64, trustedSnapshot bool) (*int64, error) {
+type modContentEntryTypeDefinition struct {
+	Code      string                     `json:"code"`
+	KindCodes []string                   `json:"kindCodes"`
+	Groups    []modContentEntryTypeGroup `json:"groups"`
+}
+
+type modContentEntryTypeGroup struct {
+	Code   string                     `json:"code"`
+	Fields []modContentEntryTypeField `json:"fields"`
+}
+
+type modContentEntryTypeField struct {
+	Code          string     `json:"code"`
+	Type          string     `json:"type"`
+	ReferenceKind string     `json:"referenceKind"`
+	Paths         [][]string `json:"paths"`
+	Editable      *bool      `json:"editable,omitempty"`
+}
+
+type modContentTemplateDefinition struct {
+	ResourceKinds []string                        `json:"resourceKinds"`
+	EntryTypes    []modContentEntryTypeDefinition `json:"entryTypes"`
+}
+
+func validateModContentTemplateDefinition(definition map[string]any) error {
+	encoded, err := json.Marshal(definition)
+	if err != nil || len(encoded) > 512*1024 || catalogJSONDepth(definition, 0) > 20 {
+		return errCatalogEditorInvalid
+	}
+	var schema modContentTemplateDefinition
+	if err = json.Unmarshal(encoded, &schema); err != nil {
+		return errCatalogEditorInvalid
+	}
+	seenTypes := make(map[string]struct{}, len(schema.EntryTypes))
+	for _, entryType := range schema.EntryTypes {
+		code := strings.ToLower(strings.TrimSpace(entryType.Code))
+		if !modContentTemplateCodePattern.MatchString(code) {
+			return errCatalogEditorInvalid
+		}
+		if _, exists := seenTypes[code]; exists {
+			return errCatalogEditorInvalid
+		}
+		seenTypes[code] = struct{}{}
+		seenGroups := make(map[string]struct{}, len(entryType.Groups))
+		seenFields := make(map[string]struct{})
+		for _, group := range entryType.Groups {
+			groupCode := strings.ToLower(strings.TrimSpace(group.Code))
+			if !modContentTemplateCodePattern.MatchString(groupCode) {
+				return errCatalogEditorInvalid
+			}
+			if _, exists := seenGroups[groupCode]; exists {
+				return errCatalogEditorInvalid
+			}
+			seenGroups[groupCode] = struct{}{}
+			for _, field := range group.Fields {
+				fieldCode := strings.TrimSpace(field.Code)
+				if fieldCode == "" || len(fieldCode) > 64 || !catalogStringIn(field.Type, "number", "text", "boolean", "list", "reference-list", "json") ||
+					len(field.Paths) == 0 || len(field.Paths) > 8 {
+					return errCatalogEditorInvalid
+				}
+				if _, exists := seenFields[fieldCode]; exists {
+					return errCatalogEditorInvalid
+				}
+				seenFields[fieldCode] = struct{}{}
+				if field.Type == "reference-list" && !catalogStringIn(field.ReferenceKind, "enchantment", "tag") {
+					return errCatalogEditorInvalid
+				}
+				for _, path := range field.Paths {
+					if len(path) == 0 || len(path) > 8 {
+						return errCatalogEditorInvalid
+					}
+					for _, segment := range path {
+						if strings.TrimSpace(segment) == "" || len(segment) > 80 {
+							return errCatalogEditorInvalid
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateModContentEntryType(ctx context.Context, query modContentImageQuerier, modID, versionID int64, kindCode string, sectionPublicID *string, entryTypeCode string, definition map[string]any) error {
+	_, err := normalizeModContentEntryDefinition(ctx, query, modID, versionID, kindCode, sectionPublicID, entryTypeCode, definition, false)
+	return err
+}
+
+func modContentDefinitionValue(definition map[string]any, paths [][]string) (any, bool) {
+	for _, path := range paths {
+		var current any = definition
+		found := true
+		for _, segment := range path {
+			object, ok := current.(map[string]any)
+			if !ok {
+				found = false
+				break
+			}
+			current, ok = object[segment]
+			if !ok {
+				found = false
+				break
+			}
+		}
+		if found {
+			return current, true
+		}
+	}
+	return nil, false
+}
+
+func resolveModContentImageFileID(ctx context.Context, query modContentImageQuerier, filePublicID *string, actorID, resourceID, versionID int64, trustedSnapshot bool, variant string) (*int64, error) {
 	if filePublicID == nil || strings.TrimSpace(*filePublicID) == "" {
 		return nil, nil
 	}
@@ -308,13 +436,20 @@ func resolveModContentImageFileID(ctx context.Context, query modContentImageQuer
 		from oss_files file
 		where file.public_id=$1 and file.status='active'
 		  and file.scan_status in ('clean','trusted_generated')
-		  and lower(split_part(file.content_type,';',1)) in ('image/png','image/jpeg','image/webp','image/gif','image/apng')
-		  and ($2 or file.uploader_id=$3 or exists(
+		  and ($2 or (
+		    lower(split_part(file.content_type,';',1))='image/png'
+		    and file.uploader_id=$3
+		    and lower(file.source) like 'mod_resource:%:'||$6
+		  ) or exists(
 			select 1 from mod_resource_version_details detail
 			where detail.resource_id=$4 and detail.version_id=$5
-			  and (detail.icon_file_id=file.id or detail.render_file_id=file.id)
+			  and (
+			    ($6='icon_32' and detail.icon_small_file_id=file.id)
+			    or ($6='icon_128' and detail.icon_file_id=file.id)
+			    or ($6='render' and detail.render_file_id=file.id)
+			  )
 		  ))`,
-		*filePublicID, trustedSnapshot, actorID, resourceID, versionID).Scan(&fileID)
+		*filePublicID, trustedSnapshot, actorID, resourceID, versionID, variant).Scan(&fileID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errCatalogEditorReference
 	}
@@ -447,6 +582,9 @@ func normalizeModContentTemplateEdit(edit *modContentTemplateEdit) error {
 	}
 	if edit.Definition == nil {
 		edit.Definition = map[string]any{}
+	}
+	if err := validateModContentTemplateDefinition(edit.Definition); err != nil {
+		return err
 	}
 	defaultLocale, localizations, err := normalizeCatalogLocalizations(edit.DefaultLocale, edit.Localizations)
 	if err != nil || len(localizations) == 0 || defaultLocale == "" || requireCatalogCreateDefaultLocalization(defaultLocale, localizations) != nil {
@@ -633,10 +771,14 @@ func (s *Server) submitExistingModContentMutation(w http.ResponseWriter, r *http
 	defer tx.Rollback(r.Context())
 	result, err := s.createModContentRevisionTx(r, tx, identity, snapshot, baseRevisionID)
 	if err != nil {
+		log.Printf("submit mod content mutation failed: site=%s kind=%s operation=%s public_id=%s: %v",
+			identity.SiteID, snapshot.Kind, snapshot.Operation, snapshot.PublicID, err)
 		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
+		log.Printf("commit mod content mutation failed: site=%s kind=%s operation=%s public_id=%s: %v",
+			identity.SiteID, snapshot.Kind, snapshot.Operation, snapshot.PublicID, err)
 		writeError(w, http.StatusInternalServerError, "failed to commit mod content revision")
 		return
 	}
@@ -1227,13 +1369,15 @@ func (s *Server) modContentResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `select entity.public_id,resource.kind_code,resource.canonical_id,
-		coalesce((select jsonb_agg(jsonb_build_object('versionPublicId',version.public_id,'defaultLocale',detail.default_locale,
+		coalesce((select jsonb_agg(jsonb_build_object('versionPublicId',version.public_id,'entryTypeCode',detail.entry_type_code,'definitionSchemaVersion',detail.definition_schema_version,'defaultLocale',detail.default_locale,
 		'sectionPublicId',coalesce((select section.public_id from mod_content_section_resources member
 		 join mod_content_sections section on section.id=member.section_id and section.version_id=member.version_id
 		 where member.resource_id=resource.entity_id and member.version_id=version.id and section.status='active'
 		 order by section.ordinal,section.id limit 1),''),
 		'definition',detail.definition,'status',detail.status,'publishedRevisionId',
 		(select revision.public_id from content_revisions revision where revision.id=detail.published_revision_id),
+		'iconSmallFilePublicId',coalesce((select file.public_id from oss_files file where file.id=detail.icon_small_file_id and file.status='active'
+		 and file.scan_status in ('clean','trusted_generated')),''),
 		'iconFilePublicId',coalesce((select file.public_id from oss_files file where file.id=detail.icon_file_id and file.status='active'
 		 and file.scan_status in ('clean','trusted_generated')),''),
 		'renderFilePublicId',coalesce((select file.public_id from oss_files file where file.id=detail.render_file_id and file.status='active'
@@ -1326,6 +1470,14 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusUnprocessableEntity, "the selected content category cannot contain this resource")
 		return
 	}
+	canonicalDefinition, normalizeErr := normalizeModContentEntryDefinition(
+		r.Context(), tx, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, edit.Definition, false,
+	)
+	if normalizeErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, "the selected resource subtype or its fields are invalid")
+		return
+	}
+	edit.Definition = canonicalDefinition
 	if _, err = tx.Exec(r.Context(), `insert into mod_resource_bindings(resource_id,mod_id) values($1,$2) on conflict(resource_id) do nothing`, resourceID, identity.ID); err != nil {
 		writeError(w, http.StatusConflict, "resource identity cannot be bound to this mod")
 		return
@@ -1336,18 +1488,23 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	actorID := currentClaims(r).Subject
-	iconFileID, err := resolveModContentImageFileID(r.Context(), tx, edit.IconFilePublicID, actorID, resourceID, versionID, false)
+	iconSmallFileID, err := resolveModContentImageFileID(r.Context(), tx, edit.IconSmallFilePublicID, actorID, resourceID, versionID, false, "icon_32")
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "resource 32px icon is unavailable")
+		return
+	}
+	iconFileID, err := resolveModContentImageFileID(r.Context(), tx, edit.IconFilePublicID, actorID, resourceID, versionID, false, "icon_128")
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "resource icon is unavailable")
 		return
 	}
-	renderFileID, err := resolveModContentImageFileID(r.Context(), tx, edit.RenderFilePublicID, actorID, resourceID, versionID, false)
+	renderFileID, err := resolveModContentImageFileID(r.Context(), tx, edit.RenderFilePublicID, actorID, resourceID, versionID, false, "render")
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "resource render image is unavailable")
 		return
 	}
 	definition, _ := json.Marshal(edit.Definition)
-	err = reserveModContentResourceDetailTx(r.Context(), tx, resourceID, versionID, identity.ID, edit.DefaultLocale, definition, iconFileID, renderFileID, actorID)
+	err = reserveModContentResourceDetailWithSubtypeTx(r.Context(), tx, resourceID, versionID, identity.ID, edit.EntryTypeCode, edit.DefaultLocale, definition, iconSmallFileID, iconFileID, renderFileID, actorID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusConflict, "this resource already has detail content for the selected version")
 		return
@@ -1359,7 +1516,15 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 	edit.ResourcePublicID = publicID
 	snapshot := modContentSnapshot{Kind: "resource", Operation: "create", ModID: identity.ID, ModSiteID: identity.SiteID, PublicID: publicID, Resource: &edit, CreatedIdentity: createdIdentity}
 	result, err := s.createModContentRevisionTx(r, tx, identity, snapshot, nil)
-	if err != nil || tx.Commit(r.Context()) != nil {
+	if err != nil {
+		log.Printf("submit new mod resource failed: site=%s public_id=%s canonical_id=%s: %v",
+			identity.SiteID, publicID, edit.CanonicalID, err)
+		writeError(w, http.StatusInternalServerError, "failed to submit resource detail")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		log.Printf("commit new mod resource failed: site=%s public_id=%s canonical_id=%s: %v",
+			identity.SiteID, publicID, edit.CanonicalID, err)
 		writeError(w, http.StatusInternalServerError, "failed to submit resource detail")
 		return
 	}
@@ -1394,13 +1559,15 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		claims := currentClaims(r)
 		canPreviewInactive := canEditMod(claims, identity) || hasPermission(claims.Permissions, "content.review")
 		if err := s.db.QueryRow(r.Context(), `select resource.entity_id,resource.kind_code,resource.canonical_id,
-			coalesce((select jsonb_agg(jsonb_build_object('versionPublicId',version.public_id,'defaultLocale',detail.default_locale,
+			coalesce((select jsonb_agg(jsonb_build_object('versionPublicId',version.public_id,'entryTypeCode',detail.entry_type_code,'definitionSchemaVersion',detail.definition_schema_version,'defaultLocale',detail.default_locale,
 			'sectionPublicId',coalesce((select section.public_id from mod_content_section_resources member
 			 join mod_content_sections section on section.id=member.section_id and section.version_id=member.version_id
 			 where member.resource_id=resource.entity_id and member.version_id=version.id and section.status='active'
 			 order by section.ordinal,section.id limit 1),''),
 			'definition',detail.definition,'status',detail.status,'publishedRevisionId',
 			(select revision.public_id from content_revisions revision where revision.id=detail.published_revision_id),
+			'iconSmallFilePublicId',coalesce((select file.public_id from oss_files file where file.id=detail.icon_small_file_id and file.status='active'
+			 and file.scan_status in ('clean','trusted_generated')),''),
 			'iconFilePublicId',coalesce((select file.public_id from oss_files file where file.id=detail.icon_file_id and file.status='active'
 			 and file.scan_status in ('clean','trusted_generated')),''),
 			'renderFilePublicId',coalesce((select file.public_id from oss_files file where file.id=detail.render_file_id and file.status='active'
@@ -1461,19 +1628,21 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 	}
 	var publishedRevisionID *int64
 	var resourceID int64
-	var actualKindCode, actualCanonicalID, currentIconFilePublicID, currentRenderFilePublicID string
+	var actualKindCode, actualCanonicalID, currentIconSmallFilePublicID, currentIconFilePublicID, currentRenderFilePublicID string
 	if err := s.db.QueryRow(r.Context(), `select detail.published_revision_id,resource.entity_id,resource.kind_code,resource.canonical_id,
-		coalesce(icon_file.public_id,''),coalesce(render_file.public_id,'')
+		coalesce(icon_small_file.public_id,''),coalesce(icon_file.public_id,''),coalesce(render_file.public_id,'')
 		from mod_resource_version_details detail
 		join mod_content_versions version on version.id=detail.version_id and version.status='active'
 		join catalog_entities entity on entity.id=detail.resource_id
 		join game_resources resource on resource.entity_id=detail.resource_id
+		left join oss_files icon_small_file on icon_small_file.id=detail.icon_small_file_id and icon_small_file.status='active'
+		 and icon_small_file.scan_status in ('clean','trusted_generated')
 		left join oss_files icon_file on icon_file.id=detail.icon_file_id and icon_file.status='active'
 		 and icon_file.scan_status in ('clean','trusted_generated')
 		left join oss_files render_file on render_file.id=detail.render_file_id and render_file.status='active'
 		 and render_file.scan_status in ('clean','trusted_generated')
 		where entity.public_id=$1 and version.public_id=$2 and version.mod_id=$3 and detail.status='active'`,
-		publicID, edit.VersionPublicID, identity.ID).Scan(&publishedRevisionID, &resourceID, &actualKindCode, &actualCanonicalID, &currentIconFilePublicID, &currentRenderFilePublicID); err != nil {
+		publicID, edit.VersionPublicID, identity.ID).Scan(&publishedRevisionID, &resourceID, &actualKindCode, &actualCanonicalID, &currentIconSmallFilePublicID, &currentIconFilePublicID, &currentRenderFilePublicID); err != nil {
 		writeError(w, http.StatusNotFound, "mod resource version detail not found")
 		return
 	}
@@ -1497,6 +1666,9 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "non-editable resource localizations must be preserved unchanged")
 		return
 	}
+	if edit.IconSmallFilePublicID == nil {
+		edit.IconSmallFilePublicID = &currentIconSmallFilePublicID
+	}
 	if edit.IconFilePublicID == nil {
 		edit.IconFilePublicID = &currentIconFilePublicID
 	}
@@ -1504,11 +1676,15 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		edit.RenderFilePublicID = &currentRenderFilePublicID
 	}
 	actorID := currentClaims(r).Subject
-	if _, err := resolveModContentImageFileID(r.Context(), s.db, edit.IconFilePublicID, actorID, resourceID, versionID, false); err != nil {
+	if _, err := resolveModContentImageFileID(r.Context(), s.db, edit.IconSmallFilePublicID, actorID, resourceID, versionID, false, "icon_32"); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "resource 32px icon is unavailable")
+		return
+	}
+	if _, err := resolveModContentImageFileID(r.Context(), s.db, edit.IconFilePublicID, actorID, resourceID, versionID, false, "icon_128"); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "resource icon is unavailable")
 		return
 	}
-	if _, err := resolveModContentImageFileID(r.Context(), s.db, edit.RenderFilePublicID, actorID, resourceID, versionID, false); err != nil {
+	if _, err := resolveModContentImageFileID(r.Context(), s.db, edit.RenderFilePublicID, actorID, resourceID, versionID, false, "render"); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "resource render image is unavailable")
 		return
 	}
@@ -1516,6 +1692,14 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "the selected content category cannot contain this resource")
 		return
 	}
+	canonicalDefinition, normalizeErr := normalizeModContentEntryDefinition(
+		r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, edit.Definition, false,
+	)
+	if normalizeErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, "the selected resource subtype or its fields are invalid")
+		return
+	}
+	edit.Definition = canonicalDefinition
 	edit.ResourcePublicID = publicID
 	s.submitExistingModContentMutation(w, r, identity, modContentSnapshot{Kind: "resource", Operation: "edit", ModID: identity.ID, ModSiteID: identity.SiteID, PublicID: publicID, Resource: &edit}, publishedRevisionID)
 }
@@ -1653,7 +1837,6 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 		if snapshot.Resource == nil {
 			return errCatalogEditorInvalid
 		}
-		definition, _ := json.Marshal(snapshot.Resource.Definition)
 		var resourceID int64
 		var versionID int64
 		if err := tx.QueryRow(ctx, `select id from mod_content_versions where public_id=$1 and mod_id=$2 and status='active'`, snapshot.Resource.VersionPublicID, snapshot.ModID).Scan(&versionID); err != nil {
@@ -1671,20 +1854,38 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 		if err = preserveImmutableModContentResourceLocales(existingDefaultLocale, existingLocalizations, snapshot.Resource); err != nil {
 			return err
 		}
-		iconFileID, iconErr := resolveModContentImageFileID(ctx, tx, snapshot.Resource.IconFilePublicID, actorID, resourceID, versionID, true)
+		canonicalDefinition, normalizeErr := normalizeModContentEntryDefinition(
+			ctx, tx, snapshot.ModID, versionID, snapshot.Resource.KindCode, snapshot.Resource.SectionPublicID,
+			snapshot.Resource.EntryTypeCode, snapshot.Resource.Definition, false,
+		)
+		if normalizeErr != nil {
+			return normalizeErr
+		}
+		snapshot.Resource.Definition = canonicalDefinition
+		definition, _ := json.Marshal(canonicalDefinition)
+		if err = validateModContentEntryType(ctx, tx, snapshot.ModID, versionID, snapshot.Resource.KindCode, snapshot.Resource.SectionPublicID, snapshot.Resource.EntryTypeCode, canonicalDefinition); err != nil {
+			return err
+		}
+		iconSmallFileID, iconSmallErr := resolveModContentImageFileID(ctx, tx, snapshot.Resource.IconSmallFilePublicID, actorID, resourceID, versionID, true, "icon_32")
+		if iconSmallErr != nil {
+			return iconSmallErr
+		}
+		iconFileID, iconErr := resolveModContentImageFileID(ctx, tx, snapshot.Resource.IconFilePublicID, actorID, resourceID, versionID, true, "icon_128")
 		if iconErr != nil {
 			return iconErr
 		}
-		renderFileID, renderErr := resolveModContentImageFileID(ctx, tx, snapshot.Resource.RenderFilePublicID, actorID, resourceID, versionID, true)
+		renderFileID, renderErr := resolveModContentImageFileID(ctx, tx, snapshot.Resource.RenderFilePublicID, actorID, resourceID, versionID, true, "render")
 		if renderErr != nil {
 			return renderErr
 		}
-		if _, err := tx.Exec(ctx, `update mod_resource_version_details detail set default_locale=$3,definition=$4::jsonb,
-			icon_file_id=case when $5 then $6 else detail.icon_file_id end,
-			render_file_id=case when $7 then $8 else detail.render_file_id end,
-			status='active',published_revision_id=$9,updated_by=$10,updated_at=now()
+		if _, err := tx.Exec(ctx, `update mod_resource_version_details detail set entry_type_code=$3,definition_schema_version=$4,default_locale=$5,definition=$6::jsonb,
+			icon_small_file_id=case when $7 then $8 else detail.icon_small_file_id end,
+			icon_file_id=case when $9 then $10 else detail.icon_file_id end,
+			render_file_id=case when $11 then $12 else detail.render_file_id end,
+			status='active',published_revision_id=$13,updated_by=$14,updated_at=now()
 			from catalog_entities entity where entity.public_id=$1 and detail.resource_id=entity.id and detail.version_id=$2`,
-			snapshot.PublicID, versionID, snapshot.Resource.DefaultLocale, string(definition),
+			snapshot.PublicID, versionID, snapshot.Resource.EntryTypeCode, modContentDefinitionSchemaVersion, snapshot.Resource.DefaultLocale, string(definition),
+			snapshot.Resource.IconSmallFilePublicID != nil, iconSmallFileID,
 			snapshot.Resource.IconFilePublicID != nil, iconFileID,
 			snapshot.Resource.RenderFilePublicID != nil, renderFileID,
 			revisionID, actorID); err != nil {
@@ -1715,10 +1916,111 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 				return err
 			}
 		}
-		return nil
+		return syncModContentResourceUnresolvedReferencesTx(
+			ctx, tx, resourceID, versionID, snapshot.Resource.Definition,
+		)
 	default:
 		return errCatalogEditorInvalid
 	}
+}
+
+func syncModContentResourceUnresolvedReferencesTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	resourceID, versionID int64,
+	definition map[string]any,
+) error {
+	fieldPrefix := fmt.Sprintf("version.%d.", versionID)
+	if _, err := tx.Exec(ctx, `delete from unresolved_resource_references
+		where source_entity_id=$1 and source_revision_id is null
+		  and field_path like $2`, resourceID, fieldPrefix+"%"); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `delete from unresolved_references
+		where source_type='mod_content_resource' and source_id=$1
+		  and field_path like $2`, resourceID, fieldPrefix+"%"); err != nil {
+		return err
+	}
+	enchantments := firstDefinitionStringList(definition,
+		[]string{"compatibleEnchantments"},
+		[]string{"enchanting", "compatible_enchantments"},
+		[]string{"compatible_enchantments"},
+	)
+	for index, identifier := range enchantments {
+		var resolvedID int64
+		err := tx.QueryRow(ctx, `select resource.entity_id
+			from game_resources resource
+			join catalog_entities entity on entity.id=resource.entity_id
+			left join game_resource_aliases alias
+			  on alias.resource_id=resource.entity_id and alias.kind_code=resource.kind_code
+			where resource.kind_code='minecraft.enchantment' and entity.status='active'
+			  and (lower(resource.canonical_id)=lower($1) or lower(alias.alias_id)=lower($1))
+			order by resource.resolved desc,resource.entity_id limit 1`, identifier).Scan(&resolvedID)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `insert into unresolved_resource_references(
+			source_entity_id,field_path,kind_code,raw_resource_id,status
+		) values($1,$2,'minecraft.enchantment',$3,'pending')`,
+			resourceID, fmt.Sprintf("%scompatibleEnchantments.%d", fieldPrefix, index), identifier); err != nil {
+			return err
+		}
+	}
+	tags := firstDefinitionStringList(definition, []string{"itemTags"}, []string{"item_tags"}, []string{"tags"})
+	for index, identifier := range tags {
+		normalized := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(identifier)), "#")
+		var exists bool
+		if err := tx.QueryRow(ctx, `select exists(select 1
+			from catalog_tags tag join catalog_entities entity on entity.id=tag.entity_id
+			where entity.status='active' and lower(tag.canonical_id)=$1)`, normalized).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `insert into unresolved_references(
+			source_type,source_id,field_path,reference_type,raw_identifier,normalized_identifier,metadata
+		) values('mod_content_resource',$1,$2,'tag',$3,$4,jsonb_build_object('versionId',$5))
+		on conflict(source_type,source_id,field_path,reference_type,normalized_identifier) do update
+		set raw_identifier=excluded.raw_identifier,status='pending',resolved_type='',resolved_id=null,
+			resolved_at=null,metadata=excluded.metadata,updated_at=now()`,
+			resourceID, fmt.Sprintf("%sitem_tags.%d", fieldPrefix, index), identifier, normalized, versionID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func firstDefinitionStringList(definition map[string]any, paths ...[]string) []string {
+	for _, path := range paths {
+		var current any = definition
+		for _, part := range path {
+			row, ok := current.(map[string]any)
+			if !ok {
+				current = nil
+				break
+			}
+			current = row[part]
+		}
+		values, ok := current.([]any)
+		if !ok {
+			if strings, valid := current.([]string); valid {
+				return uniqueTrimmed(strings, 500)
+			}
+			continue
+		}
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			if text, valid := value.(string); valid {
+				result = append(result, text)
+			}
+		}
+		return uniqueTrimmed(result, 500)
+	}
+	return nil
 }
 
 // archiveModContentSectionTreeTx applies soft deletion to the complete

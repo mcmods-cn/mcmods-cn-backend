@@ -1065,7 +1065,20 @@ func templateVariableName(segment string) (string, bool) {
 }
 
 func applyRoleVariables(permissionCode string, variables map[string]string) string {
-	result := permissionCode
+	parts := strings.Split(permissionCode, ".")
+	for index, part := range parts {
+		name, ok := templateVariableName(part)
+		if !ok {
+			continue
+		}
+		for variable, value := range variables {
+			if strings.EqualFold(name, variable) {
+				parts[index] = value
+				break
+			}
+		}
+	}
+	result := strings.Join(parts, ".")
 	for name, value := range variables {
 		result = strings.NewReplacer(
 			"["+name+"]", value,

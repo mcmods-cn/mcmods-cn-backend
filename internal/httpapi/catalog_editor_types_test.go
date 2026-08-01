@@ -84,6 +84,35 @@ func TestRecipeProbabilityBelongsToEachOutputCandidate(t *testing.T) {
 	}
 }
 
+func TestRecipeCandidateMayReferenceAnUncollectedItem(t *testing.T) {
+	edit := &catalogRecipeEdit{TemplatePublicID: "abc234567", Bindings: map[string]catalogRecipeBindingEdit{
+		"input": {Candidates: []catalogRecipeCandidateEdit{{
+			RawResourceID: "example:uncollected_part", KindCode: "minecraft.item", Amount: 1,
+		}}},
+		"output": {Candidates: []catalogRecipeCandidateEdit{{ResourcePublicID: "ghi234567", Amount: 1}}},
+	}}
+	roles := map[string]string{"input": "input", "output": "output"}
+	if err := validateCatalogRecipeBindings(edit, roles); err != nil {
+		t.Fatalf("uncollected recipe candidate was rejected: %v", err)
+	}
+	edit.Bindings["input"] = catalogRecipeBindingEdit{Candidates: []catalogRecipeCandidateEdit{{
+		ResourcePublicID: "def234567", RawResourceID: "example:ambiguous", KindCode: "minecraft.item", Amount: 1,
+	}}}
+	if err := validateCatalogRecipeBindings(edit, roles); !errors.Is(err, errCatalogEditorInvalid) {
+		t.Fatalf("ambiguous collected/uncollected candidate should fail, got %v", err)
+	}
+}
+
+func TestRecipeAllowsEmptyInputSlots(t *testing.T) {
+	edit := &catalogRecipeEdit{TemplatePublicID: "abc234567", Bindings: map[string]catalogRecipeBindingEdit{
+		"output": {Candidates: []catalogRecipeCandidateEdit{{ResourcePublicID: "ghi234567", Amount: 1}}},
+	}}
+	roles := map[string]string{"input_0": "input", "input_1": "input", "output": "output"}
+	if err := validateCatalogRecipeBindings(edit, roles); err != nil {
+		t.Fatalf("empty input slots were rejected: %v", err)
+	}
+}
+
 func TestRecipeSourceVersionPublicIDIsOptional(t *testing.T) {
 	if value, err := normalizeCatalogOptionalPublicID(""); err != nil || value != "" {
 		t.Fatalf("empty optional source version = %q, %v", value, err)
@@ -127,5 +156,17 @@ func TestCatalogMutationResponseIncludesActivityIdentity(t *testing.T) {
 	}
 	if payload["objectPublicId"] != "abc234567" || payload["activityEventId"] != "evt234567" {
 		t.Fatalf("mutation response is missing durable activity identity: %s", raw)
+	}
+}
+
+func TestCatalogRecipeResourceIconURL(t *testing.T) {
+	if got := catalogRecipeResourceIconURL("resource234", "file234567", "revision234", "assets/item.png"); got != "/api/v1/catalog/resources/resource234/icon" {
+		t.Fatalf("manual icon URL = %q", got)
+	}
+	if got := catalogRecipeResourceIconURL("resource234", "", "revision234", "assets/item icon.png"); got != "/api/v1/export-revisions/revision234/assets/content?path=assets%2Fitem+icon.png" {
+		t.Fatalf("imported icon URL = %q", got)
+	}
+	if got := catalogRecipeResourceIconURL("resource234", "", "", ""); got != "" {
+		t.Fatalf("missing icon URL = %q", got)
 	}
 }

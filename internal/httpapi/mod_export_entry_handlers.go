@@ -14,20 +14,22 @@ import (
 const maxModExportEntryMarkdownBytes = 256 * 1024
 
 type modExportEntryDetailResponse struct {
-	EntityID          string                           `json:"entityId"`
-	PublicID          string                           `json:"publicId"`
-	Data              map[string]any                   `json:"data"`
-	Name              string                           `json:"name"`
-	Summary           string                           `json:"summary"`
-	ContentMarkdown   string                           `json:"contentMarkdown"`
-	ContentLocale     string                           `json:"contentLocale"`
-	ContentProvenance string                           `json:"contentProvenance"`
-	ModelAvailable    bool                             `json:"modelAvailable"`
-	ModelAssetPaths   []string                         `json:"modelAssetPaths"`
-	BlockEntityModel  *modExportBlockEntityModelDetail `json:"blockEntityModel,omitempty"`
-	Recipes           []any                            `json:"recipes"`
-	Uses              []any                            `json:"uses"`
-	Versions          []map[string]any                 `json:"versions"`
+	EntityID                string                           `json:"entityId"`
+	PublicID                string                           `json:"publicId"`
+	Data                    map[string]any                   `json:"data"`
+	EntryTypeCode           string                           `json:"entryTypeCode"`
+	DefinitionSchemaVersion int                              `json:"definitionSchemaVersion"`
+	Name                    string                           `json:"name"`
+	Summary                 string                           `json:"summary"`
+	ContentMarkdown         string                           `json:"contentMarkdown"`
+	ContentLocale           string                           `json:"contentLocale"`
+	ContentProvenance       string                           `json:"contentProvenance"`
+	ModelAvailable          bool                             `json:"modelAvailable"`
+	ModelAssetPaths         []string                         `json:"modelAssetPaths"`
+	BlockEntityModel        *modExportBlockEntityModelDetail `json:"blockEntityModel,omitempty"`
+	Recipes                 []any                            `json:"recipes"`
+	Uses                    []any                            `json:"uses"`
+	Versions                []map[string]any                 `json:"versions"`
 }
 
 type modExportBlockEntityModelDetail struct {
@@ -66,16 +68,18 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var resourceID, modID int64
-	var publicID string
+	var publicID, entryTypeCode string
+	var definitionSchemaVersion int
 	var snapshotData []byte
-	err := s.db.QueryRow(r.Context(), `select resource.entity_id,entity.public_id,resource.canonical_id,revision.mod_id,snapshot.data
+	err := s.db.QueryRow(r.Context(), `select resource.entity_id,entity.public_id,resource.canonical_id,revision.mod_id,
+		snapshot.entry_type_code,snapshot.definition_schema_version,snapshot.data
 		from resource_import_snapshots snapshot
 		join game_resources resource on resource.entity_id=snapshot.resource_id
 		join catalog_entities entity on entity.id=resource.entity_id
 		join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		where snapshot.revision_id=$1 and snapshot.registry=$2
 		and (($3<>'' and entity.public_id=$3) or ($3='' and resource.canonical_id=$4))`,
-		revisionID, registry, entityPublicID, objectID).Scan(&resourceID, &publicID, &objectID, &modID, &snapshotData)
+		revisionID, registry, entityPublicID, objectID).Scan(&resourceID, &publicID, &objectID, &modID, &entryTypeCode, &definitionSchemaVersion, &snapshotData)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "entry not found")
 		return
@@ -90,7 +94,7 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response := modExportEntryDetailResponse{
-		EntityID: publicID, PublicID: publicID, Data: data,
+		EntityID: publicID, PublicID: publicID, Data: data, EntryTypeCode: entryTypeCode, DefinitionSchemaVersion: definitionSchemaVersion,
 		ModelAssetPaths: []string{}, Recipes: []any{}, Uses: []any{}, Versions: []map[string]any{},
 	}
 	recipeResourceID := resourceID

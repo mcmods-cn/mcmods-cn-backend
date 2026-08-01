@@ -124,11 +124,3 @@ func sendSMTP(addr string, host string, auth smtp.Auth, from string, to []string
 	}
 	return client.Quit()
 }
-
-func LocalAddress(raddr string) string {
-	host, _, err := net.SplitHostPort(raddr)
-	if err != nil {
-		return raddr
-	}
-	return host
-}

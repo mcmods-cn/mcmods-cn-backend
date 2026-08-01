@@ -1369,14 +1369,6 @@ func isExportTranslationFile(name string) bool {
 	return strings.HasPrefix(name, "translations/") && strings.HasSuffix(name, ".json") && path.Base(name) != "languages.json"
 }
 
-func isSupportedExportTranslationFile(name string) bool {
-	if !isExportTranslationFile(name) {
-		return false
-	}
-	_, supported := canonicalExportLocaleTag(strings.TrimSuffix(path.Base(name), path.Ext(name)))
-	return supported
-}
-
 func isExportRegistryFile(name string) bool {
 	return strings.HasPrefix(name, "registries/") && strings.HasSuffix(name, ".json")
 }
@@ -1527,14 +1519,6 @@ type exportTagRow struct {
 	Registry   string
 	TagID      string
 	Members    []string
-}
-
-func importExportTags(ctx context.Context, tx pgx.Tx, resolver catalogResourceIdentityResolver, revisions map[string]string, raw []byte) error {
-	rows, memberCount, err := decodeExportTags(revisions, raw)
-	if err != nil {
-		return err
-	}
-	return persistExportTags(ctx, tx, resolver, rows, memberCount)
 }
 
 func persistExportTags(ctx context.Context, tx pgx.Tx, resolver catalogResourceIdentityResolver, rows []exportTagRow, memberCount int) error {

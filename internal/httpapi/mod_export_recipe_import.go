@@ -302,16 +302,16 @@ func importExportRecipeTypes(ctx context.Context, tx pgx.Tx, packageID string, r
 			typeIdentity.ID, canonicalSourceID, sha256Hex(fingerprintRaw), recipeIndex.RecipeIDSource, revisionID)
 		batch.Queue(`insert into recipe_import_snapshots(id,recipe_id,revision_id,source_recipe_id,source_id_kind,source_recipe_key,
 			recipe_collection_path,origin_kind,underlying_recipe_type_id,source_mod_id,source_mod_version,source_mod_id_source,
-			render_locale,source_data,template_id,layout_available,layout_kind,ordered,layout_classification_source,width,height,parameters,binding_count)
-			values($1,catalog_entity_internal_id($2),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'',$13::jsonb,null,false,$14,$15,$16,$17,$18,'{}'::jsonb,0)
+			render_locale,definition_schema_version,template_id,layout_available,layout_kind,ordered,layout_classification_source,width,height,parameters,binding_count)
+			values($1,catalog_entity_internal_id($2),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'',1,null,false,$13,$14,$15,$16,$17,'{}'::jsonb,0)
 			on conflict(recipe_id,revision_id,source_recipe_key) do update set layout_available=false,layout_kind=excluded.layout_kind,
 			ordered=excluded.ordered,layout_classification_source=excluded.layout_classification_source,
 			origin_kind=excluded.origin_kind,underlying_recipe_type_id=excluded.underlying_recipe_type_id,
 			source_mod_id=excluded.source_mod_id,source_mod_version=excluded.source_mod_version,
-			source_mod_id_source=excluded.source_mod_id_source,source_data=excluded.source_data`, snapshotID,
+			source_mod_id_source=excluded.source_mod_id_source,definition_schema_version=excluded.definition_schema_version`, snapshotID,
 			recipeIdentityValue.ID, revisionID, recipeIndex.RecipeID, recipeIndex.RecipeIDSource, recipeKey,
 			recipeIndex.RecipeCollection, recipeIndex.OriginKind, recipeIndex.UnderlyingRecipeTypeID,
-			recipeIndex.SourceModID, recipeIndex.SourceModVersion, recipeIndex.SourceModIDSource, string(fingerprintRaw),
+			recipeIndex.SourceModID, recipeIndex.SourceModVersion, recipeIndex.SourceModIDSource,
 			recipeIndex.LayoutKind, nullableRecipeOrdered(recipeIndex.Ordered),
 			recipeIndex.LayoutClassificationSource, recipeIndex.Width, recipeIndex.Height)
 		queued += 3
@@ -723,7 +723,6 @@ func queueExportJEIRecipeCollection(batch *modExportWriteBatch, resolver catalog
 		if canonical {
 			canonicalSourceID = strings.TrimSpace(recipeBinding.RecipeID)
 		}
-		sourceData := compactImportJSONObject(recipeBinding.Raw, "bindings")
 		batch.recipes = append(batch.recipes, recipeImportRecipeWrite{
 			TypeIdentity: typeIdentity.ID, TypePublicID: typeIdentity.PublicID, RecipeTypeID: recipeTypeID,
 			RecipeIdentity: recipeIdentityValue.ID, RecipePublicID: recipeIdentityValue.PublicID,
@@ -733,14 +732,14 @@ func queueExportJEIRecipeCollection(batch *modExportWriteBatch, resolver catalog
 			OriginKind: recipeBinding.OriginKind, UnderlyingRecipeTypeID: recipeBinding.UnderlyingRecipeTypeID,
 			SourceModID: recipeBinding.SourceModID, SourceModVersion: recipeBinding.SourceModVersion,
 			SourceModIDSource: recipeBinding.SourceModIDSource, RenderLocale: recipeBinding.RenderLocale,
-			SourceData: sourceData, TemplateID: templateID,
+			TemplateID: templateID,
 			LayoutKind: recipeBinding.LayoutKind, Ordered: recipeBinding.Ordered,
 			LayoutClassificationSource: recipeBinding.LayoutClassificationSource,
 			Width:                      recipeBinding.Width, Height: recipeBinding.Height,
 			Parameters:   json.RawMessage(nonEmptyJSON(recipeBinding.Parameters, `{}`)),
 			BindingCount: len(recipeBinding.Bindings),
 		})
-		batch.byteCount += int64(len(sourceData) + len(recipeBinding.Parameters))
+		batch.byteCount += int64(len(recipeBinding.Parameters))
 		if err = queueExportRecipeBindings(batch, resolver, recipeSnapshotID, templateID, recipeBinding.Bindings); err != nil {
 			return fmt.Errorf("JEI recipe %q: %w", recipeKey, err)
 		}
@@ -778,25 +777,14 @@ func queueExportRecipeBindings(batch *modExportWriteBatch, resolver catalogResou
 			tagIdentityKey = tag.ID
 			tagPublicID = tag.PublicID
 		}
-		bindingData := binding.Raw
-		if len(bindingData) == 0 {
-			bindingData, _ = json.Marshal(binding)
-		}
-		bindingData = compactImportJSONObject(bindingData,
-			"alternatives", "slot_id", "ingredient_present", "clickable", "placeholder_item",
-			"item_tag_equivalent", "semantic_role", "role_source", "chance_available", "chance",
-			"chance_percent", "chance_comparator", "chance_source", "chance_text", "chance_texts",
-			"chance_translation_key", "chance_render_x", "chance_render_y", "byproduct",
-		)
 		byproduct := binding.Byproduct || strings.EqualFold(strings.TrimSpace(binding.SemanticRole), "byproduct")
 		batch.recipeBindings = append(batch.recipeBindings, recipeImportBindingWrite{
 			ID: bindingID, RecipeSnapshotID: recipeSnapshotID, TemplateSlotID: templateSlotID,
 			SourceSlotID: binding.SlotID, Ordinal: ordinal, IngredientPresent: binding.IngredientPresent,
 			Clickable: binding.Clickable, PlaceholderItem: binding.PlaceholderItem,
 			ItemTagEquivalent: tagID, SemanticRole: binding.SemanticRole, RoleSource: binding.RoleSource,
-			TagIdentity: tagIdentityKey, TagPublicID: tagPublicID, TagCanonicalID: tagID, Data: bindingData,
+			TagIdentity: tagIdentityKey, TagPublicID: tagPublicID, TagCanonicalID: tagID,
 		})
-		batch.byteCount += int64(len(bindingData))
 		for alternativeIndex, alternative := range binding.Alternatives {
 			ingredientType := strings.TrimSpace(exportString(alternative["type"]))
 			ingredientKind := exportIngredientKind(ingredientType)
@@ -812,10 +800,6 @@ func queueExportRecipeBindings(batch *modExportWriteBatch, resolver catalogResou
 			namespace, resourcePath := resource.Namespace, resource.ResourcePath
 			uniqueID := strings.TrimSpace(exportString(alternative["unique_id"]))
 			nbtSNBT := strings.TrimSpace(exportString(alternative["nbt_snbt"]))
-			alternativeData, _ := json.Marshal(alternative)
-			alternativeData = compactImportJSONObject(alternativeData,
-				"type", "item", "resource_location", "count", "amount", "unique_id", "nbt_snbt",
-			)
 			resourceAliasID := resource.RawID
 			if resourceAliasID == "" {
 				resourceAliasID = resourceID
@@ -832,18 +816,16 @@ func queueExportRecipeBindings(batch *modExportWriteBatch, resolver catalogResou
 				ChanceSource: binding.ChanceSource, ChanceText: binding.ChanceText,
 				ChanceTexts:          json.RawMessage(nonEmptyJSON(binding.ChanceTexts, `{}`)),
 				ChanceTranslationKey: binding.ChanceTranslationKey, ChanceRenderX: binding.ChanceRenderX,
-				ChanceRenderY: binding.ChanceRenderY, Byproduct: byproduct, Data: alternativeData,
+				ChanceRenderY: binding.ChanceRenderY, Byproduct: byproduct,
 			})
-			batch.byteCount += int64(len(alternativeData) + len(binding.ChanceTexts))
+			batch.byteCount += int64(len(binding.ChanceTexts))
 		}
 	}
 	return nil
 }
 
-// The complete exporter collection is retained once in catalog_import_text_assets.
-// Snapshot rows only need metadata that is not already represented in normalized
-// columns; retaining duplicated fields and nested children here dominates network
-// transfer time when PostgreSQL is remote.
+// Import helpers below are kept for source documents that still need a compact
+// fingerprint. Recipe snapshots themselves store only normalized columns.
 func compactImportJSONObject(value json.RawMessage, omittedFields ...string) json.RawMessage {
 	if len(value) == 0 {
 		return json.RawMessage(`{}`)

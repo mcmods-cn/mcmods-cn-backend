@@ -96,6 +96,12 @@ var seedPermissions = []seedPermission{
 	{Code: "content.write", Module: "content", Name: "Manage content", Description: "Allows creating and editing site content."},
 	{Code: "content.no-review", Module: "content", Name: "Bypass content review", Description: "Allows catalog and localized content changes to publish without review."},
 	{Code: "content.translate", Module: "content", Name: "Translate content", Description: "Allows requesting quota-backed AI translations for unsupported content languages."},
+	{Code: "reference.unresolved.read", Module: "content", Name: "Read unresolved references", Description: "Allows viewing the site-wide list of referenced projects and resources that have not been collected yet."},
+
+	{Code: "server.create", Module: "server", Name: "Submit servers", Description: "Allows submitting a reachable Minecraft server for review."},
+	{Code: "server.create.no-review", Module: "server", Name: "Publish servers without review", Description: "Allows submitted Minecraft servers to be published immediately."},
+	{Code: "server.review", Module: "server", Name: "Review servers", Description: "Allows reviewing server submissions and their proof files."},
+	{Code: "server.edit.<serverID>", Module: "server", Name: "Edit one server", Description: "Variable permission; replace <serverID> with a server public ID."},
 
 	{Code: "project.create", Module: "project", Name: "Create projects", Description: "Allows creating mods and other projects."},
 	{Code: "project.edit", Module: "project", Name: "Edit projects and project content", Description: "Allows editing every project and all content scoped to those projects."},
@@ -126,6 +132,8 @@ var seedUsers = []seedUser{
 			"ai.read", "ai.write", "ai.task.enqueue", "ai.task.consume",
 			"notification.system.publish", "notification.translate",
 			"content.review", "content.write", "content.no-review", "content.translate",
+			"reference.unresolved.read",
+			"server.create", "server.create.no-review", "server.review",
 			"project.create", "project.edit", "project.review",
 		},
 	},

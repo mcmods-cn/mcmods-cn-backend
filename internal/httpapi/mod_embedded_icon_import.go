@@ -500,10 +500,6 @@ func downloadEmbeddedIconCatalog(ctx context.Context, client *aliyunoss.Client, 
 	return buffer.Bytes(), nil
 }
 
-func decodeEmbeddedIconCatalog(raw []byte) ([]embeddedIconCatalogEntry, error) {
-	return decodeEmbeddedIconCatalogForSource(raw, iconRendererImportSource)
-}
-
 func decodeEmbeddedIconCatalogForSource(raw []byte, source string) ([]embeddedIconCatalogEntry, error) {
 	source = normalizeEmbeddedIconImportSource(source)
 	if source == "" {

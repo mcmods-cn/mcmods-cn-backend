@@ -25,7 +25,7 @@ func TestDecodeEmbeddedIconCatalogJSONLines(t *testing.T) {
 		raw.Write(encoded)
 		raw.WriteByte('\n')
 	}
-	decoded, err := decodeEmbeddedIconCatalog(raw.Bytes())
+	decoded, err := decodeEmbeddedIconCatalogForSource(raw.Bytes(), iconRendererImportSource)
 	if err != nil {
 		t.Fatal(err)
 	}

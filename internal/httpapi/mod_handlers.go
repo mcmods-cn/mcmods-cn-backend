@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -24,19 +25,23 @@ type modLinkPayload struct {
 }
 
 type modAuthorPayload struct {
-	CreatorID string  `json:"creatorId,omitempty"`
-	Kind      string  `json:"kind,omitempty"`
-	Name      string  `json:"name,omitempty"`
-	AvatarURL string  `json:"avatarUrl,omitempty"`
-	RoleID    *string `json:"roleId,omitempty"`
-	Role      string  `json:"role,omitempty"`
+	CreatorID        string  `json:"creatorId,omitempty"`
+	Kind             string  `json:"kind,omitempty"`
+	Name             string  `json:"name,omitempty"`
+	AvatarURL        string  `json:"avatarUrl,omitempty"`
+	AvatarFileID     *string `json:"-"`
+	AvatarInternalID *int64  `json:"-"`
+	RoleID           *string `json:"roleId,omitempty"`
+	Role             string  `json:"role,omitempty"`
 }
 
 type modRelationshipPayload struct {
-	Type               string `json:"type"`
-	RelatedModPublicID string `json:"relatedModId,omitempty"`
-	RelatedModName     string `json:"relatedModName"`
-	Notes              string `json:"notes"`
+	Type                 string `json:"type"`
+	RelatedModPublicID   string `json:"relatedModId,omitempty"`
+	RelatedModSiteID     string `json:"relatedModSiteId,omitempty"`
+	RelatedModName       string `json:"relatedModName"`
+	RelatedModIdentifier string `json:"relatedModIdentifier,omitempty"`
+	Notes                string `json:"notes"`
 }
 
 type modRelationshipGroupPayload struct {
@@ -217,6 +222,29 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "生成模组唯一 ID 失败")
 		return
 	}
+	if req.SubmissionMethod != "manual" {
+		for index := range req.Authors {
+			author := &req.Authors[index]
+			if author.CreatorID != "" || author.AvatarURL == "" {
+				continue
+			}
+			kind := author.Kind
+			if kind == "" {
+				kind = "author"
+			}
+			mirroredAvatar, mirrorErr := s.mirrorExternalCreatorAvatar(r.Context(), author.AvatarURL, kind, author.Name, claims.Subject)
+			if mirrorErr != nil {
+				log.Printf("store imported mod author avatar: provider=%s author=%q: %v", req.SubmissionMethod, author.Name, mirrorErr)
+				author.AvatarURL = ""
+				continue
+			}
+			author.AvatarURL = mirroredAvatar.URL
+			filePublicID := mirroredAvatar.FilePublicID
+			fileInternalID := mirroredAvatar.FileInternalID
+			author.AvatarFileID = &filePublicID
+			author.AvatarInternalID = &fileInternalID
+		}
+	}
 	if req.IconURL != "" && req.SubmissionMethod != "manual" {
 		mirroredIconURL, mirrorErr := s.mirrorExternalModIcon(r.Context(), req.IconURL, uniqueID, claims.Subject)
 		if mirrorErr != nil {
@@ -357,6 +385,7 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 	if parsed, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && parsed > 0 {
 		limit = min(parsed, 100)
 	}
+	offset := boundedOffset(r.URL.Query().Get("offset"))
 	var total int
 	if err := s.db.QueryRow(
 		r.Context(),
@@ -387,8 +416,8 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		        or exists (select 1 from content_creator_bindings a join creators creator on creator.id=a.creator_id
 		                   where a.subject_id=m.id and a.subject_type='mod' and creator.name ilike '%' || $2 || '%'))
 		 order by m.updated_at desc, m.id desc
-		 limit $3`,
-		claims.Subject, query, limit,
+		 limit $3 offset $4`,
+		claims.Subject, query, limit, offset,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取模组列表失败")
@@ -403,14 +432,15 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "解析模组列表失败")
 			return
 		}
-		if err = s.loadModAssociations(r.Context(), &mod); err != nil {
-			writeError(w, http.StatusInternalServerError, "读取模组关联资料失败")
-			return
-		}
 		items = append(items, mod)
 	}
 	if err = rows.Err(); err != nil {
 		writeError(w, http.StatusInternalServerError, "读取模组列表失败")
+		return
+	}
+	rows.Close()
+	if err = s.loadModListAssociations(r.Context(), items); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取模组关联资料失败")
 		return
 	}
 	writeJSON(w, http.StatusOK, modListResponse{Items: items, Total: total})
@@ -484,6 +514,120 @@ func scanMod(row scanner) (modResponse, error) {
 	mod.RelationshipGroups = []modRelationshipGroupPayload{}
 	mod.Compatibilities = []modLoaderCompatibilityPayload{}
 	return mod, err
+}
+
+func (s *Server) loadModListAssociations(ctx context.Context, mods []modResponse) error {
+	if len(mods) == 0 {
+		return nil
+	}
+	byID := make(map[int64]*modResponse, len(mods))
+	ids := make([]int64, 0, len(mods))
+	for index := range mods {
+		byID[mods[index].ID] = &mods[index]
+		ids = append(ids, mods[index].ID)
+	}
+
+	rows, err := s.db.Query(ctx, `select mod_id,tag from mod_tags where mod_id=any($1) order by mod_id,tag`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var modID int64
+		var tag string
+		if err = rows.Scan(&modID, &tag); err != nil {
+			rows.Close()
+			return err
+		}
+		byID[modID].Tags = append(byID[modID].Tags, tag)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	rows, err = s.db.Query(ctx, `select link.mod_id,link.link_type,link.url,link.note
+		from mod_links link where link.mod_id=any($1) order by link.mod_id,link.display_order,link.id`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var modID int64
+		var item modLinkPayload
+		if err = rows.Scan(&modID, &item.Type, &item.URL, &item.Note); err != nil {
+			rows.Close()
+			return err
+		}
+		byID[modID].Links = append(byID[modID].Links, item)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	rows, err = s.db.Query(ctx, `select compatibility.mod_id,compatibility.loader,
+		array_agg(compatibility.minecraft_version order by compatibility.minecraft_version desc)
+		from mod_loader_compatibilities compatibility where compatibility.mod_id=any($1)
+		group by compatibility.mod_id,compatibility.loader order by compatibility.mod_id,compatibility.loader`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var modID int64
+		var item modLoaderCompatibilityPayload
+		if err = rows.Scan(&modID, &item.Loader, &item.Versions); err != nil {
+			rows.Close()
+			return err
+		}
+		byID[modID].Compatibilities = append(byID[modID].Compatibilities, item)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	rows, err = s.db.Query(ctx, `select author.subject_id,creator.public_id,creator.kind,creator.name,creator.avatar_url,
+		coalesce(role.public_id,''),coalesce(role.name,author.role_snapshot)
+		from content_creator_bindings author
+		join creators creator on creator.id=author.creator_id
+		left join creator_role_definitions role on role.id=author.role_id
+		where author.subject_id=any($1) and author.subject_type='mod'
+		order by author.subject_id,author.display_order,author.id`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var modID int64
+		var item modAuthorPayload
+		if err = rows.Scan(&modID, &item.CreatorID, &item.Kind, &item.Name, &item.AvatarURL, &item.RoleID, &item.Role); err != nil {
+			rows.Close()
+			return err
+		}
+		byID[modID].Authors = append(byID[modID].Authors, item)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	rows, err = s.db.Query(ctx, `select mod.id,user_account.public_id
+		from mods mod join users user_account on user_account.id=mod.created_by where mod.id=any($1)`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var modID int64
+		var publicID string
+		if err = rows.Scan(&modID, &publicID); err != nil {
+			return err
+		}
+		byID[modID].CreatedBy = publicID
+	}
+	return rows.Err()
 }
 
 func (s *Server) modByID(ctx context.Context, id int64, viewerID int64) (modResponse, error) {
@@ -713,7 +857,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	rows.Close()
 	for _, group := range groups {
 		rows, err = s.db.Query(ctx, `select relationship.relation_type,coalesce(related.project_code,''),
-			relationship.related_mod_name,relationship.notes
+			coalesce(related.slug,''),relationship.related_mod_name,relationship.related_mod_identifier,relationship.notes
 			from mod_relationships relationship
 			left join mods related on related.id=relationship.related_mod_id
 			where relationship.group_id=$1 order by relationship.display_order,relationship.id`, group.id)
@@ -722,7 +866,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 		}
 		for rows.Next() {
 			var item modRelationshipPayload
-			if err = rows.Scan(&item.Type, &item.RelatedModPublicID, &item.RelatedModName, &item.Notes); err != nil {
+			if err = rows.Scan(&item.Type, &item.RelatedModPublicID, &item.RelatedModSiteID, &item.RelatedModName, &item.RelatedModIdentifier, &item.Notes); err != nil {
 				rows.Close()
 				return err
 			}
@@ -741,7 +885,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 func (s *Server) loadIncomingModRelationships(ctx context.Context, mod *modResponse) error {
 	rows, err := s.db.Query(ctx, `select relationship_group.id,relationship_group.label,relationship_group.loader,
 		relationship_group.minecraft_versions,relationship_group.mod_version,relationship.relation_type,
-		source_mod.project_code,source_mod.primary_name,relationship.notes
+		source_mod.project_code,source_mod.slug,source_mod.primary_name,relationship.notes
 		from mod_relationships relationship
 		join mod_relationship_groups relationship_group on relationship_group.id=relationship.group_id
 		join mods source_mod on source_mod.id=relationship.mod_id
@@ -754,9 +898,9 @@ func (s *Server) loadIncomingModRelationships(ctx context.Context, mod *modRespo
 	groupIndexes := map[int64]int{}
 	for rows.Next() {
 		var groupID int64
-		var label, loader, modVersion, relationshipType, sourceModPublicID, sourceModName, notes string
+		var label, loader, modVersion, relationshipType, sourceModPublicID, sourceModSiteID, sourceModName, notes string
 		var minecraftVersions []string
-		if err = rows.Scan(&groupID, &label, &loader, &minecraftVersions, &modVersion, &relationshipType, &sourceModPublicID, &sourceModName, &notes); err != nil {
+		if err = rows.Scan(&groupID, &label, &loader, &minecraftVersions, &modVersion, &relationshipType, &sourceModPublicID, &sourceModSiteID, &sourceModName, &notes); err != nil {
 			return err
 		}
 		index, exists := groupIndexes[groupID]
@@ -769,7 +913,7 @@ func (s *Server) loadIncomingModRelationships(ctx context.Context, mod *modRespo
 			})
 		}
 		mod.RelationshipGroups[index].Relationships = append(mod.RelationshipGroups[index].Relationships, modRelationshipPayload{
-			Type: relationshipType, RelatedModPublicID: sourceModPublicID, RelatedModName: sourceModName, Notes: notes,
+			Type: relationshipType, RelatedModPublicID: sourceModPublicID, RelatedModSiteID: sourceModSiteID, RelatedModName: sourceModName, Notes: notes,
 		})
 	}
 	return rows.Err()
@@ -967,6 +1111,7 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 		item.CreatorID = strings.ToLower(strings.TrimSpace(item.CreatorID))
 		item.Kind = strings.ToLower(strings.TrimSpace(item.Kind))
 		item.Name = strings.TrimSpace(item.Name)
+		item.AvatarURL = strings.TrimSpace(item.AvatarURL)
 		item.Role = strings.TrimSpace(item.Role)
 		if item.CreatorID == "" && item.Name == "" {
 			continue
@@ -976,6 +1121,9 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 		}
 		if item.Kind != "" && item.Kind != "author" && item.Kind != "team" {
 			return errors.New("作者资料类型无效")
+		}
+		if item.AvatarURL != "" && !validHTTPURL(item.AvatarURL) {
+			return errors.New("author avatar URL must use HTTP or HTTPS")
 		}
 		if len(item.Name) > 160 || len(item.Role) > 80 {
 			return errors.New("作者或团队信息过长")
@@ -1008,12 +1156,17 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 			item.Type = strings.TrimSpace(item.Type)
 			item.RelatedModPublicID = strings.ToLower(strings.TrimSpace(item.RelatedModPublicID))
 			item.RelatedModName = strings.TrimSpace(item.RelatedModName)
+			item.RelatedModIdentifier = strings.TrimSpace(item.RelatedModIdentifier)
 			item.Notes = strings.TrimSpace(item.Notes)
-			if item.Type == "" && item.RelatedModName == "" && item.RelatedModPublicID == "" {
+			if item.Type == "" && item.RelatedModName == "" && item.RelatedModPublicID == "" && item.RelatedModIdentifier == "" {
 				continue
 			}
-			if !allowedModRelationshipTypes[item.Type] || (item.RelatedModName == "" && item.RelatedModPublicID == "") {
+			if !allowedModRelationshipTypes[item.Type] ||
+				(item.RelatedModName == "" && item.RelatedModPublicID == "" && item.RelatedModIdentifier == "") {
 				return errors.New("模组关系缺少有效的关系类型或关联模组")
+			}
+			if item.RelatedModIdentifier != "" && !validModIdentifier(item.RelatedModIdentifier) {
+				return errors.New("uncollected related Mod ID is invalid")
 			}
 			if len(item.RelatedModName) > 160 || len(item.Notes) > 500 {
 				return errors.New("模组关系字段过长")
@@ -1160,7 +1313,7 @@ func insertModIdentifiersTx(ctx context.Context, tx pgx.Tx, modID int64, values 
 			return err
 		}
 	}
-	return nil
+	return resolvePendingModReferencesTx(ctx, tx, modID)
 }
 
 func replaceModIdentifiersTx(ctx context.Context, tx pgx.Tx, modID int64, values []modIdentifierPayload) error {
@@ -1228,41 +1381,144 @@ func replaceModGalleryImagesTx(ctx context.Context, tx pgx.Tx, modID, revisionID
 func insertModRelationshipGroups(ctx context.Context, tx pgx.Tx, modID int64, groups []modRelationshipGroupPayload) error {
 	for groupIndex, group := range groups {
 		var groupID int64
-		if err := tx.QueryRow(
-			ctx,
-			`insert into mod_relationship_groups (mod_id, label, loader, minecraft_versions, mod_version, display_order)
-			 values ($1,$2,$3,$4,$5,$6) returning id`,
-			modID, group.Label, group.Loader, group.MinecraftVersions, group.ModVersion, groupIndex,
-		).Scan(&groupID); err != nil {
+		if err := tx.QueryRow(ctx, `insert into mod_relationship_groups(
+			mod_id,label,loader,minecraft_versions,mod_version,display_order
+		) values($1,$2,$3,$4,$5,$6) returning id`,
+			modID, group.Label, group.Loader, group.MinecraftVersions, group.ModVersion, groupIndex).Scan(&groupID); err != nil {
 			return err
 		}
 		for relationshipIndex, relationship := range group.Relationships {
-			if relationship.RelatedModPublicID == "" {
-				return errors.New("模组关系必须选择网站中另一个已有模组")
-			}
-			var relatedModID int64
-			if err := tx.QueryRow(ctx, `select id,primary_name from mods where project_code=$1`, relationship.RelatedModPublicID).
-				Scan(&relatedModID, &relationship.RelatedModName); err != nil || relatedModID == modID {
-				return errors.New("关联模组不存在")
-			}
-			if relationship.Type == "integration" {
-				if _, err := tx.Exec(ctx, `delete from mod_relationships
-					where relation_type='integration' and mod_id=$1 and related_mod_id=$2`, relatedModID, modID); err != nil {
+			var relatedModID *int64
+			if relationship.RelatedModPublicID != "" {
+				var resolvedID int64
+				if err := tx.QueryRow(ctx, `select id,primary_name from mods where project_code=$1`,
+					relationship.RelatedModPublicID).Scan(&resolvedID, &relationship.RelatedModName); err != nil || resolvedID == modID {
+					return errors.New("selected related mod does not exist")
+				}
+				relatedModID = &resolvedID
+			} else if relationship.RelatedModIdentifier != "" {
+				var resolvedID int64
+				err := tx.QueryRow(ctx, `select mod.id,mod.primary_name
+					from mod_identifiers identifier join mods mod on mod.id=identifier.mod_id
+					where lower(identifier.identifier)=lower($1) and mod.id<>$2 and mod.review_status='approved'
+					order by identifier.is_primary desc,mod.id limit 1`,
+					relationship.RelatedModIdentifier, modID).Scan(&resolvedID, &relationship.RelatedModName)
+				if err == nil {
+					relatedModID = &resolvedID
+				} else if !errors.Is(err, pgx.ErrNoRows) {
 					return err
 				}
 			}
-			if _, err := tx.Exec(
-				ctx,
-				`insert into mod_relationships (mod_id, group_id, relation_type, related_mod_id, related_mod_name, notes, display_order)
-				 values ($1,$2,$3,$4,$5,$6,$7)`,
-				modID, groupID, relationship.Type, relatedModID, relationship.RelatedModName, relationship.Notes, relationshipIndex,
-			); err != nil {
+			if relatedModID == nil && relationship.RelatedModIdentifier == "" {
+				return errors.New("a related mod or an uncollected Mod ID is required")
+			}
+			if relationship.Type == "integration" && relatedModID != nil {
+				if _, err := tx.Exec(ctx, `delete from mod_relationships
+					where relation_type='integration' and mod_id=$1 and related_mod_id=$2`,
+					*relatedModID, modID); err != nil {
+					return err
+				}
+			}
+			var relationshipID int64
+			if err := tx.QueryRow(ctx, `insert into mod_relationships(
+				mod_id,group_id,relation_type,related_mod_id,related_mod_name,related_mod_identifier,notes,display_order
+			) values($1,$2,$3,$4,$5,$6,$7,$8) returning id`,
+				modID, groupID, relationship.Type, relatedModID, relationship.RelatedModName,
+				relationship.RelatedModIdentifier, relationship.Notes, relationshipIndex).Scan(&relationshipID); err != nil {
 				return err
+			}
+			if relatedModID == nil {
+				if _, err := tx.Exec(ctx, `insert into unresolved_references(
+					source_type,source_id,field_path,reference_type,raw_identifier,normalized_identifier,metadata
+				) values('mod_relationship',$1,'relatedMod','mod',$2,lower($2),jsonb_build_object('sourceModId',$3))
+				on conflict(source_type,source_id,field_path,reference_type,normalized_identifier) do update
+				set raw_identifier=excluded.raw_identifier,status='pending',resolved_type='',resolved_id=null,
+					resolved_at=null,metadata=excluded.metadata,updated_at=now()`,
+					relationshipID, relationship.RelatedModIdentifier, modID); err != nil {
+					return err
+				}
 			}
 		}
 	}
 	if _, err := tx.Exec(ctx, `delete from mod_relationship_groups relationship_group
 		where not exists(select 1 from mod_relationships relationship where relationship.group_id=relationship_group.id)`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func resolvePendingModReferencesTx(ctx context.Context, tx pgx.Tx, modID int64) error {
+	var name, reviewStatus string
+	if err := tx.QueryRow(ctx, `select primary_name,review_status from mods where id=$1`, modID).Scan(&name, &reviewStatus); err != nil {
+		return err
+	}
+	if reviewStatus != "approved" {
+		return nil
+	}
+	rows, err := tx.Query(ctx, `select unresolved.id,unresolved.source_id
+		from unresolved_references unresolved
+		join mod_relationships relationship
+		  on unresolved.source_type='mod_relationship' and unresolved.source_id=relationship.id
+		where unresolved.status='pending' and unresolved.reference_type='mod'
+		  and relationship.mod_id<>$1
+		  and exists(select 1 from mod_identifiers identifier
+			where identifier.mod_id=$1 and lower(identifier.identifier)=unresolved.normalized_identifier)
+		order by unresolved.id for update of unresolved`, modID)
+	if err != nil {
+		return err
+	}
+	type pendingReference struct {
+		id             int64
+		relationshipID int64
+	}
+	pending := make([]pendingReference, 0)
+	for rows.Next() {
+		var item pendingReference
+		if err = rows.Scan(&item.id, &item.relationshipID); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, item)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, item := range pending {
+		if _, err = tx.Exec(ctx, `update mod_relationships
+			set related_mod_id=$2,related_mod_name=$3 where id=$1 and related_mod_id is null`,
+			item.relationshipID, modID, name); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `update unresolved_references
+			set status='resolved',resolved_type='mod',resolved_id=$2,resolved_at=now(),updated_at=now()
+			where id=$1 and status='pending'`, item.id, modID); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(ctx, `update minecraft_server_mods server_mod
+		set mod_id=$1
+		from unresolved_references unresolved
+		where unresolved.source_type='minecraft_server_mod'
+		  and unresolved.source_id=server_mod.id
+		  and unresolved.status='pending'
+		  and unresolved.reference_type='mod'
+		  and server_mod.mod_id is null
+		  and exists(select 1 from mod_identifiers identifier
+			where identifier.mod_id=$1
+			  and lower(identifier.identifier)=unresolved.normalized_identifier)`, modID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `update unresolved_references unresolved
+		set status='resolved',resolved_type='mod',resolved_id=$1,resolved_at=now(),updated_at=now()
+		where unresolved.source_type='minecraft_server_mod'
+		  and unresolved.status='pending'
+		  and unresolved.reference_type='mod'
+		  and exists(select 1 from minecraft_server_mods server_mod
+			join mod_identifiers identifier on identifier.mod_id=$1
+			where server_mod.id=unresolved.source_id and server_mod.mod_id=$1
+			  and lower(identifier.identifier)=unresolved.normalized_identifier)`, modID); err != nil {
 		return err
 	}
 	return nil
@@ -1340,7 +1596,10 @@ func resolveModAuthorForCreateTx(ctx context.Context, tx pgx.Tx, author modAutho
 			kind = "author"
 		}
 		var err error
-		creatorID, _, err = ensureNamedCreatorTx(ctx, tx, kind, author.Name, actorID, r)
+		creatorID, _, err = ensureNamedCreatorSnapshotTx(ctx, tx, creatorSnapshot{
+			Kind: kind, Name: author.Name, AvatarURL: author.AvatarURL,
+			AvatarFileID: author.AvatarFileID, AvatarInternalID: author.AvatarInternalID,
+		}, actorID, r)
 		if err != nil {
 			return 0, "", "", err
 		}
@@ -1360,25 +1619,29 @@ func resolveModAuthorForCreateTx(ctx context.Context, tx pgx.Tx, author modAutho
 }
 
 func ensureNamedCreatorTx(ctx context.Context, tx pgx.Tx, kind, name string, actorID int64, r *http.Request) (int64, string, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
+	return ensureNamedCreatorSnapshotTx(ctx, tx, creatorSnapshot{Kind: kind, Name: name}, actorID, r)
+}
+
+func ensureNamedCreatorSnapshotTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, actorID int64, r *http.Request) (int64, string, error) {
+	snapshot.Name = strings.TrimSpace(snapshot.Name)
+	if snapshot.Name == "" {
 		return 0, "", errors.New("creator name is required")
 	}
-	if kind != "author" && kind != "team" {
-		kind = "author"
+	if snapshot.Kind != "author" && snapshot.Kind != "team" {
+		snapshot.Kind = "author"
 	}
 	var id int64
 	var publicID string
 	err := tx.QueryRow(ctx, `select id,public_id from creators
 		where kind=$1 and normalized_name=$2
-		order by review_status='approved' desc,id limit 1`, kind, normalizeCreatorName(name)).Scan(&id, &publicID)
+		order by review_status='approved' desc,id limit 1`, snapshot.Kind, normalizeCreatorName(snapshot.Name)).Scan(&id, &publicID)
 	if err == nil {
 		return id, publicID, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return 0, "", err
 	}
-	id, publicID, _, err = (&Server{}).createCreatorTx(ctx, tx, creatorSnapshot{Kind: kind, Name: name}, actorID, "pending", r)
+	id, publicID, _, err = (&Server{}).createCreatorTx(ctx, tx, snapshot, actorID, "pending", r)
 	if err != nil {
 		return 0, "", fmt.Errorf("create imported creator: %w", err)
 	}

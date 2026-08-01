@@ -2,9 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 
 	"mcmods-cn-backend/internal/security"
 )
@@ -45,22 +49,39 @@ func (s *Server) optionalAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		token, err := authTokenFromRequest(r)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "authentication session is invalid")
+			s.continueOptionalAuthAsGuest(w, r, next)
 			return
 		}
 		claims, err := security.ParseToken(s.cfg.JWTSecret, token)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "authentication session has expired")
+			s.continueOptionalAuthAsGuest(w, r, next)
 			return
 		}
 		if err := s.resolveClaimsSubject(r.Context(), &claims); err != nil {
-			writeError(w, http.StatusUnauthorized, "authentication account no longer exists")
+			if errors.Is(err, pgx.ErrNoRows) {
+				s.continueOptionalAuthAsGuest(w, r, next)
+				return
+			}
+			log.Printf("optional authentication lookup failed: %v", err)
+			writeError(w, http.StatusServiceUnavailable, "authentication service is temporarily unavailable")
 			return
 		}
 		markActivityUser(r, claims.Subject)
 		ctx := context.WithValue(r.Context(), claimsContextKey, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	}
+}
+
+func (s *Server) continueOptionalAuthAsGuest(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+	// Optional authentication must never turn a public endpoint into a protected
+	// one. Expire an invalid cookie so subsequent public requests do not repeat
+	// the lookup; an explicit Authorization header is owned by the API client.
+	if strings.TrimSpace(r.Header.Get("Authorization")) == "" {
+		if _, err := r.Cookie(authSessionCookieName); err == nil {
+			s.clearAuthSessionCookie(w, r)
+		}
+	}
+	next.ServeHTTP(w, r)
 }
 
 func (s *Server) resolveClaimsSubject(ctx context.Context, claims *security.Claims) error {

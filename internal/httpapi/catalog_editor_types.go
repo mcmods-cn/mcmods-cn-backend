@@ -100,6 +100,8 @@ type catalogRecipeTemplateEdit struct {
 
 type catalogRecipeCandidateEdit struct {
 	ResourcePublicID string         `json:"resourcePublicId"`
+	RawResourceID    string         `json:"rawResourceId,omitempty"`
+	KindCode         string         `json:"kindCode,omitempty"`
 	Amount           float64        `json:"amount"`
 	Probability      *float64       `json:"probability,omitempty"`
 	Byproduct        bool           `json:"byproduct"`
@@ -286,6 +288,7 @@ func validateCatalogRecipeBindings(edit *catalogRecipeEdit, slotRoles map[string
 	if edit == nil || strings.TrimSpace(edit.TemplatePublicID) == "" || len(edit.Bindings) > 512 {
 		return fmt.Errorf("%w: invalid recipe", errCatalogEditorInvalid)
 	}
+	hasOutput := false
 	for slotKey, binding := range edit.Bindings {
 		role, exists := slotRoles[slotKey]
 		if !exists {
@@ -294,10 +297,19 @@ func validateCatalogRecipeBindings(edit *catalogRecipeEdit, slotRoles map[string
 		if len(binding.Candidates) == 0 || len(binding.Candidates) > 256 {
 			return fmt.Errorf("%w: every binding requires a candidate", errCatalogEditorInvalid)
 		}
+		if role == "output" {
+			hasOutput = true
+		}
 		seen := make(map[string]struct{}, len(binding.Candidates))
 		for _, candidate := range binding.Candidates {
 			candidate.ResourcePublicID = strings.TrimSpace(candidate.ResourcePublicID)
-			if candidate.ResourcePublicID == "" || math.IsNaN(candidate.Amount) || math.IsInf(candidate.Amount, 0) || candidate.Amount <= 0 {
+			candidate.RawResourceID = strings.TrimSpace(candidate.RawResourceID)
+			candidate.KindCode = strings.TrimSpace(candidate.KindCode)
+			unresolved := candidate.RawResourceID != ""
+			if candidate.ResourcePublicID == "" && !unresolved ||
+				candidate.ResourcePublicID != "" && unresolved ||
+				unresolved && candidate.KindCode == "" ||
+				math.IsNaN(candidate.Amount) || math.IsInf(candidate.Amount, 0) || candidate.Amount <= 0 {
 				return fmt.Errorf("%w: invalid recipe candidate", errCatalogEditorInvalid)
 			}
 			if role != "output" && (candidate.Probability != nil || candidate.Byproduct) {
@@ -306,11 +318,18 @@ func validateCatalogRecipeBindings(edit *catalogRecipeEdit, slotRoles map[string
 			if candidate.Probability != nil && (math.IsNaN(*candidate.Probability) || math.IsInf(*candidate.Probability, 0) || *candidate.Probability < 0 || *candidate.Probability > 1) {
 				return fmt.Errorf("%w: probability must be between zero and one", errCatalogEditorInvalid)
 			}
-			if _, duplicate := seen[candidate.ResourcePublicID]; duplicate {
+			identity := candidate.ResourcePublicID
+			if unresolved {
+				identity = "unresolved:" + candidate.KindCode + ":" + strings.ToLower(candidate.RawResourceID)
+			}
+			if _, duplicate := seen[identity]; duplicate {
 				return fmt.Errorf("%w: duplicate recipe candidate", errCatalogEditorInvalid)
 			}
-			seen[candidate.ResourcePublicID] = struct{}{}
+			seen[identity] = struct{}{}
 		}
+	}
+	if !hasOutput {
+		return fmt.Errorf("%w: recipe requires an output candidate", errCatalogEditorInvalid)
 	}
 	return nil
 }

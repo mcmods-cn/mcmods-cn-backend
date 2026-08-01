@@ -28,14 +28,19 @@ func syncImportedResourcesToContentVersionTx(ctx context.Context, tx pgx.Tx, rev
 		return fmt.Errorf("bind imported resources to mod: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `insert into mod_resource_version_details(
-		resource_id,version_id,default_locale,definition,icon_file_id,render_file_id,status,created_by,updated_by)
-		select distinct on (snapshot.resource_id) snapshot.resource_id,$2::bigint,'en-US',snapshot.data,icon.oss_file_id,preview.oss_file_id,'active',nullif($4::bigint,0),nullif($4::bigint,0)
+		resource_id,version_id,entry_type_code,definition_schema_version,default_locale,definition,icon_file_id,render_file_id,status,created_by,updated_by)
+		select distinct on (snapshot.resource_id) snapshot.resource_id,$2::bigint,
+			snapshot.entry_type_code,snapshot.definition_schema_version,
+			'en-US',snapshot.data,icon.oss_file_id,preview.oss_file_id,'active',nullif($4::bigint,0),nullif($4::bigint,0)
 		from resource_import_snapshots snapshot
+		join game_resources resource on resource.entity_id=snapshot.resource_id
 		left join catalog_import_media icon on icon.revision_id=snapshot.revision_id and icon.asset_path=snapshot.icon_path
 		left join catalog_import_media preview on preview.revision_id=snapshot.revision_id and preview.asset_path=snapshot.preview_path
 		where snapshot.revision_id=any($1::text[])
 		order by snapshot.resource_id,(snapshot.icon_path<>'') desc,(snapshot.preview_path<>'') desc
 		on conflict(resource_id,version_id) do update set
+			entry_type_code=case when $3 then excluded.entry_type_code else mod_resource_version_details.entry_type_code end,
+			definition_schema_version=case when $3 then excluded.definition_schema_version else mod_resource_version_details.definition_schema_version end,
 			definition=case when $3 then mod_resource_version_details.definition||excluded.definition else mod_resource_version_details.definition end,
 			icon_file_id=case when $3 and excluded.icon_file_id is not null then excluded.icon_file_id else mod_resource_version_details.icon_file_id end,
 			render_file_id=case when $3 and excluded.render_file_id is not null then excluded.render_file_id else mod_resource_version_details.render_file_id end,
