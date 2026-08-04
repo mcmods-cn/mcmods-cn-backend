@@ -224,7 +224,10 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID, bl
 				  and revision.is_active and revision.status in ('ready','partial')
 				union all
 				select mod.id,1 priority,mod.updated_at matched_at from mods mod
-				where lower(mod.mod_id)=lower(namespace.source_namespace) and mod.review_status='approved'
+				where mod.review_status='approved' and exists (
+					select 1 from mod_identifiers identifier
+					where identifier.mod_id=mod.id and lower(identifier.identifier)=lower(namespace.source_namespace)
+				)
 			) candidate order by candidate.priority,candidate.matched_at desc limit 1
 		) source on true`, blueprintID); err != nil {
 		return err
@@ -390,8 +393,9 @@ func (worker *BlueprintWorker) notifyTemplate(userID int64, code string, values 
 		values["name"] = blueprintName
 	}
 	title, body, locale := renderNotificationTemplate(context.Background(), worker.db, userID, code, values)
-	data, _ := json.Marshal(map[string]any{"blueprintId": publicID, "url": "/blueprints/" + publicID})
-	if worker.queue != nil && worker.queue.PublishTask(context.Background(), notificationTaskCode, notificationEvent{Action: "direct", RecipientID: userID, Kind: "system", Title: title, Body: body, SourceLocale: locale, Data: map[string]any{"blueprintId": publicID, "url": "/blueprints/" + publicID}}) == nil {
+	targetData := map[string]any{"blueprintId": publicID, "targetLabel": blueprintName, "url": "/blueprints/" + publicID}
+	data, _ := json.Marshal(targetData)
+	if worker.queue != nil && worker.queue.PublishTask(context.Background(), notificationTaskCode, notificationEvent{Action: "direct", RecipientID: userID, Kind: "system", Title: title, Body: body, SourceLocale: locale, Data: targetData}) == nil {
 		return
 	}
 	_, _ = worker.db.Exec(context.Background(), `insert into notifications(recipient_id,kind,title,body,source_locale,data) values($1,'system',$2,$3,$4,$5::jsonb)`, userID, title, body, locale, string(data))

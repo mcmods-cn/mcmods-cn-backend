@@ -32,12 +32,14 @@ type modContentLayoutCategoryEdit struct {
 type modContentLayoutResourceEdit struct {
 	ResourcePublicID string                           `json:"resourcePublicId"`
 	SectionPublicID  string                           `json:"sectionPublicId"`
+	SimilarGroupID   string                           `json:"similarGroupId,omitempty"`
 	Ordinal          int                              `json:"ordinal"`
 	Advancement      *modContentAdvancementLayoutEdit `json:"advancement,omitempty"`
 }
 
 type modContentAdvancementLayoutEdit struct {
 	ParentResourcePublicID string  `json:"parentResourcePublicId"`
+	GroupID                string  `json:"groupId"`
 	X                      float64 `json:"x"`
 	Y                      float64 `json:"y"`
 }
@@ -45,6 +47,7 @@ type modContentAdvancementLayoutEdit struct {
 type modContentLayoutEdit struct {
 	VersionPublicID     string                         `json:"versionPublicId"`
 	RootSectionPublicID string                         `json:"rootSectionPublicId"`
+	DisplayMode         string                         `json:"displayMode"`
 	Categories          []modContentLayoutCategoryEdit `json:"categories"`
 	Resources           []modContentLayoutResourceEdit `json:"resources"`
 	Reason              string                         `json:"reason"`
@@ -70,8 +73,10 @@ type modContentQuerier interface {
 func normalizeModContentLayoutEdit(edit *modContentLayoutEdit) error {
 	edit.VersionPublicID = strings.ToLower(strings.TrimSpace(edit.VersionPublicID))
 	edit.RootSectionPublicID = strings.ToLower(strings.TrimSpace(edit.RootSectionPublicID))
+	edit.DisplayMode = strings.ToLower(strings.TrimSpace(edit.DisplayMode))
 	edit.Reason = strings.TrimSpace(edit.Reason)
 	if edit.VersionPublicID == "" || !modContentPublicIDPattern.MatchString(edit.RootSectionPublicID) ||
+		(edit.DisplayMode != "compact" && edit.DisplayMode != "large") ||
 		len(edit.Reason) > 500 || len(edit.Categories) > maxModContentCategories || len(edit.Resources) > maxModContentResources {
 		return errCatalogEditorInvalid
 	}
@@ -98,7 +103,9 @@ func normalizeModContentLayoutEdit(edit *modContentLayoutEdit) error {
 		resource := &edit.Resources[index]
 		resource.ResourcePublicID = strings.ToLower(strings.TrimSpace(resource.ResourcePublicID))
 		resource.SectionPublicID = strings.ToLower(strings.TrimSpace(resource.SectionPublicID))
-		if !modContentPublicIDPattern.MatchString(resource.ResourcePublicID) || resource.SectionPublicID == "" || resource.Ordinal < 0 {
+		resource.SimilarGroupID = strings.ToLower(strings.TrimSpace(resource.SimilarGroupID))
+		if !modContentPublicIDPattern.MatchString(resource.ResourcePublicID) || resource.SectionPublicID == "" ||
+			len(resource.SimilarGroupID) > 80 || resource.Ordinal < 0 {
 			return errCatalogEditorInvalid
 		}
 		if _, duplicate := resourceIDs[resource.ResourcePublicID]; duplicate {
@@ -106,8 +113,11 @@ func normalizeModContentLayoutEdit(edit *modContentLayoutEdit) error {
 		}
 		if resource.Advancement != nil {
 			resource.Advancement.ParentResourcePublicID = strings.ToLower(strings.TrimSpace(resource.Advancement.ParentResourcePublicID))
+			groupID, validGroupID := normalizeAdvancementLayoutGroupID(resource.Advancement.GroupID)
+			resource.Advancement.GroupID = groupID
 			if (resource.Advancement.ParentResourcePublicID != "" && !modContentPublicIDPattern.MatchString(resource.Advancement.ParentResourcePublicID)) ||
 				resource.Advancement.ParentResourcePublicID == resource.ResourcePublicID ||
+				!validGroupID ||
 				math.IsNaN(resource.Advancement.X) || math.IsInf(resource.Advancement.X, 0) ||
 				math.IsNaN(resource.Advancement.Y) || math.IsInf(resource.Advancement.Y, 0) ||
 				math.Abs(resource.Advancement.X) > 1000 || math.Abs(resource.Advancement.Y) > 1000 {
@@ -192,6 +202,32 @@ func (s *Server) prepareModContentLayout(ctx context.Context, modID, versionID i
 		return err
 	}
 	rows.Close()
+	existingSimilarGroups := make(map[string]struct{})
+	groupRows, groupErr := s.db.Query(ctx, `with recursive subtree as (
+			select id from mod_content_sections where public_id=$1 and mod_id=$2 and version_id=$3 and status='active'
+			union all
+			select child.id from mod_content_sections child join subtree parent on child.parent_id=parent.id
+			where child.status='active'
+		)
+		select distinct placement.similar_group_id from subtree
+		join mod_content_section_resources placement on placement.section_id=subtree.id
+		where placement.version_id=$3 and placement.similar_group_id<>''`, edit.RootSectionPublicID, modID, versionID)
+	if groupErr != nil {
+		return groupErr
+	}
+	for groupRows.Next() {
+		var groupID string
+		if err = groupRows.Scan(&groupID); err != nil {
+			groupRows.Close()
+			return err
+		}
+		existingSimilarGroups[groupID] = struct{}{}
+	}
+	if err = groupRows.Err(); err != nil {
+		groupRows.Close()
+		return err
+	}
+	groupRows.Close()
 
 	replacements := make(map[string]string)
 	for index := range edit.Categories {
@@ -218,6 +254,24 @@ func (s *Server) prepareModContentLayout(ctx context.Context, modID, versionID i
 		if replacement, ok := replacements[edit.Resources[index].SectionPublicID]; ok {
 			edit.Resources[index].SectionPublicID = replacement
 		}
+	}
+	groupReplacements := make(map[string]string)
+	for index := range edit.Resources {
+		groupID := edit.Resources[index].SimilarGroupID
+		if groupID == "" {
+			continue
+		}
+		if _, exists := existingSimilarGroups[groupID]; exists {
+			continue
+		}
+		replacement, exists := groupReplacements[groupID]
+		if !exists {
+			if err = s.db.QueryRow(ctx, `select new_public_id()`).Scan(&replacement); err != nil {
+				return err
+			}
+			groupReplacements[groupID] = replacement
+		}
+		edit.Resources[index].SimilarGroupID = replacement
 	}
 
 	categoryByID := make(map[string]*modContentLayoutCategoryEdit, len(edit.Categories))
@@ -290,12 +344,7 @@ func (s *Server) prepareModContentLayout(ctx context.Context, modID, versionID i
 	}
 	if len(resourcePublicIDs) > 0 {
 		var templateDefinition []byte
-		if err = s.db.QueryRow(ctx, `select template.definition
-			from mod_content_sections section
-			join mod_content_templates template on template.id=section.template_id
-			where section.public_id=$1 and section.mod_id=$2 and section.version_id=$3
-			  and section.parent_id is null and section.status='active'`,
-			edit.RootSectionPublicID, modID, versionID).Scan(&templateDefinition); err != nil {
+		if err = loadModContentSectionDefinition(ctx, s.db, modID, versionID, edit.RootSectionPublicID, &templateDefinition); err != nil {
 			return errCatalogEditorInvalid
 		}
 		var template struct {
@@ -365,6 +414,9 @@ func (s *Server) prepareModContentLayout(ctx context.Context, modID, versionID i
 		}
 		edit.Resources = canonicalizeModContentLayoutResources(edit.Resources, identities)
 	}
+	if err = normalizeModContentSimilarGroups(edit.Resources); err != nil {
+		return err
+	}
 	sort.SliceStable(edit.Resources, func(i, j int) bool {
 		left, right := edit.Resources[i], edit.Resources[j]
 		if left.SectionPublicID != right.SectionPublicID {
@@ -380,6 +432,26 @@ func (s *Server) prepareModContentLayout(ctx context.Context, modID, versionID i
 		sectionID := edit.Resources[index].SectionPublicID
 		edit.Resources[index].Ordinal = nextResourceOrdinal[sectionID]
 		nextResourceOrdinal[sectionID]++
+	}
+	return nil
+}
+
+func normalizeModContentSimilarGroups(resources []modContentLayoutResourceEdit) error {
+	counts := make(map[string]int)
+	sections := make(map[string]string)
+	for _, resource := range resources {
+		if resource.SimilarGroupID != "" {
+			counts[resource.SimilarGroupID]++
+			if sectionID, exists := sections[resource.SimilarGroupID]; exists && sectionID != resource.SectionPublicID {
+				return errCatalogEditorInvalid
+			}
+			sections[resource.SimilarGroupID] = resource.SectionPublicID
+		}
+	}
+	for index := range resources {
+		if resources[index].SimilarGroupID != "" && counts[resources[index].SimilarGroupID] < 2 {
+			resources[index].SimilarGroupID = ""
+		}
 	}
 	return nil
 }
@@ -507,14 +579,16 @@ func publishModContentLayoutTx(ctx context.Context, tx pgx.Tx, revisionID int64,
 		return err
 	}
 	var rootID, versionID, templateID int64
-	var displayMode string
-	if err := tx.QueryRow(ctx, `select section.id,section.version_id,section.template_id,section.display_mode
+	var templateCode, defaultDisplayMode string
+	if err := tx.QueryRow(ctx, `select section.id,section.version_id,section.template_id,template.code,template.default_display_mode
 		from mod_content_sections section join mod_content_versions version on version.id=section.version_id
+		join mod_content_templates template on template.id=section.template_id
 		where section.public_id=$1 and section.mod_id=$2 and section.parent_id is null and section.status='active'
 		and version.public_id=$3 for update`, snapshot.PublicID, snapshot.ModID, layout.VersionPublicID).
-		Scan(&rootID, &versionID, &templateID, &displayMode); err != nil {
+		Scan(&rootID, &versionID, &templateID, &templateCode, &defaultDisplayMode); err != nil {
 		return err
 	}
+	displayMode := lockedModContentDisplayMode(templateCode, defaultDisplayMode, layout.DisplayMode)
 
 	existingRows, err := tx.Query(ctx, `with recursive subtree as (
 			select id,public_id from mod_content_sections where id=$1
@@ -623,8 +697,8 @@ func publishModContentLayoutTx(ctx context.Context, tx pgx.Tx, revisionID int64,
 			return err
 		}
 	}
-	_, err = tx.Exec(ctx, `update mod_content_sections set published_revision_id=$2,updated_by=$3,updated_at=now()
-		where id=$1`, rootID, revisionID, actorID)
+	_, err = tx.Exec(ctx, `update mod_content_sections set display_mode=$2,published_revision_id=$3,updated_by=$4,updated_at=now()
+		where id=$1`, rootID, displayMode, revisionID, actorID)
 	return err
 }
 
@@ -636,8 +710,9 @@ type modContentLayoutPublishResource struct {
 }
 
 type modContentLayoutPublishedPlacement struct {
-	SectionID int64
-	Ordinal   int32
+	SectionID      int64
+	Ordinal        int32
+	SimilarGroupID string
 }
 
 func publishModContentLayoutResourcesTx(
@@ -651,7 +726,7 @@ func publishModContentLayoutResourcesTx(
 		select id from mod_content_sections where id=$1
 		union all select child.id from mod_content_sections child join subtree parent on child.parent_id=parent.id
 		)
-		select placement.resource_id,placement.section_id,placement.ordinal
+		select placement.resource_id,placement.section_id,placement.ordinal,placement.similar_group_id
 		from mod_content_section_resources placement
 		where placement.version_id=$2 and placement.section_id in(select id from subtree)`, rootSectionID, versionID)
 	if err != nil {
@@ -661,7 +736,7 @@ func publishModContentLayoutResourcesTx(
 	for existingPlacementRows.Next() {
 		var resourceID int64
 		var placement modContentLayoutPublishedPlacement
-		if err = existingPlacementRows.Scan(&resourceID, &placement.SectionID, &placement.Ordinal); err != nil {
+		if err = existingPlacementRows.Scan(&resourceID, &placement.SectionID, &placement.Ordinal, &placement.SimilarGroupID); err != nil {
 			existingPlacementRows.Close()
 			return err
 		}
@@ -719,6 +794,7 @@ func publishModContentLayoutResourcesTx(
 	placementSectionIDs := make([]int64, 0, len(resources))
 	placementResourceIDs := make([]int64, 0, len(resources))
 	placementOrdinals := make([]int32, 0, len(resources))
+	placementSimilarGroupIDs := make([]string, 0, len(resources))
 	desiredResourceIDs := make(map[int64]struct{}, len(resources))
 	deletePlacementIDs := make(map[int64]struct{})
 	advancementResourceIDs := make([]int64, 0, len(resources))
@@ -732,13 +808,15 @@ func publishModContentLayoutResourcesTx(
 		desiredResourceIDs[resource.ID] = struct{}{}
 		desiredOrdinal := int32(edit.Ordinal)
 		currentPlacement, placementExists := existingPlacements[resource.ID]
-		if !placementExists || currentPlacement.SectionID != sectionID || currentPlacement.Ordinal != desiredOrdinal {
+		if !placementExists || currentPlacement.SectionID != sectionID || currentPlacement.Ordinal != desiredOrdinal ||
+			currentPlacement.SimilarGroupID != edit.SimilarGroupID {
 			if placementExists {
 				deletePlacementIDs[resource.ID] = struct{}{}
 			}
 			placementSectionIDs = append(placementSectionIDs, sectionID)
 			placementResourceIDs = append(placementResourceIDs, resource.ID)
 			placementOrdinals = append(placementOrdinals, desiredOrdinal)
+			placementSimilarGroupIDs = append(placementSimilarGroupIDs, edit.SimilarGroupID)
 		}
 		if edit.Advancement == nil {
 			continue
@@ -767,7 +845,8 @@ func publishModContentLayoutResourcesTx(
 		display, _ := definition["display"].(map[string]any)
 		currentX, hasCurrentX := display["x"].(float64)
 		currentY, hasCurrentY := display["y"].(float64)
-		if currentParentCanonicalID == parentCanonicalID && hasCurrentX && hasCurrentY &&
+		currentGroupID, _ := definition["layoutGroupId"].(string)
+		if currentParentCanonicalID == parentCanonicalID && currentGroupID == edit.Advancement.GroupID && hasCurrentX && hasCurrentY &&
 			currentX == edit.Advancement.X && currentY == edit.Advancement.Y {
 			continue
 		}
@@ -784,6 +863,7 @@ func publishModContentLayoutResourcesTx(
 		display["x"] = edit.Advancement.X
 		display["y"] = edit.Advancement.Y
 		definition["display"] = display
+		definition["layoutGroupId"] = edit.Advancement.GroupID
 		encoded, encodeErr := json.Marshal(definition)
 		if encodeErr != nil {
 			return encodeErr
@@ -807,10 +887,10 @@ func publishModContentLayoutResourcesTx(
 		}
 	}
 	if len(placementResourceIDs) > 0 {
-		if _, err = tx.Exec(ctx, `insert into mod_content_section_resources(section_id,version_id,resource_id,ordinal,placement_source)
-			select input.section_id,$2,input.resource_id,input.ordinal,'manual'
-			from unnest($1::bigint[],$3::bigint[],$4::integer[]) as input(section_id,resource_id,ordinal)`,
-			placementSectionIDs, versionID, placementResourceIDs, placementOrdinals); err != nil {
+		if _, err = tx.Exec(ctx, `insert into mod_content_section_resources(section_id,version_id,resource_id,ordinal,similar_group_id,placement_source)
+			select input.section_id,$2,input.resource_id,input.ordinal,input.similar_group_id,'manual'
+			from unnest($1::bigint[],$3::bigint[],$4::integer[],$5::text[]) as input(section_id,resource_id,ordinal,similar_group_id)`,
+			placementSectionIDs, versionID, placementResourceIDs, placementOrdinals, placementSimilarGroupIDs); err != nil {
 			return err
 		}
 	}
@@ -831,19 +911,12 @@ func publishModContentLayoutResourcesTx(
 	return nil
 }
 
-func validateModContentResourceSectionTx(ctx context.Context, tx pgx.Tx, modID, versionID int64, kindCode string, sectionPublicID *string) error {
-	return validateModContentResourceSection(ctx, tx, modID, versionID, kindCode, sectionPublicID)
-}
-
 func validateModContentResourceSection(ctx context.Context, db modContentQueryRower, modID, versionID int64, kindCode string, sectionPublicID *string) error {
 	if sectionPublicID == nil || *sectionPublicID == "" {
 		return nil
 	}
 	var definition []byte
-	if err := db.QueryRow(ctx, `select template.definition from mod_content_sections section
-		join mod_content_templates template on template.id=section.template_id
-		where section.public_id=$1 and section.mod_id=$2 and section.version_id=$3 and section.status='active'`,
-		*sectionPublicID, modID, versionID).Scan(&definition); err != nil {
+	if err := loadModContentSectionDefinition(ctx, db, modID, versionID, *sectionPublicID, &definition); err != nil {
 		return err
 	}
 	var template struct {
@@ -891,6 +964,14 @@ func moveModContentResourceToSectionTx(ctx context.Context, tx pgx.Tx, revisionI
 			return representativeErr
 		}
 	}
+	var sourceSectionID int64
+	var similarGroupID string
+	groupErr := tx.QueryRow(ctx, `select section_id,similar_group_id from mod_content_section_resources
+		where version_id=$1 and resource_id in ($2,$3) order by resource_id=$3 desc limit 1`,
+		versionID, resourceID, placementResourceID).Scan(&sourceSectionID, &similarGroupID)
+	if groupErr != nil && !errors.Is(groupErr, pgx.ErrNoRows) {
+		return groupErr
+	}
 	deleteLogicalPlacement := func() error {
 		_, deleteErr := tx.Exec(ctx, `delete from mod_content_section_resources placement
 			using mod_content_sections section,game_resources candidate
@@ -933,6 +1014,9 @@ func moveModContentResourceToSectionTx(ctx context.Context, tx pgx.Tx, revisionI
 			(select id from ancestors where parent_id is null limit 1)`, sectionPublicID, modID, versionID).Scan(&targetID, &rootID); err != nil {
 		return err
 	}
+	if sourceSectionID != targetID {
+		similarGroupID = ""
+	}
 	if err := deleteLogicalPlacement(); err != nil {
 		return err
 	}
@@ -941,8 +1025,8 @@ func moveModContentResourceToSectionTx(ctx context.Context, tx pgx.Tx, revisionI
 		where section_id=$1 and version_id=$2`, targetID, versionID).Scan(&ordinal); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `insert into mod_content_section_resources(section_id,version_id,resource_id,ordinal,placement_source)
-		values($1,$2,$3,$4,'manual')`, targetID, versionID, placementResourceID, ordinal); err != nil {
+	if _, err := tx.Exec(ctx, `insert into mod_content_section_resources(section_id,version_id,resource_id,ordinal,similar_group_id,placement_source)
+		values($1,$2,$3,$4,$5,'manual')`, targetID, versionID, placementResourceID, ordinal, similarGroupID); err != nil {
 		return err
 	}
 	_, err := tx.Exec(ctx, `update mod_content_sections set published_revision_id=$2,updated_by=$3,updated_at=now()

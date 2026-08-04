@@ -196,7 +196,7 @@ func (s *Server) modRevisionHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load mod")
 		return
 	}
-	canSeePending := canEditMod(claims, identity) || hasPermission(claims.Permissions, "project.review")
+	canSeePending := canEditMod(claims, identity) || claimsAllow(claims, "project.review")
 	rows, err := s.db.Query(r.Context(), modRevisionSelect+`
 		where revision.aggregate_type='mod' and revision.aggregate_key=$1 and ($2 or request.status='approved')
 		order by revision.revision_no desc`, identity.UniqueID, canSeePending)
@@ -244,7 +244,7 @@ func (s *Server) compareModRevisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
-	canSeePending := canEditMod(claims, identity) || hasPermission(claims.Permissions, "project.review")
+	canSeePending := canEditMod(claims, identity) || claimsAllow(claims, "project.review")
 	if !canSeePending && (before.Status != "approved" || after.Status != "approved") {
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
@@ -371,14 +371,14 @@ func canEditMod(claims security.Claims, identity modIdentityRecord) bool {
 	if identity.OwnerID != nil && claims.Subject != 0 && *identity.OwnerID == claims.Subject {
 		return true
 	}
-	return hasPermission(claims.Permissions, "project.edit") ||
-		hasPermission(claims.Permissions, "project.edit."+identity.UniqueID) ||
-		hasPermission(claims.Permissions, "project.editor."+identity.UniqueID) ||
-		hasPermission(claims.Permissions, "project.owner."+identity.UniqueID)
+	return claimsAllow(claims, "project.edit") ||
+		claimsAllow(claims, "project.edit."+identity.UniqueID) ||
+		claimsAllow(claims, "project.editor."+identity.UniqueID) ||
+		claimsAllow(claims, "project.owner."+identity.UniqueID)
 }
 
 func canSkipProjectReview(claims security.Claims, identity modIdentityRecord) bool {
-	return hasPermission(claims.Permissions, "project.no-review."+identity.UniqueID)
+	return claimsAllow(claims, "project.no-review."+identity.UniqueID)
 }
 
 const modRevisionSelect = `select
@@ -435,22 +435,16 @@ func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, s
 	if err := ensureModSiteIDAvailable(ctx, tx, snapshot.SiteID, modID); err != nil {
 		return err
 	}
-	if len(snapshot.Compatibilities) == 0 && len(snapshot.SupportedLoaders) > 0 {
-		for _, loader := range snapshot.SupportedLoaders {
-			snapshot.Compatibilities = append(snapshot.Compatibilities, modLoaderCompatibilityPayload{Loader: loader, Versions: append([]string(nil), snapshot.SupportedVersions...)})
-		}
-	}
-	snapshot.SupportedLoaders, snapshot.SupportedVersions = compatibilitySummary(snapshot.Compatibilities)
 	_, err := tx.Exec(ctx, `update mods set
-		primary_name=$2,secondary_name=$3,abbreviation=$4,summary=$5,mod_id=$6,environment=$7,
-		primary_category=$8,official_status=$9,source_status=$10,license=$11,curseforge_project_id=$12,
-		modrinth_project_id=$13,github_project_path=$14,icon_url=$15,body_markdown=$16,search_keywords=$17,submission_method=$18,
-		review_status='approved',published_revision_id=$19,supported_versions=$20,supported_loaders=$21,
-		slug=$22,published_at=coalesce(published_at,now()),updated_at=now() where id=$1`,
-		modID, snapshot.PrimaryName, snapshot.SecondaryName, snapshot.Abbreviation, snapshot.Summary, snapshot.ModID,
+		primary_name=$2,secondary_name=$3,abbreviation=$4,summary=$5,environment=$6,
+		primary_category=$7,official_status=$8,source_status=$9,license=$10,curseforge_project_id=$11,
+		modrinth_project_id=$12,github_project_path=$13,icon_url=$14,body_markdown=$15,search_keywords=$16,submission_method=$17,
+		review_status='approved',published_revision_id=$18,
+		slug=$19,published_at=coalesce(published_at,now()),updated_at=now() where id=$1`,
+		modID, snapshot.PrimaryName, snapshot.SecondaryName, snapshot.Abbreviation, snapshot.Summary,
 		snapshot.Environment, snapshot.PrimaryCategory, snapshot.OfficialStatus, snapshot.SourceStatus, snapshot.License,
 		snapshot.CurseForgeProjectID, snapshot.ModrinthProjectID, snapshot.GitHubProjectPath, snapshot.IconURL, snapshot.BodyMarkdown,
-		snapshot.SearchKeywords, snapshot.SubmissionMethod, revisionID, snapshot.SupportedVersions, snapshot.SupportedLoaders, snapshot.SiteID,
+		snapshot.SearchKeywords, snapshot.SubmissionMethod, revisionID, snapshot.SiteID,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {

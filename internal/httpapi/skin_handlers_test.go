@@ -46,7 +46,7 @@ func TestSkinAssetJSONCompatibilityAliases(t *testing.T) {
 	t.Parallel()
 	record := skinAssetRecord{
 		PublicID: "abc234567", OwnerID: 7, OwnerPublicID: "def234567", OwnerName: "owner",
-		OwnerDisplay: "Owner", BlobHash: "hash", Kind: "skin", Model: "default", DisplayName: "Example",
+		BlobHash: "hash", Kind: "skin", Model: "default", DisplayName: "Example",
 		Visibility: "public", ReviewStatus: "approved", Status: "active",
 	}
 	payload := skinAssetJSON(record, 7)

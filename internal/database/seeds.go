@@ -20,7 +20,6 @@ type seedPermission struct {
 type seedUser struct {
 	Username    string
 	Email       string
-	DisplayName string
 	Status      string
 	Permissions []string
 }
@@ -116,10 +115,9 @@ var seedPermissions = []seedPermission{
 
 var seedUsers = []seedUser{
 	{
-		Username:    "admin",
-		Email:       "admin@mcmods.cn",
-		DisplayName: "Administrator",
-		Status:      "active",
+		Username: "admin",
+		Email:    "admin@mcmods.cn",
+		Status:   "active",
 		Permissions: []string{
 			"admin.*", "admin.access", "admin.config.read", "admin.config.write",
 			"user.read", "user.write", "permission.read", "permission.write",
@@ -138,16 +136,14 @@ var seedUsers = []seedUser{
 		},
 	},
 	{
-		Username:    "guest",
-		Email:       "guest@mcmods.cn",
-		DisplayName: "Guest",
-		Status:      "active",
+		Username: "guest",
+		Email:    "guest@mcmods.cn",
+		Status:   "active",
 	},
 	{
-		Username:    "deleted_user",
-		Email:       "deleted-user@mcmods.cn",
-		DisplayName: "Deleted User",
-		Status:      "deleted",
+		Username: "deleted_user",
+		Email:    "deleted-user@mcmods.cn",
+		Status:   "deleted",
 	},
 }
 
@@ -181,18 +177,16 @@ func seedDefaultUsers(ctx context.Context, db *pgxpool.Pool) error {
 		var userID int64
 		err = db.QueryRow(
 			ctx,
-			`insert into users (username, email, display_name, password_hash, email_verified, status)
-			 values ($1, $2, $3, $4, true, $5)
+			`insert into users (username, email, password_hash, email_verified, status)
+			 values ($1, $2, $3, true, $4)
 			 on conflict (username) do update
 			 set email = excluded.email,
-			     display_name = excluded.display_name,
 			     status = excluded.status,
-			     password_hash = case when $6 then excluded.password_hash else users.password_hash end,
+			     password_hash = case when $5 then excluded.password_hash else users.password_hash end,
 			     updated_at = now()
 			 returning id`,
 			user.Username,
 			user.Email,
-			user.DisplayName,
 			passwordHash,
 			user.Status,
 			updatePassword,

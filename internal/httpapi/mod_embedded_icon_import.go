@@ -233,18 +233,22 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
+	if cleanupDuplicate {
+		if _, err = tx.Exec(r.Context(), `update catalog_import_packages set archive_file_id=null where id=$1 and archive_file_id=$2`, packageID, archiveFileID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to detach duplicate catalog archive")
+			return
+		}
+		if err = s.tombstoneOSSFileTx(r.Context(), tx, archiveFileID, "duplicate-catalog-import"); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to queue duplicate catalog archive deletion")
+			return
+		}
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit catalog import job")
 		return
 	}
 	if shouldPublish {
 		s.dispatchModExportJob(r.Context(), jobID)
-	} else if cleanupDuplicate {
-		if client, cfg, clientErr := s.ossClient(r.Context()); clientErr == nil {
-			_, _ = client.DeleteObject(r.Context(), &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey)})
-		}
-		_, _ = s.db.Exec(r.Context(), `update oss_files set status='deleted',updated_at=now() where id=$1`, archiveFileID)
-		_, _ = s.db.Exec(r.Context(), `update catalog_import_packages set archive_file_id=null where id=$1 and archive_file_id=$2`, packageID, archiveFileID)
 	}
 	response, _ := s.modExportJobByID(r.Context(), jobID, identity.ID)
 	response.Deduplicated = deduplicated
@@ -468,13 +472,13 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 		if tag.RowsAffected() == 0 {
 			return errModExportLeaseLost
 		}
-		_, updateErr = tx.Exec(ctx, `update catalog_import_packages set imported_at=now() where id=$1`, packageID)
-		return updateErr
+		if _, updateErr = tx.Exec(ctx, `update catalog_import_packages set imported_at=now() where id=$1`, packageID); updateErr != nil {
+			return updateErr
+		}
+		return s.tombstoneOSSFileTx(ctx, tx, sourceFileID, "catalog-import-consumed")
 	}); err != nil {
 		return err
 	}
-	_, _ = client.DeleteObject(context.Background(), &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey)})
-	_, _ = s.db.Exec(context.Background(), `update oss_files set status='deleted',updated_at=now() where id=$1`, sourceFileID)
 	s.notifyModExportResult(context.Background(), jobID, "ready", nil)
 	return nil
 }

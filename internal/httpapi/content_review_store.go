@@ -93,7 +93,7 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 		return result, fmt.Errorf("insert content revision: %w", err)
 	}
 
-	metadata, err := json.Marshal(nonNilMap(params.Metadata))
+	metadata, err := json.Marshal(nonNilJSONObject(params.Metadata))
 	if err != nil {
 		return result, fmt.Errorf("encode change request metadata: %w", err)
 	}
@@ -199,7 +199,7 @@ type auditEventParams struct {
 }
 
 func appendAuditEventTx(ctx context.Context, tx pgx.Tx, params auditEventParams) error {
-	metadata, err := json.Marshal(nonNilMap(params.Metadata))
+	metadata, err := json.Marshal(nonNilJSONObject(params.Metadata))
 	if err != nil {
 		return err
 	}
@@ -352,11 +352,4 @@ func auditRequestValues(r *http.Request) (ip, userAgent, traceID string) {
 		return "", "", ""
 	}
 	return requestIP(r), r.UserAgent(), strings.TrimSpace(r.Header.Get("X-Request-ID"))
-}
-
-func nonNilMap(value map[string]any) map[string]any {
-	if value == nil {
-		return map[string]any{}
-	}
-	return value
 }

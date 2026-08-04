@@ -312,7 +312,7 @@ func importExportRecipeTypes(ctx context.Context, tx pgx.Tx, packageID string, r
 			recipeIdentityValue.ID, revisionID, recipeIndex.RecipeID, recipeIndex.RecipeIDSource, recipeKey,
 			recipeIndex.RecipeCollection, recipeIndex.OriginKind, recipeIndex.UnderlyingRecipeTypeID,
 			recipeIndex.SourceModID, recipeIndex.SourceModVersion, recipeIndex.SourceModIDSource,
-			recipeIndex.LayoutKind, nullableRecipeOrdered(recipeIndex.Ordered),
+			recipeIndex.LayoutKind, recipeImportOptional(recipeIndex.Ordered),
 			recipeIndex.LayoutClassificationSource, recipeIndex.Width, recipeIndex.Height)
 		queued += 3
 	}
@@ -1056,13 +1056,6 @@ func validateExportRecipeChance(binding exportJEIBinding) error {
 		return fmt.Errorf("chance_percent must be between 0 and 100")
 	}
 	return nil
-}
-
-func nullableRecipeOrdered(value *bool) any {
-	if value == nil {
-		return nil
-	}
-	return *value
 }
 
 func canonicalExportRecipeBinding(binding exportJEIRecipeBinding) ([]byte, error) {

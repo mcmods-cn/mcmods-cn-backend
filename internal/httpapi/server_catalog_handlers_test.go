@@ -18,7 +18,7 @@ func TestNormalizeAndValidateServerRequest(t *testing.T) {
 		ProofText:         "Control panel screenshot",
 		ProofFileIDs:      []string{"abc123def"},
 	}
-	if err := normalizeAndValidateServerRequest(&request, defaultServerCatalogSettings()); err != nil {
+	if err := normalizeAndValidateServerRequest(&request, defaultServerCatalogSettings(), true); err != nil {
 		t.Fatal(err)
 	}
 	if request.Name != "Example Server" || request.PrimaryTag != "rpg" ||
@@ -38,8 +38,45 @@ func TestNormalizeAndValidateServerRequestRejectsMarkdownSizedSummary(t *testing
 		ProofText:         "proof",
 		ProofFileIDs:      []string{"abc123def"},
 	}
-	if err := normalizeAndValidateServerRequest(&request, defaultServerCatalogSettings()); err == nil {
+	if err := normalizeAndValidateServerRequest(&request, defaultServerCatalogSettings(), true); err == nil {
 		t.Fatal("oversized summary was accepted")
+	}
+}
+
+func TestNormalizeAndValidateServerRequestAllowsNoProofWhenReviewDisabled(t *testing.T) {
+	request := createMinecraftServerRequest{
+		Address:           "play.example.net",
+		Name:              "Example",
+		MinecraftVersions: []string{"1.21.1"},
+		Languages:         []string{"zh-CN"},
+		PrimaryTag:        "survival",
+		ProofText:         "must be discarded",
+		ProofFileIDs:      []string{"abc123def"},
+	}
+	if err := normalizeAndValidateServerRequest(&request, defaultServerCatalogSettings(), false); err != nil {
+		t.Fatal(err)
+	}
+	if request.ProofText != "" || len(request.ProofFileIDs) != 0 {
+		t.Fatalf("disabled review retained proof data: %#v", request)
+	}
+}
+
+func TestNormalizeAndValidateServerRequestRequiresProofWhenReviewEnabled(t *testing.T) {
+	request := createMinecraftServerRequest{
+		Address:           "play.example.net",
+		Name:              "Example",
+		MinecraftVersions: []string{"1.21.1"},
+		Languages:         []string{"zh-CN"},
+		PrimaryTag:        "survival",
+	}
+	if err := normalizeAndValidateServerRequest(&request, defaultServerCatalogSettings(), true); err == nil {
+		t.Fatal("review-enabled server request without proof was accepted")
+	}
+}
+
+func TestDefaultReviewConfigRequiresServerCreationReview(t *testing.T) {
+	if !defaultReviewConfig().ServerCreate {
+		t.Fatal("server creation review must be enabled by default")
 	}
 }
 

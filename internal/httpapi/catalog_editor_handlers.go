@@ -50,7 +50,7 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		join catalog_entities entity on entity.id=resource.entity_id
 		left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
 		where entity.status='active' and ($1='' or resource.kind_code=$1) and ($3='' or resource.namespace=$3) and
-		($2='' or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations localization
+		($2='' or entity.public_id=$2 or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations localization
 		 where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$2||'%')
 		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$2||'%')`, kindCode, query, registry).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count resources")
@@ -66,7 +66,7 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		 where candidate.catalog_entity_id=entity.id and candidate.name<>''),'{}'::jsonb),
 		coalesce((select jsonb_object_agg(candidate.locale,candidate.provenance) from content_localizations candidate
 		 where candidate.catalog_entity_id=entity.id and candidate.name<>''),'{}'::jsonb),
-		coalesce(owner.project_code,''),coalesce(owner.slug,''),coalesce(owner.primary_name,'')
+		coalesce(owner.project_code,''),coalesce(owner.slug,''),coalesce(owner.primary_name,''),coalesce(imported.icon_path,'')
 		from game_resources resource join catalog_entities entity on entity.id=resource.entity_id
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 		left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
@@ -74,7 +74,7 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		left join lateral (select candidate.* from content_localizations candidate where candidate.catalog_entity_id=entity.id
 			 order by case candidate.locale when $4 then 0 when $5 then 1 when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
 		where entity.status='active' and ($1='' or resource.kind_code=$1) and ($3='' or resource.namespace=$3) and
-		($2='' or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations candidate
+		($2='' or entity.public_id=$2 or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations candidate
 		 where candidate.catalog_entity_id=entity.id and candidate.name ilike '%'||$2||'%')
 		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$2||'%')
 		order by resource.kind_code,resource.canonical_id limit $6 offset $7`, kindCode, query, registry, primary, secondary, limit, offset)
@@ -87,19 +87,17 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var entityID int64
 		var publicID, kind, canonicalID, namespace, defaultLocale, contentLocale, name string
-		var ownerPublicID, ownerSiteID, ownerName string
+		var ownerPublicID, ownerSiteID, ownerName, importedIconPath string
 		var names, provenances []byte
 		var revisionID sql.NullString
 		var iconID, renderID sql.NullString
 		if err = rows.Scan(&entityID, &publicID, &kind, &canonicalID, &namespace, &defaultLocale, &revisionID, &contentLocale, &name,
-			&iconID, &renderID, &names, &provenances, &ownerPublicID, &ownerSiteID, &ownerName); err != nil {
+			&iconID, &renderID, &names, &provenances, &ownerPublicID, &ownerSiteID, &ownerName, &importedIconPath); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode resource")
 			return
 		}
-		iconURL, renderURL := "", ""
-		if iconID.Valid {
-			iconURL = "/api/v1/catalog/resources/" + publicID + "/icon"
-		}
+		iconURL := catalogRecipeResourceIconURL(publicID, iconID.String, "", importedIconPath)
+		renderURL := ""
 		if renderID.Valid {
 			renderURL = "/api/v1/catalog/resources/" + publicID + "/render"
 		}
@@ -135,21 +133,6 @@ func catalogLocalizationProvenance(raw []byte, locale, name string) string {
 }
 
 func (s *Server) createCatalogResource(w http.ResponseWriter, r *http.Request) {
-	var ownerModID *int64
-	var ownerModPublicID string
-	if siteID := strings.TrimSpace(r.PathValue("siteId")); siteID != "" {
-		identity, err := s.modIdentity(r.Context(), siteID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "mod not found")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to read mod")
-			return
-		}
-		ownerModID = &identity.ID
-		ownerModPublicID = identity.UniqueID
-	}
 	var edit catalogResourceEdit
 	if decodeJSON(r, &edit) != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -177,8 +160,7 @@ func (s *Server) createCatalogResource(w http.ResponseWriter, r *http.Request) {
 	edit.CanonicalID = resolvedIdentity.CanonicalID
 	catalogIdentity := resolvedIdentity.catalogIdentity
 	snapshot := catalogEditorSnapshot{Operation: "create", Reason: edit.Reason, Kind: "resource", IdentityKey: catalogIdentity.ID,
-		PublicID: catalogIdentity.PublicID, OwnerModID: ownerModID, OwnerModPublicID: ownerModPublicID,
-		DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, Resource: &edit}
+		PublicID: catalogIdentity.PublicID, DefaultLocale: edit.DefaultLocale, Localizations: edit.Localizations, Resource: &edit}
 	result, err := s.submitCatalogEditorMutation(r, snapshot, nil)
 	writeCatalogMutationResult(w, result, err)
 }
@@ -189,11 +171,7 @@ func (s *Server) catalogResourceDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "resource not found")
 		return
 	}
-	if r.Method == http.MethodGet {
-		s.writeCatalogResourceDetail(w, r, entity)
-		return
-	}
-	writeError(w, http.StatusMethodNotAllowed, "global resource identities are immutable; edit the mod's versioned resource detail instead")
+	s.writeCatalogResourceDetail(w, r, entity)
 }
 
 func normalizeCatalogResourceEdit(ctx context.Context, query modContentTemplateRows, edit *catalogResourceEdit) error {
@@ -210,7 +188,7 @@ func normalizeCatalogResourceEdit(ctx context.Context, query modContentTemplateR
 	if err != nil {
 		return err
 	}
-	edit.Definition = nonNilCatalogDefinition(edit.Definition)
+	edit.Definition = nonNilJSONObject(edit.Definition)
 	edit.Definition, err = canonicalizeGlobalCatalogResourceDefinition(ctx, query, edit.KindCode, edit.CanonicalID, edit.Definition)
 	if err != nil {
 		return err
@@ -647,7 +625,7 @@ func normalizeCatalogRecipeTypeEdit(edit *catalogRecipeTypeEdit) error {
 		return errCatalogEditorInvalid
 	}
 	edit.DefaultLocale, edit.Localizations, err = normalizeCatalogLocalizations(edit.DefaultLocale, edit.Localizations)
-	edit.Definition = nonNilCatalogDefinition(edit.Definition)
+	edit.Definition = nonNilJSONObject(edit.Definition)
 	return err
 }
 
@@ -805,7 +783,7 @@ func normalizeCatalogTemplateEdit(edit *catalogRecipeTemplateEdit) error {
 	if err != nil {
 		return err
 	}
-	edit.Definition = nonNilCatalogDefinition(edit.Definition)
+	edit.Definition = nonNilJSONObject(edit.Definition)
 	return validateCatalogTemplate(edit)
 }
 
@@ -1238,13 +1216,6 @@ func writeCatalogMutationResult(w http.ResponseWriter, result catalogEditResult,
 	writeJSON(w, http.StatusAccepted, result)
 }
 
-func nullableCatalogInt64(value sql.NullInt64) any {
-	if !value.Valid {
-		return nil
-	}
-	return value.Int64
-}
-
 func nullableCatalogString(value sql.NullString) any {
 	if !value.Valid {
 		return nil
@@ -1496,7 +1467,11 @@ func (s *Server) catalogTemplateSlotRows(ctx context.Context, templateID int64) 
 		if err = rows.Scan(&key, &role, &outputIndex, &ordinal, &x, &y, &width, &height, &definition); err != nil {
 			return nil, err
 		}
-		items = append(items, map[string]any{"slotKey": key, "role": role, "outputIndex": nullableCatalogInt64(outputIndex), "ordinal": ordinal,
+		var outputIndexValue any
+		if outputIndex.Valid {
+			outputIndexValue = outputIndex.Int64
+		}
+		items = append(items, map[string]any{"slotKey": key, "role": role, "outputIndex": outputIndexValue, "ordinal": ordinal,
 			"rect": map[string]any{"x": x, "y": y, "width": width, "height": height}, "definition": json.RawMessage(definition)})
 	}
 	return items, rows.Err()
@@ -1619,7 +1594,7 @@ func (s *Server) catalogRecipeCandidateRows(ctx context.Context, bindingID int64
 }
 
 func catalogRecipeResourceIconURL(publicID, iconFileID, revisionID, iconPath string) string {
-	if publicID != "" && iconFileID != "" {
+	if publicID != "" && (iconFileID != "" || iconPath != "") {
 		return "/api/v1/catalog/resources/" + url.PathEscape(publicID) + "/icon"
 	}
 	if revisionID != "" && iconPath != "" {

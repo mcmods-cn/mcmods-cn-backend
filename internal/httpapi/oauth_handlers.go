@@ -36,7 +36,6 @@ type oauthProviderProfile struct {
 	Provider       string
 	ProviderUserID string
 	Username       string
-	DisplayName    string
 	Email          string
 	EmailVerified  bool
 	AvatarURL      string
@@ -115,7 +114,6 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "第三方账号登录失败")
 		return
 	}
-	user.Roles, user.Permissions = s.userGrants(r.Context(), user.ID)
 	_, _ = s.db.Exec(r.Context(), `update users set last_login_at = now(), updated_at = now() where id = $1`, user.ID)
 	s.recordLogin(r.Context(), &user.ID, profile.Provider+":"+profile.ProviderUserID, location, r.UserAgent(), true, "oauth_"+profile.Provider)
 	token, err := s.issueToken(r.Context(), user)
@@ -340,7 +338,6 @@ func fetchGitHubProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 		Provider:       "github",
 		ProviderUserID: fmt.Sprintf("%d", user.ID),
 		Username:       user.Login,
-		DisplayName:    defaultString(user.Name, user.Login),
 		Email:          user.Email,
 		EmailVerified:  user.Email != "",
 		AvatarURL:      user.AvatarURL,
@@ -442,7 +439,6 @@ func fetchGoogleProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 		Provider:       "google",
 		ProviderUserID: user.Sub,
 		Username:       strings.Split(defaultString(user.Email, user.Sub), "@")[0],
-		DisplayName:    defaultString(user.Name, user.Email),
 		Email:          verifiedEmail,
 		EmailVerified:  user.EmailVerified && verifiedEmail != "",
 		AvatarURL:      user.Picture,
@@ -503,7 +499,6 @@ func fetchQQProfile(ctx context.Context, cfg oauthProviderConfig, code string) (
 		Provider:       "qq",
 		ProviderUserID: openIDResp.OpenID,
 		Username:       "qq_" + openIDResp.OpenID,
-		DisplayName:    user.Nickname,
 		AvatarURL:      user.Figure,
 	}, nil
 }
@@ -546,7 +541,6 @@ func fetchWeChatProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 		Provider:       "wechat",
 		ProviderUserID: providerID,
 		Username:       "wechat_" + providerID,
-		DisplayName:    user.Nickname,
 		AvatarURL:      user.HeadImg,
 	}, nil
 }
@@ -606,13 +600,13 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProvide
 	created := false
 	err := s.db.QueryRow(
 		ctx,
-		`select u.id, u.public_id, u.username, u.email, u.display_name, u.email_verified, u.status, u.created_at, u.last_login_at, u.avatar_url, u.signature
+		`select u.id, u.public_id, u.username, u.email, u.email_verified, u.status, u.created_at, u.last_login_at, u.avatar_url, u.signature
 		 from oauth_accounts oa
 		 join users u on u.id = oa.user_id
 		 where oa.provider = $1 and oa.provider_user_id = $2`,
 		profile.Provider,
 		profile.ProviderUserID,
-	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
+	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
 	if err == nil {
 		return user, nil
 	}
@@ -630,13 +624,13 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProvide
 	}
 	err = tx.QueryRow(
 		ctx,
-		`select u.id,u.public_id,u.username,u.email,u.display_name,u.email_verified,u.status,u.created_at,u.last_login_at,u.avatar_url,u.signature
+		`select u.id,u.public_id,u.username,u.email,u.email_verified,u.status,u.created_at,u.last_login_at,u.avatar_url,u.signature
 		 from oauth_accounts oa
 		 join users u on u.id=oa.user_id
 		 where oa.provider=$1 and oa.provider_user_id=$2`,
 		profile.Provider,
 		profile.ProviderUserID,
-	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
+	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
 	if err == nil {
 		if err = tx.Commit(ctx); err != nil {
 			return user, err
@@ -649,10 +643,10 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProvide
 	if profile.EmailVerified && strings.TrimSpace(profile.Email) != "" {
 		err = tx.QueryRow(
 			ctx,
-			`select id,public_id,username,email,display_name,email_verified,status,created_at,last_login_at,avatar_url,signature
+			`select id,public_id,username,email,email_verified,status,created_at,last_login_at,avatar_url,signature
 			 from users where lower(email)=lower($1)`,
 			profile.Email,
-		).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
+		).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
 		if err != nil && err != pgx.ErrNoRows {
 			return user, err
 		}
@@ -667,19 +661,18 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProvide
 		err = tx.QueryRow(
 			ctx,
 			`insert into users (
-				username, email, display_name, password_hash, email_verified, status,
+				username, email, password_hash, email_verified, status,
 				registration_ip, registration_country_code, registration_city
 			 )
-			 values ($1, $2, $3, 'oauth-login-disabled', $4, 'active', $5, $6, $7)
-			 returning id, public_id, username, email, display_name, email_verified, status, created_at, last_login_at`,
+			 values ($1, $2, 'oauth-login-disabled', $3, 'active', $4, $5, $6)
+			 returning id, public_id, username, email, email_verified, status, created_at, last_login_at`,
 			username,
 			email,
-			defaultString(profile.DisplayName, username),
 			profile.EmailVerified,
 			location.IP,
 			location.CountryCode,
 			location.City,
-		).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
+		).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
 		if err != nil {
 			return user, err
 		}

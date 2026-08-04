@@ -1,6 +1,10 @@
 package httpapi
 
-import "testing"
+import (
+	"testing"
+
+	"mcmods-cn-backend/internal/security"
+)
 
 func TestMatchRoleTemplateCode(t *testing.T) {
 	tests := []struct {
@@ -69,20 +73,20 @@ func TestApplyRoleVariables(t *testing.T) {
 func TestPermissionCandidatePriority(t *testing.T) {
 	candidates := map[string]permissionCandidate{}
 	applyPermissionCandidate(candidates, permissionCandidate{
-		effectivePermission: effectivePermission{Code: "project.edit.*", Allow: true, Priority: 10, Source: "group.editor"},
-		Depth:               0,
+		PermissionRule: security.PermissionRule{Code: "project.edit.*", Allow: true, Priority: 10, Source: "group.editor"},
+		Depth:          0,
 	})
 	applyPermissionCandidate(candidates, permissionCandidate{
-		effectivePermission: effectivePermission{Code: "project.edit.*", Allow: false, Priority: 10, Source: "group.restricted"},
-		Depth:               0,
+		PermissionRule: security.PermissionRule{Code: "project.edit.*", Allow: false, Priority: 10, Source: "group.restricted"},
+		Depth:          0,
 	})
 	if candidates["project.edit.*"].Allow {
 		t.Fatal("deny must win when role priority and depth are equal")
 	}
 
 	applyPermissionCandidate(candidates, permissionCandidate{
-		effectivePermission: effectivePermission{Code: "project.edit.*", Allow: true, Priority: directUserPermissionPriority, Source: "user"},
-		Depth:               -1,
+		PermissionRule: security.PermissionRule{Code: "project.edit.*", Allow: true, Priority: directUserPermissionPriority, Source: "user"},
+		Depth:          -1,
 	})
 	got := candidates["project.edit.*"]
 	if !got.Allow || got.Source != "user" {

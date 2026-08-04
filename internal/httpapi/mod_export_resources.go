@@ -37,7 +37,10 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 		key.RevisionID = strings.TrimSpace(key.RevisionID)
 		key.ResourceID = strings.TrimSpace(key.ResourceID)
 		key.Kind = normalizeExportResourceKind(key.Kind)
-		if key.RevisionID == "" || key.ResourceID == "" {
+		// Manually-created resources have no import revision. Keep those keys
+		// so the second-stage canonical-ID resolver can still turn them into
+		// links after the referenced resource is collected by the site.
+		if key.ResourceID == "" {
 			continue
 		}
 		if _, exists := seen[key]; exists {
@@ -197,6 +200,15 @@ func normalizeExportResourceKind(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if separator := strings.LastIndex(value, ":"); separator >= 0 {
 		value = value[separator+1:]
+	}
+	// Resource-kind codes use a dotted namespace (minecraft.loot_table),
+	// while exporter registries and reference declarations use the family
+	// name (loot_table). Normalize both representations before comparing.
+	if namespace, family, found := strings.Cut(value, "."); found && family != "" {
+		switch namespace {
+		case "minecraft", "mod", "mekanism":
+			value = family
+		}
 	}
 	switch {
 	case strings.Contains(value, "fluid"):
@@ -461,36 +473,47 @@ func lootTableItemIDs(data map[string]any) []string {
 		seen[value] = struct{}{}
 		result = append(result, value)
 	}
-	if values, ok := data["possible_item_ids"].([]any); ok {
-		for _, value := range values {
-			if itemID, ok := value.(string); ok {
-				add(itemID)
-			}
-		}
-	}
-	var visit func(any)
-	visit = func(value any) {
-		switch typed := value.(type) {
-		case map[string]any:
-			entryType, _ := typed["type"].(string)
-			if entryType == "minecraft:item" || entryType == "item" {
-				if itemID, ok := typed["name"].(string); ok {
-					add(itemID)
-				} else if itemID, ok := typed["value"].(string); ok {
+	for _, key := range []string{"possible_item_ids", "possibleItemIds"} {
+		if values, ok := data[key].([]any); ok {
+			for _, value := range values {
+				if itemID, ok := value.(string); ok {
 					add(itemID)
 				}
 			}
+		}
+	}
+	walkLootTableDefinition(data, func(entry map[string]any) {
+		entryType, _ := entry["type"].(string)
+		if entryType == "minecraft:item" || entryType == "item" {
+			if itemID, ok := entry["name"].(string); ok {
+				add(itemID)
+			} else if itemID, ok := entry["value"].(string); ok {
+				add(itemID)
+			}
+		}
+	})
+	return result
+}
+
+func walkLootTableDefinition(data map[string]any, visit func(map[string]any)) {
+	var walk func(any)
+	walk = func(value any) {
+		switch typed := value.(type) {
+		case map[string]any:
+			visit(typed)
 			for _, nested := range typed {
-				visit(nested)
+				walk(nested)
 			}
 		case []any:
 			for _, nested := range typed {
-				visit(nested)
+				walk(nested)
 			}
 		}
 	}
-	visit(data["definition"])
-	return result
+	// `definition` is the legacy exporter envelope; canonical website documents
+	// store the same pools at the top level.
+	walk(data["definition"])
+	walk(data["pools"])
 }
 
 func lootTableIconPreviews(data map[string]any) []map[string]string {
@@ -553,36 +576,25 @@ func lootTableReferenceIDs(data map[string]any) []string {
 			add(value)
 		}
 	}
-	if values, ok := data["referenced_loot_tables"].([]any); ok {
-		for _, value := range values {
-			if referenceID, ok := value.(string); ok {
-				add(referenceID)
-			}
-		}
-	}
-	var visit func(any)
-	visit = func(value any) {
-		switch typed := value.(type) {
-		case map[string]any:
-			entryType, _ := typed["type"].(string)
-			entryKind, _ := typed["entry_kind"].(string)
-			if strings.Contains(entryType, "loot_table") || strings.Contains(entryKind, "loot_table") {
-				for _, key := range []string{"name", "value", "loot_table", "loot_table_id"} {
-					if referenceID, ok := typed[key].(string); ok {
-						add(referenceID)
-					}
+	for _, key := range []string{"referenced_loot_tables", "referencedLootTables"} {
+		if values, ok := data[key].([]any); ok {
+			for _, value := range values {
+				if referenceID, ok := value.(string); ok {
+					add(referenceID)
 				}
 			}
-			for _, nested := range typed {
-				visit(nested)
-			}
-		case []any:
-			for _, nested := range typed {
-				visit(nested)
-			}
 		}
 	}
-	visit(data["definition"])
-	visit(data["pools"])
+	walkLootTableDefinition(data, func(entry map[string]any) {
+		entryType, _ := entry["type"].(string)
+		entryKind, _ := entry["entry_kind"].(string)
+		if strings.Contains(entryType, "loot_table") || strings.Contains(entryKind, "loot_table") {
+			for _, key := range []string{"name", "value", "loot_table", "loot_table_id"} {
+				if referenceID, ok := entry[key].(string); ok {
+					add(referenceID)
+				}
+			}
+		}
+	})
 	return result
 }

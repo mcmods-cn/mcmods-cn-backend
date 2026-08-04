@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +41,7 @@ type contentTranslationState struct {
 type contentResolutionResponse struct {
 	PublicID        string                       `json:"publicId"`
 	EntityType      string                       `json:"entityType"`
+	CanonicalPath   string                       `json:"canonicalPath"`
 	RequestedLocale string                       `json:"requestedLocale"`
 	ResolvedLocale  string                       `json:"resolvedLocale,omitempty"`
 	DefaultLocale   string                       `json:"defaultLocale"`
@@ -54,6 +56,7 @@ type catalogEntityLocalizationSet struct {
 	EntityID      int64
 	PublicID      string
 	EntityType    string
+	CanonicalPath string
 	DefaultLocale string
 	Localizations map[string]catalogLocalizationPayload
 }
@@ -115,6 +118,7 @@ func (s *Server) catalogEntityContent(w http.ResponseWriter, r *http.Request) {
 	response := contentResolutionResponse{
 		PublicID:        entity.PublicID,
 		EntityType:      entity.EntityType,
+		CanonicalPath:   entity.CanonicalPath,
 		RequestedLocale: resolution.RequestedLocale,
 		ResolvedLocale:  resolution.ResolvedLocale,
 		DefaultLocale:   entity.DefaultLocale,
@@ -228,7 +232,7 @@ func (s *Server) updateCatalogEntityContent(w http.ResponseWriter, r *http.Reque
 	}
 	claims := currentClaims(r)
 	reviewRequired := contentLocalizationReviewRequired(loadReviewConfig(r.Context(), s.db), entity.EntityType)
-	if catalogMutationBypassesReview(claims.Permissions) {
+	if catalogMutationBypassesReview(claims) {
 		reviewRequired = false
 	}
 	reviewStatus := "approved"
@@ -395,7 +399,7 @@ func (s *Server) requestCatalogContentTranslation(w http.ResponseWriter, r *http
 		return
 	}
 	claims := currentClaims(r)
-	limit := int64(numericPermissionValue(claims.Permissions, "user.ai.daily_token_limit"))
+	limit := int64(claimsNumericPermissionValue(claims, "user.ai.daily_token_limit"))
 	if limit <= 0 {
 		writeError(w, http.StatusForbidden, "no daily AI token allowance is available")
 		return
@@ -445,7 +449,7 @@ func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusInternalServerError, "failed to load translation task")
 		return
 	}
-	if createdBy != nil && *createdBy != claims.Subject && !hasPermission(claims.Permissions, "content.review") {
+	if createdBy != nil && *createdBy != claims.Subject && !claimsAllow(claims, "content.review") {
 		writeError(w, http.StatusForbidden, "translation task belongs to another user")
 		return
 	}
@@ -467,7 +471,7 @@ func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.
 func (s *Server) loadCatalogEntityLocalizations(ctx context.Context, publicID string) (catalogEntityLocalizationSet, error) {
 	result := catalogEntityLocalizationSet{Localizations: map[string]catalogLocalizationPayload{}}
 	err := s.db.QueryRow(ctx, `
-		select route.internal_id,route.public_id,route.entity_type,subject.default_locale
+		select route.internal_id,route.public_id,route.entity_type,coalesce(route.canonical_path,''),subject.default_locale
 		from public_routes route
 		join content_subjects subject on subject.subject_id=route.internal_id and subject.subject_type=route.entity_type
 		where route.public_id=$1
@@ -493,10 +497,13 @@ func (s *Server) loadCatalogEntityLocalizations(ctx context.Context, publicID st
 		    select 1 from recipes recipe join catalog_entities parent on parent.id=recipe.recipe_type_id
 		    where recipe.entity_id=route.internal_id and parent.status='active' and parent.archived_at is null
 		  ))`, publicID, contentVisibilityBypassed(ctx)).Scan(
-		&result.EntityID, &result.PublicID, &result.EntityType, &result.DefaultLocale,
+		&result.EntityID, &result.PublicID, &result.EntityType, &result.CanonicalPath, &result.DefaultLocale,
 	)
 	if err != nil {
 		return result, err
+	}
+	if result.CanonicalPath == "" {
+		result.CanonicalPath = s.catalogContentCanonicalPath(ctx, result.EntityType, result.PublicID, result.EntityID)
 	}
 	result.DefaultLocale = normalizeContentLocale(result.DefaultLocale)
 	rows, err := s.db.Query(ctx, `
@@ -524,6 +531,29 @@ func (s *Server) loadCatalogEntityLocalizations(ctx context.Context, publicID st
 		result.Localizations[item.Locale] = item
 	}
 	return result, rows.Err()
+}
+
+func (s *Server) catalogContentCanonicalPath(ctx context.Context, entityType, publicID string, entityID int64) string {
+	escapedID := url.QueryEscape(publicID)
+	switch entityType {
+	case "blueprint":
+		return "/blueprints/" + escapedID
+	case "skin":
+		return "/skins/" + escapedID
+	case "resource":
+		return "/catalog/resources?publicId=" + escapedID
+	case "tag":
+		return "/mods-tag?publicId=" + escapedID
+	case "recipe_type":
+		return "/recipe-types?publicId=" + escapedID
+	case "recipe":
+		var parentPublicID string
+		if s.db.QueryRow(ctx, `select parent.public_id from recipes recipe join catalog_entities parent
+			on parent.id=recipe.recipe_type_id where recipe.entity_id=$1`, entityID).Scan(&parentPublicID) == nil {
+			return "/recipe-types?publicId=" + url.QueryEscape(parentPublicID) + "#recipe-" + escapedID
+		}
+	}
+	return "/content/" + escapedID
 }
 
 func contentVisibilityBypassed(ctx context.Context) bool {

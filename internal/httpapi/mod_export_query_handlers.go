@@ -611,7 +611,7 @@ func (s *Server) canReadModExportRevision(w http.ResponseWriter, r *http.Request
 		return false
 	}
 	claims := currentClaims(r)
-	if !active && !canEditMod(claims, identity) && !hasPermission(claims.Permissions, "project.review") {
+	if !active && !canEditMod(claims, identity) && !claimsAllow(claims, "project.review") {
 		writeError(w, http.StatusForbidden, "export revision is awaiting review")
 		return false
 	}

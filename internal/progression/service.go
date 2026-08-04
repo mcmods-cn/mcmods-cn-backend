@@ -168,16 +168,18 @@ func (s *Service) activeTasks(ctx context.Context) ([]taskDefinition, error) {
 }
 
 func matchesTask(condition taskCondition, event activity.Event) bool {
-	if actionID(condition.Action) != 0 && actionID(condition.Action) != event.ActionID {
+	taskActionID := actionID(condition.Action)
+	if taskActionID == 0 || taskActionID != event.ActionID {
 		return false
 	}
-	if objectTypeID(condition.ObjectType) != 0 && objectTypeID(condition.ObjectType) != event.ObjectTypeID {
+	taskObjectTypeID := objectTypeID(condition.ObjectType)
+	if taskObjectTypeID == 0 || taskObjectTypeID != event.ObjectTypeID {
 		return false
 	}
 	if condition.ObjectPublicID != "" && condition.ObjectPublicID != event.ObjectPublicID {
 		return false
 	}
-	return condition.Metric == "" || condition.Metric == "count" || condition.Metric == "markdown_bytes"
+	return condition.Metric == "count" || condition.Metric == "markdown_bytes"
 }
 
 func PeriodKey(refreshPeriod string, timestamp time.Time, location *time.Location) string {
@@ -387,6 +389,8 @@ func objectTypeID(code string) int16 {
 		return activity.ObjectRecipe
 	case "mod":
 		return activity.ObjectMod
+	case "resource":
+		return activity.ObjectResource
 	case "blueprint":
 		return activity.ObjectBlueprint
 	case "plugin":

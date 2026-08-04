@@ -80,18 +80,6 @@ func revisionPublicIDValue(ctx context.Context, query revisionQuery, internalID 
 	return publicID
 }
 
-func resolveOSSFilePublicID(ctx context.Context, query revisionQuery, publicID string) (int64, error) {
-	publicID = strings.ToLower(strings.TrimSpace(publicID))
-	if !validCatalogPublicID(publicID) {
-		return 0, fmt.Errorf("invalid file public id")
-	}
-	var internalID int64
-	if err := query.QueryRow(ctx, `select id from oss_files where public_id=$1 and status='active'`, publicID).Scan(&internalID); err != nil {
-		return 0, err
-	}
-	return internalID, nil
-}
-
 func ossFilePublicIDForInternal(ctx context.Context, query revisionQuery, internalID *int64) (*string, error) {
 	if internalID == nil {
 		return nil, nil
@@ -101,15 +89,4 @@ func ossFilePublicIDForInternal(ctx context.Context, query revisionQuery, intern
 		return nil, err
 	}
 	return &publicID, nil
-}
-
-func resolveOptionalOSSFilePublicID(ctx context.Context, query revisionQuery, publicID *string) (*int64, error) {
-	if publicID == nil || strings.TrimSpace(*publicID) == "" {
-		return nil, nil
-	}
-	internalID, err := resolveOSSFilePublicID(ctx, query, *publicID)
-	if err != nil {
-		return nil, err
-	}
-	return &internalID, nil
 }

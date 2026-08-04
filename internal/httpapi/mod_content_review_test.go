@@ -104,12 +104,13 @@ func TestValidateModContentAdvancementLayoutResolvesParents(t *testing.T) {
 	resources := []modContentLayoutResourceEdit{
 		{
 			ResourcePublicID: "adv123456",
-			Advancement:      &modContentAdvancementLayoutEdit{X: 1, Y: 2},
+			Advancement:      &modContentAdvancementLayoutEdit{GroupID: "advancement:example", X: 1, Y: 2},
 		},
 		{
 			ResourcePublicID: "adv654321",
 			Advancement: &modContentAdvancementLayoutEdit{
 				ParentResourcePublicID: "adv123456",
+				GroupID:                "advancement:example",
 				X:                      3,
 				Y:                      4,
 			},
@@ -129,11 +130,11 @@ func TestValidateModContentAdvancementLayoutRejectsCycles(t *testing.T) {
 	resources := []modContentLayoutResourceEdit{
 		{
 			ResourcePublicID: "adv123456",
-			Advancement:      &modContentAdvancementLayoutEdit{ParentResourcePublicID: "adv654321"},
+			Advancement:      &modContentAdvancementLayoutEdit{ParentResourcePublicID: "adv654321", GroupID: "advancement:example"},
 		},
 		{
 			ResourcePublicID: "adv654321",
-			Advancement:      &modContentAdvancementLayoutEdit{ParentResourcePublicID: "adv123456"},
+			Advancement:      &modContentAdvancementLayoutEdit{ParentResourcePublicID: "adv123456", GroupID: "advancement:example"},
 		},
 	}
 	identities := map[string]modContentLayoutResourceIdentity{

@@ -127,7 +127,7 @@ func (s *Server) appLogs(r *http.Request, filter logQueryFilter) []map[string]an
 	where := []string{"l.category = $1"}
 	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
 		"l.action", "l.target", "l.ip", "l.user_agent", "l.method", "l.path", "l.payload::text",
-		"actor.username", "actor.display_name", "actor.email", "actor.public_id",
+		"actor.username", "actor.email", "actor.public_id",
 	})
 	if filter.Level != "" {
 		args = append(args, filter.Level)
@@ -144,7 +144,6 @@ func (s *Server) appLogs(r *http.Request, filter logQueryFilter) []map[string]an
 		r,
 		`select l.id, l.category, l.level, actor.public_id as actor_id,
 		        actor.username as actor_username,
-		        actor.display_name as actor_display_name,
 		        l.action, l.target, l.ip, l.user_agent, l.method, l.path, l.status, l.latency_ms, l.payload, l.created_at
 		 from app_logs l
 		 left join users actor on actor.id = l.actor_id
@@ -160,18 +159,16 @@ func (s *Server) permissionChangeLogs(r *http.Request, filter logQueryFilter) []
 	where := []string{"1 = 1"}
 	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
 		"l.action", "l.payload::text", "operator.public_id", "target.public_id",
-		"operator.username", "operator.display_name", "operator.email",
-		"target.username", "target.display_name", "target.email",
+		"operator.username", "operator.email",
+		"target.username", "target.email",
 	})
 	args = append(args, filter.Limit)
 	return s.querySimpleRows(
 		r,
 		`select l.id, operator.public_id as operator_id,
 		        operator.username as operator_username,
-		        operator.display_name as operator_display_name,
 		        target.public_id as target_user_id,
 		        target.username as target_username,
-		        target.display_name as target_display_name,
 		        l.action, l.payload, l.created_at
 		 from permission_audit_logs l
 		 left join users operator on operator.id = l.operator_id
@@ -188,7 +185,7 @@ func (s *Server) loginSecurityLogs(r *http.Request, filter logQueryFilter) []map
 	where := []string{"1 = 1"}
 	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
 		"l.account", "l.ip", "l.user_agent", "l.reason", "u.public_id",
-		"u.username", "u.display_name", "u.email",
+		"u.username", "u.email",
 	})
 	switch filter.Status {
 	case "success":
@@ -201,7 +198,6 @@ func (s *Server) loginSecurityLogs(r *http.Request, filter logQueryFilter) []map
 		r,
 		`select l.id, u.public_id as user_id,
 		        u.username,
-		        u.display_name,
 		        l.account, l.ip, l.user_agent, l.success, l.reason, l.created_at
 		 from user_login_logs l
 		 left join users u on u.id = l.user_id
@@ -217,7 +213,7 @@ func (s *Server) fileUploadLogs(r *http.Request, filter logQueryFilter) []map[st
 	where := []string{"1 = 1"}
 	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
 		"l.object_key", "l.original_name", "l.ip", "l.user_agent", "l.result", "l.message", "uploader.public_id",
-		"uploader.username", "uploader.display_name", "uploader.email",
+		"uploader.username", "uploader.email",
 	})
 	if filter.Status != "" {
 		args = append(args, filter.Status)
@@ -228,7 +224,6 @@ func (s *Server) fileUploadLogs(r *http.Request, filter logQueryFilter) []map[st
 		r,
 		`select l.id, file.public_id as file_id, uploader.public_id as uploader_id,
 		        uploader.username as uploader_username,
-		        uploader.display_name as uploader_display_name,
 		        l.object_key, l.original_name, l.size_bytes, l.ip, l.user_agent, l.result, l.message, l.created_at
 		 from oss_upload_logs l
 		 left join users uploader on uploader.id = l.uploader_id

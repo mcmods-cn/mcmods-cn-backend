@@ -312,23 +312,3 @@ func nextMinecraftVersionSync(now time.Time) time.Time {
 	}
 	return next
 }
-
-func compatibilitySummary(items []modLoaderCompatibilityPayload) ([]string, []string) {
-	loaderSet := map[string]bool{}
-	versionSet := map[string]bool{}
-	loaders := make([]string, 0, len(items))
-	versions := make([]string, 0)
-	for _, item := range items {
-		if !loaderSet[item.Loader] {
-			loaderSet[item.Loader] = true
-			loaders = append(loaders, item.Loader)
-		}
-		for _, version := range item.Versions {
-			if !versionSet[version] {
-				versionSet[version] = true
-				versions = append(versions, version)
-			}
-		}
-	}
-	return loaders, versions
-}

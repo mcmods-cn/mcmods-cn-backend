@@ -1169,14 +1169,14 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 		if tag.RowsAffected() == 0 {
 			return errModExportLeaseLost
 		}
-		_, updateErr = tx.Exec(ctx, `update catalog_import_packages set imported_at=now() where id=$1`, packageID)
-		return updateErr
+		if _, updateErr = tx.Exec(ctx, `update catalog_import_packages set imported_at=now() where id=$1`, packageID); updateErr != nil {
+			return updateErr
+		}
+		return s.tombstoneOSSFileTx(ctx, tx, sourceFileID, "mod-export-import-consumed")
 	})
 	if err != nil {
 		return err
 	}
-	_, _ = client.DeleteObject(context.Background(), &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey)})
-	_, _ = s.db.Exec(context.Background(), `update oss_files set status='deleted',updated_at=now() where id=$1`, sourceFileID)
 	s.notifyModExportResult(context.Background(), jobID, jobStatus, nil)
 	return nil
 }
@@ -1822,7 +1822,7 @@ func queueExportTextAsset(batch *modExportWriteBatch, revisionID, name string, d
 		batch.byteCount += int64(len(canonical))
 		return nil
 	}
-	if !utf8Text(data) {
+	if !utf8.Valid(data) {
 		return fmt.Errorf("text asset is not valid UTF-8: %s", name)
 	}
 	batch.textAssets = append(batch.textAssets, exportTextAssetWrite{
@@ -2036,10 +2036,6 @@ func sha256Hex(data []byte) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func utf8Text(value []byte) bool {
-	return utf8.Valid(value)
-}
-
 func nullableUserID(value int64) any {
 	if value <= 0 {
 		return nil
@@ -2071,6 +2067,7 @@ func (s *Server) notifyModExportResult(ctx context.Context, jobID, status string
 		}
 	}
 	s.sendTemplatedNotification(ctx, recipientID, code, values, map[string]any{
-		"type": "mod_export_import", "jobId": jobID, "modSiteId": siteID, "status": status, "translationValuesSkipped": skipped,
+		"type": "mod_export_import", "jobId": jobID, "modSiteId": siteID, "status": status,
+		"translationValuesSkipped": skipped, "targetLabel": modName, "url": "/mods/" + siteID,
 	})
 }

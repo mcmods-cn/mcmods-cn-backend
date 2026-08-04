@@ -3,6 +3,8 @@ package httpapi
 import (
 	"net/http"
 	"testing"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 func TestResolveContentLocaleChinesePairBeforeEnglish(t *testing.T) {
@@ -37,11 +39,15 @@ func TestResolveContentLocaleStoredUnsupportedTranslation(t *testing.T) {
 
 func TestNormalizeContentLocaleChineseAliases(t *testing.T) {
 	tests := map[string]string{
-		"zh_hans": "zh-CN",
-		"zh-HK":   "zh-TW",
-		"PT_br":   "pt-BR",
-		"en":      "en-US",
-		"ja_jp":   "ja-JP",
+		"zh_hans":    "zh-CN",
+		"zh-HK":      "zh-HK",
+		"zh-Hant-HK": "zh-HK",
+		"zh-MO":      "zh-MO",
+		"PT_br":      "pt-BR",
+		"be_latn":    "be-Latn",
+		"zlm_arab":   "zlm-Arab",
+		"en":         "en-US",
+		"ja_jp":      "ja-JP",
 	}
 	for input, want := range tests {
 		if got := normalizeContentLocale(input); got != want {
@@ -63,14 +69,28 @@ func TestValidContentLocaleTag(t *testing.T) {
 	}
 }
 
+func TestSecondaryContentLocaleMustUseSiteSupportedLanguage(t *testing.T) {
+	for _, locale := range supportedContentLocaleList() {
+		if !isEditableContentLocale(locale) {
+			t.Fatalf("site-supported locale %q must be valid as a secondary language", locale)
+		}
+	}
+	if isEditableContentLocale("pt-BR") {
+		t.Fatal("a Minecraft-only locale must not be valid as a secondary language")
+	}
+}
+
 func TestCatalogReviewAndBypassPermissionsAreSeparated(t *testing.T) {
-	if catalogMutationBypassesReview([]string{"content.review"}) {
+	claims := func(code string) security.Claims {
+		return security.Claims{PermissionRules: []security.PermissionRule{{Code: code, Allow: true}}}
+	}
+	if catalogMutationBypassesReview(claims("content.review")) {
 		t.Fatal("content.review must not bypass the configured review workflow")
 	}
-	if !catalogMutationBypassesReview([]string{"content.no-review"}) {
+	if !catalogMutationBypassesReview(claims("content.no-review")) {
 		t.Fatal("content.no-review must bypass the configured review workflow")
 	}
-	if !catalogMutationBypassesReview([]string{"admin.*"}) {
+	if !catalogMutationBypassesReview(claims("admin.*")) {
 		t.Fatal("administrators must retain the explicit review bypass")
 	}
 }
@@ -99,17 +119,15 @@ func TestContentLocalizationReviewPolicyUsesSubjectType(t *testing.T) {
 	}
 }
 
-func TestUnifiedContentWriteRoutesAreRegistered(t *testing.T) {
+func TestContentWriteRouteIsRegistered(t *testing.T) {
 	server := &Server{mux: http.NewServeMux()}
 	server.routes()
-	for _, path := range []string{"/api/v1/content/abc234567", "/api/v1/catalog/entities/abc234567/content"} {
-		request, err := http.NewRequest(http.MethodPut, path, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, pattern := server.mux.Handler(request)
-		if pattern == "" {
-			t.Fatalf("unified content write route is not registered: %s", path)
-		}
+	request, err := http.NewRequest(http.MethodPut, "/api/v1/content/abc234567", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pattern := server.mux.Handler(request)
+	if pattern == "" {
+		t.Fatal("content write route is not registered")
 	}
 }

@@ -16,7 +16,7 @@ func (s *Server) modGalleryImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
-	canReview := hasPermission(claims.Permissions, "project.review") || hasPermission(claims.Permissions, "admin.*")
+	canReview := claimsAllow(claims, "project.review") || claimsAllow(claims, "admin.*")
 	var objectKey, contentType string
 	err := s.db.QueryRow(r.Context(), `select file.object_key,file.content_type
 		from mod_gallery_images gallery

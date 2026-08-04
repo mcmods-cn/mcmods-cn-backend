@@ -4,8 +4,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 )
 
 type markdownPlaygroundDraftRequest struct {
@@ -70,9 +68,20 @@ func (s *Server) userOSSFiles(w http.ResponseWriter, r *http.Request) {
 	limit := boundedLimit(r.URL.Query().Get("limit"), 100, 500)
 	rows, err := s.db.Query(
 		r.Context(),
-		`select public_id, bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, status, scan_status, created_at, updated_at
-		 from oss_files
-		 where uploader_id = $1 and object_key like $2 and status = 'active'
+		`select file.public_id,file.bucket,file.endpoint,file.region,file.object_key,file.category,file.source,
+		        file.original_name,file.source_original_name,file.content_type,file.size_bytes,file.source_size_bytes,
+		        file.sha256,file.status,file.scan_status,file.created_at,file.updated_at,
+		        exists(select 1 from creator_claim_attachments attachment
+		          join creator_claims claim on claim.id=attachment.claim_id
+		          where attachment.oss_file_id=file.id and claim.status='pending'),
+		        exists(select 1 from minecraft_server_proof_files proof
+		          join minecraft_servers server on server.id=proof.server_id
+		          where proof.oss_file_id=file.id and server.review_status='pending'),
+		        exists(select 1 from mod_application_attachments attachment
+		          join mod_membership_applications application on application.id=attachment.application_id
+		          where attachment.oss_file_id=file.id and application.status='pending')
+		 from oss_files file
+		 where file.uploader_id = $1 and file.object_key like $2 and file.status = 'active'
 		 order by created_at desc
 		 limit $3`,
 		claims.Subject,
@@ -89,12 +98,21 @@ func (s *Server) userOSSFiles(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var size, sourceSize int64
 		var id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, sha, status, scanStatus string
+		var creatorClaimLocked, serverReviewLocked, modApplicationLocked bool
 		var createdAt, updatedAt time.Time
-		if err := rows.Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &sourceOriginalName, &contentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &sourceOriginalName, &contentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt, &creatorClaimLocked, &serverReviewLocked, &modApplicationLocked); err != nil {
 			writeError(w, http.StatusInternalServerError, "解析用户文件失败")
 			return
 		}
 		record := ossFileRecord(id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt)
+		record["locked"] = creatorClaimLocked || serverReviewLocked || modApplicationLocked
+		if creatorClaimLocked {
+			record["lockReason"] = "creator_claim_review"
+		} else if serverReviewLocked {
+			record["lockReason"] = "server_review"
+		} else if modApplicationLocked {
+			record["lockReason"] = "mod_application_review"
+		}
 		record["url"] = buildPublicOSSURL(cfg, objectKey)
 		files = append(files, record)
 	}
@@ -120,9 +138,9 @@ func (s *Server) userOSSFileQuota(w http.ResponseWriter, r *http.Request) {
 		claims.Subject,
 	).Scan(&totalSourceUsed, &totalStoredUsed)
 
-	singleLimit := permissionMiBToBytes(numericPermissionValue(claims.Permissions, "user.file.single_limit"))
-	dailyLimit := permissionMiBToBytes(numericPermissionValue(claims.Permissions, "user.file.daily_limit"))
-	totalLimit := permissionMiBToBytes(numericPermissionValue(claims.Permissions, "user.file.total_limit"))
+	singleLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.single_limit"))
+	dailyLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.daily_limit"))
+	totalLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.total_limit"))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"daily": map[string]any{
 			"usedBytes":       dailySourceUsed,
@@ -175,38 +193,47 @@ func (s *Server) deleteUserOSSFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
-	client, cfg, err := s.ossClient(r.Context())
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
+	cfg := s.ossConfigFromSettings(r.Context())
 	req.ObjectKey = strings.TrimSpace(req.ObjectKey)
 	userPrefix := ossUserPrefix(cfg.Prefix, claims.Subject)
 	if req.ObjectKey == "" || !isAllowedObjectKey(req.ObjectKey, userPrefix) {
 		writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于用户文件目录")
 		return
 	}
-	var ownerID int64
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "锁定文件记录失败")
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	var fileID, ownerID int64
 	var originalName string
-	err = s.db.QueryRow(r.Context(), `select uploader_id, original_name from oss_files where object_key = $1 and status = 'active'`, req.ObjectKey).Scan(&ownerID, &originalName)
+	var locked bool
+	err = tx.QueryRow(r.Context(), `select file.id,file.uploader_id,file.original_name,
+		exists(select 1 from creator_claim_attachments attachment
+		  join creator_claims claim on claim.id=attachment.claim_id
+		  where attachment.oss_file_id=file.id and claim.status='pending')
+		or exists(select 1 from minecraft_server_proof_files proof
+		  join minecraft_servers server on server.id=proof.server_id
+		  where proof.oss_file_id=file.id and server.review_status='pending')
+		or exists(select 1 from mod_application_attachments attachment
+		  join mod_membership_applications application on application.id=attachment.application_id
+		  where attachment.oss_file_id=file.id and application.status='pending')
+		from oss_files file where file.object_key=$1 and file.status='active' for update`, req.ObjectKey).Scan(&fileID, &ownerID, &originalName, &locked)
 	if err != nil || ownerID != claims.Subject {
 		writeError(w, http.StatusForbidden, "只能删除自己的用户文件")
 		return
 	}
-	_, err = client.DeleteObject(
-		r.Context(),
-		&aliyunoss.DeleteObjectRequest{
-			Bucket: aliyunoss.Ptr(cfg.Bucket),
-			Key:    aliyunoss.Ptr(req.ObjectKey),
-		},
-	)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "删除 OSS 文件失败")
+	if locked {
+		writeError(w, http.StatusConflict, "文件正在用于待审核证明，审核结束后才能删除")
 		return
 	}
-	_, err = s.db.Exec(r.Context(), `update oss_files set status = 'deleted', updated_at = now() where object_key = $1 and uploader_id = $2`, req.ObjectKey, claims.Subject)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "更新文件记录失败")
+	if err = s.tombstoneOSSFileTx(r.Context(), tx, fileID, "user-delete"); err != nil {
+		writeError(w, http.StatusInternalServerError, "创建 OSS 文件删除任务失败")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "提交文件删除记录失败")
 		return
 	}
 	s.insertOSSUploadLog(r.Context(), nil, claims.Subject, req.ObjectKey, originalName, 0, s.requestClientLocation(r).IP, r.UserAgent(), "deleted", "user-delete")
@@ -242,7 +269,7 @@ func normalizeOSSUserFileScope(category string, source string) string {
 			return "recipe-gui"
 		case "iconexport", "iconexporter", "iconrenderer", "letmeseesee":
 			return "imports"
-		case "creator-avatar", "author-avatar":
+		case "creator-avatar", "author-avatar", "creator-claim":
 			return "authors"
 		}
 	}

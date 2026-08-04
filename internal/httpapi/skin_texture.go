@@ -181,20 +181,14 @@ func minecraftTextureTargetDimensions(kind string, width, height int) (int, int,
 	}
 }
 
-func (s *Server) loadMinecraftTextureUpload(ctx context.Context, ownerID, fileID int64, kind string) (sanitizedMinecraftTexture, *aliyunoss.Client, ossConfigPayload, error) {
+func (s *Server) loadMinecraftTextureUpload(ctx context.Context, file trustedRasterOSSFile, kind string) (sanitizedMinecraftTexture, *aliyunoss.Client, ossConfigPayload, error) {
 	var texture sanitizedMinecraftTexture
 	var emptyConfig ossConfigPayload
-	if ownerID <= 0 || fileID <= 0 {
+	if file.ID <= 0 || file.UploaderID <= 0 || file.ObjectKey == "" || file.Status != "active" ||
+		!trustedOSSScanStatus(file.ScanStatus) || !safeRasterContentType(file.ContentType) {
 		return texture, nil, emptyConfig, fmt.Errorf("texture file was not found")
 	}
-	var objectKey string
-	var sizeBytes int64
-	err := s.db.QueryRow(ctx, `select object_key,size_bytes from oss_files
-		where id=$1 and uploader_id=$2 and status='active'`, fileID, ownerID).Scan(&objectKey, &sizeBytes)
-	if err != nil {
-		return texture, nil, emptyConfig, fmt.Errorf("texture file was not found: %w", err)
-	}
-	if sizeBytes <= 0 || sizeBytes > maxMinecraftTextureUploadBytes {
+	if file.SizeBytes <= 0 || file.SizeBytes > maxMinecraftTextureUploadBytes {
 		return texture, nil, emptyConfig, fmt.Errorf("texture file size is invalid")
 	}
 	client, cfg, err := s.ossClient(ctx)
@@ -203,7 +197,7 @@ func (s *Server) loadMinecraftTextureUpload(ctx context.Context, ownerID, fileID
 	}
 	object, err := client.GetObject(ctx, &aliyunoss.GetObjectRequest{
 		Bucket: aliyunoss.Ptr(cfg.Bucket),
-		Key:    aliyunoss.Ptr(objectKey),
+		Key:    aliyunoss.Ptr(file.ObjectKey),
 	})
 	if err != nil {
 		return texture, nil, emptyConfig, fmt.Errorf("read private texture object: %w", err)

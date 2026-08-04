@@ -36,17 +36,17 @@ func TestInsertMinecraftServerUnresolvedModIntegration(t *testing.T) {
 	username := fmt.Sprintf("srvmod%d", suffix)
 	email := username + "@example.invalid"
 	var actorID int64
-	if err = tx.QueryRow(ctx, `insert into users(username,email,display_name,password_hash,email_verified)
-		values($1,$2,'Server mod save test','test',true) returning id`, username, email).Scan(&actorID); err != nil {
+	if err = tx.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
+		values($1,$2,'test',true) returning id`, username, email).Scan(&actorID); err != nil {
 		t.Fatal(err)
 	}
 	projectCode := fmt.Sprintf("smt%06d", suffix%1_000_000)
 	resolvedModID := fmt.Sprintf("resolved_test_mod_%d", suffix)
 	resolvedModSlug := fmt.Sprintf("resolved-test-mod-%d", suffix)
 	var resolvedModInternalID int64
-	if err = tx.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,mod_id,icon_url,review_status,created_by)
-		values($1,$2,'Resolved test mod',$3,'https://example.invalid/mod.png','approved',$4) returning id`,
-		projectCode, resolvedModSlug, resolvedModID, actorID).Scan(&resolvedModInternalID); err != nil {
+	if err = tx.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,icon_url,review_status,created_by)
+		values($1,$2,'Resolved test mod','https://example.invalid/mod.png','approved',$3) returning id`,
+		projectCode, resolvedModSlug, actorID).Scan(&resolvedModInternalID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = tx.Exec(ctx, `insert into mod_identifiers(mod_id,identifier,is_primary)

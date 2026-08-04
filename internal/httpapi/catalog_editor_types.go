@@ -334,7 +334,7 @@ func validateCatalogRecipeBindings(edit *catalogRecipeEdit, slotRoles map[string
 	return nil
 }
 
-func nonNilCatalogDefinition(value map[string]any) map[string]any {
+func nonNilJSONObject(value map[string]any) map[string]any {
 	if value == nil {
 		return map[string]any{}
 	}

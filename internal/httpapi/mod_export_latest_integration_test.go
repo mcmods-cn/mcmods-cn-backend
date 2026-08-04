@@ -461,6 +461,18 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		t.Fatalf("expected imported loot tables in one unified content page, sections=%d resources=%d",
 			lootTableSections, lootTableResources)
 	}
+	var lootTablesWithEditableDefinitions int
+	if err = tx.QueryRow(context.Background(), `select count(*)::int
+		from mod_resource_version_details detail
+		join game_resources resource on resource.entity_id=detail.resource_id
+		where detail.version_id=$1 and resource.kind_code='minecraft.loot_table'
+		  and detail.definition ?& array['tableType','pools','definitionAvailable']`, versionID).
+		Scan(&lootTablesWithEditableDefinitions); err != nil {
+		t.Fatal(err)
+	}
+	if lootTablesWithEditableDefinitions == 0 {
+		t.Fatal("loot-table type and visual-editor pool data were discarded during canonical import")
+	}
 	var lootTableCategorySections, categorizedLootTableResources int
 	if err = tx.QueryRow(context.Background(), `select count(distinct child.id)::int,count(placement.resource_id)::int
 		from mod_content_sections root
@@ -476,25 +488,6 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 			lootTableCategorySections, categorizedLootTableResources, lootTableResources)
 	}
 	t.Logf("classified loot tables: categories=%d resources=%d", lootTableCategorySections, categorizedLootTableResources)
-	var legacyEmptySectionID int64
-	if err = tx.QueryRow(context.Background(), `insert into mod_content_sections(
-			mod_id,version_id,template_id,default_locale,display_mode,status)
-		select $1,$2,template.id,template.default_locale,template.default_display_mode,'active'
-		from mod_content_templates template where template.code='enchantment' and template.builtin
-		returning id`, modID, versionID).Scan(&legacyEmptySectionID); err != nil {
-		t.Fatal(err)
-	}
-	if err = archiveLegacyEmptyImportedSectionsTx(context.Background(), tx, versionID, 0); err != nil {
-		t.Fatalf("archive a legacy empty page: %v", err)
-	}
-	var legacyEmptySectionStatus string
-	if err = tx.QueryRow(context.Background(), `select status from mod_content_sections where id=$1`, legacyEmptySectionID).
-		Scan(&legacyEmptySectionStatus); err != nil {
-		t.Fatal(err)
-	}
-	if legacyEmptySectionStatus != "archived" {
-		t.Fatalf("legacy capability-created empty page was not archived: %s", legacyEmptySectionStatus)
-	}
 	var populatedCatalogSections int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int
 		from mod_content_sections section
@@ -521,6 +514,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		t.Fatalf("normalized icon effect was not attached to the unified content section: got %d", speedEffectPlacements)
 	}
 	var enchantmentsWithSpecificData, effectsWithSpecificData, fluidsWithSpecificData, advancementsWithSpecificData, advancementLinks int
+	var dimensionsWithSpecificData, biomesWithSpecificData, keyMappingsWithSpecificData int
 	if err = tx.QueryRow(context.Background(), `select
 		count(*) filter(where resource.kind_code='minecraft.enchantment'
 			and detail.definition ?& array['minimumLevel','maximumLevel','rarityWeight','supportedItems'])::int,
@@ -531,7 +525,13 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		count(*) filter(where resource.kind_code='minecraft.advancement'
 			and detail.definition ?& array['display','criteria','requirements','rewards'])::int,
 		count(*) filter(where resource.kind_code='minecraft.advancement'
-			and detail.definition ? 'parentId')::int
+			and detail.definition ? 'parentId')::int,
+		count(*) filter(where resource.kind_code='minecraft.dimension'
+			and detail.definition ?& array['dimensionType','generatorType'])::int,
+		count(*) filter(where resource.kind_code='minecraft.biome'
+			and detail.definition ? 'temperature')::int,
+		count(*) filter(where resource.kind_code='minecraft.key_mapping'
+			and detail.definition ? 'defaultKey')::int
 		from mod_resource_version_details detail
 		join game_resources resource on resource.entity_id=detail.resource_id
 		where detail.version_id=$1`, versionID).Scan(
@@ -540,12 +540,16 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		&fluidsWithSpecificData,
 		&advancementsWithSpecificData,
 		&advancementLinks,
+		&dimensionsWithSpecificData,
+		&biomesWithSpecificData,
+		&keyMappingsWithSpecificData,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if enchantmentsWithSpecificData == 0 || effectsWithSpecificData == 0 || fluidsWithSpecificData == 0 || advancementsWithSpecificData == 0 || advancementLinks == 0 {
-		t.Fatalf("resource-specific canonical data was discarded: enchantments=%d effects=%d fluids=%d advancements=%d links=%d",
-			enchantmentsWithSpecificData, effectsWithSpecificData, fluidsWithSpecificData, advancementsWithSpecificData, advancementLinks)
+	if enchantmentsWithSpecificData == 0 || effectsWithSpecificData == 0 || fluidsWithSpecificData == 0 || advancementsWithSpecificData == 0 || advancementLinks == 0 || dimensionsWithSpecificData == 0 || biomesWithSpecificData == 0 || keyMappingsWithSpecificData == 0 {
+		t.Fatalf("resource-specific canonical data was discarded: enchantments=%d effects=%d fluids=%d advancements=%d links=%d dimensions=%d biomes=%d keyMappings=%d",
+			enchantmentsWithSpecificData, effectsWithSpecificData, fluidsWithSpecificData, advancementsWithSpecificData, advancementLinks,
+			dimensionsWithSpecificData, biomesWithSpecificData, keyMappingsWithSpecificData)
 	}
 	var itemBlockRootsWithSystemCategories int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int from (

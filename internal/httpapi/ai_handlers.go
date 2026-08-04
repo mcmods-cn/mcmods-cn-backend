@@ -335,7 +335,6 @@ func (s *Server) adminAITasks(w http.ResponseWriter, r *http.Request) {
 		`select t.task_uid as id, t.task_uid, t.task_type, t.provider, t.model, t.status, t.priority,
 		        t.concurrency_key, t.input_tokens, t.output_tokens, t.cost_micros, t.payload,
 		        t.result, t.error, u.public_id as created_by, u.username as created_by_username,
-		        u.display_name as created_by_display_name,
 		        t.created_at, t.queued_at, t.started_at, t.finished_at, t.updated_at
 		 from ai_tasks t
 		 left join users u on u.id = t.created_by

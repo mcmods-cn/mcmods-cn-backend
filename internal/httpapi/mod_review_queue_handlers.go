@@ -6,23 +6,22 @@ import (
 )
 
 type modContentReviewItem struct {
-	ID          string    `json:"id"`
-	Source      string    `json:"source"`
-	ModSiteID   string    `json:"modSiteId"`
-	ModName     string    `json:"modName"`
-	UserID      *string   `json:"userId,omitempty"`
-	Username    string    `json:"username"`
-	DisplayName string    `json:"displayName"`
-	Title       string    `json:"title"`
-	Summary     string    `json:"summary"`
-	CreatedAt   time.Time `json:"createdAt"`
-	ReviewURL   string    `json:"reviewUrl"`
+	ID        string    `json:"id"`
+	Source    string    `json:"source"`
+	ModSiteID string    `json:"modSiteId"`
+	ModName   string    `json:"modName"`
+	UserID    *string   `json:"userId,omitempty"`
+	Username  string    `json:"username"`
+	Title     string    `json:"title"`
+	Summary   string    `json:"summary"`
+	CreatedAt time.Time `json:"createdAt"`
+	ReviewURL string    `json:"reviewUrl"`
 }
 
 func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), `
 		select queue.id,queue.source,queue.slug,queue.mod_name,user_account.public_id,
-		       coalesce(user_account.username,''),coalesce(user_account.display_name,''),
+		       coalesce(user_account.username,''),
 		       queue.title,queue.summary,queue.created_at
 		from (
 			select revision.public_id id,'revision'::text source,mod.slug,mod.primary_name mod_name,
@@ -86,7 +85,7 @@ func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) 
 		var item modContentReviewItem
 		if err = rows.Scan(
 			&item.ID, &item.Source, &item.ModSiteID, &item.ModName, &item.UserID,
-			&item.Username, &item.DisplayName, &item.Title, &item.Summary, &item.CreatedAt,
+			&item.Username, &item.Title, &item.Summary, &item.CreatedAt,
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode pending reviews")
 			return

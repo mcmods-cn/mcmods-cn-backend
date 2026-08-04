@@ -17,7 +17,11 @@ func TestHumanReadableOSSObjectKeys(t *testing.T) {
 	})
 
 	t.Run("imported icon has no hash shard directory", func(t *testing.T) {
-		got := modIconObjectKey("mcmods", "m123abc", strings.Repeat("a", 64), ".png")
+		got := externalImageObjectKey(
+			"mcmods",
+			ossProjectCategory("mod", "m123abc", "icons", "project", "original"),
+			"icon", strings.Repeat("a", 64), ".png",
+		)
 		want := "mcmods/project/mods/m123abc/icons/project/original/icon-aaaaaaaaaaaaaaaa.png"
 		if got != want {
 			t.Fatalf("unexpected icon key: got %q want %q", got, want)

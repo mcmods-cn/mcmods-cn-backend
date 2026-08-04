@@ -47,7 +47,7 @@ func (s *Server) ownedBlueprintContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load blueprint")
 		return
 	}
-	if claims.Subject != ownerID && !hasPermission(claims.Permissions, "admin.*") {
+	if claims.Subject != ownerID && !claimsAllow(claims, "admin.*") {
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}

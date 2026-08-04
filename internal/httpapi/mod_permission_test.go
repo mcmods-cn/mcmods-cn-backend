@@ -41,7 +41,11 @@ func TestCanEditModAcceptsCanonicalScopedProjectPermission(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			claims := security.Claims{Permissions: test.permissions}
+			rules := make([]security.PermissionRule, 0, len(test.permissions))
+			for _, permission := range test.permissions {
+				rules = append(rules, security.PermissionRule{Code: permission, Allow: true})
+			}
+			claims := security.Claims{PermissionRules: rules}
 			if got := canEditMod(claims, identity); got != test.want {
 				t.Fatalf("canEditMod() = %v, want %v", got, test.want)
 			}

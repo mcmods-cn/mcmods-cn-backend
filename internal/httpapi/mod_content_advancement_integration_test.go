@@ -40,8 +40,8 @@ func TestCreateAndArrangeAdvancementIntegration(t *testing.T) {
 	email := username + "@example.invalid"
 	var actorID, modID, versionID, sectionID, templateID int64
 	var versionPublicID, sectionPublicID string
-	if err = pool.QueryRow(ctx, `insert into users(username,email,display_name,password_hash,email_verified)
-		values($1,$2,'Advancement save test','test',true) returning id`, username, email).Scan(&actorID); err != nil {
+	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
+		values($1,$2,'test',true) returning id`, username, email).Scan(&actorID); err != nil {
 		t.Fatal(err)
 	}
 	if err = pool.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,review_status,created_by)
@@ -68,8 +68,11 @@ func TestCreateAndArrangeAdvancementIntegration(t *testing.T) {
 
 	server := &Server{db: pool}
 	claims := security.Claims{
-		Subject:     actorID,
-		Permissions: []string{"project.edit." + projectCode, "content.no-review"},
+		Subject: actorID,
+		PermissionRules: []security.PermissionRule{
+			{Code: "project.edit." + projectCode, Allow: true},
+			{Code: "content.no-review", Allow: true},
+		},
 	}
 	createBody, err := json.Marshal(map[string]any{
 		"kindCode":        "minecraft.advancement",
@@ -123,6 +126,7 @@ func TestCreateAndArrangeAdvancementIntegration(t *testing.T) {
 	layoutPayload := map[string]any{
 		"versionPublicId":     versionPublicID,
 		"rootSectionPublicId": sectionPublicID,
+		"displayMode":         "compact",
 		"categories":          []any{},
 		"resources": []map[string]any{{
 			"resourcePublicId": resourcePublicID,
@@ -130,6 +134,7 @@ func TestCreateAndArrangeAdvancementIntegration(t *testing.T) {
 			"ordinal":          0,
 			"advancement": map[string]any{
 				"parentResourcePublicId": "",
+				"groupId":                "advancement:test",
 				"x":                      2,
 				"y":                      3,
 			},

@@ -314,12 +314,16 @@ func (s *Server) yggdrasilRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	ttl := s.yggdrasilTokenTTL()
 	var newID int64
+	var selectedProfileIDValue any
+	if selectedProfileID.Valid {
+		selectedProfileIDValue = selectedProfileID.Int64
+	}
 	err = tx.QueryRow(r.Context(),
 		`insert into yggdrasil_tokens
 		 (access_token_hash,user_id,player_profile_id,client_token,status,issued_at,expires_at,ip,user_agent)
 		 values ($1,$2,$3,$4,'active',now(),$5,$6,$7)
 		 returning id`,
-		tokenHash, userID, nullableInt64Value(selectedProfileID), storedClientToken, time.Now().Add(ttl), s.yggdrasilClientLocation(r).IP, boundedYggdrasilUserAgent(r),
+		tokenHash, userID, selectedProfileIDValue, storedClientToken, time.Now().Add(ttl), s.yggdrasilClientLocation(r).IP, boundedYggdrasilUserAgent(r),
 	).Scan(&newID)
 	if err != nil {
 		writeYggdrasilInternalError(w)
@@ -681,13 +685,6 @@ func (s *Server) recordYggdrasilLogin(ctx context.Context, userID *int64, accoun
 		 values ($1,$2,$3,$4,$5,$6,$7,$8)`, userID, account, location.IP, location.CountryCode,
 		location.City, userAgent, success, reason)
 	return err
-}
-
-func nullableInt64Value(value sql.NullInt64) any {
-	if !value.Valid {
-		return nil
-	}
-	return value.Int64
 }
 
 func writeYggdrasilInvalidCredentials(w http.ResponseWriter) {

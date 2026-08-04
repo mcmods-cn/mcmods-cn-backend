@@ -447,7 +447,7 @@ func validateTaskCondition(condition map[string]any) error {
 	if !stringIn(action, "edit", "create", "view", "delete", "claim", "download", "upload", "purchase", "transfer", "checkin", "use") {
 		return errors.New("task condition action is unsupported")
 	}
-	if !stringIn(objectType, "recipe", "mod", "blueprint", "plugin", "author", "team", "user", "comment", "tag", "file", "economy", "task", "shop_item") {
+	if !stringIn(objectType, "recipe", "mod", "resource", "blueprint", "plugin", "author", "team", "user", "comment", "tag", "file", "economy", "task", "shop_item") {
 		return errors.New("task condition object type is unsupported")
 	}
 	condition["action"] = action

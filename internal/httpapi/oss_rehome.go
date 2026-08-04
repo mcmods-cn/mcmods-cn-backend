@@ -134,22 +134,36 @@ func (s *Server) rehomeModGalleryOSSObjects(ctx context.Context, modID int64) er
 			}); copyErr != nil {
 				return fmt.Errorf("copy gallery %s: %w", item.galleryPublicID, copyErr)
 			}
-			command, updateErr := s.db.Exec(groupContext, `update oss_files set object_key=$2,category=$3,updated_at=now()
+			tx, updateErr := s.db.Begin(groupContext)
+			if updateErr != nil {
+				s.deleteOSSObjectIfUnregistered(groupContext, client, cfg, targetKey)
+				return fmt.Errorf("begin gallery %s rehome transaction: %w", item.galleryPublicID, updateErr)
+			}
+			defer tx.Rollback(groupContext)
+			command, updateErr := tx.Exec(groupContext, `update oss_files set object_key=$2,category=$3,updated_at=now()
 				where id=$1 and object_key=$4 and status='active'`, item.fileID, targetKey, category, item.objectKey)
 			if updateErr != nil {
+				s.deleteOSSObjectIfUnregistered(groupContext, client, cfg, targetKey)
 				return fmt.Errorf("record gallery %s destination: %w", item.galleryPublicID, updateErr)
 			}
 			if command.RowsAffected() != 1 {
 				var currentKey string
-				if queryErr := s.db.QueryRow(groupContext, `select object_key from oss_files where id=$1 and status='active'`, item.fileID).Scan(&currentKey); queryErr == nil && currentKey == targetKey {
+				if queryErr := tx.QueryRow(groupContext, `select object_key from oss_files where id=$1 and status='active'`, item.fileID).Scan(&currentKey); queryErr == nil && currentKey == targetKey {
 					return nil
 				}
+				s.deleteOSSObjectIfUnregistered(groupContext, client, cfg, targetKey)
 				return fmt.Errorf("record gallery %s destination: source changed", item.galleryPublicID)
 			}
-			if _, deleteErr := client.DeleteObject(groupContext, &aliyunoss.DeleteObjectRequest{
-				Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(item.objectKey),
-			}); deleteErr != nil {
-				log.Printf("delete rehomed OSS source %s: %v", item.objectKey, deleteErr)
+			if updateErr = enqueueOSSObjectDeletionTx(groupContext, tx, ossDeletionTarget{
+				Bucket: cfg.Bucket, Endpoint: cfg.Endpoint, Region: cfg.Region, UseCName: cfg.UseCName,
+				ObjectKey: item.objectKey, Reason: "mod-gallery-rehome",
+			}); updateErr != nil {
+				s.deleteOSSObjectIfUnregistered(groupContext, client, cfg, targetKey)
+				return fmt.Errorf("queue gallery %s source deletion: %w", item.galleryPublicID, updateErr)
+			}
+			if updateErr = tx.Commit(groupContext); updateErr != nil {
+				s.deleteOSSObjectIfUnregistered(groupContext, client, cfg, targetKey)
+				return fmt.Errorf("commit gallery %s rehome: %w", item.galleryPublicID, updateErr)
 			}
 			return nil
 		})

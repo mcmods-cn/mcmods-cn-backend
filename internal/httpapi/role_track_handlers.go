@@ -134,10 +134,11 @@ func (s *Server) downgradeUserRoleTrack(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, direction int) {
-	userID, ok := s.pathUserID(w, r)
+	identity, ok := s.pathUserIdentity(w, r)
 	if !ok {
 		return
 	}
+	userID := identity.InternalID
 	trackCode := strings.TrimSpace(r.PathValue("code"))
 	roles, err := s.roleTrackRoles(r.Context(), trackCode)
 	if err == pgx.ErrNoRows || len(roles) < 2 {

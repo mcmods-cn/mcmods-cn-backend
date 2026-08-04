@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"mcmods-cn-backend/internal/activity"
+	"mcmods-cn-backend/internal/security"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -99,7 +100,7 @@ func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEd
 		}
 	}
 	claims := currentClaims(r)
-	allowForeignFiles := hasPermission(claims.Permissions, "content.review") || hasPermission(claims.Permissions, "admin.*")
+	allowForeignFiles := claimsAllow(claims, "content.review") || claimsAllow(claims, "admin.*")
 	snapshot.AllowForeignFiles = allowForeignFiles
 	if err = validateCatalogSnapshotReferencesTx(r.Context(), tx, snapshot, claims.Subject, allowForeignFiles); err != nil {
 		return result, err
@@ -111,7 +112,7 @@ func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEd
 	}
 	reviewConfig := loadReviewConfig(r.Context(), s.db)
 	reviewRequired := catalogMutationReviewRequired(reviewConfig, snapshot.Operation)
-	if catalogMutationBypassesReview(claims.Permissions) {
+	if catalogMutationBypassesReview(claims) {
 		reviewRequired = false
 	}
 	reviewStatus := "approved"
@@ -154,8 +155,8 @@ func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEd
 	return result, nil
 }
 
-func catalogMutationBypassesReview(permissions []string) bool {
-	return hasPermission(permissions, "content.no-review") || hasPermission(permissions, "admin.*")
+func catalogMutationBypassesReview(claims security.Claims) bool {
+	return claimsAllow(claims, "content.no-review") || claimsAllow(claims, "admin.*")
 }
 
 func catalogMutationBaseMatches(operation, status string, requested, published *int64) bool {
@@ -269,6 +270,17 @@ func publishCatalogEditorSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID i
 	if err := hydrateCatalogEditorSnapshotTx(ctx, tx, &snapshot); err != nil {
 		return err
 	}
+	var rasterScope ossRasterBindingScope
+	if snapshot.Kind == "resource" || snapshot.Kind == "recipe_template" {
+		var submittedBy *int64
+		if err := tx.QueryRow(ctx, `select created_by from content_revisions where id=$1`, revisionID).Scan(&submittedBy); err != nil {
+			return err
+		}
+		if submittedBy != nil {
+			rasterScope.UploaderID = *submittedBy
+		}
+		rasterScope.AllowAnyUploader = snapshot.AllowForeignFiles
+	}
 	if snapshot.Operation == "delete" {
 		result, err := tx.Exec(ctx, `update catalog_entities set status='archived',archived_at=now(),published_revision_id=$2,updated_at=now()
 			where id=$1 and status='active'`, snapshot.EntityID, revisionID)
@@ -293,13 +305,13 @@ func publishCatalogEditorSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID i
 	}
 	switch snapshot.Kind {
 	case "resource":
-		return publishCatalogResourceTx(ctx, tx, snapshot, revisionID, actorID)
+		return publishCatalogResourceTx(ctx, tx, snapshot, revisionID, actorID, rasterScope)
 	case "tag":
 		return publishCatalogTagTx(ctx, tx, snapshot, revisionID)
 	case "recipe_type":
 		return publishCatalogRecipeTypeTx(ctx, tx, snapshot, revisionID, actorID)
 	case "recipe_template":
-		return publishCatalogRecipeTemplateTx(ctx, tx, snapshot, revisionID, actorID)
+		return publishCatalogRecipeTemplateTx(ctx, tx, snapshot, revisionID, actorID, rasterScope)
 	case "recipe":
 		return publishCatalogRecipeTx(ctx, tx, snapshot, revisionID, actorID)
 	default:
@@ -519,7 +531,13 @@ func invalidateAIDerivedLocalizationsTx(ctx context.Context, tx pgx.Tx, subjectI
 	return err
 }
 
-func publishCatalogResourceTx(ctx context.Context, tx pgx.Tx, snapshot catalogEditorSnapshot, revisionID, actorID int64) error {
+func publishCatalogResourceTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	snapshot catalogEditorSnapshot,
+	revisionID, actorID int64,
+	rasterScope ossRasterBindingScope,
+) error {
 	edit := snapshot.Resource
 	if edit == nil {
 		return errCatalogEditorInvalid
@@ -528,7 +546,7 @@ func publishCatalogResourceTx(ctx context.Context, tx pgx.Tx, snapshot catalogEd
 	if kindCode == "" || canonicalID == "" {
 		return errCatalogEditorInvalid
 	}
-	canonicalDefinition, err := canonicalizeGlobalCatalogResourceDefinition(ctx, tx, kindCode, canonicalID, nonNilCatalogDefinition(edit.Definition))
+	canonicalDefinition, err := canonicalizeGlobalCatalogResourceDefinition(ctx, tx, kindCode, canonicalID, nonNilJSONObject(edit.Definition))
 	if err != nil {
 		return err
 	}
@@ -536,23 +554,11 @@ func publishCatalogResourceTx(ctx context.Context, tx pgx.Tx, snapshot catalogEd
 	if err = validateCatalogResourceDefinition(kindCode, canonicalDefinition); err != nil {
 		return err
 	}
-	if snapshot.AllowForeignFiles {
-		if err := validateCatalogImageFileReferences(ctx, tx, 0, true, edit.IconFileID, edit.RenderFileID); err != nil {
-			return err
-		}
-	} else {
-		if err := validateCatalogImageReferenceTx(ctx, tx, revisionID, edit.IconFileID); err != nil {
-			return err
-		}
-		if err := validateCatalogImageReferenceTx(ctx, tx, revisionID, edit.RenderFileID); err != nil {
-			return err
-		}
-	}
-	iconFileID, err := resolveOptionalOSSFilePublicID(ctx, tx, edit.IconFileID)
+	iconFileID, err := resolveOptionalTrustedRasterOSSFilePublicID(ctx, tx, edit.IconFileID, rasterScope)
 	if err != nil {
 		return errCatalogEditorReference
 	}
-	renderFileID, err := resolveOptionalOSSFilePublicID(ctx, tx, edit.RenderFileID)
+	renderFileID, err := resolveOptionalTrustedRasterOSSFilePublicID(ctx, tx, edit.RenderFileID, rasterScope)
 	if err != nil {
 		return errCatalogEditorReference
 	}
@@ -573,7 +579,7 @@ func publishCatalogResourceTx(ctx context.Context, tx pgx.Tx, snapshot catalogEd
 			return err
 		}
 	}
-	definition := string(catalogJSON(nonNilCatalogDefinition(edit.Definition)))
+	definition := string(catalogJSON(nonNilJSONObject(edit.Definition)))
 	_, err = tx.Exec(ctx, `insert into catalog_resource_definitions(resource_id,definition_schema_version,definition,icon_file_id,render_file_id,published_revision_id,updated_by)
 		values($1,1,$2::jsonb,$3,$4,$5,$6) on conflict(resource_id) do update set definition_schema_version=excluded.definition_schema_version,definition=excluded.definition,
 		icon_file_id=excluded.icon_file_id,render_file_id=excluded.render_file_id,published_revision_id=excluded.published_revision_id,
@@ -616,7 +622,7 @@ func publishCatalogRecipeTypeTx(ctx context.Context, tx pgx.Tx, snapshot catalog
 		on conflict(entity_id) do update set canonical_id=excluded.canonical_id`, snapshot.EntityID, strings.TrimSpace(edit.CanonicalID)); err != nil {
 		return err
 	}
-	definition := string(catalogJSON(nonNilCatalogDefinition(edit.Definition)))
+	definition := string(catalogJSON(nonNilJSONObject(edit.Definition)))
 	if _, err := tx.Exec(ctx, `insert into recipe_type_definitions(recipe_type_id,definition,published_revision_id,updated_by)
 		values($1,$2::jsonb,$3,$4) on conflict(recipe_type_id) do update set definition=excluded.definition,
 		published_revision_id=excluded.published_revision_id,updated_by=excluded.updated_by,updated_at=now()`, snapshot.EntityID,
@@ -639,7 +645,13 @@ func publishCatalogRecipeTypeTx(ctx context.Context, tx pgx.Tx, snapshot catalog
 	return nil
 }
 
-func publishCatalogRecipeTemplateTx(ctx context.Context, tx pgx.Tx, snapshot catalogEditorSnapshot, revisionID, actorID int64) error {
+func publishCatalogRecipeTemplateTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	snapshot catalogEditorSnapshot,
+	revisionID, actorID int64,
+	rasterScope ossRasterBindingScope,
+) error {
 	edit := snapshot.Template
 	if edit == nil || snapshot.ParentEntityID <= 0 {
 		return errCatalogEditorInvalid
@@ -647,18 +659,11 @@ func publishCatalogRecipeTemplateTx(ctx context.Context, tx pgx.Tx, snapshot cat
 	if err := validateCatalogTemplate(edit); err != nil {
 		return err
 	}
-	if snapshot.AllowForeignFiles {
-		if err := validateCatalogImageFileReferences(ctx, tx, 0, true, edit.BackgroundFileID); err != nil {
-			return err
-		}
-	} else if err := validateCatalogImageReferenceTx(ctx, tx, revisionID, edit.BackgroundFileID); err != nil {
-		return err
-	}
-	backgroundFileID, err := resolveOptionalOSSFilePublicID(ctx, tx, edit.BackgroundFileID)
+	backgroundFileID, err := resolveOptionalTrustedRasterOSSFilePublicID(ctx, tx, edit.BackgroundFileID, rasterScope)
 	if err != nil {
 		return errCatalogEditorReference
 	}
-	definition := string(catalogJSON(nonNilCatalogDefinition(edit.Definition)))
+	definition := string(catalogJSON(nonNilJSONObject(edit.Definition)))
 	if _, err := tx.Exec(ctx, `insert into recipe_layout_templates(entity_id,recipe_type_id,template_key,import_snapshot_id,background_file_id,
 		canvas_width,canvas_height,image_scale,definition,published_revision_id,updated_by)
 		values($1,$2,$3,null,$4,$5,$6,$7,$8::jsonb,$9,$10)
@@ -707,7 +712,7 @@ func publishCatalogRecipeTemplateTx(ctx context.Context, tx pgx.Tx, snapshot cat
 			on conflict(template_id,slot_key) do update set role=excluded.role,output_index=excluded.output_index,
 			ordinal=excluded.ordinal,x=excluded.x,y=excluded.y,width=excluded.width,height=excluded.height,definition=excluded.definition`, slotID, snapshot.EntityID, slot.SlotKey, slot.Role,
 			slot.OutputIndex, slot.Ordinal, slot.Rect.X, slot.Rect.Y, slot.Rect.Width, slot.Rect.Height,
-			string(catalogJSON(nonNilCatalogDefinition(slot.Definition)))); err != nil {
+			string(catalogJSON(nonNilJSONObject(slot.Definition)))); err != nil {
 			return err
 		}
 	}
@@ -775,7 +780,7 @@ func publishCatalogRecipeTx(ctx context.Context, tx pgx.Tx, snapshot catalogEdit
 		source_mod_content_version_id=excluded.source_mod_content_version_id,definition=excluded.definition,
 		definition_schema_version=excluded.definition_schema_version,
 		published_revision_id=excluded.published_revision_id,updated_by=excluded.updated_by,updated_at=now()`,
-		snapshot.EntityID, templateID, sourceVersionID, string(catalogJSON(nonNilCatalogDefinition(edit.Definition))), revisionID, nullableActorID(actorID)); err != nil {
+		snapshot.EntityID, templateID, sourceVersionID, string(catalogJSON(nonNilJSONObject(edit.Definition))), revisionID, nullableActorID(actorID)); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `delete from recipe_bindings where recipe_id=$1`, snapshot.EntityID); err != nil {
@@ -796,7 +801,7 @@ func publishCatalogRecipeTx(ctx context.Context, tx pgx.Tx, snapshot catalogEdit
 		var bindingInternalID int64
 		if err = tx.QueryRow(ctx, `insert into recipe_bindings(identity_key,recipe_id,template_slot_id,ordinal,definition)
 			values($1,$2,$3,$4,$5::jsonb) returning id`, bindingID, snapshot.EntityID, slotIDs[slotKey], ordinal,
-			string(catalogJSON(nonNilCatalogDefinition(binding.Definition)))).Scan(&bindingInternalID); err != nil {
+			string(catalogJSON(nonNilJSONObject(binding.Definition)))).Scan(&bindingInternalID); err != nil {
 			return err
 		}
 		for index, candidate := range binding.Candidates {
@@ -816,7 +821,7 @@ func publishCatalogRecipeTx(ctx context.Context, tx pgx.Tx, snapshot catalogEdit
 			candidateID := catalogSnapshotID("canonical-recipe-candidate", strconv.FormatInt(revisionID, 10), bindingID, strconv.Itoa(index))
 			if _, err = tx.Exec(ctx, `insert into recipe_binding_candidates(identity_key,binding_id,candidate_index,resource_id,amount,probability,byproduct,definition)
 				values($1,$2,$3,$4,$5,$6,$7,$8::jsonb)`, candidateID, bindingInternalID, index, resourceID, candidate.Amount,
-				candidate.Probability, candidate.Byproduct, string(catalogJSON(nonNilCatalogDefinition(candidate.Definition)))); err != nil {
+				candidate.Probability, candidate.Byproduct, string(catalogJSON(nonNilJSONObject(candidate.Definition)))); err != nil {
 				return err
 			}
 			if candidate.RawResourceID != "" {
@@ -1075,22 +1080,12 @@ func catalogEditorIdentityForTemplate(recipeTypeID, templateKey string) catalogI
 }
 
 func validateCatalogImageFileReferences(ctx context.Context, tx pgx.Tx, actorID int64, allowForeign bool, fileIDs ...*string) error {
+	scope := ossRasterBindingScope{UploaderID: actorID, AllowAnyUploader: allowForeign}
 	for _, fileID := range fileIDs {
 		if fileID == nil {
 			continue
 		}
-		publicID := strings.ToLower(strings.TrimSpace(*fileID))
-		if !validCatalogPublicID(publicID) {
-			return errCatalogEditorReference
-		}
-		var valid bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from oss_files where public_id=$1 and status='active'
-			and scan_status in ('clean','trusted_generated')
-			and lower(split_part(content_type,';',1)) in ('image/png','image/jpeg','image/webp','image/gif','image/apng')
-			and ($2 or uploader_id=$3))`, publicID, allowForeign, actorID).Scan(&valid); err != nil {
-			return err
-		}
-		if !valid {
+		if _, err := resolveTrustedRasterOSSFilePublicID(ctx, tx, *fileID, scope); err != nil {
 			return errCatalogEditorReference
 		}
 	}

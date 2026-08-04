@@ -288,6 +288,16 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
+	if blueprintUpload {
+		if blueprint := s.reusableBlueprintByHash(r.Context(), req.SHA256, req.SizeBytes, currentClaims(r).Subject); blueprint != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"uploadRequired": false,
+				"blueprint":      blueprint,
+				"blueprintId":    blueprint["id"],
+			})
+			return
+		}
+	}
 	var existing map[string]any
 	var exists bool
 	if isProjectDownload {
@@ -311,7 +321,9 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	var existingInternalID int64
 	if exists && (blueprintUpload || coverBlueprintID > 0) {
 		if coverBlueprintID > 0 {
-			existingInternalID, err = s.resolveActiveTrustedRasterOSSFileInternalIDForUploader(r.Context(), fmt.Sprint(existing["id"]), currentClaims(r).Subject)
+			var file trustedRasterOSSFile
+			file, err = resolveTrustedRasterOSSFilePublicID(r.Context(), s.db, fmt.Sprint(existing["id"]), ossRasterBindingScope{UploaderID: currentClaims(r).Subject})
+			existingInternalID = file.ID
 		} else {
 			existingInternalID, err = s.resolveActiveOSSFileInternalIDForUploader(r.Context(), fmt.Sprint(existing["id"]), currentClaims(r).Subject)
 		}
@@ -1067,16 +1079,6 @@ func (s *Server) resolveActiveOSSFileInternalIDForUploader(ctx context.Context, 
 	return internalID, err
 }
 
-func (s *Server) resolveActiveTrustedRasterOSSFileInternalIDForUploader(ctx context.Context, publicID string, uploaderID int64) (int64, error) {
-	var internalID int64
-	err := s.db.QueryRow(ctx, `select id from oss_files
-		where public_id=$1 and uploader_id=$2 and status='active'
-		  and scan_status in ('clean','trusted_generated')
-		  and lower(split_part(content_type,';',1)) in ('image/png','image/jpeg','image/jpg','image/gif','image/webp')`,
-		publicID, uploaderID).Scan(&internalID)
-	return internalID, err
-}
-
 func requiresSynchronousCatalogImageValidation(source string) bool {
 	source = strings.ToLower(strings.TrimSpace(source))
 	return strings.HasPrefix(source, "mod_resource:") ||
@@ -1412,9 +1414,9 @@ func ossFileRecord(id string, bucket string, endpoint string, region string, obj
 
 func (s *Server) enforceUserFileUploadLimits(r *http.Request, sizeBytes int64, deferStoredSizeCheck bool) error {
 	claims := currentClaims(r)
-	singleLimit := permissionMiBToBytes(numericPermissionValue(claims.Permissions, "user.file.single_limit"))
-	dailyLimit := permissionMiBToBytes(numericPermissionValue(claims.Permissions, "user.file.daily_limit"))
-	totalLimit := permissionMiBToBytes(numericPermissionValue(claims.Permissions, "user.file.total_limit"))
+	singleLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.single_limit"))
+	dailyLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.daily_limit"))
+	totalLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.total_limit"))
 	if singleLimit <= 0 {
 		return errors.New("没有单文件上传权限")
 	}
@@ -1453,7 +1455,7 @@ func (s *Server) enforceUserFileUploadLimits(r *http.Request, sizeBytes int64, d
 
 func (s *Server) enforceUserStoredFileLimit(r *http.Request, sizeBytes int64) error {
 	claims := currentClaims(r)
-	totalLimit := permissionMiBToBytes(numericPermissionValue(claims.Permissions, "user.file.total_limit"))
+	totalLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.total_limit"))
 	if totalLimit <= 0 {
 		return errors.New("没有用户文件总容量额度")
 	}
@@ -1802,7 +1804,7 @@ func (s *Server) resolveUserOSSUploadCategory(r *http.Request, category, source 
 			templatePublicID = normalizeObjectSegment(parts[1])
 		}
 		var exists bool
-		if recipeTypePublicID == "" || !hasPermission(claims.Permissions, "content.write") ||
+		if recipeTypePublicID == "" || !claimsAllow(claims, "content.write") ||
 			s.db.QueryRow(r.Context(), `select exists(select 1 from catalog_entities where public_id=$1 and entity_type='recipe_type' and status='active')`, recipeTypePublicID).Scan(&exists) != nil || !exists {
 			return "", errors.New("没有权限向该配方模板目录上传文件")
 		}
@@ -1820,7 +1822,7 @@ func (s *Server) resolveUserOSSUploadCategory(r *http.Request, category, source 
 			Scan(&storedKind, &createdBy, &claimedBy) != nil {
 			return "", errors.New("作者或团队不存在")
 		}
-		canEdit := hasPermission(claims.Permissions, "admin.*") || hasPermission(claims.Permissions, "creator.edit") ||
+		canEdit := claimsAllow(claims, "admin.*") || claimsAllow(claims, "creator.edit") ||
 			(createdBy != nil && *createdBy == claims.Subject) || (claimedBy != nil && *claimedBy == claims.Subject)
 		if !canEdit || kind != normalizeObjectSegment(storedKind) {
 			return "", errors.New("没有权限向该作者或团队目录上传文件")

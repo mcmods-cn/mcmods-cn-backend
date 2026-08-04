@@ -8,11 +8,16 @@ import (
 
 func TestNormalizeExportResourceKind(t *testing.T) {
 	tests := map[string]string{
-		"minecraft:item_stack": "item",
-		"forge:fluid_stack":    "fluid",
-		"mekanism:gas_stack":   "gas",
-		"pigment":              "pigment",
-		"slurry_stack":         "slurry",
+		"minecraft:item_stack":         "item",
+		"forge:fluid_stack":            "fluid",
+		"mekanism:gas_stack":           "gas",
+		"pigment":                      "pigment",
+		"slurry_stack":                 "slurry",
+		"minecraft.loot_table":         "loot_table",
+		"minecraft.enchantment":        "enchantment",
+		"minecraft.dimension":          "dimension",
+		"minecraft.advancement":        "advancement",
+		"minecraft.natural_generation": "natural_generation",
 	}
 	for input, expected := range tests {
 		if actual := normalizeExportResourceKind(input); actual != expected {

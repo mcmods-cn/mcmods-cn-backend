@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"mcmods-cn-backend/internal/activity"
+	"mcmods-cn-backend/internal/security"
 )
 
 var allowedCommentReactions = stringSet("thumbs_up", "thumbs_down", "laugh", "hooray", "confused", "heart", "rocket", "eyes")
@@ -33,7 +34,6 @@ type commentTargetInfo struct {
 type commentAuthor struct {
 	ID          string `json:"id"`
 	Username    string `json:"username"`
-	DisplayName string `json:"displayName"`
 	AvatarURL   string `json:"avatarUrl"`
 	ProjectRole string `json:"projectRole,omitempty"`
 }
@@ -145,7 +145,7 @@ type commentProjectRoleSignals struct {
 
 func (s *Server) commentsForTarget(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	target, err := s.resolveCommentTarget(r.Context(), r.PathValue("targetType"), r.PathValue("targetKey"), claims.Subject, claims.Permissions)
+	target, err := s.resolveCommentTarget(r.Context(), r.PathValue("targetType"), r.PathValue("targetKey"), claims)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "评论目标不存在或当前不可见")
 		return
@@ -332,7 +332,7 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 
 	notificationData := map[string]any{
 		"commentId": publicID, "targetType": target.Type, "targetKey": target.Key,
-		"targetTitle": target.Title, "url": target.URL + "#comment-" + publicID,
+		"targetLabel": target.Title, "url": target.URL + "#comment-" + publicID,
 	}
 	if parentID != nil && directRecipientID != claims.Subject {
 		s.enqueueOrCreateDirectNotification(r.Context(), directRecipientID, claims.Subject, "reply_mention",
@@ -470,7 +470,7 @@ func (s *Server) commentThread(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取评论失败")
 		return
 	}
-	target, err := s.resolveCommentTargetByInternal(r.Context(), targetType, targetID, targetVersionID, claims.Subject, claims.Permissions)
+	target, err := s.resolveCommentTargetByInternal(r.Context(), targetType, targetID, targetVersionID, claims)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "评论目标不存在或当前不可见")
 		return
@@ -533,7 +533,7 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if authorID != claims.Subject && !hasPermission(claims.Permissions, "comment.moderate") {
+	if authorID != claims.Subject && !claimsAllow(claims, "comment.moderate") {
 		writeError(w, http.StatusForbidden, "无权修改这条评论")
 		return
 	}
@@ -629,7 +629,8 @@ func (s *Server) reportComment(w http.ResponseWriter, r *http.Request) {
 	}
 	_, err = s.db.Exec(r.Context(), `insert into comment_reports(comment_id,reporter_id,reason,detail)
 		values($1,$2,$3,$4) on conflict(comment_id,reporter_id)
-		do update set reason=excluded.reason,detail=excluded.detail,status='pending',created_at=now(),resolved_at=null`,
+		do update set reason=excluded.reason,detail=excluded.detail,status='pending',reviewer_id=null,
+			resolution_note='',created_at=now(),updated_at=now(),resolved_at=null`,
 		commentID, claims.Subject, request.Reason, request.Detail)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "提交举报失败")
@@ -753,7 +754,7 @@ func (s *Server) myCommentWatches(w http.ResponseWriter, r *http.Request) {
 		if queryErr != nil || len(comments) == 0 {
 			continue
 		}
-		target, queryErr := s.resolveCommentTargetByInternal(r.Context(), value.targetType, value.targetID, value.targetVersionID, claims.Subject, claims.Permissions)
+		target, queryErr := s.resolveCommentTargetByInternal(r.Context(), value.targetType, value.targetID, value.targetVersionID, claims)
 		if queryErr != nil {
 			target = commentTargetInfo{Type: value.targetType, InternalID: value.targetID}
 		}
@@ -863,8 +864,8 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 	args = append(args, viewerID)
 	rows, err := queryer.Query(ctx, fmt.Sprintf(`select c.id,c.public_id,coalesce(parent.public_id,''),
 		coalesce(root.public_id,''),c.depth,c.body,c.status,c.child_count,c.descendant_count,
-		author.public_id,author.username,author.display_name,author.avatar_url,
-		coalesce(parent_author.display_name,parent_author.username,''),coalesce(parent.body,''),coalesce(parent.status,''),
+		author.public_id,author.username,author.avatar_url,
+		coalesce(parent_author.username,''),coalesce(parent.body,''),coalesce(parent.status,''),
 		c.created_at,c.updated_at,
 		coalesce(watch.public_id,''),coalesce(watch.status,''),watch.muted_until,
 		coalesce(watch.muted_forever,false),coalesce(watch.unread_count,0),coalesce(watch.watched_reply_count,0),
@@ -907,7 +908,7 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 		item := commentResponse{Reactions: map[string]int{}, UserReactions: []string{}}
 		if err = rows.Scan(&numericID, &item.ID, &parentID, &rootID, &item.Depth, &item.Body, &status,
 			&item.ChildCount, &item.DescendantCount, &item.Author.ID, &item.Author.Username,
-			&item.Author.DisplayName, &item.Author.AvatarURL, &parentAuthor, &parentBody, &parentStatus,
+			&item.Author.AvatarURL, &parentAuthor, &parentBody, &parentStatus,
 			&item.CreatedAt, &item.UpdatedAt, &watchID, &watchStatus, &mutedUntil, &mutedForever,
 			&watchUnread, &watchedReplies, &reactionNames, &reactionCounts, &selectedReactions); err != nil {
 			return nil, err
@@ -1124,11 +1125,12 @@ func resolveCommentProjectRole(signals commentProjectRoleSignals) string {
 	return ""
 }
 
-func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey string, viewerID int64, permissions []string) (commentTargetInfo, error) {
+func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey string, claims security.Claims) (commentTargetInfo, error) {
 	targetType = strings.ToLower(strings.TrimSpace(targetType))
 	targetKey = strings.ToLower(strings.TrimSpace(targetKey))
 	info := commentTargetInfo{Type: targetType, Key: targetKey}
-	moderator := hasPermission(permissions, "comment.moderate") || hasPermission(permissions, "admin.*")
+	viewerID := claims.Subject
+	moderator := claimsAllow(claims, "comment.moderate") || claimsAllow(claims, "admin.*")
 	switch targetType {
 	case "mod":
 		err := s.db.QueryRow(ctx, `select mod.id,mod.primary_name,route.canonical_path
@@ -1221,7 +1223,7 @@ func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey
 	}
 }
 
-func (s *Server) resolveCommentTargetByInternal(ctx context.Context, targetType string, targetID int64, targetVersionID *int64, viewerID int64, permissions []string) (commentTargetInfo, error) {
+func (s *Server) resolveCommentTargetByInternal(ctx context.Context, targetType string, targetID int64, targetVersionID *int64, claims security.Claims) (commentTargetInfo, error) {
 	var targetKey string
 	if targetType == "mod_resource" {
 		if targetVersionID == nil {
@@ -1242,7 +1244,7 @@ func (s *Server) resolveCommentTargetByInternal(ctx context.Context, targetType 
 			return commentTargetInfo{}, err
 		}
 	}
-	return s.resolveCommentTarget(ctx, targetType, targetKey, viewerID, permissions)
+	return s.resolveCommentTarget(ctx, targetType, targetKey, claims)
 }
 
 func (s *Server) numericCommentID(ctx context.Context, publicID string) (int64, error) {

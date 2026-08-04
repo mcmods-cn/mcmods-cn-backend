@@ -20,7 +20,6 @@ type directConversationSummary struct {
 	ID          string     `json:"id"`
 	PartnerID   string     `json:"partnerId"`
 	Username    string     `json:"username"`
-	DisplayName string     `json:"displayName"`
 	LastMessage string     `json:"lastMessage"`
 	LastAt      *time.Time `json:"lastAt,omitempty"`
 	UnreadCount int64      `json:"unreadCount"`
@@ -38,7 +37,7 @@ type directMessageItem struct {
 
 func (s *Server) conversations(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	rows, err := s.db.Query(r.Context(), `select c.public_id,partner.public_id,partner.username,partner.display_name,
+	rows, err := s.db.Query(r.Context(), `select c.public_id,partner.public_id,partner.username,
 		coalesce(last_message.body,''),last_message.created_at,
 		(select count(*) from direct_messages unread
 		 where unread.conversation_id=c.id and unread.recipient_id=$1 and unread.read_at is null)
@@ -58,7 +57,7 @@ func (s *Server) conversations(w http.ResponseWriter, r *http.Request) {
 	items := make([]directConversationSummary, 0)
 	for rows.Next() {
 		var item directConversationSummary
-		if err = rows.Scan(&item.ID, &item.PartnerID, &item.Username, &item.DisplayName, &item.LastMessage, &item.LastAt, &item.UnreadCount); err != nil {
+		if err = rows.Scan(&item.ID, &item.PartnerID, &item.Username, &item.LastMessage, &item.LastAt, &item.UnreadCount); err != nil {
 			writeError(w, http.StatusInternalServerError, "读取私聊会话失败")
 			return
 		}
@@ -195,7 +194,7 @@ func (s *Server) sendConversationMessage(w http.ResponseWriter, r *http.Request)
 	notificationQueued := false
 	if !active && s.queue != nil {
 		var senderName string
-		_ = s.db.QueryRow(r.Context(), `select coalesce(nullif(display_name,''),username) from users where id=$1`, claims.Subject).Scan(&senderName)
+		_ = s.db.QueryRow(r.Context(), `select username from users where id=$1`, claims.Subject).Scan(&senderName)
 		preview := request.Body
 		if len([]rune(preview)) > 160 {
 			preview = string([]rune(preview)[:160]) + "..."

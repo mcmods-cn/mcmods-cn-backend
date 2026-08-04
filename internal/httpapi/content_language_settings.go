@@ -46,6 +46,10 @@ func (s *Server) contentLanguageSettings(w http.ResponseWriter, r *http.Request)
 	}
 	request.PrimaryLocale = normalizeContentLocale(request.PrimaryLocale)
 	request.SecondaryLocale = normalizeContentLocale(request.SecondaryLocale)
+	if !isEditableContentLocale(request.SecondaryLocale) {
+		writeError(w, http.StatusBadRequest, "secondaryLocale must be a site-supported content language")
+		return
+	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update content language settings")

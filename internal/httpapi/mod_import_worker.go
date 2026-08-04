@@ -383,7 +383,7 @@ func importGitHubRepository(ctx context.Context, client *http.Client, cfg modImp
 		SiteID:           modSiteIDBase(repository.Name),
 		PrimaryName:      repository.Name,
 		Summary:          repository.Description,
-		ModID:            normalizeExternalModID(repository.Name),
+		ModIDs:           []modIdentifierPayload{{Identifier: normalizeExternalModID(repository.Name), Primary: true}},
 		Environment:      "bothRequired",
 		PrimaryCategory:  primaryCategoryFromExternal(repository.Topics),
 		Compatibilities:  compatibilitiesForLoaders(loaders, nil),

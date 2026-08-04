@@ -29,23 +29,24 @@ func (s *Server) userOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"followers": followers,
 		"following": following,
-		"aiBalance": s.userAIDailyBalance(r.Context(), claims.Subject, claims.Permissions),
+		"aiBalance": s.userAIDailyBalance(r.Context(), claims.Subject, claims),
 	})
 }
 
 func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
-	userID, ok := s.pathUserID(w, r)
+	identity, ok := s.pathUserIdentity(w, r)
 	if !ok {
 		return
 	}
-	var username, displayName, status, avatarURL, signature, profileBackgroundURL string
+	userID := identity.InternalID
+	var username, status, avatarURL, signature, profileBackgroundURL string
 	var createdAt time.Time
 	err := s.db.QueryRow(
 		r.Context(),
-		`select username, display_name, status, created_at, avatar_url, signature, profile_background_url
+		`select username, status, created_at, avatar_url, signature, profile_background_url
 		 from users where id = $1`,
 		userID,
-	).Scan(&username, &displayName, &status, &createdAt, &avatarURL, &signature, &profileBackgroundURL)
+	).Scan(&username, &status, &createdAt, &avatarURL, &signature, &profileBackgroundURL)
 	if err == pgx.ErrNoRows || status == "deleted" {
 		writeError(w, http.StatusNotFound, "用户不存在")
 		return
@@ -69,11 +70,11 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 			userID,
 		).Scan(&isFollowing)
 	}
-	canFollow := claims.Subject > 0 && !isOwn && hasPermission(claims.Permissions, "user.follow.create") && s.userHasPermission(r.Context(), userID, "user.follow.receive")
-	canMessage := claims.Subject > 0 && !isOwn && hasPermission(claims.Permissions, "user.message.send") && s.userHasPermission(r.Context(), userID, "user.message.receive")
+	canFollow := claims.Subject > 0 && !isOwn && claimsAllow(claims, "user.follow.create") && s.userHasPermission(r.Context(), userID, "user.follow.receive")
+	canMessage := claims.Subject > 0 && !isOwn && claimsAllow(claims, "user.message.send") && s.userHasPermission(r.Context(), userID, "user.message.receive")
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": userID, "username": username, "displayName": displayName, "status": status,
+		"id": identity.PublicID, "username": username, "status": status,
 		"createdAt": createdAt, "followers": followers, "following": following,
 		"avatarUrl": avatarURL, "signature": signature, "profileBackgroundUrl": profileBackgroundURL,
 		"isOwn": isOwn, "isFollowing": isFollowing, "canFollow": canFollow, "canMessage": canMessage,
@@ -81,10 +82,11 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) followUser(w http.ResponseWriter, r *http.Request) {
-	targetID, ok := s.pathUserID(w, r)
+	identity, ok := s.pathUserIdentity(w, r)
 	if !ok {
 		return
 	}
+	targetID := identity.InternalID
 	claims := currentClaims(r)
 	if targetID == claims.Subject {
 		writeError(w, http.StatusBadRequest, "不能关注自己")
@@ -130,10 +132,11 @@ func (s *Server) followUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) unfollowUser(w http.ResponseWriter, r *http.Request) {
-	targetID, ok := s.pathUserID(w, r)
+	identity, ok := s.pathUserIdentity(w, r)
 	if !ok {
 		return
 	}
+	targetID := identity.InternalID
 	claims := currentClaims(r)
 	_, err := s.db.Exec(r.Context(), `delete from user_follows where follower_id = $1 and followed_id = $2`, claims.Subject, targetID)
 	if err != nil {
@@ -176,11 +179,11 @@ func (s *Server) updateNotificationSettings(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]bool{"emailEnabled": req.EmailEnabled})
 }
 
-func (s *Server) pathUserID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+func (s *Server) pathUserIdentity(w http.ResponseWriter, r *http.Request) (publicIdentity, bool) {
 	identity, err := s.resolvePublicIdentity(r.Context(), strings.TrimSpace(r.PathValue("id")), "user")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "用户 ID 不正确")
-		return 0, false
+		return publicIdentity{}, false
 	}
-	return identity.InternalID, true
+	return identity, true
 }

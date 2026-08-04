@@ -114,6 +114,7 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 
 	httpapi.StartMinecraftVersionSyncScheduler(ctx, db)
 	httpapi.StartMinecraftServerProbeScheduler(ctx, db)
+	httpapi.NewOSSDeletionWorker(cfg, db).Start(ctx)
 	progressionService := progression.NewService(db)
 	activityMonitor := activity.NewMonitor(db, progressionService.ProcessActivityBatch)
 	natsCfg, loadErr := database.LoadNATSConfig(ctx, db, cfg.NATS, cfg.SettingsEncryptionKey)

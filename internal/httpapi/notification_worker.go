@@ -223,7 +223,7 @@ func (worker *NotificationWorker) aggregateFollowerNotification(ctx context.Cont
 
 	rows, err := tx.Query(
 		ctx,
-		`select u.display_name, u.username
+		`select u.username
 		 from notification_actors a
 		 join users u on u.id = a.actor_id
 		 where a.notification_id = $1
@@ -236,9 +236,9 @@ func (worker *NotificationWorker) aggregateFollowerNotification(ctx context.Cont
 	}
 	names := make([]string, 0, 3)
 	for rows.Next() {
-		var displayName, username string
-		if err := rows.Scan(&displayName, &username); err == nil {
-			names = append(names, defaultString(displayName, username))
+		var username string
+		if err := rows.Scan(&username); err == nil {
+			names = append(names, username)
 		}
 	}
 	rows.Close()

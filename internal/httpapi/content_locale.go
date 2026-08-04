@@ -46,6 +46,8 @@ func normalizeContentLocale(value string) string {
 		}
 		if len(parts[index]) == 2 || len(parts[index]) == 3 && isASCIIDigits(parts[index]) {
 			parts[index] = strings.ToUpper(parts[index])
+		} else if len(parts[index]) == 4 && isASCIIAlpha(parts[index]) {
+			parts[index] = strings.ToUpper(parts[index][:1]) + strings.ToLower(parts[index][1:])
 		} else {
 			parts[index] = strings.ToLower(parts[index])
 		}
@@ -54,8 +56,12 @@ func normalizeContentLocale(value string) string {
 	switch strings.ToLower(locale) {
 	case "zh", "zh-cn", "zh-sg", "zh-hans", "zh-hans-cn", "zh-hans-sg":
 		return "zh-CN"
-	case "zh-tw", "zh-hk", "zh-mo", "zh-hant", "zh-hant-tw", "zh-hant-hk":
+	case "zh-tw", "zh-hant", "zh-hant-tw":
 		return "zh-TW"
+	case "zh-hk", "zh-hant-hk":
+		return "zh-HK"
+	case "zh-mo", "zh-hant-mo":
+		return "zh-MO"
 	case "en":
 		return "en-US"
 	case "ja":

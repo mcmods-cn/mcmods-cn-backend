@@ -37,14 +37,16 @@ func TestImportedCreatorRevisionUsesPublicRouteTypeIntegration(t *testing.T) {
 	suffix := time.Now().UnixNano()
 	username := fmt.Sprintf("creatorrev%d", suffix)
 	var actorID int64
-	if err = tx.QueryRow(ctx, `insert into users(username,email,display_name,password_hash,email_verified)
-		values($1,$2,'Creator revision test','test',true) returning id`, username, username+"@example.invalid").Scan(&actorID); err != nil {
+	if err = tx.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
+		values($1,$2,'test',true) returning id`, username, username+"@example.invalid").Scan(&actorID); err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/mods", nil)
 	for _, kind := range []string{"author", "team"} {
-		creatorID, publicID, createErr := ensureNamedCreatorTx(ctx, tx, kind,
-			fmt.Sprintf("Imported %s %d", kind, suffix), actorID, request)
+		creatorID, publicID, createErr := ensureNamedCreatorSnapshotTx(ctx, tx, creatorSnapshot{
+			Kind: kind,
+			Name: fmt.Sprintf("Imported %s %d", kind, suffix),
+		}, actorID, request)
 		if createErr != nil {
 			t.Fatalf("create imported %s: %v", kind, createErr)
 		}

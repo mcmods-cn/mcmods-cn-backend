@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"mcmods-cn-backend/internal/domain"
+	"mcmods-cn-backend/internal/security"
 )
 
 func TestOSSFileRecordExposesConversionDetails(t *testing.T) {
@@ -40,12 +41,12 @@ func TestMatchPermissionCatalogUsesVariableTemplate(t *testing.T) {
 	}
 }
 
-func TestResolvedPermissionAllowsDirectDenyOverridesRoleGrant(t *testing.T) {
-	entries := []effectivePermission{
+func TestPermissionRulesAllowDirectDenyOverridesRoleGrant(t *testing.T) {
+	entries := []security.PermissionRule{
 		{Code: "user.message.receive", Allow: true, Priority: 10, Source: "group.member"},
 		{Code: "user.message.receive", Allow: false, Priority: directUserPermissionPriority, Source: "user"},
 	}
-	if resolvedPermissionAllows(entries, "user.message.receive") {
+	if permissionRulesAllow(entries, "user.message.receive") {
 		t.Fatal("expected direct deny to override role grant")
 	}
 }
@@ -93,8 +94,8 @@ func TestShouldPersistMarkdownImageAsWebP(t *testing.T) {
 }
 
 func TestMergePermissionComparisonRows(t *testing.T) {
-	left := []effectivePermission{{Code: "a.read", Allow: true}, {Code: "shared", Allow: true}}
-	right := []effectivePermission{{Code: "b.read", Allow: true}, {Code: "shared", Allow: false}}
+	left := []security.PermissionRule{{Code: "a.read", Allow: true}, {Code: "shared", Allow: true}}
+	right := []security.PermissionRule{{Code: "b.read", Allow: true}, {Code: "shared", Allow: false}}
 	rows := mergePermissionComparisonRows(left, right)
 	if len(rows) != 3 || rows[0].Code != "a.read" || rows[1].Code != "b.read" || rows[2].Code != "shared" {
 		t.Fatalf("unexpected comparison rows: %#v", rows)
@@ -107,13 +108,45 @@ func TestMergePermissionComparisonRows(t *testing.T) {
 	}
 }
 
-func TestResolvedPermissionAllowsSpecificGrantOverridesWildcardAtSamePriority(t *testing.T) {
-	entries := []effectivePermission{
+func TestPermissionRulesAllowSpecificGrantOverridesWildcardAtSamePriority(t *testing.T) {
+	entries := []security.PermissionRule{
 		{Code: "user.message.*", Allow: false, Priority: 10},
 		{Code: "user.message.receive", Allow: true, Priority: 10},
 	}
-	if !resolvedPermissionAllows(entries, "user.message.receive") {
+	if !permissionRulesAllow(entries, "user.message.receive") {
 		t.Fatal("expected the more specific permission to win")
+	}
+}
+
+func TestPermissionRulesAllowHigherPriorityWildcardDenyWins(t *testing.T) {
+	entries := []security.PermissionRule{
+		{Code: "project.edit.abc123456", Allow: true, Priority: 10},
+		{Code: "project.edit.*", Allow: false, Priority: 20},
+	}
+	if permissionRulesAllow(entries, "project.edit.abc123456") {
+		t.Fatal("expected the higher-priority wildcard deny to win")
+	}
+}
+
+func TestPermissionRulesNumericValueHonorsDeny(t *testing.T) {
+	entries := []security.PermissionRule{
+		{Code: "user.file.total_limit.500", Allow: true, Priority: 10},
+		{Code: "user.file.total_limit.*", Allow: false, Priority: 20},
+		{Code: "user.file.total_limit.100", Allow: true, Priority: 30},
+	}
+	if got := permissionRulesNumericValue(entries, "user.file.total_limit"); got != 100 {
+		t.Fatalf("permissionRulesNumericValue() = %d, want 100", got)
+	}
+}
+
+func TestClaimsAllowHonorsResolvedDeny(t *testing.T) {
+	claims := security.Claims{
+		PermissionRules: []security.PermissionRule{
+			{Code: "admin.*", Allow: false, Priority: directUserPermissionPriority},
+		},
+	}
+	if claimsAllow(claims, "admin.users.read") {
+		t.Fatal("resolved deny rule must not authorize a request")
 	}
 }
 

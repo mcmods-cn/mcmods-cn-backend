@@ -56,7 +56,6 @@ func communitySchemaStatements() []string {
 			description_markdown text not null default '',
 			avatar_url text not null default '',
 			avatar_file_id bigint references oss_files(id) on delete set null,
-			translations jsonb not null default '{}'::jsonb,
 			claimed_by bigint references users(id) on delete set null,
 			created_by bigint references users(id) on delete set null,
 			review_status text not null default 'pending'
@@ -83,16 +82,6 @@ func communitySchemaStatements() []string {
 		)`,
 		`create index if not exists idx_creator_links_order
 			on creator_links(creator_id,display_order,id)`,
-		`create table if not exists creator_collaborations (
-			creator_id bigint not null references creators(id) on delete cascade,
-			collaborator_id bigint not null references creators(id) on delete cascade,
-			description text not null default '',
-			created_at timestamptz not null default now(),
-			primary key(creator_id,collaborator_id),
-			check(creator_id <> collaborator_id)
-		)`,
-		`create index if not exists idx_creator_collaborations_reverse
-			on creator_collaborations(collaborator_id,creator_id)`,
 		`create table if not exists creator_team_members (
 			team_id bigint not null references creators(id) on delete cascade,
 			member_creator_id bigint not null references creators(id) on delete cascade,
@@ -119,6 +108,15 @@ func communitySchemaStatements() []string {
 			created_at timestamptz not null default now(),
 			reviewed_at timestamptz
 		)`,
+		`create table if not exists creator_claim_attachments (
+			claim_id bigint not null references creator_claims(id) on delete cascade,
+			oss_file_id bigint not null references oss_files(id) on delete restrict,
+			display_order integer not null default 0,
+			created_at timestamptz not null default now(),
+			primary key(claim_id,oss_file_id)
+		)`,
+		`create index if not exists idx_creator_claim_attachments_file
+			on creator_claim_attachments(oss_file_id,claim_id)`,
 		`create unique index if not exists idx_creator_claims_open
 			on creator_claims(creator_id,user_id) where status='pending'`,
 		`create index if not exists idx_creator_claims_queue

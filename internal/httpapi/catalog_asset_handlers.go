@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -11,26 +10,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func validateCatalogImageReferenceTx(ctx context.Context, tx pgx.Tx, revisionID int64, fileID *string) error {
-	if fileID == nil {
-		return nil
-	}
-	var valid bool
-	if err := tx.QueryRow(ctx, `select exists(
-		select 1 from oss_files file
-		join content_revisions revision on revision.id=$1 and revision.created_by=file.uploader_id
-		where file.public_id=$2 and file.status='active'
-		  and file.scan_status in ('clean','trusted_generated')
-		  and lower(split_part(file.content_type,';',1)) in ('image/png','image/jpeg','image/webp','image/gif','image/apng')
-	)`, revisionID, *fileID).Scan(&valid); err != nil {
-		return err
-	}
-	if !valid {
-		return errCatalogEditorReference
-	}
-	return nil
-}
-
 func (s *Server) catalogResourceAsset(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("publicId")))
 	assetKind := strings.ToLower(strings.TrimSpace(r.PathValue("assetKind")))
@@ -39,12 +18,12 @@ func (s *Server) catalogResourceAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	versionColumn := "detail.icon_file_id"
-	legacyColumn := "definition.icon_file_id"
+	definitionColumn := "definition.icon_file_id"
 	if assetKind == "icon-small" {
 		versionColumn = "detail.icon_small_file_id"
 	} else if assetKind == "render" {
 		versionColumn = "detail.render_file_id"
-		legacyColumn = "definition.render_file_id"
+		definitionColumn = "definition.render_file_id"
 	}
 	var objectKey, contentType string
 	versionPublicID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("version")))
@@ -78,13 +57,33 @@ func (s *Server) catalogResourceAsset(w http.ResponseWriter, r *http.Request) {
 		err = s.db.QueryRow(r.Context(), `select file.object_key,file.content_type
 		from catalog_entities entity
 		join catalog_resource_definitions definition on definition.resource_id=entity.id
-		join oss_files file on file.id=`+legacyColumn+`
+		join oss_files file on file.id=`+definitionColumn+`
 		where entity.public_id=$1 and entity.entity_type='resource' and entity.status='active'
 		  and entity.archived_at is null and file.status='active'
 		  and file.scan_status in ('clean','trusted_generated')`, publicID).Scan(&objectKey, &contentType)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "catalog resource asset does not exist")
+		snapshotColumn := "snapshot.icon_path"
+		if assetKind == "render" {
+			snapshotColumn = "snapshot.preview_path"
+		}
+		var revisionID, assetPath string
+		err = s.db.QueryRow(r.Context(), `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
+			select snapshot.revision_id::text,`+snapshotColumn+`
+			from catalog_entities entity
+			join latest_resource_snapshots snapshot on snapshot.resource_id=entity.id
+			where entity.public_id=$1 and entity.entity_type='resource' and entity.status='active'
+			  and entity.archived_at is null and `+snapshotColumn+`<>''`, publicID).Scan(&revisionID, &assetPath)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "catalog resource asset does not exist")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load imported catalog resource asset")
+			return
+		}
+		w.Header().Set("Cache-Control", "private, no-store")
+		s.redirectModExportMedia(w, r, revisionID, assetPath)
 		return
 	}
 	if err != nil {
@@ -139,7 +138,7 @@ func (s *Server) catalogRecipeTemplateBackground(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) redirectCatalogOSSAsset(w http.ResponseWriter, r *http.Request, objectKey, contentType string) {
-	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "image/") {
+	if !safeRasterContentType(contentType) {
 		writeError(w, http.StatusUnsupportedMediaType, "catalog asset is not an image")
 		return
 	}

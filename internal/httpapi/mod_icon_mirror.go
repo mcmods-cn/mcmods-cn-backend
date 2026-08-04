@@ -148,10 +148,6 @@ func (s *Server) mirrorExternalImage(ctx context.Context, sourceURL string, uplo
 	return result, nil
 }
 
-func modIconObjectKey(prefix, projectUniqueID, digest, extension string) string {
-	return externalImageObjectKey(prefix, ossProjectCategory("mod", projectUniqueID, "icons", "project", "original"), "icon", digest, extension)
-}
-
 func externalImageObjectKey(prefix, category, baseName, digest, extension string) string {
 	digest = strings.ToLower(strings.TrimSpace(digest))
 	if len(digest) > 16 {
@@ -181,11 +177,6 @@ func externalModIconFormat(data []byte) (string, string, error) {
 	default:
 		return "", "", fmt.Errorf("unsupported external mod icon content type: %s", contentType)
 	}
-}
-
-func (s *Server) reusableExternalModIconObject(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey, expectedSHA256 string, expectedSize int64) bool {
-	_, reusable := s.reusableExternalImageObject(ctx, client, cfg, objectKey, expectedSHA256, expectedSize)
-	return reusable
 }
 
 func (s *Server) reusableExternalImageObject(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey, expectedSHA256 string, expectedSize int64) (mirroredExternalImage, bool) {

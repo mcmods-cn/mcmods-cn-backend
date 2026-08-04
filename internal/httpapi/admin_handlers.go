@@ -37,12 +37,11 @@ type updateRolesRequest struct {
 }
 
 type adminCreateUserRequest struct {
-	Username    string   `json:"username"`
-	Email       string   `json:"email"`
-	Password    string   `json:"password"`
-	DisplayName string   `json:"displayName"`
-	Status      string   `json:"status"`
-	Roles       []string `json:"roles"`
+	Username string   `json:"username"`
+	Email    string   `json:"email"`
+	Password string   `json:"password"`
+	Status   string   `json:"status"`
+	Roles    []string `json:"roles"`
 }
 
 type roleRequest struct {
@@ -104,6 +103,7 @@ func (s *Server) adminNav(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 	mailCfg := s.mailConfigFromSettings(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
+		"general": s.siteGeneralConfigFromSettings(r.Context()),
 		"auth": map[string]any{
 			"allowRegistration":        true,
 			"emailPasswordLogin":       true,
@@ -441,13 +441,12 @@ func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	rows, err := s.db.Query(
 		r.Context(),
-		`select id, public_id, username, email, display_name, email_verified, status, created_at, last_login_at
+		`select id, public_id, username, email, email_verified, status, created_at, last_login_at
 		 from users
 		 where $1 = ''
 		    or public_id = lower($1)
 		    or username ilike '%' || $1 || '%'
 		    or email ilike '%' || $1 || '%'
-		    or display_name ilike '%' || $1 || '%'
 		 order by id desc
 		 limit 100`,
 		query,
@@ -461,11 +460,16 @@ func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	users := make([]domain.User, 0)
 	for rows.Next() {
 		var user domain.User
-		if err := rows.Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt); err != nil {
+		if err := rows.Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "读取用户数据失败")
 			return
 		}
-		user.Roles, user.Permissions = s.userGrants(r.Context(), user.ID)
+		roleCodes, _, permissionErr := s.resolveUserRootPermissions(r.Context(), user.ID)
+		if permissionErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
+			return
+		}
+		user.RoleCodes = roleCodes
 		users = append(users, user)
 	}
 	writeJSON(w, http.StatusOK, users)
@@ -479,12 +483,8 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Username = strings.TrimSpace(req.Username)
 	req.Email = normalizeEmail(req.Email)
-	req.DisplayName = strings.TrimSpace(req.DisplayName)
 	req.Status = strings.TrimSpace(req.Status)
 	req.Roles = normalizeCodes(req.Roles)
-	if req.DisplayName == "" {
-		req.DisplayName = req.Username
-	}
 	if req.Status == "" {
 		req.Status = "active"
 	}
@@ -526,15 +526,14 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 	var user domain.User
 	err = tx.QueryRow(
 		r.Context(),
-		`insert into users (username, email, display_name, password_hash, email_verified, status)
-		 values ($1, $2, $3, $4, true, $5)
-		 returning id, public_id, username, email, display_name, email_verified, status, created_at, last_login_at`,
+		`insert into users (username, email, password_hash, email_verified, status)
+		 values ($1, $2, $3, true, $4)
+		 returning id, public_id, username, email, email_verified, status, created_at, last_login_at`,
 		req.Username,
 		req.Email,
-		req.DisplayName,
 		passwordHash,
 		req.Status,
-	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.DisplayName, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
+	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
 	if err != nil {
 		writeError(w, http.StatusConflict, "用户名或邮箱已被占用")
 		return
@@ -583,7 +582,12 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "创建用户失败")
 		return
 	}
-	user.Roles, user.Permissions = s.userGrants(r.Context(), user.ID)
+	roleCodes, _, permissionErr := s.resolveUserRootPermissions(r.Context(), user.ID)
+	if permissionErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
+		return
+	}
+	user.RoleCodes = roleCodes
 	writeJSON(w, http.StatusCreated, user)
 }
 
@@ -643,7 +647,11 @@ func (s *Server) userPermissionDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := identity.InternalID
-	roles, effective := s.userGrants(r.Context(), userID)
+	roles, effectivePermissionRules, err := s.resolveUserRootPermissions(r.Context(), userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
+		return
+	}
 	rows, err := s.db.Query(
 		r.Context(),
 		`select p.code, up.allow, up.expires_at, up.context
@@ -678,10 +686,10 @@ func (s *Server) userPermissionDetails(w http.ResponseWriter, r *http.Request) {
 		groupPermissions = append(groupPermissions, "group."+role)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"roles":                roles,
-		"groupPermissions":     groupPermissions,
-		"directPermissions":    direct,
-		"effectivePermissions": effective,
+		"roles":                    roles,
+		"groupPermissions":         groupPermissions,
+		"directPermissions":        direct,
+		"effectivePermissionRules": effectivePermissionRules,
 	})
 }
 

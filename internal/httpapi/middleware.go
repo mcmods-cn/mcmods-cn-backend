@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -85,7 +84,7 @@ func (s *Server) continueOptionalAuthAsGuest(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) resolveClaimsSubject(ctx context.Context, claims *security.Claims) error {
-	return s.db.QueryRow(
+	if err := s.db.QueryRow(
 		ctx,
 		`select users.id
 		 from auth_sessions session
@@ -100,7 +99,15 @@ func (s *Server) resolveClaimsSubject(ctx context.Context, claims *security.Clai
 		security.SessionFingerprint(claims.SessionID),
 		claims.AuthVersion,
 		claims.PublicSubject,
-	).Scan(&claims.Subject)
+	).Scan(&claims.Subject); err != nil {
+		return err
+	}
+	_, permissionRules, err := s.resolveUserRootPermissions(ctx, claims.Subject)
+	if err != nil {
+		return err
+	}
+	claims.PermissionRules = permissionRules
+	return nil
 }
 
 func authTokenFromRequest(r *http.Request) (string, error) {
@@ -126,7 +133,7 @@ func (s *Server) requirePermission(permission string, next http.HandlerFunc) htt
 	s.registerDeclaredPermission(permission)
 	return s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		claims := currentClaims(r)
-		if !hasPermission(claims.Permissions, permission) {
+		if !claimsAllow(claims, permission) {
 			writeError(w, http.StatusForbidden, "permission denied")
 			return
 		}
@@ -158,91 +165,7 @@ func currentClaims(r *http.Request) security.Claims {
 	return claims
 }
 
-func hasPermission(grants []string, required string) bool {
-	for _, grant := range grants {
-		if grant == "*" || grant == "admin.*" {
-			return true
-		}
-		if grant == required {
-			return true
-		}
-		if strings.HasSuffix(grant, ".*") {
-			prefix := strings.TrimSuffix(grant, "*")
-			if strings.HasPrefix(required, prefix) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func numericPermissionValue(grants []string, permissionPrefix string) int32 {
-	if hasPermission(grants, "admin.*") {
-		return maxPermissionValue
-	}
-	if hasPermission(grants, permissionPrefix+".*") {
-		return maxPermissionValue
-	}
-	best := int32(0)
-	prefix := strings.TrimSuffix(permissionPrefix, ".") + "."
-	for _, grant := range grants {
-		if !strings.HasPrefix(grant, prefix) {
-			continue
-		}
-		valuePart := strings.TrimPrefix(grant, prefix)
-		if valuePart == "*" || valuePart == "-1" {
-			return maxPermissionValue
-		}
-		value, err := strconv.ParseInt(valuePart, 10, 32)
-		if err != nil {
-			continue
-		}
-		if int32(value) > best {
-			best = int32(value)
-		}
-	}
-	return best
-}
-
 func (s *Server) userHasPermission(ctx context.Context, userID int64, permission string) bool {
-	if _, permissions, err := s.resolveUserRootPermissions(ctx, userID); err == nil {
-		return resolvedPermissionAllows(permissions, permission)
-	}
-	_, grants := s.userGrants(ctx, userID)
-	return hasPermission(grants, permission)
-}
-
-func resolvedPermissionAllows(entries []effectivePermission, required string) bool {
-	var selected *effectivePermission
-	selectedSpecificity := -1
-	for index := range entries {
-		entry := &entries[index]
-		matches, specificity := permissionEntryMatches(entry.Code, required)
-		if !matches {
-			continue
-		}
-		if selected == nil || entry.Priority > selected.Priority ||
-			(entry.Priority == selected.Priority && specificity > selectedSpecificity) ||
-			(entry.Priority == selected.Priority && specificity == selectedSpecificity && !entry.Allow && selected.Allow) {
-			selected = entry
-			selectedSpecificity = specificity
-		}
-	}
-	return selected != nil && selected.Allow
-}
-
-func permissionEntryMatches(grant string, required string) (bool, int) {
-	if grant == "*" || grant == "admin.*" {
-		return true, 0
-	}
-	if grant == required {
-		return true, len(grant) + 10000
-	}
-	if strings.HasSuffix(grant, ".*") {
-		prefix := strings.TrimSuffix(grant, "*")
-		if strings.HasPrefix(required, prefix) {
-			return true, len(prefix)
-		}
-	}
-	return false, -1
+	_, permissions, err := s.resolveUserRootPermissions(ctx, userID)
+	return err == nil && permissionRulesAllow(permissions, permission)
 }

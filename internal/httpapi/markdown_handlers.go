@@ -58,11 +58,7 @@ func defaultMarkdownConfig() markdownConfigPayload {
 	}
 }
 
-func (s *Server) publicMarkdownConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.markdownConfigFromSettings(r.Context()))
-}
-
-func (s *Server) adminMarkdownConfig(w http.ResponseWriter, r *http.Request) {
+func (s *Server) markdownConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.markdownConfigFromSettings(r.Context()))
 }
 

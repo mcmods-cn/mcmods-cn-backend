@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
-
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 )
 
@@ -22,17 +20,22 @@ type profileConfigPayload struct {
 }
 
 type userProfileSettingsRequest struct {
+	Username       *string `json:"username,omitempty"`
 	Signature      *string `json:"signature,omitempty"`
+	Timezone       *string `json:"timezone,omitempty"`
 	MessageReceive *bool   `json:"messageReceive,omitempty"`
 	AvatarFileID   *string `json:"avatarFileId,omitempty"`
 	ClearAvatar    bool    `json:"clearAvatar,omitempty"`
 }
 
 type userProfileSettingsResponse struct {
+	PublicID             string `json:"publicId"`
+	Username             string `json:"username"`
 	Signature            string `json:"signature"`
 	SignatureMaxBytes    int    `json:"signatureMaxBytes"`
 	AvatarURL            string `json:"avatarUrl"`
 	ProfileBackgroundURL string `json:"profileBackgroundUrl"`
+	Timezone             string `json:"timezone"`
 	MessageReceive       bool   `json:"messageReceive"`
 	CanUpdateAvatar      bool   `json:"canUpdateAvatar"`
 	CanUseAnimatedAvatar bool   `json:"canUseAnimatedAvatar"`
@@ -84,6 +87,14 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 	}
 	claims := currentClaims(r)
 	config := s.profileConfigFromSettings(r.Context())
+	if request.Username != nil {
+		value := strings.TrimSpace(*request.Username)
+		if err := validateUsername(value); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		request.Username = &value
+	}
 	if request.Signature != nil {
 		value := strings.TrimSpace(*request.Signature)
 		if len([]byte(value)) > config.SignatureMaxBytes {
@@ -91,6 +102,14 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		request.Signature = &value
+	}
+	if request.Timezone != nil {
+		value, normalizeErr := normalizeTimezone(*request.Timezone)
+		if normalizeErr != nil {
+			writeError(w, http.StatusBadRequest, normalizeErr.Error())
+			return
+		}
+		request.Timezone = &value
 	}
 
 	tx, err := s.db.Begin(r.Context())
@@ -100,14 +119,32 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 	}
 	defer tx.Rollback(r.Context())
 	var baseRevisionID *int64
-	if err = tx.QueryRow(r.Context(), `select profile_revision_id from users where id=$1 for update`, claims.Subject).Scan(&baseRevisionID); err != nil {
+	var currentTimezone string
+	if err = tx.QueryRow(r.Context(), `select profile_revision_id,timezone from users where id=$1 for update`, claims.Subject).Scan(&baseRevisionID, &currentTimezone); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to lock user profile")
 		return
+	}
+	timezoneChanged := request.Timezone != nil && *request.Timezone != currentTimezone
+	if request.Username != nil {
+		if _, err := tx.Exec(r.Context(), `update users set username=$2,updated_at=now() where id=$1`, claims.Subject, *request.Username); err != nil {
+			writeError(w, http.StatusConflict, "用户名已被占用")
+			return
+		}
 	}
 
 	if request.Signature != nil {
 		if _, err := tx.Exec(r.Context(), `update users set signature = $2, updated_at = now() where id = $1`, claims.Subject, *request.Signature); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存用户签名失败")
+			return
+		}
+	}
+	if timezoneChanged {
+		if _, err := tx.Exec(r.Context(), `update users set timezone=$2,updated_at=now() where id=$1`, claims.Subject, *request.Timezone); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save user timezone")
+			return
+		}
+		if _, err := tx.Exec(r.Context(), `insert into user_timezone_changes(user_id,old_timezone,new_timezone) values($1,$2,$3)`, claims.Subject, currentTimezone, *request.Timezone); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record user timezone change")
 			return
 		}
 	}
@@ -145,33 +182,16 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusForbidden, "没有更换头像权限")
 			return
 		}
-		fileID, resolveErr := resolveOSSFilePublicID(r.Context(), tx, *request.AvatarFileID)
+		file, resolveErr := resolveTrustedRasterOSSFilePublicID(r.Context(), tx, *request.AvatarFileID, ossRasterBindingScope{UploaderID: claims.Subject})
 		if resolveErr != nil {
 			writeError(w, http.StatusBadRequest, "avatar file does not exist")
 			return
 		}
-		var originalName, contentType, objectKey string
-		err := tx.QueryRow(
-			r.Context(),
-			`select original_name, content_type, object_key
-			 from oss_files
-			 where id = $1 and uploader_id = $2 and status = 'active'`,
-			fileID,
-			claims.Subject,
-		).Scan(&originalName, &contentType, &objectKey)
-		if err == pgx.ErrNoRows {
-			writeError(w, http.StatusBadRequest, "头像文件不存在或不属于当前用户")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "读取头像文件失败")
-			return
-		}
-		if !isSupportedAvatarImage(originalName, contentType) {
+		if !isSupportedAvatarImage(file.OriginalName, file.ContentType) {
 			writeError(w, http.StatusBadRequest, "头像仅支持 PNG、JPEG、WebP、GIF 或 APNG 图片")
 			return
 		}
-		animated, err := s.isAnimatedAvatarObject(r.Context(), objectKey, originalName, contentType)
+		animated, err := s.isAnimatedAvatarObject(r.Context(), file.ObjectKey, file.OriginalName, file.ContentType)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "无法验证头像文件是否为动态图")
 			return
@@ -180,22 +200,22 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusForbidden, "没有使用动态头像权限")
 			return
 		}
-		avatarURL := buildPublicOSSURL(s.ossConfigFromSettings(r.Context()), objectKey)
+		avatarURL := buildPublicOSSURL(s.ossConfigFromSettings(r.Context()), file.ObjectKey)
 		if _, err := tx.Exec(
 			r.Context(),
 			`update users set avatar_file_id = $2, avatar_url = $3, updated_at = now() where id = $1`,
 			claims.Subject,
-			fileID,
+			file.ID,
 			avatarURL,
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存头像失败")
 			return
 		}
 	}
-	if request.Signature != nil || request.MessageReceive != nil || request.ClearAvatar || request.AvatarFileID != nil {
-		var signature, avatarURL string
+	if request.Username != nil || request.Signature != nil || timezoneChanged || request.MessageReceive != nil || request.ClearAvatar || request.AvatarFileID != nil {
+		var username, signature, avatarURL, timezone string
 		var avatarFileID *string
-		if err = tx.QueryRow(r.Context(), `select signature,avatar_url,(select public_id from oss_files where id=users.avatar_file_id) from users where id=$1`, claims.Subject).Scan(&signature, &avatarURL, &avatarFileID); err != nil {
+		if err = tx.QueryRow(r.Context(), `select username,signature,avatar_url,(select public_id from oss_files where id=users.avatar_file_id),timezone from users where id=$1`, claims.Subject).Scan(&username, &signature, &avatarURL, &avatarFileID, &timezone); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to read updated user profile")
 			return
 		}
@@ -207,8 +227,8 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		snapshot, marshalErr := json.Marshal(map[string]any{
-			"userId": claims.PublicSubject, "signature": signature, "avatarUrl": avatarURL,
-			"avatarFileId": avatarFileID, "messageReceive": messageReceive,
+			"userId": claims.PublicSubject, "username": username, "signature": signature, "avatarUrl": avatarURL,
+			"avatarFileId": avatarFileID, "timezone": timezone, "messageReceive": messageReceive,
 		})
 		if marshalErr != nil {
 			writeError(w, http.StatusInternalServerError, "failed to encode user profile revision")
@@ -248,8 +268,8 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) loadUserProfileSettings(ctx context.Context, userID int64) (userProfileSettingsResponse, error) {
 	var response userProfileSettingsResponse
-	if err := s.db.QueryRow(ctx, `select signature, avatar_url, profile_background_url from users where id = $1`, userID).
-		Scan(&response.Signature, &response.AvatarURL, &response.ProfileBackgroundURL); err != nil {
+	if err := s.db.QueryRow(ctx, `select public_id, username, signature, avatar_url, profile_background_url, timezone from users where id = $1`, userID).
+		Scan(&response.PublicID, &response.Username, &response.Signature, &response.AvatarURL, &response.ProfileBackgroundURL, &response.Timezone); err != nil {
 		return response, err
 	}
 	response.SignatureMaxBytes = s.profileConfigFromSettings(ctx).SignatureMaxBytes

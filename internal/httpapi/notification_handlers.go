@@ -11,6 +11,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 var notificationKinds = map[string]bool{
@@ -37,9 +39,8 @@ type aiDailyBalancePayload struct {
 }
 
 type notificationActor struct {
-	ID          string `json:"id"`
-	Username    string `json:"username"`
-	DisplayName string `json:"displayName"`
+	ID       string `json:"id"`
+	Username string `json:"username"`
 }
 
 type notificationItem struct {
@@ -132,7 +133,7 @@ func (s *Server) notifications(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		`select n.public_id, n.kind, n.title, n.body, n.source_locale, n.data,
 		        coalesce(jsonb_agg(distinct jsonb_build_object(
-		          'id', actor.public_id, 'username', actor.username, 'displayName', actor.display_name
+		          'id', actor.public_id, 'username', actor.username
 		        )) filter (where actor.id is not null), '[]'::jsonb),
 		        (receipt.read_at is not null), n.created_at, n.updated_at
 		 from notifications n
@@ -237,7 +238,7 @@ func (s *Server) unreadSummary(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) aiDailyBalance(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	writeJSON(w, http.StatusOK, s.userAIDailyBalance(r.Context(), claims.Subject, claims.Permissions))
+	writeJSON(w, http.StatusOK, s.userAIDailyBalance(r.Context(), claims.Subject, claims))
 }
 
 func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
@@ -285,7 +286,7 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	limit := int64(numericPermissionValue(claims.Permissions, "user.ai.daily_token_limit"))
+	limit := int64(claimsNumericPermissionValue(claims, "user.ai.daily_token_limit"))
 	if limit <= 0 {
 		writeError(w, http.StatusForbidden, "没有可用的每日 AI Token 额度")
 		return
@@ -445,8 +446,8 @@ func (s *Server) userAIDailyUsage(ctx context.Context, userID int64) (int64, int
 	return used, reserved
 }
 
-func (s *Server) userAIDailyBalance(ctx context.Context, userID int64, permissions []string) aiDailyBalancePayload {
-	limit := int64(numericPermissionValue(permissions, "user.ai.daily_token_limit"))
+func (s *Server) userAIDailyBalance(ctx context.Context, userID int64, claims security.Claims) aiDailyBalancePayload {
+	limit := int64(claimsNumericPermissionValue(claims, "user.ai.daily_token_limit"))
 	used, reserved := s.userAIDailyUsage(ctx, userID)
 	return aiDailyBalancePayload{
 		UsedTokens:      used,

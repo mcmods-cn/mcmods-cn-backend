@@ -66,11 +66,11 @@ func TestValidateModContentTemplateDefinition(t *testing.T) {
 	valid := map[string]any{
 		"resourceKinds": []any{"mod.skill"},
 		"entryTypes": []any{map[string]any{
-			"code": "skill",
+			"code": "skill", "names": map[string]any{"en-US": "Skill"},
 			"groups": []any{map[string]any{
-				"code": "skill",
+				"code": "skill", "names": map[string]any{"en-US": "Skill properties"},
 				"fields": []any{map[string]any{
-					"code": "cd", "type": "number", "paths": []any{[]any{"skill", "cd"}},
+					"code": "cd", "type": "number", "format": "integer", "names": map[string]any{"en-US": "Cooldown"}, "paths": []any{[]any{"skill", "cd"}},
 				}},
 			}},
 		}},

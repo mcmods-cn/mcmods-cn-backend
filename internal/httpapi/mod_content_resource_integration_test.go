@@ -193,8 +193,8 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 	}
 	defer layoutTx.Rollback(ctx)
 	var actorID, revisionID int64
-	if err = layoutTx.QueryRow(ctx, `insert into users(username,email,display_name,password_hash,email_verified)
-		values($1,$2,'Layout test','test',true) returning id`, "layout-user-"+projectCode, "layout-"+projectCode+"@example.invalid").Scan(&actorID); err != nil {
+	if err = layoutTx.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
+		values($1,$2,'test',true) returning id`, "layout-user-"+projectCode, "layout-"+projectCode+"@example.invalid").Scan(&actorID); err != nil {
 		t.Fatal(err)
 	}
 	advancementParentPublicID := fmt.Sprintf("apr%06d", suffix)
@@ -239,6 +239,7 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 	layout := modContentLayoutEdit{
 		VersionPublicID:     detailedVersionPublicID,
 		RootSectionPublicID: sectionPublicID,
+		DisplayMode:         "compact",
 		Categories: []modContentLayoutCategoryEdit{
 			{PublicID: categoryPublicID, ParentPublicID: sectionPublicID, DefaultLocale: "zh-CN", Ordinal: 0,
 				Localizations: []catalogLocalizationEdit{{Locale: "zh-CN", Name: "Nested category"}}},
@@ -248,10 +249,11 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 		Resources: []modContentLayoutResourceEdit{
 			{ResourcePublicID: resourcePublicID, SectionPublicID: newCategoryPublicID, Ordinal: 0},
 			{ResourcePublicID: advancementParentPublicID, SectionPublicID: newCategoryPublicID, Ordinal: 1,
-				Advancement: &modContentAdvancementLayoutEdit{X: 1.5, Y: 2.5}},
+				Advancement: &modContentAdvancementLayoutEdit{GroupID: "advancement:test", X: 1.5, Y: 2.5}},
 			{ResourcePublicID: advancementChildPublicID, SectionPublicID: newCategoryPublicID, Ordinal: 2,
 				Advancement: &modContentAdvancementLayoutEdit{
 					ParentResourcePublicID: advancementParentPublicID,
+					GroupID:                "advancement:test",
 					X:                      3.5,
 					Y:                      4.5,
 				}},

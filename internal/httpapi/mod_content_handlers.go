@@ -276,13 +276,6 @@ func loadModContentResourceLocalizationState(ctx context.Context, query modConte
 	return normalizeContentLocale(defaultLocale), localizations, nil
 }
 
-func reserveModContentResourceDetailTx(ctx context.Context, tx pgx.Tx, resourceID, versionID, modID int64, defaultLocale string, definition []byte, iconFileID, renderFileID *int64, actorID int64) error {
-	return reserveModContentResourceDetailWithSubtypeTx(
-		ctx, tx, resourceID, versionID, modID, "default", defaultLocale,
-		definition, nil, iconFileID, renderFileID, actorID,
-	)
-}
-
 func reserveModContentResourceDetailWithSubtypeTx(ctx context.Context, tx pgx.Tx, resourceID, versionID, modID int64, entryTypeCode, defaultLocale string, definition []byte, iconSmallFileID, iconFileID, renderFileID *int64, actorID int64) error {
 	var reservedResourceID int64
 	err := tx.QueryRow(ctx, `insert into mod_resource_version_details(resource_id,version_id,entry_type_code,default_locale,definition,icon_small_file_id,icon_file_id,render_file_id,status,created_by,updated_by)
@@ -319,21 +312,26 @@ type modContentImageQuerier interface {
 type modContentEntryTypeDefinition struct {
 	Code      string                     `json:"code"`
 	KindCodes []string                   `json:"kindCodes"`
+	Names     map[string]string          `json:"names"`
 	Groups    []modContentEntryTypeGroup `json:"groups"`
 }
 
 type modContentEntryTypeGroup struct {
-	Code   string                     `json:"code"`
-	Fields []modContentEntryTypeField `json:"fields"`
+	Code         string                     `json:"code"`
+	Names        map[string]string          `json:"names"`
+	Descriptions map[string]string          `json:"descriptions"`
+	Fields       []modContentEntryTypeField `json:"fields"`
 }
 
 type modContentEntryTypeField struct {
-	Code              string     `json:"code"`
-	Type              string     `json:"type"`
-	ReferenceKind     string     `json:"referenceKind"`
-	ReferenceRegistry string     `json:"referenceRegistry"`
-	Paths             [][]string `json:"paths"`
-	Editable          *bool      `json:"editable,omitempty"`
+	Code              string            `json:"code"`
+	Type              string            `json:"type"`
+	Format            string            `json:"format,omitempty"`
+	Names             map[string]string `json:"names"`
+	ReferenceKind     string            `json:"referenceKind"`
+	ReferenceRegistry string            `json:"referenceRegistry"`
+	Paths             [][]string        `json:"paths"`
+	Editable          *bool             `json:"editable,omitempty"`
 }
 
 type modContentTemplateDefinition struct {
@@ -350,6 +348,20 @@ func validateModContentTemplateDefinition(definition map[string]any) error {
 	if err = json.Unmarshal(encoded, &schema); err != nil {
 		return errCatalogEditorInvalid
 	}
+	if len(schema.ResourceKinds) == 0 || len(schema.ResourceKinds) > 64 {
+		return errCatalogEditorInvalid
+	}
+	seenResourceKinds := make(map[string]struct{}, len(schema.ResourceKinds))
+	for _, kindCode := range schema.ResourceKinds {
+		kindCode = strings.ToLower(strings.TrimSpace(kindCode))
+		if !validModContentReferenceKind(kindCode) {
+			return errCatalogEditorInvalid
+		}
+		if _, exists := seenResourceKinds[kindCode]; exists {
+			return errCatalogEditorInvalid
+		}
+		seenResourceKinds[kindCode] = struct{}{}
+	}
 	seenTypes := make(map[string]struct{}, len(schema.EntryTypes))
 	for _, entryType := range schema.EntryTypes {
 		code := strings.ToLower(strings.TrimSpace(entryType.Code))
@@ -360,6 +372,20 @@ func validateModContentTemplateDefinition(definition map[string]any) error {
 			return errCatalogEditorInvalid
 		}
 		seenTypes[code] = struct{}{}
+		if len(entryType.Names) == 0 || !validModContentSchemaNames(entryType.Names) || len(entryType.KindCodes) > 64 {
+			return errCatalogEditorInvalid
+		}
+		seenKinds := make(map[string]struct{}, len(entryType.KindCodes))
+		for _, kindCode := range entryType.KindCodes {
+			kindCode = strings.ToLower(strings.TrimSpace(kindCode))
+			if !validModContentReferenceKind(kindCode) {
+				return errCatalogEditorInvalid
+			}
+			if _, exists := seenKinds[kindCode]; exists {
+				return errCatalogEditorInvalid
+			}
+			seenKinds[kindCode] = struct{}{}
+		}
 		seenGroups := make(map[string]struct{}, len(entryType.Groups))
 		seenFields := make(map[string]struct{})
 		for _, group := range entryType.Groups {
@@ -371,10 +397,16 @@ func validateModContentTemplateDefinition(definition map[string]any) error {
 				return errCatalogEditorInvalid
 			}
 			seenGroups[groupCode] = struct{}{}
+			if len(group.Names) == 0 || !validModContentSchemaNames(group.Names) || !validModContentSchemaNames(group.Descriptions) {
+				return errCatalogEditorInvalid
+			}
 			for _, field := range group.Fields {
 				fieldCode := strings.TrimSpace(field.Code)
-				if fieldCode == "" || len(fieldCode) > 64 || !catalogStringIn(field.Type, "number", "text", "boolean", "list", "reference", "reference-list", "json") ||
+				if fieldCode == "" || len(fieldCode) > 64 || !catalogStringIn(field.Type, "number", "range", "text", "boolean", "list", "reference", "reference-list", "json") ||
 					len(field.Paths) == 0 || len(field.Paths) > 8 {
+					return errCatalogEditorInvalid
+				}
+				if len(field.Names) == 0 || !validModContentSchemaNames(field.Names) || !validModContentFieldFormat(field) {
 					return errCatalogEditorInvalid
 				}
 				if _, exists := seenFields[fieldCode]; exists {
@@ -401,6 +433,43 @@ func validateModContentTemplateDefinition(definition map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func validModContentSchemaNames(names map[string]string) bool {
+	if len(names) > 32 {
+		return false
+	}
+	for locale, value := range names {
+		if strings.TrimSpace(locale) == "" || len(locale) > 32 || len([]rune(strings.TrimSpace(value))) > 160 {
+			return false
+		}
+	}
+	return true
+}
+
+func validModContentFieldFormat(field modContentEntryTypeField) bool {
+	format := strings.ToLower(strings.TrimSpace(field.Format))
+	if format == "" {
+		return true
+	}
+	switch field.Type {
+	case "number":
+		return catalogStringIn(format, "integer", "float", "health", "armor")
+	case "range":
+		return format == "range"
+	case "text":
+		return format == "text"
+	case "boolean":
+		return format == "boolean"
+	case "list":
+		return format == "text-list"
+	case "reference", "reference-list":
+		return catalogStringIn(format, "resource", "entity", "tag", "enchantment", "item")
+	case "json":
+		return format == "json"
+	default:
+		return false
+	}
 }
 
 func validModContentReferenceKind(value string) bool {
@@ -691,7 +760,7 @@ func (s *Server) modContentVersions(w http.ResponseWriter, r *http.Request) {
 		s.submitNewModContentVersion(w, r, identity, edit)
 		return
 	}
-	includePending := canEditMod(currentClaims(r), identity) || hasPermission(currentClaims(r).Permissions, "content.review")
+	includePending := canEditMod(currentClaims(r), identity) || claimsAllow(currentClaims(r), "content.review")
 	rows, err := s.db.Query(r.Context(), `select public_id,label,minecraft_versions,loaders,mod_version,status,
 		(select revision.public_id from content_revisions revision where revision.id=mod_content_versions.published_revision_id),
 		created_at,updated_at from mod_content_versions where mod_id=$1 and ($2 or status='active')
@@ -817,7 +886,7 @@ func (s *Server) createModContentRevisionTx(r *http.Request, tx pgx.Tx, identity
 	config := loadReviewConfig(r.Context(), s.db)
 	reviewRequired := modContentReviewRequired(config, snapshot)
 	status := "approved"
-	if reviewRequired && !catalogMutationBypassesReview(claims.Permissions) && !canSkipProjectReview(claims, identity) {
+	if reviewRequired && !catalogMutationBypassesReview(claims) && !canSkipProjectReview(claims, identity) {
 		status = "pending"
 	}
 	aggregateType := modContentAggregateVersion
@@ -1072,9 +1141,14 @@ func (s *Server) modContentSections(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), `select section.public_id,version.public_id,template.public_id,template.code,template.builtin,template.i18n_key,
 		coalesce(parent.public_id,''),section.system_key,section.default_locale,section.display_mode,
 		section.ordinal,section.status,
+		case when section.parent_id is null then template.definition end,
 		(select revision.public_id from content_revisions revision where revision.id=section.published_revision_id),
-		coalesce((select jsonb_agg(jsonb_build_object('locale',localization.locale,'name',localization.name,'summary',localization.description,'contentMarkdown','') order by localization.locale)
-		 from mod_content_section_localizations localization where localization.section_id=section.id),'[]'::jsonb),
+		coalesce(
+			(select jsonb_agg(jsonb_build_object('locale',localization.locale,'name',localization.name,'summary',localization.description,'contentMarkdown','') order by localization.locale)
+			 from mod_content_section_localizations localization where localization.section_id=section.id),
+			(select jsonb_agg(jsonb_build_object('locale',localization.locale,'name',localization.name,'summary',localization.description,'contentMarkdown','') order by localization.locale)
+			 from mod_content_template_localizations localization where localization.template_id=template.id),
+			'[]'::jsonb),
 		coalesce((with recursive subtree as (
 			select id from mod_content_sections where id=section.id and status='active'
 			union all select child.id from mod_content_sections child join subtree parent on child.parent_id=parent.id where child.status='active'
@@ -1095,15 +1169,15 @@ func (s *Server) modContentSections(w http.ResponseWriter, r *http.Request) {
 		var templateBuiltin bool
 		var ordinal, resourceCount int
 		var revisionID *string
-		var localizations []byte
-		if err = rows.Scan(&publicID, &versionPublicID, &templatePublicID, &templateCode, &templateBuiltin, &templateI18nKey, &parentPublicID, &systemKey, &defaultLocale, &displayMode, &ordinal, &status, &revisionID, &localizations, &resourceCount); err != nil {
+		var definition, localizations []byte
+		if err = rows.Scan(&publicID, &versionPublicID, &templatePublicID, &templateCode, &templateBuiltin, &templateI18nKey, &parentPublicID, &systemKey, &defaultLocale, &displayMode, &ordinal, &status, &definition, &revisionID, &localizations, &resourceCount); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode content sections")
 			return
 		}
 		items = append(items, map[string]any{"publicId": publicID, "versionPublicId": versionPublicID, "templatePublicId": templatePublicID,
 			"templateCode": templateCode, "templateBuiltin": templateBuiltin, "templateI18nKey": templateI18nKey, "parentPublicId": parentPublicID, "systemKey": systemKey, "defaultLocale": defaultLocale,
 			"displayMode": displayMode, "ordinal": ordinal, "status": status, "publishedRevisionId": revisionID,
-			"localizations": json.RawMessage(localizations), "resourceCount": resourceCount})
+			"definition": json.RawMessage(definition), "localizations": json.RawMessage(localizations), "resourceCount": resourceCount})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -1148,9 +1222,14 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 		template.public_id,template.code,template.builtin,template.i18n_key,coalesce(parent.public_id,''),section.system_key,section.default_locale,
 		section.display_mode,section.ordinal,section.status,
 		(select revision.public_id from content_revisions revision where revision.id=section.published_revision_id),
-		coalesce((select jsonb_agg(jsonb_build_object('locale',localization.locale,'name',localization.name,
-		 'summary',localization.description,'contentMarkdown','') order by localization.locale)
-		 from mod_content_section_localizations localization where localization.section_id=section.id),'[]'::jsonb)
+		coalesce(
+		 (select jsonb_agg(jsonb_build_object('locale',localization.locale,'name',localization.name,
+		  'summary',localization.description,'contentMarkdown','') order by localization.locale)
+		  from mod_content_section_localizations localization where localization.section_id=section.id),
+		 (select jsonb_agg(jsonb_build_object('locale',localization.locale,'name',localization.name,
+		  'summary',localization.description,'contentMarkdown','') order by localization.locale)
+		  from mod_content_template_localizations localization where localization.template_id=template.id),
+		 '[]'::jsonb)
 		from mod_content_sections section join mod_content_versions version on version.id=section.version_id
 		join mod_content_templates template on template.id=section.template_id
 		left join mod_content_sections parent on parent.id=section.parent_id
@@ -1196,6 +1275,7 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 			from mod_content_sections child join subtree parent on child.parent_id=parent.id where child.status='active'
 		)
 		select entity.public_id,resource.kind_code,resource.canonical_id,subtree.public_id,section_resource.ordinal,
+		section_resource.similar_group_id,
 		coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(icon_file.public_id,''),
 		coalesce(nullif(version_names.names,'{}'::jsonb),nullif((select jsonb_object_agg(name.key,name.value)
 		 from jsonb_each_text(coalesce(imported.names,'{}'::jsonb)) name
@@ -1236,16 +1316,16 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 	defer rows.Close()
 	resources := make([]map[string]any, 0, min(limit, total))
 	for rows.Next() {
-		var resourcePublicID, kindCode, canonicalID, resourceSectionPublicID, sourceRevisionID, iconPath, iconFileID string
+		var resourcePublicID, kindCode, canonicalID, resourceSectionPublicID, similarGroupID, sourceRevisionID, iconPath, iconFileID string
 		var resourceOrdinal int
 		var names, definition []byte
-		if err = rows.Scan(&resourcePublicID, &kindCode, &canonicalID, &resourceSectionPublicID, &resourceOrdinal, &sourceRevisionID, &iconPath, &iconFileID, &names, &definition); err != nil {
+		if err = rows.Scan(&resourcePublicID, &kindCode, &canonicalID, &resourceSectionPublicID, &resourceOrdinal, &similarGroupID, &sourceRevisionID, &iconPath, &iconFileID, &names, &definition); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode content section resources")
 			return
 		}
 		resources = append(resources, map[string]any{"versionPublicId": versionPublicID, "resourcePublicId": resourcePublicID,
 			"sectionPublicId": resourceSectionPublicID, "kindCode": kindCode, "canonicalId": canonicalID, "ordinal": resourceOrdinal, "revisionId": sourceRevisionID, "iconPath": iconPath,
-			"iconFileId": iconFileID, "names": json.RawMessage(names), "definition": json.RawMessage(definition)})
+			"iconFileId": iconFileID, "similarGroupId": similarGroupID, "names": json.RawMessage(names), "definition": json.RawMessage(definition)})
 	}
 	lootItems := make([]map[string]any, 0)
 	lootResourceIndexes := make([]int, 0)
@@ -1487,7 +1567,7 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusUnprocessableEntity, "mod content version is invalid")
 		return
 	}
-	if err = validateModContentResourceSectionTx(r.Context(), tx, identity.ID, versionID, edit.KindCode, edit.SectionPublicID); err != nil {
+	if err = validateModContentResourceSection(r.Context(), tx, identity.ID, versionID, edit.KindCode, edit.SectionPublicID); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "the selected content category cannot contain this resource")
 		return
 	}
@@ -1552,6 +1632,92 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusCreated, result)
 }
 
+func (s *Server) modContentSimilarResources(w http.ResponseWriter, r *http.Request) {
+	identity, err := s.modIdentity(r.Context(), r.PathValue("siteId"))
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "mod not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read mod")
+		return
+	}
+	resourcePublicID := strings.ToLower(strings.TrimSpace(r.PathValue("resourceId")))
+	versionPublicID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("version")))
+	if !modContentPublicIDPattern.MatchString(resourcePublicID) || !modContentPublicIDPattern.MatchString(versionPublicID) {
+		writeError(w, http.StatusBadRequest, "invalid resource version")
+		return
+	}
+	var versionID int64
+	var similarGroupID string
+	err = s.db.QueryRow(r.Context(), `select version.id,placement.similar_group_id
+		from catalog_entities entity
+		join mod_content_section_resources placement on placement.resource_id=entity.id
+		join mod_content_versions version on version.id=placement.version_id and version.status='active'
+		join mod_content_sections section on section.id=placement.section_id and section.mod_id=version.mod_id and section.status='active'
+		where entity.public_id=$1 and version.public_id=$2 and version.mod_id=$3
+		order by section.ordinal,section.id limit 1`, resourcePublicID, versionPublicID, identity.ID).
+		Scan(&versionID, &similarGroupID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "mod resource version placement not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read similar resource group")
+		return
+	}
+	if similarGroupID == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"groupId": "", "items": []map[string]any{}})
+		return
+	}
+	primary, secondary := s.requestContentLocales(r)
+	localeCandidates := []string{strings.ToLower(normalizeContentLocale(primary)), strings.ToLower(normalizeContentLocale(secondary)), "en", "en-us", "zh-cn", "zh-tw"}
+	rows, err := s.db.Query(r.Context(), `select entity.public_id,resource.kind_code,resource.canonical_id,
+		coalesce(icon_file.public_id,''),coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),
+		coalesce(nullif(version_names.names,'{}'::jsonb),nullif((select jsonb_object_agg(name.key,name.value)
+		 from jsonb_each_text(coalesce(imported.names,'{}'::jsonb)) name
+		 where replace(lower(name.key),'_','-')=any($3::text[])),'{}'::jsonb),'{}'::jsonb)
+		from mod_content_section_resources placement
+		join mod_content_sections section on section.id=placement.section_id and section.status='active'
+		join catalog_entities entity on entity.id=placement.resource_id and entity.status='active' and entity.archived_at is null
+		join game_resources resource on resource.entity_id=placement.resource_id
+		left join mod_resource_version_details detail on detail.resource_id=placement.resource_id and detail.version_id=$1 and detail.status='active'
+		left join oss_files icon_file on icon_file.id=detail.icon_file_id and icon_file.status='active'
+		 and icon_file.scan_status in ('clean','trusted_generated')
+		left join lateral (select revision.public_id revision_id,snapshot.icon_path,snapshot.names
+		 from resource_import_snapshots snapshot join catalog_import_revisions revision on revision.id=snapshot.revision_id
+		 where snapshot.resource_id=placement.resource_id and revision.target_version_id=$1 and revision.is_active
+		 and revision.status in ('ready','partial') order by (snapshot.icon_path<>'') desc,revision.created_at desc limit 1) imported on true
+		left join lateral (select jsonb_object_agg(localization.locale,localization.name) names
+		 from mod_resource_version_detail_localizations localization
+		 where localization.resource_id=placement.resource_id and localization.version_id=$1
+		 and localization.name<>'' and replace(lower(localization.locale),'_','-')=any($3::text[])) version_names on true
+		where placement.version_id=$1 and placement.similar_group_id=$2 and section.mod_id=$4
+		order by section.ordinal,placement.ordinal,resource.canonical_id`, versionID, similarGroupID, localeCandidates, identity.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read similar resources")
+		return
+	}
+	defer rows.Close()
+	items := make([]map[string]any, 0)
+	for rows.Next() {
+		var publicID, kindCode, canonicalID, iconFileID, revisionID, iconPath string
+		var names []byte
+		if err = rows.Scan(&publicID, &kindCode, &canonicalID, &iconFileID, &revisionID, &iconPath, &names); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode similar resources")
+			return
+		}
+		items = append(items, map[string]any{"resourcePublicId": publicID, "versionPublicId": versionPublicID,
+			"kindCode": kindCode, "canonicalId": canonicalID, "iconFileId": iconFileID,
+			"revisionId": revisionID, "iconPath": iconPath, "names": json.RawMessage(names)})
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read similar resources")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"groupId": similarGroupID, "items": items})
+}
+
 func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 	var identity modIdentityRecord
 	if r.Method == http.MethodGet {
@@ -1578,9 +1744,21 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		var kindCode, canonicalID string
 		var details []byte
 		claims := currentClaims(r)
-		canPreviewInactive := canEditMod(claims, identity) || hasPermission(claims.Permissions, "content.review")
+		canPreviewInactive := canEditMod(claims, identity) || claimsAllow(claims, "content.review")
 		if err := s.db.QueryRow(r.Context(), `select resource.entity_id,resource.kind_code,resource.canonical_id,
 			coalesce((select jsonb_agg(jsonb_build_object('versionPublicId',version.public_id,'entryTypeCode',detail.entry_type_code,'definitionSchemaVersion',detail.definition_schema_version,'defaultLocale',detail.default_locale,
+			'schemaDefinition',coalesce((with recursive lineage as (
+				select section.id,section.parent_id,section.template_id
+				from mod_content_section_resources member
+				join mod_content_sections section on section.id=member.section_id and section.version_id=member.version_id
+				where member.resource_id=resource.entity_id and member.version_id=version.id and section.status='active'
+				union all
+				select parent.id,parent.parent_id,parent.template_id
+				from mod_content_sections parent join lineage child on child.parent_id=parent.id
+				where parent.status='active'
+			) select template.definition
+				from lineage root join mod_content_templates template on template.id=root.template_id and template.status='active'
+				where root.parent_id is null order by root.id limit 1),'{}'::jsonb),
 			'sourceRevisionId',coalesce((select import_revision.id from catalog_import_revisions import_revision
 			 where import_revision.target_version_id=version.id and import_revision.is_active and import_revision.status in ('ready','partial')
 			 order by coalesce(import_revision.activated_at,import_revision.created_at) desc limit 1),''),
@@ -1659,8 +1837,9 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 	var publishedRevisionID *int64
 	var resourceID int64
 	var actualKindCode, actualCanonicalID, currentIconSmallFilePublicID, currentIconFilePublicID, currentRenderFilePublicID string
+	var currentDefinition []byte
 	if err := s.db.QueryRow(r.Context(), `select detail.published_revision_id,resource.entity_id,resource.kind_code,resource.canonical_id,
-		coalesce(icon_small_file.public_id,''),coalesce(icon_file.public_id,''),coalesce(render_file.public_id,'')
+		coalesce(icon_small_file.public_id,''),coalesce(icon_file.public_id,''),coalesce(render_file.public_id,''),detail.definition
 		from mod_resource_version_details detail
 		join mod_content_versions version on version.id=detail.version_id and version.status='active'
 		join catalog_entities entity on entity.id=detail.resource_id
@@ -1672,7 +1851,7 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		left join oss_files render_file on render_file.id=detail.render_file_id and render_file.status='active'
 		 and render_file.scan_status in ('clean','trusted_generated')
 		where entity.public_id=$1 and version.public_id=$2 and version.mod_id=$3 and detail.status='active'`,
-		publicID, edit.VersionPublicID, identity.ID).Scan(&publishedRevisionID, &resourceID, &actualKindCode, &actualCanonicalID, &currentIconSmallFilePublicID, &currentIconFilePublicID, &currentRenderFilePublicID); err != nil {
+		publicID, edit.VersionPublicID, identity.ID).Scan(&publishedRevisionID, &resourceID, &actualKindCode, &actualCanonicalID, &currentIconSmallFilePublicID, &currentIconFilePublicID, &currentRenderFilePublicID, &currentDefinition); err != nil {
 		writeError(w, http.StatusNotFound, "mod resource version detail not found")
 		return
 	}
@@ -1722,8 +1901,14 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "the selected content category cannot contain this resource")
 		return
 	}
+	var storedDefinition map[string]any
+	if err := json.Unmarshal(currentDefinition, &storedDefinition); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to decode current resource definition")
+		return
+	}
+	effectiveDefinition := mergeModContentDefinitionPatch(storedDefinition, edit.Definition)
 	canonicalDefinition, normalizeErr := normalizeModContentEntryDefinition(
-		r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, edit.Definition, false,
+		r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, effectiveDefinition, false,
 	)
 	if normalizeErr != nil {
 		writeError(w, http.StatusUnprocessableEntity, "the selected resource subtype or its fields are invalid")
@@ -1994,13 +2179,21 @@ func syncModContentResourceUnresolvedReferencesTx(
 	}
 	var rawTemplate []byte
 	var entryTypeCode string
-	if err := tx.QueryRow(ctx, `select template.definition,detail.entry_type_code
-		from mod_resource_version_details detail
-		join mod_content_section_resources member on member.resource_id=detail.resource_id and member.version_id=detail.version_id
+	if err := tx.QueryRow(ctx, `with recursive lineage as (
+		select section.id,section.parent_id,section.template_id
+		from mod_content_section_resources member
 		join mod_content_sections section on section.id=member.section_id and section.version_id=member.version_id
-		join mod_content_templates template on template.id=section.template_id and template.status='active'
-		where detail.resource_id=$1 and detail.version_id=$2 and section.status='active'
-		order by section.ordinal,section.id limit 1`, resourceID, versionID).Scan(&rawTemplate, &entryTypeCode); err != nil {
+		where member.resource_id=$1 and member.version_id=$2 and section.status='active'
+		union all
+		select parent.id,parent.parent_id,parent.template_id
+		from mod_content_sections parent join lineage child on child.parent_id=parent.id
+		where parent.status='active'
+	), root as (select * from lineage where parent_id is null order by id limit 1)
+		select template.definition,detail.entry_type_code
+		from mod_resource_version_details detail
+		join root on true
+		join mod_content_templates template on template.id=root.template_id and template.status='active'
+		where detail.resource_id=$1 and detail.version_id=$2`, resourceID, versionID).Scan(&rawTemplate, &entryTypeCode); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}

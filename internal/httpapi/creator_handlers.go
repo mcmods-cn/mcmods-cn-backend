@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 
@@ -27,16 +28,33 @@ type creatorMemberPayload struct {
 }
 
 type creatorSnapshot struct {
-	Kind                string                 `json:"kind"`
-	Name                string                 `json:"name"`
-	DescriptionMarkdown string                 `json:"descriptionMarkdown"`
-	AvatarURL           string                 `json:"avatarUrl"`
-	AvatarFileID        *string                `json:"avatarFileId,omitempty"`
-	AvatarInternalID    *int64                 `json:"-"`
-	Links               []creatorLinkPayload   `json:"links"`
-	CollaboratorIDs     []string               `json:"collaboratorIds"`
-	Members             []creatorMemberPayload `json:"members"`
+	Kind                string                    `json:"kind"`
+	Name                string                    `json:"name"`
+	DescriptionMarkdown string                    `json:"descriptionMarkdown"`
+	DefaultLocale       string                    `json:"defaultLocale"`
+	Localizations       []creatorLocalizationEdit `json:"localizations"`
+	AvatarURL           string                    `json:"avatarUrl"`
+	AvatarFileID        *string                   `json:"avatarFileId,omitempty"`
+	AvatarInternalID    *int64                    `json:"-"`
+	Links               []creatorLinkPayload      `json:"links"`
+	Members             []creatorMemberPayload    `json:"members"`
 }
+
+type creatorLocalizationEdit struct {
+	Locale          string `json:"locale"`
+	ContentMarkdown string `json:"contentMarkdown"`
+}
+
+type creatorClaimAttachment struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	SizeBytes int64  `json:"sizeBytes"`
+}
+
+const (
+	creatorClaimMaxFiles      = 5
+	creatorClaimMaxTotalBytes = int64(10 << 20)
+)
 
 type creatorSummary struct {
 	PublicID     string `json:"publicId"`
@@ -66,7 +84,18 @@ func (s *Server) creators(w http.ResponseWriter, r *http.Request) {
 	}
 	query := strings.TrimSpace(r.URL.Query().Get("query"))
 	limit := boundedInt(r.URL.Query().Get("limit"), 40, 1, 100)
-	admin := hasPermission(claims.Permissions, "admin.*") || hasPermission(claims.Permissions, "content.review")
+	admin := claimsAllow(claims, "admin.*") || claimsAllow(claims, "content.review")
+	var authorCount, teamCount int
+	if err := s.db.QueryRow(r.Context(), `
+		select count(*) filter(where creator.kind='author'),
+		       count(*) filter(where creator.kind='team')
+		from creators creator
+		where ($1='' or creator.name ilike '%' || $1 || '%')
+		  and (creator.review_status='approved' or creator.created_by=$2 or creator.claimed_by=$2 or $3)`,
+		query, claims.Subject, admin).Scan(&authorCount, &teamCount); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to count creators")
+		return
+	}
 	rows, err := s.db.Query(r.Context(), `
 		select creator.public_id,creator.kind,creator.name,creator.avatar_url,creator.review_status,
 		       creator.claimed_by is not null,count(distinct mod.project_code)
@@ -97,13 +126,16 @@ func (s *Server) creators(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load creators")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":  items,
+		"counts": map[string]int{"author": authorCount, "team": teamCount},
+	})
 }
 
 func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.TrimSpace(strings.ToLower(r.PathValue("publicId")))
 	claims := currentClaims(r)
-	admin := hasPermission(claims.Permissions, "admin.*") || hasPermission(claims.Permissions, "content.review")
+	admin := claimsAllow(claims, "admin.*") || claimsAllow(claims, "content.review")
 	var id int64
 	var item creatorSummary
 	var description string
@@ -144,23 +176,29 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load creator works")
 		return
 	}
+	defaultLocale, localizations, err := s.creatorLocalizations(r.Context(), id, item.Kind, item.Name, description)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load creator localizations")
+		return
+	}
 	var claimedUser any
 	if claimedBy != nil {
-		var userPublicID, username, displayName, avatarURL string
-		if scanErr := s.db.QueryRow(r.Context(), `select public_id,username,display_name,avatar_url from users where id=$1`, *claimedBy).
-			Scan(&userPublicID, &username, &displayName, &avatarURL); scanErr == nil {
+		var userPublicID, username, avatarURL string
+		if scanErr := s.db.QueryRow(r.Context(), `select public_id,username,avatar_url from users where id=$1`, *claimedBy).
+			Scan(&userPublicID, &username, &avatarURL); scanErr == nil {
 			claimedUser = map[string]any{
 				"id": userPublicID, "publicId": userPublicID, "username": username,
-				"displayName": displayName, "avatarUrl": avatarURL,
+				"avatarUrl": avatarURL,
 			}
 		}
 	}
 	canEdit := admin || claims.Subject > 0 &&
 		((createdBy != nil && *createdBy == claims.Subject) || (claimedBy != nil && *claimedBy == claims.Subject)) ||
-		hasPermission(claims.Permissions, "creator.edit")
+		claimsAllow(claims, "creator.edit")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"creator": item, "descriptionMarkdown": description, "links": links,
 		"collaborators": collaborators, "members": members, "works": works,
+		"defaultLocale": defaultLocale, "localizations": localizations,
 		"claimedUser": claimedUser, "canEdit": canEdit,
 		"canClaim":            claims.Subject > 0 && claimedBy == nil && item.ReviewStatus == "approved",
 		"publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, publishedRevisionID),
@@ -179,7 +217,7 @@ func (s *Server) createCreator(w http.ResponseWriter, r *http.Request) {
 	}
 	claims := currentClaims(r)
 	reviewRequired := creatorReviewRequired(loadReviewConfig(r.Context(), s.db), snapshot.Kind, "create") &&
-		!hasPermission(claims.Permissions, "admin.*")
+		!claimsAllow(claims, "admin.*")
 	status := "approved"
 	if reviewRequired {
 		status = "pending"
@@ -245,7 +283,7 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load creator")
 		return
 	}
-	canEdit := hasPermission(claims.Permissions, "admin.*") || hasPermission(claims.Permissions, "creator.edit") ||
+	canEdit := claimsAllow(claims, "admin.*") || claimsAllow(claims, "creator.edit") ||
 		(createdBy != nil && *createdBy == claims.Subject) || (claimedBy != nil && *claimedBy == claims.Subject)
 	if !canEdit {
 		writeError(w, http.StatusForbidden, "permission denied")
@@ -268,7 +306,7 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	}
 	status := "approved"
 	if creatorReviewRequired(loadReviewConfig(r.Context(), s.db), kind, "edit") &&
-		!hasPermission(claims.Permissions, "admin.*") {
+		!claimsAllow(claims, "admin.*") {
 		status = "pending"
 	}
 	raw, _ := json.Marshal(snapshot)
@@ -282,7 +320,7 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if status == "approved" {
-		if err = applyCreatorSnapshotTx(r.Context(), tx, id, created.RevisionID, snapshot); err != nil {
+		if err = s.applyCreatorSnapshotTx(r.Context(), tx, id, created.RevisionID, claims.Subject, claims.Subject, snapshot); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to publish creator revision")
 			return
 		}
@@ -303,7 +341,8 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.TrimSpace(strings.ToLower(r.PathValue("publicId")))
 	var request struct {
-		ProofMarkdown string `json:"proofMarkdown"`
+		ProofMarkdown string   `json:"proofMarkdown"`
+		ProofFileIDs  []string `json:"proofFileIds"`
 	}
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid claim payload")
@@ -334,9 +373,15 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "creator has already been claimed")
 		return
 	}
+	request.ProofFileIDs = uniquePublicIDs(request.ProofFileIDs)
+	proofFiles, err := resolveCreatorClaimProofFiles(r.Context(), tx, claims.Subject, request.ProofFileIDs)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	status := "pending"
 	if !creatorReviewRequired(loadReviewConfig(r.Context(), s.db), kind, "claim") ||
-		hasPermission(claims.Permissions, "admin.*") {
+		claimsAllow(claims, "admin.*") {
 		status = "approved"
 	}
 	var claimID int64
@@ -351,6 +396,13 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create claim")
 		return
+	}
+	for index, file := range proofFiles {
+		if _, err = tx.Exec(r.Context(), `insert into creator_claim_attachments(claim_id,oss_file_id,display_order)
+			values($1,$2,$3)`, claimID, file.InternalID, index); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save claim attachments")
+			return
+		}
 	}
 	if status == "approved" {
 		if err = s.approveCreatorClaimTx(r.Context(), tx, creatorID, claims.Subject, claims.Subject); err != nil {
@@ -369,7 +421,7 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 func (s *Server) adminCreatorClaims(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), `
 		select claim.public_id,creator.public_id,creator.kind,creator.name,account.public_id,
-		       account.username,account.display_name,claim.proof_markdown,claim.status,claim.created_at
+			account.username,claim.proof_markdown,claim.status,claim.created_at
 		from creator_claims claim
 		join creators creator on creator.id=claim.creator_id
 		join users account on account.id=claim.user_id
@@ -382,16 +434,21 @@ func (s *Server) adminCreatorClaims(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, publicID, kind, name, userID, username, displayName, proof, status string
+		var id, publicID, kind, name, userID, username, proof, status string
 		var createdAt time.Time
-		if err = rows.Scan(&id, &publicID, &kind, &name, &userID, &username, &displayName, &proof, &status, &createdAt); err != nil {
+		if err = rows.Scan(&id, &publicID, &kind, &name, &userID, &username, &proof, &status, &createdAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode creator claims")
+			return
+		}
+		attachments, attachmentErr := s.creatorClaimAttachments(r.Context(), id)
+		if attachmentErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load creator claim attachments")
 			return
 		}
 		items = append(items, map[string]any{
 			"id": id, "creatorId": publicID, "kind": kind, "name": name,
-			"userId": userID, "username": username, "displayName": displayName,
-			"proofMarkdown": proof, "status": status, "createdAt": createdAt,
+			"userId": userID, "username": username,
+			"proofMarkdown": proof, "attachments": attachments, "status": status, "createdAt": createdAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -452,7 +509,7 @@ func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
 		code = "creator_claim_rejected"
 	}
 	s.sendTemplatedNotification(r.Context(), userID, code, map[string]string{"name": name, "reason": request.Note}, map[string]any{
-		"creatorId": publicID, "url": creatorPath(kind, publicID),
+		"creatorId": publicID, "targetLabel": name, "url": creatorPath(kind, publicID),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"id": claimPublicID, "status": request.Status})
 }
@@ -477,6 +534,27 @@ func (s *Server) creatorRoles(w http.ResponseWriter, r *http.Request) {
 		items = append(items, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) presignCreatorClaimAttachment(w http.ResponseWriter, r *http.Request) {
+	claimID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	fileID := strings.ToLower(strings.TrimSpace(r.PathValue("fileId")))
+	if !validCatalogPublicID(claimID) || !validCatalogPublicID(fileID) {
+		writeError(w, http.StatusBadRequest, "invalid claim attachment")
+		return
+	}
+	file, err := lookupReviewAttachment(r.Context(), s.db, reviewAttachmentLookup{
+		Kind: reviewAttachmentForCreatorClaim, SubjectPublicID: claimID,
+	}, fileID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "claim attachment was not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load claim attachment")
+		return
+	}
+	s.presignOSSFileWithRequest(w, r, ossPresignRequest{ObjectKey: file.ObjectKey})
 }
 
 func (s *Server) createCreatorRole(w http.ResponseWriter, r *http.Request) {
@@ -542,6 +620,9 @@ func (s *Server) createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creato
 		return 0, "", "", err
 	}
 	if status == "approved" {
+		if err = publishCreatorLocalizationsTx(ctx, tx, id, snapshot.Kind, snapshot.Name, snapshot.DefaultLocale, snapshot.Localizations, created.RevisionID, actorID); err != nil {
+			return 0, "", "", err
+		}
 		if _, err = tx.Exec(ctx, `update creators set published_revision_id=$2,review_status='approved' where id=$1`, id, created.RevisionID); err != nil {
 			return 0, "", "", err
 		}
@@ -552,20 +633,32 @@ func (s *Server) createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creato
 	return id, publicID, created.RevisionPublicID, nil
 }
 
-func applyCreatorSnapshotTx(ctx context.Context, tx pgx.Tx, creatorID, revisionID int64, snapshot creatorSnapshot) error {
+func (s *Server) applyCreatorSnapshotTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	creatorID, revisionID, actorID, uploaderID int64,
+	snapshot creatorSnapshot,
+) error {
+	if err := normalizeCreatorSnapshot(&snapshot); err != nil {
+		return err
+	}
 	var avatarFileID *int64
 	if snapshot.AvatarFileID != nil {
-		internalID, err := resolveOSSFilePublicID(ctx, tx, *snapshot.AvatarFileID)
+		file, err := resolveTrustedRasterOSSFilePublicID(ctx, tx, *snapshot.AvatarFileID, ossRasterBindingScope{UploaderID: uploaderID})
 		if err != nil {
 			return err
 		}
-		avatarFileID = &internalID
+		avatarFileID = &file.ID
+		snapshot.AvatarURL = buildPublicOSSURL(s.ossConfigFromSettings(ctx), file.ObjectKey)
 	}
 	if _, err := tx.Exec(ctx, `update creators set
 		name=$2,normalized_name=$3,description_markdown=$4,avatar_url=$5,avatar_file_id=$6,
 		review_status='approved',published_revision_id=$7,updated_at=now()
 		where id=$1`, creatorID, snapshot.Name, normalizeCreatorName(snapshot.Name),
 		snapshot.DescriptionMarkdown, snapshot.AvatarURL, avatarFileID, revisionID); err != nil {
+		return err
+	}
+	if err := publishCreatorLocalizationsTx(ctx, tx, creatorID, snapshot.Kind, snapshot.Name, snapshot.DefaultLocale, snapshot.Localizations, revisionID, actorID); err != nil {
 		return err
 	}
 	return applyCreatorRelationsTx(ctx, tx, creatorID, snapshot)
@@ -587,34 +680,19 @@ func (s *Server) resolveCreatorAvatarTx(
 		snapshot.AvatarURL = ""
 		return nil
 	}
-	internalID, err := resolveOSSFilePublicID(ctx, tx, publicID)
+	file, err := resolveTrustedRasterOSSFilePublicID(ctx, tx, publicID, ossRasterBindingScope{UploaderID: actorID})
 	if err != nil {
 		return errors.New("creator avatar file was not found")
-	}
-	var objectKey, contentType string
-	err = tx.QueryRow(ctx, `select object_key,content_type from oss_files
-		where id=$1 and uploader_id=$2 and status='active'`,
-		internalID, actorID,
-	).Scan(&objectKey, &contentType)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errors.New("creator avatar file was not found")
-	}
-	if err != nil {
-		return errors.New("failed to load creator avatar file")
-	}
-	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
-		return errors.New("creator avatar must be an image")
 	}
 	snapshot.AvatarFileID = &publicID
-	snapshot.AvatarInternalID = &internalID
-	snapshot.AvatarURL = buildPublicOSSURL(s.ossConfigFromSettings(ctx), objectKey)
+	snapshot.AvatarInternalID = &file.ID
+	snapshot.AvatarURL = buildPublicOSSURL(s.ossConfigFromSettings(ctx), file.ObjectKey)
 	return nil
 }
 
 func applyCreatorRelationsTx(ctx context.Context, tx pgx.Tx, creatorID int64, snapshot creatorSnapshot) error {
 	for _, statement := range []string{
 		`delete from creator_links where creator_id=$1`,
-		`delete from creator_collaborations where creator_id=$1`,
 		`delete from creator_team_members where team_id=$1`,
 	} {
 		if _, err := tx.Exec(ctx, statement, creatorID); err != nil {
@@ -624,16 +702,6 @@ func applyCreatorRelationsTx(ctx context.Context, tx pgx.Tx, creatorID int64, sn
 	for index, link := range snapshot.Links {
 		if _, err := tx.Exec(ctx, `insert into creator_links(creator_id,link_type,url,label,display_order)
 			values($1,$2,$3,$4,$5)`, creatorID, link.Type, link.URL, link.Label, index); err != nil {
-			return err
-		}
-	}
-	for _, publicID := range snapshot.CollaboratorIDs {
-		var collaboratorID int64
-		if err := tx.QueryRow(ctx, `select id from creators where public_id=$1`, publicID).Scan(&collaboratorID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `insert into creator_collaborations(creator_id,collaborator_id)
-			values($1,$2) on conflict do nothing`, creatorID, collaboratorID); err != nil {
 			return err
 		}
 	}
@@ -733,11 +801,17 @@ func (s *Server) creatorCollaborators(ctx context.Context, creatorID int64) ([]c
 		       (select count(distinct mod.id) from content_creator_bindings binding
 		        join mods mod on mod.id=binding.subject_id
 		        where binding.creator_id=collaborator.id and binding.subject_type='mod' and mod.review_status='approved')
-		from (
-			select collaborator_id id from creator_collaborations where creator_id=$1
-			union select creator_id from creator_collaborations where collaborator_id=$1
-		) relation join creators collaborator on collaborator.id=relation.id
-		where collaborator.review_status='approved'
+		from content_creator_bindings own_binding
+		join content_creator_bindings collaborator_binding
+		  on collaborator_binding.subject_type=own_binding.subject_type
+		 and collaborator_binding.subject_id=own_binding.subject_id
+		 and collaborator_binding.creator_id<>own_binding.creator_id
+		join creators collaborator on collaborator.id=collaborator_binding.creator_id
+		where own_binding.creator_id=$1
+		  and (own_binding.subject_type<>'mod' or exists(
+		    select 1 from mods shared_mod where shared_mod.id=own_binding.subject_id and shared_mod.review_status='approved'
+		  ))
+		  and collaborator.review_status='approved'
 		order by collaborator.name`, creatorID)
 	if err != nil {
 		return nil, err
@@ -810,10 +884,30 @@ func normalizeCreatorSnapshot(snapshot *creatorSnapshot) error {
 		return errors.New("creator kind must be author or team")
 	}
 	snapshot.Name = strings.TrimSpace(snapshot.Name)
+	snapshot.DescriptionMarkdown = strings.TrimSpace(snapshot.DescriptionMarkdown)
 	if snapshot.Name == "" || len([]byte(snapshot.Name)) > 160 {
 		return errors.New("creator name is required and must not exceed 160 bytes")
 	}
-	snapshot.DescriptionMarkdown = strings.TrimSpace(snapshot.DescriptionMarkdown)
+	if strings.TrimSpace(snapshot.DefaultLocale) == "" {
+		snapshot.DefaultLocale = defaultCreatorLocale(snapshot.DescriptionMarkdown, snapshot.Name)
+	}
+	if len(snapshot.Localizations) == 0 {
+		snapshot.Localizations = []creatorLocalizationEdit{{
+			Locale: snapshot.DefaultLocale, ContentMarkdown: snapshot.DescriptionMarkdown,
+		}}
+	}
+	defaultLocale, localizations, localizationErr := normalizeCreatorLocalizations(snapshot.DefaultLocale, snapshot.Localizations)
+	if localizationErr != nil {
+		return errors.New("localized creator content is invalid")
+	}
+	snapshot.DefaultLocale, snapshot.Localizations = defaultLocale, localizations
+	for _, localization := range localizations {
+		if localization.Locale != defaultLocale {
+			continue
+		}
+		snapshot.DescriptionMarkdown = localization.ContentMarkdown
+		break
+	}
 	snapshot.AvatarURL = strings.TrimSpace(snapshot.AvatarURL)
 	if snapshot.AvatarURL != "" && !validHTTPURL(snapshot.AvatarURL) {
 		return errors.New("avatar URL must use HTTP or HTTPS")
@@ -835,11 +929,149 @@ func normalizeCreatorSnapshot(snapshot *creatorSnapshot) error {
 		cleanLinks = append(cleanLinks, link)
 	}
 	snapshot.Links = cleanLinks
-	snapshot.CollaboratorIDs = uniquePublicIDs(snapshot.CollaboratorIDs)
 	if snapshot.Kind != "team" {
 		snapshot.Members = nil
 	}
 	return nil
+}
+
+func (s *Server) creatorLocalizations(ctx context.Context, creatorID int64, kind, name, description string) (string, []creatorLocalizationEdit, error) {
+	defaultLocale := ""
+	if err := s.db.QueryRow(ctx, `select default_locale from content_subjects where subject_type=$1 and subject_id=$2`, kind, creatorID).Scan(&defaultLocale); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", nil, err
+	}
+	rows, err := s.db.Query(ctx, `select locale,content_markdown from content_localizations
+		where subject_type=$1 and subject_id=$2 and review_status='approved' order by locale`, kind, creatorID)
+	if err != nil {
+		return "", nil, err
+	}
+	defer rows.Close()
+	localizations := make([]creatorLocalizationEdit, 0)
+	for rows.Next() {
+		var item creatorLocalizationEdit
+		if err = rows.Scan(&item.Locale, &item.ContentMarkdown); err != nil {
+			return "", nil, err
+		}
+		localizations = append(localizations, item)
+	}
+	if err = rows.Err(); err != nil {
+		return "", nil, err
+	}
+	if len(localizations) == 0 {
+		defaultLocale = defaultCreatorLocale(name, description)
+		localizations = append(localizations, creatorLocalizationEdit{Locale: defaultLocale, ContentMarkdown: description})
+	}
+	if defaultLocale == "" {
+		defaultLocale = localizations[0].Locale
+	}
+	return defaultLocale, localizations, nil
+}
+
+func publishCreatorLocalizationsTx(ctx context.Context, tx pgx.Tx, creatorID int64, kind, name, defaultLocale string, localizations []creatorLocalizationEdit, revisionID, actorID int64) error {
+	if _, err := tx.Exec(ctx, `insert into content_subjects(subject_type,subject_id,default_locale)
+		values($1,$2,$3) on conflict(subject_type,subject_id) do update
+		set default_locale=excluded.default_locale,updated_at=now()`, kind, creatorID, defaultLocale); err != nil {
+		return err
+	}
+	catalogLocalizations := make([]catalogLocalizationEdit, 0, len(localizations))
+	for _, localization := range localizations {
+		catalogLocalizations = append(catalogLocalizations, catalogLocalizationEdit{
+			Locale: localization.Locale, Name: name, ContentMarkdown: localization.ContentMarkdown,
+		})
+	}
+	if err := publishCatalogLocalizationsTx(ctx, tx, creatorID, "", kind, catalogLocalizations, revisionID, actorID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `update content_localizations set name=$3
+		where subject_type=$1 and subject_id=$2 and name<>$3`, kind, creatorID, name)
+	return err
+}
+
+func normalizeCreatorLocalizations(defaultLocale string, localizations []creatorLocalizationEdit) (string, []creatorLocalizationEdit, error) {
+	seen := make(map[string]struct{}, len(localizations))
+	for index := range localizations {
+		locale, err := normalizeCatalogLocale(localizations[index].Locale)
+		if err != nil || !isEditableContentLocale(locale) {
+			return "", nil, errCatalogEditorInvalid
+		}
+		if _, exists := seen[locale]; exists {
+			return "", nil, errCatalogEditorInvalid
+		}
+		if len(localizations[index].ContentMarkdown) > maxModExportEntryMarkdownBytes {
+			return "", nil, errCatalogEditorInvalid
+		}
+		seen[locale] = struct{}{}
+		localizations[index].Locale = locale
+	}
+	if strings.TrimSpace(defaultLocale) == "" {
+		defaultLocale = "en-US"
+	}
+	normalizedDefault, err := normalizeCatalogLocale(defaultLocale)
+	if err != nil || !isEditableContentLocale(normalizedDefault) {
+		return "", nil, errCatalogEditorInvalid
+	}
+	if _, exists := seen[normalizedDefault]; !exists {
+		return "", nil, errCatalogEditorInvalid
+	}
+	return normalizedDefault, localizations, nil
+}
+
+func defaultCreatorLocale(values ...string) string {
+	for _, value := range values {
+		for _, char := range value {
+			if unicode.Is(unicode.Han, char) {
+				return "zh-CN"
+			}
+		}
+	}
+	return "en-US"
+}
+
+func resolveCreatorClaimProofFiles(ctx context.Context, tx pgx.Tx, userID int64, publicIDs []string) ([]reviewAttachmentFile, error) {
+	if len(publicIDs) > creatorClaimMaxFiles {
+		return nil, errors.New("claim attachments cannot exceed 5 files")
+	}
+	files := make([]reviewAttachmentFile, 0, len(publicIDs))
+	var total int64
+	for _, publicID := range publicIDs {
+		file, err := lookupReviewAttachment(ctx, tx, reviewAttachmentLookup{
+			Kind: reviewAttachmentByUploader, UploaderID: userID,
+		}, publicID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errors.New("claim attachment was not found or does not belong to the current user")
+		}
+		if err != nil {
+			return nil, errors.New("failed to load claim attachment")
+		}
+		total += file.SizeBytes
+		files = append(files, file)
+	}
+	if total > creatorClaimMaxTotalBytes {
+		return nil, errors.New("claim attachments cannot exceed 10 MB in total")
+	}
+	return files, nil
+}
+
+func (s *Server) creatorClaimAttachments(ctx context.Context, claimPublicID string) ([]creatorClaimAttachment, error) {
+	rows, err := s.db.Query(ctx, `select file.public_id,file.original_name,greatest(file.size_bytes,file.source_size_bytes)
+		from creator_claim_attachments attachment
+		join creator_claims claim on claim.id=attachment.claim_id
+		join oss_files file on file.id=attachment.oss_file_id
+		where claim.public_id=$1 and `+safeReviewAttachmentPredicate+`
+		order by attachment.display_order,file.id`, claimPublicID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]creatorClaimAttachment, 0)
+	for rows.Next() {
+		var item creatorClaimAttachment
+		if err = rows.Scan(&item.ID, &item.Name, &item.SizeBytes); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func normalizeCreatorName(name string) string {

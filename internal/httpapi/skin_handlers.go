@@ -36,7 +36,6 @@ type skinAssetRecord struct {
 	OwnerID       int64
 	OwnerPublicID string
 	OwnerName     string
-	OwnerDisplay  string
 	BlobHash      string
 	Kind          string
 	Model         string
@@ -88,10 +87,9 @@ type skinAssetContentSnapshot struct {
 }
 
 type skinOwnerResponse struct {
-	ID          string `json:"id"`
-	PublicID    string `json:"publicId"`
-	Username    string `json:"username"`
-	DisplayName string `json:"displayName"`
+	ID       string `json:"id"`
+	PublicID string `json:"publicId"`
+	Username string `json:"username"`
 }
 
 type playerProfileResponse struct {
@@ -197,7 +195,7 @@ func (s *Server) skinService(w http.ResponseWriter, r *http.Request) {
 	accountUUID := ""
 	profileCount := int64(0)
 	assetCount := int64(0)
-	assetLimit := skinAssetLimit(claims.Permissions)
+	assetLimit := skinAssetLimit(claims.PermissionRules)
 	if claims.Subject > 0 {
 		err := s.db.QueryRow(r.Context(), `select enabled,account_uuid::text from yggdrasil_accounts where user_id=$1`, claims.Subject).
 			Scan(&launcherEnabled, &accountUUID)
@@ -235,7 +233,7 @@ func (s *Server) skinService(w http.ResponseWriter, r *http.Request) {
 		"maxUploadBytes":       maxMinecraftTextureUploadBytes,
 		"maxPixels":            maxMinecraftTexturePixels,
 		"profileNamePattern":   minecraftProfileNamePattern.String(),
-		"profileLimit":         playerProfileLimit(claims.Permissions),
+		"profileLimit":         playerProfileLimit(claims.PermissionRules),
 		"profileCount":         profileCount,
 		"assetLimit":           assetLimit,
 		"assetCount":           assetCount,
@@ -367,12 +365,12 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "skin library daily creation limit reached")
 		return
 	}
-	fileID, err := resolveOSSFilePublicID(r.Context(), s.db, request.FileID)
+	file, err := resolveTrustedRasterOSSFilePublicID(r.Context(), s.db, request.FileID, ossRasterBindingScope{UploaderID: claims.Subject})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "texture file is invalid or unavailable")
 		return
 	}
-	texture, storageClient, storageConfig, err := s.loadMinecraftTextureUpload(r.Context(), claims.Subject, fileID, request.Kind)
+	texture, storageClient, storageConfig, err := s.loadMinecraftTextureUpload(r.Context(), file, request.Kind)
 	if err != nil {
 		log.Printf("import web skin texture for user %d: %v", claims.Subject, err)
 		writeError(w, http.StatusBadRequest, "texture file is invalid or unavailable")
@@ -541,7 +539,7 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		writeError(w, http.StatusInternalServerError, "failed to encode skin revision")
 		return
 	}
-	reviewRequired := loadReviewConfig(r.Context(), s.db).CatalogEdit && !catalogMutationBypassesReview(claims.Permissions)
+	reviewRequired := loadReviewConfig(r.Context(), s.db).CatalogEdit && !catalogMutationBypassesReview(claims)
 	reviewStatus := "approved"
 	if reviewRequired {
 		reviewStatus = "pending"
@@ -838,7 +836,7 @@ func (s *Server) listMyPlayerProfiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load player profiles")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": profiles, "limit": playerProfileLimit(claims.Permissions)})
+	writeJSON(w, http.StatusOK, map[string]any{"items": profiles, "limit": playerProfileLimit(claims.PermissionRules)})
 }
 
 func (s *Server) createPlayerProfile(w http.ResponseWriter, r *http.Request) {
@@ -876,7 +874,7 @@ func (s *Server) createPlayerProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to inspect player profile limit")
 		return
 	}
-	if count >= playerProfileLimit(claims.Permissions) {
+	if count >= playerProfileLimit(claims.PermissionRules) {
 		writeError(w, http.StatusForbidden, "player profile limit reached")
 		return
 	}
@@ -1272,10 +1270,11 @@ func parsePlayerTextureUpdates(request playerTextureRequest) ([]playerTextureUpd
 }
 
 func (s *Server) publicUserPlayerProfiles(w http.ResponseWriter, r *http.Request) {
-	userID, ok := s.pathUserID(w, r)
+	identity, ok := s.pathUserIdentity(w, r)
 	if !ok {
 		return
 	}
+	userID := identity.InternalID
 	claims := currentClaims(r)
 	includePrivate := claims.Subject == userID || isSkinAdmin(claims)
 	profiles, err := s.loadPlayerProfiles(r.Context(), userID, claims, includePrivate)
@@ -1501,7 +1500,7 @@ func (s *Server) launcherSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"revoked": tag.RowsAffected() > 0})
 }
 
-const skinAssetSelectSQL = `select asset.id,asset.public_id,asset.owner_id,owner.public_id,owner.username,owner.display_name,
+const skinAssetSelectSQL = `select asset.id,asset.public_id,asset.owner_id,owner.public_id,owner.username,
 	asset.blob_hash,asset.kind,asset.model,asset.display_name,asset.description,asset.tags,asset.visibility,
 	asset.review_status,asset.status,asset.downloads,blob.width,blob.height,blob.size_bytes,asset.created_at,asset.updated_at,
 	exists(select 1 from skin_wardrobe viewer_wardrobe where viewer_wardrobe.user_id=$1 and viewer_wardrobe.asset_id=asset.id)
@@ -1510,7 +1509,7 @@ const skinAssetSelectSQL = `select asset.id,asset.public_id,asset.owner_id,owner
 
 func scanSkinAsset(row skinRowScanner) (skinAssetRecord, error) {
 	var record skinAssetRecord
-	err := row.Scan(&record.ID, &record.PublicID, &record.OwnerID, &record.OwnerPublicID, &record.OwnerName, &record.OwnerDisplay,
+	err := row.Scan(&record.ID, &record.PublicID, &record.OwnerID, &record.OwnerPublicID, &record.OwnerName,
 		&record.BlobHash, &record.Kind, &record.Model, &record.DisplayName, &record.Description, &record.Tags,
 		&record.Visibility, &record.ReviewStatus, &record.Status, &record.Downloads, &record.Width, &record.Height,
 		&record.SizeBytes, &record.CreatedAt, &record.UpdatedAt, &record.InWardrobe)
@@ -1591,7 +1590,7 @@ func skinAssetJSON(record skinAssetRecord, viewerID int64) map[string]any {
 	canUse := record.Status == "active" && (canEdit || (record.ReviewStatus == "approved" && record.Visibility != "private"))
 	return map[string]any{
 		"publicId": record.PublicID, "ownerId": record.OwnerPublicID,
-		"owner": map[string]any{"id": record.OwnerPublicID, "publicId": record.OwnerPublicID, "username": record.OwnerName, "displayName": record.OwnerDisplay},
+		"owner": map[string]any{"id": record.OwnerPublicID, "publicId": record.OwnerPublicID, "username": record.OwnerName},
 		"hash":  record.BlobHash, "textureHash": record.BlobHash, "kind": record.Kind, "model": record.Model,
 		"name": record.DisplayName, "displayName": record.DisplayName, "description": record.Description, "tags": record.Tags,
 		"visibility": record.Visibility, "reviewStatus": record.ReviewStatus, "status": record.Status,
@@ -1613,7 +1612,7 @@ func canReadSkinAsset(record skinAssetRecord, claims security.Claims) bool {
 }
 
 func isSkinAdmin(claims security.Claims) bool {
-	return hasPermission(claims.Permissions, "admin.*") || hasPermission(claims.Permissions, "skin.admin")
+	return claimsAllow(claims, "admin.*") || claimsAllow(claims, "skin.admin")
 }
 
 func normalizeSkinAssetCreate(request *skinAssetCreateRequest) error {
@@ -1805,8 +1804,8 @@ func normalizePlayerProfileUpdate(request *playerProfileUpdateRequest) error {
 	return nil
 }
 
-func playerProfileLimit(permissions []string) int {
-	value := numericPermissionValue(permissions, "skin.profile.limit")
+func playerProfileLimit(permissions []security.PermissionRule) int {
+	value := permissionRulesNumericValue(permissions, "skin.profile.limit")
 	if value <= 0 {
 		return defaultPlayerProfileLimit
 	}
@@ -1816,8 +1815,8 @@ func playerProfileLimit(permissions []string) int {
 	return int(value)
 }
 
-func skinAssetLimit(permissions []string) int {
-	value := numericPermissionValue(permissions, "skin.library.limit")
+func skinAssetLimit(permissions []security.PermissionRule) int {
+	value := permissionRulesNumericValue(permissions, "skin.library.limit")
 	if value <= 0 {
 		return defaultSkinAssetLimit
 	}
@@ -1832,13 +1831,7 @@ func (s *Server) userSkinAssetLimit(ctx context.Context, userID int64) (int, err
 	if err != nil {
 		return 0, err
 	}
-	allowed := make([]string, 0, len(permissions))
-	for _, permission := range permissions {
-		if permission.Allow {
-			allowed = append(allowed, permission.Code)
-		}
-	}
-	return skinAssetLimit(allowed), nil
+	return skinAssetLimit(permissions), nil
 }
 
 func normalizedSkinPublicID(value string) string {
@@ -1890,7 +1883,7 @@ func ensureYggdrasilAccountTx(ctx context.Context, tx pgx.Tx, userID int64) (str
 func (s *Server) loadPlayerProfiles(ctx context.Context, userID int64, claims security.Claims, includePrivate bool) ([]playerProfileResponse, error) {
 	rows, err := s.db.Query(ctx, `select profile.public_id,owner.public_id,profile.uuid::text,profile.name,profile.bio,
 		profile.visibility,profile.is_default,profile.status,profile.created_at,profile.updated_at,
-		owner.public_id,owner.public_id,owner.username,owner.display_name
+		owner.public_id,owner.public_id,owner.username
 		from player_profiles profile join users owner on owner.id=profile.user_id
 		where profile.user_id=$1 and profile.status='active' and ($2 or profile.visibility='public')
 		order by profile.is_default desc,profile.created_at,profile.id`, userID, includePrivate)
@@ -1903,7 +1896,7 @@ func (s *Server) loadPlayerProfiles(ctx context.Context, userID int64, claims se
 		var profile playerProfileResponse
 		if err = rows.Scan(&profile.PublicID, &profile.UserID, &profile.UUID, &profile.Name, &profile.Bio,
 			&profile.Visibility, &profile.IsDefault, &profile.Status, &profile.CreatedAt, &profile.UpdatedAt,
-			&profile.Owner.ID, &profile.Owner.PublicID, &profile.Owner.Username, &profile.Owner.DisplayName); err != nil {
+			&profile.Owner.ID, &profile.Owner.PublicID, &profile.Owner.Username); err != nil {
 			return nil, err
 		}
 		profile.Textures = map[string]playerTextureResponse{}
@@ -1924,11 +1917,11 @@ func (s *Server) loadPlayerProfileByPublicIDForViewer(ctx context.Context, publi
 	var profile playerProfileResponse
 	err := s.db.QueryRow(ctx, `select profile.public_id,owner.public_id,profile.uuid::text,profile.name,profile.bio,
 		profile.visibility,profile.is_default,profile.status,profile.created_at,profile.updated_at,
-		owner.public_id,owner.public_id,owner.username,owner.display_name
+		owner.public_id,owner.public_id,owner.username
 		from player_profiles profile join users owner on owner.id=profile.user_id where profile.public_id=$1`, publicID).
 		Scan(&profile.PublicID, &profile.UserID, &profile.UUID, &profile.Name, &profile.Bio, &profile.Visibility,
 			&profile.IsDefault, &profile.Status, &profile.CreatedAt, &profile.UpdatedAt,
-			&profile.Owner.ID, &profile.Owner.PublicID, &profile.Owner.Username, &profile.Owner.DisplayName)
+			&profile.Owner.ID, &profile.Owner.PublicID, &profile.Owner.Username)
 	if err != nil {
 		return profile, err
 	}
@@ -1939,7 +1932,7 @@ func (s *Server) loadPlayerProfileByPublicIDForViewer(ctx context.Context, publi
 func (s *Server) loadPlayerTextures(ctx context.Context, profile *playerProfileResponse, viewerID int64) error {
 	rows, err := s.db.Query(ctx, `select texture.kind,asset.model,asset.public_id,asset.display_name,
 		asset.description,asset.tags,asset.visibility,asset.review_status,asset.status,asset.downloads,asset.blob_hash,
-		asset.created_at,asset.updated_at,owner.id,owner.public_id,owner.username,owner.display_name,
+		asset.created_at,asset.updated_at,owner.id,owner.public_id,owner.username,
 		exists(select 1 from skin_wardrobe wardrobe where wardrobe.user_id=$2 and wardrobe.asset_id=asset.id)
 		from player_profile_textures texture join player_profiles profile on profile.id=texture.profile_id
 		join skin_assets asset on asset.id=texture.asset_id
@@ -1955,7 +1948,7 @@ func (s *Server) loadPlayerTextures(ctx context.Context, profile *playerProfileR
 		if err = rows.Scan(&texture.Kind, &texture.Model, &texture.PublicID, &texture.Name, &texture.Description,
 			&texture.Tags, &texture.Visibility, &texture.ReviewStatus, &assetStatus, &texture.Downloads,
 			&texture.TextureHash, &texture.CreatedAt, &texture.UpdatedAt, &texture.OwnerInternalID, &texture.Owner.ID,
-			&texture.Owner.Username, &texture.Owner.DisplayName, &texture.InWardrobe); err != nil {
+			&texture.Owner.Username, &texture.InWardrobe); err != nil {
 			return err
 		}
 		texture.AssetPublicID = texture.PublicID

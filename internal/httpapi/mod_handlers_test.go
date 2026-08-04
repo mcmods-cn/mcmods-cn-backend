@@ -66,8 +66,8 @@ func TestNormalizeAndValidateModRequest(t *testing.T) {
 	if req.PrimaryName != "Create" || len(req.Tags) != 2 || len(req.SearchKeywords) != 1 || len(req.Links) != 1 || req.SubmissionMethod != "manual" {
 		t.Fatalf("request was not normalized: %#v", req)
 	}
-	if len(req.SupportedLoaders) != 2 || len(req.SupportedVersions) != 2 || req.SupportedVersions[0] != "1.20.1" {
-		t.Fatalf("compatibility summary was not generated: %#v / %#v", req.SupportedLoaders, req.SupportedVersions)
+	if len(req.Compatibilities) != 2 || len(req.Compatibilities[0].Versions) != 2 {
+		t.Fatalf("compatibilities were not normalized: %#v", req.Compatibilities)
 	}
 	if req.Authors[0].AvatarURL != "https://cdn.modrinth.com/user/simibubi.png" {
 		t.Fatalf("author avatar URL was not normalized: %q", req.Authors[0].AvatarURL)

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"mcmods-cn-backend/internal/domain"
+	"mcmods-cn-backend/internal/security"
 )
 
 type permissionComparisonOption struct {
@@ -26,20 +27,20 @@ type permissionComparisonSelection struct {
 }
 
 type permissionComparisonSubject struct {
-	Kind        string                `json:"kind"`
-	Code        string                `json:"code"`
-	Name        string                `json:"name"`
-	Groups      []string              `json:"groups"`
-	Permissions []effectivePermission `json:"permissions"`
+	Kind        string                    `json:"kind"`
+	Code        string                    `json:"code"`
+	Name        string                    `json:"name"`
+	Groups      []string                  `json:"groups"`
+	Permissions []security.PermissionRule `json:"permissions"`
 }
 
 type permissionComparisonRow struct {
-	Code         string                `json:"code"`
-	Name         string                `json:"name"`
-	Description  string                `json:"description"`
-	Translations domain.LocalizedTexts `json:"translations"`
-	Left         *effectivePermission  `json:"left,omitempty"`
-	Right        *effectivePermission  `json:"right,omitempty"`
+	Code         string                   `json:"code"`
+	Name         string                   `json:"name"`
+	Description  string                   `json:"description"`
+	Translations domain.LocalizedTexts    `json:"translations"`
+	Left         *security.PermissionRule `json:"left,omitempty"`
+	Right        *security.PermissionRule `json:"right,omitempty"`
 }
 
 func (s *Server) permissionComparisonOptions(w http.ResponseWriter, r *http.Request) {
@@ -130,7 +131,7 @@ func matchPermissionCatalog(code string, catalog []domain.Permission) *domain.Pe
 		hasVariable := false
 		matches := true
 		for partIndex, templatePart := range templateParts {
-			if permissionTemplateSegment(templatePart) {
+			if _, ok := templateVariableName(templatePart); ok {
 				hasVariable = true
 				continue
 			}
@@ -151,12 +152,7 @@ func matchPermissionCatalog(code string, catalog []domain.Permission) *domain.Pe
 	return &catalog[bestIndex]
 }
 
-func permissionTemplateSegment(segment string) bool {
-	return (strings.HasPrefix(segment, "<") && strings.HasSuffix(segment, ">")) ||
-		(strings.HasPrefix(segment, "[") && strings.HasSuffix(segment, "]"))
-}
-
-func mergePermissionComparisonRows(left []effectivePermission, right []effectivePermission) []permissionComparisonRow {
+func mergePermissionComparisonRows(left []security.PermissionRule, right []security.PermissionRule) []permissionComparisonRow {
 	byCode := make(map[string]*permissionComparisonRow, len(left)+len(right))
 	for index := range left {
 		entry := left[index]
@@ -193,7 +189,7 @@ func (s *Server) resolvePermissionComparisonSubject(ctx context.Context, userID 
 			return permissionComparisonSubject{}, err
 		}
 		var name string
-		if err := s.db.QueryRow(ctx, `select coalesce(nullif(display_name, ''), username) from users where id = $1`, userID).Scan(&name); err != nil {
+		if err := s.db.QueryRow(ctx, `select username from users where id = $1`, userID).Scan(&name); err != nil {
 			return permissionComparisonSubject{}, err
 		}
 		return permissionComparisonSubject{Kind: "me", Code: "me", Name: name, Groups: groups, Permissions: permissions}, nil
@@ -212,7 +208,7 @@ func (s *Server) resolvePermissionComparisonSubject(ctx context.Context, userID 
 	return permissionComparisonSubject{Kind: "role", Code: selection.Code, Name: name, Groups: []string{selection.Code}, Permissions: permissions}, nil
 }
 
-func (s *Server) resolveRoleRootPermissions(ctx context.Context, roleCode string) ([]effectivePermission, error) {
+func (s *Server) resolveRoleRootPermissions(ctx context.Context, roleCode string) ([]security.PermissionRule, error) {
 	rolesByCode, templates, err := s.loadPermissionRoles(ctx)
 	if err != nil {
 		return nil, err
@@ -221,36 +217,6 @@ func (s *Server) resolveRoleRootPermissions(ctx context.Context, roleCode string
 		return nil, &requestError{message: "权限组不存在: " + roleCode}
 	}
 	candidates := make(map[string]permissionCandidate)
-	var applyRole func(string, int, map[string]bool)
-	applyRole = func(code string, depth int, path map[string]bool) {
-		if path[code] {
-			return
-		}
-		role, variables, ok := resolvePermissionRole(code, rolesByCode, templates)
-		if !ok {
-			return
-		}
-		nextPath := make(map[string]bool, len(path)+1)
-		for current := range path {
-			nextPath[current] = true
-		}
-		nextPath[code] = true
-		for _, entry := range role.Permissions {
-			permissionCode := applyRoleVariables(entry.Code, variables)
-			applyPermissionCandidate(candidates, permissionCandidate{
-				effectivePermission: effectivePermission{Code: permissionCode, Allow: entry.Allow, Priority: role.Weight, Source: "group." + code},
-				Depth:               depth,
-			})
-		}
-		for _, parent := range role.Parents {
-			applyRole(applyRoleVariables(parent, variables), depth+1, nextPath)
-		}
-	}
-	applyRole(roleCode, 0, map[string]bool{})
-	permissions := make([]effectivePermission, 0, len(candidates))
-	for _, candidate := range candidates {
-		permissions = append(permissions, candidate.effectivePermission)
-	}
-	sort.Slice(permissions, func(i, j int) bool { return permissions[i].Code < permissions[j].Code })
-	return permissions, nil
+	applyPermissionRoles(candidates, []string{roleCode}, rolesByCode, templates)
+	return permissionRulesFromCandidates(candidates), nil
 }

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 const economyConfigSettingKey = "economy.config"
@@ -405,25 +407,14 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch itemType {
 	case "profile_background":
-		fileID, resolveErr := resolveOSSFilePublicID(r.Context(), tx, request.FileID)
+		file, resolveErr := resolveTrustedRasterOSSFilePublicID(r.Context(), tx, request.FileID, ossRasterBindingScope{UploaderID: userID})
 		if resolveErr != nil {
 			writeError(w, http.StatusBadRequest, "profile background file is required")
 			return
 		}
-		var objectKey, contentType string
-		if err = tx.QueryRow(r.Context(), `select object_key,content_type from oss_files
-			where id=$1 and uploader_id=$2 and status='active'`, fileID, userID).
-			Scan(&objectKey, &contentType); err != nil {
-			writeError(w, http.StatusBadRequest, "profile background file was not found")
-			return
-		}
-		if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
-			writeError(w, http.StatusBadRequest, "profile background must be an image")
-			return
-		}
-		backgroundURL := buildPublicOSSURL(s.ossConfigFromSettings(r.Context()), objectKey)
+		backgroundURL := buildPublicOSSURL(s.ossConfigFromSettings(r.Context()), file.ObjectKey)
 		if _, err = tx.Exec(r.Context(), `update users set profile_background_file_id=$2,
-			profile_background_url=$3,updated_at=now() where id=$1`, userID, fileID, backgroundURL); err != nil {
+			profile_background_url=$3,updated_at=now() where id=$1`, userID, file.ID, backgroundURL); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to update profile background")
 			return
 		}
@@ -675,23 +666,19 @@ func (s *Server) loadShopItems(ctx context.Context, includeDisabled bool, userID
 		return nil, err
 	}
 	defer rows.Close()
-	var resolved []effectivePermission
-	var grants []string
+	var resolved []security.PermissionRule
 	if userID > 0 {
-		if _, permissions, permissionErr := s.resolveUserRootPermissions(ctx, userID); permissionErr == nil {
-			resolved = permissions
-		} else {
-			_, grants = s.userGrants(ctx, userID)
+		_, permissions, permissionErr := s.resolveUserRootPermissions(ctx, userID)
+		if permissionErr != nil {
+			return nil, permissionErr
 		}
+		resolved = permissions
 	}
 	allows := func(permission string) bool {
 		if permission == "" {
 			return true
 		}
-		if len(resolved) > 0 {
-			return resolvedPermissionAllows(resolved, permission)
-		}
-		return hasPermission(grants, permission)
+		return permissionRulesAllow(resolved, permission)
 	}
 	items := make([]map[string]any, 0)
 	for rows.Next() {

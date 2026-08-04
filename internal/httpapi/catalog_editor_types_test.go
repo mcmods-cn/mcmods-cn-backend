@@ -163,8 +163,11 @@ func TestCatalogRecipeResourceIconURL(t *testing.T) {
 	if got := catalogRecipeResourceIconURL("resource234", "file234567", "revision234", "assets/item.png"); got != "/api/v1/catalog/resources/resource234/icon" {
 		t.Fatalf("manual icon URL = %q", got)
 	}
-	if got := catalogRecipeResourceIconURL("resource234", "", "revision234", "assets/item icon.png"); got != "/api/v1/export-revisions/revision234/assets/content?path=assets%2Fitem+icon.png" {
+	if got := catalogRecipeResourceIconURL("resource234", "", "revision234", "assets/item icon.png"); got != "/api/v1/catalog/resources/resource234/icon" {
 		t.Fatalf("imported icon URL = %q", got)
+	}
+	if got := catalogRecipeResourceIconURL("", "", "revision234", "assets/item icon.png"); got != "/api/v1/export-revisions/revision234/assets/content?path=assets%2Fitem+icon.png" {
+		t.Fatalf("imported fallback icon URL = %q", got)
 	}
 	if got := catalogRecipeResourceIconURL("resource234", "", "", ""); got != "" {
 		t.Fatalf("missing icon URL = %q", got)

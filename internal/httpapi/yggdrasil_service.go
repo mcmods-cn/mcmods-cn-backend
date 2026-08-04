@@ -412,24 +412,7 @@ func (s *Server) yggdrasilClientLocation(r *http.Request) clientLocation {
 	if s.ygg == nil || parsedPeer == nil || !s.ygg.isTrustedProxy(parsedPeer) {
 		return clientLocation{IP: peer}
 	}
-	location := requestClientLocationFromProxy(r, peer)
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-		parts := strings.Split(forwarded, ",")
-		for index := len(parts) - 1; index >= 0; index-- {
-			candidate := net.ParseIP(strings.TrimSpace(parts[index]))
-			if candidate == nil {
-				return clientLocation{IP: peer}
-			}
-			location.IP = candidate.String()
-			if !s.ygg.isTrustedProxy(candidate) {
-				return location
-			}
-		}
-	}
-	if location.IP == "" {
-		location.IP = peer
-	}
-	return location
+	return requestClientLocationFromProxy(r, peer, s.ygg.trustedProxies)
 }
 
 func (service *yggdrasilService) isTrustedProxy(ip net.IP) bool {

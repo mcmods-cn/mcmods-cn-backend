@@ -62,7 +62,6 @@ func baselineSchemaStatements() []string {
 			public_id text not null unique default new_public_id() check (public_id ~ '^[a-z0-9]{9}$'),
 			username text not null unique,
 			email text not null unique,
-			display_name text not null,
 			password_hash text not null,
 			email_verified boolean not null default false,
 			status text not null default 'active',
@@ -326,6 +325,28 @@ func baselineSchemaStatements() []string {
 		$$ language plpgsql`,
 		`create trigger trg_oss_files_remove_public_route after delete on oss_files
 			for each row execute function remove_oss_file_public_route()`,
+		`create table oss_object_deletion_outbox (
+			id bigserial primary key,
+			oss_file_id bigint references oss_files(id) on delete set null,
+			bucket text not null,
+			endpoint text not null,
+			region text not null,
+			use_cname boolean not null default false,
+			object_key text not null,
+			reason text not null default '',
+			status text not null default 'pending',
+			attempts integer not null default 0,
+			next_attempt_at timestamptz not null default now(),
+			locked_at timestamptz,
+			last_error text not null default '',
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			deleted_at timestamptz,
+			unique(bucket,endpoint,object_key),
+			check(status in ('pending','processing','completed'))
+		)`,
+		`create index idx_oss_object_deletion_outbox_pending
+			on oss_object_deletion_outbox(next_attempt_at,id) where status in ('pending','processing')`,
 		`create table blueprints (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check (public_id ~ '^[a-z0-9]{9}$'),
@@ -685,7 +706,6 @@ func baselineSchemaStatements() []string {
 			secondary_name text not null default '',
 			abbreviation text not null default '',
 			summary text not null default '',
-			mod_id text not null default '',
 			environment text not null default 'bothRequired',
 			primary_category text not null default 'utility',
 			official_status text not null default 'development',
@@ -697,8 +717,6 @@ func baselineSchemaStatements() []string {
 			icon_url text not null default '',
 			body_markdown text not null default '',
 			search_keywords text[] not null default '{}'::text[],
-			supported_versions text[] not null default '{}'::text[],
-			supported_loaders text[] not null default '{}'::text[],
 			submission_method text not null default 'manual',
 			review_status text not null default 'pending',
 			created_by bigint references users(id) on delete set null,
@@ -872,18 +890,6 @@ func baselineSchemaStatements() []string {
 		$$ language plpgsql`,
 		`create trigger trg_mod_relationships_remove_unresolved after delete on mod_relationships
 		 for each row execute function remove_mod_relationship_unresolved_references()`,
-		`create table if not exists mod_download_sources (
-			id bigserial primary key,
-			mod_id bigint not null references mods(id) on delete cascade,
-			source_type text not null,
-			label text not null default '',
-			url text not null default '',
-			display_order integer not null default 0,
-			created_at timestamptz not null default now(),
-			check (source_type in ('internal', 'modrinth', 'curseforge')),
-			unique (mod_id, source_type, url)
-		)`,
-		`create index if not exists idx_mod_download_sources_mod_order on mod_download_sources (mod_id, display_order, id)`,
 		`create table if not exists mod_loader_compatibilities (
 			mod_id bigint not null references mods(id) on delete cascade,
 			loader text not null,
@@ -1014,14 +1020,6 @@ func baselineSchemaStatements() []string {
 			translation_count integer not null default 0,
 			primary key (revision_id, locale)
 		)`,
-		`create table if not exists catalog_import_translations (
-			revision_id text not null references catalog_import_revisions(id) on delete cascade,
-			locale text not null,
-			translation_key text not null,
-			value text not null,
-			primary key (revision_id, locale, translation_key)
-		)`,
-		`create index if not exists idx_catalog_import_translations_key on catalog_import_translations(revision_id, translation_key)`,
 		`create table if not exists catalog_import_text_assets (
 			revision_id text not null references catalog_import_revisions(id) on delete cascade,
 			asset_path text not null,

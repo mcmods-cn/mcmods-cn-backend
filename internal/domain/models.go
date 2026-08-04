@@ -7,11 +7,9 @@ type User struct {
 	PublicID      string     `json:"id"`
 	Username      string     `json:"username"`
 	Email         string     `json:"email"`
-	DisplayName   string     `json:"displayName"`
 	EmailVerified bool       `json:"emailVerified"`
 	Status        string     `json:"status"`
-	Roles         []string   `json:"roles"`
-	Permissions   []string   `json:"permissions"`
+	RoleCodes     []string   `json:"roleCodes"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	LastLoginAt   *time.Time `json:"lastLoginAt,omitempty"`
 	AvatarURL     string     `json:"avatarUrl,omitempty"`

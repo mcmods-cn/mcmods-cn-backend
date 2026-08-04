@@ -72,10 +72,11 @@ func (s *Server) updatePermissionDefaults(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) updateUserStatus(w http.ResponseWriter, r *http.Request) {
-	userID, ok := s.pathUserID(w, r)
+	identity, ok := s.pathUserIdentity(w, r)
 	if !ok {
 		return
 	}
+	userID := identity.InternalID
 	var request updateUserStatusRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")

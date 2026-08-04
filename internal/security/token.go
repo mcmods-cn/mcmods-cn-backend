@@ -13,16 +13,26 @@ import (
 )
 
 type Claims struct {
-	Subject       int64    `json:"-"`
-	PublicSubject string   `json:"sub"`
-	SessionID     string   `json:"sid"`
-	AuthVersion   int64    `json:"ver"`
-	Username      string   `json:"username"`
-	Email         string   `json:"email"`
-	Roles         []string `json:"roles"`
-	Permissions   []string `json:"permissions"`
-	IssuedAt      int64    `json:"iat"`
-	ExpiresAt     int64    `json:"exp"`
+	Subject         int64            `json:"-"`
+	PublicSubject   string           `json:"sub"`
+	SessionID       string           `json:"sid"`
+	AuthVersion     int64            `json:"ver"`
+	Username        string           `json:"username"`
+	Email           string           `json:"email"`
+	PermissionRules []PermissionRule `json:"-"`
+	IssuedAt        int64            `json:"iat"`
+	ExpiresAt       int64            `json:"exp"`
+}
+
+// PermissionRule is the resolved authorization rule attached to a request.
+// It is deliberately excluded from the signed token payload: middleware
+// refreshes it from the database after validating the session so role changes,
+// explicit denies, priorities, and expiration are authoritative immediately.
+type PermissionRule struct {
+	Code     string `json:"code"`
+	Allow    bool   `json:"allow"`
+	Priority int    `json:"priority"`
+	Source   string `json:"source,omitempty"`
 }
 
 func SignToken(secret string, claims Claims) (string, error) {
@@ -95,7 +105,7 @@ func subtleCompare(a string, b string) bool {
 	return hmac.Equal([]byte(a), []byte(b))
 }
 
-func NewClaims(publicUserID string, username string, email string, roles []string, permissions []string, authVersion int64, ttl time.Duration) (Claims, error) {
+func NewClaims(publicUserID string, username string, email string, authVersion int64, ttl time.Duration) (Claims, error) {
 	sessionBytes := make([]byte, 32)
 	if _, err := rand.Read(sessionBytes); err != nil {
 		return Claims{}, err
@@ -107,8 +117,6 @@ func NewClaims(publicUserID string, username string, email string, roles []strin
 		AuthVersion:   authVersion,
 		Username:      username,
 		Email:         email,
-		Roles:         roles,
-		Permissions:   permissions,
 		IssuedAt:      now.Unix(),
 		ExpiresAt:     now.Add(ttl).Unix(),
 	}, nil

@@ -28,16 +28,17 @@ func (s *Server) requestClientLocation(r *http.Request) clientLocation {
 	if !networkContainsIP(s.trustedProxies, peer) {
 		return clientLocation{IP: peer}
 	}
-	return requestClientLocationFromProxy(r, peer)
+	return requestClientLocationFromProxy(r, peer, s.trustedProxies)
 }
 
-func requestClientLocationFromProxy(r *http.Request, fallbackIP string) clientLocation {
+func requestClientLocationFromProxy(r *http.Request, fallbackIP string, trustedProxies []*net.IPNet) clientLocation {
 	ip := firstHeaderValue(r, "Ali-Real-Client-Ip", "Ali-Cdn-Real-Ip", "True-Client-IP")
 	if ip == "" {
-		ip = firstForwardedIP(r.Header.Get("X-Forwarded-For"))
+		ip = clientIPFromForwardedChain(fallbackIP, r.Header.Get("X-Forwarded-For"), trustedProxies)
 	}
+	ip = normalizeIPAddress(ip)
 	if ip == "" {
-		ip = fallbackIP
+		ip = normalizeIPAddress(fallbackIP)
 	}
 
 	countryCode := strings.ToUpper(firstHeaderValue(r, "Ali-Ip-Country", "IP-Country-Code", "CF-IPCountry"))
@@ -46,7 +47,7 @@ func requestClientLocationFromProxy(r *http.Request, fallbackIP string) clientLo
 	}
 
 	return clientLocation{
-		IP:          normalizeIPAddress(ip),
+		IP:          ip,
 		CountryCode: countryCode,
 		City:        decodeLocationHeader(firstHeaderValue(r, "Ali-Ip-City", "IP-City")),
 	}
@@ -96,11 +97,25 @@ func firstHeaderValue(r *http.Request, names ...string) string {
 	return ""
 }
 
-func firstForwardedIP(value string) string {
-	if first, _, ok := strings.Cut(value, ","); ok {
-		return strings.TrimSpace(first)
+func clientIPFromForwardedChain(fallbackIP, forwarded string, trustedProxies []*net.IPNet) string {
+	peerIP := normalizeIPAddress(fallbackIP)
+	forwarded = strings.TrimSpace(forwarded)
+	if forwarded == "" {
+		return peerIP
 	}
-	return strings.TrimSpace(value)
+	lastTrustedIP := peerIP
+	parts := strings.Split(forwarded, ",")
+	for index := len(parts) - 1; index >= 0; index-- {
+		candidate := normalizeIPAddress(parts[index])
+		if candidate == "" {
+			return peerIP
+		}
+		if !networkContainsIP(trustedProxies, candidate) {
+			return candidate
+		}
+		lastTrustedIP = candidate
+	}
+	return lastTrustedIP
 }
 
 func remoteIP(address string) string {

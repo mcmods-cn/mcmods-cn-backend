@@ -294,7 +294,7 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if request.Status == "approved" {
-			if err = applyCreatorSnapshotTx(r.Context(), tx, creatorID, revisionID, snapshot); err != nil {
+			if err = s.applyCreatorSnapshotTx(r.Context(), tx, creatorID, revisionID, claims.Subject, submittedBy, snapshot); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to publish creator")
 				return
 			}
@@ -317,7 +317,7 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			code = "review_rejected"
 		}
 		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": name, "reason": request.Note}, map[string]any{
-			"creatorId": aggregateKey, "url": creatorPath(kind, aggregateKey),
+			"creatorId": aggregateKey, "targetLabel": name, "url": creatorPath(kind, aggregateKey),
 		})
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status})
 		return
@@ -418,7 +418,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		if request.Status == "rejected" {
 			code = "review_rejected"
 		}
-		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": snapshot.Title, "reason": request.Note}, map[string]any{"blueprintId": aggregateKey, "url": "/blueprints/" + aggregateKey})
+		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": snapshot.Title, "reason": request.Note}, map[string]any{
+			"blueprintId": aggregateKey, "targetLabel": snapshot.Title, "url": "/blueprints/" + aggregateKey,
+		})
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status})
 		return
 	}
@@ -470,7 +472,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		if request.Status == "rejected" {
 			code = "review_rejected"
 		}
-		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": snapshot.DisplayName, "reason": request.Note}, map[string]any{"skinId": aggregateKey, "url": "/skins/" + aggregateKey})
+		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": snapshot.DisplayName, "reason": request.Note}, map[string]any{
+			"skinId": aggregateKey, "targetLabel": snapshot.DisplayName, "url": "/skins/" + aggregateKey,
+		})
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionID, "status": request.Status})
 		return
 	}

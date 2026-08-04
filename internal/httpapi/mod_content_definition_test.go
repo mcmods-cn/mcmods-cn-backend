@@ -1,6 +1,9 @@
 package httpapi
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestCanonicalModContentDefinitionKeepsConfiguredFieldsOnly(t *testing.T) {
 	entryType := modContentEntryTypeDefinition{Code: "entity", Groups: []modContentEntryTypeGroup{{
@@ -163,6 +166,21 @@ func TestImportedDimensionBiomeRelationsAreBidirectional(t *testing.T) {
 	}
 }
 
+func TestImportedAdvancementLayoutGroupsFollowConnectedComponents(t *testing.T) {
+	rows := []catalogResourceImportRow{
+		{KindCode: "minecraft.advancement", CanonicalID: "example:root", Data: `{}`},
+		{KindCode: "minecraft.advancement", CanonicalID: "example:child", Data: `{"parent":"example:root"}`},
+		{KindCode: "minecraft.advancement", CanonicalID: "example:standalone", Data: `{}`},
+	}
+	groups := importedAdvancementLayoutGroups(rows)
+	if groups["example:root"] == "" || groups["example:root"] != groups["example:child"] {
+		t.Fatalf("connected advancements were split: %#v", groups)
+	}
+	if groups["example:standalone"] == groups["example:root"] {
+		t.Fatalf("unconnected advancement joined another group: %#v", groups)
+	}
+}
+
 func TestInferImportedEntryTypeCode(t *testing.T) {
 	if value := inferImportedEntryTypeCode("minecraft.item", "diamond_chestplate", map[string]any{}); value != "equipment" {
 		t.Fatalf("equipment inference = %q", value)
@@ -172,6 +190,72 @@ func TestInferImportedEntryTypeCode(t *testing.T) {
 	}
 	if value := inferImportedEntryTypeCode("minecraft.entity_type", "cow", map[string]any{}); value != "entity" {
 		t.Fatalf("entity inference = %q", value)
+	}
+	for kindCode, expected := range map[string]string{
+		"minecraft.dimension":   "dimension",
+		"minecraft.biome":       "biome",
+		"minecraft.key_mapping": "key_mapping",
+	} {
+		if value := inferImportedEntryTypeCode(kindCode, "example", map[string]any{}); value != expected {
+			t.Errorf("%s inference = %q, want %q", kindCode, value, expected)
+		}
+	}
+}
+
+func TestMergeModContentDefinitionPatch(t *testing.T) {
+	base := map[string]any{
+		"unchanged": "keep",
+		"removed":   "drop",
+		"nested": map[string]any{
+			"unchanged": float64(1),
+			"changed":   false,
+		},
+	}
+	patch := map[string]any{
+		"removed": nil,
+		"nested": map[string]any{
+			"changed": true,
+		},
+	}
+
+	got := mergeModContentDefinitionPatch(base, patch)
+	want := map[string]any{
+		"unchanged": "keep",
+		"nested": map[string]any{
+			"unchanged": float64(1),
+			"changed":   true,
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("merged definition = %#v, want %#v", got, want)
+	}
+	if base["removed"] != "drop" {
+		t.Fatal("merge mutated its base document")
+	}
+}
+
+func TestNormalizeLootTableCanonicalDefinitionRefreshesDerivedReferences(t *testing.T) {
+	definition := map[string]any{
+		"pools": []any{map[string]any{"entries": []any{
+			map[string]any{"type": "minecraft:item", "name": "minecraft:diamond"},
+			map[string]any{"type": "minecraft:loot_table", "value": "minecraft:chests/abandoned_mineshaft"},
+			map[string]any{"type": "minecraft:alternatives", "children": []any{
+				map[string]any{"type": "minecraft:item", "name": "minecraft:emerald"},
+			}},
+		}}},
+		"possibleItemIds":      []any{"minecraft:stale"},
+		"referencedLootTables": []any{"minecraft:stale"},
+	}
+
+	normalizeLootTableCanonicalDefinition(definition)
+	if got, want := definition["possibleItemIds"], []string{"minecraft:diamond", "minecraft:emerald"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("possible items = %#v, want %#v", got, want)
+	}
+	if got, want := definition["referencedLootTables"], []string{"minecraft:chests/abandoned_mineshaft"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("referenced loot tables = %#v, want %#v", got, want)
+	}
+	if definition["definitionAvailable"] != true {
+		t.Fatal("loot-table definition must be marked available when pools are present")
 	}
 }
 
@@ -207,5 +291,69 @@ func TestCanonicalAdvancementDefinitionPreservesGraphAndProgressData(t *testing.
 	}
 	if _, exists := definition["rewards"]; !exists {
 		t.Fatal("advancement rewards were discarded")
+	}
+}
+
+func TestCanonicalModContentDefinitionValidatesDisplayFormats(t *testing.T) {
+	entryType := modContentEntryTypeDefinition{Code: "entity", Groups: []modContentEntryTypeGroup{{
+		Code: "entity",
+		Fields: []modContentEntryTypeField{
+			{Code: "maxHealth", Type: "number", Format: "health", Paths: [][]string{{"max_health"}}},
+			{Code: "spawnRange", Type: "range", Format: "range", Paths: [][]string{{"spawn_range"}}},
+		},
+	}}}
+	definition, err := canonicalModContentDefinition(entryType, map[string]any{
+		"max_health":  float64(20),
+		"spawn_range": []any{float64(4), float64(12)},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := definition["spawnRange"]; !reflect.DeepEqual(got, []float64{4, 12}) {
+		t.Fatalf("spawnRange = %#v", got)
+	}
+	if _, err = canonicalModContentDefinition(entryType, map[string]any{"max_health": 20.5}, true); err == nil {
+		t.Fatal("fractional health value was accepted")
+	}
+	if _, err = canonicalModContentDefinition(entryType, map[string]any{"spawn_range": []any{12.0, 4.0}}, true); err == nil {
+		t.Fatal("descending range was accepted")
+	}
+}
+
+func TestConfiguredEntryTypeMatchingUsesDistinctiveImportFields(t *testing.T) {
+	template := modContentTemplateDefinition{ResourceKinds: []string{"minecraft.item"}, EntryTypes: []modContentEntryTypeDefinition{
+		{Code: "item", KindCodes: []string{"minecraft.item"}, Groups: []modContentEntryTypeGroup{{Code: "item", Fields: []modContentEntryTypeField{
+			{Code: "maxStackSize", Type: "number", Paths: [][]string{{"max_stack_size"}}},
+		}}}},
+		{Code: "machine", KindCodes: []string{"minecraft.item"}, Groups: []modContentEntryTypeGroup{{Code: "machine", Fields: []modContentEntryTypeField{
+			{Code: "maxEnergy", Type: "number", Paths: [][]string{{"machine", "max_energy"}}},
+		}}}},
+	}}
+	got := matchImportedEntryType(template, "minecraft.item", map[string]any{
+		"max_stack_size": float64(1),
+		"machine":        map[string]any{"max_energy": float64(10000)},
+	}, "item")
+	if got != "machine" {
+		t.Fatalf("matched entry type = %q, want machine", got)
+	}
+}
+
+func TestResourceAttributeSchemaPreservesStableIDsAndStorageTypes(t *testing.T) {
+	current := modContentTemplateDefinition{EntryTypes: []modContentEntryTypeDefinition{{
+		Code: "entity", KindCodes: []string{"minecraft.entity_type"}, Groups: []modContentEntryTypeGroup{{Code: "entity", Fields: []modContentEntryTypeField{{
+			Code: "maxHealth", Type: "number", Format: "float",
+		}}}},
+	}}}
+	next := current
+	next.EntryTypes = append([]modContentEntryTypeDefinition(nil), current.EntryTypes...)
+	next.EntryTypes[0].Groups = append([]modContentEntryTypeGroup(nil), current.EntryTypes[0].Groups...)
+	next.EntryTypes[0].Groups[0].Fields = append([]modContentEntryTypeField(nil), current.EntryTypes[0].Groups[0].Fields...)
+	next.EntryTypes[0].Groups[0].Fields[0].Format = "health"
+	if err := preservesModContentAttributeSchema(current, next); err != nil {
+		t.Fatalf("presentation-only numeric format change was rejected: %v", err)
+	}
+	next.EntryTypes[0].Groups[0].Fields[0].Type = "text"
+	if err := preservesModContentAttributeSchema(current, next); err == nil {
+		t.Fatal("storage type change was accepted")
 	}
 }

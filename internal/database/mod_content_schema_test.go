@@ -88,6 +88,35 @@ func TestWorldStructureBiomesSupportsTagOrExplicitList(t *testing.T) {
 	}
 }
 
+func TestImportedDetailFieldsAreEditable(t *testing.T) {
+	t.Parallel()
+
+	schemaSQL := strings.Join(modContentCanonicalDocumentSchemaStatements(), "\n")
+	for _, field := range []string{
+		`{"code":"generatorSettings","type":"json"`,
+		`{"code":"placement","type":"json"`,
+		`{"code":"startHeight","type":"json"`,
+	} {
+		if !strings.Contains(schemaSQL, field) {
+			t.Errorf("canonical schema is missing editable field %s", field)
+		}
+		if strings.Contains(schemaSQL, field+`,"editable":false`) {
+			t.Errorf("canonical schema field %s is unexpectedly read-only", field)
+		}
+	}
+}
+
+func TestLootTableSchemaPreservesEditableDefinitionMetadata(t *testing.T) {
+	t.Parallel()
+
+	schemaSQL := strings.Join(modContentCanonicalDocumentSchemaStatements(), "\n")
+	for _, field := range []string{`{"code":"tableType","type":"text"`, `{"code":"randomSequence","type":"text"`, `{"code":"pools","type":"json"`} {
+		if !strings.Contains(schemaSQL, field) {
+			t.Errorf("loot-table schema is missing %s", field)
+		}
+	}
+}
+
 func TestCanonicalDocumentSchemasPreserveExporterSpecificFields(t *testing.T) {
 	t.Parallel()
 

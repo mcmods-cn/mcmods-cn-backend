@@ -192,7 +192,7 @@ func modContentSchemaStatements() []string {
 				{"code":"equipment","kindCodes":["minecraft.item"],"names":{"en-US":"Equipment","zh-CN":"装备","zh-TW":"裝備"},"groups":[
 					{"code":"equipment","names":{"en-US":"Equipment properties","zh-CN":"装备属性","zh-TW":"裝備屬性"},"descriptions":{"en-US":"Durability, armor, slot, toughness, and enchanting values.","zh-CN":"装备的耐久、护甲、韧性、槽位与附魔属性。","zh-TW":"裝備的耐久、護甲、韌性、欄位與附魔屬性。"},"fields":[
 						{"code":"durability","type":"number","names":{"en-US":"Durability","zh-CN":"耐久","zh-TW":"耐久"},"paths":[["max_damage"],["durability","max_damage"],["equipment","durability"]]},
-						{"code":"armorValue","type":"number","names":{"en-US":"Armor value","zh-CN":"提供的护甲值","zh-TW":"提供的護甲值"},"paths":[["armor","defense"],["armor_value"],["equipment","armor"],["equipment","armor_value"]]},
+						{"code":"armorValue","type":"number","format":"armor","names":{"en-US":"Armor value","zh-CN":"提供的护甲值","zh-TW":"提供的護甲值"},"paths":[["armor","defense"],["armor_value"],["equipment","armor"],["equipment","armor_value"]]},
 						{"code":"armorToughness","type":"number","names":{"en-US":"Armor toughness","zh-CN":"护甲韧性","zh-TW":"護甲韌性"},"paths":[["armor","toughness"],["armor_toughness"],["toughness"],["equipment","toughness"]]},
 						{"code":"knockbackResistance","type":"number","names":{"en-US":"Knockback resistance","zh-CN":"击退抗性","zh-TW":"擊退抗性"},"paths":[["armor","knockback_resistance"],["knockback_resistance"],["equipment","knockback_resistance"]]},
 						{"code":"equipmentSlot","type":"text","names":{"en-US":"Equipment slot","zh-CN":"装备槽位","zh-TW":"裝備欄位"},"paths":[["equipment_slot"],["slot"],["equipment","slot"]]},
@@ -213,7 +213,7 @@ func modContentSchemaStatements() []string {
 				'zh-TW',case code when 'mob_effect' then '藥水效果' when 'entity' then '生物' when 'enchantment' then '附魔'
 				when 'fluid' then '流體' when 'skill' then '技能' when 'chemical' then '化學品' else i18n_key end),
 				'groups',case when code='skill' then '[{"code":"skill","names":{"en-US":"Skill properties","zh-CN":"技能属性","zh-TW":"技能屬性"},"fields":[{"code":"cd","type":"number","names":{"en-US":"Cooldown","zh-CN":"冷却时间（CD）","zh-TW":"冷卻時間（CD）"},"paths":[["cd"],["skill","cd"]]}]}]'::jsonb
-					when code='entity' then '[{"code":"entity","names":{"en-US":"Entity properties","zh-CN":"生物属性","zh-TW":"生物屬性"},"fields":[{"code":"maxHealth","type":"number","names":{"en-US":"Maximum health","zh-CN":"最大生命值","zh-TW":"最大生命值"},"paths":[["max_health"],["attributes","max_health"]]},{"code":"armorValue","type":"number","names":{"en-US":"Armor value","zh-CN":"护甲值","zh-TW":"護甲值"},"paths":[["armor_value"],["attributes","armor"]]},{"code":"width","type":"number","names":{"en-US":"Width","zh-CN":"宽度","zh-TW":"寬度"},"paths":[["width"],["dimensions","width"]]},{"code":"height","type":"number","names":{"en-US":"Height","zh-CN":"高度","zh-TW":"高度"},"paths":[["height"],["dimensions","height"]]},{"code":"eyeHeight","type":"number","names":{"en-US":"Eye height","zh-CN":"眼睛高度","zh-TW":"眼睛高度"},"paths":[["eye_height"],["dimensions","eye_height"]]},{"code":"fireImmune","type":"boolean","names":{"en-US":"Fire immune","zh-CN":"免疫火焰","zh-TW":"免疫火焰"},"paths":[["fire_immune"],["properties","fire_immune"]]}]}]'::jsonb
+					when code='entity' then '[{"code":"entity","names":{"en-US":"Entity properties","zh-CN":"生物属性","zh-TW":"生物屬性"},"fields":[{"code":"maxHealth","type":"number","format":"health","names":{"en-US":"Maximum health","zh-CN":"最大生命值","zh-TW":"最大生命值"},"paths":[["max_health"],["attributes","max_health"]]},{"code":"armorValue","type":"number","format":"armor","names":{"en-US":"Armor value","zh-CN":"护甲值","zh-TW":"護甲值"},"paths":[["armor_value"],["attributes","armor"]]},{"code":"width","type":"number","names":{"en-US":"Width","zh-CN":"宽度","zh-TW":"寬度"},"paths":[["width"],["dimensions","width"]]},{"code":"height","type":"number","names":{"en-US":"Height","zh-CN":"高度","zh-TW":"高度"},"paths":[["height"],["dimensions","height"]]},{"code":"eyeHeight","type":"number","names":{"en-US":"Eye height","zh-CN":"眼睛高度","zh-TW":"眼睛高度"},"paths":[["eye_height"],["dimensions","eye_height"]]},{"code":"fireImmune","type":"boolean","names":{"en-US":"Fire immune","zh-CN":"免疫火焰","zh-TW":"免疫火焰"},"paths":[["fire_immune"],["properties","fire_immune"]]}]}]'::jsonb
 					when code='mob_effect' then '[{"code":"effect","names":{"en-US":"Potion-effect properties","zh-CN":"药水效果属性","zh-TW":"藥水效果屬性"},"fields":[{"code":"category","type":"text","names":{"en-US":"Category","zh-CN":"效果类别","zh-TW":"效果類別"},"paths":[["category"],["effect","category"]]},{"code":"color","type":"text","names":{"en-US":"Color","zh-CN":"效果颜色","zh-TW":"效果顏色"},"paths":[["color"],["effect","color"]]},{"code":"beneficial","type":"boolean","names":{"en-US":"Beneficial","zh-CN":"正面效果","zh-TW":"正面效果"},"paths":[["beneficial"],["effect","beneficial"]]},{"code":"instant","type":"boolean","names":{"en-US":"Instant effect","zh-CN":"即时生效","zh-TW":"即時生效"},"paths":[["instant"],["effect","instant"]]}]}]'::jsonb
 					when code='enchantment' then '[{"code":"enchantment","names":{"en-US":"Enchantment properties","zh-CN":"附魔属性","zh-TW":"附魔屬性"},"fields":[{"code":"minimumLevel","type":"number","names":{"en-US":"Minimum level","zh-CN":"最低等级","zh-TW":"最低等級"},"paths":[["min_level"],["minimum_level"],["enchantment","minimumLevel"]]},{"code":"maximumLevel","type":"number","names":{"en-US":"Maximum level","zh-CN":"最高等级","zh-TW":"最高等級"},"paths":[["max_level"],["maximum_level"],["enchantment","maximumLevel"]]},{"code":"rarity","type":"text","names":{"en-US":"Rarity","zh-CN":"稀有度","zh-TW":"稀有度"},"paths":[["rarity"],["enchantment","rarity"]]},{"code":"treasureOnly","type":"boolean","names":{"en-US":"Treasure only","zh-CN":"宝藏附魔","zh-TW":"寶藏附魔"},"paths":[["treasure_only"],["treasure"],["enchantment","treasureOnly"]]},{"code":"curse","type":"boolean","names":{"en-US":"Curse","zh-CN":"诅咒附魔","zh-TW":"詛咒附魔"},"paths":[["curse"],["enchantment","curse"]]},{"code":"tradeable","type":"boolean","names":{"en-US":"Tradeable","zh-CN":"可交易获得","zh-TW":"可交易取得"},"paths":[["tradeable"],["enchantment","tradeable"]]},{"code":"discoverable","type":"boolean","names":{"en-US":"Discoverable","zh-CN":"可探索获得","zh-TW":"可探索取得"},"paths":[["discoverable"],["enchantment","discoverable"]]}]}]'::jsonb
 					when code='fluid' or code='chemical' then '[{"code":"material","names":{"en-US":"Material properties","zh-CN":"材料属性","zh-TW":"材料屬性"},"fields":[{"code":"density","type":"number","names":{"en-US":"Density","zh-CN":"密度","zh-TW":"密度"},"paths":[["density"],["fluid","density"],["chemical","density"]]},{"code":"temperature","type":"number","names":{"en-US":"Temperature","zh-CN":"温度","zh-TW":"溫度"},"paths":[["temperature"],["fluid","temperature"],["chemical","temperature"]]},{"code":"viscosity","type":"number","names":{"en-US":"Viscosity","zh-CN":"黏度","zh-TW":"黏度"},"paths":[["viscosity"],["fluid","viscosity"],["chemical","viscosity"]]},{"code":"luminosity","type":"number","names":{"en-US":"Luminosity","zh-CN":"发光等级","zh-TW":"發光等級"},"paths":[["luminosity"],["fluid","luminosity"],["chemical","luminosity"]]},{"code":"gaseous","type":"boolean","names":{"en-US":"Gaseous","zh-CN":"气态","zh-TW":"氣態"},"paths":[["gaseous"],["chemical","gaseous"]]}]}]'::jsonb
@@ -254,6 +254,8 @@ func modContentSchemaStatements() []string {
 			system_key text not null default '',
 			default_locale text not null default 'en-US',
 			display_mode text not null,
+			definition_override jsonb,
+			definition_version integer not null default 1 check(definition_version>0),
 			ordinal integer not null default 0 check(ordinal>=0),
 			status text not null default 'active',
 			published_revision_id bigint references content_revisions(id) on delete restrict,
@@ -262,6 +264,7 @@ func modContentSchemaStatements() []string {
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
 			check(display_mode in ('compact','large')),
+			check(definition_override is null or jsonb_typeof(definition_override)='object'),
 			check(status in ('active','pending','archived')),
 			unique(id,version_id),
 			unique(version_id,parent_id,ordinal)
@@ -282,6 +285,7 @@ func modContentSchemaStatements() []string {
 			version_id bigint not null references mod_content_versions(id) on delete cascade,
 			resource_id bigint not null references game_resources(entity_id) on delete restrict,
 			placement_identity_key text not null,
+			similar_group_id text not null default '',
 			ordinal integer not null default 0 check(ordinal>=0),
 			placement_source text not null default 'manual',
 			created_at timestamptz not null default now(),
@@ -290,9 +294,12 @@ func modContentSchemaStatements() []string {
 			unique(section_id,version_id,ordinal),
 			unique(version_id,resource_id),
 			unique(version_id,placement_identity_key),
+			check(similar_group_id='' or similar_group_id ~ '^[a-z0-9]{9}$'),
 			check(placement_source in ('manual','import'))
 		)`,
 		`create index idx_mod_content_section_resources_resource on mod_content_section_resources(resource_id,version_id)`,
+		`create index idx_mod_content_section_resources_similar_group
+			on mod_content_section_resources(version_id,similar_group_id,ordinal) where similar_group_id<>''`,
 		`create or replace function assign_mod_content_placement_identity() returns trigger as $$
 		declare resource_kind text; resource_canonical_id text; block_representative_id bigint;
 		begin

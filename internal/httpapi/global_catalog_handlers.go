@@ -365,6 +365,70 @@ func (s *Server) globalRecipeTypeDetail(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (s *Server) globalRecipeRender(w http.ResponseWriter, r *http.Request) {
+	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("publicId")))
+	if !validCatalogPublicID(publicID) {
+		writeError(w, http.StatusBadRequest, "publicId must be a 9-character mcmods.cn public ID")
+		return
+	}
+	primary, secondary := requestedContentLocales(r)
+	var recipeEntityID int64
+	var recipePublicID, recipeID, sourceKind, fingerprint, snapshotID, sourceRevisionID, siteID, note string
+	var canonical bool
+	var raw []byte
+	err := s.db.QueryRow(r.Context(), `with `+latestGlobalExportScopeCTE+`, selected as (
+		select distinct on (recipe.entity_id) recipe.entity_id,entity.public_id,recipe.canonical_source_id,
+			recipe.semantic_fingerprint,recipe.identity_source,snapshot.id snapshot_id,snapshot.source_recipe_id,
+			snapshot.source_id_kind,snapshot.revision_id,mod.slug,
+			override.note,override.layout_override
+		from latest_revisions revision
+		join recipe_import_snapshots snapshot on snapshot.revision_id=revision.id
+		join recipes recipe on recipe.entity_id=snapshot.recipe_id
+		join catalog_entities entity on entity.id=recipe.entity_id and entity.status='active'
+		join mods mod on mod.id=revision.mod_id
+		left join recipe_content_overrides override on override.recipe_id=recipe.entity_id
+		where entity.public_id=$1
+		order by recipe.entity_id,coalesce(revision.activated_at,revision.created_at) desc
+	)
+	select entity_id,public_id,coalesce(canonical_source_id,source_recipe_id),source_id_kind,
+		(canonical_source_id is not null),semantic_fingerprint,snapshot_id,revision_id,slug,coalesce(note,''),
+		layout_override
+	from selected limit 1`, publicID).Scan(&recipeEntityID, &recipePublicID, &recipeID, &sourceKind, &canonical,
+		&fingerprint, &snapshotID, &sourceRevisionID, &siteID, &note, &raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "renderable recipe not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read recipe")
+		return
+	}
+	layout, err := scanOptionalRecipeOverride(raw)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to decode recipe layout")
+		return
+	}
+	result := map[string]any{
+		"entityId": recipePublicID, "publicId": recipePublicID, "recipeKey": recipePublicID,
+		"recipeId": recipeID, "recipeIdSource": sourceKind, "recipeIdCanonical": canonical,
+		"semanticFingerprint": fingerprint, "recipeSnapshotId": snapshotID,
+		"revisionId": sourceRevisionID, "modSiteId": siteID, "note": note,
+	}
+	if layout != nil {
+		result["layout"] = layout
+	}
+	recipes := []map[string]any{result}
+	if err = s.hydrateRecipeRenderLayouts(r.Context(), recipes); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to build recipe layout")
+		return
+	}
+	if err = s.decorateRecipeResources(r.Context(), recipes, primary, secondary); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to decorate recipe resources")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[string]any, locales ...string) error {
 	keys := make([]exportResourceKey, 0, len(recipes)*8)
 	for _, recipe := range recipes {

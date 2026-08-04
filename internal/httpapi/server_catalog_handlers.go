@@ -28,6 +28,11 @@ type serverCatalogSettings struct {
 	HistoryDays        int   `json:"historyDays"`
 }
 
+type serverSubmissionSettings struct {
+	serverCatalogSettings
+	ReviewRequired bool `json:"reviewRequired"`
+}
+
 type createServerLinkRequest struct {
 	Kind  string `json:"kind"`
 	Label string `json:"label"`
@@ -152,7 +157,14 @@ func loadServerCatalogSettings(ctx context.Context, query revisionQuery) serverC
 }
 
 func (s *Server) publicServerSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, loadServerCatalogSettings(r.Context(), s.db))
+	claims := currentClaims(r)
+	reviewRequired := loadReviewConfig(r.Context(), s.db).ServerCreate &&
+		!claimsAllow(claims, "server.create.no-review") &&
+		!claimsAllow(claims, "admin.*")
+	writeJSON(w, http.StatusOK, serverSubmissionSettings{
+		serverCatalogSettings: loadServerCatalogSettings(r.Context(), s.db),
+		ReviewRequired:        reviewRequired,
+	})
 }
 
 func (s *Server) adminServerSettings(w http.ResponseWriter, r *http.Request) {
@@ -219,7 +231,11 @@ func (s *Server) createMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings := loadServerCatalogSettings(r.Context(), s.db)
-	if err := normalizeAndValidateServerRequest(&request, settings); err != nil {
+	claims := currentClaims(r)
+	reviewRequired := loadReviewConfig(r.Context(), s.db).ServerCreate &&
+		!claimsAllow(claims, "server.create.no-review") &&
+		!claimsAllow(claims, "admin.*")
+	if err := normalizeAndValidateServerRequest(&request, settings, reviewRequired); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -230,10 +246,9 @@ func (s *Server) createMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "提交前无法再次连接服务器："+err.Error())
 		return
 	}
-	claims := currentClaims(r)
-	reviewStatus := "pending"
-	if hasPermission(claims.Permissions, "server.create.no-review") || hasPermission(claims.Permissions, "admin.*") {
-		reviewStatus = "approved"
+	reviewStatus := "approved"
+	if reviewRequired {
+		reviewStatus = "pending"
 	}
 
 	tx, err := s.db.Begin(r.Context())
@@ -242,9 +257,13 @@ func (s *Server) createMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if err = validateServerProofFiles(r.Context(), tx, claims.Subject, request.ProofFileIDs, settings); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+	proofFiles := make([]reviewAttachmentFile, 0)
+	if reviewRequired {
+		proofFiles, err = resolveServerProofFiles(r.Context(), tx, claims.Subject, request.ProofFileIDs, settings)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	hash := sha256.Sum256([]byte(probe.NormalizedAddress))
@@ -294,14 +313,9 @@ func (s *Server) createMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存服务器模组列表失败")
 		return
 	}
-	for index, filePublicID := range uniquePublicIDs(request.ProofFileIDs) {
-		fileID, resolveErr := resolveOSSFilePublicID(r.Context(), tx, filePublicID)
-		if resolveErr != nil {
-			writeError(w, http.StatusBadRequest, "证明附件不存在")
-			return
-		}
+	for index, file := range proofFiles {
 		if _, err = tx.Exec(r.Context(), `insert into minecraft_server_proof_files(server_id,oss_file_id,display_order)
-			values($1,$2,$3)`, serverID, fileID, index); err != nil {
+			values($1,$2,$3)`, serverID, file.InternalID, index); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存证明附件失败")
 			return
 		}
@@ -359,9 +373,9 @@ func (s *Server) updateMinecraftServer(w http.ResponseWriter, r *http.Request) {
 	}
 	claims := currentClaims(r)
 	if claims.Subject != ownerID &&
-		!hasPermission(claims.Permissions, "server.edit."+publicID) &&
-		!hasPermission(claims.Permissions, "server.review") &&
-		!hasPermission(claims.Permissions, "admin.*") {
+		!claimsAllow(claims, "server.edit."+publicID) &&
+		!claimsAllow(claims, "server.review") &&
+		!claimsAllow(claims, "admin.*") {
 		writeError(w, http.StatusForbidden, "没有编辑这个服务器的权限")
 		return
 	}
@@ -419,10 +433,8 @@ func normalizeAndValidateServerUpdateRequest(request *updateMinecraftServerReque
 		OnlineMode:        request.OnlineMode,
 		Links:             request.Links,
 		Mods:              request.Mods,
-		ProofText:         "existing-proof",
-		ProofFileIDs:      []string{"abc123def"},
 	}
-	if err := normalizeAndValidateServerRequest(&candidate, settings); err != nil {
+	if err := normalizeAndValidateServerRequest(&candidate, settings, false); err != nil {
 		return err
 	}
 	request.Name = candidate.Name
@@ -436,7 +448,7 @@ func normalizeAndValidateServerUpdateRequest(request *updateMinecraftServerReque
 	return nil
 }
 
-func normalizeAndValidateServerRequest(request *createMinecraftServerRequest, settings serverCatalogSettings) error {
+func normalizeAndValidateServerRequest(request *createMinecraftServerRequest, settings serverCatalogSettings, proofRequired bool) error {
 	request.Address = strings.TrimSpace(request.Address)
 	request.Name = strings.TrimSpace(request.Name)
 	request.ShortDescription = strings.TrimSpace(request.ShortDescription)
@@ -462,11 +474,16 @@ func normalizeAndValidateServerRequest(request *createMinecraftServerRequest, se
 	default:
 		return errors.New("请选择有效的服务器主标签")
 	}
-	if request.ProofText == "" || len(request.ProofText) > 10000 {
-		return errors.New("请填写有效的服主或管理成员证明说明")
-	}
-	if len(uniquePublicIDs(request.ProofFileIDs)) == 0 {
-		return errors.New("请至少上传一份证明附件")
+	if proofRequired {
+		if request.ProofText == "" || len(request.ProofText) > 10000 {
+			return errors.New("请填写有效的服主或管理成员证明说明")
+		}
+		if len(uniquePublicIDs(request.ProofFileIDs)) == 0 {
+			return errors.New("请至少上传一份证明附件")
+		}
+	} else {
+		request.ProofText = ""
+		request.ProofFileIDs = nil
 	}
 	if len(request.Links) > 12 || len(request.Mods) > 4096 {
 		return errors.New("服务器链接或模组数量过多")
@@ -490,29 +507,30 @@ func normalizeAndValidateServerRequest(request *createMinecraftServerRequest, se
 	return nil
 }
 
-func validateServerProofFiles(ctx context.Context, tx pgx.Tx, userID int64, publicIDs []string, settings serverCatalogSettings) error {
+func resolveServerProofFiles(ctx context.Context, tx pgx.Tx, userID int64, publicIDs []string, settings serverCatalogSettings) ([]reviewAttachmentFile, error) {
 	publicIDs = uniquePublicIDs(publicIDs)
 	if len(publicIDs) < 1 || len(publicIDs) > settings.MaxProofFiles {
-		return fmt.Errorf("证明附件需要 1–%d 个", settings.MaxProofFiles)
+		return nil, fmt.Errorf("证明附件需要 1–%d 个", settings.MaxProofFiles)
 	}
+	files := make([]reviewAttachmentFile, 0, len(publicIDs))
 	var total int64
 	for _, publicID := range publicIDs {
-		var size int64
-		err := tx.QueryRow(ctx, `select greatest(size_bytes,source_size_bytes)
-			from oss_files where public_id=$1 and uploader_id=$2 and status='active'`,
-			publicID, userID).Scan(&size)
+		file, err := lookupReviewAttachment(ctx, tx, reviewAttachmentLookup{
+			Kind: reviewAttachmentByUploader, UploaderID: userID,
+		}, publicID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return errors.New("证明附件不存在或不属于当前用户")
+			return nil, errors.New("证明附件不存在或不属于当前用户")
 		}
 		if err != nil {
-			return errors.New("读取证明附件失败")
+			return nil, errors.New("读取证明附件失败")
 		}
-		total += size
+		total += file.SizeBytes
+		files = append(files, file)
 	}
 	if total > settings.MaxProofTotalBytes {
-		return fmt.Errorf("证明附件总大小不能超过 %.1f MB", float64(settings.MaxProofTotalBytes)/(1<<20))
+		return nil, fmt.Errorf("证明附件总大小不能超过 %.1f MB", float64(settings.MaxProofTotalBytes)/(1<<20))
 	}
-	return nil
+	return files, nil
 }
 
 func mergeServerModRequests(detected []serverprobe.Mod, declared []createServerModRequest) []createServerModRequest {
@@ -807,14 +825,14 @@ func (s *Server) publicMinecraftServerDetail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if detail.ReviewStatus != "approved" && claims.Subject != ownerID &&
-		!hasPermission(claims.Permissions, "server.review") && !hasPermission(claims.Permissions, "admin.*") {
+		!claimsAllow(claims, "server.review") && !claimsAllow(claims, "admin.*") {
 		writeError(w, http.StatusNotFound, "服务器不存在")
 		return
 	}
 	detail.CanEdit = claims.Subject == ownerID ||
-		hasPermission(claims.Permissions, "server.edit."+publicID) ||
-		hasPermission(claims.Permissions, "server.review") ||
-		hasPermission(claims.Permissions, "admin.*")
+		claimsAllow(claims, "server.edit."+publicID) ||
+		claimsAllow(claims, "server.review") ||
+		claimsAllow(claims, "admin.*")
 	if latency >= 0 {
 		detail.LatencyMS = &latency
 	}
@@ -862,11 +880,13 @@ type minecraftServerModQuerier interface {
 
 func readMinecraftServerMods(ctx context.Context, query minecraftServerModQuerier, publicID string) ([]minecraftServerMod, error) {
 	rows, err := query.Query(ctx, `select server_mod.raw_mod_id,server_mod.version,server_mod.source,
-		server_mod.confidence,mod.id is not null,coalesce(mod.project_code,''),coalesce(mod.mod_id,''),
+		server_mod.confidence,mod.id is not null,coalesce(mod.project_code,''),coalesce(primary_identifier.identifier,''),
 		coalesce(mod.primary_name,''),coalesce(mod.slug,''),coalesce(mod.icon_url,'')
 		from minecraft_server_mods server_mod
 		join minecraft_servers server on server.id=server_mod.server_id
 		left join mods mod on mod.id=server_mod.mod_id
+		left join lateral (select identifier.identifier from mod_identifiers identifier where identifier.mod_id=mod.id
+			order by identifier.is_primary desc,identifier.display_order,identifier.id limit 1) primary_identifier on true
 		where server.public_id=$1 order by lower(coalesce(mod.primary_name,server_mod.raw_mod_id)),server_mod.id`, publicID)
 	if err != nil {
 		return nil, err

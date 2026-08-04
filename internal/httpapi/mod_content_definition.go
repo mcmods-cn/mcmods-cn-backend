@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
+	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -14,6 +17,32 @@ const modContentDefinitionSchemaVersion = 1
 
 type modContentTemplateRows interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+// loadModContentSectionDefinition returns the website-wide schema used by a
+// version-scoped data page. Child classification sections resolve to the same
+// root template; mods and versions never own separate attribute contracts.
+func loadModContentSectionDefinition(
+	ctx context.Context,
+	query modContentImageQuerier,
+	modID, versionID int64,
+	sectionPublicID string,
+	destination *[]byte,
+) error {
+	return query.QueryRow(ctx, `with recursive lineage as (
+		select section.id,section.parent_id,section.template_id
+		from mod_content_sections section
+		where section.public_id=$1 and section.mod_id=$2 and section.version_id=$3 and section.status='active'
+		union all
+		select parent.id,parent.parent_id,parent.template_id
+		from mod_content_sections parent join lineage child on child.parent_id=parent.id
+		where parent.mod_id=$2 and parent.version_id=$3 and parent.status='active'
+	), root as (
+		select * from lineage where parent_id is null limit 1
+	)
+	select template.definition
+	from root join mod_content_templates template on template.id=root.template_id and template.status='active'`,
+		sectionPublicID, modID, versionID).Scan(destination)
 }
 
 func normalizeModContentEntryDefinition(
@@ -33,12 +62,7 @@ func normalizeModContentEntryDefinition(
 		return nil, errCatalogEditorReference
 	}
 	var raw []byte
-	if err := query.QueryRow(ctx, `select template.definition
-		from mod_content_sections section
-		join mod_content_templates template on template.id=section.template_id
-		where section.public_id=$1 and section.mod_id=$2 and section.version_id=$3
-		  and section.status='active' and template.status='active'`,
-		*sectionPublicID, modID, versionID).Scan(&raw); err != nil {
+	if err := loadModContentSectionDefinition(ctx, query, modID, versionID, *sectionPublicID, &raw); err != nil {
 		return nil, err
 	}
 	var template modContentTemplateDefinition
@@ -49,7 +73,45 @@ func normalizeModContentEntryDefinition(
 	if err != nil {
 		return nil, err
 	}
-	return canonicalModContentDefinition(*entryType, definition, useImportAliases)
+	normalized, err := canonicalModContentDefinition(*entryType, definition, useImportAliases)
+	if err != nil {
+		return nil, err
+	}
+	if strings.EqualFold(strings.TrimSpace(kindCode), "minecraft.loot_table") {
+		normalizeLootTableCanonicalDefinition(normalized)
+		encoded, encodeErr := json.Marshal(normalized)
+		if encodeErr != nil || len(encoded) > 512*1024 || catalogJSONDepth(normalized, 0) > 20 {
+			return nil, errCatalogEditorInvalid
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(kindCode), "minecraft.advancement") {
+		if groupID, ok := normalizeAdvancementLayoutGroupID(definition["layoutGroupId"]); ok {
+			normalized["layoutGroupId"] = groupID
+		}
+	}
+	return normalized, nil
+}
+
+func normalizeLootTableCanonicalDefinition(definition map[string]any) {
+	source := make(map[string]any, len(definition))
+	for key, value := range definition {
+		source[key] = value
+	}
+	for _, key := range []string{"possibleItemIds", "possible_item_ids", "referencedLootTables", "referenced_loot_tables"} {
+		delete(source, key)
+	}
+	if itemIDs := lootTableItemIDs(source); len(itemIDs) > 0 {
+		definition["possibleItemIds"] = itemIDs
+	} else {
+		delete(definition, "possibleItemIds")
+	}
+	if referenceIDs := lootTableReferenceIDs(source); len(referenceIDs) > 0 {
+		definition["referencedLootTables"] = referenceIDs
+	} else {
+		delete(definition, "referencedLootTables")
+	}
+	_, hasPools := definition["pools"]
+	definition["definitionAvailable"] = hasPools
 }
 
 func selectModContentEntryType(entryTypes []modContentEntryTypeDefinition, entryTypeCode, kindCode string, enforceKind bool) (*modContentEntryTypeDefinition, error) {
@@ -107,6 +169,30 @@ func canonicalModContentDefinition(entryType modContentEntryTypeDefinition, sour
 	return result, nil
 }
 
+// mergeModContentDefinitionPatch applies the editor's JSON merge-patch-shaped
+// payload to the currently stored canonical document. Editors only submit
+// changed fields; a null value explicitly removes a field.
+func mergeModContentDefinitionPatch(base, patch map[string]any) map[string]any {
+	result := make(map[string]any, len(base)+len(patch))
+	for key, value := range base {
+		result[key] = value
+	}
+	for key, value := range patch {
+		if value == nil {
+			delete(result, key)
+			continue
+		}
+		patchObject, patchIsObject := value.(map[string]any)
+		if !patchIsObject {
+			result[key] = value
+			continue
+		}
+		baseObject, _ := result[key].(map[string]any)
+		result[key] = mergeModContentDefinitionPatch(baseObject, patchObject)
+	}
+	return result
+}
+
 func normalizeModContentFieldValue(field modContentEntryTypeField, value any) (any, bool, error) {
 	switch field.Type {
 	case "number":
@@ -114,7 +200,21 @@ func normalizeModContentFieldValue(field modContentEntryTypeField, value any) (a
 		if !ok {
 			return nil, false, errCatalogEditorInvalid
 		}
+		if catalogStringIn(field.Format, "integer", "health", "armor") && number != math.Trunc(number) {
+			return nil, false, errCatalogEditorInvalid
+		}
 		return number, true, nil
+	case "range":
+		items, ok := value.([]any)
+		if !ok || len(items) != 2 {
+			return nil, false, errCatalogEditorInvalid
+		}
+		minimum, minimumOK := catalogFiniteNumber(items[0])
+		maximum, maximumOK := catalogFiniteNumber(items[1])
+		if !minimumOK || !maximumOK || minimum > maximum {
+			return nil, false, errCatalogEditorInvalid
+		}
+		return []float64{minimum, maximum}, true, nil
 	case "text", "reference":
 		text, ok := value.(string)
 		if !ok || len(text) > 4096 {
@@ -175,11 +275,12 @@ func canonicalizeCatalogResourceRows(ctx context.Context, tx pgx.Tx, rows []cata
 		return err
 	}
 	dimensionBiomes, biomeDimensions := importedDimensionBiomeRelations(rows)
+	advancementGroups := importedAdvancementLayoutGroups(rows)
 	for index := range rows {
 		row := &rows[index]
 		var source map[string]any
-		if err = json.Unmarshal([]byte(nonEmptyJSONObject(row.Data)), &source); err != nil {
-			return fmt.Errorf("decode %s definition: %w", row.CanonicalID, err)
+		if decodeErr := json.Unmarshal([]byte(nonEmptyJSONObject(row.Data)), &source); decodeErr != nil {
+			return fmt.Errorf("decode %s definition: %w", row.CanonicalID, decodeErr)
 		}
 		if strings.EqualFold(row.KindCode, "minecraft.dimension") {
 			source["biome_ids"] = mergeImportedReferenceLists(source["biome_ids"], dimensionBiomes[strings.ToLower(row.CanonicalID)])
@@ -193,7 +294,10 @@ func canonicalizeCatalogResourceRows(ctx context.Context, tx pgx.Tx, rows []cata
 		}
 		inferredEntryTypeCode := inferImportedEntryTypeCode(row.KindCode, row.ResourcePath, source)
 		if entryTypeCode != inferredEntryTypeCode {
-			log.Printf("resource document %s downgraded from inferred type %s to %s", row.CanonicalID, inferredEntryTypeCode, entryTypeCode)
+			log.Printf("resource document %s matched configured type %s instead of default inference %s", row.CanonicalID, entryTypeCode, inferredEntryTypeCode)
+		}
+		if groupID := advancementGroups[strings.ToLower(strings.TrimSpace(row.CanonicalID))]; groupID != "" {
+			canonical["layoutGroupId"] = groupID
 		}
 		encoded, _ := json.Marshal(canonical)
 		row.EntryTypeCode = entryTypeCode
@@ -201,6 +305,78 @@ func canonicalizeCatalogResourceRows(ctx context.Context, tx pgx.Tx, rows []cata
 		row.Data = string(encoded)
 	}
 	return nil
+}
+
+func importedAdvancementLayoutGroups(rows []catalogResourceImportRow) map[string]string {
+	parents := make(map[string]string)
+	canonicalIDs := make([]string, 0)
+	for _, row := range rows {
+		if !strings.EqualFold(strings.TrimSpace(row.KindCode), "minecraft.advancement") {
+			continue
+		}
+		canonicalID := strings.ToLower(strings.TrimSpace(row.CanonicalID))
+		if canonicalID == "" {
+			continue
+		}
+		canonicalIDs = append(canonicalIDs, canonicalID)
+		var source map[string]any
+		if json.Unmarshal([]byte(nonEmptyJSONObject(row.Data)), &source) == nil {
+			parent, _ := source["parentId"].(string)
+			if strings.TrimSpace(parent) == "" {
+				parent, _ = source["parent"].(string)
+			}
+			parents[canonicalID] = strings.ToLower(strings.TrimSpace(parent))
+		}
+	}
+	neighbors := make(map[string][]string, len(canonicalIDs))
+	known := make(map[string]struct{}, len(canonicalIDs))
+	for _, canonicalID := range canonicalIDs {
+		known[canonicalID] = struct{}{}
+	}
+	for childID, parentID := range parents {
+		if parentID == "" || parentID == childID {
+			continue
+		}
+		if _, exists := known[parentID]; !exists {
+			continue
+		}
+		neighbors[childID] = append(neighbors[childID], parentID)
+		neighbors[parentID] = append(neighbors[parentID], childID)
+	}
+	sort.Strings(canonicalIDs)
+	result := make(map[string]string, len(canonicalIDs))
+	for _, canonicalID := range canonicalIDs {
+		if result[canonicalID] != "" {
+			continue
+		}
+		groupID := "advancement:" + canonicalID
+		pending := []string{canonicalID}
+		result[canonicalID] = groupID
+		for cursor := 0; cursor < len(pending); cursor++ {
+			for _, neighborID := range neighbors[pending[cursor]] {
+				if result[neighborID] != "" {
+					continue
+				}
+				result[neighborID] = groupID
+				pending = append(pending, neighborID)
+			}
+		}
+	}
+	return result
+}
+
+func normalizeAdvancementLayoutGroupID(value any) (string, bool) {
+	groupID, ok := value.(string)
+	groupID = strings.TrimSpace(groupID)
+	if !ok || groupID == "" || len([]rune(groupID)) > 512 {
+		return "", false
+	}
+	for _, character := range groupID {
+		if unicode.IsControl(character) {
+			return "", false
+		}
+	}
+	return groupID, true
 }
 
 func importedDimensionBiomeRelations(rows []catalogResourceImportRow) (map[string][]string, map[string][]string) {
@@ -281,11 +457,11 @@ func canonicalResourceDefinitionFromTemplates(
 	kindCode, resourcePath string,
 	source map[string]any,
 ) (string, map[string]any, error) {
-	entryTypeCode := inferImportedEntryTypeCode(kindCode, resourcePath, source)
 	template, exists := templates[strings.ToLower(strings.TrimSpace(kindCode))]
 	if !exists {
 		return "default", map[string]any{}, nil
 	}
+	entryTypeCode := matchImportedEntryType(template, kindCode, source, inferImportedEntryTypeCode(kindCode, resourcePath, source))
 	entryType, err := selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode, true)
 	if err != nil {
 		entryType, err = selectModContentEntryType(template.EntryTypes, "default", kindCode, true)
@@ -305,6 +481,83 @@ func canonicalResourceDefinitionFromTemplates(
 		}
 	}
 	return entryTypeCode, canonical, err
+}
+
+func matchImportedEntryType(
+	template modContentTemplateDefinition,
+	kindCode string,
+	source map[string]any,
+	fallback string,
+) string {
+	type matchScore struct {
+		code        string
+		distinctive int
+		matched     int
+	}
+	candidates := make([]modContentEntryTypeDefinition, 0, len(template.EntryTypes))
+	pathOwners := make(map[string]int)
+	for _, entryType := range template.EntryTypes {
+		if strings.EqualFold(strings.TrimSpace(entryType.Code), "default") || !modContentEntryTypeSupportsKind(entryType, kindCode) {
+			continue
+		}
+		candidates = append(candidates, entryType)
+		seen := make(map[string]struct{})
+		for _, group := range entryType.Groups {
+			for _, field := range group.Fields {
+				for _, path := range field.Paths {
+					key := strings.Join(path, "\x00")
+					if _, exists := seen[key]; !exists {
+						seen[key] = struct{}{}
+						pathOwners[key]++
+					}
+				}
+			}
+		}
+	}
+	best := matchScore{code: fallback}
+	for _, entryType := range candidates {
+		score := matchScore{code: entryType.Code}
+		for _, group := range entryType.Groups {
+			for _, field := range group.Fields {
+				matched := false
+				distinctive := false
+				for _, path := range field.Paths {
+					if _, exists := modContentDefinitionValue(source, [][]string{path}); !exists {
+						continue
+					}
+					matched = true
+					if pathOwners[strings.Join(path, "\x00")] == 1 {
+						distinctive = true
+					}
+				}
+				if matched {
+					score.matched++
+				}
+				if distinctive {
+					score.distinctive++
+				}
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(score.code), strings.TrimSpace(fallback)) {
+			continue
+		}
+		if score.distinctive > best.distinctive || (score.distinctive == best.distinctive && score.distinctive > 0 && score.matched > best.matched) {
+			best = score
+		}
+	}
+	return best.code
+}
+
+func modContentEntryTypeSupportsKind(entryType modContentEntryTypeDefinition, kindCode string) bool {
+	if len(entryType.KindCodes) == 0 {
+		return true
+	}
+	for _, candidate := range entryType.KindCodes {
+		if strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(kindCode)) {
+			return true
+		}
+	}
+	return false
 }
 
 func canonicalizeGlobalCatalogResourceDefinition(
@@ -376,6 +629,18 @@ func inferImportedEntryTypeCode(kindCode, resourcePath string, source map[string
 		return "mob_effect"
 	case "minecraft.fluid":
 		return "fluid"
+	case "minecraft.dimension":
+		return "dimension"
+	case "minecraft.biome":
+		return "biome"
+	case "minecraft.key_mapping":
+		return "key_mapping"
+	case "minecraft.command":
+		return "command"
+	case "minecraft.multiblock":
+		return "multiblock"
+	case "minecraft.game_setting":
+		return "game_setting"
 	case "mod.skill":
 		return "skill"
 	case "minecraft.advancement":

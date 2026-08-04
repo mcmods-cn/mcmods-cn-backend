@@ -31,6 +31,7 @@ type notificationTemplateConfig struct {
 type reviewConfig struct {
 	BlueprintCreate         bool `json:"blueprintCreate"`
 	BlueprintEdit           bool `json:"blueprintEdit"`
+	ServerCreate            bool `json:"serverCreate"`
 	ModCreate               bool `json:"modCreate"`
 	ModEdit                 bool `json:"modEdit"`
 	AuthorCreate            bool `json:"authorCreate"`
@@ -225,6 +226,7 @@ func loadReviewConfig(ctx context.Context, db *pgxpool.Pool) reviewConfig {
 
 func defaultReviewConfig() reviewConfig {
 	return reviewConfig{
+		ServerCreate:            true,
 		ModCreate:               true,
 		ModEdit:                 true,
 		AuthorCreate:            true,
