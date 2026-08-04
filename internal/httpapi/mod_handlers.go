@@ -52,7 +52,6 @@ type modRelationshipPayload struct {
 	RelatedModSiteID     string `json:"relatedModSiteId,omitempty"`
 	RelatedModName       string `json:"relatedModName"`
 	RelatedModIdentifier string `json:"relatedModIdentifier,omitempty"`
-	Notes                string `json:"notes"`
 }
 
 type modRelationshipGroupPayload struct {
@@ -170,11 +169,11 @@ var allowedModTags = stringSet(
 	"building", "creatures", "worldGeneration", "biomes", "structures", "weapons", "tools", "storage", "logistics", "energy", "redstone", "automation",
 	"optimization", "assistance", "modpackSupport", "adventure", "economy", "equipment", "gameMechanics", "management", "minigames", "social", "transportation",
 )
-var allowedModRelationshipTypes = stringSet("dependency", "extension", "integration")
+var allowedModRelationshipTypes = stringSet("dependency", "integration", "conflict")
 var errModSiteIDTaken = errors.New("mod site ID already exists")
 var allowedModLinkTypes = stringSet(
-	"official", "curseforge", "modrinth", "klpbbs", "minebbs", "redstoneRelay", "mcbbsMemorial", "mcbbsArchive", "sourceforge", "minecraftForum", "planetMinecraft", "mcpedl", "spigotmc", "wiki",
-	"github", "gitlab", "gitee", "gitea", "gitpod", "gitcode", "bitbucket", "maven", "crowdin", "mastodon",
+	"official", "curseforge", "modrinth", "mcmod", "klpbbs", "minebbs", "redstoneRelay", "mcbbsMemorial", "mcbbsArchive", "sourceforge", "minecraftForum", "planetMinecraft", "mcpedl", "spigotmc", "wiki",
+	"github", "gitlab", "gitee", "gitea", "gitpod", "gitcode", "bitbucket", "maven", "crowdin", "mastodon", "issue",
 	"baiduPan", "aliyunDrive", "quarkDrive", "weiyun", "lanzou", "chinaMobileCloud", "tianyiCloud", "cowTransfer", "googleDrive", "oneDrive", "dropbox", "mediaFire",
 	"bilibili", "weibo", "tieba", "zhihu", "bcy", "ftb", "patreon", "buyMeACoffee", "kofi", "aifadian", "kook", "discord", "twitter", "youtube", "reddit", "other",
 )
@@ -895,7 +894,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	rows.Close()
 	for _, group := range groups {
 		rows, err = s.db.Query(ctx, `select relationship.relation_type,coalesce(related.project_code,''),
-			coalesce(related.slug,''),relationship.related_mod_name,relationship.related_mod_identifier,relationship.notes
+			coalesce(related.slug,''),relationship.related_mod_name,relationship.related_mod_identifier
 			from mod_relationships relationship
 			left join mods related on related.id=relationship.related_mod_id
 			where relationship.group_id=$1 order by relationship.display_order,relationship.id`, group.id)
@@ -904,7 +903,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 		}
 		for rows.Next() {
 			var item modRelationshipPayload
-			if err = rows.Scan(&item.Type, &item.RelatedModPublicID, &item.RelatedModSiteID, &item.RelatedModName, &item.RelatedModIdentifier, &item.Notes); err != nil {
+			if err = rows.Scan(&item.Type, &item.RelatedModPublicID, &item.RelatedModSiteID, &item.RelatedModName, &item.RelatedModIdentifier); err != nil {
 				rows.Close()
 				return err
 			}
@@ -923,7 +922,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 func (s *Server) loadIncomingModRelationships(ctx context.Context, mod *modResponse) error {
 	rows, err := s.db.Query(ctx, `select relationship_group.id,relationship_group.label,relationship_group.loader,
 		relationship_group.minecraft_versions,relationship_group.mod_version,relationship.relation_type,
-		source_mod.project_code,source_mod.slug,source_mod.primary_name,relationship.notes
+		source_mod.project_code,source_mod.slug,source_mod.primary_name
 		from mod_relationships relationship
 		join mod_relationship_groups relationship_group on relationship_group.id=relationship.group_id
 		join mods source_mod on source_mod.id=relationship.mod_id
@@ -936,9 +935,9 @@ func (s *Server) loadIncomingModRelationships(ctx context.Context, mod *modRespo
 	groupIndexes := map[int64]int{}
 	for rows.Next() {
 		var groupID int64
-		var label, loader, modVersion, relationshipType, sourceModPublicID, sourceModSiteID, sourceModName, notes string
+		var label, loader, modVersion, relationshipType, sourceModPublicID, sourceModSiteID, sourceModName string
 		var minecraftVersions []string
-		if err = rows.Scan(&groupID, &label, &loader, &minecraftVersions, &modVersion, &relationshipType, &sourceModPublicID, &sourceModSiteID, &sourceModName, &notes); err != nil {
+		if err = rows.Scan(&groupID, &label, &loader, &minecraftVersions, &modVersion, &relationshipType, &sourceModPublicID, &sourceModSiteID, &sourceModName); err != nil {
 			return err
 		}
 		index, exists := groupIndexes[groupID]
@@ -951,7 +950,7 @@ func (s *Server) loadIncomingModRelationships(ctx context.Context, mod *modRespo
 			})
 		}
 		mod.RelationshipGroups[index].Relationships = append(mod.RelationshipGroups[index].Relationships, modRelationshipPayload{
-			Type: relationshipType, RelatedModPublicID: sourceModPublicID, RelatedModSiteID: sourceModSiteID, RelatedModName: sourceModName, Notes: notes,
+			Type: relationshipType, RelatedModPublicID: sourceModPublicID, RelatedModSiteID: sourceModSiteID, RelatedModName: sourceModName,
 		})
 	}
 	return rows.Err()
@@ -1162,6 +1161,13 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 	}
 	supportedLoaderSet := stringSet(supportedLoaders...)
 	for _, group := range req.RelationshipGroups {
+		group.Direction = strings.ToLower(strings.TrimSpace(group.Direction))
+		if group.Direction == "" {
+			group.Direction = "outgoing"
+		}
+		if group.Direction != "outgoing" && group.Direction != "incoming" {
+			return errors.New("invalid mod relationship direction")
+		}
 		group.Label = strings.TrimSpace(group.Label)
 		group.Loader = strings.TrimSpace(group.Loader)
 		group.MinecraftVersions = uniqueTrimmed(group.MinecraftVersions, 100)
@@ -1183,7 +1189,6 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 			item.RelatedModPublicID = strings.ToLower(strings.TrimSpace(item.RelatedModPublicID))
 			item.RelatedModName = strings.TrimSpace(item.RelatedModName)
 			item.RelatedModIdentifier = strings.TrimSpace(item.RelatedModIdentifier)
-			item.Notes = strings.TrimSpace(item.Notes)
 			if item.Type == "" && item.RelatedModName == "" && item.RelatedModPublicID == "" && item.RelatedModIdentifier == "" {
 				continue
 			}
@@ -1194,7 +1199,10 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 			if item.RelatedModIdentifier != "" && !validModIdentifier(item.RelatedModIdentifier) {
 				return errors.New("uncollected related Mod ID is invalid")
 			}
-			if len(item.RelatedModName) > 160 || len(item.Notes) > 500 {
+			if group.Direction == "incoming" && item.RelatedModPublicID == "" {
+				return errors.New("an incoming relationship must reference a collected mod")
+			}
+			if len(item.RelatedModName) > 160 {
 				return errors.New("模组关系字段过长")
 			}
 			cleanRelationships = append(cleanRelationships, item)
@@ -1406,7 +1414,44 @@ func replaceModGalleryImagesTx(ctx context.Context, tx pgx.Tx, modID, revisionID
 }
 
 func insertModRelationshipGroups(ctx context.Context, tx pgx.Tx, modID int64, groups []modRelationshipGroupPayload) error {
+	var currentModName string
+	if err := tx.QueryRow(ctx, `select primary_name from mods where id=$1`, modID).Scan(&currentModName); err != nil {
+		return err
+	}
+	// Incoming groups are the editable inverse view of relationships owned by
+	// other collected mods. Replace exactly the approved relationships exposed
+	// by that view; pending projects remain untouched until they are published.
+	if _, err := tx.Exec(ctx, `delete from mod_relationships relationship
+		using mods source_mod
+		where relationship.mod_id=source_mod.id and relationship.related_mod_id=$1
+		  and source_mod.review_status='approved'`, modID); err != nil {
+		return err
+	}
+
 	for groupIndex, group := range groups {
+		if group.Direction == "incoming" {
+			for relationshipIndex, relationship := range group.Relationships {
+				var sourceModID int64
+				if err := tx.QueryRow(ctx, `select id from mods
+					where project_code=$1 and id<>$2 and review_status='approved'`,
+					relationship.RelatedModPublicID, modID).Scan(&sourceModID); err != nil {
+					if errors.Is(err, pgx.ErrNoRows) {
+						return errors.New("selected incoming mod does not exist")
+					}
+					return err
+				}
+				groupID, err := ensureModRelationshipGroup(ctx, tx, sourceModID, group, groupIndex)
+				if err != nil {
+					return err
+				}
+				if _, err = insertModRelationship(ctx, tx, sourceModID, groupID, relationship.Type,
+					&modID, currentModName, "", relationshipIndex); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+
 		var groupID int64
 		if err := tx.QueryRow(ctx, `insert into mod_relationship_groups(
 			mod_id,label,loader,minecraft_versions,mod_version,display_order
@@ -1439,19 +1484,9 @@ func insertModRelationshipGroups(ctx context.Context, tx pgx.Tx, modID int64, gr
 			if relatedModID == nil && relationship.RelatedModIdentifier == "" {
 				return errors.New("a related mod or an uncollected Mod ID is required")
 			}
-			if relationship.Type == "integration" && relatedModID != nil {
-				if _, err := tx.Exec(ctx, `delete from mod_relationships
-					where relation_type='integration' and mod_id=$1 and related_mod_id=$2`,
-					*relatedModID, modID); err != nil {
-					return err
-				}
-			}
-			var relationshipID int64
-			if err := tx.QueryRow(ctx, `insert into mod_relationships(
-				mod_id,group_id,relation_type,related_mod_id,related_mod_name,related_mod_identifier,notes,display_order
-			) values($1,$2,$3,$4,$5,$6,$7,$8) returning id`,
-				modID, groupID, relationship.Type, relatedModID, relationship.RelatedModName,
-				relationship.RelatedModIdentifier, relationship.Notes, relationshipIndex).Scan(&relationshipID); err != nil {
+			relationshipID, err := insertModRelationship(ctx, tx, modID, groupID, relationship.Type,
+				relatedModID, relationship.RelatedModName, relationship.RelatedModIdentifier, relationshipIndex)
+			if err != nil {
 				return err
 			}
 			if relatedModID == nil {
@@ -1472,6 +1507,52 @@ func insertModRelationshipGroups(ctx context.Context, tx pgx.Tx, modID int64, gr
 		return err
 	}
 	return nil
+}
+
+func ensureModRelationshipGroup(ctx context.Context, tx pgx.Tx, sourceModID int64, group modRelationshipGroupPayload, displayOrder int) (int64, error) {
+	var groupID int64
+	err := tx.QueryRow(ctx, `select id from mod_relationship_groups
+		where mod_id=$1 and label=$2 and loader=$3 and minecraft_versions=$4 and mod_version=$5
+		order by display_order,id limit 1`,
+		sourceModID, group.Label, group.Loader, group.MinecraftVersions, group.ModVersion).Scan(&groupID)
+	if err == nil {
+		return groupID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, err
+	}
+	err = tx.QueryRow(ctx, `insert into mod_relationship_groups(
+		mod_id,label,loader,minecraft_versions,mod_version,display_order
+	) values($1,$2,$3,$4,$5,$6) returning id`,
+		sourceModID, group.Label, group.Loader, group.MinecraftVersions, group.ModVersion, displayOrder).Scan(&groupID)
+	return groupID, err
+}
+
+func insertModRelationship(
+	ctx context.Context,
+	tx pgx.Tx,
+	sourceModID int64,
+	groupID int64,
+	relationshipType string,
+	targetModID *int64,
+	targetModName string,
+	targetModIdentifier string,
+	displayOrder int,
+) (int64, error) {
+	if targetModID != nil && (relationshipType == "integration" || relationshipType == "conflict") {
+		if _, err := tx.Exec(ctx, `delete from mod_relationships
+			where relation_type=$1 and mod_id=$2 and related_mod_id=$3`,
+			relationshipType, *targetModID, sourceModID); err != nil {
+			return 0, err
+		}
+	}
+	var relationshipID int64
+	err := tx.QueryRow(ctx, `insert into mod_relationships(
+		mod_id,group_id,relation_type,related_mod_id,related_mod_name,related_mod_identifier,display_order
+	) values($1,$2,$3,$4,$5,$6,$7) returning id`,
+		sourceModID, groupID, relationshipType, targetModID, targetModName,
+		targetModIdentifier, displayOrder).Scan(&relationshipID)
+	return relationshipID, err
 }
 
 func resolvePendingModReferencesTx(ctx context.Context, tx pgx.Tx, modID int64) error {

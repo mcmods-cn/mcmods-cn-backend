@@ -117,6 +117,43 @@ func TestNormalizeModRequestAcceptsUncollectedRelationshipModID(t *testing.T) {
 	}
 }
 
+func TestNormalizeModRequestUsesDirectionalRelationshipTypes(t *testing.T) {
+	base := createModRequest{
+		SiteID: "example", PrimaryName: "Example", Environment: "bothRequired", PrimaryCategory: "technology",
+		OfficialStatus: "active", SourceStatus: "open", License: "MIT", SubmissionMethod: "manual",
+	}
+
+	valid := base
+	valid.Links = []modLinkPayload{
+		{Type: "mcmod", URL: "https://www.mcmod.cn/class/1.html"},
+		{Type: "issue", URL: "https://example.com/issues"},
+	}
+	valid.RelationshipGroups = []modRelationshipGroupPayload{
+		{Relationships: []modRelationshipPayload{{Type: "conflict", RelatedModIdentifier: "other_mod"}}},
+		{Direction: " INCOMING ", Relationships: []modRelationshipPayload{{Type: "dependency", RelatedModPublicID: "ab2cd3efg", RelatedModName: "Other"}}},
+	}
+	if err := normalizeAndValidateModRequest(&valid); err != nil {
+		t.Fatalf("directional relationship request rejected: %v", err)
+	}
+	if valid.RelationshipGroups[0].Direction != "outgoing" || valid.RelationshipGroups[1].Direction != "incoming" {
+		t.Fatalf("relationship directions were not normalized: %#v", valid.RelationshipGroups)
+	}
+
+	legacy := base
+	legacy.RelationshipGroups = []modRelationshipGroupPayload{{Relationships: []modRelationshipPayload{{Type: "extension", RelatedModIdentifier: "other_mod"}}}}
+	if err := normalizeAndValidateModRequest(&legacy); err == nil {
+		t.Fatal("removed extension relationship type was accepted")
+	}
+
+	unresolvedIncoming := base
+	unresolvedIncoming.RelationshipGroups = []modRelationshipGroupPayload{{
+		Direction: "incoming", Relationships: []modRelationshipPayload{{Type: "dependency", RelatedModIdentifier: "other_mod"}},
+	}}
+	if err := normalizeAndValidateModRequest(&unresolvedIncoming); err == nil {
+		t.Fatal("uncollected incoming relationship was accepted")
+	}
+}
+
 func TestFirstDefinitionStringListSupportsNestedResourceFields(t *testing.T) {
 	definition := map[string]any{
 		"enchanting": map[string]any{

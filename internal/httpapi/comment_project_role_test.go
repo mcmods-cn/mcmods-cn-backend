@@ -1,45 +1,58 @@
 package httpapi
 
-import "testing"
+import (
+	"testing"
 
-func TestResolveCommentProjectRole(t *testing.T) {
+	"mcmods-cn-backend/internal/security"
+)
+
+func TestCommentProjectRoleFromPermissions(t *testing.T) {
 	tests := []struct {
-		name    string
-		signals commentProjectRoleSignals
-		want    string
+		name        string
+		permissions []security.PermissionRule
+		want        string
 	}{
 		{
-			name:    "project creator is owner",
-			signals: commentProjectRoleSignals{ProjectCreator: true},
-			want:    "owner",
+			name:        "owner badge uses its dedicated project permission",
+			permissions: []security.PermissionRule{{Code: "project.comment.role.owner.demo12345", Allow: true, Priority: 100}},
+			want:        "owner",
 		},
 		{
-			name:    "configured developer role is owner",
-			signals: commentProjectRoleSignals{ConfiguredDeveloperRole: true},
-			want:    "owner",
-		},
-		{
-			name:    "canonical scoped edit permission is editor",
-			signals: commentProjectRoleSignals{ScopedEditorPermission: true},
-			want:    "editor",
+			name:        "editor badge uses its dedicated project permission",
+			permissions: []security.PermissionRule{{Code: "project.comment.role.editor.demo12345", Allow: true, Priority: 100}},
+			want:        "editor",
 		},
 		{
 			name: "owner takes precedence over editor",
-			signals: commentProjectRoleSignals{
-				DeveloperMembership: true,
-				EditorMembership:    true,
+			permissions: []security.PermissionRule{
+				{Code: "project.comment.role.owner.demo12345", Allow: true, Priority: 100},
+				{Code: "project.comment.role.editor.demo12345", Allow: true, Priority: 100},
 			},
 			want: "owner",
 		},
 		{
-			name: "unrelated user has no project badge",
+			name: "explicit higher priority deny hides badge",
+			permissions: []security.PermissionRule{
+				{Code: "project.comment.role.owner.demo12345", Allow: true, Priority: 100},
+				{Code: "project.comment.role.owner.demo12345", Allow: false, Priority: 200},
+			},
 			want: "",
+		},
+		{
+			name:        "project edit permission does not imply a badge",
+			permissions: []security.PermissionRule{{Code: "project.edit.demo12345", Allow: true, Priority: 100}},
+			want:        "",
+		},
+		{
+			name:        "admin wildcard does not claim project ownership",
+			permissions: []security.PermissionRule{{Code: "admin.*", Allow: true, Priority: 100}},
+			want:        "",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := resolveCommentProjectRole(test.signals); got != test.want {
-				t.Fatalf("resolveCommentProjectRole() = %q, want %q", got, test.want)
+			if got := commentProjectRoleFromPermissions(test.permissions, "demo12345"); got != test.want {
+				t.Fatalf("commentProjectRoleFromPermissions() = %q, want %q", got, test.want)
 			}
 		})
 	}

@@ -24,76 +24,109 @@ type permissionCandidate struct {
 	Depth int
 }
 
+type resolvedUserRootPermissions struct {
+	Roles       []string
+	Permissions []security.PermissionRule
+}
+
 // resolveUserRootPermissions is the single source of truth for user
 // authorization. It resolves active direct roles, inherited/template roles,
 // rule priority and direct user allow/deny overrides.
 func (s *Server) resolveUserRootPermissions(ctx context.Context, userID int64) ([]string, []security.PermissionRule, error) {
-	rolesByCode, templates, err := s.loadPermissionRoles(ctx)
+	resolved, err := s.resolveUsersRootPermissions(ctx, []int64{userID})
 	if err != nil {
 		return nil, nil, err
+	}
+	user := resolved[userID]
+	return user.Roles, user.Permissions, nil
+}
+
+// resolveUsersRootPermissions resolves a set of users with the same priority,
+// inheritance and deny semantics as the single-user authorization path. It is
+// used when a response needs permission-derived metadata for several authors.
+func (s *Server) resolveUsersRootPermissions(ctx context.Context, userIDs []int64) (map[int64]resolvedUserRootPermissions, error) {
+	result := make(map[int64]resolvedUserRootPermissions, len(userIDs))
+	if len(userIDs) == 0 {
+		return result, nil
+	}
+	rolesByCode, templates, err := s.loadPermissionRoles(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	roleRows, err := s.db.Query(
 		ctx,
-		`select r.code
+		`select b.user_id, r.code
 		 from user_role_bindings b
 		 join roles r on r.id = b.role_id
-		 where b.user_id = $1 and r.status = 'active'
-		 order by r.code`,
-		userID,
+		 where b.user_id = any($1) and r.status = 'active'
+		 order by b.user_id, r.code`,
+		userIDs,
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	assignedRoles := make([]string, 0)
+	assignedRoles := make(map[int64][]string, len(userIDs))
 	for roleRows.Next() {
+		var userID int64
 		var code string
-		if err := roleRows.Scan(&code); err != nil {
+		if err := roleRows.Scan(&userID, &code); err != nil {
 			roleRows.Close()
-			return nil, nil, err
+			return nil, err
 		}
-		assignedRoles = append(assignedRoles, code)
+		assignedRoles[userID] = append(assignedRoles[userID], code)
 	}
 	if err := roleRows.Err(); err != nil {
 		roleRows.Close()
-		return nil, nil, err
+		return nil, err
 	}
 	roleRows.Close()
 
-	candidates := make(map[string]permissionCandidate)
-	applyPermissionRoles(candidates, assignedRoles, rolesByCode, templates)
+	candidatesByUser := make(map[int64]map[string]permissionCandidate, len(userIDs))
+	for _, userID := range userIDs {
+		candidates := make(map[string]permissionCandidate)
+		applyPermissionRoles(candidates, assignedRoles[userID], rolesByCode, templates)
+		candidatesByUser[userID] = candidates
+	}
 
 	directRows, err := s.db.Query(
 		ctx,
-		`select p.code, up.allow
+		`select up.user_id, p.code, up.allow
 		 from user_permissions up
 		 join permissions p on p.id = up.permission_id
-		 where up.user_id = $1 and (up.expires_at is null or up.expires_at > now())
-		 order by p.code`,
-		userID,
+		 where up.user_id = any($1) and (up.expires_at is null or up.expires_at > now())
+		 order by up.user_id, p.code`,
+		userIDs,
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	for directRows.Next() {
+		var userID int64
 		var code string
 		var allow bool
-		if err := directRows.Scan(&code, &allow); err != nil {
+		if err := directRows.Scan(&userID, &code, &allow); err != nil {
 			directRows.Close()
-			return nil, nil, err
+			return nil, err
 		}
-		applyPermissionCandidate(candidates, permissionCandidate{
+		applyPermissionCandidate(candidatesByUser[userID], permissionCandidate{
 			PermissionRule: security.PermissionRule{Code: code, Allow: allow, Priority: directUserPermissionPriority, Source: "user"},
 			Depth:          -1,
 		})
 	}
 	if err := directRows.Err(); err != nil {
 		directRows.Close()
-		return nil, nil, err
+		return nil, err
 	}
 	directRows.Close()
 
-	return assignedRoles, permissionRulesFromCandidates(candidates), nil
+	for _, userID := range userIDs {
+		result[userID] = resolvedUserRootPermissions{
+			Roles:       assignedRoles[userID],
+			Permissions: permissionRulesFromCandidates(candidatesByUser[userID]),
+		}
+	}
+	return result, nil
 }
 
 func applyPermissionRoles(candidates map[string]permissionCandidate, roleCodes []string, rolesByCode map[string]permissionRole, templates []permissionRole) {

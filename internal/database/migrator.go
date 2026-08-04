@@ -7,9 +7,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 45
+const schemaGeneration = 47
 
-// Migrate installs one coherent development schema. Generation 45 establishes
+// Migrate installs one coherent development schema. Generation 47 establishes
 // numeric internal keys, globally unique public IDs, revocable authentication
 // sessions, version-scoped mod-content layout identities and similar-resource
 // groups, and generalized
@@ -19,7 +19,8 @@ const schemaGeneration = 45
 // resource-specific encyclopedia data,
 // including generic collected/uncollected resource references and normalized
 // dimension/biome documents, version-scoped resource attribute schemas,
-// transactional OSS deletion outbox jobs, and consumable comment reports.
+// transactional OSS deletion outbox jobs, consumable comment reports, and
+// directional mod relationships with editable inverse projections.
 // Earlier development data is
 // intentionally not migrated and must be reset before installation.
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {

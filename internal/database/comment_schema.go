@@ -20,6 +20,8 @@ func commentSchemaStatements() []string {
 			child_count integer not null default 0 check(child_count >= 0),
 			descendant_count integer not null default 0 check(descendant_count >= 0),
 			idempotency_key text not null default '',
+			pinned_at timestamptz,
+			pinned_by bigint references users(id) on delete set null,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
 			deleted_at timestamptz,
@@ -35,7 +37,7 @@ func commentSchemaStatements() []string {
 		`create index idx_comments_author_created
 			on comments(author_id,created_at desc)`,
 		`create index idx_comments_target_roots
-			on comments(target_type,target_id,target_version_id,created_at desc,id desc) where parent_id is null`,
+			on comments(target_type,target_id,target_version_id,pinned_at desc,created_at desc,id desc) where parent_id is null`,
 		`create index idx_comments_root_created on comments(root_id,created_at,id)`,
 		`create index idx_comments_parent_created on comments(parent_id,created_at,id)`,
 		`create table comment_closure (

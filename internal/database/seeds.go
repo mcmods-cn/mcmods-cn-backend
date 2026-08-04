@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 
@@ -21,6 +22,14 @@ type seedUser struct {
 	Username    string
 	Email       string
 	Status      string
+	Permissions []string
+}
+
+type seedRole struct {
+	Code        string
+	Name        string
+	Description string
+	Weight      int
 	Permissions []string
 }
 
@@ -111,6 +120,35 @@ var seedPermissions = []seedPermission{
 	{Code: "project.delete.<projectID>", Module: "project", Name: "Project delete template", Description: "Variable permission; replace <projectID> with a project unique ID."},
 	{Code: "project.no-review.<projectID>", Module: "project", Name: "Project review bypass template", Description: "Variable permission; replace <projectID> with a project unique ID."},
 	{Code: "project.download.upload.<projectID>", Module: "project", Name: "Project file upload template", Description: "Variable permission; replace <projectID> with a project unique ID to upload and manage on-site download files."},
+
+	{Code: "comment.create", Module: "comment", Name: "Publish comments", Description: "Allows publishing comments and replies."},
+	{Code: "comment.edit.own", Module: "comment", Name: "Edit own comments", Description: "Allows editing comments authored by the current user."},
+	{Code: "comment.delete.own", Module: "comment", Name: "Delete own comments", Description: "Allows deleting comments authored by the current user."},
+	{Code: "comment.react", Module: "comment", Name: "React to comments", Description: "Allows adding and removing reactions on comments."},
+	{Code: "comment.report", Module: "comment", Name: "Report comments", Description: "Allows submitting a comment report."},
+	{Code: "comment.report.review", Module: "comment", Name: "Review comment reports", Description: "Allows reading and resolving the global comment report queue."},
+	{Code: "comment.watch", Module: "comment", Name: "Watch comments", Description: "Allows watching comment branches for replies."},
+	{Code: "comment.moderate", Module: "comment", Name: "Moderate all comments", Description: "Allows editing and deleting comments on every target."},
+	{Code: "comment.pin", Module: "comment", Name: "Pin all comments", Description: "Allows pinning root comments on every target."},
+	{Code: "project.comment.moderate.<projectID>", Module: "comment", Name: "Moderate project comments", Description: "Variable permission; replace <projectID> with a project unique ID to moderate its comments."},
+	{Code: "project.comment.pin.<projectID>", Module: "comment", Name: "Pin project comments", Description: "Variable permission; replace <projectID> with a project unique ID to pin its root comments."},
+	{Code: "project.comment.role.owner.<projectID>", Module: "comment", Name: "Show project owner badge", Description: "Variable permission; controls the project owner badge beside this project's comments."},
+	{Code: "project.comment.role.editor.<projectID>", Module: "comment", Name: "Show project editor badge", Description: "Variable permission; controls the project editor badge beside this project's comments."},
+}
+
+var seedRoles = []seedRole{
+	{
+		Code: "registered", Name: "Registered user", Description: "Default permissions granted to a registered account.", Weight: 10,
+		Permissions: []string{"comment.create", "comment.edit.own", "comment.delete.own", "comment.react", "comment.report", "comment.watch"},
+	},
+	{
+		Code: "project_owner.[ProjectID]", Name: "Project owner", Description: "Default project-scoped owner permissions.", Weight: 100,
+		Permissions: []string{"project.edit.<projectID>", "project.comment.moderate.<projectID>", "project.comment.pin.<projectID>", "project.comment.role.owner.<projectID>"},
+	},
+	{
+		Code: "project_editor.[ProjectID]", Name: "Project editor", Description: "Default project-scoped editor permissions.", Weight: 50,
+		Permissions: []string{"project.edit.<projectID>", "project.comment.role.editor.<projectID>"},
+	},
 }
 
 var seedUsers = []seedUser{
@@ -164,7 +202,49 @@ func SeedRBAC(ctx context.Context, db *pgxpool.Pool) error {
 			return err
 		}
 	}
+	if err := seedDefaultRoles(ctx, db); err != nil {
+		return err
+	}
+	if err := seedPermissionDefaults(ctx, db); err != nil {
+		return err
+	}
 	return seedDefaultUsers(ctx, db)
+}
+
+func seedDefaultRoles(ctx context.Context, db *pgxpool.Pool) error {
+	for _, role := range seedRoles {
+		var roleID int64
+		if _, err := db.Exec(ctx, `insert into roles(code,name,description,weight,status,updated_at)
+			values($1,$2,$3,$4,'active',now())
+			on conflict(code) do nothing`, role.Code, role.Name, role.Description, role.Weight); err != nil {
+			return err
+		}
+		if err := db.QueryRow(ctx, `select id from roles where code=$1`, role.Code).Scan(&roleID); err != nil {
+			return err
+		}
+		for _, permission := range role.Permissions {
+			if _, err := db.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow,updated_at)
+				select $1,id,true,now() from permissions where code=$2
+				on conflict(role_id,permission_id) do nothing`, roleID, permission); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func seedPermissionDefaults(ctx context.Context, db *pgxpool.Pool) error {
+	value, err := json.Marshal(map[string]string{
+		"registeredRole": "registered",
+		"developerRole":  "project_owner.[ProjectID]",
+		"editorRole":     "project_editor.[ProjectID]",
+	})
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `insert into system_settings(key,value,updated_at)
+		values('permission.default_roles',$1::jsonb,now()) on conflict(key) do nothing`, string(value))
+	return err
 }
 
 func seedDefaultUsers(ctx context.Context, db *pgxpool.Pool) error {

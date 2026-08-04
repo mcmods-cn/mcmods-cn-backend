@@ -838,10 +838,9 @@ func baselineSchemaStatements() []string {
 			group_id bigint,
 			related_mod_name text not null default '',
 			related_mod_identifier text not null default '',
-			notes text not null default '',
 			display_order integer not null default 0,
 			created_at timestamptz not null default now(),
-			check (relation_type in ('dependency', 'extension', 'integration')),
+			check (relation_type in ('dependency', 'integration', 'conflict')),
 			check (related_mod_id is not null or related_mod_name <> '' or related_mod_identifier <> '')
 		)`,
 		`create index if not exists idx_mod_relationships_mod_order on mod_relationships (mod_id, display_order, id)`,

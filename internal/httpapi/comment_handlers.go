@@ -69,6 +69,15 @@ type commentResponse struct {
 	DescendantCount  int                   `json:"descendantCount"`
 	HasMoreReplies   bool                  `json:"hasMoreReplies"`
 	CurrentUserWatch *commentWatchState    `json:"currentUserWatch,omitempty"`
+	Pinned           bool                  `json:"pinned"`
+	PinnedAt         *time.Time            `json:"pinnedAt,omitempty"`
+	CanEdit          bool                  `json:"canEdit"`
+	CanDelete        bool                  `json:"canDelete"`
+	CanPin           bool                  `json:"canPin"`
+	CanReply         bool                  `json:"canReply"`
+	CanReact         bool                  `json:"canReact"`
+	CanReport        bool                  `json:"canReport"`
+	CanWatch         bool                  `json:"canWatch"`
 	CreatedAt        time.Time             `json:"createdAt"`
 	UpdatedAt        time.Time             `json:"updatedAt"`
 }
@@ -127,22 +136,6 @@ type commentQueryer interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
-type commentProjectIdentity struct {
-	ID        int64
-	UniqueID  string
-	CreatedBy int64
-}
-
-type commentProjectRoleSignals struct {
-	ProjectCreator          bool
-	DeveloperMembership     bool
-	EditorMembership        bool
-	ConfiguredDeveloperRole bool
-	ConfiguredEditorRole    bool
-	ScopedOwnerPermission   bool
-	ScopedEditorPermission  bool
-}
-
 func (s *Server) commentsForTarget(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	target, err := s.resolveCommentTarget(r.Context(), r.PathValue("targetType"), r.PathValue("targetKey"), claims)
@@ -182,7 +175,7 @@ func (s *Server) listTargetComments(w http.ResponseWriter, r *http.Request, targ
 	rows, err := s.db.Query(r.Context(), `select c.id from comments c
 		where c.target_type=$1 and c.target_id=$2 and c.target_version_id is not distinct from $3 and c.parent_id is null
 		  and c.status in ('published','deleted')
-		order by `+order+` limit $4 offset $5`, target.Type, target.InternalID, target.VersionID, limit+1, offset)
+		order by (c.pinned_at is not null) desc,c.pinned_at desc,`+order+` limit $4 offset $5`, target.Type, target.InternalID, target.VersionID, limit+1, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取评论失败")
 		return
@@ -199,7 +192,7 @@ func (s *Server) listTargetComments(w http.ResponseWriter, r *http.Request, targ
 	if hasMore {
 		rootIDs = rootIDs[:limit]
 	}
-	items, err := s.queryCommentItems(r.Context(), rootIDs, true, 3, claims.Subject)
+	items, err := s.queryCommentItems(r.Context(), rootIDs, true, 3, claims)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取评论失败")
 		return
@@ -214,11 +207,16 @@ func (s *Server) listTargetComments(w http.ResponseWriter, r *http.Request, targ
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items, "total": total, "target": target, "nextCursor": nextCursor,
+		"capabilities": map[string]bool{"canCreate": claimsAllow(claims, "comment.create")},
 	})
 }
 
 func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target commentTargetInfo) {
 	claims := currentClaims(r)
+	if !claimsAllow(claims, "comment.create") {
+		writeError(w, http.StatusForbidden, "无权发表评论")
+		return
+	}
 	var request createCommentRequest
 	if decodeJSON(r, &request) != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
@@ -243,6 +241,10 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 	}
 	if request.ParentID != "" && isPureCY(request.Body) {
 		// “CY” is a private watch command rather than a public comment action.
+		if !claimsAllow(claims, "comment.watch") {
+			writeError(w, http.StatusForbidden, "无权插眼评论")
+			return
+		}
 		skipRequestActivity(r)
 		commentID, err := s.commentIDForTarget(r.Context(), request.ParentID, target)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -284,7 +286,7 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 			writeError(w, http.StatusInternalServerError, "发布评论失败")
 			return
 		}
-		items, _ := s.queryCommentItems(r.Context(), []int64{existingID}, false, 0, claims.Subject)
+		items, _ := s.queryCommentItems(r.Context(), []int64{existingID}, false, 0, claims)
 		if len(items) > 0 {
 			writeJSON(w, http.StatusOK, items[0])
 			return
@@ -356,7 +358,7 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		s.enqueueOrCreateCommentWatchNotification(r.Context(), pending.RecipientID, claims.Subject,
 			"插眼的评论有了新回复", truncateRunes(request.Body, 160), watchData)
 	}
-	items, _ := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims.Subject)
+	items, _ := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims)
 	if len(items) > 0 {
 		writeJSON(w, http.StatusCreated, items[0])
 		return
@@ -465,7 +467,7 @@ func (s *Server) commentThread(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取评论失败")
 		return
 	}
-	items, err := s.queryCommentItems(r.Context(), []int64{rootID}, true, 256, claims.Subject)
+	items, err := s.queryCommentItems(r.Context(), []int64{rootID}, true, 256, claims)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取评论失败")
 		return
@@ -509,7 +511,7 @@ func (s *Server) commentReplies(w http.ResponseWriter, r *http.Request) {
 	if hasMore {
 		ids = ids[:limit]
 	}
-	items, err := s.queryCommentItems(r.Context(), ids, false, 0, claims.Subject)
+	items, err := s.queryCommentItems(r.Context(), ids, false, 0, claims)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取回复失败")
 		return
@@ -525,7 +527,15 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("commentId")))
 	var commentID, authorID int64
-	if err := s.db.QueryRow(r.Context(), `select id,author_id from comments where public_id=$1`, publicID).Scan(&commentID, &authorID); err != nil {
+	var projectID string
+	if err := s.db.QueryRow(r.Context(), `select comment.id,comment.author_id,
+		coalesce(direct_mod.project_code,resource_mod.project_code,'')
+		from comments comment
+		left join mods direct_mod on comment.target_type='mod' and direct_mod.id=comment.target_id
+		left join mod_content_versions resource_version
+			on comment.target_type='mod_resource' and resource_version.id=comment.target_version_id
+		left join mods resource_mod on resource_mod.id=resource_version.mod_id
+		where comment.public_id=$1`, publicID).Scan(&commentID, &authorID, &projectID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "评论不存在")
 		} else {
@@ -533,8 +543,16 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if authorID != claims.Subject && !claimsAllow(claims, "comment.moderate") {
+	moderator := claimsAllow(claims, "comment.moderate") ||
+		(projectID != "" && claimsAllow(claims, "project.comment.moderate."+projectID))
+	if r.Method == http.MethodPatch && !moderator &&
+		(authorID != claims.Subject || !claimsAllow(claims, "comment.edit.own")) {
 		writeError(w, http.StatusForbidden, "无权修改这条评论")
+		return
+	}
+	if r.Method == http.MethodDelete && !moderator &&
+		(authorID != claims.Subject || !claimsAllow(claims, "comment.delete.own")) {
+		writeError(w, http.StatusForbidden, "无权删除这条评论")
 		return
 	}
 	switch r.Method {
@@ -555,13 +573,14 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		annotateActivity(r, activity.ActionEdit, activity.ObjectComment, publicID, len(request.Body), nil)
-		items, _ := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims.Subject)
+		items, _ := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims)
 		if len(items) > 0 {
 			writeJSON(w, http.StatusOK, items[0])
 			return
 		}
 	case http.MethodDelete:
-		if _, err := s.db.Exec(r.Context(), `update comments set body='',status='deleted',deleted_at=now(),updated_at=now()
+		if _, err := s.db.Exec(r.Context(), `update comments set body='',status='deleted',deleted_at=now(),
+			pinned_at=null,pinned_by=null,updated_at=now()
 			where id=$1 and status<>'deleted'`, commentID); err != nil {
 			writeError(w, http.StatusInternalServerError, "删除评论失败")
 			return
@@ -572,8 +591,73 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) commentPin(w http.ResponseWriter, r *http.Request) {
+	claims := currentClaims(r)
+	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("commentId")))
+	var commentID int64
+	var parentID *int64
+	var status, projectID string
+	if err := s.db.QueryRow(r.Context(), `select comment.id,comment.parent_id,comment.status,
+		coalesce(direct_mod.project_code,resource_mod.project_code,'')
+		from comments comment
+		left join mods direct_mod on comment.target_type='mod' and direct_mod.id=comment.target_id
+		left join mod_content_versions resource_version
+			on comment.target_type='mod_resource' and resource_version.id=comment.target_version_id
+		left join mods resource_mod on resource_mod.id=resource_version.mod_id
+		where comment.public_id=$1`, publicID).Scan(&commentID, &parentID, &status, &projectID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "评论不存在")
+		} else {
+			writeError(w, http.StatusInternalServerError, "读取评论失败")
+		}
+		return
+	}
+	if parentID != nil {
+		writeError(w, http.StatusBadRequest, "只能置顶根评论")
+		return
+	}
+	if status != "published" {
+		writeError(w, http.StatusBadRequest, "当前评论不可置顶")
+		return
+	}
+	allowed := claimsAllow(claims, "comment.pin") ||
+		(projectID != "" && claimsAllow(claims, "project.comment.pin."+projectID))
+	if !allowed {
+		writeError(w, http.StatusForbidden, "无权置顶该评论")
+		return
+	}
+
+	pinned := r.Method == http.MethodPut
+	if pinned {
+		_, err := s.db.Exec(r.Context(), `update comments set pinned_at=now(),pinned_by=$2,updated_at=now()
+			where id=$1 and status='published'`, commentID, claims.Subject)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "置顶评论失败")
+			return
+		}
+	} else {
+		_, err := s.db.Exec(r.Context(), `update comments set pinned_at=null,pinned_by=null,updated_at=now()
+			where id=$1`, commentID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "取消置顶失败")
+			return
+		}
+	}
+	annotateActivity(r, activity.ActionEdit, activity.ObjectComment, publicID, 0, map[string]any{"pinned": pinned})
+	items, err := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims)
+	if err != nil || len(items) == 0 {
+		writeError(w, http.StatusInternalServerError, "读取评论失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, items[0])
+}
+
 func (s *Server) commentReaction(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
+	if !claimsAllow(claims, "comment.react") {
+		writeError(w, http.StatusForbidden, "无权对评论添加表态")
+		return
+	}
 	commentID, err := s.numericCommentID(r.Context(), r.PathValue("commentId"))
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "评论不存在")
@@ -611,6 +695,10 @@ func (s *Server) reportComment(w http.ResponseWriter, r *http.Request) {
 	// Reports are private moderation input and must not appear in user activity.
 	skipRequestActivity(r)
 	claims := currentClaims(r)
+	if !claimsAllow(claims, "comment.report") {
+		writeError(w, http.StatusForbidden, "无权举报评论")
+		return
+	}
 	commentID, err := s.numericCommentID(r.Context(), r.PathValue("commentId"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "评论不存在")
@@ -643,6 +731,10 @@ func (s *Server) commentWatch(w http.ResponseWriter, r *http.Request) {
 	// Watch ownership and state are private to the current user.
 	skipRequestActivity(r)
 	claims := currentClaims(r)
+	if !claimsAllow(claims, "comment.watch") {
+		writeError(w, http.StatusForbidden, "无权插眼评论")
+		return
+	}
 	commentID, err := s.numericCommentID(r.Context(), r.PathValue("commentId"))
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "评论不存在")
@@ -690,6 +782,10 @@ func (s *Server) commentWatch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) myCommentWatches(w http.ResponseWriter, r *http.Request) {
 	skipRequestActivity(r)
 	claims := currentClaims(r)
+	if !claimsAllow(claims, "comment.watch") {
+		writeError(w, http.StatusForbidden, "无权查看评论插眼")
+		return
+	}
 	limit := boundedLimit(r.URL.Query().Get("limit"), 30, 100)
 	offset := nonNegativeInt(r.URL.Query().Get("cursor"))
 	filter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("filter")))
@@ -750,7 +846,7 @@ func (s *Server) myCommentWatches(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]commentWatchListItem, 0, len(values))
 	for _, value := range values {
-		comments, queryErr := s.queryCommentItems(r.Context(), []int64{value.commentID}, false, 0, claims.Subject)
+		comments, queryErr := s.queryCommentItems(r.Context(), []int64{value.commentID}, false, 0, claims)
 		if queryErr != nil || len(comments) == 0 {
 			continue
 		}
@@ -774,6 +870,10 @@ func (s *Server) myCommentWatches(w http.ResponseWriter, r *http.Request) {
 func (s *Server) commentWatchItem(w http.ResponseWriter, r *http.Request) {
 	skipRequestActivity(r)
 	claims := currentClaims(r)
+	if !claimsAllow(claims, "comment.watch") {
+		writeError(w, http.StatusForbidden, "无权管理评论插眼")
+		return
+	}
 	watchID := strings.ToLower(strings.TrimSpace(r.PathValue("watchId")))
 	switch r.Method {
 	case http.MethodPost:
@@ -836,12 +936,12 @@ func (s *Server) commentWatchItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) queryCommentItems(ctx context.Context, ids []int64, includeTree bool, maxDepth int, viewerID int64) ([]commentResponse, error) {
-	items, err := queryCommentItemsWithQueryer(ctx, s.db, ids, includeTree, maxDepth, viewerID)
+func (s *Server) queryCommentItems(ctx context.Context, ids []int64, includeTree bool, maxDepth int, claims security.Claims) ([]commentResponse, error) {
+	items, err := queryCommentItemsWithQueryer(ctx, s.db, ids, includeTree, maxDepth, claims.Subject)
 	if err != nil {
 		return nil, err
 	}
-	if err = s.annotateCommentProjectRoles(ctx, items); err != nil {
+	if err = s.annotateCommentPermissions(ctx, items, claims); err != nil {
 		return nil, err
 	}
 	return items, nil
@@ -866,7 +966,7 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 		coalesce(root.public_id,''),c.depth,c.body,c.status,c.child_count,c.descendant_count,
 		author.public_id,author.username,author.avatar_url,
 		coalesce(parent_author.username,''),coalesce(parent.body,''),coalesce(parent.status,''),
-		c.created_at,c.updated_at,
+		c.created_at,c.updated_at,c.pinned_at,
 		coalesce(watch.public_id,''),coalesce(watch.status,''),watch.muted_until,
 		coalesce(watch.muted_forever,false),coalesce(watch.unread_count,0),coalesce(watch.watched_reply_count,0),
 		coalesce(reaction_summary.names,array[]::text[]),
@@ -909,13 +1009,14 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 		if err = rows.Scan(&numericID, &item.ID, &parentID, &rootID, &item.Depth, &item.Body, &status,
 			&item.ChildCount, &item.DescendantCount, &item.Author.ID, &item.Author.Username,
 			&item.Author.AvatarURL, &parentAuthor, &parentBody, &parentStatus,
-			&item.CreatedAt, &item.UpdatedAt, &watchID, &watchStatus, &mutedUntil, &mutedForever,
+			&item.CreatedAt, &item.UpdatedAt, &item.PinnedAt, &watchID, &watchStatus, &mutedUntil, &mutedForever,
 			&watchUnread, &watchedReplies, &reactionNames, &reactionCounts, &selectedReactions); err != nil {
 			return nil, err
 		}
 		item.ParentID = parentID
 		item.RootID = rootID
 		item.Deleted = status == "deleted"
+		item.Pinned = item.PinnedAt != nil
 		if item.Deleted {
 			item.Body = ""
 		}
@@ -946,7 +1047,7 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 	return items, nil
 }
 
-func (s *Server) annotateCommentProjectRoles(ctx context.Context, items []commentResponse) error {
+func (s *Server) annotateCommentPermissions(ctx context.Context, items []commentResponse, claims security.Claims) error {
 	if len(items) == 0 {
 		return nil
 	}
@@ -957,10 +1058,14 @@ func (s *Server) annotateCommentProjectRoles(ctx context.Context, items []commen
 		itemsByID[items[index].ID] = &items[index]
 	}
 
+	type permissionContext struct {
+		CommentID string
+		AuthorID  int64
+		ProjectID string
+		Root      bool
+	}
 	rows, err := s.db.Query(ctx, `select comment.public_id,comment.author_id,
-		coalesce(direct_mod.id,resource_mod.id,0),
-		coalesce(direct_mod.project_code,resource_mod.project_code,''),
-		coalesce(direct_mod.created_by,resource_mod.created_by,0)
+		coalesce(direct_mod.project_code,resource_mod.project_code,''),comment.parent_id is null
 		from comments comment
 		left join mods direct_mod on comment.target_type='mod' and direct_mod.id=comment.target_id
 		left join mod_content_versions resource_version
@@ -970,35 +1075,16 @@ func (s *Server) annotateCommentProjectRoles(ctx context.Context, items []commen
 	if err != nil {
 		return err
 	}
-	type projectUserKey struct {
-		ProjectID int64
-		UserID    int64
-	}
-	type projectGroup struct {
-		Identity commentProjectIdentity
-		UserIDs  map[int64]struct{}
-	}
-	assignments := make(map[string]projectUserKey, len(items))
-	groups := make(map[int64]*projectGroup)
+	contexts := make([]permissionContext, 0, len(items))
+	authorSet := make(map[int64]struct{}, len(items))
 	for rows.Next() {
-		var commentID string
-		var authorID int64
-		var project commentProjectIdentity
-		if err = rows.Scan(&commentID, &authorID, &project.ID, &project.UniqueID, &project.CreatedBy); err != nil {
+		var value permissionContext
+		if err = rows.Scan(&value.CommentID, &value.AuthorID, &value.ProjectID, &value.Root); err != nil {
 			rows.Close()
 			return err
 		}
-		if project.ID == 0 || project.UniqueID == "" {
-			continue
-		}
-		key := projectUserKey{ProjectID: project.ID, UserID: authorID}
-		assignments[commentID] = key
-		group := groups[project.ID]
-		if group == nil {
-			group = &projectGroup{Identity: project, UserIDs: make(map[int64]struct{})}
-			groups[project.ID] = group
-		}
-		group.UserIDs[authorID] = struct{}{}
+		contexts = append(contexts, value)
+		authorSet[value.AuthorID] = struct{}{}
 	}
 	if err = rows.Err(); err != nil {
 		rows.Close()
@@ -1006,120 +1092,60 @@ func (s *Server) annotateCommentProjectRoles(ctx context.Context, items []commen
 	}
 	rows.Close()
 
-	defaults := s.permissionDefaultsFromSettings(ctx)
-	roles := make(map[projectUserKey]string)
-	for _, group := range groups {
-		userIDs := make([]int64, 0, len(group.UserIDs))
-		for userID := range group.UserIDs {
-			userIDs = append(userIDs, userID)
-		}
-		resolved, resolveErr := s.commentProjectRoles(ctx, group.Identity, userIDs, defaults)
-		if resolveErr != nil {
-			return resolveErr
-		}
-		for userID, role := range resolved {
-			roles[projectUserKey{ProjectID: group.Identity.ID, UserID: userID}] = role
-		}
+	authorIDs := make([]int64, 0, len(authorSet))
+	for authorID := range authorSet {
+		authorIDs = append(authorIDs, authorID)
 	}
-	for commentID, key := range assignments {
-		if item := itemsByID[commentID]; item != nil {
-			item.Author.ProjectRole = roles[key]
+	authorPermissions, err := s.resolveUsersRootPermissions(ctx, authorIDs)
+	if err != nil {
+		return err
+	}
+
+	for _, value := range contexts {
+		item := itemsByID[value.CommentID]
+		if item == nil {
+			continue
 		}
+		if value.ProjectID != "" {
+			item.Author.ProjectRole = commentProjectRoleFromPermissions(
+				authorPermissions[value.AuthorID].Permissions,
+				value.ProjectID,
+			)
+		}
+		if claims.Subject == 0 {
+			continue
+		}
+		moderator := claimsAllow(claims, "comment.moderate") ||
+			(value.ProjectID != "" && claimsAllow(claims, "project.comment.moderate."+value.ProjectID))
+		pinModerator := claimsAllow(claims, "comment.pin") ||
+			(value.ProjectID != "" && claimsAllow(claims, "project.comment.pin."+value.ProjectID))
+		own := claims.Subject == value.AuthorID
+		item.CanEdit = !item.Deleted && (moderator || own && claimsAllow(claims, "comment.edit.own"))
+		item.CanDelete = !item.Deleted && (moderator || own && claimsAllow(claims, "comment.delete.own"))
+		item.CanPin = value.Root && !item.Deleted && pinModerator
+		item.CanReply = !item.Deleted && claimsAllow(claims, "comment.create")
+		item.CanReact = !item.Deleted && claimsAllow(claims, "comment.react")
+		item.CanReport = !item.Deleted && !own && claimsAllow(claims, "comment.report")
+		item.CanWatch = claimsAllow(claims, "comment.watch")
 	}
 	return nil
 }
 
-func (s *Server) commentProjectRoles(
-	ctx context.Context,
-	project commentProjectIdentity,
-	userIDs []int64,
-	defaults permissionDefaultsPayload,
-) (map[int64]string, error) {
-	result := make(map[int64]string, len(userIDs))
-	if len(userIDs) == 0 {
-		return result, nil
-	}
-	developerRole, _ := concreteProjectRole(defaults.DeveloperRole, project.UniqueID)
-	editorRole, _ := concreteProjectRole(defaults.EditorRole, project.UniqueID)
-	ownerPermissions := []string{"project.owner." + project.UniqueID}
-	editorPermissions := []string{
-		"project.edit." + project.UniqueID,
-		"project.editor." + project.UniqueID,
-	}
-	rows, err := s.db.Query(ctx, `select candidate.user_id,
-		candidate.user_id=$3,
-		exists(select 1 from mod_memberships membership
-			where membership.mod_id=$1 and membership.user_id=candidate.user_id and membership.role='developer'),
-		exists(select 1 from mod_memberships membership
-			where membership.mod_id=$1 and membership.user_id=candidate.user_id and membership.role='editor'),
-		exists(select 1 from user_role_bindings binding join roles role on role.id=binding.role_id
-			where binding.user_id=candidate.user_id and role.code=$4 and role.status='active'),
-		exists(select 1 from user_role_bindings binding join roles role on role.id=binding.role_id
-			where binding.user_id=candidate.user_id and role.code=$5 and role.status='active'),
-		exists(
-			select 1 from user_permissions user_permission
-			join permissions permission on permission.id=user_permission.permission_id
-			where user_permission.user_id=candidate.user_id and user_permission.allow=true
-			  and (user_permission.expires_at is null or user_permission.expires_at>now())
-			  and permission.code=any($6::text[])
-			union all
-			select 1 from user_role_bindings binding
-			join roles role on role.id=binding.role_id and role.status='active'
-			join role_permissions role_permission on role_permission.role_id=role.id and role_permission.allow=true
-			join permissions permission on permission.id=role_permission.permission_id
-			where binding.user_id=candidate.user_id
-			  and (role_permission.expires_at is null or role_permission.expires_at>now())
-			  and permission.code=any($6::text[])
-		),
-		exists(
-			select 1 from user_permissions user_permission
-			join permissions permission on permission.id=user_permission.permission_id
-			where user_permission.user_id=candidate.user_id and user_permission.allow=true
-			  and (user_permission.expires_at is null or user_permission.expires_at>now())
-			  and permission.code=any($7::text[])
-			union all
-			select 1 from user_role_bindings binding
-			join roles role on role.id=binding.role_id and role.status='active'
-			join role_permissions role_permission on role_permission.role_id=role.id and role_permission.allow=true
-			join permissions permission on permission.id=role_permission.permission_id
-			where binding.user_id=candidate.user_id
-			  and (role_permission.expires_at is null or role_permission.expires_at>now())
-			  and permission.code=any($7::text[])
-		)
-		from unnest($2::bigint[]) candidate(user_id)`,
-		project.ID, userIDs, project.CreatedBy, developerRole, editorRole, ownerPermissions, editorPermissions)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var userID int64
-		var signals commentProjectRoleSignals
-		if err = rows.Scan(
-			&userID,
-			&signals.ProjectCreator,
-			&signals.DeveloperMembership,
-			&signals.EditorMembership,
-			&signals.ConfiguredDeveloperRole,
-			&signals.ConfiguredEditorRole,
-			&signals.ScopedOwnerPermission,
-			&signals.ScopedEditorPermission,
-		); err != nil {
-			return nil, err
+func commentProjectRoleFromPermissions(permissions []security.PermissionRule, projectID string) string {
+	identityPermissions := make([]security.PermissionRule, 0, len(permissions))
+	for _, permission := range permissions {
+		// Administrative wildcards authorize actions, but must not assert that an
+		// administrator belongs to every project. Identity badges require an
+		// explicit project identity permission or its dedicated wildcard.
+		if permission.Code == "admin.*" || permission.Code == "*" {
+			continue
 		}
-		if role := resolveCommentProjectRole(signals); role != "" {
-			result[userID] = role
-		}
+		identityPermissions = append(identityPermissions, permission)
 	}
-	return result, rows.Err()
-}
-
-func resolveCommentProjectRole(signals commentProjectRoleSignals) string {
-	if signals.ProjectCreator || signals.DeveloperMembership ||
-		signals.ConfiguredDeveloperRole || signals.ScopedOwnerPermission {
+	if permissionRulesAllow(identityPermissions, "project.comment.role.owner."+projectID) {
 		return "owner"
 	}
-	if signals.EditorMembership || signals.ConfiguredEditorRole || signals.ScopedEditorPermission {
+	if permissionRulesAllow(identityPermissions, "project.comment.role.editor."+projectID) {
 		return "editor"
 	}
 	return ""

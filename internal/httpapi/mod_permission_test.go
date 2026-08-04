@@ -34,9 +34,9 @@ func TestCanEditModAcceptsCanonicalScopedProjectPermission(t *testing.T) {
 			want:        false,
 		},
 		{
-			name:        "legacy project editor remains compatible",
-			permissions: []string{"project.editor.a2bc3de89"},
-			want:        true,
+			name:        "unrelated project role label is not an edit permission",
+			permissions: []string{"project.comment.role.editor.a2bc3de89"},
+			want:        false,
 		},
 	}
 	for _, test := range tests {

@@ -368,17 +368,12 @@ func (s *Server) modIdentity(ctx context.Context, siteID string) (modIdentityRec
 }
 
 func canEditMod(claims security.Claims, identity modIdentityRecord) bool {
-	if identity.OwnerID != nil && claims.Subject != 0 && *identity.OwnerID == claims.Subject {
-		return true
-	}
 	return claimsAllow(claims, "project.edit") ||
-		claimsAllow(claims, "project.edit."+identity.UniqueID) ||
-		claimsAllow(claims, "project.editor."+identity.UniqueID) ||
-		claimsAllow(claims, "project.owner."+identity.UniqueID)
+		claimsAllow(claims, "project.edit."+identity.UniqueID)
 }
 
 func canSkipProjectReview(claims security.Claims, identity modIdentityRecord) bool {
-	return claimsAllow(claims, "project.no-review."+identity.UniqueID)
+	return claimsAllow(claims, "project.no-review") || claimsAllow(claims, "project.no-review."+identity.UniqueID)
 }
 
 const modRevisionSelect = `select
