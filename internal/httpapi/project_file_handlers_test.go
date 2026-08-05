@@ -5,6 +5,7 @@ import "testing"
 func TestNormalizeProjectFileType(t *testing.T) {
 	tests := map[string]string{
 		"mod":          "mod",
+		"addon":        "addon",
 		"resourcepack": "resource_pack",
 		"shader-pack":  "shader_pack",
 		"unknown":      "",
@@ -13,6 +14,41 @@ func TestNormalizeProjectFileType(t *testing.T) {
 		if actual := normalizeProjectFileType(input); actual != expected {
 			t.Fatalf("normalizeProjectFileType(%q)=%q, want %q", input, actual, expected)
 		}
+	}
+}
+
+func TestProjectFileExtensionsForLargeResources(t *testing.T) {
+	tests := []struct {
+		projectType string
+		extension   string
+		allowed     bool
+	}{
+		{"plugin", ".jar", true},
+		{"plugin", ".zip", false},
+		{"map", ".zip", true},
+		{"resource_pack", ".zip", true},
+		{"shader_pack", ".zip", true},
+		{"datapack", ".zip", true},
+		{"addon", ".jar", true},
+		{"addon", ".zip", true},
+		{"addon", ".exe", false},
+	}
+	for _, test := range tests {
+		if actual := projectFileExtensionAllowed(test.projectType, test.extension); actual != test.allowed {
+			t.Fatalf("projectFileExtensionAllowed(%q,%q)=%v, want %v", test.projectType, test.extension, actual, test.allowed)
+		}
+	}
+}
+
+func TestSimpleProjectClassifications(t *testing.T) {
+	if !validSimpleProjectOptions("shader_pack", []string{"iris"}, []string{"realistic"}, []string{"pbr", "shadows"}) {
+		t.Fatal("expected supported shader classification to be valid")
+	}
+	if validSimpleProjectOptions("shader_pack", []string{"paper"}, []string{"realistic"}, nil) {
+		t.Fatal("expected a plugin loader to be rejected for shader packs")
+	}
+	if validSimpleProjectOptions("resource_pack", nil, []string{"realistic"}, []string{"unknown_feature"}) {
+		t.Fatal("expected an unknown resource-pack feature to be rejected")
 	}
 }
 

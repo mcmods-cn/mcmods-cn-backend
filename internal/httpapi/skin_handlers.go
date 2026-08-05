@@ -555,6 +555,10 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		Metadata: map[string]any{"skinId": publicID, "name": record.DisplayName, "operation": "edit"}, Request: r,
 	})
 	if err != nil {
+		if errors.Is(err, errReviewInProgress) {
+			writeError(w, http.StatusConflict, errReviewInProgress.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to create skin revision")
 		return
 	}

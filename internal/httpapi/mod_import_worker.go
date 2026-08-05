@@ -88,12 +88,12 @@ func (worker *ModMetadataImportWorker) handle(ctx context.Context, raw []byte) e
 }
 
 func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
-	var provider, sourceURL string
+	var projectType, provider, sourceURL string
 	var userID int64
 	err := s.db.QueryRow(ctx,
 		`update mod_metadata_import_jobs set status='running',progress=10,error='',started_at=now(),updated_at=now()
-		 where public_id=$1 and status='queued' returning provider,source_url,user_id`, jobID,
-	).Scan(&provider, &sourceURL, &userID)
+		 where public_id=$1 and status='queued' returning project_type,provider,source_url,user_id`, jobID,
+	).Scan(&projectType, &provider, &sourceURL, &userID)
 	if err != nil {
 		return nil
 	}
@@ -110,7 +110,7 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 	if err = ensureModImportProviderAvailable(cfg, provider); err != nil {
 		return fail(err)
 	}
-	_, _, reference, err := parseModImportSource(provider, sourceURL)
+	_, _, reference, err := parseProjectImportSource(projectType, provider, sourceURL)
 	if err != nil {
 		return fail(err)
 	}
@@ -125,6 +125,60 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 		return fail(err)
 	}
 	_, _ = s.db.Exec(ctx, `update mod_metadata_import_jobs set progress=25,updated_at=now() where public_id=$1`, jobID)
+	if projectType == "modpack" {
+		var draft createModpackRequest
+		switch provider {
+		case "modrinth":
+			draft, err = importModrinthModpack(ctx, client, cfg, reference)
+		case "curseforge":
+			draft, err = importCurseForgeModpack(ctx, client, cfg, reference)
+		default:
+			err = errors.New("unsupported modpack import provider")
+		}
+		if err != nil {
+			return fail(err)
+		}
+		_, _ = s.db.Exec(ctx, `update mod_metadata_import_jobs set progress=85,updated_at=now() where public_id=$1`, jobID)
+		if err = normalizeAndValidateModpackRequest(&draft); err != nil {
+			return fail(fmt.Errorf("导入数据校验失败: %w", err))
+		}
+		result, marshalErr := json.Marshal(draft)
+		if marshalErr != nil {
+			return fail(marshalErr)
+		}
+		if _, err = s.db.Exec(ctx, `update mod_metadata_import_jobs set status='completed',progress=100,result=$2::jsonb,error='',
+			finished_at=now(),updated_at=now() where public_id=$1`, jobID, string(result)); err != nil {
+			return err
+		}
+		return nil
+	}
+	if simpleProjectTypes[projectType] {
+		var draft simpleProjectSnapshot
+		switch provider {
+		case "modrinth":
+			draft, err = importModrinthSimpleProject(ctx, client, cfg, projectType, sourceURL, reference)
+		case "curseforge":
+			draft, err = importCurseForgeSimpleProject(ctx, client, cfg, projectType, sourceURL, reference)
+		default:
+			err = errors.New("unsupported project import provider")
+		}
+		if err != nil {
+			return fail(err)
+		}
+		_, _ = s.db.Exec(ctx, `update mod_metadata_import_jobs set progress=85,updated_at=now() where public_id=$1`, jobID)
+		if err = normalizeAndValidateSimpleProjectDraft(&draft, true); err != nil {
+			return fail(fmt.Errorf("imported project data is invalid: %w", err))
+		}
+		result, marshalErr := json.Marshal(draft)
+		if marshalErr != nil {
+			return fail(marshalErr)
+		}
+		if _, err = s.db.Exec(ctx, `update mod_metadata_import_jobs set status='completed',progress=100,result=$2::jsonb,error='',
+			finished_at=now(),updated_at=now() where public_id=$1`, jobID, string(result)); err != nil {
+			return err
+		}
+		return nil
+	}
 	var draft createModRequest
 	switch provider {
 	case "modrinth":
@@ -236,9 +290,9 @@ func importModrinthProject(ctx context.Context, client *http.Client, cfg modImpo
 		SubmissionMethod:  "modrinth",
 		Links: compactLinks([]modLinkPayload{
 			{Type: "modrinth", URL: "https://modrinth.com/mod/" + project.Slug},
-			{Type: "github", URL: project.SourceURL},
+			externalSourceLink(project.SourceURL),
 			{Type: "wiki", URL: project.WikiURL},
-			{Type: "other", URL: project.IssuesURL},
+			{Type: "issue", URL: project.IssuesURL},
 			{Type: "discord", URL: project.DiscordURL},
 		}),
 	}, nil
@@ -246,6 +300,7 @@ func importModrinthProject(ctx context.Context, client *http.Client, cfg modImpo
 
 type curseForgeMod struct {
 	ID           int64  `json:"id"`
+	ClassID      int64  `json:"classId"`
 	Name         string `json:"name"`
 	Slug         string `json:"slug"`
 	Summary      string `json:"summary"`
@@ -273,6 +328,9 @@ type curseForgeMod struct {
 		GameVersion string `json:"gameVersion"`
 		ModLoader   int    `json:"modLoader"`
 	} `json:"latestFilesIndexes"`
+	LatestFiles []struct {
+		GameVersions []string `json:"gameVersions"`
+	} `json:"latestFiles"`
 }
 
 func importCurseForgeProject(ctx context.Context, client *http.Client, cfg modImportConfig, reference string) (createModRequest, error) {
@@ -334,11 +392,30 @@ func importCurseForgeProject(ctx context.Context, client *http.Client, cfg modIm
 		SubmissionMethod:    "curseforge",
 		Links: compactLinks([]modLinkPayload{
 			{Type: "curseforge", URL: project.Links.WebsiteURL},
-			{Type: "github", URL: project.Links.SourceURL},
+			externalSourceLink(project.Links.SourceURL),
 			{Type: "wiki", URL: project.Links.WikiURL},
-			{Type: "other", URL: project.Links.IssuesURL},
+			{Type: "issue", URL: project.Links.IssuesURL},
 		}),
 	}, nil
+}
+
+func externalSourceLink(value string) modLinkPayload {
+	linkType := "other"
+	if parsed, err := url.Parse(strings.TrimSpace(value)); err == nil {
+		switch strings.ToLower(parsed.Hostname()) {
+		case "github.com", "www.github.com":
+			linkType = "github"
+		case "gitlab.com", "www.gitlab.com":
+			linkType = "gitlab"
+		case "gitee.com", "www.gitee.com":
+			linkType = "gitee"
+		case "bitbucket.org", "www.bitbucket.org":
+			linkType = "bitbucket"
+		case "sourceforge.net", "www.sourceforge.net":
+			linkType = "sourceforge"
+		}
+	}
+	return modLinkPayload{Type: linkType, URL: value}
 }
 
 type githubRepository struct {

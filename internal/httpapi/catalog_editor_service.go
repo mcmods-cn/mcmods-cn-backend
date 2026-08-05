@@ -1029,6 +1029,8 @@ func catalogEditorHTTPStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, errCatalogEditorConflict):
 		return http.StatusConflict
+	case errors.Is(err, errReviewInProgress):
+		return http.StatusConflict
 	case errors.Is(err, errCatalogEditorReference), errors.Is(err, errCatalogEditorInvalid):
 		return http.StatusUnprocessableEntity
 	default:
@@ -1041,6 +1043,9 @@ func catalogEditorErrorMessage(err error) string {
 	case http.StatusNotFound:
 		return "catalog entity not found"
 	case http.StatusConflict:
+		if errors.Is(err, errReviewInProgress) {
+			return errReviewInProgress.Error()
+		}
 		return "catalog entity changed after this edit was loaded"
 	case http.StatusUnprocessableEntity:
 		return err.Error()

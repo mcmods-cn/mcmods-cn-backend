@@ -121,8 +121,12 @@ func (s *Server) resolveUsersRootPermissions(ctx context.Context, userIDs []int6
 	directRows.Close()
 
 	for _, userID := range userIDs {
+		roles := assignedRoles[userID]
+		if roles == nil {
+			roles = []string{}
+		}
 		result[userID] = resolvedUserRootPermissions{
-			Roles:       assignedRoles[userID],
+			Roles:       roles,
 			Permissions: permissionRulesFromCandidates(candidatesByUser[userID]),
 		}
 	}

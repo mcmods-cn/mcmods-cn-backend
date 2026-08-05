@@ -22,7 +22,7 @@ func projectFileSchemaStatements() []string {
 			uploaded_by bigint references users(id) on delete set null,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
-			check (project_type in ('mod','modpack','plugin','map','resource_pack','shader_pack','datapack')),
+			check (project_type in ('mod','modpack','plugin','map','resource_pack','shader_pack','datapack','addon')),
 			check (release_channel in ('release','beta','alpha')),
 			check (status in ('active','deleted')),
 			unique (project_type, project_internal_id, oss_file_id),

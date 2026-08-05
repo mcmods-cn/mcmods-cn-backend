@@ -40,11 +40,21 @@ func (s *Server) adminUnresolvedReferences(w http.ResponseWriter, r *http.Reques
 			unresolved.source_id::text source_id,unresolved.field_path,unresolved.reference_type,
 			unresolved.raw_identifier,unresolved.status,unresolved.resolved_type,
 			coalesce(unresolved.resolved_id::text,'') resolved_id,unresolved.created_at,unresolved.resolved_at,
-			coalesce(source_mod.primary_name,'') source_label,coalesce(source_mod.project_code,'') source_public_id
+			coalesce(source_mod.primary_name,community_post.title,source_modpack.primary_name,'') source_label,
+			coalesce(source_mod.project_code,community_post.public_id,source_modpack.public_id,'') source_public_id
 		from unresolved_references unresolved
 		left join mod_relationships relationship
 		  on unresolved.source_type='mod_relationship' and relationship.id=unresolved.source_id
 		left join mods source_mod on source_mod.id=relationship.mod_id
+		left join community_post_project_refs community_project
+		  on unresolved.source_type='community_post_project' and community_project.id=unresolved.source_id
+		left join community_post_resource_refs community_resource
+		  on unresolved.source_type='community_post_resource' and community_resource.id=unresolved.source_id
+		left join community_posts community_post
+		  on community_post.id=coalesce(community_project.post_id,community_resource.post_id)
+		left join modpack_mods modpack_entry
+		  on unresolved.source_type='modpack_mod' and modpack_entry.id=unresolved.source_id
+		left join modpacks source_modpack on source_modpack.id=modpack_entry.modpack_id
 		union all
 		select 'resource:'||unresolved.id::text,'catalog_resource',
 			unresolved.source_entity_id::text,unresolved.field_path,unresolved.kind_code,

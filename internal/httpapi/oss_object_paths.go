@@ -35,6 +35,8 @@ func normalizeOSSProjectKind(value string) string {
 		return "shaders"
 	case "datapack", "datapacks", "data_pack", "data_packs":
 		return "datapacks"
+	case "addon", "addons", "add_on", "add_ons", "derivative", "derivatives":
+		return "addons"
 	case "blueprint", "blueprints", "bluemap", "bluemaps":
 		return "blueprints"
 	case "skin", "skins", "cape", "capes":

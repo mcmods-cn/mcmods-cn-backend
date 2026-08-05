@@ -43,10 +43,10 @@ func TestImportedCreatorRevisionUsesPublicRouteTypeIntegration(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/mods", nil)
 	for _, kind := range []string{"author", "team"} {
-		creatorID, publicID, createErr := ensureNamedCreatorSnapshotTx(ctx, tx, creatorSnapshot{
+		creatorID, publicID, _, createErr := ensureNamedCreatorSnapshotTx(ctx, tx, creatorSnapshot{
 			Kind: kind,
 			Name: fmt.Sprintf("Imported %s %d", kind, suffix),
-		}, actorID, request)
+		}, actorID, "pending", request)
 		if createErr != nil {
 			t.Fatalf("create imported %s: %v", kind, createErr)
 		}

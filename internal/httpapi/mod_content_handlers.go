@@ -1003,6 +1003,18 @@ func (s *Server) requireEditableMod(w http.ResponseWriter, r *http.Request) (mod
 		writeError(w, http.StatusForbidden, "permission denied")
 		return identity, false
 	}
+	if r.Method != http.MethodGet {
+		var pending bool
+		if err = s.db.QueryRow(r.Context(), `select exists(select 1 from change_requests
+			where entity_type='mod' and entity_id=$1 and status='pending')`, identity.ID).Scan(&pending); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to inspect project review lock")
+			return identity, false
+		}
+		if pending {
+			writeError(w, http.StatusConflict, errReviewInProgress.Error())
+			return identity, false
+		}
+	}
 	return identity, true
 }
 

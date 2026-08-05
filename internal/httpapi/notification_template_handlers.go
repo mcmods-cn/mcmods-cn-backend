@@ -34,6 +34,20 @@ type reviewConfig struct {
 	ServerCreate            bool `json:"serverCreate"`
 	ModCreate               bool `json:"modCreate"`
 	ModEdit                 bool `json:"modEdit"`
+	ModpackCreate           bool `json:"modpackCreate"`
+	ModpackEdit             bool `json:"modpackEdit"`
+	PluginCreate            bool `json:"pluginCreate"`
+	PluginEdit              bool `json:"pluginEdit"`
+	MapCreate               bool `json:"mapCreate"`
+	MapEdit                 bool `json:"mapEdit"`
+	ResourcePackCreate      bool `json:"resourcePackCreate"`
+	ResourcePackEdit        bool `json:"resourcePackEdit"`
+	ShaderPackCreate        bool `json:"shaderPackCreate"`
+	ShaderPackEdit          bool `json:"shaderPackEdit"`
+	DatapackCreate          bool `json:"datapackCreate"`
+	DatapackEdit            bool `json:"datapackEdit"`
+	AddonCreate             bool `json:"addonCreate"`
+	AddonEdit               bool `json:"addonEdit"`
 	AuthorCreate            bool `json:"authorCreate"`
 	AuthorEdit              bool `json:"authorEdit"`
 	AuthorClaim             bool `json:"authorClaim"`
@@ -45,6 +59,14 @@ type reviewConfig struct {
 	CatalogDelete           bool `json:"catalogDelete"`
 	ModContentSectionCreate bool `json:"modContentSectionCreate"`
 	AITranslation           bool `json:"aiTranslation"`
+	TutorialCreate          bool `json:"tutorialCreate"`
+	TutorialEdit            bool `json:"tutorialEdit"`
+	IssueCreate             bool `json:"issueCreate"`
+	IssueEdit               bool `json:"issueEdit"`
+	NewsCreate              bool `json:"newsCreate"`
+	NewsEdit                bool `json:"newsEdit"`
+	DiscussionCreate        bool `json:"discussionCreate"`
+	DiscussionEdit          bool `json:"discussionEdit"`
 }
 
 func defaultNotificationTemplateConfig() notificationTemplateConfig {
@@ -63,6 +85,7 @@ func defaultNotificationTemplateConfig() notificationTemplateConfig {
 		{"blueprint_format_success", "蓝图格式转换完成", "{name} 已转换为 {format} 格式。", "Blueprint format converted", "{name} has been converted to {format}."},
 		{"review_approved", "内容审核通过", "您提交的 {name} 已通过审核。", "Content approved", "Your submission for {name} was approved."},
 		{"review_rejected", "内容审核未通过", "您提交的 {name} 未通过审核。原因：{reason}", "Content rejected", "Your submission for {name} was rejected. Reason: {reason}"},
+		{"question_answer_accepted", "回答已被采纳", "您在问题「{name}」下的回答已被采纳，悬赏已按转账税率结算。", "Answer accepted", "Your answer to {name} was accepted and its bounty was settled after transfer tax."},
 		{"creator_claim_approved", "作者或团队认领已通过", "您对 {name} 的认领已通过审核。", "Creator claim approved", "Your claim for {name} was approved."},
 		{"creator_claim_rejected", "作者或团队认领未通过", "您对 {name} 的认领未通过审核。原因：{reason}", "Creator claim rejected", "Your claim for {name} was rejected. Reason: {reason}"},
 	}
@@ -229,6 +252,20 @@ func defaultReviewConfig() reviewConfig {
 		ServerCreate:            true,
 		ModCreate:               true,
 		ModEdit:                 true,
+		ModpackCreate:           true,
+		ModpackEdit:             true,
+		PluginCreate:            true,
+		PluginEdit:              true,
+		MapCreate:               true,
+		MapEdit:                 true,
+		ResourcePackCreate:      true,
+		ResourcePackEdit:        true,
+		ShaderPackCreate:        true,
+		ShaderPackEdit:          true,
+		DatapackCreate:          true,
+		DatapackEdit:            true,
+		AddonCreate:             true,
+		AddonEdit:               true,
 		AuthorCreate:            true,
 		AuthorEdit:              true,
 		AuthorClaim:             true,
@@ -240,6 +277,45 @@ func defaultReviewConfig() reviewConfig {
 		CatalogDelete:           true,
 		ModContentSectionCreate: false,
 		AITranslation:           false,
+		TutorialCreate:          true,
+		TutorialEdit:            true,
+		IssueCreate:             true,
+		IssueEdit:               true,
+		NewsCreate:              true,
+		NewsEdit:                true,
+		DiscussionCreate:        true,
+		DiscussionEdit:          true,
+	}
+}
+
+func simpleProjectReviewRequired(config reviewConfig, projectType, action string) bool {
+	switch normalizeSimpleProjectType(projectType) + ":" + strings.ToLower(strings.TrimSpace(action)) {
+	case "plugin:create":
+		return config.PluginCreate
+	case "plugin:edit":
+		return config.PluginEdit
+	case "map:create":
+		return config.MapCreate
+	case "map:edit":
+		return config.MapEdit
+	case "resource_pack:create":
+		return config.ResourcePackCreate
+	case "resource_pack:edit":
+		return config.ResourcePackEdit
+	case "shader_pack:create":
+		return config.ShaderPackCreate
+	case "shader_pack:edit":
+		return config.ShaderPackEdit
+	case "datapack:create":
+		return config.DatapackCreate
+	case "datapack:edit":
+		return config.DatapackEdit
+	case "addon:create":
+		return config.AddonCreate
+	case "addon:edit":
+		return config.AddonEdit
+	default:
+		return true
 	}
 }
 

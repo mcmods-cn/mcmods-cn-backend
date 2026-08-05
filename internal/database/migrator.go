@@ -7,9 +7,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 47
+const schemaGeneration = 56
 
-// Migrate installs one coherent development schema. Generation 47 establishes
+// Migrate installs one coherent development schema. Generation 56 establishes
 // numeric internal keys, globally unique public IDs, revocable authentication
 // sessions, version-scoped mod-content layout identities and similar-resource
 // groups, and generalized
@@ -20,7 +20,16 @@ const schemaGeneration = 47
 // including generic collected/uncollected resource references and normalized
 // dimension/biome documents, version-scoped resource attribute schemas,
 // transactional OSS deletion outbox jobs, consumable comment reports, and
-// directional mod relationships with editable inverse projections.
+// directional mod relationships with editable inverse projections, plus the
+// shared reviewed publication model for tutorials, issue reports, news, and
+// bounty-backed questions, with
+// submitter-attributed history for manual edits and imported resource data,
+// plus exclusive pending-review locks and completion subscriptions, and the
+// shared localized catalog for plugins, maps, resource packs, shader packs,
+// datapacks and add-on resources, including their shared CurseForge/Modrinth
+// metadata import task pipeline.
+// It also adds owner-scoped editor drafts whose retention is controlled by a
+// numeric permission measured in seconds.
 // Earlier development data is
 // intentionally not migrated and must be reset before installation.
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {
@@ -70,6 +79,10 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	statements = append(statements, projectFileSchemaStatements()...)
 	statements = append(statements, modContentSchemaStatements()...)
 	statements = append(statements, commentSchemaStatements()...)
+	statements = append(statements, communityPostSchemaStatements()...)
+	statements = append(statements, modpackSchemaStatements()...)
+	statements = append(statements, simpleProjectSchemaStatements()...)
+	statements = append(statements, draftSchemaStatements()...)
 	statements = append(statements, serverSchemaStatements()...)
 	statements = append(statements, foreignKeyIndexStatement())
 	for _, statement := range statements {
@@ -257,6 +270,19 @@ func reviewSchemaStatements() []string {
 			check((entity_type is null)=(entity_id is null))
 		)`,
 		`create index idx_change_requests_queue on change_requests(status,submitted_at,id)`,
+		`create unique index idx_change_requests_pending_aggregate
+			on change_requests(aggregate_type,aggregate_key) where status='pending'`,
+		`create table review_completion_subscriptions (
+			change_request_id bigint not null references change_requests(id) on delete cascade,
+			user_id bigint not null references users(id) on delete cascade,
+			target_label text not null default '',
+			target_url text not null default '',
+			created_at timestamptz not null default now(),
+			notified_at timestamptz,
+			primary key(change_request_id,user_id)
+		)`,
+		`create index idx_review_completion_subscriptions_user
+			on review_completion_subscriptions(user_id,created_at desc)`,
 		`create table review_events (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),

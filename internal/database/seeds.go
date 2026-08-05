@@ -48,9 +48,12 @@ var seedPermissions = []seedPermission{
 	{Code: "user.avatar.update", Module: "user", Name: "Update avatar", Description: "Allows changing the account avatar."},
 	{Code: "user.avatar.animated", Module: "user", Name: "Use animated avatar", Description: "Allows GIF or APNG avatars."},
 	{Code: "user.ai.daily_token_limit.<num>", Module: "user", Name: "Daily AI token limit", Description: "Numeric permission; replace <num> with the daily token allowance."},
+	{Code: "user.ai.daily_token_limit.20000", Module: "user", Name: "Daily AI token limit: 20,000", Description: "Default daily AI translation allowance for registered users."},
 	{Code: "user.file.daily_limit.<num>", Module: "user", Name: "Daily upload limit", Description: "Numeric permission; replace <num> with bytes allowed per day."},
 	{Code: "user.file.total_limit.<num>", Module: "user", Name: "Total upload limit", Description: "Numeric permission; replace <num> with total stored bytes."},
 	{Code: "user.file.single_limit.<num>", Module: "user", Name: "Single file limit", Description: "Numeric permission; replace <num> with maximum bytes per file."},
+	{Code: "user.draft.retention_seconds.<num>", Module: "user", Name: "Draft retention period", Description: "Numeric permission; replace <num> with the number of seconds that each autosaved draft remains available."},
+	{Code: "user.draft.retention_seconds.2592000", Module: "user", Name: "Draft retention: 30 days", Description: "Keeps registered users' autosaved drafts for 2,592,000 seconds."},
 
 	{Code: "skin.library.upload", Module: "skin", Name: "Upload skin library assets", Description: "Allows uploading skins and capes to the user's library."},
 	{Code: "skin.library.limit.<num>", Module: "skin", Name: "Skin library asset limit", Description: "Numeric permission; replace <num> with the maximum number of active skin library assets."},
@@ -104,6 +107,13 @@ var seedPermissions = []seedPermission{
 	{Code: "content.write", Module: "content", Name: "Manage content", Description: "Allows creating and editing site content."},
 	{Code: "content.no-review", Module: "content", Name: "Bypass content review", Description: "Allows catalog and localized content changes to publish without review."},
 	{Code: "content.translate", Module: "content", Name: "Translate content", Description: "Allows requesting quota-backed AI translations for unsupported content languages."},
+	{Code: "community.tutorial.create", Module: "community", Name: "Publish tutorials", Description: "Allows submitting tutorials."},
+	{Code: "community.issue.create", Module: "community", Name: "Publish issue reports", Description: "Allows submitting bug and feature reports."},
+	{Code: "community.news.create", Module: "community", Name: "Publish news", Description: "Allows submitting news articles."},
+	{Code: "community.discussion.create", Module: "community", Name: "Publish questions", Description: "Allows submitting questions and discussion posts."},
+	{Code: "community.edit", Module: "community", Name: "Edit community posts", Description: "Allows editing all community publications."},
+	{Code: "community.no-review", Module: "community", Name: "Bypass community review", Description: "Allows publishing community posts without review."},
+	{Code: "modpack.create", Module: "modpack", Name: "Submit modpacks", Description: "Allows creating modpack projects."},
 	{Code: "reference.unresolved.read", Module: "content", Name: "Read unresolved references", Description: "Allows viewing the site-wide list of referenced projects and resources that have not been collected yet."},
 
 	{Code: "server.create", Module: "server", Name: "Submit servers", Description: "Allows submitting a reachable Minecraft server for review."},
@@ -112,6 +122,12 @@ var seedPermissions = []seedPermission{
 	{Code: "server.edit.<serverID>", Module: "server", Name: "Edit one server", Description: "Variable permission; replace <serverID> with a server public ID."},
 
 	{Code: "project.create", Module: "project", Name: "Create projects", Description: "Allows creating mods and other projects."},
+	{Code: "project.create.plugin", Module: "project", Name: "Submit plugins", Description: "Allows creating plugin projects."},
+	{Code: "project.create.map", Module: "project", Name: "Submit maps", Description: "Allows creating map projects."},
+	{Code: "project.create.resource_pack", Module: "project", Name: "Submit resource packs", Description: "Allows creating resource-pack projects."},
+	{Code: "project.create.shader_pack", Module: "project", Name: "Submit shader packs", Description: "Allows creating shader-pack projects."},
+	{Code: "project.create.datapack", Module: "project", Name: "Submit data packs", Description: "Allows creating data-pack projects."},
+	{Code: "project.create.addon", Module: "project", Name: "Submit add-on resources", Description: "Allows creating add-on resource projects."},
 	{Code: "project.edit", Module: "project", Name: "Edit projects and project content", Description: "Allows editing every project and all content scoped to those projects."},
 	{Code: "project.review", Module: "project", Name: "Review projects", Description: "Allows reviewing project changes."},
 	{Code: "project.no-review", Module: "project", Name: "Bypass project review", Description: "Allows project changes to publish without review."},
@@ -139,7 +155,7 @@ var seedPermissions = []seedPermission{
 var seedRoles = []seedRole{
 	{
 		Code: "registered", Name: "Registered user", Description: "Default permissions granted to a registered account.", Weight: 10,
-		Permissions: []string{"comment.create", "comment.edit.own", "comment.delete.own", "comment.react", "comment.report", "comment.watch"},
+		Permissions: []string{"comment.create", "comment.edit.own", "comment.delete.own", "comment.react", "comment.report", "comment.watch", "content.translate", "user.ai.daily_token_limit.20000", "user.draft.retention_seconds.2592000", "community.tutorial.create", "community.issue.create", "community.discussion.create", "modpack.create"},
 	},
 	{
 		Code: "project_owner.[ProjectID]", Name: "Project owner", Description: "Default project-scoped owner permissions.", Weight: 100,

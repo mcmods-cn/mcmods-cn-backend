@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -15,6 +16,8 @@ import (
 )
 
 const currentContentSchemaVersion = 1
+
+var errReviewInProgress = errors.New("this project already has a pending review")
 
 type createContentRevisionParams struct {
 	EntityType    string
@@ -68,6 +71,15 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 	lockKey := params.AggregateType + ":" + params.AggregateKey
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
 		return result, fmt.Errorf("lock content aggregate: %w", err)
+	}
+	var pending bool
+	if err := tx.QueryRow(ctx, `select exists(select 1 from change_requests
+		where aggregate_type=$1 and aggregate_key=$2 and status='pending')`,
+		params.AggregateType, params.AggregateKey).Scan(&pending); err != nil {
+		return result, fmt.Errorf("inspect pending review: %w", err)
+	}
+	if pending {
+		return result, errReviewInProgress
 	}
 	if err := tx.QueryRow(ctx,
 		`select coalesce(max(revision_no),0)+1 from content_revisions where aggregate_type=$1 and aggregate_key=$2`,
@@ -177,6 +189,9 @@ func withdrawPendingContentRequestsTx(ctx context.Context, tx pgx.Tx, aggregateT
 			values($1,'withdrawn',$2,$3,'Superseded by a newer initial submission',$4,$5)`,
 			requestID, nullableActorID(actorID), actorSnapshot, ip, userAgent); err != nil {
 			return fmt.Errorf("record withdrawn content request: %w", err)
+		}
+		if err = createReviewCompletionNotificationsTx(ctx, tx, requestID, "withdrawn"); err != nil {
+			return fmt.Errorf("notify withdrawn review subscribers: %w", err)
 		}
 	}
 	return nil

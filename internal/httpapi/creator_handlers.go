@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -166,10 +167,20 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load collaborators")
 		return
 	}
-	members, err := s.creatorMembers(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load team members")
-		return
+	members := make([]map[string]any, 0)
+	teams := make([]map[string]any, 0)
+	if item.Kind == "team" {
+		members, err = s.creatorMembers(r.Context(), id, claims.Subject, admin)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load team members")
+			return
+		}
+	} else {
+		teams, err = s.creatorTeams(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load creator teams")
+			return
+		}
 	}
 	works, err := s.creatorWorks(r.Context(), id)
 	if err != nil {
@@ -197,7 +208,7 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 		claimsAllow(claims, "creator.edit")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"creator": item, "descriptionMarkdown": description, "links": links,
-		"collaborators": collaborators, "members": members, "works": works,
+		"collaborators": collaborators, "members": members, "teams": teams, "works": works,
 		"defaultLocale": defaultLocale, "localizations": localizations,
 		"claimedUser": claimedUser, "canEdit": canEdit,
 		"canClaim":            claims.Subject > 0 && claimedBy == nil && item.ReviewStatus == "approved",
@@ -232,7 +243,7 @@ func (s *Server) createCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_, publicID, revisionID, err := s.createCreatorTx(r.Context(), tx, snapshot, claims.Subject, status, r)
+	_, publicID, revisionID, err := createCreatorTx(r.Context(), tx, snapshot, claims.Subject, status, r)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, http.StatusConflict, "creator already exists")
@@ -300,10 +311,6 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	if snapshot.AvatarFileID == nil && snapshot.AvatarURL != "" {
 		snapshot.AvatarFileID = currentAvatarFileID
 	}
-	if err = withdrawPendingContentRequestsTx(r.Context(), tx, "creator", publicID, claims.Subject, r); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to replace pending creator revision")
-		return
-	}
 	status := "approved"
 	if creatorReviewRequired(loadReviewConfig(r.Context(), s.db), kind, "edit") &&
 		!claimsAllow(claims, "admin.*") {
@@ -316,6 +323,10 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		Source: "user", Status: status, Metadata: map[string]any{"creatorId": publicID, "kind": kind}, Request: r,
 	})
 	if err != nil {
+		if errors.Is(err, errReviewInProgress) {
+			writeError(w, http.StatusConflict, errReviewInProgress.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to create creator revision")
 		return
 	}
@@ -595,7 +606,7 @@ func (s *Server) createCreatorRole(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "code": request.Code, "name": request.Name})
 }
 
-func (s *Server) createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, actorID int64, status string, r *http.Request) (int64, string, string, error) {
+func createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, actorID int64, status string, r *http.Request) (int64, string, string, error) {
 	var id int64
 	var publicID string
 	err := tx.QueryRow(ctx, `insert into creators(
@@ -631,6 +642,50 @@ func (s *Server) createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creato
 		}
 	}
 	return id, publicID, created.RevisionPublicID, nil
+}
+
+func ensureNamedCreatorSnapshotTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, actorID int64, status string, r *http.Request) (int64, string, bool, error) {
+	if snapshot.Kind != "author" && snapshot.Kind != "team" {
+		snapshot.Kind = "author"
+	}
+	if err := normalizeCreatorSnapshot(&snapshot); err != nil {
+		return 0, "", false, err
+	}
+	var id int64
+	var publicID string
+	identityType, identityURL := creatorIdentityLink(snapshot.Links)
+	err := tx.QueryRow(ctx, `select id,public_id from creators
+		where kind=$1 and (
+			normalized_name=$2 or ($3<>'' and exists(
+				select 1 from creator_links link where link.creator_id=creators.id and link.link_type=$3 and link.url=$4
+			))
+		order by ($3<>'' and exists(
+			select 1 from creator_links link where link.creator_id=creators.id and link.link_type=$3 and link.url=$4
+		)) desc,review_status='approved' desc,id limit 1`,
+		snapshot.Kind, normalizeCreatorName(snapshot.Name), identityType, identityURL).Scan(&id, &publicID)
+	if err == nil {
+		return id, publicID, false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, "", false, err
+	}
+	id, publicID, _, err = createCreatorTx(ctx, tx, snapshot, actorID, status, r)
+	if err != nil {
+		return 0, "", false, fmt.Errorf("create imported creator: %w", err)
+	}
+	return id, publicID, true, nil
+}
+
+func creatorIdentityLink(links []creatorLinkPayload) (string, string) {
+	for _, link := range links {
+		switch link.Type {
+		case "modrinth", "curseforge":
+			if link.URL != "" {
+				return link.Type, link.URL
+			}
+		}
+	}
+	return "", ""
 }
 
 func (s *Server) applyCreatorSnapshotTx(
@@ -828,14 +883,15 @@ func (s *Server) creatorCollaborators(ctx context.Context, creatorID int64) ([]c
 	return result, rows.Err()
 }
 
-func (s *Server) creatorMembers(ctx context.Context, creatorID int64) ([]map[string]any, error) {
+func (s *Server) creatorMembers(ctx context.Context, creatorID, viewerID int64, admin bool) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, `
 		select member.public_id,member.name,member.avatar_url,role.public_id,role.code,role.name,relation.title
 		from creator_team_members relation
 		join creators member on member.id=relation.member_creator_id
 		join creator_role_definitions role on role.id=relation.role_id
 		where relation.team_id=$1
-		order by relation.display_order,relation.created_at`, creatorID)
+		  and (member.review_status='approved' or member.created_by=$2 or $3)
+		order by relation.display_order,relation.created_at`, creatorID, viewerID, admin)
 	if err != nil {
 		return nil, err
 	}
@@ -849,6 +905,42 @@ func (s *Server) creatorMembers(ctx context.Context, creatorID int64) ([]map[str
 		result = append(result, map[string]any{
 			"creatorId": publicID, "name": name, "avatarUrl": avatarURL,
 			"role": map[string]any{"id": roleID, "code": roleCode, "name": roleName}, "title": title,
+		})
+	}
+	return result, rows.Err()
+}
+
+func (s *Server) creatorTeams(ctx context.Context, creatorID int64) ([]map[string]any, error) {
+	rows, err := s.db.Query(ctx, `
+		select team.public_id,team.kind,team.name,team.avatar_url,team.review_status,
+		       team.claimed_by is not null,
+		       (select count(distinct mod.id) from content_creator_bindings binding
+		        join mods mod on mod.id=binding.subject_id
+		        where binding.creator_id=team.id and binding.subject_type='mod' and mod.review_status='approved'),
+		       role.public_id,role.code,role.name,relation.title
+		from creator_team_members relation
+		join creators team on team.id=relation.team_id
+		join creator_role_definitions role on role.id=relation.role_id
+		where relation.member_creator_id=$1 and team.review_status='approved'
+		order by lower(team.name),team.id,relation.display_order`, creatorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]map[string]any, 0)
+	for rows.Next() {
+		var team creatorSummary
+		var roleID, roleCode, roleName, title string
+		if err = rows.Scan(
+			&team.PublicID, &team.Kind, &team.Name, &team.AvatarURL, &team.ReviewStatus,
+			&team.Claimed, &team.WorkCount, &roleID, &roleCode, &roleName, &title,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, map[string]any{
+			"team":  team,
+			"role":  map[string]any{"id": roleID, "code": roleCode, "name": roleName},
+			"title": title,
 		})
 	}
 	return result, rows.Err()

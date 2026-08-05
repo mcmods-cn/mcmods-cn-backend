@@ -199,7 +199,16 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 		worker.persistNotificationTranslation(ctx, createdBy, rawPayload, result)
 	}
 	if taskType == aiTaskContentTranslation {
-		if err = worker.persistCatalogContentTranslation(ctx, msg.TaskID, createdBy, rawPayload, result); err != nil {
+		var payloadScope struct {
+			Scope string `json:"scope"`
+		}
+		_ = json.Unmarshal(rawPayload, &payloadScope)
+		if payloadScope.Scope == "community_post" {
+			err = worker.persistCommunityPostTranslation(ctx, msg.TaskID, rawPayload, result)
+		} else {
+			err = worker.persistCatalogContentTranslation(ctx, msg.TaskID, createdBy, rawPayload, result)
+		}
+		if err != nil {
 			worker.failTask(ctx, msg.TaskID, err)
 			return err
 		}

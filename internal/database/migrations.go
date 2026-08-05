@@ -1003,12 +1003,35 @@ func baselineSchemaStatements() []string {
 			source_kind text not null default 'mcmods_exporter',
 			source_metadata jsonb not null default '{}'::jsonb,
 			import_run_token text not null default '',
+			submitted_by bigint references users(id) on delete set null,
+			submitted_by_snapshot text not null default '',
 			is_active boolean not null default false,
 			created_at timestamptz not null default now(),
 			activated_at timestamptz,
 			unique (mod_id, target_version_id, source_kind, source_namespace, revision_no),
 			check (status in ('staging','ready','partial','rejected','superseded'))
 		)`,
+		`create or replace function attribute_catalog_import_revision() returns trigger as $$
+		begin
+			if new.submitted_by is null then
+				select coalesce(job.created_by,package.uploaded_by),
+					coalesce(account.username,'system')
+			into new.submitted_by,new.submitted_by_snapshot
+			from catalog_import_jobs job
+			join catalog_import_packages package on package.id=job.package_id
+			left join users account on account.id=coalesce(job.created_by,package.uploaded_by)
+			where job.id=new.job_id;
+			end if;
+			if new.submitted_by_snapshot='' then
+				select coalesce(account.username,'system') into new.submitted_by_snapshot
+				from (values(1)) seed(value)
+				left join users account on account.id=new.submitted_by;
+			end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_catalog_import_revision_submitter before insert on catalog_import_revisions
+			for each row execute function attribute_catalog_import_revision()`,
 		`create unique index if not exists idx_catalog_import_revisions_active
 		 on catalog_import_revisions(mod_id, target_version_id, source_kind, source_namespace) where is_active`,
 		`create index if not exists idx_catalog_import_revisions_package on catalog_import_revisions(package_id)`,

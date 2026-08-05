@@ -34,6 +34,7 @@ type modRevisionResponse struct {
 	Snapshot        createModRequest `json:"snapshot"`
 	ChangeReason    string           `json:"changeReason"`
 	SubmittedBy     *string          `json:"submittedBy,omitempty"`
+	SubmittedByName string           `json:"submittedByName"`
 	ReviewedBy      *string          `json:"reviewedBy,omitempty"`
 	ReviewNote      string           `json:"reviewNote"`
 	CreatedAt       time.Time        `json:"createdAt"`
@@ -152,6 +153,10 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		Request:       r,
 	})
 	if err != nil {
+		if errors.Is(err, errReviewInProgress) {
+			writeError(w, http.StatusConflict, errReviewInProgress.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to create revision")
 		return
 	}
@@ -379,6 +384,7 @@ func canSkipProjectReview(claims security.Claims, identity modIdentityRecord) bo
 const modRevisionSelect = `select
 	revision.public_id,revision.entity_id,revision.aggregate_key,revision.revision_no,request.status,revision.snapshot,request.reason,
 	(select account.public_id from users account where account.id=request.submitted_by),
+	coalesce(nullif(request.submitted_by_snapshot,''),nullif(revision.created_by_snapshot,''),(select account.username from users account where account.id=request.submitted_by),'system'),
 	(select account.public_id from review_events event join users account on account.id=event.actor_id
 	 where event.change_request_id=request.id and event.event_type in ('approved','rejected','conflicted') order by event.id desc limit 1),
 	coalesce((select event.note from review_events event where event.change_request_id=request.id and event.event_type in ('approved','rejected','conflicted') order by event.id desc limit 1),''),
@@ -401,7 +407,7 @@ func scanModRevision(row scanner) (modRevisionResponse, error) {
 	var snapshot []byte
 	err := row.Scan(
 		&result.ID, &result.ModInternalID, &result.ModID, &result.Version, &result.Status, &snapshot, &result.ChangeReason,
-		&result.SubmittedBy, &result.ReviewedBy, &result.ReviewNote, &result.CreatedAt, &result.ReviewedAt,
+		&result.SubmittedBy, &result.SubmittedByName, &result.ReviewedBy, &result.ReviewNote, &result.CreatedAt, &result.ReviewedAt,
 		&result.BaseRevisionID, &result.ChangeRequestID, &result.SchemaVersion, &result.SnapshotHash,
 	)
 	if err != nil {
@@ -558,13 +564,19 @@ func appendReviewResolutionTx(ctx context.Context, tx pgx.Tx, requestID int64, s
 		resolvedEntityType = *entityType
 		resolvedEntityID = *entityID
 	}
-	return appendAuditEventTx(ctx, tx, auditEventParams{
+	if err = appendAuditEventTx(ctx, tx, auditEventParams{
 		EntityType: resolvedEntityType, EntityID: resolvedEntityID,
 		AggregateType: aggregateType, AggregateKey: aggregateKey, ActorID: actorID, ActorSnapshot: actorSnapshot,
 		Action: "content.revision." + status, BeforeHash: revisionHashTx(ctx, tx, baseRevisionID), AfterHash: snapshotHash,
 		TraceID: traceID, IP: ip, UserAgent: userAgent,
 		Metadata: map[string]any{"revisionId": revisionID, "changeRequestId": requestID},
-	})
+	}); err != nil {
+		return err
+	}
+	if err = createReviewCompletionNotificationsTx(ctx, tx, requestID, status); err != nil {
+		return fmt.Errorf("notify review completion subscribers: %w", err)
+	}
+	return nil
 }
 
 func markChangeRequestConflictedTx(ctx context.Context, tx pgx.Tx, requestID, actorID int64, note string, r *http.Request) error {

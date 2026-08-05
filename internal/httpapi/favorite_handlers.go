@@ -214,11 +214,13 @@ func (s *Server) favoriteCollectionItems(w http.ResponseWriter, r *http.Request)
 	}
 	rows, err := s.db.Query(r.Context(), `select item.entity_type,route.public_id,
 		coalesce(mods.primary_name,''),coalesce(mods.secondary_name,''),coalesce(mods.icon_url,''),coalesce(mods.slug,''),
+		coalesce(modpack.primary_name,''),coalesce(modpack.secondary_name,''),coalesce(modpack.icon_url,''),coalesce(modpack.slug,''),
 		coalesce(blueprint.title,''),coalesce(blueprint.public_id,'')
 		from favorite_collection_items item
 		join favorite_collections collection on collection.id=item.collection_id
 		join public_routes route on route.entity_type=item.entity_type and route.internal_id=item.entity_id
 		left join mods on item.entity_type='mod' and mods.id=item.entity_id
+		left join modpacks modpack on item.entity_type='modpack' and modpack.id=item.entity_id
 		left join blueprints blueprint on item.entity_type='blueprint' and blueprint.id=item.entity_id and blueprint.status<>'deleted'
 		where collection.public_id=$1 and collection.user_id=$2 order by item.created_at desc`,
 		collectionPublicID, currentClaims(r).Subject)
@@ -229,13 +231,17 @@ func (s *Server) favoriteCollectionItems(w http.ResponseWriter, r *http.Request)
 	defer rows.Close()
 	items := make([]favoriteCollectionItem, 0)
 	for rows.Next() {
-		var entityType, entityKey, primaryName, secondaryName, iconURL, slug, title, publicID string
-		if rows.Scan(&entityType, &entityKey, &primaryName, &secondaryName, &iconURL, &slug, &title, &publicID) != nil {
+		var entityType, entityKey, primaryName, secondaryName, iconURL, slug string
+		var modpackPrimaryName, modpackSecondaryName, modpackIconURL, modpackSlug, title, publicID string
+		if rows.Scan(&entityType, &entityKey, &primaryName, &secondaryName, &iconURL, &slug,
+			&modpackPrimaryName, &modpackSecondaryName, &modpackIconURL, &modpackSlug, &title, &publicID) != nil {
 			continue
 		}
 		metadata := map[string]any{}
 		if entityType == "mod" {
 			metadata = map[string]any{"primaryName": primaryName, "secondaryName": secondaryName, "iconUrl": iconURL, "slug": slug}
+		} else if entityType == "modpack" {
+			metadata = map[string]any{"primaryName": modpackPrimaryName, "secondaryName": modpackSecondaryName, "iconUrl": modpackIconURL, "slug": modpackSlug}
 		} else if entityType == "blueprint" {
 			metadata = map[string]any{"title": title, "publicId": publicID}
 		}

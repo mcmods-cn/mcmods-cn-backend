@@ -666,6 +666,10 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 		Metadata: map[string]any{"blueprintId": publicID, "title": request.Title, "operation": operation}, Request: r,
 	})
 	if err != nil {
+		if errors.Is(err, errReviewInProgress) {
+			writeError(w, http.StatusConflict, errReviewInProgress.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "创建蓝图修订失败")
 		return
 	}

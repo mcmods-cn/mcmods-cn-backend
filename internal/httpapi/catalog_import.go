@@ -232,6 +232,30 @@ func persistCatalogResources(ctx context.Context, tx pgx.Tx, rows []catalogResou
 		  and matches.old_resource_id is distinct from matches.new_resource_id`); err != nil {
 		return fmt.Errorf("resolve resource references: %w", err)
 	}
+	if _, err := execImportStatement(ctx, tx, `with imported_aliases as materialized (
+		select distinct source.kind_code,lower(source.alias_id) alias_id,resource.entity_id resource_id
+		from (
+			select kind_code,raw_id alias_id,canonical_id from catalog_resource_import_stage
+			union select kind_code,canonical_id alias_id,canonical_id from catalog_resource_import_stage
+		) source join game_resources resource
+		  on resource.kind_code=source.kind_code and resource.canonical_id=source.canonical_id
+		where source.alias_id<>''
+	), matches as materialized (
+		select unresolved.id,unresolved.source_id,imported.resource_id
+		from unresolved_references unresolved join imported_aliases imported
+		  on unresolved.reference_type=imported.kind_code and unresolved.normalized_identifier=imported.alias_id
+		where unresolved.source_type='community_post_resource' and unresolved.status='pending'
+	), references_updated as (
+		update community_post_resource_refs reference set resource_id=matches.resource_id,raw_resource_id=''
+		from matches where reference.id=matches.source_id and reference.resource_id is null
+		returning matches.id,matches.resource_id
+	)
+	update unresolved_references unresolved
+	set status='resolved',resolved_type='resource',resolved_id=references_updated.resource_id,
+		resolved_at=now(),updated_at=now()
+	from references_updated where unresolved.id=references_updated.id and unresolved.status='pending'`); err != nil {
+		return fmt.Errorf("resolve community post resource references: %w", err)
+	}
 	return nil
 }
 

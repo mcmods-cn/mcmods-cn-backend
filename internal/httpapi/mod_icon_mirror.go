@@ -25,13 +25,13 @@ type mirroredExternalImage struct {
 	FileInternalID int64
 }
 
-func (s *Server) mirrorExternalModIcon(ctx context.Context, sourceURL, projectUniqueID string, uploaderID int64) (string, error) {
+func (s *Server) mirrorExternalProjectIcon(ctx context.Context, sourceURL, projectType, projectUniqueID string, uploaderID int64) (string, error) {
 	projectUniqueID = normalizeProjectObjectSegment(projectUniqueID)
 	result, err := s.mirrorExternalImage(ctx, sourceURL, uploaderID, externalImageMirrorOptions{
-		category:  ossProjectCategory("mod", projectUniqueID, "icons", "project", "original"),
-		source:    "mod_metadata_import",
+		category:  ossProjectCategory(projectType, projectUniqueID, "icons", "project", "original"),
+		source:    normalizeObjectSegment(projectType) + "_metadata_import",
 		baseName:  "icon",
-		userAgent: "mcmods.cn mod metadata importer",
+		userAgent: "mcmods.cn project metadata importer",
 	})
 	return result.URL, err
 }
@@ -40,9 +40,9 @@ func (s *Server) mirrorExternalCreatorAvatar(ctx context.Context, sourceURL, kin
 	identityDigest := sha256Hex([]byte(strings.ToLower(strings.TrimSpace(kind)) + "\x00" + normalizeCreatorName(name)))
 	return s.mirrorExternalImage(ctx, sourceURL, uploaderID, externalImageMirrorOptions{
 		category:  ossProjectCategory(kind, "import-"+identityDigest[:16], "icons", "profile", "original"),
-		source:    "mod_author_metadata_import",
+		source:    "creator_metadata_import",
 		baseName:  "avatar",
-		userAgent: "mcmods.cn mod author metadata importer",
+		userAgent: "mcmods.cn creator metadata importer",
 	})
 }
 

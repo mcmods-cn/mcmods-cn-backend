@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,24 +23,61 @@ type modMetadataImportMessage struct {
 }
 
 type modMetadataImportJobResponse struct {
-	ID        string          `json:"id"`
-	Provider  string          `json:"provider"`
-	SourceURL string          `json:"sourceUrl"`
-	Status    string          `json:"status"`
-	Progress  int             `json:"progress"`
-	Result    json.RawMessage `json:"result,omitempty"`
-	Error     string          `json:"error,omitempty"`
-	CreatedAt time.Time       `json:"createdAt"`
-	UpdatedAt time.Time       `json:"updatedAt"`
+	ID          string          `json:"id"`
+	ProjectType string          `json:"projectType"`
+	Provider    string          `json:"provider"`
+	SourceURL   string          `json:"sourceUrl"`
+	Status      string          `json:"status"`
+	Progress    int             `json:"progress"`
+	Result      json.RawMessage `json:"result,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	CreatedAt   time.Time       `json:"createdAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
 }
 
 func (s *Server) createModMetadataImport(w http.ResponseWriter, r *http.Request) {
+	s.createProjectMetadataImport(w, r, "mod")
+}
+
+func (s *Server) createModpackMetadataImport(w http.ResponseWriter, r *http.Request) {
+	s.createProjectMetadataImport(w, r, "modpack")
+}
+
+func (s *Server) createSimpleProjectMetadataImport(w http.ResponseWriter, r *http.Request) {
+	projectType := normalizeSimpleProjectType(r.PathValue("projectType"))
+	if projectType == "" {
+		writeError(w, http.StatusNotFound, "project type not found")
+		return
+	}
+	claims := currentClaims(r)
+	if !claimsAllow(claims, "project.create."+projectType) && !claimsAllow(claims, "admin.*") {
+		writeError(w, http.StatusForbidden, "project creation permission is required")
+		return
+	}
+	s.createProjectMetadataImport(w, r, projectType)
+}
+
+func (s *Server) getSimpleProjectMetadataImport(w http.ResponseWriter, r *http.Request) {
+	projectType := normalizeSimpleProjectType(r.PathValue("projectType"))
+	if projectType == "" {
+		writeError(w, http.StatusNotFound, "project type not found")
+		return
+	}
+	job, err := s.modMetadataImportJob(r.Context(), strings.TrimSpace(r.PathValue("jobId")), currentClaims(r).Subject)
+	if err != nil || job.ProjectType != projectType {
+		writeError(w, http.StatusNotFound, "project import job not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) createProjectMetadataImport(w http.ResponseWriter, r *http.Request, projectType string) {
 	var request modMetadataImportRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	provider, sourceURL, _, err := parseModImportSource(request.Provider, request.URL)
+	provider, sourceURL, _, err := parseProjectImportSource(projectType, request.Provider, request.URL)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -56,9 +94,9 @@ func (s *Server) createModMetadataImport(w http.ResponseWriter, r *http.Request)
 	userID := currentClaims(r).Subject
 	var jobID string
 	if err = s.db.QueryRow(r.Context(),
-		`insert into mod_metadata_import_jobs(user_id,provider,source_url,status,progress)
-		 values($1,$2,$3,'queued',0) returning public_id`,
-		userID, provider, sourceURL,
+		`insert into mod_metadata_import_jobs(user_id,project_type,provider,source_url,status,progress)
+		 values($1,$2,$3,$4,'queued',0) returning public_id`,
+		userID, projectType, provider, sourceURL,
 	).Scan(&jobID); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建模组导入任务失败")
 		return
@@ -92,10 +130,10 @@ func (s *Server) modMetadataImportJob(ctx context.Context, jobID string, userID 
 	var job modMetadataImportJobResponse
 	var result []byte
 	err := s.db.QueryRow(ctx,
-		`select public_id,provider,source_url,status,progress,coalesce(result,'null'::jsonb),error,created_at,updated_at
+		`select public_id,project_type,provider,source_url,status,progress,coalesce(result,'null'::jsonb),error,created_at,updated_at
 		 from mod_metadata_import_jobs where public_id=$1 and user_id=$2`,
 		jobID, userID,
-	).Scan(&job.ID, &job.Provider, &job.SourceURL, &job.Status, &job.Progress, &result, &job.Error, &job.CreatedAt, &job.UpdatedAt)
+	).Scan(&job.ID, &job.ProjectType, &job.Provider, &job.SourceURL, &job.Status, &job.Progress, &result, &job.Error, &job.CreatedAt, &job.UpdatedAt)
 	if err != nil {
 		return modMetadataImportJobResponse{}, err
 	}
@@ -129,6 +167,13 @@ func ensureModImportProviderAvailable(cfg modImportConfig, provider string) erro
 }
 
 func parseModImportSource(provider, rawURL string) (string, string, string, error) {
+	return parseProjectImportSource("mod", provider, rawURL)
+}
+
+func parseProjectImportSource(projectType, provider, rawURL string) (string, string, string, error) {
+	if _, supported := projectImportSourceSpecs[projectType]; !supported {
+		return "", "", "", errors.New("不支持的项目类型")
+	}
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Hostname() == "" || (parsed.Port() != "" && parsed.Port() != "443") {
@@ -138,16 +183,32 @@ func parseModImportSource(provider, rawURL string) (string, string, string, erro
 	segments := splitURLPath(parsed.Path)
 	switch provider {
 	case "modrinth":
-		if (host != "modrinth.com" && host != "www.modrinth.com") || len(segments) < 2 || segments[0] != "mod" || !isSafeImportReferenceSegment(segments[1]) {
-			return "", "", "", errors.New("请输入 Modrinth 模组项目链接")
+		spec := projectImportSourceSpecs[projectType]
+		if len(spec.ModrinthSections) == 0 {
+			return "", "", "", fmt.Errorf("%s does not support Modrinth imports", projectImportDisplayName(projectType))
 		}
-		return provider, "https://modrinth.com/mod/" + segments[1], segments[1], nil
+		expectedSection := spec.ModrinthSections[0]
+		if len(segments) > 0 && containsImportSection(spec.ModrinthSections, segments[0]) {
+			expectedSection = segments[0]
+		}
+		if (host != "modrinth.com" && host != "www.modrinth.com") || len(segments) < 2 || segments[0] != expectedSection || !isSafeImportReferenceSegment(segments[1]) {
+			return "", "", "", fmt.Errorf("请输入有效的 Modrinth %s项目链接", projectImportDisplayName(projectType))
+		}
+		return provider, "https://modrinth.com/" + expectedSection + "/" + segments[1], segments[1], nil
 	case "curseforge":
-		if (host != "curseforge.com" && host != "www.curseforge.com") || len(segments) < 3 || segments[0] != "minecraft" || segments[1] != "mc-mods" || !isSafeImportReferenceSegment(segments[2]) {
-			return "", "", "", errors.New("请输入 CurseForge Minecraft 模组链接")
+		spec := projectImportSourceSpecs[projectType]
+		expectedSection := spec.CurseForgeSections[0]
+		if len(segments) > 1 && containsImportSection(spec.CurseForgeSections, segments[1]) {
+			expectedSection = segments[1]
 		}
-		return provider, "https://www.curseforge.com/minecraft/mc-mods/" + segments[2], segments[2], nil
+		if (host != "curseforge.com" && host != "www.curseforge.com") || len(segments) < 3 || segments[0] != "minecraft" || segments[1] != expectedSection || !isSafeImportReferenceSegment(segments[2]) {
+			return "", "", "", fmt.Errorf("请输入有效的 CurseForge Minecraft %s项目链接", projectImportDisplayName(projectType))
+		}
+		return provider, "https://www.curseforge.com/minecraft/" + expectedSection + "/" + segments[2], segments[2], nil
 	case "github":
+		if projectType != "mod" {
+			return "", "", "", errors.New("GitHub 自动导入仅支持模组")
+		}
 		if (host != "github.com" && host != "www.github.com") || len(segments) < 2 {
 			return "", "", "", errors.New("请输入 GitHub 仓库链接")
 		}
@@ -160,6 +221,44 @@ func parseModImportSource(provider, rawURL string) (string, string, string, erro
 	default:
 		return "", "", "", errors.New("不支持的模组导入来源")
 	}
+}
+
+type projectImportSourceSpec struct {
+	ModrinthSections   []string
+	CurseForgeSections []string
+}
+
+var projectImportSourceSpecs = map[string]projectImportSourceSpec{
+	"mod":           {ModrinthSections: []string{"mod"}, CurseForgeSections: []string{"mc-mods"}},
+	"modpack":       {ModrinthSections: []string{"modpack"}, CurseForgeSections: []string{"modpacks"}},
+	"plugin":        {ModrinthSections: []string{"plugin"}, CurseForgeSections: []string{"bukkit-plugins"}},
+	"map":           {CurseForgeSections: []string{"worlds"}},
+	"resource_pack": {ModrinthSections: []string{"resourcepack"}, CurseForgeSections: []string{"texture-packs"}},
+	"shader_pack":   {ModrinthSections: []string{"shader"}, CurseForgeSections: []string{"shaders"}},
+	"datapack":      {ModrinthSections: []string{"datapack"}, CurseForgeSections: []string{"data-packs"}},
+	"addon": {
+		ModrinthSections:   []string{"mod", "plugin", "datapack", "resourcepack", "shader"},
+		CurseForgeSections: []string{"mc-addons", "mc-mods", "bukkit-plugins", "data-packs", "texture-packs", "shaders", "worlds"},
+	},
+}
+
+func containsImportSection(sections []string, value string) bool {
+	for _, section := range sections {
+		if section == value {
+			return true
+		}
+	}
+	return false
+}
+
+func projectImportDisplayName(projectType string) string {
+	if name := map[string]string{
+		"mod": "mod", "modpack": "modpack", "plugin": "plugin", "map": "map",
+		"resource_pack": "resource pack", "shader_pack": "shader pack", "datapack": "data pack", "addon": "add-on",
+	}[projectType]; name != "" {
+		return name
+	}
+	return "project"
 }
 
 func splitURLPath(value string) []string {

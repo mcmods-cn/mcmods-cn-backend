@@ -583,6 +583,27 @@ func (s *Server) requestContentLocales(r *http.Request) (string, string) {
 
 var errAIQuotaExceeded = errors.New("AI token quota exceeded")
 
+func reserveAITaskQuotaTx(ctx context.Context, tx pgx.Tx, actorID, tokenLimit, reserved int64) error {
+	if actorID <= 0 || tokenLimit <= 0 {
+		return errAIQuotaExceeded
+	}
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, actorID); err != nil {
+		return err
+	}
+	var used, pending int64
+	if err := tx.QueryRow(ctx, `
+		select
+		 coalesce(sum(case when status='completed' then input_tokens+output_tokens else 0 end),0),
+		 coalesce(sum(case when status in ('queued','running','retrying') then quota_reserved_tokens else 0 end),0)
+		from ai_tasks where created_by=$1 and created_at>=date_trunc('day',now())`, actorID).Scan(&used, &pending); err != nil {
+		return err
+	}
+	if tokenLimit != int64(maxPermissionValue) && used+pending+reserved > tokenLimit {
+		return errAIQuotaExceeded
+	}
+	return nil
+}
+
 func (s *Server) enqueueCatalogContentTranslation(
 	ctx context.Context,
 	entity catalogEntityLocalizationSet,
@@ -656,22 +677,8 @@ func (s *Server) enqueueCatalogContentTranslation(
 		return enqueuedContentTranslation{}, err
 	}
 	if quotaBacked {
-		if actorID <= 0 || tokenLimit <= 0 {
-			return enqueuedContentTranslation{}, errAIQuotaExceeded
-		}
-		if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, actorID); err != nil {
+		if err = reserveAITaskQuotaTx(ctx, tx, actorID, tokenLimit, reserved); err != nil {
 			return enqueuedContentTranslation{}, err
-		}
-		var used, pending int64
-		if err = tx.QueryRow(ctx, `
-			select
-			 coalesce(sum(case when status='completed' then input_tokens+output_tokens else 0 end),0),
-			 coalesce(sum(case when status in ('queued','running','retrying') then quota_reserved_tokens else 0 end),0)
-			from ai_tasks where created_by=$1 and created_at>=date_trunc('day',now())`, actorID).Scan(&used, &pending); err != nil {
-			return enqueuedContentTranslation{}, err
-		}
-		if tokenLimit != int64(maxPermissionValue) && used+pending+reserved > tokenLimit {
-			return enqueuedContentTranslation{}, errAIQuotaExceeded
 		}
 	}
 	taskUID := "ai_" + randomHex(16)
@@ -732,7 +739,7 @@ func translationItemsToMap(result map[string]any) map[string]string {
 		key, _ := item["key"].(string)
 		text, _ := item["text"].(string)
 		switch key {
-		case "name", "summary", "contentMarkdown":
+		case "name", "summary", "contentMarkdown", "title", "bodyMarkdown":
 			translated[key] = text
 		}
 	}

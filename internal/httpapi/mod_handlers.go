@@ -250,7 +250,7 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.IconURL != "" && req.SubmissionMethod != "manual" {
-		mirroredIconURL, mirrorErr := s.mirrorExternalModIcon(r.Context(), req.IconURL, uniqueID, claims.Subject)
+		mirroredIconURL, mirrorErr := s.mirrorExternalProjectIcon(r.Context(), req.IconURL, "mod", uniqueID, claims.Subject)
 		if mirrorErr != nil {
 			writeError(w, http.StatusBadGateway, "failed to store imported mod icon")
 			return
@@ -304,7 +304,7 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for index, author := range req.Authors {
-		creatorID, nameSnapshot, roleSnapshot, resolveErr := resolveModAuthorForCreateTx(r.Context(), tx, author, claims.Subject, r)
+		creatorID, nameSnapshot, roleSnapshot, resolveErr := resolveProjectAuthorForCreateTx(r.Context(), tx, author, claims.Subject, r)
 		if resolveErr != nil {
 			writeError(w, http.StatusBadRequest, resolveErr.Error())
 			return
@@ -362,6 +362,7 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err = appendReviewResolutionTx(r.Context(), tx, createdRevision.ChangeRequestID, "approved", claims.Subject, "automatic approval", r); err != nil {
+			log.Printf("record automatic mod approval: mod=%s change_request=%d: %v", uniqueID, createdRevision.ChangeRequestID, err)
 			writeError(w, http.StatusInternalServerError, "记录自动审核失败")
 			return
 		}
@@ -1629,6 +1630,42 @@ func resolvePendingModReferencesTx(ctx context.Context, tx pgx.Tx, modID int64) 
 			  and lower(identifier.identifier)=unresolved.normalized_identifier)`, modID); err != nil {
 		return err
 	}
+	if _, err = tx.Exec(ctx, `update community_post_project_refs reference
+		set target_id=$1,raw_identifier=''
+		from unresolved_references unresolved
+		where unresolved.source_type='community_post_project' and unresolved.source_id=reference.id
+		  and unresolved.status='pending' and unresolved.reference_type='mod' and reference.target_id is null
+		  and exists(select 1 from mod_identifiers identifier where identifier.mod_id=$1
+		    and lower(identifier.identifier)=unresolved.normalized_identifier)`, modID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `update unresolved_references unresolved
+		set status='resolved',resolved_type='mod',resolved_id=$1,resolved_at=now(),updated_at=now()
+		where unresolved.source_type='community_post_project' and unresolved.status='pending'
+		  and unresolved.reference_type='mod'
+		  and exists(select 1 from community_post_project_refs reference
+		    join mod_identifiers identifier on identifier.mod_id=$1
+		    where reference.id=unresolved.source_id and reference.target_id=$1
+			  and lower(identifier.identifier)=unresolved.normalized_identifier)`, modID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `update modpack_mods entry set mod_id=$1
+		from unresolved_references unresolved,mods candidate
+		where candidate.id=$1 and unresolved.source_type='modpack_mod' and unresolved.source_id=entry.id
+		  and unresolved.status='pending' and unresolved.reference_type='mod' and entry.mod_id is null
+		  and (entry.provider='modrinth' and entry.provider_project_id<>'' and candidate.modrinth_project_id=entry.provider_project_id
+		    or entry.provider='curseforge' and entry.provider_project_id<>'' and candidate.curseforge_project_id=entry.provider_project_id
+		    or entry.identifier<>'' and exists(select 1 from mod_identifiers identifier
+		      where identifier.mod_id=$1 and lower(identifier.identifier)=lower(entry.identifier)))`, modID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `update unresolved_references unresolved
+		set status='resolved',resolved_type='mod',resolved_id=$1,resolved_at=now(),updated_at=now()
+		where unresolved.source_type='modpack_mod' and unresolved.status='pending'
+		  and unresolved.reference_type='mod' and exists(select 1 from modpack_mods entry
+		    where entry.id=unresolved.source_id and entry.mod_id=$1)`, modID); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1690,7 +1727,7 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
-func resolveModAuthorForCreateTx(ctx context.Context, tx pgx.Tx, author modAuthorPayload, actorID int64, r *http.Request) (int64, string, string, error) {
+func resolveProjectAuthorForCreateTx(ctx context.Context, tx pgx.Tx, author modAuthorPayload, actorID int64, r *http.Request) (int64, string, string, error) {
 	var creatorID int64
 	var creatorName string
 	if author.CreatorID != "" {
@@ -1704,10 +1741,10 @@ func resolveModAuthorForCreateTx(ctx context.Context, tx pgx.Tx, author modAutho
 			kind = "author"
 		}
 		var err error
-		creatorID, _, err = ensureNamedCreatorSnapshotTx(ctx, tx, creatorSnapshot{
+		creatorID, _, _, err = ensureNamedCreatorSnapshotTx(ctx, tx, creatorSnapshot{
 			Kind: kind, Name: author.Name, AvatarURL: author.AvatarURL,
 			AvatarFileID: author.AvatarFileID, AvatarInternalID: author.AvatarInternalID,
-		}, actorID, r)
+		}, actorID, "pending", r)
 		if err != nil {
 			return 0, "", "", err
 		}
@@ -1724,32 +1761,6 @@ func resolveModAuthorForCreateTx(ctx context.Context, tx pgx.Tx, author modAutho
 		roleName = author.Role
 	}
 	return creatorID, creatorName, roleName, nil
-}
-
-func ensureNamedCreatorSnapshotTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, actorID int64, r *http.Request) (int64, string, error) {
-	snapshot.Name = strings.TrimSpace(snapshot.Name)
-	if snapshot.Name == "" {
-		return 0, "", errors.New("creator name is required")
-	}
-	if snapshot.Kind != "author" && snapshot.Kind != "team" {
-		snapshot.Kind = "author"
-	}
-	var id int64
-	var publicID string
-	err := tx.QueryRow(ctx, `select id,public_id from creators
-		where kind=$1 and normalized_name=$2
-		order by review_status='approved' desc,id limit 1`, snapshot.Kind, normalizeCreatorName(snapshot.Name)).Scan(&id, &publicID)
-	if err == nil {
-		return id, publicID, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return 0, "", err
-	}
-	id, publicID, _, err = (&Server{}).createCreatorTx(ctx, tx, snapshot, actorID, "pending", r)
-	if err != nil {
-		return 0, "", fmt.Errorf("create imported creator: %w", err)
-	}
-	return id, publicID, nil
 }
 
 type databaseQuery interface {

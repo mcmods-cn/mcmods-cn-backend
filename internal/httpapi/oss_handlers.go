@@ -1832,9 +1832,11 @@ func (s *Server) resolveUserOSSUploadCategory(r *http.Request, category, source 
 	for _, candidate := range []struct {
 		prefix      string
 		destination string
+		projectType string
 	}{
-		{prefix: "mod_gallery:", destination: "gallery"},
-		{prefix: "iconexport:", destination: "iconexporter"},
+		{prefix: "mod_gallery:", destination: "gallery", projectType: "mod"},
+		{prefix: "modpack_gallery:", destination: "gallery", projectType: "modpack"},
+		{prefix: "iconexport:", destination: "iconexporter", projectType: "mod"},
 	} {
 		if !strings.HasPrefix(normalizedSource, candidate.prefix) {
 			continue
@@ -1843,6 +1845,16 @@ func (s *Server) resolveUserOSSUploadCategory(r *http.Request, category, source 
 		siteID := strings.TrimSpace(strings.SplitN(remainder, ":", 2)[0])
 		if siteID == "" || siteID == "draft" {
 			return ossUserCategory(claims.Subject, normalizeOSSUserFileScope(category, source)), nil
+		}
+		if candidate.projectType == "modpack" {
+			pack, err := s.modpackBySiteID(r.Context(), normalizeModSiteID(siteID), claims.Subject, true)
+			if err != nil {
+				return ossUserCategory(claims.Subject, normalizeOSSUserFileScope(category, source)), nil
+			}
+			if !canEditModpack(claims, pack) {
+				return "", errors.New("没有权限向该整合包目录上传文件")
+			}
+			return ossProjectTextCategory("modpack", pack.PublicID, pack.PublicID, "gallery"), nil
 		}
 		identity, err := s.modIdentity(r.Context(), siteID)
 		if err != nil && candidate.destination == "gallery" {

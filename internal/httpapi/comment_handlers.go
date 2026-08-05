@@ -527,15 +527,21 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("commentId")))
 	var commentID, authorID int64
-	var projectID string
+	var projectID, targetKind string
+	var targetAuthorID int64
+	var acceptedAnswer bool
 	if err := s.db.QueryRow(r.Context(), `select comment.id,comment.author_id,
-		coalesce(direct_mod.project_code,resource_mod.project_code,'')
+		coalesce(direct_mod.project_code,direct_modpack.public_id,direct_simple.public_id,resource_mod.project_code,''),coalesce(post.author_id,0),coalesce(post.kind,''),
+		coalesce(post.accepted_comment_id=comment.id,false)
 		from comments comment
 		left join mods direct_mod on comment.target_type='mod' and direct_mod.id=comment.target_id
+		left join modpacks direct_modpack on comment.target_type='modpack' and direct_modpack.id=comment.target_id
+		left join simple_projects direct_simple on comment.target_type=direct_simple.project_type and direct_simple.id=comment.target_id
 		left join mod_content_versions resource_version
 			on comment.target_type='mod_resource' and resource_version.id=comment.target_version_id
 		left join mods resource_mod on resource_mod.id=resource_version.mod_id
-		where comment.public_id=$1`, publicID).Scan(&commentID, &authorID, &projectID); err != nil {
+		left join community_posts post on comment.target_type='community_post' and post.id=comment.target_id
+		where comment.public_id=$1`, publicID).Scan(&commentID, &authorID, &projectID, &targetAuthorID, &targetKind, &acceptedAnswer); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "评论不存在")
 		} else {
@@ -545,14 +551,19 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 	}
 	moderator := claimsAllow(claims, "comment.moderate") ||
 		(projectID != "" && claimsAllow(claims, "project.comment.moderate."+projectID))
+	postAuthorModerator := communityPostAuthorModeratesComments(targetKind) && targetAuthorID == claims.Subject
 	if r.Method == http.MethodPatch && !moderator &&
 		(authorID != claims.Subject || !claimsAllow(claims, "comment.edit.own")) {
 		writeError(w, http.StatusForbidden, "无权修改这条评论")
 		return
 	}
-	if r.Method == http.MethodDelete && !moderator &&
+	if r.Method == http.MethodDelete && !moderator && !postAuthorModerator &&
 		(authorID != claims.Subject || !claimsAllow(claims, "comment.delete.own")) {
 		writeError(w, http.StatusForbidden, "无权删除这条评论")
+		return
+	}
+	if r.Method == http.MethodDelete && acceptedAnswer {
+		writeError(w, http.StatusConflict, "an accepted answer cannot be deleted")
 		return
 	}
 	switch r.Method {
@@ -579,10 +590,16 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case http.MethodDelete:
-		if _, err := s.db.Exec(r.Context(), `update comments set body='',status='deleted',deleted_at=now(),
+		result, err := s.db.Exec(r.Context(), `update comments set body='',status='deleted',deleted_at=now(),
 			pinned_at=null,pinned_by=null,updated_at=now()
-			where id=$1 and status<>'deleted'`, commentID); err != nil {
+			where id=$1 and status<>'deleted'
+			and not exists(select 1 from community_posts where accepted_comment_id=$1)`, commentID)
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "删除评论失败")
+			return
+		}
+		if result.RowsAffected() == 0 {
+			writeError(w, http.StatusConflict, "已选为最佳回答的评论不能删除")
 			return
 		}
 		annotateActivity(r, activity.ActionDelete, activity.ObjectComment, publicID, 0, nil)
@@ -596,15 +613,19 @@ func (s *Server) commentPin(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("commentId")))
 	var commentID int64
 	var parentID *int64
-	var status, projectID string
+	var status, projectID, targetKind string
+	var targetAuthorID int64
 	if err := s.db.QueryRow(r.Context(), `select comment.id,comment.parent_id,comment.status,
-		coalesce(direct_mod.project_code,resource_mod.project_code,'')
+		coalesce(direct_mod.project_code,direct_modpack.public_id,direct_simple.public_id,resource_mod.project_code,''),coalesce(post.author_id,0),coalesce(post.kind,'')
 		from comments comment
 		left join mods direct_mod on comment.target_type='mod' and direct_mod.id=comment.target_id
+		left join modpacks direct_modpack on comment.target_type='modpack' and direct_modpack.id=comment.target_id
+		left join simple_projects direct_simple on comment.target_type=direct_simple.project_type and direct_simple.id=comment.target_id
 		left join mod_content_versions resource_version
 			on comment.target_type='mod_resource' and resource_version.id=comment.target_version_id
 		left join mods resource_mod on resource_mod.id=resource_version.mod_id
-		where comment.public_id=$1`, publicID).Scan(&commentID, &parentID, &status, &projectID); err != nil {
+		left join community_posts post on comment.target_type='community_post' and post.id=comment.target_id
+		where comment.public_id=$1`, publicID).Scan(&commentID, &parentID, &status, &projectID, &targetAuthorID, &targetKind); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "评论不存在")
 		} else {
@@ -621,7 +642,8 @@ func (s *Server) commentPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	allowed := claimsAllow(claims, "comment.pin") ||
-		(projectID != "" && claimsAllow(claims, "project.comment.pin."+projectID))
+		(projectID != "" && claimsAllow(claims, "project.comment.pin."+projectID)) ||
+		(communityPostAuthorModeratesComments(targetKind) && targetAuthorID == claims.Subject)
 	if !allowed {
 		writeError(w, http.StatusForbidden, "无权置顶该评论")
 		return
@@ -1059,18 +1081,25 @@ func (s *Server) annotateCommentPermissions(ctx context.Context, items []comment
 	}
 
 	type permissionContext struct {
-		CommentID string
-		AuthorID  int64
-		ProjectID string
-		Root      bool
+		CommentID      string
+		AuthorID       int64
+		ProjectID      string
+		TargetAuthorID int64
+		TargetKind     string
+		Root           bool
+		AcceptedAnswer bool
 	}
 	rows, err := s.db.Query(ctx, `select comment.public_id,comment.author_id,
-		coalesce(direct_mod.project_code,resource_mod.project_code,''),comment.parent_id is null
+		coalesce(direct_mod.project_code,direct_modpack.public_id,direct_simple.public_id,resource_mod.project_code,''),coalesce(post.author_id,0),coalesce(post.kind,''),comment.parent_id is null,
+		coalesce(post.accepted_comment_id=comment.id,false)
 		from comments comment
 		left join mods direct_mod on comment.target_type='mod' and direct_mod.id=comment.target_id
+		left join modpacks direct_modpack on comment.target_type='modpack' and direct_modpack.id=comment.target_id
+		left join simple_projects direct_simple on comment.target_type=direct_simple.project_type and direct_simple.id=comment.target_id
 		left join mod_content_versions resource_version
 			on comment.target_type='mod_resource' and resource_version.id=comment.target_version_id
 		left join mods resource_mod on resource_mod.id=resource_version.mod_id
+		left join community_posts post on comment.target_type='community_post' and post.id=comment.target_id
 		where comment.public_id=any($1::text[])`, commentIDs)
 	if err != nil {
 		return err
@@ -1079,7 +1108,7 @@ func (s *Server) annotateCommentPermissions(ctx context.Context, items []comment
 	authorSet := make(map[int64]struct{}, len(items))
 	for rows.Next() {
 		var value permissionContext
-		if err = rows.Scan(&value.CommentID, &value.AuthorID, &value.ProjectID, &value.Root); err != nil {
+		if err = rows.Scan(&value.CommentID, &value.AuthorID, &value.ProjectID, &value.TargetAuthorID, &value.TargetKind, &value.Root, &value.AcceptedAnswer); err != nil {
 			rows.Close()
 			return err
 		}
@@ -1119,16 +1148,21 @@ func (s *Server) annotateCommentPermissions(ctx context.Context, items []comment
 			(value.ProjectID != "" && claimsAllow(claims, "project.comment.moderate."+value.ProjectID))
 		pinModerator := claimsAllow(claims, "comment.pin") ||
 			(value.ProjectID != "" && claimsAllow(claims, "project.comment.pin."+value.ProjectID))
+		postAuthorModerator := communityPostAuthorModeratesComments(value.TargetKind) && value.TargetAuthorID == claims.Subject
 		own := claims.Subject == value.AuthorID
 		item.CanEdit = !item.Deleted && (moderator || own && claimsAllow(claims, "comment.edit.own"))
-		item.CanDelete = !item.Deleted && (moderator || own && claimsAllow(claims, "comment.delete.own"))
-		item.CanPin = value.Root && !item.Deleted && pinModerator
+		item.CanDelete = !item.Deleted && !value.AcceptedAnswer && (moderator || postAuthorModerator || own && claimsAllow(claims, "comment.delete.own"))
+		item.CanPin = value.Root && !item.Deleted && (pinModerator || postAuthorModerator)
 		item.CanReply = !item.Deleted && claimsAllow(claims, "comment.create")
 		item.CanReact = !item.Deleted && claimsAllow(claims, "comment.react")
 		item.CanReport = !item.Deleted && !own && claimsAllow(claims, "comment.report")
 		item.CanWatch = claimsAllow(claims, "comment.watch")
 	}
 	return nil
+}
+
+func communityPostAuthorModeratesComments(kind string) bool {
+	return kind == "tutorial" || kind == "discussion"
 }
 
 func commentProjectRoleFromPermissions(permissions []security.PermissionRule, projectID string) string {
@@ -1164,6 +1198,20 @@ func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey
 			where mod.project_code=$1 and (mod.review_status='approved' or mod.created_by=$2 or $3)`,
 			targetKey, viewerID, moderator).Scan(&info.InternalID, &info.Title, &info.URL)
 		return info, err
+	case "modpack":
+		err := s.db.QueryRow(ctx, `select pack.id,pack.primary_name,route.canonical_path
+			from modpacks pack join public_routes route on route.public_id=pack.public_id and route.entity_type='modpack'
+			where pack.public_id=$1 and (pack.review_status='approved' or pack.created_by=$2 or $3)`,
+			targetKey, viewerID, moderator).Scan(&info.InternalID, &info.Title, &info.URL)
+		return info, err
+	case "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
+		err := s.db.QueryRow(ctx, `select project.id,project.primary_name,route.canonical_path
+			from simple_projects project join public_routes route
+				on route.public_id=project.public_id and route.entity_type=project.project_type
+			where project.public_id=$1 and project.project_type=$2
+			  and (project.review_status='approved' or project.created_by=$3 or $4)`,
+			targetKey, targetType, viewerID, moderator).Scan(&info.InternalID, &info.Title, &info.URL)
+		return info, err
 	case "blueprint":
 		err := s.db.QueryRow(ctx, `select blueprint.id,blueprint.title,route.canonical_path
 			from blueprints blueprint join public_routes route on route.public_id=blueprint.public_id and route.entity_type='blueprint'
@@ -1184,6 +1232,13 @@ func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey
 			from creators creator where creator.public_id=$1
 			  and (creator.review_status='approved' or creator.created_by=$2 or creator.claimed_by=$2 or $3)`,
 			targetKey, viewerID, moderator).Scan(&info.InternalID, &info.Title, &info.URL)
+		return info, err
+	case "community_post":
+		err := s.db.QueryRow(ctx, `select post.id,post.title,route.canonical_path
+			from community_posts post join public_routes route on route.public_id=post.public_id and route.entity_type='community_post'
+			where post.public_id=$1 and post.status='active'
+			  and (post.review_status='approved' or post.author_id=$2 or $3)`, targetKey, viewerID, moderator).
+			Scan(&info.InternalID, &info.Title, &info.URL)
 		return info, err
 	case "player_profile":
 		err := s.db.QueryRow(ctx, `select profile.id,profile.name,'/players/'||profile.public_id

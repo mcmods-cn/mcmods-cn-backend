@@ -210,8 +210,8 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 	request.GameVersions = uniqueTrimmed(request.GameVersions, 100)
 	request.Loaders = normalizeLoaders(request.Loaders)
 	request.OSSFileID = strings.ToLower(strings.TrimSpace(request.OSSFileID))
-	if !validCatalogPublicID(request.OSSFileID) || request.VersionName == "" || len(request.GameVersions) == 0 || len(request.Loaders) == 0 {
-		writeError(w, http.StatusBadRequest, "file, version, game version, and loader are required")
+	if !validCatalogPublicID(request.OSSFileID) || request.VersionName == "" || len(request.GameVersions) == 0 || projectFileRequiresLoader(project.ProjectType) && len(request.Loaders) == 0 {
+		writeError(w, http.StatusBadRequest, "file, version, game version, and applicable loader are required")
 		return
 	}
 	if request.ReleaseChannel != "release" && request.ReleaseChannel != "beta" && request.ReleaseChannel != "alpha" {
@@ -235,8 +235,10 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 	expectedCategory := ossProjectReleaseCategory(project.ProjectType, project.ProjectID)
-	if uploaderID != currentClaims(r).Subject || category != expectedCategory || strings.ToLower(filepath.Ext(fileName)) != ".jar" {
-		writeError(w, http.StatusBadRequest, "the uploaded file does not belong to this project or is not a JAR")
+	extension := strings.ToLower(filepath.Ext(fileName))
+	validExtension := projectFileExtensionAllowed(project.ProjectType, extension)
+	if uploaderID != currentClaims(r).Subject || category != expectedCategory || !validExtension {
+		writeError(w, http.StatusBadRequest, "the uploaded file does not belong to this project or has an unsupported format")
 		return
 	}
 	if request.DisplayName == "" {
@@ -387,13 +389,25 @@ func (s *Server) projectFileContext(ctx context.Context, rawType, rawID string) 
 	if projectType == "" || len(projectID) != 9 {
 		return projectFileContext{}, errors.New("invalid project reference")
 	}
-	if projectType != "mod" {
+	result := projectFileContext{ProjectType: projectType, ProjectID: projectID}
+	var err error
+	switch projectType {
+	case "mod":
+		err = s.db.QueryRow(ctx, `select id,slug,review_status,modrinth_project_id,curseforge_project_id
+			from mods where project_code=$1`, projectID).Scan(&result.ProjectInternalID, &result.SiteID, &result.ReviewStatus,
+			&result.ModrinthProjectID, &result.CurseForgeProjectID)
+	case "modpack":
+		err = s.db.QueryRow(ctx, `select id,slug,review_status,modrinth_project_id,curseforge_project_id
+			from modpacks where public_id=$1`, projectID).Scan(&result.ProjectInternalID, &result.SiteID, &result.ReviewStatus,
+			&result.ModrinthProjectID, &result.CurseForgeProjectID)
+	case "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
+		err = s.db.QueryRow(ctx, `select id,slug,review_status,modrinth_project_id,curseforge_project_id
+			from simple_projects where public_id=$1 and project_type=$2`, projectID, projectType).
+			Scan(&result.ProjectInternalID, &result.SiteID, &result.ReviewStatus,
+				&result.ModrinthProjectID, &result.CurseForgeProjectID)
+	default:
 		return projectFileContext{}, errors.New("project type is not connected to downloads yet")
 	}
-	result := projectFileContext{ProjectType: projectType, ProjectID: projectID}
-	err := s.db.QueryRow(ctx, `select id,slug,review_status,modrinth_project_id,curseforge_project_id
-		from mods where project_code=$1`, projectID).Scan(&result.ProjectInternalID, &result.SiteID, &result.ReviewStatus,
-		&result.ModrinthProjectID, &result.CurseForgeProjectID)
 	return result, err
 }
 
@@ -401,7 +415,7 @@ func normalizeProjectFileType(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	value = strings.ReplaceAll(value, "-", "_")
 	switch value {
-	case "mod", "modpack", "plugin", "map", "resource_pack", "shader_pack", "datapack":
+	case "mod", "modpack", "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
 		return value
 	case "resourcepack", "texture_pack", "texturepack":
 		return "resource_pack"
@@ -409,6 +423,25 @@ func normalizeProjectFileType(value string) string {
 		return "shader_pack"
 	default:
 		return ""
+	}
+}
+
+func projectFileRequiresLoader(projectType string) bool {
+	return projectType == "mod" || projectType == "modpack" || projectType == "plugin" || projectType == "addon"
+}
+
+func projectFileExtensionAllowed(projectType, extension string) bool {
+	switch projectType {
+	case "mod", "plugin":
+		return extension == ".jar"
+	case "modpack":
+		return extension == ".mrpack" || extension == ".zip"
+	case "map", "resource_pack", "shader_pack", "datapack":
+		return extension == ".zip"
+	case "addon":
+		return extension == ".jar" || extension == ".zip"
+	default:
+		return false
 	}
 }
 

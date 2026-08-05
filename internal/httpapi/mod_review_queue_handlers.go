@@ -32,6 +32,21 @@ func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) 
 			join mods mod on mod.id=revision.entity_id
 			where revision.aggregate_type='mod' and request.status='pending'
 			union all
+			select revision.public_id,'modpack'::text,pack.slug,pack.primary_name,request.submitted_by,
+			       'Modpack revision #' || revision.revision_no,request.reason,revision.created_at
+			from content_revisions revision
+			join change_requests request on request.proposed_revision_id=revision.id
+			join modpacks pack on pack.id=revision.entity_id
+			where revision.aggregate_type='modpack' and request.status='pending'
+			union all
+			select revision.public_id,project.project_type,project.slug,project.primary_name,request.submitted_by,
+			       initcap(replace(project.project_type,'_',' ')) || ' revision #' || revision.revision_no,
+			       request.reason,revision.created_at
+			from content_revisions revision
+			join change_requests request on request.proposed_revision_id=revision.id
+			join simple_projects project on project.id=revision.entity_id and project.project_type=revision.entity_type
+			where revision.aggregate_type='simple_project' and request.status='pending'
+			union all
 			select revision.public_id,'entry'::text,mod.slug,mod.primary_name,request.submitted_by,
 			       'Entry introduction: ' || (request.metadata->>'objectId'),request.reason,revision.created_at
 			from content_revisions revision
@@ -64,6 +79,15 @@ func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) 
 			join creators creator on creator.public_id=revision.aggregate_key
 			where revision.aggregate_type='creator' and request.status='pending'
 			union all
+			select revision.public_id,post.kind::text,post.public_id,post.title,request.submitted_by,
+			       case post.kind when 'tutorial' then 'Tutorial: ' when 'issue' then 'BUG / feature: '
+			            when 'news' then 'News: ' else 'Question: ' end || post.title,
+			       request.reason,revision.created_at
+			from content_revisions revision
+			join change_requests request on request.proposed_revision_id=revision.id
+			join community_posts post on post.public_id=revision.aggregate_key
+			where revision.aggregate_type='community_post' and request.status='pending'
+			union all
 			select export_revision.id,'export'::text,mod.slug,mod.primary_name,job.created_by,
 			       'mcmods_exporter ' || export_revision.minecraft_version || ' / ' || export_revision.loader,
 			       export_revision.source_namespace || ' revision ' || export_revision.revision_no,
@@ -92,7 +116,7 @@ func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) 
 		}
 		if item.Source == "revision" {
 			item.ReviewURL = "/api/v1/mods/" + item.ModSiteID + "/revisions/" + item.ID
-		} else if item.Source == "entry" || item.Source == "catalog" || item.Source == "blueprint" || item.Source == "creator" {
+		} else if item.Source == "entry" || item.Source == "catalog" || item.Source == "blueprint" || item.Source == "creator" || item.Source == "modpack" || item.Source == "tutorial" || item.Source == "issue" || item.Source == "news" || item.Source == "discussion" || simpleProjectTypes[item.Source] {
 			item.ReviewURL = "/api/v1/content-revisions/" + item.ID
 		} else {
 			item.ReviewURL = "/api/v1/admin/export-revisions/" + item.ID + "/activate"

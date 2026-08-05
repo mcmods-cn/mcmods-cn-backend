@@ -124,6 +124,197 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status, "publicId": snapshot.PublicID})
 		return
 	}
+	if aggregateType == communityPostAggregate {
+		var snapshot communityPostSnapshot
+		if err = json.Unmarshal(snapshotRaw, &snapshot); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode community post revision")
+			return
+		}
+		var postID, postAuthorID int64
+		var publishedRevisionID *int64
+		var title string
+		if err = tx.QueryRow(r.Context(), `select id,author_id,published_revision_id,title from community_posts where public_id=$1 for update`, aggregateKey).
+			Scan(&postID, &postAuthorID, &publishedRevisionID, &title); err != nil {
+			writeError(w, http.StatusNotFound, "community post not found")
+			return
+		}
+		claims := currentClaims(r)
+		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
+			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err == nil {
+				err = tx.Commit(r.Context())
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record community post conflict")
+				return
+			}
+			writeError(w, http.StatusConflict, "community post changed after this request was submitted")
+			return
+		}
+		if request.Status == "approved" {
+			if err = applyCommunityPostSnapshotTx(r.Context(), tx, postID, revisionID, snapshot); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to publish community post")
+				return
+			}
+		} else {
+			if publishedRevisionID == nil {
+				if err = refundCommunityPostBountyTx(r.Context(), tx, postID, postAuthorID, aggregateKey, "review_rejected"); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to refund rejected question bounty")
+					return
+				}
+			}
+			if _, err = tx.Exec(r.Context(), `update community_posts set
+				review_status=case when published_revision_id is null then 'rejected' else 'approved' end,updated_at=now() where id=$1`, postID); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to reject community post")
+				return
+			}
+		}
+		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record community post review")
+			return
+		}
+		if request.Status == "approved" {
+			if err = appendCatalogPublishedReviewEventTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record community post publication")
+				return
+			}
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit community post review")
+			return
+		}
+		code := "review_approved"
+		if request.Status == "rejected" {
+			code = "review_rejected"
+		}
+		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": title, "reason": request.Note}, map[string]any{
+			"communityPostId": aggregateKey, "targetLabel": title, "url": communityPostPath(snapshot.Kind, aggregateKey),
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status, "publicId": aggregateKey})
+		return
+	}
+	if aggregateType == modpackAggregate {
+		var snapshot createModpackRequest
+		if err = json.Unmarshal(snapshotRaw, &snapshot); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode modpack revision")
+			return
+		}
+		var modpackID int64
+		var publishedRevisionID *int64
+		var title string
+		if err = tx.QueryRow(r.Context(), `select id,published_revision_id,primary_name from modpacks where public_id=$1 for update`, aggregateKey).
+			Scan(&modpackID, &publishedRevisionID, &title); err != nil {
+			writeError(w, http.StatusNotFound, "modpack not found")
+			return
+		}
+		claims := currentClaims(r)
+		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
+			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err == nil {
+				err = tx.Commit(r.Context())
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record modpack conflict")
+				return
+			}
+			writeError(w, http.StatusConflict, "modpack changed after this request was submitted")
+			return
+		}
+		if request.Status == "approved" {
+			if err = applyModpackSnapshotTx(r.Context(), tx, modpackID, revisionID, claims.Subject, snapshot); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to publish modpack")
+				return
+			}
+		} else if _, err = tx.Exec(r.Context(), `update modpacks set
+			review_status=case when published_revision_id is null then 'rejected' else 'approved' end,updated_at=now() where id=$1`, modpackID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to reject modpack")
+			return
+		}
+		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record modpack review")
+			return
+		}
+		if request.Status == "approved" {
+			if err = appendCatalogPublishedReviewEventTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record modpack publication")
+				return
+			}
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit modpack review")
+			return
+		}
+		code := "review_approved"
+		if request.Status == "rejected" {
+			code = "review_rejected"
+		}
+		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": title, "reason": request.Note}, map[string]any{
+			"modpackId": aggregateKey, "targetLabel": title, "url": "/modpacks/" + snapshot.SiteID,
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status, "publicId": aggregateKey})
+		return
+	}
+	if aggregateType == simpleProjectAggregate {
+		var snapshot simpleProjectSnapshot
+		if err = json.Unmarshal(snapshotRaw, &snapshot); err != nil || normalizeSimpleProjectType(snapshot.ProjectType) == "" {
+			writeError(w, http.StatusInternalServerError, "failed to decode project revision")
+			return
+		}
+		var projectID int64
+		var publishedRevisionID *int64
+		var title string
+		if err = tx.QueryRow(r.Context(), `select id,published_revision_id,primary_name from simple_projects
+			where public_id=$1 and project_type=$2 for update`, aggregateKey, snapshot.ProjectType).
+			Scan(&projectID, &publishedRevisionID, &title); err != nil {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		claims := currentClaims(r)
+		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
+			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err == nil {
+				err = tx.Commit(r.Context())
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record project conflict")
+				return
+			}
+			writeError(w, http.StatusConflict, "project changed after this request was submitted")
+			return
+		}
+		if request.Status == "approved" {
+			if err = applySimpleProjectSnapshotTx(r.Context(), tx, projectID, revisionID, claims.Subject, snapshot); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to publish project")
+				return
+			}
+		} else if _, err = tx.Exec(r.Context(), `update simple_projects set
+			review_status=case when published_revision_id is null then 'rejected' else 'approved' end,updated_at=now()
+			where id=$1`, projectID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to reject project")
+			return
+		}
+		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record project review")
+			return
+		}
+		if request.Status == "approved" {
+			if err = appendCatalogPublishedReviewEventTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record project publication")
+				return
+			}
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit project review")
+			return
+		}
+		code := "review_approved"
+		if request.Status == "rejected" {
+			code = "review_rejected"
+		}
+		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": title, "reason": request.Note}, map[string]any{
+			"projectId": aggregateKey, "projectType": snapshot.ProjectType, "targetLabel": title,
+			"url": simpleProjectWebPath(snapshot.ProjectType, snapshot.SiteID),
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status, "publicId": aggregateKey})
+		return
+	}
 	if catalogEditorAggregate(aggregateType) {
 		if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext($1))`, aggregateType+":"+aggregateKey); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to lock catalog content")
