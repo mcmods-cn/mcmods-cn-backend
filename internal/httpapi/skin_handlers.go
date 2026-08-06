@@ -174,16 +174,17 @@ type skinRowScanner interface {
 func (s *Server) skinService(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	w.Header().Set("Cache-Control", "private, no-store")
-	serviceEnabled := s.ygg != nil && s.ygg.privateKey != nil && s.ygg.disabledReason == nil
-	serverName := strings.TrimSpace(s.cfg.Yggdrasil.ServerName)
+	yggdrasilConfig, service := s.yggdrasilRuntimeSnapshot()
+	serviceEnabled := service != nil && service.privateKey != nil && service.disabledReason == nil
+	serverName := strings.TrimSpace(yggdrasilConfig.ServerName)
 	if serverName == "" {
 		serverName = "Mcmods-cn"
 	}
-	apiRoot := strings.TrimSpace(s.cfg.Yggdrasil.PublicBaseURL)
+	apiRoot := strings.TrimSpace(yggdrasilConfig.PublicBaseURL)
 	if apiRoot != "" {
 		apiRoot = strings.TrimRight(apiRoot, "/") + "/"
 	}
-	textureBaseURL := strings.TrimSpace(s.cfg.Yggdrasil.TextureBaseURL)
+	textureBaseURL := strings.TrimSpace(yggdrasilConfig.TextureBaseURL)
 	if textureBaseURL != "" {
 		textureBaseURL = strings.TrimRight(textureBaseURL, "/") + "/"
 	}

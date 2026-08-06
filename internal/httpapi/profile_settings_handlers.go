@@ -200,7 +200,7 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusForbidden, "没有使用动态头像权限")
 			return
 		}
-		avatarURL := buildPublicOSSURL(s.ossConfigFromSettings(r.Context()), file.ObjectKey)
+		avatarURL := ossStoredObjectURL(s.ossConfigFromSettings(r.Context()), file.ObjectKey)
 		if _, err := tx.Exec(
 			r.Context(),
 			`update users set avatar_file_id = $2, avatar_url = $3, updated_at = now() where id = $1`,
@@ -270,6 +270,16 @@ func (s *Server) loadUserProfileSettings(ctx context.Context, userID int64) (use
 	var response userProfileSettingsResponse
 	if err := s.db.QueryRow(ctx, `select public_id, username, signature, avatar_url, profile_background_url, timezone from users where id = $1`, userID).
 		Scan(&response.PublicID, &response.Username, &response.Signature, &response.AvatarURL, &response.ProfileBackgroundURL, &response.Timezone); err != nil {
+		return response, err
+	}
+	ossCfg := s.ossConfigFromSettings(ctx)
+	var err error
+	response.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, response.AvatarURL)
+	if err != nil {
+		return response, err
+	}
+	response.ProfileBackgroundURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, response.ProfileBackgroundURL)
+	if err != nil {
 		return response, err
 	}
 	response.SignatureMaxBytes = s.profileConfigFromSettings(ctx).SignatureMaxBytes

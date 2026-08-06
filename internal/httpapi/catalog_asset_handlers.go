@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -143,26 +142,9 @@ func (s *Server) redirectCatalogOSSAsset(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	cfg := s.ossConfigFromSettings(r.Context())
-	w.Header().Set("Cache-Control", "private, no-store")
-	if cfg.DownloadURLMode == ossDownloadModeESAPrivateOrigin {
-		http.Redirect(w, r, buildPublicOSSURL(cfg, objectKey), http.StatusTemporaryRedirect)
-		return
-	}
-	client, err := s.ossDownloadClient(r.Context(), cfg)
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
 	ttl := time.Duration(cfg.DownloadURLTTLMinutes) * time.Minute
 	if ttl <= 0 || ttl > time.Hour {
 		ttl = 15 * time.Minute
 	}
-	result, err := client.Presign(r.Context(), &aliyunoss.GetObjectRequest{
-		Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey),
-	}, aliyunoss.PresignExpires(ttl))
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to sign catalog asset")
-		return
-	}
-	http.Redirect(w, r, result.URL, http.StatusTemporaryRedirect)
+	s.redirectOSSObjectAccess(w, r, objectKey, ossObjectAccessOptions{Expires: ttl})
 }

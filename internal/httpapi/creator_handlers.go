@@ -86,8 +86,12 @@ func (s *Server) creators(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("query"))
 	limit := boundedInt(r.URL.Query().Get("limit"), 40, 1, 100)
 	admin := claimsAllow(claims, "admin.*") || claimsAllow(claims, "content.review")
+	indexed := s.searchCreatorPage(r.Context(), query, kind, claims, admin, limit)
+	indexedCounts := s.searchCreatorCounts(r.Context(), query, claims, admin)
 	var authorCount, teamCount int
-	if err := s.db.QueryRow(r.Context(), `
+	if indexedCounts.Used {
+		authorCount, teamCount = indexedCounts.Author, indexedCounts.Team
+	} else if err := s.db.QueryRow(r.Context(), `
 		select count(*) filter(where creator.kind='author'),
 		       count(*) filter(where creator.kind='team')
 		from creators creator
@@ -104,21 +108,28 @@ func (s *Server) creators(w http.ResponseWriter, r *http.Request) {
 		left join content_creator_bindings binding on binding.creator_id=creator.id and binding.subject_type='mod'
 		left join mods mod on mod.id=binding.subject_id and mod.review_status='approved'
 		where ($1='' or creator.kind=$1)
-		  and ($2='' or creator.name ilike '%' || $2 || '%')
+		  and (($5 and creator.id=any($6::bigint[])) or (not $5 and ($2='' or creator.name ilike '%' || $2 || '%')))
 		  and (creator.review_status='approved' or creator.created_by=$3 or creator.claimed_by=$3 or $4)
 		group by creator.id
-		order by creator.review_status='approved' desc,lower(creator.name),creator.id
-		limit $5`, kind, query, claims.Subject, admin, limit)
+		order by case when $5 then array_position($6::bigint[],creator.id) end,
+			creator.review_status='approved' desc,lower(creator.name),creator.id
+		limit $7`, kind, query, claims.Subject, admin, indexed.Used, indexed.IDs, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load creators")
 		return
 	}
 	defer rows.Close()
 	items := make([]creatorSummary, 0)
+	ossCfg := s.ossConfigFromSettings(r.Context())
 	for rows.Next() {
 		var item creatorSummary
 		if err = rows.Scan(&item.PublicID, &item.Kind, &item.Name, &item.AvatarURL, &item.ReviewStatus, &item.Claimed, &item.WorkCount); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode creators")
+			return
+		}
+		item.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.AvatarURL)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate creator avatar URL")
 			return
 		}
 		items = append(items, item)
@@ -140,14 +151,16 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 	var id int64
 	var item creatorSummary
 	var description string
+	var avatarFileID *string
 	var createdBy, claimedBy *int64
 	var publishedRevisionID *int64
 	err := s.db.QueryRow(r.Context(), `
-		select id,public_id,kind,name,avatar_url,description_markdown,review_status,created_by,claimed_by,published_revision_id
+		select id,public_id,kind,name,avatar_url,description_markdown,review_status,created_by,claimed_by,published_revision_id,
+		       (select public_id from oss_files where id=creators.avatar_file_id)
 		from creators
 		where public_id=$1 and (review_status='approved' or created_by=$2 or claimed_by=$2 or $3)`,
 		publicID, claims.Subject, admin,
-	).Scan(&id, &item.PublicID, &item.Kind, &item.Name, &item.AvatarURL, &description, &item.ReviewStatus, &createdBy, &claimedBy, &publishedRevisionID)
+	).Scan(&id, &item.PublicID, &item.Kind, &item.Name, &item.AvatarURL, &description, &item.ReviewStatus, &createdBy, &claimedBy, &publishedRevisionID, &avatarFileID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "creator not found")
 		return
@@ -157,6 +170,11 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item.Claimed = claimedBy != nil
+	item.AvatarURL, err = s.resolveStoredOSSObjectAccessURL(r.Context(), item.AvatarURL)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate creator avatar URL")
+		return
+	}
 	links, err := s.creatorLinks(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load creator links")
@@ -197,6 +215,7 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 		var userPublicID, username, avatarURL string
 		if scanErr := s.db.QueryRow(r.Context(), `select public_id,username,avatar_url from users where id=$1`, *claimedBy).
 			Scan(&userPublicID, &username, &avatarURL); scanErr == nil {
+			avatarURL, _ = s.resolveStoredOSSObjectAccessURL(r.Context(), avatarURL)
 			claimedUser = map[string]any{
 				"id": userPublicID, "publicId": userPublicID, "username": username,
 				"avatarUrl": avatarURL,
@@ -211,6 +230,7 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 		"collaborators": collaborators, "members": members, "teams": teams, "works": works,
 		"defaultLocale": defaultLocale, "localizations": localizations,
 		"claimedUser": claimedUser, "canEdit": canEdit,
+		"avatarFileId":        avatarFileID,
 		"canClaim":            claims.Subject > 0 && claimedBy == nil && item.ReviewStatus == "approved",
 		"publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, publishedRevisionID),
 	})
@@ -243,7 +263,7 @@ func (s *Server) createCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_, publicID, revisionID, err := createCreatorTx(r.Context(), tx, snapshot, claims.Subject, status, r)
+	_, publicID, created, err := createCreatorTx(r.Context(), tx, snapshot, claims.Subject, status, r)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, http.StatusConflict, "creator already exists")
@@ -257,7 +277,7 @@ func (s *Server) createCreator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	annotateActivity(r, activity.ActionCreate, creatorObjectType(snapshot.Kind), publicID, len(snapshot.DescriptionMarkdown), map[string]any{"creatorId": publicID})
-	writeJSON(w, http.StatusCreated, map[string]any{"publicId": publicID, "revisionId": revisionID, "reviewStatus": status})
+	writeJSON(w, http.StatusCreated, map[string]any{"publicId": publicID, "revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID, "reviewStatus": status})
 }
 
 func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
@@ -346,7 +366,7 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	}
 	addedBytes := activity.AddedMarkdownBytes(previousDescription, snapshot.DescriptionMarkdown)
 	annotateActivity(r, activity.ActionEdit, creatorObjectType(kind), publicID, addedBytes, map[string]any{"revisionId": created.RevisionPublicID})
-	writeJSON(w, http.StatusOK, map[string]any{"revisionId": created.RevisionPublicID, "reviewStatus": status})
+	writeJSON(w, http.StatusOK, map[string]any{"revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID, "reviewStatus": status})
 }
 
 func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
@@ -606,7 +626,7 @@ func (s *Server) createCreatorRole(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "code": request.Code, "name": request.Name})
 }
 
-func createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, actorID int64, status string, r *http.Request) (int64, string, string, error) {
+func createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, actorID int64, status string, r *http.Request) (int64, string, createdContentRevision, error) {
 	var id int64
 	var publicID string
 	err := tx.QueryRow(ctx, `insert into creators(
@@ -616,7 +636,7 @@ func createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, a
 		snapshot.AvatarURL, snapshot.AvatarInternalID, actorID, status,
 	).Scan(&id, &publicID)
 	if err != nil {
-		return 0, "", "", err
+		return 0, "", createdContentRevision{}, err
 	}
 	raw, _ := json.Marshal(snapshot)
 	created, err := createContentRevisionTx(ctx, tx, createContentRevisionParams{
@@ -625,23 +645,23 @@ func createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, a
 		Metadata: map[string]any{"creatorId": publicID, "kind": snapshot.Kind}, Request: r,
 	})
 	if err != nil {
-		return 0, "", "", err
+		return 0, "", createdContentRevision{}, err
 	}
 	if err = applyCreatorRelationsTx(ctx, tx, id, snapshot); err != nil {
-		return 0, "", "", err
+		return 0, "", createdContentRevision{}, err
 	}
 	if status == "approved" {
 		if err = publishCreatorLocalizationsTx(ctx, tx, id, snapshot.Kind, snapshot.Name, snapshot.DefaultLocale, snapshot.Localizations, created.RevisionID, actorID); err != nil {
-			return 0, "", "", err
+			return 0, "", createdContentRevision{}, err
 		}
 		if _, err = tx.Exec(ctx, `update creators set published_revision_id=$2,review_status='approved' where id=$1`, id, created.RevisionID); err != nil {
-			return 0, "", "", err
+			return 0, "", createdContentRevision{}, err
 		}
 		if err = appendReviewResolutionTx(ctx, tx, created.ChangeRequestID, "approved", actorID, "automatic approval", r); err != nil {
-			return 0, "", "", err
+			return 0, "", createdContentRevision{}, err
 		}
 	}
-	return id, publicID, created.RevisionPublicID, nil
+	return id, publicID, created, nil
 }
 
 func ensureNamedCreatorSnapshotTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, actorID int64, status string, r *http.Request) (int64, string, bool, error) {
@@ -704,7 +724,7 @@ func (s *Server) applyCreatorSnapshotTx(
 			return err
 		}
 		avatarFileID = &file.ID
-		snapshot.AvatarURL = buildPublicOSSURL(s.ossConfigFromSettings(ctx), file.ObjectKey)
+		snapshot.AvatarURL = ossStoredObjectURL(s.ossConfigFromSettings(ctx), file.ObjectKey)
 	}
 	if _, err := tx.Exec(ctx, `update creators set
 		name=$2,normalized_name=$3,description_markdown=$4,avatar_url=$5,avatar_file_id=$6,
@@ -741,7 +761,7 @@ func (s *Server) resolveCreatorAvatarTx(
 	}
 	snapshot.AvatarFileID = &publicID
 	snapshot.AvatarInternalID = &file.ID
-	snapshot.AvatarURL = buildPublicOSSURL(s.ossConfigFromSettings(ctx), file.ObjectKey)
+	snapshot.AvatarURL = ossStoredObjectURL(s.ossConfigFromSettings(ctx), file.ObjectKey)
 	return nil
 }
 
@@ -873,9 +893,14 @@ func (s *Server) creatorCollaborators(ctx context.Context, creatorID int64) ([]c
 	}
 	defer rows.Close()
 	result := make([]creatorSummary, 0)
+	ossCfg := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var item creatorSummary
 		if err = rows.Scan(&item.PublicID, &item.Kind, &item.Name, &item.AvatarURL, &item.ReviewStatus, &item.Claimed, &item.WorkCount); err != nil {
+			return nil, err
+		}
+		item.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, item.AvatarURL)
+		if err != nil {
 			return nil, err
 		}
 		result = append(result, item)
@@ -897,9 +922,14 @@ func (s *Server) creatorMembers(ctx context.Context, creatorID, viewerID int64, 
 	}
 	defer rows.Close()
 	result := make([]map[string]any, 0)
+	ossCfg := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var publicID, name, avatarURL, roleID, roleCode, roleName, title string
 		if err = rows.Scan(&publicID, &name, &avatarURL, &roleID, &roleCode, &roleName, &title); err != nil {
+			return nil, err
+		}
+		avatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, avatarURL)
+		if err != nil {
 			return nil, err
 		}
 		result = append(result, map[string]any{
@@ -928,6 +958,7 @@ func (s *Server) creatorTeams(ctx context.Context, creatorID int64) ([]map[strin
 	}
 	defer rows.Close()
 	result := make([]map[string]any, 0)
+	ossCfg := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var team creatorSummary
 		var roleID, roleCode, roleName, title string
@@ -935,6 +966,10 @@ func (s *Server) creatorTeams(ctx context.Context, creatorID int64) ([]map[strin
 			&team.PublicID, &team.Kind, &team.Name, &team.AvatarURL, &team.ReviewStatus,
 			&team.Claimed, &team.WorkCount, &roleID, &roleCode, &roleName, &title,
 		); err != nil {
+			return nil, err
+		}
+		team.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, team.AvatarURL)
+		if err != nil {
 			return nil, err
 		}
 		result = append(result, map[string]any{
@@ -957,9 +992,14 @@ func (s *Server) creatorWorks(ctx context.Context, creatorID int64) ([]map[strin
 	}
 	defer rows.Close()
 	result := make([]map[string]any, 0)
+	ossCfg := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var uniqueID, siteID, primaryName, secondaryName, summary, iconURL string
 		if err = rows.Scan(&uniqueID, &siteID, &primaryName, &secondaryName, &summary, &iconURL); err != nil {
+			return nil, err
+		}
+		iconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, iconURL)
+		if err != nil {
 			return nil, err
 		}
 		result = append(result, map[string]any{

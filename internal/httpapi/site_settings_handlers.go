@@ -23,7 +23,20 @@ func defaultSiteGeneralConfig() siteGeneralConfig {
 }
 
 func (s *Server) publicSiteGeneralConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.siteGeneralConfigFromSettings(r.Context()))
+	config := s.siteGeneralConfigFromSettings(r.Context())
+	if config.LogoURL != "" {
+		config.LogoURL = "/api/v1/site/logo"
+	}
+	writeJSON(w, http.StatusOK, config)
+}
+
+func (s *Server) siteLogo(w http.ResponseWriter, r *http.Request) {
+	config := s.siteGeneralConfigFromSettings(r.Context())
+	if config.LogoURL == "" {
+		writeError(w, http.StatusNotFound, "site logo does not exist")
+		return
+	}
+	s.redirectStoredRasterURL(w, r, config.LogoURL)
 }
 
 func (s *Server) updateSiteGeneralConfig(w http.ResponseWriter, r *http.Request) {

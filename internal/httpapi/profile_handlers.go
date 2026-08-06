@@ -72,6 +72,17 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	canFollow := claims.Subject > 0 && !isOwn && claimsAllow(claims, "user.follow.create") && s.userHasPermission(r.Context(), userID, "user.follow.receive")
 	canMessage := claims.Subject > 0 && !isOwn && claimsAllow(claims, "user.message.send") && s.userHasPermission(r.Context(), userID, "user.message.receive")
+	ossCfg := s.ossConfigFromSettings(r.Context())
+	avatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, avatarURL)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "生成用户头像访问链接失败")
+		return
+	}
+	profileBackgroundURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, profileBackgroundURL)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "生成用户主页背景访问链接失败")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": identity.PublicID, "username": username, "status": status,

@@ -116,42 +116,44 @@ type createModRequest struct {
 }
 
 type modResponse struct {
-	ID                  int64                           `json:"-"`
-	PublicID            string                          `json:"id"`
-	UniqueID            string                          `json:"uniqueId"`
-	SiteID              string                          `json:"siteId"`
-	PrimaryName         string                          `json:"primaryName"`
-	SecondaryName       string                          `json:"secondaryName"`
-	Abbreviation        string                          `json:"abbreviation"`
-	Summary             string                          `json:"summary"`
-	ModIDs              []modIdentifierPayload          `json:"modIds"`
-	DefaultLocale       string                          `json:"defaultLocale"`
-	Localizations       []catalogLocalizationEdit       `json:"localizations"`
-	Environment         string                          `json:"environment"`
-	PrimaryCategory     string                          `json:"primaryCategory"`
-	Compatibilities     []modLoaderCompatibilityPayload `json:"compatibilities"`
-	OfficialStatus      string                          `json:"officialStatus"`
-	SourceStatus        string                          `json:"sourceStatus"`
-	License             string                          `json:"license"`
-	CurseForgeProjectID string                          `json:"curseforgeProjectId"`
-	ModrinthProjectID   string                          `json:"modrinthProjectId"`
-	GitHubProjectPath   string                          `json:"githubProjectPath"`
-	IconURL             string                          `json:"iconUrl"`
-	BodyMarkdown        string                          `json:"bodyMarkdown"`
-	SearchKeywords      []string                        `json:"searchKeywords"`
-	SubmissionMethod    string                          `json:"submissionMethod"`
-	ReviewStatus        string                          `json:"reviewStatus"`
-	CreatedByInternal   *int64                          `json:"-"`
-	CreatedBy           string                          `json:"createdBy,omitempty"`
-	CreatedAt           time.Time                       `json:"createdAt"`
-	UpdatedAt           time.Time                       `json:"updatedAt"`
-	PublishedAt         *time.Time                      `json:"publishedAt,omitempty"`
-	PublishedRevisionID *string                         `json:"publishedRevisionId,omitempty"`
-	Tags                []string                        `json:"tags"`
-	Authors             []modAuthorPayload              `json:"authors"`
-	Links               []modLinkPayload                `json:"links"`
-	RelationshipGroups  []modRelationshipGroupPayload   `json:"relationshipGroups"`
-	GalleryImages       []modGalleryImagePayload        `json:"galleryImages"`
+	ID                   int64                           `json:"-"`
+	PublicID             string                          `json:"id"`
+	UniqueID             string                          `json:"uniqueId"`
+	SiteID               string                          `json:"siteId"`
+	PrimaryName          string                          `json:"primaryName"`
+	SecondaryName        string                          `json:"secondaryName"`
+	Abbreviation         string                          `json:"abbreviation"`
+	Summary              string                          `json:"summary"`
+	ModIDs               []modIdentifierPayload          `json:"modIds"`
+	DefaultLocale        string                          `json:"defaultLocale"`
+	Localizations        []catalogLocalizationEdit       `json:"localizations"`
+	Environment          string                          `json:"environment"`
+	PrimaryCategory      string                          `json:"primaryCategory"`
+	Compatibilities      []modLoaderCompatibilityPayload `json:"compatibilities"`
+	OfficialStatus       string                          `json:"officialStatus"`
+	SourceStatus         string                          `json:"sourceStatus"`
+	License              string                          `json:"license"`
+	CurseForgeProjectID  string                          `json:"curseforgeProjectId"`
+	ModrinthProjectID    string                          `json:"modrinthProjectId"`
+	GitHubProjectPath    string                          `json:"githubProjectPath"`
+	IconURL              string                          `json:"iconUrl"`
+	BodyMarkdown         string                          `json:"bodyMarkdown"`
+	SearchKeywords       []string                        `json:"searchKeywords"`
+	SubmissionMethod     string                          `json:"submissionMethod"`
+	ReviewStatus         string                          `json:"reviewStatus"`
+	CreatedByInternal    *int64                          `json:"-"`
+	CreatedBy            string                          `json:"createdBy,omitempty"`
+	CreatedAt            time.Time                       `json:"createdAt"`
+	UpdatedAt            time.Time                       `json:"updatedAt"`
+	PublishedAt          *time.Time                      `json:"publishedAt,omitempty"`
+	PublishedRevisionID  *string                         `json:"publishedRevisionId,omitempty"`
+	SubmissionRevisionID string                          `json:"submissionRevisionId,omitempty"`
+	ChangeRequestID      string                          `json:"changeRequestId,omitempty"`
+	Tags                 []string                        `json:"tags"`
+	Authors              []modAuthorPayload              `json:"authors"`
+	Links                []modLinkPayload                `json:"links"`
+	RelationshipGroups   []modRelationshipGroupPayload   `json:"relationshipGroups"`
+	GalleryImages        []modGalleryImagePayload        `json:"galleryImages"`
 }
 
 type modListResponse struct {
@@ -380,6 +382,8 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取已创建模组失败")
 		return
 	}
+	mod.SubmissionRevisionID = createdRevision.RevisionPublicID
+	mod.ChangeRequestID = createdRevision.ChangeRequestPublicID
 	writeJSON(w, http.StatusCreated, mod)
 }
 
@@ -391,8 +395,15 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		limit = min(parsed, 100)
 	}
 	offset := boundedOffset(r.URL.Query().Get("offset"))
+	indexed := s.searchProjectPage(r.Context(), query, "mod", "", "", "", claims, limit, offset)
+	databaseOffset := offset
+	if indexed.Used {
+		databaseOffset = 0
+	}
 	var total int
-	if err := s.db.QueryRow(
+	if indexed.Used {
+		total = indexed.Total
+	} else if err := s.db.QueryRow(
 		r.Context(),
 		`select count(*)
 		 from mods m
@@ -415,14 +426,14 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		        (select revision.public_id from content_revisions revision where revision.id=m.published_revision_id)
 		 from mods m
 		 where (m.review_status = 'approved' or m.created_by = $1)
-		   and ($2 = '' or m.slug ilike '%' || $2 || '%' or m.project_code ilike '%' || $2 || '%' or m.primary_name ilike '%' || $2 || '%' or m.secondary_name ilike '%' || $2 || '%'
+		   and (($3 and m.id=any($4::bigint[])) or (not $3 and ($2 = '' or m.slug ilike '%' || $2 || '%' or m.project_code ilike '%' || $2 || '%' or m.primary_name ilike '%' || $2 || '%' or m.secondary_name ilike '%' || $2 || '%'
 		        or m.abbreviation ilike '%' || $2 || '%' or $2 = any(m.search_keywords)
 		        or exists (select 1 from mod_identifiers identifier where identifier.mod_id=m.id and identifier.identifier ilike '%' || $2 || '%')
 		        or exists (select 1 from content_creator_bindings a join creators creator on creator.id=a.creator_id
-		                   where a.subject_id=m.id and a.subject_type='mod' and creator.name ilike '%' || $2 || '%'))
-		 order by m.updated_at desc, m.id desc
-		 limit $3 offset $4`,
-		claims.Subject, query, limit, offset,
+		                   where a.subject_id=m.id and a.subject_type='mod' and creator.name ilike '%' || $2 || '%'))))
+		 order by case when $3 then array_position($4::bigint[],m.id) end,m.updated_at desc,m.id desc
+		 limit $5 offset $6`,
+		claims.Subject, query, indexed.Used, indexed.IDs, limit, databaseOffset,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取模组列表失败")
@@ -448,6 +459,18 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取模组关联资料失败")
 		return
 	}
+	ossCfg := s.ossConfigFromSettings(r.Context())
+	for index := range items {
+		items[index].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, items[index].IconURL)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate mod icon URL")
+			return
+		}
+		if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, items[index].Authors); err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate mod author avatar URL")
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, modListResponse{Items: items, Total: total})
 }
 
@@ -471,7 +494,62 @@ func (s *Server) publicModDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取反向模组关系失败")
 		return
 	}
+	ossCfg := s.ossConfigFromSettings(r.Context())
+	if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, mod.Authors); err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate mod author avatar URL")
+		return
+	}
+	mod.IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, mod.IconURL)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate mod icon URL")
+		return
+	}
 	writeJSON(w, http.StatusOK, mod)
+}
+
+func (s *Server) resolveModAuthorOSSURLs(ctx context.Context, authors []modAuthorPayload) error {
+	ossCfg := s.ossConfigFromSettings(ctx)
+	return s.resolveModAuthorOSSURLsWithConfig(ctx, ossCfg, authors)
+}
+
+func (s *Server) resolveModAuthorOSSURLsWithConfig(ctx context.Context, ossCfg ossConfigPayload, authors []modAuthorPayload) error {
+	for authorIndex := range authors {
+		var err error
+		authors[authorIndex].AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, authors[authorIndex].AvatarURL)
+		if err != nil {
+			return err
+		}
+		for memberIndex := range authors[authorIndex].Members {
+			authors[authorIndex].Members[memberIndex].AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(
+				ctx, ossCfg, authors[authorIndex].Members[memberIndex].AvatarURL,
+			)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Server) publicModIcon(w http.ResponseWriter, r *http.Request) {
+	siteID := normalizeModSiteID(r.PathValue("siteId"))
+	if siteID == "" {
+		writeError(w, http.StatusBadRequest, "mod site ID is invalid")
+		return
+	}
+	var iconURL string
+	err := s.db.QueryRow(r.Context(), `select icon_url from mods
+		where slug=$1 and (review_status='approved' or created_by=$2)`, siteID, currentClaims(r).Subject).Scan(&iconURL)
+	if errors.Is(err, pgx.ErrNoRows) || strings.TrimSpace(iconURL) == "" {
+		writeError(w, http.StatusNotFound, "mod icon does not exist")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load mod icon")
+		return
+	}
+
+	s.redirectStoredRasterURL(w, r, iconURL)
 }
 
 func (s *Server) modEditorDetail(w http.ResponseWriter, r *http.Request) {

@@ -286,7 +286,13 @@ func (s *Server) blueprints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]map[string]any, 0, len(listRows))
+	ossCfg := s.ossConfigFromSettings(r.Context())
 	for _, item := range listRows {
+		item.avatar, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.avatar)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate blueprint uploader avatar URL")
+			return
+		}
 		items = append(items, map[string]any{"id": item.publicID, "title": item.title, "description": item.description, "sourceFormat": item.format, "status": item.status,
 			"size": []int{item.sizeX, item.sizeY, item.sizeZ}, "blockCount": item.blockCount, "paletteCount": item.paletteCount, "createdAt": item.createdAt, "updatedAt": item.updatedAt,
 			"coverUrl": "/api/v1/blueprints/" + item.publicID + "/cover?v=" + strconv.FormatInt(item.updatedAt.Unix(), 10), "requiredMods": requiredMods[item.id],
@@ -315,11 +321,16 @@ func (s *Server) blueprintRequiredModsByID(ctx context.Context, blueprintIDs []i
 		return nil, err
 	}
 	defer rows.Close()
+	ossCfg := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var blueprintID int64
 		var mod blueprintRequiredMod
 		if err = rows.Scan(&blueprintID, &mod.ProjectCode, &mod.SiteID, &mod.PrimaryName, &mod.SecondaryName,
 			&mod.ModID, &mod.IconURL, &mod.Namespaces); err != nil {
+			return nil, err
+		}
+		mod.IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, mod.IconURL)
+		if err != nil {
 			return nil, err
 		}
 		result[blueprintID] = append(result[blueprintID], mod)
@@ -344,6 +355,11 @@ func (s *Server) blueprintDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取蓝图失败")
+		return
+	}
+	avatar, err = s.resolveStoredOSSObjectAccessURL(r.Context(), avatar)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate blueprint uploader avatar URL")
 		return
 	}
 	claims := currentClaims(r)

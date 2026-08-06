@@ -143,7 +143,7 @@ func (s *Server) mirrorExternalImage(ctx context.Context, sourceURL string, uplo
 			s.deleteOSSObjectIfUnregistered(context.Background(), ossClient, ossCfg, objectKey)
 			return mirroredExternalImage{}, err
 		}
-		result.URL = buildPublicOSSURL(ossCfg, objectKey)
+		result.URL = ossStoredObjectURL(ossCfg, objectKey)
 	}
 	return result, nil
 }
@@ -214,7 +214,7 @@ func (s *Server) reusableExternalImageObject(ctx context.Context, client *aliyun
 	if err != nil {
 		return mirroredExternalImage{}, false
 	}
-	result.URL = buildPublicOSSURL(cfg, objectKey)
+	result.URL = ossStoredObjectURL(cfg, objectKey)
 	return result, true
 }
 

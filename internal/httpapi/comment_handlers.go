@@ -963,6 +963,13 @@ func (s *Server) queryCommentItems(ctx context.Context, ids []int64, includeTree
 	if err != nil {
 		return nil, err
 	}
+	ossCfg := s.ossConfigFromSettings(ctx)
+	for index := range items {
+		items[index].Author.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, items[index].Author.AvatarURL)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if err = s.annotateCommentPermissions(ctx, items, claims); err != nil {
 		return nil, err
 	}

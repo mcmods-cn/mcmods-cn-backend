@@ -68,14 +68,16 @@ type simpleProjectResponse struct {
 	ID       int64  `json:"-"`
 	PublicID string `json:"id"`
 	simpleProjectSnapshot
-	ReviewStatus        string     `json:"reviewStatus"`
-	CreatedByInternal   *int64     `json:"-"`
-	CreatedBy           string     `json:"createdBy,omitempty"`
-	PublishedRevisionID *string    `json:"publishedRevisionId,omitempty"`
-	CreatedAt           time.Time  `json:"createdAt"`
-	UpdatedAt           time.Time  `json:"updatedAt"`
-	PublishedAt         *time.Time `json:"publishedAt,omitempty"`
-	CanEdit             bool       `json:"canEdit"`
+	ReviewStatus         string     `json:"reviewStatus"`
+	CreatedByInternal    *int64     `json:"-"`
+	CreatedBy            string     `json:"createdBy,omitempty"`
+	PublishedRevisionID  *string    `json:"publishedRevisionId,omitempty"`
+	SubmissionRevisionID string     `json:"submissionRevisionId,omitempty"`
+	ChangeRequestID      string     `json:"changeRequestId,omitempty"`
+	CreatedAt            time.Time  `json:"createdAt"`
+	UpdatedAt            time.Time  `json:"updatedAt"`
+	PublishedAt          *time.Time `json:"publishedAt,omitempty"`
+	CanEdit              bool       `json:"canEdit"`
 }
 
 func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
@@ -95,16 +97,24 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 	loader := strings.TrimSpace(r.URL.Query().Get("loader"))
 	limit := boundedLimit(r.URL.Query().Get("limit"), 24, 100)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
+	indexed := s.searchProjectPage(r.Context(), query, projectType, category, version, loader, claims, limit, offset)
+	databaseOffset := offset
+	if indexed.Used {
+		databaseOffset = 0
+	}
 	filter := `where project.project_type=$1
 		and (project.review_status='approved' or project.created_by=$2)
-		and ($3='' or project.slug ilike '%%'||$3||'%%' or project.public_id ilike '%%'||$3||'%%'
+		and (($7 and project.id=any($8::bigint[])) or (not $7 and ($3='' or project.slug ilike '%%'||$3||'%%' or project.public_id ilike '%%'||$3||'%%'
 			or project.primary_name ilike '%%'||$3||'%%' or project.summary ilike '%%'||$3||'%%'
 			or exists(select 1 from simple_project_localizations localization where localization.project_id=project.id
-				and (localization.name ilike '%%'||$3||'%%' or localization.summary ilike '%%'||$3||'%%')))
+				and (localization.name ilike '%%'||$3||'%%' or localization.summary ilike '%%'||$3||'%%'))))
 		and ($4='' or $4=any(project.categories)) and ($5='' or $5=any(project.minecraft_versions))
 		and ($6='' or $6=any(project.loaders))`
 	var total int
-	if err := s.db.QueryRow(r.Context(), `select count(*) from simple_projects project `+filter, projectType, claims.Subject, query, category, version, loader).Scan(&total); err != nil {
+	if indexed.Used {
+		total = indexed.Total
+	} else if err := s.db.QueryRow(r.Context(), `select count(*) from simple_projects project `+filter,
+		projectType, claims.Subject, query, category, version, loader, false, []int64{}).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count projects")
 		return
 	}
@@ -117,8 +127,9 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		left join users account on account.id=project.created_by
 		left join content_revisions revision on revision.id=project.published_revision_id
 		`+filter+`
-		order by project.updated_at desc,project.id desc limit $7 offset $8`,
-		projectType, claims.Subject, query, category, version, loader, limit, offset)
+		order by case when $7 then array_position($8::bigint[],project.id) end,project.updated_at desc,project.id desc
+		limit $9 offset $10`, projectType, claims.Subject, query, category, version, loader,
+		indexed.Used, indexed.IDs, limit, databaseOffset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load projects")
 		return
@@ -137,8 +148,25 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load project details")
 		return
 	}
+	ossCfg := s.ossConfigFromSettings(r.Context())
 	for index := range items {
 		items[index].CanEdit = canEditSimpleProject(claims, items[index])
+		items[index].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, items[index].IconURL)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate project icon URL")
+			return
+		}
+		for parentIndex := range items[index].ParentProjects {
+			items[index].ParentProjects[parentIndex].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, items[index].ParentProjects[parentIndex].IconURL)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "failed to generate parent project icon URL")
+				return
+			}
+		}
+		if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, items[index].Authors); err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate project author avatar URL")
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total})
 }
@@ -160,7 +188,46 @@ func (s *Server) simpleProjectItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item.CanEdit = canEditSimpleProject(currentClaims(r), item)
+	ossCfg := s.ossConfigFromSettings(r.Context())
+	item.IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.IconURL)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate project icon URL")
+		return
+	}
+	for index := range item.ParentProjects {
+		item.ParentProjects[index].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.ParentProjects[index].IconURL)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate parent project icon URL")
+			return
+		}
+	}
+	if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, item.Authors); err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate project author avatar URL")
+		return
+	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) simpleProjectIcon(w http.ResponseWriter, r *http.Request) {
+	projectType := normalizeSimpleProjectType(r.PathValue("projectType"))
+	siteID := normalizeModSiteID(r.PathValue("siteId"))
+	if projectType == "" || siteID == "" {
+		writeError(w, http.StatusBadRequest, "project icon path is invalid")
+		return
+	}
+	var iconURL string
+	err := s.db.QueryRow(r.Context(), `select icon_url from simple_projects
+		where project_type=$1 and slug=$2 and (review_status='approved' or created_by=$3)`,
+		projectType, siteID, currentClaims(r).Subject).Scan(&iconURL)
+	if errors.Is(err, pgx.ErrNoRows) || strings.TrimSpace(iconURL) == "" {
+		writeError(w, http.StatusNotFound, "project icon does not exist")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load project icon")
+		return
+	}
+	s.redirectStoredRasterURL(w, r, iconURL)
 }
 
 func (s *Server) simpleProjectEditor(w http.ResponseWriter, r *http.Request) {
@@ -286,6 +353,8 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 	item.CanEdit = true
+	item.SubmissionRevisionID = created.RevisionPublicID
+	item.ChangeRequestID = created.ChangeRequestPublicID
 	writeJSON(w, http.StatusCreated, item)
 }
 
@@ -365,7 +434,7 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "failed to save project revision")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": created.RevisionPublicID, "status": status, "siteId": request.Snapshot.SiteID})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": created.RevisionPublicID, "status": status, "siteId": request.Snapshot.SiteID, "changeRequestId": created.ChangeRequestPublicID})
 }
 
 func normalizeAndValidateSimpleProject(snapshot *simpleProjectSnapshot) error {
@@ -533,7 +602,7 @@ func normalizedSimpleProjectOptions(values []string) []string {
 
 func validSimpleProjectOptions(projectType string, loaders, categories, features []string) bool {
 	loadersByType := map[string]map[string]bool{
-		"plugin":        stringSet("bukkit", "spigot", "paper", "purpur", "folia", "sponge", "bungeecord", "waterfall", "velocity", "fabric", "forge", "neoforge"),
+		"plugin":        stringSet("bukkit", "spigot", "paper", "purpur", "folia", "sponge", "bungeecord", "waterfall", "velocity"),
 		"map":           {},
 		"resource_pack": {},
 		"shader_pack":   stringSet("optifine", "iris", "oculus", "canvas"),

@@ -30,6 +30,7 @@ type yggdrasilTexture struct {
 }
 
 func (s *Server) buildYggdrasilProfile(ctx context.Context, profileID int64, signed bool) (yggdrasilProfile, error) {
+	yggdrasilConfig, service := s.yggdrasilRuntimeSnapshot()
 	profile, err := s.yggdrasilProfileRecordByID(ctx, profileID)
 	if err != nil {
 		return yggdrasilProfile{}, err
@@ -58,7 +59,7 @@ func (s *Server) buildYggdrasilProfile(ctx context.Context, profileID int64, sig
 		if !yggdrasilTextureHashPattern.MatchString(hash) {
 			continue
 		}
-		textureURL, urlErr := yggdrasilTextureURL(s.cfg.Yggdrasil.TextureBaseURL, hash)
+		textureURL, urlErr := yggdrasilTextureURL(yggdrasilConfig.TextureBaseURL, hash)
 		if urlErr != nil {
 			return yggdrasilProfile{}, urlErr
 		}
@@ -93,7 +94,7 @@ func (s *Server) buildYggdrasilProfile(ctx context.Context, profileID int64, sig
 		{Name: "uploadableTextures", Value: "skin,cape"},
 	}
 	if signed {
-		properties[0].Signature, err = s.ygg.signPropertyValue(properties[0].Value)
+		properties[0].Signature, err = service.signPropertyValue(properties[0].Value)
 		if err != nil {
 			return yggdrasilProfile{}, err
 		}
@@ -222,7 +223,8 @@ func (s *Server) yggdrasilSetTexture(w http.ResponseWriter, r *http.Request) {
 		writeYggdrasilInternalError(w)
 		return
 	}
-	maximum := s.cfg.Yggdrasil.TextureMaxBytes
+	yggdrasilConfig, _ := s.yggdrasilRuntimeSnapshot()
+	maximum := yggdrasilConfig.TextureMaxBytes
 	if maximum <= 0 {
 		maximum = 2 * 1024 * 1024
 	}

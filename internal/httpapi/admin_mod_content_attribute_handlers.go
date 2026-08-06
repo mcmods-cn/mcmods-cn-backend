@@ -155,7 +155,10 @@ func preservesModContentAttributeSchema(current, next modContentTemplateDefiniti
 	for _, currentType := range current.EntryTypes {
 		code := strings.ToLower(strings.TrimSpace(currentType.Code))
 		nextType, exists := nextTypes[code]
-		if !exists || !sameNormalizedStrings(currentType.KindCodes, nextType.KindCodes) {
+		if !exists {
+			continue
+		}
+		if !sameNormalizedStrings(currentType.KindCodes, nextType.KindCodes) {
 			return errCatalogEditorInvalid
 		}
 		currentFields := modContentFieldsByCode(currentType)

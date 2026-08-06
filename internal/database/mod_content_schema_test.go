@@ -106,6 +106,15 @@ func TestImportedDetailFieldsAreEditable(t *testing.T) {
 	}
 }
 
+func TestCanonicalDocumentFieldsDefaultToEditable(t *testing.T) {
+	t.Parallel()
+
+	schemaSQL := strings.Join(modContentCanonicalDocumentSchemaStatements(), "\n")
+	if strings.Contains(schemaSQL, `"editable":false`) {
+		t.Fatal("built-in resource attribute fields must default to human-editable")
+	}
+}
+
 func TestLootTableSchemaPreservesEditableDefinitionMetadata(t *testing.T) {
 	t.Parallel()
 

@@ -685,13 +685,24 @@ func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) 
 	if parsed, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && parsed > 0 {
 		page = min(parsed, 10000)
 	}
+	indexed := s.searchServerPage(r.Context(), query, tag, language, version, modFilters,
+		modded, online, whitelist, onlineMode, limit, (page-1)*limit)
+	databaseOffset := (page - 1) * limit
+	if indexed.Used {
+		databaseOffset = 0
+	}
 	where := []string{"server.review_status='approved'"}
 	args := make([]any, 0, 10)
 	add := func(format string, value any) {
 		args = append(args, value)
 		where = append(where, fmt.Sprintf(format, len(args)))
 	}
-	if query != "" {
+	indexedPosition := 0
+	if indexed.Used {
+		args = append(args, indexed.IDs)
+		indexedPosition = len(args)
+		where = append(where, fmt.Sprintf("server.id=any($%d::bigint[])", indexedPosition))
+	} else if query != "" {
 		args = append(args, query)
 		position := len(args)
 		where = append(where, fmt.Sprintf(`(
@@ -747,17 +758,23 @@ func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) 
 	}
 	whereSQL := strings.Join(where, " and ")
 	var total int
-	if err := s.db.QueryRow(r.Context(), `select count(*) from minecraft_servers server where `+whereSQL, args...).Scan(&total); err != nil {
+	if indexed.Used {
+		total = indexed.Total
+	} else if err := s.db.QueryRow(r.Context(), `select count(*) from minecraft_servers server where `+whereSQL, args...).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "读取服务器数量失败")
 		return
 	}
-	listArgs := append(append([]any{}, args...), limit, (page-1)*limit)
+	listArgs := append(append([]any{}, args...), limit, databaseOffset)
+	orderSQL := "server.last_online desc,server.updated_at desc,server.id desc"
+	if indexed.Used {
+		orderSQL = fmt.Sprintf("array_position($%d::bigint[],server.id)", indexedPosition)
+	}
 	rows, err := s.db.Query(r.Context(), `select server.public_id,server.name,server.short_description,
 		server.icon_data_uri,server.modded,server.loader,server.languages,server.primary_tag,
 		server.minecraft_versions,server.last_online,coalesce(server.last_latency_ms,-1),
 		server.last_players_online,server.last_players_max,server.last_checked_at
 		from minecraft_servers server where `+whereSQL+`
-		order by server.last_online desc,server.updated_at desc,server.id desc
+		order by `+orderSQL+`
 		limit $`+strconv.Itoa(len(args)+1)+` offset $`+strconv.Itoa(len(args)+2), listArgs...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取服务器列表失败")
@@ -871,7 +888,18 @@ func (s *Server) minecraftServerLinks(ctx context.Context, publicID string) ([]m
 }
 
 func (s *Server) minecraftServerMods(ctx context.Context, publicID string) ([]minecraftServerMod, error) {
-	return readMinecraftServerMods(ctx, s.db, publicID)
+	items, err := readMinecraftServerMods(ctx, s.db, publicID)
+	if err != nil {
+		return nil, err
+	}
+	ossCfg := s.ossConfigFromSettings(ctx)
+	for index := range items {
+		items[index].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, items[index].IconURL)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
 }
 
 type minecraftServerModQuerier interface {

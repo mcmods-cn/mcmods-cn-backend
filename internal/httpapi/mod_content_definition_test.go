@@ -49,6 +49,33 @@ func TestCanonicalModContentDefinitionManualWritesUseFieldCodes(t *testing.T) {
 	}
 }
 
+func TestValidateModContentEntryDefinitionPatchHonorsExplicitReadOnlyFields(t *testing.T) {
+	editable := true
+	readOnly := false
+	entryType := modContentEntryTypeDefinition{Code: "entity", Groups: []modContentEntryTypeGroup{{
+		Code: "entity",
+		Fields: []modContentEntryTypeField{
+			{Code: "defaultEditable", Type: "text"},
+			{Code: "explicitEditable", Type: "text", Editable: &editable},
+			{Code: "readOnly", Type: "text", Editable: &readOnly},
+		},
+	}}}
+
+	if err := validateModContentEntryDefinitionPatch(entryType, map[string]any{
+		"defaultEditable":  "changed",
+		"explicitEditable": "changed",
+		"unknownOldField":  nil,
+	}); err != nil {
+		t.Fatalf("editable fields were rejected: %v", err)
+	}
+	if err := validateModContentEntryDefinitionPatch(entryType, map[string]any{"readOnly": "changed"}); err == nil {
+		t.Fatal("read-only field change was accepted")
+	}
+	if err := validateModContentEntryDefinitionPatch(entryType, map[string]any{"readOnly": nil}); err == nil {
+		t.Fatal("read-only field removal was accepted")
+	}
+}
+
 func TestCanonicalModContentDefinitionImportAliasesTakePrecedence(t *testing.T) {
 	entryType := modContentEntryTypeDefinition{Code: "tool", Groups: []modContentEntryTypeGroup{{
 		Code: "tool",
@@ -355,5 +382,21 @@ func TestResourceAttributeSchemaPreservesStableIDsAndStorageTypes(t *testing.T) 
 	next.EntryTypes[0].Groups[0].Fields[0].Type = "text"
 	if err := preservesModContentAttributeSchema(current, next); err == nil {
 		t.Fatal("storage type change was accepted")
+	}
+	if err := preservesModContentAttributeSchema(current, modContentTemplateDefinition{}); err != nil {
+		t.Fatalf("deleting an entry type was rejected: %v", err)
+	}
+}
+
+func TestConfiguredEntryTypeMatchingSkipsDisabledTypes(t *testing.T) {
+	disabled := false
+	template := modContentTemplateDefinition{ResourceKinds: []string{"minecraft.item"}, EntryTypes: []modContentEntryTypeDefinition{
+		{Code: "machine", Enabled: &disabled, KindCodes: []string{"minecraft.item"}, Groups: []modContentEntryTypeGroup{{Code: "machine", Fields: []modContentEntryTypeField{
+			{Code: "maxEnergy", Type: "number", Paths: [][]string{{"machine", "max_energy"}}},
+		}}}},
+		{Code: "item", KindCodes: []string{"minecraft.item"}, Groups: []modContentEntryTypeGroup{{Code: "item"}}},
+	}}
+	if got := matchImportedEntryType(template, "minecraft.item", map[string]any{"machine": map[string]any{"max_energy": float64(10000)}}, "item"); got != "item" {
+		t.Fatalf("matched entry type = %q, want enabled item fallback", got)
 	}
 }

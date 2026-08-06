@@ -55,21 +55,9 @@ func normalizeModContentEntryDefinition(
 	definition map[string]any,
 	useImportAliases bool,
 ) (map[string]any, error) {
-	if sectionPublicID == nil || strings.TrimSpace(*sectionPublicID) == "" {
-		if strings.EqualFold(strings.TrimSpace(entryTypeCode), "default") {
-			return map[string]any{}, nil
-		}
-		return nil, errCatalogEditorReference
-	}
-	var raw []byte
-	if err := loadModContentSectionDefinition(ctx, query, modID, versionID, *sectionPublicID, &raw); err != nil {
-		return nil, err
-	}
-	var template modContentTemplateDefinition
-	if err := json.Unmarshal(raw, &template); err != nil {
-		return nil, err
-	}
-	entryType, err := selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode, false)
+	entryType, err := loadModContentEntryTypeDefinition(
+		ctx, query, modID, versionID, kindCode, sectionPublicID, entryTypeCode,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -90,6 +78,63 @@ func normalizeModContentEntryDefinition(
 		}
 	}
 	return normalized, nil
+}
+
+func loadModContentEntryTypeDefinition(
+	ctx context.Context,
+	query modContentImageQuerier,
+	modID, versionID int64,
+	kindCode string,
+	sectionPublicID *string,
+	entryTypeCode string,
+) (*modContentEntryTypeDefinition, error) {
+	if sectionPublicID == nil || strings.TrimSpace(*sectionPublicID) == "" {
+		if strings.EqualFold(strings.TrimSpace(entryTypeCode), "default") {
+			return &modContentEntryTypeDefinition{Code: "default"}, nil
+		}
+		return nil, errCatalogEditorReference
+	}
+	var raw []byte
+	if err := loadModContentSectionDefinition(ctx, query, modID, versionID, *sectionPublicID, &raw); err != nil {
+		return nil, err
+	}
+	var template modContentTemplateDefinition
+	if err := json.Unmarshal(raw, &template); err != nil {
+		return nil, err
+	}
+	return selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode, false)
+}
+
+func validateModContentEditableDefinitionPatch(
+	ctx context.Context,
+	query modContentImageQuerier,
+	modID, versionID int64,
+	kindCode string,
+	sectionPublicID *string,
+	entryTypeCode string,
+	patch map[string]any,
+) error {
+	entryType, err := loadModContentEntryTypeDefinition(
+		ctx, query, modID, versionID, kindCode, sectionPublicID, entryTypeCode,
+	)
+	if err != nil {
+		return err
+	}
+	return validateModContentEntryDefinitionPatch(*entryType, patch)
+}
+
+func validateModContentEntryDefinitionPatch(entryType modContentEntryTypeDefinition, patch map[string]any) error {
+	for _, group := range entryType.Groups {
+		for _, field := range group.Fields {
+			if field.Editable == nil || *field.Editable {
+				continue
+			}
+			if _, changed := patch[field.Code]; changed {
+				return fmt.Errorf("%w: field %s is read-only", errCatalogEditorInvalid, field.Code)
+			}
+		}
+	}
+	return nil
 }
 
 func normalizeLootTableCanonicalDefinition(definition map[string]any) {
@@ -123,6 +168,9 @@ func selectModContentEntryType(entryTypes []modContentEntryTypeDefinition, entry
 		if !strings.EqualFold(strings.TrimSpace(entryType.Code), strings.TrimSpace(entryTypeCode)) {
 			continue
 		}
+		if !modContentEntryTypeEnabled(*entryType) {
+			return nil, errCatalogEditorReference
+		}
 		if !enforceKind || len(entryType.KindCodes) == 0 {
 			return entryType, nil
 		}
@@ -134,6 +182,10 @@ func selectModContentEntryType(entryTypes []modContentEntryTypeDefinition, entry
 		return nil, errCatalogEditorInvalid
 	}
 	return nil, errCatalogEditorReference
+}
+
+func modContentEntryTypeEnabled(entryType modContentEntryTypeDefinition) bool {
+	return entryType.Enabled == nil || *entryType.Enabled
 }
 
 func canonicalModContentDefinition(entryType modContentEntryTypeDefinition, source map[string]any, useImportAliases bool) (map[string]any, error) {
@@ -497,7 +549,7 @@ func matchImportedEntryType(
 	candidates := make([]modContentEntryTypeDefinition, 0, len(template.EntryTypes))
 	pathOwners := make(map[string]int)
 	for _, entryType := range template.EntryTypes {
-		if strings.EqualFold(strings.TrimSpace(entryType.Code), "default") || !modContentEntryTypeSupportsKind(entryType, kindCode) {
+		if strings.EqualFold(strings.TrimSpace(entryType.Code), "default") || !modContentEntryTypeEnabled(entryType) || !modContentEntryTypeSupportsKind(entryType, kindCode) {
 			continue
 		}
 		candidates = append(candidates, entryType)

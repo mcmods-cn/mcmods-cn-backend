@@ -37,11 +37,11 @@ func TestParseSimpleProjectImportSources(t *testing.T) {
 
 func TestSimpleProjectExternalClassification(t *testing.T) {
 	loaders := simpleProjectLoadersFromExternal("plugin", []string{"NeoForge", "Paper"})
-	if len(loaders) != 2 || loaders[0] != "paper" || loaders[1] != "neoforge" {
+	if len(loaders) != 1 || loaders[0] != "paper" {
 		t.Fatalf("unexpected plugin loaders: %#v", loaders)
 	}
-	if containsSimpleImportOption(loaders, "forge") {
-		t.Fatal("NeoForge must not also classify as Forge")
+	if containsSimpleImportOption(loaders, "forge") || containsSimpleImportOption(loaders, "neoforge") || containsSimpleImportOption(loaders, "fabric") {
+		t.Fatal("mod loaders must not be classified as plugin platforms")
 	}
 	categories := simpleProjectCategoriesFromExternal("resource_pack", []string{"Traditional", "32x", "Mod Support"})
 	if !containsSimpleImportOption(categories, "vanilla_like") || !containsSimpleImportOption(categories, "modded") {

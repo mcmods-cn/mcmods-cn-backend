@@ -44,8 +44,15 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := boundedLimit(r.URL.Query().Get("limit"), 40, 100)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
+	indexed := s.searchResourcePage(r.Context(), query, kindCode, registry, limit, offset)
+	databaseOffset := offset
+	if indexed.Used {
+		databaseOffset = 0
+	}
 	var total int
-	if err := s.db.QueryRow(r.Context(), `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
+	if indexed.Used {
+		total = indexed.Total
+	} else if err := s.db.QueryRow(r.Context(), `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
 		select count(*)::int from game_resources resource
 		join catalog_entities entity on entity.id=resource.entity_id
 		left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
@@ -74,10 +81,11 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		left join lateral (select candidate.* from content_localizations candidate where candidate.catalog_entity_id=entity.id
 			 order by case candidate.locale when $4 then 0 when $5 then 1 when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
 		where entity.status='active' and ($1='' or resource.kind_code=$1) and ($3='' or resource.namespace=$3) and
-		($2='' or entity.public_id=$2 or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations candidate
+		(($6 and entity.id=any($7::bigint[])) or (not $6 and ($2='' or entity.public_id=$2 or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations candidate
 		 where candidate.catalog_entity_id=entity.id and candidate.name ilike '%'||$2||'%')
-		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$2||'%')
-		order by resource.kind_code,resource.canonical_id limit $6 offset $7`, kindCode, query, registry, primary, secondary, limit, offset)
+		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$2||'%')))
+		order by case when $6 then array_position($7::bigint[],entity.id) end,resource.kind_code,resource.canonical_id
+		limit $8 offset $9`, kindCode, query, registry, primary, secondary, indexed.Used, indexed.IDs, limit, databaseOffset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read resources")
 		return

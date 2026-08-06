@@ -341,6 +341,12 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 					where id=$1 and owner_id=$4`, coverBlueprintID, existingInternalID, fmt.Sprint(existing["objectKey"]), currentClaims(r).Subject)
 			}
 		}
+		objectKey := fmt.Sprint(existing["objectKey"])
+		access, accessErr := s.resolveOSSObjectAccessWithConfig(r.Context(), cfg, objectKey, ossObjectAccessOptions{})
+		if accessErr != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
+			return
+		}
 		response := map[string]any{
 			"uploadRequired": false,
 			"file":           existing,
@@ -353,7 +359,8 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 			"contentType":    existing["contentType"],
 			"sizeBytes":      existing["sizeBytes"],
 			"sha256":         existing["sha256"],
-			"accessUrl":      buildPublicOSSURL(cfg, fmt.Sprint(existing["objectKey"])),
+			"accessUrl":      access.URL,
+			"storageUrl":     ossStoredObjectURL(cfg, objectKey),
 		}
 		if blueprintUpload {
 			if blueprint := s.blueprintForExistingFile(r.Context(), existingInternalID, currentClaims(r).Subject); blueprint != nil {
@@ -414,7 +421,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 			"bucket": cfg.Bucket, "objectKey": objectKey, "category": category, "source": source,
 			"originalName": req.OriginalName, "contentType": contentType, "sizeBytes": req.SizeBytes,
 			"sha256": req.SHA256, "uploadRequired": true, "expiresAt": time.Now().Add(expires),
-			"accessUrl": buildPublicOSSURL(cfg, objectKey),
+			"storageUrl": ossStoredObjectURL(cfg, objectKey),
 		}
 		if blueprintPublicID != "" {
 			response["blueprintId"] = blueprintPublicID
@@ -453,7 +460,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		"sha256":         req.SHA256,
 		"uploadRequired": true,
 		"expiresAt":      time.Now().Add(expires),
-		"accessUrl":      buildPublicOSSURL(cfg, objectKey),
+		"storageUrl":     ossStoredObjectURL(cfg, objectKey),
 	}
 	if blueprintPublicID != "" {
 		response["blueprintId"] = blueprintPublicID
@@ -587,7 +594,11 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		return
 	}
 	if existingFileID, existing, found := s.findCompletedOSSUpload(r.Context(), currentClaims(r).Subject, req); found {
-		response := completedOSSUploadResponse(cfg, existing)
+		response, responseErr := s.completedOSSUploadResponse(r.Context(), cfg, existing)
+		if responseErr != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
+			return
+		}
 		if err := s.attachCompletedOSSUploadAssociations(r.Context(), response, existingFileID, currentClaims(r).Subject, req.Source); err != nil {
 			writeError(w, http.StatusInternalServerError, "恢复已完成上传的关联数据失败")
 			return
@@ -688,7 +699,11 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	if scope == "user" {
 		if err := s.enforceUserStoredFileLimit(r, size); err != nil {
 			if existingFileID, existing, found := s.findCompletedOSSUpload(r.Context(), currentClaims(r).Subject, req); found {
-				response := completedOSSUploadResponse(cfg, existing)
+				response, responseErr := s.completedOSSUploadResponse(r.Context(), cfg, existing)
+				if responseErr != nil {
+					writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
+					return
+				}
 				if associationErr := s.attachCompletedOSSUploadAssociations(r.Context(), response, existingFileID, currentClaims(r).Subject, req.Source); associationErr != nil {
 					writeError(w, http.StatusInternalServerError, "恢复已完成上传的关联数据失败")
 					return
@@ -729,7 +744,11 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	).Scan(&fileID, &filePublicID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if existingFileID, existing, found := s.findCompletedOSSUpload(r.Context(), currentClaims(r).Subject, req); found {
-			response := completedOSSUploadResponse(cfg, existing)
+			response, responseErr := s.completedOSSUploadResponse(r.Context(), cfg, existing)
+			if responseErr != nil {
+				writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
+				return
+			}
 			if associationErr := s.attachCompletedOSSUploadAssociations(r.Context(), response, existingFileID, currentClaims(r).Subject, req.Source); associationErr != nil {
 				writeError(w, http.StatusInternalServerError, "恢复已完成上传的关联数据失败")
 				return
@@ -765,6 +784,11 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		scanStatus,
 		scanMessage,
 	)
+	access, accessErr := s.resolveOSSObjectAccessWithConfig(r.Context(), cfg, req.ObjectKey, ossObjectAccessOptions{})
+	if accessErr != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
+		return
+	}
 	response := map[string]any{
 		"id":                 filePublicID,
 		"bucket":             cfg.Bucket,
@@ -779,7 +803,9 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		"converted":          converted,
 		"sha256":             req.SHA256,
 		"scanStatus":         scanStatus,
-		"url":                buildPublicOSSURL(cfg, req.ObjectKey),
+		"url":                access.URL,
+		"accessUrl":          access.URL,
+		"storageUrl":         ossStoredObjectURL(cfg, req.ObjectKey),
 	}
 	if blueprint, blueprintErr := s.completeBlueprintUpload(r.Context(), fileID, currentClaims(r).Subject, req.ObjectKey, sourceOriginalName, contentType, size, req.SHA256); blueprintErr != nil {
 		writeError(w, http.StatusInternalServerError, "登记蓝图处理任务失败")
@@ -845,7 +871,12 @@ func (s *Server) findCompletedOSSUpload(ctx context.Context, uploaderID int64, r
 		storedContentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt), true
 }
 
-func completedOSSUploadResponse(cfg ossConfigPayload, file map[string]any) map[string]any {
+func (s *Server) completedOSSUploadResponse(ctx context.Context, cfg ossConfigPayload, file map[string]any) (map[string]any, error) {
+	objectKey := fmt.Sprint(file["objectKey"])
+	access, err := s.resolveOSSObjectAccessWithConfig(ctx, cfg, objectKey, ossObjectAccessOptions{})
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"id":                 file["id"],
 		"bucket":             file["bucket"],
@@ -860,9 +891,11 @@ func completedOSSUploadResponse(cfg ossConfigPayload, file map[string]any) map[s
 		"converted":          file["converted"],
 		"sha256":             file["sha256"],
 		"scanStatus":         file["scanStatus"],
-		"url":                buildPublicOSSURL(cfg, fmt.Sprint(file["objectKey"])),
+		"url":                access.URL,
+		"accessUrl":          access.URL,
+		"storageUrl":         ossStoredObjectURL(cfg, objectKey),
 		"idempotent":         true,
-	}
+	}, nil
 }
 
 func (s *Server) attachCompletedOSSUploadAssociations(ctx context.Context, response map[string]any, fileID, ownerID int64, source string) error {
@@ -1499,31 +1532,15 @@ func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Reques
 		req.ExpiresMinutes = 10080
 	}
 	expires := time.Duration(req.ExpiresMinutes) * time.Minute
-	downloadURL := ""
 	originalName := s.originalNameForOSSObject(r.Context(), req.ObjectKey)
 	contentDisposition := downloadContentDisposition(originalName)
-	if cfg.DownloadURLMode == ossDownloadModeESAPrivateOrigin {
-		downloadURL = buildPublicOSSURLWithDisposition(cfg, req.ObjectKey, contentDisposition)
-	} else {
-		client, err := s.ossDownloadClient(r.Context(), cfg)
-		if err != nil {
-			writeError(w, http.StatusServiceUnavailable, err.Error())
-			return false
-		}
-		result, err := client.Presign(
-			r.Context(),
-			&aliyunoss.GetObjectRequest{
-				Bucket:                     aliyunoss.Ptr(cfg.Bucket),
-				Key:                        aliyunoss.Ptr(req.ObjectKey),
-				ResponseContentDisposition: aliyunoss.Ptr(contentDisposition),
-			},
-			aliyunoss.PresignExpires(expires),
-		)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate OSS download URL")
-			return false
-		}
-		downloadURL = result.URL
+	access, err := s.resolveOSSObjectAccessWithConfig(r.Context(), cfg, req.ObjectKey, ossObjectAccessOptions{
+		Expires:            expires,
+		ContentDisposition: contentDisposition,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate OSS download URL")
+		return false
 	}
 	_, _ = s.db.Exec(
 		r.Context(),
@@ -1534,9 +1551,9 @@ func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Reques
 		req.ObjectKey,
 	)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"url":             downloadURL,
-		"expiresAt":       time.Now().Add(expires),
-		"downloadUrlMode": cfg.DownloadURLMode,
+		"url":             access.URL,
+		"expiresAt":       access.ExpiresAt,
+		"downloadUrlMode": access.Mode,
 		"filename":        originalName,
 	})
 	return true
@@ -1625,7 +1642,7 @@ func redactOSSConfig(payload ossConfigPayload) map[string]any {
 		"downloadUrlMode":         payload.DownloadURLMode,
 		"allowedExtensions":       payload.AllowedExtensions,
 		"bucketAccessPolicy":      "private-read-write",
-		"temporaryDownloadPolicy": "presigned-url",
+		"temporaryDownloadPolicy": payload.DownloadURLMode,
 	}
 }
 
@@ -1644,13 +1661,13 @@ func normalizeOSSConfig(payload ossConfigPayload) ossConfigPayload {
 	if payload.Region != "" && payload.Endpoint == "" {
 		payload.Endpoint = defaultOSSEndpoint(payload.Region)
 	}
-	if payload.PublicEndpoint == "" {
-		payload.PublicEndpoint = "https://oss.mcmods.cn"
-	}
 	if payload.PublicEndpoint == "" && isCustomOSSEndpoint(payload.Endpoint) {
 		payload.PublicEndpoint = payload.Endpoint
 		payload.Endpoint = defaultOSSEndpoint(payload.Region)
 		payload.UseCName = false
+	}
+	if payload.PublicEndpoint == "" {
+		payload.PublicEndpoint = "https://oss.mcmods.cn"
 	}
 	if !isCustomOSSEndpoint(payload.Endpoint) {
 		payload.UseCName = false
@@ -1690,19 +1707,8 @@ func normalizeOSSDownloadMode(value string) string {
 	}
 }
 
-func buildPublicOSSURL(cfg ossConfigPayload, objectKey string) string {
-	endpoint := strings.TrimRight(cfg.PublicEndpoint, "/")
-	if endpoint == "" {
-		endpoint = strings.TrimRight(cfg.Endpoint, "/")
-	}
-	if endpoint == "" {
-		return strings.TrimLeft(objectKey, "/")
-	}
-	return endpoint + "/" + strings.TrimLeft(objectKey, "/")
-}
-
-func buildPublicOSSURLWithDisposition(cfg ossConfigPayload, objectKey string, contentDisposition string) string {
-	rawURL := buildPublicOSSURL(cfg, objectKey)
+func ossStoredObjectURLWithDisposition(cfg ossConfigPayload, objectKey string, contentDisposition string) string {
+	rawURL := ossStoredObjectURL(cfg, objectKey)
 	if contentDisposition == "" {
 		return rawURL
 	}

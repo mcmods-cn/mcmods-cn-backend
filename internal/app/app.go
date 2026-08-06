@@ -46,7 +46,7 @@ func Run() {
 		shutdownHTTPServer(server)
 		return
 	}
-	availability.setHandler(httpapi.NewServer(cfg, runtime.db, runtime.queue, runtime.activity))
+	availability.setHandler(httpapi.NewServer(cfg, runtime.db, runtime.queue, runtime.activity, runtime.search))
 	availability.resolveIssue("database")
 	availability.resolveIssue("startup")
 	log.Print("backend initialization completed; API traffic is enabled")

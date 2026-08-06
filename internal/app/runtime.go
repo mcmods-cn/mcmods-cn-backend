@@ -15,12 +15,14 @@ import (
 	"mcmods-cn-backend/internal/httpapi"
 	"mcmods-cn-backend/internal/progression"
 	"mcmods-cn-backend/internal/queue"
+	"mcmods-cn-backend/internal/searchindex"
 )
 
 type applicationRuntime struct {
 	db       *pgxpool.Pool
 	queue    *queue.Client
 	activity *activity.Monitor
+	search   *searchindex.Client
 }
 
 type runtimeInitializationError struct {
@@ -115,6 +117,7 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	httpapi.StartMinecraftVersionSyncScheduler(ctx, db)
 	httpapi.StartMinecraftServerProbeScheduler(ctx, db)
 	httpapi.NewOSSDeletionWorker(cfg, db).Start(ctx)
+	httpapi.NewMaintenanceWorker(db).Start(ctx)
 	progressionService := progression.NewService(db)
 	activityMonitor := activity.NewMonitor(db, progressionService.ProcessActivityBatch)
 	natsCfg, loadErr := database.LoadNATSConfig(ctx, db, cfg.NATS, cfg.SettingsEncryptionKey)
@@ -143,9 +146,11 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	if err = blueprintWorker.Start(ctx); err != nil {
 		log.Printf("blueprint worker unavailable; queued jobs remain recoverable: %v", err)
 	}
+	searchClient := searchindex.New(cfg.Typesense)
+	searchindex.NewWorker(db, searchClient).Start(ctx)
 
 	initialized = true
-	return &applicationRuntime{db: db, queue: queueClient, activity: activityMonitor}, nil
+	return &applicationRuntime{db: db, queue: queueClient, activity: activityMonitor, search: searchClient}, nil
 }
 
 func databaseInitializationError(action string, err error) error {

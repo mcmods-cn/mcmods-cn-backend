@@ -75,23 +75,38 @@ func refundCommunityPostBountyTx(ctx context.Context, tx pgx.Tx, postID, authorI
 }
 
 func (s *Server) loadCommunityPostBounty(ctx context.Context, postID int64) (*communityPostBounty, error) {
-	var bounty communityPostBounty
-	var translations []byte
-	err := s.db.QueryRow(ctx, `select currency.code,currency.name,currency.icon,currency.translations,
-		bounty.amount,bounty.status,bounty.tax_amount,bounty.net_amount
-		from community_post_bounties bounty join currencies currency on currency.id=bounty.currency_id where bounty.post_id=$1`, postID).
-		Scan(&bounty.Currency, &bounty.CurrencyName, &bounty.CurrencyIcon, &translations, &bounty.Amount, &bounty.Status, &bounty.TaxAmount, &bounty.NetAmount)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+	values, err := s.loadCommunityPostBounties(ctx, []int64{postID})
+	return values[postID], err
+}
+
+func (s *Server) loadCommunityPostBounties(ctx context.Context, postIDs []int64) (map[int64]*communityPostBounty, error) {
+	result := make(map[int64]*communityPostBounty, len(postIDs))
+	if len(postIDs) == 0 {
+		return result, nil
 	}
+	rows, err := s.db.Query(ctx, `select bounty.post_id,currency.code,currency.name,currency.icon,currency.translations,
+		bounty.amount,bounty.status,bounty.tax_amount,bounty.net_amount
+		from community_post_bounties bounty join currencies currency on currency.id=bounty.currency_id
+		where bounty.post_id=any($1::bigint[])`, postIDs)
 	if err != nil {
 		return nil, err
 	}
-	_ = json.Unmarshal(translations, &bounty.Translations)
-	if bounty.Translations == nil {
-		bounty.Translations = map[string]any{}
+	defer rows.Close()
+	for rows.Next() {
+		var postID int64
+		var bounty communityPostBounty
+		var translations []byte
+		if err = rows.Scan(&postID, &bounty.Currency, &bounty.CurrencyName, &bounty.CurrencyIcon, &translations,
+			&bounty.Amount, &bounty.Status, &bounty.TaxAmount, &bounty.NetAmount); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(translations, &bounty.Translations)
+		if bounty.Translations == nil {
+			bounty.Translations = map[string]any{}
+		}
+		result[postID] = &bounty
 	}
-	return &bounty, nil
+	return result, rows.Err()
 }
 
 func (s *Server) acceptCommunityPostAnswer(w http.ResponseWriter, r *http.Request) {

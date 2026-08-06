@@ -593,7 +593,8 @@ func (s *Server) issueYggdrasilToken(ctx context.Context, userID int64, profile 
 }
 
 func (s *Server) revokeExcessYggdrasilTokensTx(ctx context.Context, tx pgx.Tx, userID int64) error {
-	maximum := s.cfg.Yggdrasil.MaxTokens
+	yggdrasilConfig, _ := s.yggdrasilRuntimeSnapshot()
+	maximum := yggdrasilConfig.MaxTokens
 	if maximum <= 0 {
 		maximum = 10
 	}
@@ -616,7 +617,8 @@ func yggdrasilIssueRateLimitedTx(ctx context.Context, tx pgx.Tx, userID int64) (
 }
 
 func (s *Server) pruneYggdrasilTokenHistoryTx(ctx context.Context, tx pgx.Tx, userID int64) error {
-	limit := s.cfg.Yggdrasil.MaxTokens * 5
+	yggdrasilConfig, _ := s.yggdrasilRuntimeSnapshot()
+	limit := yggdrasilConfig.MaxTokens * 5
 	if limit < 100 {
 		limit = 100
 	}
@@ -633,10 +635,11 @@ func (s *Server) pruneYggdrasilTokenHistoryTx(ctx context.Context, tx pgx.Tx, us
 }
 
 func (s *Server) yggdrasilTokenTTL() time.Duration {
-	if s.cfg.Yggdrasil.TokenTTL <= 0 {
+	yggdrasilConfig, _ := s.yggdrasilRuntimeSnapshot()
+	if yggdrasilConfig.TokenTTL <= 0 {
 		return 15 * 24 * time.Hour
 	}
-	return s.cfg.Yggdrasil.TokenTTL
+	return yggdrasilConfig.TokenTTL
 }
 
 func (s *Server) revokeYggdrasilTokensForUser(ctx context.Context, userID int64, expectedPasswordHash string) error {

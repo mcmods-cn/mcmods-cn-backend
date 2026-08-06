@@ -251,7 +251,7 @@ func isMinecraftVersionLabel(value string) bool {
 func simpleProjectLoadersFromExternal(projectType string, values []string) []string {
 	joined := externalClassificationText(values)
 	allowed := map[string][]string{
-		"plugin":      {"bukkit", "spigot", "paper", "purpur", "folia", "sponge", "bungeecord", "waterfall", "velocity", "fabric", "forge", "neoforge"},
+		"plugin":      {"bukkit", "spigot", "paper", "purpur", "folia", "sponge", "bungeecord", "waterfall", "velocity"},
 		"shader_pack": {"optifine", "iris", "oculus", "canvas"},
 		"datapack":    {"vanilla", "fabric", "forge", "neoforge", "quilt"},
 		"addon":       {"vanilla", "fabric", "forge", "neoforge", "quilt", "bukkit", "spigot", "paper"},

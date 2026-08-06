@@ -1,8 +1,11 @@
 package httpapi
 
 import (
+	"context"
+	"log"
 	"net"
 	"net/http"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -11,6 +14,7 @@ import (
 	"mcmods-cn-backend/internal/mailer"
 	"mcmods-cn-backend/internal/querycache"
 	"mcmods-cn-backend/internal/queue"
+	"mcmods-cn-backend/internal/searchindex"
 )
 
 type Server struct {
@@ -20,14 +24,16 @@ type Server struct {
 	queue          *queue.Client
 	cache          *querycache.Cache
 	activity       *activity.Monitor
+	search         *searchindex.Client
 	mux            *http.ServeMux
 	ygg            *yggdrasilService
+	yggMu          sync.RWMutex
 	trustedProxies []*net.IPNet
 }
 
 const corsAllowedHeaders = "Authorization, Content-Type, Idempotency-Key, X-Request-ID"
 
-func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, activityMonitor *activity.Monitor) http.Handler {
+func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, activityMonitor *activity.Monitor, searchClient *searchindex.Client) http.Handler {
 	server := &Server{
 		cfg:            cfg,
 		db:             db,
@@ -35,10 +41,17 @@ func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, a
 		queue:          queueClient,
 		cache:          querycache.New(cfg.Redis),
 		activity:       activityMonitor,
+		search:         searchClient,
 		mux:            http.NewServeMux(),
 		trustedProxies: parseTrustedProxyNetworks(cfg.TrustedProxyCIDRs),
 	}
-	server.ygg = newYggdrasilService(cfg)
+	yggdrasilConfig, err := server.loadYggdrasilConfig(context.Background())
+	if err != nil {
+		log.Printf("load Yggdrasil settings: %v; using environment configuration", err)
+	} else {
+		server.cfg.Yggdrasil = yggdrasilConfig
+	}
+	server.ygg = newYggdrasilService(server.cfg)
 	server.routes()
 	return server.securityHeaders(server.cors(server.cookieRequestOrigin(server.yggdrasilALI(server.compression(server.logAccess(server.mux))))))
 }
@@ -62,6 +75,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/location", s.visitorLocation)
 	s.mux.HandleFunc("GET /api/v1/markdown/config", s.markdownConfig)
 	s.mux.HandleFunc("GET /api/v1/site/config", s.publicSiteGeneralConfig)
+	s.mux.HandleFunc("GET /api/v1/site/logo", s.siteLogo)
+	s.mux.HandleFunc("GET /api/v1/oss/files/{publicId}/content", s.publicInlineOSSFile)
 	s.mux.HandleFunc("GET /api/v1/minecraft/versions", s.publicMinecraftVersions)
 	s.mux.HandleFunc("GET /api/v1/servers/settings", s.optionalAuth(s.publicServerSettings))
 	s.mux.HandleFunc("GET /api/v1/servers", s.optionalAuth(s.publicMinecraftServers))
@@ -87,7 +102,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/users/me/content-languages", s.requireAuth(s.contentLanguageSettings))
 	s.mux.HandleFunc("GET /api/v1/users/me/drafts", s.requireAuth(s.userDrafts))
 	s.mux.HandleFunc("POST /api/v1/users/me/drafts", s.requireAuth(s.userDrafts))
-	s.mux.HandleFunc("DELETE /api/v1/users/me/drafts", s.requireAuth(s.userDrafts))
+	s.mux.HandleFunc("POST /api/v1/users/me/drafts/complete", s.requireAuth(s.completeUserDraft))
 	s.mux.HandleFunc("GET /api/v1/users/me/drafts/{draftId}", s.requireAuth(s.userDraftItem))
 	s.mux.HandleFunc("DELETE /api/v1/users/me/drafts/{draftId}", s.requireAuth(s.userDraftItem))
 	s.mux.HandleFunc("GET /api/v1/tags", s.optionalAuth(s.catalogTags))
@@ -161,12 +176,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/blueprints/{publicId}/retry", s.requireAuth(s.retryBlueprint))
 	s.mux.HandleFunc("POST /api/v1/blueprints/{publicId}/variants/{variantId}/download", s.optionalAuth(s.downloadBlueprintVariant))
 	s.mux.HandleFunc("GET /api/v1/mods/{siteId}", s.optionalAuth(s.publicModDetail))
+	s.mux.HandleFunc("GET /api/v1/mods/{siteId}/icon", s.optionalAuth(s.publicModIcon))
 	s.mux.HandleFunc("GET /api/v1/modpacks/{siteId}", s.optionalAuth(s.modpackItem))
+	s.mux.HandleFunc("GET /api/v1/modpacks/{siteId}/icon", s.optionalAuth(s.modpackIcon))
 	s.mux.HandleFunc("GET /api/v1/modpacks/{siteId}/editor", s.requireAuth(s.modpackEditor))
 	s.mux.HandleFunc("PUT /api/v1/modpacks/{siteId}", s.requireAuth(s.modpackItem))
 	s.mux.HandleFunc("GET /api/v1/modpacks/{siteId}/history", s.optionalAuth(s.modpackHistory))
 	s.mux.HandleFunc("GET /api/v1/modpacks/{siteId}/gallery/{publicId}", s.optionalAuth(s.modpackGalleryImage))
 	s.mux.HandleFunc("GET /api/v1/content-projects/{projectType}/{siteId}", s.optionalAuth(s.simpleProjectItem))
+	s.mux.HandleFunc("GET /api/v1/content-projects/{projectType}/{siteId}/icon", s.optionalAuth(s.simpleProjectIcon))
 	s.mux.HandleFunc("PUT /api/v1/content-projects/{projectType}/{siteId}", s.requireAuth(s.simpleProjectItem))
 	s.mux.HandleFunc("GET /api/v1/content-projects/{projectType}/{siteId}/editor", s.requireAuth(s.simpleProjectEditor))
 	s.mux.HandleFunc("GET /api/v1/content-projects/{projectType}/{siteId}/history", s.optionalAuth(s.simpleProjectHistory))
@@ -312,6 +330,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/admin/nav", s.requirePermission("admin.access", s.adminNav))
 	s.mux.HandleFunc("GET /api/v1/admin/config", s.requirePermission("admin.config.read", s.adminConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/general", s.requirePermission("admin.config.write", s.updateSiteGeneralConfig))
+	s.mux.HandleFunc("GET /api/v1/admin/config/yggdrasil", s.requirePermission("admin.config.read", s.getYggdrasilConfig))
+	s.mux.HandleFunc("PUT /api/v1/admin/config/yggdrasil", s.requirePermission("admin.config.write", s.updateYggdrasilConfig))
 	s.mux.HandleFunc("GET /api/v1/admin/config/markdown", s.requirePermission("admin.config.read", s.markdownConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/markdown", s.requirePermission("admin.config.write", s.updateMarkdownConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/profile", s.requirePermission("admin.config.write", s.updateProfileConfig))
@@ -409,10 +429,18 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "database is unavailable")
 		return
 	}
+	searchStatus := "disabled"
+	if s.search != nil && s.search.Enabled() {
+		searchStatus = "initializing"
+		if s.search.Ready() {
+			searchStatus = "ready"
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"app":    "mcmods-cn-backend",
 		"env":    s.cfg.Env,
+		"search": searchStatus,
 	})
 }
 

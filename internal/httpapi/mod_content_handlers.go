@@ -314,6 +314,7 @@ type modContentEntryTypeDefinition struct {
 	KindCodes []string                   `json:"kindCodes"`
 	Names     map[string]string          `json:"names"`
 	Groups    []modContentEntryTypeGroup `json:"groups"`
+	Enabled   *bool                      `json:"enabled,omitempty"`
 }
 
 type modContentEntryTypeGroup struct {
@@ -1583,6 +1584,12 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusUnprocessableEntity, "the selected content category cannot contain this resource")
 		return
 	}
+	if err = validateModContentEditableDefinitionPatch(
+		r.Context(), tx, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, edit.Definition,
+	); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "the selected resource subtype or its fields are invalid")
+		return
+	}
 	canonicalDefinition, normalizeErr := normalizeModContentEntryDefinition(
 		r.Context(), tx, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, edit.Definition, false,
 	)
@@ -1911,6 +1918,12 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateModContentResourceSection(r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "the selected content category cannot contain this resource")
+		return
+	}
+	if err := validateModContentEditableDefinitionPatch(
+		r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, edit.Definition,
+	); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "the selected resource subtype or its fields are invalid")
 		return
 	}
 	var storedDefinition map[string]any

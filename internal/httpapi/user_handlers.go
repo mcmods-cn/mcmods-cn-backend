@@ -113,7 +113,12 @@ func (s *Server) userOSSFiles(w http.ResponseWriter, r *http.Request) {
 		} else if modApplicationLocked {
 			record["lockReason"] = "mod_application_review"
 		}
-		record["url"] = buildPublicOSSURL(cfg, objectKey)
+		access, accessErr := s.resolveOSSObjectAccessWithConfig(r.Context(), cfg, objectKey, ossObjectAccessOptions{})
+		if accessErr != nil {
+			writeError(w, http.StatusBadGateway, "生成用户文件访问链接失败")
+			return
+		}
+		record["url"] = access.URL
 		files = append(files, record)
 	}
 	writeJSON(w, http.StatusOK, files)

@@ -281,7 +281,7 @@ func (s *Server) resumeModExportUpload(w http.ResponseWriter, r *http.Request) {
 			"originalName": request.OriginalName, "contentType": request.ContentType,
 			"sizeBytes": request.SizeBytes, "sha256": request.SHA256,
 			"uploadRequired": true, "expiresAt": time.Now().Add(expires),
-			"accessUrl": buildPublicOSSURL(cfg, request.ObjectKey),
+			"storageUrl": ossStoredObjectURL(cfg, request.ObjectKey),
 		})
 		return
 	}
@@ -299,7 +299,7 @@ func (s *Server) resumeModExportUpload(w http.ResponseWriter, r *http.Request) {
 		"originalName": request.OriginalName, "contentType": request.ContentType,
 		"sizeBytes": request.SizeBytes, "sha256": request.SHA256,
 		"uploadRequired": true, "expiresAt": time.Now().Add(expires),
-		"accessUrl": buildPublicOSSURL(cfg, request.ObjectKey),
+		"storageUrl": ossStoredObjectURL(cfg, request.ObjectKey),
 	})
 }
 

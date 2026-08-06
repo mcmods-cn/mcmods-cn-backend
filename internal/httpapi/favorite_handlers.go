@@ -230,12 +230,23 @@ func (s *Server) favoriteCollectionItems(w http.ResponseWriter, r *http.Request)
 	}
 	defer rows.Close()
 	items := make([]favoriteCollectionItem, 0)
+	ossCfg := s.ossConfigFromSettings(r.Context())
 	for rows.Next() {
 		var entityType, entityKey, primaryName, secondaryName, iconURL, slug string
 		var modpackPrimaryName, modpackSecondaryName, modpackIconURL, modpackSlug, title, publicID string
 		if rows.Scan(&entityType, &entityKey, &primaryName, &secondaryName, &iconURL, &slug,
 			&modpackPrimaryName, &modpackSecondaryName, &modpackIconURL, &modpackSlug, &title, &publicID) != nil {
 			continue
+		}
+		iconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, iconURL)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate favorite icon URL")
+			return
+		}
+		modpackIconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, modpackIconURL)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate favorite icon URL")
+			return
 		}
 		metadata := map[string]any{}
 		if entityType == "mod" {

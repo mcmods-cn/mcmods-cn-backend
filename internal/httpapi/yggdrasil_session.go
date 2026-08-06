@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"errors"
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -56,9 +55,6 @@ func (s *Server) yggdrasilJoin(w http.ResponseWriter, r *http.Request) {
 
 	clientIP := s.yggdrasilClientLocation(r).IP
 	expiresAt := time.Now().Add(s.yggdrasilJoinTTL())
-	if _, cleanupErr := s.db.Exec(r.Context(), `delete from yggdrasil_join_sessions where expires_at<=now()`); cleanupErr != nil {
-		log.Printf("prune expired Yggdrasil join sessions: %v", cleanupErr)
-	}
 	command, err := s.db.Exec(r.Context(),
 		`insert into yggdrasil_join_sessions
 		 (server_id,token_id,player_profile_id,client_ip,expires_at,created_at)
@@ -133,8 +129,9 @@ func (s *Server) yggdrasilHasJoined(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) yggdrasilJoinTTL() time.Duration {
-	if s.cfg.Yggdrasil.JoinTTL <= 0 {
+	yggdrasilConfig, _ := s.yggdrasilRuntimeSnapshot()
+	if yggdrasilConfig.JoinTTL <= 0 {
 		return 30 * time.Second
 	}
-	return s.cfg.Yggdrasil.JoinTTL
+	return yggdrasilConfig.JoinTTL
 }

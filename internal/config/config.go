@@ -26,6 +26,7 @@ type Config struct {
 	SMTP                  SMTPConfig
 	NATS                  NATSConfig
 	Redis                 RedisConfig
+	Typesense             TypesenseConfig
 	Yggdrasil             YggdrasilConfig
 }
 
@@ -69,7 +70,16 @@ type RedisConfig struct {
 	TTL      time.Duration
 }
 
+type TypesenseConfig struct {
+	Enabled          bool
+	URL              string
+	APIKey           string
+	CollectionPrefix string
+	Timeout          time.Duration
+}
+
 type YggdrasilConfig struct {
+	Enabled           bool
 	PublicBaseURL     string
 	TextureBaseURL    string
 	ServerName        string
@@ -155,7 +165,15 @@ func Load() Config {
 			Prefix:   getenv("REDIS_PREFIX", "mcmods:query:"),
 			TTL:      time.Duration(getenvInt("REDIS_QUERY_TTL_SECONDS", 120)) * time.Second,
 		},
+		Typesense: TypesenseConfig{
+			Enabled:          getenvBool("TYPESENSE_ENABLED", false),
+			URL:              strings.TrimRight(getenv("TYPESENSE_URL", "http://127.0.0.1:8108"), "/"),
+			APIKey:           os.Getenv("TYPESENSE_API_KEY"),
+			CollectionPrefix: getenv("TYPESENSE_COLLECTION_PREFIX", "mcmods"),
+			Timeout:          time.Duration(getenvInt("TYPESENSE_TIMEOUT_SECONDS", 3)) * time.Second,
+		},
 		Yggdrasil: YggdrasilConfig{
+			Enabled:           getenvBool("YGGDRASIL_ENABLED", true),
 			PublicBaseURL:     getenv("YGGDRASIL_PUBLIC_BASE_URL", "http://127.0.0.1:8080/api/yggdrasil/"),
 			TextureBaseURL:    getenv("YGGDRASIL_TEXTURE_BASE_URL", "http://127.0.0.1:8080/api/yggdrasil/textures/"),
 			ServerName:        getenv("YGGDRASIL_SERVER_NAME", "Mcmods-cn"),
@@ -211,6 +229,24 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.JWTTTL < 5*time.Minute || cfg.JWTTTL > 30*24*time.Hour {
 		problems = append(problems, errors.New("JWT_TTL_HOURS must produce a duration between 5 minutes and 30 days"))
+	}
+	if cfg.Typesense.Enabled {
+		typesenseURL, parseErr := url.Parse(strings.TrimSpace(cfg.Typesense.URL))
+		if parseErr != nil || typesenseURL.Scheme == "" || typesenseURL.Host == "" || typesenseURL.User != nil ||
+			(typesenseURL.Scheme != "http" && typesenseURL.Scheme != "https") || typesenseURL.RawQuery != "" || typesenseURL.Fragment != "" {
+			problems = append(problems, errors.New("TYPESENSE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment"))
+		}
+		if strings.TrimSpace(cfg.Typesense.APIKey) == "" {
+			problems = append(problems, errors.New("TYPESENSE_API_KEY is required when TYPESENSE_ENABLED=true"))
+		}
+		if cfg.Typesense.Timeout < time.Second || cfg.Typesense.Timeout > 30*time.Second {
+			problems = append(problems, errors.New("TYPESENSE_TIMEOUT_SECONDS must be between 1 and 30"))
+		}
+		if prefix := strings.TrimSpace(cfg.Typesense.CollectionPrefix); prefix == "" || strings.IndexFunc(prefix, func(value rune) bool {
+			return !(value == '_' || value == '-' || value >= '0' && value <= '9' || value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z')
+		}) >= 0 {
+			problems = append(problems, errors.New("TYPESENSE_COLLECTION_PREFIX may only contain letters, numbers, underscores, and hyphens"))
+		}
 	}
 	frontend, err := url.Parse(strings.TrimSpace(cfg.FrontendOrigin))
 	if err != nil || frontend.Scheme == "" || frontend.Host == "" || frontend.User != nil ||

@@ -663,21 +663,7 @@ func (s *Server) redirectModExportMedia(w http.ResponseWriter, r *http.Request, 
 		_, _ = io.Copy(w, io.LimitReader(result.Body, byteLength+1))
 		return
 	}
-	if cfg.DownloadURLMode == ossDownloadModeESAPrivateOrigin {
-		http.Redirect(w, r, buildPublicOSSURL(cfg, objectKey), http.StatusTemporaryRedirect)
-		return
-	}
-	client, err := s.ossDownloadClient(r.Context(), cfg)
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-	result, err := client.Presign(r.Context(), &aliyunoss.GetObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey)}, aliyunoss.PresignExpires(time.Duration(cfg.DownloadURLTTLMinutes)*time.Minute))
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to sign media asset")
-		return
-	}
-	http.Redirect(w, r, result.URL, http.StatusTemporaryRedirect)
+	s.redirectOSSObjectAccess(w, r, objectKey, ossObjectAccessOptions{})
 }
 
 func isRendererTextureAsset(assetPath string) bool {

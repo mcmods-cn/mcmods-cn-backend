@@ -61,41 +61,43 @@ type createModpackRequest struct {
 }
 
 type modpackResponse struct {
-	ID                  int64                           `json:"-"`
-	PublicID            string                          `json:"id"`
-	SiteID              string                          `json:"siteId"`
-	PrimaryName         string                          `json:"primaryName"`
-	SecondaryName       string                          `json:"secondaryName"`
-	Abbreviation        string                          `json:"abbreviation"`
-	Summary             string                          `json:"summary"`
-	DefaultLocale       string                          `json:"defaultLocale"`
-	Environment         string                          `json:"environment"`
-	PrimaryCategory     string                          `json:"primaryCategory"`
-	PackType            string                          `json:"packType"`
-	PackagingMethod     string                          `json:"packagingMethod"`
-	OfficialStatus      string                          `json:"officialStatus"`
-	SourceStatus        string                          `json:"sourceStatus"`
-	License             string                          `json:"license"`
-	CurseForgeProjectID string                          `json:"curseforgeProjectId"`
-	ModrinthProjectID   string                          `json:"modrinthProjectId"`
-	IconURL             string                          `json:"iconUrl"`
-	BodyMarkdown        string                          `json:"bodyMarkdown"`
-	SearchKeywords      []string                        `json:"searchKeywords"`
-	SubmissionMethod    string                          `json:"submissionMethod"`
-	ReviewStatus        string                          `json:"reviewStatus"`
-	CreatedByInternal   *int64                          `json:"-"`
-	CreatedBy           string                          `json:"createdBy,omitempty"`
-	PublishedRevisionID *string                         `json:"publishedRevisionId,omitempty"`
-	CreatedAt           time.Time                       `json:"createdAt"`
-	UpdatedAt           time.Time                       `json:"updatedAt"`
-	PublishedAt         *time.Time                      `json:"publishedAt,omitempty"`
-	Compatibilities     []modLoaderCompatibilityPayload `json:"compatibilities"`
-	Tags                []string                        `json:"tags"`
-	Authors             []modAuthorPayload              `json:"authors"`
-	Links               []modLinkPayload                `json:"links"`
-	GalleryImages       []modGalleryImagePayload        `json:"galleryImages"`
-	Mods                []modpackModPayload             `json:"mods"`
-	CanEdit             bool                            `json:"canEdit"`
+	ID                   int64                           `json:"-"`
+	PublicID             string                          `json:"id"`
+	SiteID               string                          `json:"siteId"`
+	PrimaryName          string                          `json:"primaryName"`
+	SecondaryName        string                          `json:"secondaryName"`
+	Abbreviation         string                          `json:"abbreviation"`
+	Summary              string                          `json:"summary"`
+	DefaultLocale        string                          `json:"defaultLocale"`
+	Environment          string                          `json:"environment"`
+	PrimaryCategory      string                          `json:"primaryCategory"`
+	PackType             string                          `json:"packType"`
+	PackagingMethod      string                          `json:"packagingMethod"`
+	OfficialStatus       string                          `json:"officialStatus"`
+	SourceStatus         string                          `json:"sourceStatus"`
+	License              string                          `json:"license"`
+	CurseForgeProjectID  string                          `json:"curseforgeProjectId"`
+	ModrinthProjectID    string                          `json:"modrinthProjectId"`
+	IconURL              string                          `json:"iconUrl"`
+	BodyMarkdown         string                          `json:"bodyMarkdown"`
+	SearchKeywords       []string                        `json:"searchKeywords"`
+	SubmissionMethod     string                          `json:"submissionMethod"`
+	ReviewStatus         string                          `json:"reviewStatus"`
+	CreatedByInternal    *int64                          `json:"-"`
+	CreatedBy            string                          `json:"createdBy,omitempty"`
+	PublishedRevisionID  *string                         `json:"publishedRevisionId,omitempty"`
+	SubmissionRevisionID string                          `json:"submissionRevisionId,omitempty"`
+	ChangeRequestID      string                          `json:"changeRequestId,omitempty"`
+	CreatedAt            time.Time                       `json:"createdAt"`
+	UpdatedAt            time.Time                       `json:"updatedAt"`
+	PublishedAt          *time.Time                      `json:"publishedAt,omitempty"`
+	Compatibilities      []modLoaderCompatibilityPayload `json:"compatibilities"`
+	Tags                 []string                        `json:"tags"`
+	Authors              []modAuthorPayload              `json:"authors"`
+	Links                []modLinkPayload                `json:"links"`
+	GalleryImages        []modGalleryImagePayload        `json:"galleryImages"`
+	Mods                 []modpackModPayload             `json:"mods"`
+	CanEdit              bool                            `json:"canEdit"`
 }
 
 type modpackListResponse struct {
@@ -112,8 +114,15 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	limit := boundedLimit(r.URL.Query().Get("limit"), 24, 100)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
+	indexed := s.searchProjectPage(r.Context(), query, "modpack", "", "", "", claims, limit, offset)
+	databaseOffset := offset
+	if indexed.Used {
+		databaseOffset = 0
+	}
 	var total int
-	if err := s.db.QueryRow(r.Context(), `select count(*) from modpacks pack
+	if indexed.Used {
+		total = indexed.Total
+	} else if err := s.db.QueryRow(r.Context(), `select count(*) from modpacks pack
 		where (pack.review_status='approved' or pack.created_by=$1)
 		and ($2='' or pack.slug ilike '%%'||$2||'%%' or pack.public_id ilike '%%'||$2||'%%'
 			or pack.primary_name ilike '%%'||$2||'%%' or pack.secondary_name ilike '%%'||$2||'%%'
@@ -133,12 +142,13 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 		from modpacks pack left join users account on account.id=pack.created_by
 		left join content_revisions revision on revision.id=pack.published_revision_id
 		where (pack.review_status='approved' or pack.created_by=$1)
-		and ($2='' or pack.slug ilike '%%'||$2||'%%' or pack.public_id ilike '%%'||$2||'%%'
+		and (($3 and pack.id=any($4::bigint[])) or (not $3 and ($2='' or pack.slug ilike '%%'||$2||'%%' or pack.public_id ilike '%%'||$2||'%%'
 			or pack.primary_name ilike '%%'||$2||'%%' or pack.secondary_name ilike '%%'||$2||'%%'
 			or pack.summary ilike '%%'||$2||'%%' or $2=any(pack.search_keywords)
 			or exists(select 1 from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
-				where binding.subject_type='modpack' and binding.subject_id=pack.id and creator.name ilike '%%'||$2||'%%'))
-		order by pack.updated_at desc,pack.id desc limit $3 offset $4`, claims.Subject, query, limit, offset)
+				where binding.subject_type='modpack' and binding.subject_id=pack.id and creator.name ilike '%%'||$2||'%%'))))
+		order by case when $3 then array_position($4::bigint[],pack.id) end,pack.updated_at desc,pack.id desc
+		limit $5 offset $6`, claims.Subject, query, indexed.Used, indexed.IDs, limit, databaseOffset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load modpacks")
 		return
@@ -161,8 +171,25 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load modpack relations")
 		return
 	}
+	ossCfg := s.ossConfigFromSettings(r.Context())
 	for index := range items {
 		items[index].CanEdit = canEditModpack(claims, items[index])
+		items[index].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, items[index].IconURL)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate modpack icon URL")
+			return
+		}
+		for modIndex := range items[index].Mods {
+			items[index].Mods[modIndex].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, items[index].Mods[modIndex].IconURL)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "failed to generate contained mod icon URL")
+				return
+			}
+		}
+		if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, items[index].Authors); err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate modpack author avatar URL")
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, modpackListResponse{Items: items, Total: total})
 }
@@ -184,7 +211,44 @@ func (s *Server) modpackItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item.CanEdit = canEditModpack(claims, item)
+	ossCfg := s.ossConfigFromSettings(r.Context())
+	item.IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.IconURL)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate modpack icon URL")
+		return
+	}
+	for index := range item.Mods {
+		item.Mods[index].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.Mods[index].IconURL)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate contained mod icon URL")
+			return
+		}
+	}
+	if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, item.Authors); err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate modpack author avatar URL")
+		return
+	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) modpackIcon(w http.ResponseWriter, r *http.Request) {
+	siteID := normalizeModSiteID(r.PathValue("siteId"))
+	if siteID == "" {
+		writeError(w, http.StatusBadRequest, "modpack site ID is invalid")
+		return
+	}
+	var iconURL string
+	err := s.db.QueryRow(r.Context(), `select icon_url from modpacks
+		where slug=$1 and (review_status='approved' or created_by=$2)`, siteID, currentClaims(r).Subject).Scan(&iconURL)
+	if errors.Is(err, pgx.ErrNoRows) || strings.TrimSpace(iconURL) == "" {
+		writeError(w, http.StatusNotFound, "modpack icon does not exist")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load modpack icon")
+		return
+	}
+	s.redirectStoredRasterURL(w, r, iconURL)
 }
 
 func (s *Server) modpackEditor(w http.ResponseWriter, r *http.Request) {
@@ -303,6 +367,8 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item.CanEdit = true
+	item.SubmissionRevisionID = created.RevisionPublicID
+	item.ChangeRequestID = created.ChangeRequestPublicID
 	writeJSON(w, http.StatusCreated, item)
 }
 
@@ -383,7 +449,7 @@ func (s *Server) createModpackRevision(w http.ResponseWriter, r *http.Request, s
 		writeError(w, http.StatusInternalServerError, "failed to save modpack revision")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": created.RevisionPublicID, "status": status, "siteId": request.Snapshot.SiteID})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": created.RevisionPublicID, "status": status, "siteId": request.Snapshot.SiteID, "changeRequestId": created.ChangeRequestPublicID})
 }
 
 func normalizeAndValidateModpackRequest(request *createModpackRequest) error {

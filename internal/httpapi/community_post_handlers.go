@@ -113,6 +113,11 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 	resourceID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("resourceId")))
 	viewerID := currentClaims(r).Subject
 	moderator := claimsAllow(currentClaims(r), "content.review") || claimsAllow(currentClaims(r), "admin.*")
+	indexed := s.searchCommunityPage(r.Context(), query, kind, modID, resourceID, currentClaims(r), moderator, limit, offset)
+	databaseOffset := offset
+	if indexed.Used {
+		databaseOffset = 0
+	}
 	rows, err := s.db.Query(r.Context(), `select post.id,post.public_id,post.kind,post.title,post.source_locale,post.body_markdown,
 		post.minecraft_versions,post.mod_version_min,post.mod_version_max,post.severity,post.has_fix,post.issue_url,
 		coalesce(file.public_id,''),coalesce(file.object_key,''),author.public_id,author.username,post.review_status,post.created_at,post.updated_at,post.author_id,
@@ -121,17 +126,19 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 		left join oss_files file on file.id=post.cover_file_id and file.status='active'
 		left join comments accepted on accepted.id=post.accepted_comment_id
 		where post.kind=$1 and post.status='active' and (post.review_status='approved' or post.author_id=$2 or $3)
-		and ($4='' or lower(post.title) like '%%'||lower($4)||'%%' or lower(post.body_markdown) like '%%'||lower($4)||'%%')
+		and (($7 and post.id=any($8::bigint[])) or (not $7 and ($4='' or lower(post.title) like '%%'||lower($4)||'%%' or lower(post.body_markdown) like '%%'||lower($4)||'%%')))
 		and ($5='' or exists(select 1 from community_post_project_refs ref join public_routes route on route.internal_id=ref.target_id and route.entity_type=ref.target_type where ref.post_id=post.id and route.public_id=$5))
 		and ($6='' or exists(select 1 from community_post_resource_refs ref join catalog_entities entity on entity.id=ref.resource_id where ref.post_id=post.id and entity.public_id=$6))
-		order by post.published_at desc nulls last,post.created_at desc,post.id desc limit $7 offset $8`,
-		kind, viewerID, moderator, query, modID, resourceID, limit, offset)
+		order by case when $7 then array_position($8::bigint[],post.id) end,post.published_at desc nulls last,post.created_at desc,post.id desc
+		limit $9 offset $10`, kind, viewerID, moderator, query, modID, resourceID, indexed.Used, indexed.IDs, limit, databaseOffset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load community posts")
 		return
 	}
 	defer rows.Close()
 	items := make([]communityPostResponse, 0)
+	internalIDs := make([]int64, 0, limit)
+	ossCfg := s.ossConfigFromSettings(r.Context())
 	for rows.Next() {
 		var item communityPostResponse
 		var internalID, authorInternalID int64
@@ -144,25 +151,48 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if coverKey != "" {
-			item.CoverURL = buildPublicOSSURL(s.ossConfigFromSettings(r.Context()), coverKey)
+			access, accessErr := s.resolveOSSObjectAccessWithConfig(r.Context(), ossCfg, coverKey, ossObjectAccessOptions{})
+			if accessErr != nil {
+				writeError(w, http.StatusBadGateway, "failed to generate community post cover URL")
+				return
+			}
+			item.CoverURL = access.URL
 		}
 		item.CanEdit = viewerID > 0 && (viewerID == authorInternalID || claimsAllow(currentClaims(r), "community.edit") || moderator)
 		item.CanResolve = item.Kind == "discussion" && item.ResolutionStatus == "open" && item.ReviewStatus == "approved" && viewerID == authorInternalID
-		item.Bounty, err = s.loadCommunityPostBounty(r.Context(), internalID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load community post bounty")
-			return
-		}
-		item.Projects, item.Resources, _ = s.communityPostReferences(r.Context(), internalID)
 		items = append(items, item)
+		internalIDs = append(internalIDs, internalID)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load community posts")
+		return
+	}
+	bounties, err := s.loadCommunityPostBounties(r.Context(), internalIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load community post bounties")
+		return
+	}
+	projects, resources, err := s.communityPostReferencesBatch(r.Context(), internalIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load community post references")
+		return
+	}
+	for index, internalID := range internalIDs {
+		items[index].Bounty = bounties[internalID]
+		items[index].Projects = projects[internalID]
+		items[index].Resources = resources[internalID]
 	}
 	var total int
-	_ = s.db.QueryRow(r.Context(), `select count(*) from community_posts post where post.kind=$1 and post.status='active'
+	if indexed.Used {
+		total = indexed.Total
+	} else {
+		_ = s.db.QueryRow(r.Context(), `select count(*) from community_posts post where post.kind=$1 and post.status='active'
 		and (post.review_status='approved' or post.author_id=$2 or $3)
 		and ($4='' or lower(post.title) like '%%'||lower($4)||'%%' or lower(post.body_markdown) like '%%'||lower($4)||'%%')
 		and ($5='' or exists(select 1 from community_post_project_refs ref join public_routes route on route.internal_id=ref.target_id and route.entity_type=ref.target_type where ref.post_id=post.id and route.public_id=$5))
 		and ($6='' or exists(select 1 from community_post_resource_refs ref join catalog_entities entity on entity.id=ref.resource_id where ref.post_id=post.id and entity.public_id=$6))`,
-		kind, viewerID, moderator, query, modID, resourceID).Scan(&total)
+			kind, viewerID, moderator, query, modID, resourceID).Scan(&total)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
 }
 
@@ -264,7 +294,7 @@ func (s *Server) createCommunityPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit community post")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": publicID, "reviewStatus": status, "revisionId": created.RevisionPublicID})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": publicID, "reviewStatus": status, "revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID})
 }
 
 func (s *Server) updateCommunityPost(w http.ResponseWriter, r *http.Request, publicID string) {
@@ -344,7 +374,7 @@ func (s *Server) updateCommunityPost(w http.ResponseWriter, r *http.Request, pub
 		writeError(w, http.StatusInternalServerError, "failed to save community post")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": publicID, "reviewStatus": status, "revisionId": created.RevisionPublicID})
+	writeJSON(w, http.StatusOK, map[string]any{"id": publicID, "reviewStatus": status, "revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID})
 }
 
 func normalizeCommunityPostKind(value string) string {
@@ -662,7 +692,11 @@ func (s *Server) loadCommunityPost(ctx context.Context, publicID string, claims 
 		return item, err
 	}
 	if coverKey != "" {
-		item.CoverURL = buildPublicOSSURL(s.ossConfigFromSettings(ctx), coverKey)
+		access, accessErr := s.resolveOSSObjectAccess(ctx, coverKey, ossObjectAccessOptions{})
+		if accessErr != nil {
+			return item, accessErr
+		}
+		item.CoverURL = access.URL
 	}
 	item.CanEdit = claims.Subject > 0 && (claims.Subject == authorInternalID || claimsAllow(claims, "community.edit") || moderator)
 	item.CanResolve = item.Kind == "discussion" && item.ResolutionStatus == "open" && item.ReviewStatus == "approved" && claims.Subject == authorInternalID
@@ -675,29 +709,46 @@ func (s *Server) loadCommunityPost(ctx context.Context, publicID string, claims 
 }
 
 func (s *Server) communityPostReferences(ctx context.Context, postID int64) ([]communityPostReference, []communityPostReference, error) {
-	projects := make([]communityPostReference, 0)
-	rows, err := s.db.Query(ctx, `select coalesce(route.public_id,''),ref.target_type,ref.raw_identifier,
+	projects, resources, err := s.communityPostReferencesBatch(ctx, []int64{postID})
+	return projects[postID], resources[postID], err
+}
+
+func (s *Server) communityPostReferencesBatch(ctx context.Context, postIDs []int64) (map[int64][]communityPostReference, map[int64][]communityPostReference, error) {
+	projects := make(map[int64][]communityPostReference, len(postIDs))
+	resources := make(map[int64][]communityPostReference, len(postIDs))
+	for _, postID := range postIDs {
+		projects[postID] = make([]communityPostReference, 0)
+		resources[postID] = make([]communityPostReference, 0)
+	}
+	if len(postIDs) == 0 {
+		return projects, resources, nil
+	}
+	rows, err := s.db.Query(ctx, `select ref.post_id,coalesce(route.public_id,''),ref.target_type,ref.raw_identifier,
 		coalesce(mod.slug,modpack.slug,project.slug,''),coalesce(mod.primary_name,modpack.primary_name,project.primary_name,ref.raw_identifier)
 		from community_post_project_refs ref left join public_routes route on route.entity_type=ref.target_type and route.internal_id=ref.target_id
 		left join mods mod on ref.target_type='mod' and mod.id=ref.target_id
 		left join modpacks modpack on ref.target_type='modpack' and modpack.id=ref.target_id
 		left join simple_projects project on project.project_type=ref.target_type and project.id=ref.target_id
-		where ref.post_id=$1 order by ref.display_order,ref.id`, postID)
+		where ref.post_id=any($1::bigint[]) order by ref.post_id,ref.display_order,ref.id`, postIDs)
 	if err != nil {
 		return nil, nil, err
 	}
 	for rows.Next() {
+		var postID int64
 		var ref communityPostReference
-		if err = rows.Scan(&ref.PublicID, &ref.Type, &ref.Identifier, &ref.SiteID, &ref.Name); err != nil {
+		if err = rows.Scan(&postID, &ref.PublicID, &ref.Type, &ref.Identifier, &ref.SiteID, &ref.Name); err != nil {
 			rows.Close()
 			return nil, nil, err
 		}
 		ref.Unresolved = ref.PublicID == ""
-		projects = append(projects, ref)
+		projects[postID] = append(projects[postID], ref)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, err
 	}
 	rows.Close()
-	resources := make([]communityPostReference, 0)
-	rows, err = s.db.Query(ctx, `select coalesce(entity.public_id,''),ref.kind_code,ref.raw_resource_id,
+	rows, err = s.db.Query(ctx, `select ref.post_id,coalesce(entity.public_id,''),ref.kind_code,ref.raw_resource_id,
 		coalesce(resource.canonical_id,ref.raw_resource_id),coalesce(detail.version_id,0),coalesce(version.public_id,''),
 		coalesce(detail.icon_file_id,0),coalesce(snapshot.revision_id,''),coalesce(snapshot.icon_path,''),
 		coalesce(localized.names,snapshot.names,'{}'::jsonb)
@@ -708,20 +759,22 @@ func (s *Server) communityPostReferences(ctx context.Context, postID int64) ([]c
 			order by value.updated_at desc limit 1) detail on true
 		left join mod_content_versions version on version.id=detail.version_id
 		left join lateral (select imported.revision_id,imported.icon_path,imported.names from resource_import_snapshots imported
-			where imported.resource_id=ref.resource_id order by (imported.revision_id=version.source_revision_id) desc,
+			join catalog_import_revisions import_revision on import_revision.id=imported.revision_id
+			where imported.resource_id=ref.resource_id order by (import_revision.target_version_id=detail.version_id) desc,
 			(imported.icon_path<>'') desc,imported.created_at desc limit 1) snapshot on true
 		left join lateral (select jsonb_object_agg(value.locale,value.name) names from content_localizations value
 			where value.catalog_entity_id=ref.resource_id and value.name<>'') localized on true
-		where ref.post_id=$1 order by ref.display_order,ref.id`, postID)
+		where ref.post_id=any($1::bigint[]) order by ref.post_id,ref.display_order,ref.id`, postIDs)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
+		var postID int64
 		var ref communityPostReference
 		var versionInternalID, iconFileID int64
 		var namesRaw []byte
-		if err = rows.Scan(&ref.PublicID, &ref.Kind, &ref.Identifier, &ref.Name, &versionInternalID, &ref.VersionID,
+		if err = rows.Scan(&postID, &ref.PublicID, &ref.Kind, &ref.Identifier, &ref.Name, &versionInternalID, &ref.VersionID,
 			&iconFileID, &ref.RevisionID, &ref.IconPath, &namesRaw); err != nil {
 			return nil, nil, err
 		}
@@ -730,7 +783,7 @@ func (s *Server) communityPostReferences(ctx context.Context, postID int64) ([]c
 		if iconFileID > 0 && ref.PublicID != "" && ref.VersionID != "" {
 			ref.IconURL = "/api/v1/catalog/resources/" + ref.PublicID + "/versions/" + ref.VersionID + "/assets/icon-small"
 		}
-		resources = append(resources, ref)
+		resources[postID] = append(resources[postID], ref)
 	}
 	return projects, resources, rows.Err()
 }

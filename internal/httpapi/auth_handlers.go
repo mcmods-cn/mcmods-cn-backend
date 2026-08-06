@@ -513,6 +513,10 @@ func (s *Server) authenticatedUser(ctx context.Context, user domain.User) (authe
 	if err != nil {
 		return authenticatedUserResponse{}, err
 	}
+	user.AvatarURL, err = s.resolveStoredOSSObjectAccessURL(ctx, user.AvatarURL)
+	if err != nil {
+		return authenticatedUserResponse{}, err
+	}
 	user.RoleCodes = roleCodes
 	return authenticatedUserResponse{User: user, PermissionRules: permissionRules}, nil
 }

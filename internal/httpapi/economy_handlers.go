@@ -412,7 +412,7 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "profile background file is required")
 			return
 		}
-		backgroundURL := buildPublicOSSURL(s.ossConfigFromSettings(r.Context()), file.ObjectKey)
+		backgroundURL := ossStoredObjectURL(s.ossConfigFromSettings(r.Context()), file.ObjectKey)
 		if _, err = tx.Exec(r.Context(), `update users set profile_background_file_id=$2,
 			profile_background_url=$3,updated_at=now() where id=$1`, userID, file.ID, backgroundURL); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to update profile background")
