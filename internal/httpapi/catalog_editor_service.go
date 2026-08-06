@@ -142,7 +142,7 @@ func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEd
 			return result, err
 		}
 	}
-	activityEventID, err := insertCatalogActivityTx(r.Context(), tx, claims.Subject, snapshot, created, reviewStatus)
+	activityEventID, err := insertCatalogActivityTx(r.Context(), tx, claims.Subject, snapshot)
 	if err != nil {
 		return result, err
 	}
@@ -233,22 +233,18 @@ func catalogActivityObjectType(kind string) int16 {
 	}
 }
 
-func insertCatalogActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, snapshot catalogEditorSnapshot, created createdContentRevision, reviewStatus string) (string, error) {
+func insertCatalogActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, snapshot catalogEditorSnapshot) (string, error) {
 	actionID := activity.ActionEdit
 	if snapshot.Operation == "create" {
 		actionID = activity.ActionCreate
 	} else if snapshot.Operation == "delete" {
 		actionID = activity.ActionDelete
 	}
-	metadata, err := json.Marshal(map[string]any{"revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID,
-		"operation": snapshot.Operation, "kind": snapshot.Kind, "reviewStatus": reviewStatus, "source": "user"})
-	if err != nil {
-		return "", err
-	}
-	var publicID string
-	err = tx.QueryRow(ctx, `insert into user_activity_events(user_id,action_id,object_type_id,object_public_id,markdown_added_bytes,metadata,occurred_at)
-		values($1,$2,$3,$4,0,$5::jsonb,$6) returning public_id`, actorID, actionID, catalogActivityObjectType(snapshot.Kind), snapshot.PublicID, string(metadata), time.Now().UTC()).Scan(&publicID)
-	return publicID, err
+	var eventID string
+	err := tx.QueryRow(ctx, `insert into user_activity_events(user_id,action_id,object_type_id,object_route_id,markdown_added_bytes,occurred_at)
+		select $1,$2,$3,route.id,0,$5 from public_routes route where route.public_id=$4
+		returning id::text`, actorID, actionID, catalogActivityObjectType(snapshot.Kind), snapshot.PublicID, time.Now().UTC()).Scan(&eventID)
+	return eventID, err
 }
 
 func appendCatalogPublishedReviewEventTx(ctx context.Context, tx pgx.Tx, requestID, actorID int64, note string, r *http.Request) error {

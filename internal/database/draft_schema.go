@@ -19,7 +19,7 @@ func draftSchemaStatements() []string {
 			payload jsonb not null check(jsonb_typeof(payload) = 'object'),
 			change_request_id bigint references change_requests(id) on delete set null,
 			review_target_type text not null default '' check(review_target_type in ('','server')),
-			review_target_public_id text not null default '',
+			review_target_id bigint references minecraft_servers(id) on delete set null,
 			submitted_status text not null default '' check(submitted_status in ('','pending','approved')),
 			submitted_at timestamptz,
 			expires_at timestamptz not null,
@@ -31,6 +31,7 @@ func draftSchemaStatements() []string {
 		`create index idx_user_drafts_owner_updated on user_drafts(user_id,updated_at desc,id desc)`,
 		`create index idx_user_drafts_owner_project on user_drafts(user_id,project_key,coalesce(submitted_at,updated_at) desc,id desc)`,
 		`create index idx_user_drafts_change_request on user_drafts(change_request_id) where change_request_id is not null`,
+		`create index idx_user_drafts_review_target on user_drafts(review_target_id) where review_target_id is not null`,
 		`create index idx_user_drafts_expiration on user_drafts(expires_at)`,
 	}
 }

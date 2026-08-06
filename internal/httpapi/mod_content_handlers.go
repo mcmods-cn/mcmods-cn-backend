@@ -940,7 +940,7 @@ func (s *Server) createModContentRevisionTx(r *http.Request, tx pgx.Tx, identity
 			return modContentMutationResult{}, err
 		}
 	}
-	activityID, err := insertModContentActivityTx(r.Context(), tx, claims.Subject, snapshot, created, status)
+	activityID, err := insertModContentActivityTx(r.Context(), tx, claims.Subject, snapshot)
 	if err != nil {
 		return modContentMutationResult{}, err
 	}
@@ -972,22 +972,18 @@ func modContentReviewRequired(config reviewConfig, snapshot modContentSnapshot) 
 	return config.CatalogEdit
 }
 
-func insertModContentActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, snapshot modContentSnapshot, created createdContentRevision, reviewStatus string) (string, error) {
+func insertModContentActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, snapshot modContentSnapshot) (string, error) {
 	actionID := activity.ActionEdit
 	if snapshot.Operation == "create" {
 		actionID = activity.ActionCreate
 	} else if snapshot.Operation == "delete" {
 		actionID = activity.ActionDelete
 	}
-	metadata, err := json.Marshal(map[string]any{"revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID,
-		"kind": snapshot.Kind, "operation": snapshot.Operation, "reviewStatus": reviewStatus, "modPublicId": snapshot.ModPublicID})
-	if err != nil {
-		return "", err
-	}
-	var publicID string
-	err = tx.QueryRow(ctx, `insert into user_activity_events(user_id,action_id,object_type_id,object_public_id,metadata,occurred_at)
-		values($1,$2,$3,$4,$5::jsonb,$6) returning public_id`, actorID, actionID, activity.ObjectMod, snapshot.PublicID, string(metadata), time.Now().UTC()).Scan(&publicID)
-	return publicID, err
+	var eventID string
+	err := tx.QueryRow(ctx, `insert into user_activity_events(user_id,action_id,object_type_id,object_route_id,occurred_at)
+		select $1,$2,$3,route.id,$5 from public_routes route
+		where route.entity_type='mod' and route.internal_id=$4 returning id::text`, actorID, actionID, activity.ObjectMod, snapshot.ModID, time.Now().UTC()).Scan(&eventID)
+	return eventID, err
 }
 
 func (s *Server) requireEditableMod(w http.ResponseWriter, r *http.Request) (modIdentityRecord, bool) {

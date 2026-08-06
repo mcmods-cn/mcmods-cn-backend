@@ -70,7 +70,7 @@ const userDraftSummaryQuery = `select draft.public_id,draft.draft_key,draft.proj
 	draft.expires_at,draft.created_at,draft.updated_at
 	from user_drafts draft
 	left join change_requests request on request.id=draft.change_request_id
-	left join minecraft_servers server on draft.review_target_type='server' and server.public_id=draft.review_target_public_id`
+	left join minecraft_servers server on draft.review_target_type='server' and server.id=draft.review_target_id`
 
 type draftSummaryScanner interface {
 	Scan(dest ...any) error
@@ -180,6 +180,7 @@ func (s *Server) completeUserDraft(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 
 	var changeRequestID any
+	var reviewTargetID any
 	if request.ChangeRequestID != "" {
 		var internalID int64
 		if err = tx.QueryRow(r.Context(), `select id,status from change_requests where public_id=$1 and submitted_by=$2`,
@@ -190,11 +191,13 @@ func (s *Server) completeUserDraft(w http.ResponseWriter, r *http.Request) {
 		changeRequestID = internalID
 	}
 	if request.ReviewTargetType == "server" {
-		if err = tx.QueryRow(r.Context(), `select review_status from minecraft_servers where public_id=$1 and created_by=$2`,
-			request.ReviewTargetPublicID, claims.Subject).Scan(&request.ReviewStatus); err != nil {
+		var internalID int64
+		if err = tx.QueryRow(r.Context(), `select id,review_status from minecraft_servers where public_id=$1 and created_by=$2`,
+			request.ReviewTargetPublicID, claims.Subject).Scan(&internalID, &request.ReviewStatus); err != nil {
 			writeError(w, http.StatusBadRequest, "review target does not belong to the current user")
 			return
 		}
+		reviewTargetID = internalID
 	}
 	request.ReviewStatus = normalizeDraftSubmissionStatus(request.ReviewStatus)
 
@@ -210,9 +213,9 @@ func (s *Server) completeUserDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err = tx.Exec(r.Context(), `update user_drafts set project_key=$2,project_title=$3,target_url=$4,
-		change_request_id=$5,review_target_type=$6,review_target_public_id=$7,submitted_status=$8,
+		change_request_id=$5,review_target_type=$6,review_target_id=$7,submitted_status=$8,
 		submitted_at=now(),updated_at=now() where id=$1`, draftID, request.ProjectKey, request.ProjectTitle,
-		request.TargetURL, changeRequestID, request.ReviewTargetType, request.ReviewTargetPublicID, request.ReviewStatus); err != nil {
+		request.TargetURL, changeRequestID, request.ReviewTargetType, reviewTargetID, request.ReviewStatus); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to complete draft")
 		return
 	}

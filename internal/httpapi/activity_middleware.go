@@ -16,9 +16,10 @@ type requestActivity struct {
 	userID             int64
 	actionID           int16
 	objectTypeID       int16
+	objectEntityType   string
+	objectInternalID   int64
 	objectPublicID     string
 	markdownAddedBytes int
-	metadata           map[string]any
 	skip               bool
 }
 
@@ -32,7 +33,7 @@ func markActivityUser(r *http.Request, userID int64) {
 	annotation.mu.Unlock()
 }
 
-func annotateActivity(r *http.Request, actionID, objectTypeID int16, publicID string, markdownAddedBytes int, metadata map[string]any) {
+func annotateActivity(r *http.Request, actionID, objectTypeID int16, publicID string, markdownAddedBytes int) {
 	annotation, _ := r.Context().Value(requestActivityContextKey).(*requestActivity)
 	if annotation == nil {
 		return
@@ -51,13 +52,27 @@ func annotateActivity(r *http.Request, actionID, objectTypeID int16, publicID st
 	if markdownAddedBytes > 0 {
 		annotation.markdownAddedBytes = markdownAddedBytes
 	}
-	if len(metadata) > 0 {
-		if annotation.metadata == nil {
-			annotation.metadata = make(map[string]any, len(metadata))
-		}
-		for key, value := range metadata {
-			annotation.metadata[key] = value
-		}
+}
+
+func annotateActivityID(r *http.Request, actionID, objectTypeID int16, entityType string, internalID int64, markdownAddedBytes int) {
+	annotation, _ := r.Context().Value(requestActivityContextKey).(*requestActivity)
+	if annotation == nil {
+		return
+	}
+	annotation.mu.Lock()
+	defer annotation.mu.Unlock()
+	if actionID > 0 {
+		annotation.actionID = actionID
+	}
+	if objectTypeID > 0 {
+		annotation.objectTypeID = objectTypeID
+	}
+	if internalID > 0 && entityType != "" {
+		annotation.objectEntityType = entityType
+		annotation.objectInternalID = internalID
+	}
+	if markdownAddedBytes > 0 {
+		annotation.markdownAddedBytes = markdownAddedBytes
 	}
 }
 
@@ -75,14 +90,18 @@ func (s *Server) recordRequestActivity(r *http.Request, annotation *requestActiv
 	if s.activity == nil || annotation == nil {
 		return
 	}
+	if isHighFrequencyActivityExcluded(r) {
+		return
+	}
 	annotation.mu.Lock()
 	event := activity.Event{
 		UserID:             annotation.userID,
 		ActionID:           annotation.actionID,
 		ObjectTypeID:       annotation.objectTypeID,
+		ObjectEntityType:   annotation.objectEntityType,
+		ObjectInternalID:   annotation.objectInternalID,
 		ObjectPublicID:     annotation.objectPublicID,
 		MarkdownAddedBytes: annotation.markdownAddedBytes,
-		Metadata:           annotation.metadata,
 		OccurredAt:         time.Now().UTC(),
 	}
 	skip := annotation.skip
@@ -102,11 +121,6 @@ func (s *Server) recordRequestActivity(r *http.Request, annotation *requestActiv
 	if event.ActionID == 0 || event.ObjectTypeID == 0 {
 		return
 	}
-	if event.Metadata == nil {
-		event.Metadata = map[string]any{}
-	}
-	event.Metadata["method"] = r.Method
-	event.Metadata["path"] = r.URL.Path
 	s.activity.Record(event)
 }
 
@@ -142,9 +156,44 @@ func inferredActivityAction(r *http.Request) int16 {
 	}
 }
 
+func isHighFrequencyActivityExcluded(r *http.Request) bool {
+	path := strings.ToLower(r.URL.Path)
+	if strings.Contains(path, "/users/me/drafts") ||
+		strings.Contains(path, "/users/me/markdown-playground") ||
+		(strings.Contains(path, "/messages/conversations/") && strings.HasSuffix(path, "/presence")) {
+		return true
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	for _, marker := range []string{
+		"/mod-imports/", "/modpack-imports/", "/content-project-imports/",
+		"/export-imports/", "/catalog-imports/", "/translations/",
+	} {
+		if strings.Contains(path, marker) {
+			return true
+		}
+	}
+	for _, suffix := range []string{"/icon", "/cover", "/render", "/content"} {
+		if strings.HasSuffix(path, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func inferredActivityObject(path string) int16 {
 	path = strings.ToLower(path)
+	if objectTypeID := inferredSimpleProjectActivityObject(path); objectTypeID > 0 {
+		return objectTypeID
+	}
 	switch {
+	case strings.Contains(path, "/review-locks"), strings.Contains(path, "/change-requests"),
+		strings.Contains(path, "/content-revisions"), strings.Contains(path, "/server-reviews"),
+		strings.Contains(path, "/mod-content-reviews"), strings.Contains(path, "/creator-claims"),
+		strings.Contains(path, "/comment-reports"), strings.Contains(path, "/mod-applications"),
+		strings.Contains(path, "/revisions"):
+		return activity.ObjectReview
 	case strings.Contains(path, "/comments"):
 		return activity.ObjectComment
 	case strings.Contains(path, "/recipes"), strings.Contains(path, "/recipe-types"):
@@ -155,6 +204,30 @@ func inferredActivityObject(path string) int16 {
 		return activity.ObjectResource
 	case strings.Contains(path, "/blueprints"):
 		return activity.ObjectBlueprint
+	case strings.Contains(path, "/modpacks"), strings.Contains(path, "/modpack-imports"):
+		return activity.ObjectModpack
+	case strings.Contains(path, "/servers"):
+		return activity.ObjectServer
+	case strings.Contains(path, "/plugins"):
+		return activity.ObjectPlugin
+	case strings.Contains(path, "/maps"):
+		return activity.ObjectMap
+	case strings.Contains(path, "/resource-packs"):
+		return activity.ObjectResourcePack
+	case strings.Contains(path, "/shaders"):
+		return activity.ObjectShaderPack
+	case strings.Contains(path, "/datapacks"):
+		return activity.ObjectDatapack
+	case strings.Contains(path, "/addons"):
+		return activity.ObjectAddon
+	case strings.Contains(path, "/news"), strings.Contains(path, "/tutorials"),
+		strings.Contains(path, "/issues"), strings.Contains(path, "/discussions"),
+		strings.Contains(path, "/community-posts"), strings.Contains(path, "/community/posts"):
+		return activity.ObjectCommunityPost
+	case strings.Contains(path, "/skins"):
+		return activity.ObjectSkin
+	case strings.Contains(path, "/player-profiles"):
+		return activity.ObjectPlayerProfile
 	case strings.Contains(path, "/authors"):
 		return activity.ObjectAuthor
 	case strings.Contains(path, "/teams"):
@@ -178,6 +251,20 @@ func inferredActivityObject(path string) int16 {
 	}
 }
 
+func inferredSimpleProjectActivityObject(path string) int16 {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	for index, segment := range segments {
+		if segment != "content-projects" && segment != "content-project-imports" {
+			continue
+		}
+		if index+1 >= len(segments) {
+			return 0
+		}
+		return activityObjectTypeForEntityType(segments[index+1])
+	}
+	return 0
+}
+
 func inferredPublicID(path string) string {
 	for _, segment := range strings.Split(path, "/") {
 		if len(segment) != 9 {
@@ -195,4 +282,53 @@ func inferredPublicID(path string) string {
 		}
 	}
 	return ""
+}
+
+func activityObjectTypeForEntityType(entityType string) int16 {
+	switch strings.ToLower(strings.TrimSpace(entityType)) {
+	case "recipe", "recipe_type", "recipe_layout_template":
+		return activity.ObjectRecipe
+	case "mod":
+		return activity.ObjectMod
+	case "modpack":
+		return activity.ObjectModpack
+	case "blueprint", "blueprint_variant":
+		return activity.ObjectBlueprint
+	case "plugin":
+		return activity.ObjectPlugin
+	case "map":
+		return activity.ObjectMap
+	case "resource_pack":
+		return activity.ObjectResourcePack
+	case "shader_pack":
+		return activity.ObjectShaderPack
+	case "datapack":
+		return activity.ObjectDatapack
+	case "addon":
+		return activity.ObjectAddon
+	case "author", "creator":
+		return activity.ObjectAuthor
+	case "team":
+		return activity.ObjectTeam
+	case "user":
+		return activity.ObjectUser
+	case "comment":
+		return activity.ObjectComment
+	case "tag":
+		return activity.ObjectTag
+	case "resource", "document", "structure", "mod_content_version", "mod_content_template", "mod_content_section":
+		return activity.ObjectResource
+	case "community_post":
+		return activity.ObjectCommunityPost
+	case "minecraft_server", "server":
+		return activity.ObjectServer
+	case "oss_file", "project_file":
+		return activity.ObjectFile
+	case "skin", "skin_asset":
+		return activity.ObjectSkin
+	case "player_profile":
+		return activity.ObjectPlayerProfile
+	default:
+		return 0
+	}
 }

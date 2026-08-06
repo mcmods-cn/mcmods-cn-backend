@@ -920,13 +920,18 @@ func (s *Server) recordOwnedContentDownload(
 		return err
 	}
 	defer tx.Rollback(ctx)
+	var objectRouteID int64
+	if err = tx.QueryRow(ctx, `select id from public_routes where entity_type=$1 and public_id=$2`,
+		objectType, objectPublicID).Scan(&objectRouteID); err != nil {
+		return err
+	}
 	var downloads int64
 	if err = tx.QueryRow(ctx, `insert into content_download_counters(
-		object_type,object_public_id,owner_id,downloads,last_download_at
-	) values($1,$2,$3,1,now())
-		on conflict(object_type,object_public_id,owner_id) do update
+		object_route_id,owner_id,downloads,last_download_at
+	) values($1,$2,1,now())
+		on conflict(object_route_id,owner_id) do update
 		set downloads=content_download_counters.downloads+1,last_download_at=now()
-		returning downloads`, objectType, objectPublicID, ownerID).Scan(&downloads); err != nil {
+		returning downloads`, objectRouteID, ownerID).Scan(&downloads); err != nil {
 		return err
 	}
 	for _, rule := range rules {
@@ -937,11 +942,11 @@ func (s *Server) recordOwnedContentDownload(
 		}
 		var rewardedSteps int64
 		if err = tx.QueryRow(ctx, `insert into content_download_reward_counters(
-			object_type,object_public_id,owner_id,currency_id,rewarded_steps
-		) values($1,$2,$3,$4,0)
-		on conflict(object_type,object_public_id,owner_id,currency_id) do update
+			object_route_id,owner_id,currency_id,rewarded_steps
+		) values($1,$2,$3,0)
+		on conflict(object_route_id,owner_id,currency_id) do update
 		set updated_at=content_download_reward_counters.updated_at
-		returning rewarded_steps`, objectType, objectPublicID, ownerID, currencyID).Scan(&rewardedSteps); err != nil {
+		returning rewarded_steps`, objectRouteID, ownerID, currencyID).Scan(&rewardedSteps); err != nil {
 			return err
 		}
 		targetSteps := downloads / rule.DownloadsPerReward
@@ -956,9 +961,9 @@ func (s *Server) recordOwnedContentDownload(
 		); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `update content_download_reward_counters set rewarded_steps=$5,updated_at=now()
-			where object_type=$1 and object_public_id=$2 and owner_id=$3 and currency_id=$4`,
-			objectType, objectPublicID, ownerID, currencyID, targetSteps); err != nil {
+		if _, err = tx.Exec(ctx, `update content_download_reward_counters set rewarded_steps=$4,updated_at=now()
+			where object_route_id=$1 and owner_id=$2 and currency_id=$3`,
+			objectRouteID, ownerID, currencyID, targetSteps); err != nil {
 			return err
 		}
 	}

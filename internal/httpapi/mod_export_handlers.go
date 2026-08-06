@@ -414,7 +414,7 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "保存导入队列事件失败")
 			return
 		}
-		if err = insertModExportImportActivityTx(r.Context(), tx, claims.Subject, jobID, request.TargetVersionPublicID, request.OverwriteExistingImportData); err != nil {
+		if err = insertModExportImportActivityTx(r.Context(), tx, claims.Subject, request.TargetVersionPublicID); err != nil {
 			writeError(w, http.StatusInternalServerError, "记录导入用户行为失败")
 			return
 		}

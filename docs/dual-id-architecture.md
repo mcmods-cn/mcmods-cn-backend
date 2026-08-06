@@ -8,7 +8,7 @@ Mcmods-cn 的业务对象使用“数字内部 ID + 随机公开 ID”：
 - `public_id` 只能由 PostgreSQL 的 `new_public_id()` 或服务端 CSPRNG 生成，不能再由名称、Minecraft ID、时间戳或内容哈希推导；
 - 外部公开 ID 不是权限凭据，服务端解析后仍必须执行对象级权限检查。
 
-Schema generation 28 直接建立这套结构。开发数据不迁移；升级时必须重建开发数据库。
+Schema generation 60 直接建立这套结构。开发数据不迁移；升级时必须重建开发数据库。
 
 ## 核心表约定
 
@@ -32,10 +32,10 @@ API 不返回这些数字主键。响应中的 `id`、`userId`、`parentId`、`f
 `public_id_registry` 负责跨对象类型保留公开 ID，`public_routes` 保存：
 
 ```text
-public_id -> entity_type + internal_id + canonical_path
+numeric route id -> public_id -> entity_type + internal_id + canonical_path
 ```
 
-各业务表通过插入/删除触发器维护映射。服务端使用 `public_routes` 或对象表的唯一索引把公开 ID 解析为数字主键，不允许前端提交内部主键。
+`public_routes.id` 是全站公共路由的数字内部主键，`public_id` 只是唯一的对外字符标识。各业务表通过插入/删除触发器维护映射。服务端使用 `public_routes` 或对象表的唯一索引把公开 ID 解析为数字主键，不允许前端提交内部主键。
 
 ## 边界规则
 
@@ -44,7 +44,7 @@ public_id -> entity_type + internal_id + canonical_path
 3. 审核修订快照只保存公开 ID。批准发布时，在同一事务内重新解析数字主键。
 4. NATS 的纯后端消息可以携带数字内部 ID；一旦任务 ID 返回浏览器，则必须同时拥有并返回公开 ID。
 5. Redis 的公开对象缓存键使用公开 ID；缓存值可包含仅供服务端使用的数字 ID。
-6. 审计日志可以同时记录内部 ID 和公开 ID，但任何返回用户的 metadata 只使用公开 ID。
+6. 高频用户操作记录只保存数字用户/对象关联、枚举动作、Markdown 新增字节数和时间，不保存公开 ID 快照或 JSON metadata；后台查询时按数字路由关联公开 ID。
 7. 游标分页可在服务端使用递增数字主键排序，游标必须封装为不透明值，不能直接暴露数字 ID。
 
 ## 不属于业务公开 ID 的字符串

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/activity"
 )
 
 const currentContentSchemaVersion = 1
@@ -151,6 +153,13 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 		Metadata:      params.Metadata,
 	}); err != nil {
 		return result, err
+	}
+	if params.Request != nil && params.EntityID > 0 {
+		actionID := activity.ActionEdit
+		if params.BaseRevision == nil {
+			actionID = activity.ActionCreate
+		}
+		annotateActivityID(params.Request, actionID, activityObjectTypeForEntityType(params.EntityType), params.EntityType, params.EntityID, 0)
 	}
 	return result, nil
 }

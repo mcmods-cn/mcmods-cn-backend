@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -325,12 +324,11 @@ func ensureImportedContentSectionsTx(ctx context.Context, tx pgx.Tx, revisionIDs
 	return nil
 }
 
-func insertModExportImportActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, jobID, versionPublicID string, overwrite bool) error {
-	metadata, err := json.Marshal(map[string]any{"jobId": jobID, "targetVersionPublicId": versionPublicID, "overwriteExistingImportData": overwrite, "source": "mcmods_exporter"})
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `insert into user_activity_events(user_id,action_id,object_type_id,object_public_id,metadata,occurred_at)
-		values(nullif($1,0),$2,$3,$4,$5::jsonb,$6)`, actorID, activity.ActionUpload, activity.ObjectMod, versionPublicID, string(metadata), time.Now().UTC())
+func insertModExportImportActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, versionPublicID string) error {
+	_, err := tx.Exec(ctx, `insert into user_activity_events(user_id,action_id,object_type_id,object_route_id,occurred_at)
+		select nullif($1,0),$2,$3,route.id,$5
+		from mod_content_versions version
+		join public_routes route on route.entity_type='mod' and route.internal_id=version.mod_id
+		where version.public_id=$4`, actorID, activity.ActionUpload, activity.ObjectMod, versionPublicID, time.Now().UTC())
 	return err
 }

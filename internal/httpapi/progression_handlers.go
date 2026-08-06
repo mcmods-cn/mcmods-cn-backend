@@ -381,7 +381,7 @@ func (s *Server) adminActivityEvents(w http.ResponseWriter, r *http.Request) {
 		addCondition("object_type.code=?", value)
 	}
 	if value := strings.TrimSpace(query.Get("objectPublicId")); value != "" {
-		addCondition("event.object_public_id=?", value)
+		addCondition("route.public_id=?", value)
 	}
 	if value := strings.TrimSpace(query.Get("from")); value != "" {
 		if timestamp, err := time.Parse(time.RFC3339, value); err == nil {
@@ -394,13 +394,14 @@ func (s *Server) adminActivityEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	args = append(args, limit, offset)
-	rows, err := s.db.Query(r.Context(), `select event.public_id,account.public_id,account.username,
-		action.code,action.name,object_type.code,object_type.name,event.object_public_id,
-		event.markdown_added_bytes,event.metadata,event.occurred_at
+	rows, err := s.db.Query(r.Context(), `select event.id::text,account.public_id,account.username,
+		action.code,action.name,object_type.code,object_type.name,coalesce(route.public_id,''),
+		event.markdown_added_bytes,event.occurred_at
 		from user_activity_events event
 		left join users account on account.id=event.user_id
 		join activity_actions action on action.id=event.action_id
 		join activity_object_types object_type on object_type.id=event.object_type_id
+		left join public_routes route on route.id=event.object_route_id
 		where `+strings.Join(conditions, " and ")+`
 		order by event.occurred_at desc,event.id desc
 		limit $`+strconv.Itoa(len(args)-1)+` offset $`+strconv.Itoa(len(args)), args...)
@@ -416,21 +417,18 @@ func (s *Server) adminActivityEvents(w http.ResponseWriter, r *http.Request) {
 		var username *string
 		var actionCode, actionName, objectCode, objectName, objectPublicID string
 		var markdownAddedBytes int
-		var metadataRaw []byte
 		var occurredAt time.Time
 		if err = rows.Scan(&id, &userID, &username, &actionCode, &actionName, &objectCode, &objectName,
-			&objectPublicID, &markdownAddedBytes, &metadataRaw, &occurredAt); err != nil {
+			&objectPublicID, &markdownAddedBytes, &occurredAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode activity events")
 			return
 		}
-		metadata := map[string]any{}
-		_ = json.Unmarshal(metadataRaw, &metadata)
 		items = append(items, map[string]any{
 			"id": id, "userId": userID, "username": username,
 			"action": actionCode, "actionName": actionName,
 			"objectType": objectCode, "objectTypeName": objectName,
 			"objectPublicId": objectPublicID, "markdownAddedBytes": markdownAddedBytes,
-			"metadata": metadata, "occurredAt": occurredAt,
+			"occurredAt": occurredAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "limit": limit, "offset": offset})
@@ -447,7 +445,7 @@ func validateTaskCondition(condition map[string]any) error {
 	if !stringIn(action, "edit", "create", "view", "delete", "claim", "download", "upload", "purchase", "transfer", "checkin", "use") {
 		return errors.New("task condition action is unsupported")
 	}
-	if !stringIn(objectType, "recipe", "mod", "resource", "blueprint", "plugin", "author", "team", "user", "comment", "tag", "file", "economy", "task", "shop_item") {
+	if !stringIn(objectType, "recipe", "mod", "resource", "blueprint", "plugin", "author", "team", "user", "comment", "tag", "file", "economy", "task", "shop_item", "modpack", "server", "map", "resource_pack", "shader_pack", "datapack", "addon", "community_post", "review", "skin", "player_profile") {
 		return errors.New("task condition object type is unsupported")
 	}
 	condition["action"] = action

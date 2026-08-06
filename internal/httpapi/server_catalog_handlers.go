@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"mcmods-cn-backend/internal/activity"
 	"mcmods-cn-backend/internal/serverprobe"
 )
 
@@ -221,6 +222,7 @@ func (s *Server) probeMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "检查重复服务器失败")
 		return
 	}
+	skipRequestActivity(r)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -331,6 +333,7 @@ func (s *Server) createMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "提交服务器失败")
 		return
 	}
+	annotateActivityID(r, activity.ActionCreate, activity.ObjectServer, "minecraft_server", serverID, len(request.BodyMarkdown))
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": publicID, "reviewStatus": reviewStatus, "published": reviewStatus == "approved",
 	})
@@ -360,9 +363,9 @@ func (s *Server) updateMinecraftServer(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 
 	var serverID, ownerID int64
-	var loader string
-	err = tx.QueryRow(r.Context(), `select id,created_by,loader from minecraft_servers
-		where public_id=$1 for update`, publicID).Scan(&serverID, &ownerID, &loader)
+	var loader, previousBody string
+	err = tx.QueryRow(r.Context(), `select id,created_by,loader,body_markdown from minecraft_servers
+		where public_id=$1 for update`, publicID).Scan(&serverID, &ownerID, &loader, &previousBody)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "服务器不存在")
 		return
@@ -416,6 +419,8 @@ func (s *Server) updateMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "更新服务器失败")
 		return
 	}
+	annotateActivityID(r, activity.ActionEdit, activity.ObjectServer, "minecraft_server", serverID,
+		activity.AddedMarkdownBytes(previousBody, request.BodyMarkdown))
 	writeJSON(w, http.StatusOK, map[string]any{"id": publicID})
 }
 

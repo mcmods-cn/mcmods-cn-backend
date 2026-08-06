@@ -413,6 +413,28 @@ func objectTypeID(code string) int16 {
 		return activity.ObjectTask
 	case "shop_item":
 		return activity.ObjectShopItem
+	case "modpack":
+		return activity.ObjectModpack
+	case "server":
+		return activity.ObjectServer
+	case "map":
+		return activity.ObjectMap
+	case "resource_pack":
+		return activity.ObjectResourcePack
+	case "shader_pack":
+		return activity.ObjectShaderPack
+	case "datapack":
+		return activity.ObjectDatapack
+	case "addon":
+		return activity.ObjectAddon
+	case "community_post":
+		return activity.ObjectCommunityPost
+	case "review":
+		return activity.ObjectReview
+	case "skin":
+		return activity.ObjectSkin
+	case "player_profile":
+		return activity.ObjectPlayerProfile
 	default:
 		return 0
 	}

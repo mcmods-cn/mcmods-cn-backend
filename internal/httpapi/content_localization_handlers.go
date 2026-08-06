@@ -271,7 +271,7 @@ func (s *Server) updateCatalogEntityContent(w http.ResponseWriter, r *http.Reque
 	}
 	activityID, err := insertCatalogActivityTx(r.Context(), tx, claims.Subject, catalogEditorSnapshot{
 		Operation: "edit", Kind: entity.EntityType, EntityID: entity.EntityID, PublicID: publicID,
-	}, created, reviewStatus)
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record localized content activity")
 		return
@@ -417,9 +417,7 @@ func (s *Server) requestCatalogContentTranslation(w http.ResponseWriter, r *http
 		writeError(w, http.StatusServiceUnavailable, "AI task queue is unavailable")
 		return
 	}
-	annotateActivity(r, 0, catalogActivityObjectType(entity.EntityType), publicID, 0, map[string]any{
-		"operation": "translate", "targetLocale": request.TargetLocale, "aiTaskId": task.TaskUID,
-	})
+	annotateActivity(r, 0, catalogActivityObjectType(entity.EntityType), publicID, 0)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"cached": false, "taskId": task.TaskUID, "status": task.Status, "countsTowardDailyTokenQuota": true,
 	})

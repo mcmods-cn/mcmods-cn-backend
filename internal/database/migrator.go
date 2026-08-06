@@ -7,9 +7,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 59
+const schemaGeneration = 60
 
-// Migrate installs one coherent development schema. Generation 59 establishes
+// Migrate installs one coherent development schema. Generation 60 establishes
 // numeric internal keys, globally unique public IDs, revocable authentication
 // sessions, version-scoped mod-content layout identities and similar-resource
 // groups, and generalized
@@ -35,6 +35,8 @@ const schemaGeneration = 59
 // marked read-only by administrators; import aliases remain independent.
 // Searchable records are projected through a durable, coalescing queue so the
 // optional Typesense service never participates in content transactions.
+// User activity is stored as compact numeric relations without public-ID
+// snapshots or JSON metadata; high-frequency editor autosaves are excluded.
 // Earlier development data is
 // intentionally not migrated and must be reset before installation.
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {

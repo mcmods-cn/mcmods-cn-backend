@@ -227,8 +227,7 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusInternalServerError, "failed to queue catalog import")
 			return
 		}
-		if err = insertEmbeddedIconImportActivityTx(r.Context(), tx, claims.Subject, jobID, request.TargetVersionPublicID,
-			request.OverwriteExistingImportData, request.Source); err != nil {
+		if err = insertEmbeddedIconImportActivityTx(r.Context(), tx, claims.Subject, request.TargetVersionPublicID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to record catalog import activity")
 			return
 		}
@@ -840,16 +839,12 @@ func normalizeEmbeddedIconStrings(values []string) []string {
 	return result
 }
 
-func insertEmbeddedIconImportActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, jobID, versionPublicID string, overwrite bool, source string) error {
-	metadata, err := json.Marshal(map[string]any{
-		"jobId": jobID, "targetVersionPublicId": versionPublicID,
-		"overwriteExistingImportData": overwrite, "source": source,
-	})
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `insert into user_activity_events(user_id,action_id,object_type_id,object_public_id,metadata,occurred_at)
-		values(nullif($1,0),$2,$3,$4,$5::jsonb,$6)`, actorID, activity.ActionUpload, activity.ObjectMod,
-		versionPublicID, string(metadata), time.Now().UTC())
+func insertEmbeddedIconImportActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, versionPublicID string) error {
+	_, err := tx.Exec(ctx, `insert into user_activity_events(user_id,action_id,object_type_id,object_route_id,occurred_at)
+		select nullif($1,0),$2,$3,route.id,$5
+		from mod_content_versions version
+		join public_routes route on route.entity_type='mod' and route.internal_id=version.mod_id
+		where version.public_id=$4`, actorID, activity.ActionUpload, activity.ObjectMod,
+		versionPublicID, time.Now().UTC())
 	return err
 }

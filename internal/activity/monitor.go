@@ -2,7 +2,6 @@ package activity
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"sync"
 	"time"
@@ -26,20 +25,31 @@ const (
 )
 
 const (
-	ObjectRecipe    int16 = 1
-	ObjectMod       int16 = 2
-	ObjectBlueprint int16 = 3
-	ObjectPlugin    int16 = 4
-	ObjectAuthor    int16 = 5
-	ObjectTeam      int16 = 6
-	ObjectUser      int16 = 7
-	ObjectComment   int16 = 8
-	ObjectTag       int16 = 9
-	ObjectFile      int16 = 10
-	ObjectEconomy   int16 = 11
-	ObjectTask      int16 = 12
-	ObjectShopItem  int16 = 13
-	ObjectResource  int16 = 14
+	ObjectRecipe        int16 = 1
+	ObjectMod           int16 = 2
+	ObjectBlueprint     int16 = 3
+	ObjectPlugin        int16 = 4
+	ObjectAuthor        int16 = 5
+	ObjectTeam          int16 = 6
+	ObjectUser          int16 = 7
+	ObjectComment       int16 = 8
+	ObjectTag           int16 = 9
+	ObjectFile          int16 = 10
+	ObjectEconomy       int16 = 11
+	ObjectTask          int16 = 12
+	ObjectShopItem      int16 = 13
+	ObjectResource      int16 = 14
+	ObjectModpack       int16 = 15
+	ObjectServer        int16 = 16
+	ObjectMap           int16 = 17
+	ObjectResourcePack  int16 = 18
+	ObjectShaderPack    int16 = 19
+	ObjectDatapack      int16 = 20
+	ObjectAddon         int16 = 21
+	ObjectCommunityPost int16 = 22
+	ObjectReview        int16 = 23
+	ObjectSkin          int16 = 24
+	ObjectPlayerProfile int16 = 25
 )
 
 const (
@@ -48,12 +58,18 @@ const (
 )
 
 type Event struct {
-	UserID             int64
-	ActionID           int16
-	ObjectTypeID       int16
-	ObjectPublicID     string
+	UserID        int64
+	ActionID      int16
+	ObjectTypeID  int16
+	ObjectRouteID int64
+	// ObjectPublicID is a transient lookup key. It is resolved in batches and
+	// never persisted in the high-volume activity table.
+	ObjectPublicID string
+	// ObjectEntityType and ObjectInternalID are the numeric internal lookup
+	// alternative used when a handler already resolved the business entity.
+	ObjectEntityType   string
+	ObjectInternalID   int64
 	MarkdownAddedBytes int
-	Metadata           map[string]any
 	OccurredAt         time.Time
 }
 
@@ -198,26 +214,24 @@ func (m *Monitor) flushAll(ctx context.Context, pending []Event) error {
 }
 
 func (m *Monitor) writeBatch(ctx context.Context, events []Event) error {
+	if err := m.resolveObjectRouteIDs(ctx, events); err != nil {
+		return err
+	}
 	rows := make([][]any, 0, len(events))
 	for _, event := range events {
-		metadata, err := json.Marshal(event.Metadata)
-		if err != nil {
-			metadata = []byte(`{}`)
-		}
 		rows = append(rows, []any{
 			nullableUserID(event.UserID),
 			event.ActionID,
 			event.ObjectTypeID,
-			event.ObjectPublicID,
+			nullableObjectRouteID(event.ObjectRouteID),
 			event.MarkdownAddedBytes,
-			string(metadata),
 			event.OccurredAt.UTC(),
 		})
 	}
 	_, err := m.db.CopyFrom(
 		ctx,
 		pgx.Identifier{"user_activity_events"},
-		[]string{"user_id", "action_id", "object_type_id", "object_public_id", "markdown_added_bytes", "metadata", "occurred_at"},
+		[]string{"user_id", "action_id", "object_type_id", "object_route_id", "markdown_added_bytes", "occurred_at"},
 		pgx.CopyFromRows(rows),
 	)
 	if err != nil {
@@ -231,11 +245,118 @@ func (m *Monitor) writeBatch(ctx context.Context, events []Event) error {
 	return nil
 }
 
+func (m *Monitor) resolveObjectRouteIDs(ctx context.Context, events []Event) error {
+	publicIDs := make([]string, 0, len(events))
+	seen := make(map[string]struct{}, len(events))
+	for _, event := range events {
+		if event.ObjectRouteID > 0 || event.ObjectPublicID == "" {
+			continue
+		}
+		if _, exists := seen[event.ObjectPublicID]; exists {
+			continue
+		}
+		seen[event.ObjectPublicID] = struct{}{}
+		publicIDs = append(publicIDs, event.ObjectPublicID)
+	}
+	resolvedPublicIDs := make(map[string]int64, len(publicIDs))
+	if len(publicIDs) > 0 {
+		rows, err := m.db.Query(ctx, `select public_id,id from public_routes where public_id=any($1)`, publicIDs)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var publicID string
+			var routeID int64
+			if err = rows.Scan(&publicID, &routeID); err != nil {
+				rows.Close()
+				return err
+			}
+			resolvedPublicIDs[publicID] = routeID
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+	type internalKey struct {
+		entityType string
+		internalID int64
+	}
+	entityTypes := make([]string, 0, len(events))
+	internalIDs := make([]int64, 0, len(events))
+	seenInternal := make(map[internalKey]struct{}, len(events))
+	for _, event := range events {
+		if event.ObjectRouteID > 0 || event.ObjectEntityType == "" || event.ObjectInternalID <= 0 {
+			continue
+		}
+		key := internalKey{entityType: event.ObjectEntityType, internalID: event.ObjectInternalID}
+		if _, exists := seenInternal[key]; exists {
+			continue
+		}
+		seenInternal[key] = struct{}{}
+		entityTypes = append(entityTypes, key.entityType)
+		internalIDs = append(internalIDs, key.internalID)
+	}
+	type resolvedRoute struct {
+		id       int64
+		publicID string
+	}
+	resolvedInternalIDs := make(map[internalKey]resolvedRoute, len(entityTypes))
+	if len(entityTypes) > 0 {
+		rows, err := m.db.Query(ctx, `select route.entity_type,route.internal_id,route.id,route.public_id
+			from public_routes route
+			join unnest($1::text[],$2::bigint[]) input(entity_type,internal_id)
+			  on input.entity_type=route.entity_type and input.internal_id=route.internal_id`, entityTypes, internalIDs)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var key internalKey
+			var route resolvedRoute
+			if err = rows.Scan(&key.entityType, &key.internalID, &route.id, &route.publicID); err != nil {
+				rows.Close()
+				return err
+			}
+			resolvedInternalIDs[key] = route
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+	for index := range events {
+		if events[index].ObjectRouteID > 0 {
+			continue
+		}
+		if events[index].ObjectPublicID != "" {
+			events[index].ObjectRouteID = resolvedPublicIDs[events[index].ObjectPublicID]
+		}
+		if events[index].ObjectRouteID <= 0 && events[index].ObjectInternalID > 0 {
+			key := internalKey{entityType: events[index].ObjectEntityType, internalID: events[index].ObjectInternalID}
+			route := resolvedInternalIDs[key]
+			events[index].ObjectRouteID = route.id
+			if events[index].ObjectPublicID == "" {
+				events[index].ObjectPublicID = route.publicID
+			}
+		}
+	}
+	return nil
+}
+
 func nullableUserID(userID int64) any {
 	if userID <= 0 {
 		return nil
 	}
 	return userID
+}
+
+func nullableObjectRouteID(routeID int64) any {
+	if routeID <= 0 {
+		return nil
+	}
+	return routeID
 }
 
 // AddedMarkdownBytes returns the number of inserted UTF-8 bytes in a minimal

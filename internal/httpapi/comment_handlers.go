@@ -326,11 +326,7 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		writeError(w, http.StatusInternalServerError, "发布评论失败")
 		return
 	}
-	annotateActivity(r, activity.ActionCreate, activity.ObjectComment, publicID, len(request.Body), map[string]any{
-		"targetType": target.Type,
-		"targetKey":  target.Key,
-		"parentId":   request.ParentID,
-	})
+	annotateActivity(r, activity.ActionCreate, activity.ObjectComment, publicID, len(request.Body))
 
 	notificationData := map[string]any{
 		"commentId": publicID, "targetType": target.Type, "targetKey": target.Key,
@@ -583,7 +579,7 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "修改评论失败")
 			return
 		}
-		annotateActivity(r, activity.ActionEdit, activity.ObjectComment, publicID, len(request.Body), nil)
+		annotateActivity(r, activity.ActionEdit, activity.ObjectComment, publicID, len(request.Body))
 		items, _ := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims)
 		if len(items) > 0 {
 			writeJSON(w, http.StatusOK, items[0])
@@ -602,7 +598,7 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "已选为最佳回答的评论不能删除")
 			return
 		}
-		annotateActivity(r, activity.ActionDelete, activity.ObjectComment, publicID, 0, nil)
+		annotateActivity(r, activity.ActionDelete, activity.ObjectComment, publicID, 0)
 		writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 		return
 	}
@@ -665,7 +661,7 @@ func (s *Server) commentPin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	annotateActivity(r, activity.ActionEdit, activity.ObjectComment, publicID, 0, map[string]any{"pinned": pinned})
+	annotateActivity(r, activity.ActionEdit, activity.ObjectComment, publicID, 0)
 	items, err := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims)
 	if err != nil || len(items) == 0 {
 		writeError(w, http.StatusInternalServerError, "读取评论失败")

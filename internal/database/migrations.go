@@ -40,7 +40,8 @@ func baselineSchemaStatements() []string {
 		end;
 		$$ language plpgsql volatile`,
 		`create table public_routes (
-			public_id varchar(16) primary key check (public_id ~ '^[a-z0-9]{9}$'),
+			id bigserial primary key,
+			public_id varchar(16) not null unique check (public_id ~ '^[a-z0-9]{9}$'),
 			entity_type text not null,
 			internal_id bigint not null,
 			canonical_path text not null default '',

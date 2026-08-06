@@ -276,7 +276,7 @@ func (s *Server) createCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit creator")
 		return
 	}
-	annotateActivity(r, activity.ActionCreate, creatorObjectType(snapshot.Kind), publicID, len(snapshot.DescriptionMarkdown), map[string]any{"creatorId": publicID})
+	annotateActivity(r, activity.ActionCreate, creatorObjectType(snapshot.Kind), publicID, len(snapshot.DescriptionMarkdown))
 	writeJSON(w, http.StatusCreated, map[string]any{"publicId": publicID, "revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID, "reviewStatus": status})
 }
 
@@ -365,7 +365,7 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	addedBytes := activity.AddedMarkdownBytes(previousDescription, snapshot.DescriptionMarkdown)
-	annotateActivity(r, activity.ActionEdit, creatorObjectType(kind), publicID, addedBytes, map[string]any{"revisionId": created.RevisionPublicID})
+	annotateActivity(r, activity.ActionEdit, creatorObjectType(kind), publicID, addedBytes)
 	writeJSON(w, http.StatusOK, map[string]any{"revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID, "reviewStatus": status})
 }
 
@@ -445,7 +445,7 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit claim")
 		return
 	}
-	annotateActivity(r, activity.ActionClaim, creatorObjectType(kind), publicID, len(request.ProofMarkdown), map[string]any{"claimId": claimPublicID})
+	annotateActivity(r, activity.ActionClaim, creatorObjectType(kind), publicID, len(request.ProofMarkdown))
 	writeJSON(w, http.StatusCreated, map[string]any{"id": claimPublicID, "status": status, "name": name})
 }
 

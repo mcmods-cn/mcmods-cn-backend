@@ -1,9 +1,7 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"net/http"
-	"time"
 
 	"mcmods-cn-backend/internal/activity"
 )
@@ -62,13 +60,10 @@ func (s *Server) contentLanguageSettings(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to update content language settings")
 		return
 	}
-	metadata, _ := json.Marshal(map[string]any{
-		"operation": "content_language_preferences", "primaryLocale": request.PrimaryLocale,
-		"secondaryLocale": request.SecondaryLocale,
-	})
 	if _, err = tx.Exec(r.Context(), `
-		insert into user_activity_events(user_id,action_id,object_type_id,object_public_id,metadata,occurred_at)
-		values($1,$2,$3,'',$4::jsonb,$5)`, claims.Subject, activity.ActionEdit, activity.ObjectUser, string(metadata), time.Now().UTC()); err != nil {
+		insert into user_activity_events(user_id,action_id,object_type_id,object_route_id,occurred_at)
+		select $1,$2,$3,route.id,now() from public_routes route
+		where route.entity_type='user' and route.internal_id=$1`, claims.Subject, activity.ActionEdit, activity.ObjectUser); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record content language settings update")
 		return
 	}

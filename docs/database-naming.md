@@ -33,6 +33,8 @@
 - `provider_*_id`：外部平台 ID；
 - `source_*_id`：导入包中的源标识。
 
+跨业务类型需要一个全站数字身份时使用 `public_routes.id`；不要把 `public_id` 当作内部主键或业务外键。
+
 HTTP API 不得输出内部数字 ID。若旧接口仍使用 `entityId` 这类历史字段名，其值也必须是公开 ID，并应在新接口中逐步收敛到 `publicId`。
 
 导入快照的确定性字符串键只允许存在于 `*_import_*` 溯源表中。它们应在代码

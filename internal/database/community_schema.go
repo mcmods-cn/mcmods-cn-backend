@@ -190,27 +190,26 @@ func communitySchemaStatements() []string {
 			(4,'plugin','Plugin'),(5,'author','Author'),(6,'team','Team'),
 			(7,'user','User'),(8,'comment','Comment'),(9,'tag','Tag'),
 			(10,'file','File'),(11,'economy','Economy'),(12,'task','Task'),
-			(13,'shop_item','Shop item'),(14,'resource','Resource')
+			(13,'shop_item','Shop item'),(14,'resource','Resource'),
+			(15,'modpack','Modpack'),(16,'server','Server'),(17,'map','Map'),
+			(18,'resource_pack','Resource pack'),(19,'shader_pack','Shader pack'),
+			(20,'datapack','Data pack'),(21,'addon','Addon'),
+			(22,'community_post','Community post'),(23,'review','Review'),
+			(24,'skin','Skin'),(25,'player_profile','Player profile')
 		 on conflict(id) do update set code=excluded.code,name=excluded.name`,
 		`create table if not exists user_activity_events (
 			id bigserial primary key,
-			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			user_id bigint references users(id) on delete set null,
-			user_public_id text not null default '',
 			action_id smallint not null references activity_actions(id) on delete restrict,
 			object_type_id smallint not null references activity_object_types(id) on delete restrict,
-			object_id bigint,
-			object_public_id text not null default '',
+			object_route_id bigint references public_routes(id) on delete set null,
 			markdown_added_bytes integer not null default 0 check(markdown_added_bytes >= 0),
-			metadata jsonb not null default '{}'::jsonb,
 			occurred_at timestamptz not null
 		)`,
 		`create index if not exists idx_activity_user_time
 			on user_activity_events(user_id,occurred_at desc,id desc)`,
 		`create index if not exists idx_activity_object_time
-			on user_activity_events(object_type_id,object_id,occurred_at desc,id desc)`,
-		`create index if not exists idx_activity_action_time
-			on user_activity_events(action_id,occurred_at desc,id desc)`,
+			on user_activity_events(object_type_id,object_route_id,occurred_at desc,id desc)`,
 		`create index if not exists idx_activity_time_brin
 			on user_activity_events using brin(occurred_at)`,
 
@@ -258,25 +257,21 @@ func communitySchemaStatements() []string {
 		`create index if not exists idx_currency_transactions_reference
 			on currency_transactions(reference_type,reference_key,created_at desc)`,
 		`create table if not exists content_download_counters (
-			object_type text not null,
-			object_id bigint not null,
+			object_route_id bigint not null references public_routes(id) on delete cascade,
 			owner_id bigint not null references users(id) on delete cascade,
 			downloads bigint not null default 0 check(downloads >= 0),
 			last_download_at timestamptz,
-			primary key(object_type,object_id,owner_id),
-			foreign key(object_type,object_id) references public_routes(entity_type,internal_id) on delete cascade
+			primary key(object_route_id,owner_id)
 		)`,
 		`create index if not exists idx_content_download_counters_owner
 			on content_download_counters(owner_id,downloads desc)`,
 		`create table if not exists content_download_reward_counters (
-			object_type text not null,
-			object_id bigint not null,
+			object_route_id bigint not null references public_routes(id) on delete cascade,
 			owner_id bigint not null references users(id) on delete cascade,
 			currency_id bigint not null references currencies(id) on delete restrict,
 			rewarded_steps bigint not null default 0 check(rewarded_steps >= 0),
 			updated_at timestamptz not null default now(),
-			primary key(object_type,object_id,owner_id,currency_id),
-			foreign key(object_type,object_id) references public_routes(entity_type,internal_id) on delete cascade
+			primary key(object_route_id,owner_id,currency_id)
 		)`,
 		`create table if not exists user_checkins (
 			user_id bigint not null references users(id) on delete cascade,
