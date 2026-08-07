@@ -12,14 +12,21 @@ type notificationSettingsRequest struct {
 	EmailEnabled bool `json:"emailEnabled"`
 }
 
+type userConnectionItem struct {
+	ID        string `json:"id"`
+	Username  string `json:"username"`
+	AvatarURL string `json:"avatarUrl"`
+	Signature string `json:"signature"`
+}
+
 func (s *Server) userOverview(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	var followers, following int64
 	err := s.db.QueryRow(
 		r.Context(),
 		`select
-		 (select count(*) from user_follows where followed_id = $1),
-		 (select count(*) from user_follows where follower_id = $1)`,
+		 (select count(*) from user_follows follow join users account on account.id=follow.follower_id where follow.followed_id=$1 and account.status='active'),
+		 (select count(*) from user_follows follow join users account on account.id=follow.followed_id where follow.follower_id=$1 and account.status='active')`,
 		claims.Subject,
 	).Scan(&followers, &following)
 	if err != nil {
@@ -57,8 +64,8 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var followers, following int64
-	_ = s.db.QueryRow(r.Context(), `select count(*) from user_follows where followed_id = $1`, userID).Scan(&followers)
-	_ = s.db.QueryRow(r.Context(), `select count(*) from user_follows where follower_id = $1`, userID).Scan(&following)
+	_ = s.db.QueryRow(r.Context(), `select count(*) from user_follows follow join users account on account.id=follow.follower_id where follow.followed_id=$1 and account.status='active'`, userID).Scan(&followers)
+	_ = s.db.QueryRow(r.Context(), `select count(*) from user_follows follow join users account on account.id=follow.followed_id where follow.follower_id=$1 and account.status='active'`, userID).Scan(&following)
 	claims := currentClaims(r)
 	isOwn := claims.Subject > 0 && claims.Subject == userID
 	isFollowing := false
@@ -89,6 +96,78 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 		"createdAt": createdAt, "followers": followers, "following": following,
 		"avatarUrl": avatarURL, "signature": signature, "profileBackgroundUrl": profileBackgroundURL,
 		"isOwn": isOwn, "isFollowing": isFollowing, "canFollow": canFollow, "canMessage": canMessage,
+	})
+}
+
+func (s *Server) userFollowers(w http.ResponseWriter, r *http.Request) {
+	s.userConnections(w, r, "followers")
+}
+
+func (s *Server) userFollowing(w http.ResponseWriter, r *http.Request) {
+	s.userConnections(w, r, "following")
+}
+
+func (s *Server) userConnections(w http.ResponseWriter, r *http.Request, connectionType string) {
+	identity, ok := s.pathUserIdentity(w, r)
+	if !ok {
+		return
+	}
+	var status string
+	if err := s.db.QueryRow(r.Context(), `select status from users where id=$1`, identity.InternalID).Scan(&status); err == pgx.ErrNoRows || status == "deleted" {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load user connections")
+		return
+	}
+
+	page := boundedInt(r.URL.Query().Get("page"), 1, 1, 10000)
+	pageSize := boundedInt(r.URL.Query().Get("pageSize"), 24, 1, 60)
+	offset := (page - 1) * pageSize
+	countQuery := `select count(*) from user_follows follow join users account on account.id=follow.follower_id where follow.followed_id=$1 and account.status='active'`
+	itemsQuery := `select account.public_id,account.username,account.avatar_url,account.signature
+		from user_follows follow join users account on account.id=follow.follower_id
+		where follow.followed_id=$1 and account.status='active'
+		order by follow.created_at desc,follow.follower_id desc limit $2 offset $3`
+	if connectionType == "following" {
+		countQuery = `select count(*) from user_follows follow join users account on account.id=follow.followed_id where follow.follower_id=$1 and account.status='active'`
+		itemsQuery = `select account.public_id,account.username,account.avatar_url,account.signature
+			from user_follows follow join users account on account.id=follow.followed_id
+			where follow.follower_id=$1 and account.status='active'
+			order by follow.created_at desc,follow.followed_id desc limit $2 offset $3`
+	}
+	var total int64
+	if err := s.db.QueryRow(r.Context(), countQuery, identity.InternalID).Scan(&total); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to count user connections")
+		return
+	}
+	rows, err := s.db.Query(r.Context(), itemsQuery, identity.InternalID, pageSize, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load user connections")
+		return
+	}
+	defer rows.Close()
+	items := make([]userConnectionItem, 0)
+	ossCfg := s.ossConfigFromSettings(r.Context())
+	for rows.Next() {
+		var item userConnectionItem
+		if err = rows.Scan(&item.ID, &item.Username, &item.AvatarURL, &item.Signature); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode user connections")
+			return
+		}
+		item.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.AvatarURL)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate user avatar URL")
+			return
+		}
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load user connections")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items, "page": page, "pageSize": pageSize, "total": total,
 	})
 }
 

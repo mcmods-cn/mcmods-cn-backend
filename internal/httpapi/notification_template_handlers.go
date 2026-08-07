@@ -67,6 +67,8 @@ type reviewConfig struct {
 	NewsEdit                bool `json:"newsEdit"`
 	DiscussionCreate        bool `json:"discussionCreate"`
 	DiscussionEdit          bool `json:"discussionEdit"`
+	ChangelogCreate         bool `json:"changelogCreate"`
+	ChangelogEdit           bool `json:"changelogEdit"`
 }
 
 func defaultNotificationTemplateConfig() notificationTemplateConfig {
@@ -285,6 +287,8 @@ func defaultReviewConfig() reviewConfig {
 		NewsEdit:                true,
 		DiscussionCreate:        true,
 		DiscussionEdit:          true,
+		ChangelogCreate:         true,
+		ChangelogEdit:           true,
 	}
 }
 

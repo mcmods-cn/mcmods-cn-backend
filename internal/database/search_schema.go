@@ -147,7 +147,7 @@ func searchSchemaStatements() []string {
 		`create trigger trg_search_catalog_entities after insert or update or delete on catalog_entities for each row execute function enqueue_search_catalog_entity()`,
 		`create trigger trg_search_mod_identifiers after insert or update or delete on mod_identifiers for each row execute function enqueue_search_index_parent('mod','mod_id')`,
 		`create trigger trg_search_mod_identifier_servers after insert or update or delete on mod_identifiers for each row execute function enqueue_search_servers_for_mod_parent()`,
-		`create trigger trg_search_mod_server_names after update of primary_name,secondary_name,public_id,project_code or delete on mods for each row execute function enqueue_search_servers_for_mod()`,
+		`create trigger trg_search_mod_server_names after update of primary_name,secondary_name,project_code or delete on mods for each row execute function enqueue_search_servers_for_mod()`,
 		`create trigger trg_search_mod_loaders after insert or update or delete on mod_loader_compatibilities for each row execute function enqueue_search_index_parent('mod','mod_id')`,
 		`create trigger trg_search_mod_tags after insert or update or delete on mod_tags for each row execute function enqueue_search_index_parent('mod','mod_id')`,
 		`create trigger trg_search_modpack_loaders after insert or update or delete on modpack_loader_compatibilities for each row execute function enqueue_search_index_parent('modpack','modpack_id')`,

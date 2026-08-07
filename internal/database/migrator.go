@@ -7,9 +7,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 60
+const schemaGeneration = 67
 
-// Migrate installs one coherent development schema. Generation 60 establishes
+// Migrate installs one coherent development schema. Generation 67 establishes
 // numeric internal keys, globally unique public IDs, revocable authentication
 // sessions, version-scoped mod-content layout identities and similar-resource
 // groups, and generalized
@@ -37,6 +37,19 @@ const schemaGeneration = 60
 // optional Typesense service never participates in content transactions.
 // User activity is stored as compact numeric relations without public-ID
 // snapshots or JSON metadata; high-frequency editor autosaves are excluded.
+// User profile contributions are incrementally persisted as daily aggregates;
+// favorite collections have explicit public/private visibility.
+// Top-level projects and servers share normalized ratings, dimension scores,
+// deduplicated effective views, decaying trend events, Bayesian quality,
+// separately scoped project/server promotion items and persisted popularity
+// components. Root comments use a trust- and decay-aware heat aggregate.
+// They also share reviewed, localized, draft-aware release logs with reusable
+// per-project categories and immutable submitter-attributed history.
+// All public resources share a persisted metrics projection. View and edit
+// bursts are coalesced through a durable numeric-route refresh queue; project
+// totals include their bound child resources without synchronous fan-out.
+// The administration workbench reads persisted daily site metrics and project
+// popularity snapshots instead of aggregating the activity stream on demand.
 // Earlier development data is
 // intentionally not migrated and must be reset before installation.
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {
@@ -74,25 +87,7 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		return fmt.Errorf("begin schema installation: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	statements := make([]string, 0, 256)
-	statements = append(statements, baselineSchemaStatements()...)
-	statements = append(statements, catalogSchemaStatements()...)
-	statements = append(statements, catalogEditorSchemaStatements()...)
-	statements = append(statements, skinSchemaStatements()...)
-	statements = append(statements, reviewSchemaStatements()...)
-	statements = append(statements, immutableHistoryGuardStatements()...)
-	statements = append(statements, blueprintRelationSchemaStatements()...)
-	statements = append(statements, communitySchemaStatements()...)
-	statements = append(statements, projectFileSchemaStatements()...)
-	statements = append(statements, modContentSchemaStatements()...)
-	statements = append(statements, commentSchemaStatements()...)
-	statements = append(statements, communityPostSchemaStatements()...)
-	statements = append(statements, modpackSchemaStatements()...)
-	statements = append(statements, simpleProjectSchemaStatements()...)
-	statements = append(statements, draftSchemaStatements()...)
-	statements = append(statements, serverSchemaStatements()...)
-	statements = append(statements, searchSchemaStatements()...)
-	statements = append(statements, foreignKeyIndexStatement())
+	statements := schemaInstallationStatements()
 	for _, statement := range statements {
 		if _, err = tx.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("install schema generation %d: %w", schemaGeneration, err)
@@ -112,6 +107,32 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		return fmt.Errorf("commit schema generation: %w", err)
 	}
 	return nil
+}
+
+func schemaInstallationStatements() []string {
+	statements := make([]string, 0, 256)
+	statements = append(statements, baselineSchemaStatements()...)
+	statements = append(statements, catalogSchemaStatements()...)
+	statements = append(statements, catalogEditorSchemaStatements()...)
+	statements = append(statements, skinSchemaStatements()...)
+	statements = append(statements, reviewSchemaStatements()...)
+	statements = append(statements, immutableHistoryGuardStatements()...)
+	statements = append(statements, blueprintRelationSchemaStatements()...)
+	statements = append(statements, communitySchemaStatements()...)
+	statements = append(statements, projectFileSchemaStatements()...)
+	statements = append(statements, modContentSchemaStatements()...)
+	statements = append(statements, commentSchemaStatements()...)
+	statements = append(statements, communityPostSchemaStatements()...)
+	statements = append(statements, modpackSchemaStatements()...)
+	statements = append(statements, simpleProjectSchemaStatements()...)
+	statements = append(statements, serverSchemaStatements()...)
+	statements = append(statements, ratingSchemaStatements()...)
+	statements = append(statements, changelogSchemaStatements()...)
+	statements = append(statements, contentMetricsSchemaStatements()...)
+	statements = append(statements, adminDashboardSchemaStatements()...)
+	statements = append(statements, draftSchemaStatements()...)
+	statements = append(statements, searchSchemaStatements()...)
+	return append(statements, foreignKeyIndexStatement())
 }
 
 func foreignKeyIndexStatement() string {

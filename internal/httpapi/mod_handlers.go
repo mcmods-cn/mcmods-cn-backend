@@ -420,18 +420,22 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.db.Query(
 		r.Context(),
-		`select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, environment, primary_category,
+		`select m.id, project_code, slug, primary_name, secondary_name, abbreviation, summary, environment, primary_category,
 		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
-		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at,
+		        body_markdown, search_keywords, submission_method, review_status, created_by, m.created_at, m.updated_at, published_at,
 		        (select revision.public_id from content_revisions revision where revision.id=m.published_revision_id)
 		 from mods m
+		 left join public_routes popularity_route on popularity_route.entity_type='mod' and popularity_route.internal_id=m.id
+		 left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
 		 where (m.review_status = 'approved' or m.created_by = $1)
 		   and (($3 and m.id=any($4::bigint[])) or (not $3 and ($2 = '' or m.slug ilike '%' || $2 || '%' or m.project_code ilike '%' || $2 || '%' or m.primary_name ilike '%' || $2 || '%' or m.secondary_name ilike '%' || $2 || '%'
 		        or m.abbreviation ilike '%' || $2 || '%' or $2 = any(m.search_keywords)
 		        or exists (select 1 from mod_identifiers identifier where identifier.mod_id=m.id and identifier.identifier ilike '%' || $2 || '%')
 		        or exists (select 1 from content_creator_bindings a join creators creator on creator.id=a.creator_id
 		                   where a.subject_id=m.id and a.subject_type='mod' and creator.name ilike '%' || $2 || '%'))))
-		 order by case when $3 then array_position($4::bigint[],m.id) end,m.updated_at desc,m.id desc
+		 order by case when $3 then array_position($4::bigint[],m.id) end,
+		          case when not $3 then coalesce(popularity.heat_score,0) end desc,
+		          m.updated_at desc,m.id desc
 		 limit $5 offset $6`,
 		claims.Subject, query, indexed.Used, indexed.IDs, limit, databaseOffset,
 	)

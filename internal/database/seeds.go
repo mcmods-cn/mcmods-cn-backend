@@ -76,6 +76,7 @@ var seedPermissions = []seedPermission{
 
 	{Code: "economy.read", Module: "economy", Name: "Read economy settings", Description: "Allows reading currencies, balances and economy configuration."},
 	{Code: "economy.write", Module: "economy", Name: "Manage economy settings", Description: "Allows modifying currencies and economy configuration."},
+	{Code: "economy.balance.write", Module: "economy", Name: "Adjust user balances", Description: "Allows changing a user's currency balance while recording an immutable ledger entry."},
 	{Code: "economy.checkin", Module: "economy", Name: "Check in", Description: "Allows claiming the configured daily check-in reward."},
 	{Code: "economy.transfer", Module: "economy", Name: "Transfer currency", Description: "Allows transferring currency to another user."},
 
@@ -85,6 +86,10 @@ var seedPermissions = []seedPermission{
 	{Code: "shop.use", Module: "shop", Name: "Use shop items", Description: "Allows using an owned shop item."},
 	{Code: "shop.profile_background.purchase", Module: "shop", Name: "Purchase profile background", Description: "Allows purchasing the profile background item."},
 	{Code: "shop.profile_background.use", Module: "shop", Name: "Use profile background", Description: "Allows applying a custom profile background."},
+	{Code: "shop.project_heat_boost.purchase", Module: "shop", Name: "Purchase project heat boost", Description: "Allows purchasing a project heat boost item."},
+	{Code: "shop.project_heat_boost.use", Module: "shop", Name: "Use project heat boost", Description: "Allows applying an owned heat boost to an editable project."},
+	{Code: "shop.server_heat_boost.purchase", Module: "shop", Name: "Purchase server heat boost", Description: "Allows purchasing a server heat boost item."},
+	{Code: "shop.server_heat_boost.use", Module: "shop", Name: "Use server heat boost", Description: "Allows applying an owned heat boost to an editable server."},
 
 	{Code: "level.read", Module: "level", Name: "Read level settings", Description: "Allows reading level thresholds and role-track binding."},
 	{Code: "level.write", Module: "level", Name: "Manage level settings", Description: "Allows modifying level thresholds and role-track binding."},
@@ -107,6 +112,8 @@ var seedPermissions = []seedPermission{
 	{Code: "content.write", Module: "content", Name: "Manage content", Description: "Allows creating and editing site content."},
 	{Code: "content.no-review", Module: "content", Name: "Bypass content review", Description: "Allows catalog and localized content changes to publish without review."},
 	{Code: "content.translate", Module: "content", Name: "Translate content", Description: "Allows requesting quota-backed AI translations for unsupported content languages."},
+	{Code: "rating.create", Module: "rating", Name: "Rate projects", Description: "Allows submitting, updating and removing the account's own project and server ratings."},
+	{Code: "rating.read", Module: "rating", Name: "Read rating details", Description: "Allows opening the individual ratings and messages submitted by other users."},
 	{Code: "community.tutorial.create", Module: "community", Name: "Publish tutorials", Description: "Allows submitting tutorials."},
 	{Code: "community.issue.create", Module: "community", Name: "Publish issue reports", Description: "Allows submitting bug and feature reports."},
 	{Code: "community.news.create", Module: "community", Name: "Publish news", Description: "Allows submitting news articles."},
@@ -155,7 +162,7 @@ var seedPermissions = []seedPermission{
 var seedRoles = []seedRole{
 	{
 		Code: "registered", Name: "Registered user", Description: "Default permissions granted to a registered account.", Weight: 10,
-		Permissions: []string{"comment.create", "comment.edit.own", "comment.delete.own", "comment.react", "comment.report", "comment.watch", "content.translate", "user.ai.daily_token_limit.20000", "user.draft.retention_seconds.2592000", "community.tutorial.create", "community.issue.create", "community.discussion.create", "modpack.create"},
+		Permissions: []string{"comment.create", "comment.edit.own", "comment.delete.own", "comment.react", "comment.report", "comment.watch", "content.translate", "rating.create", "rating.read", "shop.read", "shop.purchase", "shop.use", "shop.project_heat_boost.purchase", "shop.project_heat_boost.use", "shop.server_heat_boost.purchase", "shop.server_heat_boost.use", "user.ai.daily_token_limit.20000", "user.draft.retention_seconds.2592000", "community.tutorial.create", "community.issue.create", "community.discussion.create", "modpack.create"},
 	},
 	{
 		Code: "project_owner.[ProjectID]", Name: "Project owner", Description: "Default project-scoped owner permissions.", Weight: 100,
@@ -176,9 +183,11 @@ var seedUsers = []seedUser{
 			"admin.*", "admin.access", "admin.config.read", "admin.config.write",
 			"user.read", "user.write", "permission.read", "permission.write",
 			"creator.create", "creator.edit", "creator.claim", "creator.claim.review", "creator.role.write",
-			"activity.read", "economy.read", "economy.write", "economy.checkin", "economy.transfer",
+			"activity.read", "economy.read", "economy.write", "economy.balance.write", "economy.checkin", "economy.transfer",
 			"shop.read", "shop.write", "shop.purchase", "shop.use",
 			"shop.profile_background.purchase", "shop.profile_background.use",
+			"shop.project_heat_boost.purchase", "shop.project_heat_boost.use",
+			"shop.server_heat_boost.purchase", "shop.server_heat_boost.use",
 			"level.read", "level.write", "task.read", "task.write",
 			"mail.read", "mail.write", "oss.read", "oss.write", "log.read", "log.write",
 			"ai.read", "ai.write", "ai.task.enqueue", "ai.task.consume",

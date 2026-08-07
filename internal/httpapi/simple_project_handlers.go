@@ -80,6 +80,15 @@ type simpleProjectResponse struct {
 	CanEdit              bool       `json:"canEdit"`
 }
 
+const simpleProjectCatalogFilter = `where project.project_type=$1
+	and (project.review_status='approved' or project.created_by=$2)
+	and (($7 and project.id=any($8::bigint[])) or (not $7 and ($3='' or project.slug ilike '%%'||$3||'%%' or project.public_id ilike '%%'||$3||'%%'
+		or project.primary_name ilike '%%'||$3||'%%' or project.summary ilike '%%'||$3||'%%'
+		or exists(select 1 from simple_project_localizations localization where localization.project_id=project.id
+			and (localization.name ilike '%%'||$3||'%%' or localization.summary ilike '%%'||$3||'%%')))))
+	and ($4='' or $4=any(project.categories)) and ($5='' or $5=any(project.minecraft_versions))
+	and ($6='' or $6=any(project.loaders))`
+
 func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 	projectType := normalizeSimpleProjectType(r.PathValue("projectType"))
 	if projectType == "" {
@@ -102,18 +111,10 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 	if indexed.Used {
 		databaseOffset = 0
 	}
-	filter := `where project.project_type=$1
-		and (project.review_status='approved' or project.created_by=$2)
-		and (($7 and project.id=any($8::bigint[])) or (not $7 and ($3='' or project.slug ilike '%%'||$3||'%%' or project.public_id ilike '%%'||$3||'%%'
-			or project.primary_name ilike '%%'||$3||'%%' or project.summary ilike '%%'||$3||'%%'
-			or exists(select 1 from simple_project_localizations localization where localization.project_id=project.id
-				and (localization.name ilike '%%'||$3||'%%' or localization.summary ilike '%%'||$3||'%%'))))
-		and ($4='' or $4=any(project.categories)) and ($5='' or $5=any(project.minecraft_versions))
-		and ($6='' or $6=any(project.loaders))`
 	var total int
 	if indexed.Used {
 		total = indexed.Total
-	} else if err := s.db.QueryRow(r.Context(), `select count(*) from simple_projects project `+filter,
+	} else if err := s.db.QueryRow(r.Context(), `select count(*) from simple_projects project `+simpleProjectCatalogFilter,
 		projectType, claims.Subject, query, category, version, loader, false, []int64{}).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count projects")
 		return
@@ -126,8 +127,12 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		project.created_at,project.updated_at,project.published_at from simple_projects project
 		left join users account on account.id=project.created_by
 		left join content_revisions revision on revision.id=project.published_revision_id
-		`+filter+`
-		order by case when $7 then array_position($8::bigint[],project.id) end,project.updated_at desc,project.id desc
+		left join public_routes popularity_route on popularity_route.entity_type=project.project_type and popularity_route.internal_id=project.id
+		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
+		`+simpleProjectCatalogFilter+`
+		order by case when $7 then array_position($8::bigint[],project.id) end,
+			case when not $7 then coalesce(popularity.heat_score,0) end desc,
+			project.updated_at desc,project.id desc
 		limit $9 offset $10`, projectType, claims.Subject, query, category, version, loader,
 		indexed.Used, indexed.IDs, limit, databaseOffset)
 	if err != nil {

@@ -224,6 +224,10 @@ func inferredActivityObject(path string) int16 {
 		strings.Contains(path, "/issues"), strings.Contains(path, "/discussions"),
 		strings.Contains(path, "/community-posts"), strings.Contains(path, "/community/posts"):
 		return activity.ObjectCommunityPost
+	case strings.Contains(path, "/changelogs"):
+		return activity.ObjectChangelog
+	case strings.Contains(path, "/ratings"):
+		return activity.ObjectRating
 	case strings.Contains(path, "/skins"):
 		return activity.ObjectSkin
 	case strings.Contains(path, "/player-profiles"):
@@ -328,6 +332,10 @@ func activityObjectTypeForEntityType(entityType string) int16 {
 		return activity.ObjectSkin
 	case "player_profile":
 		return activity.ObjectPlayerProfile
+	case "project_changelog", "changelog":
+		return activity.ObjectChangelog
+	case "rating":
+		return activity.ObjectRating
 	default:
 		return 0
 	}

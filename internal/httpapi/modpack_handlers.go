@@ -141,13 +141,17 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 		coalesce(account.public_id,''),revision.public_id,pack.created_at,pack.updated_at,pack.published_at
 		from modpacks pack left join users account on account.id=pack.created_by
 		left join content_revisions revision on revision.id=pack.published_revision_id
+		left join public_routes popularity_route on popularity_route.entity_type='modpack' and popularity_route.internal_id=pack.id
+		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
 		where (pack.review_status='approved' or pack.created_by=$1)
 		and (($3 and pack.id=any($4::bigint[])) or (not $3 and ($2='' or pack.slug ilike '%%'||$2||'%%' or pack.public_id ilike '%%'||$2||'%%'
 			or pack.primary_name ilike '%%'||$2||'%%' or pack.secondary_name ilike '%%'||$2||'%%'
 			or pack.summary ilike '%%'||$2||'%%' or $2=any(pack.search_keywords)
 			or exists(select 1 from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
 				where binding.subject_type='modpack' and binding.subject_id=pack.id and creator.name ilike '%%'||$2||'%%'))))
-		order by case when $3 then array_position($4::bigint[],pack.id) end,pack.updated_at desc,pack.id desc
+		order by case when $3 then array_position($4::bigint[],pack.id) end,
+			case when not $3 then coalesce(popularity.heat_score,0) end desc,
+			pack.updated_at desc,pack.id desc
 		limit $5 offset $6`, claims.Subject, query, indexed.Used, indexed.IDs, limit, databaseOffset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load modpacks")

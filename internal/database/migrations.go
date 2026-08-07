@@ -469,11 +469,13 @@ func baselineSchemaStatements() []string {
 			user_id bigint not null references users(id) on delete cascade,
 			name text not null,
 			is_default boolean not null default false,
+			is_public boolean not null default false,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
 			unique(user_id,name)
 		)`,
 		`create unique index idx_favorite_collections_default on favorite_collections(user_id) where is_default`,
+		`create index idx_favorite_collections_public on favorite_collections(user_id,created_at,id) where is_public`,
 		`create table favorite_collection_items (
 			collection_id bigint not null references favorite_collections(id) on delete cascade,
 			entity_type text not null,

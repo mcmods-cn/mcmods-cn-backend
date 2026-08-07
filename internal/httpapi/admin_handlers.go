@@ -78,22 +78,7 @@ var roleCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-zA-Z0-9_*:\[\]<>
 var permissionCodePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-zA-Z0-9_*:\[\]<>-]+)+$`)
 
 func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
-	var users, roles, permissions, loginSuccess, loginFailed int64
-	_ = s.db.QueryRow(r.Context(), `select count(*) from users`).Scan(&users)
-	_ = s.db.QueryRow(r.Context(), `select count(*) from roles`).Scan(&roles)
-	_ = s.db.QueryRow(r.Context(), `select count(*) from permissions`).Scan(&permissions)
-	_ = s.db.QueryRow(r.Context(), `select count(*) from user_login_logs where success = true`).Scan(&loginSuccess)
-	_ = s.db.QueryRow(r.Context(), `select count(*) from user_login_logs where success = false`).Scan(&loginFailed)
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"cards": []map[string]any{
-			{"label": "users", "value": users, "tone": "green"},
-			{"label": "roles", "value": roles, "tone": "blue"},
-			{"label": "permissions", "value": permissions, "tone": "violet"},
-			{"label": "loginSuccess", "value": loginSuccess, "tone": "green"},
-			{"label": "loginFailed", "value": loginFailed, "tone": "red"},
-		},
-	})
+	s.loadAdminDashboard(w, r)
 }
 
 func (s *Server) adminNav(w http.ResponseWriter, _ *http.Request) {

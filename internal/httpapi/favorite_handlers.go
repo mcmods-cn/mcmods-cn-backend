@@ -8,6 +8,14 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+type favoriteCollectionSummary struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	IsDefault bool   `json:"isDefault"`
+	IsPublic  bool   `json:"isPublic"`
+	ItemCount int64  `json:"itemCount"`
+}
+
 type favoriteCollectionItem struct {
 	EntityType string         `json:"entityType"`
 	EntityKey  string         `json:"entityKey"`
@@ -26,53 +34,77 @@ func (s *Server) ensureDefaultFavoriteCollection(ctx context.Context, userID int
 func (s *Server) favoriteCollections(w http.ResponseWriter, r *http.Request) {
 	userID := currentClaims(r).Subject
 	if _, err := s.ensureDefaultFavoriteCollection(r.Context(), userID); err != nil {
-		writeError(w, http.StatusInternalServerError, "创建默认收藏夹失败")
+		writeError(w, http.StatusInternalServerError, "failed to create the default favorite collection")
 		return
 	}
-	rows, err := s.db.Query(r.Context(), `select collection.public_id,collection.name,collection.is_default,count(item.entity_id)
-		from favorite_collections collection
-		left join favorite_collection_items item on item.collection_id=collection.id
-		where collection.user_id=$1 group by collection.id order by collection.is_default desc,collection.created_at`, userID)
+	items, err := s.loadFavoriteCollections(r.Context(), userID, true)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取收藏夹失败")
+		writeError(w, http.StatusInternalServerError, "failed to load favorite collections")
 		return
-	}
-	defer rows.Close()
-	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, name string
-		var count int64
-		var isDefault bool
-		if err = rows.Scan(&id, &name, &isDefault, &count); err != nil {
-			writeError(w, http.StatusInternalServerError, "读取收藏夹失败")
-			return
-		}
-		items = append(items, map[string]any{"id": id, "name": name, "isDefault": isDefault, "itemCount": count})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (s *Server) publicFavoriteCollections(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.pathUserIdentity(w, r)
+	if !ok {
+		return
+	}
+	items, err := s.loadFavoriteCollections(r.Context(), identity.InternalID, false)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load public favorite collections")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) loadFavoriteCollections(ctx context.Context, userID int64, includePrivate bool) ([]favoriteCollectionSummary, error) {
+	rows, err := s.db.Query(ctx, `select collection.public_id,collection.name,collection.is_default,
+		collection.is_public,count(item.entity_id)
+		from favorite_collections collection
+		left join favorite_collection_items item on item.collection_id=collection.id
+		where collection.user_id=$1 and ($2 or collection.is_public)
+		group by collection.id
+		order by collection.is_default desc,collection.created_at,collection.id`, userID, includePrivate)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]favoriteCollectionSummary, 0)
+	for rows.Next() {
+		var item favoriteCollectionSummary
+		if err = rows.Scan(&item.ID, &item.Name, &item.IsDefault, &item.IsPublic, &item.ItemCount); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (s *Server) createFavoriteCollection(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Name string `json:"name"`
+		Name     string `json:"name"`
+		IsPublic bool   `json:"isPublic"`
 	}
 	if decodeJSON(r, &request) != nil {
-		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		writeError(w, http.StatusBadRequest, "invalid favorite collection")
 		return
 	}
 	request.Name = strings.TrimSpace(request.Name)
 	if request.Name == "" || len([]rune(request.Name)) > 60 {
-		writeError(w, http.StatusBadRequest, "收藏夹名称不能为空且不能超过 60 个字符")
+		writeError(w, http.StatusBadRequest, "favorite collection name must contain 1 to 60 characters")
 		return
 	}
-	var publicID string
-	err := s.db.QueryRow(r.Context(), `insert into favorite_collections(user_id,name)
-		values($1,$2) returning public_id`, currentClaims(r).Subject, request.Name).Scan(&publicID)
+	var item favoriteCollectionSummary
+	err := s.db.QueryRow(r.Context(), `insert into favorite_collections(user_id,name,is_public)
+		values($1,$2,$3) returning public_id,name,is_default,is_public`,
+		currentClaims(r).Subject, request.Name, request.IsPublic).
+		Scan(&item.ID, &item.Name, &item.IsDefault, &item.IsPublic)
 	if err != nil {
-		writeError(w, http.StatusConflict, "同名收藏夹已存在")
+		writeError(w, http.StatusConflict, "a favorite collection with this name already exists")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": publicID, "name": request.Name, "isDefault": false, "itemCount": 0})
+	writeJSON(w, http.StatusCreated, item)
 }
 
 func (s *Server) updateFavoriteCollection(w http.ResponseWriter, r *http.Request) {
@@ -81,24 +113,43 @@ func (s *Server) updateFavoriteCollection(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var request struct {
-		Name string `json:"name"`
+		Name     *string `json:"name"`
+		IsPublic *bool   `json:"isPublic"`
 	}
-	if decodeJSON(r, &request) != nil {
-		writeError(w, http.StatusBadRequest, "请求格式不正确")
+	if decodeJSON(r, &request) != nil || (request.Name == nil && request.IsPublic == nil) {
+		writeError(w, http.StatusBadRequest, "invalid favorite collection update")
 		return
 	}
-	request.Name = strings.TrimSpace(request.Name)
-	if request.Name == "" || len([]rune(request.Name)) > 60 {
-		writeError(w, http.StatusBadRequest, "收藏夹名称不能为空且不能超过 60 个字符")
+	name := ""
+	if request.Name != nil {
+		name = strings.TrimSpace(*request.Name)
+		if name == "" || len([]rune(name)) > 60 {
+			writeError(w, http.StatusBadRequest, "favorite collection name must contain 1 to 60 characters")
+			return
+		}
+	}
+	var visibility any
+	if request.IsPublic != nil {
+		visibility = *request.IsPublic
+	}
+	var item favoriteCollectionSummary
+	err := s.db.QueryRow(r.Context(), `update favorite_collections set
+		name=case when is_default or $3='' then name else $3 end,
+		is_public=coalesce($4::boolean,is_public),updated_at=now()
+		where public_id=$1 and user_id=$2
+		returning public_id,name,is_default,is_public,
+		(select count(*) from favorite_collection_items where collection_id=favorite_collections.id)`,
+		publicID, currentClaims(r).Subject, name, visibility).
+		Scan(&item.ID, &item.Name, &item.IsDefault, &item.IsPublic, &item.ItemCount)
+	if err != nil {
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "a favorite collection with this name already exists")
+			return
+		}
+		writeError(w, http.StatusNotFound, "favorite collection was not found")
 		return
 	}
-	tag, err := s.db.Exec(r.Context(), `update favorite_collections set name=$3,updated_at=now()
-		where public_id=$1 and user_id=$2 and not is_default`, publicID, currentClaims(r).Subject, request.Name)
-	if err != nil || tag.RowsAffected() == 0 {
-		writeError(w, http.StatusConflict, "默认收藏夹不可改名，或同名收藏夹已存在")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"updated": true})
+	writeJSON(w, http.StatusOK, item)
 }
 
 func (s *Server) deleteFavoriteCollection(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +160,7 @@ func (s *Server) deleteFavoriteCollection(w http.ResponseWriter, r *http.Request
 	tag, err := s.db.Exec(r.Context(), `delete from favorite_collections
 		where public_id=$1 and user_id=$2 and not is_default`, publicID, currentClaims(r).Subject)
 	if err != nil || tag.RowsAffected() == 0 {
-		writeError(w, http.StatusConflict, "默认收藏夹不可删除，或收藏夹不存在")
+		writeError(w, http.StatusConflict, "the default collection cannot be deleted, or the collection does not exist")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -123,7 +174,7 @@ func (s *Server) favoriteMembership(w http.ResponseWriter, r *http.Request) {
 	}
 	entityID, err := s.resolveFavoriteEntity(r.Context(), entityType, entityPublicID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "收藏对象不存在")
+		writeError(w, http.StatusBadRequest, "favorite target does not exist")
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `select collection.public_id from favorite_collections collection
@@ -131,7 +182,7 @@ func (s *Server) favoriteMembership(w http.ResponseWriter, r *http.Request) {
 		where collection.user_id=$1 and item.entity_type=$2 and item.entity_id=$3`,
 		currentClaims(r).Subject, entityType, entityID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取收藏状态失败")
+		writeError(w, http.StatusInternalServerError, "failed to load favorite membership")
 		return
 	}
 	defer rows.Close()
@@ -153,7 +204,7 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 		CollectionIDs  []string `json:"collectionIds"`
 	}
 	if decodeJSON(r, &request) != nil {
-		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		writeError(w, http.StatusBadRequest, "invalid favorite membership")
 		return
 	}
 	request.EntityType = strings.TrimSpace(request.EntityType)
@@ -163,24 +214,24 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 	}
 	entityID, err := s.resolveFavoriteEntity(r.Context(), request.EntityType, request.EntityPublicID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "收藏对象不存在")
+		writeError(w, http.StatusBadRequest, "favorite target does not exist")
 		return
 	}
 	userID := currentClaims(r).Subject
 	if _, err = s.ensureDefaultFavoriteCollection(r.Context(), userID); err != nil {
-		writeError(w, http.StatusInternalServerError, "创建默认收藏夹失败")
+		writeError(w, http.StatusInternalServerError, "failed to create the default favorite collection")
 		return
 	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "保存收藏失败")
+		writeError(w, http.StatusInternalServerError, "failed to save favorites")
 		return
 	}
 	defer tx.Rollback(r.Context())
 	if _, err = tx.Exec(r.Context(), `delete from favorite_collection_items item using favorite_collections collection
 		where item.collection_id=collection.id and collection.user_id=$1
 		  and item.entity_type=$2 and item.entity_id=$3`, userID, request.EntityType, entityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "保存收藏失败")
+		writeError(w, http.StatusInternalServerError, "failed to save favorites")
 		return
 	}
 	saved := make([]string, 0, len(request.CollectionIDs))
@@ -193,7 +244,7 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 			select id,$3,$4 from favorite_collections where public_id=$1 and user_id=$2
 			on conflict do nothing`, collectionPublicID, userID, request.EntityType, entityID)
 		if insertErr != nil {
-			writeError(w, http.StatusInternalServerError, "保存收藏失败")
+			writeError(w, http.StatusInternalServerError, "failed to save favorites")
 			return
 		}
 		if tag.RowsAffected() > 0 {
@@ -201,7 +252,7 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "保存收藏失败")
+		writeError(w, http.StatusInternalServerError, "failed to save favorites")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"saved": true, "collectionIds": saved})
@@ -212,20 +263,40 @@ func (s *Server) favoriteCollectionItems(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	s.writeFavoriteCollectionItems(w, r, collectionPublicID, currentClaims(r).Subject, true)
+}
+
+func (s *Server) publicFavoriteCollectionItems(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.pathUserIdentity(w, r)
+	if !ok {
+		return
+	}
+	collectionPublicID, ok := publicPathID(w, r, "collectionId")
+	if !ok {
+		return
+	}
+	s.writeFavoriteCollectionItems(w, r, collectionPublicID, identity.InternalID, false)
+}
+
+func (s *Server) writeFavoriteCollectionItems(w http.ResponseWriter, r *http.Request, collectionPublicID string, ownerID int64, includePrivate bool) {
 	rows, err := s.db.Query(r.Context(), `select item.entity_type,route.public_id,
 		coalesce(mods.primary_name,''),coalesce(mods.secondary_name,''),coalesce(mods.icon_url,''),coalesce(mods.slug,''),
 		coalesce(modpack.primary_name,''),coalesce(modpack.secondary_name,''),coalesce(modpack.icon_url,''),coalesce(modpack.slug,''),
-		coalesce(blueprint.title,''),coalesce(blueprint.public_id,'')
+		coalesce(blueprint.title,''),coalesce(blueprint.public_id,''),coalesce(blueprint.cover_object_key,'')
 		from favorite_collection_items item
 		join favorite_collections collection on collection.id=item.collection_id
 		join public_routes route on route.entity_type=item.entity_type and route.internal_id=item.entity_id
 		left join mods on item.entity_type='mod' and mods.id=item.entity_id
 		left join modpacks modpack on item.entity_type='modpack' and modpack.id=item.entity_id
 		left join blueprints blueprint on item.entity_type='blueprint' and blueprint.id=item.entity_id and blueprint.status<>'deleted'
-		where collection.public_id=$1 and collection.user_id=$2 order by item.created_at desc`,
-		collectionPublicID, currentClaims(r).Subject)
+		where collection.public_id=$1 and collection.user_id=$2 and ($3 or collection.is_public)
+		  and ($3 or
+			(item.entity_type='mod' and mods.review_status='approved') or
+			(item.entity_type='modpack' and modpack.review_status='approved') or
+			(item.entity_type='blueprint' and blueprint.status in ('ready','partial') and blueprint.review_status in ('not_required','approved')))
+		order by item.created_at desc`, collectionPublicID, ownerID, includePrivate)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取收藏内容失败")
+		writeError(w, http.StatusInternalServerError, "failed to load favorite collection items")
 		return
 	}
 	defer rows.Close()
@@ -233,12 +304,18 @@ func (s *Server) favoriteCollectionItems(w http.ResponseWriter, r *http.Request)
 	ossCfg := s.ossConfigFromSettings(r.Context())
 	for rows.Next() {
 		var entityType, entityKey, primaryName, secondaryName, iconURL, slug string
-		var modpackPrimaryName, modpackSecondaryName, modpackIconURL, modpackSlug, title, publicID string
-		if rows.Scan(&entityType, &entityKey, &primaryName, &secondaryName, &iconURL, &slug,
-			&modpackPrimaryName, &modpackSecondaryName, &modpackIconURL, &modpackSlug, &title, &publicID) != nil {
-			continue
+		var modpackPrimaryName, modpackSecondaryName, modpackIconURL, modpackSlug, title, publicID, blueprintIconURL string
+		if err = rows.Scan(&entityType, &entityKey, &primaryName, &secondaryName, &iconURL, &slug,
+			&modpackPrimaryName, &modpackSecondaryName, &modpackIconURL, &modpackSlug, &title, &publicID, &blueprintIconURL); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode favorite collection items")
+			return
 		}
 		iconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, iconURL)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate favorite icon URL")
+			return
+		}
+		blueprintIconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, blueprintIconURL)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "failed to generate favorite icon URL")
 			return
@@ -249,14 +326,19 @@ func (s *Server) favoriteCollectionItems(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		metadata := map[string]any{}
-		if entityType == "mod" {
+		switch entityType {
+		case "mod":
 			metadata = map[string]any{"primaryName": primaryName, "secondaryName": secondaryName, "iconUrl": iconURL, "slug": slug}
-		} else if entityType == "modpack" {
+		case "modpack":
 			metadata = map[string]any{"primaryName": modpackPrimaryName, "secondaryName": modpackSecondaryName, "iconUrl": modpackIconURL, "slug": modpackSlug}
-		} else if entityType == "blueprint" {
-			metadata = map[string]any{"title": title, "publicId": publicID}
+		case "blueprint":
+			metadata = map[string]any{"title": title, "publicId": publicID, "iconUrl": blueprintIconURL}
 		}
 		items = append(items, favoriteCollectionItem{EntityType: entityType, EntityKey: entityKey, Metadata: metadata})
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load favorite collection items")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -264,7 +346,7 @@ func (s *Server) favoriteCollectionItems(w http.ResponseWriter, r *http.Request)
 func publicPathID(w http.ResponseWriter, r *http.Request, key string) (string, bool) {
 	id := strings.ToLower(strings.TrimSpace(r.PathValue(key)))
 	if len(id) != 9 {
-		writeError(w, http.StatusBadRequest, "公开 ID 不正确")
+		writeError(w, http.StatusBadRequest, "invalid public ID")
 		return "", false
 	}
 	return id, true

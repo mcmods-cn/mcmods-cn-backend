@@ -2,6 +2,7 @@ package querycache
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"time"
 
@@ -19,16 +20,20 @@ type localEntry struct {
 }
 
 type Cache struct {
-	redis  *redis.Client
-	prefix string
-	ttl    time.Duration
-	mu     sync.Mutex
-	local  map[string]localEntry
-	group  singleflight.Group
+	redis    *redis.Client
+	prefix   string
+	ttl      time.Duration
+	mu       sync.Mutex
+	local    map[string]localEntry
+	presence map[string]time.Time
+	group    singleflight.Group
 }
 
 func New(cfg config.RedisConfig) *Cache {
-	cache := &Cache{prefix: cfg.Prefix, ttl: cfg.TTL, local: make(map[string]localEntry)}
+	cache := &Cache{
+		prefix: cfg.Prefix, ttl: cfg.TTL,
+		local: make(map[string]localEntry), presence: make(map[string]time.Time),
+	}
 	if cache.ttl <= 0 {
 		cache.ttl = 2 * time.Minute
 	}
@@ -39,6 +44,63 @@ func New(cfg config.RedisConfig) *Cache {
 		})
 	}
 	return cache
+}
+
+// TouchPresence records an opaque visitor fingerprint in the short-lived
+// online set. Redis provides a shared view across replicas; the bounded local
+// set is both the single-process implementation and a graceful Redis fallback.
+func (c *Cache) TouchPresence(ctx context.Context, visitor string, now time.Time) {
+	if c == nil || visitor == "" {
+		return
+	}
+	c.mu.Lock()
+	c.presence[visitor] = now
+	c.prunePresenceLocked(now.Add(-5 * time.Minute))
+	c.mu.Unlock()
+	if c.redis == nil {
+		return
+	}
+	key := c.prefix + "presence:online"
+	pipeline := c.redis.Pipeline()
+	pipeline.ZAdd(ctx, key, redis.Z{Score: float64(now.Unix()), Member: visitor})
+	pipeline.ZRemRangeByScore(ctx, key, "-inf", formatUnix(now.Add(-5*time.Minute).Unix()))
+	pipeline.Expire(ctx, key, 10*time.Minute)
+	_, _ = pipeline.Exec(ctx)
+}
+
+// OnlinePresenceCount returns visitors active during the preceding five
+// minutes. Redis failures fall back to the local process without failing the
+// administration dashboard.
+func (c *Cache) OnlinePresenceCount(ctx context.Context, now time.Time) int64 {
+	if c == nil {
+		return 0
+	}
+	cutoff := now.Add(-5 * time.Minute)
+	if c.redis != nil {
+		key := c.prefix + "presence:online"
+		pipeline := c.redis.Pipeline()
+		pipeline.ZRemRangeByScore(ctx, key, "-inf", formatUnix(cutoff.Unix()))
+		count := pipeline.ZCount(ctx, key, formatUnix(cutoff.Unix()), "+inf")
+		if _, err := pipeline.Exec(ctx); err == nil {
+			return count.Val()
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.prunePresenceLocked(cutoff)
+	return int64(len(c.presence))
+}
+
+func (c *Cache) prunePresenceLocked(cutoff time.Time) {
+	for visitor, seenAt := range c.presence {
+		if seenAt.Before(cutoff) {
+			delete(c.presence, visitor)
+		}
+	}
+}
+
+func formatUnix(value int64) string {
+	return strconv.FormatInt(value, 10)
 }
 
 func (c *Cache) GetOrLoad(ctx context.Context, key string, loader func(context.Context) ([]byte, error)) ([]byte, error) {

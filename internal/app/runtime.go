@@ -116,6 +116,7 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 
 	httpapi.StartMinecraftVersionSyncScheduler(ctx, db)
 	httpapi.StartMinecraftServerProbeScheduler(ctx, db)
+	httpapi.StartPopularityRefreshScheduler(ctx, db)
 	httpapi.NewOSSDeletionWorker(cfg, db).Start(ctx)
 	httpapi.NewMaintenanceWorker(db).Start(ctx)
 	progressionService := progression.NewService(db)

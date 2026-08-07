@@ -50,6 +50,8 @@ const (
 	ObjectReview        int16 = 23
 	ObjectSkin          int16 = 24
 	ObjectPlayerProfile int16 = 25
+	ObjectChangelog     int16 = 26
+	ObjectRating        int16 = 27
 )
 
 const (
@@ -236,6 +238,22 @@ func (m *Monitor) writeBatch(ctx context.Context, events []Event) error {
 	)
 	if err != nil {
 		return err
+	}
+	eventTimes := make([]time.Time, 0, len(events))
+	actorIDs := make([]int64, 0, len(events))
+	for _, event := range events {
+		if event.UserID <= 0 {
+			continue
+		}
+		eventTimes = append(eventTimes, event.OccurredAt.UTC())
+		actorIDs = append(actorIDs, event.UserID)
+	}
+	if len(eventTimes) > 0 {
+		if _, aggregateErr := m.db.Exec(ctx, `select record_site_activity_batch($1,$2)`, eventTimes, actorIDs); aggregateErr != nil {
+			// Activity rows are authoritative. The periodic reconciliation job can
+			// rebuild this compact projection if an aggregation write is interrupted.
+			log.Printf("aggregate site activity batch: %v", aggregateErr)
+		}
 	}
 	if m.processor != nil {
 		if err = m.processor(ctx, events); err != nil {

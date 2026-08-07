@@ -14,6 +14,7 @@ import (
 var reviewLockEntityTypes = stringSet(
 	"mod", "modpack", "creator", "community_post", "blueprint", "skin",
 	"plugin", "map", "resource_pack", "shader_pack", "datapack", "addon",
+	"project_changelog",
 )
 
 type reviewLockResponse struct {
@@ -138,6 +139,21 @@ func canEditReviewTarget(ctx context.Context, query databaseQuery, claims securi
 			return false
 		}
 		return createdBy != nil && *createdBy == claims.Subject || claimsAllow(claims, "project.edit."+publicID)
+	case "minecraft_server", "server":
+		var createdBy int64
+		if query.QueryRow(ctx, `select created_by from minecraft_servers where id=$1`, internalID).Scan(&createdBy) != nil {
+			return false
+		}
+		return createdBy == claims.Subject || claimsAllow(claims, "server.edit."+publicID)
+	case "project_changelog":
+		var targetType, targetPublicID string
+		var targetInternalID int64
+		if query.QueryRow(ctx, `select target.entity_type,target.internal_id,target.public_id
+			from project_changelogs entry join public_routes target on target.id=entry.object_route_id where entry.id=$1`, internalID).
+			Scan(&targetType, &targetInternalID, &targetPublicID) != nil {
+			return false
+		}
+		return canEditReviewTarget(ctx, query, claims, targetType, targetInternalID, targetPublicID)
 	case "creator":
 		var createdBy, claimedBy *int64
 		if query.QueryRow(ctx, `select created_by,claimed_by from creators where id=$1`, internalID).Scan(&createdBy, &claimedBy) != nil {
@@ -176,6 +192,15 @@ func reviewTargetInfoTx(ctx context.Context, tx pgx.Tx, entityType string, inter
 		_ = tx.QueryRow(ctx, `select title from blueprints where id=$1`, internalID).Scan(&label)
 	case "skin":
 		_ = tx.QueryRow(ctx, `select display_name from skin_assets where id=$1`, internalID).Scan(&label)
+	case "project_changelog":
+		_ = tx.QueryRow(ctx, `select target_label from (
+			select coalesce(mod.primary_name,modpack.primary_name,project.primary_name,server.name,target.public_id)||' - '||entry.project_version target_label
+			from project_changelogs entry join public_routes target on target.id=entry.object_route_id
+			left join mods mod on target.entity_type='mod' and mod.id=target.internal_id
+			left join modpacks modpack on target.entity_type='modpack' and modpack.id=target.internal_id
+			left join simple_projects project on target.entity_type=project.project_type and project.id=target.internal_id
+			left join minecraft_servers server on target.entity_type='minecraft_server' and server.id=target.internal_id
+			where entry.id=$1) value`, internalID).Scan(&label)
 	}
 	if strings.TrimSpace(canonicalPath) == "" {
 		canonicalPath = "/"

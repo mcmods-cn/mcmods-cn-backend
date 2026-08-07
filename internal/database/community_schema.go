@@ -195,7 +195,8 @@ func communitySchemaStatements() []string {
 			(18,'resource_pack','Resource pack'),(19,'shader_pack','Shader pack'),
 			(20,'datapack','Data pack'),(21,'addon','Addon'),
 			(22,'community_post','Community post'),(23,'review','Review'),
-			(24,'skin','Skin'),(25,'player_profile','Player profile')
+			(24,'skin','Skin'),(25,'player_profile','Player profile'),(26,'changelog','Changelog'),
+			(27,'rating','Rating')
 		 on conflict(id) do update set code=excluded.code,name=excluded.name`,
 		`create table if not exists user_activity_events (
 			id bigserial primary key,
@@ -212,6 +213,49 @@ func communitySchemaStatements() []string {
 			on user_activity_events(object_type_id,object_route_id,occurred_at desc,id desc)`,
 		`create index if not exists idx_activity_time_brin
 			on user_activity_events using brin(occurred_at)`,
+		`create index if not exists idx_change_requests_contributor
+			on change_requests(submitted_by,status,entity_type,entity_id)
+			where submitted_by is not null`,
+		`create table if not exists user_daily_contributions (
+			user_id bigint not null references users(id) on delete cascade,
+			contribution_date date not null,
+			contribution_count integer not null check(contribution_count > 0),
+			primary key(user_id,contribution_date)
+		)`,
+		`create or replace function sync_user_daily_contribution() returns trigger as $$
+		declare
+			old_date date;
+			new_date date;
+		begin
+			if tg_op='UPDATE' and old.status='approved' and old.submitted_by is not null and old.entity_type is not null then
+				old_date := (coalesce(old.resolved_at,old.submitted_at) at time zone 'UTC')::date;
+				delete from user_daily_contributions
+				where user_id=old.submitted_by and contribution_date=old_date and contribution_count=1;
+				update user_daily_contributions
+				set contribution_count=contribution_count-1
+				where user_id=old.submitted_by and contribution_date=old_date and contribution_count>1;
+			end if;
+			if new.status='approved' and new.submitted_by is not null and new.entity_type is not null then
+				new_date := (coalesce(new.resolved_at,new.submitted_at) at time zone 'UTC')::date;
+				insert into user_daily_contributions(user_id,contribution_date,contribution_count)
+				values(new.submitted_by,new_date,1)
+				on conflict(user_id,contribution_date) do update
+				set contribution_count=user_daily_contributions.contribution_count+1;
+			end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`drop trigger if exists trg_change_requests_daily_contribution on change_requests`,
+		`create trigger trg_change_requests_daily_contribution
+			after insert or update of status,resolved_at,submitted_by,entity_type on change_requests
+			for each row execute function sync_user_daily_contribution()`,
+		`insert into user_daily_contributions(user_id,contribution_date,contribution_count)
+		 select submitted_by,(coalesce(resolved_at,submitted_at) at time zone 'UTC')::date,count(*)::integer
+		 from change_requests
+		 where status='approved' and submitted_by is not null and entity_type is not null
+		 group by submitted_by,(coalesce(resolved_at,submitted_at) at time zone 'UTC')::date
+		 on conflict(user_id,contribution_date) do update
+		 set contribution_count=excluded.contribution_count`,
 
 		`create table if not exists currencies (
 			id bigserial primary key,
@@ -315,6 +359,18 @@ func communitySchemaStatements() []string {
 				currency.id,10,'shop.profile_background.purchase','shop.profile_background.use'
 		 from currencies currency where currency.code='diamond'
 		 on conflict(code) do nothing`,
+		`insert into shop_items(code,item_type,name,description,icon,translations,price_currency_id,price_amount,purchase_permission,use_permission,config)
+		 select item.code,item.item_type,item.name,item.description,'fire',item.translations::jsonb,currency.id,5,item.purchase_permission,item.use_permission,
+			'{"power":1,"halfLifeHours":72,"durationHours":432}'::jsonb
+		 from currencies currency cross join (values
+			('project_heat_boost','project_heat_boost','Project heat boost','Temporarily raises one project''s discovery heat',
+			 '{"zh-CN":{"name":"项目热度提升","description":"临时提升一个模组、整合包或其他大型资源的展示热度"},"en-US":{"name":"Project heat boost","description":"Temporarily raises one project''s discovery heat"}}',
+			 'shop.project_heat_boost.purchase','shop.project_heat_boost.use'),
+			('server_heat_boost','server_heat_boost','Server heat boost','Temporarily raises one Minecraft server''s discovery heat',
+			 '{"zh-CN":{"name":"服务器热度提升","description":"临时提升一个 Minecraft 服务器的展示热度"},"en-US":{"name":"Server heat boost","description":"Temporarily raises one Minecraft server''s discovery heat"}}',
+			 'shop.server_heat_boost.purchase','shop.server_heat_boost.use')
+		 ) item(code,item_type,name,description,translations,purchase_permission,use_permission)
+		 where currency.code='diamond' on conflict(code) do nothing`,
 		`create table if not exists user_inventory (
 			user_id bigint not null references users(id) on delete cascade,
 			shop_item_id bigint not null references shop_items(id) on delete restrict,

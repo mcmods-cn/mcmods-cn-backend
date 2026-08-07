@@ -33,3 +33,15 @@ func TestLocalFallbackCachesAndInvalidates(t *testing.T) {
 		t.Fatalf("loader was not called after invalidation: %d", loads.Load())
 	}
 }
+
+func TestLocalPresenceCountsRecentVisitors(t *testing.T) {
+	t.Parallel()
+	cache := New(config.RedisConfig{})
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	cache.TouchPresence(context.Background(), "visitor-a", now.Add(-time.Minute))
+	cache.TouchPresence(context.Background(), "visitor-b", now.Add(-6*time.Minute))
+	cache.TouchPresence(context.Background(), "visitor-a", now)
+	if got := cache.OnlinePresenceCount(context.Background(), now); got != 1 {
+		t.Fatalf("OnlinePresenceCount() = %d, want 1", got)
+	}
+}

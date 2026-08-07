@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"mcmods-cn-backend/internal/activity"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -134,6 +135,95 @@ func (s *Server) userEconomyOverview(w http.ResponseWriter, r *http.Request) {
 		},
 		"inventory": inventory,
 	})
+}
+
+func (s *Server) userCurrencyTransactions(w http.ResponseWriter, r *http.Request) {
+	limit := boundedLimit(r.URL.Query().Get("limit"), 30, 100)
+	cursor, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("cursor")), 10, 64)
+	rows, err := s.db.Query(r.Context(), `select entry.id,currency.public_id,currency.code,currency.name,currency.icon,
+		entry.amount_delta,entry.balance_after,entry.transaction_type,
+		coalesce(counterparty.public_id,''),coalesce(counterparty.username,''),
+		entry.reference_type,entry.reference_key,entry.created_at
+		from currency_transactions entry
+		join currencies currency on currency.id=entry.currency_id
+		left join users counterparty on counterparty.id=entry.counterparty_user_id
+		where entry.user_id=$1 and ($2::bigint<=0 or entry.id<$2)
+		order by entry.id desc limit $3`, currentClaims(r).Subject, cursor, limit+1)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load currency transactions")
+		return
+	}
+	defer rows.Close()
+	items := make([]map[string]any, 0, limit)
+	var nextCursor string
+	var lastID int64
+	for rows.Next() {
+		var id, amountDelta, balanceAfter int64
+		var currencyPublicID, code, name, icon, transactionType string
+		var counterpartyPublicID, counterpartyName, referenceType, referenceKey string
+		var createdAt time.Time
+		if err = rows.Scan(&id, &currencyPublicID, &code, &name, &icon, &amountDelta, &balanceAfter,
+			&transactionType, &counterpartyPublicID, &counterpartyName, &referenceType, &referenceKey, &createdAt); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode currency transactions")
+			return
+		}
+		if len(items) == limit {
+			nextCursor = strconv.FormatInt(lastID, 10)
+			break
+		}
+		items = append(items, map[string]any{
+			"currency":    map[string]any{"publicId": currencyPublicID, "code": code, "name": name, "icon": icon},
+			"amountDelta": amountDelta, "balanceAfter": balanceAfter, "transactionType": transactionType,
+			"counterparty":  map[string]any{"publicId": counterpartyPublicID, "username": counterpartyName},
+			"referenceType": referenceType, "referenceKey": referenceKey, "createdAt": createdAt,
+		})
+		lastID = id
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load currency transactions")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "nextCursor": nextCursor})
+}
+
+func (s *Server) userExperienceTransactions(w http.ResponseWriter, r *http.Request) {
+	limit := boundedLimit(r.URL.Query().Get("limit"), 30, 100)
+	cursor, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("cursor")), 10, 64)
+	rows, err := s.db.Query(r.Context(), `select id,amount_delta,experience_after,reason,reference_type,reference_key,created_at
+		from experience_transactions
+		where user_id=$1 and ($2::bigint<=0 or id<$2)
+		order by id desc limit $3`, currentClaims(r).Subject, cursor, limit+1)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load experience transactions")
+		return
+	}
+	defer rows.Close()
+	items := make([]map[string]any, 0, limit)
+	var nextCursor string
+	var lastID int64
+	for rows.Next() {
+		var id, amountDelta, experienceAfter int64
+		var reason, referenceType, referenceKey string
+		var createdAt time.Time
+		if err = rows.Scan(&id, &amountDelta, &experienceAfter, &reason, &referenceType, &referenceKey, &createdAt); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode experience transactions")
+			return
+		}
+		if len(items) == limit {
+			nextCursor = strconv.FormatInt(lastID, 10)
+			break
+		}
+		items = append(items, map[string]any{
+			"amountDelta": amountDelta, "experienceAfter": experienceAfter, "reason": reason,
+			"referenceType": referenceType, "referenceKey": referenceKey, "createdAt": createdAt,
+		})
+		lastID = id
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load experience transactions")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "nextCursor": nextCursor})
 }
 
 func (s *Server) checkIn(w http.ResponseWriter, r *http.Request) {
@@ -360,6 +450,7 @@ func (s *Server) purchaseShopItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit purchase")
 		return
 	}
+	annotateActivity(r, activity.ActionCreate, activity.ObjectShopItem, publicID, 0)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"itemCode": request.ItemCode, "quantity": inventoryQuantity, "balance": balance,
 	})
@@ -367,8 +458,10 @@ func (s *Server) purchaseShopItem(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		ItemCode string `json:"itemCode"`
-		FileID   string `json:"fileId"`
+		ItemCode   string `json:"itemCode"`
+		FileID     string `json:"fileId"`
+		TargetType string `json:"targetType"`
+		TargetID   string `json:"targetId"`
 	}
 	if decodeJSON(r, &request) != nil {
 		writeError(w, http.StatusBadRequest, "invalid item use request")
@@ -384,9 +477,10 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var itemID int64
 	var publicID, itemType, permission string
-	err = tx.QueryRow(r.Context(), `select id,public_id,item_type,use_permission from shop_items
+	var rawConfig []byte
+	err = tx.QueryRow(r.Context(), `select id,public_id,item_type,use_permission,config from shop_items
 		where code=$1 and status='active' for update`, request.ItemCode).
-		Scan(&itemID, &publicID, &itemType, &permission)
+		Scan(&itemID, &publicID, &itemType, &permission, &rawConfig)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "shop item was not found")
 		return
@@ -418,6 +512,72 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to update profile background")
 			return
 		}
+	case "project_heat_boost", "server_heat_boost":
+		targetType := normalizeRatingTargetType(request.TargetType)
+		if itemType == "server_heat_boost" && targetType != "minecraft_server" {
+			writeError(w, http.StatusBadRequest, "server heat boosts can only target a Minecraft server")
+			return
+		}
+		if itemType == "project_heat_boost" && (targetType == "" || targetType == "minecraft_server") {
+			writeError(w, http.StatusBadRequest, "project heat boosts cannot target a Minecraft server")
+			return
+		}
+		request.TargetID = strings.ToLower(strings.TrimSpace(request.TargetID))
+		if !validCatalogPublicID(request.TargetID) {
+			writeError(w, http.StatusBadRequest, "a collected project target is required")
+			return
+		}
+		target, resolveErr := s.resolveRateableTarget(r.Context(), targetType, request.TargetID)
+		if resolveErr != nil {
+			writeError(w, http.StatusNotFound, "heat boost target was not found")
+			return
+		}
+		routeID, internalID := target.RouteID, target.InternalID
+		if !canEditReviewTarget(r.Context(), tx, currentClaims(r), targetType, internalID, request.TargetID) {
+			writeError(w, http.StatusForbidden, "only a project editor can apply a heat boost")
+			return
+		}
+		config := struct {
+			Power         float64 `json:"power"`
+			HalfLifeHours int     `json:"halfLifeHours"`
+			DurationHours int     `json:"durationHours"`
+		}{Power: 1, HalfLifeHours: 72, DurationHours: 432}
+		if len(rawConfig) > 0 {
+			_ = json.Unmarshal(rawConfig, &config)
+		}
+		if config.Power <= 0 || config.Power > 100 {
+			config.Power = 1
+		}
+		if config.HalfLifeHours < 1 || config.HalfLifeHours > 8760 {
+			config.HalfLifeHours = 72
+		}
+		if config.DurationHours < 1 || config.DurationHours > 87600 {
+			config.DurationHours = 432
+		}
+		var usedCount int
+		if err = tx.QueryRow(r.Context(), `select count(*) from content_heat_promotions where object_route_id=$1`, routeID).
+			Scan(&usedCount); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to inspect existing heat boosts")
+			return
+		}
+		effectivePower := effectivePromotionPower(config.Power, usedCount)
+		promotionKind := "project"
+		if itemType == "server_heat_boost" {
+			promotionKind = "server"
+		}
+		if _, err = tx.Exec(r.Context(), `insert into content_heat_promotions(
+			object_route_id,shop_item_id,applied_by,promotion_kind,base_power,effective_power,
+			half_life_hours,sequence_no,expires_at
+		) values($1,$2,$3,$4,$5,$6,$7,$8,now()+make_interval(hours=>$9))`,
+			routeID, itemID, userID, promotionKind, config.Power, effectivePower,
+			config.HalfLifeHours, usedCount+1, config.DurationHours); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to apply heat boost")
+			return
+		}
+		if _, err = tx.Exec(r.Context(), `select enqueue_content_stats_refresh($1,true,true)`, routeID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to refresh project heat")
+			return
+		}
 	default:
 		writeError(w, http.StatusBadRequest, "shop item type is not supported")
 		return
@@ -431,9 +591,14 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit item use")
 		return
 	}
+	annotateActivity(r, activity.ActionUse, activity.ObjectShopItem, publicID, 0)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"itemCode": request.ItemCode, "remaining": quantity - 1, "itemPublicId": publicID,
 	})
+}
+
+func effectivePromotionPower(basePower float64, previousUseCount int) float64 {
+	return basePower / (1 + float64(max(0, previousUseCount))*0.2)
 }
 
 func (s *Server) adminEconomyConfig(w http.ResponseWriter, r *http.Request) {
@@ -881,16 +1046,29 @@ func changeCurrencyBalanceByIDTx(
 	if err != nil {
 		return 0, err
 	}
+	return applyLockedCurrencyBalanceChangeTx(ctx, tx, userID, currencyID, current, delta,
+		transactionType, counterparty, referenceType, referenceKey, metadata)
+}
+
+func applyLockedCurrencyBalanceChangeTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	userID, currencyID, current, delta int64,
+	transactionType string,
+	counterparty *int64,
+	referenceType, referenceKey string,
+	metadata map[string]any,
+) (int64, error) {
 	next := current + delta
 	if next < 0 {
 		return current, errInsufficientBalance
 	}
-	if _, err = tx.Exec(ctx, `update user_currency_balances set balance=$3,updated_at=now()
+	if _, err := tx.Exec(ctx, `update user_currency_balances set balance=$3,updated_at=now()
 		where user_id=$1 and currency_id=$2`, userID, currencyID, next); err != nil {
 		return 0, err
 	}
 	raw, _ := json.Marshal(metadata)
-	if _, err = tx.Exec(ctx, `insert into currency_transactions(
+	if _, err := tx.Exec(ctx, `insert into currency_transactions(
 		user_id,currency_id,amount_delta,balance_after,transaction_type,counterparty_user_id,
 		reference_type,reference_key,metadata
 	) values($1,$2,$3,$4,$5,$6,$7,$8,$9)`,

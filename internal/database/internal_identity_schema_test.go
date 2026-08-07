@@ -13,7 +13,7 @@ func TestSchemaDoesNotStorePublicIDsAsInternalRelations(t *testing.T) {
 		skinSchemaStatements(), reviewSchemaStatements(), blueprintRelationSchemaStatements(),
 		communitySchemaStatements(), projectFileSchemaStatements(), modContentSchemaStatements(),
 		commentSchemaStatements(), communityPostSchemaStatements(), modpackSchemaStatements(),
-		simpleProjectSchemaStatements(), draftSchemaStatements(), serverSchemaStatements(),
+		simpleProjectSchemaStatements(), draftSchemaStatements(), serverSchemaStatements(), ratingSchemaStatements(), changelogSchemaStatements(),
 	}
 	forbidden := regexp.MustCompile(`(?i)\b[a-z][a-z0-9_]+_public_id\s+(text|varchar|bigint)\b`)
 	for _, statements := range groups {

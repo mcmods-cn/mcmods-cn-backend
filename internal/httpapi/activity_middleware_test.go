@@ -104,17 +104,19 @@ func TestHighFrequencyAutosavesAreExcluded(t *testing.T) {
 func TestActivityObjectTypeForRevisionEntities(t *testing.T) {
 	t.Parallel()
 	tests := map[string]int16{
-		"mod":              activity.ObjectMod,
-		"modpack":          activity.ObjectModpack,
-		"plugin":           activity.ObjectPlugin,
-		"map":              activity.ObjectMap,
-		"resource_pack":    activity.ObjectResourcePack,
-		"shader_pack":      activity.ObjectShaderPack,
-		"datapack":         activity.ObjectDatapack,
-		"addon":            activity.ObjectAddon,
-		"community_post":   activity.ObjectCommunityPost,
-		"minecraft_server": activity.ObjectServer,
-		"skin":             activity.ObjectSkin,
+		"mod":               activity.ObjectMod,
+		"modpack":           activity.ObjectModpack,
+		"plugin":            activity.ObjectPlugin,
+		"map":               activity.ObjectMap,
+		"resource_pack":     activity.ObjectResourcePack,
+		"shader_pack":       activity.ObjectShaderPack,
+		"datapack":          activity.ObjectDatapack,
+		"addon":             activity.ObjectAddon,
+		"community_post":    activity.ObjectCommunityPost,
+		"minecraft_server":  activity.ObjectServer,
+		"skin":              activity.ObjectSkin,
+		"project_changelog": activity.ObjectChangelog,
+		"rating":            activity.ObjectRating,
 	}
 	for entityType, want := range tests {
 		if got := activityObjectTypeForEntityType(entityType); got != want {

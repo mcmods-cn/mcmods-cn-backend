@@ -5,13 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
 
 const siteGeneralSettingKey = "site.general"
+
+var publicSiteLogoPathPattern = regexp.MustCompile(`^/site-assets/site-logo-[a-f0-9]{20}\.(?:png|jpe?g|webp|gif)$`)
 
 type siteGeneralConfig struct {
 	SiteName string `json:"siteName"`
@@ -24,19 +26,11 @@ func defaultSiteGeneralConfig() siteGeneralConfig {
 
 func (s *Server) publicSiteGeneralConfig(w http.ResponseWriter, r *http.Request) {
 	config := s.siteGeneralConfigFromSettings(r.Context())
-	if config.LogoURL != "" {
-		config.LogoURL = "/api/v1/site/logo"
-	}
 	writeJSON(w, http.StatusOK, config)
 }
 
-func (s *Server) siteLogo(w http.ResponseWriter, r *http.Request) {
-	config := s.siteGeneralConfigFromSettings(r.Context())
-	if config.LogoURL == "" {
-		writeError(w, http.StatusNotFound, "site logo does not exist")
-		return
-	}
-	s.redirectStoredRasterURL(w, r, config.LogoURL)
+func (s *Server) siteLogoUploadAccess(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) updateSiteGeneralConfig(w http.ResponseWriter, r *http.Request) {
@@ -86,9 +80,8 @@ func normalizeSiteGeneralConfig(config *siteGeneralConfig) error {
 	if config.LogoURL == "" {
 		return nil
 	}
-	parsed, err := url.Parse(config.LogoURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return errors.New("logoUrl must be an HTTP or HTTPS URL")
+	if !publicSiteLogoPathPattern.MatchString(config.LogoURL) {
+		return errors.New("logoUrl must reference a logo stored in the frontend public directory")
 	}
 	return nil
 }

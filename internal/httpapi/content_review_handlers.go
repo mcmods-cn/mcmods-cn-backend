@@ -61,6 +61,73 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "revision has already been reviewed")
 		return
 	}
+	if aggregateType == projectChangelogAggregate {
+		var snapshot projectChangelogSnapshot
+		if err = json.Unmarshal(snapshotRaw, &snapshot); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode changelog revision")
+			return
+		}
+		var changelogID, targetRouteID int64
+		var publishedRevisionID *int64
+		var targetName, targetURL string
+		if err = tx.QueryRow(r.Context(), `select entry.id,entry.object_route_id,entry.published_revision_id,
+			coalesce(mod.primary_name,modpack.primary_name,project.primary_name,server.name,target.public_id),target.canonical_path
+			from project_changelogs entry join public_routes target on target.id=entry.object_route_id
+			left join mods mod on target.entity_type='mod' and mod.id=target.internal_id
+			left join modpacks modpack on target.entity_type='modpack' and modpack.id=target.internal_id
+			left join simple_projects project on target.entity_type=project.project_type and project.id=target.internal_id
+			left join minecraft_servers server on target.entity_type='minecraft_server' and server.id=target.internal_id
+			where entry.public_id=$1 for update of entry`, aggregateKey).
+			Scan(&changelogID, &targetRouteID, &publishedRevisionID, &targetName, &targetURL); err != nil {
+			writeError(w, http.StatusNotFound, "changelog not found")
+			return
+		}
+		claims := currentClaims(r)
+		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
+			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err == nil {
+				err = tx.Commit(r.Context())
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record changelog conflict")
+				return
+			}
+			writeError(w, http.StatusConflict, "changelog changed after this request was submitted")
+			return
+		}
+		if request.Status == "approved" {
+			if err = applyProjectChangelogSnapshotTx(r.Context(), tx, changelogID, targetRouteID, revisionID, claims.Subject, snapshot); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to publish changelog")
+				return
+			}
+		} else if _, err = tx.Exec(r.Context(), `update project_changelogs set
+			review_status=case when published_revision_id is null then 'rejected' else 'approved' end,updated_at=now() where id=$1`, changelogID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to reject changelog")
+			return
+		}
+		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record changelog review")
+			return
+		}
+		if request.Status == "approved" {
+			if err = appendCatalogPublishedReviewEventTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to record changelog publication")
+				return
+			}
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit changelog review")
+			return
+		}
+		code := "review_approved"
+		if request.Status == "rejected" {
+			code = "review_rejected"
+		}
+		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{
+			"name": targetName + " - " + snapshot.ProjectVersion, "reason": request.Note,
+		}, map[string]any{"changelogId": aggregateKey, "targetLabel": targetName, "url": targetURL + "?tab=changelog"})
+		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status, "publicId": aggregateKey})
+		return
+	}
 	if modContentAggregate(aggregateType) {
 		var snapshot modContentSnapshot
 		if err = json.Unmarshal(snapshotRaw, &snapshot); err != nil {

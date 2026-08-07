@@ -67,6 +67,7 @@ type commentResponse struct {
 	UserReactions    []string              `json:"userReactions"`
 	ChildCount       int                   `json:"childCount"`
 	DescendantCount  int                   `json:"descendantCount"`
+	HeatScore        float64               `json:"heatScore"`
 	HasMoreReplies   bool                  `json:"hasMoreReplies"`
 	CurrentUserWatch *commentWatchState    `json:"currentUserWatch,omitempty"`
 	Pinned           bool                  `json:"pinned"`
@@ -165,7 +166,7 @@ func (s *Server) listTargetComments(w http.ResponseWriter, r *http.Request, targ
 	case "oldest":
 		order = "c.created_at,c.id"
 	case "hot":
-		order = "(c.descendant_count + coalesce((select count(*) from comment_reactions reaction where reaction.comment_id=c.id),0)*2) desc,c.created_at desc,c.id desc"
+		order = "c.hot_score desc,c.created_at desc,c.id desc"
 	case "replies":
 		order = "c.descendant_count desc,c.created_at desc,c.id desc"
 	default:
@@ -988,7 +989,7 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 	}
 	args = append(args, viewerID)
 	rows, err := queryer.Query(ctx, fmt.Sprintf(`select c.id,c.public_id,coalesce(parent.public_id,''),
-		coalesce(root.public_id,''),c.depth,c.body,c.status,c.child_count,c.descendant_count,
+		coalesce(root.public_id,''),c.depth,c.body,c.status,c.child_count,c.descendant_count,c.hot_score,
 		author.public_id,author.username,author.avatar_url,
 		coalesce(parent_author.username,''),coalesce(parent.body,''),coalesce(parent.status,''),
 		c.created_at,c.updated_at,c.pinned_at,
@@ -1032,7 +1033,7 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 		var reactionCounts []int64
 		item := commentResponse{Reactions: map[string]int{}, UserReactions: []string{}}
 		if err = rows.Scan(&numericID, &item.ID, &parentID, &rootID, &item.Depth, &item.Body, &status,
-			&item.ChildCount, &item.DescendantCount, &item.Author.ID, &item.Author.Username,
+			&item.ChildCount, &item.DescendantCount, &item.HeatScore, &item.Author.ID, &item.Author.Username,
 			&item.Author.AvatarURL, &parentAuthor, &parentBody, &parentStatus,
 			&item.CreatedAt, &item.UpdatedAt, &item.PinnedAt, &watchID, &watchStatus, &mutedUntil, &mutedForever,
 			&watchUnread, &watchedReplies, &reactionNames, &reactionCounts, &selectedReactions); err != nil {

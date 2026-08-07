@@ -770,7 +770,7 @@ func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	listArgs := append(append([]any{}, args...), limit, databaseOffset)
-	orderSQL := "server.last_online desc,server.updated_at desc,server.id desc"
+	orderSQL := "coalesce(popularity.heat_score,0) desc,server.last_online desc,server.updated_at desc,server.id desc"
 	if indexed.Used {
 		orderSQL = fmt.Sprintf("array_position($%d::bigint[],server.id)", indexedPosition)
 	}
@@ -778,7 +778,10 @@ func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) 
 		server.icon_data_uri,server.modded,server.loader,server.languages,server.primary_tag,
 		server.minecraft_versions,server.last_online,coalesce(server.last_latency_ms,-1),
 		server.last_players_online,server.last_players_max,server.last_checked_at
-		from minecraft_servers server where `+whereSQL+`
+		from minecraft_servers server
+		left join public_routes popularity_route on popularity_route.entity_type='minecraft_server' and popularity_route.internal_id=server.id
+		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
+		where `+whereSQL+`
 		order by `+orderSQL+`
 		limit $`+strconv.Itoa(len(args)+1)+` offset $`+strconv.Itoa(len(args)+2), listArgs...)
 	if err != nil {
