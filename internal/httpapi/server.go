@@ -329,6 +329,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/users/{id}/followers", s.optionalAuth(s.userFollowers))
 	s.mux.HandleFunc("GET /api/v1/users/{id}/following", s.optionalAuth(s.userFollowing))
 	s.mux.HandleFunc("GET /api/v1/users/{id}/showcase", s.optionalAuth(s.userShowcase))
+	s.mux.HandleFunc("GET /api/v1/users/{id}/contributions", s.optionalAuth(s.userContributions))
 	s.mux.HandleFunc("GET /api/v1/users/{id}/favorite-collections", s.optionalAuth(s.publicFavoriteCollections))
 	s.mux.HandleFunc("GET /api/v1/users/{id}/favorite-collections/{collectionId}/items", s.optionalAuth(s.publicFavoriteCollectionItems))
 	s.mux.HandleFunc("POST /api/v1/users/{id}/follow", s.requirePermission("user.follow.create", s.followUser))

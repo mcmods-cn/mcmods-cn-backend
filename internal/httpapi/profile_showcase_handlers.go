@@ -3,6 +3,9 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -20,6 +23,26 @@ type userShowcaseItem struct {
 type userContributionDay struct {
 	Date  string `json:"date"`
 	Count int    `json:"count"`
+}
+
+type userContributionActivity struct {
+	ID         string    `json:"id"`
+	EntityType string    `json:"entityType"`
+	Action     string    `json:"action"`
+	Name       string    `json:"name"`
+	Href       string    `json:"href"`
+	OccurredAt time.Time `json:"occurredAt"`
+}
+
+type userContributionsPayload struct {
+	Year                    int                        `json:"year"`
+	From                    string                     `json:"from"`
+	To                      string                     `json:"to"`
+	Total                   int                        `json:"total"`
+	Days                    []userContributionDay      `json:"days"`
+	Years                   []int                      `json:"years"`
+	RecentActivity          []userContributionActivity `json:"recentActivity"`
+	RecentActivityTruncated bool                       `json:"recentActivityTruncated"`
 }
 
 func (s *Server) userShowcase(w http.ResponseWriter, r *http.Request) {
@@ -42,19 +65,35 @@ func (s *Server) userShowcase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load user posts")
 		return
 	}
-	contributions, from, to, total, err := s.loadUserContributions(r.Context(), identity.InternalID)
+	contributions, err := s.loadUserContributions(r.Context(), identity.InternalID, time.Now().UTC().Year())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load user contributions")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"projects": projects,
-		"uploads":  uploads,
-		"posts":    posts,
-		"contributions": map[string]any{
-			"from": from, "to": to, "total": total, "days": contributions,
-		},
+		"projects":      projects,
+		"uploads":       uploads,
+		"posts":         posts,
+		"contributions": contributions,
 	})
+}
+
+func (s *Server) userContributions(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.pathUserIdentity(w, r)
+	if !ok {
+		return
+	}
+	year, ok := requestedContributionYear(r, time.Now().UTC().Year())
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid contribution year")
+		return
+	}
+	contributions, err := s.loadUserContributions(r.Context(), identity.InternalID, year)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load user contributions")
+		return
+	}
+	writeJSON(w, http.StatusOK, contributions)
 }
 
 func (s *Server) loadUserShowcaseProjects(ctx context.Context, userID int64) ([]userShowcaseItem, error) {
@@ -185,30 +224,116 @@ func (s *Server) loadUserShowcasePosts(ctx context.Context, userID int64) ([]use
 	return items, rows.Err()
 }
 
-func (s *Server) loadUserContributions(ctx context.Context, userID int64) ([]userContributionDay, string, string, int, error) {
+func (s *Server) loadUserContributions(ctx context.Context, userID int64, year int) (userContributionsPayload, error) {
 	now := time.Now().UTC()
-	to := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	from := to.AddDate(-1, 0, 1)
+	from, to := contributionDateRange(year, now)
+	result := userContributionsPayload{
+		Year: year, From: from.Format("2006-01-02"), To: to.Format("2006-01-02"),
+		Days: make([]userContributionDay, 0), Years: make([]int, 0), RecentActivity: make([]userContributionActivity, 0),
+	}
 	rows, err := s.db.Query(ctx, `select contribution_date::text,contribution_count
 		from user_daily_contributions
 		where user_id=$1 and contribution_date between $2::date and $3::date
 		order by contribution_date`, userID, from.Format("2006-01-02"), to.Format("2006-01-02"))
 	if err != nil {
-		return nil, "", "", 0, err
+		return userContributionsPayload{}, err
 	}
-	defer rows.Close()
-	days := make([]userContributionDay, 0)
-	total := 0
 	for rows.Next() {
 		var item userContributionDay
 		if err = rows.Scan(&item.Date, &item.Count); err != nil {
-			return nil, "", "", 0, err
+			rows.Close()
+			return userContributionsPayload{}, err
 		}
-		total += item.Count
-		days = append(days, item)
+		result.Total += item.Count
+		result.Days = append(result.Days, item)
 	}
 	if err = rows.Err(); err != nil {
-		return nil, "", "", 0, err
+		rows.Close()
+		return userContributionsPayload{}, err
 	}
-	return days, from.Format("2006-01-02"), to.Format("2006-01-02"), total, nil
+	rows.Close()
+
+	yearRows, err := s.db.Query(ctx, `select distinct extract(year from contribution_date)::integer
+		from user_daily_contributions where user_id=$1 order by 1 desc`, userID)
+	if err != nil {
+		return userContributionsPayload{}, err
+	}
+	for yearRows.Next() {
+		var availableYear int
+		if err = yearRows.Scan(&availableYear); err != nil {
+			yearRows.Close()
+			return userContributionsPayload{}, err
+		}
+		result.Years = appendContributionYear(result.Years, availableYear)
+	}
+	if err = yearRows.Err(); err != nil {
+		yearRows.Close()
+		return userContributionsPayload{}, err
+	}
+	yearRows.Close()
+	result.Years = appendContributionYear(result.Years, now.Year())
+	result.Years = appendContributionYear(result.Years, year)
+	sort.Sort(sort.Reverse(sort.IntSlice(result.Years)))
+
+	activityRows, err := s.db.Query(ctx, `select request.public_id,request.entity_type,
+		case when request.base_revision_id is null then 'created' else 'edited' end,
+		coalesce(nullif(revision.snapshot->>'primaryName',''),nullif(revision.snapshot->>'title',''),
+			nullif(revision.snapshot->>'displayName',''),nullif(revision.snapshot->>'name',''),
+			nullif(request.metadata->>'targetLabel',''),nullif(route.public_id,''),request.aggregate_key),
+		coalesce(route.canonical_path,''),coalesce(request.resolved_at,request.submitted_at)
+		from change_requests request
+		join content_revisions revision on revision.id=request.proposed_revision_id
+		left join public_routes route on route.entity_type=request.entity_type and route.internal_id=request.entity_id
+		where request.submitted_by=$1 and request.status='approved' and request.entity_type is not null
+		  and coalesce(request.resolved_at,request.submitted_at)>=$2
+		order by coalesce(request.resolved_at,request.submitted_at) desc,request.id desc
+		limit 101`, userID, now.AddDate(0, -1, 0))
+	if err != nil {
+		return userContributionsPayload{}, err
+	}
+	for activityRows.Next() {
+		var item userContributionActivity
+		if err = activityRows.Scan(&item.ID, &item.EntityType, &item.Action, &item.Name, &item.Href, &item.OccurredAt); err != nil {
+			activityRows.Close()
+			return userContributionsPayload{}, err
+		}
+		if len(result.RecentActivity) < 100 {
+			result.RecentActivity = append(result.RecentActivity, item)
+		} else {
+			result.RecentActivityTruncated = true
+		}
+	}
+	if err = activityRows.Err(); err != nil {
+		activityRows.Close()
+		return userContributionsPayload{}, err
+	}
+	activityRows.Close()
+	return result, nil
+}
+
+func requestedContributionYear(r *http.Request, currentYear int) (int, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get("year"))
+	if raw == "" {
+		return currentYear, true
+	}
+	year, err := strconv.Atoi(raw)
+	return year, err == nil && year >= 1970 && year <= currentYear
+}
+
+func contributionDateRange(year int, now time.Time) (time.Time, time.Time) {
+	now = now.UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	if year == today.Year() {
+		return today.AddDate(-1, 0, 1), today
+	}
+	return time.Date(year, time.January, 1, 0, 0, 0, 0, time.UTC), time.Date(year, time.December, 31, 0, 0, 0, 0, time.UTC)
+}
+
+func appendContributionYear(years []int, year int) []int {
+	for _, existing := range years {
+		if existing == year {
+			return years
+		}
+	}
+	return append(years, year)
 }
