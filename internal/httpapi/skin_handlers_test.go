@@ -29,11 +29,11 @@ func TestParsePlayerTextureUpdatesPatchSemantics(t *testing.T) {
 	}
 }
 
-func TestParsePlayerTextureUpdatesRejectsInvalidOrMixedFields(t *testing.T) {
+func TestParsePlayerTextureUpdatesRejectsInvalidOrEmptyPatches(t *testing.T) {
 	t.Parallel()
 	for _, request := range []playerTextureRequest{
 		{SkinPublicID: json.RawMessage(`"not-an-id"`)},
-		{SkinPublicID: json.RawMessage(`"abc234567"`), Kind: "skin"},
+		{CapePublicID: json.RawMessage(`123`)},
 		{},
 	} {
 		if _, err := parsePlayerTextureUpdates(request); err == nil {
@@ -42,16 +42,21 @@ func TestParsePlayerTextureUpdatesRejectsInvalidOrMixedFields(t *testing.T) {
 	}
 }
 
-func TestSkinAssetJSONCompatibilityAliases(t *testing.T) {
+func TestSkinAssetJSONCanonicalContract(t *testing.T) {
 	t.Parallel()
 	record := skinAssetRecord{
 		PublicID: "abc234567", OwnerID: 7, OwnerPublicID: "def234567", OwnerName: "owner",
-		BlobHash: "hash", Kind: "skin", Model: "default", DisplayName: "Example",
+		BlobHash: "hash", Kind: "skin", Model: "default", Name: "Example",
 		Visibility: "public", ReviewStatus: "approved", Status: "active",
 	}
 	payload := skinAssetJSON(record, 7)
 	if payload["name"] != "Example" || payload["textureHash"] != "hash" || payload["canEdit"] != true || payload["canUse"] != true {
-		t.Fatalf("compatibility aliases are incomplete: %#v", payload)
+		t.Fatalf("canonical skin fields are incomplete: %#v", payload)
+	}
+	for _, removedAlias := range []string{"displayName", "hash", "isOwner", "ownerId"} {
+		if _, exists := payload[removedAlias]; exists {
+			t.Fatalf("legacy alias %q is still present: %#v", removedAlias, payload)
+		}
 	}
 }
 

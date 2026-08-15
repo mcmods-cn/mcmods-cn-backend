@@ -86,8 +86,25 @@ const simpleProjectCatalogFilter = `where project.project_type=$1
 		or project.primary_name ilike '%%'||$3||'%%' or project.summary ilike '%%'||$3||'%%'
 		or exists(select 1 from simple_project_localizations localization where localization.project_id=project.id
 			and (localization.name ilike '%%'||$3||'%%' or localization.summary ilike '%%'||$3||'%%')))))
-	and ($4='' or $4=any(project.categories)) and ($5='' or $5=any(project.minecraft_versions))
-	and ($6='' or $6=any(project.loaders))`
+	and (cardinality($4::text[])=0 or not exists(
+		select 1 from unnest($4::text[]) requested(value) where not requested.value=any(project.categories)))
+	and (cardinality($5::text[])=0 or project.minecraft_versions && $5::text[])
+	and (cardinality($6::text[])=0 or project.loaders && $6::text[])
+	and (cardinality($9::text[])=0 or not exists(
+		select 1 from unnest($9::text[]) requested(value) where not requested.value=any(project.features)))
+	and (cardinality($10::text[])=0 or project.resolution=any($10::text[]))
+	and (cardinality($11::text[])=0 or project.performance=any($11::text[]))
+	and (cardinality($12::text[])=0 or project.map_size=any($12::text[]))
+	and (cardinality($13::text[])=0 or exists(select 1 from simple_project_parent_refs parent
+		left join mods parent_mod on parent.target_type='mod' and parent_mod.id=parent.target_id
+		left join modpacks parent_pack on parent.target_type='modpack' and parent_pack.id=parent.target_id
+		left join simple_projects parent_project on parent.target_type=parent_project.project_type and parent_project.id=parent.target_id
+		where parent.project_id=project.id and parent.target_type||':'||coalesce(parent_mod.slug,parent_pack.slug,parent_project.slug,parent.raw_identifier)=any($13::text[])))
+	and (cardinality($14::text[])=0 or project.official_status=any($14::text[]))
+	and (cardinality($15::text[])=0 or project.source_status=any($15::text[]))
+	and (cardinality($16::text[])=0 or project.license=any($16::text[]))
+	and ($17::integer=0 or $17>0 and project.updated_at>=now()-make_interval(days=>$17)
+		or $17<0 and project.updated_at<now()-make_interval(days=>abs($17)))`
 
 func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 	projectType := normalizeSimpleProjectType(r.PathValue("projectType"))
@@ -100,13 +117,40 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
-	query := strings.TrimSpace(r.URL.Query().Get("q"))
-	category := strings.TrimSpace(r.URL.Query().Get("category"))
-	version := strings.TrimSpace(r.URL.Query().Get("version"))
-	loader := strings.TrimSpace(r.URL.Query().Get("loader"))
+	query, validQuery := parseCatalogQuery(r.URL.Query().Get("q"))
+	categories, validCategories := parseCatalogList(r.URL.Query().Get("category"), 20)
+	versions, validVersions := parseCatalogList(r.URL.Query().Get("version"), 20)
+	loaders, validLoaders := parseCatalogList(r.URL.Query().Get("loader"), 20)
+	features, validFeatures := parseCatalogList(r.URL.Query().Get("feature"), 20)
+	resolutions, validResolutions := parseCatalogList(r.URL.Query().Get("resolution"), 20)
+	performances, validPerformances := parseCatalogList(r.URL.Query().Get("performance"), 20)
+	mapSizes, validMapSizes := parseCatalogList(r.URL.Query().Get("mapSize"), 20)
+	parents, validParents := parseCatalogList(r.URL.Query().Get("parent"), 20)
+	statuses, validStatuses := parseCatalogList(r.URL.Query().Get("status"), 10)
+	sources, validSources := parseCatalogList(r.URL.Query().Get("source"), 10)
+	licenses, validLicenses := parseCatalogList(r.URL.Query().Get("license"), 20)
+	updatedDays, validUpdated := parseCatalogUpdatedRange(r.URL.Query().Get("updated"))
+	if !validQuery || !validCategories || !validVersions || !validLoaders || !validFeatures || !validResolutions ||
+		!validPerformances || !validMapSizes || !validParents || !validStatuses || !validSources ||
+		!validLicenses || !validUpdated || !validSimpleProjectOptions(projectType, loaders, categories, features) ||
+		!everyCatalogValueAllowed(statuses, allowedModStatuses) || !everyCatalogValueAllowed(sources, allowedModSourceStatuses) ||
+		!everyCatalogValueAllowed(licenses, allowedModLicenses) {
+		writeError(w, http.StatusBadRequest, "invalid catalog filter")
+		return
+	}
+	sort, validSort := parseCatalogSort(r.URL.Query().Get("sort"))
+	if !validSort {
+		writeError(w, http.StatusBadRequest, "invalid catalog sort")
+		return
+	}
 	limit := boundedLimit(r.URL.Query().Get("limit"), 24, 100)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
-	indexed := s.searchProjectPage(r.Context(), query, projectType, category, version, loader, claims, limit, offset)
+	indexed := indexedSearchPage{}
+	filtered := len(categories)+len(versions)+len(loaders)+len(features)+len(resolutions)+len(performances)+
+		len(mapSizes)+len(parents)+len(statuses)+len(sources)+len(licenses) > 0 || updatedDays != 0
+	if catalogSortUsesSearchIndex(sort) && !filtered {
+		indexed = s.searchProjectPage(r.Context(), query, projectType, firstCatalogValue(categories), firstCatalogValue(versions), firstCatalogValue(loaders), claims, limit, offset)
+	}
 	databaseOffset := offset
 	if indexed.Used {
 		databaseOffset = 0
@@ -115,10 +159,12 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 	if indexed.Used {
 		total = indexed.Total
 	} else if err := s.db.QueryRow(r.Context(), `select count(*) from simple_projects project `+simpleProjectCatalogFilter,
-		projectType, claims.Subject, query, category, version, loader, false, []int64{}).Scan(&total); err != nil {
+		projectType, claims.Subject, query, categories, versions, loaders, false, []int64{}, features, resolutions,
+		performances, mapSizes, parents, statuses, sources, licenses, updatedDays).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count projects")
 		return
 	}
+	orderSQL := catalogOrderSQL(sort, indexed.Used, 8, "project.updated_at", "project.id", "project.primary_name")
 	rows, err := s.db.Query(r.Context(), `select project.id,project.public_id,project.project_type,project.slug,project.default_locale,
 		project.abbreviation,project.minecraft_versions,project.loaders,project.categories,project.features,project.resolution,
 		project.performance,project.map_size,project.official_status,project.source_status,project.license,
@@ -130,11 +176,10 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		left join public_routes popularity_route on popularity_route.entity_type=project.project_type and popularity_route.internal_id=project.id
 		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
 		`+simpleProjectCatalogFilter+`
-		order by case when $7 then array_position($8::bigint[],project.id) end,
-			case when not $7 then coalesce(popularity.heat_score,0) end desc,
-			project.updated_at desc,project.id desc
-		limit $9 offset $10`, projectType, claims.Subject, query, category, version, loader,
-		indexed.Used, indexed.IDs, limit, databaseOffset)
+		order by `+orderSQL+`
+		limit $18 offset $19`, projectType, claims.Subject, query, categories, versions, loaders,
+		indexed.Used, indexed.IDs, features, resolutions, performances, mapSizes, parents, statuses, sources,
+		licenses, updatedDays, limit, databaseOffset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load projects")
 		return
@@ -522,20 +567,9 @@ func normalizeAndValidateSimpleProjectDraft(snapshot *simpleProjectSnapshot, all
 		return errors.New("at least one related link is required")
 	}
 	snapshot.Links = links
-	authors := make([]modAuthorPayload, 0, len(snapshot.Authors))
-	for _, author := range snapshot.Authors {
-		author.CreatorID = strings.ToLower(strings.TrimSpace(author.CreatorID))
-		author.Kind = strings.ToLower(strings.TrimSpace(author.Kind))
-		author.Name = strings.TrimSpace(author.Name)
-		author.Role = strings.TrimSpace(author.Role)
-		author.AvatarURL = strings.TrimSpace(author.AvatarURL)
-		if author.CreatorID == "" && author.Name == "" {
-			continue
-		}
-		if author.CreatorID != "" && !validCatalogPublicID(author.CreatorID) || author.Kind != "" && author.Kind != "author" && author.Kind != "team" || author.AvatarURL != "" && !validHTTPURL(author.AvatarURL) {
-			return errors.New("invalid project author")
-		}
-		authors = append(authors, author)
+	authors, err := normalizeProjectAuthors(snapshot.Authors)
+	if err != nil {
+		return err
 	}
 	snapshot.Authors = authors
 	if len(snapshot.GalleryImages) > 32 {

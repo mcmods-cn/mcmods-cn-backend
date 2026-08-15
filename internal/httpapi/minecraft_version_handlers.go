@@ -43,6 +43,7 @@ type minecraftLoaderSyncStatus struct {
 
 type minecraftVersionConfig struct {
 	Versions       []minecraftVersionOption    `json:"versions"`
+	CommonVersions []string                    `json:"commonVersions"`
 	Loaders        []minecraftLoaderOption     `json:"loaders"`
 	SourceURL      string                      `json:"sourceUrl"`
 	LastSyncedAt   string                      `json:"lastSyncedAt,omitempty"`
@@ -122,9 +123,19 @@ func saveMinecraftVersionConfig(ctx context.Context, db *pgxpool.Pool, config mi
 	return err
 }
 
-func minecraftVersionType(value string) string {
+func minecraftVersionType(value string, codes ...string) string {
+	code := ""
+	if len(codes) > 0 {
+		code = strings.ToLower(strings.TrimSpace(codes[0]))
+	}
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "snapshot":
+		if strings.Contains(code, "-pre") {
+			return "pre_release"
+		}
+		if strings.Contains(code, "-rc") {
+			return "release_candidate"
+		}
 		return "snapshot"
 	case "old_alpha", "old_beta":
 		return "legacy"
@@ -136,6 +147,9 @@ func minecraftVersionType(value string) string {
 func mergeMinecraftVersionConfig(base, stored minecraftVersionConfig) minecraftVersionConfig {
 	if len(stored.Versions) > 0 {
 		base.Versions = stored.Versions
+	}
+	if len(stored.CommonVersions) > 0 {
+		base.CommonVersions = stored.CommonVersions
 	}
 	if len(stored.Loaders) > 0 {
 		base.Loaders = stored.Loaders
@@ -167,7 +181,8 @@ func normalizeMinecraftVersionConfig(payload minecraftVersionConfig) (minecraftV
 		if len(version.Code) > 80 {
 			return minecraftVersionConfig{}, &requestError{message: "Minecraft version name is too long"}
 		}
-		if version.Type != "release" && version.Type != "snapshot" && version.Type != "april_fools" && version.Type != "legacy" {
+		if version.Type != "release" && version.Type != "snapshot" && version.Type != "pre_release" &&
+			version.Type != "release_candidate" && version.Type != "april_fools" && version.Type != "legacy" {
 			version.Type = "release"
 		}
 		versionSet[version.Code] = true
@@ -205,8 +220,15 @@ func normalizeMinecraftVersionConfig(payload minecraftVersionConfig) (minecraftV
 	if len(loaders) > 100 {
 		return minecraftVersionConfig{}, &requestError{message: "too many Minecraft loaders"}
 	}
+	commonVersions := uniqueTrimmed(payload.CommonVersions, 20)
+	filteredCommonVersions := commonVersions[:0]
+	for _, version := range commonVersions {
+		if versionSet[version] {
+			filteredCommonVersions = append(filteredCommonVersions, version)
+		}
+	}
 	return minecraftVersionConfig{
-		Versions: versions, Loaders: loaders, SourceURL: normalizedMinecraftSourceURL(payload.SourceURL),
+		Versions: versions, CommonVersions: filteredCommonVersions, Loaders: loaders, SourceURL: normalizedMinecraftSourceURL(payload.SourceURL),
 		LastSyncedAt: strings.TrimSpace(payload.LastSyncedAt), LatestRelease: strings.TrimSpace(payload.LatestRelease),
 		LatestSnapshot: strings.TrimSpace(payload.LatestSnapshot), LoaderSyncs: normalizeMinecraftLoaderSyncs(payload.LoaderSyncs),
 	}, nil
@@ -271,7 +293,12 @@ func defaultMinecraftVersionConfig() minecraftVersionConfig {
 	for _, name := range loaderNames {
 		loaders = append(loaders, minecraftLoaderOption{Code: name, Name: name, Versions: append([]string(nil), versionCodes...)})
 	}
-	return minecraftVersionConfig{Versions: versions, Loaders: loaders, SourceURL: mojangVersionManifestURL}
+	return minecraftVersionConfig{
+		Versions:       versions,
+		CommonVersions: []string{"1.21.1", "1.20.1", "1.19.2", "1.18.2", "1.16.5", "1.12.2", "1.7.10"},
+		Loaders:        loaders,
+		SourceURL:      mojangVersionManifestURL,
+	}
 }
 
 func StartMinecraftVersionSyncScheduler(ctx context.Context, db *pgxpool.Pool) {

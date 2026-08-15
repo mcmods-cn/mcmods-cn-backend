@@ -161,7 +161,7 @@ func (client *Client) ImportDocuments(ctx context.Context, collection string, do
 			return fmt.Errorf("decode Typesense import result: %w", err)
 		}
 		if !result.Success {
-			return fmt.Errorf("Typesense rejected a document: %s", result.Error)
+			return fmt.Errorf("typesense rejected a document: %s", result.Error)
 		}
 	}
 	return scanner.Err()

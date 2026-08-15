@@ -164,7 +164,7 @@ func selectModrinthPackArchive(versions []modrinthVersion) (modrinthVersion, str
 	return modrinthVersion{}, struct {
 		URL      string
 		Filename string
-	}{}, errors.New("Modrinth 没有可下载的 mrpack 文件")
+	}{}, errors.New("没有可下载的 Modrinth mrpack 文件")
 }
 
 func modrinthProjectAuthors(ctx context.Context, client *http.Client, cfg modImportConfig, headers http.Header, teamID string) []modAuthorPayload {

@@ -66,7 +66,7 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		var sourceTemplateID, backgroundPath, coordinateSpace string
 		var slotDatabaseID, sourceSlotID, role, bindingID string
 		var placeholderItem, itemTagEquivalent, semanticRole, roleSource string
-		var tagEntityID, tagRegistry, tagCanonicalID string
+		var tagPublicID, tagRegistry, tagCanonicalID string
 		var layoutAvailable, backgroundContainsIngredients, coordinatesAvailable bool
 		var ingredientPresent, clickable bool
 		var imageScale, slotOrdinal int
@@ -79,7 +79,7 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 			&imageScale, &canvas, &imagePixels, &contentRect, &slotDatabaseID, &sourceSlotID, &role, &slotOrdinal,
 			&coordinatesAvailable, &rect, &visualRect, &slotData, &bindingID, &ingredientPresent, &clickable,
 			&placeholderItem, &itemTagEquivalent, &semanticRole, &roleSource,
-			&tagEntityID, &tagRegistry, &tagCanonicalID); err != nil {
+			&tagPublicID, &tagRegistry, &tagCanonicalID); err != nil {
 			rows.Close()
 			return err
 		}
@@ -141,7 +141,7 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		slot["alternatives"] = []any{}
 		if tagCanonicalID != "" {
 			slot["tag"] = tagCanonicalID
-			slot["tagEntityId"] = tagEntityID
+			slot["tagPublicId"] = tagPublicID
 			slot["tagRegistry"] = tagRegistry
 		}
 		state.slots = append(state.slots, slot)

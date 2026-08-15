@@ -77,7 +77,7 @@ type yggdrasilUser struct {
 
 func newYggdrasilService(cfg config.Config) *yggdrasilService {
 	if !cfg.Yggdrasil.Enabled {
-		return &yggdrasilService{disabledReason: errors.New("Yggdrasil is disabled by configuration")}
+		return &yggdrasilService{disabledReason: errors.New("yggdrasil is disabled by configuration")}
 	}
 	production := strings.EqualFold(strings.TrimSpace(cfg.Env), "production")
 	if err := validateYggdrasilEndpoint(cfg.Yggdrasil.PublicBaseURL, "public API", production); err != nil {

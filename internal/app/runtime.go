@@ -119,6 +119,7 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	httpapi.StartPopularityRefreshScheduler(ctx, db)
 	httpapi.NewOSSDeletionWorker(cfg, db).Start(ctx)
 	httpapi.NewMaintenanceWorker(db).Start(ctx)
+	httpapi.NewActivityRetentionWorker(db).Start(ctx)
 	progressionService := progression.NewService(db)
 	activityMonitor := activity.NewMonitor(db, progressionService.ProcessActivityBatch)
 	natsCfg, loadErr := database.LoadNATSConfig(ctx, db, cfg.NATS, cfg.SettingsEncryptionKey)

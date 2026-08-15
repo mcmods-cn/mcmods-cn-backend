@@ -422,20 +422,6 @@ func catalogSchemaStatements() []string {
 			updated_at timestamptz not null default now(),
 			primary key(entity_id,locale)
 		)`,
-		`create table tag_member_overrides (
-			tag_id bigint primary key references catalog_tags(entity_id) on delete cascade,
-			resource_ids bigint[] not null default '{}'::bigint[],
-			updated_by bigint references users(id) on delete set null,
-			published_revision_id bigint,
-			updated_at timestamptz not null default now()
-		)`,
-		`create table recipe_type_catalyst_overrides (
-			recipe_type_id bigint primary key references recipe_types(entity_id) on delete cascade,
-			catalyst_resource_ids bigint[] not null default '{}'::bigint[],
-			updated_by bigint references users(id) on delete set null,
-			published_revision_id bigint,
-			updated_at timestamptz not null default now()
-		)`,
 		`create table recipe_content_overrides (
 			recipe_id bigint primary key references recipes(entity_id) on delete cascade,
 			note text not null default '',

@@ -69,10 +69,11 @@ type Event struct {
 	ObjectPublicID string
 	// ObjectEntityType and ObjectInternalID are the numeric internal lookup
 	// alternative used when a handler already resolved the business entity.
-	ObjectEntityType   string
-	ObjectInternalID   int64
-	MarkdownAddedBytes int
-	OccurredAt         time.Time
+	ObjectEntityType     string
+	ObjectInternalID     int64
+	MarkdownAddedBytes   int
+	MarkdownDeletedBytes int
+	OccurredAt           time.Time
 }
 
 type BatchProcessor func(context.Context, []Event) error
@@ -115,6 +116,9 @@ func (m *Monitor) Record(event Event) {
 	}
 	if event.MarkdownAddedBytes < 0 {
 		event.MarkdownAddedBytes = 0
+	}
+	if event.MarkdownDeletedBytes < 0 {
+		event.MarkdownDeletedBytes = 0
 	}
 	select {
 	case m.incoming <- event:
@@ -227,13 +231,14 @@ func (m *Monitor) writeBatch(ctx context.Context, events []Event) error {
 			event.ObjectTypeID,
 			nullableObjectRouteID(event.ObjectRouteID),
 			event.MarkdownAddedBytes,
+			event.MarkdownDeletedBytes,
 			event.OccurredAt.UTC(),
 		})
 	}
 	_, err := m.db.CopyFrom(
 		ctx,
 		pgx.Identifier{"user_activity_events"},
-		[]string{"user_id", "action_id", "object_type_id", "object_route_id", "markdown_added_bytes", "occurred_at"},
+		[]string{"user_id", "action_id", "object_type_id", "object_route_id", "markdown_added_bytes", "markdown_deleted_bytes", "occurred_at"},
 		pgx.CopyFromRows(rows),
 	)
 	if err != nil {
@@ -381,8 +386,16 @@ func nullableObjectRouteID(routeID int64) any {
 // insert/delete edit script. Replaced or moved text only counts newly inserted
 // bytes, never bytes removed from the previous document.
 func AddedMarkdownBytes(previous, current string) int {
+	added, _ := MarkdownDeltaBytes(previous, current)
+	return added
+}
+
+// MarkdownDeltaBytes returns inserted and deleted UTF-8 bytes in the same
+// minimal insert/delete edit script. The sum is the documented total-edit
+// byte count; net growth is added minus deleted.
+func MarkdownDeltaBytes(previous, current string) (added int, deleted int) {
 	if previous == current {
-		return 0
+		return 0, 0
 	}
 	oldBytes := []byte(previous)
 	newBytes := []byte(current)
@@ -400,20 +413,18 @@ func AddedMarkdownBytes(previous, current string) int {
 	oldBytes = oldBytes[:len(oldBytes)-suffix]
 	newBytes = newBytes[:len(newBytes)-suffix]
 	if len(oldBytes) == 0 {
-		return len(newBytes)
+		return len(newBytes), 0
 	}
 	if len(newBytes) == 0 {
-		return 0
+		return 0, len(oldBytes)
 	}
 	distance, ok := insertDeleteDistance(oldBytes, newBytes, 8192)
 	if !ok {
-		return len(newBytes)
+		return len(newBytes), len(oldBytes)
 	}
 	insertions := (distance + len(newBytes) - len(oldBytes)) / 2
-	if insertions < 0 {
-		return 0
-	}
-	return insertions
+	deletions := distance - insertions
+	return max(0, insertions), max(0, deletions)
 }
 
 func insertDeleteDistance(oldBytes, newBytes []byte, limit int) (int, bool) {

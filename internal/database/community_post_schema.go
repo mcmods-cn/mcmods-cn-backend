@@ -8,6 +8,7 @@ func communityPostSchemaStatements() []string {
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			kind text not null check(kind in ('tutorial','issue','news','discussion')),
+			category text not null,
 			author_id bigint not null references users(id) on delete restrict,
 			title text not null,
 			source_locale text not null,
@@ -36,6 +37,8 @@ func communityPostSchemaStatements() []string {
 		)`,
 		`create index idx_community_posts_catalog
 			on community_posts(kind,review_status,published_at desc,id desc) where status='active'`,
+		`create index idx_community_posts_category_catalog
+			on community_posts(kind,category,review_status,published_at desc,id desc) where status='active'`,
 		`create index idx_community_posts_author
 			on community_posts(author_id,created_at desc,id desc)`,
 		`create table community_post_bounties (

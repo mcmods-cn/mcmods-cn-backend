@@ -146,7 +146,7 @@ func TestCatalogMutationBaseSupportsFirstManualEditOfImport(t *testing.T) {
 }
 
 func TestCatalogMutationResponseIncludesActivityIdentity(t *testing.T) {
-	raw, err := json.Marshal(catalogEditResult{PublicID: "abc234567", ObjectPublicID: "abc234567", ActivityEventID: "evt234567"})
+	raw, err := json.Marshal(catalogEditResult{ObjectPublicID: "abc234567", ActivityEventID: "evt234567"})
 	if err != nil {
 		t.Fatal(err)
 	}

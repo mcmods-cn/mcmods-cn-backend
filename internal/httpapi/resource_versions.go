@@ -12,7 +12,7 @@ func (s *Server) decorateResourceVersionRows(ctx context.Context, items []map[st
 	resourcePublicIDs := make([]string, 0, len(items))
 	byResource := make(map[string]map[string]any, len(items))
 	for _, item := range items {
-		resourceID, _ := item["entityId"].(string)
+		resourceID, _ := item["publicId"].(string)
 		if resourceID == "" {
 			continue
 		}

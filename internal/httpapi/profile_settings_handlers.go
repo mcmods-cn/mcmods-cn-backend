@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 )
@@ -20,25 +21,31 @@ type profileConfigPayload struct {
 }
 
 type userProfileSettingsRequest struct {
-	Username       *string `json:"username,omitempty"`
-	Signature      *string `json:"signature,omitempty"`
-	Timezone       *string `json:"timezone,omitempty"`
-	MessageReceive *bool   `json:"messageReceive,omitempty"`
-	AvatarFileID   *string `json:"avatarFileId,omitempty"`
-	ClearAvatar    bool    `json:"clearAvatar,omitempty"`
+	Username            *string   `json:"username,omitempty"`
+	Signature           *string   `json:"signature,omitempty"`
+	Timezone            *string   `json:"timezone,omitempty"`
+	MessageReceive      *bool     `json:"messageReceive,omitempty"`
+	ShowOnlineStatus    *bool     `json:"showOnlineStatus,omitempty"`
+	PublicCardStatSlots *[]string `json:"publicCardStatSlots,omitempty"`
+	AvatarFileID        *string   `json:"avatarFileId,omitempty"`
+	ClearAvatar         bool      `json:"clearAvatar,omitempty"`
 }
 
 type userProfileSettingsResponse struct {
-	PublicID             string `json:"publicId"`
-	Username             string `json:"username"`
-	Signature            string `json:"signature"`
-	SignatureMaxBytes    int    `json:"signatureMaxBytes"`
-	AvatarURL            string `json:"avatarUrl"`
-	ProfileBackgroundURL string `json:"profileBackgroundUrl"`
-	Timezone             string `json:"timezone"`
-	MessageReceive       bool   `json:"messageReceive"`
-	CanUpdateAvatar      bool   `json:"canUpdateAvatar"`
-	CanUseAnimatedAvatar bool   `json:"canUseAnimatedAvatar"`
+	PublicID             string             `json:"publicId"`
+	Username             string             `json:"username"`
+	Signature            string             `json:"signature"`
+	SignatureMaxBytes    int                `json:"signatureMaxBytes"`
+	AvatarURL            string             `json:"avatarUrl"`
+	ProfileBackgroundURL string             `json:"profileBackgroundUrl"`
+	Timezone             string             `json:"timezone"`
+	MessageReceive       bool               `json:"messageReceive"`
+	ShowOnlineStatus     bool               `json:"showOnlineStatus"`
+	OnlineStatus         publicOnlineStatus `json:"onlineStatus"`
+	PublicCardStatSlots  []string           `json:"publicCardStatSlots"`
+	CardStatisticOptions []string           `json:"cardStatisticOptions"`
+	CanUpdateAvatar      bool               `json:"canUpdateAvatar"`
+	CanUseAnimatedAvatar bool               `json:"canUseAnimatedAvatar"`
 }
 
 func (s *Server) updateProfileConfig(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +118,14 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 		}
 		request.Timezone = &value
 	}
+	if request.PublicCardStatSlots != nil {
+		values, normalizeErr := normalizePublicCardSlots(*request.PublicCardStatSlots)
+		if normalizeErr != nil {
+			writeError(w, http.StatusBadRequest, normalizeErr.Error())
+			return
+		}
+		request.PublicCardStatSlots = &values
+	}
 
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -167,6 +182,18 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
+	if request.ShowOnlineStatus != nil {
+		if _, err := tx.Exec(r.Context(), `update users set show_online_status=$2,updated_at=now() where id=$1`, claims.Subject, *request.ShowOnlineStatus); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save online status privacy")
+			return
+		}
+	}
+	if request.PublicCardStatSlots != nil {
+		if _, err := tx.Exec(r.Context(), `update users set public_card_stat_slots=$2,updated_at=now() where id=$1`, claims.Subject, *request.PublicCardStatSlots); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save public card statistics")
+			return
+		}
+	}
 	if request.ClearAvatar {
 		if !s.userHasPermission(r.Context(), claims.Subject, "user.avatar.update") {
 			writeError(w, http.StatusForbidden, "没有更换头像权限")
@@ -212,10 +239,12 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	if request.Username != nil || request.Signature != nil || timezoneChanged || request.MessageReceive != nil || request.ClearAvatar || request.AvatarFileID != nil {
+	if request.Username != nil || request.Signature != nil || timezoneChanged || request.MessageReceive != nil || request.ShowOnlineStatus != nil || request.PublicCardStatSlots != nil || request.ClearAvatar || request.AvatarFileID != nil {
 		var username, signature, avatarURL, timezone string
+		var showOnlineStatus bool
+		var publicCardStatSlots []string
 		var avatarFileID *string
-		if err = tx.QueryRow(r.Context(), `select username,signature,avatar_url,(select public_id from oss_files where id=users.avatar_file_id),timezone from users where id=$1`, claims.Subject).Scan(&username, &signature, &avatarURL, &avatarFileID, &timezone); err != nil {
+		if err = tx.QueryRow(r.Context(), `select username,signature,avatar_url,(select public_id from oss_files where id=users.avatar_file_id),timezone,show_online_status,public_card_stat_slots from users where id=$1`, claims.Subject).Scan(&username, &signature, &avatarURL, &avatarFileID, &timezone, &showOnlineStatus, &publicCardStatSlots); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to read updated user profile")
 			return
 		}
@@ -229,6 +258,7 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 		snapshot, marshalErr := json.Marshal(map[string]any{
 			"userId": claims.PublicSubject, "username": username, "signature": signature, "avatarUrl": avatarURL,
 			"avatarFileId": avatarFileID, "timezone": timezone, "messageReceive": messageReceive,
+			"showOnlineStatus": showOnlineStatus, "publicCardStatSlots": publicCardStatSlots,
 		})
 		if marshalErr != nil {
 			writeError(w, http.StatusInternalServerError, "failed to encode user profile revision")
@@ -268,8 +298,11 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) loadUserProfileSettings(ctx context.Context, userID int64) (userProfileSettingsResponse, error) {
 	var response userProfileSettingsResponse
-	if err := s.db.QueryRow(ctx, `select public_id, username, signature, avatar_url, profile_background_url, timezone from users where id = $1`, userID).
-		Scan(&response.PublicID, &response.Username, &response.Signature, &response.AvatarURL, &response.ProfileBackgroundURL, &response.Timezone); err != nil {
+	var onlineActive bool
+	if err := s.db.QueryRow(ctx, `select public_id, username, signature, avatar_url, profile_background_url, timezone, show_online_status,
+		exists(select 1 from user_presence_sessions presence where presence.user_id=users.id
+			and presence.last_active_at>=now()-make_interval(secs=>$2)),public_card_stat_slots from users where id = $1`, userID, int(publicPresenceWindow/time.Second)).
+		Scan(&response.PublicID, &response.Username, &response.Signature, &response.AvatarURL, &response.ProfileBackgroundURL, &response.Timezone, &response.ShowOnlineStatus, &onlineActive, &response.PublicCardStatSlots); err != nil {
 		return response, err
 	}
 	ossCfg := s.ossConfigFromSettings(ctx)
@@ -283,6 +316,8 @@ func (s *Server) loadUserProfileSettings(ctx context.Context, userID int64) (use
 		return response, err
 	}
 	response.SignatureMaxBytes = s.profileConfigFromSettings(ctx).SignatureMaxBytes
+	response.OnlineStatus = mapPublicOnlineVisibility(response.ShowOnlineStatus, onlineActive)
+	response.CardStatisticOptions = append([]string(nil), publicCardStatisticOptionKeys...)
 	response.MessageReceive = s.userHasPermission(ctx, userID, "user.message.receive")
 	response.CanUpdateAvatar = s.userHasPermission(ctx, userID, "user.avatar.update")
 	response.CanUseAnimatedAvatar = s.userHasPermission(ctx, userID, "user.avatar.animated")

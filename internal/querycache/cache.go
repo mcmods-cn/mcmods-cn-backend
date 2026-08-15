@@ -12,7 +12,10 @@ import (
 	"mcmods-cn-backend/internal/config"
 )
 
-const maxLocalEntries = 512
+const (
+	maxLocalEntries = 512
+	maxLocalClaims  = 4096
+)
 
 type localEntry struct {
 	value     []byte
@@ -26,13 +29,14 @@ type Cache struct {
 	mu       sync.Mutex
 	local    map[string]localEntry
 	presence map[string]time.Time
+	claims   map[string]time.Time
 	group    singleflight.Group
 }
 
 func New(cfg config.RedisConfig) *Cache {
 	cache := &Cache{
 		prefix: cfg.Prefix, ttl: cfg.TTL,
-		local: make(map[string]localEntry), presence: make(map[string]time.Time),
+		local: make(map[string]localEntry), presence: make(map[string]time.Time), claims: make(map[string]time.Time),
 	}
 	if cache.ttl <= 0 {
 		cache.ttl = 2 * time.Minute
@@ -44,6 +48,58 @@ func New(cfg config.RedisConfig) *Cache {
 		})
 	}
 	return cache
+}
+
+// ClaimThrottle returns true once per key and window. Redis SET NX gives all
+// application replicas the same decision; the bounded local map is the
+// single-process implementation and the fallback when Redis is unavailable.
+func (c *Cache) ClaimThrottle(ctx context.Context, key string, window time.Duration) bool {
+	if c == nil || key == "" || window <= 0 {
+		return true
+	}
+	now := time.Now()
+	if c.redis != nil {
+		claimed, err := c.redis.SetNX(ctx, c.prefix+"throttle:"+key, "1", window).Result()
+		if err == nil {
+			c.recordLocalClaim(key, now.Add(window), now)
+			return claimed
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if expiresAt, exists := c.claims[key]; exists && now.Before(expiresAt) {
+		return false
+	}
+	c.pruneClaimsLocked(now)
+	if len(c.claims) >= maxLocalClaims {
+		for existingKey := range c.claims {
+			delete(c.claims, existingKey)
+			break
+		}
+	}
+	c.claims[key] = now.Add(window)
+	return true
+}
+
+func (c *Cache) recordLocalClaim(key string, expiresAt, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pruneClaimsLocked(now)
+	if len(c.claims) >= maxLocalClaims {
+		for existingKey := range c.claims {
+			delete(c.claims, existingKey)
+			break
+		}
+	}
+	c.claims[key] = expiresAt
+}
+
+func (c *Cache) pruneClaimsLocked(now time.Time) {
+	for key, expiresAt := range c.claims {
+		if !now.Before(expiresAt) {
+			delete(c.claims, key)
+		}
+	}
 }
 
 // TouchPresence records an opaque visitor fingerprint in the short-lived

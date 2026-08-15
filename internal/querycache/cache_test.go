@@ -45,3 +45,16 @@ func TestLocalPresenceCountsRecentVisitors(t *testing.T) {
 		t.Fatalf("OnlinePresenceCount() = %d, want 1", got)
 	}
 }
+
+func TestClaimThrottleLocalFallback(t *testing.T) {
+	cache := New(config.RedisConfig{})
+	if !cache.ClaimThrottle(context.Background(), "view:user:mod", time.Minute) {
+		t.Fatal("first throttle claim should be accepted")
+	}
+	if cache.ClaimThrottle(context.Background(), "view:user:mod", time.Minute) {
+		t.Fatal("duplicate throttle claim inside the window should be rejected")
+	}
+	if !cache.ClaimThrottle(context.Background(), "view:user:other-mod", time.Minute) {
+		t.Fatal("a different throttle key should be accepted")
+	}
+}

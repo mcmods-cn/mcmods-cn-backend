@@ -90,7 +90,7 @@ func parseFabricRegistrySync(data []byte) ([]string, []string, error) {
 						)
 					}
 					if int64(len(entries))+int64(bulkSize) > 5_000_000 {
-						return nil, nil, errors.New("Fabric registry sync contains more than 5000000 entries")
+						return nil, nil, errors.New("fabric registry sync contains more than 5000000 entries")
 					}
 					for entryIndex := int32(0); entryIndex < bulkSize; entryIndex++ {
 						entryPath, err := readProtocolString(reader, maxConfigurationPacketBytes)

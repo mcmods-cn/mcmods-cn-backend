@@ -364,8 +364,8 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit creator revision")
 		return
 	}
-	addedBytes := activity.AddedMarkdownBytes(previousDescription, snapshot.DescriptionMarkdown)
-	annotateActivity(r, activity.ActionEdit, creatorObjectType(kind), publicID, addedBytes)
+	addedBytes, deletedBytes := activity.MarkdownDeltaBytes(previousDescription, snapshot.DescriptionMarkdown)
+	annotateActivityDelta(r, activity.ActionEdit, creatorObjectType(kind), publicID, addedBytes, deletedBytes)
 	writeJSON(w, http.StatusOK, map[string]any{"revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID, "reviewStatus": status})
 }
 

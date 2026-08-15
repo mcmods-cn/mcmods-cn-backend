@@ -387,15 +387,80 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, mod)
 }
 
+const publicModCatalogFilter = `where (m.review_status='approved' or m.created_by=$1)
+	and (($3 and m.id=any($4::bigint[])) or (not $3 and ($2='' or m.slug ilike '%%'||$2||'%%'
+		or m.project_code ilike '%%'||$2||'%%' or m.primary_name ilike '%%'||$2||'%%'
+		or m.secondary_name ilike '%%'||$2||'%%' or m.abbreviation ilike '%%'||$2||'%%'
+		or $2=any(m.search_keywords)
+		or exists(select 1 from mod_identifiers identifier where identifier.mod_id=m.id and identifier.identifier ilike '%%'||$2||'%%')
+		or exists(select 1 from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
+			where binding.subject_id=m.id and binding.subject_type='mod' and creator.name ilike '%%'||$2||'%%'))))
+	and (cardinality($5::text[])=0 or (
+		$9='all' and not exists(select 1 from unnest($5::text[]) requested(value) where not exists(
+			select 1 from mod_loader_compatibilities compatibility where compatibility.mod_id=m.id and compatibility.minecraft_version=requested.value))
+		or $9<>'all' and exists(select 1 from mod_loader_compatibilities compatibility
+			where compatibility.mod_id=m.id and compatibility.minecraft_version=any($5::text[]))))
+	and (cardinality($6::text[])=0 or exists(select 1 from mod_loader_compatibilities compatibility
+		where compatibility.mod_id=m.id and compatibility.loader=any($6::text[])))
+	and (cardinality($7::text[])=0 or m.primary_category=any($7::text[]))
+	and (cardinality($8::text[])=0 or not exists(select 1 from unnest($8::text[]) requested(value) where not exists(
+		select 1 from mod_tags tag where tag.mod_id=m.id and tag.tag=requested.value)))
+	and (cardinality($10::text[])=0 or m.environment=any($10::text[]))
+	and (cardinality($11::text[])=0 or m.official_status=any($11::text[]))
+	and (cardinality($12::text[])=0 or m.source_status=any($12::text[]))
+	and (cardinality($13::text[])=0 or m.license=any($13::text[]))
+	and (cardinality($14::text[])=0 or not exists(select 1 from unnest($14::text[]) requested(value) where not case requested.value
+		when 'gallery' then exists(select 1 from mod_gallery_images gallery where gallery.mod_id=m.id)
+		when 'downloads' then m.modrinth_project_id<>'' or m.curseforge_project_id<>''
+		when 'reviewed' then m.review_status='approved'
+		else false end))
+	and ($15::integer=0 or $15>0 and m.updated_at>=now()-make_interval(days=>$15)
+		or $15<0 and m.updated_at<now()-make_interval(days=>abs($15)))`
+
 func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	query, validQuery := parseCatalogQuery(r.URL.Query().Get("q"))
+	versions, validVersions := parseCatalogList(r.URL.Query().Get("version"), 20)
+	loaders, validLoaders := parseCatalogList(r.URL.Query().Get("loader"), 20)
+	primaryCategories, validPrimary := parseCatalogList(r.URL.Query().Get("primary"), 1)
+	tags, validTags := parseCatalogList(r.URL.Query().Get("tag"), 20)
+	environments, validEnvironments := parseCatalogList(r.URL.Query().Get("environment"), 10)
+	statuses, validStatuses := parseCatalogList(r.URL.Query().Get("status"), 10)
+	sources, validSources := parseCatalogList(r.URL.Query().Get("source"), 10)
+	licenses, validLicenses := parseCatalogList(r.URL.Query().Get("license"), 20)
+	features, validFeatures := parseCatalogList(r.URL.Query().Get("feature"), 20)
+	updatedDays, validUpdated := parseCatalogUpdatedRange(r.URL.Query().Get("updated"))
+	if !validQuery || !validVersions || !validLoaders || !validPrimary || !validTags || !validEnvironments ||
+		!validStatuses || !validSources || !validLicenses || !validFeatures || !validCatalogFeatures(features) || !validUpdated ||
+		!everyCatalogValueAllowed(primaryCategories, allowedModCategories) || !everyCatalogValueAllowed(tags, allowedModTags) ||
+		!everyCatalogValueAllowed(environments, allowedModEnvironments) || !everyCatalogValueAllowed(statuses, allowedModStatuses) ||
+		!everyCatalogValueAllowed(sources, allowedModSourceStatuses) || !everyCatalogValueAllowed(licenses, allowedModLicenses) {
+		writeError(w, http.StatusBadRequest, "invalid catalog filter")
+		return
+	}
+	versionMode := strings.TrimSpace(r.URL.Query().Get("versionMode"))
+	if versionMode == "" {
+		versionMode = "any"
+	}
+	if versionMode != "any" && versionMode != "all" {
+		writeError(w, http.StatusBadRequest, "invalid version mode")
+		return
+	}
+	sort, validSort := parseCatalogSort(r.URL.Query().Get("sort"))
+	if !validSort {
+		writeError(w, http.StatusBadRequest, "invalid catalog sort")
+		return
+	}
 	limit := 100
 	if parsed, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && parsed > 0 {
 		limit = min(parsed, 100)
 	}
 	offset := boundedOffset(r.URL.Query().Get("offset"))
-	indexed := s.searchProjectPage(r.Context(), query, "mod", "", "", "", claims, limit, offset)
+	indexed := indexedSearchPage{}
+	filtered := len(versions)+len(loaders)+len(primaryCategories)+len(tags)+len(environments)+len(statuses)+len(sources)+len(licenses)+len(features) > 0 || updatedDays != 0
+	if catalogSortUsesSearchIndex(sort) && !filtered {
+		indexed = s.searchProjectPage(r.Context(), query, "mod", "", "", "", claims, limit, offset)
+	}
 	databaseOffset := offset
 	if indexed.Used {
 		databaseOffset = 0
@@ -403,21 +468,13 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 	var total int
 	if indexed.Used {
 		total = indexed.Total
-	} else if err := s.db.QueryRow(
-		r.Context(),
-		`select count(*)
-		 from mods m
-		 where (m.review_status = 'approved' or m.created_by = $1)
-		   and ($2 = '' or m.slug ilike '%' || $2 || '%' or m.project_code ilike '%' || $2 || '%' or m.primary_name ilike '%' || $2 || '%' or m.secondary_name ilike '%' || $2 || '%'
-		        or m.abbreviation ilike '%' || $2 || '%' or $2 = any(m.search_keywords)
-		        or exists (select 1 from mod_identifiers identifier where identifier.mod_id=m.id and identifier.identifier ilike '%' || $2 || '%')
-		        or exists (select 1 from content_creator_bindings a join creators creator on creator.id=a.creator_id
-		                   where a.subject_id=m.id and a.subject_type='mod' and creator.name ilike '%' || $2 || '%'))`,
-		claims.Subject, query,
-	).Scan(&total); err != nil {
+	} else if err := s.db.QueryRow(r.Context(), `select count(*) from mods m `+publicModCatalogFilter,
+		claims.Subject, query, false, []int64{}, versions, loaders, primaryCategories, tags, versionMode,
+		environments, statuses, sources, licenses, features, updatedDays).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "读取模组总数失败")
 		return
 	}
+	orderSQL := catalogOrderSQL(sort, indexed.Used, 4, "m.updated_at", "m.id", "m.primary_name")
 	rows, err := s.db.Query(
 		r.Context(),
 		`select m.id, project_code, slug, primary_name, secondary_name, abbreviation, summary, environment, primary_category,
@@ -427,17 +484,11 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		 from mods m
 		 left join public_routes popularity_route on popularity_route.entity_type='mod' and popularity_route.internal_id=m.id
 		 left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
-		 where (m.review_status = 'approved' or m.created_by = $1)
-		   and (($3 and m.id=any($4::bigint[])) or (not $3 and ($2 = '' or m.slug ilike '%' || $2 || '%' or m.project_code ilike '%' || $2 || '%' or m.primary_name ilike '%' || $2 || '%' or m.secondary_name ilike '%' || $2 || '%'
-		        or m.abbreviation ilike '%' || $2 || '%' or $2 = any(m.search_keywords)
-		        or exists (select 1 from mod_identifiers identifier where identifier.mod_id=m.id and identifier.identifier ilike '%' || $2 || '%')
-		        or exists (select 1 from content_creator_bindings a join creators creator on creator.id=a.creator_id
-		                   where a.subject_id=m.id and a.subject_type='mod' and creator.name ilike '%' || $2 || '%'))))
-		 order by case when $3 then array_position($4::bigint[],m.id) end,
-		          case when not $3 then coalesce(popularity.heat_score,0) end desc,
-		          m.updated_at desc,m.id desc
-		 limit $5 offset $6`,
-		claims.Subject, query, indexed.Used, indexed.IDs, limit, databaseOffset,
+		 `+publicModCatalogFilter+`
+		 order by `+orderSQL+`
+		 limit $16 offset $17`,
+		claims.Subject, query, indexed.Used, indexed.IDs, versions, loaders, primaryCategories, tags, versionMode,
+		environments, statuses, sources, licenses, features, updatedDays, limit, databaseOffset,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取模组列表失败")
@@ -511,11 +562,6 @@ func (s *Server) publicModDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, mod)
 }
 
-func (s *Server) resolveModAuthorOSSURLs(ctx context.Context, authors []modAuthorPayload) error {
-	ossCfg := s.ossConfigFromSettings(ctx)
-	return s.resolveModAuthorOSSURLsWithConfig(ctx, ossCfg, authors)
-}
-
 func (s *Server) resolveModAuthorOSSURLsWithConfig(ctx context.Context, ossCfg ossConfigPayload, authors []modAuthorPayload) error {
 	for authorIndex := range authors {
 		var err error
@@ -535,24 +581,51 @@ func (s *Server) resolveModAuthorOSSURLsWithConfig(ctx context.Context, ossCfg o
 	return nil
 }
 
+func normalizeProjectAuthors(authors []modAuthorPayload) ([]modAuthorPayload, error) {
+	result := make([]modAuthorPayload, 0, len(authors))
+	for _, author := range authors {
+		author.CreatorID = strings.ToLower(strings.TrimSpace(author.CreatorID))
+		author.Kind = strings.ToLower(strings.TrimSpace(author.Kind))
+		author.Name = strings.TrimSpace(author.Name)
+		author.Role = strings.TrimSpace(author.Role)
+		author.AvatarURL = strings.TrimSpace(author.AvatarURL)
+		if author.CreatorID == "" && author.Name == "" {
+			continue
+		}
+		if author.CreatorID != "" && !validCatalogPublicID(author.CreatorID) ||
+			author.Kind != "" && author.Kind != "author" && author.Kind != "team" ||
+			author.AvatarURL != "" && !validHTTPURL(author.AvatarURL) {
+			return nil, errors.New("invalid project author")
+		}
+		result = append(result, author)
+	}
+	return result, nil
+}
+
 func (s *Server) publicModIcon(w http.ResponseWriter, r *http.Request) {
+	s.publicProjectIcon(w, r, "mod")
+}
+
+func (s *Server) publicProjectIcon(w http.ResponseWriter, r *http.Request, projectKind string) {
 	siteID := normalizeModSiteID(r.PathValue("siteId"))
 	if siteID == "" {
-		writeError(w, http.StatusBadRequest, "mod site ID is invalid")
+		writeError(w, http.StatusBadRequest, projectKind+" site ID is invalid")
 		return
 	}
+	query := `select icon_url from mods where slug=$1 and (review_status='approved' or created_by=$2)`
+	if projectKind == "modpack" {
+		query = `select icon_url from modpacks where slug=$1 and (review_status='approved' or created_by=$2)`
+	}
 	var iconURL string
-	err := s.db.QueryRow(r.Context(), `select icon_url from mods
-		where slug=$1 and (review_status='approved' or created_by=$2)`, siteID, currentClaims(r).Subject).Scan(&iconURL)
+	err := s.db.QueryRow(r.Context(), query, siteID, currentClaims(r).Subject).Scan(&iconURL)
 	if errors.Is(err, pgx.ErrNoRows) || strings.TrimSpace(iconURL) == "" {
-		writeError(w, http.StatusNotFound, "mod icon does not exist")
+		writeError(w, http.StatusNotFound, projectKind+" icon does not exist")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load mod icon")
+		writeError(w, http.StatusInternalServerError, "failed to load "+projectKind+" icon")
 		return
 	}
-
 	s.redirectStoredRasterURL(w, r, iconURL)
 }
 

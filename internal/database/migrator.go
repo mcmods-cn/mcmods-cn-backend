@@ -7,9 +7,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 67
+const schemaGeneration = 69
 
-// Migrate installs one coherent development schema. Generation 67 establishes
+// Migrate installs one coherent development schema. Generation 69 establishes
 // numeric internal keys, globally unique public IDs, revocable authentication
 // sessions, version-scoped mod-content layout identities and similar-resource
 // groups, and generalized
@@ -50,6 +50,10 @@ const schemaGeneration = 67
 // totals include their bound child resources without synchronous fan-out.
 // The administration workbench reads persisted daily site metrics and project
 // popularity snapshots instead of aggregating the activity stream on demand.
+// User contribution counters are persisted independently from the raw activity
+// retention window. It also adds category-aware community catalogs, per-session
+// online presence with private-by-default disclosure, configurable public user
+// cards, and audited action-specific activity cleanup.
 // Earlier development data is
 // intentionally not migrated and must be reset before installation.
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {
@@ -132,6 +136,7 @@ func schemaInstallationStatements() []string {
 	statements = append(statements, adminDashboardSchemaStatements()...)
 	statements = append(statements, draftSchemaStatements()...)
 	statements = append(statements, searchSchemaStatements()...)
+	statements = append(statements, userFeatureSchemaStatements()...)
 	return append(statements, foreignKeyIndexStatement())
 }
 
@@ -368,8 +373,6 @@ func reviewSchemaStatements() []string {
 		`alter table recipe_layout_templates add constraint fk_recipe_layout_templates_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
 		`alter table recipe_definitions add constraint fk_recipe_definitions_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
 		`alter table knowledge_pages add constraint fk_knowledge_pages_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
-		`alter table tag_member_overrides add constraint fk_tag_member_overrides_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
-		`alter table recipe_type_catalyst_overrides add constraint fk_recipe_type_overrides_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
 		`alter table recipe_content_overrides add constraint fk_recipe_content_overrides_revision foreign key(published_revision_id) references content_revisions(id) on delete restrict`,
 		`alter table users add constraint fk_users_avatar_file foreign key(avatar_file_id) references oss_files(id) on delete set null`,
 		`alter table mod_relationships add constraint fk_mod_relationships_group foreign key(group_id) references mod_relationship_groups(id) on delete cascade`,

@@ -113,8 +113,8 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 			contentLocale, name = resolvedLocale, resolvedName
 		}
 		provenance := catalogLocalizationProvenance(provenances, contentLocale, name)
-		items = append(items, map[string]any{"entityId": publicID, "publicId": publicID, "id": canonicalID,
-			"kind": kind, "kindCode": kind, "registry": namespace, "canonicalId": canonicalID, "names": json.RawMessage(names),
+		items = append(items, map[string]any{"publicId": publicID, "id": canonicalID,
+			"kind": kind, "registry": namespace, "names": json.RawMessage(names),
 			"defaultLocale": defaultLocale, "publishedRevisionId": nullableCatalogString(revisionID), "locale": contentLocale,
 			"name": name, "provenance": provenance, "iconUrl": iconURL, "renderUrl": renderURL,
 			"iconFileId": nullableCatalogString(iconID), "renderFileId": nullableCatalogString(renderID),
@@ -417,9 +417,9 @@ func (s *Server) catalogTags(w http.ResponseWriter, r *http.Request) {
 		}
 		previewTagIDs = append(previewTagIDs, entityID)
 		previewFallback[entityID] = !revisionID.Valid
-		items = append(items, map[string]any{"entityId": publicID, "publicId": publicID, "registry": registry, "canonicalId": canonicalID,
+		items = append(items, map[string]any{"publicId": publicID, "registry": registry, "canonicalId": canonicalID,
 			"defaultLocale": defaultLocale, "publishedRevisionId": nullableCatalogString(revisionID), "memberCount": count,
-			"locale": contentLocale, "contentLocale": contentLocale, "name": name, "names": json.RawMessage(names)})
+			"locale": contentLocale, "name": name, "names": json.RawMessage(names)})
 	}
 	if err = rows.Err(); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read tags")
@@ -535,8 +535,7 @@ func scanCatalogTagPreviewRows(rows pgx.Rows, result map[int64][]map[string]any,
 			iconURL = "/api/v1/catalog/resources/" + publicID + "/icon"
 		}
 		result[tagID] = append(result[tagID], map[string]any{
-			"entityId": publicID, "publicId": publicID, "id": canonicalID, "canonicalId": canonicalID,
-			"kind": kindCode, "kindCode": kindCode, "registry": registry, "ordinal": ordinal,
+			"publicId": publicID, "id": canonicalID, "kind": kindCode, "registry": registry, "ordinal": ordinal,
 			"locale": locale, "name": name, "names": compactNames, "iconFileId": nullableCatalogString(iconID),
 			"iconUrl": iconURL, "revisionId": revisionID, "iconPath": iconPath, "modSiteId": modSiteID,
 		})
@@ -1335,8 +1334,8 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID int64, primary,
 		if iconID.Valid {
 			iconURL = "/api/v1/catalog/resources/" + publicID + "/icon"
 		}
-		items = append(items, map[string]any{"entityId": publicID, "publicId": publicID, "id": canonicalID, "kind": kindCode, "kindCode": kindCode,
-			"registry": registry, "canonicalId": canonicalID, "ordinal": ordinal, "locale": locale, "name": name,
+		items = append(items, map[string]any{"publicId": publicID, "id": canonicalID, "kind": kindCode,
+			"registry": registry, "ordinal": ordinal, "locale": locale, "name": name,
 			"names": json.RawMessage(names), "iconFileId": nullableCatalogString(iconID), "iconUrl": iconURL,
 			"revisionId": revisionID, "iconPath": iconPath, "modSiteId": modSiteID})
 	}
@@ -1392,8 +1391,8 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID int64, primary,
 		if iconID.Valid {
 			iconURL = "/api/v1/catalog/resources/" + publicID + "/icon"
 		}
-		items = append(items, map[string]any{"entityId": publicID, "publicId": publicID, "id": canonicalID, "kind": kindCode, "kindCode": kindCode,
-			"registry": registry, "canonicalId": canonicalID, "ordinal": ordinal, "locale": locale, "name": name,
+		items = append(items, map[string]any{"publicId": publicID, "id": canonicalID, "kind": kindCode,
+			"registry": registry, "ordinal": ordinal, "locale": locale, "name": name,
 			"names": json.RawMessage(names), "iconFileId": nullableCatalogString(iconID), "iconUrl": iconURL,
 			"revisionId": revisionID, "iconPath": iconPath, "modSiteId": modSiteID, "source": "import"})
 	}
@@ -1431,8 +1430,8 @@ func (s *Server) catalogRecipeTypeCatalysts(ctx context.Context, typeID int64, p
 		if iconID.Valid {
 			iconURL = "/api/v1/catalog/resources/" + publicID + "/icon"
 		}
-		items = append(items, map[string]any{"publicId": publicID, "id": canonicalID, "kind": kindCode, "kindCode": kindCode,
-			"registry": registry, "canonicalId": canonicalID, "ordinal": ordinal, "locale": locale, "name": name,
+		items = append(items, map[string]any{"publicId": publicID, "id": canonicalID, "kind": kindCode,
+			"registry": registry, "ordinal": ordinal, "locale": locale, "name": name,
 			"names": json.RawMessage(names), "iconFileId": nullableCatalogString(iconID), "iconUrl": iconURL})
 	}
 	if err = rows.Err(); err != nil {

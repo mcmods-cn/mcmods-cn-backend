@@ -47,13 +47,17 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := identity.InternalID
 	var username, status, avatarURL, signature, profileBackgroundURL string
+	var showOnlineStatus bool
+	var onlineActive bool
 	var createdAt time.Time
 	err := s.db.QueryRow(
 		r.Context(),
-		`select username, status, created_at, avatar_url, signature, profile_background_url
+		`select username, status, created_at, avatar_url, signature, profile_background_url,
+		        show_online_status,exists(select 1 from user_presence_sessions presence
+		          where presence.user_id=users.id and presence.last_active_at>=now()-make_interval(secs=>$2))
 		 from users where id = $1`,
-		userID,
-	).Scan(&username, &status, &createdAt, &avatarURL, &signature, &profileBackgroundURL)
+		userID, int(publicPresenceWindow/time.Second),
+	).Scan(&username, &status, &createdAt, &avatarURL, &signature, &profileBackgroundURL, &showOnlineStatus, &onlineActive)
 	if err == pgx.ErrNoRows || status == "deleted" {
 		writeError(w, http.StatusNotFound, "用户不存在")
 		return
@@ -95,7 +99,8 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 		"id": identity.PublicID, "username": username, "status": status,
 		"createdAt": createdAt, "followers": followers, "following": following,
 		"avatarUrl": avatarURL, "signature": signature, "profileBackgroundUrl": profileBackgroundURL,
-		"isOwn": isOwn, "isFollowing": isFollowing, "canFollow": canFollow, "canMessage": canMessage,
+		"onlineStatus": mapPublicOnlineVisibility(showOnlineStatus, onlineActive),
+		"isOwn":        isOwn, "isFollowing": isFollowing, "canFollow": canFollow, "canMessage": canMessage,
 	})
 }
 

@@ -354,7 +354,7 @@ func (conn *configurationPacketConn) readPacket() (int32, []byte, error) {
 			return 0, nil, readErr
 		}
 		if uncompressedLength < 0 || uncompressedLength > maxConfigurationPacketBytes {
-			return 0, nil, errors.New("Configuration packet expands beyond limit")
+			return 0, nil, errors.New("configuration packet expands beyond limit")
 		}
 		if uncompressedLength == 0 {
 			packetData = make([]byte, frameReader.Len())
@@ -373,7 +373,7 @@ func (conn *configurationPacketConn) readPacket() (int32, []byte, error) {
 				return 0, nil, closeErr
 			}
 			if len(packetData) != int(uncompressedLength) {
-				return 0, nil, errors.New("Configuration decompressed length mismatch")
+				return 0, nil, errors.New("configuration decompressed length mismatch")
 			}
 		}
 	}

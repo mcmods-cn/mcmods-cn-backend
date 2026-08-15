@@ -166,10 +166,6 @@ func ensureModImportProviderAvailable(cfg modImportConfig, provider string) erro
 	return nil
 }
 
-func parseModImportSource(provider, rawURL string) (string, string, string, error) {
-	return parseProjectImportSource("mod", provider, rawURL)
-}
-
 func parseProjectImportSource(projectType, provider, rawURL string) (string, string, string, error) {
 	if _, supported := projectImportSourceSpecs[projectType]; !supported {
 		return "", "", "", errors.New("不支持的项目类型")

@@ -19,6 +19,12 @@ func TestMinecraftVersionType(t *testing.T) {
 			t.Fatalf("minecraftVersionType(%q) = %q, want %q", input, actual, expected)
 		}
 	}
+	if actual := minecraftVersionType("snapshot", "1.21.5-pre2"); actual != "pre_release" {
+		t.Fatalf("pre-release classification = %q", actual)
+	}
+	if actual := minecraftVersionType("snapshot", "1.21.5-rc1"); actual != "release_candidate" {
+		t.Fatalf("release-candidate classification = %q", actual)
+	}
 }
 
 func TestNextMinecraftVersionSync(t *testing.T) {

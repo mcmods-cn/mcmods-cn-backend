@@ -17,12 +17,14 @@ type sendDirectMessageRequest struct {
 }
 
 type directConversationSummary struct {
-	ID          string     `json:"id"`
-	PartnerID   string     `json:"partnerId"`
-	Username    string     `json:"username"`
-	LastMessage string     `json:"lastMessage"`
-	LastAt      *time.Time `json:"lastAt,omitempty"`
-	UnreadCount int64      `json:"unreadCount"`
+	ID           string             `json:"id"`
+	PartnerID    string             `json:"partnerId"`
+	Username     string             `json:"username"`
+	AvatarURL    string             `json:"avatarUrl"`
+	OnlineStatus publicOnlineStatus `json:"onlineStatus"`
+	LastMessage  string             `json:"lastMessage"`
+	LastAt       *time.Time         `json:"lastAt,omitempty"`
+	UnreadCount  int64              `json:"unreadCount"`
 }
 
 type directMessageItem struct {
@@ -37,7 +39,9 @@ type directMessageItem struct {
 
 func (s *Server) conversations(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	rows, err := s.db.Query(r.Context(), `select c.public_id,partner.public_id,partner.username,
+	rows, err := s.db.Query(r.Context(), `select c.public_id,partner.public_id,partner.username,partner.avatar_url,
+		partner.show_online_status,exists(select 1 from user_presence_sessions presence
+			where presence.user_id=partner.id and presence.last_active_at>=now()-make_interval(secs=>$2)),
 		coalesce(last_message.body,''),last_message.created_at,
 		(select count(*) from direct_messages unread
 		 where unread.conversation_id=c.id and unread.recipient_id=$1 and unread.read_at is null)
@@ -48,17 +52,26 @@ func (s *Server) conversations(w http.ResponseWriter, r *http.Request) {
 			where message.conversation_id=c.id order by message.id desc limit 1
 		) last_message on true
 		where c.user_low_id=$1 or c.user_high_id=$1
-		order by coalesce(last_message.created_at,c.updated_at) desc,c.id desc`, claims.Subject)
+		order by coalesce(last_message.created_at,c.updated_at) desc,c.id desc`, claims.Subject, int(publicPresenceWindow/time.Second))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取私聊会话失败")
 		return
 	}
 	defer rows.Close()
 	items := make([]directConversationSummary, 0)
+	ossCfg := s.ossConfigFromSettings(r.Context())
 	for rows.Next() {
 		var item directConversationSummary
-		if err = rows.Scan(&item.ID, &item.PartnerID, &item.Username, &item.LastMessage, &item.LastAt, &item.UnreadCount); err != nil {
+		var showOnlineStatus bool
+		var onlineActive bool
+		if err = rows.Scan(&item.ID, &item.PartnerID, &item.Username, &item.AvatarURL, &showOnlineStatus, &onlineActive, &item.LastMessage, &item.LastAt, &item.UnreadCount); err != nil {
 			writeError(w, http.StatusInternalServerError, "读取私聊会话失败")
+			return
+		}
+		item.OnlineStatus = mapPublicOnlineVisibility(showOnlineStatus, onlineActive)
+		item.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.AvatarURL)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate conversation avatar URL")
 			return
 		}
 		items = append(items, item)
@@ -112,14 +125,14 @@ func (s *Server) conversationMessages(w http.ResponseWriter, r *http.Request) {
 	_, _ = s.db.Exec(r.Context(), `update direct_messages set read_at=coalesce(read_at,now())
 		where conversation_id=$1 and recipient_id=$2 and read_at is null`, conversationID, claims.Subject)
 	rows, err := s.db.Query(r.Context(), `select recent.public_id,sender.public_id,recipient.public_id,
-		recent.body,recent.read_at,recent.created_at
+		recent.body,case when recent.sender_id=$2 and not recipient.show_online_status then null else recent.read_at end,recent.created_at
 		from (
 			select public_id,sender_id,recipient_id,body,read_at,created_at,id
 			from direct_messages where conversation_id=$1 order by id desc limit 100
 		) recent
 		join users sender on sender.id=recent.sender_id
 		join users recipient on recipient.id=recent.recipient_id
-		order by recent.id`, conversationID)
+		order by recent.id`, conversationID, claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取私聊消息失败")
 		return
@@ -174,6 +187,8 @@ func (s *Server) sendConversationMessage(w http.ResponseWriter, r *http.Request)
 	active := false
 	_ = s.db.QueryRow(r.Context(), `select exists(select 1 from user_chat_presence
 		where user_id=$1 and conversation_id=$2 and expires_at>now())`, recipientID, conversationID).Scan(&active)
+	var recipientShowsOnline bool
+	_ = s.db.QueryRow(r.Context(), `select show_online_status from users where id=$1`, recipientID).Scan(&recipientShowsOnline)
 	var item directMessageItem
 	item.ConversationID = conversationPublicID
 	err := s.db.QueryRow(r.Context(), `insert into direct_messages(conversation_id,sender_id,recipient_id,body,read_at)
@@ -186,6 +201,9 @@ func (s *Server) sendConversationMessage(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	item.SenderID = claims.PublicSubject
+	if !recipientShowsOnline {
+		item.ReadAt = nil
+	}
 	if err = s.db.QueryRow(r.Context(), `select public_id from users where id=$1`, recipientID).Scan(&item.RecipientID); err != nil {
 		writeError(w, http.StatusInternalServerError, "发送私聊消息失败")
 		return
@@ -205,7 +223,12 @@ func (s *Server) sendConversationMessage(w http.ResponseWriter, r *http.Request)
 		})
 		notificationQueued = err == nil
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"message": item, "notificationQueued": notificationQueued, "suppressed": active})
+	response := map[string]any{"message": item}
+	if recipientShowsOnline {
+		response["notificationQueued"] = notificationQueued
+		response["suppressed"] = active
+	}
+	writeJSON(w, http.StatusCreated, response)
 }
 
 func (s *Server) updateConversationPresence(w http.ResponseWriter, r *http.Request) {

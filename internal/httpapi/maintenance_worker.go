@@ -52,6 +52,9 @@ func (worker *MaintenanceWorker) prune(ctx context.Context) {
 		`delete from yggdrasil_join_sessions where server_id in (
 			select server_id from yggdrasil_join_sessions where expires_at<=now() order by expires_at limit $1
 		)`,
+		`delete from user_presence_sessions where session_hash in (
+			select session_hash from user_presence_sessions where last_active_at<now()-interval '1 day' order by last_active_at limit $1
+		)`,
 	} {
 		for pruneCtx.Err() == nil {
 			command, err := worker.db.Exec(pruneCtx, statement, maintenanceBatchSize)

@@ -39,7 +39,7 @@ type skinAssetRecord struct {
 	BlobHash      string
 	Kind          string
 	Model         string
-	DisplayName   string
+	Name          string
 	Description   string
 	Tags          []string
 	Visibility    string
@@ -59,7 +59,6 @@ type skinAssetCreateRequest struct {
 	Kind          string                    `json:"kind"`
 	Model         string                    `json:"model"`
 	Name          string                    `json:"name"`
-	DisplayName   string                    `json:"displayName"`
 	Description   string                    `json:"description"`
 	Tags          []string                  `json:"tags"`
 	Visibility    string                    `json:"visibility"`
@@ -70,7 +69,6 @@ type skinAssetCreateRequest struct {
 type skinAssetUpdateRequest struct {
 	Model       *string   `json:"model,omitempty"`
 	Name        *string   `json:"name,omitempty"`
-	DisplayName *string   `json:"displayName,omitempty"`
 	Description *string   `json:"description,omitempty"`
 	Tags        *[]string `json:"tags,omitempty"`
 	Visibility  *string   `json:"visibility,omitempty"`
@@ -80,7 +78,7 @@ type skinAssetUpdateRequest struct {
 type skinAssetContentSnapshot struct {
 	PublicID    string   `json:"publicId"`
 	Model       string   `json:"model"`
-	DisplayName string   `json:"displayName"`
+	Name        string   `json:"name"`
 	Description string   `json:"description"`
 	Tags        []string `json:"tags"`
 	Visibility  string   `json:"visibility"`
@@ -88,43 +86,36 @@ type skinAssetContentSnapshot struct {
 
 type skinOwnerResponse struct {
 	ID       string `json:"id"`
-	PublicID string `json:"publicId"`
 	Username string `json:"username"`
 }
 
 type playerProfileResponse struct {
-	PublicID   string                           `json:"publicId"`
-	UserID     string                           `json:"userId"`
-	UUID       string                           `json:"uuid"`
-	Name       string                           `json:"name"`
-	Bio        string                           `json:"bio"`
-	Visibility string                           `json:"visibility"`
-	IsDefault  bool                             `json:"isDefault"`
-	Status     string                           `json:"status"`
-	Textures   map[string]playerTextureResponse `json:"textures"`
-	Skin       *playerTextureResponse           `json:"skin"`
-	Cape       *playerTextureResponse           `json:"cape"`
-	Owner      skinOwnerResponse                `json:"owner"`
-	CreatedAt  time.Time                        `json:"createdAt"`
-	UpdatedAt  time.Time                        `json:"updatedAt"`
+	PublicID   string                 `json:"publicId"`
+	UUID       string                 `json:"uuid"`
+	Name       string                 `json:"name"`
+	Bio        string                 `json:"bio"`
+	Visibility string                 `json:"visibility"`
+	IsDefault  bool                   `json:"isDefault"`
+	Status     string                 `json:"status"`
+	Skin       *playerTextureResponse `json:"skin"`
+	Cape       *playerTextureResponse `json:"cape"`
+	Owner      skinOwnerResponse      `json:"owner"`
+	CreatedAt  time.Time              `json:"createdAt"`
+	UpdatedAt  time.Time              `json:"updatedAt"`
 }
 
 type playerTextureResponse struct {
 	OwnerInternalID int64             `json:"-"`
 	PublicID        string            `json:"publicId"`
-	AssetPublicID   string            `json:"assetPublicId"`
 	Kind            string            `json:"kind"`
 	Model           string            `json:"model"`
 	Name            string            `json:"name"`
-	DisplayName     string            `json:"displayName"`
 	Description     string            `json:"description"`
 	Tags            []string          `json:"tags"`
 	Visibility      string            `json:"visibility"`
 	ReviewStatus    string            `json:"reviewStatus"`
 	TextureHash     string            `json:"textureHash"`
-	Hash            string            `json:"hash"`
 	TextureURL      string            `json:"textureUrl"`
-	URL             string            `json:"url"`
 	Owner           skinOwnerResponse `json:"owner"`
 	Downloads       int64             `json:"downloads"`
 	CanEdit         bool              `json:"canEdit"`
@@ -149,11 +140,8 @@ type playerProfileUpdateRequest struct {
 }
 
 type playerTextureRequest struct {
-	Kind          string          `json:"kind"`
-	AssetPublicID string          `json:"assetPublicId"`
-	Model         string          `json:"model"`
-	SkinPublicID  json.RawMessage `json:"skinPublicId"`
-	CapePublicID  json.RawMessage `json:"capePublicId"`
+	SkinPublicID json.RawMessage `json:"skinPublicId"`
+	CapePublicID json.RawMessage `json:"capePublicId"`
 }
 
 type playerTextureUpdate struct {
@@ -224,7 +212,6 @@ func (s *Server) skinService(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":              serviceEnabled,
 		"name":                 serverName,
-		"serverName":           serverName,
 		"yggdrasilApiRoot":     apiRoot,
 		"textureBaseUrl":       textureBaseURL,
 		"textureUploadEnabled": true,
@@ -415,7 +402,7 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 	err = tx.QueryRow(r.Context(), `insert into skin_assets(
 		owner_id,blob_hash,kind,model,display_name,description,tags,visibility,review_status,status)
 		values($1,$2,$3,$4,$5,$6,$7,$8,'approved','active') returning id,public_id`, claims.Subject,
-		blob.Hash, request.Kind, request.Model, request.DisplayName, request.Description, request.Tags, request.Visibility).
+		blob.Hash, request.Kind, request.Model, request.Name, request.Description, request.Tags, request.Visibility).
 		Scan(&assetID, &publicID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record skin asset")
@@ -509,7 +496,7 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		visibility,review_status,status,downloads,created_at,updated_at,published_revision_id
 		from skin_assets where public_id=$1 for update`, publicID).
 		Scan(&record.ID, &record.PublicID, &record.OwnerID, &record.BlobHash, &record.Kind, &record.Model,
-			&record.DisplayName, &record.Description, &record.Tags, &record.Visibility, &record.ReviewStatus,
+			&record.Name, &record.Description, &record.Tags, &record.Visibility, &record.ReviewStatus,
 			&record.Status, &record.Downloads, &record.CreatedAt, &record.UpdatedAt, &baseRevisionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "skin asset was not found")
@@ -532,7 +519,7 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		return
 	}
 	snapshot := skinAssetContentSnapshot{
-		PublicID: publicID, Model: record.Model, DisplayName: record.DisplayName,
+		PublicID: publicID, Model: record.Model, Name: record.Name,
 		Description: record.Description, Tags: record.Tags, Visibility: record.Visibility,
 	}
 	snapshotRaw, err := json.Marshal(snapshot)
@@ -553,7 +540,7 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		EntityType: "skin", EntityID: record.ID,
 		AggregateType: "skin", AggregateKey: publicID, BaseRevision: baseRevisionID, Snapshot: snapshotRaw,
 		Reason: reason, ActorID: claims.Subject, Status: reviewStatus, Source: "skin_metadata",
-		Metadata: map[string]any{"skinId": publicID, "name": record.DisplayName, "operation": "edit"}, Request: r,
+		Metadata: map[string]any{"skinId": publicID, "name": record.Name, "operation": "edit"}, Request: r,
 	})
 	if err != nil {
 		if errors.Is(err, errReviewInProgress) {
@@ -617,7 +604,7 @@ func applySkinAssetSnapshotTx(ctx context.Context, tx pgx.Tx, assetID, ownerID, 
 	}
 	command, err := tx.Exec(ctx, `update skin_assets set model=$2,display_name=$3,description=$4,tags=$5,
 		visibility=$6,review_status='approved',published_revision_id=$7,updated_at=now() where id=$1 and status='active'`,
-		assetID, snapshot.Model, snapshot.DisplayName, snapshot.Description, snapshot.Tags, snapshot.Visibility, revisionID)
+		assetID, snapshot.Model, snapshot.Name, snapshot.Description, snapshot.Tags, snapshot.Visibility, revisionID)
 	if err != nil {
 		return err
 	}
@@ -1250,28 +1237,10 @@ func parsePlayerTextureUpdates(request playerTextureRequest) ([]playerTextureUpd
 		}
 		updates = append(updates, playerTextureUpdate{Kind: value.kind, AssetPublicID: assetPublicID})
 	}
-	if len(updates) > 0 {
-		if strings.TrimSpace(request.Kind) != "" || strings.TrimSpace(request.AssetPublicID) != "" || strings.TrimSpace(request.Model) != "" {
-			return nil, fmt.Errorf("do not mix skinPublicId/capePublicId with the legacy texture fields")
-		}
-		return updates, nil
+	if len(updates) == 0 {
+		return nil, fmt.Errorf("skinPublicId or capePublicId is required")
 	}
-	kind, err := normalizeMinecraftTextureKind(request.Kind)
-	if err != nil {
-		return nil, err
-	}
-	assetPublicID := strings.TrimSpace(request.AssetPublicID)
-	if assetPublicID != "" {
-		assetPublicID = normalizedSkinPublicID(assetPublicID)
-		if assetPublicID == "" {
-			return nil, fmt.Errorf("assetPublicId is invalid")
-		}
-	}
-	model := strings.ToLower(strings.TrimSpace(request.Model))
-	if model != "" && model != "default" && model != "slim" {
-		return nil, fmt.Errorf("model must be default or slim")
-	}
-	return []playerTextureUpdate{{Kind: kind, AssetPublicID: assetPublicID, Model: model}}, nil
+	return updates, nil
 }
 
 func (s *Server) publicUserPlayerProfiles(w http.ResponseWriter, r *http.Request) {
@@ -1306,7 +1275,7 @@ func (s *Server) playerProfileDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "player profile was not found")
 		return
 	}
-	if profile.Visibility == "private" && profile.UserID != claims.PublicSubject && !isSkinAdmin(claims) {
+	if profile.Visibility == "private" && profile.Owner.ID != claims.PublicSubject && !isSkinAdmin(claims) {
 		writeError(w, http.StatusNotFound, "player profile was not found")
 		return
 	}
@@ -1515,7 +1484,7 @@ const skinAssetSelectSQL = `select asset.id,asset.public_id,asset.owner_id,owner
 func scanSkinAsset(row skinRowScanner) (skinAssetRecord, error) {
 	var record skinAssetRecord
 	err := row.Scan(&record.ID, &record.PublicID, &record.OwnerID, &record.OwnerPublicID, &record.OwnerName,
-		&record.BlobHash, &record.Kind, &record.Model, &record.DisplayName, &record.Description, &record.Tags,
+		&record.BlobHash, &record.Kind, &record.Model, &record.Name, &record.Description, &record.Tags,
 		&record.Visibility, &record.ReviewStatus, &record.Status, &record.Downloads, &record.Width, &record.Height,
 		&record.SizeBytes, &record.CreatedAt, &record.UpdatedAt, &record.InWardrobe)
 	return record, err
@@ -1594,14 +1563,14 @@ func skinAssetJSON(record skinAssetRecord, viewerID int64) map[string]any {
 	canEdit := viewerID > 0 && viewerID == record.OwnerID
 	canUse := record.Status == "active" && (canEdit || (record.ReviewStatus == "approved" && record.Visibility != "private"))
 	return map[string]any{
-		"publicId": record.PublicID, "ownerId": record.OwnerPublicID,
-		"owner": map[string]any{"id": record.OwnerPublicID, "publicId": record.OwnerPublicID, "username": record.OwnerName},
-		"hash":  record.BlobHash, "textureHash": record.BlobHash, "kind": record.Kind, "model": record.Model,
-		"name": record.DisplayName, "displayName": record.DisplayName, "description": record.Description, "tags": record.Tags,
+		"publicId":    record.PublicID,
+		"owner":       map[string]any{"id": record.OwnerPublicID, "username": record.OwnerName},
+		"textureHash": record.BlobHash, "kind": record.Kind, "model": record.Model,
+		"name": record.Name, "description": record.Description, "tags": record.Tags,
 		"visibility": record.Visibility, "reviewStatus": record.ReviewStatus, "status": record.Status,
 		"downloads": record.Downloads, "width": record.Width, "height": record.Height, "sizeBytes": record.SizeBytes,
 		"textureUrl": "/api/yggdrasil/textures/" + record.BlobHash,
-		"inWardrobe": record.InWardrobe, "isOwner": canEdit, "canEdit": canEdit, "canUse": canUse,
+		"inWardrobe": record.InWardrobe, "canEdit": canEdit, "canUse": canUse,
 		"createdAt": record.CreatedAt, "updatedAt": record.UpdatedAt,
 	}
 }
@@ -1638,22 +1607,15 @@ func normalizeSkinAssetCreate(request *skinAssetCreateRequest) error {
 		return fmt.Errorf("model must be default or slim")
 	}
 	request.Name = strings.TrimSpace(request.Name)
-	request.DisplayName = strings.TrimSpace(request.DisplayName)
-	if request.Name != "" && request.DisplayName != "" && request.Name != request.DisplayName {
-		return fmt.Errorf("name and displayName must match when both are provided")
-	}
-	if request.Name != "" {
-		request.DisplayName = request.Name
-	}
-	if request.DisplayName == "" {
+	if request.Name == "" {
 		if request.Kind == "cape" {
-			request.DisplayName = "Cape"
+			request.Name = "Cape"
 		} else {
-			request.DisplayName = "Skin"
+			request.Name = "Skin"
 		}
 	}
-	if len([]rune(request.DisplayName)) > 80 {
-		return fmt.Errorf("displayName is too long")
+	if len([]rune(request.Name)) > 80 {
+		return fmt.Errorf("name is too long")
 	}
 	request.Description = strings.TrimSpace(request.Description)
 	if len([]rune(request.Description)) > 1000 {
@@ -1664,7 +1626,7 @@ func normalizeSkinAssetCreate(request *skinAssetCreateRequest) error {
 		return fmt.Errorf("localized skin content is invalid")
 	}
 	if len(request.Localizations) == 0 {
-		request.Localizations = []catalogLocalizationEdit{{Locale: request.DefaultLocale, Name: request.DisplayName, Summary: request.Description}}
+		request.Localizations = []catalogLocalizationEdit{{Locale: request.DefaultLocale, Name: request.Name, Summary: request.Description}}
 		request.DefaultLocale, request.Localizations, err = normalizeCatalogLocalizations(request.DefaultLocale, request.Localizations)
 	}
 	if err != nil || requireCatalogCreateDefaultLocalization(request.DefaultLocale, request.Localizations) != nil {
@@ -1672,7 +1634,6 @@ func normalizeSkinAssetCreate(request *skinAssetCreateRequest) error {
 	}
 	for _, localization := range request.Localizations {
 		if localization.Locale == request.DefaultLocale {
-			request.DisplayName = localization.Name
 			request.Name = localization.Name
 			request.Description = localization.Summary
 			break
@@ -1687,12 +1648,6 @@ func normalizeSkinAssetCreate(request *skinAssetCreateRequest) error {
 }
 
 func applySkinAssetUpdate(record *skinAssetRecord, request skinAssetUpdateRequest) error {
-	if request.Name != nil {
-		if request.DisplayName != nil && strings.TrimSpace(*request.Name) != strings.TrimSpace(*request.DisplayName) {
-			return fmt.Errorf("name and displayName must match when both are provided")
-		}
-		request.DisplayName = request.Name
-	}
 	if request.Model != nil {
 		model := strings.ToLower(strings.TrimSpace(*request.Model))
 		if record.Kind == "cape" {
@@ -1703,12 +1658,12 @@ func applySkinAssetUpdate(record *skinAssetRecord, request skinAssetUpdateReques
 		}
 		record.Model = model
 	}
-	if request.DisplayName != nil {
-		value := strings.TrimSpace(*request.DisplayName)
+	if request.Name != nil {
+		value := strings.TrimSpace(*request.Name)
 		if value == "" || len([]rune(value)) > 80 {
-			return fmt.Errorf("displayName must contain between 1 and 80 characters")
+			return fmt.Errorf("name must contain between 1 and 80 characters")
 		}
-		record.DisplayName = value
+		record.Name = value
 	}
 	if request.Description != nil {
 		value := strings.TrimSpace(*request.Description)
@@ -1886,9 +1841,9 @@ func ensureYggdrasilAccountTx(ctx context.Context, tx pgx.Tx, userID int64) (str
 }
 
 func (s *Server) loadPlayerProfiles(ctx context.Context, userID int64, claims security.Claims, includePrivate bool) ([]playerProfileResponse, error) {
-	rows, err := s.db.Query(ctx, `select profile.public_id,owner.public_id,profile.uuid::text,profile.name,profile.bio,
+	rows, err := s.db.Query(ctx, `select profile.public_id,profile.uuid::text,profile.name,profile.bio,
 		profile.visibility,profile.is_default,profile.status,profile.created_at,profile.updated_at,
-		owner.public_id,owner.public_id,owner.username
+		owner.public_id,owner.username
 		from player_profiles profile join users owner on owner.id=profile.user_id
 		where profile.user_id=$1 and profile.status='active' and ($2 or profile.visibility='public')
 		order by profile.is_default desc,profile.created_at,profile.id`, userID, includePrivate)
@@ -1899,12 +1854,11 @@ func (s *Server) loadPlayerProfiles(ctx context.Context, userID int64, claims se
 	profiles := make([]playerProfileResponse, 0)
 	for rows.Next() {
 		var profile playerProfileResponse
-		if err = rows.Scan(&profile.PublicID, &profile.UserID, &profile.UUID, &profile.Name, &profile.Bio,
+		if err = rows.Scan(&profile.PublicID, &profile.UUID, &profile.Name, &profile.Bio,
 			&profile.Visibility, &profile.IsDefault, &profile.Status, &profile.CreatedAt, &profile.UpdatedAt,
-			&profile.Owner.ID, &profile.Owner.PublicID, &profile.Owner.Username); err != nil {
+			&profile.Owner.ID, &profile.Owner.Username); err != nil {
 			return nil, err
 		}
-		profile.Textures = map[string]playerTextureResponse{}
 		profiles = append(profiles, profile)
 	}
 	if err = rows.Err(); err != nil {
@@ -1920,17 +1874,16 @@ func (s *Server) loadPlayerProfiles(ctx context.Context, userID int64, claims se
 
 func (s *Server) loadPlayerProfileByPublicIDForViewer(ctx context.Context, publicID string, viewerID int64) (playerProfileResponse, error) {
 	var profile playerProfileResponse
-	err := s.db.QueryRow(ctx, `select profile.public_id,owner.public_id,profile.uuid::text,profile.name,profile.bio,
+	err := s.db.QueryRow(ctx, `select profile.public_id,profile.uuid::text,profile.name,profile.bio,
 		profile.visibility,profile.is_default,profile.status,profile.created_at,profile.updated_at,
-		owner.public_id,owner.public_id,owner.username
+		owner.public_id,owner.username
 		from player_profiles profile join users owner on owner.id=profile.user_id where profile.public_id=$1`, publicID).
-		Scan(&profile.PublicID, &profile.UserID, &profile.UUID, &profile.Name, &profile.Bio, &profile.Visibility,
+		Scan(&profile.PublicID, &profile.UUID, &profile.Name, &profile.Bio, &profile.Visibility,
 			&profile.IsDefault, &profile.Status, &profile.CreatedAt, &profile.UpdatedAt,
-			&profile.Owner.ID, &profile.Owner.PublicID, &profile.Owner.Username)
+			&profile.Owner.ID, &profile.Owner.Username)
 	if err != nil {
 		return profile, err
 	}
-	profile.Textures = map[string]playerTextureResponse{}
 	return profile, s.loadPlayerTextures(ctx, &profile, viewerID)
 }
 
@@ -1956,16 +1909,10 @@ func (s *Server) loadPlayerTextures(ctx context.Context, profile *playerProfileR
 			&texture.Owner.Username, &texture.InWardrobe); err != nil {
 			return err
 		}
-		texture.AssetPublicID = texture.PublicID
-		texture.DisplayName = texture.Name
-		texture.Hash = texture.TextureHash
 		texture.TextureURL = "/api/yggdrasil/textures/" + texture.TextureHash
-		texture.URL = texture.TextureURL
-		texture.Owner.PublicID = texture.Owner.ID
 		texture.CanEdit = viewerID > 0 && viewerID == texture.OwnerInternalID
 		texture.CanUse = assetStatus == "active" && (texture.CanEdit ||
 			(texture.ReviewStatus == "approved" && texture.Visibility != "private"))
-		profile.Textures[texture.Kind] = texture
 		textureCopy := texture
 		if texture.Kind == "skin" {
 			profile.Skin = &textureCopy

@@ -1,0 +1,44 @@
+{
+  "generatedAt": "2026-08-15T06:22:53.692Z",
+  "startedAt": "2026-08-15T06:21:53.219Z",
+  "baseURL": "http://127.0.0.1:8080",
+  "scenario": "catalogs",
+  "stages": [
+    {
+      "concurrency": 20,
+      "seconds": 60
+    }
+  ],
+  "elapsedSeconds": 60.47,
+  "requests": 3319,
+  "success": 3319,
+  "clientErrors": 0,
+  "serverErrors": 0,
+  "networkErrors": 0,
+  "errorRate": 0,
+  "requestsPerSecond": 54.89,
+  "latencyMS": {
+    "average": 362.77,
+    "p50": 271.1,
+    "p90": 671.4,
+    "p95": 775.57,
+    "p99": 1280.11,
+    "maximum": 1898.14
+  },
+  "statuses": {
+    "200": 3319
+  },
+  "requestsByScenario": {
+    "maps-updated": 552,
+    "mods-heat": 552,
+    "mods-version-heat": 552,
+    "plugins-heat": 553,
+    "servers-heat": 554,
+    "tutorials": 556
+  },
+  "notes": [
+    "This client does not infer backend CPU, memory, DB connections, locks, or cache hit rate; capture those from the test environment telemetry.",
+    "The script never calls the destructive cleanup execute endpoint. Activity cleanup load covers preview only.",
+    "Comment mutations were disabled (safe default)."
+  ]
+}

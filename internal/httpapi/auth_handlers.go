@@ -439,6 +439,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	_, _ = s.db.Exec(r.Context(), `update auth_sessions set revoked_at=coalesce(revoked_at,now())
 		where session_hash=$1 and user_id=$2`, security.SessionFingerprint(claims.SessionID), claims.Subject)
+	_, _ = s.db.Exec(r.Context(), `delete from user_presence_sessions where session_hash=$1 and user_id=$2`, security.SessionFingerprint(claims.SessionID), claims.Subject)
 	s.clearAuthSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

@@ -197,7 +197,7 @@ func normalizeYggdrasilConfig(cfg *config.YggdrasilConfig, environment string) e
 	cfg.ServerName = strings.TrimSpace(cfg.ServerName)
 	cfg.PrivateKeyBase64 = strings.TrimSpace(cfg.PrivateKeyBase64)
 	if cfg.ServerName == "" || utf8.RuneCountInString(cfg.ServerName) > 80 {
-		return errors.New("Yggdrasil server name must contain 1 to 80 characters")
+		return errors.New("yggdrasil server name must contain 1 to 80 characters")
 	}
 	proxies, err := normalizeYggdrasilProxyCIDRs(cfg.TrustedProxyCIDRs)
 	if err != nil {
@@ -219,7 +219,7 @@ func normalizeYggdrasilConfig(cfg *config.YggdrasilConfig, environment string) e
 			return err
 		}
 	} else if cfg.Enabled && production {
-		return errors.New("Yggdrasil signing key is required in production")
+		return errors.New("yggdrasil signing key is required in production")
 	}
 	return nil
 }

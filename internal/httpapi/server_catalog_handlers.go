@@ -419,8 +419,8 @@ func (s *Server) updateMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "更新服务器失败")
 		return
 	}
-	annotateActivityID(r, activity.ActionEdit, activity.ObjectServer, "minecraft_server", serverID,
-		activity.AddedMarkdownBytes(previousBody, request.BodyMarkdown))
+	addedBytes, deletedBytes := activity.MarkdownDeltaBytes(previousBody, request.BodyMarkdown)
+	annotateActivityIDDelta(r, activity.ActionEdit, activity.ObjectServer, "minecraft_server", serverID, addedBytes, deletedBytes)
 	writeJSON(w, http.StatusOK, map[string]any{"id": publicID})
 }
 
@@ -676,22 +676,34 @@ func insertMinecraftServerMods(ctx context.Context, tx pgx.Tx, serverID int64, m
 }
 
 func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) {
-	query := strings.TrimSpace(r.URL.Query().Get("q"))
-	tag := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("tag")))
-	language := strings.TrimSpace(r.URL.Query().Get("language"))
-	version := strings.TrimSpace(r.URL.Query().Get("version"))
+	query, validQuery := parseCatalogQuery(r.URL.Query().Get("q"))
+	tag, validTag := parseCatalogScalar(strings.ToLower(r.URL.Query().Get("tag")))
+	language, validLanguage := parseCatalogScalar(r.URL.Query().Get("language"))
+	version, validVersion := parseCatalogScalar(r.URL.Query().Get("version"))
 	modFilters := serverModFilters(r.URL.Query().Get("mods"))
-	modded := strings.TrimSpace(r.URL.Query().Get("modded"))
-	online := strings.TrimSpace(r.URL.Query().Get("online"))
-	whitelist := strings.TrimSpace(r.URL.Query().Get("whitelist"))
-	onlineMode := strings.TrimSpace(r.URL.Query().Get("onlineMode"))
+	modded, validModded := parseCatalogBoolean(r.URL.Query().Get("modded"))
+	online, validOnline := parseCatalogBoolean(r.URL.Query().Get("online"))
+	whitelist, validWhitelist := parseCatalogBoolean(r.URL.Query().Get("whitelist"))
+	onlineMode, validOnlineMode := parseCatalogBoolean(r.URL.Query().Get("onlineMode"))
+	if !validQuery || !validTag || !validLanguage || !validVersion || !validModded || !validOnline || !validWhitelist || !validOnlineMode {
+		writeError(w, http.StatusBadRequest, "invalid server catalog filter")
+		return
+	}
+	sort, validSort := parseCatalogSort(r.URL.Query().Get("sort"))
+	if !validSort {
+		writeError(w, http.StatusBadRequest, "invalid catalog sort")
+		return
+	}
 	limit := boundedLimit(r.URL.Query().Get("limit"), 20, 60)
 	page := 1
 	if parsed, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && parsed > 0 {
 		page = min(parsed, 10000)
 	}
-	indexed := s.searchServerPage(r.Context(), query, tag, language, version, modFilters,
-		modded, online, whitelist, onlineMode, limit, (page-1)*limit)
+	indexed := indexedSearchPage{}
+	if catalogSortUsesSearchIndex(sort) {
+		indexed = s.searchServerPage(r.Context(), query, tag, language, version, modFilters,
+			modded, online, whitelist, onlineMode, limit, (page-1)*limit)
+	}
 	databaseOffset := (page - 1) * limit
 	if indexed.Used {
 		databaseOffset = 0
@@ -770,9 +782,9 @@ func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	listArgs := append(append([]any{}, args...), limit, databaseOffset)
-	orderSQL := "coalesce(popularity.heat_score,0) desc,server.last_online desc,server.updated_at desc,server.id desc"
-	if indexed.Used {
-		orderSQL = fmt.Sprintf("array_position($%d::bigint[],server.id)", indexedPosition)
+	orderSQL := catalogOrderSQL(sort, indexed.Used, indexedPosition, "server.updated_at", "server.id", "server.name")
+	if !indexed.Used && (sort == catalogSortHeat || sort == catalogSortRelevance) {
+		orderSQL = "coalesce(popularity.heat_score,0) desc,server.last_online desc,server.updated_at desc,server.id desc"
 	}
 	rows, err := s.db.Query(r.Context(), `select server.public_id,server.name,server.short_description,
 		server.icon_data_uri,server.modded,server.loader,server.languages,server.primary_tag,

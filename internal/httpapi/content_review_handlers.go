@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -580,52 +579,6 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status})
 		return
 	}
-	if aggregateType == "catalog_tag" || aggregateType == "catalog_recipe_type" || aggregateType == "catalog_recipe" {
-		if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext($1))`, aggregateType+":"+aggregateKey); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to lock catalog content")
-			return
-		}
-		publishedRevisionID, publishedErr := catalogPublishedRevisionTx(r.Context(), tx, aggregateType, aggregateKey)
-		if publishedErr != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load published catalog content")
-			return
-		}
-		claims := currentClaims(r)
-		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
-			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to record catalog conflict")
-				return
-			}
-			if err = tx.Commit(r.Context()); err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to commit catalog conflict")
-				return
-			}
-			writeError(w, http.StatusConflict, "catalog content changed after this request was submitted")
-			return
-		}
-		if request.Status == "approved" {
-			if err = publishGlobalCatalogSnapshotTx(r.Context(), tx, revisionID, aggregateType, snapshotRaw, claims.Subject); err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to publish catalog content")
-				return
-			}
-			if _, err = tx.Exec(r.Context(), `update catalog_entities set published_revision_id=$2,updated_at=now() where public_id=$1`, aggregateKey, revisionID); err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to update published catalog revision")
-				return
-			}
-		}
-		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to record catalog review")
-			return
-		}
-		if err = tx.Commit(r.Context()); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to commit catalog review")
-			return
-		}
-		s.cache.InvalidatePrefix(r.Context(), "global-tags:")
-		s.cache.InvalidatePrefix(r.Context(), "recipe-types:")
-		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status})
-		return
-	}
 	if aggregateType == "blueprint" {
 		var snapshot blueprintContentSnapshot
 		if err = json.Unmarshal(snapshotRaw, &snapshot); err != nil {
@@ -730,8 +683,8 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		if request.Status == "rejected" {
 			code = "review_rejected"
 		}
-		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": snapshot.DisplayName, "reason": request.Note}, map[string]any{
-			"skinId": aggregateKey, "targetLabel": snapshot.DisplayName, "url": "/skins/" + aggregateKey,
+		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": snapshot.Name, "reason": request.Note}, map[string]any{
+			"skinId": aggregateKey, "targetLabel": snapshot.Name, "url": "/skins/" + aggregateKey,
 		})
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionID, "status": request.Status})
 		return
@@ -791,31 +744,4 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status})
-}
-
-func catalogPublishedRevisionTx(ctx context.Context, tx pgx.Tx, aggregateType, entityID string) (*int64, error) {
-	var revisionID *int64
-	var internalID int64
-	if err := tx.QueryRow(ctx, `select id from catalog_entities where public_id=$1`, entityID).Scan(&internalID); err != nil {
-		return nil, err
-	}
-	var err error
-	switch aggregateType {
-	case "catalog_tag":
-		err = tx.QueryRow(ctx, `select max(revision_id) from (
-			select published_revision_id revision_id from knowledge_pages where entity_id=$1
-			union all select published_revision_id from tag_member_overrides where tag_id=$1) revisions`, internalID).Scan(&revisionID)
-	case "catalog_recipe_type":
-		err = tx.QueryRow(ctx, `select max(revision_id) from (
-			select published_revision_id revision_id from knowledge_pages where entity_id=$1
-			union all select published_revision_id from recipe_type_catalyst_overrides where recipe_type_id=$1) revisions`, internalID).Scan(&revisionID)
-	case "catalog_recipe":
-		err = tx.QueryRow(ctx, `select published_revision_id from recipe_content_overrides where recipe_id=$1`, internalID).Scan(&revisionID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-	default:
-		return nil, errors.New("unsupported global catalog content")
-	}
-	return revisionID, err
 }

@@ -150,7 +150,7 @@ func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEd
 		return result, err
 	}
 	skipRequestActivity(r)
-	result = catalogEditResult{PublicID: snapshot.PublicID, ObjectPublicID: snapshot.PublicID, Operation: snapshot.Operation, RevisionID: created.RevisionPublicID,
+	result = catalogEditResult{ObjectPublicID: snapshot.PublicID, Operation: snapshot.Operation, RevisionID: created.RevisionPublicID,
 		ChangeRequestID: created.ChangeRequestPublicID, ReviewStatus: reviewStatus, ActivityEventID: activityEventID}
 	return result, nil
 }

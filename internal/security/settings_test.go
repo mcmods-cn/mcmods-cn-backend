@@ -24,13 +24,8 @@ func TestEncryptedSettingRoundTrip(t *testing.T) {
 	}
 }
 
-func TestDecryptSettingAcceptsLegacyJSON(t *testing.T) {
-	legacy := []byte(`{"enabled":true}`)
-	decrypted, err := DecryptSetting("0123456789abcdef0123456789abcdef", legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(decrypted, legacy) {
-		t.Fatalf("legacy setting changed: %s", decrypted)
+func TestDecryptSettingRejectsPlaintextJSON(t *testing.T) {
+	if _, err := DecryptSetting("0123456789abcdef0123456789abcdef", []byte(`{"enabled":true}`)); err == nil {
+		t.Fatal("expected plaintext settings to be rejected")
 	}
 }

@@ -105,16 +105,83 @@ type modpackListResponse struct {
 	Total int               `json:"total"`
 }
 
+var allowedModpackCategories = stringSet("technology", "magic", "adventure", "building", "map", "quests", "optimization", "hardcore", "casual", "large", "lightweight", "story", "kitchen_sink", "skyblock", "pvp", "chinese")
+
+const publicModpackCatalogFilter = `where (pack.review_status='approved' or pack.created_by=$1)
+	and (($3 and pack.id=any($4::bigint[])) or (not $3 and ($2='' or pack.slug ilike '%%'||$2||'%%'
+		or pack.public_id ilike '%%'||$2||'%%' or pack.primary_name ilike '%%'||$2||'%%'
+		or pack.secondary_name ilike '%%'||$2||'%%' or pack.summary ilike '%%'||$2||'%%'
+		or $2=any(pack.search_keywords)
+		or exists(select 1 from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
+			where binding.subject_type='modpack' and binding.subject_id=pack.id and creator.name ilike '%%'||$2||'%%'))))
+	and (cardinality($5::text[])=0 or (
+		$9='all' and not exists(select 1 from unnest($5::text[]) requested(value) where not exists(
+			select 1 from modpack_loader_compatibilities compatibility where compatibility.modpack_id=pack.id and compatibility.minecraft_version=requested.value))
+		or $9<>'all' and exists(select 1 from modpack_loader_compatibilities compatibility
+			where compatibility.modpack_id=pack.id and compatibility.minecraft_version=any($5::text[]))))
+	and (cardinality($6::text[])=0 or exists(select 1 from modpack_loader_compatibilities compatibility
+		where compatibility.modpack_id=pack.id and compatibility.loader=any($6::text[])))
+	and (cardinality($7::text[])=0 or pack.primary_category=any($7::text[]))
+	and (cardinality($8::text[])=0 or not exists(select 1 from unnest($8::text[]) requested(value) where not exists(
+		select 1 from modpack_tags tag where tag.modpack_id=pack.id and tag.tag=requested.value)))
+	and (cardinality($10::text[])=0 or pack.environment=any($10::text[]))
+	and (cardinality($11::text[])=0 or pack.official_status=any($11::text[]))
+	and (cardinality($12::text[])=0 or pack.source_status=any($12::text[]))
+	and (cardinality($13::text[])=0 or pack.license=any($13::text[]))
+	and (cardinality($14::text[])=0 or not exists(select 1 from unnest($14::text[]) requested(value) where not case requested.value
+		when 'gallery' then exists(select 1 from modpack_gallery_images gallery where gallery.modpack_id=pack.id)
+		when 'downloads' then true
+		when 'reviewed' then pack.review_status='approved'
+		else false end))
+	and ($15::integer=0 or $15>0 and pack.updated_at>=now()-make_interval(days=>$15)
+		or $15<0 and pack.updated_at<now()-make_interval(days=>abs($15)))`
+
 func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		s.createModpack(w, r)
 		return
 	}
 	claims := currentClaims(r)
-	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	query, validQuery := parseCatalogQuery(r.URL.Query().Get("q"))
+	versions, validVersions := parseCatalogList(r.URL.Query().Get("version"), 20)
+	loaders, validLoaders := parseCatalogList(r.URL.Query().Get("loader"), 20)
+	primaryCategories, validPrimary := parseCatalogList(r.URL.Query().Get("primary"), 1)
+	tags, validTags := parseCatalogList(r.URL.Query().Get("tag"), 20)
+	environments, validEnvironments := parseCatalogList(r.URL.Query().Get("environment"), 10)
+	statuses, validStatuses := parseCatalogList(r.URL.Query().Get("status"), 10)
+	sources, validSources := parseCatalogList(r.URL.Query().Get("source"), 10)
+	licenses, validLicenses := parseCatalogList(r.URL.Query().Get("license"), 20)
+	features, validFeatures := parseCatalogList(r.URL.Query().Get("feature"), 20)
+	updatedDays, validUpdated := parseCatalogUpdatedRange(r.URL.Query().Get("updated"))
+	if !validQuery || !validVersions || !validLoaders || !validPrimary || !validTags || !validEnvironments ||
+		!validStatuses || !validSources || !validLicenses || !validFeatures || !validCatalogFeatures(features) || !validUpdated ||
+		!everyCatalogValueAllowed(primaryCategories, allowedModpackCategories) || !everyCatalogValueAllowed(tags, allowedModpackCategories) ||
+		!everyCatalogValueAllowed(environments, stringSet("clientOnly", "serverOnly", "bothRequired")) ||
+		!everyCatalogValueAllowed(statuses, allowedModStatuses) || !everyCatalogValueAllowed(sources, allowedModSourceStatuses) ||
+		!everyCatalogValueAllowed(licenses, allowedModLicenses) {
+		writeError(w, http.StatusBadRequest, "invalid catalog filter")
+		return
+	}
+	versionMode := strings.TrimSpace(r.URL.Query().Get("versionMode"))
+	if versionMode == "" {
+		versionMode = "any"
+	}
+	if versionMode != "any" && versionMode != "all" {
+		writeError(w, http.StatusBadRequest, "invalid version mode")
+		return
+	}
+	sort, validSort := parseCatalogSort(r.URL.Query().Get("sort"))
+	if !validSort {
+		writeError(w, http.StatusBadRequest, "invalid catalog sort")
+		return
+	}
 	limit := boundedLimit(r.URL.Query().Get("limit"), 24, 100)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
-	indexed := s.searchProjectPage(r.Context(), query, "modpack", "", "", "", claims, limit, offset)
+	indexed := indexedSearchPage{}
+	filtered := len(versions)+len(loaders)+len(primaryCategories)+len(tags)+len(environments)+len(statuses)+len(sources)+len(licenses)+len(features) > 0 || updatedDays != 0
+	if catalogSortUsesSearchIndex(sort) && !filtered {
+		indexed = s.searchProjectPage(r.Context(), query, "modpack", "", "", "", claims, limit, offset)
+	}
 	databaseOffset := offset
 	if indexed.Used {
 		databaseOffset = 0
@@ -122,17 +189,13 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 	var total int
 	if indexed.Used {
 		total = indexed.Total
-	} else if err := s.db.QueryRow(r.Context(), `select count(*) from modpacks pack
-		where (pack.review_status='approved' or pack.created_by=$1)
-		and ($2='' or pack.slug ilike '%%'||$2||'%%' or pack.public_id ilike '%%'||$2||'%%'
-			or pack.primary_name ilike '%%'||$2||'%%' or pack.secondary_name ilike '%%'||$2||'%%'
-			or pack.summary ilike '%%'||$2||'%%' or $2=any(pack.search_keywords)
-			or exists(select 1 from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
-				where binding.subject_type='modpack' and binding.subject_id=pack.id and creator.name ilike '%%'||$2||'%%'))`,
-		claims.Subject, query).Scan(&total); err != nil {
+	} else if err := s.db.QueryRow(r.Context(), `select count(*) from modpacks pack `+publicModpackCatalogFilter,
+		claims.Subject, query, false, []int64{}, versions, loaders, primaryCategories, tags, versionMode,
+		environments, statuses, sources, licenses, features, updatedDays).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count modpacks")
 		return
 	}
+	orderSQL := catalogOrderSQL(sort, indexed.Used, 4, "pack.updated_at", "pack.id", "pack.primary_name")
 	rows, err := s.db.Query(r.Context(), `select pack.id,pack.public_id,pack.slug,pack.primary_name,pack.secondary_name,
 		pack.abbreviation,pack.summary,pack.default_locale,pack.environment,pack.primary_category,pack.pack_type,
 		pack.packaging_method,pack.official_status,
@@ -143,16 +206,10 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 		left join content_revisions revision on revision.id=pack.published_revision_id
 		left join public_routes popularity_route on popularity_route.entity_type='modpack' and popularity_route.internal_id=pack.id
 		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
-		where (pack.review_status='approved' or pack.created_by=$1)
-		and (($3 and pack.id=any($4::bigint[])) or (not $3 and ($2='' or pack.slug ilike '%%'||$2||'%%' or pack.public_id ilike '%%'||$2||'%%'
-			or pack.primary_name ilike '%%'||$2||'%%' or pack.secondary_name ilike '%%'||$2||'%%'
-			or pack.summary ilike '%%'||$2||'%%' or $2=any(pack.search_keywords)
-			or exists(select 1 from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
-				where binding.subject_type='modpack' and binding.subject_id=pack.id and creator.name ilike '%%'||$2||'%%'))))
-		order by case when $3 then array_position($4::bigint[],pack.id) end,
-			case when not $3 then coalesce(popularity.heat_score,0) end desc,
-			pack.updated_at desc,pack.id desc
-		limit $5 offset $6`, claims.Subject, query, indexed.Used, indexed.IDs, limit, databaseOffset)
+		`+publicModpackCatalogFilter+`
+		order by `+orderSQL+`
+		limit $16 offset $17`, claims.Subject, query, indexed.Used, indexed.IDs, versions, loaders,
+		primaryCategories, tags, versionMode, environments, statuses, sources, licenses, features, updatedDays, limit, databaseOffset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load modpacks")
 		return
@@ -236,23 +293,7 @@ func (s *Server) modpackItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) modpackIcon(w http.ResponseWriter, r *http.Request) {
-	siteID := normalizeModSiteID(r.PathValue("siteId"))
-	if siteID == "" {
-		writeError(w, http.StatusBadRequest, "modpack site ID is invalid")
-		return
-	}
-	var iconURL string
-	err := s.db.QueryRow(r.Context(), `select icon_url from modpacks
-		where slug=$1 and (review_status='approved' or created_by=$2)`, siteID, currentClaims(r).Subject).Scan(&iconURL)
-	if errors.Is(err, pgx.ErrNoRows) || strings.TrimSpace(iconURL) == "" {
-		writeError(w, http.StatusNotFound, "modpack icon does not exist")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load modpack icon")
-		return
-	}
-	s.redirectStoredRasterURL(w, r, iconURL)
+	s.publicProjectIcon(w, r, "modpack")
 }
 
 func (s *Server) modpackEditor(w http.ResponseWriter, r *http.Request) {
@@ -498,9 +539,8 @@ func normalizeAndValidateModpackRequest(request *createModpackRequest) error {
 	if request.PrimaryCategory == "" {
 		request.PrimaryCategory = "adventure"
 	}
-	allowedCategories := stringSet("technology", "magic", "adventure", "building", "map", "quests", "optimization", "hardcore", "casual", "large", "lightweight", "story", "kitchen_sink", "skyblock", "pvp", "chinese")
 	for _, category := range request.Tags {
-		if !allowedCategories[category] {
+		if !allowedModpackCategories[category] {
 			return errors.New("invalid modpack category")
 		}
 	}
@@ -536,22 +576,9 @@ func normalizeAndValidateModpackRequest(request *createModpackRequest) error {
 		links = append(links, link)
 	}
 	request.Links = links
-	authors := make([]modAuthorPayload, 0, len(request.Authors))
-	for _, author := range request.Authors {
-		author.CreatorID = strings.ToLower(strings.TrimSpace(author.CreatorID))
-		author.Kind = strings.ToLower(strings.TrimSpace(author.Kind))
-		author.Name = strings.TrimSpace(author.Name)
-		author.Role = strings.TrimSpace(author.Role)
-		author.AvatarURL = strings.TrimSpace(author.AvatarURL)
-		if author.CreatorID == "" && author.Name == "" {
-			continue
-		}
-		if author.CreatorID != "" && !validCatalogPublicID(author.CreatorID) ||
-			author.Kind != "" && author.Kind != "author" && author.Kind != "team" ||
-			author.AvatarURL != "" && !validHTTPURL(author.AvatarURL) {
-			return errors.New("invalid modpack author")
-		}
-		authors = append(authors, author)
+	authors, err := normalizeProjectAuthors(request.Authors)
+	if err != nil {
+		return err
 	}
 	request.Authors = authors
 	if len(request.GalleryImages) > 32 || len(request.Mods) > 2000 {

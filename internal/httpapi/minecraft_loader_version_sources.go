@@ -114,7 +114,7 @@ func mergeMojangVersions(manifest mojangVersionManifest, current []minecraftVers
 		if code == "" || seen[code] {
 			continue
 		}
-		versionType := minecraftVersionType(version.Type)
+		versionType := minecraftVersionType(version.Type, code)
 		if knownTypes[code] == "april_fools" {
 			versionType = "april_fools"
 		}

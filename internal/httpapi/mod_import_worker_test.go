@@ -48,28 +48,28 @@ func TestParseModImportSource(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.provider, func(t *testing.T) {
-			provider, sourceURL, reference, err := parseModImportSource(test.provider, test.input)
+			provider, sourceURL, reference, err := parseProjectImportSource("mod", test.provider, test.input)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if provider != test.provider || sourceURL != test.wantURL || reference != test.wantRef {
-				t.Fatalf("parseModImportSource() = %q, %q, %q", provider, sourceURL, reference)
+				t.Fatalf("parseProjectImportSource() = %q, %q, %q", provider, sourceURL, reference)
 			}
 		})
 	}
 }
 
 func TestParseModImportSourceRejectsForeignHost(t *testing.T) {
-	if _, _, _, err := parseModImportSource("github", "https://example.com/owner/repo"); err == nil {
+	if _, _, _, err := parseProjectImportSource("mod", "github", "https://example.com/owner/repo"); err == nil {
 		t.Fatal("expected foreign GitHub host to be rejected")
 	}
-	if _, _, _, err := parseModImportSource("modrinth", "https://github.com/mod/ferrite-core"); err == nil {
+	if _, _, _, err := parseProjectImportSource("mod", "modrinth", "https://github.com/mod/ferrite-core"); err == nil {
 		t.Fatal("expected a URL from another provider to be rejected")
 	}
-	if _, _, _, err := parseModImportSource("github", "https://github.com:8443/owner/repo"); err == nil {
+	if _, _, _, err := parseProjectImportSource("mod", "github", "https://github.com:8443/owner/repo"); err == nil {
 		t.Fatal("expected a non-standard provider port to be rejected")
 	}
-	if _, _, _, err := parseModImportSource("github", "https://github.com/owner/repo%20name"); err == nil {
+	if _, _, _, err := parseProjectImportSource("mod", "github", "https://github.com/owner/repo%20name"); err == nil {
 		t.Fatal("expected an invalid repository name to be rejected")
 	}
 }

@@ -1,0 +1,55 @@
+{
+  "generatedAt": "2026-08-15T06:27:44.588Z",
+  "startedAt": "2026-08-15T06:27:24.358Z",
+  "baseURL": "http://127.0.0.1:8080",
+  "scenario": "mixed",
+  "stages": [
+    {
+      "concurrency": 5,
+      "seconds": 20
+    }
+  ],
+  "elapsedSeconds": 20.23,
+  "requests": 251,
+  "success": 251,
+  "clientErrors": 0,
+  "serverErrors": 0,
+  "networkErrors": 0,
+  "errorRate": 0,
+  "requestsPerSecond": 12.41,
+  "latencyMS": {
+    "average": 401.23,
+    "p50": 267.94,
+    "p90": 822.85,
+    "p95": 1063.47,
+    "p99": 1649.26,
+    "maximum": 2493.98
+  },
+  "statuses": {
+    "200": 251
+  },
+  "requestsByScenario": {
+    "activity-cleanup-preview": 5,
+    "activity-retention-config": 5,
+    "admin-logs": 6,
+    "maps-updated": 30,
+    "message-conversations": 10,
+    "mods-heat": 30,
+    "mods-version-heat": 30,
+    "plugins-heat": 30,
+    "presence": 7,
+    "servers-heat": 30,
+    "statistics-1y": 5,
+    "statistics-30d": 5,
+    "statistics-7d": 5,
+    "statistics-90d": 5,
+    "statistics-all": 7,
+    "tutorials": 30,
+    "user-card": 11
+  },
+  "notes": [
+    "This client does not infer backend CPU, memory, DB connections, locks, or cache hit rate; capture those from the test environment telemetry.",
+    "The script never calls the destructive cleanup execute endpoint. Activity cleanup load covers preview only.",
+    "Comment mutations were disabled (safe default)."
+  ]
+}

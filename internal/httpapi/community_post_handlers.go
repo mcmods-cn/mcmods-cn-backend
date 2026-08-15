@@ -36,6 +36,7 @@ type communityPostReference struct {
 
 type communityPostSnapshot struct {
 	Kind              string                   `json:"kind"`
+	Category          string                   `json:"category"`
 	Title             string                   `json:"title"`
 	SourceLocale      string                   `json:"sourceLocale"`
 	BodyMarkdown      string                   `json:"bodyMarkdown"`
@@ -67,6 +68,7 @@ type communityPostBounty struct {
 type communityPostResponse struct {
 	ID                string                   `json:"id"`
 	Kind              string                   `json:"kind"`
+	Category          string                   `json:"category"`
 	Title             string                   `json:"title"`
 	SourceLocale      string                   `json:"sourceLocale"`
 	BodyMarkdown      string                   `json:"bodyMarkdown,omitempty"`
@@ -108,17 +110,50 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
-	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	query, validQuery := parseCatalogQuery(r.URL.Query().Get("q"))
+	if !validQuery {
+		writeError(w, http.StatusBadRequest, "invalid community post query")
+		return
+	}
+	category := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("category")))
+	if category != "" && !communityPostCategoryAllowed(kind, category) {
+		writeError(w, http.StatusBadRequest, "invalid community post category")
+		return
+	}
+	versions, validVersions := parseCatalogList(r.URL.Query().Get("version"), 20)
+	if !validVersions {
+		writeError(w, http.StatusBadRequest, "invalid Minecraft version filter")
+		return
+	}
+	sort := strings.TrimSpace(r.URL.Query().Get("sort"))
+	if sort == "" {
+		sort = "latest"
+	}
+	if sort != "latest" && sort != "oldest" && sort != "updated" {
+		writeError(w, http.StatusBadRequest, "invalid community post sort")
+		return
+	}
 	modID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("modId")))
 	resourceID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("resourceId")))
 	viewerID := currentClaims(r).Subject
 	moderator := claimsAllow(currentClaims(r), "content.review") || claimsAllow(currentClaims(r), "admin.*")
-	indexed := s.searchCommunityPage(r.Context(), query, kind, modID, resourceID, currentClaims(r), moderator, limit, offset)
+	indexed := indexedSearchPage{}
+	if category == "" && len(versions) == 0 && sort == "latest" {
+		indexed = s.searchCommunityPage(r.Context(), query, kind, modID, resourceID, currentClaims(r), moderator, limit, offset)
+	}
 	databaseOffset := offset
 	if indexed.Used {
 		databaseOffset = 0
 	}
-	rows, err := s.db.Query(r.Context(), `select post.id,post.public_id,post.kind,post.title,post.source_locale,post.body_markdown,
+	orderSQL := "post.published_at desc nulls last,post.created_at desc,post.id desc"
+	if indexed.Used {
+		orderSQL = "array_position($8::bigint[],post.id),post.updated_at desc,post.id desc"
+	} else if sort == "oldest" {
+		orderSQL = "post.created_at asc,post.id asc"
+	} else if sort == "updated" {
+		orderSQL = "post.updated_at desc,post.id desc"
+	}
+	rows, err := s.db.Query(r.Context(), `select post.id,post.public_id,post.kind,post.category,post.title,post.source_locale,post.body_markdown,
 		post.minecraft_versions,post.mod_version_min,post.mod_version_max,post.severity,post.has_fix,post.issue_url,
 		coalesce(file.public_id,''),coalesce(file.object_key,''),author.public_id,author.username,post.review_status,post.created_at,post.updated_at,post.author_id,
 		post.resolution_status,coalesce(accepted.public_id,''),post.resolved_at
@@ -129,8 +164,10 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 		and (($7 and post.id=any($8::bigint[])) or (not $7 and ($4='' or lower(post.title) like '%%'||lower($4)||'%%' or lower(post.body_markdown) like '%%'||lower($4)||'%%')))
 		and ($5='' or exists(select 1 from community_post_project_refs ref join public_routes route on route.internal_id=ref.target_id and route.entity_type=ref.target_type where ref.post_id=post.id and route.public_id=$5))
 		and ($6='' or exists(select 1 from community_post_resource_refs ref join catalog_entities entity on entity.id=ref.resource_id where ref.post_id=post.id and entity.public_id=$6))
-		order by case when $7 then array_position($8::bigint[],post.id) end,post.published_at desc nulls last,post.created_at desc,post.id desc
-		limit $9 offset $10`, kind, viewerID, moderator, query, modID, resourceID, indexed.Used, indexed.IDs, limit, databaseOffset)
+		and ($11='' or post.category=$11)
+		and (cardinality($12::text[])=0 or post.minecraft_versions && $12::text[])
+		order by `+orderSQL+`
+		limit $9 offset $10`, kind, viewerID, moderator, query, modID, resourceID, indexed.Used, indexed.IDs, limit, databaseOffset, category, versions)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load community posts")
 		return
@@ -143,7 +180,7 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 		var item communityPostResponse
 		var internalID, authorInternalID int64
 		var coverKey string
-		if err = rows.Scan(&internalID, &item.ID, &item.Kind, &item.Title, &item.SourceLocale, &item.BodyMarkdown,
+		if err = rows.Scan(&internalID, &item.ID, &item.Kind, &item.Category, &item.Title, &item.SourceLocale, &item.BodyMarkdown,
 			&item.MinecraftVersions, &item.ModVersionMin, &item.ModVersionMax, &item.Severity, &item.HasFix, &item.IssueURL,
 			&item.CoverFileID, &coverKey, &item.AuthorID, &item.AuthorName, &item.ReviewStatus, &item.CreatedAt, &item.UpdatedAt, &authorInternalID,
 			&item.ResolutionStatus, &item.AcceptedCommentID, &item.ResolvedAt); err != nil {
@@ -190,10 +227,12 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 		and (post.review_status='approved' or post.author_id=$2 or $3)
 		and ($4='' or lower(post.title) like '%%'||lower($4)||'%%' or lower(post.body_markdown) like '%%'||lower($4)||'%%')
 		and ($5='' or exists(select 1 from community_post_project_refs ref join public_routes route on route.internal_id=ref.target_id and route.entity_type=ref.target_type where ref.post_id=post.id and route.public_id=$5))
-		and ($6='' or exists(select 1 from community_post_resource_refs ref join catalog_entities entity on entity.id=ref.resource_id where ref.post_id=post.id and entity.public_id=$6))`,
-			kind, viewerID, moderator, query, modID, resourceID).Scan(&total)
+		and ($6='' or exists(select 1 from community_post_resource_refs ref join catalog_entities entity on entity.id=ref.resource_id where ref.post_id=post.id and entity.public_id=$6))
+		and ($7='' or post.category=$7)
+		and (cardinality($8::text[])=0 or post.minecraft_versions && $8::text[])`,
+			kind, viewerID, moderator, query, modID, resourceID, category, versions).Scan(&total)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset, "categories": communityPostCategories(kind)})
 }
 
 func (s *Server) communityPostItem(w http.ResponseWriter, r *http.Request) {
@@ -247,9 +286,9 @@ func (s *Server) createCommunityPost(w http.ResponseWriter, r *http.Request) {
 	}
 	var internalID int64
 	var publicID string
-	err = tx.QueryRow(r.Context(), `insert into community_posts(kind,author_id,title,source_locale,body_markdown,minecraft_versions,
+	err = tx.QueryRow(r.Context(), `insert into community_posts(kind,category,author_id,title,source_locale,body_markdown,minecraft_versions,
 		mod_version_min,mod_version_max,severity,has_fix,issue_url,cover_file_id,review_status)
-		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning id,public_id`, snapshot.Kind, claims.Subject,
+		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) returning id,public_id`, snapshot.Kind, snapshot.Category, claims.Subject,
 		snapshot.Title, snapshot.SourceLocale, snapshot.BodyMarkdown, snapshot.MinecraftVersions, snapshot.ModVersionMin,
 		snapshot.ModVersionMax, snapshot.Severity, snapshot.HasFix, snapshot.IssueURL, snapshot.CoverInternalID, status).
 		Scan(&internalID, &publicID)
@@ -386,6 +425,47 @@ func normalizeCommunityPostKind(value string) string {
 	}
 }
 
+func communityPostCategories(kind string) []string {
+	switch normalizeCommunityPostKind(kind) {
+	case "tutorial":
+		return []string{"general", "beginner", "technical", "modding", "server"}
+	case "issue":
+		return []string{"client", "gameplay", "compatibility", "performance", "crash"}
+	case "news":
+		return []string{"site", "minecraft", "modding", "community", "release"}
+	case "discussion":
+		return []string{"help", "recommendation", "technical", "gameplay", "server"}
+	default:
+		return []string{}
+	}
+}
+
+func defaultCommunityPostCategory(kind string) string {
+	items := communityPostCategories(kind)
+	if len(items) == 0 {
+		return ""
+	}
+	return items[0]
+}
+
+func communityPostCategoryAllowed(kind, category string) bool {
+	for _, allowed := range communityPostCategories(kind) {
+		if category == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) communityPostCategoryOptions(w http.ResponseWriter, r *http.Request) {
+	kind := normalizeCommunityPostKind(r.URL.Query().Get("kind"))
+	if kind == "" {
+		writeError(w, http.StatusBadRequest, "invalid community post kind")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"kind": kind, "items": communityPostCategories(kind)})
+}
+
 func communityPostPath(kind, publicID string) string {
 	switch normalizeCommunityPostKind(kind) {
 	case "tutorial":
@@ -401,9 +481,13 @@ func communityPostPath(kind, publicID string) string {
 
 func normalizeCommunityPostSnapshot(snapshot *communityPostSnapshot) error {
 	snapshot.Kind = normalizeCommunityPostKind(snapshot.Kind)
+	snapshot.Category = strings.ToLower(strings.TrimSpace(snapshot.Category))
+	if snapshot.Category == "" {
+		snapshot.Category = defaultCommunityPostCategory(snapshot.Kind)
+	}
 	snapshot.Title = strings.TrimSpace(snapshot.Title)
 	snapshot.BodyMarkdown = strings.TrimSpace(snapshot.BodyMarkdown)
-	if snapshot.Kind == "" || snapshot.Title == "" || len([]rune(snapshot.Title)) > 160 || len(snapshot.BodyMarkdown) > 1<<20 {
+	if snapshot.Kind == "" || !communityPostCategoryAllowed(snapshot.Kind, snapshot.Category) || snapshot.Title == "" || len([]rune(snapshot.Title)) > 160 || len(snapshot.BodyMarkdown) > 1<<20 {
 		return errors.New("invalid community post")
 	}
 	snapshot.SourceLocale = detectCommunityPostLocale(snapshot.Title + "\n" + snapshot.BodyMarkdown)
@@ -597,10 +681,10 @@ func (s *Server) resolveCommunityPostSnapshot(ctx context.Context, tx pgx.Tx, ac
 }
 
 func applyCommunityPostSnapshotTx(ctx context.Context, tx pgx.Tx, postID, revisionID int64, snapshot communityPostSnapshot) error {
-	if _, err := tx.Exec(ctx, `update community_posts set title=$2,source_locale=$3,body_markdown=$4,minecraft_versions=$5,
-		mod_version_min=$6,mod_version_max=$7,severity=$8,has_fix=$9,issue_url=$10,cover_file_id=$11,
-		review_status='approved',published_revision_id=$12,published_at=coalesce(published_at,now()),updated_at=now() where id=$1`,
-		postID, snapshot.Title, snapshot.SourceLocale, snapshot.BodyMarkdown, snapshot.MinecraftVersions, snapshot.ModVersionMin,
+	if _, err := tx.Exec(ctx, `update community_posts set category=$2,title=$3,source_locale=$4,body_markdown=$5,minecraft_versions=$6,
+		mod_version_min=$7,mod_version_max=$8,severity=$9,has_fix=$10,issue_url=$11,cover_file_id=$12,
+		review_status='approved',published_revision_id=$13,published_at=coalesce(published_at,now()),updated_at=now() where id=$1`,
+		postID, snapshot.Category, snapshot.Title, snapshot.SourceLocale, snapshot.BodyMarkdown, snapshot.MinecraftVersions, snapshot.ModVersionMin,
 		snapshot.ModVersionMax, snapshot.Severity, snapshot.HasFix, snapshot.IssueURL, snapshot.CoverInternalID, revisionID); err != nil {
 		return err
 	}
@@ -676,7 +760,7 @@ func (s *Server) loadCommunityPost(ctx context.Context, publicID string, claims 
 	var internalID, authorInternalID int64
 	var coverKey string
 	moderator := claimsAllow(claims, "content.review") || claimsAllow(claims, "admin.*")
-	err := s.db.QueryRow(ctx, `select post.id,post.public_id,post.kind,post.title,post.source_locale,post.body_markdown,
+	err := s.db.QueryRow(ctx, `select post.id,post.public_id,post.kind,post.category,post.title,post.source_locale,post.body_markdown,
 		post.minecraft_versions,post.mod_version_min,post.mod_version_max,post.severity,post.has_fix,post.issue_url,
 		coalesce(file.public_id,''),coalesce(file.object_key,''),author.public_id,author.username,post.review_status,post.created_at,post.updated_at,post.author_id,
 		post.resolution_status,coalesce(accepted.public_id,''),post.resolved_at
@@ -684,7 +768,7 @@ func (s *Server) loadCommunityPost(ctx context.Context, publicID string, claims 
 		left join oss_files file on file.id=post.cover_file_id and file.status='active'
 		left join comments accepted on accepted.id=post.accepted_comment_id
 		where post.public_id=$1 and post.status='active' and (post.review_status='approved' or post.author_id=$2 or $3)`,
-		publicID, claims.Subject, moderator).Scan(&internalID, &item.ID, &item.Kind, &item.Title, &item.SourceLocale,
+		publicID, claims.Subject, moderator).Scan(&internalID, &item.ID, &item.Kind, &item.Category, &item.Title, &item.SourceLocale,
 		&item.BodyMarkdown, &item.MinecraftVersions, &item.ModVersionMin, &item.ModVersionMax, &item.Severity, &item.HasFix,
 		&item.IssueURL, &item.CoverFileID, &coverKey, &item.AuthorID, &item.AuthorName, &item.ReviewStatus, &item.CreatedAt, &item.UpdatedAt, &authorInternalID,
 		&item.ResolutionStatus, &item.AcceptedCommentID, &item.ResolvedAt)

@@ -44,7 +44,7 @@ func DecryptSetting(masterSecret string, stored []byte) ([]byte, error) {
 		return nil, err
 	}
 	if envelope.Encryption == "" {
-		return stored, nil
+		return nil, errors.New("unencrypted setting payload is not supported")
 	}
 	if envelope.Encryption != encryptedSettingVersion || envelope.Nonce == "" || envelope.Ciphertext == "" {
 		return nil, errors.New("unsupported encrypted setting envelope")

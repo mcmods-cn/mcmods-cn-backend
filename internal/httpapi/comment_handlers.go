@@ -22,6 +22,9 @@ var allowedCommentReactions = stringSet("thumbs_up", "thumbs_down", "laugh", "ho
 var commentMarkdownLinkPattern = regexp.MustCompile(`!?\[([^\]]*)\]\([^)]+\)`)
 var commentHTMLTagPattern = regexp.MustCompile(`<[^>]+>`)
 
+const commentIdempotencyLockSQL = `select pg_advisory_xact_lock(
+		hashtextextended($1::text,0))`
+
 type commentTargetInfo struct {
 	Type       string `json:"type"`
 	Key        string `json:"key"`
@@ -32,10 +35,11 @@ type commentTargetInfo struct {
 }
 
 type commentAuthor struct {
-	ID          string `json:"id"`
-	Username    string `json:"username"`
-	AvatarURL   string `json:"avatarUrl"`
-	ProjectRole string `json:"projectRole,omitempty"`
+	ID           string             `json:"id"`
+	Username     string             `json:"username"`
+	AvatarURL    string             `json:"avatarUrl"`
+	OnlineStatus publicOnlineStatus `json:"onlineStatus"`
+	ProjectRole  string             `json:"projectRole,omitempty"`
 }
 
 type commentParentPreview struct {
@@ -271,6 +275,11 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		return
 	}
 	defer tx.Rollback(r.Context())
+	lockKey := commentIdempotencyLockKey(claims.Subject, request.IdempotencyKey)
+	if _, err = tx.Exec(r.Context(), commentIdempotencyLockSQL, lockKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "发布评论失败")
+		return
+	}
 	var existingID int64
 	var recent int
 	if err = tx.QueryRow(r.Context(), `select
@@ -361,6 +370,10 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": publicID})
+}
+
+func commentIdempotencyLockKey(userID int64, idempotencyKey string) string {
+	return fmt.Sprintf("comment-idempotency:%d:%s", userID, idempotencyKey)
 }
 
 func insertCommentTree(ctx context.Context, tx pgx.Tx, target commentTargetInfo, authorID int64, request createCommentRequest) (insertedCommentTree, error) {
@@ -524,10 +537,10 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("commentId")))
 	var commentID, authorID int64
-	var projectID, targetKind string
+	var projectID, targetKind, previousBody string
 	var targetAuthorID int64
 	var acceptedAnswer bool
-	if err := s.db.QueryRow(r.Context(), `select comment.id,comment.author_id,
+	if err := s.db.QueryRow(r.Context(), `select comment.id,comment.author_id,comment.body,
 		coalesce(direct_mod.project_code,direct_modpack.public_id,direct_simple.public_id,resource_mod.project_code,''),coalesce(post.author_id,0),coalesce(post.kind,''),
 		coalesce(post.accepted_comment_id=comment.id,false)
 		from comments comment
@@ -538,7 +551,7 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 			on comment.target_type='mod_resource' and resource_version.id=comment.target_version_id
 		left join mods resource_mod on resource_mod.id=resource_version.mod_id
 		left join community_posts post on comment.target_type='community_post' and post.id=comment.target_id
-		where comment.public_id=$1`, publicID).Scan(&commentID, &authorID, &projectID, &targetAuthorID, &targetKind, &acceptedAnswer); err != nil {
+		where comment.public_id=$1`, publicID).Scan(&commentID, &authorID, &previousBody, &projectID, &targetAuthorID, &targetKind, &acceptedAnswer); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "评论不存在")
 		} else {
@@ -575,12 +588,26 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "评论内容不正确")
 			return
 		}
-		if _, err := s.db.Exec(r.Context(), `update comments set body=$2,updated_at=now()
-			where id=$1 and status='published'`, commentID, request.Body); err != nil {
+		tx, err := s.db.Begin(r.Context())
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "修改评论失败")
 			return
 		}
-		annotateActivity(r, activity.ActionEdit, activity.ObjectComment, publicID, len(request.Body))
+		defer tx.Rollback(r.Context())
+		if err = tx.QueryRow(r.Context(), `select body from comments where id=$1 and status='published' for update`, commentID).Scan(&previousBody); err != nil {
+			writeError(w, http.StatusConflict, "评论已发生变化，请重新加载后再试")
+			return
+		}
+		if _, err = tx.Exec(r.Context(), `update comments set body=$2,updated_at=now() where id=$1`, commentID, request.Body); err != nil {
+			writeError(w, http.StatusInternalServerError, "修改评论失败")
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "修改评论失败")
+			return
+		}
+		addedBytes, deletedBytes := activity.MarkdownDeltaBytes(previousBody, request.Body)
+		annotateActivityDelta(r, activity.ActionEdit, activity.ObjectComment, publicID, addedBytes, deletedBytes)
 		items, _ := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims)
 		if len(items) > 0 {
 			writeJSON(w, http.StatusOK, items[0])
@@ -988,9 +1015,13 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 		viewerIndex = 3
 	}
 	args = append(args, viewerID)
+	presenceIndex := len(args) + 1
+	args = append(args, int(publicPresenceWindow/time.Second))
 	rows, err := queryer.Query(ctx, fmt.Sprintf(`select c.id,c.public_id,coalesce(parent.public_id,''),
 		coalesce(root.public_id,''),c.depth,c.body,c.status,c.child_count,c.descendant_count,c.hot_score,
-		author.public_id,author.username,author.avatar_url,
+		author.public_id,author.username,author.avatar_url,author.show_online_status,
+		exists(select 1 from user_presence_sessions presence where presence.user_id=author.id
+			and presence.last_active_at>=now()-make_interval(secs=>$%d)),
 		coalesce(parent_author.username,''),coalesce(parent.body,''),coalesce(parent.status,''),
 		c.created_at,c.updated_at,c.pinned_at,
 		coalesce(watch.public_id,''),coalesce(watch.status,''),watch.muted_until,
@@ -1016,7 +1047,7 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 			) grouped
 		) reaction_summary on true
 		where %s and c.status in ('published','deleted')
-		order by c.created_at,c.id`, viewerIndex, viewerIndex, where), args...)
+		order by c.created_at,c.id`, presenceIndex, viewerIndex, viewerIndex, where), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1031,15 +1062,18 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 		var watchUnread, watchedReplies int
 		var reactionNames, selectedReactions []string
 		var reactionCounts []int64
+		var showOnlineStatus bool
+		var onlineActive bool
 		item := commentResponse{Reactions: map[string]int{}, UserReactions: []string{}}
 		if err = rows.Scan(&numericID, &item.ID, &parentID, &rootID, &item.Depth, &item.Body, &status,
 			&item.ChildCount, &item.DescendantCount, &item.HeatScore, &item.Author.ID, &item.Author.Username,
-			&item.Author.AvatarURL, &parentAuthor, &parentBody, &parentStatus,
+			&item.Author.AvatarURL, &showOnlineStatus, &onlineActive, &parentAuthor, &parentBody, &parentStatus,
 			&item.CreatedAt, &item.UpdatedAt, &item.PinnedAt, &watchID, &watchStatus, &mutedUntil, &mutedForever,
 			&watchUnread, &watchedReplies, &reactionNames, &reactionCounts, &selectedReactions); err != nil {
 			return nil, err
 		}
 		item.ParentID = parentID
+		item.Author.OnlineStatus = mapPublicOnlineVisibility(showOnlineStatus, onlineActive)
 		item.RootID = rootID
 		item.Deleted = status == "deleted"
 		item.Pinned = item.PinnedAt != nil

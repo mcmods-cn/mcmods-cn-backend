@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,15 +13,16 @@ import (
 const requestActivityContextKey contextKey = "request_activity"
 
 type requestActivity struct {
-	mu                 sync.Mutex
-	userID             int64
-	actionID           int16
-	objectTypeID       int16
-	objectEntityType   string
-	objectInternalID   int64
-	objectPublicID     string
-	markdownAddedBytes int
-	skip               bool
+	mu                   sync.Mutex
+	userID               int64
+	actionID             int16
+	objectTypeID         int16
+	objectEntityType     string
+	objectInternalID     int64
+	objectPublicID       string
+	markdownAddedBytes   int
+	markdownDeletedBytes int
+	skip                 bool
 }
 
 func markActivityUser(r *http.Request, userID int64) {
@@ -76,6 +78,32 @@ func annotateActivityID(r *http.Request, actionID, objectTypeID int16, entityTyp
 	}
 }
 
+func annotateActivityDelta(r *http.Request, actionID, objectTypeID int16, publicID string, markdownAddedBytes, markdownDeletedBytes int) {
+	annotateActivity(r, actionID, objectTypeID, publicID, markdownAddedBytes)
+	annotation, _ := r.Context().Value(requestActivityContextKey).(*requestActivity)
+	if annotation == nil {
+		return
+	}
+	annotation.mu.Lock()
+	if markdownDeletedBytes > 0 {
+		annotation.markdownDeletedBytes = markdownDeletedBytes
+	}
+	annotation.mu.Unlock()
+}
+
+func annotateActivityIDDelta(r *http.Request, actionID, objectTypeID int16, entityType string, internalID int64, markdownAddedBytes, markdownDeletedBytes int) {
+	annotateActivityID(r, actionID, objectTypeID, entityType, internalID, markdownAddedBytes)
+	annotation, _ := r.Context().Value(requestActivityContextKey).(*requestActivity)
+	if annotation == nil {
+		return
+	}
+	annotation.mu.Lock()
+	if markdownDeletedBytes > 0 {
+		annotation.markdownDeletedBytes = markdownDeletedBytes
+	}
+	annotation.mu.Unlock()
+}
+
 func skipRequestActivity(r *http.Request) {
 	annotation, _ := r.Context().Value(requestActivityContextKey).(*requestActivity)
 	if annotation == nil {
@@ -95,14 +123,15 @@ func (s *Server) recordRequestActivity(r *http.Request, annotation *requestActiv
 	}
 	annotation.mu.Lock()
 	event := activity.Event{
-		UserID:             annotation.userID,
-		ActionID:           annotation.actionID,
-		ObjectTypeID:       annotation.objectTypeID,
-		ObjectEntityType:   annotation.objectEntityType,
-		ObjectInternalID:   annotation.objectInternalID,
-		ObjectPublicID:     annotation.objectPublicID,
-		MarkdownAddedBytes: annotation.markdownAddedBytes,
-		OccurredAt:         time.Now().UTC(),
+		UserID:               annotation.userID,
+		ActionID:             annotation.actionID,
+		ObjectTypeID:         annotation.objectTypeID,
+		ObjectEntityType:     annotation.objectEntityType,
+		ObjectInternalID:     annotation.objectInternalID,
+		ObjectPublicID:       annotation.objectPublicID,
+		MarkdownAddedBytes:   annotation.markdownAddedBytes,
+		MarkdownDeletedBytes: annotation.markdownDeletedBytes,
+		OccurredAt:           time.Now().UTC(),
 	}
 	skip := annotation.skip
 	annotation.mu.Unlock()
@@ -120,6 +149,16 @@ func (s *Server) recordRequestActivity(r *http.Request, annotation *requestActiv
 	}
 	if event.ActionID == 0 || event.ObjectTypeID == 0 {
 		return
+	}
+	if event.ActionID == activity.ActionView {
+		identity := event.ObjectPublicID
+		if identity == "" && event.ObjectInternalID > 0 {
+			identity = event.ObjectEntityType + ":" + strconv.FormatInt(event.ObjectInternalID, 10)
+		}
+		key := strconv.FormatInt(event.UserID, 10) + ":" + strconv.FormatInt(int64(event.ObjectTypeID), 10) + ":" + identity
+		if !s.cache.ClaimThrottle(r.Context(), "activity-view:"+key, 5*time.Minute) {
+			return
+		}
 	}
 	s.activity.Record(event)
 }

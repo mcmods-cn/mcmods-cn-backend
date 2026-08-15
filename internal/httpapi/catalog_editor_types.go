@@ -162,7 +162,6 @@ type catalogLocalizationSnapshot struct {
 }
 
 type catalogEditResult struct {
-	PublicID        string `json:"publicId"`
 	ObjectPublicID  string `json:"objectPublicId"`
 	Operation       string `json:"operation"`
 	RevisionID      string `json:"revisionId"`

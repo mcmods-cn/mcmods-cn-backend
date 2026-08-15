@@ -23,3 +23,26 @@ func TestAddedMarkdownBytes(t *testing.T) {
 		})
 	}
 }
+
+func TestMarkdownDeltaBytes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name              string
+		previous, current string
+		added, deleted    int
+	}{
+		{name: "unchanged", previous: "abc", current: "abc"},
+		{name: "append", previous: "abc", current: "abcdef", added: 3},
+		{name: "delete", previous: "abcdef", current: "abc", deleted: 3},
+		{name: "replace", previous: "hello old world", current: "hello new text world", added: 8, deleted: 3},
+		{name: "utf8", previous: "old", current: "old新", added: len("新")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			added, deleted := MarkdownDeltaBytes(test.previous, test.current)
+			if added != test.added || deleted != test.deleted {
+				t.Fatalf("MarkdownDeltaBytes() = (%d,%d), want (%d,%d)", added, deleted, test.added, test.deleted)
+			}
+		})
+	}
+}
