@@ -36,7 +36,7 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		markActivityUser(r, claims.Subject)
 		ctx := context.WithValue(r.Context(), claimsContextKey, claims)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		s.serveProtectedMutation(w, r.WithContext(ctx), next)
 	}
 }
 
@@ -67,7 +67,7 @@ func (s *Server) optionalAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		markActivityUser(r, claims.Subject)
 		ctx := context.WithValue(r.Context(), claimsContextKey, claims)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		s.serveProtectedMutation(w, r.WithContext(ctx), next)
 	}
 }
 

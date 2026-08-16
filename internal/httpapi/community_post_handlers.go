@@ -125,6 +125,16 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid Minecraft version filter")
 		return
 	}
+	versionMode, validVersionMode := parseCatalogVersionMode(r.URL.Query().Get("versionMode"))
+	if !validVersionMode {
+		writeError(w, http.StatusBadRequest, "invalid version mode")
+		return
+	}
+	projectFilters, validProjectFilters := parseCommunityProjectFilters(r.URL.Query().Get("project"))
+	if !validProjectFilters {
+		writeError(w, http.StatusBadRequest, "invalid community project filter")
+		return
+	}
 	sort := strings.TrimSpace(r.URL.Query().Get("sort"))
 	if sort == "" {
 		sort = "latest"
@@ -138,7 +148,7 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 	viewerID := currentClaims(r).Subject
 	moderator := claimsAllow(currentClaims(r), "content.review") || claimsAllow(currentClaims(r), "admin.*")
 	indexed := indexedSearchPage{}
-	if category == "" && len(versions) == 0 && sort == "latest" {
+	if category == "" && len(versions) == 0 && len(projectFilters) == 0 && sort == "latest" {
 		indexed = s.searchCommunityPage(r.Context(), query, kind, modID, resourceID, currentClaims(r), moderator, limit, offset)
 	}
 	databaseOffset := offset
@@ -165,9 +175,14 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 		and ($5='' or exists(select 1 from community_post_project_refs ref join public_routes route on route.internal_id=ref.target_id and route.entity_type=ref.target_type where ref.post_id=post.id and route.public_id=$5))
 		and ($6='' or exists(select 1 from community_post_resource_refs ref join catalog_entities entity on entity.id=ref.resource_id where ref.post_id=post.id and entity.public_id=$6))
 		and ($11='' or post.category=$11)
-		and (cardinality($12::text[])=0 or post.minecraft_versions && $12::text[])
+		and (cardinality($12::text[])=0
+			or $13='all' and post.minecraft_versions @> $12::text[]
+			or $13='any' and post.minecraft_versions && $12::text[])
+		and (cardinality($14::text[])=0 or exists(select 1 from community_post_project_refs ref
+			left join public_routes route on route.internal_id=ref.target_id and route.entity_type=ref.target_type
+			where ref.post_id=post.id and lower(ref.target_type||':'||coalesce(route.public_id,ref.raw_identifier))=any($14::text[])))
 		order by `+orderSQL+`
-		limit $9 offset $10`, kind, viewerID, moderator, query, modID, resourceID, indexed.Used, indexed.IDs, limit, databaseOffset, category, versions)
+		limit $9 offset $10`, kind, viewerID, moderator, query, modID, resourceID, indexed.Used, indexed.IDs, limit, databaseOffset, category, versions, versionMode, projectFilters)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load community posts")
 		return
@@ -229,8 +244,13 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 		and ($5='' or exists(select 1 from community_post_project_refs ref join public_routes route on route.internal_id=ref.target_id and route.entity_type=ref.target_type where ref.post_id=post.id and route.public_id=$5))
 		and ($6='' or exists(select 1 from community_post_resource_refs ref join catalog_entities entity on entity.id=ref.resource_id where ref.post_id=post.id and entity.public_id=$6))
 		and ($7='' or post.category=$7)
-		and (cardinality($8::text[])=0 or post.minecraft_versions && $8::text[])`,
-			kind, viewerID, moderator, query, modID, resourceID, category, versions).Scan(&total)
+		and (cardinality($8::text[])=0
+			or $9='all' and post.minecraft_versions @> $8::text[]
+			or $9='any' and post.minecraft_versions && $8::text[])
+		and (cardinality($10::text[])=0 or exists(select 1 from community_post_project_refs ref
+			left join public_routes route on route.internal_id=ref.target_id and route.entity_type=ref.target_type
+			where ref.post_id=post.id and lower(ref.target_type||':'||coalesce(route.public_id,ref.raw_identifier))=any($10::text[])))`,
+			kind, viewerID, moderator, query, modID, resourceID, category, versions, versionMode, projectFilters).Scan(&total)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset, "categories": communityPostCategories(kind)})
 }
@@ -279,6 +299,9 @@ func (s *Server) createCommunityPost(w http.ResponseWriter, r *http.Request) {
 	reviewRequired := communityPostReviewRequired(reviewConfig, snapshot.Kind, false)
 	if claimsAllow(claims, "community.no-review") || claimsAllow(claims, "admin.*") {
 		reviewRequired = false
+	}
+	if antiAbuseModerationRequired(r) {
+		reviewRequired = true
 	}
 	status := "approved"
 	if reviewRequired {
@@ -383,6 +406,9 @@ func (s *Server) updateCommunityPost(w http.ResponseWriter, r *http.Request, pub
 	if claimsAllow(claims, "community.no-review") || claimsAllow(claims, "admin.*") {
 		reviewRequired = false
 	}
+	if antiAbuseModerationRequired(r) {
+		reviewRequired = true
+	}
 	status := "approved"
 	if reviewRequired {
 		status = "pending"
@@ -423,6 +449,32 @@ func normalizeCommunityPostKind(value string) string {
 	default:
 		return ""
 	}
+}
+
+var communityPostProjectTypes = stringSet("mod", "modpack", "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon")
+
+func communityPostProjectTypeAllowed(value string) bool {
+	return communityPostProjectTypes[value]
+}
+
+func parseCommunityProjectFilters(value string) ([]string, bool) {
+	filters, valid := parseCatalogList(value, 20)
+	if !valid {
+		return nil, false
+	}
+	for index, filter := range filters {
+		separator := strings.IndexByte(filter, ':')
+		if separator <= 0 || separator == len(filter)-1 {
+			return nil, false
+		}
+		projectType := strings.ToLower(strings.TrimSpace(filter[:separator]))
+		identity := strings.ToLower(strings.TrimSpace(filter[separator+1:]))
+		if !communityPostProjectTypeAllowed(projectType) || !validModIdentifier(identity) {
+			return nil, false
+		}
+		filters[index] = projectType + ":" + identity
+	}
+	return filters, true
 }
 
 func communityPostCategories(kind string) []string {
@@ -638,9 +690,7 @@ func (s *Server) resolveCommunityPostSnapshot(ctx context.Context, tx pgx.Tx, ac
 		if ref.Type == "" {
 			ref.Type = "mod"
 		}
-		switch ref.Type {
-		case "mod", "modpack", "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
-		default:
+		if !communityPostProjectTypeAllowed(ref.Type) {
 			return errors.New("project reference type is invalid")
 		}
 		ref.PublicID = strings.ToLower(strings.TrimSpace(ref.PublicID))

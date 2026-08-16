@@ -193,6 +193,9 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 
 	claims := currentClaims(r)
 	reviewRequired := loadReviewConfig(r.Context(), s.db).ModCreate && !claimsAllow(claims, "admin.*")
+	if antiAbuseModerationRequired(r) {
+		reviewRequired = true
+	}
 	reviewStatus := "approved"
 	var publishedAt *time.Time
 	if reviewRequired {
@@ -438,11 +441,8 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid catalog filter")
 		return
 	}
-	versionMode := strings.TrimSpace(r.URL.Query().Get("versionMode"))
-	if versionMode == "" {
-		versionMode = "any"
-	}
-	if versionMode != "any" && versionMode != "all" {
+	versionMode, validVersionMode := parseCatalogVersionMode(r.URL.Query().Get("versionMode"))
+	if !validVersionMode {
 		writeError(w, http.StatusBadRequest, "invalid version mode")
 		return
 	}

@@ -162,6 +162,9 @@ func (s *Server) publicServerSettings(w http.ResponseWriter, r *http.Request) {
 	reviewRequired := loadReviewConfig(r.Context(), s.db).ServerCreate &&
 		!claimsAllow(claims, "server.create.no-review") &&
 		!claimsAllow(claims, "admin.*")
+	if antiAbuseModerationRequired(r) {
+		reviewRequired = true
+	}
 	writeJSON(w, http.StatusOK, serverSubmissionSettings{
 		serverCatalogSettings: loadServerCatalogSettings(r.Context(), s.db),
 		ReviewRequired:        reviewRequired,
@@ -237,6 +240,9 @@ func (s *Server) createMinecraftServer(w http.ResponseWriter, r *http.Request) {
 	reviewRequired := loadReviewConfig(r.Context(), s.db).ServerCreate &&
 		!claimsAllow(claims, "server.create.no-review") &&
 		!claimsAllow(claims, "admin.*")
+	if antiAbuseModerationRequired(r) {
+		reviewRequired = true
+	}
 	if err := normalizeAndValidateServerRequest(&request, settings, reviewRequired); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -679,13 +685,14 @@ func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) 
 	query, validQuery := parseCatalogQuery(r.URL.Query().Get("q"))
 	tag, validTag := parseCatalogScalar(strings.ToLower(r.URL.Query().Get("tag")))
 	language, validLanguage := parseCatalogScalar(r.URL.Query().Get("language"))
-	version, validVersion := parseCatalogScalar(r.URL.Query().Get("version"))
+	versions, validVersions := parseCatalogList(r.URL.Query().Get("version"), 20)
+	versionMode, validVersionMode := parseCatalogVersionMode(r.URL.Query().Get("versionMode"))
 	modFilters := serverModFilters(r.URL.Query().Get("mods"))
 	modded, validModded := parseCatalogBoolean(r.URL.Query().Get("modded"))
 	online, validOnline := parseCatalogBoolean(r.URL.Query().Get("online"))
 	whitelist, validWhitelist := parseCatalogBoolean(r.URL.Query().Get("whitelist"))
 	onlineMode, validOnlineMode := parseCatalogBoolean(r.URL.Query().Get("onlineMode"))
-	if !validQuery || !validTag || !validLanguage || !validVersion || !validModded || !validOnline || !validWhitelist || !validOnlineMode {
+	if !validQuery || !validTag || !validLanguage || !validVersions || !validVersionMode || !validModded || !validOnline || !validWhitelist || !validOnlineMode {
 		writeError(w, http.StatusBadRequest, "invalid server catalog filter")
 		return
 	}
@@ -700,8 +707,8 @@ func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) 
 		page = min(parsed, 10000)
 	}
 	indexed := indexedSearchPage{}
-	if catalogSortUsesSearchIndex(sort) {
-		indexed = s.searchServerPage(r.Context(), query, tag, language, version, modFilters,
+	if catalogSortUsesSearchIndex(sort) && len(versions) <= 1 {
+		indexed = s.searchServerPage(r.Context(), query, tag, language, firstCatalogValue(versions), modFilters,
 			modded, online, whitelist, onlineMode, limit, (page-1)*limit)
 	}
 	databaseOffset := (page - 1) * limit
@@ -740,8 +747,12 @@ func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) 
 	if language != "" {
 		add("$%d=any(server.languages)", language)
 	}
-	if version != "" {
-		add("$%d=any(server.minecraft_versions)", version)
+	if len(versions) > 0 {
+		if versionMode == "all" {
+			add("server.minecraft_versions @> $%d::text[]", versions)
+		} else {
+			add("server.minecraft_versions && $%d::text[]", versions)
+		}
 	}
 	for _, modFilter := range modFilters {
 		args = append(args, modFilter)

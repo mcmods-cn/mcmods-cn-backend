@@ -7,7 +7,7 @@ import (
 
 func TestUserFeatureSchemaKeepsStatisticsIndependentFromActivityRetention(t *testing.T) {
 	t.Parallel()
-	if schemaGeneration != 69 {
+	if schemaGeneration != 71 {
 		t.Fatalf("unexpected schema generation %d", schemaGeneration)
 	}
 	definition := strings.ToLower(strings.Join(userFeatureSchemaStatements(), "\n"))
@@ -21,6 +21,8 @@ func TestUserFeatureSchemaKeepsStatisticsIndependentFromActivityRetention(t *tes
 		"create table if not exists activity_cleanup_runs",
 		"create trigger trg_user_activity_statistics after insert on user_activity_events",
 		"idx_activity_action_time",
+		"create table activity_event_outbox",
+		"idx_activity_outbox_available",
 		"create or replace function sync_user_content_creation_fact()",
 		"object_identifier text",
 		"values(content_kind,object_identifier,actor_id",

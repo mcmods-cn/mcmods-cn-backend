@@ -426,7 +426,10 @@ func (s *Server) activityCleanupSamples(ctx context.Context, where string, args 
 
 func (s *Server) activityCleanupGroupedCounts(ctx context.Context, where string, args []any, groupExpression, join string) (map[string]int64, error) {
 	result := map[string]int64{}
-	rows, err := s.db.Query(ctx, `select `+groupExpression+`,count(*) from user_activity_events event `+join+` where `+where+` group by 1 order by 2 desc,1`, args...)
+	// A cleanup spanning many users must not build an unbounded response. The
+	// action/object dimensions are finite; for users this returns the 100
+	// largest groups, which is sufficient for a destructive-action preview.
+	rows, err := s.db.Query(ctx, `select `+groupExpression+`,count(*) from user_activity_events event `+join+` where `+where+` group by 1 order by 2 desc,1 limit 100`, args...)
 	if err != nil {
 		return nil, err
 	}

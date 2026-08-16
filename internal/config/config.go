@@ -13,19 +13,24 @@ import (
 )
 
 const defaultDevelopmentSettingsEncryptionKey = "development-only-settings-encryption-key"
+const defaultDevelopmentAntiAbuseHMACSecret = "development-only-change-this-anti-abuse-hmac-secret"
+const defaultDevelopmentAntiAbuseIPSecret = "development-only-change-this-anti-abuse-ip-hash-secret"
 
 type Config struct {
 	Addr                  string
 	Env                   string
+	ReplicaCount          int
 	FrontendOrigin        string
 	TrustedProxyCIDRs     []string
 	JWTSecret             string
 	SettingsEncryptionKey string
 	JWTTTL                time.Duration
 	DB                    DBConfig
+	Activity              ActivityConfig
 	SMTP                  SMTPConfig
 	NATS                  NATSConfig
 	Redis                 RedisConfig
+	AntiAbuse             AntiAbuseConfig
 	Typesense             TypesenseConfig
 	Yggdrasil             YggdrasilConfig
 }
@@ -39,6 +44,24 @@ type DBConfig struct {
 	SSLMode      string
 	URL          string
 	ResetOnStart bool
+	MaxConns     int32
+	MinConns     int32
+}
+
+// ActivityConfig controls the bounded best-effort view pipeline and the
+// durable outbox used by actions that must survive an application restart.
+// Durations are intentionally expressed as time.Duration after environment
+// parsing so callers cannot disagree about units.
+type ActivityConfig struct {
+	BatchSize             int
+	QueueCapacity         int
+	FlushInterval         time.Duration
+	RetryMinDelay         time.Duration
+	RetryMaxDelay         time.Duration
+	WriteTimeout          time.Duration
+	DurableEnqueueTimeout time.Duration
+	DBMaxConns            int32
+	DBMinConns            int32
 }
 
 type SMTPConfig struct {
@@ -68,6 +91,23 @@ type RedisConfig struct {
 	DB       int
 	Prefix   string
 	TTL      time.Duration
+}
+
+type AntiAbuseConfig struct {
+	Enabled                  bool
+	HMACSecret               string
+	IPHashSecret             string
+	ChallengeProvider        string
+	TurnstileSiteKey         string
+	TurnstileSecretKey       string
+	TurnstileVerifyURL       string
+	FormTokenTTL             time.Duration
+	FormMinimumAge           time.Duration
+	ChallengeTTL             time.Duration
+	EventRetentionDays       int
+	FingerprintRetentionDays int
+	DNSLookupTimeout         time.Duration
+	DNSCacheTTL              time.Duration
 }
 
 type TypesenseConfig struct {
@@ -107,6 +147,7 @@ func Load() Config {
 	return Config{
 		Addr:                  getenv("APP_ADDR", ":8080"),
 		Env:                   getenv("APP_ENV", "development"),
+		ReplicaCount:          getenvInt("APP_REPLICA_COUNT", 1),
 		FrontendOrigin:        strings.TrimRight(getenv("FRONTEND_ORIGIN", "http://localhost:3000"), "/"),
 		TrustedProxyCIDRs:     splitCommaSeparated(os.Getenv("TRUSTED_PROXY_CIDRS")),
 		JWTSecret:             jwtSecret,
@@ -121,6 +162,19 @@ func Load() Config {
 			SSLMode:      getenv("DB_SSLMODE", "disable"),
 			URL:          os.Getenv("DATABASE_URL"),
 			ResetOnStart: getenvBool("DB_RESET_ON_START", false),
+			MaxConns:     int32(getenvInt("DB_MAX_CONNS", 12)),
+			MinConns:     int32(getenvInt("DB_MIN_CONNS", 2)),
+		},
+		Activity: ActivityConfig{
+			BatchSize:             getenvInt("ACTIVITY_BATCH_SIZE", 256),
+			QueueCapacity:         getenvInt("ACTIVITY_QUEUE_CAPACITY", 4096),
+			FlushInterval:         time.Duration(getenvInt("ACTIVITY_FLUSH_INTERVAL_MS", 1000)) * time.Millisecond,
+			RetryMinDelay:         time.Duration(getenvInt("ACTIVITY_RETRY_MIN_MS", 250)) * time.Millisecond,
+			RetryMaxDelay:         time.Duration(getenvInt("ACTIVITY_RETRY_MAX_MS", 30000)) * time.Millisecond,
+			WriteTimeout:          time.Duration(getenvInt("ACTIVITY_WRITE_TIMEOUT_MS", 10000)) * time.Millisecond,
+			DurableEnqueueTimeout: time.Duration(getenvInt("ACTIVITY_DURABLE_ENQUEUE_TIMEOUT_MS", 1500)) * time.Millisecond,
+			DBMaxConns:            int32(getenvInt("ACTIVITY_DB_MAX_CONNS", 4)),
+			DBMinConns:            int32(getenvInt("ACTIVITY_DB_MIN_CONNS", 1)),
 		},
 		SMTP: SMTPConfig{
 			Host:     os.Getenv("SMTP_HOST"),
@@ -164,6 +218,22 @@ func Load() Config {
 			DB:       getenvInt("REDIS_DB", 0),
 			Prefix:   getenv("REDIS_PREFIX", "mcmods:query:"),
 			TTL:      time.Duration(getenvInt("REDIS_QUERY_TTL_SECONDS", 120)) * time.Second,
+		},
+		AntiAbuse: AntiAbuseConfig{
+			Enabled:                  getenvBool("ANTI_ABUSE_ENABLED", true),
+			HMACSecret:               getenv("ANTI_ABUSE_HMAC_SECRET", defaultDevelopmentAntiAbuseHMACSecret),
+			IPHashSecret:             getenv("ANTI_ABUSE_IP_HASH_SECRET", defaultDevelopmentAntiAbuseIPSecret),
+			ChallengeProvider:        strings.ToLower(getenv("ANTI_ABUSE_CHALLENGE_PROVIDER", "proof")),
+			TurnstileSiteKey:         strings.TrimSpace(os.Getenv("TURNSTILE_SITE_KEY")),
+			TurnstileSecretKey:       strings.TrimSpace(os.Getenv("TURNSTILE_SECRET_KEY")),
+			TurnstileVerifyURL:       getenv("TURNSTILE_VERIFY_URL", "https://challenges.cloudflare.com/turnstile/v0/siteverify"),
+			FormTokenTTL:             time.Duration(getenvInt("ANTI_ABUSE_FORM_TOKEN_TTL_MINUTES", 30)) * time.Minute,
+			FormMinimumAge:           time.Duration(getenvInt("ANTI_ABUSE_FORM_MINIMUM_AGE_MS", 800)) * time.Millisecond,
+			ChallengeTTL:             time.Duration(getenvInt("ANTI_ABUSE_CHALLENGE_TTL_MINUTES", 10)) * time.Minute,
+			EventRetentionDays:       getenvInt("ANTI_ABUSE_EVENT_RETENTION_DAYS", 180),
+			FingerprintRetentionDays: getenvInt("ANTI_ABUSE_FINGERPRINT_RETENTION_DAYS", 30),
+			DNSLookupTimeout:         time.Duration(getenvInt("ANTI_ABUSE_DNS_TIMEOUT_MS", 750)) * time.Millisecond,
+			DNSCacheTTL:              time.Duration(getenvInt("ANTI_ABUSE_DNS_CACHE_HOURS", 6)) * time.Hour,
 		},
 		Typesense: TypesenseConfig{
 			Enabled:          getenvBool("TYPESENSE_ENABLED", false),
@@ -215,6 +285,33 @@ func (cfg Config) Validate() error {
 	if cfg.DB.ResetOnStart && environment != "development" {
 		problems = append(problems, errors.New("DB_RESET_ON_START is only allowed in development"))
 	}
+	if cfg.ReplicaCount < 1 || cfg.ReplicaCount > 1000 {
+		problems = append(problems, errors.New("APP_REPLICA_COUNT must be between 1 and 1000"))
+	}
+	if cfg.ReplicaCount > 1 && !cfg.Redis.Enabled {
+		problems = append(problems, errors.New("REDIS_ENABLED must be true when APP_REPLICA_COUNT is greater than 1 so cross-instance throttles remain correct"))
+	}
+	if cfg.DB.MaxConns < 2 || cfg.DB.MaxConns > 500 || cfg.DB.MinConns < 0 || cfg.DB.MinConns > cfg.DB.MaxConns {
+		problems = append(problems, errors.New("DB_MIN_CONNS and DB_MAX_CONNS must define a valid pool between 2 and 500 connections"))
+	}
+	if cfg.Activity.BatchSize < 16 || cfg.Activity.BatchSize > 5000 {
+		problems = append(problems, errors.New("ACTIVITY_BATCH_SIZE must be between 16 and 5000"))
+	}
+	if cfg.Activity.QueueCapacity < cfg.Activity.BatchSize || cfg.Activity.QueueCapacity > 1000000 {
+		problems = append(problems, errors.New("ACTIVITY_QUEUE_CAPACITY must be at least one batch and no more than 1000000"))
+	}
+	if cfg.Activity.FlushInterval < 50*time.Millisecond || cfg.Activity.FlushInterval > time.Minute {
+		problems = append(problems, errors.New("ACTIVITY_FLUSH_INTERVAL_MS must be between 50 and 60000"))
+	}
+	if cfg.Activity.RetryMinDelay < 10*time.Millisecond || cfg.Activity.RetryMaxDelay < cfg.Activity.RetryMinDelay || cfg.Activity.RetryMaxDelay > 5*time.Minute {
+		problems = append(problems, errors.New("activity retry delays are invalid"))
+	}
+	if cfg.Activity.WriteTimeout < time.Second || cfg.Activity.WriteTimeout > time.Minute || cfg.Activity.DurableEnqueueTimeout < 100*time.Millisecond || cfg.Activity.DurableEnqueueTimeout > 10*time.Second {
+		problems = append(problems, errors.New("activity write timeouts are invalid"))
+	}
+	if cfg.Activity.DBMaxConns < 1 || cfg.Activity.DBMaxConns > 50 || cfg.Activity.DBMinConns < 0 || cfg.Activity.DBMinConns > cfg.Activity.DBMaxConns {
+		problems = append(problems, errors.New("ACTIVITY_DB_MIN_CONNS and ACTIVITY_DB_MAX_CONNS must define a valid pool between 1 and 50 connections"))
+	}
 	secret := strings.TrimSpace(cfg.JWTSecret)
 	settingsSecret := strings.TrimSpace(cfg.SettingsEncryptionKey)
 	if environment != "development" && environment != "test" {
@@ -246,6 +343,44 @@ func (cfg Config) Validate() error {
 			return !(value == '_' || value == '-' || value >= '0' && value <= '9' || value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z')
 		}) >= 0 {
 			problems = append(problems, errors.New("TYPESENSE_COLLECTION_PREFIX may only contain letters, numbers, underscores, and hyphens"))
+		}
+	}
+	if cfg.AntiAbuse.Enabled {
+		if len(strings.TrimSpace(cfg.AntiAbuse.HMACSecret)) < 32 {
+			problems = append(problems, errors.New("ANTI_ABUSE_HMAC_SECRET must contain at least 32 characters"))
+		}
+		if len(strings.TrimSpace(cfg.AntiAbuse.IPHashSecret)) < 32 {
+			problems = append(problems, errors.New("ANTI_ABUSE_IP_HASH_SECRET must contain at least 32 characters"))
+		}
+		if environment != "development" && environment != "test" {
+			if cfg.AntiAbuse.HMACSecret == defaultDevelopmentAntiAbuseHMACSecret {
+				problems = append(problems, errors.New("ANTI_ABUSE_HMAC_SECRET must be changed outside development"))
+			}
+			if cfg.AntiAbuse.IPHashSecret == defaultDevelopmentAntiAbuseIPSecret {
+				problems = append(problems, errors.New("ANTI_ABUSE_IP_HASH_SECRET must be changed outside development"))
+			}
+		}
+		if cfg.ReplicaCount > 1 && !cfg.Redis.Enabled {
+			problems = append(problems, errors.New("REDIS_ENABLED must be true for multi-replica anti-abuse rate limiting"))
+		}
+		switch cfg.AntiAbuse.ChallengeProvider {
+		case "proof", "disabled":
+		case "turnstile":
+			if cfg.AntiAbuse.TurnstileSiteKey == "" || cfg.AntiAbuse.TurnstileSecretKey == "" {
+				problems = append(problems, errors.New("TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY are required for the Turnstile challenge provider"))
+			}
+		default:
+			problems = append(problems, errors.New("ANTI_ABUSE_CHALLENGE_PROVIDER must be proof, turnstile, or disabled"))
+		}
+		if cfg.AntiAbuse.FormTokenTTL < time.Minute || cfg.AntiAbuse.FormTokenTTL > 24*time.Hour {
+			problems = append(problems, errors.New("ANTI_ABUSE_FORM_TOKEN_TTL_MINUTES must be between 1 minute and 24 hours"))
+		}
+		if cfg.AntiAbuse.FormMinimumAge < 0 || cfg.AntiAbuse.FormMinimumAge > time.Minute {
+			problems = append(problems, errors.New("ANTI_ABUSE_FORM_MINIMUM_AGE_MS must be between 0 and 60000"))
+		}
+		if cfg.AntiAbuse.EventRetentionDays < 7 || cfg.AntiAbuse.EventRetentionDays > 3650 ||
+			cfg.AntiAbuse.FingerprintRetentionDays < 1 || cfg.AntiAbuse.FingerprintRetentionDays > 365 {
+			problems = append(problems, errors.New("anti-abuse retention values are outside their supported ranges"))
 		}
 	}
 	frontend, err := url.Parse(strings.TrimSpace(cfg.FrontendOrigin))

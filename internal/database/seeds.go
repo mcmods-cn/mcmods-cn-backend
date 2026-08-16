@@ -38,6 +38,9 @@ var seedPermissions = []seedPermission{
 	{Code: "admin.access", Module: "admin", Name: "Access administration", Description: "Allows access to the administration console."},
 	{Code: "admin.config.read", Module: "settings", Name: "Read system configuration", Description: "Allows reading system configuration."},
 	{Code: "admin.config.write", Module: "settings", Name: "Write system configuration", Description: "Allows modifying system configuration."},
+	{Code: "security.anti-abuse.read", Module: "security", Name: "Read anti-abuse events", Description: "Allows viewing anti-abuse summaries, rules and redacted events."},
+	{Code: "security.anti-abuse.write", Module: "security", Name: "Manage anti-abuse controls", Description: "Allows changing anti-abuse rules and restrictions."},
+	{Code: "security.anti-abuse.sensitive", Module: "security", Name: "Read sensitive anti-abuse identifiers", Description: "Allows viewing complete hashed network and device identifiers."},
 
 	{Code: "user.read", Module: "user", Name: "Read users", Description: "Allows reading user accounts and login information."},
 	{Code: "user.write", Module: "user", Name: "Manage users", Description: "Allows modifying user accounts, status and security settings."},

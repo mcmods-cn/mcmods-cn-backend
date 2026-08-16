@@ -91,6 +91,7 @@ type createCommentRequest struct {
 	Body           string `json:"body"`
 	ParentID       string `json:"parentId"`
 	IdempotencyKey string `json:"idempotencyKey"`
+	Status         string `json:"-"`
 }
 
 type updateCommentRequest struct {
@@ -244,6 +245,10 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		writeError(w, http.StatusBadRequest, "评论不能为空且不能超过 10000 个字符")
 		return
 	}
+	request.Status = "published"
+	if antiAbuseModerationRequired(r) {
+		request.Status = "pending"
+	}
 	if request.ParentID != "" && isPureCY(request.Body) {
 		// “CY” is a private watch command rather than a public comment action.
 		if !claimsAllow(claims, "comment.watch") {
@@ -281,11 +286,9 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		return
 	}
 	var existingID int64
-	var recent int
-	if err = tx.QueryRow(r.Context(), `select
-		coalesce((select id from comments where author_id=$1 and idempotency_key=$2 limit 1),0),
-		(select count(*) from comments where author_id=$1 and created_at>now()-interval '1 minute')`,
-		claims.Subject, request.IdempotencyKey).Scan(&existingID, &recent); err != nil {
+	if err = tx.QueryRow(r.Context(), `select coalesce(
+		(select id from comments where author_id=$1 and idempotency_key=$2 limit 1),0)`,
+		claims.Subject, request.IdempotencyKey).Scan(&existingID); err != nil {
 		writeError(w, http.StatusInternalServerError, "发布评论失败")
 		return
 	}
@@ -301,12 +304,14 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 			writeJSON(w, http.StatusOK, items[0])
 			return
 		}
-	}
-	if recent >= 20 {
-		writeError(w, http.StatusTooManyRequests, "评论发布过于频繁，请稍后再试")
+		var existingPublicID, existingStatus string
+		if s.db.QueryRow(r.Context(), `select public_id,status from comments where id=$1`, existingID).Scan(&existingPublicID, &existingStatus) == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"id": existingPublicID, "status": existingStatus, "moderation": existingStatus == "pending"})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to load idempotent comment result")
 		return
 	}
-
 	inserted, err := insertCommentTree(r.Context(), tx, target, claims.Subject, request)
 	if errors.Is(err, pgx.ErrNoRows) && request.ParentID != "" {
 		writeError(w, http.StatusBadRequest, "回复目标不存在")
@@ -337,6 +342,10 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		return
 	}
 	annotateActivity(r, activity.ActionCreate, activity.ObjectComment, publicID, len(request.Body))
+	if request.Status == "pending" {
+		writeJSON(w, http.StatusAccepted, map[string]any{"id": publicID, "status": "pending", "moderation": true})
+		return
+	}
 
 	notificationData := map[string]any{
 		"commentId": publicID, "targetType": target.Type, "targetKey": target.Key,
@@ -388,9 +397,9 @@ func insertCommentTree(ctx context.Context, tx pgx.Tx, target commentTargetInfo,
 			for update
 		), inserted_comment as (
 			insert into comments
-				(target_type,target_id,target_version_id,author_id,parent_id,root_id,depth,body,idempotency_key)
+				(target_type,target_id,target_version_id,author_id,parent_id,root_id,depth,body,idempotency_key,status)
 			select $1::text,$2::bigint,$3::bigint,$4::bigint,
-				parent.id,parent.root_id,coalesce(parent.depth,0),$6::text,$7::text
+				parent.id,parent.root_id,coalesce(parent.depth,0),$6::text,$7::text,$8::text
 			from (values (1)) seed(value)
 			left join parent on true
 			where $5::text='' or parent.id is not null
@@ -416,7 +425,7 @@ func insertCommentTree(ctx context.Context, tx pgx.Tx, target commentTargetInfo,
 			coalesce(parent.author_id,0)
 		from inserted_comment inserted
 		left join parent on parent.id=inserted.parent_id`,
-		target.Type, target.InternalID, target.VersionID, authorID, request.ParentID, request.Body, request.IdempotencyKey).
+		target.Type, target.InternalID, target.VersionID, authorID, request.ParentID, request.Body, request.IdempotencyKey, request.Status).
 		Scan(&inserted.ID, &inserted.PublicID, &inserted.ParentID, &inserted.RootID, &inserted.Depth, &inserted.DirectRecipientID)
 	return inserted, err
 }

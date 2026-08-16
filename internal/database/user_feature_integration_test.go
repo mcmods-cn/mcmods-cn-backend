@@ -10,7 +10,7 @@ import (
 	"mcmods-cn-backend/internal/config"
 )
 
-func TestGeneration69UserFeaturesIntegration(t *testing.T) {
+func TestGeneration70UserFeaturesIntegration(t *testing.T) {
 	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
 		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 with an isolated PostgreSQL database to execute migration integration tests")
 	}
@@ -22,15 +22,15 @@ func TestGeneration69UserFeaturesIntegration(t *testing.T) {
 	}
 	defer pool.Close()
 	if err = Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate generation 69: %v", err)
+		t.Fatalf("migrate generation 70: %v", err)
 	}
 	var generation int
-	if err = pool.QueryRow(ctx, `select generation from schema_metadata where singleton`).Scan(&generation); err != nil || generation != 69 {
+	if err = pool.QueryRow(ctx, `select generation from schema_metadata where singleton`).Scan(&generation); err != nil || generation != 70 {
 		t.Fatalf("unexpected schema generation %d: %v", generation, err)
 	}
 	for _, relation := range []string{
 		"user_presence_sessions", "user_statistics_daily", "user_statistics_totals",
-		"user_content_creation_facts", "activity_cleanup_runs",
+		"user_content_creation_facts", "activity_cleanup_runs", "activity_event_outbox",
 	} {
 		var exists bool
 		if err = pool.QueryRow(ctx, `select to_regclass('public.'||$1) is not null`, relation).Scan(&exists); err != nil || !exists {

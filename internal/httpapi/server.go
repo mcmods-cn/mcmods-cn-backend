@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/activity"
+	"mcmods-cn-backend/internal/antiabuse"
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/mailer"
 	"mcmods-cn-backend/internal/querycache"
@@ -24,6 +25,7 @@ type Server struct {
 	queue          *queue.Client
 	cache          *querycache.Cache
 	activity       *activity.Monitor
+	antiAbuse      *antiabuse.Service
 	search         *searchindex.Client
 	mux            *http.ServeMux
 	ygg            *yggdrasilService
@@ -31,7 +33,7 @@ type Server struct {
 	trustedProxies []*net.IPNet
 }
 
-const corsAllowedHeaders = "Authorization, Content-Type, Idempotency-Key, X-Request-ID"
+const corsAllowedHeaders = "Authorization, Content-Type, Idempotency-Key, X-Request-ID, X-Client-ID, X-Anti-Abuse-Form, X-Anti-Abuse-Trap, X-Anti-Abuse-Challenge, X-MCMods-Bot-Token"
 
 func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, activityMonitor *activity.Monitor, searchClient *searchindex.Client) http.Handler {
 	server := &Server{
@@ -45,6 +47,7 @@ func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, a
 		mux:            http.NewServeMux(),
 		trustedProxies: parseTrustedProxyNetworks(cfg.TrustedProxyCIDRs),
 	}
+	server.antiAbuse = antiabuse.New(cfg.AntiAbuse, db, server.cache)
 	yggdrasilConfig, err := server.loadYggdrasilConfig(context.Background())
 	if err != nil {
 		log.Printf("load Yggdrasil settings: %v; using environment configuration", err)
@@ -53,7 +56,7 @@ func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, a
 	}
 	server.ygg = newYggdrasilService(server.cfg)
 	server.routes()
-	return server.securityHeaders(server.cors(server.cookieRequestOrigin(server.yggdrasilALI(server.compression(server.logAccess(server.mux))))))
+	return server.securityHeaders(server.cors(server.cookieRequestOrigin(server.yggdrasilALI(server.compression(server.logAccess(server.botTraffic(server.mux)))))))
 }
 
 func (s *Server) routes() {
@@ -69,6 +72,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/permissions/compare/options", s.requireAuth(s.permissionComparisonOptions))
 	s.mux.HandleFunc("POST /api/v1/permissions/compare", s.requireAuth(s.comparePermissions))
 	s.mux.HandleFunc("GET /api/v1/auth/me", s.requireAuth(s.me))
+	s.mux.HandleFunc("GET /api/v1/anti-abuse/form-token", s.requireAuth(s.antiAbuseFormToken))
 	s.mux.HandleFunc("GET /api/v1/review-locks/{entityType}/{publicId}", s.requireAuth(s.reviewLock))
 	s.mux.HandleFunc("POST /api/v1/review-locks/{entityType}/{publicId}/subscribe", s.requireAuth(s.subscribeReviewCompletion))
 	s.mux.HandleFunc("POST /api/v1/auth/logout", s.requireAuth(s.logout))
@@ -408,6 +412,19 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/admin/server-reviews/{serverId}/attachments/{fileId}/presign", s.requirePermission("server.review", s.presignMinecraftServerProof))
 	s.mux.HandleFunc("GET /api/v1/admin/server-settings", s.requirePermission("admin.config.read", s.adminServerSettings))
 	s.mux.HandleFunc("PUT /api/v1/admin/server-settings", s.requirePermission("admin.config.write", s.adminServerSettings))
+	s.mux.HandleFunc("GET /api/v1/admin/anti-abuse/overview", s.requirePermission("security.anti-abuse.read", s.adminAntiAbuseOverview))
+	s.mux.HandleFunc("GET /api/v1/admin/anti-abuse/events", s.requirePermission("security.anti-abuse.read", s.adminAntiAbuseEvents))
+	s.mux.HandleFunc("PATCH /api/v1/admin/anti-abuse/events/{id}", s.requirePermission("security.anti-abuse.write", s.adminReviewAntiAbuseEvent))
+	s.mux.HandleFunc("GET /api/v1/admin/anti-abuse/config", s.requirePermission("security.anti-abuse.read", s.adminAntiAbuseConfig))
+	s.mux.HandleFunc("PUT /api/v1/admin/anti-abuse/config", s.requirePermission("security.anti-abuse.write", s.adminAntiAbuseConfig))
+	s.mux.HandleFunc("POST /api/v1/admin/anti-abuse/config/reset", s.requirePermission("security.anti-abuse.write", s.adminResetAntiAbuseConfig))
+	s.mux.HandleFunc("PATCH /api/v1/admin/anti-abuse/users/{id}", s.requirePermission("security.anti-abuse.write", s.adminUpdateAntiAbuseUserState))
+	s.mux.HandleFunc("GET /api/v1/admin/anti-abuse/restrictions", s.requirePermission("security.anti-abuse.read", s.adminAntiAbuseRestrictions))
+	s.mux.HandleFunc("POST /api/v1/admin/anti-abuse/restrictions", s.requirePermission("security.anti-abuse.write", s.adminAntiAbuseRestrictions))
+	s.mux.HandleFunc("PATCH /api/v1/admin/anti-abuse/restrictions/{id}", s.requirePermission("security.anti-abuse.write", s.adminLiftAntiAbuseRestriction))
+	s.mux.HandleFunc("GET /api/v1/admin/anti-abuse/bot-rules", s.requirePermission("security.anti-abuse.read", s.adminAntiAbuseBotRules))
+	s.mux.HandleFunc("POST /api/v1/admin/anti-abuse/bot-rules", s.requirePermission("security.anti-abuse.write", s.adminAntiAbuseBotRules))
+	s.mux.HandleFunc("DELETE /api/v1/admin/anti-abuse/bot-rules/{id}", s.requirePermission("security.anti-abuse.write", s.adminDeleteAntiAbuseBotRule))
 	s.mux.HandleFunc("GET /api/v1/admin/mod-content-reviews", s.requirePermission("content.review", s.adminModContentReviews))
 	s.mux.HandleFunc("GET /api/v1/admin/unresolved-references", s.requirePermission("reference.unresolved.read", s.adminUnresolvedReferences))
 	s.mux.HandleFunc("GET /api/v1/admin/creator-claims", s.requirePermission("creator.claim.review", s.adminCreatorClaims))
@@ -441,6 +458,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/admin/logs/config", s.requirePermission("log.read", s.getLogConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/logs/config", s.requirePermission("log.write", s.updateLogConfig))
 	s.mux.HandleFunc("GET /api/v1/admin/activity-logs/retention", s.requirePermission("log.read", s.getActivityRetentionConfig))
+	s.mux.HandleFunc("GET /api/v1/admin/activity-logs/ingestion", s.requirePermission("log.read", s.activityIngestionStatus))
 	s.mux.HandleFunc("PUT /api/v1/admin/activity-logs/retention", s.requirePermission("log.write", s.updateActivityRetentionConfig))
 	s.mux.HandleFunc("POST /api/v1/admin/activity-logs/cleanup/preview", s.requirePermission("log.write", s.previewActivityCleanup))
 	s.mux.HandleFunc("POST /api/v1/admin/activity-logs/cleanup/execute", s.requirePermission("log.write", s.executeActivityCleanup))
@@ -498,7 +516,7 @@ func (s *Server) cookieRequestOrigin(next http.Handler) http.Handler {
 		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 			if _, err := r.Cookie(authSessionCookieName); err == nil && r.Header.Get("Authorization") == "" {
 				origin := r.Header.Get("Origin")
-				if origin != "" && origin != s.cfg.FrontendOrigin {
+				if origin != s.cfg.FrontendOrigin {
 					writeError(w, http.StatusForbidden, "request origin is not allowed")
 					return
 				}

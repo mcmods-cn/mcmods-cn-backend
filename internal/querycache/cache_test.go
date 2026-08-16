@@ -2,6 +2,7 @@ package querycache
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,6 +32,31 @@ func TestLocalFallbackCachesAndInvalidates(t *testing.T) {
 	}
 	if loads.Load() != 2 {
 		t.Fatalf("loader was not called after invalidation: %d", loads.Load())
+	}
+}
+
+func TestConsumeRateLimitLocalFallbackIsAtomic(t *testing.T) {
+	t.Parallel()
+	cache := New(config.RedisConfig{})
+	const attempts, limit = 64, 11
+	var allowed atomic.Int32
+	var group sync.WaitGroup
+	for range attempts {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			result := cache.ConsumeRateLimit(context.Background(), "comment:user:42", limit, time.Minute)
+			if result.Allowed {
+				allowed.Add(1)
+			}
+			if result.Backend != "local" || result.RetryAfter <= 0 {
+				t.Errorf("unexpected fallback result: %+v", result)
+			}
+		}()
+	}
+	group.Wait()
+	if got := allowed.Load(); got != limit {
+		t.Fatalf("allowed %d concurrent requests, want exactly %d", got, limit)
 	}
 }
 

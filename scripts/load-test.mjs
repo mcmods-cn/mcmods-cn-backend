@@ -21,12 +21,14 @@ const commentTargetType = process.env.MCMODS_LOAD_COMMENT_TARGET_TYPE ?? "";
 const commentTargetID = process.env.MCMODS_LOAD_COMMENT_TARGET_ID ?? "";
 const mutationCommentID = process.env.MCMODS_LOAD_COMMENT_ID ?? "";
 const fixedCommentIdempotencyKey = process.env.MCMODS_LOAD_COMMENT_IDEMPOTENCY_KEY ?? "";
+const botToken = process.env.MCMODS_LOAD_BOT_TOKEN ?? "";
 const outputPath = process.env.MCMODS_LOAD_OUTPUT ?? "";
 const requestTimeoutMS = boundedNumber(process.env.MCMODS_LOAD_TIMEOUT_MS, 10_000, 500, 120_000);
 
 const results = [];
 const statusCounts = new Map();
 const scenarioCounts = new Map();
+const antiAbuseCodes = new Map();
 let networkErrors = 0;
 let completed = 0;
 let stopped = false;
@@ -71,6 +73,7 @@ const report = {
   },
   statuses: Object.fromEntries([...statusCounts.entries()].sort(([left], [right]) => left - right)),
   requestsByScenario: Object.fromEntries([...scenarioCounts.entries()].sort()),
+  antiAbuseCodes: Object.fromEntries([...antiAbuseCodes.entries()].sort()),
   notes: [
     "This client does not infer backend CPU, memory, DB connections, locks, or cache hit rate; capture those from the test environment telemetry.",
     "The script never calls the destructive cleanup execute endpoint. Activity cleanup load covers preview only.",
@@ -100,12 +103,18 @@ async function worker(workerID, deadline) {
         headers: {
           ...(request.token ? { Authorization: `Bearer ${request.token}` } : {}),
           ...(body ? { "Content-Type": "application/json" } : {}),
+          ...(request.headers ?? {}),
+          "X-Client-ID": request.clientID ?? `mcmods-load-${workerID % 8}`,
           "X-Load-Test": "mcmods-local-load-test",
         },
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
-      await response.arrayBuffer();
+      const responseBody = await response.text();
+      try {
+        const code = JSON.parse(responseBody)?.code;
+        if (typeof code === "string" && code) antiAbuseCodes.set(code, (antiAbuseCodes.get(code) ?? 0) + 1);
+      } catch {}
       statusCounts.set(response.status, (statusCounts.get(response.status) ?? 0) + 1);
     } catch {
       networkErrors++;
@@ -126,6 +135,8 @@ function chooseRequest(scenario, sequence) {
     presence: presenceRequests(),
     statistics: statisticsRequests(),
     activity: activityRequests(),
+    antiabuse: antiAbuseRequests(),
+    crawlers: crawlerRequests(),
   };
   const mixed = interleave([
     repeat(pools.catalogs, 6),
@@ -202,6 +213,9 @@ function activityRequests() {
   const requests = [
     { name: "admin-logs", path: "/api/v1/admin/logs?kind=user&limit=50", token: adminToken },
     { name: "activity-retention-config", path: "/api/v1/admin/activity-logs/retention", token: adminToken },
+    { name: "activity-ingestion-status", path: "/api/v1/admin/activity-logs/ingestion", token: adminToken },
+    { name: "anti-abuse-overview", path: "/api/v1/admin/anti-abuse/overview", token: adminToken },
+    { name: "anti-abuse-events", path: "/api/v1/admin/anti-abuse/events?limit=100", token: adminToken },
   ];
   if (enableAdminPreview) requests.push({
       name: "activity-cleanup-preview",
@@ -210,6 +224,28 @@ function activityRequests() {
       token: adminToken,
       body: { actions: ["view"], from: new Date(Date.now() - 30 * 86_400_000).toISOString() },
   });
+  return requests;
+}
+
+function antiAbuseRequests() {
+  if (!enableMutations || !token || !commentTargetType || !commentTargetID) return [];
+  const path = `/api/v1/comment-targets/${encodeURIComponent(commentTargetType)}/${encodeURIComponent(commentTargetID)}/comments`;
+  const replayKey = fixedCommentIdempotencyKey || `replay-${startedAt.getTime()}`;
+  return [
+    { name: "spam-exact", path, method: "POST", token, bodyFactory: (workerID, sequence) => ({ body: "[mcmods-anti-abuse-load] exact duplicate", idempotencyKey: `exact-${workerID}-${sequence}-${startedAt.getTime()}` }) },
+    { name: "spam-near", path, method: "POST", token, bodyFactory: (workerID, sequence) => ({ body: `[mcmods-anti-abuse-load] repeated template number ${sequence % 5}`, idempotencyKey: `near-${workerID}-${sequence}-${startedAt.getTime()}` }) },
+    { name: "idempotent-replay", path, method: "POST", token, body: { body: "[mcmods-anti-abuse-load] idempotent replay", idempotencyKey: replayKey }, headers: { "Idempotency-Key": replayKey } },
+    { name: "normal-comment-read", path: `${path}?sort=latest&limit=20`, token },
+  ];
+}
+
+function crawlerRequests() {
+  const requests = [
+    { name: "unknown-crawler-catalog", path: "/api/v1/mods?limit=20", headers: { "User-Agent": "MCModsResearchCrawler/1.0" } },
+    { name: "spoofed-googlebot", path: "/api/v1/community/posts?kind=tutorial&limit=20", headers: { "User-Agent": "Googlebot/2.1" } },
+    { name: "crawler-search", path: "/api/v1/search?q=minecraft", headers: { "User-Agent": "ExampleSpider/1.0" } },
+  ];
+  if (botToken) requests.push({ name: "allowed-readonly-bot", path: "/api/v1/mods?limit=20", headers: { "User-Agent": "MCModsAllowedIndexer/1.0", "X-MCMods-Bot-Token": botToken } });
   return requests;
 }
 

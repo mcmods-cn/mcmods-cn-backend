@@ -11,8 +11,11 @@ import (
 const maxJSONRequestBodyBytes = int64(8 << 20)
 
 type apiResponse struct {
-	Data  any    `json:"data,omitempty"`
-	Error string `json:"error,omitempty"`
+	Data       any    `json:"data,omitempty"`
+	Error      string `json:"error,omitempty"`
+	Code       string `json:"code,omitempty"`
+	RetryAfter int    `json:"retryAfter,omitempty"`
+	Details    any    `json:"details,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
@@ -34,6 +37,16 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(apiResponse{Error: message})
+}
+
+func writeAPIError(w http.ResponseWriter, status int, code, message string, retryAfter int, details any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if retryAfter > 0 {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+	}
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(apiResponse{Error: message, Code: code, RetryAfter: retryAfter, Details: details})
 }
 
 func decodeJSON(r *http.Request, target any) error {

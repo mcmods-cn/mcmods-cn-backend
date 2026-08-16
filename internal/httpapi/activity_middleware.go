@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
@@ -160,25 +161,31 @@ func (s *Server) recordRequestActivity(r *http.Request, annotation *requestActiv
 			return
 		}
 	}
-	s.activity.Record(event)
+	if activity.IsDurableAction(event.ActionID) {
+		// Request cancellation must not erase an already successful mutation.
+		// The monitor still applies its short configured enqueue deadline.
+		_ = s.activity.RecordDurable(context.Background(), event)
+		return
+	}
+	s.activity.RecordBestEffort(event)
 }
 
 func inferredActivityAction(r *http.Request) int16 {
 	path := strings.ToLower(r.URL.Path)
 	switch {
-	case strings.Contains(path, "/download"):
+	case hasActivityPathSegment(path, "download", "downloads"):
 		return activity.ActionDownload
-	case strings.Contains(path, "/uploads"):
+	case hasActivityPathSegment(path, "upload", "uploads"):
 		return activity.ActionUpload
-	case strings.Contains(path, "/claim"):
+	case hasActivityPathSegment(path, "claim"):
 		return activity.ActionClaim
-	case strings.Contains(path, "/transfer"):
+	case hasActivityPathSegment(path, "transfer"):
 		return activity.ActionTransfer
-	case strings.Contains(path, "/checkin"):
+	case hasActivityPathSegment(path, "checkin"):
 		return activity.ActionCheckIn
-	case strings.Contains(path, "/purchase"):
+	case hasActivityPathSegment(path, "purchase"):
 		return activity.ActionPurchase
-	case strings.Contains(path, "/use"):
+	case hasActivityPathSegment(path, "use"):
 		return activity.ActionUse
 	}
 	switch r.Method {
@@ -193,6 +200,23 @@ func inferredActivityAction(r *http.Request) int16 {
 	default:
 		return 0
 	}
+}
+
+func hasActivityPathSegment(path string, expected ...string) bool {
+	remaining := strings.Trim(path, "/")
+	for remaining != "" {
+		segment, rest, found := strings.Cut(remaining, "/")
+		for _, candidate := range expected {
+			if segment == candidate {
+				return true
+			}
+		}
+		if !found {
+			break
+		}
+		remaining = rest
+	}
+	return false
 }
 
 func isHighFrequencyActivityExcluded(r *http.Request) bool {

@@ -73,6 +73,17 @@ func parseCatalogBoolean(value string) (string, bool) {
 	return value, value == "" || value == "true" || value == "false"
 }
 
+func parseCatalogVersionMode(value string) (string, bool) {
+	switch strings.TrimSpace(value) {
+	case "", "any":
+		return "any", true
+	case "all":
+		return "all", true
+	default:
+		return "", false
+	}
+}
+
 var catalogFeatureKeys = stringSet("tutorials", "items", "gallery", "downloads", "reviewed", "claimed", "serverSupport", "modpackAllowed", "severeIssues")
 
 func validCatalogFeatures(values []string) bool {

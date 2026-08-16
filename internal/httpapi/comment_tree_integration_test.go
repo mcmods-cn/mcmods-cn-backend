@@ -37,7 +37,7 @@ func TestInsertCommentTreeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if recentCommentIndex == nil {
-		t.Fatal("recent-comment rate-limit index is missing")
+		t.Fatal("comment author activity index is missing")
 	}
 
 	tx, err := db.Begin(ctx)

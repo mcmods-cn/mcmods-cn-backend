@@ -8,6 +8,41 @@ import (
 	"mcmods-cn-backend/internal/config"
 )
 
+func TestCookieMutationRequiresExactOrigin(t *testing.T) {
+	server := &Server{cfg: config.Config{FrontendOrigin: "https://mcmods.example"}}
+	called := false
+	handler := server.cookieRequestOrigin(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { called = true; w.WriteHeader(http.StatusNoContent) }))
+	for _, test := range []struct {
+		name, origin string
+		want         int
+	}{{"missing", "", http.StatusForbidden}, {"cross-site", "https://evil.example", http.StatusForbidden}, {"same-origin", "https://mcmods.example", http.StatusNoContent}} {
+		t.Run(test.name, func(t *testing.T) {
+			called = false
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/comments", nil)
+			request.AddCookie(&http.Cookie{Name: authSessionCookieName, Value: "cookie"})
+			request.Header.Set("Origin", test.origin)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.want || called != (test.want == http.StatusNoContent) {
+				t.Fatalf("status=%d called=%v", response.Code, called)
+			}
+		})
+	}
+}
+
+func TestBearerMutationDoesNotRequireBrowserOrigin(t *testing.T) {
+	server := &Server{cfg: config.Config{FrontendOrigin: "https://mcmods.example"}}
+	handler := server.cookieRequestOrigin(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/comments", nil)
+	request.AddCookie(&http.Cookie{Name: authSessionCookieName, Value: "cookie"})
+	request.Header.Set("Authorization", "Bearer api-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d", response.Code)
+	}
+}
+
 func TestOptionalAuthTreatsInvalidCookieAsGuest(t *testing.T) {
 	server := &Server{cfg: config.Config{JWTSecret: "test-secret"}}
 	called := false

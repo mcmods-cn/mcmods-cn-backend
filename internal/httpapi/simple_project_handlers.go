@@ -88,7 +88,9 @@ const simpleProjectCatalogFilter = `where project.project_type=$1
 			and (localization.name ilike '%%'||$3||'%%' or localization.summary ilike '%%'||$3||'%%')))))
 	and (cardinality($4::text[])=0 or not exists(
 		select 1 from unnest($4::text[]) requested(value) where not requested.value=any(project.categories)))
-	and (cardinality($5::text[])=0 or project.minecraft_versions && $5::text[])
+	and (cardinality($5::text[])=0
+		or $18='all' and project.minecraft_versions @> $5::text[]
+		or $18='any' and project.minecraft_versions && $5::text[])
 	and (cardinality($6::text[])=0 or project.loaders && $6::text[])
 	and (cardinality($9::text[])=0 or not exists(
 		select 1 from unnest($9::text[]) requested(value) where not requested.value=any(project.features)))
@@ -130,9 +132,10 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 	sources, validSources := parseCatalogList(r.URL.Query().Get("source"), 10)
 	licenses, validLicenses := parseCatalogList(r.URL.Query().Get("license"), 20)
 	updatedDays, validUpdated := parseCatalogUpdatedRange(r.URL.Query().Get("updated"))
+	versionMode, validVersionMode := parseCatalogVersionMode(r.URL.Query().Get("versionMode"))
 	if !validQuery || !validCategories || !validVersions || !validLoaders || !validFeatures || !validResolutions ||
 		!validPerformances || !validMapSizes || !validParents || !validStatuses || !validSources ||
-		!validLicenses || !validUpdated || !validSimpleProjectOptions(projectType, loaders, categories, features) ||
+		!validLicenses || !validUpdated || !validVersionMode || !validSimpleProjectOptions(projectType, loaders, categories, features) ||
 		!everyCatalogValueAllowed(statuses, allowedModStatuses) || !everyCatalogValueAllowed(sources, allowedModSourceStatuses) ||
 		!everyCatalogValueAllowed(licenses, allowedModLicenses) {
 		writeError(w, http.StatusBadRequest, "invalid catalog filter")
@@ -160,7 +163,7 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		total = indexed.Total
 	} else if err := s.db.QueryRow(r.Context(), `select count(*) from simple_projects project `+simpleProjectCatalogFilter,
 		projectType, claims.Subject, query, categories, versions, loaders, false, []int64{}, features, resolutions,
-		performances, mapSizes, parents, statuses, sources, licenses, updatedDays).Scan(&total); err != nil {
+		performances, mapSizes, parents, statuses, sources, licenses, updatedDays, versionMode).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count projects")
 		return
 	}
@@ -177,9 +180,9 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
 		`+simpleProjectCatalogFilter+`
 		order by `+orderSQL+`
-		limit $18 offset $19`, projectType, claims.Subject, query, categories, versions, loaders,
+		limit $19 offset $20`, projectType, claims.Subject, query, categories, versions, loaders,
 		indexed.Used, indexed.IDs, features, resolutions, performances, mapSizes, parents, statuses, sources,
-		licenses, updatedDays, limit, databaseOffset)
+		licenses, updatedDays, versionMode, limit, databaseOffset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load projects")
 		return
@@ -316,6 +319,9 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 	if simpleProjectReviewRequired(config, projectType, "create") && !claimsAllow(claims, "content.no-review") && !claimsAllow(claims, "admin.*") {
 		reviewStatus = "pending"
 	}
+	if antiAbuseModerationRequired(r) {
+		reviewStatus = "pending"
+	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start project creation")
@@ -439,6 +445,9 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 	}
 	status := "approved"
 	if simpleProjectReviewRequired(loadReviewConfig(r.Context(), s.db), projectType, "edit") && !claimsAllow(claims, "content.no-review") && !claimsAllow(claims, "admin.*") {
+		status = "pending"
+	}
+	if antiAbuseModerationRequired(r) {
 		status = "pending"
 	}
 	tx, err := s.db.Begin(r.Context())

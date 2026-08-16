@@ -162,11 +162,8 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid catalog filter")
 		return
 	}
-	versionMode := strings.TrimSpace(r.URL.Query().Get("versionMode"))
-	if versionMode == "" {
-		versionMode = "any"
-	}
-	if versionMode != "any" && versionMode != "all" {
+	versionMode, validVersionMode := parseCatalogVersionMode(r.URL.Query().Get("versionMode"))
+	if !validVersionMode {
 		writeError(w, http.StatusBadRequest, "invalid version mode")
 		return
 	}
@@ -322,6 +319,9 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reviewRequired := loadReviewConfig(r.Context(), s.db).ModpackCreate && !claimsAllow(claims, "content.no-review") && !claimsAllow(claims, "admin.*")
+	if antiAbuseModerationRequired(r) {
+		reviewRequired = true
+	}
 	reviewStatus := "approved"
 	if reviewRequired {
 		reviewStatus = "pending"
@@ -443,6 +443,9 @@ func (s *Server) createModpackRevision(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 	reviewRequired := loadReviewConfig(r.Context(), s.db).ModpackEdit && !claimsAllow(claims, "content.no-review") && !claimsAllow(claims, "admin.*")
+	if antiAbuseModerationRequired(r) {
+		reviewRequired = true
+	}
 	status := "approved"
 	if reviewRequired {
 		status = "pending"

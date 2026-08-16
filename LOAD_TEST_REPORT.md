@@ -173,6 +173,25 @@ node scripts/load-test.mjs
 - `test-results/load/comments-mutation-high.json`
 - `test-results/load/comments-create-rate-limit.json`
 
+## 2026-08-15：动作 Outbox 定向负载
+
+本轮不是 HTTP 用户流量基线，而是 Generation 70 新动作摄取链路的真实 PostgreSQL 一致性负载：
+
+- 2,000 个非 `view` 关键动作；
+- 20 个并发生产协程；
+- 4 个共享 PostgreSQL 的消费实例；
+- 入队 8.678 秒，230.46 条/秒；
+- Outbox 全部搬运完成 8.863 秒，端到端 225.65 条/秒；
+- Outbox 最终 0 条，`user_activity_events` 恰好 2,000 条；
+- 无入队失败、重复或丢失，独立测试用户数据已精确清理。
+
+```powershell
+$env:MCMODS_RUN_ACTIVITY_LOAD='1'
+go test -v -count=1 -run TestDurableOutboxConcurrentLoadIntegration ./internal/activity
+```
+
+该结果没有数据库主机 CPU、WAL、锁等待、VACUUM 或千万级历史表背景，不能外推为生产用户容量。
+
 ## 风险与下一轮建议
 
 1. 给测试库装载能区分发布时间、点赞和热度排序的代表性数据，并加入跨分页、大评论树、高贡献用户和大量活动日志；当前空表无法衡量排序、大范围过滤与索引性能。

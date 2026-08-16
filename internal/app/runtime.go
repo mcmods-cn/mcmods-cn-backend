@@ -19,10 +19,11 @@ import (
 )
 
 type applicationRuntime struct {
-	db       *pgxpool.Pool
-	queue    *queue.Client
-	activity *activity.Monitor
-	search   *searchindex.Client
+	db         *pgxpool.Pool
+	activityDB *pgxpool.Pool
+	queue      *queue.Client
+	activity   *activity.Monitor
+	search     *searchindex.Client
 }
 
 type runtimeInitializationError struct {
@@ -95,8 +96,12 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 		}
 	}
 	initialized := false
+	var activityDB *pgxpool.Pool
 	defer func() {
 		if !initialized {
+			if activityDB != nil {
+				activityDB.Close()
+			}
 			db.Close()
 		}
 	}()
@@ -113,6 +118,13 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	if err = database.SeedRBAC(ctx, db); err != nil {
 		return nil, databaseInitializationError("seed permissions", err)
 	}
+	activityDB, err = database.ConnectActivity(ctx, cfg)
+	if err != nil {
+		return nil, &runtimeInitializationError{
+			Component: "database", Code: "activity_database_unavailable",
+			PublicMessage: "activity database writer is unavailable", Err: fmt.Errorf("connect activity database pool: %w", err),
+		}
+	}
 
 	httpapi.StartMinecraftVersionSyncScheduler(ctx, db)
 	httpapi.StartMinecraftServerProbeScheduler(ctx, db)
@@ -121,7 +133,12 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	httpapi.NewMaintenanceWorker(db).Start(ctx)
 	httpapi.NewActivityRetentionWorker(db).Start(ctx)
 	progressionService := progression.NewService(db)
-	activityMonitor := activity.NewMonitor(db, progressionService.ProcessActivityBatch)
+	activityMonitor := activity.NewMonitorWithOptions(activityDB, progressionService.ProcessActivityBatch, activity.Options{
+		BatchSize: cfg.Activity.BatchSize, QueueCapacity: cfg.Activity.QueueCapacity,
+		FlushInterval: cfg.Activity.FlushInterval, RetryMinDelay: cfg.Activity.RetryMinDelay,
+		RetryMaxDelay: cfg.Activity.RetryMaxDelay, WriteTimeout: cfg.Activity.WriteTimeout,
+		DurableEnqueueTimeout: cfg.Activity.DurableEnqueueTimeout,
+	})
 	natsCfg, loadErr := database.LoadNATSConfig(ctx, db, cfg.NATS, cfg.SettingsEncryptionKey)
 	if loadErr != nil {
 		log.Printf("load NATS config: %v", loadErr)
@@ -152,7 +169,7 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	searchindex.NewWorker(db, searchClient).Start(ctx)
 
 	initialized = true
-	return &applicationRuntime{db: db, queue: queueClient, activity: activityMonitor, search: searchClient}, nil
+	return &applicationRuntime{db: db, activityDB: activityDB, queue: queueClient, activity: activityMonitor, search: searchClient}, nil
 }
 
 func databaseInitializationError(action string, err error) error {
@@ -238,6 +255,9 @@ func (runtime *applicationRuntime) close() {
 		if err := runtime.activity.Close(shutdownCtx); err != nil {
 			log.Printf("activity monitor shutdown: %v", err)
 		}
+	}
+	if runtime.activityDB != nil {
+		runtime.activityDB.Close()
 	}
 	if runtime.queue != nil {
 		runtime.queue.Close()

@@ -87,3 +87,15 @@ where id in (
   where action_id=3 and occurred_at<now()-interval '30 days'
   order by occurred_at,id limit 1000
 );
+
+explain (analyze, buffers, format text)
+select id,user_id,action_id,object_type_id,occurred_at
+from activity_event_outbox
+where available_at<=now()
+order by available_at,id
+limit 256
+for update skip locked;
+
+explain (analyze, buffers, format text)
+select count(*),min(created_at)
+from activity_event_outbox;

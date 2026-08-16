@@ -60,3 +60,14 @@
 - 预览使用快照上界，执行不会误删预览之后新写入的事件。
 - 清理不可恢复；生产执行前应按现有备份策略保留数据库备份。
 - 用户累计统计、按日趋势、内容事实和经验交易不位于清理目标表，清理后无需扫描全量日志来维持正确性。
+
+## 动作摄取稳定性（generation 70）
+
+- `view` 是 best-effort 信号：经五分钟共享节流后进入严格有界队列；队列满载时丢弃并计数，不阻塞业务请求，也不再创建无上限内存 overflow。
+- `create/edit/delete/claim/download/upload/purchase/transfer/checkin/use` 先写入 `activity_event_outbox`。只有数据库确认后才算成功入队，应用重启不会丢失已确认的 Outbox 事件。
+- 消费器按固定批次执行 `FOR UPDATE SKIP LOCKED`，原始事件插入和 Outbox 删除位于同一事务，多实例不会重复搬运同一事件。
+- 失败使用 250ms 到 30s 的指数退避并带抖动；每次 CopyFrom 不超过配置批量，数据库恢复时不会一次提交整个积压。
+- 动作摄取使用独立连接池。生产连接总数必须把 API 池和动作池一起计入 PostgreSQL `max_connections` 预算。
+- `GET /api/v1/admin/activity-logs/ingestion` 需要 `log.read`，返回队列深度、Outbox 积压与最老时间、丢弃/失败/重试计数和连接池等待指标。
+- 多实例必须设置正确的 `APP_REPLICA_COUNT` 并启用 Redis；否则启动配置校验失败，避免视图节流在每个实例重复计数。
+- 安全、权限、资金等权威审计仍在业务事务和专用审计表内完成；通用动作 Outbox 是活动/统计流，不替代领域账本。

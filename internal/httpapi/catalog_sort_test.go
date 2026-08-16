@@ -86,6 +86,15 @@ func TestCatalogDatabaseFiltersCoverVersionAndCategoryBeforePagination(t *testin
 	}
 }
 
+func TestSimpleProjectVersionFilterSupportsAnyAndAllMatching(t *testing.T) {
+	t.Parallel()
+	for _, operator := range []string{"project.minecraft_versions && $5::text[]", "project.minecraft_versions @> $5::text[]"} {
+		if !strings.Contains(simpleProjectCatalogFilter, operator) {
+			t.Fatalf("simple project version filter is missing %q", operator)
+		}
+	}
+}
+
 func TestCatalogTextAndBooleanParametersAreBounded(t *testing.T) {
 	t.Parallel()
 	if _, ok := parseCatalogQuery(strings.Repeat("a", 201)); ok {
@@ -99,5 +108,17 @@ func TestCatalogTextAndBooleanParametersAreBounded(t *testing.T) {
 	}
 	if everyCatalogValueAllowed([]string{"active", "dropped'); --"}, allowedModStatuses) {
 		t.Fatal("unknown catalog enum was accepted")
+	}
+}
+
+func TestParseCatalogVersionModeUsesWhitelist(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{"", "any", "all"} {
+		if _, ok := parseCatalogVersionMode(value); !ok {
+			t.Fatalf("valid version mode %q was rejected", value)
+		}
+	}
+	if _, ok := parseCatalogVersionMode("all') or true --"); ok {
+		t.Fatal("arbitrary version mode was accepted")
 	}
 }

@@ -21,7 +21,7 @@
 - 用户统计写入集中在数据库统计触发器、内容事实触发器和 `internal/userstats` 校准服务；控制器只读取或标注领域活动。
 - 日志清理集中在 `activity_retention_handlers.go` 的策略、过滤、预览、确认、执行和自动 worker，不在管理页面拼 SQL。
 
-## 数据模型调整（schema generation 69）
+## 数据模型调整（schema generation 71）
 
 - `community_posts.category`：按板块合法类别筛选，并增加 `(kind, category, review_status, published_at, id)` 部分索引。
 - `users.show_online_status`：默认 `false`；`public_card_stat_slots`：固定六槽且默认全空。
@@ -31,7 +31,9 @@
 - `user_content_creation_facts`：保存创建、审核、删除/恢复后的持久内容事实。
 - `activity_cleanup_runs`：独立保存预览、执行和自动清理审计，清理活动表时不会被连带删除。
 
-当前仍处于 Dev 阶段，generation 69 只支持全新空库安装：所有最终表、索引和触发器在同一事务中创建，`sync_user_content_creation_fact()` 直接使用不会与表列重名的 `object_identifier`。不再保留 67/68 到 69 的升级桥；检测到其他 generation 时应用会明确要求重置开发数据库，避免为未发布结构长期维护兼容迁移。
+当前仍处于 Dev 阶段，generation 71 只支持全新空库安装：所有最终表、索引和触发器在同一事务中创建，`sync_user_content_creation_fact()` 直接使用不会与表列重名的 `object_identifier`。不再保留旧 generation 的升级桥；检测到其他 generation 时应用会明确要求重置开发数据库，避免为未发布结构长期维护兼容迁移。
+
+玩家动作摄取新增 `activity_event_outbox`：除 `view` 外的动作先持久化到 Outbox，再由多实例安全的 `FOR UPDATE SKIP LOCKED` 消费器按固定批次写入 `user_activity_events`。`view` 使用严格有界的内存队列，满载时丢弃并累计指标，不再使用无上限 overflow。动作摄取使用独立 PostgreSQL 连接池、指数退避、写入超时和管理员可观测接口。
 
 ## API 调整
 
@@ -65,12 +67,26 @@ go run ./cmd/user-statistics -user <用户公开ID> -batch-size 200
 | 会话级在线判断、默认隐藏和统一状态圆点 | 完成 |
 | 评论悬浮卡、等级摘要、六槽设置和缓存 | 完成 |
 | Go 单测、静态检查、前端检查和生产构建 | 完成 |
-| PostgreSQL 空库安装集成、真实 EXPLAIN ANALYZE | generation 69 空库安装有门禁集成测试；无 psql，EXPLAIN ANALYZE 未执行 |
+| PostgreSQL 空库安装集成、真实 EXPLAIN | generation 71 空库安装、风控查询计划和 Outbox 并发消费已实跑；生产规模 EXPLAIN ANALYZE 仍需代表性数据 |
 | 真实应用压力测试 | 已完成目录、鉴权混合和评论专项；详见 `LOAD_TEST_REPORT.md` |
 
 ## 风险与后续门禁
 
-- 合并前应重置 Dev 数据库并执行 generation 69 空库安装；在带代表性测试数据的隔离 PostgreSQL 环境继续执行校准命令和 `scripts/query-analysis.sql`，确认实际数据量下的计划。
-- 活动 monitor 沿用原有异步批量落库模型；进程被强杀时尚未 flush 的少量活动可能延迟到业务级校准之外。内容创建事实由业务表触发器保证，不受该风险影响。
+- Dev 数据库已重置并执行 generation 71 空库安装；仍需在带千万级代表性数据的隔离 PostgreSQL 环境执行查询分析脚本，确认真实数据分布下的计划。
+- 非 `view` 动作已持久化到数据库 Outbox，可跨进程重启恢复；`view` 明确为可丢弃的 best-effort 信号。业务、安全和资金审计仍必须保留在各自业务事务/审计表中，不能只依赖通用动作流。
+- 当前按动作保留周期不同，无法直接按月整分区删除；因此 generation 71 暂不强行分区。达到千万级事件前应以真实执行计划和 VACUUM/WAL 指标决定按时间+动作拆表或分区方案。
 - 热度排序索引已经存在于 `content_popularity_stats`，但项目表/路由连接在具体数据分布下是否成为瓶颈必须用真实执行计划判定。
 - 合并/部署前需在有 GCC 的环境执行 Go race 测试，并在授权的预发布环境完成负载门禁。
+# 2026-08-15 分层反机器人与反滥用实施状态
+
+- [x] 审计认证、权限、评论、审核、操作日志、统计、Redis、真实 IP、CSRF、数据库与压测调用链。
+- [x] generation 71 新增风险事件、用户状态、限制、挑战、指纹、机器人规则和日聚合表。
+- [x] 统一动作分类、多维限流、可信度、风险评分、重复/近似检测、挑战、审核与限制。
+- [x] 评论接入幂等键、表单令牌、动态蜜罐、挑战恢复、冷却倒计时和 pending 提示。
+- [x] 主要内容创建/编辑及审核提交接入统一保护，复用 change request 的唯一 pending 约束。
+- [x] 双向 DNS 搜索爬虫验证、管理员只读机器人、独立读预算、robots.txt 与 sitemap。
+- [x] 后台总览、规则、事件处置、人工限制、用户可信度 API 与 Bot 规则。
+- [x] 有界异步风险事件写入、采样详情与准确日聚合。
+- [x] 单元、数据库集成、并发、真实接口、安全、查询计划、前端构建及本地压力测试。
+
+详见 `ANTI_BOT_DESIGN.md`、`ANTI_BOT_TEST_REPORT.md` 与 `ANTI_BOT_LOAD_TEST_REPORT.md`。

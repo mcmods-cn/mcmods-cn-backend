@@ -1,0 +1,146 @@
+package database
+
+func antiAbuseSchemaStatements() []string {
+	return []string{
+		`create table anti_abuse_user_states (
+			user_id bigint primary key references users(id) on delete cascade,
+			trust_level text not null default 'normal' check(trust_level in ('new','normal','trusted','high_risk','restricted')),
+			risk_score integer not null default 0 check(risk_score between 0 and 1000),
+			hit_count bigint not null default 0 check(hit_count>=0),
+			manually_trusted boolean not null default false,
+			challenge_required_until timestamptz,
+			review_required_until timestamptz,
+			restricted_until timestamptz,
+			last_event_at timestamptz,
+			updated_at timestamptz not null default now()
+		)`,
+		`create table anti_abuse_restrictions (
+			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
+			user_id bigint references users(id) on delete cascade,
+			ip_hash text not null default '',
+			device_hash text not null default '',
+			actions text[] not null default '{}'::text[],
+			mode text not null check(mode in ('cooldown','challenge','moderation','no_comment','no_review','no_upload','read_only','temporary_ban','permanent_ban')),
+			source text not null check(source in ('automatic','administrator','security_import')),
+			rule_code text not null default '',
+			risk_score integer not null default 0 check(risk_score between 0 and 1000),
+			reason text not null default '',
+			automatic boolean not null default true,
+			appeal_allowed boolean not null default true,
+			starts_at timestamptz not null default now(),
+			ends_at timestamptz,
+			lifted_at timestamptz,
+			lifted_by bigint references users(id) on delete set null,
+			lift_reason text not null default '',
+			created_by bigint references users(id) on delete set null,
+			created_at timestamptz not null default now(),
+			check(user_id is not null or ip_hash<>'' or device_hash<>''),
+			check(ends_at is null or ends_at>starts_at)
+		)`,
+		`create index idx_anti_abuse_restrictions_user_active on anti_abuse_restrictions(user_id,starts_at desc) where lifted_at is null`,
+		`create index idx_anti_abuse_restrictions_ip_active on anti_abuse_restrictions(ip_hash,starts_at desc) where lifted_at is null and ip_hash<>''`,
+		`create table anti_abuse_challenges (
+			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
+			user_id bigint not null references users(id) on delete cascade,
+			session_hash text not null,
+			action text not null,
+			object_key text not null default '',
+			kind text not null check(kind in ('form','human')),
+			provider text not null,
+			token_hash text not null unique,
+			answer_hash text not null default '',
+			status text not null default 'pending' check(status in ('pending','passed','failed','consumed','expired')),
+			failure_count integer not null default 0 check(failure_count>=0),
+			ip_hash text not null default '',
+			issued_at timestamptz not null default now(),
+			expires_at timestamptz not null,
+			passed_at timestamptz,
+			consumed_at timestamptz,
+			metadata jsonb not null default '{}'::jsonb,
+			check(expires_at>issued_at)
+		)`,
+		`create index idx_anti_abuse_challenges_user_pending on anti_abuse_challenges(user_id,action,expires_at) where status in ('pending','passed')`,
+		`create index idx_anti_abuse_challenges_expiry on anti_abuse_challenges(expires_at,status)`,
+		`create table anti_abuse_events (
+			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
+			user_id bigint references users(id) on delete set null,
+			action text not null,
+			object_type text not null default '',
+			object_key text not null default '',
+			outcome text not null check(outcome in ('allow','allow_with_log','challenge','delay','moderation','temp_block','deny','account_review')),
+			risk_score integer not null default 0 check(risk_score between 0 and 1000),
+			rule_codes text[] not null default '{}'::text[],
+			ip_hash text not null default '',
+			subnet_hash text not null default '',
+			device_hash text not null default '',
+			session_hash text not null default '',
+			crawler_class text not null default '',
+			content_hash text not null default '',
+			similar_event_id bigint references anti_abuse_events(id) on delete set null,
+			similarity smallint not null default 0 check(similarity between 0 and 1000),
+			request_id text not null default '',
+			metadata jsonb not null default '{}'::jsonb,
+			disposition text not null default 'unreviewed' check(disposition in ('unreviewed','acknowledged','false_positive','confirmed_malicious')),
+			review_note text not null default '',
+			reviewed_by bigint references users(id) on delete set null,
+			reviewed_at timestamptz,
+			created_at timestamptz not null default now()
+		)`,
+		`create index idx_anti_abuse_events_time on anti_abuse_events(created_at desc,id desc)`,
+		`create index idx_anti_abuse_events_action_time on anti_abuse_events(action,created_at desc,id desc)`,
+		`create index idx_anti_abuse_events_outcome_time on anti_abuse_events(outcome,created_at desc,id desc)`,
+		`create index idx_anti_abuse_events_user_time on anti_abuse_events(user_id,created_at desc,id desc) where user_id is not null`,
+		`create index idx_anti_abuse_events_ip_time on anti_abuse_events(ip_hash,created_at desc,id desc) where ip_hash<>''`,
+		`create table anti_abuse_content_fingerprints (
+			id bigserial primary key,
+			user_id bigint references users(id) on delete set null,
+			action text not null,
+			object_key text not null default '',
+			exact_hash text not null,
+			simhash bigint not null,
+			ip_hash text not null default '',
+			event_id bigint references anti_abuse_events(id) on delete set null,
+			created_at timestamptz not null default now()
+		)`,
+		`create index idx_anti_abuse_fingerprint_exact on anti_abuse_content_fingerprints(exact_hash,created_at desc,id desc)`,
+		`create index idx_anti_abuse_fingerprint_user_action on anti_abuse_content_fingerprints(user_id,action,created_at desc,id desc)`,
+		`create index idx_anti_abuse_fingerprint_object on anti_abuse_content_fingerprints(action,object_key,created_at desc,id desc) where object_key<>''`,
+		`create table anti_abuse_bot_rules (
+			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
+			kind text not null check(kind in ('allowed_bot','monitoring_bot','blocked_bot','ip_allow','ip_block')),
+			label text not null,
+			matcher text not null default '',
+			secret_hash text not null default '',
+			read_only boolean not null default true,
+			enabled boolean not null default true,
+			expires_at timestamptz,
+			created_by bigint references users(id) on delete set null,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now()
+		)`,
+		`create index idx_anti_abuse_bot_rules_kind_enabled on anti_abuse_bot_rules(kind,enabled,updated_at desc)`,
+		`create table anti_abuse_daily_stats (
+			stat_date date not null,
+			action text not null,
+			outcome text not null,
+			crawler_class text not null default '',
+			event_count bigint not null default 0 check(event_count>=0),
+			primary key(stat_date,action,outcome,crawler_class)
+		)`,
+		`create index idx_anti_abuse_daily_stats_date on anti_abuse_daily_stats(stat_date desc,action)`,
+		`create or replace function aggregate_anti_abuse_event() returns trigger as $$
+		begin
+			insert into anti_abuse_daily_stats(stat_date,action,outcome,crawler_class,event_count)
+			values((new.created_at at time zone 'UTC')::date,new.action,new.outcome,new.crawler_class,1)
+			on conflict(stat_date,action,outcome,crawler_class) do update
+			set event_count=anti_abuse_daily_stats.event_count+1;
+			return new;
+		end $$ language plpgsql`,
+		`create trigger trg_anti_abuse_daily_stats after insert on anti_abuse_events
+			for each row execute function aggregate_anti_abuse_event()`,
+	}
+}

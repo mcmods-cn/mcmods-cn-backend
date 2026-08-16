@@ -15,11 +15,24 @@ import (
 const (
 	maxLocalEntries = 512
 	maxLocalClaims  = 4096
+	maxLocalLimits  = 8192
 )
 
 type localEntry struct {
 	value     []byte
 	expiresAt time.Time
+}
+
+type localLimit struct {
+	count     int
+	expiresAt time.Time
+}
+
+type RateLimitResult struct {
+	Allowed    bool
+	Remaining  int
+	RetryAfter time.Duration
+	Backend    string
 }
 
 type Cache struct {
@@ -30,6 +43,7 @@ type Cache struct {
 	local    map[string]localEntry
 	presence map[string]time.Time
 	claims   map[string]time.Time
+	limits   map[string]localLimit
 	group    singleflight.Group
 }
 
@@ -37,6 +51,7 @@ func New(cfg config.RedisConfig) *Cache {
 	cache := &Cache{
 		prefix: cfg.Prefix, ttl: cfg.TTL,
 		local: make(map[string]localEntry), presence: make(map[string]time.Time), claims: make(map[string]time.Time),
+		limits: make(map[string]localLimit),
 	}
 	if cache.ttl <= 0 {
 		cache.ttl = 2 * time.Minute
@@ -48,6 +63,63 @@ func New(cfg config.RedisConfig) *Cache {
 		})
 	}
 	return cache
+}
+
+// ConsumeRateLimit atomically consumes one slot from a bounded fixed window.
+// Redis keeps the decision shared between replicas. A bounded local counter is
+// used for single-process development and as fail-soft protection when Redis
+// is unavailable; callers can include Backend in internal diagnostics without
+// exposing it to clients.
+func (c *Cache) ConsumeRateLimit(ctx context.Context, key string, limit int, window time.Duration) RateLimitResult {
+	if c == nil || key == "" || limit <= 0 || window <= 0 {
+		return RateLimitResult{Allowed: true, Remaining: max(limit-1, 0), Backend: "disabled"}
+	}
+	if c.redis != nil {
+		redisKey := c.prefix + "limit:" + key
+		result, err := c.redis.Eval(ctx, `
+local count=redis.call('INCR',KEYS[1])
+if count==1 then redis.call('PEXPIRE',KEYS[1],ARGV[2]) end
+local ttl=redis.call('PTTL',KEYS[1])
+return {count,ttl}
+`, []string{redisKey}, limit, window.Milliseconds()).Int64Slice()
+		if err == nil && len(result) == 2 {
+			count := int(result[0])
+			retry := time.Duration(max(result[1], 0)) * time.Millisecond
+			return RateLimitResult{
+				Allowed: count <= limit, Remaining: max(limit-count, 0), RetryAfter: retry, Backend: "redis",
+			}
+		}
+	}
+	return c.consumeLocalRateLimit(key, limit, window)
+}
+
+func (c *Cache) consumeLocalRateLimit(key string, limit int, window time.Duration) RateLimitResult {
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, exists := c.limits[key]
+	if !exists || !now.Before(entry.expiresAt) {
+		entry = localLimit{expiresAt: now.Add(window)}
+	}
+	entry.count++
+	if len(c.limits) >= maxLocalLimits && !exists {
+		for existingKey, existing := range c.limits {
+			if !now.Before(existing.expiresAt) {
+				delete(c.limits, existingKey)
+			}
+		}
+		if len(c.limits) >= maxLocalLimits {
+			for existingKey := range c.limits {
+				delete(c.limits, existingKey)
+				break
+			}
+		}
+	}
+	c.limits[key] = entry
+	return RateLimitResult{
+		Allowed: entry.count <= limit, Remaining: max(limit-entry.count, 0),
+		RetryAfter: max(entry.expiresAt.Sub(now), 0), Backend: "local",
+	}
 }
 
 // ClaimThrottle returns true once per key and window. Redis SET NX gives all

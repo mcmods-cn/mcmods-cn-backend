@@ -2,12 +2,19 @@ package activity
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+var (
+	ErrRecorderUnavailable = errors.New("activity recorder is unavailable")
+	ErrRecorderClosed      = errors.New("activity recorder is closed")
+	ErrInvalidEvent        = errors.New("activity event is invalid")
 )
 
 const (
@@ -54,11 +61,6 @@ const (
 	ObjectRating        int16 = 27
 )
 
-const (
-	defaultBatchSize = 256
-	defaultInterval  = 2 * time.Second
-)
-
 type Event struct {
 	UserID        int64
 	ActionID      int16
@@ -78,67 +80,180 @@ type Event struct {
 
 type BatchProcessor func(context.Context, []Event) error
 
+type Options struct {
+	BatchSize             int
+	QueueCapacity         int
+	FlushInterval         time.Duration
+	RetryMinDelay         time.Duration
+	RetryMaxDelay         time.Duration
+	WriteTimeout          time.Duration
+	DurableEnqueueTimeout time.Duration
+}
+
+func DefaultOptions() Options {
+	return Options{
+		BatchSize: 256, QueueCapacity: 4096, FlushInterval: time.Second,
+		RetryMinDelay: 250 * time.Millisecond, RetryMaxDelay: 30 * time.Second,
+		WriteTimeout: 10 * time.Second, DurableEnqueueTimeout: 1500 * time.Millisecond,
+	}
+}
+
+func normalizeOptions(options Options) Options {
+	defaults := DefaultOptions()
+	if options.BatchSize <= 0 {
+		options.BatchSize = defaults.BatchSize
+	}
+	if options.QueueCapacity < options.BatchSize {
+		options.QueueCapacity = max(defaults.QueueCapacity, options.BatchSize)
+	}
+	if options.FlushInterval <= 0 {
+		options.FlushInterval = defaults.FlushInterval
+	}
+	if options.RetryMinDelay <= 0 {
+		options.RetryMinDelay = defaults.RetryMinDelay
+	}
+	if options.RetryMaxDelay < options.RetryMinDelay {
+		options.RetryMaxDelay = max(defaults.RetryMaxDelay, options.RetryMinDelay)
+	}
+	if options.WriteTimeout <= 0 {
+		options.WriteTimeout = defaults.WriteTimeout
+	}
+	if options.DurableEnqueueTimeout <= 0 {
+		options.DurableEnqueueTimeout = defaults.DurableEnqueueTimeout
+	}
+	return options
+}
+
+// IsDurableAction deliberately keeps only views in the lossy path. Mutations,
+// downloads, purchases and other user actions first enter PostgreSQL's durable
+// outbox and therefore survive a process restart.
+func IsDurableAction(actionID int16) bool { return actionID != ActionView }
+
+type activityStore interface {
+	EnqueueDurable(context.Context, Event) error
+	WriteBestEffort(context.Context, []Event) error
+	DrainDurable(context.Context, int) (int, error)
+	DurableBacklog(context.Context) (int64, *time.Time, error)
+}
+
 type closeRequest struct {
 	ctx  context.Context
 	done chan error
 }
 
 type Monitor struct {
-	db        *pgxpool.Pool
-	processor BatchProcessor
-	incoming  chan Event
-	close     chan closeRequest
-	wake      chan struct{}
+	store    activityStore
+	options  Options
+	incoming chan Event
+	close    chan closeRequest
+	wake     chan struct{}
 
-	overflowMu sync.Mutex
-	overflow   []Event
-	closeOnce  sync.Once
+	closeOnce sync.Once
+	closed    atomic.Bool
+	metrics   monitorMetrics
 }
 
 func NewMonitor(db *pgxpool.Pool, processor BatchProcessor) *Monitor {
+	return NewMonitorWithOptions(db, processor, DefaultOptions())
+}
+
+func NewMonitorWithOptions(db *pgxpool.Pool, processor BatchProcessor, options Options) *Monitor {
+	return newMonitor(newPostgresStore(db, processor), options)
+}
+
+func newMonitor(store activityStore, options Options) *Monitor {
+	options = normalizeOptions(options)
 	monitor := &Monitor{
-		db:        db,
-		processor: processor,
-		incoming:  make(chan Event, defaultBatchSize*4),
-		close:     make(chan closeRequest),
-		wake:      make(chan struct{}, 1),
+		store: store, options: options, incoming: make(chan Event, options.QueueCapacity),
+		close: make(chan closeRequest), wake: make(chan struct{}, 1),
+	}
+	monitor.metrics.lastError.Store("")
+	if store == nil {
+		return monitor
 	}
 	go monitor.run()
 	return monitor
 }
 
-func (m *Monitor) Record(event Event) {
-	if m == nil || m.db == nil || event.UserID <= 0 || event.ActionID <= 0 || event.ObjectTypeID <= 0 {
-		return
+func normalizeEvent(event Event) (Event, bool) {
+	if event.UserID <= 0 || event.ActionID <= 0 || event.ObjectTypeID <= 0 {
+		return Event{}, false
 	}
+	event.ObjectPublicID = trimField(event.ObjectPublicID, 128)
+	event.ObjectEntityType = trimField(event.ObjectEntityType, 64)
 	if event.OccurredAt.IsZero() {
 		event.OccurredAt = time.Now().UTC()
+	} else {
+		event.OccurredAt = event.OccurredAt.UTC()
 	}
-	if event.MarkdownAddedBytes < 0 {
-		event.MarkdownAddedBytes = 0
+	event.MarkdownAddedBytes = max(0, event.MarkdownAddedBytes)
+	event.MarkdownDeletedBytes = max(0, event.MarkdownDeletedBytes)
+	return event, true
+}
+
+func trimField(value string, maximum int) string {
+	if len(value) <= maximum {
+		return value
 	}
-	if event.MarkdownDeletedBytes < 0 {
-		event.MarkdownDeletedBytes = 0
+	return value[:maximum]
+}
+
+// RecordBestEffort never blocks the request. Once the bounded queue is full it
+// drops the view and increments DroppedBestEffort instead of growing memory.
+func (m *Monitor) RecordBestEffort(event Event) bool {
+	if m == nil || m.store == nil || m.closed.Load() {
+		return false
+	}
+	var valid bool
+	if event, valid = normalizeEvent(event); !valid {
+		return false
 	}
 	select {
 	case m.incoming <- event:
+		m.metrics.acceptedBestEffort.Add(1)
+		return true
 	default:
-		m.overflowMu.Lock()
-		m.overflow = append(m.overflow, event)
-		m.overflowMu.Unlock()
-		select {
-		case m.wake <- struct{}{}:
-		default:
-		}
+		m.metrics.droppedBestEffort.Add(1)
+		return false
 	}
 }
 
+// RecordDurable acknowledges an action only after PostgreSQL has accepted it
+// into the outbox. The outbox is drained with row locks, making this safe for
+// multiple application instances.
+func (m *Monitor) RecordDurable(ctx context.Context, event Event) error {
+	if m == nil || m.store == nil {
+		return ErrRecorderUnavailable
+	}
+	if m.closed.Load() {
+		return ErrRecorderClosed
+	}
+	var valid bool
+	if event, valid = normalizeEvent(event); !valid {
+		return ErrInvalidEvent
+	}
+	writeCtx, cancel := boundedContext(ctx, m.options.DurableEnqueueTimeout)
+	defer cancel()
+	if err := m.store.EnqueueDurable(writeCtx, event); err != nil {
+		m.metrics.durableEnqueueFailures.Add(1)
+		m.recordError("enqueue durable activity", err)
+		return err
+	}
+	m.metrics.enqueuedDurable.Add(1)
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
 func (m *Monitor) Close(ctx context.Context) error {
-	if m == nil {
+	if m == nil || m.store == nil {
 		return nil
 	}
 	var result error
 	m.closeOnce.Do(func() {
+		m.closed.Store(true)
 		done := make(chan error, 1)
 		select {
 		case m.close <- closeRequest{ctx: ctx, done: done}:
@@ -155,31 +270,41 @@ func (m *Monitor) Close(ctx context.Context) error {
 }
 
 func (m *Monitor) run() {
-	ticker := time.NewTicker(defaultInterval)
+	ticker := time.NewTicker(m.options.FlushInterval)
 	defer ticker.Stop()
-	pending := make([]Event, 0, defaultBatchSize)
+	pending := make([]Event, 0, m.options.BatchSize)
+	var bestRetryAt, durableRetryAt time.Time
+	var bestRetryDelay, durableRetryDelay time.Duration
 	for {
+		incoming := (<-chan Event)(m.incoming)
+		if len(pending) >= m.options.BatchSize {
+			incoming = nil
+		}
 		select {
-		case event := <-m.incoming:
+		case event := <-incoming:
 			pending = append(pending, event)
-			if len(pending) >= defaultBatchSize {
-				pending = m.flush(context.Background(), pending)
+			m.metrics.pendingMemory.Store(int64(len(pending)))
+			if len(pending) >= m.options.BatchSize && !time.Now().Before(bestRetryAt) {
+				pending, bestRetryAt, bestRetryDelay = m.flushBestEffort(pending, bestRetryDelay)
 			}
 		case <-m.wake:
-			pending = append(pending, m.takeOverflow()...)
-			if len(pending) >= defaultBatchSize {
-				pending = m.flush(context.Background(), pending)
+			if !time.Now().Before(durableRetryAt) {
+				durableRetryAt, durableRetryDelay = m.drainDurable(durableRetryDelay)
 			}
 		case <-ticker.C:
-			pending = append(pending, m.takeOverflow()...)
-			pending = m.flush(context.Background(), pending)
+			now := time.Now()
+			if len(pending) > 0 && !now.Before(bestRetryAt) {
+				pending, bestRetryAt, bestRetryDelay = m.flushBestEffort(pending, bestRetryDelay)
+			}
+			if !now.Before(durableRetryAt) {
+				durableRetryAt, durableRetryDelay = m.drainDurable(durableRetryDelay)
+			}
 		case request := <-m.close:
 			for {
 				select {
 				case event := <-m.incoming:
 					pending = append(pending, event)
 				default:
-					pending = append(pending, m.takeOverflow()...)
 					request.done <- m.flushAll(request.ctx, pending)
 					return
 				}
@@ -188,198 +313,187 @@ func (m *Monitor) run() {
 	}
 }
 
-func (m *Monitor) takeOverflow() []Event {
-	m.overflowMu.Lock()
-	defer m.overflowMu.Unlock()
-	if len(m.overflow) == 0 {
-		return nil
+func (m *Monitor) flushBestEffort(pending []Event, previousDelay time.Duration) ([]Event, time.Time, time.Duration) {
+	count := min(len(pending), m.options.BatchSize)
+	ctx, cancel := context.WithTimeout(context.Background(), m.options.WriteTimeout)
+	err := m.store.WriteBestEffort(ctx, pending[:count])
+	cancel()
+	if err != nil {
+		m.metrics.flushFailures.Add(1)
+		m.metrics.retries.Add(1)
+		m.recordError("flush best-effort activity", err)
+		delay := m.nextRetryDelay(previousDelay)
+		return pending, jitteredRetryAt(delay), delay
 	}
-	result := m.overflow
-	m.overflow = nil
-	return result
-}
-
-func (m *Monitor) flush(ctx context.Context, pending []Event) []Event {
-	if len(pending) == 0 {
-		return pending[:0]
-	}
-	if err := m.writeBatch(ctx, pending); err != nil {
-		return pending
-	}
-	return pending[:0]
+	m.metrics.flushedBestEffort.Add(uint64(count))
+	m.metrics.flushBatches.Add(1)
+	m.metrics.lastFlushUnix.Store(time.Now().UTC().Unix())
+	m.metrics.pendingMemory.Store(int64(len(pending) - count))
+	m.metrics.lastError.Store("")
+	return pending[count:], time.Time{}, 0
 }
 
 func (m *Monitor) flushAll(ctx context.Context, pending []Event) error {
 	for len(pending) > 0 {
-		if err := m.writeBatch(ctx, pending); err != nil {
+		count := min(len(pending), m.options.BatchSize)
+		if err := m.store.WriteBestEffort(ctx, pending[:count]); err != nil {
 			return err
 		}
-		pending = pending[:0]
+		m.metrics.flushedBestEffort.Add(uint64(count))
+		m.metrics.flushBatches.Add(1)
+		pending = pending[count:]
 	}
+	m.metrics.pendingMemory.Store(0)
 	return nil
 }
 
-func (m *Monitor) writeBatch(ctx context.Context, events []Event) error {
-	if err := m.resolveObjectRouteIDs(ctx, events); err != nil {
-		return err
-	}
-	rows := make([][]any, 0, len(events))
-	for _, event := range events {
-		rows = append(rows, []any{
-			nullableUserID(event.UserID),
-			event.ActionID,
-			event.ObjectTypeID,
-			nullableObjectRouteID(event.ObjectRouteID),
-			event.MarkdownAddedBytes,
-			event.MarkdownDeletedBytes,
-			event.OccurredAt.UTC(),
-		})
-	}
-	_, err := m.db.CopyFrom(
-		ctx,
-		pgx.Identifier{"user_activity_events"},
-		[]string{"user_id", "action_id", "object_type_id", "object_route_id", "markdown_added_bytes", "markdown_deleted_bytes", "occurred_at"},
-		pgx.CopyFromRows(rows),
-	)
+func (m *Monitor) drainDurable(previousDelay time.Duration) (time.Time, time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), m.options.WriteTimeout)
+	count, err := m.store.DrainDurable(ctx, m.options.BatchSize)
+	cancel()
 	if err != nil {
-		return err
+		m.metrics.flushFailures.Add(1)
+		m.metrics.retries.Add(1)
+		m.recordError("drain durable activity", err)
+		delay := m.nextRetryDelay(previousDelay)
+		return jitteredRetryAt(delay), delay
 	}
-	eventTimes := make([]time.Time, 0, len(events))
-	actorIDs := make([]int64, 0, len(events))
-	for _, event := range events {
-		if event.UserID <= 0 {
-			continue
-		}
-		eventTimes = append(eventTimes, event.OccurredAt.UTC())
-		actorIDs = append(actorIDs, event.UserID)
+	if count > 0 {
+		m.metrics.flushedDurable.Add(uint64(count))
+		m.metrics.flushBatches.Add(1)
+		m.metrics.lastFlushUnix.Store(time.Now().UTC().Unix())
+		m.metrics.lastError.Store("")
 	}
-	if len(eventTimes) > 0 {
-		if _, aggregateErr := m.db.Exec(ctx, `select record_site_activity_batch($1,$2)`, eventTimes, actorIDs); aggregateErr != nil {
-			// Activity rows are authoritative. The periodic reconciliation job can
-			// rebuild this compact projection if an aggregation write is interrupted.
-			log.Printf("aggregate site activity batch: %v", aggregateErr)
-		}
-	}
-	if m.processor != nil {
-		if err = m.processor(ctx, events); err != nil {
-			log.Printf("process activity batch: %v", err)
+	if count == m.options.BatchSize {
+		select {
+		case m.wake <- struct{}{}:
+		default:
 		}
 	}
-	return nil
+	return time.Time{}, 0
 }
 
-func (m *Monitor) resolveObjectRouteIDs(ctx context.Context, events []Event) error {
-	publicIDs := make([]string, 0, len(events))
-	seen := make(map[string]struct{}, len(events))
-	for _, event := range events {
-		if event.ObjectRouteID > 0 || event.ObjectPublicID == "" {
-			continue
-		}
-		if _, exists := seen[event.ObjectPublicID]; exists {
-			continue
-		}
-		seen[event.ObjectPublicID] = struct{}{}
-		publicIDs = append(publicIDs, event.ObjectPublicID)
+func (m *Monitor) nextRetryDelay(previous time.Duration) time.Duration {
+	if previous <= 0 {
+		return m.options.RetryMinDelay
 	}
-	resolvedPublicIDs := make(map[string]int64, len(publicIDs))
-	if len(publicIDs) > 0 {
-		rows, err := m.db.Query(ctx, `select public_id,id from public_routes where public_id=any($1)`, publicIDs)
+	return min(previous*2, m.options.RetryMaxDelay)
+}
+
+func jitteredRetryAt(delay time.Duration) time.Time {
+	jitterRange := delay / 5
+	if jitterRange <= 0 {
+		return time.Now().Add(delay)
+	}
+	jitter := time.Duration(time.Now().UnixNano() % int64(jitterRange))
+	return time.Now().Add(delay + jitter)
+}
+
+func boundedContext(parent context.Context, maximum time.Duration) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if deadline, ok := parent.Deadline(); ok && time.Until(deadline) <= maximum {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, maximum)
+}
+
+type monitorMetrics struct {
+	acceptedBestEffort     atomic.Uint64
+	droppedBestEffort      atomic.Uint64
+	enqueuedDurable        atomic.Uint64
+	durableEnqueueFailures atomic.Uint64
+	flushedBestEffort      atomic.Uint64
+	flushedDurable         atomic.Uint64
+	flushBatches           atomic.Uint64
+	flushFailures          atomic.Uint64
+	retries                atomic.Uint64
+	pendingMemory          atomic.Int64
+	lastFlushUnix          atomic.Int64
+	lastFailureLogUnix     atomic.Int64
+	lastError              atomic.Value
+}
+
+type Snapshot struct {
+	QueueCapacity          int           `json:"queueCapacity"`
+	QueueDepth             int           `json:"queueDepth"`
+	BatchSize              int           `json:"batchSize"`
+	PendingMemory          int64         `json:"pendingMemory"`
+	DurableBacklog         int64         `json:"durableBacklog"`
+	OldestDurableAt        *time.Time    `json:"oldestDurableAt,omitempty"`
+	AcceptedBestEffort     uint64        `json:"acceptedBestEffort"`
+	DroppedBestEffort      uint64        `json:"droppedBestEffort"`
+	EnqueuedDurable        uint64        `json:"enqueuedDurable"`
+	DurableEnqueueFailures uint64        `json:"durableEnqueueFailures"`
+	FlushedBestEffort      uint64        `json:"flushedBestEffort"`
+	FlushedDurable         uint64        `json:"flushedDurable"`
+	FlushBatches           uint64        `json:"flushBatches"`
+	FlushFailures          uint64        `json:"flushFailures"`
+	Retries                uint64        `json:"retries"`
+	LastFlushAt            *time.Time    `json:"lastFlushAt,omitempty"`
+	LastError              string        `json:"lastError,omitempty"`
+	BacklogQueryError      string        `json:"backlogQueryError,omitempty"`
+	Pool                   *PoolSnapshot `json:"pool,omitempty"`
+}
+
+type PoolSnapshot struct {
+	MaxConns             int32 `json:"maxConns"`
+	TotalConns           int32 `json:"totalConns"`
+	AcquiredConns        int32 `json:"acquiredConns"`
+	IdleConns            int32 `json:"idleConns"`
+	EmptyAcquireCount    int64 `json:"emptyAcquireCount"`
+	CanceledAcquireCount int64 `json:"canceledAcquireCount"`
+	AcquireDurationMs    int64 `json:"acquireDurationMs"`
+}
+
+type poolSnapshotProvider interface{ PoolSnapshot() PoolSnapshot }
+
+func (m *Monitor) Snapshot(ctx context.Context) Snapshot {
+	if m == nil {
+		return Snapshot{}
+	}
+	queueDepth := len(m.incoming)
+	result := Snapshot{
+		QueueCapacity: m.options.QueueCapacity, QueueDepth: queueDepth, BatchSize: m.options.BatchSize,
+		PendingMemory: m.metrics.pendingMemory.Load() + int64(queueDepth), AcceptedBestEffort: m.metrics.acceptedBestEffort.Load(),
+		DroppedBestEffort: m.metrics.droppedBestEffort.Load(), EnqueuedDurable: m.metrics.enqueuedDurable.Load(),
+		DurableEnqueueFailures: m.metrics.durableEnqueueFailures.Load(), FlushedBestEffort: m.metrics.flushedBestEffort.Load(),
+		FlushedDurable: m.metrics.flushedDurable.Load(), FlushBatches: m.metrics.flushBatches.Load(),
+		FlushFailures: m.metrics.flushFailures.Load(), Retries: m.metrics.retries.Load(),
+	}
+	if value, _ := m.metrics.lastError.Load().(string); value != "" {
+		result.LastError = value
+	}
+	if value := m.metrics.lastFlushUnix.Load(); value > 0 {
+		timestamp := time.Unix(value, 0).UTC()
+		result.LastFlushAt = &timestamp
+	}
+	if m.store != nil {
+		count, oldest, err := m.store.DurableBacklog(ctx)
 		if err != nil {
-			return err
+			result.BacklogQueryError = err.Error()
+		} else {
+			result.DurableBacklog, result.OldestDurableAt = count, oldest
 		}
-		for rows.Next() {
-			var publicID string
-			var routeID int64
-			if err = rows.Scan(&publicID, &routeID); err != nil {
-				rows.Close()
-				return err
-			}
-			resolvedPublicIDs[publicID] = routeID
-		}
-		if err = rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		rows.Close()
-	}
-	type internalKey struct {
-		entityType string
-		internalID int64
-	}
-	entityTypes := make([]string, 0, len(events))
-	internalIDs := make([]int64, 0, len(events))
-	seenInternal := make(map[internalKey]struct{}, len(events))
-	for _, event := range events {
-		if event.ObjectRouteID > 0 || event.ObjectEntityType == "" || event.ObjectInternalID <= 0 {
-			continue
-		}
-		key := internalKey{entityType: event.ObjectEntityType, internalID: event.ObjectInternalID}
-		if _, exists := seenInternal[key]; exists {
-			continue
-		}
-		seenInternal[key] = struct{}{}
-		entityTypes = append(entityTypes, key.entityType)
-		internalIDs = append(internalIDs, key.internalID)
-	}
-	type resolvedRoute struct {
-		id       int64
-		publicID string
-	}
-	resolvedInternalIDs := make(map[internalKey]resolvedRoute, len(entityTypes))
-	if len(entityTypes) > 0 {
-		rows, err := m.db.Query(ctx, `select route.entity_type,route.internal_id,route.id,route.public_id
-			from public_routes route
-			join unnest($1::text[],$2::bigint[]) input(entity_type,internal_id)
-			  on input.entity_type=route.entity_type and input.internal_id=route.internal_id`, entityTypes, internalIDs)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			var key internalKey
-			var route resolvedRoute
-			if err = rows.Scan(&key.entityType, &key.internalID, &route.id, &route.publicID); err != nil {
-				rows.Close()
-				return err
-			}
-			resolvedInternalIDs[key] = route
-		}
-		if err = rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		rows.Close()
-	}
-	for index := range events {
-		if events[index].ObjectRouteID > 0 {
-			continue
-		}
-		if events[index].ObjectPublicID != "" {
-			events[index].ObjectRouteID = resolvedPublicIDs[events[index].ObjectPublicID]
-		}
-		if events[index].ObjectRouteID <= 0 && events[index].ObjectInternalID > 0 {
-			key := internalKey{entityType: events[index].ObjectEntityType, internalID: events[index].ObjectInternalID}
-			route := resolvedInternalIDs[key]
-			events[index].ObjectRouteID = route.id
-			if events[index].ObjectPublicID == "" {
-				events[index].ObjectPublicID = route.publicID
-			}
+		if provider, ok := m.store.(poolSnapshotProvider); ok {
+			pool := provider.PoolSnapshot()
+			result.Pool = &pool
 		}
 	}
-	return nil
+	return result
 }
 
-func nullableUserID(userID int64) any {
-	if userID <= 0 {
-		return nil
+func (m *Monitor) recordError(operation string, err error) {
+	if err == nil {
+		return
 	}
-	return userID
-}
-
-func nullableObjectRouteID(routeID int64) any {
-	if routeID <= 0 {
-		return nil
+	m.metrics.lastError.Store(err.Error())
+	now := time.Now().Unix()
+	last := m.metrics.lastFailureLogUnix.Load()
+	if now-last >= 60 && m.metrics.lastFailureLogUnix.CompareAndSwap(last, now) {
+		log.Printf("%s: %v", operation, err)
 	}
-	return routeID
 }
 
 // AddedMarkdownBytes returns the number of inserted UTF-8 bytes in a minimal

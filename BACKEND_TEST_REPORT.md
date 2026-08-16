@@ -5,11 +5,11 @@
 ## 环境
 
 - Windows / PowerShell
-- Go 1.26.4：`D:\System\SDK\go\go1.26.4\bin\go.exe`
+- Go 1.26.5：`C:\Users\xsx20\go\pkg\mod\golang.org\toolchain@v0.0.1-go1.26.5.windows-amd64\bin\go.exe`
 - Node.js 24（Codex bundled runtime）
 - Next.js 16.2.11 / React 19.2.4
 - PostgreSQL：应用已连接经用户确认允许压测的远程专用测试库；本机仍未安装 psql，无法直接采集数据库端查询计划和等待事件
-- `MCMODS_RUN_DB_INTEGRATION`：未设置
+- `MCMODS_RUN_DB_INTEGRATION`：仅在本轮 Generation 70/Outbox 定向测试命令中临时设置
 
 ## 修改前基线
 
@@ -29,7 +29,7 @@ go vet ./...
 go test -count=1 -json ./...
 
 # 数据库集成测试门禁检查
-go test -v ./internal/database -run 'TestGeneration69UserFeaturesIntegration|TestEveryForeignKeyHasLeadingIndex'
+go test -v ./internal/database -run 'TestGeneration70UserFeaturesIntegration|TestEveryForeignKeyHasLeadingIndex'
 
 # 竞态检测尝试
 go test -race ./...
@@ -46,7 +46,7 @@ node --check scripts/load-test.mjs
 
 结果：
 
-- Go：569 个测试通过，19 个测试跳过，0 个测试失败；12 个有测试的 package 通过。
+- Go：581 个测试通过，21 个测试跳过，0 个测试失败；13 个有测试的 package 通过。
 - `go vet ./...`：通过，无输出。
 - 前端 ESLint：通过。
 - 前端 TypeScript：通过。
@@ -70,7 +70,7 @@ node --check scripts/load-test.mjs
 - 高频查看的 Redis/本地降级去重门；相同用户与对象在窗口内只接受首个 claim。
 - 动作级保留策略、非法动作拒绝、时间 RFC3339/UTC 边界、参数化清理条件、确认 token。
 - 活动动作名称与数据库种子一致，服务器对象类型正确映射公共路由。
-- generation 69 schema 结构、默认隐私、六槽约束、统计/清理表、内容事实触发器修复和禁止启动全量回填断言。
+- generation 70 schema 结构、默认隐私、六槽约束、统计/清理表、持久化动作 Outbox、内容事实触发器修复和禁止启动全量回填断言。
 - 评论固定幂等键使用事务级 advisory lock，锁键包含用户和幂等键命名空间。
 - 回填 SQL 的幂等/锁定/持久累计约束。
 
@@ -99,7 +99,7 @@ node --check scripts/load-test.mjs
 
 ## 数据库迁移与查询分析
 
-已完成静态迁移测试和可执行集成测试 `TestGeneration69UserFeaturesIntegration`。`scripts/query-analysis.sql` 覆盖：
+已完成静态迁移测试和可执行集成测试 `TestGeneration70UserFeaturesIntegration`。`scripts/query-analysis.sql` 覆盖：
 
 - Mod、插件和服务器热度排序；
 - 分类/版本/热度组合；
@@ -107,7 +107,7 @@ node --check scripts/load-test.mjs
 - 用户卡片摘要和会话在线状态；
 - 用户操作记录分页、动作+用户+对象+时间预览及批量删除计划。
 
-应用能够连接远程测试 PostgreSQL；压力测试期间曾执行一次 68→69 修复以验证内容创建缺陷。交付代码按 Dev 可重置约束移除了 67/68 升级桥，generation 69 仅支持空库安装；其他 generation 会明确要求重置。本机没有 psql，且没有为 `go test` 设置隔离集成库门禁，因此空库安装实跑、`EXPLAIN (ANALYZE, BUFFERS)`、N+1 查询采样、重复/无效索引检查仍未执行。现有 schema 定义包含热度 `(heat_score desc, object_route_id)`、活动用户/对象/BRIN 索引，以及实际清理查询需要的 `(action_id, occurred_at, id)`。
+应用能够连接远程测试 PostgreSQL；generation 70 已在用户授权的 Dev 数据库重置后完成空库安装。`TestDurableOutboxSurvivesProducerAndDrainsExactlyOnceAcrossWorkers` 使用真实 PostgreSQL 验证 20 个关键动作可由 4 个消费者通过 `SKIP LOCKED` 最终精确写入 20 行、Outbox 清空且累计统计为 20。当前仍无 psql/数据库主机遥测，因此千万级数据下的 `EXPLAIN (ANALYZE, BUFFERS)`、VACUUM、WAL、锁等待和重复索引检查尚未执行。
 
 ## 真实压力测试
 
@@ -125,7 +125,7 @@ node --check scripts/load-test.mjs
 - 幂等竞争：修复前 36 次同键创建出现 1 次 500、只新增 1 行；事务锁修复后 31 次同键创建为 1×201、30×200，只新增 1 行。
 - 创建限流：76 次唯一键创建为 20×201、56×429、0×500，限流没有被并发绕过。
 - 清理：精确枚举并软删除 24/24 条测试评论，0 失败；目标下没有未删除根评论。
-- 触发器：压测夹具创建发现旧 generation 68 `object_key` 歧义导致 SQLSTATE 42702；最终 generation 69 空库定义已直接修复，压力测试期间也已对运行库验证修复结果。
+- 触发器：压测夹具创建发现旧 generation 68 `object_key` 歧义导致 SQLSTATE 42702；generation 70 空库定义保留该修复，并已在重置后的运行库验证。
 
 完整阶段数据、原始 JSON 和限制见 `LOAD_TEST_REPORT.md`。测试库目录数据为空，结果不能代表大数据量生产容量。
 
@@ -141,6 +141,32 @@ node --check scripts/load-test.mjs
 - 错误输出：新接口使用统一错误 writer，未返回 SQL/表结构；没有运行外部 DAST。
 
 ## 尚未解决/未验证
+
+### Generation 70 动作摄取加固复测
+
+实际执行：
+
+```powershell
+go test ./...
+go vet ./...
+node --check scripts/load-test.mjs
+$env:MCMODS_RUN_DB_INTEGRATION='1'
+go test -count=1 -run TestDurableOutboxSurvivesProducerAndDrainsExactlyOnceAcrossWorkers ./internal/activity
+go test -count=1 -run TestGeneration70UserFeaturesIntegration ./internal/database
+$env:MCMODS_RUN_ACTIVITY_LOAD='1'
+go test -v -count=1 -run TestDurableOutboxConcurrentLoadIntegration ./internal/activity
+```
+
+- Dev 数据库按授权重置并成功安装 Generation 70，后端重新启动后 `/health` 为 `200`、`ready=true`。
+- 20 条 Outbox 事件由 4 个并发消费者持续领取，最终 Outbox 为 0、原始事件恰好 20 条、累计统计恰好 20；无重复或丢失。
+- 定向负载为 2,000 个关键动作、20 个并发生产协程、4 个消费实例：入队 8.678s（230.46 条/秒），全部入库 8.863s（225.65 条/秒），测试总耗时 10.72s；Outbox 最终为 0，原始事件恰好 2,000 条。
+- 管理员状态接口返回 `200`、`status=healthy`；未认证请求返回 `401`。验证时独立动作池 `maxConns=4`，Outbox/内存积压均为 0，写入失败和重试均为 0。
+- 用户统计 GET 被正确识别为 `view`：`acceptedBestEffort=1`、`flushedBestEffort=1`、`enqueuedDurable=0`。同时修复 `/users/...` 被 `"/use"` 子串错误识别为 `use` 的旧缺陷。
+- `go test -count=1 -json ./...`：581 通过、21 跳过、0 失败；13 个 package 通过。
+- Race 再次尝试但未完成：`CGO_ENABLED=1 go test -race ./internal/activity ./internal/httpapi` 因本机没有 `gcc` 失败，未标记为通过。
+
+这组 2,000 条负载验证摄取一致性和当前测试数据库下的短时吞吐，不代表千万级表容量。数据库主机 CPU、WAL、锁等待、VACUUM 和磁盘 I/O 仍不可见。
+
 
 1. 真实 API 已连接远程测试 PostgreSQL 并完成压力测试，但目录业务数据为空；缺少 psql/数据库监控，Redis、NATS、Typesense 的本地集成环境也仍不完整。
 2. 缺少 GCC，Go race 测试未执行。

@@ -672,6 +672,9 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	reviewRequired = reviewRequired && !claimsAllow(currentClaims(r), "admin.*")
+	if antiAbuseModerationRequired(r) {
+		reviewRequired = true
+	}
 	status := "approved"
 	if reviewRequired {
 		status = "pending"

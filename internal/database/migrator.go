@@ -7,9 +7,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 69
+const schemaGeneration = 71
 
-// Migrate installs one coherent development schema. Generation 69 establishes
+// Migrate installs one coherent development schema. Generation 71 establishes
 // numeric internal keys, globally unique public IDs, revocable authentication
 // sessions, version-scoped mod-content layout identities and similar-resource
 // groups, and generalized
@@ -37,6 +37,8 @@ const schemaGeneration = 69
 // optional Typesense service never participates in content transactions.
 // User activity is stored as compact numeric relations without public-ID
 // snapshots or JSON metadata; high-frequency editor autosaves are excluded.
+// Non-view actions enter a compact durable outbox before fixed-size ingestion;
+// views use a bounded best-effort buffer with explicit overload accounting.
 // User profile contributions are incrementally persisted as daily aggregates;
 // favorite collections have explicit public/private visibility.
 // Top-level projects and servers share normalized ratings, dimension scores,
@@ -54,6 +56,9 @@ const schemaGeneration = 69
 // retention window. It also adds category-aware community catalogs, per-session
 // online presence with private-by-default disclosure, configurable public user
 // cards, and audited action-specific activity cleanup.
+// It also adds independent anti-abuse events, content fingerprints, one-time
+// form/challenge tokens, user risk state, temporary restrictions, bot access
+// rules, and bounded daily security aggregates.
 // Earlier development data is
 // intentionally not migrated and must be reset before installation.
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {
@@ -137,6 +142,7 @@ func schemaInstallationStatements() []string {
 	statements = append(statements, draftSchemaStatements()...)
 	statements = append(statements, searchSchemaStatements()...)
 	statements = append(statements, userFeatureSchemaStatements()...)
+	statements = append(statements, antiAbuseSchemaStatements()...)
 	return append(statements, foreignKeyIndexStatement())
 }
 

@@ -39,6 +39,27 @@ func userFeatureSchemaStatements() []string {
 			check(markdown_deleted_bytes>=0)`,
 		`create index if not exists idx_activity_action_time
 			on user_activity_events(action_id,occurred_at,id)`,
+		`create table activity_event_outbox (
+			id bigserial primary key,
+			user_id bigint not null references users(id) on delete cascade,
+			action_id smallint not null references activity_actions(id) on delete restrict,
+			object_type_id smallint not null references activity_object_types(id) on delete restrict,
+			object_route_id bigint references public_routes(id) on delete set null,
+			object_public_id text not null default '' check(length(object_public_id)<=128),
+			object_entity_type text not null default '' check(length(object_entity_type)<=64),
+			object_internal_id bigint check(object_internal_id is null or object_internal_id>0),
+			markdown_added_bytes integer not null default 0 check(markdown_added_bytes>=0),
+			markdown_deleted_bytes integer not null default 0 check(markdown_deleted_bytes>=0),
+			occurred_at timestamptz not null,
+			available_at timestamptz not null default now(),
+			attempts integer not null default 0 check(attempts>=0),
+			last_error text not null default '',
+			created_at timestamptz not null default now()
+		)`,
+		`create index idx_activity_outbox_available
+			on activity_event_outbox(available_at,id)`,
+		`create index idx_activity_outbox_created_brin
+			on activity_event_outbox using brin(created_at)`,
 		`create table if not exists activity_cleanup_runs (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),

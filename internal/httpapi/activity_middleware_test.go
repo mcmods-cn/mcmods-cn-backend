@@ -70,6 +70,30 @@ func TestInferredActivityAction(t *testing.T) {
 	}
 }
 
+func TestInferredActivityActionUsesWholePathSegments(t *testing.T) {
+	tests := []struct {
+		name, method, path string
+		want               int16
+	}{
+		{name: "users is a view not use", method: http.MethodGet, path: "/api/v1/users/me/statistics", want: activity.ActionView},
+		{name: "user card is a view", method: http.MethodGet, path: "/api/v1/users/abc123xyz/card", want: activity.ActionView},
+		{name: "explicit use action", method: http.MethodPost, path: "/api/v1/shop/items/abc123xyz/use", want: activity.ActionUse},
+		{name: "explicit upload", method: http.MethodPost, path: "/api/v1/oss/uploads", want: activity.ActionUpload},
+		{name: "ordinary create", method: http.MethodPost, path: "/api/v1/users/me/settings", want: activity.ActionCreate},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request, err := http.NewRequest(test.method, test.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := inferredActivityAction(request); got != test.want {
+				t.Fatalf("inferredActivityAction(%s %s)=%d, want %d", test.method, test.path, got, test.want)
+			}
+		})
+	}
+}
+
 func TestHighFrequencyAutosavesAreExcluded(t *testing.T) {
 	t.Parallel()
 	for _, path := range []string{
