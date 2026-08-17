@@ -339,6 +339,19 @@ func claimsAllow(claims security.Claims, required string) bool {
 	return permissionRulesAllow(claims.PermissionRules, required)
 }
 
+// claimsExplicitlyAllow is reserved for state-marker permissions whose
+// presence carries meaning by itself. Administrative wildcards must not imply
+// markers such as account.banned.
+func claimsExplicitlyAllow(claims security.Claims, required string) bool {
+	exact := make([]security.PermissionRule, 0, 1)
+	for _, rule := range claims.PermissionRules {
+		if rule.Code == required {
+			exact = append(exact, rule)
+		}
+	}
+	return permissionRulesAllow(exact, required)
+}
+
 func permissionRulesNumericValue(entries []security.PermissionRule, permissionPrefix string) int32 {
 	if permissionRulesAllow(entries, "admin.*") || permissionRulesAllow(entries, strings.TrimSuffix(permissionPrefix, ".")+".*") {
 		return maxPermissionValue

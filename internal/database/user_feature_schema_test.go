@@ -7,7 +7,7 @@ import (
 
 func TestUserFeatureSchemaKeepsStatisticsIndependentFromActivityRetention(t *testing.T) {
 	t.Parallel()
-	if schemaGeneration != 80 {
+	if schemaGeneration != 81 {
 		t.Fatalf("unexpected schema generation %d", schemaGeneration)
 	}
 	definition := strings.ToLower(strings.Join(userFeatureSchemaStatements(), "\n"))

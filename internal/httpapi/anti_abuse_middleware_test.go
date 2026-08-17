@@ -71,6 +71,31 @@ func TestAntiAbuseRateLimitPercentUsesVariablePermissions(t *testing.T) {
 	}
 }
 
+func TestBannedAccountMarkerRequiresExplicitPermission(t *testing.T) {
+	administrator := security.Claims{PermissionRules: []security.PermissionRule{
+		{Code: "admin.*", Allow: true, Priority: 100},
+	}}
+	if claimsExplicitlyAllow(administrator, "account.banned") {
+		t.Fatal("administrator wildcard must not imply the account.banned state marker")
+	}
+
+	banned := security.Claims{PermissionRules: []security.PermissionRule{
+		{Code: "account.banned", Allow: true, Priority: 100},
+		{Code: "*", Allow: false, Priority: 100},
+	}}
+	if !claimsExplicitlyAllow(banned, "account.banned") {
+		t.Fatal("explicit account.banned marker must remain effective")
+	}
+
+	revoked := security.Claims{PermissionRules: []security.PermissionRule{
+		{Code: "account.banned", Allow: true, Priority: 50},
+		{Code: "account.banned", Allow: false, Priority: 100},
+	}}
+	if claimsExplicitlyAllow(revoked, "account.banned") {
+		t.Fatal("higher-priority explicit denial must override the marker")
+	}
+}
+
 func TestInspectAntiAbuseBodyRestoresContent(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/community/posts", strings.NewReader(`{"title":"Title","bodyMarkdown":"Body"}`))
 	request.Header.Set("Content-Type", "application/json")

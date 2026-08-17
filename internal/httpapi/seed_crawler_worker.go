@@ -114,11 +114,9 @@ func (worker *SeedCrawlerWorker) processOne(ctx context.Context) (bool, error) {
 	}
 	defer tx.Rollback(ctx)
 	var runID int64
-	var runPublicID string
 	var dryRun bool
-	var requestedBy *int64
-	err = tx.QueryRow(ctx, `select id,public_id,dry_run,requested_by from seed_crawler_runs
-		where status='pending' and next_attempt_at<=now() order by created_at,id for update skip locked limit 1`).Scan(&runID, &runPublicID, &dryRun, &requestedBy)
+	err = tx.QueryRow(ctx, `select id,dry_run from seed_crawler_runs
+		where status='pending' and next_attempt_at<=now() order by created_at,id for update skip locked limit 1`).Scan(&runID, &dryRun)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -131,14 +129,14 @@ func (worker *SeedCrawlerWorker) processOne(ctx context.Context) (bool, error) {
 	if err = tx.Commit(ctx); err != nil {
 		return false, err
 	}
-	if requestedBy == nil {
-		var serviceUser int64
-		if scanErr := worker.server.db.QueryRow(ctx, `select id from users where status='active' order by case username when 'admin' then 0 else 1 end,id limit 1`).Scan(&serviceUser); scanErr != nil {
-			return true, worker.failRun(ctx, runID, scanErr)
-		}
-		requestedBy = &serviceUser
+	actor, actorErr := worker.server.automationActor(ctx)
+	if actorErr != nil {
+		return true, worker.failRun(ctx, runID, actorErr)
 	}
-	stats, runErr := worker.executeRun(ctx, runID, *requestedBy, dryRun)
+	if _, actorErr = worker.server.db.Exec(ctx, `update seed_crawler_runs set actor_id=$2 where id=$1`, runID, actor.Subject); actorErr != nil {
+		return true, worker.failRun(ctx, runID, actorErr)
+	}
+	stats, runErr := worker.executeRun(ctx, runID, actor, dryRun)
 	statsRaw, _ := json.Marshal(stats)
 	if runErr != nil {
 		return true, worker.failRunWithStats(ctx, runID, runErr, statsRaw)
@@ -170,7 +168,7 @@ func (worker *SeedCrawlerWorker) failRunWithStats(ctx context.Context, runID int
 	return err
 }
 
-func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID, actorID int64, dryRun bool) (map[string]int, error) {
+func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, actor security.Claims, dryRun bool) (map[string]int, error) {
 	var cfg seedCrawlerRuntimeConfig
 	err := worker.server.db.QueryRow(ctx, `select project_types,batch_size,daily_limit,minimum_downloads,ai_daily_token_budget,auto_submit_review from seed_crawler_configs where id`).Scan(
 		&cfg.ProjectTypes, &cfg.BatchSize, &cfg.DailyLimit, &cfg.MinimumDownloads, &cfg.AIDailyTokenBudget, &cfg.AutoSubmitReview)
@@ -227,7 +225,7 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID, actorID 
 			if dryRun {
 				continue
 			}
-			status, processErr := worker.createSeedDraft(ctx, candidateID, actorID, projectType, hit, cfg)
+			status, processErr := worker.createSeedDraft(ctx, candidateID, actor, projectType, hit, cfg)
 			if processErr != nil {
 				stats["failed"]++
 				_, _ = worker.server.db.Exec(ctx, `update seed_crawler_candidates set status='failed',last_error=$2,updated_at=now() where id=$1`, candidateID, truncateRunes(processErr.Error(), 2000))
@@ -324,7 +322,7 @@ func seedModrinthURL(projectType, slug string) string {
 	return "https://modrinth.com/" + section + "/" + slug
 }
 
-func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateID, actorID int64, projectType string, hit seedModrinthHit, cfg seedCrawlerRuntimeConfig) (string, error) {
+func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateID int64, actor security.Claims, projectType string, hit seedModrinthHit, cfg seedCrawlerRuntimeConfig) (string, error) {
 	var exists bool
 	if projectType == "mod" {
 		_ = worker.server.db.QueryRow(ctx, `select exists(select 1 from mods where modrinth_project_id=$1)`, hit.ProjectID).Scan(&exists)
@@ -338,7 +336,7 @@ func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateI
 	var jobID string
 	sourceURL := seedModrinthURL(projectType, hit.Slug)
 	err := worker.server.db.QueryRow(ctx, `insert into mod_metadata_import_jobs(user_id,project_type,provider,source_url,status,progress)
-		values($1,$2,'modrinth',$3,'queued',0) returning public_id`, actorID, projectType, sourceURL).Scan(&jobID)
+		values($1,$2,'modrinth',$3,'queued',0) returning public_id`, actor.Subject, projectType, sourceURL).Scan(&jobID)
 	if err != nil {
 		return "", err
 	}
@@ -377,17 +375,18 @@ func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateI
 	err = worker.server.db.QueryRow(ctx, `insert into user_drafts(user_id,draft_key,project_key,project_title,kind,title,edit_url,payload,expires_at)
 		values($1,$2,$3,$4,'seed_crawler_import',$4,$5,$6::jsonb,now()+interval '3 years')
 		on conflict(user_id,draft_key) where submitted_at is null do update set payload=excluded.payload,project_title=excluded.project_title,title=excluded.title,updated_at=now(),expires_at=excluded.expires_at returning public_id`,
-		actorID, "seed-crawler:"+hit.ProjectID, projectType+":"+hit.ProjectID, hit.Title, editURL, finalPayload).Scan(&draftID)
+		actor.Subject, "seed-crawler:"+hit.ProjectID, projectType+":"+hit.ProjectID, hit.Title, editURL, finalPayload).Scan(&draftID)
 	if err != nil {
 		return "", err
 	}
 	nextStatus := "draft"
 	if cfg.AutoSubmitReview {
-		if submitErr := worker.submitSeedDraft(ctx, actorID, projectType, hit.ProjectID, sourceURL, result); submitErr != nil {
+		submittedStatus, submitErr := worker.submitSeedDraft(ctx, actor, projectType, hit.ProjectID, sourceURL, result)
+		if submitErr != nil {
 			return "", submitErr
 		}
 		nextStatus = "submitted"
-		_, _ = worker.server.db.Exec(ctx, `update user_drafts set submitted_status='pending',submitted_at=now(),updated_at=now() where public_id=$1`, draftID)
+		_, _ = worker.server.db.Exec(ctx, `update user_drafts set submitted_status=$2,submitted_at=now(),updated_at=now() where public_id=$1`, draftID, submittedStatus)
 	}
 	_, err = worker.server.db.Exec(ctx, `update seed_crawler_candidates set status=$2,last_error='',updated_at=now() where id=$1`, candidateID, nextStatus)
 	return nextStatus, err
@@ -458,12 +457,9 @@ func (worker *SeedCrawlerWorker) translateSeedDraft(ctx context.Context, candida
 	return translations
 }
 
-func (worker *SeedCrawlerWorker) submitSeedDraft(ctx context.Context, actorID int64, projectType, externalProjectID, externalURL string, raw []byte) error {
+func (worker *SeedCrawlerWorker) submitSeedDraft(ctx context.Context, actor security.Claims, projectType, externalProjectID, externalURL string, raw []byte) (string, error) {
 	request := httptest.NewRequest(http.MethodPost, "/internal/seed-crawler", bytes.NewReader(raw)).WithContext(
-		context.WithValue(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: actorID, PermissionRules: []security.PermissionRule{
-			{Code: "project.create", Allow: true, Priority: 100},
-			{Code: "project.create." + projectType, Allow: true, Priority: 100},
-		}}), antiAbuseModerationContextKey, true),
+		context.WithValue(ctx, claimsContextKey, actor),
 	)
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -473,7 +469,18 @@ func (worker *SeedCrawlerWorker) submitSeedDraft(ctx context.Context, actorID in
 		worker.server.createSimpleProject(response, request, projectType)
 	}
 	if response.Code < 200 || response.Code >= 300 {
-		return fmt.Errorf("seed draft review submission failed (%d): %s", response.Code, truncateRunes(response.Body.String(), 500))
+		return "", fmt.Errorf("seed draft submission failed (%d): %s", response.Code, truncateRunes(response.Body.String(), 500))
+	}
+	var created struct {
+		Data struct {
+			ReviewStatus string `json:"reviewStatus"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		return "", fmt.Errorf("decode seed draft submission: %w", err)
+	}
+	if created.Data.ReviewStatus != "approved" && created.Data.ReviewStatus != "pending" {
+		return "", fmt.Errorf("seed draft submission returned invalid review status %q", created.Data.ReviewStatus)
 	}
 	// The normal importer has already verified this external identifier. Bind
 	// it immediately so later automatic updates can never guess by project
@@ -489,7 +496,7 @@ func (worker *SeedCrawlerWorker) submitSeedDraft(ctx context.Context, actorID in
 			_, _ = worker.server.db.Exec(ctx, `insert into project_external_sources(project_route_id,source_type,external_project_id,external_project_url,verified_at,verified_by)
 				values($1,'modrinth',$2,$3,now(),$4) on conflict(project_route_id,source_type) do update set
 				external_project_id=excluded.external_project_id,external_project_url=excluded.external_project_url,verified_at=now(),verified_by=excluded.verified_by`,
-				routeID, externalProjectID, externalURL, actorID)
+				routeID, externalProjectID, externalURL, actor.Subject)
 		}
 	} else {
 		err := worker.server.db.QueryRow(ctx, `select route.id,route.public_id from simple_projects project
@@ -499,8 +506,8 @@ func (worker *SeedCrawlerWorker) submitSeedDraft(ctx context.Context, actorID in
 			_, _ = worker.server.db.Exec(ctx, `insert into project_external_sources(project_route_id,source_type,external_project_id,external_project_url,verified_at,verified_by)
 				values($1,'modrinth',$2,$3,now(),$4) on conflict(project_route_id,source_type) do update set
 				external_project_id=excluded.external_project_id,external_project_url=excluded.external_project_url,verified_at=now(),verified_by=excluded.verified_by`,
-				routeID, externalProjectID, externalURL, actorID)
+				routeID, externalProjectID, externalURL, actor.Subject)
 		}
 	}
-	return nil
+	return created.Data.ReviewStatus, nil
 }

@@ -102,20 +102,12 @@ func (h *availabilityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		writeAvailabilityJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"status": "alive", "app": "mcmods-cn-backend"}})
 		return
 	}
-	if r.URL.Path == "/health" || r.URL.Path == "/ready" || !snapshot.Ready {
+	if r.URL.Path == "/ready" || !snapshot.Ready {
 		h.setAvailabilityResponseHeaders(w, r)
 	}
-	if r.Method == http.MethodOptions && (r.URL.Path == "/health" || r.URL.Path == "/ready" || !snapshot.Ready) {
+	if r.Method == http.MethodOptions && (r.URL.Path == "/ready" || !snapshot.Ready) {
 		w.WriteHeader(http.StatusNoContent)
 		return
-	}
-	if r.Method == http.MethodGet && r.URL.Path == "/health" {
-		w.Header().Set("Deprecation", "true")
-		w.Header().Set("Link", "</ready>; rel=successor-version")
-		if snapshot.Ready && handler != nil {
-			handler.ServeHTTP(w, r)
-			return
-		}
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/ready" && !snapshot.Ready {
 		writeAvailabilityJSON(w, http.StatusServiceUnavailable, map[string]any{"error": availabilityErrorMessage, "data": snapshot})

@@ -27,11 +27,23 @@ go run .
 
 管理员 Session 登录实测通过；带管理员 Session 的常用封禁理由接口返回 12 项（含 `spam_bot` 和 `other`），未登录访问同一接口返回 HTTP 401。
 
+## `autobot` 与项目维护状态补充验证
+
+本轮实际执行：
+
+```text
+go test -count=1 ./...
+APP_ENV=development DB_RESET_ON_START=true DB_RESET_CONFIRM="RESET mcmods" go run ./cmd/db-reset
+MCMODS_RUN_DB_INTEGRATION=1 go test -count=1 ./internal/database ./internal/httpapi
+```
+
+结果：全部 Go 包单元回归通过；开发库重置并安装 generation 81；最终 database 集成包通过（8.661s），httpapi 集成包通过（66.306s）。真实 PostgreSQL 验证了 `autobot@mcmods.cn`、不可交互密码、`project.no-review/content.no-review`、全局及 `review.submit` 的 1000% 限流权限；验证了自动状态从 active 进入 lowFrequency、随后进入 discontinued、发现新上游活动后恢复 active，以及人工覆盖后保持人工状态。测试未调用真实生产提供方，因此半年/一年判断使用可控 UTC 时间和真实数据库事务，外部 API 时间戳解析仍由现有本地 HTTP 提供方测试覆盖。
+
 ## 覆盖
 
 单元测试覆盖所有举报目标理由、非法理由隔离、理由接口、路由类型适配、举报反滥用动作、公开封禁状态、爬虫类型规范化、严格下载门槛、随机分页范围/查询参数、自动更新周期与来源哈希、Schema generation 和关键约束。已有 Outbox、权限、反滥用、缓存和评论测试随全包回归执行。
 
-数据库集成测试在重置后的真实开发库上验证 generation 80、当前表/索引/触发器与 RBAC 种子。并发可靠性主要由唯一约束、事务行锁、advisory lock、`SKIP LOCKED` 与已有 Outbox 集成测试覆盖。
+数据库集成测试在重置后的真实开发库上验证 generation 81、当前表/索引/触发器、`autobot` 服务账号及其免审/1000% 限流权限种子。并发可靠性主要由唯一约束、事务行锁、advisory lock、`SKIP LOCKED` 与已有 Outbox 集成测试覆盖。
 
 ## 未能真实验证
 

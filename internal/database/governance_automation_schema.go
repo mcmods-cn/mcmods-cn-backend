@@ -184,6 +184,7 @@ func governanceAutomationSchemaStatements() []string {
 			status text not null default 'pending',
 			dry_run boolean not null default false,
 			requested_by bigint references users(id) on delete set null,
+			actor_id bigint references users(id) on delete set null,
 			lease_owner text not null default '',
 			lease_expires_at timestamptz,
 			attempts integer not null default 0,
@@ -273,6 +274,7 @@ func governanceAutomationSchemaStatements() []string {
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			setting_id bigint not null references project_auto_update_settings(id) on delete cascade,
 			status text not null default 'pending',
+			actor_id bigint references users(id) on delete set null,
 			lease_owner text not null default '',
 			lease_expires_at timestamptz,
 			attempts integer not null default 0,
@@ -288,6 +290,22 @@ func governanceAutomationSchemaStatements() []string {
 		`create unique index uq_project_auto_update_active_run on project_auto_update_runs(setting_id)
 			where status in ('pending','running')`,
 		`create index idx_project_auto_update_runs_ready on project_auto_update_runs(status,next_attempt_at,id)`,
+		`create table project_automation_activity (
+			project_route_id bigint primary key references public_routes(id) on delete cascade,
+			last_project_change_at timestamptz not null,
+			has_external_activity boolean not null default false,
+			last_checked_at timestamptz not null default now(),
+			automated_status text,
+			status_before_automation text not null default '',
+			manual_status_override boolean not null default false,
+			last_source_type text not null default '',
+			last_update_kind text not null default '',
+			changed_by bigint references users(id) on delete set null,
+			updated_at timestamptz not null default now(),
+			check(automated_status is null or automated_status in ('lowFrequency','discontinued')),
+			check(status_before_automation='' or status_before_automation in ('active','lowFrequency','discontinued','archived','development'))
+		)`,
+		`create index idx_project_automation_activity_stale on project_automation_activity(last_project_change_at,project_route_id)`,
 		`create table external_release_bindings (
 			id bigserial primary key,
 			project_route_id bigint not null references public_routes(id) on delete cascade,

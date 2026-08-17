@@ -8,7 +8,6 @@
 
 | 兼容项 | 内部权威实现 | 保留原因 | 移除条件 |
 | --- | --- | --- | --- |
-| `GET /health` | `GET /ready` | 旧基础设施探针可能仍使用；响应带 `Deprecation` 和 successor `Link` | 所有部署清单和访问日志证明已迁移 |
 | `GET /api/v1/notifications/unread` | `GET /api/v1/me/unread-summary` 的同一 Handler | 已发布客户端可能仍调用旧路径 | 客户端最低版本和访问日志证明无调用 |
 | 既有内容详情、历史和编辑 URL | 当前路由 Handler | 用户书签、搜索引擎和外部链接 | 提供正式重定向和索引迁移方案 |
 

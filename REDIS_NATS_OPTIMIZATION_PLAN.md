@@ -17,7 +17,7 @@
 ## 已实施阶段
 
 1. 删除浏览器正常状态下的固定健康轮询；只在网络/502/503/504、恢复在线或已显示异常时按 5/10/20/30 秒退避检查 `/ready`。
-2. 新增 `/live`（无依赖访问）与 `/ready`（2 秒 PostgreSQL、300ms Redis、NATS状态）；`/health` 兼容并携带弃用头。
+2. 新增 `/live`（无依赖访问）与 `/ready`（2 秒 PostgreSQL、300ms Redis、NATS状态）；Dev 阶段已移除无调用方的旧 `/health` 入口。
 3. 统一 Redis 客户端、环境命名空间、连接池、超时、Pipeline/Lua能力、singleflight、L1 降级和指标。
 4. Session 使用 SHA-256 指纹缓存；登出立即删除，用户认证版本以 10 秒上界校验封禁/密码/权限变化。
 5. RBAC 使用全局持久 `rbacVersion` 与用户 `auth_version` 组成版本化 Key，不使用 `SCAN + DEL`。

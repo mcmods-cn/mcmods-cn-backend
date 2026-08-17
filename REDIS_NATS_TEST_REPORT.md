@@ -28,7 +28,7 @@ Redis/NATS 优化开始时存在 5 类数据库集成失败：规范身份 NULL 
 
 - `/live` 200，响应不访问 PG/Redis/NATS；100 次顺序请求 661ms。
 - `/ready` 200，返回 PostgreSQL/NATS ready、Redis disabled/degraded 语义；20 次顺序请求 831ms。
-- `/health` 兼容 200，返回 `Deprecation: true` 和 successor Link。
+- `/live` 与 `/ready` 探针已覆盖存活和就绪语义；Dev 阶段已删除旧 `/health` 兼容入口。
 - 未认证 `/api/v1/realtime/events`：401。
 - Redis 停止后 `/ready` 仍 200 且 `redis=degraded`；登录限流切到严格本地额度并实际返回 429，而非无限放行。
 - miniredis 单元/集成覆盖多 Session Presence、TTL离线、未读原子增减/非负/单次回源、命名空间和 Redis 清空重建。

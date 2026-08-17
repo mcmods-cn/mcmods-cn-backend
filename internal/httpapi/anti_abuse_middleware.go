@@ -42,7 +42,7 @@ func (r *antiAbuseResponseRecorder) Write(body []byte) (int, error) {
 
 func (s *Server) serveProtectedMutation(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
 	claims := currentClaims(r)
-	if claims.Subject > 0 && claimsAllow(claims, "account.banned") && !bannedMutationAllowed(r) {
+	if claims.Subject > 0 && claimsExplicitlyAllow(claims, "account.banned") && !bannedMutationAllowed(r) {
 		writeAPIError(w, http.StatusForbidden, "account_banned", "当前账户处于封禁状态，只能执行登录、退出和必要的账户安全操作", 0, nil)
 		return
 	}

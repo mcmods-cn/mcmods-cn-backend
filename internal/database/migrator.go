@@ -7,9 +7,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 80
+const schemaGeneration = 81
 
-// Migrate installs one coherent development schema. Generation 80 is the
+// Migrate installs one coherent development schema. Generation 81 is the
 // current pre-production baseline. Older development databases are
 // intentionally reset instead of upgraded or backfilled.
 // Generation 74 established
@@ -69,6 +69,9 @@ const schemaGeneration = 80
 // Generation 79 adds complete leading indexes for the generation 78 foreign
 // keys after the database query-plan audit rejected partial indexes as FK
 // maintenance coverage.
+// Generation 81 introduces the seeded autobot service identity for early-data
+// ingestion and project automation, records that identity on worker runs, and
+// persists reversible inactivity-based project maintenance status decisions.
 // Generation 74 repaired the popularity refresh function
 // without replacing its persisted facts or queue. Earlier development data is
 // intentionally not migrated and must be reset before installation.

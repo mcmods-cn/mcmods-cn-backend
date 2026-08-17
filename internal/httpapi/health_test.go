@@ -25,3 +25,16 @@ func TestReadyFailsClosedWithoutPostgreSQL(t *testing.T) {
 		t.Fatalf("ready status = %d", response.Code)
 	}
 }
+
+func TestLegacyHealthRouteIsRemoved(t *testing.T) {
+	server := &Server{mux: http.NewServeMux()}
+	server.routes()
+	request := httptest.NewRequest(http.MethodGet, "/health", nil)
+	response := httptest.NewRecorder()
+
+	server.mux.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("legacy health status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}

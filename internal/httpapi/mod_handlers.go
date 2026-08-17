@@ -192,7 +192,7 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := currentClaims(r)
-	reviewRequired := loadReviewConfig(r.Context(), s.db).ModCreate && !claimsAllow(claims, "admin.*")
+	reviewRequired := loadReviewConfig(r.Context(), s.db).ModCreate && !projectMutationBypassesReview(claims)
 	if antiAbuseModerationRequired(r) {
 		reviewRequired = true
 	}

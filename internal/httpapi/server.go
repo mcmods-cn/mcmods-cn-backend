@@ -40,6 +40,7 @@ type Server struct {
 }
 
 const corsAllowedHeaders = "Authorization, Content-Type, Idempotency-Key, X-Request-ID, X-Client-ID, X-Anti-Abuse-Form, X-Anti-Abuse-Trap, X-Anti-Abuse-Challenge, X-MCMods-Bot-Token"
+const corsExposedHeaders = "Retry-After, X-MCMods-API-Response"
 
 func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, sharedCache *querycache.Cache, activityMonitor *activity.Monitor, searchClient *searchindex.Client) http.Handler {
 	if sharedCache == nil {
@@ -73,7 +74,6 @@ func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, s
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /live", s.live)
 	s.mux.HandleFunc("GET /ready", s.ready)
-	s.mux.HandleFunc("GET /health", s.health)
 	s.mux.HandleFunc("GET /api/v1/reports/reasons", reportReasons)
 	s.mux.HandleFunc("POST /api/v1/reports", s.requirePermission("report.create", s.createUnifiedReport))
 	s.mux.HandleFunc("POST /api/v1/reports/evidence/uploads", s.requirePermission("report.create", s.createReportEvidenceUpload))
@@ -599,14 +599,6 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// health is a compatibility alias for infrastructure that has not migrated to
-// /ready. Browsers must not poll this endpoint during normal operation.
-func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Deprecation", "true")
-	w.Header().Set("Link", "</ready>; rel=successor-version")
-	s.ready(w, r)
-}
-
 func (s *Server) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Vary", "Origin")
@@ -616,6 +608,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 		w.Header().Set("Access-Control-Allow-Headers", corsAllowedHeaders)
+		w.Header().Set("Access-Control-Expose-Headers", corsExposedHeaders)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

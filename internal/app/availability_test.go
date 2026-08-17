@@ -10,20 +10,20 @@ import (
 	"mcmods-cn-backend/internal/config"
 )
 
-func TestAvailabilityHandlerServesHealthDuringStartup(t *testing.T) {
+func TestAvailabilityHandlerServesReadinessDuringStartup(t *testing.T) {
 	handler := newAvailabilityHandler(config.Config{Env: "test", FrontendOrigin: "https://frontend.example"})
-	request := httptest.NewRequest(http.MethodGet, "/health", nil)
+	request := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	request.Header.Set("Origin", "https://frontend.example")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
-		t.Fatalf("startup health status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+		t.Fatalf("startup readiness status = %d, want %d", response.Code, http.StatusServiceUnavailable)
 	}
 	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "https://frontend.example" {
-		t.Fatalf("health CORS origin = %q", got)
+		t.Fatalf("readiness CORS origin = %q", got)
 	}
 	if got := response.Header().Get("Cache-Control"); got != "no-store" {
-		t.Fatalf("health cache policy = %q", got)
+		t.Fatalf("readiness cache policy = %q", got)
 	}
 	var envelope struct {
 		Data  runtimeHealthSnapshot `json:"data"`
@@ -33,10 +33,10 @@ func TestAvailabilityHandlerServesHealthDuringStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	if envelope.Data.Ready || envelope.Data.Status != "error" || len(envelope.Data.Issues) != 1 {
-		t.Fatalf("unexpected startup health payload: %+v", envelope.Data)
+		t.Fatalf("unexpected startup readiness payload: %+v", envelope.Data)
 	}
 	if envelope.Error != availabilityErrorMessage {
-		t.Fatalf("startup health error = %q", envelope.Error)
+		t.Fatalf("startup readiness error = %q", envelope.Error)
 	}
 }
 

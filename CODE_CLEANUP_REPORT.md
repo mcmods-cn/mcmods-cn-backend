@@ -51,7 +51,6 @@
 
 以下代码有真实外部契约责任，已保留并限制在边界；完整清单见 `COMPATIBILITY_BOUNDARIES.md`：
 
-- `/health` 到 `/ready` 的弃用别名；
 - `/api/v1/notifications/unread` 到统一未读摘要 Handler 的旧客户端路由；
 - `latest`、`oldest`、`created`、`nameAsc`、`nameDesc` 等旧列表排序参数；
 - 旧 Core NATS 原始负载的解码兼容；

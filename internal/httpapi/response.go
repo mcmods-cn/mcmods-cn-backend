@@ -10,6 +10,8 @@ import (
 
 const maxJSONRequestBodyBytes = int64(8 << 20)
 
+const backendResponseHeader = "X-MCMods-API-Response"
+
 type apiResponse struct {
 	Data       any    `json:"data,omitempty"`
 	Error      string `json:"error,omitempty"`
@@ -19,6 +21,7 @@ type apiResponse struct {
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
+	markBackendResponse(w)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
@@ -26,6 +29,7 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 }
 
 func writeJSONBytes(w http.ResponseWriter, status int, payload []byte) {
+	markBackendResponse(w)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
@@ -33,6 +37,7 @@ func writeJSONBytes(w http.ResponseWriter, status int, payload []byte) {
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
+	markBackendResponse(w)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
@@ -40,6 +45,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func writeAPIError(w http.ResponseWriter, status int, code, message string, retryAfter int, details any) {
+	markBackendResponse(w)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if retryAfter > 0 {
@@ -47,6 +53,10 @@ func writeAPIError(w http.ResponseWriter, status int, code, message string, retr
 	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(apiResponse{Error: message, Code: code, RetryAfter: retryAfter, Details: details})
+}
+
+func markBackendResponse(w http.ResponseWriter) {
+	w.Header().Set(backendResponseHeader, "1")
 }
 
 func decodeJSON(r *http.Request, target any) error {

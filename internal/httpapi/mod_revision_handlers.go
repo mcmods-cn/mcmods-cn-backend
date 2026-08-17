@@ -383,7 +383,7 @@ func canEditMod(claims security.Claims, identity modIdentityRecord) bool {
 }
 
 func canSkipProjectReview(claims security.Claims, identity modIdentityRecord) bool {
-	return claimsAllow(claims, "project.no-review") || claimsAllow(claims, "project.no-review."+identity.UniqueID)
+	return projectMutationBypassesReview(claims) || claimsAllow(claims, "project.no-review."+identity.UniqueID)
 }
 
 const modRevisionSelect = `select

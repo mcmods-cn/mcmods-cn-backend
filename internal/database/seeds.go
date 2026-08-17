@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/security"
+	"mcmods-cn-backend/internal/systemactor"
 )
 
 type seedPermission struct {
@@ -46,7 +47,9 @@ var seedPermissions = []seedPermission{
 	{Code: "security.anti-abuse.sensitive", Module: "security", Name: "Read sensitive anti-abuse identifiers", Description: "Allows viewing complete hashed network and device identifiers."},
 	{Code: "security.anti-abuse.rate_multiplier.<num>", Module: "security", Name: "Anti-abuse rate limit allowance", Description: "Numeric permission; replace <num> with the percentage of the normal request-count allowance."},
 	{Code: "security.anti-abuse.rate_multiplier.100", Module: "security", Name: "Anti-abuse rate limit allowance: 100%", Description: "Default request-count allowance for registered users."},
+	{Code: "security.anti-abuse.rate_multiplier.1000", Module: "security", Name: "Anti-abuse rate limit allowance: 1000%", Description: "High request-count allowance reserved for trusted internal automation."},
 	{Code: "security.anti-abuse.rate_multiplier.review_submit.<num>", Module: "security", Name: "Review submission rate limit allowance", Description: "Numeric permission; replace <num> with the percentage allowance for review.submit requests."},
+	{Code: "security.anti-abuse.rate_multiplier.review_submit.1000", Module: "security", Name: "Review submission rate limit allowance: 1000%", Description: "High review submission allowance reserved for trusted internal automation."},
 
 	{Code: "user.read", Module: "user", Name: "Read users", Description: "Allows reading user accounts and login information."},
 	{Code: "user.write", Module: "user", Name: "Manage users", Description: "Allows modifying user accounts, status and security settings."},
@@ -244,6 +247,18 @@ var seedUsers = []seedUser{
 		},
 	},
 	{
+		Username: systemactor.AutobotUsername,
+		Email:    systemactor.AutobotEmail,
+		Status:   "active",
+		Permissions: []string{
+			"project.create", "project.create.plugin", "project.create.map", "project.create.resource_pack",
+			"project.create.shader_pack", "project.create.datapack", "project.create.addon",
+			"project.edit", "project.no-review", "content.no-review",
+			"security.anti-abuse.rate_multiplier.1000",
+			"security.anti-abuse.rate_multiplier.review_submit.1000",
+		},
+	},
+	{
 		Username: "guest",
 		Email:    "guest@mcmods.cn",
 		Status:   "active",
@@ -372,6 +387,7 @@ func seedDefaultUsers(ctx context.Context, db *pgxpool.Pool) error {
 			 values ($1, $2, $3, true, $4)
 			 on conflict (username) do update
 			 set email = excluded.email,
+			     email_verified = true,
 			     status = excluded.status,
 			     password_hash = case when $5 then excluded.password_hash else users.password_hash end,
 			     updated_at = now()
@@ -405,6 +421,9 @@ func seedDefaultUsers(ctx context.Context, db *pgxpool.Pool) error {
 }
 
 func seedPasswordHash(username string) (string, bool, error) {
+	if username == systemactor.AutobotUsername {
+		return "password-login-disabled", true, nil
+	}
 	if username == "admin" {
 		if password := strings.TrimSpace(os.Getenv("SEED_ADMIN_PASSWORD")); password != "" {
 			hash, err := security.HashPassword(password)

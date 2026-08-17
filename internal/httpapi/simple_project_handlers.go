@@ -319,7 +319,7 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 	}
 	config := loadReviewConfig(r.Context(), s.db)
 	reviewStatus := "approved"
-	if simpleProjectReviewRequired(config, projectType, "create") && !claimsAllow(claims, "content.no-review") && !claimsAllow(claims, "admin.*") {
+	if simpleProjectReviewRequired(config, projectType, "create") && !projectMutationBypassesReview(claims) {
 		reviewStatus = "pending"
 	}
 	if antiAbuseModerationRequired(r) {
@@ -447,7 +447,7 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	status := "approved"
-	if simpleProjectReviewRequired(loadReviewConfig(r.Context(), s.db), projectType, "edit") && !claimsAllow(claims, "content.no-review") && !claimsAllow(claims, "admin.*") {
+	if simpleProjectReviewRequired(loadReviewConfig(r.Context(), s.db), projectType, "edit") && !projectMutationBypassesReview(claims) {
 		status = "pending"
 	}
 	if antiAbuseModerationRequired(r) {

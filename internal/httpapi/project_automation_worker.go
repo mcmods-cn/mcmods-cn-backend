@@ -117,7 +117,7 @@ type projectAutomationJob struct {
 	SourceType      string
 	ExternalID      string
 	Interval        string
-	ConfiguredBy    int64
+	ActorID         int64
 	LicenseOverride bool
 	OverrideReason  string
 	OverrideSource  string
@@ -131,7 +131,7 @@ func (worker *ProjectAutomationWorker) processOne(ctx context.Context) (bool, er
 	defer tx.Rollback(ctx)
 	var job projectAutomationJob
 	err = tx.QueryRow(ctx, `select run.id,setting.id,route.id,route.internal_id,route.entity_type,route.public_id,
-		setting.update_kind,setting.source_type,source.external_project_id,setting.interval_code,coalesce(setting.configured_by,0),
+		setting.update_kind,setting.source_type,source.external_project_id,setting.interval_code,
 		setting.license_override,setting.license_override_reason,setting.license_override_source
 		from project_auto_update_runs run
 		join project_auto_update_settings setting on setting.id=run.setting_id
@@ -140,18 +140,13 @@ func (worker *ProjectAutomationWorker) processOne(ctx context.Context) (bool, er
 		where run.status='pending' and run.next_attempt_at<=now()
 		order by run.created_at,run.id for update of run skip locked limit 1`).Scan(
 		&job.RunID, &job.SettingID, &job.RouteID, &job.InternalID, &job.ProjectType, &job.ProjectPublicID,
-		&job.Kind, &job.SourceType, &job.ExternalID, &job.Interval, &job.ConfiguredBy,
+		&job.Kind, &job.SourceType, &job.ExternalID, &job.Interval,
 		&job.LicenseOverride, &job.OverrideReason, &job.OverrideSource)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
-	}
-	if job.ConfiguredBy <= 0 {
-		if err = tx.QueryRow(ctx, `select id from users where status='active' order by case username when 'admin' then 0 else 1 end,id limit 1`).Scan(&job.ConfiguredBy); err != nil {
-			return false, err
-		}
 	}
 	if _, err = tx.Exec(ctx, `update project_auto_update_runs set status='running',lease_owner='project-auto-update',
 		lease_expires_at=now()+$2::interval,attempts=attempts+1,started_at=coalesce(started_at,now()) where id=$1`,
@@ -160,6 +155,14 @@ func (worker *ProjectAutomationWorker) processOne(ctx context.Context) (bool, er
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return false, err
+	}
+	actor, actorErr := worker.server.automationActor(ctx)
+	if actorErr != nil {
+		return true, worker.fail(ctx, job, "automation_actor_unavailable", actorErr, []byte(`{}`))
+	}
+	job.ActorID = actor.Subject
+	if _, actorErr = worker.server.db.Exec(ctx, `update project_auto_update_runs set actor_id=$2 where id=$1`, job.RunID, job.ActorID); actorErr != nil {
+		return true, worker.fail(ctx, job, "automation_actor_unavailable", actorErr, []byte(`{}`))
 	}
 
 	result, code, runErr := worker.execute(ctx, job)
@@ -233,6 +236,10 @@ func (worker *ProjectAutomationWorker) execute(ctx context.Context, job projectA
 			return nil, providerFailureCode(loadErr), loadErr
 		}
 		result, updateErr := worker.mergeCompatibility(ctx, job, files)
+		result, maintenanceErr := worker.withMaintenanceResult(ctx, job, result, latestProviderFileActivity(files))
+		if updateErr == nil && maintenanceErr != nil {
+			return result, "maintenance_status_update_failed", maintenanceErr
+		}
 		return result, "minecraft_version_unmapped", updateErr
 	case "changelog":
 		releases, loadErr := worker.loadReleases(ctx, job, cfg)
@@ -240,6 +247,10 @@ func (worker *ProjectAutomationWorker) execute(ctx context.Context, job projectA
 			return nil, providerFailureCode(loadErr), loadErr
 		}
 		result, updateErr := worker.syncChangelogs(ctx, job, releases)
+		result, maintenanceErr := worker.withMaintenanceResult(ctx, job, result, latestProviderReleaseActivity(releases))
+		if updateErr == nil && maintenanceErr != nil {
+			return result, "maintenance_status_update_failed", maintenanceErr
+		}
 		return result, "update_conflict", updateErr
 	case "site_downloads":
 		if err = worker.checkRedistribution(ctx, job); err != nil {
@@ -250,10 +261,25 @@ func (worker *ProjectAutomationWorker) execute(ctx context.Context, job projectA
 			return nil, providerFailureCode(loadErr), loadErr
 		}
 		result, mirrorErr := worker.mirrorFiles(ctx, job, cfg, files)
+		result, maintenanceErr := worker.withMaintenanceResult(ctx, job, result, latestProviderFileActivity(files))
+		if mirrorErr == nil && maintenanceErr != nil {
+			return result, "maintenance_status_update_failed", maintenanceErr
+		}
 		return result, "download_failed", mirrorErr
 	default:
 		return nil, "unsupported_source", errors.New("unsupported update kind")
 	}
+}
+
+func (worker *ProjectAutomationWorker) withMaintenanceResult(ctx context.Context, job projectAutomationJob, result map[string]any, observedAt time.Time) (map[string]any, error) {
+	maintenance, err := worker.applyProjectMaintenancePolicy(ctx, job, observedAt, time.Now().UTC())
+	if result == nil {
+		result = map[string]any{}
+	}
+	if err == nil {
+		result["maintenance"] = maintenance
+	}
+	return result, err
 }
 
 func providerFailureCode(err error) string {
@@ -540,7 +566,7 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 			var internalID int64
 			var publicID string
 			if err = tx.QueryRow(ctx, `insert into project_changelogs(object_route_id,event_at,minecraft_versions,project_version,default_locale,created_by)
-				values($1,$2,$3,$4,'en-US',$5) returning id,public_id`, job.RouteID, release.PublishedAt, uniqueTrimmed(release.GameVersions, 100), release.Version, job.ConfiguredBy).Scan(&internalID, &publicID); err != nil {
+				values($1,$2,$3,$4,'en-US',$5) returning id,public_id`, job.RouteID, release.PublishedAt, uniqueTrimmed(release.GameVersions, 100), release.Version, job.ActorID).Scan(&internalID, &publicID); err != nil {
 				_ = tx.Rollback(ctx)
 				return nil, err
 			}
@@ -548,13 +574,13 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 				DefaultLocale: "en-US", Localizations: []projectChangelogLocalization{{Locale: "en-US", BodyMarkdown: body}}, Reason: "Automated external release synchronization"}
 			raw, _ := json.Marshal(snapshot)
 			revision, createErr := createContentRevisionTx(ctx, tx, createContentRevisionParams{EntityType: projectChangelogAggregate, EntityID: internalID,
-				AggregateType: projectChangelogAggregate, AggregateKey: publicID, Snapshot: raw, Reason: snapshot.Reason, ActorID: job.ConfiguredBy,
+				AggregateType: projectChangelogAggregate, AggregateKey: publicID, Snapshot: raw, Reason: snapshot.Reason, ActorID: job.ActorID,
 				Source: "auto_update", Status: "approved", Metadata: map[string]any{"source": job.SourceType, "externalReleaseId": release.ID, "externalURL": release.URL}})
 			if createErr != nil {
 				_ = tx.Rollback(ctx)
 				return nil, createErr
 			}
-			if err = applyProjectChangelogSnapshotTx(ctx, tx, internalID, job.RouteID, revision.RevisionID, job.ConfiguredBy, snapshot); err != nil {
+			if err = applyProjectChangelogSnapshotTx(ctx, tx, internalID, job.RouteID, revision.RevisionID, job.ActorID, snapshot); err != nil {
 				_ = tx.Rollback(ctx)
 				return nil, err
 			}
@@ -583,12 +609,12 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 			raw, _ := json.Marshal(snapshot)
 			revision, createErr := createContentRevisionTx(ctx, tx, createContentRevisionParams{EntityType: projectChangelogAggregate, EntityID: internalID,
 				AggregateType: projectChangelogAggregate, AggregateKey: *changelogID, BaseRevision: publishedRevisionID, Snapshot: raw, Reason: snapshot.Reason,
-				ActorID: job.ConfiguredBy, Source: "auto_update", Status: "approved", Metadata: map[string]any{"source": job.SourceType, "externalReleaseId": release.ID, "externalURL": release.URL}})
+				ActorID: job.ActorID, Source: "auto_update", Status: "approved", Metadata: map[string]any{"source": job.SourceType, "externalReleaseId": release.ID, "externalURL": release.URL}})
 			if createErr != nil {
 				_ = tx.Rollback(ctx)
 				return nil, createErr
 			}
-			if err = applyProjectChangelogSnapshotTx(ctx, tx, internalID, job.RouteID, revision.RevisionID, job.ConfiguredBy, snapshot); err == nil {
+			if err = applyProjectChangelogSnapshotTx(ctx, tx, internalID, job.RouteID, revision.RevisionID, job.ActorID, snapshot); err == nil {
 				_, err = tx.Exec(ctx, `update external_release_bindings set external_body_hash=$2,external_url=$3,updated_at=now() where id=$1`, bindingID, bodyHash, release.URL)
 			}
 			updated++
