@@ -261,20 +261,26 @@ func (s *Server) listPublicSkins(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := boundedLimit(query.Get("limit"), 24, 100)
 	offset := boundedOffset(query.Get("offset"))
-	var orderBy string
-	switch strings.ToLower(strings.TrimSpace(query.Get("sort"))) {
-	case "", "latest":
-		orderBy = "asset.created_at desc,asset.id desc"
-	case "downloads":
-		orderBy = "asset.downloads desc,asset.created_at desc,asset.id desc"
-	case "name":
-		orderBy = "lower(asset.display_name),asset.id"
-	default:
-		writeError(w, http.StatusBadRequest, "sort must be latest, downloads or name")
+	rawSort := strings.TrimSpace(query.Get("sort"))
+	if rawSort == "" {
+		rawSort = string(catalogSortPublished)
+	}
+	sort, validSort := parseCatalogSort(rawSort)
+	direction, validDirection := parseCatalogSortDirection(query.Get("order"), rawSort)
+	if !validSort || !validDirection {
+		writeError(w, http.StatusBadRequest, "invalid skin catalog sort")
 		return
+	}
+	orderBy := catalogOrderSQL(sort, direction, false, 0,
+		"asset.created_at", "asset.updated_at", "asset.id", "asset.display_name")
+	if sort == catalogSortDownloads {
+		directionSQL := string(direction)
+		orderBy = "asset.downloads " + directionSQL + ",asset.updated_at " + directionSQL + ",asset.id " + directionSQL
 	}
 	viewerID := currentClaims(r).Subject
 	rows, err := s.db.Query(r.Context(), skinAssetSelectSQL+`
+		left join public_routes popularity_route on popularity_route.entity_type='skin' and popularity_route.internal_id=asset.id
+		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
 		where asset.status='active' and asset.review_status='approved' and asset.visibility='public'
 		and ($2='' or asset.kind=$2) and ($3='' or asset.model=$3)
 		and ($4='' or asset.display_name ilike '%'||$4||'%' or asset.description ilike '%'||$4||'%'

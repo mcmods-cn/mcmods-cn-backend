@@ -145,7 +145,7 @@ func TestDurableOutboxConcurrentLoadIntegration(t *testing.T) {
 	}
 	monitors := make([]*Monitor, 4)
 	for index := range monitors {
-		monitors[index] = NewMonitorWithOptions(pool, nil, options)
+		monitors[index] = NewMonitor(pool, nil, options)
 	}
 	defer func() {
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)

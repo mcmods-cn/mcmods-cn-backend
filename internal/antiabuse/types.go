@@ -66,23 +66,27 @@ func DefaultSettings() Settings {
 }
 
 type Evaluation struct {
-	UserID         int64
-	SessionID      string
-	IP             string
-	DeviceID       string
-	UserAgent      string
-	RequestID      string
-	Action         string
-	ObjectType     string
-	ObjectKey      string
-	Content        string
-	FormToken      string
-	Honeypot       string
-	ChallengeProof string
-	IdempotencyKey string
-	Administrator  bool
-	CrawlerClass   CrawlerClass
-	Now            time.Time
+	UserID    int64
+	SessionID string
+	IP        string
+	DeviceID  string
+	UserAgent string
+	RequestID string
+	Action    string
+	RateScope string
+	// RateLimitPercent is the permission-derived request allowance. Its zero
+	// value retains the safe 100% policy for callers that do not supply it.
+	RateLimitPercent int
+	ObjectType       string
+	ObjectKey        string
+	Content          string
+	FormToken        string
+	Honeypot         string
+	ChallengeProof   string
+	IdempotencyKey   string
+	Administrator    bool
+	CrawlerClass     CrawlerClass
+	Now              time.Time
 }
 
 type Decision struct {

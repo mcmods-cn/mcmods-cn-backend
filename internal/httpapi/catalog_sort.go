@@ -7,9 +7,11 @@ import (
 )
 
 type catalogSort string
+type catalogSortDirection string
 
 const (
 	catalogSortRelevance catalogSort = "relevance"
+	catalogSortPublished catalogSort = "published"
 	catalogSortHeat      catalogSort = "heat"
 	catalogSortUpdated   catalogSort = "updated"
 	catalogSortCollected catalogSort = "collected"
@@ -18,20 +20,51 @@ const (
 	catalogSortRating    catalogSort = "rating"
 	catalogSortViews     catalogSort = "views"
 	catalogSortComments  catalogSort = "comments"
+	catalogSortName      catalogSort = "name"
 	catalogSortNameAsc   catalogSort = "nameAsc"
 	catalogSortNameDesc  catalogSort = "nameDesc"
+
+	catalogSortAscending  catalogSortDirection = "asc"
+	catalogSortDescending catalogSortDirection = "desc"
 )
 
 func parseCatalogSort(value string) (catalogSort, bool) {
 	if strings.TrimSpace(value) == "" {
 		return catalogSortRelevance, true
 	}
-	sort := catalogSort(strings.TrimSpace(value))
+	raw := strings.TrimSpace(value)
+	// Preserve old bookmarks while exposing one canonical field + direction
+	// model to new clients.
+	switch raw {
+	case "latest", "oldest", "created":
+		raw = string(catalogSortPublished)
+	case string(catalogSortNameAsc), string(catalogSortNameDesc):
+		raw = string(catalogSortName)
+	}
+	sort := catalogSort(raw)
 	switch sort {
-	case catalogSortRelevance, catalogSortHeat, catalogSortUpdated, catalogSortCollected,
+	case catalogSortRelevance, catalogSortPublished, catalogSortHeat, catalogSortUpdated, catalogSortCollected,
 		catalogSortDownloads, catalogSortFavorites, catalogSortRating, catalogSortViews,
-		catalogSortComments, catalogSortNameAsc, catalogSortNameDesc:
+		catalogSortComments, catalogSortName:
 		return sort, true
+	default:
+		return "", false
+	}
+}
+
+func parseCatalogSortDirection(value, legacySort string) (catalogSortDirection, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "default":
+		switch strings.TrimSpace(legacySort) {
+		case "oldest", string(catalogSortName), string(catalogSortNameAsc):
+			return catalogSortAscending, true
+		default:
+			return catalogSortDescending, true
+		}
+	case string(catalogSortAscending):
+		return catalogSortAscending, true
+	case string(catalogSortDescending):
+		return catalogSortDescending, true
 	default:
 		return "", false
 	}
@@ -56,6 +89,40 @@ func parseCatalogList(value string, maximum int) ([]string, bool) {
 		result = append(result, part)
 	}
 	return result, true
+}
+
+func parseCatalogModFilters(value string) []string {
+	result := make([]string, 0, 8)
+	seen := make(map[string]struct{}, 8)
+	for _, candidate := range strings.Split(value, ",") {
+		normalized := normalizeCatalogModIdentifier(candidate)
+		if normalized == "" {
+			continue
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		result = append(result, normalized)
+		if len(result) == 32 {
+			break
+		}
+	}
+	return result
+}
+
+func normalizeCatalogModIdentifier(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || len(value) > 128 {
+		return ""
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') &&
+			character != '_' && character != '-' && character != '.' {
+			return ""
+		}
+	}
+	return value
 }
 
 func parseCatalogQuery(value string) (string, bool) {
@@ -140,29 +207,36 @@ func catalogSortUsesSearchIndex(sort catalogSort) bool {
 // catalogOrderSQL only receives server-owned SQL identifiers. User input is
 // first reduced to catalogSort by parseCatalogSort, so no request text is ever
 // interpolated into a query.
-func catalogOrderSQL(sort catalogSort, indexed bool, indexedPosition int, updated, id, name string) string {
+func catalogOrderSQL(sort catalogSort, direction catalogSortDirection, indexed bool, indexedPosition int, published, updated, id, name string) string {
 	if indexed {
 		return fmt.Sprintf("array_position($%d::bigint[],%s),%s desc,%s desc", indexedPosition, id, updated, id)
 	}
-	stable := fmt.Sprintf("%s desc,%s desc", updated, id)
+	directionSQL := string(direction)
+	if directionSQL != string(catalogSortAscending) {
+		directionSQL = string(catalogSortDescending)
+	}
+	stable := fmt.Sprintf("%s %s,%s %s", updated, directionSQL, id, directionSQL)
+	withStable := func(expression string) string {
+		return fmt.Sprintf("%s %s,%s", expression, directionSQL, stable)
+	}
 	switch sort {
+	case catalogSortPublished:
+		return withStable(published)
 	case catalogSortUpdated, catalogSortCollected:
 		return stable
 	case catalogSortDownloads:
-		return "coalesce(popularity.download_count,0) desc," + stable
+		return withStable("coalesce(popularity.download_count,0)")
 	case catalogSortFavorites:
-		return "coalesce(popularity.favorite_count,0) desc," + stable
+		return withStable("coalesce(popularity.favorite_count,0)")
 	case catalogSortRating:
-		return "coalesce(popularity.bayesian_rating,0) desc,coalesce(popularity.rating_count,0) desc," + stable
+		return fmt.Sprintf("coalesce(popularity.bayesian_rating,0) %s,coalesce(popularity.rating_count,0) %s,%s", directionSQL, directionSQL, stable)
 	case catalogSortViews:
-		return "coalesce(popularity.view_count,0) desc," + stable
+		return withStable("coalesce(popularity.view_count,0)")
 	case catalogSortComments:
-		return "coalesce(popularity.comment_count,0) desc," + stable
-	case catalogSortNameAsc:
-		return fmt.Sprintf("lower(%s) asc,%s asc", name, id)
-	case catalogSortNameDesc:
-		return fmt.Sprintf("lower(%s) desc,%s desc", name, id)
+		return withStable("coalesce(popularity.comment_count,0)")
+	case catalogSortName:
+		return fmt.Sprintf("lower(%s) %s,%s %s", name, directionSQL, id, directionSQL)
 	default:
-		return "coalesce(popularity.heat_score,0) desc," + stable
+		return withStable("coalesce(popularity.heat_score,0)")
 	}
 }

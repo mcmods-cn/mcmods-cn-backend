@@ -1821,7 +1821,7 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		details = decoratedDetails
-		carrier := map[string]any{"entityId": publicID, "versions": []map[string]any{}}
+		carrier := map[string]any{"entityId": publicID, "publicId": publicID, "versions": []map[string]any{}}
 		if err := s.decorateResourceVersionRows(r.Context(), []map[string]any{carrier}, primary, secondary); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to resolve resource versions")
 			return

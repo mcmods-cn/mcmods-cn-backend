@@ -284,18 +284,19 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var changeRequestID, modID int64
+	var changeRequestID, modID, submittedBy int64
+	var projectID string
 	var status string
 	var baseRevisionID, publishedRevisionID *int64
 	var snapshotRaw []byte
 	err = tx.QueryRow(r.Context(), `
 		select request.id,request.status,request.base_revision_id,revision.entity_id,
-		       revision.snapshot,mod.published_revision_id
+		       revision.snapshot,mod.published_revision_id,coalesce(request.submitted_by,0),mod.project_code
 		from change_requests request
 		join content_revisions revision on revision.id=request.proposed_revision_id and revision.aggregate_type='mod'
 		join mods mod on mod.id=revision.entity_id
 		where revision.public_id=$1 for update of request,mod`, revisionPublicID,
-	).Scan(&changeRequestID, &status, &baseRevisionID, &modID, &snapshotRaw, &publishedRevisionID)
+	).Scan(&changeRequestID, &status, &baseRevisionID, &modID, &snapshotRaw, &publishedRevisionID, &submittedBy, &projectID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "revision not found")
 		return
@@ -309,6 +310,10 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
+	if !canReviewProjectSubmission(claims, projectID, submittedBy) {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
 	if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
 		if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to record revision conflict")

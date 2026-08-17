@@ -7,9 +7,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 71
+const schemaGeneration = 80
 
-// Migrate installs one coherent development schema. Generation 71 establishes
+// Migrate installs one coherent development schema. Generation 80 is the
+// current pre-production baseline. Older development databases are
+// intentionally reset instead of upgraded or backfilled.
+// Generation 74 established
 // numeric internal keys, globally unique public IDs, revocable authentication
 // sessions, version-scoped mod-content layout identities and similar-resource
 // groups, and generalized
@@ -59,7 +62,15 @@ const schemaGeneration = 71
 // It also adds independent anti-abuse events, content fingerprints, one-time
 // form/challenge tokens, user risk state, temporary restrictions, bot access
 // rules, and bounded daily security aggregates.
-// Earlier development data is
+// Generation 77 adds directional user blacklists used by comments, following,
+// and direct messaging, and removes a parameter/column ambiguity from comment
+// popularity route resolution. Generation 78 adds normalized recipe-version
+// bindings, immutable per-target comment floors, and sanitized log shares.
+// Generation 79 adds complete leading indexes for the generation 78 foreign
+// keys after the database query-plan audit rejected partial indexes as FK
+// maintenance coverage.
+// Generation 74 repaired the popularity refresh function
+// without replacing its persisted facts or queue. Earlier development data is
 // intentionally not migrated and must be reset before installation.
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 	conn, err := db.Acquire(ctx)
@@ -142,7 +153,11 @@ func schemaInstallationStatements() []string {
 	statements = append(statements, draftSchemaStatements()...)
 	statements = append(statements, searchSchemaStatements()...)
 	statements = append(statements, userFeatureSchemaStatements()...)
+	statements = append(statements, userBlockSchemaStatements()...)
 	statements = append(statements, antiAbuseSchemaStatements()...)
+	statements = append(statements, infrastructureSchemaStatements()...)
+	statements = append(statements, featureUpdateSchemaStatements()...)
+	statements = append(statements, governanceAutomationSchemaStatements()...)
 	return append(statements, foreignKeyIndexStatement())
 }
 

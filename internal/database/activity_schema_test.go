@@ -139,3 +139,16 @@ func TestPopularityFormulaAndPromotionItemsMatchDesign(t *testing.T) {
 		}
 	}
 }
+
+func TestPopularityThresholdColumnsAreQualified(t *testing.T) {
+	t.Parallel()
+	definition := strings.ToLower(strings.Join(ratingSchemaStatements(), "\n"))
+	qualified := `select threshold.favorite_threshold,threshold.commenter_threshold,threshold.download_threshold,
+				threshold.rating_threshold,threshold.view_threshold,threshold.trend_threshold`
+	if !strings.Contains(definition, qualified) {
+		t.Fatal("popularity threshold columns must be qualified to avoid PL/pgSQL variable ambiguity")
+	}
+	if strings.Contains(definition, "select favorite_threshold,commenter_threshold,download_threshold") {
+		t.Fatal("popularity function still contains ambiguous unqualified threshold columns")
+	}
+}

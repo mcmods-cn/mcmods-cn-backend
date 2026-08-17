@@ -24,6 +24,12 @@ import (
 
 const settingsKey = "anti_abuse.config"
 
+const (
+	accountCacheKeyPrefix = "anti-abuse:account:"
+	botRulesCacheKey      = "anti-abuse:bot-rules"
+	settingsCacheKey      = "anti-abuse:settings"
+)
+
 type Service struct {
 	cfg      config.AntiAbuseConfig
 	db       *pgxpool.Pool
@@ -199,7 +205,7 @@ func (s *Service) Evaluate(ctx context.Context, input Evaluation) (Decision, err
 		}
 	}
 
-	policy := policyFor(settings, input.Action, trust)
+	policy := policyFor(settings, input.Action, trust, input.RateLimitPercent)
 	if !challengePassed {
 		limited, retry, limitRule := s.applyLimits(ctx, input, policy, ipHash, subnetHash, deviceHash, sessionHash)
 		if limited {
@@ -291,6 +297,7 @@ func mapDecision(score int, rules []string, settings Settings) Decision {
 }
 
 func (s *Service) applyLimits(ctx context.Context, input Evaluation, policy ActionPolicy, ipHash, subnetHash, deviceHash, sessionHash string) (bool, time.Duration, string) {
+	limitNamespace := rateLimitNamespace(input)
 	type dimension struct {
 		name, value string
 		multiplier  int
@@ -312,14 +319,14 @@ func (s *Service) applyLimits(ctx context.Context, input Evaluation, policy Acti
 			if dim.value == "" || dim.value == "0" {
 				continue
 			}
-			result := s.cache.ConsumeRateLimit(ctx, "abuse:"+input.Action+":"+check.label+":"+dim.name+":"+dim.value, check.limit*dim.multiplier, check.window)
+			result := s.cache.ConsumeRateLimit(ctx, "abuse:"+limitNamespace+":"+check.label+":"+dim.name+":"+dim.value, check.limit*dim.multiplier, check.window)
 			if !result.Allowed {
 				return true, result.RetryAfter, "rate_" + check.label + "_" + dim.name
 			}
 		}
 	}
 	if policy.ObjectLimit > 0 && input.ObjectKey != "" {
-		result := s.cache.ConsumeRateLimit(ctx, "abuse:"+input.Action+":object:"+strconv.FormatInt(input.UserID, 10)+":"+s.privateHash("object", input.ObjectKey), policy.ObjectLimit, time.Duration(policy.ObjectMinutes)*time.Minute)
+		result := s.cache.ConsumeRateLimit(ctx, "abuse:"+limitNamespace+":object:"+strconv.FormatInt(input.UserID, 10)+":"+s.privateHash("object", input.ObjectKey), policy.ObjectLimit, time.Duration(policy.ObjectMinutes)*time.Minute)
 		if !result.Allowed {
 			return true, result.RetryAfter, "rate_object_user"
 		}
@@ -327,7 +334,20 @@ func (s *Service) applyLimits(ctx context.Context, input Evaluation, policy Acti
 	return false, 0, ""
 }
 
-func policyFor(settings Settings, action, trust string) ActionPolicy {
+func rateLimitNamespace(input Evaluation) string {
+	scope := strings.Map(func(character rune) rune {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' || character == '-' {
+			return character
+		}
+		return -1
+	}, strings.ToLower(strings.TrimSpace(input.RateScope)))
+	if scope == "" {
+		return input.Action
+	}
+	return input.Action + ":" + scope
+}
+
+func policyFor(settings Settings, action, trust string, rateLimitPercent int) ActionPolicy {
 	policy, ok := settings.Policies[action]
 	if !ok {
 		policy = settings.Policies["write.generic"]
@@ -336,8 +356,6 @@ func policyFor(settings Settings, action, trust string) ActionPolicy {
 	switch trust {
 	case "new", "high_risk", "restricted":
 		factorNumerator, factorDenominator = 1, 2
-	case "trusted":
-		factorNumerator = 2
 	}
 	scale := func(value int) int {
 		if value <= 0 {
@@ -347,7 +365,34 @@ func policyFor(settings Settings, action, trust string) ActionPolicy {
 	}
 	policy.BurstLimit, policy.HourLimit, policy.DayLimit = scale(policy.BurstLimit), scale(policy.HourLimit), scale(policy.DayLimit)
 	policy.ObjectLimit, policy.PendingLimit = scale(policy.ObjectLimit), scale(policy.PendingLimit)
+	rateLimitPercent = NormalizeRateLimitPercent(rateLimitPercent)
+	scaleByPermission := func(value int) int {
+		if value <= 0 {
+			return 0
+		}
+		// Round up so increases remain meaningful for small burst/object limits.
+		return max(1, (value*rateLimitPercent+99)/100)
+	}
+	policy.BurstLimit = scaleByPermission(policy.BurstLimit)
+	policy.HourLimit = scaleByPermission(policy.HourLimit)
+	policy.DayLimit = scaleByPermission(policy.DayLimit)
+	policy.ObjectLimit = scaleByPermission(policy.ObjectLimit)
 	return policy
+}
+
+const (
+	DefaultRateLimitPercent = 100
+	MinRateLimitPercent     = 25
+	MaxRateLimitPercent     = 1000
+)
+
+// NormalizeRateLimitPercent bounds permission-controlled quotas. A missing
+// permission must never disable or accidentally relax rate limiting.
+func NormalizeRateLimitPercent(value int) int {
+	if value == 0 {
+		return DefaultRateLimitPercent
+	}
+	return min(MaxRateLimitPercent, max(MinRateLimitPercent, value))
 }
 
 func (s *Service) duplicateRisk(ctx context.Context, input Evaluation, normalized, ipHash string, settings Settings) (int, []string, bool, error) {
@@ -502,7 +547,24 @@ func (s *Service) applyAutomaticRestriction(ctx context.Context, input Evaluatio
 		values($1,'restricted',$2,1,$3,now()) on conflict(user_id) do update set trust_level='restricted',
 		risk_score=greatest(anti_abuse_user_states.risk_score,excluded.risk_score),hit_count=anti_abuse_user_states.hit_count+1,
 		restricted_until=greatest(anti_abuse_user_states.restricted_until,excluded.restricted_until),last_event_at=now(),updated_at=now()`, input.UserID, decision.RiskScore, endsAt)
-	s.cache.InvalidatePrefix(ctx, "anti-abuse:account:"+strconv.FormatInt(input.UserID, 10))
+	s.InvalidateAccountState(ctx, input.UserID)
+}
+
+// InvalidateAccountState centralizes the account-risk cache key. The suffix
+// varies by network and client signal, so invalidating one account intentionally
+// removes all of that account's short-lived variants without scanning others.
+func (s *Service) InvalidateAccountState(ctx context.Context, userID int64) {
+	if s == nil || s.cache == nil || userID <= 0 {
+		return
+	}
+	s.cache.InvalidatePrefix(ctx, accountCacheKeyPrefix+strconv.FormatInt(userID, 10)+":")
+}
+
+func (s *Service) InvalidateBotRules(ctx context.Context) {
+	if s == nil || s.cache == nil {
+		return
+	}
+	s.cache.Delete(ctx, botRulesCacheKey)
 }
 
 func (s *Service) Settings(ctx context.Context) (Settings, error) {
@@ -510,7 +572,7 @@ func (s *Service) Settings(ctx context.Context) (Settings, error) {
 	if s.db == nil {
 		return defaults, nil
 	}
-	raw, err := s.cache.GetOrLoad(ctx, "anti-abuse:settings", func(loadCtx context.Context) ([]byte, error) {
+	raw, err := s.cache.GetOrLoad(ctx, settingsCacheKey, func(loadCtx context.Context) ([]byte, error) {
 		var stored []byte
 		err := s.db.QueryRow(loadCtx, `select value from system_settings where key=$1`, settingsKey).Scan(&stored)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -599,7 +661,7 @@ func (s *Service) SaveSettings(ctx context.Context, settings Settings, actorID i
 	_, err = s.db.Exec(ctx, `insert into system_settings(key,value,updated_by,updated_at) values($1,$2::jsonb,$3,now())
 		on conflict(key) do update set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`, settingsKey, raw, actorID)
 	if err == nil {
-		s.cache.InvalidatePrefix(ctx, "anti-abuse:settings")
+		s.cache.Delete(ctx, settingsCacheKey)
 	}
 	return settings, err
 }
@@ -608,7 +670,7 @@ func (s *Service) account(ctx context.Context, userID int64, ipHash, deviceHash 
 	if userID <= 0 {
 		return accountProfile{}, pgx.ErrNoRows
 	}
-	key := "anti-abuse:account:" + strconv.FormatInt(userID, 10) + ":" + truncate(ipHash, 16) + ":" + truncate(deviceHash, 16)
+	key := accountCacheKeyPrefix + strconv.FormatInt(userID, 10) + ":" + truncate(ipHash, 16) + ":" + truncate(deviceHash, 16)
 	raw, err := s.cache.GetOrLoad(ctx, key, func(loadCtx context.Context) ([]byte, error) {
 		var profile accountProfile
 		err := s.db.QueryRow(loadCtx, `select account.created_at,account.email_verified,account.status,coalesce(experience.level,0),

@@ -12,6 +12,7 @@ if (!localHosts.has(baseURL.hostname) && process.env.MCMODS_LOAD_ALLOW_REMOTE !=
 const stages = parseStages(process.env.MCMODS_LOAD_STAGES ?? "2x10,5x15,10x20,20x10,5x15");
 const scenarioName = process.env.MCMODS_LOAD_SCENARIO ?? "mixed";
 const token = process.env.MCMODS_LOAD_TOKEN ?? "";
+const authCookie = process.env.MCMODS_LOAD_COOKIE ?? "";
 const adminToken = process.env.MCMODS_LOAD_ADMIN_TOKEN ?? "";
 const enableAdminPreview = process.env.MCMODS_LOAD_ENABLE_ADMIN_PREVIEW === "1";
 const enableMutations = process.env.MCMODS_LOAD_ENABLE_MUTATIONS === "1";
@@ -24,6 +25,7 @@ const fixedCommentIdempotencyKey = process.env.MCMODS_LOAD_COMMENT_IDEMPOTENCY_K
 const botToken = process.env.MCMODS_LOAD_BOT_TOKEN ?? "";
 const outputPath = process.env.MCMODS_LOAD_OUTPUT ?? "";
 const requestTimeoutMS = boundedNumber(process.env.MCMODS_LOAD_TIMEOUT_MS, 10_000, 500, 120_000);
+const includeReadinessProbe = process.env.MCMODS_LOAD_INCLUDE_READY === "1";
 
 const results = [];
 const statusCounts = new Map();
@@ -102,6 +104,7 @@ async function worker(workerID, deadline) {
         method: request.method ?? "GET",
         headers: {
           ...(request.token ? { Authorization: `Bearer ${request.token}` } : {}),
+          ...(authCookie ? { Cookie: authCookie } : {}),
           ...(body ? { "Content-Type": "application/json" } : {}),
           ...(request.headers ?? {}),
           "X-Client-ID": request.clientID ?? `mcmods-load-${workerID % 8}`,
@@ -137,6 +140,7 @@ function chooseRequest(scenario, sequence) {
     activity: activityRequests(),
     antiabuse: antiAbuseRequests(),
     crawlers: crawlerRequests(),
+    infrastructure: infrastructureRequests(),
   };
   const mixed = interleave([
     repeat(pools.catalogs, 6),
@@ -149,6 +153,21 @@ function chooseRequest(scenario, sequence) {
   const selected = scenario === "mixed" ? mixed : pools[scenario];
   if (!selected?.length) return null;
   return selected[sequence % selected.length];
+}
+
+function infrastructureRequests() {
+  // Readiness probes touch dependencies and are intentionally rare. Liveness
+  // is the only endpoint suitable for high-frequency process probing.
+  const requests = Array.from({ length: 64 }, () => ({ name: "liveness", path: "/live" }));
+  if (includeReadinessProbe) requests.push({ name: "readiness", path: "/ready" });
+  if (token || authCookie) {
+    requests.push(
+      { name: "unread-summary", path: "/api/v1/me/unread-summary", token },
+      { name: "message-conversations", path: "/api/v1/messages/conversations", token },
+    );
+  }
+  if (token) requests.push({ name: "presence", path: "/api/v1/site/presence", method: "POST", token, body: { visitorId: "mcmods-infrastructure-load" } });
+  return requests;
 }
 
 function catalogRequests() {

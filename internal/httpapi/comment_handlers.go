@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/text/unicode/norm"
 
 	"mcmods-cn-backend/internal/activity"
 	"mcmods-cn-backend/internal/security"
@@ -40,6 +42,8 @@ type commentAuthor struct {
 	AvatarURL    string             `json:"avatarUrl"`
 	OnlineStatus publicOnlineStatus `json:"onlineStatus"`
 	ProjectRole  string             `json:"projectRole,omitempty"`
+	internalID   int64
+	showOnline   bool
 }
 
 type commentParentPreview struct {
@@ -59,39 +63,51 @@ type commentWatchState struct {
 }
 
 type commentResponse struct {
-	ID               string                `json:"id"`
-	ParentID         string                `json:"parentId,omitempty"`
-	RootID           string                `json:"rootId,omitempty"`
-	Depth            int                   `json:"depth"`
-	Body             string                `json:"body"`
-	Deleted          bool                  `json:"deleted"`
-	Author           commentAuthor         `json:"author"`
-	Parent           *commentParentPreview `json:"parent,omitempty"`
-	Reactions        map[string]int        `json:"reactions"`
-	UserReactions    []string              `json:"userReactions"`
-	ChildCount       int                   `json:"childCount"`
-	DescendantCount  int                   `json:"descendantCount"`
-	HeatScore        float64               `json:"heatScore"`
-	HasMoreReplies   bool                  `json:"hasMoreReplies"`
-	CurrentUserWatch *commentWatchState    `json:"currentUserWatch,omitempty"`
-	Pinned           bool                  `json:"pinned"`
-	PinnedAt         *time.Time            `json:"pinnedAt,omitempty"`
-	CanEdit          bool                  `json:"canEdit"`
-	CanDelete        bool                  `json:"canDelete"`
-	CanPin           bool                  `json:"canPin"`
-	CanReply         bool                  `json:"canReply"`
-	CanReact         bool                  `json:"canReact"`
-	CanReport        bool                  `json:"canReport"`
-	CanWatch         bool                  `json:"canWatch"`
-	CreatedAt        time.Time             `json:"createdAt"`
-	UpdatedAt        time.Time             `json:"updatedAt"`
+	ID               string                 `json:"id"`
+	FloorNumber      *int64                 `json:"floorNumber"`
+	ParentID         string                 `json:"parentId,omitempty"`
+	RootID           string                 `json:"rootId,omitempty"`
+	Depth            int                    `json:"depth"`
+	Body             string                 `json:"body"`
+	Deleted          bool                   `json:"deleted"`
+	Author           commentAuthor          `json:"author"`
+	Parent           *commentParentPreview  `json:"parent,omitempty"`
+	Reactions        map[string]int         `json:"reactions"`
+	UserReactions    []string               `json:"userReactions"`
+	ChildCount       int                    `json:"childCount"`
+	DescendantCount  int                    `json:"descendantCount"`
+	HeatScore        float64                `json:"heatScore"`
+	HasMoreReplies   bool                   `json:"hasMoreReplies"`
+	CurrentUserWatch *commentWatchState     `json:"currentUserWatch,omitempty"`
+	Pinned           bool                   `json:"pinned"`
+	PinnedAt         *time.Time             `json:"pinnedAt,omitempty"`
+	CanEdit          bool                   `json:"canEdit"`
+	CanDelete        bool                   `json:"canDelete"`
+	CanPin           bool                   `json:"canPin"`
+	CanReply         bool                   `json:"canReply"`
+	CanReact         bool                   `json:"canReact"`
+	CanReport        bool                   `json:"canReport"`
+	CanWatch         bool                   `json:"canWatch"`
+	CreatedAt        time.Time              `json:"createdAt"`
+	UpdatedAt        time.Time              `json:"updatedAt"`
+	LogAttachments   []commentLogAttachment `json:"logAttachments"`
+	internalID       int64
+}
+
+type commentLogAttachment struct {
+	FileID     string `json:"fileId"`
+	FileName   string `json:"fileName"`
+	PublicCode string `json:"publicCode,omitempty"`
+	Status     string `json:"status"`
+	URL        string `json:"url,omitempty"`
 }
 
 type createCommentRequest struct {
-	Body           string `json:"body"`
-	ParentID       string `json:"parentId"`
-	IdempotencyKey string `json:"idempotencyKey"`
-	Status         string `json:"-"`
+	Body              string   `json:"body"`
+	ParentID          string   `json:"parentId"`
+	IdempotencyKey    string   `json:"idempotencyKey"`
+	Status            string   `json:"-"`
+	AttachmentFileIDs []string `json:"attachmentFileIds,omitempty"`
 }
 
 type updateCommentRequest struct {
@@ -160,6 +176,47 @@ func (s *Server) commentsForTarget(w http.ResponseWriter, r *http.Request) {
 	s.listTargetComments(w, r, target)
 }
 
+func (s *Server) commentFloor(w http.ResponseWriter, r *http.Request) {
+	claims := currentClaims(r)
+	floor, err := strconv.ParseInt(strings.TrimSpace(r.PathValue("floor")), 10, 64)
+	if err != nil || floor <= 0 || floor > 1_000_000_000 {
+		writeError(w, http.StatusBadRequest, "楼层必须是有效的正整数")
+		return
+	}
+	target, err := s.resolveCommentTarget(r.Context(), r.PathValue("targetType"), r.PathValue("targetKey"), claims)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "评论目标不存在或当前不可见")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取评论目标失败")
+		return
+	}
+	var commentID int64
+	err = s.db.QueryRow(r.Context(), `select comment.id from comments comment
+		where comment.target_type=$1 and comment.target_id=$2
+		  and comment.target_version_id is not distinct from $3::bigint
+		  and comment.parent_id is null and comment.floor_number=$4
+		  and comment.status in ('published','deleted')
+		  and ($5::bigint=0 or not exists(select 1 from user_blocks block
+			where block.blocker_id=$5 and block.blocked_id=comment.author_id))`,
+		target.Type, target.InternalID, target.VersionID, floor, claims.Subject).Scan(&commentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "该楼层不存在或当前不可见")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取楼层失败")
+		return
+	}
+	items, err := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims)
+	if err != nil || len(items) != 1 {
+		writeError(w, http.StatusInternalServerError, "读取楼层失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"comment": items[0], "target": target})
+}
+
 func (s *Server) listTargetComments(w http.ResponseWriter, r *http.Request, target commentTargetInfo) {
 	claims := currentClaims(r)
 	limit := boundedLimit(r.URL.Query().Get("limit"), 20, 50)
@@ -181,7 +238,9 @@ func (s *Server) listTargetComments(w http.ResponseWriter, r *http.Request, targ
 	rows, err := s.db.Query(r.Context(), `select c.id from comments c
 		where c.target_type=$1 and c.target_id=$2 and c.target_version_id is not distinct from $3 and c.parent_id is null
 		  and c.status in ('published','deleted')
-		order by (c.pinned_at is not null) desc,c.pinned_at desc,`+order+` limit $4 offset $5`, target.Type, target.InternalID, target.VersionID, limit+1, offset)
+		  and ($6::bigint=0 or not exists(select 1 from user_blocks block
+			where block.blocker_id=$6 and block.blocked_id=c.author_id))
+		order by (c.pinned_at is not null) desc,c.pinned_at desc,`+order+` limit $4 offset $5`, target.Type, target.InternalID, target.VersionID, limit+1, offset, claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取评论失败")
 		return
@@ -206,14 +265,21 @@ func (s *Server) listTargetComments(w http.ResponseWriter, r *http.Request, targ
 	var total int
 	_ = s.db.QueryRow(r.Context(), `select count(*) from comments
 		where target_type=$1 and target_id=$2 and target_version_id is not distinct from $3
-		  and status in ('published','deleted')`, target.Type, target.InternalID, target.VersionID).Scan(&total)
+		  and status in ('published','deleted')
+		  and ($4::bigint=0 or not exists(select 1 from user_blocks block
+			where block.blocker_id=$4 and block.blocked_id=comments.author_id))`, target.Type, target.InternalID, target.VersionID, claims.Subject).Scan(&total)
+	ownerBlocks, err := s.commentTargetOwnerBlocksUser(r.Context(), target, claims.Subject)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取评论权限失败")
+		return
+	}
 	nextCursor := ""
 	if hasMore {
 		nextCursor = strconv.Itoa(offset + limit)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items, "total": total, "target": target, "nextCursor": nextCursor,
-		"capabilities": map[string]bool{"canCreate": claimsAllow(claims, "comment.create")},
+		"capabilities": map[string]bool{"canCreate": claimsAllow(claims, "comment.create") && !ownerBlocks},
 	})
 }
 
@@ -221,6 +287,15 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 	claims := currentClaims(r)
 	if !claimsAllow(claims, "comment.create") {
 		writeError(w, http.StatusForbidden, "无权发表评论")
+		return
+	}
+	ownerBlocks, err := s.commentTargetOwnerBlocksUser(r.Context(), target, claims.Subject)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "检查评论权限失败")
+		return
+	}
+	if ownerBlocks {
+		writeError(w, http.StatusForbidden, "当前无法在该内容下发表评论")
 		return
 	}
 	var request createCommentRequest
@@ -243,6 +318,11 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 	}
 	if request.Body == "" || utf8.RuneCountInString(request.Body) > 10000 {
 		writeError(w, http.StatusBadRequest, "评论不能为空且不能超过 10000 个字符")
+		return
+	}
+	request.AttachmentFileIDs = uniqueNonEmpty(request.AttachmentFileIDs)
+	if len(request.AttachmentFileIDs) > 5 {
+		writeError(w, http.StatusBadRequest, "评论最多附加 5 个文件")
 		return
 	}
 	request.Status = "published"
@@ -299,6 +379,11 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 			writeError(w, http.StatusInternalServerError, "发布评论失败")
 			return
 		}
+		for _, fileID := range request.AttachmentFileIDs {
+			if bindErr := s.bindCommentLogAttachment(r.Context(), existingID, claims.Subject, fileID); bindErr != nil {
+				log.Printf("restore idempotent comment log attachment comment_id=%d file_id=%s: %v", existingID, fileID, bindErr)
+			}
+		}
 		items, _ := s.queryCommentItems(r.Context(), []int64{existingID}, false, 0, claims)
 		if len(items) > 0 {
 			writeJSON(w, http.StatusOK, items[0])
@@ -341,6 +426,11 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		writeError(w, http.StatusInternalServerError, "发布评论失败")
 		return
 	}
+	for _, fileID := range request.AttachmentFileIDs {
+		if bindErr := s.bindCommentLogAttachment(r.Context(), commentID, claims.Subject, fileID); bindErr != nil {
+			log.Printf("bind comment log attachment comment_id=%d file_id=%s: %v", commentID, fileID, bindErr)
+		}
+	}
 	annotateActivity(r, activity.ActionCreate, activity.ObjectComment, publicID, len(request.Body))
 	if request.Status == "pending" {
 		writeJSON(w, http.StatusAccepted, map[string]any{"id": publicID, "status": "pending", "moderation": true})
@@ -352,8 +442,11 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		"targetLabel": target.Title, "url": target.URL + "#comment-" + publicID,
 	}
 	if parentID != nil && directRecipientID != claims.Subject {
-		s.enqueueOrCreateDirectNotification(r.Context(), directRecipientID, claims.Subject, "reply_mention",
-			"评论收到回复", truncateRunes(request.Body, 160), notificationData)
+		blocked, blockErr := s.userBlocksActor(r.Context(), directRecipientID, claims.Subject)
+		if blockErr == nil && !blocked {
+			s.enqueueOrCreateDirectNotification(r.Context(), directRecipientID, claims.Subject, "reply_mention",
+				"评论收到回复", truncateRunes(request.Body, 160), notificationData)
+		}
 	}
 	notifiedWatchUsers := make(map[int64]bool)
 	for _, pending := range watchNotifications {
@@ -395,11 +488,19 @@ func insertCommentTree(ctx context.Context, tx pgx.Tx, target commentTargetInfo,
 			  and comment.target_version_id is not distinct from $3::bigint
 			  and comment.status in ('published','deleted')
 			for update
+		), floor_counter as (
+			insert into comment_floor_counters(target_type,target_id,target_version_key,last_floor)
+			select $1::text,$2::bigint,coalesce($3::bigint,0),1 where $5::text=''
+			on conflict(target_type,target_id,target_version_key) do update
+			set last_floor=comment_floor_counters.last_floor+1,updated_at=now()
+			returning last_floor
 		), inserted_comment as (
 			insert into comments
-				(target_type,target_id,target_version_id,author_id,parent_id,root_id,depth,body,idempotency_key,status)
+				(target_type,target_id,target_version_id,author_id,parent_id,root_id,depth,floor_number,body,idempotency_key,status)
 			select $1::text,$2::bigint,$3::bigint,$4::bigint,
-				parent.id,parent.root_id,coalesce(parent.depth,0),$6::text,$7::text,$8::text
+				parent.id,parent.root_id,coalesce(parent.depth,0),
+				case when $5::text='' then (select last_floor from floor_counter) end,
+				$6::text,$7::text,$8::text
 			from (values (1)) seed(value)
 			left join parent on true
 			where $5::text='' or parent.id is not null
@@ -436,6 +537,8 @@ func recordCommentWatchReplies(ctx context.Context, tx pgx.Tx, parentID, comment
 			from comment_watches watch
 			join comment_closure path on path.ancestor_id=watch.comment_id
 			where path.descendant_id=$1::bigint and watch.status='active' and watch.user_id<>$3::bigint
+			  and not exists(select 1 from user_blocks block
+				where block.blocker_id=watch.user_id and block.blocked_id=$3::bigint)
 		), inserted_replies as (
 			insert into comment_watch_replies(watch_id,comment_id)
 			select relevant.id,$2::bigint from relevant
@@ -513,7 +616,10 @@ func (s *Server) commentReplies(w http.ResponseWriter, r *http.Request) {
 	limit := boundedLimit(r.URL.Query().Get("limit"), 50, 100)
 	offset := nonNegativeInt(r.URL.Query().Get("cursor"))
 	rows, err := s.db.Query(r.Context(), `select id from comments where parent_id=$1
-		and status in ('published','deleted') order by created_at,id limit $2 offset $3`, commentID, limit+1, offset)
+		and status in ('published','deleted')
+		and ($4::bigint=0 or not exists(select 1 from user_blocks block
+			where block.blocker_id=$4 and block.blocked_id=comments.author_id))
+		order by created_at,id limit $2 offset $3`, commentID, limit+1, offset, claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取回复失败")
 		return
@@ -747,16 +853,12 @@ func (s *Server) commentReaction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) reportComment(w http.ResponseWriter, r *http.Request) {
-	// Reports are private moderation input and must not appear in user activity.
+	// Compatibility boundary for the former comment-only report endpoint. All
+	// persistence and snapshots use the unified report service.
 	skipRequestActivity(r)
 	claims := currentClaims(r)
-	if !claimsAllow(claims, "comment.report") {
+	if !claimsAllow(claims, "report.create") {
 		writeError(w, http.StatusForbidden, "无权举报评论")
-		return
-	}
-	commentID, err := s.numericCommentID(r.Context(), r.PathValue("commentId"))
-	if err != nil {
-		writeError(w, http.StatusNotFound, "评论不存在")
 		return
 	}
 	var request reportCommentRequest
@@ -764,22 +866,25 @@ func (s *Server) reportComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	request.Reason = strings.TrimSpace(request.Reason)
+	request.Reason = strings.ToLower(strings.TrimSpace(request.Reason))
 	request.Detail = strings.TrimSpace(request.Detail)
-	if request.Reason == "" || utf8.RuneCountInString(request.Detail) > 2000 {
+	if request.Reason == "" || utf8.RuneCountInString(request.Detail) > 4000 {
 		writeError(w, http.StatusBadRequest, "举报内容不正确")
 		return
 	}
-	_, err = s.db.Exec(r.Context(), `insert into comment_reports(comment_id,reporter_id,reason,detail)
-		values($1,$2,$3,$4) on conflict(comment_id,reporter_id)
-		do update set reason=excluded.reason,detail=excluded.detail,status='pending',reviewer_id=null,
-			resolution_note='',created_at=now(),updated_at=now(),resolved_at=null`,
-		commentID, claims.Subject, request.Reason, request.Detail)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "提交举报失败")
-		return
+	reasonCode := request.Reason
+	customReason := ""
+	if !validReportReason("comment", reasonCode) {
+		reasonCode = "other"
+		customReason = request.Reason
 	}
-	writeJSON(w, http.StatusCreated, map[string]bool{"reported": true})
+	s.submitUnifiedReport(w, r, createUnifiedReportRequest{
+		TargetType:   "comment",
+		TargetID:     strings.ToLower(strings.TrimSpace(r.PathValue("commentId"))),
+		ReasonCode:   reasonCode,
+		CustomReason: customReason,
+		Detail:       request.Detail,
+	})
 }
 
 func (s *Server) commentWatch(w http.ResponseWriter, r *http.Request) {
@@ -996,6 +1101,14 @@ func (s *Server) queryCommentItems(ctx context.Context, ids []int64, includeTree
 	if err != nil {
 		return nil, err
 	}
+	authorIDs := make([]int64, len(items))
+	for index := range items {
+		authorIDs[index] = items[index].Author.internalID
+	}
+	online := s.cache.UsersOnline(ctx, authorIDs, time.Now(), s.cache.Config().PresenceTTL)
+	for index := range items {
+		items[index].Author.OnlineStatus = mapPublicOnlineVisibility(items[index].Author.showOnline, online[items[index].Author.internalID])
+	}
 	ossCfg := s.ossConfigFromSettings(ctx)
 	for index := range items {
 		items[index].Author.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, items[index].Author.AvatarURL)
@@ -1006,7 +1119,78 @@ func (s *Server) queryCommentItems(ctx context.Context, ids []int64, includeTree
 	if err = s.annotateCommentPermissions(ctx, items, claims); err != nil {
 		return nil, err
 	}
+	if err = s.annotateCommentLogAttachments(ctx, items); err != nil {
+		return nil, err
+	}
 	return items, nil
+}
+
+func (s *Server) bindCommentLogAttachment(ctx context.Context, commentID, userID int64, publicFileID string) error {
+	publicFileID = strings.ToLower(strings.TrimSpace(publicFileID))
+	var fileID int64
+	var fileName string
+	if err := s.db.QueryRow(ctx, `select id,coalesce(nullif(source_original_name,''),original_name)
+		from oss_files where public_id=$1 and uploader_id=$2 and status='active'`, publicFileID, userID).
+		Scan(&fileID, &fileName); err != nil {
+		return err
+	}
+	baseName := norm.NFC.String(filepath.Base(fileName))
+	extension := strings.ToLower(filepath.Ext(baseName))
+	if extension != ".log" && !(extension == ".zip" && strings.Contains(baseName, "错误报告")) {
+		return nil
+	}
+	result, err := s.createFileLogShare(ctx, userID, publicFileID, time.Now().UTC().AddDate(1, 0, 0))
+	if err != nil {
+		return err
+	}
+	publicCode, _ := result["publicCode"].(string)
+	if publicCode == "" {
+		return errors.New("log share public code is missing")
+	}
+	_, err = s.db.Exec(ctx, `insert into comment_log_bindings(comment_id,attachment_file_id,log_share_id)
+		select $1,$2,id from log_shares where public_code=$3
+		on conflict(comment_id,attachment_file_id) do update set log_share_id=excluded.log_share_id`, commentID, fileID, publicCode)
+	return err
+}
+
+func (s *Server) annotateCommentLogAttachments(ctx context.Context, items []commentResponse) error {
+	if len(items) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(items))
+	byID := make(map[int64]*commentResponse, len(items))
+	for index := range items {
+		items[index].LogAttachments = []commentLogAttachment{}
+		ids = append(ids, items[index].internalID)
+		byID[items[index].internalID] = &items[index]
+	}
+	rows, err := s.db.Query(ctx, `select binding.comment_id,file.public_id,
+		coalesce(nullif(file.source_original_name,''),file.original_name),share.public_code,share.status,share.expires_at
+		from comment_log_bindings binding
+		join oss_files file on file.id=binding.attachment_file_id
+		join log_shares share on share.id=binding.log_share_id
+		where binding.comment_id=any($1::bigint[]) order by binding.created_at,binding.attachment_file_id`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var commentID int64
+		var attachment commentLogAttachment
+		var expiresAt time.Time
+		if err = rows.Scan(&commentID, &attachment.FileID, &attachment.FileName, &attachment.PublicCode, &attachment.Status, &expiresAt); err != nil {
+			return err
+		}
+		if attachment.Status == "ready" && expiresAt.After(time.Now()) {
+			attachment.URL = "/log/s/" + attachment.PublicCode
+		} else {
+			attachment.PublicCode = ""
+		}
+		if item := byID[commentID]; item != nil {
+			item.LogAttachments = append(item.LogAttachments, attachment)
+		}
+	}
+	return rows.Err()
 }
 
 func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, ids []int64, includeTree bool, maxDepth int, viewerID int64) ([]commentResponse, error) {
@@ -1024,14 +1208,12 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 		viewerIndex = 3
 	}
 	args = append(args, viewerID)
-	presenceIndex := len(args) + 1
-	args = append(args, int(publicPresenceWindow/time.Second))
-	rows, err := queryer.Query(ctx, fmt.Sprintf(`select c.id,c.public_id,coalesce(parent.public_id,''),
+	rows, err := queryer.Query(ctx, fmt.Sprintf(`select c.id,c.public_id,c.floor_number,coalesce(parent.public_id,''),
 		coalesce(root.public_id,''),c.depth,c.body,c.status,c.child_count,c.descendant_count,c.hot_score,
-		author.public_id,author.username,author.avatar_url,author.show_online_status,
-		exists(select 1 from user_presence_sessions presence where presence.user_id=author.id
-			and presence.last_active_at>=now()-make_interval(secs=>$%d)),
-		coalesce(parent_author.username,''),coalesce(parent.body,''),coalesce(parent.status,''),
+		author.id,author.public_id,author.username,author.avatar_url,author.show_online_status,
+		case when parent_block.blocker_id is null then coalesce(parent_author.username,'') else '' end,
+		case when parent_block.blocker_id is null then coalesce(parent.body,'') else '' end,
+		case when parent_block.blocker_id is null then coalesce(parent.status,'') else 'deleted' end,
 		c.created_at,c.updated_at,c.pinned_at,
 		coalesce(watch.public_id,''),coalesce(watch.status,''),watch.muted_until,
 		coalesce(watch.muted_forever,false),coalesce(watch.unread_count,0),coalesce(watch.watched_reply_count,0),
@@ -1042,6 +1224,7 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 		join users author on author.id=c.author_id
 		left join comments parent on parent.id=c.parent_id
 		left join users parent_author on parent_author.id=parent.author_id
+		left join user_blocks parent_block on parent_block.blocker_id=$%d and parent_block.blocked_id=parent.author_id
 		left join comments root on root.id=c.root_id
 		left join comment_watches watch on watch.comment_id=c.id and watch.user_id=$%d
 		left join lateral (
@@ -1056,7 +1239,9 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 			) grouped
 		) reaction_summary on true
 		where %s and c.status in ('published','deleted')
-		order by c.created_at,c.id`, presenceIndex, viewerIndex, viewerIndex, where), args...)
+		  and ($%d::bigint=0 or not exists(select 1 from user_blocks block
+			where block.blocker_id=$%d and block.blocked_id=c.author_id))
+		order by c.created_at,c.id`, viewerIndex, viewerIndex, viewerIndex, where, viewerIndex, viewerIndex), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1071,18 +1256,16 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 		var watchUnread, watchedReplies int
 		var reactionNames, selectedReactions []string
 		var reactionCounts []int64
-		var showOnlineStatus bool
-		var onlineActive bool
 		item := commentResponse{Reactions: map[string]int{}, UserReactions: []string{}}
-		if err = rows.Scan(&numericID, &item.ID, &parentID, &rootID, &item.Depth, &item.Body, &status,
-			&item.ChildCount, &item.DescendantCount, &item.HeatScore, &item.Author.ID, &item.Author.Username,
-			&item.Author.AvatarURL, &showOnlineStatus, &onlineActive, &parentAuthor, &parentBody, &parentStatus,
+		if err = rows.Scan(&numericID, &item.ID, &item.FloorNumber, &parentID, &rootID, &item.Depth, &item.Body, &status,
+			&item.ChildCount, &item.DescendantCount, &item.HeatScore, &item.Author.internalID, &item.Author.ID, &item.Author.Username,
+			&item.Author.AvatarURL, &item.Author.showOnline, &parentAuthor, &parentBody, &parentStatus,
 			&item.CreatedAt, &item.UpdatedAt, &item.PinnedAt, &watchID, &watchStatus, &mutedUntil, &mutedForever,
 			&watchUnread, &watchedReplies, &reactionNames, &reactionCounts, &selectedReactions); err != nil {
 			return nil, err
 		}
 		item.ParentID = parentID
-		item.Author.OnlineStatus = mapPublicOnlineVisibility(showOnlineStatus, onlineActive)
+		item.internalID = numericID
 		item.RootID = rootID
 		item.Deleted = status == "deleted"
 		item.Pinned = item.PinnedAt != nil
@@ -1202,7 +1385,7 @@ func (s *Server) annotateCommentPermissions(ctx context.Context, items []comment
 		item.CanPin = value.Root && !item.Deleted && (pinModerator || postAuthorModerator)
 		item.CanReply = !item.Deleted && claimsAllow(claims, "comment.create")
 		item.CanReact = !item.Deleted && claimsAllow(claims, "comment.react")
-		item.CanReport = !item.Deleted && !own && claimsAllow(claims, "comment.report")
+		item.CanReport = !item.Deleted && !own && claimsAllow(claims, "report.create")
 		item.CanWatch = claimsAllow(claims, "comment.watch")
 	}
 	return nil
@@ -1287,6 +1470,10 @@ func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey
 			  and (post.review_status='approved' or post.author_id=$2 or $3)`, targetKey, viewerID, moderator).
 			Scan(&info.InternalID, &info.Title, &info.URL)
 		return info, err
+	case "ban_record":
+		err := s.db.QueryRow(ctx, `select ban.id,'小黑屋 · '||ban.username_snapshot,'/site-affairs/blackroom/'||ban.public_id
+			from ban_records ban where ban.public_id=$1`, targetKey).Scan(&info.InternalID, &info.Title, &info.URL)
+		return info, err
 	case "player_profile":
 		err := s.db.QueryRow(ctx, `select profile.id,profile.name,'/players/'||profile.public_id
 			from player_profiles profile where profile.public_id=$1 and profile.status='active'
@@ -1366,6 +1553,10 @@ func (s *Server) resolveCommentTargetByInternal(ctx context.Context, targetType 
 			return commentTargetInfo{}, err
 		}
 		targetKey = resourcePublicID + "~" + versionPublicID
+	} else if targetType == "ban_record" {
+		if err := s.db.QueryRow(ctx, `select public_id from ban_records where id=$1`, targetID).Scan(&targetKey); err != nil {
+			return commentTargetInfo{}, err
+		}
 	} else {
 		if err := s.db.QueryRow(ctx, `select public_id from public_routes
 			where entity_type=$1 and internal_id=$2`, targetType, targetID).Scan(&targetKey); err != nil {
@@ -1464,11 +1655,15 @@ func nonNegativeInt(value string) int {
 }
 
 func (s *Server) enqueueOrCreateCommentWatchNotification(ctx context.Context, recipientID, actorID int64, title, body string, data map[string]any) {
+	blocked, err := s.userBlocksActor(ctx, recipientID, actorID)
+	if err != nil || blocked {
+		return
+	}
 	event := notificationEvent{
 		Action: "comment_watch", RecipientID: recipientID, ActorID: actorID,
 		Kind: "comment_watch_reply", Title: title, Body: body, SourceLocale: "zh-CN", Data: data,
 	}
-	if s.queue != nil && s.queue.PublishTask(ctx, notificationTaskCode, event) == nil {
+	if (s.queue != nil || s.cfg.NATS.OutboxEnabled) && s.enqueueNotificationTask(ctx, event) == nil {
 		return
 	}
 	s.enqueueOrCreateDirectNotification(ctx, recipientID, actorID, "comment_watch_reply", title, body, data)

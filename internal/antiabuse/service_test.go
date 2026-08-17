@@ -1,20 +1,55 @@
 package antiabuse
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/querycache"
 )
 
-func TestPolicyUsesTrustWithoutBypassingLimits(t *testing.T) {
+func TestPolicyUsesTrustRestrictionAndPermissionForElevation(t *testing.T) {
 	settings := DefaultSettings()
 	base := settings.Policies["comment.create"]
-	newPolicy := policyFor(settings, "comment.create", "new")
-	trusted := policyFor(settings, "comment.create", "trusted")
-	if newPolicy.BurstLimit >= base.BurstLimit || trusted.BurstLimit <= base.BurstLimit {
+	newPolicy := policyFor(settings, "comment.create", "new", 100)
+	trusted := policyFor(settings, "comment.create", "trusted", 100)
+	if newPolicy.BurstLimit >= base.BurstLimit || trusted.BurstLimit != base.BurstLimit {
 		t.Fatalf("unexpected differentiated limits: new=%+v base=%+v trusted=%+v", newPolicy, base, trusted)
 	}
-	if trusted.BurstLimit <= 0 {
-		t.Fatal("trusted users must remain rate limited")
+	elevated := policyFor(settings, "comment.create", "trusted", 200)
+	if elevated.BurstLimit != base.BurstLimit*2 {
+		t.Fatalf("trusted quota must be elevated by permission, got=%+v base=%+v", elevated, base)
+	}
+}
+
+func TestPolicyUsesPermissionRateLimitPercent(t *testing.T) {
+	settings := DefaultSettings()
+	base := policyFor(settings, "review.submit", "normal", 100)
+	elevated := policyFor(settings, "review.submit", "normal", 200)
+	if elevated.BurstLimit != base.BurstLimit*2 || elevated.HourLimit != base.HourLimit*2 || elevated.DayLimit != base.DayLimit*2 || elevated.ObjectLimit != base.ObjectLimit*2 {
+		t.Fatalf("permission percentage did not scale request quotas: base=%+v elevated=%+v", base, elevated)
+	}
+	if elevated.PendingLimit != base.PendingLimit {
+		t.Fatalf("rate-limit permission must not expand the moderation queue: base=%d elevated=%d", base.PendingLimit, elevated.PendingLimit)
+	}
+	if got := NormalizeRateLimitPercent(0); got != DefaultRateLimitPercent {
+		t.Fatalf("missing permission normalized to %d, want %d", got, DefaultRateLimitPercent)
+	}
+	if got := NormalizeRateLimitPercent(MaxRateLimitPercent + 1); got != MaxRateLimitPercent {
+		t.Fatalf("oversized permission normalized to %d, want %d", got, MaxRateLimitPercent)
+	}
+}
+
+func TestReviewSubmitRateScopesRemainReviewSubmit(t *testing.T) {
+	create := rateLimitNamespace(Evaluation{Action: "review.submit", RateScope: "mod_content_version_create"})
+	update := rateLimitNamespace(Evaluation{Action: "review.submit", RateScope: "mod_content_version_update"})
+	other := rateLimitNamespace(Evaluation{Action: "review.submit"})
+	if create != "review.submit:mod_content_version_create" || update != "review.submit:mod_content_version_update" || other != "review.submit" {
+		t.Fatalf("unexpected review rate namespaces: create=%q update=%q other=%q", create, update, other)
+	}
+	if create == update || create == other {
+		t.Fatal("content-version creation must not consume unrelated review-submit counters")
 	}
 }
 
@@ -80,5 +115,27 @@ func TestNetworkAndClientSignals(t *testing.T) {
 	}
 	if !suspiciousUserAgent("python-requests/2.32") || suspiciousUserAgent("Mozilla/5.0 Firefox/141") {
 		t.Fatal("client signal classification is incorrect")
+	}
+}
+
+func TestAccountStateInvalidationOnlyRemovesTargetAccount(t *testing.T) {
+	ctx := context.Background()
+	cache := querycache.New(config.RedisConfig{})
+	service := New(config.AntiAbuseConfig{}, nil, cache)
+	targetPrefix := accountCacheKeyPrefix + "42:"
+	targetKeys := []string{targetPrefix + "ip-a:device-a", targetPrefix + "ip-b:device-b"}
+	otherKey := accountCacheKeyPrefix + "43:ip-a:device-a"
+	for _, key := range append(targetKeys, otherKey) {
+		cache.Set(ctx, key, []byte("cached"), time.Minute)
+	}
+
+	service.InvalidateAccountState(ctx, 42)
+	for _, key := range targetKeys {
+		if _, ok := cache.Get(ctx, key); ok {
+			t.Fatalf("target account cache key %q was not invalidated", key)
+		}
+	}
+	if _, ok := cache.Get(ctx, otherKey); !ok {
+		t.Fatal("invalidating one account removed another account's cache")
 	}
 }

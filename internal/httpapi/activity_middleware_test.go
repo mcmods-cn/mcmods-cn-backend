@@ -30,7 +30,7 @@ func TestInferredActivityObjectCoversPublicFeatureRoutes(t *testing.T) {
 		"/api/change-requests/example":                       activity.ObjectReview,
 		"/api/v1/content-revisions/example":                  activity.ObjectReview,
 		"/api/v1/admin/server-reviews/example":               activity.ObjectReview,
-		"/api/v1/admin/comment-reports/example":              activity.ObjectReview,
+		"/api/v1/admin/reports/example":                      activity.ObjectReview,
 		"/api/skins/example":                                 activity.ObjectSkin,
 		"/api/player-profiles/example":                       activity.ObjectPlayerProfile,
 	}

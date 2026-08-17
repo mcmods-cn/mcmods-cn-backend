@@ -548,7 +548,7 @@ func mergeServerModRequests(detected []serverprobe.Mod, declared []createServerM
 	result := make([]createServerModRequest, 0, len(detected)+len(declared))
 	byID := make(map[string]int, len(detected)+len(declared))
 	appendMod := func(mod createServerModRequest) {
-		mod.ID = normalizeServerModID(mod.ID)
+		mod.ID = normalizeCatalogModIdentifier(mod.ID)
 		if mod.ID == "" {
 			return
 		}
@@ -578,20 +578,6 @@ func mergeServerModRequests(detected []serverprobe.Mod, declared []createServerM
 		appendMod(mod)
 	}
 	return result
-}
-
-func normalizeServerModID(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" || len(value) > 128 {
-		return ""
-	}
-	for _, character := range value {
-		if (character < 'a' || character > 'z') && (character < '0' || character > '9') &&
-			character != '_' && character != '-' && character != '.' {
-			return ""
-		}
-	}
-	return value
 }
 
 func insertMinecraftServerMods(ctx context.Context, tx pgx.Tx, serverID int64, mods []createServerModRequest) error {
@@ -687,7 +673,7 @@ func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) 
 	language, validLanguage := parseCatalogScalar(r.URL.Query().Get("language"))
 	versions, validVersions := parseCatalogList(r.URL.Query().Get("version"), 20)
 	versionMode, validVersionMode := parseCatalogVersionMode(r.URL.Query().Get("versionMode"))
-	modFilters := serverModFilters(r.URL.Query().Get("mods"))
+	modFilters := parseCatalogModFilters(r.URL.Query().Get("mods"))
 	modded, validModded := parseCatalogBoolean(r.URL.Query().Get("modded"))
 	online, validOnline := parseCatalogBoolean(r.URL.Query().Get("online"))
 	whitelist, validWhitelist := parseCatalogBoolean(r.URL.Query().Get("whitelist"))
@@ -696,8 +682,13 @@ func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid server catalog filter")
 		return
 	}
-	sort, validSort := parseCatalogSort(r.URL.Query().Get("sort"))
-	if !validSort {
+	rawSort := r.URL.Query().Get("sort")
+	if strings.TrimSpace(rawSort) == "" {
+		rawSort = string(catalogSortHeat)
+	}
+	sort, validSort := parseCatalogSort(rawSort)
+	direction, validDirection := parseCatalogSortDirection(r.URL.Query().Get("order"), rawSort)
+	if !validSort || !validDirection {
 		writeError(w, http.StatusBadRequest, "invalid catalog sort")
 		return
 	}
@@ -762,8 +753,8 @@ func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) 
 			left join mods collected_mod on collected_mod.id=filter_mod.mod_id
 			where filter_mod.server_id=server.id and (
 				lower(filter_mod.raw_mod_id)=lower($%d)
-				or lower(coalesce(collected_mod.public_id,''))=lower($%d)
 				or lower(coalesce(collected_mod.project_code,''))=lower($%d)
+				or lower(coalesce(collected_mod.slug,''))=lower($%d)
 				or exists(
 					select 1 from mod_identifiers identifier
 					where identifier.mod_id=filter_mod.mod_id
@@ -793,9 +784,11 @@ func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	listArgs := append(append([]any{}, args...), limit, databaseOffset)
-	orderSQL := catalogOrderSQL(sort, indexed.Used, indexedPosition, "server.updated_at", "server.id", "server.name")
+	orderSQL := catalogOrderSQL(sort, direction, indexed.Used, indexedPosition,
+		"server.created_at", "server.updated_at", "server.id", "server.name")
 	if !indexed.Used && (sort == catalogSortHeat || sort == catalogSortRelevance) {
-		orderSQL = "coalesce(popularity.heat_score,0) desc,server.last_online desc,server.updated_at desc,server.id desc"
+		directionSQL := string(direction)
+		orderSQL = "coalesce(popularity.heat_score,0) " + directionSQL + ",server.last_online desc,server.updated_at " + directionSQL + ",server.id " + directionSQL
 	}
 	rows, err := s.db.Query(r.Context(), `select server.public_id,server.name,server.short_description,
 		server.icon_data_uri,server.modded,server.loader,server.languages,server.primary_tag,
@@ -961,26 +954,6 @@ func readMinecraftServerMods(ctx context.Context, query minecraftServerModQuerie
 		items = append(items, item)
 	}
 	return items, rows.Err()
-}
-
-func serverModFilters(value string) []string {
-	result := make([]string, 0, 8)
-	seen := make(map[string]struct{}, 8)
-	for _, candidate := range strings.Split(value, ",") {
-		normalized := normalizeServerModID(candidate)
-		if normalized == "" {
-			continue
-		}
-		if _, exists := seen[normalized]; exists {
-			continue
-		}
-		seen[normalized] = struct{}{}
-		result = append(result, normalized)
-		if len(result) == 32 {
-			break
-		}
-	}
-	return result
 }
 
 func (s *Server) minecraftServerHistory(w http.ResponseWriter, r *http.Request) {

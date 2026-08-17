@@ -2,8 +2,12 @@ package querycache
 
 import (
 	"context"
+	"errors"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -28,6 +32,18 @@ type localLimit struct {
 	expiresAt time.Time
 }
 
+type unreadEntry struct {
+	notifications int64
+	messages      int64
+	epoch         int64
+	expiresAt     time.Time
+}
+
+type chatPresenceEntry struct {
+	conversationID int64
+	expiresAt      time.Time
+}
+
 type RateLimitResult struct {
 	Allowed    bool
 	Remaining  int
@@ -35,23 +51,70 @@ type RateLimitResult struct {
 	Backend    string
 }
 
+type Metrics struct {
+	Requests           uint64        `json:"requests"`
+	Hits               uint64        `json:"hits"`
+	Misses             uint64        `json:"misses"`
+	RedisHits          uint64        `json:"redisHits"`
+	RedisMisses        uint64        `json:"redisMisses"`
+	CacheHitRate       float64       `json:"cacheHitRate"`
+	RedisHitRate       float64       `json:"redisHitRate"`
+	Errors             uint64        `json:"errors"`
+	Timeouts           uint64        `json:"timeouts"`
+	LocalFallbacks     uint64        `json:"localFallbacks"`
+	PostgresLoads      uint64        `json:"postgresLoads"`
+	RateLimitFalls     uint64        `json:"rateLimitFallbacks"`
+	PresenceWrites     uint64        `json:"presenceWrites"`
+	UnreadRebuilds     uint64        `json:"unreadRebuilds"`
+	UnreadCalibrations uint64        `json:"unreadCalibrations"`
+	UnreadDrifts       uint64        `json:"unreadDrifts"`
+	AverageLatency     time.Duration `json:"averageLatency"`
+	P95Latency         time.Duration `json:"p95Latency"`
+}
+
+type metricCounters struct {
+	requests, hits, misses, errors, timeouts                         atomic.Uint64
+	redisHits, redisMisses                                           atomic.Uint64
+	localFallbacks, postgresLoads, rateLimitFallbacks                atomic.Uint64
+	presenceWrites, unreadRebuilds, unreadCalibrations, unreadDrifts atomic.Uint64
+	latencyTotal                                                     atomic.Uint64
+}
+
 type Cache struct {
-	redis    *redis.Client
-	prefix   string
-	ttl      time.Duration
-	mu       sync.Mutex
-	local    map[string]localEntry
-	presence map[string]time.Time
-	claims   map[string]time.Time
-	limits   map[string]localLimit
-	group    singleflight.Group
+	redis        *redis.Client
+	cfg          config.RedisConfig
+	prefix       string
+	ttl          time.Duration
+	mu           sync.Mutex
+	local        map[string]localEntry
+	presence     map[string]time.Time
+	userPresence map[int64]map[string]time.Time
+	chatPresence map[int64]chatPresenceEntry
+	unread       map[int64]unreadEntry
+	unreadEpoch  int64
+	claims       map[string]time.Time
+	limits       map[string]localLimit
+	group        singleflight.Group
+	metrics      metricCounters
+	latencyMu    sync.Mutex
+	latencies    []time.Duration
+	latencyIndex int
 }
 
 func New(cfg config.RedisConfig) *Cache {
+	basePrefix := strings.Trim(strings.TrimSpace(cfg.Prefix), ":")
+	if basePrefix == "" {
+		basePrefix = "mcmods"
+	}
+	namespace := strings.Trim(strings.TrimSpace(cfg.Namespace), ":")
+	if namespace == "" {
+		namespace = "development"
+	}
 	cache := &Cache{
-		prefix: cfg.Prefix, ttl: cfg.TTL,
-		local: make(map[string]localEntry), presence: make(map[string]time.Time), claims: make(map[string]time.Time),
-		limits: make(map[string]localLimit),
+		cfg: cfg, prefix: basePrefix + ":" + namespace + ":", ttl: cfg.TTL,
+		local: make(map[string]localEntry), presence: make(map[string]time.Time), userPresence: make(map[int64]map[string]time.Time),
+		chatPresence: make(map[int64]chatPresenceEntry), unread: make(map[int64]unreadEntry), claims: make(map[string]time.Time),
+		limits: make(map[string]localLimit), latencies: make([]time.Duration, 256),
 	}
 	if cache.ttl <= 0 {
 		cache.ttl = 2 * time.Minute
@@ -59,10 +122,105 @@ func New(cfg config.RedisConfig) *Cache {
 	if cfg.Enabled {
 		cache.redis = redis.NewClient(&redis.Options{
 			Addr: cfg.Addr, Username: cfg.Username, Password: cfg.Password, DB: cfg.DB,
-			DialTimeout: 2 * time.Second, ReadTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second,
+			PoolSize: cfg.PoolSize, MinIdleConns: cfg.MinIdleConns,
+			DialTimeout: cfg.DialTimeout, ReadTimeout: cfg.ReadTimeout, WriteTimeout: cfg.WriteTimeout,
 		})
 	}
 	return cache
+}
+
+func (c *Cache) Enabled() bool { return c != nil && c.redis != nil }
+
+func (c *Cache) Config() config.RedisConfig {
+	if c == nil {
+		return config.RedisConfig{}
+	}
+	return c.cfg
+}
+
+func (c *Cache) Close() error {
+	if c == nil || c.redis == nil {
+		return nil
+	}
+	return c.redis.Close()
+}
+
+func (c *Cache) Ping(ctx context.Context) error {
+	if c == nil || c.redis == nil {
+		return errors.New("redis disabled")
+	}
+	started := time.Now()
+	err := c.redis.Ping(ctx).Err()
+	c.recordRedisResult(started, err)
+	return err
+}
+
+func (c *Cache) Metrics() Metrics {
+	if c == nil {
+		return Metrics{}
+	}
+	requests := c.metrics.requests.Load()
+	result := Metrics{
+		Requests: requests, Hits: c.metrics.hits.Load(), Misses: c.metrics.misses.Load(),
+		RedisHits: c.metrics.redisHits.Load(), RedisMisses: c.metrics.redisMisses.Load(),
+		Errors: c.metrics.errors.Load(), Timeouts: c.metrics.timeouts.Load(),
+		LocalFallbacks: c.metrics.localFallbacks.Load(), PostgresLoads: c.metrics.postgresLoads.Load(),
+		RateLimitFalls: c.metrics.rateLimitFallbacks.Load(), PresenceWrites: c.metrics.presenceWrites.Load(),
+		UnreadRebuilds:     c.metrics.unreadRebuilds.Load(),
+		UnreadCalibrations: c.metrics.unreadCalibrations.Load(), UnreadDrifts: c.metrics.unreadDrifts.Load(),
+	}
+	if decisions := result.Hits + result.Misses; decisions > 0 {
+		result.CacheHitRate = float64(result.Hits) / float64(decisions)
+	}
+	if redisDecisions := result.RedisHits + result.RedisMisses; redisDecisions > 0 {
+		result.RedisHitRate = float64(result.RedisHits) / float64(redisDecisions)
+	}
+	if requests > 0 {
+		result.AverageLatency = time.Duration(c.metrics.latencyTotal.Load() / requests)
+	}
+	c.latencyMu.Lock()
+	values := make([]time.Duration, 0, len(c.latencies))
+	for _, value := range c.latencies {
+		if value > 0 {
+			values = append(values, value)
+		}
+	}
+	c.latencyMu.Unlock()
+	if len(values) > 0 {
+		sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+		result.P95Latency = values[(len(values)-1)*95/100]
+	}
+	return result
+}
+
+func (c *Cache) recordRedisResult(started time.Time, err error) {
+	if c == nil {
+		return
+	}
+	elapsed := time.Since(started)
+	c.metrics.requests.Add(1)
+	c.metrics.latencyTotal.Add(uint64(elapsed))
+	c.latencyMu.Lock()
+	c.latencies[c.latencyIndex%len(c.latencies)] = elapsed
+	c.latencyIndex++
+	c.latencyMu.Unlock()
+	if errors.Is(err, redis.Nil) {
+		return
+	}
+	if err != nil {
+		c.metrics.errors.Add(1)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, redis.ErrClosed) {
+			c.metrics.timeouts.Add(1)
+		}
+	}
+}
+
+func (c *Cache) redisKey(key string) (string, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" || len(key) > 512 {
+		return "", false
+	}
+	return c.prefix + key, true
 }
 
 // ConsumeRateLimit atomically consumes one slot from a bounded fixed window.
@@ -71,26 +229,38 @@ func New(cfg config.RedisConfig) *Cache {
 // is unavailable; callers can include Backend in internal diagnostics without
 // exposing it to clients.
 func (c *Cache) ConsumeRateLimit(ctx context.Context, key string, limit int, window time.Duration) RateLimitResult {
-	if c == nil || key == "" || limit <= 0 || window <= 0 {
-		return RateLimitResult{Allowed: true, Remaining: max(limit-1, 0), Backend: "disabled"}
+	return c.ConsumeRateLimitPolicy(ctx, key, limit, limit, window)
+}
+
+// ConsumeRateLimitPolicy uses a deliberately smaller localFallbackLimit for
+// security-sensitive actions when shared Redis state is unavailable.
+func (c *Cache) ConsumeRateLimitPolicy(ctx context.Context, key string, redisLimit, localFallbackLimit int, window time.Duration) RateLimitResult {
+	if c == nil || key == "" || redisLimit <= 0 || window <= 0 {
+		return RateLimitResult{Allowed: true, Remaining: max(redisLimit-1, 0), Backend: "disabled"}
 	}
-	if c.redis != nil {
-		redisKey := c.prefix + "limit:" + key
+	if localFallbackLimit <= 0 || localFallbackLimit > redisLimit {
+		localFallbackLimit = redisLimit
+	}
+	if redisKey, valid := c.redisKey("limit:" + key); c.redis != nil && valid {
+		started := time.Now()
 		result, err := c.redis.Eval(ctx, `
 local count=redis.call('INCR',KEYS[1])
 if count==1 then redis.call('PEXPIRE',KEYS[1],ARGV[2]) end
 local ttl=redis.call('PTTL',KEYS[1])
 return {count,ttl}
-`, []string{redisKey}, limit, window.Milliseconds()).Int64Slice()
+`, []string{redisKey}, redisLimit, window.Milliseconds()).Int64Slice()
+		c.recordRedisResult(started, err)
 		if err == nil && len(result) == 2 {
 			count := int(result[0])
 			retry := time.Duration(max(result[1], 0)) * time.Millisecond
 			return RateLimitResult{
-				Allowed: count <= limit, Remaining: max(limit-count, 0), RetryAfter: retry, Backend: "redis",
+				Allowed: count <= redisLimit, Remaining: max(redisLimit-count, 0), RetryAfter: retry, Backend: "redis",
 			}
 		}
 	}
-	return c.consumeLocalRateLimit(key, limit, window)
+	c.metrics.localFallbacks.Add(1)
+	c.metrics.rateLimitFallbacks.Add(1)
+	return c.consumeLocalRateLimit(key, localFallbackLimit, window)
 }
 
 func (c *Cache) consumeLocalRateLimit(key string, limit int, window time.Duration) RateLimitResult {
@@ -122,6 +292,15 @@ func (c *Cache) consumeLocalRateLimit(key string, limit int, window time.Duratio
 	}
 }
 
+func (c *Cache) ConsumeLocalRateLimit(key string, limit int, window time.Duration) RateLimitResult {
+	if c == nil {
+		return RateLimitResult{Allowed: false, Backend: "unavailable"}
+	}
+	c.metrics.localFallbacks.Add(1)
+	c.metrics.rateLimitFallbacks.Add(1)
+	return c.consumeLocalRateLimit(key, limit, window)
+}
+
 // ClaimThrottle returns true once per key and window. Redis SET NX gives all
 // application replicas the same decision; the bounded local map is the
 // single-process implementation and the fallback when Redis is unavailable.
@@ -130,13 +309,16 @@ func (c *Cache) ClaimThrottle(ctx context.Context, key string, window time.Durat
 		return true
 	}
 	now := time.Now()
-	if c.redis != nil {
-		claimed, err := c.redis.SetNX(ctx, c.prefix+"throttle:"+key, "1", window).Result()
+	if redisKey, valid := c.redisKey("throttle:" + key); c.redis != nil && valid {
+		started := time.Now()
+		claimed, err := c.redis.SetNX(ctx, redisKey, "1", window).Result()
+		c.recordRedisResult(started, err)
 		if err == nil {
 			c.recordLocalClaim(key, now.Add(window), now)
 			return claimed
 		}
 	}
+	c.metrics.localFallbacks.Add(1)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if expiresAt, exists := c.claims[key]; exists && now.Before(expiresAt) {
@@ -232,26 +414,49 @@ func formatUnix(value int64) string {
 }
 
 func (c *Cache) GetOrLoad(ctx context.Context, key string, loader func(context.Context) ([]byte, error)) ([]byte, error) {
+	return c.GetOrLoadTTL(ctx, key, c.ttl, loader)
+}
+
+func (c *Cache) GetOrLoadTTL(ctx context.Context, key string, ttl time.Duration, loader func(context.Context) ([]byte, error)) ([]byte, error) {
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
 	if value, ok := c.getLocal(key); ok {
+		c.metrics.hits.Add(1)
 		return value, nil
 	}
-	if c.redis != nil {
-		if value, err := c.redis.Get(ctx, c.prefix+key).Bytes(); err == nil {
-			c.setLocal(key, value)
+	if redisKey, valid := c.redisKey(key); c.redis != nil && valid {
+		started := time.Now()
+		value, redisErr := c.redis.Get(ctx, redisKey).Bytes()
+		c.recordRedisResult(started, redisErr)
+		if redisErr == nil {
+			c.metrics.redisHits.Add(1)
+			c.metrics.hits.Add(1)
+			c.setLocalTTL(key, value, ttl)
 			return value, nil
 		}
+		if errors.Is(redisErr, redis.Nil) {
+			c.metrics.redisMisses.Add(1)
+		}
+		if !errors.Is(redisErr, redis.Nil) {
+			c.metrics.localFallbacks.Add(1)
+		}
 	}
+	c.metrics.misses.Add(1)
 	loaded, err, _ := c.group.Do(key, func() (any, error) {
 		if value, ok := c.getLocal(key); ok {
 			return value, nil
 		}
+		c.metrics.postgresLoads.Add(1)
 		value, loadErr := loader(ctx)
 		if loadErr != nil {
 			return nil, loadErr
 		}
-		c.setLocal(key, value)
-		if c.redis != nil {
-			_ = c.redis.Set(context.Background(), c.prefix+key, value, c.ttl).Err()
+		c.setLocalTTL(key, value, ttl)
+		if redisKey, valid := c.redisKey(key); c.redis != nil && valid {
+			started := time.Now()
+			setErr := c.redis.Set(context.Background(), redisKey, value, ttl).Err()
+			c.recordRedisResult(started, setErr)
 		}
 		return value, nil
 	})
@@ -259,6 +464,83 @@ func (c *Cache) GetOrLoad(ctx context.Context, key string, loader func(context.C
 		return nil, err
 	}
 	return loaded.([]byte), nil
+}
+
+func (c *Cache) Get(ctx context.Context, key string) ([]byte, bool) {
+	if c == nil {
+		return nil, false
+	}
+	if value, ok := c.getLocal(key); ok {
+		c.metrics.hits.Add(1)
+		return value, true
+	}
+	redisKey, valid := c.redisKey(key)
+	if c.redis == nil || !valid {
+		c.metrics.misses.Add(1)
+		return nil, false
+	}
+	started := time.Now()
+	value, err := c.redis.Get(ctx, redisKey).Bytes()
+	c.recordRedisResult(started, err)
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			c.metrics.redisMisses.Add(1)
+		}
+		c.metrics.misses.Add(1)
+		if !errors.Is(err, redis.Nil) {
+			c.metrics.localFallbacks.Add(1)
+		}
+		return nil, false
+	}
+	c.metrics.redisHits.Add(1)
+	c.metrics.hits.Add(1)
+	c.setLocal(key, value)
+	return value, true
+}
+
+func (c *Cache) Set(ctx context.Context, key string, value []byte, ttl time.Duration) bool {
+	if c == nil {
+		return false
+	}
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
+	c.setLocalTTL(key, value, ttl)
+	redisKey, valid := c.redisKey(key)
+	if c.redis == nil || !valid {
+		c.metrics.localFallbacks.Add(1)
+		return false
+	}
+	started := time.Now()
+	err := c.redis.Set(ctx, redisKey, value, ttl).Err()
+	c.recordRedisResult(started, err)
+	return err == nil
+}
+
+func (c *Cache) Delete(ctx context.Context, keys ...string) {
+	if c == nil || len(keys) == 0 {
+		return
+	}
+	c.mu.Lock()
+	for _, key := range keys {
+		delete(c.local, key)
+	}
+	c.mu.Unlock()
+	if c.redis == nil {
+		return
+	}
+	redisKeys := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if value, valid := c.redisKey(key); valid {
+			redisKeys = append(redisKeys, value)
+		}
+	}
+	if len(redisKeys) == 0 {
+		return
+	}
+	started := time.Now()
+	err := c.redis.Del(ctx, redisKeys...).Err()
+	c.recordRedisResult(started, err)
 }
 
 func (c *Cache) InvalidatePrefix(ctx context.Context, prefix string) {
@@ -300,6 +582,10 @@ func (c *Cache) getLocal(key string) ([]byte, bool) {
 }
 
 func (c *Cache) setLocal(key string, value []byte) {
+	c.setLocalTTL(key, value, c.ttl)
+}
+
+func (c *Cache) setLocalTTL(key string, value []byte, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.local) >= maxLocalEntries {
@@ -316,5 +602,5 @@ func (c *Cache) setLocal(key string, value []byte) {
 			}
 		}
 	}
-	c.local[key] = localEntry{value: append([]byte(nil), value...), expiresAt: time.Now().Add(c.ttl)}
+	c.local[key] = localEntry{value: append([]byte(nil), value...), expiresAt: time.Now().Add(ttl)}
 }

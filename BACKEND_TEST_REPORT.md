@@ -29,7 +29,7 @@ go vet ./...
 go test -count=1 -json ./...
 
 # 数据库集成测试门禁检查
-go test -v ./internal/database -run 'TestGeneration70UserFeaturesIntegration|TestEveryForeignKeyHasLeadingIndex'
+go test -v ./internal/database -run 'TestCurrentUserFeaturesIntegration|TestEveryForeignKeyHasLeadingIndex'
 
 # 竞态检测尝试
 go test -race ./...
@@ -99,7 +99,7 @@ node --check scripts/load-test.mjs
 
 ## 数据库迁移与查询分析
 
-已完成静态迁移测试和可执行集成测试 `TestGeneration70UserFeaturesIntegration`。`scripts/query-analysis.sql` 覆盖：
+已完成静态迁移测试和可执行集成测试 `TestCurrentUserFeaturesIntegration`。`scripts/query-analysis.sql` 覆盖：
 
 - Mod、插件和服务器热度排序；
 - 分类/版本/热度组合；
@@ -152,7 +152,7 @@ go vet ./...
 node --check scripts/load-test.mjs
 $env:MCMODS_RUN_DB_INTEGRATION='1'
 go test -count=1 -run TestDurableOutboxSurvivesProducerAndDrainsExactlyOnceAcrossWorkers ./internal/activity
-go test -count=1 -run TestGeneration70UserFeaturesIntegration ./internal/database
+go test -count=1 -run TestCurrentUserFeaturesIntegration ./internal/database
 $env:MCMODS_RUN_ACTIVITY_LOAD='1'
 go test -v -count=1 -run TestDurableOutboxConcurrentLoadIntegration ./internal/activity
 ```

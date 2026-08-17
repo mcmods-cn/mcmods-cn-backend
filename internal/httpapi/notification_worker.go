@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,7 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/mailer"
+	"mcmods-cn-backend/internal/querycache"
 	"mcmods-cn-backend/internal/queue"
 	"mcmods-cn-backend/internal/security"
 )
@@ -36,10 +38,11 @@ type NotificationWorker struct {
 	queue                 *queue.Client
 	fallback              config.SMTPConfig
 	settingsEncryptionKey string
+	cache                 *querycache.Cache
 }
 
-func NewNotificationWorker(db *pgxpool.Pool, queueClient *queue.Client, fallback config.SMTPConfig, settingsEncryptionKey string) *NotificationWorker {
-	return &NotificationWorker{db: db, queue: queueClient, fallback: fallback, settingsEncryptionKey: settingsEncryptionKey}
+func NewNotificationWorker(db *pgxpool.Pool, queueClient *queue.Client, cache *querycache.Cache, fallback config.SMTPConfig, settingsEncryptionKey string) *NotificationWorker {
+	return &NotificationWorker{db: db, queue: queueClient, cache: cache, fallback: fallback, settingsEncryptionKey: settingsEncryptionKey}
 }
 
 func (worker *NotificationWorker) Start() error {
@@ -81,17 +84,23 @@ func (worker *NotificationWorker) createSystemNotification(ctx context.Context, 
 		event.SourceLocale = "zh-CN"
 	}
 	rawData, _ := json.Marshal(event.Data)
-	if _, err := worker.db.Exec(
+	tag, err := worker.db.Exec(
 		ctx,
-		`insert into notifications (recipient_id, kind, title, body, source_locale, data)
-		 values (null, 'system', $1, $2, $3, $4::jsonb)`,
+		`insert into notifications (recipient_id,kind,title,body,source_locale,data,source_event_id)
+		 values (null,'system',$1,$2,$3,$4::jsonb,nullif($5,'')) on conflict(source_event_id) where source_event_id is not null do nothing`,
 		event.Title,
 		event.Body,
 		event.SourceLocale,
 		string(rawData),
-	); err != nil {
+		queue.EventIDFromContext(ctx),
+	)
+	if err != nil {
 		return err
 	}
+	if tag.RowsAffected() == 0 {
+		return nil
+	}
+	worker.cache.BumpUnreadEpoch(ctx)
 	if event.SendEmail {
 		worker.sendBroadcastEmail(ctx, event.Title, event.Body)
 	}
@@ -106,8 +115,8 @@ func (worker *NotificationWorker) createDirectNotification(ctx context.Context, 
 	var notificationID int64
 	if err := worker.db.QueryRow(
 		ctx,
-		`insert into notifications (recipient_id, kind, title, body, source_locale, data)
-		 values ($1, $2, $3, $4, $5, $6::jsonb)
+		`insert into notifications (recipient_id,kind,title,body,source_locale,data,source_event_id)
+		 values ($1,$2,$3,$4,$5,$6::jsonb,nullif($7,'')) on conflict(source_event_id) where source_event_id is not null do nothing
 		 returning id`,
 		event.RecipientID,
 		event.Kind,
@@ -115,12 +124,18 @@ func (worker *NotificationWorker) createDirectNotification(ctx context.Context, 
 		strings.TrimSpace(event.Body),
 		defaultString(event.SourceLocale, "zh-CN"),
 		string(rawData),
+		queue.EventIDFromContext(ctx),
 	).Scan(&notificationID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
 		return err
 	}
 	if event.ActorID > 0 {
 		_, _ = worker.db.Exec(ctx, `insert into notification_actors (notification_id, actor_id) values ($1, $2) on conflict do nothing`, notificationID, event.ActorID)
 	}
+	worker.cache.AdjustUnread(ctx, event.RecipientID, "notifications", 1)
+	worker.publishRealtime(event.RecipientID, "notification.created", map[string]any{"kind": event.Kind})
 	if event.SendEmail {
 		worker.enqueueUserEmail(ctx, event.RecipientID, event.Title, event.Body)
 	}
@@ -140,6 +155,10 @@ func (worker *NotificationWorker) aggregateCommentWatchNotification(ctx context.
 		return err
 	}
 	defer tx.Rollback(ctx)
+	claimed, err := claimProcessedEventTx(ctx, tx, "notifications.comment_watch")
+	if err != nil || !claimed {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, event.RecipientID); err != nil {
 		return err
 	}
@@ -176,7 +195,11 @@ func (worker *NotificationWorker) aggregateCommentWatchNotification(ctx context.
 		_, _ = tx.Exec(ctx, `insert into notification_actors(notification_id,actor_id)
 			values($1,$2) on conflict do nothing`, notificationID, event.ActorID)
 	}
-	return tx.Commit(ctx)
+	if err = tx.Commit(ctx); err == nil {
+		worker.cache.InvalidateUnread(ctx, event.RecipientID)
+		worker.publishRealtime(event.RecipientID, "notification.changed", map[string]any{"kind": "comment_watch_reply"})
+	}
+	return err
 }
 
 func (worker *NotificationWorker) aggregateFollowerNotification(ctx context.Context, event notificationEvent) error {
@@ -188,6 +211,10 @@ func (worker *NotificationWorker) aggregateFollowerNotification(ctx context.Cont
 		return err
 	}
 	defer tx.Rollback(ctx)
+	claimed, err := claimProcessedEventTx(ctx, tx, "notifications.follow")
+	if err != nil || !claimed {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, event.RecipientID); err != nil {
 		return err
 	}
@@ -253,8 +280,27 @@ func (worker *NotificationWorker) aggregateFollowerNotification(ctx context.Cont
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
+	worker.cache.InvalidateUnread(ctx, event.RecipientID)
+	worker.publishRealtime(event.RecipientID, "notification.changed", map[string]any{"kind": "new_follower"})
 	worker.enqueueUserEmail(ctx, event.RecipientID, "你有新的粉丝", body)
 	return nil
+}
+
+func (worker *NotificationWorker) publishRealtime(userID int64, eventType string, data any) {
+	if worker == nil || worker.queue == nil || userID <= 0 {
+		return
+	}
+	_ = worker.queue.PublishBroadcast(context.Background(), "user."+strconv.FormatInt(userID, 10), realtimeEvent{ID: randomHex(12), Type: eventType, Data: data})
+}
+
+func claimProcessedEventTx(ctx context.Context, tx pgx.Tx, consumer string) (bool, error) {
+	eventID := queue.EventIDFromContext(ctx)
+	if eventID == "" {
+		return true, nil
+	}
+	tag, err := tx.Exec(ctx, `insert into processed_events(consumer,event_id,event_type)
+		values($1,$2,$1) on conflict do nothing`, consumer, eventID)
+	return err == nil && tag.RowsAffected() > 0, err
 }
 
 func followerNotificationBody(names []string, count int) string {

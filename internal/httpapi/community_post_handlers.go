@@ -135,11 +135,13 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid community project filter")
 		return
 	}
-	sort := strings.TrimSpace(r.URL.Query().Get("sort"))
-	if sort == "" {
-		sort = "latest"
+	rawSort := strings.TrimSpace(r.URL.Query().Get("sort"))
+	if rawSort == "" {
+		rawSort = string(catalogSortPublished)
 	}
-	if sort != "latest" && sort != "oldest" && sort != "updated" {
+	sort, validSort := parseCatalogSort(rawSort)
+	direction, validDirection := parseCatalogSortDirection(r.URL.Query().Get("order"), rawSort)
+	if !validSort || !validDirection {
 		writeError(w, http.StatusBadRequest, "invalid community post sort")
 		return
 	}
@@ -148,21 +150,15 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 	viewerID := currentClaims(r).Subject
 	moderator := claimsAllow(currentClaims(r), "content.review") || claimsAllow(currentClaims(r), "admin.*")
 	indexed := indexedSearchPage{}
-	if category == "" && len(versions) == 0 && len(projectFilters) == 0 && sort == "latest" {
+	if category == "" && len(versions) == 0 && len(projectFilters) == 0 && catalogSortUsesSearchIndex(sort) {
 		indexed = s.searchCommunityPage(r.Context(), query, kind, modID, resourceID, currentClaims(r), moderator, limit, offset)
 	}
 	databaseOffset := offset
 	if indexed.Used {
 		databaseOffset = 0
 	}
-	orderSQL := "post.published_at desc nulls last,post.created_at desc,post.id desc"
-	if indexed.Used {
-		orderSQL = "array_position($8::bigint[],post.id),post.updated_at desc,post.id desc"
-	} else if sort == "oldest" {
-		orderSQL = "post.created_at asc,post.id asc"
-	} else if sort == "updated" {
-		orderSQL = "post.updated_at desc,post.id desc"
-	}
+	orderSQL := catalogOrderSQL(sort, direction, indexed.Used, 8,
+		"coalesce(post.published_at,post.created_at)", "post.updated_at", "post.id", "post.title")
 	rows, err := s.db.Query(r.Context(), `select post.id,post.public_id,post.kind,post.category,post.title,post.source_locale,post.body_markdown,
 		post.minecraft_versions,post.mod_version_min,post.mod_version_max,post.severity,post.has_fix,post.issue_url,
 		coalesce(file.public_id,''),coalesce(file.object_key,''),author.public_id,author.username,post.review_status,post.created_at,post.updated_at,post.author_id,
@@ -170,6 +166,8 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 		from community_posts post join users author on author.id=post.author_id
 		left join oss_files file on file.id=post.cover_file_id and file.status='active'
 		left join comments accepted on accepted.id=post.accepted_comment_id
+		left join public_routes popularity_route on popularity_route.entity_type='community_post' and popularity_route.internal_id=post.id
+		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
 		where post.kind=$1 and post.status='active' and (post.review_status='approved' or post.author_id=$2 or $3)
 		and (($7 and post.id=any($8::bigint[])) or (not $7 and ($4='' or lower(post.title) like '%%'||lower($4)||'%%' or lower(post.body_markdown) like '%%'||lower($4)||'%%')))
 		and ($5='' or exists(select 1 from community_post_project_refs ref join public_routes route on route.internal_id=ref.target_id and route.entity_type=ref.target_type where ref.post_id=post.id and route.public_id=$5))

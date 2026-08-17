@@ -358,7 +358,7 @@ func (s *Server) modApplicationAttachmentsByApplication(ctx context.Context, app
 
 func (s *Server) enqueueOrCreateDirectNotification(ctx context.Context, recipientID, actorID int64, kind, title, body string, data map[string]any) {
 	event := notificationEvent{Action: "direct", RecipientID: recipientID, ActorID: actorID, Kind: kind, Title: title, Body: body, SourceLocale: "zh-CN", Data: data}
-	if s.queue != nil && s.queue.PublishTask(ctx, notificationTaskCode, event) == nil {
+	if (s.queue != nil || s.cfg.NATS.OutboxEnabled) && s.enqueueNotificationTask(ctx, event) == nil {
 		return
 	}
 	raw, _ := json.Marshal(data)

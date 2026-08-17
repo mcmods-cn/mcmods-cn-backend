@@ -17,6 +17,8 @@ import (
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/queue"
 )
 
 var blueprintFormats = map[string]bool{"nbt": true, "schem": true, "schematic": true, "litematic": true, "json": true}
@@ -80,12 +82,26 @@ func (s *Server) createPendingBlueprint(ctx context.Context, ownerID int64, orig
 func (s *Server) enqueueBlueprintJob(ctx context.Context, blueprintID, createdBy int64, operation, targetFormat string) (string, error) {
 	var jobID int64
 	var jobPublicID string
-	err := s.db.QueryRow(ctx, `insert into blueprint_jobs(blueprint_id,operation,target_format,created_by) values($1,$2,$3,$4) returning id,public_id`, blueprintID, operation, targetFormat, createdBy).Scan(&jobID, &jobPublicID)
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return "", err
 	}
-	if s.queue != nil {
-		_ = s.queue.PublishTask(ctx, "blueprint_convert", blueprintJobMessage{JobID: jobID})
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx, `insert into blueprint_jobs(blueprint_id,operation,target_format,created_by) values($1,$2,$3,$4) returning id,public_id`, blueprintID, operation, targetFormat, createdBy).Scan(&jobID, &jobPublicID)
+	if err != nil {
+		return "", err
+	}
+	message := blueprintJobMessage{JobID: jobID}
+	if s.cfg.NATS.OutboxEnabled {
+		if _, err = queue.EnqueueTx(ctx, tx, "blueprint_convert", "blueprint.conversion.requested", "blueprint_job", jobPublicID, "", message); err != nil {
+			return "", err
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	if !s.cfg.NATS.OutboxEnabled && s.queue != nil {
+		_ = s.queue.PublishTask(ctx, "blueprint_convert", message)
 	}
 	return jobPublicID, nil
 }
@@ -228,7 +244,21 @@ func int64Value(value any) int64 {
 func (s *Server) blueprints(w http.ResponseWriter, r *http.Request) {
 	limit := boundedLimit(r.URL.Query().Get("limit"), 24, 100)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
-	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	query, validQuery := parseCatalogQuery(r.URL.Query().Get("q"))
+	if !validQuery {
+		writeError(w, http.StatusBadRequest, "invalid blueprint catalog query")
+		return
+	}
+	rawSort := strings.TrimSpace(r.URL.Query().Get("sort"))
+	if rawSort == "" {
+		rawSort = string(catalogSortUpdated)
+	}
+	sort, validSort := parseCatalogSort(rawSort)
+	direction, validDirection := parseCatalogSortDirection(r.URL.Query().Get("order"), rawSort)
+	if !validSort || !validDirection {
+		writeError(w, http.StatusBadRequest, "invalid blueprint catalog sort")
+		return
+	}
 	claims := currentClaims(r)
 	args := []any{claims.Subject, claimsAllow(claims, "admin.*")}
 	where := []string{"b.status <> 'deleted'", "(b.review_status in ('not_required','approved') or b.owner_id=$1 or $2)"}
@@ -245,11 +275,16 @@ func (s *Server) blueprints(w http.ResponseWriter, r *http.Request) {
 				)
 			))`, queryArg))
 	}
+	orderSQL := catalogOrderSQL(sort, direction, false, 0,
+		"b.created_at", "b.updated_at", "b.id", "b.title")
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(r.Context(), `select b.id,b.public_id,b.title,b.description_markdown,b.source_format,b.status,b.size_x,b.size_y,b.size_z,
 		b.block_count,b.palette_count,b.created_at,b.updated_at,u.id,u.username,u.avatar_url
-		from blueprints b join users u on u.id=b.owner_id where `+strings.Join(where, " and ")+`
-		order by b.updated_at desc limit $`+strconv.Itoa(len(args)-1)+` offset $`+strconv.Itoa(len(args)), args...)
+		from blueprints b join users u on u.id=b.owner_id
+		left join public_routes popularity_route on popularity_route.entity_type='blueprint' and popularity_route.internal_id=b.id
+		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
+		where `+strings.Join(where, " and ")+`
+		order by `+orderSQL+` limit $`+strconv.Itoa(len(args)-1)+` offset $`+strconv.Itoa(len(args)), args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取蓝图库失败")
 		return

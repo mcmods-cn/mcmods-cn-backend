@@ -94,13 +94,13 @@ func TestPersistCatalogResourcesReusesCanonicalIdentityIntegration(t *testing.T)
 			EntityID: stagedIdentity, PublicID: stagedPublicID, KindCode: kindCode, CanonicalID: canonicalID,
 			RawID: "legacy:item", Namespace: "fixture", ResourcePath: fmt.Sprintf("item_%06d", suffix),
 			RevisionID: revisionID, SnapshotID: snapshotID, Registry: "items",
-			Names: `{"en-US":"Old name","shared":"old"}`, Data: `{"first":1,"shared":"old"}`, IconPath: "old.png",
+			Names: `{"en-US":"Old name","shared":"old"}`, Data: `{"max_stack_size":16,"enchantment_value":5}`, IconPath: "old.png",
 		},
 		{
 			EntityID: stagedIdentity, PublicID: stagedPublicID, KindCode: kindCode, CanonicalID: canonicalID,
 			RawID: "legacy:item", Namespace: "fixture", ResourcePath: fmt.Sprintf("item_%06d", suffix),
 			RevisionID: revisionID, SnapshotID: snapshotID, Registry: "items",
-			Names: `{"zh-CN":"新名称","shared":"new"}`, Data: `{"second":2,"shared":"new"}`, IconPath: "new.png",
+			Names: `{"zh-CN":"新名称","shared":"new"}`, Data: `{"max_stack_size":64,"enchantment_value":7}`, IconPath: "new.png",
 		},
 	}
 	if err = persistCatalogResources(ctx, tx, rows); err != nil {
@@ -108,11 +108,11 @@ func TestPersistCatalogResourcesReusesCanonicalIdentityIntegration(t *testing.T)
 	}
 
 	var snapshotResourceID, aliasResourceID int64
-	var englishName, chineseName, sharedName, sharedData, iconPath string
+	var englishName, chineseName, sharedName, maxStackSize, enchantability, iconPath string
 	if err = tx.QueryRow(ctx, `select resource_id,names->>'en-US',names->>'zh-CN',names->>'shared',
-		data->>'shared',icon_path from resource_import_snapshots
+		data->>'maxStackSize',data->>'enchantability',icon_path from resource_import_snapshots
 		where revision_id=$1 and resource_id=$2`, revisionID, existingResourceID).
-		Scan(&snapshotResourceID, &englishName, &chineseName, &sharedName, &sharedData, &iconPath); err != nil {
+		Scan(&snapshotResourceID, &englishName, &chineseName, &sharedName, &maxStackSize, &enchantability, &iconPath); err != nil {
 		t.Fatal(err)
 	}
 	if err = tx.QueryRow(ctx, `select resource_id from game_resource_aliases
@@ -127,8 +127,8 @@ func TestPersistCatalogResourcesReusesCanonicalIdentityIntegration(t *testing.T)
 		t.Fatalf("canonical identity was not reused: snapshot=%d alias=%d existing=%d staged=%d",
 			snapshotResourceID, aliasResourceID, existingResourceID, stagedIdentityCount)
 	}
-	if englishName != "Old name" || chineseName != "新名称" || sharedName != "new" || sharedData != "new" || iconPath != "new.png" {
-		t.Fatalf("snapshot overlays were not merged correctly: en=%q zh=%q name=%q data=%q icon=%q",
-			englishName, chineseName, sharedName, sharedData, iconPath)
+	if englishName != "Old name" || chineseName != "新名称" || sharedName != "new" || maxStackSize != "64" || enchantability != "7" || iconPath != "new.png" {
+		t.Fatalf("snapshot overlays were not merged correctly: en=%q zh=%q name=%q maxStack=%q enchantability=%q icon=%q",
+			englishName, chineseName, sharedName, maxStackSize, enchantability, iconPath)
 	}
 }

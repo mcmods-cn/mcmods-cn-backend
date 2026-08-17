@@ -86,7 +86,20 @@ func (s *Server) creators(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("query"))
 	limit := boundedInt(r.URL.Query().Get("limit"), 40, 1, 100)
 	admin := claimsAllow(claims, "admin.*") || claimsAllow(claims, "content.review")
-	indexed := s.searchCreatorPage(r.Context(), query, kind, claims, admin, limit)
+	rawSort := strings.TrimSpace(r.URL.Query().Get("sort"))
+	if rawSort == "" {
+		rawSort = string(catalogSortName)
+	}
+	sort, validSort := parseCatalogSort(rawSort)
+	direction, validDirection := parseCatalogSortDirection(r.URL.Query().Get("order"), rawSort)
+	if !validSort || !validDirection {
+		writeError(w, http.StatusBadRequest, "invalid creator catalog sort")
+		return
+	}
+	indexed := indexedSearchPage{}
+	if catalogSortUsesSearchIndex(sort) {
+		indexed = s.searchCreatorPage(r.Context(), query, kind, claims, admin, limit)
+	}
 	indexedCounts := s.searchCreatorCounts(r.Context(), query, claims, admin)
 	var authorCount, teamCount int
 	if indexedCounts.Used {
@@ -101,18 +114,22 @@ func (s *Server) creators(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to count creators")
 		return
 	}
+	orderSQL := catalogOrderSQL(sort, direction, indexed.Used, 6,
+		"creator.created_at", "creator.updated_at", "creator.id", "creator.name")
 	rows, err := s.db.Query(r.Context(), `
 		select creator.public_id,creator.kind,creator.name,creator.avatar_url,creator.review_status,
 		       creator.claimed_by is not null,count(distinct mod.project_code)
 		from creators creator
 		left join content_creator_bindings binding on binding.creator_id=creator.id and binding.subject_type='mod'
 		left join mods mod on mod.id=binding.subject_id and mod.review_status='approved'
+		left join public_routes popularity_route on popularity_route.entity_type=creator.kind and popularity_route.internal_id=creator.id
+		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
 		where ($1='' or creator.kind=$1)
 		  and (($5 and creator.id=any($6::bigint[])) or (not $5 and ($2='' or creator.name ilike '%' || $2 || '%')))
 		  and (creator.review_status='approved' or creator.created_by=$3 or creator.claimed_by=$3 or $4)
-		group by creator.id
-		order by case when $5 then array_position($6::bigint[],creator.id) end,
-			creator.review_status='approved' desc,lower(creator.name),creator.id
+		group by creator.id,popularity.heat_score,popularity.view_count,popularity.download_count,
+			popularity.favorite_count,popularity.bayesian_rating,popularity.rating_count,popularity.comment_count
+		order by `+orderSQL+`
 		limit $7`, kind, query, claims.Subject, admin, indexed.Used, indexed.IDs, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load creators")
@@ -678,7 +695,7 @@ func ensureNamedCreatorSnapshotTx(ctx context.Context, tx pgx.Tx, snapshot creat
 		where kind=$1 and (
 			normalized_name=$2 or ($3<>'' and exists(
 				select 1 from creator_links link where link.creator_id=creators.id and link.link_type=$3 and link.url=$4
-			))
+			)))
 		order by ($3<>'' and exists(
 			select 1 from creator_links link where link.creator_id=creators.id and link.link_type=$3 and link.url=$4
 		)) desc,review_status='approved' desc,id limit 1`,

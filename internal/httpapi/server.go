@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -31,21 +33,29 @@ type Server struct {
 	ygg            *yggdrasilService
 	yggMu          sync.RWMutex
 	trustedProxies []*net.IPNet
+	realtime       *realtimeHub
+	liveRequests   atomic.Uint64
+	readyRequests  atomic.Uint64
+	databasePings  atomic.Uint64
 }
 
 const corsAllowedHeaders = "Authorization, Content-Type, Idempotency-Key, X-Request-ID, X-Client-ID, X-Anti-Abuse-Form, X-Anti-Abuse-Trap, X-Anti-Abuse-Challenge, X-MCMods-Bot-Token"
 
-func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, activityMonitor *activity.Monitor, searchClient *searchindex.Client) http.Handler {
+func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, sharedCache *querycache.Cache, activityMonitor *activity.Monitor, searchClient *searchindex.Client) http.Handler {
+	if sharedCache == nil {
+		sharedCache = querycache.New(cfg.Redis)
+	}
 	server := &Server{
 		cfg:            cfg,
 		db:             db,
 		mailer:         mailer.New(cfg.SMTP),
 		queue:          queueClient,
-		cache:          querycache.New(cfg.Redis),
+		cache:          sharedCache,
 		activity:       activityMonitor,
 		search:         searchClient,
 		mux:            http.NewServeMux(),
 		trustedProxies: parseTrustedProxyNetworks(cfg.TrustedProxyCIDRs),
+		realtime:       newRealtimeHub(),
 	}
 	server.antiAbuse = antiabuse.New(cfg.AntiAbuse, db, server.cache)
 	yggdrasilConfig, err := server.loadYggdrasilConfig(context.Background())
@@ -56,11 +66,28 @@ func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, a
 	}
 	server.ygg = newYggdrasilService(server.cfg)
 	server.routes()
+	server.subscribeRealtimeBroadcast()
 	return server.securityHeaders(server.cors(server.cookieRequestOrigin(server.yggdrasilALI(server.compression(server.logAccess(server.botTraffic(server.mux)))))))
 }
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("GET /live", s.live)
+	s.mux.HandleFunc("GET /ready", s.ready)
 	s.mux.HandleFunc("GET /health", s.health)
+	s.mux.HandleFunc("GET /api/v1/reports/reasons", reportReasons)
+	s.mux.HandleFunc("POST /api/v1/reports", s.requirePermission("report.create", s.createUnifiedReport))
+	s.mux.HandleFunc("POST /api/v1/reports/evidence/uploads", s.requirePermission("report.create", s.createReportEvidenceUpload))
+	s.mux.HandleFunc("POST /api/v1/reports/evidence/uploads/complete", s.requirePermission("report.create", s.completeReportEvidenceUpload))
+	s.mux.HandleFunc("POST /api/v1/reports/evidence/{id}/access", s.requireAuth(s.reportEvidenceAccess))
+	s.mux.HandleFunc("GET /api/v1/reports/me", s.requirePermission("report.view_own", s.ownReports))
+	s.mux.HandleFunc("GET /api/v1/site-affairs/blackroom", s.publicBlackroom)
+	s.mux.HandleFunc("GET /api/v1/site-affairs/blackroom/{id}", s.blackroomDetail)
+	s.mux.HandleFunc("POST /api/v1/log-shares/paste", s.optionalAuth(s.createPasteLogShare))
+	s.mux.HandleFunc("POST /api/v1/log-shares/files", s.requireAuth(s.createFileLogShares))
+	s.mux.HandleFunc("GET /api/v1/log-shares/me", s.requireAuth(s.myLogShares))
+	s.mux.HandleFunc("DELETE /api/v1/log-shares/{code}", s.requireAuth(s.deleteLogShare))
+	s.mux.HandleFunc("GET /api/v1/log-shares/s/{code}", s.optionalAuth(s.publicLogShare))
+	s.mux.HandleFunc("GET /api/v1/log-shares/s/{code}/download", s.optionalAuth(s.downloadLogShare))
 	s.yggdrasilRoutes()
 	s.mux.HandleFunc("POST /api/v1/auth/register", s.register)
 	s.mux.HandleFunc("POST /api/v1/auth/login", s.login)
@@ -72,6 +99,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/permissions/compare/options", s.requireAuth(s.permissionComparisonOptions))
 	s.mux.HandleFunc("POST /api/v1/permissions/compare", s.requireAuth(s.comparePermissions))
 	s.mux.HandleFunc("GET /api/v1/auth/me", s.requireAuth(s.me))
+	s.mux.HandleFunc("GET /api/v1/realtime/events", s.requireAuth(s.realtimeEvents))
 	s.mux.HandleFunc("GET /api/v1/anti-abuse/form-token", s.requireAuth(s.antiAbuseFormToken))
 	s.mux.HandleFunc("GET /api/v1/review-locks/{entityType}/{publicId}", s.requireAuth(s.reviewLock))
 	s.mux.HandleFunc("POST /api/v1/review-locks/{entityType}/{publicId}/subscribe", s.requireAuth(s.subscribeReviewCompletion))
@@ -79,6 +107,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/location", s.visitorLocation)
 	s.mux.HandleFunc("GET /api/v1/markdown/config", s.markdownConfig)
 	s.mux.HandleFunc("GET /api/v1/site/config", s.publicSiteGeneralConfig)
+	s.mux.HandleFunc("GET /api/v1/site-affairs/about", s.publicAboutPage)
+	s.mux.HandleFunc("GET /api/v1/site-affairs/changelogs", s.publicSiteChangelogs)
+	s.mux.HandleFunc("GET /api/v1/site-affairs/changelogs/{id}", s.publicSiteChangelogDetail)
 	s.mux.HandleFunc("POST /api/v1/site/presence", s.optionalAuth(s.touchSitePresence))
 	s.mux.HandleFunc("GET /api/v1/ratings/{targetType}/{publicId}", s.optionalAuth(s.ratingSummary))
 	s.mux.HandleFunc("PUT /api/v1/ratings/{targetType}/{publicId}", s.requirePermission("rating.create", s.ratingItem))
@@ -100,9 +131,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/modpacks", s.optionalAuth(s.modpacks))
 	s.mux.HandleFunc("GET /api/v1/content-projects/{projectType}", s.optionalAuth(s.simpleProjects))
 	s.mux.HandleFunc("POST /api/v1/content-projects/{projectType}", s.requireAuth(s.simpleProjects))
-	s.mux.HandleFunc("GET /api/v1/catalog/resources", s.optionalAuth(s.catalogResources))
+	s.mux.HandleFunc("GET /api/v1/catalog/resource-presentation", s.catalogResourcePresentation)
+	s.mux.HandleFunc("GET /api/v1/catalog/resources", s.requirePermission("global_resource.list", s.catalogResources))
 	s.mux.HandleFunc("POST /api/v1/catalog/resources", s.requirePermission("content.write", s.createCatalogResource))
-	s.mux.HandleFunc("GET /api/v1/catalog/resources/{publicId}", s.optionalAuth(s.catalogResourceDetail))
+	s.mux.HandleFunc("GET /api/v1/catalog/resources/{publicId}", s.requirePermission("global_resource.view", s.catalogResourceDetail))
+	s.mux.HandleFunc("GET /api/v1/admin/global-resources", s.requirePermission("global_resource.list", s.catalogResources))
+	s.mux.HandleFunc("GET /api/v1/admin/global-resources/{publicId}", s.requirePermission("global_resource.view", s.catalogResourceDetail))
+	s.mux.HandleFunc("GET /api/v1/admin/global-resources/{publicId}/bindings", s.requirePermission("global_resource.binding.view", s.adminGlobalResourceBindings))
 	s.mux.HandleFunc("GET /api/v1/catalog/resources/{publicId}/{assetKind}", s.optionalAuth(s.catalogResourceAsset))
 	s.mux.HandleFunc("GET /api/v1/content/{publicId}", s.optionalAuth(s.catalogEntityContent))
 	s.mux.HandleFunc("PUT /api/v1/content/{publicId}", s.requirePermission("content.write", s.updateCatalogEntityContent))
@@ -226,6 +261,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/projects/{projectType}/{projectId}/files/{source}/{fileId}/download", s.optionalAuth(s.downloadProjectFile))
 	s.mux.HandleFunc("POST /api/v1/projects/{projectType}/{projectId}/files/uploads/presign", s.requireAuth(s.createProjectFileUpload))
 	s.mux.HandleFunc("POST /api/v1/projects/{projectType}/{projectId}/files/uploads/complete", s.requireAuth(s.completeProjectFileUpload))
+	s.mux.HandleFunc("GET /api/v1/projects/{projectType}/{projectId}/automation", s.requireAuth(s.projectAutomation))
+	s.mux.HandleFunc("PUT /api/v1/projects/{projectType}/{projectId}/automation", s.requireAuth(s.projectAutomation))
+	s.mux.HandleFunc("POST /api/v1/projects/{projectType}/{projectId}/automation/sources", s.requireAuth(s.bindProjectAutomationSource))
+	s.mux.HandleFunc("POST /api/v1/projects/{projectType}/{projectId}/automation/runs", s.requireAuth(s.runProjectAutomation))
+	s.mux.HandleFunc("GET /api/v1/projects/{projectType}/{projectId}/automation/runs", s.requireAuth(s.projectAutomationRuns))
 	s.mux.HandleFunc("POST /api/v1/mods", s.requirePermission("project.create", s.createMod))
 	s.mux.HandleFunc("POST /api/v1/modpacks", s.requirePermission("modpack.create", s.createModpack))
 	s.mux.HandleFunc("POST /api/v1/mod-imports", s.requirePermission("project.create", s.createModMetadataImport))
@@ -237,8 +277,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/mods/{siteId}/revisions", s.optionalAuth(s.modRevisionHistory))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/revisions", s.requireAuth(s.submitModRevision))
 	s.mux.HandleFunc("GET /api/v1/mods/{siteId}/revisions/compare", s.optionalAuth(s.compareModRevisions))
-	s.mux.HandleFunc("PATCH /api/v1/mods/{siteId}/revisions/{revisionId}", s.requirePermission("project.review", s.reviewModRevision))
-	s.mux.HandleFunc("PATCH /api/v1/content-revisions/{revisionId}", s.requirePermission("content.review", s.reviewContentRevision))
+	s.mux.HandleFunc("PATCH /api/v1/mods/{siteId}/revisions/{revisionId}", s.requireAuth(s.reviewModRevision))
+	s.mux.HandleFunc("PATCH /api/v1/content-revisions/{revisionId}", s.requireAuth(s.reviewContentRevision))
+	s.mux.HandleFunc("GET /api/v1/reviews/content", s.requireAuth(s.adminModContentReviews))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/export-imports/uploads/presign", s.requireAuth(s.createModExportUpload))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/export-imports/uploads/resume", s.requireAuth(s.resumeModExportUpload))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/export-imports/uploads/complete", s.requireAuth(s.completeModExportUpload))
@@ -267,6 +308,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/mods/{siteId}/applications", s.requireAuth(s.modApplications))
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/applications", s.requireAuth(s.modApplications))
 	s.mux.HandleFunc("GET /api/v1/comment-targets/{targetType}/{targetKey}/comments", s.optionalAuth(s.commentsForTarget))
+	s.mux.HandleFunc("GET /api/v1/comment-targets/{targetType}/{targetKey}/comments/floors/{floor}", s.optionalAuth(s.commentFloor))
 	s.mux.HandleFunc("POST /api/v1/comment-targets/{targetType}/{targetKey}/comments", s.requireAuth(s.commentsForTarget))
 	s.mux.HandleFunc("GET /api/v1/comments/{commentId}/replies", s.optionalAuth(s.commentReplies))
 	s.mux.HandleFunc("GET /api/v1/comments/{commentId}/thread", s.optionalAuth(s.commentThread))
@@ -332,12 +374,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/users/{id}/statistics", s.optionalAuth(s.publicUserStatistics))
 	s.mux.HandleFunc("GET /api/v1/users/{id}/followers", s.optionalAuth(s.userFollowers))
 	s.mux.HandleFunc("GET /api/v1/users/{id}/following", s.optionalAuth(s.userFollowing))
+	s.mux.HandleFunc("GET /api/v1/users/me/blocks", s.requireAuth(s.userBlockList))
 	s.mux.HandleFunc("GET /api/v1/users/{id}/showcase", s.optionalAuth(s.userShowcase))
 	s.mux.HandleFunc("GET /api/v1/users/{id}/contributions", s.optionalAuth(s.userContributions))
 	s.mux.HandleFunc("GET /api/v1/users/{id}/favorite-collections", s.optionalAuth(s.publicFavoriteCollections))
 	s.mux.HandleFunc("GET /api/v1/users/{id}/favorite-collections/{collectionId}/items", s.optionalAuth(s.publicFavoriteCollectionItems))
 	s.mux.HandleFunc("POST /api/v1/users/{id}/follow", s.requirePermission("user.follow.create", s.followUser))
 	s.mux.HandleFunc("DELETE /api/v1/users/{id}/follow", s.requirePermission("user.follow.create", s.unfollowUser))
+	s.mux.HandleFunc("PUT /api/v1/users/{id}/block", s.requireAuth(s.userBlock))
+	s.mux.HandleFunc("DELETE /api/v1/users/{id}/block", s.requireAuth(s.userBlock))
 	s.mux.HandleFunc("GET /api/v1/messages/conversations", s.requireAuth(s.conversations))
 	s.mux.HandleFunc("POST /api/v1/messages/conversations", s.requirePermission("user.message.send", s.startConversation))
 	s.mux.HandleFunc("GET /api/v1/messages/conversations/{id}", s.requireAuth(s.conversationMessages))
@@ -345,6 +390,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/messages/conversations/{id}/presence", s.requireAuth(s.updateConversationPresence))
 	s.mux.HandleFunc("GET /api/v1/notifications", s.requireAuth(s.notifications))
 	s.mux.HandleFunc("GET /api/v1/notifications/unread", s.requireAuth(s.unreadSummary))
+	s.mux.HandleFunc("GET /api/v1/me/unread-summary", s.requireAuth(s.unreadSummary))
 	s.mux.HandleFunc("POST /api/v1/notifications/read-all", s.requireAuth(s.markAllNotificationsRead))
 	s.mux.HandleFunc("POST /api/v1/notifications/{id}/read", s.requireAuth(s.markNotificationRead))
 	s.mux.HandleFunc("GET /api/v1/notifications/ai-balance", s.requireAuth(s.aiDailyBalance))
@@ -405,14 +451,37 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/admin/mod-applications", s.requirePermission("project.review", s.adminModApplications))
 	s.mux.HandleFunc("PATCH /api/v1/admin/mod-applications/{id}", s.requirePermission("project.review", s.reviewModApplication))
 	s.mux.HandleFunc("POST /api/v1/admin/mod-applications/{id}/attachments/{fileId}/presign", s.requirePermission("project.review", s.presignModApplicationAttachment))
-	s.mux.HandleFunc("GET /api/v1/admin/comment-reports", s.requirePermission("comment.report.review", s.adminCommentReports))
-	s.mux.HandleFunc("PATCH /api/v1/admin/comment-reports/{id}", s.requirePermission("comment.report.review", s.reviewCommentReport))
+	s.mux.HandleFunc("GET /api/v1/admin/reports", s.requirePermission("report.review", s.adminReports))
+	s.mux.HandleFunc("GET /api/v1/admin/reports/{id}", s.requirePermission("report.review", s.adminReportDetail))
+	s.mux.HandleFunc("POST /api/v1/admin/reports/{id}/claim", s.requirePermission("report.review", s.claimReport))
+	s.mux.HandleFunc("POST /api/v1/admin/reports/{id}/resolve", s.requirePermission("report.review", s.resolveUnifiedReport))
+	s.mux.HandleFunc("POST /api/v1/admin/reports/{id}/reopen", s.requirePermission("report.action.reopen", s.reopenUnifiedReport))
+	s.mux.HandleFunc("GET /api/v1/admin/bans", s.requirePermission("ban.view_internal", s.adminBans))
+	s.mux.HandleFunc("POST /api/v1/admin/bans", s.requirePermission("ban.create", s.adminBans))
+	s.mux.HandleFunc("GET /api/v1/admin/ban-reasons", s.requirePermission("ban.create", s.adminBanReasons))
+	s.mux.HandleFunc("POST /api/v1/admin/bans/{id}/revoke", s.requirePermission("ban.revoke", s.revokeBan))
+	s.mux.HandleFunc("GET /api/v1/admin/seed-crawler", s.requirePermission("seed_crawler.view", s.adminSeedCrawler))
+	s.mux.HandleFunc("PUT /api/v1/admin/seed-crawler", s.requirePermission("seed_crawler.configure", s.adminSeedCrawler))
+	s.mux.HandleFunc("GET /api/v1/admin/seed-crawler/runs", s.requirePermission("seed_crawler.view", s.adminSeedCrawlerRuns))
+	s.mux.HandleFunc("POST /api/v1/admin/seed-crawler/runs", s.requirePermission("seed_crawler.run", s.adminSeedCrawlerRuns))
+	s.mux.HandleFunc("GET /api/v1/admin/seed-crawler/candidates", s.requirePermission("seed_crawler.view", s.adminSeedCrawlerCandidates))
+	s.mux.HandleFunc("GET /api/v1/admin/project-auto-updates", s.requirePermission("project.auto_update.view_logs", s.adminProjectAutomationOverview))
+	s.mux.HandleFunc("GET /api/v1/admin/site-affairs/about/{locale}", s.requirePermission("site_affairs.about.manage", s.adminAboutPage))
+	s.mux.HandleFunc("PUT /api/v1/admin/site-affairs/about/{locale}", s.requirePermission("site_affairs.about.manage", s.adminAboutPage))
+	s.mux.HandleFunc("GET /api/v1/admin/site-affairs/changelogs", s.requirePermission("site_affairs.changelog.manage", s.adminSiteChangelogs))
+	s.mux.HandleFunc("POST /api/v1/admin/site-affairs/changelogs", s.requirePermission("site_affairs.changelog.manage", s.adminSiteChangelogs))
+	s.mux.HandleFunc("GET /api/v1/admin/site-affairs/changelogs/{id}", s.requirePermission("site_affairs.changelog.manage", s.adminSiteChangelogDetail))
+	s.mux.HandleFunc("PUT /api/v1/admin/site-affairs/changelogs/{id}", s.requirePermission("site_affairs.changelog.manage", s.adminSiteChangelogDetail))
 	s.mux.HandleFunc("GET /api/v1/admin/server-reviews", s.requirePermission("server.review", s.adminMinecraftServerReviews))
 	s.mux.HandleFunc("PATCH /api/v1/admin/server-reviews/{serverId}", s.requirePermission("server.review", s.reviewMinecraftServer))
 	s.mux.HandleFunc("POST /api/v1/admin/server-reviews/{serverId}/attachments/{fileId}/presign", s.requirePermission("server.review", s.presignMinecraftServerProof))
 	s.mux.HandleFunc("GET /api/v1/admin/server-settings", s.requirePermission("admin.config.read", s.adminServerSettings))
 	s.mux.HandleFunc("PUT /api/v1/admin/server-settings", s.requirePermission("admin.config.write", s.adminServerSettings))
 	s.mux.HandleFunc("GET /api/v1/admin/anti-abuse/overview", s.requirePermission("security.anti-abuse.read", s.adminAntiAbuseOverview))
+	s.mux.HandleFunc("GET /api/v1/admin/infrastructure/metrics", s.requirePermission("admin.config.read", s.infrastructureMetrics))
+	s.mux.HandleFunc("GET /api/v1/admin/infrastructure/dead-letters", s.requirePermission("admin.config.read", s.adminDeadLetters))
+	s.mux.HandleFunc("POST /api/v1/admin/infrastructure/dead-letters/{id}/replay", s.requirePermission("admin.config.write", s.adminReplayDeadLetter))
+	s.mux.HandleFunc("POST /api/v1/admin/infrastructure/unread/reconcile", s.requirePermission("admin.config.write", s.adminReconcileUnread))
 	s.mux.HandleFunc("GET /api/v1/admin/anti-abuse/events", s.requirePermission("security.anti-abuse.read", s.adminAntiAbuseEvents))
 	s.mux.HandleFunc("PATCH /api/v1/admin/anti-abuse/events/{id}", s.requirePermission("security.anti-abuse.write", s.adminReviewAntiAbuseEvent))
 	s.mux.HandleFunc("GET /api/v1/admin/anti-abuse/config", s.requirePermission("security.anti-abuse.read", s.adminAntiAbuseConfig))
@@ -472,24 +541,70 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/v1/admin/notifications/{id}", s.requirePermission("notification.system.publish", s.deleteSystemNotification))
 }
 
-func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	if err := s.db.Ping(r.Context()); err != nil {
-		writeError(w, http.StatusServiceUnavailable, "database is unavailable")
-		return
+func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
+	s.liveRequests.Add(1)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "alive", "app": "mcmods-cn-backend"})
+}
+
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	s.readyRequests.Add(1)
+	statusCode := http.StatusOK
+	status := "ready"
+	dependencies := map[string]string{
+		"postgresql": "ready",
+		"redis":      "disabled",
+		"nats":       "disabled",
+		"search":     "disabled",
+	}
+	dbCtx, dbCancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer dbCancel()
+	s.databasePings.Add(1)
+	if s.db == nil || s.db.Ping(dbCtx) != nil {
+		dependencies["postgresql"] = "unavailable"
+		status, statusCode = "not_ready", http.StatusServiceUnavailable
+	}
+	if s.cfg.Redis.Enabled {
+		dependencies["redis"] = "degraded"
+		redisCtx, redisCancel := context.WithTimeout(r.Context(), 300*time.Millisecond)
+		err := s.cache.Ping(redisCtx)
+		redisCancel()
+		if err == nil {
+			dependencies["redis"] = "ready"
+		}
+	}
+	if s.queue != nil {
+		queueStatus := s.queue.Status()
+		if queueStatus.Enabled {
+			dependencies["nats"] = "degraded"
+			if queueStatus.Connected {
+				dependencies["nats"] = "ready"
+			}
+		}
 	}
 	searchStatus := "disabled"
 	if s.search != nil && s.search.Enabled() {
 		searchStatus = "initializing"
 		if s.search.Ready() {
 			searchStatus = "ready"
+		} else {
+			searchStatus = "degraded"
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "ok",
-		"app":    "mcmods-cn-backend",
-		"env":    s.cfg.Env,
-		"search": searchStatus,
+	dependencies["search"] = searchStatus
+	writeJSON(w, statusCode, map[string]any{
+		"status":       status,
+		"app":          "mcmods-cn-backend",
+		"env":          s.cfg.Env,
+		"dependencies": dependencies,
 	})
+}
+
+// health is a compatibility alias for infrastructure that has not migrated to
+// /ready. Browsers must not poll this endpoint during normal operation.
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Deprecation", "true")
+	w.Header().Set("Link", "</ready>; rel=successor-version")
+	s.ready(w, r)
 }
 
 func (s *Server) cors(next http.Handler) http.Handler {

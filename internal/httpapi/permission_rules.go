@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,6 +34,40 @@ type resolvedUserRootPermissions struct {
 // authorization. It resolves active direct roles, inherited/template roles,
 // rule priority and direct user allow/deny overrides.
 func (s *Server) resolveUserRootPermissions(ctx context.Context, userID int64) ([]string, []security.PermissionRule, error) {
+	var authVersion int64
+	if err := s.db.QueryRow(ctx, `select auth_version from users where id=$1`, userID).Scan(&authVersion); err != nil {
+		return nil, nil, err
+	}
+	return s.resolveUserRootPermissionsVersion(ctx, userID, authVersion)
+}
+
+func (s *Server) resolveUserRootPermissionsVersion(ctx context.Context, userID, authVersion int64) ([]string, []security.PermissionRule, error) {
+	if !s.cache.Config().RBACCacheEnabled {
+		return s.resolveUserRootPermissionsUncached(ctx, userID)
+	}
+	version, err := s.loadRBACVersion(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	raw, err := s.cache.GetOrLoadTTL(ctx, rbacCacheKey(version, userID, authVersion), s.cache.Config().RBACCacheTTL, func(loadCtx context.Context) ([]byte, error) {
+		roles, permissions, loadErr := s.resolveUserRootPermissionsUncached(loadCtx, userID)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		return json.Marshal(resolvedUserRootPermissions{Roles: roles, Permissions: permissions})
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	var resolved resolvedUserRootPermissions
+	if err = json.Unmarshal(raw, &resolved); err != nil {
+		s.cache.Delete(ctx, rbacCacheKey(version, userID, authVersion))
+		return nil, nil, err
+	}
+	return resolved.Roles, resolved.Permissions, nil
+}
+
+func (s *Server) resolveUserRootPermissionsUncached(ctx context.Context, userID int64) ([]string, []security.PermissionRule, error) {
 	resolved, err := s.resolveUsersRootPermissions(ctx, []int64{userID})
 	if err != nil {
 		return nil, nil, err
@@ -60,6 +95,7 @@ func (s *Server) resolveUsersRootPermissions(ctx context.Context, userIDs []int6
 		 from user_role_bindings b
 		 join roles r on r.id = b.role_id
 		 where b.user_id = any($1) and r.status = 'active'
+		   and (b.expires_at is null or b.expires_at > now())
 		 order by b.user_id, r.code`,
 		userIDs,
 	)

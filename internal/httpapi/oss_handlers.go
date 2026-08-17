@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -19,6 +20,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -32,6 +34,11 @@ import (
 )
 
 const maxOSSUploadBytes = 2 << 30
+
+const (
+	ossReportEvidenceScope = "report_evidence"
+	maxReportEvidenceBytes = int64(25 << 20)
+)
 
 const (
 	ossDownloadModePresigned        = "oss_presigned"
@@ -211,7 +218,12 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	modCatalogUniqueID := strings.TrimPrefix(scope, ossModCatalogScopePrefix)
 	isModCatalog := modCatalogUniqueID != scope && modCatalogUniqueID != ""
 	projectDownloadType, projectDownloadID, isProjectDownload := parseOSSProjectDownloadScope(scope)
-	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && ext != ".jar") || (!isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
+	isReportEvidence := scope == ossReportEvidenceScope
+	if isReportEvidence && (req.SizeBytes > maxReportEvidenceBytes || !reportEvidenceExtensionAllowed(ext)) {
+		writeError(w, http.StatusBadRequest, "举报附件类型不支持或超过 25MB")
+		return
+	}
+	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && ext != ".jar") || (!isReportEvidence && !isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -240,6 +252,8 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		}
 	} else if isProjectDownload {
 		source = "project_download"
+	} else if isReportEvidence {
+		source = "report_evidence"
 	}
 	objectPrefix := ossRoot(cfg.Prefix)
 	if requestedPrefix := normalizeObjectPrefix(req.Prefix); requestedPrefix != "" {
@@ -268,6 +282,10 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		objectPrefix = ossRoot(cfg.Prefix)
 	} else if isProjectDownload {
 		category = ossProjectReleaseCategory(projectDownloadType, projectDownloadID)
+		objectCategory = category
+		objectPrefix = ossRoot(cfg.Prefix)
+	} else if isReportEvidence {
+		category = path.Join("moderation", "report-evidence", strconv.FormatInt(currentClaims(r).Subject, 10))
 		objectCategory = category
 		objectPrefix = ossRoot(cfg.Prefix)
 	} else if rawCategory == ossProjectIntroCategory || category == "project_intro" || category == "projectintro" {
@@ -300,7 +318,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	}
 	var existing map[string]any
 	var exists bool
-	if isProjectDownload {
+	if isProjectDownload || isReportEvidence {
 		// Project files keep their own immutable object path even when another
 		// project happens to upload the same JAR.
 		exists = false
@@ -312,7 +330,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 			RequireRaster:  isCatalogImageUpload,
 			RequireTrusted: isCatalogImageUpload,
 		}
-		if scope == "user" || isModExport || isModCatalog {
+		if scope == "user" || isModExport || isModCatalog || isReportEvidence {
 			uploaderID := currentClaims(r).Subject
 			lookup.UploaderID = &uploaderID
 		}
@@ -502,6 +520,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	modCatalogUniqueID := strings.TrimPrefix(scope, ossModCatalogScopePrefix)
 	isModCatalog := modCatalogUniqueID != scope && modCatalogUniqueID != ""
 	projectDownloadType, projectDownloadID, isProjectDownload := parseOSSProjectDownloadScope(scope)
+	isReportEvidence := scope == ossReportEvidenceScope
 	if isModExport {
 		req.Source = "mcmods_exporter"
 	} else if isModCatalog {
@@ -512,6 +531,8 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		}
 	} else if isProjectDownload {
 		req.Source = "project_download"
+	} else if isReportEvidence {
+		req.Source = "report_evidence"
 	}
 	if req.ObjectKey == "" || !isAllowedObjectKey(req.ObjectKey, cfg.Prefix) {
 		writeError(w, http.StatusBadRequest, "OSS ObjectKey 不合法")
@@ -525,7 +546,11 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		req.OriginalName = path.Base(req.ObjectKey)
 	}
 	ext := strings.ToLower(filepath.Ext(req.OriginalName))
-	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && ext != ".jar") || (!isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
+	if isReportEvidence && (req.SizeBytes > maxReportEvidenceBytes || !reportEvidenceExtensionAllowed(ext)) {
+		writeError(w, http.StatusBadRequest, "举报附件类型不支持或超过 25MB")
+		return
+	}
+	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && ext != ".jar") || (!isReportEvidence && !isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -576,6 +601,14 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 			return
 		}
 		req.Category = downloadCategory
+	} else if isReportEvidence {
+		evidenceCategory := path.Join("moderation", "report-evidence", strconv.FormatInt(currentClaims(r).Subject, 10))
+		evidencePrefix := ossObjectPrefix(cfg.Prefix, evidenceCategory)
+		if !isAllowedObjectKey(req.ObjectKey, evidencePrefix) {
+			writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于举报附件目录")
+			return
+		}
+		req.Category = evidenceCategory
 	} else if strings.HasPrefix(req.ObjectKey, path.Join(ossRoot(cfg.Prefix), ossProjectDirectory)+"/") {
 		if rawCategory == ossProjectIntroCategory || req.Category == "project_intro" || req.Category == "projectintro" {
 			req.Category = ossCategoryFromObjectKey(req.ObjectKey, cfg.Prefix)
@@ -593,18 +626,28 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		writeJSON(w, http.StatusOK, map[string]any{"aborted": true})
 		return
 	}
-	if existingFileID, existing, found := s.findCompletedOSSUpload(r.Context(), currentClaims(r).Subject, req); found {
-		response, responseErr := s.completedOSSUploadResponse(r.Context(), cfg, existing)
-		if responseErr != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
+	if isReportEvidence {
+		var evidenceID, scanStatus string
+		if s.db.QueryRow(r.Context(), `select public_id,scan_status from report_evidence where uploader_id=$1 and object_key=$2 and status='temporary'`,
+			currentClaims(r).Subject, req.ObjectKey).Scan(&evidenceID, &scanStatus) == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"id": evidenceID, "evidenceId": evidenceID, "scanStatus": scanStatus, "idempotent": true})
 			return
 		}
-		if err := s.attachCompletedOSSUploadAssociations(r.Context(), response, existingFileID, currentClaims(r).Subject, req.Source); err != nil {
-			writeError(w, http.StatusInternalServerError, "恢复已完成上传的关联数据失败")
+	}
+	if !isReportEvidence {
+		if existingFileID, existing, found := s.findCompletedOSSUpload(r.Context(), currentClaims(r).Subject, req); found {
+			response, responseErr := s.completedOSSUploadResponse(r.Context(), cfg, existing)
+			if responseErr != nil {
+				writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
+				return
+			}
+			if err := s.attachCompletedOSSUploadAssociations(r.Context(), response, existingFileID, currentClaims(r).Subject, req.Source); err != nil {
+				writeError(w, http.StatusInternalServerError, "恢复已完成上传的关联数据失败")
+				return
+			}
+			writeJSON(w, http.StatusOK, response)
 			return
 		}
-		writeJSON(w, http.StatusOK, response)
-		return
 	}
 	if req.MultipartUploadID != "" {
 		if req.MultipartAction != "" && req.MultipartAction != "complete" {
@@ -644,6 +687,13 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	sourceObjectKey := req.ObjectKey
 	sourceOriginalName := req.OriginalName
 	sourceSize := size
+	if isReportEvidence {
+		if inspectErr := validateReportEvidenceObject(r.Context(), client, cfg, req.ObjectKey, req.OriginalName, contentType, size); inspectErr != nil {
+			s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, req.ObjectKey)
+			writeError(w, http.StatusUnprocessableEntity, inspectErr.Error())
+			return
+		}
+	}
 	converted := false
 	imageProcessLog := ""
 	if isModResourceRenderUploadSource(req.Source) {
@@ -765,6 +815,15 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		writeError(w, http.StatusInternalServerError, "保存 OSS 文件记录失败")
 		return
 	}
+	var reportEvidenceID string
+	if isReportEvidence {
+		if err = s.db.QueryRow(r.Context(), `insert into report_evidence(uploader_id,object_key,original_name,content_type,byte_size,sha256,scan_status)
+			values($1,$2,$3,$4,$5,$6,$7) returning public_id`, currentClaims(r).Subject, req.ObjectKey, sourceOriginalName,
+			contentType, sourceSize, req.SHA256, scanStatus).Scan(&reportEvidenceID); err != nil {
+			writeError(w, http.StatusInternalServerError, "登记举报附件失败")
+			return
+		}
+	}
 	logMessage := "direct-to-oss"
 	if converted {
 		logMessage = "direct-to-oss; " + imageProcessLog
@@ -807,6 +866,10 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		"accessUrl":          access.URL,
 		"storageUrl":         ossStoredObjectURL(cfg, req.ObjectKey),
 	}
+	if reportEvidenceID != "" {
+		response["id"] = reportEvidenceID
+		response["evidenceId"] = reportEvidenceID
+	}
 	if blueprint, blueprintErr := s.completeBlueprintUpload(r.Context(), fileID, currentClaims(r).Subject, req.ObjectKey, sourceOriginalName, contentType, size, req.SHA256); blueprintErr != nil {
 		writeError(w, http.StatusInternalServerError, "登记蓝图处理任务失败")
 		return
@@ -830,6 +893,89 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		response["blueprintId"] = coverPublicID
 	}
 	writeJSON(w, http.StatusCreated, response)
+}
+
+func reportEvidenceExtensionAllowed(extension string) bool {
+	return stringSet(".png", ".jpg", ".jpeg", ".webp", ".gif", ".txt", ".log", ".pdf", ".zip")[strings.ToLower(extension)]
+}
+
+func validateReportEvidenceObject(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey, originalName, contentType string, expectedSize int64) error {
+	result, err := client.GetObject(ctx, &aliyunoss.GetObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey)})
+	if err != nil {
+		return errors.New("无法读取举报附件")
+	}
+	defer result.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(result.Body, maxReportEvidenceBytes+1))
+	if err != nil || int64(len(raw)) > maxReportEvidenceBytes || expectedSize > 0 && int64(len(raw)) != expectedSize {
+		return errors.New("举报附件大小不正确")
+	}
+	extension := strings.ToLower(filepath.Ext(filepath.Base(originalName)))
+	detected := http.DetectContentType(raw)
+	switch extension {
+	case ".png":
+		if detected != "image/png" {
+			return errors.New("举报附件内容与扩展名不一致")
+		}
+	case ".jpg", ".jpeg":
+		if detected != "image/jpeg" {
+			return errors.New("举报附件内容与扩展名不一致")
+		}
+	case ".gif":
+		if detected != "image/gif" {
+			return errors.New("举报附件内容与扩展名不一致")
+		}
+	case ".webp":
+		if len(raw) < 12 || string(raw[:4]) != "RIFF" || string(raw[8:12]) != "WEBP" {
+			return errors.New("举报附件不是有效 WebP")
+		}
+	case ".pdf":
+		if len(raw) < 5 || string(raw[:5]) != "%PDF-" {
+			return errors.New("举报附件不是有效 PDF")
+		}
+	case ".txt", ".log":
+		if bytes.IndexByte(raw, 0) >= 0 {
+			return errors.New("举报文本附件包含二进制内容")
+		}
+	case ".zip":
+		if err = validateReportEvidenceZIP(raw); err != nil {
+			return err
+		}
+	default:
+		return errors.New("举报附件类型不支持")
+	}
+	_ = contentType
+	return nil
+}
+
+func validateReportEvidenceZIP(raw []byte) error {
+	archive, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil || len(archive.File) == 0 || len(archive.File) > 100 {
+		return errors.New("ZIP 无效或文件数量过多")
+	}
+	var total uint64
+	seen := map[string]bool{}
+	for _, file := range archive.File {
+		name := filepath.ToSlash(strings.TrimSpace(file.Name))
+		clean := filepath.ToSlash(filepath.Clean(name))
+		unsafeMode := file.Mode() & (os.ModeSymlink | os.ModeDevice | os.ModeCharDevice | os.ModeNamedPipe | os.ModeSocket)
+		if name == "" || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") || filepath.IsAbs(name) || strings.Count(clean, "/") > 16 || unsafeMode != 0 || file.Flags&0x1 != 0 {
+			return errors.New("ZIP 包含不安全路径、特殊文件或加密内容")
+		}
+		key := strings.ToLower(clean)
+		if seen[key] || strings.EqualFold(filepath.Ext(clean), ".zip") {
+			return errors.New("ZIP 包含重复文件名或嵌套压缩包")
+		}
+		seen[key] = true
+		if file.FileInfo().IsDir() {
+			continue
+		}
+		total += file.UncompressedSize64
+		compressed := max(file.CompressedSize64, uint64(1))
+		if file.UncompressedSize64 > uint64(maxReportEvidenceBytes) || total > uint64(100<<20) || file.UncompressedSize64/compressed > 100 {
+			return errors.New("ZIP 解压大小或压缩比超过安全限制")
+		}
+	}
+	return nil
 }
 
 func (s *Server) findCompletedOSSUpload(ctx context.Context, uploaderID int64, req ossCompleteUploadRequest) (int64, map[string]any, bool) {
@@ -1082,6 +1228,16 @@ func (s *Server) updateOSSFileScanStatus(w http.ResponseWriter, r *http.Request)
 	if _, err = tx.Exec(r.Context(), `update oss_files
 		set scan_status=$2,status=$3,updated_at=now() where id=$1`, internalID, request.Status, fileStatus); err != nil {
 		writeError(w, http.StatusInternalServerError, "无法更新扫描状态")
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `update report_evidence set
+		scan_status=$2,
+		status=case when $2='rejected' then 'pending_delete' else status end,
+		cleanup_after=case when $2='rejected' then now() else cleanup_after end,
+		last_error=case when $2='rejected' then $3 else '' end
+		where object_key=(select object_key from oss_files where id=$1) and status<>'deleted'`,
+		internalID, request.Status, request.Note); err != nil {
+		writeError(w, http.StatusInternalServerError, "无法同步举报附件扫描状态")
 		return
 	}
 	metadata, _ := json.Marshal(map[string]any{

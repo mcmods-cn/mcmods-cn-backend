@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"mcmods-cn-backend/internal/antiabuse"
+	"mcmods-cn-backend/internal/security"
 )
 
 type antiAbuseContextKey string
@@ -40,6 +41,11 @@ func (r *antiAbuseResponseRecorder) Write(body []byte) (int, error) {
 }
 
 func (s *Server) serveProtectedMutation(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+	claims := currentClaims(r)
+	if claims.Subject > 0 && claimsAllow(claims, "account.banned") && !bannedMutationAllowed(r) {
+		writeAPIError(w, http.StatusForbidden, "account_banned", "当前账户处于封禁状态，只能执行登录、退出和必要的账户安全操作", 0, nil)
+		return
+	}
 	action := antiAbuseAction(r)
 	if action == "" || s.antiAbuse == nil || !s.antiAbuse.Enabled() {
 		next.ServeHTTP(w, r)
@@ -49,11 +55,11 @@ func (s *Server) serveProtectedMutation(w http.ResponseWriter, r *http.Request, 
 	if body != nil {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 	}
-	claims := currentClaims(r)
 	input := antiabuse.Evaluation{
 		UserID: claims.Subject, SessionID: claims.SessionID, IP: s.requestClientLocation(r).IP,
 		DeviceID: r.Header.Get("X-Client-ID"), UserAgent: r.UserAgent(), RequestID: r.Header.Get("X-Request-ID"),
-		Action: action, ObjectType: antiAbuseObjectType(r), ObjectKey: antiAbuseObjectKey(r), Content: content,
+		Action: action, RateScope: antiAbuseRateScope(r), RateLimitPercent: antiAbuseRateLimitPercent(claims, action),
+		ObjectType: antiAbuseObjectType(r), ObjectKey: antiAbuseObjectKey(r), Content: content,
 		FormToken: r.Header.Get("X-Anti-Abuse-Form"), Honeypot: r.Header.Get("X-Anti-Abuse-Trap"),
 		ChallengeProof: r.Header.Get("X-Anti-Abuse-Challenge"), IdempotencyKey: r.Header.Get("Idempotency-Key"), Administrator: claimsAllow(claims, "admin.*"),
 		CrawlerClass: crawlerClassFromRequest(r), Now: time.Now(),
@@ -87,6 +93,22 @@ func (s *Server) serveProtectedMutation(w http.ResponseWriter, r *http.Request, 
 	if recorder.status >= 200 && recorder.status < 400 {
 		go s.antiAbuse.RecordSuccess(context.Background(), input, decision)
 	}
+}
+
+func bannedMutationAllowed(r *http.Request) bool {
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		return true
+	}
+	for _, allowed := range []string{
+		"/api/v1/auth/login", "/api/v1/auth/logout", "/api/v1/auth/password/forgot",
+		"/api/v1/auth/password/reset", "/api/v1/auth/security", "/api/v1/realtime",
+	} {
+		if strings.HasPrefix(path, allowed) {
+			return true
+		}
+	}
+	return false
 }
 
 func antiAbuseDecisionBlocks(outcome antiabuse.Outcome) bool {
@@ -146,6 +168,40 @@ func antiAbuseAction(r *http.Request) string {
 	default:
 		return "write.generic"
 	}
+}
+
+func antiAbuseRateScope(r *http.Request) string {
+	requestPath := strings.TrimSuffix(r.URL.Path, "/")
+	if strings.HasPrefix(requestPath, "/api/v1/mods/") && strings.Contains(requestPath, "/content-versions") {
+		switch r.Method {
+		case http.MethodPost:
+			return "mod_content_version_create"
+		case http.MethodPut:
+			return "mod_content_version_update"
+		case http.MethodDelete:
+			return "mod_content_version_delete"
+		}
+	}
+	return ""
+}
+
+func antiAbuseRateLimitPercent(claims security.Claims, action string) int {
+	global := claimsNumericPermissionValue(claims, "security.anti-abuse.rate_multiplier")
+	scoped := claimsNumericPermissionValue(claims, "security.anti-abuse.rate_multiplier."+antiAbusePermissionAction(action))
+	value := max(global, scoped)
+	if value <= 0 {
+		return antiabuse.DefaultRateLimitPercent
+	}
+	return antiabuse.NormalizeRateLimitPercent(int(value))
+}
+
+func antiAbusePermissionAction(action string) string {
+	return strings.Map(func(character rune) rune {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' || character == '-' {
+			return character
+		}
+		return '_'
+	}, strings.ToLower(strings.TrimSpace(action)))
 }
 
 func inspectAntiAbuseBody(r *http.Request) ([]byte, string) {

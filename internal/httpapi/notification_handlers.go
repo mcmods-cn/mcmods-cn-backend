@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"mcmods-cn-backend/internal/querycache"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -76,7 +77,7 @@ func (s *Server) publishSystemNotification(w http.ResponseWriter, r *http.Reques
 	if req.SourceLocale == "" {
 		req.SourceLocale = "zh-CN"
 	}
-	if s.queue == nil {
+	if s.queue == nil && !s.cfg.NATS.OutboxEnabled {
 		writeError(w, http.StatusServiceUnavailable, "通知任务队列不可用")
 		return
 	}
@@ -85,7 +86,7 @@ func (s *Server) publishSystemNotification(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to resolve publisher")
 		return
 	}
-	err = s.queue.PublishTask(r.Context(), notificationTaskCode, notificationEvent{
+	err = s.enqueueNotificationTask(r.Context(), notificationEvent{
 		Action: "system", Title: req.Title, Body: req.Body,
 		SourceLocale: req.SourceLocale, SendEmail: req.SendEmail,
 		Data: map[string]any{"publishedBy": publisherPublicID},
@@ -185,7 +186,8 @@ func (s *Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		`insert into notification_receipts (notification_id, user_id, read_at)
 		 select id, $2, now() from notifications where id = $1 and (recipient_id is null or recipient_id = $2)
-		 on conflict (notification_id, user_id) do update set read_at = now()`,
+		 on conflict (notification_id, user_id) do update set read_at = now()
+		 where notification_receipts.read_at is null`,
 		notificationID,
 		claims.Subject,
 	)
@@ -194,9 +196,11 @@ func (s *Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		writeError(w, http.StatusNotFound, "通知不存在")
+		// Marking an already-read item is intentionally idempotent.
+		writeJSON(w, http.StatusOK, map[string]bool{"read": true})
 		return
 	}
+	s.cache.AdjustUnread(r.Context(), claims.Subject, "notifications", -1)
 	writeJSON(w, http.StatusOK, map[string]bool{"read": true})
 }
 
@@ -215,24 +219,30 @@ func (s *Server) markAllNotificationsRead(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "更新通知状态失败")
 		return
 	}
+	s.cache.InvalidateUnread(r.Context(), claims.Subject)
 	writeJSON(w, http.StatusOK, map[string]any{"read": true, "updated": tag.RowsAffected()})
 }
 
 func (s *Server) unreadSummary(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	var notificationsCount, messagesCount int64
-	_ = s.db.QueryRow(
-		r.Context(),
-		`select count(*) from notifications n
-		 left join notification_receipts receipt on receipt.notification_id = n.id and receipt.user_id = $1
-		 where (n.recipient_id is null or n.recipient_id = $1) and receipt.read_at is null`,
-		claims.Subject,
-	).Scan(&notificationsCount)
-	_ = s.db.QueryRow(r.Context(), `select count(*) from direct_messages where recipient_id = $1 and read_at is null`, claims.Subject).Scan(&messagesCount)
+	summary, err := s.cache.LoadUnread(r.Context(), claims.Subject, func(ctx context.Context) (querycache.UnreadSummary, error) {
+		var value querycache.UnreadSummary
+		err := s.db.QueryRow(ctx, `select
+			(select count(*) from notifications n left join notification_receipts receipt
+			 on receipt.notification_id=n.id and receipt.user_id=$1
+			 where (n.recipient_id is null or n.recipient_id=$1) and receipt.read_at is null),
+			(select count(*) from direct_messages where recipient_id=$1 and read_at is null)`, claims.Subject).
+			Scan(&value.Notifications, &value.Messages)
+		return value, err
+	})
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load unread summary")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]int64{
-		"notifications": notificationsCount,
-		"messages":      messagesCount,
-		"total":         notificationsCount + messagesCount,
+		"notifications": summary.Notifications,
+		"messages":      summary.Messages,
+		"total":         summary.Total(),
 	})
 }
 

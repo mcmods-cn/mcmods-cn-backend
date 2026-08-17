@@ -96,23 +96,6 @@ func commentSchemaStatements() []string {
 		)`,
 		`create index idx_comment_watch_replies_unread
 			on comment_watch_replies(watch_id,created_at,comment_id) where read_at is null`,
-		`create table comment_reports (
-			id bigserial primary key,
-			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
-			comment_id bigint not null references comments(id) on delete cascade,
-			reporter_id bigint not null references users(id) on delete cascade,
-			reason text not null,
-			detail text not null default '',
-			status text not null default 'pending',
-			reviewer_id bigint references users(id) on delete set null,
-			resolution_note text not null default '',
-			created_at timestamptz not null default now(),
-			updated_at timestamptz not null default now(),
-			resolved_at timestamptz,
-			unique(comment_id,reporter_id),
-			check(status in ('pending','resolved','dismissed'))
-		)`,
-		`create index idx_comment_reports_queue on comment_reports(status,created_at,id)`,
 		`create table comment_heat_refresh_queue (
 			comment_id bigint primary key references comments(id) on delete cascade,
 			attempts integer not null default 0 check(attempts>=0),

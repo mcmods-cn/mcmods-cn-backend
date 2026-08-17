@@ -175,7 +175,7 @@ func (s *Server) sendTemplatedNotification(ctx context.Context, userID int64, co
 	if data == nil {
 		data = map[string]any{}
 	}
-	if s.queue != nil && s.queue.PublishTask(ctx, notificationTaskCode, notificationEvent{
+	if (s.queue != nil || s.cfg.NATS.OutboxEnabled) && s.enqueueNotificationTask(ctx, notificationEvent{
 		Action: "direct", RecipientID: userID, Kind: "system", Title: title, Body: body, SourceLocale: locale, Data: data,
 	}) == nil {
 		return

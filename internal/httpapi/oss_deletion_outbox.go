@@ -197,6 +197,10 @@ func (s *Server) tombstoneOSSFileTx(ctx context.Context, tx pgx.Tx, fileID int64
 		if _, err = tx.Exec(ctx, `update oss_files set status='deleted',updated_at=now() where id=$1`, fileID); err != nil {
 			return err
 		}
+		if _, err = tx.Exec(ctx, `update log_shares set status='source_deleted',deleted_at=now()
+			where source_file_id=$1 and deleted_at is null`, fileID); err != nil {
+			return err
+		}
 	}
 	return enqueueOSSObjectDeletionTx(ctx, tx, target)
 }

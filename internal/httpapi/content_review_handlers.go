@@ -39,15 +39,16 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 	var changeRequestID int64
 	var revisionID int64
 	var submittedBy int64
-	var aggregateType, aggregateKey, status string
+	var aggregateType, aggregateKey, status, revisionEntityType string
+	var revisionEntityID int64
 	var baseRevisionID *int64
-	var snapshotRaw []byte
+	var snapshotRaw, metadataRaw []byte
 	err = tx.QueryRow(r.Context(), `
 		select revision.id,request.id,coalesce(request.submitted_by,0),request.status,request.base_revision_id,revision.aggregate_type,
-		       revision.aggregate_key,revision.snapshot
+		       revision.aggregate_key,revision.snapshot,coalesce(revision.entity_type,''),coalesce(revision.entity_id,0),request.metadata
 		from change_requests request join content_revisions revision on revision.id=request.proposed_revision_id
 		where revision.public_id=$1 for update of request`, revisionPublicID,
-	).Scan(&revisionID, &changeRequestID, &submittedBy, &status, &baseRevisionID, &aggregateType, &aggregateKey, &snapshotRaw)
+	).Scan(&revisionID, &changeRequestID, &submittedBy, &status, &baseRevisionID, &aggregateType, &aggregateKey, &snapshotRaw, &revisionEntityType, &revisionEntityID, &metadataRaw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "revision not found")
 		return
@@ -58,6 +59,11 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 	}
 	if status != "pending" {
 		writeError(w, http.StatusConflict, "revision has already been reviewed")
+		return
+	}
+	claims := currentClaims(r)
+	if !canReviewContentSubmission(r.Context(), tx, claims, submittedBy, revisionEntityType, revisionEntityID, aggregateType, aggregateKey, snapshotRaw, metadataRaw) {
+		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
 	if aggregateType == projectChangelogAggregate {
@@ -81,7 +87,6 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "changelog not found")
 			return
 		}
-		claims := currentClaims(r)
 		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
 			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err == nil {
 				err = tx.Commit(r.Context())
@@ -716,7 +721,6 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load published content")
 		return
 	}
-	claims := currentClaims(r)
 	if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
 		if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to record revision conflict")

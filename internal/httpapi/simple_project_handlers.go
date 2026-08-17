@@ -141,8 +141,10 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid catalog filter")
 		return
 	}
-	sort, validSort := parseCatalogSort(r.URL.Query().Get("sort"))
-	if !validSort {
+	rawSort := r.URL.Query().Get("sort")
+	sort, validSort := parseCatalogSort(rawSort)
+	direction, validDirection := parseCatalogSortDirection(r.URL.Query().Get("order"), rawSort)
+	if !validSort || !validDirection {
 		writeError(w, http.StatusBadRequest, "invalid catalog sort")
 		return
 	}
@@ -167,7 +169,8 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to count projects")
 		return
 	}
-	orderSQL := catalogOrderSQL(sort, indexed.Used, 8, "project.updated_at", "project.id", "project.primary_name")
+	orderSQL := catalogOrderSQL(sort, direction, indexed.Used, 8,
+		"coalesce(project.published_at,project.created_at)", "project.updated_at", "project.id", "project.primary_name")
 	rows, err := s.db.Query(r.Context(), `select project.id,project.public_id,project.project_type,project.slug,project.default_locale,
 		project.abbreviation,project.minecraft_versions,project.loaders,project.categories,project.features,project.resolution,
 		project.performance,project.map_size,project.official_status,project.source_status,project.license,

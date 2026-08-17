@@ -30,12 +30,9 @@ func TestMapPublicOnlineStatusPreservesPrivacy(t *testing.T) {
 	}
 }
 
-func TestPresenceConfigurationIsCentralizedAndThrottled(t *testing.T) {
+func TestPresenceSnapshotIsNotRequestLevel(t *testing.T) {
 	t.Parallel()
-	if publicPresenceWindow <= presenceWriteThrottle {
-		t.Fatal("presence visibility window must exceed the database write throttle")
-	}
-	if presenceWriteThrottle < time.Minute {
-		t.Fatal("heartbeat persistence must be throttled to avoid request-level writes")
+	if defaultPresenceSnapshotInterval < 5*time.Minute {
+		t.Fatal("PostgreSQL presence snapshots must remain low frequency")
 	}
 }

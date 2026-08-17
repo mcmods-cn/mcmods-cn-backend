@@ -74,6 +74,7 @@ func (s *Server) updateProfileConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存用户资料配置失败")
 		return
 	}
+	s.invalidateSettingsCache(r.Context())
 	writeJSON(w, http.StatusOK, payload)
 }
 
@@ -288,6 +289,7 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "保存用户设置失败")
 		return
 	}
+	s.cache.Delete(r.Context(), publicUserCardCacheKey(claims.Subject))
 	settings, err := s.loadUserProfileSettings(r.Context(), claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取用户设置失败")
@@ -298,11 +300,9 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) loadUserProfileSettings(ctx context.Context, userID int64) (userProfileSettingsResponse, error) {
 	var response userProfileSettingsResponse
-	var onlineActive bool
-	if err := s.db.QueryRow(ctx, `select public_id, username, signature, avatar_url, profile_background_url, timezone, show_online_status,
-		exists(select 1 from user_presence_sessions presence where presence.user_id=users.id
-			and presence.last_active_at>=now()-make_interval(secs=>$2)),public_card_stat_slots from users where id = $1`, userID, int(publicPresenceWindow/time.Second)).
-		Scan(&response.PublicID, &response.Username, &response.Signature, &response.AvatarURL, &response.ProfileBackgroundURL, &response.Timezone, &response.ShowOnlineStatus, &onlineActive, &response.PublicCardStatSlots); err != nil {
+	if err := s.db.QueryRow(ctx, `select public_id,username,signature,avatar_url,profile_background_url,timezone,show_online_status,
+		public_card_stat_slots from users where id=$1`, userID).
+		Scan(&response.PublicID, &response.Username, &response.Signature, &response.AvatarURL, &response.ProfileBackgroundURL, &response.Timezone, &response.ShowOnlineStatus, &response.PublicCardStatSlots); err != nil {
 		return response, err
 	}
 	ossCfg := s.ossConfigFromSettings(ctx)
@@ -316,6 +316,7 @@ func (s *Server) loadUserProfileSettings(ctx context.Context, userID int64) (use
 		return response, err
 	}
 	response.SignatureMaxBytes = s.profileConfigFromSettings(ctx).SignatureMaxBytes
+	onlineActive := s.cache.UsersOnline(ctx, []int64{userID}, time.Now(), s.cache.Config().PresenceTTL)[userID]
 	response.OnlineStatus = mapPublicOnlineVisibility(response.ShowOnlineStatus, onlineActive)
 	response.CardStatisticOptions = append([]string(nil), publicCardStatisticOptionKeys...)
 	response.MessageReceive = s.userHasPermission(ctx, userID, "user.message.receive")
@@ -327,7 +328,8 @@ func (s *Server) loadUserProfileSettings(ctx context.Context, userID int64) (use
 func (s *Server) profileConfigFromSettings(ctx context.Context) profileConfigPayload {
 	payload := defaultProfileConfig()
 	var raw []byte
-	if err := s.db.QueryRow(ctx, `select value from system_settings where key = $1`, profileConfigSettingKey).Scan(&raw); err == nil {
+	if cached, err := s.loadCachedPublicSetting(ctx, profileConfigSettingKey); err == nil {
+		raw = cached
 		_ = json.Unmarshal(raw, &payload)
 	}
 	return normalizeProfileConfig(payload)

@@ -414,7 +414,13 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 	}
 	taskUID := "ai_" + randomHex(16)
 	var taskID int64
-	err = s.db.QueryRow(
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "创建 AI 任务失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	err = tx.QueryRow(
 		r.Context(),
 		`insert into ai_tasks (task_uid, task_type, provider, model, status, priority, concurrency_key, payload, created_by, queued_at)
 		 values ($1, $2, $3, $4, 'queued', $5, $6, $7::jsonb, $8, now())
@@ -433,22 +439,22 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	message := aiTaskMessage{TaskID: taskID, TaskUID: taskUID, TaskType: req.TaskType}
-	if s.queue == nil {
+	if s.cfg.NATS.OutboxEnabled {
+		if _, err = queue.EnqueueTx(r.Context(), tx, "ai", "ai.task.requested", "ai_task", taskUID, r.Header.Get("X-Request-ID"), message); err != nil {
+			writeError(w, http.StatusInternalServerError, "AI 任务可靠入队失败")
+			return
+		}
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "创建 AI 任务失败")
+		return
+	}
+	if !s.cfg.NATS.OutboxEnabled && (s.queue == nil || s.queue.PublishTask(r.Context(), "ai", message) != nil) {
 		_, _ = s.db.Exec(
 			r.Context(),
 			`update ai_tasks set status = 'failed', error = $2, finished_at = now(), updated_at = now() where id = $1`,
 			taskID,
 			queue.ErrUnavailable.Error(),
-		)
-		writeError(w, http.StatusServiceUnavailable, "NATS 任务队列不可用，请检查 NATS 服务是否运行")
-		return
-	}
-	if err := s.queue.PublishTask(r.Context(), "ai", message); err != nil {
-		_, _ = s.db.Exec(
-			r.Context(),
-			`update ai_tasks set status = 'failed', error = $2, finished_at = now(), updated_at = now() where id = $1`,
-			taskID,
-			err.Error(),
 		)
 		writeError(w, http.StatusServiceUnavailable, "NATS 任务队列不可用，请检查 NATS 服务是否运行")
 		return

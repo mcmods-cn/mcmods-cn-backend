@@ -46,26 +46,50 @@ func TestInsertCommentTreeIntegration(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
+	fixtureKey := fmt.Sprintf("comment-tree-integration-%d", time.Now().UnixNano())
 	var authorID, targetID int64
-	if err = tx.QueryRow(ctx, `select users.id,recipe_type.entity_id
-		from users cross join recipe_types recipe_type
-		order by users.id,recipe_type.entity_id limit 1`).Scan(&authorID, &targetID); err != nil {
+	if err = tx.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
+		values($1,$2,'test',true) returning id`, fixtureKey, fixtureKey+"@example.invalid").Scan(&authorID); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.QueryRow(ctx, `insert into catalog_entities(identity_key,entity_type,status)
+		values($1,'recipe_type','active') returning id`, "recipe-type:"+fixtureKey).Scan(&targetID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(ctx, `insert into recipe_types(entity_id,canonical_id) values($1,$2)`, targetID, "test:"+fixtureKey); err != nil {
 		t.Fatal(err)
 	}
 
-	key := fmt.Sprintf("comment-tree-integration-%d", time.Now().UnixNano())
+	key := fixtureKey
 	target := commentTargetInfo{Type: "recipe_type", InternalID: targetID}
 	root, err := insertCommentTree(ctx, tx, target, authorID, createCommentRequest{
-		Body: "root", IdempotencyKey: key + "-root",
+		Body: "root", IdempotencyKey: key + "-root", Status: "published",
 	})
 	if err != nil {
 		t.Fatalf("insert root: %v", err)
 	}
 	child, err := insertCommentTree(ctx, tx, target, authorID, createCommentRequest{
-		Body: "child", ParentID: root.PublicID, IdempotencyKey: key + "-child",
+		Body: "child", ParentID: root.PublicID, IdempotencyKey: key + "-child", Status: "published",
 	})
 	if err != nil {
 		t.Fatalf("insert child: %v", err)
+	}
+	secondRoot, err := insertCommentTree(ctx, tx, target, authorID, createCommentRequest{
+		Body: "second root", IdempotencyKey: key + "-root-2", Status: "published",
+	})
+	if err != nil {
+		t.Fatalf("insert second root: %v", err)
+	}
+	var rootFloor, childFloor, secondRootFloor *int64
+	if err = tx.QueryRow(ctx, `select
+		(select floor_number from comments where id=$1),
+		(select floor_number from comments where id=$2),
+		(select floor_number from comments where id=$3)`, root.ID, child.ID, secondRoot.ID).
+		Scan(&rootFloor, &childFloor, &secondRootFloor); err != nil {
+		t.Fatal(err)
+	}
+	if rootFloor == nil || *rootFloor != 1 || childFloor != nil || secondRootFloor == nil || *secondRootFloor != 2 {
+		t.Fatalf("unexpected floors: root=%v child=%v second=%v", rootFloor, childFloor, secondRootFloor)
 	}
 
 	if child.ParentID == nil || *child.ParentID != root.ID {
@@ -120,5 +144,21 @@ func TestInsertCommentTreeIntegration(t *testing.T) {
 	if len(items) != 2 || items[1].Reactions["heart"] != 1 ||
 		len(items[1].UserReactions) != 1 || items[1].UserReactions[0] != "heart" {
 		t.Fatalf("unexpected queried comment tree: %#v", items)
+	}
+
+	var viewerID int64
+	if err = tx.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
+		values($1,$2,'test',true) returning id`, fixtureKey+"-viewer", fixtureKey+"-viewer@example.invalid").Scan(&viewerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(ctx, `insert into user_blocks(blocker_id,blocked_id) values($1,$2)`, viewerID, authorID); err != nil {
+		t.Fatal(err)
+	}
+	hiddenItems, err := queryCommentItemsWithQueryer(ctx, tx, []int64{root.ID}, true, 3, viewerID)
+	if err != nil {
+		t.Fatalf("query filtered comment tree: %v", err)
+	}
+	if len(hiddenItems) != 0 {
+		t.Fatalf("blocked author's comments were returned: %#v", hiddenItems)
 	}
 }

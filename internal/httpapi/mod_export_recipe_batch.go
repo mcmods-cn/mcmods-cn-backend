@@ -272,6 +272,21 @@ func persistRecipeImports(ctx context.Context, tx pgx.Tx, recipes []recipeImport
 			render_locale=excluded.render_locale,definition_schema_version=excluded.definition_schema_version`); err != nil {
 		return fmt.Errorf("persist imported recipe snapshots: %w", err)
 	}
+	// A recipe is a version-independent semantic identity. Every successful
+	// recipe import, including recipes without ingredient bindings, adds the
+	// concrete Minecraft versions of its target content version.
+	if _, err = execImportStatement(ctx, tx, `insert into recipe_version_bindings(recipe_id,version_code,created_by,source)
+		select distinct snapshot.recipe_id,btrim(version_code),revision.submitted_by,'import'
+		from recipe_import_snapshots snapshot
+		join catalog_import_revisions revision on revision.id=snapshot.revision_id
+		left join mod_content_versions content_version on content_version.id=revision.target_version_id
+		cross join lateral unnest(case when cardinality(content_version.minecraft_versions)>0
+			then content_version.minecraft_versions else array[revision.minecraft_version] end) version_code
+		where snapshot.revision_id in (select distinct revision_id from recipe_import_stage)
+		  and btrim(version_code)<>''
+		on conflict(recipe_id,version_code) do nothing`); err != nil {
+		return fmt.Errorf("persist recipe version bindings: %w", err)
+	}
 	return nil
 }
 

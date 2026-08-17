@@ -44,6 +44,7 @@ type DBConfig struct {
 	SSLMode      string
 	URL          string
 	ResetOnStart bool
+	ResetConfirm string
 	MaxConns     int32
 	MinConns     int32
 }
@@ -81,16 +82,49 @@ type NATSConfig struct {
 	Token         string           `json:"token,omitempty"`
 	SubjectPrefix string           `json:"subjectPrefix"`
 	Tasks         []NATSTaskConfig `json:"tasks"`
+	OutboxEnabled bool             `json:"outboxEnabled"`
+	JetStream     JetStreamConfig  `json:"jetStream"`
+	Realtime      bool             `json:"realtime"`
+}
+
+type JetStreamConfig struct {
+	Enabled        bool          `json:"enabled"`
+	Stream         string        `json:"stream"`
+	MaxDeliver     int           `json:"maxDeliver"`
+	AckWait        time.Duration `json:"-"`
+	PublishTimeout time.Duration `json:"-"`
 }
 
 type RedisConfig struct {
-	Enabled  bool
-	Addr     string
-	Username string
-	Password string
-	DB       int
-	Prefix   string
-	TTL      time.Duration
+	Enabled                  bool
+	Required                 bool
+	Addr                     string
+	Username                 string
+	Password                 string
+	DB                       int
+	Prefix                   string
+	Namespace                string
+	TTL                      time.Duration
+	PoolSize                 int
+	MinIdleConns             int
+	DialTimeout              time.Duration
+	ReadTimeout              time.Duration
+	WriteTimeout             time.Duration
+	AuthSessionCacheEnabled  bool
+	RBACCacheEnabled         bool
+	AuthRateLimitEnabled     bool
+	PresenceEnabled          bool
+	UnreadCounterEnabled     bool
+	SettingsCacheEnabled     bool
+	UserCardCacheEnabled     bool
+	SessionTTL               time.Duration
+	RBACCacheTTL             time.Duration
+	PresenceTTL              time.Duration
+	PresenceSnapshotInterval time.Duration
+	UnreadTTL                time.Duration
+	UnreadReconcileInterval  time.Duration
+	UnreadReconcileBatchSize int
+	UserCardTTL              time.Duration
 }
 
 type AntiAbuseConfig struct {
@@ -162,6 +196,7 @@ func Load() Config {
 			SSLMode:      getenv("DB_SSLMODE", "disable"),
 			URL:          os.Getenv("DATABASE_URL"),
 			ResetOnStart: getenvBool("DB_RESET_ON_START", false),
+			ResetConfirm: strings.TrimSpace(os.Getenv("DB_RESET_CONFIRM")),
 			MaxConns:     int32(getenvInt("DB_MAX_CONNS", 12)),
 			MinConns:     int32(getenvInt("DB_MIN_CONNS", 2)),
 		},
@@ -191,6 +226,15 @@ func Load() Config {
 			Password:      os.Getenv("NATS_PASSWORD"),
 			Token:         os.Getenv("NATS_TOKEN"),
 			SubjectPrefix: getenv("NATS_SUBJECT_PREFIX", "mcmods"),
+			OutboxEnabled: getenvBool("NATS_OUTBOX_ENABLED", true),
+			Realtime:      getenvBool("REALTIME_ENABLED", true),
+			JetStream: JetStreamConfig{
+				Enabled:        getenvBool("NATS_JETSTREAM_ENABLED", false),
+				Stream:         getenv("NATS_JETSTREAM_STREAM", "MCMODS_TASKS"),
+				MaxDeliver:     getenvInt("NATS_JETSTREAM_MAX_DELIVER", 8),
+				AckWait:        time.Duration(getenvInt("NATS_JETSTREAM_ACK_WAIT_SECONDS", 300)) * time.Second,
+				PublishTimeout: time.Duration(getenvInt("NATS_JETSTREAM_PUBLISH_TIMEOUT_SECONDS", 5)) * time.Second,
+			},
 			Tasks: []NATSTaskConfig{
 				{
 					Code:           "ai",
@@ -211,13 +255,35 @@ func Load() Config {
 			},
 		},
 		Redis: RedisConfig{
-			Enabled:  getenvBool("REDIS_ENABLED", false),
-			Addr:     getenv("REDIS_ADDR", "127.0.0.1:6379"),
-			Username: os.Getenv("REDIS_USERNAME"),
-			Password: os.Getenv("REDIS_PASSWORD"),
-			DB:       getenvInt("REDIS_DB", 0),
-			Prefix:   getenv("REDIS_PREFIX", "mcmods:query:"),
-			TTL:      time.Duration(getenvInt("REDIS_QUERY_TTL_SECONDS", 120)) * time.Second,
+			Enabled:                  getenvBool("REDIS_ENABLED", false),
+			Required:                 getenvBool("REDIS_REQUIRED", false),
+			Addr:                     getenv("REDIS_ADDR", "127.0.0.1:6379"),
+			Username:                 os.Getenv("REDIS_USERNAME"),
+			Password:                 os.Getenv("REDIS_PASSWORD"),
+			DB:                       getenvInt("REDIS_DB", 0),
+			Prefix:                   getenv("REDIS_PREFIX", "mcmods"),
+			Namespace:                getenv("REDIS_NAMESPACE", getenv("APP_ENV", "development")),
+			TTL:                      time.Duration(getenvInt("REDIS_QUERY_TTL_SECONDS", 120)) * time.Second,
+			PoolSize:                 getenvInt("REDIS_POOL_SIZE", 32),
+			MinIdleConns:             getenvInt("REDIS_MIN_IDLE_CONNS", 2),
+			DialTimeout:              time.Duration(getenvInt("REDIS_DIAL_TIMEOUT_MS", 1000)) * time.Millisecond,
+			ReadTimeout:              time.Duration(getenvInt("REDIS_READ_TIMEOUT_MS", 750)) * time.Millisecond,
+			WriteTimeout:             time.Duration(getenvInt("REDIS_WRITE_TIMEOUT_MS", 750)) * time.Millisecond,
+			AuthSessionCacheEnabled:  getenvBool("REDIS_AUTH_SESSION_CACHE_ENABLED", true),
+			RBACCacheEnabled:         getenvBool("REDIS_RBAC_CACHE_ENABLED", true),
+			AuthRateLimitEnabled:     getenvBool("REDIS_AUTH_RATE_LIMIT_ENABLED", true),
+			PresenceEnabled:          getenvBool("REDIS_PRESENCE_ENABLED", true),
+			UnreadCounterEnabled:     getenvBool("REDIS_UNREAD_COUNTER_ENABLED", true),
+			SettingsCacheEnabled:     getenvBool("REDIS_SETTINGS_CACHE_ENABLED", true),
+			UserCardCacheEnabled:     getenvBool("REDIS_USER_CARD_CACHE_ENABLED", true),
+			SessionTTL:               time.Duration(getenvInt("REDIS_AUTH_SESSION_TTL_SECONDS", 60)) * time.Second,
+			RBACCacheTTL:             time.Duration(getenvInt("REDIS_RBAC_TTL_SECONDS", 120)) * time.Second,
+			PresenceTTL:              time.Duration(getenvInt("REDIS_PRESENCE_TTL_SECONDS", 150)) * time.Second,
+			PresenceSnapshotInterval: time.Duration(getenvInt("PRESENCE_SNAPSHOT_INTERVAL_SECONDS", 600)) * time.Second,
+			UnreadTTL:                time.Duration(getenvInt("REDIS_UNREAD_TTL_SECONDS", 300)) * time.Second,
+			UnreadReconcileInterval:  time.Duration(getenvInt("REDIS_UNREAD_RECONCILE_MINUTES", 30)) * time.Minute,
+			UnreadReconcileBatchSize: getenvInt("REDIS_UNREAD_RECONCILE_BATCH_SIZE", 50),
+			UserCardTTL:              time.Duration(getenvInt("REDIS_USER_CARD_TTL_SECONDS", 45)) * time.Second,
 		},
 		AntiAbuse: AntiAbuseConfig{
 			Enabled:                  getenvBool("ANTI_ABUSE_ENABLED", true),
@@ -274,6 +340,28 @@ func (db DBConfig) ConnString() string {
 	return u.String()
 }
 
+// EffectiveName returns the database name that the connection string will
+// actually use. Destructive development reset validation must not trust
+// DB_NAME when DATABASE_URL overrides it.
+func (db DBConfig) EffectiveName() (string, error) {
+	if strings.TrimSpace(db.URL) == "" {
+		name := strings.TrimSpace(db.Name)
+		if name == "" {
+			return "", errors.New("database name is empty")
+		}
+		return name, nil
+	}
+	parsed, err := url.Parse(db.URL)
+	if err != nil {
+		return "", err
+	}
+	name := strings.TrimPrefix(strings.TrimSpace(parsed.Path), "/")
+	if name == "" || strings.Contains(name, "/") {
+		return "", errors.New("DATABASE_URL does not contain one database name")
+	}
+	return name, nil
+}
+
 func (cfg Config) Validate() error {
 	var problems []error
 	environment := strings.ToLower(strings.TrimSpace(cfg.Env))
@@ -285,11 +373,58 @@ func (cfg Config) Validate() error {
 	if cfg.DB.ResetOnStart && environment != "development" {
 		problems = append(problems, errors.New("DB_RESET_ON_START is only allowed in development"))
 	}
+	if cfg.DB.ResetOnStart {
+		databaseName, err := cfg.DB.EffectiveName()
+		if err != nil {
+			problems = append(problems, fmt.Errorf("cannot validate reset database name: %w", err))
+		} else {
+			lowerName := strings.ToLower(databaseName)
+			if strings.Contains(lowerName, "prod") || strings.Contains(lowerName, "production") {
+				problems = append(problems, errors.New("refusing to reset a database whose name contains prod or production"))
+			}
+			if cfg.DB.ResetConfirm != "RESET "+databaseName {
+				problems = append(problems, fmt.Errorf("DB_RESET_CONFIRM must equal %q", "RESET "+databaseName))
+			}
+		}
+	}
 	if cfg.ReplicaCount < 1 || cfg.ReplicaCount > 1000 {
 		problems = append(problems, errors.New("APP_REPLICA_COUNT must be between 1 and 1000"))
 	}
 	if cfg.ReplicaCount > 1 && !cfg.Redis.Enabled {
 		problems = append(problems, errors.New("REDIS_ENABLED must be true when APP_REPLICA_COUNT is greater than 1 so cross-instance throttles remain correct"))
+	}
+	if cfg.Redis.Required && !cfg.Redis.Enabled {
+		problems = append(problems, errors.New("REDIS_ENABLED must be true when REDIS_REQUIRED=true"))
+	}
+	if cfg.Redis.Enabled {
+		if strings.TrimSpace(cfg.Redis.Addr) == "" {
+			problems = append(problems, errors.New("REDIS_ADDR is required when Redis is enabled"))
+		}
+		if cfg.Redis.PoolSize < 1 || cfg.Redis.PoolSize > 1000 || cfg.Redis.MinIdleConns < 0 || cfg.Redis.MinIdleConns > cfg.Redis.PoolSize {
+			problems = append(problems, errors.New("REDIS_POOL_SIZE and REDIS_MIN_IDLE_CONNS define an invalid pool"))
+		}
+		if cfg.Redis.DialTimeout < 50*time.Millisecond || cfg.Redis.ReadTimeout < 50*time.Millisecond || cfg.Redis.WriteTimeout < 50*time.Millisecond {
+			problems = append(problems, errors.New("Redis timeouts must be at least 50 milliseconds"))
+		}
+		if cfg.Redis.UnreadCounterEnabled && (cfg.Redis.UnreadReconcileInterval < time.Minute || cfg.Redis.UnreadReconcileBatchSize < 1 || cfg.Redis.UnreadReconcileBatchSize > 1000) {
+			problems = append(problems, errors.New("Redis unread reconciliation interval and batch size are invalid"))
+		}
+		if namespace := strings.TrimSpace(cfg.Redis.Namespace); namespace == "" || strings.IndexFunc(namespace, func(value rune) bool {
+			return !(value == '_' || value == '-' || value >= '0' && value <= '9' || value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z')
+		}) >= 0 {
+			problems = append(problems, errors.New("REDIS_NAMESPACE may only contain letters, numbers, underscores, and hyphens"))
+		}
+	}
+	if cfg.NATS.JetStream.Enabled {
+		if !cfg.NATS.Enabled {
+			problems = append(problems, errors.New("NATS_ENABLED must be true when NATS_JETSTREAM_ENABLED=true"))
+		}
+		if strings.TrimSpace(cfg.NATS.JetStream.Stream) == "" || cfg.NATS.JetStream.MaxDeliver < 2 || cfg.NATS.JetStream.MaxDeliver > 100 {
+			problems = append(problems, errors.New("JetStream stream and maximum delivery settings are invalid"))
+		}
+		if cfg.NATS.JetStream.AckWait < time.Second || cfg.NATS.JetStream.PublishTimeout < 100*time.Millisecond {
+			problems = append(problems, errors.New("JetStream acknowledgement and publish timeouts are invalid"))
+		}
 	}
 	if cfg.DB.MaxConns < 2 || cfg.DB.MaxConns > 500 || cfg.DB.MinConns < 0 || cfg.DB.MinConns > cfg.DB.MaxConns {
 		problems = append(problems, errors.New("DB_MIN_CONNS and DB_MAX_CONNS must define a valid pool between 2 and 500 connections"))

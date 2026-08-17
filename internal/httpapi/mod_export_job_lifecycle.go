@@ -132,6 +132,9 @@ func (s *Server) resetModExportJobForRetry(ctx context.Context, jobID string, mo
 }
 
 func (s *Server) dispatchModExportJob(ctx context.Context, jobID string) {
+	if s.cfg.NATS.OutboxEnabled {
+		return
+	}
 	message := modExportJobMessage{JobID: jobID}
 	if s.queue != nil && s.queue.PublishTask(ctx, modExportTaskCode, message) == nil {
 		_, _ = s.db.Exec(ctx, `update nats_outbox set published_at=now() where aggregate_type='mod_export_job' and aggregate_id=$1 and published_at is null`, jobID)

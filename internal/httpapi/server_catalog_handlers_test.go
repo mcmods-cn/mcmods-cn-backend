@@ -116,8 +116,8 @@ func TestNormalizeAndValidateServerUpdateRequestReusesMetadataRules(t *testing.T
 	}
 }
 
-func TestServerModFiltersNormalizesAndDeduplicates(t *testing.T) {
-	filters := serverModFilters(" Example_Mod,example_mod,invalid:mod, second.mod ")
+func TestCatalogModFiltersNormalizesAndDeduplicates(t *testing.T) {
+	filters := parseCatalogModFilters(" Example_Mod,example_mod,invalid:mod, second.mod ")
 	if len(filters) != 2 || filters[0] != "example_mod" || filters[1] != "second.mod" {
 		t.Fatalf("unexpected filters: %#v", filters)
 	}

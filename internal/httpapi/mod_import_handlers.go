@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"mcmods-cn-backend/internal/queue"
 )
 
 const modMetadataImportTaskCode = "mod_metadata_import"
@@ -93,7 +95,13 @@ func (s *Server) createProjectMetadataImport(w http.ResponseWriter, r *http.Requ
 	}
 	userID := currentClaims(r).Subject
 	var jobID string
-	if err = s.db.QueryRow(r.Context(),
+	tx, txErr := s.db.Begin(r.Context())
+	if txErr != nil {
+		writeError(w, http.StatusInternalServerError, "创建模组导入任务失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if err = tx.QueryRow(r.Context(),
 		`insert into mod_metadata_import_jobs(user_id,project_type,provider,source_url,status,progress)
 		 values($1,$2,$3,$4,'queued',0) returning public_id`,
 		userID, projectType, provider, sourceURL,
@@ -102,7 +110,17 @@ func (s *Server) createProjectMetadataImport(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	message := modMetadataImportMessage{JobID: jobID}
-	if s.queue == nil || s.queue.PublishTask(r.Context(), modMetadataImportTaskCode, message) != nil {
+	if s.cfg.NATS.OutboxEnabled {
+		if _, err = queue.EnqueueTx(r.Context(), tx, modMetadataImportTaskCode, "mod.metadata.import.requested", "mod_metadata_import_job", jobID, r.Header.Get("X-Request-ID"), message); err != nil {
+			writeError(w, http.StatusInternalServerError, "模组导入任务可靠入队失败")
+			return
+		}
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "创建模组导入任务失败")
+		return
+	}
+	if !s.cfg.NATS.OutboxEnabled && (s.queue == nil || s.queue.PublishTask(r.Context(), modMetadataImportTaskCode, message) != nil) {
 		_, _ = s.db.Exec(r.Context(), `update mod_metadata_import_jobs set status='failed',error='NATS queue unavailable',
 			finished_at=now(),updated_at=now() where public_id=$1`, jobID)
 		writeError(w, http.StatusServiceUnavailable, "NATS 模组导入任务队列不可用")

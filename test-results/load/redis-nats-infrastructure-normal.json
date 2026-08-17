@@ -1,0 +1,50 @@
+{
+  "generatedAt": "2026-08-16T03:36:57.781Z",
+  "startedAt": "2026-08-16T03:36:32.622Z",
+  "baseURL": "http://127.0.0.1:8080",
+  "scenario": "infrastructure",
+  "stages": [
+    {
+      "concurrency": 2,
+      "seconds": 5
+    },
+    {
+      "concurrency": 5,
+      "seconds": 10
+    },
+    {
+      "concurrency": 10,
+      "seconds": 10
+    }
+  ],
+  "elapsedSeconds": 25.16,
+  "requests": 15225,
+  "success": 15225,
+  "clientErrors": 0,
+  "serverErrors": 0,
+  "networkErrors": 0,
+  "errorRate": 0,
+  "requestsPerSecond": 605.22,
+  "latencyMS": {
+    "average": 10.52,
+    "p50": 8.91,
+    "p90": 15.75,
+    "p95": 16.18,
+    "p99": 93.59,
+    "maximum": 894.46
+  },
+  "statuses": {
+    "200": 15225
+  },
+  "requestsByScenario": {
+    "liveness": 14775,
+    "message-conversations": 225,
+    "unread-summary": 225
+  },
+  "antiAbuseCodes": {},
+  "notes": [
+    "This client does not infer backend CPU, memory, DB connections, locks, or cache hit rate; capture those from the test environment telemetry.",
+    "The script never calls the destructive cleanup execute endpoint. Activity cleanup load covers preview only.",
+    "Comment mutations were disabled (safe default)."
+  ]
+}

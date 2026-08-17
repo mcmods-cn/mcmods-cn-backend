@@ -55,13 +55,14 @@ func (s *Server) updateSiteGeneralConfig(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to save site settings")
 		return
 	}
+	s.invalidateSettingsCache(r.Context())
 	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) siteGeneralConfigFromSettings(ctx context.Context) siteGeneralConfig {
 	config := defaultSiteGeneralConfig()
 	var raw []byte
-	err := s.db.QueryRow(ctx, `select value from system_settings where key=$1`, siteGeneralSettingKey).Scan(&raw)
+	raw, err := s.loadCachedPublicSetting(ctx, siteGeneralSettingKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return config
 	}

@@ -89,6 +89,7 @@ func (s *Server) updateMarkdownConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存 Markdown 配置失败")
 		return
 	}
+	s.invalidateSettingsCache(r.Context())
 	s.writeAppLog(r.Context(), "admin_operation", "info", "update_markdown_config", "markdown.rendering", claims.Subject, r, http.StatusOK, 0, nil)
 	writeJSON(w, http.StatusOK, payload)
 }
@@ -96,7 +97,7 @@ func (s *Server) updateMarkdownConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) markdownConfigFromSettings(ctx context.Context) markdownConfigPayload {
 	payload := defaultMarkdownConfig()
 	var raw []byte
-	err := s.db.QueryRow(ctx, `select value from system_settings where key = $1`, markdownConfigSettingKey).Scan(&raw)
+	raw, err := s.loadCachedPublicSetting(ctx, markdownConfigSettingKey)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return payload

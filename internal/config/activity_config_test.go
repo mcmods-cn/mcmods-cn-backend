@@ -27,6 +27,13 @@ func TestMultipleReplicasRequireSharedRedisThrottle(t *testing.T) {
 		t.Fatalf("expected Redis validation error, got %v", err)
 	}
 	cfg.Redis.Enabled = true
+	cfg.Redis.Addr = "127.0.0.1:6379"
+	cfg.Redis.Namespace = "test"
+	cfg.Redis.PoolSize = 4
+	cfg.Redis.MinIdleConns = 1
+	cfg.Redis.DialTimeout = time.Second
+	cfg.Redis.ReadTimeout = time.Second
+	cfg.Redis.WriteTimeout = time.Second
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("shared Redis should make a multi-replica config valid: %v", err)
 	}

@@ -176,6 +176,12 @@ func (worker *ModExportWorker) Start() error {
 	if worker.queue != nil {
 		subscribeErr = worker.queue.SubscribeTask(modExportTaskCode, worker.handle)
 	}
+	if worker.server.cfg.NATS.OutboxEnabled {
+		// The durable dispatcher will deliver every committed outbox row. The
+		// subscription is registered even when Core NATS is unavailable so the
+		// database-backed local fallback can still execute it.
+		return nil
+	}
 	rows, err := worker.server.db.Query(context.Background(), `select id from catalog_import_jobs where status='queued' order by created_at`)
 	if err != nil {
 		if subscribeErr != nil {
@@ -409,7 +415,8 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 	if shouldPublish {
 		eventID := newExportID()
 		payload, _ := json.Marshal(modExportJobMessage{JobID: jobID})
-		_, err = tx.Exec(r.Context(), `insert into nats_outbox(event_id,subject,aggregate_type,aggregate_id,payload) values($1,$2,'mod_export_job',$3,$4::jsonb)`, eventID, modExportTaskCode, jobID, string(payload))
+		_, err = tx.Exec(r.Context(), `insert into nats_outbox(event_id,event_type,subject,aggregate_type,aggregate_id,payload)
+			values($1,'mod.catalog_import.requested',$2,'mod_export_job',$3,$4::jsonb)`, eventID, modExportTaskCode, jobID, string(payload))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "保存导入队列事件失败")
 			return

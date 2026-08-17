@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	publicPresenceWindow  = 5 * time.Minute
-	presenceWriteThrottle = 2 * time.Minute
+	publicPresenceWindow            = 5 * time.Minute
+	defaultPresenceSnapshotInterval = 10 * time.Minute
 )
 
 type publicOnlineStatus string
@@ -40,11 +40,19 @@ func (s *Server) touchSitePresence(w http.ResponseWriter, r *http.Request) {
 	if claims.Subject > 0 {
 		visitorID = "user:" + strconv.FormatInt(claims.Subject, 10)
 		if claims.SessionID != "" {
-			_, _ = s.db.Exec(r.Context(), `insert into user_presence_sessions(session_hash,user_id,last_active_at,updated_at)
-				values($1,$2,now(),now()) on conflict(session_hash) do update set
-				last_active_at=now(),updated_at=now()
-				where user_presence_sessions.last_active_at<now()-make_interval(secs=>$3)`,
-				security.SessionFingerprint(claims.SessionID), claims.Subject, int(presenceWriteThrottle/time.Second))
+			sessionHash := hex.EncodeToString(security.SessionFingerprint(claims.SessionID))
+			s.cache.TouchUserPresence(r.Context(), claims.Subject, sessionHash, time.Now().UTC(), s.cache.Config().PresenceTTL)
+			// PostgreSQL only receives a low-frequency activity snapshot. Redis
+			// outages therefore cannot turn every heartbeat into a database write.
+			snapshotInterval := s.cache.Config().PresenceSnapshotInterval
+			if snapshotInterval <= 0 {
+				snapshotInterval = defaultPresenceSnapshotInterval
+			}
+			if s.cache.ClaimThrottle(r.Context(), "presence-snapshot:"+strconv.FormatInt(claims.Subject, 10)+":"+sessionHash, snapshotInterval) {
+				_, _ = s.db.Exec(r.Context(), `insert into user_presence_sessions(session_hash,user_id,last_active_at,updated_at)
+					values($1,$2,now(),now()) on conflict(session_hash) do update set
+					last_active_at=now(),updated_at=now()`, security.SessionFingerprint(claims.SessionID), claims.Subject)
+			}
 		}
 	}
 	digest := sha256.Sum256([]byte(visitorID))

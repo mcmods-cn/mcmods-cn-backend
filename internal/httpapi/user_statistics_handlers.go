@@ -296,7 +296,7 @@ func (s *Server) loadUserPrivateStatistics(r *http.Request, userID int64, statis
 		return err
 	}
 	response.EditReviews = editReviews
-	if err = s.db.QueryRow(r.Context(), `select count(*),count(*) filter(where status='resolved') from comment_reports where reporter_id=$1`, userID).
+	if err = s.db.QueryRow(r.Context(), `select count(*),count(*) filter(where status='resolved_valid') from reports where reporter_id=$1`, userID).
 		Scan(&response.Community.Reports, &response.Community.EffectiveReports); err != nil {
 		return err
 	}

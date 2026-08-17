@@ -25,6 +25,19 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		kindCode = strings.TrimSpace(r.URL.Query().Get("kind"))
 	}
 	registry := strings.TrimSpace(r.URL.Query().Get("registry"))
+	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	if status == "" {
+		status = "active"
+	}
+	if !stringSet("active", "pending", "archived")[status] {
+		writeError(w, http.StatusBadRequest, "invalid resource status")
+		return
+	}
+	hasBindings := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("hasBindings")))
+	if hasBindings != "" && hasBindings != "true" && hasBindings != "false" {
+		writeError(w, http.StatusBadRequest, "invalid binding filter")
+		return
+	}
 	primary, secondary := s.requestContentLocales(r)
 	if requested := strings.TrimSpace(r.URL.Query().Get("locale")); requested != "" {
 		var err error
@@ -44,7 +57,10 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := boundedLimit(r.URL.Query().Get("limit"), 40, 100)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
-	indexed := s.searchResourcePage(r.Context(), query, kindCode, registry, limit, offset)
+	indexed := indexedSearchPage{}
+	if status == "active" && hasBindings == "" {
+		indexed = s.searchResourcePage(r.Context(), query, kindCode, registry, limit, offset)
+	}
 	databaseOffset := offset
 	if indexed.Used {
 		databaseOffset = 0
@@ -56,10 +72,12 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		select count(*)::int from game_resources resource
 		join catalog_entities entity on entity.id=resource.entity_id
 		left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
-		where entity.status='active' and ($1='' or resource.kind_code=$1) and ($3='' or resource.namespace=$3) and
+		where entity.status=$4 and ($1='' or resource.kind_code=$1) and ($3='' or resource.namespace=$3)
+		and ($5='' or ($5='true' and exists(select 1 from mod_resource_version_details detail where detail.resource_id=resource.entity_id))
+		 or ($5='false' and not exists(select 1 from mod_resource_version_details detail where detail.resource_id=resource.entity_id))) and
 		($2='' or entity.public_id=$2 or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations localization
 		 where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$2||'%')
-		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$2||'%')`, kindCode, query, registry).Scan(&total); err != nil {
+		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$2||'%')`, kindCode, query, registry, status, hasBindings).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count resources")
 		return
 	}
@@ -73,19 +91,22 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		 where candidate.catalog_entity_id=entity.id and candidate.name<>''),'{}'::jsonb),
 		coalesce((select jsonb_object_agg(candidate.locale,candidate.provenance) from content_localizations candidate
 		 where candidate.catalog_entity_id=entity.id and candidate.name<>''),'{}'::jsonb),
-		coalesce(owner.project_code,''),coalesce(owner.slug,''),coalesce(owner.primary_name,''),coalesce(imported.icon_path,'')
+		coalesce(owner.project_code,''),coalesce(owner.slug,''),coalesce(owner.primary_name,''),coalesce(imported.icon_path,''),
+		(select count(*)::int from mod_resource_version_details detail where detail.resource_id=resource.entity_id)
 		from game_resources resource join catalog_entities entity on entity.id=resource.entity_id
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 		left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
 		left join mods owner on owner.id=resource.owner_mod_id
 		left join lateral (select candidate.* from content_localizations candidate where candidate.catalog_entity_id=entity.id
 			 order by case candidate.locale when $4 then 0 when $5 then 1 when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
-		where entity.status='active' and ($1='' or resource.kind_code=$1) and ($3='' or resource.namespace=$3) and
+		where entity.status=$10 and ($1='' or resource.kind_code=$1) and ($3='' or resource.namespace=$3)
+		and ($11='' or ($11='true' and exists(select 1 from mod_resource_version_details detail where detail.resource_id=resource.entity_id))
+		 or ($11='false' and not exists(select 1 from mod_resource_version_details detail where detail.resource_id=resource.entity_id))) and
 		(($6 and entity.id=any($7::bigint[])) or (not $6 and ($2='' or entity.public_id=$2 or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations candidate
 		 where candidate.catalog_entity_id=entity.id and candidate.name ilike '%'||$2||'%')
 		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$2||'%')))
 		order by case when $6 then array_position($7::bigint[],entity.id) end,resource.kind_code,resource.canonical_id
-		limit $8 offset $9`, kindCode, query, registry, primary, secondary, indexed.Used, indexed.IDs, limit, databaseOffset)
+		limit $8 offset $9`, kindCode, query, registry, primary, secondary, indexed.Used, indexed.IDs, limit, databaseOffset, status, hasBindings)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read resources")
 		return
@@ -99,8 +120,9 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		var names, provenances []byte
 		var revisionID sql.NullString
 		var iconID, renderID sql.NullString
+		var bindingCount int
 		if err = rows.Scan(&entityID, &publicID, &kind, &canonicalID, &namespace, &defaultLocale, &revisionID, &contentLocale, &name,
-			&iconID, &renderID, &names, &provenances, &ownerPublicID, &ownerSiteID, &ownerName, &importedIconPath); err != nil {
+			&iconID, &renderID, &names, &provenances, &ownerPublicID, &ownerSiteID, &ownerName, &importedIconPath, &bindingCount); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode resource")
 			return
 		}
@@ -116,7 +138,7 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		items = append(items, map[string]any{"publicId": publicID, "id": canonicalID,
 			"kind": kind, "registry": namespace, "names": json.RawMessage(names),
 			"defaultLocale": defaultLocale, "publishedRevisionId": nullableCatalogString(revisionID), "locale": contentLocale,
-			"name": name, "provenance": provenance, "iconUrl": iconURL, "renderUrl": renderURL,
+			"name": name, "provenance": provenance, "iconUrl": iconURL, "renderUrl": renderURL, "bindingCount": bindingCount,
 			"iconFileId": nullableCatalogString(iconID), "renderFileId": nullableCatalogString(renderID),
 			"source": map[string]any{"publicId": ownerPublicID, "siteId": ownerSiteID, "name": ownerName, "type": "mod", "version": ""}})
 	}
@@ -945,6 +967,19 @@ func (s *Server) createCatalogRecipe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
+	if edit.ApplicableVersionIDs == nil && edit.SourceVersionPublicID != "" {
+		var versions []string
+		if err = s.db.QueryRow(r.Context(), `select minecraft_versions from mod_content_versions where public_id=$1 and status='active'`, edit.SourceVersionPublicID).Scan(&versions); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, "sourceVersionPublicId is invalid")
+			return
+		}
+		versions = uniqueNonEmpty(versions)
+		edit.ApplicableVersionIDs = &versions
+	}
+	if edit.ApplicableVersionIDs == nil || len(*edit.ApplicableVersionIDs) == 0 {
+		writeError(w, http.StatusUnprocessableEntity, "at least one applicable Minecraft version is required")
+		return
+	}
 	if err = requireCatalogCreateDefaultLocalization(edit.DefaultLocale, edit.Localizations); err != nil {
 		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
@@ -985,7 +1020,7 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 		coalesce(effective_source_version.public_id,''),coalesce(source_mod.project_code,''),coalesce(source_mod.slug,''),
 		coalesce(source_mod.primary_name,''),coalesce(effective_source_version.label,''),
 		coalesce(effective_source_version.minecraft_versions,'{}'::text[]),coalesce(effective_source_version.loaders,'{}'::text[]),
-		coalesce(effective_source_version.mod_version,'')
+		coalesce(effective_source_version.mod_version,''),coalesce(applicable.versions,'[]'::jsonb)
 		from recipes recipe join catalog_entities entity on entity.id=recipe.entity_id
 		left join recipe_definitions definition on definition.recipe_id=recipe.entity_id
 		left join catalog_entities template_entity on template_entity.id=definition.template_id
@@ -1000,6 +1035,8 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 		left join mod_content_versions effective_source_version on effective_source_version.public_id=
 			case when definition.recipe_id is not null then canonical_source_version.public_id else observation.source_version_public_id end
 		left join mods source_mod on source_mod.id=effective_source_version.mod_id
+		left join lateral (select jsonb_agg(binding.version_code order by binding.created_at,binding.version_code) versions
+			from recipe_version_bindings binding where binding.recipe_id=recipe.entity_id) applicable on true
 		where recipe.recipe_type_id=$1 and entity.status='active' and ($2='' or coalesce(recipe.canonical_source_id,'') ilike '%'||$2||'%')
 		order by coalesce(recipe.canonical_source_id,''),entity.public_id limit $3 offset $4`, typeEntity.ID, query, limit, offset)
 	if err != nil {
@@ -1008,19 +1045,20 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	primary, secondary := s.catalogRequestedLocales(r)
+	versionOrder := minecraftVersionOrder(loadMinecraftVersionConfig(r.Context(), s.db))
 	items := make([]map[string]any, 0, limit)
 	for rows.Next() {
 		var publicID, canonicalID, identitySource, templatePublicID, observationID, importRevisionID string
 		var sourceVersionPublicID, sourceModPublicID, sourceModSiteID, sourceModName, sourceVersionLabel, sourceModVersion string
 		var sourceMinecraftVersions, sourceLoaders []string
 		var publishedRevisionID sql.NullString
-		var definition, names []byte
+		var definition, names, applicableVersions []byte
 		var bindingCount int
 		var canonicalDefinition bool
 		if err = rows.Scan(&publicID, &canonicalID, &identitySource, &publishedRevisionID, &templatePublicID, &definition,
 			&observationID, &importRevisionID, &bindingCount, &names, &canonicalDefinition,
 			&sourceVersionPublicID, &sourceModPublicID, &sourceModSiteID, &sourceModName, &sourceVersionLabel,
-			&sourceMinecraftVersions, &sourceLoaders, &sourceModVersion); err != nil {
+			&sourceMinecraftVersions, &sourceLoaders, &sourceModVersion, &applicableVersions); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode recipes")
 			return
 		}
@@ -1039,7 +1077,8 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 			"identitySource": identitySource, "templatePublicId": templatePublicID, "publishedRevisionId": nullableCatalogString(publishedRevisionID),
 			"definition": json.RawMessage(definition), "bindingCount": bindingCount, "source": source,
 			"sourceVersionPublicId": sourceVersionPublicID, "sourceVersion": sourceVersion,
-			"importRevisionId": importRevisionID, "locale": locale, "name": name, "names": json.RawMessage(names)})
+			"applicableVersions": catalogApplicableVersions(applicableVersions, versionOrder),
+			"importRevisionId":   importRevisionID, "locale": locale, "name": name, "names": json.RawMessage(names)})
 	}
 	if err = rows.Err(); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read recipes")
@@ -1057,6 +1096,22 @@ func (s *Server) normalizeCatalogRecipeEdit(ctx context.Context, typeID int64, e
 	edit.SourceVersionPublicID, err = normalizeCatalogOptionalPublicID(edit.SourceVersionPublicID)
 	if err != nil {
 		return err
+	}
+	if edit.ApplicableVersionIDs != nil {
+		versions := uniqueNonEmpty(*edit.ApplicableVersionIDs)
+		if len(versions) == 0 {
+			return errCatalogEditorInvalid
+		}
+		valid := make(map[string]struct{})
+		for _, option := range loadMinecraftVersionConfig(ctx, s.db).Versions {
+			valid[option.Code] = struct{}{}
+		}
+		for _, version := range versions {
+			if _, exists := valid[version]; !exists {
+				return errCatalogEditorReference
+			}
+		}
+		edit.ApplicableVersionIDs = &versions
 	}
 	edit.DefaultLocale, edit.Localizations, err = normalizeCatalogLocalizations(edit.DefaultLocale, edit.Localizations)
 	if err != nil {
@@ -1139,14 +1194,14 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 	var sourceVersionPublicID, sourceModPublicID, sourceModSiteID, sourceModName, sourceVersionLabel, sourceModVersion string
 	var sourceMinecraftVersions, sourceLoaders []string
 	var canonicalDefinition bool
-	var definition []byte
+	var definition, applicableVersions []byte
 	if err = s.db.QueryRow(r.Context(), `select type_entity.public_id,coalesce(template_entity.public_id,imported_template_entity.public_id,''),coalesce(recipe.canonical_source_id,''),
 		coalesce(definition.definition,'{}'::jsonb),coalesce(observation.id,''),coalesce(observation.revision_id,''),
 		coalesce(import_template.source_template_id,''),definition.recipe_id is not null,
 		coalesce(effective_source_version.public_id,''),coalesce(source_mod.project_code,''),coalesce(source_mod.slug,''),
 		coalesce(source_mod.primary_name,''),coalesce(effective_source_version.label,''),
 		coalesce(effective_source_version.minecraft_versions,'{}'::text[]),coalesce(effective_source_version.loaders,'{}'::text[]),
-		coalesce(effective_source_version.mod_version,'')
+		coalesce(effective_source_version.mod_version,''),coalesce(applicable.versions,'[]'::jsonb)
 		from recipes recipe join catalog_entities type_entity on type_entity.id=recipe.recipe_type_id
 		left join recipe_definitions definition on definition.recipe_id=recipe.entity_id
 		left join catalog_entities template_entity on template_entity.id=definition.template_id
@@ -1161,10 +1216,12 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 		left join mod_content_versions effective_source_version on effective_source_version.public_id=
 			case when definition.recipe_id is not null then canonical_source_version.public_id else observation.source_version_public_id end
 		left join mods source_mod on source_mod.id=effective_source_version.mod_id
+		left join lateral (select jsonb_agg(binding.version_code order by binding.created_at,binding.version_code) versions
+			from recipe_version_bindings binding where binding.recipe_id=recipe.entity_id) applicable on true
 		where recipe.entity_id=$1`, entity.ID).
 		Scan(&typePublicID, &templatePublicID, &canonicalID, &definition, &observationID, &importRevisionID, &importTemplateKey, &canonicalDefinition,
 			&sourceVersionPublicID, &sourceModPublicID, &sourceModSiteID, &sourceModName, &sourceVersionLabel,
-			&sourceMinecraftVersions, &sourceLoaders, &sourceModVersion); err != nil {
+			&sourceMinecraftVersions, &sourceLoaders, &sourceModVersion, &applicableVersions); err != nil {
 		writeError(w, http.StatusNotFound, "recipe not found")
 		return
 	}
@@ -1200,7 +1257,49 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 		"canonicalSourceId": canonicalID, "definition": json.RawMessage(definition), "bindings": bindings,
 		"defaultLocale": defaultLocale, "localizations": localizations, "publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID),
 		"reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID), "source": source,
-		"importRevisionId": importRevisionID, "importTemplateKey": importTemplateKey})
+		"applicableVersions": catalogApplicableVersions(applicableVersions, minecraftVersionOrder(loadMinecraftVersionConfig(r.Context(), s.db))),
+		"importRevisionId":   importRevisionID, "importTemplateKey": importTemplateKey})
+}
+
+func minecraftVersionOrder(config minecraftVersionConfig) map[string]int {
+	order := make(map[string]int, len(config.Versions))
+	for index, version := range config.Versions {
+		order[version.Code] = index
+	}
+	return order
+}
+
+func catalogApplicableVersions(raw []byte, order map[string]int) []map[string]string {
+	codes := make([]string, 0)
+	_ = json.Unmarshal(raw, &codes)
+	sort.SliceStable(codes, func(left, right int) bool {
+		leftRank, leftKnown := order[codes[left]]
+		rightRank, rightKnown := order[codes[right]]
+		if leftKnown != rightKnown {
+			return leftKnown
+		}
+		if leftKnown && leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		return codes[left] < codes[right]
+	})
+	items := make([]map[string]string, 0, len(codes))
+	for _, code := range codes {
+		code = strings.TrimSpace(code)
+		if code == "" {
+			continue
+		}
+		items = append(items, map[string]string{"id": code, "name": code, "group": minecraftVersionGroupName(code)})
+	}
+	return items
+}
+
+func minecraftVersionGroupName(code string) string {
+	parts := strings.Split(code, ".")
+	if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+		return parts[0] + "." + parts[1] + ".X"
+	}
+	return "其他"
 }
 
 func (s *Server) deleteCatalogEntity(w http.ResponseWriter, r *http.Request, entity catalogEditorEntity, kind string) {

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -107,13 +108,13 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	location := s.requestClientLocation(r)
-	rateLimited, err := s.registrationRateLimited(r.Context(), location.IP)
+	rateLimited, err := s.registrationRateLimited(r.Context(), location.IP, r.Header.Get("X-Client-ID"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "registration rate-limit check failed")
 		return
 	}
 	if rateLimited {
-		writeError(w, http.StatusTooManyRequests, "too many registration requests; please try again later")
+		writeAPIError(w, http.StatusTooManyRequests, "auth_rate_limited", "too many registration requests; please try again later", 3600, nil)
 		return
 	}
 	passwordHash, err := security.HashPassword(req.Password)
@@ -194,13 +195,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	location := s.requestClientLocation(r)
-	rateLimited, err := s.authAttemptRateLimited(r.Context(), account, location.IP)
+	rateLimited, err := s.authAttemptRateLimited(r.Context(), account, location.IP, r.Header.Get("X-Client-ID"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "login rate-limit check failed")
 		return
 	}
 	if rateLimited {
-		writeError(w, http.StatusTooManyRequests, "too many failed login attempts; please try again later")
+		writeAPIError(w, http.StatusTooManyRequests, "auth_rate_limited", "too many login attempts; please try again later", 900, nil)
 		return
 	}
 	user, passwordHash, err := s.findUserForLogin(r.Context(), account)
@@ -288,11 +289,12 @@ func (s *Server) requestEmailCode(w http.ResponseWriter, r *http.Request) {
 		req.Purpose,
 		codeHash,
 		location.IP,
+		r.Header.Get("X-Client-ID"),
 		time.Now().Add(10*time.Minute),
 	)
 	if err != nil {
 		if err == errAuthRateLimited {
-			writeError(w, http.StatusTooManyRequests, "too many verification-code requests; please try again later")
+			writeAPIError(w, http.StatusTooManyRequests, "auth_rate_limited", "too many verification-code requests; please try again later", 600, nil)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "验证码保存失败")
@@ -327,13 +329,13 @@ func (s *Server) emailLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rateLimited, err := s.authAttemptRateLimited(r.Context(), req.Email, location.IP)
+	rateLimited, err := s.authAttemptRateLimited(r.Context(), req.Email, location.IP, r.Header.Get("X-Client-ID"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "login rate-limit check failed")
 		return
 	}
 	if rateLimited {
-		writeError(w, http.StatusTooManyRequests, "too many failed login attempts; please try again later")
+		writeAPIError(w, http.StatusTooManyRequests, "auth_rate_limited", "too many login attempts; please try again later", 900, nil)
 		return
 	}
 	if err := s.consumeEmailLoginCode(r.Context(), req.Email, req.Code); err != nil {
@@ -440,6 +442,8 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	_, _ = s.db.Exec(r.Context(), `update auth_sessions set revoked_at=coalesce(revoked_at,now())
 		where session_hash=$1 and user_id=$2`, security.SessionFingerprint(claims.SessionID), claims.Subject)
 	_, _ = s.db.Exec(r.Context(), `delete from user_presence_sessions where session_hash=$1 and user_id=$2`, security.SessionFingerprint(claims.SessionID), claims.Subject)
+	s.invalidateSessionCache(r.Context(), claims)
+	s.cache.RemoveUserPresence(r.Context(), claims.Subject, hex.EncodeToString(security.SessionFingerprint(claims.SessionID)), time.Now(), s.cache.Config().PresenceTTL)
 	s.clearAuthSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -461,6 +465,7 @@ func (s *Server) issueToken(ctx context.Context, user domain.User) (string, erro
 		values($1,$2,$3,$4)`, security.SessionFingerprint(claims.SessionID), user.ID, authVersion, time.Unix(claims.ExpiresAt, 0)); err != nil {
 		return "", err
 	}
+	s.cacheIssuedSession(ctx, claims, user.ID)
 	return token, nil
 }
 

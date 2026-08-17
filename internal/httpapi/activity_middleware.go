@@ -254,7 +254,7 @@ func inferredActivityObject(path string) int16 {
 	case strings.Contains(path, "/review-locks"), strings.Contains(path, "/change-requests"),
 		strings.Contains(path, "/content-revisions"), strings.Contains(path, "/server-reviews"),
 		strings.Contains(path, "/mod-content-reviews"), strings.Contains(path, "/creator-claims"),
-		strings.Contains(path, "/comment-reports"), strings.Contains(path, "/mod-applications"),
+		strings.Contains(path, "/admin/reports"), strings.Contains(path, "/mod-applications"),
 		strings.Contains(path, "/revisions"):
 		return activity.ObjectReview
 	case strings.Contains(path, "/comments"):

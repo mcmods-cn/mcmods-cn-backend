@@ -179,7 +179,7 @@ func (s *Server) adminUpdateAntiAbuseUserState(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusInternalServerError, "failed to update user risk state")
 		return
 	}
-	s.cache.InvalidatePrefix(r.Context(), "anti-abuse:account:")
+	s.antiAbuse.InvalidateAccountState(r.Context(), userID)
 	s.writeAppLog(r.Context(), "admin_operation", "warn", "update_anti_abuse_user_state", r.PathValue("id"), currentClaims(r).Subject, r, http.StatusOK, 0, request)
 	writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
 }
@@ -243,7 +243,7 @@ func (s *Server) adminAntiAbuseRestrictions(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "failed to create restriction")
 		return
 	}
-	s.cache.InvalidatePrefix(r.Context(), "anti-abuse:account:")
+	s.antiAbuse.InvalidateAccountState(r.Context(), userID)
 	s.writeAppLog(r.Context(), "admin_operation", "warn", "create_anti_abuse_restriction", publicID, currentClaims(r).Subject, r, http.StatusCreated, 0, request)
 	writeJSON(w, http.StatusCreated, map[string]string{"id": publicID})
 }
@@ -256,13 +256,15 @@ func (s *Server) adminLiftAntiAbuseRestriction(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "a lift reason is required")
 		return
 	}
-	tag, err := s.db.Exec(r.Context(), `update anti_abuse_restrictions set lifted_at=now(),lifted_by=$2,lift_reason=$3 where public_id=$1 and lifted_at is null`,
-		strings.ToLower(r.PathValue("id")), currentClaims(r).Subject, strings.TrimSpace(request.Reason))
-	if err != nil || tag.RowsAffected() != 1 {
+	var userID int64
+	err := s.db.QueryRow(r.Context(), `update anti_abuse_restrictions set lifted_at=now(),lifted_by=$2,lift_reason=$3
+		where public_id=$1 and lifted_at is null returning user_id`,
+		strings.ToLower(r.PathValue("id")), currentClaims(r).Subject, strings.TrimSpace(request.Reason)).Scan(&userID)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "active restriction was not found")
 		return
 	}
-	s.cache.InvalidatePrefix(r.Context(), "anti-abuse:account:")
+	s.antiAbuse.InvalidateAccountState(r.Context(), userID)
 	s.writeAppLog(r.Context(), "admin_operation", "warn", "lift_anti_abuse_restriction", r.PathValue("id"), currentClaims(r).Subject, r, http.StatusOK, 0, request)
 	writeJSON(w, http.StatusOK, map[string]bool{"lifted": true})
 }
@@ -301,7 +303,7 @@ func (s *Server) adminAntiAbuseBotRules(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "failed to create bot rule")
 		return
 	}
-	s.cache.InvalidatePrefix(r.Context(), "anti-abuse:bot-rules")
+	s.antiAbuse.InvalidateBotRules(r.Context())
 	s.writeAppLog(r.Context(), "admin_operation", "warn", "create_anti_abuse_bot_rule", publicID, currentClaims(r).Subject, r, http.StatusCreated, 0, map[string]string{"kind": request.Kind, "label": request.Label})
 	writeJSON(w, http.StatusCreated, map[string]string{"id": publicID})
 }
@@ -312,7 +314,7 @@ func (s *Server) adminDeleteAntiAbuseBotRule(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusNotFound, "bot rule was not found")
 		return
 	}
-	s.cache.InvalidatePrefix(r.Context(), "anti-abuse:bot-rules")
+	s.antiAbuse.InvalidateBotRules(r.Context())
 	s.writeAppLog(r.Context(), "admin_operation", "warn", "delete_anti_abuse_bot_rule", r.PathValue("id"), currentClaims(r).Subject, r, http.StatusOK, 0, map[string]bool{"deleted": true})
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }

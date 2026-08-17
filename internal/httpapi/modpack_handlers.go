@@ -134,7 +134,22 @@ const publicModpackCatalogFilter = `where (pack.review_status='approved' or pack
 		when 'reviewed' then pack.review_status='approved'
 		else false end))
 	and ($15::integer=0 or $15>0 and pack.updated_at>=now()-make_interval(days=>$15)
-		or $15<0 and pack.updated_at<now()-make_interval(days=>abs($15)))`
+		or $15<0 and pack.updated_at<now()-make_interval(days=>abs($15)))
+	and (cardinality($16::text[])=0 or not exists(
+		select 1 from unnest($16::text[]) requested(value) where not exists(
+			select 1 from modpack_mods entry where entry.modpack_id=pack.id and (
+				lower(entry.identifier)=requested.value
+				or lower(entry.provider_project_id)=requested.value
+				or exists(select 1 from mods candidate where candidate.review_status='approved' and (
+					candidate.id=entry.mod_id
+					or entry.provider='modrinth' and entry.provider_project_id<>'' and candidate.modrinth_project_id=entry.provider_project_id
+					or entry.provider='curseforge' and entry.provider_project_id<>'' and candidate.curseforge_project_id=entry.provider_project_id
+					or entry.identifier<>'' and exists(select 1 from mod_identifiers source_identifier
+						where source_identifier.mod_id=candidate.id and lower(source_identifier.identifier)=lower(entry.identifier))
+				) and (lower(candidate.project_code)=requested.value or lower(candidate.slug)=requested.value
+					or exists(select 1 from mod_identifiers requested_identifier
+						where requested_identifier.mod_id=candidate.id and lower(requested_identifier.identifier)=requested.value)))
+			))))`
 
 func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
@@ -152,6 +167,7 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 	sources, validSources := parseCatalogList(r.URL.Query().Get("source"), 10)
 	licenses, validLicenses := parseCatalogList(r.URL.Query().Get("license"), 20)
 	features, validFeatures := parseCatalogList(r.URL.Query().Get("feature"), 20)
+	modFilters := parseCatalogModFilters(r.URL.Query().Get("mods"))
 	updatedDays, validUpdated := parseCatalogUpdatedRange(r.URL.Query().Get("updated"))
 	if !validQuery || !validVersions || !validLoaders || !validPrimary || !validTags || !validEnvironments ||
 		!validStatuses || !validSources || !validLicenses || !validFeatures || !validCatalogFeatures(features) || !validUpdated ||
@@ -167,15 +183,17 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid version mode")
 		return
 	}
-	sort, validSort := parseCatalogSort(r.URL.Query().Get("sort"))
-	if !validSort {
+	rawSort := r.URL.Query().Get("sort")
+	sort, validSort := parseCatalogSort(rawSort)
+	direction, validDirection := parseCatalogSortDirection(r.URL.Query().Get("order"), rawSort)
+	if !validSort || !validDirection {
 		writeError(w, http.StatusBadRequest, "invalid catalog sort")
 		return
 	}
 	limit := boundedLimit(r.URL.Query().Get("limit"), 24, 100)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
 	indexed := indexedSearchPage{}
-	filtered := len(versions)+len(loaders)+len(primaryCategories)+len(tags)+len(environments)+len(statuses)+len(sources)+len(licenses)+len(features) > 0 || updatedDays != 0
+	filtered := len(versions)+len(loaders)+len(primaryCategories)+len(tags)+len(environments)+len(statuses)+len(sources)+len(licenses)+len(features)+len(modFilters) > 0 || updatedDays != 0
 	if catalogSortUsesSearchIndex(sort) && !filtered {
 		indexed = s.searchProjectPage(r.Context(), query, "modpack", "", "", "", claims, limit, offset)
 	}
@@ -188,11 +206,12 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 		total = indexed.Total
 	} else if err := s.db.QueryRow(r.Context(), `select count(*) from modpacks pack `+publicModpackCatalogFilter,
 		claims.Subject, query, false, []int64{}, versions, loaders, primaryCategories, tags, versionMode,
-		environments, statuses, sources, licenses, features, updatedDays).Scan(&total); err != nil {
+		environments, statuses, sources, licenses, features, updatedDays, modFilters).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count modpacks")
 		return
 	}
-	orderSQL := catalogOrderSQL(sort, indexed.Used, 4, "pack.updated_at", "pack.id", "pack.primary_name")
+	orderSQL := catalogOrderSQL(sort, direction, indexed.Used, 4,
+		"coalesce(pack.published_at,pack.created_at)", "pack.updated_at", "pack.id", "pack.primary_name")
 	rows, err := s.db.Query(r.Context(), `select pack.id,pack.public_id,pack.slug,pack.primary_name,pack.secondary_name,
 		pack.abbreviation,pack.summary,pack.default_locale,pack.environment,pack.primary_category,pack.pack_type,
 		pack.packaging_method,pack.official_status,
@@ -205,8 +224,8 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
 		`+publicModpackCatalogFilter+`
 		order by `+orderSQL+`
-		limit $16 offset $17`, claims.Subject, query, indexed.Used, indexed.IDs, versions, loaders,
-		primaryCategories, tags, versionMode, environments, statuses, sources, licenses, features, updatedDays, limit, databaseOffset)
+		limit $17 offset $18`, claims.Subject, query, indexed.Used, indexed.IDs, versions, loaders,
+		primaryCategories, tags, versionMode, environments, statuses, sources, licenses, features, updatedDays, modFilters, limit, databaseOffset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load modpacks")
 		return

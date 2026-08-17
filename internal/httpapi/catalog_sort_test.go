@@ -17,7 +17,8 @@ func TestParseCatalogSortRejectsUnknownValues(t *testing.T) {
 
 func TestCatalogHeatOrderIsDescendingNullSafeAndStable(t *testing.T) {
 	t.Parallel()
-	order := catalogOrderSQL(catalogSortHeat, false, 0, "project.updated_at", "project.id", "project.primary_name")
+	order := catalogOrderSQL(catalogSortHeat, catalogSortDescending, false, 0,
+		"project.created_at", "project.updated_at", "project.id", "project.primary_name")
 	for _, expected := range []string{"coalesce(popularity.heat_score,0) desc", "project.updated_at desc", "project.id desc"} {
 		if !strings.Contains(order, expected) {
 			t.Fatalf("heat order %q does not contain %q", order, expected)
@@ -27,7 +28,8 @@ func TestCatalogHeatOrderIsDescendingNullSafeAndStable(t *testing.T) {
 
 func TestCatalogIndexedOrderRetainsStableTieBreakers(t *testing.T) {
 	t.Parallel()
-	order := catalogOrderSQL(catalogSortRelevance, true, 4, "project.updated_at", "project.id", "project.primary_name")
+	order := catalogOrderSQL(catalogSortRelevance, catalogSortDescending, true, 4,
+		"project.created_at", "project.updated_at", "project.id", "project.primary_name")
 	if order != "array_position($4::bigint[],project.id),project.updated_at desc,project.id desc" {
 		t.Fatalf("unexpected indexed order: %q", order)
 	}
@@ -62,13 +64,46 @@ func TestCatalogHeatOrderAcrossProjectTypes(t *testing.T) {
 		"mod": "m", "modpack": "pack", "plugin_or_map": "project", "server": "server",
 	} {
 		t.Run(name, func(t *testing.T) {
-			order := catalogOrderSQL(catalogSortHeat, false, 0, alias+".updated_at", alias+".id", alias+".primary_name")
+			order := catalogOrderSQL(catalogSortHeat, catalogSortDescending, false, 0,
+				alias+".created_at", alias+".updated_at", alias+".id", alias+".primary_name")
 			for _, fragment := range []string{"coalesce(popularity.heat_score,0) desc", alias + ".updated_at desc", alias + ".id desc"} {
 				if !strings.Contains(order, fragment) {
 					t.Fatalf("heat ordering %q is missing %q", order, fragment)
 				}
 			}
 		})
+	}
+}
+
+func TestCatalogCoreSortFieldsSupportBothDirections(t *testing.T) {
+	t.Parallel()
+	fields := map[catalogSort]string{
+		catalogSortPublished: "project.published_at",
+		catalogSortUpdated:   "project.updated_at",
+		catalogSortHeat:      "coalesce(popularity.heat_score,0)",
+		catalogSortViews:     "coalesce(popularity.view_count,0)",
+	}
+	for field, expression := range fields {
+		for _, direction := range []catalogSortDirection{catalogSortAscending, catalogSortDescending} {
+			order := catalogOrderSQL(field, direction, false, 0,
+				"project.published_at", "project.updated_at", "project.id", "project.primary_name")
+			if !strings.Contains(order, expression+" "+string(direction)) || !strings.Contains(order, "project.id "+string(direction)) {
+				t.Fatalf("%s %s ordering is not stable: %q", field, direction, order)
+			}
+		}
+	}
+}
+
+func TestCatalogSortDirectionRejectsUnknownValuesAndKeepsLegacyLinks(t *testing.T) {
+	t.Parallel()
+	if direction, ok := parseCatalogSortDirection("asc", "published"); !ok || direction != catalogSortAscending {
+		t.Fatalf("ascending direction was not accepted: %q %v", direction, ok)
+	}
+	if direction, ok := parseCatalogSortDirection("", "oldest"); !ok || direction != catalogSortAscending {
+		t.Fatalf("legacy oldest link did not map to ascending: %q %v", direction, ok)
+	}
+	if _, ok := parseCatalogSortDirection("desc nulls last; drop table users", "heat"); ok {
+		t.Fatal("untrusted sort direction was accepted")
 	}
 }
 

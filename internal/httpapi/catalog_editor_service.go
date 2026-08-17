@@ -763,7 +763,11 @@ func publishCatalogRecipeTx(ctx context.Context, tx pgx.Tx, snapshot catalogEdit
 		}
 		sourceVersionID, sourceModID = versionID, modID
 	}
-	fingerprint := sha256Hex(catalogJSON(edit))
+	// Applicable versions are relations, not part of the recipe's semantic
+	// content. Excluding them keeps identical recipes reusable across versions.
+	fingerprintEdit := *edit
+	fingerprintEdit.ApplicableVersionIDs = nil
+	fingerprint := sha256Hex(catalogJSON(fingerprintEdit))
 	if _, err = tx.Exec(ctx, `insert into recipes(entity_id,recipe_type_id,canonical_source_id,semantic_fingerprint,owner_mod_id,identity_source)
 		values($1,$2,$3,$4,$5,'manual') on conflict(entity_id) do update set recipe_type_id=excluded.recipe_type_id,
 		canonical_source_id=excluded.canonical_source_id,semantic_fingerprint=excluded.semantic_fingerprint,
@@ -778,6 +782,28 @@ func publishCatalogRecipeTx(ctx context.Context, tx pgx.Tx, snapshot catalogEdit
 		published_revision_id=excluded.published_revision_id,updated_by=excluded.updated_by,updated_at=now()`,
 		snapshot.EntityID, templateID, sourceVersionID, string(catalogJSON(nonNilJSONObject(edit.Definition))), revisionID, nullableActorID(actorID)); err != nil {
 		return err
+	}
+	if edit.ApplicableVersionIDs != nil {
+		versions := *edit.ApplicableVersionIDs
+		if len(versions) == 0 {
+			return errCatalogEditorInvalid
+		}
+		if _, err = tx.Exec(ctx, `delete from recipe_version_bindings where recipe_id=$1 and not(version_code=any($2::text[]))`, snapshot.EntityID, versions); err != nil {
+			return err
+		}
+		for _, version := range versions {
+			if _, err = tx.Exec(ctx, `insert into recipe_version_bindings(recipe_id,version_code,created_by,source)
+				values($1,$2,$3,'editor') on conflict(recipe_id,version_code) do nothing`, snapshot.EntityID, version, nullableActorID(actorID)); err != nil {
+				return err
+			}
+		}
+	}
+	var versionBindingCount int
+	if err = tx.QueryRow(ctx, `select count(*)::int from recipe_version_bindings where recipe_id=$1`, snapshot.EntityID).Scan(&versionBindingCount); err != nil {
+		return err
+	}
+	if versionBindingCount == 0 {
+		return errCatalogEditorInvalid
 	}
 	if _, err = tx.Exec(ctx, `delete from recipe_bindings where recipe_id=$1`, snapshot.EntityID); err != nil {
 		return err

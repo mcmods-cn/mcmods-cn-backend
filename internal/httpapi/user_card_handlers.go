@@ -2,11 +2,14 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
 	"mcmods-cn-backend/internal/progression"
 )
 
@@ -41,6 +44,15 @@ type publicUserCard struct {
 	Statistics   []*publicCardStatistic `json:"statistics"`
 }
 
+type cachedPublicUserCard struct {
+	Card       publicUserCard `json:"card"`
+	ShowOnline bool           `json:"showOnline"`
+}
+
+func publicUserCardCacheKey(userID int64) string {
+	return fmt.Sprintf("user-card:public:%d", userID)
+}
+
 func normalizePublicCardSlots(values []string) ([]string, error) {
 	if len(values) != 6 {
 		return nil, errors.New("exactly six public card statistic slots are required")
@@ -68,18 +80,21 @@ func (s *Server) userCard(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var response publicUserCard
-	var showOnline bool
-	var onlineActive bool
-	var slots []string
-	var status string
-	response.ID = identity.PublicID
-	err := s.db.QueryRow(r.Context(), `select username,avatar_url,status,show_online_status,
-		exists(select 1 from user_presence_sessions presence where presence.user_id=users.id
-			and presence.last_active_at>=now()-make_interval(secs=>$2)),public_card_stat_slots
-		from users where id=$1`, identity.InternalID, int(publicPresenceWindow/time.Second)).
-		Scan(&response.Username, &response.AvatarURL, &status, &showOnline, &onlineActive, &slots)
-	if err == pgx.ErrNoRows || status == "deleted" {
+	loader := func(ctx context.Context) ([]byte, error) {
+		cached, loadErr := s.loadPublicUserCard(ctx, identity.InternalID, identity.PublicID)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		return json.Marshal(cached)
+	}
+	var raw []byte
+	var err error
+	if s.cache.Config().UserCardCacheEnabled {
+		raw, err = s.cache.GetOrLoadTTL(r.Context(), publicUserCardCacheKey(identity.InternalID), s.cache.Config().UserCardTTL, loader)
+	} else {
+		raw, err = loader(r.Context())
+	}
+	if err == pgx.ErrNoRows {
 		writeError(w, http.StatusNotFound, "user not found")
 		return
 	}
@@ -87,23 +102,15 @@ func (s *Server) userCard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load user card")
 		return
 	}
-	response.OnlineStatus = mapPublicOnlineVisibility(showOnline, onlineActive)
-	response.Level, err = s.loadUserLevelSummary(r.Context(), identity.InternalID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load user level")
+	var cached cachedPublicUserCard
+	if err = json.Unmarshal(raw, &cached); err != nil {
+		s.cache.Delete(r.Context(), publicUserCardCacheKey(identity.InternalID))
+		writeError(w, http.StatusServiceUnavailable, "failed to decode user card cache")
 		return
 	}
-	values, err := s.loadPublicCardStatisticValues(r.Context(), identity.InternalID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load public user statistics")
-		return
-	}
-	response.Statistics = make([]*publicCardStatistic, 6)
-	for index := 0; index < len(response.Statistics) && index < len(slots); index++ {
-		if slots[index] != "" {
-			response.Statistics[index] = &publicCardStatistic{Key: slots[index], Value: values[slots[index]]}
-		}
-	}
+	response := cached.Card
+	onlineActive := s.cache.UsersOnline(r.Context(), []int64{identity.InternalID}, time.Now(), s.cache.Config().PresenceTTL)[identity.InternalID]
+	response.OnlineStatus = mapPublicOnlineVisibility(cached.ShowOnline, onlineActive)
 	ossCfg := s.ossConfigFromSettings(r.Context())
 	response.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, response.AvatarURL)
 	if err != nil {
@@ -111,6 +118,37 @@ func (s *Server) userCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) loadPublicUserCard(ctx context.Context, userID int64, publicID string) (cachedPublicUserCard, error) {
+	var cached cachedPublicUserCard
+	var slots []string
+	var status string
+	cached.Card.ID = publicID
+	err := s.db.QueryRow(ctx, `select username,avatar_url,status,show_online_status,public_card_stat_slots
+		from users where id=$1`, userID).
+		Scan(&cached.Card.Username, &cached.Card.AvatarURL, &status, &cached.ShowOnline, &slots)
+	if err != nil {
+		return cached, err
+	}
+	if status == "deleted" {
+		return cached, pgx.ErrNoRows
+	}
+	cached.Card.Level, err = s.loadUserLevelSummary(ctx, userID)
+	if err != nil {
+		return cached, err
+	}
+	values, err := s.loadPublicCardStatisticValues(ctx, userID)
+	if err != nil {
+		return cached, err
+	}
+	cached.Card.Statistics = make([]*publicCardStatistic, 6)
+	for index := 0; index < len(cached.Card.Statistics) && index < len(slots); index++ {
+		if slots[index] != "" {
+			cached.Card.Statistics[index] = &publicCardStatistic{Key: slots[index], Value: values[slots[index]]}
+		}
+	}
+	return cached, nil
 }
 
 func (s *Server) loadUserLevelSummary(ctx context.Context, userID int64) (userLevelSummary, error) {

@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/queue"
 )
 
 type notificationSettingsRequest struct {
@@ -21,14 +23,15 @@ type userConnectionItem struct {
 
 func (s *Server) userOverview(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	var followers, following int64
+	var followers, following, blocked int64
 	err := s.db.QueryRow(
 		r.Context(),
 		`select
 		 (select count(*) from user_follows follow join users account on account.id=follow.follower_id where follow.followed_id=$1 and account.status='active'),
-		 (select count(*) from user_follows follow join users account on account.id=follow.followed_id where follow.follower_id=$1 and account.status='active')`,
+		 (select count(*) from user_follows follow join users account on account.id=follow.followed_id where follow.follower_id=$1 and account.status='active'),
+		 (select count(*) from user_blocks block join users account on account.id=block.blocked_id where block.blocker_id=$1 and account.status='active')`,
 		claims.Subject,
-	).Scan(&followers, &following)
+	).Scan(&followers, &following, &blocked)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取用户主页概览失败")
 		return
@@ -36,6 +39,7 @@ func (s *Server) userOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"followers": followers,
 		"following": following,
+		"blocked":   blocked,
 		"aiBalance": s.userAIDailyBalance(r.Context(), claims.Subject, claims),
 	})
 }
@@ -48,16 +52,12 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 	userID := identity.InternalID
 	var username, status, avatarURL, signature, profileBackgroundURL string
 	var showOnlineStatus bool
-	var onlineActive bool
 	var createdAt time.Time
 	err := s.db.QueryRow(
 		r.Context(),
-		`select username, status, created_at, avatar_url, signature, profile_background_url,
-		        show_online_status,exists(select 1 from user_presence_sessions presence
-		          where presence.user_id=users.id and presence.last_active_at>=now()-make_interval(secs=>$2))
-		 from users where id = $1`,
-		userID, int(publicPresenceWindow/time.Second),
-	).Scan(&username, &status, &createdAt, &avatarURL, &signature, &profileBackgroundURL, &showOnlineStatus, &onlineActive)
+		`select username,status,created_at,avatar_url,signature,profile_background_url,show_online_status
+		 from users where id=$1`, userID,
+	).Scan(&username, &status, &createdAt, &avatarURL, &signature, &profileBackgroundURL, &showOnlineStatus)
 	if err == pgx.ErrNoRows || status == "deleted" {
 		writeError(w, http.StatusNotFound, "用户不存在")
 		return
@@ -67,12 +67,17 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var followers, following int64
-	_ = s.db.QueryRow(r.Context(), `select count(*) from user_follows follow join users account on account.id=follow.follower_id where follow.followed_id=$1 and account.status='active'`, userID).Scan(&followers)
-	_ = s.db.QueryRow(r.Context(), `select count(*) from user_follows follow join users account on account.id=follow.followed_id where follow.follower_id=$1 and account.status='active'`, userID).Scan(&following)
 	claims := currentClaims(r)
 	isOwn := claims.Subject > 0 && claims.Subject == userID
+	var followers, following, blockedCount int64
+	_ = s.db.QueryRow(r.Context(), `select count(*) from user_follows follow join users account on account.id=follow.follower_id where follow.followed_id=$1 and account.status='active'`, userID).Scan(&followers)
+	_ = s.db.QueryRow(r.Context(), `select count(*) from user_follows follow join users account on account.id=follow.followed_id where follow.follower_id=$1 and account.status='active'`, userID).Scan(&following)
+	if isOwn {
+		_ = s.db.QueryRow(r.Context(), `select count(*) from user_blocks block join users account on account.id=block.blocked_id where block.blocker_id=$1 and account.status='active'`, userID).Scan(&blockedCount)
+	}
 	isFollowing := false
+	isBlocked := false
+	blockedEitherDirection := false
 	if claims.Subject > 0 && !isOwn {
 		_ = s.db.QueryRow(
 			r.Context(),
@@ -80,9 +85,14 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 			claims.Subject,
 			userID,
 		).Scan(&isFollowing)
+		_ = s.db.QueryRow(r.Context(), `select
+			exists(select 1 from user_blocks where blocker_id=$1 and blocked_id=$2),
+			exists(select 1 from user_blocks where (blocker_id=$1 and blocked_id=$2) or (blocker_id=$2 and blocked_id=$1))`,
+			claims.Subject, userID).Scan(&isBlocked, &blockedEitherDirection)
 	}
-	canFollow := claims.Subject > 0 && !isOwn && claimsAllow(claims, "user.follow.create") && s.userHasPermission(r.Context(), userID, "user.follow.receive")
-	canMessage := claims.Subject > 0 && !isOwn && claimsAllow(claims, "user.message.send") && s.userHasPermission(r.Context(), userID, "user.message.receive")
+	canBlock := claims.Subject > 0 && !isOwn
+	canFollow := claims.Subject > 0 && !isOwn && !blockedEitherDirection && claimsAllow(claims, "user.follow.create") && s.userHasPermission(r.Context(), userID, "user.follow.receive")
+	canMessage := claims.Subject > 0 && !isOwn && !blockedEitherDirection && claimsAllow(claims, "user.message.send") && s.userHasPermission(r.Context(), userID, "user.message.receive")
 	ossCfg := s.ossConfigFromSettings(r.Context())
 	avatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, avatarURL)
 	if err != nil {
@@ -95,12 +105,15 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	onlineActive := s.cache.UsersOnline(r.Context(), []int64{userID}, time.Now(), s.cache.Config().PresenceTTL)[userID]
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": identity.PublicID, "username": username, "status": status,
 		"createdAt": createdAt, "followers": followers, "following": following,
+		"blocked":   blockedCount,
 		"avatarUrl": avatarURL, "signature": signature, "profileBackgroundUrl": profileBackgroundURL,
 		"onlineStatus": mapPublicOnlineVisibility(showOnlineStatus, onlineActive),
-		"isOwn":        isOwn, "isFollowing": isFollowing, "canFollow": canFollow, "canMessage": canMessage,
+		"isOwn":        isOwn, "isFollowing": isFollowing, "isBlocked": isBlocked,
+		"canBlock": canBlock, "canFollow": canFollow, "canMessage": canMessage,
 	})
 }
 
@@ -187,6 +200,15 @@ func (s *Server) followUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "不能关注自己")
 		return
 	}
+	blocked, err := s.usersBlockEachOther(r.Context(), claims.Subject, targetID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "检查用户关系失败")
+		return
+	}
+	if blocked {
+		writeError(w, http.StatusForbidden, "当前无法关注该用户")
+		return
+	}
 	if !s.userHasPermission(r.Context(), targetID, "user.follow.receive") {
 		writeError(w, http.StatusForbidden, "对方没有允许被关注的权限")
 		return
@@ -210,18 +232,20 @@ func (s *Server) followUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if tag.RowsAffected() > 0 {
-		if s.queue == nil {
-			writeError(w, http.StatusServiceUnavailable, "通知任务队列不可用")
-			return
-		}
-		if err := s.queue.PublishTask(r.Context(), notificationTaskCode, notificationEvent{Action: "follow", RecipientID: targetID, ActorID: claims.Subject}); err != nil {
-			writeError(w, http.StatusServiceUnavailable, "通知任务队列不可用")
-			return
+		if s.cfg.NATS.OutboxEnabled {
+			if _, err = queue.EnqueueTx(r.Context(), tx, notificationTaskCode, "user.followed", "user", identity.PublicID, r.Header.Get("X-Request-ID"),
+				notificationEvent{Action: "follow", RecipientID: targetID, ActorID: claims.Subject}); err != nil {
+				writeError(w, http.StatusInternalServerError, "关注通知入队失败")
+				return
+			}
 		}
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "关注用户失败")
 		return
+	}
+	if tag.RowsAffected() > 0 && !s.cfg.NATS.OutboxEnabled && s.queue != nil {
+		_ = s.queue.PublishTask(r.Context(), notificationTaskCode, notificationEvent{Action: "follow", RecipientID: targetID, ActorID: claims.Subject})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"following": true, "created": tag.RowsAffected() > 0})
 }

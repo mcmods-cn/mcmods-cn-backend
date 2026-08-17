@@ -14,6 +14,7 @@ import (
 	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/httpapi"
 	"mcmods-cn-backend/internal/progression"
+	"mcmods-cn-backend/internal/querycache"
 	"mcmods-cn-backend/internal/queue"
 	"mcmods-cn-backend/internal/searchindex"
 )
@@ -24,6 +25,7 @@ type applicationRuntime struct {
 	queue      *queue.Client
 	activity   *activity.Monitor
 	search     *searchindex.Client
+	cache      *querycache.Cache
 }
 
 type runtimeInitializationError struct {
@@ -125,15 +127,31 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 			PublicMessage: "activity database writer is unavailable", Err: fmt.Errorf("connect activity database pool: %w", err),
 		}
 	}
+	sharedCache := querycache.New(cfg.Redis)
+	if cfg.Redis.Required {
+		redisCtx, redisCancel := context.WithTimeout(ctx, 3*time.Second)
+		err = sharedCache.Ping(redisCtx)
+		redisCancel()
+		if err != nil {
+			sharedCache.Close()
+			return nil, &runtimeInitializationError{
+				Component: "redis", Code: "redis_required_unavailable",
+				PublicMessage: "required cache service is unavailable", Err: err,
+			}
+		}
+	}
+	httpapi.StartUnreadReconciliation(ctx, db, sharedCache, cfg.Redis.UnreadCounterEnabled, cfg.Redis.UnreadReconcileInterval, cfg.Redis.UnreadReconcileBatchSize)
 
 	httpapi.StartMinecraftVersionSyncScheduler(ctx, db)
 	httpapi.StartMinecraftServerProbeScheduler(ctx, db)
 	httpapi.StartPopularityRefreshScheduler(ctx, db)
 	httpapi.NewOSSDeletionWorker(cfg, db).Start(ctx)
 	httpapi.NewMaintenanceWorker(db).Start(ctx)
+	httpapi.NewSeedCrawlerWorker(cfg, db).Start(ctx)
+	httpapi.NewProjectAutomationWorker(cfg, db).Start(ctx)
 	httpapi.NewActivityRetentionWorker(db).Start(ctx)
 	progressionService := progression.NewService(db)
-	activityMonitor := activity.NewMonitorWithOptions(activityDB, progressionService.ProcessActivityBatch, activity.Options{
+	activityMonitor := activity.NewMonitor(activityDB, progressionService.ProcessActivityBatch, activity.Options{
 		BatchSize: cfg.Activity.BatchSize, QueueCapacity: cfg.Activity.QueueCapacity,
 		FlushInterval: cfg.Activity.FlushInterval, RetryMinDelay: cfg.Activity.RetryMinDelay,
 		RetryMaxDelay: cfg.Activity.RetryMaxDelay, WriteTimeout: cfg.Activity.WriteTimeout,
@@ -145,11 +163,12 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 		natsCfg = cfg.NATS
 	}
 	queueClient := queue.New(ctx, natsCfg)
+	queueClient.SetDeadLetterSink(queue.NewPostgresDeadLetterSink(db))
 	aiWorker := httpapi.NewAIWorker(db, queueClient, cfg.SettingsEncryptionKey)
 	if err = aiWorker.Start(ctx); err != nil {
 		log.Printf("ai queue worker unavailable: %v", err)
 	}
-	notificationWorker := httpapi.NewNotificationWorker(db, queueClient, cfg.SMTP, cfg.SettingsEncryptionKey)
+	notificationWorker := httpapi.NewNotificationWorker(db, queueClient, sharedCache, cfg.SMTP, cfg.SettingsEncryptionKey)
 	if err = notificationWorker.Start(); err != nil {
 		log.Printf("notification queue worker unavailable: %v", err)
 	}
@@ -165,11 +184,13 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	if err = blueprintWorker.Start(ctx); err != nil {
 		log.Printf("blueprint worker unavailable; queued jobs remain recoverable: %v", err)
 	}
+	outboxDispatcher := queue.NewOutboxDispatcher(db, queueClient, natsCfg.OutboxEnabled)
+	outboxDispatcher.Start(ctx)
 	searchClient := searchindex.New(cfg.Typesense)
 	searchindex.NewWorker(db, searchClient).Start(ctx)
 
 	initialized = true
-	return &applicationRuntime{db: db, activityDB: activityDB, queue: queueClient, activity: activityMonitor, search: searchClient}, nil
+	return &applicationRuntime{db: db, activityDB: activityDB, queue: queueClient, activity: activityMonitor, search: searchClient, cache: sharedCache}, nil
 }
 
 func databaseInitializationError(action string, err error) error {
@@ -261,6 +282,9 @@ func (runtime *applicationRuntime) close() {
 	}
 	if runtime.queue != nil {
 		runtime.queue.Close()
+	}
+	if runtime.cache != nil {
+		runtime.cache.Close()
 	}
 	if runtime.db != nil {
 		runtime.db.Close()

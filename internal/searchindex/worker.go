@@ -495,7 +495,7 @@ func (worker *Worker) loadServerDocuments(ctx context.Context, ids []int64) ([]m
 		server.has_whitelist,server.online_mode,server.review_status,server.updated_at,
 		coalesce((select array_agg(distinct source.value) from (
 			select term.value from minecraft_server_mods server_mod left join mods mod on mod.id=server_mod.mod_id
-			cross join lateral unnest(array[server_mod.raw_mod_id,coalesce(mod.public_id,''),coalesce(mod.project_code,''),
+			cross join lateral unnest(array[server_mod.raw_mod_id,coalesce(mod.project_code,''),coalesce(mod.slug,''),
 				coalesce(mod.primary_name,''),coalesce(mod.secondary_name,'')]) term(value)
 			where server_mod.server_id=server.id
 			union all

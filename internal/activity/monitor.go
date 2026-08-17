@@ -153,11 +153,7 @@ type Monitor struct {
 	metrics   monitorMetrics
 }
 
-func NewMonitor(db *pgxpool.Pool, processor BatchProcessor) *Monitor {
-	return NewMonitorWithOptions(db, processor, DefaultOptions())
-}
-
-func NewMonitorWithOptions(db *pgxpool.Pool, processor BatchProcessor, options Options) *Monitor {
+func NewMonitor(db *pgxpool.Pool, processor BatchProcessor, options Options) *Monitor {
 	return newMonitor(newPostgresStore(db, processor), options)
 }
 

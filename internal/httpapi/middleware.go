@@ -84,25 +84,12 @@ func (s *Server) continueOptionalAuthAsGuest(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) resolveClaimsSubject(ctx context.Context, claims *security.Claims) error {
-	if err := s.db.QueryRow(
-		ctx,
-		`select users.id
-		 from auth_sessions session
-		 join users on users.id=session.user_id
-		 where session.session_hash=$1
-		   and session.revoked_at is null
-		   and session.expires_at>now()
-		   and session.auth_version=$2
-		   and users.auth_version=$2
-		   and users.public_id=$3
-		   and users.status='active'`,
-		security.SessionFingerprint(claims.SessionID),
-		claims.AuthVersion,
-		claims.PublicSubject,
-	).Scan(&claims.Subject); err != nil {
+	record, err := s.resolveCachedSessionSubject(ctx, *claims)
+	if err != nil {
 		return err
 	}
-	_, permissionRules, err := s.resolveUserRootPermissions(ctx, claims.Subject)
+	claims.Subject = record.UserID
+	_, permissionRules, err := s.resolveUserRootPermissionsVersion(ctx, claims.Subject, claims.AuthVersion)
 	if err != nil {
 		return err
 	}

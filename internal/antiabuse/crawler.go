@@ -109,7 +109,7 @@ func (s *Service) botRules(ctx context.Context) []botRule {
 	if s.db == nil {
 		return nil
 	}
-	raw, err := s.cache.GetOrLoad(ctx, "anti-abuse:bot-rules", func(loadCtx context.Context) ([]byte, error) {
+	raw, err := s.cache.GetOrLoad(ctx, botRulesCacheKey, func(loadCtx context.Context) ([]byte, error) {
 		rows, err := s.db.Query(loadCtx, `select kind,matcher,secret_hash from anti_abuse_bot_rules
 			where enabled and (expires_at is null or expires_at>now()) order by id`)
 		if err != nil {

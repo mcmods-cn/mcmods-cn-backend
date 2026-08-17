@@ -222,8 +222,8 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 	if shouldPublish {
 		eventID := newExportID()
 		payload, _ := json.Marshal(modExportJobMessage{JobID: jobID})
-		if _, err = tx.Exec(r.Context(), `insert into nats_outbox(event_id,subject,aggregate_type,aggregate_id,payload)
-			values($1,$2,'mod_export_job',$3,$4::jsonb)`, eventID, modExportTaskCode, jobID, string(payload)); err != nil {
+		if _, err = tx.Exec(r.Context(), `insert into nats_outbox(event_id,event_type,subject,aggregate_type,aggregate_id,payload)
+			values($1,'mod.embedded_icon_import.requested',$2,'mod_export_job',$3,$4::jsonb)`, eventID, modExportTaskCode, jobID, string(payload)); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to queue catalog import")
 			return
 		}

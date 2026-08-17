@@ -122,6 +122,7 @@ func baselineSchemaStatements() []string {
 			module text not null,
 			name text not null,
 			description text not null default '',
+			access_type text not null default 'read' check(access_type in ('read','write','moderation','administration','security')),
 			translations jsonb not null default '{}'::jsonb
 		)`,
 		`create table if not exists role_permissions (
@@ -135,6 +136,8 @@ func baselineSchemaStatements() []string {
 		`create table if not exists user_role_bindings (
 			user_id bigint not null references users(id) on delete cascade,
 			role_id bigint not null references roles(id) on delete cascade,
+			expires_at timestamptz,
+			context text not null default '',
 			created_at timestamptz not null default now(),
 			primary key (user_id, role_id)
 		)`,

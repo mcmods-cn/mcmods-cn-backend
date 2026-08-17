@@ -118,6 +118,7 @@ type catalogRecipeEdit struct {
 	RecipeTypePublicID    string                              `json:"recipeTypePublicId,omitempty"`
 	TemplatePublicID      string                              `json:"templatePublicId"`
 	SourceVersionPublicID string                              `json:"sourceVersionPublicId,omitempty"`
+	ApplicableVersionIDs  *[]string                           `json:"applicableVersionIds,omitempty"`
 	CanonicalSourceID     string                              `json:"canonicalSourceId"`
 	Definition            map[string]any                      `json:"definition"`
 	Bindings              map[string]catalogRecipeBindingEdit `json:"bindings"`

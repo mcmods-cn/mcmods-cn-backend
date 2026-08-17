@@ -273,7 +273,11 @@ func (s *Server) writeAppLog(ctx context.Context, category string, level string,
 }
 
 func (s *Server) querySimpleRows(r *http.Request, sql string, args ...any) []map[string]any {
-	rows, err := s.db.Query(r.Context(), sql, args...)
+	return s.querySimpleRowsWithContext(r.Context(), sql, args...)
+}
+
+func (s *Server) querySimpleRowsWithContext(ctx context.Context, sql string, args ...any) []map[string]any {
+	rows, err := s.db.Query(ctx, sql, args...)
 	if err != nil {
 		return []map[string]any{}
 	}

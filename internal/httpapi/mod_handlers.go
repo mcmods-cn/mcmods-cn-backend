@@ -446,8 +446,10 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid version mode")
 		return
 	}
-	sort, validSort := parseCatalogSort(r.URL.Query().Get("sort"))
-	if !validSort {
+	rawSort := r.URL.Query().Get("sort")
+	sort, validSort := parseCatalogSort(rawSort)
+	direction, validDirection := parseCatalogSortDirection(r.URL.Query().Get("order"), rawSort)
+	if !validSort || !validDirection {
 		writeError(w, http.StatusBadRequest, "invalid catalog sort")
 		return
 	}
@@ -474,7 +476,8 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取模组总数失败")
 		return
 	}
-	orderSQL := catalogOrderSQL(sort, indexed.Used, 4, "m.updated_at", "m.id", "m.primary_name")
+	orderSQL := catalogOrderSQL(sort, direction, indexed.Used, 4,
+		"coalesce(m.published_at,m.created_at)", "m.updated_at", "m.id", "m.primary_name")
 	rows, err := s.db.Query(
 		r.Context(),
 		`select m.id, project_code, slug, primary_name, secondary_name, abbreviation, summary, environment, primary_category,

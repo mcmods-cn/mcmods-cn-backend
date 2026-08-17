@@ -93,21 +93,32 @@ func (h *availabilityHandler) snapshot() (runtimeHealthSnapshot, http.Handler) {
 
 func (h *availabilityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	snapshot, handler := h.snapshot()
-	if r.URL.Path == "/health" || !snapshot.Ready {
+	if r.Method == http.MethodGet && r.URL.Path == "/live" {
+		if handler != nil {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		h.setAvailabilityResponseHeaders(w, r)
+		writeAvailabilityJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"status": "alive", "app": "mcmods-cn-backend"}})
+		return
+	}
+	if r.URL.Path == "/health" || r.URL.Path == "/ready" || !snapshot.Ready {
 		h.setAvailabilityResponseHeaders(w, r)
 	}
-	if r.Method == http.MethodOptions && (r.URL.Path == "/health" || !snapshot.Ready) {
+	if r.Method == http.MethodOptions && (r.URL.Path == "/health" || r.URL.Path == "/ready" || !snapshot.Ready) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/health" {
-		status := http.StatusOK
-		payload := map[string]any{"data": snapshot}
-		if !snapshot.Ready {
-			status = http.StatusServiceUnavailable
-			payload["error"] = availabilityErrorMessage
+		w.Header().Set("Deprecation", "true")
+		w.Header().Set("Link", "</ready>; rel=successor-version")
+		if snapshot.Ready && handler != nil {
+			handler.ServeHTTP(w, r)
+			return
 		}
-		writeAvailabilityJSON(w, status, payload)
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/ready" && !snapshot.Ready {
+		writeAvailabilityJSON(w, http.StatusServiceUnavailable, map[string]any{"error": availabilityErrorMessage, "data": snapshot})
 		return
 	}
 	if !snapshot.Ready || handler == nil {

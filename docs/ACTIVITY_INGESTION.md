@@ -49,5 +49,5 @@ go test ./internal/activity ./internal/config ./internal/database ./internal/app
 go vet ./...
 $env:MCMODS_RUN_DB_INTEGRATION='1'
 go test -count=1 -run TestDurableOutboxSurvivesProducerAndDrainsExactlyOnceAcrossWorkers ./internal/activity
-go test -count=1 -run TestGeneration70UserFeaturesIntegration ./internal/database
+go test -count=1 -run TestCurrentUserFeaturesIntegration ./internal/database
 ```

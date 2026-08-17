@@ -189,6 +189,14 @@ func (s *Server) projectChangelogItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Source-managed entries become editor-owned after the first manual edit.
+	// The update worker may still report upstream changes, but must never
+	// overwrite this revision afterwards.
+	if _, err = tx.Exec(r.Context(), `update external_release_bindings set manual_override=true,updated_at=now()
+		where changelog_public_id=$1 and source_managed`, publicID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to protect manually edited changelog")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save changelog")
 		return

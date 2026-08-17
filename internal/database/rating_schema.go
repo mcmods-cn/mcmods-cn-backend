@@ -1,5 +1,7 @@
 package database
 
+import "strings"
+
 // ratingSchemaStatements installs the shared rating and heat model for every
 // top-level project family. Public IDs are resolved at the HTTP boundary; all
 // persisted relationships use numeric route and user IDs.
@@ -213,16 +215,7 @@ func ratingSchemaStatements() []string {
 				release_value=content_popularity_events_daily.release_value+excluded.release_value;
 		end;
 		$$ language plpgsql`,
-		`create or replace function content_route_for_comment(kind text,internal_id bigint,version_id bigint) returns bigint as $$
-			select case when kind='mod_resource' then (
-				select route.id from mod_content_versions version
-				join public_routes route on route.entity_type='mod' and route.internal_id=version.mod_id
-				where version.id=version_id
-			) else (
-				select route.id from public_routes route where route.entity_type=kind and route.internal_id=internal_id
-				and route.entity_type in ('mod','modpack','plugin','map','resource_pack','shader_pack','datapack','addon','minecraft_server')
-			) end
-		$$ language sql stable`,
+		contentRouteForCommentFunctionStatement(),
 		`create or replace function refresh_content_rating_global_stats(target_type text) returns void as $$
 		declare total_count bigint; total_sum bigint; average_score numeric;
 		begin
@@ -242,96 +235,98 @@ func ratingSchemaStatements() []string {
 		$$ language plpgsql`,
 		`create or replace function refresh_content_popularity(target_route_id bigint) returns void as $$
 		declare
-			target_type text; target_id bigint; owner_id bigint; created_time timestamptz;
+			route_type text; route_internal_id bigint; route_owner_id bigint; route_created_at timestamptz;
 			total_views bigint; total_unique_views bigint; total_pages integer; total_downloads bigint;
 			total_favorites bigint; total_comments bigint; total_commenters bigint; total_ratings bigint; total_rating_score bigint;
 			direct_comments bigint; direct_commenters bigint; child_comments bigint; child_commenters bigint;
-			average_rating numeric; global_average numeric; bayesian numeric; averages jsonb;
-			favorite_threshold numeric; commenter_threshold numeric; download_threshold numeric;
-			rating_threshold numeric; view_threshold numeric; trend_threshold numeric;
+			route_average_rating numeric; global_average numeric; bayesian numeric; averages jsonb;
+			favorite_limit numeric; commenter_limit numeric; download_limit numeric;
+			rating_limit numeric; view_limit numeric; trend_limit numeric;
 			favorite_score numeric; commenter_score numeric; download_score numeric; rating_score numeric;
 			long_term numeric; trend_raw numeric; trend numeric; effective_views numeric;
 			promotion numeric; quality numeric; new_boost numeric; calculated_heat numeric;
 		begin
-			select entity_type,internal_id into target_type,target_id from public_routes where id=target_route_id;
-			if not found or target_type not in ('mod','modpack','plugin','map','resource_pack','shader_pack','datapack','addon','minecraft_server') then return; end if;
-			owner_id:=content_target_owner_id(target_route_id);
-			created_time:=coalesce(content_target_created_at(target_route_id),now());
-			select favorite_threshold,commenter_threshold,download_threshold,rating_threshold,view_threshold,trend_threshold
-			into favorite_threshold,commenter_threshold,download_threshold,rating_threshold,view_threshold,trend_threshold
-			from content_popularity_thresholds where entity_type=target_type;
+			select route.entity_type,route.internal_id into route_type,route_internal_id
+			from public_routes route where route.id=target_route_id;
+			if not found or route_type not in ('mod','modpack','plugin','map','resource_pack','shader_pack','datapack','addon','minecraft_server') then return; end if;
+			route_owner_id:=content_target_owner_id(target_route_id);
+			route_created_at:=coalesce(content_target_created_at(target_route_id),now());
+			select threshold.favorite_threshold,threshold.commenter_threshold,threshold.download_threshold,
+				threshold.rating_threshold,threshold.view_threshold,threshold.trend_threshold
+			into favorite_limit,commenter_limit,download_limit,rating_limit,view_limit,trend_limit
+			from content_popularity_thresholds threshold where threshold.entity_type=route_type;
 
 			select coalesce(sum(views),0) into total_views from content_view_daily where object_route_id=target_route_id;
 			select count(*) into total_unique_views from content_unique_views
-			where object_route_id=target_route_id and (viewer_user_id is null or viewer_user_id is distinct from owner_id);
+			where object_route_id=target_route_id and (viewer_user_id is null or viewer_user_id is distinct from route_owner_id);
 			select greatest(1,count(*)) into total_pages from content_project_pages where object_route_id=target_route_id;
 			select coalesce(sum(downloads),0) into total_downloads from content_download_counters where object_route_id=target_route_id;
 			select count(distinct collection.user_id) into total_favorites
 			from favorite_collection_items item join favorite_collections collection on collection.id=item.collection_id
 			join users actor on actor.id=collection.user_id
-			where item.entity_type=target_type and item.entity_id=target_id and collection.user_id is distinct from owner_id
+			where item.entity_type=route_type and item.entity_id=route_internal_id and collection.user_id is distinct from route_owner_id
 			and actor.status='active' and actor.security_score>=40;
 			select count(*),count(distinct author_id) into direct_comments,direct_commenters from comments comment
 			join users actor on actor.id=comment.author_id
-			where comment.status='published' and comment.author_id is distinct from owner_id
+			where comment.status='published' and comment.author_id is distinct from route_owner_id
 			and actor.status='active' and actor.security_score>=40
-			and comment.target_type=target_type and comment.target_id=target_id;
+			and comment.target_type=route_type and comment.target_id=route_internal_id;
 			child_comments:=0; child_commenters:=0;
-			if target_type='mod' then
+			if route_type='mod' then
 				select count(*),count(distinct comment.author_id) into child_comments,child_commenters
 				from comments comment
 				join users actor on actor.id=comment.author_id
-				join mod_content_versions version on version.id=comment.target_version_id and version.mod_id=target_id
+				join mod_content_versions version on version.id=comment.target_version_id and version.mod_id=route_internal_id
 				where comment.status='published' and comment.target_type='mod_resource'
-				and comment.author_id is distinct from owner_id
+				and comment.author_id is distinct from route_owner_id
 				and actor.status='active' and actor.security_score>=40;
 			end if;
 			total_comments:=direct_comments+child_comments;
 			select count(distinct author_id) into total_commenters from (
 				select comment.author_id from comments comment join users actor on actor.id=comment.author_id
-				where comment.status='published' and comment.target_type=target_type and comment.target_id=target_id
-				and comment.author_id is distinct from owner_id and actor.status='active' and actor.security_score>=40
+				where comment.status='published' and comment.target_type=route_type and comment.target_id=route_internal_id
+				and comment.author_id is distinct from route_owner_id and actor.status='active' and actor.security_score>=40
 				union
 				select comment.author_id from comments comment join users actor on actor.id=comment.author_id
-				join mod_content_versions version on version.id=comment.target_version_id and version.mod_id=target_id
-				where target_type='mod' and comment.status='published' and comment.target_type='mod_resource'
-				and comment.author_id is distinct from owner_id and actor.status='active' and actor.security_score>=40
+				join mod_content_versions version on version.id=comment.target_version_id and version.mod_id=route_internal_id
+				where route_type='mod' and comment.status='published' and comment.target_type='mod_resource'
+				and comment.author_id is distinct from route_owner_id and actor.status='active' and actor.security_score>=40
 			) commenters;
 			select count(*),coalesce(sum(overall_score),0),coalesce(avg(overall_score),0)
-			into total_ratings,total_rating_score,average_rating from content_ratings rating
+			into total_ratings,total_rating_score,route_average_rating from content_ratings rating
 			join users actor on actor.id=rating.author_id
-			where object_route_id=target_route_id and rating.status='published' and author_id is distinct from owner_id
+			where object_route_id=target_route_id and rating.status='published' and author_id is distinct from route_owner_id
 			and actor.status='active' and actor.security_score>=40;
-			select coalesce((select average_rating from content_rating_global_stats where entity_type=target_type),3.5)
+			select coalesce((select global_stats.average_rating from content_rating_global_stats global_stats where global_stats.entity_type=route_type),3.5)
 			into global_average;
 			bayesian:=case when total_ratings=0 then global_average else
-				(average_rating*total_ratings+global_average*10)/(total_ratings+10) end;
+				(route_average_rating*total_ratings+global_average*10)/(total_ratings+10) end;
 			select coalesce(jsonb_object_agg(dimension_code,average_score),'{}'::jsonb) into averages from (
 				select score.dimension_code,round(avg(score.score)::numeric,2) average_score
 				from content_rating_scores score join content_ratings rating on rating.id=score.rating_id
 				join users actor on actor.id=rating.author_id
-				where rating.object_route_id=target_route_id and rating.status='published' and rating.author_id is distinct from owner_id
+				where rating.object_route_id=target_route_id and rating.status='published' and rating.author_id is distinct from route_owner_id
 				and actor.status='active' and actor.security_score>=40
 				group by score.dimension_code
 			) dimension_summary;
 
-			favorite_score:=normalized_popularity(total_favorites,favorite_threshold);
-			commenter_score:=normalized_popularity(total_commenters,commenter_threshold);
-			download_score:=normalized_popularity(total_downloads,download_threshold);
-			rating_score:=normalized_popularity(total_ratings,rating_threshold);
-			long_term:=case when target_type='minecraft_server'
+			favorite_score:=normalized_popularity(total_favorites,favorite_limit);
+			commenter_score:=normalized_popularity(total_commenters,commenter_limit);
+			download_score:=normalized_popularity(total_downloads,download_limit);
+			rating_score:=normalized_popularity(total_ratings,rating_limit);
+			long_term:=case when route_type='minecraft_server'
 				then 0.50*favorite_score+0.30*commenter_score+0.20*rating_score
 				else 0.40*favorite_score+0.25*commenter_score+0.20*download_score+0.15*rating_score end;
 			select coalesce(sum((favorite_value+comment_value+rating_value+release_value)*
 				power(2::numeric,-(current_date-event_date)::numeric/7)),0) into trend_raw
 			from content_popularity_events_daily where object_route_id=target_route_id and event_date>=current_date-90;
-			trend:=least(1,greatest(0,trend_raw)/trend_threshold);
-			effective_views:=normalized_popularity(total_unique_views,view_threshold)/power(greatest(total_pages,1)::numeric,0.3);
+			trend:=least(1,greatest(0,trend_raw)/trend_limit);
+			effective_views:=normalized_popularity(total_unique_views,view_limit)/power(greatest(total_pages,1)::numeric,0.3);
 			select least(1.5,coalesce(sum(effective_power*power(2::numeric,
 				-extract(epoch from (now()-started_at))/(3600.0*half_life_hours))),0)) into promotion
 			from content_heat_promotions where object_route_id=target_route_id and expires_at>now();
 			quality:=0.85+0.15*least(1,greatest(0,(bayesian-1)/4));
-			new_boost:=1+0.15*power(2::numeric,-greatest(0,extract(epoch from (now()-created_time))/86400.0)/14);
+			new_boost:=1+0.15*power(2::numeric,-greatest(0,extract(epoch from (now()-route_created_at))/86400.0)/14);
 			calculated_heat:=100*(0.45*long_term+0.35*trend+0.10*effective_views+0.10*promotion)*quality*new_boost;
 
 			insert into content_popularity_stats(
@@ -339,7 +334,7 @@ func ratingSchemaStatements() []string {
 				rating_count,rating_sum,rating_average,bayesian_rating,dimension_averages,long_term_score,
 				trend_score,effective_view_score,promotion_score,quality_modifier,new_project_boost,heat_score,updated_at
 			) values(target_route_id,total_views,total_unique_views,total_pages,total_downloads,total_favorites,total_comments,total_commenters,
-				total_ratings,total_rating_score,average_rating,bayesian,averages,long_term,trend,effective_views,promotion,
+				total_ratings,total_rating_score,route_average_rating,bayesian,averages,long_term,trend,effective_views,promotion,
 				quality,new_boost,greatest(0,calculated_heat),now())
 			on conflict(object_route_id) do update set
 				view_count=excluded.view_count,unique_view_count=excluded.unique_view_count,page_count=excluded.page_count,
@@ -377,27 +372,7 @@ func ratingSchemaStatements() []string {
 		$$ language plpgsql`,
 		`create trigger trg_content_ratings_popularity after insert or update or delete on content_ratings
 			for each row execute function refresh_popularity_from_rating()`,
-		`create or replace function refresh_popularity_from_comment() returns trigger as $$
-		declare route_id bigint; owner_id bigint; author_id bigint; trust numeric; old_published boolean; new_published boolean; author_count bigint;
-		begin
-			route_id:=content_route_for_comment(
-				case when tg_op='DELETE' then old.target_type else new.target_type end,
-				case when tg_op='DELETE' then old.target_id else new.target_id end,
-				case when tg_op='DELETE' then old.target_version_id else new.target_version_id end);
-			if route_id is null then if tg_op='DELETE' then return old; end if; return new; end if;
-			author_id:=case when tg_op='DELETE' then old.author_id else new.author_id end;
-			owner_id:=content_target_owner_id(route_id);
-			trust:=coalesce(content_user_trust(author_id),0.2);
-			old_published:=tg_op<>'INSERT' and old.status='published' and old.author_id is distinct from owner_id;
-			new_published:=tg_op<>'DELETE' and new.status='published' and new.author_id is distinct from owner_id;
-			select count(*) into author_count from comments comment where comment.status='published' and comment.author_id=author_id
-			and content_route_for_comment(comment.target_type,comment.target_id,comment.target_version_id)=route_id;
-			if not old_published and new_published and author_count=1 then perform record_popularity_event(route_id,'comment',3*trust);
-			elsif old_published and not new_published and author_count=0 then perform record_popularity_event(route_id,'comment',-3*trust); end if;
-			perform enqueue_content_stats_refresh(route_id,true,true);
-			if tg_op='DELETE' then return old; end if; return new;
-		end;
-		$$ language plpgsql`,
+		contentPopularityCommentRefreshFunctionStatement(),
 		`create trigger trg_comments_popularity after insert or update of status or delete on comments
 			for each row execute function refresh_popularity_from_comment()`,
 		`create or replace function refresh_popularity_from_favorite() returns trigger as $$
@@ -427,4 +402,54 @@ func ratingSchemaStatements() []string {
 		`create trigger trg_favorite_items_popularity after insert or delete on favorite_collection_items
 			for each row execute function refresh_popularity_from_favorite()`,
 	}
+}
+
+func contentRouteForCommentFunctionStatement() string {
+	return `create or replace function content_route_for_comment(kind text,internal_id bigint,version_id bigint) returns bigint as $$
+		select case when content_route_for_comment.kind='mod_resource' then (
+			select route.id from mod_content_versions version
+			join public_routes route on route.entity_type='mod' and route.internal_id=version.mod_id
+			where version.id=content_route_for_comment.version_id
+		) else (
+			select route.id from public_routes route
+			where route.entity_type=content_route_for_comment.kind
+			  and route.internal_id=content_route_for_comment.internal_id
+			  and route.entity_type in ('mod','modpack','plugin','map','resource_pack','shader_pack','datapack','addon','minecraft_server')
+		) end
+	$$ language sql stable`
+}
+
+func contentPopularityCommentRefreshFunctionStatement() string {
+	return `create or replace function refresh_popularity_from_comment() returns trigger as $$
+	declare route_id bigint; owner_id bigint; comment_author_id bigint; trust numeric; old_published boolean; new_published boolean; author_count bigint;
+	begin
+		route_id:=content_route_for_comment(
+			case when tg_op='DELETE' then old.target_type else new.target_type end,
+			case when tg_op='DELETE' then old.target_id else new.target_id end,
+			case when tg_op='DELETE' then old.target_version_id else new.target_version_id end);
+		if route_id is null then if tg_op='DELETE' then return old; end if; return new; end if;
+		comment_author_id:=case when tg_op='DELETE' then old.author_id else new.author_id end;
+		owner_id:=content_target_owner_id(route_id);
+		trust:=coalesce(content_user_trust(comment_author_id),0.2);
+		old_published:=tg_op<>'INSERT' and old.status='published' and old.author_id is distinct from owner_id;
+		new_published:=tg_op<>'DELETE' and new.status='published' and new.author_id is distinct from owner_id;
+		select count(*) into author_count from comments comment
+		where comment.status='published' and comment.author_id=comment_author_id
+		  and content_route_for_comment(comment.target_type,comment.target_id,comment.target_version_id)=route_id;
+		if not old_published and new_published and author_count=1 then perform record_popularity_event(route_id,'comment',3*trust);
+		elsif old_published and not new_published and author_count=0 then perform record_popularity_event(route_id,'comment',-3*trust); end if;
+		perform enqueue_content_stats_refresh(route_id,true,true);
+		if tg_op='DELETE' then return old; end if; return new;
+	end;
+	$$ language plpgsql`
+}
+
+func contentPopularityRefreshFunctionStatement() string {
+	const prefix = "create or replace function refresh_content_popularity("
+	for _, statement := range ratingSchemaStatements() {
+		if strings.HasPrefix(strings.TrimSpace(statement), prefix) {
+			return statement
+		}
+	}
+	panic("refresh_content_popularity schema statement is missing")
 }

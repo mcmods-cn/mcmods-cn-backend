@@ -16,6 +16,7 @@ type seedPermission struct {
 	Module      string
 	Name        string
 	Description string
+	AccessType  string
 }
 
 type seedUser struct {
@@ -31,9 +32,11 @@ type seedRole struct {
 	Description string
 	Weight      int
 	Permissions []string
+	Denials     []string
 }
 
 var seedPermissions = []seedPermission{
+	{Code: "*", Module: "security", Name: "All permissions", Description: "Internal wildcard used by fail-closed security roles.", AccessType: "security"},
 	{Code: "admin.*", Module: "admin", Name: "All administration permissions", Description: "Grants access to every administration capability."},
 	{Code: "admin.access", Module: "admin", Name: "Access administration", Description: "Allows access to the administration console."},
 	{Code: "admin.config.read", Module: "settings", Name: "Read system configuration", Description: "Allows reading system configuration."},
@@ -41,6 +44,9 @@ var seedPermissions = []seedPermission{
 	{Code: "security.anti-abuse.read", Module: "security", Name: "Read anti-abuse events", Description: "Allows viewing anti-abuse summaries, rules and redacted events."},
 	{Code: "security.anti-abuse.write", Module: "security", Name: "Manage anti-abuse controls", Description: "Allows changing anti-abuse rules and restrictions."},
 	{Code: "security.anti-abuse.sensitive", Module: "security", Name: "Read sensitive anti-abuse identifiers", Description: "Allows viewing complete hashed network and device identifiers."},
+	{Code: "security.anti-abuse.rate_multiplier.<num>", Module: "security", Name: "Anti-abuse rate limit allowance", Description: "Numeric permission; replace <num> with the percentage of the normal request-count allowance."},
+	{Code: "security.anti-abuse.rate_multiplier.100", Module: "security", Name: "Anti-abuse rate limit allowance: 100%", Description: "Default request-count allowance for registered users."},
+	{Code: "security.anti-abuse.rate_multiplier.review_submit.<num>", Module: "security", Name: "Review submission rate limit allowance", Description: "Numeric permission; replace <num> with the percentage allowance for review.submit requests."},
 
 	{Code: "user.read", Module: "user", Name: "Read users", Description: "Allows reading user accounts and login information."},
 	{Code: "user.write", Module: "user", Name: "Manage users", Description: "Allows modifying user accounts, status and security settings."},
@@ -115,6 +121,14 @@ var seedPermissions = []seedPermission{
 	{Code: "content.write", Module: "content", Name: "Manage content", Description: "Allows creating and editing site content."},
 	{Code: "content.no-review", Module: "content", Name: "Bypass content review", Description: "Allows catalog and localized content changes to publish without review."},
 	{Code: "content.translate", Module: "content", Name: "Translate content", Description: "Allows requesting quota-backed AI translations for unsupported content languages."},
+	{Code: "global_resource.list", Module: "content", Name: "List global resources", Description: "Allows browsing the administration-only global resource directory."},
+	{Code: "global_resource.view", Module: "content", Name: "View global resources", Description: "Allows reading administration-only global resource technical details."},
+	{Code: "global_resource.binding.view", Module: "content", Name: "View global resource bindings", Description: "Allows reading the projects and data versions bound to a global resource."},
+	{Code: "log_share.list", Module: "log_share", Name: "List log shares", Description: "Allows administrators to list sanitized log shares."},
+	{Code: "log_share.view", Module: "log_share", Name: "View log shares", Description: "Allows administrators to inspect sanitized log-share metadata and content."},
+	{Code: "log_share.moderate", Module: "log_share", Name: "Moderate log shares", Description: "Allows administrators to moderate sanitized log shares."},
+	{Code: "log_share.delete", Module: "log_share", Name: "Delete log shares", Description: "Allows administrators to invalidate another user's log share."},
+	{Code: "log_share.redaction_reprocess", Module: "log_share", Name: "Reprocess log redaction", Description: "Allows administrators to request redaction with the current rule version."},
 	{Code: "rating.create", Module: "rating", Name: "Rate projects", Description: "Allows submitting, updating and removing the account's own project and server ratings."},
 	{Code: "rating.read", Module: "rating", Name: "Read rating details", Description: "Allows opening the individual ratings and messages submitted by other users."},
 	{Code: "community.tutorial.create", Module: "community", Name: "Publish tutorials", Description: "Allows submitting tutorials."},
@@ -151,8 +165,29 @@ var seedPermissions = []seedPermission{
 	{Code: "comment.edit.own", Module: "comment", Name: "Edit own comments", Description: "Allows editing comments authored by the current user."},
 	{Code: "comment.delete.own", Module: "comment", Name: "Delete own comments", Description: "Allows deleting comments authored by the current user."},
 	{Code: "comment.react", Module: "comment", Name: "React to comments", Description: "Allows adding and removing reactions on comments."},
-	{Code: "comment.report", Module: "comment", Name: "Report comments", Description: "Allows submitting a comment report."},
-	{Code: "comment.report.review", Module: "comment", Name: "Review comment reports", Description: "Allows reading and resolving the global comment report queue."},
+	{Code: "report.create", Module: "moderation", Name: "Create reports", Description: "Allows reporting supported site content, comments and profiles.", AccessType: "write"},
+	{Code: "report.view_own", Module: "moderation", Name: "View own reports", Description: "Allows reading reports created by the current user."},
+	{Code: "report.review", Module: "moderation", Name: "Review reports", Description: "Allows claiming and resolving the report queue.", AccessType: "moderation"},
+	{Code: "report.snapshot.view", Module: "moderation", Name: "View report snapshots", Description: "Allows viewing immutable reported-content snapshots.", AccessType: "moderation"},
+	{Code: "report.evidence.view", Module: "moderation", Name: "View report evidence", Description: "Allows issuing short-lived access to private evidence.", AccessType: "security"},
+	{Code: "report.action.delete", Module: "moderation", Name: "Delete reported content", Description: "Allows applying the normal deletion flow from a report.", AccessType: "moderation"},
+	{Code: "report.action.ban", Module: "moderation", Name: "Ban reported users", Description: "Allows creating ban records from a valid report.", AccessType: "moderation"},
+	{Code: "report.action.reopen", Module: "moderation", Name: "Reopen reports", Description: "Allows reopening a resolved report.", AccessType: "moderation"},
+	{Code: "ban.create", Module: "moderation", Name: "Create bans", Description: "Allows temporary and permanent account bans.", AccessType: "moderation"},
+	{Code: "ban.revoke", Module: "moderation", Name: "Revoke bans", Description: "Allows ending an active account ban.", AccessType: "moderation"},
+	{Code: "ban.view_internal", Module: "moderation", Name: "View internal ban notes", Description: "Allows reading non-public moderation notes.", AccessType: "security"},
+	{Code: "account.banned", Module: "security", Name: "Account is banned", Description: "Marker permission used by the mutation firewall.", AccessType: "security"},
+	{Code: "site_affairs.about.manage", Module: "site_affairs", Name: "Manage about page", Description: "Allows editing localized about-site content.", AccessType: "administration"},
+	{Code: "site_affairs.changelog.manage", Module: "site_affairs", Name: "Manage site changelog", Description: "Allows publishing localized site changelog entries.", AccessType: "administration"},
+	{Code: "seed_crawler.view", Module: "automation", Name: "View seed crawler", Description: "Allows viewing crawler configuration and runs."},
+	{Code: "seed_crawler.configure", Module: "automation", Name: "Configure seed crawler", Description: "Allows changing seed crawler policy.", AccessType: "administration"},
+	{Code: "seed_crawler.run", Module: "automation", Name: "Run seed crawler", Description: "Allows dry-running or scheduling the seed crawler.", AccessType: "administration"},
+	{Code: "project.auto_update.view", Module: "automation", Name: "View project auto update", Description: "Allows viewing update settings and runs."},
+	{Code: "project.auto_update.configure", Module: "automation", Name: "Configure project auto update", Description: "Allows configuring updates for an authorized project.", AccessType: "write"},
+	{Code: "project.auto_update.run", Module: "automation", Name: "Run project auto update", Description: "Allows checking an authorized project immediately.", AccessType: "write"},
+	{Code: "project.auto_update.view_logs", Module: "automation", Name: "View project update logs", Description: "Allows reading update execution logs."},
+	{Code: "project.auto_update.redistribution_override", Module: "automation", Name: "Override redistribution policy", Description: "Allows documented license overrides.", AccessType: "administration"},
+	{Code: "project.external_source.bind", Module: "automation", Name: "Bind external project source", Description: "Allows binding a verified external source.", AccessType: "write"},
 	{Code: "comment.watch", Module: "comment", Name: "Watch comments", Description: "Allows watching comment branches for replies."},
 	{Code: "comment.moderate", Module: "comment", Name: "Moderate all comments", Description: "Allows editing and deleting comments on every target."},
 	{Code: "comment.pin", Module: "comment", Name: "Pin all comments", Description: "Allows pinning root comments on every target."},
@@ -165,16 +200,17 @@ var seedPermissions = []seedPermission{
 var seedRoles = []seedRole{
 	{
 		Code: "registered", Name: "Registered user", Description: "Default permissions granted to a registered account.", Weight: 10,
-		Permissions: []string{"comment.create", "comment.edit.own", "comment.delete.own", "comment.react", "comment.report", "comment.watch", "content.translate", "rating.create", "rating.read", "shop.read", "shop.purchase", "shop.use", "shop.project_heat_boost.purchase", "shop.project_heat_boost.use", "shop.server_heat_boost.purchase", "shop.server_heat_boost.use", "user.ai.daily_token_limit.20000", "user.draft.retention_seconds.2592000", "community.tutorial.create", "community.issue.create", "community.discussion.create", "modpack.create"},
+		Permissions: []string{"comment.create", "comment.edit.own", "comment.delete.own", "comment.react", "comment.watch", "report.create", "report.view_own", "content.translate", "rating.create", "rating.read", "shop.read", "shop.purchase", "shop.use", "shop.project_heat_boost.purchase", "shop.project_heat_boost.use", "shop.server_heat_boost.purchase", "shop.server_heat_boost.use", "user.ai.daily_token_limit.20000", "user.draft.retention_seconds.2592000", "security.anti-abuse.rate_multiplier.100", "community.tutorial.create", "community.issue.create", "community.discussion.create", "modpack.create"},
 	},
 	{
 		Code: "project_owner.[ProjectID]", Name: "Project owner", Description: "Default project-scoped owner permissions.", Weight: 100,
-		Permissions: []string{"project.edit.<projectID>", "project.comment.moderate.<projectID>", "project.comment.pin.<projectID>", "project.comment.role.owner.<projectID>"},
+		Permissions: []string{"project.edit.<projectID>", "project.review.<projectID>", "project.comment.moderate.<projectID>", "project.comment.pin.<projectID>", "project.comment.role.owner.<projectID>"},
 	},
 	{
 		Code: "project_editor.[ProjectID]", Name: "Project editor", Description: "Default project-scoped editor permissions.", Weight: 50,
-		Permissions: []string{"project.edit.<projectID>", "project.comment.role.editor.<projectID>"},
+		Permissions: []string{"project.edit.<projectID>", "project.review.<projectID>", "project.comment.role.editor.<projectID>"},
 	},
+	{Code: "banned", Name: "Banned account", Description: "High-priority fail-closed denial role applied without removing existing roles.", Weight: 2_000_000_000, Permissions: []string{"account.banned"}, Denials: []string{"*"}},
 }
 
 var seedUsers = []seedUser{
@@ -196,9 +232,15 @@ var seedUsers = []seedUser{
 			"ai.read", "ai.write", "ai.task.enqueue", "ai.task.consume",
 			"notification.system.publish", "notification.translate",
 			"content.review", "content.write", "content.no-review", "content.translate",
+			"global_resource.list", "global_resource.view", "global_resource.binding.view",
+			"log_share.list", "log_share.view", "log_share.moderate", "log_share.delete", "log_share.redaction_reprocess",
 			"reference.unresolved.read",
 			"server.create", "server.create.no-review", "server.review",
 			"project.create", "project.edit", "project.review",
+			"report.review", "report.snapshot.view", "report.evidence.view", "report.action.delete", "report.action.ban", "report.action.reopen",
+			"ban.create", "ban.revoke", "ban.view_internal", "site_affairs.about.manage", "site_affairs.changelog.manage",
+			"seed_crawler.view", "seed_crawler.configure", "seed_crawler.run",
+			"project.auto_update.view", "project.auto_update.configure", "project.auto_update.run", "project.auto_update.view_logs", "project.auto_update.redistribution_override", "project.external_source.bind",
 		},
 	},
 	{
@@ -217,14 +259,15 @@ func SeedRBAC(ctx context.Context, db *pgxpool.Pool) error {
 	for _, permission := range seedPermissions {
 		_, err := db.Exec(
 			ctx,
-			`insert into permissions (code, module, name, description)
-			 values ($1, $2, $3, $4)
+			`insert into permissions (code, module, name, description, access_type)
+			 values ($1, $2, $3, $4, $5)
 			 on conflict (code) do update
-			 set module = excluded.module, name = excluded.name, description = excluded.description`,
+			 set module = excluded.module, name = excluded.name, description = excluded.description, access_type=excluded.access_type`,
 			permission.Code,
 			permission.Module,
 			permission.Name,
 			permission.Description,
+			seedPermissionAccessType(permission),
 		)
 		if err != nil {
 			return err
@@ -233,10 +276,43 @@ func SeedRBAC(ctx context.Context, db *pgxpool.Pool) error {
 	if err := seedDefaultRoles(ctx, db); err != nil {
 		return err
 	}
+	if err := seedProjectReviewPermissions(ctx, db); err != nil {
+		return err
+	}
 	if err := seedPermissionDefaults(ctx, db); err != nil {
 		return err
 	}
+	if err := seedGovernanceAutomationDefaults(ctx, db); err != nil {
+		return err
+	}
 	return seedDefaultUsers(ctx, db)
+}
+
+// Existing concrete project roles may predate a newly added template
+// permission. Keep those role instances aligned with the owner/editor
+// templates without requiring a destructive database reset.
+func seedProjectReviewPermissions(ctx context.Context, db *pgxpool.Pool) error {
+	if _, err := db.Exec(ctx, `insert into permissions(code,module,name,description)
+		select distinct 'project.review.' || split_part(role.code,'.',2),'project','Review one project',
+		       'Project-scoped permission generated from the owner/editor role template.'
+		from roles role
+		where (role.code like 'project_owner.%' or role.code like 'project_editor.%')
+		  and split_part(role.code,'.',2) <> ''
+		  and array_length(string_to_array(role.code,'.'),1)=2
+		  and position('[' in role.code)=0 and position('<' in role.code)=0
+		on conflict(code) do nothing`); err != nil {
+		return err
+	}
+	_, err := db.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow,updated_at)
+		select role.id,permission.id,true,now()
+		from roles role
+		join permissions permission on permission.code='project.review.' || split_part(role.code,'.',2)
+		where (role.code like 'project_owner.%' or role.code like 'project_editor.%')
+		  and split_part(role.code,'.',2) <> ''
+		  and array_length(string_to_array(role.code,'.'),1)=2
+		  and position('[' in role.code)=0 and position('<' in role.code)=0
+		on conflict(role_id,permission_id) do nothing`)
+	return err
 }
 
 func seedDefaultRoles(ctx context.Context, db *pgxpool.Pool) error {
@@ -254,6 +330,13 @@ func seedDefaultRoles(ctx context.Context, db *pgxpool.Pool) error {
 			if _, err := db.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow,updated_at)
 				select $1,id,true,now() from permissions where code=$2
 				on conflict(role_id,permission_id) do nothing`, roleID, permission); err != nil {
+				return err
+			}
+		}
+		for _, permission := range role.Denials {
+			if _, err := db.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow,updated_at)
+				select $1,id,false,now() from permissions where code=$2
+				on conflict(role_id,permission_id) do update set allow=false,updated_at=now()`, roleID, permission); err != nil {
 				return err
 			}
 		}

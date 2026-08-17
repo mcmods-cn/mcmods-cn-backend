@@ -99,6 +99,10 @@ func (s *Server) catalogEntityContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load localized content")
 		return
 	}
+	if entity.EntityType == "resource" && !claimsAllow(currentClaims(r), "global_resource.view") {
+		writeError(w, http.StatusNotFound, "localized content subject does not exist")
+		return
+	}
 
 	primary, secondary := s.requestContentLocales(r)
 	if requested := normalizeContentLocale(r.URL.Query().Get("locale")); requested != "" {
@@ -539,7 +543,7 @@ func (s *Server) catalogContentCanonicalPath(ctx context.Context, entityType, pu
 	case "skin":
 		return "/skins/" + escapedID
 	case "resource":
-		return "/catalog/resources?publicId=" + escapedID
+		return "/admin/global-resources?publicId=" + escapedID
 	case "tag":
 		return "/mods-tag?publicId=" + escapedID
 	case "recipe_type":

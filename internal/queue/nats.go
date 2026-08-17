@@ -2,8 +2,11 @@ package queue
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +28,7 @@ type Status struct {
 	SubjectPrefix string                  `json:"subjectPrefix"`
 	Tasks         []config.NATSTaskConfig `json:"tasks"`
 	LastError     string                  `json:"lastError,omitempty"`
+	JetStream     bool                    `json:"jetStream"`
 }
 
 type taskHandler func(context.Context, []byte) error
@@ -34,12 +38,22 @@ type subscriptionDefinition struct {
 	handler  taskHandler
 }
 
+type DeadLetter struct {
+	EventID, EventType, TaskCode, FailureStage, LastError string
+	Payload                                               []byte
+	Attempts                                              int
+}
+
+type DeadLetterSink func(context.Context, DeadLetter) error
+
 type Client struct {
-	mu            sync.RWMutex
-	cfg           config.NATSConfig
-	conn          *nats.Conn
-	lastError     string
-	subscriptions map[string]subscriptionDefinition
+	mu             sync.RWMutex
+	cfg            config.NATSConfig
+	conn           *nats.Conn
+	jetStream      nats.JetStreamContext
+	lastError      string
+	subscriptions  map[string]subscriptionDefinition
+	deadLetterSink DeadLetterSink
 }
 
 func New(ctx context.Context, cfg config.NATSConfig) *Client {
@@ -50,6 +64,15 @@ func New(ctx context.Context, cfg config.NATSConfig) *Client {
 		client.Close()
 	}()
 	return client
+}
+
+func (c *Client) SetDeadLetterSink(sink DeadLetterSink) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.deadLetterSink = sink
+	c.mu.Unlock()
 }
 
 func DefaultTaskConfigs() []config.NATSTaskConfig {
@@ -104,6 +127,18 @@ func NormalizeConfig(cfg config.NATSConfig) config.NATSConfig {
 	}
 	cfg.Username = strings.TrimSpace(cfg.Username)
 	cfg.SubjectPrefix = cleanSubjectToken(cfg.SubjectPrefix, "mcmods")
+	if strings.TrimSpace(cfg.JetStream.Stream) == "" {
+		cfg.JetStream.Stream = "MCMODS_TASKS"
+	}
+	if cfg.JetStream.MaxDeliver <= 0 {
+		cfg.JetStream.MaxDeliver = 8
+	}
+	if cfg.JetStream.AckWait <= 0 {
+		cfg.JetStream.AckWait = 5 * time.Minute
+	}
+	if cfg.JetStream.PublishTimeout <= 0 {
+		cfg.JetStream.PublishTimeout = 5 * time.Second
+	}
 	useDefaultTasks := cfg.Tasks == nil
 	if useDefaultTasks {
 		cfg.Tasks = DefaultTaskConfigs()
@@ -157,11 +192,20 @@ func (c *Client) Reconfigure(cfg config.NATSConfig) error {
 	if cfg.Enabled {
 		nextConn, connectErr = c.connect(cfg)
 	}
+	var nextJetStream nats.JetStreamContext
+	if connectErr == nil && nextConn != nil && cfg.JetStream.Enabled {
+		nextJetStream, connectErr = initializeJetStream(nextConn, cfg)
+		if connectErr != nil {
+			nextConn.Close()
+			nextConn = nil
+		}
+	}
 
 	c.mu.Lock()
 	previousConn := c.conn
 	c.cfg = cfg
 	c.conn = nextConn
+	c.jetStream = nextJetStream
 	if connectErr != nil {
 		c.lastError = connectErr.Error()
 	} else {
@@ -241,6 +285,7 @@ func (c *Client) Status() Status {
 		SubjectPrefix: c.cfg.SubjectPrefix,
 		Tasks:         append([]config.NATSTaskConfig(nil), c.cfg.Tasks...),
 		LastError:     c.lastError,
+		JetStream:     c.jetStream != nil,
 	}
 }
 
@@ -263,10 +308,115 @@ func (c *Client) PublishTask(ctx context.Context, taskCode string, payload any) 
 	if err != nil {
 		return err
 	}
+	return c.publishRaw(ctx, conn, cfg, task, randomEventID(), raw)
+}
+
+type broadcastHandler func(context.Context, string, []byte)
+
+// PublishEvent publishes an already-encoded event envelope. JetStream's
+// acknowledgement is required before the caller may mark an outbox row sent.
+func (c *Client) PublishEvent(ctx context.Context, taskCode, eventID string, raw []byte) error {
+	if c == nil {
+		return ErrUnavailable
+	}
+	c.mu.RLock()
+	conn, cfg, js := c.conn, c.cfg, c.jetStream
+	task, exists := findTask(cfg.Tasks, taskCode)
+	c.mu.RUnlock()
+	if !exists || !task.Enabled {
+		return ErrTaskDisabled
+	}
+	if conn == nil || !conn.IsConnected() {
+		return ErrUnavailable
+	}
+	if strings.TrimSpace(eventID) == "" {
+		return errors.New("event ID is required")
+	}
+	if js != nil {
+		message := nats.NewMsg(fullSubject(cfg.SubjectPrefix, task.Subject))
+		message.Data = raw
+		message.Header.Set(nats.MsgIdHdr, eventID)
+		message.Header.Set("MCMods-Event-ID", eventID)
+		publishCtx, cancel := context.WithTimeout(ctx, cfg.JetStream.PublishTimeout)
+		defer cancel()
+		_, err := js.PublishMsg(message, nats.Context(publishCtx))
+		c.setLastError(err)
+		return err
+	}
+	return c.publishRaw(ctx, conn, cfg, task, eventID, raw)
+}
+
+// HandleLocally is the reliable no-JetStream fallback used by the PostgreSQL
+// outbox dispatcher. Core NATS may still be used as a wake-up signal, but the
+// task is processed from the claimed database row before it is marked sent.
+func (c *Client) HandleLocally(ctx context.Context, taskCode, eventID string, raw []byte) error {
+	if c == nil {
+		return ErrUnavailable
+	}
+	c.mu.RLock()
+	definition, ok := c.subscriptions[cleanTaskCode(taskCode)]
+	c.mu.RUnlock()
+	if !ok {
+		return ErrUnavailable
+	}
+	payload, envelope := UnwrapEvent(raw)
+	if envelope != nil {
+		eventID = envelope.EventID
+	}
+	return definition.handler(WithEventID(ctx, eventID), payload)
+}
+
+func (c *Client) PublishBroadcast(ctx context.Context, subject string, payload any) error {
+	if c == nil {
+		return ErrUnavailable
+	}
+	c.mu.RLock()
+	conn, cfg := c.conn, c.cfg
+	c.mu.RUnlock()
+	if conn == nil || !conn.IsConnected() || !cfg.Realtime {
+		return ErrUnavailable
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
 	done := make(chan error, 1)
 	go func() {
-		done <- conn.Publish(fullSubject(cfg.SubjectPrefix, task.Subject), raw)
+		done <- conn.Publish(fullSubject(cfg.SubjectPrefix, "realtime."+cleanSubjectToken(subject, "event")), raw)
 	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err = <-done:
+		return err
+	}
+}
+
+func (c *Client) SubscribeBroadcast(subject string, handler broadcastHandler) error {
+	if c == nil || handler == nil {
+		return ErrUnavailable
+	}
+	c.mu.RLock()
+	conn, cfg := c.conn, c.cfg
+	c.mu.RUnlock()
+	if conn == nil || !conn.IsConnected() || !cfg.Realtime {
+		return ErrUnavailable
+	}
+	_, err := conn.Subscribe(fullSubject(cfg.SubjectPrefix, "realtime."+cleanSubjectToken(subject, ">")), func(message *nats.Msg) {
+		handler(context.Background(), message.Subject, message.Data)
+	})
+	if err == nil {
+		err = conn.Flush()
+	}
+	return err
+}
+
+func (c *Client) publishRaw(ctx context.Context, conn *nats.Conn, cfg config.NATSConfig, task config.NATSTaskConfig, eventID string, raw []byte) error {
+	message := nats.NewMsg(fullSubject(cfg.SubjectPrefix, task.Subject))
+	message.Data = raw
+	message.Header.Set("MCMods-Event-ID", eventID)
+	done := make(chan error, 1)
+	go func() { done <- conn.PublishMsg(message) }()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -297,7 +447,7 @@ func (c *Client) SubscribeTask(taskCode string, handler taskHandler) error {
 
 func (c *Client) subscribe(definition subscriptionDefinition) error {
 	c.mu.RLock()
-	conn := c.conn
+	conn, js := c.conn, c.jetStream
 	cfg := c.cfg
 	task, exists := findTask(cfg.Tasks, definition.taskCode)
 	c.mu.RUnlock()
@@ -308,17 +458,65 @@ func (c *Client) subscribe(definition subscriptionDefinition) error {
 		return ErrUnavailable
 	}
 	sem := make(chan struct{}, task.MaxConcurrent)
-	_, err := conn.QueueSubscribe(fullSubject(cfg.SubjectPrefix, task.Subject), task.QueueGroup, func(msg *nats.Msg) {
+	handle := func(msg *nats.Msg) {
 		sem <- struct{}{}
 		go func() {
 			defer func() { <-sem }()
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(task.TimeoutSeconds)*time.Second)
 			defer cancel()
-			if err := definition.handler(ctx, msg.Data); err != nil {
+			payload, envelope := UnwrapEvent(msg.Data)
+			eventID := msg.Header.Get("MCMods-Event-ID")
+			if envelope != nil {
+				eventID = envelope.EventID
+			}
+			ctx = WithEventID(ctx, eventID)
+			if err := definition.handler(ctx, payload); err != nil {
 				c.setLastError(err)
+				if js != nil {
+					metadata, _ := msg.Metadata()
+					if metadata != nil && int(metadata.NumDelivered) >= cfg.JetStream.MaxDeliver {
+						c.mu.RLock()
+						sink := c.deadLetterSink
+						c.mu.RUnlock()
+						if eventID == "" {
+							eventID = randomEventID()
+						}
+						eventType := definition.taskCode + ".failed"
+						if envelope != nil && envelope.EventType != "" {
+							eventType = envelope.EventType
+						}
+						if sink != nil && sink(ctx, DeadLetter{
+							EventID: eventID, EventType: eventType, TaskCode: definition.taskCode,
+							FailureStage: "consumer:" + definition.taskCode, LastError: err.Error(),
+							Payload: msg.Data, Attempts: int(metadata.NumDelivered),
+						}) != nil {
+							_ = msg.Nak()
+							return
+						}
+						dead := nats.NewMsg(fullSubject(cfg.SubjectPrefix, "dead-letter."+definition.taskCode))
+						dead.Data, dead.Header = msg.Data, msg.Header
+						_, _ = js.PublishMsg(dead)
+						_ = msg.Term()
+					} else {
+						_ = msg.Nak()
+					}
+				}
+				return
+			}
+			if js != nil {
+				_ = msg.Ack()
 			}
 		}()
-	})
+	}
+	var err error
+	if js != nil {
+		durable := cleanDurable(task.QueueGroup)
+		_, err = js.QueueSubscribe(fullSubject(cfg.SubjectPrefix, task.Subject), task.QueueGroup, handle,
+			nats.Durable(durable), nats.ManualAck(), nats.AckExplicit(), nats.AckWait(cfg.JetStream.AckWait),
+			nats.MaxDeliver(cfg.JetStream.MaxDeliver), nats.BindStream(cfg.JetStream.Stream))
+	} else {
+		_, err = conn.QueueSubscribe(fullSubject(cfg.SubjectPrefix, task.Subject), task.QueueGroup, handle)
+	}
 	if err != nil {
 		c.setLastError(err)
 		return err
@@ -328,6 +526,37 @@ func (c *Client) subscribe(definition subscriptionDefinition) error {
 		return err
 	}
 	return nil
+}
+
+func initializeJetStream(conn *nats.Conn, cfg config.NATSConfig) (nats.JetStreamContext, error) {
+	js, err := conn.JetStream()
+	if err != nil {
+		return nil, err
+	}
+	subject := fullSubject(cfg.SubjectPrefix, ">")
+	streamCfg := &nats.StreamConfig{Name: cfg.JetStream.Stream, Subjects: []string{subject}, Retention: nats.LimitsPolicy, Storage: nats.FileStorage, Duplicates: 10 * time.Minute}
+	if _, err = js.StreamInfo(cfg.JetStream.Stream); errors.Is(err, nats.ErrStreamNotFound) {
+		_, err = js.AddStream(streamCfg)
+	} else if err == nil {
+		_, err = js.UpdateStream(streamCfg)
+	}
+	return js, err
+}
+
+func randomEventID() string {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(value)
+}
+
+func cleanDurable(value string) string {
+	value = strings.NewReplacer(".", "-", " ", "-").Replace(strings.TrimSpace(value))
+	if value == "" {
+		return "mcmods-workers"
+	}
+	return value
 }
 
 func (c *Client) setLastError(err error) {

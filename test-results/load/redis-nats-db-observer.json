@@ -1,0 +1,10 @@
+{
+  "startedAt": "2026-08-16T03:36:17.7175233Z",
+  "durationSeconds": 30,
+  "samples": 107,
+  "maxConnections": 15,
+  "maxActive": 2,
+  "maxLockWaiters": 0,
+  "maxSlowQueries": 0,
+  "errors": 0
+}
