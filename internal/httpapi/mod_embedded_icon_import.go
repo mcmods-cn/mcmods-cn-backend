@@ -328,6 +328,13 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 	if len(namespaces) == 0 {
 		return errors.New("catalog contains no importable resources")
 	}
+	paused, err := s.pauseCatalogImportForMODIDConfirmation(ctx, jobID, runToken, modID, expectedHash, embeddedImportNamespaceCounts(entries))
+	if err != nil {
+		return err
+	}
+	if paused {
+		return nil
+	}
 	manifestJSON, _ := json.Marshal(map[string]any{
 		"source": source, "format": "jsonl", "entryCount": len(entries), "namespaces": namespaces,
 		"iconSizes": []int{32, 128, 256},

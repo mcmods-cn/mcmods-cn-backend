@@ -184,6 +184,14 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	if err = blueprintWorker.Start(ctx); err != nil {
 		log.Printf("blueprint worker unavailable; queued jobs remain recoverable: %v", err)
 	}
+	favoriteExportWorker := httpapi.NewFavoriteModpackExportWorker(cfg, db, queueClient)
+	if err = favoriteExportWorker.Start(ctx); err != nil {
+		log.Printf("favorite Modrinth export worker unavailable; database scanner remains enabled: %v", err)
+	}
+	projectUpdateWorker := httpapi.NewProjectUpdateNotificationWorker(db, queueClient, sharedCache)
+	if err = projectUpdateWorker.Start(ctx); err != nil {
+		log.Printf("project update notification queue unavailable; database scanner remains enabled: %v", err)
+	}
 	outboxDispatcher := queue.NewOutboxDispatcher(db, queueClient, natsCfg.OutboxEnabled)
 	outboxDispatcher.Start(ctx)
 	searchClient := searchindex.New(cfg.Typesense)

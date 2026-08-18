@@ -7,9 +7,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 81
+const schemaGeneration = 82
 
-// Migrate installs one coherent development schema. Generation 81 is the
+// Migrate installs one coherent development schema. Generation 82 is the
 // current pre-production baseline. Older development databases are
 // intentionally reset instead of upgraded or backfilled.
 // Generation 74 established
@@ -72,6 +72,9 @@ const schemaGeneration = 81
 // Generation 81 introduces the seeded autobot service identity for early-data
 // ingestion and project automation, records that identity on worker runs, and
 // persists reversible inactivity-based project maintenance status decisions.
+// Generation 82 adds localized notification snapshots, deterministic
+// collection-to-mrpack export jobs, MODID import confirmations, the sticker
+// catalog and unified project update subscriptions.
 // Generation 74 repaired the popularity refresh function
 // without replacing its persisted facts or queue. Earlier development data is
 // intentionally not migrated and must be reset before installation.
@@ -161,6 +164,7 @@ func schemaInstallationStatements() []string {
 	statements = append(statements, infrastructureSchemaStatements()...)
 	statements = append(statements, featureUpdateSchemaStatements()...)
 	statements = append(statements, governanceAutomationSchemaStatements()...)
+	statements = append(statements, engagementExportSchemaStatements()...)
 	return append(statements, foreignKeyIndexStatement())
 }
 

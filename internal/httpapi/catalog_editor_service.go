@@ -255,7 +255,10 @@ func appendCatalogPublishedReviewEventTx(ctx context.Context, tx pgx.Tx, request
 	ip, userAgent, _ := auditRequestValues(r)
 	_, err = tx.Exec(ctx, `insert into review_events(change_request_id,event_type,actor_id,actor_snapshot,note,ip,user_agent)
 		values($1,'published',$2,$3,$4,$5,$6)`, requestID, nullableActorID(actorID), actorSnapshot, note, ip, userAgent)
-	return err
+	if err != nil {
+		return err
+	}
+	return appendReviewedProjectUpdateEventTx(ctx, tx, requestID, actorID)
 }
 
 func publishCatalogEditorSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int64, raw []byte, actorID int64) error {

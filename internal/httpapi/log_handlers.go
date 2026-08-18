@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"mcmods-cn-backend/internal/runtimelog"
 )
 
 type responseRecorder struct {
@@ -31,6 +33,8 @@ type logQueryFilter struct {
 	To       string
 	Limit    int
 }
+
+var appLogRetentionCategories = []string{"system", "user_interaction", "admin_operation", "api_access", "ai_call", "download"}
 
 func (r *responseRecorder) WriteHeader(status int) {
 	r.status = status
@@ -57,6 +61,12 @@ func (s *Server) logAccess(next http.Handler) http.Handler {
 		started := time.Now()
 		recorder := &responseRecorder{ResponseWriter: w}
 		next.ServeHTTP(recorder, r)
+		// Runtime-log polling is intentionally absent from API access logs. The
+		// endpoint reads an in-memory ring buffer; recording every poll would turn
+		// observability into a continuous PostgreSQL write source.
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/admin/runtime-logs" {
+			return
+		}
 		status := recorder.status
 		if status == 0 {
 			status = http.StatusOK
@@ -73,6 +83,55 @@ func (s *Server) logAccess(next http.Handler) http.Handler {
 			s.recordRequestActivity(r, annotation)
 		}
 	})
+}
+
+type runtimeLogResponse struct {
+	Items       []runtimelog.Entry `json:"items"`
+	LastID      uint64             `json:"lastId"`
+	OldestID    uint64             `json:"oldestId"`
+	ResetNeeded bool               `json:"resetNeeded"`
+}
+
+func (s *Server) adminRuntimeLogs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	level := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("level")))
+	if level != "" && level != "info" && level != "warn" && level != "error" {
+		writeError(w, http.StatusBadRequest, "invalid runtime log level")
+		return
+	}
+	afterID, _ := strconv.ParseUint(strings.TrimSpace(r.URL.Query().Get("afterId")), 10, 64)
+	limit := boundedLimit(r.URL.Query().Get("limit"), 300, 1000)
+	from, hasFrom := parseLogTime(r.URL.Query().Get("from"), false)
+	to, hasTo := parseLogTime(r.URL.Query().Get("to"), true)
+
+	all := runtimelog.Entries()
+	response := runtimeLogResponse{Items: make([]runtimelog.Entry, 0, min(limit, len(all)))}
+	if len(all) > 0 {
+		response.OldestID = all[0].ID
+		response.LastID = all[len(all)-1].ID
+		response.ResetNeeded = afterID > 0 && afterID < response.OldestID-1
+	}
+	for _, item := range all {
+		if afterID > 0 && item.ID <= afterID {
+			continue
+		}
+		if level != "" && item.Level != level {
+			continue
+		}
+		if hasFrom && item.CreatedAt.Before(from) || hasTo && item.CreatedAt.After(to) {
+			continue
+		}
+		item.Line, _ = redactLogText(item.Line)
+		if query != "" && !strings.Contains(strings.ToLower(item.Line), query) {
+			continue
+		}
+		response.Items = append(response.Items, item)
+	}
+	if len(response.Items) > limit {
+		response.Items = response.Items[len(response.Items)-limit:]
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) adminLogs(w http.ResponseWriter, r *http.Request) {
@@ -384,22 +443,30 @@ func defaultLogConfig() logRetentionConfig {
 			"permission_change": 1095,
 			"admin_operation":   365,
 			"file_upload":       365,
+			"file_scan":         365,
 			"ai_call":           180,
 			"system":            180,
 			"user_interaction":  180,
+			"download":          90,
 		},
 	}
 }
 
 func normalizeLogConfig(payload logRetentionConfig) logRetentionConfig {
+	defaults := defaultLogConfig()
 	if payload.DefaultDays <= 0 {
-		payload.DefaultDays = 180
+		payload.DefaultDays = defaults.DefaultDays
 	}
 	if payload.DefaultDays > 3650 {
 		payload.DefaultDays = 3650
 	}
 	if payload.CategoryDays == nil {
 		payload.CategoryDays = map[string]int{}
+	}
+	for category, days := range defaults.CategoryDays {
+		if _, exists := payload.CategoryDays[category]; !exists {
+			payload.CategoryDays[category] = days
+		}
 	}
 	for category, days := range payload.CategoryDays {
 		category = strings.TrimSpace(category)
@@ -435,7 +502,7 @@ func (s *Server) cleanupLogs(ctx context.Context, cfg logRetentionConfig) map[st
 		}
 		return cfg.DefaultDays
 	}
-	for _, category := range []string{"system", "user_interaction", "admin_operation", "api_access", "ai_call"} {
+	for _, category := range appLogRetentionCategories {
 		run(category, `delete from app_logs where category = $1 and created_at < now() - make_interval(days => $2::int)`, category, daysFor(category))
 	}
 	run("permission_change", `delete from permission_audit_logs where created_at < now() - make_interval(days => $1::int)`, daysFor("permission_change"))

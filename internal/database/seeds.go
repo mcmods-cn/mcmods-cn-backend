@@ -120,6 +120,14 @@ var seedPermissions = []seedPermission{
 	{Code: "ai.task.consume", Module: "ai", Name: "Consume AI tasks", Description: "Allows workers to consume asynchronous AI work."},
 	{Code: "notification.system.publish", Module: "notification", Name: "Publish system notifications", Description: "Allows publishing a system notification to users."},
 	{Code: "notification.translate", Module: "notification", Name: "Translate notifications", Description: "Allows AI translation of received notifications."},
+	{Code: "notification.template.manage", Module: "notification", Name: "Manage notification templates", Description: "Allows editing localized system notification templates."},
+	{Code: "favorite.modpack_export", Module: "favorite", Name: "Export favorite collection", Description: "Allows exporting compatible favorite Mods as a Modrinth modpack."},
+	{Code: "favorite.modpack_export.view_own", Module: "favorite", Name: "View own export reports", Description: "Allows reading the account's own collection export tasks and reports."},
+	{Code: "sticker.view", Module: "sticker", Name: "View stickers", Description: "Allows resolving enabled system sticker metadata."},
+	{Code: "sticker.manage", Module: "sticker", Name: "Manage stickers", Description: "Allows managing sticker packs, translations and publication state."},
+	{Code: "sticker.upload", Module: "sticker", Name: "Upload sticker images", Description: "Allows attaching validated PNG and GIF assets to system stickers."},
+	{Code: "project.follow", Module: "project", Name: "Follow projects", Description: "Allows subscribing to public project updates."},
+	{Code: "project.follow.view_own", Module: "project", Name: "View own project follows", Description: "Allows reading and managing the account's own project subscriptions."},
 	{Code: "content.review", Module: "review", Name: "Review content", Description: "Allows reviewing content changes, files and reports."},
 	{Code: "content.write", Module: "content", Name: "Manage content", Description: "Allows creating and editing site content."},
 	{Code: "content.no-review", Module: "content", Name: "Bypass content review", Description: "Allows catalog and localized content changes to publish without review."},
@@ -203,7 +211,7 @@ var seedPermissions = []seedPermission{
 var seedRoles = []seedRole{
 	{
 		Code: "registered", Name: "Registered user", Description: "Default permissions granted to a registered account.", Weight: 10,
-		Permissions: []string{"comment.create", "comment.edit.own", "comment.delete.own", "comment.react", "comment.watch", "report.create", "report.view_own", "content.translate", "rating.create", "rating.read", "shop.read", "shop.purchase", "shop.use", "shop.project_heat_boost.purchase", "shop.project_heat_boost.use", "shop.server_heat_boost.purchase", "shop.server_heat_boost.use", "user.ai.daily_token_limit.20000", "user.draft.retention_seconds.2592000", "security.anti-abuse.rate_multiplier.100", "community.tutorial.create", "community.issue.create", "community.discussion.create", "modpack.create"},
+		Permissions: []string{"comment.create", "comment.edit.own", "comment.delete.own", "comment.react", "comment.watch", "report.create", "report.view_own", "content.translate", "rating.create", "rating.read", "shop.read", "shop.purchase", "shop.use", "shop.project_heat_boost.purchase", "shop.project_heat_boost.use", "shop.server_heat_boost.purchase", "shop.server_heat_boost.use", "user.ai.daily_token_limit.20000", "user.draft.retention_seconds.2592000", "security.anti-abuse.rate_multiplier.100", "community.tutorial.create", "community.issue.create", "community.discussion.create", "modpack.create", "favorite.modpack_export", "favorite.modpack_export.view_own", "sticker.view", "project.follow", "project.follow.view_own"},
 	},
 	{
 		Code: "project_owner.[ProjectID]", Name: "Project owner", Description: "Default project-scoped owner permissions.", Weight: 100,
@@ -233,7 +241,8 @@ var seedUsers = []seedUser{
 			"level.read", "level.write", "task.read", "task.write",
 			"mail.read", "mail.write", "oss.read", "oss.write", "log.read", "log.write",
 			"ai.read", "ai.write", "ai.task.enqueue", "ai.task.consume",
-			"notification.system.publish", "notification.translate",
+			"notification.system.publish", "notification.translate", "notification.template.manage",
+			"favorite.modpack_export", "favorite.modpack_export.view_own", "sticker.view", "sticker.manage", "sticker.upload", "project.follow", "project.follow.view_own",
 			"content.review", "content.write", "content.no-review", "content.translate",
 			"global_resource.list", "global_resource.view", "global_resource.binding.view",
 			"log_share.list", "log_share.view", "log_share.moderate", "log_share.delete", "log_share.redaction_reprocess",

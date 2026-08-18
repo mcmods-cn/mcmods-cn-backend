@@ -1289,6 +1289,11 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 		coalesce(nullif(version_names.names,'{}'::jsonb),nullif((select jsonb_object_agg(name.key,name.value)
 		 from jsonb_each_text(coalesce(imported.names,'{}'::jsonb)) name
 		 where replace(lower(name.key),'_','-')=any($3::text[])),'{}'::jsonb),'{}'::jsonb),
+		exists(select 1 from mod_resource_version_detail_localizations localization
+		 where localization.resource_id=section_resource.resource_id and localization.version_id=$2
+		  and replace(lower(localization.locale),'_','-')=any($3::text[])
+		  and regexp_replace(regexp_replace(coalesce(localization.content_markdown,''),'<[^>]*>','','g'),
+		   '[[:space:]#*_>\[\]()~-]+','','g')<>''),
 		case when resource.kind_code='minecraft.advancement' then jsonb_strip_nulls(jsonb_build_object(
 		 'parent',coalesce(effective.data->'parentId',effective.data->'parent'),'display',jsonb_strip_nulls(jsonb_build_object(
 		  'x',effective.data#>'{display,x}','y',effective.data#>'{display,y}','frame',effective.data#>'{display,frame}'))))
@@ -1327,14 +1332,15 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 	for rows.Next() {
 		var resourcePublicID, kindCode, canonicalID, resourceSectionPublicID, similarGroupID, sourceRevisionID, iconPath, iconFileID string
 		var resourceOrdinal int
+		var hasDetailDescription bool
 		var names, definition []byte
-		if err = rows.Scan(&resourcePublicID, &kindCode, &canonicalID, &resourceSectionPublicID, &resourceOrdinal, &similarGroupID, &sourceRevisionID, &iconPath, &iconFileID, &names, &definition); err != nil {
+		if err = rows.Scan(&resourcePublicID, &kindCode, &canonicalID, &resourceSectionPublicID, &resourceOrdinal, &similarGroupID, &sourceRevisionID, &iconPath, &iconFileID, &names, &hasDetailDescription, &definition); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode content section resources")
 			return
 		}
 		resources = append(resources, map[string]any{"versionPublicId": versionPublicID, "resourcePublicId": resourcePublicID,
 			"sectionPublicId": resourceSectionPublicID, "kindCode": kindCode, "canonicalId": canonicalID, "ordinal": resourceOrdinal, "revisionId": sourceRevisionID, "iconPath": iconPath,
-			"iconFileId": iconFileID, "similarGroupId": similarGroupID, "names": json.RawMessage(names), "definition": json.RawMessage(definition)})
+			"iconFileId": iconFileID, "similarGroupId": similarGroupID, "names": json.RawMessage(names), "hasDetailDescription": hasDetailDescription, "definition": json.RawMessage(definition)})
 	}
 	lootItems := make([]map[string]any, 0)
 	lootResourceIndexes := make([]int, 0)

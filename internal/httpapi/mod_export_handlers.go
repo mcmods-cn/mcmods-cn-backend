@@ -85,20 +85,25 @@ type createModExportJobRequest struct {
 }
 
 type modExportJobResponse struct {
-	ID                          string         `json:"id"`
-	ModSiteID                   string         `json:"modSiteId"`
-	PackageID                   string         `json:"packageId"`
-	TargetVersionPublicID       string         `json:"targetVersionPublicId"`
-	OverwriteExistingImportData bool           `json:"overwriteExistingImportData"`
-	Status                      string         `json:"status"`
-	Progress                    int            `json:"progress"`
-	CurrentStage                string         `json:"currentStage"`
-	ErrorCode                   string         `json:"errorCode"`
-	ErrorDetail                 map[string]any `json:"errorDetail"`
-	Deduplicated                bool           `json:"deduplicated"`
-	ReviewRequired              bool           `json:"reviewRequired"`
-	CreatedAt                   time.Time      `json:"createdAt"`
-	UpdatedAt                   time.Time      `json:"updatedAt"`
+	ID                          string           `json:"id"`
+	ModSiteID                   string           `json:"modSiteId"`
+	PackageID                   string           `json:"packageId"`
+	TargetVersionPublicID       string           `json:"targetVersionPublicId"`
+	OverwriteExistingImportData bool             `json:"overwriteExistingImportData"`
+	Status                      string           `json:"status"`
+	Progress                    int              `json:"progress"`
+	CurrentStage                string           `json:"currentStage"`
+	ErrorCode                   string           `json:"errorCode"`
+	ErrorDetail                 map[string]any   `json:"errorDetail"`
+	Deduplicated                bool             `json:"deduplicated"`
+	ReviewRequired              bool             `json:"reviewRequired"`
+	ConfiguredModIDs            []string         `json:"configuredModids"`
+	DetectedModIDs              []modIDCandidate `json:"detectedModids"`
+	PrimaryDetectedModID        string           `json:"primaryDetectedModid"`
+	MODIDConfirmationRequired   bool             `json:"modidConfirmationRequired"`
+	MODIDAnalysisHash           string           `json:"modidAnalysisHash,omitempty"`
+	CreatedAt                   time.Time        `json:"createdAt"`
+	UpdatedAt                   time.Time        `json:"updatedAt"`
 }
 
 type modExportWriteBatch struct {
@@ -494,7 +499,7 @@ func (s *Server) getActiveModExportJob(w http.ResponseWriter, r *http.Request) {
 		join mod_content_versions version on version.id=job.target_version_id
 		where job.mod_id=$1 and version.public_id=$2 and version.status='active'
 		  and package.profile='all'
-		  and job.status in ('queued','validating','importing')
+		  and job.status in ('queued','validating','confirmation_required','importing')
 		order by job.created_at desc,job.id desc limit 1`,
 		identity.ID, targetVersionPublicID).Scan(&jobID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -551,7 +556,7 @@ func (s *Server) cancelModExportJob(w http.ResponseWriter, r *http.Request) {
 	tag, err := s.db.Exec(r.Context(), `update catalog_import_jobs
 		set status='cancelled',progress=least(progress,99),current_stage='cancelled',
 			finished_at=now(),heartbeat_at=now(),run_token='',updated_at=now()
-		where id=$1 and mod_id=$2 and status in ('queued','validating','importing')`,
+		where id=$1 and mod_id=$2 and status in ('queued','validating','confirmation_required','importing')`,
 		r.PathValue("jobId"), identity.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "取消导入任务失败")
@@ -567,22 +572,31 @@ func (s *Server) cancelModExportJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) modExportJobByID(ctx context.Context, jobID string, modID int64) (modExportJobResponse, error) {
 	var result modExportJobResponse
 	var detail []byte
+	var configuredMODIDs []byte
+	var detectedMODIDs []byte
 	err := s.db.QueryRow(
 		ctx,
 		`select j.id,m.slug,j.package_id,version.public_id,j.overwrite_existing,j.status,j.progress,j.current_stage,j.error_code,j.error_detail,j.created_at,j.updated_at,
+		 j.configured_modids,j.detected_modids,j.primary_detected_modid,j.modid_confirmation_required,j.modid_analysis_hash,
 		 exists(select 1 from catalog_import_revisions r where r.job_id=j.id and r.status in ('ready','partial') and not r.is_active)
 		 from catalog_import_jobs j join mods m on m.id=j.mod_id
 		 join mod_content_versions version on version.id=j.target_version_id
 		 where j.id=$1 and j.mod_id=$2`,
 		jobID, modID,
-	).Scan(&result.ID, &result.ModSiteID, &result.PackageID, &result.TargetVersionPublicID, &result.OverwriteExistingImportData, &result.Status, &result.Progress, &result.CurrentStage, &result.ErrorCode, &detail, &result.CreatedAt, &result.UpdatedAt, &result.ReviewRequired)
+	).Scan(&result.ID, &result.ModSiteID, &result.PackageID, &result.TargetVersionPublicID, &result.OverwriteExistingImportData, &result.Status, &result.Progress, &result.CurrentStage, &result.ErrorCode, &detail, &result.CreatedAt, &result.UpdatedAt,
+		&configuredMODIDs, &detectedMODIDs, &result.PrimaryDetectedModID, &result.MODIDConfirmationRequired, &result.MODIDAnalysisHash, &result.ReviewRequired)
+	if err != nil {
+		return result, err
+	}
+	_ = json.Unmarshal(configuredMODIDs, &result.ConfiguredModIDs)
+	_ = json.Unmarshal(detectedMODIDs, &result.DetectedModIDs)
 	if len(detail) > 0 {
 		_ = json.Unmarshal(detail, &result.ErrorDetail)
 	}
 	if result.ErrorDetail == nil {
 		result.ErrorDetail = map[string]any{}
 	}
-	return result, err
+	return result, nil
 }
 
 func (s *Server) requireModEditor(w http.ResponseWriter, r *http.Request) (modIdentityRecord, bool) {
@@ -750,6 +764,13 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	namespaces := normalizeExportNamespaces(manifest.Configuration.Namespaces)
 	if len(namespaces) == 0 {
 		return errors.New("manifest contains no valid namespace")
+	}
+	paused, err := s.pauseCatalogImportForMODIDConfirmation(ctx, jobID, runToken, modID, expectedHash, importNamespaceCounts(namespaces))
+	if err != nil {
+		return err
+	}
+	if paused {
+		return nil
 	}
 	_, err = s.db.Exec(
 		ctx,

@@ -12,9 +12,11 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/httpapi"
+	"mcmods-cn-backend/internal/runtimelog"
 )
 
 func Run() {
+	runtimelog.Install()
 	cfg := config.Load()
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("invalid configuration: %v", err)
@@ -35,7 +37,7 @@ func Run() {
 		IdleTimeout:       60 * time.Second,
 	}
 	go func() {
-		log.Printf("mcmods-cn backend listening on %s; health endpoint is available while dependencies initialize", cfg.Addr)
+		log.Printf("mcmods-cn backend listening on %s; live and ready probes are available while dependencies initialize", cfg.Addr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("http server: %v", err)
 		}

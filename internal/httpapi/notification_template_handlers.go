@@ -3,7 +3,12 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"reflect"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,12 +26,25 @@ type localizedNotificationTemplate struct {
 
 type notificationTemplateDefinition struct {
 	Code         string                                   `json:"code"`
+	Version      int                                      `json:"version"`
+	Variables    []string                                 `json:"variables"`
 	Translations map[string]localizedNotificationTemplate `json:"translations"`
 }
 
 type notificationTemplateConfig struct {
 	Templates []notificationTemplateDefinition `json:"templates"`
 }
+
+type renderedNotificationTemplate struct {
+	Key     string
+	Version int
+	Locale  string
+	Title   string
+	Body    string
+	Values  map[string]string
+}
+
+var notificationTemplateVariablePattern = regexp.MustCompile(`\{([a-z][a-z0-9_]*)\}`)
 
 type reviewConfig struct {
 	BlueprintCreate         bool `json:"blueprintCreate"`
@@ -73,61 +91,92 @@ type reviewConfig struct {
 
 func defaultNotificationTemplateConfig() notificationTemplateConfig {
 	definitions := []struct {
-		code    string
-		zhTitle string
-		zhBody  string
-		enTitle string
-		enBody  string
+		code      string
+		variables []string
+		zhTitle   string
+		zhBody    string
+		enTitle   string
+		enBody    string
 	}{
-		{"mod_import_success", "模组资料导入完成", "{name} 的资料已经导入完成。", "Mod import completed", "The data for {name} has been imported."},
-		{"mod_import_partial", "模组资料部分导入完成", "{name} 的资料已经导入，但存在警告；共跳过 {skipped} 条非字符串翻译。", "Mod import partially completed", "The data for {name} was imported with warnings; {skipped} non-string translation values were skipped."},
-		{"mod_import_failure", "模组资料导入失败", "{name} 的资料导入失败：{error}", "Mod import failed", "The data import for {name} failed: {error}"},
-		{"blueprint_conversion_success", "蓝图处理完成", "{name} 已处理完成，可以在蓝图库中查看。", "Blueprint processing completed", "{name} is ready in the blueprint library."},
-		{"blueprint_conversion_failure", "蓝图处理失败", "{name} 处理失败：{error}", "Blueprint processing failed", "{name} could not be processed: {error}"},
-		{"blueprint_format_success", "蓝图格式转换完成", "{name} 已转换为 {format} 格式。", "Blueprint format converted", "{name} has been converted to {format}."},
-		{"review_approved", "内容审核通过", "您提交的 {name} 已通过审核。", "Content approved", "Your submission for {name} was approved."},
-		{"review_rejected", "内容审核未通过", "您提交的 {name} 未通过审核。原因：{reason}", "Content rejected", "Your submission for {name} was rejected. Reason: {reason}"},
-		{"question_answer_accepted", "回答已被采纳", "您在问题「{name}」下的回答已被采纳，悬赏已按转账税率结算。", "Answer accepted", "Your answer to {name} was accepted and its bounty was settled after transfer tax."},
-		{"creator_claim_approved", "作者或团队认领已通过", "您对 {name} 的认领已通过审核。", "Creator claim approved", "Your claim for {name} was approved."},
-		{"creator_claim_rejected", "作者或团队认领未通过", "您对 {name} 的认领未通过审核。原因：{reason}", "Creator claim rejected", "Your claim for {name} was rejected. Reason: {reason}"},
+		{"mod_import_success", []string{"name"}, "模组资料导入完成", "{name} 的资料已经导入完成。", "Mod import completed", "The data for {name} has been imported."},
+		{"mod_import_partial", []string{"name", "skipped"}, "模组资料部分导入完成", "{name} 的资料已经导入，但存在警告；共跳过 {skipped} 条非字符串翻译。", "Mod import partially completed", "The data for {name} was imported with warnings; {skipped} non-string translation values were skipped."},
+		{"mod_import_failure", []string{"name", "error"}, "模组资料导入失败", "{name} 的资料导入失败：{error}", "Mod import failed", "The data import for {name} failed: {error}"},
+		{"blueprint_conversion_success", []string{"name"}, "蓝图处理完成", "{name} 已处理完成，可以在蓝图库中查看。", "Blueprint processing completed", "{name} is ready in the blueprint library."},
+		{"blueprint_conversion_failure", []string{"name", "error"}, "蓝图处理失败", "{name} 处理失败：{error}", "Blueprint processing failed", "{name} could not be processed: {error}"},
+		{"blueprint_format_success", []string{"name", "format"}, "蓝图格式转换完成", "{name} 已转换为 {format} 格式。", "Blueprint format converted", "{name} has been converted to {format}."},
+		{"review_approved", []string{"name"}, "内容审核通过", "您提交的 {name} 已通过审核。", "Content approved", "Your submission for {name} was approved."},
+		{"review_rejected", []string{"name", "reason"}, "内容审核未通过", "您提交的 {name} 未通过审核。原因：{reason}", "Content rejected", "Your submission for {name} was rejected. Reason: {reason}"},
+		{"question_answer_accepted", []string{"name"}, "回答已被采纳", "您在问题「{name}」下的回答已被采纳，悬赏已按转账税率结算。", "Answer accepted", "Your answer to {name} was accepted and its bounty was settled after transfer tax."},
+		{"creator_claim_approved", []string{"name"}, "作者或团队认领已通过", "您对 {name} 的认领已通过审核。", "Creator claim approved", "Your claim for {name} was approved."},
+		{"creator_claim_rejected", []string{"name", "reason"}, "作者或团队认领未通过", "您对 {name} 的认领未通过审核。原因：{reason}", "Creator claim rejected", "Your claim for {name} was rejected. Reason: {reason}"},
+		{"project_updated", []string{"project_name", "changed_sections"}, "关注的项目有新更新", "{project_name} 更新了{changed_sections}。", "A followed project was updated", "{project_name} updated {changed_sections}."},
+		{"modpack_export_completed", []string{"pack_name", "minecraft_version", "loader", "exported", "dependencies", "skipped"}, "收藏夹整合包导出完成", "{pack_name} 已导出完成。Minecraft {minecraft_version} / {loader}；成功 {exported} 个，自动依赖 {dependencies} 个，未导出 {skipped} 个。", "Collection modpack export completed", "{pack_name} is ready for Minecraft {minecraft_version} / {loader}: {exported} exported, {dependencies} dependencies, {skipped} skipped."},
+		{"modpack_export_completed_with_skips", []string{"pack_name", "minecraft_version", "loader", "exported", "dependencies", "skipped"}, "收藏夹整合包导出完成（存在未导出项目）", "{pack_name} 已导出完成。Minecraft {minecraft_version} / {loader}；成功 {exported} 个，自动依赖 {dependencies} 个，未导出 {skipped} 个。请查看完整报告。", "Collection modpack export completed with skipped items", "{pack_name} is ready for Minecraft {minecraft_version} / {loader}: {exported} exported, {dependencies} dependencies, {skipped} skipped. Review the complete report."},
+		{"modpack_export_failed", []string{"pack_name", "stage", "reason"}, "收藏夹整合包导出失败", "{pack_name} 在 {stage} 阶段导出失败：{reason}", "Collection modpack export failed", "{pack_name} failed during {stage}: {reason}"},
+		{"modpack_export_expired", []string{"pack_name"}, "收藏夹整合包下载已过期", "{pack_name} 的临时下载文件已过期，导出报告仍可查看。", "Collection modpack download expired", "The temporary download for {pack_name} expired. The export report remains available."},
 	}
 	result := notificationTemplateConfig{Templates: make([]notificationTemplateDefinition, 0, len(definitions))}
 	for _, value := range definitions {
 		result.Templates = append(result.Templates, notificationTemplateDefinition{
-			Code: value.code,
-			Translations: map[string]localizedNotificationTemplate{
-				"zh-CN": {Title: value.zhTitle, Body: value.zhBody},
-				"en-US": {Title: value.enTitle, Body: value.enBody},
-			},
+			Code: value.code, Version: 1, Variables: value.variables,
+			Translations: defaultNotificationTranslations(value.zhTitle, value.zhBody, value.enTitle, value.enBody),
 		})
 	}
 	return result
 }
 
+// All enabled site locales receive a concrete seed value. Administrators can
+// replace each translation independently; English is the safe initial value
+// for locales whose product copy has not yet been curated.
+func defaultNotificationTranslations(zhTitle, zhBody, enTitle, enBody string) map[string]localizedNotificationTemplate {
+	result := make(map[string]localizedNotificationTemplate, len(supportedEditableContentLocales))
+	for _, locale := range supportedContentLocaleList() {
+		result[locale] = localizedNotificationTemplate{Title: enTitle, Body: enBody}
+	}
+	result["zh-CN"] = localizedNotificationTemplate{Title: zhTitle, Body: zhBody}
+	result["zh-TW"] = localizedNotificationTemplate{Title: zhTitle, Body: zhBody}
+	return result
+}
+
 func mergeNotificationTemplates(config notificationTemplateConfig) notificationTemplateConfig {
 	defaults := defaultNotificationTemplateConfig()
-	byCode := make(map[string]notificationTemplateDefinition, len(config.Templates))
-	for _, item := range config.Templates {
-		if strings.TrimSpace(item.Code) != "" {
-			byCode[item.Code] = item
-		}
+	byCode := make(map[string]notificationTemplateDefinition, len(defaults.Templates)+len(config.Templates))
+	order := make([]string, 0, len(defaults.Templates)+len(config.Templates))
+	for _, item := range defaults.Templates {
+		byCode[item.Code] = item
+		order = append(order, item.Code)
 	}
-	for index, item := range defaults.Templates {
-		custom, ok := byCode[item.Code]
-		if !ok {
+	for _, item := range config.Templates {
+		item.Code = strings.TrimSpace(item.Code)
+		if item.Code == "" {
 			continue
 		}
-		if custom.Translations == nil {
-			custom.Translations = map[string]localizedNotificationTemplate{}
+		base, exists := byCode[item.Code]
+		if !exists {
+			order = append(order, item.Code)
+			base = notificationTemplateDefinition{Code: item.Code, Version: 1}
 		}
-		for locale, value := range item.Translations {
-			if _, exists := custom.Translations[locale]; !exists {
-				custom.Translations[locale] = value
+		if item.Version <= 0 {
+			item.Version = base.Version
+		}
+		if len(item.Variables) == 0 {
+			item.Variables = append([]string(nil), base.Variables...)
+		}
+		if item.Translations == nil {
+			item.Translations = map[string]localizedNotificationTemplate{}
+		}
+		for locale, value := range base.Translations {
+			if current, ok := item.Translations[locale]; !ok || strings.TrimSpace(current.Title) == "" || strings.TrimSpace(current.Body) == "" {
+				item.Translations[locale] = value
 			}
 		}
-		defaults.Templates[index] = custom
+		byCode[item.Code] = item
 	}
-	return defaults
+	result := notificationTemplateConfig{Templates: make([]notificationTemplateDefinition, 0, len(order))}
+	for _, code := range order {
+		result.Templates = append(result.Templates, byCode[code])
+	}
+	return result
 }
 
 func loadNotificationTemplateConfig(ctx context.Context, db *pgxpool.Pool) notificationTemplateConfig {
@@ -139,57 +188,85 @@ func loadNotificationTemplateConfig(ctx context.Context, db *pgxpool.Pool) notif
 	return mergeNotificationTemplates(config)
 }
 
-func renderNotificationTemplate(ctx context.Context, db *pgxpool.Pool, userID int64, code string, values map[string]string) (string, string, string) {
-	locale := "zh-CN"
-	_ = db.QueryRow(ctx, `select preferred_ui_language from users where id=$1`, userID).Scan(&locale)
-	config := loadNotificationTemplateConfig(ctx, db)
-	var selected localizedNotificationTemplate
-	for _, item := range config.Templates {
-		if item.Code != code {
-			continue
-		}
-		selected = item.Translations[locale]
-		if selected.Title == "" && selected.Body == "" {
-			selected = item.Translations[languageBase(locale)]
-		}
-		if selected.Title == "" && selected.Body == "" {
-			selected = item.Translations["zh-CN"]
-		}
-		if selected.Title == "" && selected.Body == "" {
-			selected = item.Translations["en-US"]
-		}
-		break
+func renderNotificationTemplate(ctx context.Context, db *pgxpool.Pool, userID int64, code string, values map[string]string) (renderedNotificationTemplate, error) {
+	requestedLocale := "zh-CN"
+	_ = db.QueryRow(ctx, `select preferred_ui_language from users where id=$1`, userID).Scan(&requestedLocale)
+	return renderNotificationTemplateForLocale(loadNotificationTemplateConfig(ctx, db), requestedLocale, code, values)
+}
+
+func renderNotificationTemplateForLocale(config notificationTemplateConfig, requestedLocale, code string, values map[string]string) (renderedNotificationTemplate, error) {
+	requestedLocale = normalizeContentLocale(requestedLocale)
+	if requestedLocale == "" {
+		requestedLocale = "zh-CN"
 	}
+	var definition notificationTemplateDefinition
+	for _, item := range config.Templates {
+		if item.Code == code {
+			definition = item
+			break
+		}
+	}
+	if definition.Code == "" {
+		return renderedNotificationTemplate{}, fmt.Errorf("notification template %q not found", code)
+	}
+	selectedLocale := requestedLocale
+	selected := definition.Translations[selectedLocale]
+	for _, fallback := range []string{"zh-CN", "en-US"} {
+		if strings.TrimSpace(selected.Title) != "" && strings.TrimSpace(selected.Body) != "" {
+			break
+		}
+		selectedLocale = fallback
+		selected = definition.Translations[fallback]
+	}
+	if strings.TrimSpace(selected.Title) == "" || strings.TrimSpace(selected.Body) == "" {
+		return renderedNotificationTemplate{}, fmt.Errorf("notification template %q has no usable translation", code)
+	}
+	valuesCopy := make(map[string]string, len(values))
 	for key, value := range values {
+		valuesCopy[key] = value
 		selected.Title = strings.ReplaceAll(selected.Title, "{"+key+"}", value)
 		selected.Body = strings.ReplaceAll(selected.Body, "{"+key+"}", value)
 	}
-	return selected.Title, selected.Body, locale
+	if missing := unresolvedNotificationVariables(selected.Title + "\n" + selected.Body); len(missing) > 0 {
+		return renderedNotificationTemplate{}, fmt.Errorf("notification template %q missing values: %s", code, strings.Join(missing, ","))
+	}
+	return renderedNotificationTemplate{Key: code, Version: max(1, definition.Version), Locale: selectedLocale, Title: selected.Title, Body: selected.Body, Values: valuesCopy}, nil
+}
+
+func unresolvedNotificationVariables(value string) []string {
+	found := notificationTemplateVariablePattern.FindAllStringSubmatch(value, -1)
+	set := make(map[string]struct{}, len(found))
+	for _, match := range found {
+		set[match[1]] = struct{}{}
+	}
+	result := make([]string, 0, len(set))
+	for key := range set {
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func (s *Server) sendTemplatedNotification(ctx context.Context, userID int64, code string, values map[string]string, data map[string]any) {
 	if userID <= 0 {
 		return
 	}
-	title, body, locale := renderNotificationTemplate(ctx, s.db, userID, code, values)
 	if data == nil {
 		data = map[string]any{}
 	}
 	if (s.queue != nil || s.cfg.NATS.OutboxEnabled) && s.enqueueNotificationTask(ctx, notificationEvent{
-		Action: "direct", RecipientID: userID, Kind: "system", Title: title, Body: body, SourceLocale: locale, Data: data,
+		Action: "direct", RecipientID: userID, Kind: "system", TemplateKey: code, TemplateValues: values, Data: data,
 	}) == nil {
 		return
 	}
-	raw, _ := json.Marshal(data)
-	_, _ = s.db.Exec(ctx, `insert into notifications(recipient_id,kind,title,body,source_locale,data)
-		values($1,'system',$2,$3,$4,$5::jsonb)`, userID, title, body, locale, string(raw))
-}
-
-func languageBase(locale string) string {
-	if index := strings.IndexAny(locale, "-_"); index > 0 {
-		return locale[:index]
+	rendered, err := renderNotificationTemplate(ctx, s.db, userID, code, values)
+	if err != nil {
+		return
 	}
-	return locale
+	raw, _ := json.Marshal(data)
+	params, _ := json.Marshal(rendered.Values)
+	_, _ = s.db.Exec(ctx, `insert into notifications(recipient_id,kind,title,body,source_locale,data,template_key,template_version,template_params)
+		values($1,'system',$2,$3,$4,$5::jsonb,$6,$7,$8::jsonb)`, userID, rendered.Title, rendered.Body, rendered.Locale, string(raw), rendered.Key, rendered.Version, string(params))
 }
 
 func (s *Server) getNotificationTemplates(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +279,12 @@ func (s *Server) updateNotificationTemplates(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	request = mergeNotificationTemplates(request)
+	current := loadNotificationTemplateConfig(r.Context(), s.db)
+	request = versionNotificationTemplateChanges(current, mergeNotificationTemplates(request))
+	if err := validateNotificationTemplateConfig(request); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	raw, _ := json.Marshal(request)
 	_, err := s.db.Exec(r.Context(), `insert into system_settings(key,value,updated_by,updated_at)
 		values($1,$2::jsonb,$3,now())
@@ -214,6 +296,56 @@ func (s *Server) updateNotificationTemplates(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, request)
+}
+
+func versionNotificationTemplateChanges(current, next notificationTemplateConfig) notificationTemplateConfig {
+	versions := make(map[string]notificationTemplateDefinition, len(current.Templates))
+	for _, item := range current.Templates {
+		versions[item.Code] = item
+	}
+	for index := range next.Templates {
+		previous, exists := versions[next.Templates[index].Code]
+		if !exists {
+			next.Templates[index].Version = 1
+			continue
+		}
+		if reflect.DeepEqual(previous.Variables, next.Templates[index].Variables) && reflect.DeepEqual(previous.Translations, next.Templates[index].Translations) {
+			next.Templates[index].Version = max(1, previous.Version)
+		} else {
+			next.Templates[index].Version = max(1, previous.Version) + 1
+		}
+	}
+	return next
+}
+
+func validateNotificationTemplateConfig(config notificationTemplateConfig) error {
+	seen := map[string]struct{}{}
+	locales := supportedContentLocaleList()
+	for _, item := range config.Templates {
+		if item.Code == "" || len(item.Code) > 80 {
+			return errors.New("通知模板 Key 不正确")
+		}
+		if _, ok := seen[item.Code]; ok {
+			return fmt.Errorf("通知模板 Key 重复：%s", item.Code)
+		}
+		seen[item.Code] = struct{}{}
+		allowed := map[string]struct{}{}
+		for _, variable := range item.Variables {
+			allowed[variable] = struct{}{}
+		}
+		for _, locale := range locales {
+			value, ok := item.Translations[locale]
+			if !ok || strings.TrimSpace(value.Title) == "" || strings.TrimSpace(value.Body) == "" {
+				return fmt.Errorf("模板 %s 缺少 %s 文案", item.Code, locale)
+			}
+			for _, variable := range unresolvedNotificationVariables(value.Title + "\n" + value.Body) {
+				if _, ok := allowed[variable]; !ok {
+					return fmt.Errorf("模板 %s 使用了未声明变量 %s", item.Code, variable)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Server) getReviewConfig(w http.ResponseWriter, r *http.Request) {

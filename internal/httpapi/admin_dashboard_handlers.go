@@ -19,8 +19,18 @@ type adminDashboardOverview struct {
 	PendingReviews   int64                  `json:"pendingReviews"`
 	ViewsToday       int64                  `json:"viewsToday"`
 	ActionsToday     int64                  `json:"actionsToday"`
+	OSS              adminDashboardOSSStats `json:"oss"`
 	Trend            []adminSiteMetricPoint `json:"trend"`
 	UpdatedAt        time.Time              `json:"updatedAt"`
+}
+
+type adminDashboardOSSStats struct {
+	ActiveFiles      int64 `json:"activeFiles"`
+	StoredBytes      int64 `json:"storedBytes"`
+	SourceBytes      int64 `json:"sourceBytes"`
+	PendingScans     int64 `json:"pendingScans"`
+	QuarantinedFiles int64 `json:"quarantinedFiles"`
+	UploadsToday     int64 `json:"uploadsToday"`
 }
 
 type adminSiteMetricPoint struct {
@@ -84,7 +94,26 @@ func (s *Server) loadAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load administration overview")
 		return
 	}
-	rows, err := s.db.Query(r.Context(), `select day::text,coalesce(metric.active_users,0),coalesce(live_views.views,metric.views,0),
+	err = s.db.QueryRow(r.Context(), `select
+		count(*) filter (where status='active'),
+		coalesce(sum(size_bytes) filter (where status='active'),0),
+		coalesce(sum(coalesce(nullif(source_size_bytes,0),size_bytes)) filter (where status='active'),0),
+		count(*) filter (where status='active' and scan_status='pending'),
+		count(*) filter (where status='quarantined'),
+		(select count(*) from oss_upload_logs where result='success' and created_at>=current_date)
+		from oss_files`).Scan(
+		&overview.OSS.ActiveFiles,
+		&overview.OSS.StoredBytes,
+		&overview.OSS.SourceBytes,
+		&overview.OSS.PendingScans,
+		&overview.OSS.QuarantinedFiles,
+		&overview.OSS.UploadsToday,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load OSS overview")
+		return
+	}
+	rows, err := s.db.Query(r.Context(), `select day::date::text,coalesce(metric.active_users,0),coalesce(live_views.views,metric.views,0),
 		coalesce(metric.actions,0),coalesce(metric.new_users,0),coalesce(metric.review_submissions,0)
 		from generate_series(current_date-29,current_date,interval '1 day') day
 		left join site_daily_metrics metric on metric.metric_date=day::date

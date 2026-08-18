@@ -45,16 +45,17 @@ type notificationActor struct {
 }
 
 type notificationItem struct {
-	ID           string              `json:"id"`
-	Kind         string              `json:"kind"`
-	Title        string              `json:"title"`
-	Body         string              `json:"body"`
-	SourceLocale string              `json:"sourceLocale"`
-	Data         map[string]any      `json:"data"`
-	Actors       []notificationActor `json:"actors"`
-	Read         bool                `json:"read"`
-	CreatedAt    time.Time           `json:"createdAt"`
-	UpdatedAt    time.Time           `json:"updatedAt"`
+	ID                 string              `json:"id"`
+	Kind               string              `json:"kind"`
+	Title              string              `json:"title"`
+	Body               string              `json:"body"`
+	SourceLocale       string              `json:"sourceLocale"`
+	Data               map[string]any      `json:"data"`
+	Actors             []notificationActor `json:"actors"`
+	Read               bool                `json:"read"`
+	CreatedAt          time.Time           `json:"createdAt"`
+	UpdatedAt          time.Time           `json:"updatedAt"`
+	TranslationAllowed bool                `json:"translationAllowed"`
 }
 
 func (s *Server) publishSystemNotification(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +137,7 @@ func (s *Server) notifications(w http.ResponseWriter, r *http.Request) {
 		        coalesce(jsonb_agg(distinct jsonb_build_object(
 		          'id', actor.public_id, 'username', actor.username
 		        )) filter (where actor.id is not null), '[]'::jsonb),
-		        (receipt.read_at is not null), n.created_at, n.updated_at
+		        (receipt.read_at is not null), n.created_at, n.updated_at, n.kind <> 'system'
 		 from notifications n
 		 left join notification_receipts receipt on receipt.notification_id = n.id and receipt.user_id = $1
 		 left join notification_actors na on na.notification_id = n.id
@@ -158,7 +159,7 @@ func (s *Server) notifications(w http.ResponseWriter, r *http.Request) {
 		var rawData, rawActors []byte
 		if err := rows.Scan(
 			&item.ID, &item.Kind, &item.Title, &item.Body, &item.SourceLocale,
-			&rawData, &rawActors, &item.Read, &item.CreatedAt, &item.UpdatedAt,
+			&rawData, &rawActors, &item.Read, &item.CreatedAt, &item.UpdatedAt, &item.TranslationAllowed,
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "读取通知失败")
 			return
@@ -267,20 +268,24 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
-	var title, body, sourceLocale string
+	var title, body, sourceLocale, kind string
 	err := s.db.QueryRow(
 		r.Context(),
-		`select title, body, source_locale from notifications
+		`select title, body, source_locale, kind from notifications
 		 where id = $1 and (recipient_id is null or recipient_id = $2)`,
 		notificationID,
 		claims.Subject,
-	).Scan(&title, &body, &sourceLocale)
+	).Scan(&title, &body, &sourceLocale, &kind)
 	if err == pgx.ErrNoRows {
 		writeError(w, http.StatusNotFound, "通知不存在")
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取通知失败")
+		return
+	}
+	if kind == "system" {
+		writeAPIError(w, http.StatusForbidden, "SYSTEM_NOTIFICATION_TRANSLATION_DISABLED", "系统通知已按接收语言生成，无需 AI 翻译", 0, nil)
 		return
 	}
 	var cachedTitle, cachedBody string

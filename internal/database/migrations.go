@@ -480,11 +480,12 @@ func baselineSchemaStatements() []string {
 		`create unique index idx_favorite_collections_default on favorite_collections(user_id) where is_default`,
 		`create index idx_favorite_collections_public on favorite_collections(user_id,created_at,id) where is_public`,
 		`create table favorite_collection_items (
+			id bigserial primary key,
 			collection_id bigint not null references favorite_collections(id) on delete cascade,
 			entity_type text not null,
 			entity_id bigint not null,
 			created_at timestamptz not null default now(),
-			primary key(collection_id,entity_type,entity_id),
+			unique(collection_id,entity_type,entity_id),
 			foreign key(entity_type,entity_id) references public_routes(entity_type,internal_id) on delete cascade
 		)`,
 		`create index idx_favorite_items_entity on favorite_collection_items(entity_type,entity_id)`,
@@ -576,6 +577,7 @@ func baselineSchemaStatements() []string {
 		`create table if not exists user_notification_settings (
 			user_id bigint primary key references users(id) on delete cascade,
 			email_enabled boolean not null default false,
+			project_updates_enabled boolean not null default true,
 			updated_at timestamptz not null default now()
 		)`,
 		`create table if not exists user_follows (
@@ -594,6 +596,9 @@ func baselineSchemaStatements() []string {
 			title text not null default '',
 			body text not null default '',
 			source_locale text not null default 'zh-CN',
+			template_key text,
+			template_version integer not null default 0,
+			template_params jsonb not null default '{}'::jsonb,
 			data jsonb not null default '{}'::jsonb,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now()
@@ -981,6 +986,13 @@ func baselineSchemaStatements() []string {
 			error_code text not null default '',
 			error_detail jsonb not null default '{}'::jsonb,
 			created_by bigint references users(id) on delete set null,
+			detected_modids jsonb not null default '[]'::jsonb,
+			configured_modids text[] not null default '{}'::text[],
+			primary_detected_modid text not null default '',
+			modid_analysis_hash text not null default '',
+			modid_confirmation_required boolean not null default false,
+			modid_confirmed_at timestamptz,
+			modid_confirmed_by bigint references users(id) on delete set null,
 			created_at timestamptz not null default now(),
 			started_at timestamptz,
 			finished_at timestamptz,
@@ -989,7 +1001,7 @@ func baselineSchemaStatements() []string {
 			attempt_count integer not null default 0,
 			updated_at timestamptz not null default now(),
 			unique (mod_id, package_id, importer_version, target_version_id, overwrite_existing),
-			check (status in ('queued','validating','importing','ready','partial','failed','cancelled'))
+			check (status in ('queued','validating','confirmation_required','importing','ready','partial','failed','cancelled'))
 		)`,
 		`create index if not exists idx_catalog_import_jobs_status_created on catalog_import_jobs(status, created_at)`,
 		`create index if not exists idx_catalog_import_jobs_running_heartbeat

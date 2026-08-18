@@ -27,12 +27,31 @@ type Config struct {
 	JWTTTL                time.Duration
 	DB                    DBConfig
 	Activity              ActivityConfig
+	FavoriteExport        FavoriteExportConfig
+	Sticker               StickerConfig
 	SMTP                  SMTPConfig
 	NATS                  NATSConfig
 	Redis                 RedisConfig
 	AntiAbuse             AntiAbuseConfig
 	Typesense             TypesenseConfig
 	Yggdrasil             YggdrasilConfig
+}
+
+type FavoriteExportConfig struct {
+	MaxActivePerUser int
+	MaxDailyPerUser  int
+	ArtifactTTL      time.Duration
+	LeaseTTL         time.Duration
+	MaxBuildAttempts int
+}
+
+type StickerConfig struct {
+	MaxBytes            int64
+	MaxEdge             int
+	MaxPixels           int64
+	MaxGIFFrames        int
+	MaxGIFDecodedPixels int64
+	MaxGIFDuration      time.Duration
 }
 
 type DBConfig struct {
@@ -211,6 +230,21 @@ func Load() Config {
 			DBMaxConns:            int32(getenvInt("ACTIVITY_DB_MAX_CONNS", 4)),
 			DBMinConns:            int32(getenvInt("ACTIVITY_DB_MIN_CONNS", 1)),
 		},
+		FavoriteExport: FavoriteExportConfig{
+			MaxActivePerUser: getenvInt("FAVORITE_EXPORT_MAX_ACTIVE_PER_USER", 2),
+			MaxDailyPerUser:  getenvInt("FAVORITE_EXPORT_MAX_DAILY_PER_USER", 20),
+			ArtifactTTL:      time.Duration(getenvInt("FAVORITE_EXPORT_ARTIFACT_TTL_HOURS", 168)) * time.Hour,
+			LeaseTTL:         time.Duration(getenvInt("FAVORITE_EXPORT_LEASE_MINUTES", 15)) * time.Minute,
+			MaxBuildAttempts: getenvInt("FAVORITE_EXPORT_MAX_BUILD_ATTEMPTS", 3),
+		},
+		Sticker: StickerConfig{
+			MaxBytes:            int64(getenvInt("STICKER_MAX_BYTES", 4<<20)),
+			MaxEdge:             getenvInt("STICKER_MAX_EDGE", 1024),
+			MaxPixels:           int64(getenvInt("STICKER_MAX_PIXELS", 4_194_304)),
+			MaxGIFFrames:        getenvInt("STICKER_MAX_GIF_FRAMES", 120),
+			MaxGIFDecodedPixels: int64(getenvInt("STICKER_MAX_GIF_DECODED_PIXELS", 64_000_000)),
+			MaxGIFDuration:      time.Duration(getenvInt("STICKER_MAX_GIF_DURATION_SECONDS", 30)) * time.Second,
+		},
 		SMTP: SMTPConfig{
 			Host:     os.Getenv("SMTP_HOST"),
 			Port:     getenvInt("SMTP_PORT", 587),
@@ -250,6 +284,22 @@ func Load() Config {
 					Subject:        "notifications.events",
 					QueueGroup:     getenv("NOTIFICATION_NATS_QUEUE_GROUP", "mcmods-notification-workers"),
 					MaxConcurrent:  getenvInt("NOTIFICATION_MAX_CONCURRENT", 8),
+					TimeoutSeconds: 300,
+				},
+				{
+					Code:           "favorite_modpack_export",
+					Enabled:        true,
+					Subject:        "favorite.modpack-export.tasks",
+					QueueGroup:     getenv("FAVORITE_EXPORT_NATS_QUEUE_GROUP", "mcmods-favorite-export-workers"),
+					MaxConcurrent:  getenvInt("FAVORITE_EXPORT_MAX_CONCURRENT", 2),
+					TimeoutSeconds: 600,
+				},
+				{
+					Code:           "project_update_notifications",
+					Enabled:        true,
+					Subject:        "project.update.notifications",
+					QueueGroup:     getenv("PROJECT_UPDATE_NATS_QUEUE_GROUP", "mcmods-project-update-workers"),
+					MaxConcurrent:  getenvInt("PROJECT_UPDATE_MAX_CONCURRENT", 4),
 					TimeoutSeconds: 300,
 				},
 			},

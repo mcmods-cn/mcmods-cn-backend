@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -427,7 +428,7 @@ func applyProjectChangelogSnapshotTx(ctx context.Context, tx pgx.Tx, changelogID
 			return err
 		}
 	}
-	return nil
+	return enqueueProjectUpdateEventTx(ctx, tx, targetRouteID, revisionID, actorID, "changelog", []string{"changelog", "minecraft_versions", "project_version"}, "changelog-revision:"+strconv.FormatInt(revisionID, 10))
 }
 
 func loadProjectChangelogCategories(ctx context.Context, query interface {

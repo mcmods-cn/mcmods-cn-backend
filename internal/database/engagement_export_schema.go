@@ -1,0 +1,176 @@
+package database
+
+// engagementExportSchemaStatements contains the authoritative development
+// schema for collection exports, stickers, MODID import confirmation and
+// project-update subscriptions. The project is pre-production, so these are
+// installed only as part of a clean schema generation; there is no legacy
+// backfill or dual-read path.
+func engagementExportSchemaStatements() []string {
+	return []string{
+		`create table favorite_modpack_export_tasks (
+			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
+			owner_user_id bigint not null references users(id) on delete cascade,
+			collection_id bigint not null references favorite_collections(id) on delete cascade,
+			pack_name text not null,
+			pack_version_id text not null,
+			minecraft_version text not null,
+			loader_type text not null,
+			loader_version text not null default '',
+			allow_compatible_only boolean not null default false,
+			status text not null default 'pending',
+			stage text not null default 'queued',
+			attempt_count integer not null default 0,
+			lease_token text not null default '',
+			lease_expires_at timestamptz,
+			collection_item_count integer not null default 0,
+			exported_mod_count integer not null default 0,
+			auto_dependency_count integer not null default 0,
+			skipped_item_count integer not null default 0,
+			failed_item_count integer not null default 0,
+			final_file_count integer not null default 0,
+			result_file_size bigint not null default 0,
+			result_sha256 text not null default '',
+			result_file_id bigint references oss_files(id) on delete set null,
+			report_version integer not null default 1,
+			report_snapshot jsonb not null default '{}'::jsonb,
+			error_code text not null default '',
+			error_detail text not null default '',
+			created_at timestamptz not null default now(),
+			started_at timestamptz,
+			finished_at timestamptz,
+			expires_at timestamptz,
+			updated_at timestamptz not null default now(),
+			check(loader_type in ('neoforge','fabric','forge')),
+			check(status in ('pending','processing','ready','failed','expired','cancelled')),
+			check(pack_version_id <> minecraft_version)
+		)`,
+		`create index idx_favorite_modpack_export_tasks_owner_created on favorite_modpack_export_tasks(owner_user_id,created_at desc,id desc)`,
+		`create index idx_favorite_modpack_export_tasks_queue on favorite_modpack_export_tasks(status,created_at,id) where status in ('pending','processing')`,
+		`create index idx_favorite_modpack_export_tasks_expiry on favorite_modpack_export_tasks(expires_at,id) where status='ready'`,
+		`create table favorite_modpack_export_items (
+			id bigserial primary key,
+			task_id bigint not null references favorite_modpack_export_tasks(id) on delete cascade,
+			source_collection_item_id bigint,
+			source_project_route_id bigint references public_routes(id) on delete set null,
+			source_project_type text not null,
+			source_project_name_snapshot text not null,
+			result_type text not null,
+			reason_code text not null default '',
+			reason_detail text not null default '',
+			modrinth_project_id text not null default '',
+			modrinth_version_id text not null default '',
+			selected_version_name text not null default '',
+			selected_file_name text not null default '',
+			minecraft_version text not null default '',
+			loader text not null default '',
+			release_type text not null default '',
+			env_client text not null default '',
+			env_server text not null default '',
+			file_size bigint not null default 0,
+			sha1 text not null default '',
+			sha512 text not null default '',
+			download_url text not null default '',
+			dependency_of jsonb not null default '[]'::jsonb,
+			created_at timestamptz not null default now(),
+			check(result_type in ('exported','auto_dependency','skipped','failed')),
+			check(env_client in ('','required','optional','unsupported')),
+			check(env_server in ('','required','optional','unsupported'))
+		)`,
+		`create index idx_favorite_modpack_export_items_task_result on favorite_modpack_export_items(task_id,result_type,id)`,
+		`create unique index uq_favorite_modpack_export_item_file on favorite_modpack_export_items(task_id,modrinth_project_id,modrinth_version_id,selected_file_name) where result_type in ('exported','auto_dependency')`,
+
+		`create index idx_catalog_import_jobs_confirmation on catalog_import_jobs(created_by,updated_at desc) where status='confirmation_required'`,
+
+		`create table sticker_catalog_state (
+			singleton boolean primary key default true check(singleton),
+			version bigint not null default 1,
+			updated_at timestamptz not null default now()
+		)`,
+		`insert into sticker_catalog_state(singleton) values(true)`,
+		`create table sticker_packs (
+			id bigserial primary key,
+			code text not null unique check(code ~ '^[a-z0-9][a-z0-9_-]{0,47}$'),
+			status text not null default 'active',
+			sort_order integer not null default 0,
+			created_by bigint references users(id) on delete set null,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			check(status in ('active','disabled'))
+		)`,
+		`create table sticker_pack_translations (
+			pack_id bigint not null references sticker_packs(id) on delete cascade,
+			locale text not null,
+			name text not null check(length(btrim(name)) between 1 and 80),
+			primary key(pack_id,locale)
+		)`,
+		`create table stickers (
+			id bigserial primary key,
+			pack_id bigint not null references sticker_packs(id) on delete cascade,
+			code text not null check(code ~ '^[a-z0-9][a-z0-9_-]{0,47}$'),
+			image_file_id bigint not null references oss_files(id) on delete restrict,
+			mime_type text not null,
+			width integer not null,
+			height integer not null,
+			file_size bigint not null,
+			checksum text not null,
+			status text not null default 'active',
+			sort_order integer not null default 0,
+			created_by bigint references users(id) on delete set null,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			unique(pack_id,code),
+			check(mime_type in ('image/png','image/gif')),
+			check(width>0 and height>0 and file_size>0),
+			check(status in ('active','disabled'))
+		)`,
+		`create table sticker_translations (
+			sticker_id bigint not null references stickers(id) on delete cascade,
+			locale text not null,
+			name text not null check(length(btrim(name)) between 1 and 80),
+			primary key(sticker_id,locale)
+		)`,
+		`create index idx_sticker_packs_active_order on sticker_packs(status,sort_order,id)`,
+		`create index idx_stickers_pack_active_order on stickers(pack_id,status,sort_order,id)`,
+
+		`create table project_follows (
+			user_id bigint not null references users(id) on delete cascade,
+			project_route_id bigint not null references public_routes(id) on delete cascade,
+			notifications_enabled boolean not null default true,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			primary key(user_id,project_route_id)
+		)`,
+		`create index idx_project_follows_route_user on project_follows(project_route_id,user_id)`,
+		`create index idx_project_follows_user_created on project_follows(user_id,created_at desc,project_route_id)`,
+		`create table project_update_events (
+			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
+			project_route_id bigint not null references public_routes(id) on delete cascade,
+			revision_id text,
+			actor_user_id bigint references users(id) on delete set null,
+			update_kind text not null,
+			changed_sections text[] not null default '{}'::text[],
+			publication_batch_id text not null,
+			published_at timestamptz not null default now(),
+			created_at timestamptz not null default now(),
+			unique(project_route_id,publication_batch_id)
+		)`,
+		`create index idx_project_update_events_route_published on project_update_events(project_route_id,published_at desc,id desc)`,
+		`create table project_update_notification_tasks (
+			event_id bigint primary key references project_update_events(id) on delete cascade,
+			status text not null default 'pending',
+			next_user_id bigint not null default 0,
+			notified_count bigint not null default 0,
+			attempt_count integer not null default 0,
+			next_attempt_at timestamptz not null default now(),
+			last_error text not null default '',
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now(),
+			check(status in ('pending','processing','completed','failed'))
+		)`,
+		`create index idx_project_update_notification_tasks_ready on project_update_notification_tasks(status,next_attempt_at,event_id)`,
+		`alter table notifications add column project_update_event_id bigint references project_update_events(id) on delete set null`,
+		`create unique index uq_notifications_project_update_recipient on notifications(recipient_id,project_update_event_id) where project_update_event_id is not null`,
+	}
+}

@@ -22,15 +22,17 @@ import (
 const notificationTaskCode = "notifications"
 
 type notificationEvent struct {
-	Action       string         `json:"action"`
-	RecipientID  int64          `json:"recipientId,omitempty"`
-	ActorID      int64          `json:"actorId,omitempty"`
-	Title        string         `json:"title,omitempty"`
-	Body         string         `json:"body,omitempty"`
-	Kind         string         `json:"kind,omitempty"`
-	SourceLocale string         `json:"sourceLocale,omitempty"`
-	SendEmail    bool           `json:"sendEmail,omitempty"`
-	Data         map[string]any `json:"data,omitempty"`
+	Action         string            `json:"action"`
+	RecipientID    int64             `json:"recipientId,omitempty"`
+	ActorID        int64             `json:"actorId,omitempty"`
+	Title          string            `json:"title,omitempty"`
+	Body           string            `json:"body,omitempty"`
+	Kind           string            `json:"kind,omitempty"`
+	SourceLocale   string            `json:"sourceLocale,omitempty"`
+	TemplateKey    string            `json:"templateKey,omitempty"`
+	TemplateValues map[string]string `json:"templateValues,omitempty"`
+	SendEmail      bool              `json:"sendEmail,omitempty"`
+	Data           map[string]any    `json:"data,omitempty"`
 }
 
 type NotificationWorker struct {
@@ -111,12 +113,23 @@ func (worker *NotificationWorker) createDirectNotification(ctx context.Context, 
 	if event.RecipientID <= 0 || strings.TrimSpace(event.Kind) == "" {
 		return fmt.Errorf("direct notification recipient and kind are required")
 	}
+	var templateVersion int
+	var templateParams []byte
+	if event.Kind == "system" && event.TemplateKey != "" {
+		rendered, err := renderNotificationTemplate(ctx, worker.db, event.RecipientID, event.TemplateKey, event.TemplateValues)
+		if err != nil {
+			return err
+		}
+		event.Title, event.Body, event.SourceLocale = rendered.Title, rendered.Body, rendered.Locale
+		templateVersion = rendered.Version
+		templateParams, _ = json.Marshal(rendered.Values)
+	}
 	rawData, _ := json.Marshal(event.Data)
 	var notificationID int64
 	if err := worker.db.QueryRow(
 		ctx,
-		`insert into notifications (recipient_id,kind,title,body,source_locale,data,source_event_id)
-		 values ($1,$2,$3,$4,$5,$6::jsonb,nullif($7,'')) on conflict(source_event_id) where source_event_id is not null do nothing
+		`insert into notifications (recipient_id,kind,title,body,source_locale,data,source_event_id,template_key,template_version,template_params)
+		 values ($1,$2,$3,$4,$5,$6::jsonb,nullif($7,''),nullif($8,''),$9,coalesce($10::jsonb,'{}'::jsonb)) on conflict(source_event_id) where source_event_id is not null do nothing
 		 returning id`,
 		event.RecipientID,
 		event.Kind,
@@ -125,6 +138,9 @@ func (worker *NotificationWorker) createDirectNotification(ctx context.Context, 
 		defaultString(event.SourceLocale, "zh-CN"),
 		string(rawData),
 		queue.EventIDFromContext(ctx),
+		event.TemplateKey,
+		templateVersion,
+		defaultString(string(templateParams), "{}"),
 	).Scan(&notificationID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil

@@ -47,20 +47,25 @@ type projectFileItem struct {
 }
 
 type providerProjectFile struct {
-	ID             string    `json:"id"`
-	Source         string    `json:"source"`
-	DisplayName    string    `json:"displayName"`
-	FileName       string    `json:"fileName"`
-	VersionName    string    `json:"versionName"`
-	ReleaseChannel string    `json:"releaseChannel"`
-	GameVersions   []string  `json:"gameVersions"`
-	Loaders        []string  `json:"loaders"`
-	PublishedAt    time.Time `json:"publishedAt"`
-	SizeBytes      int64     `json:"sizeBytes"`
-	DownloadCount  int64     `json:"downloadCount"`
-	SHA1           string    `json:"sha1,omitempty"`
-	SHA512         string    `json:"sha512,omitempty"`
-	DirectURL      string    `json:"directUrl,omitempty"`
+	ID                string    `json:"id"`
+	Source            string    `json:"source"`
+	DisplayName       string    `json:"displayName"`
+	FileName          string    `json:"fileName"`
+	VersionName       string    `json:"versionName"`
+	ReleaseChannel    string    `json:"releaseChannel"`
+	GameVersions      []string  `json:"gameVersions"`
+	Loaders           []string  `json:"loaders"`
+	PublishedAt       time.Time `json:"publishedAt"`
+	SizeBytes         int64     `json:"sizeBytes"`
+	DownloadCount     int64     `json:"downloadCount"`
+	SHA1              string    `json:"sha1,omitempty"`
+	SHA512            string    `json:"sha512,omitempty"`
+	DirectURL         string    `json:"directUrl,omitempty"`
+	ProviderProjectID string    `json:"providerProjectId,omitempty"`
+	ProviderVersionID string    `json:"providerVersionId,omitempty"`
+	ClientEnvironment string    `json:"clientEnvironment,omitempty"`
+	ServerEnvironment string    `json:"serverEnvironment,omitempty"`
+	Primary           bool      `json:"primary,omitempty"`
 }
 
 type createProjectFileRequest struct {
@@ -191,6 +196,12 @@ func (s *Server) projectFile(w http.ResponseWriter, r *http.Request) {
 	_, _ = tx.Exec(r.Context(), `insert into audit_events(aggregate_type,aggregate_key,actor_id,action,ip,user_agent,metadata)
 		values('project_file',$1,$2,'delete',$3,$4,jsonb_build_object('projectType',$5,'projectId',$6))`,
 		publicID, currentClaims(r).Subject, s.requestClientLocation(r).IP, r.UserAgent(), project.ProjectType, project.ProjectID)
+	if project.ReviewStatus == "approved" {
+		if err = enqueueProjectFileUpdateEventTx(r.Context(), tx, project, currentClaims(r).Subject, "download_removed", publicID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to enqueue project update")
+			return
+		}
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit project file deletion")
 		return
@@ -269,6 +280,12 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 	metadata, _ := json.Marshal(map[string]any{"projectType": project.ProjectType, "projectId": project.ProjectID, "ossFileId": request.OSSFileID})
 	_, _ = tx.Exec(r.Context(), `insert into audit_events(aggregate_type,aggregate_key,actor_id,action,ip,user_agent,metadata)
 		values('project_file',$1,$2,'create',$3,$4,$5::jsonb)`, publicID, currentClaims(r).Subject, s.requestClientLocation(r).IP, r.UserAgent(), metadata)
+	if project.ReviewStatus == "approved" {
+		if err = enqueueProjectFileUpdateEventTx(r.Context(), tx, project, currentClaims(r).Subject, "download_added", publicID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to enqueue project update")
+			return
+		}
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit project file creation")
 		return
@@ -279,6 +296,19 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 	writeJSON(w, http.StatusCreated, file)
+}
+
+func enqueueProjectFileUpdateEventTx(ctx context.Context, tx pgx.Tx, project projectFileContext, actorID int64, updateKind, filePublicID string) error {
+	var routeID int64
+	if err := tx.QueryRow(ctx, `select id from public_routes where entity_type=$1 and internal_id=$2`,
+		project.ProjectType, project.ProjectInternalID).Scan(&routeID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	return enqueueProjectUpdateEventTx(ctx, tx, routeID, 0, actorID, updateKind,
+		[]string{"download_files"}, "project-file:"+updateKind+":"+filePublicID)
 }
 
 func (s *Server) createProjectFileUpload(w http.ResponseWriter, r *http.Request) {
@@ -586,6 +616,7 @@ func loadModrinthProjectFiles(ctx context.Context, projectID string, cfg modImpo
 			Primary  bool              `json:"primary"`
 			Size     int64             `json:"size"`
 		} `json:"files"`
+		ProjectID string `json:"project_id"`
 	}
 	headers := providerHeaders(cfg.UserAgent, cfg.Modrinth.Token, "")
 	endpoint := cfg.Modrinth.BaseURL + "/project/" + url.PathEscape(projectID) + "/version"
@@ -616,6 +647,9 @@ func loadModrinthProjectFiles(ctx context.Context, projectID string, cfg modImpo
 				GameVersions: uniqueTrimmed(version.GameVersions, 100), Loaders: normalizeLoaders(version.Loaders),
 				PublishedAt: publishedAt, SizeBytes: file.Size, DownloadCount: version.Downloads,
 				SHA1: file.Hashes["sha1"], SHA512: file.Hashes["sha512"], DirectURL: file.URL,
+				ProviderProjectID: firstNonEmpty(version.ProjectID, projectID), ProviderVersionID: version.ID,
+				ClientEnvironment: "required", ServerEnvironment: "required",
+				Primary: file.Primary,
 			})
 		}
 	}

@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -154,7 +153,7 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID, bl
 	_, _ = worker.db.Exec(ctx, `update blueprint_jobs set progress=55,updated_at=now() where id=$1`, jobID)
 	normalizedConfig := worker.api.ossConfigFromSettings(ctx)
 	normalizedKey := path.Join(ossObjectPrefix(normalizedConfig.Prefix, ossBlueprintReleaseCategory(publicID, "normalized")), "blueprint.json")
-	fileID, err := worker.writeOSSObject(ctx, normalizedKey, "blueprint.json", "application/json", normalized, createdBy, "blueprint_normalized")
+	fileID, err := worker.api.writeGeneratedOSSObject(ctx, normalizedKey, "blueprint.json", "application/json", normalized, createdBy, "blueprint_normalized")
 	if err != nil {
 		return err
 	}
@@ -166,7 +165,7 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID, bl
 		} else {
 			generatedConfig := worker.api.ossConfigFromSettings(ctx)
 			generatedKey := path.Join(ossObjectPrefix(generatedConfig.Prefix, ossBlueprintTextCategory(publicID, "cover")), "generated-"+randomObjectName()+".png")
-			generatedFileID, writeErr := worker.writeOSSObject(ctx, generatedKey, "blueprint-cover.png", "image/png", cover, createdBy, "blueprint_generated_cover")
+			generatedFileID, writeErr := worker.api.writeGeneratedOSSObject(ctx, generatedKey, "blueprint-cover.png", "image/png", cover, createdBy, "blueprint_generated_cover")
 			if writeErr != nil {
 				log.Printf("store generated cover for blueprint %s: %v", publicID, writeErr)
 			} else {
@@ -318,7 +317,7 @@ func (worker *BlueprintWorker) convertBlueprint(ctx context.Context, jobID, blue
 	conversionConfig := worker.api.ossConfigFromSettings(ctx)
 	objectKey := path.Join(ossObjectPrefix(conversionConfig.Prefix, ossBlueprintReleaseCategory(publicID, extension)), randomObjectName()+"."+extension)
 	filename := strings.TrimSuffix(title, "."+document.SourceFormat) + "." + extension
-	fileID, err := worker.writeOSSObject(ctx, objectKey, filename, contentType, encoded, createdBy, "blueprint_conversion")
+	fileID, err := worker.api.writeGeneratedOSSObject(ctx, objectKey, filename, contentType, encoded, createdBy, "blueprint_conversion")
 	if err != nil {
 		return err
 	}
@@ -355,31 +354,6 @@ func (worker *BlueprintWorker) readOSSObject(ctx context.Context, objectKey stri
 	return raw, contentType, nil
 }
 
-func (worker *BlueprintWorker) writeOSSObject(ctx context.Context, objectKey, originalName, contentType string, data []byte, uploaderID int64, source string) (int64, error) {
-	client, cfg, err := worker.api.ossClient(ctx)
-	if err != nil {
-		return 0, err
-	}
-	digest := sha256.Sum256(data)
-	sha := hex.EncodeToString(digest[:])
-	_, err = client.PutObject(ctx, &aliyunoss.PutObjectRequest{
-		Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey), ContentType: aliyunoss.Ptr(contentType),
-		ContentLength: aliyunoss.Ptr(int64(len(data))), Body: bytes.NewReader(data), Metadata: map[string]string{"sha256": sha},
-	})
-	if err != nil {
-		return 0, err
-	}
-	var fileID int64
-	err = worker.db.QueryRow(ctx, `insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status)
-		values($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$9,$10,$11,'active','trusted_generated')
-		on conflict(object_key) do update set bucket=excluded.bucket,endpoint=excluded.endpoint,region=excluded.region,
-			category=excluded.category,source=excluded.source,original_name=excluded.original_name,source_original_name=excluded.source_original_name,
-			content_type=excluded.content_type,size_bytes=excluded.size_bytes,source_size_bytes=excluded.source_size_bytes,sha256=excluded.sha256,
-			uploader_id=excluded.uploader_id,status='active',scan_status='trusted_generated' returning id`,
-		cfg.Bucket, cfg.displayEndpoint(), cfg.Region, objectKey, ossCategoryFromObjectKey(objectKey, cfg.Prefix), source, originalName, contentType, len(data), sha, uploaderID).Scan(&fileID)
-	return fileID, err
-}
-
 func (worker *BlueprintWorker) notifyTemplate(userID int64, code string, values map[string]string, blueprintID int64) {
 	if userID <= 0 {
 		return
@@ -392,11 +366,15 @@ func (worker *BlueprintWorker) notifyTemplate(userID int64, code string, values 
 	if values["name"] == "" {
 		values["name"] = blueprintName
 	}
-	title, body, locale := renderNotificationTemplate(context.Background(), worker.db, userID, code, values)
 	targetData := map[string]any{"blueprintId": publicID, "targetLabel": blueprintName, "url": "/blueprints/" + publicID}
-	data, _ := json.Marshal(targetData)
-	if worker.queue != nil && worker.queue.PublishTask(context.Background(), notificationTaskCode, notificationEvent{Action: "direct", RecipientID: userID, Kind: "system", Title: title, Body: body, SourceLocale: locale, Data: targetData}) == nil {
+	if worker.queue != nil && worker.queue.PublishTask(context.Background(), notificationTaskCode, notificationEvent{Action: "direct", RecipientID: userID, Kind: "system", TemplateKey: code, TemplateValues: values, Data: targetData}) == nil {
 		return
 	}
-	_, _ = worker.db.Exec(context.Background(), `insert into notifications(recipient_id,kind,title,body,source_locale,data) values($1,'system',$2,$3,$4,$5::jsonb)`, userID, title, body, locale, string(data))
+	rendered, err := renderNotificationTemplate(context.Background(), worker.db, userID, code, values)
+	if err != nil {
+		return
+	}
+	data, _ := json.Marshal(targetData)
+	params, _ := json.Marshal(rendered.Values)
+	_, _ = worker.db.Exec(context.Background(), `insert into notifications(recipient_id,kind,title,body,source_locale,data,template_key,template_version,template_params) values($1,'system',$2,$3,$4,$5::jsonb,$6,$7,$8::jsonb)`, userID, rendered.Title, rendered.Body, rendered.Locale, string(data), rendered.Key, rendered.Version, string(params))
 }

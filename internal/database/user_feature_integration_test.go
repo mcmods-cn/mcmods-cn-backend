@@ -26,13 +26,15 @@ func TestCurrentUserFeaturesIntegration(t *testing.T) {
 		t.Fatalf("migrate current schema: %v", err)
 	}
 	var generation int
-	if err = pool.QueryRow(ctx, `select generation from schema_metadata where singleton`).Scan(&generation); err != nil || generation != 81 {
+	if err = pool.QueryRow(ctx, `select generation from schema_metadata where singleton`).Scan(&generation); err != nil || generation != 82 {
 		t.Fatalf("unexpected schema generation %d: %v", generation, err)
 	}
 	for _, relation := range []string{
 		"user_presence_sessions", "user_statistics_daily", "user_statistics_totals",
 		"user_content_creation_facts", "activity_cleanup_runs", "activity_event_outbox",
 		"project_automation_activity",
+		"favorite_modpack_export_tasks", "favorite_modpack_export_items",
+		"sticker_packs", "stickers", "project_follows", "project_update_events",
 	} {
 		var exists bool
 		if err = pool.QueryRow(ctx, `select to_regclass('public.'||$1) is not null`, relation).Scan(&exists); err != nil || !exists {

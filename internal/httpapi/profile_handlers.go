@@ -11,7 +11,8 @@ import (
 )
 
 type notificationSettingsRequest struct {
-	EmailEnabled bool `json:"emailEnabled"`
+	EmailEnabled          *bool `json:"emailEnabled"`
+	ProjectUpdatesEnabled *bool `json:"projectUpdatesEnabled"`
 }
 
 type userConnectionItem struct {
@@ -267,13 +268,13 @@ func (s *Server) unfollowUser(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getNotificationSettings(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	emailEnabled := false
-	err := s.db.QueryRow(r.Context(), `select email_enabled from user_notification_settings where user_id = $1`, claims.Subject).Scan(&emailEnabled)
+	emailEnabled, projectUpdatesEnabled := false, true
+	err := s.db.QueryRow(r.Context(), `select email_enabled,project_updates_enabled from user_notification_settings where user_id = $1`, claims.Subject).Scan(&emailEnabled, &projectUpdatesEnabled)
 	if err != nil && err != pgx.ErrNoRows {
 		writeError(w, http.StatusInternalServerError, "读取通知设置失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"emailEnabled": emailEnabled})
+	writeJSON(w, http.StatusOK, map[string]bool{"emailEnabled": emailEnabled, "projectUpdatesEnabled": projectUpdatesEnabled})
 }
 
 func (s *Server) updateNotificationSettings(w http.ResponseWriter, r *http.Request) {
@@ -285,17 +286,21 @@ func (s *Server) updateNotificationSettings(w http.ResponseWriter, r *http.Reque
 	claims := currentClaims(r)
 	_, err := s.db.Exec(
 		r.Context(),
-		`insert into user_notification_settings (user_id, email_enabled, updated_at)
-		 values ($1, $2, now())
-		 on conflict (user_id) do update set email_enabled = excluded.email_enabled, updated_at = now()`,
+		`insert into user_notification_settings (user_id,email_enabled,project_updates_enabled,updated_at)
+		 values ($1,coalesce($2,false),coalesce($3,true),now())
+		 on conflict (user_id) do update set
+		 email_enabled=coalesce($2,user_notification_settings.email_enabled),
+		 project_updates_enabled=coalesce($3,user_notification_settings.project_updates_enabled),updated_at=now()`,
 		claims.Subject,
 		req.EmailEnabled,
+		req.ProjectUpdatesEnabled,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "保存通知设置失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"emailEnabled": req.EmailEnabled})
+	getNotificationSettings := r.Clone(r.Context())
+	s.getNotificationSettings(w, getNotificationSettings)
 }
 
 func (s *Server) pathUserIdentity(w http.ResponseWriter, r *http.Request) (publicIdentity, bool) {

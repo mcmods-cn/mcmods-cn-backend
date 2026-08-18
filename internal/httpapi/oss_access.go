@@ -1,7 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -21,6 +24,34 @@ type ossObjectAccess struct {
 	URL       string
 	Mode      string
 	ExpiresAt time.Time
+}
+
+// writeGeneratedOSSObject is the shared boundary for trusted files generated
+// by backend workers. Business workers provide bytes and ownership metadata;
+// OSS configuration and the persistent file record stay centralized here.
+func (s *Server) writeGeneratedOSSObject(ctx context.Context, objectKey, originalName, contentType string, data []byte, uploaderID int64, source string) (int64, error) {
+	client, cfg, err := s.ossClient(ctx)
+	if err != nil {
+		return 0, err
+	}
+	digest := sha256.Sum256(data)
+	sha := hex.EncodeToString(digest[:])
+	_, err = client.PutObject(ctx, &aliyunoss.PutObjectRequest{
+		Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey), ContentType: aliyunoss.Ptr(contentType),
+		ContentLength: aliyunoss.Ptr(int64(len(data))), Body: bytes.NewReader(data), Metadata: map[string]string{"sha256": sha},
+	})
+	if err != nil {
+		return 0, err
+	}
+	var fileID int64
+	err = s.db.QueryRow(ctx, `insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status)
+		values($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$9,$10,$11,'active','trusted_generated')
+		on conflict(object_key) do update set bucket=excluded.bucket,endpoint=excluded.endpoint,region=excluded.region,
+			category=excluded.category,source=excluded.source,original_name=excluded.original_name,source_original_name=excluded.source_original_name,
+			content_type=excluded.content_type,size_bytes=excluded.size_bytes,source_size_bytes=excluded.source_size_bytes,sha256=excluded.sha256,
+			uploader_id=excluded.uploader_id,status='active',scan_status='trusted_generated' returning id`,
+		cfg.Bucket, cfg.displayEndpoint(), cfg.Region, objectKey, ossCategoryFromObjectKey(objectKey, cfg.Prefix), source, originalName, contentType, len(data), sha, uploaderID).Scan(&fileID)
+	return fileID, err
 }
 
 // resolveOSSObjectAccess is the single policy boundary for URLs that read an
@@ -162,6 +193,7 @@ func (s *Server) publicInlineOSSFile(w http.ResponseWriter, r *http.Request) {
 func isPublicInlineOSSFileSource(source string) bool {
 	source = strings.ToLower(strings.TrimSpace(source))
 	return source == "playground" || source == "server-content" ||
+		source == "sticker" ||
 		strings.Contains(source, "_text:") || strings.HasPrefix(source, "mod_text:")
 }
 
