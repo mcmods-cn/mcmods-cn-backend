@@ -33,7 +33,7 @@ func simpleProjectSchemaStatements() []string {
 			search_keywords text[] not null default '{}'::text[],
 			submission_method text not null default 'manual',
 			review_status text not null default 'pending',
-			created_by bigint references users(id) on delete set null,
+			submitted_by bigint references users(id) on delete set null,
 			published_revision_id bigint references content_revisions(id) on delete restrict,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
@@ -45,7 +45,7 @@ func simpleProjectSchemaStatements() []string {
 			check(review_status in ('pending','approved','rejected'))
 		)`,
 		`create index idx_simple_projects_catalog on simple_projects(project_type,review_status,updated_at desc,id desc)`,
-		`create index idx_simple_projects_created_by on simple_projects(created_by,updated_at desc)`,
+		`create index idx_simple_projects_submitted_by on simple_projects(submitted_by,updated_at desc)`,
 		`create index idx_simple_projects_versions on simple_projects using gin(minecraft_versions)`,
 		`create index idx_simple_projects_categories on simple_projects using gin(categories)`,
 		`create table simple_project_localizations (

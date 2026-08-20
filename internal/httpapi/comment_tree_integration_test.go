@@ -2,8 +2,10 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -160,5 +162,26 @@ func TestInsertCommentTreeIntegration(t *testing.T) {
 	}
 	if len(hiddenItems) != 0 {
 		t.Fatalf("blocked author's comments were returned: %#v", hiddenItems)
+	}
+
+	var attachmentPublicID string
+	if err = tx.QueryRow(ctx, `insert into oss_files(object_key,category,source,original_name,source_original_name,
+		content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status)
+		values($1,'users/comments','comment','notes.txt','notes.txt','text/plain',12,12,$2,$3,'active','clean') returning public_id`,
+		"tests/comments/"+fixtureKey+"/notes.txt", strings.Repeat("a", 64), authorID).Scan(&attachmentPublicID); err != nil {
+		t.Fatal(err)
+	}
+	if err = bindCommentAttachmentsTx(ctx, tx, child.ID, authorID, []string{attachmentPublicID}); err != nil {
+		t.Fatalf("bind reply attachment: %v", err)
+	}
+	var attachmentCount int
+	if err = tx.QueryRow(ctx, `select count(*) from comment_attachments where comment_id=$1`, child.ID).Scan(&attachmentCount); err != nil {
+		t.Fatal(err)
+	}
+	if attachmentCount != 1 {
+		t.Fatalf("unexpected reply attachment count: %d", attachmentCount)
+	}
+	if err = bindCommentAttachmentsTx(ctx, tx, root.ID, viewerID, []string{attachmentPublicID}); !errors.Is(err, errCommentAttachmentUnavailable) {
+		t.Fatalf("another user was able to bind the attachment: %v", err)
 	}
 }

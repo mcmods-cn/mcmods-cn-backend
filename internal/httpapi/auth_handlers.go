@@ -59,7 +59,9 @@ type emailLoginRequest struct {
 
 type authenticatedUserResponse struct {
 	domain.User
-	PermissionRules []security.PermissionRule `json:"permissionRules"`
+	PermissionRules   []security.PermissionRule `json:"permissionRules"`
+	PermissionVersion int64                     `json:"permissionVersion"`
+	RBACVersion       int64                     `json:"rbacVersion"`
 }
 
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
@@ -515,7 +517,15 @@ func (s *Server) findUserByID(ctx context.Context, id int64) (domain.User, error
 }
 
 func (s *Server) authenticatedUser(ctx context.Context, user domain.User) (authenticatedUserResponse, error) {
-	roleCodes, permissionRules, err := s.resolveUserRootPermissions(ctx, user.ID)
+	permissionVersion, err := s.loadPermissionVersion(ctx, user.ID)
+	if err != nil {
+		return authenticatedUserResponse{}, err
+	}
+	rbacVersion, err := s.loadRBACVersion(ctx)
+	if err != nil {
+		return authenticatedUserResponse{}, err
+	}
+	roleCodes, permissionRules, err := s.resolveUserRootPermissionsAtVersion(ctx, user.ID, permissionVersion, rbacVersion)
 	if err != nil {
 		return authenticatedUserResponse{}, err
 	}
@@ -524,7 +534,7 @@ func (s *Server) authenticatedUser(ctx context.Context, user domain.User) (authe
 		return authenticatedUserResponse{}, err
 	}
 	user.RoleCodes = roleCodes
-	return authenticatedUserResponse{User: user, PermissionRules: permissionRules}, nil
+	return authenticatedUserResponse{User: user, PermissionRules: permissionRules, PermissionVersion: permissionVersion, RBACVersion: rbacVersion}, nil
 }
 
 func (s *Server) recordLogin(ctx context.Context, userID *int64, account string, location clientLocation, userAgent string, success bool, reason string) {

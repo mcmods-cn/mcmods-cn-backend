@@ -141,8 +141,8 @@ type modResponse struct {
 	SearchKeywords       []string                        `json:"searchKeywords"`
 	SubmissionMethod     string                          `json:"submissionMethod"`
 	ReviewStatus         string                          `json:"reviewStatus"`
-	CreatedByInternal    *int64                          `json:"-"`
-	CreatedBy            string                          `json:"createdBy,omitempty"`
+	SubmittedByInternal  *int64                          `json:"-"`
+	SubmittedBy          string                          `json:"submittedBy,omitempty"`
 	CreatedAt            time.Time                       `json:"createdAt"`
 	UpdatedAt            time.Time                       `json:"updatedAt"`
 	PublishedAt          *time.Time                      `json:"publishedAt,omitempty"`
@@ -204,8 +204,6 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		publishedAt = &now
 	}
-	permissionDefaults := s.permissionDefaultsFromSettings(r.Context())
-
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "创建模组失败")
@@ -268,7 +266,7 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		`insert into mods (
 			project_code, slug, primary_name, secondary_name, abbreviation, summary, environment, primary_category,
 			official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
-			body_markdown, search_keywords, submission_method, review_status, created_by, published_at
+			body_markdown, search_keywords, submission_method, review_status, submitted_by, published_at
 		 ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
 		 returning id`,
 		uniqueID, req.SiteID, req.PrimaryName, req.SecondaryName, req.Abbreviation, req.Summary, req.Environment, req.PrimaryCategory,
@@ -308,23 +306,11 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	for index, author := range req.Authors {
-		creatorID, nameSnapshot, roleSnapshot, resolveErr := resolveProjectAuthorForCreateTx(r.Context(), tx, author, claims.Subject, r)
-		if resolveErr != nil {
-			writeError(w, http.StatusBadRequest, resolveErr.Error())
-			return
-		}
-		roleID, resolveErr := creatorRoleInternalIDTx(r.Context(), tx, author.RoleID)
-		if resolveErr != nil {
-			writeError(w, http.StatusBadRequest, "selected creator role does not exist")
-			return
-		}
-		if _, err = tx.Exec(r.Context(), `insert into content_creator_bindings(
-			subject_id,subject_type,creator_id,role_id,name_snapshot,role_snapshot,display_order
-		) values ($1,'mod',$2,$3,$4,$5,$6)`, modID, creatorID, roleID, nameSnapshot, roleSnapshot, index); err != nil {
-			writeError(w, http.StatusInternalServerError, "保存作者资料失败")
-			return
-		}
+	canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
+	if err = syncProjectCreatorBindingsTx(r.Context(), tx, "mod", modID, req.Authors, claims.Subject,
+		reviewStatus == "approved", canManageAuthors, canManageTeams, r); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	if err = insertModCompatibilities(r.Context(), tx, modID, req.Compatibilities); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存模组兼容版本失败")
@@ -333,12 +319,6 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 	if err = insertModRelationshipGroups(r.Context(), tx, modID, req.RelationshipGroups); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存模组关系失败")
 		return
-	}
-	if permissionDefaults.DeveloperRole != "" {
-		if err = s.bindProjectRoleTx(r.Context(), tx, claims.Subject, permissionDefaults.DeveloperRole, uniqueID); err != nil {
-			writeError(w, http.StatusInternalServerError, "分配模组开发者权限组失败")
-			return
-		}
 	}
 	snapshot, err := json.Marshal(req)
 	if err != nil {
@@ -362,7 +342,8 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !reviewRequired {
-		if err = applyModSnapshot(r.Context(), tx, modID, createdRevision.RevisionID, req); err != nil {
+		if err = applyModSnapshot(r.Context(), tx, modID, createdRevision.RevisionID, claims.Subject,
+			canManageAuthors, canManageTeams, req); err != nil {
 			writeError(w, http.StatusInternalServerError, "发布模组版本失败")
 			return
 		}
@@ -376,6 +357,7 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "提交模组资料失败")
 		return
 	}
+	_ = s.refreshProjectACLVersion(r.Context())
 
 	if !reviewRequired {
 		s.scheduleModGalleryOSSRehome(modID)
@@ -390,14 +372,15 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, mod)
 }
 
-const publicModCatalogFilter = `where (m.review_status='approved' or m.created_by=$1)
+const publicModCatalogFilter = `where (m.review_status='approved' or m.submitted_by=$1)
 	and (($3 and m.id=any($4::bigint[])) or (not $3 and ($2='' or m.slug ilike '%%'||$2||'%%'
 		or m.project_code ilike '%%'||$2||'%%' or m.primary_name ilike '%%'||$2||'%%'
 		or m.secondary_name ilike '%%'||$2||'%%' or m.abbreviation ilike '%%'||$2||'%%'
 		or $2=any(m.search_keywords)
 		or exists(select 1 from mod_identifiers identifier where identifier.mod_id=m.id and identifier.identifier ilike '%%'||$2||'%%')
 		or exists(select 1 from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
-			where binding.subject_id=m.id and binding.subject_type='mod' and creator.name ilike '%%'||$2||'%%'))))
+			where binding.subject_id=m.id and binding.subject_type='mod' and binding.status='approved'
+			  and creator.name ilike '%%'||$2||'%%'))))
 	and (cardinality($5::text[])=0 or (
 		$9='all' and not exists(select 1 from unnest($5::text[]) requested(value) where not exists(
 			select 1 from mod_loader_compatibilities compatibility where compatibility.mod_id=m.id and compatibility.minecraft_version=requested.value))
@@ -482,7 +465,7 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		`select m.id, project_code, slug, primary_name, secondary_name, abbreviation, summary, environment, primary_category,
 		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
-		        body_markdown, search_keywords, submission_method, review_status, created_by, m.created_at, m.updated_at, published_at,
+		        body_markdown, search_keywords, submission_method, review_status, submitted_by, m.created_at, m.updated_at, published_at,
 		        (select revision.public_id from content_revisions revision where revision.id=m.published_revision_id)
 		 from mods m
 		 left join public_routes popularity_route on popularity_route.entity_type='mod' and popularity_route.internal_id=m.id
@@ -615,9 +598,9 @@ func (s *Server) publicProjectIcon(w http.ResponseWriter, r *http.Request, proje
 		writeError(w, http.StatusBadRequest, projectKind+" site ID is invalid")
 		return
 	}
-	query := `select icon_url from mods where slug=$1 and (review_status='approved' or created_by=$2)`
+	query := `select icon_url from mods where slug=$1 and (review_status='approved' or submitted_by=$2)`
 	if projectKind == "modpack" {
-		query = `select icon_url from modpacks where slug=$1 and (review_status='approved' or created_by=$2)`
+		query = `select icon_url from modpacks where slug=$1 and (review_status='approved' or submitted_by=$2)`
 	}
 	var iconURL string
 	err := s.db.QueryRow(r.Context(), query, siteID, currentClaims(r).Subject).Scan(&iconURL)
@@ -665,7 +648,7 @@ func scanMod(row scanner) (modResponse, error) {
 		&mod.ID, &mod.UniqueID, &mod.SiteID, &mod.PrimaryName, &mod.SecondaryName, &mod.Abbreviation, &mod.Summary,
 		&mod.Environment, &mod.PrimaryCategory, &mod.OfficialStatus, &mod.SourceStatus, &mod.License,
 		&mod.CurseForgeProjectID, &mod.ModrinthProjectID, &mod.GitHubProjectPath, &mod.IconURL, &mod.BodyMarkdown, &mod.SearchKeywords,
-		&mod.SubmissionMethod, &mod.ReviewStatus, &mod.CreatedByInternal, &mod.CreatedAt, &mod.UpdatedAt, &mod.PublishedAt, &mod.PublishedRevisionID,
+		&mod.SubmissionMethod, &mod.ReviewStatus, &mod.SubmittedByInternal, &mod.CreatedAt, &mod.UpdatedAt, &mod.PublishedAt, &mod.PublishedRevisionID,
 	)
 	mod.PublicID = mod.UniqueID
 	mod.Tags = []string{}
@@ -776,7 +759,7 @@ func (s *Server) loadModListAssociations(ctx context.Context, mods []modResponse
 		from content_creator_bindings author
 		join creators creator on creator.id=author.creator_id
 		left join creator_role_definitions role on role.id=author.role_id
-		where author.subject_id=any($1) and author.subject_type='mod'
+		where author.subject_id=any($1) and author.subject_type='mod' and author.status='approved'
 		order by author.subject_id,author.display_order,author.id`, ids)
 	if err != nil {
 		return err
@@ -797,7 +780,7 @@ func (s *Server) loadModListAssociations(ctx context.Context, mods []modResponse
 	rows.Close()
 
 	rows, err = s.db.Query(ctx, `select mod.id,user_account.public_id
-		from mods mod join users user_account on user_account.id=mod.created_by where mod.id=any($1)`, ids)
+		from mods mod join users user_account on user_account.id=mod.submitted_by where mod.id=any($1)`, ids)
 	if err != nil {
 		return err
 	}
@@ -808,7 +791,7 @@ func (s *Server) loadModListAssociations(ctx context.Context, mods []modResponse
 		if err = rows.Scan(&modID, &publicID); err != nil {
 			return err
 		}
-		byID[modID].CreatedBy = publicID
+		byID[modID].SubmittedBy = publicID
 	}
 	return rows.Err()
 }
@@ -818,9 +801,9 @@ func (s *Server) modByID(ctx context.Context, id int64, viewerID int64) (modResp
 		ctx,
 		`select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, environment, primary_category,
 		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
-		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at,
+		        body_markdown, search_keywords, submission_method, review_status, submitted_by, created_at, updated_at, published_at,
 		        (select revision.public_id from content_revisions revision where revision.id=mods.published_revision_id)
-		 from mods where id = $1 and (review_status = 'approved' or created_by = $2)`,
+		 from mods where id = $1 and (review_status = 'approved' or submitted_by = $2)`,
 		id, viewerID,
 	)
 	mod, err := scanMod(row)
@@ -836,9 +819,9 @@ func (s *Server) modBySiteID(ctx context.Context, siteID string, viewerID int64)
 		ctx,
 		`select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, environment, primary_category,
 		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
-		        body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at,
+		        body_markdown, search_keywords, submission_method, review_status, submitted_by, created_at, updated_at, published_at,
 		        (select revision.public_id from content_revisions revision where revision.id=mods.published_revision_id)
-		 from mods where slug = $1 and (review_status = 'approved' or created_by = $2)`,
+		 from mods where slug = $1 and (review_status = 'approved' or submitted_by = $2)`,
 		siteID, viewerID,
 	)
 	mod, err := scanMod(row)
@@ -852,7 +835,7 @@ func (s *Server) modBySiteID(ctx context.Context, siteID string, viewerID int64)
 func (s *Server) modBySiteIDForEditor(ctx context.Context, siteID string) (modResponse, error) {
 	row := s.db.QueryRow(ctx, `select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, environment, primary_category,
 		official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
-		body_markdown, search_keywords, submission_method, review_status, created_by, created_at, updated_at, published_at,
+		body_markdown, search_keywords, submission_method, review_status, submitted_by, created_at, updated_at, published_at,
 		(select revision.public_id from content_revisions revision where revision.id=mods.published_revision_id)
 		from mods where slug=$1`, siteID)
 	mod, err := scanMod(row)
@@ -864,8 +847,8 @@ func (s *Server) modBySiteIDForEditor(ctx context.Context, siteID string) (modRe
 }
 
 func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) error {
-	if mod.CreatedByInternal != nil {
-		if err := s.db.QueryRow(ctx, `select public_id from users where id=$1`, *mod.CreatedByInternal).Scan(&mod.CreatedBy); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if mod.SubmittedByInternal != nil {
+		if err := s.db.QueryRow(ctx, `select public_id from users where id=$1`, *mod.SubmittedByInternal).Scan(&mod.SubmittedBy); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
 	}
@@ -997,11 +980,11 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 		from creator_team_members membership
 		join creators member on member.id=membership.member_creator_id
 		join creator_role_definitions member_role on member_role.id=membership.role_id
-		where membership.team_id=creator.id),'[]'::jsonb)
+		where membership.team_id=creator.id and membership.status='approved'),'[]'::jsonb)
 		from content_creator_bindings author
 		join creators creator on creator.id=author.creator_id
 		left join creator_role_definitions role on role.id=author.role_id
-		where author.subject_id=$1 and author.subject_type='mod'
+		where author.subject_id=$1 and author.subject_type='mod' and author.status='approved'
 		order by author.display_order,author.id`, mod.ID)
 	if err != nil {
 		return err

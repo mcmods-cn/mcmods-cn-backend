@@ -65,6 +65,9 @@ func TestOptionalAuthTreatsInvalidCookieAsGuest(t *testing.T) {
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("expected status %d, got %d", http.StatusNoContent, response.Code)
 	}
+	if got := response.Header().Get(authStateHeader); got != authStateInvalid {
+		t.Fatalf("authentication state header = %q, want %q", got, authStateInvalid)
+	}
 	cleared := false
 	for _, cookie := range response.Result().Cookies() {
 		if cookie.Name == authSessionCookieName && cookie.MaxAge < 0 {
@@ -91,9 +94,30 @@ func TestOptionalAuthTreatsInvalidAuthorizationAsGuestWithoutClearingCookie(t *t
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("expected status %d, got %d", http.StatusNoContent, response.Code)
 	}
+	if got := response.Header().Get(authStateHeader); got != authStateInvalid {
+		t.Fatalf("authentication state header = %q, want %q", got, authStateInvalid)
+	}
 	for _, cookie := range response.Result().Cookies() {
 		if cookie.Name == authSessionCookieName {
 			t.Fatal("explicit authorization must not mutate browser cookies")
 		}
+	}
+}
+
+func TestOptionalAuthWithoutSessionDoesNotSignalInvalidAuthentication(t *testing.T) {
+	server := &Server{cfg: config.Config{JWTSecret: "test-secret"}}
+	handler := server.optionalAuth(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/servers", nil)
+	response := httptest.NewRecorder()
+
+	handler(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("expected status %d, got %d", http.StatusNoContent, response.Code)
+	}
+	if got := response.Header().Get(authStateHeader); got != "" {
+		t.Fatalf("guest request was marked as invalid authentication: %q", got)
 	}
 }

@@ -59,9 +59,9 @@ func TestLookupReviewAttachmentEnforcesSafeOSSState(t *testing.T) {
 			wantFirstArg:      "xyz987uvw",
 		},
 		{
-			name:              "mod application",
-			lookup:            reviewAttachmentLookup{Kind: reviewAttachmentForModApplication, SubjectPublicID: "xyz987uvw"},
-			wantQueryFragment: "from mod_application_attachments attachment",
+			name:              "project editor application",
+			lookup:            reviewAttachmentLookup{Kind: reviewAttachmentForProjectEditorApplication, SubjectPublicID: "xyz987uvw"},
+			wantQueryFragment: "from project_editor_application_attachments attachment",
 			wantFirstArg:      "xyz987uvw",
 		},
 	}

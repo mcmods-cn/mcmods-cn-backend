@@ -211,6 +211,7 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 		writeError(w, http.StatusInternalServerError, "调整用户权限组失败")
 		return
 	}
+	_ = s.refreshPermissionVersion(r.Context(), userID)
 	writeJSON(w, http.StatusOK, map[string]any{"changed": true, "roles": targets})
 }
 

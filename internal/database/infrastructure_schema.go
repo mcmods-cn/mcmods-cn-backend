@@ -10,7 +10,7 @@ func infrastructureSchemaStatements() []string {
 			version bigint not null default 1 check(version > 0),
 			updated_at timestamptz not null default now()
 		)`,
-		`insert into runtime_versions(name,version) values('rbac',1),('settings',1)
+		`insert into runtime_versions(name,version) values('rbac',1),('settings',1),('project_acl',1)
 		 on conflict(name) do nothing`,
 		`create or replace function bump_runtime_version(target_name text) returns void as $$
 		begin

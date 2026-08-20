@@ -122,29 +122,17 @@ func canEditReviewTarget(ctx context.Context, query databaseQuery, claims securi
 	switch entityType {
 	case "mod":
 		var identity modIdentityRecord
-		if query.QueryRow(ctx, `select id,project_code,slug,created_by from mods where id=$1`, internalID).
-			Scan(&identity.ID, &identity.UniqueID, &identity.SiteID, &identity.OwnerID) != nil {
+		if query.QueryRow(ctx, `select id,project_code,slug from mods where id=$1`, internalID).
+			Scan(&identity.ID, &identity.UniqueID, &identity.SiteID) != nil {
 			return false
 		}
-		return identity.OwnerID != nil && *identity.OwnerID == claims.Subject || canEditMod(claims, identity)
+		return canEditMod(claims, identity)
 	case "modpack":
-		var createdBy *int64
-		if query.QueryRow(ctx, `select created_by from modpacks where id=$1`, internalID).Scan(&createdBy) != nil {
-			return false
-		}
-		return createdBy != nil && *createdBy == claims.Subject || claimsAllow(claims, "project.edit."+publicID)
+		return claimsAllow(claims, "project.edit."+publicID)
 	case "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
-		var createdBy *int64
-		if query.QueryRow(ctx, `select created_by from simple_projects where id=$1 and project_type=$2`, internalID, entityType).Scan(&createdBy) != nil {
-			return false
-		}
-		return createdBy != nil && *createdBy == claims.Subject || claimsAllow(claims, "project.edit."+publicID)
+		return claimsAllow(claims, "project.edit."+publicID)
 	case "minecraft_server", "server":
-		var createdBy int64
-		if query.QueryRow(ctx, `select created_by from minecraft_servers where id=$1`, internalID).Scan(&createdBy) != nil {
-			return false
-		}
-		return createdBy == claims.Subject || claimsAllow(claims, "server.edit."+publicID)
+		return claimsAllow(claims, "project.edit."+publicID) || claimsAllow(claims, "server.review")
 	case "project_changelog":
 		var targetType, targetPublicID string
 		var targetInternalID int64
@@ -155,21 +143,13 @@ func canEditReviewTarget(ctx context.Context, query databaseQuery, claims securi
 		}
 		return canEditReviewTarget(ctx, query, claims, targetType, targetInternalID, targetPublicID)
 	case "creator":
-		var createdBy, claimedBy *int64
-		if query.QueryRow(ctx, `select created_by,claimed_by from creators where id=$1`, internalID).Scan(&createdBy, &claimedBy) != nil {
-			return false
-		}
-		return claimsAllow(claims, "creator.edit") || createdBy != nil && *createdBy == claims.Subject || claimedBy != nil && *claimedBy == claims.Subject
+		return claimsAllow(claims, "creator.edit") || claimsAllow(claims, "creator.edit."+publicID)
 	case "community_post":
-		var authorID int64
-		return query.QueryRow(ctx, `select author_id from community_posts where id=$1`, internalID).Scan(&authorID) == nil &&
-			(authorID == claims.Subject || claimsAllow(claims, "community.edit"))
+		return claimsAllow(claims, "project.edit."+publicID) || claimsAllow(claims, "community.edit")
 	case "blueprint":
-		var ownerID int64
-		return query.QueryRow(ctx, `select owner_id from blueprints where id=$1`, internalID).Scan(&ownerID) == nil && ownerID == claims.Subject
+		return claimsAllow(claims, "project.edit."+publicID) || claimsAllow(claims, "blueprint.review")
 	case "skin":
-		var ownerID int64
-		return query.QueryRow(ctx, `select owner_id from skin_assets where id=$1`, internalID).Scan(&ownerID) == nil && ownerID == claims.Subject
+		return claimsAllow(claims, "project.edit."+publicID) || claimsAllow(claims, "skin.review")
 	default:
 		return false
 	}

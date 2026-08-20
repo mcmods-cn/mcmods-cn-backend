@@ -98,16 +98,16 @@ func reconcileUser(ctx context.Context, db *pgxpool.Pool, userID int64) error {
 
 var contentFactStatements = []string{
 	`insert into user_content_creation_facts(content_type,object_key,user_id,review_status,current_exists,created_at)
-	 select 'mod',project_code,created_by,review_status,true,created_at from mods where created_by=$1
+	 select 'mod',project_code,submitted_by,review_status,true,created_at from mods where submitted_by=$1
 	 on conflict(content_type,object_key) do update set user_id=excluded.user_id,review_status=excluded.review_status,current_exists=true,deleted_at=null,updated_at=now()`,
 	`insert into user_content_creation_facts(content_type,object_key,user_id,review_status,current_exists,created_at)
-	 select 'modpack',public_id,created_by,review_status,true,created_at from modpacks where created_by=$1
+	 select 'modpack',public_id,submitted_by,review_status,true,created_at from modpacks where submitted_by=$1
 	 on conflict(content_type,object_key) do update set user_id=excluded.user_id,review_status=excluded.review_status,current_exists=true,deleted_at=null,updated_at=now()`,
 	`insert into user_content_creation_facts(content_type,object_key,user_id,review_status,current_exists,created_at)
-	 select project_type,public_id,created_by,review_status,true,created_at from simple_projects where created_by=$1
+	 select project_type,public_id,submitted_by,review_status,true,created_at from simple_projects where submitted_by=$1
 	 on conflict(content_type,object_key) do update set user_id=excluded.user_id,review_status=excluded.review_status,current_exists=true,deleted_at=null,updated_at=now()`,
 	`insert into user_content_creation_facts(content_type,object_key,user_id,review_status,current_exists,created_at)
-	 select 'server',public_id,created_by,review_status,true,created_at from minecraft_servers where created_by=$1
+	 select 'server',public_id,submitted_by,review_status,true,created_at from minecraft_servers where submitted_by=$1
 	 on conflict(content_type,object_key) do update set user_id=excluded.user_id,review_status=excluded.review_status,current_exists=true,deleted_at=null,updated_at=now()`,
 	`insert into user_content_creation_facts(content_type,object_key,user_id,review_status,current_exists,created_at,deleted_at)
 	 select kind,public_id,author_id,review_status,status='active',created_at,case when status='deleted' then updated_at end

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,13 @@ import (
 )
 
 const maxPermissionValue int32 = 2147483647
+
+const (
+	authStateHeader         = "X-MCMods-Auth-State"
+	permissionVersionHeader = "X-MCMods-Permission-Version"
+	rbacVersionHeader       = "X-MCMods-RBAC-Version"
+	authStateInvalid        = "invalid"
+)
 
 type contextKey string
 
@@ -34,6 +42,8 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "authentication account no longer exists")
 			return
 		}
+		w.Header().Set(permissionVersionHeader, strconv.FormatInt(claims.PermissionVersion, 10))
+		w.Header().Set(rbacVersionHeader, strconv.FormatInt(claims.RBACVersion, 10))
 		markActivityUser(r, claims.Subject)
 		ctx := context.WithValue(r.Context(), claimsContextKey, claims)
 		s.serveProtectedMutation(w, r.WithContext(ctx), next)
@@ -65,6 +75,8 @@ func (s *Server) optionalAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusServiceUnavailable, "authentication service is temporarily unavailable")
 			return
 		}
+		w.Header().Set(permissionVersionHeader, strconv.FormatInt(claims.PermissionVersion, 10))
+		w.Header().Set(rbacVersionHeader, strconv.FormatInt(claims.RBACVersion, 10))
 		markActivityUser(r, claims.Subject)
 		ctx := context.WithValue(r.Context(), claimsContextKey, claims)
 		s.serveProtectedMutation(w, r.WithContext(ctx), next)
@@ -75,6 +87,7 @@ func (s *Server) continueOptionalAuthAsGuest(w http.ResponseWriter, r *http.Requ
 	// Optional authentication must never turn a public endpoint into a protected
 	// one. Expire an invalid cookie so subsequent public requests do not repeat
 	// the lookup; an explicit Authorization header is owned by the API client.
+	w.Header().Set(authStateHeader, authStateInvalid)
 	if strings.TrimSpace(r.Header.Get("Authorization")) == "" {
 		if _, err := r.Cookie(authSessionCookieName); err == nil {
 			s.clearAuthSessionCookie(w, r)
@@ -89,11 +102,21 @@ func (s *Server) resolveClaimsSubject(ctx context.Context, claims *security.Clai
 		return err
 	}
 	claims.Subject = record.UserID
-	_, permissionRules, err := s.resolveUserRootPermissionsVersion(ctx, claims.Subject, claims.AuthVersion)
+	permissionVersion, err := s.loadPermissionVersion(ctx, claims.Subject)
+	if err != nil {
+		return err
+	}
+	rbacVersion, err := s.loadRBACVersion(ctx)
+	if err != nil {
+		return err
+	}
+	_, permissionRules, err := s.resolveUserRootPermissionsAtVersion(ctx, claims.Subject, permissionVersion, rbacVersion)
 	if err != nil {
 		return err
 	}
 	claims.PermissionRules = permissionRules
+	claims.PermissionVersion = permissionVersion
+	claims.RBACVersion = rbacVersion
 	return nil
 }
 

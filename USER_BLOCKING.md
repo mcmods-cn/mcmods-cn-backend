@@ -15,7 +15,7 @@ the blocked account.
 - A blocked reply does not create a reply/watch notification for the blocker.
 - A user blocked by a project owner cannot comment on that project or its Mod
   resource-version pages. Project ownership includes the direct creator and
-  users bound to `project_owner.<projectID>`.
+  users resolved as verified developers for the project (or explicitly granted equivalent access by an administrator).
 - Tutorial and discussion authors receive the same protection. BUG/feature and
   news authors deliberately do not, matching the community moderation model.
 - Blueprint, skin, and player-profile owners are also treated as owners of

@@ -79,9 +79,15 @@ var seedPermissions = []seedPermission{
 	{Code: "permission.write", Module: "permission", Name: "Manage permissions", Description: "Allows changing permission groups, nodes and assignments."},
 
 	{Code: "creator.create", Module: "creator", Name: "Create authors and teams", Description: "Allows creating author or team profiles."},
-	{Code: "creator.edit", Module: "creator", Name: "Edit authors and teams", Description: "Allows submitting changes to author or team profiles."},
-	{Code: "creator.claim", Module: "creator", Name: "Claim authors and teams", Description: "Allows submitting ownership claims."},
-	{Code: "creator.claim.review", Module: "creator", Name: "Review creator claims", Description: "Allows approving or rejecting author and team claims."},
+	{Code: "creator.edit", Module: "creator", Name: "Edit authors and teams", Description: "Allows administrative changes to author or team profiles."},
+	{Code: "creator.claim", Module: "creator", Name: "Claim personal authors", Description: "Allows submitting a personal-author identity claim."},
+	{Code: "creator.claim.review", Module: "creator", Name: "Review author claims", Description: "Allows approving or rejecting personal-author claims."},
+	{Code: "project.editor.apply", Module: "project", Name: "Apply as project editor", Description: "Allows applying for a project-scoped site editor assignment."},
+	{Code: "project.editor.review", Module: "project", Name: "Review project editor applications", Description: "Allows approving and revoking project-scoped editor assignments.", AccessType: "moderation"},
+	{Code: "project.authorship.manage", Module: "project", Name: "Manage project authorship", Description: "Allows changing permission-granting project author relations.", AccessType: "administration"},
+	{Code: "project.team_relation.manage", Module: "project", Name: "Manage project team relations", Description: "Allows changing permission-granting project team relations.", AccessType: "administration"},
+	{Code: "team.members.manage", Module: "creator", Name: "Manage team authors", Description: "Allows changing the authors contained in a team.", AccessType: "administration"},
+	{Code: "team.members.review", Module: "creator", Name: "Review team author changes", Description: "Allows approving permission-sensitive team membership changes.", AccessType: "moderation"},
 	{Code: "creator.role.write", Module: "creator", Name: "Manage team roles", Description: "Allows creating custom team role definitions."},
 
 	{Code: "activity.read", Module: "activity", Name: "Read user activity", Description: "Allows searching the batched user operation log."},
@@ -204,21 +210,21 @@ var seedPermissions = []seedPermission{
 	{Code: "comment.pin", Module: "comment", Name: "Pin all comments", Description: "Allows pinning root comments on every target."},
 	{Code: "project.comment.moderate.<projectID>", Module: "comment", Name: "Moderate project comments", Description: "Variable permission; replace <projectID> with a project unique ID to moderate its comments."},
 	{Code: "project.comment.pin.<projectID>", Module: "comment", Name: "Pin project comments", Description: "Variable permission; replace <projectID> with a project unique ID to pin its root comments."},
-	{Code: "project.comment.role.owner.<projectID>", Module: "comment", Name: "Show project owner badge", Description: "Variable permission; controls the project owner badge beside this project's comments."},
+	{Code: "project.comment.role.developer.<projectID>", Module: "comment", Name: "Show verified project developer badge", Description: "Variable permission; controls the verified developer badge beside this project's comments."},
 	{Code: "project.comment.role.editor.<projectID>", Module: "comment", Name: "Show project editor badge", Description: "Variable permission; controls the project editor badge beside this project's comments."},
 }
 
 var seedRoles = []seedRole{
 	{
 		Code: "registered", Name: "Registered user", Description: "Default permissions granted to a registered account.", Weight: 10,
-		Permissions: []string{"comment.create", "comment.edit.own", "comment.delete.own", "comment.react", "comment.watch", "report.create", "report.view_own", "content.translate", "rating.create", "rating.read", "shop.read", "shop.purchase", "shop.use", "shop.project_heat_boost.purchase", "shop.project_heat_boost.use", "shop.server_heat_boost.purchase", "shop.server_heat_boost.use", "user.ai.daily_token_limit.20000", "user.draft.retention_seconds.2592000", "security.anti-abuse.rate_multiplier.100", "community.tutorial.create", "community.issue.create", "community.discussion.create", "modpack.create", "favorite.modpack_export", "favorite.modpack_export.view_own", "sticker.view", "project.follow", "project.follow.view_own"},
+		Permissions: []string{"comment.create", "comment.edit.own", "comment.delete.own", "comment.react", "comment.watch", "report.create", "report.view_own", "content.translate", "rating.create", "rating.read", "shop.read", "shop.purchase", "shop.use", "shop.project_heat_boost.purchase", "shop.project_heat_boost.use", "shop.server_heat_boost.purchase", "shop.server_heat_boost.use", "user.ai.daily_token_limit.20000", "user.draft.retention_seconds.2592000", "security.anti-abuse.rate_multiplier.100", "community.tutorial.create", "community.issue.create", "community.discussion.create", "modpack.create", "favorite.modpack_export", "favorite.modpack_export.view_own", "sticker.view", "project.follow", "project.follow.view_own", "creator.claim", "project.editor.apply"},
 	},
 	{
-		Code: "project_owner.[ProjectID]", Name: "Project owner", Description: "Default project-scoped owner permissions.", Weight: 100,
-		Permissions: []string{"project.edit.<projectID>", "project.review.<projectID>", "project.comment.moderate.<projectID>", "project.comment.pin.<projectID>", "project.comment.role.owner.<projectID>"},
+		Code: "project_developer.[ProjectID]", Name: "Verified project developer", Description: "Project access normally derived from verified authorship; administrators may bind it explicitly for exceptional cases.", Weight: 100,
+		Permissions: []string{"project.edit.<projectID>", "project.review.<projectID>", "project.comment.moderate.<projectID>", "project.comment.pin.<projectID>", "project.comment.role.developer.<projectID>"},
 	},
 	{
-		Code: "project_editor.[ProjectID]", Name: "Project editor", Description: "Default project-scoped editor permissions.", Weight: 50,
+		Code: "project_editor.[ProjectID]", Name: "Project editor", Description: "Project-scoped editor access normally approved through an application; administrators may bind it explicitly for exceptional cases.", Weight: 50,
 		Permissions: []string{"project.edit.<projectID>", "project.review.<projectID>", "project.comment.role.editor.<projectID>"},
 	},
 	{Code: "banned", Name: "Banned account", Description: "High-priority fail-closed denial role applied without removing existing roles.", Weight: 2_000_000_000, Permissions: []string{"account.banned"}, Denials: []string{"*"}},
@@ -233,6 +239,7 @@ var seedUsers = []seedUser{
 			"admin.*", "admin.access", "admin.config.read", "admin.config.write",
 			"user.read", "user.write", "permission.read", "permission.write",
 			"creator.create", "creator.edit", "creator.claim", "creator.claim.review", "creator.role.write",
+			"project.editor.apply", "project.editor.review", "project.authorship.manage", "project.team_relation.manage", "team.members.manage", "team.members.review",
 			"activity.read", "economy.read", "economy.write", "economy.balance.write", "economy.checkin", "economy.transfer",
 			"shop.read", "shop.write", "shop.purchase", "shop.use",
 			"shop.profile_background.purchase", "shop.profile_background.use",
@@ -300,9 +307,6 @@ func SeedRBAC(ctx context.Context, db *pgxpool.Pool) error {
 	if err := seedDefaultRoles(ctx, db); err != nil {
 		return err
 	}
-	if err := seedProjectReviewPermissions(ctx, db); err != nil {
-		return err
-	}
 	if err := seedPermissionDefaults(ctx, db); err != nil {
 		return err
 	}
@@ -310,33 +314,6 @@ func SeedRBAC(ctx context.Context, db *pgxpool.Pool) error {
 		return err
 	}
 	return seedDefaultUsers(ctx, db)
-}
-
-// Existing concrete project roles may predate a newly added template
-// permission. Keep those role instances aligned with the owner/editor
-// templates without requiring a destructive database reset.
-func seedProjectReviewPermissions(ctx context.Context, db *pgxpool.Pool) error {
-	if _, err := db.Exec(ctx, `insert into permissions(code,module,name,description)
-		select distinct 'project.review.' || split_part(role.code,'.',2),'project','Review one project',
-		       'Project-scoped permission generated from the owner/editor role template.'
-		from roles role
-		where (role.code like 'project_owner.%' or role.code like 'project_editor.%')
-		  and split_part(role.code,'.',2) <> ''
-		  and array_length(string_to_array(role.code,'.'),1)=2
-		  and position('[' in role.code)=0 and position('<' in role.code)=0
-		on conflict(code) do nothing`); err != nil {
-		return err
-	}
-	_, err := db.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow,updated_at)
-		select role.id,permission.id,true,now()
-		from roles role
-		join permissions permission on permission.code='project.review.' || split_part(role.code,'.',2)
-		where (role.code like 'project_owner.%' or role.code like 'project_editor.%')
-		  and split_part(role.code,'.',2) <> ''
-		  and array_length(string_to_array(role.code,'.'),1)=2
-		  and position('[' in role.code)=0 and position('<' in role.code)=0
-		on conflict(role_id,permission_id) do nothing`)
-	return err
 }
 
 func seedDefaultRoles(ctx context.Context, db *pgxpool.Pool) error {
@@ -371,8 +348,6 @@ func seedDefaultRoles(ctx context.Context, db *pgxpool.Pool) error {
 func seedPermissionDefaults(ctx context.Context, db *pgxpool.Pool) error {
 	value, err := json.Marshal(map[string]string{
 		"registeredRole": "registered",
-		"developerRole":  "project_owner.[ProjectID]",
-		"editorRole":     "project_editor.[ProjectID]",
 	})
 	if err != nil {
 		return err

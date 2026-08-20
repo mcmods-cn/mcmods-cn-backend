@@ -86,7 +86,7 @@ func (s *Server) searchCreatorPage(ctx context.Context, query, kind string, clai
 	if !admin {
 		visibility := "review_status:=approved"
 		if claims.Subject > 0 {
-			visibility = fmt.Sprintf("(review_status:=approved || created_by:=%d || claimed_by:=%d)", claims.Subject, claims.Subject)
+			visibility = fmt.Sprintf("(review_status:=approved || created_by:=%d)", claims.Subject)
 		}
 		filters = append(filters, visibility)
 	}
@@ -108,7 +108,7 @@ func (s *Server) searchCreatorCounts(ctx context.Context, query string, claims s
 	if !admin {
 		filter = "review_status:=approved"
 		if claims.Subject > 0 {
-			filter = fmt.Sprintf("(review_status:=approved || created_by:=%d || claimed_by:=%d)", claims.Subject, claims.Subject)
+			filter = fmt.Sprintf("(review_status:=approved || created_by:=%d)", claims.Subject)
 		}
 	}
 	result, err := s.search.Search(ctx, searchindex.SearchRequest{
@@ -185,7 +185,7 @@ func searchPageSupported(client *searchindex.Client, limit, offset int) bool {
 }
 
 func projectVisibilityFilter(userID int64) string {
-	return projectVisibilityFilterWithField(userID, "created_by")
+	return projectVisibilityFilterWithField(userID, "submitted_by")
 }
 
 func projectVisibilityFilterWithField(userID int64, ownerField string) string {

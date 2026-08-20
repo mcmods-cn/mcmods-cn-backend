@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"mcmods-cn-backend/internal/querycache"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -36,8 +37,8 @@ func userAuthVersionCacheKey(publicID string) string {
 	return "auth:user-version:" + publicID
 }
 
-func rbacCacheKey(version, userID, authVersion int64) string {
-	return fmt.Sprintf("authz:v%d:user:%d:authVersion:%d", version, userID, authVersion)
+func rbacCacheKey(version, projectACLVersion, userID, permissionVersion int64) string {
+	return fmt.Sprintf("authz:v%d:acl%d:user:%d:p%d", version, projectACLVersion, userID, permissionVersion)
 }
 
 func (s *Server) resolveCachedSessionSubject(ctx context.Context, claims security.Claims) (cachedSessionSubject, error) {
@@ -84,18 +85,18 @@ func (s *Server) resolveCachedSessionSubject(ctx context.Context, claims securit
 		encoded, _ := json.Marshal(record)
 		s.cache.Set(ctx, key, encoded, ttl)
 	}
-	versionRaw, ok := s.cache.Get(ctx, userAuthVersionCacheKey(record.PublicID))
-	if !ok {
-		// An evicted version key cannot be treated as authorization. Revalidate
-		// once against PostgreSQL and repopulate the bounded version marker.
-		revalidated, loadErr := s.loadSessionSubject(ctx, claims)
-		if loadErr != nil {
-			s.cache.Delete(ctx, key)
-			return cachedSessionSubject{}, loadErr
+	versionRaw, versionErr := s.cache.GetSharedOrLoadTTL(ctx, userAuthVersionCacheKey(record.PublicID), min(ttl, 10*time.Second), func(loadCtx context.Context) ([]byte, error) {
+		var version int64
+		if scanErr := s.db.QueryRow(loadCtx, `select auth_version from users where public_id=$1 and status='active'`, record.PublicID).Scan(&version); scanErr != nil {
+			return nil, scanErr
 		}
-		record = revalidated
-		s.cache.Set(ctx, userAuthVersionCacheKey(record.PublicID), []byte(strconv.FormatInt(record.AuthVersion, 10)), min(ttl, 10*time.Second))
-	} else if string(versionRaw) != strconv.FormatInt(record.AuthVersion, 10) {
+		return []byte(strconv.FormatInt(version, 10)), nil
+	})
+	if versionErr != nil {
+		s.cache.Delete(ctx, key)
+		return cachedSessionSubject{}, versionErr
+	}
+	if string(versionRaw) != strconv.FormatInt(record.AuthVersion, 10) {
 		s.cache.Delete(ctx, key)
 		return cachedSessionSubject{}, pgx.ErrNoRows
 	}
@@ -132,7 +133,7 @@ func (s *Server) cacheIssuedSession(ctx context.Context, claims security.Claims,
 	ttl := min(s.cache.Config().SessionTTL, time.Until(time.Unix(claims.ExpiresAt, 0)))
 	if ttl > 0 {
 		s.cache.Set(ctx, sessionCacheKey(claims.SessionID), raw, ttl)
-		s.cache.Set(ctx, userAuthVersionCacheKey(claims.PublicSubject), []byte(strconv.FormatInt(claims.AuthVersion, 10)), min(ttl, 10*time.Second))
+		s.cache.SetShared(ctx, userAuthVersionCacheKey(claims.PublicSubject), []byte(strconv.FormatInt(claims.AuthVersion, 10)), min(ttl, 10*time.Second))
 	}
 }
 
@@ -141,7 +142,7 @@ func (s *Server) invalidateSessionCache(ctx context.Context, claims security.Cla
 }
 
 func (s *Server) loadRBACVersion(ctx context.Context) (int64, error) {
-	raw, err := s.cache.GetOrLoadTTL(ctx, "versions:rbac", 10*time.Second, func(loadCtx context.Context) ([]byte, error) {
+	raw, err := s.cache.GetSharedOrLoadTTL(ctx, "versions:rbac", 10*time.Second, func(loadCtx context.Context) ([]byte, error) {
 		var version int64
 		if scanErr := s.db.QueryRow(loadCtx, `select version from runtime_versions where name='rbac'`).Scan(&version); scanErr != nil {
 			return nil, scanErr
@@ -157,4 +158,83 @@ func (s *Server) loadRBACVersion(ctx context.Context) (int64, error) {
 		return 0, errors.New("invalid RBAC version cache")
 	}
 	return version, nil
+}
+
+func (s *Server) refreshRBACVersion(ctx context.Context) error {
+	var version int64
+	if err := s.db.QueryRow(ctx, `select version from runtime_versions where name='rbac'`).Scan(&version); err != nil {
+		return err
+	}
+	s.cache.SetShared(ctx, "versions:rbac", []byte(strconv.FormatInt(version, 10)), 10*time.Second)
+	return nil
+}
+
+func (s *Server) loadProjectACLVersion(ctx context.Context) (int64, error) {
+	raw, err := s.cache.GetSharedOrLoadTTL(ctx, "versions:project-acl", 10*time.Second, func(loadCtx context.Context) ([]byte, error) {
+		var version int64
+		if scanErr := s.db.QueryRow(loadCtx, `select version from runtime_versions where name='project_acl'`).Scan(&version); scanErr != nil {
+			return nil, scanErr
+		}
+		return []byte(strconv.FormatInt(version, 10)), nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	version, err := strconv.ParseInt(string(raw), 10, 64)
+	if err != nil || version < 1 {
+		s.cache.Delete(ctx, "versions:project-acl")
+		return 0, errors.New("invalid project ACL version cache")
+	}
+	return version, nil
+}
+
+func (s *Server) refreshProjectACLVersion(ctx context.Context) error {
+	var version int64
+	if err := s.db.QueryRow(ctx, `select version from runtime_versions where name='project_acl'`).Scan(&version); err != nil {
+		return err
+	}
+	s.cache.SetShared(ctx, "versions:project-acl", []byte(strconv.FormatInt(version, 10)), 10*time.Second)
+	return nil
+}
+
+func (s *Server) loadPermissionVersion(ctx context.Context, userID int64) (int64, error) {
+	key := querycache.UserPermissionVersionKey(userID)
+	raw, err := s.cache.GetSharedOrLoadTTL(ctx, key, 10*time.Second, func(loadCtx context.Context) ([]byte, error) {
+		var version int64
+		if scanErr := s.db.QueryRow(loadCtx, `select permission_version from users where id=$1`, userID).Scan(&version); scanErr != nil {
+			return nil, scanErr
+		}
+		return []byte(strconv.FormatInt(version, 10)), nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	version, err := strconv.ParseInt(string(raw), 10, 64)
+	if err != nil || version < 1 {
+		s.cache.Delete(ctx, key)
+		return 0, errors.New("invalid permission version cache")
+	}
+	return version, nil
+}
+
+// refreshPermissionVersion publishes the authoritative post-transaction
+// version for a user. The database trigger owns the increment; this method
+// only updates the shared pointer used by other API instances.
+func (s *Server) refreshPermissionVersion(ctx context.Context, userID int64) error {
+	var version int64
+	if err := s.db.QueryRow(ctx, `select permission_version from users where id=$1`, userID).Scan(&version); err != nil {
+		return err
+	}
+	s.cache.SetShared(ctx, querycache.UserPermissionVersionKey(userID), []byte(strconv.FormatInt(version, 10)), 10*time.Second)
+	return nil
+}
+
+func (s *Server) refreshAuthVersion(ctx context.Context, userID int64) error {
+	var publicID string
+	var version int64
+	if err := s.db.QueryRow(ctx, `select public_id,auth_version from users where id=$1`, userID).Scan(&publicID, &version); err != nil {
+		return err
+	}
+	s.cache.SetShared(ctx, userAuthVersionCacheKey(publicID), []byte(strconv.FormatInt(version, 10)), 10*time.Second)
+	return nil
 }

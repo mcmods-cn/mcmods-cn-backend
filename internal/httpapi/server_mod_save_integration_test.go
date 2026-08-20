@@ -44,7 +44,7 @@ func TestInsertMinecraftServerUnresolvedModIntegration(t *testing.T) {
 	resolvedModID := fmt.Sprintf("resolved_test_mod_%d", suffix)
 	resolvedModSlug := fmt.Sprintf("resolved-test-mod-%d", suffix)
 	var resolvedModInternalID int64
-	if err = tx.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,icon_url,review_status,created_by)
+	if err = tx.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,icon_url,review_status,submitted_by)
 		values($1,$2,'Resolved test mod','https://example.invalid/mod.png','approved',$3) returning id`,
 		projectCode, resolvedModSlug, actorID).Scan(&resolvedModInternalID); err != nil {
 		t.Fatal(err)
@@ -58,7 +58,7 @@ func TestInsertMinecraftServerUnresolvedModIntegration(t *testing.T) {
 	var serverPublicID string
 	if err = tx.QueryRow(ctx, `insert into minecraft_servers(
 		slug,address,normalized_address,handshake_host,connect_host,connect_port,name,
-		minecraft_versions,languages,primary_tag,created_by
+		minecraft_versions,languages,primary_tag,submitted_by
 	) values($1,$2,$2,$2,$2,25565,'Server mod save test',array['1.21.1'],array['zh-CN'],'survival',$3)
 	returning id,public_id`, fmt.Sprintf("server-mod-save-%d", suffix), address, actorID).Scan(&serverID, &serverPublicID); err != nil {
 		t.Fatal(err)

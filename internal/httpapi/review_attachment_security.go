@@ -14,7 +14,7 @@ const (
 	reviewAttachmentByUploader reviewAttachmentLookupKind = iota + 1
 	reviewAttachmentForCreatorClaim
 	reviewAttachmentForMinecraftServer
-	reviewAttachmentForModApplication
+	reviewAttachmentForProjectEditorApplication
 )
 
 const safeReviewAttachmentPredicate = `file.status='active'
@@ -79,11 +79,11 @@ func lookupReviewAttachment(
 			join oss_files file on file.id=proof.oss_file_id
 			where server.public_id=$1 and file.public_id=$2 and `+safeReviewAttachmentPredicate,
 			lookup.SubjectPublicID, filePublicID)
-	case reviewAttachmentForModApplication:
+	case reviewAttachmentForProjectEditorApplication:
 		row = query.QueryRow(ctx, `select file.id,file.public_id,file.object_key,file.original_name,
 			greatest(file.size_bytes,file.source_size_bytes)
-			from mod_application_attachments attachment
-			join mod_membership_applications application on application.id=attachment.application_id
+			from project_editor_application_attachments attachment
+			join project_editor_applications application on application.id=attachment.application_id
 			join oss_files file on file.id=attachment.oss_file_id
 			where application.public_id=$1 and file.public_id=$2 and `+safeReviewAttachmentPredicate,
 			lookup.SubjectPublicID, filePublicID)

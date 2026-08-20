@@ -81,13 +81,25 @@ func featureUpdateSchemaStatements() []string {
 			check(status in ('processing','ready','failed','removed')),
 			check((sanitized_text is not null) <> (sanitized_object_key<>''))
 		)`,
-		`create table if not exists comment_log_bindings (
+		`create table if not exists comment_attachments (
 			comment_id bigint not null references comments(id) on delete cascade,
 			attachment_file_id bigint not null references oss_files(id) on delete cascade,
+			kind text not null default 'file' check(kind in ('file','log')),
+			processing_status text not null default 'processing' check(processing_status in ('ready','processing','failed')),
+			created_at timestamptz not null default now(),
+			primary key(comment_id,attachment_file_id)
+		)`,
+		`create index if not exists idx_comment_attachments_file
+			on comment_attachments(attachment_file_id,comment_id)`,
+		`create table if not exists comment_log_bindings (
+			comment_id bigint not null,
+			attachment_file_id bigint not null,
 			log_share_id bigint not null references log_shares(id) on delete cascade,
 			created_at timestamptz not null default now(),
 			primary key(comment_id,attachment_file_id),
-			unique(comment_id,log_share_id)
+			unique(comment_id,log_share_id),
+			foreign key(comment_id,attachment_file_id)
+				references comment_attachments(comment_id,attachment_file_id) on delete cascade
 		)`,
 		`create index if not exists idx_comment_log_bindings_share
 			on comment_log_bindings(log_share_id,comment_id)`,

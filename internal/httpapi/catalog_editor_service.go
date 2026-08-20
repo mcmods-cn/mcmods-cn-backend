@@ -935,7 +935,7 @@ func validateCatalogSnapshotReferencesTx(ctx context.Context, tx pgx.Tx, snapsho
 			var valid bool
 			if err = tx.QueryRow(ctx, `select exists(select 1 from mod_content_versions version
 				join mods mod on mod.id=version.mod_id
-				where version.public_id=$1 and version.status='active' and (mod.review_status='approved' or mod.created_by=$2))`,
+				where version.public_id=$1 and version.status='active' and (mod.review_status='approved' or mod.submitted_by=$2))`,
 				snapshot.Recipe.SourceVersionPublicID, actorID).Scan(&valid); err != nil {
 				return err
 			}

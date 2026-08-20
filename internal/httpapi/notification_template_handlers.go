@@ -68,10 +68,8 @@ type reviewConfig struct {
 	AddonEdit               bool `json:"addonEdit"`
 	AuthorCreate            bool `json:"authorCreate"`
 	AuthorEdit              bool `json:"authorEdit"`
-	AuthorClaim             bool `json:"authorClaim"`
 	TeamCreate              bool `json:"teamCreate"`
 	TeamEdit                bool `json:"teamEdit"`
-	TeamClaim               bool `json:"teamClaim"`
 	CatalogCreate           bool `json:"catalogCreate"`
 	CatalogEdit             bool `json:"catalogEdit"`
 	CatalogDelete           bool `json:"catalogDelete"`
@@ -107,8 +105,8 @@ func defaultNotificationTemplateConfig() notificationTemplateConfig {
 		{"review_approved", []string{"name"}, "内容审核通过", "您提交的 {name} 已通过审核。", "Content approved", "Your submission for {name} was approved."},
 		{"review_rejected", []string{"name", "reason"}, "内容审核未通过", "您提交的 {name} 未通过审核。原因：{reason}", "Content rejected", "Your submission for {name} was rejected. Reason: {reason}"},
 		{"question_answer_accepted", []string{"name"}, "回答已被采纳", "您在问题「{name}」下的回答已被采纳，悬赏已按转账税率结算。", "Answer accepted", "Your answer to {name} was accepted and its bounty was settled after transfer tax."},
-		{"creator_claim_approved", []string{"name"}, "作者或团队认领已通过", "您对 {name} 的认领已通过审核。", "Creator claim approved", "Your claim for {name} was approved."},
-		{"creator_claim_rejected", []string{"name", "reason"}, "作者或团队认领未通过", "您对 {name} 的认领未通过审核。原因：{reason}", "Creator claim rejected", "Your claim for {name} was rejected. Reason: {reason}"},
+		{"creator_claim_approved", []string{"name"}, "个人作者认领已通过", "您对个人作者 {name} 的认领已通过审核。", "Personal author claim approved", "Your claim for the personal author {name} was approved."},
+		{"creator_claim_rejected", []string{"name", "reason"}, "个人作者认领未通过", "您对个人作者 {name} 的认领未通过审核。原因：{reason}", "Personal author claim rejected", "Your claim for the personal author {name} was rejected. Reason: {reason}"},
 		{"project_updated", []string{"project_name", "changed_sections"}, "关注的项目有新更新", "{project_name} 更新了{changed_sections}。", "A followed project was updated", "{project_name} updated {changed_sections}."},
 		{"modpack_export_completed", []string{"pack_name", "minecraft_version", "loader", "exported", "dependencies", "skipped"}, "收藏夹整合包导出完成", "{pack_name} 已导出完成。Minecraft {minecraft_version} / {loader}；成功 {exported} 个，自动依赖 {dependencies} 个，未导出 {skipped} 个。", "Collection modpack export completed", "{pack_name} is ready for Minecraft {minecraft_version} / {loader}: {exported} exported, {dependencies} dependencies, {skipped} skipped."},
 		{"modpack_export_completed_with_skips", []string{"pack_name", "minecraft_version", "loader", "exported", "dependencies", "skipped"}, "收藏夹整合包导出完成（存在未导出项目）", "{pack_name} 已导出完成。Minecraft {minecraft_version} / {loader}；成功 {exported} 个，自动依赖 {dependencies} 个，未导出 {skipped} 个。请查看完整报告。", "Collection modpack export completed with skipped items", "{pack_name} is ready for Minecraft {minecraft_version} / {loader}: {exported} exported, {dependencies} dependencies, {skipped} skipped. Review the complete report."},
@@ -402,10 +400,8 @@ func defaultReviewConfig() reviewConfig {
 		AddonEdit:               true,
 		AuthorCreate:            true,
 		AuthorEdit:              true,
-		AuthorClaim:             true,
 		TeamCreate:              true,
 		TeamEdit:                true,
-		TeamClaim:               true,
 		CatalogCreate:           true,
 		CatalogEdit:             true,
 		CatalogDelete:           true,
@@ -463,8 +459,6 @@ func creatorReviewRequired(config reviewConfig, kind, action string) bool {
 			return config.TeamCreate
 		case "edit":
 			return config.TeamEdit
-		case "claim":
-			return config.TeamClaim
 		}
 	default:
 		switch action {
@@ -472,8 +466,6 @@ func creatorReviewRequired(config reviewConfig, kind, action string) bool {
 			return config.AuthorCreate
 		case "edit":
 			return config.AuthorEdit
-		case "claim":
-			return config.AuthorClaim
 		}
 	}
 	return true

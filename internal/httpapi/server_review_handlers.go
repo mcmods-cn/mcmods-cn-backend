@@ -49,7 +49,7 @@ const minecraftServerReviewListQuery = `select server.public_id,server.name,serv
 	server.online_mode,server.modded,server.loader,server.proof_text,server.review_status,
 	server.review_note,submitter.public_id,submitter.username,server.created_at,
 	server.reviewed_at
-	from minecraft_servers server join users submitter on submitter.id=server.created_by
+	from minecraft_servers server join users submitter on submitter.id=server.submitted_by
 	where server.review_status=$1 order by server.created_at,server.id limit 200`
 
 func (s *Server) adminMinecraftServerReviews(w http.ResponseWriter, r *http.Request) {
@@ -154,7 +154,7 @@ func (s *Server) reviewMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "审核说明过长")
 		return
 	}
-	var ownerID int64
+	var submitterID int64
 	var name string
 	err := s.db.QueryRow(r.Context(), `update minecraft_servers set
 		review_status=$2,review_note=$3,reviewed_by=$4,reviewed_at=now(),
@@ -162,8 +162,8 @@ func (s *Server) reviewMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		next_probe_at=case when $2='approved' then now() else next_probe_at end,
 		updated_at=now()
 		where public_id=$1 and review_status='pending'
-		returning created_by,name`, publicID, request.Status, request.Note,
-		currentClaims(r).Subject).Scan(&ownerID, &name)
+		returning submitted_by,name`, publicID, request.Status, request.Note,
+		currentClaims(r).Subject).Scan(&submitterID, &name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusConflict, "服务器不存在或已经审核")
 		return
@@ -176,7 +176,7 @@ func (s *Server) reviewMinecraftServer(w http.ResponseWriter, r *http.Request) {
 	if request.Status == "rejected" {
 		templateCode = "review_rejected"
 	}
-	s.sendTemplatedNotification(r.Context(), ownerID, templateCode, map[string]string{
+	s.sendTemplatedNotification(r.Context(), submitterID, templateCode, map[string]string{
 		"name": name, "reason": request.Note,
 	}, map[string]any{
 		"serverId": publicID, "reviewStatus": request.Status,

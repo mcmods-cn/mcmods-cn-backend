@@ -159,15 +159,11 @@ func ratingSchemaStatements() []string {
 		begin
 			select entity_type,internal_id into target_type,target_id from public_routes where id=target_route_id;
 			case target_type
-				when 'mod' then select created_by into result from mods where id=target_id;
-				when 'modpack' then select created_by into result from modpacks where id=target_id;
-				when 'minecraft_server' then select created_by into result from minecraft_servers where id=target_id;
-				when 'plugin' then select created_by into result from simple_projects where id=target_id and project_type=target_type;
-				when 'map' then select created_by into result from simple_projects where id=target_id and project_type=target_type;
-				when 'resource_pack' then select created_by into result from simple_projects where id=target_id and project_type=target_type;
-				when 'shader_pack' then select created_by into result from simple_projects where id=target_id and project_type=target_type;
-				when 'datapack' then select created_by into result from simple_projects where id=target_id and project_type=target_type;
-				when 'addon' then select created_by into result from simple_projects where id=target_id and project_type=target_type;
+				when 'minecraft_server' then result:=null;
+				when 'mod','modpack','plugin','map','resource_pack','shader_pack','datapack','addon' then
+					select access.user_id into result from effective_project_access access
+					where access.project_type=target_type and access.project_id=target_id and access.access_level='developer'
+					order by access.user_id limit 1;
 				else result:=null;
 			end case;
 			return result;

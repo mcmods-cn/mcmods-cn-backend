@@ -192,7 +192,7 @@ func (s *Server) completeUserDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.ReviewTargetType == "server" {
 		var internalID int64
-		if err = tx.QueryRow(r.Context(), `select id,review_status from minecraft_servers where public_id=$1 and created_by=$2`,
+		if err = tx.QueryRow(r.Context(), `select id,review_status from minecraft_servers where public_id=$1 and submitted_by=$2`,
 			request.ReviewTargetPublicID, claims.Subject).Scan(&internalID, &request.ReviewStatus); err != nil {
 			writeError(w, http.StatusBadRequest, "review target does not belong to the current user")
 			return

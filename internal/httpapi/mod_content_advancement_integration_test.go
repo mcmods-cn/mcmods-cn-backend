@@ -44,7 +44,7 @@ func TestCreateAndArrangeAdvancementIntegration(t *testing.T) {
 		values($1,$2,'test',true) returning id`, username, email).Scan(&actorID); err != nil {
 		t.Fatal(err)
 	}
-	if err = pool.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,review_status,created_by)
+	if err = pool.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,review_status,submitted_by)
 		values($1,$2,'Advancement save test','pending',$3) returning id`, projectCode, slug, actorID).Scan(&modID); err != nil {
 		t.Fatal(err)
 	}

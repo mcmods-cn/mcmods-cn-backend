@@ -5,10 +5,12 @@
 | Key（省略公共前缀） | 内容 | 默认 TTL | 失效/重建 |
 |---|---|---:|---|
 | `session:{sha256(sessionToken)}` | 最小 Session、用户状态、auth_version、过期时间 | 60s 且不超过 Session 剩余寿命 | 登出直接删；封禁/密码变更由 auth_version 最迟 10s 生效；未命中回源 PG |
-| `session-negative:{sha256(token)}` | 无效 Session 负缓存 | 5s | 新建 Session 时清除；数据库故障不写负缓存 |
-| `auth-version:user:{publicId}` | 用户 auth_version | 10s | 权限/安全事实触发数据库版本变化 |
+| `session-invalid:{sha256(token)}` | 无效 Session 负缓存 | 5s | 新建 Session 时清除；数据库故障不写负缓存 |
+| `auth:user-version:{publicId}` | 用户 auth_version | 10s | 密码、封禁、停用或强制退出等安全事实变化 |
 | `versions:rbac` | 持久全局 RBAC 版本 | 10s | 角色/权限/角色权限触发器递增 |
-| `authz:v{rbacVersion}:user:{id}:authVersion:{version}` | 编译后的角色、权限和规则 | 120s | 版本变化自动换 Key，旧 Key 自然过期 |
+| `versions:project-acl` | 持久项目关系 ACL 版本 | 10s | 作者/团队项目关系及团队成员关系变化 |
+| `authz:user-version:{id}` | 用户 permission_version | 10s | 用户角色、直接权限、作者认领和编辑员 assignment 变化 |
+| `authz:v{rbacVersion}:acl{projectACLVersion}:user:{id}:p{permissionVersion}` | 编译后的角色、管理员手工权限、派生项目权限和规则 | 120s | 任一授权版本变化自动换 Key，旧 Key 自然过期 |
 | `limit:{action}:{dimensionHash}` | Lua 原子固定窗口计数 | 窗口长度 | 自动过期；Redis 故障用更严格本地额度 |
 | `presence:user:{id}:sessions` | sessionHash -> 过期时间的 ZSET | 150s 滑动 | 心跳清理过期成员；登出删除会话成员 |
 | `presence:users` | userId -> 最晚过期时间 ZSET | 成员分值 | 批量 ZMSCORE；不使用 KEYS/SCAN |

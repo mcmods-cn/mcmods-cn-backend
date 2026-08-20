@@ -916,7 +916,7 @@ func (s *Server) catalogRecipeSourceVersions(w http.ResponseWriter, r *http.Requ
 	rows, err := s.db.Query(r.Context(), `select version.public_id,mod.project_code,mod.slug,mod.primary_name,
 		version.label,version.minecraft_versions,version.loaders,version.mod_version
 		from mod_content_versions version join mods mod on mod.id=version.mod_id
-		where version.status='active' and (mod.review_status='approved' or mod.created_by=$1)
+		where version.status='active' and (mod.review_status='approved' or mod.submitted_by=$1)
 		and ($2='' or mod.primary_name ilike '%'||$2||'%' or mod.secondary_name ilike '%'||$2||'%'
 			or mod.slug ilike '%'||$2||'%' or version.label ilike '%'||$2||'%' or version.mod_version ilike '%'||$2||'%')
 		order by lower(mod.primary_name),mod.id,version.updated_at desc,version.id desc limit $3`, claims.Subject, query, limit)

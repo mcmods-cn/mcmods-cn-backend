@@ -142,24 +142,24 @@ func (s *Server) commentTargetOwnerBlocksUser(ctx context.Context, target commen
 	projectID := ""
 	switch target.Type {
 	case "mod":
-		if err := s.db.QueryRow(ctx, `select created_by,project_code from mods where id=$1`, target.InternalID).Scan(&ownerID, &projectID); err != nil {
+		if err := s.db.QueryRow(ctx, `select project_code from mods where id=$1`, target.InternalID).Scan(&projectID); err != nil {
 			return false, err
 		}
 	case "modpack":
-		if err := s.db.QueryRow(ctx, `select created_by,public_id from modpacks where id=$1`, target.InternalID).Scan(&ownerID, &projectID); err != nil {
+		if err := s.db.QueryRow(ctx, `select public_id from modpacks where id=$1`, target.InternalID).Scan(&projectID); err != nil {
 			return false, err
 		}
 	case "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
-		if err := s.db.QueryRow(ctx, `select created_by,public_id from simple_projects where id=$1 and project_type=$2`, target.InternalID, target.Type).Scan(&ownerID, &projectID); err != nil {
+		if err := s.db.QueryRow(ctx, `select public_id from simple_projects where id=$1 and project_type=$2`, target.InternalID, target.Type).Scan(&projectID); err != nil {
 			return false, err
 		}
 	case "mod_resource":
 		if target.VersionID == nil {
 			return false, pgx.ErrNoRows
 		}
-		if err := s.db.QueryRow(ctx, `select mod.created_by,mod.project_code
+		if err := s.db.QueryRow(ctx, `select mod.project_code
 			from mod_content_versions version join mods mod on mod.id=version.mod_id
-			where version.id=$1`, *target.VersionID).Scan(&ownerID, &projectID); err != nil {
+			where version.id=$1`, *target.VersionID).Scan(&projectID); err != nil {
 			return false, err
 		}
 	case "community_post":
@@ -196,12 +196,8 @@ func (s *Server) commentTargetOwnerBlocksUser(ctx context.Context, target commen
 	var blocked bool
 	err := s.db.QueryRow(ctx, `select exists(
 		select 1 from user_blocks block
-		where block.blocked_id=$1 and (
-			block.blocker_id=$2 or exists(
-				select 1 from user_role_bindings binding
-				join roles role on role.id=binding.role_id and role.status='active'
-				where binding.user_id=block.blocker_id and role.code='project_owner.'||$3
-			)
-		))`, userID, owner, projectID).Scan(&blocked)
+		join effective_project_access access on access.user_id=block.blocker_id
+		where block.blocked_id=$1 and access.project_public_id=$2 and access.access_level='developer'
+	)`, userID, projectID).Scan(&blocked)
 	return blocked, err
 }

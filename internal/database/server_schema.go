@@ -31,7 +31,7 @@ func serverSchemaStatements() []string {
 			review_status text not null default 'pending',
 			review_note text not null default '',
 			proof_text text not null default '' check(char_length(proof_text) <= 10000),
-			created_by bigint not null references users(id) on delete restrict,
+			submitted_by bigint not null references users(id) on delete restrict,
 			reviewed_by bigint references users(id) on delete set null,
 			last_online boolean not null default false,
 			last_latency_ms integer check(last_latency_ms is null or last_latency_ms >= 0),
@@ -60,6 +60,8 @@ func serverSchemaStatements() []string {
 			on minecraft_servers using gin(minecraft_versions)`,
 		`create index idx_minecraft_servers_languages
 			on minecraft_servers using gin(languages)`,
+		`create index idx_minecraft_servers_submitted_by
+			on minecraft_servers(submitted_by,updated_at desc,id desc)`,
 		`create index idx_minecraft_servers_search
 			on minecraft_servers using gin(to_tsvector('simple',name||' '||short_description||' '||body_markdown))`,
 

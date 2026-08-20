@@ -45,13 +45,13 @@ func (s *Server) resolveFollowProjectTarget(ctx context.Context, publicID string
 	var err error
 	switch target.Type {
 	case "mod":
-		err = s.db.QueryRow(ctx, `select primary_name,review_status='approved' or created_by=$2 or $3,updated_at::text from mods where id=$1`, target.InternalID, viewerID, moderator).Scan(&target.Name, &visible, &target.UpdatedAt)
+		err = s.db.QueryRow(ctx, `select primary_name,review_status='approved' or submitted_by=$2 or $3,updated_at::text from mods where id=$1`, target.InternalID, viewerID, moderator).Scan(&target.Name, &visible, &target.UpdatedAt)
 	case "modpack":
-		err = s.db.QueryRow(ctx, `select primary_name,review_status='approved' or created_by=$2 or $3,updated_at::text from modpacks where id=$1`, target.InternalID, viewerID, moderator).Scan(&target.Name, &visible, &target.UpdatedAt)
+		err = s.db.QueryRow(ctx, `select primary_name,review_status='approved' or submitted_by=$2 or $3,updated_at::text from modpacks where id=$1`, target.InternalID, viewerID, moderator).Scan(&target.Name, &visible, &target.UpdatedAt)
 	case "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
-		err = s.db.QueryRow(ctx, `select primary_name,review_status='approved' or created_by=$3 or $4,updated_at::text from simple_projects where id=$1 and project_type=$2`, target.InternalID, target.Type, viewerID, moderator).Scan(&target.Name, &visible, &target.UpdatedAt)
+		err = s.db.QueryRow(ctx, `select primary_name,review_status='approved' or submitted_by=$3 or $4,updated_at::text from simple_projects where id=$1 and project_type=$2`, target.InternalID, target.Type, viewerID, moderator).Scan(&target.Name, &visible, &target.UpdatedAt)
 	case "minecraft_server":
-		err = s.db.QueryRow(ctx, `select name,review_status='approved' or created_by=$2 or $3,updated_at::text from minecraft_servers where id=$1`, target.InternalID, viewerID, moderator).Scan(&target.Name, &visible, &target.UpdatedAt)
+		err = s.db.QueryRow(ctx, `select name,review_status='approved' or submitted_by=$2 or $3,updated_at::text from minecraft_servers where id=$1`, target.InternalID, viewerID, moderator).Scan(&target.Name, &visible, &target.UpdatedAt)
 	case "community_post":
 		err = s.db.QueryRow(ctx, `select title,status='active' and (review_status='approved' or author_id=$2 or $3),updated_at::text from community_posts where id=$1`, target.InternalID, viewerID, moderator).Scan(&target.Name, &visible, &target.UpdatedAt)
 	case "blueprint":
@@ -145,15 +145,15 @@ func (s *Server) myProjectFollows(w http.ResponseWriter, r *http.Request) {
 		where follow.user_id=$1 and ($2='' or route.entity_type=$2)
 		and ($3='' or route.public_id=$3 or lower(coalesce(case route.entity_type when 'mod' then (select primary_name from mods where id=route.internal_id) when 'modpack' then (select primary_name from modpacks where id=route.internal_id) when 'community_post' then (select title from community_posts where id=route.internal_id) when 'minecraft_server' then (select name from minecraft_servers where id=route.internal_id) when 'blueprint' then (select title from blueprints where id=route.internal_id) when 'skin' then (select display_name from skin_assets where id=route.internal_id) else (select primary_name from simple_projects where id=route.internal_id and project_type=route.entity_type) end,'')) like '%'||lower($3)||'%')
 		and case route.entity_type
-			when 'mod' then exists(select 1 from mods where id=route.internal_id and (review_status='approved' or created_by=$1 or $4))
-			when 'modpack' then exists(select 1 from modpacks where id=route.internal_id and (review_status='approved' or created_by=$1 or $4))
-			when 'plugin' then exists(select 1 from simple_projects where id=route.internal_id and project_type=route.entity_type and (review_status='approved' or created_by=$1 or $4))
-			when 'map' then exists(select 1 from simple_projects where id=route.internal_id and project_type=route.entity_type and (review_status='approved' or created_by=$1 or $4))
-			when 'resource_pack' then exists(select 1 from simple_projects where id=route.internal_id and project_type=route.entity_type and (review_status='approved' or created_by=$1 or $4))
-			when 'shader_pack' then exists(select 1 from simple_projects where id=route.internal_id and project_type=route.entity_type and (review_status='approved' or created_by=$1 or $4))
-			when 'datapack' then exists(select 1 from simple_projects where id=route.internal_id and project_type=route.entity_type and (review_status='approved' or created_by=$1 or $4))
-			when 'addon' then exists(select 1 from simple_projects where id=route.internal_id and project_type=route.entity_type and (review_status='approved' or created_by=$1 or $4))
-			when 'minecraft_server' then exists(select 1 from minecraft_servers where id=route.internal_id and (review_status='approved' or created_by=$1 or $4))
+			when 'mod' then exists(select 1 from mods where id=route.internal_id and (review_status='approved' or submitted_by=$1 or $4))
+			when 'modpack' then exists(select 1 from modpacks where id=route.internal_id and (review_status='approved' or submitted_by=$1 or $4))
+			when 'plugin' then exists(select 1 from simple_projects where id=route.internal_id and project_type=route.entity_type and (review_status='approved' or submitted_by=$1 or $4))
+			when 'map' then exists(select 1 from simple_projects where id=route.internal_id and project_type=route.entity_type and (review_status='approved' or submitted_by=$1 or $4))
+			when 'resource_pack' then exists(select 1 from simple_projects where id=route.internal_id and project_type=route.entity_type and (review_status='approved' or submitted_by=$1 or $4))
+			when 'shader_pack' then exists(select 1 from simple_projects where id=route.internal_id and project_type=route.entity_type and (review_status='approved' or submitted_by=$1 or $4))
+			when 'datapack' then exists(select 1 from simple_projects where id=route.internal_id and project_type=route.entity_type and (review_status='approved' or submitted_by=$1 or $4))
+			when 'addon' then exists(select 1 from simple_projects where id=route.internal_id and project_type=route.entity_type and (review_status='approved' or submitted_by=$1 or $4))
+			when 'minecraft_server' then exists(select 1 from minecraft_servers where id=route.internal_id and (review_status='approved' or submitted_by=$1 or $4))
 			when 'community_post' then exists(select 1 from community_posts where id=route.internal_id and status='active' and (review_status='approved' or author_id=$1 or $4))
 			when 'blueprint' then exists(select 1 from blueprints where id=route.internal_id and status<>'deleted' and (review_status in ('approved','not_required') or owner_id=$1 or $4))
 			when 'skin' then exists(select 1 from skin_assets where id=route.internal_id and status='active' and ((visibility in ('public','unlisted') and review_status='approved') or owner_id=$1 or $4))

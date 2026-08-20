@@ -17,6 +17,8 @@ func TestFeatureUpdateSchemaContainsStableRelationsAndIndexes(t *testing.T) {
 		"idx_log_shares_owner_fk",
 		"idx_log_shares_source_file_fk",
 		"idx_comment_log_bindings_attachment",
+		"comment_attachments",
+		"idx_comment_attachments_file",
 	} {
 		if !strings.Contains(definition, required) {
 			t.Fatalf("feature update schema is missing %q", required)

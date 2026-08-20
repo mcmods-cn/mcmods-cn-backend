@@ -26,7 +26,7 @@ func TestCurrentUserFeaturesIntegration(t *testing.T) {
 		t.Fatalf("migrate current schema: %v", err)
 	}
 	var generation int
-	if err = pool.QueryRow(ctx, `select generation from schema_metadata where singleton`).Scan(&generation); err != nil || generation != 82 {
+	if err = pool.QueryRow(ctx, `select generation from schema_metadata where singleton`).Scan(&generation); err != nil || generation != schemaGeneration {
 		t.Fatalf("unexpected schema generation %d: %v", generation, err)
 	}
 	for _, relation := range []string{
@@ -35,6 +35,7 @@ func TestCurrentUserFeaturesIntegration(t *testing.T) {
 		"project_automation_activity",
 		"favorite_modpack_export_tasks", "favorite_modpack_export_items",
 		"sticker_packs", "stickers", "project_follows", "project_update_events",
+		"creator_claims", "creator_team_members", "project_editor_applications", "project_editor_assignments",
 	} {
 		var exists bool
 		if err = pool.QueryRow(ctx, `select to_regclass('public.'||$1) is not null`, relation).Scan(&exists); err != nil || !exists {

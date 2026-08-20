@@ -146,11 +146,11 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	httpapi.StartMinecraftServerProbeScheduler(ctx, db)
 	httpapi.StartPopularityRefreshScheduler(ctx, db)
 	httpapi.NewOSSDeletionWorker(cfg, db).Start(ctx)
-	httpapi.NewMaintenanceWorker(db).Start(ctx)
+	httpapi.NewMaintenanceWorker(db, sharedCache).Start(ctx)
 	httpapi.NewSeedCrawlerWorker(cfg, db).Start(ctx)
 	httpapi.NewProjectAutomationWorker(cfg, db).Start(ctx)
 	httpapi.NewActivityRetentionWorker(db).Start(ctx)
-	progressionService := progression.NewService(db)
+	progressionService := progression.NewService(db, sharedCache)
 	activityMonitor := activity.NewMonitor(activityDB, progressionService.ProcessActivityBatch, activity.Options{
 		BatchSize: cfg.Activity.BatchSize, QueueCapacity: cfg.Activity.QueueCapacity,
 		FlushInterval: cfg.Activity.FlushInterval, RetryMinDelay: cfg.Activity.RetryMinDelay,

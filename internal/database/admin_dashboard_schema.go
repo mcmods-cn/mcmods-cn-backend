@@ -7,20 +7,20 @@ func adminDashboardSchemaStatements() []string {
 	return []string{
 		`create view top_level_project_catalog as
 		 select route.id object_route_id,route.public_id,route.entity_type,route.canonical_path,
-		 	project.primary_name name,project.review_status,project.created_by,project.created_at,project.updated_at
+			project.primary_name name,project.review_status,project.submitted_by,project.created_at,project.updated_at
 		 from mods project join public_routes route on route.entity_type='mod' and route.internal_id=project.id
 		 union all
 		 select route.id,route.public_id,route.entity_type,route.canonical_path,
-		 	project.primary_name,project.review_status,project.created_by,project.created_at,project.updated_at
+			project.primary_name,project.review_status,project.submitted_by,project.created_at,project.updated_at
 		 from modpacks project join public_routes route on route.entity_type='modpack' and route.internal_id=project.id
 		 union all
 		 select route.id,route.public_id,route.entity_type,route.canonical_path,
-		 	project.primary_name,project.review_status,project.created_by,project.created_at,project.updated_at
+			project.primary_name,project.review_status,project.submitted_by,project.created_at,project.updated_at
 		 from simple_projects project join public_routes route
 		 	on route.entity_type=project.project_type and route.internal_id=project.id
 		 union all
 		 select route.id,route.public_id,route.entity_type,route.canonical_path,
-		 	project.name,project.review_status,project.created_by,project.created_at,project.updated_at
+			project.name,project.review_status,project.submitted_by,project.created_at,project.updated_at
 		 from minecraft_servers project join public_routes route
 		 	on route.entity_type='minecraft_server' and route.internal_id=project.id`,
 		`create table site_daily_metrics (

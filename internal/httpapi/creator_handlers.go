@@ -109,7 +109,7 @@ func (s *Server) creators(w http.ResponseWriter, r *http.Request) {
 		       count(*) filter(where creator.kind='team')
 		from creators creator
 		where ($1='' or creator.name ilike '%' || $1 || '%')
-		  and (creator.review_status='approved' or creator.created_by=$2 or creator.claimed_by=$2 or $3)`,
+		  and (creator.review_status='approved' or creator.created_by=$2 or $3)`,
 		query, claims.Subject, admin).Scan(&authorCount, &teamCount); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count creators")
 		return
@@ -118,15 +118,16 @@ func (s *Server) creators(w http.ResponseWriter, r *http.Request) {
 		"creator.created_at", "creator.updated_at", "creator.id", "creator.name")
 	rows, err := s.db.Query(r.Context(), `
 		select creator.public_id,creator.kind,creator.name,creator.avatar_url,creator.review_status,
-		       creator.claimed_by is not null,count(distinct mod.project_code)
+		       exists(select 1 from creator_claims claim where claim.creator_id=creator.id and claim.status='approved'),
+		       count(distinct mod.project_code)
 		from creators creator
-		left join content_creator_bindings binding on binding.creator_id=creator.id and binding.subject_type='mod'
+		left join content_creator_bindings binding on binding.creator_id=creator.id and binding.subject_type='mod' and binding.status='approved'
 		left join mods mod on mod.id=binding.subject_id and mod.review_status='approved'
 		left join public_routes popularity_route on popularity_route.entity_type=creator.kind and popularity_route.internal_id=creator.id
 		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
 		where ($1='' or creator.kind=$1)
 		  and (($5 and creator.id=any($6::bigint[])) or (not $5 and ($2='' or creator.name ilike '%' || $2 || '%')))
-		  and (creator.review_status='approved' or creator.created_by=$3 or creator.claimed_by=$3 or $4)
+		  and (creator.review_status='approved' or creator.created_by=$3 or $4)
 		group by creator.id,popularity.heat_score,popularity.view_count,popularity.download_count,
 			popularity.favorite_count,popularity.bayesian_rating,popularity.rating_count,popularity.comment_count
 		order by `+orderSQL+`
@@ -169,15 +170,15 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 	var item creatorSummary
 	var description string
 	var avatarFileID *string
-	var createdBy, claimedBy *int64
+	var createdBy *int64
 	var publishedRevisionID *int64
 	err := s.db.QueryRow(r.Context(), `
-		select id,public_id,kind,name,avatar_url,description_markdown,review_status,created_by,claimed_by,published_revision_id,
+		select id,public_id,kind,name,avatar_url,description_markdown,review_status,created_by,published_revision_id,
 		       (select public_id from oss_files where id=creators.avatar_file_id)
 		from creators
-		where public_id=$1 and (review_status='approved' or created_by=$2 or claimed_by=$2 or $3)`,
+		where public_id=$1 and (review_status='approved' or created_by=$2 or $3)`,
 		publicID, claims.Subject, admin,
-	).Scan(&id, &item.PublicID, &item.Kind, &item.Name, &item.AvatarURL, &description, &item.ReviewStatus, &createdBy, &claimedBy, &publishedRevisionID, &avatarFileID)
+	).Scan(&id, &item.PublicID, &item.Kind, &item.Name, &item.AvatarURL, &description, &item.ReviewStatus, &createdBy, &publishedRevisionID, &avatarFileID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "creator not found")
 		return
@@ -186,7 +187,14 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load creator")
 		return
 	}
-	item.Claimed = claimedBy != nil
+	var claimedUserID *int64
+	var currentClaimStatus string
+	_ = s.db.QueryRow(r.Context(), `select user_id from creator_claims where creator_id=$1 and status='approved'`, id).Scan(&claimedUserID)
+	if claims.Subject > 0 {
+		_ = s.db.QueryRow(r.Context(), `select status from creator_claims where creator_id=$1 and user_id=$2
+			order by created_at desc,id desc limit 1`, id, claims.Subject).Scan(&currentClaimStatus)
+	}
+	item.Claimed = claimedUserID != nil
 	item.AvatarURL, err = s.resolveStoredOSSObjectAccessURL(r.Context(), item.AvatarURL)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "failed to generate creator avatar URL")
@@ -228,9 +236,9 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var claimedUser any
-	if claimedBy != nil {
+	if claimedUserID != nil {
 		var userPublicID, username, avatarURL string
-		if scanErr := s.db.QueryRow(r.Context(), `select public_id,username,avatar_url from users where id=$1`, *claimedBy).
+		if scanErr := s.db.QueryRow(r.Context(), `select public_id,username,avatar_url from users where id=$1`, *claimedUserID).
 			Scan(&userPublicID, &username, &avatarURL); scanErr == nil {
 			avatarURL, _ = s.resolveStoredOSSObjectAccessURL(r.Context(), avatarURL)
 			claimedUser = map[string]any{
@@ -239,16 +247,14 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	canEdit := admin || claims.Subject > 0 &&
-		((createdBy != nil && *createdBy == claims.Subject) || (claimedBy != nil && *claimedBy == claims.Subject)) ||
-		claimsAllow(claims, "creator.edit")
+	canEdit := admin || claimsAllow(claims, "creator.edit") || claimsAllow(claims, "creator.edit."+publicID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"creator": item, "descriptionMarkdown": description, "links": links,
 		"collaborators": collaborators, "members": members, "teams": teams, "works": works,
 		"defaultLocale": defaultLocale, "localizations": localizations,
-		"claimedUser": claimedUser, "canEdit": canEdit,
+		"claimedUser": claimedUser, "canEdit": canEdit, "claimStatus": currentClaimStatus,
 		"avatarFileId":        avatarFileID,
-		"canClaim":            claims.Subject > 0 && claimedBy == nil && item.ReviewStatus == "approved",
+		"canClaim":            claims.Subject > 0 && item.Kind == "author" && claimedUserID == nil && currentClaimStatus != "pending" && item.ReviewStatus == "approved",
 		"publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, publishedRevisionID),
 	})
 }
@@ -280,7 +286,8 @@ func (s *Server) createCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_, publicID, created, err := createCreatorTx(r.Context(), tx, snapshot, claims.Subject, status, r)
+	canManageMembers := claimsAllow(claims, "team.members.manage") || claimsAllow(claims, "admin.*")
+	_, publicID, created, err := createCreatorTx(r.Context(), tx, snapshot, claims.Subject, status, canManageMembers, r)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, http.StatusConflict, "creator already exists")
@@ -293,6 +300,7 @@ func (s *Server) createCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit creator")
 		return
 	}
+	_ = s.refreshProjectACLVersion(r.Context())
 	annotateActivity(r, activity.ActionCreate, creatorObjectType(snapshot.Kind), publicID, len(snapshot.DescriptionMarkdown))
 	writeJSON(w, http.StatusCreated, map[string]any{"publicId": publicID, "revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID, "reviewStatus": status})
 }
@@ -317,12 +325,12 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var id int64
 	var kind, previousDescription string
-	var createdBy, claimedBy, baseRevisionID *int64
+	var createdBy, baseRevisionID *int64
 	var currentAvatarFileID *string
-	err = tx.QueryRow(r.Context(), `select id,kind,description_markdown,created_by,claimed_by,published_revision_id,
+	err = tx.QueryRow(r.Context(), `select id,kind,description_markdown,created_by,published_revision_id,
 		(select public_id from oss_files where id=creators.avatar_file_id)
 		from creators where public_id=$1 for update`, publicID).
-		Scan(&id, &kind, &previousDescription, &createdBy, &claimedBy, &baseRevisionID, &currentAvatarFileID)
+		Scan(&id, &kind, &previousDescription, &createdBy, &baseRevisionID, &currentAvatarFileID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "creator not found")
 		return
@@ -332,13 +340,17 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	canEdit := claimsAllow(claims, "admin.*") || claimsAllow(claims, "creator.edit") ||
-		(createdBy != nil && *createdBy == claims.Subject) || (claimedBy != nil && *claimedBy == claims.Subject)
+		claimsAllow(claims, "creator.edit."+publicID)
 	if !canEdit {
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
 	if snapshot.Kind != kind {
 		writeError(w, http.StatusBadRequest, "creator kind cannot be changed")
+		return
+	}
+	if kind == "team" && !claimsAllow(claims, "admin.*") && !claimsAllow(claims, "team.members.manage") {
+		writeError(w, http.StatusForbidden, "team membership changes require team.members.manage")
 		return
 	}
 	if err = s.resolveCreatorAvatarTx(r.Context(), tx, claims.Subject, &snapshot); err != nil {
@@ -368,7 +380,9 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if status == "approved" {
-		if err = s.applyCreatorSnapshotTx(r.Context(), tx, id, created.RevisionID, claims.Subject, claims.Subject, snapshot); err != nil {
+		canManageMembers := claimsAllow(claims, "team.members.manage") || claimsAllow(claims, "admin.*")
+		if err = s.applyCreatorSnapshotTx(r.Context(), tx, id, created.RevisionID, claims.Subject,
+			claims.Subject, canManageMembers, snapshot); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to publish creator revision")
 			return
 		}
@@ -381,6 +395,7 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit creator revision")
 		return
 	}
+	_ = s.refreshProjectACLVersion(r.Context())
 	addedBytes, deletedBytes := activity.MarkdownDeltaBytes(previousDescription, snapshot.DescriptionMarkdown)
 	annotateActivityDelta(r, activity.ActionEdit, creatorObjectType(kind), publicID, addedBytes, deletedBytes)
 	writeJSON(w, http.StatusOK, map[string]any{"revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID, "reviewStatus": status})
@@ -406,9 +421,8 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var creatorID int64
 	var kind, name string
-	var claimedBy *int64
-	err = tx.QueryRow(r.Context(), `select id,kind,name,claimed_by from creators where public_id=$1 and review_status='approved' for update`, publicID).
-		Scan(&creatorID, &kind, &name, &claimedBy)
+	err = tx.QueryRow(r.Context(), `select id,kind,name from creators where public_id=$1 and review_status='approved' for update`, publicID).
+		Scan(&creatorID, &kind, &name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "creator not found")
 		return
@@ -417,8 +431,17 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load creator")
 		return
 	}
-	if claimedBy != nil {
-		writeError(w, http.StatusConflict, "creator has already been claimed")
+	if kind != "author" {
+		writeError(w, http.StatusConflict, "teams cannot be claimed; claim a personal author identity")
+		return
+	}
+	var alreadyClaimed bool
+	if err = tx.QueryRow(r.Context(), `select exists(select 1 from creator_claims where creator_id=$1 and status='approved')`, creatorID).Scan(&alreadyClaimed); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to inspect author claim")
+		return
+	}
+	if alreadyClaimed {
+		writeError(w, http.StatusConflict, "author has already been claimed")
 		return
 	}
 	request.ProofFileIDs = uniquePublicIDs(request.ProofFileIDs)
@@ -427,11 +450,10 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Identity claims always require an independent review. Content-review
+	// preferences and administrator status must not self-grant derived project
+	// developer access.
 	status := "pending"
-	if !creatorReviewRequired(loadReviewConfig(r.Context(), s.db), kind, "claim") ||
-		claimsAllow(claims, "admin.*") {
-		status = "approved"
-	}
 	var claimID int64
 	var claimPublicID string
 	err = tx.QueryRow(r.Context(), `insert into creator_claims(creator_id,user_id,proof_markdown,status,reviewed_by,reviewed_at)
@@ -452,12 +474,6 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if status == "approved" {
-		if err = s.approveCreatorClaimTx(r.Context(), tx, creatorID, claims.Subject, claims.Subject); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to apply creator ownership")
-			return
-		}
-	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit claim")
 		return
@@ -473,7 +489,7 @@ func (s *Server) adminCreatorClaims(w http.ResponseWriter, r *http.Request) {
 		from creator_claims claim
 		join creators creator on creator.id=claim.creator_id
 		join users account on account.id=claim.user_id
-		where claim.status='pending'
+		where claim.status='pending' and creator.kind='author'
 		order by claim.created_at,claim.id`)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load creator claims")
@@ -537,20 +553,32 @@ func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "claim cannot be reviewed")
 		return
 	}
-	if request.Status == "approved" {
-		if err = s.approveCreatorClaimTx(r.Context(), tx, creatorID, userID, claims.Subject); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to apply creator ownership")
-			return
-		}
+	if kind != "author" {
+		writeError(w, http.StatusConflict, "teams cannot be claimed")
+		return
 	}
 	if _, err = tx.Exec(r.Context(), `update creator_claims set status=$2,reviewed_by=$3,review_note=$4,reviewed_at=now() where id=$1`,
 		claimID, request.Status, claims.Subject, strings.TrimSpace(request.Note)); err != nil {
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "author has already been claimed")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to save claim review")
 		return
+	}
+	if request.Status == "approved" {
+		if _, err = tx.Exec(r.Context(), `update creator_claims set status='rejected',review_note='another claim was approved',
+			reviewed_by=$2,reviewed_at=now() where creator_id=$1 and id<>$3 and status='pending'`, creatorID, claims.Subject, claimID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to close competing claims")
+			return
+		}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit claim review")
 		return
+	}
+	if request.Status == "approved" {
+		_ = s.refreshPermissionVersion(r.Context(), userID)
 	}
 	code := "creator_claim_approved"
 	if request.Status == "rejected" {
@@ -560,6 +588,57 @@ func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
 		"creatorId": publicID, "targetLabel": name, "url": creatorPath(kind, publicID),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"id": claimPublicID, "status": request.Status})
+}
+
+func (s *Server) revokeCreatorClaim(w http.ResponseWriter, r *http.Request) {
+	claimPublicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	var request struct {
+		Reason string `json:"reason"`
+	}
+	if !validCatalogPublicID(claimPublicID) || decodeJSON(r, &request) != nil {
+		writeError(w, http.StatusBadRequest, "invalid author claim revocation")
+		return
+	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to revoke author claim")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var claimID, userID int64
+	var authorID, authorName string
+	err = tx.QueryRow(r.Context(), `select claim.id,claim.user_id,author.public_id,author.name
+		from creator_claims claim join creators author on author.id=claim.creator_id
+		where claim.public_id=$1 and claim.status='approved' and author.kind='author' for update of claim`, claimPublicID).
+		Scan(&claimID, &userID, &authorID, &authorName)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "approved author claim not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load author claim")
+		return
+	}
+	claims := currentClaims(r)
+	request.Reason = strings.TrimSpace(request.Reason)
+	if _, err = tx.Exec(r.Context(), `update creator_claims set status='revoked',reviewed_by=$2,
+		review_note=$3,revoked_at=now(),reviewed_at=now() where id=$1`, claimID, claims.Subject, request.Reason); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to revoke author claim")
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{"claimId": claimPublicID, "authorId": authorID, "reason": request.Reason})
+	_, _ = tx.Exec(r.Context(), `insert into permission_audit_logs(operator_id,target_user_id,action,payload)
+		values($1,$2,'author_claim.revoke',$3::jsonb)`, claims.Subject, userID, payload)
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit author claim revocation")
+		return
+	}
+	_ = s.refreshPermissionVersion(r.Context(), userID)
+	s.enqueueOrCreateDirectNotification(r.Context(), userID, claims.Subject, "review", "Author claim revoked",
+		fmt.Sprintf("Your verified claim for %s was revoked. %s", authorName, request.Reason), map[string]any{
+			"creatorId": authorID, "claimId": claimPublicID, "url": "/authors/" + authorID,
+		})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "revoked"})
 }
 
 func (s *Server) creatorRoles(w http.ResponseWriter, r *http.Request) {
@@ -643,7 +722,8 @@ func (s *Server) createCreatorRole(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "code": request.Code, "name": request.Name})
 }
 
-func createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, actorID int64, status string, r *http.Request) (int64, string, createdContentRevision, error) {
+func createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, actorID int64, status string,
+	canManageTeamMembers bool, r *http.Request) (int64, string, createdContentRevision, error) {
 	var id int64
 	var publicID string
 	err := tx.QueryRow(ctx, `insert into creators(
@@ -664,7 +744,7 @@ func createCreatorTx(ctx context.Context, tx pgx.Tx, snapshot creatorSnapshot, a
 	if err != nil {
 		return 0, "", createdContentRevision{}, err
 	}
-	if err = applyCreatorRelationsTx(ctx, tx, id, snapshot); err != nil {
+	if err = applyCreatorRelationsTx(ctx, tx, id, snapshot, status, canManageTeamMembers, actorID); err != nil {
 		return 0, "", createdContentRevision{}, err
 	}
 	if status == "approved" {
@@ -706,7 +786,7 @@ func ensureNamedCreatorSnapshotTx(ctx context.Context, tx pgx.Tx, snapshot creat
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return 0, "", false, err
 	}
-	id, publicID, _, err = createCreatorTx(ctx, tx, snapshot, actorID, status, r)
+	id, publicID, _, err = createCreatorTx(ctx, tx, snapshot, actorID, status, false, r)
 	if err != nil {
 		return 0, "", false, fmt.Errorf("create imported creator: %w", err)
 	}
@@ -729,6 +809,7 @@ func (s *Server) applyCreatorSnapshotTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	creatorID, revisionID, actorID, uploaderID int64,
+	canManageTeamMembers bool,
 	snapshot creatorSnapshot,
 ) error {
 	if err := normalizeCreatorSnapshot(&snapshot); err != nil {
@@ -753,7 +834,7 @@ func (s *Server) applyCreatorSnapshotTx(
 	if err := publishCreatorLocalizationsTx(ctx, tx, creatorID, snapshot.Kind, snapshot.Name, snapshot.DefaultLocale, snapshot.Localizations, revisionID, actorID); err != nil {
 		return err
 	}
-	return applyCreatorRelationsTx(ctx, tx, creatorID, snapshot)
+	return applyCreatorRelationsTx(ctx, tx, creatorID, snapshot, "approved", canManageTeamMembers, actorID)
 }
 
 func (s *Server) resolveCreatorAvatarTx(
@@ -782,14 +863,10 @@ func (s *Server) resolveCreatorAvatarTx(
 	return nil
 }
 
-func applyCreatorRelationsTx(ctx context.Context, tx pgx.Tx, creatorID int64, snapshot creatorSnapshot) error {
-	for _, statement := range []string{
-		`delete from creator_links where creator_id=$1`,
-		`delete from creator_team_members where team_id=$1`,
-	} {
-		if _, err := tx.Exec(ctx, statement, creatorID); err != nil {
-			return err
-		}
+func applyCreatorRelationsTx(ctx context.Context, tx pgx.Tx, creatorID int64, snapshot creatorSnapshot,
+	creatorStatus string, canManageTeamMembers bool, actorID int64) error {
+	if _, err := tx.Exec(ctx, `delete from creator_links where creator_id=$1`, creatorID); err != nil {
+		return err
 	}
 	for index, link := range snapshot.Links {
 		if _, err := tx.Exec(ctx, `insert into creator_links(creator_id,link_type,url,label,display_order)
@@ -800,6 +877,37 @@ func applyCreatorRelationsTx(ctx context.Context, tx pgx.Tx, creatorID int64, sn
 	if snapshot.Kind != "team" {
 		return nil
 	}
+	type existingTeamMember struct {
+		MemberID, RoleID int64
+		Title, Status    string
+		DisplayOrder     int
+	}
+	existing := map[string]existingTeamMember{}
+	rows, err := tx.Query(ctx, `select member_creator_id,role_id,title,status,display_order
+		from creator_team_members where team_id=$1`, creatorID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var item existingTeamMember
+		if err = rows.Scan(&item.MemberID, &item.RoleID, &item.Title, &item.Status, &item.DisplayOrder); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[fmt.Sprintf("%d:%d", item.MemberID, item.RoleID)] = item
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	type nextTeamMember struct {
+		MemberID, RoleID int64
+		Title, Status    string
+		DisplayOrder     int
+	}
+	next := make([]nextTeamMember, 0, len(snapshot.Members)+len(existing))
+	requested := make(map[string]struct{}, len(snapshot.Members))
 	for index, member := range snapshot.Members {
 		var memberID int64
 		if err := tx.QueryRow(ctx, `select id from creators where public_id=$1 and kind='author'`, member.CreatorID).Scan(&memberID); err != nil {
@@ -809,60 +917,38 @@ func applyCreatorRelationsTx(ctx context.Context, tx pgx.Tx, creatorID int64, sn
 		if err := tx.QueryRow(ctx, `select id from creator_role_definitions where public_id=$1`, member.RoleID).Scan(&roleID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `insert into creator_team_members(
-			team_id,member_creator_id,role_id,title,display_order
-		) values($1,$2,$3,$4,$5)`, creatorID, memberID, roleID, member.Title, index); err != nil {
-			return err
+		key := fmt.Sprintf("%d:%d", memberID, roleID)
+		if _, duplicate := requested[key]; duplicate {
+			return errors.New("duplicate team author membership")
 		}
-	}
-	return nil
-}
-
-func (s *Server) approveCreatorClaimTx(ctx context.Context, tx pgx.Tx, creatorID, userID, reviewerID int64) error {
-	var existing *int64
-	if err := tx.QueryRow(ctx, `select claimed_by from creators where id=$1 for update`, creatorID).Scan(&existing); err != nil {
-		return err
-	}
-	if existing != nil && *existing != userID {
-		return errors.New("creator already claimed")
-	}
-	if _, err := tx.Exec(ctx, `update creators set claimed_by=$2,updated_at=now() where id=$1`, creatorID, userID); err != nil {
-		return err
-	}
-	defaults := s.permissionDefaultsFromSettings(ctx)
-	rows, err := tx.Query(ctx, `select distinct mod.id,mod.project_code
-		from content_creator_bindings binding
-		join mods mod on mod.id=binding.subject_id
-		where binding.creator_id=$1 and binding.subject_type='mod'`, creatorID)
-	if err != nil {
-		return err
-	}
-	type ownedMod struct {
-		id     int64
-		unique string
-	}
-	mods := make([]ownedMod, 0)
-	for rows.Next() {
-		var item ownedMod
-		if err = rows.Scan(&item.id, &item.unique); err != nil {
-			rows.Close()
-			return err
+		requested[key] = struct{}{}
+		status := "pending"
+		if previous, found := existing[key]; found && previous.Status == "approved" {
+			status = "approved"
+		} else if creatorStatus == "approved" && canManageTeamMembers {
+			status = "approved"
 		}
-		mods = append(mods, item)
+		next = append(next, nextTeamMember{MemberID: memberID, RoleID: roleID, Title: member.Title, Status: status, DisplayOrder: index})
 	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
+	for key, previous := range existing {
+		if previous.Status != "approved" || canManageTeamMembers {
+			continue
+		}
+		if _, retained := requested[key]; retained {
+			continue
+		}
+		next = append(next, nextTeamMember{MemberID: previous.MemberID, RoleID: previous.RoleID,
+			Title: previous.Title, Status: previous.Status, DisplayOrder: len(next)})
+	}
+	if _, err = tx.Exec(ctx, `delete from creator_team_members where team_id=$1`, creatorID); err != nil {
 		return err
 	}
-	rows.Close()
-	for _, mod := range mods {
-		if defaults.DeveloperRole != "" {
-			if err = s.bindProjectRoleTx(ctx, tx, userID, defaults.DeveloperRole, mod.unique); err != nil {
-				return err
-			}
-		}
-		if _, err = tx.Exec(ctx, `insert into mod_memberships(mod_id,user_id,role,granted_by)
-			values($1,$2,'developer',$3) on conflict do nothing`, mod.id, userID, reviewerID); err != nil {
+	for _, member := range next {
+		if _, err = tx.Exec(ctx, `insert into creator_team_members(
+			team_id,member_creator_id,role_id,title,status,created_by,approved_by,approved_at,display_order
+		) values($1,$2,$3,$4,$5,$6,case when $5='approved' then $6 else null end,
+			case when $5='approved' then now() else null end,$7)`, creatorID, member.MemberID, member.RoleID,
+			member.Title, member.Status, actorID, member.DisplayOrder); err != nil {
 			return err
 		}
 	}
@@ -889,17 +975,19 @@ func (s *Server) creatorLinks(ctx context.Context, creatorID int64) ([]creatorLi
 func (s *Server) creatorCollaborators(ctx context.Context, creatorID int64) ([]creatorSummary, error) {
 	rows, err := s.db.Query(ctx, `
 		select distinct collaborator.public_id,collaborator.kind,collaborator.name,collaborator.avatar_url,
-		       collaborator.review_status,collaborator.claimed_by is not null,
+		       collaborator.review_status,exists(select 1 from creator_claims claim
+		         where claim.creator_id=collaborator.id and claim.status='approved'),
 		       (select count(distinct mod.id) from content_creator_bindings binding
 		        join mods mod on mod.id=binding.subject_id
-		        where binding.creator_id=collaborator.id and binding.subject_type='mod' and mod.review_status='approved')
+		        where binding.creator_id=collaborator.id and binding.subject_type='mod' and binding.status='approved'
+		          and mod.review_status='approved')
 		from content_creator_bindings own_binding
 		join content_creator_bindings collaborator_binding
 		  on collaborator_binding.subject_type=own_binding.subject_type
 		 and collaborator_binding.subject_id=own_binding.subject_id
 		 and collaborator_binding.creator_id<>own_binding.creator_id
 		join creators collaborator on collaborator.id=collaborator_binding.creator_id
-		where own_binding.creator_id=$1
+		where own_binding.creator_id=$1 and own_binding.status='approved' and collaborator_binding.status='approved'
 		  and (own_binding.subject_type<>'mod' or exists(
 		    select 1 from mods shared_mod where shared_mod.id=own_binding.subject_id and shared_mod.review_status='approved'
 		  ))
@@ -931,7 +1019,7 @@ func (s *Server) creatorMembers(ctx context.Context, creatorID, viewerID int64, 
 		from creator_team_members relation
 		join creators member on member.id=relation.member_creator_id
 		join creator_role_definitions role on role.id=relation.role_id
-		where relation.team_id=$1
+		where relation.team_id=$1 and relation.status='approved'
 		  and (member.review_status='approved' or member.created_by=$2 or $3)
 		order by relation.display_order,relation.created_at`, creatorID, viewerID, admin)
 	if err != nil {
@@ -960,15 +1048,16 @@ func (s *Server) creatorMembers(ctx context.Context, creatorID, viewerID int64, 
 func (s *Server) creatorTeams(ctx context.Context, creatorID int64) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, `
 		select team.public_id,team.kind,team.name,team.avatar_url,team.review_status,
-		       team.claimed_by is not null,
+		       false,
 		       (select count(distinct mod.id) from content_creator_bindings binding
 		        join mods mod on mod.id=binding.subject_id
-		        where binding.creator_id=team.id and binding.subject_type='mod' and mod.review_status='approved'),
+		        where binding.creator_id=team.id and binding.subject_type='mod' and binding.status='approved'
+		          and mod.review_status='approved'),
 		       role.public_id,role.code,role.name,relation.title
 		from creator_team_members relation
 		join creators team on team.id=relation.team_id
 		join creator_role_definitions role on role.id=relation.role_id
-		where relation.member_creator_id=$1 and team.review_status='approved'
+		where relation.member_creator_id=$1 and relation.status='approved' and team.review_status='approved'
 		order by lower(team.name),team.id,relation.display_order`, creatorID)
 	if err != nil {
 		return nil, err
@@ -1002,7 +1091,7 @@ func (s *Server) creatorWorks(ctx context.Context, creatorID int64) ([]map[strin
 	rows, err := s.db.Query(ctx, `
 		select distinct mod.project_code,mod.slug,mod.primary_name,mod.secondary_name,mod.summary,mod.icon_url
 		from content_creator_bindings binding join mods mod on mod.id=binding.subject_id
-		where binding.creator_id=$1 and binding.subject_type='mod' and mod.review_status='approved'
+		where binding.creator_id=$1 and binding.subject_type='mod' and binding.status='approved' and mod.review_status='approved'
 		order by mod.primary_name`, creatorID)
 	if err != nil {
 		return nil, err
@@ -1296,4 +1385,15 @@ func creatorRoleInternalIDTx(ctx context.Context, tx pgx.Tx, roleID *string) (*i
 		return nil, err
 	}
 	return &internalID, nil
+}
+
+func creatorRolePermissionGrantingTx(ctx context.Context, tx pgx.Tx, roleID *int64) (bool, error) {
+	if roleID == nil {
+		return false, nil
+	}
+	var permissionGranting bool
+	if err := tx.QueryRow(ctx, `select permission_granting from creator_role_definitions where id=$1`, *roleID).Scan(&permissionGranting); err != nil {
+		return false, err
+	}
+	return permissionGranting, nil
 }

@@ -34,14 +34,14 @@ type resolvedUserRootPermissions struct {
 // authorization. It resolves active direct roles, inherited/template roles,
 // rule priority and direct user allow/deny overrides.
 func (s *Server) resolveUserRootPermissions(ctx context.Context, userID int64) ([]string, []security.PermissionRule, error) {
-	var authVersion int64
-	if err := s.db.QueryRow(ctx, `select auth_version from users where id=$1`, userID).Scan(&authVersion); err != nil {
+	permissionVersion, err := s.loadPermissionVersion(ctx, userID)
+	if err != nil {
 		return nil, nil, err
 	}
-	return s.resolveUserRootPermissionsVersion(ctx, userID, authVersion)
+	return s.resolveUserRootPermissionsVersion(ctx, userID, permissionVersion)
 }
 
-func (s *Server) resolveUserRootPermissionsVersion(ctx context.Context, userID, authVersion int64) ([]string, []security.PermissionRule, error) {
+func (s *Server) resolveUserRootPermissionsVersion(ctx context.Context, userID, permissionVersion int64) ([]string, []security.PermissionRule, error) {
 	if !s.cache.Config().RBACCacheEnabled {
 		return s.resolveUserRootPermissionsUncached(ctx, userID)
 	}
@@ -49,7 +49,19 @@ func (s *Server) resolveUserRootPermissionsVersion(ctx context.Context, userID, 
 	if err != nil {
 		return nil, nil, err
 	}
-	raw, err := s.cache.GetOrLoadTTL(ctx, rbacCacheKey(version, userID, authVersion), s.cache.Config().RBACCacheTTL, func(loadCtx context.Context) ([]byte, error) {
+	return s.resolveUserRootPermissionsAtVersion(ctx, userID, permissionVersion, version)
+}
+
+func (s *Server) resolveUserRootPermissionsAtVersion(ctx context.Context, userID, permissionVersion, rbacVersion int64) ([]string, []security.PermissionRule, error) {
+	if !s.cache.Config().RBACCacheEnabled {
+		return s.resolveUserRootPermissionsUncached(ctx, userID)
+	}
+	projectACLVersion, err := s.loadProjectACLVersion(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	key := rbacCacheKey(rbacVersion, projectACLVersion, userID, permissionVersion)
+	raw, err := s.cache.GetOrLoadTTL(ctx, key, s.cache.Config().RBACCacheTTL, func(loadCtx context.Context) ([]byte, error) {
 		roles, permissions, loadErr := s.resolveUserRootPermissionsUncached(loadCtx, userID)
 		if loadErr != nil {
 			return nil, loadErr
@@ -61,7 +73,7 @@ func (s *Server) resolveUserRootPermissionsVersion(ctx context.Context, userID, 
 	}
 	var resolved resolvedUserRootPermissions
 	if err = json.Unmarshal(raw, &resolved); err != nil {
-		s.cache.Delete(ctx, rbacCacheKey(version, userID, authVersion))
+		s.cache.Delete(ctx, key)
 		return nil, nil, err
 	}
 	return resolved.Roles, resolved.Permissions, nil
@@ -118,12 +130,60 @@ func (s *Server) resolveUsersRootPermissions(ctx context.Context, userIDs []int6
 	}
 	roleRows.Close()
 
+	accessRows, err := s.db.Query(ctx, `select distinct user_id,access_level,project_public_id
+		from effective_project_access where user_id=any($1)
+		order by user_id,access_level,project_public_id`, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	for accessRows.Next() {
+		var userID int64
+		var level, projectID string
+		if err = accessRows.Scan(&userID, &level, &projectID); err != nil {
+			accessRows.Close()
+			return nil, err
+		}
+		rolePrefix := "project_editor."
+		if level == "developer" {
+			rolePrefix = "project_developer."
+		}
+		assignedRoles[userID] = append(assignedRoles[userID], rolePrefix+projectID)
+	}
+	if err = accessRows.Err(); err != nil {
+		accessRows.Close()
+		return nil, err
+	}
+	accessRows.Close()
+
 	candidatesByUser := make(map[int64]map[string]permissionCandidate, len(userIDs))
 	for _, userID := range userIDs {
 		candidates := make(map[string]permissionCandidate)
 		applyPermissionRoles(candidates, assignedRoles[userID], rolesByCode, templates)
 		candidatesByUser[userID] = candidates
 	}
+
+	claimRows, err := s.db.Query(ctx, `select distinct claim.user_id,creator.public_id
+		from creator_claims claim join creators creator on creator.id=claim.creator_id
+		where claim.user_id=any($1) and claim.status='approved' and creator.kind='author'`, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	for claimRows.Next() {
+		var userID int64
+		var creatorID string
+		if err = claimRows.Scan(&userID, &creatorID); err != nil {
+			claimRows.Close()
+			return nil, err
+		}
+		applyPermissionCandidate(candidatesByUser[userID], permissionCandidate{
+			PermissionRule: security.PermissionRule{Code: "creator.edit." + creatorID, Allow: true, Priority: 100, Source: "author_claim"},
+		})
+	}
+	if err = claimRows.Err(); err != nil {
+		claimRows.Close()
+		return nil, err
+	}
+	claimRows.Close()
 
 	directRows, err := s.db.Query(
 		ctx,

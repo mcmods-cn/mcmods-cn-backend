@@ -32,7 +32,7 @@ func modpackSchemaStatements() []string {
 			search_keywords text[] not null default '{}'::text[],
 			submission_method text not null default 'manual',
 			review_status text not null default 'pending',
-			created_by bigint references users(id) on delete set null,
+			submitted_by bigint references users(id) on delete set null,
 			published_revision_id bigint references content_revisions(id) on delete restrict,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
@@ -46,7 +46,7 @@ func modpackSchemaStatements() []string {
 			check(review_status in ('pending','approved','rejected'))
 		)`,
 		`create index idx_modpacks_catalog on modpacks(review_status,updated_at desc,id desc)`,
-		`create index idx_modpacks_created_by on modpacks(created_by,updated_at desc)`,
+		`create index idx_modpacks_submitted_by on modpacks(submitted_by,updated_at desc)`,
 		`create index idx_modpacks_primary_name_lower on modpacks(lower(primary_name))`,
 		`create or replace function prevent_modpack_public_id_update() returns trigger as $$
 		begin

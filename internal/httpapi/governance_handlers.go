@@ -287,8 +287,8 @@ func (s *Server) reportPublicContentSnapshot(ctx context.Context, targetType, pu
 			'category',mod.primary_category,'license',mod.license,'environment',mod.environment,'status',mod.official_status,
 			'reviewStatus',mod.review_status,'externalLinks',jsonb_build_object('curseforge',mod.curseforge_project_id,'modrinth',mod.modrinth_project_id,'github',mod.github_project_path),
 			'iconUrl',mod.icon_url,'createdAt',mod.created_at,'updatedAt',mod.updated_at,'publishedAt',mod.published_at,
-			'author',case when author.id is null then null else jsonb_build_object('id',author.public_id,'name',author.username) end),mod.created_by
-			from mods mod left join users author on author.id=mod.created_by where mod.id=$1`, internalID).Scan(&raw, &authorID)
+			'submitter',case when submitter.id is null then null else jsonb_build_object('id',submitter.public_id,'name',submitter.username) end),mod.submitted_by
+			from mods mod left join users submitter on submitter.id=mod.submitted_by where mod.id=$1`, internalID).Scan(&raw, &authorID)
 	case "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
 		err = s.db.QueryRow(ctx, `select jsonb_build_object(
 			'title',project.primary_name,'summary',project.summary,'body',project.body_markdown,'minecraftVersions',project.minecraft_versions,
@@ -296,8 +296,8 @@ func (s *Server) reportPublicContentSnapshot(ctx context.Context, targetType, pu
 			'status',project.official_status,'reviewStatus',project.review_status,'iconUrl',project.icon_url,
 			'externalLinks',jsonb_build_object('curseforge',project.curseforge_project_id,'modrinth',project.modrinth_project_id),
 			'createdAt',project.created_at,'updatedAt',project.updated_at,'publishedAt',project.published_at,
-			'author',case when author.id is null then null else jsonb_build_object('id',author.public_id,'name',author.username) end),project.created_by
-			from simple_projects project left join users author on author.id=project.created_by where project.id=$1 and project.project_type=$2`, internalID, routeType).Scan(&raw, &authorID)
+			'submitter',case when submitter.id is null then null else jsonb_build_object('id',submitter.public_id,'name',submitter.username) end),project.submitted_by
+			from simple_projects project left join users submitter on submitter.id=project.submitted_by where project.id=$1 and project.project_type=$2`, internalID, routeType).Scan(&raw, &authorID)
 	case "community_post":
 		err = s.db.QueryRow(ctx, `select jsonb_build_object(
 			'title',post.title,'body',post.body_markdown,'kind',post.kind,'category',post.category,'sourceLocale',post.source_locale,
@@ -313,8 +313,8 @@ func (s *Server) reportPublicContentSnapshot(ctx context.Context, targetType, pu
 			'modded',server.modded,'loader',server.loader,'reviewStatus',server.review_status,
 			'onlineSnapshot',jsonb_build_object('online',server.last_online,'playersOnline',server.last_players_online,'playersMax',server.last_players_max,'motd',server.last_motd,'minecraftVersion',server.last_minecraft_version,'checkedAt',server.last_checked_at),
 			'createdAt',server.created_at,'updatedAt',server.updated_at,'publishedAt',server.published_at,
-			'author',jsonb_build_object('id',author.public_id,'name',author.username)),server.created_by
-			from minecraft_servers server join users author on author.id=server.created_by where server.id=$1`, internalID).Scan(&raw, &authorID)
+			'author',jsonb_build_object('id',author.public_id,'name',author.username)),server.submitted_by
+			from minecraft_servers server join users author on author.id=server.submitted_by where server.id=$1`, internalID).Scan(&raw, &authorID)
 	case "skin":
 		err = s.db.QueryRow(ctx, `select jsonb_build_object(
 			'title',asset.display_name,'description',asset.description,'kind',asset.kind,'model',asset.model,'tags',asset.tags,
@@ -545,8 +545,8 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var bannedUserID int64
 	if request.BanUserID != "" {
-		var bannedUserID int64
 		var banPublicID string
 		if bannedUserID, banPublicID, err = createBanTx(r.Context(), tx, request.BanUserID, claims.Subject, reportID, request.BanReasonCode, request.BanCustomReason, request.PublicRecordMarkdown, "", request.BanEndsAt); err != nil {
 			writeError(w, 400, err.Error())
@@ -586,6 +586,10 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, 500, "提交举报审核失败")
 		return
+	}
+	if bannedUserID > 0 {
+		_ = s.refreshAuthVersion(r.Context(), bannedUserID)
+		_ = s.refreshPermissionVersion(r.Context(), bannedUserID)
 	}
 	s.writeAppLog(context.Background(), "admin_operation", "warn", "report.resolve", r.PathValue("id"), claims.Subject, r, 200, 0, map[string]any{"conclusion": request.Conclusion, "deleteTarget": request.DeleteTarget, "ban": request.BanUserID != ""})
 	writeJSON(w, 200, map[string]any{"status": state})
@@ -695,6 +699,9 @@ func createBanTx(ctx context.Context, tx pgx.Tx, userPublicID string, moderatorI
 		return 0, "", errors.New("用户已有生效封禁或理由无效")
 	}
 	_, err = tx.Exec(ctx, `insert into user_role_bindings(user_id,role_id,expires_at,context) select $1,id,$2,$3 from roles where code='banned' on conflict(user_id,role_id) do update set expires_at=excluded.expires_at,context=excluded.context,created_at=now()`, userID, endsAt, "ban:"+strconv.FormatInt(banID, 10))
+	if err == nil {
+		_, err = tx.Exec(ctx, `update users set auth_version=auth_version+1,updated_at=now() where id=$1`, userID)
+	}
 	return userID, banPublicID, err
 }
 
@@ -766,6 +773,8 @@ func (s *Server) adminBans(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 500, "提交封禁失败")
 			return
 		}
+		_ = s.refreshAuthVersion(r.Context(), bannedUserID)
+		_ = s.refreshPermissionVersion(r.Context(), bannedUserID)
 		s.writeAppLog(context.Background(), "admin_operation", "warn", "ban.create", req.UserID, currentClaims(r).Subject, r, 201, 0, map[string]any{"reasonCode": req.ReasonCode, "endsAt": req.EndsAt})
 		writeJSON(w, 201, map[string]bool{"created": true})
 		return
@@ -859,6 +868,7 @@ func (s *Server) revokeBan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "提交解除封禁失败")
 		return
 	}
+	_ = s.refreshPermissionVersion(r.Context(), userID)
 	s.writeAppLog(context.Background(), "admin_operation", "warn", "ban.revoke", r.PathValue("id"), currentClaims(r).Subject, r, 200, 0, map[string]string{"reason": req.Reason})
 	writeJSON(w, 200, map[string]string{"status": "released"})
 }

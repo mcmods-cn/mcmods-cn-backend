@@ -82,7 +82,7 @@ func (s *Server) loadAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		 (select count(*) from minecraft_servers where review_status='pending')+
 		 (select count(*) from creator_claims where status='pending')+
 		 (select count(*) from reports where status in ('pending','in_review'))+
-		 (select count(*) from mod_membership_applications where status='pending')),
+		 (select count(*) from project_editor_applications where status='pending')),
 		coalesce((select sum(views) from site_view_daily where metric_date=current_date),0),
 		coalesce((select actions from site_daily_metrics where metric_date=current_date),0),
 		(select count(*) from site_monthly_active_users active join users account on account.id=active.user_id

@@ -162,7 +162,7 @@ func (s *Server) createFileLogShare(ctx context.Context, userID int64, publicFil
 	var objectKey, name, contentType, digest string
 	err := s.db.QueryRow(ctx, `select id,object_key,coalesce(nullif(source_original_name,''),original_name),content_type,source_size_bytes,sha256
 		from oss_files where public_id=$1 and uploader_id=$2 and status='active'
-		  and (scan_status in ('clean','trusted_generated') or (source='log_share' and scan_status='pending'))`, strings.ToLower(strings.TrimSpace(publicFileID)), userID).
+		  and (scan_status in ('clean','trusted_generated') or (source in ('log_share','comment') and scan_status='pending'))`, strings.ToLower(strings.TrimSpace(publicFileID)), userID).
 		Scan(&fileID, &objectKey, &name, &contentType, &size, &digest)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

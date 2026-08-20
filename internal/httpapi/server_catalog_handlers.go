@@ -282,7 +282,7 @@ func (s *Server) createMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		slug,address,normalized_address,handshake_host,connect_host,connect_port,
 		name,short_description,body_markdown,minecraft_versions,dedicated_client,languages,
 		primary_tag,has_whitelist,online_mode,icon_data_uri,modded,loader,mod_list_complete,
-		review_status,proof_text,created_by,last_online,last_latency_ms,last_players_online,
+		review_status,proof_text,submitted_by,last_online,last_latency_ms,last_players_online,
 		last_players_max,last_motd,last_minecraft_version,last_protocol,last_checked_at,
 		last_error,next_probe_at,published_at
 	) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
@@ -368,10 +368,10 @@ func (s *Server) updateMinecraftServer(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 
-	var serverID, ownerID int64
+	var serverID int64
 	var loader, previousBody string
-	err = tx.QueryRow(r.Context(), `select id,created_by,loader,body_markdown from minecraft_servers
-		where public_id=$1 for update`, publicID).Scan(&serverID, &ownerID, &loader, &previousBody)
+	err = tx.QueryRow(r.Context(), `select id,loader,body_markdown from minecraft_servers
+		where public_id=$1 for update`, publicID).Scan(&serverID, &loader, &previousBody)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "服务器不存在")
 		return
@@ -381,8 +381,7 @@ func (s *Server) updateMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
-	if claims.Subject != ownerID &&
-		!claimsAllow(claims, "server.edit."+publicID) &&
+	if !claimsAllow(claims, "project.edit."+publicID) &&
 		!claimsAllow(claims, "server.review") &&
 		!claimsAllow(claims, "admin.*") {
 		writeError(w, http.StatusForbidden, "没有编辑这个服务器的权限")
@@ -840,14 +839,14 @@ func (s *Server) publicMinecraftServerDetail(w http.ResponseWriter, r *http.Requ
 	claims := currentClaims(r)
 	var detail minecraftServerDetail
 	var latency, protocol int
-	var ownerID int64
+	var submittedByID int64
 	err := s.db.QueryRow(r.Context(), `select server.public_id,server.name,server.short_description,
 		server.icon_data_uri,server.modded,server.loader,server.languages,server.primary_tag,
 		server.minecraft_versions,server.last_online,coalesce(server.last_latency_ms,-1),
 		server.last_players_online,server.last_players_max,server.last_checked_at,server.address,
 		server.body_markdown,server.dedicated_client,server.has_whitelist,server.online_mode,
 		server.last_motd,server.last_minecraft_version,coalesce(server.last_protocol,-1),
-		server.mod_list_complete,server.review_status,server.created_at,server.updated_at,server.created_by
+		server.mod_list_complete,server.review_status,server.created_at,server.updated_at,server.submitted_by
 		from minecraft_servers server where server.public_id=$1`, publicID).Scan(
 		&detail.ID, &detail.Name, &detail.ShortDescription, &detail.IconDataURI,
 		&detail.Modded, &detail.Loader, &detail.Languages, &detail.PrimaryTag,
@@ -855,7 +854,7 @@ func (s *Server) publicMinecraftServerDetail(w http.ResponseWriter, r *http.Requ
 		&detail.PlayersMax, &detail.LastCheckedAt, &detail.Address, &detail.BodyMarkdown,
 		&detail.DedicatedClient, &detail.HasWhitelist, &detail.OnlineMode, &detail.MOTD,
 		&detail.MinecraftVersion, &protocol, &detail.ModListComplete, &detail.ReviewStatus,
-		&detail.CreatedAt, &detail.UpdatedAt, &ownerID,
+		&detail.CreatedAt, &detail.UpdatedAt, &submittedByID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "服务器不存在")
@@ -865,13 +864,12 @@ func (s *Server) publicMinecraftServerDetail(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "读取服务器失败")
 		return
 	}
-	if detail.ReviewStatus != "approved" && claims.Subject != ownerID &&
+	if detail.ReviewStatus != "approved" && claims.Subject != submittedByID &&
 		!claimsAllow(claims, "server.review") && !claimsAllow(claims, "admin.*") {
 		writeError(w, http.StatusNotFound, "服务器不存在")
 		return
 	}
-	detail.CanEdit = claims.Subject == ownerID ||
-		claimsAllow(claims, "server.edit."+publicID) ||
+	detail.CanEdit = claimsAllow(claims, "project.edit."+publicID) ||
 		claimsAllow(claims, "server.review") ||
 		claimsAllow(claims, "admin.*")
 	if latency >= 0 {

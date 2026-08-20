@@ -13,10 +13,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/activity"
+	"mcmods-cn-backend/internal/querycache"
 )
 
 type Service struct {
-	db *pgxpool.Pool
+	db    *pgxpool.Pool
+	cache *querycache.Cache
 }
 
 type taskCondition struct {
@@ -50,8 +52,8 @@ type progressDelta struct {
 	Amount int64
 }
 
-func NewService(db *pgxpool.Pool) *Service {
-	return &Service{db: db}
+func NewService(db *pgxpool.Pool, cache *querycache.Cache) *Service {
+	return &Service{db: db, cache: cache}
 }
 
 func (s *Service) ProcessActivityBatch(ctx context.Context, events []activity.Event) error {
@@ -109,7 +111,33 @@ func (s *Service) ProcessActivityBatch(ctx context.Context, events []activity.Ev
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	refreshed := make(map[int64]struct{}, len(deltas))
+	userIDs := make([]int64, 0, len(deltas))
+	for key := range deltas {
+		if _, ok := refreshed[key.UserID]; ok {
+			continue
+		}
+		refreshed[key.UserID] = struct{}{}
+		userIDs = append(userIDs, key.UserID)
+	}
+	rows, err := s.db.Query(ctx, `select id,permission_version from users where id=any($1::bigint[])`, userIDs)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var userID, version int64
+		if err = rows.Scan(&userID, &version); err != nil {
+			return err
+		}
+		if s.cache != nil {
+			s.cache.SetShared(ctx, querycache.UserPermissionVersionKey(userID), []byte(strconv.FormatInt(version, 10)), 10*time.Second)
+		}
+	}
+	return rows.Err()
 }
 
 func (s *Service) userTimezones(ctx context.Context, events []activity.Event) (map[int64]string, error) {

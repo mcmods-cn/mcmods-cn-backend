@@ -100,11 +100,26 @@ func TestUserBlockRelationshipAndOwnedCommentTargetsIntegration(t *testing.T) {
 	}
 
 	var modID int64
-	if err = db.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,created_by,review_status)
+	if err = db.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,submitted_by,review_status)
 		values(new_public_id(),$1,$2,$3,'approved') returning id`, fixtureKey, fixtureKey, ownerID).Scan(&modID); err != nil {
 		t.Fatal(err)
 	}
 	defer db.Exec(context.Background(), `delete from mods where id=$1`, modID)
+	var authorID int64
+	if err = db.QueryRow(ctx, `insert into creators(kind,name,normalized_name,review_status)
+		values('author',$1,$1,'approved') returning id`, fixtureKey+"-author").Scan(&authorID); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Exec(context.Background(), `delete from creators where id=$1`, authorID)
+	if _, err = db.Exec(ctx, `insert into creator_claims(creator_id,user_id,status,reviewed_at)
+		values($1,$2,'approved',now())`, authorID, ownerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(ctx, `insert into content_creator_bindings(subject_type,subject_id,creator_id,role_id,name_snapshot,role_snapshot,status,permission_granting,approved_at)
+		select 'mod',$1,$2,role.id,$3,role.name,'approved',true,now()
+		from creator_role_definitions role where role.code='developer'`, modID, authorID, fixtureKey+"-author"); err != nil {
+		t.Fatal(err)
+	}
 	blocked, err = server.commentTargetOwnerBlocksUser(ctx, commentTargetInfo{Type: "mod", InternalID: modID}, blockedID)
 	if err != nil || !blocked {
 		t.Fatalf("expected mod owner block to reject comments: blocked=%v err=%v", blocked, err)

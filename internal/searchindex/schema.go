@@ -2,7 +2,7 @@ package searchindex
 
 // Increment when an indexed field or document shape changes after deployment.
 // The worker will build new collections and switch aliases without downtime.
-const projectionSchemaVersion = 1
+const projectionSchemaVersion = 2
 
 func collectionSchemas() map[string]CollectionSchema {
 	return map[string]CollectionSchema{
@@ -20,7 +20,7 @@ func collectionSchemas() map[string]CollectionSchema {
 				{Name: "minecraft_versions", Type: "string[]", Facet: true},
 				{Name: "loaders", Type: "string[]", Facet: true},
 				{Name: "review_status", Type: "string", Facet: true},
-				{Name: "created_by", Type: "int64", Facet: true},
+				{Name: "submitted_by", Type: "int64", Facet: true},
 				{Name: "updated_at", Type: "int64"},
 			},
 			DefaultSortingField: "updated_at",
@@ -47,7 +47,7 @@ func collectionSchemas() map[string]CollectionSchema {
 				{Name: "text", Type: "string[]"},
 				{Name: "review_status", Type: "string", Facet: true},
 				{Name: "created_by", Type: "int64", Facet: true},
-				{Name: "claimed_by", Type: "int64", Facet: true},
+				{Name: "claimed_user_id", Type: "int64", Facet: true},
 				{Name: "updated_at", Type: "int64"},
 			},
 			DefaultSortingField: "updated_at",

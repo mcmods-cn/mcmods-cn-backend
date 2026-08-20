@@ -161,7 +161,9 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if status == "approved" {
-		if err = applyModSnapshot(r.Context(), tx, identity.ID, created.RevisionID, request.Snapshot); err != nil {
+		canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
+		if err = applyModSnapshot(r.Context(), tx, identity.ID, created.RevisionID, claims.Subject,
+			canManageAuthors, canManageTeams, request.Snapshot); err != nil {
 			if errors.Is(err, errModSiteIDTaken) {
 				writeError(w, http.StatusConflict, "mod site ID is already in use")
 				return
@@ -178,6 +180,7 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit revision")
 		return
 	}
+	_ = s.refreshProjectACLVersion(r.Context())
 	if status == "approved" {
 		s.scheduleModGalleryOSSRehome(identity.ID)
 	}
@@ -338,7 +341,9 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to resolve revision")
 			return
 		}
-		if err = applyModSnapshot(r.Context(), tx, modID, revisionID, snapshot); err != nil {
+		canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
+		if err = applyModSnapshot(r.Context(), tx, modID, revisionID, claims.Subject,
+			canManageAuthors, canManageTeams, snapshot); err != nil {
 			if errors.Is(err, errModSiteIDTaken) {
 				writeError(w, http.StatusConflict, "mod site ID is already in use")
 				return
@@ -355,6 +360,7 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit review")
 		return
 	}
+	_ = s.refreshProjectACLVersion(r.Context())
 	if request.Status == "approved" {
 		s.scheduleModGalleryOSSRehome(modID)
 	}
@@ -363,16 +369,16 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 }
 
 type modIdentityRecord struct {
-	ID       int64
-	UniqueID string
-	SiteID   string
-	OwnerID  *int64
+	ID            int64
+	UniqueID      string
+	SiteID        string
+	SubmittedByID *int64
 }
 
 func (s *Server) modIdentity(ctx context.Context, siteID string) (modIdentityRecord, error) {
 	var identity modIdentityRecord
-	err := s.db.QueryRow(ctx, `select id,project_code,slug,created_by from mods where slug=$1`, normalizeModSiteID(siteID)).Scan(
-		&identity.ID, &identity.UniqueID, &identity.SiteID, &identity.OwnerID,
+	err := s.db.QueryRow(ctx, `select id,project_code,slug,submitted_by from mods where slug=$1`, normalizeModSiteID(siteID)).Scan(
+		&identity.ID, &identity.UniqueID, &identity.SiteID, &identity.SubmittedByID,
 	)
 	return identity, err
 }
@@ -422,7 +428,8 @@ func scanModRevision(row scanner) (modRevisionResponse, error) {
 	return result, err
 }
 
-func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, snapshot createModRequest) error {
+func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID, relationshipActorID int64,
+	canManageAuthors, canManageTeams bool, snapshot createModRequest) error {
 	var projectCode, currentSiteID string
 	var revisionActorID *int64
 	if err := tx.QueryRow(ctx, `select project_code,slug from mods where id=$1`, modID).Scan(&projectCode, &currentSiteID); err != nil {
@@ -483,10 +490,6 @@ func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, s
 			return err
 		}
 	}
-	if _, err = tx.Exec(ctx, `delete from content_creator_bindings
-		where subject_id=$1 and subject_type='mod'`, modID); err != nil {
-		return err
-	}
 	for index, link := range snapshot.Links {
 		if _, err = tx.Exec(ctx, `insert into mod_links(mod_id,link_type,url,note,display_order) values($1,$2,$3,$4,$5)`, modID, link.Type, link.URL, link.Note, index); err != nil {
 			return err
@@ -497,36 +500,9 @@ func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID int64, s
 			return err
 		}
 	}
-	for index, author := range snapshot.Authors {
-		var creatorID int64
-		var nameSnapshot string
-		if author.CreatorID != "" {
-			if err = tx.QueryRow(ctx, `select id,name from creators where public_id=$1`, author.CreatorID).Scan(&creatorID, &nameSnapshot); err != nil {
-				return err
-			}
-		} else {
-			if err = tx.QueryRow(ctx, `select id,name from creators
-				where normalized_name=$1 order by review_status='approved' desc,id limit 1`,
-				normalizeCreatorName(author.Name)).Scan(&creatorID, &nameSnapshot); err != nil {
-				return err
-			}
-		}
-		roleSnapshot, roleErr := creatorRoleNameTx(ctx, tx, author.RoleID)
-		if roleErr != nil {
-			return roleErr
-		}
-		if roleSnapshot == "" {
-			roleSnapshot = author.Role
-		}
-		roleID, roleIDErr := creatorRoleInternalIDTx(ctx, tx, author.RoleID)
-		if roleIDErr != nil {
-			return roleIDErr
-		}
-		if _, err = tx.Exec(ctx, `insert into content_creator_bindings(
-			subject_id,subject_type,creator_id,role_id,name_snapshot,role_snapshot,display_order
-		) values($1,'mod',$2,$3,$4,$5,$6)`, modID, creatorID, roleID, nameSnapshot, roleSnapshot, index); err != nil {
-			return err
-		}
+	if err = syncProjectCreatorBindingsTx(ctx, tx, "mod", modID, snapshot.Authors, relationshipActorID,
+		true, canManageAuthors, canManageTeams, nil); err != nil {
+		return err
 	}
 	if err = insertModCompatibilities(ctx, tx, modID, snapshot.Compatibilities); err != nil {
 		return err

@@ -13,15 +13,17 @@ import (
 )
 
 type Claims struct {
-	Subject         int64            `json:"-"`
-	PublicSubject   string           `json:"sub"`
-	SessionID       string           `json:"sid"`
-	AuthVersion     int64            `json:"ver"`
-	Username        string           `json:"username"`
-	Email           string           `json:"email"`
-	PermissionRules []PermissionRule `json:"-"`
-	IssuedAt        int64            `json:"iat"`
-	ExpiresAt       int64            `json:"exp"`
+	Subject           int64            `json:"-"`
+	PublicSubject     string           `json:"sub"`
+	SessionID         string           `json:"sid"`
+	AuthVersion       int64            `json:"ver"`
+	PermissionVersion int64            `json:"-"`
+	RBACVersion       int64            `json:"-"`
+	Username          string           `json:"username"`
+	Email             string           `json:"email"`
+	PermissionRules   []PermissionRule `json:"-"`
+	IssuedAt          int64            `json:"iat"`
+	ExpiresAt         int64            `json:"exp"`
 }
 
 // PermissionRule is the resolved authorization rule attached to a request.

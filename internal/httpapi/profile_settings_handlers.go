@@ -289,6 +289,9 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "保存用户设置失败")
 		return
 	}
+	if request.MessageReceive != nil {
+		_ = s.refreshPermissionVersion(r.Context(), claims.Subject)
+	}
 	s.cache.Delete(r.Context(), publicUserCardCacheKey(claims.Subject))
 	settings, err := s.loadUserProfileSettings(r.Context(), claims.Subject)
 	if err != nil {

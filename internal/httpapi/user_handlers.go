@@ -77,8 +77,8 @@ func (s *Server) userOSSFiles(w http.ResponseWriter, r *http.Request) {
 		        exists(select 1 from minecraft_server_proof_files proof
 		          join minecraft_servers server on server.id=proof.server_id
 		          where proof.oss_file_id=file.id and server.review_status='pending'),
-		        exists(select 1 from mod_application_attachments attachment
-		          join mod_membership_applications application on application.id=attachment.application_id
+		        exists(select 1 from project_editor_application_attachments attachment
+		          join project_editor_applications application on application.id=attachment.application_id
 		          where attachment.oss_file_id=file.id and application.status='pending')
 		 from oss_files file
 		 where file.uploader_id = $1 and file.object_key like $2 and file.status = 'active'
@@ -98,20 +98,20 @@ func (s *Server) userOSSFiles(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var size, sourceSize int64
 		var id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, sha, status, scanStatus string
-		var creatorClaimLocked, serverReviewLocked, modApplicationLocked bool
+		var creatorClaimLocked, serverReviewLocked, editorApplicationLocked bool
 		var createdAt, updatedAt time.Time
-		if err := rows.Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &sourceOriginalName, &contentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt, &creatorClaimLocked, &serverReviewLocked, &modApplicationLocked); err != nil {
+		if err := rows.Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &sourceOriginalName, &contentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt, &creatorClaimLocked, &serverReviewLocked, &editorApplicationLocked); err != nil {
 			writeError(w, http.StatusInternalServerError, "解析用户文件失败")
 			return
 		}
 		record := ossFileRecord(id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt)
-		record["locked"] = creatorClaimLocked || serverReviewLocked || modApplicationLocked
+		record["locked"] = creatorClaimLocked || serverReviewLocked || editorApplicationLocked
 		if creatorClaimLocked {
 			record["lockReason"] = "creator_claim_review"
 		} else if serverReviewLocked {
 			record["lockReason"] = "server_review"
-		} else if modApplicationLocked {
-			record["lockReason"] = "mod_application_review"
+		} else if editorApplicationLocked {
+			record["lockReason"] = "project_editor_application_review"
 		}
 		access, accessErr := s.resolveOSSObjectAccessWithConfig(r.Context(), cfg, objectKey, ossObjectAccessOptions{})
 		if accessErr != nil {
@@ -221,8 +221,8 @@ func (s *Server) deleteUserOSSFile(w http.ResponseWriter, r *http.Request) {
 		or exists(select 1 from minecraft_server_proof_files proof
 		  join minecraft_servers server on server.id=proof.server_id
 		  where proof.oss_file_id=file.id and server.review_status='pending')
-		or exists(select 1 from mod_application_attachments attachment
-		  join mod_membership_applications application on application.id=attachment.application_id
+		or exists(select 1 from project_editor_application_attachments attachment
+		  join project_editor_applications application on application.id=attachment.application_id
 		  where attachment.oss_file_id=file.id and application.status='pending')
 		from oss_files file where file.object_key=$1 and file.status='active' for update`, req.ObjectKey).Scan(&fileID, &ownerID, &originalName, &locked)
 	if err != nil || ownerID != claims.Subject {

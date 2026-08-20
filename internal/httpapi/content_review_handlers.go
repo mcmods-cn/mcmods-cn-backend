@@ -290,7 +290,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if request.Status == "approved" {
-			if err = applyModpackSnapshotTx(r.Context(), tx, modpackID, revisionID, claims.Subject, snapshot); err != nil {
+			canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
+			if err = applyModpackSnapshotTx(r.Context(), tx, modpackID, revisionID, claims.Subject,
+				canManageAuthors, canManageTeams, snapshot); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to publish modpack")
 				return
 			}
@@ -313,6 +315,7 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to commit modpack review")
 			return
 		}
+		_ = s.refreshProjectACLVersion(r.Context())
 		code := "review_approved"
 		if request.Status == "rejected" {
 			code = "review_rejected"
@@ -351,7 +354,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if request.Status == "approved" {
-			if err = applySimpleProjectSnapshotTx(r.Context(), tx, projectID, revisionID, claims.Subject, snapshot); err != nil {
+			canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
+			if err = applySimpleProjectSnapshotTx(r.Context(), tx, projectID, revisionID, claims.Subject,
+				canManageAuthors, canManageTeams, snapshot); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to publish project")
 				return
 			}
@@ -375,6 +380,7 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to commit project review")
 			return
 		}
+		_ = s.refreshProjectACLVersion(r.Context())
 		code := "review_approved"
 		if request.Status == "rejected" {
 			code = "review_rejected"
@@ -556,7 +562,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if request.Status == "approved" {
-			if err = s.applyCreatorSnapshotTx(r.Context(), tx, creatorID, revisionID, claims.Subject, submittedBy, snapshot); err != nil {
+			canManageMembers := claimsAllow(claims, "team.members.review") || claimsAllow(claims, "team.members.manage") || claimsAllow(claims, "admin.*")
+			if err = s.applyCreatorSnapshotTx(r.Context(), tx, creatorID, revisionID, claims.Subject,
+				submittedBy, canManageMembers, snapshot); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to publish creator")
 				return
 			}
@@ -574,6 +582,7 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to commit creator review")
 			return
 		}
+		_ = s.refreshProjectACLVersion(r.Context())
 		code := "review_approved"
 		if request.Status == "rejected" {
 			code = "review_rejected"

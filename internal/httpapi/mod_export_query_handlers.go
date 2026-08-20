@@ -596,12 +596,12 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 func (s *Server) canReadModExportRevision(w http.ResponseWriter, r *http.Request, revisionID string) bool {
 	var identity modIdentityRecord
 	var active bool
-	err := s.db.QueryRow(r.Context(), `select m.id,m.project_code,m.slug,m.created_by,
+	err := s.db.QueryRow(r.Context(), `select m.id,m.project_code,m.slug,m.submitted_by,
 		(e.is_active and version.status='active')
 		from catalog_import_revisions e
 		join mods m on m.id=e.mod_id
 		join mod_content_versions version on version.id=e.target_version_id
-		where e.id=$1`, revisionID).Scan(&identity.ID, &identity.UniqueID, &identity.SiteID, &identity.OwnerID, &active)
+		where e.id=$1`, revisionID).Scan(&identity.ID, &identity.UniqueID, &identity.SiteID, &identity.SubmittedByID, &active)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "export revision not found")
 		return false

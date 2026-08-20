@@ -70,7 +70,9 @@ func TestCORSExposesBackendResponseMarker(t *testing.T) {
 	for _, header := range strings.Split(response.Header().Get("Access-Control-Expose-Headers"), ",") {
 		exposed[strings.ToLower(strings.TrimSpace(header))] = true
 	}
-	if !exposed[strings.ToLower(backendResponseHeader)] {
-		t.Fatalf("backend marker is not exposed to browsers; got %q", response.Header().Get("Access-Control-Expose-Headers"))
+	for _, required := range []string{backendResponseHeader, authStateHeader, permissionVersionHeader, rbacVersionHeader} {
+		if !exposed[strings.ToLower(required)] {
+			t.Fatalf("response header %q is not exposed to browsers; got %q", required, response.Header().Get("Access-Control-Expose-Headers"))
+		}
 	}
 }

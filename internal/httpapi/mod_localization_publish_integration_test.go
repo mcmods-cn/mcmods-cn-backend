@@ -81,7 +81,7 @@ func TestApplyModSnapshotPublishesNonCatalogLocalizationsIntegration(t *testing.
 		t.Fatal(err)
 	}
 
-	if err = applyModSnapshot(ctx, tx, modID, revision.RevisionID, snapshot); err != nil {
+	if err = applyModSnapshot(ctx, tx, modID, revision.RevisionID, 0, false, false, snapshot); err != nil {
 		t.Fatalf("publish localized mod snapshot: %v", err)
 	}
 

@@ -40,7 +40,7 @@ type Server struct {
 }
 
 const corsAllowedHeaders = "Authorization, Content-Type, Idempotency-Key, X-Request-ID, X-Client-ID, X-Anti-Abuse-Form, X-Anti-Abuse-Trap, X-Anti-Abuse-Challenge, X-MCMods-Bot-Token"
-const corsExposedHeaders = "Retry-After, X-MCMods-API-Response"
+const corsExposedHeaders = "Retry-After, X-MCMods-API-Response, X-MCMods-Auth-State, X-MCMods-Permission-Version, X-MCMods-RBAC-Version"
 
 func NewServer(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client, sharedCache *querycache.Cache, activityMonitor *activity.Monitor, searchClient *searchindex.Client) http.Handler {
 	if sharedCache == nil {
@@ -310,13 +310,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/assets/content", s.optionalAuth(s.modExportAssetContent))
 	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/structures", s.optionalAuth(s.modExportStructures))
 	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/structures/{structureId}/template", s.optionalAuth(s.modExportStructureTemplate))
-	s.mux.HandleFunc("GET /api/v1/mods/{siteId}/applications", s.requireAuth(s.modApplications))
-	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/applications", s.requireAuth(s.modApplications))
+	s.mux.HandleFunc("GET /api/v1/projects/{projectType}/{projectId}/editor-applications", s.requirePermission("project.editor.apply", s.projectEditorApplications))
+	s.mux.HandleFunc("POST /api/v1/projects/{projectType}/{projectId}/editor-applications", s.requirePermission("project.editor.apply", s.projectEditorApplications))
 	s.mux.HandleFunc("GET /api/v1/comment-targets/{targetType}/{targetKey}/comments", s.optionalAuth(s.commentsForTarget))
 	s.mux.HandleFunc("GET /api/v1/comment-targets/{targetType}/{targetKey}/comments/floors/{floor}", s.optionalAuth(s.commentFloor))
 	s.mux.HandleFunc("POST /api/v1/comment-targets/{targetType}/{targetKey}/comments", s.requireAuth(s.commentsForTarget))
 	s.mux.HandleFunc("GET /api/v1/comments/{commentId}/replies", s.optionalAuth(s.commentReplies))
 	s.mux.HandleFunc("GET /api/v1/comments/{commentId}/thread", s.optionalAuth(s.commentThread))
+	s.mux.HandleFunc("GET /api/v1/comments/{commentId}/attachments/{fileId}/download", s.optionalAuth(s.downloadCommentAttachment))
 	s.mux.HandleFunc("PATCH /api/v1/comments/{commentId}", s.requireAuth(s.commentItem))
 	s.mux.HandleFunc("DELETE /api/v1/comments/{commentId}", s.requireAuth(s.commentItem))
 	s.mux.HandleFunc("PUT /api/v1/comments/{commentId}/pin", s.requireAuth(s.commentPin))
@@ -459,9 +460,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/admin/users/{id}/roles", s.requirePermission("permission.write", s.updateUserRoles))
 	s.mux.HandleFunc("GET /api/v1/admin/users/{id}/permissions", s.requirePermission("permission.read", s.userPermissionDetails))
 	s.mux.HandleFunc("PUT /api/v1/admin/users/{id}/permissions", s.requirePermission("permission.write", s.updateUserPermissions))
-	s.mux.HandleFunc("GET /api/v1/admin/mod-applications", s.requirePermission("project.review", s.adminModApplications))
-	s.mux.HandleFunc("PATCH /api/v1/admin/mod-applications/{id}", s.requirePermission("project.review", s.reviewModApplication))
-	s.mux.HandleFunc("POST /api/v1/admin/mod-applications/{id}/attachments/{fileId}/presign", s.requirePermission("project.review", s.presignModApplicationAttachment))
+	s.mux.HandleFunc("GET /api/v1/admin/project-editor-applications", s.requirePermission("project.editor.review", s.adminProjectEditorApplications))
+	s.mux.HandleFunc("PATCH /api/v1/admin/project-editor-applications/{id}", s.requirePermission("project.editor.review", s.reviewProjectEditorApplication))
+	s.mux.HandleFunc("POST /api/v1/admin/project-editor-applications/{id}/attachments/{fileId}/presign", s.requirePermission("project.editor.review", s.presignProjectEditorApplicationAttachment))
+	s.mux.HandleFunc("DELETE /api/v1/admin/project-editor-assignments/{projectType}/{projectId}/{userId}", s.requirePermission("project.editor.review", s.revokeProjectEditorAssignment))
+	s.mux.HandleFunc("GET /api/v1/admin/project-authorship-relations", s.requireAuth(s.adminProjectAuthorshipRelations))
+	s.mux.HandleFunc("PATCH /api/v1/admin/project-authorship-relations/{id}", s.requireAuth(s.reviewProjectAuthorshipRelation))
 	s.mux.HandleFunc("GET /api/v1/admin/reports", s.requirePermission("report.review", s.adminReports))
 	s.mux.HandleFunc("GET /api/v1/admin/reports/{id}", s.requirePermission("report.review", s.adminReportDetail))
 	s.mux.HandleFunc("POST /api/v1/admin/reports/{id}/claim", s.requirePermission("report.review", s.claimReport))
@@ -509,6 +513,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/admin/unresolved-references", s.requirePermission("reference.unresolved.read", s.adminUnresolvedReferences))
 	s.mux.HandleFunc("GET /api/v1/admin/creator-claims", s.requirePermission("creator.claim.review", s.adminCreatorClaims))
 	s.mux.HandleFunc("PATCH /api/v1/admin/creator-claims/{id}", s.requirePermission("creator.claim.review", s.reviewCreatorClaim))
+	s.mux.HandleFunc("DELETE /api/v1/admin/creator-claims/{id}", s.requirePermission("creator.claim.review", s.revokeCreatorClaim))
 	s.mux.HandleFunc("POST /api/v1/admin/creator-claims/{id}/attachments/{fileId}/presign", s.requirePermission("creator.claim.review", s.presignCreatorClaimAttachment))
 	s.mux.HandleFunc("GET /api/v1/admin/activity", s.requirePermission("activity.read", s.adminActivityEvents))
 	s.mux.HandleFunc("GET /api/v1/admin/economy/config", s.requirePermission("economy.read", s.adminEconomyConfig))

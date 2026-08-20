@@ -13,9 +13,9 @@ func TestCommentProjectRoleFromPermissions(t *testing.T) {
 		want        string
 	}{
 		{
-			name:        "owner badge uses its dedicated project permission",
-			permissions: []security.PermissionRule{{Code: "project.comment.role.owner.demo12345", Allow: true, Priority: 100}},
-			want:        "owner",
+			name:        "developer badge uses its dedicated project permission",
+			permissions: []security.PermissionRule{{Code: "project.comment.role.developer.demo12345", Allow: true, Priority: 100}},
+			want:        "developer",
 		},
 		{
 			name:        "editor badge uses its dedicated project permission",
@@ -23,18 +23,18 @@ func TestCommentProjectRoleFromPermissions(t *testing.T) {
 			want:        "editor",
 		},
 		{
-			name: "owner takes precedence over editor",
+			name: "developer takes precedence over editor",
 			permissions: []security.PermissionRule{
-				{Code: "project.comment.role.owner.demo12345", Allow: true, Priority: 100},
+				{Code: "project.comment.role.developer.demo12345", Allow: true, Priority: 100},
 				{Code: "project.comment.role.editor.demo12345", Allow: true, Priority: 100},
 			},
-			want: "owner",
+			want: "developer",
 		},
 		{
 			name: "explicit higher priority deny hides badge",
 			permissions: []security.PermissionRule{
-				{Code: "project.comment.role.owner.demo12345", Allow: true, Priority: 100},
-				{Code: "project.comment.role.owner.demo12345", Allow: false, Priority: 200},
+				{Code: "project.comment.role.developer.demo12345", Allow: true, Priority: 100},
+				{Code: "project.comment.role.developer.demo12345", Allow: false, Priority: 200},
 			},
 			want: "",
 		},
@@ -44,7 +44,7 @@ func TestCommentProjectRoleFromPermissions(t *testing.T) {
 			want:        "",
 		},
 		{
-			name:        "admin wildcard does not claim project ownership",
+			name:        "admin wildcard does not claim project developer identity",
 			permissions: []security.PermissionRule{{Code: "admin.*", Allow: true, Priority: 100}},
 			want:        "",
 		},

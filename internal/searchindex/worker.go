@@ -350,7 +350,7 @@ func (worker *Worker) loadProjectDocuments(ctx context.Context, ids []int64, onl
 			mod.search_keywords,coalesce((select array_agg(tag order by tag) from mod_tags where mod_id=mod.id),'{}'::text[]),
 			coalesce((select array_agg(distinct minecraft_version) from mod_loader_compatibilities where mod_id=mod.id),'{}'::text[]),
 			coalesce((select array_agg(distinct loader) from mod_loader_compatibilities where mod_id=mod.id),'{}'::text[]),
-			mod.review_status,coalesce(mod.created_by,0),mod.updated_at from mods mod where ($1 or mod.id=any($2::bigint[]))`},
+			mod.review_status,coalesce(mod.submitted_by,0),mod.updated_at from mods mod where ($1 or mod.id=any($2::bigint[]))`},
 		{"modpack", `select pack.id,'modpack'::text,pack.public_id,pack.slug,array[pack.primary_name,pack.secondary_name,pack.abbreviation] ||
 			coalesce((select array_agg(localization.name) from content_localizations localization where localization.subject_type='modpack' and localization.subject_id=pack.id and localization.name<>''),'{}'::text[]),
 			array[pack.summary,pack.body_markdown] || coalesce((select array_agg(localization.summary||' '||localization.content_markdown) from content_localizations localization where localization.subject_type='modpack' and localization.subject_id=pack.id),'{}'::text[]),'{}'::text[],
@@ -358,13 +358,13 @@ func (worker *Worker) loadProjectDocuments(ctx context.Context, ids []int64, onl
 			pack.search_keywords,coalesce((select array_agg(tag order by tag) from modpack_tags where modpack_id=pack.id),'{}'::text[]),
 			coalesce((select array_agg(distinct minecraft_version) from modpack_loader_compatibilities where modpack_id=pack.id),'{}'::text[]),
 			coalesce((select array_agg(distinct loader) from modpack_loader_compatibilities where modpack_id=pack.id),'{}'::text[]),
-			pack.review_status,coalesce(pack.created_by,0),pack.updated_at from modpacks pack where ($1 or pack.id=any($2::bigint[]))`},
+			pack.review_status,coalesce(pack.submitted_by,0),pack.updated_at from modpacks pack where ($1 or pack.id=any($2::bigint[]))`},
 		{"simple_project", `select project.id,project.project_type,project.public_id,project.slug,
 			array_prepend(project.primary_name,coalesce((select array_agg(localization.name) from simple_project_localizations localization where localization.project_id=project.id and localization.name<>''),'{}'::text[])),
 			array_prepend(project.summary,array_prepend(project.body_markdown,coalesce((select array_agg(localization.summary||' '||localization.body_markdown) from simple_project_localizations localization where localization.project_id=project.id),'{}'::text[]))),
 			'{}'::text[],coalesce((select array_agg(distinct creator.name) from content_creator_bindings binding join creators creator on creator.id=binding.creator_id where binding.subject_type=project.project_type and binding.subject_id=project.id),'{}'::text[]),
 			project.search_keywords,project.categories,project.minecraft_versions,project.loaders,
-			project.review_status,coalesce(project.created_by,0),project.updated_at from simple_projects project where ($1 or project.id=any($2::bigint[]))`},
+			project.review_status,coalesce(project.submitted_by,0),project.updated_at from simple_projects project where ($1 or project.id=any($2::bigint[]))`},
 	}
 	for _, query := range queries {
 		if onlyType != "" && onlyType != query.documentType {
@@ -375,12 +375,12 @@ func (worker *Worker) loadProjectDocuments(ctx context.Context, ids []int64, onl
 			return nil, err
 		}
 		for rows.Next() {
-			var id, createdBy int64
+			var id, submittedBy int64
 			var entityType, publicID, slug, reviewStatus string
 			var names, text, identifiers, creators, keywords, categories, versions, loaders []string
 			var updated time.Time
 			if err = rows.Scan(&id, &entityType, &publicID, &slug, &names, &text, &identifiers, &creators, &keywords, &categories,
-				&versions, &loaders, &reviewStatus, &createdBy, &updated); err != nil {
+				&versions, &loaders, &reviewStatus, &submittedBy, &updated); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -389,7 +389,7 @@ func (worker *Worker) loadProjectDocuments(ctx context.Context, ids []int64, onl
 				"public_id": publicID, "slug": slug, "names": compactStrings(names), "text": compactStrings(text),
 				"identifiers": compactStrings(identifiers), "creators": compactStrings(creators), "keywords": compactStrings(keywords),
 				"categories": compactStrings(categories), "minecraft_versions": compactStrings(versions), "loaders": compactStrings(loaders),
-				"review_status": reviewStatus, "created_by": createdBy, "updated_at": updated.Unix(),
+				"review_status": reviewStatus, "submitted_by": submittedBy, "updated_at": updated.Unix(),
 			})
 		}
 		if err := rows.Err(); err != nil {
@@ -435,7 +435,7 @@ func (worker *Worker) loadCreatorDocuments(ctx context.Context, ids []int64) ([]
 	all, selectedIDs := selected(ids)
 	rows, err := worker.db.Query(ctx, `select creator.id,creator.kind,creator.name,creator.description_markdown,
 		coalesce((select array_agg(localization.content_markdown) from content_localizations localization where localization.subject_type='creator' and localization.subject_id=creator.id),'{}'::text[]),
-		creator.review_status,coalesce(creator.created_by,0),coalesce(creator.claimed_by,0),creator.updated_at
+		creator.review_status,coalesce(creator.created_by,0),coalesce((select claim.user_id from creator_claims claim where claim.creator_id=creator.id and claim.status='approved' limit 1),0),creator.updated_at
 		from creators creator where ($1 or creator.id=any($2::bigint[]))`, all, selectedIDs)
 	if err != nil {
 		return nil, err
@@ -452,7 +452,7 @@ func (worker *Worker) loadCreatorDocuments(ctx context.Context, ids []int64) ([]
 		}
 		documents = append(documents, map[string]any{"id": documentKey("creator", id), "internal_id": id,
 			"kind": kind, "name": name, "text": compactStrings(append([]string{description}, localized...)),
-			"review_status": reviewStatus, "created_by": createdBy, "claimed_by": claimedBy, "updated_at": updated.Unix()})
+			"review_status": reviewStatus, "created_by": createdBy, "claimed_user_id": claimedBy, "updated_at": updated.Unix()})
 	}
 	return documents, rows.Err()
 }

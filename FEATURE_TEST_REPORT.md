@@ -1,5 +1,7 @@
 # 治理、站务、爬虫与自动更新测试报告
 
+> 本文件保留上一轮 generation 82 功能交付时的实际测试结果。当前权威开发 Schema 已升级为 generation 83；认证与项目权限回归见 `PROJECT_PERMISSION_TEST_REPORT.md`，不要把下述 generation 82 记录当作当前部署指引。
+
 ## 环境
 
 - 最后更新：2026-08-18；

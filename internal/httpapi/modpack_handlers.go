@@ -83,8 +83,8 @@ type modpackResponse struct {
 	SearchKeywords       []string                        `json:"searchKeywords"`
 	SubmissionMethod     string                          `json:"submissionMethod"`
 	ReviewStatus         string                          `json:"reviewStatus"`
-	CreatedByInternal    *int64                          `json:"-"`
-	CreatedBy            string                          `json:"createdBy,omitempty"`
+	SubmittedByInternal  *int64                          `json:"-"`
+	SubmittedBy          string                          `json:"submittedBy,omitempty"`
 	PublishedRevisionID  *string                         `json:"publishedRevisionId,omitempty"`
 	SubmissionRevisionID string                          `json:"submissionRevisionId,omitempty"`
 	ChangeRequestID      string                          `json:"changeRequestId,omitempty"`
@@ -107,13 +107,14 @@ type modpackListResponse struct {
 
 var allowedModpackCategories = stringSet("technology", "magic", "adventure", "building", "map", "quests", "optimization", "hardcore", "casual", "large", "lightweight", "story", "kitchen_sink", "skyblock", "pvp", "chinese")
 
-const publicModpackCatalogFilter = `where (pack.review_status='approved' or pack.created_by=$1)
+const publicModpackCatalogFilter = `where (pack.review_status='approved' or pack.submitted_by=$1)
 	and (($3 and pack.id=any($4::bigint[])) or (not $3 and ($2='' or pack.slug ilike '%%'||$2||'%%'
 		or pack.public_id ilike '%%'||$2||'%%' or pack.primary_name ilike '%%'||$2||'%%'
 		or pack.secondary_name ilike '%%'||$2||'%%' or pack.summary ilike '%%'||$2||'%%'
 		or $2=any(pack.search_keywords)
 		or exists(select 1 from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
-			where binding.subject_type='modpack' and binding.subject_id=pack.id and creator.name ilike '%%'||$2||'%%'))))
+			where binding.subject_type='modpack' and binding.subject_id=pack.id and binding.status='approved'
+			  and creator.name ilike '%%'||$2||'%%'))))
 	and (cardinality($5::text[])=0 or (
 		$9='all' and not exists(select 1 from unnest($5::text[]) requested(value) where not exists(
 			select 1 from modpack_loader_compatibilities compatibility where compatibility.modpack_id=pack.id and compatibility.minecraft_version=requested.value))
@@ -216,9 +217,9 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 		pack.abbreviation,pack.summary,pack.default_locale,pack.environment,pack.primary_category,pack.pack_type,
 		pack.packaging_method,pack.official_status,
 		pack.source_status,pack.license,pack.curseforge_project_id,pack.modrinth_project_id,pack.icon_url,
-		pack.body_markdown,pack.search_keywords,pack.submission_method,pack.review_status,pack.created_by,
+		pack.body_markdown,pack.search_keywords,pack.submission_method,pack.review_status,pack.submitted_by,
 		coalesce(account.public_id,''),revision.public_id,pack.created_at,pack.updated_at,pack.published_at
-		from modpacks pack left join users account on account.id=pack.created_by
+		from modpacks pack left join users account on account.id=pack.submitted_by
 		left join content_revisions revision on revision.id=pack.published_revision_id
 		left join public_routes popularity_route on popularity_route.entity_type='modpack' and popularity_route.internal_id=pack.id
 		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
@@ -372,7 +373,7 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 	var modpackID int64
 	err = tx.QueryRow(r.Context(), `insert into modpacks(public_id,slug,primary_name,secondary_name,abbreviation,summary,
 		default_locale,environment,primary_category,pack_type,packaging_method,official_status,source_status,license,curseforge_project_id,
-		modrinth_project_id,icon_url,body_markdown,search_keywords,submission_method,review_status,created_by,published_at)
+		modrinth_project_id,icon_url,body_markdown,search_keywords,submission_method,review_status,submitted_by,published_at)
 		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
 		case when $21='approved' then now() else null end) returning id`, publicID, snapshot.SiteID, snapshot.PrimaryName,
 		snapshot.SecondaryName, snapshot.Abbreviation, snapshot.Summary, snapshot.DefaultLocale, snapshot.Environment,
@@ -387,7 +388,9 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err = replaceModpackAssociationsTx(r.Context(), tx, modpackID, 0, claims.Subject, snapshot); err != nil {
+	canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
+	if err = replaceModpackAssociationsTx(r.Context(), tx, modpackID, 0, claims.Subject,
+		reviewStatus == "approved", canManageAuthors, canManageTeams, snapshot); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save modpack relations")
 		return
 	}
@@ -406,7 +409,8 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if reviewStatus == "approved" {
-		if err = applyModpackSnapshotTx(r.Context(), tx, modpackID, created.RevisionID, claims.Subject, snapshot); err == nil {
+		if err = applyModpackSnapshotTx(r.Context(), tx, modpackID, created.RevisionID, claims.Subject,
+			canManageAuthors, canManageTeams, snapshot); err == nil {
 			err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic approval", r)
 		}
 		if err != nil {
@@ -414,23 +418,17 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	defaults := s.permissionDefaultsFromSettings(r.Context())
-	if defaults.DeveloperRole != "" {
-		if err = s.bindProjectRoleTx(r.Context(), tx, claims.Subject, defaults.DeveloperRole, publicID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to assign modpack owner permissions")
-			return
-		}
-	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit modpack")
 		return
 	}
+	_ = s.refreshProjectACLVersion(r.Context())
 	item, err := s.modpackBySiteID(r.Context(), snapshot.SiteID, claims.Subject, true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read created modpack")
 		return
 	}
-	item.CanEdit = true
+	item.CanEdit = canEditModpack(claims, item)
 	item.SubmissionRevisionID = created.RevisionPublicID
 	item.ChangeRequestID = created.ChangeRequestPublicID
 	writeJSON(w, http.StatusCreated, item)
@@ -508,7 +506,9 @@ func (s *Server) createModpackRevision(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 	if status == "approved" {
-		if err = applyModpackSnapshotTx(r.Context(), tx, current.ID, created.RevisionID, claims.Subject, request.Snapshot); err == nil {
+		canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
+		if err = applyModpackSnapshotTx(r.Context(), tx, current.ID, created.RevisionID, claims.Subject,
+			canManageAuthors, canManageTeams, request.Snapshot); err == nil {
 			err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic approval", r)
 		}
 	}
@@ -516,6 +516,7 @@ func (s *Server) createModpackRevision(w http.ResponseWriter, r *http.Request, s
 		writeError(w, http.StatusInternalServerError, "failed to save modpack revision")
 		return
 	}
+	_ = s.refreshProjectACLVersion(r.Context())
 	writeJSON(w, http.StatusCreated, map[string]any{"id": created.RevisionPublicID, "status": status, "siteId": request.Snapshot.SiteID, "changeRequestId": created.ChangeRequestPublicID})
 }
 
@@ -666,7 +667,8 @@ func (s *Server) prepareImportedModpackAssets(ctx context.Context, snapshot *cre
 	return nil
 }
 
-func applyModpackSnapshotTx(ctx context.Context, tx pgx.Tx, modpackID, revisionID, actorID int64, snapshot createModpackRequest) error {
+func applyModpackSnapshotTx(ctx context.Context, tx pgx.Tx, modpackID, revisionID, actorID int64,
+	canManageAuthors, canManageTeams bool, snapshot createModpackRequest) error {
 	if _, err := tx.Exec(ctx, `update modpacks set slug=$2,primary_name=$3,secondary_name=$4,abbreviation=$5,
 		summary=$6,default_locale=$7,environment=$8,primary_category=$9,pack_type=$10,packaging_method=$11,
 		official_status=$12,source_status=$13,license=$14,curseforge_project_id=$15,modrinth_project_id=$16,
@@ -679,16 +681,17 @@ func applyModpackSnapshotTx(ctx context.Context, tx pgx.Tx, modpackID, revisionI
 		snapshot.SearchKeywords, snapshot.SubmissionMethod, revisionID); err != nil {
 		return err
 	}
-	return replaceModpackAssociationsTx(ctx, tx, modpackID, revisionID, actorID, snapshot)
+	return replaceModpackAssociationsTx(ctx, tx, modpackID, revisionID, actorID, true,
+		canManageAuthors, canManageTeams, snapshot)
 }
 
-func replaceModpackAssociationsTx(ctx context.Context, tx pgx.Tx, modpackID, revisionID, actorID int64, snapshot createModpackRequest) error {
+func replaceModpackAssociationsTx(ctx context.Context, tx pgx.Tx, modpackID, revisionID, actorID int64,
+	projectApproved, canManageAuthors, canManageTeams bool, snapshot createModpackRequest) error {
 	for _, query := range []string{
 		`delete from modpack_loader_compatibilities where modpack_id=$1`,
 		`delete from modpack_tags where modpack_id=$1`,
 		`delete from modpack_links where modpack_id=$1`,
 		`delete from modpack_mods where modpack_id=$1`,
-		`delete from content_creator_bindings where subject_type='modpack' and subject_id=$1`,
 	} {
 		if _, err := tx.Exec(ctx, query, modpackID); err != nil {
 			return err
@@ -711,19 +714,9 @@ func replaceModpackAssociationsTx(ctx context.Context, tx pgx.Tx, modpackID, rev
 			return err
 		}
 	}
-	for index, author := range snapshot.Authors {
-		creatorID, name, role, err := resolveProjectAuthorForCreateTx(ctx, tx, author, actorID, nil)
-		if err != nil {
-			return err
-		}
-		roleID, err := creatorRoleInternalIDTx(ctx, tx, author.RoleID)
-		if err != nil {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `insert into content_creator_bindings(subject_type,subject_id,creator_id,role_id,name_snapshot,role_snapshot,display_order)
-			values('modpack',$1,$2,$3,$4,$5,$6)`, modpackID, creatorID, roleID, name, role, index); err != nil {
-			return err
-		}
+	if err := syncProjectCreatorBindingsTx(ctx, tx, "modpack", modpackID, snapshot.Authors, actorID,
+		projectApproved, canManageAuthors, canManageTeams, nil); err != nil {
+		return err
 	}
 	for index, item := range snapshot.Mods {
 		var modID *int64
@@ -785,7 +778,7 @@ func scanModpack(row scanner) (modpackResponse, error) {
 		&item.Abbreviation, &item.Summary, &item.DefaultLocale, &item.Environment, &item.PrimaryCategory,
 		&item.PackType, &item.PackagingMethod, &item.OfficialStatus, &item.SourceStatus, &item.License, &item.CurseForgeProjectID, &item.ModrinthProjectID,
 		&item.IconURL, &item.BodyMarkdown, &item.SearchKeywords, &item.SubmissionMethod, &item.ReviewStatus,
-		&item.CreatedByInternal, &item.CreatedBy, &item.PublishedRevisionID, &item.CreatedAt, &item.UpdatedAt, &item.PublishedAt)
+		&item.SubmittedByInternal, &item.SubmittedBy, &item.PublishedRevisionID, &item.CreatedAt, &item.UpdatedAt, &item.PublishedAt)
 	item.Compatibilities = []modLoaderCompatibilityPayload{}
 	item.Tags = []string{}
 	item.Authors = []modAuthorPayload{}
@@ -800,11 +793,11 @@ func (s *Server) modpackBySiteID(ctx context.Context, siteID string, viewerID in
 		pack.abbreviation,pack.summary,pack.default_locale,pack.environment,pack.primary_category,pack.pack_type,
 		pack.packaging_method,pack.official_status,
 		pack.source_status,pack.license,pack.curseforge_project_id,pack.modrinth_project_id,pack.icon_url,
-		pack.body_markdown,pack.search_keywords,pack.submission_method,pack.review_status,pack.created_by,
+		pack.body_markdown,pack.search_keywords,pack.submission_method,pack.review_status,pack.submitted_by,
 		coalesce(account.public_id,''),revision.public_id,pack.created_at,pack.updated_at,pack.published_at
-		from modpacks pack left join users account on account.id=pack.created_by
+		from modpacks pack left join users account on account.id=pack.submitted_by
 		left join content_revisions revision on revision.id=pack.published_revision_id
-		where pack.slug=$1 and ($2 or pack.review_status='approved' or pack.created_by=$3)`, siteID, editor, viewerID)
+		where pack.slug=$1 and ($2 or pack.review_status='approved' or pack.submitted_by=$3)`, siteID, editor, viewerID)
 	item, err := scanModpack(row)
 	if err != nil {
 		return item, err
@@ -874,10 +867,12 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 		'creatorId',member.public_id,'kind',member.kind,'name',member.name,'avatarUrl',member.avatar_url,
 		'roleId',member_role.public_id,'role',member_role.name,'title',membership.title) order by membership.display_order,membership.created_at)
 		from creator_team_members membership join creators member on member.id=membership.member_creator_id
-		join creator_role_definitions member_role on member_role.id=membership.role_id where membership.team_id=creator.id),'[]'::jsonb)
+		join creator_role_definitions member_role on member_role.id=membership.role_id
+		where membership.team_id=creator.id and membership.status='approved'),'[]'::jsonb)
 		from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
 		left join creator_role_definitions role on role.id=binding.role_id
-		where binding.subject_type='modpack' and binding.subject_id=any($1) order by binding.subject_id,binding.display_order,binding.id`, ids)
+		where binding.subject_type='modpack' and binding.subject_id=any($1) and binding.status='approved'
+		order by binding.subject_id,binding.display_order,binding.id`, ids)
 	if err != nil {
 		return err
 	}
@@ -938,8 +933,7 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 }
 
 func canEditModpack(claims security.Claims, item modpackResponse) bool {
-	return claims.Subject > 0 && (item.CreatedByInternal != nil && *item.CreatedByInternal == claims.Subject ||
-		claimsAllow(claims, "project.edit."+item.PublicID) || claimsAllow(claims, "admin.*"))
+	return claims.Subject > 0 && (claimsAllow(claims, "project.edit."+item.PublicID) || claimsAllow(claims, "admin.*"))
 }
 
 func availableModpackSiteID(ctx context.Context, query databaseQuery, name string) (string, error) {
@@ -1020,7 +1014,7 @@ func (s *Server) modpackGalleryImage(w http.ResponseWriter, r *http.Request) {
 	err := s.db.QueryRow(r.Context(), `select file.object_key,file.content_type from modpack_gallery_images gallery
 		join modpacks pack on pack.id=gallery.modpack_id and pack.slug=$1
 		join oss_files file on file.id=gallery.oss_file_id and file.status='active'
-		where gallery.public_id=$2 and (pack.review_status='approved' or pack.created_by=$3)`, normalizeModSiteID(r.PathValue("siteId")), strings.ToLower(r.PathValue("publicId")), currentClaims(r).Subject).Scan(&objectKey, &contentType)
+		where gallery.public_id=$2 and (pack.review_status='approved' or pack.submitted_by=$3)`, normalizeModSiteID(r.PathValue("siteId")), strings.ToLower(r.PathValue("publicId")), currentClaims(r).Subject).Scan(&objectKey, &contentType)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "modpack gallery image not found")
 		return

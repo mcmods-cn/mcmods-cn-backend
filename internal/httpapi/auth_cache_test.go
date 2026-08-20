@@ -20,8 +20,11 @@ func TestSessionCacheKeyUsesFingerprintNotToken(t *testing.T) {
 }
 
 func TestRBACCacheKeyIsVersionScoped(t *testing.T) {
-	first := rbacCacheKey(3, 8, 11)
-	if first == rbacCacheKey(4, 8, 11) || first == rbacCacheKey(3, 8, 12) {
+	first := rbacCacheKey(3, 5, 8, 11)
+	if first != "authz:v3:acl5:user:8:p11" {
+		t.Fatalf("unexpected RBAC cache key %q", first)
+	}
+	if first == rbacCacheKey(4, 5, 8, 11) || first == rbacCacheKey(3, 6, 8, 11) || first == rbacCacheKey(3, 5, 8, 12) {
 		t.Fatal("RBAC key did not change with version")
 	}
 }

@@ -1979,13 +1979,12 @@ func (s *Server) resolveUserOSSUploadCategory(r *http.Request, category, source 
 		}
 		kind, publicID := normalizeObjectSegment(parts[0]), normalizeObjectSegment(parts[1])
 		var storedKind string
-		var createdBy, claimedBy *int64
-		if s.db.QueryRow(r.Context(), `select kind,created_by,claimed_by from creators where public_id=$1 and status='active'`, publicID).
-			Scan(&storedKind, &createdBy, &claimedBy) != nil {
+		if s.db.QueryRow(r.Context(), `select kind from creators where public_id=$1 and review_status='approved'`, publicID).
+			Scan(&storedKind) != nil {
 			return "", errors.New("作者或团队不存在")
 		}
 		canEdit := claimsAllow(claims, "admin.*") || claimsAllow(claims, "creator.edit") ||
-			(createdBy != nil && *createdBy == claims.Subject) || (claimedBy != nil && *claimedBy == claims.Subject)
+			claimsAllow(claims, "creator.edit."+publicID)
 		if !canEdit || kind != normalizeObjectSegment(storedKind) {
 			return "", errors.New("没有权限向该作者或团队目录上传文件")
 		}

@@ -63,43 +63,45 @@ type commentWatchState struct {
 }
 
 type commentResponse struct {
-	ID               string                 `json:"id"`
-	FloorNumber      *int64                 `json:"floorNumber"`
-	ParentID         string                 `json:"parentId,omitempty"`
-	RootID           string                 `json:"rootId,omitempty"`
-	Depth            int                    `json:"depth"`
-	Body             string                 `json:"body"`
-	Deleted          bool                   `json:"deleted"`
-	Author           commentAuthor          `json:"author"`
-	Parent           *commentParentPreview  `json:"parent,omitempty"`
-	Reactions        map[string]int         `json:"reactions"`
-	UserReactions    []string               `json:"userReactions"`
-	ChildCount       int                    `json:"childCount"`
-	DescendantCount  int                    `json:"descendantCount"`
-	HeatScore        float64                `json:"heatScore"`
-	HasMoreReplies   bool                   `json:"hasMoreReplies"`
-	CurrentUserWatch *commentWatchState     `json:"currentUserWatch,omitempty"`
-	Pinned           bool                   `json:"pinned"`
-	PinnedAt         *time.Time             `json:"pinnedAt,omitempty"`
-	CanEdit          bool                   `json:"canEdit"`
-	CanDelete        bool                   `json:"canDelete"`
-	CanPin           bool                   `json:"canPin"`
-	CanReply         bool                   `json:"canReply"`
-	CanReact         bool                   `json:"canReact"`
-	CanReport        bool                   `json:"canReport"`
-	CanWatch         bool                   `json:"canWatch"`
-	CreatedAt        time.Time              `json:"createdAt"`
-	UpdatedAt        time.Time              `json:"updatedAt"`
-	LogAttachments   []commentLogAttachment `json:"logAttachments"`
+	ID               string                `json:"id"`
+	FloorNumber      *int64                `json:"floorNumber"`
+	ParentID         string                `json:"parentId,omitempty"`
+	RootID           string                `json:"rootId,omitempty"`
+	Depth            int                   `json:"depth"`
+	Body             string                `json:"body"`
+	Deleted          bool                  `json:"deleted"`
+	Author           commentAuthor         `json:"author"`
+	Parent           *commentParentPreview `json:"parent,omitempty"`
+	Reactions        map[string]int        `json:"reactions"`
+	UserReactions    []string              `json:"userReactions"`
+	ChildCount       int                   `json:"childCount"`
+	DescendantCount  int                   `json:"descendantCount"`
+	HeatScore        float64               `json:"heatScore"`
+	HasMoreReplies   bool                  `json:"hasMoreReplies"`
+	CurrentUserWatch *commentWatchState    `json:"currentUserWatch,omitempty"`
+	Pinned           bool                  `json:"pinned"`
+	PinnedAt         *time.Time            `json:"pinnedAt,omitempty"`
+	CanEdit          bool                  `json:"canEdit"`
+	CanDelete        bool                  `json:"canDelete"`
+	CanPin           bool                  `json:"canPin"`
+	CanReply         bool                  `json:"canReply"`
+	CanReact         bool                  `json:"canReact"`
+	CanReport        bool                  `json:"canReport"`
+	CanWatch         bool                  `json:"canWatch"`
+	CreatedAt        time.Time             `json:"createdAt"`
+	UpdatedAt        time.Time             `json:"updatedAt"`
+	Attachments      []commentAttachment   `json:"attachments"`
 	internalID       int64
 }
 
-type commentLogAttachment struct {
-	FileID     string `json:"fileId"`
-	FileName   string `json:"fileName"`
-	PublicCode string `json:"publicCode,omitempty"`
-	Status     string `json:"status"`
-	URL        string `json:"url,omitempty"`
+type commentAttachment struct {
+	FileID      string `json:"fileId"`
+	FileName    string `json:"fileName"`
+	ContentType string `json:"contentType"`
+	SizeBytes   int64  `json:"sizeBytes"`
+	Kind        string `json:"kind"`
+	Status      string `json:"status"`
+	URL         string `json:"url,omitempty"`
 }
 
 type createCommentRequest struct {
@@ -321,6 +323,10 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		return
 	}
 	request.AttachmentFileIDs = uniqueNonEmpty(request.AttachmentFileIDs)
+	for index := range request.AttachmentFileIDs {
+		request.AttachmentFileIDs[index] = strings.ToLower(strings.TrimSpace(request.AttachmentFileIDs[index]))
+	}
+	request.AttachmentFileIDs = uniqueNonEmpty(request.AttachmentFileIDs)
 	if len(request.AttachmentFileIDs) > 5 {
 		writeError(w, http.StatusBadRequest, "评论最多附加 5 个文件")
 		return
@@ -379,11 +385,6 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 			writeError(w, http.StatusInternalServerError, "发布评论失败")
 			return
 		}
-		for _, fileID := range request.AttachmentFileIDs {
-			if bindErr := s.bindCommentLogAttachment(r.Context(), existingID, claims.Subject, fileID); bindErr != nil {
-				log.Printf("restore idempotent comment log attachment comment_id=%d file_id=%s: %v", existingID, fileID, bindErr)
-			}
-		}
 		items, _ := s.queryCommentItems(r.Context(), []int64{existingID}, false, 0, claims)
 		if len(items) > 0 {
 			writeJSON(w, http.StatusOK, items[0])
@@ -412,6 +413,14 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 	publicID := inserted.PublicID
 	parentID := inserted.ParentID
 	directRecipientID := inserted.DirectRecipientID
+	if err = bindCommentAttachmentsTx(r.Context(), tx, commentID, claims.Subject, request.AttachmentFileIDs); err != nil {
+		if errors.Is(err, errCommentAttachmentUnavailable) {
+			writeError(w, http.StatusBadRequest, "评论附件不存在、尚未上传完成或不属于当前用户")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "绑定评论附件失败")
+		return
+	}
 
 	watchNotifications := make([]pendingWatchNotification, 0)
 	if parentID != nil {
@@ -1119,28 +1128,51 @@ func (s *Server) queryCommentItems(ctx context.Context, ids []int64, includeTree
 	if err = s.annotateCommentPermissions(ctx, items, claims); err != nil {
 		return nil, err
 	}
-	if err = s.annotateCommentLogAttachments(ctx, items); err != nil {
+	if err = s.annotateCommentAttachments(ctx, items); err != nil {
 		return nil, err
 	}
 	return items, nil
+}
+
+var errCommentAttachmentUnavailable = errors.New("comment attachment is unavailable")
+
+func bindCommentAttachmentsTx(ctx context.Context, tx pgx.Tx, commentID, userID int64, publicFileIDs []string) error {
+	if len(publicFileIDs) == 0 {
+		return nil
+	}
+	tag, err := tx.Exec(ctx, `insert into comment_attachments(comment_id,attachment_file_id)
+		select $1,file.id from oss_files file
+		where file.public_id=any($2::text[]) and file.uploader_id=$3 and file.status='active'
+		  and file.scan_status in ('pending','clean','trusted_generated')
+		on conflict(comment_id,attachment_file_id) do nothing`, commentID, publicFileIDs, userID)
+	if err != nil {
+		return err
+	}
+	if int(tag.RowsAffected()) != len(publicFileIDs) {
+		return errCommentAttachmentUnavailable
+	}
+	return nil
 }
 
 func (s *Server) bindCommentLogAttachment(ctx context.Context, commentID, userID int64, publicFileID string) error {
 	publicFileID = strings.ToLower(strings.TrimSpace(publicFileID))
 	var fileID int64
 	var fileName string
-	if err := s.db.QueryRow(ctx, `select id,coalesce(nullif(source_original_name,''),original_name)
-		from oss_files where public_id=$1 and uploader_id=$2 and status='active'`, publicFileID, userID).
+	if err := s.db.QueryRow(ctx, `select file.id,coalesce(nullif(file.source_original_name,''),file.original_name)
+		from comment_attachments attachment join oss_files file on file.id=attachment.attachment_file_id
+		where attachment.comment_id=$1 and file.public_id=$2 and file.uploader_id=$3 and file.status='active'`, commentID, publicFileID, userID).
 		Scan(&fileID, &fileName); err != nil {
 		return err
 	}
-	baseName := norm.NFC.String(filepath.Base(fileName))
-	extension := strings.ToLower(filepath.Ext(baseName))
-	if extension != ".log" && !(extension == ".zip" && strings.Contains(baseName, "错误报告")) {
+	if !isCommentLogAttachmentName(fileName) {
 		return nil
 	}
+	_, _ = s.db.Exec(ctx, `update comment_attachments set kind='log',processing_status='processing'
+		where comment_id=$1 and attachment_file_id=$2`, commentID, fileID)
 	result, err := s.createFileLogShare(ctx, userID, publicFileID, time.Now().UTC().AddDate(1, 0, 0))
 	if err != nil {
+		_, _ = s.db.Exec(ctx, `update comment_attachments set processing_status='failed'
+			where comment_id=$1 and attachment_file_id=$2`, commentID, fileID)
 		return err
 	}
 	publicCode, _ := result["publicCode"].(string)
@@ -1150,25 +1182,32 @@ func (s *Server) bindCommentLogAttachment(ctx context.Context, commentID, userID
 	_, err = s.db.Exec(ctx, `insert into comment_log_bindings(comment_id,attachment_file_id,log_share_id)
 		select $1,$2,id from log_shares where public_code=$3
 		on conflict(comment_id,attachment_file_id) do update set log_share_id=excluded.log_share_id`, commentID, fileID, publicCode)
+	if err == nil {
+		_, _ = s.db.Exec(ctx, `update comment_attachments set processing_status='ready'
+			where comment_id=$1 and attachment_file_id=$2`, commentID, fileID)
+	}
 	return err
 }
 
-func (s *Server) annotateCommentLogAttachments(ctx context.Context, items []commentResponse) error {
+func (s *Server) annotateCommentAttachments(ctx context.Context, items []commentResponse) error {
 	if len(items) == 0 {
 		return nil
 	}
 	ids := make([]int64, 0, len(items))
 	byID := make(map[int64]*commentResponse, len(items))
 	for index := range items {
-		items[index].LogAttachments = []commentLogAttachment{}
+		items[index].Attachments = []commentAttachment{}
 		ids = append(ids, items[index].internalID)
 		byID[items[index].internalID] = &items[index]
 	}
 	rows, err := s.db.Query(ctx, `select binding.comment_id,file.public_id,
-		coalesce(nullif(file.source_original_name,''),file.original_name),share.public_code,share.status,share.expires_at
-		from comment_log_bindings binding
+		coalesce(nullif(file.source_original_name,''),file.original_name),file.content_type,file.size_bytes,
+		file.status,file.scan_status,binding.kind,binding.processing_status,
+		coalesce(share.public_code,''),coalesce(share.status,''),share.expires_at
+		from comment_attachments binding
 		join oss_files file on file.id=binding.attachment_file_id
-		join log_shares share on share.id=binding.log_share_id
+		left join comment_log_bindings log_binding on log_binding.comment_id=binding.comment_id and log_binding.attachment_file_id=binding.attachment_file_id
+		left join log_shares share on share.id=log_binding.log_share_id
 		where binding.comment_id=any($1::bigint[]) order by binding.created_at,binding.attachment_file_id`, ids)
 	if err != nil {
 		return err
@@ -1176,21 +1215,84 @@ func (s *Server) annotateCommentLogAttachments(ctx context.Context, items []comm
 	defer rows.Close()
 	for rows.Next() {
 		var commentID int64
-		var attachment commentLogAttachment
-		var expiresAt time.Time
-		if err = rows.Scan(&commentID, &attachment.FileID, &attachment.FileName, &attachment.PublicCode, &attachment.Status, &expiresAt); err != nil {
+		var attachment commentAttachment
+		var fileStatus, scanStatus, attachmentKind, processingStatus, publicCode, shareStatus string
+		var expiresAt *time.Time
+		if err = rows.Scan(&commentID, &attachment.FileID, &attachment.FileName, &attachment.ContentType,
+			&attachment.SizeBytes, &fileStatus, &scanStatus, &attachmentKind, &processingStatus,
+			&publicCode, &shareStatus, &expiresAt); err != nil {
 			return err
 		}
-		if attachment.Status == "ready" && expiresAt.After(time.Now()) {
-			attachment.URL = "/log/s/" + attachment.PublicCode
+		item := byID[commentID]
+		if item == nil {
+			continue
+		}
+		if attachmentKind == "log" || isCommentLogAttachmentName(attachment.FileName) {
+			attachment.Kind = "log"
+			attachment.Status = defaultString(shareStatus, processingStatus)
+			if shareStatus == "ready" && expiresAt != nil && expiresAt.After(time.Now()) {
+				attachment.URL = "/log/s/" + publicCode
+			} else if shareStatus == "ready" {
+				attachment.Status = "expired"
+			}
 		} else {
-			attachment.PublicCode = ""
+			attachment.Kind = "file"
+			switch {
+			case fileStatus != "active":
+				attachment.Status = "unavailable"
+			case scanStatus == "clean" || scanStatus == "trusted_generated":
+				attachment.Status = "ready"
+				attachment.URL = "/api/v1/comments/" + item.ID + "/attachments/" + attachment.FileID + "/download"
+			default:
+				attachment.Status = "scanning"
+			}
 		}
-		if item := byID[commentID]; item != nil {
-			item.LogAttachments = append(item.LogAttachments, attachment)
-		}
+		item.Attachments = append(item.Attachments, attachment)
 	}
 	return rows.Err()
+}
+
+func isCommentLogAttachmentName(fileName string) bool {
+	baseName := norm.NFC.String(filepath.Base(strings.TrimSpace(fileName)))
+	extension := strings.ToLower(filepath.Ext(baseName))
+	return extension == ".log" || extension == ".zip" && strings.Contains(baseName, "错误报告")
+}
+
+func (s *Server) downloadCommentAttachment(w http.ResponseWriter, r *http.Request) {
+	commentPublicID := strings.ToLower(strings.TrimSpace(r.PathValue("commentId")))
+	filePublicID := strings.ToLower(strings.TrimSpace(r.PathValue("fileId")))
+	if commentPublicID == "" || filePublicID == "" {
+		writeError(w, http.StatusBadRequest, "评论附件地址不正确")
+		return
+	}
+	var commentID, targetID int64
+	var targetType string
+	var targetVersionID *int64
+	if err := s.db.QueryRow(r.Context(), `select id,target_type,target_id,target_version_id from comments where public_id=$1 and status='published'`, commentPublicID).
+		Scan(&commentID, &targetType, &targetID, &targetVersionID); err != nil {
+		writeError(w, http.StatusNotFound, "评论附件不存在")
+		return
+	}
+	if _, err := s.resolveCommentTargetByInternal(r.Context(), targetType, targetID, targetVersionID, currentClaims(r)); err != nil {
+		writeError(w, http.StatusNotFound, "评论附件不存在")
+		return
+	}
+	items, err := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, currentClaims(r))
+	if err != nil || len(items) != 1 || items[0].Deleted {
+		writeError(w, http.StatusNotFound, "评论附件不存在")
+		return
+	}
+	var objectKey, fileName string
+	err = s.db.QueryRow(r.Context(), `select file.object_key,coalesce(nullif(file.source_original_name,''),file.original_name)
+		from comment_attachments attachment
+		join oss_files file on file.id=attachment.attachment_file_id
+		where attachment.comment_id=$1 and file.public_id=$2 and file.status='active'
+		  and file.scan_status in ('clean','trusted_generated')`, commentID, filePublicID).Scan(&objectKey, &fileName)
+	if err != nil || isCommentLogAttachmentName(fileName) {
+		writeError(w, http.StatusNotFound, "评论附件不存在或仍在安全扫描中")
+		return
+	}
+	s.redirectOSSObjectAccess(w, r, objectKey, ossObjectAccessOptions{ContentDisposition: downloadContentDisposition(fileName)})
 }
 
 func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, ids []int64, includeTree bool, maxDepth int, viewerID int64) ([]commentResponse, error) {
@@ -1406,8 +1508,8 @@ func commentProjectRoleFromPermissions(permissions []security.PermissionRule, pr
 		}
 		identityPermissions = append(identityPermissions, permission)
 	}
-	if permissionRulesAllow(identityPermissions, "project.comment.role.owner."+projectID) {
-		return "owner"
+	if permissionRulesAllow(identityPermissions, "project.comment.role.developer."+projectID) {
+		return "developer"
 	}
 	if permissionRulesAllow(identityPermissions, "project.comment.role.editor."+projectID) {
 		return "editor"
@@ -1425,13 +1527,13 @@ func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey
 	case "mod":
 		err := s.db.QueryRow(ctx, `select mod.id,mod.primary_name,route.canonical_path
 			from mods mod join public_routes route on route.public_id=mod.project_code and route.entity_type='mod'
-			where mod.project_code=$1 and (mod.review_status='approved' or mod.created_by=$2 or $3)`,
+			where mod.project_code=$1 and (mod.review_status='approved' or mod.submitted_by=$2 or $3)`,
 			targetKey, viewerID, moderator).Scan(&info.InternalID, &info.Title, &info.URL)
 		return info, err
 	case "modpack":
 		err := s.db.QueryRow(ctx, `select pack.id,pack.primary_name,route.canonical_path
 			from modpacks pack join public_routes route on route.public_id=pack.public_id and route.entity_type='modpack'
-			where pack.public_id=$1 and (pack.review_status='approved' or pack.created_by=$2 or $3)`,
+			where pack.public_id=$1 and (pack.review_status='approved' or pack.submitted_by=$2 or $3)`,
 			targetKey, viewerID, moderator).Scan(&info.InternalID, &info.Title, &info.URL)
 		return info, err
 	case "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
@@ -1439,7 +1541,7 @@ func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey
 			from simple_projects project join public_routes route
 				on route.public_id=project.public_id and route.entity_type=project.project_type
 			where project.public_id=$1 and project.project_type=$2
-			  and (project.review_status='approved' or project.created_by=$3 or $4)`,
+			  and (project.review_status='approved' or project.submitted_by=$3 or $4)`,
 			targetKey, targetType, viewerID, moderator).Scan(&info.InternalID, &info.Title, &info.URL)
 		return info, err
 	case "blueprint":
@@ -1460,7 +1562,7 @@ func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey
 		err := s.db.QueryRow(ctx, `select creator.id,creator.name,
 			case when creator.kind='team' then '/teams/' else '/authors/' end||creator.public_id
 			from creators creator where creator.public_id=$1
-			  and (creator.review_status='approved' or creator.created_by=$2 or creator.claimed_by=$2 or $3)`,
+			  and (creator.review_status='approved' or creator.created_by=$2 or $3)`,
 			targetKey, viewerID, moderator).Scan(&info.InternalID, &info.Title, &info.URL)
 		return info, err
 	case "community_post":
@@ -1516,7 +1618,7 @@ func (s *Server) resolveCommentTarget(ctx context.Context, targetType, targetKey
 			join mod_content_versions version on version.mod_id=mod.id and version.public_id=$2
 			join mod_resource_version_details detail on detail.resource_id=resource.entity_id and detail.version_id=version.id
 			where entity.public_id=$1 and entity.status='active' and detail.status='active'
-			  and version.status='active' and (mod.review_status='approved' or mod.created_by=$3 or $4)`,
+			  and version.status='active' and (mod.review_status='approved' or mod.submitted_by=$3 or $4)`,
 			parts[0], parts[1], viewerID, moderator).Scan(
 			&info.InternalID, &versionInternalID, &siteID, &resourcePublicID, &versionPublicID, &canonicalID, &versionLabel, &localizedName,
 		)

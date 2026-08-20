@@ -175,12 +175,12 @@ func TestModContentVersionArchiveAndResourceRevivalIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var modID, otherModID int64
-	if err = tx.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,review_status,created_by)
+	if err = tx.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,review_status,submitted_by)
 		values($1,$2,'Lifecycle mod','approved',$3) returning id`,
 		randomCatalogPublicID(), fmt.Sprintf("lifecycle-mod-%06d", suffix), actorID).Scan(&modID); err != nil {
 		t.Fatal(err)
 	}
-	if err = tx.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,review_status,created_by)
+	if err = tx.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,review_status,submitted_by)
 		values($1,$2,'Other lifecycle mod','approved',$3) returning id`,
 		randomCatalogPublicID(), fmt.Sprintf("lifecycle-other-%06d", suffix), actorID).Scan(&otherModID); err != nil {
 		t.Fatal(err)

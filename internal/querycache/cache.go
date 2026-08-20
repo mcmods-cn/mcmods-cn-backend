@@ -101,6 +101,10 @@ type Cache struct {
 	latencyIndex int
 }
 
+func UserPermissionVersionKey(userID int64) string {
+	return "authz:user-version:" + strconv.FormatInt(userID, 10)
+}
+
 func New(cfg config.RedisConfig) *Cache {
 	basePrefix := strings.Trim(strings.TrimSpace(cfg.Prefix), ":")
 	if basePrefix == "" {
@@ -464,6 +468,74 @@ func (c *Cache) GetOrLoadTTL(ctx context.Context, key string, ttl time.Duration,
 		return nil, err
 	}
 	return loaded.([]byte), nil
+}
+
+// GetSharedOrLoadTTL reads a small cross-instance coordination value without
+// consulting the process-local cache. It is intended for authorization
+// version pointers: a role grant written by one API instance must not be
+// hidden by another instance's stale local entry. When Redis is disabled or
+// unavailable the authoritative loader is used, so authorization fails closed
+// to PostgreSQL rather than accepting an unverified cached version.
+func (c *Cache) GetSharedOrLoadTTL(ctx context.Context, key string, ttl time.Duration, loader func(context.Context) ([]byte, error)) ([]byte, error) {
+	if c == nil {
+		return loader(ctx)
+	}
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
+	if redisKey, valid := c.redisKey(key); c.redis != nil && valid {
+		started := time.Now()
+		value, redisErr := c.redis.Get(ctx, redisKey).Bytes()
+		c.recordRedisResult(started, redisErr)
+		if redisErr == nil {
+			c.metrics.redisHits.Add(1)
+			c.metrics.hits.Add(1)
+			return value, nil
+		}
+		if errors.Is(redisErr, redis.Nil) {
+			c.metrics.redisMisses.Add(1)
+		} else {
+			c.metrics.localFallbacks.Add(1)
+		}
+	}
+	c.metrics.misses.Add(1)
+	loaded, err, _ := c.group.Do("shared:"+key, func() (any, error) {
+		c.metrics.postgresLoads.Add(1)
+		value, loadErr := loader(ctx)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		if redisKey, valid := c.redisKey(key); c.redis != nil && valid {
+			started := time.Now()
+			setErr := c.redis.Set(context.Background(), redisKey, value, ttl).Err()
+			c.recordRedisResult(started, setErr)
+		}
+		return value, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return loaded.([]byte), nil
+}
+
+// SetShared updates Redis without creating a process-local copy. Readers of
+// version pointers deliberately bypass local state so every instance observes
+// the shared value on its next request.
+func (c *Cache) SetShared(ctx context.Context, key string, value []byte, ttl time.Duration) bool {
+	if c == nil || c.redis == nil {
+		return false
+	}
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
+	redisKey, valid := c.redisKey(key)
+	if !valid {
+		return false
+	}
+	started := time.Now()
+	err := c.redis.Set(ctx, redisKey, value, ttl).Err()
+	c.recordRedisResult(started, err)
+	return err == nil
 }
 
 func (c *Cache) Get(ctx context.Context, key string) ([]byte, bool) {

@@ -251,16 +251,6 @@ func TestChangedSnapshotFieldsIncludesStructuredContent(t *testing.T) {
 	}
 }
 
-func TestConcreteProjectRole(t *testing.T) {
-	role, ok := concreteProjectRole("project_editor.[ProjectID]", "a2bc3de")
-	if !ok || role != "project_editor.a2bc3de" {
-		t.Fatalf("concreteProjectRole() = %q, %v", role, ok)
-	}
-	if _, ok = concreteProjectRole("system_admin", "a2bc3de"); ok {
-		t.Fatal("non-variable permission group was accepted as a project role")
-	}
-}
-
 func TestNewModUniqueID(t *testing.T) {
 	uniqueID, err := newModUniqueID()
 	if err != nil {

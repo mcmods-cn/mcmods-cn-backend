@@ -55,6 +55,32 @@ func (s *Server) userShowcase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load user projects")
 		return
 	}
+	claimedAuthors, err := s.loadUserClaimedAuthors(r.Context(), identity.InternalID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load claimed authors")
+		return
+	}
+	developerProjects := make([]userShowcaseItem, 0, len(projects))
+	editorProjects := make([]userShowcaseItem, 0, len(projects))
+	for _, project := range projects {
+		isDeveloper := false
+		isEditor := false
+		for _, role := range project.Roles {
+			switch role {
+			case "developer":
+				isDeveloper = true
+			case "editor":
+				isEditor = true
+			}
+		}
+		if isDeveloper {
+			project.Roles = []string{"developer"}
+			developerProjects = append(developerProjects, project)
+		} else if isEditor {
+			project.Roles = []string{"editor"}
+			editorProjects = append(editorProjects, project)
+		}
+	}
 	uploads, err := s.loadUserShowcaseUploads(r.Context(), identity.InternalID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load user uploads")
@@ -71,11 +97,43 @@ func (s *Server) userShowcase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"projects":      projects,
-		"uploads":       uploads,
-		"posts":         posts,
-		"contributions": contributions,
+		"claimedAuthors":    claimedAuthors,
+		"developerProjects": developerProjects,
+		"editorProjects":    editorProjects,
+		"uploads":           uploads,
+		"posts":             posts,
+		"contributions":     contributions,
 	})
+}
+
+func (s *Server) loadUserClaimedAuthors(ctx context.Context, userID int64) ([]userShowcaseItem, error) {
+	rows, err := s.db.Query(ctx, `select author.public_id,author.name,author.description_markdown,
+		author.avatar_url,route.canonical_path,author.updated_at
+		from creator_claims claim
+		join creators author on author.id=claim.creator_id and author.kind='author' and author.review_status='approved'
+		join public_routes route on route.entity_type='author' and route.internal_id=author.id
+		where claim.user_id=$1 and claim.status='approved'
+		order by author.updated_at desc,author.id desc`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]userShowcaseItem, 0)
+	ossCfg := s.ossConfigFromSettings(ctx)
+	for rows.Next() {
+		var item userShowcaseItem
+		item.EntityType = "author"
+		if err = rows.Scan(&item.PublicID, &item.Name, &item.Summary, &item.IconURL, &item.Href, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		item.IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, item.IconURL)
+		if err != nil {
+			return nil, err
+		}
+		item.Roles = []string{"claimed_author"}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (s *Server) userContributions(w http.ResponseWriter, r *http.Request) {
@@ -106,25 +164,27 @@ func (s *Server) loadUserShowcaseProjects(ctx context.Context, userID int64) ([]
 		union all
 		select project.id,project.project_type,project.primary_name,project.summary,project.icon_url,project.updated_at
 		from simple_projects project where project.review_status='approved'
+		union all
+		select server.id,'minecraft_server',server.name,server.body_markdown,'',server.updated_at
+		from minecraft_servers server where server.review_status='approved'
+		union all
+		select blueprint.id,'blueprint',blueprint.title,blueprint.description_markdown,blueprint.cover_object_key,blueprint.updated_at
+		from blueprints blueprint where blueprint.status in ('ready','partial') and blueprint.review_status in ('not_required','approved')
+		union all
+		select asset.id,'skin',asset.display_name,asset.description,blob.object_key,asset.updated_at
+		from skin_assets asset join skin_texture_blobs blob on blob.hash=asset.blob_hash
+		where asset.status='active' and asset.visibility='public' and asset.review_status='approved'
+		union all
+		select post.id,'community_post',post.title,post.body_markdown,'',post.updated_at
+		from community_posts post where post.status='active' and post.review_status='approved'
 	), qualified as (
 		select project.*,
-			exists(
-				select 1 from content_creator_bindings binding
-				join creators creator on creator.id=binding.creator_id
-				where binding.subject_type=project.entity_type and binding.subject_id=project.id
-				  and creator.review_status='approved' and creator.claimed_by=$1
-			) or exists(
-				select 1 from content_creator_bindings binding
-				join creator_team_members membership on membership.team_id=binding.creator_id
-				join creators member on member.id=membership.member_creator_id
-				where binding.subject_type=project.entity_type and binding.subject_id=project.id
-				  and member.review_status='approved' and member.claimed_by=$1
-			) is_developer,
-			exists(
-				select 1 from change_requests request
-				where request.entity_type=project.entity_type and request.entity_id=project.id
-				  and request.submitted_by=$1 and request.status='approved'
-			) is_editor
+			exists(select 1 from effective_project_access access
+				where access.user_id=$1 and access.project_type=project.entity_type and access.project_id=project.id
+				  and access.access_level='developer') is_developer,
+			exists(select 1 from effective_project_access access
+				where access.user_id=$1 and access.project_type=project.entity_type and access.project_id=project.id
+				  and access.access_level='editor') is_editor
 		from projects project
 	)
 	select qualified.entity_type,route.public_id,qualified.name,qualified.summary,qualified.icon_url,

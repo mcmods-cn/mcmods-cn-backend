@@ -71,6 +71,7 @@ func baselineSchemaStatements() []string {
 			preferred_content_language text not null default 'zh-CN',
 			preferred_ui_language text not null default 'en-US',
 			auth_version bigint not null default 1 check(auth_version > 0),
+			permission_version bigint not null default 1 check(permission_version > 0),
 			security_score integer not null default 100,
 			registration_ip text not null default '',
 			registration_country_code text not null default '',
@@ -157,54 +158,20 @@ func baselineSchemaStatements() []string {
 			on user_role_bindings(role_id,user_id)`,
 		`create index if not exists idx_user_permissions_permission_user
 			on user_permissions(permission_id,user_id)`,
-		`create or replace function bump_direct_user_auth_version() returns trigger as $$
+		`create or replace function bump_direct_user_permission_version() returns trigger as $$
 		begin
-			update users set auth_version=auth_version+1,updated_at=now()
+			update users set permission_version=permission_version+1,updated_at=now()
 			where id=coalesce(new.user_id,old.user_id);
 			if tg_op='DELETE' then return old; end if;
 			return new;
 		end;
 		$$ language plpgsql`,
-		`create trigger trg_user_role_bindings_auth_version
+		`create trigger trg_user_role_bindings_permission_version
 			after insert or update or delete on user_role_bindings
-			for each row execute function bump_direct_user_auth_version()`,
-		`create trigger trg_user_permissions_auth_version
+			for each row execute function bump_direct_user_permission_version()`,
+		`create trigger trg_user_permissions_permission_version
 			after insert or update or delete on user_permissions
-			for each row execute function bump_direct_user_auth_version()`,
-		`create or replace function bump_role_users_auth_version() returns trigger as $$
-		begin
-			if exists (
-				select 1 from roles
-				where id in (coalesce(new.role_id,old.role_id),coalesce(old.role_id,new.role_id))
-				  and (code like '%[%' or code like '%<%')
-			) then
-				update users set auth_version=auth_version+1,updated_at=now();
-			else
-				update users set auth_version=auth_version+1,updated_at=now()
-				where id in (
-					select binding.user_id from user_role_bindings binding
-					where binding.role_id in (coalesce(new.role_id,old.role_id),coalesce(old.role_id,new.role_id))
-				);
-			end if;
-			if tg_op='DELETE' then return old; end if;
-			return new;
-		end;
-		$$ language plpgsql`,
-		`create trigger trg_role_permissions_auth_version
-			after insert or update or delete on role_permissions
-			for each row execute function bump_role_users_auth_version()`,
-		`create or replace function bump_all_user_auth_versions() returns trigger as $$
-		begin
-			update users set auth_version=auth_version+1,updated_at=now();
-			return null;
-		end;
-		$$ language plpgsql`,
-		`create trigger trg_roles_auth_version
-			after update of code,parents,status on roles
-			for each statement execute function bump_all_user_auth_versions()`,
-		`create trigger trg_permissions_auth_version
-			after update of code on permissions
-			for each statement execute function bump_all_user_auth_versions()`,
+			for each row execute function bump_direct_user_permission_version()`,
 		`create table if not exists permission_audit_logs (
 			id bigserial primary key,
 			operator_id bigint references users(id) on delete set null,
@@ -730,7 +697,7 @@ func baselineSchemaStatements() []string {
 			search_keywords text[] not null default '{}'::text[],
 			submission_method text not null default 'manual',
 			review_status text not null default 'pending',
-			created_by bigint references users(id) on delete set null,
+			submitted_by bigint references users(id) on delete set null,
 			published_revision_id bigint,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
@@ -779,7 +746,7 @@ func baselineSchemaStatements() []string {
 		`create trigger trg_mods_remove_public_route after delete on mods
 		 for each row execute function remove_mod_public_route()`,
 		`create index if not exists idx_mods_review_updated_at on mods (review_status, updated_at desc)`,
-		`create index if not exists idx_mods_created_by_updated_at on mods (created_by, updated_at desc)`,
+		`create index if not exists idx_mods_submitted_by_updated_at on mods (submitted_by, updated_at desc)`,
 		`create index if not exists idx_mods_primary_name_lower on mods (lower(primary_name))`,
 		`create table if not exists mod_identifiers (
 			id bigserial primary key,
@@ -827,12 +794,18 @@ func baselineSchemaStatements() []string {
 		)`,
 		`create table if not exists content_creator_bindings (
 			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			subject_type text not null,
 			subject_id bigint not null,
 			creator_id bigint not null,
 			role_id bigint,
 			name_snapshot text not null default '',
 			role_snapshot text not null default '',
+			status text not null default 'pending'
+				check(status in ('pending','approved','rejected','revoked')),
+			permission_granting boolean not null default false,
+			approved_by bigint references users(id) on delete set null,
+			approved_at timestamptz,
 			display_order integer not null default 0,
 			created_at timestamptz not null default now(),
 			foreign key(subject_type,subject_id) references public_routes(entity_type,internal_id) on delete cascade
@@ -908,54 +881,58 @@ func baselineSchemaStatements() []string {
 			primary key (mod_id, loader, minecraft_version)
 		)`,
 		`create index if not exists idx_mod_loader_compatibilities_lookup on mod_loader_compatibilities (loader, minecraft_version, mod_id)`,
-		`create table if not exists mod_membership_applications (
+		`create table if not exists project_editor_applications (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
-			mod_id bigint not null references mods(id) on delete cascade,
+			target_route_id bigint not null references public_routes(id) on delete cascade,
 			user_id bigint not null references users(id) on delete cascade,
-			kind text not null,
-			proof text not null,
+			proof_markdown text not null,
 			status text not null default 'pending',
 			reviewed_by bigint references users(id) on delete set null,
 			review_note text not null default '',
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
 			reviewed_at timestamptz,
-			check (kind in ('editor', 'developer')),
-			check (status in ('pending', 'approved', 'rejected'))
+			check (status in ('pending', 'approved', 'rejected', 'withdrawn'))
 		)`,
-		`create unique index if not exists idx_mod_membership_applications_pending on mod_membership_applications (mod_id, user_id, kind) where status = 'pending'`,
-		`create index if not exists idx_mod_membership_applications_review on mod_membership_applications (kind, status, created_at)`,
-		`create or replace function register_mod_application_public_route() returns trigger as $$
+		`create unique index if not exists idx_project_editor_applications_pending
+			on project_editor_applications(target_route_id,user_id) where status='pending'`,
+		`create index if not exists idx_project_editor_applications_review
+			on project_editor_applications(status,created_at,id)`,
+		`create or replace function register_project_editor_application_public_route() returns trigger as $$
 		begin
 			insert into public_routes(public_id,entity_type,internal_id)
-			values(new.public_id,'mod_application',new.id);
+			values(new.public_id,'project_editor_application',new.id);
 			return new;
 		end;
 		$$ language plpgsql`,
-		`create trigger trg_mod_applications_public_route after insert on mod_membership_applications
-			for each row execute function register_mod_application_public_route()`,
-		`create or replace function remove_mod_application_public_route() returns trigger as $$
+		`create trigger trg_project_editor_applications_public_route after insert on project_editor_applications
+			for each row execute function register_project_editor_application_public_route()`,
+		`create or replace function remove_project_editor_application_public_route() returns trigger as $$
 		begin
-			delete from public_routes where public_id=old.public_id and entity_type='mod_application';
+			delete from public_routes where public_id=old.public_id and entity_type='project_editor_application';
 			return old;
 		end;
 		$$ language plpgsql`,
-		`create trigger trg_mod_applications_remove_public_route after delete on mod_membership_applications
-			for each row execute function remove_mod_application_public_route()`,
-		`create table if not exists mod_application_attachments (
-			application_id bigint not null references mod_membership_applications(id) on delete cascade,
+		`create trigger trg_project_editor_applications_remove_public_route after delete on project_editor_applications
+			for each row execute function remove_project_editor_application_public_route()`,
+		`create table if not exists project_editor_application_attachments (
+			application_id bigint not null references project_editor_applications(id) on delete cascade,
 			oss_file_id bigint not null references oss_files(id) on delete restrict,
 			primary key (application_id, oss_file_id)
 		)`,
-		`create table if not exists mod_memberships (
-			mod_id bigint not null references mods(id) on delete cascade,
+		`create table if not exists project_editor_assignments (
+			target_route_id bigint not null references public_routes(id) on delete cascade,
 			user_id bigint not null references users(id) on delete cascade,
-			role text not null,
+			application_id bigint references project_editor_applications(id) on delete set null,
 			granted_by bigint references users(id) on delete set null,
+			status text not null default 'active' check(status in ('active','revoked')),
+			revoked_by bigint references users(id) on delete set null,
+			revoked_at timestamptz,
+			revoke_reason text not null default '',
 			created_at timestamptz not null default now(),
-			primary key (mod_id, user_id, role),
-			check (role in ('editor', 'developer'))
+			updated_at timestamptz not null default now(),
+			primary key (target_route_id, user_id)
 		)`,
 		`create table if not exists catalog_import_packages (
 			id text primary key,

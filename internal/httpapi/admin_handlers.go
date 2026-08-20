@@ -248,6 +248,7 @@ func (s *Server) createPermission(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存权限节点失败")
 		return
 	}
+	_ = s.refreshRBACVersion(r.Context())
 	s.auditPermissionChange(r.Context(), currentClaims(r).Subject, nil, "upsert_permission_node", req)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
@@ -300,6 +301,7 @@ func (s *Server) createRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存权限组失败")
 		return
 	}
+	_ = s.refreshRBACVersion(r.Context())
 	role, err := s.roleByCode(r.Context(), req.Code)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取权限组失败")
@@ -367,6 +369,7 @@ func (s *Server) updateRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存权限组失败")
 		return
 	}
+	_ = s.refreshRBACVersion(r.Context())
 	role, err := s.roleByCode(r.Context(), req.Code)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取权限组失败")
@@ -420,6 +423,7 @@ func (s *Server) deleteRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "删除权限组失败")
 		return
 	}
+	_ = s.refreshRBACVersion(r.Context())
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -605,6 +609,10 @@ func (s *Server) updateUserRoles(w http.ResponseWriter, r *http.Request) {
 		if role == "" {
 			continue
 		}
+		if err := s.ensureRoleForBinding(r.Context(), tx, role); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		if _, err := tx.Exec(
 			r.Context(),
 			`insert into user_role_bindings (user_id, role_id)
@@ -623,6 +631,8 @@ func (s *Server) updateUserRoles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存角色失败")
 		return
 	}
+	_ = s.refreshPermissionVersion(r.Context(), userID)
+	_ = s.refreshRBACVersion(r.Context())
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -794,6 +804,8 @@ func (s *Server) updateUserPermissions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存用户权限失败")
 		return
 	}
+	_ = s.refreshPermissionVersion(r.Context(), userID)
+	_ = s.refreshRBACVersion(r.Context())
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

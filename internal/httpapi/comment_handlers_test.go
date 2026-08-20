@@ -28,3 +28,16 @@ func TestPlainCommentSummary(t *testing.T) {
 		t.Fatalf("plainCommentSummary() did not truncate correctly: %q", got)
 	}
 }
+
+func TestCommentLogAttachmentName(t *testing.T) {
+	for _, value := range []string{"latest.log", "LATEST.LOG", "错误报告-2026-08-19.zip", `C:\\Users\\tester\\错误报告.zip`} {
+		if !isCommentLogAttachmentName(value) {
+			t.Fatalf("expected %q to use the sanitized log viewer", value)
+		}
+	}
+	for _, value := range []string{"notes.txt", "logs.zip", "错误报告.txt", "错误报告.zip.exe"} {
+		if isCommentLogAttachmentName(value) {
+			t.Fatalf("did not expect %q to use the sanitized log viewer", value)
+		}
+	}
+}

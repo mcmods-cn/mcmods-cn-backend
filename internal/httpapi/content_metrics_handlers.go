@@ -166,19 +166,19 @@ func (s *Server) contentMetrics(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) loadMetricProjectEditors(ctx context.Context, target metricTarget) ([]contentMetricEditor, error) {
 	rows, err := s.db.Query(ctx, `with candidates as (
-		select binding.user_id,case when role.code='project_owner.'||$1 then 'owner' else 'editor' end role_code,
-			case when role.code='project_owner.'||$1 then 0 else 1 end priority
-		from user_role_bindings binding join roles role on role.id=binding.role_id
-		where role.status='active' and role.code in ('project_owner.'||$1,'project_editor.'||$1)
+		select access.user_id,access.access_level role_code,
+			case when access.access_level='developer' then 0 else 1 end priority
+		from effective_project_access access
+		where access.project_type=$1 and access.project_id=$2
 		union all
-		select content_target_owner_id($2),'owner',0
+		select content_target_owner_id($3),'developer',0
 	), selected as (
 		select distinct on(user_id) user_id,role_code from candidates where user_id is not null
 		order by user_id,priority
 	)
 	select account.public_id,account.username,account.avatar_url,selected.role_code
 	from selected join users account on account.id=selected.user_id and account.status='active'
-	order by selected.role_code,lower(account.username),account.id`, target.PublicID, target.RouteID)
+	order by selected.role_code,lower(account.username),account.id`, target.Type, target.InternalID, target.RouteID)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +381,8 @@ func (s *Server) loadMetricDevelopers(ctx context.Context, target metricTarget) 
 		coalesce(nullif(binding.role_snapshot,''),role.name,role.code,'')
 		from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
 		left join creator_role_definitions role on role.id=binding.role_id
-		where binding.subject_type=$1 and binding.subject_id=$2 and creator.review_status='approved'
+		where binding.subject_type=$1 and binding.subject_id=$2 and binding.status='approved'
+		  and creator.review_status='approved'
 		order by binding.display_order,binding.id`, target.Type, target.InternalID)
 	if err != nil {
 		return nil, err

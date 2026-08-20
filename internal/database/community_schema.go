@@ -10,21 +10,23 @@ func communitySchemaStatements() []string {
 			description text not null default '',
 			translations jsonb not null default '{}'::jsonb,
 			is_custom boolean not null default false,
+			permission_granting boolean not null default false,
 			created_by bigint references users(id) on delete set null,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now()
 		)`,
-		`insert into creator_role_definitions(id,code,name,description,is_custom) values
-			(1,'owner','Owner','Team owner',false),
-			(2,'developer','Developer','Software developer',false),
-			(3,'artist','Artist','Art and visual design',false),
-			(4,'mascot','Mascot','Team mascot',false),
-			(5,'former_developer','Former developer','Former software developer',false),
-			(6,'former_artist','Former artist','Former art and visual designer',false),
-			(7,'former_owner','Former owner','Former team owner',false),
-			(8,'sponsor','Sponsor','Team sponsor',false),
-			(9,'leader','Leader','Team leader',false)
-		 on conflict(id) do update set code=excluded.code,name=excluded.name,description=excluded.description`,
+		`insert into creator_role_definitions(id,code,name,description,is_custom,permission_granting) values
+			(1,'owner','Owner','Project owner or primary maintainer',false,true),
+			(2,'developer','Developer','Software developer',false,true),
+			(3,'artist','Artist','Art and visual design',false,false),
+			(4,'mascot','Mascot','Team mascot',false,false),
+			(5,'former_developer','Former developer','Former software developer',false,false),
+			(6,'former_artist','Former artist','Former art and visual designer',false,false),
+			(7,'former_owner','Former owner','Former project owner',false,false),
+			(8,'sponsor','Sponsor','Team sponsor',false,false),
+			(9,'leader','Leader','Team leader',false,true)
+		 on conflict(id) do update set code=excluded.code,name=excluded.name,description=excluded.description,
+			permission_granting=excluded.permission_granting`,
 		`select setval(pg_get_serial_sequence('creator_role_definitions','id'),
 			greatest(9,coalesce((select max(id) from creator_role_definitions),9)),true)`,
 		`create or replace function register_creator_role_public_route() returns trigger as $$
@@ -56,7 +58,6 @@ func communitySchemaStatements() []string {
 			description_markdown text not null default '',
 			avatar_url text not null default '',
 			avatar_file_id bigint references oss_files(id) on delete set null,
-			claimed_by bigint references users(id) on delete set null,
 			created_by bigint references users(id) on delete set null,
 			review_status text not null default 'pending'
 				check(review_status in ('pending','approved','rejected')),
@@ -68,8 +69,6 @@ func communitySchemaStatements() []string {
 			on creators(kind,normalized_name)`,
 		`create index if not exists idx_creators_catalog
 			on creators(kind,review_status,lower(name),id)`,
-		`create index if not exists idx_creators_claimed_by
-			on creators(claimed_by,id) where claimed_by is not null`,
 		`create table if not exists creator_links (
 			id bigserial primary key,
 			creator_id bigint not null references creators(id) on delete cascade,
@@ -87,6 +86,11 @@ func communitySchemaStatements() []string {
 			member_creator_id bigint not null references creators(id) on delete cascade,
 			role_id bigint not null references creator_role_definitions(id) on delete restrict,
 			title text not null default '',
+			status text not null default 'pending'
+				check(status in ('pending','approved','rejected','revoked')),
+			created_by bigint references users(id) on delete set null,
+			approved_by bigint references users(id) on delete set null,
+			approved_at timestamptz,
 			display_order integer not null default 0,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
@@ -95,6 +99,20 @@ func communitySchemaStatements() []string {
 		)`,
 		`create index if not exists idx_creator_team_members_member
 			on creator_team_members(member_creator_id,team_id)`,
+		`create or replace function enforce_team_author_membership() returns trigger as $$
+		declare team_kind text; member_kind text;
+		begin
+			select kind into team_kind from creators where id=new.team_id;
+			select kind into member_kind from creators where id=new.member_creator_id;
+			if team_kind is distinct from 'team' or member_kind is distinct from 'author' then
+				raise exception 'team memberships must connect a team to a personal author' using errcode='23514';
+			end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_creator_team_members_kinds
+			before insert or update of team_id,member_creator_id on creator_team_members
+			for each row execute function enforce_team_author_membership()`,
 		`create table if not exists creator_claims (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
@@ -102,11 +120,12 @@ func communitySchemaStatements() []string {
 			user_id bigint not null references users(id) on delete cascade,
 			proof_markdown text not null default '',
 			status text not null default 'pending'
-				check(status in ('pending','approved','rejected','withdrawn')),
+				check(status in ('pending','approved','rejected','withdrawn','revoked')),
 			reviewed_by bigint references users(id) on delete set null,
 			review_note text not null default '',
 			created_at timestamptz not null default now(),
-			reviewed_at timestamptz
+			reviewed_at timestamptz,
+			revoked_at timestamptz
 		)`,
 		`create table if not exists creator_claim_attachments (
 			claim_id bigint not null references creator_claims(id) on delete cascade,
@@ -119,8 +138,23 @@ func communitySchemaStatements() []string {
 			on creator_claim_attachments(oss_file_id,claim_id)`,
 		`create unique index if not exists idx_creator_claims_open
 			on creator_claims(creator_id,user_id) where status='pending'`,
+		`create unique index uq_creator_claims_approved_author
+			on creator_claims(creator_id) where status='approved'`,
 		`create index if not exists idx_creator_claims_queue
 			on creator_claims(status,created_at,id)`,
+		`create or replace function enforce_personal_author_claim() returns trigger as $$
+		declare creator_kind text;
+		begin
+			select kind into creator_kind from creators where id=new.creator_id;
+			if creator_kind is distinct from 'author' then
+				raise exception 'only personal authors can be claimed' using errcode='23514';
+			end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_creator_claims_personal_author
+			before insert or update of creator_id on creator_claims
+			for each row execute function enforce_personal_author_claim()`,
 		`create or replace function register_creator_claim_public_route() returns trigger as $$
 		begin
 			insert into public_routes(public_id,entity_type,internal_id)

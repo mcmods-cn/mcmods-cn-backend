@@ -69,8 +69,8 @@ type simpleProjectResponse struct {
 	PublicID string `json:"id"`
 	simpleProjectSnapshot
 	ReviewStatus         string     `json:"reviewStatus"`
-	CreatedByInternal    *int64     `json:"-"`
-	CreatedBy            string     `json:"createdBy,omitempty"`
+	SubmittedByInternal  *int64     `json:"-"`
+	SubmittedBy          string     `json:"submittedBy,omitempty"`
 	PublishedRevisionID  *string    `json:"publishedRevisionId,omitempty"`
 	SubmissionRevisionID string     `json:"submissionRevisionId,omitempty"`
 	ChangeRequestID      string     `json:"changeRequestId,omitempty"`
@@ -81,7 +81,7 @@ type simpleProjectResponse struct {
 }
 
 const simpleProjectCatalogFilter = `where project.project_type=$1
-	and (project.review_status='approved' or project.created_by=$2)
+	and (project.review_status='approved' or project.submitted_by=$2)
 	and (($7 and project.id=any($8::bigint[])) or (not $7 and ($3='' or project.slug ilike '%%'||$3||'%%' or project.public_id ilike '%%'||$3||'%%'
 		or project.primary_name ilike '%%'||$3||'%%' or project.summary ilike '%%'||$3||'%%'
 		or exists(select 1 from simple_project_localizations localization where localization.project_id=project.id
@@ -175,9 +175,9 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		project.abbreviation,project.minecraft_versions,project.loaders,project.categories,project.features,project.resolution,
 		project.performance,project.map_size,project.official_status,project.source_status,project.license,
 		project.curseforge_project_id,project.modrinth_project_id,project.icon_url,project.search_keywords,
-		project.submission_method,project.review_status,project.created_by,coalesce(account.public_id,''),revision.public_id,
+		project.submission_method,project.review_status,project.submitted_by,coalesce(account.public_id,''),revision.public_id,
 		project.created_at,project.updated_at,project.published_at from simple_projects project
-		left join users account on account.id=project.created_by
+		left join users account on account.id=project.submitted_by
 		left join content_revisions revision on revision.id=project.published_revision_id
 		left join public_routes popularity_route on popularity_route.entity_type=project.project_type and popularity_route.internal_id=project.id
 		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
@@ -273,7 +273,7 @@ func (s *Server) simpleProjectIcon(w http.ResponseWriter, r *http.Request) {
 	}
 	var iconURL string
 	err := s.db.QueryRow(r.Context(), `select icon_url from simple_projects
-		where project_type=$1 and slug=$2 and (review_status='approved' or created_by=$3)`,
+		where project_type=$1 and slug=$2 and (review_status='approved' or submitted_by=$3)`,
 		projectType, siteID, currentClaims(r).Subject).Scan(&iconURL)
 	if errors.Is(err, pgx.ErrNoRows) || strings.TrimSpace(iconURL) == "" {
 		writeError(w, http.StatusNotFound, "project icon does not exist")
@@ -354,7 +354,7 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 	err = tx.QueryRow(r.Context(), `insert into simple_projects(public_id,project_type,slug,default_locale,primary_name,summary,
 		body_markdown,abbreviation,minecraft_versions,loaders,categories,features,resolution,performance,map_size,
 		official_status,source_status,license,curseforge_project_id,modrinth_project_id,icon_url,search_keywords,
-		submission_method,review_status,created_by,published_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+		submission_method,review_status,submitted_by,published_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
 		$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,case when $24='approved' then now() else null end) returning id`,
 		publicID, projectType, snapshot.SiteID, snapshot.DefaultLocale, localization.Name, localization.Summary,
 		localization.BodyMarkdown, snapshot.Abbreviation, snapshot.MinecraftVersions, snapshot.Loaders, snapshot.Categories,
@@ -383,35 +383,32 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 		}
 		return
 	}
+	canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
 	if reviewStatus == "approved" {
-		if err = applySimpleProjectSnapshotTx(r.Context(), tx, projectID, created.RevisionID, claims.Subject, snapshot); err == nil {
+		if err = applySimpleProjectSnapshotTx(r.Context(), tx, projectID, created.RevisionID, claims.Subject,
+			canManageAuthors, canManageTeams, snapshot); err == nil {
 			err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic approval", r)
 		}
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to publish project")
 			return
 		}
-	} else if err = replaceSimpleProjectAssociationsTx(r.Context(), tx, projectID, projectType, created.RevisionID, claims.Subject, snapshot); err != nil {
+	} else if err = replaceSimpleProjectAssociationsTx(r.Context(), tx, projectID, projectType, created.RevisionID,
+		claims.Subject, false, canManageAuthors, canManageTeams, snapshot); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save project relations")
 		return
-	}
-	defaults := s.permissionDefaultsFromSettings(r.Context())
-	if defaults.DeveloperRole != "" {
-		if err = s.bindProjectRoleTx(r.Context(), tx, claims.Subject, defaults.DeveloperRole, publicID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to assign project owner permissions")
-			return
-		}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit project")
 		return
 	}
+	_ = s.refreshProjectACLVersion(r.Context())
 	item, err := s.simpleProjectBySiteID(r.Context(), projectType, snapshot.SiteID, claims.Subject, true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read created project")
 		return
 	}
-	item.CanEdit = true
+	item.CanEdit = canEditSimpleProject(claims, item)
 	item.SubmissionRevisionID = created.RevisionPublicID
 	item.ChangeRequestID = created.ChangeRequestPublicID
 	writeJSON(w, http.StatusCreated, item)
@@ -488,7 +485,9 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if status == "approved" {
-		if err = applySimpleProjectSnapshotTx(r.Context(), tx, current.ID, created.RevisionID, claims.Subject, request.Snapshot); err == nil {
+		canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
+		if err = applySimpleProjectSnapshotTx(r.Context(), tx, current.ID, created.RevisionID, claims.Subject,
+			canManageAuthors, canManageTeams, request.Snapshot); err == nil {
 			err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic approval", r)
 		}
 	}
@@ -496,6 +495,7 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "failed to save project revision")
 		return
 	}
+	_ = s.refreshProjectACLVersion(r.Context())
 	writeJSON(w, http.StatusCreated, map[string]any{"id": created.RevisionPublicID, "status": status, "siteId": request.Snapshot.SiteID, "changeRequestId": created.ChangeRequestPublicID})
 }
 
@@ -695,7 +695,8 @@ func defaultSimpleProjectLocalization(snapshot simpleProjectSnapshot) simpleProj
 	return simpleProjectLocalization{}
 }
 
-func applySimpleProjectSnapshotTx(ctx context.Context, tx pgx.Tx, projectID, revisionID, actorID int64, snapshot simpleProjectSnapshot) error {
+func applySimpleProjectSnapshotTx(ctx context.Context, tx pgx.Tx, projectID, revisionID, actorID int64,
+	canManageAuthors, canManageTeams bool, snapshot simpleProjectSnapshot) error {
 	localization := defaultSimpleProjectLocalization(snapshot)
 	if _, err := tx.Exec(ctx, `update simple_projects set slug=$2,default_locale=$3,primary_name=$4,summary=$5,
 		body_markdown=$6,abbreviation=$7,minecraft_versions=$8,loaders=$9,categories=$10,features=$11,resolution=$12,
@@ -709,7 +710,8 @@ func applySimpleProjectSnapshotTx(ctx context.Context, tx pgx.Tx, projectID, rev
 		snapshot.SearchKeywords, snapshot.SubmissionMethod, revisionID); err != nil {
 		return err
 	}
-	if err := replaceSimpleProjectAssociationsTx(ctx, tx, projectID, snapshot.ProjectType, revisionID, actorID, snapshot); err != nil {
+	if err := replaceSimpleProjectAssociationsTx(ctx, tx, projectID, snapshot.ProjectType, revisionID, actorID,
+		true, canManageAuthors, canManageTeams, snapshot); err != nil {
 		return err
 	}
 	return resolvePendingSimpleProjectReferencesTx(ctx, tx, projectID, snapshot.ProjectType)
@@ -756,14 +758,12 @@ func resolvePendingSimpleProjectReferencesTx(ctx context.Context, tx pgx.Tx, pro
 	return err
 }
 
-func replaceSimpleProjectAssociationsTx(ctx context.Context, tx pgx.Tx, projectID int64, projectType string, revisionID, actorID int64, snapshot simpleProjectSnapshot) error {
+func replaceSimpleProjectAssociationsTx(ctx context.Context, tx pgx.Tx, projectID int64, projectType string,
+	revisionID, actorID int64, projectApproved, canManageAuthors, canManageTeams bool, snapshot simpleProjectSnapshot) error {
 	if _, err := tx.Exec(ctx, `delete from simple_project_localizations where project_id=$1`, projectID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `delete from simple_project_links where project_id=$1`, projectID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `delete from content_creator_bindings where subject_type=$1 and subject_id=$2`, projectType, projectID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `delete from simple_project_parent_refs where project_id=$1`, projectID); err != nil {
@@ -779,18 +779,9 @@ func replaceSimpleProjectAssociationsTx(ctx context.Context, tx pgx.Tx, projectI
 			return err
 		}
 	}
-	for index, author := range snapshot.Authors {
-		creatorID, name, role, err := resolveProjectAuthorForCreateTx(ctx, tx, author, actorID, nil)
-		if err != nil {
-			return err
-		}
-		roleID, err := creatorRoleInternalIDTx(ctx, tx, author.RoleID)
-		if err != nil {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `insert into content_creator_bindings(subject_type,subject_id,creator_id,role_id,name_snapshot,role_snapshot,display_order) values($1,$2,$3,$4,$5,$6,$7)`, projectType, projectID, creatorID, roleID, name, role, index); err != nil {
-			return err
-		}
+	if err := syncProjectCreatorBindingsTx(ctx, tx, projectType, projectID, snapshot.Authors, actorID,
+		projectApproved, canManageAuthors, canManageTeams, nil); err != nil {
+		return err
 	}
 	for index, parent := range snapshot.ParentProjects {
 		var targetID *int64
@@ -823,7 +814,7 @@ func scanSimpleProject(row scanner) (simpleProjectResponse, error) {
 		&item.MinecraftVersions, &item.Loaders, &item.Categories, &item.Features, &item.Resolution, &item.Performance,
 		&item.MapSize, &item.OfficialStatus, &item.SourceStatus, &item.License, &item.CurseForgeProjectID,
 		&item.ModrinthProjectID, &item.IconURL, &item.SearchKeywords, &item.SubmissionMethod, &item.ReviewStatus,
-		&item.CreatedByInternal, &item.CreatedBy, &item.PublishedRevisionID, &item.CreatedAt, &item.UpdatedAt, &item.PublishedAt)
+		&item.SubmittedByInternal, &item.SubmittedBy, &item.PublishedRevisionID, &item.CreatedAt, &item.UpdatedAt, &item.PublishedAt)
 	item.Localizations = []simpleProjectLocalization{}
 	item.Authors = []modAuthorPayload{}
 	item.Links = []modLinkPayload{}
@@ -837,10 +828,10 @@ func (s *Server) simpleProjectBySiteID(ctx context.Context, projectType, siteID 
 		project.abbreviation,project.minecraft_versions,project.loaders,project.categories,project.features,project.resolution,
 		project.performance,project.map_size,project.official_status,project.source_status,project.license,
 		project.curseforge_project_id,project.modrinth_project_id,project.icon_url,project.search_keywords,
-		project.submission_method,project.review_status,project.created_by,coalesce(account.public_id,''),revision.public_id,
+		project.submission_method,project.review_status,project.submitted_by,coalesce(account.public_id,''),revision.public_id,
 		project.created_at,project.updated_at,project.published_at from simple_projects project
-		left join users account on account.id=project.created_by left join content_revisions revision on revision.id=project.published_revision_id
-		where project.project_type=$1 and project.slug=$2 and ($3 or project.review_status='approved' or project.created_by=$4)`, projectType, siteID, editor, viewerID)
+		left join users account on account.id=project.submitted_by left join content_revisions revision on revision.id=project.published_revision_id
+		where project.project_type=$1 and project.slug=$2 and ($3 or project.review_status='approved' or project.submitted_by=$4)`, projectType, siteID, editor, viewerID)
 	item, err := scanSimpleProject(row)
 	if err != nil {
 		return item, err
@@ -895,10 +886,12 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 		'creatorId',member.public_id,'kind',member.kind,'name',member.name,'avatarUrl',member.avatar_url,
 		'roleId',member_role.public_id,'role',member_role.name,'title',membership.title) order by membership.display_order,membership.created_at)
 		from creator_team_members membership join creators member on member.id=membership.member_creator_id
-		join creator_role_definitions member_role on member_role.id=membership.role_id where membership.team_id=creator.id),'[]'::jsonb)
+		join creator_role_definitions member_role on member_role.id=membership.role_id
+		where membership.team_id=creator.id and membership.status='approved'),'[]'::jsonb)
 		from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
 		left join creator_role_definitions role on role.id=binding.role_id
-		where binding.subject_type=any($2) and binding.subject_id=any($1) order by binding.subject_id,binding.display_order,binding.id`, ids, simpleProjectTypeValues())
+		where binding.subject_type=any($2) and binding.subject_id=any($1) and binding.status='approved'
+		order by binding.subject_id,binding.display_order,binding.id`, ids, simpleProjectTypeValues())
 	if err != nil {
 		return err
 	}
@@ -960,7 +953,7 @@ func simpleProjectTypeValues() []string {
 }
 
 func canEditSimpleProject(claims security.Claims, item simpleProjectResponse) bool {
-	return claims.Subject > 0 && (item.CreatedByInternal != nil && *item.CreatedByInternal == claims.Subject || claimsAllow(claims, "project.edit."+item.PublicID) || claimsAllow(claims, "admin.*"))
+	return claims.Subject > 0 && (claimsAllow(claims, "project.edit."+item.PublicID) || claimsAllow(claims, "admin.*"))
 }
 
 func normalizeSimpleProjectType(value string) string {
@@ -1067,7 +1060,7 @@ func (s *Server) simpleProjectGalleryImage(w http.ResponseWriter, r *http.Reques
 	err := s.db.QueryRow(r.Context(), `select file.object_key,file.content_type from simple_project_gallery_images gallery
 		join simple_projects project on project.id=gallery.project_id and project.project_type=$1 and project.slug=$2
 		join oss_files file on file.id=gallery.oss_file_id and file.status='active'
-		where gallery.public_id=$3 and (project.review_status='approved' or project.created_by=$4)`, projectType,
+		where gallery.public_id=$3 and (project.review_status='approved' or project.submitted_by=$4)`, projectType,
 		normalizeModSiteID(r.PathValue("siteId")), strings.ToLower(r.PathValue("publicId")), currentClaims(r).Subject).Scan(&objectKey, &contentType)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "project gallery image not found")

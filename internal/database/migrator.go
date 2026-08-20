@@ -7,9 +7,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 82
+const schemaGeneration = 85
 
-// Migrate installs one coherent development schema. Generation 82 is the
+// Migrate installs one coherent development schema. Generation 85 is the
 // current pre-production baseline. Older development databases are
 // intentionally reset instead of upgraded or backfilled.
 // Generation 74 established
@@ -75,6 +75,16 @@ const schemaGeneration = 82
 // Generation 82 adds localized notification snapshots, deterministic
 // collection-to-mrpack export jobs, MODID import confirmations, the sticker
 // catalog and unified project update subscriptions.
+// Generation 83 separates authentication revocation from authorization
+// changes and records catalog and Minecraft server submitters without granting
+// project access.
+// Generation 84 removes project-developer and team-claim shortcuts. Project
+// access is now derived exclusively from approved editor assignments or an
+// approved personal-author claim connected through verified author/team
+// relations, without materializing one permanent role per project.
+// Generation 85 adds quota-backed comment attachments shared by top-level
+// comments and replies. Ordinary files are downloadable only after a clean
+// scan; recognized log archives are routed exclusively through redaction.
 // Generation 74 repaired the popularity refresh function
 // without replacing its persisted facts or queue. Earlier development data is
 // intentionally not migrated and must be reset before installation.
@@ -162,6 +172,7 @@ func schemaInstallationStatements() []string {
 	statements = append(statements, userBlockSchemaStatements()...)
 	statements = append(statements, antiAbuseSchemaStatements()...)
 	statements = append(statements, infrastructureSchemaStatements()...)
+	statements = append(statements, projectAccessSchemaStatements()...)
 	statements = append(statements, featureUpdateSchemaStatements()...)
 	statements = append(statements, governanceAutomationSchemaStatements()...)
 	statements = append(statements, engagementExportSchemaStatements()...)
