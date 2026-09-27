@@ -2,16 +2,16 @@ package httpapi
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,20 +21,44 @@ import (
 const (
 	maxModpackArchiveBytes = int64(1 << 30)
 	maxModpackIndexBytes   = int64(32 << 20)
+	maxModpackArchiveFiles = 4096
+	maxModpackIndexFiles   = 2000
+	maxModpackCentralBytes = uint64(8 << 20)
+	externalModpackLocale  = "und"
 )
 
+type modrinthVersionFile struct {
+	URL      string `json:"url"`
+	Filename string `json:"filename"`
+	Primary  bool   `json:"primary"`
+	Size     int64  `json:"size"`
+}
+
 type modrinthVersion struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	VersionNumber string   `json:"version_number"`
-	GameVersions  []string `json:"game_versions"`
-	Loaders       []string `json:"loaders"`
-	Files         []struct {
-		URL      string `json:"url"`
-		Filename string `json:"filename"`
-		Primary  bool   `json:"primary"`
-		Size     int64  `json:"size"`
-	} `json:"files"`
+	ID            string                `json:"id"`
+	Name          string                `json:"name"`
+	VersionNumber string                `json:"version_number"`
+	VersionType   string                `json:"version_type"`
+	Status        string                `json:"status"`
+	DatePublished time.Time             `json:"date_published"`
+	GameVersions  []string              `json:"game_versions"`
+	Loaders       []string              `json:"loaders"`
+	Files         []modrinthVersionFile `json:"files"`
+}
+
+type curseForgePackFile struct {
+	ID                  int64     `json:"id"`
+	DisplayName         string    `json:"displayName"`
+	FileName            string    `json:"fileName"`
+	DownloadURL         string    `json:"downloadUrl"`
+	GameVersions        []string  `json:"gameVersions"`
+	ReleaseType         int       `json:"releaseType"`
+	FileStatus          int       `json:"fileStatus"`
+	IsAvailable         bool      `json:"isAvailable"`
+	IsServerPack        bool      `json:"isServerPack"`
+	ExposeAsAlternative bool      `json:"exposeAsAlternative"`
+	ParentProjectFileID int64     `json:"parentProjectFileId"`
+	FileDate            time.Time `json:"fileDate"`
 }
 
 type modrinthPackIndex struct {
@@ -72,25 +96,16 @@ type curseForgePackManifest struct {
 	} `json:"files"`
 }
 
-var modrinthCDNProjectPattern = regexp.MustCompile(`/data/([^/]+)/versions/([^/]+)/`)
-
 func importModrinthModpack(ctx context.Context, client *http.Client, cfg modImportConfig, reference string) (createModpackRequest, error) {
-	headers := providerHeaders(cfg.UserAgent, "", "")
-	if cfg.Modrinth.Token != "" {
-		headers.Set("Authorization", cfg.Modrinth.Token)
+	snapshot, err := loadModrinthProviderSnapshot(ctx, client, cfg, reference)
+	if err != nil {
+		return createModpackRequest{}, err
 	}
-	var project modrinthProject
-	if err := getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(reference), headers, &project); err != nil {
-		return createModpackRequest{}, fmt.Errorf("读取 Modrinth 整合包失败: %w", err)
-	}
+	project := snapshot.Project
 	if project.ProjectType != "modpack" {
 		return createModpackRequest{}, errors.New("该 Modrinth 项目不是整合包")
 	}
-	var versions []modrinthVersion
-	if err := getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(project.ID)+"/version", headers, &versions); err != nil {
-		return createModpackRequest{}, fmt.Errorf("读取 Modrinth 整合包版本失败: %w", err)
-	}
-	version, archive, err := selectModrinthPackArchive(versions)
+	version, archive, err := selectModrinthPackArchive(snapshot.Versions)
 	if err != nil {
 		return createModpackRequest{}, err
 	}
@@ -110,14 +125,16 @@ func importModrinthModpack(ctx context.Context, client *http.Client, cfg modImpo
 	if index.Game != "minecraft" || index.FormatVersion <= 0 {
 		return createModpackRequest{}, errors.New("modrinth.index.json 不是有效的 Minecraft 整合包索引")
 	}
-	authors := modrinthProjectAuthors(ctx, client, cfg, headers, project.Team)
+	if len(index.Files) > maxModpackIndexFiles {
+		return createModpackRequest{}, fmt.Errorf("modrinth.index.json contains more than %d files", maxModpackIndexFiles)
+	}
 	categoryValues := append(append([]string{}, project.Categories...), project.AdditionalCategories...)
 	loaders, minecraftVersions := modrinthPackCompatibility(project, version, index)
 	return createModpackRequest{
 		SiteID:            modSiteIDBase(project.Slug),
 		PrimaryName:       project.Title,
 		Summary:           project.Description,
-		DefaultLocale:     "zh-CN",
+		DefaultLocale:     externalModpackLocale,
 		Environment:       modpackEnvironmentFromSides(project.ClientSide, project.ServerSide),
 		PrimaryCategory:   primaryCategoryFromExternal(categoryValues),
 		PackType:          modpackTypeFromExternal(categoryValues),
@@ -125,7 +142,7 @@ func importModrinthModpack(ctx context.Context, client *http.Client, cfg modImpo
 		Compatibilities:   compatibilitiesForLoaders(loaders, minecraftVersions),
 		Tags:              modpackCategoriesFromExternal(categoryValues),
 		SearchKeywords:    uniqueTrimmed([]string{project.Slug, index.Name, index.VersionID}, 80),
-		Authors:           authors,
+		Authors:           snapshot.Authors,
 		OfficialStatus:    statusFromExternal(project.Status, false),
 		SourceStatus:      sourceStatusFromLicense(project.License.ID),
 		License:           normalizeExternalLicense(project.License.ID),
@@ -134,6 +151,10 @@ func importModrinthModpack(ctx context.Context, client *http.Client, cfg modImpo
 		BodyMarkdown:      project.Body,
 		SubmissionMethod:  "modrinth",
 		Mods:              modrinthIndexMods(index),
+		ImportSelection: &modpackImportSelection{
+			Provider: "modrinth", ProjectID: project.ID, VersionID: version.ID, VersionName: firstNonEmpty(version.Name, version.VersionNumber),
+			FileName: archive.Filename, ReleaseType: "release", PublishedAt: version.DatePublished.UTC().Format(time.RFC3339),
+		},
 		Links: compactLinks([]modLinkPayload{
 			{Type: "modrinth", URL: "https://modrinth.com/modpack/" + project.Slug},
 			externalSourceLink(project.SourceURL),
@@ -144,46 +165,39 @@ func importModrinthModpack(ctx context.Context, client *http.Client, cfg modImpo
 	}, nil
 }
 
-func selectModrinthPackArchive(versions []modrinthVersion) (modrinthVersion, struct {
-	URL      string
-	Filename string
-}, error) {
+func selectModrinthPackArchive(versions []modrinthVersion) (modrinthVersion, modrinthVersionFile, error) {
+	type candidate struct {
+		version modrinthVersion
+		file    modrinthVersionFile
+	}
+	candidates := make([]candidate, 0)
 	for _, version := range versions {
-		for _, primaryOnly := range []bool{true, false} {
-			for _, file := range version.Files {
-				if primaryOnly && !file.Primary || !strings.EqualFold(filepath.Ext(file.Filename), ".mrpack") || !validProviderDownloadURL(file.URL) {
-					continue
-				}
-				return version, struct {
-					URL      string
-					Filename string
-				}{URL: file.URL, Filename: file.Filename}, nil
+		if !strings.EqualFold(version.VersionType, "release") || !strings.EqualFold(version.Status, "listed") || version.DatePublished.IsZero() {
+			continue
+		}
+		for _, file := range version.Files {
+			if !file.Primary || !strings.EqualFold(filepath.Ext(file.Filename), ".mrpack") || !validProviderDownloadURL(file.URL) {
+				continue
 			}
+			candidates = append(candidates, candidate{version: version, file: file})
 		}
 	}
-	return modrinthVersion{}, struct {
-		URL      string
-		Filename string
-	}{}, errors.New("没有可下载的 Modrinth mrpack 文件")
-}
-
-func modrinthProjectAuthors(ctx context.Context, client *http.Client, cfg modImportConfig, headers http.Header, teamID string) []modAuthorPayload {
-	if teamID == "" {
-		return nil
-	}
-	var members []modrinthTeamMember
-	if getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/team/"+url.PathEscape(teamID)+"/members", headers, &members) != nil {
-		return nil
-	}
-	authors := make([]modAuthorPayload, 0, len(members))
-	for _, member := range members {
-		name := member.User.Name
-		if name == "" {
-			name = member.User.Username
+	sort.Slice(candidates, func(left, right int) bool {
+		if !candidates[left].version.DatePublished.Equal(candidates[right].version.DatePublished) {
+			return candidates[left].version.DatePublished.After(candidates[right].version.DatePublished)
 		}
-		authors = append(authors, modAuthorPayload{Name: name, Kind: "author", AvatarURL: member.User.AvatarURL, Role: member.Role})
+		if candidates[left].version.ID != candidates[right].version.ID {
+			return candidates[left].version.ID > candidates[right].version.ID
+		}
+		if candidates[left].file.Filename != candidates[right].file.Filename {
+			return candidates[left].file.Filename < candidates[right].file.Filename
+		}
+		return candidates[left].file.URL < candidates[right].file.URL
+	})
+	if len(candidates) == 0 {
+		return modrinthVersion{}, modrinthVersionFile{}, errors.New("没有已列出的正式 Modrinth 主 mrpack 文件")
 	}
-	return authors
+	return candidates[0].version, candidates[0].file, nil
 }
 
 func modrinthPackCompatibility(project modrinthProject, version modrinthVersion, index modrinthPackIndex) ([]string, []string) {
@@ -212,15 +226,10 @@ func modrinthIndexMods(index modrinthPackIndex) []modpackModPayload {
 		if !strings.HasPrefix(strings.ReplaceAll(file.Path, "\\", "/"), "mods/") {
 			continue
 		}
-		projectID, versionID := "", ""
-		for _, download := range file.Downloads {
-			if match := modrinthCDNProjectPattern.FindStringSubmatch(download); len(match) == 3 {
-				projectID, versionID = match[1], match[2]
-				break
-			}
-		}
+		projectID, versionID, trustedIdentity := consistentModrinthDownloadIdentity(file.Downloads)
 		identifier := ""
-		if projectID == "" {
+		if !trustedIdentity {
+			projectID, versionID = "", ""
 			identifier = strings.TrimSuffix(filepath.Base(file.Path), filepath.Ext(file.Path))
 		}
 		mods = append(mods, modpackModPayload{
@@ -233,43 +242,28 @@ func modrinthIndexMods(index modrinthPackIndex) []modpackModPayload {
 }
 
 func importCurseForgeModpack(ctx context.Context, client *http.Client, cfg modImportConfig, reference string) (createModpackRequest, error) {
-	headers := providerHeaders(cfg.UserAgent, "", cfg.CurseForge.APIKey)
-	searchURL, _ := url.Parse(cfg.CurseForge.BaseURL + "/mods/search")
-	query := searchURL.Query()
-	query.Set("gameId", "432")
-	query.Set("classId", "4471")
-	query.Set("slug", reference)
-	query.Set("pageSize", "1")
-	searchURL.RawQuery = query.Encode()
-	var search struct {
-		Data []curseForgeMod `json:"data"`
+	headers := providerCredentialHeaders(cfg.UserAgent, "curseforge", cfg.CurseForge.BaseURL, "", cfg.CurseForge.APIKey)
+	snapshot, err := loadCurseForgeProviderSnapshot(ctx, client, cfg, headers, 4471, reference)
+	if err != nil {
+		return createModpackRequest{}, err
 	}
-	if err := getProviderJSON(ctx, client, searchURL.String(), headers, &search); err != nil {
-		return createModpackRequest{}, fmt.Errorf("搜索 CurseForge 整合包失败: %w", err)
-	}
-	if len(search.Data) == 0 || !strings.EqualFold(search.Data[0].Slug, reference) {
-		return createModpackRequest{}, errors.New("CurseForge 整合包不存在")
-	}
-	project := search.Data[0]
-	var description struct {
-		Data string `json:"data"`
-	}
-	_ = getProviderJSON(ctx, client, cfg.CurseForge.BaseURL+"/mods/"+strconv.FormatInt(project.ID, 10)+"/description", headers, &description)
+	project := snapshot.Project
 	var files struct {
-		Data []struct {
-			ID           int64    `json:"id"`
-			FileName     string   `json:"fileName"`
-			DownloadURL  string   `json:"downloadUrl"`
-			GameVersions []string `json:"gameVersions"`
-		} `json:"data"`
+		Data []curseForgePackFile `json:"data"`
 	}
 	filesEndpoint := cfg.CurseForge.BaseURL + "/mods/" + strconv.FormatInt(project.ID, 10) + "/files?pageSize=50"
 	if err := getProviderJSON(ctx, client, filesEndpoint, headers, &files); err != nil || len(files.Data) == 0 {
 		return createModpackRequest{}, errors.New("CurseForge 整合包没有可下载文件")
 	}
-	selected := files.Data[0]
+	selected, err := selectCurseForgePackFile(files.Data)
+	if err != nil {
+		return createModpackRequest{}, err
+	}
 	if selected.DownloadURL == "" {
-		selected.DownloadURL, _ = sCurseForgeDownloadURL(ctx, client, cfg, project.ID, selected.ID, headers)
+		selected.DownloadURL, err = sCurseForgeDownloadURL(ctx, client, cfg, project.ID, selected.ID, headers)
+		if err != nil {
+			return createModpackRequest{}, fmt.Errorf("读取 CurseForge 整合包下载地址失败: %w", err)
+		}
 	}
 	if !validProviderDownloadURL(selected.DownloadURL) {
 		return createModpackRequest{}, errors.New("CurseForge 未返回安全的整合包下载地址")
@@ -287,14 +281,13 @@ func importCurseForgeModpack(ctx context.Context, client *http.Client, cfg modIm
 	if err = readJSONFromArchive(archivePath, []string{"manifest.json"}, &manifest); err != nil {
 		return createModpackRequest{}, fmt.Errorf("读取 CurseForge manifest.json 失败: %w", err)
 	}
+	if len(manifest.Files) > maxModpackIndexFiles {
+		return createModpackRequest{}, fmt.Errorf("CurseForge manifest contains more than %d files", maxModpackIndexFiles)
+	}
 	compatibilities := curseForgePackCompatibilities(manifest, selected.GameVersions)
 	categoryValues := make([]string, 0, len(project.Categories)*2)
 	for _, category := range project.Categories {
 		categoryValues = append(categoryValues, category.Name, category.Slug)
-	}
-	authors := make([]modAuthorPayload, 0, len(project.Authors))
-	for _, author := range project.Authors {
-		authors = append(authors, modAuthorPayload{Name: author.Name, Kind: "author", AvatarURL: author.AvatarURL, Role: "Author"})
 	}
 	mods := make([]modpackModPayload, 0, len(manifest.Files))
 	for _, file := range manifest.Files {
@@ -302,16 +295,45 @@ func importCurseForgeModpack(ctx context.Context, client *http.Client, cfg modIm
 			ProviderVersionID: strconv.FormatInt(file.FileID, 10), ClientRequired: file.Required, ServerRequired: file.Required})
 	}
 	return createModpackRequest{
-		SiteID: modSiteIDBase(project.Slug), PrimaryName: project.Name, Summary: project.Summary, DefaultLocale: "zh-CN",
+		SiteID: modSiteIDBase(project.Slug), PrimaryName: project.Name, Summary: project.Summary, DefaultLocale: externalModpackLocale,
 		Environment: "bothRequired", PrimaryCategory: primaryCategoryFromExternal(categoryValues),
 		PackType: modpackTypeFromExternal(categoryValues), PackagingMethod: "curseforge", Compatibilities: compatibilities,
 		Tags: modpackCategoriesFromExternal(categoryValues), SearchKeywords: uniqueTrimmed([]string{project.Slug, manifest.Name, manifest.Version}, 80),
-		Authors: authors, OfficialStatus: statusFromExternal("active", !project.IsAvailable), SourceStatus: "unknown", License: "Custom",
+		Authors: curseForgeAuthors(project), OfficialStatus: statusFromExternal("active", !project.IsAvailable), SourceStatus: "unknown", License: "Custom",
 		CurseForgeProjectID: strconv.FormatInt(project.ID, 10), IconURL: project.Logo.ThumbnailURL,
-		BodyMarkdown: htmlToMarkdown(description.Data), SubmissionMethod: "curseforge", Mods: mods,
+		BodyMarkdown: htmlToMarkdown(snapshot.DescriptionHTML), SubmissionMethod: "curseforge", Mods: mods,
+		ImportSelection: &modpackImportSelection{
+			Provider: "curseforge", ProjectID: strconv.FormatInt(project.ID, 10), VersionID: strconv.FormatInt(selected.ID, 10),
+			VersionName: selected.DisplayName, FileID: strconv.FormatInt(selected.ID, 10), FileName: selected.FileName,
+			ReleaseType: "release", PublishedAt: selected.FileDate.UTC().Format(time.RFC3339),
+		},
 		Links: compactLinks([]modLinkPayload{{Type: "curseforge", URL: project.Links.WebsiteURL}, externalSourceLink(project.Links.SourceURL),
 			{Type: "wiki", URL: project.Links.WikiURL}, {Type: "issue", URL: project.Links.IssuesURL}}),
 	}, nil
+}
+
+func selectCurseForgePackFile(files []curseForgePackFile) (curseForgePackFile, error) {
+	candidates := make([]curseForgePackFile, 0, len(files))
+	for _, file := range files {
+		if file.ID <= 0 || file.ReleaseType != 1 || file.FileStatus != 4 || !file.IsAvailable || file.IsServerPack ||
+			file.ExposeAsAlternative || file.ParentProjectFileID != 0 || file.FileDate.IsZero() || !strings.EqualFold(filepath.Ext(file.FileName), ".zip") {
+			continue
+		}
+		candidates = append(candidates, file)
+	}
+	sort.Slice(candidates, func(left, right int) bool {
+		if !candidates[left].FileDate.Equal(candidates[right].FileDate) {
+			return candidates[left].FileDate.After(candidates[right].FileDate)
+		}
+		if candidates[left].ID != candidates[right].ID {
+			return candidates[left].ID > candidates[right].ID
+		}
+		return candidates[left].FileName < candidates[right].FileName
+	})
+	if len(candidates) == 0 {
+		return curseForgePackFile{}, errors.New("CurseForge 整合包没有已批准的正式主文件")
+	}
+	return candidates[0], nil
 }
 
 func modpackCategoriesFromExternal(values []string) []string {
@@ -424,11 +446,17 @@ func downloadProviderArchive(ctx context.Context, rawURL, destination string, ti
 }
 
 func readJSONFromArchive(archivePath string, candidateNames []string, target any) error {
+	if err := validateModpackArchiveCentralDirectory(archivePath); err != nil {
+		return err
+	}
 	archive, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return err
 	}
 	defer archive.Close()
+	if len(archive.File) > maxModpackArchiveFiles {
+		return fmt.Errorf("modpack archive central directory contains more than %d entries", maxModpackArchiveFiles)
+	}
 	candidates := make(map[string]bool, len(candidateNames))
 	for _, name := range candidateNames {
 		candidates[strings.ToLower(strings.TrimLeft(filepath.ToSlash(name), "/"))] = true
@@ -459,6 +487,62 @@ func readJSONFromArchive(archivePath string, candidateNames []string, target any
 		return json.Unmarshal(body, target)
 	}
 	return errors.New("modpack index file is missing")
+}
+
+func validateModpackArchiveCentralDirectory(archivePath string) error {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() > maxModpackArchiveBytes {
+		return errors.New("modpack archive is too large")
+	}
+	const (
+		endOfCentralDirectorySize = int64(22)
+		maximumZIPCommentBytes    = int64(1<<16 - 1)
+	)
+	if info.Size() < endOfCentralDirectorySize {
+		return errors.New("modpack archive central directory is missing")
+	}
+	tailSize := min(info.Size(), endOfCentralDirectorySize+maximumZIPCommentBytes)
+	tail := make([]byte, int(tailSize))
+	if _, err = file.ReadAt(tail, info.Size()-tailSize); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	signature := []byte{'P', 'K', 0x05, 0x06}
+	recordOffset := bytes.LastIndex(tail, signature)
+	if recordOffset < 0 || recordOffset+int(endOfCentralDirectorySize) > len(tail) {
+		return errors.New("modpack archive central directory is missing")
+	}
+	record := tail[recordOffset:]
+	commentLength := int(binary.LittleEndian.Uint16(record[20:22]))
+	if recordOffset+int(endOfCentralDirectorySize)+commentLength != len(tail) {
+		return errors.New("modpack archive central directory terminator is invalid")
+	}
+	diskNumber := binary.LittleEndian.Uint16(record[4:6])
+	centralDisk := binary.LittleEndian.Uint16(record[6:8])
+	entriesOnDisk := binary.LittleEndian.Uint16(record[8:10])
+	totalEntries := binary.LittleEndian.Uint16(record[10:12])
+	if diskNumber != 0 || centralDisk != 0 || entriesOnDisk != totalEntries {
+		return errors.New("multi-disk modpack archive central directory is not supported")
+	}
+	if int(totalEntries) > maxModpackArchiveFiles {
+		return fmt.Errorf("modpack archive central directory contains more than %d entries", maxModpackArchiveFiles)
+	}
+	centralSize := uint64(binary.LittleEndian.Uint32(record[12:16]))
+	centralOffset := uint64(binary.LittleEndian.Uint32(record[16:20]))
+	if centralSize > maxModpackCentralBytes {
+		return fmt.Errorf("modpack archive central directory exceeds %d bytes", maxModpackCentralBytes)
+	}
+	if centralOffset > uint64(info.Size()) || centralSize > uint64(info.Size())-centralOffset {
+		return errors.New("modpack archive central directory points outside the file")
+	}
+	return nil
 }
 
 func safeTemporaryArchiveName(name, fallbackExtension string) string {

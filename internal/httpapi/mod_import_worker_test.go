@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -101,6 +103,130 @@ func TestExternalMetadataNormalization(t *testing.T) {
 	}
 }
 
+func TestLoadersFromTextUsesTokenBoundariesAndKeepsNeoForgeDistinct(t *testing.T) {
+	tests := []struct {
+		name   string
+		values []string
+		want   []string
+	}{
+		{name: "neoforge compact", values: []string{"A NeoForge mod"}, want: []string{"NeoForge"}},
+		{name: "neoforge hyphen", values: []string{"neo-forge"}, want: []string{"NeoForge"}},
+		{name: "neoforge words", values: []string{"neo forge loader"}, want: []string{"NeoForge"}},
+		{name: "forge", values: []string{"MinecraftForge mod"}, want: []string{"Forge"}},
+		{name: "both explicit", values: []string{"NeoForge and Forge builds"}, want: []string{"NeoForge", "Forge"}},
+		{name: "fabric quilt", values: []string{"fabric-api", "quiltmc"}, want: []string{"Fabric", "Quilt"}},
+		{name: "no substring", values: []string{"forged tools and quilted cloth"}, want: []string{}},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := loadersFromText(testCase.values...); !reflect.DeepEqual(got, testCase.want) {
+				t.Fatalf("loadersFromText(%q) = %#v, want %#v", testCase.values, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestModImportSecondaryMetadataFailuresAreVisible(t *testing.T) {
+	failures := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "not found", status: http.StatusNotFound, body: `missing`},
+		{name: "rate limited", status: http.StatusTooManyRequests, body: `slow down`},
+		{name: "upstream failure", status: http.StatusInternalServerError, body: `failed`},
+		{name: "invalid JSON", status: http.StatusOK, body: `{`},
+		{name: "oversized", status: http.StatusOK, body: strings.Repeat("x", int(maxModImportResponseBytes)+1)},
+	}
+
+	for _, failure := range failures {
+		t.Run("modrinth team/"+failure.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.Header().Set("Content-Type", "application/json")
+				switch request.URL.Path {
+				case "/project/example":
+					_, _ = response.Write([]byte(`{"id":"project-id","slug":"example","title":"Example","description":"Summary","body":"Body","project_type":"mod","team":"team-id","status":"approved","license":{"id":"MIT"}}`))
+				case "/project/project-id/version":
+					_, _ = response.Write([]byte(`[]`))
+				default:
+					writeProviderTestResponse(response, failure.status, failure.body)
+				}
+			}))
+			defer server.Close()
+			cfg := defaultModImportConfig()
+			cfg.Modrinth.BaseURL = server.URL
+			if _, err := importModrinthProject(context.Background(), server.Client(), cfg, "example"); err == nil {
+				t.Fatal("team metadata failure was ignored")
+			}
+		})
+
+		t.Run("curseforge description/"+failure.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.Header().Set("Content-Type", "application/json")
+				if request.URL.Path == "/mods/search" {
+					_, _ = response.Write([]byte(`{"data":[{"id":34,"classId":6,"slug":"example","name":"Example","summary":"Summary","isAvailable":true}]}`))
+					return
+				}
+				writeProviderTestResponse(response, failure.status, failure.body)
+			}))
+			defer server.Close()
+			cfg := defaultModImportConfig()
+			cfg.CurseForge.BaseURL = server.URL
+			cfg.CurseForge.APIKey = ""
+			if _, err := importCurseForgeProject(context.Background(), server.Client(), cfg, "example"); err == nil {
+				t.Fatal("description metadata failure was ignored")
+			}
+		})
+	}
+
+	for _, failure := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "rate limited", status: http.StatusTooManyRequests, body: `slow down`},
+		{name: "upstream failure", status: http.StatusInternalServerError, body: `failed`},
+		{name: "oversized", status: http.StatusOK, body: strings.Repeat("x", int(maxModImportResponseBytes)+1)},
+	} {
+		t.Run("github readme/"+failure.name, func(t *testing.T) {
+			server := newGitHubImportTestServer(t, failure.status, failure.body)
+			defer server.Close()
+			cfg := defaultModImportConfig()
+			cfg.GitHub.BaseURL = server.URL
+			if _, err := importGitHubRepository(context.Background(), server.Client(), cfg, "example/repository"); err == nil {
+				t.Fatal("README metadata failure was ignored")
+			}
+		})
+	}
+
+	t.Run("github missing readme is explicit absence", func(t *testing.T) {
+		server := newGitHubImportTestServer(t, http.StatusNotFound, `missing`)
+		defer server.Close()
+		cfg := defaultModImportConfig()
+		cfg.GitHub.BaseURL = server.URL
+		if _, err := importGitHubRepository(context.Background(), server.Client(), cfg, "example/repository"); err != nil {
+			t.Fatalf("missing README should remain a valid empty field: %v", err)
+		}
+	})
+}
+
+func newGitHubImportTestServer(t *testing.T, readmeStatus int, readmeBody string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/repos/example/repository" {
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = response.Write([]byte(`{"id":1,"name":"repository","full_name":"example/repository","html_url":"https://github.com/example/repository","description":"Summary","owner":{"login":"alice"},"license":{"spdx_id":"MIT"}}`))
+			return
+		}
+		writeProviderTestResponse(response, readmeStatus, readmeBody)
+	}))
+}
+
+func writeProviderTestResponse(response http.ResponseWriter, status int, body string) {
+	response.WriteHeader(status)
+	_, _ = response.Write([]byte(body))
+}
+
 func TestRedactModImportConfig(t *testing.T) {
 	cfg := defaultModImportConfig()
 	cfg.Modrinth.Token = "modrinth-secret"
@@ -121,6 +247,92 @@ func TestNormalizeModImportConfigRequiresCurseForgeKey(t *testing.T) {
 	cfg.CurseForge.APIKey = ""
 	if err := normalizeModImportConfig(&cfg); err == nil {
 		t.Fatal("expected enabled CurseForge provider without an API key to fail validation")
+	}
+}
+
+func TestPrepareModImportConfigUpdateDoesNotCarryCredentialsAcrossOrigins(t *testing.T) {
+	current := defaultModImportConfig()
+	current.Modrinth.Token = "modrinth-secret"
+	current.CurseForge.APIKey = "curseforge-secret"
+	current.GitHub.Token = "github-secret"
+
+	next := current
+	next.Modrinth.BaseURL = "https://metadata.example/modrinth"
+	next.Modrinth.Token = ""
+	next.CurseForge.Enabled = false
+	next.CurseForge.BaseURL = "https://metadata.example/curseforge"
+	next.CurseForge.APIKey = ""
+	next.GitHub.BaseURL = "https://metadata.example/github"
+	next.GitHub.Token = ""
+
+	if err := prepareModImportConfigUpdate(&next, current); err != nil {
+		t.Fatal(err)
+	}
+	if next.Modrinth.Token != "" || next.CurseForge.APIKey != "" || next.GitHub.Token != "" {
+		t.Fatalf("provider credentials crossed origins: %#v", next)
+	}
+}
+
+func TestNormalizeModImportConfigRejectsCredentialsForNonOfficialOrigin(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*modImportConfig)
+	}{
+		{
+			name: "modrinth token",
+			mutate: func(cfg *modImportConfig) {
+				cfg.Modrinth.BaseURL = "https://metadata.example/modrinth"
+				cfg.Modrinth.Token = "secret"
+			},
+		},
+		{
+			name: "curseforge api key",
+			mutate: func(cfg *modImportConfig) {
+				cfg.CurseForge.BaseURL = "https://metadata.example/curseforge"
+				cfg.CurseForge.APIKey = "secret"
+			},
+		},
+		{
+			name: "github token",
+			mutate: func(cfg *modImportConfig) {
+				cfg.GitHub.BaseURL = "https://metadata.example/github"
+				cfg.GitHub.Token = "secret"
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := defaultModImportConfig()
+			cfg.CurseForge.Enabled = false
+			test.mutate(&cfg)
+			if err := normalizeModImportConfig(&cfg); err == nil {
+				t.Fatal("expected a credential bound to a non-official origin to be rejected")
+			}
+		})
+	}
+}
+
+func TestProviderCredentialHeadersFailClosedForWrongOrigin(t *testing.T) {
+	headers := providerCredentialHeaders(
+		"mcmods-cn/test",
+		"github",
+		"https://metadata.example/github",
+		"Bearer github-secret",
+		"curseforge-secret",
+	)
+	if headers.Get("Authorization") != "" || headers.Get("x-api-key") != "" {
+		t.Fatalf("credentials were attached to an untrusted origin: %#v", headers)
+	}
+
+	headers = providerCredentialHeaders(
+		"mcmods-cn/test",
+		"github",
+		"https://api.github.com",
+		"Bearer github-secret",
+		"",
+	)
+	if got := headers.Get("Authorization"); got != "Bearer github-secret" {
+		t.Fatalf("official GitHub origin did not receive its credential: %q", got)
 	}
 }
 

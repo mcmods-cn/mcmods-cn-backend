@@ -90,12 +90,14 @@ func TestUserBlockRelationshipAndOwnedCommentTargetsIntegration(t *testing.T) {
 		t.Fatalf("conversation list returned %d: %s", response.Code, response.Body.String())
 	}
 	var conversationResponse struct {
-		Data []directConversationSummary `json:"data"`
+		Data struct {
+			Items []directConversationSummary `json:"items"`
+		} `json:"data"`
 	}
 	if err = json.Unmarshal(response.Body.Bytes(), &conversationResponse); err != nil {
 		t.Fatal(err)
 	}
-	if len(conversationResponse.Data) != 1 || conversationResponse.Data[0].CanMessage {
+	if len(conversationResponse.Data.Items) != 1 || conversationResponse.Data.Items[0].CanMessage {
 		t.Fatalf("blocked conversation remained writable: %#v", conversationResponse.Data)
 	}
 

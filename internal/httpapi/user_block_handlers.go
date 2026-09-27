@@ -135,69 +135,103 @@ func (s *Server) userBlocksActor(ctx context.Context, blockerID, actorID int64) 
 }
 
 func (s *Server) commentTargetOwnerBlocksUser(ctx context.Context, target commentTargetInfo, userID int64) (bool, error) {
-	if userID <= 0 {
-		return false, nil
-	}
-	var ownerID *int64
-	projectID := ""
-	switch target.Type {
-	case "mod":
-		if err := s.db.QueryRow(ctx, `select project_code from mods where id=$1`, target.InternalID).Scan(&projectID); err != nil {
-			return false, err
-		}
-	case "modpack":
-		if err := s.db.QueryRow(ctx, `select public_id from modpacks where id=$1`, target.InternalID).Scan(&projectID); err != nil {
-			return false, err
-		}
-	case "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
-		if err := s.db.QueryRow(ctx, `select public_id from simple_projects where id=$1 and project_type=$2`, target.InternalID, target.Type).Scan(&projectID); err != nil {
-			return false, err
-		}
-	case "mod_resource":
-		if target.VersionID == nil {
-			return false, pgx.ErrNoRows
-		}
-		if err := s.db.QueryRow(ctx, `select mod.project_code
-			from mod_content_versions version join mods mod on mod.id=version.mod_id
-			where version.id=$1`, *target.VersionID).Scan(&projectID); err != nil {
-			return false, err
-		}
-	case "community_post":
-		var kind string
-		if err := s.db.QueryRow(ctx, `select author_id,kind from community_posts where id=$1`, target.InternalID).Scan(&ownerID, &kind); err != nil {
-			return false, err
-		}
-		if !communityPostAuthorModeratesComments(kind) {
-			return false, nil
-		}
-	case "blueprint":
-		if err := s.db.QueryRow(ctx, `select owner_id from blueprints where id=$1`, target.InternalID).Scan(&ownerID); err != nil {
-			return false, err
-		}
-	case "skin":
-		if err := s.db.QueryRow(ctx, `select owner_id from skin_assets where id=$1`, target.InternalID).Scan(&ownerID); err != nil {
-			return false, err
-		}
-	case "player_profile":
-		if err := s.db.QueryRow(ctx, `select user_id from player_profiles where id=$1`, target.InternalID).Scan(&ownerID); err != nil {
-			return false, err
-		}
-	default:
-		return false, nil
-	}
+	identity := newCommentTargetIdentity(target.Type, target.InternalID, target.VersionID)
+	blockedByTarget, err := s.commentTargetOwnersBlockUser(ctx, []commentTargetIdentity{identity}, userID)
+	return blockedByTarget[identity], err
+}
 
-	owner := int64(0)
-	if ownerID != nil {
-		owner = *ownerID
+func (s *Server) commentTargetOwnersBlockUser(ctx context.Context, identities []commentTargetIdentity,
+	userID int64) (map[commentTargetIdentity]bool, error) {
+	result := make(map[commentTargetIdentity]bool, len(identities))
+	if userID <= 0 || len(identities) == 0 {
+		return result, nil
 	}
-	if projectID == "" {
-		return s.userBlocksActor(ctx, owner, userID)
+	seen := make(map[commentTargetIdentity]struct{}, len(identities))
+	types := make([]string, 0, len(identities))
+	ids := make([]int64, 0, len(identities))
+	versionKeys := make([]int64, 0, len(identities))
+	for _, identity := range identities {
+		if identity.Type == "" || identity.ID <= 0 {
+			continue
+		}
+		if _, exists := seen[identity]; exists {
+			continue
+		}
+		seen[identity] = struct{}{}
+		types = append(types, identity.Type)
+		ids = append(ids, identity.ID)
+		versionKeys = append(versionKeys, identity.VersionKey)
 	}
-	var blocked bool
-	err := s.db.QueryRow(ctx, `select exists(
-		select 1 from user_blocks block
-		join effective_project_access access on access.user_id=block.blocker_id
-		where block.blocked_id=$1 and access.project_public_id=$2 and access.access_level='developer'
-	)`, userID, projectID).Scan(&blocked)
-	return blocked, err
+	if len(types) == 0 {
+		return result, nil
+	}
+	rows, err := s.db.Query(ctx, `with requested(target_type,target_id,target_version_key) as (
+		select * from unnest($1::text[],$2::bigint[],$3::bigint[])
+	), target_facts as (
+		select request.target_type,request.target_id,request.target_version_key,
+			case when request.target_type='mod_resource' then 'mod'
+				when request.target_type in ('mod','modpack','plugin','map','resource_pack','shader_pack','datapack','addon') then request.target_type
+				else '' end project_type,
+			coalesce(direct_mod.id,direct_modpack.id,direct_simple.id,resource_mod.id) project_id,
+			case
+				when request.target_type='community_post' and post.kind in ('tutorial','discussion') then post.author_id
+				when request.target_type='blueprint' then blueprint.owner_id
+				when request.target_type='skin' then skin.owner_id
+				when request.target_type='player_profile' then player.user_id
+			end owner_id,
+			case
+				when request.target_type='mod' then direct_mod.id is not null
+				when request.target_type='modpack' then direct_modpack.id is not null
+				when request.target_type in ('plugin','map','resource_pack','shader_pack','datapack','addon') then direct_simple.id is not null
+				when request.target_type='mod_resource' then resource_mod.id is not null
+				when request.target_type='community_post' then post.id is not null
+				when request.target_type='blueprint' then blueprint.id is not null
+				when request.target_type='skin' then skin.id is not null
+				when request.target_type='player_profile' then player.id is not null
+				else true
+			end resolved
+		from requested request
+		left join mods direct_mod on request.target_type='mod' and direct_mod.id=request.target_id
+		left join modpacks direct_modpack on request.target_type='modpack' and direct_modpack.id=request.target_id
+		left join simple_projects direct_simple on request.target_type=direct_simple.project_type and direct_simple.id=request.target_id
+		left join mod_content_versions resource_version
+			on request.target_type='mod_resource' and resource_version.id=request.target_version_key
+		left join mods resource_mod on resource_mod.id=resource_version.mod_id
+		left join community_posts post on request.target_type='community_post' and post.id=request.target_id
+		left join blueprints blueprint on request.target_type='blueprint' and blueprint.id=request.target_id
+		left join skin_assets skin on request.target_type='skin' and skin.id=request.target_id
+		left join player_profiles player on request.target_type='player_profile' and player.id=request.target_id
+	)
+	select target_type,target_id,target_version_key,resolved,
+		case
+			when project_id is not null then exists(
+				select 1 from user_blocks block
+				join effective_project_access access on access.user_id=block.blocker_id
+				where block.blocked_id=$4 and access.project_type=target_facts.project_type
+				  and access.project_id=target_facts.project_id
+				  and access.access_level='developer')
+			when owner_id is not null and owner_id<>$4 then exists(
+				select 1 from user_blocks block where block.blocker_id=owner_id and block.blocked_id=$4)
+			else false
+		end
+	from target_facts`, types, ids, versionKeys, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var identity commentTargetIdentity
+		var resolved, blocked bool
+		if err = rows.Scan(&identity.Type, &identity.ID, &identity.VersionKey, &resolved, &blocked); err != nil {
+			return nil, err
+		}
+		if !resolved {
+			return nil, pgx.ErrNoRows
+		}
+		result[identity] = blocked
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }

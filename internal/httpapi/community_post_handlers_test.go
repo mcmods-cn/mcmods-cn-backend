@@ -20,11 +20,50 @@ func TestDetectCommunityPostLocale(t *testing.T) {
 	}
 }
 
-func TestNormalizeIssueRequiresReferencesAndVersions(t *testing.T) {
+func TestNormalizeCommunityPostSourceLocaleUsesExplicitSiteLocaleOrConfidentDetection(t *testing.T) {
+	t.Run("explicit site locale is authoritative", func(t *testing.T) {
+		post := communityPostSnapshot{
+			Kind: "tutorial", Title: "printf setup", BodyMarkdown: "Use foo.bar()", SourceLocale: "fr_fr",
+		}
+		if err := normalizeCommunityPostSnapshot(&post); err != nil {
+			t.Fatalf("explicit editable source locale was rejected: %v", err)
+		}
+		if post.SourceLocale != "fr-FR" {
+			t.Fatalf("explicit source locale was overwritten: got %q, want fr-FR", post.SourceLocale)
+		}
+	})
+
+	t.Run("unsupported explicit locale is rejected", func(t *testing.T) {
+		post := communityPostSnapshot{
+			Kind: "tutorial", Title: "설정", BodyMarkdown: "기술 문서", SourceLocale: "ko-KR",
+		}
+		if err := normalizeCommunityPostSnapshot(&post); err == nil {
+			t.Fatal("unsupported explicit source locale was accepted")
+		}
+	})
+
+	t.Run("ambiguous missing locale requires confirmation", func(t *testing.T) {
+		post := communityPostSnapshot{Kind: "tutorial", Title: "printf setup", BodyMarkdown: "Use foo.bar()"}
+		if err := normalizeCommunityPostSnapshot(&post); err == nil {
+			t.Fatal("ambiguous content without an explicit source locale was silently classified")
+		}
+	})
+
+	t.Run("missing locale still permits confident detection", func(t *testing.T) {
+		post := communityPostSnapshot{Kind: "tutorial", Title: "红石教程", BodyMarkdown: "这是正文"}
+		if err := normalizeCommunityPostSnapshot(&post); err != nil {
+			t.Fatalf("confident script detection was rejected: %v", err)
+		}
+		if post.SourceLocale != "zh-CN" {
+			t.Fatalf("detected source locale = %q, want zh-CN", post.SourceLocale)
+		}
+	})
+}
+
+func TestNormalizeIssueRequiresProjectAndVersionsButAllowsNoSmallResource(t *testing.T) {
 	post := communityPostSnapshot{
-		Kind: "issue", Title: "Example", BodyMarkdown: "Details", Severity: "minor",
-		Projects:  []communityPostReference{{Identifier: "example"}},
-		Resources: []communityPostReference{{Identifier: "example:item", Kind: "minecraft.item"}},
+		Kind: "issue", Title: "Example", SourceLocale: "en-US", BodyMarkdown: "Details", Severity: "minor",
+		Projects: []communityPostReference{{Identifier: "example"}},
 	}
 	if err := normalizeCommunityPostSnapshot(&post); err == nil {
 		t.Fatal("issue without version constraints was accepted")
@@ -32,13 +71,17 @@ func TestNormalizeIssueRequiresReferencesAndVersions(t *testing.T) {
 	post.MinecraftVersions = []string{"1.21.1"}
 	post.ModVersionMin = "1.0.0"
 	if err := normalizeCommunityPostSnapshot(&post); err != nil {
-		t.Fatalf("valid issue was rejected: %v", err)
+		t.Fatalf("issue without a small resource was rejected: %v", err)
+	}
+	post.Projects = nil
+	if err := normalizeCommunityPostSnapshot(&post); err == nil {
+		t.Fatal("issue without a project was accepted")
 	}
 }
 
 func TestNormalizeNewsDropsMinecraftAndIssueFields(t *testing.T) {
 	post := communityPostSnapshot{
-		Kind: "news", Title: "Release news", BodyMarkdown: "Details", MinecraftVersions: []string{"1.21.1"},
+		Kind: "news", Title: "Release news", SourceLocale: "en-US", BodyMarkdown: "Details", MinecraftVersions: []string{"1.21.1"},
 		Severity: "fatal", ModVersionMin: "1.0", IssueURL: "https://example.com/issue", HasFix: true,
 		BountyCurrency: "diamond", BountyAmount: 10,
 	}
@@ -51,7 +94,7 @@ func TestNormalizeNewsDropsMinecraftAndIssueFields(t *testing.T) {
 }
 
 func TestNormalizeDiscussionBountyPair(t *testing.T) {
-	post := communityPostSnapshot{Kind: "discussion", Title: "How do I configure this?", BodyMarkdown: "Details", BountyCurrency: "diamond"}
+	post := communityPostSnapshot{Kind: "discussion", Title: "How do I configure this?", SourceLocale: "en-US", BodyMarkdown: "Details", BountyCurrency: "diamond"}
 	if err := normalizeCommunityPostSnapshot(&post); err == nil {
 		t.Fatal("discussion with currency but no bounty amount was accepted")
 	}

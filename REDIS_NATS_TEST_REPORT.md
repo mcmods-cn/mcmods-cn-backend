@@ -60,6 +60,13 @@ Redis/NATS 优化开始时存在 5 类数据库集成失败：规范身份 NULL 
 - 浏览器多可见窗口 SharedWorker 连接共享。
 - 生产 CPU/内存/Redis连接数；本报告没有把未采集指标写成通过。
 
+## 2026-08-21 可复现 JetStream 门禁补充
+
+- `go test ./...` 现在默认启动官方 `nats-server/v2 v2.14.3` 的随机端口、临时 file store JetStream，不再需要 `MCMODS_RUN_NATS_INTEGRATION=1` 才覆盖可靠队列。
+- 实际验证 durable consumer 离线 backlog、已 ACK 不重放、Msg-Id 去重、指数 BackOff、MaxDeliver 死信、Server 停启后旧 Client 自动重连/恢复订阅。
+- 真实 PostgreSQL session-local Outbox 测试验证断连时 `failed`/retry 持久化、恢复后同一行 published、stale lease、新旧 Dispatcher claim 分割，以及发布/消费死信的管理员审计重放。
+- 这些是单节点 loopback 故障证据，不改变上面“真实集群/ACL/跨节点副本未验证”的部署边界。
+
 ## 已发现问题
 
 - 高并发下默认 PostgreSQL连接池/健康监控会短时进入降级，需部署环境容量测试。

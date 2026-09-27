@@ -64,7 +64,7 @@ func (s *Server) mirrorExternalImage(ctx context.Context, sourceURL string, uplo
 		if clientErr != nil {
 			return mirroredExternalImage{}, clientErr
 		}
-		if result, reusable := s.reusableExternalImageObject(ctx, ossClient, loadedCfg, objectKey, "", 0); reusable {
+		if result, reusable := s.reusableExternalImageObject(ctx, ossClient, loadedCfg, objectKey, options, uploaderID, "", 0); reusable {
 			return result, nil
 		}
 		return mirroredExternalImage{}, errUnsupportedExternalModIcon
@@ -114,7 +114,7 @@ func (s *Server) mirrorExternalImage(ctx context.Context, sourceURL string, uplo
 		return mirroredExternalImage{}, clientErr
 	}
 	ossCfg = loadedCfg
-	result, reusable := s.reusableExternalImageObject(ctx, ossClient, ossCfg, objectKey, digest, int64(len(data)))
+	result, reusable := s.reusableExternalImageObject(ctx, ossClient, ossCfg, objectKey, options, uploaderID, digest, int64(len(data)))
 	if !reusable {
 		_, err = ossClient.PutObject(ctx, &aliyunoss.PutObjectRequest{
 			Bucket:        aliyunoss.Ptr(ossCfg.Bucket),
@@ -140,7 +140,7 @@ func (s *Server) mirrorExternalImage(ctx context.Context, sourceURL string, uplo
 			options.category, options.source, originalName, contentType, len(data), digest, nullableUserID(uploaderID)).
 			Scan(&result.FileInternalID, &result.FilePublicID)
 		if err != nil {
-			s.deleteOSSObjectIfUnregistered(context.Background(), ossClient, ossCfg, objectKey)
+			s.deleteOSSObjectIfUnregistered(context.Background(), ossCfg, objectKey, "external-image-registration-failed")
 			return mirroredExternalImage{}, err
 		}
 		result.URL = ossStoredObjectURL(ossCfg, objectKey)
@@ -179,14 +179,23 @@ func externalModIconFormat(data []byte) (string, string, error) {
 	}
 }
 
-func (s *Server) reusableExternalImageObject(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey, expectedSHA256 string, expectedSize int64) (mirroredExternalImage, bool) {
-	var result mirroredExternalImage
-	var contentType, storedSHA256 string
-	var size int64
+type reusableExternalImageRecord struct {
+	result       mirroredExternalImage
+	contentType  string
+	storedSHA256 string
+	size         int64
+}
+
+func (s *Server) authorizedReusableExternalImageRecord(ctx context.Context, objectKey string, options externalImageMirrorOptions, uploaderID int64, expectedSHA256 string, expectedSize int64) (reusableExternalImageRecord, bool) {
+	if uploaderID <= 0 || strings.TrimSpace(options.category) == "" || strings.TrimSpace(options.source) == "" {
+		return reusableExternalImageRecord{}, false
+	}
+	var record reusableExternalImageRecord
 	query := `select id,public_id,content_type,sha256,size_bytes from oss_files
-		where object_key=$1 and status='active' and scan_status in ('clean','trusted_generated')
+		where object_key=$1 and category=$2 and source=$3 and uploader_id=$4
+		  and status='active' and scan_status in ('clean','trusted_generated')
 		  and lower(split_part(content_type,';',1)) in ('image/png','image/jpeg','image/jpg','image/gif','image/webp')`
-	args := []any{objectKey}
+	args := []any{objectKey, options.category, options.source, uploaderID}
 	if expectedSHA256 != "" {
 		args = append(args, expectedSHA256)
 		query += fmt.Sprintf(` and sha256=$%d`, len(args))
@@ -195,7 +204,21 @@ func (s *Server) reusableExternalImageObject(ctx context.Context, client *aliyun
 		args = append(args, expectedSize)
 		query += fmt.Sprintf(` and size_bytes=$%d`, len(args))
 	}
-	if err := s.db.QueryRow(ctx, query, args...).Scan(&result.FileInternalID, &result.FilePublicID, &contentType, &storedSHA256, &size); err != nil || size <= 0 || size > maxExternalModIconBytes {
+	if err := s.db.QueryRow(ctx, query, args...).Scan(
+		&record.result.FileInternalID,
+		&record.result.FilePublicID,
+		&record.contentType,
+		&record.storedSHA256,
+		&record.size,
+	); err != nil || record.size <= 0 || record.size > maxExternalModIconBytes {
+		return reusableExternalImageRecord{}, false
+	}
+	return record, true
+}
+
+func (s *Server) reusableExternalImageObject(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey string, options externalImageMirrorOptions, uploaderID int64, expectedSHA256 string, expectedSize int64) (mirroredExternalImage, bool) {
+	record, reusable := s.authorizedReusableExternalImageRecord(ctx, objectKey, options, uploaderID, expectedSHA256, expectedSize)
+	if !reusable {
 		return mirroredExternalImage{}, false
 	}
 	objectResult, err := client.GetObject(ctx, &aliyunoss.GetObjectRequest{
@@ -207,15 +230,15 @@ func (s *Server) reusableExternalImageObject(ctx context.Context, client *aliyun
 	}
 	defer objectResult.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(objectResult.Body, maxExternalModIconBytes+1))
-	if err != nil || int64(len(data)) != size || sha256Hex(data) != storedSHA256 {
+	if err != nil || int64(len(data)) != record.size || sha256Hex(data) != record.storedSHA256 {
 		return mirroredExternalImage{}, false
 	}
-	_, err = validateRasterImageBytes(data, contentType)
+	_, err = validateRasterImageBytes(data, record.contentType)
 	if err != nil {
 		return mirroredExternalImage{}, false
 	}
-	result.URL = ossStoredObjectURL(cfg, objectKey)
-	return result, true
+	record.result.URL = ossStoredObjectURL(cfg, objectKey)
+	return record.result, true
 }
 
 func ossObjectKeyUnderEndpoint(rawURL, endpoint string) (string, bool) {

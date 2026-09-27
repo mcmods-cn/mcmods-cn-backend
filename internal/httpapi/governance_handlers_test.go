@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -86,6 +88,26 @@ func TestUnifiedReportsUseAntiAbuseReportPolicy(t *testing.T) {
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/reports/evidence/uploads", nil)
 	if action := antiAbuseAction(request); action != "report.create" {
 		t.Fatalf("evidence anti-abuse action=%q, want report.create", action)
+	}
+}
+
+func TestUnifiedReportSnapshotUsesOneRepeatableReadVisibilityBoundary(t *testing.T) {
+	raw, err := os.ReadFile("governance_handlers.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(raw)
+	for _, required := range []string{
+		"BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})",
+		"reportTargetSnapshot(r.Context(), tx, request.TargetType, request.TargetID, claims)",
+		"validateReportTargetVisibility(ctx, queryer, targetType, publicID, claims)",
+		"resolveFollowProjectTargetWithQueryer(ctx, queryer, publicID, claims)",
+		"resolveCommentTargetByInternalWithQueryer(",
+		"nearby.status in ('published','deleted')",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("unified report visibility boundary is missing %q", required)
+		}
 	}
 }
 

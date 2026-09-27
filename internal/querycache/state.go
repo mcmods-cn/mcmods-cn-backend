@@ -3,6 +3,7 @@ package querycache
 import (
 	"context"
 	"errors"
+	"sort"
 	"strconv"
 	"time"
 
@@ -276,6 +277,43 @@ func (c *Cache) ReconcileUnread(ctx context.Context, userID int64, truth UnreadS
 	c.InvalidateUnread(ctx, userID)
 	_, err = c.LoadUnread(ctx, userID, func(context.Context) (UnreadSummary, error) { return truth, nil })
 	return true, err
+}
+
+// UnreadReconciliationCandidates returns a rotating, bounded sample of live
+// derivatives that this process has actually served. Expired entries are not
+// useful calibration targets and are removed instead of causing a PostgreSQL
+// walk over every account in the system.
+func (c *Cache) UnreadReconciliationCandidates(limit int) []int64 {
+	if c == nil || limit <= 0 {
+		return nil
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ids := make([]int64, 0, min(limit, len(c.unread)))
+	for userID, entry := range c.unread {
+		if !now.Before(entry.expiresAt) {
+			delete(c.unread, userID)
+			continue
+		}
+		ids = append(ids, userID)
+	}
+	if len(ids) == 0 {
+		c.unreadSampleCursor = 0
+		return nil
+	}
+	sort.Slice(ids, func(left, right int) bool { return ids[left] < ids[right] })
+	start := sort.Search(len(ids), func(index int) bool { return ids[index] > c.unreadSampleCursor })
+	if start == len(ids) {
+		start = 0
+	}
+	count := min(limit, len(ids))
+	sample := make([]int64, 0, count)
+	for offset := range count {
+		sample = append(sample, ids[(start+offset)%len(ids)])
+	}
+	c.unreadSampleCursor = sample[len(sample)-1]
+	return sample
 }
 
 func (c *Cache) SetUnread(ctx context.Context, userID int64, value UnreadSummary, epoch int64) {

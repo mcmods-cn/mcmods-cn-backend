@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -86,10 +87,14 @@ func (worker *ProjectAutomationWorker) applyProjectMaintenancePolicy(
 
 	var currentStatus string
 	var createdAt time.Time
+	var publishedRevisionID *int64
 	if job.ProjectType == "mod" {
-		err = tx.QueryRow(ctx, `select official_status,created_at from mods where id=$1 for update`, job.InternalID).Scan(&currentStatus, &createdAt)
+		err = tx.QueryRow(ctx, `select official_status,created_at,published_revision_id from mods where id=$1 for update`, job.InternalID).
+			Scan(&currentStatus, &createdAt, &publishedRevisionID)
 	} else {
-		err = tx.QueryRow(ctx, `select official_status,created_at from simple_projects where id=$1 and project_type=$2 for update`, job.InternalID, job.ProjectType).Scan(&currentStatus, &createdAt)
+		err = tx.QueryRow(ctx, `select official_status,created_at,published_revision_id from simple_projects
+			where id=$1 and project_type=$2 for update`, job.InternalID, job.ProjectType).
+			Scan(&currentStatus, &createdAt, &publishedRevisionID)
 	}
 	if err != nil {
 		return result, fmt.Errorf("load project maintenance status: %w", err)
@@ -149,7 +154,7 @@ func (worker *ProjectAutomationWorker) applyProjectMaintenancePolicy(
 		switch {
 		case desired != "" && automatedStatus != nil:
 			if currentStatus != desired {
-				if err = updateAutomatedProjectStatus(ctx, tx, job, desired); err != nil {
+				if err = publishAutomatedProjectMaintenanceStatusTx(ctx, tx, job, publishedRevisionID, currentStatus, desired); err != nil {
 					return result, err
 				}
 				result.Changed = true
@@ -159,7 +164,7 @@ func (worker *ProjectAutomationWorker) applyProjectMaintenancePolicy(
 			automatedStatus = &value
 		case desired != "" && currentStatus != desired:
 			statusBeforeAutomation = currentStatus
-			if err = updateAutomatedProjectStatus(ctx, tx, job, desired); err != nil {
+			if err = publishAutomatedProjectMaintenanceStatusTx(ctx, tx, job, publishedRevisionID, currentStatus, desired); err != nil {
 				return result, err
 			}
 			value := desired
@@ -172,7 +177,7 @@ func (worker *ProjectAutomationWorker) applyProjectMaintenancePolicy(
 				restore = "active"
 			}
 			if currentStatus == *automatedStatus && currentStatus != restore {
-				if err = updateAutomatedProjectStatus(ctx, tx, job, restore); err != nil {
+				if err = publishAutomatedProjectMaintenanceStatusTx(ctx, tx, job, publishedRevisionID, currentStatus, restore); err != nil {
 					return result, err
 				}
 				currentStatus = restore
@@ -209,17 +214,72 @@ func (worker *ProjectAutomationWorker) applyProjectMaintenancePolicy(
 	return result, nil
 }
 
-func updateAutomatedProjectStatus(ctx context.Context, tx pgx.Tx, job projectAutomationJob, status string) error {
-	if !validProjectOfficialStatus(status) {
-		return fmt.Errorf("invalid automated project status %q", status)
+func publishAutomatedProjectMaintenanceStatusTx(ctx context.Context, tx pgx.Tx, job projectAutomationJob,
+	baseRevisionID *int64, previousStatus, status string) error {
+	if !validProjectOfficialStatus(status) || previousStatus == status {
+		return fmt.Errorf("invalid automated project status transition %q -> %q", previousStatus, status)
 	}
-	var err error
+	if baseRevisionID == nil {
+		return errors.New("automated project maintenance requires a published revision")
+	}
+	aggregateType := simpleProjectAggregate
 	if job.ProjectType == "mod" {
-		_, err = tx.Exec(ctx, `update mods set official_status=$2,updated_at=now() where id=$1`, job.InternalID, status)
-	} else {
-		_, err = tx.Exec(ctx, `update simple_projects set official_status=$3,updated_at=now() where id=$1 and project_type=$2`, job.InternalID, job.ProjectType, status)
+		aggregateType = "mod"
+	} else if normalizeSimpleProjectType(job.ProjectType) == "" {
+		return fmt.Errorf("unsupported automated maintenance project type %q", job.ProjectType)
 	}
-	return err
+	var raw []byte
+	if err := tx.QueryRow(ctx, `select snapshot from content_revisions
+		where id=$1 and entity_type=$2 and entity_id=$3 and aggregate_type=$4 and aggregate_key=$5`,
+		*baseRevisionID, job.ProjectType, job.InternalID, aggregateType, job.ProjectPublicID).Scan(&raw); err != nil {
+		return fmt.Errorf("load published project revision for automated maintenance: %w", err)
+	}
+	var snapshot any
+	if job.ProjectType == "mod" {
+		var value createModRequest
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return fmt.Errorf("decode published mod revision for automated maintenance: %w", err)
+		}
+		value.OfficialStatus = status
+		snapshot = value
+	} else {
+		var value simpleProjectSnapshot
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return fmt.Errorf("decode published project revision for automated maintenance: %w", err)
+		}
+		value.ProjectType = job.ProjectType
+		value.OfficialStatus = status
+		snapshot = value
+	}
+	nextRaw, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("encode automated project maintenance revision: %w", err)
+	}
+	reason := fmt.Sprintf("Automated maintenance status: %s -> %s", previousStatus, status)
+	created, err := createContentRevisionTx(ctx, tx, createContentRevisionParams{
+		EntityType: job.ProjectType, EntityID: job.InternalID, AggregateType: aggregateType, AggregateKey: job.ProjectPublicID,
+		BaseRevision: baseRevisionID, Snapshot: nextRaw, Reason: reason, ActorID: job.ActorID, Source: "auto_update", Status: "approved",
+		Metadata: map[string]any{"automation": "project_maintenance", "previousStatus": previousStatus, "status": status,
+			"sourceType": job.SourceType, "updateKind": job.Kind},
+	})
+	if err != nil {
+		return fmt.Errorf("create automated project maintenance revision: %w", err)
+	}
+	if job.ProjectType == "mod" {
+		if err = applyModSnapshot(ctx, tx, job.InternalID, created.RevisionID, job.ActorID, true, true, snapshot.(createModRequest)); err != nil {
+			return fmt.Errorf("apply automated mod maintenance revision: %w", err)
+		}
+	} else if err = applySimpleProjectSnapshotTx(ctx, tx, job.InternalID, created.RevisionID, job.ActorID,
+		true, true, snapshot.(simpleProjectSnapshot)); err != nil {
+		return fmt.Errorf("apply automated project maintenance revision: %w", err)
+	}
+	if err = appendReviewResolutionTx(ctx, tx, created.ChangeRequestID, "approved", job.ActorID, reason, nil); err != nil {
+		return fmt.Errorf("approve automated project maintenance revision: %w", err)
+	}
+	if err = appendCatalogPublishedReviewEventTx(ctx, tx, created.ChangeRequestID, job.ActorID, reason, nil); err != nil {
+		return fmt.Errorf("publish automated project maintenance revision: %w", err)
+	}
+	return nil
 }
 
 func validProjectOfficialStatus(status string) bool {

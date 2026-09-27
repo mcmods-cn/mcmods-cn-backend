@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
@@ -17,11 +18,53 @@ import (
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"mcmods-cn-backend/internal/queue"
 )
 
 var blueprintFormats = map[string]bool{"nbt": true, "schem": true, "schematic": true, "litematic": true, "json": true}
+
+var (
+	errBlueprintNotFound       = errors.New("blueprint not found")
+	errBlueprintNotRetryable   = errors.New("blueprint is not retryable")
+	errBlueprintSourceTooLarge = errors.New("blueprint source exceeds processing size limit")
+	errBlueprintUserJobLimit   = errors.New("blueprint active job limit reached")
+	errBlueprintGlobalJobLimit = errors.New("blueprint global active conversion limit reached")
+)
+
+const (
+	maxBlueprintActiveJobsPerUser       = 4
+	maxBlueprintActiveConversionsGlobal = 16
+)
+
+const blueprintActiveJobCountSQL = `select count(*) from (
+	select 1 from blueprint_jobs where created_by=$1 and status in ('queued','processing')
+	order by id limit $2
+) active`
+
+const blueprintGlobalActiveConversionCountSQL = `select count(*) from (
+	select 1 from blueprint_jobs where operation='convert' and status in ('queued','processing')
+	limit $1
+) active`
+
+const blueprintMaterialRevisionSQL = `select distinct on(source_namespace) source_namespace,id::text
+	from catalog_import_revisions
+	where source_namespace=any($1::text[]) and is_active and status in ('ready','partial')
+	order by source_namespace,coalesce(activated_at,created_at) desc,id desc`
+
+func logBlueprintReadFailure(publicID, stage string, err error) {
+	slog.Error("load blueprint data", "module", "blueprint", "public_id", publicID, "stage", stage, "error", err)
+}
+
+func appendBlueprintMaterialNamespace(namespaces []string, seen map[string]struct{}, blockID string) []string {
+	namespace := strings.SplitN(blockID, ":", 2)[0]
+	if _, exists := seen[namespace]; namespace == "" || exists {
+		return namespaces
+	}
+	seen[namespace] = struct{}{}
+	return append(namespaces, namespace)
+}
 
 type blueprintContentSnapshot struct {
 	PublicID             string                    `json:"publicId"`
@@ -53,10 +96,13 @@ func blueprintFormatFromName(name string) string {
 	return strings.TrimPrefix(strings.ToLower(filepath.Ext(strings.TrimSpace(name))), ".")
 }
 
-func (s *Server) createPendingBlueprint(ctx context.Context, ownerID int64, originalName string) (int64, string, error) {
+func (s *Server) createPendingBlueprint(ctx context.Context, ownerID int64, originalName string, uploadExpiresAt time.Time) (int64, string, error) {
 	format := blueprintFormatFromName(originalName)
 	if !blueprintFormats[format] || format == "json" {
 		return 0, "", fmt.Errorf("unsupported blueprint format %q", format)
+	}
+	if !uploadExpiresAt.After(time.Now()) {
+		return 0, "", errors.New("blueprint upload expiry must be in the future")
 	}
 	title := strings.TrimSuffix(filepath.Base(originalName), filepath.Ext(originalName))
 	var id int64
@@ -66,7 +112,7 @@ func (s *Server) createPendingBlueprint(ctx context.Context, ownerID int64, orig
 		return 0, "", err
 	}
 	defer tx.Rollback(ctx)
-	if err = tx.QueryRow(ctx, `insert into blueprints(owner_id,title,source_format) values($1,$2,$3) returning id,public_id`, ownerID, title, format).Scan(&id, &publicID); err != nil {
+	if err = tx.QueryRow(ctx, `insert into blueprints(owner_id,title,source_format,upload_expires_at) values($1,$2,$3,$4) returning id,public_id`, ownerID, title, format, uploadExpiresAt).Scan(&id, &publicID); err != nil {
 		return 0, "", err
 	}
 	if _, err = tx.Exec(ctx, `insert into content_localizations(subject_type,subject_id,locale,name,provenance,editable,review_status,updated_by)
@@ -79,29 +125,162 @@ func (s *Server) createPendingBlueprint(ctx context.Context, ownerID int64, orig
 	return id, publicID, nil
 }
 
-func (s *Server) enqueueBlueprintJob(ctx context.Context, blueprintID, createdBy int64, operation, targetFormat string) (string, error) {
+func deletePendingBlueprintUploadRowsTx(ctx context.Context, tx pgx.Tx, blueprintIDs []int64) error {
+	if len(blueprintIDs) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `delete from content_localizations where subject_type='blueprint' and subject_id=any($1::bigint[])`, blueprintIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `delete from content_subjects where subject_type='blueprint' and subject_id=any($1::bigint[])`, blueprintIDs); err != nil {
+		return err
+	}
+	command, err := tx.Exec(ctx, `delete from blueprints where id=any($1::bigint[]) and status='uploading'`, blueprintIDs)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != int64(len(blueprintIDs)) {
+		return errors.New("pending blueprint upload changed during cleanup")
+	}
+	return nil
+}
+
+func (s *Server) discardPendingBlueprintUpload(ctx context.Context, ownerID, blueprintID int64, objectKey string) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var selectedID int64
+	query := `select id from blueprints where owner_id=$1 and status='uploading' and id=$2 for update`
+	argument := any(blueprintID)
+	if blueprintID <= 0 {
+		query = `select id from blueprints where owner_id=$1 and status='uploading' and original_object_key=$2 for update`
+		argument = objectKey
+	}
+	if err = tx.QueryRow(ctx, query, ownerID, argument).Scan(&selectedID); errors.Is(err, pgx.ErrNoRows) {
+		return tx.Commit(ctx)
+	} else if err != nil {
+		return err
+	}
+	if err = deletePendingBlueprintUploadRowsTx(ctx, tx, []int64{selectedID}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func enqueueBlueprintJobTx(ctx context.Context, tx pgx.Tx, blueprintID, createdBy int64, operation, targetFormat string) (string, error) {
+	if operation == "convert" {
+		if err := reserveBlueprintGlobalConversionBudgetTx(ctx, tx); err != nil {
+			return "", err
+		}
+	}
+	if err := reserveBlueprintUserJobBudgetTx(ctx, tx, createdBy); err != nil {
+		return "", err
+	}
 	var jobID int64
 	var jobPublicID string
+	if err := tx.QueryRow(ctx, `insert into blueprint_jobs(blueprint_id,operation,target_format,created_by) values($1,$2,$3,$4) returning id,public_id`, blueprintID, operation, targetFormat, createdBy).Scan(&jobID, &jobPublicID); err != nil {
+		return "", err
+	}
+	if _, err := queue.EnqueueTx(ctx, tx, "blueprint_convert", "blueprint.conversion.requested", "blueprint_job", jobPublicID, "", blueprintJobMessage{JobID: jobID}); err != nil {
+		return "", err
+	}
+	return jobPublicID, nil
+}
+
+func reserveBlueprintGlobalConversionBudgetTx(ctx context.Context, tx pgx.Tx) error {
+	// All public conversion producers use this transaction helper. The global
+	// lock remains held through the subsequent user admission, task insert,
+	// Outbox insert, and caller commit, so different accounts cannot race the
+	// site-wide count across application instances.
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(
+		hashtextextended('blueprint-conversion-global',0))`); err != nil {
+		return err
+	}
+	var active int
+	if err := tx.QueryRow(ctx, blueprintGlobalActiveConversionCountSQL, maxBlueprintActiveConversionsGlobal).Scan(&active); err != nil {
+		return err
+	}
+	if active >= maxBlueprintActiveConversionsGlobal {
+		return errBlueprintGlobalJobLimit
+	}
+	return nil
+}
+
+func reserveBlueprintUserJobBudgetTx(ctx context.Context, tx pgx.Tx, createdBy int64) error {
+	if createdBy <= 0 {
+		return errors.New("blueprint job creator is required")
+	}
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1,0))`, fmt.Sprintf("blueprint-job-user:%d", createdBy)); err != nil {
+		return err
+	}
+	var active int
+	if err := tx.QueryRow(ctx, blueprintActiveJobCountSQL, createdBy, maxBlueprintActiveJobsPerUser).Scan(&active); err != nil {
+		return err
+	}
+	if active >= maxBlueprintActiveJobsPerUser {
+		return errBlueprintUserJobLimit
+	}
+	return nil
+}
+
+func (s *Server) enqueueBlueprintJob(ctx context.Context, blueprintID, createdBy int64, operation, targetFormat string) (string, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return "", err
 	}
 	defer tx.Rollback(ctx)
-	err = tx.QueryRow(ctx, `insert into blueprint_jobs(blueprint_id,operation,target_format,created_by) values($1,$2,$3,$4) returning id,public_id`, blueprintID, operation, targetFormat, createdBy).Scan(&jobID, &jobPublicID)
+	jobPublicID, err := enqueueBlueprintJobTx(ctx, tx, blueprintID, createdBy, operation, targetFormat)
 	if err != nil {
 		return "", err
-	}
-	message := blueprintJobMessage{JobID: jobID}
-	if s.cfg.NATS.OutboxEnabled {
-		if _, err = queue.EnqueueTx(ctx, tx, "blueprint_convert", "blueprint.conversion.requested", "blueprint_job", jobPublicID, "", message); err != nil {
-			return "", err
-		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return "", err
 	}
-	if !s.cfg.NATS.OutboxEnabled && s.queue != nil {
-		_ = s.queue.PublishTask(ctx, "blueprint_convert", message)
+	return jobPublicID, nil
+}
+
+func (s *Server) retryBlueprintJob(ctx context.Context, publicID string, ownerID, actorID int64) (string, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	var blueprintID int64
+	var status string
+	if err = tx.QueryRow(ctx, `select id,status from blueprints where public_id=$1 and owner_id=$2 for update`, publicID, ownerID).Scan(&blueprintID, &status); errors.Is(err, pgx.ErrNoRows) {
+		return "", errBlueprintNotFound
+	} else if err != nil {
+		return "", err
+	}
+	if status != "failed" {
+		return "", errBlueprintNotRetryable
+	}
+	var active bool
+	if err = tx.QueryRow(ctx, `select exists(select 1 from blueprint_jobs
+		where blueprint_id=$1 and operation='normalize' and target_format='' and status in ('queued','processing'))`, blueprintID).Scan(&active); err != nil {
+		return "", err
+	}
+	if active {
+		return "", errBlueprintNotRetryable
+	}
+	tag, err := tx.Exec(ctx, `update blueprints set status='queued',last_error='',updated_at=now() where id=$1 and status='failed'`, blueprintID)
+	if err != nil {
+		return "", err
+	}
+	if tag.RowsAffected() != 1 {
+		return "", errBlueprintNotRetryable
+	}
+	jobPublicID, err := enqueueBlueprintJobTx(ctx, tx, blueprintID, actorID, "normalize", "")
+	if err != nil {
+		if isUniqueViolation(err) {
+			return "", errBlueprintNotRetryable
+		}
+		return "", err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return "", err
 	}
 	return jobPublicID, nil
 }
@@ -120,35 +299,36 @@ func (s *Server) userOwnsBlueprintObject(ctx context.Context, ownerID int64, obj
 	return exists
 }
 
-func (s *Server) blueprintForExistingFile(ctx context.Context, fileID, ownerID int64) map[string]any {
+func (s *Server) blueprintForExistingFile(ctx context.Context, fileID, ownerID int64) (map[string]any, error) {
 	if fileID <= 0 {
-		return nil
+		return nil, nil
 	}
 	var publicID, status string
 	if s.db.QueryRow(ctx, `select public_id,status from blueprints where owner_id=$1 and original_file_id=$2 and status<>'deleted' order by created_at limit 1`, ownerID, fileID).Scan(&publicID, &status) == nil {
-		return map[string]any{"id": publicID, "status": status}
+		return map[string]any{"id": publicID, "status": status}, nil
 	}
 	var objectKey, originalName, contentType, sha string
 	var size int64
 	if s.db.QueryRow(ctx, `select object_key,source_original_name,content_type,source_size_bytes,sha256 from oss_files where id=$1 and uploader_id=$2 and status='active'`, fileID, ownerID).
 		Scan(&objectKey, &originalName, &contentType, &size, &sha) != nil || !isBlueprintExtension(filepath.Ext(originalName)) {
-		return nil
+		return nil, nil
 	}
-	blueprintID, publicID, err := s.createPendingBlueprint(ctx, ownerID, originalName)
+	blueprintID, publicID, err := s.createPendingBlueprint(ctx, ownerID, originalName, time.Now().Add(time.Hour))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	_, _ = s.db.Exec(ctx, `update blueprints set original_object_key=$2 where id=$1`, blueprintID, objectKey)
 	blueprint, err := s.completeBlueprintUpload(ctx, fileID, ownerID, objectKey, originalName, contentType, size, sha)
 	if err != nil {
-		return map[string]any{"id": publicID, "status": "failed"}
+		_, cleanupErr := s.db.Exec(ctx, `delete from blueprints where id=$1 and status='uploading'`, blueprintID)
+		return nil, errors.Join(err, cleanupErr)
 	}
-	return blueprint
+	return blueprint, nil
 }
 
-func (s *Server) reusableBlueprintByHash(ctx context.Context, sha string, size, requesterID int64) map[string]any {
+func (s *Server) reusableBlueprintByHash(ctx context.Context, sha string, size, requesterID int64) (map[string]any, error) {
 	if sha == "" || size <= 0 {
-		return nil
+		return nil, nil
 	}
 	var publicID, status string
 	err := s.db.QueryRow(ctx, `select blueprint.public_id,blueprint.status
@@ -158,13 +338,19 @@ func (s *Server) reusableBlueprintByHash(ctx context.Context, sha string, size, 
 		  and blueprint.status<>'deleted'
 		  and (blueprint.owner_id=$3 or (blueprint.status='ready' and blueprint.review_status in ('not_required','approved')))
 		order by (blueprint.owner_id=$3) desc,blueprint.created_at asc limit 1`, sha, size, requesterID).Scan(&publicID, &status)
-	if err != nil {
-		return nil
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
 	}
-	return map[string]any{"id": publicID, "status": status}
+	if err != nil {
+		return nil, fmt.Errorf("find reusable blueprint by hash: %w", err)
+	}
+	return map[string]any{"id": publicID, "status": status}, nil
 }
 
 func (s *Server) completeBlueprintUpload(ctx context.Context, fileID, ownerID int64, objectKey, originalName, contentType string, size int64, sha string) (map[string]any, error) {
+	if size <= 0 || size > maxBlueprintSourceBytes {
+		return nil, errBlueprintSourceTooLarge
+	}
 	var blueprintID int64
 	var publicID, status, format string
 	err := s.db.QueryRow(ctx, `select id,public_id,status,source_format from blueprints where owner_id=$1 and original_object_key=$2 and status in ('uploading','queued','failed') order by created_at desc limit 1`, ownerID, objectKey).
@@ -203,7 +389,7 @@ func (s *Server) completeBlueprintUpload(ctx context.Context, fileID, ownerID in
 	if !errors.Is(existingErr, pgx.ErrNoRows) {
 		return nil, existingErr
 	}
-	if _, err = tx.Exec(ctx, `update blueprints set original_file_id=$2,status='queued',last_error='',updated_at=now() where id=$1`, blueprintID, fileID); err != nil {
+	if _, err = tx.Exec(ctx, `update blueprints set original_file_id=$2,status='queued',upload_expires_at=null,last_error='',updated_at=now() where id=$1`, blueprintID, fileID); err != nil {
 		return nil, err
 	}
 	if _, err = tx.Exec(ctx, `insert into blueprint_variants(blueprint_id,format,file_id,object_key,original,recommended,status,original_name,content_type,size_bytes,sha256,created_by)
@@ -211,16 +397,12 @@ func (s *Server) completeBlueprintUpload(ctx context.Context, fileID, ownerID in
 		blueprintID, format, fileID, objectKey, originalName, contentType, size, sha, ownerID); err != nil {
 		return nil, err
 	}
-	var jobID int64
-	var jobPublicID string
-	if err = tx.QueryRow(ctx, `insert into blueprint_jobs(blueprint_id,operation,created_by) values($1,'normalize',$2) returning id,public_id`, blueprintID, ownerID).Scan(&jobID, &jobPublicID); err != nil {
+	jobPublicID, err := enqueueBlueprintJobTx(ctx, tx, blueprintID, ownerID, "normalize", "")
+	if err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
-	}
-	if s.queue != nil {
-		_ = s.queue.PublishTask(ctx, "blueprint_convert", blueprintJobMessage{JobID: jobID})
 	}
 	return map[string]any{"id": publicID, "status": "queued", "jobId": jobPublicID}, nil
 }
@@ -242,28 +424,17 @@ func int64Value(value any) int64 {
 }
 
 func (s *Server) blueprints(w http.ResponseWriter, r *http.Request) {
-	limit := boundedLimit(r.URL.Query().Get("limit"), 24, 100)
-	offset := boundedOffset(r.URL.Query().Get("offset"))
-	query, validQuery := parseCatalogQuery(r.URL.Query().Get("q"))
-	if !validQuery {
-		writeError(w, http.StatusBadRequest, "invalid blueprint catalog query")
-		return
-	}
-	rawSort := strings.TrimSpace(r.URL.Query().Get("sort"))
-	if rawSort == "" {
-		rawSort = string(catalogSortUpdated)
-	}
-	sort, validSort := parseCatalogSort(rawSort)
-	direction, validDirection := parseCatalogSortDirection(r.URL.Query().Get("order"), rawSort)
-	if !validSort || !validDirection {
-		writeError(w, http.StatusBadRequest, "invalid blueprint catalog sort")
-		return
-	}
 	claims := currentClaims(r)
-	args := []any{claims.Subject, claimsAllow(claims, "admin.*")}
+	admin := claimsAllow(claims, "admin.*")
+	request, err := parseBlueprintPageRequest(r.URL.Query(), claims.Subject, admin)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	args := []any{claims.Subject, admin}
 	where := []string{"b.status <> 'deleted'", "(b.review_status in ('not_required','approved') or b.owner_id=$1 or $2)"}
-	if query != "" {
-		args = append(args, "%"+query+"%")
+	if request.Query != "" {
+		args = append(args, "%"+request.Query+"%")
 		queryArg := len(args)
 		where = append(where, fmt.Sprintf(`(b.title ilike $%[1]d or b.description_markdown ilike $%[1]d or b.public_id ilike $%[1]d
 			or exists (
@@ -275,45 +446,53 @@ func (s *Server) blueprints(w http.ResponseWriter, r *http.Request) {
 				)
 			))`, queryArg))
 	}
-	orderSQL := catalogOrderSQL(sort, direction, false, 0,
+	orderSQL := catalogOrderSQL(request.Sort, request.Direction, false, 0,
 		"b.created_at", "b.updated_at", "b.id", "b.title")
-	args = append(args, limit, offset)
+	cursorPredicate, cursorArguments := blueprintCursorPredicateSQL(request.Cursor, len(args)+1)
+	args = append(args, cursorArguments...)
+	args = append(args, request.Limit+1, request.Offset)
 	rows, err := s.db.Query(r.Context(), `select b.id,b.public_id,b.title,b.description_markdown,b.source_format,b.status,b.size_x,b.size_y,b.size_z,
-		b.block_count,b.palette_count,b.created_at,b.updated_at,u.id,u.username,u.avatar_url
+		b.block_count,b.palette_count,b.created_at,b.updated_at,u.id,u.username,u.avatar_url,lower(b.title),
+		coalesce(popularity.heat_score,0)::text,coalesce(popularity.download_count,0)::text,
+		coalesce(popularity.favorite_count,0)::text,coalesce(popularity.bayesian_rating,0)::text,
+		coalesce(popularity.rating_count,0),coalesce(popularity.view_count,0)::text,
+		coalesce(popularity.comment_count,0)::text
 		from blueprints b join users u on u.id=b.owner_id
 		left join public_routes popularity_route on popularity_route.entity_type='blueprint' and popularity_route.internal_id=b.id
 		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
-		where `+strings.Join(where, " and ")+`
+		where `+strings.Join(where, " and ")+` `+cursorPredicate+`
 		order by `+orderSQL+` limit $`+strconv.Itoa(len(args)-1)+` offset $`+strconv.Itoa(len(args)), args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取蓝图库失败")
 		return
 	}
 	defer rows.Close()
-	type blueprintListRow struct {
-		id                                   int64
-		publicID, title, description, format string
-		status, username, avatar             string
-		sizeX, sizeY, sizeZ, paletteCount    int
-		blockCount, uploaderID               int64
-		createdAt, updatedAt                 time.Time
-	}
-	listRows := make([]blueprintListRow, 0)
+	listRows := make([]blueprintPageRow, 0, request.Limit+1)
 	blueprintIDs := make([]int64, 0)
 	for rows.Next() {
-		var item blueprintListRow
-		if err = rows.Scan(&item.id, &item.publicID, &item.title, &item.description, &item.format, &item.status,
-			&item.sizeX, &item.sizeY, &item.sizeZ, &item.blockCount, &item.paletteCount, &item.createdAt, &item.updatedAt,
-			&item.uploaderID, &item.username, &item.avatar); err != nil {
+		var item blueprintPageRow
+		if err = rows.Scan(&item.InternalID, &item.PublicID, &item.Title, &item.Description, &item.Format, &item.Status,
+			&item.SizeX, &item.SizeY, &item.SizeZ, &item.BlockCount, &item.PaletteCount, &item.CreatedAt, &item.UpdatedAt,
+			&item.UploaderID, &item.Username, &item.Avatar, &item.SortName, &item.Heat, &item.Downloads,
+			&item.Favorites, &item.Rating, &item.RatingCount, &item.Views, &item.Comments); err != nil {
 			writeError(w, http.StatusInternalServerError, "解析蓝图库失败")
 			return
 		}
 		listRows = append(listRows, item)
-		blueprintIDs = append(blueprintIDs, item.id)
 	}
 	if err = rows.Err(); err != nil {
 		writeError(w, http.StatusInternalServerError, "读取蓝图库失败")
 		return
+	}
+	rows.Close()
+	hasMore := len(listRows) > request.Limit
+	nextCursor := ""
+	if hasMore {
+		listRows = listRows[:request.Limit]
+		nextCursor = blueprintSQLPageCursor(request, listRows[len(listRows)-1])
+	}
+	for _, item := range listRows {
+		blueprintIDs = append(blueprintIDs, item.InternalID)
 	}
 	requiredMods, err := s.blueprintRequiredModsByID(r.Context(), blueprintIDs)
 	if err != nil {
@@ -323,17 +502,20 @@ func (s *Server) blueprints(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0, len(listRows))
 	ossCfg := s.ossConfigFromSettings(r.Context())
 	for _, item := range listRows {
-		item.avatar, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.avatar)
+		item.Avatar, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.Avatar)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "failed to generate blueprint uploader avatar URL")
 			return
 		}
-		items = append(items, map[string]any{"id": item.publicID, "title": item.title, "description": item.description, "sourceFormat": item.format, "status": item.status,
-			"size": []int{item.sizeX, item.sizeY, item.sizeZ}, "blockCount": item.blockCount, "paletteCount": item.paletteCount, "createdAt": item.createdAt, "updatedAt": item.updatedAt,
-			"coverUrl": "/api/v1/blueprints/" + item.publicID + "/cover?v=" + strconv.FormatInt(item.updatedAt.Unix(), 10), "requiredMods": requiredMods[item.id],
-			"uploader": map[string]any{"id": item.uploaderID, "username": item.username, "avatarUrl": item.avatar}})
+		items = append(items, map[string]any{"id": item.PublicID, "title": item.Title, "description": item.Description, "sourceFormat": item.Format, "status": item.Status,
+			"size": []int{item.SizeX, item.SizeY, item.SizeZ}, "blockCount": item.BlockCount, "paletteCount": item.PaletteCount, "createdAt": item.CreatedAt, "updatedAt": item.UpdatedAt,
+			"coverUrl": "/api/v1/blueprints/" + item.PublicID + "/cover?v=" + strconv.FormatInt(item.UpdatedAt.Unix(), 10), "requiredMods": requiredMods[item.InternalID],
+			"uploader": map[string]any{"id": item.UploaderID, "username": item.Username, "avatarUrl": item.Avatar}})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "limit": limit, "offset": offset})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items, "limit": request.Limit, "offset": request.Offset,
+		"hasMore": hasMore, "nextCursor": nextCursor,
+	})
 }
 
 func (s *Server) blueprintRequiredModsByID(ctx context.Context, blueprintIDs []int64) (map[int64][]blueprintRequiredMod, error) {
@@ -344,6 +526,7 @@ func (s *Server) blueprintRequiredModsByID(ctx context.Context, blueprintIDs []i
 	if len(blueprintIDs) == 0 {
 		return result, nil
 	}
+	ossCfg := s.ossConfigFromSettings(ctx)
 	rows, err := s.db.Query(ctx, `select blueprint_mod.blueprint_id,mod.project_code,mod.slug,mod.primary_name,mod.secondary_name,
 		primary_identifier.identifier,mod.icon_url,array_agg(distinct blueprint_mod.source_namespace order by blueprint_mod.source_namespace)
 		from blueprint_mods blueprint_mod join mods mod on mod.id=blueprint_mod.mod_id
@@ -356,7 +539,6 @@ func (s *Server) blueprintRequiredModsByID(ctx context.Context, blueprintIDs []i
 		return nil, err
 	}
 	defer rows.Close()
-	ossCfg := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var blueprintID int64
 		var mod blueprintRequiredMod
@@ -389,6 +571,7 @@ func (s *Server) blueprintDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		logBlueprintReadFailure(publicID, "detail", err)
 		writeError(w, http.StatusInternalServerError, "读取蓝图失败")
 		return
 	}
@@ -404,17 +587,25 @@ func (s *Server) blueprintDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	variants, err := s.blueprintVariants(r.Context(), blueprintID)
 	if err != nil {
+		logBlueprintReadFailure(publicID, "variants", err)
 		writeError(w, http.StatusInternalServerError, "读取蓝图格式失败")
 		return
 	}
 	materials, err := s.blueprintMaterialRows(r.Context(), blueprintID, normalizeExportContentLocale(r.URL.Query().Get("locale")))
 	if err != nil {
+		logBlueprintReadFailure(publicID, "materials", err)
 		writeError(w, http.StatusInternalServerError, "读取蓝图方块统计失败")
 		return
 	}
-	assetRevisions := s.blueprintAssetRevisions(r.Context(), blueprintID)
+	assetRevisions, err := s.blueprintAssetRevisions(r.Context(), blueprintID)
+	if err != nil {
+		logBlueprintReadFailure(publicID, "asset_revisions", err)
+		writeError(w, http.StatusInternalServerError, "读取蓝图资源版本失败")
+		return
+	}
 	requiredModsByID, err := s.blueprintRequiredModsByID(r.Context(), []int64{blueprintID})
 	if err != nil {
+		logBlueprintReadFailure(publicID, "required_mods", err)
 		writeError(w, http.StatusInternalServerError, "读取蓝图所需模组失败")
 		return
 	}
@@ -428,7 +619,7 @@ func (s *Server) blueprintDetail(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) blueprintAssetRevisions(ctx context.Context, blueprintID int64) []map[string]any {
+func (s *Server) blueprintAssetRevisions(ctx context.Context, blueprintID int64) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, `with namespaces as (
 		select distinct split_part(block_id,':',1) namespace from blueprint_materials where blueprint_id=$1
 	), paths as (
@@ -444,18 +635,22 @@ func (s *Server) blueprintAssetRevisions(ctx context.Context, blueprintID int64)
 	join mods on mods.id=revision.mod_id
 	group by paths.revision_id,mods.slug order by paths.revision_id`, blueprintID)
 	if err != nil {
-		return []map[string]any{}
+		return nil, fmt.Errorf("query blueprint asset revisions: %w", err)
 	}
 	defer rows.Close()
 	result := make([]map[string]any, 0)
 	for rows.Next() {
 		var revisionID, siteID string
 		var paths []string
-		if rows.Scan(&revisionID, &siteID, &paths) == nil {
-			result = append(result, map[string]any{"id": revisionID, "siteId": siteID, "paths": paths})
+		if err = rows.Scan(&revisionID, &siteID, &paths); err != nil {
+			return nil, fmt.Errorf("scan blueprint asset revision: %w", err)
 		}
+		result = append(result, map[string]any{"id": revisionID, "siteId": siteID, "paths": paths})
 	}
-	return result
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate blueprint asset revisions: %w", err)
+	}
+	return result, nil
 }
 
 func (s *Server) blueprintVariants(ctx context.Context, blueprintID int64) ([]map[string]any, error) {
@@ -498,7 +693,9 @@ func (s *Server) blueprintMaterialRows(ctx context.Context, blueprintID int64, l
 			return nil, err
 		}
 		var propertyMap map[string]string
-		_ = json.Unmarshal(properties, &propertyMap)
+		if err = json.Unmarshal(properties, &propertyMap); err != nil {
+			return nil, fmt.Errorf("decode blueprint material properties %s: %w", blockID, err)
+		}
 		if propertyMap == nil {
 			propertyMap = map[string]string{}
 		}
@@ -507,17 +704,29 @@ func (s *Server) blueprintMaterialRows(ctx context.Context, blueprintID int64, l
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
-	revisions := make(map[string]string)
-	revisionRows, revisionErr := s.db.Query(ctx, `select distinct on(source_namespace) source_namespace,id::text from catalog_import_revisions
-		where is_active and status in ('ready','partial') order by source_namespace,coalesce(activated_at,created_at) desc`)
-	if revisionErr == nil {
+	namespaceSet := make(map[string]struct{}, len(materialRows))
+	namespaces := make([]string, 0, len(materialRows))
+	for _, row := range materialRows {
+		namespaces = appendBlueprintMaterialNamespace(namespaces, namespaceSet, row.blockID)
+	}
+	revisions := make(map[string]string, len(namespaces))
+	if len(namespaces) > 0 {
+		revisionRows, revisionErr := s.db.Query(ctx, blueprintMaterialRevisionSQL, namespaces)
+		if revisionErr != nil {
+			return nil, fmt.Errorf("query blueprint material revisions: %w", revisionErr)
+		}
 		defer revisionRows.Close()
 		for revisionRows.Next() {
 			var namespace, revisionID string
-			if revisionRows.Scan(&namespace, &revisionID) == nil {
-				revisions[namespace] = revisionID
+			if err = revisionRows.Scan(&namespace, &revisionID); err != nil {
+				return nil, fmt.Errorf("scan blueprint material revision: %w", err)
 			}
+			revisions[namespace] = revisionID
 		}
+		if err = revisionRows.Err(); err != nil {
+			return nil, fmt.Errorf("iterate blueprint material revisions: %w", err)
+		}
+		revisionRows.Close()
 	}
 	keys := make([]exportResourceKey, 0, len(materialRows))
 	for _, row := range materialRows {
@@ -526,7 +735,10 @@ func (s *Server) blueprintMaterialRows(ctx context.Context, blueprintID int64, l
 			keys = append(keys, exportResourceKey{RevisionID: revisionID, ResourceID: row.blockID, Kind: "block"})
 		}
 	}
-	resolved, _ := s.resolveExportResources(ctx, keys)
+	resolved, err := s.resolveExportResources(ctx, keys)
+	if err != nil {
+		return nil, fmt.Errorf("resolve blueprint material resources: %w", err)
+	}
 	result := make([]map[string]any, 0, len(materialRows))
 	for _, row := range materialRows {
 		namespace := strings.SplitN(row.blockID, ":", 2)[0]
@@ -546,7 +758,7 @@ func (s *Server) blueprintMaterialRows(ctx context.Context, blueprintID int64, l
 			"name": name, "names": source.Names, "iconPath": source.IconPath, "previewPath": source.PreviewPath,
 			"sourceRevisionId": source.RevisionID, "sourceModSiteId": source.ModSiteID,
 			"sourceVersionPublicId": source.VersionPublicID, "detailUrl": canonicalResourceDetailURL(source),
-			"entityId": source.EntityID})
+			"publicId": source.PublicID})
 	}
 	return result, nil
 }
@@ -555,13 +767,25 @@ func (s *Server) blueprintCover(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("publicId")))
 	claims := currentClaims(r)
 	var objectKey, contentType, reviewStatus string
-	if err := s.db.QueryRow(r.Context(), `select file.object_key,coalesce(file.content_type,''),blueprint.review_status
+	err := s.db.QueryRow(r.Context(), `select file.object_key,coalesce(file.content_type,''),blueprint.review_status
 		from blueprints blueprint join oss_files file on file.id=blueprint.cover_file_id
 		where blueprint.public_id=$1 and blueprint.status<>'deleted'
 		and file.status='active' and file.scan_status in ('clean','trusted_generated')
 		and lower(split_part(file.content_type,';',1)) in ('image/png','image/jpeg','image/jpg','image/gif','image/webp')
-		and (blueprint.review_status in ('not_required','approved') or blueprint.owner_id=$2 or $3)`, publicID, claims.Subject, claimsAllow(claims, "admin.*")).Scan(&objectKey, &contentType, &reviewStatus); err != nil || objectKey == "" {
+		and (blueprint.review_status in ('not_required','approved') or blueprint.owner_id=$2 or $3)`, publicID, claims.Subject, claimsAllow(claims, "admin.*")).Scan(&objectKey, &contentType, &reviewStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		logBlueprintReadFailure(publicID, "cover", err)
+		writeError(w, http.StatusInternalServerError, "读取蓝图封面信息失败")
+		return
+	}
+	if objectKey == "" {
+		err = errors.New("blueprint cover object key is empty")
+		logBlueprintReadFailure(publicID, "cover", err)
+		writeError(w, http.StatusInternalServerError, "读取蓝图封面信息失败")
 		return
 	}
 	client, cfg, err := s.ossClient(r.Context())
@@ -592,12 +816,17 @@ func (s *Server) blueprintRenderData(w http.ResponseWriter, r *http.Request) {
 	var objectKey, reviewStatus string
 	err := s.db.QueryRow(r.Context(), `select normalized_object_key,review_status from blueprints where public_id=$1 and status in ('ready','partial')
 		and (review_status in ('not_required','approved') or owner_id=$2 or $3)`, publicID, claims.Subject, claimsAllow(claims, "admin.*")).Scan(&objectKey, &reviewStatus)
-	if errors.Is(err, pgx.ErrNoRows) || objectKey == "" {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "蓝图渲染数据尚未就绪")
 		return
 	}
 	if err != nil {
+		logBlueprintReadFailure(publicID, "render_data", err)
 		writeError(w, http.StatusInternalServerError, "读取蓝图渲染数据失败")
+		return
+	}
+	if objectKey == "" {
+		writeError(w, http.StatusNotFound, "蓝图渲染数据尚未就绪")
 		return
 	}
 	client, cfg, err := s.ossClient(r.Context())
@@ -627,14 +856,17 @@ func setBlueprintPreviewCacheControl(w http.ResponseWriter, reviewStatus, public
 	}
 }
 
+type blueprintUpdateRequest struct {
+	Title         string                    `json:"title"`
+	Description   string                    `json:"description"`
+	Reason        string                    `json:"reason,omitempty"`
+	DefaultLocale string                    `json:"defaultLocale"`
+	Localizations []catalogLocalizationEdit `json:"localizations"`
+}
+
 func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("publicId")))
-	var request struct {
-		Title         string                    `json:"title"`
-		Description   string                    `json:"description"`
-		DefaultLocale string                    `json:"defaultLocale"`
-		Localizations []catalogLocalizationEdit `json:"localizations"`
-	}
+	var request blueprintUpdateRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
@@ -695,11 +927,16 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 	initialSubmission := baseRevisionID == nil || errors.Is(latestRevisionErr, pgx.ErrNoRows) || latestRevisionSource == "blueprint_upload"
 	reviewConfig := loadReviewConfig(r.Context(), s.db)
 	reviewRequired := reviewConfig.BlueprintEdit
-	reason := "Blueprint information update"
+	reason := strings.TrimSpace(request.Reason)
+	if reason == "" {
+		reason = "Blueprint information update"
+	}
 	operation := "edit"
 	if initialSubmission {
 		reviewRequired = reviewConfig.BlueprintCreate
-		reason = "New blueprint"
+		if strings.TrimSpace(request.Reason) == "" {
+			reason = "New blueprint"
+		}
 		operation = "create"
 		if err = withdrawPendingContentRequestsTx(r.Context(), tx, "blueprint", publicID, currentClaims(r).Subject, r); err != nil {
 			writeError(w, http.StatusInternalServerError, "Replace blueprint draft failed")
@@ -746,12 +983,28 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 func applyBlueprintContentSnapshotTx(ctx context.Context, tx pgx.Tx, blueprintID, revisionID, actorID int64, snapshot blueprintContentSnapshot) error {
 	var coverFileID *int64
 	if snapshot.CoverFileID != "" {
-		file, err := resolveTrustedRasterOSSFilePublicID(ctx, tx, snapshot.CoverFileID, ossRasterBindingScope{UploaderID: actorID})
-		if err != nil {
-			return err
+		var existingID int64
+		var existingKey string
+		err := tx.QueryRow(ctx, `select file.id,file.object_key
+			from blueprints blueprint join oss_files file on file.id=blueprint.cover_file_id
+			where blueprint.id=$1 and file.public_id=$2 and file.status='active'
+			  and file.scan_status in ('clean','trusted_generated')
+			  and lower(trim(split_part(file.content_type,';',1)))=any($3::text[])
+			for update of file`, blueprintID, snapshot.CoverFileID, safeRasterContentTypes).Scan(&existingID, &existingKey)
+		if err == nil {
+			coverFileID = &existingID
+			snapshot.CoverKey = existingKey
+		} else {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			file, resolveErr := resolveTrustedRasterOSSFilePublicID(ctx, tx, snapshot.CoverFileID, ossRasterBindingScope{UploaderID: actorID})
+			if resolveErr != nil {
+				return resolveErr
+			}
+			coverFileID = &file.ID
+			snapshot.CoverKey = file.ObjectKey
 		}
-		coverFileID = &file.ID
-		snapshot.CoverKey = file.ObjectKey
 	}
 	command, err := tx.Exec(ctx, `update blueprints set title=$2,description_markdown=$3,cover_file_id=$4,cover_object_key=$5,
 		published_revision_id=$6,review_status='approved',updated_at=now() where id=$1`, blueprintID, snapshot.Title,
@@ -765,26 +1018,7 @@ func applyBlueprintContentSnapshotTx(ctx context.Context, tx pgx.Tx, blueprintID
 	if !snapshot.ReplaceLocalizations {
 		return nil
 	}
-	if _, err = tx.Exec(ctx, `update content_subjects set default_locale=$2,updated_at=now()
-		where subject_id=$1 and subject_type='blueprint'`, blueprintID, snapshot.DefaultLocale); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, `delete from content_localizations where subject_id=$1 and subject_type='blueprint'`, blueprintID); err != nil {
-		return err
-	}
-	for _, localization := range snapshot.Localizations {
-		if _, err = tx.Exec(ctx, `insert into content_localizations(
-			subject_type,subject_id,locale,name,summary,content_markdown,provenance,editable,review_status,published_revision_id,updated_by)
-			values('blueprint',$1,$2,$3,$4,$5,'human',true,'approved',$6,$7)
-			on conflict(subject_type,subject_id,locale) do update set name=excluded.name,summary=excluded.summary,
-			content_markdown=excluded.content_markdown,provenance=case when content_localizations.provenance='ai' then 'human_corrected' else 'human' end,
-			editable=true,review_status='approved',published_revision_id=excluded.published_revision_id,
-			revision_no=content_localizations.revision_no+1,updated_by=excluded.updated_by,updated_at=now()`,
-			blueprintID, localization.Locale, localization.Name, localization.Summary, localization.ContentMarkdown, revisionID, actorID); err != nil {
-			return err
-		}
-	}
-	return nil
+	return replaceOwnedAssetLocalizationsTx(ctx, tx, "blueprint", blueprintID, revisionID, actorID, snapshot.DefaultLocale, snapshot.Localizations)
 }
 
 func (s *Server) convertBlueprint(w http.ResponseWriter, r *http.Request) {
@@ -814,11 +1048,28 @@ func (s *Server) convertBlueprint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobID, err := s.enqueueBlueprintJob(r.Context(), blueprintID, claims.Subject, "convert", format)
+	if errors.Is(err, errBlueprintUserJobLimit) {
+		writeAPIError(w, http.StatusTooManyRequests, "BLUEPRINT_JOB_CONCURRENCY_LIMIT", "too many blueprint jobs are already active", 60, nil)
+		return
+	}
+	if errors.Is(err, errBlueprintGlobalJobLimit) {
+		writeAPIError(w, http.StatusTooManyRequests, "BLUEPRINT_GLOBAL_CONCURRENCY_LIMIT", "the public blueprint conversion queue is at capacity", 60, nil)
+		return
+	}
+	if isBlueprintActiveJobConflict(err) {
+		writeAPIError(w, http.StatusConflict, "BLUEPRINT_CONVERSION_ALREADY_QUEUED", "the requested blueprint conversion is already active", 30, nil)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "创建转换任务失败")
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"jobId": jobID, "status": "queued"})
+}
+
+func isBlueprintActiveJobConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "idx_blueprint_jobs_active_operation"
 }
 
 func (s *Server) retryBlueprint(w http.ResponseWriter, r *http.Request) {
@@ -828,13 +1079,19 @@ func (s *Server) retryBlueprint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "没有权限重试该蓝图")
 		return
 	}
-	var blueprintID int64
-	if err := s.db.QueryRow(r.Context(), `select id from blueprints where public_id=$1 and owner_id=$2`, publicID, ownerID).Scan(&blueprintID); err != nil {
+	jobID, err := s.retryBlueprintJob(r.Context(), publicID, ownerID, currentClaims(r).Subject)
+	if errors.Is(err, errBlueprintNotFound) {
 		writeError(w, http.StatusNotFound, "蓝图不存在")
 		return
 	}
-	_, _ = s.db.Exec(r.Context(), `update blueprints set status='queued',last_error='',updated_at=now() where id=$1`, blueprintID)
-	jobID, err := s.enqueueBlueprintJob(r.Context(), blueprintID, currentClaims(r).Subject, "normalize", "")
+	if errors.Is(err, errBlueprintNotRetryable) {
+		writeError(w, http.StatusConflict, "蓝图不处于可重试状态或已有处理任务")
+		return
+	}
+	if errors.Is(err, errBlueprintUserJobLimit) {
+		writeAPIError(w, http.StatusTooManyRequests, "BLUEPRINT_JOB_CONCURRENCY_LIMIT", "too many blueprint jobs are already active", 60, nil)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "创建重试任务失败")
 		return

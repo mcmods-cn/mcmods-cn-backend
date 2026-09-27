@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 type modExportEntryContentSnapshot struct {
@@ -100,6 +102,10 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		}
 		if request.Status == "approved" {
 			if err = applyProjectChangelogSnapshotTx(r.Context(), tx, changelogID, targetRouteID, revisionID, claims.Subject, snapshot); err != nil {
+				if errors.Is(err, errInvalidMinecraftVersionCodes) || errors.Is(err, errUnknownMinecraftVersionCodes) {
+					writeError(w, http.StatusConflict, "the Minecraft version catalog changed after this request was submitted")
+					return
+				}
 				writeError(w, http.StatusInternalServerError, "failed to publish changelog")
 				return
 			}
@@ -222,7 +228,10 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if request.Status == "approved" {
-			if err = applyCommunityPostSnapshotTx(r.Context(), tx, postID, revisionID, snapshot); err != nil {
+			if err = applyCommunityPostSnapshotTx(r.Context(), tx, postID, revisionID, snapshot, security.Claims{Subject: submittedBy}); errors.Is(err, errCommunityPostProjectReferenceNotVisible) {
+				writeError(w, http.StatusConflict, "community post project reference is no longer visible")
+				return
+			} else if err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to publish community post")
 				return
 			}
@@ -315,7 +324,10 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to commit modpack review")
 			return
 		}
-		_ = s.refreshProjectACLVersion(r.Context())
+		if !s.requireSecurityVersionRefresh(w, r, "review_modpack_revision", 0,
+			s.refreshProjectACLVersion(r.Context())) {
+			return
+		}
 		code := "review_approved"
 		if request.Status == "rejected" {
 			code = "review_rejected"
@@ -380,7 +392,10 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to commit project review")
 			return
 		}
-		_ = s.refreshProjectACLVersion(r.Context())
+		if !s.requireSecurityVersionRefresh(w, r, "review_simple_project_revision", 0,
+			s.refreshProjectACLVersion(r.Context())) {
+			return
+		}
 		code := "review_approved"
 		if request.Status == "rejected" {
 			code = "review_rejected"
@@ -582,7 +597,10 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to commit creator review")
 			return
 		}
-		_ = s.refreshProjectACLVersion(r.Context())
+		if !s.requireSecurityVersionRefresh(w, r, "review_creator_revision", 0,
+			s.refreshProjectACLVersion(r.Context())) {
+			return
+		}
 		code := "review_approved"
 		if request.Status == "rejected" {
 			code = "review_rejected"
@@ -680,10 +698,17 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if request.Status == "approved" {
-			if err = applySkinAssetSnapshotTx(r.Context(), tx, assetID, ownerID, revisionID, snapshot); err != nil {
+			if err = applySkinAssetSnapshotTx(r.Context(), tx, assetID, ownerID, revisionID, submittedBy, snapshot); err != nil {
+				if errors.Is(err, errPrivateSkinProfileConflict) {
+					writeError(w, http.StatusConflict, errPrivateSkinProfileConflict.Error())
+					return
+				}
 				writeError(w, http.StatusInternalServerError, "failed to publish skin revision")
 				return
 			}
+		} else if err = rejectSkinRevisionTx(r.Context(), tx, assetID, publishedRevisionID == nil); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to reject skin revision")
+			return
 		}
 		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to record skin review")

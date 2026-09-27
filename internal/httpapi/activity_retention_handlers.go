@@ -18,21 +18,17 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"mcmods-cn-backend/internal/activitycatalog"
 )
 
 const activityRetentionSettingKey = "activity.retention"
 
-var activityActionIDs = map[string]int16{
-	"edit": 1, "create": 2, "view": 3, "delete": 4, "claim": 5, "download": 6,
-	"upload": 7, "purchase": 8, "transfer": 9, "checkin": 10, "use": 11,
-}
+const maxActivityCleanupPreviewEvents = int64(100000)
 
-var activityObjectTypeIDs = map[string]int16{
-	"recipe": 1, "mod": 2, "blueprint": 3, "plugin": 4, "author": 5, "team": 6, "user": 7,
-	"comment": 8, "tag": 9, "file": 10, "economy": 11, "task": 12, "shop_item": 13, "resource": 14,
-	"modpack": 15, "server": 16, "map": 17, "resource_pack": 18, "shader_pack": 19, "datapack": 20,
-	"addon": 21, "community_post": 22, "review": 23, "skin": 24, "player_profile": 25, "changelog": 26, "rating": 27,
-}
+var activityActionIDs = activitycatalog.ActionIDs()
+
+var activityObjectTypeIDs = activitycatalog.ObjectTypeIDs()
 
 var activityObjectRouteTypes = map[string]string{
 	"server": "minecraft_server",
@@ -82,6 +78,23 @@ type activityCleanupExecuteRequest struct {
 	PreviewID         string `json:"previewId"`
 	ConfirmationToken string `json:"confirmationToken"`
 	Confirmation      string `json:"confirmation"`
+}
+
+type activityCleanupPreviewSummary struct {
+	Total        int64
+	ByAction     map[string]int64
+	ByObjectType map[string]int64
+	ByUser       map[string]int64
+	Samples      []activityCleanupPreviewSample
+}
+
+type activityCleanupPreviewSample struct {
+	ID         int64     `json:"id"`
+	UserRef    string    `json:"user_ref"`
+	Action     string    `json:"action"`
+	ObjectType string    `json:"object_type"`
+	ObjectRef  string    `json:"object_ref"`
+	OccurredAt time.Time `json:"occurred_at"`
 }
 
 func defaultActivityRetentionConfig() activityRetentionConfig {
@@ -347,30 +360,21 @@ func (s *Server) previewActivityCleanup(w http.ResponseWriter, r *http.Request) 
 			filter.BatchSize = policy.BatchSize
 		}
 	}
+	if activityCleanupPreviewFilterIsUnbounded(filter) {
+		writeAPIError(w, http.StatusUnprocessableEntity, "ACTIVITY_CLEANUP_FILTER_TOO_BROAD",
+			"activity cleanup preview requires a user, object, object type, or time boundary", 0, nil)
+		return
+	}
 	where, args := activityCleanupWhere(filter, 1)
-	var total int64
-	if err = s.db.QueryRow(r.Context(), `select count(*) from user_activity_events event where `+where, args...).Scan(&total); err != nil {
+	summary, err := s.loadActivityCleanupPreviewSummary(r.Context(), where, args)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to preview activity cleanup")
 		return
 	}
-	byAction, err := s.activityCleanupGroupedCounts(r.Context(), where, args, "action.code", "join activity_actions action on action.id=event.action_id")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to group activity cleanup preview")
-		return
-	}
-	byObjectType, err := s.activityCleanupGroupedCounts(r.Context(), where, args, "object_type.code", "join activity_object_types object_type on object_type.id=event.object_type_id")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to group activity cleanup preview")
-		return
-	}
-	byUser, err := s.activityCleanupGroupedCounts(r.Context(), where, args, "coalesce(account.public_id,'anonymous')", "left join users account on account.id=event.user_id")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to group activity cleanup preview")
-		return
-	}
-	samples, err := s.activityCleanupSamples(r.Context(), where, args)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load activity cleanup samples")
+	if summary.Total > maxActivityCleanupPreviewEvents {
+		writeAPIError(w, http.StatusUnprocessableEntity, "ACTIVITY_CLEANUP_PREVIEW_LIMIT",
+			"activity cleanup preview matches too many events; narrow the filter", 0,
+			map[string]any{"maximumMatchedCount": maxActivityCleanupPreviewEvents, "minimumMatchedCount": summary.Total})
 		return
 	}
 	token, tokenHash, err := newCleanupConfirmationToken()
@@ -382,67 +386,79 @@ func (s *Server) previewActivityCleanup(w http.ResponseWriter, r *http.Request) 
 	var previewID string
 	err = s.db.QueryRow(r.Context(), `insert into activity_cleanup_runs(source,initiated_by,status,filters,confirmation_hash,matched_count,expires_at)
 		values('manual',$1,'preview',$2::jsonb,$3,$4,now()+interval '15 minutes') returning public_id`,
-		currentClaims(r).Subject, rawFilter, tokenHash, total).Scan(&previewID)
+		currentClaims(r).Subject, rawFilter, tokenHash, summary.Total).Scan(&previewID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save activity cleanup preview")
 		return
 	}
-	dangerous := total >= 100000 || len(filter.UserIDs)+len(filter.ObjectRouteIDs)+len(filter.ObjectTypeIDs) == 0 && filter.From == nil && filter.To == nil
+	dangerous := summary.Total >= maxActivityCleanupPreviewEvents
 	writeJSON(w, http.StatusOK, map[string]any{
-		"previewId": previewID, "confirmationToken": token, "confirmationText": "DELETE " + strconv.FormatInt(total, 10),
-		"dangerous": dangerous, "matchedCount": total, "byAction": byAction, "byObjectType": byObjectType,
-		"byUser": byUser, "samples": samples, "filters": request, "snapshotBefore": filter.SnapshotBefore, "expiresInSeconds": 900,
+		"previewId": previewID, "confirmationToken": token, "confirmationText": "DELETE " + strconv.FormatInt(summary.Total, 10),
+		"dangerous": dangerous, "matchedCount": summary.Total, "byAction": summary.ByAction, "byObjectType": summary.ByObjectType,
+		"byUser": summary.ByUser, "samples": summary.Samples, "filters": request, "snapshotBefore": filter.SnapshotBefore, "expiresInSeconds": 900,
 	})
 }
 
-func (s *Server) activityCleanupSamples(ctx context.Context, where string, args []any) ([]map[string]any, error) {
-	rows, err := s.db.Query(ctx, `select event.id,
-		case when account.id is null then 'anonymous' else substr(md5(account.public_id),1,8) end user_ref,
-		action.code action,object_type.code object_type,
-		case when route.id is null then '' else substr(md5(route.public_id),1,8) end object_ref,event.occurred_at
-		from user_activity_events event join activity_actions action on action.id=event.action_id
-		join activity_object_types object_type on object_type.id=event.object_type_id
-		left join users account on account.id=event.user_id left join public_routes route on route.id=event.object_route_id
-		where `+where+` order by event.occurred_at,event.id limit 10`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	samples := make([]map[string]any, 0, 10)
-	for rows.Next() {
-		var id int64
-		var userRef, action, objectType, objectRef string
-		var occurredAt time.Time
-		if err = rows.Scan(&id, &userRef, &action, &objectType, &objectRef, &occurredAt); err != nil {
-			return nil, err
-		}
-		samples = append(samples, map[string]any{
-			"id": id, "user_ref": userRef, "action": action, "object_type": objectType,
-			"object_ref": objectRef, "occurred_at": occurredAt,
-		})
-	}
-	return samples, rows.Err()
+func activityCleanupPreviewFilterIsUnbounded(filter normalizedActivityCleanupFilter) bool {
+	return len(filter.UserIDs) == 0 && len(filter.ObjectRouteIDs) == 0 && len(filter.ObjectTypeIDs) == 0 &&
+		filter.From == nil && filter.To == nil
 }
 
-func (s *Server) activityCleanupGroupedCounts(ctx context.Context, where string, args []any, groupExpression, join string) (map[string]int64, error) {
-	result := map[string]int64{}
-	// A cleanup spanning many users must not build an unbounded response. The
-	// action/object dimensions are finite; for users this returns the 100
-	// largest groups, which is sufficient for a destructive-action preview.
-	rows, err := s.db.Query(ctx, `select `+groupExpression+`,count(*) from user_activity_events event `+join+` where `+where+` group by 1 order by 2 desc,1 limit 100`, args...)
+func activityCleanupPreviewSummarySQL(where string, limitPlaceholder int) string {
+	return `with candidates as materialized (
+		select event.id,event.user_id,event.action_id,event.object_type_id,event.object_route_id,event.occurred_at
+		from user_activity_events event where ` + where + ` limit $` + strconv.Itoa(limitPlaceholder) + `
+	), action_counts as (
+		select action.code group_key,count(*) count from candidates candidate
+		join activity_actions action on action.id=candidate.action_id group by action.code
+	), object_counts as (
+		select object_type.code group_key,count(*) count from candidates candidate
+		join activity_object_types object_type on object_type.id=candidate.object_type_id group by object_type.code
+	), user_counts as (
+		select coalesce(account.public_id,'anonymous') group_key,count(*) count from candidates candidate
+		left join users account on account.id=candidate.user_id group by 1 order by 2 desc,1 limit 100
+	), sample_rows as (
+		select candidate.id,
+			case when account.id is null then 'anonymous' else substr(md5(account.public_id),1,8) end user_ref,
+			action.code action,object_type.code object_type,
+			case when route.id is null then '' else substr(md5(route.public_id),1,8) end object_ref,candidate.occurred_at
+		from candidates candidate join activity_actions action on action.id=candidate.action_id
+		join activity_object_types object_type on object_type.id=candidate.object_type_id
+		left join users account on account.id=candidate.user_id left join public_routes route on route.id=candidate.object_route_id
+		order by candidate.occurred_at,candidate.id limit 10
+	)
+	select (select count(*) from candidates),
+		coalesce((select jsonb_object_agg(group_key,count) from action_counts),'{}'::jsonb),
+		coalesce((select jsonb_object_agg(group_key,count) from object_counts),'{}'::jsonb),
+		coalesce((select jsonb_object_agg(group_key,count) from user_counts),'{}'::jsonb),
+		coalesce((select jsonb_agg(jsonb_build_object(
+			'id',id,'user_ref',user_ref,'action',action,'object_type',object_type,
+			'object_ref',object_ref,'occurred_at',occurred_at) order by occurred_at,id) from sample_rows),'[]'::jsonb)`
+}
+
+func (s *Server) loadActivityCleanupPreviewSummary(ctx context.Context, where string, args []any) (activityCleanupPreviewSummary, error) {
+	args = append(args, maxActivityCleanupPreviewEvents+1)
+	var summary activityCleanupPreviewSummary
+	var byAction, byObjectType, byUser, samples []byte
+	err := s.db.QueryRow(ctx, activityCleanupPreviewSummarySQL(where, len(args)), args...).Scan(
+		&summary.Total, &byAction, &byObjectType, &byUser, &samples,
+	)
 	if err != nil {
-		return nil, err
+		return summary, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var key string
-		var count int64
-		if err = rows.Scan(&key, &count); err != nil {
-			return nil, err
-		}
-		result[key] = count
+	if err = json.Unmarshal(byAction, &summary.ByAction); err != nil {
+		return summary, fmt.Errorf("decode activity cleanup action counts: %w", err)
 	}
-	return result, rows.Err()
+	if err = json.Unmarshal(byObjectType, &summary.ByObjectType); err != nil {
+		return summary, fmt.Errorf("decode activity cleanup object counts: %w", err)
+	}
+	if err = json.Unmarshal(byUser, &summary.ByUser); err != nil {
+		return summary, fmt.Errorf("decode activity cleanup user counts: %w", err)
+	}
+	if err = json.Unmarshal(samples, &summary.Samples); err != nil {
+		return summary, fmt.Errorf("decode activity cleanup samples: %w", err)
+	}
+	return summary, nil
 }
 
 func newCleanupConfirmationToken() (string, string, error) {
@@ -515,33 +531,79 @@ func (s *Server) executeActivityCleanup(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusConflict, "activity cleanup preview was already used")
 		return
 	}
-	deleted, cleanupErr := deleteActivityEventsInBatches(r.Context(), s.db, filter)
+	deleted, cleanupErr := deleteActivityEventsInBatches(r.Context(), s.db, request.PreviewID, filter)
+	finalStatus, finalMessage := "completed", ""
 	if cleanupErr != nil {
-		_, _ = s.db.Exec(context.Background(), `update activity_cleanup_runs set status='failed',deleted_count=$2,finished_at=now(),error_message=$3 where public_id=$1`, request.PreviewID, deleted, cleanupErr.Error())
+		finalStatus, finalMessage = "failed", cleanupErr.Error()
+	}
+	finalCtx, finalCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	totalDeleted, finalErr := finalizeActivityCleanupRun(finalCtx, s.db, request.PreviewID, finalStatus, finalMessage)
+	finalCancel()
+	if finalErr != nil {
+		log.Printf("finalize manual activity cleanup %s after deleting %d events: %v", request.PreviewID, deleted, finalErr)
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"code": "ACTIVITY_CLEANUP_AUDIT_PENDING", "previewId": request.PreviewID,
+			"matchedCount": matched, "deletedCount": deleted, "status": "audit_pending",
+		})
+		return
+	}
+	if cleanupErr != nil {
 		writeError(w, http.StatusInternalServerError, "activity cleanup failed")
 		return
 	}
-	_, _ = s.db.Exec(r.Context(), `update activity_cleanup_runs set status='completed',deleted_count=$2,finished_at=now(),confirmation_hash='' where public_id=$1`, request.PreviewID, deleted)
-	writeJSON(w, http.StatusOK, map[string]any{"previewId": request.PreviewID, "matchedCount": matched, "deletedCount": deleted, "status": "completed"})
+	writeJSON(w, http.StatusOK, map[string]any{"previewId": request.PreviewID, "matchedCount": matched, "deletedCount": totalDeleted, "status": "completed"})
 }
 
-func deleteActivityEventsInBatches(ctx context.Context, db *pgxpool.Pool, filter normalizedActivityCleanupFilter) (int64, error) {
+func deleteActivityEventsInBatches(ctx context.Context, db *pgxpool.Pool, runID string, filter normalizedActivityCleanupFilter) (int64, error) {
 	where, args := activityCleanupWhere(filter, 1)
 	args = append(args, filter.BatchSize)
 	limitPlaceholder := len(args)
 	var deleted int64
 	for ctx.Err() == nil {
-		tag, err := db.Exec(ctx, `delete from user_activity_events where id in (
-			select event.id from user_activity_events event where `+where+` order by event.occurred_at,event.id limit $`+strconv.Itoa(limitPlaceholder)+`)`, args...)
+		tx, err := db.Begin(ctx)
 		if err != nil {
 			return deleted, err
 		}
-		deleted += tag.RowsAffected()
-		if tag.RowsAffected() < int64(filter.BatchSize) {
+		tag, err := tx.Exec(ctx, `delete from user_activity_events where id in (
+			select event.id from user_activity_events event where `+where+` order by event.occurred_at,event.id limit $`+strconv.Itoa(limitPlaceholder)+`)`, args...)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return deleted, err
+		}
+		batchDeleted := tag.RowsAffected()
+		progressTag, progressErr := tx.Exec(ctx, `update activity_cleanup_runs
+			set deleted_count=activity_cleanup_runs.deleted_count+$2
+			where public_id=$1 and status='running'`, runID, batchDeleted)
+		if progressErr != nil || progressTag.RowsAffected() != 1 {
+			_ = tx.Rollback(ctx)
+			if progressErr != nil {
+				return deleted, progressErr
+			}
+			return deleted, errors.New("activity cleanup run is no longer active")
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return deleted, err
+		}
+		deleted += batchDeleted
+		if batchDeleted < int64(filter.BatchSize) {
 			return deleted, nil
 		}
 	}
 	return deleted, ctx.Err()
+}
+
+type activityCleanupFinalizer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func finalizeActivityCleanupRun(ctx context.Context, db activityCleanupFinalizer, runID, status, message string) (int64, error) {
+	if status != "completed" && status != "failed" {
+		return 0, errors.New("invalid activity cleanup final status")
+	}
+	var deleted int64
+	err := db.QueryRow(ctx, `update activity_cleanup_runs set status=$2,finished_at=now(),confirmation_hash='',error_message=$3
+		where public_id=$1 and status='running' returning deleted_count`, runID, status, message).Scan(&deleted)
+	return deleted, err
 }
 
 type ActivityRetentionWorker struct{ db *pgxpool.Pool }
@@ -558,14 +620,19 @@ func (worker *ActivityRetentionWorker) Start(ctx context.Context) {
 }
 
 func (worker *ActivityRetentionWorker) run(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
+	pruneTicker := time.NewTicker(10 * time.Minute)
+	repairTicker := time.NewTicker(time.Minute)
+	defer pruneTicker.Stop()
+	defer repairTicker.Stop()
+	repairActivityCleanupRuns(ctx, worker.db)
 	worker.prune(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-repairTicker.C:
+			repairActivityCleanupRuns(ctx, worker.db)
+		case <-pruneTicker.C:
 			worker.prune(ctx)
 		}
 	}
@@ -594,7 +661,10 @@ func (worker *ActivityRetentionWorker) prune(ctx context.Context) {
 		return
 	}
 	var recentlyRan bool
-	_ = worker.db.QueryRow(ctx, `select exists(select 1 from activity_cleanup_runs where source='automatic' and started_at>now()-make_interval(mins=>$1))`, config.RunIntervalMinutes).Scan(&recentlyRan)
+	if err = worker.db.QueryRow(ctx, `select exists(select 1 from activity_cleanup_runs where source='automatic' and started_at>now()-make_interval(mins=>$1))`, config.RunIntervalMinutes).Scan(&recentlyRan); err != nil {
+		log.Printf("check recent automatic activity cleanup: %v", err)
+		return
+	}
 	if recentlyRan {
 		return
 	}
@@ -610,17 +680,73 @@ func (worker *ActivityRetentionWorker) prune(ctx context.Context) {
 			Summary: activityCleanupFilterRequest{Actions: []string{action}}}
 		rawFilter, _ := json.Marshal(filter)
 		var runID string
-		if worker.db.QueryRow(ctx, `insert into activity_cleanup_runs(source,status,filters) values('automatic','running',$1::jsonb) returning public_id`, rawFilter).Scan(&runID) != nil {
+		if err = worker.db.QueryRow(ctx, `insert into activity_cleanup_runs(source,status,filters) values('automatic','running',$1::jsonb) returning public_id`, rawFilter).Scan(&runID); err != nil {
+			log.Printf("start automatic activity cleanup %s: %v", action, err)
 			continue
 		}
-		deleted, cleanupErr := deleteActivityEventsInBatches(ctx, worker.db, filter)
+		deleted, cleanupErr := deleteActivityEventsInBatches(ctx, worker.db, runID, filter)
 		status, message := "completed", ""
 		if cleanupErr != nil {
 			status, message = "failed", cleanupErr.Error()
 		}
-		_, _ = worker.db.Exec(context.Background(), `update activity_cleanup_runs set status=$2,deleted_count=$3,finished_at=now(),error_message=$4 where public_id=$1`, runID, status, deleted, message)
+		finalCtx, finalCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_, finalErr := finalizeActivityCleanupRun(finalCtx, worker.db, runID, status, message)
+		finalCancel()
+		if finalErr != nil {
+			log.Printf("finalize automatic activity cleanup %s/%s after deleting %d events: %v", action, runID, deleted, finalErr)
+		}
 		if cleanupErr != nil {
 			log.Printf("automatic activity cleanup %s failed: %v", action, cleanupErr)
+		}
+	}
+}
+
+func repairActivityCleanupRuns(ctx context.Context, db *pgxpool.Pool) {
+	rows, err := db.Query(ctx, `select public_id,filters from activity_cleanup_runs
+		where status='running' and started_at<now()-interval '1 minute'
+		order by started_at,id limit 20`)
+	if err != nil {
+		log.Printf("load activity cleanup audit repairs: %v", err)
+		return
+	}
+	type repairRun struct {
+		id     string
+		filter []byte
+	}
+	runs := make([]repairRun, 0, 20)
+	for rows.Next() {
+		var run repairRun
+		if err = rows.Scan(&run.id, &run.filter); err != nil {
+			rows.Close()
+			log.Printf("scan activity cleanup audit repair: %v", err)
+			return
+		}
+		runs = append(runs, run)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		log.Printf("iterate activity cleanup audit repairs: %v", err)
+		return
+	}
+	rows.Close()
+	for _, run := range runs {
+		var filter normalizedActivityCleanupFilter
+		if err = json.Unmarshal(run.filter, &filter); err != nil || filter.BatchSize <= 0 {
+			message := "invalid stored cleanup filter"
+			if err != nil {
+				message = err.Error()
+			}
+			if _, finalErr := finalizeActivityCleanupRun(ctx, db, run.id, "failed", message); finalErr != nil {
+				log.Printf("finalize invalid activity cleanup audit repair %s: %v", run.id, finalErr)
+			}
+			continue
+		}
+		if _, err = deleteActivityEventsInBatches(ctx, db, run.id, filter); err != nil {
+			log.Printf("resume activity cleanup audit repair %s: %v", run.id, err)
+			continue
+		}
+		if _, err = finalizeActivityCleanupRun(ctx, db, run.id, "completed", ""); err != nil {
+			log.Printf("finalize activity cleanup audit repair %s: %v", run.id, err)
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,13 +16,41 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"mcmods-cn-backend/internal/queue"
+	"mcmods-cn-backend/internal/security"
 )
 
 const reportReasonVersion = 1
 
+const minimumTemporaryBanDuration = time.Minute
+
+const (
+	reportTargetActorSubmitter = "submitter"
+	reportTargetActorAuthor    = "author"
+	reportTargetActorOwner     = "owner"
+	reportTargetActorSubject   = "subject"
+)
+
+type reportTargetActor struct {
+	ID   *int64
+	Role string
+}
+
+func identifiedReportTargetActor(id int64, role string) reportTargetActor {
+	return reportTargetActor{ID: &id, Role: role}
+}
+
+func logGovernanceReadFailure(stage, identity string, err error) {
+	slog.Error("governance read failed",
+		"module", "governance",
+		"stage", stage,
+		"identity", identity,
+		"error", err,
+	)
+}
+
 var reportTargetReasons = map[string][]string{
 	"mod":           {"copyright_theft", "impersonation", "malware", "misleading_content", "false_version_loader", "broken_download", "false_license", "duplicate_spam", "advertising"},
+	"modpack":       {"copyright_theft", "impersonation", "malware", "misleading_content", "false_version_loader", "broken_download", "false_license", "duplicate_spam", "advertising"},
 	"plugin":        {"copyright_theft", "impersonation", "malware", "misleading_content", "false_version_loader", "broken_download", "false_license", "duplicate_spam", "advertising"},
 	"map":           {"copyright_theft", "misleading_content", "broken_content", "dangerous_commands", "false_minecraft_version", "prohibited_media", "broken_download"},
 	"shader":        {"copyright_theft", "impersonation", "misleading_media", "prohibited_media", "malware", "false_minecraft_version", "missing_dependencies"},
@@ -130,11 +159,16 @@ func (s *Server) reportEvidenceAccess(w http.ResponseWriter, r *http.Request) {
 	s.presignOSSFileWithRequest(w, r, ossPresignRequest{ObjectKey: objectKey, ExpiresMinutes: 10})
 }
 
-// submitUnifiedReport is the single persistence path shared by the current
-// endpoint and the legacy comment-report boundary adapter.
+// submitUnifiedReport is the single persistence path for the current report endpoint.
 func (s *Server) submitUnifiedReport(w http.ResponseWriter, r *http.Request, request createUnifiedReportRequest) {
 	claims := currentClaims(r)
-	snapshot, targetAuthorID, err := s.reportTargetSnapshot(r.Context(), request.TargetType, request.TargetID)
+	tx, err := s.db.BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		writeError(w, 500, "创建举报事务失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	snapshot, targetActor, err := s.reportTargetSnapshot(r.Context(), tx, request.TargetType, request.TargetID, claims)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "举报目标不存在或不可见")
 		return
@@ -145,16 +179,10 @@ func (s *Server) submitUnifiedReport(w http.ResponseWriter, r *http.Request, req
 	}
 	snapshotRaw, _ := json.Marshal(snapshot)
 	digest := sha256.Sum256(snapshotRaw)
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, 500, "创建举报事务失败")
-		return
-	}
-	defer tx.Rollback(r.Context())
 	var reportID int64
 	var publicID string
-	err = tx.QueryRow(r.Context(), `insert into reports(target_type,target_public_id,target_author_id,reporter_id,reason_code,reason_version,reason_text_snapshot,custom_reason,detail)
-		values($1,$2,$3,$4,$5,$6,$7,$8,$9) returning id,public_id`, request.TargetType, request.TargetID, targetAuthorID, claims.Subject,
+	err = tx.QueryRow(r.Context(), `insert into reports(target_type,target_public_id,target_actor_id,target_actor_role,reporter_id,reason_code,reason_version,reason_text_snapshot,custom_reason,detail)
+		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning id,public_id`, request.TargetType, request.TargetID, targetActor.ID, targetActor.Role, claims.Subject,
 		request.ReasonCode, reportReasonVersion, "reports.reasons."+request.ReasonCode, request.CustomReason, request.Detail).Scan(&reportID, &publicID)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "uq_reports_open_reporter_target") {
@@ -196,29 +224,104 @@ func validReportReason(target, reason string) bool {
 	return false
 }
 
-func (s *Server) reportTargetSnapshot(ctx context.Context, targetType, publicID string) (map[string]any, any, error) {
+type reportSnapshotQueryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+type reportTargetVisibility struct {
+	RouteType  string
+	InternalID int64
+	Path       string
+}
+
+func (s *Server) validateReportTargetVisibility(
+	ctx context.Context,
+	queryer reportSnapshotQueryer,
+	targetType, publicID string,
+	claims security.Claims,
+) (reportTargetVisibility, error) {
+	if targetType == "comment" {
+		var commentTargetType string
+		var commentTargetID int64
+		var targetVersionID *int64
+		err := queryer.QueryRow(ctx, `select target_type,target_id,target_version_id from comments
+			where public_id=$1 and status in ('published','deleted')`, publicID).
+			Scan(&commentTargetType, &commentTargetID, &targetVersionID)
+		if err != nil {
+			return reportTargetVisibility{}, err
+		}
+		if _, err = resolveCommentTargetByInternalWithQueryer(
+			ctx, queryer, commentTargetType, commentTargetID, targetVersionID, claims,
+		); err != nil {
+			return reportTargetVisibility{}, err
+		}
+		return reportTargetVisibility{}, nil
+	}
+	if targetType == "user" {
+		var exists bool
+		if err := queryer.QueryRow(ctx, `select exists(
+			select 1 from users where public_id=$1 and status<>'deleted'
+		)`, publicID).Scan(&exists); err != nil {
+			return reportTargetVisibility{}, err
+		}
+		if !exists {
+			return reportTargetVisibility{}, pgx.ErrNoRows
+		}
+		return reportTargetVisibility{}, nil
+	}
+	target, err := resolveFollowProjectTargetWithQueryer(ctx, queryer, publicID, claims)
+	if err != nil {
+		return reportTargetVisibility{}, err
+	}
+	actualTargetType := normalizeReportRouteType(target.Type)
+	if target.Type == "community_post" {
+		var kind string
+		if err = queryer.QueryRow(ctx, `select kind from community_posts where id=$1 and status='active'`, target.InternalID).Scan(&kind); err != nil {
+			return reportTargetVisibility{}, err
+		}
+		actualTargetType = normalizeReportRouteType("community_" + kind)
+	}
+	if actualTargetType != targetType {
+		return reportTargetVisibility{}, pgx.ErrNoRows
+	}
+	return reportTargetVisibility{RouteType: target.Type, InternalID: target.InternalID, Path: target.URL}, nil
+}
+
+func (s *Server) reportTargetSnapshot(
+	ctx context.Context,
+	queryer reportSnapshotQueryer,
+	targetType, publicID string,
+	claims security.Claims,
+) (map[string]any, reportTargetActor, error) {
+	visibility, err := s.validateReportTargetVisibility(ctx, queryer, targetType, publicID, claims)
+	if err != nil {
+		return nil, reportTargetActor{}, err
+	}
 	if targetType == "comment" {
 		var body, status, authorPublicID, authorName, commentTargetType string
 		var commentID, authorID, commentTargetID int64
 		var targetVersionID, floorNumber *int64
 		var parentPublicID *string
 		var created, updated time.Time
-		err := s.db.QueryRow(ctx, `select comment.id,comment.body,comment.status,author.id,author.public_id,author.username,
+		err := queryer.QueryRow(ctx, `select comment.id,comment.body,comment.status,author.id,author.public_id,author.username,
 			comment.target_type,comment.target_id,comment.target_version_id,parent.public_id,comment.floor_number,comment.created_at,comment.updated_at
 			from comments comment join users author on author.id=comment.author_id
-			left join comments parent on parent.id=comment.parent_id where comment.public_id=$1`, publicID).
+			left join comments parent on parent.id=comment.parent_id
+			where comment.public_id=$1 and comment.status in ('published','deleted')`, publicID).
 			Scan(&commentID, &body, &status, &authorID, &authorPublicID, &authorName, &commentTargetType, &commentTargetID,
 				&targetVersionID, &parentPublicID, &floorNumber, &created, &updated)
 		if err != nil {
-			return nil, nil, err
+			return nil, reportTargetActor{}, err
 		}
 		contextItems := make([]map[string]any, 0, 4)
-		rows, queryErr := s.db.Query(ctx, `select nearby.public_id,nearby.body,nearby.status,nearby.floor_number,nearby.created_at,
+		rows, queryErr := queryer.Query(ctx, `select nearby.public_id,nearby.body,nearby.status,nearby.floor_number,nearby.created_at,
 			author.public_id,author.username from comments nearby join users author on author.id=nearby.author_id
 			where nearby.id<>$1 and nearby.target_type=$2 and nearby.target_id=$3 and nearby.target_version_id is not distinct from $4
+			and nearby.status in ('published','deleted')
 			order by abs(extract(epoch from (nearby.created_at-$5))),nearby.id limit 4`, commentID, commentTargetType, commentTargetID, targetVersionID, created)
 		if queryErr != nil {
-			return nil, nil, queryErr
+			return nil, reportTargetActor{}, queryErr
 		}
 		for rows.Next() {
 			var itemID, itemBody, itemStatus, itemAuthorID, itemAuthorName string
@@ -226,124 +329,153 @@ func (s *Server) reportTargetSnapshot(ctx context.Context, targetType, publicID 
 			var itemCreated time.Time
 			if queryErr = rows.Scan(&itemID, &itemBody, &itemStatus, &itemFloor, &itemCreated, &itemAuthorID, &itemAuthorName); queryErr != nil {
 				rows.Close()
-				return nil, nil, queryErr
+				return nil, reportTargetActor{}, queryErr
 			}
 			contextItems = append(contextItems, map[string]any{"id": itemID, "body": itemBody, "status": itemStatus, "floorNumber": itemFloor,
 				"createdAt": itemCreated, "authorId": itemAuthorID, "authorName": itemAuthorName})
 		}
 		if queryErr = rows.Err(); queryErr != nil {
 			rows.Close()
-			return nil, nil, queryErr
+			return nil, reportTargetActor{}, queryErr
 		}
 		rows.Close()
-		attachments := s.querySimpleRowsWithContext(ctx, `select file.public_id,file.original_name,file.content_type,file.size_bytes,file.sha256,
-			share.public_code as log_share_code,share.status as log_share_status
-			from comment_log_bindings binding join oss_files file on file.id=binding.attachment_file_id
-			left join log_shares share on share.id=binding.log_share_id where binding.comment_id=$1 order by binding.created_at,binding.attachment_file_id`, commentID)
+		attachments, queryErr := reportCommentAttachmentSnapshots(ctx, queryer, commentID)
+		if queryErr != nil {
+			return nil, reportTargetActor{}, queryErr
+		}
 		return map[string]any{"targetType": "comment", "id": publicID, "body": body, "status": status, "authorId": authorPublicID,
 			"authorName": authorName, "commentTargetType": commentTargetType, "commentTargetId": commentTargetID,
 			"targetVersionId": targetVersionID, "parentCommentId": parentPublicID, "floorNumber": floorNumber, "createdAt": created,
-			"updatedAt": updated, "context": contextItems, "attachments": attachments}, authorID, nil
+			"updatedAt": updated, "context": contextItems, "attachments": attachments}, identifiedReportTargetActor(authorID, reportTargetActorAuthor), nil
 	}
 	if targetType == "user" {
 		var id int64
 		var username, avatar, signature, status string
 		var created, updated time.Time
-		err := s.db.QueryRow(ctx, `select id,username,avatar_url,signature,status,created_at,updated_at from users where public_id=$1 and status<>'deleted'`, publicID).
+		err := queryer.QueryRow(ctx, `select id,username,avatar_url,signature,status,created_at,updated_at from users where public_id=$1 and status<>'deleted'`, publicID).
 			Scan(&id, &username, &avatar, &signature, &status, &created, &updated)
-		return map[string]any{"targetType": "user", "id": publicID, "username": username, "avatarUrl": avatar, "signature": signature, "status": status, "createdAt": created, "updatedAt": updated}, id, err
+		return map[string]any{"targetType": "user", "id": publicID, "username": username, "avatarUrl": avatar, "signature": signature, "status": status, "createdAt": created, "updatedAt": updated}, identifiedReportTargetActor(id, reportTargetActorSubject), err
 	}
-	var routeType, path string
-	var internalID int64
-	err := s.db.QueryRow(ctx, `select entity_type,internal_id,canonical_path from public_routes where public_id=$1`, publicID).Scan(&routeType, &internalID, &path)
+	return s.reportPublicContentSnapshot(
+		ctx, queryer, targetType, publicID, visibility.RouteType, visibility.InternalID, visibility.Path,
+	)
+}
+
+func reportCommentAttachmentSnapshots(ctx context.Context, queryer reportSnapshotQueryer, commentID int64) ([]map[string]any, error) {
+	rows, err := queryer.Query(ctx, `select file.public_id,file.original_name,file.content_type,file.size_bytes,file.sha256,
+		share.public_code,share.status
+		from comment_log_bindings binding join oss_files file on file.id=binding.attachment_file_id
+		left join log_shares share on share.id=binding.log_share_id
+		where binding.comment_id=$1 order by binding.created_at,binding.attachment_file_id`, commentID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	actualTargetType := normalizeReportRouteType(routeType)
-	if routeType == "community_post" {
-		var kind string
-		if err = s.db.QueryRow(ctx, `select kind from community_posts where id=$1 and status='active'`, internalID).Scan(&kind); err != nil {
-			return nil, nil, err
+	defer rows.Close()
+	items := make([]map[string]any, 0)
+	for rows.Next() {
+		var publicID, originalName, contentType, sha256 string
+		var sizeBytes int64
+		var logShareCode, logShareStatus *string
+		if err = rows.Scan(&publicID, &originalName, &contentType, &sizeBytes, &sha256, &logShareCode, &logShareStatus); err != nil {
+			return nil, err
 		}
-		actualTargetType = normalizeReportRouteType("community_" + kind)
+		items = append(items, map[string]any{
+			"public_id": publicID, "original_name": originalName, "content_type": contentType,
+			"size_bytes": sizeBytes, "sha256": sha256,
+			"log_share_code": logShareCode, "log_share_status": logShareStatus,
+		})
 	}
-	if actualTargetType != targetType {
-		return nil, nil, pgx.ErrNoRows
-	}
-	return s.reportPublicContentSnapshot(ctx, targetType, publicID, routeType, internalID, path)
+	return items, rows.Err()
 }
 
 // reportPublicContentSnapshot captures the mutable public fields reviewers need
 // to assess the report later. It deliberately omits private drafts, credentials,
 // raw security evidence, and other fields that are not part of the public page.
-func (s *Server) reportPublicContentSnapshot(ctx context.Context, targetType, publicID, routeType string, internalID int64, path string) (map[string]any, any, error) {
+func (s *Server) reportPublicContentSnapshot(ctx context.Context, queryer reportSnapshotQueryer, targetType, publicID, routeType string, internalID int64, path string) (map[string]any, reportTargetActor, error) {
 	var raw []byte
-	var authorID *int64
+	var actorID *int64
+	var actorRole string
 	var err error
 	switch routeType {
 	case "mod":
-		err = s.db.QueryRow(ctx, `select jsonb_build_object(
+		actorRole = reportTargetActorSubmitter
+		err = queryer.QueryRow(ctx, `select jsonb_build_object(
 			'title',mod.primary_name,'secondaryTitle',mod.secondary_name,'summary',mod.summary,'body',mod.body_markdown,
 			'category',mod.primary_category,'license',mod.license,'environment',mod.environment,'status',mod.official_status,
 			'reviewStatus',mod.review_status,'externalLinks',jsonb_build_object('curseforge',mod.curseforge_project_id,'modrinth',mod.modrinth_project_id,'github',mod.github_project_path),
 			'iconUrl',mod.icon_url,'createdAt',mod.created_at,'updatedAt',mod.updated_at,'publishedAt',mod.published_at,
 			'submitter',case when submitter.id is null then null else jsonb_build_object('id',submitter.public_id,'name',submitter.username) end),mod.submitted_by
-			from mods mod left join users submitter on submitter.id=mod.submitted_by where mod.id=$1`, internalID).Scan(&raw, &authorID)
+			from mods mod left join users submitter on submitter.id=mod.submitted_by where mod.id=$1`, internalID).Scan(&raw, &actorID)
+	case "modpack":
+		actorRole = reportTargetActorSubmitter
+		err = queryer.QueryRow(ctx, `select jsonb_build_object(
+			'title',pack.primary_name,'secondaryTitle',pack.secondary_name,'summary',pack.summary,'body',pack.body_markdown,
+			'category',pack.primary_category,'packType',pack.pack_type,'packagingMethod',pack.packaging_method,
+			'license',pack.license,'environment',pack.environment,'status',pack.official_status,'sourceStatus',pack.source_status,
+			'reviewStatus',pack.review_status,'externalLinks',jsonb_build_object('curseforge',pack.curseforge_project_id,'modrinth',pack.modrinth_project_id),
+			'iconUrl',pack.icon_url,'createdAt',pack.created_at,'updatedAt',pack.updated_at,'publishedAt',pack.published_at,
+			'submitter',case when submitter.id is null then null else jsonb_build_object('id',submitter.public_id,'name',submitter.username) end),pack.submitted_by
+			from modpacks pack left join users submitter on submitter.id=pack.submitted_by where pack.id=$1`, internalID).Scan(&raw, &actorID)
 	case "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
-		err = s.db.QueryRow(ctx, `select jsonb_build_object(
+		actorRole = reportTargetActorSubmitter
+		err = queryer.QueryRow(ctx, `select jsonb_build_object(
 			'title',project.primary_name,'summary',project.summary,'body',project.body_markdown,'minecraftVersions',project.minecraft_versions,
 			'loaders',project.loaders,'categories',project.categories,'features',project.features,'license',project.license,
 			'status',project.official_status,'reviewStatus',project.review_status,'iconUrl',project.icon_url,
 			'externalLinks',jsonb_build_object('curseforge',project.curseforge_project_id,'modrinth',project.modrinth_project_id),
 			'createdAt',project.created_at,'updatedAt',project.updated_at,'publishedAt',project.published_at,
 			'submitter',case when submitter.id is null then null else jsonb_build_object('id',submitter.public_id,'name',submitter.username) end),project.submitted_by
-			from simple_projects project left join users submitter on submitter.id=project.submitted_by where project.id=$1 and project.project_type=$2`, internalID, routeType).Scan(&raw, &authorID)
+			from simple_projects project left join users submitter on submitter.id=project.submitted_by where project.id=$1 and project.project_type=$2`, internalID, routeType).Scan(&raw, &actorID)
 	case "community_post":
-		err = s.db.QueryRow(ctx, `select jsonb_build_object(
+		actorRole = reportTargetActorAuthor
+		err = queryer.QueryRow(ctx, `select jsonb_build_object(
 			'title',post.title,'body',post.body_markdown,'kind',post.kind,'category',post.category,'sourceLocale',post.source_locale,
 			'minecraftVersions',post.minecraft_versions,'severity',post.severity,'issueUrl',post.issue_url,
 			'status',post.status,'reviewStatus',post.review_status,'createdAt',post.created_at,'updatedAt',post.updated_at,'publishedAt',post.published_at,
 			'author',jsonb_build_object('id',author.public_id,'name',author.username)),post.author_id
-			from community_posts post join users author on author.id=post.author_id where post.id=$1 and post.status='active'`, internalID).Scan(&raw, &authorID)
+			from community_posts post join users author on author.id=post.author_id where post.id=$1 and post.status='active'`, internalID).Scan(&raw, &actorID)
 	case "minecraft_server":
-		err = s.db.QueryRow(ctx, `select jsonb_build_object(
+		actorRole = reportTargetActorSubmitter
+		err = queryer.QueryRow(ctx, `select jsonb_build_object(
 			'title',server.name,'summary',server.short_description,'body',server.body_markdown,'address',server.address,
 			'minecraftVersions',server.minecraft_versions,'languages',server.languages,'category',server.primary_tag,
 			'dedicatedClient',server.dedicated_client,'whitelist',server.has_whitelist,'onlineMode',server.online_mode,
 			'modded',server.modded,'loader',server.loader,'reviewStatus',server.review_status,
 			'onlineSnapshot',jsonb_build_object('online',server.last_online,'playersOnline',server.last_players_online,'playersMax',server.last_players_max,'motd',server.last_motd,'minecraftVersion',server.last_minecraft_version,'checkedAt',server.last_checked_at),
 			'createdAt',server.created_at,'updatedAt',server.updated_at,'publishedAt',server.published_at,
-			'author',jsonb_build_object('id',author.public_id,'name',author.username)),server.submitted_by
-			from minecraft_servers server join users author on author.id=server.submitted_by where server.id=$1`, internalID).Scan(&raw, &authorID)
+			'submitter',jsonb_build_object('id',submitter.public_id,'name',submitter.username)),server.submitted_by
+			from minecraft_servers server join users submitter on submitter.id=server.submitted_by where server.id=$1`, internalID).Scan(&raw, &actorID)
 	case "skin":
-		err = s.db.QueryRow(ctx, `select jsonb_build_object(
+		actorRole = reportTargetActorOwner
+		err = queryer.QueryRow(ctx, `select jsonb_build_object(
 			'title',asset.display_name,'description',asset.description,'kind',asset.kind,'model',asset.model,'tags',asset.tags,
 			'visibility',asset.visibility,'reviewStatus',asset.review_status,'status',asset.status,'createdAt',asset.created_at,'updatedAt',asset.updated_at,
 			'author',jsonb_build_object('id',author.public_id,'name',author.username)),asset.owner_id
-			from skin_assets asset join users author on author.id=asset.owner_id where asset.id=$1 and asset.status<>'deleted' and asset.visibility in ('public','unlisted')`, internalID).Scan(&raw, &authorID)
+			from skin_assets asset join users author on author.id=asset.owner_id where asset.id=$1 and asset.status='active'`, internalID).Scan(&raw, &actorID)
 	case "blueprint":
-		err = s.db.QueryRow(ctx, `select jsonb_build_object(
+		actorRole = reportTargetActorOwner
+		err = queryer.QueryRow(ctx, `select jsonb_build_object(
 			'title',blueprint.title,'body',blueprint.description_markdown,'sourceFormat',blueprint.source_format,
 			'dimensions',jsonb_build_array(blueprint.size_x,blueprint.size_y,blueprint.size_z),'blockCount',blueprint.block_count,
 			'status',blueprint.status,'reviewStatus',blueprint.review_status,'createdAt',blueprint.created_at,'updatedAt',blueprint.updated_at,
 			'author',jsonb_build_object('id',author.public_id,'name',author.username)),blueprint.owner_id
-			from blueprints blueprint join users author on author.id=blueprint.owner_id where blueprint.id=$1 and blueprint.status<>'deleted'`, internalID).Scan(&raw, &authorID)
+			from blueprints blueprint join users author on author.id=blueprint.owner_id where blueprint.id=$1 and blueprint.status<>'deleted'`, internalID).Scan(&raw, &actorID)
 	default:
-		return nil, nil, pgx.ErrNoRows
+		return nil, reportTargetActor{}, pgx.ErrNoRows
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, reportTargetActor{}, err
 	}
 	payload := map[string]any{}
 	if err = json.Unmarshal(raw, &payload); err != nil {
-		return nil, nil, err
+		return nil, reportTargetActor{}, err
 	}
 	payload["targetType"] = targetType
 	payload["id"] = publicID
 	payload["routeEntityType"] = routeType
 	payload["canonicalPath"] = path
 	payload["capturedAt"] = time.Now().UTC()
-	return payload, authorID, nil
+	return payload, reportTargetActor{ID: actorID, Role: actorRole}, nil
 }
 
 func normalizeReportRouteType(value string) string {
@@ -365,57 +497,85 @@ func normalizeReportRouteType(value string) string {
 	}
 }
 
+func reportProjectAccessType(targetType string) (string, bool) {
+	switch targetType {
+	case "mod", "modpack", "plugin", "map", "resource_pack", "datapack", "addon":
+		return targetType, true
+	case "shader":
+		return "shader_pack", true
+	case "server":
+		return "minecraft_server", true
+	default:
+		return "", false
+	}
+}
+
+func reportModerationRecipientIDs(
+	ctx context.Context,
+	queryer reportSnapshotQueryer,
+	targetType, targetPublicID string,
+	actor reportTargetActor,
+) ([]int64, error) {
+	switch actor.Role {
+	case reportTargetActorAuthor, reportTargetActorOwner, reportTargetActorSubject:
+		if actor.ID == nil {
+			return nil, nil
+		}
+		return []int64{*actor.ID}, nil
+	case reportTargetActorSubmitter:
+		projectType, ok := reportProjectAccessType(targetType)
+		if !ok {
+			return nil, errors.New("report submitter role is only valid for catalog projects")
+		}
+		rows, err := queryer.Query(ctx, `select distinct user_id from effective_project_access
+			where project_type=$1 and project_public_id=$2 and access_level='developer' order by user_id`, projectType, targetPublicID)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		recipients := make([]int64, 0)
+		for rows.Next() {
+			var userID int64
+			if err = rows.Scan(&userID); err != nil {
+				return nil, err
+			}
+			recipients = append(recipients, userID)
+		}
+		return recipients, rows.Err()
+	default:
+		return nil, errors.New("report target actor role is invalid")
+	}
+}
+
 func (s *Server) ownReports(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	limit := boundedLimit(r.URL.Query().Get("limit"), 20, 100)
-	offset := boundedOffset(r.URL.Query().Get("offset"))
-	rows, err := s.db.Query(r.Context(), `select public_id,target_type,target_public_id,reason_code,status,created_at,resolved_at from reports where reporter_id=$1 order by created_at desc,id desc limit $2 offset $3`, claims.Subject, limit, offset)
+	request, err := parseOwnReportPageRequest(r.URL.Query(), claims.Subject)
 	if err != nil {
-		writeError(w, 500, "读取举报失败")
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	defer rows.Close()
-	items := []map[string]any{}
-	for rows.Next() {
-		var id, tt, tid, reason, status string
-		var created time.Time
-		var resolved *time.Time
-		if rows.Scan(&id, &tt, &tid, &reason, &status, &created, &resolved) != nil {
-			writeError(w, 500, "读取举报失败")
-			return
-		}
-		items = append(items, map[string]any{"id": id, "targetType": tt, "targetId": tid, "reasonCode": reason, "status": status, "createdAt": created, "resolvedAt": resolved})
+	page, err := s.queryOwnReportPage(r.Context(), claims.Subject, request)
+	if err != nil {
+		logGovernanceReadFailure("own_reports", request.Scope, err)
+		writeError(w, http.StatusInternalServerError, "读取举报失败")
+		return
 	}
-	writeJSON(w, 200, map[string]any{"items": items, "limit": limit, "offset": offset})
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) adminReports(w http.ResponseWriter, r *http.Request) {
-	status := strings.TrimSpace(r.URL.Query().Get("status"))
-	if status == "" {
-		status = "pending"
-	}
-	limit := boundedLimit(r.URL.Query().Get("limit"), 50, 100)
-	offset := boundedOffset(r.URL.Query().Get("offset"))
-	rows, err := s.db.Query(r.Context(), `select report.public_id,report.target_type,report.target_public_id,report.reason_code,report.status,
-		reporter.public_id,reporter.username,report.created_at,report.claimed_at from reports report join users reporter on reporter.id=report.reporter_id
-		where report.status=$1 order by report.created_at,report.id limit $2 offset $3`, status, limit, offset)
+	request, err := parseAdminReportPageRequest(r.URL.Query())
 	if err != nil {
-		writeError(w, 500, "读取举报队列失败")
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	defer rows.Close()
-	items := []map[string]any{}
-	for rows.Next() {
-		var id, tt, tid, reason, state, rid, rname string
-		var created time.Time
-		var claimed *time.Time
-		if rows.Scan(&id, &tt, &tid, &reason, &state, &rid, &rname, &created, &claimed) != nil {
-			writeError(w, 500, "解析举报队列失败")
-			return
-		}
-		items = append(items, map[string]any{"id": id, "targetType": tt, "targetId": tid, "reasonCode": reason, "status": state, "reporterId": rid, "reporterName": rname, "createdAt": created, "claimedAt": claimed})
+	page, err := s.queryAdminReportPage(r.Context(), request)
+	if err != nil {
+		logGovernanceReadFailure("admin_reports", request.Scope, err)
+		writeError(w, http.StatusInternalServerError, "读取举报队列失败")
+		return
 	}
-	writeJSON(w, 200, map[string]any{"items": items, "limit": limit, "offset": offset})
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) adminReportDetail(w http.ResponseWriter, r *http.Request) {
@@ -423,58 +583,170 @@ func (s *Server) adminReportDetail(w http.ResponseWriter, r *http.Request) {
 	var result map[string]any
 	var raw []byte
 	var tt, tid, reason, custom, detail, status, reporterID, reporterName string
-	var targetAuthorID, targetAuthorName *string
+	var targetActorID, targetActorName, claimedByID, claimedByName *string
+	var targetActorRole string
+	var claimedByCurrentUser bool
 	var version int
 	var created time.Time
 	err := s.db.QueryRow(r.Context(), `select report.target_type,report.target_public_id,report.reason_code,report.reason_version,report.custom_reason,report.detail,report.status,
-		reporter.public_id,reporter.username,target_author.public_id,target_author.username,report.created_at,snapshot.payload
-		from reports report join users reporter on reporter.id=report.reporter_id left join users target_author on target_author.id=report.target_author_id
-		join report_snapshots snapshot on snapshot.report_id=report.id where report.public_id=$1`, id).
-		Scan(&tt, &tid, &reason, &version, &custom, &detail, &status, &reporterID, &reporterName, &targetAuthorID, &targetAuthorName, &created, &raw)
+		reporter.public_id,reporter.username,target_actor.public_id,target_actor.username,report.target_actor_role,
+		claimant.public_id,claimant.username,coalesce(report.claimed_by=$2,false),report.created_at,snapshot.payload
+		from reports report join users reporter on reporter.id=report.reporter_id left join users target_actor on target_actor.id=report.target_actor_id
+		left join users claimant on claimant.id=report.claimed_by
+		join report_snapshots snapshot on snapshot.report_id=report.id where report.public_id=$1`, id, currentClaims(r).Subject).
+		Scan(&tt, &tid, &reason, &version, &custom, &detail, &status, &reporterID, &reporterName, &targetActorID, &targetActorName, &targetActorRole,
+			&claimedByID, &claimedByName, &claimedByCurrentUser, &created, &raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 404, "举报不存在")
 		return
 	}
 	if err != nil {
+		logGovernanceReadFailure("admin_report_detail", id, err)
 		writeError(w, 500, "读取举报失败")
 		return
 	}
 	if claimsAllow(currentClaims(r), "report.snapshot.view") {
-		_ = json.Unmarshal(raw, &result)
+		result, err = decodeReportSnapshot(raw)
+		if err != nil {
+			logGovernanceReadFailure("admin_report_snapshot", id, err)
+			writeError(w, http.StatusInternalServerError, "读取举报快照失败")
+			return
+		}
 	}
 	evidence := []map[string]any{}
 	if claimsAllow(currentClaims(r), "report.evidence.view") {
-		evidence = s.querySimpleRows(r, `select evidence.public_id,evidence.original_name,evidence.content_type,evidence.byte_size,evidence.sha256,
+		evidence, err = s.querySimpleRows(r, `select evidence.public_id,evidence.original_name,evidence.content_type,evidence.byte_size,evidence.sha256,
 			evidence.scan_status,evidence.status,evidence.created_at,evidence.deleted_at
 			from report_evidence evidence join reports report on report.id=evidence.report_id where report.public_id=$1 order by evidence.id`, id)
+		if err != nil {
+			logGovernanceReadFailure("admin_report_evidence", id, err)
+			writeError(w, http.StatusInternalServerError, "读取举报证据失败")
+			return
+		}
 	}
-	reviews := s.querySimpleRows(r, `select review.conclusion,review.note,review.created_at,reviewer.public_id as reviewer_id,reviewer.username as reviewer_name
+	reviews, err := s.querySimpleRows(r, `select review.conclusion,review.note,review.created_at,reviewer.public_id as reviewer_id,reviewer.username as reviewer_name
 		from report_reviews review join reports report on report.id=review.report_id join users reviewer on reviewer.id=review.reviewer_id
 		where report.public_id=$1 order by review.created_at,review.id`, id)
-	actions := s.querySimpleRows(r, `select action.public_id,action.action_type,action.target_type,action.target_public_id,action.reason,action.created_at,
+	if err != nil {
+		logGovernanceReadFailure("admin_report_reviews", id, err)
+		writeError(w, http.StatusInternalServerError, "读取举报审核记录失败")
+		return
+	}
+	actions, err := s.querySimpleRows(r, `select action.public_id,action.action_type,action.target_type,action.target_public_id,action.reason,action.created_at,
 		actor.public_id as actor_id,actor.username as actor_name from moderation_actions action join reports report on report.id=action.report_id
 		join users actor on actor.id=action.actor_id where report.public_id=$1 order by action.created_at,action.id`, id)
-	related := s.querySimpleRows(r, `select related.public_id,related.reason_code,related.status,related.created_at,reporter.username as reporter_name
+	if err != nil {
+		logGovernanceReadFailure("admin_report_actions", id, err)
+		writeError(w, http.StatusInternalServerError, "读取举报处置记录失败")
+		return
+	}
+	related, err := s.querySimpleRows(r, `select related.public_id,related.reason_code,related.status,related.created_at,reporter.username as reporter_name
 		from reports current join reports related on related.target_type=current.target_type and related.target_public_id=current.target_public_id and related.id<>current.id
 		join users reporter on reporter.id=related.reporter_id where current.public_id=$1 order by related.created_at desc,related.id desc limit 20`, id)
+	if err != nil {
+		logGovernanceReadFailure("admin_report_related", id, err)
+		writeError(w, http.StatusInternalServerError, "读取关联举报失败")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"id": id, "targetType": tt, "targetId": tid, "reasonCode": reason, "reasonVersion": version,
 		"customReason": custom, "detail": detail, "status": status, "reporterId": reporterID, "reporterName": reporterName,
-		"targetAuthorId": targetAuthorID, "targetAuthorName": targetAuthorName, "createdAt": created, "snapshot": result,
-		"evidence": evidence, "reviews": reviews, "actions": actions, "relatedReports": related})
+		"targetActorId": targetActorID, "targetActorName": targetActorName, "targetActorRole": targetActorRole, "createdAt": created, "snapshot": result,
+		"claimedById": claimedByID, "claimedByName": claimedByName, "claimedByCurrentUser": claimedByCurrentUser,
+		"canTakeover": claimsAllow(currentClaims(r), "report.action.takeover"),
+		"evidence":    evidence, "reviews": reviews, "actions": actions, "relatedReports": related})
+}
+
+func decodeReportSnapshot(raw []byte) (map[string]any, error) {
+	return decodeStoredJSONObject(raw, "report snapshot")
 }
 
 func (s *Server) claimReport(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	tag, err := s.db.Exec(r.Context(), `update reports set status='in_review',claimed_by=$2,claimed_at=now(),updated_at=now(),lock_version=lock_version+1 where public_id=$1 and status='pending'`, r.PathValue("id"), claims.Subject)
+	tx, err := s.db.Begin(r.Context())
 	if err != nil {
-		writeError(w, 500, "领取举报失败")
+		writeError(w, http.StatusInternalServerError, "创建领取事务失败")
 		return
 	}
-	if tag.RowsAffected() != 1 {
+	defer tx.Rollback(r.Context())
+	var reportID int64
+	err = tx.QueryRow(r.Context(), `update reports set status='in_review',claimed_by=$2,claimed_at=now(),updated_at=now(),lock_version=lock_version+1
+		where public_id=$1 and status='pending' returning id`, r.PathValue("id"), claims.Subject).Scan(&reportID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 409, "举报已被领取或处理")
 		return
 	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "领取举报失败")
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `insert into report_assignment_events(report_id,action,actor_id,assignee_id)
+		values($1,'claim',$2,$2)`, reportID, claims.Subject); err != nil {
+		writeError(w, http.StatusInternalServerError, "记录举报领取失败")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "提交举报领取失败")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"status": "in_review"})
+}
+
+func (s *Server) takeoverReport(w http.ResponseWriter, r *http.Request) {
+	claims := currentClaims(r)
+	if !claimsAllow(claims, "report.action.takeover") {
+		writeError(w, http.StatusForbidden, "无权接管举报")
+		return
+	}
+	var request struct {
+		Reason string `json:"reason"`
+	}
+	if decodeJSON(r, &request) != nil {
+		writeError(w, http.StatusBadRequest, "接管请求格式不正确")
+		return
+	}
+	request.Reason = strings.TrimSpace(request.Reason)
+	if request.Reason == "" || utf8.RuneCountInString(request.Reason) > 1000 {
+		writeError(w, http.StatusBadRequest, "接管原因不能为空且不能超过 1000 个字符")
+		return
+	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "创建接管事务失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var reportID int64
+	var previousAssigneeID *int64
+	err = tx.QueryRow(r.Context(), `select id,claimed_by from reports where public_id=$1 and status='in_review' for update`, r.PathValue("id")).
+		Scan(&reportID, &previousAssigneeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusConflict, "举报未被领取或已经处理")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取举报责任人失败")
+		return
+	}
+	if previousAssigneeID != nil && *previousAssigneeID == claims.Subject {
+		writeError(w, http.StatusConflict, "你已经是该举报的处理人")
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `update reports set claimed_by=$2,claimed_at=now(),updated_at=now(),lock_version=lock_version+1 where id=$1`, reportID, claims.Subject); err != nil {
+		writeError(w, http.StatusInternalServerError, "接管举报失败")
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `insert into report_assignment_events(report_id,action,actor_id,previous_assignee_id,assignee_id,reason)
+		values($1,'takeover',$2,$3,$2,$4)`, reportID, claims.Subject, previousAssigneeID, request.Reason); err != nil {
+		writeError(w, http.StatusInternalServerError, "记录举报接管失败")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "提交举报接管失败")
+		return
+	}
+	s.writeAppLog(context.Background(), "admin_operation", "warn", "report.takeover", r.PathValue("id"), claims.Subject, r, http.StatusOK, 0,
+		map[string]any{"previousAssigneeId": previousAssigneeID, "reason": request.Reason})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "in_review"})
 }
 
 type resolveUnifiedReportRequest struct {
@@ -489,6 +761,13 @@ type resolveUnifiedReportRequest struct {
 	IdempotencyKey       string     `json:"idempotencyKey"`
 }
 
+func validateReportResolutionActions(request resolveUnifiedReportRequest) error {
+	if request.Conclusion == "invalid" && (request.DeleteTarget || request.BanUserID != "") {
+		return errors.New("举报不成立时不能执行隐藏或封禁处置")
+	}
+	return nil
+}
+
 func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	var request resolveUnifiedReportRequest
 	if decodeJSON(r, &request) != nil {
@@ -500,6 +779,16 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	if (request.Conclusion != "valid" && request.Conclusion != "invalid") || request.IdempotencyKey == "" {
 		writeError(w, 400, "处理结论不正确")
 		return
+	}
+	if err := validateReportResolutionActions(request); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if request.BanUserID != "" {
+		if err := validateTemporaryBanEnd(request.BanEndsAt, time.Now()); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	claims := currentClaims(r)
 	if request.DeleteTarget && !claimsAllow(claims, "report.action.delete") {
@@ -518,22 +807,32 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var reportID, reporterID int64
 	var targetType, targetID string
-	var targetAuthorID *int64
-	err = tx.QueryRow(r.Context(), `select id,target_type,target_public_id,reporter_id,target_author_id from reports where public_id=$1 and status in ('pending','in_review') for update`, r.PathValue("id")).Scan(&reportID, &targetType, &targetID, &reporterID, &targetAuthorID)
+	var targetActor reportTargetActor
+	err = tx.QueryRow(r.Context(), `select id,target_type,target_public_id,reporter_id,target_actor_id,target_actor_role from reports
+		where public_id=$1 and status='in_review' and claimed_by=$2 for update`, r.PathValue("id"), claims.Subject).
+		Scan(&reportID, &targetType, &targetID, &reporterID, &targetActor.ID, &targetActor.Role)
 	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, 409, "举报不存在或已经处理")
+		writeError(w, 409, "举报未由你领取、责任已转交或已经处理")
 		return
 	}
 	if err != nil {
 		writeError(w, 500, "读取举报失败")
 		return
 	}
+	var moderationRecipients []int64
+	if request.Conclusion == "valid" && request.DeleteTarget {
+		moderationRecipients, err = reportModerationRecipientIDs(r.Context(), tx, targetType, targetID, targetActor)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "读取内容治理联系人失败")
+			return
+		}
+	}
 	if _, err = tx.Exec(r.Context(), `insert into report_reviews(report_id,reviewer_id,conclusion,note,idempotency_key) values($1,$2,$3,$4,$5) on conflict(report_id,idempotency_key) do nothing`, reportID, claims.Subject, request.Conclusion, strings.TrimSpace(request.Note), request.IdempotencyKey); err != nil {
 		writeError(w, 500, "保存审核结论失败")
 		return
 	}
 	if request.DeleteTarget {
-		if err = moderationHideTarget(r.Context(), tx, targetType, targetID); err != nil {
+		if err = s.moderationHideTarget(r.Context(), tx, targetType, targetID); err != nil {
 			writeError(w, 400, err.Error())
 			return
 		}
@@ -552,7 +851,8 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, err.Error())
 			return
 		}
-		if err = enqueueDirectNotificationTx(r.Context(), tx, "ban.created", bannedUserID, "account_banned", "账号已被封禁", "你的账号已受到封禁处罚，请在小黑屋记录中查看公开理由和期限。", map[string]any{"banId": banPublicID, "url": "/site-affairs/blackroom/" + banPublicID}, r.Header.Get("X-Request-ID")); err != nil {
+		if err = enqueueTemplatedNotificationTx(r.Context(), tx, "ban.created", bannedUserID, 0, "account_banned", nil,
+			map[string]any{"banId": banPublicID, "url": "/site-affairs/blackroom/" + banPublicID}, r.Header.Get("X-Request-ID")); err != nil {
 			writeError(w, http.StatusInternalServerError, "创建封禁通知失败")
 			return
 		}
@@ -569,16 +869,21 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "安排举报附件清理失败")
 		return
 	}
-	resultBody := "你提交的举报经审核未成立。"
+	reportTemplate := "report_resolved_invalid"
 	if request.Conclusion == "valid" {
-		resultBody = "你提交的举报经审核成立，站务团队已完成相应处置。"
+		reportTemplate = "report_resolved_valid"
 	}
-	if err = enqueueDirectNotificationTx(r.Context(), tx, "report.resolved", reporterID, "report_result", "举报处理完成", resultBody, map[string]any{"reportId": r.PathValue("id")}, r.Header.Get("X-Request-ID")); err != nil {
+	if err = enqueueTemplatedNotificationTx(r.Context(), tx, "report.resolved", reporterID, 0, reportTemplate, nil,
+		map[string]any{"reportId": r.PathValue("id")}, r.Header.Get("X-Request-ID")); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建举报结果通知失败")
 		return
 	}
-	if request.Conclusion == "valid" && request.DeleteTarget && targetAuthorID != nil && *targetAuthorID != reporterID {
-		if err = enqueueDirectNotificationTx(r.Context(), tx, "report.target_action", *targetAuthorID, "moderation_action", "内容已被站务处置", "你的内容经举报审核后已被隐藏；公开通知不包含举报人或内部审核信息。", map[string]any{"targetType": targetType, "targetId": targetID}, r.Header.Get("X-Request-ID")); err != nil {
+	for _, recipientID := range moderationRecipients {
+		if recipientID == reporterID {
+			continue
+		}
+		if err = enqueueTemplatedNotificationTx(r.Context(), tx, "report.target_action", recipientID, 0, "moderation_action", nil,
+			map[string]any{"targetType": targetType, "targetId": targetID}, r.Header.Get("X-Request-ID")); err != nil {
 			writeError(w, http.StatusInternalServerError, "创建内容处置通知失败")
 			return
 		}
@@ -587,11 +892,14 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "提交举报审核失败")
 		return
 	}
-	if bannedUserID > 0 {
-		_ = s.refreshAuthVersion(r.Context(), bannedUserID)
-		_ = s.refreshPermissionVersion(r.Context(), bannedUserID)
-	}
 	s.writeAppLog(context.Background(), "admin_operation", "warn", "report.resolve", r.PathValue("id"), claims.Subject, r, 200, 0, map[string]any{"conclusion": request.Conclusion, "deleteTarget": request.DeleteTarget, "ban": request.BanUserID != ""})
+	if bannedUserID > 0 {
+		if !s.requireSecurityVersionRefresh(w, r, "resolve_report_with_ban", bannedUserID,
+			s.refreshAuthVersionForIdentity(r.Context(), bannedUserID, request.BanUserID),
+			s.refreshPermissionVersion(r.Context(), bannedUserID)) {
+			return
+		}
+	}
 	writeJSON(w, 200, map[string]any{"status": state})
 }
 
@@ -641,7 +949,7 @@ func (s *Server) reopenUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "pending"})
 }
 
-func moderationHideTarget(ctx context.Context, tx pgx.Tx, targetType, publicID string) error {
+func (s *Server) moderationHideTarget(ctx context.Context, tx pgx.Tx, targetType, publicID string) error {
 	switch targetType {
 	case "comment":
 		return expectModerationUpdate(tx.Exec(ctx, `update comments set status='hidden',updated_at=now() where public_id=$1 and status not in ('deleted','spam')`, publicID))
@@ -649,6 +957,8 @@ func moderationHideTarget(ctx context.Context, tx pgx.Tx, targetType, publicID s
 		return errors.New("用户主页不能作为内容删除；请使用封禁动作")
 	case "mod":
 		return expectModerationUpdate(tx.Exec(ctx, `update mods set review_status='rejected',updated_at=now() where project_code=$1 and review_status<>'rejected'`, publicID))
+	case "modpack":
+		return expectModerationUpdate(tx.Exec(ctx, `update modpacks set review_status='rejected',updated_at=now() where public_id=$1 and review_status<>'rejected'`, publicID))
 	case "plugin", "map", "shader", "resource_pack", "datapack", "addon":
 		routeType := targetType
 		if routeType == "shader" {
@@ -662,7 +972,16 @@ func moderationHideTarget(ctx context.Context, tx pgx.Tx, targetType, publicID s
 		}
 		return expectModerationUpdate(tx.Exec(ctx, `update community_posts set status='deleted',updated_at=now() where public_id=$1 and kind=$2 and status='active'`, publicID, kind))
 	case "skin":
-		return expectModerationUpdate(tx.Exec(ctx, `update skin_assets set status='deleted',updated_at=now() where public_id=$1 and status='active'`, publicID))
+		var assetID int64
+		var blobHash string
+		if err := tx.QueryRow(ctx, `select id,blob_hash from skin_assets
+			where public_id=$1 and status='active' for update`, publicID).Scan(&assetID, &blobHash); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errors.New("举报目标不存在、已经隐藏或状态已变化")
+			}
+			return err
+		}
+		return s.softDeleteSkinAssetTx(ctx, tx, assetID, blobHash, "moderated_skin_asset_deleted")
 	case "blueprint":
 		return expectModerationUpdate(tx.Exec(ctx, `update blueprints set status='deleted',updated_at=now() where public_id=$1 and status<>'deleted'`, publicID))
 	case "server":
@@ -681,7 +1000,17 @@ func expectModerationUpdate(tag pgconn.CommandTag, err error) error {
 	return nil
 }
 
+func validateTemporaryBanEnd(endsAt *time.Time, now time.Time) error {
+	if endsAt != nil && endsAt.Before(now.Add(minimumTemporaryBanDuration)) {
+		return errors.New("临时封禁结束时间必须至少晚于当前时间 1 分钟")
+	}
+	return nil
+}
+
 func createBanTx(ctx context.Context, tx pgx.Tx, userPublicID string, moderatorID, reportID int64, reasonCode, customReason, publicMarkdown, internalNote string, endsAt *time.Time) (int64, string, error) {
+	if err := validateTemporaryBanEnd(endsAt, time.Now()); err != nil {
+		return 0, "", err
+	}
 	reasonCode = strings.TrimSpace(reasonCode)
 	customReason = strings.TrimSpace(customReason)
 	if reasonCode == "" || (reasonCode == "other" && customReason == "") {
@@ -698,17 +1027,16 @@ func createBanTx(ctx context.Context, tx pgx.Tx, userPublicID string, moderatorI
 	if err != nil {
 		return 0, "", errors.New("用户已有生效封禁或理由无效")
 	}
-	_, err = tx.Exec(ctx, `insert into user_role_bindings(user_id,role_id,expires_at,context) select $1,id,$2,$3 from roles where code='banned' on conflict(user_id,role_id) do update set expires_at=excluded.expires_at,context=excluded.context,created_at=now()`, userID, endsAt, "ban:"+strconv.FormatInt(banID, 10))
+	tag, err := tx.Exec(ctx, `insert into user_role_bindings(user_id,role_id,source,source_key,expires_at)
+		select $1,id,$2,$3,$4 from roles where code='banned'`,
+		userID, authorizationSourceGovernanceBan, strconv.FormatInt(banID, 10), endsAt)
+	if err == nil && tag.RowsAffected() != 1 {
+		err = errors.New("封禁权限组不存在")
+	}
 	if err == nil {
 		_, err = tx.Exec(ctx, `update users set auth_version=auth_version+1,updated_at=now() where id=$1`, userID)
 	}
 	return userID, banPublicID, err
-}
-
-func enqueueDirectNotificationTx(ctx context.Context, tx pgx.Tx, eventType string, recipientID int64, kind, title, body string, data map[string]any, traceID string) error {
-	_, err := queue.EnqueueTx(ctx, tx, notificationTaskCode, eventType, "user", strconv.FormatInt(recipientID, 10), traceID,
-		notificationEvent{Action: "direct", RecipientID: recipientID, Kind: kind, Title: title, Body: body, SourceLocale: "zh-CN", Data: data})
-	return err
 }
 
 type createBanRequest struct {
@@ -753,6 +1081,10 @@ func (s *Server) adminBans(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "请求格式不正确")
 			return
 		}
+		if err := validateTemporaryBanEnd(req.EndsAt, time.Now()); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		tx, e := s.db.Begin(r.Context())
 		if e != nil {
 			writeError(w, 500, "创建封禁事务失败")
@@ -765,7 +1097,8 @@ func (s *Server) adminBans(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, e.Error())
 			return
 		}
-		if e = enqueueDirectNotificationTx(r.Context(), tx, "ban.created", bannedUserID, "account_banned", "账号已被封禁", "你的账号已受到封禁处罚，请在小黑屋记录中查看公开理由和期限。", map[string]any{"banId": banPublicID, "url": "/site-affairs/blackroom/" + banPublicID}, r.Header.Get("X-Request-ID")); e != nil {
+		if e = enqueueTemplatedNotificationTx(r.Context(), tx, "ban.created", bannedUserID, 0, "account_banned", nil,
+			map[string]any{"banId": banPublicID, "url": "/site-affairs/blackroom/" + banPublicID}, r.Header.Get("X-Request-ID")); e != nil {
 			writeError(w, http.StatusInternalServerError, "创建封禁通知失败")
 			return
 		}
@@ -773,40 +1106,41 @@ func (s *Server) adminBans(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 500, "提交封禁失败")
 			return
 		}
-		_ = s.refreshAuthVersion(r.Context(), bannedUserID)
-		_ = s.refreshPermissionVersion(r.Context(), bannedUserID)
 		s.writeAppLog(context.Background(), "admin_operation", "warn", "ban.create", req.UserID, currentClaims(r).Subject, r, 201, 0, map[string]any{"reasonCode": req.ReasonCode, "endsAt": req.EndsAt})
+		if !s.requireSecurityVersionRefresh(w, r, "create_ban", bannedUserID,
+			s.refreshAuthVersionForIdentity(r.Context(), bannedUserID, req.UserID),
+			s.refreshPermissionVersion(r.Context(), bannedUserID)) {
+			return
+		}
 		writeJSON(w, 201, map[string]bool{"created": true})
 		return
 	}
-	s.blackroomList(w, r, true)
-}
-func (s *Server) blackroomList(w http.ResponseWriter, r *http.Request, internal bool) {
-	limit := boundedLimit(r.URL.Query().Get("limit"), 30, 100)
-	offset := boundedOffset(r.URL.Query().Get("offset"))
-	rows, e := s.db.Query(r.Context(), `select ban.public_id,u.public_id,ban.username_snapshot,ban.avatar_snapshot,ban.reason_code,ban.custom_reason,ban.status,ban.starts_at,ban.ends_at,ban.revoked_at from ban_records ban join users u on u.id=ban.user_id order by ban.created_at desc,ban.id desc limit $1 offset $2`, limit, offset)
-	if e != nil {
-		writeError(w, 500, "读取小黑屋失败")
+	request, err := parseAdminBlackroomPageRequest(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	defer rows.Close()
-	items := []map[string]any{}
-	now := time.Now()
-	for rows.Next() {
-		var id, uid, name, avatar, reason, custom, status string
-		var starts time.Time
-		var ends, revoked *time.Time
-		if rows.Scan(&id, &uid, &name, &avatar, &reason, &custom, &status, &starts, &ends, &revoked) != nil {
-			writeError(w, 500, "解析小黑屋失败")
-			return
-		}
-		display := publicBanStatus(status, ends, revoked, now)
-		items = append(items, map[string]any{"id": id, "userId": uid, "username": name, "avatarUrl": avatar, "reasonCode": reason, "customReason": custom, "status": display, "startsAt": starts, "endsAt": ends, "revokedAt": revoked})
+	page, err := s.queryAdminBlackroomPage(r.Context(), request, time.Now())
+	if err != nil {
+		logGovernanceReadFailure("blackroom", request.Scope, err)
+		writeError(w, http.StatusInternalServerError, "读取小黑屋失败")
+		return
 	}
-	writeJSON(w, 200, map[string]any{"items": items, "limit": limit, "offset": offset})
+	writeJSON(w, http.StatusOK, page)
 }
 func (s *Server) publicBlackroom(w http.ResponseWriter, r *http.Request) {
-	s.blackroomList(w, r, false)
+	request, err := parsePublicBlackroomPageRequest(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	page, err := s.queryPublicBlackroomPage(r.Context(), request, time.Now())
+	if err != nil {
+		logGovernanceReadFailure("blackroom", request.Scope, err)
+		writeError(w, http.StatusInternalServerError, "读取小黑屋失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
 }
 func (s *Server) blackroomDetail(w http.ResponseWriter, r *http.Request) {
 	var uid, name, avatar, reason, custom, status, record string
@@ -847,8 +1181,10 @@ func (s *Server) revokeBan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var userID int64
-	e = tx.QueryRow(r.Context(), `update ban_records set status='revoked',revoked_at=now(),revoked_by=$2,revoke_reason=$3 where public_id=$1 and status='active' returning user_id`, r.PathValue("id"), currentClaims(r).Subject, req.Reason).Scan(&userID)
+	var banID, userID int64
+	e = tx.QueryRow(r.Context(), `update ban_records set status='revoked',revoked_at=now(),revoked_by=$2,revoke_reason=$3
+		where public_id=$1 and status='active' returning id,user_id`,
+		r.PathValue("id"), currentClaims(r).Subject, req.Reason).Scan(&banID, &userID)
 	if errors.Is(e, pgx.ErrNoRows) {
 		writeError(w, 409, "封禁已结束")
 		return
@@ -857,9 +1193,12 @@ func (s *Server) revokeBan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "解除封禁失败")
 		return
 	}
-	_, e = tx.Exec(r.Context(), `delete from user_role_bindings using roles where user_role_bindings.role_id=roles.id and roles.code='banned' and user_role_bindings.user_id=$1`, userID)
+	_, e = tx.Exec(r.Context(), `delete from user_role_bindings
+		where user_id=$1 and source=$2 and source_key=$3`,
+		userID, authorizationSourceGovernanceBan, strconv.FormatInt(banID, 10))
 	if e == nil {
-		e = enqueueDirectNotificationTx(r.Context(), tx, "ban.revoked", userID, "ban_released", "封禁已解除", "你的账号封禁已解除，可以恢复正常使用。", map[string]any{"banId": r.PathValue("id")}, r.Header.Get("X-Request-ID"))
+		e = enqueueTemplatedNotificationTx(r.Context(), tx, "ban.revoked", userID, 0, "ban_released", nil,
+			map[string]any{"banId": r.PathValue("id")}, r.Header.Get("X-Request-ID"))
 	}
 	if e == nil {
 		e = tx.Commit(r.Context())
@@ -868,7 +1207,10 @@ func (s *Server) revokeBan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "提交解除封禁失败")
 		return
 	}
-	_ = s.refreshPermissionVersion(r.Context(), userID)
 	s.writeAppLog(context.Background(), "admin_operation", "warn", "ban.revoke", r.PathValue("id"), currentClaims(r).Subject, r, 200, 0, map[string]string{"reason": req.Reason})
+	if !s.requireSecurityVersionRefresh(w, r, "revoke_ban", userID,
+		s.refreshPermissionVersion(r.Context(), userID)) {
+		return
+	}
 	writeJSON(w, 200, map[string]string{"status": "released"})
 }

@@ -2,6 +2,7 @@ package queue
 
 import (
 	"testing"
+	"time"
 
 	"mcmods-cn-backend/internal/config"
 )
@@ -13,6 +14,19 @@ func TestNormalizeConfigAddsDefaultTasks(t *testing.T) {
 	}
 	if cfg.URL != "nats://127.0.0.1:4222" {
 		t.Fatalf("unexpected default URL %q", cfg.URL)
+	}
+}
+
+func TestJetStreamBackoffIsExponentialAndBounded(t *testing.T) {
+	backoff := jetStreamBackoff(5*time.Minute, 8)
+	want := []time.Duration{5 * time.Minute, 10 * time.Minute, 20 * time.Minute, 30 * time.Minute, 30 * time.Minute, 30 * time.Minute, 30 * time.Minute, 30 * time.Minute}
+	if len(backoff) != len(want) {
+		t.Fatalf("backoff length=%d, want %d", len(backoff), len(want))
+	}
+	for index := range want {
+		if backoff[index] != want[index] {
+			t.Fatalf("backoff[%d]=%s, want %s", index, backoff[index], want[index])
+		}
 	}
 }
 

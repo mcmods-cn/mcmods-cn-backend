@@ -42,7 +42,6 @@ func TestPublicCatalogCoreSortQueriesIntegration(t *testing.T) {
 		{name: "maps", path: "/api/v1/content-projects/map", handler: server.simpleProjects, prepare: func(request *http.Request) { request.SetPathValue("projectType", "map") }},
 		{name: "resource_packs", path: "/api/v1/content-projects/resource_pack", handler: server.simpleProjects, prepare: func(request *http.Request) { request.SetPathValue("projectType", "resource_pack") }},
 		{name: "shaders", path: "/api/v1/content-projects/shader_pack", handler: server.simpleProjects, prepare: func(request *http.Request) { request.SetPathValue("projectType", "shader_pack") }},
-		{name: "servers", path: "/api/v1/servers", handler: server.publicMinecraftServers},
 		{name: "tutorials", path: "/api/v1/community/posts?kind=tutorial", handler: server.communityPosts},
 		{name: "issues", path: "/api/v1/community/posts?kind=issue", handler: server.communityPosts},
 		{name: "news", path: "/api/v1/community/posts?kind=news", handler: server.communityPosts},
@@ -80,7 +79,6 @@ func TestPublicCatalogCoreSortQueriesIntegration(t *testing.T) {
 
 	for _, endpoint := range []catalogEndpoint{
 		{name: "modpacks_containing_mod", path: "/api/v1/modpacks?mods=minecraft", handler: server.modpacks},
-		{name: "servers_containing_mod", path: "/api/v1/servers?mods=minecraft", handler: server.publicMinecraftServers},
 	} {
 		t.Run(endpoint.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, endpoint.path, nil).WithContext(ctx)

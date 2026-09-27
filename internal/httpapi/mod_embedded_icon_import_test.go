@@ -2,12 +2,16 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
 	"testing"
+	"time"
 )
 
 func TestDecodeEmbeddedIconCatalogJSONLines(t *testing.T) {
@@ -51,6 +55,43 @@ func TestRenderEmbeddedIconPNGUsesRequestedCanvas(t *testing.T) {
 		if config.Width != size || config.Height != size {
 			t.Fatalf("rendered icon is %dx%d, want %dx%d", config.Width, config.Height, size, size)
 		}
+	}
+}
+
+func TestEmbeddedIconDecodeBudgetsRejectHugeHeaderBeforeFullDecode(t *testing.T) {
+	if maxEmbeddedIconDecodedPixels > 4_194_304 || maxEmbeddedIconEdge > 4096 {
+		t.Fatalf("unsafe icon budgets: pixels=%d edge=%d", maxEmbeddedIconDecodedPixels, maxEmbeddedIconEdge)
+	}
+	raw, err := base64.StdEncoding.DecodeString(embeddedIconTestPNG(t, 1, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary.BigEndian.PutUint32(raw[16:20], 50_000)
+	binary.BigEndian.PutUint32(raw[20:24], 50_000)
+	binary.BigEndian.PutUint32(raw[29:33], crc32.ChecksumIEEE(raw[12:29]))
+	if _, err = decodeEmbeddedIconPNG(base64.StdEncoding.EncodeToString(raw)); err == nil {
+		t.Fatal("PNG with a 2.5-billion-pixel header was accepted")
+	}
+}
+
+func TestEmbeddedIconBuildConcurrencyIsProcessWideAndBounded(t *testing.T) {
+	if cap(embeddedIconBuildSlots) != maxEmbeddedIconBuildConcurrency || maxEmbeddedIconBuildConcurrency > 2 {
+		t.Fatalf("global icon build slots = %d/%d, want a process-wide cap of at most 2", cap(embeddedIconBuildSlots), maxEmbeddedIconBuildConcurrency)
+	}
+	firstRelease, err := acquireEmbeddedIconBuildSlot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstRelease()
+	secondRelease, err := acquireEmbeddedIconBuildSlot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondRelease()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err = acquireEmbeddedIconBuildSlot(ctx); err == nil {
+		t.Fatal("third concurrent icon build unexpectedly acquired a global slot")
 	}
 }
 
@@ -108,6 +149,7 @@ func TestDecodeIconRendererCatalogSupportsEntityIcons(t *testing.T) {
 	}
 
 	build, err := buildEmbeddedIconImport(
+		context.Background(),
 		ossConfigPayload{Prefix: "mcmods"},
 		"mod000001", iconRendererImportSource, catalogResourceIdentityResolver{},
 		map[string]string{"example": "revision-1"}, entries[1],
@@ -148,6 +190,7 @@ func TestBuildIRRIconlessEntity(t *testing.T) {
 		RegisterName: "geomastery:spear_wood", Mod: "geomastery", Type: "entity",
 	}
 	build, err := buildEmbeddedIconImport(
+		context.Background(),
 		ossConfigPayload{Prefix: "mcmods"},
 		"mod000001", irrImportSource, resolver,
 		map[string]string{"geomastery": "revision-1"}, entry,

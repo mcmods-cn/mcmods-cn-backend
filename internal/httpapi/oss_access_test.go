@@ -7,25 +7,32 @@ import (
 	"time"
 )
 
-func TestResolveOSSObjectAccessESAPrivateOrigin(t *testing.T) {
+func TestResolveOSSObjectAccessLegacyESAModeUsesPresignedURL(t *testing.T) {
 	server := &Server{}
 	cfg := ossConfigPayload{
+		Enabled:               true,
+		Region:                "cn-hangzhou",
+		Endpoint:              "https://oss-cn-hangzhou.aliyuncs.com",
 		PublicEndpoint:        "https://oss.example.test/assets",
-		DownloadURLMode:       ossDownloadModeESAPrivateOrigin,
+		Bucket:                "mcmods-test",
+		AccessKeyID:           "test-access-key",
+		AccessKeySecret:       "test-access-secret",
+		DownloadURLMode:       "esa_private_origin",
 		DownloadURLTTLMinutes: 12,
 	}
 	access, err := server.resolveOSSObjectAccessWithConfig(context.Background(), cfg, "project/icon.png", ossObjectAccessOptions{
 		ContentDisposition: `attachment; filename="icon.png"`,
 	})
 	if err != nil {
-		t.Fatalf("resolve ESA object access: %v", err)
+		t.Fatalf("resolve legacy ESA object access: %v", err)
 	}
-	if access.Mode != ossDownloadModeESAPrivateOrigin {
+	if access.Mode != ossDownloadModePresigned {
 		t.Fatalf("unexpected mode %q", access.Mode)
 	}
-	if !strings.HasPrefix(access.URL, "https://oss.example.test/assets/project/icon.png?") ||
-		!strings.Contains(access.URL, "response-content-disposition=") {
-		t.Fatalf("unexpected ESA URL %q", access.URL)
+	if !strings.Contains(strings.ToLower(access.URL), "x-oss-signature") ||
+		!strings.Contains(access.URL, "response-content-disposition=") ||
+		strings.HasPrefix(access.URL, "https://oss.example.test/") {
+		t.Fatalf("unexpected signed URL %q", access.URL)
 	}
 	if remaining := time.Until(access.ExpiresAt); remaining < 11*time.Minute || remaining > 13*time.Minute {
 		t.Fatalf("unexpected expiry %s", remaining)
@@ -36,7 +43,7 @@ func TestResolveStoredOSSObjectAccessLeavesExternalURLUnchanged(t *testing.T) {
 	server := &Server{}
 	cfg := ossConfigPayload{
 		PublicEndpoint:  "https://oss.example.test",
-		DownloadURLMode: ossDownloadModeESAPrivateOrigin,
+		DownloadURLMode: "esa_private_origin",
 	}
 	const external = "https://cdn.example.test/avatar.png"
 	resolved, err := server.resolveStoredOSSObjectAccessURLWithConfig(context.Background(), cfg, external)

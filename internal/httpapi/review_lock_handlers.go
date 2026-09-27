@@ -196,17 +196,40 @@ func reviewAggregateType(entityType string) string {
 }
 
 func createReviewCompletionNotificationsTx(ctx context.Context, tx pgx.Tx, requestID int64, status string) error {
-	if _, err := tx.Exec(ctx, `insert into notifications(recipient_id,kind,title,body,source_locale,data)
-		select subscription.user_id,'review','项目审核已完成',
-			'您订阅的「'||subscription.target_label||'」审核已经完成。','zh-CN',
-			jsonb_build_object('targetLabel',subscription.target_label,'url',subscription.target_url,
-				'reviewStatus',$2::text,'changeRequestId',request.public_id)
+	rows, err := tx.Query(ctx, `select subscription.user_id,subscription.target_label,subscription.target_url,request.public_id
 		from review_completion_subscriptions subscription
 		join change_requests request on request.id=subscription.change_request_id
-		where subscription.change_request_id=$1 and subscription.notified_at is null`, requestID, status); err != nil {
+		where subscription.change_request_id=$1 and subscription.notified_at is null
+		order by subscription.user_id for update of subscription`, requestID)
+	if err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `update review_completion_subscriptions set notified_at=now()
+	type subscriber struct {
+		userID                 int64
+		targetLabel, targetURL string
+		requestPublicID        string
+	}
+	subscribers := make([]subscriber, 0)
+	for rows.Next() {
+		var item subscriber
+		if err = rows.Scan(&item.userID, &item.targetLabel, &item.targetURL, &item.requestPublicID); err != nil {
+			rows.Close()
+			return err
+		}
+		subscribers = append(subscribers, item)
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range subscribers {
+		if err = enqueueTemplatedNotificationTx(ctx, tx, "review.completed", item.userID, 0, "review_completed",
+			map[string]string{"name": item.targetLabel},
+			map[string]any{"targetLabel": item.targetLabel, "url": item.targetURL, "reviewStatus": status, "changeRequestId": item.requestPublicID}, ""); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(ctx, `update review_completion_subscriptions set notified_at=now()
 		where change_request_id=$1 and notified_at is null`, requestID)
 	return err
 }

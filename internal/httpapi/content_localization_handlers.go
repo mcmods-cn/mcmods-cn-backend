@@ -76,10 +76,8 @@ type updateContentLocalizationPayload struct {
 }
 
 type enqueuedContentTranslation struct {
-	TaskID  int64
 	TaskUID string
 	Status  string
-	Created bool
 }
 
 type contentVisibilityBypassKey struct{}
@@ -131,7 +129,7 @@ func (s *Server) catalogEntityContent(w http.ResponseWriter, r *http.Request) {
 		EditableLocales: supportedContentLocaleList(),
 		Translation: contentTranslationState{
 			Status:                      "not_required",
-			Automatic:                   resolution.ShouldAutoTranslate,
+			Automatic:                   false,
 			CanRequest:                  resolution.CanRequestTranslation,
 			CountsTowardDailyTokenQuota: resolution.CanRequestTranslation,
 		},
@@ -147,20 +145,7 @@ func (s *Server) catalogEntityContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if resolution.ShouldAutoTranslate && response.Localization != nil {
-		task, queueErr := s.enqueueCatalogContentTranslation(
-			r.Context(), entity, *response.Localization, resolution.RequestedLocale, 0, int64(maxPermissionValue), false,
-		)
-		if queueErr == nil {
-			response.Translation.Status = task.Status
-			response.Translation.TaskID = &task.TaskUID
-			if task.Created {
-				s.publishContentTranslationTask(r.Context(), task)
-			}
-		} else {
-			response.Translation.Status = "unavailable"
-		}
-	} else if resolution.CanRequestTranslation {
+	if resolution.CanRequestTranslation {
 		response.Translation.Status = "request_required"
 	} else {
 		response.Translation.Status = "no_source"
@@ -371,10 +356,6 @@ func (s *Server) requestCatalogContentTranslation(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadRequest, "targetLocale is required")
 		return
 	}
-	if isEditableContentLocale(request.TargetLocale) {
-		writeError(w, http.StatusConflict, "supported content locales are translated automatically and can also be edited by users")
-		return
-	}
 	entity, err := s.loadCatalogEntityLocalizations(r.Context(), publicID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "localized content subject does not exist")
@@ -408,17 +389,13 @@ func (s *Server) requestCatalogContentTranslation(w http.ResponseWriter, r *http
 		writeError(w, http.StatusForbidden, "no daily AI token allowance is available")
 		return
 	}
-	task, err := s.enqueueCatalogContentTranslation(r.Context(), entity, source, request.TargetLocale, claims.Subject, limit, true)
+	task, err := s.enqueueCatalogContentTranslation(r.Context(), entity, source, request.TargetLocale, claims.Subject, limit)
 	if errors.Is(err, errAIQuotaExceeded) {
 		writeError(w, http.StatusTooManyRequests, "daily AI token allowance is insufficient")
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-	if task.Created && !s.publishContentTranslationTask(r.Context(), task) {
-		writeError(w, http.StatusServiceUnavailable, "AI task queue is unavailable")
 		return
 	}
 	annotateActivity(r, 0, catalogActivityObjectType(entity.EntityType), publicID, 0)
@@ -448,6 +425,7 @@ func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.
 		return
 	}
 	if err != nil {
+		logAITranslationFailure("result_task", taskUID, err)
 		writeError(w, http.StatusInternalServerError, "failed to load translation task")
 		return
 	}
@@ -460,12 +438,14 @@ func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.
 		"inputTokens": inputTokens, "outputTokens": outputTokens,
 	}
 	if status == "completed" {
-		var payload map[string]any
-		var result map[string]any
-		_ = json.Unmarshal(payloadRaw, &payload)
-		_ = json.Unmarshal(resultRaw, &result)
-		response["targetLocale"] = payload["targetLocale"]
-		response["translation"] = translationItemsToMap(result)
+		targetLocale, translation, decodeErr := decodeCatalogTranslationResult(payloadRaw, resultRaw)
+		if decodeErr != nil {
+			logAITranslationFailure("result_decode", taskUID, decodeErr)
+			writeError(w, http.StatusInternalServerError, "translation task data is invalid")
+			return
+		}
+		response["targetLocale"] = targetLocale
+		response["translation"] = translation
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -613,11 +593,13 @@ func (s *Server) enqueueCatalogContentTranslation(
 	targetLocale string,
 	actorID int64,
 	tokenLimit int64,
-	quotaBacked bool,
 ) (enqueuedContentTranslation, error) {
 	targetLocale = normalizeContentLocale(targetLocale)
 	if targetLocale == "" || source.Locale == "" {
 		return enqueuedContentTranslation{}, errors.New("translation locales are invalid")
+	}
+	if actorID <= 0 || tokenLimit <= 0 {
+		return enqueuedContentTranslation{}, errors.New("translation requires an authenticated quota-backed actor")
 	}
 	cfg := s.aiConfigFromSettings(ctx)
 	binding, ok := findAITaskModel(cfg.TaskModels, aiTaskContentTranslation)
@@ -636,17 +618,14 @@ func (s *Server) enqueueCatalogContentTranslation(
 	payload := map[string]any{
 		"internalEntityId": entity.EntityID, "publicId": entity.PublicID, "entityType": entity.EntityType,
 		"sourceLocale": source.Locale, "sourceRevisionNo": source.RevisionNo, "targetLocale": targetLocale, "items": items,
-		"quotaBacked": quotaBacked,
+		"quotaBacked": true,
 	}
 	rawPayload, _ := json.Marshal(payload)
 	reserved := int64(utf8.RuneCountInString(source.Name+source.Summary+source.ContentMarkdown)*2 + 256)
 	if reserved < 256 {
 		reserved = 256
 	}
-	if !quotaBacked {
-		reserved = 0
-	}
-	concurrencyKey := contentTranslationConcurrencyKey(entity.EntityID, source, targetLocale, actorID, quotaBacked)
+	concurrencyKey := contentTranslationConcurrencyKey(entity.EntityID, source, targetLocale, actorID)
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return enqueuedContentTranslation{}, err
@@ -657,7 +636,7 @@ func (s *Server) enqueueCatalogContentTranslation(
 	}
 	var existing enqueuedContentTranslation
 	err = tx.QueryRow(ctx, `
-		select task.id,task.task_uid,task.status from ai_tasks task
+		select task.task_uid,task.status from ai_tasks task
 		where task.task_type=$1 and task.concurrency_key=$2 and (
 		 task.status in ('queued','running','retrying') or (
 		  task.status='completed' and exists(
@@ -667,7 +646,7 @@ func (s *Server) enqueueCatalogContentTranslation(
 		  )
 		 ))
 		order by task.created_at desc limit 1`, aiTaskContentTranslation, concurrencyKey, catalogAggregateLocalization).Scan(
-		&existing.TaskID, &existing.TaskUID, &existing.Status,
+		&existing.TaskUID, &existing.Status,
 	)
 	if err == nil {
 		if commitErr := tx.Commit(ctx); commitErr != nil {
@@ -678,59 +657,41 @@ func (s *Server) enqueueCatalogContentTranslation(
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return enqueuedContentTranslation{}, err
 	}
-	if quotaBacked {
-		if err = reserveAITaskQuotaTx(ctx, tx, actorID, tokenLimit, reserved); err != nil {
-			return enqueuedContentTranslation{}, err
-		}
+	if err = reserveAITaskQuotaTx(ctx, tx, actorID, tokenLimit, reserved); err != nil {
+		return enqueuedContentTranslation{}, err
 	}
 	taskUID := "ai_" + randomHex(16)
-	createdBy := any(nil)
-	if actorID > 0 {
-		createdBy = actorID
-	}
 	var taskID int64
 	err = tx.QueryRow(ctx, `
 		insert into ai_tasks(
 		 task_uid,task_type,provider,model,status,priority,concurrency_key,payload,created_by,queued_at,quota_reserved_tokens
 		) values($1,$2,$3,$4,'queued',0,$5,$6::jsonb,$7,now(),$8) returning id`,
-		taskUID, aiTaskContentTranslation, provider.Code, model.Model, concurrencyKey, string(rawPayload), createdBy, reserved,
+		taskUID, aiTaskContentTranslation, provider.Code, model.Model, concurrencyKey, string(rawPayload), actorID, reserved,
 	).Scan(&taskID)
 	if err != nil {
+		return enqueuedContentTranslation{}, err
+	}
+	if err = enqueueAITaskTx(ctx, tx, "ai.content_translation.requested", taskID, taskUID, aiTaskContentTranslation, ""); err != nil {
 		return enqueuedContentTranslation{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return enqueuedContentTranslation{}, err
 	}
 	s.writeAITaskLog(ctx, taskID, "info", "task_queued", "Catalog content translation queued", payload)
-	return enqueuedContentTranslation{TaskID: taskID, TaskUID: taskUID, Status: "queued", Created: true}, nil
+	return enqueuedContentTranslation{TaskUID: taskUID, Status: "queued"}, nil
 }
 
-func contentTranslationConcurrencyKey(entityID int64, source catalogLocalizationPayload, targetLocale string, actorID int64, quotaBacked bool) string {
+func contentTranslationConcurrencyKey(entityID int64, source catalogLocalizationPayload, targetLocale string, actorID int64) string {
 	parts := []string{
 		"catalog-content",
 		strconv.FormatInt(entityID, 10),
 		normalizeContentLocale(source.Locale),
 		strconv.FormatInt(source.RevisionNo, 10),
 		normalizeContentLocale(targetLocale),
-	}
-	if quotaBacked {
-		parts = append(parts, "actor", strconv.FormatInt(actorID, 10))
+		"actor",
+		strconv.FormatInt(actorID, 10),
 	}
 	return strings.Join(parts, ":")
-}
-
-func (s *Server) publishContentTranslationTask(ctx context.Context, task enqueuedContentTranslation) bool {
-	if !task.Created {
-		return true
-	}
-	if s.queue == nil || s.queue.PublishTask(ctx, "ai", aiTaskMessage{
-		TaskID: task.TaskID, TaskUID: task.TaskUID, TaskType: aiTaskContentTranslation,
-	}) != nil {
-		_, _ = s.db.Exec(ctx, `
-			update ai_tasks set status='failed',error='NATS unavailable',finished_at=now(),updated_at=now() where id=$1`, task.TaskID)
-		return false
-	}
-	return true
 }
 
 func translationItemsToMap(result map[string]any) map[string]string {
@@ -746,6 +707,50 @@ func translationItemsToMap(result map[string]any) map[string]string {
 		}
 	}
 	return translated
+}
+
+func strictTranslationItemsToMap(result map[string]any, allowed map[string]bool) (map[string]string, error) {
+	items, ok := result["items"].([]any)
+	if !ok || len(items) == 0 {
+		return nil, errors.New("translation result has no items")
+	}
+	translated := make(map[string]string, len(items))
+	for index, rawItem := range items {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("translation result item %d is not an object", index)
+		}
+		key, keyOK := item["key"].(string)
+		text, textOK := item["text"].(string)
+		key = strings.TrimSpace(key)
+		if !keyOK || !textOK || key == "" || !allowed[key] {
+			return nil, fmt.Errorf("translation result item %d has invalid key or text", index)
+		}
+		if _, duplicate := translated[key]; duplicate {
+			return nil, fmt.Errorf("translation result item %d duplicates key %q", index, key)
+		}
+		translated[key] = text
+	}
+	return translated, nil
+}
+
+func decodeCatalogTranslationResult(payloadRaw, resultRaw []byte) (string, map[string]string, error) {
+	payload, err := decodeContentTranslationTaskPayload(payloadRaw)
+	if err != nil {
+		return "", nil, err
+	}
+	var result map[string]any
+	if err = json.Unmarshal(resultRaw, &result); err != nil {
+		return "", nil, fmt.Errorf("decode catalog translation result: %w", err)
+	}
+	translated, err := strictTranslationItemsToMap(result, stringSet("name", "summary", "contentMarkdown"))
+	if err != nil {
+		return "", nil, err
+	}
+	if translated["name"] == "" && translated["summary"] == "" && translated["contentMarkdown"] == "" {
+		return "", nil, errors.New("catalog translation result is empty")
+	}
+	return payload.TargetLocale, translated, nil
 }
 
 func validCatalogPublicID(value string) bool {

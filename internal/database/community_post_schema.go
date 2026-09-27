@@ -44,15 +44,17 @@ func communityPostSchemaStatements() []string {
 		`create table community_post_bounties (
 			post_id bigint primary key references community_posts(id) on delete cascade,
 			currency_id bigint not null references currencies(id) on delete restrict,
-			amount bigint not null check(amount>0),
+			amount bigint not null check(amount between 1 and 1000000000000),
 			status text not null default 'held' check(status in ('held','awarded','refunded')),
 			recipient_id bigint references users(id) on delete restrict,
-			tax_amount bigint not null default 0 check(tax_amount>=0),
-			net_amount bigint not null default 0 check(net_amount>=0),
+			tax_amount bigint not null default 0 check(tax_amount between 0 and amount),
+			net_amount bigint not null default 0 check(net_amount between 0 and amount),
 			created_at timestamptz not null default now(),
 			settled_at timestamptz,
 			check(status='held' or settled_at is not null),
-			check(status<>'awarded' or recipient_id is not null)
+			check(status<>'awarded' or recipient_id is not null),
+			check(status<>'awarded' or tax_amount+net_amount=amount),
+			check(status='awarded' or (tax_amount=0 and net_amount=0))
 		)`,
 		`create table community_post_project_refs (
 			id bigserial primary key,

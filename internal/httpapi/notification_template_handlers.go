@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"regexp"
 	"sort"
 	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
 )
 
 const (
@@ -102,11 +103,22 @@ func defaultNotificationTemplateConfig() notificationTemplateConfig {
 		{"blueprint_conversion_success", []string{"name"}, "蓝图处理完成", "{name} 已处理完成，可以在蓝图库中查看。", "Blueprint processing completed", "{name} is ready in the blueprint library."},
 		{"blueprint_conversion_failure", []string{"name", "error"}, "蓝图处理失败", "{name} 处理失败：{error}", "Blueprint processing failed", "{name} could not be processed: {error}"},
 		{"blueprint_format_success", []string{"name", "format"}, "蓝图格式转换完成", "{name} 已转换为 {format} 格式。", "Blueprint format converted", "{name} has been converted to {format}."},
+		{"direct_message_email", []string{"sender", "preview"}, "{sender} 给你发来一条私聊", "{preview}", "New private message from {sender}", "{preview}"},
 		{"review_approved", []string{"name"}, "内容审核通过", "您提交的 {name} 已通过审核。", "Content approved", "Your submission for {name} was approved."},
 		{"review_rejected", []string{"name", "reason"}, "内容审核未通过", "您提交的 {name} 未通过审核。原因：{reason}", "Content rejected", "Your submission for {name} was rejected. Reason: {reason}"},
 		{"question_answer_accepted", []string{"name"}, "回答已被采纳", "您在问题「{name}」下的回答已被采纳，悬赏已按转账税率结算。", "Answer accepted", "Your answer to {name} was accepted and its bounty was settled after transfer tax."},
 		{"creator_claim_approved", []string{"name"}, "个人作者认领已通过", "您对个人作者 {name} 的认领已通过审核。", "Personal author claim approved", "Your claim for the personal author {name} was approved."},
 		{"creator_claim_rejected", []string{"name", "reason"}, "个人作者认领未通过", "您对个人作者 {name} 的认领未通过审核。原因：{reason}", "Personal author claim rejected", "Your claim for the personal author {name} was rejected. Reason: {reason}"},
+		{"project_editor_application_approved", []string{"name", "note"}, "项目编辑员申请已通过", "您对 {name} 的编辑员申请已通过。审核备注：{note}", "Project editor application approved", "Your editor application for {name} was approved. Review note: {note}"},
+		{"project_editor_application_rejected", []string{"name", "note"}, "项目编辑员申请未通过", "您对 {name} 的编辑员申请未通过。审核备注：{note}", "Project editor application rejected", "Your editor application for {name} was rejected. Review note: {note}"},
+		{"creator_claim_revoked", []string{"name", "reason"}, "个人作者认领已撤销", "您对个人作者 {name} 的已验证认领被撤销。原因：{reason}", "Personal author claim revoked", "Your verified claim for the personal author {name} was revoked. Reason: {reason}"},
+		{"review_completed", []string{"name"}, "项目审核已完成", "您订阅的「{name}」审核已经完成。", "Project review completed", "The review you subscribed to for {name} has completed."},
+		{"new_follower", []string{"actors", "count"}, "新增粉丝", "{actors} 关注了你（共 {count} 位）。", "New followers", "{actors} followed you ({count} total)."},
+		{"account_banned", nil, "账号已被封禁", "你的账号已受到封禁处罚，请在小黑屋记录中查看公开理由和期限。", "Account banned", "Your account has been banned. Review the public reason and duration in the moderation record."},
+		{"ban_released", nil, "封禁已解除", "你的账号封禁已解除，可以恢复正常使用。", "Ban released", "Your account ban has been released and normal access has been restored."},
+		{"report_resolved_valid", nil, "举报处理完成", "你提交的举报经审核成立，站务团队已完成相应处置。", "Report resolved", "Your report was upheld and the moderation team completed the corresponding action."},
+		{"report_resolved_invalid", nil, "举报处理完成", "你提交的举报经审核未成立。", "Report resolved", "Your report was reviewed and was not upheld."},
+		{"moderation_action", nil, "内容已被站务处置", "你的内容经举报审核后已被隐藏；公开通知不包含举报人或内部审核信息。", "Content moderated", "Your content was hidden after moderation review. The public notification does not identify the reporter or include internal review information."},
 		{"project_updated", []string{"project_name", "changed_sections"}, "关注的项目有新更新", "{project_name} 更新了{changed_sections}。", "A followed project was updated", "{project_name} updated {changed_sections}."},
 		{"modpack_export_completed", []string{"pack_name", "minecraft_version", "loader", "exported", "dependencies", "skipped"}, "收藏夹整合包导出完成", "{pack_name} 已导出完成。Minecraft {minecraft_version} / {loader}；成功 {exported} 个，自动依赖 {dependencies} 个，未导出 {skipped} 个。", "Collection modpack export completed", "{pack_name} is ready for Minecraft {minecraft_version} / {loader}: {exported} exported, {dependencies} dependencies, {skipped} skipped."},
 		{"modpack_export_completed_with_skips", []string{"pack_name", "minecraft_version", "loader", "exported", "dependencies", "skipped"}, "收藏夹整合包导出完成（存在未导出项目）", "{pack_name} 已导出完成。Minecraft {minecraft_version} / {loader}；成功 {exported} 个，自动依赖 {dependencies} 个，未导出 {skipped} 个。请查看完整报告。", "Collection modpack export completed with skipped items", "{pack_name} is ready for Minecraft {minecraft_version} / {loader}: {exported} exported, {dependencies} dependencies, {skipped} skipped. Review the complete report."},
@@ -177,22 +189,56 @@ func mergeNotificationTemplates(config notificationTemplateConfig) notificationT
 	return result
 }
 
-func loadNotificationTemplateConfig(ctx context.Context, db *pgxpool.Pool) notificationTemplateConfig {
-	var raw []byte
-	var config notificationTemplateConfig
-	if err := db.QueryRow(ctx, `select value from system_settings where key=$1`, notificationTemplatesSettingKey).Scan(&raw); err == nil {
-		_ = json.Unmarshal(raw, &config)
-	}
-	return mergeNotificationTemplates(config)
+type notificationTemplateQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-func renderNotificationTemplate(ctx context.Context, db *pgxpool.Pool, userID int64, code string, values map[string]string) (renderedNotificationTemplate, error) {
-	requestedLocale := "zh-CN"
-	_ = db.QueryRow(ctx, `select preferred_ui_language from users where id=$1`, userID).Scan(&requestedLocale)
-	return renderNotificationTemplateForLocale(loadNotificationTemplateConfig(ctx, db), requestedLocale, code, values)
+func loadNotificationTemplateConfig(ctx context.Context, db notificationTemplateQuerier) (notificationTemplateConfig, error) {
+	var raw []byte
+	var config notificationTemplateConfig
+	err := db.QueryRow(ctx, `select value from system_settings where key=$1`, notificationTemplatesSettingKey).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return defaultNotificationTemplateConfig(), nil
+	}
+	if err != nil {
+		return notificationTemplateConfig{}, fmt.Errorf("load notification templates: %w", err)
+	}
+	if err = json.Unmarshal(raw, &config); err != nil {
+		return notificationTemplateConfig{}, fmt.Errorf("decode notification templates: %w", err)
+	}
+	return mergeNotificationTemplates(config), nil
+}
+
+func renderNotificationTemplate(ctx context.Context, db notificationTemplateQuerier, userID int64, code string, values map[string]string) (renderedNotificationTemplate, error) {
+	var requestedLocale string
+	if err := db.QueryRow(ctx, `select coalesce(nullif(preferred_ui_language,''),'zh-CN') from users where id=$1`, userID).Scan(&requestedLocale); err != nil {
+		return renderedNotificationTemplate{}, fmt.Errorf("load notification recipient %d locale: %w", userID, err)
+	}
+	config, err := loadNotificationTemplateConfig(ctx, db)
+	if err != nil {
+		return renderedNotificationTemplate{}, err
+	}
+	return renderNotificationTemplateForLocale(config, requestedLocale, code, values)
 }
 
 func renderNotificationTemplateForLocale(config notificationTemplateConfig, requestedLocale, code string, values map[string]string) (renderedNotificationTemplate, error) {
+	definition, selectedLocale, selected, err := selectNotificationTemplateForLocale(config, requestedLocale, code)
+	if err != nil {
+		return renderedNotificationTemplate{}, err
+	}
+	valuesCopy := make(map[string]string, len(values))
+	for key, value := range values {
+		valuesCopy[key] = value
+		selected.Title = strings.ReplaceAll(selected.Title, "{"+key+"}", value)
+		selected.Body = strings.ReplaceAll(selected.Body, "{"+key+"}", value)
+	}
+	if missing := unresolvedNotificationVariables(selected.Title + "\n" + selected.Body); len(missing) > 0 {
+		return renderedNotificationTemplate{}, fmt.Errorf("notification template %q missing values: %s", code, strings.Join(missing, ","))
+	}
+	return renderedNotificationTemplate{Key: code, Version: max(1, definition.Version), Locale: selectedLocale, Title: selected.Title, Body: selected.Body, Values: valuesCopy}, nil
+}
+
+func selectNotificationTemplateForLocale(config notificationTemplateConfig, requestedLocale, code string) (notificationTemplateDefinition, string, localizedNotificationTemplate, error) {
 	requestedLocale = normalizeContentLocale(requestedLocale)
 	if requestedLocale == "" {
 		requestedLocale = "zh-CN"
@@ -205,7 +251,7 @@ func renderNotificationTemplateForLocale(config notificationTemplateConfig, requ
 		}
 	}
 	if definition.Code == "" {
-		return renderedNotificationTemplate{}, fmt.Errorf("notification template %q not found", code)
+		return notificationTemplateDefinition{}, "", localizedNotificationTemplate{}, fmt.Errorf("notification template %q not found", code)
 	}
 	selectedLocale := requestedLocale
 	selected := definition.Translations[selectedLocale]
@@ -217,18 +263,9 @@ func renderNotificationTemplateForLocale(config notificationTemplateConfig, requ
 		selected = definition.Translations[fallback]
 	}
 	if strings.TrimSpace(selected.Title) == "" || strings.TrimSpace(selected.Body) == "" {
-		return renderedNotificationTemplate{}, fmt.Errorf("notification template %q has no usable translation", code)
+		return notificationTemplateDefinition{}, "", localizedNotificationTemplate{}, fmt.Errorf("notification template %q has no usable translation", code)
 	}
-	valuesCopy := make(map[string]string, len(values))
-	for key, value := range values {
-		valuesCopy[key] = value
-		selected.Title = strings.ReplaceAll(selected.Title, "{"+key+"}", value)
-		selected.Body = strings.ReplaceAll(selected.Body, "{"+key+"}", value)
-	}
-	if missing := unresolvedNotificationVariables(selected.Title + "\n" + selected.Body); len(missing) > 0 {
-		return renderedNotificationTemplate{}, fmt.Errorf("notification template %q missing values: %s", code, strings.Join(missing, ","))
-	}
-	return renderedNotificationTemplate{Key: code, Version: max(1, definition.Version), Locale: selectedLocale, Title: selected.Title, Body: selected.Body, Values: valuesCopy}, nil
+	return definition, selectedLocale, selected, nil
 }
 
 func unresolvedNotificationVariables(value string) []string {
@@ -245,30 +282,29 @@ func unresolvedNotificationVariables(value string) []string {
 	return result
 }
 
-func (s *Server) sendTemplatedNotification(ctx context.Context, userID int64, code string, values map[string]string, data map[string]any) {
+func (s *Server) sendTemplatedNotification(ctx context.Context, userID int64, code string, values map[string]string, data map[string]any) error {
 	if userID <= 0 {
-		return
+		return errors.New("notification recipient is required")
 	}
 	if data == nil {
 		data = map[string]any{}
 	}
-	if (s.queue != nil || s.cfg.NATS.OutboxEnabled) && s.enqueueNotificationTask(ctx, notificationEvent{
+	err := s.enqueueNotificationTask(ctx, notificationEvent{
 		Action: "direct", RecipientID: userID, Kind: "system", TemplateKey: code, TemplateValues: values, Data: data,
-	}) == nil {
-		return
-	}
-	rendered, err := renderNotificationTemplate(ctx, s.db, userID, code, values)
+	})
 	if err != nil {
-		return
+		slog.Error("enqueue templated notification", "recipient_id", userID, "template_key", code, "error", err)
 	}
-	raw, _ := json.Marshal(data)
-	params, _ := json.Marshal(rendered.Values)
-	_, _ = s.db.Exec(ctx, `insert into notifications(recipient_id,kind,title,body,source_locale,data,template_key,template_version,template_params)
-		values($1,'system',$2,$3,$4,$5::jsonb,$6,$7,$8::jsonb)`, userID, rendered.Title, rendered.Body, rendered.Locale, string(raw), rendered.Key, rendered.Version, string(params))
+	return err
 }
 
 func (s *Server) getNotificationTemplates(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, loadNotificationTemplateConfig(r.Context(), s.db))
+	config, err := loadNotificationTemplateConfig(r.Context(), s.db)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取通知模板失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
 }
 
 func (s *Server) updateNotificationTemplates(w http.ResponseWriter, r *http.Request) {
@@ -277,14 +313,18 @@ func (s *Server) updateNotificationTemplates(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	current := loadNotificationTemplateConfig(r.Context(), s.db)
+	current, err := loadNotificationTemplateConfig(r.Context(), s.db)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取通知模板失败")
+		return
+	}
 	request = versionNotificationTemplateChanges(current, mergeNotificationTemplates(request))
 	if err := validateNotificationTemplateConfig(request); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	raw, _ := json.Marshal(request)
-	_, err := s.db.Exec(r.Context(), `insert into system_settings(key,value,updated_by,updated_at)
+	_, err = s.db.Exec(r.Context(), `insert into system_settings(key,value,updated_by,updated_at)
 		values($1,$2::jsonb,$3,now())
 		on conflict(key) do update
 		set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`,
@@ -369,7 +409,11 @@ func (s *Server) updateReviewConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, request)
 }
 
-func loadReviewConfig(ctx context.Context, db *pgxpool.Pool) reviewConfig {
+type reviewConfigQueryRower interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func loadReviewConfig(ctx context.Context, db reviewConfigQueryRower) reviewConfig {
 	var raw []byte
 	config := defaultReviewConfig()
 	err := db.QueryRow(ctx, `select value from system_settings where key=$1`, reviewConfigSettingKey).Scan(&raw)

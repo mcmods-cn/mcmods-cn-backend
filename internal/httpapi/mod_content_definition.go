@@ -54,9 +54,10 @@ func normalizeModContentEntryDefinition(
 	entryTypeCode string,
 	definition map[string]any,
 	useImportAliases bool,
+	allowDisabled bool,
 ) (map[string]any, error) {
 	entryType, err := loadModContentEntryTypeDefinition(
-		ctx, query, modID, versionID, kindCode, sectionPublicID, entryTypeCode,
+		ctx, query, modID, versionID, kindCode, sectionPublicID, entryTypeCode, allowDisabled,
 	)
 	if err != nil {
 		return nil, err
@@ -87,6 +88,7 @@ func loadModContentEntryTypeDefinition(
 	kindCode string,
 	sectionPublicID *string,
 	entryTypeCode string,
+	allowDisabled bool,
 ) (*modContentEntryTypeDefinition, error) {
 	if sectionPublicID == nil || strings.TrimSpace(*sectionPublicID) == "" {
 		if strings.EqualFold(strings.TrimSpace(entryTypeCode), "default") {
@@ -102,7 +104,7 @@ func loadModContentEntryTypeDefinition(
 	if err := json.Unmarshal(raw, &template); err != nil {
 		return nil, err
 	}
-	return selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode, false)
+	return selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode, false, allowDisabled)
 }
 
 func validateModContentEditableDefinitionPatch(
@@ -113,9 +115,10 @@ func validateModContentEditableDefinitionPatch(
 	sectionPublicID *string,
 	entryTypeCode string,
 	patch map[string]any,
+	allowDisabled bool,
 ) error {
 	entryType, err := loadModContentEntryTypeDefinition(
-		ctx, query, modID, versionID, kindCode, sectionPublicID, entryTypeCode,
+		ctx, query, modID, versionID, kindCode, sectionPublicID, entryTypeCode, allowDisabled,
 	)
 	if err != nil {
 		return err
@@ -159,7 +162,7 @@ func normalizeLootTableCanonicalDefinition(definition map[string]any) {
 	definition["definitionAvailable"] = hasPools
 }
 
-func selectModContentEntryType(entryTypes []modContentEntryTypeDefinition, entryTypeCode, kindCode string, enforceKind bool) (*modContentEntryTypeDefinition, error) {
+func selectModContentEntryType(entryTypes []modContentEntryTypeDefinition, entryTypeCode, kindCode string, enforceKind, allowDisabled bool) (*modContentEntryTypeDefinition, error) {
 	if len(entryTypes) == 0 && strings.EqualFold(strings.TrimSpace(entryTypeCode), "default") {
 		return &modContentEntryTypeDefinition{Code: "default"}, nil
 	}
@@ -168,7 +171,7 @@ func selectModContentEntryType(entryTypes []modContentEntryTypeDefinition, entry
 		if !strings.EqualFold(strings.TrimSpace(entryType.Code), strings.TrimSpace(entryTypeCode)) {
 			continue
 		}
-		if !modContentEntryTypeEnabled(*entryType) {
+		if !modContentEntryTypeEnabled(*entryType) && !allowDisabled {
 			return nil, errCatalogEditorReference
 		}
 		if !enforceKind || len(entryType.KindCodes) == 0 {
@@ -514,9 +517,9 @@ func canonicalResourceDefinitionFromTemplates(
 		return "default", map[string]any{}, nil
 	}
 	entryTypeCode := matchImportedEntryType(template, kindCode, source, inferImportedEntryTypeCode(kindCode, resourcePath, source))
-	entryType, err := selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode, true)
+	entryType, err := selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode, true, false)
 	if err != nil {
-		entryType, err = selectModContentEntryType(template.EntryTypes, "default", kindCode, true)
+		entryType, err = selectModContentEntryType(template.EntryTypes, "default", kindCode, true, false)
 		entryTypeCode = "default"
 	}
 	if err != nil {
@@ -525,7 +528,7 @@ func canonicalResourceDefinitionFromTemplates(
 	canonical, err := canonicalModContentDefinition(*entryType, source, true)
 	if err != nil && strings.EqualFold(strings.TrimSpace(kindCode), "minecraft.item") &&
 		(entryTypeCode == "tool" || entryTypeCode == "equipment") {
-		itemType, selectErr := selectModContentEntryType(template.EntryTypes, "item", kindCode, true)
+		itemType, selectErr := selectModContentEntryType(template.EntryTypes, "item", kindCode, true, false)
 		if selectErr == nil {
 			if itemCanonical, fallbackErr := canonicalModContentDefinition(*itemType, source, true); fallbackErr == nil {
 				return "item", itemCanonical, nil

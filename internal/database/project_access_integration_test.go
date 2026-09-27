@@ -79,8 +79,8 @@ func TestDerivedProjectAccessIntegration(t *testing.T) {
 		"project.edit."+nonce).Scan(&manualPermissionID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = tx.Exec(ctx, `insert into user_permissions(user_id,permission_id,allow,context)
-		values($1,$2,true,'manual_admin')`, claimantID, manualPermissionID); err != nil {
+	if _, err = tx.Exec(ctx, `insert into user_permissions(user_id,permission_id,allow)
+		values($1,$2,true)`, claimantID, manualPermissionID); err != nil {
 		t.Fatal(err)
 	}
 	permissionBefore++

@@ -32,6 +32,47 @@ latest_resource_snapshots as (
 	order by snapshot.resource_id,coalesce(source.activated_at,source.created_at) desc,source.created_at desc,snapshot.id desc
 )`
 
+// Public recipes prefer the human-editable canonical definition. Import
+// snapshots remain a fallback observation only when a recipe has not yet been
+// materialized into that canonical layer.
+const publicRecipeSelectionCTE = latestGlobalExportScopeCTE + `,
+latest_recipe_observations as (
+	select distinct on (recipe.entity_id)
+		recipe.entity_id,snapshot.id snapshot_id,snapshot.source_recipe_id,snapshot.source_id_kind,
+		snapshot.revision_id,mod.slug mod_site_id
+	from latest_revisions revision
+	join recipe_import_snapshots snapshot on snapshot.revision_id=revision.id
+	join recipes recipe on recipe.entity_id=snapshot.recipe_id
+	join mods mod on mod.id=revision.mod_id
+	order by recipe.entity_id,coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc,snapshot.id desc
+), public_recipes as (
+	select recipe.entity_id,entity.public_id,type_entity.public_id recipe_type_public_id,
+		coalesce(recipe.canonical_source_id,entity.public_id) recipe_id,
+		case when recipe.canonical_source_id is null then recipe.identity_source else 'canonical' end source_id_kind,
+		(recipe.canonical_source_id is not null) recipe_id_canonical,recipe.semantic_fingerprint,
+		''::text snapshot_id,coalesce(revision.public_id,'') source_revision_id,coalesce(mod.slug,'') mod_site_id,
+		coalesce(override.note,'') note,override.layout_override,true authoritative
+	from recipes recipe
+	join recipe_definitions definition on definition.recipe_id=recipe.entity_id
+	join catalog_entities entity on entity.id=recipe.entity_id and entity.status='active'
+	join catalog_entities type_entity on type_entity.id=recipe.recipe_type_id and type_entity.status='active'
+	left join content_revisions revision on revision.id=definition.published_revision_id
+	left join mods mod on mod.id=recipe.owner_mod_id
+	left join recipe_content_overrides override on override.recipe_id=recipe.entity_id
+	union all
+	select recipe.entity_id,entity.public_id,type_entity.public_id,
+		coalesce(recipe.canonical_source_id,observation.source_recipe_id),observation.source_id_kind,
+		(recipe.canonical_source_id is not null),recipe.semantic_fingerprint,
+		observation.snapshot_id,observation.revision_id,observation.mod_site_id,
+		coalesce(override.note,''),override.layout_override,false
+	from latest_recipe_observations observation
+	join recipes recipe on recipe.entity_id=observation.entity_id
+	join catalog_entities entity on entity.id=recipe.entity_id and entity.status='active'
+	join catalog_entities type_entity on type_entity.id=recipe.recipe_type_id and type_entity.status='active'
+	left join recipe_content_overrides override on override.recipe_id=recipe.entity_id
+	where not exists(select 1 from recipe_definitions definition where definition.recipe_id=recipe.entity_id)
+)`
+
 func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	primary, secondary := requestedContentLocales(r)
@@ -54,7 +95,7 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 			query, primary, secondary).Scan(&total); err != nil {
 			return nil, err
 		}
-		rows, err := s.db.Query(ctx, `with `+latestGlobalExportScopeCTE+`, imported as (
+		rows, err := s.db.Query(ctx, `with `+publicRecipeSelectionCTE+`, imported as (
 			select distinct on (snapshot.recipe_type_id) snapshot.recipe_type_id,snapshot.title_names
 			from latest_revisions revision join recipe_type_import_snapshots snapshot on snapshot.revision_id=revision.id
 			order by snapshot.recipe_type_id,coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc
@@ -62,8 +103,8 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 		select recipe_type.entity_id,entity.public_id,recipe_type.canonical_id,
 			coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
 			 where localization.catalog_entity_id=entity.id and localization.name<>''),imported.title_names,'{}'::jsonb),
-			(select count(*)::int from recipes recipe join catalog_entities recipe_entity on recipe_entity.id=recipe.entity_id
-			 where recipe.recipe_type_id=recipe_type.entity_id and recipe_entity.status='active'),
+			(select count(*)::int from public_recipes public_recipe join recipes recipe on recipe.entity_id=public_recipe.entity_id
+			 where recipe.recipe_type_id=recipe_type.entity_id),
 			(select count(*)::int from recipe_layout_templates template join catalog_entities template_entity on template_entity.id=template.entity_id
 			 where template.recipe_type_id=recipe_type.entity_id and template_entity.status='active')
 		from recipe_types recipe_type join catalog_entities entity on entity.id=recipe_type.entity_id
@@ -77,6 +118,7 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 		}
 		defer rows.Close()
 		items := make([]map[string]any, 0, limit)
+		typeIDs := make([]int64, 0, limit)
 		for rows.Next() {
 			var entityID int64
 			var publicID, id string
@@ -85,15 +127,23 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 			if err = rows.Scan(&entityID, &publicID, &id, &names, &recipeCount, &templateCount); err != nil {
 				return nil, err
 			}
-			decorated, err := s.catalogRecipeTypeCatalysts(ctx, entityID, primary, secondary, true)
-			if err != nil {
-				return nil, err
-			}
+			typeIDs = append(typeIDs, entityID)
 			items = append(items, map[string]any{"publicId": publicID, "canonicalId": id,
 				"names": json.RawMessage(names), "recipeCount": recipeCount, "templateCount": templateCount,
-				"catalysts": decorated})
+				"catalysts": []map[string]any{}})
 		}
-		return map[string]any{"items": items, "total": total, "limit": limit, "offset": offset}, rows.Err()
+		if err = rows.Err(); err != nil {
+			return nil, err
+		}
+		rows.Close()
+		catalysts, err := s.catalogRecipeTypesCatalysts(ctx, typeIDs, primary, secondary, true)
+		if err != nil {
+			return nil, err
+		}
+		for index, typeID := range typeIDs {
+			items[index]["catalysts"] = catalysts[typeID]
+		}
+		return map[string]any{"items": items, "total": total, "limit": limit, "offset": offset}, nil
 	})
 }
 
@@ -139,34 +189,22 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 			return nil, err
 		}
 		var total, templateCount int
-		if err = s.db.QueryRow(ctx, `with `+latestGlobalExportScopeCTE+`
+		if err = s.db.QueryRow(ctx, `with `+publicRecipeSelectionCTE+`
 			select
-				(select count(distinct snapshot.recipe_id)::int from latest_revisions revision
-				 join recipe_import_snapshots snapshot on snapshot.revision_id=revision.id
-				 join recipes recipe on recipe.entity_id=snapshot.recipe_id where recipe.recipe_type_id=$1),
+				(select count(*)::int from public_recipes public_recipe
+				 join recipes recipe on recipe.entity_id=public_recipe.entity_id where recipe.recipe_type_id=$1),
 				(select count(*)::int from recipe_layout_templates template
 				 join catalog_entities entity on entity.id=template.entity_id
 				 where template.recipe_type_id=$1 and entity.status='active')`, entityID).Scan(&total, &templateCount); err != nil {
 			return nil, err
 		}
-		rows, err := s.db.Query(ctx, `with `+latestGlobalExportScopeCTE+`, selected as (
-			select distinct on (recipe.entity_id) recipe.entity_id,entity.public_id,recipe.canonical_source_id,
-				recipe.semantic_fingerprint,recipe.identity_source,snapshot.id snapshot_id,snapshot.source_recipe_id,
-				snapshot.source_id_kind,snapshot.revision_id,mod.slug,
-				override.note,override.layout_override
-			from latest_revisions revision
-			join recipe_import_snapshots snapshot on snapshot.revision_id=revision.id
-			join recipes recipe on recipe.entity_id=snapshot.recipe_id
-			join catalog_entities entity on entity.id=recipe.entity_id
-			join mods mod on mod.id=revision.mod_id
-			left join recipe_content_overrides override on override.recipe_id=recipe.entity_id
-			where recipe.recipe_type_id=$1
-			order by recipe.entity_id,coalesce(revision.activated_at,revision.created_at) desc
-		)
-		select entity_id,public_id,coalesce(canonical_source_id,source_recipe_id),source_id_kind,
-			(canonical_source_id is not null),semantic_fingerprint,snapshot_id,revision_id,slug,coalesce(note,''),
-			layout_override
-		from selected order by entity_id limit $2 offset $3`, entityID, limit, offset)
+		rows, err := s.db.Query(ctx, `with `+publicRecipeSelectionCTE+`
+		select public_recipe.entity_id,public_recipe.public_id,public_recipe.recipe_id,public_recipe.source_id_kind,
+			public_recipe.recipe_id_canonical,public_recipe.semantic_fingerprint,public_recipe.snapshot_id,
+			public_recipe.source_revision_id,public_recipe.mod_site_id,public_recipe.note,
+			public_recipe.layout_override,public_recipe.authoritative
+		from public_recipes public_recipe join recipes recipe on recipe.entity_id=public_recipe.entity_id
+		where recipe.recipe_type_id=$1 order by public_recipe.entity_id limit $2 offset $3`, entityID, limit, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -174,10 +212,10 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 		recipes := make([]map[string]any, 0, limit)
 		for rows.Next() {
 			var recipeEntityID, recipePublicID, recipeID, sourceKind, fingerprint, snapshotID, sourceRevisionID, siteID, note string
-			var canonical bool
+			var canonical, authoritative bool
 			var raw []byte
 			if err = rows.Scan(&recipeEntityID, &recipePublicID, &recipeID, &sourceKind, &canonical, &fingerprint,
-				&snapshotID, &sourceRevisionID, &siteID, &note, &raw); err != nil {
+				&snapshotID, &sourceRevisionID, &siteID, &note, &raw, &authoritative); err != nil {
 				return nil, err
 			}
 			layout, layoutErr := scanOptionalRecipeOverride(raw)
@@ -187,18 +225,20 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 			recipeResult := map[string]any{"publicId": recipePublicID, "recipeTypePublicId": publicID,
 				"recipeId": recipeID, "recipeIdSource": sourceKind,
 				"recipeIdCanonical": canonical, "semanticFingerprint": fingerprint, "recipeSnapshotId": snapshotID,
-				"revisionId": sourceRevisionID, "modSiteId": siteID, "note": note}
+				"revisionId": sourceRevisionID, "modSiteId": siteID, "note": note,
+				"_recipeEntityId": recipeEntityID, "_authoritative": authoritative}
 			if layout != nil {
 				recipeResult["layout"] = layout
 			}
 			recipes = append(recipes, recipeResult)
 		}
-		if err = s.hydrateRecipeRenderLayouts(ctx, recipes); err != nil {
+		if err = s.hydratePublicRecipeRenderLayouts(ctx, recipes); err != nil {
 			return nil, err
 		}
 		if err = s.decorateRecipeResources(ctx, recipes, primary, secondary); err != nil {
 			return nil, err
 		}
+		stripPublicRecipeInternalFields(recipes)
 		return map[string]any{"publicId": publicID, "canonicalId": canonicalID,
 			"names": json.RawMessage(names), "contentMarkdown": content, "contentLocale": contentLocale,
 			"catalysts": decoratedCatalysts, "templateCount": templateCount,
@@ -215,28 +255,13 @@ func (s *Server) globalRecipeRender(w http.ResponseWriter, r *http.Request) {
 	primary, secondary := requestedContentLocales(r)
 	var recipeEntityID int64
 	var recipePublicID, recipeTypePublicID, recipeID, sourceKind, fingerprint, snapshotID, sourceRevisionID, siteID, note string
-	var canonical bool
+	var canonical, authoritative bool
 	var raw []byte
-	err := s.db.QueryRow(r.Context(), `with `+latestGlobalExportScopeCTE+`, selected as (
-		select distinct on (recipe.entity_id) recipe.entity_id,entity.public_id,type_entity.public_id recipe_type_public_id,recipe.canonical_source_id,
-			recipe.semantic_fingerprint,recipe.identity_source,snapshot.id snapshot_id,snapshot.source_recipe_id,
-			snapshot.source_id_kind,snapshot.revision_id,mod.slug,
-			override.note,override.layout_override
-		from latest_revisions revision
-		join recipe_import_snapshots snapshot on snapshot.revision_id=revision.id
-		join recipes recipe on recipe.entity_id=snapshot.recipe_id
-		join catalog_entities entity on entity.id=recipe.entity_id and entity.status='active'
-		join catalog_entities type_entity on type_entity.id=recipe.recipe_type_id and type_entity.status='active'
-		join mods mod on mod.id=revision.mod_id
-		left join recipe_content_overrides override on override.recipe_id=recipe.entity_id
-		where entity.public_id=$1
-		order by recipe.entity_id,coalesce(revision.activated_at,revision.created_at) desc
-	)
-	select entity_id,public_id,recipe_type_public_id,coalesce(canonical_source_id,source_recipe_id),source_id_kind,
-		(canonical_source_id is not null),semantic_fingerprint,snapshot_id,revision_id,slug,coalesce(note,''),
-		layout_override
-	from selected limit 1`, publicID).Scan(&recipeEntityID, &recipePublicID, &recipeTypePublicID, &recipeID, &sourceKind, &canonical,
-		&fingerprint, &snapshotID, &sourceRevisionID, &siteID, &note, &raw)
+	err := s.db.QueryRow(r.Context(), `with `+publicRecipeSelectionCTE+`
+	select entity_id,public_id,recipe_type_public_id,recipe_id,source_id_kind,recipe_id_canonical,
+		semantic_fingerprint,snapshot_id,source_revision_id,mod_site_id,note,layout_override,authoritative
+	from public_recipes where public_id=$1 limit 1`, publicID).Scan(&recipeEntityID, &recipePublicID, &recipeTypePublicID, &recipeID, &sourceKind, &canonical,
+		&fingerprint, &snapshotID, &sourceRevisionID, &siteID, &note, &raw, &authoritative)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "renderable recipe not found")
 		return
@@ -255,12 +280,13 @@ func (s *Server) globalRecipeRender(w http.ResponseWriter, r *http.Request) {
 		"recipeId": recipeID, "recipeIdSource": sourceKind, "recipeIdCanonical": canonical,
 		"semanticFingerprint": fingerprint, "recipeSnapshotId": snapshotID,
 		"revisionId": sourceRevisionID, "modSiteId": siteID, "note": note,
+		"_recipeEntityId": recipeEntityID, "_authoritative": authoritative,
 	}
 	if layout != nil {
 		result["layout"] = layout
 	}
 	recipes := []map[string]any{result}
-	if err = s.hydrateRecipeRenderLayouts(r.Context(), recipes); err != nil {
+	if err = s.hydratePublicRecipeRenderLayouts(r.Context(), recipes); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to build recipe layout")
 		return
 	}
@@ -268,6 +294,7 @@ func (s *Server) globalRecipeRender(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to decorate recipe resources")
 		return
 	}
+	stripPublicRecipeInternalFields(recipes)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -358,11 +385,7 @@ var errCatalogNotFound = errors.New("catalog entry not found")
 
 func (s *Server) writeCachedCatalog(w http.ResponseWriter, r *http.Request, key string, loader func(context.Context) (any, error)) {
 	var datasetVersion string
-	if err := s.db.QueryRow(r.Context(), `with `+latestGlobalExportScopeCTE+`
-		select md5(concat_ws(':',
-			coalesce((select string_agg(id||':'||package_id,',' order by id) from latest_revisions),'empty'),
-			coalesce((select max(updated_at)::text from catalog_entities),'empty'),
-			coalesce((select max(created_at)::text from content_revisions),'empty')))`).Scan(&datasetVersion); err != nil {
+	if err := s.db.QueryRow(r.Context(), `select version::text from catalog_dataset_state where singleton`).Scan(&datasetVersion); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read catalog version")
 		return
 	}
@@ -412,16 +435,49 @@ func (s *Server) localizedEntityContent(ctx context.Context, entityID int64, pri
 }
 
 func (s *Server) decorateCatalysts(ctx context.Context, raw []byte, revisionID string) ([]map[string]any, error) {
+	decorated, err := s.decorateCatalystBatches(ctx, []catalogCatalystBatch{{TypeID: 0, Raw: raw, RevisionID: revisionID}})
+	return decorated[0], err
+}
+
+type catalogCatalystBatch struct {
+	TypeID     int64
+	Raw        []byte
+	RevisionID string
+}
+
+func decodeCatalogCatalysts(raw []byte, revisionID string) ([]map[string]any, error) {
 	var catalysts []map[string]any
-	_ = json.Unmarshal(raw, &catalysts)
-	entityIDs := make([]string, 0, len(catalysts))
-	for _, catalyst := range catalysts {
-		publicID, _ := catalyst["publicId"].(string)
-		if publicID == "" {
-			publicID, _ = catalyst["entityId"].(string)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, fmt.Errorf("decode recipe catalysts for revision %s: expected array", revisionID)
+	}
+	if err := json.Unmarshal(raw, &catalysts); err != nil {
+		return nil, fmt.Errorf("decode recipe catalysts for revision %s: %w", revisionID, err)
+	}
+	if catalysts == nil {
+		return nil, fmt.Errorf("decode recipe catalysts for revision %s: expected array", revisionID)
+	}
+	return catalysts, nil
+}
+
+func (s *Server) decorateCatalystBatches(ctx context.Context, batches []catalogCatalystBatch) (map[int64][]map[string]any, error) {
+	result := make(map[int64][]map[string]any, len(batches))
+	entityIDs := make([]string, 0)
+	keys := make([]exportResourceKey, 0)
+	for _, batch := range batches {
+		catalysts, err := decodeCatalogCatalysts(batch.Raw, batch.RevisionID)
+		if err != nil {
+			return nil, err
 		}
-		if strings.TrimSpace(publicID) != "" {
-			entityIDs = append(entityIDs, publicID)
+		result[batch.TypeID] = catalysts
+		for _, catalyst := range catalysts {
+			publicID, _ := catalyst["publicId"].(string)
+			if publicID == "" {
+				publicID, _ = catalyst["entityId"].(string)
+			}
+			if strings.TrimSpace(publicID) != "" {
+				entityIDs = append(entityIDs, publicID)
+			}
+			keys = append(keys, exportResourceKey{RevisionID: batch.RevisionID, ResourceID: recipeAlternativeItemID(catalyst), Kind: "item"})
 		}
 	}
 	if len(entityIDs) > 0 {
@@ -444,52 +500,52 @@ func (s *Server) decorateCatalysts(ctx context.Context, raw []byte, revisionID s
 			return nil, err
 		}
 		rows.Close()
-		for _, catalyst := range catalysts {
-			publicID, _ := catalyst["publicId"].(string)
-			if publicID == "" {
-				publicID, _ = catalyst["entityId"].(string)
-			}
-			if canonicalID := canonicalByEntity[publicID]; canonicalID != "" {
-				catalyst["id"] = canonicalID
+		for _, catalysts := range result {
+			for _, catalyst := range catalysts {
+				publicID, _ := catalyst["publicId"].(string)
+				if publicID == "" {
+					publicID, _ = catalyst["entityId"].(string)
+				}
+				if canonicalID := canonicalByEntity[publicID]; canonicalID != "" {
+					catalyst["id"] = canonicalID
+				}
 			}
 		}
-	}
-	keys := make([]exportResourceKey, 0, len(catalysts))
-	for _, catalyst := range catalysts {
-		keys = append(keys, exportResourceKey{RevisionID: revisionID, ResourceID: recipeAlternativeItemID(catalyst), Kind: "item"})
 	}
 	resolved, err := s.resolveExportResources(ctx, keys)
 	if err != nil {
 		return nil, err
 	}
-	for _, catalyst := range catalysts {
-		itemID := recipeAlternativeItemID(catalyst)
-		catalyst["id"] = itemID
-		if _, exists := catalyst["kind"]; !exists {
-			catalyst["kind"] = "minecraft.item"
+	for _, batch := range batches {
+		for _, catalyst := range result[batch.TypeID] {
+			itemID := recipeAlternativeItemID(catalyst)
+			catalyst["id"] = itemID
+			if _, exists := catalyst["kind"]; !exists {
+				catalyst["kind"] = "minecraft.item"
+			}
+			if _, exists := catalyst["registry"]; !exists {
+				catalyst["registry"] = resourceNamespace(itemID)
+			}
+			for _, alias := range []string{"entityId", "item", "resource_location", "canonicalId", "kindCode"} {
+				delete(catalyst, alias)
+			}
+			source, exists := resolved[exportResourceKey{RevisionID: batch.RevisionID, ResourceID: itemID, Kind: "item"}]
+			if !exists {
+				continue
+			}
+			catalyst["publicId"] = source.PublicID
+			catalyst["id"] = source.ObjectID
+			catalyst["kind"] = source.KindCode
+			catalyst["registry"] = source.Registry
+			catalyst["names"] = source.Names
+			catalyst["revisionId"] = source.RevisionID
+			catalyst["modSiteId"] = source.ModSiteID
+			catalyst["versionPublicId"] = source.VersionPublicID
+			catalyst["detailUrl"] = canonicalResourceDetailURL(source)
+			catalyst["iconPath"] = source.IconPath
 		}
-		if _, exists := catalyst["registry"]; !exists {
-			catalyst["registry"] = resourceNamespace(itemID)
-		}
-		for _, alias := range []string{"entityId", "item", "resource_location", "canonicalId", "kindCode"} {
-			delete(catalyst, alias)
-		}
-		source, exists := resolved[exportResourceKey{RevisionID: revisionID, ResourceID: itemID, Kind: "item"}]
-		if !exists {
-			continue
-		}
-		catalyst["publicId"] = source.PublicID
-		catalyst["id"] = source.ObjectID
-		catalyst["kind"] = source.KindCode
-		catalyst["registry"] = source.Registry
-		catalyst["names"] = source.Names
-		catalyst["revisionId"] = source.RevisionID
-		catalyst["modSiteId"] = source.ModSiteID
-		catalyst["versionPublicId"] = source.VersionPublicID
-		catalyst["detailUrl"] = canonicalResourceDetailURL(source)
-		catalyst["iconPath"] = source.IconPath
 	}
-	return catalysts, nil
+	return result, nil
 }
 
 func resourceNamespace(id string) string {

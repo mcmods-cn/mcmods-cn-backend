@@ -17,7 +17,10 @@ import (
 	"mcmods-cn-backend/internal/queue"
 )
 
-const projectUpdateNotificationBatchSize = 200
+const (
+	projectUpdateNotificationBatchSize   = 200
+	projectUpdateNotificationMaxAttempts = 8
+)
 
 type ProjectUpdateNotificationWorker struct {
 	db    *pgxpool.Pool
@@ -42,7 +45,9 @@ func (worker *ProjectUpdateNotificationWorker) Start(ctx context.Context) error 
 }
 
 func (worker *ProjectUpdateNotificationWorker) scan(ctx context.Context) {
-	worker.processPending(ctx)
+	if err := worker.processPending(ctx); err != nil {
+		log.Printf("scan pending project update notifications: %v", err)
+	}
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -50,31 +55,40 @@ func (worker *ProjectUpdateNotificationWorker) scan(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			worker.processPending(ctx)
+			if err := worker.processPending(ctx); err != nil {
+				log.Printf("scan pending project update notifications: %v", err)
+			}
 		}
 	}
 }
 
-func (worker *ProjectUpdateNotificationWorker) processPending(ctx context.Context) {
+func (worker *ProjectUpdateNotificationWorker) processPending(ctx context.Context) error {
 	rows, err := worker.db.Query(ctx, `select event_id from project_update_notification_tasks
 		where (status='pending' and next_attempt_at<=now()) or (status='processing' and updated_at<now()-interval '5 minutes')
 		order by next_attempt_at,event_id limit 10`)
 	if err != nil {
-		return
+		return err
 	}
 	ids := make([]int64, 0, 10)
 	for rows.Next() {
 		var id int64
-		if rows.Scan(&id) == nil {
-			ids = append(ids, id)
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
 		}
+		ids = append(ids, id)
 	}
-	rows.Close()
+	if err = finishRows(rows); err != nil {
+		return err
+	}
 	for _, id := range ids {
 		if err = worker.process(ctx, id); err != nil {
-			worker.retry(ctx, id, err)
+			if retryErr := worker.retry(ctx, id, err); retryErr != nil {
+				return errors.Join(err, retryErr)
+			}
 		}
 	}
+	return nil
 }
 
 func (worker *ProjectUpdateNotificationWorker) handle(ctx context.Context, raw []byte) error {
@@ -83,8 +97,7 @@ func (worker *ProjectUpdateNotificationWorker) handle(ctx context.Context, raw [
 		return errors.New("invalid project update task")
 	}
 	if err := worker.process(ctx, message.EventID); err != nil {
-		worker.retry(ctx, message.EventID, err)
-		return err
+		return errors.Join(err, worker.retry(ctx, message.EventID, err))
 	}
 	return nil
 }
@@ -110,7 +123,7 @@ func (worker *ProjectUpdateNotificationWorker) process(ctx context.Context, even
 	if err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `update project_update_notification_tasks set status='processing',attempt_count=attempt_count+1,updated_at=now() where event_id=$1`, eventID); err != nil {
+	if _, err = tx.Exec(ctx, `update project_update_notification_tasks set status='processing',updated_at=now() where event_id=$1`, eventID); err != nil {
 		return err
 	}
 	projectName, err = publicProjectNameForUpdate(ctx, tx, routeID)
@@ -146,14 +159,24 @@ func (worker *ProjectUpdateNotificationWorker) process(ctx context.Context, even
 		}
 		recipients = append(recipients, value)
 	}
-	rows.Close()
-	config := loadNotificationTemplateConfig(ctx, worker.db)
-	sectionText := strings.Join(uniqueProjectUpdateSections(sections), ", ")
+	if err = finishRows(rows); err != nil {
+		return err
+	}
+	config, err := loadNotificationTemplateConfig(ctx, tx)
+	if err != nil {
+		return err
+	}
+	stableSections := uniqueProjectUpdateSections(sections)
+	unknownSections := unknownProjectUpdateSections(stableSections)
 	data, _ := json.Marshal(map[string]any{"url": projectURL, "projectUpdateEventId": eventID, "updateKind": updateKind, "changedSections": sections})
 	insertedRecipients := make([]int64, 0, len(recipients))
 	for _, recipient := range recipients {
+		_, sectionLocale, _, selectErr := selectNotificationTemplateForLocale(config, recipient.locale, "project_updated")
+		if selectErr != nil {
+			return selectErr
+		}
 		rendered, renderErr := renderNotificationTemplateForLocale(config, recipient.locale, "project_updated", map[string]string{
-			"project_name": projectName, "changed_sections": sectionText,
+			"project_name": projectName, "changed_sections": localizedProjectUpdateSectionText(sectionLocale, stableSections),
 		})
 		if renderErr != nil {
 			return renderErr
@@ -172,20 +195,17 @@ func (worker *ProjectUpdateNotificationWorker) process(ctx context.Context, even
 		}
 		nextUserID = recipient.id
 	}
-	if len(recipients) < projectUpdateNotificationBatchSize {
-		_, err = tx.Exec(ctx, `update project_update_notification_tasks set status='completed',next_user_id=$2,
-			notified_count=(select count(*) from notifications where project_update_event_id=$1),last_error='',updated_at=now()
-			where event_id=$1`, eventID, nextUserID)
-	} else {
-		_, err = tx.Exec(ctx, `update project_update_notification_tasks set status='pending',next_user_id=$2,
-			notified_count=(select count(*) from notifications where project_update_event_id=$1),next_attempt_at=now(),last_error='',updated_at=now()
-			where event_id=$1`, eventID, nextUserID)
-	}
-	if err != nil {
+	if err = updateProjectUpdateNotificationProgress(ctx, tx, eventID, nextUserID, int64(len(insertedRecipients)),
+		len(recipients) < projectUpdateNotificationBatchSize); err != nil {
 		return err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return err
+	}
+	if len(unknownSections) > 0 && len(insertedRecipients) > 0 {
+		fallbackCount := uint64(len(unknownSections)) * uint64(len(insertedRecipients))
+		projectUpdateNotificationObservability.unknownSectionFallbacks.Add(fallbackCount)
+		log.Printf("project update notification event %d used localized fallback for unknown sections %v (%d deliveries)", eventID, unknownSections, fallbackCount)
 	}
 	for _, userID := range insertedRecipients {
 		if worker.cache != nil {
@@ -198,16 +218,40 @@ func (worker *ProjectUpdateNotificationWorker) process(ctx context.Context, even
 	return nil
 }
 
-func (worker *ProjectUpdateNotificationWorker) retry(ctx context.Context, eventID int64, cause error) {
+func updateProjectUpdateNotificationProgress(ctx context.Context, tx pgx.Tx, eventID, nextUserID, insertedCount int64, completed bool) error {
+	status := "pending"
+	if completed {
+		status = "completed"
+	}
+	_, err := tx.Exec(ctx, `update project_update_notification_tasks set status=$4,next_user_id=$2,
+		notified_count=notified_count+$3,next_attempt_at=case when $4='pending' then now() else next_attempt_at end,
+		last_error='',updated_at=now() where event_id=$1`, eventID, nextUserID, insertedCount, status)
+	return err
+}
+
+func (worker *ProjectUpdateNotificationWorker) retry(ctx context.Context, eventID int64, cause error) error {
 	detail := cause.Error()
 	if len(detail) > 1000 {
 		detail = detail[:1000]
 	}
-	_, _ = worker.db.Exec(ctx, `update project_update_notification_tasks set
-		status=case when attempt_count>=8 then 'failed' else 'pending' end,
-		next_attempt_at=now()+least(300,greatest(5,attempt_count*attempt_count*5))*interval '1 second',last_error=$2,updated_at=now()
-		where event_id=$1 and status<>'completed'`, eventID, detail)
-	log.Printf("project update notification task %d failed: %v", eventID, cause)
+	var attempts int
+	var status string
+	err := worker.db.QueryRow(ctx, `update project_update_notification_tasks set
+		attempt_count=attempt_count+1,
+		status=case when attempt_count+1>=$3 then 'failed' else 'pending' end,
+		next_attempt_at=case when attempt_count+1>=$3 then next_attempt_at
+			else now()+least(300,greatest(5,(attempt_count+1)*(attempt_count+1)*5))*interval '1 second' end,
+		last_error=$2,updated_at=now()
+		where event_id=$1 and status in ('pending','processing')
+		returning attempt_count,status`, eventID, detail, projectUpdateNotificationMaxAttempts).Scan(&attempts, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("persist project update notification retry: %w", err)
+	}
+	log.Printf("project update notification task %d attempt %d became %s: %v", eventID, attempts, status, cause)
+	return nil
 }
 
 func publicProjectNameForUpdate(ctx context.Context, tx pgx.Tx, routeID int64) (string, error) {

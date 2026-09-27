@@ -144,7 +144,11 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	if _, err = tx.Exec(context.Background(), `set local idle_in_transaction_session_timeout='15s'`); err != nil {
 		t.Fatal(err)
 	}
-	var modID int64
+	var uploaderID, modID int64
+	if err = tx.QueryRow(context.Background(), `insert into users(username,email,password_hash)
+		values('catalog_import_contract','catalog_import_contract@example.invalid','test') returning id`).Scan(&uploaderID); err != nil {
+		t.Fatal(err)
+	}
 	if err = tx.QueryRow(context.Background(), `insert into mods(project_code,slug,primary_name,review_status)
 		values('tst9z9x01','catalog-import-integration-test','Catalog import integration test','approved') returning id`).Scan(&modID); err != nil {
 		t.Fatal(err)
@@ -152,8 +156,14 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	packageID := "00000000-0000-4000-8000-000000000001"
 	revisionID := "00000000-0000-4000-8000-000000000002"
 	jobID := "00000000-0000-4000-8000-000000000003"
-	if _, err = tx.Exec(context.Background(), `insert into catalog_import_packages(id,sha256,archive_name,schema_version,exporter_version,minecraft_version,loader,manifest)
-		values($1,$2,'test.zip','mcmods-export/v1','0.6.0','1.20.1','forge','{}')`, packageID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); err != nil {
+	archiveHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var archiveFileID int64
+	if err = tx.QueryRow(context.Background(), `insert into oss_files(object_key,original_name,sha256,uploader_id)
+		values('tests/latest-exporter/package.zip','test.zip',$1,$2) returning id`, archiveHash, uploaderID).Scan(&archiveFileID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(context.Background(), `insert into catalog_import_packages(id,sha256,archive_file_id,archive_name,schema_version,exporter_version,minecraft_version,loader,manifest,uploaded_by)
+		values($1,$2,$3,'test.zip','mcmods-export/v1','0.6.0','1.20.1','forge','{}',$4)`, packageID, archiveHash, archiveFileID, uploaderID); err != nil {
 		t.Fatal(err)
 	}
 	var versionID int64

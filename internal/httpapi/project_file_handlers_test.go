@@ -1,6 +1,9 @@
 package httpapi
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestNormalizeProjectFileType(t *testing.T) {
 	tests := map[string]string{
@@ -73,11 +76,11 @@ func TestValidProviderDownloadURL(t *testing.T) {
 	}
 }
 
-func TestMinecraftVersionLess(t *testing.T) {
-	if !minecraftVersionLess("1.20.1", "1.21") {
-		t.Fatal("expected 1.20.1 to sort before 1.21")
-	}
-	if minecraftVersionLess("1.21.1", "1.21") {
-		t.Fatal("did not expect 1.21.1 to sort before 1.21")
+func TestMinecraftVersionSortUsesAuthoritativeRegistry(t *testing.T) {
+	codes := []string{"unknown-z", "1.21.1", "25w10a", "unknown-a"}
+	sortMinecraftVersionCodes(codes, map[string]int{"25w10a": 0, "1.21.1": 1})
+	want := []string{"25w10a", "1.21.1", "unknown-a", "unknown-z"}
+	if !reflect.DeepEqual(codes, want) {
+		t.Fatalf("Minecraft versions=%#v, want %#v", codes, want)
 	}
 }

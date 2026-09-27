@@ -10,16 +10,17 @@ import (
 // supply a concrete name/icon/detail for that identity.
 func (s *Server) decorateResourceVersionRows(ctx context.Context, items []map[string]any, primary, secondary string) error {
 	resourcePublicIDs := make([]string, 0, len(items))
-	byResource := make(map[string]map[string]any, len(items))
+	byResource := make(map[string][]map[string]any, len(items))
 	for _, item := range items {
 		resourceID, _ := item["publicId"].(string)
 		if resourceID == "" {
+			item["versions"] = []map[string]any{}
 			continue
 		}
 		if _, exists := byResource[resourceID]; !exists {
 			resourcePublicIDs = append(resourcePublicIDs, resourceID)
-			byResource[resourceID] = item
 		}
+		byResource[resourceID] = append(byResource[resourceID], item)
 		item["versions"] = []map[string]any{}
 	}
 	if len(resourcePublicIDs) == 0 {
@@ -28,7 +29,6 @@ func (s *Server) decorateResourceVersionRows(ctx context.Context, items []map[st
 	rows, err := s.db.Query(ctx, `select entity.public_id,resource.canonical_id,version.public_id,version.label,version.minecraft_versions,version.loaders,
 		version.mod_version,
 		true has_manual_page,
-		(version_detail.resource_id is not null) has_manual_detail,
 		(version_detail.resource_id is not null or snapshot.revision_id is not null) has_detail,
 		coalesce(snapshot.revision_id,''),coalesce(snapshot.registry,''),coalesce(snapshot.icon_path,''),coalesce(snapshot.preview_path,''),mod.slug,
 		coalesce(nullif(version_names.names,'{}'::jsonb),nullif(snapshot.names,'{}'::jsonb),'{}'::jsonb),
@@ -59,10 +59,10 @@ func (s *Server) decorateResourceVersionRows(ctx context.Context, items []map[st
 	for rows.Next() {
 		var resourcePublicID, canonicalID, publicID, label, modVersion, revisionID, registry, iconPath, previewPath, modSiteID string
 		var minecraftVersions, loaders []string
-		var hasManualPage, hasManualDetail, hasDetail bool
+		var hasManualPage, hasDetail bool
 		var names []byte
 		var iconFilePublicID, renderFilePublicID string
-		if err = rows.Scan(&resourcePublicID, &canonicalID, &publicID, &label, &minecraftVersions, &loaders, &modVersion, &hasManualPage, &hasManualDetail, &hasDetail,
+		if err = rows.Scan(&resourcePublicID, &canonicalID, &publicID, &label, &minecraftVersions, &loaders, &modVersion, &hasManualPage, &hasDetail,
 			&revisionID, &registry, &iconPath, &previewPath, &modSiteID, &names, &iconFilePublicID, &renderFilePublicID); err != nil {
 			return err
 		}
@@ -75,8 +75,9 @@ func (s *Server) decorateResourceVersionRows(ctx context.Context, items []map[st
 			"modVersion": modVersion, "hasDetail": hasDetail, "revisionId": revisionID,
 			"registry": registry, "iconPath": iconPath, "previewPath": previewPath, "modSiteId": modSiteID, "names": json.RawMessage(names), "locale": locale, "name": name,
 			"iconFileId": iconFilePublicID, "renderFileId": renderFilePublicID, "detailUrl": detailURL}
-		item := byResource[resourcePublicID]
-		item["versions"] = append(item["versions"].([]map[string]any), version)
+		for _, item := range byResource[resourcePublicID] {
+			item["versions"] = append(item["versions"].([]map[string]any), version)
+		}
 	}
 	return rows.Err()
 }

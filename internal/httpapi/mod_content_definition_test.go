@@ -171,10 +171,10 @@ func TestManualEntryTypeSelectionIsIndependentFromResourceKind(t *testing.T) {
 		{Code: "block", KindCodes: []string{"minecraft.block"}},
 		{Code: "tool", KindCodes: []string{"minecraft.item"}},
 	}
-	if _, err := selectModContentEntryType(entryTypes, "tool", "minecraft.block", false); err != nil {
+	if _, err := selectModContentEntryType(entryTypes, "tool", "minecraft.block", false, false); err != nil {
 		t.Fatalf("manual category selection was coupled to resource kind: %v", err)
 	}
-	if _, err := selectModContentEntryType(entryTypes, "tool", "minecraft.block", true); err == nil {
+	if _, err := selectModContentEntryType(entryTypes, "tool", "minecraft.block", true, false); err == nil {
 		t.Fatal("import category validation must still enforce its inferred resource kind")
 	}
 }
@@ -383,8 +383,8 @@ func TestResourceAttributeSchemaPreservesStableIDsAndStorageTypes(t *testing.T) 
 	if err := preservesModContentAttributeSchema(current, next); err == nil {
 		t.Fatal("storage type change was accepted")
 	}
-	if err := preservesModContentAttributeSchema(current, modContentTemplateDefinition{}); err != nil {
-		t.Fatalf("deleting an entry type was rejected: %v", err)
+	if removed := removedModContentEntryTypeCodes(current, modContentTemplateDefinition{}); len(removed) != 1 || removed[0] != "entity" {
+		t.Fatalf("deleted entry type was not routed to the transactional reference guard: %#v", removed)
 	}
 }
 

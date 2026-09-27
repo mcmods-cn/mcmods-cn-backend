@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,35 +15,124 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
-	bmclMojangVersionManifestURL = "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json"
-	forgeMavenMetadataURL        = "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml"
-	bmclForgeVersionsURL         = "https://bmclapi2.bangbang93.com/forge/minecraft"
-	neoForgeMavenMetadataURL     = "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
-	neoForgeLegacyMetadataURL    = "https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml"
-	bmclNeoForgeMetadataURL      = "https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/maven-metadata.xml"
-	bmclNeoForgeLegacyURL        = "https://bmclapi2.bangbang93.com/maven/net/neoforged/forge/maven-metadata.xml"
-	fabricGameVersionsURL        = "https://meta.fabricmc.net/v2/versions/game"
-	bmclFabricGameVersionsURL    = "https://bmclapi2.bangbang93.com/fabric-meta/v2/versions/game"
-	liteLoaderVersionsURL        = "https://dl.liteloader.com/versions/versions.json"
-	bmclLiteLoaderVersionsURL    = "https://bmclapi2.bangbang93.com/maven/com/mumfrey/liteloader/versions.json"
-	maxMinecraftSourceBytes      = 16 << 20
+	bmclMojangVersionManifestURL              = "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json"
+	forgeMavenMetadataURL                     = "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml"
+	bmclForgeVersionsURL                      = "https://bmclapi2.bangbang93.com/forge/minecraft"
+	neoForgeMavenMetadataURL                  = "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
+	neoForgeLegacyMetadataURL                 = "https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml"
+	bmclNeoForgeMetadataURL                   = "https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/maven-metadata.xml"
+	bmclNeoForgeLegacyURL                     = "https://bmclapi2.bangbang93.com/maven/net/neoforged/forge/maven-metadata.xml"
+	fabricGameVersionsURL                     = "https://meta.fabricmc.net/v2/versions/game"
+	bmclFabricGameVersionsURL                 = "https://bmclapi2.bangbang93.com/fabric-meta/v2/versions/game"
+	liteLoaderVersionsURL                     = "https://dl.liteloader.com/versions/versions.json"
+	bmclLiteLoaderVersionsURL                 = "https://bmclapi2.bangbang93.com/maven/com/mumfrey/liteloader/versions.json"
+	maxMinecraftSourceBytes                   = 16 << 20
+	minecraftSourceCacheTTL                   = 15 * time.Minute
+	maxMinecraftSourceCacheBytes              = 64 << 20
+	maxMinecraftSourceCacheItems              = 64
+	maxMinecraftSourceFetches                 = 4
+	minecraftVersionSyncAdvisoryLockKey int64 = 0x4d434d4f44535653
 )
 
-var minecraftVersionHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var (
+	minecraftVersionHTTPClient = &http.Client{Timeout: 30 * time.Second}
+	minecraftSourceResponses   = newMinecraftSourceResponseCache()
+	minecraftSourceFetchGroup  singleflight.Group
+	minecraftSourceFetchSlots  = make(chan struct{}, maxMinecraftSourceFetches)
+)
+
+type minecraftSourceCacheEntry struct {
+	payload      []byte
+	etag         string
+	lastModified string
+	freshUntil   time.Time
+	lastAccess   uint64
+}
+
+type minecraftSourceResponseCache struct {
+	mu         sync.Mutex
+	entries    map[string]minecraftSourceCacheEntry
+	totalBytes int
+	access     uint64
+}
+
+func newMinecraftSourceResponseCache() *minecraftSourceResponseCache {
+	return &minecraftSourceResponseCache{entries: make(map[string]minecraftSourceCacheEntry)}
+}
+
+func (cache *minecraftSourceResponseCache) fresh(sourceURL string, now time.Time) ([]byte, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	entry, ok := cache.entries[sourceURL]
+	if !ok || !now.Before(entry.freshUntil) {
+		return nil, false
+	}
+	cache.access++
+	entry.lastAccess = cache.access
+	cache.entries[sourceURL] = entry
+	return entry.payload, true
+}
+
+func (cache *minecraftSourceResponseCache) stale(sourceURL string) (minecraftSourceCacheEntry, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	entry, ok := cache.entries[sourceURL]
+	return entry, ok
+}
+
+func (cache *minecraftSourceResponseCache) store(sourceURL string, entry minecraftSourceCacheEntry) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if previous, ok := cache.entries[sourceURL]; ok {
+		cache.totalBytes -= len(previous.payload)
+		delete(cache.entries, sourceURL)
+	}
+	for len(cache.entries) >= maxMinecraftSourceCacheItems || cache.totalBytes+len(entry.payload) > maxMinecraftSourceCacheBytes {
+		oldestURL := ""
+		var oldestAccess uint64
+		for candidateURL, candidate := range cache.entries {
+			if oldestURL == "" || candidate.lastAccess < oldestAccess {
+				oldestURL, oldestAccess = candidateURL, candidate.lastAccess
+			}
+		}
+		if oldestURL == "" {
+			break
+		}
+		cache.totalBytes -= len(cache.entries[oldestURL].payload)
+		delete(cache.entries, oldestURL)
+	}
+	cache.access++
+	entry.lastAccess = cache.access
+	cache.entries[sourceURL] = entry
+	cache.totalBytes += len(entry.payload)
+}
+
+func (cache *minecraftSourceResponseCache) reset() {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.entries = make(map[string]minecraftSourceCacheEntry)
+	cache.totalBytes = 0
+	cache.access = 0
+}
+
+func resetMinecraftSourceCacheForTest() {
+	minecraftSourceResponses.reset()
+}
 
 type minecraftLoaderVersionSource struct {
 	code       string
 	primaryURL string
-	fetch      func(context.Context, []string) ([]string, string, bool, error)
+	fetch      func(context.Context, []string) ([]string, []string, bool, error)
 }
 
 type minecraftLoaderVersionResult struct {
 	source       minecraftLoaderVersionSource
 	versions     []string
-	sourceURL    string
+	sourceURLs   []string
 	usedFallback bool
 	err          error
 }
@@ -52,28 +142,85 @@ type minecraftSourceAttempt struct {
 	decode func([]byte) ([]string, error)
 }
 
-func syncMinecraftVersionCatalog(ctx context.Context, db *pgxpool.Pool) (minecraftVersionConfig, error) {
-	minecraftVersionSyncMu.Lock()
-	defer minecraftVersionSyncMu.Unlock()
+type minecraftVersionSyncLease struct {
+	connection *pgxpool.Conn
+}
+
+func acquireMinecraftVersionSyncLease(ctx context.Context, db *pgxpool.Pool) (*minecraftVersionSyncLease, error) {
+	connection, err := db.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire Minecraft version synchronization connection: %w", err)
+	}
+	var acquired bool
+	if err = connection.QueryRow(ctx, `select pg_try_advisory_lock($1)`, minecraftVersionSyncAdvisoryLockKey).Scan(&acquired); err != nil {
+		connection.Release()
+		return nil, fmt.Errorf("acquire Minecraft version synchronization lease: %w", err)
+	}
+	if !acquired {
+		connection.Release()
+		return nil, errMinecraftVersionSyncInProgress
+	}
+	return &minecraftVersionSyncLease{connection: connection}, nil
+}
+
+func (lease *minecraftVersionSyncLease) Release(ctx context.Context) error {
+	if lease == nil || lease.connection == nil {
+		return nil
+	}
+	connection := lease.connection
+	lease.connection = nil
+	var released bool
+	err := connection.QueryRow(ctx, `select pg_advisory_unlock($1)`, minecraftVersionSyncAdvisoryLockKey).Scan(&released)
+	if err != nil {
+		raw := connection.Hijack()
+		_ = raw.Close(ctx)
+		return fmt.Errorf("release Minecraft version synchronization lease: %w", err)
+	}
+	connection.Release()
+	if !released {
+		return errors.New("Minecraft version synchronization lease was not held")
+	}
+	return nil
+}
+
+func syncMinecraftVersionCatalog(ctx context.Context, db *pgxpool.Pool) (config minecraftVersionConfig, returnErr error) {
+	lease, err := acquireMinecraftVersionSyncLease(ctx, db)
+	if err != nil {
+		return minecraftVersionConfig{}, err
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := lease.Release(releaseCtx); err != nil {
+			returnErr = errors.Join(returnErr, err)
+		}
+	}()
 
 	manifest, manifestSourceURL, err := fetchMojangVersionManifest(ctx)
 	if err != nil {
 		return minecraftVersionConfig{}, err
 	}
 
-	current := loadMinecraftVersionConfig(ctx, db)
+	current, err := loadMinecraftVersionConfig(ctx, db)
+	if err != nil {
+		return minecraftVersionConfig{}, fmt.Errorf("load Minecraft version configuration before synchronization: %w", err)
+	}
 	current.Versions = mergeMojangVersions(manifest, current.Versions)
 	current.SourceURL = manifestSourceURL
 	current.LastSyncedAt = time.Now().UTC().Format(time.RFC3339)
 	current.LatestRelease = strings.TrimSpace(manifest.Latest.Release)
 	current.LatestSnapshot = strings.TrimSpace(manifest.Latest.Snapshot)
 	syncConfiguredLoaderVersions(ctx, &current)
+	artifacts, err := synchronizeMRPackLoaderArtifacts(ctx, &current)
+	if err != nil {
+		return minecraftVersionConfig{}, fmt.Errorf("failed to synchronize Minecraft loader artifacts: %w", err)
+	}
 
 	normalized, err := normalizeMinecraftVersionConfig(current)
 	if err != nil {
 		return minecraftVersionConfig{}, err
 	}
-	if err = saveMinecraftVersionConfig(ctx, db, normalized); err != nil {
+	if err = saveSynchronizedMinecraftVersionConfig(ctx, db, normalized, artifacts); err != nil {
 		return minecraftVersionConfig{}, fmt.Errorf("failed to save synchronized Minecraft versions: %w", err)
 	}
 	return normalized, nil
@@ -154,8 +301,8 @@ func syncConfiguredLoaderVersions(ctx context.Context, config *minecraftVersionC
 		wait.Add(1)
 		go func(source minecraftLoaderVersionSource) {
 			defer wait.Done()
-			versions, sourceURL, fallback, err := source.fetch(ctx, knownVersions)
-			results <- minecraftLoaderVersionResult{source: source, versions: versions, sourceURL: sourceURL, usedFallback: fallback, err: err}
+			versions, sourceURLs, fallback, err := source.fetch(ctx, knownVersions)
+			results <- minecraftLoaderVersionResult{source: source, versions: versions, sourceURLs: sourceURLs, usedFallback: fallback, err: err}
 		}(source)
 	}
 	wait.Wait()
@@ -182,6 +329,7 @@ func applyMinecraftLoaderVersionResults(config *minecraftVersionConfig, sources 
 		result := byCode[strings.ToLower(source.code)]
 		status := minecraftLoaderSyncStatus{
 			Code: source.code, SourceURL: source.primaryURL, Status: "failed",
+			SourceURLs:   []string{source.primaryURL},
 			VersionCount: len(config.Loaders[loaderIndex].Versions),
 		}
 		if previous, ok := previousStatuses[strings.ToLower(source.code)]; ok {
@@ -193,7 +341,10 @@ func applyMinecraftLoaderVersionResults(config *minecraftVersionConfig, sources 
 			continue
 		}
 		config.Loaders[loaderIndex].Versions = orderSupportedMinecraftVersions(config.Versions, result.versions)
-		status.SourceURL = result.sourceURL
+		status.SourceURLs = uniqueTrimmed(result.sourceURLs, 8)
+		if len(status.SourceURLs) > 0 {
+			status.SourceURL = status.SourceURLs[0]
+		}
 		status.Status = "synced"
 		status.LastSyncedAt = config.LastSyncedAt
 		status.VersionCount = len(config.Loaders[loaderIndex].Versions)
@@ -203,69 +354,65 @@ func applyMinecraftLoaderVersionResults(config *minecraftVersionConfig, sources 
 	config.LoaderSyncs = statuses
 }
 
-func fetchForgeMinecraftVersions(ctx context.Context, known []string) ([]string, string, bool, error) {
+func fetchForgeMinecraftVersions(ctx context.Context, known []string) ([]string, []string, bool, error) {
 	versions, sourceURL, fallback, err := fetchMinecraftVersionAttempts(ctx, []minecraftSourceAttempt{
 		{url: forgeMavenMetadataURL, decode: decodeMavenMetadataVersions},
 		{url: bmclForgeVersionsURL, decode: decodeStringArray},
 	})
 	if err != nil {
-		return nil, "", false, err
+		return nil, nil, false, err
 	}
-	return requireResolvedLoaderVersions("Forge", resolveArtifactMinecraftVersions(versions, known), sourceURL, fallback)
+	return requireResolvedLoaderVersions("Forge", resolveArtifactMinecraftVersions(versions, known), []string{sourceURL}, fallback)
 }
 
-func fetchNeoForgeMinecraftVersions(ctx context.Context, known []string) ([]string, string, bool, error) {
+func fetchNeoForgeMinecraftVersions(ctx context.Context, known []string) ([]string, []string, bool, error) {
 	modern, modernURL, modernFallback, err := fetchMinecraftVersionAttempts(ctx, []minecraftSourceAttempt{
 		{url: neoForgeMavenMetadataURL, decode: decodeMavenMetadataVersions},
 		{url: bmclNeoForgeMetadataURL, decode: decodeMavenMetadataVersions},
 	})
 	if err != nil {
-		return nil, "", false, fmt.Errorf("NeoForge metadata: %w", err)
+		return nil, nil, false, fmt.Errorf("NeoForge metadata: %w", err)
 	}
 	legacy, legacyURL, legacyFallback, err := fetchMinecraftVersionAttempts(ctx, []minecraftSourceAttempt{
 		{url: neoForgeLegacyMetadataURL, decode: decodeMavenMetadataVersions},
 		{url: bmclNeoForgeLegacyURL, decode: decodeMavenMetadataVersions},
 	})
 	if err != nil {
-		return nil, "", false, fmt.Errorf("NeoForge 1.20.1 metadata: %w", err)
+		return nil, nil, false, fmt.Errorf("NeoForge 1.20.1 metadata: %w", err)
 	}
 	values := append(modern, legacy...)
 	resolved := resolveNeoForgeMinecraftVersions(values, known)
 	usedFallback := modernFallback || legacyFallback
-	sourceURL := modernURL
-	if legacyFallback && !modernFallback {
-		sourceURL = legacyURL
-	}
-	return requireResolvedLoaderVersions("NeoForge", resolved, sourceURL, usedFallback)
+	return requireResolvedLoaderVersions("NeoForge", resolved, []string{modernURL, legacyURL}, usedFallback)
 }
 
-func fetchFabricMinecraftVersions(ctx context.Context, known []string) ([]string, string, bool, error) {
+func fetchFabricMinecraftVersions(ctx context.Context, known []string) ([]string, []string, bool, error) {
 	versions, sourceURL, fallback, err := fetchMinecraftVersionAttempts(ctx, []minecraftSourceAttempt{
 		{url: fabricGameVersionsURL, decode: decodeFabricGameVersions},
 		{url: bmclFabricGameVersionsURL, decode: decodeFabricGameVersions},
 	})
 	if err != nil {
-		return nil, "", false, err
+		return nil, nil, false, err
 	}
-	return requireResolvedLoaderVersions("Fabric", filterKnownMinecraftVersions(versions, known), sourceURL, fallback)
+	return requireResolvedLoaderVersions("Fabric", filterKnownMinecraftVersions(versions, known), []string{sourceURL}, fallback)
 }
 
-func fetchLiteLoaderMinecraftVersions(ctx context.Context, known []string) ([]string, string, bool, error) {
+func fetchLiteLoaderMinecraftVersions(ctx context.Context, known []string) ([]string, []string, bool, error) {
 	versions, sourceURL, fallback, err := fetchMinecraftVersionAttempts(ctx, []minecraftSourceAttempt{
 		{url: liteLoaderVersionsURL, decode: decodeLiteLoaderMinecraftVersions},
 		{url: bmclLiteLoaderVersionsURL, decode: decodeLiteLoaderMinecraftVersions},
 	})
 	if err != nil {
-		return nil, "", false, err
+		return nil, nil, false, err
 	}
-	return requireResolvedLoaderVersions("LiteLoader", filterKnownMinecraftVersions(versions, known), sourceURL, fallback)
+	return requireResolvedLoaderVersions("LiteLoader", filterKnownMinecraftVersions(versions, known), []string{sourceURL}, fallback)
 }
 
-func requireResolvedLoaderVersions(loader string, versions []string, sourceURL string, fallback bool) ([]string, string, bool, error) {
+func requireResolvedLoaderVersions(loader string, versions, sourceURLs []string, fallback bool) ([]string, []string, bool, error) {
 	if len(versions) == 0 {
-		return nil, "", false, fmt.Errorf("%s source returned no versions present in the Minecraft catalog", loader)
+		return nil, nil, false, fmt.Errorf("%s source returned no versions present in the Minecraft catalog", loader)
 	}
-	return versions, sourceURL, fallback, nil
+	return versions, uniqueTrimmed(sourceURLs, 8), fallback, nil
 }
 
 func fetchMinecraftVersionAttempts(ctx context.Context, attempts []minecraftSourceAttempt) ([]string, string, bool, error) {
@@ -291,17 +438,62 @@ func fetchMinecraftVersionAttempts(ctx context.Context, attempts []minecraftSour
 }
 
 func fetchMinecraftSource(ctx context.Context, sourceURL string) ([]byte, error) {
+	if payload, ok := minecraftSourceResponses.fresh(sourceURL, time.Now()); ok {
+		return payload, nil
+	}
+	result := minecraftSourceFetchGroup.DoChan(sourceURL, func() (any, error) {
+		if payload, ok := minecraftSourceResponses.fresh(sourceURL, time.Now()); ok {
+			return payload, nil
+		}
+		return downloadMinecraftSource(context.WithoutCancel(ctx), sourceURL)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case resolved := <-result:
+		if resolved.Err != nil {
+			return nil, resolved.Err
+		}
+		payload, ok := resolved.Val.([]byte)
+		if !ok {
+			return nil, errors.New("invalid Minecraft source cache result")
+		}
+		return payload, nil
+	}
+}
+
+func downloadMinecraftSource(ctx context.Context, sourceURL string) ([]byte, error) {
+	select {
+	case minecraftSourceFetchSlots <- struct{}{}:
+		defer func() { <-minecraftSourceFetchSlots }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	stale, hasStale := minecraftSourceResponses.stale(sourceURL)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("User-Agent", "mcmods.cn/version-sync")
 	request.Header.Set("Accept", "application/json, application/xml, text/xml;q=0.9, */*;q=0.5")
+	if hasStale {
+		if stale.etag != "" {
+			request.Header.Set("If-None-Match", stale.etag)
+		}
+		if stale.lastModified != "" {
+			request.Header.Set("If-Modified-Since", stale.lastModified)
+		}
+	}
 	response, err := minecraftVersionHTTPClient.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("request %s: %w", sourceURL, err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotModified && hasStale {
+		stale.freshUntil = time.Now().Add(minecraftSourceCacheTTL)
+		minecraftSourceResponses.store(sourceURL, stale)
+		return stale.payload, nil
+	}
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s returned HTTP %d", sourceURL, response.StatusCode)
 	}
@@ -312,6 +504,12 @@ func fetchMinecraftSource(ctx context.Context, sourceURL string) ([]byte, error)
 	if len(payload) > maxMinecraftSourceBytes {
 		return nil, fmt.Errorf("%s exceeds %d bytes", sourceURL, maxMinecraftSourceBytes)
 	}
+	minecraftSourceResponses.store(sourceURL, minecraftSourceCacheEntry{
+		payload:      payload,
+		etag:         strings.TrimSpace(response.Header.Get("ETag")),
+		lastModified: strings.TrimSpace(response.Header.Get("Last-Modified")),
+		freshUntil:   time.Now().Add(minecraftSourceCacheTTL),
+	})
 	return payload, nil
 }
 
@@ -464,8 +662,9 @@ func orderSupportedMinecraftVersions(all []minecraftVersionOption, supported []s
 }
 
 func findMinecraftLoader(loaders []minecraftLoaderOption, code string) int {
+	code = canonicalMinecraftLoaderCode(code)
 	for index, loader := range loaders {
-		if strings.EqualFold(loader.Code, code) {
+		if canonicalMinecraftLoaderCode(loader.Code) == code {
 			return index
 		}
 	}

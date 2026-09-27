@@ -9,6 +9,7 @@ import (
 )
 
 const maxJSONRequestBodyBytes = int64(8 << 20)
+const maxCatalogResponseBytes = 2 << 20
 
 const backendResponseHeader = "X-MCMods-API-Response"
 
@@ -34,6 +35,23 @@ func writeJSONBytes(w http.ResponseWriter, status int, payload []byte) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	_, _ = w.Write(payload) // #nosec G705 -- callers pass json.Marshal output or bytes from the JSON-only query cache.
+}
+
+// writeBoundedCatalogJSON marshals before writing so an oversized catalog page
+// cannot escape as a partial 200 response. Catalog card DTOs and their nested
+// row caps keep the allocation that precedes this final invariant bounded.
+func writeBoundedCatalogJSON(w http.ResponseWriter, data any) bool {
+	payload, err := json.Marshal(apiResponse{Data: data})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to encode catalog response")
+		return false
+	}
+	if len(payload) > maxCatalogResponseBytes {
+		writeError(w, http.StatusInternalServerError, "catalog response exceeds byte budget")
+		return false
+	}
+	writeJSONBytes(w, http.StatusOK, payload)
+	return true
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

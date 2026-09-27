@@ -23,7 +23,7 @@ func New(cfg config.SMTPConfig) Mailer {
 }
 
 func (m Mailer) Enabled() bool {
-	return strings.TrimSpace(m.Config.Host) != "" && strings.TrimSpace(m.Config.From) != ""
+	return m.Config.Enabled && strings.TrimSpace(m.Config.Host) != "" && strings.TrimSpace(m.Config.From) != "" && m.Config.Port > 0 && m.Config.Port <= 65535
 }
 
 func (m Mailer) Send(to string, subject string, body string) error {

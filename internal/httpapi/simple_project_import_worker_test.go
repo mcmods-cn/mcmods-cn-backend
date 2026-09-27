@@ -1,6 +1,11 @@
 package httpapi
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func TestParseSimpleProjectImportSources(t *testing.T) {
 	tests := []struct {
@@ -53,6 +58,130 @@ func TestSimpleProjectExternalClassification(t *testing.T) {
 	versions := uniqueMinecraftVersions([]string{"1.21.1", "b1.7.3", "23w31a", "Forge", "Java 17"})
 	if len(versions) != 3 || !containsSimpleImportOption(versions, "b1.7.3") || !containsSimpleImportOption(versions, "23w31a") {
 		t.Fatalf("unexpected Minecraft versions: %#v", versions)
+	}
+}
+
+func TestSimpleProjectProviderFreeTextDoesNotCreateStructuredClassification(t *testing.T) {
+	t.Run("modrinth", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			response.Header().Set("Content-Type", "application/json")
+			switch request.URL.Path {
+			case "/project/example":
+				_, _ = response.Write([]byte(`{"id":"project-id","slug":"example","title":"Paper City 32x","description":"A path tracing model pack","body":"Includes 32x models and city textures","project_type":"resourcepack","categories":["traditional"],"game_versions":["1.21.1"],"status":"approved","license":{"id":"MIT"}}`))
+			case "/project/project-id/version":
+				_, _ = response.Write([]byte(`[]`))
+			default:
+				http.NotFound(response, request)
+			}
+		}))
+		defer server.Close()
+
+		cfg := defaultModImportConfig()
+		cfg.Modrinth.BaseURL = server.URL
+		draft, err := importModrinthSimpleProject(context.Background(), server.Client(), cfg, "resource_pack", "https://modrinth.com/resourcepack/example", "example")
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertFreeTextDidNotClassifyResourcePack(t, draft)
+	})
+
+	t.Run("curseforge", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			response.Header().Set("Content-Type", "application/json")
+			switch request.URL.Path {
+			case "/categories":
+				_, _ = response.Write([]byte(`{"data":[{"id":12,"slug":"texture-packs","isClass":true}]}`))
+			case "/mods/search":
+				_, _ = response.Write([]byte(`{"data":[{"id":34,"classId":12,"slug":"example","name":"Paper City 32x","summary":"A path tracing model pack","isAvailable":true,"categories":[{"name":"Traditional","slug":"traditional"}],"latestFilesIndexes":[{"gameVersion":"1.21.1"}]}]}`))
+			case "/mods/34/description":
+				_, _ = response.Write([]byte(`{"data":"<p>Includes 32x models and city textures</p>"}`))
+			default:
+				http.NotFound(response, request)
+			}
+		}))
+		defer server.Close()
+
+		cfg := defaultModImportConfig()
+		cfg.CurseForge.BaseURL = server.URL
+		cfg.CurseForge.APIKey = ""
+		draft, err := importCurseForgeSimpleProject(context.Background(), server.Client(), cfg, "resource_pack", "https://www.curseforge.com/minecraft/texture-packs/example", "example")
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertFreeTextDidNotClassifyResourcePack(t, draft)
+	})
+}
+
+func TestSimpleProjectSecondaryMetadataFailuresAreVisible(t *testing.T) {
+	t.Run("modrinth versions", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			response.Header().Set("Content-Type", "application/json")
+			if request.URL.Path == "/project/example" {
+				_, _ = response.Write([]byte(`{"id":"project-id","slug":"example","title":"Example","project_type":"resourcepack","status":"approved","license":{"id":"MIT"}}`))
+				return
+			}
+			http.Error(response, "failed", http.StatusInternalServerError)
+		}))
+		defer server.Close()
+		cfg := defaultModImportConfig()
+		cfg.Modrinth.BaseURL = server.URL
+		if _, err := importModrinthSimpleProject(context.Background(), server.Client(), cfg, "resource_pack", "https://modrinth.com/resourcepack/example", "example"); err == nil {
+			t.Fatal("version failure was ignored")
+		}
+	})
+
+	t.Run("modrinth team", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			response.Header().Set("Content-Type", "application/json")
+			switch request.URL.Path {
+			case "/project/example":
+				_, _ = response.Write([]byte(`{"id":"project-id","slug":"example","title":"Example","project_type":"resourcepack","team":"team-id","status":"approved","license":{"id":"MIT"}}`))
+			case "/project/project-id/version":
+				_, _ = response.Write([]byte(`[]`))
+			default:
+				http.Error(response, "failed", http.StatusTooManyRequests)
+			}
+		}))
+		defer server.Close()
+		cfg := defaultModImportConfig()
+		cfg.Modrinth.BaseURL = server.URL
+		if _, err := importModrinthSimpleProject(context.Background(), server.Client(), cfg, "resource_pack", "https://modrinth.com/resourcepack/example", "example"); err == nil {
+			t.Fatal("team failure was ignored")
+		}
+	})
+
+	t.Run("curseforge description", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			response.Header().Set("Content-Type", "application/json")
+			switch request.URL.Path {
+			case "/categories":
+				_, _ = response.Write([]byte(`{"data":[{"id":12,"slug":"texture-packs","isClass":true}]}`))
+			case "/mods/search":
+				_, _ = response.Write([]byte(`{"data":[{"id":34,"classId":12,"slug":"example","name":"Example","isAvailable":true}]}`))
+			default:
+				http.Error(response, "failed", http.StatusInternalServerError)
+			}
+		}))
+		defer server.Close()
+		cfg := defaultModImportConfig()
+		cfg.CurseForge.BaseURL = server.URL
+		cfg.CurseForge.APIKey = ""
+		if _, err := importCurseForgeSimpleProject(context.Background(), server.Client(), cfg, "resource_pack", "https://www.curseforge.com/minecraft/texture-packs/example", "example"); err == nil {
+			t.Fatal("description failure was ignored")
+		}
+	})
+}
+
+func assertFreeTextDidNotClassifyResourcePack(t *testing.T, draft simpleProjectSnapshot) {
+	t.Helper()
+	if draft.Resolution != "16x" {
+		t.Fatalf("free text changed resolution to %q", draft.Resolution)
+	}
+	if len(draft.Features) != 0 {
+		t.Fatalf("free text created features: %#v", draft.Features)
+	}
+	if !containsSimpleImportOption(draft.Categories, "vanilla_like") {
+		t.Fatalf("structured provider category was lost: %#v", draft.Categories)
 	}
 }
 
@@ -111,7 +240,7 @@ func TestImportedSimpleProjectDraftsAreEditorReady(t *testing.T) {
 			draft := simpleProjectDraftFromExternal(simpleProjectImportData{
 				ProjectType: test.projectType, Provider: "modrinth", ProviderURL: "https://modrinth.com/project/example",
 				ProviderProjectID: "example", Slug: "example", Name: "Example", MinecraftVersions: []string{"1.21.1"},
-				ExternalValues: test.values, Status: "active",
+				StructuredValues: test.values, Status: "active",
 			})
 			if err := normalizeAndValidateSimpleProjectDraft(&draft, true); err != nil {
 				t.Fatalf("imported draft is not editor-ready: %v; draft=%#v", err, draft)
@@ -124,7 +253,7 @@ func TestImportedAddonDraftAllowsParentSelectionAfterImport(t *testing.T) {
 	draft := simpleProjectDraftFromExternal(simpleProjectImportData{
 		ProjectType: "addon", Provider: "modrinth", ProviderURL: "https://modrinth.com/mod/example-addon",
 		ProviderProjectID: "AABBCCDD", Slug: "example-addon", Name: "Example Add-on",
-		MinecraftVersions: []string{"1.21.1"}, ExternalValues: []string{"NeoForge"},
+		MinecraftVersions: []string{"1.21.1"}, StructuredValues: []string{"NeoForge"},
 	})
 	if err := normalizeAndValidateSimpleProjectDraft(&draft, true); err != nil {
 		t.Fatalf("import draft should allow selecting its parent later: %v", err)

@@ -48,7 +48,8 @@ func Run() {
 		shutdownHTTPServer(server)
 		return
 	}
-	availability.setHandler(httpapi.NewServer(cfg, runtime.db, runtime.queue, runtime.cache, runtime.activity, runtime.search))
+	apiServer := httpapi.NewServer(ctx, cfg, runtime.db, runtime.queue, runtime.cache, runtime.activity, runtime.search)
+	availability.setHandler(apiServer)
 	availability.resolveIssue("database")
 	availability.resolveIssue("startup")
 	log.Print("backend initialization completed; API traffic is enabled")
@@ -56,6 +57,11 @@ func Run() {
 
 	<-ctx.Done()
 	shutdownHTTPServer(server)
+	workerShutdownCtx, workerShutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := apiServer.Shutdown(workerShutdownCtx); err != nil {
+		log.Printf("API worker shutdown: %v", err)
+	}
+	workerShutdownCancel()
 	runtime.close()
 }
 

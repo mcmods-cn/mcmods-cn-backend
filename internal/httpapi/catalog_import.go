@@ -83,7 +83,7 @@ func persistCatalogResources(ctx context.Context, tx pgx.Tx, rows []catalogResou
 		return fmt.Errorf("stage resource imports: %w", err)
 	}
 	if _, err := execImportStatement(ctx, tx, `insert into resource_kinds(code,family,user_visible)
-		select distinct kind_code,split_part(kind_code,'.',1),true
+		select distinct kind_code,case when kind_code like 'import.document.%' then 'document' else split_part(kind_code,'.',1) end,true
 		from catalog_resource_import_stage
 		on conflict(code) do nothing`); err != nil {
 		return fmt.Errorf("upsert resource kinds: %w", err)
@@ -95,7 +95,8 @@ func persistCatalogResources(ctx context.Context, tx pgx.Tx, rows []catalogResou
 			on existing.kind_code=stage.kind_code and existing.canonical_id=stage.canonical_id
 		where existing.entity_id is null
 		order by stage.identity_key,stage.ordinal
-		on conflict(identity_key) do update set status='active',updated_at=now()`); err != nil {
+		on conflict(identity_key) do update set status='active',archived_at=null,updated_at=now()
+		where catalog_entities.status='placeholder'`); err != nil {
 		return fmt.Errorf("upsert resource entities: %w", err)
 	}
 	if _, err := execImportStatement(ctx, tx, `insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path,owner_mod_id,created_from_revision_id,resolved)
@@ -120,7 +121,7 @@ func persistCatalogResources(ctx context.Context, tx pgx.Tx, rows []catalogResou
 		from game_resources resource
 		join catalog_resource_import_stage stage
 			on stage.kind_code=resource.kind_code and stage.canonical_id=resource.canonical_id
-		where entity.id=resource.entity_id and entity.status<>'active'`); err != nil {
+		where entity.id=resource.entity_id and entity.status='placeholder'`); err != nil {
 		return fmt.Errorf("activate resource entities: %w", err)
 	}
 	if _, err := execImportStatement(ctx, tx, `insert into game_resource_aliases(kind_code,alias_id,resource_id,source)

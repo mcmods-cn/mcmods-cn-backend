@@ -195,10 +195,15 @@ func TestModContentVersionArchiveAndResourceRevivalIntegration(t *testing.T) {
 
 	packageID, jobID, importRevisionID := newExportID(), newExportID(), newExportID()
 	archiveHash := fmt.Sprintf("%064d", time.Now().UnixNano())
+	var archiveFileID int64
+	if err = tx.QueryRow(ctx, `insert into oss_files(object_key,original_name,sha256,uploader_id)
+		values($1,'lifecycle.zip',$2,$3) returning id`, "tests/mod-content-safety/"+packageID, archiveHash, actorID).Scan(&archiveFileID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = tx.Exec(ctx, `insert into catalog_import_packages(
-		id,sha256,archive_name,schema_version,exporter_version,minecraft_version,loader,manifest)
-		values($1,$2,'lifecycle.zip','mcmods-export/v1','test','1.21.1','neoforge','{}')`,
-		packageID, archiveHash); err != nil {
+		id,sha256,archive_file_id,archive_name,schema_version,exporter_version,minecraft_version,loader,manifest,uploaded_by)
+		values($1,$2,$3,'lifecycle.zip','mcmods-export/v1','test','1.21.1','neoforge','{}',$4)`,
+		packageID, archiveHash, archiveFileID, actorID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = tx.Exec(ctx, `insert into catalog_import_jobs(

@@ -81,7 +81,13 @@ func (s *Server) serveProtectedMutation(w http.ResponseWriter, r *http.Request, 
 			status = http.StatusPreconditionRequired
 		}
 		retry := max(0, int(decision.RetryAfter.Round(time.Second).Seconds()))
-		s.antiAbuse.RecordDecision(context.Background(), input, decision, input.CrawlerClass)
+		if persistErr := s.antiAbuse.RecordDecision(r.Context(), input, decision, input.CrawlerClass); persistErr != nil {
+			s.writeAppLog(context.Background(), "system", "error", "anti_abuse_state_persist_failed", action, claims.Subject, r,
+				http.StatusServiceUnavailable, 0, map[string]any{"error": persistErr.Error()})
+			writeAPIError(w, http.StatusServiceUnavailable, "anti_abuse_state_unavailable",
+				"安全状态暂时无法保存，请稍后重试", 1, nil)
+			return
+		}
 		writeAPIError(w, status, decision.Code, decision.Message, retry, map[string]any{"challenge": decision.Challenge})
 		return
 	}
@@ -91,7 +97,7 @@ func (s *Server) serveProtectedMutation(w http.ResponseWriter, r *http.Request, 
 	recorder := &antiAbuseResponseRecorder{ResponseWriter: w}
 	next.ServeHTTP(recorder, r)
 	if recorder.status >= 200 && recorder.status < 400 {
-		go s.antiAbuse.RecordSuccess(context.Background(), input, decision)
+		s.antiAbuse.EnqueueSuccess(input, decision)
 	}
 }
 
@@ -141,8 +147,6 @@ func antiAbuseAction(r *http.Request) string {
 			return "comment.reply"
 		}
 		return "comment.create"
-	case strings.Contains(requestPath, "/comments/") && strings.HasSuffix(requestPath, "/reports"):
-		return "report.create"
 	case strings.Contains(requestPath, "/comments/") && r.Method == http.MethodPatch:
 		return "comment.edit"
 	case strings.HasPrefix(requestPath, "/api/v1/messages/") && r.Method == http.MethodPost:
@@ -284,11 +288,18 @@ func (s *Server) botTraffic(next http.Handler) http.Handler {
 			return
 		}
 		clientIP := s.requestClientLocation(r).IP
-		class := s.antiAbuse.ClassifyCrawler(r.Context(), clientIP, r.UserAgent(), r.Header.Get("X-MCMods-Bot-Token"))
+		class, classifyErr := s.antiAbuse.ClassifyCrawler(r.Context(), clientIP, r.UserAgent(), r.Header.Get("X-MCMods-Bot-Token"))
+		if classifyErr != nil {
+			s.writeAppLog(context.Background(), "system", "warn", "anti_abuse_bot_rules_degraded", r.URL.Path, 0, r,
+				http.StatusServiceUnavailable, 0, map[string]any{"error": classifyErr.Error(), "fallbackClass": class})
+		}
 		r = r.WithContext(context.WithValue(r.Context(), antiAbuseCrawlerContextKey, class))
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			allowed, retry := s.antiAbuse.ReadLimit(r.Context(), class, clientIP, r.URL.Path)
-			s.antiAbuse.RecordCrawler(context.Background(), class, clientIP, r.UserAgent(), r.URL.Path, allowed)
+			if recordErr := s.antiAbuse.RecordCrawler(r.Context(), class, clientIP, r.UserAgent(), r.URL.Path, allowed); recordErr != nil {
+				s.writeAppLog(context.Background(), "system", "warn", "anti_abuse_crawler_event_failed", r.URL.Path, 0, r,
+					http.StatusServiceUnavailable, 0, map[string]any{"error": recordErr.Error(), "crawlerClass": class})
+			}
 			if !allowed {
 				seconds := max(1, int(retry.Round(time.Second).Seconds()))
 				writeAPIError(w, http.StatusTooManyRequests, "crawler_rate_limited", "读取请求过于频繁，请稍后重试", seconds, nil)

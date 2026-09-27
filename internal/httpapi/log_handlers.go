@@ -1,13 +1,21 @@
 package httpapi
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5"
 
 	"mcmods-cn-backend/internal/runtimelog"
 )
@@ -24,14 +32,8 @@ type logRetentionConfig struct {
 	CategoryDays map[string]int `json:"categoryDays"`
 }
 
-type logQueryFilter struct {
-	Category string
-	Query    string
-	Level    string
-	Status   string
-	From     string
-	To       string
-	Limit    int
+type logRetentionConfigQueryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
 var appLogRetentionCategories = []string{"system", "user_interaction", "admin_operation", "api_access", "ai_call", "download"}
@@ -48,6 +50,52 @@ func (r *responseRecorder) Write(body []byte) (int, error) {
 	size, err := r.ResponseWriter.Write(body)
 	r.bytes += size
 	return size, err
+}
+
+func (r *responseRecorder) Flush() {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	_ = http.NewResponseController(r.ResponseWriter).Flush()
+}
+
+func (r *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(r.ResponseWriter).Hijack()
+}
+
+func (r *responseRecorder) Push(target string, options *http.PushOptions) error {
+	writer := r.ResponseWriter
+	for writer != nil {
+		if pusher, ok := writer.(http.Pusher); ok {
+			return pusher.Push(target, options)
+		}
+		unwrapper, ok := writer.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		next := unwrapper.Unwrap()
+		if next == writer {
+			break
+		}
+		writer = next
+	}
+	return http.ErrNotSupported
+}
+
+func (r *responseRecorder) ReadFrom(source io.Reader) (int64, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	if readerFrom, ok := r.ResponseWriter.(io.ReaderFrom); ok {
+		size, err := readerFrom.ReadFrom(source)
+		r.bytes += int(size)
+		return size, err
+	}
+	return io.Copy(struct{ io.Writer }{r}, source)
+}
+
+func (r *responseRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
 }
 
 func (s *Server) logAccess(next http.Handler) http.Handler {
@@ -71,18 +119,46 @@ func (s *Server) logAccess(next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		loggedQuery := r.URL.RawQuery
-		if strings.HasPrefix(r.URL.Path, "/api/yggdrasil/") {
-			loggedQuery = ""
+		if s.accessLogs != nil {
+			s.accessLogs.Capture(r.Method, r.URL.Path, status, s.accessLogRecord(r, status, time.Since(started), recorder.bytes))
 		}
-		s.writeAppLog(context.Background(), "api_access", levelForStatus(status), r.Method, r.URL.Path, 0, r, status, time.Since(started), map[string]any{
-			"query": loggedQuery,
-			"bytes": recorder.bytes,
-		})
 		if status >= http.StatusOK && status < http.StatusBadRequest {
 			s.recordRequestActivity(r, annotation)
 		}
 	})
+}
+
+func (s *Server) accessLogRecord(r *http.Request, status int, latency time.Duration, responseBytes int) accessLogRecord {
+	payload := struct {
+		QueryPresent bool `json:"queryPresent"`
+		Bytes        int  `json:"bytes"`
+	}{QueryPresent: r.URL.RawQuery != "", Bytes: responseBytes}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		raw = []byte(`{}`)
+	}
+	pathValue := boundedAccessLogText(r.URL.Path, 2048)
+	return accessLogRecord{
+		Category: "api_access", Level: levelForStatus(status), Action: boundedAccessLogText(r.Method, 16),
+		Target: pathValue, IP: boundedAccessLogText(s.requestClientLocation(r).IP, 64),
+		UserAgent: boundedAccessLogText(r.UserAgent(), 512), Method: boundedAccessLogText(r.Method, 16),
+		Path: pathValue, Status: status, LatencyMS: latency.Milliseconds(), Payload: raw, CreatedAt: time.Now().UTC(),
+	}
+}
+
+func boundedAccessLogText(value string, maximumBytes int) string {
+	if maximumBytes <= 0 {
+		return ""
+	}
+	value = strings.ToValidUTF8(value, "�")
+	if len(value) <= maximumBytes {
+		return value
+	}
+	end := maximumBytes
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end]
 }
 
 type runtimeLogResponse struct {
@@ -135,21 +211,29 @@ func (s *Server) adminRuntimeLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminLogs(w http.ResponseWriter, r *http.Request) {
-	filter := logFilterFromRequest(r)
-	switch filter.Category {
-	case "permission_change":
-		writeJSON(w, http.StatusOK, s.permissionChangeLogs(r, filter))
-	case "login_security":
-		writeJSON(w, http.StatusOK, s.loginSecurityLogs(r, filter))
-	case "file_upload":
-		writeJSON(w, http.StatusOK, s.fileUploadLogs(r, filter))
-	default:
-		writeJSON(w, http.StatusOK, s.appLogs(r, filter))
+	request, err := parseLogPageRequest(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
+	page, err := s.loadLogPage(r.Context(), request)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取日志失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": page.Items, "limit": request.Limit,
+		"hasMore": page.HasMore, "nextCursor": page.NextCursor,
+	})
 }
 
 func (s *Server) getLogConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.logConfigFromSettings(r.Context()))
+	payload, err := loadLogRetentionConfig(r.Context(), s.db)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "LOG_RETENTION_CONFIG_READ_FAILED", "读取日志清理配置失败", 0, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) updateLogConfig(w http.ResponseWriter, r *http.Request) {
@@ -177,121 +261,24 @@ func (s *Server) updateLogConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存日志清理配置失败")
 		return
 	}
-	deleted := s.cleanupLogs(r.Context(), payload)
+	writeJSON(w, http.StatusOK, map[string]any{"config": payload})
+}
+
+func (s *Server) runLogCleanup(w http.ResponseWriter, r *http.Request) {
+	payload, err := loadLogRetentionConfig(r.Context(), s.db)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "LOG_RETENTION_CONFIG_READ_FAILED", "读取日志清理配置失败", 0, nil)
+		return
+	}
+	deleted, failedCategories, cleanupErr := s.cleanupLogs(r.Context(), payload)
+	if cleanupErr != nil {
+		log.Printf("manual log cleanup failed: %v", cleanupErr)
+		writeAPIError(w, http.StatusInternalServerError, "LOG_CLEANUP_FAILED", "部分日志清理失败", 0, map[string]any{
+			"config": payload, "deleted": deleted, "failedCategories": failedCategories,
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"config": payload, "deleted": deleted})
-}
-
-func (s *Server) appLogs(r *http.Request, filter logQueryFilter) []map[string]any {
-	args := []any{filter.Category}
-	where := []string{"l.category = $1"}
-	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
-		"l.action", "l.target", "l.ip", "l.user_agent", "l.method", "l.path", "l.payload::text",
-		"actor.username", "actor.email", "actor.public_id",
-	})
-	if filter.Level != "" {
-		args = append(args, filter.Level)
-		where = append(where, fmt.Sprintf("l.level = $%d", len(args)))
-	}
-	if filter.Status != "" {
-		if status, err := strconv.Atoi(filter.Status); err == nil {
-			args = append(args, status)
-			where = append(where, fmt.Sprintf("l.status = $%d", len(args)))
-		}
-	}
-	args = append(args, filter.Limit)
-	return s.querySimpleRows(
-		r,
-		`select l.id, l.category, l.level, actor.public_id as actor_id,
-		        actor.username as actor_username,
-		        l.action, l.target, l.ip, l.user_agent, l.method, l.path, l.status, l.latency_ms, l.payload, l.created_at
-		 from app_logs l
-		 left join users actor on actor.id = l.actor_id
-		 where `+strings.Join(where, " and ")+`
-		 order by l.created_at desc
-		 limit $`+strconv.Itoa(len(args)),
-		args...,
-	)
-}
-
-func (s *Server) permissionChangeLogs(r *http.Request, filter logQueryFilter) []map[string]any {
-	args := []any{}
-	where := []string{"1 = 1"}
-	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
-		"l.action", "l.payload::text", "operator.public_id", "target.public_id",
-		"operator.username", "operator.email",
-		"target.username", "target.email",
-	})
-	args = append(args, filter.Limit)
-	return s.querySimpleRows(
-		r,
-		`select l.id, operator.public_id as operator_id,
-		        operator.username as operator_username,
-		        target.public_id as target_user_id,
-		        target.username as target_username,
-		        l.action, l.payload, l.created_at
-		 from permission_audit_logs l
-		 left join users operator on operator.id = l.operator_id
-		 left join users target on target.id = l.target_user_id
-		 where `+strings.Join(where, " and ")+`
-		 order by l.created_at desc
-		 limit $`+strconv.Itoa(len(args)),
-		args...,
-	)
-}
-
-func (s *Server) loginSecurityLogs(r *http.Request, filter logQueryFilter) []map[string]any {
-	args := []any{}
-	where := []string{"1 = 1"}
-	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
-		"l.account", "l.ip", "l.user_agent", "l.reason", "u.public_id",
-		"u.username", "u.email",
-	})
-	switch filter.Status {
-	case "success":
-		where = append(where, "l.success = true")
-	case "failed", "fail":
-		where = append(where, "l.success = false")
-	}
-	args = append(args, filter.Limit)
-	return s.querySimpleRows(
-		r,
-		`select l.id, u.public_id as user_id,
-		        u.username,
-		        l.account, l.ip, l.user_agent, l.success, l.reason, l.created_at
-		 from user_login_logs l
-		 left join users u on u.id = l.user_id
-		 where `+strings.Join(where, " and ")+`
-		 order by l.created_at desc
-		 limit $`+strconv.Itoa(len(args)),
-		args...,
-	)
-}
-
-func (s *Server) fileUploadLogs(r *http.Request, filter logQueryFilter) []map[string]any {
-	args := []any{}
-	where := []string{"1 = 1"}
-	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
-		"l.object_key", "l.original_name", "l.ip", "l.user_agent", "l.result", "l.message", "uploader.public_id",
-		"uploader.username", "uploader.email",
-	})
-	if filter.Status != "" {
-		args = append(args, filter.Status)
-		where = append(where, fmt.Sprintf("l.result = $%d", len(args)))
-	}
-	args = append(args, filter.Limit)
-	return s.querySimpleRows(
-		r,
-		`select l.id, file.public_id as file_id, uploader.public_id as uploader_id,
-		        uploader.username as uploader_username,
-		        l.object_key, l.original_name, l.size_bytes, l.ip, l.user_agent, l.result, l.message, l.created_at
-		 from oss_upload_logs l
-		 left join users uploader on uploader.id = l.uploader_id
-		 left join oss_files file on file.id = l.file_id
-		 where `+strings.Join(where, " and ")+`
-		 order by l.created_at desc
-		 limit $`+strconv.Itoa(len(args)),
-		args...,
-	)
 }
 
 func (s *Server) writeAppLog(ctx context.Context, category string, level string, action string, target string, actorID int64, r *http.Request, status int, latency time.Duration, payload any) {
@@ -331,22 +318,26 @@ func (s *Server) writeAppLog(ctx context.Context, category string, level string,
 	)
 }
 
-func (s *Server) querySimpleRows(r *http.Request, sql string, args ...any) []map[string]any {
+func (s *Server) querySimpleRows(r *http.Request, sql string, args ...any) ([]map[string]any, error) {
 	return s.querySimpleRowsWithContext(r.Context(), sql, args...)
 }
 
-func (s *Server) querySimpleRowsWithContext(ctx context.Context, sql string, args ...any) []map[string]any {
+func (s *Server) querySimpleRowsWithContext(ctx context.Context, sql string, args ...any) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, sql, args...)
 	if err != nil {
-		return []map[string]any{}
+		return nil, err
 	}
+	return collectSimpleRows(rows)
+}
+
+func collectSimpleRows(rows pgx.Rows) ([]map[string]any, error) {
 	defer rows.Close()
 	fields := rows.FieldDescriptions()
 	items := make([]map[string]any, 0)
 	for rows.Next() {
 		values, err := rows.Values()
 		if err != nil {
-			continue
+			return nil, err
 		}
 		item := make(map[string]any, len(values))
 		for index, value := range values {
@@ -363,43 +354,10 @@ func (s *Server) querySimpleRowsWithContext(ctx context.Context, sql string, arg
 		}
 		items = append(items, item)
 	}
-	return items
-}
-
-func logFilterFromRequest(r *http.Request) logQueryFilter {
-	category := strings.TrimSpace(r.URL.Query().Get("category"))
-	if category == "" {
-		category = "system"
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
-	return logQueryFilter{
-		Category: category,
-		Query:    strings.TrimSpace(r.URL.Query().Get("q")),
-		Level:    strings.TrimSpace(r.URL.Query().Get("level")),
-		Status:   strings.TrimSpace(r.URL.Query().Get("status")),
-		From:     strings.TrimSpace(r.URL.Query().Get("from")),
-		To:       strings.TrimSpace(r.URL.Query().Get("to")),
-		Limit:    boundedLimit(r.URL.Query().Get("limit"), 100, 500),
-	}
-}
-
-func addLogCommonFiltersForColumn(where *[]string, args *[]any, filter logQueryFilter, createdAtColumn string, searchColumns []string) {
-	if filter.Query != "" && len(searchColumns) > 0 {
-		*args = append(*args, "%"+strings.ToLower(filter.Query)+"%")
-		placeholder := fmt.Sprintf("$%d", len(*args))
-		parts := make([]string, 0, len(searchColumns))
-		for _, column := range searchColumns {
-			parts = append(parts, "lower(coalesce("+column+", '')) like "+placeholder)
-		}
-		*where = append(*where, "("+strings.Join(parts, " or ")+")")
-	}
-	if from, ok := parseLogTime(filter.From, false); ok {
-		*args = append(*args, from)
-		*where = append(*where, fmt.Sprintf("%s >= $%d", createdAtColumn, len(*args)))
-	}
-	if to, ok := parseLogTime(filter.To, true); ok {
-		*args = append(*args, to)
-		*where = append(*where, fmt.Sprintf("%s <= $%d", createdAtColumn, len(*args)))
-	}
+	return items, nil
 }
 
 func parseLogTime(value string, endOfDay bool) (time.Time, bool) {
@@ -419,18 +377,20 @@ func parseLogTime(value string, endOfDay bool) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func (s *Server) logConfigFromSettings(ctx context.Context) logRetentionConfig {
+func loadLogRetentionConfig(ctx context.Context, queryer logRetentionConfigQueryer) (logRetentionConfig, error) {
 	payload := defaultLogConfig()
 	var raw []byte
-	err := s.db.QueryRow(ctx, `select value from system_settings where key = 'logs.retention'`).Scan(&raw)
+	err := queryer.QueryRow(ctx, `select value from system_settings where key = 'logs.retention'`).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return payload, nil
+	}
 	if err != nil {
-		_ = ignoreNoRows(err)
-		return payload
+		return logRetentionConfig{}, fmt.Errorf("read logs.retention: %w", err)
 	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return defaultLogConfig()
+	if err = json.Unmarshal(raw, &payload); err != nil {
+		return logRetentionConfig{}, fmt.Errorf("decode logs.retention: %w", err)
 	}
-	return normalizeLogConfig(payload)
+	return normalizeLogConfig(payload), nil
 }
 
 func defaultLogConfig() logRetentionConfig {
@@ -485,31 +445,23 @@ func normalizeLogConfig(payload logRetentionConfig) logRetentionConfig {
 	return payload
 }
 
-func (s *Server) cleanupLogs(ctx context.Context, cfg logRetentionConfig) map[string]int64 {
+func (s *Server) cleanupLogs(ctx context.Context, cfg logRetentionConfig) (map[string]int64, []string, error) {
 	deleted := map[string]int64{}
 	if !cfg.Enabled {
-		return deleted
+		return deleted, nil, nil
 	}
-	run := func(label string, query string, args ...any) {
-		tag, err := s.db.Exec(ctx, query, args...)
-		if err == nil {
-			deleted[label] = tag.RowsAffected()
+	failedCategories := make([]string, 0)
+	failures := make([]error, 0)
+	for _, statement := range logCleanupStatements(cfg, logCleanupBatchSize) {
+		tag, err := s.db.Exec(ctx, statement.SQL, statement.Args...)
+		if err != nil {
+			failedCategories = append(failedCategories, statement.Label)
+			failures = append(failures, fmt.Errorf("%s: %w", statement.Label, err))
+			continue
 		}
+		deleted[statement.Label] = tag.RowsAffected()
 	}
-	daysFor := func(category string) int {
-		if days, ok := cfg.CategoryDays[category]; ok && days > 0 {
-			return days
-		}
-		return cfg.DefaultDays
-	}
-	for _, category := range appLogRetentionCategories {
-		run(category, `delete from app_logs where category = $1 and created_at < now() - make_interval(days => $2::int)`, category, daysFor(category))
-	}
-	run("permission_change", `delete from permission_audit_logs where created_at < now() - make_interval(days => $1::int)`, daysFor("permission_change"))
-	run("login_security", `delete from user_login_logs where created_at < now() - make_interval(days => $1::int)`, daysFor("login_security"))
-	run("file_upload", `delete from oss_upload_logs where created_at < now() - make_interval(days => $1::int)`, daysFor("file_upload"))
-	run("file_scan", `delete from oss_scan_logs where created_at < now() - make_interval(days => $1::int)`, daysFor("file_scan"))
-	return deleted
+	return deleted, failedCategories, errors.Join(failures...)
 }
 
 func boundedLimit(raw string, fallback int, max int) int {

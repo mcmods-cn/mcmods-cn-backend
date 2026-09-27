@@ -55,6 +55,9 @@ func TestFavoriteCollectionsHaveExplicitVisibility(t *testing.T) {
 	if !strings.Contains(statements, "idx_favorite_collections_public") {
 		t.Fatal("public favorite collection lookup index is missing")
 	}
+	if !strings.Contains(statements, "check(entity_type in ('mod','modpack','blueprint'))") {
+		t.Fatal("favorite collection items must be limited to the three supported product target types")
+	}
 }
 
 func TestMinecraftServersExistBeforeDraftForeignKey(t *testing.T) {
@@ -112,7 +115,7 @@ func TestPopularityFormulaAndPromotionItemsMatchDesign(t *testing.T) {
 	for _, required := range []string{
 		"0.45*long_term+0.35*trend+0.10*effective_views+0.10*promotion",
 		"quality:=0.85+0.15",
-		"/7)),0) into trend_raw",
+		"/7)),0),max(event_date) into trend_raw,latest_event_date",
 		"new_boost:=1+0.15*power(2::numeric",
 		"promotion_kind in ('project','server')",
 	} {

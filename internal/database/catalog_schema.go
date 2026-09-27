@@ -117,6 +117,8 @@ func catalogSchemaStatements() []string {
 			unique(kind_code,canonical_id)
 		)`,
 		`create index idx_game_resources_canonical on game_resources(canonical_id,kind_code)`,
+		`create index idx_game_resources_kind_canonical_folded
+			on game_resources(kind_code,lower(canonical_id),entity_id)`,
 		`create index idx_game_resources_namespace on game_resources(namespace,kind_code,resource_path)`,
 		`create table game_resource_aliases (
 			kind_code text not null references resource_kinds(code),
@@ -127,6 +129,8 @@ func catalogSchemaStatements() []string {
 			updated_at timestamptz not null default now(),
 			primary key(kind_code,alias_id)
 		)`,
+		`create index idx_game_resource_aliases_kind_alias_folded
+			on game_resource_aliases(kind_code,lower(alias_id),resource_id)`,
 		`create table resource_import_snapshots (
 			id text primary key,
 			resource_id bigint not null references game_resources(entity_id) on delete cascade,
@@ -144,8 +148,7 @@ func catalogSchemaStatements() []string {
 			unique(revision_id,registry,resource_id),
 			check(definition_schema_version>=1)
 		)`,
-		`create index idx_resource_import_snapshots_revision_registry on resource_import_snapshots(revision_id,registry,resource_id)`,
-		`create index idx_resource_import_snapshots_resource on resource_import_snapshots(resource_id,revision_id)`,
+		`create index idx_resource_import_snapshots_history on resource_import_snapshots(resource_id,created_at desc,revision_id desc)`,
 		`create table game_resource_asset_bindings (
 			snapshot_id text primary key references resource_import_snapshots(id) on delete cascade,
 			item_resource_id bigint references game_resources(entity_id) on delete set null,
@@ -195,6 +198,8 @@ func catalogSchemaStatements() []string {
 			canonical_id text not null,
 			unique(registry,canonical_id)
 		)`,
+		`create index idx_catalog_tags_canonical_registry_folded
+			on catalog_tags(lower(canonical_id),lower(registry),entity_id)`,
 		`create or replace function resolve_catalog_tag_unresolved_references() returns trigger as $$
 		begin
 			update unresolved_references

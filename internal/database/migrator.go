@@ -7,11 +7,26 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 85
+const schemaGeneration = 167
 
-// Migrate installs one coherent development schema. Generation 85 is the
+// Migrate installs one coherent development schema. Generation 167 is the
 // current pre-production baseline. Older development databases are
 // intentionally reset instead of upgraded or backfilled.
+// Generation 167 registers catalog-import derived objects before provider
+// upload and gives failure, stale-run recovery, and retry a durable
+// compensation lineage.
+// Generation 166 gives project-statistics and comment-heat refresh queues an
+// explicit pending/processing/failed lifecycle with bounded retry budgets.
+// Generation 165 removes the unused sticker catalog version state after the
+// client adopted bounded TTL caching and explicit mutation invalidation.
+// Generation 164 aligns project-automation and recipe-binding status
+// dictionaries with their writers and makes project update revision IDs
+// numeric foreign keys.
+// Generation 163 removes the unused favorite-export report_snapshot column
+// and adds exclusive artifact ownership plus bounded orphan-recovery indexes.
+// Generation 162 adds date-scoped token usage and in-flight reservations to
+// seed-crawler translation tasks so concurrent workers share one hard daily
+// AI budget.
 // Generation 74 established
 // numeric internal keys, globally unique public IDs, revocable authentication
 // sessions, version-scoped mod-content layout identities and similar-resource
@@ -85,6 +100,141 @@ const schemaGeneration = 85
 // Generation 85 adds quota-backed comment attachments shared by top-level
 // comments and replies. Ordinary files are downloadable only after a clean
 // scan; recognized log archives are routed exclusively through redaction.
+// Generation 86 establishes checked economy domains and database-level
+// conservation constraints for balances, purchases, and question bounties.
+// Generation 87 separates manual, account-status, governance, progression,
+// preference, and seed authorization sources so independent grants cannot
+// overwrite or revoke one another.
+// Generation 88 makes executable shop item kinds a closed domain and assigns
+// heat-promotion decay sequences through an atomic per-target counter.
+// Generation 89 limits favorite records to the three product-supported target
+// families; application reads and writes independently revalidate visibility.
+// Generation 90 gives each sticker image one exclusive owner and projects all
+// current and immutable historical Markdown sticker tokens into an indexed,
+// transactionally synchronized reference relation.
+// Generation 91 gives user-owned drafts an application and database payload
+// budget; per-user count and byte quotas are reserved under a transaction lock.
+// Generation 92 requires exactly one server-owned review authority for each
+// completed draft and adds separate active/completed keyset page indexes.
+// Generation 93 makes catalog-import package source files immutable and
+// records server-side content-hash verification without global SHA ownership.
+// Generation 94 adds bounded AI task recovery and aggregate Outbox lookup
+// indexes for orphaned queued attempts and stale worker executions.
+// Generation 95 gives blueprint conversion jobs bounded owner leases,
+// heartbeat recovery, and one active job per operation/format.
+// Generation 96 registers blueprint-derived OSS objects before upload and
+// atomically activates or durably compensates them with their owning attempt.
+// Generation 97 gives OSS deletion jobs bounded owner leases, classified dead
+// state, audited replay, and safe new deletion cycles for reused object keys.
+// Generation 98 replaces the process-local gallery rehome queue with durable,
+// generation-aware jobs, bounded leases, dead state, and audited replay.
+// Generation 99 persists multipart upload ownership and expiration so
+// abandoned provider uploads are actively aborted by a bounded lease worker.
+// Generation 100 gives public catalog caches an O(1), transactionally bumped
+// dataset version and makes canonical recipe definitions the public authority.
+// Generation 101 gives imported mod-content detail projections explicit source
+// ownership so re-imports can remove stale importer-owned facts without
+// overwriting manual edits. Generation 102 adds the stable status/time/ID index
+// required to traverse every project-authorship review state with a keyset
+// cursor instead of a fixed queue window. Generation 103 adds the equivalent
+// status/time/ID index for the Minecraft server review queue. Generation 104
+// gives Markdown playground drafts a monotonic revision and per-editor save
+// sequence so request arrival order cannot replace newer content. Generation
+// 105 gives follower and following feeds stable time/ID keyset indexes.
+// Generation 106 separates display-only contributor/leader roles from the
+// explicit owner/developer/maintainer project-access whitelist. Generation
+// 107 preserves action-granular statistics baselines before raw activity
+// deletion so reconciliation can replace drift exactly instead of only
+// increasing counters.
+// Generation 108 makes the four-level mod-content category boundary an
+// authoritative subtree invariant for inserts and moves.
+// Generation 109 gives versioned mod-content placements a transactionally
+// maintained GIN full-text search projection for bounded public section queries.
+// Generation 110 gives batched mod-content reference resolution case-folded
+// resource canonical, alias, and tag lookup indexes.
+// Generation 111 coalesces project ACL invalidation once per transaction and
+// creator-binding search projection once per affected project statement.
+// Generation 112 makes the server search projection authoritative for public
+// catalog filters and stable sort keys, including popularity refreshes.
+// Generation 113 adds an event-first notification index for bounded project
+// update reconciliation. Generation 114 gives seed-crawler run and candidate
+// administration stable created/download keyset indexes, including a
+// status-leading candidate variant.
+// Generation 115 adds stable notification recipient/broadcast page indexes
+// and a per-user read watermark so read-all is constant-write. Generation 116
+// adds an exact singleton broadcast count and ID-leading partial index so
+// unread calibration never rescans shared broadcasts once per active user.
+// Generation 117 gives direct conversations and messages bounded member/ID
+// keyset pages, an exact per-conversation unread projection, and a persisted
+// last-message pointer so list reads perform no per-row history aggregation.
+// Generation 118 gives administrative log sources stable time/ID keyset pages,
+// write-maintained full-text projections, and ID-stable bounded retention scans.
+// Generation 119 replaces per-project popularity lifetime rescans with
+// write-maintained counters, bounded trend inputs, and indexed decay scheduling.
+// Generation 120 makes per-type global rating totals write-maintained and
+// removes their full scan from the per-project popularity worker.
+// Generation 121 gives the administrative project workbench a write-maintained
+// search/sort projection and stable heat/time/ID keyset pages.
+// Generation 122 gives external search rebuilds stable ID batches, bounded
+// import memory, and durable per-collection progress.
+// Generation 124 gives favorite modpack export history stable owner/status
+// keyset pages. Generation 123 added bounded dependency export graph reads and
+// cached loader metadata resolution.
+// Generation 125 gives blueprint job admission a bounded creator-active
+// lookup while blueprint processing enforces shared memory and CPU budgets.
+// Generation 132 gives shared content histories stable time/identity keyset
+// indexes for manual revisions and imported resource snapshots.
+// Generation 133 versions level configuration and moves full-user level/role
+// recalculation into durable, leased, primary-key cursor batches.
+// Generation 134 gives public and administrative site changelogs one stable
+// date/ID keyset contract and indexes the complete administrative history.
+// Generation 135 projects both unresolved-reference stores into one bounded,
+// trigger-maintained administrative keyset and prefix-search catalog.
+// Generation 136 gives reporter histories, moderation queues and ban histories
+// strict time/ID keyset pages, adding the missing reporter-leading index.
+// Generation 149 replaces the lossy single-owner popularity projection with
+// complete effective-developer membership for incremental facts, trend events,
+// offline calibration, global rating totals, and the public developer list.
+// Existing development popularity facts must be rebuilt by the generation
+// reset because their excluded actor cannot be recovered from aggregate rows.
+// Generation 150 persists short-lived, digest-bound favorite MRPack preflight
+// snapshots so task creation consumes the exact loader and file selection the
+// user confirmed instead of rebuilding against a drifting catalog.
+// Generation 151 detaches retained favorite MRPack tasks and reports from a
+// deleted source collection while cancelling active work transactionally.
+// Generation 148 gives seed-crawler auto-submission an explicit recoverable
+// submitting state while project creation, source binding, draft completion,
+// and candidate completion commit in one transaction. Generation 147 gives
+// each seed-crawler candidate explicit immutable first-
+// seen and payload-authoritative last-seen run provenance. Generation 146
+// binds an external-release manual override to the approved
+// user revision that first transferred its changelog away from source control.
+// Generation 145 makes project-download publication a scan-gated state
+// transition and emits public update events only for safe active files.
+// Generation 144 gives each Minecraft server/mod identity independent manual
+// and machine evidence so complete probe snapshots can replace machine facts
+// without removing declarations or retaining stale machine-only identities.
+// Generation 143 makes the product modpack category registry authoritative in
+// both request validation and a named database CHECK constraint.
+// Generation 142 gives Minecraft loader artifacts a durable, source-attributed
+// snapshot keyed by the exact synchronized compatibility catalog.
+// Generation 141 removes the redundant single-column log-share owner index;
+// its nullable foreign-key probes are covered by the owner-leading partial
+// history index whose predicate is exactly owner_user_id IS NOT NULL.
+// Generation 140 removes the unused PostgreSQL chat-presence table; Redis with
+// a bounded in-process fallback remains the sole runtime presence authority.
+//
+// Generation 139 removes unreachable generic public routes for project files;
+// file downloads remain scoped to their owning project's active-file endpoint.
+//
+// Generation 138 scopes automated project mirror identity to the provider file
+// instead of rejecting distinct files that happen to have identical bytes.
+//
+// Generation 137 removes four non-unique catalog and mod-content indexes whose
+// ordered columns exactly duplicate indexes owned by unique constraints.
+// Generation 155 makes sanitized Minecraft texture blobs system-owned shared
+// storage facts, maintains a calibratable active-reference projection, and
+// indexes bounded garbage-collection candidates.
 // Generation 74 repaired the popularity refresh function
 // without replacing its persisted facts or queue. Earlier development data is
 // intentionally not migrated and must be reset before installation.
@@ -148,6 +298,7 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 func schemaInstallationStatements() []string {
 	statements := make([]string, 0, 256)
 	statements = append(statements, baselineSchemaStatements()...)
+	statements = append(statements, catalogImportArtifactSchemaStatements()...)
 	statements = append(statements, catalogSchemaStatements()...)
 	statements = append(statements, catalogEditorSchemaStatements()...)
 	statements = append(statements, skinSchemaStatements()...)
@@ -163,6 +314,9 @@ func schemaInstallationStatements() []string {
 	statements = append(statements, simpleProjectSchemaStatements()...)
 	statements = append(statements, serverSchemaStatements()...)
 	statements = append(statements, ratingSchemaStatements()...)
+	statements = append(statements, skinCatalogSchemaStatements()...)
+	statements = append(statements, favoritePaginationSchemaStatements()...)
+	statements = append(statements, communityPostCatalogSchemaStatements()...)
 	statements = append(statements, changelogSchemaStatements()...)
 	statements = append(statements, contentMetricsSchemaStatements()...)
 	statements = append(statements, adminDashboardSchemaStatements()...)
@@ -175,7 +329,9 @@ func schemaInstallationStatements() []string {
 	statements = append(statements, projectAccessSchemaStatements()...)
 	statements = append(statements, featureUpdateSchemaStatements()...)
 	statements = append(statements, governanceAutomationSchemaStatements()...)
+	statements = append(statements, unresolvedReferenceCatalogSchemaStatements()...)
 	statements = append(statements, engagementExportSchemaStatements()...)
+	statements = append(statements, stickerReferenceSchemaStatements()...)
 	return append(statements, foreignKeyIndexStatement())
 }
 
@@ -206,7 +362,19 @@ func foreignKeyIndexStatement() string {
 				where index_row.indrelid=constraint_row.conrelid
 				  and index_row.indisvalid
 				  and index_row.indisready
-				  and index_row.indpred is null
+				  and (
+					index_row.indpred is null
+					or (
+					  cardinality(constraint_row.conkey)=1
+					  and pg_get_expr(index_row.indpred,index_row.indrelid)=format(
+						'(%I IS NOT NULL)',
+						(select predicate_attribute.attname
+						 from pg_attribute predicate_attribute
+						 where predicate_attribute.attrelid=constraint_row.conrelid
+						   and predicate_attribute.attnum=constraint_row.conkey[1])
+					  )
+					)
+				  )
 				  and index_row.indexprs is null
 				  and index_row.indnkeyatts>=cardinality(constraint_row.conkey)
 				  and not exists (
@@ -322,6 +490,7 @@ func reviewSchemaStatements() []string {
 		)`,
 		`create index idx_content_revisions_entity on content_revisions(entity_type,entity_id,revision_no desc) where entity_id is not null`,
 		`create index idx_content_revisions_aggregate on content_revisions(aggregate_type,aggregate_key,revision_no desc)`,
+		`create index idx_content_revisions_history on content_revisions(aggregate_type,aggregate_key,created_at desc,public_id desc)`,
 		`create table change_requests (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),

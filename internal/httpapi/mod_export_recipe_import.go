@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -236,14 +237,15 @@ func importExportRecipeTypes(ctx context.Context, tx pgx.Tx, packageID string, r
 			!validExportCollectionPath(category.RecipeCollection, "recipes/jei/recipes/") {
 			return fmt.Errorf("JEI category %s contains an invalid collection path", category.RecipeTypeID)
 		}
-		revisionID := exportRevisionForRecipeType(revisions, category.RecipeTypeID)
-		if revisionID == "" {
-			continue
+		revisionID, revisionErr := exportRevisionForRecipeType(revisions, category.RecipeTypeID)
+		if revisionErr != nil {
+			return fmt.Errorf("JEI category %s: %w", category.RecipeTypeID, revisionErr)
 		}
 		identity := recipeTypeIdentity(category.RecipeTypeID)
 		snapshotID := catalogSnapshotID("recipe-type", revisionID, identity.ID, "")
 		batch.Queue(`insert into catalog_entities(identity_key,public_id,entity_type,status) values($1,$2,'recipe_type','active')
-			on conflict(identity_key) do update set status='active',updated_at=now()`, identity.ID, identity.PublicID)
+			on conflict(identity_key) do update set status='active',archived_at=null,updated_at=now()
+			where catalog_entities.status='placeholder'`, identity.ID, identity.PublicID)
 		batch.Queue(`insert into recipe_types(entity_id,canonical_id) values(catalog_entity_internal_id($1),$2) on conflict(canonical_id) do nothing`, identity.ID, category.RecipeTypeID)
 		batch.Queue(`insert into recipe_type_import_snapshots(id,recipe_type_id,revision_id,title_translation_key,title_names,width,height,
 			image_scale,canvas,catalysts,recipe_count,exported_recipe_count,template_count,background_count,
@@ -274,9 +276,9 @@ func importExportRecipeTypes(ctx context.Context, tx pgx.Tx, packageID string, r
 			}
 			continue
 		}
-		revisionID := exportRevisionForRecipeType(revisions, recipeIndex.RecipeTypeID)
-		if revisionID == "" {
-			continue
+		revisionID, revisionErr := exportRevisionForRecipeType(revisions, recipeIndex.RecipeTypeID)
+		if revisionErr != nil {
+			return fmt.Errorf("JEI recipe index %q: %w", recipeIndex.RecipeKey, revisionErr)
 		}
 		canonical, err := validateExportRecipeIdentity(recipeIndex.RecipeID, recipeIndex.RecipeIDSource, recipeIndex.RecipeIDCanonical)
 		if err != nil {
@@ -295,7 +297,8 @@ func importExportRecipeTypes(ctx context.Context, tx pgx.Tx, packageID string, r
 			canonicalSourceID = strings.TrimSpace(recipeIndex.RecipeID)
 		}
 		batch.Queue(`insert into catalog_entities(identity_key,public_id,entity_type,status) values($1,$2,'recipe','active')
-			on conflict(identity_key) do update set status='active',updated_at=now()`, recipeIdentityValue.ID, recipeIdentityValue.PublicID)
+			on conflict(identity_key) do update set status='active',archived_at=null,updated_at=now()
+			where catalog_entities.status='placeholder'`, recipeIdentityValue.ID, recipeIdentityValue.PublicID)
 		batch.Queue(`insert into recipes(entity_id,recipe_type_id,canonical_source_id,semantic_fingerprint,owner_mod_id,identity_source)
 			select catalog_entity_internal_id($1),catalog_entity_internal_id($2),$3,$4,revision.mod_id,$5 from catalog_import_revisions revision where revision.id=$6
 			on conflict(entity_id) do update set semantic_fingerprint=excluded.semantic_fingerprint`, recipeIdentityValue.ID,
@@ -346,7 +349,45 @@ func decodeExportJEITemplateCollection(raw []byte) (exportJEITemplateCollection,
 	if document.TemplateCount != len(document.Templates) {
 		return document, fmt.Errorf("JEI template count mismatch: declared %d, found %d", document.TemplateCount, len(document.Templates))
 	}
+	if err := validateExportJEITemplateObjectFields(document); err != nil {
+		return document, err
+	}
 	return document, nil
+}
+
+func validateOptionalRecipeJSONObject(raw json.RawMessage, label string) error {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	if _, err := decodeStoredJSONObject(raw, label); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateExportJEITemplateObjectFields(document exportJEITemplateCollection) error {
+	for label, raw := range map[string]json.RawMessage{
+		"JEI template canvas":       document.Canvas,
+		"JEI template image_pixels": document.ImagePixels,
+		"JEI template content":      document.Content,
+	} {
+		if err := validateOptionalRecipeJSONObject(raw, label); err != nil {
+			return err
+		}
+	}
+	for templateIndex, template := range document.Templates {
+		for slotIndex, slot := range template.Slots {
+			if err := validateOptionalRecipeJSONObject(slot.Rect,
+				fmt.Sprintf("JEI template %d slot %d rect", templateIndex, slotIndex)); err != nil {
+				return err
+			}
+			if err := validateOptionalRecipeJSONObject(slot.VisualRect,
+				fmt.Sprintf("JEI template %d slot %d visual_rect", templateIndex, slotIndex)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func canonicalImportedTemplateCanvas(document exportJEITemplateCollection) (exportJEICanvas, error) {
@@ -434,10 +475,13 @@ func canonicalImportedTemplateSlotDefinition(slot exportJEITemplateSlot, snapsho
 }
 
 func queueExportJEITemplateCollection(batch *modExportWriteBatch, revisions map[string]string, name string, document exportJEITemplateCollection) error {
+	if err := validateExportJEITemplateObjectFields(document); err != nil {
+		return fmt.Errorf("JEI template collection %s: %w", name, err)
+	}
 	recipeTypeID := strings.TrimSpace(document.RecipeTypeID)
-	revisionID := exportRevisionForRecipeType(revisions, recipeTypeID)
-	if revisionID == "" {
-		return nil
+	revisionID, revisionErr := exportRevisionForRecipeType(revisions, recipeTypeID)
+	if revisionErr != nil {
+		return fmt.Errorf("JEI template collection %s: %w", name, revisionErr)
 	}
 	typeIdentity := recipeTypeIdentity(recipeTypeID)
 	typeSnapshotID := catalogSnapshotID("recipe-type", revisionID, typeIdentity.ID, "")
@@ -579,63 +623,67 @@ type importedRecipeTemplatePromotion struct {
 // a revision becomes active. Pending/rejected imports therefore never replace
 // the public canonical editor state, while manual publication remains protected
 // by the published_revision_id guards in queueExportJEITemplateCollection.
-func promoteImportedRecipeTemplatesTx(ctx context.Context, tx pgx.Tx, revisionID string) error {
+func loadImportedRecipeTemplatePromotions(ctx context.Context, tx pgx.Tx, revisionID string) ([]importedRecipeTemplatePromotion, error) {
 	rows, err := tx.Query(ctx, `select recipe_type.canonical_id,snapshot.schema_version,snapshot.template_collection_path,
 		snapshot.source_template_id,snapshot.background_path,snapshot.background_contains_ingredients,
-		snapshot.coordinate_space,snapshot.image_scale,snapshot.canvas,snapshot.image_pixels,snapshot.content_rect
+		snapshot.coordinate_space,snapshot.image_scale,snapshot.canvas,snapshot.image_pixels,snapshot.content_rect,
+		(slot.id is not null),coalesce(slot.source_slot_id,''),coalesce(slot.role,''),coalesce(slot.jei_role,''),
+		slot.output_index,coalesce(slot.coordinates_available,false),
+		coalesce(slot.rect,'{}'::jsonb),coalesce(slot.visual_rect,'{}'::jsonb),snapshot.id
 		from recipe_template_import_snapshots snapshot
 		join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		join recipe_types recipe_type on recipe_type.entity_id=snapshot.recipe_type_id
+		left join recipe_template_import_slots slot on slot.template_id=snapshot.id
 		where snapshot.revision_id=$1 and revision.is_active and revision.status in ('ready','partial')
-		order by recipe_type.canonical_id,snapshot.source_template_id`, revisionID)
+		order by recipe_type.canonical_id,snapshot.source_template_id,snapshot.id,slot.ordinal,slot.id`, revisionID)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	defer rows.Close()
 	promotions := []importedRecipeTemplatePromotion{}
+	currentSnapshotID := ""
+	hasPromotion := false
 	for rows.Next() {
 		var promotion importedRecipeTemplatePromotion
+		var slot exportJEITemplateSlot
+		var hasSlot bool
+		var outputIndex sql.NullInt64
+		var snapshotID string
 		if err = rows.Scan(&promotion.RecipeTypeID, &promotion.SchemaVersion, &promotion.TemplateCollectionPath,
 			&promotion.SourceTemplateID, &promotion.BackgroundPath, &promotion.BackgroundContainsIngredients,
-			&promotion.CoordinateSpace, &promotion.ImageScale, &promotion.Canvas, &promotion.ImagePixels, &promotion.ContentRect); err != nil {
-			rows.Close()
-			return err
+			&promotion.CoordinateSpace, &promotion.ImageScale, &promotion.Canvas, &promotion.ImagePixels, &promotion.ContentRect,
+			&hasSlot, &slot.SlotID, &slot.Role, &slot.JEIRole, &outputIndex, &slot.CoordinatesAvailable,
+			&slot.Rect, &slot.VisualRect, &snapshotID); err != nil {
+			return nil, err
 		}
-		promotions = append(promotions, promotion)
-	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	batch := newModExportWriteBatch()
-	for index := range promotions {
-		promotion := &promotions[index]
-		templateSnapshotID := exportRecipeTemplateID(revisionID, promotion.RecipeTypeID, promotion.SourceTemplateID)
-		slotRows, slotErr := tx.Query(ctx, `select source_slot_id,role,jei_role,output_index,coordinates_available,rect,visual_rect
-			from recipe_template_import_slots where template_id=$1 order by ordinal`, templateSnapshotID)
-		if slotErr != nil {
-			return slotErr
+		if !hasPromotion || snapshotID != currentSnapshotID {
+			promotions = append(promotions, promotion)
+			currentSnapshotID = snapshotID
+			hasPromotion = true
 		}
-		for slotRows.Next() {
-			var slot exportJEITemplateSlot
-			var outputIndex sql.NullInt64
-			if slotErr = slotRows.Scan(&slot.SlotID, &slot.Role, &slot.JEIRole, &outputIndex, &slot.CoordinatesAvailable,
-				&slot.Rect, &slot.VisualRect); slotErr != nil {
-				slotRows.Close()
-				return slotErr
-			}
+		if hasSlot {
 			if outputIndex.Valid {
 				value := int(outputIndex.Int64)
 				slot.OutputIndex = &value
 			}
-			promotion.Slots = append(promotion.Slots, slot)
+			last := len(promotions) - 1
+			promotions[last].Slots = append(promotions[last].Slots, slot)
 		}
-		if slotErr = slotRows.Err(); slotErr != nil {
-			slotRows.Close()
-			return slotErr
-		}
-		slotRows.Close()
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return promotions, nil
+}
+
+func promoteImportedRecipeTemplatesTx(ctx context.Context, tx pgx.Tx, revisionID string) error {
+	promotions, err := loadImportedRecipeTemplatePromotions(ctx, tx, revisionID)
+	if err != nil {
+		return err
+	}
+	batch := newModExportWriteBatch()
+	for index := range promotions {
+		promotion := &promotions[index]
 		document := exportJEITemplateCollection{
 			SchemaVersion: "mcmods-jei-template-collection/v2", RecipeTypeID: promotion.RecipeTypeID,
 			CoordinateSpace: promotion.CoordinateSpace, ImageScale: promotion.ImageScale, Canvas: promotion.Canvas,
@@ -674,14 +722,36 @@ func decodeExportJEIRecipeCollection(raw []byte) (exportJEIRecipeCollection, err
 	if document.Count != len(document.Recipes) {
 		return document, fmt.Errorf("JEI recipe count mismatch: declared %d, found %d", document.Count, len(document.Recipes))
 	}
+	if err := validateExportJEIRecipeObjectFields(document); err != nil {
+		return document, err
+	}
 	return document, nil
 }
 
+func validateExportJEIRecipeObjectFields(document exportJEIRecipeCollection) error {
+	for recipeIndex, recipe := range document.Recipes {
+		if err := validateOptionalRecipeJSONObject(recipe.Parameters,
+			fmt.Sprintf("JEI recipe %d parameters", recipeIndex)); err != nil {
+			return err
+		}
+		for bindingIndex, binding := range recipe.Bindings {
+			if err := validateOptionalRecipeJSONObject(binding.ChanceTexts,
+				fmt.Sprintf("JEI recipe %d binding %d chance_texts", recipeIndex, bindingIndex)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func queueExportJEIRecipeCollection(batch *modExportWriteBatch, resolver catalogResourceIdentityResolver, packageID string, revisions map[string]string, name string, document exportJEIRecipeCollection) error {
+	if err := validateExportJEIRecipeObjectFields(document); err != nil {
+		return fmt.Errorf("JEI recipe collection %s: %w", name, err)
+	}
 	recipeTypeID := strings.TrimSpace(document.RecipeTypeID)
-	revisionID := exportRevisionForRecipeType(revisions, recipeTypeID)
-	if revisionID == "" {
-		return nil
+	revisionID, revisionErr := exportRevisionForRecipeType(revisions, recipeTypeID)
+	if revisionErr != nil {
+		return fmt.Errorf("JEI recipe collection %s: %w", name, revisionErr)
 	}
 	typeIdentity := recipeTypeIdentity(recipeTypeID)
 	for _, recipeBinding := range document.Recipes {
@@ -917,14 +987,13 @@ func processExportRecipeJSONFiles[T any](ctx context.Context, files map[string]*
 	return firstErr
 }
 
-func exportRevisionForRecipeType(revisions map[string]string, recipeTypeID string) string {
-	revisionID := revisions[exportResourceNamespace(strings.TrimSpace(recipeTypeID))]
-	if revisionID == "" && len(revisions) == 1 {
-		for _, revisionID = range revisions {
-			break
-		}
+func exportRevisionForRecipeType(revisions map[string]string, recipeTypeID string) (string, error) {
+	recipeTypeID = strings.TrimSpace(recipeTypeID)
+	revisionID, err := exportRevisionForNamespace(revisions, exportResourceNamespace(recipeTypeID))
+	if err != nil {
+		return "", fmt.Errorf("recipe type %q: %w", recipeTypeID, err)
 	}
-	return revisionID
+	return revisionID, nil
 }
 
 func exportRecipeTemplateID(revisionID, recipeTypeID, sourceTemplateID string) string {

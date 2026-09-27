@@ -55,8 +55,23 @@ type SearchRequest struct {
 
 type SearchResult struct {
 	IDs    []int64
+	Hits   []SearchHit
 	Found  int
 	Facets map[string]map[string]int
+}
+
+type SearchHit struct {
+	InternalID    int64 `json:"internal_id"`
+	CreatedAt     int64 `json:"created_at"`
+	UpdatedAt     int64 `json:"updated_at"`
+	HeatSortAsc   int64 `json:"heat_sort_asc"`
+	HeatSortDesc  int64 `json:"heat_sort_desc"`
+	DownloadCount int64 `json:"download_count"`
+	FavoriteCount int64 `json:"favorite_count"`
+	RatingScore   int64 `json:"rating_score"`
+	RatingCount   int64 `json:"rating_count"`
+	ViewCount     int64 `json:"view_count"`
+	CommentCount  int64 `json:"comment_count"`
 }
 
 func New(cfg config.TypesenseConfig) *Client {
@@ -85,8 +100,8 @@ func (client *Client) Alias(kind string) string {
 	return strings.TrimSpace(client.config.CollectionPrefix) + "_" + kind
 }
 
-func (client *Client) VersionedCollection(kind string) string {
-	return client.Alias(kind) + "_v" + strconv.Itoa(projectionSchemaVersion) + "_" + strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
+func (client *Client) VersionedCollection(kind string, schemaVersion int) string {
+	return client.Alias(kind) + "_v" + strconv.Itoa(schemaVersion) + "_" + strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
 }
 
 func (client *Client) Health(ctx context.Context) error {
@@ -206,9 +221,7 @@ func (client *Client) Search(ctx context.Context, request SearchRequest) (Search
 	var response struct {
 		Found int `json:"found"`
 		Hits  []struct {
-			Document struct {
-				InternalID int64 `json:"internal_id"`
-			} `json:"document"`
+			Document SearchHit `json:"document"`
 		} `json:"hits"`
 		FacetCounts []struct {
 			FieldName string `json:"field_name"`
@@ -226,10 +239,14 @@ func (client *Client) Search(ctx context.Context, request SearchRequest) (Search
 		}
 		return SearchResult{}, err
 	}
-	result := SearchResult{Found: response.Found, IDs: make([]int64, 0, len(response.Hits)), Facets: make(map[string]map[string]int)}
+	result := SearchResult{
+		Found: response.Found, IDs: make([]int64, 0, len(response.Hits)),
+		Hits: make([]SearchHit, 0, len(response.Hits)), Facets: make(map[string]map[string]int),
+	}
 	for _, hit := range response.Hits {
 		if hit.Document.InternalID > 0 {
 			result.IDs = append(result.IDs, hit.Document.InternalID)
+			result.Hits = append(result.Hits, hit.Document)
 		}
 	}
 	for _, facet := range response.FacetCounts {

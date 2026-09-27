@@ -64,6 +64,35 @@ func canReviewProjectSubmission(claims security.Claims, projectID string, submit
 		claimsAllow(claims, "project.review."+projectID)
 }
 
+type pendingReviewVisibility struct {
+	includeAll    bool
+	includeScoped bool
+	reviewerID    int64
+}
+
+func projectPendingReviewVisibility(claims security.Claims, projectID string, canEdit bool) pendingReviewVisibility {
+	visibility := pendingReviewVisibility{reviewerID: claims.Subject}
+	if canEdit || canReviewAllProjects(claims) {
+		visibility.includeAll = true
+		return visibility
+	}
+	projectID = strings.ToLower(strings.TrimSpace(projectID))
+	for _, allowedProjectID := range projectReviewIDs(claims) {
+		if allowedProjectID == projectID {
+			visibility.includeScoped = true
+			break
+		}
+	}
+	return visibility
+}
+
+func (visibility pendingReviewVisibility) allows(status string, submittedBy int64) bool {
+	if status == "approved" || visibility.includeAll {
+		return true
+	}
+	return visibility.includeScoped && submittedBy > 0 && submittedBy != visibility.reviewerID
+}
+
 func canReviewContentSubmission(
 	ctx context.Context,
 	query databaseQuery,

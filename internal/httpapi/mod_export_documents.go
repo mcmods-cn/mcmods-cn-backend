@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -28,10 +29,10 @@ func queueExportDocumentEntries(batch *modExportWriteBatch, resolver catalogReso
 		return err
 	}
 	entries := exportDocumentEntries(assetPath, document)
-	for ordinal, entry := range entries {
-		revisionID := exportRevisionForNamespace(revisions, entry.Namespace)
-		if revisionID == "" {
-			continue
+	for _, entry := range entries {
+		revisionID, revisionErr := exportRevisionForNamespace(revisions, entry.Namespace)
+		if revisionErr != nil {
+			return fmt.Errorf("document %s entry %q: %w", assetPath, entry.ID, revisionErr)
 		}
 		encodedNames, err := json.Marshal(supportedExportNames(entry.Names))
 		if err != nil {
@@ -60,21 +61,19 @@ func queueExportDocumentEntries(batch *modExportWriteBatch, resolver catalogReso
 			TranslationKey: entry.TranslationKey, Names: string(encodedNames), Data: string(encodedData),
 			IconPath: entry.IconPath, PreviewPath: entry.PreviewPath,
 		})
-		_ = ordinal
 	}
 	return nil
 }
 
-func exportRevisionForNamespace(revisions map[string]string, namespace string) string {
-	if revisionID := revisions[strings.ToLower(strings.TrimSpace(namespace))]; revisionID != "" {
-		return revisionID
+func exportRevisionForNamespace(revisions map[string]string, namespace string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(namespace))
+	if normalized == "" {
+		return "", errors.New("entry has no namespace")
 	}
-	if len(revisions) == 1 {
-		for _, revisionID := range revisions {
-			return revisionID
-		}
+	if revisionID := strings.TrimSpace(revisions[normalized]); revisionID != "" {
+		return revisionID, nil
 	}
-	return ""
+	return "", fmt.Errorf("namespace %q has no import revision", normalized)
 }
 
 func resolveExportResourceIdentity(

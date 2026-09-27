@@ -5,20 +5,19 @@ import (
 	"testing"
 )
 
-func TestFollowerNotificationBody(t *testing.T) {
-	tests := []struct {
-		names []string
-		count int
-		want  string
-	}{
-		{names: []string{"Alex"}, count: 1, want: "Alex 关注了你"},
-		{names: []string{"Alex", "Steve"}, count: 2, want: "Alex、Steve 关注了你"},
-		{names: []string{"Alex", "Steve", "Creeper"}, count: 5, want: "Alex、Steve 等 5 人关注了你"},
+func TestFollowerNotificationUsesRecipientLocaleTemplate(t *testing.T) {
+	config := defaultNotificationTemplateConfig()
+	values := map[string]string{"actors": "Alex, Steve", "count": "2"}
+	english, err := renderNotificationTemplateForLocale(config, "en-US", "new_follower", values)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, test := range tests {
-		if got := followerNotificationBody(test.names, test.count); got != test.want {
-			t.Fatalf("followerNotificationBody(%v, %d) = %q, want %q", test.names, test.count, got, test.want)
-		}
+	chinese, err := renderNotificationTemplateForLocale(config, "zh-CN", "new_follower", values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if english.Locale != "en-US" || chinese.Locale != "zh-CN" || english.Title == chinese.Title || english.Body == chinese.Body {
+		t.Fatalf("localized follower templates = %#v / %#v", english, chinese)
 	}
 }
 

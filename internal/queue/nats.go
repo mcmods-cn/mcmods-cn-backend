@@ -38,27 +38,65 @@ type subscriptionDefinition struct {
 	handler  taskHandler
 }
 
+type broadcastSubscriptionDefinition struct {
+	subject string
+	handler broadcastHandler
+}
+
+type activationGate struct {
+	ready    chan struct{}
+	canceled chan struct{}
+}
+
+func newActivationGate() *activationGate {
+	return &activationGate{ready: make(chan struct{}), canceled: make(chan struct{})}
+}
+
+func (gate *activationGate) wait() bool {
+	if gate == nil {
+		return true
+	}
+	select {
+	case <-gate.ready:
+		return true
+	case <-gate.canceled:
+		return false
+	}
+}
+
 type DeadLetter struct {
-	EventID, EventType, TaskCode, FailureStage, LastError string
-	Payload                                               []byte
-	Attempts                                              int
+	EventID, EventType, TaskCode, FailureStage, LastError, AggregateType, AggregateID string
+	Payload                                                                           []byte
+	Attempts                                                                          int
 }
 
 type DeadLetterSink func(context.Context, DeadLetter) error
 
 type Client struct {
-	mu             sync.RWMutex
-	cfg            config.NATSConfig
-	conn           *nats.Conn
-	jetStream      nats.JetStreamContext
-	lastError      string
-	subscriptions  map[string]subscriptionDefinition
-	deadLetterSink DeadLetterSink
+	mu                     sync.RWMutex
+	reconfigureMu          sync.Mutex
+	cfg                    config.NATSConfig
+	conn                   *nats.Conn
+	jetStream              nats.JetStreamContext
+	generation             uint64
+	lastError              string
+	subscriptions          map[string]subscriptionDefinition
+	broadcastSubscriptions map[string]broadcastSubscriptionDefinition
+	deadLetterSink         DeadLetterSink
 }
 
 func New(ctx context.Context, cfg config.NATSConfig) *Client {
-	client := &Client{subscriptions: make(map[string]subscriptionDefinition)}
-	_ = client.Reconfigure(cfg)
+	client := &Client{
+		cfg:                    NormalizeConfig(cfg),
+		subscriptions:          make(map[string]subscriptionDefinition),
+		broadcastSubscriptions: make(map[string]broadcastSubscriptionDefinition),
+	}
+	if err := client.Reconfigure(cfg); err != nil {
+		// Startup has no previous live connection to preserve. Keep the desired
+		// normalized configuration so the PostgreSQL dispatcher can continue to
+		// use registered local handlers while status exposes the connection error.
+		client.setLastError(err)
+	}
 	go func() {
 		<-ctx.Done()
 		client.Close()
@@ -116,6 +154,14 @@ func DefaultTaskConfigs() []config.NATSTaskConfig {
 			QueueGroup:     "mcmods-blueprint-workers",
 			MaxConcurrent:  4,
 			TimeoutSeconds: 1800,
+		},
+		{
+			Code:           "comment_log_attachment",
+			Enabled:        true,
+			Subject:        "comments.log-attachments",
+			QueueGroup:     "mcmods-comment-log-workers",
+			MaxConcurrent:  2,
+			TimeoutSeconds: 300,
 		},
 	}
 }
@@ -186,6 +232,21 @@ func NormalizeConfig(cfg config.NATSConfig) config.NATSConfig {
 }
 
 func (c *Client) Reconfigure(cfg config.NATSConfig) error {
+	return c.ReconfigureWithPersistence(cfg, nil)
+}
+
+// ReconfigureWithPersistence prepares a complete candidate runtime before the
+// persistence callback is invoked. The active connection, JetStream context,
+// task subscriptions, broadcast subscriptions, and configuration are swapped
+// only after both preparation and persistence succeed. The callback receives
+// the exact normalized configuration that will become active.
+func (c *Client) ReconfigureWithPersistence(cfg config.NATSConfig, persist func(config.NATSConfig) error) error {
+	if c == nil {
+		return ErrUnavailable
+	}
+	c.reconfigureMu.Lock()
+	defer c.reconfigureMu.Unlock()
+
 	cfg = NormalizeConfig(cfg)
 	var nextConn *nats.Conn
 	var connectErr error
@@ -193,11 +254,54 @@ func (c *Client) Reconfigure(cfg config.NATSConfig) error {
 		nextConn, connectErr = c.connect(cfg)
 	}
 	var nextJetStream nats.JetStreamContext
+	cleanupJetStream := func() error { return nil }
 	if connectErr == nil && nextConn != nil && cfg.JetStream.Enabled {
-		nextJetStream, connectErr = initializeJetStream(nextConn, cfg)
-		if connectErr != nil {
+		nextJetStream, cleanupJetStream, connectErr = initializeJetStream(nextConn, cfg)
+	}
+	if connectErr != nil {
+		connectErr = errors.Join(connectErr, cleanupJetStream())
+		if nextConn != nil {
 			nextConn.Close()
-			nextConn = nil
+		}
+		return connectErr
+	}
+
+	c.mu.RLock()
+	definitions := make([]subscriptionDefinition, 0, len(c.subscriptions))
+	for _, definition := range c.subscriptions {
+		definitions = append(definitions, definition)
+	}
+	broadcastDefinitions := make([]broadcastSubscriptionDefinition, 0, len(c.broadcastSubscriptions))
+	for _, definition := range c.broadcastSubscriptions {
+		broadcastDefinitions = append(broadcastDefinitions, definition)
+	}
+	nextGeneration := c.generation + 1
+	c.mu.RUnlock()
+
+	gate := newActivationGate()
+	discard := func(cause error) error {
+		close(gate.canceled)
+		cleanupErr := cleanupJetStream()
+		if nextConn != nil {
+			nextConn.Close()
+		}
+		return errors.Join(cause, cleanupErr)
+	}
+	if nextConn != nil {
+		for _, definition := range definitions {
+			if err := c.subscribeTaskOn(nextConn, nextJetStream, cfg, definition, nextGeneration, gate); err != nil && !errors.Is(err, ErrTaskDisabled) {
+				return discard(err)
+			}
+		}
+		for _, definition := range broadcastDefinitions {
+			if err := c.subscribeBroadcastOn(nextConn, cfg, definition, nextGeneration, gate); err != nil && !errors.Is(err, ErrTaskDisabled) {
+				return discard(err)
+			}
+		}
+	}
+	if persist != nil {
+		if err := persist(cfg); err != nil {
+			return discard(err)
 		}
 	}
 
@@ -206,28 +310,14 @@ func (c *Client) Reconfigure(cfg config.NATSConfig) error {
 	c.cfg = cfg
 	c.conn = nextConn
 	c.jetStream = nextJetStream
-	if connectErr != nil {
-		c.lastError = connectErr.Error()
-	} else {
-		c.lastError = ""
-	}
-	definitions := make([]subscriptionDefinition, 0, len(c.subscriptions))
-	for _, definition := range c.subscriptions {
-		definitions = append(definitions, definition)
-	}
+	c.generation = nextGeneration
+	c.lastError = ""
 	c.mu.Unlock()
+	close(gate.ready)
 
 	if previousConn != nil {
 		_ = previousConn.Drain()
 		previousConn.Close()
-	}
-	if connectErr != nil {
-		return connectErr
-	}
-	for _, definition := range definitions {
-		if err := c.subscribe(definition); err != nil && !errors.Is(err, ErrTaskDisabled) {
-			return err
-		}
 	}
 	return nil
 }
@@ -238,15 +328,15 @@ func (c *Client) connect(cfg config.NATSConfig) (*nats.Conn, error) {
 		nats.Timeout(3 * time.Second),
 		nats.ReconnectWait(2 * time.Second),
 		nats.MaxReconnects(-1),
-		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+		nats.DisconnectErrHandler(func(conn *nats.Conn, err error) {
 			if err != nil {
-				c.setLastError(err)
+				c.setConnectionError(conn, err)
 			}
 		}),
-		nats.ReconnectHandler(func(_ *nats.Conn) { c.setLastError(nil) }),
+		nats.ReconnectHandler(func(conn *nats.Conn) { c.setConnectionError(conn, nil) }),
 		nats.ClosedHandler(func(conn *nats.Conn) {
 			if err := conn.LastError(); err != nil {
-				c.setLastError(err)
+				c.setConnectionError(conn, err)
 			}
 		}),
 	}
@@ -262,9 +352,12 @@ func (c *Client) Close() {
 	if c == nil {
 		return
 	}
+	c.reconfigureMu.Lock()
+	defer c.reconfigureMu.Unlock()
 	c.mu.Lock()
 	conn := c.conn
 	c.conn = nil
+	c.generation++
 	c.mu.Unlock()
 	if conn != nil {
 		_ = conn.Drain()
@@ -287,28 +380,6 @@ func (c *Client) Status() Status {
 		LastError:     c.lastError,
 		JetStream:     c.jetStream != nil,
 	}
-}
-
-func (c *Client) PublishTask(ctx context.Context, taskCode string, payload any) error {
-	if c == nil {
-		return ErrUnavailable
-	}
-	c.mu.RLock()
-	conn := c.conn
-	cfg := c.cfg
-	task, exists := findTask(cfg.Tasks, taskCode)
-	c.mu.RUnlock()
-	if !exists || !task.Enabled {
-		return ErrTaskDisabled
-	}
-	if conn == nil || !conn.IsConnected() {
-		return ErrUnavailable
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	return c.publishRaw(ctx, conn, cfg, task, randomEventID(), raw)
 }
 
 type broadcastHandler func(context.Context, string, []byte)
@@ -359,10 +430,11 @@ func (c *Client) HandleLocally(ctx context.Context, taskCode, eventID string, ra
 	if !ok {
 		return ErrUnavailable
 	}
-	payload, envelope := UnwrapEvent(raw)
-	if envelope != nil {
-		eventID = envelope.EventID
+	payload, envelope, err := UnwrapEvent(raw)
+	if err != nil {
+		return err
 	}
+	eventID = envelope.EventID
 	return definition.handler(WithEventID(ctx, eventID), payload)
 }
 
@@ -396,14 +468,33 @@ func (c *Client) SubscribeBroadcast(subject string, handler broadcastHandler) er
 	if c == nil || handler == nil {
 		return ErrUnavailable
 	}
-	c.mu.RLock()
-	conn, cfg := c.conn, c.cfg
-	c.mu.RUnlock()
-	if conn == nil || !conn.IsConnected() || !cfg.Realtime {
+	subject = cleanSubjectToken(subject, ">")
+	definition := broadcastSubscriptionDefinition{subject: subject, handler: handler}
+	c.reconfigureMu.Lock()
+	defer c.reconfigureMu.Unlock()
+	c.mu.Lock()
+	_, alreadyRegistered := c.broadcastSubscriptions[subject]
+	c.broadcastSubscriptions[subject] = definition
+	conn, cfg, generation := c.conn, c.cfg, c.generation
+	c.mu.Unlock()
+	if alreadyRegistered {
+		return nil
+	}
+	return c.subscribeBroadcastOn(conn, cfg, definition, generation, nil)
+}
+
+func (c *Client) subscribeBroadcastOn(conn *nats.Conn, cfg config.NATSConfig, definition broadcastSubscriptionDefinition, generation uint64, gate *activationGate) error {
+	if !cfg.Enabled || !cfg.Realtime {
+		return ErrTaskDisabled
+	}
+	if conn == nil || !conn.IsConnected() {
 		return ErrUnavailable
 	}
-	_, err := conn.Subscribe(fullSubject(cfg.SubjectPrefix, "realtime."+cleanSubjectToken(subject, ">")), func(message *nats.Msg) {
-		handler(context.Background(), message.Subject, message.Data)
+	_, err := conn.Subscribe(fullSubject(cfg.SubjectPrefix, "realtime."+definition.subject), func(message *nats.Msg) {
+		if !gate.wait() || !c.isGenerationActive(generation) {
+			return
+		}
+		definition.handler(context.Background(), message.Subject, message.Data)
 	})
 	if err == nil {
 		err = conn.Flush()
@@ -435,22 +526,21 @@ func (c *Client) SubscribeTask(taskCode string, handler taskHandler) error {
 		return nil
 	}
 	definition := subscriptionDefinition{taskCode: taskCode, handler: handler}
+	c.reconfigureMu.Lock()
+	defer c.reconfigureMu.Unlock()
 	c.mu.Lock()
 	_, alreadyRegistered := c.subscriptions[taskCode]
 	c.subscriptions[taskCode] = definition
+	conn, js, cfg, generation := c.conn, c.jetStream, c.cfg, c.generation
 	c.mu.Unlock()
 	if alreadyRegistered {
 		return nil
 	}
-	return c.subscribe(definition)
+	return c.subscribeTaskOn(conn, js, cfg, definition, generation, nil)
 }
 
-func (c *Client) subscribe(definition subscriptionDefinition) error {
-	c.mu.RLock()
-	conn, js := c.conn, c.jetStream
-	cfg := c.cfg
+func (c *Client) subscribeTaskOn(conn *nats.Conn, js nats.JetStreamContext, cfg config.NATSConfig, definition subscriptionDefinition, generation uint64, gate *activationGate) error {
 	task, exists := findTask(cfg.Tasks, definition.taskCode)
-	c.mu.RUnlock()
 	if !exists || !task.Enabled {
 		return ErrTaskDisabled
 	}
@@ -462,16 +552,25 @@ func (c *Client) subscribe(definition subscriptionDefinition) error {
 		sem <- struct{}{}
 		go func() {
 			defer func() { <-sem }()
+			if !gate.wait() || !c.isGenerationActive(generation) {
+				if js != nil {
+					_ = msg.Nak()
+				}
+				return
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(task.TimeoutSeconds)*time.Second)
 			defer cancel()
-			payload, envelope := UnwrapEvent(msg.Data)
+			payload, envelope, handleErr := UnwrapEvent(msg.Data)
 			eventID := msg.Header.Get("MCMods-Event-ID")
 			if envelope != nil {
 				eventID = envelope.EventID
 			}
 			ctx = WithEventID(ctx, eventID)
-			if err := definition.handler(ctx, payload); err != nil {
-				c.setLastError(err)
+			if handleErr == nil {
+				handleErr = definition.handler(ctx, payload)
+			}
+			if handleErr != nil {
+				c.setGenerationError(generation, handleErr)
 				if js != nil {
 					metadata, _ := msg.Metadata()
 					if metadata != nil && int(metadata.NumDelivered) >= cfg.JetStream.MaxDeliver {
@@ -485,9 +584,14 @@ func (c *Client) subscribe(definition subscriptionDefinition) error {
 						if envelope != nil && envelope.EventType != "" {
 							eventType = envelope.EventType
 						}
+						aggregateType, aggregateID := "", ""
+						if envelope != nil {
+							aggregateType, aggregateID = envelope.AggregateType, envelope.AggregateID
+						}
 						if sink != nil && sink(ctx, DeadLetter{
 							EventID: eventID, EventType: eventType, TaskCode: definition.taskCode,
-							FailureStage: "consumer:" + definition.taskCode, LastError: err.Error(),
+							FailureStage: "consumer:" + definition.taskCode, LastError: handleErr.Error(),
+							AggregateType: aggregateType, AggregateID: aggregateID,
 							Payload: msg.Data, Attempts: int(metadata.NumDelivered),
 						}) != nil {
 							_ = msg.Nak()
@@ -513,34 +617,75 @@ func (c *Client) subscribe(definition subscriptionDefinition) error {
 		durable := cleanDurable(task.QueueGroup)
 		_, err = js.QueueSubscribe(fullSubject(cfg.SubjectPrefix, task.Subject), task.QueueGroup, handle,
 			nats.Durable(durable), nats.ManualAck(), nats.AckExplicit(), nats.AckWait(cfg.JetStream.AckWait),
-			nats.MaxDeliver(cfg.JetStream.MaxDeliver), nats.BindStream(cfg.JetStream.Stream))
+			nats.MaxDeliver(cfg.JetStream.MaxDeliver), nats.BackOff(jetStreamBackoff(cfg.JetStream.AckWait, cfg.JetStream.MaxDeliver)),
+			nats.BindStream(cfg.JetStream.Stream))
 	} else {
 		_, err = conn.QueueSubscribe(fullSubject(cfg.SubjectPrefix, task.Subject), task.QueueGroup, handle)
 	}
 	if err != nil {
-		c.setLastError(err)
 		return err
 	}
 	if err := conn.Flush(); err != nil {
-		c.setLastError(err)
 		return err
 	}
 	return nil
 }
 
-func initializeJetStream(conn *nats.Conn, cfg config.NATSConfig) (nats.JetStreamContext, error) {
+func jetStreamBackoff(initial time.Duration, maxDeliver int) []time.Duration {
+	if initial <= 0 {
+		initial = time.Second
+	}
+	if maxDeliver < 1 {
+		maxDeliver = 1
+	}
+	const maximum = 30 * time.Minute
+	result := make([]time.Duration, maxDeliver)
+	delay := initial
+	for index := range result {
+		result[index] = delay
+		if delay >= maximum {
+			delay = maximum
+		} else if delay > maximum/2 {
+			delay = maximum
+		} else {
+			delay *= 2
+		}
+	}
+	return result
+}
+
+func initializeJetStream(conn *nats.Conn, cfg config.NATSConfig) (nats.JetStreamContext, func() error, error) {
 	js, err := conn.JetStream()
 	if err != nil {
-		return nil, err
+		return nil, func() error { return nil }, err
 	}
 	subject := fullSubject(cfg.SubjectPrefix, ">")
 	streamCfg := &nats.StreamConfig{Name: cfg.JetStream.Stream, Subjects: []string{subject}, Retention: nats.LimitsPolicy, Storage: nats.FileStorage, Duplicates: 10 * time.Minute}
-	if _, err = js.StreamInfo(cfg.JetStream.Stream); errors.Is(err, nats.ErrStreamNotFound) {
+	var info *nats.StreamInfo
+	if info, err = js.StreamInfo(cfg.JetStream.Stream); errors.Is(err, nats.ErrStreamNotFound) {
 		_, err = js.AddStream(streamCfg)
-	} else if err == nil {
-		_, err = js.UpdateStream(streamCfg)
+		if err != nil {
+			return nil, func() error { return nil }, err
+		}
+		cleanup := func() error { return js.DeleteStream(cfg.JetStream.Stream) }
+		return js, cleanup, nil
 	}
-	return js, err
+	if err != nil {
+		return nil, func() error { return nil }, err
+	}
+	if !streamCoversSubject(info.Config.Subjects, subject) {
+		return nil, func() error { return nil }, errors.New("existing JetStream stream does not cover the configured NATS subject prefix")
+	}
+	return js, func() error { return nil }, nil
+}
+
+func streamCoversSubject(subjects []string, required string) bool {
+	for _, subject := range subjects {
+		if subject == required {
+			return true
+		}
+	}
+	return false
 }
 
 func randomEventID() string {
@@ -570,6 +715,42 @@ func (c *Client) setLastError(err error) {
 		return
 	}
 	c.lastError = err.Error()
+}
+
+func (c *Client) setConnectionError(conn *nats.Conn, err error) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != conn {
+		return
+	}
+	if err == nil {
+		c.lastError = ""
+		return
+	}
+	c.lastError = err.Error()
+}
+
+func (c *Client) setGenerationError(generation uint64, err error) {
+	if c == nil || err == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.generation == generation {
+		c.lastError = err.Error()
+	}
+}
+
+func (c *Client) isGenerationActive(generation uint64) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.generation == generation
 }
 
 func findTask(tasks []config.NATSTaskConfig, code string) (config.NATSTaskConfig, bool) {

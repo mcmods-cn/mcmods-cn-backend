@@ -1,14 +1,37 @@
 package httpapi
 
 import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
 
+func TestAITaskModelConfigurationDoesNotExposeUnenforcedConcurrencyLimit(t *testing.T) {
+	if _, exposed := reflect.TypeOf(aiTaskModelConfig{}).FieldByName("ConcurrencyLimit"); exposed {
+		t.Fatal("per-task AI concurrency is exposed even though only the NATS ai worker limit is enforced")
+	}
+	raw, err := json.Marshal(defaultAIConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(`"concurrencyLimit"`)) {
+		t.Fatalf("AI configuration still serializes an unenforced concurrency limit: %s", raw)
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/admin/ai/config", strings.NewReader(`{"taskModels":[{"taskType":"i18n_translation_completion","concurrencyLimit":2}]}`))
+	var payload aiConfigPayload
+	if err = decodeJSON(request, &payload); err == nil {
+		t.Fatal("the removed per-task concurrency field must not remain as a hidden write contract")
+	}
+}
+
 func TestNormalizeAITaskModelsUsesRegisteredTasks(t *testing.T) {
 	models := normalizeAITaskModels([]aiTaskModelConfig{
-		{TaskType: aiTaskI18nTranslation, ModelKey: "openai/test", ConcurrencyLimit: 5, TimeoutSeconds: 90, Prompt: "Use concise wording"},
-		{TaskType: "manually_added", ModelKey: "openai/ignored", ConcurrencyLimit: 9, TimeoutSeconds: 9},
+		{TaskType: aiTaskI18nTranslation, ModelKey: "openai/test", TimeoutSeconds: 90, Prompt: "Use concise wording"},
+		{TaskType: "manually_added", ModelKey: "openai/ignored", TimeoutSeconds: 9},
 	})
 	if len(models) != len(registeredAITaskDefinitions) {
 		t.Fatalf("task model count = %d, want %d", len(models), len(registeredAITaskDefinitions))
@@ -19,8 +42,8 @@ func TestNormalizeAITaskModelsUsesRegisteredTasks(t *testing.T) {
 	if models[1].TaskType != aiTaskI18nTranslation || models[1].ModelKey != "openai/test" {
 		t.Fatalf("saved task binding was not preserved: %#v", models[1])
 	}
-	if models[1].ConcurrencyLimit != 5 || models[1].TimeoutSeconds != 90 {
-		t.Fatalf("saved task limits were not preserved: %#v", models[1])
+	if models[1].TimeoutSeconds != 90 {
+		t.Fatalf("saved task timeout was not preserved: %#v", models[1])
 	}
 	if models[1].Prompt != "Use concise wording" {
 		t.Fatalf("saved task prompt was not preserved: %#v", models[1])

@@ -141,7 +141,7 @@ func ProbeWithOptions(ctx context.Context, address string, discoverNamespaces bo
 			result.Protocol,
 			result.MinecraftVersion,
 		)
-		discovery := probeConfigurationNamespaces(ctx, target, discoveryProtocol)
+		discovery := probeConfigurationNamespacesWithSlot(ctx, target, discoveryProtocol)
 		if discovery.Loader != "" {
 			result.Loader = discovery.Loader
 			result.Modded = true
@@ -169,6 +169,18 @@ func ProbeWithOptions(ctx context.Context, address string, discoverNamespaces bo
 		}
 	}
 	return result, nil
+}
+
+func probeConfigurationNamespacesWithSlot(ctx context.Context, target Target, protocol int) configurationDiscovery {
+	release, err := acquireConfigurationProbeSlot(ctx)
+	if err != nil {
+		return configurationDiscovery{
+			Confidence: map[string]string{},
+			Diagnostic: "高版本模组探测并发容量已满，请稍后重试",
+		}
+	}
+	defer release()
+	return probeConfigurationNamespaces(ctx, target, protocol)
 }
 
 func ResolveTarget(ctx context.Context, resolver Resolver, address string) (Target, error) {

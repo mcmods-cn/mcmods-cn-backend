@@ -172,9 +172,9 @@ func (s *Server) acceptCommunityPostAnswer(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusConflict, "question bounty is no longer available")
 			return
 		}
-		tax = (amount*int64(taxBPS) + 9999) / 10000
-		received = amount - tax
-		if received <= 0 {
+		var amountErr error
+		tax, received, amountErr = calculateTransferAmounts(amount, taxBPS)
+		if amountErr != nil {
 			writeError(w, http.StatusConflict, "question bounty is too small after tax")
 			return
 		}

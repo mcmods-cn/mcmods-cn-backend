@@ -62,7 +62,7 @@ func enqueueProjectUpdateEventTx(ctx context.Context, tx pgx.Tx, routeID, revisi
 	var eventID int64
 	err = tx.QueryRow(ctx, `insert into project_update_events(
 		project_route_id,revision_id,actor_user_id,update_kind,changed_sections,publication_batch_id)
-		values($1,nullif($2::bigint,0)::text,nullif($3::bigint,0),$4,$5,$6)
+		values($1,nullif($2::bigint,0),nullif($3::bigint,0),$4,$5,$6)
 		on conflict(project_route_id,publication_batch_id) do nothing returning id`,
 		routeID, revisionID, actorID, updateKind, sections, publicationBatchID).Scan(&eventID)
 	if err == pgx.ErrNoRows {
@@ -138,7 +138,9 @@ func appendReviewedProjectUpdateEventTx(ctx context.Context, tx pgx.Tx, requestI
 		}
 		sections = append(sections, path)
 	}
-	rows.Close()
+	if err = finishRows(rows); err != nil {
+		return err
+	}
 	updateKind := "content_updated"
 	if baseRevisionID == nil {
 		updateKind = "published"

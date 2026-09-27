@@ -105,7 +105,12 @@ func projectAccessSchemaStatements() []string {
 			after insert or update or delete on project_editor_assignments
 			for each row execute function bump_project_access_user_permission_version()`,
 		`create or replace function bump_project_acl_runtime_version() returns trigger as $$
-		begin perform bump_runtime_version('project_acl'); return null; end;
+		begin
+			if current_setting('mcmods.project_acl_runtime_bumped',true)='1' then return null; end if;
+			perform set_config('mcmods.project_acl_runtime_bumped','1',true);
+			perform bump_runtime_version('project_acl');
+			return null;
+		end;
 		$$ language plpgsql`,
 		`create trigger trg_content_creator_bindings_project_acl
 			after insert or update or delete on content_creator_bindings

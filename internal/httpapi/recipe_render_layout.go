@@ -14,6 +14,172 @@ type recipeRenderState struct {
 	bindings map[string]map[string]any
 }
 
+func (s *Server) hydratePublicRecipeRenderLayouts(ctx context.Context, recipes []map[string]any) error {
+	if err := s.hydrateRecipeRenderLayouts(ctx, recipes); err != nil {
+		return err
+	}
+	return s.hydrateAuthoritativeRecipeRenderLayouts(ctx, recipes)
+}
+
+func stripPublicRecipeInternalFields(recipes []map[string]any) {
+	for _, recipe := range recipes {
+		delete(recipe, "_recipeEntityId")
+		delete(recipe, "_authoritative")
+	}
+}
+
+type authoritativeRecipeRenderState struct {
+	recipe   map[string]any
+	layout   map[string]any
+	slots    []any
+	slotByID map[int64]map[string]any
+}
+
+// hydrateAuthoritativeRecipeRenderLayouts projects the canonical editor model
+// into the same public render shape as imported observations. It is set-based
+// for the entire result page and never manufactures an import snapshot.
+func (s *Server) hydrateAuthoritativeRecipeRenderLayouts(ctx context.Context, recipes []map[string]any) error {
+	ids := make([]int64, 0, len(recipes))
+	states := make(map[int64]*authoritativeRecipeRenderState, len(recipes))
+	for _, recipe := range recipes {
+		authoritative, _ := recipe["_authoritative"].(bool)
+		if !authoritative {
+			continue
+		}
+		id, _ := recipe["_recipeEntityId"].(int64)
+		if id <= 0 {
+			return fmt.Errorf("authoritative recipe identity is missing")
+		}
+		ids = append(ids, id)
+		states[id] = &authoritativeRecipeRenderState{recipe: recipe, slotByID: make(map[int64]map[string]any)}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	rows, err := s.db.Query(ctx, `select recipe.entity_id,type.canonical_id,definition.definition,
+		template.template_key,template.canvas_width,template.canvas_height,template.image_scale,
+		slot.id,slot.slot_key,slot.role,slot.ordinal,slot.x::float8,slot.y::float8,slot.width::float8,slot.height::float8,slot.definition,
+		binding.id,binding.definition,candidate.candidate_index,resource_entity.public_id,resource.kind_code,
+		resource.canonical_id,resource.namespace,candidate.amount::float8,candidate.probability::float8,
+		candidate.byproduct,candidate.definition,resource_entity.default_locale,
+		coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
+			where localization.catalog_entity_id=resource_entity.id and localization.name<>''),'{}'::jsonb),
+		coalesce(imported.revision_id,''),coalesce(imported.icon_path,'')
+		from recipes recipe
+		join recipe_definitions definition on definition.recipe_id=recipe.entity_id
+		join recipe_types type on type.entity_id=recipe.recipe_type_id
+		join recipe_layout_templates template on template.entity_id=definition.template_id
+		join recipe_template_slots slot on slot.template_id=template.entity_id
+		left join recipe_bindings binding on binding.recipe_id=recipe.entity_id and binding.template_slot_id=slot.id
+		left join recipe_binding_candidates candidate on candidate.binding_id=binding.id
+		left join game_resources resource on resource.entity_id=candidate.resource_id
+		left join catalog_entities resource_entity on resource_entity.id=resource.entity_id
+		left join lateral (select snapshot.revision_id,snapshot.icon_path from resource_import_snapshots snapshot
+			join catalog_import_revisions revision on revision.id=snapshot.revision_id
+			where snapshot.resource_id=resource.entity_id and revision.is_active and revision.status in ('ready','partial')
+			order by (snapshot.icon_path<>'') desc,coalesce(revision.activated_at,revision.created_at) desc,snapshot.id desc limit 1) imported on true
+		where recipe.entity_id=any($1::bigint[])
+		order by recipe.entity_id,slot.ordinal,candidate.candidate_index`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var recipeID, slotID int64
+		var recipeTypeID, templateKey, slotKey, role string
+		var canvasWidth, canvasHeight, imageScale, ordinal int
+		var x, y, width, height float64
+		var recipeDefinition, slotDefinition []byte
+		var bindingID, candidateIndex sql.NullInt64
+		var bindingDefinition, candidateDefinition []byte
+		var resourcePublicID, kindCode, canonicalID, namespace, defaultLocale, sourceRevisionID, iconPath sql.NullString
+		var amount, probability sql.NullFloat64
+		var byproduct sql.NullBool
+		var names []byte
+		if err = rows.Scan(&recipeID, &recipeTypeID, &recipeDefinition, &templateKey, &canvasWidth, &canvasHeight, &imageScale,
+			&slotID, &slotKey, &role, &ordinal, &x, &y, &width, &height, &slotDefinition,
+			&bindingID, &bindingDefinition, &candidateIndex, &resourcePublicID, &kindCode, &canonicalID, &namespace,
+			&amount, &probability, &byproduct, &candidateDefinition, &defaultLocale, &names, &sourceRevisionID, &iconPath); err != nil {
+			return err
+		}
+		state := states[recipeID]
+		if state == nil {
+			continue
+		}
+		if state.layout == nil {
+			definition, decodeErr := decodeRecipeJSONObject(recipeDefinition, "authoritative definition")
+			if decodeErr != nil {
+				return decodeErr
+			}
+			layoutKind, _ := definition["layout_kind"].(string)
+			if layoutKind == "" {
+				layoutKind, _ = definition["layoutKind"].(string)
+			}
+			if layoutKind == "" {
+				layoutKind = "unknown"
+			}
+			state.layout = map[string]any{
+				"schema_version": "mcmods-canonical-recipe-render/v1", "layout_available": true,
+				"layout_kind": layoutKind, "underlying_recipe_type_id": recipeTypeID,
+				"template_id": templateKey, "coordinate_space": "logical_pixels", "image_scale": imageScale,
+				"canvas": map[string]any{"width": canvasWidth, "height": canvasHeight}, "slots": state.slots,
+				"background": "", "background_contains_ingredients": false,
+			}
+			state.recipe["layout"] = state.layout
+		}
+		slot := state.slotByID[slotID]
+		if slot == nil {
+			slot, err = decodeRecipeJSONObject(slotDefinition, "authoritative slot definition")
+			if err != nil {
+				return err
+			}
+			slot["slot_id"] = slotKey
+			slot["role"] = role
+			slot["ordinal"] = ordinal
+			slot["coordinates_available"] = true
+			slot["rect"] = map[string]any{"x": x, "y": y, "width": width, "height": height}
+			slot["visual_rect"] = slot["rect"]
+			slot["ingredient_present"] = bindingID.Valid
+			slot["alternatives"] = []any{}
+			if bindingID.Valid {
+				bindingValue, decodeErr := decodeRecipeJSONObject(bindingDefinition, "authoritative binding definition")
+				if decodeErr != nil {
+					return decodeErr
+				}
+				slot["binding_definition"] = bindingValue
+			}
+			state.slotByID[slotID] = slot
+			state.slots = append(state.slots, slot)
+			state.layout["slots"] = state.slots
+		}
+		if !candidateIndex.Valid || !resourcePublicID.Valid || !canonicalID.Valid {
+			continue
+		}
+		candidate, decodeErr := decodeRecipeJSONObject(candidateDefinition, "authoritative candidate definition")
+		if decodeErr != nil {
+			return decodeErr
+		}
+		candidate["alternative_index"] = int(candidateIndex.Int64)
+		candidate["publicId"] = resourcePublicID.String
+		candidate["id"] = canonicalID.String
+		candidate["kind"] = kindCode.String
+		candidate["registry"] = namespace.String
+		candidate["amount"] = nullableSQLFloat(amount)
+		candidate["probability"] = nullableSQLFloat(probability)
+		candidate["chance_available"] = probability.Valid
+		candidate["chance"] = nullableSQLFloat(probability)
+		candidate["byproduct"] = byproduct.Valid && byproduct.Bool
+		candidate["locale"] = defaultLocale.String
+		candidate["names"] = json.RawMessage(names)
+		candidate["sourceRevisionId"] = sourceRevisionID.String
+		candidate["iconPath"] = iconPath.String
+		alternatives, _ := slot["alternatives"].([]any)
+		slot["alternatives"] = append(alternatives, candidate)
+	}
+	return rows.Err()
+}
+
 // hydrateRecipeRenderLayouts builds the API render model from normalized JEI
 // templates and bindings in two set-based queries for the current result page.
 func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[string]any) error {
@@ -88,6 +254,26 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 			continue
 		}
 		if state.layout == nil {
+			parametersValue, decodeErr := decodeRecipeJSONObject(parameters, "import parameters")
+			if decodeErr != nil {
+				rows.Close()
+				return decodeErr
+			}
+			canvasValue, decodeErr := decodeRecipeJSONObject(canvas, "import canvas")
+			if decodeErr != nil {
+				rows.Close()
+				return decodeErr
+			}
+			imagePixelsValue, decodeErr := decodeRecipeJSONObject(imagePixels, "import image_pixels")
+			if decodeErr != nil {
+				rows.Close()
+				return decodeErr
+			}
+			contentValue, decodeErr := decodeRecipeJSONObject(contentRect, "import content")
+			if decodeErr != nil {
+				rows.Close()
+				return decodeErr
+			}
 			state.layout = map[string]any{
 				"schema_version":                  "mcmods-recipe-render/v1",
 				"layout_available":                layoutAvailable,
@@ -96,7 +282,7 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 				"layout_classification_source":    classificationSource,
 				"width":                           nullableSQLInt(width),
 				"height":                          nullableSQLInt(height),
-				"parameters":                      decodeJSONObject(parameters),
+				"parameters":                      parametersValue,
 				"origin_kind":                     originKind,
 				"underlying_recipe_type_id":       underlyingRecipeTypeID,
 				"source_mod_id":                   sourceModID,
@@ -108,9 +294,9 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 				"background_contains_ingredients": backgroundContainsIngredients,
 				"coordinate_space":                coordinateSpace,
 				"image_scale":                     imageScale,
-				"canvas":                          decodeJSONObject(canvas),
-				"image_pixels":                    decodeJSONObject(imagePixels),
-				"content":                         decodeJSONObject(contentRect),
+				"canvas":                          canvasValue,
+				"image_pixels":                    imagePixelsValue,
+				"content":                         contentValue,
 				"slots":                           state.slots,
 			}
 			state.recipe["layout"] = state.layout
@@ -118,13 +304,27 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		if slotDatabaseID == "" {
 			continue
 		}
-		slot := decodeJSONObject(slotData)
+		slot, decodeErr := decodeRecipeJSONObject(slotData, "import slot data")
+		if decodeErr != nil {
+			rows.Close()
+			return decodeErr
+		}
+		rectValue, decodeErr := decodeRecipeJSONObject(rect, "import slot rect")
+		if decodeErr != nil {
+			rows.Close()
+			return decodeErr
+		}
+		visualRectValue, decodeErr := decodeRecipeJSONObject(visualRect, "import slot visual_rect")
+		if decodeErr != nil {
+			rows.Close()
+			return decodeErr
+		}
 		slot["slot_id"] = sourceSlotID
 		slot["role"] = role
 		slot["ordinal"] = slotOrdinal
 		slot["coordinates_available"] = coordinatesAvailable
-		slot["rect"] = decodeJSONObject(rect)
-		slot["visual_rect"] = decodeJSONObject(visualRect)
+		slot["rect"] = rectValue
+		slot["visual_rect"] = visualRectValue
 		slot["ingredient_present"] = ingredientPresent
 		slot["clickable"] = clickable
 		slot["placeholder_item"] = placeholderItem
@@ -210,7 +410,11 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		alternative["chance_comparator"] = chanceComparator
 		alternative["chance_source"] = chanceSource
 		alternative["chance_text"] = chanceText
-		alternative["chance_texts"] = decodeJSONObject(chanceTexts)
+		chanceTextValues, decodeErr := decodeRecipeJSONObject(chanceTexts, "import candidate chance_texts")
+		if decodeErr != nil {
+			return decodeErr
+		}
+		alternative["chance_texts"] = chanceTextValues
 		alternative["chance_translation_key"] = chanceTranslationKey
 		alternative["chance_render_x"] = nullableSQLFloat(chanceRenderX)
 		alternative["chance_render_y"] = nullableSQLFloat(chanceRenderY)
@@ -221,12 +425,12 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 	return alternativeRows.Err()
 }
 
-func decodeJSONObject(raw []byte) map[string]any {
-	result := make(map[string]any)
-	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &result)
+func decodeRecipeJSONObject(raw []byte, label string) (map[string]any, error) {
+	result, err := decodeStoredJSONObject(raw, label)
+	if err != nil {
+		return nil, fmt.Errorf("decode recipe %s: %w", label, err)
 	}
-	return result
+	return result, nil
 }
 
 func nullableSQLBool(value sql.NullBool) any {
@@ -254,9 +458,5 @@ func scanOptionalRecipeOverride(raw []byte) (map[string]any, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
-	var layout map[string]any
-	if err := json.Unmarshal(raw, &layout); err != nil {
-		return nil, fmt.Errorf("decode recipe layout override: %w", err)
-	}
-	return layout, nil
+	return decodeRecipeJSONObject(raw, "layout override")
 }

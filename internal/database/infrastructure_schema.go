@@ -47,24 +47,6 @@ func infrastructureSchemaStatements() []string {
 		`drop trigger if exists trg_users_secure_auth_material on users`,
 		`create trigger trg_users_secure_auth_material before update of status,password_hash on users
 			for each row execute function secure_user_auth_material_change()`,
-		`alter table nats_outbox add column if not exists event_type text not null default ''`,
-		`alter table nats_outbox add column if not exists schema_version integer not null default 1 check(schema_version > 0)`,
-		`alter table nats_outbox add column if not exists occurred_at timestamptz not null default now()`,
-		`alter table nats_outbox add column if not exists trace_id text not null default ''`,
-		`alter table nats_outbox add column if not exists status text not null default 'pending'`,
-		`alter table nats_outbox add column if not exists available_at timestamptz not null default now()`,
-		`alter table nats_outbox add column if not exists locked_at timestamptz`,
-		`alter table nats_outbox add column if not exists locked_by text not null default ''`,
-		`alter table nats_outbox add column if not exists max_attempts integer not null default 12 check(max_attempts > 0)`,
-		`alter table nats_outbox add column if not exists updated_at timestamptz not null default now()`,
-		`update nats_outbox set event_type=subject where event_type=''`,
-		`update nats_outbox set status=case when published_at is null then 'pending' else 'published' end`,
-		`alter table nats_outbox drop constraint if exists nats_outbox_status_check`,
-		`alter table nats_outbox add constraint nats_outbox_status_check check(status in ('pending','publishing','published','failed','dead'))`,
-		`drop index if exists idx_nats_outbox_pending`,
-		`create index idx_nats_outbox_pending on nats_outbox(available_at,id)
-			where status in ('pending','failed') and published_at is null`,
-		`create index if not exists idx_nats_outbox_status_created on nats_outbox(status,created_at)`,
 		`alter table notifications add column if not exists source_event_id text`,
 		`create unique index if not exists uq_notifications_source_event on notifications(source_event_id)
 			where source_event_id is not null`,
@@ -83,13 +65,20 @@ func infrastructureSchemaStatements() []string {
 			subject text not null,
 			payload jsonb not null,
 			failure_stage text not null,
+			aggregate_type text not null default '',
+			aggregate_id text not null default '',
 			attempts integer not null default 0,
 			last_error text not null default '',
 			failed_at timestamptz not null default now(),
 			replayed_at timestamptz,
 			unique(event_id,failure_stage)
 		)`,
-		`create index if not exists idx_dead_letter_events_pending on dead_letter_events(failed_at desc)
+		`create index if not exists idx_dead_letter_events_page on dead_letter_events(failed_at desc,id desc)`,
+		`create index if not exists idx_dead_letter_events_pending on dead_letter_events(failed_at desc,id desc)
 			where replayed_at is null`,
+		`create index if not exists idx_dead_letter_events_replayed on dead_letter_events(failed_at desc,id desc)
+			where replayed_at is not null`,
+		`create index if not exists idx_dead_letter_events_aggregate
+			on dead_letter_events(aggregate_type,aggregate_id,failed_at desc,id desc)`,
 	}
 }

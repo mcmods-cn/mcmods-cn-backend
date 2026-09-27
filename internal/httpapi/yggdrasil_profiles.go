@@ -284,6 +284,8 @@ func (s *Server) yggdrasilSetTexture(w http.ResponseWriter, r *http.Request) {
 		writeYggdrasilInternalError(w)
 		return
 	}
+	var pendingTextureUpload *pendingTextureUpload
+	defer func() { s.compensateUncommittedMinecraftTextureUpload(pendingTextureUpload) }()
 	defer tx.Rollback(r.Context())
 	var userStatus string
 	if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, userID).Scan(&userStatus); err != nil {
@@ -329,7 +331,8 @@ func (s *Server) yggdrasilSetTexture(w http.ResponseWriter, r *http.Request) {
 			writeYggdrasilError(w, http.StatusForbidden, "ForbiddenOperationException", "Skin library creation limit reached.", "")
 			return
 		}
-		blob, persistErr := persistSanitizedMinecraftTextureTx(r.Context(), tx, storageClient, storageConfig, userID, texture)
+		blob, uploadedTexture, persistErr := persistSanitizedMinecraftTextureTx(r.Context(), tx, storageClient, storageConfig, texture)
+		pendingTextureUpload = uploadedTexture
 		if persistErr != nil {
 			log.Printf("persist launcher skin texture for user %d: %v", userID, persistErr)
 			writeYggdrasilInternalError(w)
@@ -373,6 +376,7 @@ func (s *Server) yggdrasilSetTexture(w http.ResponseWriter, r *http.Request) {
 		writeYggdrasilInternalError(w)
 		return
 	}
+	pendingTextureUpload = nil
 	writeYggdrasilNoContent(w)
 }
 

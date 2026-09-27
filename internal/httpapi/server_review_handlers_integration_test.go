@@ -28,26 +28,33 @@ func TestMinecraftServerReviewListQueryIntegration(t *testing.T) {
 	}
 	defer pool.Close()
 
-	rows, err := pool.Query(ctx, minecraftServerReviewListQuery, "pending")
+	request, err := parseServerReviewPageRequest(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query, arguments := serverReviewPageSQL(request)
+	rows, err := pool.Query(ctx, query, arguments...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var values struct {
-			id, name, address, summary, body, primaryTag, loader, proofText string
-			reviewStatus, reviewNote, submitterID, submitterUsername        string
-			minecraftVersions, languages                                    []string
-			dedicatedClient, whitelist, onlineMode, modded                  bool
-			createdAt                                                       time.Time
-			reviewedAt                                                      *time.Time
+			id, name, address, summary, primaryTag, loader           string
+			reviewStatus, reviewNote, submitterID, submitterUsername string
+			minecraftVersions, languages                             []string
+			dedicatedClient, whitelist, onlineMode, modded           bool
+			proofFileCount, linkCount, modCount                      int64
+			createdAt                                                time.Time
+			reviewedAt                                               *time.Time
 		}
 		if err = rows.Scan(
-			&values.id, &values.name, &values.address, &values.summary, &values.body,
+			&values.id, &values.name, &values.address, &values.summary,
 			&values.minecraftVersions, &values.dedicatedClient, &values.languages,
 			&values.primaryTag, &values.whitelist, &values.onlineMode, &values.modded,
-			&values.loader, &values.proofText, &values.reviewStatus, &values.reviewNote,
+			&values.loader, &values.reviewStatus, &values.reviewNote,
 			&values.submitterID, &values.submitterUsername, &values.createdAt, &values.reviewedAt,
+			new(int64), &values.proofFileCount, &values.linkCount, &values.modCount,
 		); err != nil {
 			t.Fatal(err)
 		}

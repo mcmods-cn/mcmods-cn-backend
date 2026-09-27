@@ -3,12 +3,15 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -18,7 +21,16 @@ const (
 	maxMinecraftVersions        = 2500
 )
 
-var minecraftVersionSyncMu sync.Mutex
+var errMinecraftVersionConfigUnavailable = errors.New("Minecraft version configuration is unavailable")
+var errMinecraftVersionSyncInProgress = errors.New("Minecraft version synchronization is already in progress")
+var errInvalidMinecraftVersionCodes = errors.New("invalid Minecraft version codes")
+var errUnknownMinecraftVersionCodes = errors.New("unknown Minecraft version codes")
+
+var minecraftVersionCodePattern = regexp.MustCompile(`^[A-Za-z0-9][-A-Za-z0-9._()' +]{0,79}$`)
+
+type minecraftVersionConfigQueryRower interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
 
 type minecraftVersionOption struct {
 	Code string `json:"code"`
@@ -32,13 +44,14 @@ type minecraftLoaderOption struct {
 }
 
 type minecraftLoaderSyncStatus struct {
-	Code         string `json:"code"`
-	SourceURL    string `json:"sourceUrl"`
-	Status       string `json:"status"`
-	LastSyncedAt string `json:"lastSyncedAt,omitempty"`
-	VersionCount int    `json:"versionCount"`
-	UsedFallback bool   `json:"usedFallback,omitempty"`
-	Error        string `json:"error,omitempty"`
+	Code         string   `json:"code"`
+	SourceURL    string   `json:"sourceUrl"`
+	SourceURLs   []string `json:"sourceUrls,omitempty"`
+	Status       string   `json:"status"`
+	LastSyncedAt string   `json:"lastSyncedAt,omitempty"`
+	VersionCount int      `json:"versionCount"`
+	UsedFallback bool     `json:"usedFallback,omitempty"`
+	Error        string   `json:"error,omitempty"`
 }
 
 type minecraftVersionConfig struct {
@@ -64,7 +77,13 @@ type mojangVersionManifest struct {
 }
 
 func (s *Server) publicMinecraftVersions(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, loadMinecraftVersionConfig(r.Context(), s.db))
+	config, err := loadMinecraftVersionConfig(r.Context(), s.db)
+	if err != nil {
+		log.Printf("load public Minecraft version configuration: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to load Minecraft version settings")
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
 }
 
 func (s *Server) updateMinecraftVersions(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +97,12 @@ func (s *Server) updateMinecraftVersions(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	current := loadMinecraftVersionConfig(r.Context(), s.db)
+	current, err := loadMinecraftVersionConfig(r.Context(), s.db)
+	if err != nil {
+		log.Printf("load Minecraft version configuration before update: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to load Minecraft version settings")
+		return
+	}
 	copyMinecraftSyncMetadata(&config, current)
 	if err = saveMinecraftVersionConfig(r.Context(), s.db, config); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save Minecraft version settings")
@@ -90,37 +114,91 @@ func (s *Server) updateMinecraftVersions(w http.ResponseWriter, r *http.Request)
 func (s *Server) syncMinecraftVersions(w http.ResponseWriter, r *http.Request) {
 	config, err := syncMinecraftVersionCatalog(r.Context(), s.db)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		status := http.StatusBadGateway
+		if errors.Is(err, errMinecraftVersionConfigUnavailable) {
+			status = http.StatusInternalServerError
+		} else if errors.Is(err, errMinecraftVersionSyncInProgress) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, config)
 }
 
-func loadMinecraftVersionConfig(ctx context.Context, db *pgxpool.Pool) minecraftVersionConfig {
+func loadMinecraftVersionConfig(ctx context.Context, db minecraftVersionConfigQueryRower) (minecraftVersionConfig, error) {
 	config := defaultMinecraftVersionConfig()
 	var raw []byte
-	if err := db.QueryRow(ctx, `select value from system_settings where key=$1`, minecraftVersionsSettingKey).Scan(&raw); err != nil {
-		return config
+	err := db.QueryRow(ctx, `select value from system_settings where key=$1`, minecraftVersionsSettingKey).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return config, nil
+	}
+	if err != nil {
+		return minecraftVersionConfig{}, fmt.Errorf("%w: read setting: %v", errMinecraftVersionConfigUnavailable, err)
 	}
 	var stored minecraftVersionConfig
-	if json.Unmarshal(raw, &stored) != nil {
-		return config
+	if err = json.Unmarshal(raw, &stored); err != nil {
+		return minecraftVersionConfig{}, fmt.Errorf("%w: decode setting: %v", errMinecraftVersionConfigUnavailable, err)
 	}
 	normalized, err := normalizeMinecraftVersionConfig(stored)
 	if err != nil {
-		return config
+		return minecraftVersionConfig{}, fmt.Errorf("%w: normalize setting: %v", errMinecraftVersionConfigUnavailable, err)
 	}
-	return mergeMinecraftVersionConfig(config, normalized)
+	return mergeMinecraftVersionConfig(config, normalized), nil
+}
+
+func classifyMinecraftVersionCodes(config minecraftVersionConfig, values []string, maximum int) (recognized, unknown []string, err error) {
+	if len(values) > maximum {
+		return nil, nil, errInvalidMinecraftVersionCodes
+	}
+	valid := make(map[string]struct{}, len(config.Versions))
+	for _, version := range config.Versions {
+		valid[version.Code] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		if len(value) > 80 {
+			unknown = append(unknown, value)
+			continue
+		}
+		if _, exists := valid[value]; exists {
+			recognized = append(recognized, value)
+		} else {
+			unknown = append(unknown, value)
+		}
+	}
+	return recognized, unknown, nil
+}
+
+func authoritativeMinecraftVersionCodes(ctx context.Context, db minecraftVersionConfigQueryRower, values []string, maximum int) ([]string, error) {
+	config, err := loadMinecraftVersionConfig(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	recognized, unknown, err := classifyMinecraftVersionCodes(config, values, maximum)
+	if err != nil {
+		return nil, err
+	}
+	if len(unknown) > 0 {
+		return nil, fmt.Errorf("%w: %s", errUnknownMinecraftVersionCodes, strings.Join(unknown, ", "))
+	}
+	return recognized, nil
+}
+
+func validMinecraftVersionCode(value string) bool {
+	return value != "" && len(value) <= 80 && strings.TrimSpace(value) == value && minecraftVersionCodePattern.MatchString(value)
 }
 
 func saveMinecraftVersionConfig(ctx context.Context, db *pgxpool.Pool, config minecraftVersionConfig) error {
-	raw, err := json.Marshal(config)
-	if err != nil {
-		return err
-	}
-	_, err = db.Exec(ctx, `insert into system_settings (key,value,updated_at) values ($1,$2::jsonb,now())
-		on conflict (key) do update set value=excluded.value,updated_at=now()`, minecraftVersionsSettingKey, string(raw))
-	return err
+	return saveMinecraftVersionConfigAndInvalidateStaleArtifacts(ctx, db, config)
 }
 
 func minecraftVersionType(value string, codes ...string) string {
@@ -178,8 +256,8 @@ func normalizeMinecraftVersionConfig(payload minecraftVersionConfig) (minecraftV
 		if version.Code == "" || versionSet[version.Code] {
 			continue
 		}
-		if len(version.Code) > 80 {
-			return minecraftVersionConfig{}, &requestError{message: "Minecraft version name is too long"}
+		if !validMinecraftVersionCode(version.Code) {
+			return minecraftVersionConfig{}, &requestError{message: "Minecraft version code is invalid"}
 		}
 		if version.Type != "release" && version.Type != "snapshot" && version.Type != "pre_release" &&
 			version.Type != "release_candidate" && version.Type != "april_fools" && version.Type != "legacy" {
@@ -195,15 +273,19 @@ func normalizeMinecraftVersionConfig(payload minecraftVersionConfig) (minecraftV
 	loaderSet := map[string]bool{}
 	loaders := make([]minecraftLoaderOption, 0, len(payload.Loaders))
 	for _, loader := range payload.Loaders {
-		loader.Code = strings.TrimSpace(loader.Code)
+		loader.Code = canonicalMinecraftLoaderCode(loader.Code)
 		loader.Name = strings.TrimSpace(loader.Name)
-		if loader.Code == "" || loaderSet[loader.Code] {
+		if loader.Code == "" {
 			continue
+		}
+		loaderKey := strings.ToLower(loader.Code)
+		if loaderSet[loaderKey] {
+			return minecraftVersionConfig{}, &requestError{message: "duplicate Minecraft loader code"}
 		}
 		if len(loader.Code) > 80 || len(loader.Name) > 120 {
 			return minecraftVersionConfig{}, &requestError{message: "Minecraft loader name is too long"}
 		}
-		loaderSet[loader.Code] = true
+		loaderSet[loaderKey] = true
 		loader.Versions = uniqueTrimmed(loader.Versions, maxMinecraftVersions)
 		filtered := loader.Versions[:0]
 		for _, version := range loader.Versions {
@@ -245,13 +327,17 @@ func normalizeMinecraftLoaderSyncs(items []minecraftLoaderSyncStatus) []minecraf
 	result := make([]minecraftLoaderSyncStatus, 0, len(items))
 	seen := map[string]bool{}
 	for _, item := range items {
-		item.Code = strings.TrimSpace(item.Code)
+		item.Code = canonicalMinecraftLoaderCode(item.Code)
 		key := strings.ToLower(item.Code)
 		if item.Code == "" || seen[key] {
 			continue
 		}
 		seen[key] = true
 		item.SourceURL = strings.TrimSpace(item.SourceURL)
+		item.SourceURLs = uniqueTrimmed(append([]string{item.SourceURL}, item.SourceURLs...), 8)
+		if len(item.SourceURLs) > 0 {
+			item.SourceURL = item.SourceURLs[0]
+		}
 		item.LastSyncedAt = strings.TrimSpace(item.LastSyncedAt)
 		item.Error = strings.TrimSpace(item.Error)
 		if len(item.Error) > 500 {
@@ -266,6 +352,40 @@ func normalizeMinecraftLoaderSyncs(items []minecraftLoaderSyncStatus) []minecraf
 		result = append(result, item)
 	}
 	return result
+}
+
+func canonicalMinecraftLoaderCode(value string) string {
+	value = strings.TrimSpace(value)
+	switch strings.ToLower(value) {
+	case "fabric":
+		return "Fabric"
+	case "forge":
+		return "Forge"
+	case "neoforge":
+		return "NeoForge"
+	case "babric":
+		return "Babric"
+	case "bta (babric)":
+		return "BTA (Babric)"
+	case "java agent":
+		return "Java Agent"
+	case "legacy fabric":
+		return "Legacy Fabric"
+	case "liteloader":
+		return "LiteLoader"
+	case "risugami's modloader":
+		return "Risugami's ModLoader"
+	case "nilloader":
+		return "NilLoader"
+	case "ornithe":
+		return "Ornithe"
+	case "quilt":
+		return "Quilt"
+	case "rift":
+		return "Rift"
+	default:
+		return strings.ToLower(value)
+	}
 }
 
 func defaultMinecraftVersionConfig() minecraftVersionConfig {
@@ -284,14 +404,10 @@ func defaultMinecraftVersionConfig() minecraftVersionConfig {
 		{Code: "1.RV-Pre1", Type: "april_fools"}, {Code: "15w14a", Type: "april_fools"},
 		{Code: "b1.7.3", Type: "legacy"}, {Code: "a1.2.6", Type: "legacy"}, {Code: "rd-132211", Type: "legacy"},
 	}
-	versionCodes := make([]string, 0, len(versions))
-	for _, version := range versions {
-		versionCodes = append(versionCodes, version.Code)
-	}
 	loaderNames := []string{"Fabric", "Forge", "NeoForge", "Babric", "BTA (Babric)", "Java Agent", "Legacy Fabric", "LiteLoader", "Risugami's ModLoader", "NilLoader", "Ornithe", "Quilt", "Rift"}
 	loaders := make([]minecraftLoaderOption, 0, len(loaderNames))
 	for _, name := range loaderNames {
-		loaders = append(loaders, minecraftLoaderOption{Code: name, Name: name, Versions: append([]string(nil), versionCodes...)})
+		loaders = append(loaders, minecraftLoaderOption{Code: name, Name: name, Versions: []string{}})
 	}
 	return minecraftVersionConfig{
 		Versions:       versions,
@@ -302,29 +418,43 @@ func defaultMinecraftVersionConfig() minecraftVersionConfig {
 }
 
 func StartMinecraftVersionSyncScheduler(ctx context.Context, db *pgxpool.Pool) {
-	go func() {
-		for {
-			next := nextMinecraftVersionSync(time.Now())
-			timer := time.NewTimer(time.Until(next))
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
-				config, err := syncMinecraftVersionCatalog(ctx, db)
-				if err != nil {
-					log.Printf("synchronize Minecraft versions: %v", err)
-				} else {
-					log.Printf("Minecraft and mod loader versions synchronized")
-					for _, status := range config.LoaderSyncs {
-						if status.Status == "failed" {
-							log.Printf("synchronize %s versions: %s", status.Code, status.Error)
-						}
-					}
+	go runMinecraftVersionSyncScheduler(ctx, func(ctx context.Context) (minecraftVersionConfig, error) {
+		return syncMinecraftVersionCatalog(ctx, db)
+	})
+}
+
+func runMinecraftVersionSyncScheduler(ctx context.Context, synchronize func(context.Context) (minecraftVersionConfig, error)) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		config, err := synchronize(ctx)
+		if err != nil {
+			if errors.Is(err, errMinecraftVersionSyncInProgress) {
+				log.Printf("skip Minecraft version synchronization: %v", err)
+			} else {
+				log.Printf("synchronize Minecraft versions: %v", err)
+			}
+		} else {
+			log.Printf("Minecraft and mod loader versions synchronized")
+			for _, status := range config.LoaderSyncs {
+				if status.Status == "failed" {
+					log.Printf("synchronize %s versions: %s", status.Code, status.Error)
 				}
 			}
 		}
-	}()
+		if ctx.Err() != nil {
+			return
+		}
+		next := nextMinecraftVersionSync(time.Now())
+		timer := time.NewTimer(time.Until(next))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 func nextMinecraftVersionSync(now time.Time) time.Time {

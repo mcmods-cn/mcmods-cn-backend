@@ -269,7 +269,6 @@ func modContentSchemaStatements() []string {
 			unique(id,version_id),
 			unique(version_id,parent_id,ordinal)
 		)`,
-		`create index idx_mod_content_sections_tree on mod_content_sections(version_id,parent_id,ordinal)`,
 		`create unique index idx_mod_content_sections_system_key on mod_content_sections(version_id,parent_id,system_key)
 			where system_key<>'' and status='active'`,
 		`create table mod_content_section_localizations (
@@ -285,6 +284,7 @@ func modContentSchemaStatements() []string {
 			version_id bigint not null references mod_content_versions(id) on delete cascade,
 			resource_id bigint not null references game_resources(entity_id) on delete restrict,
 			placement_identity_key text not null,
+			search_document tsvector not null default ''::tsvector,
 			similar_group_id text not null default '',
 			ordinal integer not null default 0 check(ordinal>=0),
 			placement_source text not null default 'manual',
@@ -298,6 +298,8 @@ func modContentSchemaStatements() []string {
 			check(placement_source in ('manual','import'))
 		)`,
 		`create index idx_mod_content_section_resources_resource on mod_content_section_resources(resource_id,version_id)`,
+		`create index idx_mod_content_section_resources_search_document
+			on mod_content_section_resources using gin(search_document)`,
 		`create index idx_mod_content_section_resources_similar_group
 			on mod_content_section_resources(version_id,similar_group_id,ordinal) where similar_group_id<>''`,
 		`create or replace function assign_mod_content_placement_identity() returns trigger as $$
@@ -345,6 +347,10 @@ func modContentSchemaStatements() []string {
 			icon_small_file_id bigint references oss_files(id) on delete set null,
 			icon_file_id bigint references oss_files(id) on delete set null,
 			render_file_id bigint references oss_files(id) on delete set null,
+			projection_source text not null default 'manual',
+			import_source_namespace text not null default '',
+			import_source_kind text not null default '',
+			import_revision_id text not null default '',
 			status text not null default 'active',
 			published_revision_id bigint references content_revisions(id) on delete restrict,
 			created_by bigint references users(id) on delete set null,
@@ -353,11 +359,17 @@ func modContentSchemaStatements() []string {
 			updated_at timestamptz not null default now(),
 			primary key(resource_id,version_id),
 			check(status in ('active','pending','archived')),
+			check(projection_source in ('manual','import')),
+			check((projection_source='manual' and import_source_namespace='' and import_source_kind='' and import_revision_id='')
+				or (projection_source='import' and import_source_namespace<>'' and import_source_kind<>'' and import_revision_id<>'')),
 			check(entry_type_code ~ '^[a-z][a-z0-9_]{1,63}$'),
 			check(jsonb_typeof(definition)='object'),
 			check(definition_schema_version>=1)
 		)`,
 		`create index idx_mod_resource_version_details_status on mod_resource_version_details(version_id,status,updated_at desc)`,
+		`create index idx_mod_resource_version_details_import_scope
+			on mod_resource_version_details(version_id,import_source_kind,import_source_namespace,resource_id)
+			where projection_source='import'`,
 		`create table mod_resource_version_detail_localizations (
 			resource_id bigint not null,
 			version_id bigint not null,
@@ -371,19 +383,164 @@ func modContentSchemaStatements() []string {
 			check(locale ~ '^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$'),
 			check(provenance in ('human','import','ai','human_corrected'))
 		)`,
-		`create or replace function validate_mod_content_section_tree() returns trigger as $$
-		declare parent_mod bigint; parent_version bigint; parent_depth integer;
+		`create or replace function build_mod_content_resource_search_document(input_resource_id bigint,input_version_id bigint)
+		returns tsvector as $$
+		declare result tsvector;
 		begin
-			if new.parent_id is null then return new; end if;
-			with recursive parents as (
-				select section.id,section.parent_id,section.mod_id,section.version_id,1 depth from mod_content_sections section where section.id=new.parent_id
-				union all select section.id,section.parent_id,section.mod_id,section.version_id,parents.depth+1
-				from mod_content_sections section join parents on section.id=parents.parent_id where parents.depth<6
-			) select max(mod_id),max(version_id),max(depth) into parent_mod,parent_version,parent_depth from parents;
-			if parent_mod is null or parent_mod<>new.mod_id then raise exception 'section parent must belong to the same mod'; end if;
-			if parent_version<>new.version_id then raise exception 'section parent must belong to the same data version'; end if;
-			if parent_depth>=5 then raise exception 'content category depth cannot exceed four levels'; end if;
+			select to_tsvector('simple',left(lower(concat_ws(' ',resource.canonical_id,
+				coalesce((select string_agg(localization.name,' ' order by localization.locale)
+					from mod_resource_version_detail_localizations localization
+					join mod_resource_version_details detail on detail.resource_id=localization.resource_id
+					 and detail.version_id=localization.version_id and detail.status='active'
+					where localization.resource_id=input_resource_id and localization.version_id=input_version_id),''),
+				coalesce((select string_agg(name.value,' ' order by snapshot.id,name.key)
+					from resource_import_snapshots snapshot
+					join catalog_import_revisions revision on revision.id=snapshot.revision_id
+					cross join lateral jsonb_each_text(snapshot.names) name
+					where snapshot.resource_id=input_resource_id and revision.target_version_id=input_version_id
+					 and revision.is_active and revision.status in ('ready','partial')),''))),16384))
+			into result from game_resources resource where resource.entity_id=input_resource_id;
+			return coalesce(result,''::tsvector);
+		end;
+		$$ language plpgsql stable`,
+		`create or replace function populate_mod_content_resource_search_document() returns trigger as $$
+		begin
+			new.search_document=build_mod_content_resource_search_document(new.resource_id,new.version_id);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mod_content_resource_search_document
+			before insert or update of resource_id,version_id on mod_content_section_resources
+			for each row execute function populate_mod_content_resource_search_document()`,
+		`create or replace function refresh_mod_content_resource_search_document(input_resource_id bigint,input_version_id bigint)
+		returns void as $$
+		begin
+			update mod_content_section_resources
+			set search_document=build_mod_content_resource_search_document(input_resource_id,input_version_id)
+			where resource_id=input_resource_id and version_id=input_version_id;
+		end;
+		$$ language plpgsql`,
+		`create or replace function refresh_mod_content_search_from_versioned_resource() returns trigger as $$
+		begin
+			if TG_OP<>'INSERT' then
+				perform refresh_mod_content_resource_search_document(old.resource_id,old.version_id);
+			end if;
+			if TG_OP<>'DELETE' and (TG_OP='INSERT' or new.resource_id is distinct from old.resource_id or new.version_id is distinct from old.version_id) then
+				perform refresh_mod_content_resource_search_document(new.resource_id,new.version_id);
+			elsif TG_OP='UPDATE' then
+				perform refresh_mod_content_resource_search_document(new.resource_id,new.version_id);
+			end if;
+			if TG_OP='DELETE' then return old; end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mod_content_search_detail
+			after insert or update or delete on mod_resource_version_details
+			for each row execute function refresh_mod_content_search_from_versioned_resource()`,
+		`create trigger trg_mod_content_search_localization
+			after insert or update or delete on mod_resource_version_detail_localizations
+			for each row execute function refresh_mod_content_search_from_versioned_resource()`,
+		`create or replace function refresh_mod_content_search_from_import_snapshot() returns trigger as $$
+		declare source record;
+		begin
+			if TG_OP<>'INSERT' then
+				select old.resource_id resource_id,revision.target_version_id version_id into source
+				from catalog_import_revisions revision where revision.id=old.revision_id;
+				if source.version_id is not null then perform refresh_mod_content_resource_search_document(source.resource_id,source.version_id); end if;
+			end if;
+			if TG_OP<>'DELETE' then
+				select new.resource_id resource_id,revision.target_version_id version_id into source
+				from catalog_import_revisions revision where revision.id=new.revision_id;
+				if source.version_id is not null then perform refresh_mod_content_resource_search_document(source.resource_id,source.version_id); end if;
+			end if;
+			if TG_OP='DELETE' then return old; end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mod_content_search_import_snapshot
+			after insert or update of names,revision_id,resource_id or delete on resource_import_snapshots
+			for each row execute function refresh_mod_content_search_from_import_snapshot()`,
+		`create or replace function refresh_mod_content_search_from_import_revision() returns trigger as $$
+		declare target record;
+		begin
+			if TG_OP<>'INSERT' then
+				for target in select snapshot.resource_id from resource_import_snapshots snapshot where snapshot.revision_id=old.id loop
+					perform refresh_mod_content_resource_search_document(target.resource_id,old.target_version_id);
+				end loop;
+			end if;
+			if TG_OP<>'DELETE' then
+				for target in select snapshot.resource_id from resource_import_snapshots snapshot where snapshot.revision_id=new.id loop
+					perform refresh_mod_content_resource_search_document(target.resource_id,new.target_version_id);
+				end loop;
+			end if;
+			if TG_OP='DELETE' then return old; end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mod_content_search_import_revision_update
+			after update of is_active,status,target_version_id on catalog_import_revisions
+			for each row execute function refresh_mod_content_search_from_import_revision()`,
+		`create trigger trg_mod_content_search_import_revision_delete
+			before delete on catalog_import_revisions
+			for each row execute function refresh_mod_content_search_from_import_revision()`,
+		`create or replace function refresh_mod_content_search_from_resource() returns trigger as $$
+		declare target record;
+		begin
+			for target in select distinct placement.version_id from mod_content_section_resources placement where placement.resource_id=new.entity_id loop
+				perform refresh_mod_content_resource_search_document(new.entity_id,target.version_id);
+			end loop;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_mod_content_search_resource
+			after update of canonical_id on game_resources
+			for each row execute function refresh_mod_content_search_from_resource()`,
+		`create or replace function validate_mod_content_section_tree() returns trigger as $$
+		declare
+			parent_count integer := 0;
+			parent_depth integer := 0;
+			descendant_depth integer := 0;
+			parent_scope_invalid boolean := false;
+			descendant_scope_invalid boolean := false;
+			cycle_found boolean := false;
+		begin
+			if TG_OP='UPDATE' and old.version_id<>new.version_id then
+				perform version.id from mod_content_versions version
+				where version.id in (old.version_id,new.version_id) order by version.id for update;
+			else
+				perform version.id from mod_content_versions version where version.id=new.version_id for update;
+			end if;
 			if new.parent_id=new.id then raise exception 'content section cannot be its own parent'; end if;
+			if new.parent_id is not null then
+				with recursive parents as (
+					select section.id,section.parent_id,section.mod_id,section.version_id,1 depth
+					from mod_content_sections section where section.id=new.parent_id
+					union all
+					select section.id,section.parent_id,section.mod_id,section.version_id,parents.depth+1
+					from mod_content_sections section join parents on section.id=parents.parent_id
+					where parents.depth<6 and parents.id<>new.id
+				)
+				select count(*)::integer,coalesce(max(depth),0),
+					coalesce(bool_or(mod_id<>new.mod_id or version_id<>new.version_id),false),
+					coalesce(bool_or(id=new.id),false)
+				into parent_count,parent_depth,parent_scope_invalid,cycle_found from parents;
+				if parent_count=0 then raise exception 'content section parent does not exist'; end if;
+				if parent_scope_invalid then raise exception 'section parent must belong to the same mod and data version'; end if;
+				if cycle_found then raise exception 'content section cannot be its own ancestor'; end if;
+			end if;
+			with recursive descendants as (
+				select section.id,section.parent_id,section.mod_id,section.version_id,1 depth
+				from mod_content_sections section where section.parent_id=new.id and section.id<>new.id
+				union all
+				select section.id,section.parent_id,section.mod_id,section.version_id,descendants.depth+1
+				from mod_content_sections section join descendants on section.parent_id=descendants.id
+				where descendants.depth<5
+			)
+			select coalesce(max(depth),0),
+				coalesce(bool_or(mod_id<>new.mod_id or version_id<>new.version_id),false)
+			into descendant_depth,descendant_scope_invalid from descendants;
+			if descendant_scope_invalid then raise exception 'section descendants must belong to the same mod and data version'; end if;
+			if parent_depth+descendant_depth>4 then raise exception 'content category depth cannot exceed four levels'; end if;
 			return new;
 		end;
 		$$ language plpgsql`,

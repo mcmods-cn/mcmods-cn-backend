@@ -21,8 +21,6 @@ const (
 	catalogSortViews     catalogSort = "views"
 	catalogSortComments  catalogSort = "comments"
 	catalogSortName      catalogSort = "name"
-	catalogSortNameAsc   catalogSort = "nameAsc"
-	catalogSortNameDesc  catalogSort = "nameDesc"
 
 	catalogSortAscending  catalogSortDirection = "asc"
 	catalogSortDescending catalogSortDirection = "desc"
@@ -32,16 +30,7 @@ func parseCatalogSort(value string) (catalogSort, bool) {
 	if strings.TrimSpace(value) == "" {
 		return catalogSortRelevance, true
 	}
-	raw := strings.TrimSpace(value)
-	// Preserve old bookmarks while exposing one canonical field + direction
-	// model to new clients.
-	switch raw {
-	case "latest", "oldest", "created":
-		raw = string(catalogSortPublished)
-	case string(catalogSortNameAsc), string(catalogSortNameDesc):
-		raw = string(catalogSortName)
-	}
-	sort := catalogSort(raw)
+	sort := catalogSort(strings.TrimSpace(value))
 	switch sort {
 	case catalogSortRelevance, catalogSortPublished, catalogSortHeat, catalogSortUpdated, catalogSortCollected,
 		catalogSortDownloads, catalogSortFavorites, catalogSortRating, catalogSortViews,
@@ -52,15 +41,13 @@ func parseCatalogSort(value string) (catalogSort, bool) {
 	}
 }
 
-func parseCatalogSortDirection(value, legacySort string) (catalogSortDirection, bool) {
+func parseCatalogSortDirection(value string, sort catalogSort) (catalogSortDirection, bool) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", "default":
-		switch strings.TrimSpace(legacySort) {
-		case "oldest", string(catalogSortName), string(catalogSortNameAsc):
+		if sort == catalogSortName {
 			return catalogSortAscending, true
-		default:
-			return catalogSortDescending, true
 		}
+		return catalogSortDescending, true
 	case string(catalogSortAscending):
 		return catalogSortAscending, true
 	case string(catalogSortDescending):

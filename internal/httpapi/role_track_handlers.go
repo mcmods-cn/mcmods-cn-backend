@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -140,32 +142,79 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 	}
 	userID := identity.InternalID
 	trackCode := strings.TrimSpace(r.PathValue("code"))
-	roles, err := s.roleTrackRoles(r.Context(), trackCode)
-	if err == pgx.ErrNoRows || len(roles) < 2 {
-		writeError(w, http.StatusNotFound, "权限组线路不存在")
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "调整用户权限组失败")
 		return
 	}
+	defer tx.Rollback(r.Context())
+	var lockedUserID int64
+	if err = tx.QueryRow(r.Context(), `select id from users where id=$1 for update`, userID).Scan(&lockedUserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "锁定用户授权失败")
+		return
+	}
+	var lockedTrackCode string
+	if err = tx.QueryRow(r.Context(), `select code from permission_role_tracks where code=$1 for share`, trackCode).
+		Scan(&lockedTrackCode); errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "权限组线路不存在")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取权限组线路失败")
+		return
+	}
+	roleRows, err := tx.Query(r.Context(), `select role.code from permission_role_track_roles track_role
+		join roles role on role.id=track_role.role_id where track_role.track_code=$1
+		order by track_role.position for share of track_role`, trackCode)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取权限组线路失败")
 		return
 	}
-	rows, err := s.db.Query(
-		r.Context(),
-		`select r.code from user_role_bindings b join roles r on r.id = b.role_id
-		 where b.user_id = $1 and r.code = any($2::text[])`,
-		userID,
-		roles,
-	)
+	roles := make([]string, 0)
+	for roleRows.Next() {
+		var role string
+		if err = roleRows.Scan(&role); err != nil {
+			roleRows.Close()
+			writeError(w, http.StatusInternalServerError, "读取权限组线路失败")
+			return
+		}
+		roles = append(roles, role)
+	}
+	if err = roleRows.Err(); err != nil {
+		roleRows.Close()
+		writeError(w, http.StatusInternalServerError, "读取权限组线路失败")
+		return
+	}
+	roleRows.Close()
+	if len(roles) < 2 {
+		writeError(w, http.StatusNotFound, "权限组线路不存在")
+		return
+	}
+	rows, err := tx.Query(r.Context(), `select role.code,binding.expires_at from user_role_bindings binding
+		join roles role on role.id=binding.role_id
+		where binding.user_id=$1 and binding.source=$2 and binding.source_key=''
+		  and role.code=any($3::text[]) order by role.code`,
+		userID, authorizationSourceManual, roles)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取用户权限组失败")
 		return
 	}
 	current := make([]string, 0)
+	currentExpiries := make(map[string]*time.Time)
 	for rows.Next() {
 		var role string
-		if err := rows.Scan(&role); err == nil {
-			current = append(current, role)
+		var expiresAt *time.Time
+		if err = rows.Scan(&role, &expiresAt); err != nil {
+			rows.Close()
+			writeError(w, http.StatusInternalServerError, "读取用户权限组失败")
+			return
 		}
+		current = append(current, role)
+		currentExpiries[role] = expiresAt
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		writeError(w, http.StatusInternalServerError, "读取用户权限组失败")
+		return
 	}
 	rows.Close()
 	if len(current) == 0 {
@@ -173,19 +222,27 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 		return
 	}
 	targets := shiftRoleTrackRoles(roles, current, direction)
-
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "调整用户权限组失败")
-		return
+	targetExpiries := make(map[string]*time.Time, len(targets))
+	for _, role := range current {
+		shifted := shiftRoleTrackRoles(roles, []string{role}, direction)
+		if len(shifted) == 0 {
+			continue
+		}
+		target := shifted[0]
+		expiresAt := currentExpiries[role]
+		currentExpiry, exists := targetExpiries[target]
+		if !exists || currentExpiry != nil && (expiresAt == nil || expiresAt.After(*currentExpiry)) {
+			targetExpiries[target] = expiresAt
+		}
 	}
-	defer tx.Rollback(r.Context())
 	if _, err := tx.Exec(
 		r.Context(),
 		`delete from user_role_bindings b using roles r
-		 where b.role_id = r.id and b.user_id = $1 and r.code = any($2::text[])`,
+		 where b.role_id=r.id and b.user_id=$1 and b.source=$3 and b.source_key=''
+		   and r.code=any($2::text[])`,
 		userID,
 		roles,
+		authorizationSourceManual,
 	); err != nil {
 		writeError(w, http.StatusInternalServerError, "调整用户权限组失败")
 		return
@@ -193,10 +250,12 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 	for _, role := range targets {
 		if _, err := tx.Exec(
 			r.Context(),
-			`insert into user_role_bindings (user_id, role_id)
-			 select $1, id from roles where code = $2 on conflict do nothing`,
+			`insert into user_role_bindings (user_id,role_id,source,source_key,expires_at)
+			 select $1,id,$3,'',$4 from roles where code=$2 on conflict do nothing`,
 			userID,
 			role,
+			authorizationSourceManual,
+			targetExpiries[role],
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "调整用户权限组失败")
 			return
@@ -211,7 +270,9 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 		writeError(w, http.StatusInternalServerError, "调整用户权限组失败")
 		return
 	}
-	_ = s.refreshPermissionVersion(r.Context(), userID)
+	if !s.requireSecurityVersionRefresh(w, r, action, userID, s.refreshPermissionVersion(r.Context(), userID)) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"changed": true, "roles": targets})
 }
 

@@ -18,13 +18,14 @@ func projectFileSchemaStatements() []string {
 			size_bytes bigint not null default 0,
 			sha256 text not null default '',
 			download_count bigint not null default 0,
-			status text not null default 'active',
+			status text not null default 'processing',
+			publication_generation integer not null default 0 check(publication_generation>=0),
 			uploaded_by bigint references users(id) on delete set null,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
 			check (project_type in ('mod','modpack','plugin','map','resource_pack','shader_pack','datapack','addon')),
 			check (release_channel in ('release','beta','alpha')),
-			check (status in ('active','deleted')),
+			check (status in ('processing','active','rejected','deleted')),
 			unique (project_type, project_internal_id, oss_file_id),
 			foreign key(project_type,project_internal_id)
 				references public_routes(entity_type,internal_id) on delete cascade
@@ -33,22 +34,19 @@ func projectFileSchemaStatements() []string {
 			on project_files(project_type,project_internal_id,status,created_at desc,id desc)`,
 		`create index if not exists idx_project_files_filters
 			on project_files(project_type,project_internal_id,release_channel) where status='active'`,
-		`create or replace function register_project_file_public_route() returns trigger as $$
+		`create or replace function ensure_project_file_publication_safe() returns trigger as $$
 		begin
-			insert into public_routes(public_id,entity_type,internal_id,canonical_path)
-			values(new.public_id,'project_file',new.id,'/api/v1/project-files/' || new.public_id || '/download');
+			if new.status='active' and not exists(
+				select 1 from oss_files file where file.id=new.oss_file_id and file.status='active'
+				  and file.scan_status in ('clean','trusted_generated')
+			) then
+				raise exception 'active project file requires a safe OSS object'
+					using errcode='23514',constraint='project_files_active_oss_scan_check';
+			end if;
 			return new;
 		end;
 		$$ language plpgsql`,
-		`create trigger trg_project_files_public_route after insert on project_files
-			for each row execute function register_project_file_public_route()`,
-		`create or replace function remove_project_file_public_route() returns trigger as $$
-		begin
-			delete from public_routes where public_id=old.public_id and entity_type='project_file';
-			return old;
-		end;
-		$$ language plpgsql`,
-		`create trigger trg_project_files_remove_public_route after delete on project_files
-			for each row execute function remove_project_file_public_route()`,
+		`create trigger trg_project_files_publication_safe before insert or update of status,oss_file_id on project_files
+			for each row execute function ensure_project_file_publication_safe()`,
 	}
 }

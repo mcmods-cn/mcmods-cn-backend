@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -26,11 +27,26 @@ func TestCreateAndArrangeAdvancementIntegration(t *testing.T) {
 		databaseURL = config.Load().DB.ConnString()
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poolConfig.MaxConns = 1
+	poolConfig.MinConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
+	if err = database.InstallEphemeralSchema(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("ephemeral schema installed")
+	t.Cleanup(func() {
+		if dropErr := database.DropEphemeralSchema(context.Background(), pool); dropErr != nil {
+			t.Errorf("drop ephemeral schema: %v", dropErr)
+		}
+	})
 
 	suffix := time.Now().UnixNano() % 1_000_000
 	projectCode := fmt.Sprintf("agt%06d", suffix)
@@ -93,6 +109,7 @@ func TestCreateAndArrangeAdvancementIntegration(t *testing.T) {
 	createRequest = createRequest.WithContext(context.WithValue(createRequest.Context(), claimsContextKey, claims))
 	createResponse := httptest.NewRecorder()
 	server.modContentResources(createResponse, createRequest)
+	t.Logf("resource create status=%d", createResponse.Code)
 	if createResponse.Code != http.StatusCreated {
 		t.Fatalf("create advancement returned %d: %s", createResponse.Code, createResponse.Body.String())
 	}
@@ -154,12 +171,13 @@ func TestCreateAndArrangeAdvancementIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	layoutRequest := httptest.NewRequest(http.MethodPut, "/api/v1/mods/"+slug+"/content-sections/"+sectionPublicID+"/layout", bytes.NewReader(layoutBody))
+	layoutRequest := httptest.NewRequest(http.MethodPatch, "/api/v1/mods/"+slug+"/content-sections/"+sectionPublicID+"/layout", bytes.NewReader(layoutBody))
 	layoutRequest.SetPathValue("siteId", slug)
 	layoutRequest.SetPathValue("sectionId", sectionPublicID)
 	layoutRequest = layoutRequest.WithContext(context.WithValue(layoutRequest.Context(), claimsContextKey, claims))
 	layoutResponse := httptest.NewRecorder()
 	server.modContentSectionLayout(layoutResponse, layoutRequest)
+	t.Logf("first incremental layout status=%d", layoutResponse.Code)
 	if layoutResponse.Code != http.StatusOK {
 		t.Fatalf("arrange advancement returned %d: %s", layoutResponse.Code, layoutResponse.Body.String())
 	}
@@ -180,12 +198,13 @@ func TestCreateAndArrangeAdvancementIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unchangedLayoutRequest := httptest.NewRequest(http.MethodPut, "/api/v1/mods/"+slug+"/content-sections/"+sectionPublicID+"/layout", bytes.NewReader(layoutBody))
+	unchangedLayoutRequest := httptest.NewRequest(http.MethodPatch, "/api/v1/mods/"+slug+"/content-sections/"+sectionPublicID+"/layout", bytes.NewReader(layoutBody))
 	unchangedLayoutRequest.SetPathValue("siteId", slug)
 	unchangedLayoutRequest.SetPathValue("sectionId", sectionPublicID)
 	unchangedLayoutRequest = unchangedLayoutRequest.WithContext(context.WithValue(unchangedLayoutRequest.Context(), claimsContextKey, claims))
 	unchangedLayoutResponse := httptest.NewRecorder()
 	server.modContentSectionLayout(unchangedLayoutResponse, unchangedLayoutRequest)
+	t.Logf("unchanged incremental layout status=%d", unchangedLayoutResponse.Code)
 	if unchangedLayoutResponse.Code != http.StatusOK {
 		t.Fatalf("save unchanged advancement layout returned %d: %s", unchangedLayoutResponse.Code, unchangedLayoutResponse.Body.String())
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -31,6 +32,12 @@ type translateNotificationRequest struct {
 	TargetLocale string `json:"targetLocale"`
 }
 
+func normalizeNotificationTranslationLocale(value string) (string, bool) {
+	locale := normalizeContentLocale(value)
+	_, supported := supportedEditableContentLocales[locale]
+	return locale, supported
+}
+
 type aiDailyBalancePayload struct {
 	UsedTokens      int64 `json:"usedTokens"`
 	ReservedTokens  int64 `json:"reservedTokens"`
@@ -45,6 +52,7 @@ type notificationActor struct {
 }
 
 type notificationItem struct {
+	InternalID         int64               `json:"-"`
 	ID                 string              `json:"id"`
 	Kind               string              `json:"kind"`
 	Title              string              `json:"title"`
@@ -78,10 +86,6 @@ func (s *Server) publishSystemNotification(w http.ResponseWriter, r *http.Reques
 	if req.SourceLocale == "" {
 		req.SourceLocale = "zh-CN"
 	}
-	if s.queue == nil && !s.cfg.NATS.OutboxEnabled {
-		writeError(w, http.StatusServiceUnavailable, "通知任务队列不可用")
-		return
-	}
 	publisherPublicID, err := s.publicIDForInternal(r.Context(), "user", currentClaims(r).Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve publisher")
@@ -113,68 +117,25 @@ func (s *Server) deleteSystemNotification(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "系统通知不存在")
 		return
 	}
+	s.cache.BumpUnreadEpoch(r.Context())
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
 func (s *Server) notifications(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
-	if kind != "" && !notificationKinds[kind] {
-		writeError(w, http.StatusBadRequest, "通知类型不正确")
+	request, err := parseNotificationPageRequest(r.URL.Query(), claims.Subject)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "通知分页参数不正确")
 		return
 	}
-	limit := boundedLimit(r.URL.Query().Get("limit"), 100, 200)
-	args := []any{claims.Subject}
-	where := "(n.recipient_id is null or n.recipient_id = $1)"
-	if kind != "" {
-		args = append(args, kind)
-		where += " and n.kind = $2"
-	}
-	args = append(args, limit)
-	rows, err := s.db.Query(
-		r.Context(),
-		`select n.public_id, n.kind, n.title, n.body, n.source_locale, n.data,
-		        coalesce(jsonb_agg(distinct jsonb_build_object(
-		          'id', actor.public_id, 'username', actor.username
-		        )) filter (where actor.id is not null), '[]'::jsonb),
-		        (receipt.read_at is not null), n.created_at, n.updated_at, n.kind <> 'system'
-		 from notifications n
-		 left join notification_receipts receipt on receipt.notification_id = n.id and receipt.user_id = $1
-		 left join notification_actors na on na.notification_id = n.id
-		 left join users actor on actor.id = na.actor_id
-		 where `+where+`
-		 group by n.id, receipt.read_at
-		 order by n.updated_at desc
-		 limit $`+strconv.Itoa(len(args)),
-		args...,
-	)
+	page, err := s.loadNotificationPage(r.Context(), claims.Subject, request)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取通知失败")
 		return
 	}
-	defer rows.Close()
-	items := make([]notificationItem, 0)
-	for rows.Next() {
-		var item notificationItem
-		var rawData, rawActors []byte
-		if err := rows.Scan(
-			&item.ID, &item.Kind, &item.Title, &item.Body, &item.SourceLocale,
-			&rawData, &rawActors, &item.Read, &item.CreatedAt, &item.UpdatedAt, &item.TranslationAllowed,
-		); err != nil {
-			writeError(w, http.StatusInternalServerError, "读取通知失败")
-			return
-		}
-		_ = json.Unmarshal(rawData, &item.Data)
-		_ = json.Unmarshal(rawActors, &item.Actors)
-		if item.Data == nil {
-			item.Data = map[string]any{}
-		}
-		if item.Actors == nil {
-			item.Actors = []notificationActor{}
-		}
-		items = append(items, item)
-	}
-	writeJSON(w, http.StatusOK, items)
+	writeBoundedCatalogJSON(w, map[string]any{
+		"items": page.Items, "limit": request.Limit, "hasMore": page.HasMore, "nextCursor": page.NextCursor,
+	})
 }
 
 func (s *Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
@@ -183,15 +144,7 @@ func (s *Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
-	tag, err := s.db.Exec(
-		r.Context(),
-		`insert into notification_receipts (notification_id, user_id, read_at)
-		 select id, $2, now() from notifications where id = $1 and (recipient_id is null or recipient_id = $2)
-		 on conflict (notification_id, user_id) do update set read_at = now()
-		 where notification_receipts.read_at is null`,
-		notificationID,
-		claims.Subject,
-	)
+	tag, err := s.db.Exec(r.Context(), markNotificationReadSQL, notificationID, claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "更新通知状态失败")
 		return
@@ -207,34 +160,27 @@ func (s *Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) markAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	tag, err := s.db.Exec(
-		r.Context(),
-		`insert into notification_receipts (notification_id, user_id, read_at)
-		 select id, $1, now() from notifications
-		 where recipient_id is null or recipient_id = $1
-		 on conflict (notification_id, user_id) do update set read_at = now()
-		 where notification_receipts.read_at is null`,
-		claims.Subject,
-	)
+	var readBefore time.Time
+	err := s.db.QueryRow(r.Context(), markAllNotificationsReadSQL, claims.Subject).Scan(&readBefore)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "更新通知状态失败")
 		return
 	}
 	s.cache.InvalidateUnread(r.Context(), claims.Subject)
-	writeJSON(w, http.StatusOK, map[string]any{"read": true, "updated": tag.RowsAffected()})
+	writeJSON(w, http.StatusOK, map[string]any{"read": true, "readBefore": readBefore})
 }
 
 func (s *Server) unreadSummary(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	summary, err := s.cache.LoadUnread(r.Context(), claims.Subject, func(ctx context.Context) (querycache.UnreadSummary, error) {
-		var value querycache.UnreadSummary
-		err := s.db.QueryRow(ctx, `select
-			(select count(*) from notifications n left join notification_receipts receipt
-			 on receipt.notification_id=n.id and receipt.user_id=$1
-			 where (n.recipient_id is null or n.recipient_id=$1) and receipt.read_at is null),
-			(select count(*) from direct_messages where recipient_id=$1 and read_at is null)`, claims.Subject).
-			Scan(&value.Notifications, &value.Messages)
-		return value, err
+		items, loadErr := loadUnreadTruth(ctx, s.db, unreadTruthInternalUsersSQL, []int64{claims.Subject})
+		if loadErr != nil {
+			return querycache.UnreadSummary{}, loadErr
+		}
+		if len(items) != 1 {
+			return querycache.UnreadSummary{}, pgx.ErrNoRows
+		}
+		return items[0].Summary, nil
 	})
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "failed to load unread summary")
@@ -262,8 +208,8 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	req.TargetLocale = strings.TrimSpace(req.TargetLocale)
-	if req.TargetLocale == "" || len(req.TargetLocale) > 20 {
+	req.TargetLocale, ok = normalizeNotificationTranslationLocale(req.TargetLocale)
+	if !ok {
 		writeError(w, http.StatusBadRequest, "目标语言不正确")
 		return
 	}
@@ -374,16 +320,15 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "创建翻译任务失败")
 		return
 	}
+	if err = enqueueAITaskTx(r.Context(), tx, "ai.notification_translation.requested", taskID, taskUID, aiTaskNotificationTranslation, r.Header.Get("X-Request-ID")); err != nil {
+		writeError(w, http.StatusInternalServerError, "创建翻译任务失败")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建翻译任务失败")
 		return
 	}
-	if s.queue == nil || s.queue.PublishTask(r.Context(), "ai", aiTaskMessage{TaskID: taskID, TaskUID: taskUID, TaskType: aiTaskNotificationTranslation}) != nil {
-		_, _ = s.db.Exec(r.Context(), `update ai_tasks set status = 'failed', error = 'NATS unavailable', finished_at = now(), updated_at = now() where id = $1`, taskID)
-		writeError(w, http.StatusServiceUnavailable, "AI 任务队列不可用")
-		return
-	}
-	s.writeAITaskLog(r.Context(), taskID, "info", "task_queued", "Notification translation published to NATS", payload)
+	s.writeAITaskLog(r.Context(), taskID, "info", "task_queued", "Notification translation committed to the reliable outbox", payload)
 	writeJSON(w, http.StatusAccepted, map[string]any{"cached": false, "taskId": taskUID, "status": "queued"})
 }
 
@@ -410,42 +355,30 @@ func (s *Server) notificationTranslationResult(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if err != nil {
+		logAITranslationFailure("notification_result_task", taskUID, err)
 		writeError(w, http.StatusInternalServerError, "读取翻译任务失败")
 		return
 	}
 	response := map[string]any{"status": status, "error": errorMessage, "inputTokens": inputTokens, "outputTokens": outputTokens}
 	if status == "completed" {
-		var result struct {
-			Items []struct {
-				Key  string `json:"key"`
-				Text string `json:"text"`
-			} `json:"items"`
+		translated, decodeErr := decodeStoredNotificationTranslation(payloadRaw, resultRaw)
+		if decodeErr != nil {
+			logAITranslationFailure("notification_result_decode", taskUID, decodeErr)
+			writeError(w, http.StatusInternalServerError, "翻译任务数据损坏")
+			return
 		}
-		var payload struct {
-			NotificationID int64  `json:"notificationId"`
-			TargetLocale   string `json:"targetLocale"`
-		}
-		_ = json.Unmarshal(resultRaw, &result)
-		_ = json.Unmarshal(payloadRaw, &payload)
-		translated := map[string]string{}
-		for _, item := range result.Items {
-			translated[item.Key] = item.Text
-		}
-		_, _ = s.db.Exec(
-			r.Context(),
-			`insert into notification_translations (notification_id, user_id, locale, title, body)
-			 values ($1, $2, $3, $4, $5)
-			 on conflict (notification_id, user_id, locale) do update
-			 set title = excluded.title, body = excluded.body, created_at = now()`,
-			payload.NotificationID,
-			claims.Subject,
-			payload.TargetLocale,
-			translated["title"],
-			translated["body"],
-		)
 		response["translation"] = translated
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func decodeStoredNotificationTranslation(payloadRaw, resultRaw []byte) (map[string]string, error) {
+	var result map[string]any
+	if err := json.Unmarshal(resultRaw, &result); err != nil {
+		return nil, fmt.Errorf("decode stored notification translation result: %w", err)
+	}
+	_, translated, err := decodeNotificationTranslation(payloadRaw, result)
+	return translated, err
 }
 
 func (s *Server) userAIDailyUsage(ctx context.Context, userID int64) (int64, int64) {

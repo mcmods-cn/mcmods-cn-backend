@@ -17,14 +17,24 @@ func TestRefreshContentPopularityThresholdLookupIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, config.Load().DB.ConnString())
+	poolConfig, err := pgxpool.ParseConfig(config.Load().DB.ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	poolConfig.MaxConns, poolConfig.MinConns = 1, 1
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err = Migrate(ctx, pool); err != nil {
+	if err = InstallEphemeralSchema(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
+	defer func() {
+		if dropErr := DropEphemeralSchema(context.Background(), pool); dropErr != nil {
+			t.Errorf("drop ephemeral schema: %v", dropErr)
+		}
+	}()
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -44,7 +54,7 @@ func TestRefreshContentPopularityThresholdLookupIntegration(t *testing.T) {
 	if err = tx.QueryRow(ctx, `select id from public_routes where entity_type='mod' and internal_id=$1`, modID).Scan(&routeID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = tx.Exec(ctx, `select refresh_content_popularity($1)`, routeID); err != nil {
+	if _, err = tx.Exec(ctx, `select pg_temp.refresh_content_popularity($1::bigint)`, routeID); err != nil {
 		t.Fatalf("refresh popularity: %v", err)
 	}
 	var count int

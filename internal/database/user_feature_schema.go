@@ -4,7 +4,7 @@ const syncUserContentCreationFactFunctionSQL = `create or replace function sync_
 		declare row_data jsonb; actor_id bigint; content_kind text; object_identifier text; review_state text; exists_now boolean; created_time timestamptz;
 		begin
 			row_data:=case when tg_op='DELETE' then to_jsonb(old) else to_jsonb(new) end;
-			actor_id:=coalesce(nullif(row_data->>'created_by','')::bigint,nullif(row_data->>'author_id','')::bigint);
+			actor_id:=coalesce(nullif(row_data->>'submitted_by','')::bigint,nullif(row_data->>'author_id','')::bigint);
 			if actor_id is null then
 				if tg_op='DELETE' then return old; end if;
 				return new;
@@ -16,7 +16,7 @@ const syncUserContentCreationFactFunctionSQL = `create or replace function sync_
 			created_time:=coalesce(nullif(row_data->>'created_at','')::timestamptz,now());
 			insert into user_content_creation_facts(content_type,object_key,user_id,review_status,current_exists,created_at,deleted_at)
 			values(content_kind,object_identifier,actor_id,review_state,exists_now,created_time,case when exists_now then null else now() end)
-			on conflict(content_type,object_key) do update set review_status=excluded.review_status,
+			on conflict(content_type,object_key) do update set user_id=excluded.user_id,review_status=excluded.review_status,
 				current_exists=excluded.current_exists,deleted_at=excluded.deleted_at,updated_at=now();
 			if tg_op='DELETE' then return old; end if;
 			return new;
@@ -95,6 +95,42 @@ func userFeatureSchemaStatements() []string {
 		)`,
 		`create index if not exists idx_user_statistics_daily_range
 			on user_statistics_daily(user_id,stat_date desc)`,
+		`create table user_statistics_retained_actions (
+			user_id bigint not null references users(id) on delete cascade,
+			stat_date date not null,
+			action_id smallint not null references activity_actions(id) on delete restrict,
+			event_count bigint not null check(event_count>0),
+			markdown_added_bytes bigint not null default 0 check(markdown_added_bytes>=0),
+			markdown_deleted_bytes bigint not null default 0 check(markdown_deleted_bytes>=0),
+			first_activity_at timestamptz not null,
+			last_activity_at timestamptz not null,
+			last_comment_at timestamptz,
+			updated_at timestamptz not null default now(),
+			primary key(user_id,stat_date,action_id),
+			check(first_activity_at<=last_activity_at),
+			check(last_comment_at is null or last_comment_at between first_activity_at and last_activity_at)
+		)`,
+		`create or replace function retain_deleted_user_activity_statistics() returns trigger as $$
+		begin
+			insert into user_statistics_retained_actions(user_id,stat_date,action_id,event_count,
+				markdown_added_bytes,markdown_deleted_bytes,first_activity_at,last_activity_at,last_comment_at)
+			select event.user_id,(event.occurred_at at time zone 'UTC')::date,event.action_id,count(*),
+				sum(event.markdown_added_bytes),sum(event.markdown_deleted_bytes),min(event.occurred_at),max(event.occurred_at),
+				max(event.occurred_at) filter(where event.action_id=2 and event.object_type_id=8)
+			from deleted_user_activity_events event where event.user_id is not null
+			group by event.user_id,(event.occurred_at at time zone 'UTC')::date,event.action_id
+			on conflict(user_id,stat_date,action_id) do update set
+				event_count=user_statistics_retained_actions.event_count+excluded.event_count,
+				markdown_added_bytes=user_statistics_retained_actions.markdown_added_bytes+excluded.markdown_added_bytes,
+				markdown_deleted_bytes=user_statistics_retained_actions.markdown_deleted_bytes+excluded.markdown_deleted_bytes,
+				first_activity_at=least(user_statistics_retained_actions.first_activity_at,excluded.first_activity_at),
+				last_activity_at=greatest(user_statistics_retained_actions.last_activity_at,excluded.last_activity_at),
+				last_comment_at=greatest(user_statistics_retained_actions.last_comment_at,excluded.last_comment_at),updated_at=now();
+			return null;
+		end $$ language plpgsql`,
+		`create trigger trg_retain_deleted_user_activity_statistics after delete on user_activity_events
+			referencing old table as deleted_user_activity_events for each statement
+			execute function retain_deleted_user_activity_statistics()`,
 		`create table if not exists user_statistics_totals (
 			user_id bigint primary key references users(id) on delete cascade,
 			action_count bigint not null default 0 check(action_count>=0),
@@ -127,19 +163,19 @@ func userFeatureSchemaStatements() []string {
 			on user_content_creation_facts(user_id,created_at desc,content_type)`,
 		syncUserContentCreationFactFunctionSQL,
 		`drop trigger if exists trg_mods_user_creation_fact on mods`,
-		`create trigger trg_mods_user_creation_fact after insert or update of review_status or delete on mods
+		`create trigger trg_mods_user_creation_fact after insert or update of review_status,submitted_by or delete on mods
 			for each row execute function sync_user_content_creation_fact('mod')`,
 		`drop trigger if exists trg_modpacks_user_creation_fact on modpacks`,
-		`create trigger trg_modpacks_user_creation_fact after insert or update of review_status or delete on modpacks
+		`create trigger trg_modpacks_user_creation_fact after insert or update of review_status,submitted_by or delete on modpacks
 			for each row execute function sync_user_content_creation_fact('modpack')`,
 		`drop trigger if exists trg_simple_projects_user_creation_fact on simple_projects`,
-		`create trigger trg_simple_projects_user_creation_fact after insert or update of review_status or delete on simple_projects
+		`create trigger trg_simple_projects_user_creation_fact after insert or update of review_status,submitted_by or delete on simple_projects
 			for each row execute function sync_user_content_creation_fact('')`,
 		`drop trigger if exists trg_servers_user_creation_fact on minecraft_servers`,
-		`create trigger trg_servers_user_creation_fact after insert or update of review_status or delete on minecraft_servers
+		`create trigger trg_servers_user_creation_fact after insert or update of review_status,submitted_by or delete on minecraft_servers
 			for each row execute function sync_user_content_creation_fact('server')`,
 		`drop trigger if exists trg_community_posts_user_creation_fact on community_posts`,
-		`create trigger trg_community_posts_user_creation_fact after insert or update of review_status,status or delete on community_posts
+		`create trigger trg_community_posts_user_creation_fact after insert or update of review_status,status,author_id or delete on community_posts
 			for each row execute function sync_user_content_creation_fact('')`,
 		`create or replace function increment_jsonb_counter(counters jsonb,counter_key text,amount bigint) returns jsonb as $$
 			select jsonb_set(coalesce(counters,'{}'::jsonb),array[counter_key],

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"sort"
@@ -86,6 +87,14 @@ type userStatisticsResponse struct {
 	Community           userCommunityStatistics         `json:"community"`
 	Level               userLevelSummary                `json:"level"`
 	ExperienceSources   map[string]int64                `json:"experienceSources,omitempty"`
+}
+
+type userStatisticsDateQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+type userStatisticsTotalsQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
 func parseUserStatisticsRange(value string, now time.Time) (userStatisticsRange, error) {
@@ -271,21 +280,12 @@ func (s *Server) loadUserPrivateStatistics(r *http.Request, userID int64, statis
 		return err
 	}
 	response.Recent7ActiveDays, response.Recent30ActiveDays = recent7, recent30
-	rows, err := s.db.Query(r.Context(), `select stat_date from user_statistics_daily where user_id=$1 and action_count>0 order by stat_date`, userID)
+	response.CurrentActiveStreak, response.LongestActiveStreak, err = loadUserActiveStreaks(
+		r.Context(), s.db, userID, time.Now().UTC(),
+	)
 	if err != nil {
 		return err
 	}
-	dates := make([]time.Time, 0)
-	for rows.Next() {
-		var value time.Time
-		if err = rows.Scan(&value); err != nil {
-			rows.Close()
-			return err
-		}
-		dates = append(dates, value)
-	}
-	rows.Close()
-	response.CurrentActiveStreak, response.LongestActiveStreak = activeStreaks(dates, time.Now().UTC())
 	editReviews := &userEditReviewStatistics{}
 	err = s.db.QueryRow(r.Context(), `select count(*),count(*) filter(where status='approved'),count(*) filter(where status='pending'),
 		count(*) filter(where status='rejected'),count(*) filter(where status in ('conflicted','withdrawn')),
@@ -300,7 +300,7 @@ func (s *Server) loadUserPrivateStatistics(r *http.Request, userID int64, statis
 		Scan(&response.Community.Reports, &response.Community.EffectiveReports); err != nil {
 		return err
 	}
-	rows, err = s.db.Query(r.Context(), `select reason,coalesce(sum(amount_delta),0) from experience_transactions where user_id=$1 group by reason order by reason`, userID)
+	rows, err := s.db.Query(r.Context(), `select reason,coalesce(sum(amount_delta),0) from experience_transactions where user_id=$1 group by reason order by reason`, userID)
 	if err != nil {
 		return err
 	}
@@ -354,8 +354,46 @@ func (s *Server) queryUserActivityStatistics(r *http.Request, userID int64, star
 	result.MarkdownChangedBytes = result.MarkdownAddedBytes + result.MarkdownDeletedBytes
 	result.MarkdownNetBytes = result.MarkdownAddedBytes - result.MarkdownDeletedBytes
 	if startDate == nil {
-		_ = s.db.QueryRow(r.Context(), `select last_edit_at,last_comment_at from user_statistics_totals where user_id=$1`, userID).
-			Scan(&result.LastEditAt, &result.LastCommentAt)
+		result.LastEditAt, result.LastCommentAt, err = loadUserLatestActivityTimes(r.Context(), s.db, userID)
+		if err != nil {
+			return result, err
+		}
 	}
 	return result, nil
+}
+
+func loadUserActiveStreaks(ctx context.Context, query userStatisticsDateQuerier, userID int64, now time.Time) (int, int, error) {
+	rows, err := query.Query(ctx, `select stat_date from user_statistics_daily where user_id=$1 and action_count>0 order by stat_date`, userID)
+	if err != nil {
+		return 0, 0, err
+	}
+	dates := make([]time.Time, 0)
+	for rows.Next() {
+		var value time.Time
+		if err = rows.Scan(&value); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		dates = append(dates, value)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return 0, 0, err
+	}
+	rows.Close()
+	current, longest := activeStreaks(dates, now)
+	return current, longest, nil
+}
+
+func loadUserLatestActivityTimes(ctx context.Context, query userStatisticsTotalsQuerier, userID int64) (*time.Time, *time.Time, error) {
+	var lastEditAt, lastCommentAt *time.Time
+	err := query.QueryRow(ctx, `select last_edit_at,last_comment_at from user_statistics_totals where user_id=$1`, userID).
+		Scan(&lastEditAt, &lastCommentAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return lastEditAt, lastCommentAt, nil
 }

@@ -151,7 +151,6 @@ func TestModExportEntryDetailPreservesFullSnapshotData(t *testing.T) {
 		t.Fatalf("definition.pools = %#v, want one full pool", definition["pools"])
 	}
 	responseRaw, err := json.Marshal(modExportEntryDetailResponse{
-		EntityID: "res_123456789",
 		PublicID: "res_123456789",
 		Data:     data,
 	})
@@ -161,6 +160,12 @@ func TestModExportEntryDetailPreservesFullSnapshotData(t *testing.T) {
 	var response map[string]any
 	if err = json.Unmarshal(responseRaw, &response); err != nil {
 		t.Fatal(err)
+	}
+	if response["publicId"] != "res_123456789" {
+		t.Fatalf("response publicId = %#v", response["publicId"])
+	}
+	if _, exists := response["entityId"]; exists {
+		t.Fatalf("response retained duplicate entityId: %#v", response)
 	}
 	encodedData, ok := response["data"].(map[string]any)
 	if !ok {

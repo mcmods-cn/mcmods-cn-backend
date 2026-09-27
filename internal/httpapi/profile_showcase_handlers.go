@@ -45,6 +45,87 @@ type userContributionsPayload struct {
 	RecentActivityTruncated bool                       `json:"recentActivityTruncated"`
 }
 
+func userContributionRecentActivityQuery() string {
+	return `select request.public_id,route.entity_type,
+		case when request.base_revision_id is null then 'created' else 'edited' end,
+		coalesce(` + followProjectTargetNameSQL("route") + `,route.public_id),
+		route.canonical_path,coalesce(request.resolved_at,request.submitted_at)
+		from change_requests request
+		join public_routes route on route.entity_type=request.entity_type and route.internal_id=request.entity_id
+		where request.submitted_by=$1 and request.status='approved' and request.entity_type is not null
+		  and coalesce(request.resolved_at,request.submitted_at)>=$2
+		  and ` + publicContributionTargetVisibilitySQL("route") + `
+		order by coalesce(request.resolved_at,request.submitted_at) desc,request.id desc
+		limit 101`
+}
+
+func publicContributionTargetVisibilitySQL(route string) string {
+	return strings.Replace(
+		followProjectTargetVisibilitySQL(route, "0", "false"),
+		"visibility in ('public','unlisted')",
+		"visibility='public'",
+		1,
+	)
+}
+
+const userShowcaseProjectsQuery = `with qualified_access as materialized (
+	select access.project_type,access.project_id,
+		bool_or(access.access_level='developer') is_developer,
+		bool_or(access.access_level='editor') is_editor
+	from effective_project_access access
+	where access.user_id=$1 and access.access_level in ('developer','editor')
+	group by access.project_type,access.project_id
+), projects as (
+	select access.project_id id,access.project_type entity_type,mod.primary_name name,mod.summary,mod.icon_url,mod.updated_at,
+		access.is_developer,access.is_editor
+	from qualified_access access join mods mod
+		on access.project_type='mod' and mod.id=access.project_id
+	where mod.review_status='approved'
+	union all
+	select access.project_id,access.project_type,pack.primary_name,pack.summary,pack.icon_url,pack.updated_at,
+		access.is_developer,access.is_editor
+	from qualified_access access join modpacks pack
+		on access.project_type='modpack' and pack.id=access.project_id
+	where pack.review_status='approved'
+	union all
+	select access.project_id,access.project_type,project.primary_name,project.summary,project.icon_url,project.updated_at,
+		access.is_developer,access.is_editor
+	from qualified_access access join simple_projects project
+		on project.project_type=access.project_type and project.id=access.project_id
+	where project.review_status='approved'
+	union all
+	select access.project_id,access.project_type,server.name,server.body_markdown,'',server.updated_at,
+		access.is_developer,access.is_editor
+	from qualified_access access join minecraft_servers server
+		on access.project_type='minecraft_server' and server.id=access.project_id
+	where server.review_status='approved'
+	union all
+	select access.project_id,access.project_type,blueprint.title,blueprint.description_markdown,blueprint.cover_object_key,blueprint.updated_at,
+		access.is_developer,access.is_editor
+	from qualified_access access join blueprints blueprint
+		on access.project_type='blueprint' and blueprint.id=access.project_id
+	where blueprint.status in ('ready','partial') and blueprint.review_status in ('not_required','approved')
+	union all
+	select access.project_id,access.project_type,asset.display_name,asset.description,blob.object_key,asset.updated_at,
+		access.is_developer,access.is_editor
+	from qualified_access access join skin_assets asset
+		on access.project_type='skin' and asset.id=access.project_id
+	join skin_texture_blobs blob on blob.hash=asset.blob_hash
+	where asset.status='active' and asset.visibility='public' and asset.review_status='approved'
+	union all
+	select access.project_id,access.project_type,post.title,post.body_markdown,'',post.updated_at,
+		access.is_developer,access.is_editor
+	from qualified_access access join community_posts post
+		on access.project_type='community_post' and post.id=access.project_id
+	where post.status='active' and post.review_status='approved'
+)
+select project.entity_type,route.public_id,project.name,project.summary,project.icon_url,
+	route.canonical_path,project.is_developer,project.is_editor,project.updated_at
+from projects project
+join public_routes route on route.entity_type=project.entity_type and route.internal_id=project.id
+order by project.updated_at desc,project.id desc
+limit 100`
+
 func (s *Server) userShowcase(w http.ResponseWriter, r *http.Request) {
 	identity, ok := s.pathUserIdentity(w, r)
 	if !ok {
@@ -155,45 +236,7 @@ func (s *Server) userContributions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) loadUserShowcaseProjects(ctx context.Context, userID int64) ([]userShowcaseItem, error) {
-	rows, err := s.db.Query(ctx, `with projects as (
-		select mod.id,'mod'::text entity_type,mod.primary_name name,mod.summary,mod.icon_url,mod.updated_at
-		from mods mod where mod.review_status='approved'
-		union all
-		select pack.id,'modpack',pack.primary_name,pack.summary,pack.icon_url,pack.updated_at
-		from modpacks pack where pack.review_status='approved'
-		union all
-		select project.id,project.project_type,project.primary_name,project.summary,project.icon_url,project.updated_at
-		from simple_projects project where project.review_status='approved'
-		union all
-		select server.id,'minecraft_server',server.name,server.body_markdown,'',server.updated_at
-		from minecraft_servers server where server.review_status='approved'
-		union all
-		select blueprint.id,'blueprint',blueprint.title,blueprint.description_markdown,blueprint.cover_object_key,blueprint.updated_at
-		from blueprints blueprint where blueprint.status in ('ready','partial') and blueprint.review_status in ('not_required','approved')
-		union all
-		select asset.id,'skin',asset.display_name,asset.description,blob.object_key,asset.updated_at
-		from skin_assets asset join skin_texture_blobs blob on blob.hash=asset.blob_hash
-		where asset.status='active' and asset.visibility='public' and asset.review_status='approved'
-		union all
-		select post.id,'community_post',post.title,post.body_markdown,'',post.updated_at
-		from community_posts post where post.status='active' and post.review_status='approved'
-	), qualified as (
-		select project.*,
-			exists(select 1 from effective_project_access access
-				where access.user_id=$1 and access.project_type=project.entity_type and access.project_id=project.id
-				  and access.access_level='developer') is_developer,
-			exists(select 1 from effective_project_access access
-				where access.user_id=$1 and access.project_type=project.entity_type and access.project_id=project.id
-				  and access.access_level='editor') is_editor
-		from projects project
-	)
-	select qualified.entity_type,route.public_id,qualified.name,qualified.summary,qualified.icon_url,
-		route.canonical_path,qualified.is_developer,qualified.is_editor,qualified.updated_at
-	from qualified
-	join public_routes route on route.entity_type=qualified.entity_type and route.internal_id=qualified.id
-	where qualified.is_developer or qualified.is_editor
-	order by qualified.updated_at desc,qualified.id desc
-	limit 100`, userID)
+	rows, err := s.db.Query(ctx, userShowcaseProjectsQuery, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -335,19 +378,7 @@ func (s *Server) loadUserContributions(ctx context.Context, userID int64, year i
 	result.Years = appendContributionYear(result.Years, year)
 	sort.Sort(sort.Reverse(sort.IntSlice(result.Years)))
 
-	activityRows, err := s.db.Query(ctx, `select request.public_id,request.entity_type,
-		case when request.base_revision_id is null then 'created' else 'edited' end,
-		coalesce(nullif(revision.snapshot->>'primaryName',''),nullif(revision.snapshot->>'title',''),
-			nullif(revision.snapshot->>'displayName',''),nullif(revision.snapshot->>'name',''),
-			nullif(request.metadata->>'targetLabel',''),nullif(route.public_id,''),request.aggregate_key),
-		coalesce(route.canonical_path,''),coalesce(request.resolved_at,request.submitted_at)
-		from change_requests request
-		join content_revisions revision on revision.id=request.proposed_revision_id
-		left join public_routes route on route.entity_type=request.entity_type and route.internal_id=request.entity_id
-		where request.submitted_by=$1 and request.status='approved' and request.entity_type is not null
-		  and coalesce(request.resolved_at,request.submitted_at)>=$2
-		order by coalesce(request.resolved_at,request.submitted_at) desc,request.id desc
-		limit 101`, userID, now.AddDate(0, -1, 0))
+	activityRows, err := s.db.Query(ctx, userContributionRecentActivityQuery(), userID, now.AddDate(0, -1, 0))
 	if err != nil {
 		return userContributionsPayload{}, err
 	}

@@ -13,7 +13,7 @@ import (
 
 const siteGeneralSettingKey = "site.general"
 
-var publicSiteLogoPathPattern = regexp.MustCompile(`^/site-assets/site-logo-[a-f0-9]{20}\.(?:png|jpe?g|webp|gif)$`)
+var publicSiteLogoPathPattern = regexp.MustCompile(`^/site-assets/site-logo-[a-f0-9]{20}\.webp$`)
 
 type siteGeneralConfig struct {
 	SiteName string `json:"siteName"`

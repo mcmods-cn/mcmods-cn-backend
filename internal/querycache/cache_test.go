@@ -2,6 +2,7 @@ package querycache
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -72,6 +73,20 @@ func TestLocalPresenceCountsRecentVisitors(t *testing.T) {
 	}
 }
 
+func TestLocalPresenceCardinalityIsHardBounded(t *testing.T) {
+	cache := New(config.RedisConfig{})
+	now := time.Now().UTC()
+	for index := 0; index < maxLocalPresenceEntries+100; index++ {
+		cache.TouchPresence(context.Background(), "visitor-"+strconv.Itoa(index), now)
+	}
+	if got := cache.OnlinePresenceCount(context.Background(), now); got != maxLocalPresenceEntries {
+		t.Fatalf("local presence cardinality = %d, want hard cap %d", got, maxLocalPresenceEntries)
+	}
+	if maxSharedPresenceEntries > 50_000 {
+		t.Fatalf("shared presence cap = %d, want at most 50000", maxSharedPresenceEntries)
+	}
+}
+
 func TestClaimThrottleLocalFallback(t *testing.T) {
 	cache := New(config.RedisConfig{})
 	if !cache.ClaimThrottle(context.Background(), "view:user:mod", time.Minute) {
@@ -83,4 +98,41 @@ func TestClaimThrottleLocalFallback(t *testing.T) {
 	if !cache.ClaimThrottle(context.Background(), "view:user:other-mod", time.Minute) {
 		t.Fatal("a different throttle key should be accepted")
 	}
+}
+
+func TestRealtimeLeaseLocalFallbackEnforcesTotalUserAndSessionBudgets(t *testing.T) {
+	cache := New(config.RedisConfig{})
+	ctx := context.Background()
+	first, ok := cache.AcquireRealtimeLease(ctx, 1, "session-a", 3, 2, 1, time.Minute)
+	if !ok {
+		t.Fatal("first realtime lease was rejected")
+	}
+	defer first.Release(ctx)
+	if _, ok = cache.AcquireRealtimeLease(ctx, 1, "session-a", 3, 2, 1, time.Minute); ok {
+		t.Fatal("same-session realtime budget was bypassed")
+	}
+	second, ok := cache.AcquireRealtimeLease(ctx, 1, "session-b", 3, 2, 1, time.Minute)
+	if !ok {
+		t.Fatal("second session within user budget was rejected")
+	}
+	defer second.Release(ctx)
+	if _, ok = cache.AcquireRealtimeLease(ctx, 1, "session-c", 3, 2, 1, time.Minute); ok {
+		t.Fatal("per-user realtime budget was bypassed")
+	}
+	third, ok := cache.AcquireRealtimeLease(ctx, 2, "session-c", 3, 2, 1, time.Minute)
+	if !ok {
+		t.Fatal("third lease within total budget was rejected")
+	}
+	if _, ok = cache.AcquireRealtimeLease(ctx, 3, "session-d", 3, 2, 1, time.Minute); ok {
+		t.Fatal("total realtime budget was bypassed")
+	}
+	third.Release(ctx)
+	if !first.Refresh(ctx) {
+		t.Fatal("active local realtime lease could not refresh")
+	}
+	replacement, ok := cache.AcquireRealtimeLease(ctx, 3, "session-d", 3, 2, 1, time.Minute)
+	if !ok {
+		t.Fatal("released capacity was not reusable")
+	}
+	replacement.Release(ctx)
 }

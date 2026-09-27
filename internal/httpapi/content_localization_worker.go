@@ -19,6 +19,19 @@ type contentTranslationTaskPayload struct {
 	QuotaBacked      bool   `json:"quotaBacked"`
 }
 
+func decodeContentTranslationTaskPayload(rawPayload []byte) (contentTranslationTaskPayload, error) {
+	var payload contentTranslationTaskPayload
+	if err := json.Unmarshal(rawPayload, &payload); err != nil {
+		return contentTranslationTaskPayload{}, fmt.Errorf("decode catalog translation payload: %w", err)
+	}
+	payload.SourceLocale = normalizeContentLocale(payload.SourceLocale)
+	payload.TargetLocale = normalizeContentLocale(payload.TargetLocale)
+	if payload.EntityID <= 0 || !validCatalogPublicID(payload.PublicID) || payload.SourceLocale == "" || payload.TargetLocale == "" || payload.SourceRevisionNo <= 0 {
+		return contentTranslationTaskPayload{}, errors.New("catalog translation payload is incomplete")
+	}
+	return payload, nil
+}
+
 func (worker *AIWorker) persistCatalogContentTranslation(
 	ctx context.Context,
 	taskID int64,
@@ -26,16 +39,14 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 	rawPayload []byte,
 	result map[string]any,
 ) error {
-	var payload contentTranslationTaskPayload
-	if err := json.Unmarshal(rawPayload, &payload); err != nil {
-		return fmt.Errorf("decode catalog translation payload: %w", err)
+	payload, err := decodeContentTranslationTaskPayload(rawPayload)
+	if err != nil {
+		return err
 	}
-	payload.SourceLocale = normalizeContentLocale(payload.SourceLocale)
-	payload.TargetLocale = normalizeContentLocale(payload.TargetLocale)
-	if payload.EntityID <= 0 || !validCatalogPublicID(payload.PublicID) || payload.SourceLocale == "" || payload.TargetLocale == "" || payload.SourceRevisionNo <= 0 {
-		return errors.New("catalog translation payload is incomplete")
+	translated, err := strictTranslationItemsToMap(result, stringSet("name", "summary", "contentMarkdown"))
+	if err != nil {
+		return err
 	}
-	translated := translationItemsToMap(result)
 	if translated["name"] == "" && translated["summary"] == "" && translated["contentMarkdown"] == "" {
 		return errors.New("catalog translation result is empty")
 	}

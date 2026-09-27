@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -14,7 +15,6 @@ import (
 const maxModExportEntryMarkdownBytes = 256 * 1024
 
 type modExportEntryDetailResponse struct {
-	EntityID                string                           `json:"entityId"`
 	PublicID                string                           `json:"publicId"`
 	Data                    map[string]any                   `json:"data"`
 	EntryTypeCode           string                           `json:"entryTypeCode"`
@@ -61,10 +61,9 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	registry := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("registry")))
 	objectID := strings.TrimSpace(r.URL.Query().Get("objectId"))
-	entityPublicID := strings.TrimSpace(r.URL.Query().Get("entityId"))
-	locale := normalizeExportContentLocale(r.URL.Query().Get("locale"))
+	entityPublicID := strings.TrimSpace(r.URL.Query().Get("publicId"))
 	if !isExportRegistryName(registry) || (objectID == "" && entityPublicID == "") {
-		writeError(w, http.StatusBadRequest, "registry and entityId or objectId are required")
+		writeError(w, http.StatusBadRequest, "registry and publicId or objectId are required")
 		return
 	}
 	var resourceID, modID int64
@@ -94,17 +93,18 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response := modExportEntryDetailResponse{
-		EntityID: publicID, PublicID: publicID, Data: data, EntryTypeCode: entryTypeCode, DefinitionSchemaVersion: definitionSchemaVersion,
+		PublicID: publicID, Data: data, EntryTypeCode: entryTypeCode, DefinitionSchemaVersion: definitionSchemaVersion,
 		ModelAssetPaths: []string{}, Recipes: []any{}, Uses: []any{}, Versions: []map[string]any{},
 	}
 	recipeResourceID := resourceID
 	primary, secondary := s.requestContentLocales(r)
-	if requested := normalizeContentLocale(locale); requested != "" {
+	if requested, ok := optionalExportContentLocale(r.URL.Query().Get("locale")); ok {
 		primary = requested
 	}
-	if requested := normalizeContentLocale(r.URL.Query().Get("secondaryLocale")); requested != "" {
+	if requested, ok := optionalExportContentLocale(r.URL.Query().Get("secondaryLocale")); ok {
 		secondary = requested
 	}
+	locale := primary
 	items := []map[string]any{{"data": response.Data}}
 	if registry == "loot_tables" {
 		if err = s.decorateLootTableResources(r.Context(), revisionID, items, primary, secondary); err != nil {
@@ -156,8 +156,11 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if nameErr == nil {
-			names := map[string]any{}
-			_ = json.Unmarshal(importedNames, &names)
+			names, decodeErr := decodeModExportJSONObjectValue(importedNames, "imported entry names")
+			if decodeErr != nil {
+				writeError(w, http.StatusInternalServerError, "failed to resolve imported entry name")
+				return
+			}
 			item := map[string]any{"translationKey": translationKey, "names": names}
 			if nameErr = s.decorateExportTranslationNames(r.Context(), revisionID, primary, []map[string]any{item}); nameErr != nil {
 				writeError(w, http.StatusInternalServerError, "failed to resolve imported entry translation")
@@ -296,10 +299,20 @@ func (s *Server) loadModExportBlockEntityModel(ctx context.Context, revisionID s
 		variant.Textures = []map[string]any{}
 		variant.Mesh = map[string]any{}
 		if len(texturesRaw) > 0 {
-			_ = json.Unmarshal(texturesRaw, &variant.Textures)
+			if err = decodeModExportJSON(texturesRaw, &variant.Textures, "block entity variant textures"); err != nil {
+				return nil, fmt.Errorf("variant %s: %w", variant.VariantID, err)
+			}
+			if variant.Textures == nil {
+				return nil, fmt.Errorf("variant %s textures must be a JSON array", variant.VariantID)
+			}
 		}
 		if len(meshRaw) > 0 {
-			_ = json.Unmarshal(meshRaw, &variant.Mesh)
+			if err = decodeModExportJSON(meshRaw, &variant.Mesh, "block entity variant mesh"); err != nil {
+				return nil, fmt.Errorf("variant %s: %w", variant.VariantID, err)
+			}
+			if variant.Mesh == nil {
+				return nil, fmt.Errorf("variant %s mesh must be a JSON object", variant.VariantID)
+			}
 		}
 		model.Variants = append(model.Variants, variant)
 	}
@@ -391,4 +404,15 @@ func normalizeExportContentLocale(value string) string {
 		return "zh-CN"
 	}
 	return value
+}
+
+func optionalExportContentLocale(value string) (string, bool) {
+	if strings.TrimSpace(value) == "" {
+		return "", false
+	}
+	value = normalizeContentLocale(value)
+	if value == "" || len(value) > 32 || !validContentLocaleTag(value) {
+		return "", false
+	}
+	return value, true
 }

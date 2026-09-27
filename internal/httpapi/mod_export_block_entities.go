@@ -134,9 +134,9 @@ func deriveModExportBlockEntityModels(files map[string]*zip.File, resolver catal
 		}
 		seenBlocks[model.BlockID] = struct{}{}
 		namespace, _ := resourceParts(model.BlockID)
-		revisionID := revisions[strings.ToLower(namespace)]
-		if revisionID == "" {
-			continue
+		revisionID, revisionErr := exportRevisionForNamespace(revisions, namespace)
+		if revisionErr != nil {
+			return nil, fmt.Errorf("block entity model %q: %w", model.BlockID, revisionErr)
 		}
 		resource := resolver.resolve(resourceKindForRegistry("blocks"), model.BlockID)
 		modelID := catalogSnapshotID("block-entity-model", revisionID, resource.ID, "")

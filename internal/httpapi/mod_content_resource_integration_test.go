@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/database"
 )
 
 // This test exercises the real PostgreSQL JSON aggregation used by the public
@@ -27,11 +28,29 @@ func TestModContentResourceVersionDetailsIntegration(t *testing.T) {
 		databaseURL = config.Load().DB.ConnString()
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ephemeral := os.Getenv("MCMODS_RUN_DB_INTEGRATION") == "1"
+	if ephemeral {
+		poolConfig.MaxConns = 1
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pool.Close()
+	if ephemeral {
+		if err = database.InstallEphemeralSchema(ctx, pool); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if dropErr := database.DropEphemeralSchema(context.Background(), pool); dropErr != nil {
+				t.Errorf("drop ephemeral schema: %v", dropErr)
+			}
+		}()
+	}
 
 	suffix := time.Now().UnixNano() % 1_000_000
 	projectCode := fmt.Sprintf("mcr%06d", suffix)

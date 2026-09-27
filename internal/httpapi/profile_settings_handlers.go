@@ -171,13 +171,14 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 		}
 		if _, err := tx.Exec(
 			r.Context(),
-			`insert into user_permissions (user_id, permission_id, allow, updated_at)
-			 select $1, id, $3, now() from permissions where code = $2
-			 on conflict (user_id, permission_id) do update
+			`insert into user_permissions (user_id,permission_id,allow,source,source_key,updated_at)
+			 select $1,id,$3,$4,'profile_settings',now() from permissions where code=$2
+			 on conflict (user_id,permission_id,source,source_key) do update
 			 set allow = excluded.allow, expires_at = null, updated_at = now()`,
 			claims.Subject,
 			"user.message.receive",
 			*request.MessageReceive,
+			directPermissionSourcePreference,
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存私聊权限失败")
 			return
@@ -250,7 +251,7 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		var messageReceive bool
-		if err = tx.QueryRow(r.Context(), `select coalesce((select user_permission.allow from user_permissions user_permission
+		if err = tx.QueryRow(r.Context(), `select coalesce((select bool_and(user_permission.allow) from user_permissions user_permission
 			join permissions permission on permission.id=user_permission.permission_id
 			where user_permission.user_id=$1 and permission.code='user.message.receive' and (user_permission.expires_at is null or user_permission.expires_at>now())),false)`, claims.Subject).Scan(&messageReceive); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to read updated message preference")
@@ -290,7 +291,10 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if request.MessageReceive != nil {
-		_ = s.refreshPermissionVersion(r.Context(), claims.Subject)
+		if !s.requireSecurityVersionRefresh(w, r, "update_message_receive_permission", claims.Subject,
+			s.refreshPermissionVersion(r.Context(), claims.Subject)) {
+			return
+		}
 	}
 	s.cache.Delete(r.Context(), publicUserCardCacheKey(claims.Subject))
 	settings, err := s.loadUserProfileSettings(r.Context(), claims.Subject)

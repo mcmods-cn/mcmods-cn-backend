@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -18,6 +20,17 @@ import (
 )
 
 const currentContentSchemaVersion = 1
+
+const (
+	maximumStoredContentChangeItems      = 128
+	maximumStoredContentChangeDepth      = 64
+	maximumStoredContentChangePathBytes  = 512
+	maximumStoredContentChangeValueBytes = 512
+)
+
+const contentChangeBatchInsertSQL = `insert into content_change_items(revision_id,path,operation,before_value,after_value)
+	select $1,batch.path,batch.operation,batch.before_value::jsonb,batch.after_value::jsonb
+	from unnest($2::text[],$3::text[],$4::text[],$5::text[]) batch(path,operation,before_value,after_value)`
 
 var errReviewInProgress = errors.New("this project already has a pending review")
 
@@ -253,25 +266,191 @@ func storeContentChangesTx(ctx context.Context, tx pgx.Tx, revisionID int64, bas
 	if err := json.Unmarshal(snapshot, &after); err != nil {
 		return fmt.Errorf("decode proposed revision: %w", err)
 	}
-	changes := diffJSON("", before, after)
-	for _, change := range changes {
-		beforeJSON, err := nullableJSON(change.Before)
+	changes := boundedContentChanges(before, after)
+	if len(changes) == 0 {
+		return nil
+	}
+	paths := make([]string, len(changes))
+	operations := make([]string, len(changes))
+	beforeValues := make([]*string, len(changes))
+	afterValues := make([]*string, len(changes))
+	for index, change := range changes {
+		beforeJSON, err := encodeStoredContentChangeValue(change.Before)
 		if err != nil {
 			return err
 		}
-		afterJSON, err := nullableJSON(change.After)
+		afterJSON, err := encodeStoredContentChangeValue(change.After)
 		if err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `
-			insert into content_change_items(revision_id,path,operation,before_value,after_value)
-			values($1,$2,$3,$4,$5)`,
-			revisionID, change.Path, change.Operation, beforeJSON, afterJSON,
-		); err != nil {
-			return fmt.Errorf("insert content change item: %w", err)
-		}
+		paths[index] = change.Path
+		operations[index] = change.Operation
+		beforeValues[index] = beforeJSON
+		afterValues[index] = afterJSON
+	}
+	if _, err := tx.Exec(ctx, contentChangeBatchInsertSQL, revisionID, paths, operations, beforeValues, afterValues); err != nil {
+		return fmt.Errorf("insert content change items: %w", err)
 	}
 	return nil
+}
+
+func boundedContentChanges(before, after any) []contentChange {
+	changes := make([]contentChange, 0, min(maximumStoredContentChangeItems, 32))
+	truncated := false
+	walkStoredContentChanges("", before, after, 0, &changes, &truncated)
+	if truncated {
+		changes = append(changes, contentChange{Path: "/", Operation: "replace", Before: before, After: after})
+	}
+	return changes
+}
+
+func walkStoredContentChanges(path string, before, after any, depth int, changes *[]contentChange, truncated *bool) {
+	if storedContentValuesEqual(before, after) {
+		return
+	}
+	if len(*changes) >= maximumStoredContentChangeItems-1 {
+		*truncated = true
+		return
+	}
+	beforeMap, beforeIsMap := before.(map[string]any)
+	afterMap, afterIsMap := after.(map[string]any)
+	if beforeIsMap && afterIsMap && depth < maximumStoredContentChangeDepth {
+		keys := make([]string, 0, len(beforeMap)+len(afterMap))
+		seen := make(map[string]struct{}, len(beforeMap)+len(afterMap))
+		for key := range beforeMap {
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+		}
+		for key := range afterMap {
+			if _, exists := seen[key]; !exists {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if len(*changes) >= maximumStoredContentChangeItems-1 {
+				*truncated = true
+				return
+			}
+			childPath, pathTruncated := storedContentChangeChildPath(path, key)
+			beforeValue, beforeExists := beforeMap[key]
+			afterValue, afterExists := afterMap[key]
+			switch {
+			case !beforeExists:
+				*changes = append(*changes, contentChange{Path: childPath, Operation: "add", After: afterValue})
+			case !afterExists:
+				*changes = append(*changes, contentChange{Path: childPath, Operation: "remove", Before: beforeValue})
+			case pathTruncated:
+				*changes = append(*changes, storedContentChange(childPath, beforeValue, afterValue))
+			default:
+				walkStoredContentChanges(childPath, beforeValue, afterValue, depth+1, changes, truncated)
+			}
+		}
+		return
+	}
+	if path == "" {
+		path = "/"
+	}
+	*changes = append(*changes, storedContentChange(path, before, after))
+}
+
+func storedContentChange(path string, before, after any) contentChange {
+	operation := "replace"
+	if before == nil {
+		operation = "add"
+	} else if after == nil {
+		operation = "remove"
+	}
+	return contentChange{Path: path, Operation: operation, Before: before, After: after}
+}
+
+func storedContentValuesEqual(before, after any) bool {
+	if _, beforeIsMap := before.(map[string]any); beforeIsMap {
+		if _, afterIsMap := after.(map[string]any); afterIsMap {
+			return false
+		}
+	}
+	return reflect.DeepEqual(before, after)
+}
+
+func storedContentChangeChildPath(parent, key string) (string, bool) {
+	path := parent + "/" + escapeJSONPointer(key)
+	if len(path) <= maximumStoredContentChangePathBytes {
+		return path, false
+	}
+	digest := sha256.Sum256([]byte(path))
+	suffix := "~h" + hex.EncodeToString(digest[:8])
+	prefix := truncateValidUTF8(path, maximumStoredContentChangePathBytes-len(suffix))
+	return prefix + suffix, true
+}
+
+func truncateValidUTF8(value string, maximum int) string {
+	if len(value) <= maximum {
+		return value
+	}
+	for maximum > 0 && !utf8.ValidString(value[:maximum]) {
+		maximum--
+	}
+	return value[:maximum]
+}
+
+func encodeStoredContentChangeValue(value any) (*string, error) {
+	if value == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) <= maximumStoredContentChangeValueBytes {
+		encoded := string(raw)
+		return &encoded, nil
+	}
+	digest := sha256.Sum256(raw)
+	summary := map[string]any{
+		"$summary": storedContentValueKind(value),
+		"bytes":    len(raw),
+		"sha256":   hex.EncodeToString(digest[:]),
+	}
+	switch typed := value.(type) {
+	case []any:
+		summary["items"] = len(typed)
+	case map[string]any:
+		summary["fields"] = len(typed)
+	case string:
+		summary["characters"] = utf8.RuneCountInString(typed)
+		preview := []rune(typed)
+		if len(preview) > 64 {
+			preview = preview[:64]
+		}
+		summary["preview"] = string(preview)
+	}
+	raw, err = json.Marshal(summary)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maximumStoredContentChangeValueBytes {
+		return nil, errors.New("content change summary exceeds storage budget")
+	}
+	encoded := string(raw)
+	return &encoded, nil
+}
+
+func storedContentValueKind(value any) string {
+	switch value.(type) {
+	case []any:
+		return "array"
+	case map[string]any:
+		return "object"
+	case string:
+		return "string"
+	case float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return "number"
+	case bool:
+		return "boolean"
+	default:
+		return "value"
+	}
 }
 
 func diffJSON(path string, before, after any) []contentChange {
@@ -325,13 +504,6 @@ func jsonValuesEqual(left, right any) bool {
 	leftJSON, _ := json.Marshal(left)
 	rightJSON, _ := json.Marshal(right)
 	return string(leftJSON) == string(rightJSON)
-}
-
-func nullableJSON(value any) (any, error) {
-	if value == nil {
-		return nil, nil
-	}
-	return json.Marshal(value)
 }
 
 func escapeJSONPointer(value string) string {

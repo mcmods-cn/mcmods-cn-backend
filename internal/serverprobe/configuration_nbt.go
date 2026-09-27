@@ -9,16 +9,23 @@ import (
 )
 
 func parseConfigurationDynamicRegistry(data []byte) (string, []string, error) {
+	return parseConfigurationDynamicRegistryWithBudget(data, newConfigurationParseBudget())
+}
+
+func parseConfigurationDynamicRegistryWithBudget(data []byte, budget *configurationParseBudget) (string, []string, error) {
 	reader := bytes.NewReader(data)
 	registryName, err := readProtocolString(reader, maxConfigurationPacketBytes)
 	if err != nil {
 		return "", nil, err
 	}
+	if err = budget.claim("dynamic registry name", 1, reader.Len(), 1); err != nil {
+		return "", nil, err
+	}
 	count, err := readVarInt(reader)
-	if err != nil || count < 0 || count > 1_000_000 {
+	if err != nil || budget.claim("dynamic registry entry", count, reader.Len(), 2) != nil {
 		return "", nil, fmt.Errorf("invalid dynamic registry entry count %d", count)
 	}
-	entries := make([]string, 0, count)
+	entries := make([]string, 0, min(int(count), 256))
 	for index := int32(0); index < count; index++ {
 		id, readErr := readProtocolString(reader, maxConfigurationPacketBytes)
 		if readErr != nil {
@@ -46,13 +53,18 @@ func skipConfigurationNBT(reader *bytes.Reader) error {
 	if err != nil {
 		return err
 	}
-	return skipConfigurationNBTPayload(reader, tagType, 0)
+	remainingNodes := maximumConfigurationNBTNodes
+	return skipConfigurationNBTPayload(reader, tagType, 0, &remainingNodes)
 }
 
-func skipConfigurationNBTPayload(reader *bytes.Reader, tagType byte, depth int) error {
+func skipConfigurationNBTPayload(reader *bytes.Reader, tagType byte, depth int, remainingNodes *int) error {
 	if depth > 64 {
 		return errors.New("NBT depth exceeds 64")
 	}
+	if remainingNodes == nil || *remainingNodes <= 0 {
+		return errors.New("NBT node count exceeds safety limit")
+	}
+	*remainingNodes--
 	switch tagType {
 	case 0:
 		return nil
@@ -82,11 +94,11 @@ func skipConfigurationNBTPayload(reader *bytes.Reader, tagType byte, depth int) 
 		if err != nil {
 			return err
 		}
-		if length < 0 || length > 1_000_000 {
+		if length < 0 || length > maximumConfigurationNBTNodes || int(length) > *remainingNodes {
 			return fmt.Errorf("invalid NBT list length %d", length)
 		}
 		for index := int32(0); index < length; index++ {
-			if err = skipConfigurationNBTPayload(reader, elementType, depth+1); err != nil {
+			if err = skipConfigurationNBTPayload(reader, elementType, depth+1, remainingNodes); err != nil {
 				return err
 			}
 		}
@@ -103,7 +115,7 @@ func skipConfigurationNBTPayload(reader *bytes.Reader, tagType byte, depth int) 
 			if _, err = readConfigurationNBTString(reader); err != nil {
 				return err
 			}
-			if err = skipConfigurationNBTPayload(reader, childType, depth+1); err != nil {
+			if err = skipConfigurationNBTPayload(reader, childType, depth+1, remainingNodes); err != nil {
 				return err
 			}
 		}

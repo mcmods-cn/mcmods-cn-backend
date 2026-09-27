@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -111,17 +112,28 @@ func (s *Server) projectChangelogs(w http.ResponseWriter, r *http.Request) {
 	if locale == "" {
 		locale = "zh-CN"
 	}
-	categories, err := loadProjectChangelogCategories(r.Context(), s.db, target.RouteID, locale)
+	pageRequest, err := parseProjectChangelogPageRequest(r.URL.Query(), target, locale)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load changelog categories")
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	items, err := s.loadProjectChangelogs(r.Context(), target, locale)
+	categories := make([]projectChangelogCategoryResponse, 0)
+	if pageRequest.Cursor == nil {
+		categories, err = loadProjectChangelogCategories(r.Context(), s.db, target.RouteID, locale)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load changelog categories")
+			return
+		}
+	}
+	page, err := s.loadProjectChangelogs(r.Context(), target, locale, pageRequest)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load changelogs")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"target": target, "categories": categories, "items": items})
+	writeBoundedCatalogJSON(w, map[string]any{
+		"target": target, "categories": categories, "items": page.Items, "limit": pageRequest.Limit,
+		"hasMore": page.HasMore, "nextCursor": page.NextCursor,
+	})
 }
 
 func (s *Server) projectChangelogItem(w http.ResponseWriter, r *http.Request) {
@@ -153,6 +165,9 @@ func (s *Server) projectChangelogItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid changelog")
 		return
 	}
+	if !s.validateProjectChangelogMinecraftVersions(w, r, &snapshot) {
+		return
+	}
 	snapshotRaw, _ := json.Marshal(snapshot)
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -160,7 +175,7 @@ func (s *Server) projectChangelogItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	requireReview := loadReviewConfig(r.Context(), s.db).ChangelogEdit && !canSkipChangelogReview(claims, target.PublicID)
+	requireReview := loadReviewConfig(r.Context(), tx).ChangelogEdit && !canSkipChangelogReview(claims, target.PublicID)
 	status := "approved"
 	if requireReview {
 		status = "pending"
@@ -190,14 +205,6 @@ func (s *Server) projectChangelogItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Source-managed entries become editor-owned after the first manual edit.
-	// The update worker may still report upstream changes, but must never
-	// overwrite this revision afterwards.
-	if _, err = tx.Exec(r.Context(), `update external_release_bindings set manual_override=true,updated_at=now()
-		where changelog_public_id=$1 and source_managed`, publicID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to protect manually edited changelog")
-		return
-	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save changelog")
 		return
@@ -221,6 +228,9 @@ func (s *Server) createProjectChangelog(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusBadRequest, "invalid changelog")
 		return
 	}
+	if !s.validateProjectChangelogMinecraftVersions(w, r, &snapshot) {
+		return
+	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start changelog creation")
@@ -236,7 +246,7 @@ func (s *Server) createProjectChangelog(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusInternalServerError, "failed to create changelog")
 		return
 	}
-	requireReview := loadReviewConfig(r.Context(), s.db).ChangelogCreate && !canSkipChangelogReview(claims, target.PublicID)
+	requireReview := loadReviewConfig(r.Context(), tx).ChangelogCreate && !canSkipChangelogReview(claims, target.PublicID)
 	status := "approved"
 	if requireReview {
 		status = "pending"
@@ -267,18 +277,23 @@ func (s *Server) createProjectChangelog(w http.ResponseWriter, r *http.Request, 
 
 func (s *Server) projectChangelogHistory(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	pageRequest, err := parseContentHistoryPageRequest(r.URL.Query(), contentHistoryScope("changelog", publicID))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	entry, target, publishedRevisionID, err := s.loadProjectChangelogEditor(r.Context(), publicID, currentClaims(r))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "changelog not found")
 		return
 	}
-	includeUnpublished := target.CanEdit || claimsAllow(currentClaims(r), "content.review") || claimsAllow(currentClaims(r), "admin.*")
-	items, err := contentRevisionHistory(r.Context(), s.db, projectChangelogAggregate, entry.ID, publishedRevisionID, includeUnpublished)
+	visibility := projectPendingReviewVisibility(currentClaims(r), target.PublicID, target.CanEdit)
+	items, err := contentRevisionHistoryPage(r.Context(), s.db, projectChangelogAggregate, entry.ID, publishedRevisionID, visibility, pageRequest)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load changelog history")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, mergeContentHistoryPage(items, nil, pageRequest))
 }
 
 func normalizeProjectChangelogSnapshot(snapshot *projectChangelogSnapshot) error {
@@ -341,6 +356,20 @@ func normalizeProjectChangelogSnapshot(snapshot *projectChangelogSnapshot) error
 	return nil
 }
 
+func (s *Server) validateProjectChangelogMinecraftVersions(w http.ResponseWriter, r *http.Request, snapshot *projectChangelogSnapshot) bool {
+	versions, err := authoritativeMinecraftVersionCodes(r.Context(), s.db, snapshot.MinecraftVersions, 100)
+	if err != nil || len(versions) == 0 {
+		if err != nil && !errors.Is(err, errInvalidMinecraftVersionCodes) && !errors.Is(err, errUnknownMinecraftVersionCodes) {
+			writeError(w, http.StatusInternalServerError, "failed to load Minecraft version settings")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "unknown or invalid Minecraft version")
+		return false
+	}
+	snapshot.MinecraftVersions = versions
+	return true
+}
+
 func (s *Server) resolveProjectChangelogTarget(ctx context.Context, entityType, publicID string, claims security.Claims) (projectChangelogTarget, error) {
 	var target projectChangelogTarget
 	entityType = normalizeChangelogTargetType(entityType)
@@ -392,6 +421,14 @@ func entryInternalIDTx(ctx context.Context, query databaseQuery, publicID string
 }
 
 func applyProjectChangelogSnapshotTx(ctx context.Context, tx pgx.Tx, changelogID, targetRouteID, revisionID, actorID int64, snapshot projectChangelogSnapshot) error {
+	versions, err := authoritativeMinecraftVersionCodes(ctx, tx, snapshot.MinecraftVersions, 100)
+	if err != nil {
+		return err
+	}
+	if len(versions) == 0 {
+		return errInvalidMinecraftVersionCodes
+	}
+	snapshot.MinecraftVersions = versions
 	var categoryID *int64
 	if snapshot.CategoryID != "" {
 		var id int64
@@ -428,7 +465,21 @@ func applyProjectChangelogSnapshotTx(ctx context.Context, tx pgx.Tx, changelogID
 			return err
 		}
 	}
+	if err := recordApprovedChangelogManualOverrideTx(ctx, tx, changelogID, revisionID); err != nil {
+		return err
+	}
 	return enqueueProjectUpdateEventTx(ctx, tx, targetRouteID, revisionID, actorID, "changelog", []string{"changelog", "minecraft_versions", "project_version"}, "changelog-revision:"+strconv.FormatInt(revisionID, 10))
+}
+
+func recordApprovedChangelogManualOverrideTx(ctx context.Context, tx pgx.Tx, changelogID, revisionID int64) error {
+	_, err := tx.Exec(ctx, `update external_release_bindings binding set
+		manual_override=true,manual_override_revision_id=revision.id,manual_override_source=revision.source,updated_at=now()
+		from content_revisions revision,project_changelogs changelog
+		where changelog.id=$1 and revision.id=$2 and revision.aggregate_type=$3
+		  and revision.aggregate_key=changelog.public_id and revision.source='user'
+		  and binding.changelog_public_id=changelog.public_id and binding.source_managed and not binding.manual_override`,
+		changelogID, revisionID, projectChangelogAggregate)
+	return err
 }
 
 func loadProjectChangelogCategories(ctx context.Context, query interface {
@@ -438,7 +489,8 @@ func loadProjectChangelogCategories(ctx context.Context, query interface {
 		coalesce(jsonb_object_agg(localization.locale,localization.name) filter(where localization.locale is not null),'{}'::jsonb)
 		from project_changelog_categories category
 		left join project_changelog_category_localizations localization on localization.category_id=category.id
-		where category.object_route_id=$1 group by category.id order by category.created_at,category.id`, targetRouteID)
+		where category.object_route_id=$1 group by category.id order by category.created_at,category.id
+		limit 101`, targetRouteID)
 	if err != nil {
 		return nil, err
 	}
@@ -450,11 +502,19 @@ func loadProjectChangelogCategories(ctx context.Context, query interface {
 		if err = rows.Scan(&item.ID, &item.DefaultLocale, &raw); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal(raw, &item.Names)
+		if err = json.Unmarshal(raw, &item.Names); err != nil || len(item.Names) > projectChangelogMaximumLocalizations {
+			return nil, errors.New("changelog category localization limit exceeded")
+		}
 		item.Name = localizedChangelogValue(item.Names, locale, item.DefaultLocale)
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(items) > projectChangelogMaximumCategories {
+		return nil, errors.New("changelog category limit exceeded")
+	}
+	return items, nil
 }
 
 func localizedChangelogValue(values map[string]string, locale, fallback string) string {
@@ -471,55 +531,52 @@ func localizedChangelogValue(values map[string]string, locale, fallback string) 
 	return ""
 }
 
-func (s *Server) loadProjectChangelogs(ctx context.Context, target projectChangelogTarget, locale string) ([]projectChangelogResponse, error) {
-	rows, err := s.db.Query(ctx, `select entry.public_id,entry.event_at,entry.minecraft_versions,entry.project_version,
-		entry.default_locale,entry.review_status,entry.created_at,entry.updated_at,
-		creator.public_id,creator.username,coalesce(category.public_id,''),coalesce(category.default_locale,''),
-		coalesce(category_names.values,'{}'::jsonb),coalesce(body.values,'{}'::jsonb),
-		exists(select 1 from change_requests request where request.aggregate_type=$2 and request.aggregate_key=entry.public_id and request.status='pending')
-		from project_changelogs entry
-		join users creator on creator.id=entry.created_by
-		left join project_changelog_categories category on category.id=entry.category_id
-		left join lateral (select jsonb_object_agg(value.locale,value.name) values
-			from project_changelog_category_localizations value where value.category_id=category.id) category_names on true
-		left join lateral (select jsonb_object_agg(value.locale,value.body_markdown) values
-			from project_changelog_localizations value where value.changelog_id=entry.id) body on true
-		where entry.object_route_id=$1 and entry.status='active' and entry.review_status='approved'
-		order by entry.event_at desc,entry.id desc`, target.RouteID, projectChangelogAggregate)
+func (s *Server) loadProjectChangelogs(ctx context.Context, target projectChangelogTarget, locale string, request projectChangelogPageRequest) (projectChangelogPage, error) {
+	query, args := projectChangelogPageSQL(target.RouteID, locale, request)
+	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return projectChangelogPage{}, err
 	}
 	defer rows.Close()
-	items := make([]projectChangelogResponse, 0)
+	items := make([]projectChangelogSummary, 0, request.Limit+1)
 	for rows.Next() {
-		var item projectChangelogResponse
-		var categoryID, categoryDefaultLocale string
-		var categoryRaw, bodyRaw []byte
-		if err = rows.Scan(&item.ID, &item.EventAt, &item.MinecraftVersions, &item.ProjectVersion,
+		var item projectChangelogSummary
+		var categoryID, categoryDefaultLocale, categoryName string
+		if err = rows.Scan(&item.InternalID, &item.ID, &item.EventAt, &item.MinecraftVersions, &item.ProjectVersion,
 			&item.DefaultLocale, &item.ReviewStatus, &item.CreatedAt, &item.UpdatedAt,
 			&item.CreatedByID, &item.CreatedByName, &categoryID, &categoryDefaultLocale,
-			&categoryRaw, &bodyRaw, &item.PendingChange); err != nil {
-			return nil, err
+			&categoryName, &item.Locale, &item.BodyExcerpt, &item.AvailableLocales, &item.PendingChange); err != nil {
+			return projectChangelogPage{}, err
 		}
-		bodyValues := map[string]string{}
-		_ = json.Unmarshal(bodyRaw, &bodyValues)
-		item.Locale, item.BodyMarkdown = selectedChangelogLocalization(bodyValues, locale, item.DefaultLocale)
-		item.AvailableLocales = sortedMapKeys(bodyValues)
+		if len(item.AvailableLocales) > projectChangelogMaximumLocalizations {
+			return projectChangelogPage{}, errors.New("changelog localization limit exceeded")
+		}
+		preview := []rune(item.BodyExcerpt)
+		item.BodyTruncated = len(preview) > projectChangelogPreviewCharacterLimit
+		if item.BodyTruncated {
+			item.BodyExcerpt = string(preview[:projectChangelogPreviewCharacterLimit])
+		}
 		item.CanEdit = target.CanEdit
-		if target.CanEdit {
-			for _, key := range item.AvailableLocales {
-				item.Localizations = append(item.Localizations, projectChangelogLocalization{Locale: key, BodyMarkdown: bodyValues[key]})
-			}
-		}
 		if categoryID != "" {
-			categoryNames := map[string]string{}
-			_ = json.Unmarshal(categoryRaw, &categoryNames)
-			item.Category = &projectChangelogCategoryResponse{ID: categoryID, DefaultLocale: categoryDefaultLocale,
-				Names: categoryNames, Name: localizedChangelogValue(categoryNames, locale, categoryDefaultLocale)}
+			item.Category = &projectChangelogCategorySummary{ID: categoryID, DefaultLocale: categoryDefaultLocale, Name: categoryName}
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err = rows.Err(); err != nil {
+		return projectChangelogPage{}, err
+	}
+	hasMore := len(items) > request.Limit
+	if hasMore {
+		items = items[:request.Limit]
+	}
+	nextCursor := ""
+	if hasMore && len(items) > 0 {
+		last := items[len(items)-1]
+		nextCursor = encodeProjectChangelogPageCursor(projectChangelogPageCursor{
+			Version: projectChangelogCursorVersion, Scope: request.Scope, EventAt: last.EventAt, ID: last.InternalID,
+		})
+	}
+	return projectChangelogPage{Items: items, HasMore: hasMore, NextCursor: nextCursor}, nil
 }
 
 func (s *Server) loadProjectChangelogEditor(ctx context.Context, publicID string, claims security.Claims) (projectChangelogResponse, projectChangelogTarget, *int64, error) {
@@ -539,10 +596,12 @@ func (s *Server) loadProjectChangelogEditor(ctx context.Context, publicID string
 		join public_routes target on target.id=entry.object_route_id
 		join users creator on creator.id=entry.created_by
 		left join project_changelog_categories category on category.id=entry.category_id
-		left join lateral (select jsonb_object_agg(value.locale,value.name) values
-			from project_changelog_category_localizations value where value.category_id=category.id) category_names on true
-		left join lateral (select jsonb_object_agg(value.locale,value.body_markdown) values
-			from project_changelog_localizations value where value.changelog_id=entry.id) body on true
+		left join lateral (select jsonb_object_agg(value.locale,value.name) values from (
+			select localization.locale,localization.name from project_changelog_category_localizations localization
+			where localization.category_id=category.id order by localization.locale limit 9) value) category_names on true
+		left join lateral (select jsonb_object_agg(value.locale,value.body_markdown) values from (
+			select localization.locale,localization.body_markdown from project_changelog_localizations localization
+			where localization.changelog_id=entry.id order by localization.locale limit 9) value) body on true
 		where entry.public_id=$1 and entry.status='active'`, publicID, projectChangelogAggregate).Scan(
 		&item.ID, &targetType, &targetPublicID, &item.EventAt, &item.MinecraftVersions,
 		&item.ProjectVersion, &item.DefaultLocale, &item.ReviewStatus, &item.CreatedAt, &item.UpdatedAt,
@@ -555,12 +614,19 @@ func (s *Server) loadProjectChangelogEditor(ctx context.Context, publicID string
 	if err != nil {
 		return item, target, nil, err
 	}
-	moderator := claimsAllow(claims, "content.review") || claimsAllow(claims, "admin.*")
-	if item.ReviewStatus != "approved" && claims.Subject != createdByInternal && !moderator {
+	canReview := canReviewProjectSubmission(claims, target.PublicID, createdByInternal)
+	if item.ReviewStatus != "approved" && claims.Subject != createdByInternal && !target.CanEdit && !canReview {
 		return item, target, nil, pgx.ErrNoRows
 	}
 	bodyValues := map[string]string{}
-	_ = json.Unmarshal(bodyRaw, &bodyValues)
+	if err = json.Unmarshal(bodyRaw, &bodyValues); err != nil || len(bodyValues) > projectChangelogMaximumLocalizations {
+		return item, target, nil, errors.New("changelog localization limit exceeded")
+	}
+	for _, body := range bodyValues {
+		if utf8.RuneCountInString(body) > 200000 {
+			return item, target, nil, errors.New("changelog body limit exceeded")
+		}
+	}
 	item.Locale, item.BodyMarkdown = selectedChangelogLocalization(bodyValues, item.DefaultLocale, item.DefaultLocale)
 	item.AvailableLocales = sortedMapKeys(bodyValues)
 	for _, key := range item.AvailableLocales {
@@ -569,7 +635,9 @@ func (s *Server) loadProjectChangelogEditor(ctx context.Context, publicID string
 	item.CanEdit = target.CanEdit
 	if categoryID != "" {
 		categoryNames := map[string]string{}
-		_ = json.Unmarshal(categoryRaw, &categoryNames)
+		if err = json.Unmarshal(categoryRaw, &categoryNames); err != nil || len(categoryNames) > projectChangelogMaximumLocalizations {
+			return item, target, nil, errors.New("changelog category localization limit exceeded")
+		}
 		item.Category = &projectChangelogCategoryResponse{ID: categoryID, DefaultLocale: categoryDefaultLocale,
 			Names: categoryNames, Name: localizedChangelogValue(categoryNames, item.DefaultLocale, categoryDefaultLocale)}
 	}

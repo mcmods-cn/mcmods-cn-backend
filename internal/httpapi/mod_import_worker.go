@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
@@ -24,6 +25,8 @@ import (
 )
 
 const maxModImportResponseBytes = int64(16 << 20)
+
+var nonExternalLoaderTokenCharacters = regexp.MustCompile(`[^a-z0-9]+`)
 
 type ModMetadataImportWorker struct {
 	server *Server
@@ -38,45 +41,87 @@ func (worker *ModMetadataImportWorker) Start(ctx context.Context) error {
 	if worker == nil || worker.server == nil || worker.queue == nil {
 		return queue.ErrUnavailable
 	}
-	if _, err := worker.server.db.Exec(context.Background(),
-		`update mod_metadata_import_jobs set status='queued',progress=0,error='',started_at=null,updated_at=now()
-		 where status='running' and updated_at < now() - interval '5 minutes'`); err != nil {
-		return err
-	}
 	subscribeErr := worker.queue.SubscribeTask(modMetadataImportTaskCode, worker.handle)
-	go worker.republishQueued(ctx)
-	if publishErr := worker.publishQueued(ctx); publishErr != nil && subscribeErr == nil {
-		return publishErr
+	go worker.recoverQueuedJobs(ctx)
+	if recoverErr := worker.recoverQueued(ctx); recoverErr != nil && subscribeErr == nil {
+		return recoverErr
 	}
 	return subscribeErr
 }
 
-func (worker *ModMetadataImportWorker) republishQueued(ctx context.Context) {
-	ticker := time.NewTicker(15 * time.Second)
+func (worker *ModMetadataImportWorker) recoverQueuedJobs(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = worker.publishQueued(ctx)
+			_ = worker.recoverQueued(ctx)
 		}
 	}
 }
 
-func (worker *ModMetadataImportWorker) publishQueued(ctx context.Context) error {
-	rows, err := worker.server.db.Query(ctx, `select public_id from mod_metadata_import_jobs where status='queued' order by created_at limit 200`)
+func (worker *ModMetadataImportWorker) recoverQueued(ctx context.Context) error {
+	tx, err := worker.server.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer tx.Rollback(ctx)
+	if _, err = recoverModMetadataImportOutboxTx(ctx, tx, 5*time.Minute, 200); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func recoverModMetadataImportOutboxTx(ctx context.Context, tx pgx.Tx, staleAfter time.Duration, limit int) (int, error) {
+	if staleAfter <= 0 {
+		staleAfter = 5 * time.Minute
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	interval := fmt.Sprintf("%f seconds", staleAfter.Seconds())
+	rows, err := tx.Query(ctx, `select job.public_id,job.status from mod_metadata_import_jobs job
+		where (job.status='queued' and not exists(
+			select 1 from nats_outbox event where event.aggregate_type='mod_metadata_import_job' and event.aggregate_id=job.public_id
+			and (event.status in ('pending','failed','publishing') or event.occurred_at>now()-$1::interval)
+		)) or (job.status='running' and job.updated_at<now()-$1::interval)
+		order by job.updated_at,job.public_id for update skip locked limit $2`, interval, limit)
+	if err != nil {
+		return 0, err
+	}
+	type recovery struct{ jobID, status string }
+	jobs := make([]recovery, 0, limit)
 	for rows.Next() {
-		var jobID string
-		if rows.Scan(&jobID) == nil {
-			_ = worker.queue.PublishTask(ctx, modMetadataImportTaskCode, modMetadataImportMessage{JobID: jobID})
+		var item recovery
+		if err = rows.Scan(&item.jobID, &item.status); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		jobs = append(jobs, item)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	for _, item := range jobs {
+		if item.status == "running" {
+			tag, updateErr := tx.Exec(ctx, `update mod_metadata_import_jobs set status='queued',progress=0,error='',started_at=null,updated_at=now()
+				where public_id=$1 and status='running'`, item.jobID)
+			if updateErr != nil {
+				return 0, updateErr
+			}
+			if tag.RowsAffected() != 1 {
+				return 0, fmt.Errorf("mod metadata import job %s lost recovery ownership", item.jobID)
+			}
+		}
+		if _, err = queue.EnqueueTx(ctx, tx, modMetadataImportTaskCode, "mod.metadata.import.recovered", "mod_metadata_import_job", item.jobID, "", modMetadataImportMessage{JobID: item.jobID}); err != nil {
+			return 0, err
 		}
 	}
-	return rows.Err()
+	return len(jobs), nil
 }
 
 func (worker *ModMetadataImportWorker) handle(ctx context.Context, raw []byte) error {
@@ -94,6 +139,9 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 		`update mod_metadata_import_jobs set status='running',progress=10,error='',started_at=now(),updated_at=now()
 		 where public_id=$1 and status='queued' returning project_type,provider,source_url,user_id`, jobID,
 	).Scan(&projectType, &provider, &sourceURL, &userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return nil
 	}
@@ -139,7 +187,7 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 			return fail(err)
 		}
 		_, _ = s.db.Exec(ctx, `update mod_metadata_import_jobs set progress=85,updated_at=now() where public_id=$1`, jobID)
-		if err = normalizeAndValidateModpackRequest(&draft); err != nil {
+		if err = normalizeAndValidateModpackImportDraft(&draft); err != nil {
 			return fail(fmt.Errorf("导入数据校验失败: %w", err))
 		}
 		result, marshalErr := json.Marshal(draft)
@@ -245,29 +293,13 @@ type modrinthTeamMember struct {
 }
 
 func importModrinthProject(ctx context.Context, client *http.Client, cfg modImportConfig, reference string) (createModRequest, error) {
-	var project modrinthProject
-	headers := providerHeaders(cfg.UserAgent, "", "")
-	if cfg.Modrinth.Token != "" {
-		headers.Set("Authorization", cfg.Modrinth.Token)
+	snapshot, err := loadModrinthProviderSnapshot(ctx, client, cfg, reference)
+	if err != nil {
+		return createModRequest{}, err
 	}
-	if err := getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(reference), headers, &project); err != nil {
-		return createModRequest{}, fmt.Errorf("读取 Modrinth 项目失败: %w", err)
-	}
+	project := snapshot.Project
 	if project.ProjectType != "mod" {
 		return createModRequest{}, errors.New("该 Modrinth 项目不是模组")
-	}
-	authors := make([]modAuthorPayload, 0)
-	if project.Team != "" {
-		var members []modrinthTeamMember
-		if getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/team/"+url.PathEscape(project.Team)+"/members", headers, &members) == nil {
-			for _, member := range members {
-				name := member.User.Name
-				if name == "" {
-					name = member.User.Username
-				}
-				authors = append(authors, modAuthorPayload{Name: name, AvatarURL: member.User.AvatarURL, Role: member.Role})
-			}
-		}
 	}
 	categoryValues := append(append([]string{}, project.Categories...), project.AdditionalCategories...)
 	loaders := normalizeLoaders(project.Loaders)
@@ -280,7 +312,7 @@ func importModrinthProject(ctx context.Context, client *http.Client, cfg modImpo
 		Compatibilities:   compatibilitiesForLoaders(loaders, project.GameVersions),
 		Tags:              tagsFromExternal(categoryValues),
 		SearchKeywords:    uniqueTrimmed([]string{project.Slug}, 40),
-		Authors:           authors,
+		Authors:           snapshot.Authors,
 		OfficialStatus:    statusFromExternal(project.Status, false),
 		SourceStatus:      sourceStatusFromLicense(project.License.ID),
 		License:           normalizeExternalLicense(project.License.ID),
@@ -334,30 +366,12 @@ type curseForgeMod struct {
 }
 
 func importCurseForgeProject(ctx context.Context, client *http.Client, cfg modImportConfig, reference string) (createModRequest, error) {
-	headers := providerHeaders(cfg.UserAgent, "", cfg.CurseForge.APIKey)
-	searchURL, _ := url.Parse(cfg.CurseForge.BaseURL + "/mods/search")
-	query := searchURL.Query()
-	query.Set("gameId", "432")
-	query.Set("slug", reference)
-	query.Set("pageSize", "1")
-	searchURL.RawQuery = query.Encode()
-	var search struct {
-		Data []curseForgeMod `json:"data"`
+	headers := providerCredentialHeaders(cfg.UserAgent, "curseforge", cfg.CurseForge.BaseURL, "", cfg.CurseForge.APIKey)
+	snapshot, err := loadCurseForgeProviderSnapshot(ctx, client, cfg, headers, 6, reference)
+	if err != nil {
+		return createModRequest{}, err
 	}
-	if err := getProviderJSON(ctx, client, searchURL.String(), headers, &search); err != nil {
-		return createModRequest{}, fmt.Errorf("搜索 CurseForge 项目失败: %w", err)
-	}
-	if len(search.Data) == 0 {
-		return createModRequest{}, errors.New("CurseForge 项目不存在")
-	}
-	project := search.Data[0]
-	if !strings.EqualFold(project.Slug, reference) {
-		return createModRequest{}, errors.New("CurseForge 未返回匹配的模组项目")
-	}
-	var description struct {
-		Data string `json:"data"`
-	}
-	_ = getProviderJSON(ctx, client, cfg.CurseForge.BaseURL+"/mods/"+strconv.FormatInt(project.ID, 10)+"/description", headers, &description)
+	project := snapshot.Project
 	categoryValues := make([]string, 0, len(project.Categories)*2)
 	for _, category := range project.Categories {
 		categoryValues = append(categoryValues, category.Name, category.Slug)
@@ -369,10 +383,6 @@ func importCurseForgeProject(ctx context.Context, client *http.Client, cfg modIm
 			compatibilityMap[loader] = append(compatibilityMap[loader], index.GameVersion)
 		}
 	}
-	authors := make([]modAuthorPayload, 0, len(project.Authors))
-	for _, author := range project.Authors {
-		authors = append(authors, modAuthorPayload{Name: author.Name, AvatarURL: author.AvatarURL, Role: "Author"})
-	}
 	return createModRequest{
 		SiteID:              modSiteIDBase(project.Slug),
 		PrimaryName:         project.Name,
@@ -382,13 +392,13 @@ func importCurseForgeProject(ctx context.Context, client *http.Client, cfg modIm
 		Compatibilities:     compatibilityMapToPayload(compatibilityMap),
 		Tags:                tagsFromExternal(categoryValues),
 		SearchKeywords:      uniqueTrimmed([]string{project.Slug}, 40),
-		Authors:             authors,
+		Authors:             curseForgeAuthors(project),
 		OfficialStatus:      statusFromExternal("active", !project.IsAvailable),
 		SourceStatus:        "unknown",
 		License:             "Custom",
 		CurseForgeProjectID: strconv.FormatInt(project.ID, 10),
 		IconURL:             project.Logo.ThumbnailURL,
-		BodyMarkdown:        htmlToMarkdown(description.Data),
+		BodyMarkdown:        htmlToMarkdown(snapshot.DescriptionHTML),
 		SubmissionMethod:    "curseforge",
 		Links: compactLinks([]modLinkPayload{
 			{Type: "curseforge", URL: project.Links.WebsiteURL},
@@ -437,7 +447,7 @@ type githubRepository struct {
 }
 
 func importGitHubRepository(ctx context.Context, client *http.Client, cfg modImportConfig, reference string) (createModRequest, error) {
-	headers := providerHeaders(cfg.UserAgent, cfg.GitHub.Token, "")
+	headers := providerCredentialHeaders(cfg.UserAgent, "github", cfg.GitHub.BaseURL, bearerAuthorization(cfg.GitHub.Token), "")
 	headers.Set("Accept", "application/vnd.github+json")
 	headers.Set("X-GitHub-Api-Version", "2022-11-28")
 	var repository githubRepository
@@ -446,7 +456,10 @@ func importGitHubRepository(ctx context.Context, client *http.Client, cfg modImp
 	}
 	readmeHeaders := headers.Clone()
 	readmeHeaders.Set("Accept", "application/vnd.github.raw+json")
-	readme, _ := getProviderText(ctx, client, cfg.GitHub.BaseURL+"/repos/"+reference+"/readme", readmeHeaders)
+	readme, err := getProviderText(ctx, client, cfg.GitHub.BaseURL+"/repos/"+reference+"/readme", readmeHeaders)
+	if err != nil && !isProviderNotFound(err) {
+		return createModRequest{}, fmt.Errorf("读取 GitHub README 失败: %w", err)
+	}
 	licenseID := ""
 	if repository.License != nil {
 		licenseID = repository.License.SPDXID
@@ -476,17 +489,32 @@ func importGitHubRepository(ctx context.Context, client *http.Client, cfg modImp
 	}, nil
 }
 
-func providerHeaders(userAgent, token, apiKey string) http.Header {
+func publicProviderHeaders(userAgent string) http.Header {
 	headers := make(http.Header)
 	headers.Set("Accept", "application/json")
 	headers.Set("User-Agent", userAgent)
-	if token != "" {
-		headers.Set("Authorization", "Bearer "+token)
+	return headers
+}
+
+func providerCredentialHeaders(userAgent, provider, baseURL, authorization, apiKey string) http.Header {
+	headers := publicProviderHeaders(userAgent)
+	if !providerCredentialOriginAllowed(provider, baseURL) {
+		return headers
 	}
-	if apiKey != "" {
+	if authorization = strings.TrimSpace(authorization); authorization != "" {
+		headers.Set("Authorization", authorization)
+	}
+	if apiKey = strings.TrimSpace(apiKey); apiKey != "" {
 		headers.Set("x-api-key", apiKey)
 	}
 	return headers
+}
+
+func bearerAuthorization(token string) string {
+	if token = strings.TrimSpace(token); token != "" {
+		return "Bearer " + token
+	}
+	return ""
 }
 
 func newProviderHTTPClient(timeout time.Duration, baseURL string) (*http.Client, error) {
@@ -563,7 +591,28 @@ func getProviderText(ctx context.Context, client *http.Client, endpoint string, 
 	return string(body), nil
 }
 
+type providerHTTPStatusError struct {
+	statusCode int
+	message    string
+}
+
+func (err *providerHTTPStatusError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", err.statusCode, err.message)
+}
+
+func isProviderNotFound(err error) bool {
+	var statusErr *providerHTTPStatusError
+	return errors.As(err, &statusErr) && statusErr.statusCode == http.StatusNotFound
+}
+
 func getProviderBytes(ctx context.Context, client *http.Client, endpoint string, headers http.Header) ([]byte, error) {
+	return getProviderBytesLimited(ctx, client, endpoint, headers, maxModImportResponseBytes)
+}
+
+func getProviderBytesLimited(ctx context.Context, client *http.Client, endpoint string, headers http.Header, maximumBytes int64) ([]byte, error) {
+	if maximumBytes < 1 || maximumBytes > maxModImportResponseBytes {
+		return nil, errors.New("invalid provider response limit")
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -574,11 +623,11 @@ func getProviderBytes(ctx context.Context, client *http.Client, endpoint string,
 		return nil, err
 	}
 	defer response.Body.Close()
-	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxModImportResponseBytes+1))
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maximumBytes+1))
 	if readErr != nil {
 		return nil, readErr
 	}
-	if int64(len(body)) > maxModImportResponseBytes {
+	if int64(len(body)) > maximumBytes {
 		return nil, errors.New("provider response is too large")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -586,7 +635,7 @@ func getProviderBytes(ctx context.Context, client *http.Client, endpoint string,
 		if len(message) > 300 {
 			message = message[:300]
 		}
-		return nil, fmt.Errorf("HTTP %d: %s", response.StatusCode, message)
+		return nil, &providerHTTPStatusError{statusCode: response.StatusCode, message: message}
 	}
 	return body, nil
 }
@@ -754,14 +803,33 @@ func statusFromExternal(value string, archived bool) string {
 }
 
 func loadersFromText(values ...string) []string {
-	joined := strings.ToLower(strings.Join(values, " "))
-	result := make([]string, 0, 4)
-	for _, item := range []struct{ match, name string }{{"neoforge", "NeoForge"}, {"fabric", "Fabric"}, {"forge", "Forge"}, {"quilt", "Quilt"}} {
-		if strings.Contains(joined, item.match) {
-			result = append(result, item.name)
+	tokens := strings.Fields(nonExternalLoaderTokenCharacters.ReplaceAllString(strings.ToLower(strings.Join(values, " ")), " "))
+	found := map[string]bool{}
+	for index := 0; index < len(tokens); index++ {
+		token := tokens[index]
+		if token == "neo" && index+1 < len(tokens) && tokens[index+1] == "forge" {
+			found["NeoForge"] = true
+			index++
+			continue
+		}
+		switch token {
+		case "neoforge", "neoforged":
+			found["NeoForge"] = true
+		case "fabric", "fabricmc":
+			found["Fabric"] = true
+		case "forge", "minecraftforge":
+			found["Forge"] = true
+		case "quilt", "quiltmc":
+			found["Quilt"] = true
 		}
 	}
-	return uniqueTrimmed(result, 30)
+	result := make([]string, 0, 4)
+	for _, name := range []string{"NeoForge", "Fabric", "Forge", "Quilt"} {
+		if found[name] {
+			result = append(result, name)
+		}
+	}
+	return result
 }
 
 func compactLinks(values []modLinkPayload) []modLinkPayload {

@@ -152,20 +152,21 @@ func (s *Server) pauseCatalogImportForMODIDConfirmation(ctx context.Context, job
 
 	var confirmedHash string
 	var confirmed bool
-	if err = s.db.QueryRow(ctx, `select modid_analysis_hash,modid_confirmed_at is not null from catalog_import_jobs where id=$1 and run_token=$2`, jobID, runToken).Scan(&confirmedHash, &confirmed); err != nil {
+	if err = s.db.QueryRow(ctx, `select modid_analysis_hash,modid_confirmed_at is not null
+		from catalog_import_jobs where id=$1 and run_token=$2 and mod_id=$3`, jobID, runToken, modID).Scan(&confirmedHash, &confirmed); err != nil {
 		return false, err
 	}
 	detectedJSON, _ := json.Marshal(analysis.Detected)
 	if !analysis.Required || (confirmed && confirmedHash == analysisHash) {
 		_, err = s.db.Exec(ctx, `update catalog_import_jobs set detected_modids=$3::jsonb,configured_modids=$4,
 			primary_detected_modid=$5,modid_analysis_hash=$6,modid_confirmation_required=false,updated_at=now()
-			where id=$1 and run_token=$2`, jobID, runToken, string(detectedJSON), analysis.Configured, analysis.Primary, analysisHash)
+			where id=$1 and run_token=$2 and mod_id=$7`, jobID, runToken, string(detectedJSON), analysis.Configured, analysis.Primary, analysisHash, modID)
 		return false, err
 	}
 	tag, err := s.db.Exec(ctx, `update catalog_import_jobs set status='confirmation_required',progress=18,current_stage='modid_confirmation',
 		detected_modids=$3::jsonb,configured_modids=$4,primary_detected_modid=$5,modid_analysis_hash=$6,
 		modid_confirmation_required=true,modid_confirmed_at=null,modid_confirmed_by=null,run_token='',heartbeat_at=now(),updated_at=now()
-		where id=$1 and run_token=$2`, jobID, runToken, string(detectedJSON), analysis.Configured, analysis.Primary, analysisHash)
+		where id=$1 and run_token=$2 and mod_id=$7`, jobID, runToken, string(detectedJSON), analysis.Configured, analysis.Primary, analysisHash, modID)
 	return tag.RowsAffected() == 1, err
 }
 
@@ -205,9 +206,7 @@ func (s *Server) confirmModExportMODIDMismatch(w http.ResponseWriter, r *http.Re
 		writeAPIError(w, http.StatusConflict, "MODID_CONFIRMATION_EXPIRED", "导入分析已经变化或确认已被使用，请重新检查", 0, nil)
 		return
 	}
-	payload, _ := json.Marshal(modExportJobMessage{JobID: jobID})
-	if _, err = tx.Exec(r.Context(), `insert into nats_outbox(event_id,event_type,subject,aggregate_type,aggregate_id,payload)
-		values($1,'mod.catalog_import.confirmed',$2,'mod_export_job',$3,$4::jsonb)`, newExportID(), modExportTaskCode, jobID, string(payload)); err != nil {
+	if err = enqueueModExportAttemptTx(r.Context(), tx, jobID, "mod.catalog_import.confirmed"); err != nil {
 		writeError(w, http.StatusInternalServerError, "无法重新加入导入队列")
 		return
 	}
@@ -221,7 +220,6 @@ func (s *Server) confirmModExportMODIDMismatch(w http.ResponseWriter, r *http.Re
 		return
 	}
 	s.writeAppLog(context.Background(), "user_interaction", "warn", "mod_import.modid_mismatch_confirmed", jobID, actorID, r, http.StatusAccepted, 0, map[string]any{"modId": identity.ID, "analysisHash": request.AnalysisHash})
-	s.dispatchModExportJob(r.Context(), jobID)
 	job, err := s.modExportJobByID(r.Context(), jobID, identity.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "无法读取已确认的导入任务")

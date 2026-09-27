@@ -221,7 +221,8 @@ func persistRecipeImports(ctx context.Context, tx pgx.Tx, recipes []recipeImport
 	if _, err = execImportStatement(ctx, tx, `insert into catalog_entities(identity_key,public_id,entity_type,status)
 		select distinct on (type_identity) type_identity,type_public_id,'recipe_type','active'
 		from recipe_import_stage order by type_identity,type_public_id
-		on conflict(identity_key) do update set status='active',updated_at=now()`); err != nil {
+		on conflict(identity_key) do update set status='active',archived_at=null,updated_at=now()
+		where catalog_entities.status='placeholder'`); err != nil {
 		return fmt.Errorf("upsert imported recipe type entities: %w", err)
 	}
 	if _, err = execImportStatement(ctx, tx, `insert into recipe_types(entity_id,canonical_id)
@@ -235,7 +236,8 @@ func persistRecipeImports(ctx context.Context, tx pgx.Tx, recipes []recipeImport
 	if _, err = execImportStatement(ctx, tx, `insert into catalog_entities(identity_key,public_id,entity_type,status)
 		select distinct on (recipe_identity) recipe_identity,recipe_public_id,'recipe','active'
 		from recipe_import_stage order by recipe_identity,recipe_public_id
-		on conflict(identity_key) do update set status='active',updated_at=now()`); err != nil {
+		on conflict(identity_key) do update set status='active',archived_at=null,updated_at=now()
+		where catalog_entities.status='placeholder'`); err != nil {
 		return fmt.Errorf("upsert imported recipe entities: %w", err)
 	}
 	if _, err = execImportStatement(ctx, tx, `insert into recipes(
@@ -428,7 +430,7 @@ func persistRecipeImportBindings(
 		return fmt.Errorf("stage recipe candidates: %w", err)
 	}
 	if _, err = execImportStatement(ctx, tx, `insert into resource_kinds(code,family,user_visible)
-		select distinct kind_code,split_part(kind_code,'.',1),true
+		select distinct kind_code,case when kind_code like 'import.document.%' then 'document' else split_part(kind_code,'.',1) end,true
 		from recipe_candidate_resource_stage
 		on conflict(code) do nothing`); err != nil {
 		return fmt.Errorf("upsert candidate resource kinds: %w", err)

@@ -9,11 +9,12 @@ func TestNormalizeSiteGeneralConfig(t *testing.T) {
 		want    siteGeneralConfig
 		wantErr bool
 	}{
-		{name: "defaults are trimmed", input: siteGeneralConfig{SiteName: "  Mcmods-cn  ", LogoURL: " /site-assets/site-logo-0123456789abcdefabcd.png "}, want: siteGeneralConfig{SiteName: "Mcmods-cn", LogoURL: "/site-assets/site-logo-0123456789abcdefabcd.png"}},
+		{name: "safe WebP logo is trimmed", input: siteGeneralConfig{SiteName: "  Mcmods-cn  ", LogoURL: " /site-assets/site-logo-0123456789abcdefabcd.webp "}, want: siteGeneralConfig{SiteName: "Mcmods-cn", LogoURL: "/site-assets/site-logo-0123456789abcdefabcd.webp"}},
 		{name: "empty logo is allowed", input: siteGeneralConfig{SiteName: "测试站点"}, want: siteGeneralConfig{SiteName: "测试站点"}},
 		{name: "empty name", input: siteGeneralConfig{}, wantErr: true},
 		{name: "external logo", input: siteGeneralConfig{SiteName: "Mcmods-cn", LogoURL: "https://cdn.example.com/logo.png"}, wantErr: true},
 		{name: "unmanaged public path", input: siteGeneralConfig{SiteName: "Mcmods-cn", LogoURL: "/other/logo.png"}, wantErr: true},
+		{name: "legacy raw logo", input: siteGeneralConfig{SiteName: "Mcmods-cn", LogoURL: "/site-assets/site-logo-0123456789abcdefabcd.png"}, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

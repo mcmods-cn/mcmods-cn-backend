@@ -103,7 +103,7 @@ func (s *Server) resolveUsersRootPermissions(ctx context.Context, userIDs []int6
 
 	roleRows, err := s.db.Query(
 		ctx,
-		`select b.user_id, r.code
+		`select distinct b.user_id, r.code
 		 from user_role_bindings b
 		 join roles r on r.id = b.role_id
 		 where b.user_id = any($1) and r.status = 'active'
@@ -187,7 +187,7 @@ func (s *Server) resolveUsersRootPermissions(ctx context.Context, userIDs []int6
 
 	directRows, err := s.db.Query(
 		ctx,
-		`select up.user_id, p.code, up.allow
+		`select up.user_id,p.code,up.allow,up.source
 		 from user_permissions up
 		 join permissions p on p.id = up.permission_id
 		 where up.user_id = any($1) and (up.expires_at is null or up.expires_at > now())
@@ -199,14 +199,14 @@ func (s *Server) resolveUsersRootPermissions(ctx context.Context, userIDs []int6
 	}
 	for directRows.Next() {
 		var userID int64
-		var code string
+		var code, source string
 		var allow bool
-		if err := directRows.Scan(&userID, &code, &allow); err != nil {
+		if err := directRows.Scan(&userID, &code, &allow, &source); err != nil {
 			directRows.Close()
 			return nil, err
 		}
 		applyPermissionCandidate(candidatesByUser[userID], permissionCandidate{
-			PermissionRule: security.PermissionRule{Code: code, Allow: allow, Priority: directUserPermissionPriority, Source: "user"},
+			PermissionRule: security.PermissionRule{Code: code, Allow: allow, Priority: directUserPermissionPriority, Source: "user:" + source},
 			Depth:          -1,
 		})
 	}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -13,8 +12,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
-	"mcmods-cn-backend/internal/security"
 )
 
 const (
@@ -29,6 +26,7 @@ const (
 
 var minecraftProfileNamePattern = regexp.MustCompile(`^[A-Za-z0-9_]{3,16}$`)
 var errSkinWardrobeLimit = errors.New("skin wardrobe item limit reached")
+var errPrivateSkinProfileConflict = errors.New("private skin assets require private player profiles")
 
 type skinAssetRecord struct {
 	ID            int64
@@ -67,21 +65,32 @@ type skinAssetCreateRequest struct {
 }
 
 type skinAssetUpdateRequest struct {
-	Model       *string   `json:"model,omitempty"`
-	Name        *string   `json:"name,omitempty"`
-	Description *string   `json:"description,omitempty"`
-	Tags        *[]string `json:"tags,omitempty"`
-	Visibility  *string   `json:"visibility,omitempty"`
-	Reason      string    `json:"reason,omitempty"`
+	Model         *string                   `json:"model,omitempty"`
+	Name          *string                   `json:"name,omitempty"`
+	Description   *string                   `json:"description,omitempty"`
+	Tags          *[]string                 `json:"tags,omitempty"`
+	Visibility    *string                   `json:"visibility,omitempty"`
+	Reason        string                    `json:"reason,omitempty"`
+	DefaultLocale string                    `json:"defaultLocale,omitempty"`
+	Localizations []catalogLocalizationEdit `json:"localizations,omitempty"`
 }
 
 type skinAssetContentSnapshot struct {
-	PublicID    string   `json:"publicId"`
-	Model       string   `json:"model"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Tags        []string `json:"tags"`
-	Visibility  string   `json:"visibility"`
+	PublicID             string                    `json:"publicId"`
+	Model                string                    `json:"model"`
+	Name                 string                    `json:"name"`
+	Description          string                    `json:"description"`
+	Tags                 []string                  `json:"tags"`
+	Visibility           string                    `json:"visibility"`
+	DefaultLocale        string                    `json:"defaultLocale,omitempty"`
+	Localizations        []catalogLocalizationEdit `json:"localizations,omitempty"`
+	ReplaceLocalizations bool                      `json:"replaceLocalizations,omitempty"`
+}
+
+type createdSkinAsset struct {
+	AssetID  int64
+	PublicID string
+	Revision createdContentRevision
 }
 
 type skinOwnerResponse struct {
@@ -149,6 +158,7 @@ type playerTextureUpdate struct {
 	AssetPublicID string
 	AssetID       int64
 	Model         string
+	Visibility    string
 }
 
 type launcherCredentialRequest struct {
@@ -241,79 +251,83 @@ func (s *Server) skins(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listPublicSkins(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-	kind := strings.ToLower(strings.TrimSpace(query.Get("kind")))
-	if kind != "" {
-		if _, err := normalizeMinecraftTextureKind(kind); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-	model := strings.ToLower(strings.TrimSpace(query.Get("model")))
-	if model != "" && model != "default" && model != "slim" {
-		writeError(w, http.StatusBadRequest, "model must be default or slim")
+	request, err := parseSkinCatalogPageRequest(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	search := strings.TrimSpace(query.Get("q"))
-	if len([]rune(search)) > 80 {
-		writeError(w, http.StatusBadRequest, "search query is too long")
-		return
-	}
-	limit := boundedLimit(query.Get("limit"), 24, 100)
-	offset := boundedOffset(query.Get("offset"))
-	rawSort := strings.TrimSpace(query.Get("sort"))
-	if rawSort == "" {
-		rawSort = string(catalogSortPublished)
-	}
-	sort, validSort := parseCatalogSort(rawSort)
-	direction, validDirection := parseCatalogSortDirection(query.Get("order"), rawSort)
-	if !validSort || !validDirection {
-		writeError(w, http.StatusBadRequest, "invalid skin catalog sort")
-		return
-	}
-	orderBy := catalogOrderSQL(sort, direction, false, 0,
-		"asset.created_at", "asset.updated_at", "asset.id", "asset.display_name")
-	if sort == catalogSortDownloads {
-		directionSQL := string(direction)
-		orderBy = "asset.downloads " + directionSQL + ",asset.updated_at " + directionSQL + ",asset.id " + directionSQL
-	}
-	viewerID := currentClaims(r).Subject
-	rows, err := s.db.Query(r.Context(), skinAssetSelectSQL+`
-		left join public_routes popularity_route on popularity_route.entity_type='skin' and popularity_route.internal_id=asset.id
-		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
-		where asset.status='active' and asset.review_status='approved' and asset.visibility='public'
-		and ($2='' or asset.kind=$2) and ($3='' or asset.model=$3)
-		and ($4='' or asset.display_name ilike '%'||$4||'%' or asset.description ilike '%'||$4||'%'
-			or array_to_string(asset.tags,' ') ilike '%'||$4||'%')
-		order by `+orderBy+` limit $5 offset $6`, viewerID, kind, model, search, limit, offset)
+	pageSQL, arguments := skinCatalogPageSQL(request)
+	rows, err := s.db.Query(r.Context(), pageSQL, arguments...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load skin library")
 		return
 	}
-	defer rows.Close()
-	items := make([]map[string]any, 0)
+	pageRows := make([]skinCatalogPageRow, 0, request.Limit+1)
 	for rows.Next() {
-		record, scanErr := scanSkinAsset(rows)
-		if scanErr != nil {
+		var row skinCatalogPageRow
+		if err = rows.Scan(&row.AssetID, &row.SortName, &row.CreatedAt, &row.UpdatedAt,
+			&row.Heat, &row.Downloads, &row.Favorites, &row.Rating, &row.RatingCount,
+			&row.Views, &row.Comments); err != nil {
+			rows.Close()
 			writeError(w, http.StatusInternalServerError, "failed to read skin library")
 			return
 		}
-		items = append(items, skinAssetJSON(record, viewerID))
+		pageRows = append(pageRows, row)
 	}
 	if err = rows.Err(); err != nil {
+		rows.Close()
 		writeError(w, http.StatusInternalServerError, "failed to read skin library")
 		return
 	}
-	var total int64
-	if err = s.db.QueryRow(r.Context(), `select count(*) from skin_assets asset
-		where asset.status='active' and asset.review_status='approved' and asset.visibility='public'
-		and ($1='' or asset.kind=$1) and ($2='' or asset.model=$2)
-		and ($3='' or asset.display_name ilike '%'||$3||'%' or asset.description ilike '%'||$3||'%'
-			or array_to_string(asset.tags,' ') ilike '%'||$3||'%')`, kind, model, search).Scan(&total); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to count skin library")
-		return
+	rows.Close()
+	hasMore := len(pageRows) > request.Limit
+	if hasMore {
+		pageRows = pageRows[:request.Limit]
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
+	assetIDs := make([]int64, len(pageRows))
+	for index, row := range pageRows {
+		assetIDs[index] = row.AssetID
+	}
+	claims := currentClaims(r)
+	viewerID := claims.Subject
+	recordsByID := make(map[int64]skinAssetRecord, len(assetIDs))
+	if len(assetIDs) != 0 {
+		rows, err = s.db.Query(r.Context(), skinAssetSelectSQL+`
+			where asset.id=any($2::bigint[]) and asset.status='active'
+				and asset.review_status='approved' and asset.visibility='public'`, viewerID, assetIDs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load skin library")
+			return
+		}
+		for rows.Next() {
+			record, scanErr := scanSkinAsset(rows)
+			if scanErr != nil {
+				rows.Close()
+				writeError(w, http.StatusInternalServerError, "failed to read skin library")
+				return
+			}
+			recordsByID[record.ID] = record
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			writeError(w, http.StatusInternalServerError, "failed to read skin library")
+			return
+		}
+		rows.Close()
+	}
+	items := make([]map[string]any, 0, len(pageRows))
+	for _, row := range pageRows {
+		if record, exists := recordsByID[row.AssetID]; exists {
+			items = append(items, skinAssetJSON(record, claims))
+		}
+	}
+	nextCursor := ""
+	if hasMore && len(pageRows) != 0 {
+		nextCursor = skinCatalogNextCursor(request, pageRows[len(pageRows)-1])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items, "limit": request.Limit, "hasMore": hasMore, "nextCursor": nextCursor,
+	})
 }
 
 func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
@@ -329,6 +343,11 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 	if err := normalizeSkinAssetCreate(&request); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	reviewRequired := catalogMutationReviewRequired(loadReviewConfig(r.Context(), s.db), "create") &&
+		!catalogMutationBypassesReview(claims)
+	if antiAbuseModerationRequired(r) {
+		reviewRequired = true
 	}
 	releaseTextureWorker, acquired := acquireMinecraftTextureProcessing(r.Context())
 	if !acquired {
@@ -375,6 +394,8 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create skin asset")
 		return
 	}
+	var pendingTextureUpload *pendingTextureUpload
+	defer func() { s.compensateUncommittedMinecraftTextureUpload(pendingTextureUpload) }()
 	defer tx.Rollback(r.Context())
 	var userStatus string
 	if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, claims.Subject).Scan(&userStatus); err != nil || userStatus != "active" {
@@ -397,38 +418,18 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "skin library daily creation limit reached")
 		return
 	}
-	blob, err := persistSanitizedMinecraftTextureTx(r.Context(), tx, storageClient, storageConfig, claims.Subject, texture)
+	blob, pendingTextureUpload, err := persistSanitizedMinecraftTextureTx(r.Context(), tx, storageClient, storageConfig, texture)
 	if err != nil {
 		log.Printf("persist web skin texture for user %d: %v", claims.Subject, err)
 		writeError(w, http.StatusServiceUnavailable, "texture storage is unavailable")
 		return
 	}
-	var assetID int64
-	var publicID string
-	err = tx.QueryRow(r.Context(), `insert into skin_assets(
-		owner_id,blob_hash,kind,model,display_name,description,tags,visibility,review_status,status)
-		values($1,$2,$3,$4,$5,$6,$7,$8,'approved','active') returning id,public_id`, claims.Subject,
-		blob.Hash, request.Kind, request.Model, request.Name, request.Description, request.Tags, request.Visibility).
-		Scan(&assetID, &publicID)
+	created, err := persistSkinAssetCreationTx(r.Context(), tx, claims.Subject, blob.Hash, request, reviewRequired, r)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record skin asset")
 		return
 	}
-	if _, err = tx.Exec(r.Context(), `update content_subjects set default_locale=$2,updated_at=now()
-		where subject_id=$1 and subject_type='skin'`, assetID, request.DefaultLocale); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to set skin content language")
-		return
-	}
-	for _, localization := range request.Localizations {
-		if _, err = tx.Exec(r.Context(), `insert into content_localizations(
-			subject_type,subject_id,locale,name,summary,content_markdown,provenance,editable,review_status,updated_by)
-			values('skin',$1,$2,$3,$4,$5,'human',true,'approved',$6)`, assetID, localization.Locale,
-			localization.Name, localization.Summary, localization.ContentMarkdown, claims.Subject); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to record localized skin content")
-			return
-		}
-	}
-	if _, err = addSkinToWardrobeTx(r.Context(), tx, claims.Subject, assetID, claims.Subject); errors.Is(err, errSkinWardrobeLimit) {
+	if _, err = addSkinToWardrobeTx(r.Context(), tx, claims.Subject, created.AssetID, claims.Subject); errors.Is(err, errSkinWardrobeLimit) {
 		writeError(w, http.StatusForbidden, errSkinWardrobeLimit.Error())
 		return
 	} else if err != nil {
@@ -439,12 +440,73 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create skin asset")
 		return
 	}
-	record, err := s.skinAssetByPublicID(r.Context(), publicID, claims.Subject)
+	pendingTextureUpload = nil
+	record, err := s.skinAssetByPublicID(r.Context(), created.PublicID, claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load created skin asset")
 		return
 	}
-	writeJSON(w, http.StatusCreated, skinAssetJSON(record, claims.Subject))
+	writeJSON(w, http.StatusCreated, skinAssetJSON(record, claims))
+}
+
+func persistSkinAssetCreationTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	ownerID int64,
+	blobHash string,
+	request skinAssetCreateRequest,
+	reviewRequired bool,
+	auditRequest *http.Request,
+) (createdSkinAsset, error) {
+	var result createdSkinAsset
+	reviewStatus := "approved"
+	if reviewRequired {
+		reviewStatus = "pending"
+	}
+	if err := tx.QueryRow(ctx, `insert into skin_assets(
+		owner_id,blob_hash,kind,model,display_name,description,tags,visibility,review_status,status)
+		values($1,$2,$3,$4,$5,$6,$7,$8,$9,'active') returning id,public_id`, ownerID,
+		blobHash, request.Kind, request.Model, request.Name, request.Description, request.Tags, request.Visibility, reviewStatus).
+		Scan(&result.AssetID, &result.PublicID); err != nil {
+		return result, fmt.Errorf("insert skin asset: %w", err)
+	}
+	snapshot := skinAssetContentSnapshot{
+		PublicID: result.PublicID, Model: request.Model, Name: request.Name, Description: request.Description,
+		Tags: request.Tags, Visibility: request.Visibility, DefaultLocale: request.DefaultLocale,
+		Localizations: request.Localizations, ReplaceLocalizations: true,
+	}
+	snapshotRaw, err := json.Marshal(snapshot)
+	if err != nil {
+		return result, fmt.Errorf("encode skin creation revision: %w", err)
+	}
+	result.Revision, err = createContentRevisionTx(ctx, tx, createContentRevisionParams{
+		EntityType: "skin", EntityID: result.AssetID,
+		AggregateType: "skin", AggregateKey: result.PublicID, Snapshot: snapshotRaw,
+		Reason: "New skin", ActorID: ownerID, Status: reviewStatus, Source: "skin_upload",
+		Metadata: map[string]any{"skinId": result.PublicID, "name": request.Name, "operation": "create"}, Request: auditRequest,
+	})
+	if err != nil {
+		return result, fmt.Errorf("create skin revision: %w", err)
+	}
+	if !reviewRequired {
+		if err = applySkinAssetSnapshotTx(ctx, tx, result.AssetID, ownerID, result.Revision.RevisionID, ownerID, snapshot); err != nil {
+			return result, fmt.Errorf("publish skin creation: %w", err)
+		}
+		return result, nil
+	}
+	if _, err = tx.Exec(ctx, `update content_subjects set default_locale=$3,updated_at=now()
+		where subject_type=$1 and subject_id=$2`, "skin", result.AssetID, request.DefaultLocale); err != nil {
+		return result, fmt.Errorf("set pending skin content language: %w", err)
+	}
+	for _, localization := range request.Localizations {
+		if _, err = tx.Exec(ctx, `insert into content_localizations(
+			subject_type,subject_id,locale,name,summary,content_markdown,provenance,editable,review_status,updated_by)
+			values('skin',$1,$2,$3,$4,$5,'human',true,'pending',$6)`, result.AssetID, localization.Locale,
+			localization.Name, localization.Summary, localization.ContentMarkdown, ownerID); err != nil {
+			return result, fmt.Errorf("insert pending skin localization: %w", err)
+		}
+	}
+	return result, nil
 }
 
 func (s *Server) skinDetail(w http.ResponseWriter, r *http.Request) {
@@ -472,7 +534,7 @@ func (s *Server) getSkinDetail(w http.ResponseWriter, r *http.Request, publicID 
 		writeError(w, http.StatusNotFound, "skin asset was not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, skinAssetJSON(record, claims.Subject))
+	writeJSON(w, http.StatusOK, skinAssetJSON(record, claims))
 }
 
 func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, publicID string) {
@@ -483,6 +545,11 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 	}
 	var request skinAssetUpdateRequest
 	if !decodeSkinJSON(w, r, &request) {
+		return
+	}
+	replaceLocalizations, normalizeErr := normalizeSkinAssetUpdateRequest(&request)
+	if normalizeErr != nil {
+		writeError(w, http.StatusBadRequest, normalizeErr.Error())
 		return
 	}
 	tx, err := s.db.Begin(r.Context())
@@ -527,26 +594,49 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 	snapshot := skinAssetContentSnapshot{
 		PublicID: publicID, Model: record.Model, Name: record.Name,
 		Description: record.Description, Tags: record.Tags, Visibility: record.Visibility,
+		DefaultLocale: request.DefaultLocale, Localizations: request.Localizations, ReplaceLocalizations: replaceLocalizations,
 	}
 	snapshotRaw, err := json.Marshal(snapshot)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to encode skin revision")
 		return
 	}
-	reviewRequired := loadReviewConfig(r.Context(), s.db).CatalogEdit && !catalogMutationBypassesReview(claims)
+	reviewConfig := loadReviewConfig(r.Context(), s.db)
+	operation := "edit"
+	reviewRequired := catalogMutationReviewRequired(reviewConfig, operation) && !catalogMutationBypassesReview(claims)
 	reviewStatus := "approved"
-	if reviewRequired {
-		reviewStatus = "pending"
-	}
 	reason := strings.TrimSpace(request.Reason)
 	if reason == "" {
 		reason = "Skin information update"
+	}
+	if baseRevisionID == nil {
+		operation = "create"
+		reviewRequired = catalogMutationReviewRequired(reviewConfig, operation) && !catalogMutationBypassesReview(claims)
+		if strings.TrimSpace(request.Reason) == "" {
+			reason = "New skin"
+		}
+	}
+	if antiAbuseModerationRequired(r) {
+		reviewRequired = true
+	}
+	if reviewRequired {
+		reviewStatus = "pending"
+	}
+	if reviewRequired && snapshot.Visibility == "private" {
+		if _, err = lockSkinAssetProfilesForPrivateVisibility(r.Context(), tx, record.ID, record.OwnerID); err != nil {
+			if errors.Is(err, errPrivateSkinProfileConflict) {
+				writeError(w, http.StatusConflict, errPrivateSkinProfileConflict.Error())
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to validate player profile visibility")
+			return
+		}
 	}
 	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
 		EntityType: "skin", EntityID: record.ID,
 		AggregateType: "skin", AggregateKey: publicID, BaseRevision: baseRevisionID, Snapshot: snapshotRaw,
 		Reason: reason, ActorID: claims.Subject, Status: reviewStatus, Source: "skin_metadata",
-		Metadata: map[string]any{"skinId": publicID, "name": record.Name, "operation": "edit"}, Request: r,
+		Metadata: map[string]any{"skinId": publicID, "name": record.Name, "operation": operation}, Request: r,
 	})
 	if err != nil {
 		if errors.Is(err, errReviewInProgress) {
@@ -557,7 +647,11 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		return
 	}
 	if !reviewRequired {
-		if err = applySkinAssetSnapshotTx(r.Context(), tx, record.ID, record.OwnerID, created.RevisionID, snapshot); err != nil {
+		if err = applySkinAssetSnapshotTx(r.Context(), tx, record.ID, record.OwnerID, created.RevisionID, claims.Subject, snapshot); err != nil {
+			if errors.Is(err, errPrivateSkinProfileConflict) {
+				writeError(w, http.StatusConflict, errPrivateSkinProfileConflict.Error())
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "failed to publish skin revision")
 			return
 		}
@@ -577,15 +671,23 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		writeError(w, http.StatusInternalServerError, "failed to load updated skin asset")
 		return
 	}
-	writeJSON(w, http.StatusOK, skinAssetJSON(record, claims.Subject))
+	writeJSON(w, http.StatusOK, skinAssetJSON(record, claims))
 }
 
-func applySkinAssetSnapshotTx(ctx context.Context, tx pgx.Tx, assetID, ownerID, revisionID int64, snapshot skinAssetContentSnapshot) error {
+func applySkinAssetSnapshotTx(ctx context.Context, tx pgx.Tx, assetID, ownerID, revisionID, actorID int64, snapshot skinAssetContentSnapshot) error {
 	var oldModel string
-	if err := tx.QueryRow(ctx, `select model from skin_assets where id=$1 and status='active' for update`, assetID).Scan(&oldModel); err != nil {
+	var oldPublishedRevisionID *int64
+	if err := tx.QueryRow(ctx, `select model,published_revision_id from skin_assets where id=$1 and status='active' for update`, assetID).
+		Scan(&oldModel, &oldPublishedRevisionID); err != nil {
 		return err
 	}
-	profileIDs, err := lockProfilesUsingAsset(ctx, tx, assetID)
+	var profileIDs []int64
+	var err error
+	if snapshot.Visibility == "private" {
+		profileIDs, err = lockSkinAssetProfilesForPrivateVisibility(ctx, tx, assetID, ownerID)
+	} else {
+		profileIDs, err = lockProfilesUsingAsset(ctx, tx, assetID)
+	}
 	if err != nil {
 		return err
 	}
@@ -617,6 +719,55 @@ func applySkinAssetSnapshotTx(ctx context.Context, tx pgx.Tx, assetID, ownerID, 
 	if command.RowsAffected() != 1 {
 		return errors.New("skin asset was not updated")
 	}
+	if snapshot.ReplaceLocalizations {
+		return replaceOwnedAssetLocalizationsTx(ctx, tx, "skin", assetID, revisionID, actorID, snapshot.DefaultLocale, snapshot.Localizations)
+	}
+	if oldPublishedRevisionID == nil {
+		if _, err = tx.Exec(ctx, `update content_localizations set review_status='approved',published_revision_id=$3,updated_by=$4,updated_at=now()
+			where subject_type=$1 and subject_id=$2`, "skin", assetID, revisionID, actorID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func lockSkinAssetProfilesForPrivateVisibility(ctx context.Context, tx pgx.Tx, assetID, ownerID int64) ([]int64, error) {
+	profileIDs, err := lockProfilesUsingAsset(ctx, tx, assetID)
+	if err != nil || len(profileIDs) == 0 {
+		return profileIDs, err
+	}
+	var conflict bool
+	if err = tx.QueryRow(ctx, `select exists(select 1 from player_profile_textures texture
+		join player_profiles profile on profile.id=texture.profile_id
+		where texture.asset_id=$1 and profile.user_id=$2 and profile.status='active' and profile.visibility<>'private')`,
+		assetID, ownerID).Scan(&conflict); err != nil {
+		return nil, err
+	}
+	if conflict {
+		return nil, errPrivateSkinProfileConflict
+	}
+	return profileIDs, nil
+}
+
+func rejectSkinRevisionTx(ctx context.Context, tx pgx.Tx, assetID int64, initialSubmission bool) error {
+	reviewStatus := "approved"
+	if initialSubmission {
+		reviewStatus = "rejected"
+	}
+	command, err := tx.Exec(ctx, `update skin_assets set review_status=$2,updated_at=now()
+		where id=$1 and status='active'`, assetID, reviewStatus)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return errors.New("skin asset was not rejected")
+	}
+	if initialSubmission {
+		if _, err = tx.Exec(ctx, `update content_localizations set review_status='rejected',updated_at=now()
+			where subject_type='skin' and subject_id=$1 and published_revision_id is null`, assetID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -638,9 +789,10 @@ func (s *Server) deleteSkin(w http.ResponseWriter, r *http.Request, publicID str
 		return
 	}
 	var assetID, ownerID int64
+	var blobHash string
 	var status string
-	err = tx.QueryRow(r.Context(), `select id,owner_id,status from skin_assets where public_id=$1 for update`, publicID).
-		Scan(&assetID, &ownerID, &status)
+	err = tx.QueryRow(r.Context(), `select id,owner_id,blob_hash,status from skin_assets where public_id=$1 for update`, publicID).
+		Scan(&assetID, &ownerID, &blobHash, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "skin asset was not found")
 		return
@@ -657,27 +809,7 @@ func (s *Server) deleteSkin(w http.ResponseWriter, r *http.Request, publicID str
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
-	profileIDs, err := lockProfilesUsingAsset(r.Context(), tx, assetID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to lock equipped player profiles")
-		return
-	}
-	if _, err = tx.Exec(r.Context(), `delete from player_profile_textures where asset_id=$1`, assetID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to unlink equipped skin asset")
-		return
-	}
-	if len(profileIDs) > 0 {
-		if _, err = tx.Exec(r.Context(), `update player_profiles set updated_at=now() where id=any($1::bigint[])`, profileIDs); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update affected player profiles")
-			return
-		}
-	}
-	if _, err = tx.Exec(r.Context(), `delete from skin_wardrobe where asset_id=$1`, assetID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update wardrobes")
-		return
-	}
-	command, err := tx.Exec(r.Context(), `update skin_assets set status='deleted',updated_at=now() where id=$1 and status='active'`, assetID)
-	if err != nil || command.RowsAffected() != 1 {
+	if err = s.softDeleteSkinAssetTx(r.Context(), tx, assetID, blobHash, "skin_asset_deleted"); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete skin asset")
 		return
 	}
@@ -688,46 +820,99 @@ func (s *Server) deleteSkin(w http.ResponseWriter, r *http.Request, publicID str
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
+func (s *Server) softDeleteSkinAssetTx(ctx context.Context, tx pgx.Tx, assetID int64, blobHash, reason string) error {
+	if err := lockMinecraftTextureLifecycleStore(ctx, tx, blobHash); err != nil {
+		return fmt.Errorf("lock skin texture lifecycle: %w", err)
+	}
+	profileIDs, err := lockProfilesUsingAsset(ctx, tx, assetID)
+	if err != nil {
+		return fmt.Errorf("lock equipped player profiles: %w", err)
+	}
+	if _, err = tx.Exec(ctx, `delete from player_profile_textures where asset_id=$1`, assetID); err != nil {
+		return fmt.Errorf("unlink equipped skin asset: %w", err)
+	}
+	if len(profileIDs) > 0 {
+		if _, err = tx.Exec(ctx, `update player_profiles set updated_at=now() where id=any($1::bigint[])`, profileIDs); err != nil {
+			return fmt.Errorf("update affected player profiles: %w", err)
+		}
+	}
+	if _, err = tx.Exec(ctx, `delete from skin_wardrobe where asset_id=$1`, assetID); err != nil {
+		return fmt.Errorf("update skin wardrobes: %w", err)
+	}
+	command, err := tx.Exec(ctx, `update skin_assets set status='deleted',updated_at=now() where id=$1 and status='active'`, assetID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return errors.New("skin asset is not active")
+	}
+	if err = s.tombstoneUnreferencedMinecraftTextureBlobTx(ctx, tx, blobHash, reason); err != nil {
+		return fmt.Errorf("retire unreferenced skin texture blob: %w", err)
+	}
+	return nil
+}
+
 func (s *Server) skinWardrobe(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	userID := currentClaims(r).Subject
+	claims := currentClaims(r)
+	userID := claims.Subject
 	if userID <= 0 {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	rows, err := s.db.Query(r.Context(), skinAssetSelectSQL+`
-		join skin_wardrobe wardrobe on wardrobe.asset_id=asset.id and wardrobe.user_id=$1
-		where asset.status='active' and (asset.owner_id=$1 or
-			(asset.review_status='approved' and asset.visibility in ('public','unlisted')))
-		order by wardrobe.added_at desc,asset.id desc limit $2`, userID, maximumSkinWardrobeItems)
+	request, err := parseSkinWardrobePageRequest(r.URL.Query(), userID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	pageSQL, arguments := skinWardrobePageSQL(request)
+	rows, err := s.db.Query(r.Context(), pageSQL, arguments...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load wardrobe")
 		return
 	}
-	defer rows.Close()
-	items := make([]map[string]any, 0)
+	pageRows := make([]skinWardrobePageRow, 0, request.Limit+1)
 	for rows.Next() {
-		record, scanErr := scanSkinAsset(rows)
+		row, scanErr := scanSkinWardrobePageRow(rows)
 		if scanErr != nil {
+			rows.Close()
 			writeError(w, http.StatusInternalServerError, "failed to read wardrobe")
 			return
 		}
-		items = append(items, skinAssetJSON(record, userID))
+		pageRows = append(pageRows, row)
 	}
 	if err = rows.Err(); err != nil {
+		rows.Close()
 		writeError(w, http.StatusInternalServerError, "failed to read wardrobe")
 		return
 	}
+	rows.Close()
+	hasMore := len(pageRows) > request.Limit
+	if hasMore {
+		pageRows = pageRows[:request.Limit]
+	}
+	items := make([]map[string]any, 0, len(pageRows))
+	for _, row := range pageRows {
+		items = append(items, skinAssetJSON(row.Asset, claims))
+	}
 	var total int64
-	if err = s.db.QueryRow(r.Context(), `select count(*) from skin_wardrobe where user_id=$1`, userID).Scan(&total); err != nil {
+	countSQL, countArguments := skinWardrobeCountSQL(request)
+	if err = s.db.QueryRow(r.Context(), countSQL, countArguments...).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count wardrobe")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": maximumSkinWardrobeItems})
+	nextCursor := ""
+	if hasMore && len(pageRows) != 0 {
+		nextCursor = skinWardrobeNextCursor(request, pageRows[len(pageRows)-1])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items, "total": total, "limit": request.Limit,
+		"hasMore": hasMore, "nextCursor": nextCursor,
+	})
 }
 
 func (s *Server) skinWardrobeItem(w http.ResponseWriter, r *http.Request) {
@@ -979,6 +1164,20 @@ func (s *Server) updatePlayerProfile(w http.ResponseWriter, r *http.Request, pub
 	if request.Visibility != nil {
 		visibility = *request.Visibility
 	}
+	if request.Visibility != nil && visibility != "private" {
+		var hasPrivateTexture bool
+		if err = tx.QueryRow(r.Context(), `select exists(select 1 from player_profile_textures texture
+			join skin_assets asset on asset.id=texture.asset_id
+			where texture.profile_id=$1 and asset.status='active' and asset.visibility='private')`, profileID).
+			Scan(&hasPrivateTexture); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to validate player texture visibility")
+			return
+		}
+		if hasPrivateTexture {
+			writeError(w, http.StatusConflict, errPrivateSkinProfileConflict.Error())
+			return
+		}
+	}
 	if request.IsDefault != nil && *request.IsDefault {
 		if _, err = tx.Exec(r.Context(), `update player_profiles set is_default=false,updated_at=now()
 			where user_id=$1 and id<>$2 and status='active'`, ownerID, profileID); err != nil {
@@ -1107,824 +1306,4 @@ func (s *Server) deletePlayerProfile(w http.ResponseWriter, r *http.Request, pub
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
-}
-
-func (s *Server) setPlayerProfileTexture(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPut {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	claims := currentClaims(r)
-	if claims.Subject <= 0 {
-		writeError(w, http.StatusUnauthorized, "authentication required")
-		return
-	}
-	publicID := normalizedSkinPublicID(r.PathValue("publicId"))
-	if publicID == "" {
-		writeError(w, http.StatusNotFound, "player profile was not found")
-		return
-	}
-	var request playerTextureRequest
-	if !decodeSkinJSON(w, r, &request) {
-		return
-	}
-	updates, err := parsePlayerTextureUpdates(request)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update player texture")
-		return
-	}
-	defer tx.Rollback(r.Context())
-	var userStatus string
-	if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, claims.Subject).Scan(&userStatus); err != nil || userStatus != "active" {
-		writeError(w, http.StatusForbidden, "account is unavailable")
-		return
-	}
-	for index := range updates {
-		update := &updates[index]
-		if update.AssetPublicID == "" {
-			continue
-		}
-		var assetID, assetOwnerID int64
-		var assetKind, assetModel, status, reviewStatus, visibility string
-		err = tx.QueryRow(r.Context(), `select asset.id,asset.owner_id,asset.kind,asset.model,asset.status,asset.review_status,asset.visibility
-			from skin_assets asset where asset.public_id=$1 for update`, update.AssetPublicID).
-			Scan(&assetID, &assetOwnerID, &assetKind, &assetModel, &status, &reviewStatus, &visibility)
-		if err != nil || status != "active" || reviewStatus != "approved" || assetKind != update.Kind ||
-			(visibility == "private" && assetOwnerID != claims.Subject) {
-			writeError(w, http.StatusBadRequest, "skin asset is unavailable")
-			return
-		}
-		model := update.Model
-		if model == "" {
-			model = assetModel
-		}
-		if update.Kind == "cape" {
-			model = "default"
-		}
-		update.AssetID = assetID
-		update.Model = model
-	}
-	var profileID int64
-	err = tx.QueryRow(r.Context(), `select id from player_profiles where public_id=$1 and user_id=$2 and status='active' for update`, publicID, claims.Subject).
-		Scan(&profileID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "player profile was not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load player profile")
-		return
-	}
-	for _, update := range updates {
-		if update.AssetPublicID == "" {
-			if _, err = tx.Exec(r.Context(), `delete from player_profile_textures where profile_id=$1 and kind=$2`, profileID, update.Kind); err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to clear player texture")
-				return
-			}
-			continue
-		}
-		if _, err = addSkinToWardrobeTx(r.Context(), tx, claims.Subject, update.AssetID, 0); errors.Is(err, errSkinWardrobeLimit) {
-			writeError(w, http.StatusForbidden, errSkinWardrobeLimit.Error())
-			return
-		} else if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update wardrobe")
-			return
-		}
-		_, err = tx.Exec(r.Context(), `insert into player_profile_textures(profile_id,kind,asset_id,model,equipped_at)
-			values($1,$2,$3,$4,now()) on conflict(profile_id,kind) do update
-			set asset_id=excluded.asset_id,model=excluded.model,equipped_at=now()`, profileID, update.Kind, update.AssetID, update.Model)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to equip player texture")
-			return
-		}
-	}
-	if _, err = tx.Exec(r.Context(), `update player_profiles set updated_at=now() where id=$1`, profileID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update player profile")
-		return
-	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update player texture")
-		return
-	}
-	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims.Subject)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load updated player profile")
-		return
-	}
-	writeJSON(w, http.StatusOK, profile)
-}
-
-func parsePlayerTextureUpdates(request playerTextureRequest) ([]playerTextureUpdate, error) {
-	updates := make([]playerTextureUpdate, 0, 2)
-	for _, value := range []struct {
-		kind string
-		raw  json.RawMessage
-	}{{kind: "skin", raw: request.SkinPublicID}, {kind: "cape", raw: request.CapePublicID}} {
-		if len(value.raw) == 0 {
-			continue
-		}
-		assetPublicID := ""
-		if string(value.raw) != "null" {
-			if err := json.Unmarshal(value.raw, &assetPublicID); err != nil {
-				return nil, fmt.Errorf("%sPublicId must be a string or null", value.kind)
-			}
-			assetPublicID = strings.TrimSpace(assetPublicID)
-			if assetPublicID != "" {
-				assetPublicID = normalizedSkinPublicID(assetPublicID)
-				if assetPublicID == "" {
-					return nil, fmt.Errorf("%sPublicId is invalid", value.kind)
-				}
-			}
-		}
-		updates = append(updates, playerTextureUpdate{Kind: value.kind, AssetPublicID: assetPublicID})
-	}
-	if len(updates) == 0 {
-		return nil, fmt.Errorf("skinPublicId or capePublicId is required")
-	}
-	return updates, nil
-}
-
-func (s *Server) publicUserPlayerProfiles(w http.ResponseWriter, r *http.Request) {
-	identity, ok := s.pathUserIdentity(w, r)
-	if !ok {
-		return
-	}
-	userID := identity.InternalID
-	claims := currentClaims(r)
-	includePrivate := claims.Subject == userID || isSkinAdmin(claims)
-	profiles, err := s.loadPlayerProfiles(r.Context(), userID, claims, includePrivate)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load player profiles")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": profiles})
-}
-
-func (s *Server) playerProfileDetail(w http.ResponseWriter, r *http.Request) {
-	publicID := normalizedSkinPublicID(r.PathValue("publicId"))
-	claims := currentClaims(r)
-	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims.Subject)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "player profile was not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load player profile")
-		return
-	}
-	if profile.Status != "active" {
-		writeError(w, http.StatusNotFound, "player profile was not found")
-		return
-	}
-	if profile.Visibility == "private" && profile.Owner.ID != claims.PublicSubject && !isSkinAdmin(claims) {
-		writeError(w, http.StatusNotFound, "player profile was not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, profile)
-}
-
-func (s *Server) launcherCredential(w http.ResponseWriter, r *http.Request) {
-	userID := currentClaims(r).Subject
-	if userID <= 0 {
-		writeError(w, http.StatusUnauthorized, "authentication required")
-		return
-	}
-	switch r.Method {
-	case http.MethodPut:
-		if !s.yggdrasilUserAllowed(r.Context(), userID) {
-			writeError(w, http.StatusForbidden, "launcher login permission is required")
-			return
-		}
-		var request launcherCredentialRequest
-		if !decodeSkinJSON(w, r, &request) {
-			return
-		}
-		if len(request.Password) < 12 || len(request.Password) > 256 {
-			writeError(w, http.StatusBadRequest, "launcher password must be between 12 and 256 bytes")
-			return
-		}
-		hash, acquired, err := hashYggdrasilPassword(r.Context(), request.Password)
-		if !acquired {
-			writeError(w, http.StatusTooManyRequests, "launcher password service is busy")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to hash launcher password")
-			return
-		}
-		tx, err := s.db.Begin(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update launcher credential")
-			return
-		}
-		defer tx.Rollback(r.Context())
-		var status string
-		if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, userID).Scan(&status); err != nil || status != "active" {
-			writeError(w, http.StatusForbidden, "account is unavailable")
-			return
-		}
-		accountUUID, err := ensureYggdrasilAccountTx(r.Context(), tx, userID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to create launcher account identity")
-			return
-		}
-		if _, err = tx.Exec(r.Context(), `delete from yggdrasil_join_sessions
-			where token_id in (select id from yggdrasil_tokens where user_id=$1)`, userID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to revoke existing launcher sessions")
-			return
-		}
-		if _, err = tx.Exec(r.Context(), `update yggdrasil_tokens set status='revoked',revoked_at=now()
-			where user_id=$1 and status<>'revoked'`, userID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to revoke existing launcher sessions")
-			return
-		}
-		if _, err = tx.Exec(r.Context(), `update yggdrasil_accounts set launcher_password_hash=$2,enabled=true,updated_at=now() where user_id=$1`, userID, hash); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update launcher credential")
-			return
-		}
-		if err = tx.Commit(r.Context()); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update launcher credential")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "accountUuid": accountUUID})
-	case http.MethodDelete:
-		tx, err := s.db.Begin(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to disable launcher credential")
-			return
-		}
-		defer tx.Rollback(r.Context())
-		var status string
-		if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, userID).Scan(&status); err != nil || status != "active" {
-			writeError(w, http.StatusForbidden, "account is unavailable")
-			return
-		}
-		var accountUserID int64
-		err = tx.QueryRow(r.Context(), `select user_id from yggdrasil_accounts where user_id=$1 for update`, userID).Scan(&accountUserID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			if err = tx.Commit(r.Context()); err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to disable launcher credential")
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]bool{"enabled": false})
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to lock launcher credential")
-			return
-		}
-		if _, err = tx.Exec(r.Context(), `update yggdrasil_accounts set launcher_password_hash='',enabled=false,updated_at=now() where user_id=$1`, userID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to disable launcher credential")
-			return
-		}
-		if _, err = tx.Exec(r.Context(), `delete from yggdrasil_join_sessions where token_id in (select id from yggdrasil_tokens where user_id=$1)`, userID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to revoke launcher sessions")
-			return
-		}
-		if _, err = tx.Exec(r.Context(), `update yggdrasil_tokens set status='revoked',revoked_at=now() where user_id=$1 and status<>'revoked'`, userID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to revoke launcher sessions")
-			return
-		}
-		if err = tx.Commit(r.Context()); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to disable launcher credential")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]bool{"enabled": false})
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-	}
-}
-
-func (s *Server) launcherSessions(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "private, no-store")
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	userID := currentClaims(r).Subject
-	if userID <= 0 {
-		writeError(w, http.StatusUnauthorized, "authentication required")
-		return
-	}
-	rows, err := s.db.Query(r.Context(), `select token.public_id,token.status,token.issued_at,token.expires_at,token.last_used_at,
-		token.ip,token.user_agent,coalesce(profile.public_id,''),coalesce(profile.uuid::text,''),coalesce(profile.name,'')
-		from yggdrasil_tokens token left join player_profiles profile on profile.id=token.player_profile_id
-		where token.user_id=$1 and token.status in ('active','stale') and token.expires_at>now()
-		order by token.issued_at desc,token.id desc limit 100`, userID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load launcher sessions")
-		return
-	}
-	defer rows.Close()
-	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, status, ip, userAgent, profileID, profileUUID, profileName string
-		var issuedAt, expiresAt time.Time
-		var lastUsedAt *time.Time
-		if err = rows.Scan(&id, &status, &issuedAt, &expiresAt, &lastUsedAt, &ip, &userAgent, &profileID, &profileUUID, &profileName); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to read launcher sessions")
-			return
-		}
-		items = append(items, map[string]any{"id": id, "status": status, "issuedAt": issuedAt, "createdAt": issuedAt,
-			"expiresAt": expiresAt, "lastUsedAt": lastUsedAt, "lastSeenAt": lastUsedAt, "ip": ip, "userAgent": userAgent,
-			"profile": map[string]any{"publicId": profileID, "uuid": profileUUID, "name": profileName}})
-	}
-	if err = rows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to read launcher sessions")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
-}
-
-func (s *Server) launcherSession(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	sessionID := strings.ToLower(strings.TrimSpace(r.PathValue("sessionId")))
-	if !validCatalogPublicID(sessionID) {
-		writeError(w, http.StatusBadRequest, "launcher session ID is invalid")
-		return
-	}
-	userID := currentClaims(r).Subject
-	if userID <= 0 {
-		writeError(w, http.StatusUnauthorized, "authentication required")
-		return
-	}
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to revoke launcher session")
-		return
-	}
-	defer tx.Rollback(r.Context())
-	tag, err := tx.Exec(r.Context(), `update yggdrasil_tokens set status='revoked',revoked_at=now()
-		where public_id=$1 and user_id=$2 and status<>'revoked'`, sessionID, userID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to revoke launcher session")
-		return
-	}
-	if _, err = tx.Exec(r.Context(), `delete from yggdrasil_join_sessions where token_id=
-		(select id from yggdrasil_tokens where public_id=$1 and user_id=$2)`, sessionID, userID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to revoke launcher session")
-		return
-	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to revoke launcher session")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"revoked": tag.RowsAffected() > 0})
-}
-
-const skinAssetSelectSQL = `select asset.id,asset.public_id,asset.owner_id,owner.public_id,owner.username,
-	asset.blob_hash,asset.kind,asset.model,asset.display_name,asset.description,asset.tags,asset.visibility,
-	asset.review_status,asset.status,asset.downloads,blob.width,blob.height,blob.size_bytes,asset.created_at,asset.updated_at,
-	exists(select 1 from skin_wardrobe viewer_wardrobe where viewer_wardrobe.user_id=$1 and viewer_wardrobe.asset_id=asset.id)
-	from skin_assets asset join users owner on owner.id=asset.owner_id
-	join skin_texture_blobs blob on blob.hash=asset.blob_hash `
-
-func scanSkinAsset(row skinRowScanner) (skinAssetRecord, error) {
-	var record skinAssetRecord
-	err := row.Scan(&record.ID, &record.PublicID, &record.OwnerID, &record.OwnerPublicID, &record.OwnerName,
-		&record.BlobHash, &record.Kind, &record.Model, &record.Name, &record.Description, &record.Tags,
-		&record.Visibility, &record.ReviewStatus, &record.Status, &record.Downloads, &record.Width, &record.Height,
-		&record.SizeBytes, &record.CreatedAt, &record.UpdatedAt, &record.InWardrobe)
-	return record, err
-}
-
-func (s *Server) skinAssetByPublicID(ctx context.Context, publicID string, viewerID int64) (skinAssetRecord, error) {
-	return scanSkinAsset(s.db.QueryRow(ctx, skinAssetSelectSQL+` where asset.public_id=$2`, viewerID, publicID))
-}
-
-func lockProfilesUsingAsset(ctx context.Context, tx pgx.Tx, assetID int64) ([]int64, error) {
-	rows, err := tx.Query(ctx, `select profile.id from player_profiles profile
-		join player_profile_textures texture on texture.profile_id=profile.id
-		where texture.asset_id=$1 order by profile.id for update of profile`, assetID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	profileIDs := make([]int64, 0)
-	for rows.Next() {
-		var profileID int64
-		if err = rows.Scan(&profileID); err != nil {
-			return nil, err
-		}
-		profileIDs = append(profileIDs, profileID)
-	}
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-	return profileIDs, nil
-}
-
-func addSkinToWardrobeTx(ctx context.Context, tx pgx.Tx, userID, assetID, knownOwnerID int64) (bool, error) {
-	var exists bool
-	if err := tx.QueryRow(ctx, `select exists(select 1 from skin_wardrobe where user_id=$1 and asset_id=$2)`, userID, assetID).Scan(&exists); err != nil {
-		return false, err
-	}
-	if exists {
-		return false, nil
-	}
-	var count int
-	if err := tx.QueryRow(ctx, `select count(*) from skin_wardrobe where user_id=$1`, userID).Scan(&count); err != nil {
-		return false, err
-	}
-	if count >= maximumSkinWardrobeItems {
-		return false, errSkinWardrobeLimit
-	}
-	command, err := tx.Exec(ctx, `insert into skin_wardrobe(user_id,asset_id) values($1,$2) on conflict do nothing`, userID, assetID)
-	if err != nil {
-		return false, err
-	}
-	added := command.RowsAffected() == 1
-	if !added {
-		return false, nil
-	}
-	ownerID := knownOwnerID
-	if ownerID <= 0 {
-		if err = tx.QueryRow(ctx, `select owner_id from skin_assets where id=$1`, assetID).Scan(&ownerID); err != nil {
-			return false, err
-		}
-	}
-	if ownerID != userID {
-		adoption, adoptionErr := tx.Exec(ctx, `insert into skin_asset_adoptions(user_id,asset_id) values($1,$2) on conflict do nothing`, userID, assetID)
-		if adoptionErr != nil {
-			return false, adoptionErr
-		}
-		if adoption.RowsAffected() == 1 {
-			if _, err = tx.Exec(ctx, `update skin_assets set downloads=downloads+1 where id=$1 and status='active'`, assetID); err != nil {
-				return false, err
-			}
-		}
-	}
-	return true, nil
-}
-
-func skinAssetJSON(record skinAssetRecord, viewerID int64) map[string]any {
-	canEdit := viewerID > 0 && viewerID == record.OwnerID
-	canUse := record.Status == "active" && (canEdit || (record.ReviewStatus == "approved" && record.Visibility != "private"))
-	return map[string]any{
-		"publicId":    record.PublicID,
-		"owner":       map[string]any{"id": record.OwnerPublicID, "username": record.OwnerName},
-		"textureHash": record.BlobHash, "kind": record.Kind, "model": record.Model,
-		"name": record.Name, "description": record.Description, "tags": record.Tags,
-		"visibility": record.Visibility, "reviewStatus": record.ReviewStatus, "status": record.Status,
-		"downloads": record.Downloads, "width": record.Width, "height": record.Height, "sizeBytes": record.SizeBytes,
-		"textureUrl": "/api/yggdrasil/textures/" + record.BlobHash,
-		"inWardrobe": record.InWardrobe, "canEdit": canEdit, "canUse": canUse,
-		"createdAt": record.CreatedAt, "updatedAt": record.UpdatedAt,
-	}
-}
-
-func canReadSkinAsset(record skinAssetRecord, claims security.Claims) bool {
-	if record.Status != "active" {
-		return false
-	}
-	if claims.Subject == record.OwnerID || isSkinAdmin(claims) {
-		return true
-	}
-	return record.ReviewStatus == "approved" && record.Visibility != "private"
-}
-
-func isSkinAdmin(claims security.Claims) bool {
-	return claimsAllow(claims, "admin.*") || claimsAllow(claims, "skin.admin")
-}
-
-func normalizeSkinAssetCreate(request *skinAssetCreateRequest) error {
-	request.FileID = strings.ToLower(strings.TrimSpace(request.FileID))
-	if !validCatalogPublicID(request.FileID) {
-		return fmt.Errorf("fileId is required")
-	}
-	kind, err := normalizeMinecraftTextureKind(request.Kind)
-	if err != nil {
-		return err
-	}
-	request.Kind = kind
-	request.Model = strings.ToLower(strings.TrimSpace(request.Model))
-	if request.Model == "" || request.Kind == "cape" {
-		request.Model = "default"
-	}
-	if request.Model != "default" && request.Model != "slim" {
-		return fmt.Errorf("model must be default or slim")
-	}
-	request.Name = strings.TrimSpace(request.Name)
-	if request.Name == "" {
-		if request.Kind == "cape" {
-			request.Name = "Cape"
-		} else {
-			request.Name = "Skin"
-		}
-	}
-	if len([]rune(request.Name)) > 80 {
-		return fmt.Errorf("name is too long")
-	}
-	request.Description = strings.TrimSpace(request.Description)
-	if len([]rune(request.Description)) > 1000 {
-		return fmt.Errorf("description is too long")
-	}
-	request.DefaultLocale, request.Localizations, err = normalizeCatalogLocalizations(request.DefaultLocale, request.Localizations)
-	if err != nil {
-		return fmt.Errorf("localized skin content is invalid")
-	}
-	if len(request.Localizations) == 0 {
-		request.Localizations = []catalogLocalizationEdit{{Locale: request.DefaultLocale, Name: request.Name, Summary: request.Description}}
-		request.DefaultLocale, request.Localizations, err = normalizeCatalogLocalizations(request.DefaultLocale, request.Localizations)
-	}
-	if err != nil || requireCatalogCreateDefaultLocalization(request.DefaultLocale, request.Localizations) != nil {
-		return fmt.Errorf("the default language must have a localized skin name")
-	}
-	for _, localization := range request.Localizations {
-		if localization.Locale == request.DefaultLocale {
-			request.Name = localization.Name
-			request.Description = localization.Summary
-			break
-		}
-	}
-	request.Tags, err = normalizeSkinTags(request.Tags)
-	if err != nil {
-		return err
-	}
-	request.Visibility, err = normalizeSkinVisibility(request.Visibility, "private")
-	return err
-}
-
-func applySkinAssetUpdate(record *skinAssetRecord, request skinAssetUpdateRequest) error {
-	if request.Model != nil {
-		model := strings.ToLower(strings.TrimSpace(*request.Model))
-		if record.Kind == "cape" {
-			model = "default"
-		}
-		if model != "default" && model != "slim" {
-			return fmt.Errorf("model must be default or slim")
-		}
-		record.Model = model
-	}
-	if request.Name != nil {
-		value := strings.TrimSpace(*request.Name)
-		if value == "" || len([]rune(value)) > 80 {
-			return fmt.Errorf("name must contain between 1 and 80 characters")
-		}
-		record.Name = value
-	}
-	if request.Description != nil {
-		value := strings.TrimSpace(*request.Description)
-		if len([]rune(value)) > 1000 {
-			return fmt.Errorf("description is too long")
-		}
-		record.Description = value
-	}
-	if request.Tags != nil {
-		value, err := normalizeSkinTags(*request.Tags)
-		if err != nil {
-			return err
-		}
-		record.Tags = value
-	}
-	if request.Visibility != nil {
-		value, err := normalizeSkinVisibility(*request.Visibility, record.Visibility)
-		if err != nil {
-			return err
-		}
-		record.Visibility = value
-	}
-	return nil
-}
-
-func normalizeSkinTags(tags []string) ([]string, error) {
-	if len(tags) > 16 {
-		return nil, fmt.Errorf("at most 16 tags are allowed")
-	}
-	result := make([]string, 0, len(tags))
-	seen := map[string]struct{}{}
-	for _, tag := range tags {
-		tag = strings.ToLower(strings.TrimSpace(tag))
-		if tag == "" {
-			continue
-		}
-		if len([]rune(tag)) > 32 {
-			return nil, fmt.Errorf("tag is too long")
-		}
-		if _, exists := seen[tag]; exists {
-			continue
-		}
-		seen[tag] = struct{}{}
-		result = append(result, tag)
-	}
-	return result, nil
-}
-
-func normalizeSkinVisibility(value, fallback string) (string, error) {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" {
-		value = fallback
-	}
-	switch value {
-	case "public", "unlisted", "private":
-		return value, nil
-	default:
-		return "", fmt.Errorf("visibility must be public, unlisted or private")
-	}
-}
-
-func normalizePlayerProfileCreate(request *playerProfileCreateRequest) error {
-	request.Name = strings.TrimSpace(request.Name)
-	if !minecraftProfileNamePattern.MatchString(request.Name) {
-		return fmt.Errorf("player name must contain 3-16 ASCII letters, digits or underscores")
-	}
-	request.Bio = strings.TrimSpace(request.Bio)
-	if len([]rune(request.Bio)) > 500 {
-		return fmt.Errorf("bio is too long")
-	}
-	visibility, err := normalizeSkinVisibility(request.Visibility, "public")
-	request.Visibility = visibility
-	return err
-}
-
-func normalizePlayerProfileUpdate(request *playerProfileUpdateRequest) error {
-	if request.Name != nil {
-		value := strings.TrimSpace(*request.Name)
-		if !minecraftProfileNamePattern.MatchString(value) {
-			return fmt.Errorf("player name must contain 3-16 ASCII letters, digits or underscores")
-		}
-		request.Name = &value
-	}
-	if request.Bio != nil {
-		value := strings.TrimSpace(*request.Bio)
-		if len([]rune(value)) > 500 {
-			return fmt.Errorf("bio is too long")
-		}
-		request.Bio = &value
-	}
-	if request.Visibility != nil {
-		value, err := normalizeSkinVisibility(*request.Visibility, "public")
-		if err != nil {
-			return err
-		}
-		request.Visibility = &value
-	}
-	return nil
-}
-
-func playerProfileLimit(permissions []security.PermissionRule) int {
-	value := permissionRulesNumericValue(permissions, "skin.profile.limit")
-	if value <= 0 {
-		return defaultPlayerProfileLimit
-	}
-	if value > maximumPlayerProfileLimit {
-		return maximumPlayerProfileLimit
-	}
-	return int(value)
-}
-
-func skinAssetLimit(permissions []security.PermissionRule) int {
-	value := permissionRulesNumericValue(permissions, "skin.library.limit")
-	if value <= 0 {
-		return defaultSkinAssetLimit
-	}
-	if value > maximumSkinAssetLimit {
-		return maximumSkinAssetLimit
-	}
-	return int(value)
-}
-
-func (s *Server) userSkinAssetLimit(ctx context.Context, userID int64) (int, error) {
-	_, permissions, err := s.resolveUserRootPermissions(ctx, userID)
-	if err != nil {
-		return 0, err
-	}
-	return skinAssetLimit(permissions), nil
-}
-
-func normalizedSkinPublicID(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if len(value) != 9 {
-		return ""
-	}
-	for _, character := range value {
-		if (character < 'a' || character > 'z') && (character < '0' || character > '9') {
-			return ""
-		}
-	}
-	return value
-}
-
-func decodeSkinJSON(w http.ResponseWriter, r *http.Request, target any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, maxSkinRequestBodyBytes)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return false
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		writeError(w, http.StatusBadRequest, "request body must contain one JSON value")
-		return false
-	}
-	return true
-}
-
-func ensureYggdrasilAccountTx(ctx context.Context, tx pgx.Tx, userID int64) (string, error) {
-	var accountUUID string
-	err := tx.QueryRow(ctx, `select account_uuid::text from yggdrasil_accounts where user_id=$1 for update`, userID).Scan(&accountUUID)
-	if err == nil {
-		return accountUUID, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return "", err
-	}
-	accountUUID, err = newMinecraftUUID()
-	if err != nil {
-		return "", err
-	}
-	err = tx.QueryRow(ctx, `insert into yggdrasil_accounts(user_id,account_uuid) values($1,$2::uuid)
-		on conflict(user_id) do update set updated_at=now() returning account_uuid::text`, userID, accountUUID).Scan(&accountUUID)
-	return accountUUID, err
-}
-
-func (s *Server) loadPlayerProfiles(ctx context.Context, userID int64, claims security.Claims, includePrivate bool) ([]playerProfileResponse, error) {
-	rows, err := s.db.Query(ctx, `select profile.public_id,profile.uuid::text,profile.name,profile.bio,
-		profile.visibility,profile.is_default,profile.status,profile.created_at,profile.updated_at,
-		owner.public_id,owner.username
-		from player_profiles profile join users owner on owner.id=profile.user_id
-		where profile.user_id=$1 and profile.status='active' and ($2 or profile.visibility='public')
-		order by profile.is_default desc,profile.created_at,profile.id`, userID, includePrivate)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	profiles := make([]playerProfileResponse, 0)
-	for rows.Next() {
-		var profile playerProfileResponse
-		if err = rows.Scan(&profile.PublicID, &profile.UUID, &profile.Name, &profile.Bio,
-			&profile.Visibility, &profile.IsDefault, &profile.Status, &profile.CreatedAt, &profile.UpdatedAt,
-			&profile.Owner.ID, &profile.Owner.Username); err != nil {
-			return nil, err
-		}
-		profiles = append(profiles, profile)
-	}
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-	for index := range profiles {
-		if err = s.loadPlayerTextures(ctx, &profiles[index], claims.Subject); err != nil {
-			return nil, err
-		}
-	}
-	return profiles, nil
-}
-
-func (s *Server) loadPlayerProfileByPublicIDForViewer(ctx context.Context, publicID string, viewerID int64) (playerProfileResponse, error) {
-	var profile playerProfileResponse
-	err := s.db.QueryRow(ctx, `select profile.public_id,profile.uuid::text,profile.name,profile.bio,
-		profile.visibility,profile.is_default,profile.status,profile.created_at,profile.updated_at,
-		owner.public_id,owner.username
-		from player_profiles profile join users owner on owner.id=profile.user_id where profile.public_id=$1`, publicID).
-		Scan(&profile.PublicID, &profile.UUID, &profile.Name, &profile.Bio, &profile.Visibility,
-			&profile.IsDefault, &profile.Status, &profile.CreatedAt, &profile.UpdatedAt,
-			&profile.Owner.ID, &profile.Owner.Username)
-	if err != nil {
-		return profile, err
-	}
-	return profile, s.loadPlayerTextures(ctx, &profile, viewerID)
-}
-
-func (s *Server) loadPlayerTextures(ctx context.Context, profile *playerProfileResponse, viewerID int64) error {
-	rows, err := s.db.Query(ctx, `select texture.kind,asset.model,asset.public_id,asset.display_name,
-		asset.description,asset.tags,asset.visibility,asset.review_status,asset.status,asset.downloads,asset.blob_hash,
-		asset.created_at,asset.updated_at,owner.id,owner.public_id,owner.username,
-		exists(select 1 from skin_wardrobe wardrobe where wardrobe.user_id=$2 and wardrobe.asset_id=asset.id)
-		from player_profile_textures texture join player_profiles profile on profile.id=texture.profile_id
-		join skin_assets asset on asset.id=texture.asset_id
-		join users owner on owner.id=asset.owner_id
-		where profile.public_id=$1 and asset.status='active' order by texture.kind`, profile.PublicID, viewerID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var texture playerTextureResponse
-		var assetStatus string
-		if err = rows.Scan(&texture.Kind, &texture.Model, &texture.PublicID, &texture.Name, &texture.Description,
-			&texture.Tags, &texture.Visibility, &texture.ReviewStatus, &assetStatus, &texture.Downloads,
-			&texture.TextureHash, &texture.CreatedAt, &texture.UpdatedAt, &texture.OwnerInternalID, &texture.Owner.ID,
-			&texture.Owner.Username, &texture.InWardrobe); err != nil {
-			return err
-		}
-		texture.TextureURL = "/api/yggdrasil/textures/" + texture.TextureHash
-		texture.CanEdit = viewerID > 0 && viewerID == texture.OwnerInternalID
-		texture.CanUse = assetStatus == "active" && (texture.CanEdit ||
-			(texture.ReviewStatus == "approved" && texture.Visibility != "private"))
-		textureCopy := texture
-		if texture.Kind == "skin" {
-			profile.Skin = &textureCopy
-		} else if texture.Kind == "cape" {
-			profile.Cape = &textureCopy
-		}
-	}
-	return rows.Err()
 }

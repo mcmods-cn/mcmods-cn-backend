@@ -3,12 +3,16 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
 
 const markdownConfigSettingKey = "markdown.rendering"
+
+const plantUMLProxyPath = "/plantuml"
 
 type markdownConfigPayload struct {
 	Core              bool   `json:"core"`
@@ -45,14 +49,14 @@ func defaultMarkdownConfig() markdownConfigPayload {
 		Katex:             true,
 		ExpandTabs:        true,
 		ImageSize:         true,
-		PlantUML:          true,
+		PlantUML:          false,
 		CodeHighlight:     true,
 		EnhancedTables:    true,
 		CollapsibleBlocks: true,
 		AlertBlocks:       true,
 		TOC:               true,
 		TabSize:           2,
-		PlantUMLServer:    "https://www.plantuml.com/plantuml",
+		PlantUMLServer:    plantUMLProxyPath,
 		TOCMinDepth:       2,
 		TOCMaxDepth:       3,
 	}
@@ -66,6 +70,10 @@ func (s *Server) updateMarkdownConfig(w http.ResponseWriter, r *http.Request) {
 	var payload markdownConfigPayload
 	if err := decodeJSON(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		return
+	}
+	if err := validatePlantUMLProxyPath(payload.PlantUMLServer); err != nil {
+		writeError(w, http.StatusBadRequest, "PlantUML 仅支持本站 /plantuml 自建代理")
 		return
 	}
 	payload = normalizeMarkdownConfig(payload)
@@ -117,8 +125,10 @@ func normalizeMarkdownConfig(payload markdownConfigPayload) markdownConfigPayloa
 	if payload.TabSize > 8 {
 		payload.TabSize = 8
 	}
-	if payload.PlantUMLServer == "" {
-		payload.PlantUMLServer = "https://www.plantuml.com/plantuml"
+	plantUMLServerIsTrusted := validatePlantUMLProxyPath(payload.PlantUMLServer) == nil
+	payload.PlantUMLServer = plantUMLProxyPath
+	if !plantUMLServerIsTrusted {
+		payload.PlantUML = false
 	}
 	if payload.TOCMinDepth < 1 {
 		payload.TOCMinDepth = 1
@@ -133,4 +143,12 @@ func normalizeMarkdownConfig(payload markdownConfigPayload) markdownConfigPayloa
 		payload.TOCMaxDepth = 6
 	}
 	return payload
+}
+
+func validatePlantUMLProxyPath(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || strings.TrimRight(trimmed, "/") == plantUMLProxyPath {
+		return nil
+	}
+	return errors.New("PlantUML server must use the fixed same-origin /plantuml proxy")
 }

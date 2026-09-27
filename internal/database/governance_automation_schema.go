@@ -10,7 +10,8 @@ func governanceAutomationSchemaStatements() []string {
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			target_type text not null,
 			target_public_id text not null,
-			target_author_id bigint references users(id) on delete set null,
+			target_actor_id bigint references users(id) on delete set null,
+			target_actor_role text not null,
 			reporter_id bigint not null references users(id) on delete cascade,
 			reason_code text not null,
 			reason_version integer not null default 1 check(reason_version>0),
@@ -18,20 +19,36 @@ func governanceAutomationSchemaStatements() []string {
 			custom_reason text not null default '',
 			detail text not null default '',
 			status text not null default 'pending',
-			claimed_by bigint references users(id) on delete set null,
+			claimed_by bigint references users(id) on delete restrict,
 			claimed_at timestamptz,
 			lock_version bigint not null default 1,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
 			resolved_at timestamptz,
-			check(target_type in ('mod','plugin','map','shader','resource_pack','datapack','addon','discussion','bug','news','tutorial','skin','blueprint','server','comment','user')),
+			check(target_type in ('mod','modpack','plugin','map','shader','resource_pack','datapack','addon','discussion','bug','news','tutorial','skin','blueprint','server','comment','user')),
+			check(target_actor_role in ('submitter','author','owner','subject')),
 			check(status in ('pending','in_review','resolved_valid','resolved_invalid','cancelled')),
+			check(status<>'in_review' or (claimed_by is not null and claimed_at is not null)),
 			check(reason_code<>'other' or btrim(custom_reason)<>'')
 		)`,
 		`create unique index uq_reports_open_reporter_target on reports(reporter_id,target_type,target_public_id)
 			where status in ('pending','in_review')`,
+		`create index idx_reports_reporter_history on reports(reporter_id,created_at desc,id desc)`,
 		`create index idx_reports_queue on reports(status,created_at,id)`,
 		`create index idx_reports_target_history on reports(target_type,target_public_id,created_at desc,id desc)`,
+		`create table report_assignment_events (
+			id bigserial primary key,
+			report_id bigint not null references reports(id) on delete cascade,
+			action text not null,
+			actor_id bigint not null references users(id) on delete restrict,
+			previous_assignee_id bigint references users(id) on delete restrict,
+			assignee_id bigint not null references users(id) on delete restrict,
+			reason text not null default '',
+			created_at timestamptz not null default now(),
+			check(action in ('claim','takeover')),
+			check(action<>'takeover' or btrim(reason)<>'')
+		)`,
+		`create index idx_report_assignment_events_report on report_assignment_events(report_id,created_at,id)`,
 		`create table report_snapshots (
 			report_id bigint primary key references reports(id) on delete cascade,
 			schema_version integer not null default 1 check(schema_version>0),
@@ -115,7 +132,8 @@ func governanceAutomationSchemaStatements() []string {
 			revoke_reason text not null default '',
 			created_at timestamptz not null default now(),
 			check(status in ('active','revoked','expired')),
-			check(reason_code<>'other' or btrim(custom_reason)<>'')
+			check(reason_code<>'other' or btrim(custom_reason)<>''),
+			check(ends_at is null or ends_at>=starts_at+interval '1 minute')
 		)`,
 		`create unique index uq_ban_records_active_user on ban_records(user_id)
 			where status='active'`,
@@ -153,15 +171,20 @@ func governanceAutomationSchemaStatements() []string {
 			check(status in ('draft','published'))
 		)`,
 		`create index idx_site_changelogs_public on site_changelogs(change_date desc,id desc) where status='published'`,
+		`create index idx_site_changelogs_admin on site_changelogs(change_date desc,id desc)`,
 		`create table site_changelog_translations (
 			changelog_id bigint not null references site_changelogs(id) on delete cascade,
 			locale text not null,
 			title text not null,
 			body_markdown text not null,
+			status text not null default 'draft',
 			updated_by bigint references users(id) on delete set null,
 			updated_at timestamptz not null default now(),
-			primary key(changelog_id,locale)
+			primary key(changelog_id,locale),
+			check(status in ('draft','published'))
 		)`,
+		`create index idx_site_changelog_translations_published on site_changelog_translations(changelog_id,locale)
+			where status='published'`,
 		`create table seed_crawler_configs (
 			id boolean primary key default true check(id),
 			enabled boolean not null default false,
@@ -197,9 +220,11 @@ func governanceAutomationSchemaStatements() []string {
 			check(status in ('pending','running','completed','failed','paused'))
 		)`,
 		`create index idx_seed_crawler_runs_ready on seed_crawler_runs(status,next_attempt_at,id)`,
+		`create index idx_seed_crawler_runs_created on seed_crawler_runs(created_at desc,id desc)`,
 		`create table seed_crawler_candidates (
 			id bigserial primary key,
-			run_id bigint references seed_crawler_runs(id) on delete set null,
+			first_seen_run_id bigint not null references seed_crawler_runs(id),
+			last_seen_run_id bigint not null references seed_crawler_runs(id),
 			external_project_id text not null,
 			project_type text not null,
 			downloads bigint not null default 0,
@@ -209,8 +234,13 @@ func governanceAutomationSchemaStatements() []string {
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
 			unique(external_project_id),
+			check(status in ('candidate','submitting','failed','existing','draft','submitted')),
 			check(project_type in ('mod','plugin','shader_pack','resource_pack'))
 		)`,
+		`create index idx_seed_crawler_candidates_first_seen_run on seed_crawler_candidates(first_seen_run_id)`,
+		`create index idx_seed_crawler_candidates_last_seen_run on seed_crawler_candidates(last_seen_run_id)`,
+		`create index idx_seed_crawler_candidates_downloads on seed_crawler_candidates(downloads desc,id desc)`,
+		`create index idx_seed_crawler_candidates_status_downloads on seed_crawler_candidates(status,downloads desc,id desc)`,
 		`create table seed_crawler_translation_tasks (
 			candidate_id bigint not null references seed_crawler_candidates(id) on delete cascade,
 			locale text not null,
@@ -218,11 +248,18 @@ func governanceAutomationSchemaStatements() []string {
 			attempts integer not null default 0,
 			input_tokens bigint not null default 0,
 			output_tokens bigint not null default 0,
+			usage_date date not null default current_date,
+			quota_reserved_tokens bigint not null default 0,
 			last_error text not null default '',
 			updated_at timestamptz not null default now(),
 			primary key(candidate_id,locale),
-			check(status in ('pending','running','completed','failed'))
+			check(status in ('pending','running','completed','failed')),
+			check(input_tokens>=0),
+			check(output_tokens>=0),
+			check(quota_reserved_tokens>=0)
 		)`,
+		`create index idx_seed_crawler_translation_tasks_daily_budget on seed_crawler_translation_tasks(usage_date)
+			include(input_tokens,output_tokens,quota_reserved_tokens)`,
 		`create table project_external_sources (
 			id bigserial primary key,
 			project_route_id bigint not null references public_routes(id) on delete cascade,
@@ -285,7 +322,7 @@ func governanceAutomationSchemaStatements() []string {
 			created_at timestamptz not null default now(),
 			started_at timestamptz,
 			finished_at timestamptz,
-			check(status in ('pending','running','completed','failed','dead_letter'))
+			check(status in ('pending','running','completed','dead_letter'))
 		)`,
 		`create unique index uq_project_auto_update_active_run on project_auto_update_runs(setting_id)
 			where status in ('pending','running')`,
@@ -314,13 +351,21 @@ func governanceAutomationSchemaStatements() []string {
 			changelog_public_id text,
 			source_managed boolean not null default true,
 			manual_override boolean not null default false,
+			manual_override_revision_id bigint references content_revisions(id) on delete restrict,
+			manual_override_source text not null default '',
 			external_body_hash text not null default '',
 			external_url text not null default '',
 			metadata jsonb not null default '{}'::jsonb,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
-			unique(source_type,external_release_id)
+			unique(source_type,external_release_id),
+			constraint external_release_bindings_manual_override_origin_check check(
+				(manual_override and manual_override_revision_id is not null and manual_override_source<>'') or
+				(not manual_override and manual_override_revision_id is null and manual_override_source='')
+			)
 		)`,
+		`create index idx_external_release_bindings_manual_override_revision
+			on external_release_bindings(manual_override_revision_id) where manual_override_revision_id is not null`,
 		`create table mirrored_project_files (
 			id bigserial primary key,
 			project_route_id bigint not null references public_routes(id) on delete cascade,
@@ -334,7 +379,6 @@ func governanceAutomationSchemaStatements() []string {
 			status text not null default 'pending',
 			created_at timestamptz not null default now(),
 			unique(source_type,external_file_id),
-			unique(source_type,file_sha256,byte_size),
 			check(status in ('pending','scanning','ready','review','failed','source_changed'))
 		)`,
 	}

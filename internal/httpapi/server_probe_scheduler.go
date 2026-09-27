@@ -45,7 +45,13 @@ func StartMinecraftServerProbeScheduler(ctx context.Context, db *pgxpool.Pool) {
 }
 
 func probeDueMinecraftServers(ctx context.Context, db *pgxpool.Pool) {
-	rows, err := db.Query(ctx, `with due as (
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		log.Printf("begin Minecraft server probe claims: %v", err)
+		return
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `with due as (
 		select id,address from minecraft_servers
 		where review_status='approved' and next_probe_at<=now()
 		order by next_probe_at,id
@@ -67,13 +73,18 @@ func probeDueMinecraftServers(ctx context.Context, db *pgxpool.Pool) {
 	for rows.Next() {
 		var item target
 		if err = rows.Scan(&item.id, &item.address); err != nil {
-			break
+			rows.Close()
+			log.Printf("read Minecraft server probe claims: %v", err)
+			return
 		}
 		targets = append(targets, item)
 	}
-	rows.Close()
-	if err != nil {
+	if err = finishRows(rows); err != nil {
 		log.Printf("read Minecraft server probe claims: %v", err)
+		return
+	}
+	if err = tx.Commit(ctx); err != nil {
+		log.Printf("commit Minecraft server probe claims: %v", err)
 		return
 	}
 
@@ -141,13 +152,7 @@ func persistMinecraftServerProbe(ctx context.Context, db *pgxpool.Pool, serverID
 		result.Modded, result.Loader, result.ModListComplete); err != nil {
 		return err
 	}
-	mods := make([]createServerModRequest, 0, len(result.Mods))
-	for _, mod := range result.Mods {
-		mods = append(mods, createServerModRequest{
-			ID: mod.ID, Version: mod.Version, Source: mod.Source, Confidence: mod.Confidence,
-		})
-	}
-	if err = insertMinecraftServerMods(ctx, tx, serverID, mods); err != nil {
+	if err = reconcileMinecraftServerProbeMods(ctx, tx, serverID, result.Mods, result.ModListComplete); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

@@ -107,9 +107,16 @@ func (s *Server) adminModContentAttributeTemplate(w http.ResponseWriter, r *http
 	}
 	encoded, _ := json.Marshal(edit.Definition)
 	var nextSchema modContentTemplateDefinition
-	if json.Unmarshal(encoded, &nextSchema) != nil || !sameNormalizedStrings(currentSchema.ResourceKinds, nextSchema.ResourceKinds) ||
-		preservesModContentAttributeSchema(currentSchema, nextSchema) != nil {
+	if json.Unmarshal(encoded, &nextSchema) != nil {
 		writeError(w, http.StatusConflict, "resource attribute IDs, types, or page resource kinds cannot be changed")
+		return
+	}
+	if err = validateModContentTemplateSchemaChangeTx(r.Context(), tx, templateID, currentSchema, nextSchema); err != nil {
+		if errors.Is(err, errCatalogEditorInvalid) || errors.Is(err, errCatalogEditorReference) {
+			writeError(w, http.StatusConflict, "resource attribute IDs, types, or referenced entry types cannot be changed")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to validate resource attribute references")
+		}
 		return
 	}
 	var updatedAt time.Time
