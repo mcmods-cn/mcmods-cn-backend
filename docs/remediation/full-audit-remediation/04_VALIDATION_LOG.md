@@ -4773,3 +4773,18 @@ loader配置、同步状态、服务端校验与前端选择现在共享一个�
 | 台账和原审计 | strict/allow；双份审计17文件SHA-256 | 38 issues / inventory PASS | 1（预期）/ 0 | 精确449、CLOSED429/OPEN20；137H/230M/65L/17UNRESOLVED不伪调；原审计17文件哈希一致；阶段交接并暂停，不宣告成熟度A |
 | 最终源码复验 | closing普通导入、真实PG Race、全仓普通Test、Vet、Build、双仓diff | 墙钟10.507/30.001/66.261/4.795/7.835s；diff0.682/0.468s | 全部0 | PASS：最后实际endpoint修正后的源码通过；两端diff采用cr-at-eol识别Windows原有换行；gofmt待格式化文件0 |
 | 最终数据库隔离 | 本机127.0.0.1:55432只读核对；原始输出database-isolation.log | 打包前 | 0 | PASS：共享public generation155、其他客户端0、测试数据库0、临时关系0、临时routine0；未升级/重置共享或远端业务库 |
+
+## 2026-09-30：OPS-020 公平维护预算收尾与源码交付
+
+本轮仅收尾已开始的 OPS-020，不开始其他 19 项。实际命令原始输出在新交付包 `handoff/validation/`；后端全仓最终以 `verified-backend-results.json` 为准，前端以 `frontend-results.json` 为准。失败、中断和历史运行不混入最终 PASS。
+
+| 验证项 | 命令 / 证据 | 墙钟 / 包时间 | 退出码 | 结果 |
+| --- | --- | ---: | ---: | --- |
+| 有效 RED → GREEN | 蓝图表排他锁 + 完整随机 generation167 DB；`TestOPS020MaintenanceTimeoutDoesNotStarveBansAndTTLIntegration` | RED用例7.71s；初次GREEN6.46s | 1（预期）/ 0 | 旧共享截止时间锁等待后 bans=active/active、草稿4005、日志ready、Join/Presence各2；新实现封禁expired、来源正确、草稿剩5且后续TTL前进 |
+| 真实 PG 组合回归 | `closing-maintenance-integration.log`：OPS020、OPS003、TEST008、手工授权、临时封禁、蓝图/贴图清理与源码合同 | 21.447s / 12.347s | 0 | PASS：独立预算、4000配额、双Worker恢复、取消、未来/手工授权/Session保留；导入最终化故障仍补偿，完整DB与临时表夹具边界分别记录 |
+| 真实 PG Race | `go test -race ./internal/httpapi -run TestOPS020 -count=1 -v`，本机PG和MinGW/CGO=1 | 27.179s / 7.761s | 0 | PASS：锁等待、两个维护Worker和取消未触发DATA RACE，真实数据库行为一致 |
+| 后端最终全仓 | `go test ./... -count=1`；`go test -race ./... -count=1`；Vet/Build；`go mod tidy -diff` | 45.210 / 56.607 / 2.647 / 3.415 / 0.405s | 全部0 | PASS：完整包范围、普通/Race、静态分析、构建及模块稳定性；非今日专项门不冒充已重跑 |
+| 前端最终全仓 | `pnpm test/typecheck/lint/build`；HTTPS example.test构建配置 | 5.456 / 3.250 / 24.747 / 33.817s | 全部0 | PASS：277/277且0skip、类型与ESLint无错误、58页生产构建；前端业务代码本轮未变 |
+| 失败和中断 | 首轮backend源码合同；执行衔接后PG停止；`final-*`全仓普通/Race；`closing-*`缺完整汇总 | 原始失败输出保留 | 1 / 1 / 未记录 | 不计PASS：旧直接调用字符串已同步新调度入口且行为断言保留；pg_ctl确认无服务后启动原实例并确认readiness，随后verified复验全绿；缺退出码不冒充成功 |
+| 原审计/格式/台账 | `verify-handoff.ps1`；双份审计17文件SHA-256；全树gofmt；strict/allow verifier | 实际完整校验 | 0 / 1（严格预期未完成） | ID精确449，CLOSED430/OPEN19，137H/230M/65L/17UNRESOLVED不改；strict37 issues，allow PASS；审计17文件一致，待gofmt文件0；diff检查通过 |
+| Schema/隔离 | 本机127.0.0.1:55432；随机DB完整Migrate；共享public只读核对 | 本轮 | 0 | generation167保持，无DDL/API/前端语义变化；共享public仍155，随机test018数据库0；没有共享/远程reset，未连接生产 |

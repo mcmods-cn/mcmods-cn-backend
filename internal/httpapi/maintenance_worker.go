@@ -11,7 +11,10 @@ import (
 	"mcmods-cn-backend/internal/querycache"
 )
 
-const maintenanceBatchSize = 1000
+const (
+	maintenanceBatchSize  = 1000
+	maintenanceMaxBatches = 4
+)
 
 const stickerUploadRetention = time.Hour
 
@@ -49,14 +52,28 @@ func (worker *MaintenanceWorker) run(ctx context.Context) {
 }
 
 func (worker *MaintenanceWorker) prune(ctx context.Context) {
-	pruneCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	worker.pruneBlueprintUploads(pruneCtx)
-	worker.pruneReportEvidence(pruneCtx)
-	worker.pruneStickerUploads(pruneCtx)
-	worker.pruneSkinTextureBlobs(pruneCtx)
-	worker.pruneCatalogImportArtifacts(pruneCtx)
-	worker.expireBans(pruneCtx)
+	worker.pruneWithTimeout(ctx, 30*time.Second)
+}
+
+func (worker *MaintenanceWorker) pruneWithTimeout(ctx context.Context, timeout time.Duration) {
+	// Security state goes first. Every category gets its own deadline and a
+	// fixed batch budget; a blocked or backlogged category cannot consume the
+	// next category's time. All deadlines still inherit shutdown cancellation.
+	for _, prune := range []func(context.Context){
+		worker.expireBans,
+		worker.pruneBlueprintUploads,
+		worker.pruneReportEvidence,
+		worker.pruneStickerUploads,
+		worker.pruneSkinTextureBlobs,
+		worker.pruneCatalogImportArtifacts,
+	} {
+		if ctx.Err() != nil {
+			return
+		}
+		pruneCtx, cancel := context.WithTimeout(ctx, timeout)
+		prune(pruneCtx)
+		cancel()
+	}
 	for _, statement := range []string{
 		`update log_shares set status='expired' where id in (
 			select id from log_shares where expires_at<=now() and status in ('processing','ready')
@@ -76,7 +93,11 @@ func (worker *MaintenanceWorker) prune(ctx context.Context) {
 			select session_hash from user_presence_sessions where last_active_at<now()-interval '1 day' order by last_active_at limit $1
 		)`,
 	} {
-		for pruneCtx.Err() == nil {
+		if ctx.Err() != nil {
+			return
+		}
+		pruneCtx, cancel := context.WithTimeout(ctx, timeout)
+		for batch := 0; batch < maintenanceMaxBatches && pruneCtx.Err() == nil; batch++ {
 			command, err := worker.db.Exec(pruneCtx, statement, maintenanceBatchSize)
 			if err != nil {
 				log.Printf("background expiration cleanup failed: %v", err)
@@ -86,12 +107,13 @@ func (worker *MaintenanceWorker) prune(ctx context.Context) {
 				break
 			}
 		}
+		cancel()
 	}
 }
 
 func (worker *MaintenanceWorker) pruneCatalogImportArtifacts(ctx context.Context) {
 	server := &Server{db: worker.db}
-	for ctx.Err() == nil {
+	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
 		recovered, err := server.recoverOrphanedCatalogImportArtifacts(ctx)
 		if err != nil {
 			log.Printf("recover orphaned catalog import artifacts: %v", err)
@@ -108,7 +130,7 @@ func (worker *MaintenanceWorker) pruneCatalogImportArtifacts(ctx context.Context
 // transactionally maintained active_reference_count=0 projection.
 func (worker *MaintenanceWorker) pruneSkinTextureBlobs(ctx context.Context) {
 	server := &Server{db: worker.db}
-	for ctx.Err() == nil {
+	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
 		tx, err := worker.db.Begin(ctx)
 		if err != nil {
 			log.Printf("begin unreferenced skin texture cleanup: %v", err)
@@ -158,7 +180,7 @@ func (worker *MaintenanceWorker) pruneSkinTextureBlobs(ctx context.Context) {
 }
 
 func (worker *MaintenanceWorker) pruneBlueprintUploads(ctx context.Context) {
-	for ctx.Err() == nil {
+	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
 		tx, err := worker.db.Begin(ctx)
 		if err != nil {
 			log.Printf("begin expired blueprint upload cleanup: %v", err)
@@ -204,7 +226,7 @@ func (worker *MaintenanceWorker) pruneBlueprintUploads(ctx context.Context) {
 
 func (worker *MaintenanceWorker) pruneStickerUploads(ctx context.Context) {
 	server := &Server{db: worker.db}
-	for ctx.Err() == nil {
+	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
 		tx, err := worker.db.Begin(ctx)
 		if err != nil {
 			log.Printf("begin temporary sticker upload cleanup: %v", err)
@@ -256,7 +278,7 @@ func (worker *MaintenanceWorker) pruneStickerUploads(ctx context.Context) {
 }
 
 func (worker *MaintenanceWorker) expireBans(ctx context.Context) {
-	for ctx.Err() == nil {
+	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
 		rows, err := worker.db.Query(ctx, `with candidates as (
 			select id from ban_records where status='active' and ends_at is not null and ends_at<=now()
 			order by ends_at,id for update skip locked limit $1
@@ -313,7 +335,7 @@ func (worker *MaintenanceWorker) expireBans(ctx context.Context) {
 // durable retries; marking the file deleted immediately also closes the access
 // path before physical deletion succeeds.
 func (worker *MaintenanceWorker) pruneReportEvidence(ctx context.Context) {
-	for ctx.Err() == nil {
+	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
 		tx, err := worker.db.Begin(ctx)
 		if err != nil {
 			log.Printf("begin report evidence cleanup: %v", err)

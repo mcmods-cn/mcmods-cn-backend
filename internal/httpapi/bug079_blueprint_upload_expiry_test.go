@@ -47,7 +47,9 @@ func TestBlueprintUploadFailureAndAbortPathsDiscardPendingSubjects(t *testing.T)
 	}
 	worker := string(workerSource)
 	for _, required := range []string{
-		"worker.pruneBlueprintUploads(pruneCtx)",
+		"worker.pruneBlueprintUploads,",
+		"prune(pruneCtx)",
+		"context.WithTimeout(ctx, timeout)",
 		"for update skip locked limit $1",
 		"deletePendingBlueprintUploadRowsTx",
 	} {

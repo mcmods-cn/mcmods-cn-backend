@@ -204,5 +204,6 @@ RC-DATABASE-SCALE增量：DB-008以generation141删除`log_shares`重复owner单
 | RC-PROJECT-UPDATE-NOTIFICATION-RETRY | OPS-004、TEST-018 | 通知任务的失败预算必须在业务事务回滚之外原子持久化并只统计失败；每批游标、幂等唯一键、多实例行锁、过滤/本地化、未读增量、陈旧租约和不可用目标需要由真实Worker组合验证，不能由事件合并或DDL字符串代替 | 已关闭：retry按新失败次数退避并在第8次终止且传播自身错误；随机generation165数据库以201有效关注者并发双Worker、瞬时查询故障恢复、陈旧processing接管、重复重放和隐藏目标证明三次各201唯一投递、精确locale/过滤/未读与零漏发 |
 | RC-POPULARITY-REFRESH-LIFECYCLE | OPS-010、TEST-028、TEST-029 | 项目统计与评论热度队列必须具有可索引的待处理/执行/终止状态、有限失败预算、陈旧租约接管、错误持久化与新事实恢复；评分/热度/搜索和管理目录还必须以真实并发、隐私闭集、反向触发器及百万级计划组成发布门，不能靠DDL字符串或单项纯函数代替 | 已关闭：generation166为两队列建立pending/processing/failed闭集及ready/stale部分索引，第8次失败终止、处理与retry错误返回，新事件以CAS安全重入；随机双worker/毒函数/故障注入、评分/搜索完整状态机、公开统计隐私/pageKey和10M刷新/评分、1M目录/搜索计划全部通过 |
 | RC-CONTINUOUS-DELIVERY-GATES | OPS-002、TEST-002、TEST-003 | 测试、覆盖率、Race、数据库集成、双端构建和可重复部署必须成为每次push/PR或标签的机器门，而不是审计人员一次性手工命令；工具链缺失不能写成通过，发布物必须可追溯且不携带秘密 | 已关闭：双仓SHA固定CI/依赖审计、非root多阶段Docker与tag+sha GHCR发布；后端27.0%覆盖下限、真实PG串行门及Linux Race，前端277项/Type/Lint/standalone Build；actionlint通过且本机MinGW全仓Race实际为绿 |
+| RC-MAINTENANCE-FAIRNESS | OPS-020 | 固定顺序各类别循环清空积压并共享同一截止时间，前置锁等待或持续积压能使后续安全状态和 TTL 多轮无法执行 | 已关闭：封禁优先、每类独立继承父取消的30秒、4批限额；真实随机PG以排他锁、4005草稿、未来/手工授权/Session和双Worker恢复证明公平执行，真实PG Race及双仓全门通过 |
 
 台账中的 `TRIAGE_PENDING` 会在逐项阅读证据后替换为上述或新增的精确根因组；一个改动关闭多个 Finding 时仍逐项记录证据和验收。
