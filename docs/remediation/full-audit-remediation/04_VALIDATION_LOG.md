@@ -4788,3 +4788,22 @@ loader配置、同步状态、服务端校验与前端选择现在共享一个�
 | 失败和中断 | 首轮backend源码合同；执行衔接后PG停止；`final-*`全仓普通/Race；`closing-*`缺完整汇总 | 原始失败输出保留 | 1 / 1 / 未记录 | 不计PASS：旧直接调用字符串已同步新调度入口且行为断言保留；pg_ctl确认无服务后启动原实例并确认readiness，随后verified复验全绿；缺退出码不冒充成功 |
 | 原审计/格式/台账 | `verify-handoff.ps1`；双份审计17文件SHA-256；全树gofmt；strict/allow verifier | 实际完整校验 | 0 / 1（严格预期未完成） | ID精确449，CLOSED430/OPEN19，137H/230M/65L/17UNRESOLVED不改；strict37 issues，allow PASS；审计17文件一致，待gofmt文件0；diff检查通过 |
 | Schema/隔离 | 本机127.0.0.1:55432；随机DB完整Migrate；共享public只读核对 | 本轮 | 0 | generation167保持，无DDL/API/前端语义变化；共享public仍155，随机test018数据库0；没有共享/远程reset，未连接生产 |
+
+## 2026-09-30：OPS-007 初始订阅恢复、真实权限拒绝与最新交付
+
+仅收尾当前OPS-007，按用户要求不开始其他18项，并提交当前代码到指定GitHub仓库、新增源码/进度包。原始阶段日志保存在本机`D:\System\Flies\Mcmods-cn\.codex-tmp\remediation-ops007-20260930\`，打包时原样复制到新版`handoff/validation/`。最终源码包括零值Close保护，后端最终全仓以`closing-results.json`为准；前端以`frontend-results.json`为准。
+
+| 验证项 | 命令 / 证据 | 墙钟 / 包时间 | 退出码 | 结果 |
+| --- | --- | ---: | ---: | --- |
+| 有效RED → GREEN | 官方嵌入broker初始关闭后恢复；Close后Reconfigure；真实用户ACL拒绝SUB | 初始RED包10.684s；权限RED0.599s | 1（预期）/ 0 | 旧实现恢复10秒仍dial refused、关闭后复活；首版恢复在SUB拒绝后返回nil。现自动补订、终态不可复活、真实拒绝可观测并自动恢复 |
+| 全queue真实PG+JetStream | `MCMODS_RUN_DB_INTEGRATION=1 go test ./internal/queue -count=1 -v` | 23.428 / 20.368s | 0 | PASS：初始广播和durable任务恢复、broker重启、权限恢复；Outbox回滚/发布、断连重试、重投去重、死信、陈旧租约、双Dispatcher与持久化故障均实际运行，不skip |
+| HTTP/Hub与指标相邻回归 | `go test ./internal/httpapi -run 'TestOPS007\|TestBUG046\|TestInfrastructure\|TestAdminDeadLetter\|TestLiveProbe\|TestReadyFails' -count=1 -v`，本机PG集成开启 | 10.052 / 6.220s | 0 | PASS：两Server先于broker启动，本地事件保留、跨实例降级；恢复/重启后同ID各一次、无回声；PG缺失仍503，指标/死信replay与分页错误语义保持 |
+| 定向并发/终止边界 | MinGW/CGO=1：queue+httpapi `-race -run 'TestOPS007\|TestBUG046\|TestReconfigure\|TestBroadcastSubscription' -count=2 -v` | 35.946s | 0 | PASS：disabled最新配置不被重试覆盖；父取消、幂等Close与候选拒绝不persist/不swap；没有DATA RACE |
+| 首轮后端全仓门 | `go test ./... -count=1` / `go test -race ./... -count=1` / Vet / Build / tidy-diff | 66.547 / 81.414 / 4.941 / 5.092 / 0.463s | 全部0 | PASS：完整包范围，非本轮专项门不冒充今天已执行 |
+| 最终源码复验 | 零值Close守卫后 `closing-test/race/vet/build/tidy`，同上五命令 | 59.896 / 106.773 / 5.029 / 6.998 / 0.438s | 全部0 | PASS：最后源码全仓普通/Race、静态分析、构建与模块稳定性；无DATA RACE。另一次零值/终态Close定向Race包1.888s也通过 |
+| 前端全仓门 | `pnpm test/typecheck/lint/build`；三项example.test HTTPS配置 | 5.827 / 3.047 / 28.565 / 32.238s | 全部0 | PASS：277/277，Type和ESLint无错误，58页生产构建；本轮未修改前端源码 |
+| 夹具修正与验证边界 | HTTP readiness夹具从错误顶层decode修正为现有data.dependencies包装；库官方源码+真实broker | 首次夹具失败保留说明 | 1 / 0 | 该decode错误不是有效生产RED。单节点loopback/用户ACL不冒充生产集群、容量演练；今日未重跑govulncheck、依赖扫描、浏览器E2E或容器运行 |
+| 原审计/格式/台账 | `verify-state.ps1`：17文件SHA、全树gofmt、双仓diff、strict/allow | 实际复核 | 0 / 1（严格预期未完成） | ID精确449，CLOSED431/OPEN18，137H/231M/65L/16UNRESOLVED；strict35问题不伪通过，allow PASS；17原审计哈希未变，未格式化Go文件0，diff通过 |
+| 数据库隔离与协议 | 本机PG只读`schema_metadata`及`pg_database`；`database-isolation.log` | 打包前 | 0 | 共享public仍155，残留测试DB0；权威167保持且无DDL/reset。只新增只读健康字段，PG503不弱化，可靠任务Outbox协议和可丢广播不变 |
+
+GitHub交付使用普通push现有分支，最终本地/远程SHA与干净工作树见新包`github-delivery.json`；不强推、不变更默认分支、不创建PR、不部署。前端无新改动，无空提交。源码/进度包交付不是449项Goal完成。

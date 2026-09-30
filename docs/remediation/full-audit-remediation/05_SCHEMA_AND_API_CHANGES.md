@@ -2687,3 +2687,11 @@
 - 维护 tick 仍为 10 分钟，类别超时仍为 30 秒，但不再共享截止时间；封禁到期先执行。每类每轮最多 4×1000 行，孤儿导入最多补偿 4 个尝试；后续类别不受前置超时/无限积压影响，剩余积压下轮继续。最坏整个维护轮有 11 个独立时间片，不超过 330 秒且不另启并行 goroutine。
 - 所有子 Context 继承关闭取消；角色撤销仍精确限定 `governance_ban` 来源及 ban ID，保留其他来源、未来授权和会话；文件清理继续使用原有事务和删除 Outbox，没有第二生命周期路径。
 - 后端单独部署即可生效；回滚维护调度会重新引入饿死问题，无数据库回滚步骤。本轮测试仅代表本机随机 PostgreSQL、竞争 Worker 和本机故障替身，不代表生产多节点容量演练。
+
+## OPS-007：运行态订阅恢复和健康状态（generation167保持）
+
+- 无Schema/索引/种子/权限/可靠任务协议变化；PG临时表Outbox和dead-letter组合回归全部通过，共享public155未升级/重置。
+- queue Status增加`realtime`、`realtimeReady`、`recovering`；GET `/ready` 的dependencies增加`realtimeLocal`、`realtimeBroadcast`（disabled/ready/degraded）；管理infrastructure metrics的realtime增加`localReady`、`broadcastEnabled`、`broadcastReady`、`broadcastRecovering`。均为新增只读字段，旧字段/包装不变，数据库未就绪仍503，跨实例广播未就绪仅降级。
+- 注册定义与已成功的live注册分别保存，成功prepare/persist后一次交换；首次失败、终态连接和注册失败经同一权威候选路径恢复。候选SUB拒绝不写设置/不替换旧连接；已连接后的正常reconnect/replay仍由官方库负责。
+- Close不再允许复活或启动本地新任务；父取消停止恢复。广播仍可丢，未添加伪持久重放或改变事件ID/origin协议；双实例恢复/重启后仍一次投递、无本机回声。
+- 后端独立部署即可生效，前端业务无需迁移；回滚会恢复初始离线不补订及错误就绪风险，无DB回滚。客户端所有者需遵循New→使用→Close终态合同，当前调用方无关闭后复用入口。

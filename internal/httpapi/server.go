@@ -643,13 +643,25 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 			dependencies["redis"] = "ready"
 		}
 	}
+	queueStatus := s.queue.Status()
 	if s.queue != nil {
-		queueStatus := s.queue.Status()
 		if queueStatus.Enabled {
 			dependencies["nats"] = "degraded"
 			if queueStatus.Connected {
 				dependencies["nats"] = "ready"
 			}
+		}
+	}
+	realtimeHealth := s.realtimeHealth(queueStatus)
+	dependencies["realtimeLocal"] = "disabled"
+	if realtimeHealth.LocalReady {
+		dependencies["realtimeLocal"] = "ready"
+	}
+	dependencies["realtimeBroadcast"] = "disabled"
+	if realtimeHealth.BroadcastEnabled {
+		dependencies["realtimeBroadcast"] = "degraded"
+		if realtimeHealth.BroadcastReady {
+			dependencies["realtimeBroadcast"] = "ready"
 		}
 	}
 	searchStatus := "disabled"

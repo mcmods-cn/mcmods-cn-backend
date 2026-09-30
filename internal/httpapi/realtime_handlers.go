@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"mcmods-cn-backend/internal/queue"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -178,8 +181,8 @@ func (s *Server) subscribeRealtimeBroadcast() {
 	}
 	// Register the definition even while realtime or NATS is disabled. The
 	// queue client retains it and stages the subscription on a later successful
-	// runtime reconfiguration.
-	_ = s.queue.SubscribeBroadcast("user.*", func(_ context.Context, subject string, raw []byte) {
+	// runtime reconfiguration or automatic startup recovery.
+	err := s.queue.SubscribeBroadcast("user.*", func(_ context.Context, subject string, raw []byte) {
 		parts := strings.Split(subject, ".")
 		if len(parts) == 0 {
 			return
@@ -196,4 +199,21 @@ func (s *Server) subscribeRealtimeBroadcast() {
 			s.realtime.publish(userID, event)
 		}
 	})
+	if err != nil && !errors.Is(err, queue.ErrTaskDisabled) {
+		slog.Warn("realtime broadcast subscription unavailable; recovery pending", "error", err)
+	}
+}
+
+type realtimeHealthStatus struct {
+	LocalReady          bool
+	BroadcastEnabled    bool
+	BroadcastReady      bool
+	BroadcastRecovering bool
+}
+
+func (s *Server) realtimeHealth(status queue.Status) realtimeHealthStatus {
+	return realtimeHealthStatus{
+		LocalReady: s.realtime != nil, BroadcastEnabled: status.Enabled && status.Realtime,
+		BroadcastReady: status.RealtimeReady, BroadcastRecovering: status.Recovering && status.Realtime,
+	}
 }

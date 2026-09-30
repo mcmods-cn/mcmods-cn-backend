@@ -30,6 +30,7 @@ func (s *Server) infrastructureMetrics(w http.ResponseWriter, r *http.Request) {
 	connections, realtimeUsers := s.realtime.connectionCount()
 	realtimeRejected, realtimeDropped := s.realtime.deliveryStats()
 	queueStatus := s.queue.Status()
+	realtimeHealth := s.realtimeHealth(queueStatus)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"health":           map[string]any{"liveRequests": s.liveRequests.Load(), "readyRequests": s.readyRequests.Load(), "databasePings": s.databasePings.Load()},
 		"securityVersions": map[string]any{"refreshFailures": s.securityVersionRefreshFailures.Load()},
@@ -46,6 +47,8 @@ func (s *Server) infrastructureMetrics(w http.ResponseWriter, r *http.Request) {
 		"ossWrites":                  s.ossWrites.snapshot(),
 		"projectUpdateNotifications": projectUpdateNotificationObservability.snapshot(),
 		"realtime": map[string]any{
+			"localReady": realtimeHealth.LocalReady, "broadcastEnabled": realtimeHealth.BroadcastEnabled,
+			"broadcastReady": realtimeHealth.BroadcastReady, "broadcastRecovering": realtimeHealth.BroadcastRecovering,
 			"connections": connections, "users": realtimeUsers, "rejected": realtimeRejected, "dropped": realtimeDropped,
 			"limits": map[string]any{"total": maxRealtimeConnections, "perUser": maxRealtimeConnectionsPerUser, "perSession": maxRealtimeConnectionsPerSession, "lifetimeSeconds": int(maxRealtimeConnectionLifetime / time.Second)},
 		},

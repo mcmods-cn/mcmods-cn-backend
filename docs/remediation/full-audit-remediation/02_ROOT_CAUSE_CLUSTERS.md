@@ -205,5 +205,6 @@ RC-DATABASE-SCALE增量：DB-008以generation141删除`log_shares`重复owner单
 | RC-POPULARITY-REFRESH-LIFECYCLE | OPS-010、TEST-028、TEST-029 | 项目统计与评论热度队列必须具有可索引的待处理/执行/终止状态、有限失败预算、陈旧租约接管、错误持久化与新事实恢复；评分/热度/搜索和管理目录还必须以真实并发、隐私闭集、反向触发器及百万级计划组成发布门，不能靠DDL字符串或单项纯函数代替 | 已关闭：generation166为两队列建立pending/processing/failed闭集及ready/stale部分索引，第8次失败终止、处理与retry错误返回，新事件以CAS安全重入；随机双worker/毒函数/故障注入、评分/搜索完整状态机、公开统计隐私/pageKey和10M刷新/评分、1M目录/搜索计划全部通过 |
 | RC-CONTINUOUS-DELIVERY-GATES | OPS-002、TEST-002、TEST-003 | 测试、覆盖率、Race、数据库集成、双端构建和可重复部署必须成为每次push/PR或标签的机器门，而不是审计人员一次性手工命令；工具链缺失不能写成通过，发布物必须可追溯且不携带秘密 | 已关闭：双仓SHA固定CI/依赖审计、非root多阶段Docker与tag+sha GHCR发布；后端27.0%覆盖下限、真实PG串行门及Linux Race，前端277项/Type/Lint/standalone Build；actionlint通过且本机MinGW全仓Race实际为绿 |
 | RC-MAINTENANCE-FAIRNESS | OPS-020 | 固定顺序各类别循环清空积压并共享同一截止时间，前置锁等待或持续积压能使后续安全状态和 TTL 多轮无法执行 | 已关闭：封禁优先、每类独立继承父取消的30秒、4批限额；真实随机PG以排他锁、4005草稿、未来/手工授权/Session和双Worker恢复证明公平执行，真实PG Race及双仓全门通过 |
+| RC-REALTIME-SUBSCRIPTION-RECOVERY | OPS-007 | 初始连接失败没有运行态可由库重连，定义保存不等于已订阅；异步SUB拒绝仍可连接，Close原来非终态，健康状态把本地Hub与跨实例混淆 | 已关闭：统一候选准备/交换的2..30秒恢复循环与live注册状态；启动日志、异步拒绝、配置持久化互斥和终止生命周期；官方NATS/JS初始离线、权限拒绝、重启、双实例无重复、真实PG Outbox与双仓全门通过 |
 
 台账中的 `TRIAGE_PENDING` 会在逐项阅读证据后替换为上述或新增的精确根因组；一个改动关闭多个 Finding 时仍逐项记录证据和验收。

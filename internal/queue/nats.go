@@ -24,6 +24,9 @@ var (
 type Status struct {
 	Enabled       bool                    `json:"enabled"`
 	Connected     bool                    `json:"connected"`
+	Realtime      bool                    `json:"realtime"`
+	RealtimeReady bool                    `json:"realtimeReady"`
+	Recovering    bool                    `json:"recovering"`
 	URL           string                  `json:"url"`
 	SubjectPrefix string                  `json:"subjectPrefix"`
 	Tasks         []config.NATSTaskConfig `json:"tasks"`
@@ -80,6 +83,12 @@ type Client struct {
 	jetStream              nats.JetStreamContext
 	generation             uint64
 	lastError              string
+	ctx                    context.Context
+	done                   chan struct{}
+	closed                 bool
+	subscriptionsPending   bool
+	liveTasks              map[string]struct{}
+	liveBroadcasts         map[string]struct{}
 	subscriptions          map[string]subscriptionDefinition
 	broadcastSubscriptions map[string]broadcastSubscriptionDefinition
 	deadLetterSink         DeadLetterSink
@@ -88,6 +97,10 @@ type Client struct {
 func New(ctx context.Context, cfg config.NATSConfig) *Client {
 	client := &Client{
 		cfg:                    NormalizeConfig(cfg),
+		ctx:                    ctx,
+		done:                   make(chan struct{}),
+		liveTasks:              make(map[string]struct{}),
+		liveBroadcasts:         make(map[string]struct{}),
 		subscriptions:          make(map[string]subscriptionDefinition),
 		broadcastSubscriptions: make(map[string]broadcastSubscriptionDefinition),
 	}
@@ -97,11 +110,53 @@ func New(ctx context.Context, cfg config.NATSConfig) *Client {
 		// use registered local handlers while status exposes the connection error.
 		client.setLastError(err)
 	}
-	go func() {
-		<-ctx.Done()
-		client.Close()
-	}()
+	go client.runRecovery(ctx)
 	return client
+}
+
+// Once connected, nats.go owns reconnect and subscription replay. This loop
+// handles the missing initial/terminal connection and failed registrations,
+// using the same staged runtime swap as an explicit configuration change.
+func (c *Client) runRecovery(ctx context.Context) {
+	delay := 2 * time.Second
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			c.Close()
+			return
+		case <-c.done:
+			return
+		case <-timer.C:
+			err := c.recoverRuntime()
+			if err != nil {
+				delay = min(delay*2, 30*time.Second)
+			} else {
+				delay = 2 * time.Second
+			}
+			timer.Reset(delay)
+		}
+	}
+}
+
+func (c *Client) recoverRuntime() error {
+	c.reconfigureMu.Lock()
+	defer c.reconfigureMu.Unlock()
+	c.mu.RLock()
+	cfg, conn, closed, pending := c.cfg, c.conn, c.closed, c.subscriptionsPending
+	c.mu.RUnlock()
+	if closed || !cfg.Enabled || c.ctx.Err() != nil {
+		return nil
+	}
+	if conn != nil && !conn.IsClosed() && (!conn.IsConnected() || !pending) {
+		return nil // Do not compete with the library's active reconnect loop.
+	}
+	err := c.reconfigureLocked(cfg, nil)
+	if err != nil {
+		c.setLastError(err) // Still serialized with any explicit configuration swap.
+	}
+	return err
 }
 
 func (c *Client) SetDeadLetterSink(sink DeadLetterSink) {
@@ -246,6 +301,21 @@ func (c *Client) ReconfigureWithPersistence(cfg config.NATSConfig, persist func(
 	}
 	c.reconfigureMu.Lock()
 	defer c.reconfigureMu.Unlock()
+	return c.reconfigureLocked(cfg, persist)
+}
+
+// Caller holds reconfigureMu, including while reading the desired recovery
+// configuration, so retries cannot restore a stale configuration after a PUT.
+func (c *Client) reconfigureLocked(cfg config.NATSConfig, persist func(config.NATSConfig) error) error {
+	c.mu.RLock()
+	closed := c.closed
+	c.mu.RUnlock()
+	if closed {
+		return ErrUnavailable
+	}
+	if err := c.ctx.Err(); err != nil {
+		return err
+	}
 
 	cfg = NormalizeConfig(cfg)
 	var nextConn *nats.Conn
@@ -287,17 +357,30 @@ func (c *Client) ReconfigureWithPersistence(cfg config.NATSConfig, persist func(
 		}
 		return errors.Join(cause, cleanupErr)
 	}
+	liveTasks := make(map[string]struct{}, len(definitions))
+	liveBroadcasts := make(map[string]struct{}, len(broadcastDefinitions))
 	if nextConn != nil {
 		for _, definition := range definitions {
-			if err := c.subscribeTaskOn(nextConn, nextJetStream, cfg, definition, nextGeneration, gate); err != nil && !errors.Is(err, ErrTaskDisabled) {
+			err := c.subscribeTaskOn(nextConn, nextJetStream, cfg, definition, nextGeneration, gate)
+			if err != nil && !errors.Is(err, ErrTaskDisabled) {
 				return discard(err)
+			}
+			if err == nil {
+				liveTasks[definition.taskCode] = struct{}{}
 			}
 		}
 		for _, definition := range broadcastDefinitions {
-			if err := c.subscribeBroadcastOn(nextConn, cfg, definition, nextGeneration, gate); err != nil && !errors.Is(err, ErrTaskDisabled) {
+			err := c.subscribeBroadcastOn(nextConn, cfg, definition, nextGeneration, gate)
+			if err != nil && !errors.Is(err, ErrTaskDisabled) {
 				return discard(err)
 			}
+			if err == nil {
+				liveBroadcasts[definition.subject] = struct{}{}
+			}
 		}
+	}
+	if err := c.ctx.Err(); err != nil {
+		return discard(err)
 	}
 	if persist != nil {
 		if err := persist(cfg); err != nil {
@@ -312,6 +395,9 @@ func (c *Client) ReconfigureWithPersistence(cfg config.NATSConfig, persist func(
 	c.jetStream = nextJetStream
 	c.generation = nextGeneration
 	c.lastError = ""
+	c.subscriptionsPending = false
+	c.liveTasks = liveTasks
+	c.liveBroadcasts = liveBroadcasts
 	c.mu.Unlock()
 	close(gate.ready)
 
@@ -328,6 +414,7 @@ func (c *Client) connect(cfg config.NATSConfig) (*nats.Conn, error) {
 		nats.Timeout(3 * time.Second),
 		nats.ReconnectWait(2 * time.Second),
 		nats.MaxReconnects(-1),
+		nats.ErrorHandler(func(conn *nats.Conn, _ *nats.Subscription, err error) { c.setAsyncConnectionError(conn, err) }),
 		nats.DisconnectErrHandler(func(conn *nats.Conn, err error) {
 			if err != nil {
 				c.setConnectionError(conn, err)
@@ -355,8 +442,19 @@ func (c *Client) Close() {
 	c.reconfigureMu.Lock()
 	defer c.reconfigureMu.Unlock()
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.closed = true
+	if c.done != nil {
+		close(c.done)
+	}
 	conn := c.conn
 	c.conn = nil
+	c.jetStream = nil
+	c.liveTasks = nil
+	c.liveBroadcasts = nil
 	c.generation++
 	c.mu.Unlock()
 	if conn != nil {
@@ -371,9 +469,13 @@ func (c *Client) Status() Status {
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	connected := c.conn != nil && c.conn.IsConnected()
 	return Status{
 		Enabled:       c.cfg.Enabled,
-		Connected:     c.conn != nil && c.conn.IsConnected(),
+		Connected:     connected,
+		Realtime:      c.cfg.Realtime,
+		RealtimeReady: connected && c.cfg.Enabled && c.cfg.Realtime && len(c.broadcastSubscriptions) > 0 && len(c.liveBroadcasts) == len(c.broadcastSubscriptions),
+		Recovering:    c.cfg.Enabled && !c.closed && (!connected || c.subscriptionsPending),
 		URL:           c.cfg.URL,
 		SubjectPrefix: c.cfg.SubjectPrefix,
 		Tasks:         append([]config.NATSTaskConfig(nil), c.cfg.Tasks...),
@@ -426,8 +528,9 @@ func (c *Client) HandleLocally(ctx context.Context, taskCode, eventID string, ra
 	}
 	c.mu.RLock()
 	definition, ok := c.subscriptions[cleanTaskCode(taskCode)]
+	closed := c.closed
 	c.mu.RUnlock()
-	if !ok {
+	if closed || !ok {
 		return ErrUnavailable
 	}
 	payload, envelope, err := UnwrapEvent(raw)
@@ -473,14 +576,34 @@ func (c *Client) SubscribeBroadcast(subject string, handler broadcastHandler) er
 	c.reconfigureMu.Lock()
 	defer c.reconfigureMu.Unlock()
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrUnavailable
+	}
 	_, alreadyRegistered := c.broadcastSubscriptions[subject]
+	_, live := c.liveBroadcasts[subject]
 	c.broadcastSubscriptions[subject] = definition
 	conn, cfg, generation := c.conn, c.cfg, c.generation
 	c.mu.Unlock()
 	if alreadyRegistered {
+		if !cfg.Enabled || !cfg.Realtime {
+			return ErrTaskDisabled
+		}
+		if !live || conn == nil || !conn.IsConnected() {
+			return ErrUnavailable
+		}
 		return nil
 	}
-	return c.subscribeBroadcastOn(conn, cfg, definition, generation, nil)
+	err := c.subscribeBroadcastOn(conn, cfg, definition, generation, nil)
+	c.mu.Lock()
+	if err == nil {
+		c.liveBroadcasts[subject] = struct{}{}
+	} else if !errors.Is(err, ErrTaskDisabled) {
+		c.subscriptionsPending = true
+		c.lastError = err.Error()
+	}
+	c.mu.Unlock()
+	return err
 }
 
 func (c *Client) subscribeBroadcastOn(conn *nats.Conn, cfg config.NATSConfig, definition broadcastSubscriptionDefinition, generation uint64, gate *activationGate) error {
@@ -497,7 +620,13 @@ func (c *Client) subscribeBroadcastOn(conn *nats.Conn, cfg config.NATSConfig, de
 		definition.handler(context.Background(), message.Subject, message.Data)
 	})
 	if err == nil {
-		err = conn.Flush()
+		err = conn.FlushTimeout(3 * time.Second)
+	}
+	if err == nil {
+		// SUB permission errors are asynchronous and do not close the socket.
+		// The server processes SUB before the Flush PONG, so inspect its error
+		// before declaring the registration (or a candidate runtime) active.
+		err = conn.LastError()
 	}
 	return err
 }
@@ -529,14 +658,34 @@ func (c *Client) SubscribeTask(taskCode string, handler taskHandler) error {
 	c.reconfigureMu.Lock()
 	defer c.reconfigureMu.Unlock()
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrUnavailable
+	}
 	_, alreadyRegistered := c.subscriptions[taskCode]
+	_, live := c.liveTasks[taskCode]
 	c.subscriptions[taskCode] = definition
 	conn, js, cfg, generation := c.conn, c.jetStream, c.cfg, c.generation
 	c.mu.Unlock()
 	if alreadyRegistered {
+		if task, exists := findTask(cfg.Tasks, taskCode); !exists || !task.Enabled {
+			return ErrTaskDisabled
+		}
+		if !live || conn == nil || !conn.IsConnected() {
+			return ErrUnavailable
+		}
 		return nil
 	}
-	return c.subscribeTaskOn(conn, js, cfg, definition, generation, nil)
+	err := c.subscribeTaskOn(conn, js, cfg, definition, generation, nil)
+	c.mu.Lock()
+	if err == nil {
+		c.liveTasks[taskCode] = struct{}{}
+	} else if !errors.Is(err, ErrTaskDisabled) {
+		c.subscriptionsPending = true
+		c.lastError = err.Error()
+	}
+	c.mu.Unlock()
+	return err
 }
 
 func (c *Client) subscribeTaskOn(conn *nats.Conn, js nats.JetStreamContext, cfg config.NATSConfig, definition subscriptionDefinition, generation uint64, gate *activationGate) error {
@@ -625,10 +774,10 @@ func (c *Client) subscribeTaskOn(conn *nats.Conn, js nats.JetStreamContext, cfg 
 	if err != nil {
 		return err
 	}
-	if err := conn.Flush(); err != nil {
+	if err := conn.FlushTimeout(3 * time.Second); err != nil {
 		return err
 	}
-	return nil
+	return conn.LastError()
 }
 
 func jetStreamBackoff(initial time.Duration, maxDeliver int) []time.Duration {
@@ -733,6 +882,23 @@ func (c *Client) setConnectionError(conn *nats.Conn, err error) {
 	c.lastError = err.Error()
 }
 
+func (c *Client) setAsyncConnectionError(conn *nats.Conn, err error) {
+	if c == nil || err == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.conn != conn {
+		return
+	}
+	c.lastError = err.Error()
+	if errors.Is(err, nats.ErrPermissionViolation) && strings.Contains(err.Error(), `Subscription to "`) {
+		c.subscriptionsPending = true
+		c.liveTasks = make(map[string]struct{})
+		c.liveBroadcasts = make(map[string]struct{})
+	}
+}
+
 func (c *Client) setGenerationError(generation uint64, err error) {
 	if c == nil || err == nil {
 		return
@@ -750,7 +916,7 @@ func (c *Client) isGenerationActive(generation uint64) bool {
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.generation == generation
+	return !c.closed && c.generation == generation
 }
 
 func findTask(tasks []config.NATSTaskConfig, code string) (config.NATSTaskConfig, bool) {
