@@ -115,7 +115,15 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		return fmt.Errorf("database schema generation %d is incompatible with generation %d; reset the development database", currentGeneration, schemaGeneration)
 	}
 	if currentGeneration == schemaGeneration {
-		return nil
+		tx, beginErr := conn.Begin(ctx)
+		if beginErr != nil {
+			return beginErr
+		}
+		defer tx.Rollback(ctx)
+		if repairErr := applySchemaRepairsTx(ctx, tx); repairErr != nil {
+			return repairErr
+		}
+		return tx.Commit(ctx)
 	}
 
 	tx, err := conn.Begin(ctx)
@@ -128,6 +136,9 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		if _, err = tx.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("install schema generation %d: %w", schemaGeneration, err)
 		}
+	}
+	if err = applySchemaRepairsTx(ctx, tx); err != nil {
+		return err
 	}
 	if _, err = tx.Exec(ctx, `create table schema_metadata (
 		singleton boolean primary key default true check(singleton),

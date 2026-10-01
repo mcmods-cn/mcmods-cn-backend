@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func seedPermissionAccessType(permission seedPermission) string {
@@ -26,7 +26,9 @@ func seedPermissionAccessType(permission seedPermission) string {
 	}
 }
 
-func seedGovernanceAutomationDefaults(ctx context.Context, db *pgxpool.Pool) error {
+func seedGovernanceAutomationDefaults(ctx context.Context, db interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}) error {
 	if _, err := db.Exec(ctx, `insert into ban_reasons(code,translations,sort_order) values
 		('alt_accounts','{"zh-CN":"批量注册的小号","en-US":"Mass-created alternate accounts"}',10),
 		('advertising_bot','{"zh-CN":"广告机","en-US":"Advertising bot"}',20),
@@ -40,7 +42,7 @@ func seedGovernanceAutomationDefaults(ctx context.Context, db *pgxpool.Pool) err
 		('malicious_reports','{"zh-CN":"恶意举报","en-US":"Malicious reporting"}',100),
 		('ban_evasion','{"zh-CN":"绕过此前封禁","en-US":"Ban evasion"}',110),
 		('other','{"zh-CN":"其他","en-US":"Other"}',999)
-		on conflict(code) do update set translations=excluded.translations,sort_order=excluded.sort_order`); err != nil {
+		on conflict(code) do nothing`); err != nil {
 		return err
 	}
 	if _, err := db.Exec(ctx, `insert into site_pages(code,status,published_revision) values('about','published',1) on conflict(code) do nothing`); err != nil {
@@ -49,14 +51,14 @@ func seedGovernanceAutomationDefaults(ctx context.Context, db *pgxpool.Pool) err
 	if _, err := db.Exec(ctx, `insert into site_page_translations(page_id,locale,title,body_markdown,status)
 		select page.id,translation.locale,translation.title,translation.body,'published'
 		from site_pages page cross join (values
-			('zh-CN','关于本站','# 关于 MCMods\n\n这里将介绍本站、社区规则与维护团队。'),
-			('zh-TW','關於本站','# 關於 MCMods\n\n這裡將介紹本站、社群規則與維護團隊。'),
-			('en-US','About MCMods','# About MCMods\n\nThis page introduces the site, community rules, and maintainers.'),
-			('ja-JP','MCMods について','# MCMods について\n\nサイト、コミュニティルール、運営チームを紹介します。'),
-			('de-DE','Über MCMods','# Über MCMods\n\nInformationen über die Website, Community-Regeln und das Team.'),
-			('fr-FR','À propos de MCMods','# À propos de MCMods\n\nPrésentation du site, des règles communautaires et de l’équipe.'),
-			('es-ES','Acerca de MCMods','# Acerca de MCMods\n\nInformación del sitio, las reglas y el equipo responsable.'),
-			('ru-RU','О MCMods','# О MCMods\n\nИнформация о сайте, правилах сообщества и команде поддержки.')
+			('zh-CN','关于本站',E'# 关于 MCMods\n\n这里将介绍本站、社区规则与维护团队。'),
+			('zh-TW','關於本站',E'# 關於 MCMods\n\n這裡將介紹本站、社群規則與維護團隊。'),
+			('en-US','About MCMods',E'# About MCMods\n\nThis page introduces the site, community rules, and maintainers.'),
+			('ja-JP','MCMods について',E'# MCMods について\n\nサイト、コミュニティルール、運営チームを紹介します。'),
+			('de-DE','Über MCMods',E'# Über MCMods\n\nInformationen über die Website, Community-Regeln und das Team.'),
+			('fr-FR','À propos de MCMods',E'# À propos de MCMods\n\nPrésentation du site, des règles communautaires et de l’équipe.'),
+			('es-ES','Acerca de MCMods',E'# Acerca de MCMods\n\nInformación del sitio, las reglas y el equipo responsable.'),
+			('ru-RU','О MCMods',E'# О MCMods\n\nИнформация о сайте, правилах сообщества и команде поддержки.')
 		) translation(locale,title,body) where page.code='about'
 		on conflict(page_id,locale) do nothing`); err != nil {
 		return err
@@ -70,6 +72,6 @@ func seedGovernanceAutomationDefaults(ctx context.Context, db *pgxpool.Pool) err
 		('GPL-2.0-only',true,'Copyleft redistribution allowed'),('GPL-3.0-only',true,'Copyleft redistribution allowed'),
 		('LGPL-2.1-only',true,'Library copyleft redistribution allowed'),('LGPL-3.0-only',true,'Library copyleft redistribution allowed'),
 		('ARR',false,'All rights reserved'),('UNKNOWN',false,'Unknown or custom license')
-		on conflict(spdx_id) do update set redistribution_allowed=excluded.redistribution_allowed,notes=excluded.notes`)
+		on conflict(spdx_id) do nothing`)
 	return err
 }

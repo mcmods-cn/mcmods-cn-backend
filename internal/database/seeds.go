@@ -3,9 +3,12 @@ package database
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/security"
@@ -357,9 +360,12 @@ func seedPermissionDefaults(ctx context.Context, db *pgxpool.Pool) error {
 	return err
 }
 
-func seedDefaultUsers(ctx context.Context, db *pgxpool.Pool) error {
+func seedDefaultUsers(ctx context.Context, db interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}) error {
 	for _, user := range seedUsers {
-		passwordHash, updatePassword, err := seedPasswordHash(user.Username)
+		passwordHash, initializePassword, err := seedPasswordHash(user.Username)
 		if err != nil {
 			return err
 		}
@@ -369,21 +375,30 @@ func seedDefaultUsers(ctx context.Context, db *pgxpool.Pool) error {
 			ctx,
 			`insert into users (username, email, password_hash, email_verified, status)
 			 values ($1, $2, $3, true, $4)
-			 on conflict (username) do update
-			 set email = excluded.email,
-			     email_verified = true,
-			     status = excluded.status,
-			     password_hash = case when $5 then excluded.password_hash else users.password_hash end,
-			     updated_at = now()
-			 returning id`,
+             on conflict (username) do nothing returning id`,
 			user.Username,
 			user.Email,
 			passwordHash,
 			user.Status,
-			updatePassword,
 		).Scan(&userID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = db.QueryRow(ctx, `select id from users where username=$1`, user.Username).Scan(&userID)
+		}
 		if err != nil {
 			return err
+		}
+		if user.Username == "admin" && initializePassword {
+			if _, err = db.Exec(ctx, `update users set password_hash=$2,updated_at=now() where id=$1 and password_hash='password-login-disabled' and status='active'`, userID, passwordHash); err != nil {
+				return err
+			}
+		}
+		// The service account must remain noninteractive even when an older
+		// installation accidentally gave it a password. Preserve governance
+		// state, contact information and administrator-managed permissions.
+		if user.Username == systemactor.AutobotUsername {
+			if _, err = db.Exec(ctx, `update users set password_hash='password-login-disabled',updated_at=now() where id=$1 and password_hash<>'password-login-disabled'`, userID); err != nil {
+				return err
+			}
 		}
 
 		for _, permission := range user.Permissions {
@@ -391,8 +406,7 @@ func seedDefaultUsers(ctx context.Context, db *pgxpool.Pool) error {
 				ctx,
 				`insert into user_permissions (user_id, permission_id, allow, updated_at)
 				 select $1, id, true, now() from permissions where code = $2
-				 on conflict (user_id, permission_id) do update
-				 set allow = true, updated_at = now()`,
+                 on conflict(user_id,permission_id) do nothing`,
 				userID,
 				permission,
 			)
