@@ -613,7 +613,7 @@ func (s *Server) commentThread(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) commentReplies(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	commentID, err := s.numericCommentID(r.Context(), r.PathValue("commentId"))
+	commentID, err := s.numericCommentID(r.Context(), r.PathValue("commentId"), claims)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "评论不存在")
 		return
@@ -828,7 +828,7 @@ func (s *Server) commentReaction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "无权对评论添加表态")
 		return
 	}
-	commentID, err := s.numericCommentID(r.Context(), r.PathValue("commentId"))
+	commentID, err := s.numericCommentID(r.Context(), r.PathValue("commentId"), claims)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "评论不存在")
 		return
@@ -904,7 +904,7 @@ func (s *Server) commentWatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "无权插眼评论")
 		return
 	}
-	commentID, err := s.numericCommentID(r.Context(), r.PathValue("commentId"))
+	commentID, err := s.numericCommentID(r.Context(), r.PathValue("commentId"), claims)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "评论不存在")
 		return
@@ -1015,13 +1015,21 @@ func (s *Server) myCommentWatches(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]commentWatchListItem, 0, len(values))
 	for _, value := range values {
-		comments, queryErr := s.queryCommentItems(r.Context(), []int64{value.commentID}, false, 0, claims)
-		if queryErr != nil || len(comments) == 0 {
+		target, queryErr := s.resolveCommentTargetByInternal(r.Context(), value.targetType, value.targetID, value.targetVersionID, claims)
+		if errors.Is(queryErr, pgx.ErrNoRows) {
 			continue
 		}
-		target, queryErr := s.resolveCommentTargetByInternal(r.Context(), value.targetType, value.targetID, value.targetVersionID, claims)
 		if queryErr != nil {
-			target = commentTargetInfo{Type: value.targetType, InternalID: value.targetID}
+			writeError(w, http.StatusInternalServerError, "读取插眼目标失败")
+			return
+		}
+		comments, queryErr := s.queryCommentItems(r.Context(), []int64{value.commentID}, false, 0, claims)
+		if queryErr != nil {
+			writeError(w, http.StatusInternalServerError, "读取插眼评论失败")
+			return
+		}
+		if len(comments) == 0 {
+			continue
 		}
 		items = append(items, commentWatchListItem{
 			ID: value.publicID, Comment: comments[0], Target: target, MutedUntil: value.mutedUntil,
@@ -1668,11 +1676,25 @@ func (s *Server) resolveCommentTargetByInternal(ctx context.Context, targetType 
 	return s.resolveCommentTarget(ctx, targetType, targetKey, claims)
 }
 
-func (s *Server) numericCommentID(ctx context.Context, publicID string) (int64, error) {
-	var id int64
-	err := s.db.QueryRow(ctx, `select id from comments where public_id=$1 and status in ('published','deleted')`,
-		strings.ToLower(strings.TrimSpace(publicID))).Scan(&id)
-	return id, err
+func (s *Server) numericCommentID(ctx context.Context, publicID string, claims security.Claims) (int64, error) {
+	var id, targetID int64
+	var targetType string
+	var targetVersionID *int64
+	err := s.db.QueryRow(ctx, `select id,target_type,target_id,target_version_id from comments
+		where public_id=$1 and status in ('published','deleted')
+		and ($2::bigint=0 or not exists(select 1 from user_blocks block
+			where block.blocker_id=$2 and block.blocked_id=comments.author_id))`,
+		strings.ToLower(strings.TrimSpace(publicID)), claims.Subject).Scan(&id, &targetType, &targetID, &targetVersionID)
+	if err != nil {
+		return 0, err
+	}
+	// A published comment does not make its private or pending target public.
+	// ID-based reply/reaction/watch routes use the same visibility boundary as
+	// the target's comment list and attachment download.
+	if _, err = s.resolveCommentTargetByInternal(ctx, targetType, targetID, targetVersionID, claims); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (s *Server) commentIDForTarget(ctx context.Context, publicID string, target commentTargetInfo) (int64, error) {
@@ -1684,9 +1706,13 @@ func (s *Server) commentIDForTarget(ctx context.Context, publicID string, target
 }
 
 func (s *Server) queryCommentWatch(ctx context.Context, userID, commentID int64) (commentWatchState, error) {
+	return queryCommentWatch(ctx, s.db, userID, commentID)
+}
+
+func queryCommentWatch(ctx context.Context, query revisionQuery, userID, commentID int64) (commentWatchState, error) {
 	var state commentWatchState
 	var status string
-	err := s.db.QueryRow(ctx, `select public_id,status,muted_until,muted_forever,unread_count,watched_reply_count
+	err := query.QueryRow(ctx, `select public_id,status,muted_until,muted_forever,unread_count,watched_reply_count
 		from comment_watches where user_id=$1 and comment_id=$2`, userID, commentID).Scan(
 		&state.ID, &status, &state.MutedUntil, &state.MutedForever, &state.UnreadCount, &state.WatchedReplies,
 	)
@@ -1695,18 +1721,29 @@ func (s *Server) queryCommentWatch(ctx context.Context, userID, commentID int64)
 }
 
 func (s *Server) ensureCommentWatch(ctx context.Context, userID, commentID int64) (commentWatchState, error) {
-	var active int
-	if err := s.db.QueryRow(ctx, `select count(*) from comment_watches where user_id=$1 and status='active'`, userID).Scan(&active); err != nil {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
 		return commentWatchState{}, err
 	}
-	state, err := s.queryCommentWatch(ctx, userID, commentID)
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1,0))`, fmt.Sprintf("comment-watch:%d", userID)); err != nil {
+		return commentWatchState{}, err
+	}
+	var active int
+	if err = tx.QueryRow(ctx, `select count(*) from comment_watches where user_id=$1 and status='active'`, userID).Scan(&active); err != nil {
+		return commentWatchState{}, err
+	}
+	state, err := queryCommentWatch(ctx, tx, userID, commentID)
 	if err == nil && state.Active {
 		return state, nil
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return commentWatchState{}, err
 	}
 	if active >= 2000 {
 		return commentWatchState{}, errors.New("watch limit exceeded")
 	}
-	_, err = s.db.Exec(ctx, `insert into comment_watches(user_id,comment_id)
+	_, err = tx.Exec(ctx, `insert into comment_watches(user_id,comment_id)
 		values($1,$2) on conflict(user_id,comment_id) do update set status='active',
 		muted_until=null,muted_forever=false,unread_count=0,watched_reply_count=0,
 		last_activity_at=now(),last_read_comment_id=null,created_at=now(),updated_at=now(),cancelled_at=null`,
@@ -1714,7 +1751,14 @@ func (s *Server) ensureCommentWatch(ctx context.Context, userID, commentID int64
 	if err != nil {
 		return commentWatchState{}, err
 	}
-	return s.queryCommentWatch(ctx, userID, commentID)
+	state, err = queryCommentWatch(ctx, tx, userID, commentID)
+	if err != nil {
+		return commentWatchState{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return commentWatchState{}, err
+	}
+	return state, nil
 }
 
 func isPureCY(value string) bool {

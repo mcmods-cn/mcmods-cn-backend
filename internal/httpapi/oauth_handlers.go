@@ -89,6 +89,10 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "不支持的第三方登录")
 		return
 	}
+	if !cfg.Enabled || cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURI == "" {
+		writeError(w, http.StatusServiceUnavailable, "第三方登录尚未配置")
+		return
+	}
 	if r.URL.Query().Get("state") == "" || !validOAuthState(r, provider) {
 		writeError(w, http.StatusBadRequest, "第三方登录状态已失效")
 		return
@@ -104,7 +108,9 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 
 	profile, err := s.fetchOAuthProfile(r.Context(), provider, cfg, code)
 	if err != nil {
-		log.Printf("oauth callback failed provider=%s: %v", provider, err)
+		// HTTP errors may embed token/secret-bearing request URLs, and a
+		// provider error description is untrusted. Never log either verbatim.
+		log.Printf("oauth callback profile request failed provider=%s", provider)
 		writeError(w, http.StatusBadGateway, "third-party login provider request failed")
 		return
 	}
@@ -332,6 +338,9 @@ func fetchGitHubProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 	}
 	if err := json.Unmarshal(raw, &user); err != nil {
 		return oauthProviderProfile{}, err
+	}
+	if user.ID <= 0 {
+		return oauthProviderProfile{}, fmt.Errorf("GitHub user information is missing a valid ID")
 	}
 	user.Email = fetchGitHubPrimaryEmail(ctx, tokenResp.AccessToken)
 	return oauthProviderProfile{

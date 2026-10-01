@@ -16,6 +16,7 @@ type contentTranslationTaskPayload struct {
 	SourceLocale     string `json:"sourceLocale"`
 	SourceRevisionNo int64  `json:"sourceRevisionNo"`
 	TargetLocale     string `json:"targetLocale"`
+	TargetRevisionNo *int64 `json:"targetRevisionNo"`
 	QuotaBacked      bool   `json:"quotaBacked"`
 }
 
@@ -46,8 +47,12 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 	}
 	defer tx.Rollback(ctx)
 	var taskUID string
-	if err = tx.QueryRow(ctx, `select task_uid from ai_tasks where id=$1`, taskID).Scan(&taskUID); err != nil {
+	var taskStatus string
+	if err = tx.QueryRow(ctx, `select task_uid,status from ai_tasks where id=$1 for update`, taskID).Scan(&taskUID, &taskStatus); err != nil {
 		return fmt.Errorf("resolve AI task public identity: %w", err)
+	}
+	if taskStatus != "running" {
+		return errors.New("content translation task is no longer running")
 	}
 	var alreadyRecorded bool
 	if err = tx.QueryRow(ctx, `
@@ -58,22 +63,22 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 		return err
 	}
 	if alreadyRecorded {
+		if err = completeAITaskTx(ctx, tx, taskID); err != nil {
+			return err
+		}
 		return tx.Commit(ctx)
 	}
-	var entityType string
-	var entityID int64
-	if err = tx.QueryRow(ctx, `
-		select route.entity_type,route.internal_id from public_routes route
-		join content_subjects subject on subject.subject_id=route.internal_id and subject.subject_type=route.entity_type
-		where route.internal_id=$1 and route.public_id=$2 for update`, payload.EntityID, payload.PublicID).Scan(&entityType, &entityID); err != nil {
-		return fmt.Errorf("load translated content subject: %w", err)
+	entity, _, loadErr := loadEditableContentSubjectTx(ctx, tx, payload.PublicID)
+	if loadErr != nil || entity.EntityID != payload.EntityID {
+		return errors.New("translated content subject is no longer available")
 	}
+	entityType, entityID := entity.EntityType, entity.EntityID
 	if payload.EntityType != "" && payload.EntityType != entityType {
 		return errors.New("content translation subject type changed")
 	}
 	var currentSourceRevisionNo int64
 	if err = tx.QueryRow(ctx, `select revision_no from content_localizations
-		where subject_id=$1 and subject_type=$2 and locale=$3 and review_status='approved'`,
+		where subject_id=$1 and subject_type=$2 and locale=$3 and review_status='approved' for update`,
 		entityID, entityType, payload.SourceLocale).Scan(&currentSourceRevisionNo); err != nil {
 		return fmt.Errorf("load content translation source revision: %w", err)
 	}
@@ -82,16 +87,26 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 	}
 	revisionEntityID := entityID
 	var baseRevisionID *int64
+	var targetRevisionNo int64
+	var targetProvenance string
 	err = tx.QueryRow(ctx, `
-		select published_revision_id from content_localizations
-		where subject_id=$1 and subject_type=$2 and locale=$3`, entityID, entityType, payload.TargetLocale).Scan(&baseRevisionID)
+		select published_revision_id,revision_no,provenance from content_localizations
+		where subject_id=$1 and subject_type=$2 and locale=$3 for update`, entityID, entityType, payload.TargetLocale).Scan(&baseRevisionID, &targetRevisionNo, &targetProvenance)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		baseRevisionID = nil
 	}
-	reviewRequired := loadReviewConfig(ctx, worker.db).AITranslation
+	if targetProvenance == "human" || targetProvenance == "human_corrected" {
+		return errors.New("human translation is protected")
+	}
+	// Old queued tasks have no target snapshot and cannot safely overwrite an
+	// existing translation. Fresh tasks must match both source and target.
+	if payload.TargetRevisionNo == nil && targetRevisionNo != 0 || payload.TargetRevisionNo != nil && *payload.TargetRevisionNo != targetRevisionNo {
+		return errors.New("content translation target changed while the task was running")
+	}
+	reviewRequired := loadReviewConfig(ctx, tx).AITranslation
 	reviewStatus := "approved"
 	if reviewRequired {
 		reviewStatus = "pending"
@@ -148,6 +163,9 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 		if err = appendCatalogPublishedReviewEventTx(ctx, tx, created.ChangeRequestID, createdBy, "automatic AI translation publication", nil); err != nil {
 			return err
 		}
+	}
+	if err = completeAITaskTx(ctx, tx, taskID); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

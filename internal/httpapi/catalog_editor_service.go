@@ -110,7 +110,7 @@ func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEd
 	if err != nil {
 		return result, err
 	}
-	reviewConfig := loadReviewConfig(r.Context(), s.db)
+	reviewConfig := loadReviewConfig(r.Context(), tx)
 	reviewRequired := catalogMutationReviewRequired(reviewConfig, snapshot.Operation)
 	if catalogMutationBypassesReview(claims) {
 		reviewRequired = false
@@ -423,32 +423,52 @@ func materializeCatalogImportLocalizationsTx(ctx context.Context, tx pgx.Tx, sna
 }
 
 func publishCatalogLocalizationsTx(ctx context.Context, tx pgx.Tx, entityID int64, _ string, subjectType string, localizations []catalogLocalizationEdit, revisionID, actorID int64) error {
-	for _, localization := range localizations {
-		var existingProvenance string
-		var existingRevision int64
-		err := tx.QueryRow(ctx, `select provenance,revision_no from content_localizations where subject_type=$1 and subject_id=$2 and locale=$3 for update`, subjectType, entityID, localization.Locale).
-			Scan(&existingProvenance, &existingRevision)
+	// Read every original locale before invalidating projections. Otherwise a
+	// source edit can delete an AI target submitted in the same batch and reset
+	// its revision/provenance before that target is made human-corrected.
+	ordered := append([]catalogLocalizationEdit(nil), localizations...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Locale < ordered[j].Locale })
+	type previousLocale struct {
+		provenance string
+		revision   int64
+		unchanged  bool
+	}
+	previous := make(map[string]previousLocale, len(ordered))
+	for _, localization := range ordered {
+		var old previousLocale
+		var name, summary, markdown, reviewStatus string
+		err := tx.QueryRow(ctx, `select provenance,revision_no,name,summary,content_markdown,review_status from content_localizations where subject_type=$1 and subject_id=$2 and locale=$3 for update`, subjectType, entityID, localization.Locale).Scan(&old.provenance, &old.revision, &name, &summary, &markdown, &reviewStatus)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		provenance := catalogHumanEditProvenance(existingProvenance)
-		if err = invalidateAIDerivedLocalizationsTx(ctx, tx, entityID, subjectType, localization.Locale); err != nil {
+		old.unchanged = err == nil && reviewStatus == "approved" && name == localization.Name && summary == localization.Summary && markdown == localization.ContentMarkdown
+		previous[localization.Locale] = old
+	}
+	changed := make([]string, 0, len(ordered))
+	for _, localization := range ordered {
+		old := previous[localization.Locale]
+		if old.unchanged {
+			continue
+		}
+		provenance := catalogHumanEditProvenance(old.provenance)
+		revisionNo := old.revision + 1
+		if _, err := tx.Exec(ctx, `insert into content_localizations(subject_type,subject_id,catalog_entity_id,locale,name,summary,content_markdown,provenance,source_locale,ai_task_id,revision_no,editable,review_status,published_revision_id,updated_by)
+            values($1,$2,(select id from catalog_entities where id=$2 and entity_type=$1),$3,$4,$5,$6,$7,'',null,$8,true,'approved',$9,$10)
+            on conflict(subject_type,subject_id,locale) do update set catalog_entity_id=excluded.catalog_entity_id,name=excluded.name,summary=excluded.summary,
+            content_markdown=excluded.content_markdown,provenance=excluded.provenance,source_locale='',ai_task_id=null,
+            revision_no=excluded.revision_no,editable=true,review_status='approved',published_revision_id=excluded.published_revision_id,
+            updated_by=excluded.updated_by,updated_at=now()`, subjectType, entityID, localization.Locale, localization.Name, localization.Summary, localization.ContentMarkdown, provenance, revisionNo, revisionID, nullableActorID(actorID)); err != nil {
 			return err
 		}
-		if existingRevision == 0 {
-			existingRevision = 1
-		} else {
-			existingRevision++
-		}
-		if _, err = tx.Exec(ctx, `insert into content_localizations(subject_type,subject_id,catalog_entity_id,locale,name,summary,content_markdown,provenance,source_locale,ai_task_id,revision_no,editable,review_status,published_revision_id,updated_by)
-			values($1,$2,(select id from catalog_entities where id=$2 and entity_type=$1),$3,$4,$5,$6,$7,'',null,$8,true,'approved',$9,$10)
-			on conflict(subject_type,subject_id,locale) do update set catalog_entity_id=excluded.catalog_entity_id,name=excluded.name,summary=excluded.summary,
-			content_markdown=excluded.content_markdown,provenance=excluded.provenance,source_locale='',ai_task_id=null,
-			revision_no=excluded.revision_no,editable=true,review_status='approved',published_revision_id=excluded.published_revision_id,
-			updated_by=excluded.updated_by,updated_at=now()`, subjectType, entityID, localization.Locale, localization.Name, localization.Summary,
-			localization.ContentMarkdown, provenance, existingRevision, revisionID, nullableActorID(actorID)); err != nil {
+		changed = append(changed, localization.Locale)
+	}
+	for _, locale := range changed {
+		if err := invalidateAIDerivedLocalizationsTx(ctx, tx, entityID, subjectType, locale); err != nil {
 			return err
 		}
+	}
+	if subjectType == "mod" {
+		return markSeedModTranslationProvenanceTx(ctx, tx, entityID)
 	}
 	return nil
 }
@@ -495,10 +515,20 @@ func publishCatalogLocalizationSnapshotTx(ctx context.Context, tx pgx.Tx, revisi
 		}
 		snapshot.AITaskID = &aiTaskID
 	}
+	if snapshot.Provenance == "ai" {
+		if err = verifyCatalogTranslationPublicationTx(ctx, tx, snapshot, publicID, subjectType, subjectID, locale); err != nil {
+			return err
+		}
+	}
 	var catalogEntityID *int64
-	_ = tx.QueryRow(ctx, `select id from catalog_entities where id=$1 and public_id=$2 and entity_type=$3 and status<>'archived'`,
-		subjectID, publicID, subjectType).Scan(&catalogEntityID)
-	_ = tx.QueryRow(ctx, `select revision_no+1 from content_localizations where subject_type=$1 and subject_id=$2 and locale=$3`, subjectType, subjectID, locale).Scan(&revisionNo)
+	err = tx.QueryRow(ctx, `select id from catalog_entities where id=$1 and public_id=$2 and entity_type=$3 and status<>'archived'`, subjectID, publicID, subjectType).Scan(&catalogEntityID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	err = tx.QueryRow(ctx, `select revision_no+1 from content_localizations where subject_type=$1 and subject_id=$2 and locale=$3 for update`, subjectType, subjectID, locale).Scan(&revisionNo)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
 	if revisionNo == 0 {
 		revisionNo = 1
 	}
@@ -519,6 +549,48 @@ func publishCatalogLocalizationSnapshotTx(ctx context.Context, tx pgx.Tx, revisi
 		subjectType, subjectID, catalogEntityID, locale, snapshot.Name, snapshot.Summary, snapshot.ContentMarkdown, provenance, snapshot.SourceLocale,
 		snapshot.AITaskID, revisionNo, snapshot.Editable, revisionID, nullableActorID(actorID)); err != nil {
 		return err
+	}
+	return nil
+}
+
+// A reviewed AI snapshot can wait after the worker finishes. Recheck both
+// versions at publication so approval cannot overwrite a newer source or a
+// human edit made during that wait. The immutable revision stays in history.
+func verifyCatalogTranslationPublicationTx(ctx context.Context, tx pgx.Tx, snapshot catalogLocalizationSnapshot, publicID, subjectType string, subjectID int64, locale string) error {
+	if snapshot.AITaskID == nil {
+		return errCatalogEditorReference
+	}
+	var taskPayload []byte
+	var taskType, status string
+	if err := tx.QueryRow(ctx, `select task_type,status,payload from ai_tasks where id=$1 for update`, *snapshot.AITaskID).Scan(&taskType, &status, &taskPayload); err != nil {
+		return err
+	}
+	if taskType != aiTaskContentTranslation || status != "running" && status != "completed" {
+		return errCatalogEditorConflict
+	}
+	var payload contentTranslationTaskPayload
+	if json.Unmarshal(taskPayload, &payload) != nil || payload.EntityID != subjectID || payload.EntityType != subjectType || payload.PublicID != publicID || normalizeContentLocale(payload.TargetLocale) != locale || normalizeContentLocale(payload.SourceLocale) != normalizeContentLocale(snapshot.SourceLocale) {
+		return errCatalogEditorConflict
+	}
+	subject, _, err := loadEditableContentSubjectTx(context.WithValue(ctx, contentVisibilityBypassKey{}, false), tx, publicID)
+	if err != nil || subject.EntityID != subjectID || subject.EntityType != subjectType {
+		return errCatalogEditorConflict
+	}
+	var sourceRevision int64
+	if err = tx.QueryRow(ctx, `select revision_no from content_localizations where subject_type=$1 and subject_id=$2 and locale=$3 and review_status='approved' for update`, subjectType, subjectID, normalizeContentLocale(payload.SourceLocale)).Scan(&sourceRevision); err != nil {
+		return errCatalogEditorConflict
+	}
+	if sourceRevision != payload.SourceRevisionNo || sourceRevision != snapshot.SourceRevisionNo {
+		return errCatalogEditorConflict
+	}
+	var targetRevision int64
+	var provenance string
+	err = tx.QueryRow(ctx, `select revision_no,provenance from content_localizations where subject_type=$1 and subject_id=$2 and locale=$3 for update`, subjectType, subjectID, locale).Scan(&targetRevision, &provenance)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if provenance == "human" || provenance == "human_corrected" || payload.TargetRevisionNo == nil && targetRevision != 0 || payload.TargetRevisionNo != nil && *payload.TargetRevisionNo != targetRevision {
+		return errCatalogEditorConflict
 	}
 	return nil
 }

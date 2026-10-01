@@ -432,18 +432,46 @@ func (s *Server) evaluatePermission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	value := claimsNumericPermissionValue(claims, code)
+	allowed := claimsAllow(claims, code)
+	if !allowed && value > 0 {
+		// Numeric quota grants may satisfy a prefix without a boolean node.
+		// A matching resolved deny still wins over an administrator wildcard.
+		for _, rule := range claims.PermissionRules {
+			if matches, _ := permissionEntryMatches(rule.Code, code); matches {
+				value = 0
+				break
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"permission": code,
-		"allowed":    claimsAllow(claims, code) || value > 0,
+		"allowed":    allowed || value > 0,
 		"value":      value,
 	})
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	_, _ = s.db.Exec(r.Context(), `update auth_sessions set revoked_at=coalesce(revoked_at,now())
-		where session_hash=$1 and user_id=$2`, security.SessionFingerprint(claims.SessionID), claims.Subject)
-	_, _ = s.db.Exec(r.Context(), `delete from user_presence_sessions where session_hash=$1 and user_id=$2`, security.SessionFingerprint(claims.SessionID), claims.Subject)
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to revoke session; please retry")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if _, err = tx.Exec(r.Context(), `update auth_sessions set revoked_at=coalesce(revoked_at,now())
+		where session_hash=$1 and user_id=$2`, security.SessionFingerprint(claims.SessionID), claims.Subject); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to revoke session; please retry")
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `delete from user_presence_sessions where session_hash=$1 and user_id=$2`,
+		security.SessionFingerprint(claims.SessionID), claims.Subject); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to revoke session; please retry")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to revoke session; please retry")
+		return
+	}
 	s.invalidateSessionCache(r.Context(), claims)
 	s.cache.RemoveUserPresence(r.Context(), claims.Subject, hex.EncodeToString(security.SessionFingerprint(claims.SessionID)), time.Now(), s.cache.Config().PresenceTTL)
 	s.clearAuthSessionCookie(w, r)

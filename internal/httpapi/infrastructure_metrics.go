@@ -16,10 +16,13 @@ func (s *Server) infrastructureMetrics(w http.ResponseWriter, r *http.Request) {
 	queueStatus := s.queue.Status()
 	var pendingOutbox, deadLetters int64
 	var oldestSeconds float64
-	_ = s.db.QueryRow(r.Context(), `select
+	if err := s.db.QueryRow(r.Context(), `select
 		(select count(*) from nats_outbox where published_at is null and status in ('pending','failed','publishing')),
 		coalesce((select extract(epoch from now()-min(created_at)) from nats_outbox where published_at is null and status in ('pending','failed','publishing')),0),
-		(select count(*) from dead_letter_events where replayed_at is null)`).Scan(&pendingOutbox, &oldestSeconds, &deadLetters)
+		(select count(*) from dead_letter_events where replayed_at is null)`).Scan(&pendingOutbox, &oldestSeconds, &deadLetters); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "infrastructure metrics are temporarily unavailable")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"health":    map[string]any{"liveRequests": s.liveRequests.Load(), "readyRequests": s.readyRequests.Load(), "databasePings": s.databasePings.Load()},
 		"redis":     s.cache.Metrics(),

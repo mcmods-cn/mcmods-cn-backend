@@ -170,16 +170,19 @@ func NewModExportWorker(cfg config.Config, db *pgxpool.Pool, queueClient *queue.
 	return &ModExportWorker{server: &Server{cfg: cfg, db: db, queue: queueClient}, queue: queueClient}
 }
 
-func (worker *ModExportWorker) Start() error {
+func (worker *ModExportWorker) Start(ctx context.Context) error {
 	if worker == nil || worker.server == nil {
 		return queue.ErrUnavailable
 	}
-	if err := worker.server.recoverStaleModExportJobs(context.Background()); err != nil {
+	if err := worker.server.recoverStaleModExportJobs(ctx); err != nil {
 		return err
 	}
 	subscribeErr := queue.ErrUnavailable
 	if worker.queue != nil {
 		subscribeErr = worker.queue.SubscribeTask(modExportTaskCode, worker.handle)
+	}
+	if errors.Is(subscribeErr, queue.ErrTaskDisabled) {
+		return subscribeErr
 	}
 	if worker.server.cfg.NATS.OutboxEnabled {
 		// The durable dispatcher will deliver every committed outbox row. The
@@ -187,27 +190,51 @@ func (worker *ModExportWorker) Start() error {
 		// database-backed local fallback can still execute it.
 		return nil
 	}
-	rows, err := worker.server.db.Query(context.Background(), `select id from catalog_import_jobs where status='queued' order by created_at`)
-	if err != nil {
-		if subscribeErr != nil {
-			return subscribeErr
-		}
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var jobID string
-		if rows.Scan(&jobID) != nil {
-			continue
-		}
-		message := modExportJobMessage{JobID: jobID}
-		if subscribeErr == nil && worker.queue.PublishTask(context.Background(), modExportTaskCode, message) == nil {
-			_, _ = worker.server.db.Exec(context.Background(), `update nats_outbox set published_at=now() where aggregate_type='mod_export_job' and aggregate_id=$1 and published_at is null`, jobID)
-			continue
-		}
-		go func(id string) { _ = worker.server.importModExportJob(context.Background(), id) }(jobID)
-	}
+	go worker.dispatchQueuedJobs(ctx)
 	return subscribeErr
+}
+
+func (worker *ModExportWorker) dispatchQueuedJobs(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		worker.dispatchPendingJobs(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (worker *ModExportWorker) dispatchPendingJobs(ctx context.Context) {
+	if ctx.Err() != nil || !worker.server.queueTaskEnabled(modExportTaskCode) {
+		return
+	}
+	if err := worker.server.recoverStaleModExportJobs(ctx); err != nil {
+		return
+	}
+	rows, err := worker.server.db.Query(ctx, `select id from catalog_import_jobs where status='queued' order by created_at,id limit 32`)
+	if err != nil {
+		return
+	}
+	ids := make([]string, 0, 32)
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return
+	}
+	for _, id := range ids {
+		worker.server.dispatchModExportJobContext(ctx, id)
+	}
 }
 
 func (worker *ModExportWorker) handle(ctx context.Context, raw []byte) error {
@@ -260,7 +287,7 @@ func (s *Server) resumeModExportUpload(w http.ResponseWriter, r *http.Request) {
 		!isAllowedObjectKey(request.ObjectKey, ossObjectPrefix(cfg.Prefix, expectedCategory)) ||
 		request.OriginalName == "" ||
 		strings.ToLower(filepath.Ext(request.OriginalName)) != ".zip" ||
-		request.SizeBytes <= 0 ||
+		request.SizeBytes <= 0 || request.SizeBytes > maxOSSUploadBytes ||
 		request.SHA256 == "" ||
 		(request.MultipartUploadID != "" && !validOSSMultipartUploadID(request.MultipartUploadID)) {
 		writeError(w, http.StatusBadRequest, "Invalid upload task")
@@ -274,10 +301,11 @@ func (s *Server) resumeModExportUpload(w http.ResponseWriter, r *http.Request) {
 		result, presignErr := client.Presign(
 			r.Context(),
 			&aliyunoss.PutObjectRequest{
-				Bucket:      aliyunoss.Ptr(cfg.Bucket),
-				Key:         aliyunoss.Ptr(request.ObjectKey),
-				ContentType: aliyunoss.Ptr(request.ContentType),
-				Metadata:    map[string]string{"sha256": request.SHA256},
+				Bucket:          aliyunoss.Ptr(cfg.Bucket),
+				Key:             aliyunoss.Ptr(request.ObjectKey),
+				ContentType:     aliyunoss.Ptr(request.ContentType),
+				ForbidOverwrite: aliyunoss.Ptr("true"),
+				Metadata:        map[string]string{"sha256": request.SHA256},
 			},
 			aliyunoss.PresignExpires(expires),
 		)
@@ -772,18 +800,23 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	if paused {
 		return nil
 	}
-	_, err = s.db.Exec(
-		ctx,
-		`update catalog_import_packages set schema_version=$2,exporter_version=$3,minecraft_version=$4,loader=$5,manifest=$6::jsonb,namespaces=$7,profile=$8 where id=$1`,
-		packageID, manifest.SchemaVersion, manifest.ExporterVersion, manifest.MinecraftVersion, normalizeExportLoader(manifest.Loader), string(manifestJSON), namespaces, manifest.Configuration.Profile,
-	)
+	err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		_, updateErr := tx.Exec(ctx,
+			`update catalog_import_packages set schema_version=$2,exporter_version=$3,minecraft_version=$4,loader=$5,manifest=$6::jsonb,namespaces=$7,profile=$8 where id=$1`,
+			packageID, manifest.SchemaVersion, manifest.ExporterVersion, manifest.MinecraftVersion, normalizeExportLoader(manifest.Loader), string(manifestJSON), namespaces, manifest.Configuration.Profile,
+		)
+		return updateErr
+	})
 	if err != nil {
 		return err
 	}
 	if err = s.updateModExportJob(ctx, jobID, runToken, "importing", 20, "database"); err != nil {
 		return err
 	}
-	if _, err = s.db.Exec(ctx, `delete from catalog_import_revisions where job_id=$1 and mod_id=$2 and status='staging'`, jobID, modID); err != nil {
+	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		_, deleteErr := tx.Exec(ctx, `delete from catalog_import_revisions where job_id=$1 and mod_id=$2 and status='staging'`, jobID, modID)
+		return deleteErr
+	}); err != nil {
 		return err
 	}
 	revisions := make(map[string]string, len(namespaces))

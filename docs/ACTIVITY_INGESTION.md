@@ -4,7 +4,11 @@
 
 `view` 在请求层按用户和对象进行五分钟节流，随后进入有界内存队列。队列只保存有限数量的可丢弃浏览信号；数据库故障或写入变慢时，队列满载后的浏览动作会增加 `droppedBestEffort`，不会继续占用内存。
 
-其他动作先同步插入 `activity_event_outbox`。后台消费者通过 `FOR UPDATE SKIP LOCKED` 领取固定批次，在同一个 PostgreSQL 事务中将事件批量写入 `user_activity_events` 并删除 Outbox 行。进程在两步之间退出会触发事务回滚，因此不会留下“已删队列但未写原始事件”的状态。
+其他动作先同步插入 `activity_event_outbox`。后台消费者通过 `FOR UPDATE SKIP LOCKED` 领取固定批次，在同一个 PostgreSQL 事务中写入 `user_activity_events`、站点活动统计、任务进度和奖励账本，最后删除 Outbox 行。任一步失败或进程退出均回滚；保留原队列，按退避重试，避免已确认活动丢失其任务奖励。
+
+任务、用户和奖励币种按稳定顺序更新，降低并发锁顺序冲突。权限缓存提示在事务提交后更新；提示失败会记录错误，不会重放已经提交的奖励。缓存读取仍需遵守实际权限版本规则。
+
+停机关闭请求会排入独立有界通道。即使首次 `Close` 的调用方超时，写入循环仍会收到关闭请求；后续 `Close` 等待同一完成信号，不能伪造已经关闭的成功结果。内存中的浏览信号可丢弃，持久化队列会由重启实例接续。
 
 Outbox 是通用站内活动和统计的数据入口。资金转账、权限、安全、审核等领域仍必须在对应业务事务中写专用账本或审计表。
 
@@ -43,6 +47,8 @@ Outbox 是通用站内活动和统计的数据入口。资金转账、权限、�
 在没有真实执行计划前不引入会破坏现有主键、触发器和差异化保留策略的盲目分区。
 
 ## 验证命令
+
+数据库测试须先按 [隔离环境步骤](audit/environment.md) 启动本任务新建的服务、加载该目录的 `env.sh` 并运行 `go run ./cmd/test-setup`。单独设置测试开关不证明目标安全；集成 TestMain 会拒绝缺少所有权标记、非回环或身份不匹配的连接。下面的 PowerShell 例子同样需要预先导入这个隔离环境，不应使用部署环境变量。
 
 ```powershell
 go test ./internal/activity ./internal/config ./internal/database ./internal/app ./internal/httpapi

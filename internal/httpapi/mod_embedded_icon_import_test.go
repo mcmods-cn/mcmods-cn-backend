@@ -3,10 +3,13 @@ package httpapi
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
+	"strings"
 	"testing"
 )
 
@@ -183,4 +186,22 @@ func embeddedIconTestPNG(t *testing.T, width, height int) string {
 		t.Fatal(err)
 	}
 	return base64.StdEncoding.EncodeToString(buffer.Bytes())
+}
+
+func TestEmbeddedIconPNGChecksDimensionsBeforePixelAllocation(t *testing.T) {
+	data, err := base64.StdEncoding.DecodeString(embeddedIconTestPNG(t, 1, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Change only the valid IHDR dimensions/CRC. The tiny compressed image must
+	// be refused on its header before a decoder attempts a huge pixel buffer.
+	binary.BigEndian.PutUint32(data[16:20], 20000)
+	binary.BigEndian.PutUint32(data[20:24], 6000)
+	binary.BigEndian.PutUint32(data[29:33], crc32.ChecksumIEEE(data[12:29]))
+	if _, err = decodeEmbeddedIconPNG(base64.StdEncoding.EncodeToString(data)); err == nil || !strings.Contains(err.Error(), "dimensions") {
+		t.Fatalf("oversized header accepted: %v", err)
+	}
+	if _, err = decodeEmbeddedIconPNG(strings.Repeat("A", base64.StdEncoding.EncodedLen(16<<20)+4)); err == nil || !strings.Contains(err.Error(), "size limit") {
+		t.Fatalf("oversized encoded image accepted: %v", err)
+	}
 }

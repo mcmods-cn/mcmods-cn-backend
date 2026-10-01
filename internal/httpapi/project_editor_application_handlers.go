@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -86,6 +87,10 @@ func (s *Server) projectEditorTargetByPublicID(ctx context.Context, projectType,
 }
 
 func (s *Server) projectEditorTargetName(ctx context.Context, projectType string, internalID int64) (string, error) {
+	return projectEditorTargetNameQuery(ctx, s.db, projectType, internalID)
+}
+
+func projectEditorTargetNameQuery(ctx context.Context, database databaseQuery, projectType string, internalID int64) (string, error) {
 	var query string
 	switch projectType {
 	case "mod":
@@ -106,11 +111,16 @@ func (s *Server) projectEditorTargetName(ctx context.Context, projectType string
 		return "", pgx.ErrNoRows
 	}
 	var name string
-	err := s.db.QueryRow(ctx, query, internalID).Scan(&name)
+	err := database.QueryRow(ctx, query, internalID).Scan(&name)
 	return name, err
 }
 
 func (s *Server) projectEditorApplications(w http.ResponseWriter, r *http.Request) {
+	claims := currentClaims(r)
+	if claims.Subject <= 0 {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
 	target, err := s.projectEditorTargetByPublicID(r.Context(), r.PathValue("projectType"), r.PathValue("projectId"))
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "project not found")
@@ -120,14 +130,15 @@ func (s *Server) projectEditorApplications(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to load project")
 		return
 	}
-	claims := currentClaims(r)
 	if r.Method == http.MethodGet {
-		items, listErr := s.queryProjectEditorApplications(r.Context(), 0, target.RouteID, claims.Subject, "")
+		limit := boundedInt(r.URL.Query().Get("limit"), 100, 1, 200)
+		offset := boundedInt(r.URL.Query().Get("offset"), 0, 0, 1000000)
+		items, total, listErr := s.queryProjectEditorApplications(r.Context(), 0, target.RouteID, claims.Subject, "", limit, offset)
 		if listErr != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load editor applications")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset, "hasMore": offset+len(items) < total})
 		return
 	}
 	if claimsAllow(claims, "project.edit."+target.PublicID) || claimsAllow(claims, "project.edit") {
@@ -141,7 +152,7 @@ func (s *Server) projectEditorApplications(w http.ResponseWriter, r *http.Reques
 	}
 	request.ProofMarkdown = strings.TrimSpace(request.ProofMarkdown)
 	request.AttachmentIDs = uniquePublicIDs(request.AttachmentIDs)
-	if request.ProofMarkdown == "" || len(request.ProofMarkdown) > 10000 || len(request.AttachmentIDs) > 10 {
+	if request.ProofMarkdown == "" || utf8.RuneCountInString(request.ProofMarkdown) > 10000 || len(request.AttachmentIDs) > 10 {
 		writeError(w, http.StatusBadRequest, "proof is required and at most 10 attachments are allowed")
 		return
 	}
@@ -188,7 +199,7 @@ func (s *Server) projectEditorApplications(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to submit editor application")
 		return
 	}
-	items, err := s.queryProjectEditorApplications(r.Context(), applicationID, 0, 0, "")
+	items, _, err := s.queryProjectEditorApplications(r.Context(), applicationID, 0, 0, "", 1, 0)
 	if err != nil || len(items) != 1 {
 		writeError(w, http.StatusInternalServerError, "failed to read submitted editor application")
 		return
@@ -205,12 +216,14 @@ func (s *Server) adminProjectEditorApplications(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "invalid editor application status")
 		return
 	}
-	items, err := s.queryProjectEditorApplications(r.Context(), 0, 0, 0, status)
+	limit := boundedInt(r.URL.Query().Get("limit"), 100, 1, 200)
+	offset := boundedInt(r.URL.Query().Get("offset"), 0, 0, 1000000)
+	items, total, err := s.queryProjectEditorApplications(r.Context(), 0, 0, 0, status, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load editor applications")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset, "hasMore": offset+len(items) < total})
 }
 
 func (s *Server) reviewProjectEditorApplication(w http.ResponseWriter, r *http.Request) {
@@ -232,13 +245,13 @@ func (s *Server) reviewProjectEditorApplication(w http.ResponseWriter, r *http.R
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var applicationID, targetRouteID, userID int64
+	var applicationID, targetRouteID, userID, targetInternalID int64
 	var targetType, targetID, targetName string
 	err = tx.QueryRow(r.Context(), `select application.id,application.target_route_id,application.user_id,
-		route.entity_type,route.public_id
+		route.entity_type,route.public_id,route.internal_id
 		from project_editor_applications application join public_routes route on route.id=application.target_route_id
 		where application.public_id=$1 and application.status='pending' for update of application`, applicationPublicID).
-		Scan(&applicationID, &targetRouteID, &userID, &targetType, &targetID)
+		Scan(&applicationID, &targetRouteID, &userID, &targetType, &targetID, &targetInternalID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusConflict, "application does not exist or was already reviewed")
 		return
@@ -247,11 +260,11 @@ func (s *Server) reviewProjectEditorApplication(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusInternalServerError, "failed to load editor application")
 		return
 	}
-	targetName, _ = s.projectEditorTargetName(r.Context(), targetType, func() int64 {
-		var internalID int64
-		_ = tx.QueryRow(r.Context(), `select internal_id from public_routes where id=$1`, targetRouteID).Scan(&internalID)
-		return internalID
-	}())
+	targetName, err = projectEditorTargetNameQuery(r.Context(), tx, targetType, targetInternalID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to load reviewed project name")
+		return
+	}
 	claims := currentClaims(r)
 	if _, err = tx.Exec(r.Context(), `update project_editor_applications set status=$2,reviewed_by=$3,
 		review_note=$4,reviewed_at=now(),updated_at=now() where id=$1`, applicationID, request.Status, claims.Subject, request.Note); err != nil {
@@ -266,9 +279,10 @@ func (s *Server) reviewProjectEditorApplication(w http.ResponseWriter, r *http.R
 			writeError(w, http.StatusInternalServerError, "failed to grant project editor assignment")
 			return
 		}
-		payload, _ := json.Marshal(map[string]any{"applicationId": applicationPublicID, "targetType": targetType, "targetId": targetID})
-		_, _ = tx.Exec(r.Context(), `insert into permission_audit_logs(operator_id,target_user_id,action,payload)
-			values($1,$2,'project_editor.grant',$3::jsonb)`, claims.Subject, userID, payload)
+		if err = s.auditPermissionChangeTx(r.Context(), tx, claims.Subject, &userID, "project_editor.grant", map[string]any{"applicationId": applicationPublicID, "targetType": targetType, "targetId": targetID}); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record editor permission grant")
+			return
+		}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit editor application review")
@@ -283,7 +297,7 @@ func (s *Server) reviewProjectEditorApplication(w http.ResponseWriter, r *http.R
 	}
 	s.enqueueOrCreateDirectNotification(r.Context(), userID, claims.Subject, "review", "Project editor application", fmt.Sprintf("Your editor application for %s %s. %s", targetName, statusText, request.Note), map[string]any{
 		"targetType": targetType, "targetId": targetID, "applicationId": applicationPublicID,
-	})
+	}, "en-US")
 	writeJSON(w, http.StatusOK, map[string]any{"status": request.Status})
 }
 
@@ -321,9 +335,10 @@ func (s *Server) revokeProjectEditorAssignment(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusNotFound, "active editor assignment not found")
 		return
 	}
-	payload, _ := json.Marshal(map[string]any{"targetType": target.Type, "targetId": target.PublicID, "reason": request.Reason})
-	_, _ = tx.Exec(r.Context(), `insert into permission_audit_logs(operator_id,target_user_id,action,payload)
-		values($1,$2,'project_editor.revoke',$3::jsonb)`, claims.Subject, userID, payload)
+	if err = s.auditPermissionChangeTx(r.Context(), tx, claims.Subject, &userID, "project_editor.revoke", map[string]any{"targetType": target.Type, "targetId": target.PublicID, "reason": request.Reason}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record editor permission revocation")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit editor revocation")
 		return
@@ -349,41 +364,53 @@ func (s *Server) presignProjectEditorApplicationAttachment(w http.ResponseWriter
 	s.presignOSSFileWithRequest(w, r, ossPresignRequest{ObjectKey: file.ObjectKey})
 }
 
-func (s *Server) queryProjectEditorApplications(ctx context.Context, applicationID, targetRouteID, userID int64, status string) ([]projectEditorApplicationResponse, error) {
-	rows, err := s.db.Query(ctx, `select application.public_id,application.id,route.entity_type,route.public_id,route.internal_id,
+func (s *Server) queryProjectEditorApplications(ctx context.Context, applicationID, targetRouteID, userID int64, status string, limit, offset int) ([]projectEditorApplicationResponse, int, error) {
+	var total int
+	if err := s.db.QueryRow(ctx, `select count(*) from project_editor_applications application
+		where ($1::bigint=0 or application.id=$1) and ($2::bigint=0 or application.target_route_id=$2)
+		and ($3::bigint=0 or application.user_id=$3) and ($4='' or application.status=$4)`, applicationID, targetRouteID, userID, status).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query(ctx, `select application.public_id,application.id,route.entity_type,route.public_id,
 		route.canonical_path,account.public_id,account.username,application.proof_markdown,application.status,
-		application.review_note,application.created_at,application.reviewed_at
+		application.review_note,application.created_at,application.reviewed_at,
+		coalesce(mod.primary_name,modpack.primary_name,project.primary_name,server.name,blueprint.title,skin.display_name,post.title,'')
 		from project_editor_applications application
 		join public_routes route on route.id=application.target_route_id
 		join users account on account.id=application.user_id
+		left join mods mod on route.entity_type='mod' and mod.id=route.internal_id and mod.review_status='approved'
+		left join modpacks modpack on route.entity_type='modpack' and modpack.id=route.internal_id and modpack.review_status='approved'
+		left join simple_projects project on route.entity_type in ('plugin','map','resource_pack','shader_pack','datapack','addon') and project.id=route.internal_id and project.review_status='approved'
+		left join minecraft_servers server on route.entity_type='minecraft_server' and server.id=route.internal_id and server.review_status='approved'
+		left join blueprints blueprint on route.entity_type='blueprint' and blueprint.id=route.internal_id and blueprint.status='ready' and blueprint.review_status in ('approved','not_required')
+		left join skin_assets skin on route.entity_type='skin' and skin.id=route.internal_id and skin.status='active' and skin.review_status='approved'
+		left join community_posts post on route.entity_type='community_post' and post.id=route.internal_id and post.review_status='approved'
 		where ($1::bigint=0 or application.id=$1) and ($2::bigint=0 or application.target_route_id=$2)
 		  and ($3::bigint=0 or application.user_id=$3) and ($4='' or application.status=$4)
-		order by application.created_at desc,application.id desc`, applicationID, targetRouteID, userID, status)
+		order by application.created_at desc,application.id desc limit $5 offset $6`, applicationID, targetRouteID, userID, status, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	items := make([]projectEditorApplicationResponse, 0)
 	applicationIDs := make([]int64, 0)
 	for rows.Next() {
 		var item projectEditorApplicationResponse
-		var targetInternalID int64
-		if err = rows.Scan(&item.ID, &item.InternalID, &item.TargetType, &item.TargetID, &targetInternalID,
+		if err = rows.Scan(&item.ID, &item.InternalID, &item.TargetType, &item.TargetID,
 			&item.TargetURL, &item.UserID, &item.Username, &item.ProofMarkdown, &item.Status, &item.ReviewNote,
-			&item.CreatedAt, &item.ReviewedAt); err != nil {
-			return nil, err
+			&item.CreatedAt, &item.ReviewedAt, &item.TargetName); err != nil {
+			return nil, 0, err
 		}
-		item.TargetName, _ = s.projectEditorTargetName(ctx, item.TargetType, targetInternalID)
-		item.Attachments = []projectEditorApplicationAttachment{}
 		items = append(items, item)
 		applicationIDs = append(applicationIDs, item.InternalID)
 	}
 	if err = rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	rows.Close()
 	attachments, err := s.projectEditorApplicationAttachments(ctx, applicationIDs)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	for index := range items {
 		items[index].Attachments = attachments[items[index].InternalID]
@@ -391,7 +418,7 @@ func (s *Server) queryProjectEditorApplications(ctx context.Context, application
 			items[index].Attachments = []projectEditorApplicationAttachment{}
 		}
 	}
-	return items, nil
+	return items, total, nil
 }
 
 func (s *Server) projectEditorApplicationAttachments(ctx context.Context, applicationIDs []int64) (map[int64][]projectEditorApplicationAttachment, error) {
@@ -418,15 +445,19 @@ func (s *Server) projectEditorApplicationAttachments(ctx context.Context, applic
 	return result, rows.Err()
 }
 
-func (s *Server) enqueueOrCreateDirectNotification(ctx context.Context, recipientID, actorID int64, kind, title, body string, data map[string]any) {
-	event := notificationEvent{Action: "direct", RecipientID: recipientID, ActorID: actorID, Kind: kind, Title: title, Body: body, SourceLocale: "zh-CN", Data: data}
+func (s *Server) enqueueOrCreateDirectNotification(ctx context.Context, recipientID, actorID int64, kind, title, body string, data map[string]any, sourceLocales ...string) {
+	sourceLocale := "zh-CN"
+	if len(sourceLocales) > 0 {
+		sourceLocale = sourceLocales[0]
+	}
+	event := notificationEvent{Action: "direct", RecipientID: recipientID, ActorID: actorID, Kind: kind, Title: title, Body: body, SourceLocale: sourceLocale, Data: data}
 	if (s.queue != nil || s.cfg.NATS.OutboxEnabled) && s.enqueueNotificationTask(ctx, event) == nil {
 		return
 	}
 	raw, _ := json.Marshal(data)
 	var notificationID int64
 	if s.db.QueryRow(ctx, `insert into notifications(recipient_id,kind,title,body,source_locale,data)
-		values($1,$2,$3,$4,'zh-CN',$5::jsonb) returning id`, recipientID, kind, title, body, string(raw)).Scan(&notificationID) == nil && actorID > 0 {
+		values($1,$2,$3,$4,$5,$6::jsonb) returning id`, recipientID, kind, title, body, sourceLocale, string(raw)).Scan(&notificationID) == nil && actorID > 0 {
 		_, _ = s.db.Exec(ctx, `insert into notification_actors(notification_id,actor_id) values($1,$2) on conflict do nothing`, notificationID, actorID)
 	}
 }

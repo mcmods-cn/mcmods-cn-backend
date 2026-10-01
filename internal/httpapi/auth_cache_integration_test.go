@@ -73,8 +73,10 @@ func TestSessionAndRBACCacheHitAvoidsDatabaseLoadersIntegration(t *testing.T) {
 	if err = server.resolveClaimsSubject(ctx, &second); err != nil {
 		t.Fatal(err)
 	}
-	if got := counter.queries.Load(); got != 0 {
-		t.Fatalf("warm session/RBAC request executed %d PostgreSQL queries", got)
+	// A warm request still checks the session's authoritative revocation and
+	// user status/version. Permission payloads retain their cached loaders.
+	if got := counter.queries.Load(); got != 1 {
+		t.Fatalf("warm session/RBAC request executed %d PostgreSQL queries, want one authoritative session check", got)
 	}
 	if got := cache.Metrics().PostgresLoads; got != loadsAfterFirst {
 		t.Fatalf("cache hit caused loader: before=%d after=%d", loadsAfterFirst, got)

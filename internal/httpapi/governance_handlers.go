@@ -236,10 +236,13 @@ func (s *Server) reportTargetSnapshot(ctx context.Context, targetType, publicID 
 			return nil, nil, queryErr
 		}
 		rows.Close()
-		attachments := s.querySimpleRowsWithContext(ctx, `select file.public_id,file.original_name,file.content_type,file.size_bytes,file.sha256,
+		attachments, err := s.querySimpleRowsWithContext(ctx, `select file.public_id,file.original_name,file.content_type,file.size_bytes,file.sha256,
 			share.public_code as log_share_code,share.status as log_share_status
 			from comment_log_bindings binding join oss_files file on file.id=binding.attachment_file_id
 			left join log_shares share on share.id=binding.log_share_id where binding.comment_id=$1 order by binding.created_at,binding.attachment_file_id`, commentID)
+		if err != nil {
+			return nil, nil, err
+		}
 		return map[string]any{"targetType": "comment", "id": publicID, "body": body, "status": status, "authorId": authorPublicID,
 			"authorName": authorName, "commentTargetType": commentTargetType, "commentTargetId": commentTargetID,
 			"targetVersionId": targetVersionID, "parentCommentId": parentPublicID, "floorNumber": floorNumber, "createdAt": created,
@@ -386,6 +389,10 @@ func (s *Server) ownReports(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, map[string]any{"id": id, "targetType": tt, "targetId": tid, "reasonCode": reason, "status": status, "createdAt": created, "resolvedAt": resolved})
 	}
+	if err := rows.Err(); err != nil {
+		writeError(w, 500, "读取举报失败")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"items": items, "limit": limit, "offset": offset})
 }
 
@@ -414,6 +421,10 @@ func (s *Server) adminReports(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		items = append(items, map[string]any{"id": id, "targetType": tt, "targetId": tid, "reasonCode": reason, "status": state, "reporterId": rid, "reporterName": rname, "createdAt": created, "claimedAt": claimed})
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, 500, "读取举报队列失败")
+		return
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "limit": limit, "offset": offset})
 }
@@ -444,19 +455,35 @@ func (s *Server) adminReportDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	evidence := []map[string]any{}
 	if claimsAllow(currentClaims(r), "report.evidence.view") {
-		evidence = s.querySimpleRows(r, `select evidence.public_id,evidence.original_name,evidence.content_type,evidence.byte_size,evidence.sha256,
+		evidence, err = s.querySimpleRows(r, `select evidence.public_id,evidence.original_name,evidence.content_type,evidence.byte_size,evidence.sha256,
 			evidence.scan_status,evidence.status,evidence.created_at,evidence.deleted_at
 			from report_evidence evidence join reports report on report.id=evidence.report_id where report.public_id=$1 order by evidence.id`, id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "读取举报详情失败")
+			return
+		}
 	}
-	reviews := s.querySimpleRows(r, `select review.conclusion,review.note,review.created_at,reviewer.public_id as reviewer_id,reviewer.username as reviewer_name
+	reviews, err := s.querySimpleRows(r, `select review.conclusion,review.note,review.created_at,reviewer.public_id as reviewer_id,reviewer.username as reviewer_name
 		from report_reviews review join reports report on report.id=review.report_id join users reviewer on reviewer.id=review.reviewer_id
 		where report.public_id=$1 order by review.created_at,review.id`, id)
-	actions := s.querySimpleRows(r, `select action.public_id,action.action_type,action.target_type,action.target_public_id,action.reason,action.created_at,
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取举报详情失败")
+		return
+	}
+	actions, err := s.querySimpleRows(r, `select action.public_id,action.action_type,action.target_type,action.target_public_id,action.reason,action.created_at,
 		actor.public_id as actor_id,actor.username as actor_name from moderation_actions action join reports report on report.id=action.report_id
 		join users actor on actor.id=action.actor_id where report.public_id=$1 order by action.created_at,action.id`, id)
-	related := s.querySimpleRows(r, `select related.public_id,related.reason_code,related.status,related.created_at,reporter.username as reporter_name
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取举报详情失败")
+		return
+	}
+	related, err := s.querySimpleRows(r, `select related.public_id,related.reason_code,related.status,related.created_at,reporter.username as reporter_name
 		from reports current join reports related on related.target_type=current.target_type and related.target_public_id=current.target_public_id and related.id<>current.id
 		join users reporter on reporter.id=related.reporter_id where current.public_id=$1 order by related.created_at desc,related.id desc limit 20`, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取举报详情失败")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"id": id, "targetType": tt, "targetId": tid, "reasonCode": reason, "reasonVersion": version,
 		"customReason": custom, "detail": detail, "status": status, "reporterId": reporterID, "reporterName": reporterName,
 		"targetAuthorId": targetAuthorID, "targetAuthorName": targetAuthorName, "createdAt": created, "snapshot": result,
@@ -802,6 +829,10 @@ func (s *Server) blackroomList(w http.ResponseWriter, r *http.Request, internal 
 		}
 		display := publicBanStatus(status, ends, revoked, now)
 		items = append(items, map[string]any{"id": id, "userId": uid, "username": name, "avatarUrl": avatar, "reasonCode": reason, "customReason": custom, "status": display, "startsAt": starts, "endsAt": ends, "revokedAt": revoked})
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, 500, "读取小黑屋失败")
+		return
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "limit": limit, "offset": offset})
 }

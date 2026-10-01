@@ -445,6 +445,10 @@ func normalizeProjectFileType(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	value = strings.ReplaceAll(value, "-", "_")
 	switch value {
+	case "mods", "modpacks", "plugins", "maps", "resourcepacks", "shaderpacks", "shaders", "datapacks", "addons":
+		value = strings.TrimSuffix(value, "s")
+	}
+	switch value {
 	case "mod", "modpack", "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
 		return value
 	case "resourcepack", "texture_pack", "texturepack":

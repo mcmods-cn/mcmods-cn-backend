@@ -2,13 +2,14 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -174,6 +175,10 @@ func (s *Server) notifications(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, item)
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取通知失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, items)
 }
 
@@ -262,20 +267,21 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	req.TargetLocale = strings.TrimSpace(req.TargetLocale)
-	if req.TargetLocale == "" || len(req.TargetLocale) > 20 {
+	req.TargetLocale = normalizeContentLocale(req.TargetLocale)
+	if !validContentLocaleTag(req.TargetLocale) {
 		writeError(w, http.StatusBadRequest, "目标语言不正确")
 		return
 	}
 	claims := currentClaims(r)
 	var title, body, sourceLocale, kind string
+	var sourceUpdatedAt time.Time
 	err := s.db.QueryRow(
 		r.Context(),
-		`select title, body, source_locale, kind from notifications
+		`select title, body, source_locale, kind, updated_at from notifications
 		 where id = $1 and (recipient_id is null or recipient_id = $2)`,
 		notificationID,
 		claims.Subject,
-	).Scan(&title, &body, &sourceLocale, &kind)
+	).Scan(&title, &body, &sourceLocale, &kind, &sourceUpdatedAt)
 	if err == pgx.ErrNoRows {
 		writeError(w, http.StatusNotFound, "通知不存在")
 		return
@@ -288,17 +294,30 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusForbidden, "SYSTEM_NOTIFICATION_TRANSLATION_DISABLED", "系统通知已按接收语言生成，无需 AI 翻译", 0, nil)
 		return
 	}
+	if req.TargetLocale == normalizeContentLocale(sourceLocale) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"cached": true, "translation": map[string]string{"title": title, "body": body},
+		})
+		return
+	}
 	var cachedTitle, cachedBody string
-	if err := s.db.QueryRow(
+	err = s.db.QueryRow(
 		r.Context(),
-		`select title, body from notification_translations where notification_id = $1 and user_id = $2 and locale = $3`,
+		`select title, body from notification_translations
+		 where notification_id=$1 and user_id=$2 and locale=$3 and created_at >= $4`,
 		notificationID,
 		claims.Subject,
 		req.TargetLocale,
-	).Scan(&cachedTitle, &cachedBody); err == nil {
+		sourceUpdatedAt,
+	).Scan(&cachedTitle, &cachedBody)
+	if err == nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"cached": true, "translation": map[string]string{"title": cachedTitle, "body": cachedBody},
 		})
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusServiceUnavailable, "读取通知翻译失败")
 		return
 	}
 	limit := int64(claimsNumericPermissionValue(claims, "user.ai.daily_token_limit"))
@@ -318,16 +337,24 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload := map[string]any{
-		"notificationId": notificationID,
-		"sourceLocale":   sourceLocale,
-		"targetLocale":   req.TargetLocale,
-		"items":          []map[string]string{{"key": "title", "text": title}, {"key": "body", "text": body}},
+		"notificationId":  notificationID,
+		"sourceLocale":    sourceLocale,
+		"sourceUpdatedAt": sourceUpdatedAt,
+		"targetLocale":    req.TargetLocale,
+		"items":           []map[string]string{{"key": "title", "text": title}, {"key": "body", "text": body}},
+	}
+	if err = freezeAITranslationContext(payload, cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "翻译术语配置无效")
+		return
 	}
 	rawPayload, _ := json.Marshal(payload)
-	reserved := int64(utf8.RuneCountInString(title+body)*2 + 128)
-	if reserved < 128 {
-		reserved = 128
+	if _, err = buildTranslationPrompt(aiTaskNotificationTranslation, "", rawPayload); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
+	digest := sha256.Sum256(rawPayload)
+	concurrencyKey := "notification:" + strconv.FormatInt(claims.Subject, 10) + ":" + hex.EncodeToString(digest[:])
+	reserved := estimatedAIReservation(rawPayload, model)
 
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -335,21 +362,36 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	_, _ = tx.Exec(r.Context(), `select pg_advisory_xact_lock($1)`, claims.Subject)
-	var used, pending int64
-	if err := tx.QueryRow(
-		r.Context(),
-		`select
-		 coalesce(sum(case when status = 'completed' then input_tokens + output_tokens else 0 end), 0),
-		 coalesce(sum(case when status in ('queued', 'running', 'retrying') then quota_reserved_tokens else 0 end), 0)
-		 from ai_tasks where created_by = $1 and created_at >= date_trunc('day', now())`,
-		claims.Subject,
-	).Scan(&used, &pending); err != nil {
-		writeError(w, http.StatusInternalServerError, "读取 AI Token 额度失败")
+	if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtextextended($1,0))`, concurrencyKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "创建翻译任务失败")
 		return
 	}
-	if limit != int64(maxPermissionValue) && used+pending+reserved > limit {
-		writeError(w, http.StatusTooManyRequests, "今日 AI Token 余额不足")
+	var existingUID, existingStatus string
+	err = tx.QueryRow(r.Context(), `select task_uid,status from ai_tasks
+		where concurrency_key=$1 and created_by=$2 and status in ('queued','running','retrying')
+		order by id desc limit 1`, concurrencyKey, claims.Subject).Scan(&existingUID, &existingStatus)
+	if err == nil {
+		writeJSON(w, http.StatusAccepted, map[string]any{"cached": false, "taskId": existingUID, "status": existingStatus})
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "读取翻译任务失败")
+		return
+	}
+	if err = reserveAISiteQuotaTx(r.Context(), tx, cfg, reserved); err != nil {
+		if errors.Is(err, errAIQuotaExceeded) {
+			writeError(w, http.StatusTooManyRequests, "今日 AI Token 余额不足")
+		} else {
+			writeError(w, http.StatusServiceUnavailable, "读取 AI Token 额度失败")
+		}
+		return
+	}
+	if err = reserveAITaskQuotaTx(r.Context(), tx, claims.Subject, limit, reserved); err != nil {
+		if errors.Is(err, errAIQuotaExceeded) {
+			writeError(w, http.StatusTooManyRequests, "今日 AI Token 余额不足")
+		} else {
+			writeError(w, http.StatusServiceUnavailable, "读取 AI Token 额度失败")
+		}
 		return
 	}
 	taskUID := "ai_" + randomHex(16)
@@ -365,7 +407,7 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		aiTaskNotificationTranslation,
 		provider.Code,
 		model.Model,
-		"notification:"+strconv.FormatInt(notificationID, 10),
+		concurrencyKey,
 		string(rawPayload),
 		claims.Subject,
 		reserved,
@@ -374,11 +416,19 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "创建翻译任务失败")
 		return
 	}
+	if err = s.enqueueAIOutboxTx(r.Context(), tx, taskID, taskUID, aiTaskNotificationTranslation); err != nil {
+		if errors.Is(err, errAIQuotaExceeded) {
+			writeError(w, http.StatusTooManyRequests, "今日 AI 预算不足")
+		} else {
+			writeError(w, http.StatusServiceUnavailable, "AI 任务队列不可用")
+		}
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建翻译任务失败")
 		return
 	}
-	if s.queue == nil || s.queue.PublishTask(r.Context(), "ai", aiTaskMessage{TaskID: taskID, TaskUID: taskUID, TaskType: aiTaskNotificationTranslation}) != nil {
+	if !s.cfg.NATS.OutboxEnabled && (s.queue == nil || s.queue.PublishTask(r.Context(), "ai", aiTaskMessage{TaskID: taskID, TaskUID: taskUID, TaskType: aiTaskNotificationTranslation}) != nil) {
 		_, _ = s.db.Exec(r.Context(), `update ai_tasks set status = 'failed', error = 'NATS unavailable', finished_at = now(), updated_at = now() where id = $1`, taskID)
 		writeError(w, http.StatusServiceUnavailable, "AI 任务队列不可用")
 		return
@@ -395,16 +445,16 @@ func (s *Server) notificationTranslationResult(w http.ResponseWriter, r *http.Re
 	}
 	claims := currentClaims(r)
 	var status, errorMessage string
-	var resultRaw, payloadRaw []byte
+	var payloadRaw []byte
 	var inputTokens, outputTokens int64
 	err := s.db.QueryRow(
 		r.Context(),
-		`select status, result, payload, error, input_tokens, output_tokens
+		`select status, payload, error, input_tokens, output_tokens
 		 from ai_tasks where task_uid = $1 and created_by = $2 and task_type = $3`,
 		taskUID,
 		claims.Subject,
 		aiTaskNotificationTranslation,
-	).Scan(&status, &resultRaw, &payloadRaw, &errorMessage, &inputTokens, &outputTokens)
+	).Scan(&status, &payloadRaw, &errorMessage, &inputTokens, &outputTokens)
 	if err == pgx.ErrNoRows {
 		writeError(w, http.StatusNotFound, "翻译任务不存在")
 		return
@@ -415,35 +465,29 @@ func (s *Server) notificationTranslationResult(w http.ResponseWriter, r *http.Re
 	}
 	response := map[string]any{"status": status, "error": errorMessage, "inputTokens": inputTokens, "outputTokens": outputTokens}
 	if status == "completed" {
-		var result struct {
-			Items []struct {
-				Key  string `json:"key"`
-				Text string `json:"text"`
-			} `json:"items"`
-		}
 		var payload struct {
 			NotificationID int64  `json:"notificationId"`
 			TargetLocale   string `json:"targetLocale"`
 		}
-		_ = json.Unmarshal(resultRaw, &result)
-		_ = json.Unmarshal(payloadRaw, &payload)
-		translated := map[string]string{}
-		for _, item := range result.Items {
-			translated[item.Key] = item.Text
+		if err = json.Unmarshal(payloadRaw, &payload); err != nil || payload.NotificationID <= 0 || !validContentLocaleTag(payload.TargetLocale) {
+			writeError(w, http.StatusInternalServerError, "读取翻译任务失败")
+			return
 		}
-		_, _ = s.db.Exec(
-			r.Context(),
-			`insert into notification_translations (notification_id, user_id, locale, title, body)
-			 values ($1, $2, $3, $4, $5)
-			 on conflict (notification_id, user_id, locale) do update
-			 set title = excluded.title, body = excluded.body, created_at = now()`,
-			payload.NotificationID,
-			claims.Subject,
-			payload.TargetLocale,
-			translated["title"],
-			translated["body"],
-		)
-		response["translation"] = translated
+		var title, body string
+		err = s.db.QueryRow(r.Context(), `select translation.title,translation.body from notification_translations translation
+			join notifications notification on notification.id=translation.notification_id
+			where translation.notification_id=$1 and translation.user_id=$2 and translation.locale=$3
+			  and (notification.recipient_id is null or notification.recipient_id=$2)
+			  and translation.created_at>=notification.updated_at`, payload.NotificationID, claims.Subject, payload.TargetLocale).Scan(&title, &body)
+		if errors.Is(err, pgx.ErrNoRows) {
+			response["status"] = "failed"
+			response["error"] = "通知内容已更新或翻译不可用，请重新翻译"
+		} else if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "读取通知翻译失败")
+			return
+		} else {
+			response["translation"] = map[string]string{"title": title, "body": body}
+		}
 	}
 	writeJSON(w, http.StatusOK, response)
 }

@@ -217,3 +217,43 @@ func TestMonitorPersistsDurableActionsBeforeAcknowledging(t *testing.T) {
 		t.Fatalf("record after close returned %v", err)
 	}
 }
+
+func TestCloseCancellationStillStopsWriterAndRepeatedCloseWaits(t *testing.T) {
+	store := &fakeActivityStore{writeEntered: make(chan struct{}, 1), releaseWrite: make(chan struct{})}
+	monitor := newMonitor(store, Options{BatchSize: 1, QueueCapacity: 1, FlushInterval: time.Hour, WriteTimeout: time.Second})
+	if !monitor.RecordBestEffort(testViewEvent()) {
+		t.Fatal("event rejected")
+	}
+	select {
+	case <-store.writeEntered:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not enter")
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := monitor.Close(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled close returned %v", err)
+	}
+	store.mu.Lock()
+	before := len(store.writes)
+	store.mu.Unlock()
+	close(store.releaseWrite)
+	// A second Close must wait for the existing shutdown, rather than return a
+	// fabricated success while the original close request was never delivered.
+	ctx, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	if err := monitor.Close(ctx); err != nil {
+		t.Fatalf("waiting for shutdown: %v", err)
+	}
+	select {
+	case <-monitor.stopped:
+	default:
+		t.Fatal("Close returned before writer stopped")
+	}
+	store.mu.Lock()
+	after := len(store.writes)
+	store.mu.Unlock()
+	if after != before+1 {
+		t.Fatalf("shutdown writes before=%d after=%d", before, after)
+	}
+}

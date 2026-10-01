@@ -6,6 +6,10 @@
 
 业务调用 `queue.EnqueueTx`，必须传入现有 `pgx.Tx`。Dispatcher 使用 `FOR UPDATE SKIP LOCKED` 领取批次，状态为 `pending -> publishing -> published`；失败按有界指数退避回到 `failed`，超过次数写 `dead_letter_events` 并标记 `dead`。过期 `publishing` 可重新领取，多 Dispatcher 不会无界重复处理同一行。
 
+发布确认、失败和死信写入均同时校验 `status='publishing'`、`locked_by` 和本次 `attempts`。租约过期后，旧 Dispatcher 的迟到结果不得改写新领取者的任务；受影响行数为零也不计入成功指标。状态持久化失败会返回错误，不能把数据库失败当作已记录重试。
+
+本地降级同样遵守任务启用状态和配置超时，不执行明确禁用的任务。管理 API 的 NATS 地址移除认证、路径、查询和片段，连接错误只返回脱敏摘要；服务器内部错误仍由受控日志诊断。
+
 事件信封：
 
 ```json

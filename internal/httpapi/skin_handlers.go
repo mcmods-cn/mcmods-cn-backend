@@ -67,21 +67,26 @@ type skinAssetCreateRequest struct {
 }
 
 type skinAssetUpdateRequest struct {
-	Model       *string   `json:"model,omitempty"`
-	Name        *string   `json:"name,omitempty"`
-	Description *string   `json:"description,omitempty"`
-	Tags        *[]string `json:"tags,omitempty"`
-	Visibility  *string   `json:"visibility,omitempty"`
-	Reason      string    `json:"reason,omitempty"`
+	Model         *string                   `json:"model,omitempty"`
+	Name          *string                   `json:"name,omitempty"`
+	Description   *string                   `json:"description,omitempty"`
+	Tags          *[]string                 `json:"tags,omitempty"`
+	Visibility    *string                   `json:"visibility,omitempty"`
+	Reason        string                    `json:"reason,omitempty"`
+	DefaultLocale string                    `json:"defaultLocale,omitempty"`
+	Localizations []catalogLocalizationEdit `json:"localizations,omitempty"`
 }
 
 type skinAssetContentSnapshot struct {
-	PublicID    string   `json:"publicId"`
-	Model       string   `json:"model"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Tags        []string `json:"tags"`
-	Visibility  string   `json:"visibility"`
+	PublicID            string                    `json:"publicId"`
+	Model               string                    `json:"model"`
+	Name                string                    `json:"name"`
+	Description         string                    `json:"description"`
+	Tags                []string                  `json:"tags"`
+	Visibility          string                    `json:"visibility"`
+	DefaultLocale       string                    `json:"defaultLocale,omitempty"`
+	Localizations       []catalogLocalizationEdit `json:"localizations,omitempty"`
+	UpdateLocalizations bool                      `json:"updateLocalizations,omitempty"`
 }
 
 type skinOwnerResponse struct {
@@ -485,6 +490,10 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 	if !decodeSkinJSON(w, r, &request) {
 		return
 	}
+	if err := normalizeSkinAssetUpdateLocalizations(&request); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update skin asset")
@@ -527,6 +536,7 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 	snapshot := skinAssetContentSnapshot{
 		PublicID: publicID, Model: record.Model, Name: record.Name,
 		Description: record.Description, Tags: record.Tags, Visibility: record.Visibility,
+		DefaultLocale: request.DefaultLocale, Localizations: request.Localizations, UpdateLocalizations: request.Localizations != nil,
 	}
 	snapshotRaw, err := json.Marshal(snapshot)
 	if err != nil {
@@ -617,7 +627,20 @@ func applySkinAssetSnapshotTx(ctx context.Context, tx pgx.Tx, assetID, ownerID, 
 	if command.RowsAffected() != 1 {
 		return errors.New("skin asset was not updated")
 	}
-	return nil
+	if !snapshot.UpdateLocalizations {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `update content_subjects set default_locale=$2,updated_at=now()
+  where subject_type='skin' and subject_id=$1`, assetID, snapshot.DefaultLocale); err != nil {
+		return err
+	}
+	var actorID int64
+	if err := tx.QueryRow(ctx, `select coalesce(created_by,$2) from content_revisions where id=$1`, revisionID, ownerID).Scan(&actorID); err != nil {
+		return err
+	}
+	// Keep the shared provenance, source invalidation, and target revision rules.
+	// Locales omitted from an edit remain intact, including protected human work.
+	return publishCatalogLocalizationsTx(ctx, tx, assetID, snapshot.PublicID, "skin", snapshot.Localizations, revisionID, actorID)
 }
 
 func (s *Server) deleteSkin(w http.ResponseWriter, r *http.Request, publicID string) {
@@ -903,7 +926,7 @@ func (s *Server) createPlayerProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create player profile")
 		return
 	}
-	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims.Subject)
+	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load created player profile")
 		return
@@ -1029,7 +1052,7 @@ func (s *Server) updatePlayerProfile(w http.ResponseWriter, r *http.Request, pub
 		writeError(w, http.StatusInternalServerError, "failed to update player profile")
 		return
 	}
-	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims.Subject)
+	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load updated player profile")
 		return
@@ -1211,7 +1234,7 @@ func (s *Server) setPlayerProfileTexture(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to update player texture")
 		return
 	}
-	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims.Subject)
+	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load updated player profile")
 		return
@@ -1268,7 +1291,7 @@ func (s *Server) publicUserPlayerProfiles(w http.ResponseWriter, r *http.Request
 func (s *Server) playerProfileDetail(w http.ResponseWriter, r *http.Request) {
 	publicID := normalizedSkinPublicID(r.PathValue("publicId"))
 	claims := currentClaims(r)
-	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims.Subject)
+	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "player profile was not found")
 		return
@@ -1653,6 +1676,30 @@ func normalizeSkinAssetCreate(request *skinAssetCreateRequest) error {
 	return err
 }
 
+func normalizeSkinAssetUpdateLocalizations(request *skinAssetUpdateRequest) error {
+	if request.Localizations == nil {
+		if strings.TrimSpace(request.DefaultLocale) != "" {
+			return errors.New("defaultLocale requires localizations")
+		}
+		return nil
+	}
+	defaultLocale, localizations, err := normalizeCatalogLocalizations(request.DefaultLocale, request.Localizations)
+	if err != nil || requireCatalogCreateDefaultLocalization(defaultLocale, localizations) != nil {
+		return errors.New("the default language must have a localized skin name")
+	}
+	for _, localization := range localizations {
+		if len([]rune(localization.Name)) > 80 || len([]rune(localization.Summary)) > 1000 {
+			return errors.New("localized skin name or description is too long")
+		}
+		if localization.Locale == defaultLocale {
+			name, description := localization.Name, localization.Summary
+			request.Name, request.Description = &name, &description
+		}
+	}
+	request.DefaultLocale, request.Localizations = defaultLocale, localizations
+	return nil
+}
+
 func applySkinAssetUpdate(record *skinAssetRecord, request skinAssetUpdateRequest) error {
 	if request.Model != nil {
 		model := strings.ToLower(strings.TrimSpace(*request.Model))
@@ -1871,14 +1918,14 @@ func (s *Server) loadPlayerProfiles(ctx context.Context, userID int64, claims se
 		return nil, err
 	}
 	for index := range profiles {
-		if err = s.loadPlayerTextures(ctx, &profiles[index], claims.Subject); err != nil {
+		if err = s.loadPlayerTextures(ctx, &profiles[index], claims); err != nil {
 			return nil, err
 		}
 	}
 	return profiles, nil
 }
 
-func (s *Server) loadPlayerProfileByPublicIDForViewer(ctx context.Context, publicID string, viewerID int64) (playerProfileResponse, error) {
+func (s *Server) loadPlayerProfileByPublicIDForViewer(ctx context.Context, publicID string, claims security.Claims) (playerProfileResponse, error) {
 	var profile playerProfileResponse
 	err := s.db.QueryRow(ctx, `select profile.public_id,profile.uuid::text,profile.name,profile.bio,
 		profile.visibility,profile.is_default,profile.status,profile.created_at,profile.updated_at,
@@ -1890,18 +1937,23 @@ func (s *Server) loadPlayerProfileByPublicIDForViewer(ctx context.Context, publi
 	if err != nil {
 		return profile, err
 	}
-	return profile, s.loadPlayerTextures(ctx, &profile, viewerID)
+	return profile, s.loadPlayerTextures(ctx, &profile, claims)
 }
 
-func (s *Server) loadPlayerTextures(ctx context.Context, profile *playerProfileResponse, viewerID int64) error {
-	rows, err := s.db.Query(ctx, `select texture.kind,asset.model,asset.public_id,asset.display_name,
+const skinPlayerTextureSelectSQL = `select texture.kind,asset.model,asset.public_id,asset.display_name,
 		asset.description,asset.tags,asset.visibility,asset.review_status,asset.status,asset.downloads,asset.blob_hash,
 		asset.created_at,asset.updated_at,owner.id,owner.public_id,owner.username,
 		exists(select 1 from skin_wardrobe wardrobe where wardrobe.user_id=$2 and wardrobe.asset_id=asset.id)
 		from player_profile_textures texture join player_profiles profile on profile.id=texture.profile_id
 		join skin_assets asset on asset.id=texture.asset_id
 		join users owner on owner.id=asset.owner_id
-		where profile.public_id=$1 and asset.status='active' order by texture.kind`, profile.PublicID, viewerID)
+		where profile.public_id=$1 and asset.status='active'
+		and (asset.owner_id=$2 or $3 or (asset.review_status='approved' and asset.visibility<>'private'))
+		order by texture.kind`
+
+func (s *Server) loadPlayerTextures(ctx context.Context, profile *playerProfileResponse, claims security.Claims) error {
+	viewerID := claims.Subject
+	rows, err := s.db.Query(ctx, skinPlayerTextureSelectSQL, profile.PublicID, viewerID, isSkinAdmin(claims))
 	if err != nil {
 		return err
 	}

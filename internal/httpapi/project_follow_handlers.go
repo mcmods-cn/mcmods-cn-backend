@@ -59,7 +59,10 @@ func (s *Server) resolveFollowProjectTarget(ctx context.Context, publicID string
 	case "skin":
 		err = s.db.QueryRow(ctx, `select display_name,status='active' and ((visibility in ('public','unlisted') and review_status='approved') or owner_id=$2 or $3),updated_at::text from skin_assets where id=$1`, target.InternalID, viewerID, moderator).Scan(&target.Name, &visible, &target.UpdatedAt)
 	}
-	if err != nil || !visible {
+	if err != nil {
+		return target, err
+	}
+	if !visible {
 		return target, pgx.ErrNoRows
 	}
 	return target, nil
@@ -76,7 +79,10 @@ func (s *Server) projectFollowStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var followed, notificationsEnabled bool
-	_ = s.db.QueryRow(r.Context(), `select true,notifications_enabled from project_follows where user_id=$1 and project_route_id=$2`, currentClaims(r).Subject, target.RouteID).Scan(&followed, &notificationsEnabled)
+	if err = s.db.QueryRow(r.Context(), `select true,notifications_enabled from project_follows where user_id=$1 and project_route_id=$2`, currentClaims(r).Subject, target.RouteID).Scan(&followed, &notificationsEnabled); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusServiceUnavailable, "failed to load follow status")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"followed": followed, "notificationsEnabled": notificationsEnabled, "target": target})
 }
 
@@ -90,15 +96,24 @@ func (s *Server) followProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load project")
 		return
 	}
-	if _, err = s.db.Exec(r.Context(), `insert into project_follows(user_id,project_route_id,notifications_enabled) values($1,$2,true) on conflict(user_id,project_route_id) do update set updated_at=now()`, currentClaims(r).Subject, target.RouteID); err != nil {
+	var notificationsEnabled bool
+	if err = s.db.QueryRow(r.Context(), `insert into project_follows(user_id,project_route_id,notifications_enabled) values($1,$2,true) on conflict(user_id,project_route_id) do update set updated_at=now() returning notifications_enabled`, currentClaims(r).Subject, target.RouteID).Scan(&notificationsEnabled); err != nil {
 		writeError(w, 500, "failed to follow project")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"followed": true, "notificationsEnabled": true})
+	writeJSON(w, http.StatusOK, map[string]any{"followed": true, "notificationsEnabled": notificationsEnabled})
 }
 
 func (s *Server) unfollowProject(w http.ResponseWriter, r *http.Request) {
-	target, err := s.resolveFollowProjectTarget(r.Context(), r.PathValue("publicId"), currentClaims(r))
+	// A user may remove their own follow even after its target becomes private.
+	// Deletion returns no target metadata and remains scoped to the actor.
+	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("publicId")))
+	if !validCatalogPublicID(publicID) {
+		writeError(w, http.StatusNotFound, "project does not exist")
+		return
+	}
+	var routeID int64
+	err := s.db.QueryRow(r.Context(), `select id from public_routes where public_id=$1`, publicID).Scan(&routeID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "project does not exist")
 		return
@@ -107,7 +122,7 @@ func (s *Server) unfollowProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "failed to load project")
 		return
 	}
-	if _, err = s.db.Exec(r.Context(), `delete from project_follows where user_id=$1 and project_route_id=$2`, currentClaims(r).Subject, target.RouteID); err != nil {
+	if _, err = s.db.Exec(r.Context(), `delete from project_follows where user_id=$1 and project_route_id=$2`, currentClaims(r).Subject, routeID); err != nil {
 		writeError(w, 500, "failed to unfollow project")
 		return
 	}
@@ -174,6 +189,10 @@ func (s *Server) myProjectFollows(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		items = append(items, map[string]any{"id": publicID, "type": kind, "url": url, "name": name, "notificationsEnabled": notifications, "createdAt": createdAt, "updatedAt": updatedAt})
+	}
+	if rows.Err() != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load followed projects")
+		return
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "limit": limit, "offset": offset})
 }

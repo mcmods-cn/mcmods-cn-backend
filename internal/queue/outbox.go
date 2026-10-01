@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -65,10 +66,7 @@ func NewPostgresDeadLetterSink(db *pgxpool.Pool) DeadLetterSink {
 		if db == nil {
 			return errors.New("dead letter database is required")
 		}
-		lastError := dead.LastError
-		if len(lastError) > 1000 {
-			lastError = lastError[:1000]
-		}
+		lastError := boundedOutboxErrorText(dead.LastError)
 		_, err := db.Exec(ctx, `insert into dead_letter_events(
 			event_id,event_type,subject,payload,failure_stage,attempts,last_error)
 			values($1,$2,$3,$4::jsonb,$5,$6,$7)
@@ -120,7 +118,9 @@ func (dispatcher *OutboxDispatcher) DispatchBatch(ctx context.Context, limit int
 	for _, record := range rows {
 		raw, marshalErr := json.Marshal(record.Event)
 		if marshalErr != nil {
-			dispatcher.fail(ctx, record, marshalErr)
+			if err := dispatcher.fail(ctx, record, marshalErr); err != nil {
+				return len(rows), err
+			}
 			continue
 		}
 		status := dispatcher.queue.Status()
@@ -131,14 +131,19 @@ func (dispatcher *OutboxDispatcher) DispatchBatch(ctx context.Context, limit int
 			publishErr = dispatcher.queue.HandleLocally(ctx, record.TaskCode, record.Event.EventID, raw)
 		}
 		if publishErr != nil {
-			dispatcher.fail(ctx, record, publishErr)
+			if err := dispatcher.fail(ctx, record, publishErr); err != nil {
+				return len(rows), err
+			}
 			continue
 		}
-		if _, err = dispatcher.db.Exec(ctx, `update nats_outbox set status='published',published_at=now(),locked_at=null,locked_by='',updated_at=now()
-			where id=$1 and status='publishing' and locked_by=$2`, record.ID, dispatcher.workerID); err != nil {
-			return len(rows), err
+		result, updateErr := dispatcher.db.Exec(ctx, `update nats_outbox set status='published',published_at=now(),locked_at=null,locked_by='',updated_at=now()
+			where id=$1 and status='publishing' and locked_by=$2 and attempts=$3`, record.ID, dispatcher.workerID, record.Attempts+1)
+		if updateErr != nil {
+			return len(rows), updateErr
 		}
-		dispatcher.published.Add(1)
+		if result.RowsAffected() > 0 {
+			dispatcher.published.Add(1)
+		}
 	}
 	return len(rows), nil
 }
@@ -149,14 +154,18 @@ func (dispatcher *OutboxDispatcher) claim(ctx context.Context, limit int) ([]out
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	_, _ = tx.Exec(ctx, `update nats_outbox set status='failed',locked_at=null,locked_by='',available_at=now(),updated_at=now()
+	_, err = tx.Exec(ctx, `update nats_outbox set status='failed',locked_at=null,locked_by='',available_at=now(),updated_at=now()
 		where status='publishing' and locked_at<now()-interval '5 minutes'`)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := tx.Query(ctx, `select id,event_id,event_type,schema_version,occurred_at,aggregate_type,aggregate_id,trace_id,payload,subject,attempts,max_attempts
 		from nats_outbox where published_at is null and status in ('pending','failed') and available_at<=now()
 		order by available_at,id for update skip locked limit $1`, limit)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	result := make([]outboxRecord, 0, limit)
 	for rows.Next() {
 		var record outboxRecord
@@ -179,25 +188,41 @@ func (dispatcher *OutboxDispatcher) claim(ctx context.Context, limit int) ([]out
 	return result, tx.Commit(ctx)
 }
 
-func (dispatcher *OutboxDispatcher) fail(ctx context.Context, record outboxRecord, cause error) {
-	dispatcher.failed.Add(1)
+func (dispatcher *OutboxDispatcher) fail(ctx context.Context, record outboxRecord, cause error) error {
 	attempts := record.Attempts + 1
-	errorText := cause.Error()
-	if len(errorText) > 1000 {
-		errorText = errorText[:1000]
-	}
+	errorText := boundedOutboxErrorText(cause.Error())
 	if attempts >= record.MaxAttempts {
-		_, _ = dispatcher.db.Exec(ctx, `with moved as (
+		result, err := dispatcher.db.Exec(ctx, `with moved as (
 			update nats_outbox set status='dead',last_error=$2,locked_at=null,locked_by='',updated_at=now()
-			where id=$1 returning event_id,event_type,subject,payload,attempts
+			where id=$1 and status='publishing' and locked_by=$3 and attempts=$4 returning event_id,event_type,subject,payload,attempts
 		) insert into dead_letter_events(event_id,event_type,subject,payload,failure_stage,attempts,last_error)
 		select event_id,event_type,subject,payload,'publish',attempts,$2 from moved on conflict(event_id,failure_stage) do update
-		set attempts=excluded.attempts,last_error=excluded.last_error,failed_at=now()`, record.ID, errorText)
-		dispatcher.dead.Add(1)
-		return
+		set attempts=excluded.attempts,last_error=excluded.last_error,failed_at=now()`, record.ID, errorText, dispatcher.workerID, attempts)
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() > 0 {
+			dispatcher.failed.Add(1)
+			dispatcher.dead.Add(1)
+		}
+		return nil
 	}
 	backoff := time.Second * time.Duration(1<<min(attempts, int64(8)))
-	_, _ = dispatcher.db.Exec(ctx, `update nats_outbox set status='failed',last_error=$2,available_at=now()+$3::interval,
-		locked_at=null,locked_by='',updated_at=now() where id=$1`, record.ID, errorText, fmt.Sprintf("%f seconds", backoff.Seconds()))
-	dispatcher.retried.Add(1)
+	result, err := dispatcher.db.Exec(ctx, `update nats_outbox set status='failed',last_error=$2,available_at=now()+$3::interval,
+		locked_at=null,locked_by='',updated_at=now() where id=$1 and status='publishing' and locked_by=$4 and attempts=$5`,
+		record.ID, errorText, fmt.Sprintf("%f seconds", backoff.Seconds()), dispatcher.workerID, attempts)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() > 0 {
+		dispatcher.failed.Add(1)
+		dispatcher.retried.Add(1)
+	}
+	return nil
+}
+
+// Byte limits must not leave an incomplete Unicode sequence that PostgreSQL
+// rejects while persisting the retry/dead-letter state itself.
+func boundedOutboxErrorText(value string) string {
+	return strings.ToValidUTF8(value[:min(len(value), 1000)], "")
 }

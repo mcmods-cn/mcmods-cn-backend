@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -60,11 +61,29 @@ func (s *Service) ProcessActivityBatch(ctx context.Context, events []activity.Ev
 	if s == nil || s.db == nil || len(events) == 0 {
 		return nil
 	}
-	tasks, err := s.activeTasks(ctx)
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = s.ProcessActivityBatchTx(ctx, tx, events); err != nil {
+		return err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	return s.RefreshActivityPermissions(ctx, events)
+}
+
+func (s *Service) ProcessActivityBatchTx(ctx context.Context, tx pgx.Tx, events []activity.Event) error {
+	if s == nil || s.db == nil || len(events) == 0 {
+		return nil
+	}
+	tasks, err := s.activeTasks(ctx, tx)
 	if err != nil || len(tasks) == 0 {
 		return err
 	}
-	timezones, err := s.userTimezones(ctx, events)
+	timezones, err := s.userTimezones(ctx, tx, events)
 	if err != nil {
 		return err
 	}
@@ -101,27 +120,40 @@ func (s *Service) ProcessActivityBatch(ctx context.Context, events []activity.Ev
 	if len(deltas) == 0 {
 		return nil
 	}
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
+	keys := make([]progressKey, 0, len(deltas))
+	for key := range deltas {
+		keys = append(keys, key)
 	}
-	defer tx.Rollback(ctx)
-	for key, delta := range deltas {
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].UserID != keys[j].UserID {
+			return keys[i].UserID < keys[j].UserID
+		}
+		if keys[i].TaskID != keys[j].TaskID {
+			return keys[i].TaskID < keys[j].TaskID
+		}
+		return keys[i].PeriodKey < keys[j].PeriodKey
+	})
+	for _, key := range keys {
+		delta := deltas[key]
 		if err = s.applyTaskProgress(ctx, tx, key, delta); err != nil {
 			return err
 		}
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return err
+	return nil
+}
+
+func (s *Service) RefreshActivityPermissions(ctx context.Context, events []activity.Event) error {
+	if s == nil || s.db == nil || s.cache == nil {
+		return nil
 	}
-	refreshed := make(map[int64]struct{}, len(deltas))
-	userIDs := make([]int64, 0, len(deltas))
-	for key := range deltas {
-		if _, ok := refreshed[key.UserID]; ok {
+	refreshed := make(map[int64]struct{}, len(events))
+	userIDs := make([]int64, 0, len(events))
+	for _, event := range events {
+		if _, ok := refreshed[event.UserID]; ok {
 			continue
 		}
-		refreshed[key.UserID] = struct{}{}
-		userIDs = append(userIDs, key.UserID)
+		refreshed[event.UserID] = struct{}{}
+		userIDs = append(userIDs, event.UserID)
 	}
 	rows, err := s.db.Query(ctx, `select id,permission_version from users where id=any($1::bigint[])`, userIDs)
 	if err != nil {
@@ -140,7 +172,11 @@ func (s *Service) ProcessActivityBatch(ctx context.Context, events []activity.Ev
 	return rows.Err()
 }
 
-func (s *Service) userTimezones(ctx context.Context, events []activity.Event) (map[int64]string, error) {
+type taskQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func (s *Service) userTimezones(ctx context.Context, queryer taskQueryer, events []activity.Event) (map[int64]string, error) {
 	userIDs := make([]int64, 0, len(events))
 	seen := make(map[int64]struct{}, len(events))
 	for _, event := range events {
@@ -157,7 +193,7 @@ func (s *Service) userTimezones(ctx context.Context, events []activity.Event) (m
 	if len(userIDs) == 0 {
 		return result, nil
 	}
-	rows, err := s.db.Query(ctx, `select id,timezone from users where id=any($1::bigint[])`, userIDs)
+	rows, err := queryer.Query(ctx, `select id,timezone from users where id=any($1::bigint[])`, userIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -173,8 +209,8 @@ func (s *Service) userTimezones(ctx context.Context, events []activity.Event) (m
 	return result, rows.Err()
 }
 
-func (s *Service) activeTasks(ctx context.Context) ([]taskDefinition, error) {
-	rows, err := s.db.Query(ctx, `select id,refresh_period,condition,rewards from task_definitions where status='active'`)
+func (s *Service) activeTasks(ctx context.Context, queryer taskQueryer) ([]taskDefinition, error) {
+	rows, err := queryer.Query(ctx, `select id,refresh_period,condition,rewards from task_definitions where status='active'`)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +294,13 @@ func (s *Service) applyTaskProgress(ctx context.Context, tx pgx.Tx, key progress
 			return err
 		}
 	}
-	for currencyCode, amount := range delta.Task.Rewards.Currencies {
+	codes := make([]string, 0, len(delta.Task.Rewards.Currencies))
+	for code := range delta.Task.Rewards.Currencies {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	for _, currencyCode := range codes {
+		amount := delta.Task.Rewards.Currencies[currencyCode]
 		if amount <= 0 {
 			continue
 		}

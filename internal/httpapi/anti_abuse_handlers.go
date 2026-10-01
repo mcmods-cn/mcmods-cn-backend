@@ -80,24 +80,42 @@ func (s *Server) adminAntiAbuseOverview(w http.ResponseWriter, r *http.Request) 
 	for rows.Next() {
 		var windowName, outcome string
 		var count int64
-		if rows.Scan(&windowName, &outcome, &count) == nil {
-			counts[windowName][outcome] = count
+		if err = rows.Scan(&windowName, &outcome, &count); err != nil {
+			rows.Close()
+			writeError(w, http.StatusInternalServerError, "failed to load anti-abuse overview")
+			return
 		}
+		counts[windowName][outcome] = count
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		writeError(w, http.StatusInternalServerError, "failed to load anti-abuse overview")
+		return
 	}
 	rows.Close()
 	var restricted, highRisk int64
-	_ = s.db.QueryRow(r.Context(), `select
+	if err = s.db.QueryRow(r.Context(), `select
 		(select count(*) from anti_abuse_restrictions where lifted_at is null and starts_at<=now() and (ends_at is null or ends_at>now())),
-		(select count(*) from anti_abuse_user_states where trust_level in ('high_risk','restricted'))`).Scan(&restricted, &highRisk)
+		(select count(*) from anti_abuse_user_states where trust_level in ('high_risk','restricted'))`).Scan(&restricted, &highRisk); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load anti-abuse overview")
+		return
+	}
 	var challengePassed, challengeFailed, duplicateBlocked, verifiedCrawlerReads, unknownCrawlerReads int64
-	_ = s.db.QueryRow(r.Context(), `select
+	if err = s.db.QueryRow(r.Context(), `select
 		count(*) filter(where rule_codes@>array['challenge_passed']::text[]),
 		count(*) filter(where rule_codes@>array['challenge_failed']::text[]),
 		count(*) filter(where rule_codes&&array['exact_duplicate_user','concurrent_exact_duplicate']::text[]),
 		count(*) filter(where crawler_class in ('verified_search_engine','allowed_bot','monitoring_bot')),
 		count(*) filter(where crawler_class in ('unknown_crawler','suspicious_bot'))
-		from anti_abuse_events where created_at>now()-interval '24 hours'`).Scan(&challengePassed, &challengeFailed, &duplicateBlocked, &verifiedCrawlerReads, &unknownCrawlerReads)
-	trend := s.querySimpleRows(r, `select stat_date,action,outcome,crawler_class,event_count from anti_abuse_daily_stats where stat_date>=current_date-30 order by stat_date,action,outcome`)
+		from anti_abuse_events where created_at>now()-interval '24 hours'`).Scan(&challengePassed, &challengeFailed, &duplicateBlocked, &verifiedCrawlerReads, &unknownCrawlerReads); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load anti-abuse overview")
+		return
+	}
+	trend, err := s.querySimpleRows(r, `select stat_date,action,outcome,crawler_class,event_count from anti_abuse_daily_stats where stat_date>=current_date-30 order by stat_date,action,outcome`)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取反滥用数据失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"counts": counts, "activeRestrictions": restricted, "highRiskUsers": highRisk, "trend": trend,
 		"challengePassed24h": challengePassed, "challengeFailed24h": challengeFailed, "duplicateBlocked24h": duplicateBlocked,
 		"verifiedCrawlerReads24h": verifiedCrawlerReads, "unknownCrawlerReads24h": unknownCrawlerReads})
@@ -124,8 +142,9 @@ func (s *Server) adminAntiAbuseEvents(w http.ResponseWriter, r *http.Request) {
 		var score, similarity int
 		var rules []string
 		var createdAt time.Time
-		if rows.Scan(&id, &userID, &username, &actionValue, &objectType, &objectKey, &outcomeValue, &score, &rules, &ipHash, &subnetHash, &deviceHash, &crawlerClass, &contentHash, &similarity, &disposition, &reviewNote, &createdAt) != nil {
-			continue
+		if err = rows.Scan(&id, &userID, &username, &actionValue, &objectType, &objectKey, &outcomeValue, &score, &rules, &ipHash, &subnetHash, &deviceHash, &crawlerClass, &contentHash, &similarity, &disposition, &reviewNote, &createdAt); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load anti-abuse events")
+			return
 		}
 		if !sensitive {
 			ipHash, subnetHash, deviceHash = redactHash(ipHash), redactHash(subnetHash), redactHash(deviceHash)
@@ -134,6 +153,10 @@ func (s *Server) adminAntiAbuseEvents(w http.ResponseWriter, r *http.Request) {
 			"objectKey": objectKey, "outcome": outcomeValue, "riskScore": score, "rules": rules, "ipHash": ipHash, "subnetHash": subnetHash,
 			"deviceHash": deviceHash, "crawlerClass": crawlerClass, "contentHash": redactHash(contentHash), "similarity": similarity,
 			"disposition": disposition, "reviewNote": reviewNote, "createdAt": createdAt})
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load anti-abuse events")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -195,10 +218,15 @@ type antiAbuseRestrictionRequest struct {
 
 func (s *Server) adminAntiAbuseRestrictions(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		writeJSON(w, http.StatusOK, map[string]any{"items": s.querySimpleRows(r, `select restriction.public_id,account.public_id user_id,account.username,restriction.actions,restriction.mode,restriction.source,
+		items, err := s.querySimpleRows(r, `select restriction.public_id,account.public_id user_id,account.username,restriction.actions,restriction.mode,restriction.source,
 			restriction.rule_code,restriction.risk_score,restriction.reason,restriction.automatic,restriction.appeal_allowed,restriction.starts_at,restriction.ends_at,
 			restriction.lifted_at,restriction.lift_reason from anti_abuse_restrictions restriction left join users account on account.id=restriction.user_id
-			order by restriction.created_at desc limit 500`)})
+			order by restriction.created_at desc limit 500`)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "读取限制记录失败")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 		return
 	}
 	var request antiAbuseRestrictionRequest
@@ -279,7 +307,12 @@ type antiAbuseBotRuleRequest struct {
 
 func (s *Server) adminAntiAbuseBotRules(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		writeJSON(w, http.StatusOK, map[string]any{"items": s.querySimpleRows(r, `select public_id,kind,label,matcher,read_only,enabled,expires_at,created_at,updated_at from anti_abuse_bot_rules order by updated_at desc`)})
+		items, err := s.querySimpleRows(r, `select public_id,kind,label,matcher,read_only,enabled,expires_at,created_at,updated_at from anti_abuse_bot_rules order by updated_at desc`)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "读取机器人规则失败")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 		return
 	}
 	var request antiAbuseBotRuleRequest

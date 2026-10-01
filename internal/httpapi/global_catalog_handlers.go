@@ -17,6 +17,7 @@ latest_packages as (
 	select distinct on (mod_id) mod_id,package_id
 	from catalog_import_revisions
 	where is_active and status in ('ready','partial')
+	  and exists(select 1 from mods where mods.id=catalog_import_revisions.mod_id and review_status='approved')
 	order by mod_id,coalesce(activated_at,created_at) desc,created_at desc,package_id desc
 ), latest_revisions as (
 	select revision.* from catalog_import_revisions revision
@@ -48,7 +49,9 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 			select count(*)::int from recipe_types recipe_type
 			join catalog_entities entity on entity.id=recipe_type.entity_id
 			left join imported on imported.recipe_type_id=recipe_type.entity_id
-			where entity.status='active' and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
+			where entity.status='active'
+			 and (imported.recipe_type_id is not null or not exists(select 1 from recipe_type_import_snapshots where recipe_type_id=recipe_type.entity_id))
+			 and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
 			 or imported.title_names->>$2 ilike '%'||$1||'%' or imported.title_names->>$3 ilike '%'||$1||'%'
 			 or exists(select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%'))`,
 			query, primary, secondary).Scan(&total); err != nil {
@@ -63,12 +66,15 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 			coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
 			 where localization.catalog_entity_id=entity.id and localization.name<>''),imported.title_names,'{}'::jsonb),
 			(select count(*)::int from recipes recipe join catalog_entities recipe_entity on recipe_entity.id=recipe.entity_id
-			 where recipe.recipe_type_id=recipe_type.entity_id and recipe_entity.status='active'),
+			where recipe.recipe_type_id=recipe_type.entity_id and recipe_entity.status='active'
+			 and exists(select 1 from recipe_import_snapshots snapshot join latest_revisions revision on revision.id=snapshot.revision_id where snapshot.recipe_id=recipe.entity_id)),
 			(select count(*)::int from recipe_layout_templates template join catalog_entities template_entity on template_entity.id=template.entity_id
 			 where template.recipe_type_id=recipe_type.entity_id and template_entity.status='active')
 		from recipe_types recipe_type join catalog_entities entity on entity.id=recipe_type.entity_id
 		left join imported on imported.recipe_type_id=recipe_type.entity_id
-		where entity.status='active' and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
+		where entity.status='active'
+		 and (imported.recipe_type_id is not null or not exists(select 1 from recipe_type_import_snapshots where recipe_type_id=recipe_type.entity_id))
+		 and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
 		 or imported.title_names->>$2 ilike '%'||$1||'%' or imported.title_names->>$3 ilike '%'||$1||'%'
 		 or exists(select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%'))
 		order by recipe_type.canonical_id limit $4 offset $5`, query, primary, secondary, limit, offset)
@@ -77,6 +83,7 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 		}
 		defer rows.Close()
 		items := make([]map[string]any, 0, limit)
+		entityIDs := make([]int64, 0, limit)
 		for rows.Next() {
 			var entityID int64
 			var publicID, id string
@@ -85,13 +92,21 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 			if err = rows.Scan(&entityID, &publicID, &id, &names, &recipeCount, &templateCount); err != nil {
 				return nil, err
 			}
-			decorated, err := s.catalogRecipeTypeCatalysts(ctx, entityID, primary, secondary, true)
-			if err != nil {
-				return nil, err
-			}
 			items = append(items, map[string]any{"publicId": publicID, "canonicalId": id,
 				"names": json.RawMessage(names), "recipeCount": recipeCount, "templateCount": templateCount,
-				"catalysts": decorated})
+				"catalysts": []map[string]any{}})
+			entityIDs = append(entityIDs, entityID)
+		}
+		if err = rows.Err(); err != nil {
+			return nil, err
+		}
+		rows.Close()
+		for index, item := range items {
+			decorated, loadErr := s.catalogRecipeTypeCatalysts(ctx, entityIDs[index], primary, secondary, true)
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			item["catalysts"] = decorated
 		}
 		return map[string]any{"items": items, "total": total, "limit": limit, "offset": offset}, rows.Err()
 	})
@@ -123,6 +138,7 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 			join catalog_entities entity on entity.id=recipe_type.entity_id and entity.status='active'
 			left join imported on imported.recipe_type_id=recipe_type.entity_id
 			where entity.public_id=$1
+			 and (imported.recipe_type_id is not null or not exists(select 1 from recipe_type_import_snapshots where recipe_type_id=recipe_type.entity_id))
 			limit 1`, publicID).Scan(&entityID, &publicID, &canonicalID, &names)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errCatalogNotFound
@@ -143,7 +159,8 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 			select
 				(select count(distinct snapshot.recipe_id)::int from latest_revisions revision
 				 join recipe_import_snapshots snapshot on snapshot.revision_id=revision.id
-				 join recipes recipe on recipe.entity_id=snapshot.recipe_id where recipe.recipe_type_id=$1),
+				 join recipes recipe on recipe.entity_id=snapshot.recipe_id
+				 join catalog_entities entity on entity.id=recipe.entity_id and entity.status='active' where recipe.recipe_type_id=$1),
 				(select count(*)::int from recipe_layout_templates template
 				 join catalog_entities entity on entity.id=template.entity_id
 				 where template.recipe_type_id=$1 and entity.status='active')`, entityID).Scan(&total, &templateCount); err != nil {
@@ -160,7 +177,7 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 			join catalog_entities entity on entity.id=recipe.entity_id
 			join mods mod on mod.id=revision.mod_id
 			left join recipe_content_overrides override on override.recipe_id=recipe.entity_id
-			where recipe.recipe_type_id=$1
+			where recipe.recipe_type_id=$1 and entity.status='active'
 			order by recipe.entity_id,coalesce(revision.activated_at,revision.created_at) desc
 		)
 		select entity_id,public_id,coalesce(canonical_source_id,source_recipe_id),source_id_kind,
@@ -193,6 +210,10 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 			}
 			recipes = append(recipes, recipeResult)
 		}
+		if err = rows.Err(); err != nil {
+			return nil, err
+		}
+		rows.Close()
 		if err = s.hydrateRecipeRenderLayouts(ctx, recipes); err != nil {
 			return nil, err
 		}

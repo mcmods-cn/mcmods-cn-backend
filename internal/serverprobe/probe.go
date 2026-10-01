@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"io"
 	"net"
 	"strconv"
@@ -382,6 +383,10 @@ func safeFavicon(value string) string {
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(value, prefix))
 	if err != nil || len(decoded) == 0 || len(decoded) > 768*1024 ||
 		!bytes.HasPrefix(decoded, []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}) {
+		return ""
+	}
+	config, err := png.DecodeConfig(bytes.NewReader(decoded))
+	if err != nil || config.Width <= 0 || config.Height <= 0 || config.Width > 512 || config.Height > 512 {
 		return ""
 	}
 	return value

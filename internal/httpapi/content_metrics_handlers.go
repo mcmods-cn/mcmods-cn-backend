@@ -233,7 +233,12 @@ func (s *Server) resolveMetricTarget(ctx context.Context, publicID string) (metr
 	var err error
 	switch target.Type {
 	case "resource":
-		err = s.db.QueryRow(ctx, `select status in ('active','placeholder') from catalog_entities where id=$1`, target.InternalID).Scan(&visible)
+		err = s.db.QueryRow(ctx, `select entity.status in ('active','placeholder') and entity.archived_at is null and (
+			(resource.owner_mod_id is null and not exists(select 1 from mod_resource_bindings where resource_id=entity.id))
+			or exists(select 1 from mods where id=resource.owner_mod_id and review_status='approved')
+			or exists(select 1 from mod_resource_bindings binding join mods project on project.id=binding.mod_id
+			 where binding.resource_id=entity.id and project.review_status='approved'))
+			from catalog_entities entity join game_resources resource on resource.entity_id=entity.id where entity.id=$1`, target.InternalID).Scan(&visible)
 	case "mod":
 		err = s.db.QueryRow(ctx, `select review_status='approved' from mods where id=$1`, target.InternalID).Scan(&visible)
 	case "modpack":
@@ -313,6 +318,7 @@ func (s *Server) loadRecentMetricEditors(ctx context.Context, target metricTarge
 		union all
 		select imported.submitted_by,imported.created_at
 		from resource_import_snapshots snapshot join catalog_import_revisions imported on imported.id=snapshot.revision_id
+		join mods imported_mod on imported_mod.id=imported.mod_id and imported_mod.review_status='approved'
 		where $1='resource' and snapshot.resource_id=$2 and imported.status in ('ready','partial','superseded')
 		and imported.submitted_by is not null
 	), actor_summary as (

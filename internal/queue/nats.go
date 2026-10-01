@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -116,6 +117,14 @@ func DefaultTaskConfigs() []config.NATSTaskConfig {
 			QueueGroup:     "mcmods-blueprint-workers",
 			MaxConcurrent:  4,
 			TimeoutSeconds: 1800,
+		},
+		{
+			Code:           "favorite_modpack_export",
+			Enabled:        true,
+			Subject:        "favorite.modpack_export.requested",
+			QueueGroup:     "mcmods-favorite-export-workers",
+			MaxConcurrent:  2,
+			TimeoutSeconds: 900,
 		},
 	}
 }
@@ -281,12 +290,37 @@ func (c *Client) Status() Status {
 	return Status{
 		Enabled:       c.cfg.Enabled,
 		Connected:     c.conn != nil && c.conn.IsConnected(),
-		URL:           c.cfg.URL,
+		URL:           RedactServerURLs(c.cfg.URL),
 		SubjectPrefix: c.cfg.SubjectPrefix,
 		Tasks:         append([]config.NATSTaskConfig(nil), c.cfg.Tasks...),
-		LastError:     c.lastError,
+		LastError:     publicQueueError(c.lastError),
 		JetStream:     c.jetStream != nil,
 	}
+}
+
+// RedactServerURLs preserves diagnostic server addresses without exposing
+// embedded authentication or query parameters in API responses.
+func RedactServerURLs(value string) string {
+	servers := strings.Split(value, ",")
+	for index, server := range servers {
+		parsed, err := url.Parse(strings.TrimSpace(server))
+		if err != nil || parsed.Hostname() == "" {
+			servers[index] = "[invalid server URL]"
+			continue
+		}
+		parsed.User, parsed.RawQuery, parsed.Fragment = nil, "", ""
+		parsed.Path, parsed.RawPath = "", ""
+		parsed.ForceQuery = false
+		servers[index] = parsed.String()
+	}
+	return strings.Join(servers, ",")
+}
+
+func publicQueueError(value string) string {
+	if value == "" {
+		return ""
+	}
+	return "queue operation failed"
 }
 
 func (c *Client) PublishTask(ctx context.Context, taskCode string, payload any) error {
@@ -355,7 +389,11 @@ func (c *Client) HandleLocally(ctx context.Context, taskCode, eventID string, ra
 	}
 	c.mu.RLock()
 	definition, ok := c.subscriptions[cleanTaskCode(taskCode)]
+	task, configured := findTask(c.cfg.Tasks, taskCode)
 	c.mu.RUnlock()
+	if !configured || !task.Enabled {
+		return ErrTaskDisabled
+	}
 	if !ok {
 		return ErrUnavailable
 	}
@@ -363,7 +401,9 @@ func (c *Client) HandleLocally(ctx context.Context, taskCode, eventID string, ra
 	if envelope != nil {
 		eventID = envelope.EventID
 	}
-	return definition.handler(WithEventID(ctx, eventID), payload)
+	taskCtx, cancel := context.WithTimeout(ctx, time.Duration(task.TimeoutSeconds)*time.Second)
+	defer cancel()
+	return definition.handler(WithEventID(taskCtx, eventID), payload)
 }
 
 func (c *Client) PublishBroadcast(ctx context.Context, subject string, payload any) error {

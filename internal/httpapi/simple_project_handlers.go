@@ -17,6 +17,8 @@ import (
 
 const simpleProjectAggregate = "simple_project"
 
+var errSimpleProjectSiteIDExists = errors.New("project site ID exists")
+
 var simpleProjectTypes = stringSet("plugin", "map", "resource_pack", "shader_pack", "datapack", "addon")
 var simpleProjectParentTypes = stringSet("mod", "modpack", "plugin", "map", "resource_pack", "shader_pack", "datapack")
 
@@ -99,8 +101,11 @@ const simpleProjectCatalogFilter = `where project.project_type=$1
 	and (cardinality($12::text[])=0 or project.map_size=any($12::text[]))
 	and (cardinality($13::text[])=0 or exists(select 1 from simple_project_parent_refs parent
 		left join mods parent_mod on parent.target_type='mod' and parent_mod.id=parent.target_id
+			and (parent_mod.review_status='approved' or parent_mod.submitted_by=$2)
 		left join modpacks parent_pack on parent.target_type='modpack' and parent_pack.id=parent.target_id
+			and (parent_pack.review_status='approved' or parent_pack.submitted_by=$2)
 		left join simple_projects parent_project on parent.target_type=parent_project.project_type and parent_project.id=parent.target_id
+			and (parent_project.review_status='approved' or parent_project.submitted_by=$2)
 		where parent.project_id=project.id and parent.target_type||':'||coalesce(parent_mod.slug,parent_pack.slug,parent_project.slug,parent.raw_identifier)=any($13::text[])))
 	and (cardinality($14::text[])=0 or project.official_status=any($14::text[]))
 	and (cardinality($15::text[])=0 or project.source_status=any($15::text[]))
@@ -119,6 +124,9 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
+	if claims.Subject > 0 {
+		w.Header().Set("Cache-Control", "private, no-store")
+	}
 	query, validQuery := parseCatalogQuery(r.URL.Query().Get("q"))
 	categories, validCategories := parseCatalogList(r.URL.Query().Get("category"), 20)
 	versions, validVersions := parseCatalogList(r.URL.Query().Get("version"), 20)
@@ -200,7 +208,7 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, item)
 	}
-	if err = rows.Err(); err != nil || s.loadSimpleProjectAssociations(r.Context(), items) != nil {
+	if err = rows.Err(); err != nil || s.loadSimpleProjectAssociations(r.Context(), items, claims.Subject) != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load project details")
 		return
 	}
@@ -238,9 +246,16 @@ func (s *Server) simpleProjectItem(w http.ResponseWriter, r *http.Request) {
 		s.createSimpleProjectRevision(w, r, projectType, siteID)
 		return
 	}
+	if currentClaims(r).Subject > 0 {
+		w.Header().Set("Cache-Control", "private, no-store")
+	}
 	item, err := s.simpleProjectBySiteID(r.Context(), projectType, siteID, currentClaims(r).Subject, false)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load project")
 		return
 	}
 	item.CanEdit = canEditSimpleProject(currentClaims(r), item)
@@ -275,7 +290,7 @@ func (s *Server) simpleProjectIcon(w http.ResponseWriter, r *http.Request) {
 	err := s.db.QueryRow(r.Context(), `select icon_url from simple_projects
 		where project_type=$1 and slug=$2 and (review_status='approved' or submitted_by=$3)`,
 		projectType, siteID, currentClaims(r).Subject).Scan(&iconURL)
-	if errors.Is(err, pgx.ErrNoRows) || strings.TrimSpace(iconURL) == "" {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "project icon does not exist")
 		return
 	}
@@ -283,14 +298,23 @@ func (s *Server) simpleProjectIcon(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load project icon")
 		return
 	}
+	if strings.TrimSpace(iconURL) == "" {
+		writeError(w, http.StatusNotFound, "project icon does not exist")
+		return
+	}
 	s.redirectStoredRasterURL(w, r, iconURL)
 }
 
 func (s *Server) simpleProjectEditor(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	item, err := s.simpleProjectBySiteID(r.Context(), normalizeSimpleProjectType(r.PathValue("projectType")),
 		normalizeModSiteID(r.PathValue("siteId")), currentClaims(r).Subject, true)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load project")
 		return
 	}
 	if !canEditSimpleProject(currentClaims(r), item) {
@@ -337,7 +361,11 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 		err = ensureSimpleProjectSiteIDAvailable(r.Context(), tx, projectType, snapshot.SiteID, 0)
 	}
 	if err != nil {
-		writeError(w, http.StatusConflict, "project site ID is already used")
+		if errors.Is(err, errSimpleProjectSiteIDExists) {
+			writeError(w, http.StatusConflict, "project site ID is already used")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to allocate project site ID")
+		}
 		return
 	}
 	publicID, err := availableModUniqueID(r.Context(), tx)
@@ -347,6 +375,14 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 	}
 	if err = s.prepareImportedSimpleProjectAssets(r.Context(), &snapshot, publicID, claims.Subject); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err = lockSeedCrawlerLeaseTx(r.Context(), tx); err != nil {
+		if errors.Is(err, errSeedCrawlerLeaseLost) {
+			writeError(w, http.StatusConflict, "seed crawler lease is no longer owned")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to verify seed crawler lease")
+		}
 		return
 	}
 	localization := defaultSimpleProjectLocalization(snapshot)
@@ -417,8 +453,12 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Request, projectType, siteID string) {
 	claims := currentClaims(r)
 	current, err := s.simpleProjectBySiteID(r.Context(), projectType, siteID, claims.Subject, true)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load project")
 		return
 	}
 	if !canEditSimpleProject(claims, current) {
@@ -440,7 +480,11 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err = ensureSimpleProjectSiteIDAvailable(r.Context(), s.db, projectType, request.Snapshot.SiteID, current.ID); err != nil {
-		writeError(w, http.StatusConflict, "project site ID is already used")
+		if errors.Is(err, errSimpleProjectSiteIDExists) {
+			writeError(w, http.StatusConflict, "project site ID is already used")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to check project site ID")
+		}
 		return
 	}
 	status := "approved"
@@ -787,8 +831,14 @@ func replaceSimpleProjectAssociationsTx(ctx context.Context, tx pgx.Tx, projectI
 		var targetID *int64
 		if parent.PublicID != "" {
 			var value int64
-			if err := tx.QueryRow(ctx, `select internal_id from public_routes where public_id=$1 and entity_type=$2`, parent.PublicID, parent.Type).Scan(&value); err != nil {
-				return errors.New("selected parent project does not exist")
+			if err := tx.QueryRow(ctx, `select route.internal_id from public_routes route
+				left join mods mod on route.entity_type='mod' and mod.id=route.internal_id
+				left join modpacks pack on route.entity_type='modpack' and pack.id=route.internal_id
+				left join simple_projects project on route.entity_type=project.project_type and project.id=route.internal_id
+				where route.public_id=$1 and route.entity_type=$2
+				and (coalesce(mod.review_status,pack.review_status,project.review_status)='approved'
+					or coalesce(mod.submitted_by,pack.submitted_by,project.submitted_by)=$3)`, parent.PublicID, parent.Type, actorID).Scan(&value); err != nil {
+				return errors.New("selected parent project is unavailable")
 			}
 			targetID = &value
 		}
@@ -837,13 +887,13 @@ func (s *Server) simpleProjectBySiteID(ctx context.Context, projectType, siteID 
 		return item, err
 	}
 	values := []simpleProjectResponse{item}
-	if err = s.loadSimpleProjectAssociations(ctx, values); err != nil {
+	if err = s.loadSimpleProjectAssociations(ctx, values, viewerID); err != nil {
 		return item, err
 	}
 	return values[0], nil
 }
 
-func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simpleProjectResponse) error {
+func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simpleProjectResponse, viewerID int64) error {
 	if len(items) == 0 {
 		return nil
 	}
@@ -866,6 +916,10 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 		}
 		byID[id].Localizations = append(byID[id].Localizations, value)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
 	rows, err = s.db.Query(ctx, `select project_id,link_type,url,note from simple_project_links where project_id=any($1) order by project_id,display_order,id`, ids)
 	if err != nil {
@@ -879,6 +933,10 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 			return err
 		}
 		byID[id].Links = append(byID[id].Links, value)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	rows.Close()
 	rows, err = s.db.Query(ctx, `select binding.subject_id,creator.public_id,creator.kind,creator.name,creator.avatar_url,
@@ -906,10 +964,16 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 		_ = json.Unmarshal(raw, &value.Members)
 		byID[id].Authors = append(byID[id].Authors, value)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
 	rows, err = s.db.Query(ctx, `select gallery.project_id,gallery.public_id,file.public_id,file.original_name,file.content_type,file.size_bytes
 		from simple_project_gallery_images gallery join oss_files file on file.id=gallery.oss_file_id and file.status='active'
-		where gallery.project_id=any($1) order by gallery.project_id,gallery.display_order,gallery.id`, ids)
+			and file.scan_status in ('clean','trusted_generated')
+			and lower(trim(split_part(file.content_type,';',1)))=any($2::text[])
+		where gallery.project_id=any($1) order by gallery.project_id,gallery.display_order,gallery.id`, ids, safeRasterContentTypes)
 	if err != nil {
 		return err
 	}
@@ -923,15 +987,23 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 		value.URL = "/api/v1/content-projects/" + url.PathEscape(byID[id].ProjectType) + "/" + url.PathEscape(byID[id].SiteID) + "/gallery/" + value.PublicID
 		byID[id].GalleryImages = append(byID[id].GalleryImages, value)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
 	rows, err = s.db.Query(ctx, `select ref.project_id,coalesce(route.public_id,''),ref.target_type,ref.raw_identifier,
 		coalesce(mod.slug,modpack.slug,target.slug,''),coalesce(mod.primary_name,modpack.primary_name,target.primary_name,ref.raw_identifier),
 		coalesce(mod.icon_url,modpack.icon_url,target.icon_url,''),ref.target_id is null
 		from simple_project_parent_refs ref left join public_routes route on route.entity_type=ref.target_type and route.internal_id=ref.target_id
 		left join mods mod on ref.target_type='mod' and mod.id=ref.target_id
+			and (mod.review_status='approved' or mod.submitted_by=$2)
 		left join modpacks modpack on ref.target_type='modpack' and modpack.id=ref.target_id
+			and (modpack.review_status='approved' or modpack.submitted_by=$2)
 		left join simple_projects target on target.project_type=ref.target_type and target.id=ref.target_id
-		where ref.project_id=any($1) order by ref.project_id,ref.display_order,ref.id`, ids)
+			and (target.review_status='approved' or target.submitted_by=$2)
+		where ref.project_id=any($1) and (ref.target_id is null or mod.id is not null or modpack.id is not null or target.id is not null)
+		order by ref.project_id,ref.display_order,ref.id`, ids, viewerID)
 	if err != nil {
 		return err
 	}
@@ -990,8 +1062,10 @@ func availableSimpleProjectSiteID(ctx context.Context, query databaseQuery, proj
 		if suffix > 0 {
 			candidate = fmt.Sprintf("%s_%d", base, suffix+1)
 		}
-		if ensureSimpleProjectSiteIDAvailable(ctx, query, projectType, candidate, 0) == nil {
+		if err := ensureSimpleProjectSiteIDAvailable(ctx, query, projectType, candidate, 0); err == nil {
 			return candidate, nil
+		} else if !errors.Is(err, errSimpleProjectSiteIDExists) {
+			return "", err
 		}
 	}
 	return "", errors.New("unable to allocate project site ID")
@@ -1003,7 +1077,7 @@ func ensureSimpleProjectSiteIDAvailable(ctx context.Context, query databaseQuery
 		return err
 	}
 	if exists {
-		return errors.New("project site ID exists")
+		return errSimpleProjectSiteIDExists
 	}
 	return nil
 }
@@ -1060,28 +1134,43 @@ func (s *Server) simpleProjectGalleryImage(w http.ResponseWriter, r *http.Reques
 	err := s.db.QueryRow(r.Context(), `select file.object_key,file.content_type from simple_project_gallery_images gallery
 		join simple_projects project on project.id=gallery.project_id and project.project_type=$1 and project.slug=$2
 		join oss_files file on file.id=gallery.oss_file_id and file.status='active'
+			and file.scan_status in ('clean','trusted_generated')
+			and lower(trim(split_part(file.content_type,';',1)))=any($5::text[])
 		where gallery.public_id=$3 and (project.review_status='approved' or project.submitted_by=$4)`, projectType,
-		normalizeModSiteID(r.PathValue("siteId")), strings.ToLower(r.PathValue("publicId")), currentClaims(r).Subject).Scan(&objectKey, &contentType)
-	if err != nil {
+		normalizeModSiteID(r.PathValue("siteId")), strings.ToLower(r.PathValue("publicId")), currentClaims(r).Subject, safeRasterContentTypes).Scan(&objectKey, &contentType)
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "project gallery image not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load project gallery image")
 		return
 	}
 	s.redirectCatalogOSSAsset(w, r, objectKey, contentType)
 }
 
 func (s *Server) simpleProjectHistory(w http.ResponseWriter, r *http.Request) {
+	if currentClaims(r).Subject > 0 {
+		w.Header().Set("Cache-Control", "private, no-store")
+	}
 	item, err := s.simpleProjectBySiteID(r.Context(), normalizeSimpleProjectType(r.PathValue("projectType")), normalizeModSiteID(r.PathValue("siteId")), currentClaims(r).Subject, false)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load project")
 		return
 	}
 	include := canEditSimpleProject(currentClaims(r), item) || claimsAllow(currentClaims(r), "content.review") || claimsAllow(currentClaims(r), "admin.*")
 	var published *int64
 	if item.PublishedRevisionID != nil {
 		var id int64
-		if s.db.QueryRow(r.Context(), `select id from content_revisions where public_id=$1`, *item.PublishedRevisionID).Scan(&id) == nil {
-			published = &id
+		if err = s.db.QueryRow(r.Context(), `select id from content_revisions where public_id=$1`, *item.PublishedRevisionID).Scan(&id); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load published project revision")
+			return
 		}
+		published = &id
 	}
 	items, err := contentRevisionHistory(r.Context(), s.db, simpleProjectAggregate, item.PublicID, published, include)
 	if err != nil {

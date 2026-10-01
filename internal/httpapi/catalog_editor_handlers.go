@@ -197,6 +197,10 @@ func (s *Server) createCatalogResource(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) catalogResourceDetail(w http.ResponseWriter, r *http.Request) {
 	entity, err := s.catalogEditorEntityByPublicID(r.Context(), r.PathValue("publicId"), "resource")
+	if err != nil && !errors.Is(err, errCatalogEditorNotFound) {
+		writeError(w, http.StatusInternalServerError, "failed to read catalog entry")
+		return
+	}
 	if err != nil || (entity.Status != "active" && currentClaims(r).Subject == 0) {
 		writeError(w, http.StatusNotFound, "resource not found")
 		return
@@ -245,7 +249,7 @@ func (s *Server) writeCatalogResourceDetail(w http.ResponseWriter, r *http.Reque
 		where resource.entity_id=$1`, entity.ID).
 		Scan(&kindCode, &canonicalID, &definition, &definitionSchemaVersion, &iconID, &renderID, &importedNames)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "resource not found")
+		writeCatalogLookupError(w, err, "resource not found")
 		return
 	}
 	localizations, err := s.catalogLocalizationRows(r.Context(), entity.ID)
@@ -267,8 +271,14 @@ func (s *Server) writeCatalogResourceDetail(w http.ResponseWriter, r *http.Reque
 	if renderID.Valid {
 		renderURL = "/api/v1/catalog/resources/" + entity.PublicID + "/render"
 	}
+	reviewStatus, statusErr := s.catalogPendingReviewStatus(r.Context(), entity.ID)
+	if statusErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read review status")
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"publicId": entity.PublicID, "status": entity.Status, "defaultLocale": defaultLocale,
-		"publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID), "reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID),
+		"publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID), "reviewStatus": reviewStatus,
 		"kindCode": kindCode, "canonicalId": canonicalID, "definitionSchemaVersion": definitionSchemaVersion, "definition": json.RawMessage(definition), "iconFileId": nullableCatalogString(iconID),
 		"renderFileId": nullableCatalogString(renderID), "iconUrl": iconURL, "renderUrl": renderURL, "localizations": localizations})
 }
@@ -391,29 +401,35 @@ func (s *Server) catalogTags(w http.ResponseWriter, r *http.Request) {
 	var total int
 	if err := s.db.QueryRow(r.Context(), `select count(*)::int from catalog_tags tag
 		join catalog_entities entity on entity.id=tag.entity_id
-		where entity.status='active' and ($1='' or tag.canonical_id ilike '%'||$1||'%' or exists(
-		 select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%'))`, query).Scan(&total); err != nil {
+		where `+catalogPublicEntityCondition+` and ($1='' or tag.canonical_id ilike '%'||$1||'%' or exists(
+		 select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%' and localization.review_status='approved'))`, query).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count tags")
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `select entity.id,entity.public_id,tag.registry,tag.canonical_id,entity.default_locale,
 		(select revision.public_id from content_revisions revision where revision.id=entity.published_revision_id),
 		case when entity.published_revision_id is null then greatest(
-		 (select count(*)::int from catalog_tag_members member where member.tag_id=tag.entity_id),
+		 (select count(*)::int from catalog_tag_members member join catalog_entities entity on entity.id=member.resource_id
+		  where member.tag_id=tag.entity_id and `+catalogPublicEntityCondition+`),
 		 coalesce((select count(distinct member.resource_id)::int from tag_import_snapshots snapshot
 		  join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		  join tag_import_members member on member.tag_snapshot_id=snapshot.id
-		  where snapshot.tag_id=tag.entity_id and revision.is_active and revision.status in ('ready','partial')),0))
-		else (select count(*)::int from catalog_tag_members member where member.tag_id=tag.entity_id) end,
+		  join catalog_entities entity on entity.id=member.resource_id
+		  where snapshot.tag_id=tag.entity_id and revision.is_active and revision.status in ('ready','partial')
+		  and `+catalogPublicEntityCondition+`
+		 and exists(select 1 from mods published_mod where published_mod.id=revision.mod_id and published_mod.review_status='approved')
+		 and exists(select 1 from mod_content_versions published_version where published_version.id=revision.target_version_id and published_version.status='active')),0))
+		else (select count(*)::int from catalog_tag_members member join catalog_entities entity on entity.id=member.resource_id
+		 where member.tag_id=tag.entity_id and `+catalogPublicEntityCondition+`) end,
 		coalesce(localization.locale,''),coalesce(localization.name,''),
 		coalesce((select jsonb_object_agg(candidate.locale,candidate.name) from content_localizations candidate
-		 where candidate.catalog_entity_id=entity.id and candidate.name<>''),'{}'::jsonb)
+		 where candidate.catalog_entity_id=entity.id and candidate.name<>'' and candidate.review_status='approved'),'{}'::jsonb)
 		from catalog_tags tag join catalog_entities entity on entity.id=tag.entity_id
 		left join lateral (select candidate.locale,candidate.name from content_localizations candidate
-		 where candidate.catalog_entity_id=entity.id order by case candidate.locale when $2 then 0 when $3 then 1
+		 where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' order by case candidate.locale when $2 then 0 when $3 then 1
 			 when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
-		where entity.status='active' and ($1='' or tag.canonical_id ilike '%'||$1||'%' or exists(
-		 select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%'))
+		where `+catalogPublicEntityCondition+` and ($1='' or tag.canonical_id ilike '%'||$1||'%' or exists(
+		 select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%' and localization.review_status='approved'))
 		order by tag.registry,tag.canonical_id limit $4 offset $5`, query, primary, secondary, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read tags")
@@ -474,7 +490,7 @@ func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []int64, allo
 	select member.tag_id,entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,
 	 entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(imported.mod_site_id,''),
 	 coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-	  where localization.catalog_entity_id=entity.id and localization.name<>''),imported.names,'{}'::jsonb)
+	  where localization.catalog_entity_id=entity.id and localization.name<>'' and localization.review_status='approved'),imported.names,'{}'::jsonb)
 	from selected_members member join game_resources resource on resource.entity_id=member.resource_id
 	join catalog_entities entity on entity.id=resource.entity_id
 	left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
@@ -482,8 +498,10 @@ func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []int64, allo
 	 from resource_import_snapshots snapshot join catalog_import_revisions revision on revision.id=snapshot.revision_id
 	 join mods mod on mod.id=revision.mod_id where snapshot.resource_id=resource.entity_id
 	 and revision.is_active and revision.status in ('ready','partial')
+		 and exists(select 1 from mods published_mod where published_mod.id=revision.mod_id and published_mod.review_status='approved')
+		 and exists(select 1 from mod_content_versions published_version where published_version.id=revision.target_version_id and published_version.status='active')
 	 order by (snapshot.icon_path<>'') desc,coalesce(revision.activated_at,revision.created_at) desc limit 1) imported on true
-	where member.preview_rank<=$2 order by member.tag_id,member.ordinal`, tagIDs, catalogTagPreviewLimit)
+	where member.preview_rank<=$2 and `+catalogPublicEntityCondition+` order by member.tag_id,member.ordinal`, tagIDs, catalogTagPreviewLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -503,6 +521,8 @@ func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []int64, allo
 		select snapshot.tag_id,snapshot.id,snapshot.revision_id
 		from tag_import_snapshots snapshot join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		where snapshot.tag_id=any($1::bigint[]) and revision.is_active and revision.status in ('ready','partial')
+		 and exists(select 1 from mods published_mod where published_mod.id=revision.mod_id and published_mod.review_status='approved')
+		 and exists(select 1 from mod_content_versions published_version where published_version.id=revision.target_version_id and published_version.status='active')
 	), selected_members as (
 		select distinct on(selected.tag_id,member.resource_id) selected.tag_id,selected.revision_id,member.resource_id,member.ordinal
 		from selected join tag_import_members member on member.tag_snapshot_id=selected.id
@@ -513,16 +533,20 @@ func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []int64, allo
 	select member.tag_id,entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,
 	 entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(mod.slug,''),
 	 coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-	  where localization.catalog_entity_id=entity.id and localization.name<>''),imported.names,'{}'::jsonb)
+	  where localization.catalog_entity_id=entity.id and localization.name<>'' and localization.review_status='approved'),imported.names,'{}'::jsonb)
 	from ranked_members member join game_resources resource on resource.entity_id=member.resource_id
 	join catalog_entities entity on entity.id=resource.entity_id
 	left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 	left join lateral (select snapshot.names,snapshot.revision_id,snapshot.icon_path from resource_import_snapshots snapshot
-	 where snapshot.resource_id=resource.entity_id order by (snapshot.revision_id=member.revision_id) desc,
+	 join catalog_import_revisions imported_revision on imported_revision.id=snapshot.revision_id
+	 where snapshot.resource_id=resource.entity_id and imported_revision.is_active and imported_revision.status in ('ready','partial')
+	 and exists(select 1 from mods where id=imported_revision.mod_id and review_status='approved')
+	 and exists(select 1 from mod_content_versions where id=imported_revision.target_version_id and status='active')
+	 order by (snapshot.revision_id=member.revision_id) desc,
 	 (snapshot.icon_path<>'') desc,snapshot.created_at desc limit 1) imported on true
 	left join catalog_import_revisions revision on revision.id=imported.revision_id
 	left join mods mod on mod.id=revision.mod_id
-	where member.preview_rank<=$2 order by member.tag_id,member.ordinal`, fallbackIDs, catalogTagPreviewLimit)
+	where member.preview_rank<=$2 and `+catalogPublicEntityCondition+` order by member.tag_id,member.ordinal`, fallbackIDs, catalogTagPreviewLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -581,20 +605,28 @@ func normalizeCatalogTagEdit(edit *catalogTagEdit) error {
 
 func (s *Server) catalogTagDetail(w http.ResponseWriter, r *http.Request) {
 	entity, err := s.catalogEditorEntityByPublicID(r.Context(), r.PathValue("publicId"), "tag")
+	if err != nil && !errors.Is(err, errCatalogEditorNotFound) {
+		writeError(w, http.StatusInternalServerError, "failed to read catalog entry")
+		return
+	}
 	if err != nil || entity.Status == "archived" && r.Method == http.MethodGet {
 		writeError(w, http.StatusNotFound, "tag not found")
 		return
 	}
+	if r.Method == http.MethodGet && !s.requireCatalogPublicEntity(w, r, entity.ID) {
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		var registry, canonicalID string
 		if err = s.db.QueryRow(r.Context(), `select registry,canonical_id from catalog_tags where entity_id=$1`, entity.ID).Scan(&registry, &canonicalID); err != nil {
-			writeError(w, http.StatusNotFound, "tag not found")
+			writeCatalogLookupError(w, err, "tag not found")
 			return
 		}
 		primary, secondary := s.catalogRequestedLocales(r)
 		members, readErr := s.catalogTagMemberRows(r.Context(), entity.ID, primary, secondary, entity.PublishedRevisionID == nil)
-		localizations, localeErr := s.catalogLocalizationRows(r.Context(), entity.ID)
+		localizations, localeErr := s.catalogLocalizationRows(r.Context(), entity.ID, true)
 		if readErr != nil || localeErr != nil {
 			writeError(w, http.StatusInternalServerError, "failed to read tag")
 			return
@@ -603,9 +635,15 @@ func (s *Server) catalogTagDetail(w http.ResponseWriter, r *http.Request) {
 		if entity.PublishedRevisionID == nil && len(localizations) == 0 {
 			localizations, defaultLocale = catalogImportedEditorLocalizations(nil, defaultLocale, canonicalID)
 		}
+		reviewStatus, statusErr := s.catalogPendingReviewStatus(r.Context(), entity.ID)
+		if statusErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read review status")
+			return
+		}
+
 		writeJSON(w, http.StatusOK, map[string]any{"publicId": entity.PublicID, "registry": registry, "canonicalId": canonicalID,
 			"defaultLocale": defaultLocale, "publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID),
-			"reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID), "localizations": localizations,
+			"reviewStatus": reviewStatus, "localizations": localizations,
 			"memberCount": len(members), "members": members})
 	case http.MethodPut:
 		var edit catalogTagEdit
@@ -660,10 +698,18 @@ func normalizeCatalogRecipeTypeEdit(edit *catalogRecipeTypeEdit) error {
 
 func (s *Server) catalogRecipeTypeDetail(w http.ResponseWriter, r *http.Request) {
 	entity, err := s.catalogEditorEntityByPublicID(r.Context(), r.PathValue("publicId"), "recipe_type")
+	if err != nil && !errors.Is(err, errCatalogEditorNotFound) {
+		writeError(w, http.StatusInternalServerError, "failed to read catalog entry")
+		return
+	}
 	if err != nil || entity.Status == "archived" && r.Method == http.MethodGet {
 		writeError(w, http.StatusNotFound, "recipe type not found")
 		return
 	}
+	if r.Method == http.MethodGet && !s.requireCatalogPublicEntity(w, r, entity.ID) {
+		return
+	}
+
 	if r.Method == http.MethodPut {
 		var edit catalogRecipeTypeEdit
 		if decodeJSON(r, &edit) != nil {
@@ -692,36 +738,66 @@ func (s *Server) catalogRecipeTypeDetail(w http.ResponseWriter, r *http.Request)
 		left join lateral (select snapshot.title_names from recipe_type_import_snapshots snapshot
 		 join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		 where snapshot.recipe_type_id=type.entity_id and revision.is_active and revision.status in ('ready','partial')
+		 and exists(select 1 from mods published_mod where published_mod.id=revision.mod_id and published_mod.review_status='approved')
+		 and exists(select 1 from mod_content_versions published_version where published_version.id=revision.target_version_id and published_version.status='active')
 		 order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1) imported on true
 		where type.entity_id=$1`, entity.ID).
 		Scan(&canonicalID, &definition, &importedNames); err != nil {
-		writeError(w, http.StatusNotFound, "recipe type not found")
+		writeCatalogLookupError(w, err, "recipe type not found")
 		return
 	}
 	var templateCount, recipeCount int
-	_ = s.db.QueryRow(r.Context(), `select count(*)::int from recipe_layout_templates template join catalog_entities entity on entity.id=template.entity_id
-		where template.recipe_type_id=$1 and entity.status='active'`, entity.ID).Scan(&templateCount)
-	_ = s.db.QueryRow(r.Context(), `select count(*)::int from recipes recipe join catalog_entities entity on entity.id=recipe.entity_id
-		where recipe.recipe_type_id=$1 and entity.status='active'`, entity.ID).Scan(&recipeCount)
-	localizations, _ := s.catalogLocalizationRows(r.Context(), entity.ID)
+	if err = s.db.QueryRow(r.Context(), `select count(*)::int from recipe_layout_templates template join catalog_entities entity on entity.id=template.entity_id
+		where template.recipe_type_id=$1 and `+catalogPublicEntityCondition+``, entity.ID).Scan(&templateCount); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read template count")
+		return
+	}
+	if err = s.db.QueryRow(r.Context(), `select count(*)::int from recipes recipe join catalog_entities entity on entity.id=recipe.entity_id
+		where recipe.recipe_type_id=$1 and `+catalogPublicEntityCondition+``, entity.ID).Scan(&recipeCount); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read recipe count")
+		return
+	}
+	localizations, localeErr := s.catalogLocalizationRows(r.Context(), entity.ID, true)
+	if localeErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read localizations")
+		return
+	}
 	defaultLocale := entity.DefaultLocale
 	if entity.PublishedRevisionID == nil && len(localizations) == 0 {
 		localizations, defaultLocale = catalogImportedEditorLocalizations(importedNames, defaultLocale, canonicalID)
 	}
 	primary, secondary := s.catalogRequestedLocales(r)
-	catalysts, _ := s.catalogRecipeTypeCatalysts(r.Context(), entity.ID, primary, secondary, entity.PublishedRevisionID == nil)
+	catalysts, catalystsErr := s.catalogRecipeTypeCatalysts(r.Context(), entity.ID, primary, secondary, entity.PublishedRevisionID == nil)
+	if catalystsErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read catalysts")
+		return
+	}
+	reviewStatus, statusErr := s.catalogPendingReviewStatus(r.Context(), entity.ID)
+	if statusErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read review status")
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"publicId": entity.PublicID, "canonicalId": canonicalID, "defaultLocale": defaultLocale,
-		"publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID), "reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID),
+		"publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID), "reviewStatus": reviewStatus,
 		"definition": json.RawMessage(definition), "localizations": localizations, "catalysts": catalysts,
 		"templateCount": templateCount, "recipeCount": recipeCount})
 }
 
 func (s *Server) catalogRecipeTemplates(w http.ResponseWriter, r *http.Request) {
 	typeEntity, err := s.catalogEditorEntityByPublicID(r.Context(), r.PathValue("typePublicId"), "recipe_type")
+	if err != nil && !errors.Is(err, errCatalogEditorNotFound) {
+		writeError(w, http.StatusInternalServerError, "failed to read catalog entry")
+		return
+	}
 	if err != nil || typeEntity.Status != "active" {
 		writeError(w, http.StatusNotFound, "recipe type not found")
 		return
 	}
+	if r.Method == http.MethodGet && !s.requireCatalogPublicEntity(w, r, typeEntity.ID) {
+		return
+	}
+
 	if r.Method == http.MethodPost {
 		var edit catalogRecipeTemplateEdit
 		if decodeJSON(r, &edit) != nil || edit.BaseRevisionID != nil {
@@ -753,7 +829,10 @@ func (s *Server) catalogRecipeTemplates(w http.ResponseWriter, r *http.Request) 
 		coalesce(import_snapshot.image_pixels,'{}'::jsonb),coalesce(import_snapshot.content_rect,'{}'::jsonb)
 		from recipe_layout_templates template join catalog_entities entity on entity.id=template.entity_id
 		left join recipe_template_import_snapshots import_snapshot on import_snapshot.id=template.import_snapshot_id
-		where template.recipe_type_id=$1 and entity.status='active'
+		 and exists(select 1 from catalog_import_revisions imported join mods project on project.id=imported.mod_id
+		 join mod_content_versions version on version.id=imported.target_version_id and version.status='active'
+		 where imported.id=import_snapshot.revision_id and imported.is_active and imported.status in ('ready','partial') and project.review_status='approved')
+		where template.recipe_type_id=$1 and `+catalogPublicEntityCondition+`
 		order by template.template_key`, typeEntity.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read templates")
@@ -799,6 +878,10 @@ func (s *Server) catalogRecipeTemplates(w http.ResponseWriter, r *http.Request) 
 			"backgroundFileId": nullableCatalogString(backgroundID), "backgroundUrl": backgroundURL, "backgroundSource": backgroundSource,
 			"publishedRevisionId": nullableCatalogString(revisionID), "slotCount": count, "source": source, "importMetadata": importMetadata})
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read templates")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
 }
 
@@ -818,17 +901,24 @@ func normalizeCatalogTemplateEdit(edit *catalogRecipeTemplateEdit) error {
 
 func (s *Server) catalogRecipeTemplateDetail(w http.ResponseWriter, r *http.Request) {
 	entity, err := s.catalogEditorEntityByPublicID(r.Context(), r.PathValue("publicId"), "recipe_template")
+	if err != nil && !errors.Is(err, errCatalogEditorNotFound) {
+		writeError(w, http.StatusInternalServerError, "failed to read catalog entry")
+		return
+	}
 	if err != nil || entity.Status == "archived" && r.Method == http.MethodGet {
 		writeError(w, http.StatusNotFound, "recipe template not found")
 		return
 	}
-	var typeID int64
-	if err = s.db.QueryRow(r.Context(), `select recipe_type_id from recipe_layout_templates where entity_id=$1`, entity.ID).Scan(&typeID); err != nil && r.Method != http.MethodPut {
-		writeError(w, http.StatusNotFound, "recipe template not found")
+	if r.Method == http.MethodGet && !s.requireCatalogPublicEntity(w, r, entity.ID) {
 		return
 	}
-	if r.Method == http.MethodGet && !s.catalogRecipeTypeIsActive(r.Context(), typeID) {
-		writeError(w, http.StatusNotFound, "recipe template not found")
+
+	var typeID int64
+	if err = s.db.QueryRow(r.Context(), `select recipe_type_id from recipe_layout_templates where entity_id=$1`, entity.ID).Scan(&typeID); err != nil {
+		writeCatalogLookupError(w, err, "recipe template not found")
+		return
+	}
+	if r.Method == http.MethodGet && !s.requireCatalogPublicEntity(w, r, typeID) {
 		return
 	}
 	if r.Method == http.MethodPut {
@@ -843,7 +933,7 @@ func (s *Server) catalogRecipeTemplateDetail(w http.ResponseWriter, r *http.Requ
 		}
 		var typePublicID string
 		if err = s.db.QueryRow(r.Context(), `select public_id from catalog_entities where id=$1 and entity_type='recipe_type'`, typeID).Scan(&typePublicID); err != nil {
-			writeError(w, http.StatusNotFound, "recipe type not found")
+			writeCatalogLookupError(w, err, "recipe type not found")
 			return
 		}
 		snapshot := catalogEditorSnapshot{Operation: "edit", Reason: edit.Reason, Kind: "recipe_template", EntityID: entity.ID,
@@ -869,14 +959,25 @@ func (s *Server) catalogRecipeTemplateDetail(w http.ResponseWriter, r *http.Requ
 		coalesce(import_snapshot.image_pixels,'{}'::jsonb),coalesce(import_snapshot.content_rect,'{}'::jsonb)
 		from recipe_layout_templates template join catalog_entities type_entity on type_entity.id=template.recipe_type_id
 		left join recipe_template_import_snapshots import_snapshot on import_snapshot.id=template.import_snapshot_id
+		 and exists(select 1 from catalog_import_revisions imported join mods project on project.id=imported.mod_id
+		 join mod_content_versions version on version.id=imported.target_version_id and version.status='active'
+		 where imported.id=import_snapshot.revision_id and imported.is_active and imported.status in ('ready','partial') and project.review_status='approved')
 		where template.entity_id=$1`, entity.ID).
 		Scan(&typePublicID, &key, &width, &height, &scale, &backgroundID, &definition, &importSnapshotID,
 			&importRevisionID, &backgroundPath, &backgroundContainsIngredients, &coordinateSpace, &imagePixels, &contentRect); err != nil {
-		writeError(w, http.StatusNotFound, "recipe template not found")
+		writeCatalogLookupError(w, err, "recipe template not found")
 		return
 	}
-	slots, _ := s.catalogTemplateSlotRows(r.Context(), entity.ID)
-	localizations, _ := s.catalogLocalizationRows(r.Context(), entity.ID)
+	slots, slotsErr := s.catalogTemplateSlotRows(r.Context(), entity.ID)
+	if slotsErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read recipe slots")
+		return
+	}
+	localizations, localeErr := s.catalogLocalizationRows(r.Context(), entity.ID, true)
+	if localeErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read localizations")
+		return
+	}
 	defaultLocale := entity.DefaultLocale
 	if entity.PublishedRevisionID == nil && len(localizations) == 0 {
 		localizations, defaultLocale = catalogImportedEditorLocalizations(nil, defaultLocale, key)
@@ -902,17 +1003,26 @@ func (s *Server) catalogRecipeTemplateDetail(w http.ResponseWriter, r *http.Requ
 			"backgroundPath": backgroundPath, "backgroundContainsIngredients": backgroundContainsIngredients,
 			"coordinateSpace": coordinateSpace, "imagePixels": json.RawMessage(imagePixels), "contentRect": json.RawMessage(contentRect)}
 	}
+	reviewStatus, statusErr := s.catalogPendingReviewStatus(r.Context(), entity.ID)
+	if statusErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read review status")
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"publicId": entity.PublicID, "recipeTypePublicId": typePublicID, "templateKey": key,
 		"canvas": map[string]any{"width": width, "height": height, "imageScale": scale}, "backgroundFileId": nullableCatalogString(backgroundID),
 		"backgroundUrl": backgroundURL, "backgroundSource": backgroundSource, "definition": json.RawMessage(definition), "slots": slots, "defaultLocale": defaultLocale,
 		"localizations": localizations, "publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID),
-		"reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID), "source": source, "importMetadata": importMetadata})
+		"reviewStatus": reviewStatus, "source": source, "importMetadata": importMetadata})
 }
 
 func (s *Server) catalogRecipeSourceVersions(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	limit := boundedLimit(r.URL.Query().Get("limit"), 500, 1000)
 	claims := currentClaims(r)
+	if claims.Subject > 0 {
+		w.Header().Set("Cache-Control", "private, no-store")
+	}
 	rows, err := s.db.Query(r.Context(), `select version.public_id,mod.project_code,mod.slug,mod.primary_name,
 		version.label,version.minecraft_versions,version.loaders,version.mod_version
 		from mod_content_versions version join mods mod on mod.id=version.mod_id
@@ -958,6 +1068,10 @@ func (s *Server) createCatalogRecipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	typeEntity, err := s.catalogEditorEntityByPublicID(r.Context(), typePublicID, "recipe_type")
+	if err != nil && !errors.Is(err, errCatalogEditorNotFound) {
+		writeError(w, http.StatusInternalServerError, "failed to read catalog entry")
+		return
+	}
 	if err != nil || typeEntity.Status != "active" {
 		writeError(w, http.StatusNotFound, "recipe type not found")
 		return
@@ -994,21 +1108,30 @@ func (s *Server) createCatalogRecipe(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 	typeEntity, err := s.catalogEditorEntityByPublicID(r.Context(), r.PathValue("typePublicId"), "recipe_type")
+	if err != nil && !errors.Is(err, errCatalogEditorNotFound) {
+		writeError(w, http.StatusInternalServerError, "failed to read catalog entry")
+		return
+	}
 	if err != nil || typeEntity.Status != "active" {
 		writeError(w, http.StatusNotFound, "recipe type not found")
 		return
 	}
+	if r.Method == http.MethodGet && !s.requireCatalogPublicEntity(w, r, typeEntity.ID) {
+		return
+	}
+
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	limit := boundedLimit(r.URL.Query().Get("limit"), 40, 100)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
 	var total int
 	if err = s.db.QueryRow(r.Context(), `select count(*)::int from recipes recipe
 		join catalog_entities entity on entity.id=recipe.entity_id
-		where recipe.recipe_type_id=$1 and entity.status='active' and ($2='' or coalesce(recipe.canonical_source_id,'') ilike '%'||$2||'%')`,
+		where recipe.recipe_type_id=$1 and `+catalogPublicEntityCondition+` and ($2='' or coalesce(recipe.canonical_source_id,'') ilike '%'||$2||'%')`,
 		typeEntity.ID, query).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count recipes")
 		return
 	}
+	versionOrder := minecraftVersionOrder(loadMinecraftVersionConfig(r.Context(), s.db))
 	rows, err := s.db.Query(r.Context(), `select entity.public_id,coalesce(recipe.canonical_source_id,''),recipe.identity_source,
 		(select revision.public_id from content_revisions revision where revision.id=entity.published_revision_id),
 		coalesce(template_entity.public_id,imported_template_entity.public_id,''),
@@ -1016,7 +1139,7 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 		case when definition.recipe_id is not null then (select count(*)::int from recipe_bindings binding where binding.recipe_id=recipe.entity_id)
 		 else coalesce(observation.binding_count,0) end,
 		coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-		 where localization.catalog_entity_id=entity.id and localization.name<>''),'{}'::jsonb),definition.recipe_id is not null,
+		 where localization.catalog_entity_id=entity.id and localization.name<>'' and localization.review_status='approved'),'{}'::jsonb),definition.recipe_id is not null,
 		coalesce(effective_source_version.public_id,''),coalesce(source_mod.project_code,''),coalesce(source_mod.slug,''),
 		coalesce(source_mod.primary_name,''),coalesce(effective_source_version.label,''),
 		coalesce(effective_source_version.minecraft_versions,'{}'::text[]),coalesce(effective_source_version.loaders,'{}'::text[]),
@@ -1028,16 +1151,19 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 		 join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		 join mod_content_versions version on version.id=revision.target_version_id
 		 where snapshot.recipe_id=recipe.entity_id and revision.is_active and revision.status in ('ready','partial')
+		 and exists(select 1 from mods published_mod where published_mod.id=revision.mod_id and published_mod.review_status='approved')
+		 and exists(select 1 from mod_content_versions published_version where published_version.id=revision.target_version_id and published_version.status='active')
 		 order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1) observation on true
 		left join recipe_template_import_snapshots import_template on import_template.id=observation.template_id
 		left join catalog_entities imported_template_entity on imported_template_entity.id=import_template.canonical_template_id
 		left join mod_content_versions canonical_source_version on canonical_source_version.id=definition.source_mod_content_version_id
+		 and canonical_source_version.status='active' and exists(select 1 from mods where id=canonical_source_version.mod_id and review_status='approved')
 		left join mod_content_versions effective_source_version on effective_source_version.public_id=
 			case when definition.recipe_id is not null then canonical_source_version.public_id else observation.source_version_public_id end
 		left join mods source_mod on source_mod.id=effective_source_version.mod_id
 		left join lateral (select jsonb_agg(binding.version_code order by binding.created_at,binding.version_code) versions
 			from recipe_version_bindings binding where binding.recipe_id=recipe.entity_id) applicable on true
-		where recipe.recipe_type_id=$1 and entity.status='active' and ($2='' or coalesce(recipe.canonical_source_id,'') ilike '%'||$2||'%')
+		where recipe.recipe_type_id=$1 and `+catalogPublicEntityCondition+` and ($2='' or coalesce(recipe.canonical_source_id,'') ilike '%'||$2||'%')
 		order by coalesce(recipe.canonical_source_id,''),entity.public_id limit $3 offset $4`, typeEntity.ID, query, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read recipes")
@@ -1045,7 +1171,6 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	primary, secondary := s.catalogRequestedLocales(r)
-	versionOrder := minecraftVersionOrder(loadMinecraftVersionConfig(r.Context(), s.db))
 	items := make([]map[string]any, 0, limit)
 	for rows.Next() {
 		var publicID, canonicalID, identitySource, templatePublicID, observationID, importRevisionID string
@@ -1143,6 +1268,9 @@ func (s *Server) normalizeCatalogRecipeEdit(ctx context.Context, typeID int64, e
 		}
 		roles[key] = role
 	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
 	if len(roles) == 0 {
 		return errCatalogEditorReference
 	}
@@ -1151,17 +1279,24 @@ func (s *Server) normalizeCatalogRecipeEdit(ctx context.Context, typeID int64, e
 
 func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 	entity, err := s.catalogEditorEntityByPublicID(r.Context(), r.PathValue("publicId"), "recipe")
+	if err != nil && !errors.Is(err, errCatalogEditorNotFound) {
+		writeError(w, http.StatusInternalServerError, "failed to read catalog entry")
+		return
+	}
 	if err != nil || entity.Status == "archived" && r.Method == http.MethodGet {
 		writeError(w, http.StatusNotFound, "recipe not found")
 		return
 	}
-	var typeID int64
-	if err = s.db.QueryRow(r.Context(), `select recipe_type_id from recipes where entity_id=$1`, entity.ID).Scan(&typeID); err != nil && r.Method != http.MethodPut {
-		writeError(w, http.StatusNotFound, "recipe not found")
+	if r.Method == http.MethodGet && !s.requireCatalogPublicEntity(w, r, entity.ID) {
 		return
 	}
-	if r.Method == http.MethodGet && !s.catalogRecipeTypeIsActive(r.Context(), typeID) {
-		writeError(w, http.StatusNotFound, "recipe not found")
+
+	var typeID int64
+	if err = s.db.QueryRow(r.Context(), `select recipe_type_id from recipes where entity_id=$1`, entity.ID).Scan(&typeID); err != nil {
+		writeCatalogLookupError(w, err, "recipe not found")
+		return
+	}
+	if r.Method == http.MethodGet && !s.requireCatalogPublicEntity(w, r, typeID) {
 		return
 	}
 	if r.Method == http.MethodPut {
@@ -1176,7 +1311,7 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		var typePublicID string
 		if err = s.db.QueryRow(r.Context(), `select public_id from catalog_entities where id=$1 and entity_type='recipe_type'`, typeID).Scan(&typePublicID); err != nil {
-			writeError(w, http.StatusNotFound, "recipe type not found")
+			writeCatalogLookupError(w, err, "recipe type not found")
 			return
 		}
 		snapshot := catalogEditorSnapshot{Operation: "edit", Reason: edit.Reason, Kind: "recipe", EntityID: entity.ID, PublicID: entity.PublicID,
@@ -1209,10 +1344,13 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 		 join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		 join mod_content_versions version on version.id=revision.target_version_id
 			where snapshot.recipe_id=recipe.entity_id and revision.is_active and revision.status in ('ready','partial')
+		 and exists(select 1 from mods published_mod where published_mod.id=revision.mod_id and published_mod.review_status='approved')
+		 and exists(select 1 from mod_content_versions published_version where published_version.id=revision.target_version_id and published_version.status='active')
 			order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1) observation on true
 		left join recipe_template_import_snapshots import_template on import_template.id=observation.template_id
 		left join catalog_entities imported_template_entity on imported_template_entity.id=import_template.canonical_template_id
 		left join mod_content_versions canonical_source_version on canonical_source_version.id=definition.source_mod_content_version_id
+		 and canonical_source_version.status='active' and exists(select 1 from mods where id=canonical_source_version.mod_id and review_status='approved')
 		left join mod_content_versions effective_source_version on effective_source_version.public_id=
 			case when definition.recipe_id is not null then canonical_source_version.public_id else observation.source_version_public_id end
 		left join mods source_mod on source_mod.id=effective_source_version.mod_id
@@ -1222,7 +1360,7 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 		Scan(&typePublicID, &templatePublicID, &canonicalID, &definition, &observationID, &importRevisionID, &importTemplateKey, &canonicalDefinition,
 			&sourceVersionPublicID, &sourceModPublicID, &sourceModSiteID, &sourceModName, &sourceVersionLabel,
 			&sourceMinecraftVersions, &sourceLoaders, &sourceModVersion, &applicableVersions); err != nil {
-		writeError(w, http.StatusNotFound, "recipe not found")
+		writeCatalogLookupError(w, err, "recipe not found")
 		return
 	}
 	bindings, bindingErr := s.catalogRecipeBindingRows(r.Context(), entity.ID)
@@ -1233,7 +1371,11 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to read recipe bindings")
 		return
 	}
-	localizations, _ := s.catalogLocalizationRows(r.Context(), entity.ID)
+	localizations, localeErr := s.catalogLocalizationRows(r.Context(), entity.ID, true)
+	if localeErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read localizations")
+		return
+	}
 	defaultLocale := entity.DefaultLocale
 	if entity.PublishedRevisionID == nil && len(localizations) == 0 {
 		fallbackName := canonicalID
@@ -1252,11 +1394,17 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 			"modName": sourceModName, "label": sourceVersionLabel, "minecraftVersions": sourceMinecraftVersions,
 			"loaders": sourceLoaders, "modVersion": sourceModVersion}
 	}
+	reviewStatus, statusErr := s.catalogPendingReviewStatus(r.Context(), entity.ID)
+	if statusErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read review status")
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"publicId": entity.PublicID, "recipeTypePublicId": typePublicID,
 		"templatePublicId": templatePublicID, "sourceVersionPublicId": sourceVersionPublicID, "sourceVersion": sourceVersion,
 		"canonicalSourceId": canonicalID, "definition": json.RawMessage(definition), "bindings": bindings,
 		"defaultLocale": defaultLocale, "localizations": localizations, "publishedRevisionId": revisionPublicIDValue(r.Context(), s.db, entity.PublishedRevisionID),
-		"reviewStatus": s.catalogPendingReviewStatus(r.Context(), entity.ID), "source": source,
+		"reviewStatus": reviewStatus, "source": source,
 		"applicableVersions": catalogApplicableVersions(applicableVersions, minecraftVersionOrder(loadMinecraftVersionConfig(r.Context(), s.db))),
 		"importRevisionId":   importRevisionID, "importTemplateKey": importTemplateKey})
 }
@@ -1322,6 +1470,14 @@ func writeCatalogMutationResult(w http.ResponseWriter, result catalogEditResult,
 	writeJSON(w, http.StatusAccepted, result)
 }
 
+func writeCatalogLookupError(w http.ResponseWriter, err error, missingMessage string) {
+	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errCatalogEditorNotFound) {
+		writeError(w, http.StatusNotFound, missingMessage)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "failed to read catalog entry")
+}
+
 func nullableCatalogString(value sql.NullString) any {
 	if !value.Valid {
 		return nil
@@ -1359,18 +1515,59 @@ func (s *Server) catalogRequestedLocales(r *http.Request) (string, string) {
 	return primary, secondary
 }
 
-func (s *Server) catalogRecipeTypeIsActive(ctx context.Context, typeID int64) bool {
-	var active bool
-	return s.db.QueryRow(ctx, `select exists(select 1 from catalog_entities
-		where id=$1 and entity_type='recipe_type' and status='active' and archived_at is null)`, typeID).Scan(&active) == nil && active
+// Manual published entries retain their existing public visibility. Imported-only
+// entries need at least one active, approved source; global management uses its
+// own permission middleware and does not call this public-read predicate.
+const catalogPublicEntityCondition = `entity.status='active' and entity.archived_at is null and (
+ entity.published_revision_id is not null
+ or not exists(select 1 from (
+  select revision_id from resource_import_snapshots where resource_id=entity.id
+  union all select revision_id from tag_import_snapshots where tag_id=entity.id
+  union all select revision_id from recipe_type_import_snapshots where recipe_type_id=entity.id
+  union all select revision_id from recipe_import_snapshots where recipe_id=entity.id
+  union all select revision_id from recipe_template_import_snapshots where canonical_template_id=entity.id
+ ) origins)
+ or exists(select 1 from (
+  select revision_id from resource_import_snapshots where resource_id=entity.id
+  union all select revision_id from tag_import_snapshots where tag_id=entity.id
+  union all select revision_id from recipe_type_import_snapshots where recipe_type_id=entity.id
+  union all select revision_id from recipe_import_snapshots where recipe_id=entity.id
+  union all select revision_id from recipe_template_import_snapshots where canonical_template_id=entity.id
+ ) origins join catalog_import_revisions imported on imported.id=origins.revision_id
+ join mods project on project.id=imported.mod_id and project.review_status='approved'
+ join mod_content_versions version on version.id=imported.target_version_id and version.status='active'
+ where imported.is_active and imported.status in ('ready','partial')))
+ and (entity.entity_type<>'resource' or exists(select 1 from game_resources resource where resource.entity_id=entity.id and (
+  (resource.owner_mod_id is null and not exists(select 1 from mod_resource_bindings where resource_id=entity.id))
+  or exists(select 1 from mods where id=resource.owner_mod_id and review_status='approved')
+  or exists(select 1 from mod_resource_bindings binding join mods project on project.id=binding.mod_id
+   where binding.resource_id=entity.id and project.review_status='approved'))))`
+
+func (s *Server) catalogPublicEntityVisible(ctx context.Context, entityID int64) (bool, error) {
+	var visible bool
+	err := s.db.QueryRow(ctx, `select exists(select 1 from catalog_entities entity where entity.id=$1 and `+catalogPublicEntityCondition+`)`, entityID).Scan(&visible)
+	return visible, err
 }
 
-func (s *Server) catalogLocalizationRows(ctx context.Context, entityID int64) ([]map[string]any, error) {
+func (s *Server) requireCatalogPublicEntity(w http.ResponseWriter, r *http.Request, entityID int64) bool {
+	visible, err := s.catalogPublicEntityVisible(r.Context(), entityID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve catalog visibility")
+		return false
+	}
+	if !visible {
+		writeError(w, http.StatusNotFound, "catalog entry not found")
+		return false
+	}
+	return true
+}
+
+func (s *Server) catalogLocalizationRows(ctx context.Context, entityID int64, onlyApproved ...bool) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, `select locale,name,summary,content_markdown,provenance,source_locale,
 		(select task_uid from ai_tasks where id=content_localizations.ai_task_id),revision_no,
 		editable,review_status,
 		(select revision.public_id from content_revisions revision where revision.id=content_localizations.published_revision_id)
-		from content_localizations where catalog_entity_id=$1 order by locale`, entityID)
+		from content_localizations where catalog_entity_id=$1 and (not $2 or review_status='approved') order by locale`, entityID, len(onlyApproved) > 0 && onlyApproved[0])
 	if err != nil {
 		return nil, err
 	}
@@ -1393,31 +1590,36 @@ func (s *Server) catalogLocalizationRows(ctx context.Context, entityID int64) ([
 	return result, rows.Err()
 }
 
-func (s *Server) catalogPendingReviewStatus(ctx context.Context, entityID int64) string {
+func (s *Server) catalogPendingReviewStatus(ctx context.Context, entityID int64) (string, error) {
 	var status string
-	err := s.db.QueryRow(ctx, `select status from change_requests where entity_id=$1 order by id desc limit 1`, entityID).Scan(&status)
-	if err != nil {
-		return "approved"
+	err := s.db.QueryRow(ctx, `select request.status from change_requests request
+		join catalog_entities entity on entity.id=request.entity_id and entity.entity_type=request.entity_type
+		where entity.id=$1 order by request.id desc limit 1`, entityID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "approved", nil
 	}
-	return status
+	return status, err
 }
 
 func (s *Server) catalogTagMemberRows(ctx context.Context, tagID int64, primary, secondary string, allowImportFallback bool) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, `select entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,
 		entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(imported.mod_site_id,''),
 		coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-		 where localization.catalog_entity_id=entity.id and localization.name<>''),imported.names,'{}'::jsonb)
+		 where localization.catalog_entity_id=entity.id and localization.name<>'' and localization.review_status='approved'),imported.names,'{}'::jsonb)
 		from catalog_tag_members member join game_resources resource on resource.entity_id=member.resource_id
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 		left join lateral (select snapshot.names,snapshot.revision_id,snapshot.icon_path,mod.slug mod_site_id
 		 from resource_import_snapshots snapshot join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		 join mods mod on mod.id=revision.mod_id where snapshot.resource_id=resource.entity_id
 		 and revision.is_active and revision.status in ('ready','partial')
+		 and exists(select 1 from mods published_mod where published_mod.id=revision.mod_id and published_mod.review_status='approved')
+		 and exists(select 1 from mod_content_versions published_version where published_version.id=revision.target_version_id and published_version.status='active')
 		 order by (snapshot.icon_path<>'') desc,coalesce(revision.activated_at,revision.created_at) desc limit 1) imported on true
-		join catalog_entities entity on entity.id=resource.entity_id where member.tag_id=$1 order by member.ordinal`, tagID)
+		join catalog_entities entity on entity.id=resource.entity_id where member.tag_id=$1 and `+catalogPublicEntityCondition+` order by member.ordinal`, tagID)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	items := []map[string]any{}
 	for rows.Next() {
 		var entityID int64
@@ -1453,6 +1655,8 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID int64, primary,
 		select snapshot.id,snapshot.revision_id from tag_import_snapshots snapshot
 		join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		where snapshot.tag_id=$1 and revision.is_active and revision.status in ('ready','partial')
+		 and exists(select 1 from mods published_mod where published_mod.id=revision.mod_id and published_mod.review_status='approved')
+		 and exists(select 1 from mod_content_versions published_version where published_version.id=revision.target_version_id and published_version.status='active')
 	), selected_members as (
 		select distinct on(member.resource_id) selected.revision_id,member.resource_id,member.ordinal
 		from selected join tag_import_members member on member.tag_snapshot_id=selected.id
@@ -1461,17 +1665,21 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID int64, primary,
 	select entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,entity.default_locale,
 		(select public_id from oss_files where id=definition.icon_file_id),coalesce(resource_snapshot.revision_id,''),coalesce(resource_snapshot.icon_path,''),coalesce(mod.slug,''),
 		coalesce((select jsonb_object_agg(localization.locale,localization.name)
-		 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name<>''),
+		 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name<>'' and localization.review_status='approved'),
 		 resource_snapshot.names,'{}'::jsonb)
 	from selected_members member
 	join game_resources resource on resource.entity_id=member.resource_id
 	join catalog_entities entity on entity.id=resource.entity_id
 	left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
-	left join lateral (select candidate.names,candidate.revision_id,candidate.icon_path from resource_import_snapshots candidate where candidate.resource_id=resource.entity_id
+	left join lateral (select candidate.names,candidate.revision_id,candidate.icon_path from resource_import_snapshots candidate
+	 join catalog_import_revisions imported_revision on imported_revision.id=candidate.revision_id
+	 where candidate.resource_id=resource.entity_id and imported_revision.is_active and imported_revision.status in ('ready','partial')
+	 and exists(select 1 from mods where id=imported_revision.mod_id and review_status='approved')
+	 and exists(select 1 from mod_content_versions where id=imported_revision.target_version_id and status='active')
 	 order by (candidate.revision_id=member.revision_id) desc,(candidate.icon_path<>'') desc,candidate.created_at desc limit 1) resource_snapshot on true
 	left join catalog_import_revisions revision on revision.id=resource_snapshot.revision_id
 	left join mods mod on mod.id=revision.mod_id
-	order by member.ordinal`, tagID)
+	where `+catalogPublicEntityCondition+` order by member.ordinal`, tagID)
 	if err != nil {
 		return nil, err
 	}
@@ -1508,13 +1716,14 @@ func (s *Server) catalogRecipeTypeCatalysts(ctx context.Context, typeID int64, p
 	rows, err := s.db.Query(ctx, `select entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,catalyst.ordinal,
 		entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),
 		coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-		 where localization.catalog_entity_id=entity.id and localization.name<>''),'{}'::jsonb)
+		 where localization.catalog_entity_id=entity.id and localization.name<>'' and localization.review_status='approved'),'{}'::jsonb)
 		from recipe_type_catalysts catalyst join game_resources resource on resource.entity_id=catalyst.resource_id
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
-		join catalog_entities entity on entity.id=resource.entity_id where catalyst.recipe_type_id=$1 order by catalyst.ordinal`, typeID)
+		join catalog_entities entity on entity.id=resource.entity_id where catalyst.recipe_type_id=$1 and `+catalogPublicEntityCondition+` order by catalyst.ordinal`, typeID)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	items := []map[string]any{}
 	for rows.Next() {
 		var publicID, kindCode, canonicalID, registry, defaultLocale string
@@ -1546,6 +1755,8 @@ func (s *Server) catalogRecipeTypeCatalysts(ctx context.Context, typeID int64, p
 	err = s.db.QueryRow(ctx, `select snapshot.catalysts,snapshot.revision_id from recipe_type_import_snapshots snapshot
 		join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		where snapshot.recipe_type_id=$1 and revision.is_active and revision.status in ('ready','partial')
+		 and exists(select 1 from mods published_mod where published_mod.id=revision.mod_id and published_mod.review_status='approved')
+		 and exists(select 1 from mod_content_versions published_version where published_version.id=revision.target_version_id and published_version.status='active')
 		order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1`, typeID).Scan(&raw, &revisionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return items, nil
@@ -1591,6 +1802,12 @@ func (s *Server) catalogRecipeBindingRows(ctx context.Context, recipeID int64) (
 		return nil, err
 	}
 	defer rows.Close()
+	type bindingRow struct {
+		id         int64
+		slotKey    string
+		definition []byte
+	}
+	bindings := []bindingRow{}
 	result := map[string]any{}
 	for rows.Next() {
 		var bindingID int64
@@ -1599,13 +1816,20 @@ func (s *Server) catalogRecipeBindingRows(ctx context.Context, recipeID int64) (
 		if err = rows.Scan(&bindingID, &slotKey, &definition); err != nil {
 			return nil, err
 		}
-		candidates, candidateErr := s.catalogRecipeCandidateRows(ctx, bindingID)
+		bindings = append(bindings, bindingRow{bindingID, slotKey, definition})
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for _, binding := range bindings {
+		candidates, candidateErr := s.catalogRecipeCandidateRows(ctx, binding.id)
 		if candidateErr != nil {
 			return nil, candidateErr
 		}
-		result[slotKey] = map[string]any{"definition": json.RawMessage(definition), "candidates": candidates}
+		result[binding.slotKey] = map[string]any{"definition": json.RawMessage(binding.definition), "candidates": candidates}
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func (s *Server) catalogImportedRecipeBindingRows(ctx context.Context, snapshotID string) (map[string]any, error) {
@@ -1617,11 +1841,16 @@ func (s *Server) catalogImportedRecipeBindingRows(ctx context.Context, snapshotI
 		join recipe_template_import_slots slot on slot.id=binding.template_slot_id
 		left join recipe_import_binding_candidates candidate on candidate.binding_id=binding.id
 		left join game_resources resource on resource.entity_id=candidate.resource_id
+		 and exists(select 1 from catalog_entities entity where entity.id=resource.entity_id and `+catalogPublicEntityCondition+`)
 		left join catalog_entities resource_entity on resource_entity.id=resource.entity_id
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 		left join oss_files icon_file on icon_file.id=definition.icon_file_id and icon_file.status='active'
 		left join lateral (select source.revision_id,source.icon_path from resource_import_snapshots source
-		 where source.resource_id=resource.entity_id order by (source.icon_path<>'') desc,source.created_at desc limit 1) imported on true
+		 join catalog_import_revisions imported_revision on imported_revision.id=source.revision_id
+		 where source.resource_id=resource.entity_id and imported_revision.is_active and imported_revision.status in ('ready','partial')
+		 and exists(select 1 from mods where id=imported_revision.mod_id and review_status='approved')
+	 and exists(select 1 from mod_content_versions where id=imported_revision.target_version_id and status='active')
+		 order by (source.icon_path<>'') desc,source.created_at desc limit 1) imported on true
 		where binding.recipe_snapshot_id=$1 order by binding.ordinal,candidate.alternative_index`, snapshotID)
 	if err != nil {
 		return nil, err
@@ -1666,8 +1895,12 @@ func (s *Server) catalogRecipeCandidateRows(ctx context.Context, bindingID int64
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 		left join oss_files icon_file on icon_file.id=definition.icon_file_id and icon_file.status='active'
 		left join lateral (select source.revision_id,source.icon_path from resource_import_snapshots source
-		 where source.resource_id=resource.entity_id order by (source.icon_path<>'') desc,source.created_at desc limit 1) imported on true
-		where candidate.binding_id=$1 order by candidate.candidate_index`, bindingID)
+		 join catalog_import_revisions imported_revision on imported_revision.id=source.revision_id
+		 where source.resource_id=resource.entity_id and imported_revision.is_active and imported_revision.status in ('ready','partial')
+		 and exists(select 1 from mods where id=imported_revision.mod_id and review_status='approved')
+	 and exists(select 1 from mod_content_versions where id=imported_revision.target_version_id and status='active')
+		 order by (source.icon_path<>'') desc,source.created_at desc limit 1) imported on true
+		where candidate.binding_id=$1 and `+catalogPublicEntityCondition+` order by candidate.candidate_index`, bindingID)
 	if err != nil {
 		return nil, err
 	}

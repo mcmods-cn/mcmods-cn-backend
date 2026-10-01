@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
@@ -56,6 +57,9 @@ func (worker *FavoriteModpackExportWorker) Start(ctx context.Context) error {
 	if worker.queue != nil {
 		subscribeErr = worker.queue.SubscribeTask(favoriteModpackExportTaskCode, worker.handle)
 	}
+	if errors.Is(subscribeErr, queue.ErrTaskDisabled) || ctx.Err() != nil {
+		return subscribeErr
+	}
 	go worker.scan(ctx)
 	if worker.server.cfg.NATS.OutboxEnabled {
 		return nil
@@ -78,6 +82,9 @@ func (worker *FavoriteModpackExportWorker) scan(ctx context.Context) {
 }
 
 func (worker *FavoriteModpackExportWorker) processPending(ctx context.Context) {
+	if ctx.Err() != nil || !worker.server.queueTaskEnabled(favoriteModpackExportTaskCode) {
+		return
+	}
 	maxAttempts := favoriteExportMaxAttempts(worker.server.cfg.FavoriteExport.MaxBuildAttempts)
 	worker.expireCompleted(ctx)
 	worker.failExhaustedLeases(ctx)
@@ -96,6 +103,10 @@ func (worker *FavoriteModpackExportWorker) processPending(ctx context.Context) {
 			ids = append(ids, id)
 		}
 	}
+	if rows.Err() != nil {
+		return
+	}
+	rows.Close()
 	for _, id := range ids {
 		_ = worker.process(ctx, id)
 	}
@@ -113,12 +124,24 @@ func (worker *FavoriteModpackExportWorker) failExhaustedLeases(ctx context.Conte
 		return
 	}
 	defer rows.Close()
+	type exhaustedTask struct {
+		taskID, name string
+		ownerID      int64
+	}
+	tasks := make([]exhaustedTask, 0)
 	for rows.Next() {
-		var taskID, name string
-		var ownerID int64
-		if rows.Scan(&taskID, &ownerID, &name) == nil {
-			worker.server.sendTemplatedNotification(ctx, ownerID, "modpack_export_failed", map[string]string{"pack_name": name, "stage": "processing", "reason": "WORKER_LEASE_EXHAUSTED"}, map[string]any{"url": "/account/favorites/exports/" + taskID, "taskId": taskID})
+		var task exhaustedTask
+		if rows.Scan(&task.taskID, &task.ownerID, &task.name) != nil {
+			return
 		}
+		tasks = append(tasks, task)
+	}
+	if rows.Err() != nil {
+		return
+	}
+	rows.Close()
+	for _, task := range tasks {
+		worker.server.sendTemplatedNotification(ctx, task.ownerID, "modpack_export_failed", map[string]string{"pack_name": task.name, "stage": "processing", "reason": "WORKER_LEASE_EXHAUSTED"}, map[string]any{"url": "/account/favorites/exports/" + task.taskID, "taskId": task.taskID})
 	}
 }
 
@@ -145,11 +168,17 @@ func (worker *FavoriteModpackExportWorker) expireCompleted(ctx context.Context) 
 	artifacts := make([]expiredArtifact, 0)
 	for rows.Next() {
 		var artifact expiredArtifact
-		if rows.Scan(&artifact.taskID, &artifact.fileID, &artifact.ownerID, &artifact.name, &artifact.publicID) == nil {
-			artifacts = append(artifacts, artifact)
+		if rows.Scan(&artifact.taskID, &artifact.fileID, &artifact.ownerID, &artifact.name, &artifact.publicID) != nil {
+			rows.Close()
+			return
 		}
+		artifacts = append(artifacts, artifact)
 	}
+	err = rows.Err()
 	rows.Close()
+	if err != nil {
+		return
+	}
 	for _, artifact := range artifacts {
 		if err = worker.server.tombstoneOSSFileTx(ctx, tx, artifact.fileID, "favorite_modpack_export_expired"); err != nil {
 			return
@@ -175,6 +204,12 @@ func (worker *FavoriteModpackExportWorker) handle(ctx context.Context, raw []byt
 }
 
 func (worker *FavoriteModpackExportWorker) process(ctx context.Context, taskID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !worker.server.queueTaskEnabled(favoriteModpackExportTaskCode) {
+		return queue.ErrTaskDisabled
+	}
 	var ownerID int64
 	var name, version, minecraftVersion, loader, loaderVersion string
 	maxAttempts := favoriteExportMaxAttempts(worker.server.cfg.FavoriteExport.MaxBuildAttempts)
@@ -210,12 +245,17 @@ func (worker *FavoriteModpackExportWorker) process(ctx context.Context, taskID s
 	for rows.Next() {
 		var filename, sha1, sha512, clientEnv, serverEnv, download string
 		var size int64
-		if rows.Scan(&filename, &sha1, &sha512, &clientEnv, &serverEnv, &download, &size) != nil {
-			continue
+		if err = rows.Scan(&filename, &sha1, &sha512, &clientEnv, &serverEnv, &download, &size); err != nil {
+			rows.Close()
+			return worker.fail(ctx, taskID, leaseToken, "REPORT_LOAD_FAILED", err)
 		}
 		files = append(files, mrpackFile{Path: "mods/" + filename, Hashes: map[string]string{"sha1": sha1, "sha512": sha512}, Env: mrpackEnvironment{Client: clientEnv, Server: serverEnv}, Downloads: []string{download}, FileSize: size})
 	}
+	err = rows.Err()
 	rows.Close()
+	if err != nil {
+		return worker.fail(ctx, taskID, leaseToken, "REPORT_LOAD_FAILED", err)
+	}
 	result, err := buildMRPack(mrpackBuildInput{Name: name, VersionID: version, Summary: "Exported from an MCMods favorite collection", MinecraftVersion: minecraftVersion, Loader: loader, LoaderVersion: loaderVersion, Files: files})
 	if err != nil {
 		return worker.fail(ctx, taskID, leaseToken, "MRPACK_BUILD_FAILED", err)
@@ -231,7 +271,7 @@ func (worker *FavoriteModpackExportWorker) process(ctx context.Context, taskID s
 	tag, err = worker.server.db.Exec(ctx, `update favorite_modpack_export_tasks set status='ready',stage='completed',
 		result_file_id=$3,result_file_size=$4,result_sha256=$5,finished_at=now(),expires_at=$6,updated_at=now(),
 		error_code='',error_detail='',lease_token='',lease_expires_at=null
-		where public_id=$1 and lease_token=$2`, taskID, leaseToken, fileID, result.Size, result.SHA256, expires)
+		where public_id=$1 and lease_token=$2 and status='processing'`, taskID, leaseToken, fileID, result.Size, result.SHA256, expires)
 	if err != nil {
 		return err
 	}
@@ -251,17 +291,32 @@ func (worker *FavoriteModpackExportWorker) process(ctx context.Context, taskID s
 func (worker *FavoriteModpackExportWorker) fail(ctx context.Context, taskID, leaseToken, code string, cause error) error {
 	log.Printf("favorite modpack export task %s failed at %s: %v", taskID, code, cause)
 	var attempts int
-	_ = worker.server.db.QueryRow(ctx, `select attempt_count from favorite_modpack_export_tasks where public_id=$1 and lease_token=$2`, taskID, leaseToken).Scan(&attempts)
-	if attempts < favoriteExportMaxAttempts(worker.server.cfg.FavoriteExport.MaxBuildAttempts) {
-		retryDelay := time.Duration(max(1, attempts)*10) * time.Second
-		_, _ = worker.server.db.Exec(ctx, `update favorite_modpack_export_tasks set status='pending',stage='retry_wait',
-			error_code=$3,error_detail='temporary processing failure',lease_token='',lease_expires_at=now()+$4::interval,updated_at=now()
-			where public_id=$1 and lease_token=$2`, taskID, leaseToken, code, fmt.Sprintf("%d seconds", int(retryDelay.Seconds())))
+	err := worker.server.db.QueryRow(ctx, `select attempt_count from favorite_modpack_export_tasks where public_id=$1 and lease_token=$2 and status='processing'`, taskID, leaseToken).Scan(&attempts)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return cause
 	}
-	_, _ = worker.server.db.Exec(ctx, `update favorite_modpack_export_tasks set status='failed',stage='failed',
+	if err != nil {
+		return errors.Join(cause, err)
+	}
+	if attempts < favoriteExportMaxAttempts(worker.server.cfg.FavoriteExport.MaxBuildAttempts) {
+		retryDelay := time.Duration(max(1, attempts)*10) * time.Second
+		_, err = worker.server.db.Exec(ctx, `update favorite_modpack_export_tasks set status='pending',stage='retry_wait',
+			error_code=$3,error_detail='temporary processing failure',lease_token='',lease_expires_at=now()+$4::interval,updated_at=now()
+			where public_id=$1 and lease_token=$2 and status='processing'`, taskID, leaseToken, code, fmt.Sprintf("%d seconds", int(retryDelay.Seconds())))
+		if err != nil {
+			return errors.Join(cause, err)
+		}
+		return cause
+	}
+	tag, transitionErr := worker.server.db.Exec(ctx, `update favorite_modpack_export_tasks set status='failed',stage='failed',
 		error_code=$3,error_detail='export processing failed',finished_at=now(),lease_token='',lease_expires_at=null,updated_at=now()
-		where public_id=$1 and lease_token=$2`, taskID, leaseToken, code)
+		where public_id=$1 and lease_token=$2 and status='processing'`, taskID, leaseToken, code)
+	if transitionErr != nil {
+		return transitionErr
+	}
+	if tag.RowsAffected() != 1 {
+		return cause
+	}
 	var ownerID int64
 	var name string
 	if worker.server.db.QueryRow(ctx, `select owner_user_id,pack_name from favorite_modpack_export_tasks where public_id=$1`, taskID).Scan(&ownerID, &name) == nil {

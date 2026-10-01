@@ -26,15 +26,32 @@ func TestNotificationTemplateUsesConfiguredChineseTranslation(t *testing.T) {
 	}
 }
 
-func TestDefaultNotificationTemplatesCoverEveryEnabledLocale(t *testing.T) {
-	locales := editableStickerLocales()
-	for _, template := range defaultNotificationTemplateConfig().Templates {
-		for _, locale := range locales {
-			value, ok := template.Translations[locale]
-			if !ok || value.Title == "" || value.Body == "" {
-				t.Fatalf("template %q is missing locale %q", template.Code, locale)
+func TestDefaultNotificationTemplatesRenderEveryEnabledLocaleWithHonestFallback(t *testing.T) {
+	config := defaultNotificationTemplateConfig()
+	for _, template := range config.Templates {
+		values := map[string]string{}
+		for _, variable := range template.Variables {
+			values[variable] = "Synthetic value"
+		}
+		if len(template.Translations) != 2 {
+			t.Fatalf("template %q has mislabeled default translations", template.Code)
+		}
+		for _, locale := range supportedContentLocaleList() {
+			rendered, err := renderNotificationTemplateForLocale(config, locale, template.Code, values)
+			if err != nil || rendered.Title == "" || rendered.Body == "" {
+				t.Fatalf("template=%s requested=%s err=%v", template.Code, locale, err)
+			}
+			expected := "zh-CN"
+			if locale == "en-US" {
+				expected = "en-US"
+			}
+			if rendered.Locale != expected {
+				t.Fatalf("template=%s requested=%s actual=%s want=%s", template.Code, locale, rendered.Locale, expected)
 			}
 		}
+	}
+	if err := validateNotificationTemplateConfig(config); err != nil {
+		t.Fatalf("valid defaults rejected: %v", err)
 	}
 }
 
@@ -113,5 +130,18 @@ func TestProjectUpdateSectionsAreStableAndIgnoreAdministrativeFields(t *testing.
 		if got[index] != want[index] {
 			t.Fatalf("sections=%#v want=%#v", got, want)
 		}
+	}
+}
+
+func TestNotificationTemplateTreatsUserValuesAsLiteralContent(t *testing.T) {
+	rendered, err := renderNotificationTemplateForLocale(defaultNotificationTemplateConfig(), "zh-CN", "mod_import_failure", map[string]string{"name": "{error}", "error": "{name}", "unrelated": "sensitive-unneeded"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rendered.Title != "模组资料导入失败" || rendered.Body != "{error} 的资料导入失败：{name}" {
+		t.Fatalf("user values recursively interpolated: %#v", rendered)
+	}
+	if _, exists := rendered.Values["unrelated"]; exists {
+		t.Fatal("unrelated template data was persisted")
 	}
 }

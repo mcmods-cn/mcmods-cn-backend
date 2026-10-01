@@ -100,7 +100,11 @@ func (s *Server) resolveCachedSessionSubject(ctx context.Context, claims securit
 		s.cache.Delete(ctx, key)
 		return cachedSessionSubject{}, pgx.ErrNoRows
 	}
-	return record, nil
+	// Redis and process-local entries are hints, not revocation authority.
+	// A logout on another API instance (or a failed cache invalidation) must
+	// reject this request even while a previously loaded entry is still warm.
+	// Checking after the cache loaders also fences a load racing with logout.
+	return s.loadSessionSubject(ctx, claims)
 }
 
 func (s *Server) loadSessionSubject(ctx context.Context, claims security.Claims) (cachedSessionSubject, error) {

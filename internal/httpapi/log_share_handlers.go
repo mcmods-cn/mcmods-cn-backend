@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	logRedactionVersion    = 1
+	logRedactionVersion    = 2
 	maxLogSourceBytes      = int64(20 << 20)
 	maxLogUncompressed     = int64(100 << 20)
 	maxLogArchiveFiles     = 200
@@ -58,7 +58,7 @@ var logRedactionRules = []struct {
 	pattern *regexp.Regexp
 }{
 	{"authorization", regexp.MustCompile(`(?im)(authorization\s*:\s*(?:bearer|basic)\s+)[^\s]+`)},
-	{"secret_field", regexp.MustCompile(`(?im)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|password|passwd|redis[_-]?password|nats[_-]?(?:token|creds))\s*[:=]\s*)[^\s,;]+`)},
+	{"secret_field", regexp.MustCompile(`(?im)((?:"|')?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|password|passwd|redis[_-]?password|nats[_-]?(?:token|creds))(?:"|')?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)`)},
 	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)},
 	{"github_token", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,})\b`)},
 	{"discord_token", regexp.MustCompile(`\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{20,}\b`)},
@@ -69,7 +69,7 @@ var logRedactionRules = []struct {
 	{"mac", regexp.MustCompile(`(?i)\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b`)},
 	{"windows_home", regexp.MustCompile(`(?i)([A-Z]:\\Users\\)[^\\\r\n]+`)},
 	{"unix_home", regexp.MustCompile(`(?m)(/(?:home|Users)/)[^/\s]+`)},
-	{"url_secret", regexp.MustCompile(`(?i)([?&](?:token|key|secret|access_token|refresh_token)=)[^&#\s]+`)},
+	{"url_secret", regexp.MustCompile(`(?i)([?&](?:token|key|secret|access[_-]?token|refresh[_-]?token|session[_-]?(?:token|id)|code|state|signature|sig|x-amz-signature|x-goog-signature)=)[^&#\s]+`)},
 	{"connection_password", regexp.MustCompile(`(?i)((?:postgres(?:ql)?|mysql|redis|rediss|nats)://[^@\s]*?:)[^@/:\s]+@`)},
 	{"cookie", regexp.MustCompile(`(?im)(cookie\s*:\s*)[^\r\n]+`)},
 }
@@ -425,12 +425,19 @@ func (s *Server) loadLogShare(ctx context.Context, code string, ownerOnly bool, 
 		if err = rows.Scan(&index, &name, &contentType, &text, &size, &lines, &checksum); err != nil {
 			return nil, nil, err
 		}
+		if redactionVersion < logRedactionVersion {
+			// Apply the current protection to historical shares on display and
+			// download without rewriting or deleting their persisted content.
+			text, _ = redactLogText(text)
+			protected := makeLogShareEntry(name, contentType, text)
+			size, lines, checksum = protected.Size, protected.Lines, protected.Checksum
+		}
 		entries = append(entries, map[string]any{"index": index, "name": name, "contentType": contentType, "text": text, "byteSize": size, "lineCount": lines, "checksum": checksum})
 	}
 	var redactionCounts any
 	_ = jsonUnmarshal(counts, &redactionCounts)
 	return map[string]any{"publicCode": code, "sourceType": sourceType, "title": title, "originalName": originalName,
-		"status": status, "redactionVersion": redactionVersion, "redactionCounts": redactionCounts,
+		"status": status, "redactionVersion": redactionVersion, "appliedRedactionVersion": logRedactionVersion, "redactionCounts": redactionCounts,
 		"createdAt": createdAt, "expiresAt": expiresAt, "downloadable": sourceType == "file"}, entries, rows.Err()
 }
 
@@ -495,10 +502,14 @@ func (s *Server) myLogShares(w http.ResponseWriter, r *http.Request) {
 	if direction == "asc" {
 		order = "created_at asc,id asc"
 	}
-	items := s.querySimpleRows(r, `select public_code,source_type,title,original_name,status,redaction_version,created_at,expires_at
+	items, err := s.querySimpleRows(r, `select public_code,source_type,title,original_name,status,redaction_version,created_at,expires_at
 		from log_shares where owner_user_id=$1 and deleted_at is null and ($2='' or source_type=$2) and ($3='' or status=$3)
 		and ($4='' or title ilike '%'||$4||'%' or original_name ilike '%'||$4||'%')
 		order by `+order+` limit $5 offset $6`, claims.Subject, sourceType, status, query, limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取日志历史失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
 }
 

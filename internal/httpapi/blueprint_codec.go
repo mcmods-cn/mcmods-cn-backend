@@ -130,12 +130,21 @@ func decodeNBTMap(data []byte) (map[string]any, error) {
 		defer closer.Close()
 	}
 	limited := &io.LimitedReader{R: reader, N: maxBlueprintDecodedNBTBytes + 1}
-	result := map[string]any{}
-	if _, err := nbt.NewDecoder(limited).Decode(&result); err != nil {
+	decoded, err := io.ReadAll(limited)
+	if err != nil {
 		return nil, err
 	}
-	if limited.N <= 0 {
+	if int64(len(decoded)) > maxBlueprintDecodedNBTBytes {
 		return nil, errors.New("decoded blueprint NBT exceeds processing limit")
+	}
+	// The library allocates lists/arrays before reading their contents. Validate
+	// declared lengths and nesting first; a reader limit alone cannot bound that.
+	if err := validateBlueprintNBT(decoded); err != nil {
+		return nil, err
+	}
+	result := map[string]any{}
+	if _, err := nbt.NewDecoder(bytes.NewReader(decoded)).Decode(&result); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -239,15 +248,16 @@ func decodeSpongeSchematic(root map[string]any) (blueprintDocument, error) {
 	if err != nil {
 		return blueprintDocument{}, err
 	}
-	maxPalette := 0
-	for _, value := range paletteRaw {
-		if index := intValue(value); index > maxPalette {
-			maxPalette = index
-		}
-	}
-	palette := make([]blueprintBlockState, maxPalette+1)
+	palette := make(map[int]blueprintBlockState, len(paletteRaw))
 	for state, value := range paletteRaw {
-		palette[intValue(value)] = parseBlockState(state)
+		index := intValue(value)
+		if index < 0 {
+			return blueprintDocument{}, errors.New("schematic palette index is negative")
+		}
+		if _, exists := palette[index]; exists {
+			return blueprintDocument{}, errors.New("schematic palette indices are duplicated")
+		}
+		palette[index] = parseBlockState(state)
 	}
 	indices, err := decodeVarInts(byteSlice(dataRaw), volume)
 	if err != nil {
@@ -255,10 +265,10 @@ func decodeSpongeSchematic(root map[string]any) (blueprintDocument, error) {
 	}
 	document := blueprintDocument{Size: size, DataVersion: intValue(root["DataVersion"])}
 	for linear, paletteIndex := range indices {
-		if paletteIndex < 0 || paletteIndex >= len(palette) {
-			continue
+		state, exists := palette[paletteIndex]
+		if !exists {
+			return blueprintDocument{}, errors.New("schematic block references an unknown palette index")
 		}
-		state := palette[paletteIndex]
 		if state.ID == "" || state.ID == "minecraft:air" || state.ID == "air" {
 			continue
 		}

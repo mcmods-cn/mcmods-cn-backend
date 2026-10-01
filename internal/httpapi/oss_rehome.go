@@ -39,6 +39,7 @@ var (
 type modGalleryObjectForRehome struct {
 	galleryPublicID string
 	fileID          int64
+	filePublicID    string
 	objectKey       string
 	originalName    string
 }
@@ -82,7 +83,7 @@ func (s *Server) rehomeModGalleryOSSObjects(ctx context.Context, modID int64) er
 	if err := s.db.QueryRow(ctx, `select project_code from mods where id=$1`, modID).Scan(&projectPublicID); err != nil {
 		return err
 	}
-	rows, err := s.db.Query(ctx, `select gallery.public_id,file.id,file.object_key,file.original_name
+	rows, err := s.db.Query(ctx, `select gallery.public_id,file.id,file.public_id,file.object_key,file.original_name
 		from mod_gallery_images gallery join oss_files file on file.id=gallery.oss_file_id and file.status='active'
 		where gallery.mod_id=$1 order by gallery.id`, modID)
 	if err != nil {
@@ -91,7 +92,7 @@ func (s *Server) rehomeModGalleryOSSObjects(ctx context.Context, modID int64) er
 	items := make([]modGalleryObjectForRehome, 0)
 	for rows.Next() {
 		var item modGalleryObjectForRehome
-		if err = rows.Scan(&item.galleryPublicID, &item.fileID, &item.objectKey, &item.originalName); err != nil {
+		if err = rows.Scan(&item.galleryPublicID, &item.fileID, &item.filePublicID, &item.objectKey, &item.originalName); err != nil {
 			rows.Close()
 			return err
 		}
@@ -117,11 +118,7 @@ func (s *Server) rehomeModGalleryOSSObjects(ctx context.Context, modID int64) er
 	for index := range items {
 		item := items[index]
 		group.Go(func() error {
-			extension := strings.ToLower(filepath.Ext(item.objectKey))
-			if extension == "" {
-				extension = strings.ToLower(filepath.Ext(item.originalName))
-			}
-			targetKey := path.Join(targetPrefix, normalizeProjectObjectSegment(item.galleryPublicID)+extension)
+			targetKey := modGalleryRehomeObjectKey(targetPrefix, item)
 			if item.objectKey == targetKey {
 				return nil
 			}
@@ -169,4 +166,14 @@ func (s *Server) rehomeModGalleryOSSObjects(ctx context.Context, modID int64) er
 		})
 	}
 	return group.Wait()
+}
+
+func modGalleryRehomeObjectKey(targetPrefix string, item modGalleryObjectForRehome) string {
+	extension := strings.ToLower(filepath.Ext(item.objectKey))
+	if extension == "" {
+		extension = strings.ToLower(filepath.Ext(item.originalName))
+	}
+	// Include the immutable file identity: a delayed copy for an old gallery
+	// association must never overwrite a replacement file's destination.
+	return path.Join(targetPrefix, normalizeProjectObjectSegment(item.galleryPublicID)+"-"+normalizeProjectObjectSegment(item.filePublicID)+extension)
 }

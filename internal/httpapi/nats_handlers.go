@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 
 	"mcmods-cn-backend/internal/config"
@@ -46,6 +47,11 @@ func (s *Server) updateNATSConfig(w http.ResponseWriter, r *http.Request) {
 	if payload.Token == "" {
 		payload.Token = current.Token
 	}
+	if strings.TrimSpace(payload.URL) == redactNATSConfigURLs(current.URL) {
+		// An unchanged public URL is a redacted view of the stored setting.
+		// Preserve legacy per-server credentials when editing other fields.
+		payload.URL = current.URL
+	}
 	payload = queue.NormalizeConfig(payload)
 	raw, err := s.sealSystemSetting(payload)
 	if err != nil {
@@ -66,12 +72,17 @@ func (s *Server) updateNATSConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.queue != nil {
-		_ = s.queue.Reconfigure(payload)
+		err = s.queue.Reconfigure(payload)
 	}
 	s.writeAppLog(r.Context(), "admin_operation", "info", "update_nats_config", "nats.config", currentClaims(r).Subject, r, http.StatusOK, 0, map[string]any{
 		"enabled": payload.Enabled,
 		"tasks":   len(payload.Tasks),
 	})
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "nats_connection_failed",
+			"NATS configuration was saved, but its connection could not be established", 0, map[string]bool{"saved": true})
+		return
+	}
 	writeJSON(w, http.StatusOK, redactNATSConfig(payload, s.natsStatus()))
 }
 
@@ -85,7 +96,7 @@ func (s *Server) natsStatus() queue.Status {
 func redactNATSConfig(cfg config.NATSConfig, status queue.Status) natsConfigResponse {
 	return natsConfigResponse{
 		Enabled:       cfg.Enabled,
-		URL:           cfg.URL,
+		URL:           redactNATSConfigURLs(cfg.URL),
 		Username:      cfg.Username,
 		HasPassword:   strings.TrimSpace(cfg.Password) != "",
 		HasToken:      strings.TrimSpace(cfg.Token) != "",
@@ -93,4 +104,21 @@ func redactNATSConfig(cfg config.NATSConfig, status queue.Status) natsConfigResp
 		Tasks:         cfg.Tasks,
 		Status:        status,
 	}
+}
+
+func redactNATSConfigURLs(raw string) string {
+	servers := strings.Split(raw, ",")
+	for index, server := range servers {
+		parsed, err := url.Parse(strings.TrimSpace(server))
+		if err != nil || parsed.Host == "" {
+			servers[index] = "<invalid>"
+			continue
+		}
+		parsed.User = nil
+		// NATS server URLs have no public path/query/fragment metadata; avoid
+		// echoing accidentally embedded credentials in those components too.
+		parsed.Path, parsed.RawPath, parsed.RawQuery, parsed.Fragment = "", "", "", ""
+		servers[index] = parsed.String()
+	}
+	return strings.Join(servers, ",")
 }

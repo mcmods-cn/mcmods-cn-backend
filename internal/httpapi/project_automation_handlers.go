@@ -192,9 +192,17 @@ func (s *Server) writeProjectAutomation(w http.ResponseWriter, r *http.Request, 
 		writeError(w, 500, "初始化自动更新配置失败")
 		return
 	}
-	sources := s.querySimpleRows(r, `select source_type,external_project_id,external_project_url,verified_at from project_external_sources where project_route_id=$1 order by source_type`, target.RouteID)
-	settings := s.querySimpleRows(r, `select update_kind,coalesce(source_type,''),interval_code,enabled,next_run_at,last_run_at,last_status,last_error_code,last_error,
+	sources, err := s.querySimpleRows(r, `select source_type,external_project_id,external_project_url,verified_at from project_external_sources where project_route_id=$1 order by source_type`, target.RouteID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取自动更新数据失败")
+		return
+	}
+	settings, err := s.querySimpleRows(r, `select update_kind,coalesce(source_type,''),interval_code,enabled,next_run_at,last_run_at,last_status,last_error_code,last_error,
 		license_override,license_override_reason,license_override_source,updated_at from project_auto_update_settings where project_route_id=$1 order by update_kind`, target.RouteID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取自动更新数据失败")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"project": map[string]any{"id": target.PublicID, "type": target.ProjectType, "url": target.CanonicalURL}, "sources": sources, "settings": settings})
 }
 
@@ -329,9 +337,13 @@ func (s *Server) projectAutomationRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 403, "无权查看自动更新记录")
 		return
 	}
-	items := s.querySimpleRows(r, `select run.public_id,setting.update_kind,run.status,run.attempts,run.result,run.last_error_code,run.last_error,
+	items, err := s.querySimpleRows(r, `select run.public_id,setting.update_kind,run.status,run.attempts,run.result,run.last_error_code,run.last_error,
 		run.created_at,run.started_at,run.finished_at from project_auto_update_runs run join project_auto_update_settings setting on setting.id=run.setting_id
 		where setting.project_route_id=$1 order by run.created_at desc,run.id desc limit 100`, target.RouteID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取自动更新数据失败")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }
 
@@ -342,17 +354,25 @@ func (s *Server) adminProjectAutomationOverview(w http.ResponseWriter, r *http.R
 		return
 	}
 	limit := boundedLimit(r.URL.Query().Get("limit"), 100, 200)
-	items := s.querySimpleRows(r, `select run.public_id,route.entity_type as project_type,route.public_id as project_id,route.canonical_path,
+	items, err := s.querySimpleRows(r, `select run.public_id,route.entity_type as project_type,route.public_id as project_id,route.canonical_path,
 		setting.update_kind,setting.source_type,run.status,run.attempts,run.result,run.last_error_code,run.last_error,
 		run.created_at,run.started_at,run.finished_at
 		from project_auto_update_runs run
 		join project_auto_update_settings setting on setting.id=run.setting_id
 		join public_routes route on route.id=setting.project_route_id
 		where ($1='' or run.status=$1) order by run.created_at desc,run.id desc limit $2`, status, limit)
-	settings := s.querySimpleRows(r, `select route.entity_type as project_type,route.public_id as project_id,route.canonical_path,
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取自动更新数据失败")
+		return
+	}
+	settings, err := s.querySimpleRows(r, `select route.entity_type as project_type,route.public_id as project_id,route.canonical_path,
 		setting.update_kind,setting.source_type,setting.interval_code,setting.enabled,setting.next_run_at,setting.last_run_at,
 		setting.last_status,setting.last_error_code,setting.last_error,setting.updated_at
 		from project_auto_update_settings setting join public_routes route on route.id=setting.project_route_id
 		order by setting.updated_at desc,setting.id desc limit 200`)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取自动更新数据失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": items, "settings": settings})
 }

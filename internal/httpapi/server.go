@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,22 +22,24 @@ import (
 )
 
 type Server struct {
-	cfg            config.Config
-	db             *pgxpool.Pool
-	mailer         mailer.Mailer
-	queue          *queue.Client
-	cache          *querycache.Cache
-	activity       *activity.Monitor
-	antiAbuse      *antiabuse.Service
-	search         *searchindex.Client
-	mux            *http.ServeMux
-	ygg            *yggdrasilService
-	yggMu          sync.RWMutex
-	trustedProxies []*net.IPNet
-	realtime       *realtimeHub
-	liveRequests   atomic.Uint64
-	readyRequests  atomic.Uint64
-	databasePings  atomic.Uint64
+	cfg                    config.Config
+	db                     *pgxpool.Pool
+	mailer                 mailer.Mailer
+	queue                  *queue.Client
+	cache                  *querycache.Cache
+	activity               *activity.Monitor
+	antiAbuse              *antiabuse.Service
+	search                 *searchindex.Client
+	mux                    *http.ServeMux
+	ygg                    *yggdrasilService
+	yggMu                  sync.RWMutex
+	trustedProxies         []*net.IPNet
+	realtime               *realtimeHub
+	modExportFallbackOnce  sync.Once
+	modExportFallbackSlots chan struct{}
+	liveRequests           atomic.Uint64
+	readyRequests          atomic.Uint64
+	databasePings          atomic.Uint64
 }
 
 const corsAllowedHeaders = "Authorization, Content-Type, Idempotency-Key, X-Request-ID, X-Client-ID, X-Anti-Abuse-Form, X-Anti-Abuse-Trap, X-Anti-Abuse-Challenge, X-MCMods-Bot-Token"
@@ -560,6 +563,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/admin/ai/tasks", s.requirePermission("ai.read", s.adminAITasks))
 	s.mux.HandleFunc("GET /api/v1/admin/ai/tasks/{id}", s.requirePermission("ai.read", s.adminAITask))
 	s.mux.HandleFunc("POST /api/v1/admin/ai/tasks", s.requirePermission("ai.task.enqueue", s.createAITask))
+	s.mux.HandleFunc("POST /api/v1/admin/ai/tasks/{id}/retry", s.requirePermission("ai.task.enqueue", s.retryAITask))
+	s.mux.HandleFunc("POST /api/v1/admin/ai/tasks/{id}/cancel", s.requirePermission("ai.write", s.cancelAITask))
 	s.mux.HandleFunc("GET /api/v1/admin/ai/stats", s.requirePermission("ai.read", s.adminAIStats))
 	s.mux.HandleFunc("POST /api/v1/admin/notifications", s.requirePermission("notification.system.publish", s.publishSystemNotification))
 	s.mux.HandleFunc("DELETE /api/v1/admin/notifications/{id}", s.requirePermission("notification.system.publish", s.deleteSystemNotification))
@@ -646,7 +651,7 @@ func (s *Server) cookieRequestOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-			if _, err := r.Cookie(authSessionCookieName); err == nil && r.Header.Get("Authorization") == "" {
+			if _, err := r.Cookie(authSessionCookieName); err == nil && strings.TrimSpace(r.Header.Get("Authorization")) == "" {
 				origin := r.Header.Get("Origin")
 				if origin != s.cfg.FrontendOrigin {
 					writeError(w, http.StatusForbidden, "request origin is not allowed")

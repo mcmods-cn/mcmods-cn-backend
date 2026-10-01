@@ -700,7 +700,7 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": snapshot.Name, "reason": request.Note}, map[string]any{
 			"skinId": aggregateKey, "targetLabel": snapshot.Name, "url": "/skins/" + aggregateKey,
 		})
-		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionID, "status": request.Status})
+		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status})
 		return
 	}
 	if aggregateType != "catalog_resource" {

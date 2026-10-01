@@ -34,6 +34,7 @@ func (s *Server) catalogResourceAsset(w http.ResponseWriter, r *http.Request) {
 		from catalog_entities entity
 		join mod_resource_version_details detail on detail.resource_id=entity.id and detail.status='active'
 		join mod_content_versions version on version.id=detail.version_id and version.status='active'
+		join mods source_mod on source_mod.id=version.mod_id and source_mod.review_status='approved'
 		join oss_files file on file.id=`+versionColumn+` and file.status='active'
 		  and file.scan_status in ('clean','trusted_generated')
 		where entity.public_id=$1 and entity.entity_type='resource' and entity.status='active'
@@ -45,6 +46,7 @@ func (s *Server) catalogResourceAsset(w http.ResponseWriter, r *http.Request) {
 			from catalog_entities entity
 			join mod_resource_version_details detail on detail.resource_id=entity.id and detail.status='active'
 			join mod_content_versions version on version.id=detail.version_id and version.status='active'
+		join mods source_mod on source_mod.id=version.mod_id and source_mod.review_status='approved'
 			join oss_files file on file.id=detail.icon_file_id and file.status='active'
 			  and file.scan_status in ('clean','trusted_generated')
 			where entity.public_id=$1 and entity.entity_type='resource' and entity.status='active'
@@ -113,6 +115,8 @@ func (s *Server) catalogRecipeTemplateBackground(w http.ResponseWriter, r *http.
 			from catalog_entities entity join recipe_layout_templates template on template.entity_id=entity.id
 			join catalog_entities type_entity on type_entity.id=template.recipe_type_id
 			join recipe_template_import_snapshots snapshot on snapshot.id=template.import_snapshot_id
+			join catalog_import_revisions revision on revision.id=snapshot.revision_id and revision.status in ('ready','partial')
+			join mods source_mod on source_mod.id=revision.mod_id and source_mod.review_status='approved'
 			where entity.public_id=$1 and entity.entity_type='recipe_template' and entity.status='active'
 			  and entity.archived_at is null and type_entity.status='active' and type_entity.archived_at is null
 			  and template.background_file_id is null`, publicID).

@@ -44,7 +44,11 @@ type updateSitePageRequest struct {
 }
 
 func (s *Server) adminAboutPage(w http.ResponseWriter, r *http.Request) {
-	locale := normalizedSiteAffairsLocale(r.PathValue("locale"))
+	locale := normalizeContentLocale(r.PathValue("locale"))
+	if !isEditableContentLocale(locale) {
+		writeError(w, http.StatusBadRequest, "不支持的页面语言")
+		return
+	}
 	if r.Method == http.MethodGet {
 		var title, body, pageStatus, translationStatus string
 		var revision int64
@@ -59,7 +63,7 @@ func (s *Server) adminAboutPage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "读取站务页面失败")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"locale": locale, "title": title, "bodyMarkdown": body, "status": pageStatus, "translationStatus": translationStatus, "revision": revision})
+		writeJSON(w, http.StatusOK, map[string]any{"locale": locale, "title": title, "bodyMarkdown": body, "status": translationStatus, "pageStatus": pageStatus, "translationStatus": translationStatus, "revision": revision})
 		return
 	}
 	var request updateSitePageRequest
@@ -85,10 +89,15 @@ func (s *Server) adminAboutPage(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var pageID int64
 	err = tx.QueryRow(r.Context(), `insert into site_pages(code,status,updated_by) values('about',$1,$2)
-		on conflict(code) do update set status=excluded.status,updated_by=excluded.updated_by,updated_at=now(),published_revision=site_pages.published_revision+case when excluded.status='published' then 1 else 0 end returning id`, status, currentClaims(r).Subject).Scan(&pageID)
+		on conflict(code) do update set updated_by=excluded.updated_by,updated_at=now() returning id`, status, currentClaims(r).Subject).Scan(&pageID)
 	if err == nil {
 		_, err = tx.Exec(r.Context(), `insert into site_page_translations(page_id,locale,title,body_markdown,status,updated_by)
 			values($1,$2,$3,$4,$5,$6) on conflict(page_id,locale) do update set title=excluded.title,body_markdown=excluded.body_markdown,status=excluded.status,revision=site_page_translations.revision+1,updated_by=excluded.updated_by,updated_at=now()`, pageID, locale, request.Title, request.BodyMarkdown, status, currentClaims(r).Subject)
+	}
+	if err == nil {
+		_, err = tx.Exec(r.Context(), `update site_pages set
+			status=case when exists(select 1 from site_page_translations where page_id=$1 and status='published') then 'published' else 'draft' end,
+			published_revision=published_revision+case when $2 then 1 else 0 end where id=$1`, pageID, request.Publish)
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())
@@ -125,6 +134,10 @@ func (s *Server) publicSiteChangelogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		items = append(items, map[string]any{"id": id, "changeDate": changeDate, "locale": resolvedLocale, "title": title, "bodyMarkdown": body})
+	}
+	if rows.Err() != nil {
+		writeError(w, http.StatusInternalServerError, "读取站点更新记录失败")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "limit": limit, "offset": offset})
 }
@@ -169,10 +182,10 @@ func (s *Server) adminSiteChangelogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	date, err := time.Parse("2006-01-02", request.ChangeDate)
-	request.Locale = normalizedSiteAffairsLocale(request.Locale)
+	request.Locale = normalizeContentLocale(request.Locale)
 	request.Title = strings.TrimSpace(request.Title)
 	request.BodyMarkdown = strings.TrimSpace(request.BodyMarkdown)
-	if err != nil || request.Title == "" || request.BodyMarkdown == "" || len(request.BodyMarkdown) > 200000 {
+	if err != nil || !isEditableContentLocale(request.Locale) || request.Title == "" || request.BodyMarkdown == "" || len(request.BodyMarkdown) > 200000 {
 		writeError(w, 400, "日期、标题或正文不正确")
 		return
 	}
@@ -224,6 +237,10 @@ func (s *Server) adminSiteChangelogList(w http.ResponseWriter, r *http.Request) 
 		}
 		items = append(items, map[string]any{"id": id, "changeDate": date, "status": status, "translations": json.RawMessage(translations), "updatedAt": updated})
 	}
+	if rows.Err() != nil {
+		writeError(w, http.StatusInternalServerError, "读取更新记录失败")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }
 
@@ -253,10 +270,10 @@ func (s *Server) adminSiteChangelogDetail(w http.ResponseWriter, r *http.Request
 		return
 	}
 	date, err := time.Parse("2006-01-02", request.ChangeDate)
-	request.Locale = normalizedSiteAffairsLocale(request.Locale)
+	request.Locale = normalizeContentLocale(request.Locale)
 	request.Title = strings.TrimSpace(request.Title)
 	request.BodyMarkdown = strings.TrimSpace(request.BodyMarkdown)
-	if err != nil || request.Title == "" || request.BodyMarkdown == "" || len(request.BodyMarkdown) > 200000 {
+	if err != nil || !isEditableContentLocale(request.Locale) || request.Title == "" || request.BodyMarkdown == "" || len(request.BodyMarkdown) > 200000 {
 		writeError(w, http.StatusBadRequest, "日期、标题或正文不正确")
 		return
 	}

@@ -216,11 +216,17 @@ func (s *Server) completeBlueprintUpload(ctx context.Context, fileID, ownerID in
 	if err = tx.QueryRow(ctx, `insert into blueprint_jobs(blueprint_id,operation,created_by) values($1,'normalize',$2) returning id,public_id`, blueprintID, ownerID).Scan(&jobID, &jobPublicID); err != nil {
 		return nil, err
 	}
+	message := blueprintJobMessage{JobID: jobID}
+	if s.cfg.NATS.OutboxEnabled {
+		if _, err = queue.EnqueueTx(ctx, tx, "blueprint_convert", "blueprint.conversion.requested", "blueprint_job", jobPublicID, "", message); err != nil {
+			return nil, err
+		}
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	if s.queue != nil {
-		_ = s.queue.PublishTask(ctx, "blueprint_convert", blueprintJobMessage{JobID: jobID})
+	if !s.cfg.NATS.OutboxEnabled && s.queue != nil {
+		_ = s.queue.PublishTask(ctx, "blueprint_convert", message)
 	}
 	return map[string]any{"id": publicID, "status": "queued", "jobId": jobPublicID}, nil
 }
@@ -769,22 +775,7 @@ func applyBlueprintContentSnapshotTx(ctx context.Context, tx pgx.Tx, blueprintID
 		where subject_id=$1 and subject_type='blueprint'`, blueprintID, snapshot.DefaultLocale); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `delete from content_localizations where subject_id=$1 and subject_type='blueprint'`, blueprintID); err != nil {
-		return err
-	}
-	for _, localization := range snapshot.Localizations {
-		if _, err = tx.Exec(ctx, `insert into content_localizations(
-			subject_type,subject_id,locale,name,summary,content_markdown,provenance,editable,review_status,published_revision_id,updated_by)
-			values('blueprint',$1,$2,$3,$4,$5,'human',true,'approved',$6,$7)
-			on conflict(subject_type,subject_id,locale) do update set name=excluded.name,summary=excluded.summary,
-			content_markdown=excluded.content_markdown,provenance=case when content_localizations.provenance='ai' then 'human_corrected' else 'human' end,
-			editable=true,review_status='approved',published_revision_id=excluded.published_revision_id,
-			revision_no=content_localizations.revision_no+1,updated_by=excluded.updated_by,updated_at=now()`,
-			blueprintID, localization.Locale, localization.Name, localization.Summary, localization.ContentMarkdown, revisionID, actorID); err != nil {
-			return err
-		}
-	}
-	return nil
+	return publishCatalogLocalizationsTx(ctx, tx, blueprintID, snapshot.PublicID, "blueprint", snapshot.Localizations, revisionID, actorID)
 }
 
 func (s *Server) convertBlueprint(w http.ResponseWriter, r *http.Request) {
@@ -842,6 +833,9 @@ func (s *Server) retryBlueprint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"jobId": jobID, "status": "queued"})
 }
 
+const blueprintVariantDownloadSQL = `select v.object_key,b.owner_id from blueprint_variants v join blueprints b on b.id=v.blueprint_id
+		where b.public_id=$1 and b.status<>'deleted' and v.public_id=$2 and v.status='ready' and (b.review_status in ('not_required','approved') or b.owner_id=$3 or $4)`
+
 func (s *Server) downloadBlueprintVariant(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("publicId")))
 	variantID := strings.ToLower(strings.TrimSpace(r.PathValue("variantId")))
@@ -852,8 +846,7 @@ func (s *Server) downloadBlueprintVariant(w http.ResponseWriter, r *http.Request
 	var objectKey string
 	var ownerID int64
 	claims := currentClaims(r)
-	err := s.db.QueryRow(r.Context(), `select v.object_key,b.owner_id from blueprint_variants v join blueprints b on b.id=v.blueprint_id
-		where b.public_id=$1 and v.public_id=$2 and v.status='ready' and (b.review_status in ('not_required','approved') or b.owner_id=$3 or $4)`,
+	err := s.db.QueryRow(r.Context(), blueprintVariantDownloadSQL,
 		publicID, variantID, claims.Subject, claimsAllow(claims, "admin.*")).Scan(&objectKey, &ownerID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "蓝图格式文件不存在")
