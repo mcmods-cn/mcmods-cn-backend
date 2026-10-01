@@ -1,0 +1,64 @@
+name: Backend checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go mod download
+      - run: python3 scripts/test-audit-ledger.py -v
+      - run: python3 scripts/test-service-ownership.py -v
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - run: go build ./...
+      - name: Check reachable dependency vulnerabilities
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          govulncheck ./...
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install isolated service binaries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql redis-server
+          go install github.com/nats-io/nats-server/v2@v2.12.4
+          curl --fail --location --proto '=https' --tlsv1.2 https://dl.typesense.org/releases/30.2/typesense-server-30.2-linux-amd64.tar.gz --output "$RUNNER_TEMP/typesense.tar.gz"
+          echo 'cd791605e7c6cc7be457794f534cd4b9f9d361781adb10e40020efc22840ebc3'"  $RUNNER_TEMP/typesense.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/typesense"
+          tar -xzf "$RUNNER_TEMP/typesense.tar.gz" -C "$RUNNER_TEMP/typesense"
+      - name: Run PostgreSQL, Redis and JetStream integration
+        env:
+          REDIS_SERVER: /usr/bin/redis-server
+        shell: bash
+        run: |
+          export PG_BIN="$(pg_config --bindir)"
+          "$PG_BIN/postgres" --version
+          export NATS_SERVER="$(go env GOPATH)/bin/nats-server"
+          export TYPESENSE_SERVER="$RUNNER_TEMP/typesense/typesense-server"
+          export TMPDIR="$RUNNER_TEMP"
+          bash scripts/test-services.sh start | tee "$RUNNER_TEMP/audit-service-start.log"
+          state=$(sed -n 's@^Created disposable test services; environment: \(.*\)/env.sh$@\1@p' "$RUNNER_TEMP/audit-service-start.log")
+          test -n "$state"
+          trap 'bash scripts/test-services.sh stop "$state"' EXIT
+          export MCMODS_TEST_STATE="$state"
+          source "$state/env.sh"
+          go run ./cmd/test-setup
+          go test -p 1 -race -count=1 ./...
+        # test-services uses TMPDIR; this job creates its own unique directory.
