@@ -9,3 +9,5 @@
 当前修改没有 schema/migration。可先后独立部署后端补丁，前端合法任务配置请求保持兼容。回归命令：`go test ./internal/httpapi -run TestSaveTaskMissingRewardsReturnsBadRequestCore -count=1`；两种非法输入使用真实 handler 确认 HTTP 400，数据库迭代失败边界另在审查与集成证据中注明范围。
 
 `GET /api/v1/admin/tasks`（`task.read`）与 `GET /api/v1/admin/activity`（`activity.read`）在完整读完并检查迭代错误后才返回成功列表；数据库执行流失败返回 HTTP 500，不伪报空列表或返回内部 SQL 错误。`TestProgressionListsRejectPostgreSQLStreamFailureCoreIntegration` 在每个 ownership marker 核验的专用 PostgreSQL 数据库中先验证正常列表有数据，再保留原表/约束/触发器、用 VOLATILE 故障视图验证真实流执行失败；整库按标记清理，没有修改共享或生产数据。正常响应结构与既有权限保持兼容。
+
+`TestLevelConfigurationExperienceStreamFailureRollsBackCoreIntegration` 在专用真实 PostgreSQL 中先证实查询已创建、迭代才产生故障，再执行配置更新：HTTP 500 后角色线路、阈值、更新者、更新时间，以及用户经验/等级/时间、角色绑定与 permission_version 全部保持原值。恢复保留的经验原表后，同一请求成功写入配置并重算等级/角色。此用例验证现行完整事务边界，没有把原本已有 Commit 错误防线描述为过去必然丢失数据。命令：`go test -race ./internal/httpapi -run '^TestLevelConfigurationExperienceStreamFailureRollsBackCoreIntegration$' -count=1 -v`；需要项目约定的隔离测试环境，不能对生产数据库运行。
