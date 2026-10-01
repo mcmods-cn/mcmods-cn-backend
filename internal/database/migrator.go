@@ -7,11 +7,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 167
+const schemaGeneration = 168
 
-// Migrate installs one coherent development schema. Generation 167 is the
+// Migrate installs one coherent development schema. Generation 168 is the
 // current pre-production baseline. Older development databases are
 // intentionally reset instead of upgraded or backfilled.
+// Generation 168 indexes the bounded expiry queue for shared site logo assets.
 // Generation 167 registers catalog-import derived objects before provider
 // upload and gives failure, stale-run recovery, and retry a durable
 // compensation lineage.

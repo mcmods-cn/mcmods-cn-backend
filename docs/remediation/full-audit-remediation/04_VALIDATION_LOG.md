@@ -1,5 +1,36 @@
 # 验证日志
 
+## 2026-10-01 19:13：最终源码冻结、完整实测与交付前独立核对（D365）
+
+证据目录`D:\System\Flies\Mcmods-cn\.codex-tmp\remediation-remaining18-20260930`，最终脚本`run-remaining18-final-db.ps1 -RunPrefix remaining18-final-reverified`；report19:13:05.8942331+08:00，exit0。所有原失败仍保留，以下只列当前最终实测，不替代下方逐阶段历史命令。
+
+| 实际门 | exit | 秒/额外实测 |
+| --- | --- | --- |
+| owned空库`go run ./cmd/db-reset` | 0 | 7.639；完整168，287表/1130索引/0invalid |
+| `go test ./... -count=1 -coverprofile=...` | 0 | 155.359 |
+| `go tool cover -func=...` | 0 | 1.963；30.3%≥原27.0% |
+| `go test -race ./... -count=1` | 0 | 161.175 |
+| `go vet ./...` | 0 | 4.696 |
+| `go build ./...` | 0 | 3.617 |
+| `go mod tidy -diff` | 0 | 0.476，无改动 |
+| `govulncheck ./...` | 0 | 5.372；可达/已导入0，4未调用模块公告 |
+| `go test -race ./tools/remediation/verify_findings -count=2 -v` | 0 | 8.547；真实CLI正例及14失败反例保持 |
+| `go run ./tools/remediation/verify_findings` | 0 | 0.669；449 CLOSED，原/复核分别验证 |
+| 五个编译外部条件名称真实运行 | 0 | 148.248；5顶层PASS/0skip，原版真实完整导入138.21s、重建1m53.272s；6实际ZIP/live4 loader与Mojang/真实Modrinth |
+| `go run ./tools/testing/db_suite -batch-size=20` | 0 | 3195.440；1604编译Test/Fuzz发现=调用=顶层PASS，92批0失败/0skip |
+| `go test -race -p=1 -parallel=1 ./internal/queue -count=2 -v` | 0 | 47.955；30名称、60顶层PASS/0skip，实际PG与官方file-backed JetStream |
+| 后端`actionlint -shellcheck= -no-color` | 0 | 0.142，全部workflow |
+
+最终report源/模块/CI1070文件SHA保持，完整168 Schema与6原ZIPSHA保持；拥有`test_remediation_remaining18_final_1790849440987`创建为空、清理exit0。普通全仓条件SKIP不作为DB证据；最终显式套件和五条件均0skip。原600秒包报警、所有叶context、rows/blocks/请求预算都没有提高。
+
+配对`remaining18-final-reverified-paired-frontend-results.json`于18:12:19.6310864+08:00完成，6门均0：npm test5.720s/283 PASS0skip，type3.383s，lint30.231s/0warning，build15.429s/58页，test:browser38.180s/12实际React流程PASS0skip，npm audit --json3.862s/全部584依赖0漏洞；Node24.19.0/npm12.0.2/Chromium151.0.7922.34 rev1234，596源文件哈希保持。浏览器API测试服务与后端真实PG证据分列，不冒充实网全栈。
+
+交付前`verify-final-integrity.ps1`实际exit0，`final-delivery-integrity.json`于19:13:57.1283881+08:00：1070/596冻结文件一致、1064 Go/14格式批零未格式化、双仓diff-check/前端全部workflow actionlint PASS，17原审计逐文件与原ZIPSHA8F1E45681736BB1FA0977C0E4CEC0D87C3AD74D9BF42EB16D9C5807AB1A49500一致，默认严格又PASS、owned最终库残留0。初次控制台对OrderedDictionary使用Select-Object显示null，仅显示方式；实际写出的JSON包含上述真实字段，检查没有跳过。控制台转换已更正，未改检查逻辑或后台/前端源码。
+
+复审十九领域、原449项闭环和最终A见07。原统计0/176/214/59/0与复核148/236/65分别保留，449 CLOSED/0 NA及全部非终态0；本批18项及D363/D364无有效遗留。共享public155、17原证据与历史交付不重置/覆盖，不执行未知远端、真实云服务或远程GitHub job。
+
+## 以下为按时间保留的阶段日志，包括实际失败，不是当前未完成状态
+
 ## 2026-08-21：工作区与审计基线
 
 | 检查 | 结果 |
@@ -4807,3 +4838,327 @@ loader配置、同步状态、服务端校验与前端选择现在共享一个�
 | 数据库隔离与协议 | 本机PG只读`schema_metadata`及`pg_database`；`database-isolation.log` | 打包前 | 0 | 共享public仍155，残留测试DB0；权威167保持且无DDL/reset。只新增只读健康字段，PG503不弱化，可靠任务Outbox协议和可丢广播不变 |
 
 GitHub交付使用普通push现有分支，最终本地/远程SHA与干净工作树见新包`github-delivery.json`；不强推、不变更默认分支、不创建PR、不部署。前端无新改动，无空提交。源码/进度包交付不是449项Goal完成。
+
+## 2026-10-01：恢复剩余18项；TEST-027真实Schema/HTTP门（最终验收进行中）
+
+原始日志独立保存于本机`D:\System\Flies\Mcmods-cn\.codex-tmp\remediation-remaining18-20260930\`，不覆盖此前交付包。Goal ACTIVE，TEST-027仍未CLOSED，后续全仓closing门尚在运行；下列各项只报告实际完成结果。
+
+| 验证项 | 命令 / 证据 | 墙钟 / 包时间 | 退出码 | 结果 |
+| --- | --- | ---: | ---: | --- |
+| Schema有效RED | `schema-red.log`，三个旧154代次集成用例在实际167临时Schema运行 | 包28.000s | 1（预期） | 真实行为断言前被陈旧代次拦截；仅改用权威schemaGeneration，保留全部关系/索引/约束断言 |
+| Schema组合GREEN | `test027-schema.log`：完整空临时Schema、FK leading/partial、重复索引、项目文件/Presence关系、UTC两池和配置权威、Outbox CHECK | 墙钟65.999s | 0 | PASS：真实DDL及约束/计划执行；100k/1M/10M刷新8.7563/14.2231/6.6284ms |
+| HTTP配置和相邻Race | TEST027实际HTTP/鉴权、加密/clear、无JS/SUB拒绝/不可达、持久化拒绝/候选删除、并发保存；OPS007和相关queue/HTTP `-race -count=2` | 墙钟56.528s；最后HTTP Race41.067s | 0 / 0 | PASS：旧运行态和已存密文不变；真实官方broker候选Stream须明确ErrStreamNotFound；成功/失败后事件均一次，无DATA RACE |
+| 初轮共享库误配 | `test027-backend-results.json`；共享155上的旧Migrate用例及缺集成开关 | 墙钟108.390s | 1 | FAIL，保留：不reset共享库，不删除开关规避；后续使用新建空167随机DB |
+| 隔离全仓第一轮 | `test027-isolated-results.json`；完整受保护空库初始化及全仓开启集成串行 | 初始化8.583s；Test884.785s | 初始化0 / Test1 | FAIL，保留：贴图旧夹具误绑public索引42P07；HTTP包累计10m alarm。其他包及queue真实JS已通过，不冒充完整全绿 |
+| 贴图夹具修正 | `test027-sticker-namespace.log`，实际公共列只读检查+本会话临时trigger/引用/历史/索引/锁 | 包0.864s；用例0.35s | 0 | PASS：20公共来源列检查保留；增改删/历史保留、索引及真实55P03全通过 |
+| 已完成静态/构建门 | 最后`test027-final-vet/build/tidy` | 4.311 / 3.578 / 0.446s | 0 / 0 / 0 | PASS，模块无漂移；不能代替尚未完成的完整closing Test |
+| 前端完整门 | `test027-frontend-results.json`；已有pnpm调用test/typecheck/lint/build，HTTPS example.test配置 | 5.674 / 3.975 / 27.036 / 32.882s | 全部0 | PASS：277/277，58页，前端源码/权威锁均无改动；无npm.cmd的首次启动失败另记，不声称已做依赖扫描 |
+
+后续`test027-closing-*`使用新的随机空DB并完整重跑最后源码；整包总预算30m只容纳串行规模夹具，不修改单用例/生产预算。最终退出码与清理结果尚待记录。
+
+### 2026-10-01后续实际结果（旧失败保持，新的批次门待完成）
+
+| 验证项 | 实际证据 | 时间 | 退出码 | 结果 |
+| --- | --- | ---: | ---: | --- |
+| 完整closing集成失败 | test027-closing-results.json / test027-closing-test.log；全量集成变量开启 | 初始化5.077s；Test2073.731s | 0 / 1 | FAIL：三处旧夹具、皮肤准备超时、整包30m alarm；各包有真实成功但不能冒充全绿；精确随机DB清理0 |
+| closing相邻Race/静态门 | closing-race/vet/build/tidy | 154.156 / 5.443 / 3.777 / 1.365s | 全部0 | PASS实际匹配的FK/贴图/TEST027/OPS007等；部分Schema正则名字陈旧未命中，不声称全部匹配，下一轮使用正确名字 |
+| 日期和作用域/缓存夹具 | draft-clock-fixture.log；test027-adjacent-fixtures.log | 包3.364 / 10.623s | 0 / 0 | PASS：活跃/过期/完成/跨用户草稿断言、导入JSON形状和审核拒绝事务事实保留 |
+| 百万皮肤准备与真实计划 | skin-bulk-fixture.log | 包14.031s；准备+计划12.308s | 0 | PASS：实际100万行、同十索引，published1.6492ms/views312.7648ms/filter1.6515ms/search508.3968ms；原2秒计划预算及游标断言保持 |
+| TEST048真实后端权威矩阵 | test048-first.log；扩展后的test048-expanded-race.log | 首轮包9.358s；最后Race两次16.108s | 0 / 0 | PASS：实际HTTP+PG167、并发/故障/撤销/保留来源/清理重开；无DATA RACE；无生产代码变更 |
+| TEST048实际生产React浏览器 | test048-browser-complete.log；Node:test+实际Chrome | 11.795s | 0 | PASS：3/3，无skip；API是明确mock，非直连PG E2E；初次错误label造成2取消63.279s另留first日志，不冒充生产RED |
+| 批次工具及CI合同定向门 | TestDiscovery/TestBatches/TestDatabaseBatches/TestBackendCIDeliveryContract | 包1.215 / 1.799s | 0 / 0 | PASS：名称无遗漏/重复、预算、安全目标拒绝和CI初始化合同；GitHub工作流尚未实际运行 |
+
+下一轮phase1日志另存，普通全仓及显式全部数据库批次、真实活动负载、Race、静态门和前端npm权威门均须实际执行，不能用上表代替最终阶段验收。Goal继续ACTIVE。
+
+### 2026-10-01 phase1已完成部分及依赖回归（数据库批次仍运行）
+
+| 门 | 原始日志 / 命令 | 实际时间 | 退出码 | 结果 |
+| --- | --- | ---: | ---: | --- |
+| 新空库与普通后端 | phase1-initialize/test/coverage | 5.185 / 105.512 / 2.405s | 全部0 | PASS：独立test_remediation_phase1随机库完整Schema/种子；普通go test ./... -count=1 -coverprofile，真实总覆盖28.7%（27.0门未降低） |
+| 普通全仓Race/静态门 | phase1-race/vet/build/tidy | 92.995 / 4.150 / 4.045 / 0.478s | 全部0 | PASS：真实GCC/CGO Race，无DATA RACE；不是显式全量DB批次的替代 |
+| govulncheck | phase1-govulncheck.log，v1.7.0 ./... | 实际执行 | 0 | 调用符号0、导入包0、要求模块有4不可达公告；不把模块层也写成0 |
+| 两仓CI静态 | phase1-backend/frontend-actionlint.log，v1.7.12 | 实际执行 | 0 / 0 | PASS：显式-shellcheck=''只校验Actions语法/语义，无shellcheck或GitHub实际运行成功声明 |
+| 升级前前端门 | phase1-frontend-results.json | Test7.820/Type5.211/Lint29.352/Build32.279/Browser11.682/Audit5.924s | 前五0 / Audit1 | 277测试与3浏览器通过；扫描6漏洞为有效失败，不能计阶段全绿 |
+| 定向安全安装与扫描 | phase1-security-install/audit/ci.log | install36s；ci54s | 全部0 | npm12.0.2权威锁：改变16包/加1删1；npm ci安装503包；首次补丁后audit全部等级0 |
+| 最终补丁完整前端门 | phase1-security-final-frontend-results.json | Test5.300/Type11.751/Lint25.707/Build30.961/Browser11.537/Audit3.514s | 全部0 | PASS：277/277、浏览器3/3均无skip；58页Next16.3.8生产构建；全依赖0漏洞；Lint0 error/1旧导航warning |
+
+TEST027/048继续pending，TEST023进入受控React行为补测。显式全部DB批次/相关真实DB Race及源码冻结/精确库清理结果尚待结束，不能先写PASS。
+
+### 2026-10-01 TEST023真实React行为与最终前端组合门
+
+- `test023-browser-first.log`保留Node24仅剥离TypeScript不能执行parameter property的启动失败；改成显式字段赋值。`test023-browser-strip.log`保留2通过/2失败，失败由按钮accessible name包含头像首字母而定位不匹配造成，并非生产会话隔离RED；改为匹配完整Partner名字。
+- `test023-browser-labels.log`实际生产Next16.3.8/Chrome，4/4通过、0跳过，11.235s：A→B同步清正文/草稿、实际abort及不合作迟到A响应不提交；同ID事件去重、当前/其他会话精准请求计数；首次翻译前AI余额恰好加载一次；error/hidden/logout清理连接与定时恢复。EventSource/API/时钟为明确替身，不称真实NATS端到端。
+- `phase1-test023-final-frontend-results.json`最终全部前端门均退出0：Test6.177s（277/277）、Type11.120s、Lint24.871s（0 error/1既有warning）、Build23.831s（58页）、Browser26.244s（治理3+实时4，7/7且0 skip）、Audit3.444s（全部等级0）。实际npm12.0.2和权威package-lock，未更换runner或降低断言。
+- TEST023后端完整HTTP/SSE组合仍待补齐；TEST027/048所需显式DB批次尚在运行。上述事实不代表18项已关闭或Goal可暂停。
+
+### 2026-10-01 phase1显式数据库全部批次结果（相关Race仍运行）
+
+- `phase1-db-batches.log`，`APP_ENV=test`、相同拥有的DATABASE_URL/MCMODS_TEST_DATABASE_URL、`MCMODS_RUN_DB_INTEGRATION=1`、`MCMODS_RUN_ACTIVITY_LOAD=1`：退出0，2384.300s；discovered=1445、invoked=1445、batches=59、failed_batches=0。包含真实活动2000事件/20生产者/4监控器与真实PG/官方NATS队列行为，不排除任何发现的Test/Fuzz seed。
+- 六项条件SKIP不是PASS：项目排除目录缺已审核夹具（须在TEST014改受控夹具）；Minecraft在线版本源、Exporter sample、latest worldgen、latest catalog import、真实Modrinth metadata仍须各自显式外部/导出夹具验收。普通门和数据库批次不能把这些范围计为已测，最终质量门仍待完整完成。
+- 此时相关完整Schema/HTTP/queue的`-race -count=2`还在运行，源码哈希冻结和精确随机库清理结果尚未返回，不提前写完整阶段PASS或关闭TEST027/048。
+- 只读核对原始审计17个文件与audit-workspace参考副本SHA-256一致，mismatches=0；allow-open实际校验449/449唯一ID、431 CLOSED/15 OPEN/1 IN_PROGRESS/2 pending通过，只代表台账完整性，严格完成门仍未通过。
+
+### 2026-10-01 phase1完整结束与逐项验收
+
+- `phase1-backend-results.json`，completedAt=2026-10-01T01:58:23.8887532+08:00：全部9门退出0；相关完整Schema/官方NATS/TEST027/048等`-race -count=2`实际488.040s，无DATA RACE；1030个源码/模块/CI文件哈希sourceUnchanged=true，owned `test_remediation_phase1_1790788014131`清理exit0。
+- 与前述普通门、govulncheck、动作语法和最终前端组合门共同验收TEST027及TEST048，各自登记范围/等级/证据并CLOSED（D342）。六项条件SKIP不计通过，最终全项目质量门仍待其必要夹具及剩余16项完成，不标Goal complete/paused。
+- 冻结结束后才加入TEST023完整SSE网络测试：真实NewServer/PG167会话/官方NATS，明确Redis为miniredis Lua测试替身；观察真实Handler返回后再核对租约容量释放，防止把Hub退订早于共享租约删除的窗口误当完成。后端验证脚本独立运行，不复写phase1日志。
+
+### 2026-10-01 TEST023后端组合完成（独立日志，不复写phase1）
+
+- `test023-backend-results.json`完成于02:01:57.5336335+08:00，六门全0：首轮真实SSE19.145s（包8.942s，local/shared两模式、Hub慢消费者均通过）、相关BUG046/051/OPS007/租约+新HTTP的Race双次52.355s、普通全仓80.999s、Vet4.550s、Build4.004s、tidy0.709s。SSE用户隔离/每实例恰好一次、鉴权/额度/释放、坏事件恢复均实际网络断言，无skip/无DATA RACE。
+- 相关Race中的HTTP包29.103s、querycache包1.086s；现有恢复用例实际启动/重启官方broker，Redis共享协议明确miniredis，不冒充真实Redis部署。新源SHA-256 D3039F1AE3EDEF16E70A8C2A10A248E676531B190AB808DD77DC71F9496C6F1A。
+- 同已通过的最终前端277单测/7浏览器（其中实时4）/Type/Lint/58页Build/audit0组合，按D343独立关闭TEST023，434 CLOSED/15 OPEN。phase1的1445旧发现数不冒充包含之后新增的两个测试；新测试已定向/普通全仓/双次Race实际执行，最终完整发现批次仍须重跑。
+
+### 2026-10-01 TEST007实际测量/反例验收
+
+- `test007-first.log`退出0，包14.892s/用例14.360s：原三表各100k、原索引/无SeqScan/ANALYZE BUFFERS文本合同完整保留；新JSON自然计划满足100/100/1输出、实际读取/循环/过滤/重查、缓冲块、root cost和目标索引执行预算。
+- 三条本会话事务禁用索引的退化计划均成功执行EXPLAIN ANALYZE，分别1819/1334/2128读/命中缓冲块，判定器明确拒绝；完整JSON正/负基线原样保存，不把数据库错误当性能反例。纯函数覆盖13类退化与3非法/空JSON，含SeqScan、wrong relation/index、读行/loop/filter/recheck/blocks放大、缺测量、过大cost和空输出。
+- `test007-backend-results.json`完成02:26:02.1052912+08:00，全五门0：显式DB开启的Race双次86.849s（无DATA RACE）、普通全仓82.982s、Vet3.502s、Build3.736s、tidy0.636s。后端测试-only变更，前端最后完整门无后续源码变化；按原Low逐项CLOSED，435 CLOSED/14未关闭。
+
+### 2026-10-01 OPS008共享Logo首轮实现（尚未验收）
+
+- `ops008-acceptance-red.log`退出1（包6.025s/用例5.32s）：新接受端点POST仍404；仅架构接受RED，不冒充真实多节点生产复现。实现后`ops008-backend-first.log`失败由测试provider配置缺PublicEndpoint触发既有旧CDN规范化，实际写端点偏离测试服务；这是夹具错误，不称生产回归。改成两个endpoint均为拥有的loopback provider并在请求前强制核对后，`ops008-provider-fixture.log`退出0（包5.525s/用例4.86s）。
+- 首轮真实NewServer/PG168/双实例与OSS测试服务证明上传、热peer品牌读取、替换Outbox故障原子回滚及重试、废弃上传TTL墓碑和物理删除；不冒充公网OSS。`ops008-frontend-route-first.log`实际原生Route Handler加真实Sharp/loopback HTTP，8/8通过、0 skip，0.569s；Node的MODULE_TYPELESS_PACKAGE_JSON提示保留，不为消提示改变全仓模块格式。
+- `ops008-schema-smoke.log`退出0：database0.522s/httpapi6.419s，仅正则普通运行加拥有随机168库的无条件OPS008用例；未开启显式DB标志，不声称所有条件Schema集成已执行。后续仍需新空库、显式Schema/行为Race和全仓门。
+- `ops008-first-frontend-results.json`Test6.905s、Type3.493s、Lint24.632s、Build15.222s、Audit3.654s均0；Browser退出1（42.823s），6/7通过，私聊首用例page.goto超过原5秒。`ops008-browser-recheck.log`再次6/7，首用例Private chats点击超过原5秒。保留两次失败，不把重试绿覆盖原失败，也不提高预算。增加失败请求诊断与可选Playwright trace，单项`ops008-browser-navigation-diagnostic.log`1/1通过、15.406s仍不能代表整门稳定。
+- OPS008继续IN_PROGRESS，435 CLOSED/14未关闭；实际HTTP读取、拒绝非法衍生物、私有文件隔离、清理故障/重启、移除和计划证据正在补齐。最终全项目门尚未完成，Goal保持ACTIVE。
+
+### OPS008扩展实际行为与未通过门保留
+
+- `ops008-lifecycle-expanded.log`退出0（用例7.85s/包8.454s）：完整HTTP PNG访问/私有及坏扫描态404、非法/截断/MIME错配/超大请求不写OSS、替换和TTL Outbox CHECK原子回滚、OSS503留下两个pending/attempt1/remote_transient且新worker恢复、成功PUT后DB注册失败补偿、移除与幂等删除。
+- `ops008-raster-unit.log`两个实测单元退出0（包2.054s）：真实Sharp-produced含EXIF WebP经过Go完整解码变静态PNG、标记/元数据不保留；截断及MIME错配拒绝，1/512边接受、513边和PNG只有头拒绝。
+- `ops008-complete-targeted.log`退出0，24.220s：100100条实际168 OSS历史数据/完整public-ID trigger及ANALYZE，真实expiry EXPLAIN ANALYZE BUFFERS JSON执行新部分索引、100结果、每节点读取/缓冲块≤1000，执行时间0.071ms仅作诊断；额外完整HTTP双管理员并发、失去版本不得复活、新Server重启读取及最终6 PUT/6成功DELETE/0泄漏。原90秒用例预算保持。
+- 浏览器诊断：`ops008-browser-suite-diagnostic.log`5/7；`ops008-browser-network.log`7/7但不能当稳定修复；`ops008-browser-standalone.log`与`ops008-browser-ssr-fetch-url.log`、`ops008-browser-native-stream.log`各6/7，不同页面导航失败。原`ops008-browser-ssr-fetch.log`因Windows --import误把盘符当URI导致启动失败；改pathToFileURL后才能采样委托fetch。所有轨迹存在拥有的工作目录，服务端Abort实际约2000ms；不更改生产fetch，不把夹具失败称业务RED。
+- `ops008-pinned-chromium-install.log`官方151.0.7922.34/revision1234下载退出0；`ops008-browser-pinned-first.log`与`ops008-browser-pinned-second.log`在相同五秒预算和standalone源码下连续7/7，21.662s/21.299s，0 skip。对比系统Chrome154的多次失败支持使用与驱动/CI锁定一致的运行时，不声称已证明某一Chromium内部缺陷或在Linux执行CI。
+- 首轮`ops008-backend-results.json`：拥有空库初始化5.570s退出0，普通全仓99.538s退出1（1条当前代次源字符串未从167同步）；sourceUnchanged=true，精确随机基库清理0。修正这一精确合同后的`ops008-final-*`门在新随机库重跑，不覆盖旧失败；此时full-test93.320s/full-race133.231s/Vet4.332s已0，全部Schema/维护Race及完整前端门仍在运行，尚不关闭OPS008。
+
+### OPS008最后完整前端门（后端显式Schema尚在运行）
+
+- `ops008-final-frontend-results.json`完成2026-10-01T04:05:40.2705034+08:00，六门全部0：Test5.273s（279/279、0 skip）、Type10.045s、Lint22.334s（0 error/1既有comment-section导航warning）、Build21.199s（Next16.3.8，58页）、Browser29.271s（standalone/匹配Chromium151.0.7922.34/revision1234，7/7、0 skip）、全依赖Audit3.440s（全部等级0）。未调高五秒浏览器预算，与前述同源码两次独立7/7合计三次通过。
+- 本项前端双路由实际函数测试仍为真实Sharp+拥有HTTP后端替身，浏览器治理/实时组件API/EventSource受控；不伪称Logo界面已完成真实公网OSS端到端或邮件/页面标题矩阵。TEST024仍独立OPEN，后续需实际SMTP与品牌组件证据。
+
+### OPS008累计包报警与完整分批再验收
+
+- `ops008-final-backend-results.json`完成04:13:21，初始化4.727s、普通全仓93.320s、Race133.231s、Vet4.332s、Build25.651s、tidy0.452s均0；显式全部database包Race两次累计门604.215s退出1，Go默认600秒报警在`TestNATSOutboxFinalShapeInstallsDirectlyIntegration/InstallEphemeralSchema`，不能称全Schema通过或业务查询预算退化。sourceUnchanged=true，拥有base精确清理0。
+- `run-ops008-database-batches.ps1`已在全新拥有空库启动：完整发现database所有Test/Fuzz seeds并按现有30名称/10分钟/串行协议运行两次，另完整OPS008/OPS020 HTTP维护Race两次；不改变Go源码/模块/CI或单用例预算，结束仍核对新增/已有源路径及哈希集合和精确基库清理。尚未返回全门结果，不提前关闭。
+- 先登记状态为OPS008 FIXED_PENDING_VERIFICATION并开始TEST024独立IN_PROGRESS；当前435 CLOSED、12 OPEN、1 IN_PROGRESS、1待验证，共14未关闭。后端冻结期间只读/前端工作，不把新增SMTP/标题计划当现有通过证据，Goal保持ACTIVE。
+
+### OPS008完整Schema分批结束与TEST024认证行为发现
+
+- `ops008-batches-backend-results.json`完成04:31:56，全四门0：全新168空库初始化17.097s、完整OPS008/OPS020 HTTP维护Race两次75.025s、全部database名称两次441.888s/414.284s。每次discovered=138/invoked=138/batches=5/failed=0，原30名称/10分钟报警/各自用例预算/串行保留；sourceUnchanged=true（含路径集合）、拥有base精确清理0。冻结结束后才新增TEST024 Go认证代码，不伪称该哈希或上述历史普通门覆盖后续改变。
+- TEST024实际Native route `test024-cookie-session-route-red.log`2/3，通过已有Bearer/资产两项但Cookie登录上传403而非201；源码证明正常浏览器token是cookie-session标记，旧UI却构造Bearer cookie-session。`test024-cookie-session-route-first.log`3/3，0.449s，同域HttpOnly Cookie转发已修复；`test024-cookie-delegation-native.log`3/3，跨域Cookie请求403零上传及SiteLogo委托完整转发也实测。Node模块提示保留。
+- 新短时opaque/purpose-bound委托首次真实PG/完整HTTP `test024-logo-delegation-first.log`退出1：跨路由隔离/完整性/期限/撤权均过，但直接PG撤销父session后暖cache仍204（line140）。不是改期待值；委托现在直接读取现有parent session并复用同一权限解析，不复制session/role权威。
+- `test024-logo-delegation-session-fresh.log`退出0，13.938s：原完整共享生命周期6.16s，新Cookie授权/CSRF来源拒绝、密文不可读身份、≤60秒/不可扩大用途或再委托、篡改/过期/超期/错purpose拒绝、动态撤权403与父会话撤销401全部实际通过。仍需实际SiteLogo POST、生产Next GUI与当前全仓/相关Race；SMTP/设置/title矩阵未完成，两个Finding均不计关闭。
+
+### TEST024真实SMTP/设置RED及浏览器分层结果
+
+- `test024-real-shared-delegated-upload.log`退出0，包12.346s（共享生命周期7.46、新委托4.78）：实际后续Logo POST使用真实签发的SiteLogo密文，原6 PUT/6成功DELETE/0泄漏矩阵保持。
+- `test024-brand-initial-build.log`缺调用方NEXT_PUBLIC_API_BASE_URL被部署guard拒绝，非业务RED；配置三个HTTPS测试public URL后的`test024-brand-configured-build.log`退出0。首轮browser 0/2是实际nav/Home名称定位错误；locators 1/2、asset-diagnostic、csp-provider、network-events均保留图片transport故障。owned-provider-hop实际2/2，3.034s，原五秒预算，验证真实GUI staged upload/Sharp/provider PNG解码、失败保留、save/title刷新、删除及品牌503 fallback/recover。明确provider hop与浏览器API受控，不声明公网端到端。
+- `test024-smtp-first.log`退出0，包30.698s：六顶层SMTP测试/八子项；实际可信STARTTLS+AUTH成功、不可信证书握手拒绝（AUTH/data未发送）、必需能力不存在拒绝、AUTH/MAIL/RCPT/DATA/COMMIT/QUIT错误传播、UTF8/MIME/envelope/dot-stuffing正确、disabled及Header拒绝不拨号、I/O超时实测30.00s。临时根仅独立子进程，后续无拨号观察窗口已补100ms，须重跑当前源码。
+- `test024-brand-final-frontend-results.json`六门中Test4.643s/Type8.782/Lint28.675/Build27.284/Audit2.686s均0；Browser80.636s退出1，实际7/9：既有TEST023生命周期空列表等待超过5秒、新TEST024总title=2。`test024-brand-browser-title-nodes.log`复核head新title与body旧Streaming Metadata注入，真实document.title/品牌恢复正确；不吞失败或禁用streaming，仅调整元数据归属合同后重跑整个门。
+- `test024-mail-config-red.log`Race退出1，包10.259s：实际updateMailConfig:163死字段发生write/write DATA RACE；另一断言误把statement upsert版本+2写成+1；腐坏夹具密钥长度guard失败。两处夹具已依据Schema/官方协议纠正后单独再执行错误路径，不能用这些错误冒充腐坏业务RED。
+
+- `test024-mail-fail-closed-red.log`真实有效故障RED，包4.915s：合法长度错密钥密文使HTTP读返回200启用fallback、服务器及Worker仍Enabled、无密码PUT把fallback密码写回、坏品牌aggregate200默认。根因改为存在行解密/类型/DB失败必须传播error、activeMailer附错误且返回disabled零值，只有ErrNoRows可环境fallback；移除死字段/双路径，密码保留+密文upsert在DB事务advisory lock内串行。
+- `test024-mail-config-first-green.log`Race退出0，12.584s：BUG050原disabled门及完整配置HTTP24并发/版本精确双trigger/密文/脱敏/跨实例/失败回滚、错密钥/坏品牌/DB失败均通过。扩展`test024-mail-expanded-first.log`真实Worker eligible邮件错误和HTTP验证码失败后仅1条consumed/0 usable、admin test mail稳定脱敏code均过，但合法密文内容null仍aggregate200空配置（包7.818s/退出1）；因此读取进一步拒绝非object，不能用空成功隐藏存储腐坏。八轮无密码保存/新密码轮换同时写门也将组合Race验收。
+- `test024-browser-current-serial.log`实际完整9/9、0 skip，27.159s，独立无Go编译占用；原五秒门不改。`test024-current-final-frontend-results.json`05:34:50完成全六门0：280/280单测、0 skip（实际日志尾部已核对）、Type2.639s/Lint19.255s/Build12.701s/Browser34.501s（9/9）/Audit2.706s全部0，Test4.855s。品牌title合同核对head归属和document.title最新，不禁用Next Streaming Metadata，也不手动删DOM body title；先前7/9失败保留，当前通过不能抹掉历史失败。
+
+### OPS008/TEST024当前组合验收与完整双端门结束
+
+- `test024-final-combined-race.log`退出0，包103.270s：真实拥有168库，`go test -race -p=1 -parallel=1 ./internal/httpapi -run 'TestTEST024|TestOPS008|TestOPS020|TestBUG050|TestSanitizeSharedSiteLogo|TestNormalizeSiteGeneralConfig' -count=2 -v`。完整24并发配置/8轮密码保存与轮换、密文null/错类型/错密钥/DB失败、Worker可重试失败与验证码已消费、Cookie来源/窄委托即时撤权/实际POST、共享Logo双实例/重启/6PUT6成功删除0泄漏/100100行计划、有界维护都两次通过，无DATA RACE。未降低原用例预算。
+- `test024-final-backend-results.json`05:46:24完成：fresh168初始化4.882s；SMTP包Race count2 68.971s（实际30秒deadline两次、可信TLS子进程和证书拒绝）；全仓Test126.098s、覆盖门1.743s（29.7%≥原27%）、Race127.455s、Vet9.766s、Build5.545s、tidy8.800s全部0。sourceUnchanged=true（全部路径/哈希集合）、schemaFilesUnchanged=true（与完整138名称Schema双次证据逐文件比较）、精确拥有库test_remediation_test024_1790804428761清理0。普通全仓条件DB/live测试仍SKIP，不将其计作显式DB/公网通过。
+- 首次govulncheck0.506s退出1，提示no go.mod但当前目录实际有模块；Go工具只以绝对路径调用而未进入PATH。只读本地扫描器runSource/gomodExists及Get-Command验证子进程Go缺失。补任务Go/CGO GCC bin进入PATH，不改模块或源码后`test024-final-govulncheck-path-corrected.log`退出0，5.271s；执行前复核报告全部源码哈希一致，扫描0可达漏洞/0导入包漏洞/4不被调用模块公告。旧JSON失败项不覆写，后续测试脚本补显式PATH以便可复现。
+- 当前前端六门均0（280单测/9浏览器、58页构建、Type/Lint、全依赖0漏洞），完整Schema此前两轮138名称均0；两项按D349独立关闭。当前437 CLOSED / 12 OPEN，六项条件夹具与最终完整449项门/严重度/复审仍待完成，Goal ACTIVE。
+
+### TEST013真实资料生命周期定向证据（全阶段门执行中）
+
+- 日志均位于remediation-remaining18-20260930，不覆盖前次结果。`test013-http-first.log`（22.347s/1）是MC/loader夹具未建；`test013-http-supported-fixture.log`（27.796s/1）是猜错normalized列42703；按实际mod_loader_compatibilities建夹具后`test013-http-normalized-compatibility.log`（20.626s/1）模板/全局流程绿，advancement旧base和streaming排序导致无有效中途行仍失败。`real-streaming`（21.273s/1）与`pure-stream-fault`（21.217s/1）保留view排序/真实derived label纠偏，不能把0行错误计作中途故障通过。
+- `test013-http-first-green-attempt.log`退出0/22.390s，四顶层真实HTTP/审核/PG流程绿；扩展首轮`test013-http-expanded.log`编译变量碰撞未执行，修正后`test013-http-expanded-compiled.log`23.401s/1实际发现跨版本显式布局错误接受200 pending。独立`test013-layout-explicit-target-red.log`0.424s/1证明未知/外部目标被接受、后续坏资源会部分修改合并结果；修复后`test013-http-layout-fixed.log`21.400s/1布局全绿，但已有停用类型详情发布500为第二个有效业务RED。
+- `test013-http-retained-subtype-fixed.log`退出0/23.000s：advancement5.65s、模板5.50s、跨版本/全局5.27s、实际列表中途错误5.26s全部过。拒绝路径核对26业务表完整ordered JSON，覆盖pending/approved/rejected actor、活动/审核/发布pointer、显式CHECK发布失败全部回滚后重试、历史引用/无引用模板删除、停用类型可保留但不可借同code切到别的停用模板、全局resource不能跨Mod夺取、独立版本detail/板块/版本软删除与另一版本保留。列表实测32正常行后真实rows.Err，完整Handler500不带partial data，恢复200。
+- 现有未加载资源/删除分类/20k一秒预算和no-op detail revision合同保留；20k合并4.0746ms仅诊断，不伪称生产端到端heap测量。当前完整相关模块发现/双次Race及后端/前端阶段门执行中，TEST013仍IN_PROGRESS。
+- `test013-current-frontend-results.json`06:48:28完成全部六门0：Test4.877s（280/280、0skip）、Type2.920s、Lint22.043s、Build13.560s、Browser30.027s（9/9、0skip、官方匹配Chromium151/revision1234）、Audit3.430s（全依赖0漏洞）。未修改前端源代码/原五秒浏览器预算。后端首轮完整模块中的section publication authority仅接受MCMODS_TEST_DATABASE_URL而不接受RUN flag，实际SKIP将触发脚本失败；补两变量均指向同一拥有基库后需完整再验收，不能把首轮SKIP算通过。
+- `test013-final-module-race.log`Go进程退出0/包544.276s（脚本550.455s），实际132个顶层PASS+2个SKIP；脚本按预期拒绝验收并退出1，拥有基库清理0/全部源码哈希不变。另发现PowerShell默认大小写不敏感把小写helper test013DetailRevision误算成Test，原发现68不是真实测试数；补CaseSensitive并逐一对编译器go test -list核对，真实67名称，没有删除任何可执行测试。
+- `test013-verified-module-race.log`两环境变量指向同一拥有库，旧唯一SKIP测试两次实际PASS，Go包1.423s/脚本9.146s、0skip；结合首轮其余66名称各两次PASS，严格逐名验证67×2=134个实际PASS。原SKIP不计PASS；两轮全部源码路径/哈希与发现的真实名称一致才允许复用原通过结果。新完整阶段门继续执行，不称新短日志本身跑了全部67项或覆盖旧失败。
+- `test013-verified-backend-results.json`07:02:54结束全部九门0：fresh168初始化4.746s、模块补跑9.146s、全仓Test126.287s/覆盖4.482s（29.7%≥27%）、全仓Race137.740s、Vet9.121s、Build4.329s、tidy0.455s、govulncheck5.243s。0可达/0导入包漏洞，4不被调用模块公告；sourceUnchanged=true/schemaFilesUnchanged=true，拥有库test_remediation_test013_1790809056937清理0。当前双端完整门已完成，TEST013独立关闭，438 CLOSED/11未关闭；未改共享155或任何远端库，其他业务/条件夹具与最终449复审继续。
+
+### TEST014首轮有效业务RED与夹具流中条件
+
+- `test014-http-first.log`Race退出1/26.678s：六类实际目录(all/any/提交者权限/独立审核/非空排除页)及10,025深OFFSET、近1MiB×3locale正文详情/目录投影均过。十二同名自动创建只有7成功/5真实409，实际先查后插竞争；合法作者审批HTTP500。后者`test014-author-statement-diagnostic.log`6.316s/1在拥有库rollback-only事务复现SQLSTATE42804：CASE的unknown参数默认text不能赋值bigint approved_by，不是测试用户/权限缺失。诊断不留下业务写入。
+- 修复作者审批SQL显式$3::bigint；自动slug分配收口为pgx.Tx-only helper，按project type+规范化base使用PG事务advisory lock直至insert commit，不持进程mutex/新缓存；区分冲突sentinel与数据库错误并直接传播后者，不循环1000次掩盖DB失败。无DDL/DTO/权限放宽；不同类型/名称不被同一全局锁串行。
+- `test014-http-all-expanded.log`退出1/30.950s：上述四行为全部通过，作者审批ID/approved_by/approved_at/created_at在普通审核编辑及作者重排后稳定，十二自动slug均201且项目/revision/change_request各12。新增关联错误view实际Incremental Sort预先缓冲33组，0行即报错；因此这只是无效midstream夹具RED，不能声称Handler已具备中途错误验收。扩至97正常/故障样本并保留至少一条真实产行/真实rows.Err的必要条件再测试，不改生产查询/原用例预算。
+- `test014-stream-and-owned-exclusion.log`Race退出0/11.240s：八类exclusion端点均3→2且两非空页distinct、0skip；production constant关联SQL实际产64有效行后rows.Err，完整HTTP500/无partial data及恢复97/97通过。拥有故障view/function及所有pool连接GUC不进入共享/远端或生产查询。
+- `test014-http-two-instance-expanded.log`Race退出0/37.374s：当前六顶层完整用例均PASS，双独立Server/独立PG连接池十二同名自动创建全201、post-reservation CHECK failure 19表全JSON事实不变且移除故障后同slug重试成功、作者合法审批与权限拒绝/普通review编辑稳定、10k深页/3近1MiB正文、真实关联midstream/八类exclusion全部绿。后续增加分类/loader及add-on parent投影断言需当前源码再执行，完整阶段门尚未完成。
+- `test014-catalog-classification-expanded.log`Race退出0/12.216s：六类card与持久分类/loader/features/专属resolution/performance/mapSize一致、locale名和add-on真实public ID/父slug解析、父筛选正负以及无效loader拒绝均实际通过，原all/any/隐私及非空排除页保持。
+- `test014-final-backend-results.json`07:35:16当前11门全0：fresh168初始化4.735s；49编译器核对的真实名称三批Race×2，103.937/155.754/66.369s，98顶层PASS/0skip；全仓Test136.286s、覆盖1.836s（29.7%≥27%）、全仓Race129.977s、Vet7.089s、Build8.121s、tidy2.419s、govulncheck5.208s（0可达/导入漏洞、4未调用模块公告）。sourceUnchanged/schemaFilesUnchanged=true，基库test_remediation_test014_1790810680880精确清理0。数据库普通条件SKIP不计显式集成通过，共享155未改。
+- `test014-current-frontend-results.json`07:26:12六门全0：Test5.968s（280/280、0skip）、Type3.006s、Lint21.792s、Build13.965s（58页）、Browser33.649s（9/9、0skip、官方匹配Chromium151/revision1234）、Audit3.448s全依赖0漏洞。前端源码和原五秒预算未改。两端全部门/冻结清理完成，TEST014独立CLOSED，439 CLOSED/10未关闭；剩余继续TEST015。
+
+### TEST015真实TCP取消RED、网络预算与完整HTTP/调度矩阵
+
+- `test015-tcp-first-red.log`Race退出1/7.470s：混合公私DNS九例、同一解析固定IP贯穿真实Status+Configuration和声明超长status帧通过；父取消后Status读取阻塞超过一秒为有效RED。`test015-configuration-cancel-red.log`Race退出1/6.622s同样证明Configuration读取不响应手动取消，槽位释放未发生。实现两处取消deadline后`test015-tcp-cancel-fixed.log`Race count2退出0/6.631s；均不改5/8/30秒或4并发预算。
+- `test015-tcp-all-boundaries.log`Race count2退出0/13.743s：八压缩帧正常/未压缩/declared超限/负数/zlib无效/截断/长度伪造/64MiB膨胀，百万动态注册条目真实TCP拒绝；Fabric8MiB合法带padding实际收到completion ack且解析test015_fabric，8MiB+1拒绝，旧64MiB流在实际9437185发送bytes后被关闭，没有接受完整流。所有configuration证据保持非完整JAR推断。追加实际接收/解码TotalAlloc测量后`test015-tcp-decoder-allocation.log`count2退出0/26.292s，约9524504bytes≤16777216，攻击源/压缩夹具构建在测量之前；不是生产整体heap/公网验证。
+- `test015-http-first.log`Race退出1/16.441s：附件归属/安全状态/source bytes/401/403拒绝和创建迟发样本失败全JSON回滚通过。签名测试误用旧mode/Signature字段为测试协议夹具错误，不是生产RED；改为现有downloadUrlMode/x-oss-signature。实际有效业务RED为review通知Outbox CHECK失败后HTTP仍200且审核已提交；现收口已有事务通知helper，`test015-http-review-atomic.log`Race退出0/28.409s三个完整HTTP用例均过，通知失败500且20业务表ordered JSON不变、并发仅一次转态/一条durable意图/其它409。
+- `test015-http-scheduler-expanded.log`Race count2退出0/52.589s五实际顶层HTTP/PG流程均过：两用户pending隐私/独立review/证明签名范围/安全状态/异常source byte/手工与机器独立证据；双调度48项各一次、32峰值并发保持、1offline/47online、完整机器快照与unresolved清理、不完整保留、迟发证据故障全事务回滚、真实90天历史清理及公开history。首次gofmt因新增测试漏括号失败未执行，该编辑错误已补正，不计业务RED。
+- `test015-http-update-revocation-expanded.log`Race退出0/6.882s：真实会话HTTP伪造source/confidence400、仅拥有另一server scope的用户403、links迟发CHECK500全事实不变、合法编辑只替换manual、权限撤销同Session立即403但继续可GET，显式probe入口匿名401/无权限403/私网400全部过。
+- `test015-http-scheduler-next-due.log`Race count2退出0/11.266s：样本持久失败未伪造online/latest或样本；领取五分钟lease已独立提交保持、即时第二tick不重试；移除故障且只推进自有row due时间后下一周期正常写样本。没有伪称全领取/持久一个事务、实际等待五分钟或发生公网probe。
+- 当前发现编译核对serverprobe29及HTTP37真实名称，共66个；按包/20名有界Race count2及全仓Test/Race/Vet/Build/tidy/govulncheck、fresh168空库、源码冻结/清理与前端六门进行中。旧SQL/N+1/million/claim失败回归不删除；当前TEST015仍IN_PROGRESS，Goal ACTIVE。
+- `test015-current-frontend-results.json`08:09:58六门全部0：280/280单测/0skip4.995s、Type3.342s、Lint22.483s、Build14.320s（58页）、Browser56.070s（9/9、0skip、原五秒leaf预算和官方Chromium151/rev1234未改）、全依赖audit3.245s/0漏洞。前端没有源码变更。
+- `test015-final-backend-results.json`08:14:54原失败保存：初始化4.778s；66真实名称四批Race count2 10.527/15.423/148.764/79.513s（132顶层实际PASS、0skip）通过，但全仓Test130.084s退出1，未执行后续门。sourceUnchanged=true、拥有基库test_remediation_test015_1790813284504精确清理0；失败不计通过。HTTP结构合同仍指向提取前wrapper且0 row loop，已移至同一实际claim implementation并新增默认wrapper严格委托守卫，没有删除Scan/rows.Err断言。`test015-current-strict-claim-contract.log`两名称count2退出0/0.468s。
+- 同一全仓门还重现既有JetStream restart测试前置条件竞争：handler内发送channel信号早于return和队列Ack，立即Close本可使已收到但未被broker确认的消息合法重投，测试却宣称已ACK。现在关闭前用真实ConsumerInfo验证AckFloor.Stream=1且NumAckPending=0（原阶段4秒预算、不sleep猜测），不改生产ACK/关闭/重投语义或no-duplicate期望。`test015-jetstream-ack-barrier.log`Race count10退出0/6.260s，每次broker真实确认后一条离线backlog恢复且无已确认重复。前置失败client亦清理。
+- 重验收使用新前缀test015-verified，不覆盖首轮失败；相关范围增至serverprobe29/HTTP41/整个queue30，共100实际编译名称，按20名有界Race两次及全部后端门重新执行。不复用旧源码通过结果作当前全门，不提高包/leaf预算；TEST015继续IN_PROGRESS。
+- `test015-verified-backend-results.json`08:31:36十五阶段全部0：fresh168初始化6.262s；100真实名称七批Race count2 14.941/11.353/84.863/138.913/53.466/44.890/7.186s，200实际PASS/0skip；全仓Test145.743s、覆盖1.684s（30.1%≥27%）、全仓Race132.578s、Vet7.070s、Build13.368s、tidy0.438s、govulncheck5.059s（0可达/导入漏洞、4未调用公告）。sourceUnchanged/schemaFilesUnchanged=true，拥有基库test_remediation_test015_1790814002883精确清理0。前端当前六门全部0且无源码变更；TEST015独立High/P1 CLOSED。440 CLOSED/9未关闭，继续TEST016，目标ACTIVE。
+
+### TEST016完整项目文件HTTP/OSS/提供者有效RED与阶段扩展
+
+- `test016-upload-and-empty-first-red.log`只有unused import编译失败，不计业务RED。`test016-upload-and-empty-red-executed.log`HTTP误少/api/v1前缀属于夹具错误；空版本子进程超时尚未计HTTP通过。`test016-upload-and-empty-valid-red.log`退出1/包25.641s：六种ZIP/MRPack真实400有效RED、空/无效URL/无hash每例providerCalls=2且两秒deadline真实超时并回收；JAR完成误期望200而实际201、错误deletion表名不计生产缺陷。
+- `test016-extensions-pager-fix-and-ownership-red.log`退出1/13.919s：八类上传/登记及三空版本子进程已PASS；同项目第二授权用户抢先complete第一用户pending object实际201为独立归属RED。owner绑定后`test016-lifecycle-and-counter-red-executed.log`退出1/27.192s：八类/owner/空版本均PASS；counter CHECK失败仍200为有效RED；generation2事件被现有30秒合并为add1/remove1属于原合并合同，非生产丢事件。
+- `test016-lifecycle-and-counter-first-red.log`移通用helper漏移除strconv导致编译失败，未执行用例；已校正。`test016-lifecycle-counter-fixed.log`退出1/24.504s：counter原子失败、实际签名PUT/HEAD/GET、owner/格式/空版本通过，但合法soft-delete仍500。`test016-delete-audit-sql-compile-red.log`在root loopback的session临时表/事务PREPARE确认could not determine type $5，错误连接结束自动回滚/临时表消失，没有修改持久root业务表；cast修复后完整soft-delete/重复/跨项目拒绝实际通过。
+- `test016-provider-first-red.log`退出1/10.058s：真实更换origin复用旧cache与CF错modId接受确认；同ID跨场景版本cache污染使部分身份/空版本断言此时无效，不能声称各项独立复现。`test016-cache-fixed-and-identity-red.log`退出1/34.361s：origin/case缓存及CF身份已PASS，Modrinth错project/unrequested/duplicate三项现独立RED，其余提供者500/无效JSON/2MiB+1/10001版本/重复manifest/33 files/空/HTTP URL均PASS。
+- `test016-provider-identity-fixed.log`Race退出0/38.354s，完整八顶层均PASS。`test016-single-connection-and-late-failure-red.log`退出1/12.448s：事务持有唯一空闲连接后签名重新借池导致固定两秒超时为本轮改造回归；Outbox CHECK错误使用subject而实际task code，属无效故障夹具，改用event_type。`test016-single-connection-and-complete-fixed.log`Race count2退出0/89.475s，十顶层逐次通过，真正迟发Outbox及删除audit拒绝全12业务表JSON不变。
+- `test016-publication-race-and-concurrent-counter-red.log`退出1/15.402s：实际16并发计数产生defaultOSSConfig共享切片JSON写DATA RACE；同一创建请求等待owned row lock期间父项目转pending仍生成通知实际RED；待审项目完整隐私/内部上传/无公开下载计数或更新PASS。`test016-publication-concurrency-fixed.log`Race count2退出0/112.166s，十三实际顶层全部双次PASS/0skip；原leaf/fixture预算未改。
+- `test016-current-frontend-results.json`09:22:31六门全0：280/280单测、0skip9.037s；Type2.784s、Lint20.075s、Build13.009s（58页）、Browser23.970s（9/9、0skip、原五秒leaf/官方匹配Chromium151）、audit4.448s/全依赖0漏洞。后端新增扫描parent竞争、十格式挂载与完整keyset遍历仍验收中，不计关闭；当前TEST016 IN_PROGRESS，440 CLOSED/9未关闭，Goal ACTIVE。
+- `test016-scan-race-cursor-formats-expanded.log`Race退出1/15.967s：十格式实际上传/挂载与三页cursor通过，扫描等待文件锁期间parent转pending仍生成更新为有效RED。`test016-scan-cursor-formats-and-cf-final.log`Race count2退出1/40.950s：扫描parent、cursor和CF完整API负例均通过；合法Plugin Paper挂载400为新有效RED，已改用既有项目类型规则并新增NeoForge非法Plugin loader全事实不变断言。六个相关纯guard普通测试退出0/包0.800s，不代替完整验收。
+- `run-test016-final-backend.ps1`使用全Go/mod/CI路径集合和SHA冻结、OPS008完整168 Schema哈希核对、随机空库初始化、按编译发现名称Race双次分批与所有原全仓质量门；原leaf/包预算不变。正在运行，最终报告、精确PASS/SKIP计数与拥有基库清理结果到齐前不计关闭。
+- 第一轮`test016-final-backend-results.json`09:47:55：初始化及七模块批次全0、113真实名称226 PASS/0skip；普通全仓126.045s退出1，唯一失败为OPS008 Logo测试要求两个失败删除任务attempts恰好1。源码/Schema哈希不变、拥有基库test_remediation_test016_1790818609727清理0；后续质量门未执行，不把该报告写成通过。
+- `test016-logo-delete-diagnostic-race.log`Race count10退出0/包74.756s，并不能抹去原失败。新增750ms owned provider错误响应延迟后`test016-logo-delete-slow-provider-red.log`退出1/19.965s：两项真实503任务都pending/remote_transient/attempts=2，证明SDK处理下一对象期间既有两秒重试到期，原恰好一次假设不成立，而非生产丢任务。测试先用实际claim领取两个独立活租约，再各调用同一deleteObject/recordFailure验证恰好1，后续仍由全新Worker完整drain恢复；不改生产重试、预算或断言目标。`test016-logo-delete-claim-controlled.log`Race count2退出0/42.325s，快/慢两顶层各两次实际PASS，真实PUT/GET/DELETE与最终对象/删除次数断言保持。新增慢服务回归进入本项编译发现模块；重新冻结运行test016-verified，不计关闭。
+- `test016-verified-backend-results.json`10:10:54全部十五阶段0：空库4.803s；七Race双次批182.828/86.927/9.475/177.744/10.458/50.829/7.185s；114真实名称228 PASS/0skip。普通150.649s、覆盖1.660s/30.1%≥27%、全仓Race147.729s、Vet7.311s、Build4.760s、tidy0.806s、govulncheck6.795s/零可达和导入漏洞、四未调用公告。sourceUnchanged/schemaFilesUnchanged=true，完整168 Schema138名称双次独立证据仍源绑定，拥有基库test_remediation_test016_1790819788635清理0。结合当前前端六门，TEST016独立High/P1 CLOSED；449 ID allow-open PASS，High143/Medium234/Low65/UNRESOLVED7，441 CLOSED/7 OPEN/1 IN_PROGRESS(TEST017)，不凑原等级总数、不宣称449完成。
+
+### TEST017更新日志完整HTTP第一轮
+
+- `test017-full-http-first-red.log`普通退出1/52.390s，九个真实顶层均执行。正常session项目审核队列/历史scope、自审与异项目拒绝、真实worker绑定pending/rejected/approved人工接管、共享pending guard、九类目标完整审核发布及迟发project.updated Outbox回滚均实际PASS。
+- 有效RED：跨项目分类真实POST201待审（应提交前400且全事实不变）；approve/reject通知CHECK拒绝后均仍200并已提交审核；拥有表缺失故障时detail500而history404。大正文首轮包含不可人工编辑的ko-KR、缺少zh-TW，400是无效夹具而非生产缺陷；改为现有八语言权威列表，不放宽语言/200k/8MiB请求预算。
+- 同一categoryID helper复用提议验证与批准发布，现存分类FOR SHARE且按真实targetRouteID过滤，分类无效400/数据库错误500。review通知进入既有enqueueTemplatedNotificationTx与审核/override/类别/发布同事务，错误500、成功commit后才200，删除commit后独立通知；history仅ErrNoRows返回404，DB错误500。当前Race双次正在运行，尚不关闭。
+- `test017-first-fixes-race.log`退出0/104.295s：九实际顶层每个两次、18 PASS/0skip；八种生产人工语言的三条1.44MiB snapshot实际POST/审核，三页summary每页≤32KiB、4000字符/八locale、无尾部正文、locale/limit/target复用游标400。`test017-category-positive-and-review-race.log`Race count2退出0/24.059s，两顶层各两次：实际正常创建分类后复用、两个正常独立审核者竞争只一200/一409、一审核事件/通知意图，override/body/publication与胜出结果一致。
+- `test017-current-frontend-results.json`10:22:44六门全0：280/280单测、0skip/7.893s；Type4.902s、Lint24.415s、Build14.638s/58页、Browser34.959s/9/9零skip原五秒leaf/匹配Chromium151、audit3.526s/全依赖零漏洞。后端run-test017-final使用编译发现的74相关HTTP名称和全queue30、同一原分批/预算/全仓门与空库/源码Schema哈希冻结/精确拥有库清理，正在验收；TEST017尚IN_PROGRESS，不计关闭。
+- `test017-final-backend-results.json`10:32:43失败保留：初始化10.944s/0，首模块批次610.882s/1，Go包原600秒累计alarm；100k单例两次201.35/198.03s均在各自原五分钟预算内PASS，百万首轮19.75s PASS、第二轮尚未结束即alarm，不能计双次完成或模块通过。sourceUnchanged/schemaFilesUnchanged=true，拥有基库test_remediation_test017_1790821321967清理0；后续门未执行。
+- 新`run-test017-batched-backend.ps1`只重新分组两个大型fixture，各自独立批且仍count2，其他名称按原20分批。运行前核对全部104编译名称的分组多重集合完全相等、逐名称两次PASS/零SKIP与同一全仓门；没有排除、减少count、放宽leaf/包/响应/数据库预算或生产/Go改动。原脚本/报告保留，新前缀test017-verified重新空库/哈希冻结/精确清理验收中；不暂停Goal、不计关闭。
+- 10:59:45新分批已真实完成：八批均退出0、104编译名称逐一各两次，共208 PASS/0skip。100k两个实际用例197.61/197.29s，独立包396.086s，原五分钟leaf和十分钟包预算未变；百万行用例独立批也双次通过。此时全仓及最后源哈希/清理仍在执行，208模块PASS不代替全阶段验收。
+- `test017-verified-backend-results.json`11:04:39十六阶段全0：初始化9.920s，八模块批182.821/152.860/156.305/134.096/501.003/51.799/44.435/7.205s；104名称208 PASS/0skip。普通136.605s、覆盖1.545s/30.1%≥27%、全仓Race155.908s、Vet6.940s、Build7.539s、tidy0.418s、govulncheck6.007s/0可达与导入漏洞、4未调用公告。sourceUnchanged/schemaFilesUnchanged=true，拥有基库test_remediation_test017_1790822315042清理0。结合10:22当前前端六门，本项独立Medium/P1 CLOSED；allow-open449 ID/分类PASS，High143/Medium235/Low65/UNRESOLVED6，442 CLOSED/6 OPEN/1 IN_PROGRESS(TEST022)，本批11/18；不凑严重度或宣称449完成。
+
+### TEST022私聊与Presence完整HTTP首轮和真实修复
+
+- `test022-full-http-first-red.log`退出1/126.905s，十二顶层全执行、八PASS/四FAIL。会话IDOR/双向拉黑/收件权限、正常正反配对、4000 Unicode/160邮件预览、隐藏读回执、离线Outbox CHECK原子回滚、64并发真实发送/最大anchor/32页历史/跨scope与after拒绝/未读校准、双副本visitor准入及低频PG快照/多Session退出/Redis中断回退、已读UPDATE故障回滚、32并发正反创建均实际通过。
+- 有效RED：五种非法/未知字段/多JSON/超过8MiB心跳均原200且创建在线状态；耗尽原12次来源后仍读1048592字节才429。初始DB view为VOLATILE，连前置ID查询也抛异常，断言自检正确失败，不能算成员分类RED；初始真实30秒等待未推进miniredis替身TTL，也是夹具错误，不能算TTL生产缺陷。
+- `test022-membership-and-clock-fixture-corrected.log`退出1/40.984s：STABLE view先证明仅ID查询正常，再真实GET成员DB故障原403（应500）；真实等待原30秒后按已过时间推进替身TTL，chat过期/重新邮件通知正常PASS，不缩短本地时钟。`test022-capacity-first-execution.log`退出0/2.564s：真实Lua对种入50100状态trim至50000、五分钟过期及停止Redis后的过期回退通过；16并发8192本地身份仍硬上限4096且过期归零。明确为协议/算法测试、不冒称生产Redis吞吐。
+- 先修复严格JSON与准入前置、成员bool/error传播。`test022-presence-member-fixed-send-read-red.log`退出1/35.171s：全部非法JSON已400、耗尽入口零body读取、GET/Presence成员故障500通过；随后真实POST成员读取DB故障原404再次取得有效RED。发送只ErrNoRows404，其余500，失败不开始消息事务/调整缓存/公开部分成功数据。新增未知会话GET/POST/Presence真实404回归，正常非成员403保持。
+- 当前全部十二新顶层count2 Race及test022-current前端六门运行中；完整模块/全仓/源码冻结/清理阶段尚未完成，不计关闭。
+- `test022-first-fixes-full-http-race.log`Race count2退出0/267.404s，十二实际新顶层逐个两次，共24 PASS/0skip；真实数据库成员错误GET/Presence/发送均500、正常未知会话404、非法心跳400及已耗尽来源零body读取全部通过，未发生DATA RACE。原4000/160字符、30秒真实等待、所有消息/Outbox/已读故障与完整事实断言保持。
+- `test022-current-frontend-results.json`11:15:55六门全部0：280/280单测0skip/4.801s（实际Node4.110s）；Type3.073s、Lint20.624s、Build13.542s/58页、Browser32.945s/9/9零skip（实际29.178s、原五秒leaf/匹配Chromium151）、audit3.303s/全依赖零漏洞。没有前端源码/DTO变更。
+- test022-final进入源码哈希冻结与独立空库完整验收；编译发现所有消息/Presence/未读及全querycache/queue名称、逐个Race count2/零skip，两个百万/千万大型fixture各独立批，原leaf/包预算不变。全仓Test/覆盖≥27%/Race/Vet/Build/tidy/govulncheck与完整168 Schema源绑定/拥有基库清理全部完成前，仍IN_PROGRESS。
+- `test022-final-backend-results.json`11:34:47十五阶段全0：初始化4.756s、七模块批164.875/132.637/39.685/72.708/18.018/44.616/11.618s，78编译名称各两次共156 PASS/0skip；普通136.346s、覆盖24.625s/30.1%≥27%、全仓Race146.526s、Vet8.702s、Build11.751s、tidy11.943s、govulncheck23.266s。sourceUnchanged/schemaFilesUnchanged=true，拥有基库test_remediation_test022_1790824816376清理0。该报告保留，后续最终资源复查新增缺陷，不能用此时旧源码通过证据替代新增修复后的验收。
+- `test022-chat-state-first-red.log`真实Race退出1/2.110s：16并发共8192个聊天用户状态全保留而非有界，20ms纯缓存TTL实际等待30ms后再写新用户，旧状态仍保留且总量2；没有读取旧用户来掩盖缺少清理。HTTP的原30秒TTL另有完整真实等待用例，不用纯缓存短TTL代替。`test022-user-state-first-red.log`普通退出1/38.809s：多用户以及单用户多Session两种实际8192条均无界。
+- 本地回退缓存复用原4096总记录预算，用户Session先清过期、超额只淘汰最早本地Session；聊天写入清过期并在超额时淘汰最早到期本地项。Redis权威状态/登录Session/权限/150秒用户与30秒聊天TTL不改变；明确有界回退可近似，不宣称跨副本缓存瞬时一致。新增用例和既有多Session协议正在Race双次验收，最终全门将用新前缀test022-verified，不覆盖首轮全PASS报告。
+- `test022-all-state-capacity-fixed-race.log`Race count2退出0/32.534s，全部五个TEST022缓存顶层加既有多Session协议，六名称各两次共12 PASS/0skip；8192多用户/单用户多Session全局4096、16并发聊天4096、无人查询的旧聊天TTL自动清理、新状态可读、多Session逐个退出及全部TTL清零均通过。现新完整阶段门test022-verified冻结Go源码，发现新增全部名称，不减少任何原用例或放宽预算。
+- 新test022-verified八模块批已全部0，81实际编译名称逐名两次，共162 PASS/0skip。12:04:39新前端六门全0：280单测0skip/7.517s、Type3.950s、Lint23.258s、Build14.452s/58页、Browser27.398s/9/9零skip且原五秒leaf不变、audit3.973s/全依赖零漏洞。后端普通148.614s及覆盖2.153s/30.2%通过，最后全仓Race/扫描/源码Schema哈希和拥有库清理未全部核对前仍IN_PROGRESS。
+- `test022-verified-backend-results.json`12:06:09十六阶段全0：初始化9.469s、八模块批181.436/131.267/45.470/76.809/42.126/4.652/136.823/8.118s，81名称162 PASS/0skip；普通148.614s、覆盖2.153s/30.2%≥27%、全仓Race155.046s、Vet12.492s、Build4.812s、tidy0.426s、govulncheck7.722s/零可达导入漏洞、四未调用公告。sourceUnchanged/schemaFilesUnchanged=true，拥有基库test_remediation_test022_1790826566807清理0。结合12:04当前前端六门，本项独立High/P1 CLOSED（D355）；443 CLOSED、本批12/18，进入TEST036，全部失败/夹具纠偏/旧报告保留，Goal ACTIVE。
+
+### TEST036蓝图完整HTTP与实际Worker首轮（验收尚未完成）
+
+- 仓库外草稿在TEST022源码冻结期间准备，冻结结束和哈希/清理结果核对后才新增Go文件，不改变旧报告源码。十一顶层包含三源格式上传/审核/实际转换下载、未知及畸形palette/几何、250000合法块生成32–64MiB规范结果、NBT实体完整JSON保留与有损转换拒绝、完成/终止/审核通知CHECK、实际admin Session保留owner封面、过期租约/迟到Worker隔离/实际OSS删除，以及完整HTTP并发4/16与同operation去重。
+- 全部源上传使用真实presign/PUT/complete和真实Session/RBAC，源/规范及所有块/材料/体积/并发/租约预算保持；实际生产processJob/recovery/drain在拥有168库和本机OSS替身执行。任务事件只称PG durable意图，不冒充NATS消费/云端OSS签名验真。首轮test036-full-http-first-execution正在执行，尚不称有效RED/修复或关闭。
+- `test036-full-http-first-execution.log`普通退出1/111.656s：十一顶层全执行但都在完成时停住，实际原合同201被测试误写200，是夹具错误而非生产RED。纠正为201后`test036-completion-status-corrected.log`退出1/110.225s：真实有效RED是queued新上传以not_required匿名公开（含原始object key/variant metadata）、未知或负索引被静默丢弃、错误state类型与空/错误name变air被接受，以及完成通知CHECK拒绝后任务仍completed。另有错review路由和owned OSS路径表示造成假失败，分开保留。
+- 测试审核改为实际PATCH /content-revisions/<revision.public_id>，请求ID从实际pending request关联revision读取；本机OSS替身把SDK的/bucket/key表示规范为同bucket逻辑key，不改生产URL/签名实现。`test036-other-format-palette-first-red.log`退出1/0.471s，Litematic未知索引/空name/缺packed word三项有效RED；Sponge首次改错v3层级不是RED。`test036-sponge-v3-fixture-corrected.log`0.356s/1：实际canonical Blocks.Palette/Data空状态名有效RED，未知索引原来就正确拒绝，不能宣称为新漏洞。
+- 已修复已证实的早期发布和palette：new pending blueprint明确review_status=pending，正常规范化/审核后仍按原配置发布，无DDL；Vanilla/Litematic复用严格非空string名称与整数index核验，未知索引错误而不continue，Litematic先核对完整packed字数；Sponge仅补空state拒绝、不改原未知索引门。新完整test036-private-palette-fixed-full-http执行中，通知/大规范读/恢复等候选尚待真实新结果，仍IN_PROGRESS。
+- `test036-private-palette-fixed-full-http.log`普通1/113.877s：unknown/palette/几何、实体完整保留与有损转换拒绝、实际lease/OSS补偿及完整HTTP4/16/同operation全部PASS；合法250000块规范结果转换仍因旧32MiB读取拒绝，成功通知仍遗失、真实revision route approve/reject CHECK仍200、终止任务已failed而通知0，均为有效RED。匿名cover204是既有安全空响应而非404，admin metadata DTO为updated/reviewRequired/revisionId而无status，二者仅纠正夹具、不修改生产合同。
+- 成功/终止失败/耗尽租约通知收口为唯一notifyTemplateTx，与主体/variant/artifact、job CAS或失败状态同一事务，真正PG读取或Outbox失败传播；移除所有post-commit独立notifyTemplate路径。蓝图审核approve/reject使用既有TX通知helper同事务，故障500完整回滚。规范对象读显式沿用64MiB规范预算，源读取仍32MiB；不全局提高源上限。`test036-notification-and-normalized-read-fixed.log`普通0/112.398s：十三顶层全部PASS，实际源636297B、规范35365139B、250000块完整转换。
+- 最终lease复查扩展旧Worker实际normalize入口（非仅complete/heartbeat）：`test036-stale-normalizer-write-first-red.log`1/10.241s，真实旧runToken返回LeaseLost前仍把queued主体改processing，完整事实断言有效失败。状态UPDATE现同一SQL核验job/blueprint/attempt/runToken并FOR SHARE锁任务，零匹配返回LeaseLost且不改主体。`test036-stale-normalizer-fenced-race.log`Race count2退出0/11.697s，实际过期接管、旧complete/heartbeat/normalize全隔离、重启新attempt及真实OSS补偿删除均两次通过。
+- run-test036-batched-backend开始独立空库初始化与Go源码冻结，实际编译发现全blueprint/BUG076/077/079/SEC027、OSS删除、相邻content_review，以及完整querycache/queue名称，全部逐名Race count2/零skip。原百万/scale及新大型源、并发配额和恶意矩阵各独立批，仅分组、不放宽leaf/包预算或减少名称；完整阶段门结束前保持IN_PROGRESS。
+- `test036-final-backend-results.json`12:40:41保留失败：初始化13.509s/0、首批75.368s/0（20名称40 PASS），第二批14.919s/1，两次BUG079旧源码形状断言期待`upload_expires_at)`；新增review_status列使其不再为最后一列，真实清理流程未改变。sourceUnchanged/schemaFilesUnchanged=true，拥有基库test_remediation_test036_1790829521258清理0；后续门没有执行，不能称全验收通过。
+- BUG079仅把该断言更新为同时明确upload_expires_at和review_status的实际INSERT及pending值，原所有失败/放弃/清理调用检查不删除。`test036-expiry-static-contract-corrected-race.log`Race count2退出0/1.652s、两次PASS。新前缀test036-verified重新独立空库、完整发现/双次Race、全仓门及源/Schema哈希冻结；test036-current前端原六门同时开始。原失败报告保留，TEST036仍IN_PROGRESS，Goal ACTIVE。
+- `test036-current-frontend-results.json`12:50:29六门全部0：单测6.237s/280 PASS/0skip（实际Node5.645s）、Type2.969s、Lint22.896s、Build16.010s/58页、Browser30.367s/9 PASS/0skip（实际26.310s、原五秒leaf及固定Chromium151）、audit4.525s/584依赖零漏洞，无前端源码/DTO变更。
+- `test036-verified-backend-results.json`13:05:08二十二阶段全部0：初始化4.597s，十四批90.450/16.156/102.842/71.558/13.484/17.807/28.420/46.589/79.407/51.757/37.854/4.581/44.517/7.558s；126真实编译名称逐个两次Race，共252 PASS/0skip。普通152.530s、覆盖2.022s/30.2%≥27%、全仓Race163.820s、Vet7.006s、Build4.216s、tidy0.447s、govulncheck5.061s/零可达导入漏洞及四未调用公告。sourceUnchanged/schemaFilesUnchanged=true，拥有基库test_remediation_test036_1790830136388清理0。BUG079原失败及所有有效RED/夹具纠偏保留，结合当前前端六门，独立High/P1 CLOSED（D356）。444 CLOSED、本批13/18，TEST037 IN_PROGRESS，Goal ACTIVE。
+
+### TEST037仓库外准备（尚无实际验收结果）
+
+- 原范围为ESA到期/跨用户重放、并发配额、举报绑定回滚、completed删除Key复用、分片放弃、迁址丢失和GIF后帧预算。按现已统一的private presigned合同区分申请授权与bearer能力。测试草稿在TEST036源码冻结期间只存仓库外，加入独立HMAC核验和真实60秒等待、32并发额度准入及两真实PUT后的并发结算、真实举报登记/绑定CHECK、真实part/失败abort/新cleanup worker、过期删除Worker与生成对象同Key重用；迁址/GIF继续准备。不能把草稿预期或已关闭旧模块测试称为新RED/本项验收。
+- TEST036最终冻结结束后用apply_patch落地八顶层/996行新测试，`test037-compile-discovery.log`0/0.443s证明八名称全部实际编译。`test037-full-http-first-execution.log`普通1/67.837s，三顶层PASS（实际COPY/来源删除队列故障和重启、GIF完整预算正反边界、完整HTTP后帧/帧数/时长422及实际DELETE）；五FAIL。普通user canonical ticket.category原样回传完成被400拒绝是真实RED，已核对前端app/_lib/oss-upload.ts实际completion/abort正是原样回传，而非夹具错误。举报注册CHECK原500/全事实回滚通过，绑定CHECK故障被400误报也是真实RED。由于上游目录错误，原60秒等待、实际配额结算、multipart后续和迟到DELETE尚未完成，不预记为PASS/RED。
+- 只修复已有证据：generic用户分类仅解包当前认证用户的精确users/<id>/files/单scope，project source权限分支仍先执行，原跨用户Key/目录检查不绕过，前端合同不变。举报binding DB error与无效/他人附件RowsAffected分开：DB500并整TX回滚，无效输入400不变。新test037-category-and-report-fixed-full-http首轮执行中，删除Worker候选尚无有效RED，TEST037仍IN_PROGRESS。
+- `test037-category-and-report-fixed-full-http.log`普通1/124.322s：private全HTTP及独立HMAC校验/五类篡改和真实原60秒等待65.44s PASS，举报上传/绑定故障/恢复完整事实、multipart真实parts完成/失败abort/新cleanup worker与旧完成拒绝、实际迁址/GIF矩阵均PASS。新有效RED：过期第一incarnation Worker在已被新Worker物理删除/完成并可信重新生成的同Key上实际DELETE返回nil，能破坏active新对象。并发结算夹具只回退expires_at，违反既有expires_at>created_at CHECK，并非生产失败；仅将拥有reservation created_at同步设到过去，不改Schema/原TTL。
+- 外部DELETE现在先取得当前processing/id/runToken行的FOR SHARE锁，并一直持有到实际provider side effect结束；仅complete CAS不足以隔离迟到Worker。配置读取在事务前，同连接TX执行unregistered guard，不新增连接嵌套。既有ARCH020测试改为真实claim后验证registered guard，不再伪造无ID/token job；原单连接/错误观测检查保留。新三名称Race count2执行中，未关闭TEST037。
+- `test037-quota-fixture-and-physical-delete-fixed-race.log`Race count2退出0/26.821s：三名称各两次共6 PASS/0skip，32真实并发presign一200/31配额403、两实际PUT后过期reservation/实际权限变化并发结算一201/一403与准确source/stored/daily/reserved、旧physical DELETE LeaseLost且active再生bytes不变、两次物理删除及相邻单连接registered guard/失败指标全部通过。
+- 新`test037_oss_delete_lease_inflight_integration_test.go`使用拥有HTTP代理只暂停实际DELETE，不替换worker processor；已过期当前lease在provider阻塞期间不能被另一production worker claim，事实和bytes直到释放不变，之后真实DELETE及CAS完成。`test037-inflight-provider-lease-race.log`Race count2退出0/13.381s，两次PASS/0skip，原90秒fixture预算不延长。
+- test037-final开始独立空库及Go源码/完整168 Schema冻结；发现172相关HTTP源名称（60文件），含全部OSS、blueprint、通知审核、治理/TEST048、项目文件TEST016和OPS008实际logo，相邻完整querycache/queue同样发现并验证编译名。原大型fixtures及原60秒到期用例独立批，全部名称仍逐名count2/原预算，普通全仓门及最后哈希/拥有库清理必验。当前前端六门test037-current同步开始，最终完成前仍IN_PROGRESS。
+- `test037-current-frontend-results.json`13:27:26六门全部退出0：单测5.236s/280 PASS/0skip、Type3.105s、Lint28.534s、Build14.890s/58页、Browser24.084s/9 PASS/0skip（固定Chromium151、原五秒leaf）、audit3.191s/零漏洞。没有前端源码改动；后端完整阶段门仍运行，不能以此单独关闭TEST037。
+- `test037-final-backend-results.json`13:50:55三十一阶段全部0：初始化4.748s，23相关批223真实编译名称逐个两次Race，共446 PASS/0skip；普通141.703s、覆盖1.537s/30.2%≥原27%、全仓Race150.270s、Vet7.197s、Build4.182s、tidy0.424s、govulncheck5.545s/零可达和导入漏洞及四未调用模块公告。sourceUnchanged/schemaFilesUnchanged=true，拥有基库test_remediation_test037_1790832298775精确清理0，当前前端六门全0。原RED/夹具时间CHECK失败及单独Race报告保留；TEST037独立High/P1 CLOSED，445 CLOSED、本批14/18。TEST038进入IN_PROGRESS，Goal ACTIVE。
+
+### TEST038评论HTTP草稿落地（尚无实际结果）
+
+- 九顶层/完整Session及168拥有库，55表全事实，覆盖目标隐藏后的所有comment/watch/attachment子路由、跨目标幂等重放、32插眼最后一个名额与CY私有命令、16同基线编辑与合法10000/非法10001字符、25祖先/200大回复编码512KiB和64节点、501根keyset完整遍历/作用域拒绝、通知CHECK事务、实际上传日志/处理失败重试/过期claim/新worker恢复/迟到完成及删除解绑、真实PG装配故障。
+- 本机对象提供者与生产worker网络往返不冒称真实云端/杀毒/NATS送达；大树fixture使用生产插入helper而非伪完整创建路由。准备期间不修改冻结Go；实际编译/首轮仍须完成，不预记RED或PASS，TEST038 IN_PROGRESS。
+- `test038-compile-discovery.log`0/实际pkg0.403s，九名称均实际编译；`test038-full-http-first-execution.log`普通1/pkg159.923s。隐藏目标完整子路由、16编辑CAS与10000正/10001负边界、25层祖先/200大回复完整预算遍历、501根keyset完整遍历/三种scope拒绝四顶层PASS。真正RED：cross-target幂等请求200返回原目标评论；两种通知CHECK均comment201/comments=2/被拒intent=0/55事实已变化；真实PG附件装配故障404而非500。
+- 插眼首轮在2031根批量夹具INSERT耗尽原90秒，尚未到并发请求，不能称配额生产RED或PASS；新批量fixture显式合法九字符public_id，原全部Schema/trigger/约束和2031/1999边界保留，继续诊断，不延长时间。日志样本裸token=不属现有已声明secret_field规则，改真实access_token=输入，不把假设错误当新增脱敏漏洞；此前actual upload/任务故障/恢复已走到redaction，迟到完成/删除还未验收。新test038-fixture-and-hidden-replay-verification实际执行中，原失败保留，TEST038 IN_PROGRESS。
+- `test038-fixture-and-hidden-replay-verification.log`普通1/pkg101.165s：修改断言不中断后证实目标已pending、原route404时，另一可见route仍200回隐藏正文；日志已声明access_token样本实际脱敏/迟到拒绝/删除解绑全PASS。显式public_id仍2031同作者published bulk截止90.70s，不是随机ID成本。独立`test038-bulk-fixture-explain-first.log`0/pkg5.148s，真实20行完整Schema/默认jit=on/所有约束与trigger执行，热点popularity113.233ms；源码逐作者published author_count会重复解析整个批量集合。只修正quota fixture为1999可见deleted历史评论/仍active watches+32真正published竞争者，原全部触发器/约束/2000边界不跳过、不关闭JIT、不放宽90秒，也不宣称同作者2031published bulk性能通过。
+- 跨目标重放现在同idempotency advisory TX核验真实target_type/id/version，409无旧ID/正文；两类可靠通知移到同评论/日志job/插眼计数TX，错误500全回滚，删除唯一旧post-commit watcher sender；实际附件读取仅NoRows/不可见404，PG故障500。`test038-scope-notification-and-attachment-fixed-full-http.log`普通0/pkg84.734s，十顶层全PASS；完整2031历史fixture后32请求1成功/31限额400/active2000，quota/CY/取消重激活10.58s，原90秒保持。
+- 又增加私密化后owner实际PATCH父正文的保护检查，并新增两祖先watch同用户仅一意图、mute继续计数不通知、blocked不计数/通知而direct仍保留。`test038-private-parent-and-notification-policy-race.log`Race count2退出0/pkg22.437s，两名称各两次共4 PASS/0skip。test038-final开始真实编译发现全comment/BUG082–085/SEC031–033/log/block/通知/治理及完整querycache/queue；原百万/大型用例独立批，所有名称逐名Race两次，之后原全仓门/源码及168 Schema哈希/拥有库清理。前端test038-current原六门同步，全部完成前不关闭，Goal ACTIVE。
+- `test038-current-frontend-results.json`14:16:52六门全0：280单测5.384s/0skip、Type3.212s、Lint23.691s、Build14.725s/58页、Browser24.766s/9 PASS/0skip（固定Chromium151、原五秒leaf）、audit3.557s/零漏洞；无前端源码修改。
+- `test038-final-backend-results.json`14:31:39十九阶段全部0：初始化6.635s；11相关批104真实编译名称逐个两次Race、208 PASS/0skip，批次73.536/202.260/105.036/35.994/29.128/34.137/57.299/37.914/4.941/44.164/7.077s；普通133.579s、覆盖1.724s/30.2%≥原27%、全仓Race153.263s、Vet7.883s、Build4.890s、tidy0.508s、govulncheck5.220s/零可达与导入漏洞及四未调用模块公告。源/完整168 Schema哈希true，拥有基库test_remediation_test038_1790835337120精确清理0。保留首轮RED和夹具诊断；TEST038独立High/P1 CLOSED，446 CLOSED、本批15/18，Goal ACTIVE。
+
+### TEST039完整皮肤HTTP矩阵落地（尚无实际结果）
+
+- 八顶层真实上传/创建审核/私有档案/管理员、审核通知CHECK、两owner共享额度与last-ref tombstone/实际旧DELETE及新Key、真实PUT后回滚/持久补偿/重试、两请求库和档案额度、权限/非标准PNG/未知字段/每日100次。66表全行事实，原完整168 trigger/约束保留。hash bearer与元数据隐私合同分开，不新增Blob ACL、不承诺历史字节撤回。
+- TEST038源冻结与拥有库清理成功后才落地；编译与实际首轮仍待执行，不预记RED/PASS或关闭，不预改生产。原90秒/4槽/100日额等不放宽，Goal ACTIVE。
+- `test039-compile-discovery.log`首轮1仅worker实际API调用误写；按真实两参数构造及void drain纠正，`test039-compile-discovery-corrected.log`0/pkg0.352s、八名称实际编译。`test039-full-http-first-execution.log`normal1/pkg48.976s（墙钟53.238s），八顶层五PASS/三FAIL：private profile、admin、actual derived PUT+持久补偿/清理重试、两请求library/profile限额和每日100预算实际通过。有效RED是approve/reject outbox CHECK被日志吞没，HTTP200/状态已提交/66事实变化，以及last-ref file deleted后hash GET仍200。
+- 生产skin审核意图改同审核TX、raw blob读取join active oss_files且在304前核验，不增Blob ACL、不改变hash bearer/immutable/成功DTO。`test039-review-and-deleted-content-fixed-full-http.log`normal1/pkg54.515s原八顶层全部PASS（last-ref后新Key/实际旧DELETE也完成），新增并发审核仅在fixture事实查询使用不存在skin_asset_id而失败；修为真实asset_id，不改DDL/约束。追加实际PG500/条件ETag恢复和production maintenance/DELETE，新的十顶层test039-all-ten全矩阵正在执行。
+- `test039-all-ten-full-http.log`normal1/pkg66.258s，九顶层PASS（新并发review/生产GC和实际DELETE已完成），最后PG装配故障断言误假定通用API的500，而真实既有writeYggdrasilInternalError协议明确structured503 ServiceUnavailableException。只纠正测试期望为原launcher503，生产错误函数不改、不将此当新增生产RED；保留失败报告，十顶层test039-all-ten-launcher-error-contract重新执行。
+- `test039-all-ten-launcher-error-contract.log`normal0/pkg69.509s，十顶层全部PASS/0skip：审核原子性、tombstone含If-None-Match拒绝/健康304、mixed-private/public共享hash仍可用、真实补偿、新Key旧DELETE、并发库/档案/审核及GC/日额/PG503恢复完成。开始test039-final实际编译发现全部Skin/Profile/Yggdrasil/Localized/review/通知治理+querycache/queue两次Race；百万目录和5000衣柜独立批不丢名称/不改原预算，之后全仓门与源/168 Schema哈希/精确拥有库清理；test039-current前端六门同步，全部完成前不关闭，Goal ACTIVE。
+- `test039-current`前端单测5.701s/Type3.128s/Lint22.378s/Build13.576s全0；browser5.328s/1未开始，启动进程遗漏PLAYWRIGHT_BROWSERS_PATH，尝试默认ms-playwright路径无rev1234可执行文件。不是浏览器业务RED，也不算E2E通过；保留失败报告，用既有拥有playwright-1.62.1/Chromium151路径重跑完整六门test039-verified-current，不改版本/原断言/五秒leaf预算，后端源码继续冻结。
+- `test039-verified-current-frontend-results.json`14:52:46完整六门全0：单测4.915s/280 PASS/0skip、Type2.521s、Lint27.013s、Build13.421s/58页、Browser24.202s/9 PASS/0skip（既有固定Chromium151/原五秒leaf）、audit3.355s/零漏洞。前端源码未改；后端模块与最终门继续，不以此单独关闭本项。
+- `test039-final-backend-results.json`15:05:51十八阶段全0：初始化7.013s，10批124实际编译名称逐个两次Race/248 PASS/0skip，31.208/71.665/232.891/80.407/35.488/7.646/41.744/4.796/44.667/7.520s；普通159.598s、覆盖1.793s/30.2%≥原27%、全仓Race184.552s、Vet7.944s、Build4.500s、tidy0.480s、govulncheck6.269s/零可达和导入漏洞及四未调用公告。源/168 Schema哈希true、拥有test_remediation_test039_1790837410096清理0，当前前端六门全部0。D359独立Medium/P1 CLOSED，447 CLOSED/本批16/18，Goal ACTIVE。
+
+### TEST042社区完整HTTP矩阵落地（尚无实际结果）
+
+- TEST039源冻结与全部门/精确清理成功后才落地十一顶层/66表事实；四类型权限/审核、引用可见性/预算、CAS/语言、悬赏冻结/退款/重提/结算/竞争与CHECK全回滚、可靠通知、翻译权限/配额/幂等/入队/真实persist helper/结果读取、能力和实际写权限。合成AI配置/拥有loopback无外部供应商调用，不冒称真实凭据/充值/AI执行/送达。原90秒与所有领域预算保持，编译和首轮尚待执行，不预记RED或关闭。
+- `test042-compile-discovery.log`1仅夹具误用不存在commentItem；按实际commentResponse/createCommentRequest更正类型及body JSON字段，未修改生产。十一名称的纠正编译与test042-full-http-first-execution实际首轮已开始，尚不预记RED/PASS或关闭；原失败保留，Goal ACTIVE。
+- `test042-compile-discovery-corrected.log`0/pkg0.399s十一名称真实编译。`test042-full-http-first-execution.log`normal1/pkg102.027s（墙钟106.561s），五顶层PASS（四类型/并发结算/引用可见性/合法32+64与1MiB及超限/翻译16幂等和可靠Outbox及真实persist）。真实RED：answer通知CHECK仍200/answered+awarded/66事实变，approve与reject通知CHECK仍200/已提交，真实hold CHECK400泄露PG constraint而facts本已回滚，reviewer canEdit=true但实际PUT403，16同baseline请求一200/14正确409/一SQLSTATE40001误500。resubmit初次review409另行精确验证，不简单删断言或改审核配置。
+- `test042-unpublished-resubmission-contract.log`normal1/pkg6.250s：真正normal Session、Create=true/Edit=false、先pending再实际reject，未published对象的重提直接approved且匿名GET200，明确创建审核旁路。修复仅已证实边界：通知共TX、bounty具名输入错误/系统500、显示能力同真实写权限、未发布重提create审核策略、baseline40001 rollback后原409合同；原repeatable-read/90秒/引用/正文/财务/AI预算不变。新test042-scope-review-money-and-cas-fixed全矩阵执行中。
+- `test042-scope-review-money-and-cas-fixed-full-http.log`normal0/pkg87.478s，十一顶层全PASS/0skip，包括完整财务退款重提/16退款、奖税与并发/通知和ledger失败回滚、16 CAS/原409+currentRevision及语言人工审核、四类型与引用/翻译。新增四kind拒绝重提与显式no-review正反matrix、列表/detail能力一致性，两名称Race count2执行中。Medium→High/P1独立依据创建审核旁路（与BUG087同类权威），不声称资金重复支出/P0、不按汇总凑级，最终门未完成。
+- `test042-four-kind-review-and-list-capability-race.log`退出0/pkg53.912s，两名称各两次共4顶层PASS/0skip，包含四kind实际reject/重提审核和显式免审、列表/详情能力与真实写权限。test042-final使用完整168新拥有基库、所有发现名称先编译核对、逐名Race count2/无skip及原百万目录独立批，然后全仓门/源与Schema冻结/清理，进行中不提前关闭。
+- `test042-current-frontend-results.json`于15:30:42六门全部0：单测6.206s、Type3.454s、Lint28.061s、Build16.087s、Browser25.081s、audit3.634s。固定拥有Chromium151/原五秒leaf，前端未改；测试数量和页数以实际日志复核，不将前端门单独当作社区最终关闭依据。
+- 15:59:56首轮test042-final报告只完成13阶段：初始化7.669s/0，11相关批170编译名称340 Race PASS/0skip（130.341/580.971/321.537/76.833/69.241/345.791/46.367/43.565/4.897/44.303/7.293s），普通136.906s/1。唯一失败是TestProductionHandlerModulesStayReviewable：1523行超过原1500上限；其余门未执行，不预记PASS或最终覆盖率。sourceUnchanged/schemaFilesUnchanged=true、拥有基库test_remediation_test042_1790839760237清理0，原失败保留。
+- 翻译完整196行职责原样迁至community_post_translation_handlers.go，主文件1326行；删除主文件唯一不用的strconv import。两源码测试仅改实际职责文件读取，不移除/放松原Outbox、错误分类、CAS断言。test042-module-responsibility-split-contract.log普通0/pkg0.718s四名称PASS/0skip，重新开始test042-verified-final全阶段源冻结；期间STYLE003只允许前端/仓库外草稿，不编辑后端Go。
+
+### STYLE003当前生产UI差异实证与前端迁移准备
+
+- style003-existing-production-ui-red-browser.log实际使用刚完成test042-current的原standalone产物/固定Chromium151/原五秒leaf，2测试退出1、0PASS/2FAIL/0skip，分别停在英文日志标题和风控导航不匹配；源码对应仍固定中文。API替身只替换外部API请求，实际页面/React/静态资源不替换；这两个静态文案RED不依赖尚未扩展的code/details fixture能力。
+- 仓库外准备统一错误envelope/稳定code、真实语言设置PG故障测试，后端尚未落地。前端使用已有翻译字典和typed ApiError facts，已知code只做展示映射，未知code用页面本地化失败提示，不按原始文案判断业务、不改变code/retryAfter/details；已迁移通知模板的八类调用继续通过现有实际测试验收，不新建通知发送权威。
+- style003-frontend-first报告16:10:41：单测5.343s/1（283中282PASS/1旧源码中文断言），Type11.163s/0、Lint24.053s/0（一既有内部导航warning）、Build25.149s/0、Browser35.320s/1（12中11PASS/1未知GET /api/v1/location夹具失败）、audit3.480s/0。新英文/简中日志及风控提示实际通过；评论分支执行到cleanup遇未知请求，不把该fixture错误冒称生产缺陷。
+- 单位源码断言迁到已有字典实值并保留所有参数/时间边界；location只返回真实isMainlandChina字段，不放松未知请求验证。依据本地Next useRouter完整文档把唯一内部/comments/编码id导航迁为router.push。style003-frontend-verified报告16:14:45：单测5.178s/1仅旧assign源码形状不匹配，Type3.011/Lint21.998/Build14.072/Browser37.849/audit3.476s全部0，12浏览器PASS/0skip且Lint零warning。对应导航断言改相同编码地址的新API并新增禁旧路径检查，其余cursor/merge边界全部保留。
+- style003-frontend-final报告16:16:56完整六门全部0：283单测4.856s/0skip、Type2.549s、Lint18.957s/零warning、Build12.280s、Browser36.642s/12PASS/0skip、audit2.804s/零漏洞；固定Chromium151/原五秒leaf。后端仍未迁移且TEST042冻结未结束，STYLE003仍IN_PROGRESS。
+- 当前未改验证器的allow-open真实结果：449 audit_unique/ledger_unique，High148/Medium236/Low65，447 CLOSED/2 IN_PROGRESS/0OPEN。此模式只核对登记/类别/允许阶段状态，不代表严格最终严重度门通过；原176/214/59要求与最终独立证据统一仍待验收，未按目标数字改级。
+
+### TEST042最终冻结验收与独立关闭
+
+- test042-verified-final-backend-results.json于16:36:57完成，19阶段全部0：initialize4.549s、11模块批130.234/598.498/266.821/66.213/71.674/303.464/38.232/37.740/4.627/44.103/7.050s，170编译名称逐个两次Race，共340 PASS/0skip。第二批仍在原600秒报警内通过，未改测试context或领域预算。普通132.218s、coverage1.557s/30.2%≥27%、全仓Race149.509s、Vet7.302s、Build4.574s、tidy0.459s、govulncheck5.512s（零可达及导入漏洞，四未调用模块公告）。sourceUnchanged/schemaFilesUnchanged=true，owned test_remediation_test042_1790841932774清理0。
+- style003-frontend-frozen-current于16:24:30完成，596交付文件前后哈希一致：283单测5.271s、Type2.608s、Lint20.120s/零warning、Build14.174s/58页、12浏览器37.796s、audit3.421s/零漏洞，六门全0/无跳过。D360独立High/P1 CLOSED，448 CLOSED/本批17/18，Goal ACTIVE。
+
+### STYLE003后端实际错误协议与三PG故障
+
+- style003-backend-initial-red.log normal1/pkg5.014s，三FAIL/一PASS/0skip：legacy错误、空typed code、实际未登录HTTP均缺code；成功与Yggdrasil独立协议不受影响。仅统一出口后style003-backend-canonical-code-semantic-red.log normal1/pkg5.078s，三PASS/一FAIL明确非法语言收到HTTP_400而不是领域码，尚未运行到其余故障，不伪称所有分支RED。
+- 六语言设置code与read/begin/update/audit/commit结构化日志落地；style003-backend-error-contract-green.log normal0/pkg5.007s，四顶层PASS/0skip。真实PG用户CHECK和活动CHECK均500相应code，26表全行事实及偏好不变；修复约束后真实PUT200/de-DE与en-US，实际改列GET500/read code，再恢复GET200。SQLSTATE/约束/列诊断仅日志，响应保留原通用诊断且无数据库详情。
+- 2026-10-01 16:42开始style003-final后端源/完整168 Schema冻结、所有相关编译名称逐个Race两次及全仓门；当前前端style003-paired-final同步六门并核对596交付文件哈希。源码期间不编辑Go/前端交付文件，本项仍IN_PROGRESS，未预记最终PASS。
+- final-live-provider-first-probe.log初次真实只读两顶层PASS/0skip，pkg4.687s：Mojang/Forge/NeoForge/Fabric/LiteLoader版本源和真实Modrinth元数据。不是最终源码验收，不调用真实AI、不证明真实Exporter ZIP；最终当前源码仍须另行执行。
+
+### STYLE003全部阶段完成，本批18/18
+
+- style003-final-backend-results.json17:09:23全部20阶段0：init4.485s，12批249.236/190.203/85.583/69.298/53.609/102.813/418.561/46.566/38.475/4.626/44.826/7.126s，163真实编译名称326 Race PASS/0skip。普通139.972s、coverage1.700s/30.2%≥27%、全仓Race151.753s、Vet7.114s、Build4.303s、tidy0.408s、govulncheck5.073s/零可达及导入漏洞与四未调用模块公告。1061源码/模块/CI文件哈希和完整168 Schema均true，拥有test_remediation_style003_1790844127692清理0。
+- style003-paired-final前端16:43:44六门全0：283单测5.519s、Type2.969s、Lint22.635s/零warning、Build12.987s/58页、12浏览器37.115s、audit3.128s/零漏洞，0skip且596交付文件哈希保持。额外严格unused Type退出0/9.659s；gofmt首次1055参数超过Windows启动上限、并未执行，不计PASS，实际拆14只读批1055文件后零未格式化，源码未编辑。
+- D361独立Medium/P1 CLOSED，449 CLOSED/本批18/18；不冒称最终Goal完成。历史报告及原失败保持。
+
+### D362原统计与独立风险分开验收（用户明确确认）
+
+- 目标附件和新增原审计ZIP的核对见D362；17报告哈希相同、449ID/277明确grade/172缺grade。原审计仍17621459；复核14823665，不按汇总倒推。旧默认工具在全部CLOSED后真实退出1且仅严重度汇总一项失败；原始final-original-validator-policy-red.log保留。
+- 用户确认“同意，原统计与复核评级分别保留”后才更正工具，不修改原审计/闭合范围/证据门/测试。final-approved-validator-tests-first.log七顶层PASS/pkg3.681s，含14真实CLI反例全部实际validation FAIL；final-approved-validator-strict-first.log退出0，audit_unique=ledger_unique=449/statuses CLOSED449/original统计原值/复核单独值。
+- 17:17开始remaining18-final-current对新工具加入后的完整源冻结，原27%普通全仓/全仓Race/Vet/Build/tidy/govulncheck、工具Race双次/默认严格、五真实条件/每个编译Test/Fuzz的全部显式DB/真实队列Race双次/CI lint；同步remaining18-final-paired前端六门/源码冻结。没有降低任一原测试context/包600秒/query预算，原source/schema和6真实Archive前后哈希均核对，完成前不写最终PASS。
+
+### D363最终门实际失败与补修回归
+
+- remaining18-final-current-backend-results.json17:23:29：前十阶段0，实际五条件exit1/27.273s；四顶层通过、真实catalog失败（path当namespace），全部DB/queue/actionlint未运行。源/schema/ZIP保持、owned DB清理0。旧失败完整保留。
+- final-import-origin-regression-red.log：三个顶层FAIL/pkg0.358s，实际v1/path-only、空/冲突遗漏与标准HTTP redirect降级/userinfo穿透/default443拒绝。green.log normal0/pkg0.353s，未知namespace/原请求配置边界保持。
+- final-import-origin-backend-results.json：init0/4.724s，五条件1/24.712s；真实路径修复后已落2536 registry/3298 document和2043 recipe、12320 binding、13302 candidate、159模型/1003 block binding，在capability COPY因revision别名重复PK失败。源哈希true/owned DB清理0。新真实PG临时表PK回归final-capability-revision-alias-red.log同样1/pkg0.434s；复用唯一revision helper修复，原集成测试/断言保持。
+- remaining18-final-paired前端17:19:37六门全0：283单测6.730s、Type10.301s、Lint21.654s零warning、Build13.461s/58页、12浏览器37.472s/零skip、audit3.450s/零全部依赖漏洞；596交付文件冻结。此事实不替代后端尚失败的最终验收。
+
+### D364真实输入、完整字段合同与归档重建
+
+- key-aware真实按键先1/pkg0.905s（AE2/Mekanism key前缀错误）；key.namespace unit1/pkg0.320s。修复后三个非空实际包16条首次/重建逐ID/defaultKey完整。原版输入0按键，原断言改按源精确0而不让生产造数据，完整功能由实际非空包和两次Race继续严格证明。
+- key-fixed条件门1/40.186s：原版39附魔没有supported_items，旧假设无法成立。辅助断言对39条在初次/重建各自逐15合同字段/false/zero/缺失精确比较；另完整PG明确合成十五字段合同强制supportedItems等完整保留。
+- field-contract条件门1/161.205s：真实归档重建留下8孤立active child。orphan-red首轮23514仅非法夹具mode，不记业务RED；纠正为当前template默认mode后verified-red真实1/pkg0.899s。修复只处理selected mod/version的archived祖先后代，pending/有效人工/其他version不动；worldgen五invalid-container实际RED1/pkg0.338s，严格shape修复。失败日志和每个精确随机库清理结果保留。
+- final-import-origin-orphan-fixed-backend-results.json18:06:10六阶段全0/源哈希true/owned DB清理0；五条件194.464s/五顶层PASS/0skip，实际catalog180.49s、完整2536 registry/3298 document/2043 recipes/12320 bindings/13302 candidates/159模型/1003 bindings/1091 loot六分类、143语言1170976译文；22名称Race双次44 PASS/0skip、build0/8.570s。真实按键16条和39附魔来源逐值、独立15合成字段全Schema合同均通过。BUG013/SEC011重关，449 CLOSED，最后当前全仓/全部编译DB/队列/前端冻结重验开始。

@@ -25,7 +25,7 @@ func TestBug027LiveRowStreamsCheckEveryTerminalError(t *testing.T) {
 		{"simple_project_handlers.go", []string{"loadSimpleProjectAssociations"}},
 		{"modpack_handlers.go", []string{"loadModpackAssociations"}},
 		{"project_follow_handlers.go", []string{"myProjectFollows"}},
-		{"server_probe_scheduler.go", []string{"probeDueMinecraftServers"}},
+		{"server_probe_scheduler.go", []string{"probeDueMinecraftServersWithProbe"}},
 		{"project_update_events.go", []string{"appendReviewedProjectUpdateEventTx"}},
 		{"project_update_notification_worker.go", []string{"processPending", "process"}},
 		{"notification_worker.go", []string{"sendBroadcastEmail"}},
@@ -49,6 +49,17 @@ func TestBug027LiveRowStreamsCheckEveryTerminalError(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestBug027DefaultSchedulerUsesTheStrictClaimImplementation(t *testing.T) {
+	raw, err := os.ReadFile("server_probe_scheduler.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := goFunctionBody(t, string(raw), "probeDueMinecraftServers")
+	if !strings.Contains(body, "probeDueMinecraftServersWithProbe(ctx, db, serverprobe.Probe)") {
+		t.Fatal("production scheduler no longer delegates to the terminal-error-checked claim implementation with the default passive probe")
 	}
 }
 

@@ -108,6 +108,7 @@ func TestModExportJobResponseRejectsWrongJSONShapesIntegration(t *testing.T) {
 		create temp table mod_content_versions(id bigint primary key,public_id text not null);
 		create temp table catalog_import_jobs(
 			id text primary key,mod_id bigint not null,package_id text not null,target_version_id bigint not null,
+			created_by bigint not null default 1,
 			overwrite_existing boolean not null,status text not null,progress integer not null,current_stage text not null,
 			error_code text not null,error_detail jsonb not null,created_at timestamptz not null default now(),updated_at timestamptz not null default now(),
 			configured_modids text[] not null,detected_modids jsonb not null,primary_detected_modid text not null,

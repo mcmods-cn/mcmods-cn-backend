@@ -1,5 +1,14 @@
 # Schema 与 API 变更
 
+2026-10-01最终：当前完整generation168已经在owned空库真实安装与所有显式DB/HTTP合同中通过；449项全部关闭，最终14/6质量门和源码哈希通过。原审计基线字面量SQL表259→287（新增30/删除2）、显式命名索引181→229（新增58/删除10；动态/约束索引另列），完整名单/作用/实际计划见07；实际168空库287表/1130索引/0invalid，不混算两口径。D363/D364没有新增DDL或改变公开导入DTO。以下各段是当时变更与当时环境边界；其中“空库仍待/远程权限不足”是历史，本次本机隔离验收已经完成，未知远端和共享public155仍不重置或迁移。
+
+## D363/D364最终导入与供应商补修
+
+- 无新增DDL、generation、索引、双读/双写、远端或共享库重置；完整168 Schema源保持。
+- 文件resource_id与合法data路径归一化、key.mod命名空间两格式、revision能力去重使用单一已存在helper；归档分类收敛只处理当前mod/version的archived祖先，不改pending审核或其他版本，仍由既有version行锁串行。公开Job/导入/内容DTO不变。
+- Provider redirect统一原scheme/host/规范端口/userinfo origin约束；不安全重定向在凭据转发前失败，合法同origin/default443及本机无凭据HTTP保留。正常API字段不变。
+- 旧exporter未提供的源字段不生成；提供的字段逐值强制保留。独立真实非空按键及合成字段合同仅增强测试，不增加生产兼容主路径或降低原测试预算。
+
 ## SEC-011：供应商配置与请求头协议收紧
 
 - Schema：无数据库 DDL 变化；现有加密 `system_settings` JSON 结构不变。
@@ -2695,3 +2704,123 @@
 - 注册定义与已成功的live注册分别保存，成功prepare/persist后一次交换；首次失败、终态连接和注册失败经同一权威候选路径恢复。候选SUB拒绝不写设置/不替换旧连接；已连接后的正常reconnect/replay仍由官方库负责。
 - Close不再允许复活或启动本地新任务；父取消停止恢复。广播仍可丢，未添加伪持久重放或改变事件ID/origin协议；双实例恢复/重启后仍一次投递、无本机回声。
 - 后端独立部署即可生效，前端业务无需迁移；回滚会恢复初始离线不补订及错误就绪风险，无DB回滚。客户端所有者需遵循New→使用→Close终态合同，当前调用方无关闭后复用入口。
+
+## TEST-027：真实Schema/NATS HTTP验证边界（generation167保持）
+
+- 无生产DDL、索引、约束、种子、API、DTO、权限、前端或运行依赖变化。三个测试代次使用现有权威schemaGeneration；贴图夹具的索引、函数和trigger全部绑定实际会话临时Schema，公共Markdown列仅只读核对。
+- 完整HTTP矩阵使用随机拥有的167数据库、测试JWT/加密密钥和官方嵌入NATS/JetStream。持久化故障CHECK仅在该随机DB内，候选stream、密钥清除和并发运行态一致性通过真实HTTP验证，不改生产协议。
+- 全仓门的新数据库先核对public零对象，再用既有db-reset命令完整初始化及SeedRBAC；文档纠正为仅APP_ENV=development允许reset，初始化后切test且删除reset变量。代码未放宽test/staging/production保护，精确随机DB最终删除，共享public155及远程库不升级、不reset。
+- 本簇仅测试/安全初始化文档修正，无需客户端部署顺序或数据回填；回滚测试会恢复盲区而非任何业务兼容路径。完整closing集成结果尚待完成，不以定向成功代替发布门。
+
+## TEST-048及TEST-027后续测试基础（generation167保持）
+
+- 无生产DDL/API/权限/DTO变更。报告状态、证据生命周期、惩罚、来源绑定及JWT权威均使用当前实现；故障CHECK与人工时间移动仅存在于测试拥有的随机DB。皮肤百万夹具只改变数据和相同索引的构造顺序，未增加/删除生产索引。
+- 前端仅新增浏览器测试和开发依赖Playwright 1.62.1，npm package-lock是唯一权威锁；Node:test保持统一runner，生产React/API协议未变。CI增加生产构建后的浏览器步骤，不部署、不使用生产凭据。
+- 后端CI用本job自建mcmods_test服务并按原development guard执行Schema+种子初始化，其他步骤APP_ENV=test。普通Test/覆盖率、Race保持，显式全部DB门改按发现名称完整分批，保持每批10分钟和全部用例自身预算；无排除名单，SKIP不冒充PASS。
+- 这批是回归盲区与可复现测试设施修正，无客户端升级顺序、数据回填或生产Schema回滚。GitHub实际执行及最终全量结果仍待验证。
+
+## 2026-10-01安全补丁与TEST023（不改Schema/API）
+
+- 为真实npm扫描中新公告定向升级前端运行依赖Next16.3.8/Sharp0.35.4，以及匹配ESLint与兼容主版本传递依赖补丁；这是实际生产依赖变化，不仅测试代码变化。保持npm唯一权威锁，npm ci与277单测/7浏览器/58页生产构建/Type/Lint/全扫描0漏洞均通过。无React主版本、HTTP协议、Schema或配置键变化；回滚旧锁会重新引入已报公告，不作为安全交付方案。
+- TEST023新增真实React受控EventSource/API/时钟测试与完整HTTP SSE/PG会话/官方NATS测试，无生产Handler、DTO或租约预算变化。Redis为明确miniredis测试替身，不声称公网Redis/OSS/浏览器直连PG验证。
+- TEST027/048完整本地阶段已结束、逐项关闭；GitHub工作流本身仍未触发或验收，最终全项目门/其他条件夹具尚未完成。
+
+## OPS008共享Logo实现（开发Schema168，阶段独立验收通过）
+
+- 新增`idx_oss_files_site_logo_pending_expiry`：oss_files(created_at,id)，部分谓词source=site_logo_pending且status=active。无新表/列/权限，复用OSS文件、设置与删除Outbox。开发generation167→168，51个测试的当前代次断言同步（含首轮全仓发现的一条源字符串合同），其余约束不删除；共享public155不修改。生产本项目开发reset合同不被放宽，未知外部库未迁移。
+- 后端新增授权`POST /api/v1/admin/config/general/logo`（PNG/WebP输入≤1MiB、完整解码、边≤512、静态去元数据PNG输出）及公开`GET /api/v1/site/logo/{id}`（9位公开ID、来源/状态/扫描/TTL校验、短签名307 no-store）。原权限探测端点保留。上传201 data.url改为`/site-assets/site-logo-{9位ID}.png`；普通错误有稳定SITE_LOGO_*码，非法/超大/格式不符分别422/413/415。
+- Next原上传交互URL与成功201 `{url}`不变，安全WebP不写本地而转交后端；site-assets读取不再查本机文件、不跟随OSS重定向、不缓存短签名。site.general保存与新文件绑定、旧文件墓碑/Outbox同事务串行化；未绑定上传一小时TTL，复用有界维护和持久删除重试。
+- 公共品牌每次读取DB权威避免跨实例持有已删除Logo；旧本地Logo路径停止服务，旧站点名称保留，管理员须重新上传/保存绑定。不提供本地/OSS双读，不删除不存在的本机目录，不替用户执行未知生产回填。部署须先后端168及新路由、再Next；回滚旧端会重新引入本地非共享权威，不能作为长期兼容方案。
+
+### TEST024邻接修复：Logo短时跨主机委托（仍168）
+
+- 新增受现有admin.config.write/正常Cookie Origin保护的POST `/api/v1/admin/config/general/logo-upload-authorization`，返回no-store opaque SiteLogo授权及expiresAt，≤60秒且受parent JWT期限限制。仅Logo access GET/Logo upload POST可接收；一般Bearer/所有其他路由不接收，权威session/权限/封禁即时重核，不新增表/列/索引/缓存或持久queue。
+- GUI不再把cookie-session标记当JWT，也不获取主JWT；通过既有apiRequest Cookie模式取窄授权，再给同一BFF派生及共享写入。BFF同域Cookie须同Origin才转发，跨域使用窄委托。真实会话cookie的host-only/HttpOnly/Secure/Path/SameSite合同不改变，原图安全预算和Sharp管线不改变。
+- 凭据是短期可重试的管理上传授权，不是单次消费nonce。既有正常Bearer/同域Cookie管理上传保留，均进入同一持久OSS/品牌权威；没有本机回退或另一存储路径。未知生产实例不部署/不重设cookie。
+
+### TEST024邮件配置权威与失败关闭（无DDL）
+
+- 新mail_settings.go共用Server/Worker有错误的密文读取；仅ErrNoRows允许完整环境配置fallback。已有行解密/JSON类型/无效启用配置或DB失败必须传播错误并返回disabled零值，不能恢复环境邮件、空200或把fallback密码写回。站点general aggregate改读原严格函数，删除吞错wrapper。没有新缓存/双重权威或运行依赖。
+- 省略密码保留与密文upsert进入同一PG事务，使用settings:mail.smtp advisory锁串行首次保存/跨实例/密码轮换；成功后沿用原runtime version失效，原INSERT ON CONFLICT statement trigger精确+2保持。删除从未读取而存在并发写的Server.mailer字段；不改TLS或Mailer实际传输行为。
+- 配置不可用返回503 MAIL_SETTINGS_UNAVAILABLE，邮件发送不可用返回稳定MAIL_DELIVERY_FAILED（技术错误写结构化日志，不交API）。邮件验证码失败仍消费已生成验证码；durable Worker配置读取失败向上返回以触发既有重试，不伪记成功。正常配置响应/权限/密码脱敏/默认端口合同保持，无新表/列/索引或Cookie宽松政策。
+- 当前源码完整后端门、SMTP及配置Race双次、前端280/9和Schema138名称双次独立通过。Logo公开格式已从SEC019历史20位WebP本地路径收口为唯一9位PNG共享路径，原有图像预算/元数据剥离继续受测；不是保留两种读取权威或本机兼容路径。部署需先168后端路由再前端，未知/共享开发库不自动reset。
+
+## TEST013资料审核一致性（generation168，无DDL）
+
+- 资料布局PATCH对显式未知/跨版本目标及不存在资源，在合并任何修改前拒绝422；未显式移动的资源在原分类被删除后继续原有父级回退。原增量DTO、1000 patch/20k合并预算、权限和审核事务保持，客户端不需新字段。
+- 已停用entry type只有同一详情当前有效归属的原模板可保留编辑；新建或切换到另一停用模板仍拒绝。HTTP验证与发布事务读取同一PG事实helper，移除对同一payload再次当作新建的重复规范化，防止合法保留编辑审核500。没有旁路/双权威、Schema变更或历史数据回填。
+- 测试改用完整Server、正常session/独立审核者的真实网络HTTP；人工CHECK/index/view/GUC仅测试拥有的随机库，精确恢复/删除，不部署这些故障对象到开发共享或生产库。定向已绿，完整当前阶段门仍待完成。
+
+## TEST014简单项目并发分配与作者审批（generation168，无DDL）
+
+- 自动siteId分配改为明确pgx.Tx helper，按project type+normalized name base在PG事务内锁至创建提交；跨Server/连接池相同名字不再因先查后插返回假冲突。使用现有站点ID/后缀规则与唯一约束，没有进程mutex、缓存、新表或持久reservation。真实已占用siteId仍409，数据库分配/验证故障为500且立即返回，不反复查1000次当作已用。
+- 既有作者关系审批SQL显式将审核actor参数转为bigint，修复合法审批42804/500；权限、审核状态、approval metadata语义和ACL版本刷新保持。普通项目review编辑/作者排序不改已批准关系身份与审批时间。
+- 无客户端新DTO、Schema升级或回填；CHECK/view/函数和GUC仅拥有测试库，失败与重试受完整HTTP/持久事实验证。新目录测试不保留第二业务读取权威，原SQL用例只作为单独schema smoke，阶段全门仍待完成。
+
+## TEST015探测取消与服务器审核原子通知（generation168，无DDL）
+
+- 公共Probe/ProbeWithOptions默认DNS、固定IP与传输不变；私有Resolver/Dial参数贯穿同一实现以验证owned TCP。连接读取现在响应父取消/较早deadline，保留原连接、解析、Fabric及槽位预算；配置阶段取消只保留之前在线Status，并有不完整诊断，不谎报完整JAR列表。
+- server.review原来更新审核后再独立写通知，失败仍200；现有通知事务helper与审核状态/发布时间/搜索触发器原子提交。通知失败500并可重试；重复审核仍409，权限、DTO与模板key不变。没有新的NATS直接发布、Schema或兼容路径。
+- 调度器提取私有probe参数后共用既有领取/持久路径，默认仍passive Probe。领取与样本持久事务仍分别提交，失败保留五分钟间隔且下一due可恢复；未增加无界重试、放宽并发或进程全局hook。全部CHECK故障只安装在测试随机拥有库，清理随库销毁，不修改共享155或远端。
+
+## TEST016项目文件归属、类型与发布事务（generation168，无DDL）
+
+- 项目文件presign/complete复用现有项目类型扩展名规则；上传object key复用既有owners/<uid>绑定当前上传者，category/scope分别沿用文件系统目录和canonical项目类型。DTO、权限及已登记对象读取不变；旧未登记且不含owner的pending路径不作为兼容旁路接受，应重新presign上传。
+- 文件创建、扫描、删除与下载在实际事务中重验并锁定父项目批准状态，防止等待文件锁时旧状态产生公开通知。软删除audit参数显式text并传播失败，既有30秒更新合并/Outbox和无文件public_route政策保持。签名准备仍同一安全URL实现，项目下载次数和OSS统计同事务提交；失败返回500、不披露URL或留下部分计数。配置在事务前读取，唯一空闲连接也不二次借池；OSS默认扩展名切片独立复制消除真实并发Race。
+- 文件元数据Mod/Modpack保持原Mod规则，简单项目复用已有类型taxonomy以支持合法Paper并拒绝非法Plugin NeoForge。Modrinth空版本推进游标、manifest归属/成员/批次身份严格校验；CF文件核验modId与fileId。缓存v3以origin、凭据身份哈希与精确大小写ID分隔，沿用现有缓存/TTL，不存明文秘密；大小/数量/响应/URL/凭据origin预算不放宽。
+- 没有Schema、索引、回填或前端DTO变更。拥有provider只验证受控网络往返与签名参数，不声称OSS云端签名验真、杀毒器或公网MR/CF成功；durable通知意图不冒充实际消费送达。2026-10-01 10:10:54阶段验收完成：test016-verified十五阶段全0、114名称228次Race PASS/0skip，完整168 Schema源哈希不变、拥有基库清理0；首轮失败及慢provider有效RED仍保留，见D353/04。
+
+## TEST017更新日志提交与审核一致性（generation168，无DDL）
+
+- POST/PUT引用现有分类时在事务内按当前项目target route核验并持有FOR SHARE；跨项目/不存在分类在写任何业务事实前400，DB故障500。批准发布复用同一helper再次核验审核时事实。新增分类与本地化继续只在批准事务创建，不增加目录、权限、类型名单或第二分类权威。
+- 审核提交者的review_approved/review_rejected可靠通知意图，改与审核结果、override证明、localizations/category及project.updated同一PG事务；失败500且可重试，成功commit后才200。模板key/收件人/响应DTO不变，event type明确project_changelog.review.<status>，actor绑定真实审核者。删除commit后独立通知，不直接发布NATS、创建新表或保留双发送路径。
+- 公开history仅不存在/不可见404，持久读取故障500而非伪404。原八种人工语言、200k正文、8MiB JSON输入、50项summary/4000字符摘录/8种localizations与百万keyset索引保持。新增故障对象仅拥有随机库，不升级或reset共享155、未知远端或生产；前端无新字段/源码改动。2026-10-01 11:04:39完整后端十六阶段通过，104名称208次Race PASS/0skip、源码/完整168 Schema哈希保持及拥有基库清理0，见D354/04。
+
+## TEST022私聊读取与Presence准入（generation168，无DDL）
+
+- 会话成员读取helper返回bool/error，真正非成员403、PG故障500，不返回成功数据或写在线状态。发送读取同样只ErrNoRows为404，其余500；正常不存在会话GET/POST/Presence保持404。原Session/RBAC与消息/Outbox事务不变。
+- 心跳身份仍由服务端IP/UA/HMAC派生、忽略客户端visitorId。先执行原60共享/12本地每五分钟准入，再按既有8MiB/单JSON/未知字段拒绝规则解析；非法请求从伪200变400、限流仍429/PRESENCE_RATE_LIMIT/Retry-After，成功DTO不变。原150秒/30秒TTL、十分钟低频PG快照和4096/50000容量上限保持。
+- 无Schema、索引、回填、前端字段或外部凭据变化。故障函数/trigger/视图只在完整168随机拥有库并精确恢复/删除；Redis为声明的协议替身。阶段仍验收中，不冒称真实Redis吞吐或SMTP消费送达。
+- 最终资源复查收紧本地派生回退：用户在线缓存总Session记录以及聊天在线记录各最多原4096条，写入/读取清理过期，超额只淘汰最早本地状态。共享Redis集合与真实auth_sessions不改变，回退明确允许近似；原150秒/30秒TTL不变，无新增字段或配置预算。首轮通过报告保留，新增修复后的test022-verified全门正在验收。
+- 2026-10-01 12:06:09新增修复后的十六后端门全0、81名称162 Race PASS/0skip、覆盖30.2%，源码/168 Schema哈希与拥有库精确清理通过；12:04当前前端六门全0。TEST022阶段验收完成，D355独立关闭；旧报告保留。
+
+## TEST036蓝图规范化、保真和通知事务（generation168，无DDL）
+
+- 创建新上传明确pending审核可见性，不继承schema的not_required即公开；规范化按原review config生成批准revision或真正待审request，owner/admin保持可见，正常审核后公开。原匿名cover无数据204、admin metadata updated/reviewRequired/revisionId DTO不变。
+- Vanilla/Litematic名称必须非空string、索引必须有效整数；未知索引与截断packed数据显式失败，不静默变air/丢块。Sponge只新增空state拒绝，原dense/unknown索引与8192材料边界保持。实体JSON保留、不能无损表示的转换仍第一轮显式终止且原蓝图可用。
+- 源对象仍32MiB、规范对象按原64MiB读取，不放宽源/解压32MiB、4096维度、2M体积、250000块、8192材料及2/4/16预算。第一次processing写在同SQL核验job/blueprint/attempt/runToken并锁任务，旧Worker不能先改主体再报LeaseLost。
+- 成功/终止/耗尽租约的可靠通知与对应job、主体、variant及artifact事实同TX提交；notifyTemplateTx是唯一Worker通知路径，读取/Outbox错误传播，不使用Background独立后发或静默日志成功。审核approve/reject通知同审核TX；模板key/收件人/DTO不变，内部event type带blueprint业务关联。状态失败保留原重试/lease/补偿outbox，新Worker可恢复且实际删除旧attempt对象。
+- 无Schema、索引、回填或前端源码/字段变更；只拥有完整168库及本机OSS，durable意图不称消费送达，合成签名不称云端验真。13:05:08新完整后端22阶段全0、126名称252次Race PASS/0skip、30.2%覆盖；12:50:29当前前端六门全0。源码/完整168 Schema哈希保持，拥有基库test_remediation_test036_1790830136388清理0，全部旧RED及BUG079形状断言失败保留，D356独立High/P1 CLOSED。
+
+## TEST037 OSS第一方合同和外部删除租约（generation168，无DDL）
+
+- generic用户scope仅解包当前认证用户精确users/<id>/files/单scope的canonical ticket.category；项目源权限分支、对象key归属及目录限制保持，前端completion/abort原样回传不变。举报绑定真正PG错误500整TX回滚，非本人/数量不匹配仍400。
+- 外部DELETE前用当前processing/id/runToken行FOR SHARE验证并持锁至provider结束；配置在TX前读取，同TX连接执行未注册guard，旧token返回LeaseLost且不发送DELETE，执行中不能被新claimer接管。不改变lease期限、retry、身份或OSS配置/签名/part/图片预算。
+- 无DDL/索引/回填/新依赖/前端字段；完整168 Schema与源码冻结保持，13:50:55后端31门/223名称446 Race PASS/0skip/30.2%覆盖及拥有库清理0、13:27:26前端六门全部0。测试只称本机协议/独立合成签名与PG可靠意图，不称云验证或消费送达，D357独立High/P1 CLOSED。
+
+## TEST038评论作用域与可靠通知事务（generation168，无DDL）
+
+- 原作者/idempotency_key唯一索引与advisory锁不变；返回既有结果之前核验target_type/internal id/version，跨目标409 COMMENT_IDEMPOTENCY_SCOPE_CONFLICT且不透露旧ID/正文，正常同目标重试DTO/状态不变。
+- reply_mention与comment_watch_reply可靠意图使用唯一TX helper，与评论树/绑定日志job/插眼计数共事务；PG/block读取或Outbox写错误500整TX回滚。原标题/SourceLocale/data/recipient、event_type与action、静音/拉黑/用户去重不变，移除旧post-commit watcher helper，不保留独立发送路径。只证明可靠PG意图，不称实际NATS/SMTP送达。
+- 附件NoRows/实际不可见仍404，真正解析/装配/读取PG错误500。无Schema/索引/回填/新依赖/前端DTO；原10000字符、2000插眼、64节点/16祖先/512KiB、lease与90秒测试预算保持。14:31:39后端19门全部0、104编译名称208 Race PASS/0skip、30.2%覆盖，前端14:16:52六门全部0；源及168 Schema哈希保持/拥有库清理0，D358独立High/P1 CLOSED。
+
+## TEST039皮肤HTTP矩阵准备（generation168，无DDL）
+
+- 实际Session/HTTP、完整拥有168库/66表事实和OSS真实协议往返，准备审核/通知/共享存储/补偿/并发/每日额度；尚无生产变更或验收完成声明。沿用公开hash bearer及独立资产/档案metadata ACL，不新增共享Blob所有者授权、不承诺撤回历史公开hash。原90秒/4槽/100次等预算保持，TEST039 IN_PROGRESS。
+- 首轮实际RED后，skin审核approve/reject通过既有enqueueTemplatedNotificationTx将可靠意图与审核事实同TX；保持收件人/template/values/data和成功DTO，失败500全回滚，不保留post-commit路径。hash纹理读取join当前oss_files.status=active且在ETag前核验；逻辑删除新请求（含条件请求）404，launcher PG错误503，健康public immutable URL/304不变。没有新Blob ACL、DDL、索引、回填、依赖或前端字段变化；完整验收未结束，TEST039 IN_PROGRESS。
+- 15:05:51完整后端18阶段与14:52:46前端六门全0、124编译名称248 Race PASS/0skip/30.2%覆盖；源及完整168 Schema哈希true、拥有test_remediation_test039_1790837410096清理0，D359独立Medium/P1 CLOSED。原失败与synthetic/生产边界保留。
+
+## TEST042社区HTTP矩阵准备（generation168，无DDL）
+
+- 正常Session/66表事实、完整HTTP/owned168库；尚无生产/API变更、编译或实际首轮结果。合成翻译配置不调用真实AI，生产persist helper不冒称任务完整执行，财务seed不冒称充值HTTP；原预算保持，TEST042 IN_PROGRESS。
+- 实际RED后审核approve/reject和answer接受通知复用唯一TX helper，与审核、hold/refund/award及resolution事实同TX；失败500全回滚，原模板/收件人/值/data/成功DTO保持，删除原post-commit发送。非法/不可变bounty具名领域错误400、余额409，PG错误500并结构化日志，不给客户端原始Schema错误。
+- 当前published revision=nil的重提沿用该kind创建审核而非编辑审核；明确community.no-review/admin.*仍按既有语义免审。CanEdit只owner/community.edit/admin.*，与写入口一致，reviewer读取权限不扩大为编辑权。
+- baseline锁阶段SQLSTATE40001先rollback当前TX释放连接，再读最新revision，返回既有COMMUNITY_POST_EDIT_CONFLICT/409及currentRevisionId；不降repeatable-read、不重试写、不新增正常路径SQL或使用双权威。真实其他DB错误仍500。无DDL/索引/回填/新依赖/前端字段，原领域预算保持，最终阶段门未结束。
+- 16:36:57新后端19阶段全0/170名称340 Race PASS/0skip/30.2%覆盖，源与完整168 Schema哈希true、拥有库精确清理0；当前前端16:24:30六门全0/596文件冻结，D360独立关闭，旧失败保留。
+
+## STYLE003唯一错误envelope与本地化展示（generation168，无DDL）
+
+- writeError只委托writeAPIError；唯一JSON/header/status序列化出口将空code设为HTTP_nnn，不根据诊断短语推断领域。原状态码、diagnostic error、已有typed code/retryAfter/details不变，成功Data与Yggdrasil独立协议不改；旧客户端继续消费原字段，新增code是兼容字段。
+- 内容语言设置新增CONTENT_LANGUAGE_REQUEST_INVALID/TAG_INVALID/SECONDARY_UNSUPPORTED/SETTINGS_READ_FAILED/SETTINGS_UPDATE_FAILED/SETTINGS_AUDIT_FAILED；原错误诊断文本和成功DTO、字段、事务/活动提交顺序不变。read/begin/update/audit/commit技术详情仅结构化日志，不回显PG约束/SQLSTATE。完整168拥有库内两NOT VALID CHECK和临时列名故障验证后恢复，不是部署DDL/reset。
+- 第一方ApiError类原样迁至api-error.mts并原名重新导出，保持instanceof和机器字段；展示helper只按稳定code取原字典键，未知/传输错误用页面本地化失败提示。已审阅活跃治理/认领/关注/语言/评论/验证/日志/风控显示路径迁移，UGC/技术标识不译，既有八类通知唯一模板路径不新建/不双发。
+- 英语/简中字典各补152键，其他语言沿用原继承/回退；原权限、proof头/草稿/幂等、额度/单位与widget生命周期不变。内部评论导航按Next本地文档迁router.push，相同编码URL不变，无新依赖/Schema/查询预算。初始RED及四后端/三新前端单测/三新生产React浏览器已完成；最终相关Race双次/全仓/双端冻结验收中，STYLE003尚未关闭。

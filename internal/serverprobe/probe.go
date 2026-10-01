@@ -77,7 +77,16 @@ func Probe(ctx context.Context, address string) (Result, error) {
 // submission wizard because it can appear in a server log; scheduled health
 // checks stay on the passive Server List Ping path.
 func ProbeWithOptions(ctx context.Context, address string, discoverNamespaces bool) (Result, error) {
-	target, err := ResolveTarget(ctx, net.DefaultResolver, address)
+	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: -1}
+	return probeWithTransport(ctx, address, discoverNamespaces, net.DefaultResolver, dialer.DialContext)
+}
+
+type probeDialContextFunc func(context.Context, string, string) (net.Conn, error)
+
+// One implementation serves the public entrypoint and the owned network tests.
+// Resolver and dialer are private dependencies, never user-configurable bypasses.
+func probeWithTransport(ctx context.Context, address string, discoverNamespaces bool, resolver Resolver, dial probeDialContextFunc) (Result, error) {
+	target, err := ResolveTarget(ctx, resolver, address)
 	if err != nil {
 		return Result{}, err
 	}
@@ -92,14 +101,19 @@ func ProbeWithOptions(ctx context.Context, address string, discoverNamespaces bo
 
 	deadlineCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	dialer := net.Dialer{Timeout: 5 * time.Second, KeepAlive: -1}
 	started := time.Now()
-	conn, err := dialer.DialContext(deadlineCtx, "tcp", net.JoinHostPort(target.ConnectIP.String(), strconv.Itoa(target.ConnectPort)))
+	conn, err := dial(deadlineCtx, "tcp", net.JoinHostPort(target.ConnectIP.String(), strconv.Itoa(target.ConnectPort)))
 	if err != nil {
 		return result, fmt.Errorf("connect Minecraft server: %w", err)
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(8 * time.Second))
+	deadline := time.Now().Add(8 * time.Second)
+	if contextDeadline, ok := deadlineCtx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	_ = conn.SetDeadline(deadline)
+	stopCancellation := context.AfterFunc(deadlineCtx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stopCancellation()
 
 	if err = writeStatusHandshake(conn, target.HandshakeHost, target.HandshakePort); err != nil {
 		return result, err
@@ -141,7 +155,7 @@ func ProbeWithOptions(ctx context.Context, address string, discoverNamespaces bo
 			result.Protocol,
 			result.MinecraftVersion,
 		)
-		discovery := probeConfigurationNamespacesWithSlot(ctx, target, discoveryProtocol)
+		discovery := probeConfigurationNamespacesWithSlot(ctx, target, discoveryProtocol, dial)
 		if discovery.Loader != "" {
 			result.Loader = discovery.Loader
 			result.Modded = true
@@ -171,7 +185,7 @@ func ProbeWithOptions(ctx context.Context, address string, discoverNamespaces bo
 	return result, nil
 }
 
-func probeConfigurationNamespacesWithSlot(ctx context.Context, target Target, protocol int) configurationDiscovery {
+func probeConfigurationNamespacesWithSlot(ctx context.Context, target Target, protocol int, dial probeDialContextFunc) configurationDiscovery {
 	release, err := acquireConfigurationProbeSlot(ctx)
 	if err != nil {
 		return configurationDiscovery{
@@ -180,7 +194,7 @@ func probeConfigurationNamespacesWithSlot(ctx context.Context, target Target, pr
 		}
 	}
 	defer release()
-	return probeConfigurationNamespaces(ctx, target, protocol)
+	return probeConfigurationNamespaces(ctx, target, protocol, dial)
 }
 
 func ResolveTarget(ctx context.Context, resolver Resolver, address string) (Target, error) {

@@ -81,6 +81,35 @@ func normalizeModContentEntryDefinition(
 	return normalized, nil
 }
 
+// A disabled subtype can still interpret an existing detail, but an edit is
+// not permission to select that disabled subtype in another template.
+func retainedModContentDisabledSubtype(
+	ctx context.Context, query modContentImageQuerier,
+	modID, resourceID, versionID int64, sectionPublicID *string, entryTypeCode string,
+) (bool, error) {
+	if sectionPublicID == nil || strings.TrimSpace(*sectionPublicID) == "" {
+		return false, nil
+	}
+	var retained bool
+	err := query.QueryRow(ctx, `with recursive lineage as (
+		select section.id,section.parent_id,section.template_id
+		from mod_content_sections section
+		where section.public_id=$4 and section.mod_id=$1 and section.version_id=$3 and section.status='active'
+		union all
+		select parent.id,parent.parent_id,parent.template_id from mod_content_sections parent
+		join lineage child on child.parent_id=parent.id
+		where parent.mod_id=$1 and parent.version_id=$3 and parent.status='active'
+	), root as (select template_id from lineage where parent_id is null)
+	select exists(select 1 from mod_resource_version_details detail
+		join mod_content_section_resources placement on placement.resource_id=detail.resource_id and placement.version_id=detail.version_id
+		join mod_content_sections current_section on current_section.id=placement.section_id
+		join root on root.template_id=current_section.template_id
+		where detail.resource_id=$2 and detail.version_id=$3 and detail.status='active'
+		  and detail.entry_type_code=$5 and current_section.mod_id=$1 and current_section.status='active')`,
+		modID, resourceID, versionID, *sectionPublicID, entryTypeCode).Scan(&retained)
+	return retained, err
+}
+
 func loadModContentEntryTypeDefinition(
 	ctx context.Context,
 	query modContentImageQuerier,

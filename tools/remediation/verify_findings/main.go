@@ -54,8 +54,10 @@ func main() {
 	flag.Parse()
 
 	auditIDs, scanErrs := scanAudit(*auditDir)
+	originalCounts, originalGrades, originalErrs := scanOriginalSeverities(*auditDir)
 	entries, duplicates, ledgerErrs := scanLedger(*ledgerPath)
 	errs := append(scanErrs, ledgerErrs...)
+	errs = append(errs, originalErrs...)
 
 	if len(auditIDs) != expectedFindingCount {
 		errs = append(errs, fmt.Sprintf("audit contains %d unique Finding IDs; expected %d", len(auditIDs), expectedFindingCount))
@@ -97,6 +99,7 @@ func main() {
 		}
 		if entry.Status == "CLOSED" || entry.Status == "NOT_APPLICABLE" {
 			validateFinalEntry(entry, &errs)
+			validateReviewedSeverity(entry, originalGrades[entry.ID], &errs)
 		}
 	}
 	for id, entry := range entries {
@@ -105,15 +108,10 @@ func main() {
 		}
 	}
 
-	if !*allowOpen {
-		if severityCounts["High"] != 176 || severityCounts["Medium"] != 214 || severityCounts["Low"] != 59 {
-			errs = append(errs, fmt.Sprintf("final severity totals are High=%d Medium=%d Low=%d; expected 176/214/59", severityCounts["High"], severityCounts["Medium"], severityCounts["Low"]))
-		}
-	}
-
 	fmt.Printf("audit_unique=%d ledger_unique=%d\n", len(auditIDs), len(entries))
 	printCounts("categories", categoryCounts)
-	printCounts("severities", severityCounts)
+	printCounts("original_audit_severities", originalCounts)
+	printCounts("reviewed_severities", severityCounts)
 	printCounts("statuses", statusCounts)
 	if len(errs) == 0 {
 		fmt.Println("verification=PASS")

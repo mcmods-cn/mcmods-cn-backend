@@ -308,7 +308,11 @@ func (s *Server) requestEmailCode(w http.ResponseWriter, r *http.Request) {
 		subject = "Mcmods-cn 注册验证码"
 	}
 	body := fmt.Sprintf("你的验证码是：%s\n\n验证码 10 分钟内有效。如果不是你本人操作，请忽略这封邮件。", code)
-	if err := s.activeMailer(r.Context()).Send(req.Email, subject, body); err != nil {
+	active, err := s.activeMailer(r.Context())
+	if err == nil {
+		err = active.Send(req.Email, subject, body)
+	}
+	if err != nil {
 		_, _ = s.db.Exec(r.Context(), `update email_verification_codes set consumed_at=now() where id=$1`, codeID)
 		writeError(w, http.StatusServiceUnavailable, "验证码已生成，但邮件服务尚未配置或发送失败")
 		return

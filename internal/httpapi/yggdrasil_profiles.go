@@ -467,7 +467,9 @@ func (s *Server) yggdrasilTextureContent(w http.ResponseWriter, r *http.Request)
 	}
 	var objectKey string
 	var sizeBytes int64
-	err := s.db.QueryRow(r.Context(), `select object_key,size_bytes from skin_texture_blobs where hash=$1`, hash).
+	err := s.db.QueryRow(r.Context(), `select blob.object_key,blob.size_bytes
+		from skin_texture_blobs blob join oss_files file on file.id=blob.oss_file_id and file.status='active'
+		where blob.hash=$1`, hash).
 		Scan(&objectKey, &sizeBytes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeYggdrasilError(w, http.StatusNotFound, "NotFoundException", "Texture not found.", "")

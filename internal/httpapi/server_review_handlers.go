@@ -233,7 +233,13 @@ func (s *Server) reviewMinecraftServer(w http.ResponseWriter, r *http.Request) {
 	}
 	var submitterID int64
 	var name string
-	err := s.db.QueryRow(r.Context(), `update minecraft_servers set
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存服务器审核结果失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	err = tx.QueryRow(r.Context(), `update minecraft_servers set
 		review_status=$2,review_note=$3,reviewed_by=$4,reviewed_at=now(),
 		published_at=case when $2='approved' then coalesce(published_at,now()) else published_at end,
 		next_probe_at=case when $2='approved' then now() else next_probe_at end,
@@ -253,12 +259,23 @@ func (s *Server) reviewMinecraftServer(w http.ResponseWriter, r *http.Request) {
 	if request.Status == "rejected" {
 		templateCode = "review_rejected"
 	}
-	s.sendTemplatedNotification(r.Context(), submitterID, templateCode, map[string]string{
-		"name": name, "reason": request.Note,
-	}, map[string]any{
-		"serverId": publicID, "reviewStatus": request.Status,
-		"targetLabel": name, "url": "/servers/" + publicID,
-	})
+	err = enqueueTemplatedNotificationTx(r.Context(), tx, "minecraft_server.review."+request.Status,
+		submitterID, currentClaims(r).Subject, templateCode, map[string]string{
+			"name": name, "reason": request.Note,
+		}, map[string]any{
+			"serverId": publicID, "reviewStatus": request.Status,
+			"targetLabel": name, "url": "/servers/" + publicID,
+		}, "")
+	if err != nil {
+		log.Printf("persist minecraft server review notification server=%s: %v", publicID, err)
+		writeError(w, http.StatusInternalServerError, "保存服务器审核通知失败")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		log.Printf("commit minecraft server review server=%s: %v", publicID, err)
+		writeError(w, http.StatusInternalServerError, "保存服务器审核结果失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": request.Status})
 }
 

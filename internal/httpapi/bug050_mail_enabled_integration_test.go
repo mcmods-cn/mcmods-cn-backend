@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
-	"mcmods-cn-backend/internal/mailer"
 )
 
 func TestBUG050PersistedMailDisabledControlsEveryRuntimeMailerIntegration(t *testing.T) {
@@ -37,7 +36,7 @@ func TestBUG050PersistedMailDisabledControlsEveryRuntimeMailerIntegration(t *tes
 		Enabled: true, Host: "smtp.example.test", Port: 587, Username: "mailer", Password: "secret",
 		From: "MCMods <no-reply@example.test>", UseTLS: true,
 	}
-	server := &Server{db: db, cfg: cfg, mailer: mailer.New(cfg.SMTP)}
+	server := &Server{db: db, cfg: cfg}
 	payload := mailConfigPayload{
 		Enabled: false, Host: cfg.SMTP.Host, Port: cfg.SMTP.Port, Username: cfg.SMTP.Username,
 		Password: cfg.SMTP.Password, From: cfg.SMTP.From, UseTLS: cfg.SMTP.UseTLS,
@@ -50,14 +49,14 @@ func TestBUG050PersistedMailDisabledControlsEveryRuntimeMailerIntegration(t *tes
 		t.Fatal(err)
 	}
 
-	if loaded := server.mailConfigFromSettings(ctx); loaded.Enabled {
+	if loaded, err := server.mailConfigFromSettings(ctx); err != nil || loaded.Enabled {
 		t.Errorf("persisted enabled=false was recomputed to true: %#v", loaded)
 	}
-	if active := server.activeMailer(ctx); active.Enabled() {
+	if active, err := server.activeMailer(ctx); err != nil || active.Enabled() {
 		t.Errorf("server runtime mailer ignored persisted enabled=false: %#v", active.Config)
 	}
 	worker := NewNotificationWorker(db, nil, nil, cfg.SMTP, cfg.SettingsEncryptionKey)
-	if active := worker.activeMailer(ctx); active.Enabled() {
+	if active, err := worker.activeMailer(ctx); err != nil || active.Enabled() {
 		t.Errorf("notification worker mailer ignored persisted enabled=false: %#v", active.Config)
 	}
 }

@@ -737,7 +737,24 @@ func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "missing OSS ObjectKey")
 		return false
 	}
-	cfg := s.ossConfigFromSettings(r.Context())
+	payload, err := s.prepareOSSFileDownload(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate OSS download URL")
+		return false
+	}
+	s.recordOSSDownloadStat(r.Context(), req.ObjectKey)
+	writeJSON(w, http.StatusOK, payload)
+	return true
+}
+
+// Preparing a URL must not write a response or counters. Business handlers can
+// commit their authoritative download facts before disclosing the signed URL.
+func (s *Server) prepareOSSFileDownload(ctx context.Context, req ossPresignRequest) (map[string]any, error) {
+	cfg := s.ossConfigFromSettings(ctx)
+	return s.prepareOSSFileDownloadWithConfig(ctx, cfg, req, s.originalNameForOSSObject(ctx, req.ObjectKey))
+}
+
+func (s *Server) prepareOSSFileDownloadWithConfig(ctx context.Context, cfg ossConfigPayload, req ossPresignRequest, originalName string) (map[string]any, error) {
 	if req.ExpiresMinutes <= 0 {
 		req.ExpiresMinutes = cfg.DownloadURLTTLMinutes
 	}
@@ -745,24 +762,20 @@ func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Reques
 		req.ExpiresMinutes = maxOSSDownloadURLTTLMinutes
 	}
 	expires := time.Duration(req.ExpiresMinutes) * time.Minute
-	originalName := s.originalNameForOSSObject(r.Context(), req.ObjectKey)
 	contentDisposition := downloadContentDisposition(originalName)
-	access, err := s.resolveOSSObjectAccessWithConfig(r.Context(), cfg, req.ObjectKey, ossObjectAccessOptions{
+	access, err := s.resolveOSSObjectAccessWithConfig(ctx, cfg, req.ObjectKey, ossObjectAccessOptions{
 		Expires:            expires,
 		ContentDisposition: contentDisposition,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate OSS download URL")
-		return false
+		return nil, err
 	}
-	s.recordOSSDownloadStat(r.Context(), req.ObjectKey)
-	writeJSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"url":             access.URL,
 		"expiresAt":       access.ExpiresAt,
 		"downloadUrlMode": access.Mode,
 		"filename":        originalName,
-	})
-	return true
+	}, nil
 }
 
 func (s *Server) ossUploadLogs(w http.ResponseWriter, r *http.Request) {
@@ -916,7 +929,7 @@ func defaultOSSConfig() ossConfigPayload {
 		PublicEndpoint:        "https://oss.mcmods.cn",
 		DownloadURLTTLMinutes: 10,
 		DownloadURLMode:       ossDownloadModePresigned,
-		AllowedExtensions:     defaultOSSAllowedExtensions,
+		AllowedExtensions:     append([]string(nil), defaultOSSAllowedExtensions...),
 	}
 }
 
@@ -1080,6 +1093,16 @@ func (s *Server) resolveUserOSSUploadCategory(r *http.Request, category, source 
 		}
 		return ossModImportCategory(identity.UniqueID, candidate.destination, "catalog"), nil
 	}
+	// Tickets expose the canonical user category and the frontend returns it
+	// unchanged on complete/abort. Unwrap only this authenticated user's exact
+	// single-scope prefix; project source permissions above remain authoritative.
+	userCategoryPrefix := path.Join(ossUserDirectory, strconv.FormatInt(claims.Subject, 10), "files") + "/"
+	if scope, ok := strings.CutPrefix(strings.TrimSpace(category), userCategoryPrefix); ok {
+		if scope == "" || scope != normalizeObjectSegment(scope) {
+			return "", errors.New("用户文件目录不正确")
+		}
+		category = scope
+	}
 	return ossUserCategory(claims.Subject, normalizeOSSUserFileScope(category, source)), nil
 }
 
@@ -1101,7 +1124,7 @@ func parseModTextUploadSource(source string) (siteID string, contentID string, o
 }
 
 func ossProjectDownloadScope(projectType, projectID string) string {
-	return ossProjectDownloadScopePrefix + normalizeOSSProjectKind(projectType) + ":" + normalizeProjectObjectSegment(projectID)
+	return ossProjectDownloadScopePrefix + normalizeProjectFileType(projectType) + ":" + normalizeProjectObjectSegment(projectID)
 }
 
 func parseOSSProjectDownloadScope(scope string) (string, string, bool) {
@@ -1110,11 +1133,12 @@ func parseOSSProjectDownloadScope(scope string) (string, string, bool) {
 	}
 	value := strings.TrimPrefix(scope, ossProjectDownloadScopePrefix)
 	parts := strings.SplitN(value, ":", 2)
-	if len(parts) == 1 {
-		return "mod", normalizeProjectObjectSegment(parts[0]), parts[0] != ""
+	if len(parts) != 2 {
+		return "", "", false
 	}
+	projectType := normalizeProjectFileType(parts[0])
 	projectID := normalizeProjectObjectSegment(parts[1])
-	return parts[0], projectID, parts[1] != ""
+	return projectType, projectID, projectType != "" && validCatalogPublicID(projectID)
 }
 
 type persistedWebPObject struct {

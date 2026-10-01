@@ -45,7 +45,7 @@ func TestChatPresencePostgreSQLTableIsAbsentIntegration(t *testing.T) {
 	}()
 	var generation int
 	var relationExists bool
-	if err = pool.QueryRow(ctx, `select generation from schema_metadata where singleton`).Scan(&generation); err != nil || generation != 154 {
+	if err = pool.QueryRow(ctx, `select generation from schema_metadata where singleton`).Scan(&generation); err != nil || generation != schemaGeneration {
 		t.Fatalf("temporary schema generation=%d err=%v", generation, err)
 	}
 	if err = pool.QueryRow(ctx, `select to_regclass(current_schema() || '.user_chat_presence') is not null`).Scan(&relationExists); err != nil {

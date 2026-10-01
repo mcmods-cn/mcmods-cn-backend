@@ -6,8 +6,8 @@ import (
 )
 
 func TestBUG034ManualChangelogOverrideHasApprovedRevisionProvenance(t *testing.T) {
-	if schemaGeneration != 167 {
-		t.Fatalf("schema generation=%d want 167 for approved manual-override provenance", schemaGeneration)
+	if schemaGeneration != 168 {
+		t.Fatalf("schema generation=%d want 168 for approved manual-override provenance", schemaGeneration)
 	}
 	schema := strings.Join(governanceAutomationSchemaStatements(), "\n")
 	for _, required := range []string{

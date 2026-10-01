@@ -144,7 +144,7 @@ func TestCurseForgeProjectFilePagesUseLimitPlusOne(t *testing.T) {
 		data := make([]map[string]any, 0, end-index)
 		for item := index; item < end; item++ {
 			data = append(data, map[string]any{
-				"id": item + 1, "displayName": fmt.Sprintf("File %d", item+1), "fileName": fmt.Sprintf("file-%d.jar", item+1),
+				"id": item + 1, "modId": 123, "displayName": fmt.Sprintf("File %d", item+1), "fileName": fmt.Sprintf("file-%d.jar", item+1),
 				"releaseType": 1, "fileDate": "2026-08-20T12:00:00Z", "fileLength": 1024, "gameVersions": []string{"1.21.1", "Fabric"},
 			})
 		}

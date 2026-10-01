@@ -522,7 +522,6 @@ func newProviderHTTPClient(timeout time.Duration, baseURL string) (*http.Client,
 	if err != nil || parsed.Host == "" {
 		return nil, errors.New("invalid provider base URL")
 	}
-	allowedHost := strings.ToLower(parsed.Host)
 	allowLoopback := strings.EqualFold(parsed.Hostname(), "localhost")
 	if address := net.ParseIP(parsed.Hostname()); address != nil && address.IsLoopback() {
 		allowLoopback = true
@@ -555,8 +554,8 @@ func newProviderHTTPClient(timeout time.Duration, baseURL string) (*http.Client,
 			if len(via) >= 10 {
 				return errors.New("too many provider redirects")
 			}
-			if strings.ToLower(request.URL.Host) != allowedHost {
-				return errors.New("provider redirect changed API host")
+			if !sameProviderOrigin(request.URL.String(), baseURL) {
+				return errors.New("provider redirect changed API origin")
 			}
 			return nil
 		},

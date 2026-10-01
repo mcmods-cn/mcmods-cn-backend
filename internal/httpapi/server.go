@@ -15,7 +15,6 @@ import (
 	"mcmods-cn-backend/internal/activity"
 	"mcmods-cn-backend/internal/antiabuse"
 	"mcmods-cn-backend/internal/config"
-	"mcmods-cn-backend/internal/mailer"
 	"mcmods-cn-backend/internal/querycache"
 	"mcmods-cn-backend/internal/queue"
 	"mcmods-cn-backend/internal/searchindex"
@@ -24,7 +23,6 @@ import (
 type Server struct {
 	cfg                            config.Config
 	db                             *pgxpool.Pool
-	mailer                         mailer.Mailer
 	queue                          *queue.Client
 	cache                          *querycache.Cache
 	activity                       *activity.Monitor
@@ -59,7 +57,6 @@ func NewServer(ctx context.Context, cfg config.Config, db *pgxpool.Pool, queueCl
 	server := &Server{
 		cfg:               cfg,
 		db:                db,
-		mailer:            mailer.New(cfg.SMTP),
 		queue:             queueClient,
 		cache:             sharedCache,
 		activity:          activityMonitor,
@@ -139,6 +136,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/location", s.visitorLocation)
 	s.mux.HandleFunc("GET /api/v1/markdown/config", s.markdownConfig)
 	s.mux.HandleFunc("GET /api/v1/site/config", s.publicSiteGeneralConfig)
+	s.mux.HandleFunc("GET /api/v1/site/logo/{id}", s.publicSiteLogo)
 	s.mux.HandleFunc("GET /api/v1/site-affairs/about", s.publicAboutPage)
 	s.mux.HandleFunc("GET /api/v1/site-affairs/changelogs", s.publicSiteChangelogs)
 	s.mux.HandleFunc("GET /api/v1/site-affairs/changelogs/{id}", s.publicSiteChangelogDetail)
@@ -450,7 +448,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/admin/dashboard/projects", s.requirePermission("admin.access", s.adminDashboardProjects))
 	s.mux.HandleFunc("GET /api/v1/admin/dashboard/projects/{publicId}", s.requirePermission("admin.access", s.adminDashboardProject))
 	s.mux.HandleFunc("GET /api/v1/admin/config", s.requirePermission("admin.config.read", s.adminConfig))
-	s.mux.HandleFunc("GET /api/v1/admin/config/general/logo-upload-access", s.requirePermission("admin.config.write", s.siteLogoUploadAccess))
+	s.mux.HandleFunc("POST /api/v1/admin/config/general/logo-upload-authorization", s.requirePermission("admin.config.write", s.issueSiteLogoUploadAuthorization))
+	s.mux.HandleFunc("GET /api/v1/admin/config/general/logo-upload-access", s.requireSiteLogoUploadPermission(s.siteLogoUploadAccess))
+	s.mux.HandleFunc("POST /api/v1/admin/config/general/logo", s.requireSiteLogoUploadPermission(s.uploadSiteLogo))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/general", s.requirePermission("admin.config.write", s.updateSiteGeneralConfig))
 	s.mux.HandleFunc("GET /api/v1/admin/config/yggdrasil", s.requirePermission("admin.config.read", s.getYggdrasilConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/yggdrasil", s.requirePermission("admin.config.write", s.updateYggdrasilConfig))

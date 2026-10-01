@@ -64,6 +64,7 @@ func (worker *MaintenanceWorker) pruneWithTimeout(ctx context.Context, timeout t
 		worker.pruneBlueprintUploads,
 		worker.pruneReportEvidence,
 		worker.pruneStickerUploads,
+		worker.pruneSiteLogoUploads,
 		worker.pruneSkinTextureBlobs,
 		worker.pruneCatalogImportArtifacts,
 	} {

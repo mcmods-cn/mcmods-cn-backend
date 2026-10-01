@@ -428,13 +428,21 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		return
 	}
 	var existingID int64
-	if err = tx.QueryRow(r.Context(), `select coalesce(
-		(select id from comments where author_id=$1 and idempotency_key=$2 limit 1),0)`,
-		claims.Subject, request.IdempotencyKey).Scan(&existingID); err != nil {
+	var existingTargetMatches bool
+	if err = tx.QueryRow(r.Context(), `select coalesce(existing.id,0),coalesce(
+		existing.target_type=$3::text and existing.target_id=$4::bigint
+		and existing.target_version_id is not distinct from $5::bigint,false)
+		from (values (1)) seed(value) left join comments existing
+		  on existing.author_id=$1 and existing.idempotency_key=$2`,
+		claims.Subject, request.IdempotencyKey, target.Type, target.InternalID, target.VersionID).Scan(&existingID, &existingTargetMatches); err != nil {
 		writeError(w, http.StatusInternalServerError, "发布评论失败")
 		return
 	}
 	if existingID > 0 {
+		if !existingTargetMatches {
+			writeAPIError(w, http.StatusConflict, "COMMENT_IDEMPOTENCY_SCOPE_CONFLICT", "幂等键已用于其他评论目标", 0, nil)
+			return
+		}
 		// A retried idempotent request must not create a duplicate activity record.
 		skipRequestActivity(r)
 		if err = tx.Commit(r.Context()); err != nil {
@@ -491,6 +499,13 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 			return
 		}
 	}
+	if request.Status == "published" {
+		if err = enqueueCommentDeliveryNotificationsTx(r.Context(), tx, claims.Subject, publicID, request.Body, target, parentID, directRecipientID, watchNotifications); err != nil {
+			log.Printf("persist comment delivery comment_id=%d: %v", commentID, err)
+			writeError(w, http.StatusInternalServerError, "保存评论通知失败")
+			return
+		}
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "发布评论失败")
 		return
@@ -501,40 +516,6 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		return
 	}
 
-	notificationData := map[string]any{
-		"commentId": publicID, "targetType": target.Type, "targetKey": target.Key,
-		"targetLabel": target.Title, "url": target.URL + "#comment-" + publicID,
-	}
-	if parentID != nil && directRecipientID != claims.Subject {
-		blocked, blockErr := s.userBlocksActor(r.Context(), directRecipientID, claims.Subject)
-		if blockErr == nil && !blocked {
-			if enqueueErr := s.enqueueNotificationTask(r.Context(), notificationEvent{
-				Action: "direct", RecipientID: directRecipientID, ActorID: claims.Subject,
-				Kind: "reply_mention", Title: "评论收到回复", Body: truncateRunes(request.Body, 160),
-				SourceLocale: "zh-CN", Data: notificationData,
-			}); enqueueErr != nil {
-				log.Printf("queue reply notification recipient_id=%d: %v", directRecipientID, enqueueErr)
-			}
-		}
-	}
-	notifiedWatchUsers := make(map[int64]bool)
-	for _, pending := range watchNotifications {
-		if pending.RecipientID == directRecipientID || pending.Muted {
-			continue
-		}
-		if notifiedWatchUsers[pending.RecipientID] {
-			continue
-		}
-		notifiedWatchUsers[pending.RecipientID] = true
-		watchData := make(map[string]any, len(notificationData)+2)
-		for key, value := range notificationData {
-			watchData[key] = value
-		}
-		watchData["watchId"] = pending.WatchID
-		watchData["replyCount"] = 1
-		s.enqueueOrCreateCommentWatchNotification(r.Context(), pending.RecipientID, claims.Subject,
-			"插眼的评论有了新回复", truncateRunes(request.Body, 160), watchData)
-	}
 	items, _ := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims)
 	if len(items) > 0 {
 		writeJSON(w, http.StatusCreated, items[0])

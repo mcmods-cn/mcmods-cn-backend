@@ -6,7 +6,7 @@ import (
 )
 
 func TestCatalogDatasetStateIsConstantTimeAuthority(t *testing.T) {
-	if schemaGeneration != 167 {
+	if schemaGeneration != 168 {
 		t.Fatalf("unexpected schema generation %d", schemaGeneration)
 	}
 	schema := strings.ToLower(strings.Join(catalogEditorSchemaStatements(), "\n"))

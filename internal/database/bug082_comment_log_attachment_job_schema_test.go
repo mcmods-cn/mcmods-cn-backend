@@ -6,8 +6,8 @@ import (
 )
 
 func TestCommentLogAttachmentJobsHaveDurableRetrySchema(t *testing.T) {
-	if schemaGeneration != 167 {
-		t.Fatalf("schema generation = %d, want 167 for durable comment log attachment jobs", schemaGeneration)
+	if schemaGeneration != 168 {
+		t.Fatalf("schema generation = %d, want 168 for durable comment log attachment jobs", schemaGeneration)
 	}
 	definition := strings.ToLower(strings.Join(featureUpdateSchemaStatements(), "\n"))
 	for _, required := range []string{

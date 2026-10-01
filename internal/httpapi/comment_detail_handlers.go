@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -311,13 +310,21 @@ func (s *Server) downloadCommentAttachment(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	visible, err := s.resolveVisibleComment(r.Context(), commentPublicID, currentClaims(r))
-	if err != nil || visible.Status != "published" {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && visible.Status != "published") {
 		writeError(w, http.StatusNotFound, "评论附件不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取评论附件失败")
 		return
 	}
 	commentID := visible.ID
 	items, err := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, currentClaims(r))
-	if err != nil || len(items) != 1 || items[0].Deleted {
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取评论附件失败")
+		return
+	}
+	if len(items) != 1 || items[0].Deleted {
 		writeError(w, http.StatusNotFound, "评论附件不存在")
 		return
 	}
@@ -327,8 +334,12 @@ func (s *Server) downloadCommentAttachment(w http.ResponseWriter, r *http.Reques
 		join oss_files file on file.id=attachment.attachment_file_id
 		where attachment.comment_id=$1 and file.public_id=$2 and file.status='active'
 		  and file.scan_status in ('clean','trusted_generated')`, commentID, filePublicID).Scan(&objectKey, &fileName)
-	if err != nil || isCommentLogAttachmentName(fileName) {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && isCommentLogAttachmentName(fileName)) {
 		writeError(w, http.StatusNotFound, "评论附件不存在或仍在安全扫描中")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取评论附件失败")
 		return
 	}
 	s.redirectOSSObjectAccess(w, r, objectKey, ossObjectAccessOptions{ContentDisposition: downloadContentDisposition(fileName)})
@@ -888,18 +899,4 @@ func nonNegativeInt(value string) int {
 		return 0
 	}
 	return number
-}
-
-func (s *Server) enqueueOrCreateCommentWatchNotification(ctx context.Context, recipientID, actorID int64, title, body string, data map[string]any) {
-	blocked, err := s.userBlocksActor(ctx, recipientID, actorID)
-	if err != nil || blocked {
-		return
-	}
-	event := notificationEvent{
-		Action: "comment_watch", RecipientID: recipientID, ActorID: actorID,
-		Kind: "comment_watch_reply", Title: title, Body: body, SourceLocale: "zh-CN", Data: data,
-	}
-	if err = s.enqueueNotificationTask(ctx, event); err != nil {
-		log.Printf("queue comment watch notification recipient_id=%d: %v", recipientID, err)
-	}
 }

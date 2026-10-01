@@ -45,6 +45,12 @@ func StartMinecraftServerProbeScheduler(ctx context.Context, db *pgxpool.Pool) {
 }
 
 func probeDueMinecraftServers(ctx context.Context, db *pgxpool.Pool) {
+	probeDueMinecraftServersWithProbe(ctx, db, serverprobe.Probe)
+}
+
+// Dependency injection stays private; production and owned integration tests
+// share the same claim transaction, concurrency budget and persistence path.
+func probeDueMinecraftServersWithProbe(ctx context.Context, db *pgxpool.Pool, probe minecraftServerProbeFunc) {
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		log.Printf("begin Minecraft server probe claims: %v", err)
@@ -103,7 +109,7 @@ func probeDueMinecraftServers(ctx context.Context, db *pgxpool.Pool) {
 				return
 			}
 			defer func() { <-semaphore }()
-			result, probeErr := serverprobe.Probe(ctx, item.address)
+			result, probeErr := probe(ctx, item.address)
 			if persistErr := persistMinecraftServerProbe(ctx, db, item.id, result, probeErr); persistErr != nil {
 				log.Printf("persist Minecraft server %d probe: %v", item.id, persistErr)
 			}

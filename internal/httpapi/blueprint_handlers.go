@@ -112,7 +112,9 @@ func (s *Server) createPendingBlueprint(ctx context.Context, ownerID int64, orig
 		return 0, "", err
 	}
 	defer tx.Rollback(ctx)
-	if err = tx.QueryRow(ctx, `insert into blueprints(owner_id,title,source_format,upload_expires_at) values($1,$2,$3,$4) returning id,public_id`, ownerID, title, format, uploadExpiresAt).Scan(&id, &publicID); err != nil {
+	// Uploads are private until normalization creates an approved revision or
+	// an actual review request; the schema's not_required default is not publish.
+	if err = tx.QueryRow(ctx, `insert into blueprints(owner_id,title,source_format,upload_expires_at,review_status) values($1,$2,$3,$4,'pending') returning id,public_id`, ownerID, title, format, uploadExpiresAt).Scan(&id, &publicID); err != nil {
 		return 0, "", err
 	}
 	if _, err = tx.Exec(ctx, `insert into content_localizations(subject_type,subject_id,locale,name,provenance,editable,review_status,updated_by)

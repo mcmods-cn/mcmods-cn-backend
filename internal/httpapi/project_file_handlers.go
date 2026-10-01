@@ -189,14 +189,22 @@ func (s *Server) projectFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to read project file")
 		return
 	}
+	approved, statusErr := projectFileTargetIsApprovedTx(r.Context(), tx, project.ProjectType, project.ProjectInternalID)
+	if statusErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load project publication status")
+		return
+	}
 	if _, err = tx.Exec(r.Context(), `update project_files set status='deleted',updated_at=now() where public_id=$1`, publicID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete project file")
 		return
 	}
-	_, _ = tx.Exec(r.Context(), `insert into audit_events(aggregate_type,aggregate_key,actor_id,action,ip,user_agent,metadata)
-		values('project_file',$1,$2,'delete',$3,$4,jsonb_build_object('projectType',$5,'projectId',$6))`,
-		publicID, currentClaims(r).Subject, s.requestClientLocation(r).IP, r.UserAgent(), project.ProjectType, project.ProjectID)
-	if project.ReviewStatus == "approved" && previousStatus == "active" {
+	if _, err = tx.Exec(r.Context(), `insert into audit_events(aggregate_type,aggregate_key,actor_id,action,ip,user_agent,metadata)
+		values('project_file',$1,$2,'delete',$3,$4,jsonb_build_object('projectType',$5::text,'projectId',$6::text))`,
+		publicID, currentClaims(r).Subject, s.requestClientLocation(r).IP, r.UserAgent(), project.ProjectType, project.ProjectID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist project file deletion audit")
+		return
+	}
+	if approved && previousStatus == "active" {
 		if err = enqueueProjectFileUpdateEventTx(r.Context(), tx, project, currentClaims(r).Subject,
 			"download_removed", publicID, publicationGeneration); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to enqueue project update")
@@ -219,7 +227,15 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 	request.DisplayName = strings.TrimSpace(request.DisplayName)
 	request.VersionName = strings.TrimSpace(request.VersionName)
 	request.ReleaseChannel = strings.ToLower(strings.TrimSpace(request.ReleaseChannel))
-	request.Loaders = normalizeLoaders(request.Loaders)
+	if project.ProjectType == "mod" || project.ProjectType == "modpack" {
+		request.Loaders = normalizeLoaders(request.Loaders)
+	} else {
+		request.Loaders = normalizedSimpleProjectOptions(request.Loaders)
+		if !validSimpleProjectOptions(project.ProjectType, request.Loaders, nil, nil) {
+			writeError(w, http.StatusBadRequest, "invalid loader for this project type")
+			return
+		}
+	}
 	request.OSSFileID = strings.ToLower(strings.TrimSpace(request.OSSFileID))
 	if !validCatalogPublicID(request.OSSFileID) || request.VersionName == "" || len(request.GameVersions) == 0 || projectFileRequiresLoader(project.ProjectType) && len(request.Loaders) == 0 {
 		writeError(w, http.StatusBadRequest, "file, version, game version, and applicable loader are required")
@@ -270,6 +286,11 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 		writeError(w, http.StatusBadRequest, "the uploaded file does not belong to this project or has an unsupported format")
 		return
 	}
+	approved, statusErr := projectFileTargetIsApprovedTx(r.Context(), tx, project.ProjectType, project.ProjectInternalID)
+	if statusErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load project publication status")
+		return
+	}
 	if request.DisplayName == "" {
 		request.DisplayName = fileName
 	}
@@ -297,7 +318,7 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 	metadata, _ := json.Marshal(map[string]any{"projectType": project.ProjectType, "projectId": project.ProjectID, "ossFileId": request.OSSFileID})
 	_, _ = tx.Exec(r.Context(), `insert into audit_events(aggregate_type,aggregate_key,actor_id,action,ip,user_agent,metadata)
 		values('project_file',$1,$2,'create',$3,$4,$5::jsonb)`, publicID, currentClaims(r).Subject, s.requestClientLocation(r).IP, r.UserAgent(), metadata)
-	if project.ReviewStatus == "approved" && publicationStatus == "active" {
+	if approved && publicationStatus == "active" {
 		if err = enqueueProjectFileUpdateEventTx(r.Context(), tx, project, currentClaims(r).Subject,
 			"download_added", publicID, publicationGeneration); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to enqueue project update")
@@ -374,28 +395,24 @@ func projectFileStatusForOSSScan(scanStatus string) string {
 func synchronizeProjectFilesForOSSScanTx(ctx context.Context, tx pgx.Tx, ossFileID, scanActorID int64, scanStatus string) error {
 	rows, err := tx.Query(ctx, `select project_file.id,project_file.public_id,project_file.status,
 		project_file.publication_generation,coalesce(project_file.uploaded_by,0),route.id,
-		coalesce(target_mod.review_status,target_modpack.review_status,target_simple.review_status,'')='approved'
+		project_file.project_type,project_file.project_internal_id
 		from project_files project_file
 		join public_routes route on route.entity_type=project_file.project_type and route.internal_id=project_file.project_internal_id
-		left join mods target_mod on route.entity_type='mod' and target_mod.id=route.internal_id
-		left join modpacks target_modpack on route.entity_type='modpack' and target_modpack.id=route.internal_id
-		left join simple_projects target_simple on route.entity_type=target_simple.project_type and target_simple.id=route.internal_id
 		where project_file.oss_file_id=$1 and project_file.status<>'deleted'
 		order by project_file.id for update of project_file`, ossFileID)
 	if err != nil {
 		return err
 	}
 	type transition struct {
-		id, uploaderID, routeID    int64
-		publicID, previousStatus   string
-		publicationGeneration      int
-		projectCurrentlyIsApproved bool
+		id, uploaderID, routeID, projectInternalID int64
+		publicID, previousStatus, projectType      string
+		publicationGeneration                      int
 	}
 	transitions := make([]transition, 0, 1)
 	for rows.Next() {
 		var item transition
 		if err = rows.Scan(&item.id, &item.publicID, &item.previousStatus, &item.publicationGeneration,
-			&item.uploaderID, &item.routeID, &item.projectCurrentlyIsApproved); err != nil {
+			&item.uploaderID, &item.routeID, &item.projectType, &item.projectInternalID); err != nil {
 			rows.Close()
 			return err
 		}
@@ -405,9 +422,23 @@ func synchronizeProjectFilesForOSSScanTx(ctx context.Context, tx pgx.Tx, ossFile
 		return err
 	}
 	targetStatus := projectFileStatusForOSSScan(scanStatus)
+	type targetKey struct {
+		projectType string
+		internalID  int64
+	}
+	lockedTargets := make(map[targetKey]bool)
 	for _, item := range transitions {
 		if item.previousStatus == targetStatus {
 			continue
+		}
+		key := targetKey{item.projectType, item.projectInternalID}
+		approved, locked := lockedTargets[key]
+		if !locked {
+			approved, err = projectFileTargetIsApprovedTx(ctx, tx, item.projectType, item.projectInternalID)
+			if err != nil {
+				return err
+			}
+			lockedTargets[key] = approved
 		}
 		nextGeneration := item.publicationGeneration
 		if targetStatus == "active" {
@@ -417,7 +448,7 @@ func synchronizeProjectFilesForOSSScanTx(ctx context.Context, tx pgx.Tx, ossFile
 			where id=$1`, item.id, targetStatus, nextGeneration); err != nil {
 			return err
 		}
-		if !item.projectCurrentlyIsApproved {
+		if !approved {
 			continue
 		}
 		if item.previousStatus != "active" && targetStatus == "active" {
@@ -477,11 +508,20 @@ func (s *Server) downloadProjectFile(w http.ResponseWriter, r *http.Request) {
 	source := strings.ToLower(strings.TrimSpace(r.PathValue("source")))
 	fileID := strings.TrimSpace(r.PathValue("fileId"))
 	if source == "internal" {
+		// Load configuration before holding a connection. Signing below is pure
+		// with respect to PostgreSQL and uses the locked file's immutable name.
+		ossConfig := s.ossConfigFromSettings(r.Context())
+		tx, beginErr := s.db.Begin(r.Context())
+		if beginErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to start project file download")
+			return
+		}
+		defer tx.Rollback(r.Context())
 		var objectKey, fileName string
-		err = s.db.QueryRow(r.Context(), `select oss.object_key,project_file.file_name
+		err = tx.QueryRow(r.Context(), `select oss.object_key,project_file.file_name
 			from project_files project_file join oss_files oss
 				on oss.id=project_file.oss_file_id and oss.status='active' and oss.scan_status in ('clean','trusted_generated')
-			where project_file.public_id=$1 and project_file.project_type=$2 and project_file.project_internal_id=$3 and project_file.status='active'`,
+			where project_file.public_id=$1 and project_file.project_type=$2 and project_file.project_internal_id=$3 and project_file.status='active' for share of oss`,
 			strings.ToLower(fileID), project.ProjectType, project.ProjectInternalID).Scan(&objectKey, &fileName)
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "project file not found")
@@ -491,12 +531,42 @@ func (s *Server) downloadProjectFile(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to load project file")
 			return
 		}
-		if s.presignOSSFileWithRequest(w, r, ossPresignRequest{ObjectKey: objectKey}) {
-			_, _ = s.db.Exec(r.Context(), `update project_files set download_count=download_count+1,updated_at=now()
-				where public_id=$1 and status='active'`, strings.ToLower(fileID))
-			s.writeAppLog(r.Context(), "download", "info", "download_project_file", fileName, currentClaims(r).Subject, r, http.StatusOK, 0,
-				map[string]any{"projectType": project.ProjectType, "projectId": project.ProjectID, "source": source, "fileId": fileID})
+		approved, statusErr := projectFileTargetIsApprovedTx(r.Context(), tx, project.ProjectType, project.ProjectInternalID)
+		if statusErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load project publication status")
+			return
 		}
+		if !approved {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		payload, signErr := s.prepareOSSFileDownloadWithConfig(r.Context(), ossConfig, ossPresignRequest{ObjectKey: objectKey}, fileName)
+		if signErr != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate OSS download URL")
+			return
+		}
+		command, countErr := tx.Exec(r.Context(), `update project_files set download_count=download_count+1,updated_at=now()
+			where public_id=$1 and project_type=$2 and project_internal_id=$3 and status='active'`, strings.ToLower(fileID), project.ProjectType, project.ProjectInternalID)
+		if countErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist project download count")
+			return
+		}
+		if command.RowsAffected() != 1 {
+			writeError(w, http.StatusNotFound, "project file not found")
+			return
+		}
+		if err = persistOSSDownloadStat(r.Context(), tx, objectKey); err != nil {
+			s.observeOSSWriteFailure("download_stat", objectKey, err)
+			writeError(w, http.StatusInternalServerError, "failed to persist project download statistics")
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit project file download")
+			return
+		}
+		s.writeAppLog(r.Context(), "download", "info", "download_project_file", fileName, currentClaims(r).Subject, r, http.StatusOK, 0,
+			map[string]any{"projectType": project.ProjectType, "projectId": project.ProjectID, "source": source, "fileId": fileID})
+		writeJSON(w, http.StatusOK, payload)
 		return
 	}
 	if source != "modrinth" && source != "curseforge" {

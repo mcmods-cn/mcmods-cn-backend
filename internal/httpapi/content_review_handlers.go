@@ -124,17 +124,20 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if err = tx.Commit(r.Context()); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to commit changelog review")
-			return
-		}
 		code := "review_approved"
 		if request.Status == "rejected" {
 			code = "review_rejected"
 		}
-		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{
+		if err = enqueueTemplatedNotificationTx(r.Context(), tx, "project_changelog.review."+request.Status, submittedBy, claims.Subject, code, map[string]string{
 			"name": targetName + " - " + snapshot.ProjectVersion, "reason": request.Note,
-		}, map[string]any{"changelogId": aggregateKey, "targetLabel": targetName, "url": targetURL + "?tab=changelog"})
+		}, map[string]any{"changelogId": aggregateKey, "targetLabel": targetName, "url": targetURL + "?tab=changelog"}, ""); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to enqueue changelog review notification")
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit changelog review")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status, "publicId": aggregateKey})
 		return
 	}
@@ -258,17 +261,20 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if err = tx.Commit(r.Context()); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to commit community post review")
-			return
-		}
 		code := "review_approved"
 		if request.Status == "rejected" {
 			code = "review_rejected"
 		}
-		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": title, "reason": request.Note}, map[string]any{
+		if err = enqueueTemplatedNotificationTx(r.Context(), tx, "community_post.review."+request.Status, submittedBy, claims.Subject, code, map[string]string{"name": title, "reason": request.Note}, map[string]any{
 			"communityPostId": aggregateKey, "targetLabel": title, "url": communityPostPath(snapshot.Kind, aggregateKey),
-		})
+		}, r.Header.Get("X-Request-ID")); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist community post review notification")
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit community post review")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status, "publicId": aggregateKey})
 		return
 	}
@@ -653,17 +659,20 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to record blueprint review")
 			return
 		}
-		if err = tx.Commit(r.Context()); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to commit blueprint review")
-			return
-		}
 		code := "review_approved"
 		if request.Status == "rejected" {
 			code = "review_rejected"
 		}
-		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": snapshot.Title, "reason": request.Note}, map[string]any{
+		if err = enqueueTemplatedNotificationTx(r.Context(), tx, "blueprint.review."+request.Status, submittedBy, claims.Subject, code, map[string]string{"name": snapshot.Title, "reason": request.Note}, map[string]any{
 			"blueprintId": aggregateKey, "targetLabel": snapshot.Title, "url": "/blueprints/" + aggregateKey,
-		})
+		}, r.Header.Get("X-Request-ID")); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist blueprint review notification")
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit blueprint review")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status})
 		return
 	}
@@ -714,17 +723,20 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to record skin review")
 			return
 		}
-		if err = tx.Commit(r.Context()); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to commit skin review")
-			return
-		}
 		code := "review_approved"
 		if request.Status == "rejected" {
 			code = "review_rejected"
 		}
-		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": snapshot.Name, "reason": request.Note}, map[string]any{
+		if err = enqueueTemplatedNotificationTx(r.Context(), tx, "skin.review."+request.Status, submittedBy, claims.Subject, code, map[string]string{"name": snapshot.Name, "reason": request.Note}, map[string]any{
 			"skinId": aggregateKey, "targetLabel": snapshot.Name, "url": "/skins/" + aggregateKey,
-		})
+		}, r.Header.Get("X-Request-ID")); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist skin review notification")
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit skin review")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionID, "status": request.Status})
 		return
 	}

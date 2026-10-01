@@ -386,7 +386,11 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 		err = ensureSimpleProjectSiteIDAvailable(r.Context(), tx, projectType, snapshot.SiteID, 0)
 	}
 	if err != nil {
-		writeError(w, http.StatusConflict, "project site ID is already used")
+		if errors.Is(err, errSimpleProjectSiteIDTaken) {
+			writeError(w, http.StatusConflict, "project site ID is already used")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to allocate project site ID")
+		}
 		return
 	}
 	publicID, err := availableModUniqueID(r.Context(), tx)
@@ -501,7 +505,11 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err = ensureSimpleProjectSiteIDAvailable(r.Context(), s.db, projectType, request.Snapshot.SiteID, current.ID); err != nil {
-		writeError(w, http.StatusConflict, "project site ID is already used")
+		if errors.Is(err, errSimpleProjectSiteIDTaken) {
+			writeError(w, http.StatusConflict, "project site ID is already used")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to validate project site ID")
+		}
 		return
 	}
 	status := "approved"
@@ -1165,18 +1173,27 @@ func simpleProjectWebPath(projectType, siteID string) string {
 	return prefixes[projectType] + siteID
 }
 
-func availableSimpleProjectSiteID(ctx context.Context, query databaseQuery, projectType, name string) (string, error) {
+var errSimpleProjectSiteIDTaken = errors.New("project site ID exists")
+
+func availableSimpleProjectSiteID(ctx context.Context, tx pgx.Tx, projectType, name string) (string, error) {
 	base := modSiteIDBase(name)
+	// Keep allocation serialized until its insert commits, across server instances.
+	// A process-local lock or a read before taking this lock cannot reserve a slug.
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1,0))`, "simple-project-slug:"+projectType+":"+base); err != nil {
+		return "", err
+	}
 	for suffix := 0; suffix < 1000; suffix++ {
 		candidate := base
 		if suffix > 0 {
 			candidate = fmt.Sprintf("%s_%d", base, suffix+1)
 		}
-		if ensureSimpleProjectSiteIDAvailable(ctx, query, projectType, candidate, 0) == nil {
+		if err := ensureSimpleProjectSiteIDAvailable(ctx, tx, projectType, candidate, 0); err == nil {
 			return candidate, nil
+		} else if !errors.Is(err, errSimpleProjectSiteIDTaken) {
+			return "", err
 		}
 	}
-	return "", errors.New("unable to allocate project site ID")
+	return "", fmt.Errorf("unable to allocate project site ID: %w", errSimpleProjectSiteIDTaken)
 }
 
 func ensureSimpleProjectSiteIDAvailable(ctx context.Context, query databaseQuery, projectType, siteID string, excludeID int64) error {
@@ -1185,7 +1202,7 @@ func ensureSimpleProjectSiteIDAvailable(ctx context.Context, query databaseQuery
 		return err
 	}
 	if exists {
-		return errors.New("project site ID exists")
+		return errSimpleProjectSiteIDTaken
 	}
 	return nil
 }

@@ -17,17 +17,7 @@ func TestSkinCatalogSearchAndDeepPagesStayIndexedAtMillionScaleIntegration(t *te
 		display_name text not null,created_at timestamptz not null,updated_at timestamptz not null,
 		downloads bigint not null,heat_score numeric(16,6) not null,favorite_count bigint not null,
 		bayesian_rating numeric(6,4) not null,rating_count bigint not null,view_count bigint not null,
-		comment_count bigint not null,search_document tsvector not null);
-	create index idx_skin_public_catalog_published on skin_public_catalog(created_at desc,updated_at desc,asset_id desc);
-	create index idx_skin_public_catalog_updated on skin_public_catalog(updated_at desc,asset_id desc);
-	create index idx_skin_public_catalog_heat on skin_public_catalog(heat_score desc,updated_at desc,asset_id desc);
-	create index idx_skin_public_catalog_downloads on skin_public_catalog(downloads desc,updated_at desc,asset_id desc);
-	create index idx_skin_public_catalog_favorites on skin_public_catalog(favorite_count desc,updated_at desc,asset_id desc);
-	create index idx_skin_public_catalog_rating on skin_public_catalog(bayesian_rating desc,rating_count desc,updated_at desc,asset_id desc);
-	create index idx_skin_public_catalog_views on skin_public_catalog(view_count desc,updated_at desc,asset_id desc);
-	create index idx_skin_public_catalog_comments on skin_public_catalog(comment_count desc,updated_at desc,asset_id desc);
-	create index idx_skin_public_catalog_name on skin_public_catalog(lower(display_name),asset_id);
-	create index idx_skin_public_catalog_search on skin_public_catalog using gin(search_document)`); err != nil {
+		comment_count bigint not null,search_document tsvector not null)`); err != nil {
 		t.Fatal(err)
 	}
 	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -45,8 +35,26 @@ func TestSkinCatalogSearchAndDeepPagesStayIndexedAtMillionScaleIntegration(t *te
 		from generate_series(1,1000000) value`, base); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `analyze skin_public_catalog`); err != nil {
+	// This is a read-plan fixture, not an ingestion benchmark. Bulk-build the
+	// identical indexes after loading instead of maintaining ten indexes per
+	// synthetic row. Keep the million-row cardinality and both budgets intact.
+	if _, err := pool.Exec(ctx, `
+	create index idx_skin_public_catalog_published on skin_public_catalog(created_at desc,updated_at desc,asset_id desc);
+	create index idx_skin_public_catalog_updated on skin_public_catalog(updated_at desc,asset_id desc);
+	create index idx_skin_public_catalog_heat on skin_public_catalog(heat_score desc,updated_at desc,asset_id desc);
+	create index idx_skin_public_catalog_downloads on skin_public_catalog(downloads desc,updated_at desc,asset_id desc);
+	create index idx_skin_public_catalog_favorites on skin_public_catalog(favorite_count desc,updated_at desc,asset_id desc);
+	create index idx_skin_public_catalog_rating on skin_public_catalog(bayesian_rating desc,rating_count desc,updated_at desc,asset_id desc);
+	create index idx_skin_public_catalog_views on skin_public_catalog(view_count desc,updated_at desc,asset_id desc);
+	create index idx_skin_public_catalog_comments on skin_public_catalog(comment_count desc,updated_at desc,asset_id desc);
+	create index idx_skin_public_catalog_name on skin_public_catalog(lower(display_name),asset_id);
+	create index idx_skin_public_catalog_search on skin_public_catalog using gin(search_document);
+	analyze skin_public_catalog`); err != nil {
 		t.Fatal(err)
+	}
+	var cardinality int64
+	if err := pool.QueryRow(ctx, `select count(*) from skin_public_catalog`).Scan(&cardinality); err != nil || cardinality != 1_000_000 {
+		t.Fatalf("million-row fixture cardinality=%d err=%v", cardinality, err)
 	}
 
 	cases := []struct {

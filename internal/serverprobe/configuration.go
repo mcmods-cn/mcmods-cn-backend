@@ -101,11 +101,11 @@ func minecraftVersionForConfigurationProtocol(protocol int) string {
 	return ""
 }
 
-func probeConfigurationNamespaces(ctx context.Context, target Target, protocol int) configurationDiscovery {
+func probeConfigurationNamespaces(ctx context.Context, target Target, protocol int, dial probeDialContextFunc) configurationDiscovery {
 	result := configurationDiscovery{Confidence: map[string]string{}}
 	probeCtx, cancel := context.WithTimeout(ctx, configurationProbeTimeout)
 	defer cancel()
-	conn, err := (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: -1}).DialContext(
+	conn, err := dial(
 		probeCtx, "tcp", net.JoinHostPort(target.ConnectIP.String(), fmt.Sprint(target.ConnectPort)),
 	)
 	if err != nil {
@@ -118,6 +118,8 @@ func probeConfigurationNamespaces(ctx context.Context, target Target, protocol i
 		deadline = contextDeadline
 	}
 	_ = conn.SetDeadline(deadline)
+	stopCancellation := context.AfterFunc(probeCtx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stopCancellation()
 	packetConn := &configurationPacketConn{
 		conn: conn, reader: bufio.NewReader(conn), compressionThreshold: -1,
 	}

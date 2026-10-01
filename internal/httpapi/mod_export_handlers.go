@@ -15,7 +15,6 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -231,7 +230,7 @@ func (s *Server) resumeModExportUpload(w http.ResponseWriter, r *http.Request) {
 	request.SHA256 = normalizeSHA256(request.SHA256)
 	request.MultipartUploadID = strings.TrimSpace(request.MultipartUploadID)
 	expectedCategory := ossModImportCategory(identity.UniqueID, "mcmods-exporter", "packages")
-	expectedObjectCategory := modExportOwnerObjectCategory(expectedCategory, currentClaims(r).Subject)
+	expectedObjectCategory := ossOwnerObjectCategory(expectedCategory, currentClaims(r).Subject)
 	client, cfg, err := s.ossClient(r.Context())
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
@@ -631,10 +630,6 @@ func (s *Server) modExportJobByIDWithCreator(ctx context.Context, jobID string, 
 		result.ErrorDetail = map[string]any{}
 	}
 	return result, nil
-}
-
-func modExportOwnerObjectCategory(category string, ownerID int64) string {
-	return path.Join(category, "owners", strconv.FormatInt(ownerID, 10))
 }
 
 func (s *Server) requireModEditor(w http.ResponseWriter, r *http.Request) (modIdentityRecord, bool) {

@@ -299,8 +299,11 @@ func prepareExportRegistryResources(resolver catalogResourceIdentityResolver, re
 			return nil, err
 		}
 		objectID, _ := entry["id"].(string)
-		namespace, resourcePath, valid := exportSourceResourceParts(document.Registry, objectID, "")
+		namespace, resourcePath, valid := exportSourceResourceParts(document.Registry, objectID, exportString(entry["namespace"]))
 		if !valid {
+			if document.Registry == "key_mappings" {
+				return nil, fmt.Errorf("registry %s entry %q has invalid key-mapping namespace", document.Registry, objectID)
+			}
 			continue
 		}
 		revisionID, revisionErr := exportRevisionForNamespace(revisions, namespace)

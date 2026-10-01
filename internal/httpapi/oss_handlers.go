@@ -216,7 +216,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "举报附件类型不支持或超过 25MB")
 		return
 	}
-	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && ext != ".jar") || (!isReportEvidence && !isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
+	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && !projectFileExtensionAllowed(projectDownloadType, ext)) || (!isReportEvidence && !isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -267,7 +267,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		}
 	} else if isModExport {
 		category = ossModImportCategory(modExportUniqueID, "mcmods-exporter", "packages")
-		objectCategory = modExportOwnerObjectCategory(category, currentClaims(r).Subject)
+		objectCategory = ossOwnerObjectCategory(category, currentClaims(r).Subject)
 		objectPrefix = ossRoot(cfg.Prefix)
 	} else if isModCatalog {
 		category = ossModImportCategory(modCatalogUniqueID, source, "catalog")
@@ -275,7 +275,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		objectPrefix = ossRoot(cfg.Prefix)
 	} else if isProjectDownload {
 		category = ossProjectReleaseCategory(projectDownloadType, projectDownloadID)
-		objectCategory = category
+		objectCategory = ossOwnerObjectCategory(category, currentClaims(r).Subject)
 		objectPrefix = ossRoot(cfg.Prefix)
 	} else if isReportEvidence {
 		category = path.Join("moderation", "report-evidence", strconv.FormatInt(currentClaims(r).Subject, 10))
@@ -627,7 +627,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadRequest, "举报附件类型不支持或超过 25MB")
 		return
 	}
-	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && ext != ".jar") || (!isReportEvidence && !isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
+	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && !projectFileExtensionAllowed(projectDownloadType, ext)) || (!isReportEvidence && !isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -672,7 +672,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		req.Category = catalogCategory
 	} else if isProjectDownload {
 		downloadCategory := ossProjectReleaseCategory(projectDownloadType, projectDownloadID)
-		downloadPrefix := ossObjectPrefix(cfg.Prefix, downloadCategory)
+		downloadPrefix := ossObjectPrefix(cfg.Prefix, ossOwnerObjectCategory(downloadCategory, currentClaims(r).Subject))
 		if !isAllowedObjectKey(req.ObjectKey, downloadPrefix) {
 			writeError(w, http.StatusBadRequest, "OSS ObjectKey does not belong to this project download directory")
 			return

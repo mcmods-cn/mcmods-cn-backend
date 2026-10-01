@@ -16,7 +16,6 @@ import (
 	"mcmods-cn-backend/internal/mailer"
 	"mcmods-cn-backend/internal/querycache"
 	"mcmods-cn-backend/internal/queue"
-	"mcmods-cn-backend/internal/security"
 )
 
 const notificationTaskCode = "notifications"
@@ -435,28 +434,18 @@ func (worker *NotificationWorker) sendUserEmail(ctx context.Context, userID int6
 	if err != nil {
 		return err
 	}
-	if err = worker.activeMailer(ctx).Send(email, subject, body); err != nil {
+	active, err := worker.activeMailer(ctx)
+	if err != nil {
+		return err
+	}
+	if err = active.Send(email, subject, body); err != nil {
 		slog.Warn("send notification email", "user_id", userID, "error", err)
 		return err
 	}
 	return nil
 }
 
-func (worker *NotificationWorker) activeMailer(ctx context.Context) mailer.Mailer {
-	payload := mailConfigPayload{
-		Enabled:  worker.fallback.Enabled,
-		Host:     worker.fallback.Host,
-		Port:     worker.fallback.Port,
-		Username: worker.fallback.Username,
-		Password: worker.fallback.Password,
-		From:     worker.fallback.From,
-		UseTLS:   worker.fallback.UseTLS,
-	}
-	var raw []byte
-	if err := worker.db.QueryRow(ctx, `select value from system_settings where key = 'mail.smtp'`).Scan(&raw); err == nil {
-		if decrypted, decryptErr := security.DecryptSetting(worker.settingsEncryptionKey, raw); decryptErr == nil {
-			_ = json.Unmarshal(decrypted, &payload)
-		}
-	}
-	return mailer.New(smtpConfigFromPayload(payload))
+func (worker *NotificationWorker) activeMailer(ctx context.Context) (mailer.Mailer, error) {
+	payload, err := readMailSettings(ctx, worker.db, worker.fallback, worker.settingsEncryptionKey)
+	return mailer.New(smtpConfigFromPayload(payload)), err
 }

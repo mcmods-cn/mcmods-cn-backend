@@ -7,8 +7,8 @@ import (
 
 func TestReportAssignmentSchemaMakesInReviewOwnershipAuditable(t *testing.T) {
 	t.Parallel()
-	if schemaGeneration != 167 {
-		t.Fatalf("report assignment authority requires schema generation 167, got %d", schemaGeneration)
+	if schemaGeneration != 168 {
+		t.Fatalf("report assignment authority requires schema generation 168, got %d", schemaGeneration)
 	}
 	schema := strings.Join(governanceAutomationSchemaStatements(), "\n")
 	for _, fragment := range []string{

@@ -33,14 +33,19 @@ func TestCommunityPostReadsAndUpdatesDoNotHideDataFailures(t *testing.T) {
 		t.Fatal("community resource reference names still ignore JSON corruption")
 	}
 
-	requestTranslation := goFunctionBody(t, source, "requestCommunityPostTranslation")
+	translationRaw, err := os.ReadFile("community_post_translation_handlers.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	translationSource := string(translationRaw)
+	requestTranslation := goFunctionBody(t, translationSource, "requestCommunityPostTranslation")
 	for _, required := range []string{"errors.Is(err, pgx.ErrNoRows)", `logCommunityPostDataFailure("translation_source"`, `logCommunityPostDataFailure("translation_cache"`, "http.StatusInternalServerError"} {
 		if !strings.Contains(requestTranslation, required) {
 			t.Errorf("community translation request is missing database classification %q", required)
 		}
 	}
 
-	translationResult := goFunctionBody(t, source, "communityPostTranslationResult")
+	translationResult := goFunctionBody(t, translationSource, "communityPostTranslationResult")
 	for _, required := range []string{"decodeCommunityPostTranslationTaskPayload", "errors.Is(err, pgx.ErrNoRows)", `logCommunityPostDataFailure("translation_task"`, `logCommunityPostDataFailure("translation_payload"`, `logCommunityPostDataFailure("translation_result"`, "http.StatusInternalServerError"} {
 		if !strings.Contains(translationResult, required) {
 			t.Errorf("community translation result is missing strict failure boundary %q", required)

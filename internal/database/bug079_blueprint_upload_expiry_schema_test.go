@@ -7,8 +7,8 @@ import (
 )
 
 func TestBlueprintUploadsHaveAnExplicitGeneration155Expiry(t *testing.T) {
-	if schemaGeneration != 167 {
-		t.Fatalf("schema generation = %d, want 167", schemaGeneration)
+	if schemaGeneration != 168 {
+		t.Fatalf("schema generation = %d, want 168", schemaGeneration)
 	}
 	source, err := os.ReadFile("migrations.go")
 	if err != nil {

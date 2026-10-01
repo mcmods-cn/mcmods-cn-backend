@@ -238,16 +238,11 @@ func (s *Server) loadModrinthProjectFilePage(ctx context.Context, project projec
 			return projectFilePage{}, loadErr
 		}
 		byID := make(map[string]modrinthProjectVersion, len(versions))
-		batchFiles := 0
 		for _, version := range versions {
-			if len(version.Files) > projectFileMaximumFilesPerVersion {
-				return projectFilePage{}, errors.New("Modrinth version contains too many files")
+			if version.ProjectID != manifest.ID {
+				return projectFilePage{}, errors.New("Modrinth version does not belong to the project")
 			}
-			batchFiles += len(version.Files)
 			byID[version.ID] = version
-		}
-		if batchFiles > projectFileMaximumBatchFiles {
-			return projectFilePage{}, errors.New("Modrinth page contains too many files")
 		}
 		for statePosition < end && len(items) <= request.Limit {
 			versionID := manifest.Versions[len(manifest.Versions)-1-statePosition]
@@ -260,6 +255,11 @@ func (s *Server) loadModrinthProjectFilePage(ctx context.Context, project projec
 			files := modrinthVersionProjectFiles(version, manifest.ID)
 			if stateFileOffset > len(files) {
 				return projectFilePage{}, errors.New("project file cursor is outside the provider version")
+			}
+			if stateFileOffset == len(files) {
+				statePosition++
+				stateFileOffset = 0
+				continue
 			}
 			versionPosition := statePosition
 			for stateFileOffset < len(files) && len(items) <= request.Limit {
@@ -302,7 +302,7 @@ func modrinthManifestPosition(manifest modrinthProjectFileManifest, anchor strin
 }
 
 func (s *Server) cachedModrinthProjectFileManifest(ctx context.Context, projectID string, cfg modImportConfig) (modrinthProjectFileManifest, error) {
-	key := "project-files:modrinth:manifest:v2:" + strings.ToLower(strings.TrimSpace(projectID))
+	key := projectFileProviderCacheKey("modrinth", "manifest", strings.TrimSpace(projectID), cfg)
 	payload, err := s.cache.GetOrLoad(ctx, key, func(loadContext context.Context) ([]byte, error) {
 		client, clientErr := newProviderHTTPClient(time.Duration(cfg.RequestTimeoutSeconds)*time.Second, cfg.Modrinth.BaseURL)
 		if clientErr != nil {
@@ -355,8 +355,7 @@ func (s *Server) cachedModrinthProjectVersions(ctx context.Context, ids []string
 		return nil, errors.New("invalid Modrinth version batch")
 	}
 	material, _ := json.Marshal(ids)
-	digest := sha256.Sum256(material)
-	key := "project-files:modrinth:versions:v2:" + hex.EncodeToString(digest[:16])
+	key := projectFileProviderCacheKey("modrinth", "versions", string(material), cfg)
 	payload, err := s.cache.GetOrLoad(ctx, key, func(loadContext context.Context) ([]byte, error) {
 		client, clientErr := newProviderHTTPClient(time.Duration(cfg.RequestTimeoutSeconds)*time.Second, cfg.Modrinth.BaseURL)
 		if clientErr != nil {
@@ -371,8 +370,8 @@ func (s *Server) cachedModrinthProjectVersions(ctx context.Context, ids []string
 		if clientErr = getProviderJSONLimited(loadContext, client, endpoint.String(), headers, projectFileProviderJSONLimit, &versions); clientErr != nil {
 			return nil, clientErr
 		}
-		if len(versions) > len(ids) {
-			return nil, errors.New("Modrinth returned too many versions")
+		if clientErr = validateModrinthProjectVersionBatch(versions, ids); clientErr != nil {
+			return nil, clientErr
 		}
 		return json.Marshal(versions)
 	})
@@ -383,10 +382,39 @@ func (s *Server) cachedModrinthProjectVersions(ctx context.Context, ids []string
 	if err = json.Unmarshal(payload, &versions); err != nil {
 		return nil, err
 	}
-	if len(versions) > len(ids) {
-		return nil, errors.New("Modrinth returned too many versions")
+	if err = validateModrinthProjectVersionBatch(versions, ids); err != nil {
+		return nil, err
 	}
 	return versions, nil
+}
+
+func validateModrinthProjectVersionBatch(versions []modrinthProjectVersion, ids []string) error {
+	if len(versions) > len(ids) {
+		return errors.New("Modrinth returned too many versions")
+	}
+	requested := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		requested[id] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(versions))
+	fileCount := 0
+	for _, version := range versions {
+		if _, exists := requested[version.ID]; !exists {
+			return errors.New("Modrinth returned an unrequested version")
+		}
+		if _, duplicate := seen[version.ID]; duplicate {
+			return errors.New("Modrinth returned duplicate versions")
+		}
+		seen[version.ID] = struct{}{}
+		if len(version.Files) > projectFileMaximumFilesPerVersion {
+			return errors.New("Modrinth version contains too many files")
+		}
+		fileCount += len(version.Files)
+	}
+	if fileCount > projectFileMaximumBatchFiles {
+		return errors.New("Modrinth page contains too many files")
+	}
+	return nil
 }
 
 func modrinthVersionProjectFiles(version modrinthProjectVersion, providerProjectID string) []providerProjectFile {
@@ -445,7 +473,7 @@ func (s *Server) loadModrinthProjectFileByHash(ctx context.Context, projectID, f
 	if err != nil {
 		return providerProjectFile{}, err
 	}
-	if version.ProjectID != manifest.ID || len(version.Files) > projectFileMaximumFilesPerVersion {
+	if version.ProjectID != manifest.ID || modrinthManifestPosition(manifest, version.ID) < 0 || len(version.Files) > projectFileMaximumFilesPerVersion {
 		return providerProjectFile{}, errors.New("Modrinth file does not belong to the project")
 	}
 	for _, file := range modrinthVersionProjectFiles(version, manifest.ID) {
@@ -458,6 +486,7 @@ func (s *Server) loadModrinthProjectFileByHash(ctx context.Context, projectID, f
 
 type curseForgeProjectFile struct {
 	ID            int64    `json:"id"`
+	ModID         int64    `json:"modId"`
 	DisplayName   string   `json:"displayName"`
 	FileName      string   `json:"fileName"`
 	ReleaseType   int      `json:"releaseType"`
@@ -516,7 +545,15 @@ func (s *Server) loadCurseForgeProjectFilePage(ctx context.Context, project proj
 		return projectFilePage{}, errors.New("CurseForge returned an inconsistent empty page")
 	}
 	items := make([]projectFileItem, 0, min(len(response.Data), request.Limit))
+	seen := make(map[int64]struct{}, len(response.Data))
 	for _, file := range response.Data {
+		if file.ID <= 0 || strconv.FormatInt(file.ModID, 10) != numericID {
+			return projectFilePage{}, errors.New("CurseForge file does not belong to the project")
+		}
+		if _, duplicate := seen[file.ID]; duplicate {
+			return projectFilePage{}, errors.New("CurseForge returned duplicate files")
+		}
+		seen[file.ID] = struct{}{}
 		items = append(items, providerFileItem(project, curseForgeProviderProjectFile(file)))
 	}
 	hasMore := len(items) > request.Limit
@@ -575,7 +612,7 @@ func loadCurseForgeProjectFileByID(ctx context.Context, projectID, fileID string
 	if err = getProviderJSONLimited(ctx, client, endpoint, headers, projectFileProviderJSONLimit, &response); err != nil {
 		return providerProjectFile{}, err
 	}
-	if response.Data.ID != numericFileID {
+	if response.Data.ID != numericFileID || strconv.FormatInt(response.Data.ModID, 10) != numericID {
 		return providerProjectFile{}, errors.New("CurseForge returned the wrong file")
 	}
 	return curseForgeProviderProjectFile(response.Data), nil
@@ -599,7 +636,7 @@ func (s *Server) cachedProviderProjectFiles(ctx context.Context, source, project
 	if projectID == "" {
 		return nil, errors.New("provider project ID is missing")
 	}
-	key := "project-files:provider:bounded:v2:" + source + ":" + strings.ToLower(projectID)
+	key := projectFileProviderCacheKey(source, "bounded", projectID, cfg)
 	payload, err := s.cache.GetOrLoad(ctx, key, func(loadContext context.Context) ([]byte, error) {
 		var files []providerProjectFile
 		var loadErr error
@@ -627,6 +664,18 @@ func (s *Server) cachedProviderProjectFiles(ctx context.Context, source, project
 		return nil, errors.New("cached provider file list exceeds its hard limit")
 	}
 	return files, nil
+}
+
+// Provider identifiers are case-sensitive. Origin and credential changes also
+// define a different cache authority; none of that material is exposed in keys.
+func projectFileProviderCacheKey(source, kind, identity string, cfg modImportConfig) string {
+	provider := cfg.Modrinth
+	if source == "curseforge" {
+		provider = cfg.CurseForge
+	}
+	material, _ := json.Marshal([]string{strings.TrimRight(provider.BaseURL, "/"), provider.Token, provider.APIKey, identity})
+	digest := sha256.Sum256(material)
+	return "project-files:" + source + ":" + kind + ":v3:" + hex.EncodeToString(digest[:])
 }
 
 func loadModrinthProjectFiles(ctx context.Context, projectID string, cfg modImportConfig) ([]providerProjectFile, error) {
@@ -690,6 +739,9 @@ func loadCurseForgeProjectFiles(ctx context.Context, projectID string, cfg modIm
 			return nil, errors.New("CurseForge project contains too many files for bulk automation")
 		}
 		for _, file := range response.Data {
+			if file.ID <= 0 || strconv.FormatInt(file.ModID, 10) != numericID {
+				return nil, errors.New("CurseForge file does not belong to the project")
+			}
 			result = append(result, curseForgeProviderProjectFile(file))
 		}
 		count := response.Pagination.ResultCount

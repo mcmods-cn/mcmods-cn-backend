@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"mcmods-cn-backend/internal/config"
 )
 
@@ -184,6 +186,16 @@ func TestJetStreamDurableConsumerResumesBacklogAfterRestartIntegration(t *testin
 	}
 	firstContext, cancelFirst := context.WithCancel(context.Background())
 	first := New(firstContext, cfg)
+	t.Cleanup(func() {
+		first.mu.RLock()
+		js := first.jetStream
+		first.mu.RUnlock()
+		if js != nil {
+			_ = js.DeleteStream(stream)
+		}
+		first.Close()
+		cancelFirst()
+	})
 	firstDelivery := make(chan string, 1)
 	if err := first.SubscribeTask("resume", func(_ context.Context, payload []byte) error {
 		firstDelivery <- string(payload)
@@ -199,6 +211,31 @@ func TestJetStreamDurableConsumerResumesBacklogAfterRestartIntegration(t *testin
 		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("first durable delivery timed out")
+	}
+	// The handler signal precedes its return and the queue's ACK. Confirm the
+	// broker's actual acknowledgement before asserting no replay after restart;
+	// closing on the signal alone races the ACK and permits valid redelivery.
+	first.mu.RLock()
+	js := first.jetStream
+	first.mu.RUnlock()
+	ackContext, cancelAck := context.WithTimeout(firstContext, 4*time.Second)
+	defer cancelAck()
+	ackTicker := time.NewTicker(10 * time.Millisecond)
+	defer ackTicker.Stop()
+	for {
+		info, err := js.ConsumerInfo(stream, cleanDurable("mcmods-resume-workers"), nats.Context(ackContext))
+		if err != nil {
+			t.Fatalf("read broker ACK before restart: %v", err)
+		}
+		if info.AckFloor.Stream == 1 && info.NumAckPending == 0 {
+			t.Logf("broker confirmed pre-restart ACK floor=%d pending=%d", info.AckFloor.Stream, info.NumAckPending)
+			break
+		}
+		select {
+		case <-ackTicker.C:
+		case <-ackContext.Done():
+			t.Fatalf("first durable callback did not reach an acknowledged broker state: floor=%d pending=%d", info.AckFloor.Stream, info.NumAckPending)
+		}
 	}
 	first.Close()
 	cancelFirst()

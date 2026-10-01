@@ -130,7 +130,11 @@ func TestOSSReuseMetricsAndCleanupFailuresAreObservableIntegration(t *testing.T)
 		t.Fatal(err)
 	}
 	worker := &OSSDeletionWorker{server: server, workerID: "arch020-worker"}
-	if err = worker.deleteObject(ctx, ossDeletionJob{FileID: nil, Bucket: cfg.Bucket, Endpoint: cfg.Endpoint, Region: cfg.Region, ObjectKey: "objects/pending-delete.bin"}); err != nil {
+	job, err := worker.claim(ctx)
+	if err != nil || job.ObjectKey != "objects/pending-delete.bin" || job.FileID != nil {
+		t.Fatalf("actual unregistered cleanup claim = %#v/%v", job, err)
+	}
+	if err = worker.deleteObject(ctx, job); err != nil {
 		t.Fatalf("late registration guard failed: %v", err)
 	}
 

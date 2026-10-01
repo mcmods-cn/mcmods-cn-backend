@@ -6,7 +6,7 @@ import (
 )
 
 func TestEconomySchemaEnforcesExecutableItemsAndAtomicPromotionSequences(t *testing.T) {
-	if schemaGeneration != 167 {
+	if schemaGeneration != 168 {
 		t.Fatalf("unexpected schema generation %d", schemaGeneration)
 	}
 	economyDefinition := strings.ToLower(strings.Join(communitySchemaStatements(), "\n"))

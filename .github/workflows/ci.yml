@@ -12,9 +12,29 @@ concurrency:
   group: backend-ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  APP_ENV: test
+  DATABASE_URL: postgres://postgres@127.0.0.1:5432/mcmods_test?sslmode=disable
+  JWT_SECRET: ci-test-only-signing-secret-at-least-32-bytes
+  SETTINGS_ENCRYPTION_KEY: ci-test-only-encryption-key-at-least-32-bytes
+
 jobs:
   quality:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: postgres
+          POSTGRES_DB: mcmods_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mcmods_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -26,6 +46,8 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
+      - name: Initialize the owned job database
+        uses: ./.github/actions/initialize-test-database
       - name: Test and enforce the coverage floor
         run: |
           go test ./... -count=1 -coverprofile=coverage.out
@@ -54,18 +76,18 @@ jobs:
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_USER: postgres
-          POSTGRES_DB: postgres
+          POSTGRES_DB: mcmods_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-cmd "pg_isready -U postgres -d mcmods_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
     env:
-      DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable
-      MCMODS_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable
+      MCMODS_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/mcmods_test?sslmode=disable
       MCMODS_RUN_DB_INTEGRATION: "1"
+      MCMODS_RUN_ACTIVITY_LOAD: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -73,11 +95,27 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Run isolated PostgreSQL integration tests
-        run: go test -p=1 -parallel=1 ./... -count=1
+      - name: Initialize the owned job database
+        uses: ./.github/actions/initialize-test-database
+      - name: Run every discovered test in isolated serial PostgreSQL batches
+        run: go run ./tools/testing/db_suite
 
   race:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: postgres
+          POSTGRES_DB: mcmods_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mcmods_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -85,6 +123,8 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Initialize the owned job database
+        uses: ./.github/actions/initialize-test-database
       - name: Run the Linux race detector
         env:
           CGO_ENABLED: "1"

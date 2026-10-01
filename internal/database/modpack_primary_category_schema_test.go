@@ -18,8 +18,8 @@ import (
 var bug029ModpackCategories = catalogpolicy.ModpackCategories()
 
 func TestBUG029ModpackPrimaryCategoryIsCheckedByGeneration145Schema(t *testing.T) {
-	if schemaGeneration != 167 {
-		t.Fatalf("schema generation=%d want 167 for the new persisted category invariant", schemaGeneration)
+	if schemaGeneration != 168 {
+		t.Fatalf("schema generation=%d want 168 for the new persisted category invariant", schemaGeneration)
 	}
 	schema := strings.ToLower(strings.Join(modpackSchemaStatements(), "\n"))
 	constraint := "constraint modpacks_primary_category_check check(primary_category in ('" +

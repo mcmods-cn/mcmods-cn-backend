@@ -126,6 +126,22 @@ func archiveStaleImportedResourceDetailsTx(ctx context.Context, tx pgx.Tx, revis
 }
 
 func ensureImportedContentSectionsTx(ctx context.Context, tx pgx.Tx, revisionIDs []string, versionID, modID, actorID int64) error {
+	// Older root-only deletion could leave live descendants hidden beneath an
+	// archived page. Keep those deleted trees archived before rebuilding roots;
+	// never revive them, touch another version, or change pending review drafts.
+	if _, err := tx.Exec(ctx, `with recursive orphaned(id) as (
+		select child.id from mod_content_sections child
+		join mod_content_sections parent on parent.id=child.parent_id
+		where child.version_id=$1 and child.mod_id=$2 and parent.version_id=$1
+		  and parent.mod_id=$2 and parent.status='archived'
+		union
+		select child.id from mod_content_sections child join orphaned parent on child.parent_id=parent.id
+		where child.version_id=$1 and child.mod_id=$2
+	)
+	update mod_content_sections section set status='archived',updated_by=nullif($3::bigint,0),updated_at=now()
+	from orphaned where section.id=orphaned.id and section.status='active'`, versionID, modID, actorID); err != nil {
+		return fmt.Errorf("archive orphaned imported content categories: %w", err)
+	}
 	rootSectionSQL := strings.ReplaceAll(`with imported_templates as (
 		select distinct {{template_code}} template_code
 		from resource_import_snapshots snapshot join game_resources resource on resource.entity_id=snapshot.resource_id

@@ -85,6 +85,31 @@ func TestApplyModContentLayoutPatchMovesResourcesOutOfDeletedCategories(t *testi
 	}
 }
 
+func TestApplyModContentLayoutPatchRejectsForeignTargetsAtomically(t *testing.T) {
+	for _, target := range []string{"other0001", "unknown01", "missing-resource"} {
+		t.Run(target, func(t *testing.T) {
+			current := modContentLayoutEdit{RootSectionPublicID: "root00001", DisplayMode: "compact",
+				Categories: []modContentLayoutCategoryEdit{{PublicID: "cat000001", ParentPublicID: "root00001"}, {PublicID: "cat000002", ParentPublicID: "root00001"}},
+				Resources:  []modContentLayoutResourceEdit{{ResourcePublicID: "res000001", SectionPublicID: "root00001"}, {ResourcePublicID: "res000002", SectionPublicID: "cat000001"}}}
+			before, _ := json.Marshal(current)
+			categories := []modContentLayoutCategoryEdit{{PublicID: "cat000001", ParentPublicID: "root00001"}}
+			bad := modContentLayoutResourceEdit{ResourcePublicID: "res000002", SectionPublicID: target}
+			if target == "missing-resource" {
+				bad.ResourcePublicID, bad.SectionPublicID = "missing01", "root00001"
+			}
+			patch := modContentLayoutPatch{Categories: &categories, DisplayMode: "large", Resources: []modContentLayoutResourceEdit{
+				{ResourcePublicID: "res000001", SectionPublicID: "cat000001", Ordinal: 9}, bad}}
+			if err := applyModContentLayoutPatch(&current, patch); err != errCatalogEditorInvalid {
+				t.Fatalf("invalid explicit target accepted: %v", err)
+			}
+			after, _ := json.Marshal(current)
+			if string(before) != string(after) {
+				t.Fatalf("rejected patch partially changed current layout: before=%s after=%s", before, after)
+			}
+		})
+	}
+}
+
 func TestTwentyThousandResourceLayoutUsesOneBoundedPageAndIncrementalMerge(t *testing.T) {
 	current := modContentLayoutEdit{RootSectionPublicID: "root00001", Resources: make([]modContentLayoutResourceEdit, 20000)}
 	for index := range current.Resources {

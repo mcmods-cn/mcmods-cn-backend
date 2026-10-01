@@ -6,8 +6,8 @@ import (
 )
 
 func TestCatalogImportArtifactsHaveDurablePreUploadLineage(t *testing.T) {
-	if schemaGeneration != 167 {
-		t.Fatalf("catalog import artifact lineage requires schema generation 167, got %d", schemaGeneration)
+	if schemaGeneration != 168 {
+		t.Fatalf("catalog import artifact lineage requires schema generation 168, got %d", schemaGeneration)
 	}
 	definition := strings.ToLower(strings.Join(catalogImportArtifactSchemaStatements(), "\n"))
 	for _, required := range []string{

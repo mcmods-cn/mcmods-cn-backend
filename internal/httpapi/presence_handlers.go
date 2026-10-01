@@ -33,11 +33,11 @@ type presenceRequest struct {
 }
 
 func (s *Server) touchSitePresence(w http.ResponseWriter, r *http.Request) {
-	var request presenceRequest
-	_ = decodeJSON(r, &request)
 	location := s.requestClientLocation(r)
 	claims := currentClaims(r)
-	visitorToken, visitorID, sourceID := anonymousPresenceIdentity(s.cfg.AntiAbuse.HMACSecret, location.IP, r.UserAgent(), request.VisitorID)
+	// Client visitor IDs do not participate in identity or admission. Reject
+	// exhausted sources before spending the JSON body parsing budget.
+	visitorToken, visitorID, sourceID := anonymousPresenceIdentity(s.cfg.AntiAbuse.HMACSecret, location.IP, r.UserAgent(), "")
 	if claims.Subject > 0 {
 		visitorID = "user:" + strconv.FormatInt(claims.Subject, 10)
 		visitorToken = ""
@@ -48,6 +48,11 @@ func (s *Server) touchSitePresence(w http.ResponseWriter, r *http.Request) {
 	if !limit.Allowed {
 		retryAfter := max(1, int(limit.RetryAfter.Round(time.Second)/time.Second))
 		writeAPIError(w, http.StatusTooManyRequests, "PRESENCE_RATE_LIMIT", "presence heartbeat rate exceeded", retryAfter, nil)
+		return
+	}
+	var request presenceRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "presence heartbeat request is invalid")
 		return
 	}
 	if claims.Subject > 0 && claims.SessionID != "" {

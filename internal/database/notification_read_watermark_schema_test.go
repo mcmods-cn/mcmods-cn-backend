@@ -6,8 +6,8 @@ import (
 )
 
 func TestNotificationPagesAndReadWatermarksHaveGeneration125Schema(t *testing.T) {
-	if schemaGeneration != 167 {
-		t.Fatalf("schema generation=%d want 167", schemaGeneration)
+	if schemaGeneration != 168 {
+		t.Fatalf("schema generation=%d want 168", schemaGeneration)
 	}
 	schema := strings.ToLower(strings.Join(schemaInstallationStatements(), "\n"))
 	for _, required := range []string{

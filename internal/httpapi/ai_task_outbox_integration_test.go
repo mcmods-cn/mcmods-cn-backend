@@ -48,7 +48,7 @@ func TestContentTranslationUsesSharedTransactionalAITaskOutbox(t *testing.T) {
 	if !strings.Contains(create, "enqueueAITaskTx(") {
 		t.Fatal("general AI task does not use the shared transactional helper")
 	}
-	communitySource, err := os.ReadFile("community_post_handlers.go")
+	communitySource, err := os.ReadFile("community_post_translation_handlers.go")
 	if err != nil {
 		t.Fatal(err)
 	}

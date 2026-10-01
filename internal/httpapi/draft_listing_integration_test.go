@@ -20,7 +20,13 @@ func TestDraftPagesUseCategoryScopedKeysetAndAuthoritativeStatuses(t *testing.T)
 	defer tx.Rollback(ctx)
 	installDraftListingTempTables(t, ctx, tx)
 
-	statusAt := time.Date(2026, 8, 21, 4, 0, 0, 0, time.UTC)
+	// Expiration is evaluated by PostgreSQL now(), not a hard-coded audit date.
+	// Keep the fixture valid on later runs and explicitly exercise an expired
+	// own row so refreshing the clock cannot hide retention regressions.
+	var statusAt time.Time
+	if err = tx.QueryRow(ctx, `select now()-interval '2 hours'`).Scan(&statusAt); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = tx.Exec(ctx, `insert into change_requests(id,public_id,submitted_by,status,resolved_at) values
 		(10,'change001',7,'pending',null),(11,'change002',7,'approved',$1)`, statusAt.Add(time.Hour)); err != nil {
 		t.Fatal(err)
@@ -34,7 +40,8 @@ func TestDraftPagesUseCategoryScopedKeysetAndAuthoritativeStatuses(t *testing.T)
 		(3,'draft0003',7,'c','project','Project','mod','C','/c','','{}',null,'',null,'',null,$2,$1,$1),
 		(4,'draft0004',7,'d','project','Project','mod','D','/d','/d','{}',10,'',null,'pending',$1,$2,$1,$1),
 		(5,'draft0005',7,'e','project','Project','mod','E','/e','/e','{}',11,'',null,'approved',$1,$2,$1,$1),
-		(6,'draft0006',8,'foreign','project','Foreign','mod','F','/f','','{}',null,'',null,'',null,$2,$1,$1)`,
+		(6,'draft0006',8,'foreign','project','Foreign','mod','F','/f','','{}',null,'',null,'',null,$2,$1,$1),
+		(7,'draft0007',7,'expired','project','Project','mod','Expired','/expired','','{}',null,'',null,'',null,$1-interval '24 hours',$1,$1)`,
 		statusAt, statusAt.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}

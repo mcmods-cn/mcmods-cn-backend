@@ -55,14 +55,13 @@ func writeBoundedCatalogJSON(w http.ResponseWriter, data any) bool {
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
-	markBackendResponse(w)
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(apiResponse{Error: message})
+	writeAPIError(w, status, "", message, 0, nil)
 }
 
 func writeAPIError(w http.ResponseWriter, status int, code, message string, retryAfter int, details any) {
+	if code == "" {
+		code = fmt.Sprintf("HTTP_%d", status)
+	}
 	markBackendResponse(w)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")

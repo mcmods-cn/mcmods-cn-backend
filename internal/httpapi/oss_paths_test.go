@@ -74,7 +74,7 @@ func TestHumanReadableOSSObjectKeys(t *testing.T) {
 	t.Run("download scope keeps project kind and id", func(t *testing.T) {
 		scope := ossProjectDownloadScope("shader", "shd234567")
 		projectKind, publicID, ok := parseOSSProjectDownloadScope(scope)
-		if !ok || projectKind != "shaders" || publicID != "shd234567" {
+		if !ok || projectKind != "shader_pack" || publicID != "shd234567" {
 			t.Fatalf("unexpected project download scope: %q, %q, %q, %v", scope, projectKind, publicID, ok)
 		}
 	})

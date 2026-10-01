@@ -31,7 +31,8 @@ func TestBlueprintUploadFailureAndAbortPathsDiscardPendingSubjects(t *testing.T)
 	}
 	blueprintHandlers := string(blueprintSource)
 	for _, required := range []string{
-		"upload_expires_at)",
+		"insert into blueprints(owner_id,title,source_format,upload_expires_at,review_status)",
+		"values($1,$2,$3,$4,'pending')",
 		"delete from content_localizations where subject_type='blueprint'",
 		"delete from content_subjects where subject_type='blueprint'",
 		"upload_expires_at=null",

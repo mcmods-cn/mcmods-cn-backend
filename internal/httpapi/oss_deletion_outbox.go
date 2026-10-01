@@ -143,9 +143,26 @@ func (worker *OSSDeletionWorker) complete(ctx context.Context, job ossDeletionJo
 }
 
 func (worker *OSSDeletionWorker) deleteObject(ctx context.Context, job ossDeletionJob) error {
+	cfg := worker.server.ossConfigFromSettings(ctx)
+	tx, err := worker.server.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin OSS deletion lease guard: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var ownedID int64
+	err = tx.QueryRow(ctx, `select id from oss_object_deletion_outbox
+		where id=$1 and status='processing' and locked_by=$2 for share`, job.ID, job.LockToken).Scan(&ownedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errOSSDeletionLeaseLost
+	}
+	if err != nil {
+		return fmt.Errorf("lock OSS deletion lease: %w", err)
+	}
+	// Keep the current lease locked through the provider side effect. Fencing
+	// only complete() cannot stop an expired worker deleting a reused object key.
 	if job.FileID == nil {
 		var registered bool
-		if err := worker.server.db.QueryRow(ctx, `select exists(
+		if err := tx.QueryRow(ctx, `select exists(
 			select 1 from oss_files where object_key=$1 and status<>'deleted')`, job.ObjectKey).Scan(&registered); err != nil {
 			return fmt.Errorf("guard unregistered OSS object deletion: %w", err)
 		}
@@ -153,7 +170,6 @@ func (worker *OSSDeletionWorker) deleteObject(ctx context.Context, job ossDeleti
 			return nil
 		}
 	}
-	cfg := worker.server.ossConfigFromSettings(ctx)
 	if !cfg.Enabled || cfg.AccessKeyID == "" || cfg.AccessKeySecret == "" {
 		return errOSSDeletionCredentialsUnavailable
 	}
@@ -170,7 +186,7 @@ func (worker *OSSDeletionWorker) deleteObject(ctx context.Context, job ossDeleti
 		return errOSSDeletionTargetIncomplete
 	}
 	client := newOSSClient(cfg, cfg.Endpoint, job.UseCName || isCustomOSSEndpoint(cfg.Endpoint))
-	_, err := client.DeleteObject(ctx, &aliyunoss.DeleteObjectRequest{
+	_, err = client.DeleteObject(ctx, &aliyunoss.DeleteObjectRequest{
 		Bucket: aliyunoss.Ptr(cfg.Bucket),
 		Key:    aliyunoss.Ptr(job.ObjectKey),
 	})

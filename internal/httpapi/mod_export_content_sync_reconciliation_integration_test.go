@@ -35,7 +35,7 @@ func TestImportedContentSyncReconcilesOnlyItsSourceScopeIntegration(t *testing.T
 		create temp table mod_content_sections(
 			id bigserial primary key,mod_id bigint not null,version_id bigint not null,template_id bigint not null,parent_id bigint,
 			system_key text not null default '',default_locale text not null,display_mode text not null,ordinal integer not null,status text not null,
-			created_by bigint,updated_by bigint,unique(version_id,parent_id,ordinal));
+			created_by bigint,updated_by bigint,updated_at timestamptz not null default now(),unique(version_id,parent_id,ordinal));
 		create unique index test_mod_content_sections_system_key on mod_content_sections(version_id,parent_id,system_key) where system_key<>'' and status='active';
 		create temp table mod_content_section_localizations(
 			section_id bigint not null,locale text not null,name text not null,description text not null,primary key(section_id,locale));

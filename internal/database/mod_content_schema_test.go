@@ -65,7 +65,7 @@ func TestBuiltinCompatibilityFieldsAreConfigurable(t *testing.T) {
 
 func TestImportedResourceProjectionHasScopedOwnership(t *testing.T) {
 	t.Parallel()
-	if schemaGeneration != 167 {
+	if schemaGeneration != 168 {
 		t.Fatalf("unexpected schema generation %d", schemaGeneration)
 	}
 	schemaSQL := strings.Join(modContentSchemaStatements(), "\n")

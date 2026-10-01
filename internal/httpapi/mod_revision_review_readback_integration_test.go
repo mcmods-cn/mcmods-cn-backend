@@ -14,6 +14,7 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
+	"mcmods-cn-backend/internal/querycache"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -83,7 +84,11 @@ func TestModRevisionReviewReadbackFailureRollsBackIntegration(t *testing.T) {
 	}
 	broken := createFixture("readback1", "readback-broken", `[]`)
 	valid := createFixture("readback2", "readback-valid", `{"siteId":"readback-valid","primaryName":"Valid"}`)
-	server := &Server{db: pool}
+	// Valid post-commit security refreshes need the same disabled-cache contract
+	// as NewServer; a nil cache deliberately reports an unavailable dependency.
+	cache := querycache.New(config.RedisConfig{})
+	defer cache.Close()
+	server := &Server{db: pool, cache: cache}
 	review := func(target fixture) *httptest.ResponseRecorder {
 		t.Helper()
 		request := httptest.NewRequest(http.MethodPatch, "/api/v1/mods/revisions/"+target.revisionID,

@@ -108,6 +108,7 @@ func TestAntiAbuseQueryPlans(t *testing.T) {
 		args          []any
 		table         string
 		expectedIndex string
+		expectedRows  int
 	}{
 		{
 			name:          "risk events by action",
@@ -115,6 +116,7 @@ func TestAntiAbuseQueryPlans(t *testing.T) {
 			args:          []any{"comment.create"},
 			table:         "anti_abuse_events",
 			expectedIndex: "idx_anti_abuse_events_action_time",
+			expectedRows:  100,
 		},
 		{
 			name:          "fingerprints by user/action",
@@ -122,6 +124,7 @@ func TestAntiAbuseQueryPlans(t *testing.T) {
 			args:          []any{"comment.create", int64(1)},
 			table:         "anti_abuse_content_fingerprints",
 			expectedIndex: "idx_anti_abuse_fingerprint_user_action",
+			expectedRows:  100,
 		},
 		{
 			name:          "active user restrictions",
@@ -129,6 +132,7 @@ func TestAntiAbuseQueryPlans(t *testing.T) {
 			args:          []any{int64(1)},
 			table:         "anti_abuse_restrictions",
 			expectedIndex: "idx_anti_abuse_restrictions_user_active",
+			expectedRows:  1,
 		},
 	}
 	for _, plan := range plans {
@@ -143,6 +147,37 @@ func TestAntiAbuseQueryPlans(t *testing.T) {
 			t.Errorf("%s lacks ANALYZE/BUFFERS execution evidence:\n%s", plan.name, text)
 		}
 		t.Logf("%s (%d-row fixture)\n%s", plan.name, antiAbusePlanFixtureRows, text)
+		var measured []byte
+		if err = pool.QueryRow(ctx, "explain (analyze, buffers, costs true, format json) "+plan.query, plan.args...).Scan(&measured); err != nil {
+			t.Fatal(err)
+		}
+		if err = validateAntiAbuseMeasuredPlan(measured, plan.table, plan.expectedIndex, plan.expectedRows); err != nil {
+			t.Fatalf("%s measured plan rejected: %v\n%s", plan.name, err, measured)
+		}
+		t.Logf("%s measured JSON baseline: %s", plan.name, measured)
+		// Simulate the regression in this temporary-schema transaction only.
+		// A successfully executed bad plan must be rejected by the same judge.
+		tx, beginErr := pool.Begin(ctx)
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		if _, err = tx.Exec(ctx, `set local enable_indexscan=off; set local enable_indexonlyscan=off; set local enable_bitmapscan=off`); err != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatal(err)
+		}
+		var degraded []byte
+		if err = tx.QueryRow(ctx, "explain (analyze, buffers, costs true, format json) "+plan.query, plan.args...).Scan(&degraded); err != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatal(err)
+		}
+		if err = tx.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if rejection := validateAntiAbuseMeasuredPlan(degraded, plan.table, plan.expectedIndex, plan.expectedRows); rejection == nil {
+			t.Fatalf("%s accepted the real forced degraded plan: %s", plan.name, degraded)
+		} else {
+			t.Logf("%s forced degraded plan correctly rejected: %v; JSON: %s", plan.name, rejection, degraded)
+		}
 	}
 }
 

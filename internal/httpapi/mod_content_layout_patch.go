@@ -90,23 +90,32 @@ func normalizeModContentLayoutPatch(patch *modContentLayoutPatch) error {
 }
 
 func applyModContentLayoutPatch(current *modContentLayoutEdit, patch modContentLayoutPatch) error {
+	categories := current.Categories
 	if patch.Categories != nil {
-		current.Categories = append([]modContentLayoutCategoryEdit(nil), (*patch.Categories)...)
+		categories = append([]modContentLayoutCategoryEdit(nil), (*patch.Categories)...)
+	}
+	allowedSections := map[string]struct{}{current.RootSectionPublicID: {}}
+	for _, category := range categories {
+		allowedSections[category.PublicID] = struct{}{}
 	}
 	resourceIndexes := make(map[string]int, len(current.Resources))
 	for index := range current.Resources {
 		resourceIndexes[current.Resources[index].ResourcePublicID] = index
 	}
 	for _, resource := range patch.Resources {
-		index, exists := resourceIndexes[resource.ResourcePublicID]
+		_, exists := resourceIndexes[resource.ResourcePublicID]
 		if !exists {
 			return errCatalogEditorInvalid
 		}
-		current.Resources[index] = resource
+		if _, allowed := allowedSections[resource.SectionPublicID]; !allowed {
+			return errCatalogEditorInvalid
+		}
 	}
-	allowedSections := map[string]struct{}{current.RootSectionPublicID: {}}
-	for _, category := range current.Categories {
-		allowedSections[category.PublicID] = struct{}{}
+	// Validate every explicit move before mutating the merged state. Only
+	// unchanged resources displaced by category deletion may fall back to root.
+	current.Categories = categories
+	for _, resource := range patch.Resources {
+		current.Resources[resourceIndexes[resource.ResourcePublicID]] = resource
 	}
 	for index := range current.Resources {
 		if _, exists := allowedSections[current.Resources[index].SectionPublicID]; !exists {

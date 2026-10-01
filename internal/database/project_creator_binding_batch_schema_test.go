@@ -7,8 +7,8 @@ import (
 
 func TestProjectCreatorBindingSideEffectsAreTransactionAndStatementCoalesced(t *testing.T) {
 	t.Parallel()
-	if schemaGeneration != 167 {
-		t.Fatalf("schema generation=%d want 167", schemaGeneration)
+	if schemaGeneration != 168 {
+		t.Fatalf("schema generation=%d want 168", schemaGeneration)
 	}
 
 	accessSchema := strings.ToLower(strings.Join(projectAccessSchemaStatements(), "\n"))

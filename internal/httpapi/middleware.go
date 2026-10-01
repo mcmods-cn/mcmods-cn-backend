@@ -101,7 +101,11 @@ func (s *Server) resolveClaimsSubject(ctx context.Context, claims *security.Clai
 	if err != nil {
 		return err
 	}
-	claims.Subject = record.UserID
+	return s.resolveClaimsAuthorization(ctx, claims, record.UserID)
+}
+
+func (s *Server) resolveClaimsAuthorization(ctx context.Context, claims *security.Claims, userID int64) error {
+	claims.Subject = userID
 	permissionVersion, err := s.loadPermissionVersion(ctx, claims.Subject)
 	if err != nil {
 		return err

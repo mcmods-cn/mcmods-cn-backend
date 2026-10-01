@@ -3,6 +3,8 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"sort"
@@ -76,9 +78,18 @@ var roleCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-zA-Z0-9_*:\[\]<>
 var permissionCodePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-zA-Z0-9_*:\[\]<>-]+)+$`)
 
 func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
-	mailCfg := s.mailConfigFromSettings(r.Context())
+	mailCfg, err := s.mailConfigFromSettings(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "MAIL_SETTINGS_UNAVAILABLE", "mail settings are temporarily unavailable", 0, nil)
+		return
+	}
+	general, err := s.readSiteGeneralConfig(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "SITE_SETTINGS_UNAVAILABLE", "site settings are temporarily unavailable", 0, nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"general": s.siteGeneralConfigFromSettings(r.Context()),
+		"general": general,
 		"auth": map[string]any{
 			"allowRegistration":        true,
 			"emailPasswordLogin":       true,
@@ -137,30 +148,16 @@ func (s *Server) updateMailConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "启用邮件系统需要有效的服务器、端口和发件地址")
 		return
 	}
-	current := s.mailConfigFromSettings(r.Context())
-	if strings.TrimSpace(payload.Password) == "" {
-		payload.Password = current.Password
-	}
-	raw, err := s.sealSystemSetting(payload)
+	payload, err := s.saveMailConfig(r.Context(), payload, currentClaims(r).Subject)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "邮件配置格式不正确")
-		return
-	}
-	claims := currentClaims(r)
-	_, err = s.db.Exec(
-		r.Context(),
-		`insert into system_settings (key, value, updated_by, updated_at)
-		 values ('mail.smtp', $1::jsonb, $2, now())
-		 on conflict (key) do update
-		 set value = excluded.value, updated_by = excluded.updated_by, updated_at = now()`,
-		raw,
-		claims.Subject,
-	)
-	if err != nil {
+		if errors.Is(err, errMailSettingsUnavailable) {
+			writeAPIError(w, http.StatusServiceUnavailable, "MAIL_SETTINGS_UNAVAILABLE", "mail settings are temporarily unavailable", 0, nil)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "保存邮件配置失败")
 		return
 	}
-	s.mailer = mailer.New(smtpConfigFromPayload(payload))
+	s.invalidateSettingsCache(r.Context())
 	writeJSON(w, http.StatusOK, redactMailConfig(payload))
 }
 
@@ -175,8 +172,14 @@ func (s *Server) sendTestMail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "测试邮箱格式不正确")
 		return
 	}
-	if err := s.activeMailer(r.Context()).Send(req.To, "Mcmods-cn 邮件系统测试", "这是一封来自后台管理界面的测试邮件。"); err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+	active, err := s.activeMailer(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "MAIL_SETTINGS_UNAVAILABLE", "mail settings are temporarily unavailable", 0, nil)
+		return
+	}
+	if err := active.Send(req.To, "Mcmods-cn 邮件系统测试", "这是一封来自后台管理界面的测试邮件。"); err != nil {
+		slog.Warn("send admin test email", "error", err)
+		writeAPIError(w, http.StatusServiceUnavailable, "MAIL_DELIVERY_FAILED", "mail delivery failed", 0, nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"sent": true})
@@ -1394,33 +1397,6 @@ func (s *Server) auditPermissionChangeTx(ctx context.Context, tx pgx.Tx, operato
 		action,
 		string(raw),
 	)
-}
-
-func (s *Server) mailConfigFromSettings(ctx context.Context) mailConfigPayload {
-	payload := mailConfigPayload{
-		Enabled:  s.cfg.SMTP.Enabled,
-		Host:     s.cfg.SMTP.Host,
-		Port:     s.cfg.SMTP.Port,
-		Username: s.cfg.SMTP.Username,
-		Password: s.cfg.SMTP.Password,
-		From:     s.cfg.SMTP.From,
-		UseTLS:   s.cfg.SMTP.UseTLS,
-	}
-	var raw []byte
-	err := s.db.QueryRow(ctx, `select value from system_settings where key = 'mail.smtp'`).Scan(&raw)
-	if err != nil {
-		_ = ignoreNoRows(err)
-		return payload
-	}
-	if err := s.openSystemSetting(raw, &payload); err != nil {
-		return payload
-	}
-	return payload
-}
-
-func (s *Server) activeMailer(ctx context.Context) mailer.Mailer {
-	payload := s.mailConfigFromSettings(ctx)
-	return mailer.New(smtpConfigFromPayload(payload))
 }
 
 func smtpConfigFromPayload(payload mailConfigPayload) config.SMTPConfig {

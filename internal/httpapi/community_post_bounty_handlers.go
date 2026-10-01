@@ -10,13 +10,26 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+var (
+	errCommunityPostBountyCurrencyUnavailable = errors.New("question bounty currency is unavailable")
+	errCommunityPostBountyCannotBeAdded       = errors.New("a question bounty can only be selected when the question is created")
+	errCommunityPostBountyCannotBeChanged     = errors.New("an existing question bounty cannot be changed")
+)
+
+func isCommunityPostBountyInputError(err error) bool {
+	return errors.Is(err, errCommunityPostBountyCurrencyUnavailable) || errors.Is(err, errCommunityPostBountyCannotBeAdded) || errors.Is(err, errCommunityPostBountyCannotBeChanged)
+}
+
 func holdCommunityPostBountyTx(ctx context.Context, tx pgx.Tx, postID int64, publicID string, authorID int64, snapshot communityPostSnapshot) error {
 	if snapshot.Kind != "discussion" || snapshot.BountyAmount == 0 {
 		return nil
 	}
 	var currencyID int64
 	if err := tx.QueryRow(ctx, `select id from currencies where code=$1 and status='active'`, snapshot.BountyCurrency).Scan(&currencyID); err != nil {
-		return errors.New("question bounty currency is unavailable")
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errCommunityPostBountyCurrencyUnavailable
+		}
+		return err
 	}
 	if _, err := changeCurrencyBalanceByIDTx(ctx, tx, authorID, currencyID, -snapshot.BountyAmount,
 		"question_bounty_hold", nil, "community_post_bounty", publicID, map[string]any{"amount": snapshot.BountyAmount}); err != nil {
@@ -35,7 +48,7 @@ func validateCommunityPostBountyEditTx(ctx context.Context, tx pgx.Tx, postID in
 		where bounty.post_id=$1 for update of bounty`, postID).Scan(&currencyID, &currency, &amount, &status, &resolution)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if snapshot.BountyCurrency != "" || snapshot.BountyAmount != 0 {
-			return errors.New("a question bounty can only be selected when the question is created")
+			return errCommunityPostBountyCannotBeAdded
 		}
 		return nil
 	}
@@ -43,7 +56,7 @@ func validateCommunityPostBountyEditTx(ctx context.Context, tx pgx.Tx, postID in
 		return err
 	}
 	if snapshot.Kind != "discussion" || snapshot.BountyCurrency != currency || snapshot.BountyAmount != amount {
-		return errors.New("an existing question bounty cannot be changed")
+		return errCommunityPostBountyCannotBeChanged
 	}
 	if status == "refunded" && resolution == "open" {
 		if _, err = changeCurrencyBalanceByIDTx(ctx, tx, authorID, currencyID, -amount,
@@ -195,14 +208,17 @@ func (s *Server) acceptCommunityPostAnswer(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to resolve question")
 		return
 	}
+	if err = enqueueTemplatedNotificationTx(r.Context(), tx, "community_post.answer.accepted", recipientID, claims.Subject, "question_answer_accepted", map[string]string{"name": title}, map[string]any{
+		"communityPostId": publicID, "commentId": commentPublicID, "targetLabel": title,
+		"url": communityPostPath("discussion", publicID) + "#comment-" + commentPublicID,
+	}, r.Header.Get("X-Request-ID")); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist answer settlement notification")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit answer settlement")
 		return
 	}
-	s.sendTemplatedNotification(r.Context(), recipientID, "question_answer_accepted", map[string]string{"name": title}, map[string]any{
-		"communityPostId": publicID, "commentId": commentPublicID, "targetLabel": title,
-		"url": communityPostPath("discussion", publicID) + "#comment-" + commentPublicID,
-	})
 	writeJSON(w, http.StatusOK, map[string]any{"resolutionStatus": "answered", "acceptedCommentId": commentPublicID, "taxAmount": tax, "netAmount": received})
 }
 

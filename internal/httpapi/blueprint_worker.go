@@ -138,22 +138,12 @@ func (worker *BlueprintWorker) processJob(ctx context.Context, jobID int64) erro
 	}
 	if workErr != nil {
 		persistContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		terminal, persistErr := worker.failBlueprintJob(persistContext, job, workErr)
+		_, persistErr := worker.failBlueprintJob(persistContext, job, workErr)
 		cancel()
 		if persistErr != nil {
 			return errors.Join(workErr, persistErr)
 		}
-		if terminal {
-			worker.notifyTemplate(job.createdBy, "blueprint_conversion_failure", map[string]string{"error": workErr.Error()}, job.blueprintID)
-		}
 		return workErr
-	}
-	var title string
-	_ = worker.db.QueryRow(context.Background(), `select title from blueprints where id=$1`, job.blueprintID).Scan(&title)
-	if job.operation == "convert" {
-		worker.notifyTemplate(job.createdBy, "blueprint_format_success", map[string]string{"name": title, "format": strings.ToUpper(job.targetFormat)}, job.blueprintID)
-	} else {
-		worker.notifyTemplate(job.createdBy, "blueprint_conversion_success", map[string]string{"name": title}, job.blueprintID)
 	}
 	return nil
 }
@@ -304,6 +294,11 @@ func (worker *BlueprintWorker) failBlueprintJob(ctx context.Context, job claimed
 			return false, err
 		}
 	}
+	if terminal {
+		if err = worker.notifyTemplateTx(ctx, tx, job.createdBy, "blueprint_conversion_failure", map[string]string{"error": cause.Error()}, job.blueprintID); err != nil {
+			return false, err
+		}
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return false, err
 	}
@@ -315,11 +310,16 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int
 	var coverFileID int64
 	if err := worker.db.QueryRow(ctx, `update blueprints set status='processing',last_error='',updated_at=now()
 		where id=$1 and status in ('queued','processing','failed')
-		returning public_id,original_object_key,source_format,title,description_markdown,coalesce(cover_file_id,0),cover_object_key`, blueprintID).
+		and exists(select 1 from blueprint_jobs job where job.id=$2 and job.blueprint_id=$1
+			and job.status='processing' and job.attempts=$3 and job.locked_by=$4 for share)
+		returning public_id,original_object_key,source_format,title,description_markdown,coalesce(cover_file_id,0),cover_object_key`, blueprintID, jobID, attempt, runToken).
 		Scan(&publicID, &objectKey, &sourceFormat, &title, &description, &coverFileID, &coverKey); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errBlueprintJobLeaseLost
+		}
 		return err
 	}
-	raw, _, err := worker.readOSSObject(ctx, objectKey)
+	raw, _, err := worker.readOSSObject(ctx, objectKey, maxBlueprintSourceBytes)
 	if err != nil {
 		return err
 	}
@@ -491,6 +491,9 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int
 	if tag.RowsAffected() != 1 {
 		return errBlueprintJobLeaseLost
 	}
+	if err = worker.notifyTemplateTx(ctx, tx, createdBy, "blueprint_conversion_success", map[string]string{"name": title}, blueprintID); err != nil {
+		return err
+	}
 	if err = completeBlueprintJobTx(ctx, tx, jobID, runToken); err != nil {
 		return err
 	}
@@ -538,7 +541,7 @@ func (worker *BlueprintWorker) convertBlueprint(ctx context.Context, jobID int64
 	if normalizedKey == "" {
 		return errors.New("blueprint has not been normalized")
 	}
-	raw, _, err := worker.readOSSObject(ctx, normalizedKey)
+	raw, _, err := worker.readOSSObject(ctx, normalizedKey, maxBlueprintNormalizedBytes)
 	if err != nil {
 		return err
 	}
@@ -573,6 +576,9 @@ func (worker *BlueprintWorker) convertBlueprint(ctx context.Context, jobID int64
 		return err
 	}
 	if err = activateBlueprintArtifactTx(ctx, tx, artifact); err != nil {
+		return err
+	}
+	if err = worker.notifyTemplateTx(ctx, tx, createdBy, "blueprint_format_success", map[string]string{"name": title, "format": strings.ToUpper(targetFormat)}, blueprintID); err != nil {
 		return err
 	}
 	if err = completeBlueprintJobTx(ctx, tx, jobID, runToken); err != nil {
@@ -635,6 +641,9 @@ func (worker *BlueprintWorker) recoverStaleBlueprintJobs(ctx context.Context) (i
 					return 0, 0, updateErr
 				}
 			}
+			if err = worker.notifyTemplateTx(ctx, tx, job.createdBy, "blueprint_conversion_failure", map[string]string{"error": "worker lease expired"}, job.blueprintID); err != nil {
+				return 0, 0, err
+			}
 			exhausted = append(exhausted, job)
 			continue
 		}
@@ -661,13 +670,10 @@ func (worker *BlueprintWorker) recoverStaleBlueprintJobs(ctx context.Context) (i
 	if err = tx.Commit(ctx); err != nil {
 		return 0, 0, err
 	}
-	for _, job := range exhausted {
-		worker.notifyTemplate(job.createdBy, "blueprint_conversion_failure", map[string]string{"error": "worker lease expired"}, job.blueprintID)
-	}
 	return recovered, len(exhausted), nil
 }
 
-func (worker *BlueprintWorker) readOSSObject(ctx context.Context, objectKey string) ([]byte, string, error) {
+func (worker *BlueprintWorker) readOSSObject(ctx context.Context, objectKey string, maximum int64) ([]byte, string, error) {
 	client, cfg, err := worker.api.ossClient(ctx)
 	if err != nil {
 		return nil, "", err
@@ -677,11 +683,11 @@ func (worker *BlueprintWorker) readOSSObject(ctx context.Context, objectKey stri
 		return nil, "", err
 	}
 	defer result.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(result.Body, maxBlueprintSourceBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(result.Body, maximum+1))
 	if err != nil {
 		return nil, "", err
 	}
-	if len(raw) > maxBlueprintSourceBytes {
+	if int64(len(raw)) > maximum {
 		return nil, "", errors.New("blueprint exceeds processing size limit")
 	}
 	contentType := "application/octet-stream"
@@ -691,12 +697,14 @@ func (worker *BlueprintWorker) readOSSObject(ctx context.Context, objectKey stri
 	return raw, contentType, nil
 }
 
-func (worker *BlueprintWorker) notifyTemplate(userID int64, code string, values map[string]string, blueprintID int64) {
+func (worker *BlueprintWorker) notifyTemplateTx(ctx context.Context, tx pgx.Tx, userID int64, code string, values map[string]string, blueprintID int64) error {
 	if userID <= 0 {
-		return
+		return nil
 	}
 	var publicID, blueprintName string
-	_ = worker.db.QueryRow(context.Background(), `select public_id,title from blueprints where id=$1`, blueprintID).Scan(&publicID, &blueprintName)
+	if err := tx.QueryRow(ctx, `select public_id,title from blueprints where id=$1`, blueprintID).Scan(&publicID, &blueprintName); err != nil {
+		return err
+	}
 	if values == nil {
 		values = map[string]string{}
 	}
@@ -704,7 +712,7 @@ func (worker *BlueprintWorker) notifyTemplate(userID int64, code string, values 
 		values["name"] = blueprintName
 	}
 	targetData := map[string]any{"blueprintId": publicID, "targetLabel": blueprintName, "url": "/blueprints/" + publicID}
-	if err := worker.api.enqueueNotificationTask(context.Background(), notificationEvent{Action: "direct", RecipientID: userID, Kind: "system", TemplateKey: code, TemplateValues: values, Data: targetData}); err != nil {
-		log.Printf("persist blueprint notification for user %d: %v", userID, err)
-	}
+	return enqueueNotificationTaskTx(ctx, tx, "blueprint.notification."+code, "blueprint", publicID, "", notificationEvent{
+		Action: "direct", RecipientID: userID, Kind: "system", TemplateKey: code, TemplateValues: values, Data: targetData,
+	})
 }

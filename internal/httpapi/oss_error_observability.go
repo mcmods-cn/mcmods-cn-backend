@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"sync/atomic"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type ossWriteFailureMetrics struct {
@@ -55,11 +57,19 @@ func (s *Server) recordOSSScanLog(ctx context.Context, fileID int64, objectKey, 
 }
 
 func (s *Server) recordOSSDownloadStat(ctx context.Context, objectKey string) {
-	_, err := s.db.Exec(ctx, `insert into oss_download_stats (object_key, downloads, last_download_at)
+	if err := persistOSSDownloadStat(ctx, s.db, objectKey); err != nil {
+		s.observeOSSWriteFailure("download_stat", objectKey, err)
+	}
+}
+
+type ossDownloadStatWriter interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func persistOSSDownloadStat(ctx context.Context, writer ossDownloadStatWriter, objectKey string) error {
+	_, err := writer.Exec(ctx, `insert into oss_download_stats (object_key, downloads, last_download_at)
 		values ($1, 1, now())
 		on conflict (object_key) do update
 		set downloads = oss_download_stats.downloads + 1, last_download_at = now()`, objectKey)
-	if err != nil {
-		s.observeOSSWriteFailure("download_stat", objectKey, err)
-	}
+	return err
 }

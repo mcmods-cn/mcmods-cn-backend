@@ -6,8 +6,8 @@ import (
 )
 
 func TestGlobalRatingStatsUseGeneration125WriteMaintainedFacts(t *testing.T) {
-	if schemaGeneration != 167 {
-		t.Fatalf("schema generation=%d want 167", schemaGeneration)
+	if schemaGeneration != 168 {
+		t.Fatalf("schema generation=%d want 168", schemaGeneration)
 	}
 	statements := ratingSchemaStatements()
 	schema := strings.ToLower(strings.Join(statements, "\n"))

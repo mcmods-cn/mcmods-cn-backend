@@ -499,7 +499,7 @@ func (s *Server) reviewProjectAuthorshipRelation(w http.ResponseWriter, r *http.
 			return
 		}
 	}
-	if _, err = tx.Exec(r.Context(), `update content_creator_bindings set status=$2,approved_by=case when $2='approved' then $3 else null end,
+	if _, err = tx.Exec(r.Context(), `update content_creator_bindings set status=$2,approved_by=case when $2='approved' then $3::bigint else null end,
 		approved_at=case when $2='approved' then now() else null end where id=$1`, bindingID, request.Status, claims.Subject); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to review project authorship relationship")
 		return

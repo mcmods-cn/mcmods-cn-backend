@@ -9,7 +9,8 @@ func TestNormalizeSiteGeneralConfig(t *testing.T) {
 		want    siteGeneralConfig
 		wantErr bool
 	}{
-		{name: "safe WebP logo is trimmed", input: siteGeneralConfig{SiteName: "  Mcmods-cn  ", LogoURL: " /site-assets/site-logo-0123456789abcdefabcd.webp "}, want: siteGeneralConfig{SiteName: "Mcmods-cn", LogoURL: "/site-assets/site-logo-0123456789abcdefabcd.webp"}},
+		{name: "safe shared PNG logo is trimmed", input: siteGeneralConfig{SiteName: "  Mcmods-cn  ", LogoURL: " /site-assets/site-logo-abc123xyz.png "}, want: siteGeneralConfig{SiteName: "Mcmods-cn", LogoURL: "/site-assets/site-logo-abc123xyz.png"}},
+		{name: "obsolete instance-local derivative", input: siteGeneralConfig{SiteName: "Mcmods-cn", LogoURL: "/site-assets/site-logo-0123456789abcdefabcd.webp"}, wantErr: true},
 		{name: "empty logo is allowed", input: siteGeneralConfig{SiteName: "测试站点"}, want: siteGeneralConfig{SiteName: "测试站点"}},
 		{name: "empty name", input: siteGeneralConfig{}, wantErr: true},
 		{name: "external logo", input: siteGeneralConfig{SiteName: "Mcmods-cn", LogoURL: "https://cdn.example.com/logo.png"}, wantErr: true},

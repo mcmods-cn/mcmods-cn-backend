@@ -19,8 +19,8 @@ import (
 
 func TestModExportUploadRecoverySourcesCarryAuthenticatedOwner(t *testing.T) {
 	base := ossModImportCategory("example-project", "mcmods-exporter", "packages")
-	first := modExportOwnerObjectCategory(base, 41)
-	second := modExportOwnerObjectCategory(base, 42)
+	first := ossOwnerObjectCategory(base, 41)
+	second := ossOwnerObjectCategory(base, 42)
 	if first == second || !strings.HasSuffix(first, "/owners/41") || !strings.HasSuffix(second, "/owners/42") {
 		t.Fatalf("owner-scoped object categories are not isolated: first=%q second=%q", first, second)
 	}
@@ -37,7 +37,7 @@ func TestModExportUploadRecoverySourcesCarryAuthenticatedOwner(t *testing.T) {
 		"create": string(ossSource),
 		"resume": string(handlerSource),
 	} {
-		if !strings.Contains(source, "modExportOwnerObjectCategory") {
+		if !strings.Contains(source, "ossOwnerObjectCategory") {
 			t.Fatalf("%s upload path does not enforce the authenticated owner category", name)
 		}
 	}
@@ -104,7 +104,7 @@ func TestModExportRecoveryIsIsolatedAcrossTwoAccountsIntegration(t *testing.T) {
 		var fileID int64
 		if insertErr := pool.QueryRow(ctx, `insert into oss_files(object_key,original_name,sha256,uploader_id,source,category)
 			values($1,'recovery.zip',$2,$3,'mcmods_exporter',$4) returning id`,
-			modExportOwnerObjectCategory("tests/export-recovery", ownerID)+"/recovery.zip", digest, ownerID, "tests/export-recovery").Scan(&fileID); insertErr != nil {
+			ossOwnerObjectCategory("tests/export-recovery", ownerID)+"/recovery.zip", digest, ownerID, "tests/export-recovery").Scan(&fileID); insertErr != nil {
 			t.Fatal(insertErr)
 		}
 		if _, insertErr := pool.Exec(ctx, `insert into catalog_import_packages(

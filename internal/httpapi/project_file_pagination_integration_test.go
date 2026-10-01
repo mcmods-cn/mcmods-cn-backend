@@ -115,6 +115,9 @@ func TestInternalProjectFilePageStaysBoundedAtHundredThousandRowsIntegration(t *
 		}
 		planLines = append(planLines, line)
 	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	plan := strings.Join(planLines, "\n")
 	if !strings.Contains(plan, "idx_project_files_project_published") || strings.Contains(plan, "Seq Scan on project_files") {
 		t.Fatalf("project file page did not use its bounded index:\n%s", plan)

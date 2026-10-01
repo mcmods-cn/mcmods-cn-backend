@@ -326,6 +326,7 @@ func baselineSchemaStatements() []string {
 		`create index if not exists idx_oss_files_sha256_size on oss_files (sha256, size_bytes) where sha256 <> ''`,
 		`create index if not exists idx_oss_files_sha256_source_size on oss_files (sha256, source_size_bytes) where sha256 <> ''`,
 		`create index if not exists idx_oss_files_scan_status on oss_files (scan_status, created_at desc) where status = 'active'`,
+		`create index if not exists idx_oss_files_site_logo_pending_expiry on oss_files(created_at,id) where source='site_logo_pending' and status='active'`,
 		`create or replace function register_oss_file_public_route() returns trigger as $$
 		begin
 			insert into public_routes(public_id,entity_type,internal_id)

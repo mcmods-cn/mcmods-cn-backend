@@ -44,7 +44,7 @@ func TestProjectFileIdentityStaysScopedWithoutPublicRouteIntegration(t *testing.
 		}
 	}()
 	var generation int
-	if err = pool.QueryRow(ctx, `select generation from schema_metadata where singleton`).Scan(&generation); err != nil || generation != 154 {
+	if err = pool.QueryRow(ctx, `select generation from schema_metadata where singleton`).Scan(&generation); err != nil || generation != schemaGeneration {
 		t.Fatalf("temporary schema generation=%d err=%v", generation, err)
 	}
 

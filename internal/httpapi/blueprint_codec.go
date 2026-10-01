@@ -189,7 +189,11 @@ func decodeVanillaStructure(root map[string]any) (blueprintDocument, error) {
 	}
 	palette := make([]blueprintBlockState, 0, len(paletteValues))
 	for _, raw := range paletteValues {
-		palette = append(palette, blockStateFromMap(anyMap(raw)))
+		state, err := decodeNamedBlueprintBlockState(anyMap(raw))
+		if err != nil {
+			return blueprintDocument{}, err
+		}
+		palette = append(palette, state)
 	}
 	if len(palette) == 0 {
 		return blueprintDocument{}, errors.New("structure palette is empty")
@@ -200,9 +204,9 @@ func decodeVanillaStructure(root map[string]any) (blueprintDocument, error) {
 	document := blueprintDocument{Size: size, DataVersion: intValue(root["DataVersion"])}
 	for _, raw := range anySlice(root["blocks"]) {
 		block := anyMap(raw)
-		stateIndex := intValue(block["state"])
-		if stateIndex < 0 || stateIndex >= len(palette) {
-			continue
+		stateIndex, valid := spongePaletteIndex(block["state"])
+		if !valid || stateIndex < 0 || stateIndex >= len(palette) {
+			return blueprintDocument{}, errors.New("structure block references an invalid palette index")
 		}
 		state := palette[stateIndex]
 		if state.ID == "" || state.ID == "minecraft:air" || state.ID == "air" {
@@ -289,6 +293,9 @@ func decodeSpongePalette(raw map[string]any) ([]blueprintBlockState, error) {
 	palette := make([]blueprintBlockState, len(raw))
 	occupied := make([]bool, len(raw))
 	for state, value := range raw {
+		if strings.TrimSpace(parseBlockState(state).ID) == "" {
+			return nil, errors.New("schematic palette contains an empty block state")
+		}
 		index, ok := spongePaletteIndex(value)
 		if !ok || index < 0 || index >= len(palette) {
 			return nil, errors.New("schematic palette indices must be dense non-negative integers")
@@ -360,7 +367,11 @@ func decodeLitematic(root map[string]any) (blueprintDocument, error) {
 		}
 		states := make([]blueprintBlockState, 0)
 		for _, state := range anySlice(region["BlockStatePalette"]) {
-			states = append(states, blockStateFromMap(anyMap(state)))
+			parsedState, err := decodeNamedBlueprintBlockState(anyMap(state))
+			if err != nil {
+				return blueprintDocument{}, err
+			}
+			states = append(states, parsedState)
 		}
 		if len(states) == 0 {
 			continue
@@ -389,10 +400,13 @@ func decodeLitematic(root map[string]any) (blueprintDocument, error) {
 		if err != nil {
 			return blueprintDocument{}, err
 		}
+		if len(region.packed) < (total*bits+63)/64 {
+			return blueprintDocument{}, errors.New("litematic packed block data is truncated")
+		}
 		for linear := 0; linear < total; linear++ {
 			paletteIndex := packedValue(region.packed, linear, bits)
 			if paletteIndex < 0 || paletteIndex >= len(region.states) {
-				continue
+				return blueprintDocument{}, errors.New("litematic block references an unknown palette index")
 			}
 			state := region.states[paletteIndex]
 			if state.ID == "" || state.ID == "minecraft:air" || state.ID == "air" {
@@ -712,6 +726,18 @@ func buildPalette(document blueprintDocument) ([]blueprintBlockState, []int) {
 		palette = append(palette, blueprintBlockState{ID: "minecraft:air"})
 	}
 	return palette, indices
+}
+
+func decodeNamedBlueprintBlockState(value map[string]any) (blueprintBlockState, error) {
+	name, exists := value["Name"]
+	if !exists {
+		name = value["name"]
+	}
+	text, valid := name.(string)
+	if !valid || strings.TrimSpace(text) == "" {
+		return blueprintBlockState{}, errors.New("blueprint palette requires a nonempty block name")
+	}
+	return blockStateFromMap(value), nil
 }
 
 func blockStateFromMap(value map[string]any) blueprintBlockState {

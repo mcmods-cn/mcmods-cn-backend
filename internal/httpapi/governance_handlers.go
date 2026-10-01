@@ -199,7 +199,11 @@ func (s *Server) submitUnifiedReport(w http.ResponseWriter, r *http.Request, req
 	if len(request.EvidenceIDs) > 0 {
 		tag, bindErr := tx.Exec(r.Context(), `update report_evidence set report_id=$1,status='bound',cleanup_after='infinity'
 			where public_id=any($2) and uploader_id=$3 and report_id is null and status='temporary' and scan_status in ('pending','clean')`, reportID, request.EvidenceIDs, claims.Subject)
-		if bindErr != nil || tag.RowsAffected() != int64(len(request.EvidenceIDs)) {
+		if bindErr != nil {
+			writeError(w, http.StatusInternalServerError, "绑定举报附件失败")
+			return
+		}
+		if tag.RowsAffected() != int64(len(request.EvidenceIDs)) {
 			writeError(w, http.StatusBadRequest, "举报附件无效或尚未通过安全检查")
 			return
 		}

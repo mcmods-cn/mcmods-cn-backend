@@ -101,10 +101,9 @@ func importExportCapabilities(ctx context.Context, tx pgx.Tx, revisions map[stri
 	if len(revisions) == 0 || len(capabilities) == 0 {
 		return nil
 	}
-	revisionIDs := make([]string, 0, len(revisions))
-	for _, revisionID := range revisions {
-		revisionIDs = append(revisionIDs, revisionID)
-	}
+	// Namespace aliases can share a revision. Capabilities belong to the
+	// revision, not to each alias; COPY must receive each primary key once.
+	revisionIDs := sortedExportRevisionIDs(revisions)
 	rows := len(revisionIDs) * len(capabilities)
 	copied, err := tx.CopyFrom(ctx, pgx.Identifier{"catalog_import_capabilities"}, []string{
 		"revision_id", "capability_id", "status", "source", "data",

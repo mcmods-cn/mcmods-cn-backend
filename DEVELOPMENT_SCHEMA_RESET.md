@@ -6,7 +6,7 @@
 
 `cmd/db-reset` 和启动时重置使用同一校验：
 
-1. `APP_ENV` 必须是 development 或 test；
+1. `APP_ENV` 必须是 development；初始化本机隔离测试库时也使用 development，初始化完成后再切换为 test 执行测试；test/staging/production 均不允许 `DB_RESET_ON_START`；
 2. 数据库名必须满足开发/测试数据库安全规则；
 3. 必须显式设置 `DB_RESET_ON_START=true`；
 4. `DB_RESET_CONFIRM` 必须精确为 `RESET <实际数据库名>`；

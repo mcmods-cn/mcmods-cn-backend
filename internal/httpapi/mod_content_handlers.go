@@ -494,11 +494,6 @@ func validModContentReferenceKind(value string) bool {
 	return true
 }
 
-func validateModContentEntryType(ctx context.Context, query modContentImageQuerier, modID, versionID int64, kindCode string, sectionPublicID *string, entryTypeCode string, definition map[string]any) error {
-	_, err := normalizeModContentEntryDefinition(ctx, query, modID, versionID, kindCode, sectionPublicID, entryTypeCode, definition, false, false)
-	return err
-}
-
 func modContentDefinitionValue(definition map[string]any, paths [][]string) (any, bool) {
 	for _, path := range paths {
 		var current any = definition

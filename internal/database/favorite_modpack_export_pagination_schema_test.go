@@ -11,8 +11,8 @@ func TestFavoriteModpackExportHistoryHasStatusAndCursorIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(migrator), "schemaGeneration = 167") {
-		t.Fatal("schema generation is not 166")
+	if !strings.Contains(string(migrator), "schemaGeneration = 168") {
+		t.Fatal("schema generation is not 168")
 	}
 	payload, err := os.ReadFile("engagement_export_schema.go")
 	if err != nil {

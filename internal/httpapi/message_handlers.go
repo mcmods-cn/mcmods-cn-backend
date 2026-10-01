@@ -159,7 +159,12 @@ func (s *Server) conversationMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
-	if !s.isConversationMember(r, conversationID, claims.Subject) {
+	member, err := s.isConversationMember(r.Context(), conversationID, claims.Subject)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取私聊成员失败")
+		return
+	}
+	if !member {
 		writeError(w, http.StatusForbidden, "无权访问该私聊")
 		return
 	}
@@ -210,7 +215,11 @@ func (s *Server) sendConversationMessage(w http.ResponseWriter, r *http.Request)
 	claims := currentClaims(r)
 	var low, high int64
 	if err := s.db.QueryRow(r.Context(), `select user_low_id,user_high_id from direct_conversations where id=$1`, conversationID).Scan(&low, &high); err != nil {
-		writeError(w, http.StatusNotFound, "私聊会话不存在")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "私聊会话不存在")
+		} else {
+			writeError(w, http.StatusInternalServerError, "读取私聊成员失败")
+		}
 		return
 	}
 	if claims.Subject != low && claims.Subject != high {
@@ -295,7 +304,12 @@ func (s *Server) updateConversationPresence(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	claims := currentClaims(r)
-	if !s.isConversationMember(r, conversationID, claims.Subject) {
+	member, err := s.isConversationMember(r.Context(), conversationID, claims.Subject)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取私聊成员失败")
+		return
+	}
+	if !member {
 		writeError(w, http.StatusForbidden, "无权访问该私聊")
 		return
 	}
@@ -303,11 +317,11 @@ func (s *Server) updateConversationPresence(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]bool{"active": true})
 }
 
-func (s *Server) isConversationMember(r *http.Request, conversationID, userID int64) bool {
+func (s *Server) isConversationMember(ctx context.Context, conversationID, userID int64) (bool, error) {
 	var exists bool
-	_ = s.db.QueryRow(r.Context(), `select exists(select 1 from direct_conversations
+	err := s.db.QueryRow(ctx, `select exists(select 1 from direct_conversations
 		where id=$1 and (user_low_id=$2 or user_high_id=$2))`, conversationID, userID).Scan(&exists)
-	return exists
+	return exists, err
 }
 
 func orderedUserIDs(first, second int64) (int64, int64) {

@@ -2,12 +2,15 @@ package database
 
 import (
 	"context"
+	"errors"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
@@ -77,8 +80,29 @@ func TestStickerReferenceProjectionIntegration(t *testing.T) {
 
 	statements := stickerReferenceSchemaStatements()
 	temporaryReferenceTable := strings.Replace(statements[0], "create table", "create temp table", 1)
-	for _, statement := range []string{temporaryReferenceTable, statements[1], statements[2], statements[3]} {
-		if _, err = tx.Exec(ctx, statement); err != nil {
+	if _, err = tx.Exec(ctx, temporaryReferenceTable); err != nil {
+		t.Fatalf("install temporary reference table: %v", err)
+	}
+	var namespace string
+	if err = tx.QueryRow(ctx, `select nspname from pg_namespace where oid=pg_my_temp_schema()`).Scan(&namespace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(ctx, `select set_config('search_path',quote_ident($1)||',pg_catalog',true)`, namespace); err != nil {
+		t.Fatal(err)
+	}
+	// Keep indexes, functions and their calls in this session's namespace.
+	// Leaving public first binds CREATE INDEX to the existing public table;
+	// bare CREATE OR REPLACE would also replace the public trigger functions.
+	functionNames := ephemeralSchemaFunctionNames(statements)
+	qualifyFunctions := func(statement string) string {
+		for _, name := range functionNames {
+			call := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(name) + `\s*\(`)
+			statement = call.ReplaceAllString(statement, namespace+"."+name+"(")
+		}
+		return statement
+	}
+	for _, statement := range statements[1:4] {
+		if _, err = tx.Exec(ctx, qualifyFunctions(statement)); err != nil {
 			t.Fatalf("install temporary sticker reference contract: %v", err)
 		}
 	}
@@ -94,12 +118,9 @@ func TestStickerReferenceProjectionIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err = tx.Exec(ctx, `set local search_path=pg_temp,public`); err != nil {
-		t.Fatal(err)
-	}
-	installer := strings.Replace(statements[4], "column_info.table_schema='public'", "column_info.table_schema like 'pg_temp_%'", 1)
+	installer := strings.Replace(statements[4], "column_info.table_schema='public'", "column_info.table_schema=current_schema()", 1)
 	installer = strings.ReplaceAll(installer, "on public.%I", "on %I")
-	if _, err = tx.Exec(ctx, installer); err != nil {
+	if _, err = tx.Exec(ctx, qualifyFunctions(installer)); err != nil {
 		t.Fatalf("install generated temporary triggers: %v", err)
 	}
 
@@ -130,6 +151,10 @@ func TestStickerReferenceProjectionIntegration(t *testing.T) {
 		plan.WriteString(line)
 		plan.WriteByte('\n')
 	}
+	if err = planRows.Err(); err != nil {
+		planRows.Close()
+		t.Fatal(err)
+	}
 	planRows.Close()
 	if !strings.Contains(plan.String(), "idx_sticker_content_references_token") {
 		t.Fatalf("sticker lookup did not use the token index:\n%s", plan.String())
@@ -152,11 +177,17 @@ func TestStickerReferenceProjectionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer contender.Rollback(context.Background())
-	lockContext, cancelLock := context.WithTimeout(ctx, 250*time.Millisecond)
-	defer cancelLock()
-	if _, lockErr := contender.Exec(lockContext, `select pg_advisory_xact_lock(
+	if _, err = contender.Exec(ctx, `set local lock_timeout='100ms'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, lockErr := contender.Exec(ctx, `select pg_advisory_xact_lock(
 		hashtext('sticker-reference'),hashtext('history:kept'))`); lockErr == nil {
 		t.Fatal("reference trigger did not hold the shared sticker deletion lock")
+	} else {
+		var postgresError *pgconn.PgError
+		if !errors.As(lockErr, &postgresError) || postgresError.Code != "55P03" {
+			t.Fatalf("contender error=%v, want actual PostgreSQL lock timeout", lockErr)
+		}
 	}
 }
 

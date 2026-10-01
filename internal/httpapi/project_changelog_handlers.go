@@ -175,6 +175,9 @@ func (s *Server) projectChangelogItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if !validateProjectChangelogCategory(w, r, tx, snapshot.CategoryID, target.RouteID) {
+		return
+	}
 	requireReview := loadReviewConfig(r.Context(), tx).ChangelogEdit && !canSkipChangelogReview(claims, target.PublicID)
 	status := "approved"
 	if requireReview {
@@ -237,6 +240,9 @@ func (s *Server) createProjectChangelog(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if !validateProjectChangelogCategory(w, r, tx, snapshot.CategoryID, target.RouteID) {
+		return
+	}
 	var internalID int64
 	var publicID string
 	if err = tx.QueryRow(r.Context(), `insert into project_changelogs(
@@ -284,7 +290,11 @@ func (s *Server) projectChangelogHistory(w http.ResponseWriter, r *http.Request)
 	}
 	entry, target, publishedRevisionID, err := s.loadProjectChangelogEditor(r.Context(), publicID, currentClaims(r))
 	if err != nil {
-		writeError(w, http.StatusNotFound, "changelog not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "changelog not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to load changelog history")
+		}
 		return
 	}
 	visibility := projectPendingReviewVisibility(currentClaims(r), target.PublicID, target.CanEdit)
@@ -420,6 +430,29 @@ func entryInternalIDTx(ctx context.Context, query databaseQuery, publicID string
 	return id
 }
 
+func projectChangelogCategoryID(ctx context.Context, query databaseQuery, publicID string, targetRouteID int64) (*int64, error) {
+	if publicID == "" {
+		return nil, nil
+	}
+	var id int64
+	if err := query.QueryRow(ctx, `select id from project_changelog_categories where public_id=$1 and object_route_id=$2 for share`, publicID, targetRouteID).Scan(&id); err != nil {
+		return nil, err
+	}
+	return &id, nil
+}
+
+func validateProjectChangelogCategory(w http.ResponseWriter, r *http.Request, tx pgx.Tx, publicID string, targetRouteID int64) bool {
+	if _, err := projectChangelogCategoryID(r.Context(), tx, publicID, targetRouteID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusBadRequest, "unknown changelog category for this project")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to load changelog category")
+		}
+		return false
+	}
+	return true
+}
+
 func applyProjectChangelogSnapshotTx(ctx context.Context, tx pgx.Tx, changelogID, targetRouteID, revisionID, actorID int64, snapshot projectChangelogSnapshot) error {
 	versions, err := authoritativeMinecraftVersionCodes(ctx, tx, snapshot.MinecraftVersions, 100)
 	if err != nil {
@@ -429,14 +462,11 @@ func applyProjectChangelogSnapshotTx(ctx context.Context, tx pgx.Tx, changelogID
 		return errInvalidMinecraftVersionCodes
 	}
 	snapshot.MinecraftVersions = versions
-	var categoryID *int64
-	if snapshot.CategoryID != "" {
-		var id int64
-		if err := tx.QueryRow(ctx, `select id from project_changelog_categories where public_id=$1 and object_route_id=$2`, snapshot.CategoryID, targetRouteID).Scan(&id); err != nil {
-			return err
-		}
-		categoryID = &id
-	} else if snapshot.NewCategory != nil {
+	categoryID, err := projectChangelogCategoryID(ctx, tx, snapshot.CategoryID, targetRouteID)
+	if err != nil {
+		return err
+	}
+	if snapshot.NewCategory != nil {
 		var id int64
 		if err := tx.QueryRow(ctx, `insert into project_changelog_categories(object_route_id,default_locale,created_by)
 			values($1,$2,$3) returning id`, targetRouteID, snapshot.NewCategory.DefaultLocale, actorID).Scan(&id); err != nil {

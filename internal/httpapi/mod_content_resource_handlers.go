@@ -533,8 +533,13 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "the selected content category cannot contain this resource")
 		return
 	}
+	allowDisabled, retainedErr := retainedModContentDisabledSubtype(r.Context(), s.db, identity.ID, resourceID, versionID, edit.SectionPublicID, edit.EntryTypeCode)
+	if retainedErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read existing resource subtype")
+		return
+	}
 	if err := validateModContentEditableDefinitionPatch(
-		r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, edit.Definition, true,
+		r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, edit.Definition, allowDisabled,
 	); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "the selected resource subtype or its fields are invalid")
 		return
@@ -546,7 +551,7 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 	}
 	effectiveDefinition := mergeModContentDefinitionPatch(storedDefinition, edit.Definition)
 	canonicalDefinition, normalizeErr := normalizeModContentEntryDefinition(
-		r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, effectiveDefinition, false, true,
+		r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, effectiveDefinition, false, allowDisabled,
 	)
 	if normalizeErr != nil {
 		writeError(w, http.StatusUnprocessableEntity, "the selected resource subtype or its fields are invalid")
@@ -726,18 +731,22 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 		if err = preserveImmutableModContentResourceLocales(existingDefaultLocale, existingLocalizations, snapshot.Resource); err != nil {
 			return err
 		}
+		allowDisabled := false
+		if snapshot.Operation == "edit" {
+			allowDisabled, err = retainedModContentDisabledSubtype(ctx, tx, snapshot.ModID, resourceID, versionID, snapshot.Resource.SectionPublicID, snapshot.Resource.EntryTypeCode)
+			if err != nil {
+				return err
+			}
+		}
 		canonicalDefinition, normalizeErr := normalizeModContentEntryDefinition(
 			ctx, tx, snapshot.ModID, versionID, snapshot.Resource.KindCode, snapshot.Resource.SectionPublicID,
-			snapshot.Resource.EntryTypeCode, snapshot.Resource.Definition, false, snapshot.Operation == "edit",
+			snapshot.Resource.EntryTypeCode, snapshot.Resource.Definition, false, allowDisabled,
 		)
 		if normalizeErr != nil {
 			return normalizeErr
 		}
 		snapshot.Resource.Definition = canonicalDefinition
 		definition, _ := json.Marshal(canonicalDefinition)
-		if err = validateModContentEntryType(ctx, tx, snapshot.ModID, versionID, snapshot.Resource.KindCode, snapshot.Resource.SectionPublicID, snapshot.Resource.EntryTypeCode, canonicalDefinition); err != nil {
-			return err
-		}
 		iconSmallFileID, iconSmallErr := resolveModContentImageFileID(ctx, tx, snapshot.Resource.IconSmallFilePublicID, actorID, resourceID, versionID, true, "icon_32")
 		if iconSmallErr != nil {
 			return iconSmallErr
