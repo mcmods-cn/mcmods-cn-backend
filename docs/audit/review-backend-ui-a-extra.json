@@ -1,0 +1,783 @@
+{
+  "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+  "reviewer": "frontend_ui_a",
+  "delegated_from": "backend_database",
+  "files": [
+    {
+      "path": "internal/httpapi/mod_export_handlers_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "16de9a0d69c96d6099c9c24e0fb4b130c4faee751da9aebff884ecc48b58429a",
+      "lines": 771,
+      "read_ranges": [
+        [
+          1,
+          771
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "导出归一化、schema、ZIP路径、身份及bulk staging回归",
+      "call_chain": [
+        "mod_export write batch",
+        "catalog identities",
+        "ZIP archive validation"
+      ],
+      "issues": [],
+      "validation": [
+        "指定31个现有顶层导出测试race实际PASS"
+      ],
+      "baseline_sha256": "16de9a0d69c96d6099c9c24e0fb4b130c4faee751da9aebff884ecc48b58429a",
+      "baseline_lines": 771,
+      "baseline_read_ranges": [
+        [
+          1,
+          265
+        ],
+        [
+          266,
+          535
+        ],
+        [
+          536,
+          771
+        ]
+      ],
+      "read_basis": "真实完整基线分段阅读与语义审查；全部最终修改段/受影响调用链重读，未改行比对。"
+    },
+    {
+      "path": "internal/httpapi/minecraft_loader_version_sources.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "236b69f2c4025a49fcba48e3270df9b1e76c06128b906e951c45de5383d1ff37",
+      "lines": 481,
+      "read_ranges": [
+        [
+          1,
+          481
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "Mojang及loader固定上游、多源fallback、16MiB/30s边界及配置同步",
+      "call_chain": [
+        "minecraft_version_handlers",
+        "HTTP client",
+        "decode/resolve/order",
+        "saveMinecraftVersionConfig"
+      ],
+      "issues": [],
+      "validation": [
+        "8现有Minecraft测试及新增本地HTTP6子场景race PASS；真实公网sources NOT_RUN"
+      ],
+      "baseline_sha256": "236b69f2c4025a49fcba48e3270df9b1e76c06128b906e951c45de5383d1ff37",
+      "baseline_lines": 481,
+      "baseline_read_ranges": [
+        [
+          1,
+          240
+        ],
+        [
+          241,
+          481
+        ]
+      ],
+      "read_basis": "真实完整基线分段阅读与语义审查；全部最终修改段/受影响调用链重读，未改行比对。"
+    },
+    {
+      "path": "internal/httpapi/content_metrics_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "ef1a51f13a999157c961da53cec156264f9167984192bf9cf3bf721f9900c646",
+      "lines": 453,
+      "read_ranges": [
+        [
+          1,
+          453
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "公开资源/项目指标读取与事务浏览归因",
+      "call_chain": [
+        "public_routes",
+        "game_resources/approved owner binding",
+        "content counters",
+        "stats task enqueue",
+        "recent editors/viewers"
+      ],
+      "issues": [
+        "BE-UIA-X004"
+      ],
+      "validation": [
+        "真实PG pending importer、target和counter拒绝；ownerless manual和approved binding不误隐藏PASS"
+      ],
+      "baseline_sha256": "7b4c3bc046c88e801690fd095062783f80cda5dedf97b5ae88c2572f49d23a70",
+      "baseline_lines": 447,
+      "baseline_read_ranges": [
+        [
+          1,
+          240
+        ],
+        [
+          241,
+          447
+        ]
+      ],
+      "read_basis": "真实完整基线分段阅读与语义审查；全部最终修改段/受影响调用链重读，未改行比对。"
+    },
+    {
+      "path": "internal/httpapi/mod_export_entry_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "08f6c548e5bac77d71670fe78c118484eac20f8f99d3375e43878c0103dae93c",
+      "lines": 402,
+      "read_ranges": [
+        [
+          1,
+          402
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "导出条目定义、语言、正文、模型/配方/版本关系",
+      "call_chain": [
+        "canReadModExportRevision",
+        "requestContentLocales",
+        "resource_versions",
+        "knowledge_pages",
+        "recipe render/decorators"
+      ],
+      "issues": [
+        "BE-UIA-X001",
+        "BE-UIA-X002",
+        "BE-UIA-X003",
+        "BE-UIA-X005"
+      ],
+      "validation": [
+        "8场景有效基线6FAIL/2PASS，最终13PG子场景race PASS"
+      ],
+      "baseline_sha256": "8a17b0626dd1332d5373514c66ea83d5ba50fc1645b5d8ef09649e419527bfa7",
+      "baseline_lines": 394,
+      "baseline_read_ranges": [
+        [
+          1,
+          225
+        ],
+        [
+          226,
+          394
+        ]
+      ],
+      "read_basis": "真实完整基线分段阅读与语义审查；全部最终修改段/受影响调用链重读，未改行比对。"
+    },
+    {
+      "path": "internal/httpapi/catalog_editor_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": "60643fa4be7cb04be6cad8e4a23c6fc2de7e4907ad83aa316184ce0a851ce556",
+      "baseline_lines": 1717,
+      "baseline_read_ranges": [
+        [
+          1,
+          240
+        ],
+        [
+          241,
+          495
+        ],
+        [
+          496,
+          745
+        ],
+        [
+          746,
+          1000
+        ],
+        [
+          1001,
+          1240
+        ],
+        [
+          1241,
+          1480
+        ],
+        [
+          1481,
+          1717
+        ]
+      ],
+      "sha256": "dba7fb8cc1c8329c919788d62492eb618021918ab5a143b77b084ba3f3c99755",
+      "lines": 1950,
+      "read_ranges": [
+        [
+          1,
+          1950
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "全局资源管理与公开tag/recipe/type/template创建、查询、归因与revision工作流",
+      "call_chain": [
+        "server requirePermission/global_resource (管理) vs optionalAuth (公开)",
+        "catalog_editor_service submit immutable revision",
+        "catalog import/public approved sources",
+        "content localization projection",
+        "recipe bindings/candidates",
+        "query pool"
+      ],
+      "issues": [
+        "BE-UIA-X006",
+        "BE-UIA-X007",
+        "BE-UIA-X008",
+        "BE-UIA-X009"
+      ],
+      "validation": [
+        "28实际隔离PG场景race PASS；public审批/人工保留/译文approval/类型ID碰撞/7实际PG查询或行流故障/MaxConns1",
+        "基线20:13FAIL/7PASS→20PASS，追加5+2+1实际红→最终28PASS；完整证据见backend-ui-a-extra-validation.json"
+      ],
+      "delegated_from": "root/backend_api_b",
+      "semantics_reviewed_version": "final working-tree content, all changes explicitly rechecked",
+      "final_recheck_ranges": [
+        [
+          200,
+          203
+        ],
+        [
+          252,
+          252
+        ],
+        [
+          274,
+          279
+        ],
+        [
+          281,
+          281
+        ],
+        [
+          404,
+          405
+        ],
+        [
+          412,
+          413
+        ],
+        [
+          417,
+          423
+        ],
+        [
+          426,
+          426
+        ],
+        [
+          429,
+          429
+        ],
+        [
+          431,
+          432
+        ],
+        [
+          493,
+          493
+        ],
+        [
+          501,
+          502
+        ],
+        [
+          504,
+          504
+        ],
+        [
+          524,
+          525
+        ],
+        [
+          536,
+          536
+        ],
+        [
+          541,
+          545
+        ],
+        [
+          549,
+          549
+        ],
+        [
+          608,
+          611
+        ],
+        [
+          616,
+          619
+        ],
+        [
+          624,
+          624
+        ],
+        [
+          629,
+          629
+        ],
+        [
+          638,
+          643
+        ],
+        [
+          646,
+          646
+        ],
+        [
+          701,
+          704
+        ],
+        [
+          709,
+          712
+        ],
+        [
+          741,
+          742
+        ],
+        [
+          746,
+          746
+        ],
+        [
+          750,
+          764
+        ],
+        [
+          770,
+          780
+        ],
+        [
+          782,
+          782
+        ],
+        [
+          789,
+          792
+        ],
+        [
+          797,
+          800
+        ],
+        [
+          832,
+          835
+        ],
+        [
+          881,
+          884
+        ],
+        [
+          904,
+          907
+        ],
+        [
+          912,
+          915
+        ],
+        [
+          917,
+          918
+        ],
+        [
+          921,
+          921
+        ],
+        [
+          936,
+          936
+        ],
+        [
+          962,
+          964
+        ],
+        [
+          968,
+          978
+        ],
+        [
+          1006,
+          1011
+        ],
+        [
+          1016,
+          1016
+        ],
+        [
+          1023,
+          1025
+        ],
+        [
+          1071,
+          1074
+        ],
+        [
+          1111,
+          1114
+        ],
+        [
+          1119,
+          1122
+        ],
+        [
+          1129,
+          1129
+        ],
+        [
+          1134,
+          1134
+        ],
+        [
+          1142,
+          1142
+        ],
+        [
+          1154,
+          1155
+        ],
+        [
+          1160,
+          1160
+        ],
+        [
+          1166,
+          1166
+        ],
+        [
+          1271,
+          1273
+        ],
+        [
+          1282,
+          1285
+        ],
+        [
+          1290,
+          1293
+        ],
+        [
+          1295,
+          1296
+        ],
+        [
+          1299,
+          1299
+        ],
+        [
+          1314,
+          1314
+        ],
+        [
+          1347,
+          1348
+        ],
+        [
+          1353,
+          1353
+        ],
+        [
+          1363,
+          1363
+        ],
+        [
+          1374,
+          1378
+        ],
+        [
+          1397,
+          1402
+        ],
+        [
+          1407,
+          1407
+        ],
+        [
+          1473,
+          1480
+        ],
+        [
+          1518,
+          1562
+        ],
+        [
+          1565,
+          1565
+        ],
+        [
+          1570,
+          1570
+        ],
+        [
+          1593,
+          1593
+        ],
+        [
+          1595,
+          1599
+        ],
+        [
+          1601,
+          1601
+        ],
+        [
+          1608,
+          1608
+        ],
+        [
+          1615,
+          1616
+        ],
+        [
+          1618,
+          1618
+        ],
+        [
+          1622,
+          1622
+        ],
+        [
+          1658,
+          1659
+        ],
+        [
+          1668,
+          1668
+        ],
+        [
+          1674,
+          1678
+        ],
+        [
+          1682,
+          1682
+        ],
+        [
+          1719,
+          1719
+        ],
+        [
+          1722,
+          1722
+        ],
+        [
+          1726,
+          1726
+        ],
+        [
+          1758,
+          1759
+        ],
+        [
+          1805,
+          1810
+        ],
+        [
+          1819,
+          1826
+        ],
+        [
+          1830,
+          1830
+        ],
+        [
+          1832,
+          1832
+        ],
+        [
+          1844,
+          1844
+        ],
+        [
+          1849,
+          1853
+        ],
+        [
+          1898,
+          1903
+        ]
+      ],
+      "read_basis": "完整1717基线七段真实人工阅读/语义审查；最终815行diff全部阅读，新增最后公开边界段及上下文补读，未改行与基线逐行比对。不是脚本扫描标审。"
+    }
+  ],
+  "coverage": {
+    "included_baseline_files": 5,
+    "fully_reviewed": 5,
+    "modified_pending_recheck": 0,
+    "partial": 0,
+    "unreviewed": 0,
+    "excluded": 0,
+    "baseline_lines": 3810,
+    "final_lines": 4057
+  },
+  "updated_at": "2026-10-01T15:38:03.577691+00:00",
+  "new_files_reviewed": [
+    {
+      "path": "internal/httpapi/mod_export_entry_audit_integration_test.go",
+      "responsibility": "真实ownedPG条目/语言/父审批/统计回归",
+      "call_chain": [
+        "isolatedAITestDatabase",
+        "modExportEntryDetail",
+        "resource_versions",
+        "metricTarget",
+        "recipe import"
+      ],
+      "issues": [],
+      "behavior_verified": true,
+      "validation": [
+        "真实阅读/语义核对，测试见独立执行证据；文档本身不构成行为通过。"
+      ],
+      "sha256": "9ce071a8b1b3b6baa5cce921726b45e09157d316009b4cb5fc7d9fd45b9af109",
+      "lines": 267,
+      "read_ranges": [
+        [
+          1,
+          267
+        ]
+      ],
+      "content_read": true,
+      "semantics_reviewed": true,
+      "status": "已复查"
+    },
+    {
+      "path": "internal/httpapi/catalog_editor_visibility_audit_integration_test.go",
+      "responsibility": "真实ownedPG公共目录审批、投影/类型、单连接池和行流故障回归",
+      "call_chain": [
+        "catalog optionalAuth public GET handlers",
+        "catalogEditorEntityByPublicID",
+        "content_localizations",
+        "recipe bindings",
+        "PG shadow schema/view"
+      ],
+      "issues": [],
+      "behavior_verified": true,
+      "validation": [
+        "真实阅读/语义核对，测试见独立执行证据；文档本身不构成行为通过。"
+      ],
+      "sha256": "322caa5aab4d67a7f2d30f3bdb4c122cf2860361349d31b47764fc7f3d5207aa",
+      "lines": 279,
+      "read_ranges": [
+        [
+          1,
+          279
+        ]
+      ],
+      "content_read": true,
+      "semantics_reviewed": true,
+      "status": "已复查"
+    },
+    {
+      "path": "internal/httpapi/minecraft_loader_source_audit_test.go",
+      "responsibility": "本地HTTP上游失败/边界/取消回归",
+      "call_chain": [
+        "httptest",
+        "fetchMinecraftVersionAttempts",
+        "fetchMinecraftSource"
+      ],
+      "issues": [],
+      "behavior_verified": true,
+      "validation": [
+        "真实阅读/语义核对，测试见独立执行证据；文档本身不构成行为通过。"
+      ],
+      "sha256": "43c1c4abb59fee0c92cd7594c8be4cff22ee7966c58b338966cf4c150cd87286",
+      "lines": 60,
+      "read_ranges": [
+        [
+          1,
+          60
+        ]
+      ],
+      "content_read": true,
+      "semantics_reviewed": true,
+      "status": "已复查"
+    },
+    {
+      "path": "CONTENT_EXPORT_VISIBILITY.md",
+      "responsibility": "公开导出/全局目录/统计/导入worker正式契约与部署说明",
+      "call_chain": [
+        "public revision/resource decorator",
+        "catalog editor public predicate",
+        "DB代理asset/import fence"
+      ],
+      "issues": [],
+      "behavior_verified": false,
+      "validation": [
+        "真实阅读/语义核对，测试见独立执行证据；文档本身不构成行为通过。"
+      ],
+      "sha256": "79ab671cfa90f1cdc319c34fc1d047882ecf118065ac83001b96d536f4bc667a",
+      "lines": 23,
+      "read_ranges": [
+        [
+          1,
+          23
+        ]
+      ],
+      "content_read": true,
+      "semantics_reviewed": true,
+      "status": "已复查"
+    },
+    {
+      "path": "docs/CONTENT_STATISTICS_RELIABILITY.md",
+      "responsibility": "既有内容统计合并队列租约正式说明",
+      "call_chain": [
+        "popularity_worker.go111–247选段跨链核对",
+        "FOR UPDATE+attempts",
+        "shared DB PG evidence"
+      ],
+      "issues": [],
+      "behavior_verified": false,
+      "validation": [
+        "真实阅读/语义核对，测试见独立执行证据；文档本身不构成行为通过。"
+      ],
+      "sha256": "ea0ef09b46ebec6d4bb0fcc92806cd77a62ba67b85969336ddee8677a5351fda",
+      "lines": 7,
+      "read_ranges": [
+        [
+          1,
+          7
+        ]
+      ],
+      "content_read": true,
+      "semantics_reviewed": true,
+      "status": "已复查"
+    },
+    {
+      "path": "docs/audit/backend-ui-a-extra.md",
+      "responsibility": "审查范围、问题与实际验证证据报告",
+      "call_chain": [
+        "5人工基线文件",
+        "3新增测试",
+        "真实执行日志",
+        "正式契约"
+      ],
+      "issues": [],
+      "behavior_verified": false,
+      "validation": [
+        "真实阅读/语义核对，测试见独立执行证据；文档本身不构成行为通过。"
+      ],
+      "sha256": "1ca3f56ec272ba6d18ea4a83169236d36e6f13c9482f2c97387be2922fc2a579",
+      "lines": 39,
+      "read_ranges": [
+        [
+          1,
+          39
+        ]
+      ],
+      "content_read": true,
+      "semantics_reviewed": true,
+      "status": "已复查"
+    }
+  ]
+}

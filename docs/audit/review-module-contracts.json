@@ -1,0 +1,61 @@
+{
+  "reviewer": "frontend_ui_b",
+  "files": [
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/yggdrasil_settings_contract_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "d3320e3355358d6fd88831cfc23cffc1bd0e40431caac112177a7c180e577b1c",
+      "lines": 29,
+      "read_ranges": [
+        [
+          1,
+          29
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "真实decodeJSON/DTO验证可写字段和只读拒绝，不放宽strict/不连接服务",
+      "call_chain": [
+        "internal/httpapi/response.go",
+        "internal/httpapi/yggdrasil_settings_handlers.go"
+      ],
+      "issues": [
+        "FE-CONTRACT-001"
+      ],
+      "validation": [
+        "最终文件全文真实读取并语义复查；局部实际测试/工具执行详见前端docs/audit/module-contract-validation.json，不宣称全面行为验证"
+      ]
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "docs/YGGDRASIL_SETTINGS_CONTRACT.md",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "177114a8127df33c63a03744653bc75b8cb0772e6bd6ba84e319498a1b3d4b00",
+      "lines": 13,
+      "read_ranges": [
+        [
+          1,
+          13
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "正式GET/PUT权限、writable/read-only/密钥保留/status与发布兼容说明",
+      "call_chain": [
+        "internal/httpapi/yggdrasil_settings_handlers.go",
+        "../mcmods-cn-frontend/app/_components/admin-yggdrasil-panel.tsx"
+      ],
+      "issues": [
+        "FE-CONTRACT-001"
+      ],
+      "validation": [
+        "最终文件全文真实读取并语义复查；局部实际测试/工具执行详见前端docs/audit/module-contract-validation.json，不宣称全面行为验证"
+      ]
+    }
+  ]
+}

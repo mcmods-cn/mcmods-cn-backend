@@ -1,0 +1,5777 @@
+[
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/admin_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "748b27ce9d6b59909bfbbaa6d4f0b36a8f967e2a8b91070de8956200a65b6a85",
+    "sha256": "d05b2161764d69e5b73d76c7b76d24f98e71943b924f43d4a91b4fbb8376d36b",
+    "lines": 1545,
+    "read_ranges": [
+      [
+        1,
+        1545
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "后台RBAC/用户创建/角色和直接权限替换/SMTP设置，模板解析及审计辅助",
+    "call_chain": [
+      "server.go requirePermission",
+      "security权限解析",
+      "mailer",
+      "system_settings/roles/user_role_bindings/user_permissions"
+    ],
+    "issues": [
+      "BE-SUP-010"
+    ],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        270
+      ],
+      [
+        271,
+        545
+      ],
+      [
+        546,
+        835
+      ],
+      [
+        836,
+        1110
+      ],
+      [
+        1111,
+        1475
+      ]
+    ],
+    "baseline_lines": 1471,
+    "final_read_ranges": [
+      [
+        6,
+        6
+      ],
+      [
+        170,
+        170
+      ],
+      [
+        226,
+        232
+      ],
+      [
+        251,
+        261
+      ],
+      [
+        308,
+        311
+      ],
+      [
+        379,
+        382
+      ],
+      [
+        436,
+        439
+      ],
+      [
+        483,
+        486
+      ],
+      [
+        587,
+        587
+      ],
+      [
+        592,
+        595
+      ],
+      [
+        628,
+        633
+      ],
+      [
+        660,
+        663
+      ],
+      [
+        668,
+        673
+      ],
+      [
+        718,
+        721
+      ],
+      [
+        753,
+        758
+      ],
+      [
+        773,
+        779
+      ],
+      [
+        852,
+        852
+      ],
+      [
+        856,
+        859
+      ],
+      [
+        864,
+        869
+      ],
+      [
+        888,
+        891
+      ],
+      [
+        910,
+        913
+      ],
+      [
+        987,
+        987
+      ],
+      [
+        999,
+        999
+      ],
+      [
+        1006,
+        1010
+      ],
+      [
+        1012,
+        1012
+      ],
+      [
+        1014,
+        1014
+      ],
+      [
+        1464,
+        1469
+      ],
+      [
+        1478,
+        1478
+      ],
+      [
+        1505,
+        1507
+      ]
+    ],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [
+      [
+        6,
+        6
+      ],
+      [
+        170,
+        170
+      ],
+      [
+        226,
+        232
+      ],
+      [
+        251,
+        261
+      ],
+      [
+        308,
+        311
+      ],
+      [
+        379,
+        382
+      ],
+      [
+        436,
+        439
+      ],
+      [
+        482,
+        485
+      ],
+      [
+        483,
+        486
+      ],
+      [
+        587,
+        587
+      ],
+      [
+        592,
+        595
+      ],
+      [
+        628,
+        633
+      ],
+      [
+        660,
+        663
+      ],
+      [
+        668,
+        673
+      ],
+      [
+        718,
+        721
+      ],
+      [
+        753,
+        758
+      ],
+      [
+        773,
+        779
+      ],
+      [
+        852,
+        852
+      ],
+      [
+        856,
+        859
+      ],
+      [
+        864,
+        869
+      ],
+      [
+        888,
+        891
+      ],
+      [
+        910,
+        913
+      ],
+      [
+        987,
+        987
+      ],
+      [
+        999,
+        999
+      ],
+      [
+        1006,
+        1007
+      ],
+      [
+        1006,
+        1010
+      ],
+      [
+        1009,
+        1012
+      ],
+      [
+        1012,
+        1012
+      ],
+      [
+        1014,
+        1014
+      ],
+      [
+        1464,
+        1469
+      ],
+      [
+        1478,
+        1478
+      ],
+      [
+        1505,
+        1507
+      ]
+    ],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          5
+        ],
+        "final": [
+          1,
+          5
+        ]
+      },
+      {
+        "baseline": [
+          6,
+          168
+        ],
+        "final": [
+          7,
+          169
+        ]
+      },
+      {
+        "baseline": [
+          177,
+          231
+        ],
+        "final": [
+          171,
+          225
+        ]
+      },
+      {
+        "baseline": [
+          233,
+          250
+        ],
+        "final": [
+          233,
+          250
+        ]
+      },
+      {
+        "baseline": [
+          253,
+          298
+        ],
+        "final": [
+          262,
+          307
+        ]
+      },
+      {
+        "baseline": [
+          300,
+          366
+        ],
+        "final": [
+          312,
+          378
+        ]
+      },
+      {
+        "baseline": [
+          368,
+          420
+        ],
+        "final": [
+          383,
+          435
+        ]
+      },
+      {
+        "baseline": [
+          422,
+          463
+        ],
+        "final": [
+          440,
+          481
+        ]
+      },
+      {
+        "baseline": [
+          464,
+          564
+        ],
+        "final": [
+          486,
+          586
+        ]
+      },
+      {
+        "baseline": [
+          566,
+          569
+        ],
+        "final": [
+          588,
+          591
+        ]
+      },
+      {
+        "baseline": [
+          571,
+          602
+        ],
+        "final": [
+          596,
+          627
+        ]
+      },
+      {
+        "baseline": [
+          603,
+          628
+        ],
+        "final": [
+          634,
+          659
+        ]
+      },
+      {
+        "baseline": [
+          630,
+          633
+        ],
+        "final": [
+          664,
+          667
+        ]
+      },
+      {
+        "baseline": [
+          636,
+          679
+        ],
+        "final": [
+          674,
+          717
+        ]
+      },
+      {
+        "baseline": [
+          680,
+          710
+        ],
+        "final": [
+          722,
+          752
+        ]
+      },
+      {
+        "baseline": [
+          711,
+          724
+        ],
+        "final": [
+          759,
+          772
+        ]
+      },
+      {
+        "baseline": [
+          726,
+          797
+        ],
+        "final": [
+          780,
+          851
+        ]
+      },
+      {
+        "baseline": [
+          799,
+          801
+        ],
+        "final": [
+          853,
+          855
+        ]
+      },
+      {
+        "baseline": [
+          803,
+          806
+        ],
+        "final": [
+          860,
+          863
+        ]
+      },
+      {
+        "baseline": [
+          809,
+          826
+        ],
+        "final": [
+          870,
+          887
+        ]
+      },
+      {
+        "baseline": [
+          828,
+          845
+        ],
+        "final": [
+          892,
+          909
+        ]
+      },
+      {
+        "baseline": [
+          847,
+          919
+        ],
+        "final": [
+          914,
+          986
+        ]
+      },
+      {
+        "baseline": [
+          921,
+          931
+        ],
+        "final": [
+          988,
+          998
+        ]
+      },
+      {
+        "baseline": [
+          933,
+          938
+        ],
+        "final": [
+          1000,
+          1005
+        ]
+      },
+      {
+        "baseline": [
+          944,
+          944
+        ],
+        "final": [
+          1008,
+          1008
+        ]
+      },
+      {
+        "baseline": [
+          945,
+          945
+        ],
+        "final": [
+          1013,
+          1013
+        ]
+      },
+      {
+        "baseline": [
+          947,
+          1395
+        ],
+        "final": [
+          1015,
+          1463
+        ]
+      },
+      {
+        "baseline": [
+          1399,
+          1406
+        ],
+        "final": [
+          1470,
+          1477
+        ]
+      },
+      {
+        "baseline": [
+          1407,
+          1427
+        ],
+        "final": [
+          1479,
+          1499
+        ]
+      },
+      {
+        "baseline": [
+          1429,
+          1433
+        ],
+        "final": [
+          1500,
+          1504
+        ]
+      },
+      {
+        "baseline": [
+          1434,
+          1471
+        ],
+        "final": [
+          1508,
+          1545
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/creator_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "acab761a72e5dd0b0438d234a02fa220b9c9251e6009779a11c96d843ff7e17f",
+    "sha256": "b637f5b76395c0b996f0db800d43e71ecfed9a47e68c09d0811191db21517dd3",
+    "lines": 1443,
+    "read_ranges": [
+      [
+        1,
+        1443
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "Creator资料/团队成员/作者认领和审核撤销/本地化发布/关系权限",
+    "call_chain": [
+      "server.go",
+      "createContentRevisionTx",
+      "applyCreatorRelationsTx",
+      "publishCatalogLocalizationsTx",
+      "effective_project_access"
+    ],
+    "issues": [
+      "BE-SUP-011",
+      "BE-SUP-013",
+      "BE-SUP-014"
+    ],
+    "validation": [
+      "STATIC semantic review",
+      "PASS owned PG TestCreator*CoreIntegration; MaxConns=1; actual append-only audit CHECK failure rollback"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        300
+      ],
+      [
+        301,
+        585
+      ],
+      [
+        586,
+        875
+      ],
+      [
+        876,
+        1145
+      ],
+      [
+        1146,
+        1399
+      ]
+    ],
+    "baseline_lines": 1399,
+    "final_read_ranges": [
+      [
+        13,
+        13
+      ],
+      [
+        416,
+        420
+      ],
+      [
+        464,
+        465
+      ],
+      [
+        490,
+        497
+      ],
+      [
+        505,
+        505
+      ],
+      [
+        522,
+        522
+      ],
+      [
+        525,
+        546
+      ],
+      [
+        603,
+        606
+      ],
+      [
+        661,
+        664
+      ],
+      [
+        673,
+        673
+      ],
+      [
+        693,
+        696
+      ],
+      [
+        699,
+        702
+      ],
+      [
+        1333,
+        1338
+      ],
+      [
+        1342,
+        1343
+      ],
+      [
+        1349,
+        1349
+      ],
+      [
+        1351,
+        1351
+      ],
+      [
+        1354,
+        1354
+      ]
+    ],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [
+      [
+        13,
+        13
+      ],
+      [
+        416,
+        420
+      ],
+      [
+        464,
+        465
+      ],
+      [
+        490,
+        497
+      ],
+      [
+        505,
+        505
+      ],
+      [
+        522,
+        522
+      ],
+      [
+        525,
+        546
+      ],
+      [
+        603,
+        606
+      ],
+      [
+        661,
+        664
+      ],
+      [
+        673,
+        673
+      ],
+      [
+        693,
+        696
+      ],
+      [
+        698,
+        701
+      ],
+      [
+        699,
+        702
+      ],
+      [
+        1333,
+        1338
+      ],
+      [
+        1342,
+        1343
+      ],
+      [
+        1349,
+        1349
+      ],
+      [
+        1351,
+        1351
+      ],
+      [
+        1354,
+        1354
+      ],
+      [
+        1370,
+        1443
+      ]
+    ],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          12
+        ],
+        "final": [
+          1,
+          12
+        ]
+      },
+      {
+        "baseline": [
+          13,
+          414
+        ],
+        "final": [
+          14,
+          415
+        ]
+      },
+      {
+        "baseline": [
+          415,
+          446
+        ],
+        "final": [
+          421,
+          452
+        ]
+      },
+      {
+        "baseline": [
+          448,
+          458
+        ],
+        "final": [
+          453,
+          463
+        ]
+      },
+      {
+        "baseline": [
+          462,
+          485
+        ],
+        "final": [
+          466,
+          489
+        ]
+      },
+      {
+        "baseline": [
+          486,
+          492
+        ],
+        "final": [
+          498,
+          504
+        ]
+      },
+      {
+        "baseline": [
+          494,
+          506
+        ],
+        "final": [
+          506,
+          518
+        ]
+      },
+      {
+        "baseline": [
+          512,
+          514
+        ],
+        "final": [
+          519,
+          521
+        ]
+      },
+      {
+        "baseline": [
+          516,
+          517
+        ],
+        "final": [
+          523,
+          524
+        ]
+      },
+      {
+        "baseline": [
+          519,
+          574
+        ],
+        "final": [
+          547,
+          602
+        ]
+      },
+      {
+        "baseline": [
+          575,
+          628
+        ],
+        "final": [
+          607,
+          660
+        ]
+      },
+      {
+        "baseline": [
+          632,
+          639
+        ],
+        "final": [
+          665,
+          672
+        ]
+      },
+      {
+        "baseline": [
+          641,
+          659
+        ],
+        "final": [
+          674,
+          692
+        ]
+      },
+      {
+        "baseline": [
+          661,
+          661
+        ],
+        "final": [
+          697,
+          697
+        ]
+      },
+      {
+        "baseline": [
+          662,
+          1292
+        ],
+        "final": [
+          702,
+          1332
+        ]
+      },
+      {
+        "baseline": [
+          1295,
+          1297
+        ],
+        "final": [
+          1339,
+          1341
+        ]
+      },
+      {
+        "baseline": [
+          1300,
+          1303
+        ],
+        "final": [
+          1344,
+          1347
+        ]
+      },
+      {
+        "baseline": [
+          1305,
+          1305
+        ],
+        "final": [
+          1348,
+          1348
+        ]
+      },
+      {
+        "baseline": [
+          1306,
+          1306
+        ],
+        "final": [
+          1350,
+          1350
+        ]
+      },
+      {
+        "baseline": [
+          1308,
+          1309
+        ],
+        "final": [
+          1352,
+          1353
+        ]
+      },
+      {
+        "baseline": [
+          1311,
+          1399
+        ],
+        "final": [
+          1355,
+          1443
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/simple_project_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "3b09dc890ee147ce1b0c2a4f514b22a7291820cc8321df473267751f952a7376",
+    "sha256": "019b0888ebd0bafe97afe82a0bba2ee8344d73e75c9bc1ef9b29cf4352f17bdd",
+    "lines": 1181,
+    "read_ranges": [
+      [
+        1,
+        1181
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "六项目目录过滤、编辑修订、关系/图库发布、父项目关联",
+    "call_chain": [
+      "server.go optionalAuth/requireAuth",
+      "canEditSimpleProject",
+      "createContentRevisionTx",
+      "OSS trusted raster",
+      "public_routes"
+    ],
+    "issues": [
+      "BE-SUP-009"
+    ],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        310
+      ],
+      [
+        311,
+        580
+      ],
+      [
+        581,
+        840
+      ],
+      [
+        841,
+        1092
+      ]
+    ],
+    "baseline_lines": 1092,
+    "final_read_ranges": [
+      [
+        20,
+        21
+      ],
+      [
+        104,
+        104
+      ],
+      [
+        106,
+        106
+      ],
+      [
+        108,
+        108
+      ],
+      [
+        127,
+        129
+      ],
+      [
+        211,
+        211
+      ],
+      [
+        249,
+        251
+      ],
+      [
+        253,
+        253
+      ],
+      [
+        257,
+        260
+      ],
+      [
+        293,
+        293
+      ],
+      [
+        301,
+        304
+      ],
+      [
+        309,
+        309
+      ],
+      [
+        312,
+        312
+      ],
+      [
+        316,
+        319
+      ],
+      [
+        364,
+        368
+      ],
+      [
+        380,
+        387
+      ],
+      [
+        456,
+        456
+      ],
+      [
+        460,
+        463
+      ],
+      [
+        483,
+        487
+      ],
+      [
+        834,
+        841
+      ],
+      [
+        890,
+        890
+      ],
+      [
+        896,
+        896
+      ],
+      [
+        919,
+        922
+      ],
+      [
+        937,
+        940
+      ],
+      [
+        967,
+        970
+      ],
+      [
+        974,
+        976
+      ],
+      [
+        990,
+        993
+      ],
+      [
+        1000,
+        1000
+      ],
+      [
+        1002,
+        1002
+      ],
+      [
+        1004,
+        1006
+      ],
+      [
+        1065,
+        1065
+      ],
+      [
+        1067,
+        1068
+      ],
+      [
+        1080,
+        1080
+      ],
+      [
+        1137,
+        1138
+      ],
+      [
+        1140,
+        1141
+      ],
+      [
+        1145,
+        1148
+      ],
+      [
+        1153,
+        1155
+      ],
+      [
+        1157,
+        1157
+      ],
+      [
+        1161,
+        1164
+      ],
+      [
+        1169,
+        1171
+      ],
+      [
+        1173,
+        1173
+      ]
+    ],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [
+      [
+        19,
+        20
+      ],
+      [
+        20,
+        21
+      ],
+      [
+        104,
+        104
+      ],
+      [
+        106,
+        106
+      ],
+      [
+        108,
+        108
+      ],
+      [
+        127,
+        129
+      ],
+      [
+        211,
+        211
+      ],
+      [
+        249,
+        251
+      ],
+      [
+        253,
+        253
+      ],
+      [
+        253,
+        256
+      ],
+      [
+        257,
+        260
+      ],
+      [
+        258,
+        258
+      ],
+      [
+        293,
+        293
+      ],
+      [
+        301,
+        304
+      ],
+      [
+        309,
+        309
+      ],
+      [
+        312,
+        312
+      ],
+      [
+        312,
+        315
+      ],
+      [
+        316,
+        319
+      ],
+      [
+        317,
+        317
+      ],
+      [
+        364,
+        368
+      ],
+      [
+        378,
+        385
+      ],
+      [
+        380,
+        387
+      ],
+      [
+        456,
+        456
+      ],
+      [
+        456,
+        459
+      ],
+      [
+        460,
+        463
+      ],
+      [
+        461,
+        461
+      ],
+      [
+        483,
+        487
+      ],
+      [
+        834,
+        841
+      ],
+      [
+        890,
+        890
+      ],
+      [
+        896,
+        896
+      ],
+      [
+        919,
+        922
+      ],
+      [
+        936,
+        939
+      ],
+      [
+        937,
+        940
+      ],
+      [
+        967,
+        970
+      ],
+      [
+        974,
+        976
+      ],
+      [
+        990,
+        993
+      ],
+      [
+        1000,
+        1000
+      ],
+      [
+        1002,
+        1002
+      ],
+      [
+        1004,
+        1006
+      ],
+      [
+        1065,
+        1065
+      ],
+      [
+        1067,
+        1068
+      ],
+      [
+        1080,
+        1080
+      ],
+      [
+        1137,
+        1138
+      ],
+      [
+        1140,
+        1141
+      ],
+      [
+        1140,
+        1144
+      ],
+      [
+        1145,
+        1148
+      ],
+      [
+        1146,
+        1146
+      ],
+      [
+        1153,
+        1155
+      ],
+      [
+        1157,
+        1157
+      ],
+      [
+        1157,
+        1160
+      ],
+      [
+        1161,
+        1164
+      ],
+      [
+        1162,
+        1162
+      ],
+      [
+        1169,
+        1171
+      ],
+      [
+        1173,
+        1173
+      ]
+    ],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          18
+        ],
+        "final": [
+          1,
+          18
+        ]
+      },
+      {
+        "baseline": [
+          19,
+          101
+        ],
+        "final": [
+          21,
+          103
+        ]
+      },
+      {
+        "baseline": [
+          102,
+          102
+        ],
+        "final": [
+          105,
+          105
+        ]
+      },
+      {
+        "baseline": [
+          103,
+          103
+        ],
+        "final": [
+          107,
+          107
+        ]
+      },
+      {
+        "baseline": [
+          104,
+          121
+        ],
+        "final": [
+          109,
+          126
+        ]
+      },
+      {
+        "baseline": [
+          122,
+          202
+        ],
+        "final": [
+          130,
+          210
+        ]
+      },
+      {
+        "baseline": [
+          204,
+          240
+        ],
+        "final": [
+          212,
+          248
+        ]
+      },
+      {
+        "baseline": [
+          241,
+          241
+        ],
+        "final": [
+          252,
+          252
+        ]
+      },
+      {
+        "baseline": [
+          242,
+          242
+        ],
+        "final": [
+          257,
+          257
+        ]
+      },
+      {
+        "baseline": [
+          244,
+          277
+        ],
+        "final": [
+          259,
+          292
+        ]
+      },
+      {
+        "baseline": [
+          279,
+          285
+        ],
+        "final": [
+          294,
+          300
+        ]
+      },
+      {
+        "baseline": [
+          286,
+          289
+        ],
+        "final": [
+          305,
+          308
+        ]
+      },
+      {
+        "baseline": [
+          290,
+          291
+        ],
+        "final": [
+          310,
+          311
+        ]
+      },
+      {
+        "baseline": [
+          292,
+          292
+        ],
+        "final": [
+          316,
+          316
+        ]
+      },
+      {
+        "baseline": [
+          294,
+          339
+        ],
+        "final": [
+          318,
+          363
+        ]
+      },
+      {
+        "baseline": [
+          341,
+          349
+        ],
+        "final": [
+          369,
+          377
+        ]
+      },
+      {
+        "baseline": [
+          350,
+          419
+        ],
+        "final": [
+          386,
+          455
+        ]
+      },
+      {
+        "baseline": [
+          420,
+          420
+        ],
+        "final": [
+          460,
+          460
+        ]
+      },
+      {
+        "baseline": [
+          422,
+          442
+        ],
+        "final": [
+          462,
+          482
+        ]
+      },
+      {
+        "baseline": [
+          444,
+          789
+        ],
+        "final": [
+          488,
+          833
+        ]
+      },
+      {
+        "baseline": [
+          792,
+          839
+        ],
+        "final": [
+          842,
+          889
+        ]
+      },
+      {
+        "baseline": [
+          841,
+          845
+        ],
+        "final": [
+          891,
+          895
+        ]
+      },
+      {
+        "baseline": [
+          847,
+          868
+        ],
+        "final": [
+          897,
+          918
+        ]
+      },
+      {
+        "baseline": [
+          869,
+          881
+        ],
+        "final": [
+          923,
+          935
+        ]
+      },
+      {
+        "baseline": [
+          882,
+          908
+        ],
+        "final": [
+          940,
+          966
+        ]
+      },
+      {
+        "baseline": [
+          909,
+          911
+        ],
+        "final": [
+          971,
+          973
+        ]
+      },
+      {
+        "baseline": [
+          913,
+          925
+        ],
+        "final": [
+          977,
+          989
+        ]
+      },
+      {
+        "baseline": [
+          926,
+          931
+        ],
+        "final": [
+          994,
+          999
+        ]
+      },
+      {
+        "baseline": [
+          932,
+          932
+        ],
+        "final": [
+          1001,
+          1001
+        ]
+      },
+      {
+        "baseline": [
+          933,
+          933
+        ],
+        "final": [
+          1003,
+          1003
+        ]
+      },
+      {
+        "baseline": [
+          935,
+          992
+        ],
+        "final": [
+          1007,
+          1064
+        ]
+      },
+      {
+        "baseline": [
+          994,
+          994
+        ],
+        "final": [
+          1066,
+          1066
+        ]
+      },
+      {
+        "baseline": [
+          995,
+          1005
+        ],
+        "final": [
+          1069,
+          1079
+        ]
+      },
+      {
+        "baseline": [
+          1007,
+          1062
+        ],
+        "final": [
+          1081,
+          1136
+        ]
+      },
+      {
+        "baseline": [
+          1063,
+          1063
+        ],
+        "final": [
+          1139,
+          1139
+        ]
+      },
+      {
+        "baseline": [
+          1065,
+          1065
+        ],
+        "final": [
+          1145,
+          1145
+        ]
+      },
+      {
+        "baseline": [
+          1067,
+          1072
+        ],
+        "final": [
+          1147,
+          1152
+        ]
+      },
+      {
+        "baseline": [
+          1073,
+          1073
+        ],
+        "final": [
+          1156,
+          1156
+        ]
+      },
+      {
+        "baseline": [
+          1074,
+          1074
+        ],
+        "final": [
+          1161,
+          1161
+        ]
+      },
+      {
+        "baseline": [
+          1076,
+          1081
+        ],
+        "final": [
+          1163,
+          1168
+        ]
+      },
+      {
+        "baseline": [
+          1084,
+          1084
+        ],
+        "final": [
+          1172,
+          1172
+        ]
+      },
+      {
+        "baseline": [
+          1085,
+          1092
+        ],
+        "final": [
+          1174,
+          1181
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/governance_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "e7cf8c0a6d2556d68000551546612d507e31072819d06e72a2bd4ae55cdbb195",
+    "sha256": "e26f71e1af764b26c294a6e3e91072c0db303e0119b2e546cc8462ac0ab5c23b",
+    "lines": 905,
+    "read_ranges": [
+      [
+        1,
+        905
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "举报原因/证据、对象快照、审核领取/处理/重开、封禁和公开记录",
+    "call_chain": [
+      "server.go report permissions",
+      "reportTargetSnapshot",
+      "moderationHideTarget",
+      "createBanTx",
+      "notification outbox"
+    ],
+    "issues": [
+      "BE-SUP-008"
+    ],
+    "validation": [
+      "STATIC semantic review",
+      "root: TestGovernanceListsRejectPostgreSQLStreamFailureIntegration 实际 red→green；最终3个 rows.Err 边界已复核"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        310
+      ],
+      [
+        311,
+        585
+      ],
+      [
+        586,
+        874
+      ]
+    ],
+    "baseline_lines": 874,
+    "final_read_ranges": [
+      [
+        239,
+        239
+      ],
+      [
+        243,
+        245
+      ],
+      [
+        392,
+        395
+      ],
+      [
+        425,
+        428
+      ],
+      [
+        458,
+        458
+      ],
+      [
+        461,
+        464
+      ],
+      [
+        466,
+        466
+      ],
+      [
+        469,
+        473
+      ],
+      [
+        476,
+        480
+      ],
+      [
+        483,
+        486
+      ],
+      [
+        833,
+        836
+      ]
+    ],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [
+      [
+        239,
+        239
+      ],
+      [
+        243,
+        245
+      ],
+      [
+        392,
+        395
+      ],
+      [
+        424,
+        427
+      ],
+      [
+        425,
+        428
+      ],
+      [
+        458,
+        458
+      ],
+      [
+        461,
+        464
+      ],
+      [
+        466,
+        466
+      ],
+      [
+        469,
+        473
+      ],
+      [
+        476,
+        480
+      ],
+      [
+        483,
+        486
+      ],
+      [
+        833,
+        836
+      ],
+      [
+        835,
+        905
+      ]
+    ],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          238
+        ],
+        "final": [
+          1,
+          238
+        ]
+      },
+      {
+        "baseline": [
+          240,
+          242
+        ],
+        "final": [
+          240,
+          242
+        ]
+      },
+      {
+        "baseline": [
+          243,
+          388
+        ],
+        "final": [
+          246,
+          391
+        ]
+      },
+      {
+        "baseline": [
+          389,
+          416
+        ],
+        "final": [
+          396,
+          423
+        ]
+      },
+      {
+        "baseline": [
+          417,
+          446
+        ],
+        "final": [
+          428,
+          457
+        ]
+      },
+      {
+        "baseline": [
+          448,
+          449
+        ],
+        "final": [
+          459,
+          460
+        ]
+      },
+      {
+        "baseline": [
+          450,
+          450
+        ],
+        "final": [
+          465,
+          465
+        ]
+      },
+      {
+        "baseline": [
+          452,
+          453
+        ],
+        "final": [
+          467,
+          468
+        ]
+      },
+      {
+        "baseline": [
+          455,
+          456
+        ],
+        "final": [
+          474,
+          475
+        ]
+      },
+      {
+        "baseline": [
+          458,
+          459
+        ],
+        "final": [
+          481,
+          482
+        ]
+      },
+      {
+        "baseline": [
+          460,
+          805
+        ],
+        "final": [
+          487,
+          832
+        ]
+      },
+      {
+        "baseline": [
+          806,
+          874
+        ],
+        "final": [
+          837,
+          905
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/sticker_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "29e142179ae244d471593d608eee7344aa3c68b7af61f5d27bcf2cd14007f73d",
+    "sha256": "82bdee548dce8b48d2695929f854246e17e664f63cb2d3745a43d4b4a174a67b",
+    "lines": 624,
+    "read_ranges": [
+      [
+        1,
+        624
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "多语言贴纸目录/管理员修改/图片归属/解码上限/删除引用",
+    "call_chain": [
+      "server.go sticker permissions",
+      "ossClient",
+      "gif.DecodeAll",
+      "OSS tombstone",
+      "content revisions"
+    ],
+    "issues": [
+      "BE-SUP-007"
+    ],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        280
+      ],
+      [
+        281,
+        530
+      ],
+      [
+        531,
+        626
+      ]
+    ],
+    "baseline_lines": 626,
+    "final_read_ranges": [
+      [
+        185,
+        188
+      ],
+      [
+        190,
+        193
+      ],
+      [
+        256,
+        259
+      ],
+      [
+        616,
+        617
+      ]
+    ],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [
+      [
+        185,
+        188
+      ],
+      [
+        190,
+        193
+      ],
+      [
+        255,
+        258
+      ],
+      [
+        256,
+        259
+      ],
+      [
+        616,
+        617
+      ]
+    ],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          10
+        ],
+        "final": [
+          1,
+          10
+        ]
+      },
+      {
+        "baseline": [
+          12,
+          185
+        ],
+        "final": [
+          11,
+          184
+        ]
+      },
+      {
+        "baseline": [
+          186,
+          186
+        ],
+        "final": [
+          189,
+          189
+        ]
+      },
+      {
+        "baseline": [
+          188,
+          248
+        ],
+        "final": [
+          194,
+          254
+        ]
+      },
+      {
+        "baseline": [
+          249,
+          605
+        ],
+        "final": [
+          259,
+          615
+        ]
+      },
+      {
+        "baseline": [
+          620,
+          626
+        ],
+        "final": [
+          618,
+          624
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/project_changelog_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "3c0689f44b3ed00bc4bbca7f8d44db942f11d1fd6f2d98a7b5ea0d0c5e513bd1",
+    "sha256": "3c0689f44b3ed00bc4bbca7f8d44db942f11d1fd6f2d98a7b5ea0d0c5e513bd1",
+    "lines": 599,
+    "read_ranges": [
+      [
+        1,
+        599
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "项目更新日志/分类/语言、修订审核与人工上游保护",
+    "call_chain": [
+      "server.go",
+      "resolveProjectChangelogTarget",
+      "createContentRevisionTx",
+      "external_release_bindings",
+      "project update outbox"
+    ],
+    "issues": [],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        305
+      ],
+      [
+        306,
+        599
+      ]
+    ],
+    "baseline_lines": 599,
+    "final_read_ranges": [],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          599
+        ],
+        "final": [
+          1,
+          599
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/log_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "d6d4ce70ec3141dd4f21e4c0f849232db79a61d18ea51e2524a26fbdc27780ed",
+    "sha256": "bef1d126534a02e1fe29e86314d6c67ac56938492f9b411a5bd57eb8ae59af26",
+    "lines": 564,
+    "read_ranges": [
+      [
+        1,
+        564
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "访问/运行/管理日志、日志查询组合、保留/清理和响应记录",
+    "call_chain": [
+      "server.go logAccess",
+      "runtimelog",
+      "app_logs",
+      "querySimpleRows",
+      "OAuth callback routes"
+    ],
+    "issues": [
+      "BE-SUP-006"
+    ],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        290
+      ],
+      [
+        291,
+        539
+      ]
+    ],
+    "baseline_lines": 539,
+    "final_read_ranges": [
+      [
+        6,
+        6
+      ],
+      [
+        54,
+        57
+      ],
+      [
+        79,
+        84
+      ],
+      [
+        147,
+        148
+      ],
+      [
+        151,
+        151
+      ],
+      [
+        153,
+        153
+      ],
+      [
+        155,
+        155
+      ],
+      [
+        157,
+        157
+      ],
+      [
+        159,
+        163
+      ],
+      [
+        195,
+        199
+      ],
+      [
+        203,
+        203
+      ],
+      [
+        235,
+        235
+      ],
+      [
+        261,
+        261
+      ],
+      [
+        289,
+        289
+      ],
+      [
+        353,
+        353
+      ],
+      [
+        357,
+        357
+      ],
+      [
+        360,
+        360
+      ],
+      [
+        368,
+        368
+      ],
+      [
+        385,
+        388
+      ],
+      [
+        510,
+        510
+      ],
+      [
+        513,
+        513
+      ],
+      [
+        515,
+        515
+      ],
+      [
+        518,
+        520
+      ],
+      [
+        522,
+        522
+      ],
+      [
+        537,
+        537
+      ]
+    ],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [
+      [
+        6,
+        6
+      ],
+      [
+        54,
+        57
+      ],
+      [
+        79,
+        84
+      ],
+      [
+        147,
+        148
+      ],
+      [
+        151,
+        151
+      ],
+      [
+        153,
+        153
+      ],
+      [
+        155,
+        155
+      ],
+      [
+        157,
+        157
+      ],
+      [
+        159,
+        163
+      ],
+      [
+        195,
+        199
+      ],
+      [
+        203,
+        203
+      ],
+      [
+        235,
+        235
+      ],
+      [
+        261,
+        261
+      ],
+      [
+        289,
+        289
+      ],
+      [
+        353,
+        353
+      ],
+      [
+        357,
+        357
+      ],
+      [
+        360,
+        360
+      ],
+      [
+        368,
+        368
+      ],
+      [
+        385,
+        388
+      ],
+      [
+        510,
+        510
+      ],
+      [
+        513,
+        513
+      ],
+      [
+        515,
+        515
+      ],
+      [
+        518,
+        520
+      ],
+      [
+        522,
+        522
+      ],
+      [
+        537,
+        537
+      ]
+    ],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          5
+        ],
+        "final": [
+          1,
+          5
+        ]
+      },
+      {
+        "baseline": [
+          6,
+          52
+        ],
+        "final": [
+          7,
+          53
+        ]
+      },
+      {
+        "baseline": [
+          53,
+          73
+        ],
+        "final": [
+          58,
+          78
+        ]
+      },
+      {
+        "baseline": [
+          77,
+          138
+        ],
+        "final": [
+          85,
+          146
+        ]
+      },
+      {
+        "baseline": [
+          139,
+          140
+        ],
+        "final": [
+          149,
+          150
+        ]
+      },
+      {
+        "baseline": [
+          142,
+          142
+        ],
+        "final": [
+          152,
+          152
+        ]
+      },
+      {
+        "baseline": [
+          144,
+          144
+        ],
+        "final": [
+          154,
+          154
+        ]
+      },
+      {
+        "baseline": [
+          146,
+          146
+        ],
+        "final": [
+          156,
+          156
+        ]
+      },
+      {
+        "baseline": [
+          148,
+          148
+        ],
+        "final": [
+          158,
+          158
+        ]
+      },
+      {
+        "baseline": [
+          149,
+          179
+        ],
+        "final": [
+          164,
+          194
+        ]
+      },
+      {
+        "baseline": [
+          181,
+          183
+        ],
+        "final": [
+          200,
+          202
+        ]
+      },
+      {
+        "baseline": [
+          185,
+          215
+        ],
+        "final": [
+          204,
+          234
+        ]
+      },
+      {
+        "baseline": [
+          217,
+          241
+        ],
+        "final": [
+          236,
+          260
+        ]
+      },
+      {
+        "baseline": [
+          243,
+          269
+        ],
+        "final": [
+          262,
+          288
+        ]
+      },
+      {
+        "baseline": [
+          271,
+          333
+        ],
+        "final": [
+          290,
+          352
+        ]
+      },
+      {
+        "baseline": [
+          335,
+          337
+        ],
+        "final": [
+          354,
+          356
+        ]
+      },
+      {
+        "baseline": [
+          339,
+          340
+        ],
+        "final": [
+          358,
+          359
+        ]
+      },
+      {
+        "baseline": [
+          342,
+          348
+        ],
+        "final": [
+          361,
+          367
+        ]
+      },
+      {
+        "baseline": [
+          350,
+          365
+        ],
+        "final": [
+          369,
+          384
+        ]
+      },
+      {
+        "baseline": [
+          367,
+          487
+        ],
+        "final": [
+          389,
+          509
+        ]
+      },
+      {
+        "baseline": [
+          489,
+          490
+        ],
+        "final": [
+          511,
+          512
+        ]
+      },
+      {
+        "baseline": [
+          492,
+          492
+        ],
+        "final": [
+          514,
+          514
+        ]
+      },
+      {
+        "baseline": [
+          493,
+          494
+        ],
+        "final": [
+          516,
+          517
+        ]
+      },
+      {
+        "baseline": [
+          497,
+          497
+        ],
+        "final": [
+          521,
+          521
+        ]
+      },
+      {
+        "baseline": [
+          498,
+          511
+        ],
+        "final": [
+          523,
+          536
+        ]
+      },
+      {
+        "baseline": [
+          513,
+          539
+        ],
+        "final": [
+          538,
+          564
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/progression_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "03e7fb51a852526f3b7fdef0d2c4d5aa0507a8fafb3f151cbf137523d68446c3",
+    "sha256": "36b6d704167a910a4e3fda78d427df86778a5b3a1d62d0691b224277de71ec63",
+    "lines": 515,
+    "read_ranges": [
+      [
+        1,
+        260
+      ],
+      [
+        261,
+        515
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "任务显示/配置/奖励验证/等级阈值和角色同步/活动过滤",
+    "call_chain": [
+      "server.go",
+      "progression.PeriodKey/LevelForExperience/SyncTrackRole",
+      "user_experience",
+      "task_definitions"
+    ],
+    "issues": [
+      "BE-SUP-005",
+      "BE-SUP-016"
+    ],
+    "validation": [
+      "STATIC semantic review",
+      "PASS TestSaveTaskMissingRewardsReturnsBadRequestCore (2 scenarios); rows.Err error boundary STATIC",
+      "PASS actual missing/null reward handler; rows.Err branch static review only",
+      "TestProgressionListsRejectPostgreSQLStreamFailureCoreIntegration 真实fresh marker-owned PostgreSQL2leaf oldFAIL→racePASS /tmp/backend-progression-stream-core-green.log",
+      "TestLevelConfigurationExperienceStreamFailureRollsBackCoreIntegration 真实marker-ownedPG -race PASS5.162s；代码未变"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "最终1–260/261–515两段全文实际读取无输出截断；两新Err及路由task.read/activity.read调用链复查；source已冻结。",
+    "baseline_read_ranges": [
+      [
+        1,
+        280
+      ],
+      [
+        281,
+        499
+      ],
+      [
+        222,
+        239
+      ],
+      [
+        464,
+        478
+      ]
+    ],
+    "baseline_lines": 499,
+    "final_read_ranges": [
+      [
+        225,
+        229
+      ],
+      [
+        467,
+        469
+      ]
+    ],
+    "verification_scope": "nil/null rewards400、tasks/activity流错误分类与level配置事务真实流故障回滚/恢复均按所列场景验证；不证明线上规模或所有故障。",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [
+      [
+        1,
+        260
+      ],
+      [
+        261,
+        515
+      ]
+    ],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          224
+        ],
+        "final": [
+          1,
+          224
+        ]
+      },
+      {
+        "baseline": [
+          225,
+          270
+        ],
+        "final": [
+          230,
+          275
+        ]
+      },
+      {
+        "baseline": [
+          271,
+          433
+        ],
+        "final": [
+          280,
+          442
+        ]
+      },
+      {
+        "baseline": [
+          434,
+          461
+        ],
+        "final": [
+          447,
+          474
+        ]
+      },
+      {
+        "baseline": [
+          462,
+          499
+        ],
+        "final": [
+          478,
+          515
+        ]
+      }
+    ],
+    "read_ranges_basis": "最终515行在本次两Err补丁后实际重新完整分两段阅读；保留已阅读基线段与逐行无修改映射，未据自动扫描标阅读。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/creator_import_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "636809541f75b8bca2ca5f61a7b667189999f9341dd166532175b72f2e21b13b",
+    "sha256": "636809541f75b8bca2ca5f61a7b667189999f9341dd166532175b72f2e21b13b",
+    "lines": 480,
+    "read_ranges": [
+      [
+        1,
+        480
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "Modrinth/CurseForge作者团队资料导入/资产镜像/身份引用限制",
+    "call_chain": [
+      "server.go",
+      "newProviderHTTPClient",
+      "getProviderJSON",
+      "ensureNamedCreatorSnapshotTx",
+      "mirrorExternalCreatorAvatar"
+    ],
+    "issues": [],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        255
+      ],
+      [
+        256,
+        480
+      ]
+    ],
+    "baseline_lines": 480,
+    "final_read_ranges": [],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          480
+        ],
+        "final": [
+          1,
+          480
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/project_editor_application_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "9c8d2caa8278e385af7a815940a7b5b281056defd218fdf7d6807d423daf893b",
+    "sha256": "6430d74fd2286bd0c9631bf42ce919501688e4b25de98c13d8599fdb2abd87b8",
+    "lines": 463,
+    "read_ranges": [
+      [
+        1,
+        463
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "项目编辑员申请/附件/审核/授权撤销/通知",
+    "call_chain": [
+      "server.go project.editor.apply/review",
+      "effective_project_access",
+      "safeReviewAttachmentPredicate",
+      "project_editor_assignments",
+      "permission audit/version"
+    ],
+    "issues": [
+      "BE-SUP-012"
+    ],
+    "validation": [
+      "STATIC semantic review",
+      "PASS owned PG TestProjectEditor*/TestEditor*CoreIntegration; private history, bounded pagination, grant/revoke, audit rollback, notification locale"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        230
+      ],
+      [
+        231,
+        432
+      ]
+    ],
+    "baseline_lines": 432,
+    "final_read_ranges": [
+      [
+        11,
+        11
+      ],
+      [
+        90,
+        93
+      ],
+      [
+        114,
+        114
+      ],
+      [
+        119,
+        123
+      ],
+      [
+        134,
+        136
+      ],
+      [
+        141,
+        141
+      ],
+      [
+        155,
+        155
+      ],
+      [
+        202,
+        202
+      ],
+      [
+        219,
+        221
+      ],
+      [
+        226,
+        226
+      ],
+      [
+        248,
+        248
+      ],
+      [
+        251,
+        251
+      ],
+      [
+        254,
+        254
+      ],
+      [
+        263,
+        267
+      ],
+      [
+        282,
+        285
+      ],
+      [
+        300,
+        300
+      ],
+      [
+        338,
+        341
+      ],
+      [
+        367,
+        374
+      ],
+      [
+        376,
+        377
+      ],
+      [
+        381,
+        387
+      ],
+      [
+        390,
+        390
+      ],
+      [
+        392,
+        392
+      ],
+      [
+        399,
+        399
+      ],
+      [
+        401,
+        402
+      ],
+      [
+        408,
+        408
+      ],
+      [
+        410,
+        410
+      ],
+      [
+        413,
+        413
+      ],
+      [
+        421,
+        421
+      ],
+      [
+        448,
+        453
+      ],
+      [
+        460,
+        460
+      ]
+    ],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [
+      [
+        11,
+        11
+      ],
+      [
+        90,
+        93
+      ],
+      [
+        114,
+        114
+      ],
+      [
+        119,
+        123
+      ],
+      [
+        134,
+        136
+      ],
+      [
+        141,
+        141
+      ],
+      [
+        155,
+        155
+      ],
+      [
+        202,
+        202
+      ],
+      [
+        219,
+        221
+      ],
+      [
+        226,
+        226
+      ],
+      [
+        248,
+        248
+      ],
+      [
+        251,
+        251
+      ],
+      [
+        254,
+        254
+      ],
+      [
+        263,
+        267
+      ],
+      [
+        282,
+        285
+      ],
+      [
+        300,
+        300
+      ],
+      [
+        338,
+        341
+      ],
+      [
+        367,
+        374
+      ],
+      [
+        376,
+        377
+      ],
+      [
+        381,
+        387
+      ],
+      [
+        390,
+        390
+      ],
+      [
+        392,
+        392
+      ],
+      [
+        399,
+        399
+      ],
+      [
+        401,
+        402
+      ],
+      [
+        402,
+        463
+      ],
+      [
+        408,
+        408
+      ],
+      [
+        410,
+        410
+      ],
+      [
+        413,
+        413
+      ],
+      [
+        421,
+        421
+      ],
+      [
+        448,
+        453
+      ],
+      [
+        460,
+        460
+      ]
+    ],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          10
+        ],
+        "final": [
+          1,
+          10
+        ]
+      },
+      {
+        "baseline": [
+          11,
+          88
+        ],
+        "final": [
+          12,
+          89
+        ]
+      },
+      {
+        "baseline": [
+          89,
+          108
+        ],
+        "final": [
+          94,
+          113
+        ]
+      },
+      {
+        "baseline": [
+          110,
+          113
+        ],
+        "final": [
+          115,
+          118
+        ]
+      },
+      {
+        "baseline": [
+          114,
+          122
+        ],
+        "final": [
+          124,
+          132
+        ]
+      },
+      {
+        "baseline": [
+          124,
+          124
+        ],
+        "final": [
+          133,
+          133
+        ]
+      },
+      {
+        "baseline": [
+          126,
+          129
+        ],
+        "final": [
+          137,
+          140
+        ]
+      },
+      {
+        "baseline": [
+          131,
+          143
+        ],
+        "final": [
+          142,
+          154
+        ]
+      },
+      {
+        "baseline": [
+          145,
+          190
+        ],
+        "final": [
+          156,
+          201
+        ]
+      },
+      {
+        "baseline": [
+          192,
+          207
+        ],
+        "final": [
+          203,
+          218
+        ]
+      },
+      {
+        "baseline": [
+          209,
+          212
+        ],
+        "final": [
+          222,
+          225
+        ]
+      },
+      {
+        "baseline": [
+          214,
+          234
+        ],
+        "final": [
+          227,
+          247
+        ]
+      },
+      {
+        "baseline": [
+          236,
+          237
+        ],
+        "final": [
+          249,
+          250
+        ]
+      },
+      {
+        "baseline": [
+          239,
+          240
+        ],
+        "final": [
+          252,
+          253
+        ]
+      },
+      {
+        "baseline": [
+          242,
+          249
+        ],
+        "final": [
+          255,
+          262
+        ]
+      },
+      {
+        "baseline": [
+          255,
+          268
+        ],
+        "final": [
+          268,
+          281
+        ]
+      },
+      {
+        "baseline": [
+          272,
+          285
+        ],
+        "final": [
+          286,
+          299
+        ]
+      },
+      {
+        "baseline": [
+          287,
+          323
+        ],
+        "final": [
+          301,
+          337
+        ]
+      },
+      {
+        "baseline": [
+          327,
+          351
+        ],
+        "final": [
+          342,
+          366
+        ]
+      },
+      {
+        "baseline": [
+          354,
+          354
+        ],
+        "final": [
+          375,
+          375
+        ]
+      },
+      {
+        "baseline": [
+          356,
+          358
+        ],
+        "final": [
+          378,
+          380
+        ]
+      },
+      {
+        "baseline": [
+          359,
+          360
+        ],
+        "final": [
+          388,
+          389
+        ]
+      },
+      {
+        "baseline": [
+          362,
+          362
+        ],
+        "final": [
+          391,
+          391
+        ]
+      },
+      {
+        "baseline": [
+          364,
+          369
+        ],
+        "final": [
+          393,
+          398
+        ]
+      },
+      {
+        "baseline": [
+          372,
+          372
+        ],
+        "final": [
+          400,
+          400
+        ]
+      },
+      {
+        "baseline": [
+          375,
+          375
+        ],
+        "final": [
+          403,
+          403
+        ]
+      },
+      {
+        "baseline": [
+          378,
+          381
+        ],
+        "final": [
+          404,
+          407
+        ]
+      },
+      {
+        "baseline": [
+          383,
+          383
+        ],
+        "final": [
+          409,
+          409
+        ]
+      },
+      {
+        "baseline": [
+          384,
+          385
+        ],
+        "final": [
+          411,
+          412
+        ]
+      },
+      {
+        "baseline": [
+          387,
+          393
+        ],
+        "final": [
+          414,
+          420
+        ]
+      },
+      {
+        "baseline": [
+          395,
+          420
+        ],
+        "final": [
+          422,
+          447
+        ]
+      },
+      {
+        "baseline": [
+          423,
+          428
+        ],
+        "final": [
+          454,
+          459
+        ]
+      },
+      {
+        "baseline": [
+          430,
+          432
+        ],
+        "final": [
+          461,
+          463
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/profile_showcase_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "8a98036ecc6c7a1d8ed5651cb6d8b4a9a5907ae2b685d7ef61848f374f11be38",
+    "sha256": "8a98036ecc6c7a1d8ed5651cb6d8b4a9a5907ae2b685d7ef61848f374f11be38",
+    "lines": 399,
+    "read_ranges": [
+      [
+        1,
+        399
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "公开作者/开发和编辑项目/上传/贡献日历/年度与最近活动",
+    "call_chain": [
+      "server.go optionalAuth",
+      "effective_project_access",
+      "OSS URL resolution",
+      "user_daily_contributions/change_requests"
+    ],
+    "issues": [],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        399
+      ]
+    ],
+    "baseline_lines": 399,
+    "final_read_ranges": [],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          399
+        ],
+        "final": [
+          1,
+          399
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/favorite_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "c64c8bf13a2f39d7df5ccf10cf29e255eb75aa6eda0ab015caa14369d94246f6",
+    "sha256": "cfaade85133eb4cc4bbd8f3662178bc7fc47b530373bdd8fb30618a3752ec1b4",
+    "lines": 419,
+    "read_ranges": [
+      [
+        1,
+        419
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "私有与公开收藏夹/成员替换/资源元数据/对象归属",
+    "call_chain": [
+      "server.go favorite permissions",
+      "public_routes",
+      "favorite_collections/items",
+      "OSS URL resolution"
+    ],
+    "issues": [
+      "BE-SUP-004"
+    ],
+    "validation": [
+      "STATIC semantic review",
+      "FAIL synthetic PostgreSQL pending mod visibility (red; API-A owns fix)",
+      "PASS TestPrivateFavoriteCannotRevealOtherPendingModCoreIntegration -race; old red pending metadata; approved item remains readable"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        365
+      ]
+    ],
+    "baseline_lines": 365,
+    "final_read_ranges": [
+      [
+        5,
+        5
+      ],
+      [
+        10,
+        10
+      ],
+      [
+        172,
+        172
+      ],
+      [
+        177,
+        177
+      ],
+      [
+        179,
+        183
+      ],
+      [
+        198,
+        200
+      ],
+      [
+        202,
+        206
+      ],
+      [
+        222,
+        222
+      ],
+      [
+        227,
+        227
+      ],
+      [
+        229,
+        233
+      ],
+      [
+        247,
+        272
+      ],
+      [
+        280,
+        280
+      ],
+      [
+        335,
+        342
+      ],
+      [
+        400,
+        400
+      ],
+      [
+        403,
+        403
+      ],
+      [
+        407,
+        417
+      ]
+    ],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [
+      [
+        5,
+        5
+      ],
+      [
+        10,
+        10
+      ],
+      [
+        172,
+        172
+      ],
+      [
+        177,
+        177
+      ],
+      [
+        179,
+        183
+      ],
+      [
+        198,
+        200
+      ],
+      [
+        202,
+        206
+      ],
+      [
+        222,
+        222
+      ],
+      [
+        227,
+        227
+      ],
+      [
+        229,
+        233
+      ],
+      [
+        247,
+        272
+      ],
+      [
+        280,
+        280
+      ],
+      [
+        335,
+        342
+      ],
+      [
+        400,
+        400
+      ],
+      [
+        403,
+        403
+      ],
+      [
+        407,
+        417
+      ]
+    ],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          4
+        ],
+        "final": [
+          1,
+          4
+        ]
+      },
+      {
+        "baseline": [
+          5,
+          8
+        ],
+        "final": [
+          6,
+          9
+        ]
+      },
+      {
+        "baseline": [
+          9,
+          169
+        ],
+        "final": [
+          11,
+          171
+        ]
+      },
+      {
+        "baseline": [
+          171,
+          174
+        ],
+        "final": [
+          173,
+          176
+        ]
+      },
+      {
+        "baseline": [
+          176,
+          176
+        ],
+        "final": [
+          178,
+          178
+        ]
+      },
+      {
+        "baseline": [
+          178,
+          191
+        ],
+        "final": [
+          184,
+          197
+        ]
+      },
+      {
+        "baseline": [
+          194,
+          194
+        ],
+        "final": [
+          201,
+          201
+        ]
+      },
+      {
+        "baseline": [
+          195,
+          209
+        ],
+        "final": [
+          207,
+          221
+        ]
+      },
+      {
+        "baseline": [
+          211,
+          214
+        ],
+        "final": [
+          223,
+          226
+        ]
+      },
+      {
+        "baseline": [
+          216,
+          216
+        ],
+        "final": [
+          228,
+          228
+        ]
+      },
+      {
+        "baseline": [
+          218,
+          230
+        ],
+        "final": [
+          234,
+          246
+        ]
+      },
+      {
+        "baseline": [
+          231,
+          237
+        ],
+        "final": [
+          273,
+          279
+        ]
+      },
+      {
+        "baseline": [
+          239,
+          292
+        ],
+        "final": [
+          281,
+          334
+        ]
+      },
+      {
+        "baseline": [
+          298,
+          354
+        ],
+        "final": [
+          343,
+          399
+        ]
+      },
+      {
+        "baseline": [
+          356,
+          357
+        ],
+        "final": [
+          401,
+          402
+        ]
+      },
+      {
+        "baseline": [
+          359,
+          361
+        ],
+        "final": [
+          404,
+          406
+        ]
+      },
+      {
+        "baseline": [
+          364,
+          365
+        ],
+        "final": [
+          418,
+          419
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/profile_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "e4ce722612a7de34f0636b9dcbba4d7e0426de1ba506fb4ecb511b7fe8470a0d",
+    "sha256": "e4ce722612a7de34f0636b9dcbba4d7e0426de1ba506fb4ecb511b7fe8470a0d",
+    "lines": 313,
+    "read_ranges": [
+      [
+        1,
+        313
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "个人主页可见性/关注拉黑能力/关注事务通知/个人通知设置",
+    "call_chain": [
+      "server.go optionalAuth/requireAuth",
+      "usersBlockEachOther",
+      "claimsAllow/userHasPermission",
+      "queue.EnqueueTx"
+    ],
+    "issues": [],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        313
+      ]
+    ],
+    "baseline_lines": 313,
+    "final_read_ranges": [],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          313
+        ],
+        "final": [
+          1,
+          313
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/role_track_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "3c658ec1b49ef515086fb59f507e3dc093a4d062cb1b74b6080b8ef4623adbf1",
+    "sha256": "376c541c05c5e2f3fc8d1ace5ddb621e41b944c83596f1e0eb0c72522d639831",
+    "lines": 327,
+    "read_ranges": [
+      [
+        1,
+        327
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "权限线路配置/角色升降/角色集合移位/事务审计",
+    "call_chain": [
+      "server.go permission.write",
+      "roleTrackRoles",
+      "user_role_bindings",
+      "permission audit/version"
+    ],
+    "issues": [
+      "BE-SUP-002"
+    ],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        294
+      ]
+    ],
+    "baseline_lines": 294,
+    "final_read_ranges": [
+      [
+        5,
+        6
+      ],
+      [
+        145,
+        159
+      ],
+      [
+        162,
+        164
+      ],
+      [
+        166,
+        166
+      ],
+      [
+        171,
+        176
+      ],
+      [
+        184,
+        187
+      ],
+      [
+        189,
+        189
+      ],
+      [
+        191,
+        191
+      ],
+      [
+        193,
+        196
+      ],
+      [
+        228,
+        231
+      ],
+      [
+        236,
+        238
+      ],
+      [
+        291,
+        295
+      ],
+      [
+        297,
+        300
+      ],
+      [
+        302,
+        302
+      ],
+      [
+        308,
+        308
+      ]
+    ],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [
+      [
+        5,
+        6
+      ],
+      [
+        145,
+        159
+      ],
+      [
+        162,
+        164
+      ],
+      [
+        166,
+        166
+      ],
+      [
+        171,
+        176
+      ],
+      [
+        184,
+        187
+      ],
+      [
+        189,
+        189
+      ],
+      [
+        191,
+        191
+      ],
+      [
+        193,
+        196
+      ],
+      [
+        228,
+        231
+      ],
+      [
+        236,
+        238
+      ],
+      [
+        291,
+        295
+      ],
+      [
+        297,
+        300
+      ],
+      [
+        302,
+        302
+      ],
+      [
+        308,
+        308
+      ]
+    ],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          4
+        ],
+        "final": [
+          1,
+          4
+        ]
+      },
+      {
+        "baseline": [
+          5,
+          142
+        ],
+        "final": [
+          7,
+          144
+        ]
+      },
+      {
+        "baseline": [
+          145,
+          146
+        ],
+        "final": [
+          160,
+          161
+        ]
+      },
+      {
+        "baseline": [
+          147,
+          147
+        ],
+        "final": [
+          165,
+          165
+        ]
+      },
+      {
+        "baseline": [
+          148,
+          151
+        ],
+        "final": [
+          167,
+          170
+        ]
+      },
+      {
+        "baseline": [
+          159,
+          165
+        ],
+        "final": [
+          177,
+          183
+        ]
+      },
+      {
+        "baseline": [
+          168,
+          168
+        ],
+        "final": [
+          188,
+          188
+        ]
+      },
+      {
+        "baseline": [
+          169,
+          169
+        ],
+        "final": [
+          190,
+          190
+        ]
+      },
+      {
+        "baseline": [
+          170,
+          170
+        ],
+        "final": [
+          192,
+          192
+        ]
+      },
+      {
+        "baseline": [
+          171,
+          175
+        ],
+        "final": [
+          197,
+          201
+        ]
+      },
+      {
+        "baseline": [
+          183,
+          208
+        ],
+        "final": [
+          202,
+          227
+        ]
+      },
+      {
+        "baseline": [
+          210,
+          213
+        ],
+        "final": [
+          232,
+          235
+        ]
+      },
+      {
+        "baseline": [
+          215,
+          266
+        ],
+        "final": [
+          239,
+          290
+        ]
+      },
+      {
+        "baseline": [
+          267,
+          267
+        ],
+        "final": [
+          296,
+          296
+        ]
+      },
+      {
+        "baseline": [
+          268,
+          268
+        ],
+        "final": [
+          301,
+          301
+        ]
+      },
+      {
+        "baseline": [
+          270,
+          274
+        ],
+        "final": [
+          303,
+          307
+        ]
+      },
+      {
+        "baseline": [
+          276,
+          294
+        ],
+        "final": [
+          309,
+          327
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/site_affairs_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "48fca4e90ce6b2769e61ce0412e8efde12abbb4d324dac459d4f3a4edf04b5f0",
+    "sha256": "307573dd25a7f6435f98bc291cf37f08031716a6f34942997b425d827dd63940",
+    "lines": 310,
+    "read_ranges": [
+      [
+        1,
+        310
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "站务页面/更新日志发布、草稿、本地化回退与管理",
+    "call_chain": [
+      "server.go site_affairs permissions",
+      "normalizedSiteAffairsLocale",
+      "site_pages/translations",
+      "site_changelogs/translations"
+    ],
+    "issues": [
+      "BE-SUP-003"
+    ],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        293
+      ]
+    ],
+    "baseline_lines": 293,
+    "final_read_ranges": [
+      [
+        47,
+        51
+      ],
+      [
+        66,
+        66
+      ],
+      [
+        92,
+        92
+      ],
+      [
+        97,
+        101
+      ],
+      [
+        138,
+        141
+      ],
+      [
+        185,
+        185
+      ],
+      [
+        188,
+        188
+      ],
+      [
+        240,
+        243
+      ],
+      [
+        273,
+        273
+      ],
+      [
+        276,
+        276
+      ]
+    ],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [
+      [
+        47,
+        51
+      ],
+      [
+        66,
+        66
+      ],
+      [
+        92,
+        92
+      ],
+      [
+        96,
+        100
+      ],
+      [
+        97,
+        101
+      ],
+      [
+        137,
+        140
+      ],
+      [
+        138,
+        141
+      ],
+      [
+        185,
+        185
+      ],
+      [
+        188,
+        188
+      ],
+      [
+        240,
+        243
+      ],
+      [
+        269,
+        310
+      ],
+      [
+        273,
+        273
+      ],
+      [
+        276,
+        276
+      ]
+    ],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          46
+        ],
+        "final": [
+          1,
+          46
+        ]
+      },
+      {
+        "baseline": [
+          48,
+          61
+        ],
+        "final": [
+          52,
+          65
+        ]
+      },
+      {
+        "baseline": [
+          63,
+          87
+        ],
+        "final": [
+          67,
+          91
+        ]
+      },
+      {
+        "baseline": [
+          89,
+          91
+        ],
+        "final": [
+          93,
+          95
+        ]
+      },
+      {
+        "baseline": [
+          92,
+          127
+        ],
+        "final": [
+          101,
+          136
+        ]
+      },
+      {
+        "baseline": [
+          128,
+          171
+        ],
+        "final": [
+          141,
+          184
+        ]
+      },
+      {
+        "baseline": [
+          173,
+          174
+        ],
+        "final": [
+          186,
+          187
+        ]
+      },
+      {
+        "baseline": [
+          176,
+          226
+        ],
+        "final": [
+          189,
+          239
+        ]
+      },
+      {
+        "baseline": [
+          227,
+          255
+        ],
+        "final": [
+          244,
+          272
+        ]
+      },
+      {
+        "baseline": [
+          257,
+          258
+        ],
+        "final": [
+          274,
+          275
+        ]
+      },
+      {
+        "baseline": [
+          260,
+          293
+        ],
+        "final": [
+          277,
+          310
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/admin_dashboard_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "cc48fe9470eda181352af0e3e0aec683e2112a998a1ada6144a8782052ad731e",
+    "sha256": "cc48fe9470eda181352af0e3e0aec683e2112a998a1ada6144a8782052ad731e",
+    "lines": 278,
+    "read_ranges": [
+      [
+        1,
+        278
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "管理概览/OSS扫描/30日指标/项目趋势/有界分页",
+    "call_chain": [
+      "server.go admin permission",
+      "top_level_project_catalog",
+      "content metrics/popularity",
+      "site_view_daily"
+    ],
+    "issues": [],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        278
+      ]
+    ],
+    "baseline_lines": 278,
+    "final_read_ranges": [],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          278
+        ],
+        "final": [
+          1,
+          278
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/permission_comparison_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "c8b5ce7da3a8ee8f4c2bde6b66d6ca1f6abfdf8621503cb569d7b1944228c24b",
+    "sha256": "c8b5ce7da3a8ee8f4c2bde6b66d6ca1f6abfdf8621503cb569d7b1944228c24b",
+    "lines": 222,
+    "read_ranges": [
+      [
+        1,
+        222
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "当前账号/角色有效权限对比、模板元信息匹配",
+    "call_chain": [
+      "server.go requirePermission",
+      "resolveUserRootPermissions",
+      "loadPermissionRoles",
+      "permissionRulesFromCandidates"
+    ],
+    "issues": [],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        222
+      ]
+    ],
+    "baseline_lines": 222,
+    "final_read_ranges": [],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          222
+        ],
+        "final": [
+          1,
+          222
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/user_card_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "3cc9b370dfe9ba966b047e4735d209941aff42cab9274714381c4e213352b3a7",
+    "sha256": "3cc9b370dfe9ba966b047e4735d209941aff42cab9274714381c4e213352b3a7",
+    "lines": 213,
+    "read_ranges": [
+      [
+        1,
+        213
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "公开用户六槽卡片/在线隐私/等级和白名单统计缓存",
+    "call_chain": [
+      "server.go optionalAuth",
+      "querycache user card/presence",
+      "publicCardStatisticKeys",
+      "progression.LevelForExperience"
+    ],
+    "issues": [],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        213
+      ]
+    ],
+    "baseline_lines": 213,
+    "final_read_ranges": [],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          213
+        ],
+        "final": [
+          1,
+          213
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/server_review_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "1387418afa405c675a9c69991a9fcf2b0c53a5585f2f757245834668032f4a65",
+    "sha256": "7cab0c5494698fc469bdfefe2b0b400e668da5293c459538fd6b1d5fa0cc61f1",
+    "lines": 213,
+    "read_ranges": [
+      [
+        1,
+        213
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "服务器管理审核列表/状态原子更新/证明文件访问",
+    "call_chain": [
+      "server.go server.review",
+      "safeReviewAttachmentPredicate",
+      "minecraftServerLinks/Mods",
+      "templated notification"
+    ],
+    "issues": [
+      "BE-SUP-015"
+    ],
+    "validation": [
+      "STATIC semantic review",
+      "PASS actual PG MaxConns=1 two servers with proof/link/mod associations; old FAIL context deadline"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        207
+      ]
+    ],
+    "baseline_lines": 207,
+    "final_read_ranges": [
+      [
+        84,
+        95
+      ]
+    ],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [
+      [
+        84,
+        95
+      ],
+      [
+        150,
+        213
+      ]
+    ],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          83
+        ],
+        "final": [
+          1,
+          83
+        ]
+      },
+      {
+        "baseline": [
+          84,
+          95
+        ],
+        "final": [
+          96,
+          107
+        ]
+      },
+      {
+        "baseline": [
+          102,
+          207
+        ],
+        "final": [
+          108,
+          213
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/admin_user_details.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "e0b4365180262fe79f8e1f629925184b5c0f65ee33c2be4b085e66dcaa1c0b5c",
+    "sha256": "e0b4365180262fe79f8e1f629925184b5c0f65ee33c2be4b085e66dcaa1c0b5c",
+    "lines": 129,
+    "read_ranges": [
+      [
+        1,
+        129
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "权限控制下用户详情、登录/OAuth/根权限敏感边界",
+    "call_chain": [
+      "server.go user.read",
+      "resolvePublicIdentity",
+      "resolveUserRootPermissions",
+      "users/user_login_logs/oauth_accounts"
+    ],
+    "issues": [],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        129
+      ]
+    ],
+    "baseline_lines": 129,
+    "final_read_ranges": [],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          129
+        ],
+        "final": [
+          1,
+          129
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/favorite_modpack_export_query.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "8963d3a98fa7834f07d55e9478c5c8673df99bccb48b96814f1f546e19ffce6f",
+    "sha256": "351a52e991e299c814c0efa4fac41a9aa23035a6c7162941a088d40e094981d4",
+    "lines": 149,
+    "read_ranges": [
+      [
+        1,
+        149
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "个人导出任务/结构化报告/仅任务所有者短期下载",
+    "call_chain": [
+      "server.go favorite.modpack_export.view_own",
+      "favorite_modpack_export_tasks/items",
+      "ossObjectAccess",
+      "safeMRPackDownloadName"
+    ],
+    "issues": [
+      "BE-SUP-001"
+    ],
+    "validation": [
+      "STATIC semantic review"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整基线语义审查 + 逐行无改动片段版本映射 + 最终全部差异实际复核；六扩行文件另补读最终尾段；对应最终内容指纹。",
+    "baseline_read_ranges": [
+      [
+        1,
+        127
+      ]
+    ],
+    "baseline_lines": 127,
+    "final_read_ranges": [
+      [
+        5,
+        5
+      ],
+      [
+        9,
+        10
+      ],
+      [
+        58,
+        61
+      ],
+      [
+        76,
+        76
+      ],
+      [
+        80,
+        83
+      ],
+      [
+        105,
+        108
+      ],
+      [
+        111,
+        114
+      ],
+      [
+        126,
+        129
+      ]
+    ],
+    "verification_scope": "所列验证场景；其他行为为静态审查，所有者更广回归引用其独立证据",
+    "baseline_read_ranges_version": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "final_direct_read_ranges": [
+      [
+        5,
+        5
+      ],
+      [
+        9,
+        10
+      ],
+      [
+        58,
+        61
+      ],
+      [
+        76,
+        76
+      ],
+      [
+        76,
+        79
+      ],
+      [
+        80,
+        83
+      ],
+      [
+        81,
+        81
+      ],
+      [
+        105,
+        108
+      ],
+      [
+        110,
+        113
+      ],
+      [
+        111,
+        114
+      ],
+      [
+        126,
+        129
+      ]
+    ],
+    "unchanged_line_mapping": [
+      {
+        "baseline": [
+          1,
+          4
+        ],
+        "final": [
+          1,
+          4
+        ]
+      },
+      {
+        "baseline": [
+          5,
+          7
+        ],
+        "final": [
+          6,
+          8
+        ]
+      },
+      {
+        "baseline": [
+          8,
+          54
+        ],
+        "final": [
+          11,
+          57
+        ]
+      },
+      {
+        "baseline": [
+          55,
+          68
+        ],
+        "final": [
+          62,
+          75
+        ]
+      },
+      {
+        "baseline": [
+          69,
+          69
+        ],
+        "final": [
+          80,
+          80
+        ]
+      },
+      {
+        "baseline": [
+          71,
+          93
+        ],
+        "final": [
+          82,
+          104
+        ]
+      },
+      {
+        "baseline": [
+          95,
+          95
+        ],
+        "final": [
+          109,
+          109
+        ]
+      },
+      {
+        "baseline": [
+          96,
+          107
+        ],
+        "final": [
+          114,
+          125
+        ]
+      },
+      {
+        "baseline": [
+          108,
+          127
+        ],
+        "final": [
+          130,
+          149
+        ]
+      }
+    ],
+    "read_ranges_basis": "基线 baseline_read_ranges 全文人工语义审查；逐行相等片段按 unchanged_line_mapping 映射最终行号；所有变更块已实际输出并人工复核，final_direct_read_ranges 另记录改变块与最终尾段。读取/语义审查不等于行为验证。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/applications_core_integration_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "7d6a6ceda56da9f96fb519252839f61c2fc6405807541a13ce9c3304a057d92e",
+    "lines": 397,
+    "read_ranges": [
+      [
+        1,
+        397
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "认领/编辑员证明、分页、事务审计和通知的真实PG回归",
+    "call_chain": [
+      "实际handler/worker -> PostgreSQL/受控本地HTTP -> 持久化或终止状态"
+    ],
+    "issues": [
+      "BE-SUP-011",
+      "BE-SUP-012",
+      "BE-SUP-013",
+      "BE-SUP-014"
+    ],
+    "validation": [
+      "PASS 8 groups/13 leaf scenarios -race 55.291s; owned full-schema PG/SeedRBAC/MaxConns1"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "新增/改动后实际全文阅读并核对调用链",
+    "verification_scope": "仅列举的场景；供应商质量、生产运行与全部角色旅程未验证"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/favorite_visibility_core_integration_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "8402790f4c379917a9b1a888f63da0fd521081b9b2e665736ea7fb0336fee5a1",
+    "lines": 100,
+    "read_ranges": [
+      [
+        1,
+        100
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "私有收藏夹不得泄漏他人待审资源的真实PG回归",
+    "call_chain": [
+      "实际handler/worker -> PostgreSQL/受控本地HTTP -> 持久化或终止状态"
+    ],
+    "issues": [
+      "BE-SUP-004"
+    ],
+    "validation": [
+      "PASS actual PG -race final"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "新增/改动后实际全文阅读并核对调用链；最终真实路由字面量/拒绝待审写入强化断言复查+实际-race重跑",
+    "verification_scope": "仅列举的场景；供应商质量、生产运行与全部角色旅程未验证"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/progression_validation_core_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "0d0f83d1d5316706490cbb0a39925c695cadf155f91cd3a9ebdf1a91a4b4374d",
+    "lines": 27,
+    "read_ranges": [
+      [
+        1,
+        27
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "真实handler rewards缺省/null400回归",
+    "call_chain": [
+      "实际handler/worker -> PostgreSQL/受控本地HTTP -> 持久化或终止状态"
+    ],
+    "issues": [
+      "BE-SUP-005"
+    ],
+    "validation": [
+      "PASS 2 subcases"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "新增/改动后实际全文阅读并核对调用链",
+    "verification_scope": "仅列举的场景；供应商质量、生产运行与全部角色旅程未验证"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/project_automation_lease.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "ea10f7050b1458189dac3ae376b38f23f643785093e7b9b7bac9cc0a9db158c9",
+    "lines": 130,
+    "read_ranges": [
+      [
+        1,
+        130
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "随机owner租约心跳、事务内fencing、过期有限恢复",
+    "call_chain": [
+      "实际handler/worker -> PostgreSQL/受控本地HTTP -> 持久化或终止状态"
+    ],
+    "issues": [
+      "BE-APIA-025"
+    ],
+    "validation": [
+      "PASS real PG -race helper concurrency/recovery"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "新增/改动后实际全文阅读并核对调用链",
+    "verification_scope": "仅列举的场景；供应商质量、生产运行与全部角色旅程未验证"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/project_automation_lease_core_integration_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "0abe9c177e9c94aaabc4f5d43370e5982f93155fd2d7b488ae0980c7d927ce3c",
+    "lines": 156,
+    "read_ranges": [
+      [
+        1,
+        156
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "租约旧owner/过期/锁等待/heartbeat取消真实PG回归",
+    "call_chain": [
+      "实际handler/worker -> PostgreSQL/受控本地HTTP -> 持久化或终止状态"
+    ],
+    "issues": [
+      "BE-APIA-025"
+    ],
+    "validation": [
+      "PASS 2 tests -race 3.174s"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "新增/改动后实际全文阅读并核对调用链",
+    "verification_scope": "仅列举的场景；供应商质量、生产运行与全部角色旅程未验证"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/ai_failure_scenarios_integration_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "e54b7e4af4f3525479759ec59172e312fb7b6e1659c7142d51f6cbd64a6e8e4f",
+    "lines": 235,
+    "read_ranges": [
+      [
+        1,
+        235
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "真实AI worker/费用预留/整体发布失败的本地HTTP+PG回归",
+    "call_chain": [
+      "实际handler/worker -> PostgreSQL/受控本地HTTP -> 持久化或终止状态"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS 3 groups/9 leaf scenarios -race 14.342s; paid providers not called"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "新增/改动后实际全文阅读并核对调用链",
+    "verification_scope": "仅列举的场景；供应商质量、生产运行与全部角色旅程未验证"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/server_review_pool_core_integration_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "6ab893d5ac5f21f5e23e76b21372fc0670b7458d07d414dd8e72a6c6ab7a8207",
+    "lines": 73,
+    "read_ranges": [
+      [
+        1,
+        73
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "小连接池真实服务器审核关联资料闭环",
+    "call_chain": [
+      "实际handler/worker -> PostgreSQL/受控本地HTTP -> 持久化或终止状态"
+    ],
+    "issues": [
+      "BE-SUP-015"
+    ],
+    "validation": [
+      "PASS MaxConns1 -race; old500/deadline red"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "新增/改动后实际全文阅读并核对调用链；最终真实路由字面量/拒绝待审写入强化断言复查+实际-race重跑",
+    "verification_scope": "仅列举的场景；供应商质量、生产运行与全部角色旅程未验证"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "docs/project-applications.md",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "6c83a7e97ad13f33b936e98cd43fed5f79d113727e5505939fc3666e9fec7bc2",
+    "lines": 23,
+    "read_ranges": [
+      [
+        1,
+        23
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "正式证明/权限/分页/通知/部署兼容契约",
+    "call_chain": [
+      "实际handler/worker -> PostgreSQL/受控本地HTTP -> 持久化或终止状态"
+    ],
+    "issues": [
+      "BE-SUP-011",
+      "BE-SUP-012",
+      "BE-SUP-013",
+      "BE-SUP-014"
+    ],
+    "validation": [
+      "Reviewed against actual SQL/API/tests"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "新增/改动后实际全文阅读并核对调用链",
+    "verification_scope": "仅列举的场景；供应商质量、生产运行与全部角色旅程未验证"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "docs/progression-task-validation.md",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "0735b7fcd0aa92a2a4f48dc664fe2e5051db2b62d7e6e1595b37a0310a99a47f",
+    "lines": 13,
+    "read_ranges": [
+      [
+        1,
+        13
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "正式任务参数/事务/旧线路角色来源边界",
+    "call_chain": [
+      "实际handler/worker -> PostgreSQL/受控本地HTTP -> 持久化或终止状态"
+    ],
+    "issues": [
+      "BE-SUP-005",
+      "BE-SUP-016"
+    ],
+    "validation": [
+      "Reviewed against source and missing/null tests"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "最终13行正式说明全文实际读；新真实经验流故障、配置/权限完整回滚与恢复成功证据，仍区分生产容量/旧role来源决策。",
+    "verification_scope": "仅列举的场景；供应商质量、生产运行与全部角色旅程未验证"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "docs/AI_TRANSLATION_RELIABILITY.md",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "351fd1f3a823673fc76e2cb920e2948ac469874207361db436b8516d1e2a8302",
+    "lines": 62,
+    "read_ranges": [
+      [
+        1,
+        58
+      ],
+      [
+        59,
+        62
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "正式AI状态/版本/预算/恢复与验证边界",
+    "call_chain": [
+      "实际handler/worker -> PostgreSQL/受控本地HTTP -> 持久化或终止状态"
+    ],
+    "issues": [],
+    "validation": [
+      "Full document read; final actual extra test paragraph reviewed"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "最终1–58完整实际读取；DB追加59–62 seed显式retry及checked config边界已逐行实际补读，指纹匹配DB当前351fd1…。",
+    "verification_scope": "仅列举的场景；供应商质量、生产运行与全部角色旅程未验证"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "docs/audit/backend-api-a-core-supplement.md",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "1f0afcfa03525ce149b64f2265f4395133f1c933fb485c62f2c9ab0f10cb6671",
+    "lines": 76,
+    "read_ranges": [
+      [
+        1,
+        47
+      ],
+      [
+        47,
+        73
+      ],
+      [
+        12,
+        18
+      ],
+      [
+        45,
+        76
+      ],
+      [
+        10,
+        29
+      ],
+      [
+        45,
+        76
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "补审问题/角色/数据库与实际验证范围",
+    "call_chain": [
+      "实际handler/worker -> PostgreSQL/受控本地HTTP -> 持久化或终止状态"
+    ],
+    "issues": [],
+    "validation": [
+      "Actual report evidence reconciliation"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "原全文阅读；最终SUP005真实回滚证据/已验证状态、35条文件计数与16标签状态在10–29/45–76实际完整复查。",
+    "verification_scope": "仅列举的场景；供应商质量、生产运行与全部角色旅程未验证"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "docs/server-review.md",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "04075a2f6aaf6f373f214f6178d53bba57cfe5cb5efe42bb9f972d95a4d06b61",
+    "lines": 7,
+    "read_ranges": [
+      [
+        1,
+        7
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": false,
+    "responsibility": "正式服务器审核路由、权限、小池读取与验证边界",
+    "call_chain": [
+      "server.go server.review -> adminMinecraftServerReviews -> safe review attachment/links/mods"
+    ],
+    "issues": [
+      "BE-SUP-015"
+    ],
+    "validation": [
+      "Reviewed real router/source/owned PG evidence"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "新增正式说明实际全文阅读"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/progression_stream_core_integration_test.go",
+    "baseline_commit": null,
+    "sha256": "9a68e0248bd8051089979649ee3d9cdca444216a211a0223e1936264e2f86cf2",
+    "lines": 64,
+    "read_ranges": [
+      [
+        1,
+        64
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "owned真实PostgreSQL正常列表与volatile view流执行故障，adminTasks/adminActivityEvents错误分类和敏感错误不返回",
+    "call_chain": [
+      "isolatedAITestDatabase（ownership marker+迁移两次+整库cleanup）",
+      "adminTasks",
+      "adminActivityEvents",
+      "task_definitions/user_activity_events真实表及保留后的view"
+    ],
+    "issues": [
+      "BE-SUP-016"
+    ],
+    "validation": [
+      "COMPILE PASS /tmp/backend-progression-stream-core-compile.log（无用例执行）",
+      "真实PG2叶oldFAIL3.137s→相同-racePASS11.315s，/tmp/backend-progression-stream-core-red.log及green.log"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "完整实际读取gofmt后全文；每个子例独立marker-owned DB，保留真实表/约束/trigger，不删除审计或真实用户数据。",
+    "verification_scope": "真实PG正常读取200有数据、两个VOLATILE流执行故障500、无成功items/SQL内部细节，所有权marker整库cleanup；不是生产故障/完整权限E2E。"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/progression_level_transaction_core_integration_test.go",
+    "baseline_commit": null,
+    "sha256": "b3be524cd750e1bb19272b571571ace2e993228471c6e577638a8a383fa156df",
+    "lines": 148,
+    "read_ranges": [
+      [
+        1,
+        90
+      ],
+      [
+        91,
+        148
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_review": true,
+    "behavior_verified": true,
+    "responsibility": "真实PG等级配置事务流故障回滚及恢复后的成功重算，保留经验原表与完整约束/trigger",
+    "call_chain": [
+      "isolatedAITestDatabase marker/两次完整迁移/安全整库清理",
+      "updateLevelConfig",
+      "level_system_config/user_experience/permission_role_tracks/roles/user_role_bindings/users.permission_version",
+      "progression.LevelForExperience/SyncTrackRole"
+    ],
+    "issues": [
+      "BE-SUP-005"
+    ],
+    "validation": [
+      "TestLevelConfigurationExperienceStreamFailureRollsBackCoreIntegration -race PASS5.162s /tmp/backend-progression-level-transaction-core-final.log"
+    ],
+    "reviewer": "frontend-core supplement",
+    "final_review": "最终148行gofmt后实际1–90/91–148全文读取；真实表约束/外键/触发器保留，probe明确Query成功后迭代错误；配置/经验/role/permission version全回滚，恢复原表后真实成功。",
+    "verification_scope": "当前事务故障原子性与恢复；未复跑无Err旧源码，原Commit防线存在，不宣称旧实现必然丢失数据；不证明生产大表/断连/锁性能。"
+  }
+]

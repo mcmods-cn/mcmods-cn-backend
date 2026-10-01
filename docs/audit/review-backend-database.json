@@ -1,0 +1,2457 @@
+[
+  {
+    "path": "internal/database/migrations.go",
+    "sha256": "3df2bf61562dd9fa0ad5826e1d4a6bda2ddf8e58f6ae764ddd2904be4ef7b6e1",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "3df2bf61562dd9fa0ad5826e1d4a6bda2ddf8e58f6ae764ddd2904be4ef7b6e1",
+    "lines": 1147,
+    "read_ranges": [
+      [
+        1,
+        1147
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:3df2bf61562dd9fa0ad5826e1d4a6bda2ddf8e58f6ae764ddd2904be4ef7b6e1",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/content_localization_handlers.go",
+    "sha256": "2b35764dbb8343b28e080ecee8a960630cff8b34a1138cf984f6f007af0e166b",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "a8126fd25d47ca7b981f45b970e342d9c2c75f9661ff18248f7853f4a87e54cc",
+    "lines": 786,
+    "read_ranges": [
+      [
+        1,
+        786
+      ]
+    ],
+    "status": "已复查",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [
+      "BE-DB-005",
+      "BE-DB-007",
+      "BE-DB-010"
+    ],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN",
+      "BE-DB-010 PASS: actual own PostgreSQL17.11/public HTTP GET/local HTTP supplier2top+5subcases -race5.536s;345GET requests; no mock API/SQL; controlled direct worker consumes real DB Outbox; actual NATS transport/all middleware not claimed"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:2b35764dbb8343b28e080ecee8a960630cff8b34a1138cf984f6f007af0e166b",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/ai_handlers.go",
+    "sha256": "398d80c0cafa209b398a5e2594cd8649e5a2ce9aa1d4d0643d32e8feb31a934a",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "6b3f316d5001f45c28a08a6a86d2c98d88ca6a555c2a423294c4e37f88b95de7",
+    "lines": 786,
+    "read_ranges": [
+      [
+        1,
+        786
+      ]
+    ],
+    "status": "已复查",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [
+      "BE-DB-004",
+      "BE-DB-006",
+      "BE-DB-008",
+      "BE-DB-018",
+      "BE-DB-007",
+      "BE-DB-027",
+      "BE-DB-028"
+    ],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN",
+      "PASS: fresh PostgreSQL17.11/Go1.26.8 deterministic HTTP -race 30 top/60 subcase nodes 43.650s; final new2 groups/recovery19+AIconfig4 cases 6.018s; docs/audit/evidence/ai-db-final.json; production/paid provider NOT_RUN"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:398d80c0cafa209b398a5e2594cd8649e5a2ce9aa1d4d0643d32e8feb31a934a",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "原人工逐行全文审查；本次最终全文及新增修改段/实际调用链再复查，无截断漏读；动态证据仅限定对应回归，不代表全场景"
+  },
+  {
+    "path": "internal/database/community_schema.go",
+    "sha256": "a6909dd4e988ed40b8c4fd2c666ca2c1ab1b5875e411b22cdacc1e85bc49f91d",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "a6909dd4e988ed40b8c4fd2c666ca2c1ab1b5875e411b22cdacc1e85bc49f91d",
+    "lines": 518,
+    "read_ranges": [
+      [
+        1,
+        518
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:a6909dd4e988ed40b8c4fd2c666ca2c1ab1b5875e411b22cdacc1e85bc49f91d",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/rating_schema.go",
+    "sha256": "40200f6b62ef58a6e7837fa1acc86128980727989f788d7ab2e1333cc50624b0",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "40200f6b62ef58a6e7837fa1acc86128980727989f788d7ab2e1333cc50624b0",
+    "lines": 451,
+    "read_ranges": [
+      [
+        1,
+        451
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [
+      "BE-DB-001"
+    ],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:40200f6b62ef58a6e7837fa1acc86128980727989f788d7ab2e1333cc50624b0",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/migrator.go",
+    "sha256": "00d47b7bea89a2456ae16c5acb7ebd3a83895146db1159c0625677258b0c0cba",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "b177f6f2453d9f62ec37d77fd9b04216ea6352dbcff925398135ba4702db3903",
+    "lines": 448,
+    "read_ranges": [
+      [
+        1,
+        448
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:00d47b7bea89a2456ae16c5acb7ebd3a83895146db1159c0625677258b0c0cba",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/catalog_schema.go",
+    "sha256": "307b3a796a802defa44caf82a223f7bd43bdc1262b5aa935fc421dc6269d5a06",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "307b3a796a802defa44caf82a223f7bd43bdc1262b5aa935fc421dc6269d5a06",
+    "lines": 434,
+    "read_ranges": [
+      [
+        1,
+        434
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:307b3a796a802defa44caf82a223f7bd43bdc1262b5aa935fc421dc6269d5a06",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/seeds.go",
+    "sha256": "ba742f29547655d431594eb9a5e767599832ed148d8adc1bc825691b5f912d52",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "f41f2fd63c2df560550fb539a2b862e8eeb4deea3484dc66ef40f5c2122c50c8",
+    "lines": 432,
+    "read_ranges": [
+      [
+        1,
+        432
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [
+      "BE-DB-012"
+    ],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "final_review_version": "working-tree:ba742f29547655d431594eb9a5e767599832ed148d8adc1bc825691b5f912d52",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/mod_content_schema.go",
+    "sha256": "95cad53c205ac59f7e00d734b89383e2d2c62c05c76bfac15b28583c4074cc34",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "95cad53c205ac59f7e00d734b89383e2d2c62c05c76bfac15b28583c4074cc34",
+    "lines": 413,
+    "read_ranges": [
+      [
+        1,
+        413
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [
+      "BE-DB-002",
+      "BE-DB-003"
+    ],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:95cad53c205ac59f7e00d734b89383e2d2c62c05c76bfac15b28583c4074cc34",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/project_access_integration_test.go",
+    "sha256": "f9181aa0fc450ac8cff23ecbda9c0f65007f86f6c7275213a66943c4bddc20e5",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "f9181aa0fc450ac8cff23ecbda9c0f65007f86f6c7275213a66943c4bddc20e5",
+    "lines": 348,
+    "read_ranges": [
+      [
+        1,
+        348
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:f9181aa0fc450ac8cff23ecbda9c0f65007f86f6c7275213a66943c4bddc20e5",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/governance_automation_schema.go",
+    "sha256": "b45c492ba974f2d04c1cfcf9c0878a30abfcd7a9a79998e02b9c5eabd94fd6b4",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "b45c492ba974f2d04c1cfcf9c0878a30abfcd7a9a79998e02b9c5eabd94fd6b4",
+    "lines": 341,
+    "read_ranges": [
+      [
+        1,
+        341
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:b45c492ba974f2d04c1cfcf9c0878a30abfcd7a9a79998e02b9c5eabd94fd6b4",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/ai_translation.go",
+    "sha256": "5e00d921867b2dcf8d191b16b870a3358c19ef25211a6da245ba63aad28cb295",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "d88ecdb7d210a25ad90e892a0587437ae1f0817fbfbe4c58383d38abc2b3eab3",
+    "lines": 511,
+    "read_ranges": [
+      [
+        1,
+        511
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [
+      "BE-DB-004",
+      "BE-DB-009",
+      "BE-DB-018"
+    ],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:5e00d921867b2dcf8d191b16b870a3358c19ef25211a6da245ba63aad28cb295",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/content_locale.go",
+    "sha256": "3e25e840120ffdf8615eb7b4cf7cf1e7060a22ed37aadb690e28fb91d049b05d",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "3e25e840120ffdf8615eb7b4cf7cf1e7060a22ed37aadb690e28fb91d049b05d",
+    "lines": 247,
+    "read_ranges": [
+      [
+        1,
+        247
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:3e25e840120ffdf8615eb7b4cf7cf1e7060a22ed37aadb690e28fb91d049b05d",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/comment_schema.go",
+    "sha256": "dfb235edc76a24b288b566d39d2bc199b042a63972e7df656cf20d75ebdd8f13",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "dfb235edc76a24b288b566d39d2bc199b042a63972e7df656cf20d75ebdd8f13",
+    "lines": 224,
+    "read_ranges": [
+      [
+        1,
+        224
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:dfb235edc76a24b288b566d39d2bc199b042a63972e7df656cf20d75ebdd8f13",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/catalog_editor_schema.go",
+    "sha256": "b48c7edc0bd1bf13a43b2eb551b09c774b5cc1b7eb96db6e5abe3a506f4a9af4",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "b48c7edc0bd1bf13a43b2eb551b09c774b5cc1b7eb96db6e5abe3a506f4a9af4",
+    "lines": 204,
+    "read_ranges": [
+      [
+        1,
+        204
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:b48c7edc0bd1bf13a43b2eb551b09c774b5cc1b7eb96db6e5abe3a506f4a9af4",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/user_feature_schema.go",
+    "sha256": "2727a2ae23ef1861f72bed7567fb7610fde5321c6e53ac9d69f53a8bd49ea4eb",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "2727a2ae23ef1861f72bed7567fb7610fde5321c6e53ac9d69f53a8bd49ea4eb",
+    "lines": 196,
+    "read_ranges": [
+      [
+        1,
+        196
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:2727a2ae23ef1861f72bed7567fb7610fde5321c6e53ac9d69f53a8bd49ea4eb",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/content_metrics_schema.go",
+    "sha256": "2c9629e99f4452deae9bb55502934015bd131e1a9751267dc1a21db9cb38d44b",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "2c9629e99f4452deae9bb55502934015bd131e1a9751267dc1a21db9cb38d44b",
+    "lines": 183,
+    "read_ranges": [
+      [
+        1,
+        183
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:2c9629e99f4452deae9bb55502934015bd131e1a9751267dc1a21db9cb38d44b",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/mod_content_document_schema.go",
+    "sha256": "dde59137732a4dd08817539736a426982a2a2e5ec653eaec219df54a1af390bf",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "dde59137732a4dd08817539736a426982a2a2e5ec653eaec219df54a1af390bf",
+    "lines": 181,
+    "read_ranges": [
+      [
+        1,
+        181
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:dde59137732a4dd08817539736a426982a2a2e5ec653eaec219df54a1af390bf",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/skin_schema.go",
+    "sha256": "d784753b89b23183b55e64ea42cb6ce3826a96b430d8cb4f5f3df96574be90be",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "d784753b89b23183b55e64ea42cb6ce3826a96b430d8cb4f5f3df96574be90be",
+    "lines": 177,
+    "read_ranges": [
+      [
+        1,
+        177
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:d784753b89b23183b55e64ea42cb6ce3826a96b430d8cb4f5f3df96574be90be",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/engagement_export_schema.go",
+    "sha256": "1e8ab9cd063ae63ac9891e639d39930afff4f460c405d756cbda13122be9ccff",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "1e8ab9cd063ae63ac9891e639d39930afff4f460c405d756cbda13122be9ccff",
+    "lines": 176,
+    "read_ranges": [
+      [
+        1,
+        176
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:1e8ab9cd063ae63ac9891e639d39930afff4f460c405d756cbda13122be9ccff",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/search_schema.go",
+    "sha256": "a85cf9e533fa0adbfa8144a17d027ce398c7810e3d593433827e7efd1456e3ef",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "a85cf9e533fa0adbfa8144a17d027ce398c7810e3d593433827e7efd1456e3ef",
+    "lines": 165,
+    "read_ranges": [
+      [
+        1,
+        165
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:a85cf9e533fa0adbfa8144a17d027ce398c7810e3d593433827e7efd1456e3ef",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/mod_content_schema_test.go",
+    "sha256": "685fd5f078de915da89293162b5731a80b7dda77583689d8b8b29166ab1f2dda",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "685fd5f078de915da89293162b5731a80b7dda77583689d8b8b29166ab1f2dda",
+    "lines": 157,
+    "read_ranges": [
+      [
+        1,
+        157
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:685fd5f078de915da89293162b5731a80b7dda77583689d8b8b29166ab1f2dda",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/activity_schema_test.go",
+    "sha256": "e562ec01899c68d0a3010aeb9adeaa7434cdc407188dde72cfc045349215bd4d",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "e562ec01899c68d0a3010aeb9adeaa7434cdc407188dde72cfc045349215bd4d",
+    "lines": 154,
+    "read_ranges": [
+      [
+        1,
+        154
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:e562ec01899c68d0a3010aeb9adeaa7434cdc407188dde72cfc045349215bd4d",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/content_localization_worker.go",
+    "sha256": "7fac91a75717274e4a90c8e82d277f5e88d1788a42987e16858ae1628a9484e6",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "ab6ec7d36e5be63fcaec9f09afd8b3069a2463e3ab8387c03aec1d86502a44ba",
+    "lines": 171,
+    "read_ranges": [
+      [
+        1,
+        171
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [
+      "BE-DB-004",
+      "BE-DB-005"
+    ],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:7fac91a75717274e4a90c8e82d277f5e88d1788a42987e16858ae1628a9484e6",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/modpack_schema.go",
+    "sha256": "093cf3848e3990d5023e4472a87e20abe836ea6abcb771e46e50cb1efb55bf1f",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "093cf3848e3990d5023e4472a87e20abe836ea6abcb771e46e50cb1efb55bf1f",
+    "lines": 151,
+    "read_ranges": [
+      [
+        1,
+        151
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:093cf3848e3990d5023e4472a87e20abe836ea6abcb771e46e50cb1efb55bf1f",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/server_schema.go",
+    "sha256": "76be7d2b579b8eb746255a2b23737e99964c3c23d1be605ae50d53ae7b6feaae",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "76be7d2b579b8eb746255a2b23737e99964c3c23d1be605ae50d53ae7b6feaae",
+    "lines": 151,
+    "read_ranges": [
+      [
+        1,
+        151
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:76be7d2b579b8eb746255a2b23737e99964c3c23d1be605ae50d53ae7b6feaae",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/simple_project_schema.go",
+    "sha256": "ece0fc586010949c498e445834d0a42b365284398bdffe1fbe730860316c7191",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "ece0fc586010949c498e445834d0a42b365284398bdffe1fbe730860316c7191",
+    "lines": 150,
+    "read_ranges": [
+      [
+        1,
+        150
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:ece0fc586010949c498e445834d0a42b365284398bdffe1fbe730860316c7191",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/anti_abuse_schema.go",
+    "sha256": "dc5af2ecc212173f34c9838e4da6eacee2b6690f05d3857a7b41f0554bb0246d",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "dc5af2ecc212173f34c9838e4da6eacee2b6690f05d3857a7b41f0554bb0246d",
+    "lines": 146,
+    "read_ranges": [
+      [
+        1,
+        146
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:dc5af2ecc212173f34c9838e4da6eacee2b6690f05d3857a7b41f0554bb0246d",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/content_locale_test.go",
+    "sha256": "a1104e2aa10ca22618bff5d43f2843ec1c13e0835fcaf7fc1606c55916f691e3",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "a1104e2aa10ca22618bff5d43f2843ec1c13e0835fcaf7fc1606c55916f691e3",
+    "lines": 133,
+    "read_ranges": [
+      [
+        1,
+        133
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:a1104e2aa10ca22618bff5d43f2843ec1c13e0835fcaf7fc1606c55916f691e3",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/admin_dashboard_schema.go",
+    "sha256": "899e2d1d4c792e92bfeaf3056f074418504438265018197d50bf533386be5e8d",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "899e2d1d4c792e92bfeaf3056f074418504438265018197d50bf533386be5e8d",
+    "lines": 132,
+    "read_ranges": [
+      [
+        1,
+        132
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:899e2d1d4c792e92bfeaf3056f074418504438265018197d50bf533386be5e8d",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/community_post_schema.go",
+    "sha256": "8b25af8d2e02f6250df677273c874c92a5f44302f006824f37db629233f2f547",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "8b25af8d2e02f6250df677273c874c92a5f44302f006824f37db629233f2f547",
+    "lines": 125,
+    "read_ranges": [
+      [
+        1,
+        125
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:8b25af8d2e02f6250df677273c874c92a5f44302f006824f37db629233f2f547",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/project_access_schema.go",
+    "sha256": "0cbf2b8ebee2e513c7c1f67cb5cfc16b51b9700f01f19f64e5a12fec085ed165",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "0cbf2b8ebee2e513c7c1f67cb5cfc16b51b9700f01f19f64e5a12fec085ed165",
+    "lines": 120,
+    "read_ranges": [
+      [
+        1,
+        120
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:0cbf2b8ebee2e513c7c1f67cb5cfc16b51b9700f01f19f64e5a12fec085ed165",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/feature_localization_sticker_test.go",
+    "sha256": "b862ccc7e78c95a8086b0d3ae38d1646f5926179d168197d3202f70e62ea7c78",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "5218ba08510ebee685471bbdac198cdc6d98a24d8ec4be0c8a46939bbff59b17",
+    "lines": 147,
+    "read_ranges": [
+      [
+        1,
+        147
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [
+      "BE-DB-013"
+    ],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "final_review_version": "working-tree:b862ccc7e78c95a8086b0d3ae38d1646f5926179d168197d3202f70e62ea7c78",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/feature_update_schema.go",
+    "sha256": "a12193ec0aa75f9d8dcd823f208b17fad7b2f4d2723bc6c8d974e4da3ffb62fe",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "a12193ec0aa75f9d8dcd823f208b17fad7b2f4d2723bc6c8d974e4da3ffb62fe",
+    "lines": 109,
+    "read_ranges": [
+      [
+        1,
+        109
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:a12193ec0aa75f9d8dcd823f208b17fad7b2f4d2723bc6c8d974e4da3ffb62fe",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/changelog_schema.go",
+    "sha256": "6937070b3637c858047d65fa18e050e7ad0c3a7f319387adda95c986257e67ea",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "6937070b3637c858047d65fa18e050e7ad0c3a7f319387adda95c986257e67ea",
+    "lines": 107,
+    "read_ranges": [
+      [
+        1,
+        107
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:6937070b3637c858047d65fa18e050e7ad0c3a7f319387adda95c986257e67ea",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/mod_localization_publish_integration_test.go",
+    "sha256": "aeefc262d8aa0c7ad7d6227f0c4d74f00b5b11d2a40fa2938056164fba5d35e7",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "aeefc262d8aa0c7ad7d6227f0c4d74f00b5b11d2a40fa2938056164fba5d35e7",
+    "lines": 101,
+    "read_ranges": [
+      [
+        1,
+        101
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:aeefc262d8aa0c7ad7d6227f0c4d74f00b5b11d2a40fa2938056164fba5d35e7",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/infrastructure_schema.go",
+    "sha256": "bf61ab7a6e8e8f42a0b695e355aaf7afe5813fbdb1e84531f12066e5e020d037",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "bf61ab7a6e8e8f42a0b695e355aaf7afe5813fbdb1e84531f12066e5e020d037",
+    "lines": 95,
+    "read_ranges": [
+      [
+        1,
+        95
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:bf61ab7a6e8e8f42a0b695e355aaf7afe5813fbdb1e84531f12066e5e020d037",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/content_language_settings.go",
+    "sha256": "57cafe213f753103b365a980b49e5556b278df2f5b7f1f6fe2bb6f3867bf9f10",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "57cafe213f753103b365a980b49e5556b278df2f5b7f1f6fe2bb6f3867bf9f10",
+    "lines": 79,
+    "read_ranges": [
+      [
+        1,
+        79
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:57cafe213f753103b365a980b49e5556b278df2f5b7f1f6fe2bb6f3867bf9f10",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/internal_identity_schema_test.go",
+    "sha256": "84654cc2589d59e2b5affc6cfba0067ecbfcf7e38adcb8c4a455e7143fbfca25",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "84654cc2589d59e2b5affc6cfba0067ecbfcf7e38adcb8c4a455e7143fbfca25",
+    "lines": 77,
+    "read_ranges": [
+      [
+        1,
+        77
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:84654cc2589d59e2b5affc6cfba0067ecbfcf7e38adcb8c4a455e7143fbfca25",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/user_feature_integration_test.go",
+    "sha256": "6daaf5de21b40a2a0045a1aa5475edef5b1cbd763d493acaa05d7378bc2eb8b4",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "6daaf5de21b40a2a0045a1aa5475edef5b1cbd763d493acaa05d7378bc2eb8b4",
+    "lines": 77,
+    "read_ranges": [
+      [
+        1,
+        77
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:6daaf5de21b40a2a0045a1aa5475edef5b1cbd763d493acaa05d7378bc2eb8b4",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/governance_automation_seeds.go",
+    "sha256": "b8522ca4af3404cf33ce37d37c9fbaa0890fe280e554ea559b3961d621a2e377",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "ab51d1f7c26009c95f9a5745a48a402574e9fa9e24d94e465a42e415828d1433",
+    "lines": 77,
+    "read_ranges": [
+      [
+        1,
+        77
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [
+      "BE-DB-011"
+    ],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "final_review_version": "working-tree:b8522ca4af3404cf33ce37d37c9fbaa0890fe280e554ea559b3961d621a2e377",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/schema_quality_integration_test.go",
+    "sha256": "c06a272ccd53d93577a3f18034138a07645b23ad5b7e8b27e06c84be2473edb7",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "c06a272ccd53d93577a3f18034138a07645b23ad5b7e8b27e06c84be2473edb7",
+    "lines": 71,
+    "read_ranges": [
+      [
+        1,
+        71
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:c06a272ccd53d93577a3f18034138a07645b23ad5b7e8b27e06c84be2473edb7",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/engagement_export_schema_test.go",
+    "sha256": "f3f9fc3cc9fc617dba1f465c0e59b47dfdc86af8ecc40cd00a495199f865e58f",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "f3f9fc3cc9fc617dba1f465c0e59b47dfdc86af8ecc40cd00a495199f865e58f",
+    "lines": 70,
+    "read_ranges": [
+      [
+        1,
+        70
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:f3f9fc3cc9fc617dba1f465c0e59b47dfdc86af8ecc40cd00a495199f865e58f",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/settings.go",
+    "sha256": "56811ebc1c20b71a32bbd67e7e0bf4bace854846961f62e33b9289cc76be48e7",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "56811ebc1c20b71a32bbd67e7e0bf4bace854846961f62e33b9289cc76be48e7",
+    "lines": 70,
+    "read_ranges": [
+      [
+        1,
+        70
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:56811ebc1c20b71a32bbd67e7e0bf4bace854846961f62e33b9289cc76be48e7",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/ai_translation_test.go",
+    "sha256": "3476cccb26903bf717bfd0ed674f5bfcb5b666fc52fc054794c48c4b22510e0b",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "3476cccb26903bf717bfd0ed674f5bfcb5b666fc52fc054794c48c4b22510e0b",
+    "lines": 65,
+    "read_ranges": [
+      [
+        1,
+        65
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:3476cccb26903bf717bfd0ed674f5bfcb5b666fc52fc054794c48c4b22510e0b",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/rating_schema_integration_test.go",
+    "sha256": "8d43f06ed1f4979a3eff4c6bed65def9a71ae9801b1b4323e248fea852d3a36f",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "8d43f06ed1f4979a3eff4c6bed65def9a71ae9801b1b4323e248fea852d3a36f",
+    "lines": 57,
+    "read_ranges": [
+      [
+        1,
+        57
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:8d43f06ed1f4979a3eff4c6bed65def9a71ae9801b1b4323e248fea852d3a36f",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/autobot_seed_test.go",
+    "sha256": "4f02418e251bf5565d3324def189764dd3590835a1696b4ff06ee7a2ea2343cf",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "4f02418e251bf5565d3324def189764dd3590835a1696b4ff06ee7a2ea2343cf",
+    "lines": 55,
+    "read_ranges": [
+      [
+        1,
+        55
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:4f02418e251bf5565d3324def189764dd3590835a1696b4ff06ee7a2ea2343cf",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/permission_version_schema_test.go",
+    "sha256": "774d774e7532da961b886f4f993a0d75c6164577b455d41743905806d9d2dc88",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "774d774e7532da961b886f4f993a0d75c6164577b455d41743905806d9d2dc88",
+    "lines": 55,
+    "read_ranges": [
+      [
+        1,
+        55
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:774d774e7532da961b886f4f993a0d75c6164577b455d41743905806d9d2dc88",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/project_access_schema_test.go",
+    "sha256": "17a2e4a2606bf782cba4bc158d964b7b5080d63430c2a9f52c77b0fb01127790",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "17a2e4a2606bf782cba4bc158d964b7b5080d63430c2a9f52c77b0fb01127790",
+    "lines": 54,
+    "read_ranges": [
+      [
+        1,
+        54
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:17a2e4a2606bf782cba4bc158d964b7b5080d63430c2a9f52c77b0fb01127790",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/project_file_schema.go",
+    "sha256": "beb2631b00bd25a52c4978cc9477061282cddce81f6acf39367e786ee4c3bb7d",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "beb2631b00bd25a52c4978cc9477061282cddce81f6acf39367e786ee4c3bb7d",
+    "lines": 54,
+    "read_ranges": [
+      [
+        1,
+        54
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:beb2631b00bd25a52c4978cc9477061282cddce81f6acf39367e786ee4c3bb7d",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/user_block_schema_test.go",
+    "sha256": "15e4090c657dbf9bd8486556d5bad818a8a731faec7774498ebe77ab44f66b4e",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "15e4090c657dbf9bd8486556d5bad818a8a731faec7774498ebe77ab44f66b4e",
+    "lines": 52,
+    "read_ranges": [
+      [
+        1,
+        52
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:15e4090c657dbf9bd8486556d5bad818a8a731faec7774498ebe77ab44f66b4e",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/database.go",
+    "sha256": "43bdac509995c47ac3ca3425794b4874739a6bb80c937dbf84082ccf6e776106",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "43bdac509995c47ac3ca3425794b4874739a6bb80c937dbf84082ccf6e776106",
+    "lines": 51,
+    "read_ranges": [
+      [
+        1,
+        51
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:43bdac509995c47ac3ca3425794b4874739a6bb80c937dbf84082ccf6e776106",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/domain/models.go",
+    "sha256": "413f7e3d12c14e5ae34926e5f1ce99beffe24eab297ffb5dec2f9fa7a5caddd1",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "413f7e3d12c14e5ae34926e5f1ce99beffe24eab297ffb5dec2f9fa7a5caddd1",
+    "lines": 49,
+    "read_ranges": [
+      [
+        1,
+        49
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:413f7e3d12c14e5ae34926e5f1ce99beffe24eab297ffb5dec2f9fa7a5caddd1",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/user_feature_schema_test.go",
+    "sha256": "3ab07b0aeb39e4c966a7ab35c90c7a9bcc784840674d2b91908cc7c7662117dc",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "3ab07b0aeb39e4c966a7ab35c90c7a9bcc784840674d2b91908cc7c7662117dc",
+    "lines": 44,
+    "read_ranges": [
+      [
+        1,
+        44
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:3ab07b0aeb39e4c966a7ab35c90c7a9bcc784840674d2b91908cc7c7662117dc",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/governance_automation_schema_test.go",
+    "sha256": "6a6351a634137aa6f203eb5b309fcb0932bd4ed44bfbafec40b8ea3ffa2edc57",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "6a6351a634137aa6f203eb5b309fcb0932bd4ed44bfbafec40b8ea3ffa2edc57",
+    "lines": 42,
+    "read_ranges": [
+      [
+        1,
+        42
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:6a6351a634137aa6f203eb5b309fcb0932bd4ed44bfbafec40b8ea3ffa2edc57",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/mod_content_template_integration_test.go",
+    "sha256": "45445975691de90808b6afda28c968b454c054a639f18d9bf41b2cfcc0b13b30",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "45445975691de90808b6afda28c968b454c054a639f18d9bf41b2cfcc0b13b30",
+    "lines": 41,
+    "read_ranges": [
+      [
+        1,
+        41
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:45445975691de90808b6afda28c968b454c054a639f18d9bf41b2cfcc0b13b30",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/draft_schema.go",
+    "sha256": "8ce66b01eb88705cd72f98de271953351000ecd58777689f513a2aa67734240e",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "8ce66b01eb88705cd72f98de271953351000ecd58777689f513a2aa67734240e",
+    "lines": 37,
+    "read_ranges": [
+      [
+        1,
+        37
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:8ce66b01eb88705cd72f98de271953351000ecd58777689f513a2aa67734240e",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/feature_update_schema_test.go",
+    "sha256": "00ac05a80eb032486070def84a78f1c9cbb56eb31f3e2cefa4cb18a85f9f3101",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "00ac05a80eb032486070def84a78f1c9cbb56eb31f3e2cefa4cb18a85f9f3101",
+    "lines": 30,
+    "read_ranges": [
+      [
+        1,
+        30
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:00ac05a80eb032486070def84a78f1c9cbb56eb31f3e2cefa4cb18a85f9f3101",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/content_metrics_schema_test.go",
+    "sha256": "a23283bd0c8f15f894570176c2b7c45794f17be6ebf99452a8edbae6ed9d1c08",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "a23283bd0c8f15f894570176c2b7c45794f17be6ebf99452a8edbae6ed9d1c08",
+    "lines": 29,
+    "read_ranges": [
+      [
+        1,
+        29
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:a23283bd0c8f15f894570176c2b7c45794f17be6ebf99452a8edbae6ed9d1c08",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/migrator_test.go",
+    "sha256": "411bc4a0d18debe5edca2643a69f4e5af6c152433881e6b0bab194b57391e3f5",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "411bc4a0d18debe5edca2643a69f4e5af6c152433881e6b0bab194b57391e3f5",
+    "lines": 29,
+    "read_ranges": [
+      [
+        1,
+        29
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:411bc4a0d18debe5edca2643a69f4e5af6c152433881e6b0bab194b57391e3f5",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/admin_dashboard_schema_test.go",
+    "sha256": "1fa7c8c16c55bae9bb15697bd603d51de853d5d6553f8f6a41cda896c29e672e",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "1fa7c8c16c55bae9bb15697bd603d51de853d5d6553f8f6a41cda896c29e672e",
+    "lines": 28,
+    "read_ranges": [
+      [
+        1,
+        28
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:1fa7c8c16c55bae9bb15697bd603d51de853d5d6553f8f6a41cda896c29e672e",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/changelog_schema_test.go",
+    "sha256": "aa7112840be365c2ddf5386025a896d86808b2342a4eb2375957451594136403",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "aa7112840be365c2ddf5386025a896d86808b2342a4eb2375957451594136403",
+    "lines": 25,
+    "read_ranges": [
+      [
+        1,
+        25
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:aa7112840be365c2ddf5386025a896d86808b2342a4eb2375957451594136403",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/anti_abuse_schema_test.go",
+    "sha256": "815cd193825a80935405aa7bb24afc4b29837e9e0797c0f62538358de6a0c8ba",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "815cd193825a80935405aa7bb24afc4b29837e9e0797c0f62538358de6a0c8ba",
+    "lines": 24,
+    "read_ranges": [
+      [
+        1,
+        24
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:815cd193825a80935405aa7bb24afc4b29837e9e0797c0f62538358de6a0c8ba",
+    "repository": "mcmods-cn-backend",
+    "category": "回归测试",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/user_block_schema.go",
+    "sha256": "d7cfe6948a1b874b67de95d48cbd9e02247177afa3dc54e5fbd163b5194aa404",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "d7cfe6948a1b874b67de95d48cbd9e02247177afa3dc54e5fbd163b5194aa404",
+    "lines": 18,
+    "read_ranges": [
+      [
+        1,
+        18
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:d7cfe6948a1b874b67de95d48cbd9e02247177afa3dc54e5fbd163b5194aa404",
+    "repository": "mcmods-cn-backend",
+    "category": "人工维护业务/Schema",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/catalog_editor_service.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "8820af40ec0512d87d62a827d0b7fa1c0f054311a4127577d990ca1b0a586b8a",
+    "repository": "mcmods-cn-backend",
+    "sha256": "19ee7255f6de21687aa96967c61e19727434f4dde952c4cd3921c052d32112af",
+    "lines": 1203,
+    "read_ranges": [
+      [
+        1,
+        1203
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_version": "working-tree:19ee7255f6de21687aa96967c61e19727434f4dde952c4cd3921c052d32112af",
+    "category": "人工维护业务/Schema",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [
+      "BE-DB-005",
+      "BE-DB-015"
+    ],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "behavior_verified": false,
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/notification_template_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "a397a721f60eb5e7f0cb86943981df897dce7b43cf2e5171393344762372ade2",
+    "repository": "mcmods-cn-backend",
+    "sha256": "d07f16d9fed34eb52d2dab2b27326f9f025abda07093548d1df5ddba31b8abf6",
+    "lines": 555,
+    "read_ranges": [
+      [
+        1,
+        555
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_version": "working-tree:d07f16d9fed34eb52d2dab2b27326f9f025abda07093548d1df5ddba31b8abf6",
+    "category": "人工维护业务/Schema",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [
+      "BE-DB-013",
+      "BE-DB-014"
+    ],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "behavior_verified": false,
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/repairs.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "repository": "mcmods-cn-backend",
+    "sha256": "547001480ca52b716e847e0b7d59a0c4752ba9eed9a3d475369413d5ca377a00",
+    "lines": 116,
+    "read_ranges": [
+      [
+        1,
+        116
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已完整审查",
+    "final_review_version": "working-tree:547001480ca52b716e847e0b7d59a0c4752ba9eed9a3d475369413d5ca377a00",
+    "category": "人工维护业务/Schema",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [
+      "BE-DB-001",
+      "BE-DB-002",
+      "BE-DB-003",
+      "BE-DB-016"
+    ],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "behavior_verified": true,
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/database/repairs_integration_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "repository": "mcmods-cn-backend",
+    "sha256": "28ea994ffa9ce780f4d15a796383387a4f5b7122703fb1319d1b3d94940dcebc",
+    "lines": 220,
+    "read_ranges": [
+      [
+        1,
+        220
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已完整审查",
+    "final_review_version": "working-tree:28ea994ffa9ce780f4d15a796383387a4f5b7122703fb1319d1b3d94940dcebc",
+    "category": "回归测试",
+    "responsibility": "结构/约束/种子/前向修复",
+    "call_chain": [
+      "Migrate→generation85→compatible repairs→seed/RBAC"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused DB5 regressions PostgreSQL17 1.076s; empty and repeated Migrate; each behavior assertion limited to relevant tests"
+    ],
+    "behavior_verified": true,
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/ai_task_limits.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "repository": "mcmods-cn-backend",
+    "sha256": "35311a3a7f5d5cff47a9f4825983bb7a5851468d327ce4862933ec07cc425c1a",
+    "lines": 212,
+    "read_ranges": [
+      [
+        1,
+        212
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已完整审查",
+    "final_review_version": "working-tree:35311a3a7f5d5cff47a9f4825983bb7a5851468d327ce4862933ec07cc425c1a",
+    "category": "人工维护业务/Schema",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [
+      "BE-DB-004",
+      "BE-DB-006",
+      "BE-DB-007",
+      "BE-DB-018"
+    ],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "behavior_verified": true,
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/ai_task_recovery.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "repository": "mcmods-cn-backend",
+    "sha256": "247562aa9aab2157c3841c14a96c53b4ba7c9d9b0eae1c7da7e39cac218ef29f",
+    "lines": 386,
+    "read_ranges": [
+      [
+        1,
+        386
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_version": "working-tree:247562aa9aab2157c3841c14a96c53b4ba7c9d9b0eae1c7da7e39cac218ef29f",
+    "category": "人工维护业务/Schema",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [
+      "BE-DB-008",
+      "BE-DB-014",
+      "BE-DB-017",
+      "BE-DB-004",
+      "BE-DB-027"
+    ],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN",
+      "PASS: fresh PostgreSQL17.11/Go1.26.8 deterministic HTTP -race 30 top/60 subcase nodes 43.650s; final new2 groups/recovery19+AIconfig4 cases 6.018s; docs/audit/evidence/ai-db-final.json; production/paid provider NOT_RUN"
+    ],
+    "behavior_verified": true,
+    "final_review_basis": "原人工逐行全文审查；本次最终全文及新增修改段/实际调用链再复查，无截断漏读；动态证据仅限定对应回归，不代表全场景"
+  },
+  {
+    "path": "internal/httpapi/ai_translation_validation_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "repository": "mcmods-cn-backend",
+    "sha256": "045d1aab0e007e6952ee732a29486a9f61053a2ed985639783747496255e9c69",
+    "lines": 176,
+    "read_ranges": [
+      [
+        1,
+        176
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已完整审查",
+    "final_review_version": "working-tree:045d1aab0e007e6952ee732a29486a9f61053a2ed985639783747496255e9c69",
+    "category": "回归测试",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "behavior_verified": true,
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "internal/httpapi/ai_task_integration_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "repository": "mcmods-cn-backend",
+    "sha256": "04ac8fedc8f4c706d3d2b1be09e7419d7d52888534939d1d64d52c96dea7908d",
+    "lines": 722,
+    "read_ranges": [
+      [
+        1,
+        722
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已完整审查",
+    "final_review_version": "working-tree:04ac8fedc8f4c706d3d2b1be09e7419d7d52888534939d1d64d52c96dea7908d",
+    "category": "回归测试",
+    "responsibility": "AI/本地化/审核发布/验证",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "behavior_verified": true,
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "DEVELOPMENT_SCHEMA_RESET.md",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "5b79c983f4616aee345a01ebed91c46009ded0092b6c5b7a7a91375507cbb259",
+    "repository": "mcmods-cn-backend",
+    "sha256": "c0a81a7525326ab989963f4b042859e5638b3648bcf779f94ccd552de8260c40",
+    "lines": 43,
+    "read_ranges": [
+      [
+        1,
+        43
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已完整审查",
+    "final_review_version": "working-tree:c0a81a7525326ab989963f4b042859e5638b3648bcf779f94ccd552de8260c40",
+    "category": "人工维护文档",
+    "responsibility": "正式行为/迁移/审计证据说明",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "behavior_verified": false,
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "SYSTEM_NOTIFICATION_LOCALIZATION.md",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "98c4676a14f218c88159094dbfb74e5c4302bdf96605c74ed1e337076ce5ebdd",
+    "repository": "mcmods-cn-backend",
+    "sha256": "e2c3fae6ddd0f4c4381f4f22105d6ce0be74f5e35389bac525088840eb5e43d4",
+    "lines": 29,
+    "read_ranges": [
+      [
+        1,
+        29
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已完整审查",
+    "final_review_version": "working-tree:e2c3fae6ddd0f4c4381f4f22105d6ce0be74f5e35389bac525088840eb5e43d4",
+    "category": "人工维护文档",
+    "responsibility": "正式行为/迁移/审计证据说明",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN"
+    ],
+    "behavior_verified": false,
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "path": "docs/AI_TRANSLATION_RELIABILITY.md",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "repository": "mcmods-cn-backend",
+    "sha256": "351fd1f3a823673fc76e2cb920e2948ac469874207361db436b8516d1e2a8302",
+    "lines": 62,
+    "read_ranges": [
+      [
+        1,
+        62
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_version": "working-tree:351fd1f3a823673fc76e2cb920e2948ac469874207361db436b8516d1e2a8302",
+    "category": "人工维护文档",
+    "responsibility": "正式行为/迁移/审计证据说明",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [
+      "BE-DB-027",
+      "BE-DB-028"
+    ],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN",
+      "PASS: fresh PostgreSQL17.11/Go1.26.8 deterministic HTTP -race 30 top/60 subcase nodes 43.650s; final new2 groups/recovery19+AIconfig4 cases 6.018s; docs/audit/evidence/ai-db-final.json; production/paid provider NOT_RUN"
+    ],
+    "behavior_verified": false,
+    "final_review_basis": "原人工逐行全文审查；本次最终全文及新增修改段/实际调用链再复查，无截断漏读；动态证据仅限定对应回归，不代表全场景"
+  },
+  {
+    "path": "docs/audit/database-ai.md",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "repository": "mcmods-cn-backend",
+    "sha256": "94a407cbc4ed04ed104618cf1457bb7bd5404a93ba1d40771ece8b484fd79c75",
+    "lines": 136,
+    "read_ranges": [
+      [
+        1,
+        136
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_version": "working-tree:94a407cbc4ed04ed104618cf1457bb7bd5404a93ba1d40771ece8b484fd79c75",
+    "category": "人工维护文档",
+    "responsibility": "正式行为/迁移/审计证据说明",
+    "call_chain": [
+      "enqueue→transaction quota/Outbox→claim→provider validation→version guarded publication/completion"
+    ],
+    "issues": [],
+    "validation": [
+      "PASS: focused AI/localization PostgreSQL17 and deterministic HTTP regressions 13.130s; added context/quota/visibility 12.818s; actual provider and production NOT_RUN",
+      "PASS: fresh PostgreSQL17.11/Go1.26.8 deterministic HTTP -race 30 top/60 subcase nodes 43.650s; final new2 groups/recovery19+AIconfig4 cases 6.018s; docs/audit/evidence/ai-db-final.json; production/paid provider NOT_RUN",
+      "BE-DB-010 PASS: actual owned PostgreSQL17.11+public HTTP GET/local supplier -race2 top/5subcases5.536s docs/audit/evidence/ai-public-get.json"
+    ],
+    "behavior_verified": false,
+    "final_review_basis": "先前全文完整逐行读取；此次BE-DB-010新增/改写证据与上下文已逐行复查，其余不变；没有静态阅读充当行为证据"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "docs/audit/issues-backend-database.json",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "1c5a3c184ca54628f68b172490fa858db315c543462afa8e34a191cf85e0cd20",
+    "lines": 565,
+    "read_ranges": [
+      [
+        1,
+        565
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "category": "人工维护问题台账",
+    "responsibility": "26稳定问题ID/优先级/根因/修复和真实验证边界；014区分本次引入",
+    "call_chain": [
+      "报告↔代码与测试/脱敏执行记录"
+    ],
+    "issues": [
+      "BE-DB-001",
+      "BE-DB-002",
+      "BE-DB-003",
+      "BE-DB-004",
+      "BE-DB-005",
+      "BE-DB-006",
+      "BE-DB-007",
+      "BE-DB-008",
+      "BE-DB-009",
+      "BE-DB-010",
+      "BE-DB-011",
+      "BE-DB-012",
+      "BE-DB-013",
+      "BE-DB-014",
+      "BE-DB-015",
+      "BE-DB-016",
+      "BE-DB-017",
+      "BE-DB-018",
+      "BE-DB-019",
+      "BE-DB-020",
+      "BE-DB-021",
+      "BE-DB-022",
+      "BE-DB-023",
+      "BE-DB-024",
+      "BE-DB-025",
+      "BE-DB-026"
+    ],
+    "validation": [
+      "PASS: referenced PostgreSQL/deterministic HTTP regressions; per-issue evidence preserved; no production/provider verification",
+      "PASS: fresh PostgreSQL17.11/Go1.26.8 deterministic HTTP -race 30 top/60 subcase nodes 43.650s; final new2 groups/recovery19+AIconfig4 cases 6.018s; docs/audit/evidence/ai-db-final.json; production/paid provider NOT_RUN",
+      "BE-DB-010 PASS: actual owned PostgreSQL17.11+public HTTP GET/local supplier -race2 top/5subcases5.536s docs/audit/evidence/ai-public-get.json"
+    ],
+    "final_review_version": "working-tree:1c5a3c184ca54628f68b172490fa858db315c543462afa8e34a191cf85e0cd20",
+    "final_review_basis": "先前全文完整逐行读取；此次BE-DB-010新增/改写证据与上下文已逐行复查，其余不变；没有静态阅读充当行为证据"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/seed_crawler_recovery.go",
+    "category": "人工维护业务源码",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "2fa2000d3603fdb687cfbf354154bf3868c3c3cc323fc218ab41386fe6fbbbbb",
+    "lines": 244,
+    "read_ranges": [
+      [
+        1,
+        244
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "responsibility": "既有后台显式retry恢复completed seed旧run翻译到绑定原草稿；lease/hash/version/人工目标保护与终态补偿",
+    "call_chain": [
+      "retryAITask→prepareSeedRecoveryTx→claimTask→maintainSeedCrawlerLease/preflight→provider→persistSeedRecovery/completeAITaskTx→original owner draft GET"
+    ],
+    "issues": [
+      "BE-DB-027"
+    ],
+    "validation": [
+      "PASS: fresh owned PostgreSQL17.11/local deterministic HTTP -race; recovery19+config4 final cases 6.018s /tmp/mcmods-seed-recovery-final3-race.log; all AI30 top/60 subcase nodes43.650s /tmp/mcmods-seed-recovery-final2-race.log",
+      "FAIL-before-fix: management config true actor GET200/PUT200 overwrites unreadable stored config /tmp/mcmods-ai-config-read-red-real-actor.log",
+      "NOT_RUN: paid provider/semantic quality/production DB/real upstream import/long multi-instance"
+    ],
+    "final_review_version": "working-tree:2fa2000d3603fdb687cfbf354154bf3868c3c3cc323fc218ab41386fe6fbbbbb",
+    "final_review_basis": "本人编写后分段逐行完整读取最终内容与受影响调用链；范围1至最终行无截断；只据实际PG/HTTP/race断言登记行为证据"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/seed_crawler_recovery_integration_test.go",
+    "category": "人工维护集成测试",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "025cdd4b0d568ae53b732e812cb78516fda6eca3a2d6693050e3ad5a07607b9b",
+    "lines": 402,
+    "read_ranges": [
+      [
+        1,
+        402
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "responsibility": "19个actual ownedPG/localHTTP恢复场景，source/draft/run fence预算和不重新付费",
+    "call_chain": [
+      "isolatedAITestDatabase/seedAIFixture→actual retry+worker→userDraftItem；真实触发器故障→AI scan"
+    ],
+    "issues": [
+      "BE-DB-027"
+    ],
+    "validation": [
+      "PASS: fresh owned PostgreSQL17.11/local deterministic HTTP -race; recovery19+config4 final cases 6.018s /tmp/mcmods-seed-recovery-final3-race.log; all AI30 top/60 subcase nodes43.650s /tmp/mcmods-seed-recovery-final2-race.log",
+      "FAIL-before-fix: management config true actor GET200/PUT200 overwrites unreadable stored config /tmp/mcmods-ai-config-read-red-real-actor.log",
+      "NOT_RUN: paid provider/semantic quality/production DB/real upstream import/long multi-instance"
+    ],
+    "final_review_version": "working-tree:025cdd4b0d568ae53b732e812cb78516fda6eca3a2d6693050e3ad5a07607b9b",
+    "final_review_basis": "本人编写后分段逐行完整读取最终内容与受影响调用链；范围1至最终行无截断；只据实际PG/HTTP/race断言登记行为证据"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/ai_config_read_integration_test.go",
+    "category": "人工维护集成测试",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "1ce528fa923cb12bf56dfa90fad032de6b7e6cb9925791bd309608cf9451f4f9",
+    "lines": 91,
+    "read_ranges": [
+      [
+        1,
+        91
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "responsibility": "管理GET/PUT bad envelope/JSON/closedpool unavailable且不覆写；正常缺row",
+    "call_chain": [
+      "isolatedAITestDatabase→real encrypted system_settings→getAIConfig/updateAIConfig→checked loader→separate observer SQL"
+    ],
+    "issues": [
+      "BE-DB-028"
+    ],
+    "validation": [
+      "PASS: fresh owned PostgreSQL17.11/local deterministic HTTP -race; recovery19+config4 final cases 6.018s /tmp/mcmods-seed-recovery-final3-race.log; all AI30 top/60 subcase nodes43.650s /tmp/mcmods-seed-recovery-final2-race.log",
+      "FAIL-before-fix: management config true actor GET200/PUT200 overwrites unreadable stored config /tmp/mcmods-ai-config-read-red-real-actor.log",
+      "NOT_RUN: paid provider/semantic quality/production DB/real upstream import/long multi-instance"
+    ],
+    "final_review_version": "working-tree:1ce528fa923cb12bf56dfa90fad032de6b7e6cb9925791bd309608cf9451f4f9",
+    "final_review_basis": "本人编写后分段逐行完整读取最终内容与受影响调用链；范围1至最终行无截断；只据实际PG/HTTP/race断言登记行为证据"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/ai_public_content_get_integration_test.go",
+    "category": "人工维护集成测试",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "sha256": "fe302ca865ac491dec4b10b772cd8674be9dfa4b178254e24544197870e269e1",
+    "lines": 297,
+    "read_ranges": [
+      [
+        1,
+        297
+      ]
+    ],
+    "status": "已复查",
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "responsibility": "公开GET自动翻译enabled/失败取消同版本去重/新版重建/type-publicID隔离/多locale站点预算真实链验证",
+    "call_chain": [
+      "real GoHTTP GET route/optionalAuth→catalogEntityContent→actual localizations/source resolution→transaction quota/ai_tasks/Outbox→explicit actual worker claim/preflight→local supplier→version publication→HTTP GET target ready"
+    ],
+    "issues": [
+      "BE-DB-010"
+    ],
+    "validation": [
+      "PASS: go test -race ./internal/httpapi -run '^TestAIPublicContentGET' -count=1 -v; 2top/5subcases5.536s; /tmp/mcmods-ai-public-get-first-race.log; docs/audit/evidence/ai-public-get.json",
+      "One randomized ownership-verified PG DB per top-level; each Migrate twice; 345 actual public HTTP GET requests/local provider6requests; only synthetic data",
+      "NOT_RUN: baseline red replay/shared business rollback; actual NATS delivery/all Server middleware/browser/paid supplier quality/production DB; these are not claimed"
+    ],
+    "final_review_version": "working-tree:fe302ca865ac491dec4b10b772cd8674be9dfa4b178254e24544197870e269e1",
+    "final_review_basis": "本人新增后完整分段逐行读取最终1–297行，核对实际注册入口/handler/locale/worker/quota/Outbox调用链；动态证据来自actualPG/HTTP/race，不据无红测试声称旧版本回归通过"
+  }
+]

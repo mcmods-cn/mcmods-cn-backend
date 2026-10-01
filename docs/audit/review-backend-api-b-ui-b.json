@@ -1,0 +1,1743 @@
+{
+  "reviewer": "/root/frontend_ui_b",
+  "repository": "mcmods-cn-backend",
+  "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+  "delegated_scope": "25 tests + 17 handlers 实际完整审查；后续风险修复经API-B授权独占，紧急文件单列",
+  "files": [
+    {
+      "path": "internal/httpapi/mod_export_latest_integration_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "72e745954e5385a571eae21a8c2505af85808a10a33f66e01ab92423062c2c50",
+      "lines": 849,
+      "read_ranges": [
+        [
+          1,
+          405
+        ],
+        [
+          406,
+          849
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Exporter package real PostgreSQL import, canonical resources, locales, JEI, soft deletion and human protection assertions",
+      "call_chain": "database.Migrate → importModExportArchive → catalog resources/projections/recipes → SQL assertions",
+      "issues": [
+        "BE-UIB-003"
+      ],
+      "validation": [
+        "Static semantic review; execution not inherited from root baseline"
+      ]
+    },
+    {
+      "path": "internal/httpapi/mod_content_definition_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "219750a55e6e7273b0ba00ff4d08912308e8d2002826aa9d5cdb7129886e3a88",
+      "lines": 402,
+      "read_ranges": [
+        [
+          1,
+          402
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Canonical configured field selection/import alias priority, inferred entry types, reference relations, schema preservation",
+      "call_chain": "canonicalModContentDefinition / selectModContentEntryType / mergeModContentDefinitionPatch / matchImportedEntryType",
+      "issues": [],
+      "validation": [
+        "Static semantic review; execution not inherited from root baseline"
+      ]
+    },
+    {
+      "path": "internal/httpapi/mod_content_review_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "bacf60d8ef6862517a7ab41161731685f4f603f2a784bf7924cbdfb7a5096964",
+      "lines": 298,
+      "read_ranges": [
+        [
+          1,
+          298
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Snapshot aggregate identity/layout canonicalization/cycle rejection and immutable imported locale provenance",
+      "call_chain": "modContentSnapshotAggregateKey / canonicalizeModContentLayoutResources / preserveImmutableModContentResourceLocales",
+      "issues": [],
+      "validation": [
+        "Static semantic review; execution not inherited from root baseline"
+      ]
+    },
+    {
+      "path": "internal/httpapi/mod_handlers_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "c6f02de3e8f739680b85419699ba4793ea6ead518a6b8557cd6724745e63fb3e",
+      "lines": 275,
+      "read_ranges": [
+        [
+          1,
+          275
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Mod identity, metadata normalization/link safety/directional relationships/version restrictions/snapshot fields",
+      "call_chain": "normalizeAndValidateModRequest / revisionChanges / newModUniqueID",
+      "issues": [],
+      "validation": [
+        "Static semantic review; execution not inherited from root baseline"
+      ]
+    },
+    {
+      "path": "internal/httpapi/yggdrasil_service_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "994bc288c25a16240dc4e575700be1a0a07bd2b991a06b91125e3cb6ef84eb92",
+      "lines": 228,
+      "read_ranges": [
+        [
+          1,
+          228
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "UUID/token/RSA endpoint/raw response/signature/metadata/texture URL contracts with synthetic data",
+      "call_chain": "unsignedYggdrasilUUID / validateYggdrasilEndpoint / signPropertyValue / yggdrasilMetadata",
+      "issues": [],
+      "validation": [
+        "Static semantic review; execution not inherited from root baseline"
+      ]
+    },
+    {
+      "path": "internal/httpapi/mod_export_contract_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "3a4b002bafd6c9642bef23aa07011e98e2304f1395fa8c2837f7d1c2381ba79f",
+      "lines": 205,
+      "read_ranges": [
+        [
+          1,
+          205
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Optional real package v2/v6 recipe/template/translation contract checks, bounded ZIP reader",
+      "call_chain": "validateExportZIP / validateModExportManifest / decodeExportJEIRecipeCollection / template binding refs",
+      "issues": [],
+      "validation": [
+        "Static semantic review; execution not inherited from root baseline"
+      ]
+    },
+    {
+      "path": "internal/httpapi/mod_content_advancement_integration_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "9213606a72b7b18391382064921d97746a2ab0aa2401c3812fb02fe3e1ad763d",
+      "lines": 200,
+      "read_ranges": [
+        [
+          1,
+          200
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Advancement resource/layout real persistence, unchanged save avoids revision; pending path manually seeded active, not reviewer E2E",
+      "call_chain": "modContentResources → modContentSectionLayout → published_revision_id SQL",
+      "issues": [
+        "BE-UIB-003"
+      ],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/mod_export_resources_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "06ad50ab32a1a5427994837bf3f00b7953b36599f36b9fdff4f53ea57d582efa",
+      "lines": 190,
+      "read_ranges": [
+        [
+          1,
+          190
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Kind/locale/name normalization and loot/enchantment reference preservation, missing content not fabricated",
+      "call_chain": "normalizeExportResourceKind / localizedExportResourceNames / decodeModExportEntryData",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/permission_runtime_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "2ec7a47412e18a875deb61ba0cb87af0add2742927e6dbbd24d37cf504a4136f",
+      "lines": 174,
+      "read_ranges": [
+        [
+          1,
+          174
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Permission priority/deny/specificity/numeric limits and upload conversion/APNG/role shifts",
+      "call_chain": "permissionRulesAllow / claimsAllow / permissionRulesNumericValue / readAPNGAnimationControl",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/creator_import_handlers_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "8cca2759f16b66140755469386426d266e73ad05d8c8064f621e376d6b453b89",
+      "lines": 155,
+      "read_ranges": [
+        [
+          1,
+          155
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "HTTPS known-host creator refs and deterministic local Modrinth/CurseForge import",
+      "call_chain": "parseCreatorImportReference / importModrinthCreator / importCurseForgeAuthor",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/activity_middleware_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "3c734fb3d50be713a5a3128af2a031f0eb5077ecb054fc21cde84f26982eb660",
+      "lines": 150,
+      "read_ranges": [
+        [
+          1,
+          150
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Route/action classification and high-frequency autosave exclusion",
+      "call_chain": "inferredActivityObject / inferredActivityAction / isHighFrequencyActivityExcluded",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/catalog_import_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "d8653ff25a7e7d0dd6775062192031ec5f4e195e56f39cf79f68644266f9f20d",
+      "lines": 134,
+      "read_ranges": [
+        [
+          1,
+          134
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Actual PG canonical resource identity, staged alias reuse and snapshot overlay inside rollback tx",
+      "call_chain": "persistCatalogResources → snapshots/aliases/entity SQL",
+      "issues": [
+        "BE-UIB-003"
+      ],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/server_catalog_handlers_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "1fb7f812269874d66e86c1d260e345bbd9e091f191a1abefc3503b2011da8181",
+      "lines": 124,
+      "read_ranges": [
+        [
+          1,
+          124
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Server proof policy/summary length/tag/mod source and all-mode filters",
+      "call_chain": "normalizeAndValidateServerRequest / normalizeAndValidateServerUpdateRequest / mergeServerModRequests",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/minecraft_version_handlers_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "7bc5f225890b2af7e487701e6f8da52b3ff8eeba7af8e0f2ae1042dfab6f15d7",
+      "lines": 119,
+      "read_ranges": [
+        [
+          1,
+          119
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Version groups, 04:00 schedule, loader parsing/order and partial sync retention",
+      "call_chain": "minecraftVersionType / nextMinecraftVersionSync / applyMinecraftLoaderVersionResults",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/skin_texture_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "c83877a87067c38d1b917856b49543bbb2073f5ed4caae0435d50e782de7919d",
+      "lines": 117,
+      "read_ranges": [
+        [
+          1,
+          117
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Real PNG sanitization, hash/byte limits, cape padding pixels and UUID v4",
+      "call_chain": "sanitizeMinecraftTexture / png.Decode / newMinecraftUUID",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/server_mod_save_integration_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "dedebec0483ceafbb272892b2e84de651931d0d01989c46ab0a15ce63aa79bfe",
+      "lines": 116,
+      "read_ranges": [
+        [
+          1,
+          116
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Resolved/unresolved server mods SQL persistence and typed API data fields",
+      "call_chain": "insertMinecraftServerMods → unresolved_references → readMinecraftServerMods",
+      "issues": [
+        "BE-UIB-003"
+      ],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/governance_handlers_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "023f52be751c91eff23917f226abc16c87138226629ecb60171d6d8e5ef10d43",
+      "lines": 111,
+      "read_ranges": [
+        [
+          1,
+          111
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Per-target report reasons/other validation, anti-abuse action and public ban time states",
+      "call_chain": "reportReasons / validReportReason / antiAbuseAction / publicBanStatus",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/mod_resource_image_spec_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "5667da5598063cc67f037fbc4b0cdfe0d1be8f85cf4cda15842673c917e92040",
+      "lines": 110,
+      "read_ranges": [
+        [
+          1,
+          110
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Real PNG icon/render sizing and custom template type validation",
+      "call_chain": "validateModResourceImageSpec / validateModContentTemplateDefinition",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/review_attachment_security_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "332a415c075b8951c514a32356af40ab20952059abc77e0f5001d8d2d0832a4d",
+      "lines": 109,
+      "read_ranges": [
+        [
+          1,
+          109
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "SQL stub checks safe status/scan/lookup/lock fragments; does not prove real DB denied reads",
+      "call_chain": "lookupReviewAttachment → QueryRow SQL capture",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/admin_handlers_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "940425d2e24472b0c70bc5a63e91791f6c25d116d270b1448f42142306fa8843",
+      "lines": 95,
+      "read_ranges": [
+        [
+          1,
+          95
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Parameterized role template expansion and same-priority deny precedence",
+      "call_chain": "matchRoleTemplateCode / applyRoleVariables / applyPermissionCandidate",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/mod_icon_mirror_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "a5ddf8005c8ac037de4944cf0c72c7b5a42d4feaeca9b38c36f3af645d7308f9",
+      "lines": 84,
+      "read_ranges": [
+        [
+          1,
+          84
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Exact provider hosts, real image decoding/truncation, OSS endpoint/path boundary",
+      "call_chain": "isAllowedExternalModIconHost / externalModIconFormat / ossObjectKeyUnderEndpoint",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/community_post_handlers_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "63e572cbf3e287dd606dfcfe37d9ad7aedd3ddf86d1d47e40e3d60f5c7c8a9b8",
+      "lines": 75,
+      "read_ranges": [
+        [
+          1,
+          75
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Language heuristic sample accuracy, issue version refs, news field stripping, bounty pair and author moderation policy",
+      "call_chain": "detectCommunityPostLocale / normalizeCommunityPostSnapshot / communityPostAuthorModeratesComments",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/catalog_mod_filter_integration_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "f29a01924f19e43311e453b93bb932e4b1e77c1e4a2cb2603561e6a61bf4a9d4",
+      "lines": 70,
+      "read_ranges": [
+        [
+          1,
+          70
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Actual PG contained-mod all-match SQL inside rollback transaction",
+      "call_chain": "publicModpackCatalogFilter → modpack_mods",
+      "issues": [
+        "BE-UIB-003"
+      ],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/creator_revision_integration_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "e33afa9cd790af7c05a7660a2a575b0347eeaf3d0de7bdf9123c143dc6960635",
+      "lines": 69,
+      "read_ranges": [
+        [
+          1,
+          69
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Actual PG imported creator route and content revision entity type match",
+      "call_chain": "ensureNamedCreatorSnapshotTx → public_routes/content_revisions",
+      "issues": [
+        "BE-UIB-003"
+      ],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/project_changelog_handlers_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "7eb2a3026b11fc8e2af3f28340141980e75dadcc551c17fdce71637c3bbcc85a",
+      "lines": 66,
+      "read_ranges": [
+        [
+          1,
+          66
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Changelog localization/default body/category exclusivity and route alias",
+      "call_chain": "normalizeProjectChangelogSnapshot / normalizeChangelogTargetType",
+      "issues": [],
+      "validation": [
+        "全文静态语义审查，不继承根基线执行结果；真实/模拟测试边界按职责标注"
+      ]
+    },
+    {
+      "path": "internal/httpapi/content_review_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "8d9a7daa362a7b71a03a1b61f39ede9cd58116c0dd308ed4f742b3b5a65f21d7",
+      "lines": 760,
+      "read_ranges": [
+        [
+          1,
+          760
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "内容审核跨聚合事务、版本冲突与公开ID响应",
+      "call_chain": "reviewContentRevision → canReviewContentSubmission → change_requests/content_revisions → publish snapshot",
+      "issues": [
+        "BE-UIB-007"
+      ],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据",
+        "最终自有13顶层回归全部PASS，完整文件业务仍不等同全部运行验证；共享querySimpleRows变更独立读final diff并由root负责全family验证。"
+      ],
+      "baseline_sha256": "6fa87894d7357338b9f001ecd2bfa7d0120ae72f959685d5ab425b114da48e3b",
+      "baseline_lines": 760,
+      "baseline_read_ranges": [
+        [
+          1,
+          285
+        ],
+        [
+          286,
+          560
+        ],
+        [
+          561,
+          760
+        ]
+      ],
+      "final_sha256": "8d9a7daa362a7b71a03a1b61f39ede9cd58116c0dd308ed4f742b3b5a65f21d7",
+      "final_lines": 760,
+      "final_review_sha256": "8d9a7daa362a7b71a03a1b61f39ede9cd58116c0dd308ed4f742b3b5a65f21d7",
+      "final_review_method": "已实际完整读取原文件/原分段；实际重新读完最终全部修改差异与受影响链，保留基线行段。不是仅凭diff宣称原文件全读。"
+    },
+    {
+      "path": "internal/httpapi/mod_review_queue_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "b6d7a37214b24a13ed210fbe16b84adb99d155ab0e25d9d1183373f99e21f045",
+      "lines": 311,
+      "read_ranges": [
+        [
+          1,
+          311
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "项目/内容审核队列角色与汇总",
+      "call_chain": "canAccessAnyReviewQueue → modRevisions + content revisions unions",
+      "issues": [],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据"
+      ],
+      "baseline_sha256": "b6d7a37214b24a13ed210fbe16b84adb99d155ab0e25d9d1183373f99e21f045",
+      "baseline_lines": 311,
+      "baseline_read_ranges": [
+        [
+          1,
+          311
+        ]
+      ]
+    },
+    {
+      "path": "internal/httpapi/project_authorship_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "2868a68aa89cfe4586f3676d64de705a95d22053a7e8b17aa3a4e531e198b3df",
+      "lines": 305,
+      "read_ranges": [
+        [
+          1,
+          305
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "创作者署名关系规范化、审核与项目权限刷新",
+      "call_chain": "syncApprovedProjectAuthorshipTx / adminProjectAuthorshipRelations / reviewProjectAuthorshipRelation",
+      "issues": [
+        "BE-UIB-008"
+      ],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据",
+        "最终自有13顶层回归全部PASS，完整文件业务仍不等同全部运行验证；共享querySimpleRows变更独立读final diff并由root负责全family验证。"
+      ],
+      "baseline_sha256": "e08f857d95e096cc3301dbdfd9d48be989cae04617cab8eda494cf29c1d9396f",
+      "baseline_lines": 301,
+      "baseline_read_ranges": [
+        [
+          1,
+          301
+        ]
+      ],
+      "final_sha256": "2868a68aa89cfe4586f3676d64de705a95d22053a7e8b17aa3a4e531e198b3df",
+      "final_lines": 305,
+      "final_review_sha256": "2868a68aa89cfe4586f3676d64de705a95d22053a7e8b17aa3a4e531e198b3df",
+      "final_review_method": "已实际完整读取原文件/原分段；实际重新读完最终全部修改差异与受影响链，保留基线行段。不是仅凭diff宣称原文件全读。"
+    },
+    {
+      "path": "internal/httpapi/user_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "e92a0b9cde6189d5c845a5bd07469c3a912dce52fdcd9389f56cd1a25d29a54c",
+      "lines": 305,
+      "read_ranges": [
+        [
+          1,
+          305
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "当前用户Markdown草稿、OSS文件额度/回收、会话策略",
+      "call_chain": "getMarkdownPlaygroundDraft / userOSSFiles / userOSSFileQuota → PostgreSQL/OSS",
+      "issues": [
+        "BE-UIB-004",
+        "BE-UIB-008"
+      ],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据",
+        "最终自有13顶层回归全部PASS，完整文件业务仍不等同全部运行验证；共享querySimpleRows变更独立读final diff并由root负责全family验证。"
+      ],
+      "baseline_sha256": "70db4909bc0ce74541361462a923ef7f4b7138d3a25838ecfbac34e7392281fc",
+      "baseline_lines": 289,
+      "baseline_read_ranges": [
+        [
+          1,
+          289
+        ]
+      ],
+      "final_sha256": "e92a0b9cde6189d5c845a5bd07469c3a912dce52fdcd9389f56cd1a25d29a54c",
+      "final_lines": 305,
+      "final_review_sha256": "e92a0b9cde6189d5c845a5bd07469c3a912dce52fdcd9389f56cd1a25d29a54c",
+      "final_review_method": "已实际完整读取原文件/原分段；实际重新读完最终全部修改差异与受影响链，保留基线行段。不是仅凭diff宣称原文件全读。"
+    },
+    {
+      "path": "internal/httpapi/rating_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "ceb116df38dad779d688cc46fe6c4ec49d39de24113bdc357cf63bbf4f04dac8",
+      "lines": 452,
+      "read_ranges": [
+        [
+          1,
+          452
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "公开评分、个人评分变更及领域目标解析",
+      "call_chain": "ratings → resolve rating subject / tx upsert + aggregate",
+      "issues": [],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据"
+      ],
+      "baseline_sha256": "ceb116df38dad779d688cc46fe6c4ec49d39de24113bdc357cf63bbf4f04dac8",
+      "baseline_lines": 452,
+      "baseline_read_ranges": [
+        [
+          1,
+          452
+        ]
+      ]
+    },
+    {
+      "path": "internal/httpapi/log_share_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "9c0d2f3a0100769535455457c61b46bc05d128a21bf48d81aad988b3172c2c7d",
+      "lines": 573,
+      "read_ranges": [
+        [
+          1,
+          573
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "日志粘贴/文件发布、脱敏、历史展示、到期/删除与下载权限",
+      "call_chain": "createPaste/FileLogShare → redactLogText/persistLogShare → loadLogShare → public/download",
+      "issues": [
+        "BE-UIB-006"
+      ],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据",
+        "最终自有13顶层回归全部PASS，完整文件业务仍不等同全部运行验证；共享querySimpleRows变更独立读final diff并由root负责全family验证。"
+      ],
+      "baseline_sha256": "952655f1cbd0dfe5e65ccbff64b62f8e59ef8eb59105086e77ad3fa21b9312c8",
+      "baseline_lines": 562,
+      "baseline_read_ranges": [
+        [
+          1,
+          290
+        ],
+        [
+          291,
+          562
+        ]
+      ],
+      "final_sha256": "9c0d2f3a0100769535455457c61b46bc05d128a21bf48d81aad988b3172c2c7d",
+      "final_lines": 573,
+      "final_review_sha256": "9c0d2f3a0100769535455457c61b46bc05d128a21bf48d81aad988b3172c2c7d",
+      "final_review_method": "已实际完整读取原文件/原分段；实际重新读完最终全部修改差异与受影响链，保留基线行段。不是仅凭diff宣称原文件全读。"
+    },
+    {
+      "path": "internal/httpapi/yggdrasil_profiles.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "7b4c1af3db25eb1f889d6344a490c8a8fd6391f5d051fa73182c9272f9f76842",
+      "lines": 515,
+      "read_ranges": [
+        [
+          1,
+          285
+        ],
+        [
+          286,
+          515
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "Yggdrasil角色绑定与材质来源、用户名/UUID匹配",
+      "call_chain": "yggdrasilProfiles → skin assets/live textures → texture/OSS access",
+      "issues": [],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据"
+      ],
+      "baseline_sha256": "7b4c1af3db25eb1f889d6344a490c8a8fd6391f5d051fa73182c9272f9f76842",
+      "baseline_lines": 515,
+      "baseline_read_ranges": [
+        [
+          1,
+          285
+        ],
+        [
+          286,
+          515
+        ]
+      ]
+    },
+    {
+      "path": "internal/httpapi/draft_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "a12afa2c5332bec7fc0e9f7422143f0954c1d1543435f1fc28c4cf3375d67f1e",
+      "lines": 336,
+      "read_ranges": [
+        [
+          1,
+          336
+        ],
+        [
+          145,
+          220
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "用户草稿CRUD、归属、完成状态及载荷",
+      "call_chain": "userDrafts / saveUserDraft / completeUserDraft → drafts JSON",
+      "issues": [],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据"
+      ],
+      "baseline_sha256": "a12afa2c5332bec7fc0e9f7422143f0954c1d1543435f1fc28c4cf3375d67f1e",
+      "baseline_lines": 336,
+      "baseline_read_ranges": [
+        [
+          1,
+          336
+        ],
+        [
+          145,
+          220
+        ]
+      ]
+    },
+    {
+      "path": "internal/httpapi/message_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "3c7214fd3fe9bede9d0ef79062bb748731720c07d64b5a92b16a6ba26833bc46",
+      "lines": 328,
+      "read_ranges": [
+        [
+          1,
+          328
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "私信会话参与者授权、已读、发送与通知",
+      "call_chain": "conversations/conversationMessages/sendConversationMessage → PG + cache + queue",
+      "issues": [
+        "BE-UIB-005"
+      ],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据",
+        "最终自有13顶层回归全部PASS，完整文件业务仍不等同全部运行验证；共享querySimpleRows变更独立读final diff并由root负责全family验证。"
+      ],
+      "baseline_sha256": "f1cec19ece85487c51e691d2c903d20519393197e17d55c89cde7860b56220d3",
+      "baseline_lines": 317,
+      "baseline_read_ranges": [
+        [
+          1,
+          317
+        ]
+      ],
+      "final_sha256": "3c7214fd3fe9bede9d0ef79062bb748731720c07d64b5a92b16a6ba26833bc46",
+      "final_lines": 328,
+      "final_review_sha256": "3c7214fd3fe9bede9d0ef79062bb748731720c07d64b5a92b16a6ba26833bc46",
+      "final_review_method": "已实际完整读取原文件/原分段；实际重新读完最终全部修改差异与受影响链，保留基线行段。不是仅凭diff宣称原文件全读。"
+    },
+    {
+      "path": "internal/httpapi/anti_abuse_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "bf13addd8dcd85095fde314db61067ffadefd48f30dbe0056765ee3ca9a17648",
+      "lines": 395,
+      "read_ranges": [
+        [
+          1,
+          395
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "管理员反滥用概览、敏感查看授权、限制与机器人规则",
+      "call_chain": "adminAntiAbuseOverview/events/restrictions → antiabuse service + querySimpleRows",
+      "issues": [
+        "BE-UIB-008"
+      ],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据",
+        "最终自有13顶层回归全部PASS，完整文件业务仍不等同全部运行验证；共享querySimpleRows变更独立读final diff并由root负责全family验证。"
+      ],
+      "baseline_sha256": "b0652622e90ab7a9cd48b796e2b567adc8e35e17fb7e8843417e6dc2452157d8",
+      "baseline_lines": 362,
+      "baseline_read_ranges": [
+        [
+          1,
+          362
+        ]
+      ],
+      "final_sha256": "bf13addd8dcd85095fde314db61067ffadefd48f30dbe0056765ee3ca9a17648",
+      "final_lines": 395,
+      "final_review_sha256": "bf13addd8dcd85095fde314db61067ffadefd48f30dbe0056765ee3ca9a17648",
+      "final_review_method": "已实际完整读取原文件/原分段；实际重新读完最终全部修改差异与受影响链，保留基线行段。不是仅凭diff宣称原文件全读。"
+    },
+    {
+      "path": "internal/httpapi/user_statistics_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "01819d6f85db07cc4123b0b56e505be28854482384239ab36139047336bdaeb3",
+      "lines": 367,
+      "read_ranges": [
+        [
+          1,
+          367
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "公开/个人统计与活跃日期、时区/范围计算",
+      "call_chain": "userStatistics → loadUserPrivateStatistics/queryUserActivityStatistics → statistics totals/daily",
+      "issues": [
+        "BE-UIB-008"
+      ],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据",
+        "最终自有13顶层回归全部PASS，完整文件业务仍不等同全部运行验证；共享querySimpleRows变更独立读final diff并由root负责全family验证。"
+      ],
+      "baseline_sha256": "9d5a9ce544c1643891ffdf4fc00494ab689182eb97413105f5e1cd2fabe6b677",
+      "baseline_lines": 361,
+      "baseline_read_ranges": [
+        [
+          1,
+          361
+        ]
+      ],
+      "final_sha256": "01819d6f85db07cc4123b0b56e505be28854482384239ab36139047336bdaeb3",
+      "final_lines": 367,
+      "final_review_sha256": "01819d6f85db07cc4123b0b56e505be28854482384239ab36139047336bdaeb3",
+      "final_review_method": "已实际完整读取原文件/原分段；实际重新读完最终全部修改差异与受影响链，保留基线行段。不是仅凭diff宣称原文件全读。"
+    },
+    {
+      "path": "internal/httpapi/activity_retention_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "092051c807906ab150f5dffd6995bef6a2ebc5bdea3d34146113c3d74d779224",
+      "lines": 633,
+      "read_ranges": [
+        [
+          1,
+          633
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "活动保留策略、预览/确认、分批删除、自动清理互斥",
+      "call_chain": "preview/executeActivityCleanup → policy+confirmation+atomic state → deleteActivityEventsInBatches / worker.prune",
+      "issues": [
+        "BE-UIB-008"
+      ],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据",
+        "最终自有13顶层回归全部PASS，完整文件业务仍不等同全部运行验证；共享querySimpleRows变更独立读final diff并由root负责全family验证。"
+      ],
+      "baseline_sha256": "98accc38a9ac6e9851d475251db329be84144bae477685292692ac7b57fc16f2",
+      "baseline_lines": 628,
+      "baseline_read_ranges": [
+        [
+          1,
+          335
+        ],
+        [
+          336,
+          628
+        ]
+      ],
+      "final_sha256": "092051c807906ab150f5dffd6995bef6a2ebc5bdea3d34146113c3d74d779224",
+      "final_lines": 633,
+      "final_review_sha256": "092051c807906ab150f5dffd6995bef6a2ebc5bdea3d34146113c3d74d779224",
+      "final_review_method": "已实际完整读取原文件/原分段；实际重新读完最终全部修改差异与受影响链，保留基线行段。不是仅凭diff宣称原文件全读。"
+    },
+    {
+      "path": "internal/httpapi/project_automation_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "76d891ca4bd952f41ace837fc89ed12384eea0b27988fead707254abd2d36af5",
+      "lines": 378,
+      "read_ranges": [
+        [
+          1,
+          378
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "项目源导入/自动化配置、权限、最近运行",
+      "call_chain": "projectAutomationConfig / worker statuses → settings and jobs",
+      "issues": [],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据",
+        "最终自有13顶层回归全部PASS，完整文件业务仍不等同全部运行验证；共享querySimpleRows变更独立读final diff并由root负责全family验证。"
+      ],
+      "baseline_sha256": "1d3df05e1497cd7d912d0cc5027f586a1727d2b2c1149a8bc21e497012d858e7",
+      "baseline_lines": 358,
+      "baseline_read_ranges": [
+        [
+          1,
+          358
+        ]
+      ],
+      "final_sha256": "76d891ca4bd952f41ace837fc89ed12384eea0b27988fead707254abd2d36af5",
+      "final_lines": 378,
+      "final_review_sha256": "76d891ca4bd952f41ace837fc89ed12384eea0b27988fead707254abd2d36af5",
+      "final_review_method": "已实际完整读取原文件/原分段；实际重新读完最终全部修改差异与受影响链，保留基线行段。不是仅凭diff宣称原文件全读。"
+    },
+    {
+      "path": "internal/httpapi/project_maintenance_automation.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "289b53facf83b572f14590c798378cd78d9d12111f94118c08ccbb4029dfc1b9",
+      "lines": 235,
+      "read_ranges": [
+        [
+          1,
+          235
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "项目维护任务过滤、每项任务状态及失败",
+      "call_chain": "maintenance worker → source project selection → imports/query updates",
+      "issues": [],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据",
+        "API-A新增85–88 token lease锁；UI-B已真实最终1–235完整复读。API-A owned PG -race late_maintenance旧claim拒绝PASS /tmp/mcmods-api-a-new-five-final.log；不冒充new maintenance正向场景"
+      ],
+      "baseline_sha256": "15af84ab9385616297469cc2c2a2d0e08b402477b3a1e19b456bf51c71683737",
+      "baseline_lines": 232,
+      "baseline_read_ranges": [
+        [
+          1,
+          232
+        ]
+      ]
+    },
+    {
+      "path": "internal/httpapi/community_post_bounty_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "9f3a80f713016223995a93629a7a05b1728438453e5d8f26cb8abc6aed27488c",
+      "lines": 253,
+      "read_ranges": [
+        [
+          1,
+          253
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "社区悬赏领取、状态转移与经济并发",
+      "call_chain": "postBounty → permission/owner/transaction/settlement",
+      "issues": [],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据"
+      ],
+      "baseline_sha256": "9f3a80f713016223995a93629a7a05b1728438453e5d8f26cb8abc6aed27488c",
+      "baseline_lines": 253,
+      "baseline_read_ranges": [
+        [
+          1,
+          253
+        ]
+      ]
+    },
+    {
+      "path": "internal/httpapi/server_catalog_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "0e89f1be469011b44e39e07c03594bc6986bb676017142cddb9e2b277a1162f9",
+      "lines": 1020,
+      "read_ranges": [
+        [
+          1,
+          285
+        ],
+        [
+          286,
+          570
+        ],
+        [
+          571,
+          825
+        ],
+        [
+          826,
+          1020
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "服务器元数据、证明文件、规则/整合包/mod关联与版本",
+      "call_chain": "server catalog save/review → trusted OSS validation + associations/read gallery",
+      "issues": [],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据"
+      ],
+      "baseline_sha256": "0e89f1be469011b44e39e07c03594bc6986bb676017142cddb9e2b277a1162f9",
+      "baseline_lines": 1020,
+      "baseline_read_ranges": [
+        [
+          1,
+          285
+        ],
+        [
+          286,
+          570
+        ],
+        [
+          571,
+          825
+        ],
+        [
+          826,
+          1020
+        ]
+      ]
+    },
+    {
+      "path": "internal/httpapi/modpack_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "625e164984f04ca74fdb7bb7ddf23726d90dde54fe31667180cec3defd0e7b7f",
+      "lines": 1065,
+      "read_ranges": [
+        [
+          1,
+          1065
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "整合包目录筛选、创建编辑、公开关联资源、图片/历史权限",
+      "call_chain": "catalog/loadModpackAssociations → approved mods lateral resolution / tx revisions/gallery",
+      "issues": [
+        "BE-UIB-008"
+      ],
+      "validation": [
+        "已实际逐段全文读与语义审查，长文件截断已补读；不继承全库基线测试作为本文件行为证据",
+        "最终自有13顶层回归全部PASS，完整文件业务仍不等同全部运行验证；共享querySimpleRows变更独立读final diff并由root负责全family验证。"
+      ],
+      "baseline_sha256": "0b0b08c4bdbfd480f39efd9bb2aec2f2fdedd3510497f530517091d4ebb34138",
+      "baseline_lines": 1045,
+      "baseline_read_ranges": [
+        [
+          1,
+          280
+        ],
+        [
+          281,
+          565
+        ],
+        [
+          566,
+          825
+        ],
+        [
+          826,
+          1045
+        ]
+      ],
+      "final_sha256": "625e164984f04ca74fdb7bb7ddf23726d90dde54fe31667180cec3defd0e7b7f",
+      "final_lines": 1065,
+      "final_review_sha256": "625e164984f04ca74fdb7bb7ddf23726d90dde54fe31667180cec3defd0e7b7f",
+      "final_review_method": "已实际完整读取原文件/原分段；实际重新读完最终全部修改差异与受影响链，保留基线行段。不是仅凭diff宣称原文件全读。"
+    },
+    {
+      "path": "internal/httpapi/log_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "bef1d126534a02e1fe29e86314d6c67ac56938492f9b411a5bd57eb8ae59af26",
+      "lines": 564,
+      "read_ranges": [
+        [
+          1,
+          564
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "全局访问日志、中间件、管理员日志/浏览链路/前端错误写入",
+      "call_chain": "NewServer.logAccess → writeAppLog → app_logs → appLogs",
+      "issues": [
+        "BE-UIB-001"
+      ],
+      "validation": [
+        "原文件全文/最终修改段复查；新增文件全文实际读取",
+        "Go1.26.8定向单元与专属PG集成PASS，go vet ./internal/httpapi PASS",
+        "最终自有13顶层回归全部PASS，完整文件业务仍不等同全部运行验证；共享querySimpleRows变更独立读final diff并由root负责全family验证。",
+        "Root追加cleanupLogs错误聚合与保存后503 LOG_CLEANUP_FAILED：新增全部diff实际读完，既有脱敏行为不变；新增cleanup路径执行由root负责。"
+      ],
+      "scope": "urgent additions outside delegated 42",
+      "baseline_lines": 542,
+      "baseline_sha256": "232046963f4ba53f85ee0309ade4c771261ead28c4ca55b975b5951498b84e4b",
+      "baseline_read_ranges": [
+        [
+          1,
+          542
+        ]
+      ],
+      "final_review_sha256": "bef1d126534a02e1fe29e86314d6c67ac56938492f9b411a5bd57eb8ae59af26",
+      "final_review_method": "已实际完整读取原文件/原分段；实际重新读完最终全部修改差异与受影响链，保留基线行段。不是仅凭diff宣称原文件全读。"
+    },
+    {
+      "path": "internal/httpapi/log_query_redaction_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "0437c8d2f56135b0a325ca8a801628dec22368ff8c54481b7aaa93b8825ec83e",
+      "lines": 44,
+      "read_ranges": [
+        [
+          1,
+          44
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "专属PG真实中间件日志、5类查询和业务参数不变",
+      "call_chain": "isolatedAITestDatabase → logAccess → app_logs query",
+      "issues": [
+        "BE-UIB-001"
+      ],
+      "validation": [
+        "原文件全文/最终修改段复查；新增文件全文实际读取",
+        "Go1.26.8定向单元与专属PG集成PASS，go vet ./internal/httpapi PASS"
+      ],
+      "scope": "urgent additions outside delegated 42"
+    },
+    {
+      "path": "internal/httpapi/sticker_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "82bdee548dce8b48d2695929f854246e17e664f63cb2d3745a43d4b4a174a67b",
+      "lines": 624,
+      "read_ranges": [
+        [
+          1,
+          624
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "表情包/表情权限、事务、翻译目录、OSS哈希/MIME及解码安全",
+      "call_chain": "sticker catalog/admin CRUD → validateStickerOSSFile → validateStickerGIF → OSS/database",
+      "issues": [
+        "BE-APIB-016",
+        "BE-UIB-002"
+      ],
+      "validation": [
+        "原文件全文/最终修改段复查；新增文件全文实际读取",
+        "Go1.26.8定向单元与专属PG集成PASS，go vet ./internal/httpapi PASS"
+      ],
+      "scope": "urgent additions outside delegated 42"
+    },
+    {
+      "path": "internal/httpapi/sticker_gif_bounds.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "78888f4e0186f955578c7248f9c695fdd0ce26f42c6cb81f7942d737fecbb739",
+      "lines": 177,
+      "read_ranges": [
+        [
+          1,
+          177
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "有界GIF编码块预检查在LZW/帧buffer解码之前保护累计限制",
+      "call_chain": "validateStickerGIF → preflightStickerGIF → gif.DecodeAll",
+      "issues": [
+        "BE-APIB-016"
+      ],
+      "validation": [
+        "原文件全文/最终修改段复查；新增文件全文实际读取",
+        "Go1.26.8定向单元与专属PG集成PASS，go vet ./internal/httpapi PASS"
+      ],
+      "scope": "urgent additions outside delegated 42"
+    },
+    {
+      "path": "internal/httpapi/sticker_gif_bounds_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "7cfbeca65dd14963021e6250ffccca5e384268b2c4ec9c146bbb1f5fa7b29ac4",
+      "lines": 121,
+      "read_ranges": [
+        [
+          1,
+          121
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "真实GIF编解码合成超限/有效/损坏及拒绝分配回归",
+      "call_chain": "gif.EncodeAll → validateStickerGIF → testing.Benchmark",
+      "issues": [
+        "BE-APIB-016"
+      ],
+      "validation": [
+        "原文件全文/最终修改段复查；新增文件全文实际读取",
+        "Go1.26.8定向单元与专属PG集成PASS，go vet ./internal/httpapi PASS"
+      ],
+      "scope": "urgent additions outside delegated 42"
+    },
+    {
+      "path": "internal/httpapi/sticker_catalog_failure_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "b53efcbb9405f8369f6d1ca85352c3daeba37990028cb7d777c929bde145ba95",
+      "lines": 28,
+      "read_ranges": [
+        [
+          1,
+          28
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "专属PG目录版本读失败不假成功",
+      "call_chain": "isolatedAITestDatabase → publicStickerCatalog → version query",
+      "issues": [
+        "BE-UIB-002"
+      ],
+      "validation": [
+        "原文件全文/最终修改段复查；新增文件全文实际读取",
+        "Go1.26.8定向单元与专属PG集成PASS，go vet ./internal/httpapi PASS"
+      ],
+      "scope": "urgent additions outside delegated 42"
+    },
+    {
+      "path": "docs/access-log-privacy.md",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "6fc2ca04bd631a592877722310d280b52c85ee3e28c258710a2b1fb3c2e29e34",
+      "lines": 7,
+      "read_ranges": [
+        [
+          1,
+          7
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "正式日志查询隐私规则、兼容性与历史数据权限边界",
+      "call_chain": "logAccess/log_query_redaction_test.go",
+      "issues": [
+        "BE-UIB-001"
+      ],
+      "validation": [
+        "原文件全文/最终修改段复查；新增文件全文实际读取",
+        "文档与实际代码/测试交叉复查"
+      ],
+      "scope": "urgent additions outside delegated 42"
+    },
+    {
+      "path": "docs/sticker-image-safety.md",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "b4d018ee029d81c5ea89339ddde769aa2906e8f54783a1710a0d42ee5222ac2b",
+      "lines": 11,
+      "read_ranges": [
+        [
+          1,
+          11
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "正式GIF编码/解码边界、目录错误、部署兼容性",
+      "call_chain": "sticker_handlers.go/sticker_gif_bounds.go/tests",
+      "issues": [
+        "BE-APIB-016",
+        "BE-UIB-002"
+      ],
+      "validation": [
+        "原文件全文/最终修改段复查；新增文件全文实际读取",
+        "文档与实际代码/测试交叉复查",
+        "最终自有13顶层回归全部PASS，完整文件业务仍不等同全部运行验证；共享querySimpleRows变更独立读final diff并由root负责全family验证。"
+      ],
+      "scope": "urgent additions outside delegated 42",
+      "baseline_lines": 11,
+      "baseline_sha256": "e4d4775b532b2860270c94bd1328f14e1671b1af834ef38eae2affec2d0fcc68",
+      "baseline_read_ranges": [
+        [
+          1,
+          11
+        ]
+      ],
+      "final_review_sha256": "b4d018ee029d81c5ea89339ddde769aa2906e8f54783a1710a0d42ee5222ac2b",
+      "final_review_method": "已实际完整读取原文件/原分段；实际重新读完最终全部修改差异与受影响链，保留基线行段。不是仅凭diff宣称原文件全读。"
+    },
+    {
+      "path": "internal/httpapi/playground_draft_failure_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "origin": "本任务新增，已逐文件完整读取最终内容",
+      "sha256": "4fc4e0e097da69e620101cefc498c07d43caabbb1555ca28f75536151af3d86e",
+      "lines": 59,
+      "read_ranges": [
+        [
+          1,
+          59
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "真实PG草稿无数据/既有数据/读故障与恢复回归",
+      "call_chain": "isolatedAITestDatabase → getMarkdownPlaygroundDraft → markdown_playground_drafts",
+      "issues": [
+        "BE-UIB-004"
+      ],
+      "validation": [
+        "最终定向真实执行13顶层PASS（包括本文件相关测试）；报告/正式文档按真实代码与证据复查，非浏览器/生产运行证明"
+      ],
+      "final_review_sha256": "4fc4e0e097da69e620101cefc498c07d43caabbb1555ca28f75536151af3d86e"
+    },
+    {
+      "path": "internal/httpapi/message_read_failure_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "origin": "本任务新增，已逐文件完整读取最终内容",
+      "sha256": "e7940e34be658e3e7cc91873191fe57f9cbf40dac1d47d03c4c481fd78652d60",
+      "lines": 56,
+      "read_ranges": [
+        [
+          1,
+          56
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "真实PG已读触发器故障、未读保持、非参与者403回归",
+      "call_chain": "isolatedAITestDatabase → conversationMessages → direct_messages trigger",
+      "issues": [
+        "BE-UIB-005"
+      ],
+      "validation": [
+        "最终定向真实执行13顶层PASS（包括本文件相关测试）；报告/正式文档按真实代码与证据复查，非浏览器/生产运行证明"
+      ],
+      "final_review_sha256": "e7940e34be658e3e7cc91873191fe57f9cbf40dac1d47d03c4c481fd78652d60"
+    },
+    {
+      "path": "internal/httpapi/log_share_quote_redaction_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "origin": "本任务新增，已逐文件完整读取最终内容",
+      "sha256": "f906d2281b05ad21cefe1ca4e13bcd2f2714bda596c47064a3af39de7542cd1d",
+      "lines": 91,
+      "read_ranges": [
+        [
+          1,
+          91
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "完整引号字段/URL脱敏、分享公开展示与历史v1追加保护不回写回归",
+      "call_chain": "redactLogText → createPasteLogShare/publicLogShare → loadLogShare → isolated PG",
+      "issues": [
+        "BE-UIB-006"
+      ],
+      "validation": [
+        "最终定向真实执行13顶层PASS（包括本文件相关测试）；报告/正式文档按真实代码与证据复查，非浏览器/生产运行证明"
+      ],
+      "final_review_sha256": "f906d2281b05ad21cefe1ca4e13bcd2f2714bda596c47064a3af39de7542cd1d"
+    },
+    {
+      "path": "internal/httpapi/skin_review_contract_integration_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "origin": "本任务新增，已逐文件完整读取最终内容",
+      "sha256": "815539df26be63b72b6a3d587c085323189126ad58385bab2aba0f14ce3a0813",
+      "lines": 77,
+      "read_ranges": [
+        [
+          1,
+          77
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "真实PG皮肤审核公开revisionId、状态持久化与重复409契约回归",
+      "call_chain": "createContentRevisionTx → reviewContentRevision → change_requests",
+      "issues": [
+        "BE-UIB-007"
+      ],
+      "validation": [
+        "最终定向真实执行13顶层PASS（包括本文件相关测试）；报告/正式文档按真实代码与证据复查，非浏览器/生产运行证明"
+      ],
+      "final_review_sha256": "815539df26be63b72b6a3d587c085323189126ad58385bab2aba0f14ce3a0813"
+    },
+    {
+      "path": "internal/httpapi/user_quota_failure_integration_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "origin": "本任务新增，已逐文件完整读取最终内容",
+      "sha256": "0d6051c0a1e4f62632997a458272de72152ed6b797b0eb00a76432fc919feeec",
+      "lines": 30,
+      "read_ranges": [
+        [
+          1,
+          30
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "真实PG额度读取错误返回500回归",
+      "call_chain": "isolatedAITestDatabase → userOSSFileQuota → oss_files",
+      "issues": [
+        "BE-UIB-008"
+      ],
+      "validation": [
+        "最终定向真实执行13顶层PASS（包括本文件相关测试）；报告/正式文档按真实代码与证据复查，非浏览器/生产运行证明"
+      ],
+      "final_review_sha256": "0d6051c0a1e4f62632997a458272de72152ed6b797b0eb00a76432fc919feeec"
+    },
+    {
+      "path": "internal/httpapi/modpack_association_failure_integration_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "origin": "本任务新增，已逐文件完整读取最终内容",
+      "sha256": "abb9d4e4a9b23bf0eda93a2220baf2763320614e3ceed8c34aef4a615edcf69b",
+      "lines": 18,
+      "read_ranges": [
+        [
+          1,
+          18
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "真实PG延迟执行异常view，关联迭代错误不得丢失回归",
+      "call_chain": "isolatedAITestDatabase → loadModpackAssociations → rows.Err",
+      "issues": [
+        "BE-UIB-008"
+      ],
+      "validation": [
+        "最终定向真实执行13顶层PASS（包括本文件相关测试）；报告/正式文档按真实代码与证据复查，非浏览器/生产运行证明"
+      ],
+      "final_review_sha256": "abb9d4e4a9b23bf0eda93a2220baf2763320614e3ceed8c34aef4a615edcf69b"
+    },
+    {
+      "path": "docs/log-share-redaction.md",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "origin": "本任务新增，已逐文件完整读取最终内容",
+      "sha256": "6f4f01a010cc660294800010a6aabae2d904315d44bdbf5e43f3c59b6120f91c",
+      "lines": 9,
+      "read_ranges": [
+        [
+          1,
+          9
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "日志分享当前/存储版本、历史只读保护和发布限制正式说明",
+      "call_chain": "log_share_handlers.go → public read/download",
+      "issues": [
+        "BE-UIB-006"
+      ],
+      "validation": [
+        "最终定向真实执行13顶层PASS（包括本文件相关测试）；报告/正式文档按真实代码与证据复查，非浏览器/生产运行证明"
+      ],
+      "final_review_sha256": "6f4f01a010cc660294800010a6aabae2d904315d44bdbf5e43f3c59b6120f91c"
+    },
+    {
+      "path": "docs/user-draft-message-reliability.md",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "origin": "本任务新增，已逐文件完整读取最终内容",
+      "sha256": "06b4bf12515736238a254b7ab8a8e4cdb76c1bb0aa8153e2171b9cf69e8e2b9b",
+      "lines": 11,
+      "read_ranges": [
+        [
+          1,
+          11
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "草稿、私信、额度、关联、清理、皮肤失败恢复正式说明",
+      "call_chain": "frontend drafts/messages → backend owner/participant handlers → PG",
+      "issues": [
+        "BE-UIB-004",
+        "BE-UIB-005",
+        "BE-UIB-007",
+        "BE-UIB-008"
+      ],
+      "validation": [
+        "最终定向真实执行13顶层PASS（包括本文件相关测试）；报告/正式文档按真实代码与证据复查，非浏览器/生产运行证明"
+      ],
+      "final_review_sha256": "06b4bf12515736238a254b7ab8a8e4cdb76c1bb0aa8153e2171b9cf69e8e2b9b"
+    },
+    {
+      "path": "docs/audit/backend-api-b-ui-b.md",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "origin": "本任务新增，已逐文件完整读取最终内容",
+      "sha256": "4fa5ea7ca2690c5060089950f0ceab64462191c942d35b9f0a1db12ff1b97204",
+      "lines": 42,
+      "read_ranges": [
+        [
+          1,
+          42
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "子范围审查/模块角色/实际证据/兼容与剩余风险报告",
+      "call_chain": "review-backend-api-b-ui-b.json → validation evidence → root final delivery",
+      "issues": [],
+      "validation": [
+        "最终定向真实执行13顶层PASS（包括本文件相关测试）；报告/正式文档按真实代码与证据复查，非浏览器/生产运行证明",
+        "Root明确授权2026-10-01：最终TestMain七包数量修正；APIB完整读42行小表+单处差异复查，服务身份/PG证据不扩为生产健康"
+      ],
+      "final_review_sha256": "4fa5ea7ca2690c5060089950f0ceab64462191c942d35b9f0a1db12ff1b97204"
+    },
+    {
+      "path": "docs/audit/backend-ui-b-validation.json",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "origin": "本任务新增实际验证记录，最终全部内容人工读完",
+      "sha256": "d21bc1dcf8823dce817a2b37a3c70f99ed041805f607e4e41177279b2c94df30",
+      "lines": 139,
+      "read_ranges": [
+        [
+          1,
+          139
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "保存定向命令、退出码、34事件结果、真实旧行为红灯、fixture/in-flight编译历史失败及外部验证边界",
+      "call_chain": "go test/vet/diffcheck actual evidence → backend-api-b-ui-b.md → root final report",
+      "issues": [
+        "BE-UIB-001",
+        "BE-UIB-002",
+        "BE-UIB-003",
+        "BE-UIB-004",
+        "BE-UIB-005",
+        "BE-UIB-006",
+        "BE-UIB-007",
+        "BE-UIB-008",
+        "BE-APIB-016"
+      ],
+      "validation": [
+        "实际JSON测试结果及日志对照；不含凭据/真实用户数据；文档全读不等于业务行为测试"
+      ],
+      "final_review_sha256": "d21bc1dcf8823dce817a2b37a3c70f99ed041805f607e4e41177279b2c94df30"
+    }
+  ],
+  "delegated_baseline_counts": {
+    "files": 42,
+    "lines": 12627,
+    "complete_semantic": 42,
+    "partial": 0,
+    "unread": 0
+  },
+  "scope_counts": {
+    "delegated_original": 42,
+    "complete_original": 42,
+    "partial_original": 0,
+    "unread_original": 0,
+    "additional_source_test_document_files": 18,
+    "total_records": 60,
+    "final_lines": 14861,
+    "exclusions": 0
+  },
+  "evidence_boundary": "原25测试静态全文阅读不继承行为结论；实际自有定向回归和race/静态检查单列在backend-ui-b-validation.json。共享root修改的query-family完整原文+最终diff已读，跨链其他文件仅记录引用，不冒充全文件覆盖。"
+}

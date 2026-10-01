@@ -1,0 +1,37 @@
+{
+  "repository": "mcmods-cn-backend",
+  "baseline": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+  "issue": "BE-DB-010",
+  "environment": {
+    "go": "1.26.8",
+    "postgresql": "17.11",
+    "databases": "one ownership-marker verified randomized DB per top-level test; Migrate twice; synthetic data only",
+    "provider": "deterministic local httptest HTTP; zero real AI calls"
+  },
+  "command": "go test -race ./internal/httpapi -run '^TestAIPublicContentGET' -count=1 -v",
+  "result": "PASS",
+  "exit_code": 0,
+  "seconds": 5.536,
+  "top_level_tests": [
+    "TestAIPublicContentGETAutomaticTranslationBoundariesIntegration",
+    "TestAIPublicContentGETSiteBudgetBoundsDifferentLocalesIntegration"
+  ],
+  "subcase_count": 5,
+  "public_http_get_requests": 345,
+  "mock_provider_requests": 6,
+  "log": "/tmp/mcmods-ai-public-get-first-race.log",
+  "assertions": [
+    "disabled usable model/provider with24GET: no AI task/Outbox/provider request and usable fallback",
+    "enabled24concurrentGET: one identity/task/Outbox, provider not called by GET; actual worker completion then24GET ready without new charge",
+    "real503failed and real admin cancellation: same revision24refreshes keep same task and terminal message redelivery makes no provider request",
+    "source revision2:24refreshes create exactly one new task with source snapshot2 and actual worker publishes target",
+    "mod/tag same integer internal IDs: independent typed public identity keys/task payloads and Outbox rows",
+    "2request site limit:128GET across6missing locales plusfailed refreshes produce exactly2tasks/Outbox/provider calls"
+  ],
+  "boundaries": [
+    "only public registered route optionalAuth+actualhandler HTTP exercised; not all Server wrappers/browser acceptance",
+    "actual database Outbox, consumed by direct invocation of real worker; not actual NATS delivery transport",
+    "deterministic mock proves orchestration; not supplier semantic quality/billing",
+    "test-only evidence addition on existing repair; shared baseline not rolled back for red-test demonstration"
+  ]
+}

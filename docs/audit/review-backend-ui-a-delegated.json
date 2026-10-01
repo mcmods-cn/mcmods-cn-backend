@@ -1,0 +1,306 @@
+{
+  "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+  "reviewer": "frontend_ui_a",
+  "delegated_from": "root/backend_api_a",
+  "files": [
+    {
+      "path": "internal/httpapi/simple_project_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": "3b09dc890ee147ce1b0c2a4f514b22a7291820cc8321df473267751f952a7376",
+      "baseline_lines": 1092,
+      "baseline_read_ranges": [
+        [
+          1,
+          270
+        ],
+        [
+          271,
+          545
+        ],
+        [
+          546,
+          820
+        ],
+        [
+          821,
+          1092
+        ]
+      ],
+      "sha256": "019b0888ebd0bafe97afe82a0bba2ee8344d73e75c9bc1ef9b29cf4352f17bdd",
+      "lines": 1181,
+      "read_ranges": [
+        [
+          1,
+          1181
+        ]
+      ],
+      "read_basis": "人工基线全文语义审查，最终改动/上下文重新读取；未改行逐行比对基线。指纹不替代审查。",
+      "final_recheck_ranges": [
+        [
+          20,
+          21
+        ],
+        [
+          104,
+          104
+        ],
+        [
+          106,
+          106
+        ],
+        [
+          108,
+          108
+        ],
+        [
+          127,
+          129
+        ],
+        [
+          211,
+          211
+        ],
+        [
+          249,
+          251
+        ],
+        [
+          253,
+          253
+        ],
+        [
+          257,
+          260
+        ],
+        [
+          293,
+          293
+        ],
+        [
+          301,
+          304
+        ],
+        [
+          309,
+          309
+        ],
+        [
+          312,
+          312
+        ],
+        [
+          316,
+          319
+        ],
+        [
+          364,
+          368
+        ],
+        [
+          380,
+          387
+        ],
+        [
+          456,
+          456
+        ],
+        [
+          460,
+          463
+        ],
+        [
+          483,
+          487
+        ],
+        [
+          834,
+          841
+        ],
+        [
+          890,
+          890
+        ],
+        [
+          896,
+          896
+        ],
+        [
+          919,
+          922
+        ],
+        [
+          937,
+          940
+        ],
+        [
+          967,
+          970
+        ],
+        [
+          974,
+          976
+        ],
+        [
+          990,
+          993
+        ],
+        [
+          1000,
+          1000
+        ],
+        [
+          1002,
+          1002
+        ],
+        [
+          1004,
+          1006
+        ],
+        [
+          1065,
+          1065
+        ],
+        [
+          1067,
+          1068
+        ],
+        [
+          1080,
+          1080
+        ],
+        [
+          1137,
+          1138
+        ],
+        [
+          1140,
+          1141
+        ],
+        [
+          1145,
+          1148
+        ],
+        [
+          1153,
+          1155
+        ],
+        [
+          1157,
+          1157
+        ],
+        [
+          1161,
+          1164
+        ],
+        [
+          1169,
+          1171
+        ],
+        [
+          1173,
+          1173
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "插件等目录、创建/编辑、关联批量加载、父项目和图库、审核修订、历史及slug分配",
+      "call_chain": [
+        "simpleProjects/simpleProjectItem/simpleProjectEditor/history → simpleProjectBySiteID → loadSimpleProjectAssociations",
+        "createSimpleProject/createSimpleProjectRevision → createContentRevisionTx/applySimpleProjectSnapshotTx → replaceSimpleProjectAssociationsTx",
+        "public_routes FK → parent read/write review/owner checks; OSS gallery active/scan/MIME checks",
+        "isolatedAITestDatabase → database.Migrate twice → owned marker fixture cleanup"
+      ],
+      "issues": [
+        "BE-UIA-SP001",
+        "BE-UIA-SP002",
+        "BE-UIA-SP003",
+        "BE-UIA-SP004",
+        "BE-UIA-SP005",
+        "BE-DB022"
+      ],
+      "validation": [
+        "真实隔离PG18子场景+slug2单测race PASS；包含stale-crawler create409且无写入",
+        "最终合并59PG+2slug，13.729s exit0 /tmp/mcmods-ui-a-backend-catalog-final.log",
+        "go vet ./internal/httpapi exit0；git diff --check exit0"
+      ]
+    }
+  ],
+  "new_files_reviewed": [
+    {
+      "path": "internal/httpapi/simple_project_visibility_audit_integration_test.go",
+      "sha256": "330c18ffc5cb2b81cf63f187f737dada61b534e71c4f2f0715b9980c8f82f021",
+      "lines": 253,
+      "read_ranges": [
+        [
+          1,
+          253
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "validation": "定向race实际执行PASS；文档与实现/证据人工核对"
+    },
+    {
+      "path": "internal/httpapi/simple_project_slug_audit_test.go",
+      "sha256": "524fb29e8a825cba46658e6a6c833ce43b8734dd9094f61e8939429f30d4a24d",
+      "lines": 55,
+      "read_ranges": [
+        [
+          1,
+          55
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "validation": "定向race实际执行PASS；文档与实现/证据人工核对"
+    },
+    {
+      "path": "SIMPLE_PROJECT_VISIBILITY.md",
+      "sha256": "8915d7a9ba8081c426a2b8dd90d51555e7c8a30826207f399cc6c73c0c234f00",
+      "lines": 15,
+      "read_ranges": [
+        [
+          1,
+          15
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": false,
+      "validation": "正式契约/审计证据内容复核，不是独立执行证据"
+    },
+    {
+      "path": "docs/audit/backend-ui-a-delegated.md",
+      "sha256": "57f355944b41234b8b0fc3fd74dee9e34624f32d71d9a6db02ae152ae1e31593",
+      "lines": 21,
+      "read_ranges": [
+        [
+          1,
+          21
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": false,
+      "validation": "正式契约/审计证据内容复核，不是独立执行证据"
+    }
+  ],
+  "coverage": {
+    "included_baseline_files": 1,
+    "fully_reviewed": 1,
+    "partial": 0,
+    "unreviewed": 0,
+    "excluded": 0,
+    "baseline_lines": 1092,
+    "final_lines": 1181
+  },
+  "updated_at": "2026-10-01T15:38:03.577691+00:00"
+}

@@ -1,0 +1,607 @@
+{
+  "repository": "mcmods-cn-backend",
+  "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+  "reviewer": "backend-api-a",
+  "delegated_from": "review-backend-database-extra.json:5 original files transferred explicitly; no inherited unread ranges",
+  "files": [
+    {
+      "path": "internal/httpapi/mod_content_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "54ad92853c689aea34df416fc8c1614df0a5ef27655d113148eb0e3c90644735",
+      "lines": 2568,
+      "read_ranges": [
+        [
+          1,
+          740
+        ],
+        [
+          740,
+          1185
+        ],
+        [
+          1186,
+          1730
+        ],
+        [
+          1186,
+          1310
+        ],
+        [
+          1395,
+          1455
+        ],
+        [
+          1730,
+          1835
+        ],
+        [
+          1835,
+          2105
+        ],
+        [
+          2106,
+          2568
+        ],
+        [
+          2220,
+          2470
+        ],
+        [
+          2471,
+          2568
+        ]
+      ],
+      "status": "已复查",
+      "responsibility": "模组内容版本/模板/分类/资源CRUD、待审快照与发布、导出来源回读",
+      "call_chain": "mod route → requireReadable/EditableMod → content versions/sections/resources → immutable revision/change request → tx publisher",
+      "issues": [
+        "BE-APIA-023",
+        "BE-APIA-024"
+      ],
+      "validation": [
+        "PASS: 40实际角色/审核状态权限场景；5流式故障及4读取故障；完整迁移库MaxConns1实际revision发布",
+        "PASS: 最终fresh真实PG -race 52内容权限/stream/QueryRow/layout故障场景含最后resource GET分类；/tmp/mcmods-api-a-final-fresh3-race.jsonl"
+      ],
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "final_review_sha256": "54ad92853c689aea34df416fc8c1614df0a5ef27655d113148eb0e3c90644735",
+      "category": "go-source",
+      "repository": "mcmods-cn-backend",
+      "baseline_sha256": "8e3ec9291257c7841eca26c3649bea943adfdf17bd3dbf8218e602953f6a3c58",
+      "baseline_lines": 2427,
+      "reviewer": "backend-api-a",
+      "final_review": "最终完整内容逐段复读；截断内容单独补读；修复后复核受影响调用链",
+      "baseline_read_ranges": [
+        [
+          1,
+          410
+        ],
+        [
+          411,
+          840
+        ],
+        [
+          841,
+          1270
+        ],
+        [
+          1271,
+          1710
+        ],
+        [
+          1711,
+          2130
+        ],
+        [
+          2131,
+          2427
+        ]
+      ],
+      "behavior_verification_scope": "仅 validation 中实际 PASS 的列明场景；内容/语义已读不代表所有业务路径已验证；NOT_RUN/BLOCKED 不算通过。"
+    },
+    {
+      "path": "internal/httpapi/mod_content_layout_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "811341d5da0dd905a4d4a94802484a6254e75a7418b09327b7897ede3e6a7eb5",
+      "lines": 1042,
+      "read_ranges": [
+        [
+          1,
+          525
+        ],
+        [
+          526,
+          1042
+        ],
+        [
+          375,
+          425
+        ]
+      ],
+      "status": "已复查",
+      "responsibility": "分类树/资源放置/同类组/进度布局验证及不可变快照发布",
+      "call_chain": "layout PUT → readable/edit guard → tree/placement/identity validation → submit revision → tx publication",
+      "issues": [
+        "BE-APIA-024"
+      ],
+      "validation": [
+        "PASS: group stream failure old422→new500；既有布局/类似组测试",
+        "PASS: 最后带resources prepare错误传播新增断言与全52内容场景，fresh -race；/tmp/mcmods-api-a-final-fresh3-race.jsonl"
+      ],
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "final_review_sha256": "811341d5da0dd905a4d4a94802484a6254e75a7418b09327b7897ede3e6a7eb5",
+      "category": "go-source",
+      "repository": "mcmods-cn-backend",
+      "baseline_sha256": "7024484b0d9730e546502581916ee4d6435c04e372fff75c9583b4cc586674aa",
+      "baseline_lines": 1035,
+      "reviewer": "backend-api-a",
+      "final_review": "最终完整内容逐段复读；截断内容单独补读；修复后复核受影响调用链",
+      "baseline_read_ranges": [
+        [
+          1,
+          340
+        ],
+        [
+          341,
+          705
+        ],
+        [
+          706,
+          1035
+        ]
+      ],
+      "behavior_verification_scope": "仅 validation 中实际 PASS 的列明场景；内容/语义已读不代表所有业务路径已验证；NOT_RUN/BLOCKED 不算通过。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/project_automation_worker.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": "14e8f1da6c419c9a1563830082c9f2c29428f94b8c0a3c1a7ae7c5d542219d0c",
+      "baseline_lines": 832,
+      "sha256": "bc925b9fff3ee630cc3619f0538f7857c97e849d30f32835509f08beafd59020",
+      "lines": 963,
+      "read_ranges": [
+        [
+          1,
+          330
+        ],
+        [
+          331,
+          660
+        ],
+        [
+          661,
+          963
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "外部项目更新调度、领取、版本/兼容/日志/maintenance/镜像登记与终态",
+      "call_chain": "scheduler → recover/claim random token → heartbeat → provider HTTP → lease/config tx fence → actor/content/mirrors/maintenance → terminal settings same tx",
+      "issues": [
+        "BE-APIA-025",
+        "BE-APIA-026"
+      ],
+      "validation": [
+        "PASS: owned完整迁移PostgreSQL 11发布/暂停/重绑/取消场景-race；2受控providerHTTP契约场景",
+        "NOT_RUN: live provider/OSS下载复制扫描与高负载；不能推断exactly once外部副作用"
+      ],
+      "reviewer": "backend-api-a",
+      "final_review_sha256": "bc925b9fff3ee630cc3619f0538f7857c97e849d30f32835509f08beafd59020",
+      "final_review": "最终完整内容逐段复读；截断内容单独补读；修复后复核受影响调用链",
+      "baseline_read_ranges": [
+        [
+          1,
+          410
+        ],
+        [
+          411,
+          832
+        ]
+      ]
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/mod_revision_handlers.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": "256f8c6a8291f7751617f2164aa2825280fdbba9ed60159842e19613f0b37d42",
+      "baseline_lines": 618,
+      "sha256": "c82570590be3b8f750cd794aeb8dd2ae98ade676c10fbcfccf0e1ea8c96e1d24",
+      "lines": 654,
+      "read_ranges": [
+        [
+          1,
+          335
+        ],
+        [
+          336,
+          654
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "父模组身份/可读与编辑边界、不可变修订提交/读取/比较/审核发布/审计",
+      "call_chain": "slug → modIdentity (not authorization) → readable/edit/review → lock mods/change requests → apply snapshot/localizations/relationships → review/audit/notifications",
+      "issues": [
+        "BE-APIA-023",
+        "BE-APIA-024"
+      ],
+      "validation": [
+        "PASS: real PG父审核权限矩阵与revision_history；既有revision/diff测试",
+        "STATIC: revisionHashTx SQL故障会令PG事务aborted，后续audit/commit不会成功；不把显式未返回error等同已证明发布成功"
+      ],
+      "reviewer": "backend-api-a",
+      "final_review_sha256": "c82570590be3b8f750cd794aeb8dd2ae98ade676c10fbcfccf0e1ea8c96e1d24",
+      "final_review": "最终完整内容逐段复读；截断内容单独补读；修复后复核受影响调用链",
+      "baseline_read_ranges": [
+        [
+          1,
+          290
+        ],
+        [
+          291,
+          618
+        ]
+      ]
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/mod_export_recipe_batch.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": "332be403c72f69262f1febd6175ee071692c0b6ecf69d2962e2424be16240ebc",
+      "baseline_lines": 521,
+      "sha256": "332be403c72f69262f1febd6175ee071692c0b6ecf69d2962e2424be16240ebc",
+      "lines": 521,
+      "read_ranges": [
+        [
+          1,
+          270
+        ],
+        [
+          271,
+          521
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "导入配方批次/资源kind与引用归一化、批量revision/snapshot入库",
+      "call_chain": "catalog import revision → recipe batch JSON → resource resolver → game_recipes/import snapshots → aggregate stats",
+      "issues": [],
+      "validation": [
+        "PASS: final4所选既有recipe单测；STATIC: 批处理和错误传播/取消边界，实际OSS/大规模吞吐未验证"
+      ],
+      "reviewer": "backend-api-a",
+      "final_review_sha256": "332be403c72f69262f1febd6175ee071692c0b6ecf69d2962e2424be16240ebc",
+      "final_review": "最终完整内容逐段复读；截断内容单独补读；修复后复核受影响调用链",
+      "baseline_read_ranges": [
+        [
+          1,
+          270
+        ],
+        [
+          271,
+          521
+        ]
+      ]
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/project_maintenance_automation.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": "15af84ab9385616297469cc2c2a2d0e08b402477b3a1e19b456bf51c71683737",
+      "baseline_lines": 232,
+      "sha256": "289b53facf83b572f14590c798378cd78d9d12111f94118c08ccbb4029dfc1b9",
+      "lines": 235,
+      "read_ranges": [
+        [
+          1,
+          235
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "保留人工override的自动维护状态策略及同事务自动更新租约fence",
+      "call_chain": "provider activity → applyProjectMaintenancePolicy → lockAutomationJobTx → project/activity status tx",
+      "issues": [
+        "BE-APIA-025"
+      ],
+      "validation": [
+        "PASS: automation publication维护状态迟到owner拒绝；既有manual override/restore测试"
+      ],
+      "reviewer": "backend-api-a",
+      "final_review_sha256": "289b53facf83b572f14590c798378cd78d9d12111f94118c08ccbb4029dfc1b9",
+      "final_review": "最终完整内容逐段复读；截断内容单独补读；修复后复核受影响调用链"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/mod_content_visibility_integration_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": null,
+      "baseline_lines": null,
+      "sha256": "ee4ee6c386f6748179cedcf73bee38292feb4d9f68371478ce634828341006b9",
+      "lines": 262,
+      "read_ranges": [
+        [
+          1,
+          262
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "真实PG父审核权限矩阵与真实Rows.Err/QueryRow故障回归",
+      "call_chain": "synth user/mod/version/section/resource → actual handlers → private schema stream fault",
+      "issues": [
+        "BE-APIA-023",
+        "BE-APIA-024"
+      ],
+      "validation": [
+        "PASS: 40权限和10故障场景（修改前final4）；NOT_RUN: 最后2故障场景待fresh环境"
+      ],
+      "reviewer": "backend-api-a",
+      "final_review_sha256": "ee4ee6c386f6748179cedcf73bee38292feb4d9f68371478ce634828341006b9",
+      "final_review": "最终完整内容逐段复读；截断内容单独补读；修复后复核受影响调用链"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/mod_content_transaction_integration_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": null,
+      "baseline_lines": null,
+      "sha256": "9e0b5c83a54098845357d46b517b518c824cf48b7fb79061e2507a687bc6a6fb",
+      "lines": 61,
+      "read_ranges": [
+        [
+          1,
+          61
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "完整迁移FK库MaxConns1提交/发布回归",
+      "call_chain": "isolatedAITestDatabase → actualtx revision create → tx commit → persisted active/versionID",
+      "issues": [
+        "BE-APIA-024"
+      ],
+      "validation": [
+        "PASS: oldoverlay真实3秒自阻FAIL→新版持久化revisionPASS-race"
+      ],
+      "reviewer": "backend-api-a",
+      "final_review_sha256": "9e0b5c83a54098845357d46b517b518c824cf48b7fb79061e2507a687bc6a6fb",
+      "final_review": "最终完整内容逐段复读；截断内容单独补读；修复后复核受影响调用链"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/project_automation_provider_audit_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": null,
+      "baseline_lines": null,
+      "sha256": "cf6e86c38684023f4cdd3a00a2f4811f1fc498635d7cff2a2d6bef6a8b73d6d8",
+      "lines": 55,
+      "read_ranges": [
+        [
+          1,
+          55
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "受控HTTP供应商snake_case与错误传播契约回归",
+      "call_chain": "httptest MR version/CF changelog → actual provider loaders",
+      "issues": [
+        "BE-APIA-026"
+      ],
+      "validation": [
+        "PASS: 原版2FAIL→新版2PASS；只本地HTTP无真实供应商调用"
+      ],
+      "reviewer": "backend-api-a",
+      "final_review_sha256": "cf6e86c38684023f4cdd3a00a2f4811f1fc498635d7cff2a2d6bef6a8b73d6d8",
+      "final_review": "最终完整内容逐段复读；截断内容单独补读；修复后复核受影响调用链"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/project_automation_publication_integration_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": null,
+      "baseline_lines": null,
+      "sha256": "3b992b6bad1735476dd7f2a7290cad040472339946228d4df41466fbb9eeddaf",
+      "lines": 135,
+      "read_ranges": [
+        [
+          1,
+          135
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "完整迁移PG自动更新迟到写入/终态/暂停重绑与取消回归",
+      "call_chain": "isolated full database → random leased run/config snapshot → actual publication actor/maintenance/compat/changelog/terminal",
+      "issues": [
+        "BE-APIA-025"
+      ],
+      "validation": [
+        "PASS: 11真实PG场景-race"
+      ],
+      "reviewer": "backend-api-a",
+      "final_review_sha256": "3b992b6bad1735476dd7f2a7290cad040472339946228d4df41466fbb9eeddaf",
+      "final_review": "最终完整内容逐段复读；截断内容单独补读；修复后复核受影响调用链"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/seed_crawler_lease.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": null,
+      "baseline_lines": null,
+      "sha256": "c388eaf0f22c66df0a3ecfd4f3c6c174f8e46affac1bfd1ad305dbc9fb05a76f",
+      "lines": 131,
+      "read_ranges": [
+        [
+          1,
+          131
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "crawler随机token租约、TX fence、heartbeat和普通过期回收",
+      "call_chain": "seed worker/context → FOR SHARE run token fence → SKIP LOCKED heartbeat → bounded stale recovery",
+      "issues": [
+        "BE-DB-022"
+      ],
+      "validation": [
+        "PASS: 真实PG租约/锁竞争与取消2测试组",
+        "PASS: 最终fresh真实PG -race两组租约fence/heartbeat/锁等待/取消/translation_recovery排除断言；/tmp/mcmods-api-a-final-fresh3-race.jsonl"
+      ],
+      "reviewer": "backend-api-a",
+      "final_review_sha256": "c388eaf0f22c66df0a3ecfd4f3c6c174f8e46affac1bfd1ad305dbc9fb05a76f",
+      "final_review": "最终完整内容逐段复读；截断内容单独补读；修复后复核受影响调用链",
+      "behavior_verification_scope": "仅 validation 中实际 PASS 的列明场景；内容/语义已读不代表所有业务路径已验证；NOT_RUN/BLOCKED 不算通过。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/seed_crawler_lease_integration_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": null,
+      "baseline_lines": null,
+      "sha256": "516447b686fd4da5210fdb4cd1f86c5b9c7b4ddf7fef1872fc568923a0fefcc1",
+      "lines": 193,
+      "read_ranges": [
+        [
+          1,
+          193
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "crawler真实PG租约、替换worker锁等待、续约/过期/恢复隔离及join回归",
+      "call_chain": "private schema LIKE actual seed_crawler_runs → real FOR SHARE/UPDATE/pg_stat_activity assertions",
+      "issues": [
+        "BE-DB-022"
+      ],
+      "validation": [
+        "PASS: 最终fresh真实PG -race两组租约fence/heartbeat/锁等待/取消/translation_recovery排除断言；/tmp/mcmods-api-a-final-fresh3-race.jsonl"
+      ],
+      "reviewer": "backend-api-a",
+      "final_review_sha256": "516447b686fd4da5210fdb4cd1f86c5b9c7b4ddf7fef1872fc568923a0fefcc1",
+      "final_review": "最终完整内容逐段复读；截断内容单独补读；修复后复核受影响调用链",
+      "behavior_verification_scope": "仅 validation 中实际 PASS 的列明场景；内容/语义已读不代表所有业务路径已验证；NOT_RUN/BLOCKED 不算通过。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/favorite_export_reliability_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": null,
+      "baseline_lines": null,
+      "sha256": "21ef435941eea1741543641840cff9ec1779e6752753428d98103aa8b00dd156",
+      "lines": 98,
+      "read_ranges": [
+        [
+          1,
+          98
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "收藏导出history/detail/download运行故障与malformeddependency回归",
+      "call_chain": "controlled closed pool/real isolatedPG → actual exports read handlers",
+      "issues": [
+        "BE-APIA-020"
+      ],
+      "validation": [
+        "PASS: 运行故障500、非法DependencyOf拒绝和[]有效形状保留"
+      ],
+      "reviewer": "backend-api-a",
+      "final_review_sha256": "21ef435941eea1741543641840cff9ec1779e6752753428d98103aa8b00dd156",
+      "final_review": "最终完整内容逐段复读；截断内容单独补读；修复后复核受影响调用链"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/community_post_reliability_integration_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": null,
+      "baseline_lines": null,
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "完整迁移owned数据库的社区资源引用/filter可见性与单连接create/update/list持久化回归",
+      "call_chain": "真实catalog公共guard → community references/filter；MaxConns1 current tx reviewer/config → immutable revision",
+      "issues": [
+        "BE-APIA-019",
+        "BE-APIA-024"
+      ],
+      "validation": [
+        "PASS: 最终fresh -race /tmp/mcmods-api-a-final-fresh3-race.jsonl；包含历史red，api-a-validation.json记录精确命令/范围"
+      ],
+      "reviewer": "backend-api-a",
+      "category": "go-test",
+      "read_ranges": [
+        [
+          1,
+          161
+        ]
+      ],
+      "final_review": "新增文件完整实际阅读；最终内容与真实断言/合成fixture边界复核；非生产、非真实AI供应商",
+      "behavior_verification_scope": "仅 validation 中实际 PASS 的列明场景；内容/语义已读不代表所有业务路径已验证；NOT_RUN/BLOCKED 不算通过。",
+      "sha256": "37d107803186cc006bdc2fb00556cbdeaad13c452b5a1906cc617e04299ee1ab",
+      "lines": 161,
+      "final_review_sha256": "37d107803186cc006bdc2fb00556cbdeaad13c452b5a1906cc617e04299ee1ab"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/community_post_database_failure_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "baseline_sha256": null,
+      "baseline_lines": null,
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": true,
+      "responsibility": "closed-pool edit/translation request/result首读故障正确500回归",
+      "call_chain": "actual handlers → closed pool QueryRow error → bounded500",
+      "issues": [
+        "BE-APIA-024"
+      ],
+      "validation": [
+        "PASS: 最终fresh -race /tmp/mcmods-api-a-final-fresh3-race.jsonl；包含历史red，api-a-validation.json记录精确命令/范围"
+      ],
+      "reviewer": "backend-api-a",
+      "category": "go-test",
+      "read_ranges": [
+        [
+          1,
+          41
+        ]
+      ],
+      "final_review": "新增文件完整实际阅读；最终内容与真实断言/合成fixture边界复核；非生产、非真实AI供应商",
+      "behavior_verification_scope": "仅 validation 中实际 PASS 的列明场景；内容/语义已读不代表所有业务路径已验证；NOT_RUN/BLOCKED 不算通过。",
+      "sha256": "d84a8044324afe4bc341351408e24222fcc21d8dc245f0352b7ad21d2a34513d",
+      "lines": 41,
+      "final_review_sha256": "d84a8044324afe4bc341351408e24222fcc21d8dc245f0352b7ad21d2a34513d"
+    }
+  ],
+  "coverage_note": "5个原始文件基线逐段全文读取后最终完整复读，新增长链/回归也逐行完整审查并复查最终SHA。最后资源GET/layout/crawler排除及社区两组追加均在fresh实际-race通过；只对列明断言宣称行为验证。Core新automation lease/helper tests由独立台账证明，不冒充本人全文。生成台账不递归自包含指纹。"
+}

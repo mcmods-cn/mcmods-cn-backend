@@ -1,0 +1,432 @@
+{
+  "repository": "mcmods-cn-backend",
+  "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+  "evidence_kind": "machine-derived Go JSON terminal events; stdout omitted; actual tool exit independently recorded",
+  "execution": {
+    "id": "APIA-final-current-targeted-race",
+    "command": "go test -race ./internal/httpapi -run '^(TestCommunityPublishedReferencesCannotExposePrivateResourceIntegration|TestCommunityCreateUsesItsTransactionWithOneConnectionIntegration|TestCommunityDatabaseFailureIsNotReportedAsInvalidOrMissing|TestCommunityPostTranslationLifecycleIntegration|TestCommunityReferencesDoNotExposeUnpublishedProjectIntegration|TestModContentCannotExposeUnapprovedParentIntegration|TestSeedCrawlerLeaseFencingAndHeartbeatIntegration|TestSeedCrawlerHeartbeatStopsOnParentCancellation)$' -count=1 -json",
+    "status": "PASS",
+    "exit_code": 0,
+    "evidence": "/tmp/mcmods-api-a-final-fresh3-race.jsonl",
+    "test_run_count_including_subtests": 80,
+    "test_pass_count_including_subtests": 80,
+    "test_skip_count_including_subtests": 0,
+    "top_level_test_count": 8,
+    "seconds": 6.844,
+    "version_scope": "All final API A source changes frozen before execution; generation85 + 2 forward repairs (repairs are not schema generations) owned PostgreSQL; no paid/live provider or OSS calls."
+  },
+  "source_fingerprints_at_final_evidence": {
+    "internal/httpapi/community_post_handlers.go": "6021af4f5ef15bbc428841dbcb42716557889d366a6d403424740a462e6bdf1b",
+    "internal/httpapi/mod_content_handlers.go": "54ad92853c689aea34df416fc8c1614df0a5ef27655d113148eb0e3c90644735",
+    "internal/httpapi/mod_content_layout_handlers.go": "811341d5da0dd905a4d4a94802484a6254e75a7418b09327b7897ede3e6a7eb5",
+    "internal/httpapi/seed_crawler_lease.go": "c388eaf0f22c66df0a3ecfd4f3c6c174f8e46affac1bfd1ad305dbc9fb05a76f",
+    "internal/httpapi/community_post_reliability_integration_test.go": "37d107803186cc006bdc2fb00556cbdeaad13c452b5a1906cc617e04299ee1ab",
+    "internal/httpapi/community_post_database_failure_test.go": "d84a8044324afe4bc341351408e24222fcc21d8dc245f0352b7ad21d2a34513d"
+  },
+  "test_terminal_events": [
+    {
+      "test": "TestCommunityDatabaseFailureIsNotReportedAsInvalidOrMissing/edit",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestCommunityDatabaseFailureIsNotReportedAsInvalidOrMissing/request_translation",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestCommunityDatabaseFailureIsNotReportedAsInvalidOrMissing/translation_result",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestCommunityDatabaseFailureIsNotReportedAsInvalidOrMissing",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestCommunityReferencesDoNotExposeUnpublishedProjectIntegration",
+      "result": "pass",
+      "seconds": 0.3
+    },
+    {
+      "test": "TestCommunityPublishedReferencesCannotExposePrivateResourceIntegration/pending_hidden",
+      "result": "pass",
+      "seconds": 0.06
+    },
+    {
+      "test": "TestCommunityPublishedReferencesCannotExposePrivateResourceIntegration/approved_kept",
+      "result": "pass",
+      "seconds": 0.02
+    },
+    {
+      "test": "TestCommunityPublishedReferencesCannotExposePrivateResourceIntegration/withdrawn_hidden",
+      "result": "pass",
+      "seconds": 0.01
+    },
+    {
+      "test": "TestCommunityPublishedReferencesCannotExposePrivateResourceIntegration",
+      "result": "pass",
+      "seconds": 1.97
+    },
+    {
+      "test": "TestCommunityCreateUsesItsTransactionWithOneConnectionIntegration",
+      "result": "pass",
+      "seconds": 1.39
+    },
+    {
+      "test": "TestCommunityPostTranslationLifecycleIntegration/published",
+      "result": "pass",
+      "seconds": 0.09
+    },
+    {
+      "test": "TestCommunityPostTranslationLifecycleIntegration/cancelled",
+      "result": "pass",
+      "seconds": 0.02
+    },
+    {
+      "test": "TestCommunityPostTranslationLifecycleIntegration/completed",
+      "result": "pass",
+      "seconds": 0.02
+    },
+    {
+      "test": "TestCommunityPostTranslationLifecycleIntegration/source-changed",
+      "result": "pass",
+      "seconds": 0.02
+    },
+    {
+      "test": "TestCommunityPostTranslationLifecycleIntegration/source-changes-during-persistence",
+      "result": "pass",
+      "seconds": 0.11
+    },
+    {
+      "test": "TestCommunityPostTranslationLifecycleIntegration/cancelled-during-persistence",
+      "result": "pass",
+      "seconds": 0.06
+    },
+    {
+      "test": "TestCommunityPostTranslationLifecycleIntegration/deleted",
+      "result": "pass",
+      "seconds": 0.02
+    },
+    {
+      "test": "TestCommunityPostTranslationLifecycleIntegration/unapproved",
+      "result": "pass",
+      "seconds": 0.01
+    },
+    {
+      "test": "TestCommunityPostTranslationLifecycleIntegration/title-only",
+      "result": "pass",
+      "seconds": 0.01
+    },
+    {
+      "test": "TestCommunityPostTranslationLifecycleIntegration/empty-translation",
+      "result": "pass",
+      "seconds": 0.01
+    },
+    {
+      "test": "TestCommunityPostTranslationLifecycleIntegration/missing-body",
+      "result": "pass",
+      "seconds": 0.02
+    },
+    {
+      "test": "TestCommunityPostTranslationLifecycleIntegration/invalid-locale",
+      "result": "pass",
+      "seconds": 0.01
+    },
+    {
+      "test": "TestCommunityPostTranslationLifecycleIntegration",
+      "result": "pass",
+      "seconds": 0.39
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_pending/versions",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_pending/templates",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_pending/sections",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_pending/revision_history",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_pending/resources",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_pending/section_resources",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_pending/resource_detail",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_pending/similar",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/other_pending/versions",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/other_pending/templates",
+      "result": "pass",
+      "seconds": 0.02
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/other_pending/sections",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/other_pending/revision_history",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/other_pending/resources",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/other_pending/section_resources",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/other_pending/resource_detail",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/other_pending/similar",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/submitter_pending/versions",
+      "result": "pass",
+      "seconds": 0.01
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/submitter_pending/templates",
+      "result": "pass",
+      "seconds": 0.03
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/submitter_pending/sections",
+      "result": "pass",
+      "seconds": 0.01
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/submitter_pending/revision_history",
+      "result": "pass",
+      "seconds": 0.01
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/submitter_pending/resources",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/submitter_pending/section_resources",
+      "result": "pass",
+      "seconds": 0.03
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/submitter_pending/resource_detail",
+      "result": "pass",
+      "seconds": 0.02
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/submitter_pending/similar",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/reviewer_pending/versions",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/reviewer_pending/templates",
+      "result": "pass",
+      "seconds": 0.01
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/reviewer_pending/sections",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/reviewer_pending/revision_history",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/reviewer_pending/resources",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/reviewer_pending/section_resources",
+      "result": "pass",
+      "seconds": 0.01
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/reviewer_pending/resource_detail",
+      "result": "pass",
+      "seconds": 0.01
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/reviewer_pending/similar",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_approved/versions",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_approved/templates",
+      "result": "pass",
+      "seconds": 0.01
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_approved/sections",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_approved/revision_history",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_approved/resources",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_approved/section_resources",
+      "result": "pass",
+      "seconds": 0.01
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_approved/resource_detail",
+      "result": "pass",
+      "seconds": 0.02
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/guest_approved/similar",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/stream_error/versions",
+      "result": "pass",
+      "seconds": 0.04
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/stream_error/templates",
+      "result": "pass",
+      "seconds": 0.03
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/stream_error/sections",
+      "result": "pass",
+      "seconds": 0.04
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/stream_error/resources",
+      "result": "pass",
+      "seconds": 0.03
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/stream_error/section_resources",
+      "result": "pass",
+      "seconds": 0.04
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/stream_error/version_read",
+      "result": "pass",
+      "seconds": 0.02
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/stream_error/template_read",
+      "result": "pass",
+      "seconds": 0.03
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/stream_error/section_read",
+      "result": "pass",
+      "seconds": 0.03
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/stream_error/resource_delete",
+      "result": "pass",
+      "seconds": 0.03
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/stream_error/layout_prepare",
+      "result": "pass",
+      "seconds": 0.03
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/stream_error/resource_get",
+      "result": "pass",
+      "seconds": 0.04
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration/stream_error/layout_resource_prepare",
+      "result": "pass",
+      "seconds": 0.04
+    },
+    {
+      "test": "TestModContentCannotExposeUnapprovedParentIntegration",
+      "result": "pass",
+      "seconds": 0.84
+    },
+    {
+      "test": "TestSeedCrawlerLeaseFencingAndHeartbeatIntegration/owner",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestSeedCrawlerLeaseFencingAndHeartbeatIntegration/replacement",
+      "result": "pass",
+      "seconds": 0
+    },
+    {
+      "test": "TestSeedCrawlerLeaseFencingAndHeartbeatIntegration",
+      "result": "pass",
+      "seconds": 0.09
+    },
+    {
+      "test": "TestSeedCrawlerHeartbeatStopsOnParentCancellation",
+      "result": "pass",
+      "seconds": 0
+    }
+  ],
+  "result_counts": {
+    "pass": 80
+  },
+  "scope": "Only these 8 selected top-level tests and their 72 subtests; isolated owned PostgreSQL and deterministic local/closed-pool boundaries. Does not prove live provider/OSS/production health or later independent Core progression change."
+}

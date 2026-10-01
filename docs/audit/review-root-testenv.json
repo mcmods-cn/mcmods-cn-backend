@@ -1,0 +1,610 @@
+{
+  "reviewer": "frontend_ui_a",
+  "recorded_at": "2026-10-01T16:59:41.465154+00:00",
+  "files": [
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "scripts/test-services.sh",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "f6d9f458f63bca15314ffa217041d2affba3ce94c52caad795fbac1bdef08b95",
+      "lines": 92,
+      "read_ranges": [
+        [
+          1,
+          92
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "生成私有状态/随机测试凭据/精确回环配置，独立session启动，关联launch PID，受保护停止",
+      "call_chain": [
+        "mktemp/identity/env fixture",
+        "initdb/pg_ctl/createdb owned socket",
+        "nohup setsid tracked child",
+        "service-process-owner.py ready/stop"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "bash -n PASS；root旧任务实际stop0→新4服务start0→另一exec再次ready0且PG就绪；本代理又实际ready0。",
+        "启动实跑SHA229fa1703be9bd5982959130c18fc53d731e0941bf49d7702e48401b931bfb09的90行；最终92行仅新增两行/三个可选Typesenseenv默认空字段，当前14回归中的实际生成器红绿验证该差异；未声称当前指纹重建四服务已跑。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "scripts/service-process-owner.py",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "86cad58ba34443ab0e9b29617453f714f94875964c208cdbacf6ff871b4dd951",
+      "lines": 183,
+      "read_ranges": [
+        [
+          1,
+          183
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "显式失败关闭的目录身份、UID/PID/config/真实LISTEN fd所有权验证、有限就绪轮询与已退出进程安全停止",
+      "call_chain": [
+        "owned_state",
+        "verify_process/owns_listener",
+        "redis AUTH+INFO",
+        "ready health with no proxy/redirect",
+        "stop verified PIDs"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "14实际回归PASS：随机回环子进程PID/fd/config/marker/优化模式/Z检查，另执行实际fixture生成器验证可选服务旧env清空；不将这些用例代表全部真实服务协议。",
+        "root新任务跨exec健康与本代理再次实际ready检查PASS；只读PID/config/socket/owned AUTH/health，没有重启停止新活跃服务。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "scripts/test-service-ownership.py",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "23d0977a36135ebfd1730b451d00bec39fb025efaa48139548a59c61f717df8d",
+      "lines": 175,
+      "read_ranges": [
+        [
+          1,
+          175
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "真实随机回环子进程/临时目录验证PID/config/socket、优化模式、错误marker与Z安全停止；仅清理本用例Popen",
+      "call_chain": [
+        "temporary state",
+        "real Popen child and Linux /proc",
+        "real checker CLI under normal/-O",
+        "assertions and owned cleanup"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "14实际回归PASS：随机回环子进程PID/fd/config/marker/优化模式/Z检查，另执行实际fixture生成器验证可选服务旧env清空；不将这些用例代表全部真实服务协议。",
+        "root新任务跨exec健康与本代理再次实际ready检查PASS；只读PID/config/socket/owned AUTH/health，没有重启停止新活跃服务。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "cmd/test-setup/main.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "2e21bceecf5a0dcb1857485926b958a81bc63e4749902506b39ae82d172e4835",
+      "lines": 41,
+      "read_ranges": [
+        [
+          1,
+          41
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "配置加载后先所有权门禁，再限时连接/迁移/seed；关闭pool与错误传播",
+      "call_chain": [
+        "config.Load",
+        "testenv.ValidateOwnedDatabaseTarget",
+        "database.Connect/Migrate/SeedRBAC"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "go vet ./internal/testenv ./cmd/test-setup PASS；root新任务真实cmd/test-setup完成migration/seed成功，日志mcmods-release-setup.log已实际读取；不推断生产或代表性旧数据升级由该结果证明。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/testenv/ownership.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "8c4773d3011f2289655d2a969cd1edd537a9ef6e4b7a7c93d06c0144ff5ccaff",
+      "lines": 119,
+      "read_ranges": [
+        [
+          1,
+          119
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "数据库/旧URL与启用服务/独立测试URL校验，NATS scope门禁及Typesense key/state匹配",
+      "call_chain": [
+        "IntegrationEnabled",
+        "owned directory markers and DB identity",
+        "validateOwnedServices",
+        "seven TestMain before connection",
+        "test-setup before migration"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "7顶层、含子场景53 PASS (-race)，旧中央实现新增4顶层/30子场景断言失败；仅合成文件和配置，无真实远端连接。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/testenv/ownership_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "5bbef39ddeb3d451f583f129afca0a63293f0014af4e643c434c86612eebf85f",
+      "lines": 233,
+      "read_ranges": [
+        [
+          1,
+          233
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "纯合成文件/配置的门禁回归；不连接数据库/缓存/队列/远端",
+      "call_chain": [
+        "ownedFixture clears integration scopes",
+        "exact URL/key/state negative variants",
+        "zero service config compatibility",
+        "all configured service credentials"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "7顶层、含子场景53 PASS (-race)，旧中央实现新增4顶层/30子场景断言失败；仅合成文件和配置，无真实远端连接。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "docs/audit/environment.md",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "f6e3a88014c8e97eb5b0d2dbf8df23e3eb062aaeb8badbba898bcd8e906771b7",
+      "lines": 87,
+      "read_ranges": [
+        [
+          1,
+          87
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": false,
+      "responsibility": "可复现安装/隔离启动/目标校验/停止说明与已执行边界，区分新进程ready和跨exec存活",
+      "call_chain": [
+        "pinned official tool installs",
+        "test-services/test-setup",
+        "local unit/real service/full regression separately",
+        "stop ownership proof"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "新增行为与实际脚本/cfg门禁交叉复核；安装/旧基线为root已记录证据，新全回归仍独立登记。",
+        "新增实际stop/start/cross-exec/setup证据段已逐行复核；区别启动90行SHA与当前92行，仅可选defaults新段用实际generator验证。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": ".github/workflows/checks.yml",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "7cd426ec20c395068aa584e5f92adcafa6f4991fdfc40b1a70752fb276a52d6c",
+      "lines": 64,
+      "read_ranges": [
+        [
+          1,
+          64
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": false,
+      "responsibility": "只读CI权限，固定版本/归档校验，单位检查与单独隔离真实服务初始化/race任务",
+      "call_chain": [
+        "pull_request/push",
+        "contents:read",
+        "Go/vuln/blackbox checks",
+        "owned service setup and trap stop"
+      ],
+      "issues": [],
+      "validation": [
+        "全文静态审查；本地对应工具命令分别验证；远端GitHub CI仍待实际创建PR及运行。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": ".gitignore",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "3b3a2cbc6709c8626e10435da4e08ac21088eb09f1618cdc8afb5a2311aa79fe",
+      "lines": 10,
+      "read_ranges": [
+        [
+          1,
+          10
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": false,
+      "responsibility": "本地配置/日志/构建及Python缓存排除，保留env.example人工模板",
+      "call_chain": [
+        "Git ignore rules",
+        "no generated compiled Python cache submission"
+      ],
+      "issues": [],
+      "validation": [
+        "完整静态复核；.env例外、生成Python cache排除符合本任务，未扩大业务JSON排除。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/activity/integration_target_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "170f1fdbd6de401167f409041d2bb6a4c6b016a88578198302e3244040ae8151",
+      "lines": 22,
+      "read_ranges": [
+        [
+          1,
+          22
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": false,
+      "responsibility": "包级TestMain在任何测试连接前触发统一身份/目标门禁，随后运行m.Run",
+      "call_chain": [
+        "IntegrationEnabled",
+        "config.Load and legacy override",
+        "ValidateOwnedDatabaseTarget before m.Run"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "统一门禁职责全文静态核验；中央scope/配置安全单测PASS；最终真实各包集成/race结果由root记录。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/antiabuse/integration_target_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "150889c057f8fb9e41fdd0d175f4c4a43a1b744984bd9e884e62f5c412f9931e",
+      "lines": 22,
+      "read_ranges": [
+        [
+          1,
+          22
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": false,
+      "responsibility": "包级TestMain在任何测试连接前触发统一身份/目标门禁，随后运行m.Run",
+      "call_chain": [
+        "IntegrationEnabled",
+        "config.Load and legacy override",
+        "ValidateOwnedDatabaseTarget before m.Run"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "统一门禁职责全文静态核验；中央scope/配置安全单测PASS；最终真实各包集成/race结果由root记录。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/database/integration_target_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "4c5fbc9e652f897506323cc75b11a34cac856471aaa17a173da7e4cc0ded367a",
+      "lines": 22,
+      "read_ranges": [
+        [
+          1,
+          22
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": false,
+      "responsibility": "包级TestMain在任何测试连接前触发统一身份/目标门禁，随后运行m.Run",
+      "call_chain": [
+        "IntegrationEnabled",
+        "config.Load and legacy override",
+        "ValidateOwnedDatabaseTarget before m.Run"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "统一门禁职责全文静态核验；中央scope/配置安全单测PASS；最终真实各包集成/race结果由root记录。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/httpapi/integration_target_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "dd4ffb54e769d1dd563672487bbfec5df83c052497f64c1015f4ab6768a2ebc9",
+      "lines": 22,
+      "read_ranges": [
+        [
+          1,
+          22
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": false,
+      "responsibility": "包级TestMain在任何测试连接前触发统一身份/目标门禁，随后运行m.Run",
+      "call_chain": [
+        "IntegrationEnabled",
+        "config.Load and legacy override",
+        "ValidateOwnedDatabaseTarget before m.Run"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "统一门禁职责全文静态核验；中央scope/配置安全单测PASS；最终真实各包集成/race结果由root记录。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/progression/integration_target_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "6b915c004d8780b46ed8c93232db6ba9f4d707ac73cbd740c78f6f029c18c6ea",
+      "lines": 22,
+      "read_ranges": [
+        [
+          1,
+          22
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": false,
+      "responsibility": "包级TestMain在任何测试连接前触发统一身份/目标门禁，随后运行m.Run",
+      "call_chain": [
+        "IntegrationEnabled",
+        "config.Load and legacy override",
+        "ValidateOwnedDatabaseTarget before m.Run"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "统一门禁职责全文静态核验；中央scope/配置安全单测PASS；最终真实各包集成/race结果由root记录。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/queue/integration_target_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "dff5c91faa412224b7a9fffb2c00c3ff20eb23d2660639ac9ce0dc56161567fc",
+      "lines": 22,
+      "read_ranges": [
+        [
+          1,
+          22
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": false,
+      "responsibility": "包级TestMain在任何测试连接前触发统一身份/目标门禁，随后运行m.Run",
+      "call_chain": [
+        "IntegrationEnabled",
+        "config.Load and legacy override",
+        "ValidateOwnedDatabaseTarget before m.Run"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "统一门禁职责全文静态核验；中央scope/配置安全单测PASS；最终真实各包集成/race结果由root记录。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    },
+    {
+      "repository": "mcmods-cn-backend",
+      "path": "internal/searchindex/integration_target_test.go",
+      "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+      "sha256": "b5f4e2769fa733f4a7dcb56819c88a3ca42e38ccde052b005bad3138032aeb2c",
+      "lines": 22,
+      "read_ranges": [
+        [
+          1,
+          22
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": false,
+      "responsibility": "包级TestMain在任何测试连接前触发统一身份/目标门禁，随后运行m.Run",
+      "call_chain": [
+        "IntegrationEnabled",
+        "config.Load and legacy override",
+        "ValidateOwnedDatabaseTarget before m.Run"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "统一门禁职责全文静态核验；中央scope/配置安全单测PASS；最终真实各包集成/race结果由root记录。"
+      ],
+      "read_basis": "最终内容实际全读；输出截断处补读Go测试211–233/setup1–41/服务脚本1–56；后续source差异逐段再读，范围覆盖最终行号。"
+    }
+  ],
+  "finding_count_note": "ROOT-009为本任务新增隔离环境所有权/生命周期问题的协作证据，root要求归并，不另统计ENV子ID；不是原仓库已部署漏洞或生产受影响证明。",
+  "findings": [
+    {
+      "id": "ROOT-009",
+      "priority": "P1",
+      "status": "已修复；门禁/进程安全回归通过；root真实服务stop/start/跨exec/初始化通过，最终全回归/CI另记",
+      "evidence": [
+        "NATS-only opt-in原不进入TestMain；中央仅PG身份不能证明各服务目标授权。",
+        "原ready只PONG/health，无新PID身份，真实无关随机回环PONG反例被接受。",
+        "原stop Python assert在-O下被移除，真实错误marker反例被接受；反例无PID文件/无信号/无PG操作。",
+        "root实际旧服务为Z，同启动shell PGID/SID；cgroup oom/oom_kill为0，不能归因OOM。实际根停止先FAIL，未发新信号；加同UID Z跳过与独立session。",
+        "不设置TYPESENSE_SERVER时原env.sh未清空旧测试flag/URL/key，导致重复配置错用上轮scope（中央门禁安全拒绝，非越权连接）；实际生成器红绿已修。"
+      ],
+      "fix": [
+        "中央NATS/Typesense scope和URL/key/state + 启用Redis/NATS/Typesense cfg校验；零值未启用scope兼容。",
+        "start要求新launch PID/config/UID/socket inode与健康检查匹配，匿名NATS保持回环，不引入新token或付费依赖。",
+        "stop显式require；旧state仅在PID/UID/config/socket/Redis AUTHINFO证据完备才停止，Z仅同UID视已退出不信号。",
+        "nohup setsid/输入输出重定向；要求$!确为服务进程，仍以真实PID证明，无旧端口假成功。",
+        "可选Typesense三个testscope值默认空，可选启用分支再写实际key/URL/flag；生成器测试不打印随机值。"
+      ],
+      "qualification": "Typesense独立service integration在修前已有精确URL/key检查，未证实其原有远端连接漏洞；本轮中央扩展保护启用cfg与全scope，生产服务从未连接。"
+    }
+  ],
+  "checks": [
+    {
+      "command": "go test ./internal/testenv -count=1 -v",
+      "status": "FAIL",
+      "exit_code": 1,
+      "top_level_failed": 4,
+      "including_subtests_failed": 34,
+      "evidence": "/tmp/mcmods-testenv-safety-red.log",
+      "basis": "添加回归后、ownership.go实现修改前实际运行；纯合成目标。"
+    },
+    {
+      "command": "go test -race ./internal/testenv -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "top_level_passed": 7,
+      "including_subtests_passed": 53,
+      "duration_seconds": 1.103,
+      "evidence": "/tmp/mcmods-testenv-safety-green.log"
+    },
+    {
+      "command": "actual previous ready function + python -O actual previous stop block isolated reproducer",
+      "status": "FAIL",
+      "exit_code": 1,
+      "evidence": "/tmp/mcmods-service-safety-red.log",
+      "basis": "实际原函数AST/原stop块，不替换其核心判断；无生产连接，仅随机回环响应进程和无PID文件临时state。原源码SHA0800a85518d3b0a238e40779d03219299c26ff340fe61e1de84546811c47820a。"
+    },
+    {
+      "command": "python3 scripts/test-service-ownership.py -v (before Z-safe fix)",
+      "status": "FAIL",
+      "exit_code": 1,
+      "failed": 1,
+      "top_level_tests": 13,
+      "evidence": "/tmp/mcmods-service-zombie-red.log"
+    },
+    {
+      "command": "python3 scripts/test-service-ownership.py -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "top_level_tests": 14,
+      "duration_seconds": 2.118,
+      "evidence": "/tmp/mcmods-service-safety-green.log"
+    },
+    {
+      "command": "go vet ./internal/testenv ./cmd/test-setup",
+      "status": "PASS",
+      "exit_code": 0,
+      "evidence": "/tmp/mcmods-testenv-safety-vet.log"
+    },
+    {
+      "command": "bash -n scripts/test-services.sh; compile Python source without output artifact; git diff --check",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "root old owned stop/new four-service start/cross-exec ready+PG readiness/test-setup",
+      "status": "PASS",
+      "executor": "root",
+      "note": "root实跑退出0/成功日志；独立本代理再次ready0。新任务最终stop/全库回归/CI不在本检查结论内；start实际为90行版本，final两行可选env差异由generator回归验证。",
+      "evidence": [
+        "/tmp/mcmods-release-service-stop-old.log",
+        "/tmp/mcmods-release-service-start.log",
+        "/tmp/mcmods-release-setup.log"
+      ]
+    },
+    {
+      "command": "python3 scripts/test-service-ownership.py -v (before optional env default fix)",
+      "status": "FAIL",
+      "exit_code": 1,
+      "failed": 1,
+      "top_level_tests": 14,
+      "evidence": "/tmp/mcmods-service-optional-env-red.log"
+    },
+    {
+      "command": "python3 scripts/service-process-owner.py ready /tmp/mcmods-test-services.SoWZrtAU",
+      "status": "PASS",
+      "exit_code": 0,
+      "executor": "frontend_ui_a independent read-only check after root start exec ended",
+      "evidence": "/tmp/mcmods-service-cross-exec-independent.log"
+    },
+    {
+      "command": "final full Go regression/remote GitHub CI/new-task end-of-run stop",
+      "status": "NOT_RUN",
+      "executor": "root",
+      "note": "上述范围不以单测或此次setup成功替代；由root总交付明确记录实际结果。"
+    }
+  ],
+  "boundaries": [
+    "安全验证仅合成配置/owned随机回环子进程；没有远端服务、真实凭据、生产DB、真实AI调用。",
+    "Linux/proc是此脚本必要能力；non-Linux检查明确不能作为已测试通过。",
+    "匿名回环NATS不是多租户强隔离，测试共享VM须另有平台隔离；本任务未擅自改业务认证。",
+    "工作流静态可评估权限/依赖来源/命令顺序，但CI实跑需root创建PR后核查。",
+    "只读调用链supporting scopes已读cfg结构及NATS/Typesense测试入口；这些不替代其他代理整文件审查。"
+  ]
+}

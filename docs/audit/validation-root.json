@@ -1,0 +1,1217 @@
+{
+  "record_type": "Machine-derived execution evidence, no semantic audit coverage inferred",
+  "date_utc": "2026-10-01",
+  "backend_implementation_commit": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87",
+  "frontend_implementation_commit": "81fe60b316dd278bb20d4d5c5d2e8f32ad7ff1b8",
+  "environment": {
+    "os": "Debian 13",
+    "node": "24.19.0",
+    "npm": "11.9.0",
+    "go": "1.26.8",
+    "postgresql": "17.11",
+    "redis": "8.0.2",
+    "nats": "2.12.4",
+    "typesense": "30.2",
+    "playwright": "1.63.0",
+    "services": "New owned loopback-only cluster; random test secrets; no paid providers or production data"
+  },
+  "ci": {
+    "status": "PENDING",
+    "note": "PR not created at record time; final CI snapshot in delivery.md"
+  },
+  "checks": [
+    {
+      "id": "go-test-previous-round",
+      "repository": "backend",
+      "command": "MCMODS_RUN_ACTIVITY_LOAD=1 go test -p 1 -count=1 -json ./...",
+      "status": "PASS",
+      "exit_code": 0,
+      "terminal_nodes": {
+        "pass": 1351,
+        "skip": 5
+      },
+      "top_level_tests": {
+        "pass": 726,
+        "skip": 5
+      },
+      "skipped_tests": [
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestMinecraftLoaderVersionSourcesLive"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestExporterSamplePackageContracts"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestLatestExporterWorldgenV2Contract"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestLatestExporterCatalogImportIntegration"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestBuildMRPackWithRealModrinthMetadata"
+        }
+      ],
+      "required_real_service_checks": [
+        {
+          "test": "TestDurableOutboxConcurrentLoadIntegration",
+          "result": "pass",
+          "elapsed_seconds": 1.19
+        },
+        {
+          "test": "TestTypesenseRealCollectionImportAliasFilterAndDeleteIntegration",
+          "result": "pass",
+          "elapsed_seconds": 0.07
+        }
+      ],
+      "packages": [
+        {
+          "Package": "mcmods-cn-backend/internal/activity",
+          "Action": "pass",
+          "Elapsed": 1.54
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/antiabuse",
+          "Action": "pass",
+          "Elapsed": 0.208
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/app",
+          "Action": "pass",
+          "Elapsed": 0.43
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/config",
+          "Action": "pass",
+          "Elapsed": 0.013
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/database",
+          "Action": "pass",
+          "Elapsed": 1.561
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/httpapi",
+          "Action": "pass",
+          "Elapsed": 157.299
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/mailer",
+          "Action": "pass",
+          "Elapsed": 0.012
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/progression",
+          "Action": "pass",
+          "Elapsed": 0.238
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/querycache",
+          "Action": "pass",
+          "Elapsed": 0.037
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/queue",
+          "Action": "pass",
+          "Elapsed": 0.673
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/runtimelog",
+          "Action": "pass",
+          "Elapsed": 0.003
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/searchindex",
+          "Action": "pass",
+          "Elapsed": 0.109
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/security",
+          "Action": "pass",
+          "Elapsed": 1.157
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/serverprobe",
+          "Action": "pass",
+          "Elapsed": 0.011
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/testenv",
+          "Action": "pass",
+          "Elapsed": 0.024
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/userstats",
+          "Action": "pass",
+          "Elapsed": 0.01
+        }
+      ],
+      "first_event_utc": "2026-10-01T16:59:47.113798454Z",
+      "last_event_utc": "2026-10-01T17:03:09.634500729Z",
+      "evidence": {
+        "local_path": "/tmp/mcmods-be-release-test.jsonl",
+        "sha256": "fc72b490b84448ba791d7bd48781e46133b6caee2764f2ceee6de734f9df78d7",
+        "bytes": 1328838,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      },
+      "superseded_by_final_round": true
+    },
+    {
+      "id": "go-race-previous-round",
+      "repository": "backend",
+      "command": "MCMODS_RUN_ACTIVITY_LOAD=1 go test -race -p 1 -count=1 -json ./...",
+      "status": "PASS",
+      "exit_code": 0,
+      "terminal_nodes": {
+        "pass": 1351,
+        "skip": 5
+      },
+      "top_level_tests": {
+        "pass": 726,
+        "skip": 5
+      },
+      "skipped_tests": [
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestMinecraftLoaderVersionSourcesLive"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestExporterSamplePackageContracts"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestLatestExporterWorldgenV2Contract"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestLatestExporterCatalogImportIntegration"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestBuildMRPackWithRealModrinthMetadata"
+        }
+      ],
+      "required_real_service_checks": [
+        {
+          "test": "TestDurableOutboxConcurrentLoadIntegration",
+          "result": "pass",
+          "elapsed_seconds": 1.6
+        },
+        {
+          "test": "TestTypesenseRealCollectionImportAliasFilterAndDeleteIntegration",
+          "result": "pass",
+          "elapsed_seconds": 0.08
+        }
+      ],
+      "packages": [
+        {
+          "Package": "mcmods-cn-backend/internal/activity",
+          "Action": "pass",
+          "Elapsed": 3.226
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/antiabuse",
+          "Action": "pass",
+          "Elapsed": 1.327
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/app",
+          "Action": "pass",
+          "Elapsed": 2.203
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/config",
+          "Action": "pass",
+          "Elapsed": 1.018
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/database",
+          "Action": "pass",
+          "Elapsed": 4.209
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/httpapi",
+          "Action": "pass",
+          "Elapsed": 182.915
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/mailer",
+          "Action": "pass",
+          "Elapsed": 1.029
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/progression",
+          "Action": "pass",
+          "Elapsed": 1.316
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/querycache",
+          "Action": "pass",
+          "Elapsed": 1.085
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/queue",
+          "Action": "pass",
+          "Elapsed": 1.821
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/runtimelog",
+          "Action": "pass",
+          "Elapsed": 1.024
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/searchindex",
+          "Action": "pass",
+          "Elapsed": 1.155
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/security",
+          "Action": "pass",
+          "Elapsed": 4.276
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/serverprobe",
+          "Action": "pass",
+          "Elapsed": 1.039
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/testenv",
+          "Action": "pass",
+          "Elapsed": 1.075
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/userstats",
+          "Action": "pass",
+          "Elapsed": 1.024
+        }
+      ],
+      "first_event_utc": "2026-10-01T17:04:56.698152776Z",
+      "last_event_utc": "2026-10-01T17:08:51.101719869Z",
+      "evidence": {
+        "local_path": "/tmp/mcmods-be-release-race.jsonl",
+        "sha256": "16750faf1692ca9b4a6d73b8d6b81ecad471a3661fd20c4969cdfc5c102d8a5e",
+        "bytes": 1329038,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      },
+      "superseded_by_final_round": true
+    },
+    {
+      "id": "go-vet-previous-round",
+      "repository": "backend",
+      "command": "go vet ./...",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "Frozen final business source",
+      "evidence": {
+        "local_path": "/tmp/mcmods-be-final-vet.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      },
+      "superseded_by_final_round": true
+    },
+    {
+      "id": "go-build-previous-round",
+      "repository": "backend",
+      "command": "go build ./...",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "Subsequent executable build also exit0",
+      "evidence": {
+        "local_path": "/tmp/mcmods-be-release-build.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      },
+      "superseded_by_final_round": true
+    },
+    {
+      "id": "govulncheck",
+      "repository": "backend",
+      "command": "govulncheck ./...",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "0 reachable and 0 imported-package advisories; 1 uncalled module advisory remains",
+      "evidence": {
+        "local_path": "/tmp/mcmods-be-release-vuln.log",
+        "sha256": "b5ae54ddcfa4cb39e85f84ad2d9e43556bd817c480eaab2a71bab63bfc29353b",
+        "bytes": 299,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      }
+    },
+    {
+      "id": "npm-ci",
+      "repository": "frontend",
+      "command": "npm ci",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "599 installed packages; lockfile respected",
+      "evidence": {
+        "local_path": "/tmp/mcmods-frontend-final-install.log",
+        "sha256": "dc80b93baf3bb02e731d8ad8be543a96aaa52045a76aa62e2d6c152731904df5",
+        "bytes": 149,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      }
+    },
+    {
+      "id": "frontend-check-previous-round",
+      "repository": "frontend",
+      "command": "npm run check",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "Full ESLint and tsc; later runner-specific ESLint and full tsc also PASS",
+      "evidence": {
+        "local_path": "/tmp/mcmods-frontend-release-check.log",
+        "sha256": "4d8f878433f1b97989245ce992b15145f214dfc1079b9e634418c8ab164dc819",
+        "bytes": 168,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      },
+      "superseded_by_final_round": true
+    },
+    {
+      "id": "vitest-previous-round",
+      "repository": "frontend",
+      "command": "npm test",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "34 files and 127 tests PASS, 35.91 seconds",
+      "evidence": {
+        "local_path": "/tmp/mcmods-frontend-release-tests-final.log",
+        "sha256": "4b0b7f372183335e6fb78eb7fa5c6c449e740e76def8a1416bb0f8a75e9bfa07",
+        "bytes": 273,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      },
+      "superseded_by_final_round": true
+    },
+    {
+      "id": "production-build-previous-round",
+      "repository": "frontend",
+      "command": "NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18080 npm run build",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "59 application pages; nonce-dependent pages request-rendered; subsequent changes only test orchestration/audit metadata",
+      "evidence": {
+        "local_path": "/tmp/mcmods-frontend-final-build.log",
+        "sha256": "1a127f2c519c19e0ba9a6727cfe73dd8d77424e05abf75363f5666d4876bb497",
+        "bytes": 3889,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      },
+      "superseded_by_final_round": true
+    },
+    {
+      "id": "npm-audit",
+      "repository": "frontend",
+      "command": "npm audit --json",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "0 reported vulnerabilities; tool finding count is not an exploit assessment",
+      "evidence": {
+        "local_path": "/tmp/mcmods-frontend-final-audit.json",
+        "sha256": "b524e905ae05365e60dcf0abb359c55f9fe89e973f7a45e4783dd306ac6d02e7",
+        "bytes": 366,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      }
+    },
+    {
+      "id": "service-ownership",
+      "repository": "backend",
+      "command": "python3 scripts/test-service-ownership.py -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "14 tests PASS, actual owned children and generator; no fixed-port target probing",
+      "evidence": {
+        "local_path": "/tmp/mcmods-service-safety-release.log",
+        "sha256": "d1d5d3739e050f2faacdf741e123cf5a0ce87a41010562958486dda456f9e44a",
+        "bytes": 2181,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      }
+    },
+    {
+      "id": "ledger-be-previous-round",
+      "repository": "backend",
+      "command": "python3 scripts/test-audit-ledger.py -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "9 real disposable Git black-box tests",
+      "evidence": {
+        "local_path": "/tmp/mcmods-be-ledger-final.log",
+        "sha256": "7b88004c04d986ca68e94d942943a3efac45360ccf0a07a1ce30beeb39ee0c5e",
+        "bytes": 1295,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      },
+      "superseded_by_final_round": true
+    },
+    {
+      "id": "ledger-fe-previous-round",
+      "repository": "frontend",
+      "command": "python3 scripts/test-audit-ledger.py -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "9 real disposable Git black-box tests",
+      "evidence": {
+        "local_path": "/tmp/mcmods-fe-ledger-final.log",
+        "sha256": "51b9e9be6d3b77086bd7d814962426f7ab16e74cc300ea3a4bd49526e4aed805",
+        "bytes": 1295,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      },
+      "superseded_by_final_round": true
+    },
+    {
+      "id": "service-start",
+      "repository": "backend",
+      "command": "scripts/test-services.sh start",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "PG/Redis/NATS/Typesense actual start; independent cross-exec PID/config/socket/readiness verified",
+      "evidence": {
+        "local_path": "/tmp/mcmods-release-service-start.log",
+        "sha256": "8adaca7a62a1fce6e9dcf7dbbffd823570efb619eb2b84212757560947cd7079",
+        "bytes": 175,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      }
+    },
+    {
+      "id": "setup",
+      "repository": "backend",
+      "command": "go run ./cmd/test-setup",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "Actual full migration + seed; generation85 + 2 forward repairs",
+      "evidence": {
+        "local_path": "/tmp/mcmods-release-setup.log",
+        "sha256": "2a008c8deca1f51681dd993d6abebb0c3f76be165043355420eb0e46e10ea1be",
+        "bytes": 64,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      }
+    },
+    {
+      "id": "browser-continuous-red",
+      "repository": "frontend",
+      "command": "playwright test (continuous six tests, before shared-IP pacing fix)",
+      "status": "FAIL",
+      "exit_code": 1,
+      "pass": 5,
+      "fail": 1,
+      "reason": "Shared headless-IP crawler read window exhausted; actual 429 on refresh; not hidden as flaky or a timeout extension",
+      "evidence": {
+        "local_path": "/tmp/mcmods-e2e-release.log",
+        "sha256": "7ac81d4e37f4d235d2a7143252c879c87eeb6160540f602be9a0fdf4656d4aa9",
+        "bytes": 3728,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      }
+    },
+    {
+      "id": "browser-final-previous-round",
+      "repository": "frontend",
+      "command": "npm run test:e2e",
+      "status": "PASS",
+      "exit_code": 0,
+      "pass": 6,
+      "fail": 0,
+      "retries": 0,
+      "groups": [
+        {
+          "pass": 5,
+          "seconds": 12.9
+        },
+        {
+          "pass": 1,
+          "seconds": 5.5
+        }
+      ],
+      "between_groups_seconds": 60,
+      "actual_project_api_journeys": 5,
+      "isolated_native_indexeddb_tests": 1,
+      "scope": "Real production Next server and Go API with actual PG/Redis/JetStream; project API is not intercepted. Native IndexedDB uses a separate synthetic page. No paid AI/OSS/mail.",
+      "evidence": {
+        "local_path": "/tmp/mcmods-e2e-release-paced.log",
+        "sha256": "2da70e3b1f44349733a14215d34e825c132e88223e4ffd9640b93542e3315de3",
+        "bytes": 1312,
+        "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      },
+      "superseded_by_final_round": true
+    },
+    {
+      "id": "staged-secrets",
+      "repository": "both",
+      "command": "gitleaks dir <staged patch> --redact=100",
+      "status": "PASS",
+      "exit_code": 0,
+      "findings": 0,
+      "evidence": [
+        {
+          "local_path": "/tmp/mcmods-be-staged-leaks.json",
+          "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+          "bytes": 3,
+          "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+        },
+        {
+          "local_path": "/tmp/mcmods-fe-staged-leaks.json",
+          "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+          "bytes": 3,
+          "retention": "Raw task-local file; compact result retained in this JSON; not a committed artifact."
+        }
+      ],
+      "scope": "Business/test/formal-doc staged patches. Audit-doc final scan separately recorded before delivery.",
+      "implementation_snapshot": {
+        "backend": "a7bca7be063b5757d66aa372aa6af6d794d5eb46",
+        "frontend": "0c04f80a2f796b5a5e24420405add4db03147ae7"
+      }
+    },
+    {
+      "id": "go-test",
+      "repository": "backend",
+      "command": "MCMODS_RUN_ACTIVITY_LOAD=1 go test -p 1 -count=1 -json ./...",
+      "status": "PASS",
+      "exit_code": 0,
+      "terminal_nodes": {
+        "pass": 1366,
+        "skip": 5
+      },
+      "top_level_tests": {
+        "pass": 730,
+        "skip": 5
+      },
+      "skipped_tests": [
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestMinecraftLoaderVersionSourcesLive"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestExporterSamplePackageContracts"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestLatestExporterWorldgenV2Contract"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestLatestExporterCatalogImportIntegration"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestBuildMRPackWithRealModrinthMetadata"
+        }
+      ],
+      "required_real_service_checks": [
+        {
+          "test": "TestDurableOutboxConcurrentLoadIntegration",
+          "result": "pass",
+          "elapsed_seconds": 1.27
+        },
+        {
+          "test": "TestTypesenseRealCollectionImportAliasFilterAndDeleteIntegration",
+          "result": "pass",
+          "elapsed_seconds": 0.07
+        }
+      ],
+      "packages": [
+        {
+          "Package": "mcmods-cn-backend/internal/activity",
+          "Action": "pass",
+          "Elapsed": 1.62
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/antiabuse",
+          "Action": "pass",
+          "Elapsed": 0.215
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/app",
+          "Action": "pass",
+          "Elapsed": 0.465
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/config",
+          "Action": "pass",
+          "Elapsed": 0.006
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/database",
+          "Action": "pass",
+          "Elapsed": 1.313
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/httpapi",
+          "Action": "pass",
+          "Elapsed": 210.143
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/mailer",
+          "Action": "pass",
+          "Elapsed": 0.008
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/progression",
+          "Action": "pass",
+          "Elapsed": 0.165
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/querycache",
+          "Action": "pass",
+          "Elapsed": 0.033
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/queue",
+          "Action": "pass",
+          "Elapsed": 0.662
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/runtimelog",
+          "Action": "pass",
+          "Elapsed": 0.003
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/searchindex",
+          "Action": "pass",
+          "Elapsed": 0.108
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/security",
+          "Action": "pass",
+          "Elapsed": 1.308
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/serverprobe",
+          "Action": "pass",
+          "Elapsed": 0.009
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/testenv",
+          "Action": "pass",
+          "Elapsed": 0.02
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/userstats",
+          "Action": "pass",
+          "Elapsed": 0.008
+        }
+      ],
+      "first_event_utc": "2026-10-01T17:48:16.608221043Z",
+      "last_event_utc": "2026-10-01T17:52:23.473392516Z",
+      "evidence": {
+        "local_path": "/tmp/mcmods-be-closing-test.jsonl",
+        "sha256": "3648566abab95931f9926f886f0a5cf4e24b6cca081e8355e83e4d1c17e65216",
+        "bytes": 1345603,
+        "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87",
+        "frontend": "81fe60b316dd278bb20d4d5c5d2e8f32ad7ff1b8"
+      }
+    },
+    {
+      "id": "go-race",
+      "repository": "backend",
+      "command": "MCMODS_RUN_ACTIVITY_LOAD=1 go test -race -p 1 -count=1 -json ./...",
+      "status": "PASS",
+      "exit_code": 0,
+      "terminal_nodes": {
+        "pass": 1366,
+        "skip": 5
+      },
+      "top_level_tests": {
+        "pass": 730,
+        "skip": 5
+      },
+      "skipped_tests": [
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestMinecraftLoaderVersionSourcesLive"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestExporterSamplePackageContracts"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestLatestExporterWorldgenV2Contract"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestLatestExporterCatalogImportIntegration"
+        },
+        {
+          "package": "mcmods-cn-backend/internal/httpapi",
+          "test": "TestBuildMRPackWithRealModrinthMetadata"
+        }
+      ],
+      "required_real_service_checks": [
+        {
+          "test": "TestDurableOutboxConcurrentLoadIntegration",
+          "result": "pass",
+          "elapsed_seconds": 1.96
+        },
+        {
+          "test": "TestTypesenseRealCollectionImportAliasFilterAndDeleteIntegration",
+          "result": "pass",
+          "elapsed_seconds": 0.1
+        }
+      ],
+      "packages": [
+        {
+          "Package": "mcmods-cn-backend/internal/activity",
+          "Action": "pass",
+          "Elapsed": 3.408
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/antiabuse",
+          "Action": "pass",
+          "Elapsed": 1.3639999999999999
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/app",
+          "Action": "pass",
+          "Elapsed": 2.147
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/config",
+          "Action": "pass",
+          "Elapsed": 1.02
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/database",
+          "Action": "pass",
+          "Elapsed": 4.346
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/httpapi",
+          "Action": "pass",
+          "Elapsed": 205.795
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/mailer",
+          "Action": "pass",
+          "Elapsed": 1.034
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/progression",
+          "Action": "pass",
+          "Elapsed": 1.289
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/querycache",
+          "Action": "pass",
+          "Elapsed": 1.129
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/queue",
+          "Action": "pass",
+          "Elapsed": 1.77
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/runtimelog",
+          "Action": "pass",
+          "Elapsed": 1.022
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/searchindex",
+          "Action": "pass",
+          "Elapsed": 1.196
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/security",
+          "Action": "pass",
+          "Elapsed": 4.181
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/serverprobe",
+          "Action": "pass",
+          "Elapsed": 1.047
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/testenv",
+          "Action": "pass",
+          "Elapsed": 1.067
+        },
+        {
+          "Package": "mcmods-cn-backend/internal/userstats",
+          "Action": "pass",
+          "Elapsed": 1.045
+        }
+      ],
+      "first_event_utc": "2026-10-01T17:52:24.814554358Z",
+      "last_event_utc": "2026-10-01T17:56:34.213170283Z",
+      "evidence": {
+        "local_path": "/tmp/mcmods-be-closing-race.jsonl",
+        "sha256": "71e67262e9ed32546a71cd468b46b1d49adef517fafab9cfa424686fb884b3a3",
+        "bytes": 1345721,
+        "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87",
+        "frontend": "81fe60b316dd278bb20d4d5c5d2e8f32ad7ff1b8"
+      }
+    },
+    {
+      "id": "go-vet",
+      "repository": "backend",
+      "command": "go vet ./...",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "Frozen final business source",
+      "evidence": {
+        "local_path": "/tmp/mcmods-be-closing-vet.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0,
+        "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87",
+        "frontend": "81fe60b316dd278bb20d4d5c5d2e8f32ad7ff1b8"
+      }
+    },
+    {
+      "id": "go-build",
+      "repository": "backend",
+      "command": "go build ./...",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "Subsequent executable build also exit0",
+      "evidence": {
+        "local_path": "/tmp/mcmods-be-closing-build.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0,
+        "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87",
+        "frontend": "81fe60b316dd278bb20d4d5c5d2e8f32ad7ff1b8"
+      }
+    },
+    {
+      "id": "frontend-check",
+      "repository": "frontend",
+      "command": "npm run check",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "Full ESLint and tsc; later runner-specific ESLint and full tsc also PASS",
+      "evidence": {
+        "local_path": "/tmp/mcmods-fe-final-check.log",
+        "sha256": "4d8f878433f1b97989245ce992b15145f214dfc1079b9e634418c8ab164dc819",
+        "bytes": 168,
+        "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87",
+        "frontend": "ec7d4d5ea8c0be3aa602f98024285a177e7cf382"
+      }
+    },
+    {
+      "id": "production-build",
+      "repository": "frontend",
+      "command": "NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18080 npm run build",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "59 application pages; nonce-dependent pages request-rendered; subsequent changes only test orchestration/audit metadata",
+      "evidence": {
+        "local_path": "/tmp/mcmods-fe-final-build.log",
+        "sha256": "c6f60078e29f550a6a8c5eac9608cdf714e1dfbd07bb0981696fb2d7efcbb58d",
+        "bytes": 3889,
+        "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87",
+        "frontend": "ec7d4d5ea8c0be3aa602f98024285a177e7cf382"
+      }
+    },
+    {
+      "id": "vitest",
+      "repository": "frontend",
+      "command": "npm test",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "37 files and156 tests PASS,33.77 seconds; final frozen business/source tests, no skipped tests",
+      "evidence": {
+        "local_path": "/tmp/mcmods-fe-final-tests.log",
+        "sha256": "95fe2dbcdde13122f5bc18d6965320dd2d86efc68243452cb800cc61b93a01b3",
+        "bytes": 273,
+        "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87",
+        "frontend": "ec7d4d5ea8c0be3aa602f98024285a177e7cf382"
+      },
+      "test_files": 37,
+      "tests": 156,
+      "test_count": 156
+    },
+    {
+      "id": "ledger-be",
+      "repository": "backend",
+      "command": "python3 scripts/test-audit-ledger.py -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "9 real disposable Git black-box tests",
+      "evidence": {
+        "local_path": "/tmp/mcmods-be-delivery-ledger-tests.log",
+        "sha256": "411885a8f5d4c6b9b26cf0793575eeabc80ba88d965503d97d05570f14b8abd1",
+        "bytes": 1295,
+        "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87",
+        "frontend": "81fe60b316dd278bb20d4d5c5d2e8f32ad7ff1b8"
+      },
+      "source_sha256": "04383801362f30a71c1f6dd6d73c0e66f2276ccf0453fd0cb8e8f5aa363f8ebb"
+    },
+    {
+      "id": "ledger-fe",
+      "repository": "frontend",
+      "command": "python3 scripts/test-audit-ledger.py -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "scope": "9 real disposable Git black-box tests",
+      "evidence": {
+        "local_path": "/tmp/mcmods-fe-delivery-ledger-tests.log",
+        "sha256": "7ef7b9e92a6f9e875eb2468821b86c28adf95db40a9174cb696d333fbf2eea70",
+        "bytes": 1295,
+        "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87",
+        "frontend": "81fe60b316dd278bb20d4d5c5d2e8f32ad7ff1b8"
+      },
+      "source_sha256": "04383801362f30a71c1f6dd6d73c0e66f2276ccf0453fd0cb8e8f5aa363f8ebb"
+    },
+    {
+      "id": "browser-final",
+      "repository": "frontend",
+      "command": "npm run test:e2e",
+      "status": "PASS",
+      "exit_code": 0,
+      "pass": 6,
+      "fail": 0,
+      "retries": 0,
+      "groups": [
+        {
+          "pass": 5,
+          "seconds": 12.033100000000001,
+          "start_time": "2026-10-01T18:10:55.936Z"
+        },
+        {
+          "pass": 1,
+          "seconds": 5.6047839999999995,
+          "start_time": "2026-10-01T18:12:08.968Z"
+        }
+      ],
+      "between_groups_seconds": 60,
+      "actual_project_api_journeys": 5,
+      "isolated_native_indexeddb_tests": 1,
+      "scope": "Real production Next server and Go API with actual PG/Redis/JetStream; project API is not intercepted. Native IndexedDB uses a separate synthetic page. No paid AI/OSS/mail.",
+      "evidence": {
+        "local_path": "/tmp/mcmods-e2e-retained-reports.log",
+        "sha256": "9bc5e385f267b54e67e2835893f9f516c25d521c4370c02a2f3df3a3bf0593d8",
+        "bytes": 1311,
+        "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+      },
+      "implementation_snapshot": {
+        "backend": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87",
+        "frontend": "81fe60b316dd278bb20d4d5c5d2e8f32ad7ff1b8"
+      },
+      "retained_reports": [
+        {
+          "local_path": "/tmp/mcmods-e2e-retained-core.json",
+          "sha256": "b7dae3e4542ccbfdd51f27e64dab868facb057f817e932ff205171287b1c307d",
+          "bytes": 7440,
+          "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+        },
+        {
+          "local_path": "/tmp/mcmods-e2e-retained-account.json",
+          "sha256": "0c5ec74b3fda140e921b9b054f8347dc51fd0c00a1fb3e8804a3ec0731f2b557",
+          "bytes": 3048,
+          "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+        }
+      ],
+      "report_retention_assertion": "Both group reports survived the second Playwright run in playwright-report, separate from cleared test-results; expected5/1, skipped0, unexpected0, flaky0."
+    },
+    {
+      "id": "browser-current-before-report-retention-fix",
+      "repository": "frontend",
+      "command": "npm run test:e2e",
+      "status": "PASS",
+      "exit_code": 0,
+      "pass": 6,
+      "fail": 0,
+      "retries": 0,
+      "groups": [
+        {
+          "pass": 5,
+          "seconds": 19.6
+        },
+        {
+          "pass": 1,
+          "seconds": 7.0
+        }
+      ],
+      "implementation_snapshot": {
+        "backend": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87",
+        "frontend": "ec7d4d5ea8c0be3aa602f98024285a177e7cf382"
+      },
+      "evidence": {
+        "local_path": "/tmp/mcmods-e2e-final-paced.log",
+        "sha256": "d1e4407931e4c4ae95d9dc7b9b1f5984ba46f580ec93914971923d841a145363",
+        "bytes": 1311,
+        "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+      },
+      "note": "Real final business journeys passed, but second batch cleared first JSON in test-results. Report storage corrected and complete paced run repeated; does not invalidate logged journey results."
+    },
+    {
+      "id": "owned-service-stop",
+      "repository": "backend",
+      "command": "Exact UID/CWD/executable/arguments/log verified TERM for two owned applications; bash scripts/test-services.sh stop <owned task directory>",
+      "status": "PASS",
+      "exit_code": 0,
+      "applications": 2,
+      "dependency_services": 4,
+      "evidence": [
+        {
+          "local_path": "/tmp/mcmods-owned-app-stop.log",
+          "sha256": "1879f421c201de2363c8d263c480951025153f44ca7859c06fadb8f83492550d",
+          "bytes": 231,
+          "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+        },
+        {
+          "local_path": "/tmp/mcmods-owned-services-stop.log",
+          "sha256": "71ae873a7f0c3664d58ffd069a34e8287a94eb06f35f88cc6ec8f0383791bd3f",
+          "bytes": 136,
+          "retention": "Raw task-local evidence; compact result committed in this JSON. Not a remote raw-log artifact."
+        }
+      ],
+      "scope": "All exact owned task processes stopped (zombies treated as stopped without re-signal); disposable state/logs retained, unknown/user resources untouched."
+    },
+    {
+      "id": "e2e-runner-final-lint",
+      "repository": "frontend",
+      "command": "npx eslint scripts/run-e2e.mjs",
+      "status": "PASS",
+      "exit_code": 0,
+      "implementation_snapshot": {
+        "frontend": "81fe60b316dd278bb20d4d5c5d2e8f32ad7ff1b8"
+      },
+      "evidence": {
+        "local_path": "/tmp/mcmods-e2e-report-lint.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0,
+        "retention": "Task-local output; compact result retained."
+      }
+    },
+    {
+      "id": "go-mod-verify-final",
+      "repository": "backend",
+      "command": "go mod verify",
+      "status": "PASS",
+      "exit_code": 0,
+      "implementation_snapshot": {
+        "backend": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87"
+      },
+      "result": "all modules verified",
+      "evidence": {
+        "local_path": "/tmp/mcmods-go-mod-final-verify.log",
+        "sha256": "b4537ed75f533f993f371954de47e42a793b8e5b0587577de7e27fb3e50696bd",
+        "bytes": 21,
+        "retention": "Task-local raw output; compact result retained."
+      }
+    },
+    {
+      "id": "final-entire-diff-secret-scan",
+      "repository": "backend",
+      "command": "git diff --binary <recorded-baseline> | gitleaks stdin --redact=100 --report-format=json --report-path=<task-local>",
+      "status": "PASS",
+      "tool_exit_code": 1,
+      "tool_findings": 2,
+      "confirmed_credential_findings": 0,
+      "scope": "All baseline-to-final business/test/audit tracked additions and modifications after staging; includes final regression tests and audit evidence, not just last staged patch.",
+      "manual_review": "Backend two generic-api-key matches independently confirmed as a 64-hex test-log SHA256 and an unchanged baseline public nkeys Go checksum; no allowlist or scan suppression.",
+      "evidence": {
+        "local_path": "/tmp/mcmods-be-final-all-leaks.json",
+        "sha256": "9f7d230a31b7a14bf821b284c770a4f99e6cf5cf3fe2e6fc7040f601ed437fe7",
+        "bytes": 1017,
+        "retention": "Redacted raw report is task-local; compact finding types and disposition retained."
+      }
+    }
+  ],
+  "not_run": [
+    "Paid provider connectivity/semantic quality/billing",
+    "Production database operational health/backup restore/large-table migration locking",
+    "Unprovided authentic exporter ZIP samples and opted-out live Minecraft/Modrinth upstream cases",
+    "All roles/all optional UI journeys and full GPU visual correctness",
+    "Real OSS/SMTP/OAuth/Yggdrasil client journeys",
+    "Long-duration multi-instance supplier-crash billing windows",
+    "Original authority list of about20 legacy issues unavailable; historical issue totals unknown. Current independently reconstructed issue-index is separate."
+  ]
+}

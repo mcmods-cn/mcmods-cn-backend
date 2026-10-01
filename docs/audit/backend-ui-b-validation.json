@@ -1,0 +1,139 @@
+{
+  "repository": "mcmods-cn-backend",
+  "reviewer": "frontend_ui_b",
+  "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+  "runs": [
+    {
+      "status": "PASS",
+      "exit_code": 0,
+      "command": "source <owned-test-state>/env.sh; PATH=<Go1.26.8>/bin:$PATH APP_ENV=test MCMODS_RUN_DB_INTEGRATION=1 go test ./internal/httpapi -run 'Test(SkinReviewReturnsPublicRevisionID|UserOSSQuotaReadFailure|ModpackAssociationIteration|PasteLogSharePublishes|LogRedactionIncludes|AccessLogs|StickerGIF|StickerCatalog|PlaygroundDraft|ConversationRead)' -count=1 -json",
+      "evidence_path": "/tmp/backend-ui-b-final-green-current2.jsonl",
+      "top_level_tests": 13,
+      "test_events_with_subtests": 34,
+      "skipped": 0,
+      "failed": 0,
+      "seconds": 15.908,
+      "environment": "Go1.26.8, owned-marker verified local PostgreSQL17.11, synthetic data only; no external AI/OSS calls",
+      "limits": "Direct handler fixtures inject synthetic claims and preserve core PG SQL; does not verify login middleware/browser/production performance."
+    },
+    {
+      "status": "PASS",
+      "exit_code": 0,
+      "command": "source <owned-test-state>/env.sh; PATH=<Go1.26.8>/bin:$PATH APP_ENV=test MCMODS_RUN_DB_INTEGRATION=1 go test -race ./internal/httpapi -run 'Test(SkinReviewReturnsPublicRevisionID|UserOSSQuotaReadFailure|ModpackAssociationIteration|PasteLogSharePublishes|LogRedactionIncludes|AccessLogs|StickerGIF|StickerCatalog|PlaygroundDraft|ConversationRead)' -count=1 -json",
+      "evidence_path": "/tmp/backend-ui-b-final-race.jsonl",
+      "top_level_tests": 13,
+      "test_events_with_subtests": 34,
+      "skipped": 0,
+      "failed": 0,
+      "seconds": 18.985,
+      "environment": "Go1.26.8, owned-marker verified local PostgreSQL17.11, synthetic data only; no external AI/OSS calls",
+      "limits": "Direct handler fixtures inject synthetic claims and preserve core PG SQL; does not verify login middleware/browser/production performance."
+    },
+    {
+      "status": "PASS",
+      "exit_code": 0,
+      "command": "PATH=<Go1.26.8>/bin:$PATH go vet ./internal/httpapi",
+      "evidence_path": "/tmp/backend-ui-b-final-vet.log"
+    },
+    {
+      "status": "PASS",
+      "exit_code": 0,
+      "command": "git diff --check",
+      "environment": "Final shared workspace checked, no credentials printed"
+    }
+  ],
+  "red_regressions": [
+    {
+      "issue": "BE-UIB-001",
+      "status": "EXPECTED_FAIL",
+      "exit_code": 1,
+      "evidence_path": "/tmp/backend-ui-b-log-red.log",
+      "meaning": "Original source access log leaks sensitive synthetic query values; three cases failed."
+    },
+    {
+      "issue": "BE-APIB-016",
+      "status": "EXPECTED_FAIL",
+      "exit_code": 1,
+      "evidence_path": "/tmp/backend-ui-b-gif-red.log",
+      "meaning": "Behavior-preserving extracted old decoder helper, not a claimed original helper symbol; bounded compressed GIF excessive allocation reproduced."
+    },
+    {
+      "issue": "BE-UIB-002",
+      "status": "EXPECTED_FAIL",
+      "exit_code": 1,
+      "evidence_path": "/tmp/backend-ui-b-catalog-red.log",
+      "meaning": "Only disposable PG catalog version table removed; original returned200."
+    },
+    {
+      "issue": "BE-UIB-004",
+      "status": "EXPECTED_FAIL",
+      "exit_code": 1,
+      "evidence_path": "/tmp/backend-ui-b-playground-red.log",
+      "meaning": "Disposable PG draft table hidden; original returned200 empty."
+    },
+    {
+      "issue": "BE-UIB-005",
+      "status": "EXPECTED_FAIL",
+      "exit_code": 1,
+      "evidence_path": "/tmp/backend-ui-b-message-red-corrected.log",
+      "meaning": "Corrected fixture pgx typed parameter; original ignored real PG read receipt trigger failure and returned200."
+    },
+    {
+      "issue": "BE-UIB-006",
+      "status": "EXPECTED_FAIL",
+      "exit_code": 1,
+      "evidence_path": "/tmp/backend-ui-b-log-share-red.log",
+      "meaning": "Original JSON/URL secrets and public share synthetic leakage assertions failed; quoted-space assertion subsequently strengthened."
+    },
+    {
+      "issue": "BE-UIB-007/008",
+      "status": "EXPECTED_FAIL",
+      "exit_code": 1,
+      "evidence_path": "/tmp/backend-ui-b-skin-quota-red.log",
+      "meaning": "Original skin public ID assertion and realPG quota query failure both failed."
+    },
+    {
+      "issue": "BE-UIB-008",
+      "status": "EXPECTED_FAIL",
+      "exit_code": 1,
+      "evidence_path": "/tmp/backend-ui-b-modpack-red.log",
+      "meaning": "Exact original modpack handler discards deferred PG row iteration error; current bytes restored by finally; exit1 business assertion."
+    }
+  ],
+  "earlier_attempts": [
+    {
+      "status": "FAIL",
+      "evidence_path": "/tmp/backend-ui-b-message-red.log",
+      "reason": "Initial fixture int supplied to pgx text argument; not business regression evidence, corrected source in message-red-corrected."
+    },
+    {
+      "status": "FAIL",
+      "evidence_path": "/tmp/backend-ui-b-final-green.jsonl",
+      "reason": "Skin second request reused consumed body; first public ID/persistence assertions passed, duplicate409 fixture corrected without weakening assertion."
+    },
+    {
+      "status": "FAIL",
+      "evidence_path": "/tmp/backend-ui-b-final-green-corrected.jsonl",
+      "reason": "Root shared querySimpleRows callers were in-progress signature migration; final compile succeeded."
+    },
+    {
+      "status": "FAIL",
+      "evidence_path": "/tmp/backend-ui-b-final-green-current.jsonl",
+      "reason": "API-A in-progress seed worker referenced lease/AI helpers before files landed; final compile succeeded."
+    },
+    {
+      "status": "BLOCKED",
+      "evidence_path": "/tmp/backend-ui-b-final-green.log",
+      "reason": "New safety TestMain correctly refused env without MCMODS_TEST_STATE; root fixed persisted owned env, no bypass."
+    }
+  ],
+  "not_run": [
+    "Production database health, capacity, backups or real data migration",
+    "Real paid AI provider semantic quality or billing",
+    "Real OSS provider availability",
+    "Full HTTP authentication middleware/browser journey in this targeted suite",
+    "mod_export_contract v2/v6 ZIP fixture-specific portions without authorized fixtures"
+  ],
+  "guard": "owned STATE identity/marker/cfg/override exact same local cluster required by TestMain and isolatedAITestDatabase; no real database inferred from names/connection strings",
+  "evidence_storage": "Temporary logs contain synthetic test output, not secrets; durable command/outcome/scope here. Main task runs and PR/CI linked by root."
+}
