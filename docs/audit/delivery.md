@@ -13,7 +13,7 @@
 
 原始 Git 文件共884：后端491、前端393。最终后端666文件：605人工文件完整审查、部分0、未审0、排除61；前端481文件：453人工文件完整审查、部分0、未审0、排除28。总计1147文件、人工1058完整。最终精确指纹以两仓 `coverage.json` / `file-ledger.json` 为准，按相对路径去重，保留删除文件分母；不将代理重复读取相加。`file-ledger.json` 记录最终 SHA256、全部实际读取行段、职责、调用链、问题与有限验证证据；修改后重新读审。人工翻译、SQL、CI、配置、脚本及人工问题 JSON 均纳入。
 
-排除逐文件说明：lockfile做依赖一致性/安全检查；第三方、二进制及历史机器性能输出不做人工作业重构；生成的指纹/执行事件清单审生成器和使用边界。人工 `issue-index.json`、语言 JSON/TS 和契约 override 没有作为机器产物排除。台账生成器不从读取/扫描/字符串布尔值推断审查完成；九个独立临时 Git 黑盒回归验证此边界。自引用台账省略自身指纹，`tracked_head` 是生成时业务提交，最终交付 HEAD 从 PR 获取；最终人工文件由 SHA256识别，不伪造同一报告自身的提交 hash。
+排除逐文件说明：lockfile做依赖一致性/安全检查；第三方、二进制及历史机器性能输出不做人工作业重构；生成的指纹/执行事件清单审生成器和使用边界。人工 `issue-index.json`、语言 JSON/TS 和契约 override 没有作为机器产物排除。台账生成器不从读取/扫描/字符串布尔值推断审查完成；九个独立临时 Git 黑盒回归验证此边界。自引用台账省略自身指纹，`tracked_head` 是生成时检出提交，最终交付 HEAD 从 PR 获取；最终人工文件由 SHA256识别，不伪造同一报告自身的提交 hash。
 
 ## B. 历史问题与去重结果
 
@@ -66,7 +66,7 @@ Debian13无sudo；用户目录安装官方校验Go1.26.8、PG17.11、Redis8.0.2�
 | npm ci/check/test/production build/audit | PASS；37文件156测试；audit0工具命中；当前production构建59页面，后续仅测试编排/报告保留/审计改变 |
 | 台账黑盒与进程安全 | 两仓各9 PASS；14进程/生成器测试PASS；Go门禁7顶层/含子53 PASS |
 | `npm run test:e2e` | PASS：最终互补两批5+1、批间60秒，零重试；两JSON均保留在独立报告目录；五真实API旅程+一原生IDB隔离 |
-| diff/暂存修复密钥扫描 | PASS；原始历史BE一条命中已核为合成fixture，FE无命中；最终审计文档扫描与远端diff另在H核实 |
+| diff/全量提交差异密钥扫描 | 已核实无真实凭据；后端两条工具命中为日志SHA256/已有公开依赖checksum，前端0命中；不通过忽略规则隐藏工具结果 |
 
 五项Go SKIP：真实Minecraft loader、真实Modrinth mrpack和三个缺原始exporter样本的用例。未将合成ZIP冒充真实样本。连续E2E曾5 PASS/1 FAIL：共享headless IP每分钟60读导致429；仅改测试编排遵守窗口，不加超时/放宽断言/关闭限流。早期环境、fixture、编译、业务红灯在各validation保留，不择成功的一次冒充无失败。机器摘要/实际命令/原日志SHA见两仓 `validation-root.json` 与专题validation；`/tmp`原始日志只在本任务可取，未冒称已提交远端。
 
@@ -74,7 +74,13 @@ Debian13无sudo；用户目录安装官方校验Go1.26.8、PG17.11、Redis8.0.2�
 
 ## H. 提交、PR、CI与部署顺序
 
-两个仓库均使用 `codex/full-audit-db-i18n-20261001`。业务提交见A；审计记录与生成清单单独提交，PR/CI快照在创建后更新；最终HEAD由关联PR提供，避免报告自引用提交hash。实际精确UID/cwd/exe/argv/log核验后停止两应用，再通过项目owned stop停止四服务，退出0；未清理用户原有或未知资源。没有空PR、强推、main提交、自动合并或生产部署。
+两个仓库均使用 `codex/full-audit-db-i18n-20261001`。业务提交见A；审计记录与生成清单单独提交，最终HEAD由关联PR提供，避免报告自引用提交hash。
+
+已推送并创建互相关联的草稿：[后端 PR #4](https://github.com/mcmods-cn/mcmods-cn-backend/pull/4)、[前端 PR #4](https://github.com/mcmods-cn/mcmods-cn-frontend/pull/4)。初次CI快照：后端 `bc96afc` 的 [check/integration](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/36908617190) 全部SUCCESS（CI实际PG16.15，本地PG17.11）；前端 `4bb3873` 的 [check](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/36908617018) SUCCESS。快照带完整提交与job链接保存在 `validation-root.json`；本记录后续文档提交的最终checks以PR当前HEAD为准。
+
+远端PR文件清单后端289、前端158逐项与本地基线差异路径及Git blob SHA一致。GitHub后端整份diff返回20,000行限制/406，改用分页files API核验所有最终blob，不把API截断当审查完成。桌面PR附件接口两次未返回，不能据此确认侧栏附件；GitHub PR本身及关联链接已验证存在。
+
+实际精确UID/cwd/exe/argv/log核验后停止两应用，再通过项目owned stop停止四服务，退出0；未清理用户原有或未知资源。没有空PR、强推、main提交、自动合并或生产部署。
 
 1. 备份和实际脏数据/大表锁评估由有授权的发布负责人完成；本次没有生产执行。
 2. 停止旧AI/seed/import/automation/blueprint workers，再运行正常Migrate（保持85、登记两repair）；脏数据拒绝时恢复原版本并人工评估，不自动清洗。

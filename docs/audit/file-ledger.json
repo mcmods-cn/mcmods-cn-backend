@@ -2133,12 +2133,12 @@
     "path": "docs/audit/delivery.md",
     "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
     "baseline_sha256": null,
-    "lines": 94,
+    "lines": 100,
     "category": ".md",
     "read_ranges": [
       [
         1,
-        94
+        100
       ]
     ],
     "responsibility": "主执行者实际全文阅读/撰写与最终复核；交付结论依据命令和专题证据，静态审查不混行为覆盖",
@@ -2151,8 +2151,8 @@
     "behavior_verified": false,
     "review_evidence": "docs/audit/review-root.json",
     "exclusion": null,
-    "final_sha256": "57ab70bcc69e82764f1372da9a72a32afb6d0865d53db56a0d5185367c9d8ba8",
-    "final_review_sha256": "57ab70bcc69e82764f1372da9a72a32afb6d0865d53db56a0d5185367c9d8ba8",
+    "final_sha256": "a24e6058f6982714dc482daf5d1d89c96be5f865f15e7f723bf89cd17f41c6c8",
+    "final_review_sha256": "a24e6058f6982714dc482daf5d1d89c96be5f865f15e7f723bf89cd17f41c6c8",
     "deleted": false
   },
   {
@@ -2761,7 +2761,7 @@
     "behavior_verified": false,
     "review_evidence": null,
     "exclusion": "明确登记的生成审查清单/执行证据；生成器与人工结论另审，不继承测试结论，自引用清单省略自身指纹",
-    "final_sha256": "202e1835d13afa1f5d9dfb20313ed3af8d5ef213344fd2158c47e67393a07715",
+    "final_sha256": "50dd818117c9d7450bb54b929e3c56c634defd68d09970aaabb79f01434d8ea9",
     "final_review_sha256": null,
     "deleted": false
   },
@@ -2823,7 +2823,7 @@
     "path": "docs/audit/validation-root.json",
     "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
     "baseline_sha256": null,
-    "lines": 1217,
+    "lines": 1278,
     "category": ".json",
     "read_ranges": [],
     "responsibility": "",
@@ -2836,7 +2836,7 @@
     "behavior_verified": false,
     "review_evidence": null,
     "exclusion": "明确登记的生成审查清单/执行证据；生成器与人工结论另审，不继承测试结论，自引用清单省略自身指纹",
-    "final_sha256": "4d6487a7eb70ca625d09d87d1a3d011fe15522cf0c627d616a9e77b8ff124c7b",
+    "final_sha256": "c7e8f10f82dee68a903aac24610961fb8539bb71e5b5a7ca1f5d99b01f49134f",
     "final_review_sha256": null,
     "deleted": false
   },

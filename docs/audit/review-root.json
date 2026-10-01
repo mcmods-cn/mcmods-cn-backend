@@ -2977,12 +2977,12 @@
     },
     {
       "path": "docs/audit/delivery.md",
-      "sha256": "57ab70bcc69e82764f1372da9a72a32afb6d0865d53db56a0d5185367c9d8ba8",
-      "lines": 94,
+      "sha256": "a24e6058f6982714dc482daf5d1d89c96be5f865f15e7f723bf89cd17f41c6c8",
+      "lines": 100,
       "read_ranges": [
         [
           1,
-          94
+          100
         ]
       ],
       "status": "已复查",
@@ -2993,7 +2993,7 @@
       "call_chain": [],
       "issues": [],
       "validation": [],
-      "final_review": "root完整读取最终A–I/前端交付正文，复核源提交、实际计数、测试与未验证边界；远端PR/CI创建后单独复核补记。"
+      "final_review": "root全文读取原交付正文并复核最终全部变更行；核验实际PR链接、完整CI快照提交/job成功与远端所有blob一致，保留后端diff406/分页替代和附件未响应边界，文档后续HEAD由PR checks验证。"
     },
     {
       "path": "docs/audit/environment.md",

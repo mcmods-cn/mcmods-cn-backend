@@ -16,8 +16,45 @@
     "services": "New owned loopback-only cluster; random test secrets; no paid providers or production data"
   },
   "ci": {
-    "status": "PENDING",
-    "note": "PR not created at record time; final CI snapshot in delivery.md"
+    "status": "PASS",
+    "snapshot_utc": "2026-10-01T19:20:00.977261+00:00",
+    "repositories": {
+      "backend": {
+        "status": "completed",
+        "conclusion": "success",
+        "head_commit": "bc96afcacbf447920e628dc26b96b4b42a4cf69a",
+        "run_url": "https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/36908617190",
+        "jobs": [
+          {
+            "name": "integration",
+            "conclusion": "success",
+            "completed_at": "2026-10-01T18:46:38Z",
+            "url": "https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/36908617190/job/110525370432"
+          },
+          {
+            "name": "check",
+            "conclusion": "success",
+            "completed_at": "2026-10-01T18:43:31Z",
+            "url": "https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/36908617190/job/110525370743"
+          }
+        ]
+      },
+      "frontend": {
+        "status": "completed",
+        "conclusion": "success",
+        "head_commit": "4bb38739d836aebff5de6b09948445a85a19c26a",
+        "run_url": "https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/36908617018",
+        "jobs": [
+          {
+            "name": "check",
+            "conclusion": "success",
+            "completed_at": "2026-10-01T18:43:36Z",
+            "url": "https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/36908617018/job/110525369973"
+          }
+        ]
+      }
+    },
+    "scope": "This is the initial pushed audit HEAD, not a claim about later documentation-only HEAD; current PR checks are authoritative."
   },
   "checks": [
     {
@@ -1195,14 +1232,18 @@
       "tool_exit_code": 1,
       "tool_findings": 2,
       "confirmed_credential_findings": 0,
-      "scope": "All baseline-to-final business/test/audit tracked additions and modifications after staging; includes final regression tests and audit evidence, not just last staged patch.",
-      "manual_review": "Backend two generic-api-key matches independently confirmed as a 64-hex test-log SHA256 and an unchanged baseline public nkeys Go checksum; no allowlist or scan suppression.",
+      "scope": "Entire baseline-to-final business/test/audit tracked diff after staging PR/CI metadata; no allowlist or suppression. Newly written scan metadata consists only of command status and digests.",
+      "manual_review": [
+        "verified actual local test-log SHA256, not a credential",
+        "unchanged baseline public nkeys module checksum"
+      ],
       "evidence": {
-        "local_path": "/tmp/mcmods-be-final-all-leaks.json",
-        "sha256": "9f7d230a31b7a14bf821b284c770a4f99e6cf5cf3fe2e6fc7040f601ed437fe7",
+        "local_path": "/tmp/mcmods-be-pre-delivery-leaks.json",
+        "sha256": "c89b09e63b3fcccc6c33b65bdaba56686f989c4a3d4c9908fb0d461644670a31",
         "bytes": 1017,
-        "retention": "Redacted raw report is task-local; compact finding types and disposition retained."
-      }
+        "retention": "Redacted raw report is task-local; compact disposition retained."
+      },
+      "input_patch_sha256": "37b4247cca18a090460c9cd0f91791bbc973c394e2a842765b5f2ae95ffae057"
     }
   ],
   "not_run": [
@@ -1213,5 +1254,25 @@
     "Real OSS/SMTP/OAuth/Yggdrasil client journeys",
     "Long-duration multi-instance supplier-crash billing windows",
     "Original authority list of about20 legacy issues unavailable; historical issue totals unknown. Current independently reconstructed issue-index is separate."
-  ]
+  ],
+  "remote_delivery": {
+    "branch": "codex/full-audit-db-i18n-20261001",
+    "backend_pr": "https://github.com/mcmods-cn/mcmods-cn-backend/pull/4",
+    "frontend_pr": "https://github.com/mcmods-cn/mcmods-cn-frontend/pull/4",
+    "draft": true,
+    "file_checks": {
+      "backend": {
+        "changed_files": 289,
+        "all_paths_and_blobs_match": true,
+        "evidence_sha256": "f987b40faf7c2c89a31492a2db05b2d939e1b59f245608cf9200e7d5c5a63d03"
+      },
+      "frontend": {
+        "changed_files": 158,
+        "all_paths_and_blobs_match": true,
+        "evidence_sha256": "67825521a027209888323b1c24ba7e3db7fc9d1a6b42875073ebd15d7625d7a7"
+      }
+    },
+    "backend_full_diff": "HTTP 406/20000-line GitHub limit; paginated files API and Git blob SHA comparison independently verified every changed file.",
+    "app_attachment": "NOT_CONFIRMED; attachment tool returned no response in bounded attempts. GitHub creation is independently verified."
+  }
 }
