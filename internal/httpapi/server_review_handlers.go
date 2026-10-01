@@ -81,6 +81,18 @@ func (s *Server) adminMinecraftServerReviews(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusInternalServerError, "解析服务器审核列表失败")
 			return
 		}
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		log.Printf("iterate minecraft server review list status=%s: %v", status, err)
+		writeError(w, http.StatusInternalServerError, "读取服务器审核列表失败")
+		return
+	}
+	// All association queries share the same pool. Release the list connection
+	// before reading them, including when the pool has just one connection.
+	rows.Close()
+	for index := range items {
+		item := &items[index]
 		item.ProofFiles, err = s.minecraftServerProofFiles(r.Context(), item.ID)
 		if err == nil {
 			item.Links, err = s.minecraftServerLinks(r.Context(), item.ID)
@@ -93,12 +105,6 @@ func (s *Server) adminMinecraftServerReviews(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusInternalServerError, "读取服务器审核资料失败")
 			return
 		}
-		items = append(items, item)
-	}
-	if err = rows.Err(); err != nil {
-		log.Printf("iterate minecraft server review list status=%s: %v", status, err)
-		writeError(w, http.StatusInternalServerError, "读取服务器审核列表失败")
-		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }

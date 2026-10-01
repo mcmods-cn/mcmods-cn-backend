@@ -62,6 +62,10 @@ func (s *Server) modExportTags(w http.ResponseWriter, r *http.Request) {
 			"data": map[string]any{"memberCount": memberCount},
 		})
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to finish reading tags")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
 }
 
@@ -126,6 +130,11 @@ func (s *Server) modExportTagDetail(w http.ResponseWriter, r *http.Request) {
 		members = append(members, map[string]any{"entityId": memberEntityID, "publicId": memberPublicID, "id": memberID,
 			"registry": memberRegistry, "translationKey": translationKey, "names": decodedNames, "iconPath": iconPath})
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to finish reading tag members")
+		return
+	}
+	rows.Close()
 	if err = s.decorateExportTranslationNames(r.Context(), revisionID, locale, members); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve tag member translations")
 		return

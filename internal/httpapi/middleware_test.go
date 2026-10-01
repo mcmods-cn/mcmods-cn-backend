@@ -1,11 +1,17 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/querycache"
+	"mcmods-cn-backend/internal/security"
 )
 
 func TestCookieMutationRequiresExactOrigin(t *testing.T) {
@@ -119,5 +125,51 @@ func TestOptionalAuthWithoutSessionDoesNotSignalInvalidAuthentication(t *testing
 	}
 	if got := response.Header().Get(authStateHeader); got != "" {
 		t.Fatalf("guest request was marked as invalid authentication: %q", got)
+	}
+}
+
+func TestAuthenticationLookupFailurePreservesSession(t *testing.T) {
+	// A closed real pgx pool reproduces an infrastructure failure without
+	// connecting to an external database or replacing the authentication query.
+	pool, err := pgxpool.New(context.Background(), "postgres://audit@127.0.0.1:1/audit?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Close()
+	cache := querycache.New(config.RedisConfig{})
+	defer cache.Close()
+	server := &Server{cfg: config.Config{JWTSecret: "test-secret"}, db: pool, cache: cache}
+	claims, err := security.NewClaims("abc234567", "audit", "audit@example.test", 1, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := security.SignToken(server.cfg.JWTSecret, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, optional := range []bool{false, true} {
+		t.Run(map[bool]string{false: "required", true: "optional"}[optional], func(t *testing.T) {
+			called := false
+			next := func(w http.ResponseWriter, _ *http.Request) { called = true; w.WriteHeader(http.StatusNoContent) }
+			handler := server.requireAuth(next)
+			if optional {
+				handler = server.optionalAuth(next)
+			}
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/users/me", nil)
+			request.AddCookie(&http.Cookie{Name: authSessionCookieName, Value: token})
+			response := httptest.NewRecorder()
+			handler(response, request)
+			if response.Code != http.StatusServiceUnavailable || called {
+				t.Fatalf("status=%d called=%v, want infrastructure failure without running handler", response.Code, called)
+			}
+			if response.Header().Get(authStateHeader) != "" {
+				t.Fatal("infrastructure failure must not invalidate authentication")
+			}
+			for _, cookie := range response.Result().Cookies() {
+				if cookie.Name == authSessionCookieName {
+					t.Fatal("infrastructure failure must preserve the authentication cookie")
+				}
+			}
+		})
 	}
 }

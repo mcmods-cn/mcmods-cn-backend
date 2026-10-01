@@ -151,8 +151,9 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	httpapi.NewProjectAutomationWorker(cfg, db).Start(ctx)
 	httpapi.NewActivityRetentionWorker(db).Start(ctx)
 	progressionService := progression.NewService(db, sharedCache)
-	activityMonitor := activity.NewMonitor(activityDB, progressionService.ProcessActivityBatch, activity.Options{
-		BatchSize: cfg.Activity.BatchSize, QueueCapacity: cfg.Activity.QueueCapacity,
+	activityMonitor := activity.NewMonitor(activityDB, progressionService.ProcessActivityBatchTx, activity.Options{
+		AfterCommit: progressionService.RefreshActivityPermissions,
+		BatchSize:   cfg.Activity.BatchSize, QueueCapacity: cfg.Activity.QueueCapacity,
 		FlushInterval: cfg.Activity.FlushInterval, RetryMinDelay: cfg.Activity.RetryMinDelay,
 		RetryMaxDelay: cfg.Activity.RetryMaxDelay, WriteTimeout: cfg.Activity.WriteTimeout,
 		DurableEnqueueTimeout: cfg.Activity.DurableEnqueueTimeout,
@@ -173,7 +174,7 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 		log.Printf("notification queue worker unavailable: %v", err)
 	}
 	modExportWorker := httpapi.NewModExportWorker(cfg, db, queueClient)
-	if err = modExportWorker.Start(); err != nil {
+	if err = modExportWorker.Start(ctx); err != nil {
 		log.Printf("mod catalog import worker unavailable; API fallback remains enabled: %v", err)
 	}
 	modMetadataWorker := httpapi.NewModMetadataImportWorker(cfg, db, queueClient)

@@ -521,7 +521,10 @@ func (s *Server) executeActivityCleanup(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "activity cleanup failed")
 		return
 	}
-	_, _ = s.db.Exec(r.Context(), `update activity_cleanup_runs set status='completed',deleted_count=$2,finished_at=now(),confirmation_hash='' where public_id=$1`, request.PreviewID, deleted)
+	if _, err = s.db.Exec(r.Context(), `update activity_cleanup_runs set status='completed',deleted_count=$2,finished_at=now(),confirmation_hash='' where public_id=$1`, request.PreviewID, deleted); err != nil {
+		writeError(w, http.StatusInternalServerError, "activity deletion finished but failed to record completion")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"previewId": request.PreviewID, "matchedCount": matched, "deletedCount": deleted, "status": "completed"})
 }
 
@@ -594,8 +597,7 @@ func (worker *ActivityRetentionWorker) prune(ctx context.Context) {
 		return
 	}
 	var recentlyRan bool
-	_ = worker.db.QueryRow(ctx, `select exists(select 1 from activity_cleanup_runs where source='automatic' and started_at>now()-make_interval(mins=>$1))`, config.RunIntervalMinutes).Scan(&recentlyRan)
-	if recentlyRan {
+	if err = worker.db.QueryRow(ctx, `select exists(select 1 from activity_cleanup_runs where source='automatic' and started_at>now()-make_interval(mins=>$1))`, config.RunIntervalMinutes).Scan(&recentlyRan); err != nil || recentlyRan {
 		return
 	}
 	for action, id := range activityActionIDs {
@@ -618,7 +620,10 @@ func (worker *ActivityRetentionWorker) prune(ctx context.Context) {
 		if cleanupErr != nil {
 			status, message = "failed", cleanupErr.Error()
 		}
-		_, _ = worker.db.Exec(context.Background(), `update activity_cleanup_runs set status=$2,deleted_count=$3,finished_at=now(),error_message=$4 where public_id=$1`, runID, status, deleted, message)
+		if _, err = worker.db.Exec(ctx, `update activity_cleanup_runs set status=$2,deleted_count=$3,finished_at=now(),error_message=$4 where public_id=$1`, runID, status, deleted, message); err != nil {
+			log.Printf("automatic activity cleanup %s failed to record completion", action)
+			return
+		}
 		if cleanupErr != nil {
 			log.Printf("automatic activity cleanup %s failed: %v", action, cleanupErr)
 		}

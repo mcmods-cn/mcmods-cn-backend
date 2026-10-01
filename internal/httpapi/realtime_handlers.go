@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -72,8 +73,7 @@ func (hub *realtimeHub) connectionCount() (int, int) {
 }
 
 func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	if !realtimeStreamingSupported(w) {
 		writeError(w, http.StatusNotImplemented, "streaming is unavailable")
 		return
 	}
@@ -84,8 +84,25 @@ func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	channel, unsubscribe := s.realtime.subscribe(claims.Subject)
 	defer unsubscribe()
-	fmt.Fprint(w, ": connected\n\n")
-	flusher.Flush()
+	controller := http.NewResponseController(w)
+	// Idle streams may have an expired frame deadline when authorization
+	// closes them. Allow net/http to write its final chunk without turning a
+	// graceful revocation into a truncated response; keep that write bounded.
+	defer func() { _ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second)) }()
+	flushFrame := func(format string, args ...any) error {
+		// The server's ordinary response deadline cannot cover a long-lived
+		// stream. Bound each actual write instead, including slow clients.
+		if err := controller.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, format, args...); err != nil {
+			return err
+		}
+		return controller.Flush()
+	}
+	if err := flushFrame(": connected\n\n"); err != nil {
+		return
+	}
 	heartbeat := time.NewTicker(20 * time.Second)
 	defer heartbeat.Stop()
 	for {
@@ -93,14 +110,47 @@ func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-heartbeat.C:
-			fmt.Fprint(w, ": heartbeat\n\n")
-			flusher.Flush()
+			// Streaming connections outlive their initial authentication.
+			// Recheck durable revocation and expiry at each heartbeat, including
+			// changes made by another API instance. Database errors close the
+			// stream so an unverified session cannot keep receiving events.
+			checkContext, cancelCheck := context.WithTimeout(r.Context(), 5*time.Second)
+			_, checkErr := s.loadSessionSubject(checkContext, claims)
+			cancelCheck()
+			if checkErr != nil {
+				return
+			}
+			if err := flushFrame(": heartbeat\n\n"); err != nil {
+				return
+			}
 		case event := <-channel:
-			raw, _ := json.Marshal(event.Data)
-			fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", event.ID, event.Type, raw)
-			flusher.Flush()
+			raw, err := json.Marshal(event.Data)
+			if err != nil {
+				return
+			}
+			if err = flushFrame("id: %s\nevent: %s\ndata: %s\n\n", event.ID, event.Type, raw); err != nil {
+				return
+			}
 		}
 	}
+}
+
+// Check the underlying writer before committing the event-stream response.
+// Middleware may expose Flush while its wrapped writer cannot stream, or may
+// preserve streaming only through Unwrap (as the access-log recorder does).
+func realtimeStreamingSupported(writer http.ResponseWriter) bool {
+	for depth := 0; depth < 32 && writer != nil; depth++ {
+		if wrapper, ok := writer.(interface{ Unwrap() http.ResponseWriter }); ok {
+			writer = wrapper.Unwrap()
+			continue
+		}
+		if _, ok := writer.(interface{ FlushError() error }); ok {
+			return true
+		}
+		_, ok := writer.(http.Flusher)
+		return ok
+	}
+	return false
 }
 
 func (s *Server) publishRealtimeUser(userID int64, eventType string, data any) {

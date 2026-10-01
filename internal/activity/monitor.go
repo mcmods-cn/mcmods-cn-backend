@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -78,9 +79,13 @@ type Event struct {
 	OccurredAt           time.Time
 }
 
-type BatchProcessor func(context.Context, []Event) error
+type BatchProcessor func(context.Context, pgx.Tx, []Event) error
+
+type BatchCommittedObserver func(context.Context, []Event) error
 
 type Options struct {
+	// AfterCommit refreshes cache hints after authoritative facts commit.
+	AfterCommit           BatchCommittedObserver
 	BatchSize             int
 	QueueCapacity         int
 	FlushInterval         time.Duration
@@ -137,8 +142,7 @@ type activityStore interface {
 }
 
 type closeRequest struct {
-	ctx  context.Context
-	done chan error
+	ctx context.Context
 }
 
 type Monitor struct {
@@ -149,19 +153,21 @@ type Monitor struct {
 	wake     chan struct{}
 
 	closeOnce sync.Once
+	stopped   chan struct{}
+	closeErr  error // Written before stopped is closed; read after that signal.
 	closed    atomic.Bool
 	metrics   monitorMetrics
 }
 
 func NewMonitor(db *pgxpool.Pool, processor BatchProcessor, options Options) *Monitor {
-	return newMonitor(newPostgresStore(db, processor), options)
+	return newMonitor(newPostgresStore(db, processor, options.AfterCommit), options)
 }
 
 func newMonitor(store activityStore, options Options) *Monitor {
 	options = normalizeOptions(options)
 	monitor := &Monitor{
 		store: store, options: options, incoming: make(chan Event, options.QueueCapacity),
-		close: make(chan closeRequest), wake: make(chan struct{}, 1),
+		close: make(chan closeRequest, 1), wake: make(chan struct{}, 1), stopped: make(chan struct{}),
 	}
 	monitor.metrics.lastError.Store("")
 	if store == nil {
@@ -247,25 +253,22 @@ func (m *Monitor) Close(ctx context.Context) error {
 	if m == nil || m.store == nil {
 		return nil
 	}
-	var result error
 	m.closeOnce.Do(func() {
 		m.closed.Store(true)
-		done := make(chan error, 1)
-		select {
-		case m.close <- closeRequest{ctx: ctx, done: done}:
-			select {
-			case result = <-done:
-			case <-ctx.Done():
-				result = ctx.Err()
-			}
-		case <-ctx.Done():
-			result = ctx.Err()
-		}
+		// Deliver shutdown even if the caller's deadline expired while a
+		// database write was running. A canceled caller must not orphan run.
+		m.close <- closeRequest{ctx: ctx}
 	})
-	return result
+	select {
+	case <-m.stopped:
+		return m.closeErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (m *Monitor) run() {
+	defer close(m.stopped)
 	ticker := time.NewTicker(m.options.FlushInterval)
 	defer ticker.Stop()
 	pending := make([]Event, 0, m.options.BatchSize)
@@ -301,7 +304,7 @@ func (m *Monitor) run() {
 				case event := <-m.incoming:
 					pending = append(pending, event)
 				default:
-					request.done <- m.flushAll(request.ctx, pending)
+					m.closeErr = m.flushAll(request.ctx, pending)
 					return
 				}
 			}

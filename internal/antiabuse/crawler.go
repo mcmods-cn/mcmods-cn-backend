@@ -175,8 +175,11 @@ func crawlerUserAgent(value string) bool {
 
 func (s *Service) verifySearchEngineDNS(ctx context.Context, ip string, suffixes []string) bool {
 	now := s.now()
+	// A verdict for Google's hostnames says nothing about a Bing claim from
+	// the same IP. Cache the actual verification scope, including negatives.
+	cacheKey := ip + "\x00" + strings.Join(suffixes, "\x00")
 	crawlerDNSCache.Lock()
-	if cached, exists := crawlerDNSCache.values[ip]; exists && now.Before(cached.expiresAt) {
+	if cached, exists := crawlerDNSCache.values[cacheKey]; exists && now.Before(cached.expiresAt) {
 		crawlerDNSCache.Unlock()
 		return cached.class == VerifiedSearchEngine
 	}
@@ -217,7 +220,7 @@ func (s *Service) verifySearchEngineDNS(ctx context.Context, ip string, suffixes
 			break
 		}
 	}
-	crawlerDNSCache.values[ip] = dnsCacheEntry{class: class, expiresAt: now.Add(s.cfg.DNSCacheTTL)}
+	crawlerDNSCache.values[cacheKey] = dnsCacheEntry{class: class, expiresAt: now.Add(s.cfg.DNSCacheTTL)}
 	crawlerDNSCache.Unlock()
 	return verified
 }

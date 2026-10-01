@@ -833,6 +833,10 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 		}
 		byID[id].Compatibilities = append(byID[id].Compatibilities, value)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
 	rows, err = s.db.Query(ctx, `select modpack_id,tag from modpack_tags where modpack_id=any($1) order by modpack_id,tag`, ids)
 	if err != nil {
@@ -847,6 +851,10 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 		}
 		byID[id].Tags = append(byID[id].Tags, tag)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
 	rows, err = s.db.Query(ctx, `select modpack_id,link_type,url,note from modpack_links where modpack_id=any($1) order by modpack_id,display_order,id`, ids)
 	if err != nil {
@@ -860,6 +868,10 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 			return err
 		}
 		byID[id].Links = append(byID[id].Links, value)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	rows.Close()
 	rows, err = s.db.Query(ctx, `select binding.subject_id,creator.public_id,creator.kind,creator.name,creator.avatar_url,
@@ -887,6 +899,10 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 		_ = json.Unmarshal(raw, &value.Members)
 		byID[id].Authors = append(byID[id].Authors, value)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
 	rows, err = s.db.Query(ctx, `select gallery.modpack_id,gallery.public_id,file.public_id,file.original_name,file.content_type,file.size_bytes
 		from modpack_gallery_images gallery join oss_files file on file.id=gallery.oss_file_id and file.status='active'
@@ -903,6 +919,10 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 		}
 		value.URL = "/api/v1/modpacks/" + url.PathEscape(byID[id].SiteID) + "/gallery/" + value.PublicID
 		byID[id].GalleryImages = append(byID[id].GalleryImages, value)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	rows.Close()
 	rows, err = s.db.Query(ctx, `select entry.modpack_id,coalesce(resolved.project_code,''),coalesce(resolved.slug,''),

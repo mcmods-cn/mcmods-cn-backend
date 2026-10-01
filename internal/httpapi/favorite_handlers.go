@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"mcmods-cn-backend/internal/security"
 )
 
 type favoriteCollectionSummary struct {
@@ -167,14 +169,18 @@ func (s *Server) deleteFavoriteCollection(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) favoriteMembership(w http.ResponseWriter, r *http.Request) {
-	entityType := strings.TrimSpace(r.URL.Query().Get("entityType"))
+	entityType := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("entityType")))
 	entityPublicID := strings.TrimSpace(r.URL.Query().Get("entityPublicId"))
 	if entityPublicID == "" {
 		entityPublicID = strings.TrimSpace(r.URL.Query().Get("entityKey"))
 	}
-	entityID, err := s.resolveFavoriteEntity(r.Context(), entityType, entityPublicID)
+	entityID, err := s.resolveFavoriteEntity(r.Context(), entityType, entityPublicID, currentClaims(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "favorite target does not exist")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusBadRequest, "favorite target does not exist")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to load favorite target")
+		}
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `select collection.public_id from favorite_collections collection
@@ -189,9 +195,15 @@ func (s *Server) favoriteMembership(w http.ResponseWriter, r *http.Request) {
 	ids := make([]string, 0)
 	for rows.Next() {
 		var id string
-		if rows.Scan(&id) == nil {
-			ids = append(ids, id)
+		if err = rows.Scan(&id); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load favorite membership")
+			return
 		}
+		ids = append(ids, id)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load favorite membership")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"collectionIds": ids})
 }
@@ -207,14 +219,18 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid favorite membership")
 		return
 	}
-	request.EntityType = strings.TrimSpace(request.EntityType)
+	request.EntityType = strings.ToLower(strings.TrimSpace(request.EntityType))
 	request.EntityPublicID = strings.TrimSpace(request.EntityPublicID)
 	if request.EntityPublicID == "" {
 		request.EntityPublicID = strings.TrimSpace(request.EntityKey)
 	}
-	entityID, err := s.resolveFavoriteEntity(r.Context(), request.EntityType, request.EntityPublicID)
+	entityID, err := s.resolveFavoriteEntity(r.Context(), request.EntityType, request.EntityPublicID, currentClaims(r))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "favorite target does not exist")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusBadRequest, "favorite target does not exist")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to load favorite target")
+		}
 		return
 	}
 	userID := currentClaims(r).Subject
@@ -228,6 +244,32 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// Membership replaces a complete set. Serialize replacements for one user
+	// so two transactions cannot combine unrelated submitted sets.
+	var lockedUserID int64
+	if err = tx.QueryRow(r.Context(), `select id from users where id=$1 for update`, userID).Scan(&lockedUserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save favorites")
+		return
+	}
+	collectionIDs := make([]string, 0, len(request.CollectionIDs))
+	seen := make(map[string]bool, len(request.CollectionIDs))
+	for _, id := range request.CollectionIDs {
+		id = strings.ToLower(strings.TrimSpace(id))
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		var collectionID int64
+		if err = tx.QueryRow(r.Context(), `select id from favorite_collections where public_id=$1 and user_id=$2 for key share`, id, userID).Scan(&collectionID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusBadRequest, "favorite collection does not exist")
+			} else {
+				writeError(w, http.StatusInternalServerError, "failed to load favorite collection")
+			}
+			return
+		}
+		collectionIDs = append(collectionIDs, id)
+	}
 	if _, err = tx.Exec(r.Context(), `delete from favorite_collection_items item using favorite_collections collection
 		where item.collection_id=collection.id and collection.user_id=$1
 		  and item.entity_type=$2 and item.entity_id=$3`, userID, request.EntityType, entityID); err != nil {
@@ -235,7 +277,7 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	saved := make([]string, 0, len(request.CollectionIDs))
-	for _, collectionPublicID := range request.CollectionIDs {
+	for _, collectionPublicID := range collectionIDs {
 		collectionPublicID = strings.ToLower(strings.TrimSpace(collectionPublicID))
 		if collectionPublicID == "" {
 			continue
@@ -290,11 +332,14 @@ func (s *Server) writeFavoriteCollectionItems(w http.ResponseWriter, r *http.Req
 		left join modpacks modpack on item.entity_type='modpack' and modpack.id=item.entity_id
 		left join blueprints blueprint on item.entity_type='blueprint' and blueprint.id=item.entity_id and blueprint.status<>'deleted'
 		where collection.public_id=$1 and collection.user_id=$2 and ($3 or collection.is_public)
-		  and ($3 or
-			(item.entity_type='mod' and mods.review_status='approved') or
-			(item.entity_type='modpack' and modpack.review_status='approved') or
-			(item.entity_type='blueprint' and blueprint.status in ('ready','partial') and blueprint.review_status in ('not_required','approved')))
-		order by item.created_at desc`, collectionPublicID, ownerID, includePrivate)
+		  and (
+			(item.entity_type='mod' and (mods.review_status='approved' or ($3 and mods.submitted_by=$4))) or
+			(item.entity_type='modpack' and (modpack.review_status='approved' or ($3 and modpack.submitted_by=$4))) or
+			(item.entity_type='blueprint' and blueprint.status<>'deleted' and (
+				(blueprint.status in ('ready','partial') and blueprint.review_status in ('not_required','approved')) or
+				($3 and (blueprint.owner_id=$4 or $5)))))
+		order by item.created_at desc`, collectionPublicID, ownerID, includePrivate && currentClaims(r).Subject == ownerID,
+		currentClaims(r).Subject, claimsAllow(currentClaims(r), "admin.*"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load favorite collection items")
 		return
@@ -352,14 +397,23 @@ func publicPathID(w http.ResponseWriter, r *http.Request, key string) (string, b
 	return id, true
 }
 
-func (s *Server) resolveFavoriteEntity(ctx context.Context, entityType, publicID string) (int64, error) {
+func (s *Server) resolveFavoriteEntity(ctx context.Context, entityType, publicID string, claims security.Claims) (int64, error) {
 	entityType = strings.ToLower(strings.TrimSpace(entityType))
 	publicID = strings.ToLower(strings.TrimSpace(publicID))
-	if entityType == "" || publicID == "" {
+	if (entityType != "mod" && entityType != "modpack" && entityType != "blueprint") || publicID == "" {
 		return 0, pgx.ErrNoRows
 	}
 	var id int64
-	err := s.db.QueryRow(ctx, `select internal_id from public_routes
-		where entity_type=$1 and public_id=$2`, entityType, publicID).Scan(&id)
+	// Owning a collection does not grant access to its resources. Match the
+	// catalog's public/submitter boundary and the blueprint owner/admin boundary.
+	err := s.db.QueryRow(ctx, `select route.internal_id from public_routes route
+		left join mods m on route.entity_type='mod' and m.id=route.internal_id
+		left join modpacks pack on route.entity_type='modpack' and pack.id=route.internal_id
+		left join blueprints b on route.entity_type='blueprint' and b.id=route.internal_id
+		where route.entity_type=$1 and route.public_id=$2 and (
+			(route.entity_type='mod' and (m.review_status='approved' or m.submitted_by=$3)) or
+			(route.entity_type='modpack' and (pack.review_status='approved' or pack.submitted_by=$3)) or
+			(route.entity_type='blueprint' and b.status<>'deleted' and (b.review_status in ('not_required','approved') or b.owner_id=$3 or $4)))`,
+		entityType, publicID, claims.Subject, claimsAllow(claims, "admin.*")).Scan(&id)
 	return id, err
 }

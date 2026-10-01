@@ -785,6 +785,10 @@ func (s *Server) modContentVersions(w http.ResponseWriter, r *http.Request) {
 			"loaders": loaders, "modVersion": modVersion, "status": status,
 			"publishedRevisionId": publishedRevisionID, "createdAt": createdAt, "updatedAt": updatedAt})
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read mod content versions")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -798,7 +802,11 @@ func (s *Server) modContentVersion(w http.ResponseWriter, r *http.Request) {
 	var publishedRevisionID *int64
 	if err := s.db.QueryRow(r.Context(), `select status,published_revision_id from mod_content_versions where mod_id=$1 and public_id=$2`, identity.ID, publicID).
 		Scan(&status, &publishedRevisionID); err != nil {
-		writeError(w, http.StatusNotFound, "mod content version not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "mod content version not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to read mod content")
+		}
 		return
 	}
 	if status != "active" {
@@ -823,6 +831,10 @@ func (s *Server) modContentVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestedBaseRevisionID, baseErr := resolveRevisionPublicID(r.Context(), s.db, edit.BaseRevisionID)
+	if baseErr != nil && !errors.Is(baseErr, pgx.ErrNoRows) && edit.BaseRevisionID != nil && validCatalogPublicID(strings.ToLower(strings.TrimSpace(*edit.BaseRevisionID))) {
+		writeError(w, http.StatusInternalServerError, "failed to read base revision")
+		return
+	}
 	if baseErr != nil || !sameRevision(requestedBaseRevisionID, publishedRevisionID) {
 		writeError(w, http.StatusConflict, "mod content version changed; reload the editor")
 		return
@@ -841,7 +853,11 @@ func (s *Server) submitNewModContentVersion(w http.ResponseWriter, r *http.Reque
 	err = tx.QueryRow(r.Context(), `insert into mod_content_versions(mod_id,label,minecraft_versions,loaders,mod_version,status,created_by,updated_by)
 		values($1,$2,$3,$4,$5,'pending',$6,$6) returning public_id`, identity.ID, edit.Label, edit.MinecraftVersions, edit.Loaders, edit.ModVersion, currentClaims(r).Subject).Scan(&publicID)
 	if err != nil {
-		writeError(w, http.StatusConflict, "failed to reserve mod content version")
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "failed to reserve mod content version")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to save mod content")
+		}
 		return
 	}
 	snapshot := modContentSnapshot{Kind: "version", Operation: "create", ModID: identity.ID, ModSiteID: identity.SiteID, PublicID: publicID, Version: &edit}
@@ -864,6 +880,9 @@ func (s *Server) submitExistingModContentMutation(w http.ResponseWriter, r *http
 	if err != nil {
 		log.Printf("submit mod content mutation failed: site=%s kind=%s operation=%s public_id=%s: %v",
 			identity.SiteID, snapshot.Kind, snapshot.Operation, snapshot.PublicID, err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = errCatalogEditorReference
+		}
 		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
@@ -884,7 +903,7 @@ func (s *Server) createModContentRevisionTx(r *http.Request, tx pgx.Tx, identity
 		return modContentMutationResult{}, err
 	}
 	claims := currentClaims(r)
-	config := loadReviewConfig(r.Context(), s.db)
+	config := loadReviewConfig(r.Context(), tx)
 	reviewRequired := modContentReviewRequired(config, snapshot)
 	status := "approved"
 	if reviewRequired && !catalogMutationBypassesReview(claims) && !canSkipProjectReview(claims, identity) {
@@ -996,6 +1015,10 @@ func (s *Server) requireEditableMod(w http.ResponseWriter, r *http.Request) (mod
 		writeError(w, http.StatusInternalServerError, "failed to read mod")
 		return identity, false
 	}
+	if r.Method == http.MethodGet && !canReadModContent(currentClaims(r), identity) {
+		writeError(w, http.StatusNotFound, "mod not found")
+		return identity, false
+	}
 	if !canEditMod(currentClaims(r), identity) && r.Method != http.MethodGet {
 		writeError(w, http.StatusForbidden, "permission denied")
 		return identity, false
@@ -1055,6 +1078,10 @@ func (s *Server) modContentTemplates(w http.ResponseWriter, r *http.Request) {
 			"defaultDisplayMode": displayMode, "definition": json.RawMessage(definition), "status": status,
 			"publishedRevisionId": revisionID, "localizations": json.RawMessage(localizations)})
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read content templates")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -1070,7 +1097,11 @@ func (s *Server) submitNewModContentTemplate(w http.ResponseWriter, r *http.Requ
 	err = tx.QueryRow(r.Context(), `insert into mod_content_templates(owner_mod_id,code,builtin,default_locale,default_display_mode,definition,status,created_by)
 		values($1,$2,false,$3,$4,$5::jsonb,'pending',$6) returning public_id`, identity.ID, edit.Code, edit.DefaultLocale, edit.DefaultDisplayMode, string(definition), currentClaims(r).Subject).Scan(&publicID)
 	if err != nil {
-		writeError(w, http.StatusConflict, "content template code already exists")
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "content template code already exists")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to save mod content")
+		}
 		return
 	}
 	snapshot := modContentSnapshot{Kind: "template", Operation: "create", ModID: identity.ID, ModSiteID: identity.SiteID, PublicID: publicID, Template: &edit}
@@ -1093,7 +1124,11 @@ func (s *Server) modContentTemplate(w http.ResponseWriter, r *http.Request) {
 	var publishedRevisionID *int64
 	if err := s.db.QueryRow(r.Context(), `select builtin,status,published_revision_id from mod_content_templates
 		where public_id=$1 and owner_mod_id=$2`, publicID, identity.ID).Scan(&builtin, &status, &publishedRevisionID); err != nil {
-		writeError(w, http.StatusNotFound, "custom content template not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "custom content template not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to read mod content")
+		}
 		return
 	}
 	if builtin || status != "active" {
@@ -1110,6 +1145,10 @@ func (s *Server) modContentTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestedBaseRevisionID, baseErr := resolveRevisionPublicID(r.Context(), s.db, edit.BaseRevisionID)
+	if baseErr != nil && !errors.Is(baseErr, pgx.ErrNoRows) && edit.BaseRevisionID != nil && validCatalogPublicID(strings.ToLower(strings.TrimSpace(*edit.BaseRevisionID))) {
+		writeError(w, http.StatusInternalServerError, "failed to read base revision")
+		return
+	}
 	if baseErr != nil || !sameRevision(requestedBaseRevisionID, publishedRevisionID) {
 		writeError(w, http.StatusConflict, "content template changed; reload the editor")
 		return
@@ -1130,21 +1169,20 @@ func (s *Server) modContentSections(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnprocessableEntity, "invalid content section")
 			return
 		}
-		if s.enforceModContentSectionDisplayMode(r.Context(), identity.ID, &edit) != nil {
-			writeError(w, http.StatusUnprocessableEntity, "content template not found")
+		if err := s.enforceModContentSectionDisplayMode(r.Context(), identity.ID, &edit); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusUnprocessableEntity, "content template not found")
+			} else {
+				writeError(w, http.StatusInternalServerError, "failed to read content template")
+			}
 			return
 		}
 		s.submitNewModContentSection(w, r, identity, edit)
 		return
 	}
-	var err error
-	identity, err = s.modIdentity(r.Context(), r.PathValue("siteId"))
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "mod not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to read mod")
+	var ok bool
+	identity, ok = s.requireReadableMod(w, r)
+	if !ok {
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `select section.public_id,version.public_id,template.public_id,template.code,template.builtin,template.i18n_key,
@@ -1188,19 +1226,19 @@ func (s *Server) modContentSections(w http.ResponseWriter, r *http.Request) {
 			"displayMode": displayMode, "ordinal": ordinal, "status": status, "publishedRevisionId": revisionID,
 			"definition": json.RawMessage(definition), "localizations": json.RawMessage(localizations), "resourceCount": resourceCount})
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read content sections")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Request) {
-	identity, err := s.modIdentity(r.Context(), r.PathValue("siteId"))
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "mod not found")
+	identity, ok := s.requireReadableMod(w, r)
+	if !ok {
 		return
 	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to read mod")
-		return
-	}
+	var err error
 	sectionPublicID := strings.ToLower(strings.TrimSpace(r.PathValue("sectionId")))
 	primary, secondary := s.requestContentLocales(r)
 	if requestedLocale := normalizeContentLocale(r.URL.Query().Get("locale")); requestedLocale != "" {
@@ -1342,6 +1380,10 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 			"sectionPublicId": resourceSectionPublicID, "kindCode": kindCode, "canonicalId": canonicalID, "ordinal": resourceOrdinal, "revisionId": sourceRevisionID, "iconPath": iconPath,
 			"iconFileId": iconFileID, "similarGroupId": similarGroupID, "names": json.RawMessage(names), "hasDetailDescription": hasDetailDescription, "definition": json.RawMessage(definition)})
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read content section resources")
+		return
+	}
 	lootItems := make([]map[string]any, 0)
 	lootResourceIndexes := make([]int, 0)
 	lootRevisionIDs := make([]string, 0)
@@ -1394,20 +1436,32 @@ func (s *Server) submitNewModContentSection(w http.ResponseWriter, r *http.Reque
 	defer tx.Rollback(r.Context())
 	var versionID int64
 	if err = tx.QueryRow(r.Context(), `select id from mod_content_versions where public_id=$1 and mod_id=$2 and status='active'`, edit.VersionPublicID, identity.ID).Scan(&versionID); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "mod content version not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusUnprocessableEntity, "mod content version not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to read mod content selection")
+		}
 		return
 	}
 	var templateID int64
 	err = tx.QueryRow(r.Context(), `select id from mod_content_templates where public_id=$1 and status='active' and (builtin or owner_mod_id=$2)`, edit.TemplatePublicID, identity.ID).Scan(&templateID)
 	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "content template not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusUnprocessableEntity, "content template not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to read mod content selection")
+		}
 		return
 	}
 	var parentID *int64
 	if edit.ParentPublicID != "" {
 		var value int64
 		if err = tx.QueryRow(r.Context(), `select id from mod_content_sections where public_id=$1 and mod_id=$2 and version_id=$3 and status='active'`, edit.ParentPublicID, identity.ID, versionID).Scan(&value); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, "parent section not found")
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusUnprocessableEntity, "parent section not found")
+			} else {
+				writeError(w, http.StatusInternalServerError, "failed to read parent section")
+			}
 			return
 		}
 		parentID = &value
@@ -1416,7 +1470,11 @@ func (s *Server) submitNewModContentSection(w http.ResponseWriter, r *http.Reque
 	err = tx.QueryRow(r.Context(), `insert into mod_content_sections(mod_id,version_id,template_id,parent_id,default_locale,display_mode,ordinal,status,created_by,updated_by)
 		values($1,$2,$3,$4,$5,$6,$7,'pending',$8,$8) returning public_id`, identity.ID, versionID, templateID, parentID, edit.DefaultLocale, edit.DisplayMode, edit.Ordinal, currentClaims(r).Subject).Scan(&publicID)
 	if err != nil {
-		writeError(w, http.StatusConflict, "failed to reserve content section")
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "failed to reserve content section")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to save mod content")
+		}
 		return
 	}
 	snapshot := modContentSnapshot{Kind: "section", Operation: "create", ModID: identity.ID, ModSiteID: identity.SiteID, PublicID: publicID, Section: &edit}
@@ -1438,7 +1496,11 @@ func (s *Server) modContentSection(w http.ResponseWriter, r *http.Request) {
 	var publishedRevisionID *int64
 	if err := s.db.QueryRow(r.Context(), `select status,published_revision_id from mod_content_sections where public_id=$1 and mod_id=$2`, publicID, identity.ID).
 		Scan(&status, &publishedRevisionID); err != nil {
-		writeError(w, http.StatusNotFound, "content section not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "content section not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to read mod content")
+		}
 		return
 	}
 	if status != "active" {
@@ -1454,8 +1516,12 @@ func (s *Server) modContentSection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "invalid content section")
 		return
 	}
-	if s.enforceModContentSectionDisplayMode(r.Context(), identity.ID, &edit) != nil {
-		writeError(w, http.StatusUnprocessableEntity, "content template not found")
+	if err := s.enforceModContentSectionDisplayMode(r.Context(), identity.ID, &edit); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusUnprocessableEntity, "content template not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to read mod content selection")
+		}
 		return
 	}
 	if edit.ParentPublicID == publicID {
@@ -1463,6 +1529,10 @@ func (s *Server) modContentSection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestedBaseRevisionID, baseErr := resolveRevisionPublicID(r.Context(), s.db, edit.BaseRevisionID)
+	if baseErr != nil && !errors.Is(baseErr, pgx.ErrNoRows) && edit.BaseRevisionID != nil && validCatalogPublicID(strings.ToLower(strings.TrimSpace(*edit.BaseRevisionID))) {
+		writeError(w, http.StatusInternalServerError, "failed to read base revision")
+		return
+	}
 	if baseErr != nil || !sameRevision(requestedBaseRevisionID, publishedRevisionID) {
 		writeError(w, http.StatusConflict, "content section changed; reload the editor")
 		return
@@ -1525,6 +1595,10 @@ func (s *Server) modContentResources(w http.ResponseWriter, r *http.Request) {
 		items = append(items, map[string]any{"publicId": publicID, "kindCode": kindCode, "canonicalId": canonicalID,
 			"details": json.RawMessage(details)})
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read mod resource details")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -1539,7 +1613,11 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 	publicID := edit.ResourcePublicID
 	createdIdentity := false
 	var validKind bool
-	if err = tx.QueryRow(r.Context(), `select exists(select 1 from resource_kinds where code=$1 and user_visible)`, edit.KindCode).Scan(&validKind); err != nil || !validKind {
+	if err = tx.QueryRow(r.Context(), `select exists(select 1 from resource_kinds where code=$1 and user_visible)`, edit.KindCode).Scan(&validKind); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to validate resource kind")
+		return
+	}
+	if !validKind {
 		writeError(w, http.StatusUnprocessableEntity, "resource kind is unavailable")
 		return
 	}
@@ -1549,7 +1627,7 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 			where entity.public_id=$1 and entity.status='active' and (resource.owner_mod_id=$2 or resource.owner_mod_id is null)`,
 			publicID, identity.ID).Scan(&resourceID, &edit.KindCode, &edit.CanonicalID)
 	} else {
-		resolver, resolveErr := loadCatalogResourceIdentityResolver(r.Context(), s.db)
+		resolver, resolveErr := loadCatalogResourceIdentityResolver(r.Context(), tx)
 		if resolveErr != nil {
 			writeError(w, http.StatusInternalServerError, "failed to resolve resource identity")
 			return
@@ -1573,56 +1651,90 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 			createdIdentity = createdIdentity || entityStatus == "placeholder"
 		}
 	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to resolve resource identity")
+		return
+	}
 	if err != nil || resourceID <= 0 {
 		writeError(w, http.StatusUnprocessableEntity, "resource identity is unavailable for this mod")
 		return
 	}
 	var versionID int64
 	if err = tx.QueryRow(r.Context(), `select id from mod_content_versions where mod_id=$1 and status='active' and public_id=$2`, identity.ID, edit.VersionPublicID).Scan(&versionID); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "mod content version is invalid")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusUnprocessableEntity, "mod content version is invalid")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to read mod content selection")
+		}
 		return
 	}
 	if err = validateModContentResourceSection(r.Context(), tx, identity.ID, versionID, edit.KindCode, edit.SectionPublicID); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "the selected content category cannot contain this resource")
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = errCatalogEditorReference
+		}
+		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
 	if err = validateModContentEditableDefinitionPatch(
 		r.Context(), tx, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, edit.Definition,
 	); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "the selected resource subtype or its fields are invalid")
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = errCatalogEditorReference
+		}
+		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
 	canonicalDefinition, normalizeErr := normalizeModContentEntryDefinition(
 		r.Context(), tx, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, edit.Definition, false,
 	)
 	if normalizeErr != nil {
-		writeError(w, http.StatusUnprocessableEntity, "the selected resource subtype or its fields are invalid")
+		if errors.Is(normalizeErr, pgx.ErrNoRows) {
+			normalizeErr = errCatalogEditorReference
+		}
+		writeError(w, catalogEditorHTTPStatus(normalizeErr), catalogEditorErrorMessage(normalizeErr))
 		return
 	}
 	edit.Definition = canonicalDefinition
 	if _, err = tx.Exec(r.Context(), `insert into mod_resource_bindings(resource_id,mod_id) values($1,$2) on conflict(resource_id) do nothing`, resourceID, identity.ID); err != nil {
-		writeError(w, http.StatusConflict, "resource identity cannot be bound to this mod")
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "resource identity cannot be bound to this mod")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to save mod content")
+		}
 		return
 	}
 	var boundModID int64
-	if err = tx.QueryRow(r.Context(), `select mod_id from mod_resource_bindings where resource_id=$1`, resourceID).Scan(&boundModID); err != nil || boundModID != identity.ID {
+	if err = tx.QueryRow(r.Context(), `select mod_id from mod_resource_bindings where resource_id=$1`, resourceID).Scan(&boundModID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read resource binding")
+		return
+	}
+	if boundModID != identity.ID {
 		writeError(w, http.StatusConflict, "resource identity belongs to another mod")
 		return
 	}
 	actorID := currentClaims(r).Subject
 	iconSmallFileID, err := resolveModContentImageFileID(r.Context(), tx, edit.IconSmallFilePublicID, actorID, resourceID, versionID, false, "icon_32")
 	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "resource 32px icon is unavailable")
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = errCatalogEditorReference
+		}
+		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
 	iconFileID, err := resolveModContentImageFileID(r.Context(), tx, edit.IconFilePublicID, actorID, resourceID, versionID, false, "icon_128")
 	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "resource icon is unavailable")
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = errCatalogEditorReference
+		}
+		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
 	renderFileID, err := resolveModContentImageFileID(r.Context(), tx, edit.RenderFilePublicID, actorID, resourceID, versionID, false, "render")
 	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "resource render image is unavailable")
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = errCatalogEditorReference
+		}
+		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
 	definition, _ := json.Marshal(edit.Definition)
@@ -1654,15 +1766,11 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) modContentSimilarResources(w http.ResponseWriter, r *http.Request) {
-	identity, err := s.modIdentity(r.Context(), r.PathValue("siteId"))
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "mod not found")
+	identity, ok := s.requireReadableMod(w, r)
+	if !ok {
 		return
 	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to read mod")
-		return
-	}
+	var err error
 	resourcePublicID := strings.ToLower(strings.TrimSpace(r.PathValue("resourceId")))
 	versionPublicID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("version")))
 	if !modContentPublicIDPattern.MatchString(resourcePublicID) || !modContentPublicIDPattern.MatchString(versionPublicID) {
@@ -1742,14 +1850,9 @@ func (s *Server) modContentSimilarResources(w http.ResponseWriter, r *http.Reque
 func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 	var identity modIdentityRecord
 	if r.Method == http.MethodGet {
-		var err error
-		identity, err = s.modIdentity(r.Context(), r.PathValue("siteId"))
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "mod not found")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to read mod")
+		var ok bool
+		identity, ok = s.requireReadableMod(w, r)
+		if !ok {
 			return
 		}
 	} else {
@@ -1817,7 +1920,11 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 			    where imported.resource_id=resource.entity_id
 			  )) or $3)`, publicID, identity.ID, canPreviewInactive).
 			Scan(&entityID, &kindCode, &canonicalID, &details); err != nil {
-			writeError(w, http.StatusNotFound, "mod resource detail not found")
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "mod resource detail not found")
+			} else {
+				writeError(w, http.StatusInternalServerError, "failed to read mod resource detail")
+			}
 			return
 		}
 		primary, secondary := s.requestContentLocales(r)
@@ -1843,7 +1950,11 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 			join mod_content_versions version on version.id=detail.version_id and version.status='active'
 			join catalog_entities entity on entity.id=detail.resource_id
 			where entity.public_id=$1 and version.public_id=$2 and version.mod_id=$3 and detail.status='active'`, publicID, versionPublicID, identity.ID).Scan(&publishedRevisionID); err != nil {
-			writeError(w, http.StatusNotFound, "mod resource version detail not found")
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "mod resource version detail not found")
+			} else {
+				writeError(w, http.StatusInternalServerError, "failed to read resource detail")
+			}
 			return
 		}
 		edit := modContentResourceEdit{ResourcePublicID: publicID, VersionPublicID: versionPublicID}
@@ -1873,10 +1984,18 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		 and render_file.scan_status in ('clean','trusted_generated')
 		where entity.public_id=$1 and version.public_id=$2 and version.mod_id=$3 and detail.status='active'`,
 		publicID, edit.VersionPublicID, identity.ID).Scan(&publishedRevisionID, &resourceID, &actualKindCode, &actualCanonicalID, &currentIconSmallFilePublicID, &currentIconFilePublicID, &currentRenderFilePublicID, &currentDefinition); err != nil {
-		writeError(w, http.StatusNotFound, "mod resource version detail not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "mod resource version detail not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to read mod content")
+		}
 		return
 	}
 	requestedBaseRevisionID, baseErr := resolveRevisionPublicID(r.Context(), s.db, edit.BaseRevisionID)
+	if baseErr != nil && !errors.Is(baseErr, pgx.ErrNoRows) && edit.BaseRevisionID != nil && validCatalogPublicID(strings.ToLower(strings.TrimSpace(*edit.BaseRevisionID))) {
+		writeError(w, http.StatusInternalServerError, "failed to read base revision")
+		return
+	}
 	if baseErr != nil || !sameRevision(requestedBaseRevisionID, publishedRevisionID) {
 		writeError(w, http.StatusConflict, "mod resource version detail changed; reload the editor")
 		return
@@ -1884,7 +2003,11 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 	edit.KindCode, edit.CanonicalID = actualKindCode, actualCanonicalID
 	var versionID int64
 	if err := s.db.QueryRow(r.Context(), `select id from mod_content_versions where public_id=$1 and mod_id=$2 and status='active'`, edit.VersionPublicID, identity.ID).Scan(&versionID); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "mod content version is invalid")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusUnprocessableEntity, "mod content version is invalid")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to read mod content selection")
+		}
 		return
 	}
 	existingDefaultLocale, existingLocalizations, err := loadModContentResourceLocalizationState(r.Context(), s.db, resourceID, versionID, false)
@@ -1907,25 +2030,40 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 	}
 	actorID := currentClaims(r).Subject
 	if _, err := resolveModContentImageFileID(r.Context(), s.db, edit.IconSmallFilePublicID, actorID, resourceID, versionID, false, "icon_32"); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "resource 32px icon is unavailable")
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = errCatalogEditorReference
+		}
+		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
 	if _, err := resolveModContentImageFileID(r.Context(), s.db, edit.IconFilePublicID, actorID, resourceID, versionID, false, "icon_128"); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "resource icon is unavailable")
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = errCatalogEditorReference
+		}
+		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
 	if _, err := resolveModContentImageFileID(r.Context(), s.db, edit.RenderFilePublicID, actorID, resourceID, versionID, false, "render"); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "resource render image is unavailable")
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = errCatalogEditorReference
+		}
+		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
 	if err := validateModContentResourceSection(r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "the selected content category cannot contain this resource")
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = errCatalogEditorReference
+		}
+		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
 	if err := validateModContentEditableDefinitionPatch(
 		r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, edit.Definition,
 	); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "the selected resource subtype or its fields are invalid")
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = errCatalogEditorReference
+		}
+		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
 	var storedDefinition map[string]any
@@ -1938,7 +2076,10 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 		r.Context(), s.db, identity.ID, versionID, edit.KindCode, edit.SectionPublicID, edit.EntryTypeCode, effectiveDefinition, false,
 	)
 	if normalizeErr != nil {
-		writeError(w, http.StatusUnprocessableEntity, "the selected resource subtype or its fields are invalid")
+		if errors.Is(normalizeErr, pgx.ErrNoRows) {
+			normalizeErr = errCatalogEditorReference
+		}
+		writeError(w, catalogEditorHTTPStatus(normalizeErr), catalogEditorErrorMessage(normalizeErr))
 		return
 	}
 	edit.Definition = canonicalDefinition

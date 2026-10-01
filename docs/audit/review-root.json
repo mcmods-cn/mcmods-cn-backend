@@ -1,0 +1,3024 @@
+{
+  "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+  "scope": "root_backend",
+  "files": [
+    {
+      "path": "LOAD_TEST_REPORT.md",
+      "sha256": "2d681d6d1377e79709dbdba596be85ce7aa656771a4e1048394ebedea381dee0",
+      "lines": 203,
+      "read_ranges": [
+        [
+          1,
+          203
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "BACKEND_TEST_REPORT.md",
+      "sha256": "4838b0211daff38903e8029c308cc9208b2a3d419ff751fde7c8a00dcc025572",
+      "lines": 174,
+      "read_ranges": [
+        [
+          1,
+          174
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "CODE_CLEANUP_REPORT.md",
+      "sha256": "a6e2250f174835d0253e96222cd904a382221cd09e218d5cbd686a943003b449",
+      "lines": 133,
+      "read_ranges": [
+        [
+          1,
+          133
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "docs/oss-object-layout.md",
+      "sha256": "1c2c436274c91b44145079093f43c9418f93924d4c82838b1849c7ba9492cefb",
+      "lines": 126,
+      "read_ranges": [
+        [
+          1,
+          126
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "FEATURE_TEST_REPORT.md",
+      "sha256": "00e658bccb6fc53e9ff7fab6dfe09ceb3f4f54c655e952409458ba032c2d0305",
+      "lines": 103,
+      "read_ranges": [
+        [
+          1,
+          103
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "IMPLEMENTATION_PLAN.md",
+      "sha256": "e964754ce903e91f8c803374b9fc23782384c50400452697a23773ce6f3a845d",
+      "lines": 101,
+      "read_ranges": [
+        [
+          1,
+          101
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "FEATURE_UPDATE_IMPLEMENTATION.md",
+      "sha256": "b0e0bded6813aa0f4e33dd5670d360b769905cf3e0af74235e5034064e470f53",
+      "lines": 85,
+      "read_ranges": [
+        [
+          1,
+          85
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "USER_STATISTICS_DESIGN.md",
+      "sha256": "0a5d47f54a490833eaa557ed862c74a22f424f71b9f875f3438f51398f4eb5f2",
+      "lines": 83,
+      "read_ranges": [
+        [
+          1,
+          83
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "PROJECT_PERMISSION_TEST_REPORT.md",
+      "sha256": "4c8c09d8876976e943e3dd6e7d330cd81a7d7629011bf57151026b4754803e68",
+      "lines": 82,
+      "read_ranges": [
+        [
+          1,
+          82
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "docs/dual-id-architecture.md",
+      "sha256": "304656896b424abf1519ca297f6f8ef81afb662a62e19528467d6ec919af8a54",
+      "lines": 79,
+      "read_ranges": [
+        [
+          1,
+          79
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "OPERATION_LOG_RETENTION.md",
+      "sha256": "dbf374d6d8e32ef27d75bf4cbb2042575bfb8756399d0cd5646b4f4aa88642a5",
+      "lines": 73,
+      "read_ranges": [
+        [
+          1,
+          73
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "ANTI_BOT_LOAD_TEST_REPORT.md",
+      "sha256": "f6852149b32de4e872c8b2830df96859f2a6b315ff5443a8a6af890304845f5f",
+      "lines": 67,
+      "read_ranges": [
+        [
+          1,
+          67
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "REDIS_NATS_TEST_REPORT.md",
+      "sha256": "7cf487be8cbff1408c369f8de30b9fbacf09fcf1f87e44b4ff6d8c435c966860",
+      "lines": 67,
+      "read_ranges": [
+        [
+          1,
+          67
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "PROJECT_PERMISSION_MODEL.md",
+      "sha256": "79049cb425253003cdfc51ef6c8d9645f37bd5b2925e0b6008c4d89bfc2f84d5",
+      "lines": 64,
+      "read_ranges": [
+        [
+          1,
+          64
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "ANTI_BOT_TEST_REPORT.md",
+      "sha256": "43906d9e64e34fe99555fe066a777c26117b84afcdb980351802890d77f83356",
+      "lines": 61,
+      "read_ranges": [
+        [
+          1,
+          61
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "RECIPE_VERSION_BINDING_DESIGN.md",
+      "sha256": "aaf11bcbe953a2016b76aa67b4012b4db3a9986e9775a44d47b42825e62e3d43",
+      "lines": 61,
+      "read_ranges": [
+        [
+          1,
+          61
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "ANTI_BOT_DESIGN.md",
+      "sha256": "53f1194ebea71233966f053f374f3854b4f8c2f533eb4dc4a096fb0b6c7819f5",
+      "lines": 60,
+      "read_ranges": [
+        [
+          1,
+          60
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "FEATURE_UPDATE_TEST_REPORT.md",
+      "sha256": "74bface7d68a5ce91b0038c2cd7fd6d7f0638f884d9a1df359869f7e7e9be00f",
+      "lines": 60,
+      "read_ranges": [
+        [
+          1,
+          60
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "OUTBOX_JETSTREAM_DESIGN.md",
+      "sha256": "e3667a8dc1b73fe1a3f13ef545d0542a2047198a5b526637862a7cee4713ff49",
+      "lines": 62,
+      "read_ranges": [
+        [
+          1,
+          62
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "COMMENT_MARKDOWN_EDITOR.md",
+      "sha256": "c4ae00ca8128ee37fe8ec341192707371ca45bde90454b38a01766da1964a89d",
+      "lines": 56,
+      "read_ranges": [
+        [
+          1,
+          56
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "ANTI_BOT_CONFIGURATION.md",
+      "sha256": "0d634a530a1bfbc2ed9883feea540279ca1f607769697d0648acf340bcc14660",
+      "lines": 55,
+      "read_ranges": [
+        [
+          1,
+          55
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "COMPATIBILITY_BOUNDARIES.md",
+      "sha256": "fcacadb51116fccd93ba0ebbcb123d0a17a6302f5ab6768ebc5544e40021c2bc",
+      "lines": 54,
+      "read_ranges": [
+        [
+          1,
+          54
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "REDIS_NATS_OPTIMIZATION_PLAN.md",
+      "sha256": "57a3468218bea5757f52980031046563316d0c82fa3f281c4c90a9060350ac51",
+      "lines": 54,
+      "read_ranges": [
+        [
+          1,
+          54
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "AUTH_AND_PERMISSION_VERSIONING.md",
+      "sha256": "6e16a701ae1fb15082fdec8fa392af59a18903ece2d560a9917e882ff65799d9",
+      "lines": 53,
+      "read_ranges": [
+        [
+          1,
+          53
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "COMMENT_FLOOR_DESIGN.md",
+      "sha256": "b470f207717aaf39d4f16b79e41b4aa8c711a82e1a824e9e2c3f7fa779b9ef76",
+      "lines": 53,
+      "read_ranges": [
+        [
+          1,
+          53
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "docs/ACTIVITY_INGESTION.md",
+      "sha256": "23835aa8b6f16a0daf4e716d298f86eb725651438a017b87e41cc99951ab4780",
+      "lines": 59,
+      "read_ranges": [
+        [
+          1,
+          59
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "LOG_SHARE_SECURITY.md",
+      "sha256": "1c04805127fe0f1cfb3096fb2acbcc2ce5ada813132ec8427b77c980d60c8dca",
+      "lines": 50,
+      "read_ranges": [
+        [
+          1,
+          50
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "docs/database-naming.md",
+      "sha256": "09295d8080b71d9f36d958b6f1810b09b5e508e9dc9fa68b08f49b331e3f97ef",
+      "lines": 42,
+      "read_ranges": [
+        [
+          1,
+          42
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "PRESENCE_AND_UNREAD_DESIGN.md",
+      "sha256": "21ec1ec213a6b06af5a4620fb02a84ce3b30389c0dafef54145250c2f0c587f3",
+      "lines": 41,
+      "read_ranges": [
+        [
+          1,
+          41
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "CACHE_KEYS_AND_INVALIDATION.md",
+      "sha256": "c159e6caed23c2670b4572ed29dece48e161a6622a6c6741db233381e20612b7",
+      "lines": 40,
+      "read_ranges": [
+        [
+          1,
+          40
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "USER_BLOCKING.md",
+      "sha256": "081a62fc33319d40fab55313ed345b00f92b879150e07463dfce75998af1da75",
+      "lines": 40,
+      "read_ranges": [
+        [
+          1,
+          40
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "PROJECT_AUTO_UPDATE_DESIGN.md",
+      "sha256": "bea2f3df813083633ed8145fe459e0f1b040b0d58b3c12306b30b350740104fb",
+      "lines": 39,
+      "read_ranges": [
+        [
+          1,
+          39
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "FAVORITE_MODPACK_EXPORT.md",
+      "sha256": "75bacaa8eed12b952447af137961f8cc9ee2fff1fb28fc267c7ae103cf50a764",
+      "lines": 38,
+      "read_ranges": [
+        [
+          1,
+          38
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "PROJECT_ROLE_ASSIGNMENT_AUDIT.md",
+      "sha256": "b8a45dd23f4f84afdb17f5d1f100290de789e6c22269b5512e80bfa8887099db",
+      "lines": 36,
+      "read_ranges": [
+        [
+          1,
+          36
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "REPORT_AND_MODERATION_DESIGN.md",
+      "sha256": "977f5ca0f848f82dedec1bdf14262214cae08e6a039a6c288ce27b5c621e9866",
+      "lines": 36,
+      "read_ranges": [
+        [
+          1,
+          36
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "docs/typesense-search.md",
+      "sha256": "5211d3a72ef34f6887434650561fae3b9ac644ae40affdc034e19321cffb548d",
+      "lines": 33,
+      "read_ranges": [
+        [
+          1,
+          33
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "DEVELOPMENT_SCHEMA_RESET.md",
+      "sha256": "5b79c983f4616aee345a01ebed91c46009ded0092b6c5b7a7a91375507cbb259",
+      "lines": 27,
+      "read_ranges": [
+        [
+          1,
+          27
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "SESSION_INVALIDATION_FIX_REPORT.md",
+      "sha256": "8e606604a03bf6fb45d7fea92e525d45a57ccac07ea783d4e78e0b98a902e9be",
+      "lines": 24,
+      "read_ranges": [
+        [
+          1,
+          24
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "SYSTEM_NOTIFICATION_LOCALIZATION.md",
+      "sha256": "98c4676a14f218c88159094dbfb74e5c4302bdf96605c74ed1e337076ce5ebdd",
+      "lines": 24,
+      "read_ranges": [
+        [
+          1,
+          24
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "PROJECT_FOLLOW_NOTIFICATIONS.md",
+      "sha256": "9a06ac8c8a34e38967152bbde9359d25de3d558ae83137eeec8b6dcfbdc0954a",
+      "lines": 23,
+      "read_ranges": [
+        [
+          1,
+          23
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "SEED_CRAWLER_DESIGN.md",
+      "sha256": "3c6ac64531ecbb0691a3fcde931545a2700309b76e6f6799d371d8f1bf9d0541",
+      "lines": 23,
+      "read_ranges": [
+        [
+          1,
+          23
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "STICKER_SYSTEM_DESIGN.md",
+      "sha256": "8d94a6eef552e6df75d8435dbd3c3e9fc6e9ade3ad7d7e377d67be912afcab8b",
+      "lines": 23,
+      "read_ranges": [
+        [
+          1,
+          23
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "ADMIN_INFORMATION_ARCHITECTURE.md",
+      "sha256": "176986ed80d6825283fb96ca6cb18dc9d1c581985917b163438ebeec415198e0",
+      "lines": 21,
+      "read_ranges": [
+        [
+          1,
+          21
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "BAN_AND_BLACKROOM_DESIGN.md",
+      "sha256": "aefdf9952c7b5411ebe635563175045ac294de3a51ad2a073d33b7baf82bf3f0",
+      "lines": 21,
+      "read_ranges": [
+        [
+          1,
+          21
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "MOD_IMPORT_MODID_VALIDATION.md",
+      "sha256": "1f3b44b11b516c6d1651a9db418a5c53add35688518983d06db92441ade30872",
+      "lines": 17,
+      "read_ranges": [
+        [
+          1,
+          17
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "SITE_AFFAIRS_DESIGN.md",
+      "sha256": "8dd3aa728d42fbfcbeb8f4c6d7430d9006109dc4bc759e5caa23977508df186b",
+      "lines": 15,
+      "read_ranges": [
+        [
+          1,
+          15
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "工程设计/历史报告与实际基线交叉核对",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "main.go",
+      "sha256": "703ca276af61317544919cedb6fae6203276c2a9f1d398dfbb592258815f52f1",
+      "lines": 7,
+      "read_ranges": [
+        [
+          1,
+          7
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "go.mod",
+      "sha256": "f3ae25dbf0727286c65fbf81d114faa7045ef8b649ca45b041d255b147912223",
+      "lines": 32,
+      "read_ranges": [
+        [
+          1,
+          32
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": ".env.example",
+      "sha256": "b37fb4b088ab4cdf1df22299681618de39da7dc8658e732dabe5ad497f2c2b8f",
+      "lines": 164,
+      "read_ranges": [
+        [
+          1,
+          164
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/app/app.go",
+      "sha256": "0c6ab8d869c7bff938b20fe31730e3fe6a495402a87831a8eb5d0ba152d57b22",
+      "lines": 68,
+      "read_ranges": [
+        [
+          1,
+          68
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/app/runtime.go",
+      "sha256": "db03cf1638bcf53c5ce8b117036773f9afc54086c0e941cdadc3594d6b1d68ee",
+      "lines": 301,
+      "read_ranges": [
+        [
+          1,
+          301
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "internal/app/availability.go",
+      "sha256": "0c3e4793897dc62ddf33bd038a57b10bbfda375aa560eeee12113953975963c0",
+      "lines": 145,
+      "read_ranges": [
+        [
+          1,
+          145
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/app/availability_test.go",
+      "sha256": "e2f296a44af523fa45c842b06d0e11e3b451cbf77362a8d7e1d69a7c57401174",
+      "lines": 87,
+      "read_ranges": [
+        [
+          1,
+          87
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/runtimelog/store.go",
+      "sha256": "f565aaa09bbccf7548c105eb0da91a745545ab2a648c2860393cfa68095c2f49",
+      "lines": 130,
+      "read_ranges": [
+        [
+          1,
+          130
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/runtimelog/store_test.go",
+      "sha256": "be6f512323da979ce54821a9a5edecbf8b1018bae3a220ae17fded19052db426",
+      "lines": 31,
+      "read_ranges": [
+        [
+          1,
+          31
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/systemactor/autobot.go",
+      "sha256": "7c17f275a6685982ceec2aba6fc8621e4138f53ba762665daadf77bcdc49bda6",
+      "lines": 6,
+      "read_ranges": [
+        [
+          1,
+          6
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "3b3a2cbc6709c8626e10435da4e08ac21088eb09f1618cdc8afb5a2311aa79fe",
+      "lines": 10,
+      "read_ranges": [
+        [
+          1,
+          10
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "主执行者已实际全文复核及调用链复核；审查台账/隔离环境安全边界",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": ".idea/go.imports.xml",
+      "sha256": "6b023b2a2ebe78323ec1b2e1310fc0c51f5bb90854ea7e0997714eac1a215725",
+      "lines": 10,
+      "read_ranges": [
+        [
+          1,
+          10
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": ".idea/vcs.xml",
+      "sha256": "55768f1f84fb117f1d0fc383e180b5d0aa5e5e6584c8c4a2995c15b4237f0972",
+      "lines": 6,
+      "read_ranges": [
+        [
+          1,
+          6
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": ".idea/mcmods-cn-backend.iml",
+      "sha256": "cf1de5d1cb96ee988c0082b2b13f828915742f041b711f05f1c20f5da945afcf",
+      "lines": 4,
+      "read_ranges": [
+        [
+          1,
+          4
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/antiabuse/service.go",
+      "sha256": "451982bd10d7139c9029b76eb166f6f3b72a94a9338de656619eb1b4ad0471a2",
+      "lines": 854,
+      "read_ranges": [
+        [
+          1,
+          854
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/queue/nats.go",
+      "sha256": "0f4c5b91030f26cf6393a9f7ca9d2179dcfa460154b120ad5b4affa4a160cc6e",
+      "lines": 648,
+      "read_ranges": [
+        [
+          1,
+          648
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "internal/antiabuse/crawler.go",
+      "sha256": "ca9f7e9f13fa0a28dec3f2f067809274005c323a445064a72201bb523dc7f001",
+      "lines": 236,
+      "read_ranges": [
+        [
+          1,
+          236
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "internal/queue/outbox.go",
+      "sha256": "4f773029b9f83b92acec89a793f5f8c0f15056f08d3d7aa2a01636ad1785f020",
+      "lines": 228,
+      "read_ranges": [
+        [
+          1,
+          228
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "internal/antiabuse/challenge.go",
+      "sha256": "dc0a7bd8011c56f45ca8eda2134a43ff4eef9020cfac051ce1569497f2d1d22f",
+      "lines": 162,
+      "read_ranges": [
+        [
+          1,
+          162
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/security/token.go",
+      "sha256": "223e16e3a9eabd6a6c29010e047096a1762f325f2d4ec753f62578c9c472f54f",
+      "lines": 154,
+      "read_ranges": [
+        [
+          1,
+          154
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/security/password.go",
+      "sha256": "8430c6c7e44f439966dee571f2d4c4f40fc120c8f22d77a25d33d94685fade5b",
+      "lines": 147,
+      "read_ranges": [
+        [
+          1,
+          147
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/antiabuse/service_test.go",
+      "sha256": "fb8dce81f92a43646bd35c5714cda6f0cca84c846e4a5df4a624224b28cdd75b",
+      "lines": 141,
+      "read_ranges": [
+        [
+          1,
+          141
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/antiabuse/challenge_integration_test.go",
+      "sha256": "d77858378993f4ff107ae3db7fc4ca67b69df580a7ba2d5de1f4dbe33cdc965d",
+      "lines": 129,
+      "read_ranges": [
+        [
+          1,
+          129
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/queue/outbox_integration_test.go",
+      "sha256": "20cbd03df8a6fb4e9b0d7804302cc77665af0d299bfdf784235427b53ae04d71",
+      "lines": 128,
+      "read_ranges": [
+        [
+          1,
+          128
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/antiabuse/types.go",
+      "sha256": "f07e2580c54066f057bcad2b058390410f94008cdd1e1abcda08beb7193b20c1",
+      "lines": 127,
+      "read_ranges": [
+        [
+          1,
+          127
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/mailer/mailer.go",
+      "sha256": "fce1b1a0ead348cbc4674cb447455fbe00a6f55000766342bcc49d1625f8b8d0",
+      "lines": 126,
+      "read_ranges": [
+        [
+          1,
+          126
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/antiabuse/normalize.go",
+      "sha256": "22960817d4783927bf71dbfc89c35edd3e82485d44e20f18f74fdd5830ba2b52",
+      "lines": 100,
+      "read_ranges": [
+        [
+          1,
+          100
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/queue/nats_integration_test.go",
+      "sha256": "2a0cfe8d3675b8e00ed58775cf80b4b3bf80c148655eb3ae53ffea844fca3dbb",
+      "lines": 97,
+      "read_ranges": [
+        [
+          1,
+          97
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/security/settings.go",
+      "sha256": "80fe90043505bab37c6b226f91ac944ab6ec6bca4309bdda5db2778fc03349a3",
+      "lines": 82,
+      "read_ranges": [
+        [
+          1,
+          82
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/antiabuse/crawler_test.go",
+      "sha256": "d90cb1061a174703fe9b190051582e8ab933ee502657b0043ba3409ec1ae5820",
+      "lines": 61,
+      "read_ranges": [
+        [
+          1,
+          61
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/queue/nats_test.go",
+      "sha256": "baab08ecce7be241d90dd6d19b44b80682bbc5150c871a5a1c8c71323e727213",
+      "lines": 58,
+      "read_ranges": [
+        [
+          1,
+          58
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/antiabuse/query_plan_integration_test.go",
+      "sha256": "c1d75c66de47b268409d691b83961a09c75d110e4a6470badf00360df37b43c1",
+      "lines": 54,
+      "read_ranges": [
+        [
+          1,
+          54
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/queue/events_test.go",
+      "sha256": "766273869ad0c58168d6c0b889945996c537f47dc034e648f867876ffc54c8a0",
+      "lines": 39,
+      "read_ranges": [
+        [
+          1,
+          39
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/queue/events.go",
+      "sha256": "42045ed340fc8d5331d84a1ae6e358b98621b4ae2253449fcbf2a6a490968140",
+      "lines": 37,
+      "read_ranges": [
+        [
+          1,
+          37
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/security/settings_test.go",
+      "sha256": "66903967244993c79c602e7dc04a1c442b59ff39439c1d855c7d4b98a48de5da",
+      "lines": 31,
+      "read_ranges": [
+        [
+          1,
+          31
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/security/password_test.go",
+      "sha256": "eab0c2214f372294a8c3eddfeb4b284f92364a033423c67d00120c74f1bc081b",
+      "lines": 29,
+      "read_ranges": [
+        [
+          1,
+          29
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/mailer/mailer_test.go",
+      "sha256": "540c206125c102bec24d0d5b74267b6eaf089fe3991d08cc7fe480a709790cd1",
+      "lines": 28,
+      "read_ranges": [
+        [
+          1,
+          28
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/antiabuse/normalize_test.go",
+      "sha256": "f4919bd488fb92a6c122ead8b5f737c6f2fed7926376b41f6c9ac3440016b168",
+      "lines": 26,
+      "read_ranges": [
+        [
+          1,
+          26
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "运行配置/服务边界/生命周期/队列与测试契约审查",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/querycache/cache.go",
+      "sha256": "9fd129dc14dd4c58f2f20aa3a64bcdfc2c9385f86b449339607d348f1282f910",
+      "lines": 678,
+      "read_ranges": [
+        [
+          1,
+          678
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/config/config.go",
+      "sha256": "30d44f674cda459223c4512ac9658f5f78ef6c90475755a7e91706fd5de5fe19",
+      "lines": 666,
+      "read_ranges": [
+        [
+          1,
+          666
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/serverprobe/configuration.go",
+      "sha256": "7e9f7bf8dde1d54ed36f9a53ad669beaa17a61f946eb7cd4fc027ef0bcc18b72",
+      "lines": 586,
+      "read_ranges": [
+        [
+          1,
+          586
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/activity/monitor.go",
+      "sha256": "e2a985d26fe4800633af11e5c48f97fb30d9b85f6c7ce143e3ed7ac8611a1a28",
+      "lines": 575,
+      "read_ranges": [
+        [
+          1,
+          575
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "internal/searchindex/worker.go",
+      "sha256": "fe95ecc82e7e68c152756e29c9595ec815405e30681e3716ba36589ca5123dd9",
+      "lines": 544,
+      "read_ranges": [
+        [
+          1,
+          544
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/serverprobe/probe.go",
+      "sha256": "ecbaafaf8bdb196023613e67ea4133d9e57edca3e162387e4fbcfdbda1ed31f9",
+      "lines": 503,
+      "read_ranges": [
+        [
+          1,
+          503
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "internal/progression/service.go",
+      "sha256": "8130d5bc8a6a482a792bfb3b92b1e3c33fa409d998c1fbe579677771148488d7",
+      "lines": 511,
+      "read_ranges": [
+        [
+          1,
+          511
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "internal/querycache/state.go",
+      "sha256": "e14ad4967234757e194811daa50491a516c36a272d7e4851f957d7723f2fb198",
+      "lines": 426,
+      "read_ranges": [
+        [
+          1,
+          426
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/searchindex/typesense.go",
+      "sha256": "07f2dc994f83ae9354f262f262c27c64897983896aa2f01aacc85ba433fb11a1",
+      "lines": 338,
+      "read_ranges": [
+        [
+          1,
+          338
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "scripts/load-test.mjs",
+      "sha256": "b44723ee9acebf5cdace678fd21f62296901fd28097ac3234feb681deade32c2",
+      "lines": 316,
+      "read_ranges": [
+        [
+          1,
+          316
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/activity/postgres_store.go",
+      "sha256": "78713ed8207dbf564ccb7abe99407b08d35c154f44f6ab61e83c44dc9ed1b686",
+      "lines": 336,
+      "read_ranges": [
+        [
+          1,
+          336
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "internal/serverprobe/forge.go",
+      "sha256": "240c97ffe6ba0ec98bd46e654721dfb4eb319a325c9530815c4a2b3a335c191a",
+      "lines": 246,
+      "read_ranges": [
+        [
+          1,
+          246
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/activity/monitor_test.go",
+      "sha256": "a2f418375c5d7a2f7de75e00a361b867eb811e698342510ec6edea125f56fea1",
+      "lines": 259,
+      "read_ranges": [
+        [
+          1,
+          259
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "issues": [],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ],
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。"
+    },
+    {
+      "path": "internal/activity/postgres_store_integration_test.go",
+      "sha256": "55940af6220d8bd7ff23976326b3d95c705f7b4479d2c324a446c420897d12ef",
+      "lines": 211,
+      "read_ranges": [
+        [
+          1,
+          211
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/userstats/reconcile.go",
+      "sha256": "2a04d5fc2bfb9fa764ba11eefd6f81fb78cbb071c9cf3872b920d76b88202014",
+      "lines": 165,
+      "read_ranges": [
+        [
+          1,
+          165
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/serverprobe/configuration_nbt.go",
+      "sha256": "46acbe7779ec2d503d10b50e7e4444102090725d82bf68297119e5a5823f4682",
+      "lines": 158,
+      "read_ranges": [
+        [
+          1,
+          158
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/serverprobe/configuration_fabric.go",
+      "sha256": "0e48eeff6316a27f9e33302e13a84a0d9277d41141a8dffd2b91bcb77add5cf9",
+      "lines": 142,
+      "read_ranges": [
+        [
+          1,
+          142
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/serverprobe/configuration_test.go",
+      "sha256": "59b714f62ad27645eeec6ed31b4a4c3b41de9015c0d1ab3a13ca4ae9016da835",
+      "lines": 141,
+      "read_ranges": [
+        [
+          1,
+          141
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "scripts/query-analysis.sql",
+      "sha256": "6fcf3b8e54e24038090ad0922ecab85d135325e1336fc0747043822d23f13fb3",
+      "lines": 101,
+      "read_ranges": [
+        [
+          1,
+          101
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/querycache/state_test.go",
+      "sha256": "6e2b6adc5be563088055442af877dfd8b423f42df4684e3946db5f0cca5f8475",
+      "lines": 96,
+      "read_ranges": [
+        [
+          1,
+          96
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/searchindex/typesense_test.go",
+      "sha256": "12c9d7d41f4f45061e3d6b0100634ff472f64510318742830979bffb2d6069a9",
+      "lines": 88,
+      "read_ranges": [
+        [
+          1,
+          88
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/searchindex/schema.go",
+      "sha256": "152c696961085ab9eab1d1b09257b15d9c67c4ec450a4c9a1a865e50610acb2d",
+      "lines": 87,
+      "read_ranges": [
+        [
+          1,
+          87
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/querycache/cache_test.go",
+      "sha256": "9e7b91e5fbe096771d5da90adaa86844706cb90b643360ff545a307527fb70cc",
+      "lines": 86,
+      "read_ranges": [
+        [
+          1,
+          86
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/serverprobe/probe_test.go",
+      "sha256": "cada0a6009b09bbd5ad8bf4eacd0b008c580f35da176f2427c585bab96bfdd5c",
+      "lines": 76,
+      "read_ranges": [
+        [
+          1,
+          76
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/serverprobe/forge_test.go",
+      "sha256": "c57f2acef7435dae6f294bd1d81e09fa15a40ccef73188c9d80036724e93d424",
+      "lines": 75,
+      "read_ranges": [
+        [
+          1,
+          75
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/querycache/shared_version_test.go",
+      "sha256": "a9803b17977c197a9f8f3d6b05d4031ac6a8edd42b458c9917c1a2d0960be5d6",
+      "lines": 65,
+      "read_ranges": [
+        [
+          1,
+          65
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/config/activity_config_test.go",
+      "sha256": "49714dafe4c85f6d2bb0ce1698af6f60b41845bd2b0b163cea8b45b77a0c8eb2",
+      "lines": 64,
+      "read_ranges": [
+        [
+          1,
+          64
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/progression/service_test.go",
+      "sha256": "4b0e56054f201c45b3acd84479c3785a947b9a270e1316f22015b388b6c87251",
+      "lines": 54,
+      "read_ranges": [
+        [
+          1,
+          54
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "cmd/load-observer/main.go",
+      "sha256": "9676d00e71781913e4d4c362da7fc1b6713aad2a690a183e32d84ca4cef6240f",
+      "lines": 53,
+      "read_ranges": [
+        [
+          1,
+          53
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "cmd/db-reset/main.go",
+      "sha256": "8be16b2c281c4018be8021e06ba60b834c702b64fc7bf858e0f1bc92f33bb48d",
+      "lines": 47,
+      "read_ranges": [
+        [
+          1,
+          47
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/config/database_reset_config_test.go",
+      "sha256": "f3b87a91311f1b99e68874977e9de2ce8bf6b701ae4bcf34a00fc8c8ce907f24",
+      "lines": 41,
+      "read_ranges": [
+        [
+          1,
+          41
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/searchindex/worker_integration_test.go",
+      "sha256": "751b0eb1e084af467ccaaf618ee3b55453a2524159faa15483119c3cd77640f1",
+      "lines": 34,
+      "read_ranges": [
+        [
+          1,
+          34
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "cmd/user-statistics/main.go",
+      "sha256": "1eb150739f7fbb7048eee677e70a2f34651bf8ddb53ad87b80f6405d53deabde",
+      "lines": 30,
+      "read_ranges": [
+        [
+          1,
+          30
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/userstats/reconcile_test.go",
+      "sha256": "a262bc2533caa20648956bba6a1088a14154e5f1018e754fa3e218c13ded3f84",
+      "lines": 30,
+      "read_ranges": [
+        [
+          1,
+          30
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "scripts/process-observer.ps1",
+      "sha256": "7e143b13aaf73aabb9ce0e0343bccd4a6ae9066fb3a7be161eb246e5cd1ee3b6",
+      "lines": 30,
+      "read_ranges": [
+        [
+          1,
+          30
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "scripts/anti-abuse-query-analysis.sql",
+      "sha256": "afdbede73eeac0e6ff1bd4a6289f7ed2275cc5a14177ed3c6011c086ce645b12",
+      "lines": 17,
+      "read_ranges": [
+        [
+          1,
+          17
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "边界、SQL/并发、超时/重试与输入解析完整审查；行为证据单独登记",
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/activity/projection_atomicity_integration_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "175919cbeddce4b932b3c99554929034517a56f394c8c5efdb415052b9bea036",
+      "lines": 69,
+      "read_ranges": [
+        [
+          1,
+          69
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/antiabuse/crawler_cache_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "199125941a68cda3fc51dcdafb8c8cc9f5aa0e0b17d4438213063b2c820edf22",
+      "lines": 29,
+      "read_ranges": [
+        [
+          1,
+          29
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/httpapi/administrative_query_failure_integration_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "27fcad861aec4baba68b6a63433bbfb35c9e30253cb74fc80b817a3b2f3bf72e",
+      "lines": 62,
+      "read_ranges": [
+        [
+          1,
+          62
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/httpapi/governance_stream_failure_integration_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "7bb30c0742272887e729bb688cdab38a59f686a0cad1cdb43475dd051ca76a71",
+      "lines": 50,
+      "read_ranges": [
+        [
+          1,
+          50
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/httpapi/log_cleanup_failure_integration_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "2444b34a63d0c4732bdbcaaa74c3bc84e2b85e984be947dd55838cd59efece21",
+      "lines": 53,
+      "read_ranges": [
+        [
+          1,
+          53
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/httpapi/query_plan_audit_integration_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "1595bf6f60135fd0e31728378967435b99ce2d4b09410dbce786cf23ad2937b2",
+      "lines": 70,
+      "read_ranges": [
+        [
+          1,
+          70
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/httpapi/site_affairs_publication_integration_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "adac734a6052c4ac0f5d9e60a7c19d3419971446ea2b05dffe45b07c3fd85916",
+      "lines": 69,
+      "read_ranges": [
+        [
+          1,
+          69
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/progression/activity_reward_integration_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "24951a3b3b208a240e811fe43ed00ad081c62c0de6913d7c2954d34cda5c9fe8",
+      "lines": 148,
+      "read_ranges": [
+        [
+          1,
+          148
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/queue/favorite_task_config_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "c7ff6ad903955d77235079c9ffa10441af3c55ec34ac05cf73fcd3099277f176",
+      "lines": 33,
+      "read_ranges": [
+        [
+          1,
+          33
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/queue/local_task_safety_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "e829ba20e547ba29739cf7b4431e348f3e1cde0f8cfacbdbaa6fe92e71d8b907",
+      "lines": 43,
+      "read_ranges": [
+        [
+          1,
+          43
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/queue/outbox_error_text_integration_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "af327216858b5d464c4062eaf310c94240cc97ec28b231e351801b38895cee2f",
+      "lines": 57,
+      "read_ranges": [
+        [
+          1,
+          57
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/queue/outbox_fencing_integration_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "52c7742dd589d35485bacac4984b670ec81d58fb8c9d730b2898b391ea9a1d80",
+      "lines": 58,
+      "read_ranges": [
+        [
+          1,
+          58
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/searchindex/import_validation_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "2dd7065c592ab781502fa3a594d7b389b6f6b52fd3bce597a2a1147f94dd20a9",
+      "lines": 26,
+      "read_ranges": [
+        [
+          1,
+          26
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/searchindex/redirect_security_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "a778ecb9df750acb703420558757f07405a5d16098d8614236b19fb296665350",
+      "lines": 48,
+      "read_ranges": [
+        [
+          1,
+          48
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/searchindex/typesense_service_integration_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "6bd482afebb2da48bbd925fdee2fc66cbbf540da8faa20e2fd5d4f4e781e592c",
+      "lines": 95,
+      "read_ranges": [
+        [
+          1,
+          95
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "internal/serverprobe/favicon_bounds_test.go",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "df1dffcf6f851515cdac04372e6cce920b352c23cfa9489fe72d6cdf4316b6fc",
+      "lines": 39,
+      "read_ranges": [
+        [
+          1,
+          39
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "docs/server-probe-input.md",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "7bc20b18003f3df08c3f0f3a731bc424f775467d557435f05f9ae7e08e7415dc",
+      "lines": 7,
+      "read_ranges": [
+        [
+          1,
+          7
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "docs/site-affairs-localization.md",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "f89b5dbfc9b59134aa166f31ca8688301cd711f8b36c4411bc36ae50b220771b",
+      "lines": 9,
+      "read_ranges": [
+        [
+          1,
+          9
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "docs/audit/root-findings.md",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "ba7c93834959dc46d0163b6f568446325c2ed85c65ad9aaed72dc61a2f4d771d",
+      "lines": 41,
+      "read_ranges": [
+        [
+          1,
+          41
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "主执行者实际全文阅读/撰写与最终复核；交付结论依据命令和专题证据，静态审查不混行为覆盖",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "本轮实际全文及最终逐行差异复读；生成器9黑盒各PASS，paced browser6PASS+两个reports同时保留；仅列明断言，不推断完整行为或生产健康。"
+      ]
+    },
+    {
+      "path": "docs/audit/backend-api-b-ui-b.md",
+      "behavior_verified": false,
+      "issues": [],
+      "sha256": "e27effa724098189826c4bbf7798edcf9775552a47f89f4f054f1e0401eb29ec",
+      "lines": 42,
+      "read_ranges": [
+        [
+          1,
+          42
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "本轮可靠性/输入边界/隔离测试与可复现证据",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "docs/audit/root-findings.md 对应限定场景；整体最终结果另记"
+      ]
+    },
+    {
+      "path": "scripts/audit-ledger.py",
+      "behavior_verified": true,
+      "issues": [],
+      "sha256": "04383801362f30a71c1f6dd6d73c0e66f2276ccf0453fd0cb8e8f5aa363f8ebb",
+      "lines": 151,
+      "read_ranges": [
+        [
+          1,
+          151
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "final_review": "root已逐段完整读取源/文档；长文件在此前完整基线审查后复核全部最终修改/上下文并补读当前尾段；截断另补。不由扫描生成阅读结论。",
+      "responsibility": "主执行者实际全文阅读/撰写与最终复核；交付结论依据命令和专题证据，静态审查不混行为覆盖",
+      "call_chain": [
+        "调用方/配置/数据库事务及相关回归已逐链核对"
+      ],
+      "validation": [
+        "本轮实际全文及最终逐行差异复读；生成器9黑盒各PASS，paced browser6PASS+两个reports同时保留；仅列明断言，不推断完整行为或生产健康。"
+      ]
+    },
+    {
+      "path": "scripts/test-service-ownership.py",
+      "sha256": "23d0977a36135ebfd1730b451d00bec39fb025efaa48139548a59c61f717df8d",
+      "lines": 175,
+      "read_ranges": [
+        [
+          1,
+          175
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "responsibility": "主执行者已实际全文复核及调用链复核；审查台账/隔离环境安全边界",
+      "behavior_verified": false,
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "scripts/service-process-owner.py",
+      "sha256": "86cad58ba34443ab0e9b29617453f714f94875964c208cdbacf6ff871b4dd951",
+      "lines": 183,
+      "read_ranges": [
+        [
+          1,
+          183
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "responsibility": "主执行者已实际全文复核及调用链复核；审查台账/隔离环境安全边界",
+      "behavior_verified": false,
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "scripts/test-services.sh",
+      "sha256": "f6d9f458f63bca15314ffa217041d2affba3ce94c52caad795fbac1bdef08b95",
+      "lines": 92,
+      "read_ranges": [
+        [
+          1,
+          92
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "responsibility": "主执行者已实际全文复核及调用链复核；审查台账/隔离环境安全边界",
+      "behavior_verified": false,
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/testenv/ownership.go",
+      "sha256": "8c4773d3011f2289655d2a969cd1edd537a9ef6e4b7a7c93d06c0144ff5ccaff",
+      "lines": 119,
+      "read_ranges": [
+        [
+          1,
+          119
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "responsibility": "主执行者已实际全文复核及调用链复核；审查台账/隔离环境安全边界",
+      "behavior_verified": false,
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "internal/testenv/ownership_test.go",
+      "sha256": "5bbef39ddeb3d451f583f129afca0a63293f0014af4e643c434c86612eebf85f",
+      "lines": 233,
+      "read_ranges": [
+        [
+          1,
+          233
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "responsibility": "主执行者已实际全文复核及调用链复核；审查台账/隔离环境安全边界",
+      "behavior_verified": false,
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": ".github/workflows/checks.yml",
+      "sha256": "7cd426ec20c395068aa584e5f92adcafa6f4991fdfc40b1a70752fb276a52d6c",
+      "lines": 64,
+      "read_ranges": [
+        [
+          1,
+          64
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "responsibility": "主执行者已实际全文复核及调用链复核；审查台账/隔离环境安全边界",
+      "behavior_verified": false,
+      "call_chain": [],
+      "issues": [],
+      "validation": []
+    },
+    {
+      "path": "docs/audit/delivery.md",
+      "sha256": "a24e6058f6982714dc482daf5d1d89c96be5f865f15e7f723bf89cd17f41c6c8",
+      "lines": 100,
+      "read_ranges": [
+        [
+          1,
+          100
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "主执行者实际全文阅读/撰写与最终复核；交付结论依据命令和专题证据，静态审查不混行为覆盖",
+      "call_chain": [],
+      "issues": [],
+      "validation": [],
+      "final_review": "root全文读取原交付正文并复核最终全部变更行；核验实际PR链接、完整CI快照提交/job成功与远端所有blob一致，保留后端diff406/分页替代和附件未响应边界，文档后续HEAD由PR checks验证。"
+    },
+    {
+      "path": "docs/audit/environment.md",
+      "sha256": "0180a3aff1786c2671a641150de099c1858ed9f248f07570c44242d6a9ff653b",
+      "lines": 91,
+      "read_ranges": [
+        [
+          1,
+          91
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "responsibility": "实际安装/基线/独占服务目标校验/启动与停止/最终有限验证结果和复现边界",
+      "call_chain": [
+        "scripts/test-services.sh → service-process-owner.py/testenv → cmd/test-setup → actual local services"
+      ],
+      "issues": [
+        "ROOT-009"
+      ],
+      "validation": [
+        "root本轮逐行完整读87原行并新增/复读4行最终1366/156/6及已核验2应用4服务停止；原日志SHA在validation-root，文档本身不构成启动/测试证据。"
+      ]
+    }
+  ]
+}

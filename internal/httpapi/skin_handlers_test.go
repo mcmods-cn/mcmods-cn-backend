@@ -3,6 +3,8 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -88,5 +90,50 @@ func TestSkinRoutesAreRegistered(t *testing.T) {
 		if pattern == "" {
 			t.Errorf("route is not registered: %s %s", request.method, request.path)
 		}
+	}
+}
+
+func TestSkinLocalizationUpdateValidationAndCompatibility(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		raw       string
+		wantError bool
+	}{
+		{"legacy", `{"name":"Legacy"}`, false},
+		{"languages", `{"defaultLocale":"zh-CN","localizations":[{"locale":"zh-CN","name":"中文","summary":"描述"},{"locale":"en-US","name":"English","summary":"Description"}]}`, false},
+		{"missing-default", `{"defaultLocale":"zh-CN","localizations":[{"locale":"en-US","name":"English"}]}`, true},
+		{"duplicate", `{"defaultLocale":"en-US","localizations":[{"locale":"en-US","name":"One"},{"locale":"en-US","name":"Two"}]}`, true},
+		{"default-only", `{"defaultLocale":"zh-CN"}`, true},
+		{"empty", `{"defaultLocale":"zh-CN","localizations":[]}`, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var request skinAssetUpdateRequest
+			if err := json.Unmarshal([]byte(test.raw), &request); err != nil {
+				t.Fatal(err)
+			}
+			err := normalizeSkinAssetUpdateLocalizations(&request)
+			if (err != nil) != test.wantError {
+				t.Fatalf("validation error=%v wantError=%v", err, test.wantError)
+			}
+			if test.name == "languages" && (request.Name == nil || *request.Name != "中文" || request.Description == nil || *request.Description != "描述") {
+				t.Fatal("default locale did not update the legacy display fields")
+			}
+		})
+	}
+	for _, localized := range []catalogLocalizationEdit{{Locale: "en-US", Name: strings.Repeat("界", 81)}, {Locale: "en-US", Name: "Title", Summary: strings.Repeat("界", 1001)}} {
+		request := skinAssetUpdateRequest{DefaultLocale: "en-US", Localizations: []catalogLocalizationEdit{localized}}
+		if err := normalizeSkinAssetUpdateLocalizations(&request); err == nil {
+			t.Fatal("localized skin fields bypassed the skin limits")
+		}
+	}
+}
+
+func TestSkinLocalizationUpdateRequiresAuthentication(t *testing.T) {
+	server := new(Server)
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/skins/abc234567", strings.NewReader(`{"defaultLocale":"zh-CN","localizations":[{"locale":"zh-CN","name":"名称"}]}`))
+	response := httptest.NewRecorder()
+	server.updateSkinDetail(response, request, "abc234567")
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous edit status=%d", response.Code)
 	}
 }

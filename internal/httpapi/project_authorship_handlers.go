@@ -204,6 +204,10 @@ func (s *Server) adminProjectAuthorshipRelations(w http.ResponseWriter, r *http.
 			"creatorId": creatorID, "creatorKind": creatorKind, "creatorName": creatorName, "roleName": roleName,
 			"permissionGranting": permissionGranting, "status": relationStatus, "createdAt": createdAt})
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load project authorship relationships")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 

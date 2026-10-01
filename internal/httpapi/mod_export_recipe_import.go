@@ -846,6 +846,9 @@ func compactImportJSONObject(value json.RawMessage, omittedFields ...string) jso
 
 func processExportRecipeJSONFiles[T any](ctx context.Context, files map[string]*zip.File, prefix string,
 	decode func([]byte) (T, error), consume func(string, T) error) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
 	names := make([]string, 0)
 	for name, file := range files {
 		if !file.FileInfo().IsDir() && strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ".json") {
@@ -914,7 +917,10 @@ func processExportRecipeJSONFiles[T any](ctx context.Context, files map[string]*
 			cancel()
 		}
 	}
-	return firstErr
+	if firstErr != nil {
+		return firstErr
+	}
+	return context.Cause(ctx)
 }
 
 func exportRevisionForRecipeType(revisions map[string]string, recipeTypeID string) string {

@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"log"
 	"net/http"
 	"regexp"
 	"sort"
@@ -140,22 +142,38 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 	}
 	userID := identity.InternalID
 	trackCode := strings.TrimSpace(r.PathValue("code"))
-	roles, err := s.roleTrackRoles(r.Context(), trackCode)
-	if err == pgx.ErrNoRows || len(roles) < 2 {
-		writeError(w, http.StatusNotFound, "权限组线路不存在")
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "调整用户权限组失败")
 		return
 	}
+	defer tx.Rollback(r.Context())
+	// Serialize the read/shift/write operation for this user. The binding
+	// triggers increment permission_version in the same transaction.
+	var lockedUserID int64
+	if err = tx.QueryRow(r.Context(), `select id from users where id=$1 for update`, userID).Scan(&lockedUserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "锁定用户权限组失败")
+		return
+	}
+	var lockedTrack string
+	if err = tx.QueryRow(r.Context(), `select code from permission_role_tracks where code=$1 for share`, trackCode).Scan(&lockedTrack); errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "权限组线路不存在")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取权限组线路失败")
+		return
+	}
+	roles, err := loadRoleTrackRoles(r.Context(), tx, trackCode)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取权限组线路失败")
 		return
 	}
-	rows, err := s.db.Query(
-		r.Context(),
-		`select r.code from user_role_bindings b join roles r on r.id = b.role_id
-		 where b.user_id = $1 and r.code = any($2::text[])`,
-		userID,
-		roles,
-	)
+	if len(roles) < 2 {
+		writeError(w, http.StatusNotFound, "权限组线路不存在")
+		return
+	}
+	rows, err := tx.Query(r.Context(), `select r.code from user_role_bindings b join roles r on r.id=b.role_id
+     where b.user_id=$1 and r.code=any($2::text[])`, userID, roles)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取用户权限组失败")
 		return
@@ -163,23 +181,24 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 	current := make([]string, 0)
 	for rows.Next() {
 		var role string
-		if err := rows.Scan(&role); err == nil {
-			current = append(current, role)
+		if err = rows.Scan(&role); err != nil {
+			rows.Close()
+			writeError(w, http.StatusInternalServerError, "读取用户权限组失败")
+			return
 		}
+		current = append(current, role)
 	}
+	readErr := rows.Err()
 	rows.Close()
+	if readErr != nil {
+		writeError(w, http.StatusInternalServerError, "读取用户权限组失败")
+		return
+	}
 	if len(current) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"changed": false, "roles": []string{}})
 		return
 	}
 	targets := shiftRoleTrackRoles(roles, current, direction)
-
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "调整用户权限组失败")
-		return
-	}
-	defer tx.Rollback(r.Context())
 	if _, err := tx.Exec(
 		r.Context(),
 		`delete from user_role_bindings b using roles r
@@ -206,12 +225,17 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 	if direction < 0 {
 		action = "downgrade_role_track"
 	}
-	s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &userID, action, map[string]any{"track": trackCode, "from": current, "to": targets})
+	if err = s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &userID, action, map[string]any{"track": trackCode, "from": current, "to": targets}); err != nil {
+		writeError(w, http.StatusInternalServerError, "记录权限变更失败")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "调整用户权限组失败")
 		return
 	}
-	_ = s.refreshPermissionVersion(r.Context(), userID)
+	if err := s.refreshPermissionVersion(r.Context(), userID); err != nil {
+		log.Printf("refresh role track permission version for user %d: %v", userID, err)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"changed": true, "roles": targets})
 }
 
@@ -264,15 +288,24 @@ func (s *Server) loadRoleTracks(ctx context.Context) ([]roleTrackPayload, error)
 	return tracks, rows.Err()
 }
 
+type roleTrackReader interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
 func (s *Server) roleTrackRoles(ctx context.Context, code string) ([]string, error) {
+	return loadRoleTrackRoles(ctx, s.db, code)
+}
+
+func loadRoleTrackRoles(ctx context.Context, db roleTrackReader, code string) ([]string, error) {
 	var exists bool
-	if err := s.db.QueryRow(ctx, `select exists(select 1 from permission_role_tracks where code = $1)`, code).Scan(&exists); err != nil {
+	if err := db.QueryRow(ctx, `select exists(select 1 from permission_role_tracks where code = $1)`, code).Scan(&exists); err != nil {
 		return nil, err
 	}
 	if !exists {
 		return nil, pgx.ErrNoRows
 	}
-	rows, err := s.db.Query(
+	rows, err := db.Query(
 		ctx,
 		`select r.code from permission_role_track_roles tr join roles r on r.id = tr.role_id
 		 where tr.track_code = $1 order by tr.position`,

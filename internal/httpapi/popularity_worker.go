@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -146,7 +149,13 @@ func processContentStatsTask(ctx context.Context, db *pgxpool.Pool, task content
 	defer cancel()
 	tx, err := db.Begin(taskCtx)
 	if err == nil {
-		if task.refreshMetrics {
+		defer tx.Rollback(taskCtx)
+		var current bool
+		err = tx.QueryRow(taskCtx, `select true from content_stats_refresh_queue where object_route_id=$1 and attempts=$2 and locked_at is not null for update`, task.routeID, task.attempt).Scan(&current)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return
+		}
+		if err == nil && task.refreshMetrics {
 			_, err = tx.Exec(taskCtx, `select refresh_content_route_metrics($1)`, task.routeID)
 		}
 		if err == nil && task.refreshPopularity {
@@ -209,7 +218,15 @@ func processCommentHeatTask(ctx context.Context, db *pgxpool.Pool, task commentH
 	defer cancel()
 	tx, err := db.Begin(taskCtx)
 	if err == nil {
-		_, err = tx.Exec(taskCtx, `select refresh_comment_heat($1)`, task.commentID)
+		defer tx.Rollback(taskCtx)
+		var current bool
+		err = tx.QueryRow(taskCtx, `select true from comment_heat_refresh_queue where comment_id=$1 and attempts=$2 and locked_at is not null for update`, task.commentID, task.attempt).Scan(&current)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return
+		}
+		if err == nil {
+			_, err = tx.Exec(taskCtx, `select refresh_comment_heat($1)`, task.commentID)
+		}
 		if err == nil {
 			_, err = tx.Exec(taskCtx, `delete from comment_heat_refresh_queue
 				where comment_id=$1 and attempts=$2 and locked_at is not null`, task.commentID, task.attempt)

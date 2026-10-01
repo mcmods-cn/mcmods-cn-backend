@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -412,6 +413,11 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	request.ProofMarkdown = strings.TrimSpace(request.ProofMarkdown)
+	request.ProofFileIDs = uniquePublicIDs(request.ProofFileIDs)
+	if utf8.RuneCountInString(request.ProofMarkdown) > 10000 || (request.ProofMarkdown == "" && len(request.ProofFileIDs) == 0) {
+		writeError(w, http.StatusBadRequest, "claim requires written proof or an owned attachment; proof cannot exceed 10000 characters")
+		return
+	}
 	claims := currentClaims(r)
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -444,7 +450,6 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "author has already been claimed")
 		return
 	}
-	request.ProofFileIDs = uniquePublicIDs(request.ProofFileIDs)
 	proofFiles, err := resolveCreatorClaimProofFiles(r.Context(), tx, claims.Subject, request.ProofFileIDs)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -456,9 +461,8 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 	status := "pending"
 	var claimID int64
 	var claimPublicID string
-	err = tx.QueryRow(r.Context(), `insert into creator_claims(creator_id,user_id,proof_markdown,status,reviewed_by,reviewed_at)
-		values($1,$2,$3,$4,case when $4='approved' then $2 else null end,case when $4='approved' then now() else null end)
-		returning id,public_id`, creatorID, claims.Subject, request.ProofMarkdown, status).Scan(&claimID, &claimPublicID)
+	err = tx.QueryRow(r.Context(), `insert into creator_claims(creator_id,user_id,proof_markdown,status)
+		values($1,$2,$3,'pending') returning id,public_id`, creatorID, claims.Subject, request.ProofMarkdown).Scan(&claimID, &claimPublicID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, http.StatusConflict, "a claim is already pending")
@@ -483,6 +487,14 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminCreatorClaims(w http.ResponseWriter, r *http.Request) {
+	limit := boundedInt(r.URL.Query().Get("limit"), 100, 1, 200)
+	offset := boundedInt(r.URL.Query().Get("offset"), 0, 0, 1000000)
+	var total int
+	if err := s.db.QueryRow(r.Context(), `select count(*) from creator_claims claim
+		join creators creator on creator.id=claim.creator_id where claim.status='pending' and creator.kind='author'`).Scan(&total); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to count creator claims")
+		return
+	}
 	rows, err := s.db.Query(r.Context(), `
 		select claim.public_id,creator.public_id,creator.kind,creator.name,account.public_id,
 			account.username,claim.proof_markdown,claim.status,claim.created_at
@@ -490,7 +502,7 @@ func (s *Server) adminCreatorClaims(w http.ResponseWriter, r *http.Request) {
 		join creators creator on creator.id=claim.creator_id
 		join users account on account.id=claim.user_id
 		where claim.status='pending' and creator.kind='author'
-		order by claim.created_at,claim.id`)
+		order by claim.created_at,claim.id limit $1 offset $2`, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load creator claims")
 		return
@@ -504,18 +516,34 @@ func (s *Server) adminCreatorClaims(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to decode creator claims")
 			return
 		}
-		attachments, attachmentErr := s.creatorClaimAttachments(r.Context(), id)
-		if attachmentErr != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load creator claim attachments")
-			return
-		}
 		items = append(items, map[string]any{
 			"id": id, "creatorId": publicID, "kind": kind, "name": name,
 			"userId": userID, "username": username,
-			"proofMarkdown": proof, "attachments": attachments, "status": status, "createdAt": createdAt,
+			"proofMarkdown": proof, "status": status, "createdAt": createdAt,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read creator claims")
+		return
+	}
+	rows.Close()
+	claimIDs := make([]string, len(items))
+	for index, item := range items {
+		claimIDs[index] = item["id"].(string)
+	}
+	attachments, err := s.creatorClaimsAttachments(r.Context(), claimIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load creator claim attachments")
+		return
+	}
+	for index, item := range items {
+		files := attachments[claimIDs[index]]
+		if files == nil {
+			files = []creatorClaimAttachment{}
+		}
+		item["attachments"] = files
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset, "hasMore": offset+len(items) < total})
 }
 
 func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
@@ -572,6 +600,10 @@ func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to close competing claims")
 			return
 		}
+		if err = s.auditPermissionChangeTx(r.Context(), tx, claims.Subject, &userID, "author_claim.approve", map[string]any{"claimId": claimPublicID, "authorId": publicID}); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record author claim approval")
+			return
+		}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit claim review")
@@ -626,9 +658,10 @@ func (s *Server) revokeCreatorClaim(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to revoke author claim")
 		return
 	}
-	payload, _ := json.Marshal(map[string]any{"claimId": claimPublicID, "authorId": authorID, "reason": request.Reason})
-	_, _ = tx.Exec(r.Context(), `insert into permission_audit_logs(operator_id,target_user_id,action,payload)
-		values($1,$2,'author_claim.revoke',$3::jsonb)`, claims.Subject, userID, payload)
+	if err = s.auditPermissionChangeTx(r.Context(), tx, claims.Subject, &userID, "author_claim.revoke", map[string]any{"claimId": claimPublicID, "authorId": authorID, "reason": request.Reason}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record author claim revocation")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit author claim revocation")
 		return
@@ -637,7 +670,7 @@ func (s *Server) revokeCreatorClaim(w http.ResponseWriter, r *http.Request) {
 	s.enqueueOrCreateDirectNotification(r.Context(), userID, claims.Subject, "review", "Author claim revoked",
 		fmt.Sprintf("Your verified claim for %s was revoked. %s", authorName, request.Reason), map[string]any{
 			"creatorId": authorID, "claimId": claimPublicID, "url": "/authors/" + authorID,
-		})
+		}, "en-US")
 	writeJSON(w, http.StatusOK, map[string]any{"status": "revoked"})
 }
 
@@ -657,8 +690,15 @@ func (s *Server) creatorRoles(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to decode creator roles")
 			return
 		}
-		_ = json.Unmarshal(translationsRaw, &item.Translations)
+		if err = json.Unmarshal(translationsRaw, &item.Translations); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode creator role translations")
+			return
+		}
 		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read creator roles")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -1290,24 +1330,28 @@ func resolveCreatorClaimProofFiles(ctx context.Context, tx pgx.Tx, userID int64,
 	return files, nil
 }
 
-func (s *Server) creatorClaimAttachments(ctx context.Context, claimPublicID string) ([]creatorClaimAttachment, error) {
-	rows, err := s.db.Query(ctx, `select file.public_id,file.original_name,greatest(file.size_bytes,file.source_size_bytes)
+func (s *Server) creatorClaimsAttachments(ctx context.Context, claimPublicIDs []string) (map[string][]creatorClaimAttachment, error) {
+	items := make(map[string][]creatorClaimAttachment, len(claimPublicIDs))
+	if len(claimPublicIDs) == 0 {
+		return items, nil
+	}
+	rows, err := s.db.Query(ctx, `select claim.public_id,file.public_id,file.original_name,greatest(file.size_bytes,file.source_size_bytes)
 		from creator_claim_attachments attachment
 		join creator_claims claim on claim.id=attachment.claim_id
 		join oss_files file on file.id=attachment.oss_file_id
-		where claim.public_id=$1 and `+safeReviewAttachmentPredicate+`
-		order by attachment.display_order,file.id`, claimPublicID)
+		where claim.public_id=any($1::text[]) and `+safeReviewAttachmentPredicate+`
+		order by claim.id,attachment.display_order,file.id`, claimPublicIDs)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]creatorClaimAttachment, 0)
 	for rows.Next() {
+		var claimID string
 		var item creatorClaimAttachment
-		if err = rows.Scan(&item.ID, &item.Name, &item.SizeBytes); err != nil {
+		if err = rows.Scan(&claimID, &item.ID, &item.Name, &item.SizeBytes); err != nil {
 			return nil, err
 		}
-		items = append(items, item)
+		items[claimID] = append(items[claimID], item)
 	}
 	return items, rows.Err()
 }

@@ -222,6 +222,11 @@ func (s *Server) updateLevelConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		users = append(users, item)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		writeError(w, http.StatusInternalServerError, "failed to load user experience")
+		return
+	}
 	rows.Close()
 	for _, user := range users {
 		level := progression.LevelForExperience(user.experience, payload.LevelThresholds)
@@ -268,6 +273,10 @@ func (s *Server) adminTasks(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(conditionRaw, &item.Condition)
 		_ = json.Unmarshal(rewardsRaw, &item.Rewards)
 		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load tasks")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -431,6 +440,10 @@ func (s *Server) adminActivityEvents(w http.ResponseWriter, r *http.Request) {
 			"occurredAt": occurredAt,
 		})
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load activity events")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "limit": limit, "offset": offset})
 }
 
@@ -459,6 +472,9 @@ func validateTaskCondition(condition map[string]any) error {
 }
 
 func (s *Server) validateTaskRewards(r *http.Request, rewards map[string]any) error {
+	if rewards == nil {
+		return errors.New("task must provide at least one reward")
+	}
 	experience := int64Value(rewards["experience"])
 	if experience < 0 {
 		return errors.New("task experience reward cannot be negative")

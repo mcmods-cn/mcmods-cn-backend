@@ -284,6 +284,10 @@ func (s *Server) loadUserPrivateStatistics(r *http.Request, userID int64, statis
 		}
 		dates = append(dates, value)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
 	response.CurrentActiveStreak, response.LongestActiveStreak = activeStreaks(dates, time.Now().UTC())
 	editReviews := &userEditReviewStatistics{}
@@ -354,8 +358,10 @@ func (s *Server) queryUserActivityStatistics(r *http.Request, userID int64, star
 	result.MarkdownChangedBytes = result.MarkdownAddedBytes + result.MarkdownDeletedBytes
 	result.MarkdownNetBytes = result.MarkdownAddedBytes - result.MarkdownDeletedBytes
 	if startDate == nil {
-		_ = s.db.QueryRow(r.Context(), `select last_edit_at,last_comment_at from user_statistics_totals where user_id=$1`, userID).
-			Scan(&result.LastEditAt, &result.LastCommentAt)
+		if err = s.db.QueryRow(r.Context(), `select last_edit_at,last_comment_at from user_statistics_totals where user_id=$1`, userID).
+			Scan(&result.LastEditAt, &result.LastCommentAt); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return result, err
+		}
 	}
 	return result, nil
 }

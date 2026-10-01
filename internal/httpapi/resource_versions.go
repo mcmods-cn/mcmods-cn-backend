@@ -36,11 +36,11 @@ func (s *Server) decorateResourceVersionRows(ctx context.Context, items []map[st
 		from game_resources resource
 		join catalog_entities entity on entity.id=resource.entity_id
 		join mod_resource_bindings binding on binding.resource_id=resource.entity_id
-		join mods mod on mod.id=binding.mod_id
+		join mods mod on mod.id=binding.mod_id and mod.review_status='approved'
 		join mod_content_versions version on version.mod_id=binding.mod_id and version.status='active'
 		left join lateral (select imported.revision_id,imported.registry,imported.icon_path,imported.preview_path,imported.names
 		 from resource_import_snapshots imported join catalog_import_revisions revision on revision.id=imported.revision_id
-		 where imported.resource_id=resource.entity_id and revision.target_version_id=version.id and revision.is_active
+		 where imported.resource_id=resource.entity_id and revision.target_version_id=version.id and revision.is_active and revision.status in ('ready','partial')
 		 order by (imported.icon_path<>'') desc,revision.created_at desc limit 1) snapshot on true
 		left join mod_resource_version_details version_detail on version_detail.resource_id=resource.entity_id and version_detail.version_id=version.id and version_detail.status='active'
 		left join oss_files icon_file on icon_file.id=version_detail.icon_file_id and icon_file.status='active'

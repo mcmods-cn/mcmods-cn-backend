@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,9 +52,9 @@ func (worker *SeedCrawlerWorker) run(ctx context.Context) {
 }
 
 func (worker *SeedCrawlerWorker) schedule(ctx context.Context) {
-	_, _ = worker.server.db.Exec(ctx, `update seed_crawler_runs set status='pending',lease_owner='',lease_expires_at=null,
-		next_attempt_at=now(),last_error=case when last_error='' then 'worker lease expired' else last_error end
-		where status='running' and lease_expires_at<now()`)
+	if recoverExpiredSeedCrawlerRuns(ctx, worker.server.db) != nil {
+		return
+	}
 	worker.scheduleDueRun(ctx)
 	for count := 0; count < 4; count++ {
 		processed, err := worker.processOne(ctx)
@@ -113,27 +114,47 @@ func (worker *SeedCrawlerWorker) processOne(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('mcmods.seed_crawler.claim'))`); err != nil {
+		return false, err
+	}
+	var concurrency, running int
+	if err = tx.QueryRow(ctx, `select max_concurrency from seed_crawler_configs where id`).Scan(&concurrency); err != nil {
+		return false, err
+	}
+	if err = tx.QueryRow(ctx, `select count(*) from seed_crawler_runs where status='running' and lease_expires_at>clock_timestamp()`).Scan(&running); err != nil {
+		return false, err
+	}
+	if running >= max(1, min(concurrency, 16)) {
+		return false, nil
+	}
 	var runID int64
 	var dryRun bool
 	err = tx.QueryRow(ctx, `select id,dry_run from seed_crawler_runs
-		where status='pending' and next_attempt_at<=now() order by created_at,id for update skip locked limit 1`).Scan(&runID, &dryRun)
+		where status='pending' and stats->>'kind' is distinct from 'translation_recovery' and next_attempt_at<=now() order by created_at,id for update skip locked limit 1`).Scan(&runID, &dryRun)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	if _, err = tx.Exec(ctx, `update seed_crawler_runs set status='running',lease_owner=$2,lease_expires_at=now()+interval '5 minutes',attempts=attempts+1,started_at=coalesce(started_at,now()) where id=$1`, runID, "seed-worker"); err != nil {
+	var tokenBytes [24]byte
+	if _, err = cryptorand.Read(tokenBytes[:]); err != nil {
+		return false, err
+	}
+	token := hex.EncodeToString(tokenBytes[:])
+	if _, err = tx.Exec(ctx, `update seed_crawler_runs set status='running',lease_owner=$2,lease_expires_at=now()+interval '5 minutes',attempts=attempts+1,started_at=coalesce(started_at,now()) where id=$1`, runID, token); err != nil {
 		return false, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return false, err
 	}
+	ctx, stopLease := maintainSeedCrawlerLease(ctx, worker.server.db, runID, token)
+	defer stopLease()
 	actor, actorErr := worker.server.automationActor(ctx)
 	if actorErr != nil {
 		return true, worker.failRun(ctx, runID, actorErr)
 	}
-	if _, actorErr = worker.server.db.Exec(ctx, `update seed_crawler_runs set actor_id=$2 where id=$1`, runID, actor.Subject); actorErr != nil {
+	if _, actorErr = worker.server.db.Exec(ctx, `update seed_crawler_runs set actor_id=$2 where id=$1 and status='running' and lease_owner=$3 and lease_expires_at>clock_timestamp()`, runID, actor.Subject, token); actorErr != nil {
 		return true, worker.failRun(ctx, runID, actorErr)
 	}
 	stats, runErr := worker.executeRun(ctx, runID, actor, dryRun)
@@ -146,6 +167,9 @@ func (worker *SeedCrawlerWorker) processOne(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockSeedCrawlerLeaseTx(ctx, tx); err != nil {
+		return true, err
+	}
 	if _, err = tx.Exec(ctx, `update seed_crawler_runs set status='completed',stats=$2::jsonb,last_error='',lease_owner='',lease_expires_at=null,finished_at=now() where id=$1`, runID, statsRaw); err != nil {
 		return true, err
 	}
@@ -164,7 +188,7 @@ func (worker *SeedCrawlerWorker) failRun(ctx context.Context, runID int64, err e
 func (worker *SeedCrawlerWorker) failRunWithStats(ctx context.Context, runID int64, runErr error, stats []byte) error {
 	_, err := worker.server.db.Exec(ctx, `update seed_crawler_runs set status=case when attempts>=5 then 'failed' else 'pending' end,
 		stats=$2::jsonb,last_error=$3,lease_owner='',lease_expires_at=null,next_attempt_at=now()+make_interval(secs=>least(3600,(30*power(2,least(attempts,6)))::integer)),
-		finished_at=case when attempts>=5 then now() else null end where id=$1`, runID, stats, truncateRunes(runErr.Error(), 2000))
+		finished_at=case when attempts>=5 then now() else null end where id=$1 and status='running' and lease_owner=$4 and lease_expires_at>clock_timestamp()`, runID, stats, truncateRunes(runErr.Error(), 2000), seedCrawlerLeaseToken(ctx))
 	return err
 }
 
@@ -176,7 +200,9 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, ac
 		return nil, err
 	}
 	var importedToday int
-	_ = worker.server.db.QueryRow(ctx, `select count(*) from seed_crawler_candidates where status in ('draft','submitted') and updated_at>=current_date`).Scan(&importedToday)
+	if err = worker.server.db.QueryRow(ctx, `select count(*) from seed_crawler_candidates where status in ('draft','submitted') and updated_at>=date_trunc('day',now() at time zone 'UTC') at time zone 'UTC'`).Scan(&importedToday); err != nil {
+		return nil, err
+	}
 	remaining := max(0, cfg.DailyLimit-importedToday)
 	stats := map[string]int{"discovered": 0, "eligible": 0, "duplicates": 0, "drafts": 0, "submitted": 0, "failed": 0}
 	if remaining == 0 {
@@ -208,17 +234,14 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, ac
 				continue
 			}
 			stats["eligible"]++
-			payload, _ := json.Marshal(hit)
-			var candidateID int64
-			var currentStatus string
-			err = worker.server.db.QueryRow(ctx, `insert into seed_crawler_candidates(run_id,external_project_id,project_type,downloads,payload)
-				values($1,$2,$3,$4,$5::jsonb) on conflict(external_project_id) do update set downloads=excluded.downloads,payload=excluded.payload,updated_at=now()
-				returning id,status`, runID, hit.ProjectID, projectType, hit.Downloads, payload).Scan(&candidateID, &currentStatus)
-			if err != nil {
-				stats["failed"]++
-				continue
+			candidateID, claimStatus, claimErr := worker.claimSeedCandidate(ctx, runID, projectType, hit, dryRun)
+			if claimErr != nil {
+				return stats, claimErr
 			}
-			if currentStatus == "draft" || currentStatus == "submitted" || currentStatus == "existing" {
+			if claimStatus == "limit" {
+				return stats, nil
+			}
+			if claimStatus == "duplicate" {
 				stats["duplicates"]++
 				continue
 			}
@@ -228,7 +251,7 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, ac
 			status, processErr := worker.createSeedDraft(ctx, candidateID, actor, projectType, hit, cfg)
 			if processErr != nil {
 				stats["failed"]++
-				_, _ = worker.server.db.Exec(ctx, `update seed_crawler_candidates set status='failed',last_error=$2,updated_at=now() where id=$1`, candidateID, truncateRunes(processErr.Error(), 2000))
+				_, _ = worker.execSeedWrite(ctx, `update seed_crawler_candidates set status=case when status='processing' then 'failed' else status end,last_error=$2,updated_at=now() where id=$1`, candidateID, truncateRunes(processErr.Error(), 2000))
 				continue
 			}
 			stats[status]++
@@ -325,18 +348,33 @@ func seedModrinthURL(projectType, slug string) string {
 func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateID int64, actor security.Claims, projectType string, hit seedModrinthHit, cfg seedCrawlerRuntimeConfig) (string, error) {
 	var exists bool
 	if projectType == "mod" {
-		_ = worker.server.db.QueryRow(ctx, `select exists(select 1 from mods where modrinth_project_id=$1)`, hit.ProjectID).Scan(&exists)
+		if err := worker.server.db.QueryRow(ctx, `select exists(select 1 from mods where modrinth_project_id=$1)`, hit.ProjectID).Scan(&exists); err != nil {
+			return "", err
+		}
 	} else {
-		_ = worker.server.db.QueryRow(ctx, `select exists(select 1 from simple_projects where project_type=$1 and modrinth_project_id=$2)`, projectType, hit.ProjectID).Scan(&exists)
+		if err := worker.server.db.QueryRow(ctx, `select exists(select 1 from simple_projects where project_type=$1 and modrinth_project_id=$2)`, projectType, hit.ProjectID).Scan(&exists); err != nil {
+			return "", err
+		}
 	}
 	if exists {
-		_, _ = worker.server.db.Exec(ctx, `update seed_crawler_candidates set status='existing',last_error='',updated_at=now() where id=$1`, candidateID)
-		return "duplicates", nil
+		_, err := worker.execSeedWrite(ctx, `update seed_crawler_candidates set status='existing',last_error='',updated_at=now() where id=$1`, candidateID)
+		return "duplicates", err
 	}
 	var jobID string
 	sourceURL := seedModrinthURL(projectType, hit.Slug)
-	err := worker.server.db.QueryRow(ctx, `insert into mod_metadata_import_jobs(user_id,project_type,provider,source_url,status,progress)
+	jobTx, err := worker.server.db.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer jobTx.Rollback(ctx)
+	if err = lockSeedCrawlerLeaseTx(ctx, jobTx); err != nil {
+		return "", err
+	}
+	err = jobTx.QueryRow(ctx, `insert into mod_metadata_import_jobs(user_id,project_type,provider,source_url,status,progress)
 		values($1,$2,'modrinth',$3,'queued',0) returning public_id`, actor.Subject, projectType, sourceURL).Scan(&jobID)
+	if err == nil {
+		err = jobTx.Commit(ctx)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -359,7 +397,9 @@ func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateI
 	}
 	payload["importOrigin"] = "seed_crawler_import"
 	payload["externalProjectId"] = hit.ProjectID
-	payload["seedTranslations"] = worker.translateSeedDraft(ctx, candidateID, result, cfg.AIDailyTokenBudget)
+	translations := worker.translateSeedDraft(ctx, candidateID, jobID, result, cfg.AIDailyTokenBudget)
+	applySeedDraftTranslations(payload, translations, projectType)
+	payload["seedTranslations"] = translations
 	finalPayload, _ := json.Marshal(payload)
 	editURL := "/" + strings.ReplaceAll(projectType, "_pack", "s") + "/new"
 	if projectType == "mod" {
@@ -372,89 +412,40 @@ func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateI
 		editURL = "/resource-packs/new"
 	}
 	var draftID string
-	err = worker.server.db.QueryRow(ctx, `insert into user_drafts(user_id,draft_key,project_key,project_title,kind,title,edit_url,payload,expires_at)
+	draftTx, err := worker.server.db.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer draftTx.Rollback(ctx)
+	if err = lockSeedCrawlerLeaseTx(ctx, draftTx); err != nil {
+		return "", err
+	}
+	err = draftTx.QueryRow(ctx, `insert into user_drafts(user_id,draft_key,project_key,project_title,kind,title,edit_url,payload,expires_at)
 		values($1,$2,$3,$4,'seed_crawler_import',$4,$5,$6::jsonb,now()+interval '3 years')
 		on conflict(user_id,draft_key) where submitted_at is null do update set payload=excluded.payload,project_title=excluded.project_title,title=excluded.title,updated_at=now(),expires_at=excluded.expires_at returning public_id`,
 		actor.Subject, "seed-crawler:"+hit.ProjectID, projectType+":"+hit.ProjectID, hit.Title, editURL, finalPayload).Scan(&draftID)
+	if err == nil {
+		_, err = draftTx.Exec(ctx, `update seed_crawler_candidates set status='draft',payload=payload||jsonb_build_object('draftPublicId',$2::text),last_error='',updated_at=now() where id=$1`, candidateID, draftID)
+	}
+	if err == nil {
+		err = draftTx.Commit(ctx)
+	}
 	if err != nil {
 		return "", err
 	}
 	nextStatus := "draft"
 	if cfg.AutoSubmitReview {
-		submittedStatus, submitErr := worker.submitSeedDraft(ctx, actor, projectType, hit.ProjectID, sourceURL, result)
+		submittedStatus, submitErr := worker.submitSeedDraft(ctx, actor, projectType, hit.ProjectID, sourceURL, seedSubmissionPayload(payload))
 		if submitErr != nil {
 			return "", submitErr
 		}
 		nextStatus = "submitted"
-		_, _ = worker.server.db.Exec(ctx, `update user_drafts set submitted_status=$2,submitted_at=now(),updated_at=now() where public_id=$1`, draftID, submittedStatus)
+		if _, err = worker.execSeedWrite(ctx, `update user_drafts set submitted_status=$2,submitted_at=now(),updated_at=now() where public_id=$1`, draftID, submittedStatus); err != nil {
+			return "", err
+		}
 	}
-	_, err = worker.server.db.Exec(ctx, `update seed_crawler_candidates set status=$2,last_error='',updated_at=now() where id=$1`, candidateID, nextStatus)
+	_, err = worker.execSeedWrite(ctx, `update seed_crawler_candidates set status=$2,last_error='',updated_at=now() where id=$1`, candidateID, nextStatus)
 	return nextStatus, err
-}
-
-func (worker *SeedCrawlerWorker) translateSeedDraft(ctx context.Context, candidateID int64, raw []byte, budget int64) map[string]any {
-	translations := map[string]any{"en-US": map[string]any{"source": true}}
-	locales := make([]string, 0, len(supportedEditableContentLocales)-1)
-	for _, locale := range supportedContentLocaleList() {
-		if locale != "en-US" {
-			locales = append(locales, locale)
-		}
-	}
-	var used int64
-	_ = worker.server.db.QueryRow(ctx, `select coalesce(sum(input_tokens+output_tokens),0) from seed_crawler_translation_tasks where updated_at>=current_date`).Scan(&used)
-	if budget <= 0 || used >= budget {
-		return translations
-	}
-	var source map[string]any
-	_ = json.Unmarshal(raw, &source)
-	items := []map[string]string{}
-	for _, key := range []string{"primaryName", "summary", "bodyMarkdown"} {
-		if text, ok := source[key].(string); ok && strings.TrimSpace(text) != "" {
-			items = append(items, map[string]string{"key": key, "text": text})
-		}
-	}
-	if len(items) == 0 {
-		if localizations, ok := source["localizations"].([]any); ok && len(localizations) > 0 {
-			if first, ok := localizations[0].(map[string]any); ok {
-				for _, key := range []string{"name", "summary", "bodyMarkdown"} {
-					if text, ok := first[key].(string); ok && strings.TrimSpace(text) != "" {
-						items = append(items, map[string]string{"key": key, "text": text})
-					}
-				}
-			}
-		}
-	}
-	if len(items) == 0 {
-		return translations
-	}
-	aiCfg := aiConfigFromDatabase(ctx, worker.server.db, worker.server.cfg.SettingsEncryptionKey)
-	binding, ok := findAITaskModel(aiCfg.TaskModels, aiTaskContentTranslation)
-	if !ok || strings.TrimSpace(binding.ModelKey) == "" {
-		return translations
-	}
-	providerCode, modelID, ok := strings.Cut(binding.ModelKey, "/")
-	if !ok {
-		return translations
-	}
-	aiWorker := NewAIWorker(worker.server.db, nil, worker.server.cfg.SettingsEncryptionKey)
-	for _, locale := range locales {
-		if used >= budget {
-			break
-		}
-		_, _ = worker.server.db.Exec(ctx, `insert into seed_crawler_translation_tasks(candidate_id,locale,status) values($1,$2,'running')
-			on conflict(candidate_id,locale) do update set status='running',attempts=seed_crawler_translation_tasks.attempts+1,updated_at=now()`, candidateID, locale)
-		payload, _ := json.Marshal(map[string]any{"sourceLocale": "en-US", "targetLocale": locale, "items": items})
-		result, usage, err := aiWorker.executeTask(ctx, aiTaskContentTranslation, providerCode, modelID, payload)
-		if err != nil {
-			_, _ = worker.server.db.Exec(ctx, `update seed_crawler_translation_tasks set status='failed',last_error=$3,updated_at=now() where candidate_id=$1 and locale=$2`, candidateID, locale, truncateRunes(err.Error(), 1000))
-			continue
-		}
-		translated := translationItemsToMap(result)
-		translations[locale] = translated
-		used += usage.InputTokens + usage.OutputTokens
-		_, _ = worker.server.db.Exec(ctx, `update seed_crawler_translation_tasks set status='completed',input_tokens=$3,output_tokens=$4,last_error='',updated_at=now() where candidate_id=$1 and locale=$2`, candidateID, locale, usage.InputTokens, usage.OutputTokens)
-	}
-	return translations
 }
 
 func (worker *SeedCrawlerWorker) submitSeedDraft(ctx context.Context, actor security.Claims, projectType, externalProjectID, externalURL string, raw []byte) (string, error) {
@@ -493,21 +484,82 @@ func (worker *SeedCrawlerWorker) submitSeedDraft(ctx context.Context, actor secu
 			join public_routes route on route.entity_type='mod' and route.internal_id=project.id
 			where project.modrinth_project_id=$1`, externalProjectID).Scan(&routeID, &publicID)
 		if err == nil {
-			_, _ = worker.server.db.Exec(ctx, `insert into project_external_sources(project_route_id,source_type,external_project_id,external_project_url,verified_at,verified_by)
+			_, err = worker.execSeedWrite(ctx, `insert into project_external_sources(project_route_id,source_type,external_project_id,external_project_url,verified_at,verified_by)
 				values($1,'modrinth',$2,$3,now(),$4) on conflict(project_route_id,source_type) do update set
 				external_project_id=excluded.external_project_id,external_project_url=excluded.external_project_url,verified_at=now(),verified_by=excluded.verified_by`,
 				routeID, externalProjectID, externalURL, actor.Subject)
+		}
+		if err != nil {
+			return "", err
 		}
 	} else {
 		err := worker.server.db.QueryRow(ctx, `select route.id,route.public_id from simple_projects project
 			join public_routes route on route.entity_type=project.project_type and route.internal_id=project.id
 			where project.project_type=$1 and project.modrinth_project_id=$2`, projectType, externalProjectID).Scan(&routeID, &publicID)
 		if err == nil {
-			_, _ = worker.server.db.Exec(ctx, `insert into project_external_sources(project_route_id,source_type,external_project_id,external_project_url,verified_at,verified_by)
+			_, err = worker.execSeedWrite(ctx, `insert into project_external_sources(project_route_id,source_type,external_project_id,external_project_url,verified_at,verified_by)
 				values($1,'modrinth',$2,$3,now(),$4) on conflict(project_route_id,source_type) do update set
 				external_project_id=excluded.external_project_id,external_project_url=excluded.external_project_url,verified_at=now(),verified_by=excluded.verified_by`,
 				routeID, externalProjectID, externalURL, actor.Subject)
 		}
+		if err != nil {
+			return "", err
+		}
 	}
 	return created.Data.ReviewStatus, nil
+}
+
+// Reserve a candidate and its daily slot together. Finished candidates retain
+// their original day; another run cannot replace a live candidate's ownership.
+func (worker *SeedCrawlerWorker) claimSeedCandidate(ctx context.Context, runID int64, projectType string, hit seedModrinthHit, dryRun bool) (int64, string, error) {
+	lease, ok := ctx.Value(seedCrawlerLeaseContextKey{}).(seedCrawlerLeaseIdentity)
+	if !ok || lease.RunID != runID {
+		return 0, "", errSeedCrawlerLeaseLost
+	}
+	tx, err := worker.server.db.Begin(ctx)
+	if err != nil {
+		return 0, "", err
+	}
+	defer tx.Rollback(ctx)
+	if err = lockSeedCrawlerLeaseTx(ctx, tx); err != nil {
+		return 0, "", err
+	}
+	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('mcmods.seed_crawler.candidate_day'))`); err != nil {
+		return 0, "", err
+	}
+	payload, err := json.Marshal(hit)
+	if err != nil {
+		return 0, "", err
+	}
+	if _, err = tx.Exec(ctx, `insert into seed_crawler_candidates(run_id,external_project_id,project_type,downloads,payload) values($1,$2,$3,$4,$5::jsonb) on conflict(external_project_id) do nothing`, runID, hit.ProjectID, projectType, hit.Downloads, payload); err != nil {
+		return 0, "", err
+	}
+	var id int64
+	var status string
+	var busy bool
+	if err = tx.QueryRow(ctx, `select c.id,c.status,exists(select 1 from seed_crawler_runs r where r.id=c.run_id and r.status='running' and r.lease_expires_at>clock_timestamp()) from seed_crawler_candidates c where external_project_id=$1 for update`, hit.ProjectID).Scan(&id, &status, &busy); err != nil {
+		return 0, "", err
+	}
+	if status == "draft" || status == "submitted" || status == "existing" || (status == "processing" && busy) {
+		return id, "duplicate", tx.Commit(ctx)
+	}
+	if !dryRun {
+		var dailyLimit, consumed int
+		if err = tx.QueryRow(ctx, `select daily_limit from seed_crawler_configs where id for share`).Scan(&dailyLimit); err != nil {
+			return 0, "", err
+		}
+		if err = tx.QueryRow(ctx, `select count(*) from seed_crawler_candidates c where c.updated_at>=date_trunc('day',clock_timestamp() at time zone 'UTC') at time zone 'UTC' and (c.status in ('draft','submitted') or (c.status='processing' and exists(select 1 from seed_crawler_runs r where r.id=c.run_id and r.status='running' and r.lease_expires_at>clock_timestamp())))`).Scan(&consumed); err != nil {
+			return 0, "", err
+		}
+		if consumed >= dailyLimit {
+			return id, "limit", tx.Commit(ctx)
+		}
+		status = "processing"
+	} else {
+		status = "candidate"
+	}
+	if _, err = tx.Exec(ctx, `update seed_crawler_candidates set run_id=$2,status=$3,project_type=$4,downloads=$5,payload=$6::jsonb,last_error='',updated_at=now() where id=$1`, id, runID, status, projectType, hit.Downloads, payload); err != nil {
+		return 0, "", err
+	}
+	return id, "claimed", tx.Commit(ctx)
 }

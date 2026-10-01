@@ -59,7 +59,8 @@ func (s *Server) modExportDataSummary(w http.ResponseWriter, r *http.Request) {
 		 from catalog_import_revisions r
 		 join mod_content_versions version on version.id=r.target_version_id
 		 left join catalog_import_revision_stats stats on stats.revision_id=r.id
-		 where r.mod_id=$1 and r.is_active and version.status='active'
+		 where r.mod_id=$1 and r.is_active and r.status in ('ready','partial') and version.status='active'
+		 and exists(select 1 from mods where id=r.mod_id and review_status='approved')
 		 order by r.minecraft_version desc,r.loader,r.source_kind,r.source_namespace,r.revision_no desc`, identity.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read export revisions")
@@ -78,6 +79,10 @@ func (s *Server) modExportDataSummary(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(documentCounts, &item.DocumentCounts)
 		_ = json.Unmarshal(capabilities, &item.Capabilities)
 		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to finish export query")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -114,6 +119,10 @@ func (s *Server) modExportRegistry(w http.ResponseWriter, r *http.Request) {
 		item["names"] = jsonValue(names)
 		item["data"] = jsonValue(data)
 		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to finish registry query")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"registry": registry, "items": items})
 }
@@ -204,6 +213,10 @@ func (s *Server) modExportRegistryEntries(w http.ResponseWriter, r *http.Request
 			"entityId": publicID, "publicId": publicID, "id": objectID, "registry": registry, "namespace": namespace, "path": objectPath,
 			"translationKey": translationKey, "iconPath": iconPath, "previewPath": previewPath, "names": jsonValue(names), "data": jsonValue(data),
 		})
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to finish registry query")
+		return
 	}
 	if err = s.decorateExportTranslationNames(r.Context(), revisionID, locale, items); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve registry translations")
@@ -405,6 +418,10 @@ func (s *Server) modExportAssetIndex(w http.ResponseWriter, r *http.Request) {
 			}
 			items = append(items, assetPath)
 		}
+		if err = rows.Err(); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to finish export query")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 		return
 	}
@@ -428,6 +445,10 @@ func (s *Server) modExportAssetIndex(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		items = append(items, map[string]any{"path": assetPath, "kind": kind, "contentType": contentType, "sha256": hash, "byteLength": size, "media": media})
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to finish export query")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -495,6 +516,10 @@ func (s *Server) modExportStructures(w http.ResponseWriter, r *http.Request) {
 		item := map[string]any{"id": id, "structureId": structureID, "assetPath": assetPath, "sourceFormat": sourceFormat}
 		item["summary"] = jsonValue(summary)
 		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to finish export query")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -597,7 +622,7 @@ func (s *Server) canReadModExportRevision(w http.ResponseWriter, r *http.Request
 	var identity modIdentityRecord
 	var active bool
 	err := s.db.QueryRow(r.Context(), `select m.id,m.project_code,m.slug,m.submitted_by,
-		(e.is_active and version.status='active')
+		(e.is_active and e.status in ('ready','partial') and version.status='active' and m.review_status='approved')
 		from catalog_import_revisions e
 		join mods m on m.id=e.mod_id
 		join mod_content_versions version on version.id=e.target_version_id

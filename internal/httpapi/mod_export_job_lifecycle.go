@@ -35,7 +35,7 @@ func (s *Server) claimModExportJob(ctx context.Context, jobID string) (string, e
 }
 
 func (s *Server) startModExportHeartbeat(parent context.Context, jobID, runToken string) (context.Context, func()) {
-	ctx, cancel := context.WithCancelCause(parent)
+	ctx, cancel := context.WithCancelCause(withModExportLease(parent, jobID, runToken))
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -47,7 +47,7 @@ func (s *Server) startModExportHeartbeat(parent context.Context, jobID, runToken
 				return
 			case <-ticker.C:
 				tag, err := s.db.Exec(ctx, `update catalog_import_jobs set heartbeat_at=now(),updated_at=now() where id=$1 and run_token=$2 and status in ('validating','importing')`, jobID, runToken)
-				if err == nil && tag.RowsAffected() == 0 {
+				if err != nil || tag.RowsAffected() == 0 {
 					cancel(errModExportLeaseLost)
 					return
 				}
@@ -132,19 +132,12 @@ func (s *Server) resetModExportJobForRetry(ctx context.Context, jobID string, mo
 }
 
 func (s *Server) dispatchModExportJob(ctx context.Context, jobID string) {
-	if s.cfg.NATS.OutboxEnabled {
+	if ctx.Err() != nil {
 		return
 	}
-	message := modExportJobMessage{JobID: jobID}
-	if s.queue != nil && s.queue.PublishTask(ctx, modExportTaskCode, message) == nil {
-		_, _ = s.db.Exec(ctx, `update nats_outbox set published_at=now() where aggregate_type='mod_export_job' and aggregate_id=$1 and published_at is null`, jobID)
-		return
-	}
-	jobContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Hour)
-	go func() {
-		defer cancel()
-		_ = s.importModExportJob(jobContext, jobID)
-	}()
+	// The HTTP response ending must not abort a committed job. Worker scan
+	// calls use the process context directly so shutdown still cancels work.
+	s.dispatchModExportJobContext(context.WithoutCancel(ctx), jobID)
 }
 
 func (s *Server) runModExportTransaction(ctx context.Context, action func(pgx.Tx) error) error {
@@ -153,8 +146,16 @@ func (s *Server) runModExportTransaction(ctx context.Context, action func(pgx.Tx
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockModExportLeaseTx(ctx, tx); err != nil {
+		return err
+	}
 	if err = action(tx); err != nil {
 		return err
+	}
+	if lease, ok := ctx.Value(modExportLeaseContextKey{}).(modExportLeaseIdentity); ok {
+		if _, err = tx.Exec(ctx, `update catalog_import_jobs set heartbeat_at=clock_timestamp(),updated_at=clock_timestamp() where id=$1 and run_token=$2 and status in ('validating','importing')`, lease.JobID, lease.Token); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -169,4 +170,28 @@ func (s *Server) cleanupModExportStaging(ctx context.Context, packageID string, 
 
 func pgInterval(value time.Duration) string {
 	return fmt.Sprintf("%f seconds", value.Seconds())
+}
+
+type modExportLeaseContextKey struct{}
+type modExportLeaseIdentity struct{ JobID, Token string }
+
+func withModExportLease(ctx context.Context, jobID, token string) context.Context {
+	return context.WithValue(ctx, modExportLeaseContextKey{}, modExportLeaseIdentity{jobID, token})
+}
+func lockModExportLeaseTx(ctx context.Context, tx pgx.Tx) error {
+	lease, ok := ctx.Value(modExportLeaseContextKey{}).(modExportLeaseIdentity)
+	if !ok {
+		return nil
+	}
+	var id string
+	err := tx.QueryRow(ctx, `select id from catalog_import_jobs where id=$1 and run_token=$2 and status in ('validating','importing')
+ and coalesce(heartbeat_at,updated_at)>clock_timestamp()-interval '5 minutes' for update`, lease.JobID, lease.Token).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errModExportLeaseLost
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `update catalog_import_jobs set heartbeat_at=clock_timestamp(),updated_at=clock_timestamp() where id=$1 and run_token=$2`, lease.JobID, lease.Token)
+	return err
 }

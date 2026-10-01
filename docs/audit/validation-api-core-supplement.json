@@ -1,0 +1,153 @@
+{
+  "repository": "mcmods-cn-backend",
+  "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+  "at_utc": "2026-10-01T17:38:29.734184+00:00",
+  "environment": {
+    "go": "1.26.8",
+    "database": "owned loopback PostgreSQL17; random full migrated DB ownership marker; no production",
+    "HTTP": "deterministic local httptest; no paid calls"
+  },
+  "setup": [
+    "export PATH=/tmp/mcmods-audit-tools/go1.26.8/go/bin:$PATH GOTOOLCHAIN=local",
+    "export MCMODS_TEST_STATE=/tmp/mcmods-test-services.1DXHiJMk",
+    "source \"$MCMODS_TEST_STATE/env.sh\" (never print contents)"
+  ],
+  "records": [
+    {
+      "command": "go test ./internal/httpapi -run TestSaveTaskMissingRewardsReturnsBadRequestCore -count=1",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": "/tmp/backend-progression-core-final.log",
+      "assertions": "missing/null400; no DB write"
+    },
+    {
+      "command": "go test -race ./internal/httpapi -run 'Test(CreatorClaimProofBoundaries|ProjectEditorPagination|CreatorOwnedAttachmentProof|EditorPermissionLifecycleAndNotificationLocale|CreatorClaimPagination|EditorAuditFailureRollsBack|ClaimAuditFailureRollsBack|EditorRevokeAuditFailureRollsBack)CoreIntegration' -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "groups": 8,
+      "leaf_scenarios": 13,
+      "duration_seconds": 55.291,
+      "log": "/tmp/backend-applications-core-final-race.log",
+      "earlier_nonrace_evidence": "/tmp/backend-applications-core-final.log (16.963s, same 8 groups/13 scenarios)"
+    },
+    {
+      "command": "go test -race ./internal/httpapi -run \"TestProjectAutomation(LeaseFencingAndRecoveryCoreIntegration|HeartbeatParentCancellationCore)\" -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "tests": 2,
+      "duration_seconds": 3.174,
+      "log": "/tmp/backend-automation-lease-core-final.log"
+    },
+    {
+      "command": "go test -race ./internal/httpapi -run \"TestAI(TaskTransportFailureDoesNotAutomaticallyPayAgain|InvalidBatchPreservesExistingTranslations|DisabledModelBeforeDeliveryNeverCallsProvider)CoreIntegration\" -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "groups": 3,
+      "leaf_scenarios": 9,
+      "duration_seconds": 14.342,
+      "log": "/tmp/backend-ai-failure-core-final.log"
+    },
+    {
+      "command": "go test -race ./internal/httpapi -run \"Test(ServerReviewAssociationsWithSingleConnectionCoreIntegration|PrivateFavoriteCannotRevealOtherPendingModCoreIntegration|SaveTaskMissingRewardsReturnsBadRequestCore)\" -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "groups": 3,
+      "leaf_scenarios": 4,
+      "duration_seconds": 3.45,
+      "log": "/tmp/backend-server-favorite-progression-core-final.log"
+    },
+    {
+      "command": "git diff --check",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "real paid AI provider connectivity/semantics/account billing",
+      "status": "NOT_RUN",
+      "reason": "No authorized dedicated credentials/data/fee cap; mocks prove pipeline only"
+    },
+    {
+      "command": "production database health/production migrations",
+      "status": "NOT_RUN",
+      "reason": "Outside authorized scope; no runtime health evidence"
+    },
+    {
+      "command": "go test -race ./internal/httpapi -run '^TestProgressionListsRejectPostgreSQLStreamFailureCoreIntegration$' -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "groups": 1,
+      "leaf_scenarios": 2,
+      "duration_seconds": 11.315,
+      "log": "/tmp/backend-progression-stream-core-green.log",
+      "environment_state": "/tmp/mcmods-test-services.SoWZrtAU/env.sh; root confirmed four-service fresh readiness; no secret printed",
+      "assertions": [
+        "healthy real tasks/activity tables200 with item",
+        "VOLATILE failure stream500 rather than empty200",
+        "no success items or SQL details on failure",
+        "all tables/constraints/triggers preserved in randomly marker-owned database; guarded whole-db cleanup"
+      ],
+      "boundary": "real handler and PostgreSQL/pgx stream; middleware permissions remain unchanged, full route/production E2E not claimed"
+    },
+    {
+      "command": "go test -race ./internal/httpapi -run '^TestLevelConfigurationExperienceStreamFailureRollsBackCoreIntegration$' -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "tests": 1,
+      "duration_seconds": 5.162,
+      "log": "/tmp/backend-progression-level-transaction-core-final.log",
+      "environment_state": "/tmp/mcmods-test-services.SoWZrtAU/env.sh; fresh owned loopback PostgreSQL",
+      "assertions": [
+        "probe Query succeeds; real PostgreSQL iteration Rows.Err follows",
+        "failed handler500 without SQL details",
+        "config track/thresholds/updater/timestamp unchanged after rollback",
+        "experience/level/timestamp, roles and permission_version unchanged",
+        "restore actual preserved table; same request200 persists config and recalculates level2/next role",
+        "ownership marker whole-database cleanup preserves original constraints/triggers"
+      ],
+      "boundary": "actual current transaction behavior; no old-red claim because old transaction also had Commit error defense; no production data/queries or source changes"
+    }
+  ],
+  "failures_and_corrections": [
+    {
+      "status": "FAIL",
+      "log": "/tmp/backend-applications-core-red.log",
+      "reason": "old MaxConns1 nested query deadlock; first fixture wrong created_by/submitted_by column corrected separately"
+    },
+    {
+      "status": "FAIL",
+      "log": "/tmp/backend-applications-proof-core-red.log",
+      "reason": "old valid creator proof500; separately reproduced PostgreSQL42P08 ambiguous parameter; fixed insert always pending"
+    },
+    {
+      "status": "FAIL",
+      "log": "/tmp/backend-creator-audit-core-red.log",
+      "reason": "old creator approval200 despite actual audit rejection; new500+rollback"
+    },
+    {
+      "status": "FAIL",
+      "log": "/tmp/backend-ai-failure-core-fixture-fail.log",
+      "reason": "HTTP test fixture had not consumed request body so server cancellation observation failed; fixed fixture IO, actual task errors already returned"
+    },
+    {
+      "status": "FAIL",
+      "log": "/tmp/backend-server-review-pool-core-red.log",
+      "reason": "old real PG single connection nested association query500/deadline"
+    },
+    {
+      "status": "BLOCKED",
+      "log": "/tmp/backend-server-favorite-progression-core-intermediate-build-fail.log",
+      "reason": "other concurrently edited new resume test temporary signature compile mismatch; owner fixed and final command rerun PASS"
+    }
+  ],
+  "cleanup": "All new audit-generating fixtures use whole marker-owned DB cleanup with original immutable audit/FKs. Early shared-task synthetic audit actor retained per root for final owned-cluster cleanup; never bypass audit triggers or production delete.",
+  "earlier_failures": [
+    {
+      "command": "go test ./internal/httpapi -run '^TestProgressionListsRejectPostgreSQLStreamFailureCoreIntegration$' -count=1 -v",
+      "status": "FAIL",
+      "exit_code": 1,
+      "log": "/tmp/backend-progression-stream-core-red.log",
+      "reason": "two old raw loops returned200 empty items on real stream errors; healthy fixture reads passed first",
+      "duration_seconds": 3.137
+    }
+  ]
+}

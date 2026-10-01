@@ -260,6 +260,10 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		}
 		req.IconURL = mirroredIconURL
 	}
+	if err = lockSeedCrawlerLeaseTx(r.Context(), tx); err != nil {
+		writeError(w, http.StatusConflict, "seed crawler lease is no longer owned")
+		return
+	}
 	var modID int64
 	err = tx.QueryRow(
 		r.Context(),
@@ -604,12 +608,16 @@ func (s *Server) publicProjectIcon(w http.ResponseWriter, r *http.Request, proje
 	}
 	var iconURL string
 	err := s.db.QueryRow(r.Context(), query, siteID, currentClaims(r).Subject).Scan(&iconURL)
-	if errors.Is(err, pgx.ErrNoRows) || strings.TrimSpace(iconURL) == "" {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, projectKind+" icon does not exist")
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load "+projectKind+" icon")
+		return
+	}
+	if strings.TrimSpace(iconURL) == "" {
+		writeError(w, http.StatusNotFound, projectKind+" icon does not exist")
 		return
 	}
 	s.redirectStoredRasterURL(w, r, iconURL)

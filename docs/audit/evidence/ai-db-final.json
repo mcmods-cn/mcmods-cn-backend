@@ -1,0 +1,46 @@
+{
+  "repository": "mcmods-cn-backend",
+  "baseline": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+  "environment": {
+    "go": "1.26.8",
+    "postgresql": "17.11",
+    "database": "ownership-verified randomly created disposable databases",
+    "provider": "loopback deterministic httptest HTTP only; no paid calls"
+  },
+  "runs": [
+    {
+      "command": "go test -race ./internal/httpapi -run '^(TestSeedCompletedRunAdminRecoveryDraftCASIntegration|TestSeedCrawlerAITaskLedgerAndFencing|TestSeedCrawlerLegacyUsageIsPreservedBeforeProjectionReplacement|TestSeedCrawlerCandidateClaimSerializesDailySlots|TestAI.*|Test.*NotificationTemplate.*)$' -count=1 -v",
+      "result": "PASS",
+      "exit_code": 0,
+      "seconds": 43.65,
+      "top_level_tests": 30,
+      "passed_subcase_nodes": 60,
+      "log": "/tmp/mcmods-seed-recovery-final2-race.log"
+    },
+    {
+      "command": "go test -race ./internal/httpapi -run '^(TestSeedCompletedRunAdminRecoveryDraftCASIntegration|TestAIAdminConfigurationReadFailureDoesNotOverwriteIntegration)$' -count=1 -v",
+      "result": "PASS",
+      "exit_code": 0,
+      "seconds": 6.018,
+      "top_level_tests": 2,
+      "passed_subcase_nodes": 23,
+      "recovery_cases": 19,
+      "configuration_cases": 4,
+      "log": "/tmp/mcmods-seed-recovery-final3-race.log"
+    }
+  ],
+  "regression_red": {
+    "command": "go test ./internal/httpapi -run '^TestAIAdminConfigurationReadFailureDoesNotOverwriteIntegration$' -count=1 -v",
+    "result": "FAIL",
+    "exit_code": 1,
+    "seconds": 4.181,
+    "reason": "real valid actor reproduces unreadable envelope/JSON GET200 defaults and PUT200 overwrites; closed pool GET200 hides read failure",
+    "log": "/tmp/mcmods-ai-config-read-red-real-actor.log"
+  },
+  "not_verified": [
+    "actual paid provider/semantic translation quality/provider bill",
+    "production DB health/maintenance/backups/capacity",
+    "real Modrinth entire upstream import",
+    "long multiple-instance failure injection"
+  ]
+}

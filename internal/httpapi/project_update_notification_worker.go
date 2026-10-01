@@ -146,8 +146,12 @@ func (worker *ProjectUpdateNotificationWorker) process(ctx context.Context, even
 		}
 		recipients = append(recipients, value)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
-	config := loadNotificationTemplateConfig(ctx, worker.db)
+	config := loadNotificationTemplateConfig(ctx, tx)
 	sectionText := strings.Join(uniqueProjectUpdateSections(sections), ", ")
 	data, _ := json.Marshal(map[string]any{"url": projectURL, "projectUpdateEventId": eventID, "updateKind": updateKind, "changedSections": sections})
 	insertedRecipients := make([]int64, 0, len(recipients))
@@ -204,8 +208,8 @@ func (worker *ProjectUpdateNotificationWorker) retry(ctx context.Context, eventI
 		detail = detail[:1000]
 	}
 	_, _ = worker.db.Exec(ctx, `update project_update_notification_tasks set
-		status=case when attempt_count>=8 then 'failed' else 'pending' end,
-		next_attempt_at=now()+least(300,greatest(5,attempt_count*attempt_count*5))*interval '1 second',last_error=$2,updated_at=now()
+		status=case when attempt_count+1>=8 then 'failed' else 'pending' end,attempt_count=attempt_count+1,
+		next_attempt_at=now()+least(300,greatest(5,(attempt_count+1)*(attempt_count+1)*5))*interval '1 second',last_error=$2,updated_at=now()
 		where event_id=$1 and status<>'completed'`, eventID, detail)
 	log.Printf("project update notification task %d failed: %v", eventID, cause)
 }

@@ -62,7 +62,7 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 	registry := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("registry")))
 	objectID := strings.TrimSpace(r.URL.Query().Get("objectId"))
 	entityPublicID := strings.TrimSpace(r.URL.Query().Get("entityId"))
-	locale := normalizeExportContentLocale(r.URL.Query().Get("locale"))
+	requestedLocale := strings.TrimSpace(r.URL.Query().Get("locale"))
 	if !isExportRegistryName(registry) || (objectID == "" && entityPublicID == "") {
 		writeError(w, http.StatusBadRequest, "registry and entityId or objectId are required")
 		return
@@ -99,8 +99,8 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	recipeResourceID := resourceID
 	primary, secondary := s.requestContentLocales(r)
-	if requested := normalizeContentLocale(locale); requested != "" {
-		primary = requested
+	if requestedLocale != "" {
+		primary = normalizeExportContentLocale(requestedLocale)
 	}
 	if requested := normalizeContentLocale(r.URL.Query().Get("secondaryLocale")); requested != "" {
 		secondary = requested
@@ -176,13 +176,18 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	locale := primary
 	if response.ContentMarkdown == "" {
 		var pageLocale, pageMarkdown string
 		pageErr := s.db.QueryRow(r.Context(), `
 			select locale,content_markdown from knowledge_pages
 			where entity_id=$1 and locale=any($2::text[])
-			order by case locale when $3 then 0 when 'zh-CN' then 1 when 'zh-TW' then 2 when 'en-US' then 3 else 4 end limit 1`,
-			resourceID, []string{locale, "zh-CN", "zh-TW", "en-US"}, locale).Scan(&pageLocale, &pageMarkdown)
+			order by case locale when $3 then 0 when $4 then 1 when 'zh-CN' then 2 when 'zh-TW' then 3 when 'en-US' then 4 else 5 end limit 1`,
+			resourceID, []string{primary, secondary, "zh-CN", "zh-TW", "en-US"}, primary, secondary).Scan(&pageLocale, &pageMarkdown)
+		if pageErr != nil && !errors.Is(pageErr, pgx.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "failed to resolve entry content")
+			return
+		}
 		if pageErr == nil && pageMarkdown != "" {
 			response.ContentMarkdown = pageMarkdown
 			if response.ContentLocale == "" {
@@ -190,7 +195,7 @@ func (s *Server) modExportEntryDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	versionCarrier := map[string]any{"entityId": publicID, "versions": []map[string]any{}}
+	versionCarrier := map[string]any{"publicId": publicID, "versions": []map[string]any{}}
 	if err = s.decorateResourceVersionRows(r.Context(), []map[string]any{versionCarrier}, primary, secondary); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve entry versions")
 		return
@@ -331,14 +336,17 @@ func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID strin
 			bool_or(slot.role in ('input','catalyst')) uses,
 			row_number() over(partition by snapshot.recipe_id order by (snapshot.revision_id=$1) desc,
 			(revision.minecraft_version=preferred.minecraft_version) desc,
-			(revision.loader=preferred.loader) desc,coalesce(revision.activated_at,revision.created_at) desc) rank
+			(revision.loader=preferred.loader) desc,coalesce(revision.activated_at,revision.created_at) desc,binding.recipe_snapshot_id desc) rank
 		from recipe_import_binding_candidates alternative
 		join recipe_import_bindings binding on binding.id=alternative.binding_id
 		join recipe_template_import_slots slot on slot.id=binding.template_slot_id
 		join recipe_import_snapshots snapshot on snapshot.id=binding.recipe_snapshot_id
 		join catalog_import_revisions revision on revision.id=snapshot.revision_id
+		join mods source_mod on source_mod.id=revision.mod_id
+		join mod_content_versions source_version on source_version.id=revision.target_version_id
 		cross join preferred
-		where alternative.resource_id=$2 and binding.ingredient_present and (snapshot.revision_id=$1 or revision.is_active)
+		where alternative.resource_id=$2 and binding.ingredient_present and (snapshot.revision_id=$1 or (revision.is_active and revision.status in ('ready','partial')
+		 and source_version.status='active' and source_mod.review_status='approved'))
 		group by binding.recipe_snapshot_id,snapshot.recipe_id,snapshot.revision_id,
 			revision.minecraft_version,revision.loader,preferred.minecraft_version,preferred.loader,
 			revision.activated_at,revision.created_at

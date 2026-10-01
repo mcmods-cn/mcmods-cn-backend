@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -48,7 +49,9 @@ func (worker *ProjectAutomationWorker) Start(ctx context.Context) {
 }
 
 func (worker *ProjectAutomationWorker) run(ctx context.Context) {
-	worker.tick(ctx)
+	if err := worker.tick(ctx); err != nil && ctx.Err() == nil {
+		log.Printf("project automation tick failed: %v", err)
+	}
 	ticker := time.NewTicker(projectAutomationTick)
 	defer ticker.Stop()
 	for {
@@ -56,57 +59,79 @@ func (worker *ProjectAutomationWorker) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			worker.tick(ctx)
+			if err := worker.tick(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("project automation tick failed: %v", err)
+			}
 		}
 	}
 }
 
-func (worker *ProjectAutomationWorker) tick(ctx context.Context) {
-	_, _ = worker.server.db.Exec(ctx, `update project_auto_update_runs set status='pending',lease_owner='',lease_expires_at=null,
-		next_attempt_at=now(),last_error_code='lease_expired',last_error='worker lease expired'
-		where status='running' and lease_expires_at<now()`)
-	worker.scheduleDue(ctx)
-	worker.promoteCleanMirrors(ctx)
+func (worker *ProjectAutomationWorker) tick(ctx context.Context) error {
+	if err := recoverExpiredProjectAutomationRuns(ctx, worker.server.db); err != nil {
+		return err
+	}
+	if err := worker.scheduleDue(ctx); err != nil {
+		return err
+	}
+	if err := worker.promoteCleanMirrors(ctx); err != nil {
+		return err
+	}
 	for index := 0; index < 4; index++ {
 		processed, err := worker.processOne(ctx)
-		if err != nil || !processed {
-			return
+		if err != nil {
+			return err
+		}
+		if !processed {
+			return nil
 		}
 	}
+	return nil
 }
 
-func (worker *ProjectAutomationWorker) scheduleDue(ctx context.Context) {
+func (worker *ProjectAutomationWorker) scheduleDue(ctx context.Context) error {
 	tx, err := worker.server.db.Begin(ctx)
 	if err != nil {
-		return
+		return err
 	}
 	defer tx.Rollback(ctx)
 	var locked bool
-	if err = tx.QueryRow(ctx, `select pg_try_advisory_xact_lock(hashtext('mcmods.project_auto_update.schedule'))`).Scan(&locked); err != nil || !locked {
-		return
+	if err = tx.QueryRow(ctx, `select pg_try_advisory_xact_lock(hashtext('mcmods.project_auto_update.schedule'))`).Scan(&locked); err != nil {
+		return err
+	}
+	if !locked {
+		return nil
 	}
 	rows, err := tx.Query(ctx, `select id from project_auto_update_settings setting
 		where setting.enabled and setting.next_run_at<=now() and setting.source_type is not null
 		and not exists(select 1 from project_auto_update_runs run where run.setting_id=setting.id and run.status in ('pending','running'))
 		order by setting.next_run_at,setting.id for update skip locked limit 50`)
 	if err != nil {
-		return
+		return err
 	}
 	ids := make([]int64, 0, 50)
 	for rows.Next() {
 		var id int64
-		if rows.Scan(&id) == nil {
-			ids = append(ids, id)
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
 		}
+		ids = append(ids, id)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	rows.Close()
 	for _, id := range ids {
-		_, _ = tx.Exec(ctx, `insert into project_auto_update_runs(setting_id) values($1) on conflict do nothing`, id)
+		if _, err = tx.Exec(ctx, `insert into project_auto_update_runs(setting_id) values($1) on conflict do nothing`, id); err != nil {
+			return err
+		}
 	}
-	_ = tx.Commit(ctx)
+	return tx.Commit(ctx)
 }
 
 type projectAutomationJob struct {
+	LeaseToken      string
 	RunID           int64
 	SettingID       int64
 	RouteID         int64
@@ -137,7 +162,7 @@ func (worker *ProjectAutomationWorker) processOne(ctx context.Context) (bool, er
 		join project_auto_update_settings setting on setting.id=run.setting_id
 		join public_routes route on route.id=setting.project_route_id
 		join project_external_sources source on source.project_route_id=setting.project_route_id and source.source_type=setting.source_type
-		where run.status='pending' and run.next_attempt_at<=now()
+		where run.status='pending' and run.next_attempt_at<=now() and setting.enabled
 		order by run.created_at,run.id for update of run skip locked limit 1`).Scan(
 		&job.RunID, &job.SettingID, &job.RouteID, &job.InternalID, &job.ProjectType, &job.ProjectPublicID,
 		&job.Kind, &job.SourceType, &job.ExternalID, &job.Interval,
@@ -148,20 +173,23 @@ func (worker *ProjectAutomationWorker) processOne(ctx context.Context) (bool, er
 	if err != nil {
 		return false, err
 	}
-	if _, err = tx.Exec(ctx, `update project_auto_update_runs set status='running',lease_owner='project-auto-update',
-		lease_expires_at=now()+$2::interval,attempts=attempts+1,started_at=coalesce(started_at,now()) where id=$1`,
-		job.RunID, projectAutomationLease.String()); err != nil {
+	job.LeaseToken = randomHex(16)
+	if _, err = tx.Exec(ctx, `update project_auto_update_runs set status='running',lease_owner=$3,
+		lease_expires_at=clock_timestamp()+$2::interval,attempts=attempts+1,started_at=clock_timestamp() where id=$1`,
+		job.RunID, projectAutomationLease.String(), job.LeaseToken); err != nil {
 		return false, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return false, err
 	}
+	ctx, stopLease := maintainProjectAutomationLease(ctx, worker.server.db, job.RunID, job.LeaseToken)
+	defer stopLease()
 	actor, actorErr := worker.server.automationActor(ctx)
 	if actorErr != nil {
 		return true, worker.fail(ctx, job, "automation_actor_unavailable", actorErr, []byte(`{}`))
 	}
 	job.ActorID = actor.Subject
-	if _, actorErr = worker.server.db.Exec(ctx, `update project_auto_update_runs set actor_id=$2 where id=$1`, job.RunID, job.ActorID); actorErr != nil {
+	if actorErr = worker.execAutomationWrite(ctx, job, `update project_auto_update_runs set actor_id=$2 where id=$1`, job.RunID, job.ActorID); actorErr != nil {
 		return true, worker.fail(ctx, job, "automation_actor_unavailable", actorErr, []byte(`{}`))
 	}
 
@@ -170,23 +198,71 @@ func (worker *ProjectAutomationWorker) processOne(ctx context.Context) (bool, er
 	if runErr != nil {
 		return true, worker.fail(ctx, job, code, runErr, raw)
 	}
-	next := autoUpdateNextRun(job.Interval, time.Now().UTC())
-	tx, err = worker.server.db.Begin(ctx)
+	return true, worker.complete(ctx, job, raw)
+}
+
+func (worker *ProjectAutomationWorker) complete(ctx context.Context, job projectAutomationJob, result []byte) error {
+	tx, err := worker.server.db.Begin(ctx)
 	if err != nil {
-		return true, err
+		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockAutomationJobTx(ctx, tx, job); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `update project_auto_update_runs set status='completed',result=$2::jsonb,last_error_code='',last_error='',
-		lease_owner='',lease_expires_at=null,finished_at=now() where id=$1`, job.RunID, raw); err != nil {
-		return true, err
+		lease_owner='',lease_expires_at=null,finished_at=now() where id=$1`, job.RunID, result); err != nil {
+		return err
 	}
-	if _, err = tx.Exec(ctx, `update project_auto_update_settings set last_run_at=now(),last_status='completed',last_error_code='',last_error='',next_run_at=$2 where id=$1`, job.SettingID, next); err != nil {
-		return true, err
+	if _, err = tx.Exec(ctx, `update project_auto_update_settings set last_run_at=now(),last_status='completed',last_error_code='',last_error='',next_run_at=$2 where id=$1`, job.SettingID, autoUpdateNextRun(job.Interval, time.Now().UTC())); err != nil {
+		return err
 	}
-	return true, tx.Commit(ctx)
+	return tx.Commit(ctx)
+}
+
+// Recheck both the random claim and its current configuration in the same
+// resource transaction. Pausing/rebinding a source cannot publish an older run.
+func lockAutomationJobTx(ctx context.Context, tx pgx.Tx, job projectAutomationJob) error {
+	if err := lockProjectAutomationLeaseTx(ctx, tx); err != nil {
+		return err
+	}
+	if job.LeaseToken == "" {
+		return nil
+	}
+	lease, present := ctx.Value(projectAutomationLeaseContextKey{}).(projectAutomationLeaseIdentity)
+	if !present || lease.RunID != job.RunID || lease.Token != job.LeaseToken {
+		return errProjectAutomationLeaseLost
+	}
+	var allowed bool
+	err := tx.QueryRow(ctx, `select setting.enabled and setting.project_route_id=$2 and setting.source_type=$3
+		and setting.update_kind=$4 and source.external_project_id=$5
+		from project_auto_update_settings setting
+		join project_external_sources source on source.project_route_id=setting.project_route_id and source.source_type=setting.source_type
+		where setting.id=$1 for share of setting,source`, job.SettingID, job.RouteID, job.SourceType, job.Kind, job.ExternalID).Scan(&allowed)
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && !allowed {
+		return errProjectAutomationLeaseLost
+	}
+	return err
+}
+
+func (worker *ProjectAutomationWorker) execAutomationWrite(ctx context.Context, job projectAutomationJob, statement string, args ...any) error {
+	tx, err := worker.server.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = lockAutomationJobTx(ctx, tx, job); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, statement, args...); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (worker *ProjectAutomationWorker) fail(ctx context.Context, job projectAutomationJob, code string, runErr error, result []byte) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
 	if code == "" {
 		code = "external_service_unavailable"
 	}
@@ -196,6 +272,9 @@ func (worker *ProjectAutomationWorker) fail(ctx context.Context, job projectAuto
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockAutomationJobTx(ctx, tx, job); err != nil {
+		return err
+	}
 	var attempts int
 	if err = tx.QueryRow(ctx, `select attempts from project_auto_update_runs where id=$1 for update`, job.RunID).Scan(&attempts); err != nil {
 		return err
@@ -363,6 +442,9 @@ func (worker *ProjectAutomationWorker) mergeCompatibility(ctx context.Context, j
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockAutomationJobTx(ctx, tx, job); err != nil {
+		return nil, err
+	}
 	added := int64(0)
 	if job.ProjectType == "mod" {
 		for _, pair := range pairs {
@@ -425,10 +507,15 @@ func (worker *ProjectAutomationWorker) loadReleases(ctx context.Context, job pro
 			return nil, err
 		}
 		var raw []struct {
-			ID, Name, VersionNumber, Changelog, DatePublished, VersionType string
-			GameVersions                                                   []string `json:"game_versions"`
-			Loaders                                                        []string `json:"loaders"`
-			Files                                                          []struct {
+			ID            string   `json:"id"`
+			Name          string   `json:"name"`
+			VersionNumber string   `json:"version_number"`
+			Changelog     string   `json:"changelog"`
+			DatePublished string   `json:"date_published"`
+			VersionType   string   `json:"version_type"`
+			GameVersions  []string `json:"game_versions"`
+			Loaders       []string `json:"loaders"`
+			Files         []struct {
 				URL, Filename string
 				Size          int64
 				Hashes        map[string]string
@@ -468,7 +555,9 @@ func (worker *ProjectAutomationWorker) loadReleases(ctx context.Context, job pro
 			var response struct {
 				Data string `json:"data"`
 			}
-			_ = getProviderJSON(ctx, client, cfg.CurseForge.BaseURL+"/mods/"+url.PathEscape(job.ExternalID)+"/files/"+url.PathEscape(file.ID)+"/changelog", headers, &response)
+			if err = getProviderJSON(ctx, client, cfg.CurseForge.BaseURL+"/mods/"+url.PathEscape(job.ExternalID)+"/files/"+url.PathEscape(file.ID)+"/changelog", headers, &response); err != nil {
+				return nil, err
+			}
 			result = append(result, projectAutomationRelease{ID: file.ID, Version: firstNonEmpty(file.VersionName, file.DisplayName, file.ID), Body: response.Data,
 				PublishedAt: file.PublishedAt, GameVersions: file.GameVersions, Loaders: file.Loaders,
 				URL: "https://www.curseforge.com/minecraft/mc-mods/" + job.ExternalID + "/files/" + file.ID, Files: []providerProjectFile{file}})
@@ -535,7 +624,10 @@ func (worker *ProjectAutomationWorker) loadGitHubReleases(ctx context.Context, r
 
 func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job projectAutomationJob, releases []projectAutomationRelease) (map[string]any, error) {
 	created, updated, unchanged, manualConflicts := 0, 0, 0, 0
-	currentVersions := worker.currentProjectVersions(ctx, job)
+	currentVersions, err := worker.currentProjectVersions(ctx, job)
+	if err != nil {
+		return nil, err
+	}
 	for _, release := range releases {
 		if release.PublishedAt.IsZero() {
 			release.PublishedAt = time.Now().UTC()
@@ -554,6 +646,10 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 		bodyHash := hex.EncodeToString(hashBytes[:])
 		tx, err := worker.server.db.Begin(ctx)
 		if err != nil {
+			return nil, err
+		}
+		if err = lockAutomationJobTx(ctx, tx, job); err != nil {
+			_ = tx.Rollback(ctx)
 			return nil, err
 		}
 		var bindingID int64
@@ -630,26 +726,34 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 	return map[string]any{"created": created, "updated": updated, "unchanged": unchanged, "manualOverrideConflicts": manualConflicts}, nil
 }
 
-func (worker *ProjectAutomationWorker) currentProjectVersions(ctx context.Context, job projectAutomationJob) []string {
+func (worker *ProjectAutomationWorker) currentProjectVersions(ctx context.Context, job projectAutomationJob) ([]string, error) {
 	var versions []string
+	var err error
 	if job.ProjectType == "mod" {
-		_ = worker.server.db.QueryRow(ctx, `select coalesce(array_agg(distinct minecraft_version order by minecraft_version),'{}'::text[])
+		err = worker.server.db.QueryRow(ctx, `select coalesce(array_agg(distinct minecraft_version order by minecraft_version),'{}'::text[])
 			from mod_loader_compatibilities where mod_id=$1`, job.InternalID).Scan(&versions)
 	} else {
-		_ = worker.server.db.QueryRow(ctx, `select minecraft_versions from simple_projects where id=$1 and project_type=$2`, job.InternalID, job.ProjectType).Scan(&versions)
+		err = worker.server.db.QueryRow(ctx, `select minecraft_versions from simple_projects where id=$1 and project_type=$2`, job.InternalID, job.ProjectType).Scan(&versions)
 	}
-	return versions
+	return versions, err
 }
 
 func (worker *ProjectAutomationWorker) checkRedistribution(ctx context.Context, job projectAutomationJob) error {
 	var license string
+	var err error
 	if job.ProjectType == "mod" {
-		_ = worker.server.db.QueryRow(ctx, `select license from mods where id=$1`, job.InternalID).Scan(&license)
+		err = worker.server.db.QueryRow(ctx, `select license from mods where id=$1`, job.InternalID).Scan(&license)
 	} else {
-		_ = worker.server.db.QueryRow(ctx, `select license from simple_projects where id=$1 and project_type=$2`, job.InternalID, job.ProjectType).Scan(&license)
+		err = worker.server.db.QueryRow(ctx, `select license from simple_projects where id=$1 and project_type=$2`, job.InternalID, job.ProjectType).Scan(&license)
+	}
+	if err != nil {
+		return err
 	}
 	var allowed bool
-	err := worker.server.db.QueryRow(ctx, `select redistribution_allowed from license_policies where lower(spdx_id)=lower($1)`, strings.TrimSpace(license)).Scan(&allowed)
+	err = worker.server.db.QueryRow(ctx, `select redistribution_allowed from license_policies where lower(spdx_id)=lower($1)`, strings.TrimSpace(license)).Scan(&allowed)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
 	if err == nil && allowed {
 		return nil
 	}
@@ -681,13 +785,20 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 		if err == nil {
 			existing++
 			var previous providerProjectFile
-			_ = json.Unmarshal(currentMetadata, &previous)
+			if err = json.Unmarshal(currentMetadata, &previous); err != nil {
+				return nil, err
+			}
 			previousSignature, incomingSignature := providerFileHashSignature(previous), providerFileHashSignature(file)
 			if currentSize != file.SizeBytes || previousSignature != "" && incomingSignature != "" && previousSignature != incomingSignature {
-				_, _ = worker.server.db.Exec(ctx, `update mirrored_project_files set status='source_changed' where source_type=$1 and external_file_id=$2`, job.SourceType, file.ID)
+				if err = worker.execAutomationWrite(ctx, job, `update mirrored_project_files set status='source_changed' where source_type=$1 and external_file_id=$2`, job.SourceType, file.ID); err != nil {
+					return nil, err
+				}
 				review++
 			}
 			continue
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
 		}
 		data, digest, downloadErr := downloadProviderFile(ctx, file, cfg)
 		if downloadErr != nil {
@@ -702,6 +813,10 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 		metadata, _ := json.Marshal(file)
 		tx, txErr := worker.server.db.Begin(ctx)
 		if txErr != nil {
+			return nil, txErr
+		}
+		if txErr = lockAutomationJobTx(ctx, tx, job); txErr != nil {
+			_ = tx.Rollback(ctx)
 			return nil, txErr
 		}
 		var ossFileID int64
@@ -780,13 +895,13 @@ func downloadProviderFile(ctx context.Context, file providerProjectFile, cfg mod
 	return data, hex.EncodeToString(sum[:]), nil
 }
 
-func (worker *ProjectAutomationWorker) promoteCleanMirrors(ctx context.Context) {
+func (worker *ProjectAutomationWorker) promoteCleanMirrors(ctx context.Context) error {
 	rows, err := worker.server.db.Query(ctx, `select mirror.id,route.entity_type,route.internal_id,mirror.oss_file_id,mirror.file_sha256,mirror.byte_size,mirror.metadata
 		from mirrored_project_files mirror join public_routes route on route.id=mirror.project_route_id
 		join oss_files file on file.id=mirror.oss_file_id and file.status='active' and file.scan_status='clean'
 		where mirror.status='scanning' order by mirror.id limit 50`)
 	if err != nil {
-		return
+		return err
 	}
 	type pending struct {
 		id, internalID, ossID, size int64
@@ -796,24 +911,37 @@ func (worker *ProjectAutomationWorker) promoteCleanMirrors(ctx context.Context) 
 	items := make([]pending, 0)
 	for rows.Next() {
 		var item pending
-		if rows.Scan(&item.id, &item.projectType, &item.internalID, &item.ossID, &item.sha, &item.size, &item.metadata) == nil {
-			items = append(items, item)
+		if err = rows.Scan(&item.id, &item.projectType, &item.internalID, &item.ossID, &item.sha, &item.size, &item.metadata); err != nil {
+			rows.Close()
+			return err
 		}
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	rows.Close()
 	for _, item := range items {
 		var file providerProjectFile
-		if json.Unmarshal(item.metadata, &file) != nil {
-			continue
+		if err = json.Unmarshal(item.metadata, &file); err != nil {
+			return err
 		}
 		tx, beginErr := worker.server.db.Begin(ctx)
 		if beginErr != nil {
-			continue
+			return beginErr
 		}
 		var lockedStatus string
-		if tx.QueryRow(ctx, `select status from mirrored_project_files where id=$1 for update`, item.id).Scan(&lockedStatus) != nil || lockedStatus != "scanning" {
+		err = tx.QueryRow(ctx, `select mirror.status from mirrored_project_files mirror
+			join oss_files file on file.id=mirror.oss_file_id and file.status='active' and file.scan_status='clean'
+			where mirror.id=$1 for update of mirror for share of file`, item.id).Scan(&lockedStatus)
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && lockedStatus != "scanning" {
 			_ = tx.Rollback(ctx)
 			continue
+		}
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return err
 		}
 		_, insertErr := tx.Exec(ctx, `insert into project_files(project_type,project_internal_id,oss_file_id,display_name,version_name,release_channel,
 			game_versions,loaders,file_name,content_type,size_bytes,sha256) values($1,$2,$3,$4,$5,$6,$7,$8,$9,'application/octet-stream',$10,$11)
@@ -823,10 +951,13 @@ func (worker *ProjectAutomationWorker) promoteCleanMirrors(ctx context.Context) 
 		if insertErr == nil {
 			_, insertErr = tx.Exec(ctx, `update mirrored_project_files set status='ready' where id=$1`, item.id)
 		}
-		if insertErr == nil {
-			_ = tx.Commit(ctx)
-		} else {
+		if insertErr != nil {
 			_ = tx.Rollback(ctx)
+			return insertErr
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return err
 		}
 	}
+	return nil
 }

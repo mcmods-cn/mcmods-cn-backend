@@ -1,0 +1,73 @@
+{
+  "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+  "recorded_at": "2026-10-01T15:38:03.577691+00:00",
+  "environment": {
+    "go": "1.26.8",
+    "database": "real loopback PostgreSQL; marker-owned random disposable DB; root services installation",
+    "data": "synthetic fixtures only",
+    "http": "local httptest, real source sockets with controlled responses; real suppliers NOT_RUN",
+    "setup": "source root-owned local test service env.sh without printing credentials; APP_ENV=test MCMODS_RUN_DB_INTEGRATION=1"
+  },
+  "checks": [
+    {
+      "command": "go test -race ./internal/httpapi -run '^(TestCatalogEditorPublicVisibilityAndReadFailuresAuditIntegration|TestModExportEntryAndMetricVisibilityAuditIntegration|TestSimpleProjectAssociationVisibilityAuditIntegration|TestSimpleProjectSlugStopsOnDatabaseFailure)$' -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "top_level_tests": 4,
+      "PG_subtests": 59,
+      "unit_subtests": 2,
+      "duration_seconds": 13.729,
+      "evidence": "/tmp/mcmods-ui-a-backend-catalog-final.log"
+    },
+    {
+      "command": "go test -race ./internal/httpapi -run '^(TestMinecraftLoaderSourceFailuresAndFallbackAudit|TestMinecraftVersionType|TestNextMinecraftVersionSync|TestStoredMinecraftVersionOrderIsAuthoritative|TestDecodeLoaderVersionSources|TestResolveForgeMinecraftVersions|TestResolveNeoForgeMinecraftVersions|TestOrderSupportedMinecraftVersionsUsesCatalogOrder|TestFailedLoaderSyncPreservesPreviousVersions|TestQueueExportRecipeTemplateAndBindings|TestCompactRecipeImportJSONRemovesDuplicatedChildren|TestCompactRegistryImportJSONRemovesNormalizedFields|TestQueueExportDocumentEntriesCompactsNormalizedNames|TestExportDocumentEntriesNormalizesLootTableCategories|TestPrepareExportRegistryResourcesSupportsKeyMappingIDs|TestQueueExportDocumentEntriesRoutesMergedDocumentsByNamespace|TestQueueExportTextAssetUsesBulkStage|TestNormalizedExportSourceJSONRetention|TestCollectPartialNormalizationFallbacks|TestSupportedExportTranslationFiles|TestSupportedExportNamesKeepsOnlyEditableBCP47Locales|TestFilterSupportedExportLocalizedFieldsFiltersNestedTooltips|TestCanonicalImportedTemplatePromotionGeometryAndIdentity|TestValidateExportRecipeLayoutKind|TestValidateExportRecipeChanceBelongsToOutputItem|TestValidateExportBaseRecipeDocumentV2Only|TestValidateModExportManifestRequiresZipPackage|TestDecodeModExportCapabilities|TestExportIngredientKindKeepsMekanismFamiliesSeparate|TestExportDocumentEntriesPrecomputesNestedIndexes|TestValidateCatalogDocumentContractRequiresNormalizedWorldgenV2|TestNormalizeExportPathRejectsUnsafePaths|TestValidateExportZIPRejectsCaseInsensitiveDuplicates|TestDeriveModExportBlockBindingsUsesRegistryRelationships|TestNormalizeExportNamespaces|TestDecodeExportTranslationValuesSkipsNonStrings|TestDecodeExportTagsAssociatesSharedTagsWithRelevantRevisions|TestDecodeExportTranslationValuesSupportsExporterWrapper|TestShouldRestartModExportStatus|TestRecipeIdentityScope)$' -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "top_level_tests": 40,
+      "HTTP_failure_subtests": 6,
+      "duration_seconds": 2.903,
+      "evidence": "/tmp/mcmods-backend-ui-a-extra-unit-final.log"
+    },
+    {
+      "command": "go vet ./internal/httpapi",
+      "status": "PASS",
+      "exit_code": 0,
+      "evidence": "/tmp/mcmods-ui-a-backend-extra-vet.log"
+    },
+    {
+      "command": "git diff --check",
+      "status": "PASS",
+      "exit_code": 0
+    }
+  ],
+  "red_green": [
+    {
+      "evidence": "/tmp/mcmods-export-entry-audit-red-valid.log",
+      "result": "valid baseline8:6FAIL/2PASS → final13PASS; cache nil/duplicate binding PK fixture mistakes corrected without weakening assertions"
+    },
+    {
+      "evidence": "/tmp/mcmods-catalog-editor-baseline-red-final.log",
+      "result": "Go compile overlay baseline20:13FAIL/7PASS →20PASS; workspace never overwritten"
+    },
+    {
+      "evidence": "/tmp/mcmods-catalog-editor-additional-red.log",
+      "result": "new genuine single row query/type ID collision scenarios5FAIL/20PASS →25PASS"
+    },
+    {
+      "evidence": "/tmp/mcmods-catalog-editor-tag-red.log",
+      "result": "pending tag label and pending member count2FAIL →PASS"
+    },
+    {
+      "evidence": "/tmp/mcmods-catalog-editor-candidate-red.log",
+      "result": "pending resource owner candidate1FAIL →PASS"
+    }
+  ],
+  "validation_limits": [
+    "No production database health/query plan/load/backups inspected",
+    "No real AI/payment/object storage request",
+    "Actual handlers bypass route middleware in owned PG fixtures; route permissions separately statically crosschecked; root owns full HTTP/browser regression",
+    "No assertion of all canonical/imported resource combinations or complete queue/system behavior",
+    "Original binding N+1 remains; small-pool repair is bounded correctness, not measured production speedup",
+    "Tests were not skipped, assertions not weakened; initial PG fault fixture had no approved row and was fixed so actual failure is exercised"
+  ]
+}

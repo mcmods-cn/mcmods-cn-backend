@@ -163,12 +163,19 @@ func (s *Server) modContentSectionLayout(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	requestedBaseRevisionID, baseErr := resolveRevisionPublicID(r.Context(), s.db, edit.BaseRevisionID)
+	if baseErr != nil && !errors.Is(baseErr, pgx.ErrNoRows) && edit.BaseRevisionID != nil && validCatalogPublicID(strings.ToLower(strings.TrimSpace(*edit.BaseRevisionID))) {
+		writeError(w, http.StatusInternalServerError, "failed to read base revision")
+		return
+	}
 	if baseErr != nil || edit.VersionPublicID != versionPublicID || !sameRevision(requestedBaseRevisionID, publishedRevisionID) {
 		writeError(w, http.StatusConflict, "content layout changed; reload the editor")
 		return
 	}
 	if err = s.prepareModContentLayout(r.Context(), identity.ID, versionID, &edit); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "invalid content category tree or resource assignment")
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = errCatalogEditorReference
+		}
+		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
 	s.submitExistingModContentMutation(w, r, identity, modContentSnapshot{
@@ -345,7 +352,7 @@ func (s *Server) prepareModContentLayout(ctx context.Context, modID, versionID i
 	if len(resourcePublicIDs) > 0 {
 		var templateDefinition []byte
 		if err = loadModContentSectionDefinition(ctx, s.db, modID, versionID, edit.RootSectionPublicID, &templateDefinition); err != nil {
-			return errCatalogEditorInvalid
+			return err
 		}
 		var template struct {
 			ResourceKinds []string `json:"resourceKinds"`
@@ -382,7 +389,7 @@ func (s *Server) prepareModContentLayout(ctx context.Context, modID, versionID i
 			where entity.public_id=any($1::text[]) and entity.status='active'`,
 			resourcePublicIDs, modID, versionID)
 		if queryErr != nil {
-			return errCatalogEditorInvalid
+			return queryErr
 		}
 		identities := make(map[string]modContentLayoutResourceIdentity, len(resourcePublicIDs))
 		for rows.Next() {
@@ -391,7 +398,7 @@ func (s *Server) prepareModContentLayout(ctx context.Context, modID, versionID i
 			if err = rows.Scan(&publicID, &identity.KindCode, &identity.CanonicalID,
 				&identity.BlockRepresentativeID, &identity.BlockRepresentativePublicID); err != nil {
 				rows.Close()
-				return errCatalogEditorInvalid
+				return err
 			}
 			if len(allowedKinds) > 0 {
 				if _, allowed := allowedKinds[identity.KindCode]; !allowed {
@@ -403,7 +410,7 @@ func (s *Server) prepareModContentLayout(ctx context.Context, modID, versionID i
 		}
 		if err = rows.Err(); err != nil {
 			rows.Close()
-			return errCatalogEditorInvalid
+			return err
 		}
 		rows.Close()
 		if len(identities) != len(resourcePublicIDs) {

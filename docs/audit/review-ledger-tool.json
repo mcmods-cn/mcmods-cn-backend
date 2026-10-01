@@ -1,0 +1,154 @@
+{
+  "reviewer": "frontend_ui_a",
+  "recorded_at": "2026-10-01T16:05:08.099135+00:00",
+  "files": [
+    {
+      "path": "scripts/audit-ledger.py",
+      "sha256": "a4d86a4720048a6b2efdd1278c55c16d48c7146c00c2b5e97450bcdc21fe5ff9",
+      "lines": 142,
+      "read_ranges": [
+        [
+          1,
+          142
+        ]
+      ],
+      "status": "已复查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "合并明确人工review记录，保留原始文件分母/删除，核验当前指纹与逐行行段，区分测试和排除来源",
+      "call_chain": [
+        "git ls-files/rev-parse",
+        "file-ledger baseline",
+        "review-*.json human records",
+        "final file SHA256",
+        "range continuity",
+        "coverage counters"
+      ],
+      "issues": [
+        "AUDIT-TOOL-001",
+        "AUDIT-TOOL-002"
+      ],
+      "validation": [
+        "原/tmp反例修后实际8个观察均符合预期；该阶段模拟Git，仅用于先复核，与随后真实Git黑盒证据区分。",
+        "真实临时Git repo/commit/索引/删除，独立子进程调用实际脚本main+--check，完全未mock或导入替代main判断；两仓9测试PASS，旧确切指纹版本22失败断言。",
+        "生成来源只接受固定已确认路径；人工同名JSON及旧误标不排除。内容/语义/行为标志只接受bool True；证据见checks。"
+      ],
+      "read_basis": "最终142行内容全文实际读取；两仓SHA相同，复用同内容审查而非自动继承旧版本；root负责原源码修复与最终差异复核。"
+    }
+  ],
+  "findings": [
+    {
+      "id": "AUDIT-TOOL-001",
+      "priority": "P2",
+      "status": "已修复；已验证通过",
+      "location": "scripts/audit-ledger.py:94",
+      "evidence": "content_read和semantic值字符串false都是truthy；用明确is True并限制behavior_verified同样类型。",
+      "current_scope": "现有FE记录没有非bool字段；目前风险由实际合成反例证明，未声称当前全部计数已错。",
+      "fixed_by": "root scripts/audit-ledger.py; frontend_ui_a independently rechecked and black-box tested",
+      "verification": "9真实Git黑盒回归，修前22失败断言→修后两仓PASS；只覆盖对应不变量，不能证明人工实际理解全部代码。",
+      "baseline_location": "scripts/audit-ledger.py:72",
+      "location_sha256": "a4d86a4720048a6b2efdd1278c55c16d48c7146c00c2b5e97450bcdc21fe5ff9"
+    },
+    {
+      "id": "AUDIT-TOOL-002",
+      "priority": "P2",
+      "status": "已修复；已验证通过",
+      "location": "scripts/audit-ledger.py:84",
+      "evidence": "仅名字匹配便无审排除人工review-policy.json/policy-validation.json；默认人工，生成来源需显式清单/标记，锁/二进制排除保持既有声明。",
+      "current_scope": "两仓此工具实际测试使用合成JSON反例，不声称现有全部生成台账都是人工业务数据。",
+      "fixed_by": "root scripts/audit-ledger.py; frontend_ui_a independently rechecked and black-box tested",
+      "verification": "9真实Git黑盒回归，修前22失败断言→修后两仓PASS；只覆盖对应不变量，不能证明人工实际理解全部代码。",
+      "baseline_location": "scripts/audit-ledger.py:61",
+      "location_sha256": "a4d86a4720048a6b2efdd1278c55c16d48c7146c00c2b5e97450bcdc21fe5ff9"
+    }
+  ],
+  "boundaries": [
+    "工具无法从自报review字段证明人确实理解每一行；仅验证明确记录的一致性，不自动提升语义/业务正确性",
+    "人工内容审查与测试覆率始终分开；known generated evidence排除须有生成来源记录",
+    "目录/.audit-tools是本任务安装产物排除，非业务源码；baseline删除通过union保留，不减少原分母",
+    "审查记录自身JSON读写生成由工具负责；记录复核源与人维护issue/设计JSON不能笼统按名字跳过"
+  ],
+  "new_files_reviewed": [
+    {
+      "path": "scripts/test-audit-ledger.py",
+      "sha256": "b936f05da9c01158994f744e63e9004a34de2b89e0351f2c6bff9b3dc44b42ed",
+      "lines": 166,
+      "read_ranges": [
+        [
+          1,
+          166
+        ]
+      ],
+      "status": "已完整审查",
+      "content_read": true,
+      "semantics_reviewed": true,
+      "behavior_verified": true,
+      "responsibility": "汇总工具真实CLI黑盒回归，临时Git仓库、明确身份提交、退出码与持久化台账/分母/生成来源断言",
+      "call_chain": [
+        "tempfile.TemporaryDirectory lifecycle",
+        "isolated Git env/config/init/commit/rm",
+        "actual audit-ledger.py subprocess --check",
+        "file-ledger/coverage output assertions"
+      ],
+      "issues": [
+        "AUDIT-TOOL-001",
+        "AUDIT-TOOL-002"
+      ],
+      "validation": [
+        "9顶层unittest、36参数变体+4单用例（删除用例运行两次）验证；9临时真实Git repos，41实际工具子进程。",
+        "blackbox旧22失败断言→两仓9顶层PASS；没有生产连接、远端Git、真实密钥/用户数据；只清理自己创建的临时目录。"
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "command": "python3 /tmp/mcmods-ledger-tool-review.py",
+      "status": "PASS",
+      "exit_code": 0,
+      "kind": "先前模拟Git回归观察",
+      "evidence": "/tmp/mcmods-ledger-tool-review-green.log"
+    },
+    {
+      "command": "python3 scripts/test-audit-ledger.py --ledger-script /tmp/mcmods-ledger-before-fix.py -v",
+      "status": "FAIL",
+      "exit_code": 1,
+      "top_level_tests": 9,
+      "failed_assertions": 22,
+      "duration_seconds": 3.536,
+      "source_sha256": "ae82429bb714e324d78beb7430cf9b6d6a404092a3f96f811041ffd51895e418",
+      "evidence": "/tmp/mcmods-ledger-blackbox-red.log",
+      "red_basis": "由已记录的修前源码恢复，只改/tmp副本；与修前SHA严格一致后才运行，未回滚共享仓库。"
+    },
+    {
+      "command": "python3 scripts/test-audit-ledger.py -v",
+      "repository": "mcmods-cn-backend",
+      "status": "PASS",
+      "exit_code": 0,
+      "top_level_tests": 9,
+      "duration_seconds": 4.281,
+      "evidence": "/tmp/mcmods-ledger-blackbox-green-backend.log"
+    },
+    {
+      "command": "python3 scripts/test-audit-ledger.py -v",
+      "repository": "mcmods-cn-frontend",
+      "status": "PASS",
+      "exit_code": 0,
+      "top_level_tests": 9,
+      "duration_seconds": 3.319,
+      "evidence": "/tmp/mcmods-ledger-blackbox-green-frontend.log"
+    },
+    {
+      "command": "git diff --check",
+      "status": "PASS",
+      "exit_code": 0,
+      "repository": "mcmods-cn-backend"
+    }
+  ],
+  "environment": {
+    "python": "3.12.14",
+    "git": "2.52.0",
+    "network": "NOT_USED",
+    "scope": "test-owned temporary Git repositories; actual audit script subprocess"
+  }
+}

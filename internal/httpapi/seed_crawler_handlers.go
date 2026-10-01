@@ -122,6 +122,10 @@ func (s *Server) adminSeedCrawlerRuns(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, map[string]any{"id": id, "status": status, "dryRun": dryRun, "attempts": attempts, "stats": json.RawMessage(stats), "lastError": lastError, "createdAt": created, "startedAt": started, "finishedAt": finished})
 	}
+	if rows.Err() != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取爬虫任务失败")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }
 
@@ -149,6 +153,10 @@ func (s *Server) adminSeedCrawlerCandidates(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		items = append(items, map[string]any{"externalProjectId": id, "projectType": projectType, "downloads": downloads, "status": status, "payload": json.RawMessage(payload), "lastError": lastError, "createdAt": created, "updatedAt": updated, "draftId": draftID})
+	}
+	if rows.Err() != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取爬虫候选失败")
+		return
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }

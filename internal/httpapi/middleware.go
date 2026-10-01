@@ -39,7 +39,12 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if err := s.resolveClaimsSubject(r.Context(), &claims); err != nil {
-			writeError(w, http.StatusUnauthorized, "authentication account no longer exists")
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusUnauthorized, "authentication account no longer exists")
+				return
+			}
+			log.Printf("required authentication lookup failed: %v", err)
+			writeError(w, http.StatusServiceUnavailable, "authentication service is temporarily unavailable")
 			return
 		}
 		w.Header().Set(permissionVersionHeader, strconv.FormatInt(claims.PermissionVersion, 10))

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"image"
-	"image/gif"
 	_ "image/png"
 	"io"
 	"net/http"
@@ -183,8 +182,15 @@ func (s *Server) publicStickerCatalog(w http.ResponseWriter, r *http.Request) {
 		}
 		packs[index].Stickers = append(packs[index].Stickers, item{Code: code, Name: name, ImageURL: "/api/v1/oss/files/" + fileID + "/content", MimeType: mimeType, Width: width, Height: height})
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read sticker catalog")
+		return
+	}
 	var version int64
-	_ = s.db.QueryRow(r.Context(), `select version from sticker_catalog_state where singleton`).Scan(&version)
+	if err = s.db.QueryRow(r.Context(), `select version from sticker_catalog_state where singleton`).Scan(&version); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read sticker catalog version")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"version": version, "locale": locale, "packs": packs})
 }
 
@@ -246,6 +252,10 @@ func (s *Server) adminStickerCatalog(w http.ResponseWriter, r *http.Request) {
 			_ = json.Unmarshal(translations, &names)
 			packs[index].Stickers = append(packs[index].Stickers, adminSticker{Code: *code, Status: stickerStringValue(status), SortOrder: stickerIntValue(sortOrder), ImageFileID: stickerStringValue(filePublicID), MimeType: stickerStringValue(mimeType), Width: stickerIntValue(width), Height: stickerIntValue(height), FileSize: stickerInt64Value(fileSize), Checksum: stickerStringValue(checksum), Translations: names})
 		}
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read sticker administration data")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"locales": editableStickerLocales(), "packs": packs})
 }
@@ -603,20 +613,8 @@ func (s *Server) validateStickerOSSFile(ctx context.Context, publicID string, up
 		return result, errors.New("sticker dimensions exceed the safety limit")
 	}
 	if declared == "image/gif" {
-		animation, decodeErr := gif.DecodeAll(bytes.NewReader(data))
-		if decodeErr != nil || len(animation.Image) == 0 || len(animation.Image) > limits.MaxGIFFrames {
-			return result, errors.New("GIF frame count is invalid")
-		}
-		totalPixels, duration := int64(0), 0
-		for index, frame := range animation.Image {
-			bounds := frame.Bounds()
-			totalPixels += int64(bounds.Dx()) * int64(bounds.Dy())
-			if index < len(animation.Delay) {
-				duration += animation.Delay[index]
-			}
-		}
-		if totalPixels > limits.MaxGIFDecodedPixels || time.Duration(duration)*10*time.Millisecond > limits.MaxGIFDuration {
-			return result, errors.New("GIF animation exceeds the decoded size or duration limit")
+		if err = validateStickerGIF(data, limits); err != nil {
+			return result, err
 		}
 	} else if _, _, err = image.Decode(bytes.NewReader(data)); err != nil {
 		return result, errors.New("PNG image is invalid or truncated")

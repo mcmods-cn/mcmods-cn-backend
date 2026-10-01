@@ -1,0 +1,273 @@
+{
+  "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+  "environment": "Go 1.26.5 + explicitly authorized isolated PostgreSQL; controlled HTTP/miniredis only; no real paid AI/SMTP/OSS requests",
+  "checks": [
+    {
+      "id": "APIA-targeted-race-2",
+      "command": "go test -race ./internal/httpapi -run <API-A targeted pattern recorded in backend-api-a.md> -count=1 -json",
+      "status": "PASS",
+      "exit_code": 0,
+      "test_run_count_including_subtests": 65,
+      "test_pass_count_including_subtests": 65,
+      "seconds": 4.522,
+      "evidence": "/tmp/mcmods-api-a-final2-race.jsonl",
+      "limitation": "Ran before the last community completed/publication atomic change and final admin/export tests; those are separately verified."
+    },
+    {
+      "id": "APIA-original-overlay-6",
+      "status": "FAIL",
+      "expected": "regressions red against original endpoint logic",
+      "test_fail_count": 6,
+      "evidence": "/tmp/mcmods-api-a-red-additions.log"
+    },
+    {
+      "id": "APIA-latest-community",
+      "command": "go test ./internal/httpapi -run ^TestCommunityPostTranslationLifecycleIntegration$ -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "subtests": 12,
+      "evidence": "/tmp/mcmods-api-a-community-final-green.log"
+    },
+    {
+      "id": "APIA-final4-targeted-race",
+      "command": "go test -race ./internal/httpapi -run '^(TestActiveStreaks|TestActivityCleanupWhereUsesOnlyPlaceholders|TestActivityRetentionIdentifiersMatchAuthoritativeSchema|TestAdminDashboardContractIntegration|TestAdministratorsCanDefineEmergencyProjectAccess|TestAntiAbuseActionClassification|TestAntiAbuseRateLimitPercentUsesVariablePermissions|TestAntiAbuseRateScopeSeparatesContentVersionMutations|TestApprovedScopedRoleAllowsCatalogEditingWithoutSessionReplacement|TestAuthenticationLookupFailurePreservesSession|TestBannedAccountMarkerRequiresExplicitPermission|TestBearerMutationDoesNotRequireBrowserOrigin|TestBlueprintCodecRoundTrips|TestBlueprintCoverRequiresSynchronousRasterValidation|TestBlueprintLocalizationPreservesHumanWorkIntegration|TestBlueprintPreviewCacheControl|TestBlueprintUploadOutboxAndDeletedDownloadIntegration|TestBuildIRRIconlessEntity|TestBuildMRPackRejectsUnsafeOrIncompleteFiles|TestBuildMRPackUsesRootIndexAndLoaderDependency|TestBuildMRPackWithRealModrinthMetadata|TestCanonicalImportedTemplatePromotionGeometryAndIdentity|TestCatalogApplicableVersionsUseAuthoritativeOrder|TestCatalogCoreSortFieldsSupportBothDirections|TestCatalogCreationEntrypointsCannotGrantProjectRoles|TestCatalogDatabaseFiltersCoverVersionAndCategoryBeforePagination|TestCatalogFeatureFilterUsesWhitelist|TestCatalogHeatOrderAcrossProjectTypes|TestCatalogHeatOrderIsDescendingNullSafeAndStable|TestCatalogHumanEditProvenance|TestCatalogImportedEditorLocalizationsGenerateStableDefaultName|TestCatalogImportedEditorLocalizationsPreferImportedTitleNames|TestCatalogIndexedOrderRetainsStableTieBreakers|TestCatalogLocalizationProvenanceUsesResolvedCanonicalLocale|TestCatalogMutationBaseSupportsFirstManualEditOfImport|TestCatalogMutationResponseIncludesActivityIdentity|TestCatalogRecipeResourceIconURL|TestCatalogResourceIdentityResolverUnifiesModIDAliases|TestCatalogSortDirectionRejectsUnknownValuesAndKeepsLegacyLinks|TestCatalogSubmitterIsNotAProjectEditor|TestCatalogTextAndBooleanParametersAreBounded|TestCleanupTimeBoundary|TestCleanupTokenComparison|TestClientIPFromForwardedChainIgnoresSpoofedLeftmostHop|TestClientIPFromForwardedChainRejectsMalformedHop|TestCollectExportIconCatalogCandidates|TestCollectPartialNormalizationFallbacks|TestCommentIdempotencyUsesTransactionLock|TestCommentLogAttachmentName|TestCommentProjectRoleFromPermissions|TestCommunityPostTranslationLifecycleIntegration|TestCommunityReferencesDoNotExposeUnpublishedProjectIntegration|TestCompactRecipeImportJSONRemovesDuplicatedChildren|TestCompactRegistryImportJSONRemovesNormalizedFields|TestCompressionFlushPropagatesGzipWriteErrors|TestCompressionFlushPropagatesTransportErrors|TestCompressionGzipsJSONResponses|TestCompressionHonorsExplicitGzipRejection|TestCompressionSkipsBinaryResponsesAndRejectedGzip|TestConcurrentRoleTrackUpgradesIntegration|TestContentLocalizationAggregateKeyIncludesSubjectType|TestContentReviewQueueQueryIntegration|TestContributionDateRangeUsesCalendarYearForHistory|TestContributionDateRangeUsesRollingWindowForCurrentYear|TestCookieMutationRequiresExactOrigin|TestCurseForgeFileCompatibility|TestDecodeEmbeddedIconCatalogJSONLines|TestDecodeExportTagsAssociatesSharedTagsWithRelevantRevisions|TestDecodeExportTranslationValuesSkipsNonStrings|TestDecodeExportTranslationValuesSupportsExporterWrapper|TestDecodeIRRCatalogMergesDuplicateRegistryVariants|TestDecodeIRRCatalogSupportsItemsAndIconlessEntities|TestDecodeIconRendererCatalogSupportsEntityIcons|TestDecodeModExportCapabilities|TestDeriveModExportBlockBindingsUsesRegistryRelationships|TestEffectivePromotionPowerDiminishesRepeatedUse|TestEmbeddedIconImportSourceAliases|TestEmbeddedIconPNGChecksDimensionsBeforePixelAllocation|TestEnvironmentFromSides|TestEvaluatePermissionUsesResolvedDenyRules|TestExportDocumentEntriesNormalizesLootTableCategories|TestExportDocumentEntriesPrecomputesNestedIndexes|TestExportIngredientKindKeepsMekanismFamiliesSeparate|TestExportLocaleLookupDoesNotRelabelRegionalTranslationsIntegration|TestExternalMetadataNormalization|TestExternalModpackCategoriesUseSiteTaxonomy|TestExternalSourceLinkType|TestFavoriteExportDatabaseFailureIsNotExpired|TestFavoriteExportExhaustedLeaseRecoveryIntegration|TestFavoriteExportRejectsInvalidDependencyShapeIntegration|TestFetchSeedModrinthProjectsProbesThenLoadsCandidatePage|TestFilterSupportedExportLocalizedFieldsFiltersNestedTooltips|TestFinalizeBlueprintDropsAir|TestGalleryRehomeDoesNotOverwriteAReplacementFile|TestGeneratedYggdrasilPrivateKeyRoundTrip|TestGroupPermissionDenyAndUnsupportedScopeIntegration|TestHumanReadableOSSObjectKeys|TestImportedAddonDraftAllowsParentSelectionAfterImport|TestImportedCatalogLocalizationRowsNormalizeMinecraftLocales|TestImportedSimpleProjectDraftsAreEditorReady|TestInspectAntiAbuseBodyRestoresContent|TestLegacyHealthRouteIsRemoved|TestLegacyProjectDeveloperApplicationRoutesAreRemoved|TestLiveProbeDoesNotRequireDependencies|TestLogShareExpiryAndCode|TestMRPackLoaderDependencyKeys|TestMailConfigurationRespectsDisabledAndKeepsFallbackImmutableIntegration|TestMapPublicOnlineVisibilityNeverExposesHiddenState|TestMinecraftServerReviewListQueryIntegration|TestMinecraftVersionLess|TestMinecraftVersionOrderKeepsConfiguredSequence|TestModContentCannotExposeUnapprovedParentIntegration|TestModContentResourcePreviewScopeAndSectionIntegration|TestModContentResourceVersionDetailsIntegration|TestModContentRevisionUsesItsTransactionWithOneConnectionIntegration|TestModContentVersionArchiveAndResourceRevivalIntegration|TestModMetadataImportDoesNotAcknowledgeDatabaseFailure|TestModMetadataImportLeaseIntegration|TestModrinthIndexModsExtractsProviderReferences|TestModrinthSimpleProjectTypeMatching|TestNormalizeActivityRetentionConfigRejectsUnknownAction|TestNormalizeCatalogLocalizationsAllowsPartialEditPatch|TestNormalizeCatalogLocalizationsRestrictsHumanEditing|TestNormalizeCreatorSnapshotCreatesDefaultLocalization|TestNormalizeCreatorSnapshotKeepsCanonicalName|TestNormalizeExportNamespaces|TestNormalizeExportPathRejectsUnsafePaths|TestNormalizeModContentSimilarGroups|TestNormalizeModImportConfigRequiresCurseForgeKey|TestNormalizeProjectFileType|TestNormalizePublicCardSlots|TestNormalizeRatingTargetType|TestNormalizeYggdrasilConfig|TestNormalizedExportSourceJSONRetention|TestOSSDeletionRetryDelay|TestOptionalAuthTreatsInvalidAuthorizationAsGuestWithoutClearingCookie|TestOptionalAuthTreatsInvalidCookieAsGuest|TestOptionalAuthWithoutSessionDoesNotSignalInvalidAuthentication|TestParseCatalogSortRejectsUnknownValues|TestParseCatalogUpdatedRangeUsesWhitelist|TestParseCatalogVersionModeUsesWhitelist|TestParseModImportSource|TestParseModImportSourceRejectsForeignHost|TestParseModTextUploadSource|TestParseModpackImportSource|TestParsePlayerTextureUpdatesPatchSemantics|TestParsePlayerTextureUpdatesRejectsInvalidOrEmptyPatches|TestParseSimpleProjectImportSources|TestParseUserStatisticsRange|TestPermissionCreationRollsBackWhenAuditFailsIntegration|TestPersistedWebPObjectKey|TestPlainCommentSummary|TestPrepareExportLocaleBundlesKeepsRegionalLocalesDistinct|TestPrepareExportLocaleBundlesPreservesColdLocaleDictionary|TestPrepareExportRegistryResourcesSupportsKeyMappingIDs|TestPrivateFavoriteCannotRevealOtherPendingModCoreIntegration|TestPrivateProviderAddressClassification|TestProjectAutomationCurseForgeChangelogFailureCannotBecomeFallback|TestProjectAutomationHeartbeatParentCancellationCore|TestProjectAutomationLeaseFencingAndRecoveryCoreIntegration|TestProjectAutomationModrinthReleaseUsesProviderContract|TestProjectAutomationWritesAndTerminalStatusRespectCurrentClaimIntegration|TestProjectFileExtensionsForLargeResources|TestProjectMaintenanceAutomationPreservesManualOverride|TestProjectMaintenanceAutomationTransitionsAndRestoresOwnedStatus|TestProjectMutationBypassesReviewUsesExistingPermissionSystem|TestProjectRelationshipReviewPermissionsStayIndependent|TestProjectRelationshipReviewUsesTheAuthoritativePermissionAuditLog|TestProjectUpdateEventsMergeWithinDeliveryWindowIntegration|TestProviderAuthorAvatarFieldsDecode|TestProviderClientDoesNotDelegateTargetResolutionToEnvironmentProxy|TestProviderClientRejectsCrossHostRedirect|TestProviderClientRejectsProtocolDowngrade|TestProviderClientRejectsUnsafeURLStructure|TestPublicCatalogCoreSortQueriesIntegration|TestPureCYWatchCommand|TestQueueExportDocumentEntriesCompactsNormalizedNames|TestQueueExportDocumentEntriesRoutesMergedDocumentsByNamespace|TestQueueExportRecipeTemplateAndBindings|TestQueueExportTextAssetUsesBulkStage|TestRandomSeedCrawlerOffsetStaysInsideCandidateWindow|TestRatingDimensionsCoverEverySupportedTarget|TestReadyFailsClosedWithoutPostgreSQL|TestRecipeAllowsEmptyInputSlots|TestRecipeCandidateMayReferenceAnUncollectedItem|TestRecipeIdentityScope|TestRecipeProbabilityBelongsToEachOutputCandidate|TestRecipeSourceVersionPublicIDIsOptional|TestRedactLogTextMasksSensitiveValuesWithSnowflake|TestRedactModImportConfig|TestRenderBlueprintCover|TestRenderEmbeddedIconPNGUsesRequestedCanvas|TestRequestClientLocationAcceptsHeadersFromTrustedPeer|TestRequestClientLocationIgnoresHeadersFromUntrustedPeer|TestRequestedContributionYearValidatesRange|TestResourceKindForNamespacedTagRegistry|TestRolePermissionReadFailureDoesNotBecomeEmptyPermissions|TestSanitizeLogZipRejectsDuplicateNames|TestSanitizeLogZipRejectsTraversalAndRedactsEntries|TestSeedCrawlerDownloadThresholdIsStrict|TestSeedCrawlerHeartbeatStopsOnParentCancellation|TestSeedCrawlerLeaseFencingAndHeartbeatIntegration|TestSeedCrawlerProjectTypesUseCanonicalInternalValues|TestSeedModrinthSearchURLUsesOfficialAPIFilters|TestShouldRestartModExportStatus|TestSimpleProjectCatalogCountIntegration|TestSimpleProjectClassifications|TestSimpleProjectExternalClassification|TestSimpleProjectVersionFilterSupportsAnyAndAllMatching|TestSkinAssetJSONCanonicalContract|TestSkinLocalizationRevisionIntegration|TestSkinLocalizationUpdateRequiresAuthentication|TestSkinLocalizationUpdateValidationAndCompatibility|TestSkinRoutesAreRegistered|TestStickerMarkdownUsageQueryIntegration|TestSupportedExportNamesKeepsOnlyEditableBCP47Locales|TestSupportedExportTranslationFiles|TestSystemNotificationTranslationIsRejectedIntegration|TestTruncateOSSDeletionError|TestUserBlockRelationshipAndOwnedCommentTargetsIntegration|TestValidProviderDownloadURL|TestValidateCatalogDocumentContractRequiresNormalizedWorldgenV2|TestValidateCatalogResourceDefinitionAllowsModSpecificProperties|TestValidateCatalogResourceDefinitionEditableProperties|TestValidateCatalogResourceDefinitionRejectsInvalidKnownProperties|TestValidateCatalogTemplateGeometry|TestValidateExportBaseRecipeDocumentV2Only|TestValidateExportRecipeChanceBelongsToOutputItem|TestValidateExportRecipeLayoutKind|TestValidateExportZIPRejectsCaseInsensitiveDuplicates|TestValidateModExportManifestRequiresZipPackage|TestValidateRasterImageBytesDecodesWholePNG|TestValidateRatingRequestRequiresExactDimensionSet|TestValidateUsernameRejectsUnsafeOrOversizedValues|TestValidateUsernameSupportsUnicodeAndVisibleSpecialCharacters|TestWebPContainerRejectsHeaderOnlyAndTruncatedPayloads|TestYggdrasilSettingsRequestDecodesEmbeddedFields)$' -count=1 -json",
+      "status": "PASS",
+      "exit_code": 0,
+      "top_level_test_count": 237,
+      "test_run_count_including_subtests": 430,
+      "test_pass_count_including_subtests": 429,
+      "test_skip_count_including_subtests": 1,
+      "seconds": 31.388,
+      "evidence": "/tmp/mcmods-api-a-final4-race.jsonl",
+      "skipped_tests": [
+        {
+          "test": "TestBuildMRPackWithRealModrinthMetadata",
+          "status": "NOT_RUN",
+          "reason": "Existing opt-in real-provider metadata test not enabled; no real provider authorization claimed"
+        }
+      ],
+      "version_scope": "Working tree after API A major repairs, before final small modContent GET/POST classification, layout resource error-propagation, and seed translation-recovery exclusion. Those require separate final evidence."
+    },
+    {
+      "id": "APIA-new-five-targeted-race-valid-pattern",
+      "status": "PASS",
+      "exit_code": 0,
+      "test_run_count_including_subtests": 103,
+      "test_pass_count_including_subtests": 103,
+      "seconds": 15.765,
+      "evidence": "/tmp/mcmods-api-a-new-five-final3.jsonl",
+      "limitation": "Includes actual named parent-permission test plus existing content tests; intermediate version, not all latest faults.",
+      "exact_command_recorded": false,
+      "invocation_description": "Actual go test execution against the documented working tree or original-file overlay; exact selection expression not preserved for this earlier invocation, evidence retains actual test names and outcomes. Final targeted suite exact command is preserved separately."
+    },
+    {
+      "id": "APIA-compression-flush-red",
+      "status": "FAIL",
+      "expected_failure": true,
+      "reason": "Original gzip/underlying Flush swallowed controlled transport errors; three concrete failure assertions.",
+      "evidence": "/tmp/mcmods-api-a-compression-flush-red.log",
+      "exact_command_recorded": false,
+      "invocation_description": "Actual go test execution against the documented working tree or original-file overlay; exact selection expression not preserved for this earlier invocation, evidence retains actual test names and outcomes. Final targeted suite exact command is preserved separately."
+    },
+    {
+      "id": "APIA-parent-permission-red",
+      "status": "FAIL",
+      "expected_failure": true,
+      "reason": "Original seven GET entry points disclosed pending parent children to visitor/other user: 14 failing cases.",
+      "evidence": "/tmp/mcmods-api-a-mod-content-visibility-red.log",
+      "exact_command_recorded": false,
+      "invocation_description": "Actual go test execution against the documented working tree or original-file overlay; exact selection expression not preserved for this earlier invocation, evidence retains actual test names and outcomes. Final targeted suite exact command is preserved separately."
+    },
+    {
+      "id": "APIA-content-stream-red",
+      "status": "FAIL",
+      "expected_failure": true,
+      "reason": "Five actual PostgreSQL row-stream faults were returned as 200 in original handlers; fixture first proves Query succeeds and Rows.Err raises.",
+      "evidence": "/tmp/mcmods-api-a-content-stream-red2.log",
+      "exact_command_recorded": false,
+      "invocation_description": "Actual go test execution against the documented working tree or original-file overlay; exact selection expression not preserved for this earlier invocation, evidence retains actual test names and outcomes. Final targeted suite exact command is preserved separately."
+    },
+    {
+      "id": "APIA-content-read-fault-red",
+      "status": "FAIL",
+      "expected_failure": true,
+      "reason": "Original four handlers classified actual DB read errors as 404.",
+      "evidence": "/tmp/mcmods-api-a-content-query-red.log",
+      "exact_command_recorded": false,
+      "invocation_description": "Actual go test execution against the documented working tree or original-file overlay; exact selection expression not preserved for this earlier invocation, evidence retains actual test names and outcomes. Final targeted suite exact command is preserved separately."
+    },
+    {
+      "id": "APIA-layout-fault-red",
+      "status": "FAIL",
+      "expected_failure": true,
+      "reason": "Actual DB preparation fault returned 422 in original layout handler.",
+      "evidence": "/tmp/mcmods-api-a-content-layout-red.log",
+      "exact_command_recorded": false,
+      "invocation_description": "Actual go test execution against the documented working tree or original-file overlay; exact selection expression not preserved for this earlier invocation, evidence retains actual test names and outcomes. Final targeted suite exact command is preserved separately."
+    },
+    {
+      "id": "APIA-one-connection-red",
+      "status": "FAIL",
+      "expected_failure": true,
+      "reason": "Already-held transaction used the pool to acquire another connection; original actual MaxConns1 integration reaches deadline.",
+      "evidence": "/tmp/mcmods-api-a-content-pool-red2.log",
+      "exact_command_recorded": false,
+      "invocation_description": "Actual go test execution against the documented working tree or original-file overlay; exact selection expression not preserved for this earlier invocation, evidence retains actual test names and outcomes. Final targeted suite exact command is preserved separately."
+    },
+    {
+      "id": "APIA-automation-provider-red",
+      "status": "FAIL",
+      "expected_failure": true,
+      "reason": "Original MR snake_case loses version/time/channel, CF changelog 503 swallowed. Two controlled-HTTP tests.",
+      "evidence": "/tmp/mcmods-api-a-automation-provider-red.log",
+      "exact_command_recorded": false,
+      "invocation_description": "Actual go test execution against the documented working tree or original-file overlay; exact selection expression not preserved for this earlier invocation, evidence retains actual test names and outcomes. Final targeted suite exact command is preserved separately."
+    },
+    {
+      "id": "APIA-provider-proxy-red",
+      "status": "FAIL",
+      "expected_failure": true,
+      "reason": "Original proxy inherited and three unsafe URL structures accepted. No outbound provider requests.",
+      "evidence": "/tmp/mcmods-api-a-provider-proxy-red.log",
+      "exact_command_recorded": false,
+      "invocation_description": "Actual go test execution against the documented working tree or original-file overlay; exact selection expression not preserved for this earlier invocation, evidence retains actual test names and outcomes. Final targeted suite exact command is preserved separately."
+    },
+    {
+      "id": "APIA-seed-lease-original-green",
+      "command": "go test -race ./internal/httpapi -run ^TestSeedCrawler(LeaseFencingAndHeartbeatIntegration|HeartbeatStopsOnParentCancellation)$ -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "evidence": "/tmp/mcmods-api-a-seed-lease-green.log",
+      "limitation": "Ran before translation_recovery exclusion was appended."
+    },
+    {
+      "id": "APIA-final-vet-before-late-diff",
+      "command": "go vet ./internal/httpapi",
+      "status": "PASS",
+      "exit_code": 0,
+      "evidence": "/tmp/mcmods-api-a-final-vet.log",
+      "limitation": "Actual command exited 0; final tiny content/seed changes await subsequent repository vet."
+    },
+    {
+      "id": "APIA-inflight-build-blocker",
+      "command": "go test -race ./internal/httpapi -run '^(TestActiveStreaks|TestActivityCleanupWhereUsesOnlyPlaceholders|TestActivityRetentionIdentifiersMatchAuthoritativeSchema|TestAdminDashboardContractIntegration|TestAdministratorsCanDefineEmergencyProjectAccess|TestAntiAbuseActionClassification|TestAntiAbuseRateLimitPercentUsesVariablePermissions|TestAntiAbuseRateScopeSeparatesContentVersionMutations|TestApprovedScopedRoleAllowsCatalogEditingWithoutSessionReplacement|TestAuthenticationLookupFailurePreservesSession|TestBannedAccountMarkerRequiresExplicitPermission|TestBearerMutationDoesNotRequireBrowserOrigin|TestBlueprintCodecRoundTrips|TestBlueprintCoverRequiresSynchronousRasterValidation|TestBlueprintLocalizationPreservesHumanWorkIntegration|TestBlueprintPreviewCacheControl|TestBlueprintUploadOutboxAndDeletedDownloadIntegration|TestBuildIRRIconlessEntity|TestBuildMRPackRejectsUnsafeOrIncompleteFiles|TestBuildMRPackUsesRootIndexAndLoaderDependency|TestBuildMRPackWithRealModrinthMetadata|TestCanonicalImportedTemplatePromotionGeometryAndIdentity|TestCatalogApplicableVersionsUseAuthoritativeOrder|TestCatalogCoreSortFieldsSupportBothDirections|TestCatalogCreationEntrypointsCannotGrantProjectRoles|TestCatalogDatabaseFiltersCoverVersionAndCategoryBeforePagination|TestCatalogFeatureFilterUsesWhitelist|TestCatalogHeatOrderAcrossProjectTypes|TestCatalogHeatOrderIsDescendingNullSafeAndStable|TestCatalogHumanEditProvenance|TestCatalogImportedEditorLocalizationsGenerateStableDefaultName|TestCatalogImportedEditorLocalizationsPreferImportedTitleNames|TestCatalogIndexedOrderRetainsStableTieBreakers|TestCatalogLocalizationProvenanceUsesResolvedCanonicalLocale|TestCatalogMutationBaseSupportsFirstManualEditOfImport|TestCatalogMutationResponseIncludesActivityIdentity|TestCatalogRecipeResourceIconURL|TestCatalogResourceIdentityResolverUnifiesModIDAliases|TestCatalogSortDirectionRejectsUnknownValuesAndKeepsLegacyLinks|TestCatalogSubmitterIsNotAProjectEditor|TestCatalogTextAndBooleanParametersAreBounded|TestCleanupTimeBoundary|TestCleanupTokenComparison|TestClientIPFromForwardedChainIgnoresSpoofedLeftmostHop|TestClientIPFromForwardedChainRejectsMalformedHop|TestCollectExportIconCatalogCandidates|TestCollectPartialNormalizationFallbacks|TestCommentIdempotencyUsesTransactionLock|TestCommentLogAttachmentName|TestCommentProjectRoleFromPermissions|TestCommunityPostTranslationLifecycleIntegration|TestCommunityReferencesDoNotExposeUnpublishedProjectIntegration|TestCompactRecipeImportJSONRemovesDuplicatedChildren|TestCompactRegistryImportJSONRemovesNormalizedFields|TestCompressionFlushPropagatesGzipWriteErrors|TestCompressionFlushPropagatesTransportErrors|TestCompressionGzipsJSONResponses|TestCompressionHonorsExplicitGzipRejection|TestCompressionSkipsBinaryResponsesAndRejectedGzip|TestConcurrentRoleTrackUpgradesIntegration|TestContentLocalizationAggregateKeyIncludesSubjectType|TestContentReviewQueueQueryIntegration|TestContributionDateRangeUsesCalendarYearForHistory|TestContributionDateRangeUsesRollingWindowForCurrentYear|TestCookieMutationRequiresExactOrigin|TestCurseForgeFileCompatibility|TestDecodeEmbeddedIconCatalogJSONLines|TestDecodeExportTagsAssociatesSharedTagsWithRelevantRevisions|TestDecodeExportTranslationValuesSkipsNonStrings|TestDecodeExportTranslationValuesSupportsExporterWrapper|TestDecodeIRRCatalogMergesDuplicateRegistryVariants|TestDecodeIRRCatalogSupportsItemsAndIconlessEntities|TestDecodeIconRendererCatalogSupportsEntityIcons|TestDecodeModExportCapabilities|TestDeriveModExportBlockBindingsUsesRegistryRelationships|TestEffectivePromotionPowerDiminishesRepeatedUse|TestEmbeddedIconImportSourceAliases|TestEmbeddedIconPNGChecksDimensionsBeforePixelAllocation|TestEnvironmentFromSides|TestEvaluatePermissionUsesResolvedDenyRules|TestExportDocumentEntriesNormalizesLootTableCategories|TestExportDocumentEntriesPrecomputesNestedIndexes|TestExportIngredientKindKeepsMekanismFamiliesSeparate|TestExportLocaleLookupDoesNotRelabelRegionalTranslationsIntegration|TestExternalMetadataNormalization|TestExternalModpackCategoriesUseSiteTaxonomy|TestExternalSourceLinkType|TestFavoriteExportDatabaseFailureIsNotExpired|TestFavoriteExportExhaustedLeaseRecoveryIntegration|TestFavoriteExportRejectsInvalidDependencyShapeIntegration|TestFetchSeedModrinthProjectsProbesThenLoadsCandidatePage|TestFilterSupportedExportLocalizedFieldsFiltersNestedTooltips|TestFinalizeBlueprintDropsAir|TestGalleryRehomeDoesNotOverwriteAReplacementFile|TestGeneratedYggdrasilPrivateKeyRoundTrip|TestGroupPermissionDenyAndUnsupportedScopeIntegration|TestHumanReadableOSSObjectKeys|TestImportedAddonDraftAllowsParentSelectionAfterImport|TestImportedCatalogLocalizationRowsNormalizeMinecraftLocales|TestImportedSimpleProjectDraftsAreEditorReady|TestInspectAntiAbuseBodyRestoresContent|TestLegacyHealthRouteIsRemoved|TestLegacyProjectDeveloperApplicationRoutesAreRemoved|TestLiveProbeDoesNotRequireDependencies|TestLogShareExpiryAndCode|TestMRPackLoaderDependencyKeys|TestMailConfigurationRespectsDisabledAndKeepsFallbackImmutableIntegration|TestMapPublicOnlineVisibilityNeverExposesHiddenState|TestMinecraftServerReviewListQueryIntegration|TestMinecraftVersionLess|TestMinecraftVersionOrderKeepsConfiguredSequence|TestModContentCannotExposeUnapprovedParentIntegration|TestModContentResourcePreviewScopeAndSectionIntegration|TestModContentResourceVersionDetailsIntegration|TestModContentRevisionUsesItsTransactionWithOneConnectionIntegration|TestModContentVersionArchiveAndResourceRevivalIntegration|TestModMetadataImportDoesNotAcknowledgeDatabaseFailure|TestModMetadataImportLeaseIntegration|TestModrinthIndexModsExtractsProviderReferences|TestModrinthSimpleProjectTypeMatching|TestNormalizeActivityRetentionConfigRejectsUnknownAction|TestNormalizeCatalogLocalizationsAllowsPartialEditPatch|TestNormalizeCatalogLocalizationsRestrictsHumanEditing|TestNormalizeCreatorSnapshotCreatesDefaultLocalization|TestNormalizeCreatorSnapshotKeepsCanonicalName|TestNormalizeExportNamespaces|TestNormalizeExportPathRejectsUnsafePaths|TestNormalizeModContentSimilarGroups|TestNormalizeModImportConfigRequiresCurseForgeKey|TestNormalizeProjectFileType|TestNormalizePublicCardSlots|TestNormalizeRatingTargetType|TestNormalizeYggdrasilConfig|TestNormalizedExportSourceJSONRetention|TestOSSDeletionRetryDelay|TestOptionalAuthTreatsInvalidAuthorizationAsGuestWithoutClearingCookie|TestOptionalAuthTreatsInvalidCookieAsGuest|TestOptionalAuthWithoutSessionDoesNotSignalInvalidAuthentication|TestParseCatalogSortRejectsUnknownValues|TestParseCatalogUpdatedRangeUsesWhitelist|TestParseCatalogVersionModeUsesWhitelist|TestParseModImportSource|TestParseModImportSourceRejectsForeignHost|TestParseModTextUploadSource|TestParseModpackImportSource|TestParsePlayerTextureUpdatesPatchSemantics|TestParsePlayerTextureUpdatesRejectsInvalidOrEmptyPatches|TestParseSimpleProjectImportSources|TestParseUserStatisticsRange|TestPermissionCreationRollsBackWhenAuditFailsIntegration|TestPersistedWebPObjectKey|TestPlainCommentSummary|TestPrepareExportLocaleBundlesKeepsRegionalLocalesDistinct|TestPrepareExportLocaleBundlesPreservesColdLocaleDictionary|TestPrepareExportRegistryResourcesSupportsKeyMappingIDs|TestPrivateFavoriteCannotRevealOtherPendingModCoreIntegration|TestPrivateProviderAddressClassification|TestProjectAutomationCurseForgeChangelogFailureCannotBecomeFallback|TestProjectAutomationHeartbeatParentCancellationCore|TestProjectAutomationLeaseFencingAndRecoveryCoreIntegration|TestProjectAutomationModrinthReleaseUsesProviderContract|TestProjectAutomationWritesAndTerminalStatusRespectCurrentClaimIntegration|TestProjectFileExtensionsForLargeResources|TestProjectMaintenanceAutomationPreservesManualOverride|TestProjectMaintenanceAutomationTransitionsAndRestoresOwnedStatus|TestProjectMutationBypassesReviewUsesExistingPermissionSystem|TestProjectRelationshipReviewPermissionsStayIndependent|TestProjectRelationshipReviewUsesTheAuthoritativePermissionAuditLog|TestProjectUpdateEventsMergeWithinDeliveryWindowIntegration|TestProviderAuthorAvatarFieldsDecode|TestProviderClientDoesNotDelegateTargetResolutionToEnvironmentProxy|TestProviderClientRejectsCrossHostRedirect|TestProviderClientRejectsProtocolDowngrade|TestProviderClientRejectsUnsafeURLStructure|TestPublicCatalogCoreSortQueriesIntegration|TestPureCYWatchCommand|TestQueueExportDocumentEntriesCompactsNormalizedNames|TestQueueExportDocumentEntriesRoutesMergedDocumentsByNamespace|TestQueueExportRecipeTemplateAndBindings|TestQueueExportTextAssetUsesBulkStage|TestRandomSeedCrawlerOffsetStaysInsideCandidateWindow|TestRatingDimensionsCoverEverySupportedTarget|TestReadyFailsClosedWithoutPostgreSQL|TestRecipeAllowsEmptyInputSlots|TestRecipeCandidateMayReferenceAnUncollectedItem|TestRecipeIdentityScope|TestRecipeProbabilityBelongsToEachOutputCandidate|TestRecipeSourceVersionPublicIDIsOptional|TestRedactLogTextMasksSensitiveValuesWithSnowflake|TestRedactModImportConfig|TestRenderBlueprintCover|TestRenderEmbeddedIconPNGUsesRequestedCanvas|TestRequestClientLocationAcceptsHeadersFromTrustedPeer|TestRequestClientLocationIgnoresHeadersFromUntrustedPeer|TestRequestedContributionYearValidatesRange|TestResourceKindForNamespacedTagRegistry|TestRolePermissionReadFailureDoesNotBecomeEmptyPermissions|TestSanitizeLogZipRejectsDuplicateNames|TestSanitizeLogZipRejectsTraversalAndRedactsEntries|TestSeedCrawlerDownloadThresholdIsStrict|TestSeedCrawlerHeartbeatStopsOnParentCancellation|TestSeedCrawlerLeaseFencingAndHeartbeatIntegration|TestSeedCrawlerProjectTypesUseCanonicalInternalValues|TestSeedModrinthSearchURLUsesOfficialAPIFilters|TestShouldRestartModExportStatus|TestSimpleProjectCatalogCountIntegration|TestSimpleProjectClassifications|TestSimpleProjectExternalClassification|TestSimpleProjectVersionFilterSupportsAnyAndAllMatching|TestSkinAssetJSONCanonicalContract|TestSkinLocalizationRevisionIntegration|TestSkinLocalizationUpdateRequiresAuthentication|TestSkinLocalizationUpdateValidationAndCompatibility|TestSkinRoutesAreRegistered|TestStickerMarkdownUsageQueryIntegration|TestSupportedExportNamesKeepsOnlyEditableBCP47Locales|TestSupportedExportTranslationFiles|TestSystemNotificationTranslationIsRejectedIntegration|TestTruncateOSSDeletionError|TestUserBlockRelationshipAndOwnedCommentTargetsIntegration|TestValidProviderDownloadURL|TestValidateCatalogDocumentContractRequiresNormalizedWorldgenV2|TestValidateCatalogResourceDefinitionAllowsModSpecificProperties|TestValidateCatalogResourceDefinitionEditableProperties|TestValidateCatalogResourceDefinitionRejectsInvalidKnownProperties|TestValidateCatalogTemplateGeometry|TestValidateExportBaseRecipeDocumentV2Only|TestValidateExportRecipeChanceBelongsToOutputItem|TestValidateExportRecipeLayoutKind|TestValidateExportZIPRejectsCaseInsensitiveDuplicates|TestValidateModExportManifestRequiresZipPackage|TestValidateRasterImageBytesDecodesWholePNG|TestValidateRatingRequestRequiresExactDimensionSet|TestValidateUsernameRejectsUnsafeOrOversizedValues|TestValidateUsernameSupportsUnicodeAndVisibleSpecialCharacters|TestWebPContainerRejectsHeaderOnlyAndTruncatedPayloads|TestYggdrasilSettingsRequestDecodesEmbeddedFields)$' -count=1 -json",
+      "status": "BLOCKED",
+      "exit_code": 1,
+      "test_run_count_including_subtests": 0,
+      "evidence": "/tmp/mcmods-api-a-final3-race.jsonl",
+      "reason": "Concurrent agent seed helper/signature additions were incomplete; later defined. Does not prove any business test failure."
+    },
+    {
+      "id": "APIA-content-pool-inflight-build-blocker",
+      "status": "BLOCKED",
+      "exit_code": 1,
+      "test_run_count_including_subtests": 0,
+      "evidence": "/tmp/mcmods-api-a-content-pool-red.log",
+      "reason": "Other agent test used then-in-flight helper signature; actual red is red2 after compilation."
+    },
+    {
+      "id": "APIA-state-safety-preflight",
+      "status": "BLOCKED",
+      "test_run_count_including_subtests": 0,
+      "evidence": [
+        "/tmp/mcmods-api-a-community-cross-final.jsonl",
+        "/tmp/mcmods-api-a-community-filter-final-green.log"
+      ],
+      "reason": "TestMain rejected missing MCMODS_TEST_STATE in original owned env; no DB tests ran. Root repaired task-owned setup/env and valid rerun PASS."
+    },
+    {
+      "id": "APIA-content-mistyped-pattern",
+      "status": "NOT_RUN",
+      "evidence": "/tmp/mcmods-api-a-new-five-final.log",
+      "reason": "Pattern TestModContentCannotRevealPendingParentIntegration did not match actual TestModContentCannotExposeUnapprovedParentIntegration. Other groups passed; content group was not run. Correct valid-pattern evidence is final2/final3/final4."
+    },
+    {
+      "id": "APIA-late-content-seed-fresh",
+      "command": "go test -race ./internal/httpapi -run '^(TestCommunityPublishedReferencesCannotExposePrivateResourceIntegration|TestCommunityCreateUsesItsTransactionWithOneConnectionIntegration|TestModContentCannotExposeUnapprovedParentIntegration|TestSeedCrawlerLeaseFencingAndHeartbeatIntegration|TestSeedCrawlerHeartbeatStopsOnParentCancellation)$' -count=1 -json",
+      "status": "PASS",
+      "reason": "Fresh task-owned generation85 + 2 forward repairs (repairs are not schema generations) PostgreSQL; 52 content permission/stream/read-fault cases plus community private resources, actual create/update/list MaxConns1 and crawler recovery identity. Later strict community DB errors rechecked in fresh3.",
+      "exit_code": 0,
+      "evidence": "/tmp/mcmods-api-a-final-fresh2-race.jsonl",
+      "test_run_count_including_subtests": 62,
+      "test_pass_count_including_subtests": 62,
+      "seconds": 8.418
+    },
+    {
+      "id": "APIA-full-repository-final",
+      "status": "NOT_RUN",
+      "reason": "Root owns final full repository test/vet/build/race/browser/CI; this selected API suite does not substitute for those checks."
+    },
+    {
+      "id": "APIA-community-resource-create-red",
+      "command": "go test ./internal/httpapi -run '^(TestCommunityPublishedReferencesCannotExposePrivateResourceIntegration|TestCommunityCreateUsesItsTransactionWithOneConnectionIntegration)$' -count=1 -v",
+      "status": "FAIL",
+      "exit_code": 1,
+      "evidence": "/tmp/mcmods-api-a-community-resource-pool-red.log",
+      "expected_failure": true,
+      "reason": "Actual full-migrated task-owned databases: pending/withdrawn resources leaked metadata; MaxConns1 create hit deadline/500; approved resource positive passed."
+    },
+    {
+      "id": "APIA-community-list-red",
+      "command": "go test ./internal/httpapi -run '^TestCommunityPublishedReferencesCannotExposePrivateResourceIntegration$' -count=1 -v",
+      "status": "FAIL",
+      "exit_code": 1,
+      "evidence": "/tmp/mcmods-api-a-community-list-pool-red.log",
+      "expected_failure": true,
+      "reason": "After resource visibility fix, actual MaxConns1 list still self-blocked on OSS config during held row stream; three 3-second-deadline list failures. Fixed by loading config before Query."
+    },
+    {
+      "id": "APIA-community-runtime-error-red",
+      "command": "go test -overlay /tmp/mcmods-api-a-community-last-overlay.json ./internal/httpapi -run '^TestCommunityDatabaseFailureIsNotReportedAsInvalidOrMissing$' -count=1 -v",
+      "status": "FAIL",
+      "exit_code": 1,
+      "evidence": "/tmp/mcmods-api-a-community-read-failure-red.log",
+      "expected_failure": true,
+      "reason": "Controlled closed pool error: original edit/result 404 and translation request400; three strict assertions. This is failure-injection unit evidence, not database integration."
+    },
+    {
+      "id": "APIA-fresh-inflight-compile-blocker",
+      "command": "go test -race ./internal/httpapi -run '^(TestCommunityPublishedReferencesCannotExposePrivateResourceIntegration|TestCommunityCreateUsesItsTransactionWithOneConnectionIntegration|TestModContentCannotExposeUnapprovedParentIntegration|TestSeedCrawlerLeaseFencingAndHeartbeatIntegration|TestSeedCrawlerHeartbeatStopsOnParentCancellation)$' -count=1 -json",
+      "status": "BLOCKED",
+      "exit_code": 1,
+      "evidence": "/tmp/mcmods-api-a-final-fresh-race.jsonl",
+      "test_run_count_including_subtests": 0,
+      "reason": "ai_handlers.go then-in-flight subscribeErr undefined. Owner fixed; no business assertions ran in failed compile. Fresh2/fresh3 actual re-execution passed."
+    },
+    {
+      "id": "APIA-final-current-targeted-race",
+      "command": "go test -race ./internal/httpapi -run '^(TestCommunityPublishedReferencesCannotExposePrivateResourceIntegration|TestCommunityCreateUsesItsTransactionWithOneConnectionIntegration|TestCommunityDatabaseFailureIsNotReportedAsInvalidOrMissing|TestCommunityPostTranslationLifecycleIntegration|TestCommunityReferencesDoNotExposeUnpublishedProjectIntegration|TestModContentCannotExposeUnapprovedParentIntegration|TestSeedCrawlerLeaseFencingAndHeartbeatIntegration|TestSeedCrawlerHeartbeatStopsOnParentCancellation)$' -count=1 -json",
+      "status": "PASS",
+      "exit_code": 0,
+      "evidence": "/tmp/mcmods-api-a-final-fresh3-race.jsonl",
+      "test_run_count_including_subtests": 80,
+      "test_pass_count_including_subtests": 80,
+      "test_skip_count_including_subtests": 0,
+      "top_level_test_count": 8,
+      "seconds": 6.844,
+      "version_scope": "All final API A source changes frozen before execution; generation85 + 2 forward repairs (repairs are not schema generations) owned PostgreSQL; no paid/live provider or OSS calls."
+    },
+    {
+      "id": "APIA-final-current-vet",
+      "command": "go vet ./internal/httpapi",
+      "status": "PASS",
+      "exit_code": 0,
+      "evidence": "/tmp/mcmods-api-a-final-fresh2-vet.log",
+      "version_scope": "Executed after last strict community DB error changes; source frozen."
+    }
+  ],
+  "runtime_versions": {
+    "Go": "1.26.5",
+    "database": "PostgreSQL 17, dedicated task-owned loopback database",
+    "cache_queue": "Root installed Redis/NATS; API A selected tests also use explicit miniredis/local HTTP where stated"
+  },
+  "safety_boundary": "TestMain validates task-owned state/loopback identity; no production targets, real paid AI, SMTP sending or live OSS/provider requests. Full-migrated isolated databases and private LIKE schemas are distinguished in backend-api-a.md.",
+  "final_source_fingerprints": {
+    "internal/httpapi/community_post_handlers.go": "6021af4f5ef15bbc428841dbcb42716557889d366a6d403424740a462e6bdf1b",
+    "internal/httpapi/mod_content_handlers.go": "54ad92853c689aea34df416fc8c1614df0a5ef27655d113148eb0e3c90644735",
+    "internal/httpapi/mod_content_layout_handlers.go": "811341d5da0dd905a4d4a94802484a6254e75a7418b09327b7897ede3e6a7eb5",
+    "internal/httpapi/seed_crawler_lease.go": "c388eaf0f22c66df0a3ecfd4f3c6c174f8e46affac1bfd1ad305dbc9fb05a76f",
+    "internal/httpapi/community_post_reliability_integration_test.go": "37d107803186cc006bdc2fb00556cbdeaad13c452b5a1906cc617e04299ee1ab",
+    "internal/httpapi/community_post_database_failure_test.go": "d84a8044324afe4bc341351408e24222fcc21d8dc245f0352b7ad21d2a34513d"
+  },
+  "retained_current_evidence": "docs/audit/evidence/api-a-current-targeted.json"
+}

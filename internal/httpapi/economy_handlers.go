@@ -117,8 +117,16 @@ func (s *Server) userEconomyOverview(w http.ResponseWriter, r *http.Request) {
 		Scan(&experience, &level)
 	var timezone string
 	_ = s.db.QueryRow(r.Context(), `select timezone from users where id=$1`, userID).Scan(&timezone)
-	config := s.economyConfigFromSettings(r.Context())
-	eligibleAt, checkedInToday := s.nextCheckinState(r.Context(), userID, timezone, config.Checkin.MinimumHours)
+	config, err := s.economyConfigFromSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load economy configuration")
+		return
+	}
+	eligibleAt, checkedInToday, err := s.nextCheckinState(r.Context(), userID, timezone, config.Checkin.MinimumHours)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load check-in state")
+		return
+	}
 	inventory, err := s.userInventory(r.Context(), userID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load inventory")
@@ -227,7 +235,11 @@ func (s *Server) userExperienceTransactions(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) checkIn(w http.ResponseWriter, r *http.Request) {
-	config := s.economyConfigFromSettings(r.Context())
+	config, err := s.economyConfigFromSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load economy configuration")
+		return
+	}
 	if !config.Checkin.Enabled {
 		writeError(w, http.StatusConflict, "check-in is disabled")
 		return
@@ -336,7 +348,7 @@ func (s *Server) transferCurrency(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to lock balances")
 		return
 	}
-	tax := int64(math.Ceil(float64(request.Amount*int64(taxBPS)) / 10000))
+	tax := currencyTransferTax(request.Amount, taxBPS)
 	received := request.Amount - tax
 	if received <= 0 {
 		writeError(w, http.StatusBadRequest, "transfer amount is too small after tax")
@@ -391,6 +403,11 @@ func (s *Server) purchaseShopItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := currentClaims(r).Subject
+	_, permissions, err := s.resolveUserRootPermissions(r.Context(), userID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load item permissions")
+		return
+	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start purchase")
@@ -410,11 +427,15 @@ func (s *Server) purchaseShopItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load shop item")
 		return
 	}
-	if permission != "" && !s.userHasPermission(r.Context(), userID, permission) {
+	if permission != "" && !permissionRulesAllow(permissions, permission) {
 		writeError(w, http.StatusForbidden, "missing permission to purchase this item")
 		return
 	}
-	total := unitPrice * int64(request.Quantity)
+	total, err := currencyAmountProduct(unitPrice, int64(request.Quantity))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "purchase total exceeds the supported currency amount")
+		return
+	}
 	if _, err = lockCurrencyBalanceTx(r.Context(), tx, userID, currencyID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to lock balance")
 		return
@@ -469,6 +490,14 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 	}
 	request.ItemCode = normalizeCode(request.ItemCode)
 	userID := currentClaims(r).Subject
+	_, permissions, err := s.resolveUserRootPermissions(r.Context(), userID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load item permissions")
+		return
+	}
+	ossConfig := s.ossConfigFromSettings(r.Context())
+	request.TargetID = strings.ToLower(strings.TrimSpace(request.TargetID))
+	target, targetErr := s.resolveRateableTarget(r.Context(), request.TargetType, request.TargetID)
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start item use")
@@ -489,13 +518,17 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load shop item")
 		return
 	}
-	if permission != "" && !s.userHasPermission(r.Context(), userID, permission) {
+	if permission != "" && !permissionRulesAllow(permissions, permission) {
 		writeError(w, http.StatusForbidden, "missing permission to use this item")
 		return
 	}
 	var quantity int
 	if err = tx.QueryRow(r.Context(), `select quantity from user_inventory
-		where user_id=$1 and shop_item_id=$2 for update`, userID, itemID).Scan(&quantity); err != nil || quantity <= 0 {
+		where user_id=$1 and shop_item_id=$2 for update`, userID, itemID).Scan(&quantity); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusServiceUnavailable, "failed to load inventory")
+		return
+	}
+	if quantity <= 0 {
 		writeError(w, http.StatusConflict, "item is not available in inventory")
 		return
 	}
@@ -506,7 +539,7 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "profile background file is required")
 			return
 		}
-		backgroundURL := ossStoredObjectURL(s.ossConfigFromSettings(r.Context()), file.ObjectKey)
+		backgroundURL := ossStoredObjectURL(ossConfig, file.ObjectKey)
 		if _, err = tx.Exec(r.Context(), `update users set profile_background_file_id=$2,
 			profile_background_url=$3,updated_at=now() where id=$1`, userID, file.ID, backgroundURL); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to update profile background")
@@ -527,8 +560,7 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "a collected project target is required")
 			return
 		}
-		target, resolveErr := s.resolveRateableTarget(r.Context(), targetType, request.TargetID)
-		if resolveErr != nil {
+		if targetErr != nil {
 			writeError(w, http.StatusNotFound, "heat boost target was not found")
 			return
 		}
@@ -602,7 +634,12 @@ func effectivePromotionPower(basePower float64, previousUseCount int) float64 {
 }
 
 func (s *Server) adminEconomyConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.economyConfigFromSettings(r.Context()))
+	config, err := s.economyConfigFromSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load economy configuration")
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
 }
 
 func (s *Server) updateEconomyConfig(w http.ResponseWriter, r *http.Request) {
@@ -820,6 +857,14 @@ func (s *Server) loadShopItems(ctx context.Context, includeDisabled bool, userID
 	if includeDisabled {
 		where = ""
 	}
+	var resolved []security.PermissionRule
+	if userID > 0 {
+		_, permissions, permissionErr := s.resolveUserRootPermissions(ctx, userID)
+		if permissionErr != nil {
+			return nil, permissionErr
+		}
+		resolved = permissions
+	}
 	rows, err := s.db.Query(ctx, `select item.public_id,item.code,item.item_type,item.name,item.description,
 		item.icon,item.translations,currency.code,item.price_amount,item.purchase_permission,item.use_permission,
 		item.config,item.status,coalesce(inventory.quantity,0)
@@ -831,14 +876,6 @@ func (s *Server) loadShopItems(ctx context.Context, includeDisabled bool, userID
 		return nil, err
 	}
 	defer rows.Close()
-	var resolved []security.PermissionRule
-	if userID > 0 {
-		_, permissions, permissionErr := s.resolveUserRootPermissions(ctx, userID)
-		if permissionErr != nil {
-			return nil, permissionErr
-		}
-		resolved = permissions
-	}
 	allows := func(permission string) bool {
 		if permission == "" {
 			return true
@@ -895,18 +932,41 @@ func (s *Server) userInventory(ctx context.Context, userID int64) ([]map[string]
 	return items, rows.Err()
 }
 
-func (s *Server) economyConfigFromSettings(ctx context.Context) economyConfigPayload {
+func (s *Server) economyConfigFromSettings(ctx context.Context) (economyConfigPayload, error) {
 	payload := defaultEconomyConfig()
 	var raw []byte
-	if err := s.db.QueryRow(ctx, `select value from system_settings where key=$1`, economyConfigSettingKey).
-		Scan(&raw); err == nil {
-		_ = json.Unmarshal(raw, &payload)
+	err := s.db.QueryRow(ctx, `select value from system_settings where key=$1`, economyConfigSettingKey).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return payload, nil
 	}
-	normalized, err := normalizeEconomyConfig(payload)
 	if err != nil {
-		return defaultEconomyConfig()
+		return economyConfigPayload{}, err
 	}
-	return normalized
+	if !strings.HasPrefix(strings.TrimSpace(string(raw)), "{") {
+		return economyConfigPayload{}, errors.New("economy configuration must be an object")
+	}
+	var fields map[string]json.RawMessage
+	if err = json.Unmarshal(raw, &fields); err != nil {
+		return economyConfigPayload{}, err
+	}
+	if checkin, exists := fields["checkin"]; exists {
+		if !strings.HasPrefix(strings.TrimSpace(string(checkin)), "{") {
+			return economyConfigPayload{}, errors.New("check-in configuration must be an object")
+		}
+		var switches map[string]json.RawMessage
+		if err = json.Unmarshal(checkin, &switches); err != nil {
+			return economyConfigPayload{}, err
+		}
+		for _, key := range []string{"enabled", "currency", "amount", "minimumHours"} {
+			if value, exists := switches[key]; exists && strings.TrimSpace(string(value)) == "null" {
+				return economyConfigPayload{}, errors.New("check-in configuration fields cannot be null")
+			}
+		}
+	}
+	if err = json.Unmarshal(raw, &payload); err != nil {
+		return economyConfigPayload{}, err
+	}
+	return normalizeEconomyConfig(payload)
 }
 
 func defaultEconomyConfig() economyConfigPayload {
@@ -962,21 +1022,39 @@ func loadLocation(name string) *time.Location {
 	return location
 }
 
-func (s *Server) nextCheckinState(ctx context.Context, userID int64, timezone string, minimumHours int) (*time.Time, bool) {
+func (s *Server) nextCheckinState(ctx context.Context, userID int64, timezone string, minimumHours int) (*time.Time, bool, error) {
 	var claimedAt time.Time
 	var localDate string
 	err := s.db.QueryRow(ctx, `select claimed_at,local_date::text from user_checkins
 		where user_id=$1 order by claimed_at desc limit 1`, userID).Scan(&claimedAt, &localDate)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
 	if err != nil {
-		return nil, false
+		return nil, false, err
 	}
 	now := time.Now().UTC()
 	checkedInToday := localDate == now.In(loadLocation(timezone)).Format("2006-01-02")
 	eligible := claimedAt.Add(time.Duration(minimumHours) * time.Hour)
-	return &eligible, checkedInToday
+	return &eligible, checkedInToday, nil
 }
 
 var errInsufficientBalance = errors.New("insufficient balance")
+var errCurrencyAmountOverflow = errors.New("currency amount exceeds the supported range")
+
+// Split the amount before multiplication to preserve integer ceil semantics
+// across the full bigint range, including amounts above float64's precision.
+func currencyTransferTax(amount int64, taxBPS int) int64 {
+	bps := int64(taxBPS)
+	return amount/10000*bps + (amount%10000*bps+9999)/10000
+}
+
+func currencyAmountProduct(left, right int64) (int64, error) {
+	if left < 0 || right < 0 || (right > 0 && left > math.MaxInt64/right) {
+		return 0, errCurrencyAmountOverflow
+	}
+	return left * right, nil
+}
 
 func resolveTransferRecipient(ctx context.Context, tx pgx.Tx, value string) (int64, error) {
 	if id, err := strconv.ParseInt(value, 10, 64); err == nil && id > 0 {
@@ -1059,10 +1137,13 @@ func applyLockedCurrencyBalanceChangeTx(
 	referenceType, referenceKey string,
 	metadata map[string]any,
 ) (int64, error) {
-	next := current + delta
-	if next < 0 {
+	if delta < 0 && delta < -current {
 		return current, errInsufficientBalance
 	}
+	if delta > 0 && current > math.MaxInt64-delta {
+		return current, errCurrencyAmountOverflow
+	}
+	next := current + delta
 	if _, err := tx.Exec(ctx, `update user_currency_balances set balance=$3,updated_at=now()
 		where user_id=$1 and currency_id=$2`, userID, currencyID, next); err != nil {
 		return 0, err
@@ -1086,7 +1167,10 @@ func (s *Server) recordOwnedContentDownload(
 	if ownerID <= 0 || ownerID == downloaderID {
 		return nil
 	}
-	config := s.economyConfigFromSettings(ctx)
+	config, err := s.economyConfigFromSettings(ctx)
+	if err != nil {
+		return err
+	}
 	rules := make([]economyDownloadReward, 0)
 	for _, rule := range config.DownloadRewards {
 		if rule.ObjectType == objectType {
@@ -1132,7 +1216,10 @@ func (s *Server) recordOwnedContentDownload(
 			continue
 		}
 		deltaSteps := targetSteps - rewardedSteps
-		rewardAmount := deltaSteps * rule.Amount
+		rewardAmount, amountErr := currencyAmountProduct(deltaSteps, rule.Amount)
+		if amountErr != nil {
+			return amountErr
+		}
 		if _, err = changeCurrencyBalanceByIDTx(
 			ctx, tx, ownerID, currencyID, rewardAmount, "content_download_reward", nil,
 			objectType, objectPublicID, map[string]any{"downloads": downloads, "steps": deltaSteps},

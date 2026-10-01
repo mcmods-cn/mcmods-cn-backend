@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -123,17 +125,14 @@ func defaultNotificationTemplateConfig() notificationTemplateConfig {
 	return result
 }
 
-// All enabled site locales receive a concrete seed value. Administrators can
-// replace each translation independently; English is the safe initial value
-// for locales whose product copy has not yet been curated.
+// Only genuinely authored default languages are stored. Other UI languages
+// use the normal fallback chain and report the language actually rendered;
+// English under a French/Arabic/etc. key is not a French/Arabic translation.
 func defaultNotificationTranslations(zhTitle, zhBody, enTitle, enBody string) map[string]localizedNotificationTemplate {
-	result := make(map[string]localizedNotificationTemplate, len(supportedEditableContentLocales))
-	for _, locale := range supportedContentLocaleList() {
-		result[locale] = localizedNotificationTemplate{Title: enTitle, Body: enBody}
+	return map[string]localizedNotificationTemplate{
+		"zh-CN": {Title: zhTitle, Body: zhBody},
+		"en-US": {Title: enTitle, Body: enBody},
 	}
-	result["zh-CN"] = localizedNotificationTemplate{Title: zhTitle, Body: zhBody}
-	result["zh-TW"] = localizedNotificationTemplate{Title: zhTitle, Body: zhBody}
-	return result
 }
 
 func mergeNotificationTemplates(config notificationTemplateConfig) notificationTemplateConfig {
@@ -177,13 +176,31 @@ func mergeNotificationTemplates(config notificationTemplateConfig) notificationT
 	return result
 }
 
-func loadNotificationTemplateConfig(ctx context.Context, db *pgxpool.Pool) notificationTemplateConfig {
+func loadNotificationTemplateConfig(ctx context.Context, db revisionQuery) notificationTemplateConfig {
+	config, err := loadNotificationTemplateConfigChecked(ctx, db)
+	if err != nil {
+		return mergeNotificationTemplates(notificationTemplateConfig{})
+	}
+	return config
+}
+
+func loadNotificationTemplateConfigChecked(ctx context.Context, db revisionQuery) (notificationTemplateConfig, error) {
 	var raw []byte
 	var config notificationTemplateConfig
-	if err := db.QueryRow(ctx, `select value from system_settings where key=$1`, notificationTemplatesSettingKey).Scan(&raw); err == nil {
-		_ = json.Unmarshal(raw, &config)
+	err := db.QueryRow(ctx, `select value from system_settings where key=$1`, notificationTemplatesSettingKey).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return mergeNotificationTemplates(config), nil
 	}
-	return mergeNotificationTemplates(config)
+	if err != nil {
+		return notificationTemplateConfig{}, err
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(raw)), "{") {
+		return notificationTemplateConfig{}, errors.New("notification templates must be an object")
+	}
+	if err = json.Unmarshal(raw, &config); err != nil {
+		return notificationTemplateConfig{}, err
+	}
+	return mergeNotificationTemplates(config), nil
 }
 
 func renderNotificationTemplate(ctx context.Context, db *pgxpool.Pool, userID int64, code string, values map[string]string) (renderedNotificationTemplate, error) {
@@ -219,15 +236,27 @@ func renderNotificationTemplateForLocale(config notificationTemplateConfig, requ
 	if strings.TrimSpace(selected.Title) == "" || strings.TrimSpace(selected.Body) == "" {
 		return renderedNotificationTemplate{}, fmt.Errorf("notification template %q has no usable translation", code)
 	}
-	valuesCopy := make(map[string]string, len(values))
-	for key, value := range values {
-		valuesCopy[key] = value
-		selected.Title = strings.ReplaceAll(selected.Title, "{"+key+"}", value)
-		selected.Body = strings.ReplaceAll(selected.Body, "{"+key+"}", value)
+	allowed := make(map[string]bool, len(definition.Variables))
+	for _, variable := range definition.Variables {
+		allowed[variable] = true
 	}
-	if missing := unresolvedNotificationVariables(selected.Title + "\n" + selected.Body); len(missing) > 0 {
-		return renderedNotificationTemplate{}, fmt.Errorf("notification template %q missing values: %s", code, strings.Join(missing, ","))
+	valuesCopy := make(map[string]string, len(definition.Variables))
+	for _, variable := range unresolvedNotificationVariables(selected.Title + "\n" + selected.Body) {
+		if !allowed[variable] {
+			return renderedNotificationTemplate{}, fmt.Errorf("notification template %q uses an undeclared variable", code)
+		}
+		value, exists := values[variable]
+		if !exists {
+			return renderedNotificationTemplate{}, fmt.Errorf("notification template %q missing value: %s", code, variable)
+		}
+		valuesCopy[variable] = value
 	}
+	// Replace only tokens from the template, exactly once. User values are
+	// literal content: braces in a project name must not become instructions
+	// or be interpreted as another variable depending on map iteration order.
+	replace := func(token string) string { return valuesCopy[token[1:len(token)-1]] }
+	selected.Title = notificationTemplateVariablePattern.ReplaceAllStringFunc(selected.Title, replace)
+	selected.Body = notificationTemplateVariablePattern.ReplaceAllStringFunc(selected.Body, replace)
 	return renderedNotificationTemplate{Key: code, Version: max(1, definition.Version), Locale: selectedLocale, Title: selected.Title, Body: selected.Body, Values: valuesCopy}, nil
 }
 
@@ -268,7 +297,12 @@ func (s *Server) sendTemplatedNotification(ctx context.Context, userID int64, co
 }
 
 func (s *Server) getNotificationTemplates(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, loadNotificationTemplateConfig(r.Context(), s.db))
+	config, err := loadNotificationTemplateConfigChecked(r.Context(), s.db)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取通知模板失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
 }
 
 func (s *Server) updateNotificationTemplates(w http.ResponseWriter, r *http.Request) {
@@ -277,14 +311,18 @@ func (s *Server) updateNotificationTemplates(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	current := loadNotificationTemplateConfig(r.Context(), s.db)
+	current, err := loadNotificationTemplateConfigChecked(r.Context(), s.db)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取通知模板失败")
+		return
+	}
 	request = versionNotificationTemplateChanges(current, mergeNotificationTemplates(request))
 	if err := validateNotificationTemplateConfig(request); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	raw, _ := json.Marshal(request)
-	_, err := s.db.Exec(r.Context(), `insert into system_settings(key,value,updated_by,updated_at)
+	_, err = s.db.Exec(r.Context(), `insert into system_settings(key,value,updated_by,updated_at)
 		values($1,$2::jsonb,$3,now())
 		on conflict(key) do update
 		set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`,
@@ -331,8 +369,16 @@ func validateNotificationTemplateConfig(config notificationTemplateConfig) error
 		for _, variable := range item.Variables {
 			allowed[variable] = struct{}{}
 		}
+		for locale := range item.Translations {
+			if !slices.Contains(locales, locale) {
+				return fmt.Errorf("模板 %s 语言 %s 未受支持", item.Code, locale)
+			}
+		}
 		for _, locale := range locales {
 			value, ok := item.Translations[locale]
+			if !ok && locale != "zh-CN" && locale != "en-US" {
+				continue
+			}
 			if !ok || strings.TrimSpace(value.Title) == "" || strings.TrimSpace(value.Body) == "" {
 				return fmt.Errorf("模板 %s 缺少 %s 文案", item.Code, locale)
 			}
@@ -347,7 +393,12 @@ func validateNotificationTemplateConfig(config notificationTemplateConfig) error
 }
 
 func (s *Server) getReviewConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, loadReviewConfig(r.Context(), s.db))
+	config, err := loadReviewConfigChecked(r.Context(), s.db)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取审核设置失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
 }
 
 func (s *Server) updateReviewConfig(w http.ResponseWriter, r *http.Request) {
@@ -369,14 +420,46 @@ func (s *Server) updateReviewConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, request)
 }
 
-func loadReviewConfig(ctx context.Context, db *pgxpool.Pool) reviewConfig {
+func loadReviewConfig(ctx context.Context, db revisionQuery) reviewConfig {
+	config, err := loadReviewConfigChecked(ctx, db)
+	if err == nil {
+		return config
+	}
+	// An unavailable or malformed configuration must not disable moderation.
+	// Missing settings retain the documented bootstrap defaults below.
+	config = defaultReviewConfig()
+	config.BlueprintCreate, config.BlueprintEdit = true, true
+	config.ModContentSectionCreate, config.AITranslation = true, true
+	return config
+}
+
+func loadReviewConfigChecked(ctx context.Context, db revisionQuery) (reviewConfig, error) {
 	var raw []byte
 	config := defaultReviewConfig()
 	err := db.QueryRow(ctx, `select value from system_settings where key=$1`, reviewConfigSettingKey).Scan(&raw)
-	if err == nil {
-		_ = json.Unmarshal(raw, &config)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return config, nil
 	}
-	return config
+	if err != nil {
+		return reviewConfig{}, err
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(raw)), "{") {
+		return reviewConfig{}, errors.New("review configuration must be an object")
+	}
+	var fields map[string]json.RawMessage
+	if err = json.Unmarshal(raw, &fields); err != nil {
+		return reviewConfig{}, err
+	}
+	configType := reflect.TypeOf(config)
+	for index := 0; index < configType.NumField(); index++ {
+		if value, exists := fields[configType.Field(index).Tag.Get("json")]; exists && strings.TrimSpace(string(value)) == "null" {
+			return reviewConfig{}, errors.New("review switches cannot be null")
+		}
+	}
+	if err = json.Unmarshal(raw, &config); err != nil {
+		return reviewConfig{}, err
+	}
+	return config, nil
 }
 
 func defaultReviewConfig() reviewConfig {

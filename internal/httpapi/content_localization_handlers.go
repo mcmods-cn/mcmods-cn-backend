@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -147,19 +146,22 @@ func (s *Server) catalogEntityContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if resolution.ShouldAutoTranslate && response.Localization != nil {
+	if resolution.ShouldAutoTranslate && response.Localization != nil && s.aiConfigFromSettings(r.Context()).Translation.Enabled {
 		task, queueErr := s.enqueueCatalogContentTranslation(
 			r.Context(), entity, *response.Localization, resolution.RequestedLocale, 0, int64(maxPermissionValue), false,
 		)
 		if queueErr == nil {
 			response.Translation.Status = task.Status
 			response.Translation.TaskID = &task.TaskUID
-			if task.Created {
-				s.publishContentTranslationTask(r.Context(), task)
+			if task.Created && !s.publishContentTranslationTask(r.Context(), task) {
+				response.Translation.Status = "unavailable"
 			}
 		} else {
 			response.Translation.Status = "unavailable"
 		}
+	} else if resolution.ShouldAutoTranslate && response.Localization != nil {
+		response.Translation.Status = "unavailable"
+		response.Translation.Automatic = false
 	} else if resolution.CanRequestTranslation {
 		response.Translation.Status = "request_required"
 	} else {
@@ -235,7 +237,7 @@ func (s *Server) updateCatalogEntityContent(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	claims := currentClaims(r)
-	reviewRequired := contentLocalizationReviewRequired(loadReviewConfig(r.Context(), s.db), entity.EntityType)
+	reviewRequired := contentLocalizationReviewRequired(loadReviewConfig(r.Context(), tx), entity.EntityType)
 	if catalogMutationBypassesReview(claims) {
 		reviewRequired = false
 	}
@@ -305,7 +307,7 @@ func loadEditableContentSubjectTx(ctx context.Context, tx pgx.Tx, publicID strin
 	switch entity.EntityType {
 	case "mod":
 		var exists bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from mods where id=$1 and review_status='approved')`, entity.EntityID).Scan(&exists); err != nil || !exists {
+		if err := tx.QueryRow(ctx, `select true from mods where id=$1 and review_status='approved' for share`, entity.EntityID).Scan(&exists); err != nil || !exists {
 			if err == nil {
 				err = pgx.ErrNoRows
 			}
@@ -313,8 +315,8 @@ func loadEditableContentSubjectTx(ctx context.Context, tx pgx.Tx, publicID strin
 		}
 	case "blueprint":
 		var exists bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from blueprints where id=$1 and status<>'deleted'
-			and ($2 or review_status in ('not_required','approved')))`, entity.EntityID, contentVisibilityBypassed(ctx)).Scan(&exists); err != nil || !exists {
+		if err := tx.QueryRow(ctx, `select true from blueprints where id=$1 and status<>'deleted'
+			and ($2 or review_status in ('not_required','approved')) for share`, entity.EntityID, contentVisibilityBypassed(ctx)).Scan(&exists); err != nil || !exists {
 			if err == nil {
 				err = pgx.ErrNoRows
 			}
@@ -322,7 +324,8 @@ func loadEditableContentSubjectTx(ctx context.Context, tx pgx.Tx, publicID strin
 		}
 	case "skin":
 		var exists bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from skin_assets where id=$1 and status='active')`, entity.EntityID).Scan(&exists); err != nil || !exists {
+		if err := tx.QueryRow(ctx, `select true from skin_assets where id=$1 and status='active'
+			and ($2 or (review_status='approved' and visibility<>'private')) for share`, entity.EntityID, contentVisibilityBypassed(ctx)).Scan(&exists); err != nil || !exists {
 			if err == nil {
 				err = pgx.ErrNoRows
 			}
@@ -330,8 +333,8 @@ func loadEditableContentSubjectTx(ctx context.Context, tx pgx.Tx, publicID strin
 		}
 	case "resource", "tag", "recipe_type", "recipe_template", "recipe":
 		var exists bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from catalog_entities where id=$1 and public_id=$2
-			and entity_type=$3 and status='active' and archived_at is null)`, entity.EntityID, entity.PublicID, entity.EntityType).Scan(&exists); err != nil || !exists {
+		if err := tx.QueryRow(ctx, `select true from catalog_entities where id=$1 and public_id=$2
+			and entity_type=$3 and status='active' and archived_at is null for share`, entity.EntityID, entity.PublicID, entity.EntityType).Scan(&exists); err != nil || !exists {
 			if err == nil {
 				err = pgx.ErrNoRows
 			}
@@ -595,9 +598,9 @@ func reserveAITaskQuotaTx(ctx context.Context, tx pgx.Tx, actorID, tokenLimit, r
 	var used, pending int64
 	if err := tx.QueryRow(ctx, `
 		select
-		 coalesce(sum(case when status='completed' then input_tokens+output_tokens else 0 end),0),
-		 coalesce(sum(case when status in ('queued','running','retrying') then quota_reserved_tokens else 0 end),0)
-		from ai_tasks where created_by=$1 and created_at>=date_trunc('day',now())`, actorID).Scan(&used, &pending); err != nil {
+		 coalesce(sum(input_tokens+output_tokens),0),
+		 coalesce(sum(case when (status<>'cancelled' or started_at is not null) and input_tokens+output_tokens=0 then quota_reserved_tokens else 0 end),0)
+		from ai_tasks where created_by=$1 and created_at>=date_trunc('day',now() at time zone 'UTC') at time zone 'UTC'`, actorID).Scan(&used, &pending); err != nil {
 		return err
 	}
 	if tokenLimit != int64(maxPermissionValue) && used+pending+reserved > tokenLimit {
@@ -636,22 +639,34 @@ func (s *Server) enqueueCatalogContentTranslation(
 	payload := map[string]any{
 		"internalEntityId": entity.EntityID, "publicId": entity.PublicID, "entityType": entity.EntityType,
 		"sourceLocale": source.Locale, "sourceRevisionNo": source.RevisionNo, "targetLocale": targetLocale, "items": items,
-		"quotaBacked": quotaBacked,
+		"quotaBacked": quotaBacked, "targetRevisionNo": int64(0),
+	}
+	if err := freezeAITranslationContext(payload, cfg); err != nil {
+		return enqueuedContentTranslation{}, err
 	}
 	rawPayload, _ := json.Marshal(payload)
-	reserved := int64(utf8.RuneCountInString(source.Name+source.Summary+source.ContentMarkdown)*2 + 256)
-	if reserved < 256 {
-		reserved = 256
+	if err := validateAITranslationPayload(aiTaskContentTranslation, rawPayload); err != nil {
+		return enqueuedContentTranslation{}, err
 	}
-	if !quotaBacked {
-		reserved = 0
-	}
-	concurrencyKey := contentTranslationConcurrencyKey(entity.EntityID, source, targetLocale, actorID, quotaBacked)
+	reserved := estimatedAIReservation(rawPayload, model)
+	concurrencyKey := entity.EntityType + ":" + entity.PublicID + ":" + contentTranslationConcurrencyKey(entity.EntityID, source, targetLocale, actorID, quotaBacked)
+	concurrencyKey = aiTranslationContextKey(concurrencyKey, cfg)
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return enqueuedContentTranslation{}, err
 	}
 	defer tx.Rollback(ctx)
+	var targetRevisionNo int64
+	var targetProvenance string
+	err = tx.QueryRow(ctx, `select revision_no,provenance from content_localizations where subject_type=$1 and subject_id=$2 and locale=$3 for update`, entity.EntityType, entity.EntityID, targetLocale).Scan(&targetRevisionNo, &targetProvenance)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return enqueuedContentTranslation{}, err
+	}
+	if targetProvenance == "human" || targetProvenance == "human_corrected" {
+		return enqueuedContentTranslation{}, errors.New("human translation is protected")
+	}
+	payload["targetRevisionNo"] = targetRevisionNo
+	rawPayload, _ = json.Marshal(payload)
 	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, concurrencyKey); err != nil {
 		return enqueuedContentTranslation{}, err
 	}
@@ -659,14 +674,14 @@ func (s *Server) enqueueCatalogContentTranslation(
 	err = tx.QueryRow(ctx, `
 		select task.id,task.task_uid,task.status from ai_tasks task
 		where task.task_type=$1 and task.concurrency_key=$2 and (
-		 task.status in ('queued','running','retrying') or (
+		 task.status in ('queued','running','retrying') or (not $4 and task.status in ('failed','cancelled')) or (
 		  task.status='completed' and exists(
 		   select 1 from change_requests request
 		   where request.aggregate_type=$3 and request.status='pending'
 		     and request.metadata->>'aiTaskId'=task.task_uid
 		  )
 		 ))
-		order by task.created_at desc limit 1`, aiTaskContentTranslation, concurrencyKey, catalogAggregateLocalization).Scan(
+		order by task.created_at desc limit 1`, aiTaskContentTranslation, concurrencyKey, catalogAggregateLocalization, quotaBacked).Scan(
 		&existing.TaskID, &existing.TaskUID, &existing.Status,
 	)
 	if err == nil {
@@ -676,6 +691,9 @@ func (s *Server) enqueueCatalogContentTranslation(
 		return existing, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
+		return enqueuedContentTranslation{}, err
+	}
+	if err = reserveAISiteQuotaTx(ctx, tx, cfg, reserved); err != nil {
 		return enqueuedContentTranslation{}, err
 	}
 	if quotaBacked {
@@ -696,6 +714,9 @@ func (s *Server) enqueueCatalogContentTranslation(
 		taskUID, aiTaskContentTranslation, provider.Code, model.Model, concurrencyKey, string(rawPayload), createdBy, reserved,
 	).Scan(&taskID)
 	if err != nil {
+		return enqueuedContentTranslation{}, err
+	}
+	if err = s.enqueueAIOutboxTx(ctx, tx, taskID, taskUID, aiTaskContentTranslation); err != nil {
 		return enqueuedContentTranslation{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -720,7 +741,7 @@ func contentTranslationConcurrencyKey(entityID int64, source catalogLocalization
 }
 
 func (s *Server) publishContentTranslationTask(ctx context.Context, task enqueuedContentTranslation) bool {
-	if !task.Created {
+	if !task.Created || s.cfg.NATS.OutboxEnabled {
 		return true
 	}
 	if s.queue == nil || s.queue.PublishTask(ctx, "ai", aiTaskMessage{
@@ -741,7 +762,7 @@ func translationItemsToMap(result map[string]any) map[string]string {
 		key, _ := item["key"].(string)
 		text, _ := item["text"].(string)
 		switch key {
-		case "name", "summary", "contentMarkdown", "title", "bodyMarkdown":
+		case "name", "primaryName", "summary", "contentMarkdown", "title", "bodyMarkdown":
 			translated[key] = text
 		}
 	}

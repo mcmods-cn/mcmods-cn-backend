@@ -1,0 +1,77 @@
+{
+  "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+  "recorded_at": "2026-10-01T15:38:03.577691+00:00",
+  "environment": {
+    "go": "1.26.8",
+    "database": "isolated loopback PostgreSQL, random owned marker database; no shared/prod resources",
+    "fixtures": "synthetic users/parents/images; owned schema shadow views raise actual PG row stream errors"
+  },
+  "checks": [
+    {
+      "command": "APP_ENV=test MCMODS_RUN_DB_INTEGRATION=1 go test -race ./internal/httpapi -run '^(TestSimpleProjectAssociationVisibilityAuditIntegration|TestSimpleProjectSlugStopsOnDatabaseFailure)$' -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "top_level_tests": 2,
+      "PG_subtests": 17,
+      "unit_subtests": 2,
+      "evidence": "/tmp/mcmods-simple-associations-race.log",
+      "duration_seconds": 3.522
+    },
+    {
+      "command": "go vet ./internal/httpapi",
+      "status": "PASS",
+      "exit_code": 0,
+      "evidence": "/tmp/mcmods-simple-vet.log"
+    },
+    {
+      "command": "git diff --check",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "go test -race ./internal/httpapi -run '^(TestCatalogEditorPublicVisibilityAndReadFailuresAuditIntegration|TestModExportEntryAndMetricVisibilityAuditIntegration|TestSimpleProjectAssociationVisibilityAuditIntegration|TestSimpleProjectSlugStopsOnDatabaseFailure)$' -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "top_level_tests": 4,
+      "PG_subtests": 59,
+      "unit_subtests": 2,
+      "duration_seconds": 13.729,
+      "evidence": "/tmp/mcmods-ui-a-backend-catalog-final.log"
+    },
+    {
+      "command": "go vet ./internal/httpapi",
+      "status": "PASS",
+      "exit_code": 0,
+      "evidence": "/tmp/mcmods-ui-a-backend-extra-vet.log"
+    },
+    {
+      "command": "git diff --check",
+      "status": "PASS",
+      "exit_code": 0
+    }
+  ],
+  "red_green": [
+    {
+      "evidence": "/tmp/mcmods-simple-associations-red.log",
+      "result": "有效基线14子场景11FAIL/3PASS →14PASS；初次非法infected enum fixture先修正且没有弱化断言"
+    },
+    {
+      "evidence": "/tmp/mcmods-simple-associations-http-red.log",
+      "result": "新增HTTP数据库流异常4FAIL（404）/12PASS →16PASS（异常500）"
+    },
+    {
+      "evidence": "/tmp/mcmods-simple-slug-red.log",
+      "result": "2FAIL因错误根因被丢失/最多1000次查询 →2PASS错误即止"
+    },
+    {
+      "evidence": "/tmp/mcmods-ui-a-backend-catalog-final.log",
+      "result": "additional stale crawler handler lease409+no rows persisted; final18PG PASS, not claimed baseline red"
+    }
+  ],
+  "validation_limits": [
+    "No real production connection/pool/load/backup metrics",
+    "No full moderation browser acceptance or production object storage",
+    "No index performance conclusion from tiny fixture",
+    "No schema migration introduced; root handles overall regression/CI"
+  ]
+}

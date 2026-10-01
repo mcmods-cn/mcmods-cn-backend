@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/queue"
@@ -119,17 +120,27 @@ func NewAIWorker(db *pgxpool.Pool, queueClient *queue.Client, settingsEncryption
 }
 
 func (worker *AIWorker) Start(ctx context.Context) error {
-	if worker == nil || worker.queue == nil {
+	if worker == nil || worker.db == nil {
 		return queue.ErrUnavailable
 	}
-	err := worker.queue.SubscribeTask("ai", worker.handleTask)
-	if err != nil {
-		return err
+	subscribeErr := queue.ErrUnavailable
+	if worker.queue != nil {
+		subscribeErr = worker.queue.SubscribeTask("ai", worker.handleTask)
 	}
 	go func() {
-		<-ctx.Done()
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		worker.recoverTasks(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				worker.recoverTasks(ctx)
+			}
+		}
 	}()
-	return nil
+	return subscribeErr
 }
 
 func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
@@ -141,17 +152,11 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 		return errors.New("ai task message missing task id")
 	}
 	started := time.Now()
-	tag, err := worker.db.Exec(
-		ctx,
-		`update ai_tasks
-		 set status = 'running', started_at = coalesce(started_at, now()), updated_at = now()
-		 where id = $1 and status in ('queued', 'retrying')`,
-		msg.TaskID,
-	)
+	claimed, err := worker.claimTask(ctx, msg.TaskID)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	if !claimed {
 		return nil
 	}
 	worker.writeTaskLog(ctx, msg.TaskID, "info", "task_started", "AI task picked by NATS worker", msg)
@@ -168,42 +173,47 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 		return err
 	}
 
-	result, usage, err := worker.executeTask(ctx, taskType, provider, model, rawPayload)
-	if err != nil {
+	var recovery seedRecoveryPayload
+	if json.Unmarshal(rawPayload, &recovery) == nil && recovery.Scope == seedRecoveryScope {
+		leased, stop := maintainSeedCrawlerLease(ctx, worker.db, recovery.RunID, recovery.RunToken)
+		defer stop()
+		defer worker.finishSeedRecoveryRun(ctx, msg.TaskID)
+		ctx = leased
+	}
+	if err = worker.preflightTranslation(ctx, taskType, rawPayload); err != nil {
 		worker.failTask(ctx, msg.TaskID, err)
 		return err
 	}
+	result, usage, err := worker.executeTask(ctx, taskType, provider, model, rawPayload)
+	// Record returned usage even when the provider produced an invalid result:
+	// an unsuccessful translation can still be a billed provider call.
 	rawResult, _ := json.Marshal(result)
-	_, err = worker.db.Exec(
-		ctx,
-		`update ai_tasks
-		 set status = 'completed',
-		     result = $2::jsonb,
-		     input_tokens = $3,
-		     output_tokens = $4,
-		     cost_micros = $5,
-		     finished_at = now(),
-		     updated_at = now()
-		 where id = $1`,
-		msg.TaskID,
-		string(rawResult),
-		usage.InputTokens,
-		usage.OutputTokens,
-		usage.CostMicros,
-	)
+	if _, accountingErr := worker.db.Exec(ctx, `update ai_tasks
+		set input_tokens=$2,output_tokens=$3,cost_micros=$4,result=$5::jsonb,updated_at=now()
+		where id=$1 and status in ('running','cancelled','failed')`, msg.TaskID, max(usage.InputTokens, 0), max(usage.OutputTokens, 0), max(usage.CostMicros, 0), string(rawResult)); accountingErr != nil {
+		worker.failTask(ctx, msg.TaskID, accountingErr)
+		return accountingErr
+	}
 	if err != nil {
 		worker.failTask(ctx, msg.TaskID, err)
 		return err
 	}
 	if taskType == aiTaskNotificationTranslation && createdBy > 0 {
-		worker.persistNotificationTranslation(ctx, createdBy, rawPayload, result)
+		if err = worker.persistNotificationTranslation(ctx, msg.TaskID, createdBy, rawPayload, result); err != nil {
+			worker.failTask(ctx, msg.TaskID, err)
+			return err
+		}
 	}
 	if taskType == aiTaskContentTranslation {
 		var payloadScope struct {
 			Scope string `json:"scope"`
 		}
 		_ = json.Unmarshal(rawPayload, &payloadScope)
-		if payloadScope.Scope == "community_post" {
+		if payloadScope.Scope == seedRecoveryScope {
+			err = worker.persistSeedRecovery(ctx, msg.TaskID, rawPayload, result)
+		} else if payloadScope.Scope == "seed_crawler" {
+			err = worker.persistSeedTranslation(ctx, msg.TaskID, rawPayload)
+		} else if payloadScope.Scope == "community_post" {
 			err = worker.persistCommunityPostTranslation(ctx, msg.TaskID, rawPayload, result)
 		} else {
 			err = worker.persistCatalogContentTranslation(ctx, msg.TaskID, createdBy, rawPayload, result)
@@ -213,7 +223,23 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 			return err
 		}
 	}
-	worker.writeTaskLog(ctx, msg.TaskID, "info", "task_completed", "AI task completed by placeholder executor", map[string]any{
+	// Completion is visible only after publication/persistence succeeds.
+	tag, err := worker.db.Exec(ctx, `update ai_tasks set status='completed',
+		finished_at=now(),updated_at=now() where id=$1 and status='running'`, msg.TaskID)
+	if err != nil {
+		worker.failTask(ctx, msg.TaskID, err)
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		var status string
+		if err = worker.db.QueryRow(ctx, `select status from ai_tasks where id=$1`, msg.TaskID).Scan(&status); err != nil {
+			return err
+		}
+		if status != "completed" {
+			return errors.New("AI task was cancelled before completion")
+		}
+	}
+	worker.writeTaskLog(ctx, msg.TaskID, "info", "task_completed", "AI translation persisted", map[string]any{
 		"durationMs": time.Since(started).Milliseconds(),
 	})
 	worker.writeAICallLog(ctx, msg.TaskID, msg.TaskType, provider, model, time.Since(started))
@@ -229,10 +255,19 @@ func (worker *AIWorker) failTask(ctx context.Context, taskID int64, cause error)
 		ctx,
 		`update ai_tasks
 		 set status = 'failed', error = $2, finished_at = now(), updated_at = now()
-		 where id = $1`,
+		 where id = $1 and status='running'`,
 		taskID,
 		message,
 	)
+	var raw []byte
+	if worker.db.QueryRow(ctx, `select payload from ai_tasks where id=$1 and status='failed'`, taskID).Scan(&raw) == nil {
+		var payload seedTranslationPayload
+		if json.Unmarshal(raw, &payload) == nil && payload.Scope == "seed_crawler" {
+			seedCtx := withSeedCrawlerLease(ctx, payload.RunID, payload.RunToken)
+			crawler := &SeedCrawlerWorker{server: &Server{db: worker.db}}
+			_, _ = crawler.execSeedWrite(seedCtx, `update seed_crawler_translation_tasks set status='failed',input_tokens=task.input_tokens,output_tokens=task.output_tokens,last_error=$4,updated_at=now() from ai_tasks task where task.id=$1 and candidate_id=$2 and locale=$3`, taskID, payload.CandidateID, payload.TargetLocale, truncateRunes(message, 1000))
+		}
+	}
 	worker.writeTaskLog(ctx, taskID, "error", "task_failed", message, nil)
 }
 
@@ -269,7 +304,11 @@ func (worker *AIWorker) writeAICallLog(ctx context.Context, taskID int64, taskTy
 }
 
 func (s *Server) getAIConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := s.aiConfigFromSettings(r.Context())
+	cfg, err := s.aiConfigFromSettingsChecked(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "AI_CONFIG_UNAVAILABLE", "AI 配置暂时不可用", 0, nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, redactAIConfig(cfg))
 }
 
@@ -279,8 +318,16 @@ func (s *Server) updateAIConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	current := s.aiConfigFromSettings(r.Context())
+	current, err := s.aiConfigFromSettingsChecked(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "AI_CONFIG_UNAVAILABLE", "无法读取现有 AI 配置，未保存修改", 0, nil)
+		return
+	}
 	payload = normalizeAIConfig(payload)
+	if err := validateAIQuotaConfiguration(payload); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "AI_CONFIG_INVALID", err.Error(), 0, nil)
+		return
+	}
 	for index := range payload.Providers {
 		if payload.Providers[index].APIKey == "" {
 			payload.Providers[index].APIKey = providerAPIKey(current.Providers, payload.Providers[index].Code)
@@ -339,7 +386,7 @@ func (s *Server) adminAITasks(w http.ResponseWriter, r *http.Request) {
 		where = append(where, fmt.Sprintf("t.created_at <= $%d", len(args)))
 	}
 	args = append(args, boundedLimit(r.URL.Query().Get("limit"), 100, 500))
-	rows := s.querySimpleRows(
+	rows, err := s.querySimpleRows(
 		r,
 		`select t.task_uid as id, t.task_uid, t.task_type, t.provider, t.model, t.status, t.priority,
 		        t.concurrency_key, t.input_tokens, t.output_tokens, t.cost_micros, t.payload,
@@ -352,6 +399,10 @@ func (s *Server) adminAITasks(w http.ResponseWriter, r *http.Request) {
 		 limit $`+strconv.Itoa(len(args)),
 		args...,
 	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取 AI 管理数据失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, rows)
 }
 
@@ -361,7 +412,7 @@ func (s *Server) adminAITask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "AI 任务 ID 不正确")
 		return
 	}
-	rows := s.querySimpleRows(
+	rows, err := s.querySimpleRows(
 		r,
 		`select task_uid as id, task_uid, task_type, provider, model, status, input_tokens, output_tokens,
 		        cost_micros, result, error, created_at, started_at, finished_at, updated_at
@@ -370,6 +421,10 @@ func (s *Server) adminAITask(w http.ResponseWriter, r *http.Request) {
 		 limit 1`,
 		taskUID,
 	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取 AI 管理数据失败")
+		return
+	}
 	if len(rows) == 0 {
 		writeError(w, http.StatusNotFound, "AI 任务不存在")
 		return
@@ -407,11 +462,25 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 	if req.Payload == nil {
 		req.Payload = map[string]any{}
 	}
+	if scope, _ := req.Payload["scope"].(string); isSeedTaskScope(scope) {
+		writeError(w, http.StatusBadRequest, "seed crawler tasks must be created by the fenced crawler")
+		return
+	}
+	if err := freezeAITranslationContext(req.Payload, cfg); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.ConcurrencyKey = aiTranslationContextKey(req.ConcurrencyKey, cfg)
 	rawPayload, err := json.Marshal(req.Payload)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "任务 Payload 格式不正确")
 		return
 	}
+	if err = validateAITranslationPayload(req.TaskType, rawPayload); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	reserved := estimatedAIReservation(rawPayload, model)
 	taskUID := "ai_" + randomHex(16)
 	var taskID int64
 	tx, err := s.db.Begin(r.Context())
@@ -420,10 +489,14 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if err = reserveAISiteQuotaTx(r.Context(), tx, cfg, reserved); err != nil {
+		writeError(w, http.StatusTooManyRequests, "AI site quota is insufficient")
+		return
+	}
 	err = tx.QueryRow(
 		r.Context(),
-		`insert into ai_tasks (task_uid, task_type, provider, model, status, priority, concurrency_key, payload, created_by, queued_at)
-		 values ($1, $2, $3, $4, 'queued', $5, $6, $7::jsonb, $8, now())
+		`insert into ai_tasks (task_uid, task_type, provider, model, status, priority, concurrency_key, payload, created_by, queued_at,quota_reserved_tokens)
+		 values ($1, $2, $3, $4, 'queued', $5, $6, $7::jsonb, $8, now(),$9)
 		 returning id`,
 		taskUID,
 		req.TaskType,
@@ -433,17 +506,16 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 		req.ConcurrencyKey,
 		string(rawPayload),
 		currentClaims(r).Subject,
+		reserved,
 	).Scan(&taskID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "创建 AI 任务失败")
 		return
 	}
 	message := aiTaskMessage{TaskID: taskID, TaskUID: taskUID, TaskType: req.TaskType}
-	if s.cfg.NATS.OutboxEnabled {
-		if _, err = queue.EnqueueTx(r.Context(), tx, "ai", "ai.task.requested", "ai_task", taskUID, r.Header.Get("X-Request-ID"), message); err != nil {
-			writeError(w, http.StatusInternalServerError, "AI 任务可靠入队失败")
-			return
-		}
+	if err = s.enqueueAIOutboxTx(r.Context(), tx, taskID, taskUID, req.TaskType); err != nil {
+		writeError(w, http.StatusInternalServerError, "AI 任务可靠入队失败")
+		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建 AI 任务失败")
@@ -464,7 +536,7 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminAIStats(w http.ResponseWriter, r *http.Request) {
-	stats := s.querySimpleRows(
+	stats, err := s.querySimpleRows(
 		r,
 		`select status, count(*) as tasks, coalesce(sum(input_tokens), 0) as input_tokens,
 		        coalesce(sum(output_tokens), 0) as output_tokens,
@@ -474,7 +546,11 @@ func (s *Server) adminAIStats(w http.ResponseWriter, r *http.Request) {
 		 group by status
 		 order by status`,
 	)
-	byProvider := s.querySimpleRows(
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取 AI 管理数据失败")
+		return
+	}
+	byProvider, err := s.querySimpleRows(
 		r,
 		`select provider, model, count(*) as tasks, coalesce(sum(cost_micros), 0) as cost_micros
 		 from ai_tasks
@@ -483,6 +559,10 @@ func (s *Server) adminAIStats(w http.ResponseWriter, r *http.Request) {
 		 order by cost_micros desc, tasks desc
 		 limit 50`,
 	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取 AI 管理数据失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"byStatus":   stats,
 		"byProvider": byProvider,
@@ -490,17 +570,28 @@ func (s *Server) adminAIStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) aiConfigFromSettings(ctx context.Context) aiConfigPayload {
+	payload, err := s.aiConfigFromSettingsChecked(ctx)
+	if err != nil {
+		// Execution paths fail closed through the existing disabled defaults.
+		return defaultAIConfig()
+	}
+	return payload
+}
+
+func (s *Server) aiConfigFromSettingsChecked(ctx context.Context) (aiConfigPayload, error) {
 	payload := defaultAIConfig()
 	var raw []byte
 	err := s.db.QueryRow(ctx, `select value from system_settings where key = 'ai.config'`).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return payload, nil
+	}
 	if err != nil {
-		_ = ignoreNoRows(err)
-		return payload
+		return aiConfigPayload{}, err
 	}
 	if err := s.openSystemSetting(raw, &payload); err != nil {
-		return defaultAIConfig()
+		return aiConfigPayload{}, err
 	}
-	return normalizeAIConfig(payload)
+	return normalizeAIConfig(payload), nil
 }
 
 func (s *Server) writeAITaskLog(ctx context.Context, taskID int64, level string, event string, message string, payload any) {
@@ -607,6 +698,8 @@ func normalizeAITaskModels(current []aiTaskModelConfig) []aiTaskModelConfig {
 			result[index].TimeoutSeconds = saved.TimeoutSeconds
 			result[index].Prompt = strings.TrimSpace(saved.Prompt)
 		}
+		result[index].ConcurrencyLimit = min(result[index].ConcurrencyLimit, 32)
+		result[index].TimeoutSeconds = min(result[index].TimeoutSeconds, 600)
 		if result[index].ConcurrencyLimit <= 0 {
 			result[index].ConcurrencyLimit = 1
 		}

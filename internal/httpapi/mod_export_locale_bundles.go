@@ -22,6 +22,17 @@ const (
 	maxExportLocaleBundleSize     = int64(16 << 20)
 )
 
+// exportLocaleBundleLookupSQL is shared with PostgreSQL contract tests.
+const exportLocaleBundleLookupSQL = `select file.bucket,file.object_key
+			from catalog_import_locales imported_locale
+			join catalog_import_media media on media.revision_id=imported_locale.revision_id
+			 and media.asset_path=('_locales/'||imported_locale.locale||'.json.gz')
+			 and media.media_kind=$3
+			join oss_files file on file.id=media.oss_file_id
+			where imported_locale.revision_id=$1
+			  and imported_locale.locale=$2
+			limit 1`
+
 type modExportLocaleBundleMedia struct {
 	RevisionID       string
 	Locale           string
@@ -171,15 +182,7 @@ func (s *Server) loadExportLocaleBundle(ctx context.Context, revisionID, locale 
 	cacheKey := "export-locale-bundle:v1:" + revisionID + ":" + locale
 	raw, err := s.cache.GetOrLoad(ctx, cacheKey, func(loadContext context.Context) ([]byte, error) {
 		var bucket, objectKey string
-		queryErr := s.db.QueryRow(loadContext, `select file.bucket,file.object_key
-			from catalog_import_locales imported_locale
-			join catalog_import_media media on media.revision_id=imported_locale.revision_id
-			 and media.asset_path=('_locales/'||imported_locale.locale||'.json.gz')
-			 and media.media_kind=$3
-			join oss_files file on file.id=media.oss_file_id
-			where imported_locale.revision_id=$1
-			  and (imported_locale.locale=$2 or split_part(imported_locale.locale,'-',1)=split_part($2,'-',1))
-			order by (imported_locale.locale=$2) desc,imported_locale.locale limit 1`,
+		queryErr := s.db.QueryRow(loadContext, exportLocaleBundleLookupSQL,
 			revisionID, locale, exportLocaleBundleKind).Scan(&bucket, &objectKey)
 		if errors.Is(queryErr, pgx.ErrNoRows) {
 			return []byte("{}"), nil

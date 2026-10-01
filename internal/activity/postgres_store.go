@@ -11,15 +11,20 @@ import (
 )
 
 type postgresStore struct {
-	db        *pgxpool.Pool
-	processor BatchProcessor
+	db          *pgxpool.Pool
+	processor   BatchProcessor
+	afterCommit BatchCommittedObserver
 }
 
-func newPostgresStore(db *pgxpool.Pool, processor BatchProcessor) activityStore {
+func newPostgresStore(db *pgxpool.Pool, processor BatchProcessor, observers ...BatchCommittedObserver) activityStore {
 	if db == nil {
 		return nil
 	}
-	return &postgresStore{db: db, processor: processor}
+	store := &postgresStore{db: db, processor: processor}
+	if len(observers) > 0 {
+		store.afterCommit = observers[0]
+	}
+	return store
 }
 
 func (store *postgresStore) EnqueueDurable(ctx context.Context, event Event) error {
@@ -38,13 +43,24 @@ func (store *postgresStore) WriteBestEffort(ctx context.Context, events []Event)
 	if len(events) == 0 {
 		return nil
 	}
-	if err := resolveObjectRouteIDs(ctx, store.db, events); err != nil {
+	tx, err := store.db.Begin(ctx)
+	if err != nil {
 		return err
 	}
-	if err := copyActivityEvents(ctx, store.db, events); err != nil {
+	defer tx.Rollback(ctx)
+	if err = resolveObjectRouteIDs(ctx, tx, events); err != nil {
 		return err
 	}
-	store.processProjections(ctx, events)
+	if err = copyActivityEvents(ctx, tx, events); err != nil {
+		return err
+	}
+	if err = store.processProjections(ctx, tx, events); err != nil {
+		return err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	store.notifyCommitted(ctx, events)
 	return nil
 }
 
@@ -102,6 +118,9 @@ func (store *postgresStore) DrainDurable(ctx context.Context, limit int) (int, e
 		err = copyActivityEvents(ctx, tx, events)
 	}
 	if err == nil {
+		err = store.processProjections(ctx, tx, events)
+	}
+	if err == nil {
 		_, err = tx.Exec(ctx, `delete from activity_event_outbox where id=any($1::bigint[])`, ids)
 	}
 	if err == nil {
@@ -112,7 +131,7 @@ func (store *postgresStore) DrainDurable(ctx context.Context, limit int) (int, e
 		store.markDurableFailure(ids, err)
 		return 0, err
 	}
-	store.processProjections(ctx, events)
+	store.notifyCommitted(ctx, events)
 	return len(events), nil
 }
 
@@ -155,7 +174,7 @@ func (store *postgresStore) PoolSnapshot() PoolSnapshot {
 	}
 }
 
-func (store *postgresStore) processProjections(ctx context.Context, events []Event) {
+func (store *postgresStore) processProjections(ctx context.Context, tx pgx.Tx, events []Event) error {
 	eventTimes := make([]time.Time, 0, len(events))
 	actorIDs := make([]int64, 0, len(events))
 	for _, event := range events {
@@ -166,15 +185,22 @@ func (store *postgresStore) processProjections(ctx context.Context, events []Eve
 		actorIDs = append(actorIDs, event.UserID)
 	}
 	if len(eventTimes) > 0 {
-		if _, err := store.db.Exec(ctx, `select record_site_activity_batch($1,$2)`, eventTimes, actorIDs); err != nil {
-			// Raw activity and the trigger-maintained user statistics are already
-			// committed. Periodic reconciliation can rebuild this site projection.
-			log.Printf("aggregate site activity batch: %v", err)
+		if _, err := tx.Exec(ctx, `select record_site_activity_batch($1,$2)`, eventTimes, actorIDs); err != nil {
+			return err
 		}
 	}
 	if store.processor != nil {
-		if err := store.processor(ctx, events); err != nil {
-			log.Printf("process activity batch: %v", err)
+		if err := store.processor(ctx, tx, events); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (store *postgresStore) notifyCommitted(ctx context.Context, events []Event) {
+	if store.afterCommit != nil {
+		if err := store.afterCommit(ctx, events); err != nil {
+			log.Printf("refresh committed activity cache: %v", err)
 		}
 	}
 }

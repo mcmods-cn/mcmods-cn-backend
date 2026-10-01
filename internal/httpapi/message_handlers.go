@@ -78,6 +78,10 @@ func (s *Server) conversations(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, item)
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取私聊会话失败")
+		return
+	}
 	partnerIDs := make([]int64, len(items))
 	for index := range items {
 		partnerIDs[index] = items[index].partnerInternalID
@@ -141,8 +145,12 @@ func (s *Server) conversationMessages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "无权访问该私聊")
 		return
 	}
-	readTag, _ := s.db.Exec(r.Context(), `update direct_messages set read_at=now()
+	readTag, err := s.db.Exec(r.Context(), `update direct_messages set read_at=now()
 		where conversation_id=$1 and recipient_id=$2 and read_at is null`, conversationID, claims.Subject)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "更新私聊已读状态失败")
+		return
+	}
 	if readTag.RowsAffected() > 0 {
 		s.cache.AdjustUnread(r.Context(), claims.Subject, "messages", -readTag.RowsAffected())
 		s.publishRealtimeUser(claims.Subject, "unread.changed", map[string]string{"kind": "messages"})
@@ -177,6 +185,10 @@ func (s *Server) conversationMessages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取私聊消息失败")
+		return
 	}
 	writeJSON(w, http.StatusOK, items)
 }
@@ -223,12 +235,15 @@ func (s *Server) sendConversationMessage(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusForbidden, "对方没有接收私聊的权限")
 		return
 	}
-	activeConversation, active := s.cache.ChatPresence(r.Context(), recipientID)
-	active = active && activeConversation == conversationID
 	var recipientShowsOnline bool
-	_ = s.db.QueryRow(r.Context(), `select show_online_status from users where id=$1`, recipientID).Scan(&recipientShowsOnline)
 	var item directMessageItem
 	item.ConversationID = conversationPublicID
+	if err = s.db.QueryRow(r.Context(), `select public_id,show_online_status from users where id=$1`, recipientID).Scan(&item.RecipientID, &recipientShowsOnline); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取私聊接收者失败")
+		return
+	}
+	activeConversation, active := s.cache.ChatPresence(r.Context(), recipientID)
+	active = active && activeConversation == conversationID
 	err = s.db.QueryRow(r.Context(), `insert into direct_messages(conversation_id,sender_id,recipient_id,body,read_at)
 		values($1,$2,$3,$4,case when $5 then now() else null end)
 		returning public_id,body,read_at,created_at`,
@@ -245,10 +260,6 @@ func (s *Server) sendConversationMessage(w http.ResponseWriter, r *http.Request)
 	item.SenderID = claims.PublicSubject
 	if !recipientShowsOnline {
 		item.ReadAt = nil
-	}
-	if err = s.db.QueryRow(r.Context(), `select public_id from users where id=$1`, recipientID).Scan(&item.RecipientID); err != nil {
-		writeError(w, http.StatusInternalServerError, "发送私聊消息失败")
-		return
 	}
 	_, _ = s.db.Exec(r.Context(), `update direct_conversations set updated_at=now() where id=$1`, conversationID)
 	notificationQueued := false

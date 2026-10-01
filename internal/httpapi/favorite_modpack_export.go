@@ -131,8 +131,18 @@ func (s *Server) createFavoriteModpackExport(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	userID := currentClaims(r).Subject
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create export task")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtextextended('favorite-export-quota:'||$1::bigint::text,0))`, userID); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to lock export limits")
+		return
+	}
 	var active, daily, recentDuplicate int
-	if err = s.db.QueryRow(r.Context(), `select
+	if err = tx.QueryRow(r.Context(), `select
 		count(*) filter(where status in ('pending','processing')),
 		count(*) filter(where created_at>=now()-interval '24 hours'),
 		count(*) filter(where collection_id=$2 and minecraft_version=$3 and loader_type=$4 and created_at>=now()-interval '30 seconds')
@@ -152,12 +162,6 @@ func (s *Server) createFavoriteModpackExport(w http.ResponseWriter, r *http.Requ
 		writeAPIError(w, http.StatusTooManyRequests, "MODPACK_EXPORT_DUPLICATE_COOLDOWN", "wait before repeating the same export", 30, nil)
 		return
 	}
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create export task")
-		return
-	}
-	defer tx.Rollback(r.Context())
 	// Persist the pack version with the task so dispatcher retries produce the
 	// same index, while separate exports receive a readable revision identifier.
 	packVersion := time.Now().UTC().Format("2006.01.02-150405")
@@ -247,13 +251,26 @@ func (s *Server) buildFavoriteModpackExportPreview(ctx context.Context, actorID 
 		return preview, err
 	}
 	defer rows.Close()
-	seen := map[int64]struct{}{}
+	type collectedItem struct {
+		id, internalID, routeID            int64
+		entityType, publicID, name, status string
+	}
+	collected := make([]collectedItem, 0)
 	for rows.Next() {
-		var itemID, internalID, routeID int64
-		var entityType, publicID, name, status string
-		if err = rows.Scan(&itemID, &entityType, &internalID, &routeID, &publicID, &name, &status); err != nil {
+		var item collectedItem
+		if err = rows.Scan(&item.id, &item.entityType, &item.internalID, &item.routeID, &item.publicID, &item.name, &item.status); err != nil {
 			return preview, err
 		}
+		collected = append(collected, item)
+	}
+	if err = rows.Err(); err != nil {
+		return preview, err
+	}
+	rows.Close()
+	seen := map[int64]struct{}{}
+	for _, collected := range collected {
+		itemID, internalID, routeID := collected.id, collected.internalID, collected.routeID
+		entityType, publicID, name, status := collected.entityType, collected.publicID, collected.name, collected.status
 		item := favoriteModpackExportItem{SourceCollectionItemID: int64Pointer(itemID), SourceProjectRouteID: int64Pointer(routeID), SourceProjectID: publicID, SourceProjectType: entityType, SourceProjectName: name}
 		switch {
 		case entityType != "mod":
@@ -280,7 +297,10 @@ func (s *Server) buildFavoriteModpackExportPreview(ctx context.Context, actorID 
 		return preview, err
 	}
 	preview.CollectionItemCount = len(preview.Items)
-	preview.Items = s.appendFavoriteExportDependencies(ctx, preview.Items, request)
+	preview.Items, err = s.appendFavoriteExportDependencies(ctx, preview.Items, request)
+	if err != nil {
+		return preview, err
+	}
 	for _, item := range preview.Items {
 		switch item.ResultType {
 		case "exported":
@@ -299,7 +319,7 @@ func (s *Server) buildFavoriteModpackExportPreview(ctx context.Context, actorID 
 // appendFavoriteExportDependencies follows only explicit dependency
 // relationships that resolve to a real on-site Mod. Optional/name-only
 // relationships are deliberately not guessed.
-func (s *Server) appendFavoriteExportDependencies(ctx context.Context, items []favoriteModpackExportItem, request favoriteModpackExportRequest) []favoriteModpackExportItem {
+func (s *Server) appendFavoriteExportDependencies(ctx context.Context, items []favoriteModpackExportItem, request favoriteModpackExportRequest) ([]favoriteModpackExportItem, error) {
 	knownRoutes := make(map[int64]int)
 	queueRoutes := make([]int64, 0)
 	for index := range items {
@@ -322,14 +342,28 @@ func (s *Server) appendFavoriteExportDependencies(ctx context.Context, items []f
 			  and (relation_group.id is null or relation_group.loader='' or lower(relation_group.loader)=lower($3))
 			order by relationship.display_order,relationship.id`, sourceRouteID, request.MinecraftVersion, request.Loader)
 		if err != nil {
-			continue
+			return nil, err
 		}
+		type dependency struct {
+			routeID        int64
+			publicID, name string
+		}
+		dependencies := make([]dependency, 0)
 		for rows.Next() {
-			var routeID int64
-			var publicID, name string
-			if rows.Scan(&routeID, &publicID, &name) != nil {
-				continue
+			var dependent dependency
+			if err = rows.Scan(&dependent.routeID, &dependent.publicID, &dependent.name); err != nil {
+				rows.Close()
+				return nil, err
 			}
+			dependencies = append(dependencies, dependent)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, dependent := range dependencies {
+			routeID, publicID, name := dependent.routeID, dependent.publicID, dependent.name
 			if existingIndex, exists := knownRoutes[routeID]; exists {
 				items[existingIndex].DependencyOf = appendUniqueString(items[existingIndex].DependencyOf, items[sourceIndex].SourceProjectName)
 				continue
@@ -350,7 +384,10 @@ func (s *Server) appendFavoriteExportDependencies(ctx context.Context, items []f
 		}
 		rows.Close()
 	}
-	return items
+	if len(queueRoutes) > 100 {
+		return nil, errors.New("favorite export dependency graph exceeds processing limit")
+	}
+	return items, nil
 }
 
 func appendUniqueString(values []string, value string) []string {

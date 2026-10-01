@@ -64,7 +64,19 @@ func New(cfg config.TypesenseConfig) *Client {
 	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
-	return &Client{config: cfg, http: &http.Client{Timeout: timeout}}
+	return &Client{config: cfg, http: &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(request *http.Request, previous []*http.Request) error {
+			if len(previous) >= 10 {
+				return errors.New("too many Typesense redirects")
+			}
+			initial := previous[0].URL
+			if request.URL.User != nil || request.URL.Scheme != initial.Scheme || !strings.EqualFold(request.URL.Host, initial.Host) {
+				return errors.New("Typesense redirect crossed the configured origin")
+			}
+			return nil
+		},
+	}}
 }
 
 func (client *Client) Enabled() bool {
@@ -152,7 +164,9 @@ func (client *Client) ImportDocuments(ctx context.Context, collection string, do
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
 	scanner.Buffer(make([]byte, 64*1024), 2<<20)
+	results := 0
 	for scanner.Scan() {
+		results++
 		var result struct {
 			Success bool   `json:"success"`
 			Error   string `json:"error"`
@@ -164,7 +178,13 @@ func (client *Client) ImportDocuments(ctx context.Context, collection string, do
 			return fmt.Errorf("typesense rejected a document: %s", result.Error)
 		}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if results != len(documents) {
+		return fmt.Errorf("typesense returned %d import results for %d documents", results, len(documents))
+	}
+	return nil
 }
 
 func (client *Client) DeleteDocument(ctx context.Context, collection, documentID string) error {

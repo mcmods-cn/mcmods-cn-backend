@@ -1,0 +1,565 @@
+[
+  {
+    "id": "BE-DB-001",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "收藏热度函数 `user_id` 局部变量与列歧义，合法收藏写入失败",
+    "impact": "收藏热度函数 `user_id` 局部变量与列歧义，合法收藏写入失败",
+    "files": [
+      "internal/database/repairs.go",
+      "internal/database/rating_schema.go"
+    ],
+    "result": "immutable baseline 不改，前向修复变量；真实 PG 先还原原函数复现 ambiguous，再修复 INSERT/DELETE 通过",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-002",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "`(version_id,parent_id,ordinal)` 的 NULL 根允许重复；根 system key 同样缺口",
+    "impact": "`(version_id,parent_id,ordinal)` 的 NULL 根允许重复；根 system key 同样缺口",
+    "files": [
+      "internal/database/repairs.go",
+      "internal/database/mod_content_schema.go"
+    ],
+    "result": "root partial unique；脏样本返回计数且不删数据；并发根写恰一成功",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-003",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "section 仅检查父节点深度，重新挂接祖先可形成循环",
+    "impact": "section 仅检查父节点深度，重新挂接祖先可形成循环",
+    "files": [
+      "internal/database/repairs.go",
+      "internal/database/mod_content_schema.go"
+    ],
+    "result": "advisory lock + 祖先路径/cycle 检查；串行和双事务相互挂接拒绝循环，保持既有深度规则",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-004",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "AI 先 completed 后落库，通知落库错误被忽略，取消迟到写",
+    "impact": "AI 先 completed 后落库，通知落库错误被忽略，取消迟到写",
+    "files": [
+      "internal/httpapi/ai_handlers.go",
+      "internal/httpapi/ai_translation.go",
+      "internal/httpapi/content_localization_worker.go",
+      "internal/httpapi/ai_task_limits.go"
+    ],
+    "result": "发布/成功持久化与completed同一事务；running任务锁使cancel-first禁止发布、publish-first取消409；真实PG取消/用量与跨代理通知/社区回归",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-005",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "源版本之外缺目标版本/人工保护；待审核后源或人工变更仍可批准覆盖",
+    "impact": "源版本之外缺目标版本/人工保护；待审核后源或人工变更仍可批准覆盖",
+    "files": [
+      "internal/httpapi/content_localization_handlers.go",
+      "internal/httpapi/content_localization_worker.go",
+      "internal/httpapi/catalog_editor_service.go"
+    ],
+    "result": "入队目标快照、worker/source+target 锁、资源状态 FOR SHARE 阻止治理并发变更、最终发布重新验证；PG 正常/源变/人工变/AI变/取消/隐藏六场景",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-006",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "全局额度、费用和并发配置原未实施；错误/取消用量丢失或释放未知费用",
+    "impact": "全局额度、费用和并发配置原未实施；错误/取消用量丢失或释放未知费用",
+    "files": [
+      "internal/httpapi/ai_task_limits.go",
+      "internal/httpapi/ai_handlers.go"
+    ],
+    "result": "UTC site 请求/token/cost 事务预留，保守未知使用，取消运行后 usage 保留；8 并发额度恰两成功，成本上限及缺价拒绝",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-007",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "内容/通知/社区入口提交后直接 publish 绕过事务 Outbox",
+    "impact": "内容/通知/社区入口提交后直接 publish 绕过事务 Outbox",
+    "files": [
+      "internal/httpapi/ai_task_limits.go",
+      "internal/httpapi/content_localization_handlers.go"
+    ],
+    "result": "三入口调用 shared enqueue helper，预算与 Outbox 同事务；PG 检查 reservation + 一行 Outbox",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-008",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "running worker 崩溃后永久滞留，无管理恢复",
+    "impact": "running worker 崩溃后永久滞留，无管理恢复",
+    "files": [
+      "internal/httpapi/ai_task_recovery.go",
+      "internal/httpapi/ai_handlers.go"
+    ],
+    "result": "每 15 秒扫描、按任务类型并发、超时保守 failed；新增受权限控制 retry/cancel 及 UI；崩溃状态真实 PG 验证",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-009",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "任意解释/重复 JSON/缺条目/空值/变量损坏/截断被当译文，错误正文可泄密",
+    "impact": "任意解释/重复 JSON/缺条目/空值/变量损坏/截断被当译文，错误正文可泄密",
+    "files": [
+      "internal/httpapi/ai_translation.go"
+    ],
+    "result": "完整 JSON/字段/条目/保护片段及 finish reason 校验；响应大小、URL结构和错误正文脱敏；确定性 HTTP mock 回归",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-010",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "公开 GET 忽略自动翻译开关，失败版本刷新反复调用；数值 ID 跨类型锁 key 冲突",
+    "impact": "公开 GET 忽略自动翻译开关，失败版本刷新反复调用；数值 ID 跨类型锁 key 冲突",
+    "files": [
+      "internal/httpapi/content_localization_handlers.go"
+    ],
+    "result": "遵守enabled、同版本failed/cancelled自动任务不重新付费，type+publicID构成key；真实ownedPG/实际公开HTTP GET/本地供应商2顶层5子场景-race PASS5.536s（345 GET），涵盖disabled、24并发单任务及发布后ready读取、503/cancel同版去重、新sourceRevision=2重建、mod/tag同numeric ID隔离、2请求site预算限制多locale刷新。实际SQL/Outbox/worker，不冒称真实NATS投递或全server中间件验收。",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log",
+      "internal/httpapi/ai_public_content_get_integration_test.go",
+      "docs/audit/evidence/ai-public-get.json",
+      "/tmp/mcmods-ai-public-get-first-race.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-011",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "每次启动覆盖人工封禁文案/排序、许可证转载政策",
+    "impact": "每次启动覆盖人工封禁文案/排序、许可证转载政策",
+    "files": [
+      "internal/database/governance_automation_seeds.go"
+    ],
+    "result": "种子只补缺失；PG 管理员自定义后重复 seed 保留；新 about 默认正文真实换行",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-012",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "默认账号启动恢复 active/allow、重设密码导致 session 失效",
+    "impact": "默认账号启动恢复 active/allow、重设密码导致 session 失效",
+    "files": [
+      "internal/database/seeds.go"
+    ],
+    "result": "只初始化缺失数据和未初始化 active admin 密码；保留封禁、显式 deny、可登录密码；autobot 仍禁止交互登录；PG 双次 seed 通过",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-013",
+    "severity": "P2",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "通知按 map 顺序反复插值用户值，花括号导致误报或递归替换；英文复制到目标 key 冒充翻译",
+    "impact": "通知按 map 顺序反复插值用户值，花括号导致误报或递归替换；英文复制到目标 key 冒充翻译",
+    "files": [
+      "internal/httpapi/notification_template_handlers.go",
+      "internal/httpapi/feature_localization_sticker_test.go"
+    ],
+    "result": "一次源模板替换、参数白名单；真实 zh/en 默认及诚实 fallback locale；覆盖所有支持语言的渲染测试",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-014",
+    "severity": "P1",
+    "source": "本次AI并发实现首次真实PostgreSQL回归FAIL90s（本次引入，已修复）；不是旧问题数量",
+    "root_cause": "新并发领取持 tx 再从 pool 读配置导致小连接池死锁",
+    "impact": "新并发领取持 tx 再从 pool 读配置导致小连接池死锁",
+    "files": [
+      "internal/httpapi/ai_task_recovery.go",
+      "internal/httpapi/notification_template_handlers.go"
+    ],
+    "result": "首次真实 8 并发回归 FAIL90s；改为同 tx 读取、review config 接受既有 query 接口，最新 PASS，无放宽超时",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-015",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "同批 source 失效先删 AI target，使人工修订 provenance/修订号丢失；相同文案也触发重译",
+    "impact": "同批 source 失效先删 AI target，使人工修订 provenance/修订号丢失；相同文案也触发重译",
+    "files": [
+      "internal/httpapi/catalog_editor_service.go"
+    ],
+    "result": "全部旧值先锁读，未变值跳过，批量人工写后再失效旧AI；PG target rev4→5、human_corrected、旧AI失效验证",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-016",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "蓝图 worker 崩溃没有租约/fence 结构支撑",
+    "impact": "蓝图 worker 崩溃没有租约/fence 结构支撑",
+    "files": [
+      "internal/database/repairs.go"
+    ],
+    "result": "独立兼容 patch 增 run_token/heartbeat；worker 心跳/迟到fence/删除保护由 API-B 实现，真实PG崩溃/迟到/删除2项测试PASS；独立回归证据在其专项",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-017",
+    "severity": "P1",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "admin retry 新任务沿用创建者但绕过其日额度",
+    "impact": "admin retry 新任务沿用创建者但绕过其日额度",
+    "files": [
+      "internal/httpapi/ai_task_recovery.go"
+    ],
+    "result": "现有 uncached RBAC + same tx user quota；PG 429不写入/剩余额度201/重复不再创建",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-018",
+    "severity": "P2",
+    "source": "current baseline semantic review + local regression",
+    "root_cause": "术语表配置未进入请求且无上下文指纹；其他scope静默无效",
+    "impact": "术语表配置未进入请求且无上下文指纹；其他scope静默无效",
+    "files": [
+      "internal/httpapi/ai_task_limits.go",
+      "internal/httpapi/ai_translation.go",
+      "internal/httpapi/ai_handlers.go"
+    ],
+    "result": "限长冻结术语+SHA256去重，prompt仅发授权翻译字段；配置/执行拒绝未定义scope；mock及PG回归",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-ai-context-final-test.log",
+      "/tmp/mcmods-db-final-test.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-019",
+    "severity": "P1",
+    "source": "baseline full-file semantic audit + isolated PostgreSQL/deterministic local HTTP regressions",
+    "root_cause": "公开资产查询未检查来源模组审批和导入状态，待审图标/背景可被公开读取",
+    "impact": "公开资产查询未检查来源模组审批和导入状态，待审图标/背景可被公开读取",
+    "files": [
+      "internal/httpapi/catalog_asset_handlers.go"
+    ],
+    "result": "公开资产加入已审核来源/active及ready-partial条件；真实PG pending404、approved进入MIME415，未调用真实OSS",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-db-extra-final-race3.log",
+      "/tmp/mcmods-seed-candidate-race.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-020",
+    "severity": "P1",
+    "source": "baseline full-file semantic audit + isolated PostgreSQL/deterministic local HTTP regressions",
+    "root_cause": "项目更新通知失败事务回滚attempt，永久重复错误且进度无法终止",
+    "impact": "项目更新通知失败事务回滚attempt，永久重复错误且进度无法终止",
+    "files": [
+      "internal/httpapi/project_update_notification_worker.go"
+    ],
+    "result": "失败在独立条件写持久递增attempt并最多8次；模板读取复用tx，行流错误拒绝；真实PG8次坏模板无通知/无收件进度推进",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-db-extra-final-race3.log",
+      "/tmp/mcmods-seed-candidate-race.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-021",
+    "severity": "P1",
+    "source": "baseline full-file semantic audit + isolated PostgreSQL/deterministic local HTTP regressions",
+    "root_cause": "统计队列旧领取在重领后仍能写派生投影和清理新任务",
+    "impact": "统计队列旧领取在重领后仍能写派生投影和清理新任务",
+    "files": [
+      "internal/httpapi/popularity_worker.go"
+    ],
+    "result": "重建同tx锁对应attempt/locked状态，旧领取不执行；真实PG旧计数保持999、新领取重建0并完成",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-db-extra-final-race3.log",
+      "/tmp/mcmods-seed-candidate-race.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-022",
+    "severity": "P1",
+    "source": "baseline full-file semantic audit + isolated PostgreSQL/deterministic local HTTP regressions",
+    "root_cause": "种子同步AI绕过ai_tasks/global费用与并发，固定租约缺心跳/fence，译文只存未消费metadata且candidate日限额并发越界",
+    "impact": "种子同步AI绕过ai_tasks/global费用与并发，固定租约缺心跳/fence，译文只存未消费metadata且candidate日限额并发越界",
+    "files": [
+      "internal/httpapi/seed_crawler_worker.go",
+      "internal/httpapi/seed_crawler_ai.go",
+      "internal/httpapi/ai_task_recovery.go",
+      "internal/httpapi/ai_handlers.go",
+      "internal/httpapi/catalog_editor_service.go",
+      "internal/httpapi/content_localization_handlers.go"
+    ],
+    "result": "统一普通AI任务/哈希与有界术语快照；site+crawler事务预留/Outbox，随机租约/心跳/派生写fence；标准localizations及Mod AI谱系；保留当日legacy known/unknown事实；候选日额度和领取同tx；真实PG/HTTP/race并发、预算、503未知、失主、真实自动提交与旧费用幂等通过",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-db-extra-final-race3.log",
+      "/tmp/mcmods-seed-candidate-race.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-023",
+    "severity": "P1",
+    "source": "baseline full-file semantic audit + isolated PostgreSQL/deterministic local HTTP regressions",
+    "root_cause": "PNG尺寸仅完整Decode后检查，小编码大IHDR可先分配超限像素内存",
+    "impact": "PNG尺寸仅完整Decode后检查，小编码大IHDR可先分配超限像素内存",
+    "files": [
+      "internal/httpapi/mod_embedded_icon_import.go",
+      "internal/httpapi/mod_embedded_icon_import_test.go"
+    ],
+    "result": "base64长度前检及DecodeConfig尺寸前检，再完整解码；合法CRC超大IHDR和编码长度回归通过，不危险执行旧版巨额分配",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-db-extra-final-race3.log",
+      "/tmp/mcmods-seed-candidate-race.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-024",
+    "severity": "P1",
+    "source": "baseline full-file semantic audit + isolated PostgreSQL/deterministic local HTTP regressions",
+    "root_cause": "active公开revision未检查父模组审核与ready/partial状态",
+    "impact": "active公开revision未检查父模组审核与ready/partial状态",
+    "files": [
+      "internal/httpapi/mod_export_query_handlers.go"
+    ],
+    "result": "公开入口严格审核；合法项目编辑者私人预览保留且private/no-store；行流错误500；真实PG pending拒绝、授权预览、approved公开、rejected再拒绝",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-db-extra-final-race3.log",
+      "/tmp/mcmods-seed-candidate-race.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-025",
+    "severity": "P2",
+    "source": "baseline full-file semantic audit + isolated PostgreSQL/deterministic local HTTP regressions",
+    "root_cause": "项目图标DB错误先被空值判断当404，故障被伪装资源不存在",
+    "impact": "项目图标DB错误先被空值判断当404，故障被伪装资源不存在",
+    "files": [
+      "internal/httpapi/mod_handlers.go"
+    ],
+    "result": "错误先返回500，真正无资源仍404；真实独占PG关闭单独连接池回归500",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-db-extra-final-race3.log",
+      "/tmp/mcmods-seed-candidate-race.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-026",
+    "severity": "P1",
+    "source": "baseline full-file semantic audit + isolated PostgreSQL/deterministic local HTTP regressions",
+    "root_cause": "catalog importer失主旧token仍能更新包并DELETE新worker staging",
+    "impact": "catalog importer失主旧token仍能更新包并DELETE新worker staging",
+    "files": [
+      "internal/httpapi/mod_export_job_lifecycle.go",
+      "internal/httpapi/mod_embedded_icon_import.go"
+    ],
+    "result": "网络ctx绑定job/token，每个业务短TX锁当前有效job/token状态后动作，刷新clock心跳；DB故障/失主取消，当前token清全部旧staging而旧worker不能执行；真实PG/race旧token清理拒绝/当前写/取消拒绝",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-db-extra-final-race3.log",
+      "/tmp/mcmods-seed-candidate-race.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-027",
+    "severity": "P2",
+    "source": "BE-DB-022修复后 completed-run 管理恢复验收；original completed run及failed ai_tasks真实PG夹具",
+    "root_cause": "失败种子AI任务依赖已经completed/expired旧run，现有后台retry返回409而不能恢复到已保存draft；恢复终态cleanup失败需要既有扫描补偿",
+    "impact": "英语草稿仍可用但显式翻译恢复断链；不能假称全局retry按钮完成此场景",
+    "files": [
+      "internal/httpapi/seed_crawler_recovery.go",
+      "internal/httpapi/seed_crawler_recovery_integration_test.go",
+      "internal/httpapi/ai_task_recovery.go",
+      "internal/httpapi/ai_handlers.go",
+      "internal/httpapi/seed_crawler_worker.go",
+      "internal/httpapi/seed_crawler_ai.go"
+    ],
+    "result": "现有权限/入口创建新的专用run随机lease/token；原actor/site/crawler预算同tx， sourcehash+实际draftID+payloadhash+updated_at CAS和已存在目标保护；仅追加原合成草稿localizations，无自动创建或公开。旧run/费用保留；legacy缺binding仅时间/归属证据明确才兼容。既有scan即使NATS暂不可用仍补偿terminalcleanup，不自动外部请求。19真实PG/本地HTTP/race场景PASS，3字段原ownerGET闭环和8duplicateworker一请求",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "docs/audit/database-ai.md",
+      "/tmp/mcmods-seed-recovery-final2-race.log",
+      "/tmp/mcmods-seed-recovery-final3-race.log"
+    ],
+    "blockers": []
+  },
+  {
+    "id": "BE-DB-028",
+    "severity": "P1",
+    "source": "UI-B追加管理故障验收发现；合法actor真实PG红绿，不继承frontend mock证据",
+    "root_cause": "aiConfigFromSettings把DB/解密/JSON错误当停用默认，GET假成功；PUT保留secret从defaults取空导致覆盖不可读原配置",
+    "impact": "管理员误以为配置丢失且保存可清空原设置/密钥；故障不被正常展示",
+    "files": [
+      "internal/httpapi/ai_handlers.go",
+      "internal/httpapi/ai_config_read_integration_test.go"
+    ],
+    "result": "管理GET/PUT使用checked helper，故障503 AI_CONFIG_UNAVAILABLE且未写；只有ErrNoRows保留原disabled defaults。worker继续disabled fallback停止外部调用。真实PG坏encrypted envelope/有效envelope但明文JSON坏/缺row/关pool4场景红绿，observer证实加密原值未覆盖",
+    "status": "已修复并完成相关验证",
+    "commit": "pending root grouped commit",
+    "validation": [
+      "/tmp/mcmods-ai-config-read-red-real-actor.log",
+      "/tmp/mcmods-seed-recovery-final2-race.log",
+      "/tmp/mcmods-seed-recovery-final3-race.log"
+    ],
+    "blockers": []
+  }
+]

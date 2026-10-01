@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
@@ -38,9 +40,7 @@ func (worker *ModMetadataImportWorker) Start(ctx context.Context) error {
 	if worker == nil || worker.server == nil || worker.queue == nil {
 		return queue.ErrUnavailable
 	}
-	if _, err := worker.server.db.Exec(context.Background(),
-		`update mod_metadata_import_jobs set status='queued',progress=0,error='',started_at=null,updated_at=now()
-		 where status='running' and updated_at < now() - interval '5 minutes'`); err != nil {
+	if err := worker.recoverStaleJobs(ctx); err != nil {
 		return err
 	}
 	subscribeErr := worker.queue.SubscribeTask(modMetadataImportTaskCode, worker.handle)
@@ -59,12 +59,26 @@ func (worker *ModMetadataImportWorker) republishQueued(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = worker.publishQueued(ctx)
+			if err := worker.publishQueued(ctx); err != nil {
+				log.Printf("metadata import queued-job publication failed: %v", err)
+			}
 		}
 	}
 }
 
+func (worker *ModMetadataImportWorker) recoverStaleJobs(ctx context.Context) error {
+	_, err := worker.server.db.Exec(ctx, `update mod_metadata_import_jobs
+  set status='queued',progress=0,error='',started_at=null,updated_at=now()
+  where status='running' and updated_at < now() - interval '5 minutes'`)
+	return err
+}
+
 func (worker *ModMetadataImportWorker) publishQueued(ctx context.Context) error {
+	// The same recovery used at startup also runs periodically, so a failed
+	// terminal write or a crashed worker cannot strand a job until a restart.
+	if err := worker.recoverStaleJobs(ctx); err != nil {
+		return err
+	}
 	rows, err := worker.server.db.Query(ctx, `select public_id from mod_metadata_import_jobs where status='queued' order by created_at limit 200`)
 	if err != nil {
 		return err
@@ -72,8 +86,11 @@ func (worker *ModMetadataImportWorker) publishQueued(ctx context.Context) error 
 	defer rows.Close()
 	for rows.Next() {
 		var jobID string
-		if rows.Scan(&jobID) == nil {
-			_ = worker.queue.PublishTask(ctx, modMetadataImportTaskCode, modMetadataImportMessage{JobID: jobID})
+		if err := rows.Scan(&jobID); err != nil {
+			return err
+		}
+		if err := worker.queue.PublishTask(ctx, modMetadataImportTaskCode, modMetadataImportMessage{JobID: jobID}); err != nil {
+			return err
 		}
 	}
 	return rows.Err()
@@ -90,17 +107,41 @@ func (worker *ModMetadataImportWorker) handle(ctx context.Context, raw []byte) e
 func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 	var projectType, provider, sourceURL string
 	var userID int64
+	var claimStartedAt time.Time
 	err := s.db.QueryRow(ctx,
 		`update mod_metadata_import_jobs set status='running',progress=10,error='',started_at=now(),updated_at=now()
-		 where public_id=$1 and status='queued' returning project_type,provider,source_url,user_id`, jobID,
-	).Scan(&projectType, &provider, &sourceURL, &userID)
-	if err != nil {
+		 where public_id=$1 and status='queued' returning project_type,provider,source_url,user_id,started_at`, jobID,
+	).Scan(&projectType, &provider, &sourceURL, &userID, &claimStartedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
+	if err != nil {
+		return err
+	}
 	fail := func(importErr error) error {
-		_, _ = s.db.Exec(context.Background(),
-			`update mod_metadata_import_jobs set status='failed',error=$2,finished_at=now(),updated_at=now() where public_id=$1`,
-			jobID, truncateRunes(importErr.Error(), 2000))
+		failureContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, writeErr := s.db.Exec(failureContext,
+			`update mod_metadata_import_jobs set status='failed',error=$2,finished_at=now(),updated_at=now()
+             where public_id=$1 and status='running' and started_at=$3`,
+			jobID, truncateRunes(importErr.Error(), 2000), claimStartedAt)
+		return writeErr
+	}
+	complete := func(result []byte) error {
+		_, err := s.db.Exec(ctx, `update mod_metadata_import_jobs set status='completed',progress=100,result=$2::jsonb,error='',
+            finished_at=now(),updated_at=now() where public_id=$1 and status='running' and started_at=$3`,
+			jobID, string(result), claimStartedAt)
+		return err
+	}
+	progress := func(value int) error {
+		command, err := s.db.Exec(ctx, `update mod_metadata_import_jobs set progress=$2,updated_at=now()
+            where public_id=$1 and status='running' and started_at=$3`, jobID, value, claimStartedAt)
+		if err != nil {
+			return err
+		}
+		if command.RowsAffected() != 1 {
+			return errors.New("metadata import claim was replaced")
+		}
 		return nil
 	}
 	cfg, err := s.modImportConfigFromSettings(ctx)
@@ -124,7 +165,9 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 	if err != nil {
 		return fail(err)
 	}
-	_, _ = s.db.Exec(ctx, `update mod_metadata_import_jobs set progress=25,updated_at=now() where public_id=$1`, jobID)
+	if err := progress(25); err != nil {
+		return err
+	}
 	if projectType == "modpack" {
 		var draft createModpackRequest
 		switch provider {
@@ -138,7 +181,9 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 		if err != nil {
 			return fail(err)
 		}
-		_, _ = s.db.Exec(ctx, `update mod_metadata_import_jobs set progress=85,updated_at=now() where public_id=$1`, jobID)
+		if err := progress(85); err != nil {
+			return err
+		}
 		if err = normalizeAndValidateModpackRequest(&draft); err != nil {
 			return fail(fmt.Errorf("导入数据校验失败: %w", err))
 		}
@@ -146,11 +191,7 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 		if marshalErr != nil {
 			return fail(marshalErr)
 		}
-		if _, err = s.db.Exec(ctx, `update mod_metadata_import_jobs set status='completed',progress=100,result=$2::jsonb,error='',
-			finished_at=now(),updated_at=now() where public_id=$1`, jobID, string(result)); err != nil {
-			return err
-		}
-		return nil
+		return complete(result)
 	}
 	if simpleProjectTypes[projectType] {
 		var draft simpleProjectSnapshot
@@ -165,7 +206,9 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 		if err != nil {
 			return fail(err)
 		}
-		_, _ = s.db.Exec(ctx, `update mod_metadata_import_jobs set progress=85,updated_at=now() where public_id=$1`, jobID)
+		if err := progress(85); err != nil {
+			return err
+		}
 		if err = normalizeAndValidateSimpleProjectDraft(&draft, true); err != nil {
 			return fail(fmt.Errorf("imported project data is invalid: %w", err))
 		}
@@ -173,11 +216,7 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 		if marshalErr != nil {
 			return fail(marshalErr)
 		}
-		if _, err = s.db.Exec(ctx, `update mod_metadata_import_jobs set status='completed',progress=100,result=$2::jsonb,error='',
-			finished_at=now(),updated_at=now() where public_id=$1`, jobID, string(result)); err != nil {
-			return err
-		}
-		return nil
+		return complete(result)
 	}
 	var draft createModRequest
 	switch provider {
@@ -193,7 +232,9 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 	if err != nil {
 		return fail(err)
 	}
-	_, _ = s.db.Exec(ctx, `update mod_metadata_import_jobs set progress=85,updated_at=now() where public_id=$1`, jobID)
+	if err := progress(85); err != nil {
+		return err
+	}
 	if err = normalizeAndValidateModRequest(&draft); err != nil {
 		return fail(fmt.Errorf("导入数据校验失败: %w", err))
 	}
@@ -201,13 +242,7 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 	if err != nil {
 		return fail(err)
 	}
-	if _, err = s.db.Exec(ctx,
-		`update mod_metadata_import_jobs set status='completed',progress=100,result=$2::jsonb,error='',
-		 finished_at=now(),updated_at=now() where public_id=$1`,
-		jobID, string(result)); err != nil {
-		return err
-	}
-	return nil
+	return complete(result)
 }
 
 type modrinthProject struct {
@@ -491,7 +526,7 @@ func providerHeaders(userAgent, token, apiKey string) http.Header {
 
 func newProviderHTTPClient(timeout time.Duration, baseURL string) (*http.Client, error) {
 	parsed, err := url.Parse(baseURL)
-	if err != nil || parsed.Host == "" {
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil, errors.New("invalid provider base URL")
 	}
 	allowedHost := strings.ToLower(parsed.Host)
@@ -501,6 +536,9 @@ func newProviderHTTPClient(timeout time.Duration, baseURL string) (*http.Client,
 	}
 	dialer := &net.Dialer{Timeout: min(timeout, 15*time.Second), KeepAlive: 30 * time.Second}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// The IP fence must resolve and dial the destination itself. An implicit
+	// environment proxy would make DialContext validate only the proxy host.
+	transport.Proxy = nil
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, splitErr := net.SplitHostPort(address)
 		if splitErr != nil {
@@ -514,7 +552,7 @@ func newProviderHTTPClient(timeout time.Duration, baseURL string) (*http.Client,
 			return nil, errors.New("provider host did not resolve")
 		}
 		for _, resolved := range addresses {
-			if isPrivateProviderAddress(resolved) && !allowLoopback {
+			if isPrivateProviderAddress(resolved) && !(allowLoopback && strings.EqualFold(host, parsed.Hostname()) && resolved.IsLoopback()) {
 				return nil, errors.New("provider host resolves to a private network")
 			}
 		}
@@ -527,8 +565,8 @@ func newProviderHTTPClient(timeout time.Duration, baseURL string) (*http.Client,
 			if len(via) >= 10 {
 				return errors.New("too many provider redirects")
 			}
-			if strings.ToLower(request.URL.Host) != allowedHost {
-				return errors.New("provider redirect changed API host")
+			if strings.ToLower(request.URL.Host) != allowedHost || request.URL.Scheme != parsed.Scheme {
+				return errors.New("provider redirect changed API origin")
 			}
 			return nil
 		},

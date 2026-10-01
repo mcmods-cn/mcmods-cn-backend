@@ -21,7 +21,12 @@ type updateUserStatusRequest struct {
 }
 
 func (s *Server) getPermissionDefaults(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.permissionDefaultsFromSettings(r.Context()))
+	payload, err := permissionDefaultsFromQuery(r.Context(), s.db)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取默认权限组失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) updatePermissionDefaults(w http.ResponseWriter, r *http.Request) {
@@ -103,7 +108,10 @@ func (s *Server) updateUserStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "移除封禁权限组失败")
 		return
 	}
-	s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &userID, "update_user_status", map[string]any{"status": request.Status})
+	if err := s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &userID, "update_user_status", map[string]any{"status": request.Status}); err != nil {
+		writeError(w, http.StatusInternalServerError, "记录权限变更审计失败")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "修改用户状态失败")
 		return
@@ -113,13 +121,19 @@ func (s *Server) updateUserStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": r.PathValue("id"), "status": request.Status})
 }
 
-func (s *Server) permissionDefaultsFromSettings(ctx context.Context) permissionDefaultsPayload {
+func permissionDefaultsFromQuery(ctx context.Context, query revisionQuery) (permissionDefaultsPayload, error) {
 	var payload permissionDefaultsPayload
 	var raw []byte
-	if err := s.db.QueryRow(ctx, `select value from system_settings where key = $1`, permissionDefaultsSettingKey).Scan(&raw); err == nil {
-		_ = json.Unmarshal(raw, &payload)
+	if err := query.QueryRow(ctx, `select value from system_settings where key = $1`, permissionDefaultsSettingKey).Scan(&raw); err != nil {
+		if err == pgx.ErrNoRows {
+			return normalizePermissionDefaults(payload), nil
+		}
+		return payload, err
 	}
-	return normalizePermissionDefaults(payload)
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return payload, err
+	}
+	return normalizePermissionDefaults(payload), nil
 }
 
 func normalizePermissionDefaults(payload permissionDefaultsPayload) permissionDefaultsPayload {
@@ -129,7 +143,10 @@ func normalizePermissionDefaults(payload permissionDefaultsPayload) permissionDe
 }
 
 func (s *Server) assignConfiguredRoleTx(ctx context.Context, tx pgx.Tx, userID int64, kind string) error {
-	defaults := s.permissionDefaultsFromSettings(ctx)
+	defaults, err := permissionDefaultsFromQuery(ctx, tx)
+	if err != nil {
+		return err
+	}
 	role := defaults.RegisteredRole
 	if kind == "banned" {
 		role = defaults.BannedRole
@@ -137,7 +154,7 @@ func (s *Server) assignConfiguredRoleTx(ctx context.Context, tx pgx.Tx, userID i
 	if role == "" {
 		return nil
 	}
-	_, err := tx.Exec(
+	_, err = tx.Exec(
 		ctx,
 		`insert into user_role_bindings (user_id, role_id)
 		 select $1, id from roles where code = $2 and status = 'active'
@@ -149,7 +166,10 @@ func (s *Server) assignConfiguredRoleTx(ctx context.Context, tx pgx.Tx, userID i
 }
 
 func (s *Server) removeConfiguredRoleTx(ctx context.Context, tx pgx.Tx, userID int64, kind string) error {
-	defaults := s.permissionDefaultsFromSettings(ctx)
+	defaults, err := permissionDefaultsFromQuery(ctx, tx)
+	if err != nil {
+		return err
+	}
 	role := defaults.RegisteredRole
 	if kind == "banned" {
 		role = defaults.BannedRole
@@ -157,7 +177,7 @@ func (s *Server) removeConfiguredRoleTx(ctx context.Context, tx pgx.Tx, userID i
 	if role == "" {
 		return nil
 	}
-	_, err := tx.Exec(
+	_, err = tx.Exec(
 		ctx,
 		`delete from user_role_bindings b using roles r
 		 where b.role_id = r.id and b.user_id = $1 and r.code = $2`,

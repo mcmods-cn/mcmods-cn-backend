@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type favoriteModpackExportSummary struct {
@@ -52,6 +55,10 @@ func (s *Server) favoriteModpackExports(w http.ResponseWriter, r *http.Request) 
 		}
 		items = append(items, item)
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load export history")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -66,8 +73,12 @@ func (s *Server) favoriteModpackExportDetail(w http.ResponseWriter, r *http.Requ
 		Scan(&task.ID, &task.CollectionID, &task.PackName, &task.PackVersion, &task.MinecraftVersion, &task.Loader, &task.LoaderVersion, &task.Status,
 			&task.CollectionItemCount, &task.ExportedModCount, &task.AutoDependencyCount, &task.SkippedItemCount, &task.FailedItemCount,
 			&task.FinalFileCount, &task.FileSize, &task.ResultSHA256, &task.ErrorCode, &task.CreatedAt, &task.FinishedAt, &task.ExpiresAt)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "export task not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load export task")
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `select coalesce(route.public_id,''),source_project_type,source_project_name_snapshot,
@@ -91,8 +102,15 @@ func (s *Server) favoriteModpackExportDetail(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusInternalServerError, "failed to decode export report")
 			return
 		}
-		_ = json.Unmarshal(dependencies, &item.DependencyOf)
+		if err = json.Unmarshal(dependencies, &item.DependencyOf); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode export dependencies")
+			return
+		}
 		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load export report")
+		return
 	}
 	downloadAvailable := task.Status == "ready" && task.ExpiresAt != nil && task.ExpiresAt.After(time.Now())
 	writeJSON(w, http.StatusOK, map[string]any{"task": task, "items": items, "downloadAvailable": downloadAvailable})
@@ -105,6 +123,10 @@ func (s *Server) downloadFavoriteModpackExport(w http.ResponseWriter, r *http.Re
 	err := s.db.QueryRow(r.Context(), `select file.object_key,task.pack_name,task.minecraft_version,task.loader_type,task.status,task.expires_at
 		from favorite_modpack_export_tasks task join oss_files file on file.id=task.result_file_id and file.status='active'
 		where task.public_id=$1 and task.owner_user_id=$2`, taskID, currentClaims(r).Subject).Scan(&objectKey, &name, &minecraftVersion, &loader, &status, &expires)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to load export download")
+		return
+	}
 	if err != nil || status != "ready" || expires == nil || !expires.After(time.Now()) {
 		writeAPIError(w, http.StatusGone, "MODPACK_EXPORT_DOWNLOAD_EXPIRED", "the temporary download is unavailable", 0, nil)
 		return

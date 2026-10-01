@@ -1,9 +1,12 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type markdownPlaygroundDraftRequest struct {
@@ -23,9 +26,12 @@ func (s *Server) getMarkdownPlaygroundDraft(w http.ResponseWriter, r *http.Reque
 		`select content, updated_at from markdown_playground_drafts where user_id = $1`,
 		claims.Subject,
 	).Scan(&content, &updatedAt)
-	if err != nil {
-		_ = ignoreNoRows(err)
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeJSON(w, http.StatusOK, map[string]any{"content": "", "updatedAt": nil})
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load Markdown playground draft")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"content": content, "updatedAt": updatedAt})
@@ -121,6 +127,10 @@ func (s *Server) userOSSFiles(w http.ResponseWriter, r *http.Request) {
 		record["url"] = access.URL
 		files = append(files, record)
 	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取用户文件失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, files)
 }
 
@@ -128,20 +138,26 @@ func (s *Server) userOSSFileQuota(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	cfg := s.ossConfigFromSettings(r.Context())
 	var dailySourceUsed, dailyStoredUsed, totalSourceUsed, totalStoredUsed int64
-	_ = s.db.QueryRow(
+	if err := s.db.QueryRow(
 		r.Context(),
 		`select coalesce(sum(coalesce(nullif(source_size_bytes, 0), size_bytes)), 0), coalesce(sum(size_bytes), 0)
 		 from oss_files
 		 where uploader_id = $1 and status = 'active' and created_at >= current_date`,
 		claims.Subject,
-	).Scan(&dailySourceUsed, &dailyStoredUsed)
-	_ = s.db.QueryRow(
+	).Scan(&dailySourceUsed, &dailyStoredUsed); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取用户文件额度失败")
+		return
+	}
+	if err := s.db.QueryRow(
 		r.Context(),
 		`select coalesce(sum(coalesce(nullif(source_size_bytes, 0), size_bytes)), 0), coalesce(sum(size_bytes), 0)
 		 from oss_files
 		 where uploader_id = $1 and status = 'active'`,
 		claims.Subject,
-	).Scan(&totalSourceUsed, &totalStoredUsed)
+	).Scan(&totalSourceUsed, &totalStoredUsed); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取用户文件额度失败")
+		return
+	}
 
 	singleLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.single_limit"))
 	dailyLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.daily_limit"))

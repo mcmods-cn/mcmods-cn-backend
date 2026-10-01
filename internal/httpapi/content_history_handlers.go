@@ -56,20 +56,15 @@ func (s *Server) communityPostHistory(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) modContentResourceHistory(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	identity, err := s.modIdentity(r.Context(), r.PathValue("siteId"))
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "mod not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load resource history")
+	identity, ok := s.requireReadableMod(w, r)
+	if !ok {
 		return
 	}
 	resourcePublicID := strings.ToLower(strings.TrimSpace(r.PathValue("resourceId")))
 	versionPublicID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("version")))
 	var resourceID, versionID int64
 	var publishedRevisionID *int64
-	err = s.db.QueryRow(r.Context(), `select entity.id,version.id,detail.published_revision_id
+	err := s.db.QueryRow(r.Context(), `select entity.id,version.id,detail.published_revision_id
 		from catalog_entities entity
 		join mod_resource_bindings binding on binding.resource_id=entity.id and binding.mod_id=$1
 		join mod_content_versions version on version.mod_id=$1 and version.public_id=$3 and version.status='active'

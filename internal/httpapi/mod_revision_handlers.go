@@ -112,6 +112,10 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestedBaseRevisionID, resolveErr := resolveRevisionPublicID(r.Context(), tx, request.BaseRevisionID)
+	if resolveErr != nil && !errors.Is(resolveErr, pgx.ErrNoRows) && request.BaseRevisionID != nil && validCatalogPublicID(strings.ToLower(strings.TrimSpace(*request.BaseRevisionID))) {
+		writeError(w, http.StatusInternalServerError, "failed to read base revision")
+		return
+	}
 	if resolveErr != nil {
 		writeError(w, http.StatusConflict, "the proposed base revision is no longer current")
 		return
@@ -135,7 +139,7 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status := "pending"
-	if !loadReviewConfig(r.Context(), s.db).ModEdit || canSkipProjectReview(claims, identity) {
+	if !loadReviewConfig(r.Context(), tx).ModEdit || canSkipProjectReview(claims, identity) {
 		status = "approved"
 	}
 	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
@@ -193,15 +197,9 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) modRevisionHistory(w http.ResponseWriter, r *http.Request) {
-	siteID := normalizeModSiteID(r.PathValue("siteId"))
 	claims := currentClaims(r)
-	identity, err := s.modIdentity(r.Context(), siteID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "mod not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load mod")
+	identity, ok := s.requireReadableMod(w, r)
+	if !ok {
 		return
 	}
 	canSeePending := canEditMod(claims, identity) || claimsAllow(claims, "project.review")
@@ -230,9 +228,8 @@ func (s *Server) modRevisionHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) compareModRevisions(w http.ResponseWriter, r *http.Request) {
-	identity, err := s.modIdentity(r.Context(), normalizeModSiteID(r.PathValue("siteId")))
-	if err != nil {
-		writeError(w, http.StatusNotFound, "mod not found")
+	identity, ok := s.requireReadableMod(w, r)
+	if !ok {
 		return
 	}
 	beforeID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("before")))
@@ -242,11 +239,19 @@ func (s *Server) compareModRevisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before, err := s.modRevisionByPublicID(r.Context(), beforeID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to read revision comparison")
+		return
+	}
 	if err != nil || before.ModInternalID != identity.ID {
 		writeError(w, http.StatusNotFound, "base revision not found")
 		return
 	}
 	after, err := s.modRevisionByPublicID(r.Context(), afterID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to read revision comparison")
+		return
+	}
 	if err != nil || after.ModInternalID != identity.ID {
 		writeError(w, http.StatusNotFound, "target revision not found")
 		return
@@ -364,7 +369,11 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 	if request.Status == "approved" {
 		s.scheduleModGalleryOSSRehome(modID)
 	}
-	updated, _ := s.modRevisionByPublicID(r.Context(), revisionPublicID)
+	updated, err := s.modRevisionByPublicID(r.Context(), revisionPublicID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read reviewed revision")
+		return
+	}
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -373,14 +382,41 @@ type modIdentityRecord struct {
 	UniqueID      string
 	SiteID        string
 	SubmittedByID *int64
+	ReviewStatus  string
 }
 
 func (s *Server) modIdentity(ctx context.Context, siteID string) (modIdentityRecord, error) {
 	var identity modIdentityRecord
-	err := s.db.QueryRow(ctx, `select id,project_code,slug,submitted_by from mods where slug=$1`, normalizeModSiteID(siteID)).Scan(
-		&identity.ID, &identity.UniqueID, &identity.SiteID, &identity.SubmittedByID,
+	err := s.db.QueryRow(ctx, `select id,project_code,slug,submitted_by,review_status from mods where slug=$1`, normalizeModSiteID(siteID)).Scan(
+		&identity.ID, &identity.UniqueID, &identity.SiteID, &identity.SubmittedByID, &identity.ReviewStatus,
 	)
 	return identity, err
+}
+
+func canReadModContent(claims security.Claims, identity modIdentityRecord) bool {
+	return identity.ReviewStatus == "approved" ||
+		(identity.SubmittedByID != nil && claims.Subject > 0 && *identity.SubmittedByID == claims.Subject) ||
+		canEditMod(claims, identity) || claimsAllow(claims, "content.review") || claimsAllow(claims, "project.review") || claimsAllow(claims, "admin.*")
+}
+
+// Resolving a route is not permission to read the unpublished project's
+// otherwise active children. Keep identity lookup separate for edit/review
+// operations, and apply the parent visibility boundary at public read entry points.
+func (s *Server) requireReadableMod(w http.ResponseWriter, r *http.Request) (modIdentityRecord, bool) {
+	identity, err := s.modIdentity(r.Context(), r.PathValue("siteId"))
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "mod not found")
+		return identity, false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read mod")
+		return identity, false
+	}
+	if !canReadModContent(currentClaims(r), identity) {
+		writeError(w, http.StatusNotFound, "mod not found")
+		return identity, false
+	}
+	return identity, true
 }
 
 func canEditMod(claims security.Claims, identity modIdentityRecord) bool {

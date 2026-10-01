@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -50,6 +51,10 @@ func (r *responseRecorder) Write(body []byte) (int, error) {
 	return size, err
 }
 
+// Preserve optional HTTP capabilities for ResponseController users such as
+// server-sent events while retaining access-log status and byte accounting.
+func (r *responseRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 func (s *Server) logAccess(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/") {
@@ -71,9 +76,12 @@ func (s *Server) logAccess(next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		loggedQuery := r.URL.RawQuery
-		if strings.HasPrefix(r.URL.Path, "/api/yggdrasil/") {
-			loggedQuery = ""
+		// Query strings may contain OAuth codes, session credentials, signed URLs
+		// or private search text. Keep only their presence, including for unknown
+		// or malformed parameter names, rather than guessing sensitive keys.
+		loggedQuery := ""
+		if r.URL.RawQuery != "" && !strings.HasPrefix(r.URL.Path, "/api/yggdrasil/") {
+			loggedQuery = "[redacted]"
 		}
 		s.writeAppLog(context.Background(), "api_access", levelForStatus(status), r.Method, r.URL.Path, 0, r, status, time.Since(started), map[string]any{
 			"query": loggedQuery,
@@ -136,16 +144,23 @@ func (s *Server) adminRuntimeLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) adminLogs(w http.ResponseWriter, r *http.Request) {
 	filter := logFilterFromRequest(r)
+	var items []map[string]any
+	var err error
 	switch filter.Category {
 	case "permission_change":
-		writeJSON(w, http.StatusOK, s.permissionChangeLogs(r, filter))
+		items, err = s.permissionChangeLogs(r, filter)
 	case "login_security":
-		writeJSON(w, http.StatusOK, s.loginSecurityLogs(r, filter))
+		items, err = s.loginSecurityLogs(r, filter)
 	case "file_upload":
-		writeJSON(w, http.StatusOK, s.fileUploadLogs(r, filter))
+		items, err = s.fileUploadLogs(r, filter)
 	default:
-		writeJSON(w, http.StatusOK, s.appLogs(r, filter))
+		items, err = s.appLogs(r, filter)
 	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取日志失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) getLogConfig(w http.ResponseWriter, r *http.Request) {
@@ -177,11 +192,15 @@ func (s *Server) updateLogConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存日志清理配置失败")
 		return
 	}
-	deleted := s.cleanupLogs(r.Context(), payload)
+	deleted, cleanupErr := s.cleanupLogs(r.Context(), payload)
+	if cleanupErr != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "LOG_CLEANUP_FAILED", "日志策略已保存，但部分日志清理失败", 0, map[string]any{"saved": true, "config": payload, "deleted": deleted})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"config": payload, "deleted": deleted})
 }
 
-func (s *Server) appLogs(r *http.Request, filter logQueryFilter) []map[string]any {
+func (s *Server) appLogs(r *http.Request, filter logQueryFilter) ([]map[string]any, error) {
 	args := []any{filter.Category}
 	where := []string{"l.category = $1"}
 	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
@@ -213,7 +232,7 @@ func (s *Server) appLogs(r *http.Request, filter logQueryFilter) []map[string]an
 	)
 }
 
-func (s *Server) permissionChangeLogs(r *http.Request, filter logQueryFilter) []map[string]any {
+func (s *Server) permissionChangeLogs(r *http.Request, filter logQueryFilter) ([]map[string]any, error) {
 	args := []any{}
 	where := []string{"1 = 1"}
 	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
@@ -239,7 +258,7 @@ func (s *Server) permissionChangeLogs(r *http.Request, filter logQueryFilter) []
 	)
 }
 
-func (s *Server) loginSecurityLogs(r *http.Request, filter logQueryFilter) []map[string]any {
+func (s *Server) loginSecurityLogs(r *http.Request, filter logQueryFilter) ([]map[string]any, error) {
 	args := []any{}
 	where := []string{"1 = 1"}
 	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
@@ -267,7 +286,7 @@ func (s *Server) loginSecurityLogs(r *http.Request, filter logQueryFilter) []map
 	)
 }
 
-func (s *Server) fileUploadLogs(r *http.Request, filter logQueryFilter) []map[string]any {
+func (s *Server) fileUploadLogs(r *http.Request, filter logQueryFilter) ([]map[string]any, error) {
 	args := []any{}
 	where := []string{"1 = 1"}
 	addLogCommonFiltersForColumn(&where, &args, filter, "l.created_at", []string{
@@ -331,14 +350,14 @@ func (s *Server) writeAppLog(ctx context.Context, category string, level string,
 	)
 }
 
-func (s *Server) querySimpleRows(r *http.Request, sql string, args ...any) []map[string]any {
+func (s *Server) querySimpleRows(r *http.Request, sql string, args ...any) ([]map[string]any, error) {
 	return s.querySimpleRowsWithContext(r.Context(), sql, args...)
 }
 
-func (s *Server) querySimpleRowsWithContext(ctx context.Context, sql string, args ...any) []map[string]any {
+func (s *Server) querySimpleRowsWithContext(ctx context.Context, sql string, args ...any) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, sql, args...)
 	if err != nil {
-		return []map[string]any{}
+		return nil, err
 	}
 	defer rows.Close()
 	fields := rows.FieldDescriptions()
@@ -346,7 +365,7 @@ func (s *Server) querySimpleRowsWithContext(ctx context.Context, sql string, arg
 	for rows.Next() {
 		values, err := rows.Values()
 		if err != nil {
-			continue
+			return nil, err
 		}
 		item := make(map[string]any, len(values))
 		for index, value := range values {
@@ -363,7 +382,10 @@ func (s *Server) querySimpleRowsWithContext(ctx context.Context, sql string, arg
 		}
 		items = append(items, item)
 	}
-	return items
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func logFilterFromRequest(r *http.Request) logQueryFilter {
@@ -485,16 +507,19 @@ func normalizeLogConfig(payload logRetentionConfig) logRetentionConfig {
 	return payload
 }
 
-func (s *Server) cleanupLogs(ctx context.Context, cfg logRetentionConfig) map[string]int64 {
+func (s *Server) cleanupLogs(ctx context.Context, cfg logRetentionConfig) (map[string]int64, error) {
 	deleted := map[string]int64{}
 	if !cfg.Enabled {
-		return deleted
+		return deleted, nil
 	}
+	var failures []error
 	run := func(label string, query string, args ...any) {
 		tag, err := s.db.Exec(ctx, query, args...)
-		if err == nil {
-			deleted[label] = tag.RowsAffected()
+		if err != nil {
+			failures = append(failures, fmt.Errorf("cleanup category %s failed: %w", label, err))
+			return
 		}
+		deleted[label] = tag.RowsAffected()
 	}
 	daysFor := func(category string) int {
 		if days, ok := cfg.CategoryDays[category]; ok && days > 0 {
@@ -509,7 +534,7 @@ func (s *Server) cleanupLogs(ctx context.Context, cfg logRetentionConfig) map[st
 	run("login_security", `delete from user_login_logs where created_at < now() - make_interval(days => $1::int)`, daysFor("login_security"))
 	run("file_upload", `delete from oss_upload_logs where created_at < now() - make_interval(days => $1::int)`, daysFor("file_upload"))
 	run("file_scan", `delete from oss_scan_logs where created_at < now() - make_interval(days => $1::int)`, daysFor("file_scan"))
-	return deleted
+	return deleted, errors.Join(failures...)
 }
 
 func boundedLimit(raw string, fallback int, max int) int {

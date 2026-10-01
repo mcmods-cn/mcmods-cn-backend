@@ -24,10 +24,11 @@ import (
 const maxBlueprintSourceBytes = 512 << 20
 
 type BlueprintWorker struct {
-	cfg   config.Config
-	db    *pgxpool.Pool
-	queue *queue.Client
-	api   *Server
+	cfg           config.Config
+	db            *pgxpool.Pool
+	queue         *queue.Client
+	api           *Server
+	fallbackSlots chan struct{}
 }
 
 type blueprintJobMessage struct {
@@ -35,7 +36,7 @@ type blueprintJobMessage struct {
 }
 
 func NewBlueprintWorker(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client) *BlueprintWorker {
-	return &BlueprintWorker{cfg: cfg, db: db, queue: queueClient, api: &Server{cfg: cfg, db: db, queue: queueClient}}
+	return &BlueprintWorker{cfg: cfg, db: db, queue: queueClient, api: &Server{cfg: cfg, db: db, queue: queueClient}, fallbackSlots: make(chan struct{}, 4)}
 }
 
 func (worker *BlueprintWorker) Start(ctx context.Context) error {
@@ -73,6 +74,10 @@ func (worker *BlueprintWorker) recoverQueuedJobs(ctx context.Context) {
 }
 
 func (worker *BlueprintWorker) dispatchQueuedJobs(ctx context.Context) {
+	if err := worker.recoverStaleBlueprintJobs(ctx); err != nil {
+		log.Printf("recover blueprint jobs: %v", err)
+		return
+	}
 	rows, err := worker.db.Query(ctx, `select id from blueprint_jobs where status = 'queued' order by created_at limit 32`)
 	if err != nil {
 		return
@@ -83,8 +88,16 @@ func (worker *BlueprintWorker) dispatchQueuedJobs(ctx context.Context) {
 		if rows.Scan(&jobID) != nil {
 			continue
 		}
-		if err := worker.queue.PublishTask(ctx, "blueprint_convert", blueprintJobMessage{JobID: jobID}); err != nil {
+		if err := worker.queue.PublishTask(ctx, "blueprint_convert", blueprintJobMessage{JobID: jobID}); err != nil && !errors.Is(err, queue.ErrTaskDisabled) {
+			select {
+			case worker.fallbackSlots <- struct{}{}:
+			case <-ctx.Done():
+				return
+			default:
+				continue
+			}
 			go func(id int64) {
+				defer func() { <-worker.fallbackSlots }()
 				jobContext, cancel := context.WithTimeout(ctx, 30*time.Minute)
 				defer cancel()
 				if processErr := worker.processJob(jobContext, id); processErr != nil {
@@ -95,52 +108,67 @@ func (worker *BlueprintWorker) dispatchQueuedJobs(ctx context.Context) {
 	}
 }
 
-func (worker *BlueprintWorker) processJob(ctx context.Context, jobID int64) (resultErr error) {
-	var blueprintID, createdBy int64
-	var operation, targetFormat string
-	err := worker.db.QueryRow(ctx, `update blueprint_jobs set status='processing',progress=1,attempts=attempts+1,started_at=coalesce(started_at,now()),updated_at=now()
-		where id=$1 and status='queued' returning blueprint_id,operation,target_format,coalesce(created_by,0)`, jobID).
-		Scan(&blueprintID, &operation, &targetFormat, &createdBy)
+func (worker *BlueprintWorker) processJob(parent context.Context, jobID int64) (resultErr error) {
+	claim, err := worker.claimBlueprintJob(parent, jobID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
+	ctx, stopHeartbeat := worker.startBlueprintJobHeartbeat(parent, jobID, claim.RunToken)
+	defer stopHeartbeat()
 	defer func() {
 		if resultErr == nil {
-			_, _ = worker.db.Exec(context.Background(), `update blueprint_jobs set status='completed',progress=100,finished_at=now(),updated_at=now(),last_error='' where id=$1`, jobID)
+			resultErr = context.Cause(ctx)
+		}
+		finishCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if finishErr := worker.finishBlueprintJob(finishCtx, jobID, claim.RunToken, resultErr); finishErr != nil {
+			resultErr = fmt.Errorf("finalize blueprint job: %w", finishErr)
 			return
 		}
-		_, _ = worker.db.Exec(context.Background(), `update blueprint_jobs set status='failed',finished_at=now(),updated_at=now(),last_error=$2 where id=$1`, jobID, resultErr.Error())
-		_, _ = worker.db.Exec(context.Background(), `update blueprints set status='failed',last_error=$2,updated_at=now() where id=$1`, blueprintID, resultErr.Error())
-		worker.notifyTemplate(createdBy, "blueprint_conversion_failure", map[string]string{"error": resultErr.Error()}, blueprintID)
+		if resultErr != nil {
+			worker.notifyTemplate(claim.CreatedBy, "blueprint_conversion_failure", map[string]string{"error": truncateRunes(resultErr.Error(), 1000)}, claim.BlueprintID)
+		}
 	}()
-
-	switch operation {
+	switch claim.Operation {
 	case "normalize":
-		resultErr = worker.normalizeBlueprint(ctx, jobID, blueprintID, createdBy)
+		resultErr = worker.normalizeBlueprint(ctx, jobID, claim.RunToken, claim.BlueprintID, claim.CreatedBy)
 	case "convert":
-		resultErr = worker.convertBlueprint(ctx, jobID, blueprintID, createdBy, targetFormat)
+		resultErr = worker.convertBlueprint(ctx, jobID, claim.RunToken, claim.BlueprintID, claim.CreatedBy, claim.TargetFormat)
 	default:
-		resultErr = fmt.Errorf("unsupported blueprint operation %q", operation)
+		resultErr = fmt.Errorf("unsupported blueprint operation %q", claim.Operation)
 	}
 	return resultErr
 }
 
-func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID, blueprintID, createdBy int64) error {
+func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int64, runToken string, blueprintID, createdBy int64) error {
 	var publicID, objectKey, sourceFormat, title, description, coverKey string
 	var coverFileID int64
-	if err := worker.db.QueryRow(ctx, `update blueprints set status='processing',last_error='',updated_at=now() where id=$1
+	startTx, err := worker.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer startTx.Rollback(ctx)
+	if err = lockBlueprintJobLeaseTx(ctx, startTx, jobID, runToken); err != nil {
+		return err
+	}
+	if err = startTx.QueryRow(ctx, `update blueprints set status='processing',last_error='',updated_at=now() where id=$1 and status<>'deleted'
 		returning public_id,original_object_key,source_format,title,description_markdown,coalesce(cover_file_id,0),cover_object_key`, blueprintID).
 		Scan(&publicID, &objectKey, &sourceFormat, &title, &description, &coverFileID, &coverKey); err != nil {
+		return err
+	}
+	if err = startTx.Commit(ctx); err != nil {
 		return err
 	}
 	raw, _, err := worker.readOSSObject(ctx, objectKey)
 	if err != nil {
 		return err
 	}
-	_, _ = worker.db.Exec(ctx, `update blueprint_jobs set progress=25,updated_at=now() where id=$1`, jobID)
+	if err = worker.updateBlueprintJobProgress(ctx, jobID, runToken, 25); err != nil {
+		return err
+	}
 	document, err := decodeBlueprint(raw, sourceFormat, title)
 	if err != nil {
 		return fmt.Errorf("decode %s blueprint: %w", sourceFormat, err)
@@ -150,9 +178,11 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID, bl
 	if err != nil {
 		return err
 	}
-	_, _ = worker.db.Exec(ctx, `update blueprint_jobs set progress=55,updated_at=now() where id=$1`, jobID)
+	if err = worker.updateBlueprintJobProgress(ctx, jobID, runToken, 55); err != nil {
+		return err
+	}
 	normalizedConfig := worker.api.ossConfigFromSettings(ctx)
-	normalizedKey := path.Join(ossObjectPrefix(normalizedConfig.Prefix, ossBlueprintReleaseCategory(publicID, "normalized")), "blueprint.json")
+	normalizedKey := path.Join(ossObjectPrefix(normalizedConfig.Prefix, ossBlueprintReleaseCategory(publicID, "normalized")), "blueprint-"+runToken+".json")
 	fileID, err := worker.api.writeGeneratedOSSObject(ctx, normalizedKey, "blueprint.json", "application/json", normalized, createdBy, "blueprint_normalized")
 	if err != nil {
 		return err
@@ -178,6 +208,9 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID, bl
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockBlueprintJobLeaseTx(ctx, tx, jobID, runToken); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, "blueprint:"+publicID); err != nil {
 		return fmt.Errorf("lock blueprint revision: %w", err)
 	}
@@ -185,7 +218,7 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID, bl
 	var existingPublishedRevisionID *int64
 	var currentCoverFileID int64
 	var currentCoverKey string
-	if err = tx.QueryRow(ctx, `select review_status,published_revision_id,coalesce(cover_file_id,0),cover_object_key from blueprints where id=$1 for update`, blueprintID).
+	if err = tx.QueryRow(ctx, `select review_status,published_revision_id,coalesce(cover_file_id,0),cover_object_key from blueprints where id=$1 and status<>'deleted' for update`, blueprintID).
 		Scan(&existingReviewStatus, &existingPublishedRevisionID, &currentCoverFileID, &currentCoverKey); err != nil {
 		return err
 	}
@@ -245,7 +278,7 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID, bl
 		publishedRevisionID = *existingPublishedRevisionID
 	}
 	if revisionCount == 0 {
-		reviewRequired := loadReviewConfig(ctx, worker.db).BlueprintCreate
+		reviewRequired := loadReviewConfig(ctx, tx).BlueprintCreate
 		revisionStatus := "approved"
 		reviewStatus = "approved"
 		if reviewRequired {
@@ -284,17 +317,22 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID, bl
 		blueprintID, status, normalizedKey, document.Size[0], document.Size[1], document.Size[2], len(document.Blocks), len(materials), len(document.Entities), document.DataVersion, reviewStatus, publishedRevisionID, coverFileID, coverKey); err != nil {
 		return err
 	}
+	if err = refreshBlueprintJobLeaseTx(ctx, tx, jobID, runToken); err != nil {
+		return err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}
-	_, _ = worker.db.Exec(ctx, `update blueprint_jobs set progress=90,updated_at=now() where id=$1`, jobID)
+	if err = worker.updateBlueprintJobProgress(ctx, jobID, runToken, 90); err != nil {
+		return err
+	}
 	worker.notifyTemplate(createdBy, "blueprint_conversion_success", map[string]string{"name": title}, blueprintID)
 	return nil
 }
 
-func (worker *BlueprintWorker) convertBlueprint(ctx context.Context, jobID, blueprintID, createdBy int64, targetFormat string) error {
+func (worker *BlueprintWorker) convertBlueprint(ctx context.Context, jobID int64, runToken string, blueprintID, createdBy int64, targetFormat string) error {
 	var publicID, title, normalizedKey string
-	if err := worker.db.QueryRow(ctx, `select public_id,title,normalized_object_key from blueprints where id=$1`, blueprintID).Scan(&publicID, &title, &normalizedKey); err != nil {
+	if err := worker.db.QueryRow(ctx, `select public_id,title,normalized_object_key from blueprints where id=$1 and status<>'deleted'`, blueprintID).Scan(&publicID, &title, &normalizedKey); err != nil {
 		return err
 	}
 	if normalizedKey == "" {
@@ -308,7 +346,9 @@ func (worker *BlueprintWorker) convertBlueprint(ctx context.Context, jobID, blue
 	if err = json.Unmarshal(raw, &document); err != nil {
 		return err
 	}
-	_, _ = worker.db.Exec(ctx, `update blueprint_jobs set progress=40,updated_at=now() where id=$1`, jobID)
+	if err = worker.updateBlueprintJobProgress(ctx, jobID, runToken, 40); err != nil {
+		return err
+	}
 	encoded, contentType, err := encodeBlueprint(document, targetFormat)
 	if err != nil {
 		return err
@@ -322,8 +362,26 @@ func (worker *BlueprintWorker) convertBlueprint(ctx context.Context, jobID, blue
 		return err
 	}
 	digest := sha256.Sum256(encoded)
-	_, err = worker.db.Exec(ctx, `insert into blueprint_variants(blueprint_id,format,file_id,object_key,original,recommended,status,original_name,content_type,size_bytes,sha256,created_by)
+	tx, err := worker.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = lockBlueprintJobLeaseTx(ctx, tx, jobID, runToken); err != nil {
+		return err
+	}
+	var activeID int64
+	if err = tx.QueryRow(ctx, `select id from blueprints where id=$1 and status<>'deleted' for update`, blueprintID).Scan(&activeID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `insert into blueprint_variants(blueprint_id,format,file_id,object_key,original,recommended,status,original_name,content_type,size_bytes,sha256,created_by)
 		values($1,$2,$3,$4,false,false,'ready',$5,$6,$7,$8,$9)`, blueprintID, extension, fileID, objectKey, filename, contentType, len(encoded), hex.EncodeToString(digest[:]), createdBy)
+	if err == nil {
+		err = refreshBlueprintJobLeaseTx(ctx, tx, jobID, runToken)
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
 	if err == nil {
 		worker.notifyTemplate(createdBy, "blueprint_format_success", map[string]string{"name": title, "format": strings.ToUpper(extension)}, blueprintID)
 	}

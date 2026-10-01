@@ -1,12 +1,16 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"reflect"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestProviderAuthorAvatarFieldsDecode(t *testing.T) {
@@ -147,5 +151,58 @@ func TestPrivateProviderAddressClassification(t *testing.T) {
 	}
 	if isPrivateProviderAddress(netip.MustParseAddr("1.1.1.1")) {
 		t.Fatal("public provider address was classified as private")
+	}
+}
+
+func TestModMetadataImportDoesNotAcknowledgeDatabaseFailure(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, "postgres://fixture:fixture@127.0.0.1:1/fixture?connect_timeout=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Close()
+	server := &Server{db: pool}
+	if err := server.runModMetadataImport(ctx, "fixture-job"); err == nil {
+		t.Fatal("database claim failure was acknowledged as a successful delivery")
+	}
+}
+
+func TestProviderClientRejectsProtocolDowngrade(t *testing.T) {
+	client, err := newProviderHTTPClient(time.Second, "https://provider.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://provider.example/project", nil)
+	if err := client.CheckRedirect(request, []*http.Request{httptest.NewRequest(http.MethodGet, "https://provider.example", nil)}); err == nil {
+		t.Fatal("HTTPS provider redirect was allowed to send credentials over HTTP")
+	}
+}
+
+func TestProviderClientDoesNotDelegateTargetResolutionToEnvironmentProxy(t *testing.T) {
+	client, err := newProviderHTTPClient(time.Second, "https://provider.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("provider transport is not inspectable")
+	}
+	if transport.Proxy != nil {
+		t.Fatal("implicit environment proxy bypasses the provider target DNS/IP fence")
+	}
+}
+
+func TestProviderClientRejectsUnsafeURLStructure(t *testing.T) {
+	for _, endpoint := range []string{"ftp://provider.example/file", "https://synthetic:fixture@provider.example/file", "https://provider.example/file#fragment"} {
+		t.Run(endpoint, func(t *testing.T) {
+			if _, err := newProviderHTTPClient(time.Second, endpoint); err == nil {
+				t.Fatal("unsafe provider URL was accepted")
+			}
+		})
+	}
+	// Signed download URLs may contain queries. API base URL configuration
+	// separately rejects queries in normalizeProviderBaseURL.
+	if _, err := newProviderHTTPClient(time.Second, "https://provider.example/file?signature=synthetic"); err != nil {
+		t.Fatalf("signed provider file URL rejected: %v", err)
 	}
 }

@@ -80,11 +80,11 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 			select resource.entity_id,entity.public_id,snapshot.revision_id,mod.slug site_id,version.public_id version_public_id,
 				resource.kind_code,snapshot.registry,resource.canonical_id object_id,
 				snapshot.icon_path,snapshot.preview_path,snapshot.names,kind.family resource_kind,
-				revision.minecraft_version,revision.loader,revision.is_active,revision.status,
+				revision.minecraft_version,revision.loader,revision.is_active,revision.status,mod.review_status,
 				coalesce(revision.activated_at,revision.created_at) source_time,resource.namespace
 			from game_resources resource
 			join resource_kinds kind on kind.code=resource.kind_code
-			join catalog_entities entity on entity.id=resource.entity_id
+			join catalog_entities entity on entity.id=resource.entity_id and entity.status='active'
 			join resource_import_snapshots snapshot on snapshot.resource_id=resource.entity_id
 			join catalog_import_revisions revision on revision.id=snapshot.revision_id
 			join mods mod on mod.id=revision.mod_id
@@ -92,7 +92,7 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 			where resource.canonical_id=requested.resource_id
 		) candidate
 		where candidate.revision_id=requested.preferred_revision_id
-			or (candidate.is_active and candidate.status in ('ready','partial'))
+			or (candidate.is_active and candidate.status in ('ready','partial') and candidate.review_status='approved')
 		order by (candidate.revision_id=requested.preferred_revision_id) desc,
 			(candidate.resource_kind=requested.resource_kind) desc,
 			(candidate.minecraft_version=requested.minecraft_version) desc,
@@ -169,7 +169,7 @@ func (s *Server) resolveManualModContentResources(ctx context.Context, keys []ex
 		from game_resources resource
 		join catalog_entities entity on entity.id=resource.entity_id and entity.status='active'
 		join mod_resource_bindings binding on binding.resource_id=resource.entity_id
-		join mods mod on mod.id=binding.mod_id and mod.status='active'
+		join mods mod on mod.id=binding.mod_id and mod.status='active' and mod.review_status='approved'
 		join mod_resource_version_details detail on detail.resource_id=resource.entity_id and detail.status='active'
 		join mod_content_versions version on version.id=detail.version_id and version.status='active'
 		where lower(resource.canonical_id)=lower(requested.resource_id)

@@ -343,12 +343,15 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 	if loader == "" {
 		loader = "unknown"
 	}
-	if _, err = s.db.Exec(ctx, `update catalog_import_packages set schema_version=$2,exporter_version=$3,
+	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `update catalog_import_packages set schema_version=$2,exporter_version=$3,
 		minecraft_version=$4,loader=$5,manifest=$6::jsonb,namespaces=$7,profile='icons' where id=$1`,
-		packageID, importerVersion, source, minecraftVersion, loader, string(manifestJSON), namespaces); err != nil {
+			packageID, importerVersion, source, minecraftVersion, loader, string(manifestJSON), namespaces); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `delete from catalog_import_revisions where job_id=$1 and mod_id=$2 and status='staging'`, jobID, modID)
 		return err
-	}
-	if _, err = s.db.Exec(ctx, `delete from catalog_import_revisions where job_id=$1 and mod_id=$2 and status='staging'`, jobID, modID); err != nil {
+	}); err != nil {
 		return err
 	}
 
@@ -772,12 +775,19 @@ func decodeEmbeddedIconPNG(encoded string) (image.Image, error) {
 	if encoded == "" {
 		return nil, errors.New("icon is empty")
 	}
+	if len(encoded) > base64.StdEncoding.EncodedLen(16<<20) {
+		return nil, errors.New("icon exceeds size limit")
+	}
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return nil, err
 	}
 	if len(data) > 16<<20 {
 		return nil, errors.New("icon exceeds size limit")
+	}
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || format != "png" || config.Width <= 0 || config.Height <= 0 || int64(config.Width)*int64(config.Height) > 100_000_000 {
+		return nil, errors.New("icon dimensions or PNG header are invalid")
 	}
 	decoded, format, err := image.Decode(bytes.NewReader(data))
 	if err != nil || format != "png" {

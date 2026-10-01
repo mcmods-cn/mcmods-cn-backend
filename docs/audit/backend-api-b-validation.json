@@ -1,0 +1,140 @@
+[
+  {
+    "repository": "mcmods-cn-backend",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "version": "working-tree; matching final reviewed file fingerprints in review-backend-api-b.json",
+    "command": "go test -race ./internal/httpapi -run '^(TestLogout|TestPasswordChangeRejectsWarmSession|TestGitHubOAuth|TestOAuthProviderResponses|TestNATSConfigResponse|TestInfrastructureMetricsDatabaseFailure|TestNotificationTranslationResult|TestOSSProject|TestOSSUploadExtension|TestOSSCompletion|TestOSSConcurrentProject|TestCommentIDRoutes|TestConcurrentCommentWatches|TestConfiguredRoleLookup|TestPermissionDefaultsDatabaseFailure|TestCurrencyTransferTax|TestSpongeSchematic|TestBlueprintNBT|TestBlueprintJobLease|TestBlueprintWorker|TestProjectFollow|TestEconomyItem|TestFavoriteExportQuota|TestGlobalCatalog|TestModExportFallback|TestResumedModExport|TestExportRecipeCancellation)' -count=1 -v",
+    "environment": "Go1.26.8; PostgreSQL17 isolated owned-marker test services; source task env with TestMain preflight; synthetic fixtures only",
+    "result": "PASS",
+    "exit_code": 0,
+    "top_level_tests": 32,
+    "seconds": 15.278,
+    "evidence": "docs/audit/evidence/backend-api-b-final-owned-race.log",
+    "provider_boundary": "deterministic controlled OSS HEAD/DELETE and OAuth transport; actual DB semantics/HTTP middleware; zero real paid AI calls",
+    "raw_evidence_scope": "raw .log files are ignored and available only in the current task workspace; this committed JSON is the durable command/result/assertion/boundary summary, not a raw-log archive",
+    "raw_evidence_sha256": {
+      "docs/audit/evidence/backend-api-b-final-owned-race.log": "f18a515c0c037c99c93431580216a5b64ea6f010c1acddf63ed3b59ca0dfd839"
+    },
+    "test_nodes": 61,
+    "subtest_nodes": 29
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "version": "working-tree; matching final reviewed file fingerprints in review-backend-api-b.json",
+    "command": "go test -race ./internal/httpapi -run '^(TestRealtimeStream|TestEconomyInvalid|TestReviewConfig|TestNotificationTemplate)' -count=1 -v",
+    "environment": "Go1.26.8; PostgreSQL17 isolated owned-marker test services; source task env with TestMain preflight; synthetic fixtures only",
+    "result": "PASS",
+    "exit_code": 0,
+    "top_level_tests": 10,
+    "seconds": 33.516,
+    "evidence": "docs/audit/evidence/backend-api-b-sse-final-race.log",
+    "provider_boundary": "deterministic controlled OSS HEAD/DELETE and OAuth transport; actual DB semantics/HTTP middleware; zero real paid AI calls",
+    "raw_evidence_scope": "raw .log files are ignored and available only in the current task workspace; this committed JSON is the durable command/result/assertion/boundary summary, not a raw-log archive",
+    "raw_evidence_sha256": {
+      "docs/audit/evidence/backend-api-b-sse-final-race.log": "fd7b75787bf5c6620fa6ee9e903b9bffa059cc05e3667f7962124fbc836daf32"
+    },
+    "test_nodes": 10,
+    "subtest_nodes": 0
+  },
+  {
+    "result": "FAIL",
+    "exit_code": 1,
+    "command": "earlier targeted integration/-race attempts",
+    "evidence": [
+      "/tmp/mcmods-api-b-final-additional.log",
+      "/tmp/mcmods-api-b-final-additional-green2.log",
+      "/tmp/mcmods-api-b-latest-race.log"
+    ],
+    "causes": [
+      "new fixture wrong actual schema external_project_url/verified_at or nonunique collection names, fixed per actual schema",
+      "new fixture invalid project_code length, corrected 9-char schema requirement",
+      "SSE revoked response truncated after idle frame deadline; strict EOF assertion retained, final deadline reset fixed"
+    ],
+    "followup": "Final logs above are fresh executions after actual fixes; no flaky classification or masked successful retries",
+    "raw_evidence_scope": "raw .log files are ignored and available only in the current task workspace; this committed JSON is the durable command/result/assertion/boundary summary, not a raw-log archive",
+    "raw_evidence_sha256": {
+      "/tmp/mcmods-api-b-final-additional.log": "8c906433cd4f53f14730aae07433585d4fba76a86425e12561aff69d5b67f98d",
+      "/tmp/mcmods-api-b-final-additional-green2.log": "1037af441ae1ef098f67bef337e59741b6ac91003f3bc6ddee9a5775cf06bc6a",
+      "/tmp/mcmods-api-b-latest-race.log": "bd3dd1f65b61dbc933c0867ad41b1d341474340ce1caebd6a00a7a3fa6ec0a67"
+    }
+  },
+  {
+    "result": "NOT_RUN",
+    "scope": [
+      "production runtime health",
+      "real OAuth/OSS suppliers",
+      "real paid AI supplier connectivity, semantic quality and bill accuracy",
+      "complete blueprint multi-format OSS success journey"
+    ],
+    "reason": "scope/authorization boundaries; relevant controlled failures and PG invariants verified separately"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "version": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87; test SHA cd07ac19d400bf41d271476052d1692ef67065d638edaa7a095805c136a58aff",
+    "command": "go test -race ./internal/httpapi -run '^TestAdminNATSAndTemplateFailureStateIntegration$' -count=1 -v",
+    "environment": "Go1.26.8; random marker-owned PostgreSQL17 database initialized with real migrations; dedicated ephemeral loopback TCP disconnect endpoint; synthetic actor and settings",
+    "result": "PASS",
+    "exit_code": 0,
+    "top_level_tests": 1,
+    "subtests": 6,
+    "seconds": 3.967,
+    "evidence": "docs/audit/evidence/backend-api-b-admin-config-final-race.log",
+    "assertions": [
+      "NATS encrypted setting saved before handshake failure;503/nats_connection_failed/details.saved=true;GET exposes saved disconnected sanitized configuration",
+      "notifications/review null,array,wrong typed field reject;adminGET/PUT503 and original setting value/time/actor unchanged;business fallback requires review",
+      "after correction valid notification template revision2 persisted",
+      "closed pool refuses reads/save and independent observer shows unchanged settings"
+    ],
+    "boundary": "direct handlers with synthetic claims; no authenticated middleware/E2E assertion, production or supplier calls; shared test service configuration was not modified",
+    "raw_evidence_scope": "raw .log files are ignored and available only in the current task workspace; this committed JSON is the durable command/result/assertion/boundary summary, not a raw-log archive",
+    "raw_evidence_sha256": {
+      "docs/audit/evidence/backend-api-b-admin-config-final-race.log": "d041118298795e9d6635e150dea703ec76cba596b90e08daff89e39d9250b576"
+    },
+    "test_nodes": 7,
+    "test_function_sha256": "cd07ac19d400bf41d271476052d1692ef67065d638edaa7a095805c136a58aff",
+    "subtest_nodes": 6
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "version": "isolated temp current HEAD archive with original baseline nats_handlers.go plus original function bodies getNotificationTemplates/updateNotificationTemplates/getReviewConfig; current helper signatures and owned fixture/dependencies retained",
+    "command": "go test ./internal/httpapi -run '^TestAdminNATSAndTemplateFailureStateIntegration$' -count=1 -v",
+    "environment": "same Go1.26.8/real fresh marker-owned PostgreSQL/local disconnect; entirely outside shared source tree",
+    "result": "FAIL",
+    "exit_code": 1,
+    "top_level_tests": 1,
+    "failed_subtests": 5,
+    "passed_subtests": 1,
+    "seconds": 2.79,
+    "evidence": "docs/audit/evidence/backend-api-b-admin-config-old-handlers-red.log",
+    "causes": [
+      "old NATS returns200 instead of saved503",
+      "invalid notification/review settings return200 and save overwrites unreadable configuration",
+      "closed-pool GET returns200 and save500 rather than bounded503"
+    ],
+    "boundary": "limited original-handler comparison, not a full original-baseline build or integration run; healthy correction control passes; no weakened assertions",
+    "raw_evidence_scope": "raw .log files are ignored and available only in the current task workspace; this committed JSON is the durable command/result/assertion/boundary summary, not a raw-log archive",
+    "raw_evidence_sha256": {
+      "docs/audit/evidence/backend-api-b-admin-config-old-handlers-red.log": "419e2d6718baac6e4b8697696b5059d7f49ed28a0c31bb74df7512efe4b4e304"
+    },
+    "test_nodes": 7,
+    "test_function_sha256": "cd07ac19d400bf41d271476052d1692ef67065d638edaa7a095805c136a58aff"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "version": "3dec598b4e4c82cd0f08e4ae9c46ca783f21ff87",
+    "command": "PATH=/tmp/mcmods-audit-tools/go1.26.8/go/bin:$PATH GOTOOLCHAIN=local go vet ./internal/httpapi",
+    "result": "PASS",
+    "exit_code": 0,
+    "environment": "Go1.26.8 official checked task runtime",
+    "prior_attempt": {
+      "result": "FAIL",
+      "exit_code": 1,
+      "command": "go vet ./internal/httpapi without task PATH",
+      "reason": "system go wrapper reports Unknown option: vet; no checks executed by that wrapper"
+    },
+    "scope": "current HTTP API/test package static vet; whole-repository final checks are recorded separately by root"
+  }
+]

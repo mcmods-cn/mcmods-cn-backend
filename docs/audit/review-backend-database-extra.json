@@ -1,0 +1,965 @@
+[
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_content_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "8e3ec9291257c7841eca26c3649bea943adfdf17bd3dbf8218e602953f6a3c58",
+    "sha256": "2aec06ab00bab590113f418b715f31b0e492b94488e35f65a1da0d6a654d54db",
+    "lines": 2564,
+    "read_ranges": [],
+    "status": "未审查",
+    "responsibility": "逐文件继续",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": false,
+    "semantic_reviewed": false,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:2aec06ab00bab590113f418b715f31b0e492b94488e35f65a1da0d6a654d54db",
+    "assigned_reviewer": "backend_api_a",
+    "coverage_note": "本执行者已明确转交独占全文，不能继承阅读；最终去重覆盖取 review-backend-api-a-additions.json"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "3837d9b9232a542a2bb10849305f1e2a8352fa8112433e81ba4d3916ab71dd47",
+    "sha256": "09908717b3bbdfeac403f6ffc0d03e87b4c8ec0b3120a3a44ebbd3afc74387a8",
+    "lines": 2022,
+    "read_ranges": [
+      [
+        1,
+        2022
+      ]
+    ],
+    "status": "已复查",
+    "responsibility": "项目目录/分页/排序/编辑审核与公开图标",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [
+      "BE-DB-025"
+    ],
+    "validation": [
+      "PASS: isolated PostgreSQL17/local deterministic HTTP -race focused11, 14.134s; /tmp/mcmods-db-extra-final-race3.log"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "final_review_version": "working-tree:09908717b3bbdfeac403f6ffc0d03e87b4c8ec0b3120a3a44ebbd3afc74387a8",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_content_layout_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "7024484b0d9730e546502581916ee4d6435c04e372fff75c9583b4cc586674aa",
+    "sha256": "70ba7bc828ad48fe31b1728ddd286a4d3cfdb25db3d149d1af315452dc355466",
+    "lines": 1042,
+    "read_ranges": [],
+    "status": "未审查",
+    "responsibility": "逐文件继续",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": false,
+    "semantic_reviewed": false,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:70ba7bc828ad48fe31b1728ddd286a4d3cfdb25db3d149d1af315452dc355466",
+    "assigned_reviewer": "backend_api_a",
+    "coverage_note": "本执行者已明确转交独占全文，不能继承阅读；最终去重覆盖取 review-backend-api-a-additions.json"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_embedded_icon_import.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "f77adac0d63cd64999614c112943c36e4bb4c2b5b5657341a0c3aaa491f30ce8",
+    "sha256": "29c026ed703a95a0608edf6b8739a8438cf2cdbec26b8b7cbb7f89e96bd83c63",
+    "lines": 867,
+    "read_ranges": [
+      [
+        1,
+        867
+      ]
+    ],
+    "status": "已复查",
+    "responsibility": "embedded JSONL编码/PNG分配前检查/变体staging与最终导入",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [
+      "BE-DB-023"
+    ],
+    "validation": [
+      "PASS: isolated PostgreSQL17/local deterministic HTTP -race focused11, 14.134s; /tmp/mcmods-db-extra-final-race3.log"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "final_review_version": "working-tree:29c026ed703a95a0608edf6b8739a8438cf2cdbec26b8b7cbb7f89e96bd83c63",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/project_automation_worker.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "14e8f1da6c419c9a1563830082c9f2c29428f94b8c0a3c1a7ae7c5d542219d0c",
+    "sha256": "bc925b9fff3ee630cc3619f0538f7857c97e849d30f32835509f08beafd59020",
+    "lines": 963,
+    "read_ranges": [],
+    "status": "未审查",
+    "responsibility": "逐文件继续",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": false,
+    "semantic_reviewed": false,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:bc925b9fff3ee630cc3619f0538f7857c97e849d30f32835509f08beafd59020",
+    "assigned_reviewer": "backend_api_a",
+    "coverage_note": "本执行者已明确转交独占全文，不能继承阅读；最终去重覆盖取 review-backend-api-a-additions.json"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_export_handlers_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "16de9a0d69c96d6099c9c24e0fb4b130c4faee751da9aebff884ecc48b58429a",
+    "sha256": "16de9a0d69c96d6099c9c24e0fb4b130c4faee751da9aebff884ecc48b58429a",
+    "lines": 771,
+    "read_ranges": [],
+    "status": "未审查",
+    "responsibility": "逐文件继续",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": false,
+    "semantic_reviewed": false,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:16de9a0d69c96d6099c9c24e0fb4b130c4faee751da9aebff884ecc48b58429a",
+    "assigned_reviewer": "frontend_ui_a",
+    "note": "已交接完整独占；本台账不声称读取，汇总取review-backend-ui-a-extra.json",
+    "coverage_note": "本执行者已明确转交独占全文，不能继承阅读；最终去重覆盖取 review-backend-ui-a-extra.json"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_export_query_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "79143e2154980d03c099052f1c3ae962fe977e909e2d27a50623596226271934",
+    "sha256": "953058839dae6c8259af2e1c45549358c7edec3090807d473037bd87d41e0737",
+    "lines": 704,
+    "read_ranges": [
+      [
+        1,
+        704
+      ]
+    ],
+    "status": "已复查",
+    "responsibility": "导出revision公开审批/授权预览/章节资源配方/行流错误",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [
+      "BE-DB-024"
+    ],
+    "validation": [
+      "PASS: isolated PostgreSQL17/local deterministic HTTP -race focused11, 14.134s; /tmp/mcmods-db-extra-final-race3.log"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "final_review_version": "working-tree:953058839dae6c8259af2e1c45549358c7edec3090807d473037bd87d41e0737",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_revision_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "256f8c6a8291f7751617f2164aa2825280fdbba9ed60159842e19613f0b37d42",
+    "sha256": "c82570590be3b8f750cd794aeb8dd2ae98ade676c10fbcfccf0e1ea8c96e1d24",
+    "lines": 654,
+    "read_ranges": [],
+    "status": "未审查",
+    "responsibility": "逐文件继续",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": false,
+    "semantic_reviewed": false,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:c82570590be3b8f750cd794aeb8dd2ae98ade676c10fbcfccf0e1ea8c96e1d24",
+    "assigned_reviewer": "backend_api_a",
+    "coverage_note": "本执行者已明确转交独占全文，不能继承阅读；最终去重覆盖取 review-backend-api-a-additions.json"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_export_recipe_batch.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "332be403c72f69262f1febd6175ee071692c0b6ecf69d2962e2424be16240ebc",
+    "sha256": "332be403c72f69262f1febd6175ee071692c0b6ecf69d2962e2424be16240ebc",
+    "lines": 521,
+    "read_ranges": [],
+    "status": "未审查",
+    "responsibility": "逐文件继续",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": false,
+    "semantic_reviewed": false,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:332be403c72f69262f1febd6175ee071692c0b6ecf69d2962e2424be16240ebc",
+    "assigned_reviewer": "backend_api_a",
+    "coverage_note": "本执行者已明确转交独占全文，不能继承阅读；最终去重覆盖取 review-backend-api-a-additions.json"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/seed_crawler_worker.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "b1436f588ab1d5e4953ed290fc01c5a40086191f98ef7c601e0cdd77eb6cdc25",
+    "sha256": "9a6676e411c5573c94a51d5ce59ba7a9a287a412546d4545948c983d609bfc56",
+    "lines": 565,
+    "read_ranges": [
+      [
+        1,
+        565
+      ]
+    ],
+    "status": "已复查",
+    "responsibility": "种子调度/随机租约/候选日额度及去重/元数据草稿与标准提交",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [
+      "BE-DB-022",
+      "BE-DB-027"
+    ],
+    "validation": [
+      "PASS: isolated PostgreSQL17/local deterministic HTTP -race focused11, 14.134s; /tmp/mcmods-db-extra-final-race3.log",
+      "PASS: fresh PostgreSQL17.11/Go1.26.8 deterministic HTTP -race 30 top/60 subcase nodes 43.650s; final new2 groups/recovery19+AIconfig4 cases 6.018s; docs/audit/evidence/ai-db-final.json; production/paid provider NOT_RUN"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "final_review_version": "working-tree:9a6676e411c5573c94a51d5ce59ba7a9a287a412546d4545948c983d609bfc56",
+    "final_review_basis": "原人工逐行全文审查；本次最终全文及新增修改段/实际调用链再复查，无截断漏读；动态证据仅限定对应回归，不代表全场景"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/minecraft_loader_version_sources.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "236b69f2c4025a49fcba48e3270df9b1e76c06128b906e951c45de5383d1ff37",
+    "sha256": "236b69f2c4025a49fcba48e3270df9b1e76c06128b906e951c45de5383d1ff37",
+    "lines": 481,
+    "read_ranges": [],
+    "status": "未审查",
+    "responsibility": "逐文件继续",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": false,
+    "semantic_reviewed": false,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:236b69f2c4025a49fcba48e3270df9b1e76c06128b906e951c45de5383d1ff37",
+    "assigned_reviewer": "frontend_ui_a",
+    "note": "已交接完整独占；本台账不声称读取，汇总取review-backend-ui-a-extra.json",
+    "coverage_note": "本执行者已明确转交独占全文，不能继承阅读；最终去重覆盖取 review-backend-ui-a-extra.json"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/content_metrics_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "7b4c3bc046c88e801690fd095062783f80cda5dedf97b5ae88c2572f49d23a70",
+    "sha256": "ef1a51f13a999157c961da53cec156264f9167984192bf9cf3bf721f9900c646",
+    "lines": 453,
+    "read_ranges": [],
+    "status": "未审查",
+    "responsibility": "逐文件继续",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": false,
+    "semantic_reviewed": false,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:ef1a51f13a999157c961da53cec156264f9167984192bf9cf3bf721f9900c646",
+    "assigned_reviewer": "frontend_ui_a",
+    "note": "已交接完整独占；本台账不声称读取，汇总取review-backend-ui-a-extra.json",
+    "coverage_note": "本执行者已明确转交独占全文，不能继承阅读；最终去重覆盖取 review-backend-ui-a-extra.json"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_export_entry_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "8a17b0626dd1332d5373514c66ea83d5ba50fc1645b5d8ef09649e419527bfa7",
+    "sha256": "08f6c548e5bac77d71670fe78c118484eac20f8f99d3375e43878c0103dae93c",
+    "lines": 402,
+    "read_ranges": [],
+    "status": "未审查",
+    "responsibility": "逐文件继续",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": false,
+    "semantic_reviewed": false,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:08f6c548e5bac77d71670fe78c118484eac20f8f99d3375e43878c0103dae93c",
+    "assigned_reviewer": "frontend_ui_a",
+    "note": "已交接完整独占；本台账不声称读取，汇总取review-backend-ui-a-extra.json",
+    "coverage_note": "本执行者已明确转交独占全文，不能继承阅读；最终去重覆盖取 review-backend-ui-a-extra.json"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_content_safety_integration_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "2372cd0521c937f97fe17f1f9f35f621cf3321a31d6456b11e6db8f2630adf79",
+    "sha256": "2372cd0521c937f97fe17f1f9f35f621cf3321a31d6456b11e6db8f2630adf79",
+    "lines": 359,
+    "read_ranges": [
+      [
+        1,
+        359
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "真实PG默认内容模板/混合版本及未解析引用保护",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:2372cd0521c937f97fe17f1f9f35f621cf3321a31d6456b11e6db8f2630adf79",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_content_resource_integration_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "941a650870a05c221eb4651a1c2ae566c5af0cd1d0d69c7e853caa9765a82e84",
+    "sha256": "941a650870a05c221eb4651a1c2ae566c5af0cd1d0d69c7e853caa9765a82e84",
+    "lines": 342,
+    "read_ranges": [
+      [
+        1,
+        342
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "真实PG列表/版本隔离/布局atomic场景",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:941a650870a05c221eb4651a1c2ae566c5af0cd1d0d69c7e853caa9765a82e84",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/yggdrasil_settings_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "5ccb9d5f8153ded2d455d02aed951c1ac82a6b0e16c994c97e50294e663c5060",
+    "sha256": "5ccb9d5f8153ded2d455d02aed951c1ac82a6b0e16c994c97e50294e663c5060",
+    "lines": 282,
+    "read_ranges": [
+      [
+        1,
+        282
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "加密签名配置/轮换/并发runtime",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:5ccb9d5f8153ded2d455d02aed951c1ac82a6b0e16c994c97e50294e663c5060",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/catalog_import.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "2231c8281e605f01abcb5fcd560c3b4705fd6ae5d779a8eb352a744799f6ea01",
+    "sha256": "2231c8281e605f01abcb5fcd560c3b4705fd6ae5d779a8eb352a744799f6ea01",
+    "lines": 273,
+    "read_ranges": [
+      [
+        1,
+        273
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "资源SQL批导入/映射/引用解析",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:2231c8281e605f01abcb5fcd560c3b4705fd6ae5d779a8eb352a744799f6ea01",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/popularity_worker.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "7590f305ef3159ce84ae4c2b622ccb4fd7cc85e0f6ed00e122e22c5b2d57a6fa",
+    "sha256": "c8bd7a41de050042e45d1cdd7ee8f65136754eef4e5b11b96c0a136f857e631d",
+    "lines": 282,
+    "read_ranges": [
+      [
+        1,
+        282
+      ]
+    ],
+    "status": "已复查",
+    "responsibility": "派生指标/热度合并队列领取与attempt fence",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [
+      "BE-DB-021"
+    ],
+    "validation": [
+      "PASS: isolated PostgreSQL17/local deterministic HTTP -race focused11, 14.134s; /tmp/mcmods-db-extra-final-race3.log"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "final_review_version": "working-tree:c8bd7a41de050042e45d1cdd7ee8f65136754eef4e5b11b96c0a136f857e631d",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/project_update_notification_worker.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "a45ed234bdaa5dc06a8189c450ac2fa311175d6a65ab0dd01d71e611c769e771",
+    "sha256": "0edaf8c9bbe45215d0acf1e1af9b1d6b29ea6c50526bc58093af362ef40db8f7",
+    "lines": 250,
+    "read_ranges": [
+      [
+        1,
+        250
+      ]
+    ],
+    "status": "已复查",
+    "responsibility": "关注通知批处理/事务模板读取/持久退避上限/原子进度",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [
+      "BE-DB-020"
+    ],
+    "validation": [
+      "PASS: isolated PostgreSQL17/local deterministic HTTP -race focused11, 14.134s; /tmp/mcmods-db-extra-final-race3.log"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "final_review_version": "working-tree:0edaf8c9bbe45215d0acf1e1af9b1d6b29ea6c50526bc58093af362ef40db8f7",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_embedded_icon_import_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "c8358868786d545213df91498a86e58de300c46feb9577bbf78a98095b1d6c63",
+    "sha256": "16be8e2e085a4221ca9936d37066200fa1b15762b0fb8dffb7d3202da3e79d0c",
+    "lines": 207,
+    "read_ranges": [
+      [
+        1,
+        207
+      ]
+    ],
+    "status": "已复查",
+    "responsibility": "JSONL/base64/PNG正常与分配前限制回归",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [
+      "BE-DB-023"
+    ],
+    "validation": [
+      "PASS: isolated PostgreSQL17/local deterministic HTTP -race focused11, 14.134s; /tmp/mcmods-db-extra-final-race3.log"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "final_review_version": "working-tree:16be8e2e085a4221ca9936d37066200fa1b15762b0fb8dffb7d3202da3e79d0c",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/catalog_asset_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "4ecff68dfb1025700b43a59aebf2957f094f020bb19acaf3228d6ea403d82c66",
+    "sha256": "13aa3f6e19a3b4a698ee13e4a3501f76d34a312f968720725356e78a4b23a48b",
+    "lines": 154,
+    "read_ranges": [
+      [
+        1,
+        154
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "来源审核过滤/图标背景/OSS响应边界",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [
+      "BE-DB-019"
+    ],
+    "validation": [
+      "PASS: isolated PostgreSQL17/local deterministic HTTP -race focused11, 14.134s; /tmp/mcmods-db-extra-final-race3.log"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": true,
+    "final_review_version": "working-tree:13aa3f6e19a3b4a698ee13e4a3501f76d34a312f968720725356e78a4b23a48b",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_export_tag_handlers.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "1cc42bdcf024935283f9dd60be58e5690db94667089a16aa2441df494ac74daa",
+    "sha256": "e673810cae76c13f328a7ced3903033749c23f69aea0908adcdefbb5ac5fab68",
+    "lines": 144,
+    "read_ranges": [
+      [
+        1,
+        144
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "版本export tag列表与成员映射",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:e673810cae76c13f328a7ced3903033749c23f69aea0908adcdefbb5ac5fab68",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mrpack_loader_version.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "b0ea0299e8fec8de9e001c4d2772f4b0c36394a1bb839bf67a2734f2d709fc5f",
+    "sha256": "b0ea0299e8fec8de9e001c4d2772f4b0c36394a1bb839bf67a2734f2d709fc5f",
+    "lines": 122,
+    "read_ranges": [
+      [
+        1,
+        122
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "Modrinth导出loader解析/版本排序",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:b0ea0299e8fec8de9e001c4d2772f4b0c36394a1bb839bf67a2734f2d709fc5f",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_content_system_categories.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "af4136820da2434b895601036e2506a901bb9402b7de74c852869693e89d3e24",
+    "sha256": "af4136820da2434b895601036e2506a901bb9402b7de74c852869693e89d3e24",
+    "lines": 62,
+    "read_ranges": [
+      [
+        1,
+        62
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "item/block初始分类幂等与语言seed",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:af4136820da2434b895601036e2506a901bb9402b7de74c852869693e89d3e24",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_content_similar_groups_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "b666f43311d6bfd1a28837897b81647793624d001ff3ed8936477ffbdfe07eef",
+    "sha256": "b666f43311d6bfd1a28837897b81647793624d001ff3ed8936477ffbdfe07eef",
+    "lines": 41,
+    "read_ranges": [
+      [
+        1,
+        41
+      ]
+    ],
+    "status": "已完整审查",
+    "responsibility": "相似资源分组约束",
+    "call_chain": [
+      "catalog/mod/export handlers→revision/snapshot queries→asset/readback"
+    ],
+    "issues": [],
+    "validation": [
+      "NOT_RUN: static semantic review only"
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "behavior_verified": false,
+    "final_review_version": "working-tree:b666f43311d6bfd1a28837897b81647793624d001ff3ed8936477ffbdfe07eef",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/mod_export_job_lifecycle.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "eeaddbe76c5ad424cee99e972ed6d8ee1e7d0724f0f3168f3b0a62983f3619d2",
+    "category": "人工维护源码/测试",
+    "responsibility": "导入job租约心跳/上下文fence/短TX写与staging安全清理",
+    "call_chain": [
+      "seed config/run→candidate daily claim→metadata snapshot→AI quota/Outbox→provider validation→run/subject/task fence→draft/publication; catalog importer→lease TX→staging→publication"
+    ],
+    "issues": [
+      "BE-DB-026"
+    ],
+    "behavior_verified": true,
+    "validation": [
+      "PASS: isolated PostgreSQL17/deterministic HTTP focused -race11,14.134s; provider/production NOT_RUN"
+    ],
+    "sha256": "3b295c2650c9127f06fd6fe03cd9011a928130ecd95b70c19b2468a857ce7f1e",
+    "lines": 197,
+    "final_review_version": "working-tree:3b295c2650c9127f06fd6fe03cd9011a928130ecd95b70c19b2468a857ce7f1e",
+    "read_ranges": [
+      [
+        1,
+        197
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/seed_crawler_ai.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "category": "人工维护源码/测试",
+    "responsibility": "普通AI任务/源哈希/run与候选归属/预算与legacy事实/结果及标准locale映射",
+    "call_chain": [
+      "seed config/run→candidate daily claim→metadata snapshot→AI quota/Outbox→provider validation→run/subject/task fence→draft/publication; catalog importer→lease TX→staging→publication"
+    ],
+    "issues": [
+      "BE-DB-022",
+      "BE-DB-027"
+    ],
+    "behavior_verified": true,
+    "validation": [
+      "PASS: isolated PostgreSQL17/deterministic HTTP focused -race11,14.134s; provider/production NOT_RUN",
+      "PASS: fresh PostgreSQL17.11/Go1.26.8 deterministic HTTP -race 30 top/60 subcase nodes 43.650s; final new2 groups/recovery19+AIconfig4 cases 6.018s; docs/audit/evidence/ai-db-final.json; production/paid provider NOT_RUN"
+    ],
+    "sha256": "535bdd26974419f366625e5557e1014a91c882b3e71e2dde3fc33e96729b42ca",
+    "lines": 460,
+    "final_review_version": "working-tree:535bdd26974419f366625e5557e1014a91c882b3e71e2dde3fc33e96729b42ca",
+    "read_ranges": [
+      [
+        1,
+        460
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_basis": "原人工逐行全文审查；本次最终全文及新增修改段/实际调用链再复查，无截断漏读；动态证据仅限定对应回归，不代表全场景"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/seed_crawler_ai_integration_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "category": "人工维护源码/测试",
+    "responsibility": "真实PG和受控HTTP seed并发/预算/unknown/lease/真实Mod自动发布/标准editor契约/legacy幂等/候选并发日额度",
+    "call_chain": [
+      "seed config/run→candidate daily claim→metadata snapshot→AI quota/Outbox→provider validation→run/subject/task fence→draft/publication; catalog importer→lease TX→staging→publication"
+    ],
+    "issues": [
+      "BE-DB-022"
+    ],
+    "behavior_verified": true,
+    "validation": [
+      "PASS: isolated PostgreSQL17/deterministic HTTP focused -race11,14.134s; provider/production NOT_RUN"
+    ],
+    "sha256": "3d88a51b07c982aa1e06429c618cdb9b6102ddd08b79b322031ff44dbe1913b9",
+    "lines": 427,
+    "final_review_version": "working-tree:3d88a51b07c982aa1e06429c618cdb9b6102ddd08b79b322031ff44dbe1913b9",
+    "read_ranges": [
+      [
+        1,
+        427
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/deferred_projection_integration_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "category": "人工维护源码/测试",
+    "responsibility": "真实PG派生投影旧领取/失败通知上限/公开asset来源审核",
+    "call_chain": [
+      "seed config/run→candidate daily claim→metadata snapshot→AI quota/Outbox→provider validation→run/subject/task fence→draft/publication; catalog importer→lease TX→staging→publication"
+    ],
+    "issues": [
+      "BE-DB-021"
+    ],
+    "behavior_verified": true,
+    "validation": [
+      "PASS: isolated PostgreSQL17/deterministic HTTP focused -race11,14.134s; provider/production NOT_RUN"
+    ],
+    "sha256": "c5e3cd145c18e1a3f6f7357f46b9408b3d76e7fa78424a974cfe703bfcfe41d2",
+    "lines": 133,
+    "final_review_version": "working-tree:c5e3cd145c18e1a3f6f7357f46b9408b3d76e7fa78424a974cfe703bfcfe41d2",
+    "read_ranges": [
+      [
+        1,
+        133
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "internal/httpapi/catalog_read_fence_integration_test.go",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "category": "人工维护源码/测试",
+    "responsibility": "真实PG公开revision审批/私人预览/NULL作者边界/旧importer拒绝及关闭pool错误",
+    "call_chain": [
+      "seed config/run→candidate daily claim→metadata snapshot→AI quota/Outbox→provider validation→run/subject/task fence→draft/publication; catalog importer→lease TX→staging→publication"
+    ],
+    "issues": [
+      "BE-DB-026"
+    ],
+    "behavior_verified": true,
+    "validation": [
+      "PASS: isolated PostgreSQL17/deterministic HTTP focused -race11,14.134s; provider/production NOT_RUN"
+    ],
+    "sha256": "c67bc1b62b75bbf49e90f54fc921ffa3e56551c3ba1d1026c7bc3c513daede42",
+    "lines": 141,
+    "final_review_version": "working-tree:c67bc1b62b75bbf49e90f54fc921ffa3e56551c3ba1d1026c7bc3c513daede42",
+    "read_ranges": [
+      [
+        1,
+        141
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "SEED_CRAWLER_DESIGN.md",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "3c6ac64531ecbb0691a3fcde931545a2700309b76e6f6799d371d8f1bf9d0541",
+    "category": "人工维护文档",
+    "responsibility": "正式功能/权限/部署与真实验证边界",
+    "call_chain": [
+      "seed config/run→candidate daily claim→metadata snapshot→AI quota/Outbox→provider validation→run/subject/task fence→draft/publication; catalog importer→lease TX→staging→publication"
+    ],
+    "issues": [
+      "BE-DB-022",
+      "BE-DB-027"
+    ],
+    "behavior_verified": false,
+    "validation": [
+      "PASS: isolated PostgreSQL17/deterministic HTTP focused -race11,14.134s; provider/production NOT_RUN",
+      "PASS: fresh PostgreSQL17.11/Go1.26.8 deterministic HTTP -race 30 top/60 subcase nodes 43.650s; final new2 groups/recovery19+AIconfig4 cases 6.018s; docs/audit/evidence/ai-db-final.json; production/paid provider NOT_RUN"
+    ],
+    "sha256": "fe2dbc45106737eab6348183b33612235093322db8a827366e7952d41245ba90",
+    "lines": 51,
+    "final_review_version": "working-tree:fe2dbc45106737eab6348183b33612235093322db8a827366e7952d41245ba90",
+    "read_ranges": [
+      [
+        1,
+        51
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_basis": "原人工逐行全文审查；本次最终全文及新增修改段/实际调用链再复查，无截断漏读；动态证据仅限定对应回归，不代表全场景"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "PROJECT_FOLLOW_NOTIFICATIONS.md",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": "9a06ac8c8a34e38967152bbde9359d25de3d558ae83137eeec8b6dcfbdc0954a",
+    "category": "人工维护文档",
+    "responsibility": "正式功能/权限/部署与真实验证边界",
+    "call_chain": [
+      "seed config/run→candidate daily claim→metadata snapshot→AI quota/Outbox→provider validation→run/subject/task fence→draft/publication; catalog importer→lease TX→staging→publication"
+    ],
+    "issues": [],
+    "behavior_verified": false,
+    "validation": [
+      "PASS: isolated PostgreSQL17/deterministic HTTP focused -race11,14.134s; provider/production NOT_RUN"
+    ],
+    "sha256": "5b6f907076575aa59deacbd64ab1d71f1ef9e5158c865a47a47e3b557dcac831",
+    "lines": 29,
+    "final_review_version": "working-tree:5b6f907076575aa59deacbd64ab1d71f1ef9e5158c865a47a47e3b557dcac831",
+    "read_ranges": [
+      [
+        1,
+        29
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "CONTENT_EXPORT_VISIBILITY.md",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "category": "人工维护文档",
+    "responsibility": "正式功能/权限/部署与真实验证边界",
+    "call_chain": [
+      "seed config/run→candidate daily claim→metadata snapshot→AI quota/Outbox→provider validation→run/subject/task fence→draft/publication; catalog importer→lease TX→staging→publication"
+    ],
+    "issues": [],
+    "behavior_verified": false,
+    "validation": [
+      "PASS: isolated PostgreSQL17/deterministic HTTP focused -race11,14.134s; provider/production NOT_RUN"
+    ],
+    "sha256": "79ab671cfa90f1cdc319c34fc1d047882ecf118065ac83001b96d536f4bc667a",
+    "lines": 23,
+    "final_review_version": "working-tree:79ab671cfa90f1cdc319c34fc1d047882ecf118065ac83001b96d536f4bc667a",
+    "read_ranges": [
+      [
+        1,
+        23
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  },
+  {
+    "repository": "mcmods-cn-backend",
+    "path": "docs/CONTENT_STATISTICS_RELIABILITY.md",
+    "baseline_commit": "bd50afd0ef92192c40c5152ea56e27a3fdbb657f",
+    "baseline_sha256": null,
+    "category": "人工维护文档",
+    "responsibility": "正式功能/权限/部署与真实验证边界",
+    "call_chain": [
+      "seed config/run→candidate daily claim→metadata snapshot→AI quota/Outbox→provider validation→run/subject/task fence→draft/publication; catalog importer→lease TX→staging→publication"
+    ],
+    "issues": [],
+    "behavior_verified": false,
+    "validation": [
+      "PASS: isolated PostgreSQL17/deterministic HTTP focused -race11,14.134s; provider/production NOT_RUN"
+    ],
+    "sha256": "ea0ef09b46ebec6d4bb0fcc92806cd77a62ba67b85969336ddee8677a5351fda",
+    "lines": 7,
+    "final_review_version": "working-tree:ea0ef09b46ebec6d4bb0fcc92806cd77a62ba67b85969336ddee8677a5351fda",
+    "read_ranges": [
+      [
+        1,
+        7
+      ]
+    ],
+    "content_read": true,
+    "semantic_reviewed": true,
+    "status": "已复查",
+    "final_review_basis": "实际完整逐行阅读；修改后最终段落、上下文及受影响调用链复查；读取与行为证据分开"
+  }
+]

@@ -56,16 +56,22 @@ func (w *compressedResponseWriter) Write(payload []byte) (int, error) {
 }
 
 func (w *compressedResponseWriter) Flush() {
+	// Keep http.Flusher compatibility; callers that need disconnect/error
+	// handling use ResponseController, which chooses FlushError below.
+	_ = w.FlushError()
+}
+
+func (w *compressedResponseWriter) FlushError() error {
 	if !w.decided {
 		w.decide()
 		w.ResponseWriter.WriteHeader(w.statusCode)
 	}
 	if w.gzipWriter != nil {
-		_ = w.gzipWriter.Flush()
+		if err := w.gzipWriter.Flush(); err != nil {
+			return err
+		}
 	}
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
 func (w *compressedResponseWriter) ReadFrom(reader io.Reader) (int64, error) {
@@ -92,9 +98,11 @@ func (w *compressedResponseWriter) decide() {
 }
 
 func acceptsGzip(value string) bool {
+	var gzipSeen, gzipAccepted, wildcardAccepted bool
 	for _, part := range strings.Split(value, ",") {
 		segments := strings.Split(strings.TrimSpace(part), ";")
-		if !strings.EqualFold(strings.TrimSpace(segments[0]), "gzip") && strings.TrimSpace(segments[0]) != "*" {
+		encoding := strings.ToLower(strings.TrimSpace(segments[0]))
+		if encoding != "gzip" && encoding != "*" {
 			continue
 		}
 		accepted := true
@@ -102,14 +110,21 @@ func acceptsGzip(value string) bool {
 			key, raw, found := strings.Cut(strings.TrimSpace(parameter), "=")
 			if found && strings.EqualFold(strings.TrimSpace(key), "q") {
 				quality, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
-				accepted = err != nil || quality > 0
+				accepted = err == nil && quality > 0 && quality <= 1
 			}
 		}
-		if accepted {
-			return true
+		if encoding == "gzip" {
+			gzipSeen, gzipAccepted = true, accepted
+		} else {
+			wildcardAccepted = accepted
 		}
 	}
-	return false
+	// An explicit gzip preference takes precedence over the wildcard in either
+	// header order, including an explicit q=0 rejection.
+	if gzipSeen {
+		return gzipAccepted
+	}
+	return wildcardAccepted
 }
 
 func compressibleContentType(value string) bool {

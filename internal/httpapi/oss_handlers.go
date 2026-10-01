@@ -223,7 +223,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "举报附件类型不支持或超过 25MB")
 		return
 	}
-	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && ext != ".jar") || (!isReportEvidence && !isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
+	if !ossUploadExtensionAllowed(scope, ext, cfg.AllowedExtensions) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -392,11 +392,15 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusOK, response)
 		return
 	}
-	if scope == "user" {
+	if scope == "user" || isProjectDownload {
 		deferStoredSizeCheck := shouldPersistMarkdownImageAsWebP(req.OriginalName, contentType, source, category) ||
 			isModResourceRenderUploadSource(source)
 		if err := s.enforceUserFileUploadLimits(r, req.SizeBytes, deferStoredSizeCheck); err != nil {
-			writeError(w, http.StatusForbidden, err.Error())
+			if errors.Is(err, errOSSQuotaUnavailable) {
+				writeError(w, http.StatusServiceUnavailable, err.Error())
+			} else {
+				writeError(w, http.StatusForbidden, err.Error())
+			}
 			return
 		}
 	}
@@ -550,7 +554,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadRequest, "举报附件类型不支持或超过 25MB")
 		return
 	}
-	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && ext != ".jar") || (!isReportEvidence && !isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
+	if !ossUploadExtensionAllowed(scope, ext, cfg.AllowedExtensions) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -675,6 +679,10 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadRequest, "OSS 文件大小与上传记录不一致")
 		return
 	}
+	if head.ContentLength <= 0 || head.ContentLength > maxOSSUploadBytes {
+		writeError(w, http.StatusBadRequest, "上传内容过大或文件大小不正确")
+		return
+	}
 	if metadataHash := normalizeSHA256(metadataValue(head.Metadata, "sha256")); metadataHash == "" || metadataHash != req.SHA256 {
 		writeError(w, http.StatusBadRequest, "OSS 文件哈希与上传记录不一致")
 		return
@@ -746,8 +754,23 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		}
 		scanStatus = "clean"
 	}
-	if scope == "user" {
-		if err := s.enforceUserStoredFileLimit(r, size); err != nil {
+	var uploadTx pgx.Tx
+	var fileQuery revisionQuery = s.db
+	if scope == "user" || isProjectDownload {
+		uploadTx, err = s.db.Begin(r.Context())
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "无法校验上传额度，请重试")
+			return
+		}
+		defer uploadTx.Rollback(r.Context())
+		if err = lockOSSUserQuotaTx(r.Context(), uploadTx, currentClaims(r).Subject); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "无法校验上传额度，请重试")
+			return
+		}
+		if err := enforceOSSUserQuota(r, uploadTx, sourceSize, size, false); err != nil {
+			// Release the connection before an idempotency lookup or object
+			// cleanup, which use the API pool and must work with a one-slot pool.
+			_ = uploadTx.Rollback(r.Context())
 			if existingFileID, existing, found := s.findCompletedOSSUpload(r.Context(), currentClaims(r).Subject, req); found {
 				response, responseErr := s.completedOSSUploadResponse(r.Context(), cfg, existing)
 				if responseErr != nil {
@@ -765,13 +788,18 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 			if converted {
 				s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, sourceObjectKey)
 			}
-			writeError(w, http.StatusForbidden, err.Error())
+			if errors.Is(err, errOSSQuotaUnavailable) {
+				writeError(w, http.StatusServiceUnavailable, err.Error())
+			} else {
+				writeError(w, http.StatusForbidden, err.Error())
+			}
 			return
 		}
+		fileQuery = uploadTx
 	}
 	var fileID int64
 	var filePublicID string
-	err = s.db.QueryRow(
+	err = fileQuery.QueryRow(
 		r.Context(),
 		`insert into oss_files (bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, uploader_id, status, scan_status)
 		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'active', $14)
@@ -792,6 +820,13 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		currentClaims(r).Subject,
 		scanStatus,
 	).Scan(&fileID, &filePublicID)
+	if uploadTx != nil {
+		if err == nil {
+			err = uploadTx.Commit(r.Context())
+		} else {
+			_ = uploadTx.Rollback(r.Context())
+		}
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		if existingFileID, existing, found := s.findCompletedOSSUpload(r.Context(), currentClaims(r).Subject, req); found {
 			response, responseErr := s.completedOSSUploadResponse(r.Context(), cfg, existing)
@@ -897,6 +932,22 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 
 func reportEvidenceExtensionAllowed(extension string) bool {
 	return stringSet(".png", ".jpg", ".jpeg", ".webp", ".gif", ".txt", ".log", ".pdf", ".zip")[strings.ToLower(extension)]
+}
+
+func ossUploadExtensionAllowed(scope, extension string, allowedExtensions []string) bool {
+	if publicID := strings.TrimPrefix(scope, ossModExportScopePrefix); publicID != scope && publicID != "" {
+		return extension == ".zip"
+	}
+	if publicID := strings.TrimPrefix(scope, ossModCatalogScopePrefix); publicID != scope && publicID != "" {
+		return extension == ".json"
+	}
+	if projectType, _, ok := parseOSSProjectDownloadScope(scope); ok {
+		return projectFileExtensionAllowed(normalizeProjectFileType(projectType), extension)
+	}
+	if scope == ossReportEvidenceScope {
+		return reportEvidenceExtensionAllowed(extension)
+	}
+	return allowedUploadExtension(extension, allowedExtensions)
 }
 
 func validateReportEvidenceObject(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey, originalName, contentType string, expectedSize int64) error {
@@ -1602,6 +1653,17 @@ func ossFileRecord(id string, bucket string, endpoint string, region string, obj
 }
 
 func (s *Server) enforceUserFileUploadLimits(r *http.Request, sizeBytes int64, deferStoredSizeCheck bool) error {
+	return enforceOSSUserQuota(r, s.db, sizeBytes, sizeBytes, deferStoredSizeCheck)
+}
+
+var errOSSQuotaUnavailable = errors.New("无法读取上传额度，请重试")
+
+func lockOSSUserQuotaTx(ctx context.Context, tx pgx.Tx, userID int64) error {
+	_, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended('oss-user-quota:'||$1::bigint::text,0))`, userID)
+	return err
+}
+
+func enforceOSSUserQuota(r *http.Request, query revisionQuery, sourceBytes, storedBytes int64, deferStoredSizeCheck bool) error {
 	claims := currentClaims(r)
 	singleLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.single_limit"))
 	dailyLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.daily_limit"))
@@ -1615,51 +1677,28 @@ func (s *Server) enforceUserFileUploadLimits(r *http.Request, sizeBytes int64, d
 	if totalLimit <= 0 {
 		return errors.New("没有用户文件总容量额度")
 	}
-	if singleLimit != maxPermissionBytes && sizeBytes > singleLimit {
+	if sourceBytes <= 0 || storedBytes <= 0 {
+		return errors.New("上传文件大小不正确")
+	}
+	if singleLimit != maxPermissionBytes && sourceBytes > singleLimit {
 		return fmt.Errorf("文件超过单文件大小限制：%s", formatLimitBytes(singleLimit))
 	}
 	var dailyUsed, totalUsed int64
-	_ = s.db.QueryRow(
+	if err := query.QueryRow(
 		r.Context(),
-		`select coalesce(sum(coalesce(nullif(source_size_bytes, 0), size_bytes)), 0)
+		`select coalesce(sum(case when created_at >= current_date
+		 then coalesce(nullif(source_size_bytes,0),size_bytes) else 0 end),0),
+		 coalesce(sum(size_bytes),0)
 		 from oss_files
-		 where uploader_id = $1 and status = 'active' and created_at >= current_date`,
+		 where uploader_id=$1 and status='active'`,
 		claims.Subject,
-	).Scan(&dailyUsed)
-	_ = s.db.QueryRow(
-		r.Context(),
-		`select coalesce(sum(size_bytes), 0)
-		 from oss_files
-		 where uploader_id = $1 and status = 'active'`,
-		claims.Subject,
-	).Scan(&totalUsed)
-	if dailyLimit != maxPermissionBytes && dailyUsed+sizeBytes > dailyLimit {
+	).Scan(&dailyUsed, &totalUsed); err != nil {
+		return errOSSQuotaUnavailable
+	}
+	if dailyLimit != maxPermissionBytes && (sourceBytes > dailyLimit || dailyUsed > dailyLimit-sourceBytes) {
 		return fmt.Errorf("超过每日上传额度：%s", formatLimitBytes(dailyLimit))
 	}
-	if totalLimit != maxPermissionBytes && !deferStoredSizeCheck && totalUsed+sizeBytes > totalLimit {
-		return fmt.Errorf("超过用户文件总容量：%s", formatLimitBytes(totalLimit))
-	}
-	return nil
-}
-
-func (s *Server) enforceUserStoredFileLimit(r *http.Request, sizeBytes int64) error {
-	claims := currentClaims(r)
-	totalLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.total_limit"))
-	if totalLimit <= 0 {
-		return errors.New("没有用户文件总容量额度")
-	}
-	if totalLimit == maxPermissionBytes {
-		return nil
-	}
-	var totalUsed int64
-	_ = s.db.QueryRow(
-		r.Context(),
-		`select coalesce(sum(size_bytes), 0)
-		 from oss_files
-		 where uploader_id = $1 and status = 'active'`,
-		claims.Subject,
-	).Scan(&totalUsed)
-	if totalUsed+sizeBytes > totalLimit {
+	if totalLimit != maxPermissionBytes && !deferStoredSizeCheck && (storedBytes > totalLimit || totalUsed > totalLimit-storedBytes) {
 		return fmt.Errorf("超过用户文件总容量：%s", formatLimitBytes(totalLimit))
 	}
 	return nil
@@ -1716,15 +1755,30 @@ func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) ossUploadLogs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.querySimpleRows(r, `select id, file_id, uploader_id, object_key, original_name, size_bytes, ip, user_agent, result, message, created_at from oss_upload_logs order by created_at desc limit $1`, boundedLimit(r.URL.Query().Get("limit"), 100, 500)))
+	items, err := s.querySimpleRows(r, `select id, file_id, uploader_id, object_key, original_name, size_bytes, ip, user_agent, result, message, created_at from oss_upload_logs order by created_at desc limit $1`, boundedLimit(r.URL.Query().Get("limit"), 100, 500))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取上传日志失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) ossScanLogs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.querySimpleRows(r, `select id, file_id, object_key, engine, result, message, payload, created_at from oss_scan_logs order by created_at desc limit $1`, boundedLimit(r.URL.Query().Get("limit"), 100, 500)))
+	items, err := s.querySimpleRows(r, `select id, file_id, object_key, engine, result, message, payload, created_at from oss_scan_logs order by created_at desc limit $1`, boundedLimit(r.URL.Query().Get("limit"), 100, 500))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取扫描日志失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) ossDownloadStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.querySimpleRows(r, `select object_key, downloads, total_bytes, last_download_at from oss_download_stats order by downloads desc, last_download_at desc nulls last limit $1`, boundedLimit(r.URL.Query().Get("limit"), 100, 500)))
+	items, err := s.querySimpleRows(r, `select object_key, downloads, total_bytes, last_download_at from oss_download_stats order by downloads desc, last_download_at desc nulls last limit $1`, boundedLimit(r.URL.Query().Get("limit"), 100, 500))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取下载统计失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) ossConfigFromSettings(ctx context.Context) ossConfigPayload {
