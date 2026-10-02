@@ -8,6 +8,11 @@ the blocked account.
 
 - Creating a block is idempotent and removes existing follows in both
   directions in the same PostgreSQL transaction.
+- Follow, block and unblock mutations acquire the same transaction-scoped
+  advisory lock for the unordered user pair. Follow rechecks both directional
+  blocks while holding it, so an in-flight follow cannot recreate a relation
+  after a block has committed. The lock also covers the follow notification
+  outbox write; failures roll back the relationship and its event together.
 - A follow or direct message is rejected while either user has blocked the
   other. Existing direct-message history remains readable.
 - Comment list, reply, thread, and watch responses filter authors blocked by
@@ -32,9 +37,15 @@ through another user's public profile. Public profiles only return whether the
 current viewer has blocked that profile; they do not disclose whether the
 profile owner has blocked the viewer.
 
+The paged list consumes and closes its database rows before loading storage
+configuration or resolving avatar URLs. This allows the request to complete
+with a one-connection pool and prevents avatar lookups from waiting for the
+connection retained by the list itself.
+
 ## Database and upgrade
 
-Schema generation 77 creates the directional table and reverse lookup index.
-The same upgrade also repairs two pre-existing PostgreSQL variable/column
-ambiguities in the comment popularity trigger so a normal Mod comment can be
-inserted when several project routes exist.
+The generation 168 empty-database schema contains the directional table,
+reverse lookup index, and unambiguous comment-route parameters. Other existing
+generations are rejected; development reset is not a data-preserving upgrade.
+The explicit generation-168 comment popularity function/binding repair and its
+backup/restore procedure are documented in `docs/database-function-repair.md`.

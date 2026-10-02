@@ -6,8 +6,8 @@ import (
 )
 
 func TestServerProjectionContainsEveryCatalogFilterAndStableSortKey(t *testing.T) {
-	if projectionSchemaVersion != 3 {
-		t.Fatalf("projection schema version=%d want 3", projectionSchemaVersion)
+	if projectionSchemaVersion != 5 {
+		t.Fatalf("projection schema version=%d want 5", projectionSchemaVersion)
 	}
 	schema := collectionSchemas()["servers"]
 	raw, err := json.Marshal(schema)

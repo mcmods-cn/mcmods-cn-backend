@@ -171,6 +171,7 @@ type Monitor struct {
 	incoming chan Event
 	close    chan closeRequest
 	wake     chan struct{}
+	stopped  chan struct{}
 
 	closeOnce sync.Once
 	closed    atomic.Bool
@@ -185,7 +186,7 @@ func newMonitor(store activityStore, options Options) *Monitor {
 	options = normalizeOptions(options)
 	monitor := &Monitor{
 		store: store, options: options, incoming: make(chan Event, options.QueueCapacity),
-		close: make(chan closeRequest), wake: make(chan struct{}, 1),
+		close: make(chan closeRequest, 1), wake: make(chan struct{}, 1), stopped: make(chan struct{}),
 	}
 	monitor.metrics.lastError.Store("")
 	if store == nil {
@@ -275,13 +276,11 @@ func (m *Monitor) Close(ctx context.Context) error {
 	m.closeOnce.Do(func() {
 		m.closed.Store(true)
 		done := make(chan error, 1)
+		// Queue the one shutdown request even when the caller's deadline has
+		// expired. A busy worker must still exit after its bounded write ends.
+		m.close <- closeRequest{ctx: ctx, done: done}
 		select {
-		case m.close <- closeRequest{ctx: ctx, done: done}:
-			select {
-			case result = <-done:
-			case <-ctx.Done():
-				result = ctx.Err()
-			}
+		case result = <-done:
 		case <-ctx.Done():
 			result = ctx.Err()
 		}
@@ -290,6 +289,7 @@ func (m *Monitor) Close(ctx context.Context) error {
 }
 
 func (m *Monitor) run() {
+	defer close(m.stopped)
 	ticker := time.NewTicker(m.options.FlushInterval)
 	defer ticker.Stop()
 	pending := make([]Event, 0, m.options.BatchSize)

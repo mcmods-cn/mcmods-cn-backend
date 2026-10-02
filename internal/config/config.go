@@ -205,7 +205,11 @@ type NATSTaskConfig struct {
 }
 
 func Load() Config {
-	loadDotEnvUpwards(".env")
+	// Isolated test tools must not silently import a developer's real service
+	// credentials from this directory or its ancestors.
+	if !getenvBool("MCMODS_SKIP_DOTENV", false) {
+		loadDotEnvUpwards(".env")
+	}
 	jwtSecret := getenv("JWT_SECRET", "change-this-in-production")
 	replicaCount := getenvInt("APP_REPLICA_COUNT", 1)
 
@@ -425,7 +429,9 @@ func (db DBConfig) EffectiveName() (string, error) {
 	}
 	parsed, err := url.Parse(db.URL)
 	if err != nil {
-		return "", err
+		// URL parse errors can include the complete connection string. This
+		// diagnostic is included in startup/reset validation logs.
+		return "", errors.New("DATABASE_URL is not a valid URL")
 	}
 	name := strings.TrimPrefix(strings.TrimSpace(parsed.Path), "/")
 	if name == "" || strings.Contains(name, "/") {

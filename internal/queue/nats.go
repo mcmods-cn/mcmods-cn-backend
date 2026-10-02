@@ -84,6 +84,7 @@ type Client struct {
 	generation             uint64
 	lastError              string
 	ctx                    context.Context
+	cancel                 context.CancelFunc
 	done                   chan struct{}
 	closed                 bool
 	subscriptionsPending   bool
@@ -95,9 +96,11 @@ type Client struct {
 }
 
 func New(ctx context.Context, cfg config.NATSConfig) *Client {
+	clientCtx, cancel := context.WithCancel(ctx)
 	client := &Client{
 		cfg:                    NormalizeConfig(cfg),
-		ctx:                    ctx,
+		ctx:                    clientCtx,
+		cancel:                 cancel,
 		done:                   make(chan struct{}),
 		liveTasks:              make(map[string]struct{}),
 		liveBroadcasts:         make(map[string]struct{}),
@@ -110,7 +113,7 @@ func New(ctx context.Context, cfg config.NATSConfig) *Client {
 		// use registered local handlers while status exposes the connection error.
 		client.setLastError(err)
 	}
-	go client.runRecovery(ctx)
+	go client.runRecovery(clientCtx)
 	return client
 }
 
@@ -360,6 +363,11 @@ func (c *Client) reconfigureLocked(cfg config.NATSConfig, persist func(config.NA
 	liveTasks := make(map[string]struct{}, len(definitions))
 	liveBroadcasts := make(map[string]struct{}, len(broadcastDefinitions))
 	if nextConn != nil {
+		if nextJetStream != nil {
+			if err := c.subscribeDeadLettersOn(nextConn, nextJetStream, cfg, nextGeneration, gate); err != nil {
+				return discard(err)
+			}
+		}
 		for _, definition := range definitions {
 			err := c.subscribeTaskOn(nextConn, nextJetStream, cfg, definition, nextGeneration, gate)
 			if err != nil && !errors.Is(err, ErrTaskDisabled) {
@@ -447,6 +455,9 @@ func (c *Client) Close() {
 		return
 	}
 	c.closed = true
+	if c.cancel != nil {
+		c.cancel()
+	}
 	if c.done != nil {
 		close(c.done)
 	}
@@ -476,10 +487,10 @@ func (c *Client) Status() Status {
 		Realtime:      c.cfg.Realtime,
 		RealtimeReady: connected && c.cfg.Enabled && c.cfg.Realtime && len(c.broadcastSubscriptions) > 0 && len(c.liveBroadcasts) == len(c.broadcastSubscriptions),
 		Recovering:    c.cfg.Enabled && !c.closed && (!connected || c.subscriptionsPending),
-		URL:           c.cfg.URL,
+		URL:           RedactURL(c.cfg.URL),
 		SubjectPrefix: c.cfg.SubjectPrefix,
 		Tasks:         append([]config.NATSTaskConfig(nil), c.cfg.Tasks...),
-		LastError:     c.lastError,
+		LastError:     redactDiagnostic(c.lastError, c.cfg),
 		JetStream:     c.jetStream != nil,
 	}
 }
@@ -707,7 +718,7 @@ func (c *Client) subscribeTaskOn(conn *nats.Conn, js nats.JetStreamContext, cfg 
 				}
 				return
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(task.TimeoutSeconds)*time.Second)
+			ctx, cancel := context.WithTimeout(c.ctx, time.Duration(task.TimeoutSeconds)*time.Second)
 			defer cancel()
 			payload, envelope, handleErr := UnwrapEvent(msg.Data)
 			eventID := msg.Header.Get("MCMods-Event-ID")
@@ -723,11 +734,8 @@ func (c *Client) subscribeTaskOn(conn *nats.Conn, js nats.JetStreamContext, cfg 
 				if js != nil {
 					metadata, _ := msg.Metadata()
 					if metadata != nil && int(metadata.NumDelivered) >= cfg.JetStream.MaxDeliver {
-						c.mu.RLock()
-						sink := c.deadLetterSink
-						c.mu.RUnlock()
 						if eventID == "" {
-							eventID = randomEventID()
+							eventID = cfg.JetStream.Stream + ":" + strconv.FormatUint(metadata.Sequence.Stream, 10)
 						}
 						eventType := definition.taskCode + ".failed"
 						if envelope != nil && envelope.EventType != "" {
@@ -737,19 +745,22 @@ func (c *Client) subscribeTaskOn(conn *nats.Conn, js nats.JetStreamContext, cfg 
 						if envelope != nil {
 							aggregateType, aggregateID = envelope.AggregateType, envelope.AggregateID
 						}
-						if sink != nil && sink(ctx, DeadLetter{
+						letter := DeadLetter{
 							EventID: eventID, EventType: eventType, TaskCode: definition.taskCode,
-							FailureStage: "consumer:" + definition.taskCode, LastError: handleErr.Error(),
+							FailureStage: "consumer:" + definition.taskCode, LastError: redactDiagnostic(handleErr.Error(), cfg),
 							AggregateType: aggregateType, AggregateID: aggregateID,
 							Payload: msg.Data, Attempts: int(metadata.NumDelivered),
-						}) != nil {
-							_ = msg.Nak()
+						}
+						// Persist to JetStream before terminating the exhausted task.
+						// Database recovery has its own consumer and never reruns the
+						// task handler (which may already have incurred provider fees).
+						if err := c.publishDeadLetter(js, cfg, letter); err != nil {
+							c.setGenerationError(generation, err)
 							return
 						}
-						dead := nats.NewMsg(fullSubject(cfg.SubjectPrefix, "dead-letter."+definition.taskCode))
-						dead.Data, dead.Header = msg.Data, msg.Header
-						_, _ = js.PublishMsg(dead)
-						_ = msg.Term()
+						if err := msg.Term(); err != nil {
+							c.setGenerationError(generation, err)
+						}
 					} else {
 						_ = msg.Nak()
 					}

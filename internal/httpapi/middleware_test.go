@@ -1,11 +1,16 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/security"
 )
 
 func TestCookieMutationRequiresExactOrigin(t *testing.T) {
@@ -27,6 +32,45 @@ func TestCookieMutationRequiresExactOrigin(t *testing.T) {
 				t.Fatalf("status=%d called=%v", response.Code, called)
 			}
 		})
+	}
+}
+
+func TestRequireAuthPreservesSessionWhenAuthenticationStoreUnavailable(t *testing.T) {
+	// Creating a zero-minimum pool is lazy; closing it before the request makes
+	// the failure deterministic without contacting any database.
+	pool, err := pgxpool.New(context.Background(), "postgres://127.0.0.1:1/unused?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Close()
+	const secret = "synthetic-authentication-secret"
+	claims, err := security.NewClaims("authuser1", "example", "example@example.invalid", 1, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := security.SignToken(secret, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{db: pool, cfg: config.Config{JWTSecret: secret}}
+	called := false
+	handler := server.requireAuth(func(http.ResponseWriter, *http.Request) { called = true })
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	request.AddCookie(&http.Cookie{Name: authSessionCookieName, Value: token})
+	response := httptest.NewRecorder()
+	handler(response, request)
+	if response.Code != http.StatusServiceUnavailable || called {
+		t.Fatalf("status=%d called=%v body=%s; want 503 with no protected handler call", response.Code, called, response.Body.String())
+	}
+	if response.Header().Get(authStateHeader) != "" || len(response.Result().Cookies()) != 0 {
+		t.Fatal("temporary authentication storage failure must not invalidate or clear the session")
+	}
+	invalid := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	invalid.AddCookie(&http.Cookie{Name: authSessionCookieName, Value: "invalid-token"})
+	invalidResponse := httptest.NewRecorder()
+	handler(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusUnauthorized || called {
+		t.Fatalf("invalid session status=%d called=%v; want 401", invalidResponse.Code, called)
 	}
 }
 

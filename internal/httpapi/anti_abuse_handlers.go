@@ -3,10 +3,13 @@ package httpapi
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"mcmods-cn-backend/internal/antiabuse"
 )
@@ -142,8 +145,9 @@ func (s *Server) adminAntiAbuseEvents(w http.ResponseWriter, r *http.Request) {
 		var score, similarity int
 		var rules []string
 		var createdAt time.Time
-		if rows.Scan(&id, &userID, &username, &actionValue, &objectType, &objectKey, &outcomeValue, &score, &rules, &ipHash, &subnetHash, &deviceHash, &crawlerClass, &contentHash, &similarity, &disposition, &reviewNote, &createdAt) != nil {
-			continue
+		if err = rows.Scan(&id, &userID, &username, &actionValue, &objectType, &objectKey, &outcomeValue, &score, &rules, &ipHash, &subnetHash, &deviceHash, &crawlerClass, &contentHash, &similarity, &disposition, &reviewNote, &createdAt); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load anti-abuse events")
+			return
 		}
 		if !sensitive {
 			ipHash, subnetHash, deviceHash = redactHash(ipHash), redactHash(subnetHash), redactHash(deviceHash)
@@ -152,6 +156,10 @@ func (s *Server) adminAntiAbuseEvents(w http.ResponseWriter, r *http.Request) {
 			"objectKey": objectKey, "outcome": outcomeValue, "riskScore": score, "rules": rules, "ipHash": ipHash, "subnetHash": subnetHash,
 			"deviceHash": deviceHash, "crawlerClass": crawlerClass, "contentHash": redactHash(contentHash), "similarity": similarity,
 			"disposition": disposition, "reviewNote": reviewNote, "createdAt": createdAt})
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load anti-abuse events")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -167,7 +175,11 @@ func (s *Server) adminReviewAntiAbuseEvent(w http.ResponseWriter, r *http.Reques
 	}
 	tag, err := s.db.Exec(r.Context(), `update anti_abuse_events set disposition=$2,review_note=$3,reviewed_by=$4,reviewed_at=now() where public_id=$1`,
 		strings.ToLower(r.PathValue("id")), request.Disposition, strings.TrimSpace(request.Note), currentClaims(r).Subject)
-	if err != nil || tag.RowsAffected() != 1 {
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to review anti-abuse event")
+		return
+	}
+	if tag.RowsAffected() != 1 {
 		writeError(w, http.StatusNotFound, "anti-abuse event was not found")
 		return
 	}
@@ -186,8 +198,12 @@ func (s *Server) adminUpdateAntiAbuseUserState(w http.ResponseWriter, r *http.Re
 		return
 	}
 	var userID int64
-	if s.db.QueryRow(r.Context(), `select id from users where public_id=$1`, strings.ToLower(r.PathValue("id"))).Scan(&userID) != nil {
-		writeError(w, http.StatusNotFound, "user was not found")
+	if err := s.db.QueryRow(r.Context(), `select id from users where public_id=$1`, strings.ToLower(r.PathValue("id"))).Scan(&userID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "user was not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to load user risk state")
+		}
 		return
 	}
 	_, err := s.db.Exec(r.Context(), `insert into anti_abuse_user_states(user_id,trust_level,risk_score,manually_trusted,updated_at)
@@ -230,8 +246,12 @@ func (s *Server) adminAntiAbuseRestrictions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var userID int64
-	if s.db.QueryRow(r.Context(), `select id from users where public_id=$1`, strings.ToLower(strings.TrimSpace(request.UserID))).Scan(&userID) != nil {
-		writeError(w, http.StatusNotFound, "user was not found")
+	if err := s.db.QueryRow(r.Context(), `select id from users where public_id=$1`, strings.ToLower(strings.TrimSpace(request.UserID))).Scan(&userID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "user was not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to load restriction user")
+		}
 		return
 	}
 	for _, action := range request.Actions {
@@ -284,7 +304,11 @@ func (s *Server) adminLiftAntiAbuseRestriction(w http.ResponseWriter, r *http.Re
 		where public_id=$1 and lifted_at is null returning user_id`,
 		strings.ToLower(r.PathValue("id")), currentClaims(r).Subject, strings.TrimSpace(request.Reason)).Scan(&userID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "active restriction was not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "active restriction was not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to lift anti-abuse restriction")
+		}
 		return
 	}
 	s.antiAbuse.InvalidateAccountState(r.Context(), userID)
@@ -337,7 +361,11 @@ func (s *Server) adminAntiAbuseBotRules(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) adminDeleteAntiAbuseBotRule(w http.ResponseWriter, r *http.Request) {
 	tag, err := s.db.Exec(r.Context(), `delete from anti_abuse_bot_rules where public_id=$1`, strings.ToLower(r.PathValue("id")))
-	if err != nil || tag.RowsAffected() != 1 {
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete bot rule")
+		return
+	}
+	if tag.RowsAffected() != 1 {
 		writeError(w, http.StatusNotFound, "bot rule was not found")
 		return
 	}

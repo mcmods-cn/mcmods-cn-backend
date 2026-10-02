@@ -43,7 +43,7 @@ func TestSessionAndRBACCacheHitAvoidsDatabaseLoadersIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	redisServer := miniredis.RunT(t)
 	cache := querycache.New(config.RedisConfig{Enabled: true, Addr: redisServer.Addr(), Prefix: "mcmods", Namespace: "auth-integration", PoolSize: 4, MinIdleConns: 1,
 		DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second, TTL: time.Minute, AuthSessionCacheEnabled: true, RBACCacheEnabled: true, SessionTTL: time.Minute, RBACCacheTTL: time.Minute})
@@ -55,7 +55,11 @@ func TestSessionAndRBACCacheHitAvoidsDatabaseLoadersIntegration(t *testing.T) {
 	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified,status) values($1,$2,'test',true,'active') returning id,public_id`, unique, unique+"@example.test").Scan(&userID, &publicID); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `delete from users where id=$1`, userID) })
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_, _ = pool.Exec(cleanupCtx, `delete from users where id=$1`, userID)
+	})
 	claims, err := security.NewClaims(publicID, unique, unique+"@example.test", 1, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +99,7 @@ func TestRoleBindingChangesPermissionVersionWithoutInvalidatingSessionIntegratio
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	redisServer := miniredis.RunT(t)
 	cache := querycache.New(config.RedisConfig{Enabled: true, Addr: redisServer.Addr(), Prefix: "mcmods", Namespace: "version-integration", PoolSize: 4, MinIdleConns: 1,
 		DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second, TTL: time.Minute, AuthSessionCacheEnabled: true, RBACCacheEnabled: true, SessionTTL: time.Minute, RBACCacheTTL: time.Minute})
@@ -112,8 +116,10 @@ func TestRoleBindingChangesPermissionVersionWithoutInvalidatingSessionIntegratio
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `delete from users where id=$1`, userID)
-		_, _ = pool.Exec(context.Background(), `delete from roles where code=$1`, roleCode)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_, _ = pool.Exec(cleanupCtx, `delete from users where id=$1`, userID)
+		_, _ = pool.Exec(cleanupCtx, `delete from roles where code=$1`, roleCode)
 	})
 	var roleID int64
 	if err = pool.QueryRow(ctx, `insert into roles(code,name,description,weight) values($1,$1,'integration test',1) returning id`, roleCode).Scan(&roleID); err != nil {
@@ -126,7 +132,9 @@ func TestRoleBindingChangesPermissionVersionWithoutInvalidatingSessionIntegratio
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `delete from permissions where code=$1`, permissionCode)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_, _ = pool.Exec(cleanupCtx, `delete from permissions where code=$1`, permissionCode)
 	})
 	if _, err = pool.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow) values($1,$2,true)`, roleID, permissionID); err != nil {
 		t.Fatal(err)
@@ -234,7 +242,7 @@ func TestPasswordChangeInvalidatesCachedSessionIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	redisServer := miniredis.RunT(t)
 	cache := querycache.New(config.RedisConfig{Enabled: true, Addr: redisServer.Addr(), Prefix: "mcmods", Namespace: "auth-revocation-integration", PoolSize: 2, MinIdleConns: 1,
 		DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second, TTL: time.Minute, AuthSessionCacheEnabled: true, RBACCacheEnabled: true, SessionTTL: time.Minute, RBACCacheTTL: time.Minute})
@@ -247,7 +255,11 @@ func TestPasswordChangeInvalidatesCachedSessionIntegration(t *testing.T) {
 		values($1,$2,'old-hash',true,'active') returning id,public_id`, unique, unique+"@example.test").Scan(&userID, &publicID); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `delete from users where id=$1`, userID) })
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_, _ = pool.Exec(cleanupCtx, `delete from users where id=$1`, userID)
+	})
 	claims, err := security.NewClaims(publicID, unique, unique+"@example.test", 1, time.Hour)
 	if err != nil {
 		t.Fatal(err)

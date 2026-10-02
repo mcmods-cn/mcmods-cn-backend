@@ -3,6 +3,8 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"mcmods-cn-backend/internal/config"
@@ -89,9 +91,13 @@ func (payload natsConfigUpdateRequest) config(current config.NATSConfig) (config
 	} else if payload.Token != nil && *payload.Token != "" {
 		token = *payload.Token
 	}
+	internalURL, err := mergeNATSURLCredentialUpdates(current, payload)
+	if err != nil {
+		return config.NATSConfig{}, err
+	}
 	return config.NATSConfig{
 		Enabled:       *payload.Enabled,
-		URL:           *payload.URL,
+		URL:           internalURL,
 		Username:      *payload.Username,
 		Password:      password,
 		Token:         token,
@@ -107,6 +113,74 @@ func (payload natsConfigUpdateRequest) config(current config.NATSConfig) (config
 			PublishTimeout: time.Duration(*payload.JetStream.PublishTimeoutSeconds) * time.Second,
 		},
 	}, nil
+}
+
+// URL userinfo takes priority over nats.go auth options. Keep legacy per-server
+// credentials on a no-change form round trip, and update the matching auth kind
+// when the administrator explicitly replaces or clears a secret.
+func mergeNATSURLCredentialUpdates(current config.NATSConfig, payload natsConfigUpdateRequest) (string, error) {
+	raw := strings.TrimSpace(*payload.URL)
+	if raw == queue.RedactURL(current.URL) {
+		raw = current.URL
+	}
+	servers := strings.Split(raw, ",")
+	for i, server := range servers {
+		server = strings.TrimSpace(server)
+		schemed := strings.Contains(server, "://")
+		if !schemed {
+			server = "nats://" + server
+		}
+		address, err := url.Parse(server)
+		if err != nil || address.Hostname() == "" {
+			return "", errors.New("invalid NATS endpoint")
+		}
+		if address.User != nil {
+			username := address.User.Username()
+			password, hasPassword := address.User.Password()
+			switch {
+			case payload.Token != nil && *payload.Token != "":
+				address.User = url.User(*payload.Token)
+			case !hasPassword && payload.ClearToken:
+				address.User = nil
+			case hasPassword:
+				if *payload.Username != current.Username {
+					username = *payload.Username
+				}
+				if payload.ClearPassword {
+					password = ""
+				} else if payload.Password != nil && *payload.Password != "" {
+					password = *payload.Password
+				}
+				// Retaining the colon is essential: username without a password
+				// marker is interpreted as a token by the NATS protocol client.
+				address.User = url.UserPassword(username, password)
+			}
+		}
+		servers[i] = address.String()
+		if !schemed {
+			servers[i] = strings.TrimPrefix(servers[i], "nats://")
+		}
+	}
+	return strings.Join(servers, ","), nil
+}
+
+func natsURLCredentialFlags(raw string) (hasPassword, hasToken bool) {
+	for _, server := range strings.Split(raw, ",") {
+		server = strings.TrimSpace(server)
+		if !strings.Contains(server, "://") {
+			server = "nats://" + server
+		}
+		address, err := url.Parse(server)
+		if err != nil || address.User == nil {
+			continue
+		}
+		if password, exists := address.User.Password(); exists {
+			hasPassword = hasPassword || password != ""
+		} else {
+			hasToken = hasToken || address.User.Username() != ""
+		}
+	}
+	return
 }
 
 func (s *Server) getNATSConfig(w http.ResponseWriter, r *http.Request) {
@@ -183,9 +257,11 @@ func (s *Server) natsStatus() queue.Status {
 }
 
 func redactNATSConfig(cfg config.NATSConfig, status queue.Status) natsConfigResponse {
+	urlPassword, urlToken := natsURLCredentialFlags(cfg.URL)
+	status.URL = queue.RedactURL(status.URL)
 	return natsConfigResponse{
-		Enabled: cfg.Enabled, URL: cfg.URL, Username: cfg.Username,
-		HasPassword: cfg.Password != "", HasToken: cfg.Token != "",
+		Enabled: cfg.Enabled, URL: queue.RedactURL(cfg.URL), Username: cfg.Username,
+		HasPassword: cfg.Password != "" || urlPassword, HasToken: cfg.Token != "" || urlToken,
 		SubjectPrefix: cfg.SubjectPrefix, Tasks: cfg.Tasks, OutboxEnabled: cfg.OutboxEnabled, Realtime: cfg.Realtime,
 		JetStream: natsJetStreamConfigDTO{
 			Enabled: cfg.JetStream.Enabled, Stream: cfg.JetStream.Stream, MaxDeliver: cfg.JetStream.MaxDeliver,

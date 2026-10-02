@@ -167,6 +167,7 @@ func (client *Client) ImportDocuments(ctx context.Context, collection string, do
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
 	scanner.Buffer(make([]byte, 64*1024), 2<<20)
+	acknowledged := 0
 	for scanner.Scan() {
 		var result struct {
 			Success bool   `json:"success"`
@@ -178,8 +179,15 @@ func (client *Client) ImportDocuments(ctx context.Context, collection string, do
 		if !result.Success {
 			return fmt.Errorf("typesense rejected a document: %s", result.Error)
 		}
+		acknowledged++
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if acknowledged != len(documents) {
+		return fmt.Errorf("typesense acknowledged %d of %d documents", acknowledged, len(documents))
+	}
+	return nil
 }
 
 func (client *Client) DeleteDocument(ctx context.Context, collection, documentID string) error {

@@ -300,17 +300,12 @@ func (s *Server) yggdrasilSetTexture(w http.ResponseWriter, r *http.Request) {
 		writeYggdrasilError(w, http.StatusForbidden, "ForbiddenOperationException", "Account is unavailable.", "")
 		return
 	}
-	var profileStatus string
-	if err = tx.QueryRow(r.Context(), `select status from player_profiles where id=$1 and user_id=$2 for update`, profileID, userID).Scan(&profileStatus); err != nil {
+	if err = lockYggdrasilTextureSessionTx(r.Context(), tx, yggdrasilBearerToken(r), userID, profileID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeYggdrasilError(w, http.StatusForbidden, "ForbiddenOperationException", "Player profile is unavailable.", "")
+			writeYggdrasilError(w, http.StatusUnauthorized, "UnauthorizedException", "Invalid access token.", "")
 		} else {
 			writeYggdrasilInternalError(w)
 		}
-		return
-	}
-	if profileStatus != "active" {
-		writeYggdrasilError(w, http.StatusForbidden, "ForbiddenOperationException", "Player profile is unavailable.", "")
 		return
 	}
 	var assetID int64
@@ -410,17 +405,12 @@ func (s *Server) yggdrasilDeleteTexture(w http.ResponseWriter, r *http.Request) 
 		writeYggdrasilError(w, http.StatusForbidden, "ForbiddenOperationException", "Account is unavailable.", "")
 		return
 	}
-	var profileStatus string
-	if err = tx.QueryRow(r.Context(), `select status from player_profiles where id=$1 and user_id=$2 for update`, profileID, userID).Scan(&profileStatus); err != nil {
+	if err = lockYggdrasilTextureSessionTx(r.Context(), tx, yggdrasilBearerToken(r), userID, profileID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeYggdrasilError(w, http.StatusForbidden, "ForbiddenOperationException", "Player profile is unavailable.", "")
+			writeYggdrasilError(w, http.StatusUnauthorized, "UnauthorizedException", "Invalid access token.", "")
 		} else {
 			writeYggdrasilInternalError(w)
 		}
-		return
-	}
-	if profileStatus != "active" {
-		writeYggdrasilError(w, http.StatusForbidden, "ForbiddenOperationException", "Player profile is unavailable.", "")
 		return
 	}
 	if _, err = tx.Exec(r.Context(), `delete from player_profile_textures where profile_id=$1 and kind=$2`, profileID, kind); err != nil {
@@ -438,6 +428,27 @@ func (s *Server) yggdrasilDeleteTexture(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeYggdrasilNoContent(w)
+}
+
+// The caller first locks the user row. Match the refresh/credential lock
+// order: account, profile, then token. Keep these locks through the write so
+// revocation, credential rotation and profile deletion cannot pass between the
+// authorization check and the texture mutation.
+func lockYggdrasilTextureSessionTx(ctx context.Context, tx pgx.Tx, token string, userID, profileID int64) error {
+	var lockedID int64
+	if err := tx.QueryRow(ctx, `select user_id from yggdrasil_accounts
+		where user_id=$1 and enabled=true for update`, userID).Scan(&lockedID); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(ctx, `select id from player_profiles
+		where id=$1 and user_id=$2 and status='active' for update`, profileID, userID).Scan(&lockedID); err != nil {
+		return err
+	}
+	return tx.QueryRow(ctx, `with locked_token as materialized (
+		select id,status,expires_at from yggdrasil_tokens
+		where access_token_hash=$1 and user_id=$2 and player_profile_id=$3 for update
+	) select id from locked_token where status='active' and expires_at>clock_timestamp()`,
+		hashYggdrasilToken(token), userID, profileID).Scan(&lockedID)
 }
 
 func (s *Server) authorizeYggdrasilTextureChange(r *http.Request, uuid string) (int64, int64, bool) {

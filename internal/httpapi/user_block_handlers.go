@@ -32,16 +32,10 @@ func (s *Server) userBlockList(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	items := make([]userConnectionItem, 0)
-	ossCfg := s.ossConfigFromSettings(r.Context())
 	for rows.Next() {
 		var item userConnectionItem
 		if err = rows.Scan(&item.ID, &item.Username, &item.AvatarURL, &item.Signature); err != nil {
 			writeError(w, http.StatusInternalServerError, "读取黑名单失败")
-			return
-		}
-		item.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.AvatarURL)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "生成用户头像访问链接失败")
 			return
 		}
 		items = append(items, item)
@@ -49,6 +43,20 @@ func (s *Server) userBlockList(w http.ResponseWriter, r *http.Request) {
 	if err = rows.Err(); err != nil {
 		writeError(w, http.StatusInternalServerError, "读取黑名单失败")
 		return
+	}
+	rows.Close()
+	ossCfg := s.ossConfigFromSettings(r.Context())
+	avatarURLs := make([]string, len(items))
+	for index := range items {
+		avatarURLs[index] = items[index].AvatarURL
+	}
+	avatarURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, avatarURLs)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "生成用户头像访问链接失败")
+		return
+	}
+	for index := range items {
+		items[index].AvatarURL = avatarURLs[index]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items, "page": page, "pageSize": pageSize, "total": total,
@@ -65,22 +73,33 @@ func (s *Server) userBlock(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "不能拉黑自己")
 		return
 	}
+	failureMessage := "拉黑用户失败"
 	if r.Method == http.MethodDelete {
-		tag, err := s.db.Exec(r.Context(), `delete from user_blocks where blocker_id=$1 and blocked_id=$2`, claims.Subject, identity.InternalID)
+		failureMessage = "解除拉黑失败"
+	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, failureMessage)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if err = lockUserRelationshipPairTx(r.Context(), tx, claims.Subject, identity.InternalID); err != nil {
+		writeError(w, http.StatusInternalServerError, failureMessage)
+		return
+	}
+	if r.Method == http.MethodDelete {
+		tag, err := tx.Exec(r.Context(), `delete from user_blocks where blocker_id=$1 and blocked_id=$2`, claims.Subject, identity.InternalID)
 		if err != nil {
+			writeError(w, http.StatusInternalServerError, "解除拉黑失败")
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "解除拉黑失败")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"blocked": false, "removed": tag.RowsAffected() > 0})
 		return
 	}
-
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "拉黑用户失败")
-		return
-	}
-	defer tx.Rollback(r.Context())
 	tag, err := tx.Exec(r.Context(), `insert into user_blocks(blocker_id,blocked_id)
 		select $1,id from users where id=$2 and status='active'
 		on conflict do nothing`, claims.Subject, identity.InternalID)

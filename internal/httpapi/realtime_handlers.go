@@ -128,7 +128,11 @@ func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 	heartbeat := time.NewTicker(20 * time.Second)
 	defer heartbeat.Stop()
-	lifetime := time.NewTimer(maxRealtimeConnectionLifetime)
+	remaining := min(maxRealtimeConnectionLifetime, time.Until(time.Unix(claims.ExpiresAt, 0)))
+	if remaining <= 0 {
+		return
+	}
+	lifetime := time.NewTimer(remaining)
 	defer lifetime.Stop()
 	for {
 		select {
@@ -137,7 +141,7 @@ func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
 		case <-lifetime.C:
 			return
 		case <-heartbeat.C:
-			if !lease.Refresh(r.Context()) {
+			if !s.realtimeSessionValid(r.Context(), claims, true) || !lease.Refresh(r.Context()) {
 				return
 			}
 			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
@@ -145,6 +149,9 @@ func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		case event := <-channel:
+			if !s.realtimeSessionValid(r.Context(), claims, false) {
+				return
+			}
 			raw, err := json.Marshal(event.Data)
 			if err != nil {
 				s.realtime.dropped.Add(1)
@@ -156,6 +163,25 @@ func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// Event checks use the same session cache as ordinary authenticated requests.
+// Heartbeats also query PostgreSQL directly, bounding stale cache exposure after
+// a committed revocation whose cache invalidation failed to one heartbeat.
+func (s *Server) realtimeSessionValid(ctx context.Context, claims security.Claims, authoritative bool) bool {
+	if claims.Subject <= 0 || claims.SessionID == "" || claims.ExpiresAt <= time.Now().Unix() {
+		return false
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var record cachedSessionSubject
+	var err error
+	if authoritative {
+		record, err = s.loadSessionSubject(checkCtx, claims)
+	} else {
+		record, err = s.resolveCachedSessionSubject(checkCtx, claims)
+	}
+	return err == nil && record.UserID == claims.Subject && validCachedSession(record, claims)
 }
 
 func (s *Server) publishRealtimeUser(userID int64, eventType string, data any) {

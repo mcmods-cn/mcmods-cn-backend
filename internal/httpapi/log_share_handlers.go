@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	logRedactionVersion    = 1
+	logRedactionVersion    = 2
 	maxLogSourceBytes      = int64(20 << 20)
 	maxLogUncompressed     = int64(100 << 20)
 	maxLogArchiveFiles     = 200
@@ -58,7 +58,8 @@ var logRedactionRules = []struct {
 	pattern *regexp.Regexp
 }{
 	{"authorization", regexp.MustCompile(`(?im)(authorization\s*:\s*(?:bearer|basic)\s+)[^\s]+`)},
-	{"secret_field", regexp.MustCompile(`(?im)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|password|passwd|redis[_-]?password|nats[_-]?(?:token|creds))\s*[:=]\s*)[^\s,;]+`)},
+	{"secret_field", regexp.MustCompile(`(?im)(["']?\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|password|passwd|redis[_-]?password|nats[_-]?(?:token|creds))\b["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)`)},
+	{"connection_userinfo", regexp.MustCompile(`(?i)((?:postgres(?:ql)?|mysql|redis|rediss|nats)://)[^/@\s]+@`)},
 	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)},
 	{"github_token", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,})\b`)},
 	{"discord_token", regexp.MustCompile(`\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{20,}\b`)},
@@ -70,7 +71,6 @@ var logRedactionRules = []struct {
 	{"windows_home", regexp.MustCompile(`(?i)([A-Z]:\\Users\\)[^\\\r\n]+`)},
 	{"unix_home", regexp.MustCompile(`(?m)(/(?:home|Users)/)[^/\s]+`)},
 	{"url_secret", regexp.MustCompile(`(?i)([?&](?:token|key|secret|access_token|refresh_token)=)[^&#\s]+`)},
-	{"connection_password", regexp.MustCompile(`(?i)((?:postgres(?:ql)?|mysql|redis|rediss|nats)://[^@\s]*?:)[^@/:\s]+@`)},
 	{"cookie", regexp.MustCompile(`(?im)(cookie\s*:\s*)[^\r\n]+`)},
 }
 
@@ -80,11 +80,20 @@ func redactLogText(input string) (string, map[string]int) {
 	counts := make(map[string]int)
 	for _, rule := range logRedactionRules {
 		input = rule.pattern.ReplaceAllStringFunc(input, func(value string) string {
-			counts[rule.name]++
+			replacement := "❄"
 			if match := rule.pattern.FindStringSubmatch(value); len(match) > 1 && match[1] != "" {
-				return match[1] + "❄"
+				if rule.name == "connection_userinfo" {
+					replacement = match[1] + "❄@"
+				} else if rule.name == "secret_field" && len(match) > 2 && (strings.HasPrefix(match[2], "\"") || strings.HasPrefix(match[2], "'")) {
+					replacement = match[1] + match[2][:1] + "❄" + match[2][:1]
+				} else {
+					replacement = match[1] + "❄"
+				}
 			}
-			return "❄"
+			if replacement != value {
+				counts[rule.name]++
+			}
+			return replacement
 		})
 	}
 	return input, counts
@@ -168,15 +177,19 @@ func (s *Server) createFileLogShare(ctx context.Context, userID int64, publicFil
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errors.New("文件不存在、未完成安全检查或不属于当前用户")
 		}
-		return nil, err
+		return nil, errors.New("读取日志文件记录失败，请稍后重试")
 	}
 	if size <= 0 || size > maxLogSourceBytes {
 		return nil, fmt.Errorf("文件超过 %d MiB 限制", maxLogSourceBytes>>20)
 	}
 	var existingCode string
-	if s.db.QueryRow(ctx, `select public_code from log_shares where source_file_id=$1 and redaction_version=$2
-		and status='ready' and deleted_at is null and expires_at>now()`, fileID, logRedactionVersion).Scan(&existingCode) == nil {
+	lookupErr := s.db.QueryRow(ctx, `select public_code from log_shares where source_file_id=$1 and redaction_version=$2
+		and status='ready' and deleted_at is null and expires_at>now()`, fileID, logRedactionVersion).Scan(&existingCode)
+	if lookupErr == nil {
 		return map[string]any{"publicCode": existingCode, "url": "/log/s/" + existingCode, "status": "ready", "reused": true}, nil
+	}
+	if !errors.Is(lookupErr, pgx.ErrNoRows) {
+		return nil, errors.New("读取已有日志分享失败，请稍后重试")
 	}
 	raw, err := s.readLogOSSObject(ctx, objectKey, size, digest)
 	if err != nil {
@@ -190,6 +203,9 @@ func (s *Server) createFileLogShare(ctx context.Context, userID int64, publicFil
 	if err == nil {
 		return result, nil
 	}
+	if !isUniqueViolation(err) {
+		return nil, errors.New("保存脱敏日志失败，请稍后重试")
+	}
 	// The partial unique index is the concurrency authority. If another
 	// request sanitized the same source file first, return that share instead
 	// of surfacing a spurious batch failure.
@@ -197,7 +213,7 @@ func (s *Server) createFileLogShare(ctx context.Context, userID int64, publicFil
 		and status='ready' and deleted_at is null and expires_at>now()`, fileID, logRedactionVersion).Scan(&existingCode) == nil {
 		return map[string]any{"publicCode": existingCode, "url": "/log/s/" + existingCode, "status": "ready", "reused": true}, nil
 	}
-	return nil, err
+	return nil, errors.New("保存脱敏日志失败，请稍后重试")
 }
 
 func (s *Server) readLogOSSObject(ctx context.Context, objectKey string, expectedSize int64, expectedDigest string) ([]byte, error) {
@@ -253,10 +269,9 @@ func sanitizeLogZip(raw []byte) ([]logShareEntryWrite, map[string]int, error) {
 	seenNames := make(map[string]struct{}, len(archive.File))
 	var total int64
 	for _, file := range archive.File {
-		name := filepath.ToSlash(strings.TrimSpace(file.Name))
-		clean := filepath.ToSlash(filepath.Clean(name))
+		clean, safePath := portableArchiveEntryName(file.Name, maxLogArchiveDepth)
 		unsafeMode := file.Mode() & (os.ModeSymlink | os.ModeDevice | os.ModeCharDevice | os.ModeNamedPipe | os.ModeSocket)
-		if name == "" || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") || filepath.IsAbs(name) || strings.Count(clean, "/") > maxLogArchiveDepth || unsafeMode != 0 {
+		if !safePath || unsafeMode != 0 {
 			return nil, nil, errors.New("ZIP 包含不安全路径或符号链接")
 		}
 		if file.Flags&0x1 != 0 {
@@ -355,8 +370,8 @@ func (s *Server) persistReadyLogShare(ctx context.Context, ownerID int64, source
 		sourceFile = sourceFileID
 	}
 	countsJSON, _ := jsonMarshal(counts)
-	err = tx.QueryRow(ctx, `insert into log_shares(public_code,owner_user_id,source_type,source_file_id,title,original_name,status,redaction_version,redaction_counts,expires_at)
-		values($1,$2,$3,$4,$5,$6,'ready',$7,$8::jsonb,$9) returning id`, code, owner, sourceType, sourceFile,
+	err = tx.QueryRow(ctx, `insert into log_shares(public_code,owner_user_id,source_type,source_file_id,title,original_name,status,redaction_version,redaction_applied_version,redaction_counts,expires_at)
+		values($1,$2,$3,$4,$5,$6,'ready',$7,$7,$8::jsonb,$9) returning id`, code, owner, sourceType, sourceFile,
 		truncateRunes(strings.TrimSpace(title), 200), filepath.Base(originalName), logRedactionVersion, countsJSON, expiresAt).Scan(&shareID)
 	if err != nil {
 		return nil, err
@@ -384,11 +399,7 @@ func (s *Server) publicLogShare(w http.ResponseWriter, r *http.Request) {
 	}
 	share, _, err := s.loadLogShareMetadata(r.Context(), r.PathValue("code"), false, currentClaims(r).Subject)
 	if err != nil {
-		status := http.StatusNotFound
-		if errors.Is(err, errLogShareGone) {
-			status = http.StatusGone
-		}
-		writeError(w, status, "日志不存在或已失效")
+		writeLogShareReadError(w, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
@@ -403,6 +414,18 @@ func (s *Server) publicLogShare(w http.ResponseWriter, r *http.Request) {
 
 var errLogShareGone = errors.New("log share gone")
 
+func writeLogShareReadError(w http.ResponseWriter, err error) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "日志不存在或已失效")
+		return
+	}
+	if errors.Is(err, errLogShareGone) {
+		writeError(w, http.StatusGone, "日志已失效")
+		return
+	}
+	writeAPIError(w, http.StatusServiceUnavailable, "LOG_SHARE_READ_UNAVAILABLE", "无法读取安全脱敏日志，请稍后重试", 1, nil)
+}
+
 func (s *Server) downloadLogShare(w http.ResponseWriter, r *http.Request) {
 	release, ok := s.acquireLogShareBodyRead(w, r, "log-share-download", 5)
 	if !ok {
@@ -410,7 +433,11 @@ func (s *Server) downloadLogShare(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 	share, record, err := s.loadLogShareMetadata(r.Context(), r.PathValue("code"), false, currentClaims(r).Subject)
-	if err != nil || record.SourceType != "file" {
+	if err != nil {
+		writeLogShareReadError(w, err)
+		return
+	}
+	if record.SourceType != "file" {
 		writeError(w, http.StatusNotFound, "该日志不能下载")
 		return
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"mcmods-cn-backend/internal/catalogvisibility"
 )
 
 const (
@@ -569,9 +570,49 @@ func (worker *Worker) claim(ctx context.Context) ([]queueJob, error) {
 }
 
 func (worker *Worker) complete(ctx context.Context, job queueJob) error {
+	if job.DocumentType == "mod" {
+		return worker.completeMod(ctx, job)
+	}
 	_, err := worker.db.Exec(ctx, `delete from search_index_queue where document_type=$1 and document_id=$2 and updated_at=$3`,
 		job.DocumentType, job.DocumentID, job.Token)
 	return err
+}
+
+// A parent's publication and metadata affect otherwise-public child search
+// documents. Persist their refresh intent before acknowledging the parent.
+func (worker *Worker) completeMod(ctx context.Context, job queueJob) error {
+	tx, err := worker.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var id int64
+	err = tx.QueryRow(ctx, `select document_id from search_index_queue
+	 where document_type='mod' and document_id=$1 and updated_at=$2 for update`, job.DocumentID, job.Token).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `insert into search_index_queue(document_type,document_id,operation)
+	 select dependent.document_type,dependent.document_id,'upsert' from (
+	 select 'server'::text document_type,server_id document_id from minecraft_server_mods where mod_id=$1
+	 union select 'resource',entity_id from game_resources where owner_mod_id=$1
+	 union select 'resource',snapshot.resource_id from resource_import_snapshots snapshot
+	 join catalog_import_revisions revision on revision.id=snapshot.revision_id where revision.mod_id=$1
+	 union select 'resource',detail.resource_id from mod_resource_version_details detail
+	 join mod_content_versions version on version.id=detail.version_id where version.mod_id=$1
+	 ) dependent order by dependent.document_type,dependent.document_id
+	 on conflict(document_type,document_id) do update set operation='upsert',attempts=0,
+	 available_at=now(),last_error='',updated_at=clock_timestamp()`, id)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `delete from search_index_queue where document_type='mod' and document_id=$1 and updated_at=$2`, id, job.Token); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (worker *Worker) retry(ctx context.Context, jobs []queueJob, cause error) error {
@@ -823,10 +864,15 @@ func (worker *Worker) loadResourceDocuments(ctx context.Context, ids []int64) ([
 		greatest(entity.updated_at,resource.updated_at),
 		coalesce((select array_agg(distinct value) from (
 			select localization.name value from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name<>''
-			union all select imported_name.value from resource_import_snapshots snapshot cross join lateral jsonb_each_text(snapshot.names) imported_name where snapshot.resource_id=entity.id and imported_name.value<>''
+			union all select imported_name.value from resource_import_snapshots snapshot
+			join catalog_import_revisions revision on revision.id=snapshot.revision_id
+			join mods source_mod on source_mod.id=revision.mod_id
+			cross join lateral jsonb_each_text(snapshot.names) imported_name where snapshot.resource_id=entity.id and imported_name.value<>''
+			and revision.is_active and revision.status in ('ready','partial') and source_mod.review_status='approved'
 		) names),'{}'::text[])
 		from catalog_entities entity join game_resources resource on resource.entity_id=entity.id
-		where entity.id=any($1::bigint[])`, ids)
+		where entity.id=any($1::bigint[]) and entity.status='active' and entity.archived_at is null
+		and `+catalogvisibility.EntitySQL("entity", "resource"), ids)
 	if err != nil {
 		return nil, err
 	}
@@ -856,13 +902,14 @@ func (worker *Worker) loadServerDocuments(ctx context.Context, ids []int64) ([]m
 		coalesce(popularity.favorite_count,0),coalesce((popularity.bayesian_rating*10000)::bigint,0),
 		coalesce(popularity.rating_count,0),coalesce(popularity.view_count,0),coalesce(popularity.comment_count,0),
 		coalesce((select array_agg(distinct source.value) from (
-			select term.value from minecraft_server_mods server_mod left join mods mod on mod.id=server_mod.mod_id
+			select term.value from minecraft_server_mods server_mod left join mods mod on mod.id=server_mod.mod_id and mod.review_status='approved'
 			cross join lateral unnest(array[server_mod.raw_mod_id,coalesce(mod.project_code,''),coalesce(mod.slug,''),
 				coalesce(mod.primary_name,''),coalesce(mod.secondary_name,'')]) term(value)
 			where server_mod.server_id=server.id
 			union all
 			select identifier.identifier from minecraft_server_mods server_mod
-			join mod_identifiers identifier on identifier.mod_id=server_mod.mod_id where server_mod.server_id=server.id
+			join mods mod on mod.id=server_mod.mod_id and mod.review_status='approved'
+			join mod_identifiers identifier on identifier.mod_id=mod.id where server_mod.server_id=server.id
 		) source where source.value<>''),'{}'::text[])
 		from minecraft_servers server
 		left join public_routes popularity_route
@@ -913,8 +960,11 @@ func compactStrings(values []string) []string {
 	remainingBytes := searchDocumentArrayByteLimit
 	for _, value := range values {
 		value = strings.TrimSpace(value)
-		if value == "" || remainingBytes == 0 || len(result) == searchDocumentArrayItemLimit {
+		if remainingBytes == 0 || len(result) == searchDocumentArrayItemLimit {
 			break
+		}
+		if value == "" {
+			continue
 		}
 		value = truncateSearchString(value, remainingBytes)
 		value = strings.TrimSpace(value)

@@ -42,14 +42,14 @@ func TestFileLogShareBatchReturnsEveryItemAndReusesCompletedSourcesIntegration(t
 		);
 		create temporary table log_shares (
 			source_file_id bigint,redaction_version integer,status text,deleted_at timestamptz,
-			expires_at timestamptz,public_code text
+			expires_at timestamptz,public_code text,redaction_applied_version integer not null default 1
 		);
 		insert into oss_files values
 			(1,'filegood01',7001,'active','clean','log_share','logs/one.log','one.log','one.log','text/plain',10,''),
 			(2,'filegood02',7001,'active','clean','log_share','logs/two.log','two.log','two.log','text/plain',10,'');
 		insert into log_shares values
-			(1,1,'ready',null,now()+interval '1 day','sharegood01'),
-			(2,1,'ready',null,now()+interval '1 day','sharegood02')`); err != nil {
+			(1,2,'ready',null,now()+interval '1 day','sharegood01'),
+			(2,2,'ready',null,now()+interval '1 day','sharegood02')`); err != nil {
 		t.Fatal(err)
 	}
 	server := &Server{db: pool}

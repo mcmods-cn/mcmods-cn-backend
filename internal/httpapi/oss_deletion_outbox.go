@@ -374,7 +374,7 @@ func (s *Server) tombstoneOSSFileTx(ctx context.Context, tx pgx.Tx, fileID int64
 		return errors.New("OSS file object key is empty")
 	}
 	if target.Endpoint == "" || target.Bucket == "" || target.Region == "" {
-		cfg := s.ossConfigFromSettings(ctx)
+		cfg := s.ossConfigFromSettingsWithQueryer(ctx, tx)
 		if target.Endpoint == "" {
 			target.Endpoint = cfg.Endpoint
 		}

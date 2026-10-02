@@ -100,7 +100,12 @@ type ossCompleteUploadRequest struct {
 }
 
 func (s *Server) getOSSConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, redactOSSConfig(s.ossConfigFromSettings(r.Context())))
+	payload, err := s.ossConfigFromSettingsStrictWithQueryer(r.Context(), s.db)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取 OSS 配置失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, redactOSSConfig(payload))
 }
 
 func (s *Server) updateOSSConfig(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +134,23 @@ func (s *Server) updateOSSConfig(w http.ResponseWriter, r *http.Request) {
 		payload.DownloadURLTTLMinutes = maxOSSDownloadURLTTLMinutes
 	}
 
-	current := s.ossConfigFromSettings(r.Context())
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取 OSS 配置失败，原配置未更改")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	// Serialize masked saves, including the initially absent setting, so an
+	// omitted secret cannot restore a credential replaced by another admin.
+	if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtextextended('system-settings:oss.aliyun',0))`); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取 OSS 配置失败，原配置未更改")
+		return
+	}
+	current, err := s.ossConfigFromSettingsStrictWithQueryer(r.Context(), tx)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取 OSS 配置失败，原配置未更改")
+		return
+	}
 	if payload.AccessKeySecret == "" {
 		payload.AccessKeySecret = current.AccessKeySecret
 	}
@@ -150,7 +171,7 @@ func (s *Server) updateOSSConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "OSS 配置格式不正确")
 		return
 	}
-	_, err = s.db.Exec(
+	_, err = tx.Exec(
 		r.Context(),
 		`insert into system_settings (key, value, updated_by, updated_at)
 		 values ('oss.aliyun', $1::jsonb, $2, now())
@@ -160,6 +181,10 @@ func (s *Server) updateOSSConfig(w http.ResponseWriter, r *http.Request) {
 		currentClaims(r).Subject,
 	)
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存 OSS 配置失败")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存 OSS 配置失败")
 		return
 	}
@@ -357,8 +382,15 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	if exists {
 		if coverBlueprintID > 0 {
 			if existingInternalID > 0 {
-				_, _ = s.db.Exec(r.Context(), `update blueprints set cover_file_id=$2,cover_object_key=$3,updated_at=now()
-					where id=$1 and owner_id=$4`, coverBlueprintID, existingInternalID, fmt.Sprint(existing["objectKey"]), currentClaims(r).Subject)
+				bindErr := s.bindReusableBlueprintCover(r.Context(), coverBlueprintID, currentClaims(r).Subject, fmt.Sprint(existing["id"]), fmt.Sprint(existing["objectKey"]))
+				if errors.Is(bindErr, errReusableBlueprintCoverChanged) {
+					writeError(w, http.StatusConflict, "蓝图或封面文件状态已变化，请重新提交")
+					return
+				}
+				if bindErr != nil {
+					writeError(w, http.StatusInternalServerError, "保存蓝图封面失败")
+					return
+				}
 			}
 		}
 		objectKey := fmt.Sprint(existing["objectKey"])
@@ -562,6 +594,41 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		response["blueprint"] = map[string]any{"id": blueprintPublicID, "status": "uploading"}
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+var errReusableBlueprintCoverChanged = errors.New("reusable blueprint cover changed")
+
+func (s *Server) bindReusableBlueprintCover(ctx context.Context, blueprintID, ownerID int64, filePublicID, objectKey string) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var locked int64
+	if err = tx.QueryRow(ctx, `select id from blueprints where id=$1 and owner_id=$2 and status<>'deleted' for update`, blueprintID, ownerID).Scan(&locked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errReusableBlueprintCoverChanged
+		}
+		return err
+	}
+	file, err := resolveTrustedRasterOSSFilePublicID(ctx, tx, filePublicID, ossRasterBindingScope{UploaderID: ownerID})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errOSSFileNotBindable) {
+			return errReusableBlueprintCoverChanged
+		}
+		return err
+	}
+	if file.ObjectKey != objectKey {
+		return errReusableBlueprintCoverChanged
+	}
+	command, err := tx.Exec(ctx, `update blueprints set cover_file_id=$2,cover_object_key=$3,updated_at=now() where id=$1`, locked, file.ID, file.ObjectKey)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return errReusableBlueprintCoverChanged
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Server) completeOSSDirectUpload(w http.ResponseWriter, r *http.Request) {
@@ -911,6 +978,8 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		defer quotaTx.Rollback(r.Context())
 		if err = settleUserOSSUploadQuotaTx(r.Context(), quotaTx, currentClaims(r).Subject, sourceObjectKey,
 			sourceSize, size, quotaLimits); err != nil {
+			// Cleanup owns a separate transaction; release this connection first.
+			_ = quotaTx.Rollback(r.Context())
 			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, req.ObjectKey, "user-quota-settlement-failed")
 			if converted {
 				s.deleteOSSObjectIfUnregistered(r.Context(), cfg, sourceObjectKey, "converted-source-settlement-failed")
@@ -994,6 +1063,14 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		}
 	}
 	if err != nil {
+		// Cleanup opens its own transaction. Release a failed quota/evidence
+		// transaction before acquiring another connection from the same pool.
+		if quotaTx != nil {
+			_ = quotaTx.Rollback(r.Context())
+		}
+		if evidenceTx != nil {
+			_ = evidenceTx.Rollback(r.Context())
+		}
 		if converted {
 			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, req.ObjectKey, "converted-file-registration-failed")
 			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, sourceObjectKey, "converted-source-registration-failed")
@@ -1150,10 +1227,9 @@ func validateReportEvidenceZIP(raw []byte) error {
 	var total uint64
 	seen := map[string]bool{}
 	for _, file := range archive.File {
-		name := filepath.ToSlash(strings.TrimSpace(file.Name))
-		clean := filepath.ToSlash(filepath.Clean(name))
+		clean, safePath := portableArchiveEntryName(file.Name, 16)
 		unsafeMode := file.Mode() & (os.ModeSymlink | os.ModeDevice | os.ModeCharDevice | os.ModeNamedPipe | os.ModeSocket)
-		if name == "" || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") || filepath.IsAbs(name) || strings.Count(clean, "/") > 16 || unsafeMode != 0 || file.Flags&0x1 != 0 {
+		if !safePath || unsafeMode != 0 || file.Flags&0x1 != 0 {
 			return errors.New("ZIP 包含不安全路径、特殊文件或加密内容")
 		}
 		key := strings.ToLower(clean)

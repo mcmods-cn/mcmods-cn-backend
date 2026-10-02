@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	logShareChunkCursorVersion       = 1
+	logShareChunkCursorVersion       = 2
 	maxLogShareChunkRunes            = 32 << 10
 	maxLogShareChunkResponseBytes    = 256 << 10
 	maxLogShareMetadataResponseBytes = 256 << 10
@@ -137,7 +137,7 @@ func (s *Server) loadLogShareRecord(ctx context.Context, code string, ownerOnly 
 	var record logShareRecord
 	var counts []byte
 	err := s.db.QueryRow(ctx, `select id,owner_user_id,public_code,source_type,left(title,200),left(original_name,512),status,
-		redaction_version,redaction_counts,created_at,expires_at from log_shares where public_code=$1`, code).
+		greatest(redaction_version,redaction_applied_version),redaction_counts,created_at,expires_at from log_shares where public_code=$1 and deleted_at is null`, code).
 		Scan(&record.ID, &record.OwnerID, &record.PublicCode, &record.SourceType, &record.Title, &record.OriginalName,
 			&record.Status, &record.RedactionVersion, &counts, &record.CreatedAt, &record.ExpiresAt)
 	if err != nil {
@@ -148,6 +148,12 @@ func (s *Server) loadLogShareRecord(ctx context.Context, code string, ownerOnly 
 	}
 	if record.Status != "ready" || !record.ExpiresAt.After(time.Now()) {
 		return logShareRecord{}, errLogShareGone
+	}
+	if record.RedactionVersion < logRedactionVersion {
+		if err = s.upgradeLogShareRedaction(ctx, record.ID); err != nil {
+			return logShareRecord{}, err
+		}
+		return s.loadLogShareRecord(ctx, code, ownerOnly, viewerID)
 	}
 	if len(counts) > 16<<10 || json.Unmarshal(counts, &record.RedactionCounts) != nil {
 		return logShareRecord{}, errors.New("invalid log share redaction counts")
@@ -210,6 +216,10 @@ func (s *Server) publicLogShareEntryContent(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	code := strings.TrimSpace(r.PathValue("code"))
+	if _, err = s.loadLogShareRecord(r.Context(), code, false, currentClaims(r).Subject); err != nil {
+		writeLogShareReadError(w, err)
+		return
+	}
 	scope := logShareChunkCursorScope(code, entryIndex)
 	offset, err := decodeLogShareChunkCursor(values.Get("cursor"), scope)
 	if err != nil {

@@ -45,11 +45,11 @@ func (s *Server) authenticationRateLimited(ctx context.Context, action string, d
 			continue
 		}
 		key := "auth:" + action + ":" + dimension.name + ":" + dimension.value
-		result := s.cache.ConsumeLocalRateLimit(key, dimension.degradedLimit, dimension.window)
 		if cacheConfig := s.cache.Config(); cacheConfig.AuthRateLimitEnabled || cacheConfig.RateLimitFailClosed {
-			result = s.cache.ConsumeRateLimitPolicy(ctx, key, dimension.limit, dimension.degradedLimit, dimension.window)
-		}
-		if !result.Allowed {
+			if !s.cache.ConsumeRateLimitPolicy(ctx, key, dimension.limit, dimension.degradedLimit, dimension.window).Allowed {
+				return true
+			}
+		} else if !s.cache.ConsumeLocalRateLimit(key, dimension.degradedLimit, dimension.window).Allowed {
 			return true
 		}
 	}
