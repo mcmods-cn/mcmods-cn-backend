@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Create disposable, labelled loopback services; never reset a supplied DB URL."""
 import argparse
+import errno
 import json
 import os
 from pathlib import Path
@@ -132,7 +133,12 @@ def down(state):
         path = state / filename
         if path.exists():
             path.unlink()
-    state.rmdir()
+    try:
+        state.rmdir()
+    except OSError as error:
+        if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+            raise
+        print("Retained state directory containing other files; backups were not removed.")
     print("Removed only this environment's labelled disposable resources.")
 
 
