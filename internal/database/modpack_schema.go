@@ -1,5 +1,12 @@
 package database
 
+import (
+	"fmt"
+	"strings"
+
+	"mcmods-cn-backend/internal/catalogpolicy"
+)
+
 // modpackSchemaStatements installs the modpack catalog. Modpacks share public
 // project routes, creator bindings, reviewed revisions, comments and project
 // downloads with other top-level resources while keeping pack-specific mod
@@ -9,7 +16,7 @@ func modpackSchemaStatements() []string {
 		`alter table mod_metadata_import_jobs add column project_type text not null default 'mod'
 			check(project_type in ('mod','modpack','plugin','map','resource_pack','shader_pack','datapack','addon'))`,
 		`create index idx_mod_metadata_import_jobs_project_type on mod_metadata_import_jobs(project_type,user_id,created_at desc)`,
-		`create table modpacks (
+		fmt.Sprintf(`create table modpacks (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			slug text not null unique,
@@ -20,6 +27,7 @@ func modpackSchemaStatements() []string {
 			default_locale text not null default 'zh-CN',
 			environment text not null default 'bothRequired',
 			primary_category text not null default 'adventure',
+			constraint modpacks_primary_category_check check(primary_category in (%s)),
 			pack_type text not null default 'native',
 			packaging_method text not null default 'other',
 			official_status text not null default 'development',
@@ -44,7 +52,7 @@ func modpackSchemaStatements() []string {
 			check(source_status in ('open','partial','closed','unknown')),
 			check(submission_method in ('manual','modrinth','curseforge')),
 			check(review_status in ('pending','approved','rejected'))
-		)`,
+		)`, quotedModpackCategories()),
 		`create index idx_modpacks_catalog on modpacks(review_status,updated_at desc,id desc)`,
 		`create index idx_modpacks_submitted_by on modpacks(submitted_by,updated_at desc)`,
 		`create index idx_modpacks_primary_name_lower on modpacks(lower(primary_name))`,
@@ -148,4 +156,12 @@ func modpackSchemaStatements() []string {
 		`create trigger trg_modpack_mods_remove_unresolved after delete on modpack_mods
 			for each row execute function remove_modpack_mod_unresolved_reference()`,
 	}
+}
+
+func quotedModpackCategories() string {
+	categories := catalogpolicy.ModpackCategories()
+	for index, category := range categories {
+		categories[index] = "'" + strings.ReplaceAll(category, "'", "''") + "'"
+	}
+	return strings.Join(categories, ",")
 }

@@ -19,7 +19,10 @@ import (
 	"mcmods-cn-backend/internal/serverprobe"
 )
 
-const serverSettingsKey = "server_catalog"
+const (
+	serverSettingsKey          = "server_catalog"
+	maxServerBodyMarkdownBytes = 100_000
+)
 
 type serverCatalogSettings struct {
 	MaxProofFiles      int   `json:"maxProofFiles"`
@@ -41,10 +44,15 @@ type createServerLinkRequest struct {
 }
 
 type createServerModRequest struct {
-	ID         string `json:"id"`
-	Version    string `json:"version"`
-	Source     string `json:"source"`
-	Confidence string `json:"confidence"`
+	ID      string `json:"id"`
+	Version string `json:"version"`
+}
+
+type trustedServerModEvidence struct {
+	ID         string
+	Version    string
+	Source     string
+	Confidence string
 }
 
 type createMinecraftServerRequest struct {
@@ -62,6 +70,15 @@ type createMinecraftServerRequest struct {
 	Mods              []createServerModRequest  `json:"mods"`
 	ProofText         string                    `json:"proofText"`
 	ProofFileIDs      []string                  `json:"proofFileIds"`
+}
+
+type minecraftServerProbeFunc func(context.Context, string) (serverprobe.Result, error)
+
+func (s *Server) probeMinecraftServerForSubmission(ctx context.Context, address string) (serverprobe.Result, error) {
+	if s.serverProbe != nil {
+		return s.serverProbe(ctx, address)
+	}
+	return serverprobe.Probe(ctx, address)
 }
 
 type updateMinecraftServerRequest struct {
@@ -249,7 +266,7 @@ func (s *Server) createMinecraftServer(w http.ResponseWriter, r *http.Request) {
 	}
 	// Re-probe on submission. This avoids accepting a stale or forged result
 	// from step one and guarantees that only reachable servers enter review.
-	probe, err := serverprobe.Probe(r.Context(), request.Address)
+	probe, err := s.probeMinecraftServerForSubmission(r.Context(), request.Address)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "提交前无法再次连接服务器："+err.Error())
 		return
@@ -410,14 +427,16 @@ func (s *Server) updateMinecraftServer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if _, err = tx.Exec(r.Context(), `delete from minecraft_server_mods where server_id=$1`, serverID); err != nil {
-		writeError(w, http.StatusInternalServerError, "更新服务器模组列表失败")
-		return
-	}
-	if err = insertMinecraftServerMods(r.Context(), tx, serverID, request.Mods); err != nil {
+	if err = replaceMinecraftServerDeclarations(r.Context(), tx, serverID, request.Mods); err != nil {
 		log.Printf("update minecraft server mods failed: server_id=%d public_id=%s mod_count=%d: %v",
 			serverID, publicID, len(request.Mods), err)
 		writeError(w, http.StatusInternalServerError, "保存服务器模组列表失败")
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `update minecraft_servers server set modded=(server.loader<>'' or exists(
+		select 1 from minecraft_server_mods server_mod where server_mod.server_id=server.id
+	)) where server.id=$1`, serverID); err != nil {
+		writeError(w, http.StatusInternalServerError, "更新服务器模组状态失败")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
@@ -473,7 +492,7 @@ func normalizeAndValidateServerRequest(request *createMinecraftServerRequest, se
 	if len([]rune(request.ShortDescription)) > settings.SummaryMaxLength {
 		return fmt.Errorf("列表简介不能超过 %d 个字符", settings.SummaryMaxLength)
 	}
-	if len(request.BodyMarkdown) > 100000 {
+	if len(request.BodyMarkdown) > maxServerBodyMarkdownBytes {
 		return errors.New("正文介绍不能超过 100000 个字符")
 	}
 	if len(request.MinecraftVersions) == 0 || len(request.Languages) == 0 {
@@ -514,6 +533,7 @@ func normalizeAndValidateServerRequest(request *createMinecraftServerRequest, se
 		links = append(links, link)
 	}
 	request.Links = links
+	request.Mods = normalizeDeclaredServerMods(request.Mods)
 	return nil
 }
 
@@ -543,73 +563,99 @@ func resolveServerProofFiles(ctx context.Context, tx pgx.Tx, userID int64, publi
 	return files, nil
 }
 
-func mergeServerModRequests(detected []serverprobe.Mod, declared []createServerModRequest) []createServerModRequest {
-	result := make([]createServerModRequest, 0, len(detected)+len(declared))
-	byID := make(map[string]int, len(detected)+len(declared))
-	appendMod := func(mod createServerModRequest) {
+func normalizeDeclaredServerMods(mods []createServerModRequest) []createServerModRequest {
+	result := make([]createServerModRequest, 0, len(mods))
+	seen := make(map[string]struct{}, len(mods))
+	for _, mod := range mods {
+		mod.ID = normalizeCatalogModIdentifier(mod.ID)
+		if mod.ID == "" {
+			continue
+		}
+		mod.Version = strings.TrimSpace(mod.Version)
+		if _, exists := seen[mod.ID]; exists {
+			continue
+		}
+		seen[mod.ID] = struct{}{}
+		result = append(result, mod)
+	}
+	return result
+}
+
+func mergeServerModRequests(detected []serverprobe.Mod, declared []createServerModRequest) []trustedServerModEvidence {
+	trusted := make([]trustedServerModEvidence, 0, len(detected))
+	for _, mod := range detected {
+		trusted = append(trusted, trustedServerModEvidence{
+			ID: mod.ID, Version: mod.Version, Source: mod.Source, Confidence: mod.Confidence,
+		})
+	}
+	return mergeTrustedServerModEvidence(trusted, declared)
+}
+
+func mergeTrustedServerModEvidence(trusted []trustedServerModEvidence, declared []createServerModRequest) []trustedServerModEvidence {
+	result := make([]trustedServerModEvidence, 0, len(trusted)+len(declared))
+	byIdentityAndSource := make(map[string]int, len(trusted)+len(declared))
+	appendMod := func(mod trustedServerModEvidence) {
 		mod.ID = normalizeCatalogModIdentifier(mod.ID)
 		if mod.ID == "" {
 			return
 		}
 		mod.Version = strings.TrimSpace(mod.Version)
-		if index, exists := byID[mod.ID]; exists {
-			if result[index].Version == "" {
-				result[index].Version = mod.Version
+		switch mod.Source {
+		case "manual":
+			mod.Confidence = "declared"
+		case "forge_status", "configuration", "agent":
+			switch mod.Confidence {
+			case "exact", "high", "inferred":
+			default:
+				mod.Confidence = "inferred"
 			}
-			if result[index].Source == "manual" && mod.Source != "manual" {
-				result[index].Source, result[index].Confidence = mod.Source, mod.Confidence
-			}
+		default:
 			return
 		}
-		byID[mod.ID] = len(result)
+		key := mod.ID + "\x00" + mod.Source
+		if index, exists := byIdentityAndSource[key]; exists {
+			if mod.Version != "" {
+				result[index].Version = mod.Version
+			}
+			result[index].Confidence = mod.Confidence
+			return
+		}
+		byIdentityAndSource[key] = len(result)
 		result = append(result, mod)
 	}
-	for _, mod := range detected {
-		appendMod(createServerModRequest{ID: mod.ID, Version: mod.Version, Source: mod.Source, Confidence: mod.Confidence})
+	for _, mod := range trusted {
+		appendMod(mod)
 	}
 	for _, mod := range declared {
-		if mod.Source == "" {
-			mod.Source = "manual"
-		}
-		if mod.Confidence == "" {
-			mod.Confidence = "declared"
-		}
-		appendMod(mod)
+		appendMod(trustedServerModEvidence{ID: mod.ID, Version: mod.Version, Source: "manual", Confidence: "declared"})
 	}
 	return result
 }
 
-func insertMinecraftServerMods(ctx context.Context, tx pgx.Tx, serverID int64, mods []createServerModRequest) error {
-	mods = mergeServerModRequests(nil, mods)
+func insertMinecraftServerMods(ctx context.Context, tx pgx.Tx, serverID int64, mods []trustedServerModEvidence) error {
+	mods = mergeTrustedServerModEvidence(mods, nil)
 	if len(mods) == 0 {
 		return nil
 	}
 	modIDs := make([]string, 0, len(mods))
+	seenModIDs := make(map[string]struct{}, len(mods))
 	versions := make([]string, 0, len(mods))
 	sources := make([]string, 0, len(mods))
 	confidences := make([]string, 0, len(mods))
 	for _, mod := range mods {
-		switch mod.Source {
-		case "forge_status", "configuration", "agent", "manual":
-		default:
-			mod.Source = "manual"
+		if _, exists := seenModIDs[mod.ID]; !exists {
+			seenModIDs[mod.ID] = struct{}{}
+			modIDs = append(modIDs, mod.ID)
 		}
-		switch mod.Confidence {
-		case "exact", "high", "inferred", "declared":
-		default:
-			mod.Confidence = "declared"
-		}
-		modIDs = append(modIDs, mod.ID)
 		versions = append(versions, mod.Version)
 		sources = append(sources, mod.Source)
 		confidences = append(confidences, mod.Confidence)
 	}
 	rows, err := tx.Query(ctx, `insert into minecraft_server_mods(
-		server_id,mod_id,raw_mod_id,version,source,confidence
+		server_id,mod_id,raw_mod_id
 	)
-	select $1,resolved.mod_id,input.raw_mod_id,input.version,input.source,input.confidence
-	from unnest($2::text[],$3::text[],$4::text[],$5::text[])
-		as input(raw_mod_id,version,source,confidence)
+	select $1,resolved.mod_id,input.raw_mod_id
+	from unnest($2::text[]) as input(raw_mod_id)
 	left join lateral (
 		select mod.id mod_id
 		from mod_identifiers identifier join mods mod on mod.id=identifier.mod_id
@@ -617,8 +663,8 @@ func insertMinecraftServerMods(ctx context.Context, tx pgx.Tx, serverID int64, m
 		order by mod.id limit 1
 	) resolved on true
 	on conflict(server_id,raw_mod_id) do update set
-		mod_id=excluded.mod_id,version=excluded.version,source=excluded.source,confidence=excluded.confidence
-	returning id,raw_mod_id,mod_id`, serverID, modIDs, versions, sources, confidences)
+		mod_id=excluded.mod_id
+	returning id,raw_mod_id,mod_id`, serverID, modIDs)
 	if err != nil {
 		return err
 	}
@@ -639,13 +685,32 @@ func insertMinecraftServerMods(ctx context.Context, tx pgx.Tx, serverID int64, m
 			unresolvedModIDs = append(unresolvedModIDs, rawModID)
 		}
 	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
+	if err = finishRows(rows); err != nil {
 		return err
 	}
-	rows.Close()
-	if len(rowIDs) != len(mods) {
-		return fmt.Errorf("saved %d of %d server mods", len(rowIDs), len(mods))
+	if len(rowIDs) != len(modIDs) {
+		return fmt.Errorf("saved %d of %d server mod identities", len(rowIDs), len(modIDs))
+	}
+	evidenceModIDs := make([]string, 0, len(mods))
+	for _, mod := range mods {
+		evidenceModIDs = append(evidenceModIDs, mod.ID)
+	}
+	commandTag, err := tx.Exec(ctx, `insert into minecraft_server_mod_evidence(
+		server_mod_id,source,version,confidence,observed_at
+	)
+	select server_mod.id,input.source,input.version,input.confidence,now()
+	from unnest($2::text[],$3::text[],$4::text[],$5::text[])
+		as input(raw_mod_id,version,source,confidence)
+	join minecraft_server_mods server_mod
+		on server_mod.server_id=$1 and server_mod.raw_mod_id=input.raw_mod_id
+	on conflict(server_mod_id,source) do update set
+		version=excluded.version,confidence=excluded.confidence,observed_at=excluded.observed_at`,
+		serverID, evidenceModIDs, versions, sources, confidences)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() != int64(len(mods)) {
+		return fmt.Errorf("saved %d of %d server mod evidence records", commandTag.RowsAffected(), len(mods))
 	}
 	if _, err = tx.Exec(ctx, `delete from unresolved_references
 		where source_type='minecraft_server_mod' and source_id=any($1::bigint[])`, rowIDs); err != nil {
@@ -666,145 +731,92 @@ func insertMinecraftServerMods(ctx context.Context, tx pgx.Tx, serverID int64, m
 	return err
 }
 
-func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) {
-	query, validQuery := parseCatalogQuery(r.URL.Query().Get("q"))
-	tag, validTag := parseCatalogScalar(strings.ToLower(r.URL.Query().Get("tag")))
-	language, validLanguage := parseCatalogScalar(r.URL.Query().Get("language"))
-	versions, validVersions := parseCatalogList(r.URL.Query().Get("version"), 20)
-	versionMode, validVersionMode := parseCatalogVersionMode(r.URL.Query().Get("versionMode"))
-	modFilters := parseCatalogModFilters(r.URL.Query().Get("mods"))
-	modded, validModded := parseCatalogBoolean(r.URL.Query().Get("modded"))
-	online, validOnline := parseCatalogBoolean(r.URL.Query().Get("online"))
-	whitelist, validWhitelist := parseCatalogBoolean(r.URL.Query().Get("whitelist"))
-	onlineMode, validOnlineMode := parseCatalogBoolean(r.URL.Query().Get("onlineMode"))
-	if !validQuery || !validTag || !validLanguage || !validVersions || !validVersionMode || !validModded || !validOnline || !validWhitelist || !validOnlineMode {
-		writeError(w, http.StatusBadRequest, "invalid server catalog filter")
-		return
+func replaceMinecraftServerDeclarations(ctx context.Context, tx pgx.Tx, serverID int64, declared []createServerModRequest) error {
+	if _, err := tx.Exec(ctx, `delete from minecraft_server_mod_evidence evidence
+		using minecraft_server_mods server_mod
+		where evidence.server_mod_id=server_mod.id and server_mod.server_id=$1
+		  and evidence.source='manual'`, serverID); err != nil {
+		return err
 	}
-	rawSort := r.URL.Query().Get("sort")
-	if strings.TrimSpace(rawSort) == "" {
-		rawSort = string(catalogSortHeat)
+	if err := insertMinecraftServerMods(ctx, tx, serverID, mergeTrustedServerModEvidence(nil, declared)); err != nil {
+		return err
 	}
-	sort, validSort := parseCatalogSort(rawSort)
-	direction, validDirection := parseCatalogSortDirection(r.URL.Query().Get("order"), rawSort)
-	if !validSort || !validDirection {
-		writeError(w, http.StatusBadRequest, "invalid catalog sort")
-		return
-	}
-	limit := boundedLimit(r.URL.Query().Get("limit"), 20, 60)
-	page := 1
-	if parsed, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && parsed > 0 {
-		page = min(parsed, 10000)
-	}
-	indexed := indexedSearchPage{}
-	if catalogSortUsesSearchIndex(sort) && len(versions) <= 1 {
-		indexed = s.searchServerPage(r.Context(), query, tag, language, firstCatalogValue(versions), modFilters,
-			modded, online, whitelist, onlineMode, limit, (page-1)*limit)
-	}
-	databaseOffset := (page - 1) * limit
-	if indexed.Used {
-		databaseOffset = 0
-	}
-	where := []string{"server.review_status='approved'"}
-	args := make([]any, 0, 10)
-	add := func(format string, value any) {
-		args = append(args, value)
-		where = append(where, fmt.Sprintf(format, len(args)))
-	}
-	indexedPosition := 0
-	if indexed.Used {
-		args = append(args, indexed.IDs)
-		indexedPosition = len(args)
-		where = append(where, fmt.Sprintf("server.id=any($%d::bigint[])", indexedPosition))
-	} else if query != "" {
-		args = append(args, query)
-		position := len(args)
-		where = append(where, fmt.Sprintf(`(
-			to_tsvector('simple',server.name||' '||server.short_description||' '||server.body_markdown)
-				@@ plainto_tsquery('simple',$%d)
-			or server.name ilike '%%'||$%d||'%%'
-			or exists(select 1 from minecraft_server_mods server_mod
-				left join mods mod on mod.id=server_mod.mod_id
-				where server_mod.server_id=server.id
-				  and (server_mod.raw_mod_id ilike '%%'||$%d||'%%'
-					or mod.primary_name ilike '%%'||$%d||'%%'
-					or mod.secondary_name ilike '%%'||$%d||'%%'))
-		)`, position, position, position, position, position))
-	}
-	if tag != "" {
-		add("server.primary_tag=$%d", tag)
-	}
-	if language != "" {
-		add("$%d=any(server.languages)", language)
-	}
-	if len(versions) > 0 {
-		if versionMode == "all" {
-			add("server.minecraft_versions @> $%d::text[]", versions)
-		} else {
-			add("server.minecraft_versions && $%d::text[]", versions)
+	return deleteMinecraftServerModsWithoutEvidence(ctx, tx, serverID)
+}
+
+func reconcileMinecraftServerProbeMods(ctx context.Context, tx pgx.Tx, serverID int64, detected []serverprobe.Mod, complete bool) error {
+	if complete {
+		if _, err := tx.Exec(ctx, `delete from minecraft_server_mod_evidence evidence
+			using minecraft_server_mods server_mod
+			where evidence.server_mod_id=server_mod.id and server_mod.server_id=$1
+			  and evidence.source<>'manual'`, serverID); err != nil {
+			return err
 		}
 	}
-	for _, modFilter := range modFilters {
-		args = append(args, modFilter)
-		position := len(args)
-		where = append(where, fmt.Sprintf(`exists(
-			select 1 from minecraft_server_mods filter_mod
-			left join mods collected_mod on collected_mod.id=filter_mod.mod_id
-			where filter_mod.server_id=server.id and (
-				lower(filter_mod.raw_mod_id)=lower($%d)
-				or lower(coalesce(collected_mod.project_code,''))=lower($%d)
-				or lower(coalesce(collected_mod.slug,''))=lower($%d)
-				or exists(
-					select 1 from mod_identifiers identifier
-					where identifier.mod_id=filter_mod.mod_id
-					  and lower(identifier.identifier)=lower($%d)
-				)
-			)
-		)`, position, position, position, position))
+	if err := insertMinecraftServerMods(ctx, tx, serverID, mergeServerModRequests(detected, nil)); err != nil {
+		return err
 	}
-	if modded == "true" || modded == "false" {
-		add("server.modded=$%d", modded == "true")
+	if !complete {
+		return nil
 	}
-	if online == "true" || online == "false" {
-		add("server.last_online=$%d", online == "true")
-	}
-	if whitelist == "true" || whitelist == "false" {
-		add("server.has_whitelist=$%d", whitelist == "true")
-	}
-	if onlineMode == "true" || onlineMode == "false" {
-		add("server.online_mode=$%d", onlineMode == "true")
-	}
-	whereSQL := strings.Join(where, " and ")
-	var total int
-	if indexed.Used {
-		total = indexed.Total
-	} else if err := s.db.QueryRow(r.Context(), `select count(*) from minecraft_servers server where `+whereSQL, args...).Scan(&total); err != nil {
-		writeError(w, http.StatusInternalServerError, "读取服务器数量失败")
+	return deleteMinecraftServerModsWithoutEvidence(ctx, tx, serverID)
+}
+
+func deleteMinecraftServerModsWithoutEvidence(ctx context.Context, tx pgx.Tx, serverID int64) error {
+	_, err := tx.Exec(ctx, `delete from minecraft_server_mods server_mod
+		where server_mod.server_id=$1 and not exists(
+			select 1 from minecraft_server_mod_evidence evidence where evidence.server_mod_id=server_mod.id
+		)`, serverID)
+	return err
+}
+
+func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) {
+	request, err := parseServerCatalogPageRequest(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	listArgs := append(append([]any{}, args...), limit, databaseOffset)
-	orderSQL := catalogOrderSQL(sort, direction, indexed.Used, indexedPosition,
-		"server.created_at", "server.updated_at", "server.id", "server.name")
-	if !indexed.Used && (sort == catalogSortHeat || sort == catalogSortRelevance) {
-		directionSQL := string(direction)
-		orderSQL = "coalesce(popularity.heat_score,0) " + directionSQL + ",server.last_online desc,server.updated_at " + directionSQL + ",server.id " + directionSQL
+	indexed := s.searchServerPage(r.Context(), request)
+	if !indexed.Used {
+		if request.Cursor != nil && request.Cursor.Mode != serverCatalogCursorSQL {
+			writeError(w, http.StatusServiceUnavailable, "server catalog index is temporarily unavailable")
+			return
+		}
+		pageRows, hasMore, loadErr := s.databaseServerCatalogPage(r.Context(), request)
+		if loadErr != nil {
+			writeError(w, http.StatusInternalServerError, "读取服务器列表失败")
+			return
+		}
+		items := make([]minecraftServerListItem, 0, len(pageRows))
+		for _, row := range pageRows {
+			items = append(items, row.Item)
+		}
+		nextCursor := ""
+		if hasMore && len(pageRows) > 0 {
+			nextCursor = serverCatalogDatabaseNextCursor(request, pageRows[len(pageRows)-1])
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"items": items, "limit": request.Limit, "hasMore": hasMore, "nextCursor": nextCursor,
+		})
+		return
+	}
+	ids := make([]int64, 0, len(indexed.Hits))
+	for _, hit := range indexed.Hits {
+		ids = append(ids, hit.InternalID)
 	}
 	rows, err := s.db.Query(r.Context(), `select server.public_id,server.name,server.short_description,
 		server.icon_data_uri,server.modded,server.loader,server.languages,server.primary_tag,
 		server.minecraft_versions,server.last_online,coalesce(server.last_latency_ms,-1),
 		server.last_players_online,server.last_players_max,server.last_checked_at
 		from minecraft_servers server
-		left join public_routes popularity_route on popularity_route.entity_type='minecraft_server' and popularity_route.internal_id=server.id
-		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
-		where `+whereSQL+`
-		order by `+orderSQL+`
-		limit $`+strconv.Itoa(len(args)+1)+` offset $`+strconv.Itoa(len(args)+2), listArgs...)
+		where server.review_status='approved' and server.id=any($1::bigint[])
+		order by array_position($1::bigint[],server.id)`, ids)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取服务器列表失败")
 		return
 	}
 	defer rows.Close()
-	items := make([]minecraftServerListItem, 0, limit)
+	items := make([]minecraftServerListItem, 0, request.Limit)
 	for rows.Next() {
 		var item minecraftServerListItem
 		var latency int
@@ -824,9 +836,12 @@ func (s *Server) publicMinecraftServers(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "读取服务器列表失败")
 		return
 	}
+	nextCursor := ""
+	if indexed.HasMore && len(indexed.Hits) > 0 {
+		nextCursor = serverCatalogNextCursor(request, indexed.Hits[len(indexed.Hits)-1])
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items": items, "total": total, "page": page, "limit": limit,
-		"pages": max(1, (total+limit-1)/limit),
+		"items": items, "limit": request.Limit, "hasMore": indexed.HasMore, "nextCursor": nextCursor,
 	})
 }
 
@@ -929,11 +944,29 @@ type minecraftServerModQuerier interface {
 }
 
 func readMinecraftServerMods(ctx context.Context, query minecraftServerModQuerier, publicID string) ([]minecraftServerMod, error) {
-	rows, err := query.Query(ctx, `select server_mod.raw_mod_id,server_mod.version,server_mod.source,
-		server_mod.confidence,mod.id is not null,coalesce(mod.project_code,''),coalesce(primary_identifier.identifier,''),
+	rows, err := query.Query(ctx, `select server_mod.raw_mod_id,selected_evidence.version,selected_evidence.source,
+		selected_evidence.confidence,mod.id is not null,coalesce(mod.project_code,''),coalesce(primary_identifier.identifier,''),
 		coalesce(mod.primary_name,''),coalesce(mod.slug,''),coalesce(mod.icon_url,'')
 		from minecraft_server_mods server_mod
 		join minecraft_servers server on server.id=server_mod.server_id
+		join lateral (
+			select coalesce(nullif(evidence.version,''),(
+				select fallback.version from minecraft_server_mod_evidence fallback
+				where fallback.server_mod_id=server_mod.id and fallback.version<>''
+				order by case fallback.confidence when 'exact' then 1 when 'high' then 2
+					when 'inferred' then 3 when 'declared' then 4 else 5 end,
+					case fallback.source when 'agent' then 1 when 'forge_status' then 2
+					when 'configuration' then 3 when 'manual' then 4 else 5 end
+				limit 1
+			),'') version,evidence.source,evidence.confidence
+			from minecraft_server_mod_evidence evidence
+			where evidence.server_mod_id=server_mod.id
+			order by case evidence.confidence when 'exact' then 1 when 'high' then 2
+				when 'inferred' then 3 when 'declared' then 4 else 5 end,
+				case evidence.source when 'agent' then 1 when 'forge_status' then 2
+				when 'configuration' then 3 when 'manual' then 4 else 5 end
+			limit 1
+		) selected_evidence on true
 		left join mods mod on mod.id=server_mod.mod_id
 		left join lateral (select identifier.identifier from mod_identifiers identifier where identifier.mod_id=mod.id
 			order by identifier.is_primary desc,identifier.display_order,identifier.id limit 1) primary_identifier on true

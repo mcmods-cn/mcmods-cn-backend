@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	maxModContentCategories = 1000
-	maxModContentResources  = 20000
+	maxModContentCategories    = 1000
+	maxModContentResources     = 20000
+	maxModContentCategoryDepth = 4
 )
 
 var modContentPublicIDPattern = regexp.MustCompile(`^[a-z0-9]{9}$`)
@@ -59,6 +60,24 @@ type modContentLayoutResourceIdentity struct {
 	CanonicalID                 string
 	BlockRepresentativeID       int64
 	BlockRepresentativePublicID string
+}
+
+type modContentCategoryTreeError struct {
+	CategoryID string
+	ParentID   string
+	Reason     string
+}
+
+func (err *modContentCategoryTreeError) Error() string {
+	return "invalid content category tree: " + err.Reason
+}
+
+type modContentCategoryTreeErrorDetails struct {
+	Field        string `json:"field"`
+	CategoryID   string `json:"categoryId"`
+	ParentID     string `json:"parentId"`
+	Reason       string `json:"reason"`
+	MaximumDepth int    `json:"maximumDepth"`
 }
 
 type modContentQueryRower interface {
@@ -135,25 +154,25 @@ func (s *Server) modContentSectionLayout(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	rootPublicID := strings.ToLower(strings.TrimSpace(r.PathValue("sectionId")))
-	var edit modContentLayoutEdit
-	if decodeJSON(r, &edit) != nil {
+	var patch modContentLayoutPatch
+	if decodeJSON(r, &patch) != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid content layout")
 		return
 	}
-	if edit.RootSectionPublicID == "" {
-		edit.RootSectionPublicID = rootPublicID
+	if patch.RootSectionPublicID == "" {
+		patch.RootSectionPublicID = rootPublicID
 	}
-	if edit.RootSectionPublicID != rootPublicID || normalizeModContentLayoutEdit(&edit) != nil {
+	if patch.RootSectionPublicID != rootPublicID || normalizeModContentLayoutPatch(&patch) != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid content layout")
 		return
 	}
-	var versionID int64
-	var versionPublicID string
+	var rootSectionID, versionID int64
+	var versionPublicID, displayMode string
 	var publishedRevisionID *int64
-	err := s.db.QueryRow(r.Context(), `select section.version_id,version.public_id,section.published_revision_id
+	err := s.db.QueryRow(r.Context(), `select section.id,section.version_id,version.public_id,section.display_mode,section.published_revision_id
 		from mod_content_sections section join mod_content_versions version on version.id=section.version_id and version.status='active'
 		where section.public_id=$1 and section.mod_id=$2 and section.parent_id is null and section.status='active'`,
-		rootPublicID, identity.ID).Scan(&versionID, &versionPublicID, &publishedRevisionID)
+		rootPublicID, identity.ID).Scan(&rootSectionID, &versionID, &versionPublicID, &displayMode, &publishedRevisionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "root content section not found")
 		return
@@ -162,19 +181,45 @@ func (s *Server) modContentSectionLayout(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to read content layout")
 		return
 	}
-	requestedBaseRevisionID, baseErr := resolveRevisionPublicID(r.Context(), s.db, edit.BaseRevisionID)
-	if baseErr != nil || edit.VersionPublicID != versionPublicID || !sameRevision(requestedBaseRevisionID, publishedRevisionID) {
+	requestedBaseRevisionID, baseErr := resolveRevisionPublicID(r.Context(), s.db, patch.BaseRevisionID)
+	if baseErr != nil || patch.VersionPublicID != versionPublicID || !sameRevision(requestedBaseRevisionID, publishedRevisionID) {
 		writeError(w, http.StatusConflict, "content layout changed; reload the editor")
 		return
 	}
+	edit, err := loadCurrentModContentLayout(r.Context(), s.db, identity.ID, rootSectionID, versionID,
+		rootPublicID, versionPublicID, displayMode)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read current content layout")
+		return
+	}
+	if err = applyModContentLayoutPatch(&edit, patch); err != nil || normalizeModContentLayoutEdit(&edit) != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid content layout")
+		return
+	}
 	if err = s.prepareModContentLayout(r.Context(), identity.ID, versionID, &edit); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "invalid content category tree or resource assignment")
+		writeModContentLayoutPreparationError(w, err)
 		return
 	}
 	s.submitExistingModContentMutation(w, r, identity, modContentSnapshot{
 		Kind: "layout", Operation: "edit", ModID: identity.ID, ModSiteID: identity.SiteID,
 		PublicID: rootPublicID, Layout: &edit,
 	}, publishedRevisionID)
+}
+
+func writeModContentLayoutPreparationError(w http.ResponseWriter, err error) {
+	var categoryTreeErr *modContentCategoryTreeError
+	if errors.As(err, &categoryTreeErr) {
+		writeAPIError(w, http.StatusUnprocessableEntity, "content_layout_category_tree_invalid", "invalid content category tree", 0,
+			modContentCategoryTreeErrorDetails{
+				Field:        "categories.parentPublicId",
+				CategoryID:   categoryTreeErr.CategoryID,
+				ParentID:     categoryTreeErr.ParentID,
+				Reason:       categoryTreeErr.Reason,
+				MaximumDepth: maxModContentCategoryDepth,
+			})
+		return
+	}
+	writeError(w, http.StatusUnprocessableEntity, "invalid content category tree or resource assignment")
 }
 
 func (s *Server) prepareModContentLayout(ctx context.Context, modID, versionID int64, edit *modContentLayoutEdit) error {
@@ -228,8 +273,11 @@ func (s *Server) prepareModContentLayout(ctx context.Context, modID, versionID i
 		return err
 	}
 	groupRows.Close()
+	if err = validateModContentCategoryTree(edit.RootSectionPublicID, edit.Categories); err != nil {
+		return err
+	}
 
-	replacements := make(map[string]string)
+	temporaryCategoryIDs := make([]string, 0)
 	for index := range edit.Categories {
 		publicID := edit.Categories[index].PublicID
 		if modContentPublicIDPattern.MatchString(publicID) {
@@ -238,80 +286,34 @@ func (s *Server) prepareModContentLayout(ctx context.Context, modID, versionID i
 			}
 			continue
 		}
-		var generated string
-		if err = s.db.QueryRow(ctx, `select new_public_id()`).Scan(&generated); err != nil {
-			return err
-		}
-		replacements[publicID] = generated
-		edit.Categories[index].PublicID = generated
+		temporaryCategoryIDs = append(temporaryCategoryIDs, publicID)
 	}
-	for index := range edit.Categories {
-		if replacement, ok := replacements[edit.Categories[index].ParentPublicID]; ok {
-			edit.Categories[index].ParentPublicID = replacement
-		}
-	}
-	for index := range edit.Resources {
-		if replacement, ok := replacements[edit.Resources[index].SectionPublicID]; ok {
-			edit.Resources[index].SectionPublicID = replacement
-		}
-	}
-	groupReplacements := make(map[string]string)
-	for index := range edit.Resources {
-		groupID := edit.Resources[index].SimilarGroupID
+	temporaryGroupIDs := make([]string, 0)
+	temporaryGroups := make(map[string]struct{})
+	for _, resource := range edit.Resources {
+		groupID := resource.SimilarGroupID
 		if groupID == "" {
 			continue
 		}
 		if _, exists := existingSimilarGroups[groupID]; exists {
 			continue
 		}
-		replacement, exists := groupReplacements[groupID]
-		if !exists {
-			if err = s.db.QueryRow(ctx, `select new_public_id()`).Scan(&replacement); err != nil {
-				return err
-			}
-			groupReplacements[groupID] = replacement
+		if _, exists := temporaryGroups[groupID]; !exists {
+			temporaryGroups[groupID] = struct{}{}
+			temporaryGroupIDs = append(temporaryGroupIDs, groupID)
 		}
-		edit.Resources[index].SimilarGroupID = replacement
+	}
+	generatedIDs, err := generateModContentPublicIDs(ctx, s.db, len(temporaryCategoryIDs)+len(temporaryGroupIDs))
+	if err != nil {
+		return err
+	}
+	if err = applyModContentLayoutGeneratedIDs(edit, temporaryCategoryIDs, temporaryGroupIDs, generatedIDs); err != nil {
+		return err
 	}
 
 	categoryByID := make(map[string]*modContentLayoutCategoryEdit, len(edit.Categories))
 	for index := range edit.Categories {
-		category := &edit.Categories[index]
-		if category.PublicID == edit.RootSectionPublicID {
-			return errCatalogEditorInvalid
-		}
-		categoryByID[category.PublicID] = category
-	}
-	depthCache := make(map[string]int, len(categoryByID))
-	visiting := make(map[string]bool, len(categoryByID))
-	var categoryDepth func(string) (int, error)
-	categoryDepth = func(publicID string) (int, error) {
-		if publicID == edit.RootSectionPublicID {
-			return 0, nil
-		}
-		if depth, ok := depthCache[publicID]; ok {
-			return depth, nil
-		}
-		if visiting[publicID] {
-			return 0, errCatalogEditorInvalid
-		}
-		category := categoryByID[publicID]
-		if category == nil {
-			return 0, errCatalogEditorInvalid
-		}
-		visiting[publicID] = true
-		parentDepth, err := categoryDepth(category.ParentPublicID)
-		delete(visiting, publicID)
-		if err != nil || parentDepth >= 4 {
-			return 0, errCatalogEditorInvalid
-		}
-		depthCache[publicID] = parentDepth + 1
-		return parentDepth + 1, nil
-	}
-	for publicID := range categoryByID {
-		if _, err = categoryDepth(publicID); err != nil {
-			return err
-		}
+		categoryByID[edit.Categories[index].PublicID] = &edit.Categories[index]
 	}
 
 	sort.SliceStable(edit.Categories, func(i, j int) bool {
@@ -432,6 +434,153 @@ func (s *Server) prepareModContentLayout(ctx context.Context, modID, versionID i
 		sectionID := edit.Resources[index].SectionPublicID
 		edit.Resources[index].Ordinal = nextResourceOrdinal[sectionID]
 		nextResourceOrdinal[sectionID]++
+	}
+	return nil
+}
+
+func generateModContentPublicIDs(ctx context.Context, db modContentQuerier, count int) ([]string, error) {
+	if count == 0 {
+		return []string{}, nil
+	}
+	var schemaName string
+	if err := db.QueryRow(ctx, `select current_schema()`).Scan(&schemaName); err != nil {
+		return nil, err
+	}
+	query := `select ` + pgx.Identifier{schemaName}.Sanitize() + `.new_public_id() from generate_series(1,$1)`
+	rows, err := db.Query(ctx, query, count)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]string, 0, count)
+	for rows.Next() {
+		var publicID string
+		if err = rows.Scan(&publicID); err != nil {
+			return nil, err
+		}
+		result = append(result, publicID)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(result) != count {
+		return nil, errCatalogEditorInvalid
+	}
+	return result, nil
+}
+
+func applyModContentLayoutGeneratedIDs(
+	edit *modContentLayoutEdit,
+	temporaryCategoryIDs, temporaryGroupIDs, generatedIDs []string,
+) error {
+	if len(generatedIDs) != len(temporaryCategoryIDs)+len(temporaryGroupIDs) {
+		return errCatalogEditorInvalid
+	}
+	replacements := make(map[string]string, len(temporaryCategoryIDs))
+	for index, temporaryID := range temporaryCategoryIDs {
+		replacements[temporaryID] = generatedIDs[index]
+	}
+	for index := range edit.Categories {
+		if replacement, ok := replacements[edit.Categories[index].PublicID]; ok {
+			edit.Categories[index].PublicID = replacement
+		}
+		if replacement, ok := replacements[edit.Categories[index].ParentPublicID]; ok {
+			edit.Categories[index].ParentPublicID = replacement
+		}
+	}
+	groupReplacements := make(map[string]string, len(temporaryGroupIDs))
+	for index, temporaryID := range temporaryGroupIDs {
+		groupReplacements[temporaryID] = generatedIDs[len(temporaryCategoryIDs)+index]
+	}
+	for index := range edit.Resources {
+		if replacement, ok := replacements[edit.Resources[index].SectionPublicID]; ok {
+			edit.Resources[index].SectionPublicID = replacement
+		}
+		if replacement, ok := groupReplacements[edit.Resources[index].SimilarGroupID]; ok {
+			edit.Resources[index].SimilarGroupID = replacement
+		}
+	}
+	return nil
+}
+
+func reserveModContentSectionIDs(ctx context.Context, db modContentQuerier, count int) ([]int64, error) {
+	if count == 0 {
+		return []int64{}, nil
+	}
+	rows, err := db.Query(ctx, `select nextval(pg_get_serial_sequence('mod_content_sections','id'))::bigint
+		from generate_series(1,$1)`, count)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]int64, 0, count)
+	for rows.Next() {
+		var id int64
+		if err = rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result = append(result, id)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(result) != count {
+		return nil, errCatalogEditorInvalid
+	}
+	return result, nil
+}
+
+func validateModContentCategoryTree(rootPublicID string, categories []modContentLayoutCategoryEdit) error {
+	categoryByID := make(map[string]*modContentLayoutCategoryEdit, len(categories))
+	for index := range categories {
+		category := &categories[index]
+		if category.PublicID == rootPublicID {
+			return &modContentCategoryTreeError{CategoryID: category.PublicID, ParentID: category.ParentPublicID, Reason: "root_id_conflict"}
+		}
+		if _, duplicate := categoryByID[category.PublicID]; duplicate {
+			return &modContentCategoryTreeError{CategoryID: category.PublicID, ParentID: category.ParentPublicID, Reason: "duplicate_category"}
+		}
+		categoryByID[category.PublicID] = category
+	}
+	for _, category := range categories {
+		if category.ParentPublicID != rootPublicID && categoryByID[category.ParentPublicID] == nil {
+			return &modContentCategoryTreeError{CategoryID: category.PublicID, ParentID: category.ParentPublicID, Reason: "parent_not_found"}
+		}
+	}
+
+	depthCache := make(map[string]int, len(categoryByID))
+	visiting := make(map[string]bool, len(categoryByID))
+	var categoryDepth func(string) (int, error)
+	categoryDepth = func(publicID string) (int, error) {
+		if publicID == rootPublicID {
+			return 0, nil
+		}
+		if depth, ok := depthCache[publicID]; ok {
+			return depth, nil
+		}
+		category := categoryByID[publicID]
+		if category == nil {
+			return 0, errCatalogEditorInvalid
+		}
+		if visiting[publicID] {
+			return 0, &modContentCategoryTreeError{CategoryID: category.PublicID, ParentID: category.ParentPublicID, Reason: "cycle"}
+		}
+		visiting[publicID] = true
+		parentDepth, err := categoryDepth(category.ParentPublicID)
+		delete(visiting, publicID)
+		if err != nil {
+			return 0, err
+		}
+		if parentDepth >= maxModContentCategoryDepth {
+			return 0, &modContentCategoryTreeError{CategoryID: category.PublicID, ParentID: category.ParentPublicID, Reason: "maximum_depth_exceeded"}
+		}
+		depthCache[publicID] = parentDepth + 1
+		return parentDepth + 1, nil
+	}
+	for _, category := range categories {
+		if _, err := categoryDepth(category.PublicID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -594,19 +743,22 @@ func publishModContentLayoutTx(ctx context.Context, tx pgx.Tx, revisionID int64,
 			select id,public_id from mod_content_sections where id=$1
 			union all select child.id,child.public_id from mod_content_sections child join subtree parent on child.parent_id=parent.id
 		)
-		select id,public_id from subtree where id<>$1`, rootID)
+		select section.id,section.public_id,section.system_key
+		from subtree join mod_content_sections section on section.id=subtree.id where section.id<>$1`, rootID)
 	if err != nil {
 		return err
 	}
 	existingIDs := make(map[string]int64)
+	existingSystemKeys := make(map[int64]string)
 	for existingRows.Next() {
 		var id int64
-		var publicID string
-		if err = existingRows.Scan(&id, &publicID); err != nil {
+		var publicID, systemKey string
+		if err = existingRows.Scan(&id, &publicID, &systemKey); err != nil {
 			existingRows.Close()
 			return err
 		}
 		existingIDs[publicID] = id
+		existingSystemKeys[id] = systemKey
 	}
 	if err = existingRows.Err(); err != nil {
 		existingRows.Close()
@@ -619,8 +771,17 @@ func publishModContentLayoutTx(ctx context.Context, tx pgx.Tx, revisionID int64,
 		), ranked as (
 			select id,row_number() over(order by id) position from subtree where id<>$1
 		)
-		update mod_content_sections section set ordinal=1000000000+ranked.position::int
+		update mod_content_sections section set ordinal=1000000000+ranked.position::int,
+			system_key='__layout_staging_'||section.id::text
 		from ranked where section.id=ranked.id`, rootID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `with recursive subtree as (
+			select id from mod_content_sections where id=$1
+			union all select child.id from mod_content_sections child join subtree parent on child.parent_id=parent.id
+		)
+		update mod_content_sections section set parent_id=$1
+		from subtree where subtree.id<>$1 and section.id=subtree.id`, rootID); err != nil {
 		return err
 	}
 
@@ -649,51 +810,113 @@ func publishModContentLayoutTx(ctx context.Context, tx pgx.Tx, revisionID int64,
 		}
 		return categories[i].Ordinal < categories[j].Ordinal
 	})
+	newCategoryCount := 0
+	for _, category := range categories {
+		if _, exists := existingIDs[category.PublicID]; !exists {
+			newCategoryCount++
+		}
+	}
+	reservedCategoryIDs, err := reserveModContentSectionIDs(ctx, tx, newCategoryCount)
+	if err != nil {
+		return err
+	}
 	sectionIDs := map[string]int64{layout.RootSectionPublicID: rootID}
 	activeCategoryIDs := make(map[string]struct{}, len(categories))
+	categoryIDs := make([]int64, 0, len(categories))
+	categoryPublicIDs := make([]string, 0, len(categories))
+	categoryParentIDs := make([]int64, 0, len(categories))
+	categoryDefaultLocales := make([]string, 0, len(categories))
+	categoryOrdinals := make([]int64, 0, len(categories))
+	localizationSectionIDs := make([]int64, 0)
+	localizationLocales := make([]string, 0)
+	localizationNames := make([]string, 0)
+	localizationDescriptions := make([]string, 0)
+	reservedIndex := 0
 	for _, category := range categories {
 		parentID, ok := sectionIDs[category.ParentPublicID]
 		if !ok {
 			return errCatalogEditorInvalid
 		}
 		categoryID, exists := existingIDs[category.PublicID]
-		if exists {
-			err = tx.QueryRow(ctx, `update mod_content_sections set parent_id=$2,default_locale=$3,display_mode=$4,ordinal=$5,
-				status='active',published_revision_id=$6,updated_by=$7,updated_at=now()
-				where id=$1 and mod_id=$8 and version_id=$9 returning id`,
-				categoryID, parentID, category.DefaultLocale, displayMode, category.Ordinal, revisionID, actorID, snapshot.ModID, versionID).Scan(&categoryID)
-		} else {
-			err = tx.QueryRow(ctx, `insert into mod_content_sections(public_id,mod_id,version_id,template_id,parent_id,default_locale,display_mode,
-				ordinal,status,published_revision_id,created_by,updated_by)
-				values($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$10) returning id`,
-				category.PublicID, snapshot.ModID, versionID, templateID, parentID, category.DefaultLocale, displayMode,
-				category.Ordinal, revisionID, actorID).Scan(&categoryID)
+		if !exists {
+			categoryID = reservedCategoryIDs[reservedIndex]
+			reservedIndex++
 		}
-		if err != nil {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `delete from mod_content_section_localizations where section_id=$1`, categoryID); err != nil {
-			return err
-		}
+		categoryIDs = append(categoryIDs, categoryID)
+		categoryPublicIDs = append(categoryPublicIDs, category.PublicID)
+		categoryParentIDs = append(categoryParentIDs, parentID)
+		categoryDefaultLocales = append(categoryDefaultLocales, category.DefaultLocale)
+		categoryOrdinals = append(categoryOrdinals, int64(category.Ordinal))
 		for _, localization := range category.Localizations {
-			if _, err = tx.Exec(ctx, `insert into mod_content_section_localizations(section_id,locale,name,description)
-				values($1,$2,$3,$4)`, categoryID, localization.Locale, localization.Name, localization.Summary); err != nil {
-				return err
-			}
+			localizationSectionIDs = append(localizationSectionIDs, categoryID)
+			localizationLocales = append(localizationLocales, localization.Locale)
+			localizationNames = append(localizationNames, localization.Name)
+			localizationDescriptions = append(localizationDescriptions, localization.Summary)
 		}
 		sectionIDs[category.PublicID] = categoryID
 		activeCategoryIDs[category.PublicID] = struct{}{}
+	}
+	if len(categoryIDs) > 0 {
+		result, upsertErr := tx.Exec(ctx, `insert into mod_content_sections(
+			id,public_id,mod_id,version_id,template_id,parent_id,default_locale,display_mode,ordinal,
+			status,published_revision_id,created_by,updated_by
+		)
+		select input.id,input.public_id,$6,$7,$8,input.parent_id,input.default_locale,$9,input.desired_ordinal::integer,
+			'active',$10,$11,$11
+		from unnest($1::bigint[],$2::text[],$3::bigint[],$4::text[],$5::bigint[])
+			with ordinality as input(id,public_id,parent_id,default_locale,desired_ordinal,input_order)
+		order by input.input_order
+		on conflict(public_id) do update set
+			parent_id=excluded.parent_id,default_locale=excluded.default_locale,display_mode=excluded.display_mode,
+			ordinal=excluded.ordinal,status='active',published_revision_id=excluded.published_revision_id,
+			updated_by=excluded.updated_by,updated_at=now()
+		where mod_content_sections.id=excluded.id and mod_content_sections.mod_id=$6 and mod_content_sections.version_id=$7`,
+			categoryIDs, categoryPublicIDs, categoryParentIDs, categoryDefaultLocales, categoryOrdinals,
+			snapshot.ModID, versionID, templateID, displayMode, revisionID, actorID)
+		if upsertErr != nil {
+			return upsertErr
+		}
+		if result.RowsAffected() != int64(len(categoryIDs)) {
+			return errCatalogEditorInvalid
+		}
+		if _, err = tx.Exec(ctx, `delete from mod_content_section_localizations where section_id=any($1::bigint[])`, categoryIDs); err != nil {
+			return err
+		}
+		if len(localizationSectionIDs) > 0 {
+			if _, err = tx.Exec(ctx, `insert into mod_content_section_localizations(section_id,locale,name,description)
+				select * from unnest($1::bigint[],$2::text[],$3::text[],$4::text[])`,
+				localizationSectionIDs, localizationLocales, localizationNames, localizationDescriptions); err != nil {
+				return err
+			}
+		}
 	}
 
 	if err = publishModContentLayoutResourcesTx(ctx, tx, snapshot.ModID, versionID, rootID, revisionID, actorID, sectionIDs, layout.Resources); err != nil {
 		return err
 	}
+	archiveCategoryIDs := make([]int64, 0)
 	for publicID, categoryID := range existingIDs {
 		if _, keep := activeCategoryIDs[publicID]; keep {
 			continue
 		}
+		archiveCategoryIDs = append(archiveCategoryIDs, categoryID)
+	}
+	if len(archiveCategoryIDs) > 0 {
 		if _, err = tx.Exec(ctx, `update mod_content_sections set status='archived',published_revision_id=$2,
-			updated_by=$3,updated_at=now() where id=$1`, categoryID, revisionID, actorID); err != nil {
+			updated_by=$3,updated_at=now() where id=any($1::bigint[])`, archiveCategoryIDs, revisionID, actorID); err != nil {
+			return err
+		}
+	}
+	existingSystemKeyIDs := make([]int64, 0, len(existingSystemKeys))
+	existingSystemKeyValues := make([]string, 0, len(existingSystemKeys))
+	for categoryID, systemKey := range existingSystemKeys {
+		existingSystemKeyIDs = append(existingSystemKeyIDs, categoryID)
+		existingSystemKeyValues = append(existingSystemKeyValues, systemKey)
+	}
+	if len(existingSystemKeyIDs) > 0 {
+		if _, err = tx.Exec(ctx, `update mod_content_sections section set system_key=input.system_key
+			from unnest($1::bigint[],$2::text[]) as input(id,system_key) where section.id=input.id`,
+			existingSystemKeyIDs, existingSystemKeyValues); err != nil {
 			return err
 		}
 	}

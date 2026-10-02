@@ -160,42 +160,79 @@ func autoUpdateNextRun(interval string, now time.Time) *time.Time {
 }
 
 func (s *Server) writeProjectAutomation(w http.ResponseWriter, r *http.Request, target projectAutomationTarget) {
-	// Defaults are inserted in one short transaction so GET remains idempotent.
-	tx, err := s.db.Begin(r.Context())
+	sources, err := s.querySimpleRows(r, `select source_type,external_project_id,external_project_url,verified_at from project_external_sources where project_route_id=$1 order by source_type`, target.RouteID)
 	if err != nil {
-		writeError(w, 500, "读取自动更新配置失败")
+		writeError(w, http.StatusInternalServerError, "读取自动更新来源失败")
 		return
 	}
-	for _, item := range []struct{ kind, interval string }{{"minecraft_versions", "quarter"}, {"changelog", "never"}, {"site_downloads", "never"}} {
-		var sourceType *string
-		sourceErr := tx.QueryRow(r.Context(), `select source_type from project_external_sources where project_route_id=$1
-			and ($2<>'minecraft_versions' or source_type in ('modrinth','curseforge'))
-			order by case source_type when 'modrinth' then 0 when 'curseforge' then 1 else 2 end limit 1`, target.RouteID, item.kind).Scan(&sourceType)
-		if sourceErr != nil && !errors.Is(sourceErr, pgx.ErrNoRows) {
-			err = sourceErr
-			break
-		}
-		enabled := item.kind == "minecraft_versions" && sourceType != nil
-		_, err = tx.Exec(r.Context(), `insert into project_auto_update_settings(project_route_id,update_kind,source_type,interval_code,enabled,configured_by)
-			values($1,$2,$3,$4,$5,$6) on conflict(project_route_id,update_kind) do nothing`, target.RouteID, item.kind, sourceType,
-			item.interval, enabled, currentClaims(r).Subject)
-		if err != nil {
-			break
-		}
-	}
-	if err == nil {
-		err = tx.Commit(r.Context())
-	} else {
-		_ = tx.Rollback(r.Context())
-	}
-	if err != nil {
-		writeError(w, 500, "初始化自动更新配置失败")
-		return
-	}
-	sources := s.querySimpleRows(r, `select source_type,external_project_id,external_project_url,verified_at from project_external_sources where project_route_id=$1 order by source_type`, target.RouteID)
-	settings := s.querySimpleRows(r, `select update_kind,coalesce(source_type,''),interval_code,enabled,next_run_at,last_run_at,last_status,last_error_code,last_error,
+	sources = renameProjectAutomationFields(sources, map[string]string{
+		"source_type": "sourceType", "external_project_id": "externalProjectId",
+		"external_project_url": "externalProjectUrl", "verified_at": "verifiedAt",
+	})
+	settings, err := s.querySimpleRows(r, `select update_kind,coalesce(source_type,'') as source_type,interval_code,enabled,next_run_at,last_run_at,last_status,last_error_code,last_error,
 		license_override,license_override_reason,license_override_source,updated_at from project_auto_update_settings where project_route_id=$1 order by update_kind`, target.RouteID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取自动更新配置失败")
+		return
+	}
+	settings = renameProjectAutomationFields(settings, map[string]string{
+		"update_kind": "updateKind", "source_type": "sourceType", "interval_code": "interval",
+		"next_run_at": "nextRunAt", "last_run_at": "lastRunAt", "last_status": "lastStatus",
+		"last_error_code": "lastErrorCode", "last_error": "lastError", "license_override": "licenseOverride",
+		"license_override_reason": "licenseOverrideReason", "license_override_source": "licenseOverrideSource",
+		"updated_at": "updatedAt",
+	})
+	settings = completeProjectAutomationSettings(settings, sources)
 	writeJSON(w, 200, map[string]any{"project": map[string]any{"id": target.PublicID, "type": target.ProjectType, "url": target.CanonicalURL}, "sources": sources, "settings": settings})
+}
+
+func renameProjectAutomationFields(rows []map[string]any, names map[string]string) []map[string]any {
+	for _, row := range rows {
+		for current, canonical := range names {
+			if value, exists := row[current]; exists {
+				row[canonical] = value
+				delete(row, current)
+			}
+		}
+	}
+	return rows
+}
+
+func completeProjectAutomationSettings(settings, sources []map[string]any) []map[string]any {
+	byKind := make(map[string]map[string]any, len(settings))
+	for _, setting := range settings {
+		if kind, ok := setting["updateKind"].(string); ok && autoUpdateKinds[kind] {
+			byKind[kind] = setting
+		}
+	}
+	availableSources := make(map[string]bool, len(sources))
+	for _, source := range sources {
+		if sourceType, ok := source["sourceType"].(string); ok {
+			availableSources[sourceType] = true
+		}
+	}
+	result := make([]map[string]any, 0, 3)
+	for _, specification := range []struct{ kind, interval string }{
+		{"minecraft_versions", "quarter"}, {"changelog", "never"}, {"site_downloads", "never"},
+	} {
+		if setting := byKind[specification.kind]; setting != nil {
+			result = append(result, setting)
+			continue
+		}
+		sourceType := ""
+		for _, candidate := range []string{"modrinth", "curseforge", "github"} {
+			if availableSources[candidate] && (specification.kind != "minecraft_versions" || candidate != "github") {
+				sourceType = candidate
+				break
+			}
+		}
+		result = append(result, map[string]any{
+			"updateKind": specification.kind, "sourceType": sourceType, "interval": specification.interval,
+			"enabled": false, "nextRunAt": nil, "lastRunAt": nil, "lastStatus": "never", "lastErrorCode": "", "lastError": "",
+			"licenseOverride": false, "licenseOverrideReason": "", "licenseOverrideSource": "", "updatedAt": nil,
+		})
+	}
+	return result
 }
 
 func projectAutomationLicenseArgs(target projectAutomationTarget) []any {
@@ -269,7 +306,7 @@ func (s *Server) verifyProjectExternalSource(ctx context.Context, projectType, s
 	}
 	if provider == "modrinth" {
 		var project modrinthProject
-		headers := providerHeaders(cfg.UserAgent, cfg.Modrinth.Token, "")
+		headers := providerCredentialHeaders(cfg.UserAgent, "modrinth", cfg.Modrinth.BaseURL, bearerAuthorization(cfg.Modrinth.Token), "")
 		if err = getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(reference), headers, &project); err != nil {
 			return "", "", errors.New("无法验证 Modrinth 项目")
 		}
@@ -277,13 +314,13 @@ func (s *Server) verifyProjectExternalSource(ctx context.Context, projectType, s
 	}
 	if provider == "github" {
 		var repository map[string]any
-		headers := providerHeaders(cfg.UserAgent, cfg.GitHub.Token, "")
+		headers := providerCredentialHeaders(cfg.UserAgent, "github", cfg.GitHub.BaseURL, bearerAuthorization(cfg.GitHub.Token), "")
 		if err = getProviderJSON(ctx, client, cfg.GitHub.BaseURL+"/repos/"+reference, headers, &repository); err != nil {
 			return "", "", errors.New("无法验证 GitHub 仓库")
 		}
 		return reference, canonicalURL, nil
 	}
-	headers := providerHeaders(cfg.UserAgent, "", cfg.CurseForge.APIKey)
+	headers := providerCredentialHeaders(cfg.UserAgent, "curseforge", cfg.CurseForge.BaseURL, "", cfg.CurseForge.APIKey)
 	numericID, err := resolveCurseForgeProjectID(ctx, client, reference, cfg, headers)
 	if err != nil {
 		return "", "", errors.New("无法验证 CurseForge 项目")
@@ -329,30 +366,57 @@ func (s *Server) projectAutomationRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 403, "无权查看自动更新记录")
 		return
 	}
-	items := s.querySimpleRows(r, `select run.public_id,setting.update_kind,run.status,run.attempts,run.result,run.last_error_code,run.last_error,
+	items, err := s.querySimpleRows(r, `select run.public_id,setting.update_kind,run.status,run.attempts,run.result,run.last_error_code,run.last_error,
 		run.created_at,run.started_at,run.finished_at from project_auto_update_runs run join project_auto_update_settings setting on setting.id=run.setting_id
 		where setting.project_route_id=$1 order by run.created_at desc,run.id desc limit 100`, target.RouteID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取自动更新记录失败")
+		return
+	}
+	items = renameProjectAutomationFields(items, map[string]string{
+		"public_id": "id", "update_kind": "updateKind", "last_error_code": "lastErrorCode",
+		"last_error": "lastError", "created_at": "createdAt", "started_at": "startedAt", "finished_at": "finishedAt",
+	})
 	writeJSON(w, 200, map[string]any{"items": items})
 }
 
 func (s *Server) adminProjectAutomationOverview(w http.ResponseWriter, r *http.Request) {
 	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
-	if status != "" && !stringSet("pending", "running", "completed", "failed", "dead_letter")[status] {
+	if status != "" && !stringSet("pending", "running", "completed", "dead_letter")[status] {
 		writeError(w, http.StatusBadRequest, "自动更新任务状态不正确")
 		return
 	}
 	limit := boundedLimit(r.URL.Query().Get("limit"), 100, 200)
-	items := s.querySimpleRows(r, `select run.public_id,route.entity_type as project_type,route.public_id as project_id,route.canonical_path,
+	items, err := s.querySimpleRows(r, `select run.public_id,route.entity_type as project_type,route.public_id as project_id,route.canonical_path,
 		setting.update_kind,setting.source_type,run.status,run.attempts,run.result,run.last_error_code,run.last_error,
 		run.created_at,run.started_at,run.finished_at
 		from project_auto_update_runs run
 		join project_auto_update_settings setting on setting.id=run.setting_id
 		join public_routes route on route.id=setting.project_route_id
 		where ($1='' or run.status=$1) order by run.created_at desc,run.id desc limit $2`, status, limit)
-	settings := s.querySimpleRows(r, `select route.entity_type as project_type,route.public_id as project_id,route.canonical_path,
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取自动更新任务失败")
+		return
+	}
+	items = renameProjectAutomationFields(items, map[string]string{
+		"public_id": "id", "project_type": "projectType", "project_id": "projectId", "canonical_path": "canonicalPath",
+		"update_kind": "updateKind", "source_type": "sourceType", "last_error_code": "lastErrorCode",
+		"last_error": "lastError", "created_at": "createdAt", "started_at": "startedAt", "finished_at": "finishedAt",
+	})
+	settings, err := s.querySimpleRows(r, `select route.entity_type as project_type,route.public_id as project_id,route.canonical_path,
 		setting.update_kind,setting.source_type,setting.interval_code,setting.enabled,setting.next_run_at,setting.last_run_at,
 		setting.last_status,setting.last_error_code,setting.last_error,setting.updated_at
 		from project_auto_update_settings setting join public_routes route on route.id=setting.project_route_id
 		order by setting.updated_at desc,setting.id desc limit 200`)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取自动更新配置失败")
+		return
+	}
+	settings = renameProjectAutomationFields(settings, map[string]string{
+		"project_type": "projectType", "project_id": "projectId", "canonical_path": "canonicalPath",
+		"update_kind": "updateKind", "source_type": "sourceType", "interval_code": "interval",
+		"next_run_at": "nextRunAt", "last_run_at": "lastRunAt", "last_status": "lastStatus",
+		"last_error_code": "lastErrorCode", "last_error": "lastError", "updated_at": "updatedAt",
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"runs": items, "settings": settings})
 }

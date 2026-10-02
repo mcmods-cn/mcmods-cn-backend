@@ -10,12 +10,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
@@ -25,18 +29,59 @@ import (
 const settingsKey = "anti_abuse.config"
 
 const (
-	accountCacheKeyPrefix = "anti-abuse:account:"
-	botRulesCacheKey      = "anti-abuse:bot-rules"
-	settingsCacheKey      = "anti-abuse:settings"
+	accountCacheKeyPrefix            = "anti-abuse:account:"
+	botRulesCacheKey                 = "anti-abuse:bot-rules"
+	settingsCacheKey                 = "anti-abuse:settings"
+	successQueueCapacity             = 1024
+	successWorkerCount               = 2
+	maximumQueuedSuccessContentBytes = 20_000
+	asyncRecordTimeout               = 2 * time.Second
+	asyncShutdownDrainTimeout        = 3 * time.Second
 )
 
 type Service struct {
-	cfg      config.AntiAbuseConfig
-	db       *pgxpool.Pool
-	cache    *querycache.Cache
-	resolver DNSResolver
-	now      func() time.Time
-	events   chan queuedRiskEvent
+	cfg               config.AntiAbuseConfig
+	db                *pgxpool.Pool
+	cache             *querycache.Cache
+	resolver          DNSResolver
+	now               func() time.Time
+	events            chan queuedRiskEvent
+	successes         chan queuedSuccessRecord
+	workerCtx         context.Context
+	cancelWorkers     context.CancelFunc
+	workerGroup       sync.WaitGroup
+	closeOnce         sync.Once
+	stopping          atomic.Bool
+	successQueued     atomic.Uint64
+	successProcessed  atomic.Uint64
+	successDropped    atomic.Uint64
+	successFailed     atomic.Uint64
+	riskDropped       atomic.Uint64
+	riskEventFailed   atomic.Uint64
+	riskDailyFailed   atomic.Uint64
+	restrictionFailed atomic.Uint64
+	botRuleLoadFailed atomic.Uint64
+}
+
+type queuedSuccessRecord struct {
+	input    Evaluation
+	decision Decision
+}
+
+type AsyncRecorderMetrics struct {
+	SuccessQueued        uint64 `json:"successQueued"`
+	SuccessProcessed     uint64 `json:"successProcessed"`
+	SuccessDropped       uint64 `json:"successDropped"`
+	SuccessFailed        uint64 `json:"successFailed"`
+	SuccessQueueDepth    int    `json:"successQueueDepth"`
+	SuccessQueueCapacity int    `json:"successQueueCapacity"`
+	RiskDropped          uint64 `json:"riskDropped"`
+	RiskEventFailed      uint64 `json:"riskEventFailed"`
+	RiskDailyFailed      uint64 `json:"riskDailyFailed"`
+	RestrictionFailed    uint64 `json:"restrictionFailed"`
+	BotRuleLoadFailed    uint64 `json:"botRuleLoadFailed"`
+	RiskQueueDepth       int    `json:"riskQueueDepth"`
+	RiskQueueCapacity    int    `json:"riskQueueCapacity"`
 }
 
 type queuedRiskEvent struct {
@@ -65,10 +110,22 @@ func (r netResolver) LookupHost(ctx context.Context, value string) ([]string, er
 	return r.value.LookupHost(ctx, value)
 }
 
-func New(cfg config.AntiAbuseConfig, db *pgxpool.Pool, cache *querycache.Cache) *Service {
-	service := &Service{cfg: cfg, db: db, cache: cache, resolver: netResolver{net.DefaultResolver}, now: time.Now, events: make(chan queuedRiskEvent, 2048)}
+func New(ctx context.Context, cfg config.AntiAbuseConfig, db *pgxpool.Pool, cache *querycache.Cache) *Service {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	workerCtx, cancelWorkers := context.WithCancel(ctx)
+	service := &Service{
+		cfg: cfg, db: db, cache: cache, resolver: netResolver{net.DefaultResolver}, now: time.Now,
+		events: make(chan queuedRiskEvent, 2048), successes: make(chan queuedSuccessRecord, successQueueCapacity),
+		workerCtx: workerCtx, cancelWorkers: cancelWorkers,
+	}
 	if cfg.Enabled && db != nil {
-		go service.writeRiskEvents()
+		service.workerGroup.Add(1 + successWorkerCount)
+		go service.writeRiskEvents(workerCtx)
+		for index := 0; index < successWorkerCount; index++ {
+			go service.writeSuccessRecords(workerCtx)
+		}
 	}
 	return service
 }
@@ -76,19 +133,20 @@ func New(cfg config.AntiAbuseConfig, db *pgxpool.Pool, cache *querycache.Cache) 
 func (s *Service) Enabled() bool { return s != nil && s.cfg.Enabled }
 
 type accountProfile struct {
-	CreatedAt              time.Time `json:"createdAt"`
-	EmailVerified          bool      `json:"emailVerified"`
-	Status                 string    `json:"status"`
-	Level                  int       `json:"level"`
-	TrustLevel             string    `json:"trustLevel"`
-	RiskScore              int       `json:"riskScore"`
-	ManuallyTrusted        bool      `json:"manuallyTrusted"`
-	ChallengeRequiredUntil time.Time `json:"challengeRequiredUntil"`
-	ReviewRequiredUntil    time.Time `json:"reviewRequiredUntil"`
-	RestrictedUntil        time.Time `json:"restrictedUntil"`
-	RestrictionMode        string    `json:"restrictionMode"`
-	RestrictionActions     []string  `json:"restrictionActions"`
-	RestrictionEnd         time.Time `json:"restrictionEnd"`
+	CreatedAt                time.Time `json:"createdAt"`
+	EmailVerified            bool      `json:"emailVerified"`
+	Status                   string    `json:"status"`
+	Level                    int       `json:"level"`
+	TrustLevel               string    `json:"trustLevel"`
+	RiskScore                int       `json:"riskScore"`
+	ManuallyTrusted          bool      `json:"manuallyTrusted"`
+	ChallengeRequiredUntil   time.Time `json:"challengeRequiredUntil"`
+	ReviewRequiredUntil      time.Time `json:"reviewRequiredUntil"`
+	RestrictedUntil          time.Time `json:"restrictedUntil"`
+	RestrictionMode          string    `json:"restrictionMode"`
+	RestrictionEnd           time.Time `json:"restrictionEnd"`
+	RestrictionChallengeEnd  time.Time `json:"restrictionChallengeEnd"`
+	RestrictionModerationEnd time.Time `json:"restrictionModerationEnd"`
 }
 
 func (s *Service) Evaluate(ctx context.Context, input Evaluation) (Decision, error) {
@@ -121,7 +179,7 @@ func (s *Service) Evaluate(ctx context.Context, input Evaluation) (Decision, err
 	subnetHash := s.privateHash("subnet", subnetForIP(input.IP))
 	deviceHash := s.privateHash("device", input.DeviceID)
 	sessionHash := s.privateHash("session", input.SessionID)
-	profile, profileErr := s.account(ctx, input.UserID, ipHash, deviceHash)
+	profile, profileErr := s.account(ctx, input.UserID, ipHash, deviceHash, input.Action)
 	if profileErr != nil && !errors.Is(profileErr, pgx.ErrNoRows) {
 		return decision, profileErr
 	}
@@ -133,12 +191,12 @@ func (s *Service) Evaluate(ctx context.Context, input Evaluation) (Decision, err
 	if input.CrawlerClass == VerifiedSearchEngine || input.CrawlerClass == AllowedBot || input.CrawlerClass == MonitoringBot || input.CrawlerClass == BlockedBot {
 		return Decision{Outcome: Deny, Code: "crawler_write_forbidden", Message: "只读机器人不能执行写操作", RiskScore: 100, Rules: []string{"crawler_write_forbidden"}}, nil
 	}
-	if restrictionApplies(profile, input.Action, input.Now) {
+	if restrictionApplies(profile, input.Now) {
 		outcome := TempBlock
 		if profile.RestrictionMode == "permanent_ban" {
 			outcome = Deny
 		}
-		decision = Decision{Outcome: outcome, Code: "action_restricted", Message: "当前账户暂时无法执行该操作", RiskScore: max(profile.RiskScore, 80), Rules: []string{"active_restriction"}, RetryAfter: time.Until(profile.RestrictionEnd)}
+		decision = Decision{Outcome: outcome, Code: "action_restricted", Message: "当前账户暂时无法执行该操作", RiskScore: max(profile.RiskScore, 80), Rules: []string{"active_restriction"}, RetryAfter: profile.RestrictionEnd.Sub(input.Now)}
 		return decision, nil
 	}
 
@@ -241,17 +299,13 @@ func (s *Service) Evaluate(ctx context.Context, input Evaluation) (Decision, err
 		score = max(score, settings.ModerationThreshold)
 		rules = append(rules, "moderation_required_state")
 	}
-	if restrictionMatchesAction(profile, input.Action, input.Now) {
-		switch profile.RestrictionMode {
-		case "challenge":
-			if !challengePassed {
-				score = max(score, settings.ChallengeThreshold)
-				rules = append(rules, "administrator_challenge_required")
-			}
-		case "moderation":
-			score = max(score, settings.ModerationThreshold)
-			rules = append(rules, "administrator_moderation_required")
-		}
+	if profile.RestrictionChallengeEnd.After(input.Now) && !challengePassed {
+		score = max(score, settings.ChallengeThreshold)
+		rules = append(rules, "administrator_challenge_required")
+	}
+	if profile.RestrictionModerationEnd.After(input.Now) {
+		score = max(score, settings.ModerationThreshold)
+		rules = append(rules, "administrator_moderation_required")
 	}
 
 	decision = mapDecision(score, rules, settings)
@@ -441,12 +495,16 @@ func (s *Service) duplicateRisk(ctx context.Context, input Evaluation, normalize
 	return 0, nil, false, rows.Err()
 }
 
-func (s *Service) RecordDecision(ctx context.Context, input Evaluation, decision Decision, crawler CrawlerClass) {
+func (s *Service) RecordDecision(ctx context.Context, input Evaluation, decision Decision, crawler CrawlerClass) error {
 	if !s.Enabled() || decision.Outcome == Allow {
-		return
+		return nil
 	}
+	var resultErr error
 	if decision.Outcome == TempBlock || decision.Outcome == AccountReview {
-		s.applyAutomaticRestriction(ctx, input, decision)
+		if err := s.applyAutomaticRestriction(ctx, input, decision); err != nil {
+			s.restrictionFailed.Add(1)
+			resultErr = fmt.Errorf("persist automatic restriction: %w", err)
+		}
 	}
 	// Rejected traffic must not hold an HTTP connection while a remote or busy
 	// database persists security telemetry. The bounded queue applies memory
@@ -460,65 +518,216 @@ func (s *Service) RecordDecision(ctx context.Context, input Evaluation, decision
 	select {
 	case s.events <- queuedRiskEvent{input: input, decision: decision, crawler: crawler, aggregateOnly: aggregateOnly}:
 	default:
-		// Preserve aggregate visibility when an attack exceeds the bounded event
-		// queue without spawning an unbounded goroutine per rejected request.
-		if s.cache.ClaimThrottle(context.Background(), "anti-abuse:event-queue-full", time.Minute) {
-			go func() {
-				overflow := Evaluation{Action: "system.event_queue", ObjectType: "anti_abuse"}
-				_, _ = s.insertEvent(context.Background(), overflow, Decision{Outcome: AllowWithLog, Code: "event_queue_full", RiskScore: 0, Rules: []string{"event_queue_full"}}, "")
-			}()
+		s.riskDropped.Add(1)
+	}
+	return resultErr
+}
+
+func (s *Service) EnqueueSuccess(input Evaluation, decision Decision) bool {
+	if !s.Enabled() || s.successes == nil || s.stopping.Load() {
+		return false
+	}
+	if s.workerCtx != nil {
+		select {
+		case <-s.workerCtx.Done():
+			s.successDropped.Add(1)
+			return false
+		default:
 		}
+	}
+	input.Content = truncate(input.Content, maximumQueuedSuccessContentBytes)
+	select {
+	case s.successes <- queuedSuccessRecord{input: input, decision: decision}:
+		s.successQueued.Add(1)
+		return true
+	default:
+		s.successDropped.Add(1)
+		return false
 	}
 }
 
-func (s *Service) writeRiskEvents() {
+func (s *Service) AsyncMetrics() AsyncRecorderMetrics {
+	if s == nil {
+		return AsyncRecorderMetrics{}
+	}
+	return AsyncRecorderMetrics{
+		SuccessQueued: s.successQueued.Load(), SuccessProcessed: s.successProcessed.Load(),
+		SuccessDropped: s.successDropped.Load(), SuccessFailed: s.successFailed.Load(),
+		SuccessQueueDepth: len(s.successes), SuccessQueueCapacity: cap(s.successes),
+		RiskDropped: s.riskDropped.Load(), RiskQueueDepth: len(s.events), RiskQueueCapacity: cap(s.events),
+		RiskEventFailed: s.riskEventFailed.Load(), RiskDailyFailed: s.riskDailyFailed.Load(),
+		RestrictionFailed: s.restrictionFailed.Load(), BotRuleLoadFailed: s.botRuleLoadFailed.Load(),
+	}
+}
+
+func (s *Service) Close(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		s.stopping.Store(true)
+		if s.cancelWorkers != nil {
+			s.cancelWorkers()
+		}
+	})
+	done := make(chan struct{})
+	go func() {
+		s.workerGroup.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Service) writeRiskEvents(ctx context.Context) {
+	defer s.workerGroup.Done()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	aggregates := map[string]riskAggregate{}
-	flush := func() {
-		for key, value := range aggregates {
-			_, _ = s.db.Exec(context.Background(), `insert into anti_abuse_daily_stats(stat_date,action,outcome,crawler_class,event_count)
-				values($1,$2,$3,$4,$5) on conflict(stat_date,action,outcome,crawler_class) do update
-				set event_count=anti_abuse_daily_stats.event_count+excluded.event_count`, value.date, value.action, value.outcome, value.crawler, value.count)
-			delete(aggregates, key)
+	flush := func(writeCtx context.Context) {
+		if failed := flushRiskAggregates(writeCtx, s.db, aggregates); failed > 0 {
+			s.riskDailyFailed.Add(uint64(failed))
+			log.Printf("persist anti-abuse daily aggregates: failed=%d retained=%d", failed, len(aggregates))
 		}
+	}
+	handle := func(writeCtx context.Context, event queuedRiskEvent) {
+		if !event.aggregateOnly {
+			if _, err := s.insertEvent(writeCtx, event.input, event.decision, event.crawler); err != nil {
+				s.riskEventFailed.Add(1)
+				log.Printf("persist anti-abuse risk event action=%s outcome=%s: %v", event.input.Action, event.decision.Outcome, err)
+			}
+			return
+		}
+		date := s.now().UTC().Format("2006-01-02")
+		key := date + "\x00" + event.input.Action + "\x00" + string(event.decision.Outcome) + "\x00" + string(event.crawler)
+		value := aggregates[key]
+		value.date, value.action, value.outcome, value.crawler = date, event.input.Action, string(event.decision.Outcome), string(event.crawler)
+		value.count++
+		aggregates[key] = value
 	}
 	for {
 		select {
 		case event := <-s.events:
-			if !event.aggregateOnly {
-				_, _ = s.insertEvent(context.Background(), event.input, event.decision, event.crawler)
-				continue
-			}
-			date := s.now().UTC().Format("2006-01-02")
-			key := date + "\x00" + event.input.Action + "\x00" + string(event.decision.Outcome) + "\x00" + string(event.crawler)
-			value := aggregates[key]
-			value.date, value.action, value.outcome, value.crawler = date, event.input.Action, string(event.decision.Outcome), string(event.crawler)
-			value.count++
-			aggregates[key] = value
+			handle(ctx, event)
 		case <-ticker.C:
-			flush()
+			flush(ctx)
+		case <-ctx.Done():
+			drainCtx, cancel := context.WithTimeout(context.Background(), asyncShutdownDrainTimeout)
+			for {
+				select {
+				case event := <-s.events:
+					handle(drainCtx, event)
+				case <-drainCtx.Done():
+					s.discardRiskEvents()
+					if dropped := discardRiskAggregates(aggregates); dropped > 0 {
+						s.riskDropped.Add(dropped)
+					}
+					cancel()
+					return
+				default:
+					flush(drainCtx)
+					if dropped := discardRiskAggregates(aggregates); dropped > 0 {
+						s.riskDropped.Add(dropped)
+						log.Printf("discard anti-abuse daily aggregates after shutdown drain: events=%d", dropped)
+					}
+					cancel()
+					return
+				}
+			}
 		}
 	}
 }
 
-func (s *Service) RecordSuccess(ctx context.Context, input Evaluation, decision Decision) {
+func (s *Service) discardRiskEvents() {
+	var dropped uint64
+	for {
+		select {
+		case <-s.events:
+			dropped++
+		default:
+			s.riskDropped.Add(dropped)
+			return
+		}
+	}
+}
+
+func (s *Service) RecordSuccess(ctx context.Context, input Evaluation, decision Decision) error {
+	return s.recordSuccess(ctx, input, decision)
+}
+
+func (s *Service) recordSuccess(ctx context.Context, input Evaluation, decision Decision) (resultErr error) {
 	if !s.Enabled() {
-		return
+		return nil
 	}
 	var eventID *int64
 	if decision.Outcome != Allow {
 		if id, err := s.insertEvent(ctx, input, decision, ""); err == nil {
 			eventID = &id
+		} else {
+			resultErr = errors.Join(resultErr, err)
 		}
 	}
 	normalized := NormalizeContent(input.Content)
 	if normalized != "" && contentAction(input.Action) {
-		_, _ = s.db.Exec(ctx, `insert into anti_abuse_content_fingerprints(user_id,action,object_key,exact_hash,simhash,ip_hash,event_id)
+		_, err := s.db.Exec(ctx, `insert into anti_abuse_content_fingerprints(user_id,action,object_key,exact_hash,simhash,ip_hash,event_id)
 			values($1,$2,$3,$4,$5,$6,$7)`, input.UserID, input.Action, truncate(input.ObjectKey, 160), ContentHash(normalized), int64(SimHash(normalized)), s.privateHash("ip", input.IP), eventID)
+		resultErr = errors.Join(resultErr, err)
 	}
 	if s.cache.ClaimThrottle(ctx, "anti-abuse-cleanup", 6*time.Hour) {
-		go s.cleanup(context.Background())
+		resultErr = errors.Join(resultErr, s.cleanup(ctx))
+	}
+	return resultErr
+}
+
+func (s *Service) writeSuccessRecords(ctx context.Context) {
+	defer s.workerGroup.Done()
+	process := func(parent context.Context, record queuedSuccessRecord) {
+		writeCtx, cancel := context.WithTimeout(parent, asyncRecordTimeout)
+		err := s.recordSuccess(writeCtx, record.input, record.decision)
+		cancel()
+		s.successProcessed.Add(1)
+		if err != nil {
+			s.successFailed.Add(1)
+			log.Printf("persist anti-abuse success telemetry action=%s: %v", record.input.Action, err)
+		}
+	}
+	for {
+		select {
+		case record := <-s.successes:
+			process(ctx, record)
+		case <-ctx.Done():
+			drainCtx, cancel := context.WithTimeout(context.Background(), asyncShutdownDrainTimeout)
+			for {
+				select {
+				case record := <-s.successes:
+					process(drainCtx, record)
+				case <-drainCtx.Done():
+					s.discardSuccessRecords()
+					cancel()
+					return
+				default:
+					cancel()
+					return
+				}
+			}
+		}
+	}
+}
+
+func (s *Service) discardSuccessRecords() {
+	var dropped uint64
+	for {
+		select {
+		case <-s.successes:
+			dropped++
+		default:
+			s.successDropped.Add(dropped)
+			return
+		}
 	}
 }
 
@@ -535,19 +744,70 @@ func (s *Service) insertEvent(ctx context.Context, input Evaluation, decision De
 	return id, err
 }
 
-func (s *Service) applyAutomaticRestriction(ctx context.Context, input Evaluation, decision Decision) {
+func (s *Service) applyAutomaticRestriction(ctx context.Context, input Evaluation, decision Decision) error {
 	if input.UserID <= 0 {
-		return
+		return nil
 	}
-	settings, _ := s.Settings(ctx)
+	if s.db == nil {
+		return errors.New("anti-abuse database is unavailable")
+	}
+	settings, err := s.Settings(ctx)
+	if err != nil {
+		return fmt.Errorf("load automatic restriction settings: %w", err)
+	}
 	endsAt := s.now().Add(time.Duration(settings.TemporaryBlockMinutes) * time.Minute)
-	_, _ = s.db.Exec(ctx, `insert into anti_abuse_restrictions(user_id,actions,mode,source,rule_code,risk_score,reason,automatic,ends_at)
-		values($1,array[$2],'cooldown','automatic',$3,$4,'Automated temporary anti-abuse restriction',true,$5)`, input.UserID, input.Action, firstString(decision.Rules), decision.RiskScore, endsAt)
-	_, _ = s.db.Exec(ctx, `insert into anti_abuse_user_states(user_id,trust_level,risk_score,hit_count,restricted_until,last_event_at)
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `insert into anti_abuse_restrictions(user_id,actions,mode,source,rule_code,risk_score,reason,automatic,ends_at)
+		values($1,array[$2],'cooldown','automatic',$3,$4,'Automated temporary anti-abuse restriction',true,$5)`, input.UserID, input.Action, firstString(decision.Rules), decision.RiskScore, endsAt); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `insert into anti_abuse_user_states(user_id,trust_level,risk_score,hit_count,restricted_until,last_event_at)
 		values($1,'restricted',$2,1,$3,now()) on conflict(user_id) do update set trust_level='restricted',
 		risk_score=greatest(anti_abuse_user_states.risk_score,excluded.risk_score),hit_count=anti_abuse_user_states.hit_count+1,
-		restricted_until=greatest(anti_abuse_user_states.restricted_until,excluded.restricted_until),last_event_at=now(),updated_at=now()`, input.UserID, decision.RiskScore, endsAt)
+		restricted_until=greatest(anti_abuse_user_states.restricted_until,excluded.restricted_until),last_event_at=now(),updated_at=now()`, input.UserID, decision.RiskScore, endsAt); err != nil {
+		return err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
 	s.InvalidateAccountState(ctx, input.UserID)
+	return nil
+}
+
+type riskAggregateExecer interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func flushRiskAggregates(ctx context.Context, execer riskAggregateExecer, aggregates map[string]riskAggregate) int {
+	failed := 0
+	for key, value := range aggregates {
+		operationCtx, cancel := context.WithTimeout(ctx, asyncRecordTimeout)
+		_, err := execer.Exec(operationCtx, `insert into anti_abuse_daily_stats(stat_date,action,outcome,crawler_class,event_count)
+			values($1,$2,$3,$4,$5) on conflict(stat_date,action,outcome,crawler_class) do update
+			set event_count=anti_abuse_daily_stats.event_count+excluded.event_count`, value.date, value.action, value.outcome, value.crawler, value.count)
+		cancel()
+		if err != nil {
+			failed++
+			continue
+		}
+		delete(aggregates, key)
+	}
+	return failed
+}
+
+func discardRiskAggregates(aggregates map[string]riskAggregate) uint64 {
+	var dropped uint64
+	for key, value := range aggregates {
+		if value.count > 0 {
+			dropped += uint64(value.count)
+		}
+		delete(aggregates, key)
+	}
+	return dropped
 }
 
 // InvalidateAccountState centralizes the account-risk cache key. The suffix
@@ -625,13 +885,16 @@ func NormalizeSettings(value Settings) Settings {
 }
 
 func ValidateSettings(value Settings) error {
-	if value.LogThreshold < 1 || value.ModerationThreshold < value.LogThreshold || value.ChallengeThreshold < value.ModerationThreshold ||
-		value.TempBlockThreshold < value.ChallengeThreshold || value.DenyThreshold < value.TempBlockThreshold || value.DenyThreshold > 1000 {
-		return errors.New("anti-abuse thresholds must be ordered and between 1 and 1000")
+	if value.LogThreshold < 1 || value.LogThreshold > 100 ||
+		value.ModerationThreshold < value.LogThreshold || value.ModerationThreshold > 200 ||
+		value.ChallengeThreshold < value.ModerationThreshold || value.ChallengeThreshold > 300 ||
+		value.TempBlockThreshold < value.ChallengeThreshold || value.TempBlockThreshold > 500 ||
+		value.DenyThreshold < value.TempBlockThreshold || value.DenyThreshold > 1000 {
+		return errors.New("anti-abuse thresholds are outside supported ordered bounds")
 	}
 	if value.SimilarityThreshold < 700 || value.SimilarityThreshold > 1000 || value.DuplicateWindowHours < 1 || value.DuplicateWindowHours > 720 ||
 		value.NewAccountDays < 1 || value.NewAccountDays > 90 || value.TrustedAccountDays < value.NewAccountDays || value.TrustedAccountDays > 3650 ||
-		value.TemporaryBlockMinutes < 1 || value.TemporaryBlockMinutes > 43200 {
+		value.TrustedMinimumLevel < 0 || value.TrustedMinimumLevel > 1000 || value.TemporaryBlockMinutes < 1 || value.TemporaryBlockMinutes > 43200 {
 		return errors.New("anti-abuse configuration is outside supported bounds")
 	}
 	allowed := DefaultSettings().Policies
@@ -666,26 +929,45 @@ func (s *Service) SaveSettings(ctx context.Context, settings Settings, actorID i
 	return settings, err
 }
 
-func (s *Service) account(ctx context.Context, userID int64, ipHash, deviceHash string) (accountProfile, error) {
+const accountProfileSQL = `select account.created_at,account.email_verified,account.status,coalesce(experience.level,0),
+	coalesce(state.trust_level,'normal'),coalesce(state.risk_score,0),coalesce(state.manually_trusted,false),
+	coalesce(state.challenge_required_until,'epoch'),coalesce(state.review_required_until,'epoch'),coalesce(state.restricted_until,'epoch'),
+	coalesce(restriction.hard_mode,''),coalesce(restriction.hard_end,'epoch'),
+	coalesce(restriction.challenge_end,'epoch'),coalesce(restriction.moderation_end,'epoch')
+	from users account left join user_experience experience on experience.user_id=account.id
+	left join anti_abuse_user_states state on state.user_id=account.id
+	left join lateral (
+		with matching as (
+			select restriction.mode,restriction.starts_at,coalesce(restriction.ends_at,now()+interval '100 years') effective_end
+			from anti_abuse_restrictions restriction
+			where restriction.lifted_at is null and restriction.starts_at<=now()
+				and (restriction.ends_at is null or restriction.ends_at>now())
+				and (restriction.user_id=account.id or ($2<>'' and restriction.ip_hash=$2) or ($3<>'' and restriction.device_hash=$3))
+				and (restriction.mode in ('read_only','temporary_ban','permanent_ban')
+					or restriction.actions&&array[$4,'*']::text[])
+		)
+		select
+			(array_agg(mode order by case mode when 'permanent_ban' then 1 when 'temporary_ban' then 2 when 'read_only' then 3 else 4 end,starts_at desc)
+				filter(where mode not in ('challenge','moderation')))[1] hard_mode,
+			(array_agg(effective_end order by case mode when 'permanent_ban' then 1 when 'temporary_ban' then 2 when 'read_only' then 3 else 4 end,starts_at desc)
+				filter(where mode not in ('challenge','moderation')))[1] hard_end,
+			max(effective_end) filter(where mode='challenge') challenge_end,
+			max(effective_end) filter(where mode='moderation') moderation_end
+		from matching
+	) restriction on true
+	where account.id=$1`
+
+func (s *Service) account(ctx context.Context, userID int64, ipHash, deviceHash, action string) (accountProfile, error) {
 	if userID <= 0 {
 		return accountProfile{}, pgx.ErrNoRows
 	}
-	key := accountCacheKeyPrefix + strconv.FormatInt(userID, 10) + ":" + truncate(ipHash, 16) + ":" + truncate(deviceHash, 16)
+	key := s.accountCacheKey(userID, ipHash, deviceHash, action)
 	raw, err := s.cache.GetOrLoad(ctx, key, func(loadCtx context.Context) ([]byte, error) {
 		var profile accountProfile
-		err := s.db.QueryRow(loadCtx, `select account.created_at,account.email_verified,account.status,coalesce(experience.level,0),
-			coalesce(state.trust_level,'normal'),coalesce(state.risk_score,0),coalesce(state.manually_trusted,false),
-			coalesce(state.challenge_required_until,'epoch'),coalesce(state.review_required_until,'epoch'),coalesce(state.restricted_until,'epoch'),
-			coalesce(restriction.mode,''),coalesce(restriction.actions,'{}'::text[]),coalesce(restriction.ends_at,now()+interval '100 years')
-			from users account left join user_experience experience on experience.user_id=account.id
-			left join anti_abuse_user_states state on state.user_id=account.id
-			left join lateral (select mode,actions,ends_at from anti_abuse_restrictions restriction
-				where restriction.lifted_at is null and restriction.starts_at<=now() and (restriction.ends_at is null or restriction.ends_at>now())
-				and (restriction.user_id=account.id or ($2<>'' and restriction.ip_hash=$2) or ($3<>'' and restriction.device_hash=$3))
-				order by case mode when 'permanent_ban' then 1 when 'temporary_ban' then 2 when 'read_only' then 3 else 4 end,starts_at desc limit 1) restriction on true
-			where account.id=$1`, userID, ipHash, deviceHash).Scan(&profile.CreatedAt, &profile.EmailVerified, &profile.Status, &profile.Level,
+		err := s.db.QueryRow(loadCtx, accountProfileSQL, userID, ipHash, deviceHash, action).Scan(&profile.CreatedAt, &profile.EmailVerified, &profile.Status, &profile.Level,
 			&profile.TrustLevel, &profile.RiskScore, &profile.ManuallyTrusted, &profile.ChallengeRequiredUntil, &profile.ReviewRequiredUntil,
-			&profile.RestrictedUntil, &profile.RestrictionMode, &profile.RestrictionActions, &profile.RestrictionEnd)
+			&profile.RestrictedUntil, &profile.RestrictionMode, &profile.RestrictionEnd,
+			&profile.RestrictionChallengeEnd, &profile.RestrictionModerationEnd)
 		if err != nil {
 			return nil, err
 		}
@@ -699,6 +981,11 @@ func (s *Service) account(ctx context.Context, userID int64, ipHash, deviceHash 
 		return accountProfile{}, err
 	}
 	return profile, nil
+}
+
+func (s *Service) accountCacheKey(userID int64, ipHash, deviceHash, action string) string {
+	return accountCacheKeyPrefix + strconv.FormatInt(userID, 10) + ":" + truncate(ipHash, 16) + ":" +
+		truncate(deviceHash, 16) + ":" + s.privateHash("account-action", action)
 }
 
 func classifyTrust(profile accountProfile, settings Settings, now time.Time) string {
@@ -718,26 +1005,8 @@ func classifyTrust(profile accountProfile, settings Settings, now time.Time) str
 	return "normal"
 }
 
-func restrictionApplies(profile accountProfile, action string, now time.Time) bool {
-	if profile.RestrictionMode == "challenge" || profile.RestrictionMode == "moderation" {
-		return false
-	}
-	return restrictionMatchesAction(profile, action, now)
-}
-
-func restrictionMatchesAction(profile accountProfile, action string, now time.Time) bool {
-	if profile.RestrictionMode == "" || !profile.RestrictionEnd.After(now) {
-		return false
-	}
-	if profile.RestrictionMode == "read_only" || profile.RestrictionMode == "temporary_ban" || profile.RestrictionMode == "permanent_ban" {
-		return true
-	}
-	for _, restricted := range profile.RestrictionActions {
-		if restricted == action || restricted == "*" {
-			return true
-		}
-	}
-	return false
+func restrictionApplies(profile accountProfile, now time.Time) bool {
+	return profile.RestrictionMode != "" && profile.RestrictionEnd.After(now)
 }
 
 func (s *Service) pendingReviewCount(ctx context.Context, userID int64) (int, error) {
@@ -847,8 +1116,9 @@ func boundedAllowZero(value, maximum int) int {
 	return value
 }
 
-func (s *Service) cleanup(ctx context.Context) {
-	_, _ = s.db.Exec(ctx, `delete from anti_abuse_challenges where id in (select id from anti_abuse_challenges where expires_at<now()-interval '1 day' order by id limit 1000)`)
-	_, _ = s.db.Exec(ctx, `delete from anti_abuse_content_fingerprints where id in (select id from anti_abuse_content_fingerprints where created_at<now()-make_interval(days=>$1::int) order by id limit 1000)`, s.cfg.FingerprintRetentionDays)
-	_, _ = s.db.Exec(ctx, `delete from anti_abuse_events where id in (select id from anti_abuse_events where created_at<now()-make_interval(days=>$1::int) order by id limit 1000)`, s.cfg.EventRetentionDays)
+func (s *Service) cleanup(ctx context.Context) error {
+	_, challengeErr := s.db.Exec(ctx, `delete from anti_abuse_challenges where id in (select id from anti_abuse_challenges where expires_at<now()-interval '1 day' order by id limit 1000)`)
+	_, fingerprintErr := s.db.Exec(ctx, `delete from anti_abuse_content_fingerprints where id in (select id from anti_abuse_content_fingerprints where created_at<now()-make_interval(days=>$1::int) order by id limit 1000)`, s.cfg.FingerprintRetentionDays)
+	_, eventErr := s.db.Exec(ctx, `delete from anti_abuse_events where id in (select id from anti_abuse_events where created_at<now()-make_interval(days=>$1::int) order by id limit 1000)`, s.cfg.EventRetentionDays)
+	return errors.Join(challengeErr, fingerprintErr, eventErr)
 }

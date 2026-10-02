@@ -1,6 +1,9 @@
 package httpapi
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDimensionDocumentMergesDimensionTypeAndDirectBiome(t *testing.T) {
 	document := map[string]any{
@@ -59,5 +62,37 @@ func TestStructureDocumentSplitsBiomeTagsAndIDs(t *testing.T) {
 	tag, ids = exportBiomeSelectorReferences([]any{"minecraft:plains", "minecraft:forest"})
 	if tag != "" || len(ids) != 2 {
 		t.Fatalf("tag=%q ids=%#v", tag, ids)
+	}
+}
+
+func TestExportRevisionRequiresExactNamespace(t *testing.T) {
+	revisions := map[string]string{"example": "revision-example"}
+	revisionID, err := exportRevisionForNamespace(revisions, " Example ")
+	if err != nil || revisionID != "revision-example" {
+		t.Fatalf("exact namespace did not resolve: revision=%q err=%v", revisionID, err)
+	}
+	if _, err = exportRevisionForNamespace(revisions, "missing"); err == nil {
+		t.Fatal("single-revision package silently accepted an unknown namespace")
+	}
+	if _, err = exportRevisionForNamespace(revisions, ""); err == nil {
+		t.Fatal("empty namespace was accepted")
+	}
+	if _, err = exportRevisionForRecipeType(revisions, "missing:machine"); err == nil {
+		t.Fatal("recipe type from an unknown namespace was assigned to the only revision")
+	}
+}
+
+func TestImportQueuesRejectUnknownNamespacesInsteadOfDroppingEntries(t *testing.T) {
+	revisions := map[string]string{"example": "revision-example"}
+	document := []byte(`{"biomes":[{"id":"missing:test","namespace":"missing","names":{"en-US":"Missing"}}]}`)
+	err := queueExportDocumentEntries(newModExportWriteBatch(), nil, revisions, "worldgen/biomes.json", document)
+	if err == nil || !strings.Contains(err.Error(), `namespace "missing" has no import revision`) {
+		t.Fatalf("document entry was not rejected with structured namespace context: %v", err)
+	}
+	err = queueExportJEITemplateCollection(newModExportWriteBatch(), revisions, "recipes/jei/templates/missing.json", exportJEITemplateCollection{
+		RecipeTypeID: "missing:machine",
+	})
+	if err == nil || !strings.Contains(err.Error(), `recipe type "missing:machine"`) {
+		t.Fatalf("recipe template was not rejected with recipe namespace context: %v", err)
 	}
 }

@@ -74,6 +74,19 @@ func TestNormalizeAndValidateModRequest(t *testing.T) {
 	}
 }
 
+func TestNormalizeProjectAuthorsEnforcesBatchBound(t *testing.T) {
+	authors := make([]modAuthorPayload, 65)
+	for index := range authors {
+		authors[index].Name = "Author"
+	}
+	if _, err := normalizeProjectAuthors(authors); err == nil {
+		t.Fatal("65 project authors were accepted")
+	}
+	if normalized, err := normalizeProjectAuthors(authors[:64]); err != nil || len(normalized) != 64 {
+		t.Fatalf("64 project authors were not accepted: len=%d err=%v", len(normalized), err)
+	}
+}
+
 func TestNormalizeModRequestSynchronizesGitHubProjectLink(t *testing.T) {
 	req := createModRequest{
 		SiteID: "example", PrimaryName: "Example", Environment: "bothRequired", PrimaryCategory: "technology",
@@ -117,7 +130,7 @@ func TestNormalizeModRequestAcceptsUncollectedRelationshipModID(t *testing.T) {
 	}
 }
 
-func TestNormalizeModRequestUsesDirectionalRelationshipTypes(t *testing.T) {
+func TestNormalizeModRequestTreatsIncomingRelationshipsAsReadOnly(t *testing.T) {
 	base := createModRequest{
 		SiteID: "example", PrimaryName: "Example", Environment: "bothRequired", PrimaryCategory: "technology",
 		OfficialStatus: "active", SourceStatus: "open", License: "MIT", SubmissionMethod: "manual",
@@ -135,8 +148,8 @@ func TestNormalizeModRequestUsesDirectionalRelationshipTypes(t *testing.T) {
 	if err := normalizeAndValidateModRequest(&valid); err != nil {
 		t.Fatalf("directional relationship request rejected: %v", err)
 	}
-	if valid.RelationshipGroups[0].Direction != "outgoing" || valid.RelationshipGroups[1].Direction != "incoming" {
-		t.Fatalf("relationship directions were not normalized: %#v", valid.RelationshipGroups)
+	if len(valid.RelationshipGroups) != 1 || valid.RelationshipGroups[0].Direction != "outgoing" {
+		t.Fatalf("read-only incoming relationships entered the authoritative snapshot: %#v", valid.RelationshipGroups)
 	}
 
 	legacy := base
@@ -145,13 +158,6 @@ func TestNormalizeModRequestUsesDirectionalRelationshipTypes(t *testing.T) {
 		t.Fatal("removed extension relationship type was accepted")
 	}
 
-	unresolvedIncoming := base
-	unresolvedIncoming.RelationshipGroups = []modRelationshipGroupPayload{{
-		Direction: "incoming", Relationships: []modRelationshipPayload{{Type: "dependency", RelatedModIdentifier: "other_mod"}},
-	}}
-	if err := normalizeAndValidateModRequest(&unresolvedIncoming); err == nil {
-		t.Fatal("uncollected incoming relationship was accepted")
-	}
 }
 
 func TestFirstDefinitionStringListSupportsNestedResourceFields(t *testing.T) {

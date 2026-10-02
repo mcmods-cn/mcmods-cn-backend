@@ -54,9 +54,10 @@ func normalizeModContentEntryDefinition(
 	entryTypeCode string,
 	definition map[string]any,
 	useImportAliases bool,
+	allowDisabled bool,
 ) (map[string]any, error) {
 	entryType, err := loadModContentEntryTypeDefinition(
-		ctx, query, modID, versionID, kindCode, sectionPublicID, entryTypeCode,
+		ctx, query, modID, versionID, kindCode, sectionPublicID, entryTypeCode, allowDisabled,
 	)
 	if err != nil {
 		return nil, err
@@ -80,6 +81,35 @@ func normalizeModContentEntryDefinition(
 	return normalized, nil
 }
 
+// A disabled subtype can still interpret an existing detail, but an edit is
+// not permission to select that disabled subtype in another template.
+func retainedModContentDisabledSubtype(
+	ctx context.Context, query modContentImageQuerier,
+	modID, resourceID, versionID int64, sectionPublicID *string, entryTypeCode string,
+) (bool, error) {
+	if sectionPublicID == nil || strings.TrimSpace(*sectionPublicID) == "" {
+		return false, nil
+	}
+	var retained bool
+	err := query.QueryRow(ctx, `with recursive lineage as (
+		select section.id,section.parent_id,section.template_id
+		from mod_content_sections section
+		where section.public_id=$4 and section.mod_id=$1 and section.version_id=$3 and section.status='active'
+		union all
+		select parent.id,parent.parent_id,parent.template_id from mod_content_sections parent
+		join lineage child on child.parent_id=parent.id
+		where parent.mod_id=$1 and parent.version_id=$3 and parent.status='active'
+	), root as (select template_id from lineage where parent_id is null)
+	select exists(select 1 from mod_resource_version_details detail
+		join mod_content_section_resources placement on placement.resource_id=detail.resource_id and placement.version_id=detail.version_id
+		join mod_content_sections current_section on current_section.id=placement.section_id
+		join root on root.template_id=current_section.template_id
+		where detail.resource_id=$2 and detail.version_id=$3 and detail.status='active'
+		  and detail.entry_type_code=$5 and current_section.mod_id=$1 and current_section.status='active')`,
+		modID, resourceID, versionID, *sectionPublicID, entryTypeCode).Scan(&retained)
+	return retained, err
+}
+
 func loadModContentEntryTypeDefinition(
 	ctx context.Context,
 	query modContentImageQuerier,
@@ -87,6 +117,7 @@ func loadModContentEntryTypeDefinition(
 	kindCode string,
 	sectionPublicID *string,
 	entryTypeCode string,
+	allowDisabled bool,
 ) (*modContentEntryTypeDefinition, error) {
 	if sectionPublicID == nil || strings.TrimSpace(*sectionPublicID) == "" {
 		if strings.EqualFold(strings.TrimSpace(entryTypeCode), "default") {
@@ -102,7 +133,7 @@ func loadModContentEntryTypeDefinition(
 	if err := json.Unmarshal(raw, &template); err != nil {
 		return nil, err
 	}
-	return selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode, false)
+	return selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode, false, allowDisabled)
 }
 
 func validateModContentEditableDefinitionPatch(
@@ -113,9 +144,10 @@ func validateModContentEditableDefinitionPatch(
 	sectionPublicID *string,
 	entryTypeCode string,
 	patch map[string]any,
+	allowDisabled bool,
 ) error {
 	entryType, err := loadModContentEntryTypeDefinition(
-		ctx, query, modID, versionID, kindCode, sectionPublicID, entryTypeCode,
+		ctx, query, modID, versionID, kindCode, sectionPublicID, entryTypeCode, allowDisabled,
 	)
 	if err != nil {
 		return err
@@ -159,7 +191,7 @@ func normalizeLootTableCanonicalDefinition(definition map[string]any) {
 	definition["definitionAvailable"] = hasPools
 }
 
-func selectModContentEntryType(entryTypes []modContentEntryTypeDefinition, entryTypeCode, kindCode string, enforceKind bool) (*modContentEntryTypeDefinition, error) {
+func selectModContentEntryType(entryTypes []modContentEntryTypeDefinition, entryTypeCode, kindCode string, enforceKind, allowDisabled bool) (*modContentEntryTypeDefinition, error) {
 	if len(entryTypes) == 0 && strings.EqualFold(strings.TrimSpace(entryTypeCode), "default") {
 		return &modContentEntryTypeDefinition{Code: "default"}, nil
 	}
@@ -168,7 +200,7 @@ func selectModContentEntryType(entryTypes []modContentEntryTypeDefinition, entry
 		if !strings.EqualFold(strings.TrimSpace(entryType.Code), strings.TrimSpace(entryTypeCode)) {
 			continue
 		}
-		if !modContentEntryTypeEnabled(*entryType) {
+		if !modContentEntryTypeEnabled(*entryType) && !allowDisabled {
 			return nil, errCatalogEditorReference
 		}
 		if !enforceKind || len(entryType.KindCodes) == 0 {
@@ -514,9 +546,9 @@ func canonicalResourceDefinitionFromTemplates(
 		return "default", map[string]any{}, nil
 	}
 	entryTypeCode := matchImportedEntryType(template, kindCode, source, inferImportedEntryTypeCode(kindCode, resourcePath, source))
-	entryType, err := selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode, true)
+	entryType, err := selectModContentEntryType(template.EntryTypes, entryTypeCode, kindCode, true, false)
 	if err != nil {
-		entryType, err = selectModContentEntryType(template.EntryTypes, "default", kindCode, true)
+		entryType, err = selectModContentEntryType(template.EntryTypes, "default", kindCode, true, false)
 		entryTypeCode = "default"
 	}
 	if err != nil {
@@ -525,7 +557,7 @@ func canonicalResourceDefinitionFromTemplates(
 	canonical, err := canonicalModContentDefinition(*entryType, source, true)
 	if err != nil && strings.EqualFold(strings.TrimSpace(kindCode), "minecraft.item") &&
 		(entryTypeCode == "tool" || entryTypeCode == "equipment") {
-		itemType, selectErr := selectModContentEntryType(template.EntryTypes, "item", kindCode, true)
+		itemType, selectErr := selectModContentEntryType(template.EntryTypes, "item", kindCode, true, false)
 		if selectErr == nil {
 			if itemCanonical, fallbackErr := canonicalModContentDefinition(*itemType, source, true); fallbackErr == nil {
 				return "item", itemCanonical, nil

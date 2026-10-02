@@ -89,9 +89,6 @@ func exportLocaleBundleAssetPath(locale string) string {
 func persistExportLocaleBundles(
 	ctx context.Context,
 	tx pgx.Tx,
-	cfg ossConfigPayload,
-	uploaderID int64,
-	source string,
 	bundles []modExportLocaleBundleMedia,
 ) error {
 	if len(bundles) == 0 {
@@ -117,29 +114,9 @@ func persistExportLocaleBundles(
 		}
 		return bundles[left].RevisionID < bundles[right].RevisionID
 	})
-	for start := 0; start < len(bundles); start += maxExportWriteBatchRows {
-		end := min(start+maxExportWriteBatchRows, len(bundles))
-		batch := &pgx.Batch{}
-		for index := start; index < end; index++ {
-			item := &bundles[index]
-			batch.Queue(`insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
-				content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status)
-				values($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$9,$10,$11,'active','clean')
-				on conflict(object_key) do update set size_bytes=excluded.size_bytes,source_size_bytes=excluded.source_size_bytes,
-				sha256=excluded.sha256,updated_at=now() returning id`,
-				cfg.Bucket, cfg.displayEndpoint(), cfg.Region, item.ObjectKey,
-				ossCategoryFromObjectKey(item.ObjectKey, cfg.Prefix), source, item.Original,
-				item.ContentType, item.ByteLength, item.Digest, nullableUserID(uploaderID))
-		}
-		results := tx.SendBatch(ctx, batch)
-		for index := start; index < end; index++ {
-			if err := results.QueryRow().Scan(&bundles[index].FileID); err != nil {
-				_ = results.Close()
-				return err
-			}
-		}
-		if err := results.Close(); err != nil {
-			return err
+	for _, item := range bundles {
+		if item.FileID <= 0 {
+			return fmt.Errorf("locale artifact is not registered: %s", item.ObjectKey)
 		}
 	}
 	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"catalog_import_locales"},

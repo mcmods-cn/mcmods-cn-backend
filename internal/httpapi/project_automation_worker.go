@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -11,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -26,11 +27,15 @@ import (
 )
 
 const (
-	projectAutomationTick           = 30 * time.Second
-	projectAutomationLease          = 10 * time.Minute
-	projectAutomationMaxFileBytes   = int64(256 << 20)
-	projectAutomationMaxFilesPerRun = 25
+	projectAutomationTick                    = 30 * time.Second
+	projectAutomationLease                   = 10 * time.Minute
+	projectAutomationMaxFileBytes            = int64(256 << 20)
+	projectAutomationMaxFilesPerRun          = 25
+	projectAutomationMirrorBufferBytes       = 128 << 10
+	projectAutomationMirrorGlobalConcurrency = 4
 )
+
+var errProjectMirrorScanRejected = errors.New("automated project mirror failed security scan")
 
 type ProjectAutomationWorker struct {
 	server *Server
@@ -48,7 +53,9 @@ func (worker *ProjectAutomationWorker) Start(ctx context.Context) {
 }
 
 func (worker *ProjectAutomationWorker) run(ctx context.Context) {
-	worker.tick(ctx)
+	if err := worker.tick(ctx); err != nil {
+		log.Printf("project automation tick: %v", err)
+	}
 	ticker := time.NewTicker(projectAutomationTick)
 	defer ticker.Stop()
 	for {
@@ -56,54 +63,80 @@ func (worker *ProjectAutomationWorker) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			worker.tick(ctx)
+			if err := worker.tick(ctx); err != nil {
+				log.Printf("project automation tick: %v", err)
+			}
 		}
 	}
 }
 
-func (worker *ProjectAutomationWorker) tick(ctx context.Context) {
-	_, _ = worker.server.db.Exec(ctx, `update project_auto_update_runs set status='pending',lease_owner='',lease_expires_at=null,
+func (worker *ProjectAutomationWorker) tick(ctx context.Context) error {
+	if _, err := worker.server.db.Exec(ctx, `update project_auto_update_runs set status='pending',lease_owner='',lease_expires_at=null,
 		next_attempt_at=now(),last_error_code='lease_expired',last_error='worker lease expired'
-		where status='running' and lease_expires_at<now()`)
-	worker.scheduleDue(ctx)
-	worker.promoteCleanMirrors(ctx)
+		where status='running' and lease_expires_at<now()`); err != nil {
+		return fmt.Errorf("recover expired project automation leases: %w", err)
+	}
+	if err := worker.scheduleDue(ctx); err != nil {
+		return err
+	}
+	if err := worker.promoteCleanMirrors(ctx); err != nil {
+		return fmt.Errorf("reconcile project mirror scans: %w", err)
+	}
 	for index := 0; index < 4; index++ {
 		processed, err := worker.processOne(ctx)
-		if err != nil || !processed {
-			return
+		if err != nil {
+			return fmt.Errorf("process project automation run: %w", err)
+		}
+		if !processed {
+			return nil
 		}
 	}
+	return nil
 }
 
-func (worker *ProjectAutomationWorker) scheduleDue(ctx context.Context) {
+func (worker *ProjectAutomationWorker) scheduleDue(ctx context.Context) error {
 	tx, err := worker.server.db.Begin(ctx)
 	if err != nil {
-		return
+		return fmt.Errorf("begin project automation schedule: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	var locked bool
-	if err = tx.QueryRow(ctx, `select pg_try_advisory_xact_lock(hashtext('mcmods.project_auto_update.schedule'))`).Scan(&locked); err != nil || !locked {
-		return
+	if err = tx.QueryRow(ctx, `select pg_try_advisory_xact_lock(hashtext('mcmods.project_auto_update.schedule'))`).Scan(&locked); err != nil {
+		return fmt.Errorf("lock project automation schedule: %w", err)
+	}
+	if !locked {
+		return nil
 	}
 	rows, err := tx.Query(ctx, `select id from project_auto_update_settings setting
 		where setting.enabled and setting.next_run_at<=now() and setting.source_type is not null
 		and not exists(select 1 from project_auto_update_runs run where run.setting_id=setting.id and run.status in ('pending','running'))
 		order by setting.next_run_at,setting.id for update skip locked limit 50`)
 	if err != nil {
-		return
+		return fmt.Errorf("read due project automation settings: %w", err)
 	}
 	ids := make([]int64, 0, 50)
 	for rows.Next() {
 		var id int64
-		if rows.Scan(&id) == nil {
-			ids = append(ids, id)
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan due project automation setting: %w", err)
 		}
+		ids = append(ids, id)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate due project automation settings: %w", err)
 	}
 	rows.Close()
 	for _, id := range ids {
-		_, _ = tx.Exec(ctx, `insert into project_auto_update_runs(setting_id) values($1) on conflict do nothing`, id)
+		if _, err = tx.Exec(ctx, `insert into project_auto_update_runs(setting_id) values($1) on conflict do nothing`, id); err != nil {
+			return fmt.Errorf("schedule project automation setting %d: %w", id, err)
+		}
 	}
-	_ = tx.Commit(ctx)
+	if err = tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit project automation schedule: %w", err)
+	}
+	return nil
 }
 
 type projectAutomationJob struct {
@@ -265,7 +298,11 @@ func (worker *ProjectAutomationWorker) execute(ctx context.Context, job projectA
 		if mirrorErr == nil && maintenanceErr != nil {
 			return result, "maintenance_status_update_failed", maintenanceErr
 		}
-		return result, "download_failed", mirrorErr
+		failureCode := "download_failed"
+		if errors.Is(mirrorErr, errProjectMirrorScanRejected) {
+			failureCode = "project_mirror_scan_rejected"
+		}
+		return result, failureCode, mirrorErr
 	default:
 		return nil, "unsupported_source", errors.New("unsupported update kind")
 	}
@@ -318,7 +355,10 @@ func (worker *ProjectAutomationWorker) loadProviderFiles(ctx context.Context, jo
 }
 
 func (worker *ProjectAutomationWorker) mergeCompatibility(ctx context.Context, job projectAutomationJob, files []providerProjectFile) (map[string]any, error) {
-	catalog := loadMinecraftVersionConfig(ctx, worker.server.db)
+	catalog, err := loadMinecraftVersionConfig(ctx, worker.server.db)
+	if err != nil {
+		return nil, fmt.Errorf("load Minecraft version configuration for project automation: %w", err)
+	}
 	versions := make(map[string]bool, len(catalog.Versions))
 	for _, version := range catalog.Versions {
 		versions[version.Code] = true
@@ -434,7 +474,7 @@ func (worker *ProjectAutomationWorker) loadReleases(ctx context.Context, job pro
 				Hashes        map[string]string
 			} `json:"files"`
 		}
-		if err = getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(job.ExternalID)+"/version", providerHeaders(cfg.UserAgent, cfg.Modrinth.Token, ""), &raw); err != nil {
+		if err = getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(job.ExternalID)+"/version", providerCredentialHeaders(cfg.UserAgent, "modrinth", cfg.Modrinth.BaseURL, bearerAuthorization(cfg.Modrinth.Token), ""), &raw); err != nil {
 			return nil, err
 		}
 		result := make([]projectAutomationRelease, 0, len(raw))
@@ -459,7 +499,7 @@ func (worker *ProjectAutomationWorker) loadReleases(ctx context.Context, job pro
 		if err != nil {
 			return nil, err
 		}
-		headers := providerHeaders(cfg.UserAgent, "", cfg.CurseForge.APIKey)
+		headers := providerCredentialHeaders(cfg.UserAgent, "curseforge", cfg.CurseForge.BaseURL, "", cfg.CurseForge.APIKey)
 		result := make([]projectAutomationRelease, 0, min(len(files), 100))
 		for _, file := range files {
 			if len(result) >= 100 {
@@ -512,7 +552,7 @@ func (worker *ProjectAutomationWorker) loadGitHubReleases(ctx context.Context, r
 			ContentType        string `json:"content_type"`
 		} `json:"assets"`
 	}
-	if err = getProviderJSON(ctx, client, cfg.GitHub.BaseURL+"/repos/"+repository+"/releases?per_page=100", providerHeaders(cfg.UserAgent, cfg.GitHub.Token, ""), &raw); err != nil {
+	if err = getProviderJSON(ctx, client, cfg.GitHub.BaseURL+"/repos/"+repository+"/releases?per_page=100", providerCredentialHeaders(cfg.UserAgent, "github", cfg.GitHub.BaseURL, bearerAuthorization(cfg.GitHub.Token), ""), &raw); err != nil {
 		return nil, err
 	}
 	result := make([]projectAutomationRelease, 0, len(raw))
@@ -534,23 +574,38 @@ func (worker *ProjectAutomationWorker) loadGitHubReleases(ctx context.Context, r
 }
 
 func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job projectAutomationJob, releases []projectAutomationRelease) (map[string]any, error) {
-	created, updated, unchanged, manualConflicts := 0, 0, 0, 0
-	currentVersions := worker.currentProjectVersions(ctx, job)
+	created, updated, unchanged, manualConflicts, skippedUnknownVersions := 0, 0, 0, 0, 0
+	catalog, err := loadMinecraftVersionConfig(ctx, worker.server.db)
+	if err != nil {
+		return nil, fmt.Errorf("load Minecraft version configuration for changelog synchronization: %w", err)
+	}
+	currentVersions, _, currentVersionErr := classifyMinecraftVersionCodes(catalog, worker.currentProjectVersions(ctx, job), 100)
+	if currentVersionErr != nil {
+		currentVersions = nil
+	}
 	for _, release := range releases {
 		if release.PublishedAt.IsZero() {
 			release.PublishedAt = time.Now().UTC()
 		}
-		if len(release.GameVersions) == 0 {
-			release.GameVersions = currentVersions
+		rawMinecraftVersions := uniqueTrimmed(release.GameVersions, 100)
+		candidateVersions := release.GameVersions
+		if len(candidateVersions) == 0 {
+			candidateVersions = currentVersions
 		}
-		if len(release.GameVersions) == 0 {
-			release.GameVersions = []string{"unspecified"}
+		resolvedVersions, unmappedVersions, resolveErr := classifyMinecraftVersionCodes(catalog, candidateVersions, 100)
+		if resolveErr != nil || len(resolvedVersions) == 0 {
+			skippedUnknownVersions++
+			continue
 		}
+		release.GameVersions = resolvedVersions
 		body := strings.TrimSpace(release.Body)
 		if body == "" {
 			body = "[View the external release](" + release.URL + ")"
 		}
-		hashBytes := sha256.Sum256([]byte(body))
+		releaseMetadata := map[string]any{"minecraftVersions": release.GameVersions, "loaders": release.Loaders,
+			"rawMinecraftVersions": rawMinecraftVersions, "unmappedMinecraftVersions": unmappedVersions}
+		signature, _ := json.Marshal(map[string]any{"body": body, "metadata": releaseMetadata})
+		hashBytes := sha256.Sum256(signature)
 		bodyHash := hex.EncodeToString(hashBytes[:])
 		tx, err := worker.server.db.Begin(ctx)
 		if err != nil {
@@ -584,7 +639,7 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 				_ = tx.Rollback(ctx)
 				return nil, err
 			}
-			metadata, _ := json.Marshal(map[string]any{"minecraftVersions": release.GameVersions, "loaders": release.Loaders})
+			metadata, _ := json.Marshal(releaseMetadata)
 			_, err = tx.Exec(ctx, `insert into external_release_bindings(project_route_id,source_type,external_release_id,changelog_public_id,external_body_hash,external_url,metadata)
 				values($1,$2,$3,$4,$5,$6,$7::jsonb)`, job.RouteID, job.SourceType, release.ID, publicID, bodyHash, release.URL, metadata)
 			created++
@@ -595,7 +650,9 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 			unchanged++
 		} else if manual || changelogID == nil {
 			manualConflicts++
-			metadata, _ := json.Marshal(map[string]any{"upstreamChanged": true, "latestHash": bodyHash, "externalURL": release.URL})
+			metadata, _ := json.Marshal(map[string]any{"upstreamChanged": true, "latestHash": bodyHash, "externalURL": release.URL,
+				"minecraftVersions": release.GameVersions, "loaders": release.Loaders, "rawMinecraftVersions": rawMinecraftVersions,
+				"unmappedMinecraftVersions": unmappedVersions})
 			_, err = tx.Exec(ctx, `update external_release_bindings set metadata=metadata||$2::jsonb,external_url=$3,updated_at=now() where id=$1`, bindingID, metadata, release.URL)
 		} else {
 			var internalID int64
@@ -615,7 +672,9 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 				return nil, createErr
 			}
 			if err = applyProjectChangelogSnapshotTx(ctx, tx, internalID, job.RouteID, revision.RevisionID, job.ActorID, snapshot); err == nil {
-				_, err = tx.Exec(ctx, `update external_release_bindings set external_body_hash=$2,external_url=$3,updated_at=now() where id=$1`, bindingID, bodyHash, release.URL)
+				metadata, _ := json.Marshal(releaseMetadata)
+				_, err = tx.Exec(ctx, `update external_release_bindings set external_body_hash=$2,external_url=$3,metadata=$4::jsonb,updated_at=now() where id=$1`,
+					bindingID, bodyHash, release.URL, metadata)
 			}
 			updated++
 		}
@@ -627,7 +686,8 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 			return nil, err
 		}
 	}
-	return map[string]any{"created": created, "updated": updated, "unchanged": unchanged, "manualOverrideConflicts": manualConflicts}, nil
+	return map[string]any{"created": created, "updated": updated, "unchanged": unchanged, "manualOverrideConflicts": manualConflicts,
+		"skippedUnknownMinecraftVersions": skippedUnknownVersions}, nil
 }
 
 func (worker *ProjectAutomationWorker) currentProjectVersions(ctx context.Context, job projectAutomationJob) []string {
@@ -664,7 +724,16 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 	if err != nil {
 		return nil, fmt.Errorf("OSS unavailable: %w", err)
 	}
-	queued, existing, review := 0, 0, 0
+	queued, existing, awaitingScan, scanFailures, review := 0, 0, 0, 0, 0
+	result := func() map[string]any {
+		return map[string]any{
+			"queuedForScan": queued,
+			"existing":      existing,
+			"awaitingScan":  awaitingScan,
+			"scanFailures":  scanFailures,
+			"needsReview":   review,
+		}
+	}
 	for _, file := range files {
 		if queued >= projectAutomationMaxFilesPerRun {
 			break
@@ -673,31 +742,67 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 			review++
 			continue
 		}
-		var currentSHA string
 		var currentSize int64
-		var currentStatus string
+		var currentStatus, currentFileStatus, currentScanStatus string
 		var currentMetadata []byte
-		err = worker.server.db.QueryRow(ctx, `select file_sha256,byte_size,status,metadata from mirrored_project_files where source_type=$1 and external_file_id=$2`, job.SourceType, file.ID).Scan(&currentSHA, &currentSize, &currentStatus, &currentMetadata)
+		err = worker.server.db.QueryRow(ctx, `select mirror.byte_size,mirror.status,mirror.metadata,
+			coalesce(file.status,''),coalesce(file.scan_status,'')
+			from mirrored_project_files mirror left join oss_files file on file.id=mirror.oss_file_id
+			where mirror.source_type=$1 and mirror.external_file_id=$2`, job.SourceType, file.ID).
+			Scan(&currentSize, &currentStatus, &currentMetadata, &currentFileStatus, &currentScanStatus)
 		if err == nil {
 			existing++
 			var previous providerProjectFile
-			_ = json.Unmarshal(currentMetadata, &previous)
+			if decodeErr := json.Unmarshal(currentMetadata, &previous); decodeErr != nil {
+				if _, updateErr := worker.server.db.Exec(ctx, `update mirrored_project_files set status='review'
+					where source_type=$1 and external_file_id=$2 and status<>'ready'`, job.SourceType, file.ID); updateErr != nil {
+					return result(), fmt.Errorf("mark corrupt project mirror metadata for review: %w", updateErr)
+				}
+				review++
+				continue
+			}
 			previousSignature, incomingSignature := providerFileHashSignature(previous), providerFileHashSignature(file)
 			if currentSize != file.SizeBytes || previousSignature != "" && incomingSignature != "" && previousSignature != incomingSignature {
-				_, _ = worker.server.db.Exec(ctx, `update mirrored_project_files set status='source_changed' where source_type=$1 and external_file_id=$2`, job.SourceType, file.ID)
+				if _, updateErr := worker.server.db.Exec(ctx, `update mirrored_project_files set status='source_changed'
+					where source_type=$1 and external_file_id=$2`, job.SourceType, file.ID); updateErr != nil {
+					return result(), fmt.Errorf("mark changed project mirror source: %w", updateErr)
+				}
 				review++
+				continue
+			}
+			switch currentStatus {
+			case "failed":
+				scanFailures++
+				review++
+			case "review", "source_changed":
+				review++
+			case "scanning", "ready":
+				if currentScanStatus == "rejected" || currentFileStatus == "deleted" || currentFileStatus == "" {
+					if _, updateErr := worker.server.db.Exec(ctx, `update mirrored_project_files set status='failed'
+						where source_type=$1 and external_file_id=$2 and status in ('scanning','ready')`, job.SourceType, file.ID); updateErr != nil {
+						return result(), fmt.Errorf("mark rejected project mirror scan: %w", updateErr)
+					}
+					scanFailures++
+					review++
+				} else if currentScanStatus == "pending" {
+					if _, updateErr := worker.server.db.Exec(ctx, `update mirrored_project_files set status='scanning'
+						where source_type=$1 and external_file_id=$2 and status='ready'`, job.SourceType, file.ID); updateErr != nil {
+						return result(), fmt.Errorf("mark project mirror rescan pending: %w", updateErr)
+					}
+					awaitingScan++
+				} else if currentStatus == "scanning" {
+					awaitingScan++
+				}
 			}
 			continue
 		}
-		data, digest, downloadErr := downloadProviderFile(ctx, file, cfg)
-		if downloadErr != nil {
-			return map[string]any{"queuedForScan": queued, "existing": existing, "needsReview": review}, downloadErr
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return result(), fmt.Errorf("check existing project mirror: %w", err)
 		}
 		objectKey := buildOSSObjectKeyForFile(ossCfg.Prefix, "project/download/automated/"+job.ProjectPublicID, file.FileName)
-		_, err = client.PutObject(ctx, &aliyunoss.PutObjectRequest{Bucket: aliyunoss.Ptr(ossCfg.Bucket), Key: aliyunoss.Ptr(objectKey),
-			ContentType: aliyunoss.Ptr("application/octet-stream"), ContentLength: aliyunoss.Ptr(int64(len(data))), Body: bytes.NewReader(data), Metadata: map[string]string{"sha256": digest}})
-		if err != nil {
-			return nil, err
+		size, digest, downloadErr := worker.uploadProviderFile(ctx, client, ossCfg, objectKey, file, cfg)
+		if downloadErr != nil {
+			return result(), downloadErr
 		}
 		metadata, _ := json.Marshal(file)
 		tx, txErr := worker.server.db.Begin(ctx)
@@ -708,13 +813,13 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 		txErr = tx.QueryRow(ctx, `insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
 			content_type,size_bytes,source_size_bytes,sha256,status,scan_status) values($1,$2,$3,$4,$5,'project_auto_update',$6,$6,
 			'application/octet-stream',$7,$7,$8,'active','pending') returning id`, ossCfg.Bucket, ossCfg.displayEndpoint(), ossCfg.Region,
-			objectKey, ossCategoryFromObjectKey(objectKey, ossCfg.Prefix), file.FileName, len(data), digest).Scan(&ossFileID)
+			objectKey, ossCategoryFromObjectKey(objectKey, ossCfg.Prefix), file.FileName, size, digest).Scan(&ossFileID)
 		if txErr == nil {
 			_, txErr = tx.Exec(ctx, `insert into mirrored_project_files(project_route_id,source_type,external_file_id,file_sha256,byte_size,oss_file_id,
 			license_spdx_id,status,metadata) values($1,$2,$3,$4,$5,$6,coalesce(
 				(select license from mods where $7='mod' and id=$8),
 				(select license from simple_projects where $7<>'mod' and id=$8 and project_type=$7)),
-				'scanning',$9::jsonb)`, job.RouteID, job.SourceType, file.ID, digest, len(data), ossFileID, job.ProjectType, job.InternalID, metadata)
+				'scanning',$9::jsonb)`, job.RouteID, job.SourceType, file.ID, digest, size, ossFileID, job.ProjectType, job.InternalID, metadata)
 		}
 		if txErr == nil {
 			txErr = tx.Commit(ctx)
@@ -722,11 +827,55 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 			_ = tx.Rollback(ctx)
 		}
 		if txErr != nil {
+			_ = tx.Rollback(ctx)
+			cleanupErr := worker.cleanupUnregisteredProjectMirror(ctx, client, ossCfg, objectKey)
+			if cleanupErr != nil {
+				return nil, errors.Join(txErr, cleanupErr)
+			}
 			return nil, txErr
 		}
 		queued++
 	}
-	return map[string]any{"queuedForScan": queued, "existing": existing, "needsReview": review}, nil
+	if scanFailures > 0 {
+		return result(), fmt.Errorf("%w: %d file(s) require a clean rescan", errProjectMirrorScanRejected, scanFailures)
+	}
+	return result(), nil
+}
+
+func (worker *ProjectAutomationWorker) cleanupUnregisteredProjectMirror(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	var registered bool
+	if err := worker.server.db.QueryRow(cleanupCtx, `select exists(select 1 from oss_files where object_key=$1)`, objectKey).Scan(&registered); err != nil {
+		return fmt.Errorf("verify failed project mirror registration before cleanup: %w", err)
+	}
+	if registered {
+		return nil
+	}
+	if _, err := client.DeleteObject(cleanupCtx, &aliyunoss.DeleteObjectRequest{
+		Bucket: aliyunoss.Ptr(cfg.Bucket),
+		Key:    aliyunoss.Ptr(objectKey),
+	}); err == nil {
+		return nil
+	} else {
+		directDeleteErr := err
+		tx, beginErr := worker.server.db.Begin(cleanupCtx)
+		if beginErr != nil {
+			return errors.Join(fmt.Errorf("delete unregistered project mirror: %w", directDeleteErr), fmt.Errorf("begin durable cleanup: %w", beginErr))
+		}
+		defer tx.Rollback(cleanupCtx)
+		queueErr := enqueueOSSObjectDeletionTx(cleanupCtx, tx, ossDeletionTarget{
+			Bucket: cfg.Bucket, Endpoint: cfg.Endpoint, Region: cfg.Region, UseCName: cfg.UseCName || isCustomOSSEndpoint(cfg.Endpoint),
+			ObjectKey: objectKey, Reason: "project-automation-registration-failed",
+		})
+		if queueErr == nil {
+			queueErr = tx.Commit(cleanupCtx)
+		}
+		if queueErr != nil {
+			return errors.Join(fmt.Errorf("delete unregistered project mirror: %w", directDeleteErr), fmt.Errorf("queue durable cleanup: %w", queueErr))
+		}
+		return fmt.Errorf("direct project mirror cleanup failed; durable deletion queued: %w", directDeleteErr)
+	}
 }
 
 func providerFileHashSignature(file providerProjectFile) string {
@@ -739,94 +888,292 @@ func providerFileHashSignature(file providerProjectFile) string {
 	return ""
 }
 
-func downloadProviderFile(ctx context.Context, file providerProjectFile, cfg modImportConfig) ([]byte, string, error) {
+type spooledProviderFile struct {
+	File   *os.File
+	Path   string
+	Size   int64
+	SHA256 string
+}
+
+func (file *spooledProviderFile) Close() {
+	if file == nil {
+		return
+	}
+	if file.File != nil {
+		_ = file.File.Close()
+	}
+	if file.Path != "" {
+		_ = os.Remove(file.Path)
+	}
+}
+
+func (worker *ProjectAutomationWorker) uploadProviderFile(ctx context.Context, client *aliyunoss.Client, ossCfg ossConfigPayload,
+	objectKey string, file providerProjectFile, cfg modImportConfig) (int64, string, error) {
+	acquireCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
+	defer cancel()
+	slot, err := acquireProjectAutomationMirrorSlot(acquireCtx, worker.server.db)
+	if err != nil {
+		return 0, "", fmt.Errorf("acquire global project mirror capacity: %w", err)
+	}
+	defer slot.Release()
+
+	spooled, err := downloadProviderFile(ctx, file, cfg)
+	if err != nil {
+		return 0, "", err
+	}
+	defer spooled.Close()
+	_, err = client.PutObject(ctx, &aliyunoss.PutObjectRequest{
+		Bucket: aliyunoss.Ptr(ossCfg.Bucket), Key: aliyunoss.Ptr(objectKey), ContentType: aliyunoss.Ptr("application/octet-stream"),
+		ContentLength: aliyunoss.Ptr(spooled.Size), Body: spooled.File, Metadata: map[string]string{"sha256": spooled.SHA256},
+	})
+	if err != nil {
+		return 0, "", err
+	}
+	return spooled.Size, spooled.SHA256, nil
+}
+
+func downloadProviderFile(ctx context.Context, file providerProjectFile, cfg modImportConfig) (*spooledProviderFile, error) {
 	client, err := newProviderHTTPClient(time.Duration(cfg.RequestTimeoutSeconds)*time.Second, file.DirectURL)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, file.DirectURL, nil)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	request.Header.Set("User-Agent", cfg.UserAgent)
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, "", fmt.Errorf("HTTP %d while downloading provider file", response.StatusCode)
+		return nil, fmt.Errorf("HTTP %d while downloading provider file", response.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, projectAutomationMaxFileBytes+1))
-	if err != nil || int64(len(data)) > projectAutomationMaxFileBytes {
-		return nil, "", errors.New("provider file exceeds the safe mirror limit")
+	if response.ContentLength > projectAutomationMaxFileBytes {
+		return nil, errors.New("provider file exceeds the safe mirror limit")
 	}
-	if file.SizeBytes > 0 && int64(len(data)) != file.SizeBytes {
-		return nil, "", errors.New("provider file size mismatch")
+	if response.ContentLength >= 0 && file.SizeBytes > 0 && response.ContentLength != file.SizeBytes {
+		return nil, errors.New("provider file size mismatch")
+	}
+	return spoolProviderFile(response.Body, file, projectAutomationMaxFileBytes)
+}
+
+func spoolProviderFile(source io.Reader, file providerProjectFile, maximumBytes int64) (*spooledProviderFile, error) {
+	if maximumBytes < 1 || maximumBytes > projectAutomationMaxFileBytes {
+		return nil, errors.New("invalid provider file limit")
+	}
+	temporary, err := os.CreateTemp("", "mcmods-project-mirror-*")
+	if err != nil {
+		return nil, err
+	}
+	result := &spooledProviderFile{File: temporary, Path: temporary.Name()}
+	fail := func(cause error) (*spooledProviderFile, error) {
+		result.Close()
+		return nil, cause
+	}
+	sha1Hash := sha1.New()
+	sha256Hash := sha256.New()
+	sha512Hash := sha512.New()
+	writer := io.MultiWriter(temporary, sha1Hash, sha256Hash, sha512Hash)
+	written, err := io.CopyBuffer(writer, io.LimitReader(source, maximumBytes+1), make([]byte, projectAutomationMirrorBufferBytes))
+	if err != nil {
+		return fail(err)
+	}
+	if written > maximumBytes {
+		return fail(errors.New("provider file exceeds the safe mirror limit"))
+	}
+	if file.SizeBytes > 0 && written != file.SizeBytes {
+		return fail(errors.New("provider file size mismatch"))
 	}
 	if file.SHA1 != "" {
-		sum := sha1.Sum(data)
-		if !strings.EqualFold(hex.EncodeToString(sum[:]), file.SHA1) {
-			return nil, "", errors.New("provider SHA-1 mismatch")
+		if !strings.EqualFold(hex.EncodeToString(sha1Hash.Sum(nil)), file.SHA1) {
+			return fail(errors.New("provider SHA-1 mismatch"))
 		}
 	}
 	if file.SHA512 != "" {
-		sum := sha512.Sum512(data)
-		if !strings.EqualFold(hex.EncodeToString(sum[:]), file.SHA512) {
-			return nil, "", errors.New("provider SHA-512 mismatch")
+		if !strings.EqualFold(hex.EncodeToString(sha512Hash.Sum(nil)), file.SHA512) {
+			return fail(errors.New("provider SHA-512 mismatch"))
 		}
 	}
-	sum := sha256.Sum256(data)
-	return data, hex.EncodeToString(sum[:]), nil
+	if _, err = temporary.Seek(0, io.SeekStart); err != nil {
+		return fail(err)
+	}
+	result.Size = written
+	result.SHA256 = hex.EncodeToString(sha256Hash.Sum(nil))
+	return result, nil
 }
 
-func (worker *ProjectAutomationWorker) promoteCleanMirrors(ctx context.Context) {
-	rows, err := worker.server.db.Query(ctx, `select mirror.id,route.entity_type,route.internal_id,mirror.oss_file_id,mirror.file_sha256,mirror.byte_size,mirror.metadata
-		from mirrored_project_files mirror join public_routes route on route.id=mirror.project_route_id
-		join oss_files file on file.id=mirror.oss_file_id and file.status='active' and file.scan_status='clean'
-		where mirror.status='scanning' order by mirror.id limit 50`)
-	if err != nil {
+type projectAutomationMirrorSlot struct {
+	connection *pgxpool.Conn
+	index      int
+}
+
+func acquireProjectAutomationMirrorSlot(ctx context.Context, db *pgxpool.Pool) (*projectAutomationMirrorSlot, error) {
+	if db == nil {
+		return nil, errors.New("project automation database is required")
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		connection, err := db.Acquire(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for index := 1; index <= projectAutomationMirrorGlobalConcurrency; index++ {
+			var acquired bool
+			err = connection.QueryRow(ctx, `select pg_try_advisory_lock(hashtext('mcmods.project_auto_update.mirror'),$1::integer)`, index).Scan(&acquired)
+			if err != nil {
+				connection.Release()
+				return nil, err
+			}
+			if acquired {
+				return &projectAutomationMirrorSlot{connection: connection, index: index}, nil
+			}
+		}
+		connection.Release()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (slot *projectAutomationMirrorSlot) Release() {
+	if slot == nil || slot.connection == nil {
 		return
 	}
+	connection := slot.connection
+	slot.connection = nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	var released bool
+	err := connection.QueryRow(ctx, `select pg_advisory_unlock(hashtext('mcmods.project_auto_update.mirror'),$1::integer)`, slot.index).Scan(&released)
+	cancel()
+	if err != nil || !released {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = connection.Hijack().Close(closeCtx)
+		closeCancel()
+		return
+	}
+	connection.Release()
+}
+
+func (worker *ProjectAutomationWorker) promoteCleanMirrors(ctx context.Context) error {
+	rows, err := worker.server.db.Query(ctx, `select mirror.id,mirror.project_route_id,route.entity_type,route.internal_id,
+		coalesce(mirror.oss_file_id,0),mirror.file_sha256,mirror.byte_size,mirror.metadata,mirror.status,
+		coalesce(file.status,''),coalesce(file.scan_status,'')
+		from mirrored_project_files mirror join public_routes route on route.id=mirror.project_route_id
+		left join oss_files file on file.id=mirror.oss_file_id
+		where (mirror.status in ('scanning','ready') and (file.id is null or file.status='deleted' or file.scan_status='rejected'))
+		or (mirror.status='ready' and file.scan_status='pending')
+		or (mirror.status in ('scanning','failed') and file.status='active' and file.scan_status in ('clean','trusted_generated'))
+		order by mirror.id limit 50`)
+	if err != nil {
+		return fmt.Errorf("read project mirror scan transitions: %w", err)
+	}
 	type pending struct {
-		id, internalID, ossID, size int64
-		projectType, sha            string
-		metadata                    []byte
+		id, routeID, internalID, ossID, size int64
+		projectType, sha                     string
+		metadata                             []byte
+		mirrorStatus, fileStatus, scanStatus string
 	}
 	items := make([]pending, 0)
 	for rows.Next() {
 		var item pending
-		if rows.Scan(&item.id, &item.projectType, &item.internalID, &item.ossID, &item.sha, &item.size, &item.metadata) == nil {
-			items = append(items, item)
+		if err = rows.Scan(&item.id, &item.routeID, &item.projectType, &item.internalID, &item.ossID, &item.sha, &item.size,
+			&item.metadata, &item.mirrorStatus, &item.fileStatus, &item.scanStatus); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan project mirror transition: %w", err)
 		}
+		items = append(items, item)
 	}
-	rows.Close()
+	if err = finishRows(rows); err != nil {
+		return fmt.Errorf("iterate project mirror transitions: %w", err)
+	}
+	var catalog minecraftVersionConfig
+	catalogLoaded := false
 	for _, item := range items {
+		if item.scanStatus == "rejected" || item.fileStatus == "deleted" || item.ossID == 0 {
+			if _, err = worker.server.db.Exec(ctx, `update mirrored_project_files set status='failed'
+				where id=$1 and status in ('scanning','ready')`, item.id); err != nil {
+				return fmt.Errorf("persist rejected project mirror scan: %w", err)
+			}
+			continue
+		}
+		if item.mirrorStatus == "ready" && item.scanStatus == "pending" {
+			if _, err = worker.server.db.Exec(ctx, `update mirrored_project_files set status='scanning'
+				where id=$1 and status='ready'`, item.id); err != nil {
+				return fmt.Errorf("persist pending project mirror rescan: %w", err)
+			}
+			continue
+		}
+		if !catalogLoaded {
+			catalog, err = loadMinecraftVersionConfig(ctx, worker.server.db)
+			if err != nil {
+				return fmt.Errorf("load Minecraft versions for project mirror promotion: %w", err)
+			}
+			catalogLoaded = true
+		}
 		var file providerProjectFile
-		if json.Unmarshal(item.metadata, &file) != nil {
+		if decodeErr := json.Unmarshal(item.metadata, &file); decodeErr != nil {
+			if _, err = worker.server.db.Exec(ctx, `update mirrored_project_files set status='review'
+				where id=$1 and status in ('scanning','failed')`, item.id); err != nil {
+				return fmt.Errorf("persist corrupt project mirror metadata review: %w", err)
+			}
+			continue
+		}
+		resolvedVersions, _, resolveErr := classifyMinecraftVersionCodes(catalog, file.GameVersions, 100)
+		if resolveErr != nil || len(resolvedVersions) == 0 {
+			if _, err = worker.server.db.Exec(ctx, `update mirrored_project_files set status='review'
+				where id=$1 and status in ('scanning','failed')`, item.id); err != nil {
+				return fmt.Errorf("persist project mirror version review: %w", err)
+			}
 			continue
 		}
 		tx, beginErr := worker.server.db.Begin(ctx)
 		if beginErr != nil {
-			continue
+			return fmt.Errorf("begin project mirror promotion: %w", beginErr)
 		}
 		var lockedStatus string
-		if tx.QueryRow(ctx, `select status from mirrored_project_files where id=$1 for update`, item.id).Scan(&lockedStatus) != nil || lockedStatus != "scanning" {
+		if lockErr := tx.QueryRow(ctx, `select status from mirrored_project_files where id=$1 for update`, item.id).Scan(&lockedStatus); lockErr != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("lock project mirror promotion: %w", lockErr)
+		}
+		if lockedStatus != "scanning" && lockedStatus != "failed" {
 			_ = tx.Rollback(ctx)
 			continue
 		}
-		_, insertErr := tx.Exec(ctx, `insert into project_files(project_type,project_internal_id,oss_file_id,display_name,version_name,release_channel,
-			game_versions,loaders,file_name,content_type,size_bytes,sha256) values($1,$2,$3,$4,$5,$6,$7,$8,$9,'application/octet-stream',$10,$11)
-			on conflict(project_type,project_internal_id,oss_file_id) do nothing`, item.projectType, item.internalID, item.ossID,
-			firstNonEmpty(file.DisplayName, file.FileName), firstNonEmpty(file.VersionName, file.DisplayName), normalizeReleaseChannel(file.ReleaseChannel),
-			uniqueTrimmed(file.GameVersions, 100), normalizeLoaders(file.Loaders), file.FileName, item.size, item.sha)
+		projectApproved, insertErr := projectFileTargetIsApprovedTx(ctx, tx, item.projectType, item.internalID)
+		var filePublicID string
+		const publicationGeneration = 1
+		if insertErr == nil {
+			insertErr = tx.QueryRow(ctx, `insert into project_files(project_type,project_internal_id,oss_file_id,display_name,version_name,release_channel,
+				game_versions,loaders,file_name,content_type,size_bytes,sha256,status,publication_generation)
+				values($1,$2,$3,$4,$5,$6,$7,$8,$9,'application/octet-stream',$10,$11,'active',$12)
+				on conflict(project_type,project_internal_id,oss_file_id) do nothing returning public_id`, item.projectType, item.internalID, item.ossID,
+				firstNonEmpty(file.DisplayName, file.FileName), firstNonEmpty(file.VersionName, file.DisplayName), normalizeReleaseChannel(file.ReleaseChannel),
+				resolvedVersions, normalizeLoaders(file.Loaders), file.FileName, item.size, item.sha, publicationGeneration).Scan(&filePublicID)
+		}
+		inserted := insertErr == nil
+		if errors.Is(insertErr, pgx.ErrNoRows) {
+			insertErr = nil
+		}
+		if insertErr == nil && inserted && projectApproved {
+			insertErr = enqueueProjectFileUpdateEventByRouteTx(ctx, tx, item.routeID, 0,
+				"download_added", filePublicID, publicationGeneration)
+		}
 		if insertErr == nil {
 			_, insertErr = tx.Exec(ctx, `update mirrored_project_files set status='ready' where id=$1`, item.id)
 		}
 		if insertErr == nil {
-			_ = tx.Commit(ctx)
+			if commitErr := tx.Commit(ctx); commitErr != nil {
+				return fmt.Errorf("commit project mirror promotion: %w", commitErr)
+			}
 		} else {
 			_ = tx.Rollback(ctx)
+			return fmt.Errorf("promote project mirror %d: %w", item.id, insertErr)
 		}
 	}
+	return nil
 }

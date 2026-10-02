@@ -34,6 +34,34 @@ func TestSeedCrawlerDownloadThresholdIsStrict(t *testing.T) {
 	}
 }
 
+func TestSeedCrawlerTranslationUsesCanonicalLocalizationFieldsAndRejectsIncompleteResults(t *testing.T) {
+	sourceLocale, items, err := seedDraftTranslationSource([]byte(`{
+		"defaultLocale":"en-US","primaryName":"legacy top-level name",
+		"localizations":[{"locale":"en-US","name":"Localized name","summary":"Localized summary","contentMarkdown":"Localized body"}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceLocale != "en-US" || len(items) != 3 || items[0]["key"] != "name" || items[0]["text"] != "Localized name" ||
+		items[1]["key"] != "summary" || items[2]["key"] != "bodyMarkdown" || items[2]["text"] != "Localized body" {
+		t.Fatalf("translation source locale/items = %q/%v", sourceLocale, items)
+	}
+	if _, err = validateSeedDraftTranslationResult(map[string]any{"items": []any{
+		map[string]any{"key": "name", "text": "名称"},
+		map[string]any{"key": "summary", "text": "简介"},
+	}}, items); err == nil {
+		t.Fatal("incomplete paid translation was accepted")
+	}
+	translated, err := validateSeedDraftTranslationResult(map[string]any{"items": []any{
+		map[string]any{"key": "name", "text": "名称"},
+		map[string]any{"key": "summary", "text": "简介"},
+		map[string]any{"key": "bodyMarkdown", "text": "正文"},
+	}}, items)
+	if err != nil || translated["name"] != "名称" || translated["summary"] != "简介" || translated["bodyMarkdown"] != "正文" {
+		t.Fatalf("validated translation = %v, err=%v", translated, err)
+	}
+}
+
 func TestRandomSeedCrawlerOffsetStaysInsideCandidateWindow(t *testing.T) {
 	for range 100 {
 		offset, err := randomSeedCrawlerOffset(250, 25)

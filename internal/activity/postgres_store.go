@@ -12,10 +12,10 @@ import (
 
 type postgresStore struct {
 	db        *pgxpool.Pool
-	processor BatchProcessor
+	processor ProjectionProcessor
 }
 
-func newPostgresStore(db *pgxpool.Pool, processor BatchProcessor) activityStore {
+func newPostgresStore(db *pgxpool.Pool, processor ProjectionProcessor) activityStore {
 	if db == nil {
 		return nil
 	}
@@ -44,7 +44,7 @@ func (store *postgresStore) WriteBestEffort(ctx context.Context, events []Event)
 	if err := copyActivityEvents(ctx, store.db, events); err != nil {
 		return err
 	}
-	store.processProjections(ctx, events)
+	store.processBestEffortProjections(ctx, events)
 	return nil
 }
 
@@ -102,6 +102,9 @@ func (store *postgresStore) DrainDurable(ctx context.Context, limit int) (int, e
 		err = copyActivityEvents(ctx, tx, events)
 	}
 	if err == nil {
+		err = store.processDurableProjections(ctx, tx, events)
+	}
+	if err == nil {
 		_, err = tx.Exec(ctx, `delete from activity_event_outbox where id=any($1::bigint[])`, ids)
 	}
 	if err == nil {
@@ -112,7 +115,10 @@ func (store *postgresStore) DrainDurable(ctx context.Context, limit int) (int, e
 		store.markDurableFailure(ids, err)
 		return 0, err
 	}
-	store.processProjections(ctx, events)
+	store.processSiteActivityProjection(ctx, events)
+	if store.processor != nil {
+		store.processor.ActivityBatchCommitted(ctx, events)
+	}
 	return len(events), nil
 }
 
@@ -155,7 +161,16 @@ func (store *postgresStore) PoolSnapshot() PoolSnapshot {
 	}
 }
 
-func (store *postgresStore) processProjections(ctx context.Context, events []Event) {
+func (store *postgresStore) processBestEffortProjections(ctx context.Context, events []Event) {
+	store.processSiteActivityProjection(ctx, events)
+	if store.processor != nil {
+		if err := store.processor.ProcessActivityBatch(ctx, events); err != nil {
+			log.Printf("process activity batch: %v", err)
+		}
+	}
+}
+
+func (store *postgresStore) processSiteActivityProjection(ctx context.Context, events []Event) {
 	eventTimes := make([]time.Time, 0, len(events))
 	actorIDs := make([]int64, 0, len(events))
 	for _, event := range events {
@@ -166,17 +181,19 @@ func (store *postgresStore) processProjections(ctx context.Context, events []Eve
 		actorIDs = append(actorIDs, event.UserID)
 	}
 	if len(eventTimes) > 0 {
-		if _, err := store.db.Exec(ctx, `select record_site_activity_batch($1,$2)`, eventTimes, actorIDs); err != nil {
+		if _, err := store.db.Exec(ctx, `select record_site_activity_batch($1::timestamptz[],$2::bigint[])`, eventTimes, actorIDs); err != nil {
 			// Raw activity and the trigger-maintained user statistics are already
 			// committed. Periodic reconciliation can rebuild this site projection.
 			log.Printf("aggregate site activity batch: %v", err)
 		}
 	}
-	if store.processor != nil {
-		if err := store.processor(ctx, events); err != nil {
-			log.Printf("process activity batch: %v", err)
-		}
+}
+
+func (store *postgresStore) processDurableProjections(ctx context.Context, tx pgx.Tx, events []Event) error {
+	if store.processor == nil {
+		return nil
 	}
+	return store.processor.ProcessActivityBatchTx(ctx, tx, events)
 }
 
 type routeQueryer interface {

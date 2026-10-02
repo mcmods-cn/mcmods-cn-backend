@@ -11,7 +11,12 @@ import (
 	"mcmods-cn-backend/internal/querycache"
 )
 
-const maintenanceBatchSize = 1000
+const (
+	maintenanceBatchSize  = 1000
+	maintenanceMaxBatches = 4
+)
+
+const stickerUploadRetention = time.Hour
 
 // MaintenanceWorker keeps expiration cleanup outside user-facing request
 // transactions. Each delete is bounded so a large backlog cannot hold a long
@@ -47,10 +52,29 @@ func (worker *MaintenanceWorker) run(ctx context.Context) {
 }
 
 func (worker *MaintenanceWorker) prune(ctx context.Context) {
-	pruneCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	worker.pruneReportEvidence(pruneCtx)
-	worker.expireBans(pruneCtx)
+	worker.pruneWithTimeout(ctx, 30*time.Second)
+}
+
+func (worker *MaintenanceWorker) pruneWithTimeout(ctx context.Context, timeout time.Duration) {
+	// Security state goes first. Every category gets its own deadline and a
+	// fixed batch budget; a blocked or backlogged category cannot consume the
+	// next category's time. All deadlines still inherit shutdown cancellation.
+	for _, prune := range []func(context.Context){
+		worker.expireBans,
+		worker.pruneBlueprintUploads,
+		worker.pruneReportEvidence,
+		worker.pruneStickerUploads,
+		worker.pruneSiteLogoUploads,
+		worker.pruneSkinTextureBlobs,
+		worker.pruneCatalogImportArtifacts,
+	} {
+		if ctx.Err() != nil {
+			return
+		}
+		pruneCtx, cancel := context.WithTimeout(ctx, timeout)
+		prune(pruneCtx)
+		cancel()
+	}
 	for _, statement := range []string{
 		`update log_shares set status='expired' where id in (
 			select id from log_shares where expires_at<=now() and status in ('processing','ready')
@@ -70,7 +94,11 @@ func (worker *MaintenanceWorker) prune(ctx context.Context) {
 			select session_hash from user_presence_sessions where last_active_at<now()-interval '1 day' order by last_active_at limit $1
 		)`,
 	} {
-		for pruneCtx.Err() == nil {
+		if ctx.Err() != nil {
+			return
+		}
+		pruneCtx, cancel := context.WithTimeout(ctx, timeout)
+		for batch := 0; batch < maintenanceMaxBatches && pruneCtx.Err() == nil; batch++ {
 			command, err := worker.db.Exec(pruneCtx, statement, maintenanceBatchSize)
 			if err != nil {
 				log.Printf("background expiration cleanup failed: %v", err)
@@ -80,20 +108,188 @@ func (worker *MaintenanceWorker) prune(ctx context.Context) {
 				break
 			}
 		}
+		cancel()
+	}
+}
+
+func (worker *MaintenanceWorker) pruneCatalogImportArtifacts(ctx context.Context) {
+	server := &Server{db: worker.db}
+	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
+		recovered, err := server.recoverOrphanedCatalogImportArtifacts(ctx)
+		if err != nil {
+			log.Printf("recover orphaned catalog import artifacts: %v", err)
+			return
+		}
+		if !recovered {
+			return
+		}
+	}
+}
+
+// pruneSkinTextureBlobs calibrates missed request-time cleanup without scanning
+// the skin history. idx_skin_texture_blobs_unreferenced keeps each batch on the
+// transactionally maintained active_reference_count=0 projection.
+func (worker *MaintenanceWorker) pruneSkinTextureBlobs(ctx context.Context) {
+	server := &Server{db: worker.db}
+	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
+		tx, err := worker.db.Begin(ctx)
+		if err != nil {
+			log.Printf("begin unreferenced skin texture cleanup: %v", err)
+			return
+		}
+		rows, err := tx.Query(ctx, `select blob.hash
+			from skin_texture_blobs blob
+			join oss_files file on file.id=blob.oss_file_id and file.status='active'
+			where blob.active_reference_count=0
+			order by blob.created_at,blob.hash limit $1`, maintenanceBatchSize)
+		if err != nil {
+			tx.Rollback(ctx)
+			log.Printf("claim unreferenced skin texture cleanup: %v", err)
+			return
+		}
+		hashes := make([]string, 0, maintenanceBatchSize)
+		for rows.Next() {
+			var hash string
+			if err = rows.Scan(&hash); err != nil {
+				break
+			}
+			hashes = append(hashes, hash)
+		}
+		rows.Close()
+		if err == nil {
+			err = rows.Err()
+		}
+		for _, hash := range hashes {
+			if err != nil {
+				break
+			}
+			err = server.tombstoneUnreferencedMinecraftTextureBlobTx(ctx, tx, hash, "unreferenced_minecraft_texture_blob")
+		}
+		if err != nil {
+			tx.Rollback(ctx)
+			log.Printf("queue unreferenced skin texture cleanup: %v", err)
+			return
+		}
+		if err = tx.Commit(ctx); err != nil {
+			log.Printf("commit unreferenced skin texture cleanup: %v", err)
+			return
+		}
+		if len(hashes) < maintenanceBatchSize {
+			return
+		}
+	}
+}
+
+func (worker *MaintenanceWorker) pruneBlueprintUploads(ctx context.Context) {
+	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
+		tx, err := worker.db.Begin(ctx)
+		if err != nil {
+			log.Printf("begin expired blueprint upload cleanup: %v", err)
+			return
+		}
+		rows, err := tx.Query(ctx, `select id from blueprints
+			where status='uploading' and upload_expires_at is not null and upload_expires_at<=now()
+			order by upload_expires_at,id for update skip locked limit $1`, maintenanceBatchSize)
+		if err != nil {
+			tx.Rollback(ctx)
+			log.Printf("claim expired blueprint upload cleanup: %v", err)
+			return
+		}
+		blueprintIDs := make([]int64, 0, maintenanceBatchSize)
+		for rows.Next() {
+			var blueprintID int64
+			if err = rows.Scan(&blueprintID); err != nil {
+				break
+			}
+			blueprintIDs = append(blueprintIDs, blueprintID)
+		}
+		rows.Close()
+		if err == nil {
+			err = rows.Err()
+		}
+		if err == nil && len(blueprintIDs) > 0 {
+			err = deletePendingBlueprintUploadRowsTx(ctx, tx, blueprintIDs)
+		}
+		if err != nil {
+			tx.Rollback(ctx)
+			log.Printf("delete expired blueprint uploads: %v", err)
+			return
+		}
+		if err = tx.Commit(ctx); err != nil {
+			log.Printf("commit expired blueprint upload cleanup: %v", err)
+			return
+		}
+		if len(blueprintIDs) < maintenanceBatchSize {
+			return
+		}
+	}
+}
+
+func (worker *MaintenanceWorker) pruneStickerUploads(ctx context.Context) {
+	server := &Server{db: worker.db}
+	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
+		tx, err := worker.db.Begin(ctx)
+		if err != nil {
+			log.Printf("begin temporary sticker upload cleanup: %v", err)
+			return
+		}
+		rows, err := tx.Query(ctx, `select file.id from oss_files file
+			where file.status='active'
+			  and (source='sticker-upload' or source like 'sticker-upload:%')
+			  and file.created_at<now()-make_interval(secs=>$2)
+			  and not exists(select 1 from stickers where image_file_id=file.id)
+			order by file.created_at,file.id for update of file skip locked limit $1`,
+			maintenanceBatchSize, int(stickerUploadRetention/time.Second))
+		if err != nil {
+			tx.Rollback(ctx)
+			log.Printf("claim temporary sticker upload cleanup: %v", err)
+			return
+		}
+		fileIDs := make([]int64, 0, maintenanceBatchSize)
+		for rows.Next() {
+			var fileID int64
+			if err = rows.Scan(&fileID); err != nil {
+				break
+			}
+			fileIDs = append(fileIDs, fileID)
+		}
+		rows.Close()
+		if err == nil {
+			err = rows.Err()
+		}
+		for _, fileID := range fileIDs {
+			if err != nil {
+				break
+			}
+			err = server.tombstoneUnreferencedStickerFileTx(ctx, tx, fileID, "sticker_upload_expired")
+		}
+		if err != nil {
+			tx.Rollback(ctx)
+			log.Printf("queue temporary sticker upload cleanup: %v", err)
+			return
+		}
+		if err = tx.Commit(ctx); err != nil {
+			log.Printf("commit temporary sticker upload cleanup: %v", err)
+			return
+		}
+		if len(fileIDs) < maintenanceBatchSize {
+			return
+		}
 	}
 }
 
 func (worker *MaintenanceWorker) expireBans(ctx context.Context) {
-	for ctx.Err() == nil {
+	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
 		rows, err := worker.db.Query(ctx, `with candidates as (
 			select id from ban_records where status='active' and ends_at is not null and ends_at<=now()
 			order by ends_at,id for update skip locked limit $1
 		), expired as (
 			update ban_records ban set status='expired'
-			from candidates where ban.id=candidates.id returning ban.user_id
-		) delete from user_role_bindings binding using roles role
-			where binding.role_id=role.id and role.code='banned' and binding.user_id in (select user_id from expired)
-			returning binding.user_id`, maintenanceBatchSize)
+			from candidates where ban.id=candidates.id returning ban.id,ban.user_id
+		) delete from user_role_bindings binding using expired
+			where binding.user_id=expired.user_id and binding.source='governance_ban'
+			  and binding.source_key=expired.id::text
+			returning expired.user_id`, maintenanceBatchSize)
 		if err != nil {
 			log.Printf("background ban expiration cleanup failed: %v", err)
 			return
@@ -115,13 +311,18 @@ func (worker *MaintenanceWorker) expireBans(ctx context.Context) {
 			return
 		}
 		for _, userID := range userIDs {
+			key := querycache.UserPermissionVersionKey(userID)
+			var invalidateErr error
+			if worker.cache != nil {
+				invalidateErr = worker.cache.DeleteShared(ctx, key)
+			}
 			var version int64
 			if err = worker.db.QueryRow(ctx, `select permission_version from users where id=$1`, userID).Scan(&version); err != nil {
-				log.Printf("refresh expired ban permission version: %v", err)
+				log.Printf("refresh expired ban permission version user_id=%d invalidate_error=%v query_error=%v", userID, invalidateErr, err)
 				continue
 			}
-			if worker.cache != nil {
-				worker.cache.SetShared(ctx, querycache.UserPermissionVersionKey(userID), []byte(strconv.FormatInt(version, 10)), 10*time.Second)
+			if worker.cache != nil && worker.cache.Enabled() && !worker.cache.SetShared(ctx, key, []byte(strconv.FormatInt(version, 10)), 10*time.Second) {
+				log.Printf("publish expired ban permission version user_id=%d invalidate_error=%v", userID, invalidateErr)
 			}
 		}
 		if len(userIDs) < maintenanceBatchSize {
@@ -135,7 +336,7 @@ func (worker *MaintenanceWorker) expireBans(ctx context.Context) {
 // durable retries; marking the file deleted immediately also closes the access
 // path before physical deletion succeeds.
 func (worker *MaintenanceWorker) pruneReportEvidence(ctx context.Context) {
-	for ctx.Err() == nil {
+	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
 		tx, err := worker.db.Begin(ctx)
 		if err != nil {
 			log.Printf("begin report evidence cleanup: %v", err)

@@ -13,7 +13,7 @@ func featureUpdateSchemaStatements() []string {
 			created_at timestamptz not null default now(),
 			primary key(recipe_id,version_code),
 			check(version_code=btrim(version_code) and version_code<>''),
-			check(source in ('import','editor','backfill','split'))
+			check(source in ('import','editor'))
 		)`,
 		`create index if not exists idx_recipe_version_bindings_version
 			on recipe_version_bindings(version_code,recipe_id)`,
@@ -55,8 +55,6 @@ func featureUpdateSchemaStatements() []string {
 		)`,
 		`create index if not exists idx_log_shares_owner_created
 			on log_shares(owner_user_id,created_at desc,id desc) where owner_user_id is not null`,
-		`create index if not exists idx_log_shares_owner_fk
-			on log_shares(owner_user_id)`,
 		`create index if not exists idx_log_shares_source_file_fk
 			on log_shares(source_file_id)`,
 		`create index if not exists idx_log_shares_expiry
@@ -105,5 +103,33 @@ func featureUpdateSchemaStatements() []string {
 			on comment_log_bindings(log_share_id,comment_id)`,
 		`create index if not exists idx_comment_log_bindings_attachment
 			on comment_log_bindings(attachment_file_id,comment_id)`,
+		`create table if not exists comment_log_attachment_jobs (
+			id bigserial primary key,
+			comment_id bigint not null,
+			attachment_file_id bigint not null,
+			requested_by bigint not null references users(id) on delete cascade,
+			status text not null default 'queued',
+			attempts integer not null default 0,
+			max_attempts integer not null default 5,
+			next_attempt_at timestamptz not null default now(),
+			lease_expires_at timestamptz,
+			locked_by text not null default '',
+			last_error text not null default '',
+			created_at timestamptz not null default now(),
+			started_at timestamptz,
+			finished_at timestamptz,
+			updated_at timestamptz not null default now(),
+			unique(comment_id,attachment_file_id),
+			foreign key(comment_id,attachment_file_id)
+				references comment_attachments(comment_id,attachment_file_id) on delete cascade,
+			check(status in ('queued','processing','completed','failed')),
+			check(attempts>=0 and max_attempts>0 and attempts<=max_attempts)
+		)`,
+		`create index if not exists idx_comment_log_attachment_jobs_pending
+			on comment_log_attachment_jobs(next_attempt_at,id) where status='queued'`,
+		`create index if not exists idx_comment_log_attachment_jobs_processing
+			on comment_log_attachment_jobs(lease_expires_at,id) where status='processing'`,
+		`create index if not exists idx_comment_log_attachment_jobs_requester
+			on comment_log_attachment_jobs(requested_by,id)`,
 	}
 }

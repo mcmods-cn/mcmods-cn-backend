@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -31,6 +30,11 @@ type contentHistoryItem struct {
 
 func (s *Server) communityPostHistory(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	pageRequest, err := parseContentHistoryPageRequest(r.URL.Query(), contentHistoryScope("community", publicID))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	claims := currentClaims(r)
 	moderator := claimsAllow(claims, "content.review") || claimsAllow(claims, "community.edit") || claimsAllow(claims, "admin.*")
 	var authorID int64
@@ -46,17 +50,27 @@ func (s *Server) communityPostHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	includeUnpublished := moderator || claims.Subject == authorID
-	items, err := contentRevisionHistory(r.Context(), s.db, communityPostAggregate, publicID, publishedRevisionID, includeUnpublished)
+	items, err := contentRevisionHistoryPage(r.Context(), s.db, communityPostAggregate, publicID, publishedRevisionID,
+		pendingReviewVisibility{includeAll: includeUnpublished}, pageRequest)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load community post history")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, mergeContentHistoryPage(items, nil, pageRequest))
 }
 
 func (s *Server) modContentResourceHistory(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	identity, err := s.modIdentity(r.Context(), r.PathValue("siteId"))
+	siteID := normalizeModSiteID(r.PathValue("siteId"))
+	resourcePublicID := strings.ToLower(strings.TrimSpace(r.PathValue("resourceId")))
+	versionPublicID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("version")))
+	pageRequest, err := parseContentHistoryPageRequest(r.URL.Query(),
+		contentHistoryScope("mod-resource", siteID, resourcePublicID, versionPublicID), "version")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	identity, err := s.modIdentity(r.Context(), siteID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "mod not found")
 		return
@@ -65,8 +79,6 @@ func (s *Server) modContentResourceHistory(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to load resource history")
 		return
 	}
-	resourcePublicID := strings.ToLower(strings.TrimSpace(r.PathValue("resourceId")))
-	versionPublicID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("version")))
 	var resourceID, versionID int64
 	var publishedRevisionID *int64
 	err = s.db.QueryRow(r.Context(), `select entity.id,version.id,detail.published_revision_id
@@ -84,32 +96,32 @@ func (s *Server) modContentResourceHistory(w http.ResponseWriter, r *http.Reques
 		}
 		return
 	}
-	includeUnpublished := canEditMod(claims, identity) || claimsAllow(claims, "content.review") || claimsAllow(claims, "project.review") || claimsAllow(claims, "admin.*")
-	items, err := contentRevisionHistory(r.Context(), s.db, modContentAggregateResource,
-		resourcePublicID+":"+versionPublicID, publishedRevisionID, includeUnpublished)
+	visibility := projectPendingReviewVisibility(claims, identity.UniqueID, canEditMod(claims, identity))
+	items, err := contentRevisionHistoryPage(r.Context(), s.db, modContentAggregateResource,
+		resourcePublicID+":"+versionPublicID, publishedRevisionID, visibility, pageRequest)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load resource history")
 		return
 	}
-	imports, err := importedResourceHistory(r.Context(), s.db, resourceID, versionID, includeUnpublished)
+	imports, err := importedResourceHistoryPage(r.Context(), s.db, resourceID, versionID, visibility.includeAll, pageRequest)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load imported resource history")
 		return
 	}
-	items = append(items, imports...)
-	sort.SliceStable(items, func(left, right int) bool { return items[left].CreatedAt.After(items[right].CreatedAt) })
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, mergeContentHistoryPage(items, imports, pageRequest))
 }
 
-func contentRevisionHistory(ctx context.Context, query contentHistoryQuery, aggregateType, aggregateKey string, publishedRevisionID *int64, includeUnpublished bool) ([]contentHistoryItem, error) {
-	rows, err := query.Query(ctx, `select revision.public_id,revision.revision_no,request.status,revision.source,request.reason,
-		coalesce(account.public_id,''),coalesce(nullif(request.submitted_by_snapshot,''),nullif(revision.created_by_snapshot,''),account.username,'system'),
-		revision.created_at,coalesce(revision.id=$3::bigint,false)
-		from content_revisions revision
-		join change_requests request on request.proposed_revision_id=revision.id
-		left join users account on account.id=coalesce(request.submitted_by,revision.created_by)
-		where revision.aggregate_type=$1 and revision.aggregate_key=$2 and ($4 or request.status='approved')
-		order by revision.revision_no desc`, aggregateType, aggregateKey, publishedRevisionID, includeUnpublished)
+func contentRevisionHistoryPage(
+	ctx context.Context,
+	query contentHistoryQuery,
+	aggregateType string,
+	aggregateKey string,
+	publishedRevisionID *int64,
+	visibility pendingReviewVisibility,
+	request contentHistoryPageRequest,
+) ([]contentHistoryItem, error) {
+	statement, arguments := contentRevisionHistoryPageSQL(aggregateType, aggregateKey, publishedRevisionID, visibility, request)
+	rows, err := query.Query(ctx, statement, arguments...)
 	if err != nil {
 		return nil, err
 	}
@@ -127,16 +139,9 @@ func contentRevisionHistory(ctx context.Context, query contentHistoryQuery, aggr
 	return items, rows.Err()
 }
 
-func importedResourceHistory(ctx context.Context, query contentHistoryQuery, resourceID, versionID int64, includeUnpublished bool) ([]contentHistoryItem, error) {
-	rows, err := query.Query(ctx, `select revision.id,revision.revision_no,revision.status,revision.source_kind,revision.source_namespace,
-		coalesce(account.public_id,''),coalesce(nullif(revision.submitted_by_snapshot,''),account.username,'system'),
-		revision.created_at,revision.is_active
-		from resource_import_snapshots snapshot
-		join catalog_import_revisions revision on revision.id=snapshot.revision_id
-		left join users account on account.id=revision.submitted_by
-		where snapshot.resource_id=$1 and revision.target_version_id=$2
-		  and ($3 or revision.status in ('ready','partial','superseded'))
-		order by revision.created_at desc`, resourceID, versionID, includeUnpublished)
+func importedResourceHistoryPage(ctx context.Context, query contentHistoryQuery, resourceID, versionID int64, includeUnpublished bool, request contentHistoryPageRequest) ([]contentHistoryItem, error) {
+	statement, arguments := importedResourceHistoryPageSQL(resourceID, versionID, includeUnpublished, request)
+	rows, err := query.Query(ctx, statement, arguments...)
 	if err != nil {
 		return nil, err
 	}

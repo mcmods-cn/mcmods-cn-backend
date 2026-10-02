@@ -4,34 +4,53 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"mcmods-cn-backend/internal/security"
 )
 
 const communityPostAggregate = "community_post"
 
+const maximumCommunityPostProjectReferences = 32
+const maximumCommunityPostResourceReferences = 64
+const maximumCommunityPostResourceIdentifierBytes = 256
+
+var errCommunityPostProjectReferenceNotVisible = errors.New("selected project was not found or is not visible")
+
+func logCommunityPostDataFailure(stage, identity string, err error) {
+	slog.Error("community post data failure",
+		"module", "community_post",
+		"stage", stage,
+		"identity", identity,
+		"error", err,
+	)
+}
+
 type communityPostReference struct {
-	PublicID   string            `json:"publicId,omitempty"`
-	Type       string            `json:"type,omitempty"`
-	Kind       string            `json:"kind,omitempty"`
-	Identifier string            `json:"identifier"`
-	Name       string            `json:"name,omitempty"`
-	SiteID     string            `json:"siteId,omitempty"`
-	Names      map[string]string `json:"names,omitempty"`
-	IconURL    string            `json:"iconUrl,omitempty"`
-	VersionID  string            `json:"versionId,omitempty"`
-	RevisionID string            `json:"revisionId,omitempty"`
-	IconPath   string            `json:"iconPath,omitempty"`
-	Unresolved bool              `json:"unresolved,omitempty"`
+	PublicID    string            `json:"publicId,omitempty"`
+	Type        string            `json:"type,omitempty"`
+	Kind        string            `json:"kind,omitempty"`
+	Identifier  string            `json:"identifier"`
+	Name        string            `json:"name,omitempty"`
+	SiteID      string            `json:"siteId,omitempty"`
+	Names       map[string]string `json:"names,omitempty"`
+	IconURL     string            `json:"iconUrl,omitempty"`
+	VersionID   string            `json:"versionId,omitempty"`
+	RevisionID  string            `json:"revisionId,omitempty"`
+	IconPath    string            `json:"iconPath,omitempty"`
+	Unresolved  bool              `json:"unresolved,omitempty"`
+	Unavailable bool              `json:"unavailable,omitempty"`
+	InternalID  int64             `json:"-"`
 }
 
 type communityPostSnapshot struct {
@@ -54,6 +73,23 @@ type communityPostSnapshot struct {
 	Resources         []communityPostReference `json:"resources"`
 }
 
+type communityPostMutationRequest struct {
+	communityPostSnapshot
+	BaseRevisionID *string `json:"baseRevisionId,omitempty"`
+}
+
+type communityPostEditConflict struct {
+	CurrentRevisionID string `json:"currentRevisionId,omitempty"`
+}
+
+type communityPostEditConflictError struct {
+	Current communityPostEditConflict
+}
+
+func (err *communityPostEditConflictError) Error() string {
+	return "community post changed after the editor baseline"
+}
+
 type communityPostBounty struct {
 	Currency     string         `json:"currency"`
 	CurrencyName string         `json:"currencyName"`
@@ -66,33 +102,43 @@ type communityPostBounty struct {
 }
 
 type communityPostResponse struct {
-	ID                string                   `json:"id"`
-	Kind              string                   `json:"kind"`
-	Category          string                   `json:"category"`
-	Title             string                   `json:"title"`
-	SourceLocale      string                   `json:"sourceLocale"`
-	BodyMarkdown      string                   `json:"bodyMarkdown,omitempty"`
-	MinecraftVersions []string                 `json:"minecraftVersions"`
-	ModVersionMin     string                   `json:"modVersionMin,omitempty"`
-	ModVersionMax     string                   `json:"modVersionMax,omitempty"`
-	Severity          string                   `json:"severity,omitempty"`
-	HasFix            bool                     `json:"hasFix,omitempty"`
-	IssueURL          string                   `json:"issueUrl,omitempty"`
-	CoverURL          string                   `json:"coverUrl,omitempty"`
-	CoverFileID       string                   `json:"coverFileId,omitempty"`
-	ResolutionStatus  string                   `json:"resolutionStatus,omitempty"`
-	AcceptedCommentID string                   `json:"acceptedCommentId,omitempty"`
-	ResolvedAt        *time.Time               `json:"resolvedAt,omitempty"`
-	Bounty            *communityPostBounty     `json:"bounty,omitempty"`
-	AuthorID          string                   `json:"authorId"`
-	AuthorName        string                   `json:"authorName"`
-	ReviewStatus      string                   `json:"reviewStatus"`
-	Projects          []communityPostReference `json:"projects"`
-	Resources         []communityPostReference `json:"resources"`
-	CreatedAt         time.Time                `json:"createdAt"`
-	UpdatedAt         time.Time                `json:"updatedAt"`
-	CanEdit           bool                     `json:"canEdit"`
-	CanResolve        bool                     `json:"canResolve"`
+	ID                  string                   `json:"id"`
+	Kind                string                   `json:"kind"`
+	Category            string                   `json:"category"`
+	Title               string                   `json:"title"`
+	SourceLocale        string                   `json:"sourceLocale"`
+	BodyMarkdown        string                   `json:"bodyMarkdown,omitempty"`
+	Summary             string                   `json:"summary,omitempty"`
+	MinecraftVersions   []string                 `json:"minecraftVersions"`
+	ModVersionMin       string                   `json:"modVersionMin,omitempty"`
+	ModVersionMax       string                   `json:"modVersionMax,omitempty"`
+	Severity            string                   `json:"severity,omitempty"`
+	HasFix              bool                     `json:"hasFix,omitempty"`
+	IssueURL            string                   `json:"issueUrl,omitempty"`
+	CoverURL            string                   `json:"coverUrl,omitempty"`
+	CoverFileID         string                   `json:"coverFileId,omitempty"`
+	ResolutionStatus    string                   `json:"resolutionStatus,omitempty"`
+	AcceptedCommentID   string                   `json:"acceptedCommentId,omitempty"`
+	ResolvedAt          *time.Time               `json:"resolvedAt,omitempty"`
+	Bounty              *communityPostBounty     `json:"bounty,omitempty"`
+	AuthorID            string                   `json:"authorId"`
+	AuthorName          string                   `json:"authorName"`
+	ReviewStatus        string                   `json:"reviewStatus"`
+	PublishedRevisionID string                   `json:"publishedRevisionId,omitempty"`
+	Projects            []communityPostReference `json:"projects"`
+	Resources           []communityPostReference `json:"resources"`
+	CreatedAt           time.Time                `json:"createdAt"`
+	UpdatedAt           time.Time                `json:"updatedAt"`
+	CanEdit             bool                     `json:"canEdit"`
+	CanResolve          bool                     `json:"canResolve"`
+}
+
+type communityPostPageResponse struct {
+	Items      []communityPostResponse `json:"items"`
+	Limit      int                     `json:"limit"`
+	HasMore    bool                    `json:"hasMore"`
+	NextCursor string                  `json:"nextCursor"`
+	Categories []string                `json:"categories"`
 }
 
 func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
@@ -100,130 +146,76 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 		s.createCommunityPost(w, r)
 		return
 	}
-	kind := normalizeCommunityPostKind(r.URL.Query().Get("kind"))
-	if kind == "" {
-		writeError(w, http.StatusBadRequest, "invalid community post kind")
-		return
-	}
-	limit := boundedLimit(r.URL.Query().Get("limit"), 24, 100)
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	if offset < 0 {
-		offset = 0
-	}
-	query, validQuery := parseCatalogQuery(r.URL.Query().Get("q"))
-	if !validQuery {
-		writeError(w, http.StatusBadRequest, "invalid community post query")
-		return
-	}
-	category := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("category")))
-	if category != "" && !communityPostCategoryAllowed(kind, category) {
-		writeError(w, http.StatusBadRequest, "invalid community post category")
-		return
-	}
-	versions, validVersions := parseCatalogList(r.URL.Query().Get("version"), 20)
-	if !validVersions {
-		writeError(w, http.StatusBadRequest, "invalid Minecraft version filter")
-		return
-	}
-	versionMode, validVersionMode := parseCatalogVersionMode(r.URL.Query().Get("versionMode"))
-	if !validVersionMode {
-		writeError(w, http.StatusBadRequest, "invalid version mode")
-		return
-	}
-	projectFilters, validProjectFilters := parseCommunityProjectFilters(r.URL.Query().Get("project"))
-	if !validProjectFilters {
-		writeError(w, http.StatusBadRequest, "invalid community project filter")
-		return
-	}
-	rawSort := strings.TrimSpace(r.URL.Query().Get("sort"))
-	if rawSort == "" {
-		rawSort = string(catalogSortPublished)
-	}
-	sort, validSort := parseCatalogSort(rawSort)
-	direction, validDirection := parseCatalogSortDirection(r.URL.Query().Get("order"), rawSort)
-	if !validSort || !validDirection {
-		writeError(w, http.StatusBadRequest, "invalid community post sort")
-		return
-	}
-	modID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("modId")))
-	resourceID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("resourceId")))
-	viewerID := currentClaims(r).Subject
-	moderator := claimsAllow(currentClaims(r), "content.review") || claimsAllow(currentClaims(r), "admin.*")
-	indexed := indexedSearchPage{}
-	if category == "" && len(versions) == 0 && len(projectFilters) == 0 && catalogSortUsesSearchIndex(sort) {
-		indexed = s.searchCommunityPage(r.Context(), query, kind, modID, resourceID, currentClaims(r), moderator, limit, offset)
-	}
-	databaseOffset := offset
-	if indexed.Used {
-		databaseOffset = 0
-	}
-	orderSQL := catalogOrderSQL(sort, direction, indexed.Used, 8,
-		"coalesce(post.published_at,post.created_at)", "post.updated_at", "post.id", "post.title")
-	rows, err := s.db.Query(r.Context(), `select post.id,post.public_id,post.kind,post.category,post.title,post.source_locale,post.body_markdown,
-		post.minecraft_versions,post.mod_version_min,post.mod_version_max,post.severity,post.has_fix,post.issue_url,
-		coalesce(file.public_id,''),coalesce(file.object_key,''),author.public_id,author.username,post.review_status,post.created_at,post.updated_at,post.author_id,
-		post.resolution_status,coalesce(accepted.public_id,''),post.resolved_at
-		from community_posts post join users author on author.id=post.author_id
-		left join oss_files file on file.id=post.cover_file_id and file.status='active'
-		left join comments accepted on accepted.id=post.accepted_comment_id
-		left join public_routes popularity_route on popularity_route.entity_type='community_post' and popularity_route.internal_id=post.id
-		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
-		where post.kind=$1 and post.status='active' and (post.review_status='approved' or post.author_id=$2 or $3)
-		and (($7 and post.id=any($8::bigint[])) or (not $7 and ($4='' or lower(post.title) like '%%'||lower($4)||'%%' or lower(post.body_markdown) like '%%'||lower($4)||'%%')))
-		and ($5='' or exists(select 1 from community_post_project_refs ref join public_routes route on route.internal_id=ref.target_id and route.entity_type=ref.target_type where ref.post_id=post.id and route.public_id=$5))
-		and ($6='' or exists(select 1 from community_post_resource_refs ref join catalog_entities entity on entity.id=ref.resource_id where ref.post_id=post.id and entity.public_id=$6))
-		and ($11='' or post.category=$11)
-		and (cardinality($12::text[])=0
-			or $13='all' and post.minecraft_versions @> $12::text[]
-			or $13='any' and post.minecraft_versions && $12::text[])
-		and (cardinality($14::text[])=0 or exists(select 1 from community_post_project_refs ref
-			left join public_routes route on route.internal_id=ref.target_id and route.entity_type=ref.target_type
-			where ref.post_id=post.id and lower(ref.target_type||':'||coalesce(route.public_id,ref.raw_identifier))=any($14::text[])))
-		order by `+orderSQL+`
-		limit $9 offset $10`, kind, viewerID, moderator, query, modID, resourceID, indexed.Used, indexed.IDs, limit, databaseOffset, category, versions, versionMode, projectFilters)
+	claims := currentClaims(r)
+	page, err := parseCommunityPostPageRequest(r.URL.Query(), claims)
 	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	query, arguments := communityPostPageSQL(page)
+	rows, err := s.db.Query(r.Context(), query, arguments...)
+	if err != nil {
+		logCommunityPostDataFailure("directory_query", page.Kind, err)
 		writeError(w, http.StatusInternalServerError, "failed to load community posts")
 		return
 	}
 	defer rows.Close()
-	items := make([]communityPostResponse, 0)
-	internalIDs := make([]int64, 0, limit)
-	ossCfg := s.ossConfigFromSettings(r.Context())
+	pageRows := make([]communityPostPageRow, 0, page.Limit+1)
 	for rows.Next() {
-		var item communityPostResponse
-		var internalID, authorInternalID int64
-		var coverKey string
-		if err = rows.Scan(&internalID, &item.ID, &item.Kind, &item.Category, &item.Title, &item.SourceLocale, &item.BodyMarkdown,
-			&item.MinecraftVersions, &item.ModVersionMin, &item.ModVersionMax, &item.Severity, &item.HasFix, &item.IssueURL,
-			&item.CoverFileID, &coverKey, &item.AuthorID, &item.AuthorName, &item.ReviewStatus, &item.CreatedAt, &item.UpdatedAt, &authorInternalID,
-			&item.ResolutionStatus, &item.AcceptedCommentID, &item.ResolvedAt); err != nil {
+		var row communityPostPageRow
+		if err = rows.Scan(&row.ID, &row.Item.ID, &row.Item.Kind, &row.Item.Category, &row.Item.Title,
+			&row.Item.SourceLocale, &row.Item.Summary, &row.Item.MinecraftVersions, &row.Item.ModVersionMin,
+			&row.Item.ModVersionMax, &row.Item.Severity, &row.Item.HasFix, &row.Item.IssueURL,
+			&row.Item.CoverFileID, &row.CoverKey, &row.Item.AuthorID, &row.Item.AuthorName,
+			&row.Item.ReviewStatus, &row.Item.CreatedAt, &row.Item.UpdatedAt, &row.AuthorInternalID,
+			&row.Item.ResolutionStatus, &row.Item.AcceptedCommentID, &row.Item.ResolvedAt,
+			&row.PublishedAt, &row.SortName, &row.Heat, &row.Downloads, &row.Favorites, &row.Rating,
+			&row.RatingCount, &row.Views, &row.Comments, &row.Relevance); err != nil {
+			logCommunityPostDataFailure("directory_scan", page.Kind, err)
 			writeError(w, http.StatusInternalServerError, "failed to decode community post")
 			return
 		}
-		if coverKey != "" {
-			access, accessErr := s.resolveOSSObjectAccessWithConfig(r.Context(), ossCfg, coverKey, ossObjectAccessOptions{})
+		row.UpdatedAt = row.Item.UpdatedAt
+		pageRows = append(pageRows, row)
+	}
+	if err = rows.Err(); err != nil {
+		logCommunityPostDataFailure("directory_cursor", page.Kind, err)
+		writeError(w, http.StatusInternalServerError, "failed to load community posts")
+		return
+	}
+	rows.Close()
+	hasMore := len(pageRows) > page.Limit
+	if hasMore {
+		pageRows = pageRows[:page.Limit]
+	}
+	items := make([]communityPostResponse, 0, len(pageRows))
+	internalIDs := make([]int64, 0, len(pageRows))
+	ossCfg := s.ossConfigFromSettings(r.Context())
+	for index := range pageRows {
+		row := &pageRows[index]
+		if row.CoverKey != "" {
+			access, accessErr := s.resolveOSSObjectAccessWithConfig(r.Context(), ossCfg, row.CoverKey, ossObjectAccessOptions{})
 			if accessErr != nil {
 				writeError(w, http.StatusBadGateway, "failed to generate community post cover URL")
 				return
 			}
-			item.CoverURL = access.URL
+			row.Item.CoverURL = access.URL
 		}
-		item.CanEdit = viewerID > 0 && (viewerID == authorInternalID || claimsAllow(currentClaims(r), "community.edit") || moderator)
-		item.CanResolve = item.Kind == "discussion" && item.ResolutionStatus == "open" && item.ReviewStatus == "approved" && viewerID == authorInternalID
-		items = append(items, item)
-		internalIDs = append(internalIDs, internalID)
-	}
-	if err = rows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load community posts")
-		return
+		row.Item.CanEdit = page.ViewerID > 0 && (page.ViewerID == row.AuthorInternalID || claimsAllow(claims, "community.edit") || claimsAllow(claims, "admin.*"))
+		row.Item.CanResolve = row.Item.Kind == "discussion" && row.Item.ResolutionStatus == "open" &&
+			row.Item.ReviewStatus == "approved" && page.ViewerID == row.AuthorInternalID
+		items = append(items, row.Item)
+		internalIDs = append(internalIDs, row.ID)
 	}
 	bounties, err := s.loadCommunityPostBounties(r.Context(), internalIDs)
 	if err != nil {
+		logCommunityPostDataFailure("directory_bounties", page.Kind, err)
 		writeError(w, http.StatusInternalServerError, "failed to load community post bounties")
 		return
 	}
-	projects, resources, err := s.communityPostReferencesBatch(r.Context(), internalIDs)
+	projects, resources, err := s.communityPostReferencesBatch(r.Context(), internalIDs, claims)
 	if err != nil {
+		logCommunityPostDataFailure("directory_references", page.Kind, err)
 		writeError(w, http.StatusInternalServerError, "failed to load community post references")
 		return
 	}
@@ -232,25 +224,14 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 		items[index].Projects = projects[internalID]
 		items[index].Resources = resources[internalID]
 	}
-	var total int
-	if indexed.Used {
-		total = indexed.Total
-	} else {
-		_ = s.db.QueryRow(r.Context(), `select count(*) from community_posts post where post.kind=$1 and post.status='active'
-		and (post.review_status='approved' or post.author_id=$2 or $3)
-		and ($4='' or lower(post.title) like '%%'||lower($4)||'%%' or lower(post.body_markdown) like '%%'||lower($4)||'%%')
-		and ($5='' or exists(select 1 from community_post_project_refs ref join public_routes route on route.internal_id=ref.target_id and route.entity_type=ref.target_type where ref.post_id=post.id and route.public_id=$5))
-		and ($6='' or exists(select 1 from community_post_resource_refs ref join catalog_entities entity on entity.id=ref.resource_id where ref.post_id=post.id and entity.public_id=$6))
-		and ($7='' or post.category=$7)
-		and (cardinality($8::text[])=0
-			or $9='all' and post.minecraft_versions @> $8::text[]
-			or $9='any' and post.minecraft_versions && $8::text[])
-		and (cardinality($10::text[])=0 or exists(select 1 from community_post_project_refs ref
-			left join public_routes route on route.internal_id=ref.target_id and route.entity_type=ref.target_type
-			where ref.post_id=post.id and lower(ref.target_type||':'||coalesce(route.public_id,ref.raw_identifier))=any($10::text[])))`,
-			kind, viewerID, moderator, query, modID, resourceID, category, versions, versionMode, projectFilters).Scan(&total)
+	nextCursor := ""
+	if hasMore && len(pageRows) > 0 {
+		nextCursor = communityPostNextCursor(page, pageRows[len(pageRows)-1])
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset, "categories": communityPostCategories(kind)})
+	writeJSON(w, http.StatusOK, communityPostPageResponse{
+		Items: items, Limit: page.Limit, HasMore: hasMore, NextCursor: nextCursor,
+		Categories: communityPostCategories(page.Kind),
+	})
 }
 
 func (s *Server) communityPostItem(w http.ResponseWriter, r *http.Request) {
@@ -273,9 +254,14 @@ func (s *Server) communityPostItem(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createCommunityPost(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	var snapshot communityPostSnapshot
-	if decodeJSON(r, &snapshot) != nil || normalizeCommunityPostSnapshot(&snapshot) != nil {
+	var request communityPostMutationRequest
+	if decodeJSON(r, &request) != nil {
 		writeError(w, http.StatusBadRequest, "invalid community post")
+		return
+	}
+	snapshot := request.communityPostSnapshot
+	if err := normalizeCommunityPostSnapshot(&snapshot); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	permission := "community." + snapshot.Kind + ".create"
@@ -283,17 +269,17 @@ func (s *Server) createCommunityPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "community post permission is required")
 		return
 	}
-	tx, err := s.db.Begin(r.Context())
+	tx, err := s.db.BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start community post creation")
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if err = s.resolveCommunityPostSnapshot(r.Context(), tx, claims.Subject, 0, &snapshot); err != nil {
+	if err = s.resolveCommunityPostSnapshot(r.Context(), tx, claims, 0, &snapshot); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	reviewConfig := loadReviewConfig(r.Context(), s.db)
+	reviewConfig := loadReviewConfig(r.Context(), tx)
 	reviewRequired := communityPostReviewRequired(reviewConfig, snapshot.Kind, false)
 	if claimsAllow(claims, "community.no-review") || claimsAllow(claims, "admin.*") {
 		reviewRequired = false
@@ -320,8 +306,11 @@ func (s *Server) createCommunityPost(w http.ResponseWriter, r *http.Request) {
 	if err = holdCommunityPostBountyTx(r.Context(), tx, internalID, publicID, claims.Subject, snapshot); err != nil {
 		if errors.Is(err, errInsufficientBalance) {
 			writeError(w, http.StatusConflict, "insufficient balance for question bounty")
-		} else {
+		} else if isCommunityPostBountyInputError(err) {
 			writeError(w, http.StatusBadRequest, err.Error())
+		} else {
+			logCommunityPostDataFailure("bounty_hold", publicID, err)
+			writeError(w, http.StatusInternalServerError, "failed to reserve question bounty")
 		}
 		return
 	}
@@ -336,9 +325,9 @@ func (s *Server) createCommunityPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if status == "approved" {
-		err = applyCommunityPostSnapshotTx(r.Context(), tx, internalID, created.RevisionID, snapshot)
+		err = applyCommunityPostSnapshotTx(r.Context(), tx, internalID, created.RevisionID, snapshot, claims)
 	} else {
-		err = replaceCommunityPostReferencesTx(r.Context(), tx, internalID, snapshot)
+		err = replaceCommunityPostReferencesTx(r.Context(), tx, internalID, snapshot, claims)
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save community post relations")
@@ -361,46 +350,98 @@ func (s *Server) updateCommunityPost(w http.ResponseWriter, r *http.Request, pub
 	claims := currentClaims(r)
 	var postID, authorID int64
 	var kind string
-	var baseRevision *int64
-	if err := s.db.QueryRow(r.Context(), `select id,author_id,kind,published_revision_id from community_posts where public_id=$1 and status='active'`, publicID).
-		Scan(&postID, &authorID, &kind, &baseRevision); err != nil {
+	err := s.db.QueryRow(r.Context(), `select id,author_id,kind from community_posts where public_id=$1 and status='active'`, publicID).
+		Scan(&postID, &authorID, &kind)
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "community post not found")
+		return
+	}
+	if err != nil {
+		logCommunityPostDataFailure("update_lookup", publicID, err)
+		writeError(w, http.StatusInternalServerError, "failed to load community post")
 		return
 	}
 	if claims.Subject != authorID && !claimsAllow(claims, "community.edit") && !claimsAllow(claims, "admin.*") {
 		writeError(w, http.StatusForbidden, "cannot edit this community post")
 		return
 	}
-	var snapshot communityPostSnapshot
-	if decodeJSON(r, &snapshot) != nil {
+	var request communityPostMutationRequest
+	if decodeJSON(r, &request) != nil {
 		writeError(w, http.StatusBadRequest, "invalid community post")
 		return
+	}
+	snapshot := request.communityPostSnapshot
+	if request.BaseRevisionID != nil {
+		baseRevisionID := strings.ToLower(strings.TrimSpace(*request.BaseRevisionID))
+		request.BaseRevisionID = &baseRevisionID
+		if baseRevisionID != "" && !validCatalogPublicID(baseRevisionID) {
+			writeError(w, http.StatusBadRequest, "community post base revision is invalid")
+			return
+		}
 	}
 	snapshot.Kind = kind
-	if normalizeCommunityPostSnapshot(&snapshot) != nil {
-		writeError(w, http.StatusBadRequest, "invalid community post")
+	if err := normalizeCommunityPostSnapshot(&snapshot); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	tx, err := s.db.Begin(r.Context())
+	tx, err := s.db.BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start community post update")
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if err = s.resolveCommunityPostSnapshot(r.Context(), tx, claims.Subject, postID, &snapshot); err != nil {
+	baseRevision, err := lockCommunityPostRevisionBaseTx(r.Context(), tx, postID, publicID, request.BaseRevisionID)
+	var conflict *communityPostEditConflictError
+	if errors.As(err, &conflict) {
+		writeAPIError(w, http.StatusConflict, "COMMUNITY_POST_EDIT_CONFLICT", conflict.Error(), 0, conflict.Current)
+		return
+	}
+	if err != nil {
+		var serialization *pgconn.PgError
+		if errors.As(err, &serialization) && serialization.Code == "40001" {
+			// The repeatable-read snapshot may predate a waiter ahead of us.
+			// Release the aborted transaction before reading its new baseline;
+			// do not retry a mutation or consume an additional pooled connection.
+			if rollbackErr := tx.Rollback(r.Context()); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+				logCommunityPostDataFailure("update_conflict_rollback", publicID, rollbackErr)
+				writeError(w, http.StatusInternalServerError, "failed to release community post conflict")
+				return
+			}
+			var currentPublicID string
+			if readErr := s.db.QueryRow(r.Context(), `select coalesce(revision.public_id,'') from community_posts post
+				left join content_revisions revision on revision.id=post.published_revision_id
+				where post.id=$1 and post.public_id=$2 and post.status='active'`, postID, publicID).Scan(&currentPublicID); readErr != nil {
+				logCommunityPostDataFailure("update_conflict_baseline", publicID, readErr)
+				writeError(w, http.StatusInternalServerError, "failed to load community post conflict")
+				return
+			}
+			current := communityPostEditConflict{CurrentRevisionID: currentPublicID}
+			writeAPIError(w, http.StatusConflict, "COMMUNITY_POST_EDIT_CONFLICT", "community post changed after the editor baseline", 0, current)
+			return
+		}
+		logCommunityPostDataFailure("update_base", publicID, err)
+		writeError(w, http.StatusInternalServerError, "failed to validate community post revision")
+		return
+	}
+	if err = s.resolveCommunityPostSnapshot(r.Context(), tx, claims, postID, &snapshot); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err = validateCommunityPostBountyEditTx(r.Context(), tx, postID, publicID, authorID, snapshot); err != nil {
 		if errors.Is(err, errInsufficientBalance) {
 			writeError(w, http.StatusConflict, "insufficient balance for question bounty")
-		} else {
+		} else if isCommunityPostBountyInputError(err) {
 			writeError(w, http.StatusBadRequest, err.Error())
+		} else {
+			logCommunityPostDataFailure("bounty_edit", publicID, err)
+			writeError(w, http.StatusInternalServerError, "failed to update question bounty")
 		}
 		return
 	}
-	reviewConfig := loadReviewConfig(r.Context(), s.db)
-	reviewRequired := communityPostReviewRequired(reviewConfig, kind, true)
+	reviewConfig := loadReviewConfig(r.Context(), tx)
+	// Until a first revision is published, a resubmission still belongs to the
+	// create policy; an exempt edit policy must not bypass a rejected creation.
+	reviewRequired := communityPostReviewRequired(reviewConfig, kind, baseRevision != nil)
 	if claimsAllow(claims, "community.no-review") || claimsAllow(claims, "admin.*") {
 		reviewRequired = false
 	}
@@ -425,7 +466,7 @@ func (s *Server) updateCommunityPost(w http.ResponseWriter, r *http.Request, pub
 		return
 	}
 	if status == "approved" {
-		if err = applyCommunityPostSnapshotTx(r.Context(), tx, postID, created.RevisionID, snapshot); err == nil {
+		if err = applyCommunityPostSnapshotTx(r.Context(), tx, postID, created.RevisionID, snapshot, claims); err == nil {
 			err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic approval", r)
 		}
 	} else {
@@ -433,11 +474,40 @@ func (s *Server) updateCommunityPost(w http.ResponseWriter, r *http.Request, pub
 			review_status=case when published_revision_id is null then 'pending' else 'approved' end,
 			updated_at=now() where id=$1`, postID)
 	}
-	if err != nil || tx.Commit(r.Context()) != nil {
+	if err != nil {
+		logCommunityPostDataFailure("update_apply", publicID, err)
+		writeError(w, http.StatusInternalServerError, "failed to save community post")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		logCommunityPostDataFailure("update_commit", publicID, err)
 		writeError(w, http.StatusInternalServerError, "failed to save community post")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": publicID, "reviewStatus": status, "revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID})
+}
+
+func lockCommunityPostRevisionBaseTx(ctx context.Context, tx pgx.Tx, postID int64, publicID string, expectedRevisionID *string) (*int64, error) {
+	lockKey := communityPostAggregate + ":" + publicID
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+		return nil, err
+	}
+	var currentRevision *int64
+	var currentPublicID string
+	if err := tx.QueryRow(ctx, `select post.published_revision_id,coalesce(revision.public_id,'')
+		from community_posts post left join content_revisions revision on revision.id=post.published_revision_id
+		where post.id=$1 and post.public_id=$2 and post.status='active' for update of post`, postID, publicID).
+		Scan(&currentRevision, &currentPublicID); err != nil {
+		return nil, err
+	}
+	expectedPublicID := ""
+	if expectedRevisionID != nil {
+		expectedPublicID = *expectedRevisionID
+	}
+	if currentPublicID != expectedPublicID {
+		return nil, &communityPostEditConflictError{Current: communityPostEditConflict{CurrentRevisionID: currentPublicID}}
+	}
+	return currentRevision, nil
 }
 
 func normalizeCommunityPostKind(value string) string {
@@ -540,12 +610,25 @@ func normalizeCommunityPostSnapshot(snapshot *communityPostSnapshot) error {
 	if snapshot.Kind == "" || !communityPostCategoryAllowed(snapshot.Kind, snapshot.Category) || snapshot.Title == "" || len([]rune(snapshot.Title)) > 160 || len(snapshot.BodyMarkdown) > 1<<20 {
 		return errors.New("invalid community post")
 	}
-	snapshot.SourceLocale = detectCommunityPostLocale(snapshot.Title + "\n" + snapshot.BodyMarkdown)
+	if sourceLocale := strings.TrimSpace(snapshot.SourceLocale); sourceLocale != "" {
+		snapshot.SourceLocale = normalizeContentLocale(sourceLocale)
+		if !isEditableContentLocale(snapshot.SourceLocale) {
+			return errors.New("community post source locale is invalid")
+		}
+	} else {
+		snapshot.SourceLocale = detectCommunityPostLocale(snapshot.Title + "\n" + snapshot.BodyMarkdown)
+		if snapshot.SourceLocale == "" {
+			return errors.New("community post source locale is required")
+		}
+	}
 	snapshot.MinecraftVersions = uniqueNonEmpty(snapshot.MinecraftVersions)
 	snapshot.ModVersionMin = strings.TrimSpace(snapshot.ModVersionMin)
 	snapshot.ModVersionMax = strings.TrimSpace(snapshot.ModVersionMax)
 	snapshot.IssueURL = strings.TrimSpace(snapshot.IssueURL)
 	snapshot.BountyCurrency = normalizeCode(snapshot.BountyCurrency)
+	if err := normalizeCommunityPostReferences(snapshot); err != nil {
+		return err
+	}
 	if snapshot.IssueURL != "" {
 		parsed, err := url.ParseRequestURI(snapshot.IssueURL)
 		if err != nil || parsed.Scheme != "https" && parsed.Scheme != "http" {
@@ -562,8 +645,8 @@ func normalizeCommunityPostSnapshot(snapshot *communityPostSnapshot) error {
 		default:
 			return errors.New("issue severity is invalid")
 		}
-		if len(snapshot.Projects) == 0 || len(snapshot.Resources) == 0 {
-			return errors.New("issues require at least one project and one resource")
+		if len(snapshot.Projects) == 0 {
+			return errors.New("issues require at least one project")
 		}
 		if len(snapshot.MinecraftVersions) == 0 || snapshot.ModVersionMin == "" && snapshot.ModVersionMax == "" {
 			return errors.New("issues require a Minecraft version and a mod version or version range")
@@ -618,11 +701,13 @@ func detectCommunityPostLocale(value string) string {
 		return !unicode.IsLetter(char)
 	})
 	stopWords := map[string]map[string]struct{}{
+		"en-US": wordSet("the", "this", "that", "and", "is", "with", "for", "not", "a", "an", "to", "how"),
 		"de-DE": wordSet("der", "die", "das", "und", "ist", "mit", "für", "nicht", "eine", "einen"),
 		"es-ES": wordSet("el", "la", "los", "las", "una", "para", "con", "que", "del", "este"),
 		"fr-FR": wordSet("le", "la", "les", "une", "des", "pour", "avec", "est", "dans", "cette"),
 	}
-	bestLocale, bestScore := "en-US", 0
+	bestLocale, bestScore := "", 0
+	tied := false
 	for locale, candidates := range stopWords {
 		score := 0
 		for _, word := range words {
@@ -631,13 +716,15 @@ func detectCommunityPostLocale(value string) string {
 			}
 		}
 		if score > bestScore {
-			bestLocale, bestScore = locale, score
+			bestLocale, bestScore, tied = locale, score, false
+		} else if score > 0 && score == bestScore {
+			tied = true
 		}
 	}
-	if bestScore >= 2 {
+	if bestScore >= 2 && !tied {
 		return bestLocale
 	}
-	return "en-US"
+	return ""
 }
 
 func wordSet(values ...string) map[string]struct{} {
@@ -665,7 +752,108 @@ func uniqueNonEmpty(values []string) []string {
 	return result
 }
 
-func (s *Server) resolveCommunityPostSnapshot(ctx context.Context, tx pgx.Tx, actorID, postID int64, snapshot *communityPostSnapshot) error {
+func normalizeCommunityPostReferences(snapshot *communityPostSnapshot) error {
+	if len(snapshot.Projects) > maximumCommunityPostProjectReferences {
+		return fmt.Errorf("community post supports at most %d project references", maximumCommunityPostProjectReferences)
+	}
+	if len(snapshot.Resources) > maximumCommunityPostResourceReferences {
+		return fmt.Errorf("community post supports at most %d resource references", maximumCommunityPostResourceReferences)
+	}
+	projectKeys := make(map[string]struct{}, len(snapshot.Projects))
+	for index := range snapshot.Projects {
+		ref := &snapshot.Projects[index]
+		ref.Type = strings.ToLower(strings.TrimSpace(ref.Type))
+		if ref.Type == "" {
+			ref.Type = "mod"
+		}
+		if !communityPostProjectTypeAllowed(ref.Type) {
+			return errors.New("project reference type is invalid")
+		}
+		ref.PublicID = strings.ToLower(strings.TrimSpace(ref.PublicID))
+		ref.Identifier = strings.TrimSpace(ref.Identifier)
+		if strings.HasPrefix(ref.PublicID, "unresolved:") {
+			ref.PublicID = ""
+		}
+		key := ref.Type + "\x00"
+		if ref.PublicID != "" {
+			if !validCatalogPublicID(ref.PublicID) {
+				return errors.New("project reference public ID is invalid")
+			}
+			ref.Identifier = ""
+			key += "public:" + ref.PublicID
+		} else {
+			if !validModIdentifier(ref.Identifier) {
+				return errors.New("project reference identifier is invalid")
+			}
+			key += "raw:" + strings.ToLower(ref.Identifier)
+		}
+		if _, duplicate := projectKeys[key]; duplicate {
+			return errors.New("duplicate project reference")
+		}
+		projectKeys[key] = struct{}{}
+		clearCommunityPostReferencePresentation(ref)
+	}
+	resourceKeys := make(map[string]struct{}, len(snapshot.Resources))
+	for index := range snapshot.Resources {
+		ref := &snapshot.Resources[index]
+		ref.PublicID = strings.ToLower(strings.TrimSpace(ref.PublicID))
+		ref.Kind = strings.ToLower(strings.TrimSpace(ref.Kind))
+		ref.Identifier = strings.TrimSpace(ref.Identifier)
+		if strings.HasPrefix(ref.PublicID, "unresolved:") {
+			ref.PublicID = ""
+		}
+		if len(ref.Kind) > 64 {
+			return errors.New("resource reference kind is invalid")
+		}
+		key := ""
+		if ref.PublicID != "" {
+			if !validCatalogPublicID(ref.PublicID) {
+				return errors.New("resource reference public ID is invalid")
+			}
+			ref.Identifier = ""
+			key = "public:" + ref.PublicID
+		} else {
+			if ref.Kind == "" || !validCommunityPostResourceIdentifier(ref.Identifier) {
+				return errors.New("resource reference is incomplete or invalid")
+			}
+			key = ref.Kind + "\x00raw:" + strings.ToLower(ref.Identifier)
+		}
+		if _, duplicate := resourceKeys[key]; duplicate {
+			return errors.New("duplicate resource reference")
+		}
+		resourceKeys[key] = struct{}{}
+		clearCommunityPostReferencePresentation(ref)
+	}
+	return nil
+}
+
+func validCommunityPostResourceIdentifier(value string) bool {
+	if value == "" || len(value) > maximumCommunityPostResourceIdentifierBytes || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) || unicode.IsSpace(character) {
+			return false
+		}
+	}
+	return true
+}
+
+func clearCommunityPostReferencePresentation(ref *communityPostReference) {
+	ref.Name = ""
+	ref.SiteID = ""
+	ref.Names = nil
+	ref.IconURL = ""
+	ref.VersionID = ""
+	ref.RevisionID = ""
+	ref.IconPath = ""
+	ref.Unresolved = false
+	ref.Unavailable = false
+	ref.InternalID = 0
+}
+
+func (s *Server) resolveCommunityPostSnapshot(ctx context.Context, tx pgx.Tx, claims security.Claims, postID int64, snapshot *communityPostSnapshot) error {
+	actorID := claims.Subject
 	if snapshot.CoverFileID != "" {
 		if postID > 0 {
 			var existingID int64
@@ -682,53 +870,109 @@ func (s *Server) resolveCommunityPostSnapshot(ctx context.Context, tx pgx.Tx, ac
 			snapshot.CoverInternalID = &file.ID
 		}
 	}
+	return resolveCommunityPostReferences(ctx, tx, claims, snapshot)
+}
+
+func resolveCommunityPostReferences(ctx context.Context, tx pgx.Tx, claims security.Claims, snapshot *communityPostSnapshot) error {
+	publicIDs := make([]string, 0, len(snapshot.Projects))
 	for index := range snapshot.Projects {
 		ref := &snapshot.Projects[index]
-		ref.Type = strings.ToLower(strings.TrimSpace(ref.Type))
-		if ref.Type == "" {
-			ref.Type = "mod"
+		if ref.PublicID != "" {
+			publicIDs = append(publicIDs, ref.PublicID)
 		}
-		if !communityPostProjectTypeAllowed(ref.Type) {
-			return errors.New("project reference type is invalid")
+	}
+	visibleProjects, err := loadFollowProjectTargetsWithQueryer(ctx, tx, publicIDs, claims)
+	if err != nil {
+		return err
+	}
+	for index := range snapshot.Projects {
+		ref := &snapshot.Projects[index]
+		if ref.PublicID == "" {
+			continue
 		}
-		ref.PublicID = strings.ToLower(strings.TrimSpace(ref.PublicID))
-		ref.Identifier = strings.TrimSpace(ref.Identifier)
-		if ref.PublicID != "" && !strings.HasPrefix(ref.PublicID, "unresolved:") {
-			var targetID int64
-			if tx.QueryRow(ctx, `select internal_id from public_routes where public_id=$1 and entity_type=$2`, ref.PublicID, ref.Type).Scan(&targetID) != nil {
-				return errors.New("selected project was not found")
+		target, visible := visibleProjects[ref.PublicID]
+		if !visible || target.Type != ref.Type {
+			return errCommunityPostProjectReferenceNotVisible
+		}
+		ref.InternalID = target.InternalID
+	}
+
+	resourcePublicIDs := make([]string, 0, len(snapshot.Resources))
+	unresolvedKinds := make([]string, 0, len(snapshot.Resources))
+	seenKinds := make(map[string]struct{}, len(snapshot.Resources))
+	for index := range snapshot.Resources {
+		ref := &snapshot.Resources[index]
+		if ref.PublicID != "" {
+			resourcePublicIDs = append(resourcePublicIDs, ref.PublicID)
+		} else if _, exists := seenKinds[ref.Kind]; !exists {
+			seenKinds[ref.Kind] = struct{}{}
+			unresolvedKinds = append(unresolvedKinds, ref.Kind)
+		}
+	}
+	type resolvedResource struct {
+		ID   int64
+		Kind string
+	}
+	resourcesByPublicID := make(map[string]resolvedResource, len(resourcePublicIDs))
+	if len(resourcePublicIDs) > 0 {
+		rows, queryErr := tx.Query(ctx, `select entity.public_id,entity.id,resource.kind_code
+			from catalog_entities entity join game_resources resource on resource.entity_id=entity.id
+			where entity.public_id=any($1::text[]) and entity.status='active'`, resourcePublicIDs)
+		if queryErr != nil {
+			return errors.New("selected resource was not found")
+		}
+		for rows.Next() {
+			var publicID string
+			var resource resolvedResource
+			if queryErr = rows.Scan(&publicID, &resource.ID, &resource.Kind); queryErr != nil {
+				rows.Close()
+				return errors.New("selected resource was not found")
 			}
-			ref.Identifier = ""
-		} else if ref.Identifier == "" {
-			return errors.New("project reference is incomplete")
+			resourcesByPublicID[publicID] = resource
+		}
+		queryErr = rows.Err()
+		rows.Close()
+		if queryErr != nil {
+			return errors.New("selected resource was not found")
+		}
+	}
+	validKinds := make(map[string]struct{}, len(unresolvedKinds))
+	if len(unresolvedKinds) > 0 {
+		rows, queryErr := tx.Query(ctx, `select code from resource_kinds where code=any($1::text[])`, unresolvedKinds)
+		if queryErr != nil {
+			return errors.New("resource reference kind is invalid")
+		}
+		for rows.Next() {
+			var code string
+			if queryErr = rows.Scan(&code); queryErr != nil {
+				rows.Close()
+				return errors.New("resource reference kind is invalid")
+			}
+			validKinds[code] = struct{}{}
+		}
+		queryErr = rows.Err()
+		rows.Close()
+		if queryErr != nil {
+			return errors.New("resource reference kind is invalid")
 		}
 	}
 	for index := range snapshot.Resources {
 		ref := &snapshot.Resources[index]
-		ref.PublicID = strings.ToLower(strings.TrimSpace(ref.PublicID))
-		ref.Kind = strings.TrimSpace(ref.Kind)
-		ref.Identifier = strings.TrimSpace(ref.Identifier)
-		if ref.PublicID != "" && !strings.HasPrefix(ref.PublicID, "unresolved:") {
-			var resourceID int64
-			if tx.QueryRow(ctx, `select entity.id,resource.kind_code from catalog_entities entity
-				join game_resources resource on resource.entity_id=entity.id
-				where entity.public_id=$1 and entity.status='active'`, ref.PublicID).Scan(&resourceID, &ref.Kind) != nil {
+		if ref.PublicID != "" {
+			resource, exists := resourcesByPublicID[ref.PublicID]
+			if !exists {
 				return errors.New("selected resource was not found")
 			}
-			ref.Identifier = ""
-		} else if ref.Identifier == "" || ref.Kind == "" {
-			return errors.New("resource reference is incomplete")
-		} else {
-			var exists bool
-			if tx.QueryRow(ctx, `select exists(select 1 from resource_kinds where code=$1)`, ref.Kind).Scan(&exists) != nil || !exists {
-				return errors.New("resource reference kind is invalid")
-			}
+			ref.InternalID = resource.ID
+			ref.Kind = resource.Kind
+		} else if _, exists := validKinds[ref.Kind]; !exists {
+			return errors.New("resource reference kind is invalid")
 		}
 	}
 	return nil
 }
 
-func applyCommunityPostSnapshotTx(ctx context.Context, tx pgx.Tx, postID, revisionID int64, snapshot communityPostSnapshot) error {
+func applyCommunityPostSnapshotTx(ctx context.Context, tx pgx.Tx, postID, revisionID int64, snapshot communityPostSnapshot, claims security.Claims) error {
 	if _, err := tx.Exec(ctx, `update community_posts set category=$2,title=$3,source_locale=$4,body_markdown=$5,minecraft_versions=$6,
 		mod_version_min=$7,mod_version_max=$8,severity=$9,has_fix=$10,issue_url=$11,cover_file_id=$12,
 		review_status='approved',published_revision_id=$13,published_at=coalesce(published_at,now()),updated_at=now() where id=$1`,
@@ -736,71 +980,173 @@ func applyCommunityPostSnapshotTx(ctx context.Context, tx pgx.Tx, postID, revisi
 		snapshot.ModVersionMax, snapshot.Severity, snapshot.HasFix, snapshot.IssueURL, snapshot.CoverInternalID, revisionID); err != nil {
 		return err
 	}
-	if err := replaceCommunityPostReferencesTx(ctx, tx, postID, snapshot); err != nil {
+	if err := replaceCommunityPostReferencesTx(ctx, tx, postID, snapshot, claims); err != nil {
 		return err
 	}
 	_, err := tx.Exec(ctx, `delete from community_post_translations where post_id=$1 and source_revision_id<>$2`, postID, revisionID)
 	return err
 }
 
-func replaceCommunityPostReferencesTx(ctx context.Context, tx pgx.Tx, postID int64, snapshot communityPostSnapshot) error {
+func replaceCommunityPostReferencesTx(ctx context.Context, tx pgx.Tx, postID int64, snapshot communityPostSnapshot, claims security.Claims) error {
+	if communityPostReferencesNeedResolution(snapshot) {
+		if err := resolveCommunityPostReferences(ctx, tx, claims, &snapshot); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(ctx, `delete from community_post_project_refs where post_id=$1`, postID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `delete from community_post_resource_refs where post_id=$1`, postID); err != nil {
 		return err
 	}
-	for index, ref := range snapshot.Projects {
-		var targetID *int64
-		if ref.PublicID != "" && !strings.HasPrefix(ref.PublicID, "unresolved:") {
-			var id int64
-			if err := tx.QueryRow(ctx, `select internal_id from public_routes where public_id=$1 and entity_type=$2`, ref.PublicID, ref.Type).Scan(&id); err != nil {
-				return err
-			}
-			targetID = &id
-		}
-		var referenceID int64
-		if err := tx.QueryRow(ctx, `insert into community_post_project_refs(post_id,target_type,target_id,raw_identifier,display_order)
-			values($1,$2,$3,$4,$5) returning id`, postID, ref.Type, targetID, ref.Identifier, index).Scan(&referenceID); err != nil {
-			return err
-		}
-		if targetID == nil {
-			if _, err := tx.Exec(ctx, `insert into unresolved_references(
-				source_type,source_id,field_path,reference_type,raw_identifier,normalized_identifier,metadata
-			) values('community_post_project',$1,'projects',$2,$3,lower($3),jsonb_build_object('postId',$4::bigint))
-			on conflict(source_type,source_id,field_path,reference_type,normalized_identifier) do update
-			set raw_identifier=excluded.raw_identifier,status='pending',resolved_type='',resolved_id=null,
-				resolved_at=null,metadata=excluded.metadata,updated_at=now()`, referenceID, ref.Type, ref.Identifier, postID); err != nil {
-				return err
-			}
+	if err := insertCommunityPostProjectReferencesTx(ctx, tx, postID, snapshot.Projects); err != nil {
+		return err
+	}
+	return insertCommunityPostResourceReferencesTx(ctx, tx, postID, snapshot.Resources)
+}
+
+func communityPostReferencesNeedResolution(snapshot communityPostSnapshot) bool {
+	for _, ref := range snapshot.Projects {
+		if ref.PublicID != "" && ref.InternalID <= 0 {
+			return true
 		}
 	}
-	for index, ref := range snapshot.Resources {
-		var resourceID *int64
-		if ref.PublicID != "" && !strings.HasPrefix(ref.PublicID, "unresolved:") {
-			var id int64
-			if err := tx.QueryRow(ctx, `select id from catalog_entities where public_id=$1`, ref.PublicID).Scan(&id); err != nil {
-				return err
-			}
-			resourceID = &id
-		}
-		var referenceID int64
-		if err := tx.QueryRow(ctx, `insert into community_post_resource_refs(post_id,resource_id,kind_code,raw_resource_id,display_order)
-			values($1,$2,$3,$4,$5) returning id`, postID, resourceID, ref.Kind, ref.Identifier, index).Scan(&referenceID); err != nil {
-			return err
-		}
-		if resourceID == nil {
-			if _, err := tx.Exec(ctx, `insert into unresolved_references(
-				source_type,source_id,field_path,reference_type,raw_identifier,normalized_identifier,metadata
-			) values('community_post_resource',$1,'resources',$2,$3,lower($3),jsonb_build_object('postId',$4::bigint))
-			on conflict(source_type,source_id,field_path,reference_type,normalized_identifier) do update
-			set raw_identifier=excluded.raw_identifier,status='pending',resolved_type='',resolved_id=null,
-				resolved_at=null,metadata=excluded.metadata,updated_at=now()`, referenceID, ref.Kind, ref.Identifier, postID); err != nil {
-				return err
-			}
+	for _, ref := range snapshot.Resources {
+		if ref.PublicID != "" && ref.InternalID <= 0 {
+			return true
 		}
 	}
-	return nil
+	return false
+}
+
+func insertCommunityPostProjectReferencesTx(ctx context.Context, tx pgx.Tx, postID int64, references []communityPostReference) error {
+	if len(references) == 0 {
+		return nil
+	}
+	types := make([]string, len(references))
+	targetIDs := make([]int64, len(references))
+	rawIdentifiers := make([]string, len(references))
+	displayOrders := make([]int32, len(references))
+	for index, ref := range references {
+		types[index] = ref.Type
+		targetIDs[index] = ref.InternalID
+		rawIdentifiers[index] = ref.Identifier
+		displayOrders[index] = int32(index)
+	}
+	rows, err := tx.Query(ctx, `insert into community_post_project_refs(
+		post_id,target_type,target_id,raw_identifier,display_order)
+		select $1,value.target_type,nullif(value.target_id,0),value.raw_identifier,value.display_order
+		from unnest($2::text[],$3::bigint[],$4::text[],$5::integer[])
+			as value(target_type,target_id,raw_identifier,display_order)
+		returning id,display_order`, postID, types, targetIDs, rawIdentifiers, displayOrders)
+	if err != nil {
+		return err
+	}
+	referenceIDs := make(map[int]int64, len(references))
+	for rows.Next() {
+		var referenceID int64
+		var displayOrder int
+		if err = rows.Scan(&referenceID, &displayOrder); err != nil {
+			rows.Close()
+			return err
+		}
+		referenceIDs[displayOrder] = referenceID
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if len(referenceIDs) != len(references) {
+		return errors.New("project reference batch insert was incomplete")
+	}
+	unresolvedIDs := make([]int64, 0, len(references))
+	unresolvedTypes := make([]string, 0, len(references))
+	unresolvedRaw := make([]string, 0, len(references))
+	for index, ref := range references {
+		if ref.InternalID > 0 {
+			continue
+		}
+		unresolvedIDs = append(unresolvedIDs, referenceIDs[index])
+		unresolvedTypes = append(unresolvedTypes, ref.Type)
+		unresolvedRaw = append(unresolvedRaw, ref.Identifier)
+	}
+	return upsertCommunityPostUnresolvedReferencesTx(ctx, tx, "community_post_project", "projects",
+		postID, unresolvedIDs, unresolvedTypes, unresolvedRaw)
+}
+
+func insertCommunityPostResourceReferencesTx(ctx context.Context, tx pgx.Tx, postID int64, references []communityPostReference) error {
+	if len(references) == 0 {
+		return nil
+	}
+	resourceIDs := make([]int64, len(references))
+	kinds := make([]string, len(references))
+	rawIdentifiers := make([]string, len(references))
+	displayOrders := make([]int32, len(references))
+	for index, ref := range references {
+		resourceIDs[index] = ref.InternalID
+		kinds[index] = ref.Kind
+		rawIdentifiers[index] = ref.Identifier
+		displayOrders[index] = int32(index)
+	}
+	rows, err := tx.Query(ctx, `insert into community_post_resource_refs(
+		post_id,resource_id,kind_code,raw_resource_id,display_order)
+		select $1,nullif(value.resource_id,0),value.kind_code,value.raw_identifier,value.display_order
+		from unnest($2::bigint[],$3::text[],$4::text[],$5::integer[])
+			as value(resource_id,kind_code,raw_identifier,display_order)
+		returning id,display_order`, postID, resourceIDs, kinds, rawIdentifiers, displayOrders)
+	if err != nil {
+		return err
+	}
+	referenceIDs := make(map[int]int64, len(references))
+	for rows.Next() {
+		var referenceID int64
+		var displayOrder int
+		if err = rows.Scan(&referenceID, &displayOrder); err != nil {
+			rows.Close()
+			return err
+		}
+		referenceIDs[displayOrder] = referenceID
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if len(referenceIDs) != len(references) {
+		return errors.New("resource reference batch insert was incomplete")
+	}
+	unresolvedIDs := make([]int64, 0, len(references))
+	unresolvedKinds := make([]string, 0, len(references))
+	unresolvedRaw := make([]string, 0, len(references))
+	for index, ref := range references {
+		if ref.InternalID > 0 {
+			continue
+		}
+		unresolvedIDs = append(unresolvedIDs, referenceIDs[index])
+		unresolvedKinds = append(unresolvedKinds, ref.Kind)
+		unresolvedRaw = append(unresolvedRaw, ref.Identifier)
+	}
+	return upsertCommunityPostUnresolvedReferencesTx(ctx, tx, "community_post_resource", "resources",
+		postID, unresolvedIDs, unresolvedKinds, unresolvedRaw)
+}
+
+func upsertCommunityPostUnresolvedReferencesTx(ctx context.Context, tx pgx.Tx, sourceType, fieldPath string,
+	postID int64, sourceIDs []int64, referenceTypes, rawIdentifiers []string,
+) error {
+	if len(sourceIDs) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `insert into unresolved_references(
+		source_type,source_id,field_path,reference_type,raw_identifier,normalized_identifier,metadata)
+		select $1,value.source_id,$2,value.reference_type,value.raw_identifier,lower(value.raw_identifier),
+			jsonb_build_object('postId',$3::bigint)
+		from unnest($4::bigint[],$5::text[],$6::text[]) as value(source_id,reference_type,raw_identifier)
+		on conflict(source_type,source_id,field_path,reference_type,normalized_identifier) do update
+		set raw_identifier=excluded.raw_identifier,status='pending',resolved_type='',resolved_id=null,
+			resolved_at=null,metadata=excluded.metadata,updated_at=now()`, sourceType, fieldPath, postID,
+		sourceIDs, referenceTypes, rawIdentifiers)
+	return err
 }
 
 func (s *Server) loadCommunityPost(ctx context.Context, publicID string, claims security.Claims) (communityPostResponse, error) {
@@ -810,15 +1156,18 @@ func (s *Server) loadCommunityPost(ctx context.Context, publicID string, claims 
 	moderator := claimsAllow(claims, "content.review") || claimsAllow(claims, "admin.*")
 	err := s.db.QueryRow(ctx, `select post.id,post.public_id,post.kind,post.category,post.title,post.source_locale,post.body_markdown,
 		post.minecraft_versions,post.mod_version_min,post.mod_version_max,post.severity,post.has_fix,post.issue_url,
-		coalesce(file.public_id,''),coalesce(file.object_key,''),author.public_id,author.username,post.review_status,post.created_at,post.updated_at,post.author_id,
+		coalesce(file.public_id,''),coalesce(file.object_key,''),author.public_id,author.username,post.review_status,
+		coalesce(revision.public_id,''),post.created_at,post.updated_at,post.author_id,
 		post.resolution_status,coalesce(accepted.public_id,''),post.resolved_at
 		from community_posts post join users author on author.id=post.author_id
 		left join oss_files file on file.id=post.cover_file_id and file.status='active'
+		left join content_revisions revision on revision.id=post.published_revision_id
 		left join comments accepted on accepted.id=post.accepted_comment_id
 		where post.public_id=$1 and post.status='active' and (post.review_status='approved' or post.author_id=$2 or $3)`,
 		publicID, claims.Subject, moderator).Scan(&internalID, &item.ID, &item.Kind, &item.Category, &item.Title, &item.SourceLocale,
 		&item.BodyMarkdown, &item.MinecraftVersions, &item.ModVersionMin, &item.ModVersionMax, &item.Severity, &item.HasFix,
-		&item.IssueURL, &item.CoverFileID, &coverKey, &item.AuthorID, &item.AuthorName, &item.ReviewStatus, &item.CreatedAt, &item.UpdatedAt, &authorInternalID,
+		&item.IssueURL, &item.CoverFileID, &coverKey, &item.AuthorID, &item.AuthorName, &item.ReviewStatus, &item.PublishedRevisionID,
+		&item.CreatedAt, &item.UpdatedAt, &authorInternalID,
 		&item.ResolutionStatus, &item.AcceptedCommentID, &item.ResolvedAt)
 	if err != nil {
 		return item, err
@@ -830,57 +1179,107 @@ func (s *Server) loadCommunityPost(ctx context.Context, publicID string, claims 
 		}
 		item.CoverURL = access.URL
 	}
-	item.CanEdit = claims.Subject > 0 && (claims.Subject == authorInternalID || claimsAllow(claims, "community.edit") || moderator)
+	item.CanEdit = claims.Subject > 0 && (claims.Subject == authorInternalID || claimsAllow(claims, "community.edit") || claimsAllow(claims, "admin.*"))
 	item.CanResolve = item.Kind == "discussion" && item.ResolutionStatus == "open" && item.ReviewStatus == "approved" && claims.Subject == authorInternalID
 	item.Bounty, err = s.loadCommunityPostBounty(ctx, internalID)
 	if err != nil {
 		return item, err
 	}
-	item.Projects, item.Resources, err = s.communityPostReferences(ctx, internalID)
+	item.Projects, item.Resources, err = s.communityPostReferences(ctx, internalID, claims)
 	return item, err
 }
 
-func (s *Server) communityPostReferences(ctx context.Context, postID int64) ([]communityPostReference, []communityPostReference, error) {
-	projects, resources, err := s.communityPostReferencesBatch(ctx, []int64{postID})
+func (s *Server) communityPostReferences(ctx context.Context, postID int64, claims security.Claims) ([]communityPostReference, []communityPostReference, error) {
+	projects, resources, err := s.communityPostReferencesBatch(ctx, []int64{postID}, claims)
 	return projects[postID], resources[postID], err
 }
 
-func (s *Server) communityPostReferencesBatch(ctx context.Context, postIDs []int64) (map[int64][]communityPostReference, map[int64][]communityPostReference, error) {
+func loadCommunityPostProjectReferencesWithQueryer(ctx context.Context, queryer followProjectBatchQueryer, postIDs []int64, claims security.Claims) (map[int64][]communityPostReference, error) {
 	projects := make(map[int64][]communityPostReference, len(postIDs))
-	resources := make(map[int64][]communityPostReference, len(postIDs))
 	for _, postID := range postIDs {
 		projects[postID] = make([]communityPostReference, 0)
-		resources[postID] = make([]communityPostReference, 0)
 	}
 	if len(postIDs) == 0 {
-		return projects, resources, nil
+		return projects, nil
 	}
-	rows, err := s.db.Query(ctx, `select ref.post_id,coalesce(route.public_id,''),ref.target_type,ref.raw_identifier,
-		coalesce(mod.slug,modpack.slug,project.slug,''),coalesce(mod.primary_name,modpack.primary_name,project.primary_name,ref.raw_identifier)
-		from community_post_project_refs ref left join public_routes route on route.entity_type=ref.target_type and route.internal_id=ref.target_id
-		left join mods mod on ref.target_type='mod' and mod.id=ref.target_id
-		left join modpacks modpack on ref.target_type='modpack' and modpack.id=ref.target_id
-		left join simple_projects project on project.project_type=ref.target_type and project.id=ref.target_id
+	type storedReference struct {
+		postID                    int64
+		publicID, targetType, raw string
+		unresolved                bool
+	}
+	rows, err := queryer.Query(ctx, `select ref.post_id,coalesce(route.public_id,''),ref.target_type,ref.raw_identifier,ref.target_id is null
+		from community_post_project_refs ref
+		left join public_routes route on route.entity_type=ref.target_type and route.internal_id=ref.target_id
 		where ref.post_id=any($1::bigint[]) order by ref.post_id,ref.display_order,ref.id`, postIDs)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
+	stored := make([]storedReference, 0)
+	publicIDs := make([]string, 0)
 	for rows.Next() {
-		var postID int64
-		var ref communityPostReference
-		if err = rows.Scan(&postID, &ref.PublicID, &ref.Type, &ref.Identifier, &ref.SiteID, &ref.Name); err != nil {
+		var ref storedReference
+		if err = rows.Scan(&ref.postID, &ref.publicID, &ref.targetType, &ref.raw, &ref.unresolved); err != nil {
 			rows.Close()
-			return nil, nil, err
+			return nil, err
 		}
-		ref.Unresolved = ref.PublicID == ""
-		projects[postID] = append(projects[postID], ref)
+		stored = append(stored, ref)
+		if !ref.unresolved && ref.publicID != "" {
+			publicIDs = append(publicIDs, ref.publicID)
+		}
 	}
 	if err = rows.Err(); err != nil {
 		rows.Close()
-		return nil, nil, err
+		return nil, err
 	}
 	rows.Close()
-	rows, err = s.db.Query(ctx, `select ref.post_id,coalesce(entity.public_id,''),ref.kind_code,ref.raw_resource_id,
+	visible, err := loadFollowProjectTargetsWithQueryer(ctx, queryer, publicIDs, claims)
+	if err != nil {
+		return nil, err
+	}
+	for _, storedRef := range stored {
+		ref := communityPostReference{Type: storedRef.targetType}
+		switch {
+		case storedRef.unresolved:
+			ref.Identifier = storedRef.raw
+			ref.Name = storedRef.raw
+			ref.Unresolved = true
+		case visible[storedRef.publicID].Type == storedRef.targetType:
+			target := visible[storedRef.publicID]
+			ref.PublicID = target.PublicID
+			ref.Name = target.Name
+			ref.SiteID = target.URL
+			if separator := strings.LastIndexByte(ref.SiteID, '/'); separator >= 0 {
+				ref.SiteID = ref.SiteID[separator+1:]
+			}
+		default:
+			ref.Unavailable = true
+		}
+		projects[storedRef.postID] = append(projects[storedRef.postID], ref)
+	}
+	return projects, nil
+}
+
+func (s *Server) communityPostReferencesBatch(ctx context.Context, postIDs []int64, claims security.Claims) (map[int64][]communityPostReference, map[int64][]communityPostReference, error) {
+	projects, err := loadCommunityPostProjectReferencesWithQueryer(ctx, s.db, postIDs, claims)
+	if err != nil {
+		return nil, nil, err
+	}
+	resources, err := loadCommunityPostResourceReferencesWithQueryer(ctx, s.db, postIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	return projects, resources, nil
+}
+
+func loadCommunityPostResourceReferencesWithQueryer(ctx context.Context, queryer followProjectBatchQueryer, postIDs []int64) (map[int64][]communityPostReference, error) {
+	resources := make(map[int64][]communityPostReference, len(postIDs))
+	for _, postID := range postIDs {
+		resources[postID] = make([]communityPostReference, 0)
+	}
+	if len(postIDs) == 0 {
+		return resources, nil
+	}
+	rows, err := queryer.Query(ctx, `select ref.post_id,coalesce(entity.public_id,''),ref.kind_code,ref.raw_resource_id,
 		coalesce(resource.canonical_id,ref.raw_resource_id),coalesce(detail.version_id,0),coalesce(version.public_id,''),
 		coalesce(detail.icon_file_id,0),coalesce(snapshot.revision_id,''),coalesce(snapshot.icon_path,''),
 		coalesce(localized.names,snapshot.names,'{}'::jsonb)
@@ -898,7 +1297,7 @@ func (s *Server) communityPostReferencesBatch(ctx context.Context, postIDs []int
 			where value.catalog_entity_id=ref.resource_id and value.name<>'') localized on true
 		where ref.post_id=any($1::bigint[]) order by ref.post_id,ref.display_order,ref.id`, postIDs)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -908,164 +1307,19 @@ func (s *Server) communityPostReferencesBatch(ctx context.Context, postIDs []int
 		var namesRaw []byte
 		if err = rows.Scan(&postID, &ref.PublicID, &ref.Kind, &ref.Identifier, &ref.Name, &versionInternalID, &ref.VersionID,
 			&iconFileID, &ref.RevisionID, &ref.IconPath, &namesRaw); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		_ = json.Unmarshal(namesRaw, &ref.Names)
+		if err = json.Unmarshal(namesRaw, &ref.Names); err != nil {
+			return nil, fmt.Errorf("decode community resource names for post %d resource %q: %w", postID, ref.Identifier, err)
+		}
 		ref.Unresolved = ref.PublicID == ""
 		if iconFileID > 0 && ref.PublicID != "" && ref.VersionID != "" {
 			ref.IconURL = "/api/v1/catalog/resources/" + ref.PublicID + "/versions/" + ref.VersionID + "/assets/icon-small"
 		}
 		resources[postID] = append(resources[postID], ref)
 	}
-	return projects, resources, rows.Err()
-}
-
-func (s *Server) requestCommunityPostTranslation(w http.ResponseWriter, r *http.Request) {
-	claims := currentClaims(r)
-	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
-	var request struct {
-		TargetLocale string `json:"targetLocale"`
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
-	if decodeJSON(r, &request) != nil {
-		writeError(w, http.StatusBadRequest, "invalid translation request")
-		return
-	}
-	targetLocale := normalizeContentLocale(request.TargetLocale)
-	var postID, revisionID int64
-	var sourceLocale, title, body string
-	err := s.db.QueryRow(r.Context(), `select id,published_revision_id,source_locale,title,body_markdown from community_posts
-		where public_id=$1 and status='active' and review_status='approved'`, publicID).Scan(&postID, &revisionID, &sourceLocale, &title, &body)
-	if err != nil || targetLocale == "" || targetLocale == sourceLocale {
-		writeError(w, http.StatusBadRequest, "translation request is invalid")
-		return
-	}
-	var cachedTitle, cachedBody string
-	if s.db.QueryRow(r.Context(), `select title,body_markdown from community_post_translations where post_id=$1 and locale=$2 and source_revision_id=$3`, postID, targetLocale, revisionID).Scan(&cachedTitle, &cachedBody) == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"cached": true, "translation": map[string]string{"title": cachedTitle, "bodyMarkdown": cachedBody}})
-		return
-	}
-	limit := int64(claimsNumericPermissionValue(claims, "user.ai.daily_token_limit"))
-	if limit <= 0 {
-		writeError(w, http.StatusForbidden, "no daily AI token allowance is available")
-		return
-	}
-	task, err := s.enqueueCommunityPostTranslation(r.Context(), publicID, postID, revisionID, sourceLocale, targetLocale, title, body, claims.Subject, limit)
-	if errors.Is(err, errAIQuotaExceeded) {
-		writeError(w, http.StatusTooManyRequests, "daily AI token allowance is insufficient")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-	if task.Created && !s.publishContentTranslationTask(r.Context(), task) {
-		writeError(w, http.StatusServiceUnavailable, "translation queue is unavailable")
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"taskId": task.TaskUID, "status": task.Status, "countsTowardDailyTokenQuota": true})
-}
-
-func (s *Server) enqueueCommunityPostTranslation(ctx context.Context, publicID string, postID, revisionID int64, sourceLocale, targetLocale, title, body string, actorID, tokenLimit int64) (enqueuedContentTranslation, error) {
-	cfg := s.aiConfigFromSettings(ctx)
-	binding, ok := findAITaskModel(cfg.TaskModels, aiTaskContentTranslation)
-	if !ok {
-		return enqueuedContentTranslation{}, errors.New("content translation is not configured")
-	}
-	provider, model, ok := resolveAIModel(cfg, binding.ModelKey)
-	if !ok {
-		return enqueuedContentTranslation{}, errors.New("content translation model is unavailable")
-	}
-	payload := map[string]any{"scope": "community_post", "postId": publicID, "postInternalId": postID,
-		"sourceRevisionId": revisionID, "sourceLocale": sourceLocale, "targetLocale": targetLocale,
-		"quotaBacked": true, "items": []map[string]string{{"key": "title", "text": title}, {"key": "bodyMarkdown", "text": body}}}
-	raw, _ := json.Marshal(payload)
-	reserved := int64(utf8.RuneCountInString(title+body)*2 + 256)
-	concurrencyKey := "community-post:" + publicID + ":" + targetLocale + ":" + strconv.FormatInt(revisionID, 10) + ":actor:" + strconv.FormatInt(actorID, 10)
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return enqueuedContentTranslation{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, concurrencyKey); err != nil {
-		return enqueuedContentTranslation{}, err
-	}
-	var existing enqueuedContentTranslation
-	err = tx.QueryRow(ctx, `select id,task_uid,status from ai_tasks where task_type=$1 and concurrency_key=$2
-		and status in ('queued','running','retrying') order by created_at desc limit 1`, aiTaskContentTranslation, concurrencyKey).
-		Scan(&existing.TaskID, &existing.TaskUID, &existing.Status)
-	if err == nil {
-		if err = tx.Commit(ctx); err != nil {
-			return enqueuedContentTranslation{}, err
-		}
-		return existing, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return enqueuedContentTranslation{}, err
-	}
-	if err = reserveAITaskQuotaTx(ctx, tx, actorID, tokenLimit, reserved); err != nil {
-		return enqueuedContentTranslation{}, err
-	}
-	taskUID := "ai_" + randomHex(16)
-	var taskID int64
-	err = tx.QueryRow(ctx, `insert into ai_tasks(task_uid,task_type,provider,model,status,priority,concurrency_key,payload,created_by,queued_at,quota_reserved_tokens)
-		values($1,$2,$3,$4,'queued',0,$5,$6::jsonb,$7,now(),$8) returning id`, taskUID, aiTaskContentTranslation,
-		provider.Code, model.Model, concurrencyKey, string(raw), actorID, reserved).Scan(&taskID)
-	if err != nil {
-		return enqueuedContentTranslation{}, err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return enqueuedContentTranslation{}, err
-	}
-	s.writeAITaskLog(ctx, taskID, "info", "task_queued", "Community post translation queued", payload)
-	return enqueuedContentTranslation{TaskID: taskID, TaskUID: taskUID, Status: "queued", Created: true}, nil
-}
-
-func (s *Server) communityPostTranslationResult(w http.ResponseWriter, r *http.Request) {
-	taskUID := strings.ToLower(strings.TrimSpace(r.PathValue("taskId")))
-	var status, errorText string
-	var createdBy int64
-	var payloadRaw []byte
-	if s.db.QueryRow(r.Context(), `select status,error,coalesce(created_by,0),payload from ai_tasks where task_uid=$1 and task_type=$2`, taskUID, aiTaskContentTranslation).
-		Scan(&status, &errorText, &createdBy, &payloadRaw) != nil || createdBy != currentClaims(r).Subject {
-		writeError(w, http.StatusNotFound, "translation task not found")
-		return
-	}
-	response := map[string]any{"taskId": taskUID, "status": status, "error": errorText}
-	if status == "completed" {
-		var payload struct {
-			PostInternalID int64  `json:"postInternalId"`
-			TargetLocale   string `json:"targetLocale"`
-			SourceRevision int64  `json:"sourceRevisionId"`
-		}
-		_ = json.Unmarshal(payloadRaw, &payload)
-		var title, body string
-		if s.db.QueryRow(r.Context(), `select title,body_markdown from community_post_translations where post_id=$1 and locale=$2 and source_revision_id=$3`, payload.PostInternalID, payload.TargetLocale, payload.SourceRevision).Scan(&title, &body) == nil {
-			response["translation"] = map[string]string{"title": title, "bodyMarkdown": body}
-		}
-	}
-	writeJSON(w, http.StatusOK, response)
-}
-
-func (worker *AIWorker) persistCommunityPostTranslation(ctx context.Context, taskID int64, rawPayload []byte, result map[string]any) error {
-	var payload struct {
-		PostInternalID int64  `json:"postInternalId"`
-		TargetLocale   string `json:"targetLocale"`
-		SourceRevision int64  `json:"sourceRevisionId"`
-	}
-	if json.Unmarshal(rawPayload, &payload) != nil || payload.PostInternalID <= 0 || payload.SourceRevision <= 0 {
-		return errors.New("community post translation payload is invalid")
-	}
-	translated := translationItemsToMap(result)
-	if strings.TrimSpace(translated["title"]) == "" || strings.TrimSpace(translated["bodyMarkdown"]) == "" {
-		return errors.New("community post translation result is incomplete")
-	}
-	var currentRevision int64
-	if worker.db.QueryRow(ctx, `select published_revision_id from community_posts where id=$1 and review_status='approved'`, payload.PostInternalID).Scan(&currentRevision) != nil || currentRevision != payload.SourceRevision {
-		return errors.New("community post changed while translation was running")
-	}
-	_, err := worker.db.Exec(ctx, `insert into community_post_translations(post_id,locale,title,body_markdown,source_revision_id,ai_task_id)
-		values($1,$2,$3,$4,$5,$6) on conflict(post_id,locale) do update set title=excluded.title,
-		body_markdown=excluded.body_markdown,source_revision_id=excluded.source_revision_id,ai_task_id=excluded.ai_task_id,updated_at=now()`,
-		payload.PostInternalID, normalizeContentLocale(payload.TargetLocale), translated["title"], translated["bodyMarkdown"], payload.SourceRevision, taskID)
-	return err
+	return resources, nil
 }

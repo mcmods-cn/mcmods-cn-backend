@@ -9,8 +9,6 @@ import (
 	"log"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
 )
@@ -29,7 +27,7 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	db, err := pgxpool.New(ctx, cfg.DB.ConnString())
+	db, err := database.Connect(ctx, cfg)
 	if err != nil {
 		log.Fatalf("connect %s: %v", databaseName, err)
 	}

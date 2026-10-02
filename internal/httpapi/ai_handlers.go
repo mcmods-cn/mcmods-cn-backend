@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -25,16 +26,15 @@ const (
 )
 
 type aiTaskDefinition struct {
-	TaskType         string
-	ConcurrencyLimit int
-	TimeoutSeconds   int
+	TaskType       string
+	TimeoutSeconds int
 }
 
 var registeredAITaskDefinitions = []aiTaskDefinition{
-	{TaskType: aiTaskPermissionTranslation, ConcurrencyLimit: 2, TimeoutSeconds: 120},
-	{TaskType: aiTaskI18nTranslation, ConcurrencyLimit: 2, TimeoutSeconds: 120},
-	{TaskType: aiTaskNotificationTranslation, ConcurrencyLimit: 4, TimeoutSeconds: 90},
-	{TaskType: aiTaskContentTranslation, ConcurrencyLimit: 4, TimeoutSeconds: 120},
+	{TaskType: aiTaskPermissionTranslation, TimeoutSeconds: 120},
+	{TaskType: aiTaskI18nTranslation, TimeoutSeconds: 120},
+	{TaskType: aiTaskNotificationTranslation, TimeoutSeconds: 90},
+	{TaskType: aiTaskContentTranslation, TimeoutSeconds: 120},
 }
 
 type aiConfigPayload struct {
@@ -68,11 +68,10 @@ type aiModelConfig struct {
 }
 
 type aiTaskModelConfig struct {
-	TaskType         string `json:"taskType"`
-	ModelKey         string `json:"modelKey"`
-	ConcurrencyLimit int    `json:"concurrencyLimit"`
-	TimeoutSeconds   int    `json:"timeoutSeconds"`
-	Prompt           string `json:"prompt"`
+	TaskType       string `json:"taskType"`
+	ModelKey       string `json:"modelKey"`
+	TimeoutSeconds int    `json:"timeoutSeconds"`
+	Prompt         string `json:"prompt"`
 }
 
 type aiQuotaConfig struct {
@@ -119,17 +118,42 @@ func NewAIWorker(db *pgxpool.Pool, queueClient *queue.Client, settingsEncryption
 }
 
 func (worker *AIWorker) Start(ctx context.Context) error {
-	if worker == nil || worker.queue == nil {
+	if worker == nil || worker.db == nil || worker.queue == nil {
 		return queue.ErrUnavailable
 	}
-	err := worker.queue.SubscribeTask("ai", worker.handleTask)
+	// Registration happens before SubscribeTask reports an offline NATS
+	// connection, so the PostgreSQL dispatcher can use the same local handler.
+	_ = worker.queue.SubscribeTask("ai", worker.handleTask)
+	recoveryErr := worker.recoverTasks(ctx)
+	go worker.recoveryLoop(ctx)
+	return recoveryErr
+}
+
+func (worker *AIWorker) recoveryLoop(ctx context.Context) {
+	ticker := time.NewTicker(aiTaskRecoveryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := worker.recoverTasks(ctx); err != nil {
+				slog.Warn("recover AI task outbox", "error", err)
+			}
+		}
+	}
+}
+
+func (worker *AIWorker) recoverTasks(ctx context.Context) error {
+	tx, err := worker.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	go func() {
-		<-ctx.Done()
-	}()
-	return nil
+	defer tx.Rollback(ctx)
+	if _, err = recoverAITaskOutboxTx(ctx, tx, aiTaskStaleAfter, aiTaskRecoveryBatch); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
@@ -141,20 +165,14 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 		return errors.New("ai task message missing task id")
 	}
 	started := time.Now()
-	tag, err := worker.db.Exec(
-		ctx,
-		`update ai_tasks
-		 set status = 'running', started_at = coalesce(started_at, now()), updated_at = now()
-		 where id = $1 and status in ('queued', 'retrying')`,
-		msg.TaskID,
-	)
+	claimed, err := claimAITaskForExecution(ctx, worker.db, msg.TaskID)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	if !claimed {
 		return nil
 	}
-	worker.writeTaskLog(ctx, msg.TaskID, "info", "task_started", "AI task picked by NATS worker", msg)
+	worker.writeTaskLog(ctx, msg.TaskID, "info", "task_started", "AI task claimed by reliable worker", msg)
 
 	var taskType, provider, model string
 	var createdBy int64
@@ -164,17 +182,42 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 		`select task_type, provider, model, payload, coalesce(created_by, 0) from ai_tasks where id = $1`,
 		msg.TaskID,
 	).Scan(&taskType, &provider, &model, &rawPayload, &createdBy); err != nil {
-		worker.failTask(ctx, msg.TaskID, err)
-		return err
+		failureErr := worker.failTask(ctx, msg.TaskID, err)
+		return errors.Join(err, failureErr)
 	}
 
 	result, usage, err := worker.executeTask(ctx, taskType, provider, model, rawPayload)
 	if err != nil {
-		worker.failTask(ctx, msg.TaskID, err)
-		return err
+		failureErr := worker.failTask(ctx, msg.TaskID, err)
+		return errors.Join(err, failureErr)
 	}
-	rawResult, _ := json.Marshal(result)
-	_, err = worker.db.Exec(
+	rawResult, err := json.Marshal(result)
+	if err != nil {
+		failureErr := worker.failTask(ctx, msg.TaskID, err)
+		return errors.Join(err, failureErr)
+	}
+	if taskType == aiTaskNotificationTranslation {
+		if err = worker.persistNotificationTranslation(ctx, createdBy, rawPayload, result); err != nil {
+			failureErr := worker.failTask(ctx, msg.TaskID, err)
+			return errors.Join(err, failureErr)
+		}
+	}
+	if taskType == aiTaskContentTranslation {
+		var scope string
+		scope, err = decodeAITaskContentScope(rawPayload)
+		if err == nil {
+			if scope == "community_post" {
+				err = worker.persistCommunityPostTranslation(ctx, msg.TaskID, rawPayload, result)
+			} else {
+				err = worker.persistCatalogContentTranslation(ctx, msg.TaskID, createdBy, rawPayload, result)
+			}
+		}
+		if err != nil {
+			failureErr := worker.failTask(ctx, msg.TaskID, err)
+			return errors.Join(err, failureErr)
+		}
+	}
+	tag, err := worker.db.Exec(
 		ctx,
 		`update ai_tasks
 		 set status = 'completed',
@@ -184,7 +227,7 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 		     cost_micros = $5,
 		     finished_at = now(),
 		     updated_at = now()
-		 where id = $1`,
+		 where id = $1 and status = 'running'`,
 		msg.TaskID,
 		string(rawResult),
 		usage.InputTokens,
@@ -192,26 +235,13 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 		usage.CostMicros,
 	)
 	if err != nil {
-		worker.failTask(ctx, msg.TaskID, err)
-		return err
+		failureErr := worker.failTask(ctx, msg.TaskID, err)
+		return errors.Join(err, failureErr)
 	}
-	if taskType == aiTaskNotificationTranslation && createdBy > 0 {
-		worker.persistNotificationTranslation(ctx, createdBy, rawPayload, result)
-	}
-	if taskType == aiTaskContentTranslation {
-		var payloadScope struct {
-			Scope string `json:"scope"`
-		}
-		_ = json.Unmarshal(rawPayload, &payloadScope)
-		if payloadScope.Scope == "community_post" {
-			err = worker.persistCommunityPostTranslation(ctx, msg.TaskID, rawPayload, result)
-		} else {
-			err = worker.persistCatalogContentTranslation(ctx, msg.TaskID, createdBy, rawPayload, result)
-		}
-		if err != nil {
-			worker.failTask(ctx, msg.TaskID, err)
-			return err
-		}
+	if tag.RowsAffected() != 1 {
+		err = fmt.Errorf("complete AI task %d: expected one running task, updated %d", msg.TaskID, tag.RowsAffected())
+		failureErr := worker.failTask(ctx, msg.TaskID, err)
+		return errors.Join(err, failureErr)
 	}
 	worker.writeTaskLog(ctx, msg.TaskID, "info", "task_completed", "AI task completed by placeholder executor", map[string]any{
 		"durationMs": time.Since(started).Milliseconds(),
@@ -220,20 +250,49 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 	return nil
 }
 
-func (worker *AIWorker) failTask(ctx context.Context, taskID int64, cause error) {
+func decodeAITaskContentScope(rawPayload []byte) (string, error) {
+	var payload struct {
+		Scope string `json:"scope"`
+	}
+	if err := json.Unmarshal(rawPayload, &payload); err != nil {
+		return "", fmt.Errorf("decode AI content task scope: %w", err)
+	}
+	payload.Scope = strings.TrimSpace(payload.Scope)
+	if payload.Scope != "" && payload.Scope != "community_post" {
+		return "", fmt.Errorf("unsupported AI content task scope %q", payload.Scope)
+	}
+	return payload.Scope, nil
+}
+
+func logAITranslationFailure(stage, taskUID string, err error) {
+	slog.Error("AI translation failure", "module", "ai_translation", "stage", stage, "task_uid", taskUID, "error", err)
+}
+
+func (worker *AIWorker) failTask(ctx context.Context, taskID int64, cause error) error {
 	message := ""
 	if cause != nil {
 		message = cause.Error()
 	}
-	_, _ = worker.db.Exec(
+	tag, err := worker.db.Exec(
 		ctx,
 		`update ai_tasks
 		 set status = 'failed', error = $2, finished_at = now(), updated_at = now()
-		 where id = $1`,
+		 where id = $1 and status = 'running'`,
 		taskID,
 		message,
 	)
+	if err != nil {
+		logAITranslationFailure("persist_failed_state", strconv.FormatInt(taskID, 10), err)
+		return fmt.Errorf("persist failed AI task %d: %w", taskID, err)
+	}
+	if tag.RowsAffected() != 1 {
+		err = fmt.Errorf("persist failed AI task %d: expected one running task, updated %d", taskID, tag.RowsAffected())
+		logAITranslationFailure("persist_failed_state", strconv.FormatInt(taskID, 10), err)
+		return err
+	}
+	logAITranslationFailure("task_failed", strconv.FormatInt(taskID, 10), cause)
 	worker.writeTaskLog(ctx, taskID, "error", "task_failed", message, nil)
+	return nil
 }
 
 func (worker *AIWorker) writeTaskLog(ctx context.Context, taskID int64, level string, event string, message string, payload any) {
@@ -339,7 +398,7 @@ func (s *Server) adminAITasks(w http.ResponseWriter, r *http.Request) {
 		where = append(where, fmt.Sprintf("t.created_at <= $%d", len(args)))
 	}
 	args = append(args, boundedLimit(r.URL.Query().Get("limit"), 100, 500))
-	rows := s.querySimpleRows(
+	rows, err := s.querySimpleRows(
 		r,
 		`select t.task_uid as id, t.task_uid, t.task_type, t.provider, t.model, t.status, t.priority,
 		        t.concurrency_key, t.input_tokens, t.output_tokens, t.cost_micros, t.payload,
@@ -352,6 +411,10 @@ func (s *Server) adminAITasks(w http.ResponseWriter, r *http.Request) {
 		 limit $`+strconv.Itoa(len(args)),
 		args...,
 	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取 AI 任务失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, rows)
 }
 
@@ -361,7 +424,7 @@ func (s *Server) adminAITask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "AI 任务 ID 不正确")
 		return
 	}
-	rows := s.querySimpleRows(
+	rows, err := s.querySimpleRows(
 		r,
 		`select task_uid as id, task_uid, task_type, provider, model, status, input_tokens, output_tokens,
 		        cost_micros, result, error, created_at, started_at, finished_at, updated_at
@@ -370,6 +433,10 @@ func (s *Server) adminAITask(w http.ResponseWriter, r *http.Request) {
 		 limit 1`,
 		taskUID,
 	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取 AI 任务失败")
+		return
+	}
 	if len(rows) == 0 {
 		writeError(w, http.StatusNotFound, "AI 任务不存在")
 		return
@@ -439,32 +506,20 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	message := aiTaskMessage{TaskID: taskID, TaskUID: taskUID, TaskType: req.TaskType}
-	if s.cfg.NATS.OutboxEnabled {
-		if _, err = queue.EnqueueTx(r.Context(), tx, "ai", "ai.task.requested", "ai_task", taskUID, r.Header.Get("X-Request-ID"), message); err != nil {
-			writeError(w, http.StatusInternalServerError, "AI 任务可靠入队失败")
-			return
-		}
+	if err = enqueueAITaskTx(r.Context(), tx, "ai.task.requested", taskID, taskUID, req.TaskType, r.Header.Get("X-Request-ID")); err != nil {
+		writeError(w, http.StatusInternalServerError, "AI 任务可靠入队失败")
+		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建 AI 任务失败")
 		return
 	}
-	if !s.cfg.NATS.OutboxEnabled && (s.queue == nil || s.queue.PublishTask(r.Context(), "ai", message) != nil) {
-		_, _ = s.db.Exec(
-			r.Context(),
-			`update ai_tasks set status = 'failed', error = $2, finished_at = now(), updated_at = now() where id = $1`,
-			taskID,
-			queue.ErrUnavailable.Error(),
-		)
-		writeError(w, http.StatusServiceUnavailable, "NATS 任务队列不可用，请检查 NATS 服务是否运行")
-		return
-	}
-	s.writeAITaskLog(r.Context(), taskID, "info", "task_queued", "AI task published to NATS", message)
+	s.writeAITaskLog(r.Context(), taskID, "info", "task_queued", "AI task committed to the reliable outbox", message)
 	writeJSON(w, http.StatusCreated, map[string]any{"id": taskUID, "taskUid": taskUID, "status": "queued"})
 }
 
 func (s *Server) adminAIStats(w http.ResponseWriter, r *http.Request) {
-	stats := s.querySimpleRows(
+	stats, err := s.querySimpleRows(
 		r,
 		`select status, count(*) as tasks, coalesce(sum(input_tokens), 0) as input_tokens,
 		        coalesce(sum(output_tokens), 0) as output_tokens,
@@ -474,7 +529,11 @@ func (s *Server) adminAIStats(w http.ResponseWriter, r *http.Request) {
 		 group by status
 		 order by status`,
 	)
-	byProvider := s.querySimpleRows(
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取 AI 统计失败")
+		return
+	}
+	byProvider, err := s.querySimpleRows(
 		r,
 		`select provider, model, count(*) as tasks, coalesce(sum(cost_micros), 0) as cost_micros
 		 from ai_tasks
@@ -483,6 +542,10 @@ func (s *Server) adminAIStats(w http.ResponseWriter, r *http.Request) {
 		 order by cost_micros desc, tasks desc
 		 limit 50`,
 	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取 AI 统计失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"byStatus":   stats,
 		"byProvider": byProvider,
@@ -583,9 +646,8 @@ func defaultAITaskModels() []aiTaskModelConfig {
 	models := make([]aiTaskModelConfig, 0, len(registeredAITaskDefinitions))
 	for _, definition := range registeredAITaskDefinitions {
 		models = append(models, aiTaskModelConfig{
-			TaskType:         definition.TaskType,
-			ConcurrencyLimit: definition.ConcurrencyLimit,
-			TimeoutSeconds:   definition.TimeoutSeconds,
+			TaskType:       definition.TaskType,
+			TimeoutSeconds: definition.TimeoutSeconds,
 		})
 	}
 	return models
@@ -603,12 +665,8 @@ func normalizeAITaskModels(current []aiTaskModelConfig) []aiTaskModelConfig {
 	for index := range result {
 		if saved, ok := byType[result[index].TaskType]; ok {
 			result[index].ModelKey = strings.TrimSpace(saved.ModelKey)
-			result[index].ConcurrencyLimit = saved.ConcurrencyLimit
 			result[index].TimeoutSeconds = saved.TimeoutSeconds
 			result[index].Prompt = strings.TrimSpace(saved.Prompt)
-		}
-		if result[index].ConcurrencyLimit <= 0 {
-			result[index].ConcurrencyLimit = 1
 		}
 		if result[index].TimeoutSeconds <= 0 {
 			result[index].TimeoutSeconds = 60

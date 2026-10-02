@@ -12,7 +12,9 @@ import (
 	"testing"
 )
 
-func TestCatalogCreationEntrypointsCannotGrantProjectRoles(t *testing.T) {
+func TestCatalogCreationEntrypointsContainNoDirectProjectRoleSQL(t *testing.T) {
+	// This is a local structure guard only. The integration matrix exercises
+	// the complete helper call graph and owns the no-authorization guarantee.
 	t.Parallel()
 	for _, entrypoint := range []struct {
 		file     string
@@ -36,7 +38,7 @@ func TestCatalogCreationEntrypointsCannotGrantProjectRoles(t *testing.T) {
 					}
 					literal, err := strconv.Unquote(value.Value)
 					if err == nil && strings.Contains(strings.ToLower(literal), "user_role_bindings") {
-						t.Fatalf("%s writes user_role_bindings directly", entrypoint.function)
+						t.Fatalf("%s contains direct user_role_bindings SQL", entrypoint.function)
 					}
 				}
 				return true

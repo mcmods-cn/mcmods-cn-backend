@@ -52,3 +52,11 @@ func TestPendingIdentityAndEditorRequestsDoNotChangePermissionVersion(t *testing
 		}
 	}
 }
+
+func TestProjectAuthorshipReviewQueueHasStablePageIndex(t *testing.T) {
+	schema := strings.ToLower(strings.Join(baselineSchemaStatements(), "\n"))
+	if !strings.Contains(schema, "idx_content_creator_bindings_review_page") ||
+		!strings.Contains(schema, "content_creator_bindings(status,created_at,id)") {
+		t.Fatal("project authorship review queue is missing its status/time/id keyset index")
+	}
+}

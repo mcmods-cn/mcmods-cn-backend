@@ -7,11 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"image"
 	"image/gif"
-	_ "image/png"
+	"image/png"
 	"io"
+	"log"
 	"net/http"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -19,6 +20,7 @@ import (
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"mcmods-cn-backend/internal/config"
 )
@@ -29,6 +31,12 @@ const (
 	maxStickerPixels        = int64(4_194_304)
 	maxStickerGIFFrames     = 120
 	maxStickerGIFTotalPixel = int64(64_000_000)
+	defaultStickerPacks     = 64
+	defaultStickersPerPack  = 128
+	defaultStickerCatalog   = 1024
+	hardStickerPacks        = 256
+	hardStickersPerPack     = 512
+	hardStickerCatalog      = 4096
 )
 
 func normalizedStickerLimits(value config.StickerConfig) config.StickerConfig {
@@ -49,6 +57,21 @@ func normalizedStickerLimits(value config.StickerConfig) config.StickerConfig {
 	}
 	if value.MaxGIFDuration <= 0 {
 		value.MaxGIFDuration = 30 * time.Second
+	}
+	if value.MaxPacks <= 0 {
+		value.MaxPacks = defaultStickerPacks
+	} else if value.MaxPacks > hardStickerPacks {
+		value.MaxPacks = hardStickerPacks
+	}
+	if value.MaxStickersPerPack <= 0 {
+		value.MaxStickersPerPack = defaultStickersPerPack
+	} else if value.MaxStickersPerPack > hardStickersPerPack {
+		value.MaxStickersPerPack = hardStickersPerPack
+	}
+	if value.MaxCatalogItems <= 0 {
+		value.MaxCatalogItems = defaultStickerCatalog
+	} else if value.MaxCatalogItems > hardStickerCatalog {
+		value.MaxCatalogItems = hardStickerCatalog
 	}
 	return value
 }
@@ -71,14 +94,33 @@ type stickerMutation struct {
 }
 
 type stickerImageMeta struct {
-	FileID      int64
-	PublicID    string
-	ObjectKey   string
-	ContentType string
-	Size        int64
-	SHA256      string
-	Width       int
-	Height      int
+	FileID        int64
+	SourceFileID  int64
+	ContentType   string
+	Size          int64
+	SHA256        string
+	Width         int
+	Height        int
+	SanitizedData []byte
+}
+
+type stickerReferenceQueryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+var errStickerImageNoLongerActive = errors.New("sticker image is no longer active")
+
+func parseStickerToken(token string) (string, string, bool) {
+	value, ok := strings.CutPrefix(token, "[sticker:")
+	if !ok || !strings.HasSuffix(value, "]") {
+		return "", "", false
+	}
+	value = strings.TrimSuffix(value, "]")
+	packCode, code, ok := strings.Cut(value, ":")
+	if !ok || strings.Contains(code, ":") || !validStickerCode(packCode) || !validStickerCode(code) {
+		return "", "", false
+	}
+	return packCode, code, true
 }
 
 func editableStickerLocales() []string {
@@ -131,6 +173,7 @@ func normalizeStickerStatus(value string) (string, bool) {
 }
 
 func (s *Server) publicStickerCatalog(w http.ResponseWriter, r *http.Request) {
+	limits := normalizedStickerLimits(s.cfg.Sticker)
 	locale := normalizeContentLocale(r.URL.Query().Get("locale"))
 	if _, ok := supportedEditableContentLocales[locale]; !ok {
 		locale = "zh-CN"
@@ -140,14 +183,14 @@ func (s *Server) publicStickerCatalog(w http.ResponseWriter, r *http.Request) {
 		coalesce(st.name,stzh.name,sten.name,s.code),f.public_id,s.mime_type,s.width,s.height
 		from sticker_packs p
 		join stickers s on s.pack_id=p.id and s.status='active'
-		join oss_files f on f.id=s.image_file_id and f.status='active' and f.scan_status in ('clean','trusted_generated')
+		join oss_files f on f.id=s.image_file_id and f.status='active' and f.scan_status='trusted_generated' and f.source='sticker_derived'
 		left join sticker_pack_translations pt on pt.pack_id=p.id and pt.locale=$1
 		left join sticker_pack_translations zh on zh.pack_id=p.id and zh.locale='zh-CN'
 		left join sticker_pack_translations en on en.pack_id=p.id and en.locale='en-US'
 		left join sticker_translations st on st.sticker_id=s.id and st.locale=$1
 		left join sticker_translations stzh on stzh.sticker_id=s.id and stzh.locale='zh-CN'
 		left join sticker_translations sten on sten.sticker_id=s.id and sten.locale='en-US'
-		where p.status='active' order by p.sort_order,p.id,s.sort_order,s.id`, locale)
+		where p.status='active' order by p.sort_order,p.id,s.sort_order,s.id limit $2`, locale, limits.MaxCatalogItems+1)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load sticker catalog")
 		return
@@ -168,7 +211,13 @@ func (s *Server) publicStickerCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 	packs := make([]pack, 0)
 	packIndex := map[string]int{}
+	rowCount := 0
 	for rows.Next() {
+		rowCount++
+		if rowCount > limits.MaxCatalogItems {
+			writeError(w, http.StatusInternalServerError, "sticker catalog exceeds the configured item budget")
+			return
+		}
 		var packCode, packName, code, name, fileID, mimeType string
 		var packSort, stickerSort, width, height int
 		if err = rows.Scan(&packCode, &packSort, &packName, &code, &stickerSort, &name, &fileID, &mimeType, &width, &height); err != nil {
@@ -177,24 +226,35 @@ func (s *Server) publicStickerCatalog(w http.ResponseWriter, r *http.Request) {
 		}
 		index, ok := packIndex[packCode]
 		if !ok {
+			if len(packs) >= limits.MaxPacks {
+				writeError(w, http.StatusInternalServerError, "sticker catalog exceeds the configured pack budget")
+				return
+			}
 			index = len(packs)
 			packIndex[packCode] = index
 			packs = append(packs, pack{Code: packCode, Name: packName, Stickers: []item{}})
 		}
+		if len(packs[index].Stickers) >= limits.MaxStickersPerPack {
+			writeError(w, http.StatusInternalServerError, "sticker pack exceeds the configured item budget")
+			return
+		}
 		packs[index].Stickers = append(packs[index].Stickers, item{Code: code, Name: name, ImageURL: "/api/v1/oss/files/" + fileID + "/content", MimeType: mimeType, Width: width, Height: height})
 	}
-	var version int64
-	_ = s.db.QueryRow(r.Context(), `select version from sticker_catalog_state where singleton`).Scan(&version)
-	writeJSON(w, http.StatusOK, map[string]any{"version": version, "locale": locale, "packs": packs})
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read sticker catalog")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"locale": locale, "packs": packs})
 }
 
 func (s *Server) adminStickerCatalog(w http.ResponseWriter, r *http.Request) {
+	limits := normalizedStickerLimits(s.cfg.Sticker)
 	rows, err := s.db.Query(r.Context(), `select p.code,p.status,p.sort_order,
 		coalesce((select jsonb_object_agg(locale,name) from sticker_pack_translations where pack_id=p.id),'{}'::jsonb),
 		s.code,s.status,s.sort_order,f.public_id,s.mime_type,s.width,s.height,s.file_size,s.checksum,
 		coalesce((select jsonb_object_agg(locale,name) from sticker_translations where sticker_id=s.id),'{}'::jsonb)
 		from sticker_packs p left join stickers s on s.pack_id=p.id left join oss_files f on f.id=s.image_file_id
-		order by p.sort_order,p.id,s.sort_order,s.id`)
+		order by p.sort_order,p.id,s.sort_order,s.id limit $1`, limits.MaxCatalogItems+limits.MaxPacks+1)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load sticker administration data")
 		return
@@ -221,7 +281,13 @@ func (s *Server) adminStickerCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 	packs := make([]adminPack, 0)
 	indexes := map[string]int{}
+	rowCount := 0
 	for rows.Next() {
+		rowCount++
+		if rowCount > limits.MaxCatalogItems+limits.MaxPacks {
+			writeError(w, http.StatusInternalServerError, "sticker administration catalog exceeds the configured budget")
+			return
+		}
 		var packCode, packStatus string
 		var packSort int
 		var packTranslations []byte
@@ -236,16 +302,34 @@ func (s *Server) adminStickerCatalog(w http.ResponseWriter, r *http.Request) {
 		index, ok := indexes[packCode]
 		if !ok {
 			var names stickerTranslationMap
-			_ = json.Unmarshal(packTranslations, &names)
+			if err = json.Unmarshal(packTranslations, &names); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to decode sticker pack translations")
+				return
+			}
 			index = len(packs)
+			if index >= limits.MaxPacks {
+				writeError(w, http.StatusInternalServerError, "sticker administration catalog exceeds the configured pack budget")
+				return
+			}
 			indexes[packCode] = index
 			packs = append(packs, adminPack{Code: packCode, Status: packStatus, SortOrder: packSort, Translations: names, Stickers: []adminSticker{}})
 		}
 		if code != nil {
 			var names stickerTranslationMap
-			_ = json.Unmarshal(translations, &names)
+			if err = json.Unmarshal(translations, &names); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to decode sticker translations")
+				return
+			}
+			if len(packs[index].Stickers) >= limits.MaxStickersPerPack {
+				writeError(w, http.StatusInternalServerError, "sticker pack exceeds the configured item budget")
+				return
+			}
 			packs[index].Stickers = append(packs[index].Stickers, adminSticker{Code: *code, Status: stickerStringValue(status), SortOrder: stickerIntValue(sortOrder), ImageFileID: stickerStringValue(filePublicID), MimeType: stickerStringValue(mimeType), Width: stickerIntValue(width), Height: stickerIntValue(height), FileSize: stickerInt64Value(fileSize), Checksum: stickerStringValue(checksum), Translations: names})
 		}
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read sticker administration data")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"locales": editableStickerLocales(), "packs": packs})
 }
@@ -288,10 +372,24 @@ func (s *Server) createStickerPack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = tx.Rollback(r.Context()) }()
+	limits := normalizedStickerLimits(s.cfg.Sticker)
+	if err = lockStickerCatalogBudgetTx(r.Context(), tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock sticker catalog budget")
+		return
+	}
+	var packBudgetAvailable bool
+	if err = tx.QueryRow(r.Context(), `select count(*)<$1 from sticker_packs`, limits.MaxPacks).Scan(&packBudgetAvailable); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to inspect sticker pack budget")
+		return
+	}
+	if !packBudgetAvailable {
+		writeAPIError(w, http.StatusConflict, "STICKER_CATALOG_LIMIT", "the configured sticker pack limit has been reached", 0, nil)
+		return
+	}
 	var packID int64
 	err = tx.QueryRow(r.Context(), `insert into sticker_packs(code,status,sort_order,created_by) values($1,$2,$3,$4) returning id`, request.Code, status, request.SortOrder, currentClaims(r).Subject).Scan(&packID)
 	if err != nil {
-		writeAPIError(w, http.StatusConflict, "STICKER_PACK_CODE_EXISTS", "sticker pack code already exists", 0, nil)
+		writeStickerPackCreateDatabaseError(w, err)
 		return
 	}
 	for locale, name := range names {
@@ -300,7 +398,7 @@ func (s *Server) createStickerPack(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err = bumpStickerCatalogVersion(r.Context(), tx); err != nil || tx.Commit(r.Context()) != nil {
+	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, 500, "failed to save sticker pack")
 		return
 	}
@@ -340,7 +438,7 @@ func (s *Server) updateStickerPack(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err = bumpStickerCatalogVersion(r.Context(), tx); err != nil || tx.Commit(r.Context()) != nil {
+	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, 500, "failed to save sticker pack")
 		return
 	}
@@ -349,6 +447,56 @@ func (s *Server) updateStickerPack(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createSticker(w http.ResponseWriter, r *http.Request) { s.mutateSticker(w, r, false) }
 func (s *Server) updateSticker(w http.ResponseWriter, r *http.Request) { s.mutateSticker(w, r, true) }
+
+func isTemporaryStickerUploadSource(source string) bool {
+	source = strings.TrimSpace(source)
+	return source == "sticker-upload" || strings.HasPrefix(source, "sticker-upload:") && len(source) > len("sticker-upload:")
+}
+
+func (s *Server) discardStickerUpload(w http.ResponseWriter, r *http.Request) {
+	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("fileId")))
+	if !validCatalogPublicID(publicID) {
+		writeError(w, http.StatusBadRequest, "sticker upload file is invalid")
+		return
+	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start sticker upload cleanup")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var fileID int64
+	var status, source string
+	err = tx.QueryRow(r.Context(), `select id,status,source from oss_files
+		where public_id=$1 and uploader_id=$2 for update`, publicID, currentClaims(r).Subject).Scan(&fileID, &status, &source)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "sticker upload file does not exist")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load sticker upload file")
+		return
+	}
+	if !isTemporaryStickerUploadSource(source) {
+		writeError(w, http.StatusNotFound, "sticker upload file does not exist")
+		return
+	}
+	if status == "active" {
+		if err = s.tombstoneUnreferencedStickerFileTx(r.Context(), tx, fileID, "sticker_upload_discarded"); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to discard sticker upload file")
+			return
+		}
+		if err = tx.QueryRow(r.Context(), `select status from oss_files where id=$1`, fileID).Scan(&status); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to verify sticker upload cleanup")
+			return
+		}
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to discard sticker upload file")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"discarded": status == "deleted"})
+}
 
 func (s *Server) mutateSticker(w http.ResponseWriter, r *http.Request, update bool) {
 	packCode := strings.ToLower(strings.TrimSpace(r.PathValue("packCode")))
@@ -378,6 +526,24 @@ func (s *Server) mutateSticker(w http.ResponseWriter, r *http.Request, update bo
 			writeAPIError(w, 422, "STICKER_IMAGE_INVALID", err.Error(), 0, nil)
 			return
 		}
+		image, err = s.persistSanitizedStickerImage(r.Context(), image, currentClaims(r).Subject, packCode, code)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to persist sanitized sticker image")
+			return
+		}
+	}
+	imageBound := false
+	if image.FileID > 0 {
+		defer func() {
+			if imageBound {
+				return
+			}
+			cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Second)
+			defer cancel()
+			if cleanupErr := s.cleanupUnboundStickerImage(cleanupContext, image.FileID); cleanupErr != nil {
+				log.Printf("cleanup unbound sticker derivative %d: %v", image.FileID, cleanupErr)
+			}
+		}()
 	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -385,22 +551,61 @@ func (s *Server) mutateSticker(w http.ResponseWriter, r *http.Request, update bo
 		return
 	}
 	defer func() { _ = tx.Rollback(r.Context()) }()
+	limits := normalizedStickerLimits(s.cfg.Sticker)
+	if !update {
+		if err = lockStickerCatalogBudgetTx(r.Context(), tx); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to lock sticker catalog budget")
+			return
+		}
+	}
 	var packID, stickerID, previousImageFileID int64
-	if err = tx.QueryRow(r.Context(), `select id from sticker_packs where code=$1`, packCode).Scan(&packID); errors.Is(err, pgx.ErrNoRows) {
+	if err = tx.QueryRow(r.Context(), `select id from sticker_packs where code=$1 for update`, packCode).Scan(&packID); errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 404, "sticker pack does not exist")
 		return
 	} else if err != nil {
 		writeError(w, 500, "failed to load sticker pack")
 		return
 	}
+	if !update {
+		var packBudgetAvailable, catalogBudgetAvailable bool
+		if err = tx.QueryRow(r.Context(), `select (select count(*) from stickers where pack_id=$1)<$2,
+			(select count(*) from stickers)<$3`, packID, limits.MaxStickersPerPack, limits.MaxCatalogItems).Scan(&packBudgetAvailable, &catalogBudgetAvailable); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to inspect sticker catalog budget")
+			return
+		}
+		if !packBudgetAvailable || !catalogBudgetAvailable {
+			writeAPIError(w, http.StatusConflict, "STICKER_CATALOG_LIMIT", "the configured sticker catalog limit has been reached", 0, nil)
+			return
+		}
+	}
 	if update {
-		err = tx.QueryRow(r.Context(), `select id,image_file_id from stickers where pack_id=$1 and code=$2 for update`, packID, code).Scan(&stickerID, &previousImageFileID)
+		err = tx.QueryRow(r.Context(), `select id,image_file_id from stickers where pack_id=$1 and code=$2`, packID, code).Scan(&stickerID, &previousImageFileID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, 404, "sticker does not exist")
 			return
 		}
 		if err != nil {
 			writeError(w, 500, "failed to lock sticker")
+			return
+		}
+	}
+	if err = lockStickerImageFilesTx(r.Context(), tx, image.FileID, previousImageFileID, image.FileID, image.SourceFileID); err != nil {
+		if errors.Is(err, errStickerImageNoLongerActive) {
+			writeAPIError(w, http.StatusConflict, "STICKER_IMAGE_INVALID", "the uploaded image is no longer active", 0, nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to lock sticker image")
+		}
+		return
+	}
+	if update {
+		var lockedStickerID, lockedImageFileID int64
+		err = tx.QueryRow(r.Context(), `select id,image_file_id from stickers where pack_id=$1 and code=$2 for update`, packID, code).Scan(&lockedStickerID, &lockedImageFileID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, 404, "sticker does not exist")
+			return
+		}
+		if err != nil || lockedStickerID != stickerID || lockedImageFileID != previousImageFileID {
+			writeError(w, 409, "sticker changed while its image was being locked")
 			return
 		}
 		if image.FileID > 0 {
@@ -419,7 +624,7 @@ func (s *Server) mutateSticker(w http.ResponseWriter, r *http.Request, update bo
 		writeError(w, 404, "sticker does not exist")
 		return
 	} else if err != nil {
-		writeAPIError(w, 409, "STICKER_CODE_EXISTS", "sticker code already exists in this pack", 0, nil)
+		writeStickerMutationDatabaseError(w, err)
 		return
 	}
 	for locale, name := range names {
@@ -429,26 +634,75 @@ func (s *Server) mutateSticker(w http.ResponseWriter, r *http.Request, update bo
 		}
 	}
 	if image.FileID > 0 {
-		if _, err = tx.Exec(r.Context(), `update oss_files set source='sticker',scan_status='clean' where id=$1`, image.FileID); err != nil {
-			writeError(w, 500, "failed to activate sticker image")
+		if err = s.tombstoneUnreferencedStickerFileTx(r.Context(), tx, image.SourceFileID, "sticker_source_consumed"); err != nil {
+			writeError(w, 500, "failed to retire the private sticker upload")
 			return
 		}
 		if update && previousImageFileID > 0 && previousImageFileID != image.FileID {
-			if err = s.tombstoneOSSFileTx(r.Context(), tx, previousImageFileID, "sticker_image_replaced"); err != nil {
+			if err = s.tombstoneUnreferencedStickerFileTx(r.Context(), tx, previousImageFileID, "sticker_image_replaced"); err != nil {
 				writeError(w, 500, "failed to queue replaced sticker image deletion")
 				return
 			}
 		}
 	}
-	if err = bumpStickerCatalogVersion(r.Context(), tx); err != nil || tx.Commit(r.Context()) != nil {
+	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, 500, "failed to save sticker")
 		return
 	}
+	imageBound = image.FileID > 0
 	writeJSON(w, map[bool]int{true: 200, false: 201}[update], map[string]any{"packCode": packCode, "code": code})
 }
 
-func bumpStickerCatalogVersion(ctx context.Context, tx pgx.Tx) error {
-	_, err := tx.Exec(ctx, `update sticker_catalog_state set version=version+1,updated_at=now() where singleton`)
+func writeStickerMutationDatabaseError(w http.ResponseWriter, err error) {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if pgErr.ConstraintName == "uq_stickers_image_file" {
+			writeAPIError(w, http.StatusConflict, "STICKER_IMAGE_IN_USE", "the uploaded image already belongs to another sticker", 0, nil)
+			return
+		}
+		writeAPIError(w, http.StatusConflict, "STICKER_CODE_EXISTS", "sticker code already exists in this pack", 0, nil)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "failed to save sticker")
+}
+
+func writeStickerPackCreateDatabaseError(w http.ResponseWriter, err error) {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "sticker_packs_code_key" {
+		writeAPIError(w, http.StatusConflict, "STICKER_PACK_CODE_EXISTS", "sticker pack code already exists", 0, nil)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "failed to save sticker pack")
+}
+
+func lockStickerImageFilesTx(ctx context.Context, tx pgx.Tx, requiredActiveFileID int64, fileIDs ...int64) error {
+	unique := make(map[int64]struct{}, len(fileIDs))
+	ordered := make([]int64, 0, len(fileIDs))
+	for _, fileID := range fileIDs {
+		if fileID <= 0 {
+			continue
+		}
+		if _, exists := unique[fileID]; exists {
+			continue
+		}
+		unique[fileID] = struct{}{}
+		ordered = append(ordered, fileID)
+	}
+	sort.Slice(ordered, func(left, right int) bool { return ordered[left] < ordered[right] })
+	for _, fileID := range ordered {
+		var fileStatus string
+		if err := tx.QueryRow(ctx, `select status from oss_files where id=$1 for update`, fileID).Scan(&fileStatus); err != nil {
+			return err
+		}
+		if fileID == requiredActiveFileID && fileStatus != "active" {
+			return errStickerImageNoLongerActive
+		}
+	}
+	return nil
+}
+
+func lockStickerCatalogBudgetTx(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('sticker-catalog-budget'))`)
 	return err
 }
 
@@ -458,9 +712,22 @@ func (s *Server) deleteUnusedStickerPack(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid sticker pack code")
 		return
 	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete sticker pack")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var packID int64
+	if err = tx.QueryRow(r.Context(), `select id from sticker_packs where code=$1 for update`, code).Scan(&packID); errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "sticker pack does not exist")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock sticker pack")
+		return
+	}
 	var used bool
-	if err := s.db.QueryRow(r.Context(), `select exists(select 1 from stickers sticker
-		join sticker_packs pack on pack.id=sticker.pack_id where pack.code=$1)`, code).Scan(&used); err != nil {
+	if err = tx.QueryRow(r.Context(), `select exists(select 1 from stickers where pack_id=$1)`, packID).Scan(&used); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to inspect sticker pack")
 		return
 	}
@@ -468,23 +735,13 @@ func (s *Server) deleteUnusedStickerPack(w http.ResponseWriter, r *http.Request)
 		writeAPIError(w, http.StatusConflict, "STICKER_PACK_NOT_EMPTY", "disable or remove unused stickers before deleting the pack", 0, nil)
 		return
 	}
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to delete sticker pack")
-		return
-	}
-	defer tx.Rollback(r.Context())
-	tag, err := tx.Exec(r.Context(), `delete from sticker_packs where code=$1`, code)
+	tag, err := tx.Exec(r.Context(), `delete from sticker_packs where id=$1`, packID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete sticker pack")
 		return
 	}
 	if tag.RowsAffected() == 0 {
 		writeError(w, http.StatusNotFound, "sticker pack does not exist")
-		return
-	}
-	if err = bumpStickerCatalogVersion(r.Context(), tx); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update sticker catalog version")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
@@ -501,25 +758,22 @@ func (s *Server) deleteUnusedSticker(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid sticker code")
 		return
 	}
-	token := "[sticker:" + packCode + ":" + code + "]"
-	used, err := s.stickerMarkdownIsUsed(r.Context(), token)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to inspect sticker usage")
-		return
-	}
-	if used {
-		writeAPIError(w, http.StatusConflict, "STICKER_IN_USE", "the sticker is referenced by published or historical content; disable it instead", 0, nil)
-		return
-	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete sticker")
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var fileID int64
-	err = tx.QueryRow(r.Context(), `delete from stickers using sticker_packs pack
-		where stickers.pack_id=pack.id and pack.code=$1 and stickers.code=$2 returning stickers.image_file_id`, packCode, code).Scan(&fileID)
+	var packID int64
+	if err = tx.QueryRow(r.Context(), `select id from sticker_packs where code=$1 for update`, packCode).Scan(&packID); errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "sticker does not exist")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock sticker pack")
+		return
+	}
+	var stickerID, fileID int64
+	err = tx.QueryRow(r.Context(), `select id,image_file_id from stickers where pack_id=$1 and code=$2 for update`, packID, code).Scan(&stickerID, &fileID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "sticker does not exist")
 		return
@@ -528,12 +782,29 @@ func (s *Server) deleteUnusedSticker(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to delete sticker")
 		return
 	}
-	if err = s.tombstoneOSSFileTx(r.Context(), tx, fileID, "unused_sticker_deleted"); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to queue sticker image deletion")
+	if err = lockStickerImageFilesTx(r.Context(), tx, 0, fileID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock sticker image")
 		return
 	}
-	if err = bumpStickerCatalogVersion(r.Context(), tx); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update sticker catalog version")
+	if err = lockStickerReferenceTx(r.Context(), tx, packCode, code); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock sticker usage")
+		return
+	}
+	used, err := stickerMarkdownIsUsed(r.Context(), tx, "[sticker:"+packCode+":"+code+"]")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to inspect sticker usage")
+		return
+	}
+	if used {
+		writeAPIError(w, http.StatusConflict, "STICKER_IN_USE", "the sticker is referenced by published or historical content; disable it instead", 0, nil)
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `delete from stickers where id=$1`, stickerID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete sticker")
+		return
+	}
+	if err = s.tombstoneUnreferencedStickerFileTx(r.Context(), tx, fileID, "unused_sticker_deleted"); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to queue sticker image deletion")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
@@ -543,84 +814,177 @@ func (s *Server) deleteUnusedSticker(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) stickerMarkdownIsUsed(ctx context.Context, token string) (bool, error) {
+func stickerMarkdownIsUsed(ctx context.Context, queryer stickerReferenceQueryer, token string) (bool, error) {
+	packCode, code, ok := parseStickerToken(token)
+	if !ok {
+		return false, errors.New("invalid sticker token")
+	}
+	return stickerMarkdownIsUsedWithQueryer(ctx, queryer, packCode, code)
+}
+
+func stickerMarkdownIsUsedWithQueryer(ctx context.Context, queryer stickerReferenceQueryer, packCode, code string) (bool, error) {
 	var used bool
-	err := s.db.QueryRow(ctx, `select
-		exists(select 1 from comments where position($1 in body)>0) or
-		exists(select 1 from mods where position($1 in body_markdown)>0) or
-		exists(select 1 from modpacks where position($1 in body_markdown)>0) or
-		exists(select 1 from simple_projects where position($1 in body_markdown)>0) or
-		exists(select 1 from community_posts where position($1 in body_markdown)>0) or
-		exists(select 1 from minecraft_servers where position($1 in body_markdown)>0) or
-		exists(select 1 from blueprints where position($1 in description_markdown)>0) or
-		exists(select 1 from project_changelog_localizations where position($1 in body_markdown)>0) or
-		exists(select 1 from mod_resource_version_detail_localizations where position($1 in content_markdown)>0)`, token).Scan(&used)
+	err := queryer.QueryRow(ctx, `select exists(select 1 from sticker_content_references where pack_code=$1 and sticker_code=$2)`, packCode, code).Scan(&used)
 	return used, err
 }
 
-func (s *Server) validateStickerOSSFile(ctx context.Context, publicID string, uploaderID int64) (stickerImageMeta, error) {
-	limits := normalizedStickerLimits(s.cfg.Sticker)
-	var result stickerImageMeta
-	var originalName string
-	err := s.db.QueryRow(ctx, `select id,public_id,object_key,content_type,size_bytes,sha256,original_name from oss_files where public_id=$1 and uploader_id=$2 and status='active'`, strings.TrimSpace(publicID), uploaderID).Scan(&result.FileID, &result.PublicID, &result.ObjectKey, &result.ContentType, &result.Size, &result.SHA256, &originalName)
+func lockStickerReferenceTx(ctx context.Context, tx pgx.Tx, packCode, code string) error {
+	_, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('sticker-reference'),hashtext($1||':'||$2))`, packCode, code)
+	return err
+}
+
+func (s *Server) tombstoneUnreferencedStickerFileTx(ctx context.Context, tx pgx.Tx, fileID int64, reason string) error {
+	var referenced bool
+	if err := tx.QueryRow(ctx, `select exists(select 1 from stickers where image_file_id=$1)`, fileID).Scan(&referenced); err != nil {
+		return err
+	}
+	if referenced {
+		return nil
+	}
+	return s.tombstoneOSSFileTx(ctx, tx, fileID, reason)
+}
+
+func (s *Server) persistSanitizedStickerImage(ctx context.Context, image stickerImageMeta, uploaderID int64, packCode, code string) (stickerImageMeta, error) {
+	if image.SourceFileID <= 0 || len(image.SanitizedData) == 0 {
+		return image, errors.New("sanitized sticker image is empty")
+	}
+	extension := ".png"
+	if image.ContentType == "image/gif" {
+		extension = ".gif"
+	}
+	cfg := s.ossConfigFromSettings(ctx)
+	objectKey := buildOSSObjectKeyForFile(cfg.Prefix, path.Join("stickers", "derived", packCode, code), code+extension)
+	fileID, err := s.writeGeneratedOSSObject(ctx, objectKey, code+extension, image.ContentType, image.SanitizedData, uploaderID, "sticker_derived")
 	if err != nil {
-		return result, errors.New("uploaded sticker file does not exist")
+		return image, err
 	}
-	ext := strings.ToLower(filepath.Ext(originalName))
-	if ext != ".png" && ext != ".gif" {
-		return result, errors.New("stickers only support PNG or GIF")
-	}
-	if result.Size <= 0 || result.Size > limits.MaxBytes {
-		return result, errors.New("sticker file exceeds the configured size limit")
-	}
-	client, cfg, err := s.ossClient(ctx)
+	image.FileID = fileID
+	image.SanitizedData = nil
+	return image, nil
+}
+
+func (s *Server) cleanupUnboundStickerImage(ctx context.Context, fileID int64) error {
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return result, errors.New("sticker storage is unavailable")
+		return err
 	}
-	object, err := client.GetObject(ctx, &aliyunoss.GetObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(result.ObjectKey)})
-	if err != nil {
-		return result, errors.New("failed to read uploaded sticker")
+	defer tx.Rollback(ctx)
+	if err = lockStickerImageFilesTx(ctx, tx, 0, fileID); err != nil {
+		return err
 	}
-	defer object.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(object.Body, limits.MaxBytes+1))
-	if err != nil || int64(len(data)) != result.Size {
-		return result, errors.New("sticker file size does not match upload")
+	if err = s.tombstoneUnreferencedStickerFileTx(ctx, tx, fileID, "unbound_sticker_derivative"); err != nil {
+		return err
 	}
-	digest := sha256.Sum256(data)
-	if hex.EncodeToString(digest[:]) != result.SHA256 {
-		return result, errors.New("sticker file hash does not match upload")
+	return tx.Commit(ctx)
+}
+
+func sanitizeStickerImage(data []byte, declaredContentType string, limits config.StickerConfig) ([]byte, int, int, error) {
+	limits = normalizedStickerLimits(limits)
+	if len(data) == 0 || int64(len(data)) > limits.MaxBytes {
+		return nil, 0, 0, errors.New("sticker file exceeds the configured size limit")
 	}
-	detected := normalizeRasterContentType(http.DetectContentType(data))
-	declared := normalizeRasterContentType(result.ContentType)
-	if detected != declared || (declared != "image/png" && declared != "image/gif") {
-		return result, errors.New("sticker extension, MIME and magic bytes do not match")
+	declaredContentType = normalizeRasterContentType(declaredContentType)
+	if detected := normalizeRasterContentType(http.DetectContentType(data)); detected != declaredContentType ||
+		(declaredContentType != "image/png" && declaredContentType != "image/gif") {
+		return nil, 0, 0, errors.New("sticker MIME and magic bytes do not match")
 	}
-	decoded, format, err := image.DecodeConfig(bytes.NewReader(data))
-	if err != nil || normalizeRasterContentType("image/"+format) != declared {
-		return result, errors.New("sticker image cannot be decoded")
-	}
-	if decoded.Width <= 0 || decoded.Height <= 0 || decoded.Width > limits.MaxEdge || decoded.Height > limits.MaxEdge || int64(decoded.Width)*int64(decoded.Height) > limits.MaxPixels {
-		return result, errors.New("sticker dimensions exceed the safety limit")
-	}
-	if declared == "image/gif" {
-		animation, decodeErr := gif.DecodeAll(bytes.NewReader(data))
-		if decodeErr != nil || len(animation.Image) == 0 || len(animation.Image) > limits.MaxGIFFrames {
-			return result, errors.New("GIF frame count is invalid")
+	var output bytes.Buffer
+	var width, height int
+	if declaredContentType == "image/png" {
+		decoded, err := png.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil, 0, 0, errors.New("PNG image is invalid or truncated")
+		}
+		bounds := decoded.Bounds()
+		width, height = bounds.Dx(), bounds.Dy()
+		if width <= 0 || height <= 0 || width > limits.MaxEdge || height > limits.MaxEdge || int64(width)*int64(height) > limits.MaxPixels {
+			return nil, 0, 0, errors.New("sticker dimensions exceed the safety limit")
+		}
+		if err = png.Encode(&output, decoded); err != nil {
+			return nil, 0, 0, errors.New("failed to encode sanitized PNG")
+		}
+	} else {
+		animation, err := decodeGIFAnimationWithBudget(data, limits.MaxGIFFrames, limits.MaxGIFDecodedPixels, limits.MaxGIFDuration)
+		if err != nil {
+			return nil, 0, 0, errors.New("GIF frame count is invalid")
+		}
+		width, height = animation.Config.Width, animation.Config.Height
+		if width <= 0 || height <= 0 || width > limits.MaxEdge || height > limits.MaxEdge || int64(width)*int64(height) > limits.MaxPixels {
+			return nil, 0, 0, errors.New("sticker dimensions exceed the safety limit")
 		}
 		totalPixels, duration := int64(0), 0
 		for index, frame := range animation.Image {
 			bounds := frame.Bounds()
+			if bounds.Dx() <= 0 || bounds.Dy() <= 0 || bounds.Dx() > limits.MaxEdge || bounds.Dy() > limits.MaxEdge {
+				return nil, 0, 0, errors.New("GIF frame dimensions are invalid")
+			}
 			totalPixels += int64(bounds.Dx()) * int64(bounds.Dy())
 			if index < len(animation.Delay) {
 				duration += animation.Delay[index]
 			}
 		}
 		if totalPixels > limits.MaxGIFDecodedPixels || time.Duration(duration)*10*time.Millisecond > limits.MaxGIFDuration {
-			return result, errors.New("GIF animation exceeds the decoded size or duration limit")
+			return nil, 0, 0, errors.New("GIF animation exceeds the decoded size or duration limit")
 		}
-	} else if _, _, err = image.Decode(bytes.NewReader(data)); err != nil {
-		return result, errors.New("PNG image is invalid or truncated")
+		if err = gif.EncodeAll(&output, animation); err != nil {
+			return nil, 0, 0, errors.New("failed to encode sanitized GIF")
+		}
 	}
-	result.Width, result.Height = decoded.Width, decoded.Height
+	if int64(output.Len()) > limits.MaxBytes {
+		return nil, 0, 0, errors.New("sanitized sticker exceeds the configured size limit")
+	}
+	return output.Bytes(), width, height, nil
+}
+
+func (s *Server) validateStickerOSSFile(ctx context.Context, publicID string, uploaderID int64) (stickerImageMeta, error) {
+	limits := normalizedStickerLimits(s.cfg.Sticker)
+	var result stickerImageMeta
+	var originalName, sourceObjectKey, sourceContentType, sourceSHA256, source string
+	var sourceSize int64
+	err := s.db.QueryRow(ctx, `select id,object_key,content_type,size_bytes,sha256,original_name,source from oss_files
+		where public_id=$1 and uploader_id=$2 and status='active'`, strings.TrimSpace(publicID), uploaderID).
+		Scan(&result.SourceFileID, &sourceObjectKey, &sourceContentType, &sourceSize, &sourceSHA256, &originalName, &source)
+	if err != nil {
+		return result, errors.New("uploaded sticker file does not exist")
+	}
+	if !isTemporaryStickerUploadSource(source) {
+		return result, errors.New("uploaded sticker file does not exist")
+	}
+	ext := strings.ToLower(filepath.Ext(originalName))
+	if ext != ".png" && ext != ".gif" {
+		return result, errors.New("stickers only support PNG or GIF")
+	}
+	if sourceSize <= 0 || sourceSize > limits.MaxBytes {
+		return result, errors.New("sticker file exceeds the configured size limit")
+	}
+	client, cfg, err := s.ossClient(ctx)
+	if err != nil {
+		return result, errors.New("sticker storage is unavailable")
+	}
+	object, err := client.GetObject(ctx, &aliyunoss.GetObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(sourceObjectKey)})
+	if err != nil {
+		return result, errors.New("failed to read uploaded sticker")
+	}
+	defer object.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(object.Body, limits.MaxBytes+1))
+	if err != nil || int64(len(data)) != sourceSize {
+		return result, errors.New("sticker file size does not match upload")
+	}
+	digest := sha256.Sum256(data)
+	if hex.EncodeToString(digest[:]) != sourceSHA256 {
+		return result, errors.New("sticker file hash does not match upload")
+	}
+	declared := normalizeRasterContentType(sourceContentType)
+	if ext == ".png" && declared != "image/png" || ext == ".gif" && declared != "image/gif" {
+		return result, errors.New("sticker extension and MIME do not match")
+	}
+	result.SanitizedData, result.Width, result.Height, err = sanitizeStickerImage(data, declared, limits)
+	if err != nil {
+		return result, err
+	}
+	result.ContentType = declared
+	result.Size = int64(len(result.SanitizedData))
+	sanitizedDigest := sha256.Sum256(result.SanitizedData)
+	result.SHA256 = hex.EncodeToString(sanitizedDigest[:])
 	return result, nil
 }

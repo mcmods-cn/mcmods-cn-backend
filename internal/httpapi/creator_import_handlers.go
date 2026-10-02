@@ -10,8 +10,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 type creatorImportRequest struct {
@@ -43,23 +41,23 @@ type importedCreatorMember struct {
 }
 
 type creatorImportMemberResponse struct {
-	CreatorID string `json:"creatorId"`
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	AvatarURL string `json:"avatarUrl"`
-	RoleID    string `json:"roleId"`
-	Role      string `json:"role"`
-	Title     string `json:"title"`
+	Kind               string `json:"kind"`
+	Name               string `json:"name"`
+	AvatarURL          string `json:"avatarUrl"`
+	ProfileURL         string `json:"profileUrl"`
+	ExternalRole       string `json:"externalRole"`
+	SuggestedRoleCode  string `json:"suggestedRoleCode"`
+	SuggestedRole      string `json:"suggestedRole"`
+	PermissionGranting bool   `json:"permissionGranting"`
+	Title              string `json:"title"`
 }
 
 type creatorImportResponse struct {
-	Kind           string                        `json:"kind"`
-	Name           string                        `json:"name"`
-	AvatarURL      string                        `json:"avatarUrl"`
-	AvatarFileID   *string                       `json:"avatarFileId,omitempty"`
-	Links          []creatorLinkPayload          `json:"links"`
-	Members        []creatorImportMemberResponse `json:"members"`
-	CreatedMembers int                           `json:"createdMembers"`
+	Kind      string                        `json:"kind"`
+	Name      string                        `json:"name"`
+	AvatarURL string                        `json:"avatarUrl"`
+	Links     []creatorLinkPayload          `json:"links"`
+	Members   []creatorImportMemberResponse `json:"members"`
 }
 
 type modrinthCreatorUser struct {
@@ -148,96 +146,91 @@ func (s *Server) importCreator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims := currentClaims(r)
-	response := creatorImportResponse{
-		Kind: profile.Kind, Name: profile.Name, Links: profile.Links,
-		Members: make([]creatorImportMemberResponse, 0, len(profile.Members)),
+	response, err := buildCreatorImportPreview(profile)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
 	}
-	if profile.AvatarURL != "" {
-		mirrored, mirrorErr := s.mirrorExternalCreatorAvatar(r.Context(), profile.AvatarURL, profile.Kind, profile.Name, claims.Subject)
-		if mirrorErr != nil {
-			writeError(w, http.StatusBadGateway, "failed to store the imported creator avatar")
-			return
-		}
-		response.AvatarURL = mirrored.URL
-		response.AvatarFileID = &mirrored.FilePublicID
-	}
-
-	if profile.Kind == "team" {
-		if err = s.importCreatorTeamMembers(r, claims.Subject, claimsAllow(claims, "admin.*"), profile.Members, &response); err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
-			return
-		}
+	if err = s.hydrateCreatorImportRoleFacts(r.Context(), response.Members); err != nil {
+		writeError(w, http.StatusInternalServerError, "creator role definitions are unavailable")
+		return
 	}
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *Server) importCreatorTeamMembers(r *http.Request, actorID int64, admin bool, members []importedCreatorMember, response *creatorImportResponse) error {
-	type preparedMember struct {
-		profile importedCreatorMember
-		avatar  mirroredExternalImage
+func buildCreatorImportPreview(profile importedCreatorProfile) (creatorImportResponse, error) {
+	if len(profile.Members) > maximumCreatorTeamMembers {
+		return creatorImportResponse{}, errors.New("the provider returned too many team members")
 	}
-	prepared := make([]preparedMember, 0, len(members))
-	for _, member := range members {
+	response := creatorImportResponse{
+		Kind: profile.Kind, Name: strings.TrimSpace(profile.Name),
+		AvatarURL: externalCreatorAvatarPreviewURL(profile.AvatarURL), Links: profile.Links,
+		Members: make([]creatorImportMemberResponse, 0, len(profile.Members)),
+	}
+	seen := make(map[string]struct{}, len(profile.Members))
+	for _, member := range profile.Members {
 		member.Name = strings.TrimSpace(member.Name)
 		if member.Name == "" || len([]byte(member.Name)) > 160 {
-			return errors.New("the provider returned an invalid team member")
+			return creatorImportResponse{}, errors.New("the provider returned an invalid team member")
 		}
-		item := preparedMember{profile: member}
-		if member.AvatarURL != "" {
-			mirrored, err := s.mirrorExternalCreatorAvatar(r.Context(), member.AvatarURL, "author", member.Name, actorID)
-			if err != nil {
-				return fmt.Errorf("failed to store the avatar for %s", member.Name)
-			}
-			item.avatar = mirrored
-		}
-		prepared = append(prepared, item)
-	}
-
-	status := "approved"
-	if creatorReviewRequired(loadReviewConfig(r.Context(), s.db), "author", "create") && !admin {
-		status = "pending"
-	}
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		return errors.New("failed to prepare imported team members")
-	}
-	defer tx.Rollback(r.Context())
-
-	seenCreators := make(map[string]struct{}, len(prepared))
-	for _, member := range prepared {
-		snapshot := creatorSnapshot{Kind: "author", Name: member.profile.Name, Links: member.profile.Links}
-		if member.avatar.FilePublicID != "" {
-			snapshot.AvatarURL = member.avatar.URL
-			snapshot.AvatarFileID = &member.avatar.FilePublicID
-			snapshot.AvatarInternalID = &member.avatar.FileInternalID
-		}
-		creatorID, publicID, created, ensureErr := ensureNamedCreatorSnapshotTx(r.Context(), tx, snapshot, actorID, status, r)
-		if ensureErr != nil {
-			return ensureErr
-		}
-		if created {
-			response.CreatedMembers++
-		}
-		if _, duplicate := seenCreators[publicID]; duplicate {
+		_, profileURL := creatorIdentityLink(member.Links)
+		identity := normalizeCreatorName(member.Name) + "\x00" + strings.ToLower(strings.TrimSpace(profileURL))
+		if _, duplicate := seen[identity]; duplicate {
 			continue
 		}
-		seenCreators[publicID] = struct{}{}
-		roleID, roleName, roleCode, roleErr := importedCreatorRoleTx(r.Context(), tx, member.profile.Role, member.profile.Owner)
-		if roleErr != nil {
-			return roleErr
-		}
-		var name, avatarURL string
-		if err = tx.QueryRow(r.Context(), `select name,avatar_url from creators where id=$1`, creatorID).Scan(&name, &avatarURL); err != nil {
-			return err
-		}
+		seen[identity] = struct{}{}
+		externalRole := truncateRunes(strings.TrimSpace(member.Role), 160)
+		roleCode := importedCreatorRoleCode(externalRole, member.Owner)
 		response.Members = append(response.Members, creatorImportMemberResponse{
-			CreatorID: publicID, Kind: "author", Name: name, AvatarURL: avatarURL,
-			RoleID: roleID, Role: roleName, Title: importedCreatorRoleTitle(member.profile.Role, roleCode),
+			Kind: "author", Name: member.Name, AvatarURL: externalCreatorAvatarPreviewURL(member.AvatarURL),
+			ProfileURL: profileURL, ExternalRole: externalRole,
+			SuggestedRoleCode: roleCode, Title: importedCreatorRoleTitle(externalRole, roleCode),
 		})
 	}
-	if err = tx.Commit(r.Context()); err != nil {
-		return errors.New("failed to save imported team members")
+	return response, nil
+}
+
+func (s *Server) hydrateCreatorImportRoleFacts(ctx context.Context, members []creatorImportMemberResponse) error {
+	if len(members) == 0 {
+		return nil
+	}
+	codes := make([]string, 0, len(members))
+	seen := make(map[string]struct{}, len(members))
+	for _, member := range members {
+		if _, exists := seen[member.SuggestedRoleCode]; exists {
+			continue
+		}
+		seen[member.SuggestedRoleCode] = struct{}{}
+		codes = append(codes, member.SuggestedRoleCode)
+	}
+	rows, err := s.db.Query(ctx, `select code,name,permission_granting from creator_role_definitions where code=any($1)`, codes)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type roleFact struct {
+		name               string
+		permissionGranting bool
+	}
+	facts := make(map[string]roleFact, len(codes))
+	for rows.Next() {
+		var code string
+		var fact roleFact
+		if err = rows.Scan(&code, &fact.name, &fact.permissionGranting); err != nil {
+			return err
+		}
+		facts[code] = fact
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if len(facts) != len(codes) {
+		return errors.New("creator import role definition is missing")
+	}
+	for index := range members {
+		fact := facts[members[index].SuggestedRoleCode]
+		members[index].SuggestedRole = fact.name
+		members[index].PermissionGranting = fact.permissionGranting
 	}
 	return nil
 }
@@ -290,7 +283,7 @@ func validCreatorImportIdentifier(value string) bool {
 }
 
 func importModrinthCreator(ctx context.Context, client *http.Client, cfg modImportConfig, reference creatorImportReference) (importedCreatorProfile, error) {
-	headers := providerHeaders(cfg.UserAgent, cfg.Modrinth.Token, "")
+	headers := providerCredentialHeaders(cfg.UserAgent, "modrinth", cfg.Modrinth.BaseURL, bearerAuthorization(cfg.Modrinth.Token), "")
 	if reference.Kind == "author" {
 		var user modrinthCreatorUser
 		endpoint := cfg.Modrinth.BaseURL + "/user/" + url.PathEscape(reference.Identifier)
@@ -333,7 +326,7 @@ func importModrinthCreator(ctx context.Context, client *http.Client, cfg modImpo
 }
 
 func importCurseForgeAuthor(ctx context.Context, client *http.Client, cfg modImportConfig, reference creatorImportReference) (importedCreatorProfile, error) {
-	headers := providerHeaders(cfg.UserAgent, "", cfg.CurseForge.APIKey)
+	headers := providerCredentialHeaders(cfg.UserAgent, "curseforge", cfg.CurseForge.BaseURL, "", cfg.CurseForge.APIKey)
 	searchURL, _ := url.Parse(cfg.CurseForge.BaseURL + "/mods/search")
 	query := searchURL.Query()
 	query.Set("gameId", "432")
@@ -379,7 +372,7 @@ func fetchCurseForgeProfileImage(ctx context.Context, cfg modImportConfig, profi
 	if err != nil {
 		return ""
 	}
-	headers := providerHeaders(cfg.UserAgent, "", "")
+	headers := publicProviderHeaders(cfg.UserAgent)
 	headers.Set("Accept", "text/html,application/xhtml+xml")
 	page, err := getProviderText(ctx, client, profileURL, headers)
 	if err != nil {
@@ -445,29 +438,40 @@ func modrinthV3BaseURL(baseURL string) string {
 	return baseURL + "/v3"
 }
 
-func importedCreatorRoleTx(ctx context.Context, tx pgx.Tx, externalRole string, owner bool) (publicID, name, code string, err error) {
-	code = importedCreatorRoleCode(externalRole, owner)
-	err = tx.QueryRow(ctx, `select public_id,name from creator_role_definitions where code=$1`, code).Scan(&publicID, &name)
-	return
-}
-
 func importedCreatorRoleCode(role string, owner bool) string {
 	if owner {
 		return "owner"
 	}
-	normalized := strings.ToLower(strings.TrimSpace(role))
-	switch {
-	case strings.Contains(normalized, "owner"):
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "owner", "project owner", "organization owner":
 		return "owner"
-	case strings.Contains(normalized, "artist") || strings.Contains(normalized, "art"):
-		return "artist"
-	case strings.Contains(normalized, "leader") || strings.Contains(normalized, "lead"):
-		return "leader"
-	case strings.Contains(normalized, "sponsor"):
-		return "sponsor"
-	default:
+	case "developer", "dev":
 		return "developer"
+	case "maintainer":
+		return "maintainer"
+	case "artist", "art", "graphics":
+		return "artist"
+	case "leader", "lead", "project lead":
+		return "leader"
+	case "sponsor":
+		return "sponsor"
+	case "former developer", "former dev":
+		return "former_developer"
+	case "former artist":
+		return "former_artist"
+	case "former owner":
+		return "former_owner"
+	default:
+		return "contributor"
 	}
+}
+
+func externalCreatorAvatarPreviewURL(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Port() != "" || !isAllowedExternalModIconHost(parsed.Hostname()) {
+		return ""
+	}
+	return parsed.String()
 }
 
 func importedCreatorRoleTitle(externalRole, roleCode string) string {

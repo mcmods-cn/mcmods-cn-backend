@@ -33,6 +33,10 @@ func connectPool(ctx context.Context, dbConfig config.DBConfig, minConns, maxCon
 	poolConfig.HealthCheckPeriod = 30 * time.Second
 	poolConfig.ConnConfig.ConnectTimeout = 10 * time.Second
 	poolConfig.ConnConfig.RuntimeParams["application_name"] = applicationName
+	// Date-valued counters and projections use the PostgreSQL session day.
+	// Override even an explicit DATABASE_URL setting so every application pool
+	// assigns the same event instant to the same UTC day bucket.
+	poolConfig.ConnConfig.RuntimeParams["timezone"] = "UTC"
 	poolConfig.ConnConfig.RuntimeParams["lock_timeout"] = "10s"
 	poolConfig.ConnConfig.RuntimeParams["statement_timeout"] = "5min"
 	poolConfig.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = "60s"

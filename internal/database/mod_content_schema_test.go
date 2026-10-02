@@ -63,6 +63,64 @@ func TestBuiltinCompatibilityFieldsAreConfigurable(t *testing.T) {
 	}
 }
 
+func TestImportedResourceProjectionHasScopedOwnership(t *testing.T) {
+	t.Parallel()
+	if schemaGeneration != 168 {
+		t.Fatalf("unexpected schema generation %d", schemaGeneration)
+	}
+	schemaSQL := strings.Join(modContentSchemaStatements(), "\n")
+	for _, required := range []string{
+		"projection_source text not null default 'manual'",
+		"import_source_namespace text not null default ''",
+		"import_source_kind text not null default ''",
+		"import_revision_id text not null default ''",
+		"idx_mod_resource_version_details_import_scope",
+		"where projection_source='import'",
+	} {
+		if !strings.Contains(schemaSQL, required) {
+			t.Errorf("import projection schema is missing %q", required)
+		}
+	}
+}
+
+func TestModContentPlacementSearchProjectionIsIndexedAndTransactional(t *testing.T) {
+	t.Parallel()
+	schemaSQL := strings.Join(modContentSchemaStatements(), "\n")
+	baselineSQL := strings.Join(baselineSchemaStatements(), "\n")
+	for _, required := range []string{
+		"search_document tsvector not null default ''::tsvector",
+		"using gin(search_document)",
+		"build_mod_content_resource_search_document",
+		"trg_mod_content_search_localization",
+		"trg_mod_content_search_import_snapshot",
+		"trg_mod_content_search_import_revision_update",
+		"trg_mod_content_search_import_revision_delete",
+		"trg_mod_content_search_resource",
+	} {
+		if !strings.Contains(schemaSQL, required) {
+			t.Errorf("mod-content search projection is missing %q", required)
+		}
+	}
+	if strings.Contains(baselineSQL, "pg_trgm") {
+		t.Fatal("mod-content search projection must not depend on unavailable optional extensions")
+	}
+}
+
+func TestModContentCategoryDepthIsAnAuthoritativeSubtreeInvariant(t *testing.T) {
+	t.Parallel()
+	schemaSQL := strings.Join(modContentSchemaStatements(), "\n")
+	for _, required := range []string{
+		"from mod_content_versions version where version.id=new.version_id for update",
+		"with recursive descendants as",
+		"parent_depth+descendant_depth>4",
+		"content section cannot be its own ancestor",
+	} {
+		if !strings.Contains(schemaSQL, required) {
+			t.Errorf("content category tree invariant is missing %q", required)
+		}
+	}
+}
+
 func TestNaturalGenerationSizeSupportsNumberProviders(t *testing.T) {
 	t.Parallel()
 

@@ -70,10 +70,10 @@ type ratingHeatComponents struct {
 }
 
 type ratingListResponse struct {
-	Items  []ratingItemResponse `json:"items"`
-	Total  int                  `json:"total"`
-	Limit  int                  `json:"limit"`
-	Offset int                  `json:"offset"`
+	Items      []ratingItemResponse `json:"items"`
+	Limit      int                  `json:"limit"`
+	HasMore    bool                 `json:"hasMore"`
+	NextCursor string               `json:"nextCursor"`
 }
 
 type ratingUpsertRequest struct {
@@ -111,14 +111,6 @@ func dimensions(codes ...string) []ratingDimensionDefinition {
 
 func normalizeRatingTargetType(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
-	switch value {
-	case "server", "minecraft-server":
-		return "minecraft_server"
-	case "resource-pack":
-		return "resource_pack"
-	case "shader", "shader-pack":
-		return "shader_pack"
-	}
 	if _, ok := ratingDimensions[value]; ok {
 		return value
 	}
@@ -182,15 +174,21 @@ func (s *Server) ratingItem(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	var existingID int64
-	_ = tx.QueryRow(r.Context(), `select id from content_ratings where object_route_id=$1 and author_id=$2`,
-		target.RouteID, currentClaims(r).Subject).Scan(&existingID)
 	var item ratingItemResponse
-	err = tx.QueryRow(r.Context(), `insert into content_ratings(object_route_id,author_id,overall_score,message)
-		values($1,$2,$3,$4)
-		on conflict(object_route_id,author_id) do update set
-			overall_score=excluded.overall_score,message=excluded.message,status='published',updated_at=now()
+	err = tx.QueryRow(r.Context(), `update content_ratings set overall_score=$3,message=$4,status='published',updated_at=now()
+		where object_route_id=$1 and author_id=$2
 		returning id,public_id,overall_score,message,created_at,updated_at`, target.RouteID, currentClaims(r).Subject,
 		request.OverallScore, request.Message).Scan(&item.ID, &item.PublicID, &item.OverallScore, &item.Message, &item.CreatedAt, &item.UpdatedAt)
+	if err == nil {
+		existingID = item.ID
+	} else if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(r.Context(), `insert into content_ratings(object_route_id,author_id,overall_score,message)
+			values($1,$2,$3,$4)
+			on conflict(object_route_id,author_id) do update set
+				overall_score=excluded.overall_score,message=excluded.message,status='published',updated_at=now()
+			returning id,public_id,overall_score,message,created_at,updated_at`, target.RouteID, currentClaims(r).Subject,
+			request.OverallScore, request.Message).Scan(&item.ID, &item.PublicID, &item.OverallScore, &item.Message, &item.CreatedAt, &item.UpdatedAt)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save rating")
 		return
@@ -205,10 +203,6 @@ func (s *Server) ratingItem(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to save rating dimensions")
 			return
 		}
-	}
-	if _, err = tx.Exec(r.Context(), `select enqueue_content_stats_refresh($1,true,true)`, target.RouteID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to queue rating statistics")
-		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit rating")
@@ -248,39 +242,42 @@ func (s *Server) ratingReviews(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve rating target")
 		return
 	}
-	limit := boundedLimit(r.URL.Query().Get("limit"), 20, 100)
-	offset := boundedOffset(r.URL.Query().Get("offset"))
-	var total int
-	if err = s.db.QueryRow(r.Context(), `select count(*) from content_ratings
-		where object_route_id=$1 and status='published'`, target.RouteID).Scan(&total); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to count ratings")
+	page, err := parseRatingReviewPageRequest(r.URL.Query(), target)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rows, err := s.db.Query(r.Context(), `select rating.id,rating.public_id,author.public_id,author.username,author.avatar_url,
-		rating.overall_score,rating.message,rating.created_at,rating.updated_at
-		from content_ratings rating join users author on author.id=rating.author_id
-		where rating.object_route_id=$1 and rating.status='published'
-		order by rating.updated_at desc,rating.id desc limit $2 offset $3`, target.RouteID, limit, offset)
+	query, arguments := ratingReviewPageSQL(page)
+	rows, err := s.db.Query(r.Context(), query, arguments...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load ratings")
 		return
 	}
 	defer rows.Close()
-	items := make([]ratingItemResponse, 0)
-	ids := make([]int64, 0)
+	pageRows := make([]ratingReviewPageRow, 0, page.Limit+1)
 	for rows.Next() {
-		var item ratingItemResponse
-		if err = rows.Scan(&item.ID, &item.PublicID, &item.AuthorID, &item.AuthorName, &item.AuthorAvatar,
-			&item.OverallScore, &item.Message, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		var row ratingReviewPageRow
+		if err = rows.Scan(&row.ID, &row.PublicID, &row.AuthorID, &row.AuthorName, &row.AuthorAvatar,
+			&row.OverallScore, &row.Message, &row.CreatedAt, &row.UpdatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode ratings")
 			return
 		}
-		ids = append(ids, item.ID)
-		items = append(items, item)
+		pageRows = append(pageRows, row)
 	}
 	if err = rows.Err(); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load ratings")
 		return
+	}
+	rows.Close()
+	hasMore := len(pageRows) > page.Limit
+	if hasMore {
+		pageRows = pageRows[:page.Limit]
+	}
+	items := make([]ratingItemResponse, 0, len(pageRows))
+	ids := make([]int64, 0, len(pageRows))
+	for _, row := range pageRows {
+		ids = append(ids, row.ID)
+		items = append(items, row.response())
 	}
 	if err = s.loadRatingScores(r.Context(), items, ids); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load rating dimensions")
@@ -294,7 +291,14 @@ func (s *Server) ratingReviews(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, ratingListResponse{Items: items, Total: total, Limit: limit, Offset: offset})
+	nextCursor := ""
+	if hasMore && len(pageRows) > 0 {
+		nextCursor = ratingReviewNextCursor(page, pageRows[len(pageRows)-1])
+	}
+	// The bounded response exposes "hasMore" and "nextCursor" instead of a synchronous exact count.
+	writeJSON(w, http.StatusOK, ratingListResponse{
+		Items: items, Limit: page.Limit, HasMore: hasMore, NextCursor: nextCursor,
+	})
 }
 
 func (s *Server) resolveRateableTarget(ctx context.Context, rawType, rawPublicID string) (rateableTarget, error) {

@@ -3,6 +3,7 @@ package activity
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,6 +51,31 @@ func TestMarkdownDeltaBytes(t *testing.T) {
 				t.Fatalf("MarkdownDeltaBytes() = (%d,%d), want (%d,%d)", added, deleted, test.added, test.deleted)
 			}
 		})
+	}
+}
+
+func TestMarkdownDiffFrontierIsBoundedByExactDistanceBudget(t *testing.T) {
+	const eightMiB = 8 << 20
+	if markdownDeltaMaxExactDistance > 2048 {
+		t.Fatalf("exact distance budget = %d, want at most 2048", markdownDeltaMaxExactDistance)
+	}
+	got := boundedEditFrontierSize(eightMiB, eightMiB, markdownDeltaMaxExactDistance)
+	want := 2*markdownDeltaMaxExactDistance + 3
+	if got != want {
+		t.Fatalf("frontier entries = %d, want %d", got, want)
+	}
+	if got >= 2*(eightMiB+eightMiB)+3 {
+		t.Fatalf("frontier still scales with request bytes: %d entries", got)
+	}
+}
+
+func TestMarkdownDeltaLargeRewriteFallsBackConservatively(t *testing.T) {
+	const eightMiB = 8 << 20
+	previous := strings.Repeat("a", eightMiB)
+	current := strings.Repeat("b", eightMiB)
+	added, deleted := MarkdownDeltaBytes(previous, current)
+	if added != eightMiB || deleted != eightMiB {
+		t.Fatalf("large rewrite delta = (%d,%d), want (%d,%d)", added, deleted, eightMiB, eightMiB)
 	}
 }
 

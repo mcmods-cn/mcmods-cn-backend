@@ -3,6 +3,8 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"sort"
@@ -30,10 +32,6 @@ type mailConfigPayload struct {
 
 type testMailRequest struct {
 	To string `json:"to"`
-}
-
-type updateRolesRequest struct {
-	Roles []string `json:"roles"`
 }
 
 type adminCreateUserRequest struct {
@@ -66,8 +64,10 @@ type permissionNodeRequest struct {
 type userPermissionEntry struct {
 	Code      string `json:"code"`
 	Allow     bool   `json:"allow"`
-	ExpiresAt string `json:"expiresAt"`
-	Context   string `json:"context"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
+	Source    string `json:"source,omitempty"`
+	SourceKey string `json:"sourceKey,omitempty"`
+	Editable  bool   `json:"editable,omitempty"`
 }
 
 type updateUserPermissionsRequest struct {
@@ -77,18 +77,19 @@ type updateUserPermissionsRequest struct {
 var roleCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-zA-Z0-9_*:\[\]<>-]+)*$`)
 var permissionCodePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-zA-Z0-9_*:\[\]<>-]+)+$`)
 
-func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
-	s.loadAdminDashboard(w, r)
-}
-
-func (s *Server) adminNav(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, adminNavigation())
-}
-
 func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
-	mailCfg := s.mailConfigFromSettings(r.Context())
+	mailCfg, err := s.mailConfigFromSettings(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "MAIL_SETTINGS_UNAVAILABLE", "mail settings are temporarily unavailable", 0, nil)
+		return
+	}
+	general, err := s.readSiteGeneralConfig(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "SITE_SETTINGS_UNAVAILABLE", "site settings are temporarily unavailable", 0, nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"general": s.siteGeneralConfigFromSettings(r.Context()),
+		"general": general,
 		"auth": map[string]any{
 			"allowRegistration":        true,
 			"emailPasswordLogin":       true,
@@ -143,37 +144,20 @@ func (s *Server) updateMailConfig(w http.ResponseWriter, r *http.Request) {
 	if payload.Port <= 0 {
 		payload.Port = 587
 	}
-	current := s.mailConfigFromSettings(r.Context())
-	if strings.TrimSpace(payload.Password) == "" {
-		payload.Password = current.Password
-	}
-	raw, err := s.sealSystemSetting(payload)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "邮件配置格式不正确")
+	if payload.Enabled && !mailer.New(smtpConfigFromPayload(payload)).Enabled() {
+		writeError(w, http.StatusBadRequest, "启用邮件系统需要有效的服务器、端口和发件地址")
 		return
 	}
-	claims := currentClaims(r)
-	_, err = s.db.Exec(
-		r.Context(),
-		`insert into system_settings (key, value, updated_by, updated_at)
-		 values ('mail.smtp', $1::jsonb, $2, now())
-		 on conflict (key) do update
-		 set value = excluded.value, updated_by = excluded.updated_by, updated_at = now()`,
-		raw,
-		claims.Subject,
-	)
+	payload, err := s.saveMailConfig(r.Context(), payload, currentClaims(r).Subject)
 	if err != nil {
+		if errors.Is(err, errMailSettingsUnavailable) {
+			writeAPIError(w, http.StatusServiceUnavailable, "MAIL_SETTINGS_UNAVAILABLE", "mail settings are temporarily unavailable", 0, nil)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "保存邮件配置失败")
 		return
 	}
-	s.mailer = mailer.New(config.SMTPConfig{
-		Host:     payload.Host,
-		Port:     payload.Port,
-		Username: payload.Username,
-		Password: payload.Password,
-		From:     payload.From,
-		UseTLS:   payload.UseTLS,
-	})
+	s.invalidateSettingsCache(r.Context())
 	writeJSON(w, http.StatusOK, redactMailConfig(payload))
 }
 
@@ -188,8 +172,14 @@ func (s *Server) sendTestMail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "测试邮箱格式不正确")
 		return
 	}
-	if err := s.activeMailer(r.Context()).Send(req.To, "Mcmods-cn 邮件系统测试", "这是一封来自后台管理界面的测试邮件。"); err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+	active, err := s.activeMailer(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "MAIL_SETTINGS_UNAVAILABLE", "mail settings are temporarily unavailable", 0, nil)
+		return
+	}
+	if err := active.Send(req.To, "Mcmods-cn 邮件系统测试", "这是一封来自后台管理界面的测试邮件。"); err != nil {
+		slog.Warn("send admin test email", "error", err)
+		writeAPIError(w, http.StatusServiceUnavailable, "MAIL_DELIVERY_FAILED", "mail delivery failed", 0, nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"sent": true})
@@ -248,8 +238,10 @@ func (s *Server) createPermission(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存权限节点失败")
 		return
 	}
-	_ = s.refreshRBACVersion(r.Context())
 	s.auditPermissionChange(r.Context(), currentClaims(r).Subject, nil, "upsert_permission_node", req)
+	if !s.requireSecurityVersionRefresh(w, r, "upsert_permission_node", 0, s.refreshRBACVersion(r.Context())) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -271,6 +263,10 @@ func (s *Server) createRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if err = lockRoleGraphMutationTx(r.Context(), tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "锁定权限组图失败")
+		return
+	}
 
 	translationsJSON, err := localizedTextsJSON(req.Translations)
 	if err != nil {
@@ -289,7 +285,15 @@ func (s *Server) createRole(w http.ResponseWriter, r *http.Request) {
 		translationsJSON,
 	)
 	if err != nil {
-		writeError(w, http.StatusConflict, "权限组代码已存在")
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "权限组代码已存在")
+		} else {
+			writeError(w, http.StatusInternalServerError, "创建权限组失败")
+		}
+		return
+	}
+	if err = validateRoleGraphTx(r.Context(), tx); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := s.replaceRolePermissions(r.Context(), tx, req.Code, rolePermissionEntries(req.Permissions, req.PermissionEntries)); err != nil {
@@ -301,7 +305,9 @@ func (s *Server) createRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存权限组失败")
 		return
 	}
-	_ = s.refreshRBACVersion(r.Context())
+	if !s.requireSecurityVersionRefresh(w, r, "create_role", 0, s.refreshRBACVersion(r.Context())) {
+		return
+	}
 	role, err := s.roleByCode(r.Context(), req.Code)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取权限组失败")
@@ -330,6 +336,10 @@ func (s *Server) updateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if err = lockRoleGraphMutationTx(r.Context(), tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "锁定权限组图失败")
+		return
+	}
 
 	translationsJSON, err := localizedTextsJSON(req.Translations)
 	if err != nil {
@@ -360,6 +370,10 @@ func (s *Server) updateRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "权限组不存在")
 		return
 	}
+	if err = validateRoleGraphTx(r.Context(), tx); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := s.replaceRolePermissions(r.Context(), tx, req.Code, rolePermissionEntries(req.Permissions, req.PermissionEntries)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -369,7 +383,9 @@ func (s *Server) updateRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存权限组失败")
 		return
 	}
-	_ = s.refreshRBACVersion(r.Context())
+	if !s.requireSecurityVersionRefresh(w, r, "update_role", 0, s.refreshRBACVersion(r.Context())) {
+		return
+	}
 	role, err := s.roleByCode(r.Context(), req.Code)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取权限组失败")
@@ -391,9 +407,13 @@ func (s *Server) deleteRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if err = lockRoleGraphMutationTx(r.Context(), tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "锁定权限组图失败")
+		return
+	}
 
 	var roleID int64
-	if err := tx.QueryRow(r.Context(), `select id from roles where code = $1`, code).Scan(&roleID); err != nil {
+	if err := tx.QueryRow(r.Context(), `select id from roles where code=$1 for update`, code).Scan(&roleID); err != nil {
 		if err == pgx.ErrNoRows {
 			writeError(w, http.StatusNotFound, "权限组不存在")
 			return
@@ -401,15 +421,16 @@ func (s *Server) deleteRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取权限组失败")
 		return
 	}
-	if _, err := tx.Exec(r.Context(), `delete from user_role_bindings where role_id = $1`, roleID); err != nil {
-		writeError(w, http.StatusInternalServerError, "清理用户权限组绑定失败")
+	blockers, err := roleDeletionBlockersTx(r.Context(), tx, roleID, code)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "检查权限组依赖失败")
 		return
 	}
-	if _, err := tx.Exec(r.Context(), `delete from role_permissions where role_id = $1`, roleID); err != nil {
-		writeError(w, http.StatusInternalServerError, "清理权限组节点失败")
+	if len(blockers) != 0 {
+		writeError(w, http.StatusConflict, "权限组仍被引用: "+strings.Join(blockers, ", "))
 		return
 	}
-	tag, err := tx.Exec(r.Context(), `delete from roles where id = $1`, roleID)
+	tag, err := tx.Exec(r.Context(), `delete from roles where id=$1`, roleID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "删除权限组失败")
 		return
@@ -423,7 +444,9 @@ func (s *Server) deleteRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "删除权限组失败")
 		return
 	}
-	_ = s.refreshRBACVersion(r.Context())
+	if !s.requireSecurityVersionRefresh(w, r, "delete_role", 0, s.refreshRBACVersion(r.Context())) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -448,19 +471,28 @@ func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	users := make([]domain.User, 0)
+	userIDs := make([]int64, 0)
 	for rows.Next() {
 		var user domain.User
 		if err := rows.Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "读取用户数据失败")
 			return
 		}
-		roleCodes, _, permissionErr := s.resolveUserRootPermissions(r.Context(), user.ID)
-		if permissionErr != nil {
-			writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
-			return
-		}
-		user.RoleCodes = roleCodes
 		users = append(users, user)
+		userIDs = append(userIDs, user.ID)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取用户列表失败")
+		return
+	}
+	rows.Close()
+	resolvedByUser, err := s.resolveUsersRootPermissions(r.Context(), userIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
+		return
+	}
+	for index := range users {
+		users[index].RoleCodes = resolvedByUser[users[index].ID].Roles
 	}
 	writeJSON(w, http.StatusOK, users)
 }
@@ -539,11 +571,12 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 		}
 		tag, err := tx.Exec(
 			r.Context(),
-			`insert into user_role_bindings (user_id, role_id)
-			 select $1, id from roles where code = $2
+			`insert into user_role_bindings (user_id, role_id, source, source_key)
+			 select $1, id, $3, '' from roles where code = $2
 			 on conflict do nothing`,
 			user.ID,
 			role,
+			authorizationSourceManual,
 		)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "绑定权限组失败")
@@ -581,61 +614,6 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, user)
 }
 
-func (s *Server) updateUserRoles(w http.ResponseWriter, r *http.Request) {
-	identity, err := s.resolvePublicIdentity(r.Context(), r.PathValue("id"), "user")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "用户 ID 不正确")
-		return
-	}
-	userID := identity.InternalID
-	var req updateRolesRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "请求格式不正确")
-		return
-	}
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "数据库事务创建失败")
-		return
-	}
-	defer tx.Rollback(r.Context())
-
-	if _, err := tx.Exec(r.Context(), `delete from user_role_bindings where user_id = $1`, userID); err != nil {
-		writeError(w, http.StatusInternalServerError, "清理旧角色失败")
-		return
-	}
-	for _, role := range req.Roles {
-		role = strings.TrimSpace(role)
-		if role == "" {
-			continue
-		}
-		if err := s.ensureRoleForBinding(r.Context(), tx, role); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if _, err := tx.Exec(
-			r.Context(),
-			`insert into user_role_bindings (user_id, role_id)
-			 select $1, id from roles where code = $2
-			 on conflict do nothing`,
-			userID,
-			role,
-		); err != nil {
-			writeError(w, http.StatusInternalServerError, "绑定角色失败")
-			return
-		}
-	}
-	claims := currentClaims(r)
-	s.auditPermissionChangeTx(r.Context(), tx, claims.Subject, &userID, "update_user_roles", map[string]any{"roles": req.Roles})
-	if err := tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "保存角色失败")
-		return
-	}
-	_ = s.refreshPermissionVersion(r.Context(), userID)
-	_ = s.refreshRBACVersion(r.Context())
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
 func (s *Server) userPermissionDetails(w http.ResponseWriter, r *http.Request) {
 	identity, err := s.resolvePublicIdentity(r.Context(), r.PathValue("id"), "user")
 	if err != nil {
@@ -648,42 +626,83 @@ func (s *Server) userPermissionDetails(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
 		return
 	}
+	roleRows, err := s.db.Query(
+		r.Context(),
+		`select role.code,binding.expires_at,binding.source,binding.source_key
+		 from user_role_bindings binding join roles role on role.id=binding.role_id
+		 where binding.user_id=$1
+		 order by role.code,binding.source,binding.source_key`,
+		userID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取用户权限组失败")
+		return
+	}
+	roleBindings := make([]userPermissionEntry, 0)
+	groupPermissions := make([]string, 0)
+	for roleRows.Next() {
+		var code, source, sourceKey string
+		var expiresAt *time.Time
+		if err = roleRows.Scan(&code, &expiresAt, &source, &sourceKey); err != nil {
+			roleRows.Close()
+			writeError(w, http.StatusInternalServerError, "读取用户权限组数据失败")
+			return
+		}
+		entry := userPermissionEntry{Code: "group." + code, Allow: true, Source: source,
+			SourceKey: sourceKey, Editable: source == authorizationSourceManual}
+		if expiresAt != nil {
+			entry.ExpiresAt = expiresAt.Format(time.RFC3339)
+		}
+		roleBindings = append(roleBindings, entry)
+		if entry.Editable {
+			groupPermissions = append(groupPermissions, entry.Code)
+		}
+	}
+	if err = roleRows.Err(); err != nil {
+		roleRows.Close()
+		writeError(w, http.StatusInternalServerError, "读取用户权限组数据失败")
+		return
+	}
+	roleRows.Close()
+
 	rows, err := s.db.Query(
 		r.Context(),
-		`select p.code, up.allow, up.expires_at, up.context
+		`select p.code,up.allow,up.expires_at,up.source,up.source_key
 		 from user_permissions up
 		 join permissions p on p.id = up.permission_id
 		 where up.user_id = $1
-		 order by p.code`,
+		 order by p.code,up.source,up.source_key`,
 		userID,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取用户权限失败")
 		return
 	}
-	defer rows.Close()
-	direct := make([]map[string]any, 0)
+	direct := make([]userPermissionEntry, 0)
 	for rows.Next() {
-		var code, contextValue string
-		var allow bool
+		var entry userPermissionEntry
 		var expiresAt *time.Time
-		if err := rows.Scan(&code, &allow, &expiresAt, &contextValue); err != nil {
+		if err := rows.Scan(&entry.Code, &entry.Allow, &expiresAt, &entry.Source, &entry.SourceKey); err != nil {
+			rows.Close()
 			writeError(w, http.StatusInternalServerError, "读取用户权限数据失败")
 			return
 		}
-		item := map[string]any{"code": code, "allow": allow, "context": contextValue}
+		entry.Editable = entry.Source == authorizationSourceManual
 		if expiresAt != nil {
-			item["expiresAt"] = expiresAt.Format(time.RFC3339)
+			entry.ExpiresAt = expiresAt.Format(time.RFC3339)
 		}
-		direct = append(direct, item)
+		direct = append(direct, entry)
 	}
-	groupPermissions := make([]string, 0, len(roles))
-	for _, role := range roles {
-		groupPermissions = append(groupPermissions, "group."+role)
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		writeError(w, http.StatusInternalServerError, "读取用户权限数据失败")
+		return
 	}
+	rows.Close()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"roles":                    roles,
 		"groupPermissions":         groupPermissions,
+		"roleBindings":             roleBindings,
 		"directPermissions":        direct,
 		"effectivePermissionRules": effectivePermissionRules,
 	})
@@ -701,6 +720,11 @@ func (s *Server) updateUserPermissions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
+	manualRoles, manualPermissions, normalizeErr := normalizeManualAuthorizationEntries(req.Permissions)
+	if normalizeErr != nil {
+		writeError(w, http.StatusBadRequest, normalizeErr.Error())
+		return
+	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "数据库事务创建失败")
@@ -708,36 +732,8 @@ func (s *Server) updateUserPermissions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 
-	groupRoles := make([]string, 0)
-	directPermissions := make([]userPermissionEntry, 0)
-	for _, entry := range req.Permissions {
-		entry.Code = normalizeCode(entry.Code)
-		entry.Context = strings.TrimSpace(entry.Context)
-		if entry.Code == "" {
-			continue
-		}
-		if strings.HasPrefix(entry.Code, "group.") {
-			role := strings.TrimPrefix(entry.Code, "group.")
-			if !roleCodePattern.MatchString(role) {
-				writeError(w, http.StatusBadRequest, "权限组代码格式不正确: "+role)
-				return
-			}
-			groupRoles = append(groupRoles, role)
-			continue
-		}
-		if !permissionCodePattern.MatchString(entry.Code) {
-			writeError(w, http.StatusBadRequest, "权限节点格式不正确: "+entry.Code)
-			return
-		}
-		directPermissions = append(directPermissions, entry)
-	}
-
-	if _, err := tx.Exec(r.Context(), `delete from user_role_bindings where user_id = $1`, userID); err != nil {
-		writeError(w, http.StatusInternalServerError, "清理旧权限组失败")
-		return
-	}
-	for _, role := range normalizeCodes(groupRoles) {
-		if err := s.ensureRoleForBinding(r.Context(), tx, role); err != nil {
+	for _, role := range manualRoles {
+		if err := s.ensureRoleForBinding(r.Context(), tx, role.Code); err != nil {
 			if requestErr, ok := err.(*requestError); ok {
 				writeError(w, http.StatusBadRequest, requestErr.Error())
 				return
@@ -745,54 +741,16 @@ func (s *Server) updateUserPermissions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "绑定权限组失败")
 			return
 		}
-		tag, err := tx.Exec(
-			r.Context(),
-			`insert into user_role_bindings (user_id, role_id)
-			 select $1, id from roles where code = $2
-			 on conflict do nothing`,
-			userID,
-			role,
-		)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "绑定权限组失败")
-			return
-		}
-		if tag.RowsAffected() == 0 {
-			writeError(w, http.StatusBadRequest, "权限组不存在: "+role)
-			return
-		}
 	}
-
-	if _, err := tx.Exec(r.Context(), `delete from user_permissions where user_id = $1`, userID); err != nil {
-		writeError(w, http.StatusInternalServerError, "清理旧用户权限失败")
-		return
-	}
-	for _, entry := range directPermissions {
-		expiresAt, err := parseOptionalTime(entry.ExpiresAt)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "有效期格式不正确: "+entry.Code)
-			return
-		}
-		if err := ensurePermissionNode(r.Context(), tx, entry.Code); err != nil {
+	for _, permission := range manualPermissions {
+		if err := ensurePermissionNode(r.Context(), tx, permission.Code); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存权限节点失败")
 			return
 		}
-		_, err = tx.Exec(
-			r.Context(),
-			`insert into user_permissions (user_id, permission_id, allow, expires_at, context, updated_at)
-			 select $1, id, $3, $4, $5, now() from permissions where code = $2
-			 on conflict (user_id, permission_id) do update
-			 set allow = excluded.allow, expires_at = excluded.expires_at, context = excluded.context, updated_at = now()`,
-			userID,
-			entry.Code,
-			entry.Allow,
-			expiresAt,
-			entry.Context,
-		)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "保存用户权限失败")
-			return
-		}
+	}
+	if err = replaceManualUserAuthorizationTx(r.Context(), tx, userID, manualRoles, manualPermissions); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存用户权限失败")
+		return
 	}
 	claims := currentClaims(r)
 	s.auditPermissionChangeTx(r.Context(), tx, claims.Subject, &userID, "update_user_permissions", map[string]any{
@@ -804,8 +762,10 @@ func (s *Server) updateUserPermissions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存用户权限失败")
 		return
 	}
-	_ = s.refreshPermissionVersion(r.Context(), userID)
-	_ = s.refreshRBACVersion(r.Context())
+	if !s.requireSecurityVersionRefresh(w, r, "update_user_permissions", userID,
+		s.refreshPermissionVersion(r.Context(), userID), s.refreshRBACVersion(r.Context())) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -824,11 +784,25 @@ func (s *Server) roles(ctx context.Context) ([]domain.Role, error) {
 			return nil, err
 		}
 		role.Translations = parseLocalizedTexts(translations)
-		role.PermissionEntries = s.rolePermissionEntries(ctx, role.Code)
-		role.Permissions = rolePermissionCodes(role.PermissionEntries)
 		roles = append(roles, role)
 	}
-	return roles, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	roleCodes := make([]string, len(roles))
+	for index := range roles {
+		roleCodes[index] = roles[index].Code
+	}
+	entriesByRole, err := s.rolePermissionEntriesForRoles(ctx, roleCodes)
+	if err != nil {
+		return nil, err
+	}
+	for index := range roles {
+		roles[index].PermissionEntries = entriesByRole[roles[index].Code]
+		roles[index].Permissions = rolePermissionCodes(roles[index].PermissionEntries)
+	}
+	return roles, nil
 }
 
 func (s *Server) roleByCode(ctx context.Context, code string) (domain.Role, error) {
@@ -843,7 +817,10 @@ func (s *Server) roleByCode(ctx context.Context, code string) (domain.Role, erro
 		return role, err
 	}
 	role.Translations = parseLocalizedTexts(translations)
-	role.PermissionEntries = s.rolePermissionEntries(ctx, role.Code)
+	role.PermissionEntries, err = s.rolePermissionEntries(ctx, role.Code)
+	if err != nil {
+		return role, err
+	}
 	role.Permissions = rolePermissionCodes(role.PermissionEntries)
 	return role, nil
 }
@@ -917,33 +894,49 @@ func (s *Server) permissions(ctx context.Context) ([]domain.Permission, error) {
 	return permissions, rows.Err()
 }
 
-func (s *Server) rolePermissionEntries(ctx context.Context, roleCode string) []domain.RolePermissionEntry {
+func (s *Server) rolePermissionEntries(ctx context.Context, roleCode string) ([]domain.RolePermissionEntry, error) {
+	entriesByRole, err := s.rolePermissionEntriesForRoles(ctx, []string{roleCode})
+	if err != nil {
+		return nil, err
+	}
+	return entriesByRole[roleCode], nil
+}
+
+func (s *Server) rolePermissionEntriesForRoles(ctx context.Context, roleCodes []string) (map[string][]domain.RolePermissionEntry, error) {
+	entriesByRole := make(map[string][]domain.RolePermissionEntry, len(roleCodes))
+	for _, roleCode := range roleCodes {
+		entriesByRole[roleCode] = []domain.RolePermissionEntry{}
+	}
+	if len(roleCodes) == 0 {
+		return entriesByRole, nil
+	}
 	rows, err := s.db.Query(
 		ctx,
-		`select p.code, rp.allow, rp.expires_at
+		`select r.code,p.code,rp.allow,rp.expires_at
 		 from permissions p
 		 join role_permissions rp on rp.permission_id = p.id
 		 join roles r on r.id = rp.role_id
-		 where r.code = $1
-		 order by p.code`,
-		roleCode,
+		 where r.code=any($1)
+		 order by r.code,p.code`,
+		roleCodes,
 	)
 	if err != nil {
-		return []domain.RolePermissionEntry{}
+		return nil, err
 	}
 	defer rows.Close()
-	entries := make([]domain.RolePermissionEntry, 0)
 	for rows.Next() {
+		var roleCode string
 		var entry domain.RolePermissionEntry
 		var expiresAt *time.Time
-		if err := rows.Scan(&entry.Code, &entry.Allow, &expiresAt); err == nil {
-			if expiresAt != nil {
-				entry.ExpiresAt = expiresAt.Format(time.RFC3339)
-			}
-			entries = append(entries, entry)
+		if err := rows.Scan(&roleCode, &entry.Code, &entry.Allow, &expiresAt); err != nil {
+			return nil, err
 		}
+		if expiresAt != nil {
+			entry.ExpiresAt = expiresAt.Format(time.RFC3339)
+		}
+		entriesByRole[roleCode] = append(entriesByRole[roleCode], entry)
 	}
-	return entries
+	return entriesByRole, rows.Err()
 }
 
 func rolePermissionCodes(entries []domain.RolePermissionEntry) []string {
@@ -1406,39 +1399,11 @@ func (s *Server) auditPermissionChangeTx(ctx context.Context, tx pgx.Tx, operato
 	)
 }
 
-func (s *Server) mailConfigFromSettings(ctx context.Context) mailConfigPayload {
-	payload := mailConfigPayload{
-		Enabled:  s.mailer.Enabled(),
-		Host:     s.cfg.SMTP.Host,
-		Port:     s.cfg.SMTP.Port,
-		Username: s.cfg.SMTP.Username,
-		Password: s.cfg.SMTP.Password,
-		From:     s.cfg.SMTP.From,
-		UseTLS:   s.cfg.SMTP.UseTLS,
+func smtpConfigFromPayload(payload mailConfigPayload) config.SMTPConfig {
+	return config.SMTPConfig{
+		Enabled: payload.Enabled, Host: payload.Host, Port: payload.Port,
+		Username: payload.Username, Password: payload.Password, From: payload.From, UseTLS: payload.UseTLS,
 	}
-	var raw []byte
-	err := s.db.QueryRow(ctx, `select value from system_settings where key = 'mail.smtp'`).Scan(&raw)
-	if err != nil {
-		_ = ignoreNoRows(err)
-		return payload
-	}
-	if err := s.openSystemSetting(raw, &payload); err != nil {
-		return payload
-	}
-	payload.Enabled = strings.TrimSpace(payload.Host) != "" && strings.TrimSpace(payload.From) != ""
-	return payload
-}
-
-func (s *Server) activeMailer(ctx context.Context) mailer.Mailer {
-	payload := s.mailConfigFromSettings(ctx)
-	return mailer.New(config.SMTPConfig{
-		Host:     payload.Host,
-		Port:     payload.Port,
-		Username: payload.Username,
-		Password: payload.Password,
-		From:     payload.From,
-		UseTLS:   payload.UseTLS,
-	})
 }
 
 func redactMailConfig(payload mailConfigPayload) map[string]any {
@@ -1450,22 +1415,5 @@ func redactMailConfig(payload mailConfigPayload) map[string]any {
 		"from":        payload.From,
 		"useTLS":      payload.UseTLS,
 		"hasPassword": strings.TrimSpace(payload.Password) != "",
-	}
-}
-
-func adminNavigation() []map[string]any {
-	return []map[string]any{
-		{"id": "overview", "label": "统计", "items": []string{"总览", "用户统计", "上传统计", "搜索统计", "AI 调用统计"}},
-		{"id": "content", "label": "内容管理", "items": []string{"模组 Mod", "模组导入数据源", "整合包", "插件 Plugin", "衍生资源", "教程", "新闻", "问题 / 讨论"}},
-		{"id": "users", "label": "用户", "items": []string{"用户列表", "登录记录", "设备记录", "账号安全", "用户封禁"}},
-		{"id": "notifications", "label": "通知系统", "items": []string{"系统通知", "通知模板"}},
-		{"id": "permissions", "label": "权限", "items": []string{"权限组", "用户权限", "权限列表", "权限模板", "临时权限", "权限审计日志"}},
-		{"id": "oss", "label": "OSS 管理", "items": []string{"OSS 链接设置", "OSS 文件目录", "文件上传记录", "文件查杀记录", "下载统计"}},
-		{"id": "logs", "label": "日志", "items": []string{"系统运行日志", "用户交互日志", "管理员操作日志", "权限变更日志", "登录安全日志", "API 访问日志", "文件上传日志", "AI 调用日志"}},
-		{"id": "infrastructure", "label": "基础设施", "items": []string{"NATS 设置"}},
-		{"id": "review", "label": "审核", "items": []string{"待审核项", "新建内容审核", "编辑审核", "文件审核", "申请审核", "举报审核", "申诉审核"}},
-		{"id": "security", "label": "安全", "items": []string{"被封禁用户列表", "IP 黑名单", "设备黑名单", "风险账号"}},
-		{"id": "mail", "label": "邮件系统", "items": []string{"SMTP 配置", "验证码模板", "安全通知模板", "测试发送", "发送日志"}},
-		{"id": "settings", "label": "系统设置", "items": []string{"系统信息", "标签管理", "防御模式", "内容安全", "主题", "备份", "功能开关", "维护模式"}},
 	}
 }

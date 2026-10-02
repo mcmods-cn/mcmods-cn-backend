@@ -2,17 +2,17 @@ package progression
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/activity"
+	"mcmods-cn-backend/internal/activitycatalog"
 	"mcmods-cn-backend/internal/querycache"
 )
 
@@ -60,11 +60,30 @@ func (s *Service) ProcessActivityBatch(ctx context.Context, events []activity.Ev
 	if s == nil || s.db == nil || len(events) == 0 {
 		return nil
 	}
-	tasks, err := s.activeTasks(ctx)
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = s.ProcessActivityBatchTx(ctx, tx, events); err != nil {
+		return err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.ActivityBatchCommitted(ctx, events)
+	return nil
+}
+
+func (s *Service) ProcessActivityBatchTx(ctx context.Context, tx pgx.Tx, events []activity.Event) error {
+	if s == nil || tx == nil || len(events) == 0 {
+		return nil
+	}
+	tasks, err := s.activeTasks(ctx, tx)
 	if err != nil || len(tasks) == 0 {
 		return err
 	}
-	timezones, err := s.userTimezones(ctx, events)
+	timezones, err := s.userTimezones(ctx, tx, events)
 	if err != nil {
 		return err
 	}
@@ -101,46 +120,42 @@ func (s *Service) ProcessActivityBatch(ctx context.Context, events []activity.Ev
 	if len(deltas) == 0 {
 		return nil
 	}
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
 	for key, delta := range deltas {
 		if err = s.applyTaskProgress(ctx, tx, key, delta); err != nil {
 			return err
 		}
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return err
-	}
-	refreshed := make(map[int64]struct{}, len(deltas))
-	userIDs := make([]int64, 0, len(deltas))
-	for key := range deltas {
-		if _, ok := refreshed[key.UserID]; ok {
-			continue
-		}
-		refreshed[key.UserID] = struct{}{}
-		userIDs = append(userIDs, key.UserID)
-	}
-	rows, err := s.db.Query(ctx, `select id,permission_version from users where id=any($1::bigint[])`, userIDs)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var userID, version int64
-		if err = rows.Scan(&userID, &version); err != nil {
-			return err
-		}
-		if s.cache != nil {
-			s.cache.SetShared(ctx, querycache.UserPermissionVersionKey(userID), []byte(strconv.FormatInt(version, 10)), 10*time.Second)
-		}
-	}
-	return rows.Err()
+	return nil
 }
 
-func (s *Service) userTimezones(ctx context.Context, events []activity.Event) (map[int64]string, error) {
+// ActivityBatchCommitted runs only after the database commit. Removing the
+// short-lived shared version pointer makes the next authorization read load
+// the trigger-maintained version without making cache availability part of the
+// durable projection transaction.
+func (s *Service) ActivityBatchCommitted(ctx context.Context, events []activity.Event) {
+	if s == nil || s.cache == nil {
+		return
+	}
+	seen := make(map[int64]struct{}, len(events))
+	keys := make([]string, 0, len(events))
+	for _, event := range events {
+		if event.UserID <= 0 {
+			continue
+		}
+		if _, exists := seen[event.UserID]; exists {
+			continue
+		}
+		seen[event.UserID] = struct{}{}
+		keys = append(keys, querycache.UserPermissionVersionKey(event.UserID))
+	}
+	s.cache.Delete(ctx, keys...)
+}
+
+type progressionQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func (s *Service) userTimezones(ctx context.Context, queryer progressionQueryer, events []activity.Event) (map[int64]string, error) {
 	userIDs := make([]int64, 0, len(events))
 	seen := make(map[int64]struct{}, len(events))
 	for _, event := range events {
@@ -157,7 +172,7 @@ func (s *Service) userTimezones(ctx context.Context, events []activity.Event) (m
 	if len(userIDs) == 0 {
 		return result, nil
 	}
-	rows, err := s.db.Query(ctx, `select id,timezone from users where id=any($1::bigint[])`, userIDs)
+	rows, err := queryer.Query(ctx, `select id,timezone from users where id=any($1::bigint[])`, userIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -173,34 +188,76 @@ func (s *Service) userTimezones(ctx context.Context, events []activity.Event) (m
 	return result, rows.Err()
 }
 
-func (s *Service) activeTasks(ctx context.Context) ([]taskDefinition, error) {
-	rows, err := s.db.Query(ctx, `select id,refresh_period,condition,rewards from task_definitions where status='active'`)
+func (s *Service) activeTasks(ctx context.Context, queryer progressionQueryer) ([]taskDefinition, error) {
+	rows, err := queryer.Query(ctx, `select id,refresh_period,condition,rewards from task_definitions where status='active'`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	result := make([]taskDefinition, 0)
+	requiredCurrencies := make(map[string]int64)
 	for rows.Next() {
 		var task taskDefinition
 		var conditionRaw, rewardsRaw []byte
 		if err = rows.Scan(&task.ID, &task.RefreshPeriod, &conditionRaw, &rewardsRaw); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		if json.Unmarshal(conditionRaw, &task.Condition) != nil || task.Condition.Target <= 0 {
-			continue
+		task.Condition, task.Rewards, err = decodeTaskConfiguration(conditionRaw, rewardsRaw)
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("decode active task %d configuration: %w", task.ID, err)
 		}
-		_ = json.Unmarshal(rewardsRaw, &task.Rewards)
 		result = append(result, task)
+		for code := range task.Rewards.Currencies {
+			requiredCurrencies[code] = task.ID
+		}
 	}
-	return result, rows.Err()
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(requiredCurrencies) == 0 {
+		return result, nil
+	}
+	codes := make([]string, 0, len(requiredCurrencies))
+	for code := range requiredCurrencies {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	currencyRows, err := queryer.Query(ctx, `select code from currencies where status='active' and code=any($1::text[])`, codes)
+	if err != nil {
+		return nil, fmt.Errorf("validate active task reward currencies: %w", err)
+	}
+	for currencyRows.Next() {
+		var code string
+		if err = currencyRows.Scan(&code); err != nil {
+			currencyRows.Close()
+			return nil, fmt.Errorf("decode active task reward currency: %w", err)
+		}
+		delete(requiredCurrencies, code)
+	}
+	if err = currencyRows.Err(); err != nil {
+		currencyRows.Close()
+		return nil, fmt.Errorf("read active task reward currencies: %w", err)
+	}
+	currencyRows.Close()
+	if len(requiredCurrencies) > 0 {
+		for _, code := range codes {
+			if taskID, missing := requiredCurrencies[code]; missing {
+				return nil, fmt.Errorf("active task %d reward currency %q is unavailable", taskID, code)
+			}
+		}
+	}
+	return result, nil
 }
 
 func matchesTask(condition taskCondition, event activity.Event) bool {
-	taskActionID := actionID(condition.Action)
+	taskActionID := activitycatalog.ActionID(condition.Action)
 	if taskActionID == 0 || taskActionID != event.ActionID {
 		return false
 	}
-	taskObjectTypeID := objectTypeID(condition.ObjectType)
+	taskObjectTypeID := activitycatalog.ObjectTypeID(condition.ObjectType)
 	if taskObjectTypeID == 0 || taskObjectTypeID != event.ObjectTypeID {
 		return false
 	}
@@ -291,10 +348,7 @@ func (s *Service) grantExperience(ctx context.Context, tx pgx.Tx, userID, amount
 		values($1,$2,$3,$4,'task',$5)`, userID, amount, experience, reason, referenceKey); err != nil {
 		return err
 	}
-	if trackCode != "" {
-		return SyncTrackRole(ctx, tx, userID, trackCode, level)
-	}
-	return nil
+	return SyncTrackRole(ctx, tx, userID, trackCode, level)
 }
 
 func levelConfiguration(ctx context.Context, tx pgx.Tx) ([]int64, string, error) {
@@ -325,6 +379,16 @@ func LevelForExperience(experience int64, thresholds []int64) int {
 }
 
 func SyncTrackRole(ctx context.Context, tx pgx.Tx, userID int64, trackCode string, level int) error {
+	var lockedUserID int64
+	if err := tx.QueryRow(ctx, `select id from users where id=$1 for update`, userID).Scan(&lockedUserID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `delete from user_role_bindings where user_id=$1 and source='level_track'`, userID); err != nil {
+		return err
+	}
+	if trackCode == "" || level <= 0 {
+		return nil
+	}
 	rows, err := tx.Query(ctx, `select role_id from permission_role_track_roles where track_code=$1 order by position`, trackCode)
 	if err != nil {
 		return err
@@ -346,17 +410,12 @@ func SyncTrackRole(ctx context.Context, tx pgx.Tx, userID int64, trackCode strin
 	if len(roleIDs) == 0 {
 		return nil
 	}
-	if _, err = tx.Exec(ctx, `delete from user_role_bindings where user_id=$1 and role_id=any($2)`, userID, roleIDs); err != nil {
-		return err
-	}
-	if level <= 0 {
-		return nil
-	}
 	position := level - 1
 	if position >= len(roleIDs) {
 		position = len(roleIDs) - 1
 	}
-	_, err = tx.Exec(ctx, `insert into user_role_bindings(user_id,role_id) values($1,$2) on conflict do nothing`, userID, roleIDs[position])
+	_, err = tx.Exec(ctx, `insert into user_role_bindings(user_id,role_id,source,source_key)
+		values($1,$2,'level_track',$3)`, userID, roleIDs[position], trackCode)
 	return err
 }
 
@@ -380,90 +439,4 @@ func grantCurrency(ctx context.Context, tx pgx.Tx, userID int64, currencyCode st
 		userID, currencyID, amount, balance, transactionType, referenceType, referenceKey,
 	)
 	return err
-}
-
-func actionID(code string) int16 {
-	switch strings.ToLower(strings.TrimSpace(code)) {
-	case "edit":
-		return activity.ActionEdit
-	case "create":
-		return activity.ActionCreate
-	case "view":
-		return activity.ActionView
-	case "delete":
-		return activity.ActionDelete
-	case "claim":
-		return activity.ActionClaim
-	case "download":
-		return activity.ActionDownload
-	case "upload":
-		return activity.ActionUpload
-	case "purchase":
-		return activity.ActionPurchase
-	case "transfer":
-		return activity.ActionTransfer
-	case "checkin":
-		return activity.ActionCheckIn
-	case "use":
-		return activity.ActionUse
-	default:
-		return 0
-	}
-}
-
-func objectTypeID(code string) int16 {
-	switch strings.ToLower(strings.TrimSpace(code)) {
-	case "recipe":
-		return activity.ObjectRecipe
-	case "mod":
-		return activity.ObjectMod
-	case "resource":
-		return activity.ObjectResource
-	case "blueprint":
-		return activity.ObjectBlueprint
-	case "plugin":
-		return activity.ObjectPlugin
-	case "author":
-		return activity.ObjectAuthor
-	case "team":
-		return activity.ObjectTeam
-	case "user":
-		return activity.ObjectUser
-	case "comment":
-		return activity.ObjectComment
-	case "tag":
-		return activity.ObjectTag
-	case "file":
-		return activity.ObjectFile
-	case "economy":
-		return activity.ObjectEconomy
-	case "task":
-		return activity.ObjectTask
-	case "shop_item":
-		return activity.ObjectShopItem
-	case "modpack":
-		return activity.ObjectModpack
-	case "server":
-		return activity.ObjectServer
-	case "map":
-		return activity.ObjectMap
-	case "resource_pack":
-		return activity.ObjectResourcePack
-	case "shader_pack":
-		return activity.ObjectShaderPack
-	case "datapack":
-		return activity.ObjectDatapack
-	case "addon":
-		return activity.ObjectAddon
-	case "community_post":
-		return activity.ObjectCommunityPost
-	case "review":
-		return activity.ObjectReview
-	case "skin":
-		return activity.ObjectSkin
-	case "player_profile":
-		return activity.ObjectPlayerProfile
-	default:
-		return 0
-	}
 }

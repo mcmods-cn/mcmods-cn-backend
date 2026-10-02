@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 func TestParsePlayerTextureUpdatesPatchSemantics(t *testing.T) {
@@ -49,7 +51,7 @@ func TestSkinAssetJSONCanonicalContract(t *testing.T) {
 		BlobHash: "hash", Kind: "skin", Model: "default", Name: "Example",
 		Visibility: "public", ReviewStatus: "approved", Status: "active",
 	}
-	payload := skinAssetJSON(record, 7)
+	payload := skinAssetJSON(record, security.Claims{Subject: 7})
 	if payload["name"] != "Example" || payload["textureHash"] != "hash" || payload["canEdit"] != true || payload["canUse"] != true {
 		t.Fatalf("canonical skin fields are incomplete: %#v", payload)
 	}

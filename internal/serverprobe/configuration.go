@@ -13,16 +13,57 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	maxConfigurationPacketBytes = 2 << 20
-	maxFabricRegistrySyncBytes  = 64 << 20
-	maxConfigurationPacketCount = 512
-	configurationProbeTimeout   = 30 * time.Second
-	minecraft1211Protocol       = 767
+	maxConfigurationPacketBytes          = 2 << 20
+	maxFabricRegistrySyncBytes           = 8 << 20
+	maxConfigurationPacketCount          = 512
+	maximumConfigurationIdentifiers      = 16_384
+	maximumConfigurationNamespaces       = 4_096
+	maximumConfigurationNBTNodes         = 16_384
+	maximumConcurrentConfigurationProbes = 4
+	configurationProbeTimeout            = 30 * time.Second
+	minecraft1211Protocol                = 767
 )
+
+var configurationProbeSlots = make(chan struct{}, maximumConcurrentConfigurationProbes)
+
+var errConfigurationProbeCapacity = errors.New("configuration probe capacity is full")
+
+type configurationParseBudget struct {
+	remaining int64
+}
+
+func newConfigurationParseBudget() *configurationParseBudget {
+	return &configurationParseBudget{remaining: maximumConfigurationIdentifiers}
+}
+
+func (budget *configurationParseBudget) claim(label string, count int32, remainingBytes int, minimumBytes int64) error {
+	if budget == nil || count < 0 || minimumBytes <= 0 || int64(count) > budget.remaining ||
+		int64(count)*minimumBytes > int64(remainingBytes) {
+		return fmt.Errorf("invalid %s count %d for remaining probe budget", label, count)
+	}
+	budget.remaining -= int64(count)
+	return nil
+}
+
+func acquireConfigurationProbeSlot(ctx context.Context) (func(), error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	select {
+	case configurationProbeSlots <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-configurationProbeSlots }) }, nil
+	default:
+		return nil, errConfigurationProbeCapacity
+	}
+}
 
 type configurationDiscovery struct {
 	Loader     string
@@ -60,11 +101,11 @@ func minecraftVersionForConfigurationProtocol(protocol int) string {
 	return ""
 }
 
-func probeConfigurationNamespaces(ctx context.Context, target Target, protocol int) configurationDiscovery {
+func probeConfigurationNamespaces(ctx context.Context, target Target, protocol int, dial probeDialContextFunc) configurationDiscovery {
 	result := configurationDiscovery{Confidence: map[string]string{}}
 	probeCtx, cancel := context.WithTimeout(ctx, configurationProbeTimeout)
 	defer cancel()
-	conn, err := (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: -1}).DialContext(
+	conn, err := dial(
 		probeCtx, "tcp", net.JoinHostPort(target.ConnectIP.String(), fmt.Sprint(target.ConnectPort)),
 	)
 	if err != nil {
@@ -77,6 +118,8 @@ func probeConfigurationNamespaces(ctx context.Context, target Target, protocol i
 		deadline = contextDeadline
 	}
 	_ = conn.SetDeadline(deadline)
+	stopCancellation := context.AfterFunc(probeCtx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stopCancellation()
 	packetConn := &configurationPacketConn{
 		conn: conn, reader: bufio.NewReader(conn), compressionThreshold: -1,
 	}
@@ -91,6 +134,7 @@ func probeConfigurationNamespaces(ctx context.Context, target Target, protocol i
 
 	channelEvidence := map[string]int{}
 	registryEvidence := map[string]int{}
+	parseBudget := newConfigurationParseBudget()
 	var fabricRegistryData []byte
 	phase := "login"
 	for packetNumber := 0; packetNumber < maxConfigurationPacketCount; packetNumber++ {
@@ -178,7 +222,9 @@ func probeConfigurationNamespaces(ctx context.Context, target Target, protocol i
 			_, _ = io.ReadFull(reader, body)
 			switch payloadID {
 			case "minecraft:register", "minecraft:unregister":
-				recordConfigurationIDs(channelEvidence, parseNulSeparatedChannels(body))
+				if recordErr := recordConfigurationIDs(channelEvidence, parseNulSeparatedChannels(body)); recordErr != nil {
+					result.Diagnostic = recordErr.Error()
+				}
 			case "neoforge:register":
 				result.Loader = "neoforge"
 				queryReader := bytes.NewReader(body)
@@ -191,7 +237,9 @@ func probeConfigurationNamespaces(ctx context.Context, target Target, protocol i
 			case "neoforge:network":
 				result.Loader = "neoforge"
 				if ids, networkErr := parseConfigurationNetworkChannels(body); networkErr == nil {
-					recordConfigurationIDs(channelEvidence, ids)
+					if recordErr := recordConfigurationIDs(channelEvidence, ids); recordErr != nil {
+						result.Diagnostic = recordErr.Error()
+					}
 				} else {
 					result.Diagnostic = "NeoForge 网络能力解析失败：" + networkErr.Error()
 				}
@@ -202,8 +250,10 @@ func probeConfigurationNamespaces(ctx context.Context, target Target, protocol i
 				}
 			case "neoforge:frozen_registry":
 				result.Loader = "neoforge"
-				if registryName, entries, registryErr := parseConfigurationFrozenRegistry(body); registryErr == nil {
-					recordConfigurationIDs(registryEvidence, append(entries, registryName))
+				if registryName, entries, registryErr := parseConfigurationFrozenRegistryWithBudget(body, parseBudget); registryErr == nil {
+					if recordErr := recordConfigurationIDs(registryEvidence, append(entries, registryName)); recordErr != nil {
+						result.Diagnostic = recordErr.Error()
+					}
 				} else {
 					result.Diagnostic = "NeoForge 注册表解析失败：" + registryErr.Error()
 				}
@@ -226,13 +276,19 @@ func probeConfigurationNamespaces(ctx context.Context, target Target, protocol i
 					fabricRegistryData = append(fabricRegistryData, body...)
 					continue
 				}
-				registryNames, entries, registryErr := parseFabricRegistrySync(fabricRegistryData)
+				registryNames, entries, registryErr := parseFabricRegistrySyncWithBudget(fabricRegistryData, parseBudget)
 				if registryErr != nil {
 					result.Diagnostic = "Fabric 注册表解析失败：" + registryErr.Error()
 					continue
 				}
-				recordConfigurationIDs(registryEvidence, registryNames)
-				recordConfigurationIDs(registryEvidence, entries)
+				if recordErr := recordConfigurationIDs(registryEvidence, registryNames); recordErr != nil {
+					result.Diagnostic = recordErr.Error()
+					continue
+				}
+				if recordErr := recordConfigurationIDs(registryEvidence, entries); recordErr != nil {
+					result.Diagnostic = recordErr.Error()
+					continue
+				}
 				if err = sendConfigurationCustomPayload(packetConn, "fabric:registry/sync/complete", nil); err != nil {
 					result.Diagnostic = "发送 Fabric 注册表完成回执失败：" + err.Error()
 				}
@@ -256,11 +312,13 @@ func probeConfigurationNamespaces(ctx context.Context, target Target, protocol i
 				_ = packetConn.writePacket(5, payload)
 			}
 		case 7:
-			registryName, entries, registryErr := parseConfigurationDynamicRegistry(payload)
+			registryName, entries, registryErr := parseConfigurationDynamicRegistryWithBudget(payload, parseBudget)
 			if registryErr != nil {
 				result.Diagnostic = "动态注册表解析失败：" + registryErr.Error()
 			} else {
-				recordConfigurationIDs(registryEvidence, append(entries, registryName))
+				if recordErr := recordConfigurationIDs(registryEvidence, append(entries, registryName)); recordErr != nil {
+					result.Diagnostic = recordErr.Error()
+				}
 			}
 		case 13:
 			packetNumber = maxConfigurationPacketCount
@@ -458,7 +516,8 @@ func parseConfigurationNetworkChannels(data []byte) ([]string, error) {
 			return nil, err
 		}
 		channelCount, countErr := readVarInt(reader)
-		if countErr != nil || channelCount < 0 || channelCount > 4096 {
+		if countErr != nil || channelCount < 0 || channelCount > 4096 ||
+			len(ids)+int(channelCount) > maximumConfigurationIdentifiers || int64(channelCount)*3 > int64(reader.Len()) {
 			return nil, errors.New("invalid channel count")
 		}
 		for channelIndex := int32(0); channelIndex < channelCount; channelIndex++ {
@@ -486,16 +545,23 @@ func parseConfigurationNetworkChannels(data []byte) ([]string, error) {
 }
 
 func parseConfigurationFrozenRegistry(data []byte) (string, []string, error) {
+	return parseConfigurationFrozenRegistryWithBudget(data, newConfigurationParseBudget())
+}
+
+func parseConfigurationFrozenRegistryWithBudget(data []byte, budget *configurationParseBudget) (string, []string, error) {
 	reader := bytes.NewReader(data)
 	registryName, err := readProtocolString(reader, 32767)
 	if err != nil {
 		return "", nil, err
 	}
+	if err = budget.claim("frozen registry name", 1, reader.Len(), 1); err != nil {
+		return "", nil, err
+	}
 	count, err := readVarInt(reader)
-	if err != nil || count < 0 || count > 1_000_000 {
+	if err != nil || budget.claim("frozen registry entry", count, reader.Len(), 2) != nil {
 		return "", nil, errors.New("invalid frozen registry entry count")
 	}
-	entries := make([]string, 0, count)
+	entries := make([]string, 0, min(int(count), 256))
 	for index := int32(0); index < count; index++ {
 		if _, err = readVarInt(reader); err != nil {
 			return "", nil, err
@@ -507,7 +573,8 @@ func parseConfigurationFrozenRegistry(data []byte) (string, []string, error) {
 		entries = append(entries, id)
 	}
 	aliasCount, err := readVarInt(reader)
-	if err != nil || aliasCount < 0 || aliasCount > 1_000_000 {
+	if err != nil || aliasCount < 0 || aliasCount > maximumConfigurationIdentifiers/2 ||
+		budget.claim("frozen registry alias", aliasCount*2, reader.Len(), 1) != nil {
 		return "", nil, errors.New("invalid frozen registry alias count")
 	}
 	for index := int32(0); index < aliasCount; index++ {
@@ -529,17 +596,24 @@ func parseConfigurationFrozenRegistry(data []byte) (string, []string, error) {
 
 func parseNulSeparatedChannels(data []byte) []string {
 	seen := map[string]struct{}{}
-	var result []string
-	for _, value := range bytes.Split(data, []byte{0}) {
+	result := make([]string, 0, min(64, maximumConfigurationIdentifiers))
+	for len(data) > 0 && len(result) < maximumConfigurationIdentifiers {
+		end := bytes.IndexByte(data, 0)
+		if end < 0 {
+			end = len(data)
+		}
+		value := data[:end]
 		trimmed := strings.TrimSpace(string(value))
-		if trimmed == "" {
-			continue
+		if trimmed != "" {
+			if _, exists := seen[trimmed]; !exists {
+				seen[trimmed] = struct{}{}
+				result = append(result, trimmed)
+			}
 		}
-		if _, exists := seen[trimmed]; exists {
-			continue
+		if end == len(data) {
+			break
 		}
-		seen[trimmed] = struct{}{}
-		result = append(result, trimmed)
+		data = data[end+1:]
 	}
 	return result
 }
@@ -551,10 +625,10 @@ func encodeNulSeparatedChannels(channels []string) []byte {
 func parseConfigurationResourceLocationList(data []byte) ([]string, error) {
 	reader := bytes.NewReader(data)
 	count, err := readVarInt(reader)
-	if err != nil || count < 0 || count > 4096 {
+	if err != nil || count < 0 || count > 4096 || int64(count) > int64(reader.Len()) {
 		return nil, errors.New("invalid resource location count")
 	}
-	values := make([]string, 0, count)
+	values := make([]string, 0, min(int(count), 256))
 	for index := int32(0); index < count; index++ {
 		value, readErr := readProtocolString(reader, 32767)
 		if readErr != nil {
@@ -568,12 +642,16 @@ func parseConfigurationResourceLocationList(data []byte) ([]string, error) {
 	return values, nil
 }
 
-func recordConfigurationIDs(target map[string]int, ids []string) {
+func recordConfigurationIDs(target map[string]int, ids []string) error {
 	for _, id := range ids {
 		if namespace, _, ok := strings.Cut(strings.ToLower(id), ":"); ok {
+			if _, exists := target[namespace]; !exists && len(target) >= maximumConfigurationNamespaces {
+				return errors.New("configuration namespace evidence exceeds safety limit")
+			}
 			target[namespace]++
 		}
 	}
+	return nil
 }
 
 func isDiscoverableModNamespace(namespace string) bool {

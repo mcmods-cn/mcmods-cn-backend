@@ -17,7 +17,7 @@ func TestAutobotSeedUsesNonLoginServiceIdentityAndTrustedAutomationPermissions(t
 	if autobot == nil {
 		t.Fatal("autobot seed user is missing")
 	}
-	if autobot.Email != systemactor.AutobotEmail || autobot.Status != "active" {
+	if autobot.Email != systemactor.AutobotEmail || autobot.Status != systemactor.AutobotStatus {
 		t.Fatalf("unexpected autobot identity: %+v", *autobot)
 	}
 	permissions := make(map[string]bool, len(autobot.Permissions))
@@ -33,9 +33,9 @@ func TestAutobotSeedUsesNonLoginServiceIdentityAndTrustedAutomationPermissions(t
 			t.Fatalf("autobot is missing permission %q", required)
 		}
 	}
-	hash, updatePassword, err := seedPasswordHash(autobot.Username)
-	if err != nil || !updatePassword || hash != "password-login-disabled" {
-		t.Fatalf("autobot must not receive an interactive password: hash=%q update=%v err=%v", hash, updatePassword, err)
+	hash, err := seedPasswordHash(autobot.Username)
+	if err != nil || hash != "password-login-disabled" {
+		t.Fatalf("autobot must not receive an interactive password: hash=%q err=%v", hash, err)
 	}
 }
 

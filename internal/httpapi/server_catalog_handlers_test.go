@@ -80,19 +80,28 @@ func TestDefaultReviewConfigRequiresServerCreationReview(t *testing.T) {
 	}
 }
 
-func TestMergeServerModRequestsPrefersDetectedEvidence(t *testing.T) {
+func TestMergeServerModRequestsRetainsDetectedAndDeclaredEvidence(t *testing.T) {
 	result := mergeServerModRequests(
 		[]serverprobe.Mod{{ID: "Example_Mod", Version: "1.0", Source: "forge_status", Confidence: "exact"}},
 		[]createServerModRequest{
-			{ID: "example_mod", Source: "manual", Confidence: "declared"},
-			{ID: "missing_mod", Source: "manual", Confidence: "declared"},
+			{ID: "example_mod"},
+			{ID: "missing_mod"},
 		},
 	)
-	if len(result) != 2 {
-		t.Fatalf("got %d mods, want 2", len(result))
+	if len(result) != 3 {
+		t.Fatalf("got %d evidence records, want 3", len(result))
 	}
-	if result[0].ID != "example_mod" || result[0].Source != "forge_status" || result[0].Confidence != "exact" {
-		t.Fatalf("detected evidence was overwritten: %#v", result[0])
+	byIdentityAndSource := make(map[string]trustedServerModEvidence, len(result))
+	for _, evidence := range result {
+		byIdentityAndSource[evidence.ID+"/"+evidence.Source] = evidence
+	}
+	if detected := byIdentityAndSource["example_mod/forge_status"]; detected.Confidence != "exact" || detected.Version != "1.0" {
+		t.Fatalf("detected evidence was overwritten: %#v", detected)
+	}
+	for _, key := range []string{"example_mod/manual", "missing_mod/manual"} {
+		if declared := byIdentityAndSource[key]; declared.Confidence != "declared" {
+			t.Fatalf("declaration %q did not retain independent manual evidence: %#v", key, declared)
+		}
 	}
 }
 
@@ -104,7 +113,7 @@ func TestNormalizeAndValidateServerUpdateRequestReusesMetadataRules(t *testing.T
 		Languages:         []string{"zh-CN", "zh-CN"},
 		PrimaryTag:        "Technology",
 		Mods: []createServerModRequest{
-			{ID: "example_mod", Source: "manual", Confidence: "declared"},
+			{ID: "example_mod"},
 		},
 	}
 	if err := normalizeAndValidateServerUpdateRequest(&request, defaultServerCatalogSettings()); err != nil {

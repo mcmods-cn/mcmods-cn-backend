@@ -6,9 +6,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/userstats"
 )
 
@@ -17,7 +16,8 @@ func main() {
 	batchSize := flag.Int("batch-size", 200, "number of users loaded per batch")
 	flag.Parse()
 	ctx := context.Background()
-	db, err := pgxpool.New(ctx, config.Load().DB.ConnString())
+	cfg := config.Load()
+	db, err := database.Connect(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
 	}

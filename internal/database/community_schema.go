@@ -1,5 +1,23 @@
 package database
 
+import (
+	"fmt"
+	"strings"
+
+	"mcmods-cn-backend/internal/activitycatalog"
+)
+
+func activityDictionarySeed(table string, definitions []activitycatalog.Entry) string {
+	values := make([]string, 0, len(definitions))
+	for _, definition := range definitions {
+		code := strings.ReplaceAll(definition.Code, "'", "''")
+		name := strings.ReplaceAll(definition.Name, "'", "''")
+		values = append(values, fmt.Sprintf("(%d,'%s','%s')", definition.ID, code, name))
+	}
+	return "insert into " + table + "(id,code,name) values\n\t\t\t" + strings.Join(values, ",") +
+		"\n\t\t on conflict(id) do update set code=excluded.code,name=excluded.name"
+}
+
 func communitySchemaStatements() []string {
 	return []string{
 		`create table if not exists creator_role_definitions (
@@ -24,11 +42,13 @@ func communitySchemaStatements() []string {
 			(6,'former_artist','Former artist','Former art and visual designer',false,false),
 			(7,'former_owner','Former owner','Former project owner',false,false),
 			(8,'sponsor','Sponsor','Team sponsor',false,false),
-			(9,'leader','Leader','Team leader',false,true)
+			(9,'leader','Leader','Team leader',false,false),
+			(10,'contributor','Contributor','General contribution without project access',false,false),
+			(11,'maintainer','Maintainer','Software maintainer with project access',false,true)
 		 on conflict(id) do update set code=excluded.code,name=excluded.name,description=excluded.description,
 			permission_granting=excluded.permission_granting`,
 		`select setval(pg_get_serial_sequence('creator_role_definitions','id'),
-			greatest(9,coalesce((select max(id) from creator_role_definitions),9)),true)`,
+			greatest(11,coalesce((select max(id) from creator_role_definitions),11)),true)`,
 		`create or replace function register_creator_role_public_route() returns trigger as $$
 		begin
 			insert into public_routes(public_id,entity_type,internal_id)
@@ -208,30 +228,13 @@ func communitySchemaStatements() []string {
 			code text not null unique,
 			name text not null
 		)`,
-		`insert into activity_actions(id,code,name) values
-			(1,'edit','Edit'),(2,'create','Create'),(3,'view','View'),
-			(4,'delete','Delete'),(5,'claim','Claim'),(6,'download','Download'),
-			(7,'upload','Upload'),(8,'purchase','Purchase'),(9,'transfer','Transfer'),
-			(10,'checkin','Check in'),(11,'use','Use')
-		 on conflict(id) do update set code=excluded.code,name=excluded.name`,
+		activityDictionarySeed("activity_actions", activitycatalog.ActionDefinitions()),
 		`create table if not exists activity_object_types (
 			id smallint primary key,
 			code text not null unique,
 			name text not null
 		)`,
-		`insert into activity_object_types(id,code,name) values
-			(1,'recipe','Recipe'),(2,'mod','Mod'),(3,'blueprint','Blueprint'),
-			(4,'plugin','Plugin'),(5,'author','Author'),(6,'team','Team'),
-			(7,'user','User'),(8,'comment','Comment'),(9,'tag','Tag'),
-			(10,'file','File'),(11,'economy','Economy'),(12,'task','Task'),
-			(13,'shop_item','Shop item'),(14,'resource','Resource'),
-			(15,'modpack','Modpack'),(16,'server','Server'),(17,'map','Map'),
-			(18,'resource_pack','Resource pack'),(19,'shader_pack','Shader pack'),
-			(20,'datapack','Data pack'),(21,'addon','Addon'),
-			(22,'community_post','Community post'),(23,'review','Review'),
-			(24,'skin','Skin'),(25,'player_profile','Player profile'),(26,'changelog','Changelog'),
-			(27,'rating','Rating')
-		 on conflict(id) do update set code=excluded.code,name=excluded.name`,
+		activityDictionarySeed("activity_object_types", activitycatalog.ObjectTypeDefinitions()),
 		`create table if not exists user_activity_events (
 			id bigserial primary key,
 			user_id bigint references users(id) on delete set null,
@@ -313,7 +316,7 @@ func communitySchemaStatements() []string {
 		`create table if not exists user_currency_balances (
 			user_id bigint not null references users(id) on delete cascade,
 			currency_id bigint not null references currencies(id) on delete restrict,
-			balance bigint not null default 0 check(balance >= 0),
+			balance bigint not null default 0 check(balance between 0 and 100000000000000),
 			updated_at timestamptz not null default now(),
 			primary key(user_id,currency_id)
 		)`,
@@ -321,8 +324,8 @@ func communitySchemaStatements() []string {
 			id bigserial primary key,
 			user_id bigint not null references users(id) on delete cascade,
 			currency_id bigint not null references currencies(id) on delete restrict,
-			amount_delta bigint not null,
-			balance_after bigint not null check(balance_after >= 0),
+			amount_delta bigint not null check(amount_delta between -100000000000000 and 100000000000000),
+			balance_after bigint not null check(balance_after between 0 and 100000000000000),
 			transaction_type text not null,
 			counterparty_user_id bigint references users(id) on delete set null,
 			reference_type text not null default '',
@@ -337,7 +340,7 @@ func communitySchemaStatements() []string {
 		`create table if not exists content_download_counters (
 			object_route_id bigint not null references public_routes(id) on delete cascade,
 			owner_id bigint not null references users(id) on delete cascade,
-			downloads bigint not null default 0 check(downloads >= 0),
+			downloads bigint not null default 0 check(downloads between 0 and 100000000000000),
 			last_download_at timestamptz,
 			primary key(object_route_id,owner_id)
 		)`,
@@ -347,7 +350,7 @@ func communitySchemaStatements() []string {
 			object_route_id bigint not null references public_routes(id) on delete cascade,
 			owner_id bigint not null references users(id) on delete cascade,
 			currency_id bigint not null references currencies(id) on delete restrict,
-			rewarded_steps bigint not null default 0 check(rewarded_steps >= 0),
+			rewarded_steps bigint not null default 0 check(rewarded_steps between 0 and 100000000000000),
 			updated_at timestamptz not null default now(),
 			primary key(object_route_id,owner_id,currency_id)
 		)`,
@@ -373,13 +376,13 @@ func communitySchemaStatements() []string {
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			code text not null unique,
-			item_type text not null,
+			item_type text not null check(item_type in ('profile_background','project_heat_boost','server_heat_boost')),
 			name text not null,
 			description text not null default '',
 			icon text not null default '',
 			translations jsonb not null default '{}'::jsonb,
 			price_currency_id bigint not null references currencies(id) on delete restrict,
-			price_amount bigint not null default 0 check(price_amount >= 0),
+			price_amount bigint not null default 0 check(price_amount between 0 and 1000000000000),
 			purchase_permission text not null default '',
 			use_permission text not null default '',
 			config jsonb not null default '{}'::jsonb,
@@ -408,7 +411,7 @@ func communitySchemaStatements() []string {
 		`create table if not exists user_inventory (
 			user_id bigint not null references users(id) on delete cascade,
 			shop_item_id bigint not null references shop_items(id) on delete restrict,
-			quantity integer not null default 0 check(quantity >= 0),
+			quantity integer not null default 0 check(quantity between 0 and 1000000),
 			updated_at timestamptz not null default now(),
 			primary key(user_id,shop_item_id)
 		)`,
@@ -417,10 +420,11 @@ func communitySchemaStatements() []string {
 			user_id bigint not null references users(id) on delete cascade,
 			shop_item_id bigint not null references shop_items(id) on delete restrict,
 			currency_id bigint not null references currencies(id) on delete restrict,
-			quantity integer not null check(quantity > 0),
-			unit_price bigint not null check(unit_price >= 0),
-			total_price bigint not null check(total_price >= 0),
-			created_at timestamptz not null default now()
+			quantity integer not null check(quantity between 1 and 100),
+			unit_price bigint not null check(unit_price between 0 and 1000000000000),
+			total_price bigint not null check(total_price between 0 and 100000000000000),
+			created_at timestamptz not null default now(),
+			check(total_price=unit_price*quantity::bigint)
 		)`,
 		`alter table users add column if not exists profile_background_url text not null default ''`,
 		`alter table users add column if not exists profile_background_file_id bigint references oss_files(id) on delete set null`,
@@ -448,10 +452,45 @@ func communitySchemaStatements() []string {
 			singleton boolean primary key default true check(singleton),
 			role_track_code text references permission_role_tracks(code) on delete set null,
 			level_thresholds bigint[] not null default '{}'::bigint[],
+			version bigint not null default 1 check(version > 0),
 			updated_by bigint references users(id) on delete set null,
 			updated_at timestamptz not null default now()
 		)`,
 		`insert into level_system_config(singleton) values(true) on conflict(singleton) do nothing`,
+		`create table if not exists level_recalculation_jobs (
+			id bigserial primary key,
+			config_version bigint not null unique check(config_version > 0),
+			role_track_code text not null default '',
+			level_thresholds bigint[] not null default '{}'::bigint[],
+			role_ids bigint[] not null default '{}'::bigint[],
+			status text not null default 'queued'
+				check(status in ('queued','processing','completed','superseded','dead')),
+			cursor_user_id bigint not null default 0 check(cursor_user_id >= 0),
+			processed_count bigint not null default 0 check(processed_count >= 0),
+			attempts integer not null default 0 check(attempts >= 0),
+			max_attempts integer not null default 8 check(max_attempts between 1 and 20),
+			next_attempt_at timestamptz not null default now(),
+			locked_by text not null default '',
+			lease_expires_at timestamptz,
+			last_error text not null default '',
+			created_by bigint references users(id) on delete set null,
+			created_at timestamptz not null default now(),
+			started_at timestamptz,
+			finished_at timestamptz,
+			updated_at timestamptz not null default now(),
+			check(cardinality(level_thresholds)=cardinality(role_ids)),
+			check((status='processing' and locked_by<>'' and lease_expires_at is not null)
+				or (status<>'processing' and locked_by='' and lease_expires_at is null))
+		)`,
+		`create index idx_level_recalculation_jobs_ready
+			on level_recalculation_jobs(next_attempt_at,id)
+			where status='queued' and attempts<max_attempts`,
+		`create index idx_level_recalculation_jobs_lease
+			on level_recalculation_jobs(lease_expires_at,id)
+			where status='processing'`,
+		`create unique index idx_level_recalculation_jobs_active
+			on level_recalculation_jobs((true))
+			where status in ('queued','processing')`,
 		`create table if not exists task_definitions (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),

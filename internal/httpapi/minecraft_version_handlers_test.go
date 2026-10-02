@@ -104,7 +104,7 @@ func TestFailedLoaderSyncPreservesPreviousVersions(t *testing.T) {
 	sources := []minecraftLoaderVersionSource{{code: "Forge", primaryURL: forgeMavenMetadataURL}, {code: "Fabric", primaryURL: fabricGameVersionsURL}}
 	results := map[string]minecraftLoaderVersionResult{
 		"forge":  {source: sources[0], err: errors.New("temporary source failure")},
-		"fabric": {source: sources[1], versions: []string{"1.21.1"}, sourceURL: fabricGameVersionsURL},
+		"fabric": {source: sources[1], versions: []string{"1.21.1"}, sourceURLs: []string{fabricGameVersionsURL}},
 	}
 	applyMinecraftLoaderVersionResults(&config, sources, results)
 	if !reflect.DeepEqual(config.Loaders[0].Versions, []string{"1.20.1"}) {

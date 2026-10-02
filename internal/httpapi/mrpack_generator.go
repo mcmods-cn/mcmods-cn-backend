@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"path"
 	"regexp"
 	"sort"
 	"strings"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 const modrinthIndexName = "modrinth.index.json"
@@ -53,9 +55,10 @@ type mrpackBuildInput struct {
 }
 
 type mrpackBuildResult struct {
-	Data   []byte
-	SHA256 string
-	Size   int64
+	Data           []byte
+	SHA256         string
+	Size           int64
+	IndexFileCount int
 }
 
 func buildMRPack(input mrpackBuildInput) (mrpackBuildResult, error) {
@@ -77,16 +80,20 @@ func buildMRPack(input mrpackBuildInput) (mrpackBuildResult, error) {
 	if len(input.Files) == 0 {
 		return mrpackBuildResult{}, errors.New("mrpack must contain at least one compatible file")
 	}
-	seenPaths := make(map[string]struct{}, len(input.Files))
+	seenPaths := make(map[string]string, len(input.Files))
 	files := append([]mrpackFile(nil), input.Files...)
 	for index := range files {
 		if err = validateMRPackFile(&files[index]); err != nil {
 			return mrpackBuildResult{}, fmt.Errorf("file %d: %w", index+1, err)
 		}
-		if _, exists := seenPaths[files[index].Path]; exists {
-			return mrpackBuildResult{}, fmt.Errorf("duplicate file path %q", files[index].Path)
+		portablePath, pathErr := portableMRPackFilePathKey(files[index].Path)
+		if pathErr != nil {
+			return mrpackBuildResult{}, fmt.Errorf("file %d portable path: %w", index+1, pathErr)
 		}
-		seenPaths[files[index].Path] = struct{}{}
+		if existing, exists := seenPaths[portablePath]; exists {
+			return mrpackBuildResult{}, fmt.Errorf("portable file path collision between %q and %q", existing, files[index].Path)
+		}
+		seenPaths[portablePath] = files[index].Path
 	}
 	sort.SliceStable(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	index := mrpackIndex{
@@ -120,7 +127,10 @@ func buildMRPack(input mrpackBuildInput) (mrpackBuildResult, error) {
 		return mrpackBuildResult{}, err
 	}
 	digest := sha256.Sum256(buffer.Bytes())
-	return mrpackBuildResult{Data: buffer.Bytes(), SHA256: hex.EncodeToString(digest[:]), Size: int64(buffer.Len())}, nil
+	return mrpackBuildResult{
+		Data: buffer.Bytes(), SHA256: hex.EncodeToString(digest[:]), Size: int64(buffer.Len()),
+		IndexFileCount: len(index.Files),
+	}, nil
 }
 
 func mrpackLoaderDependencyKey(loader string) (string, error) {
@@ -137,13 +147,10 @@ func mrpackLoaderDependencyKey(loader string) (string, error) {
 }
 
 func validateMRPackFile(file *mrpackFile) error {
-	file.Path = strings.TrimSpace(strings.ReplaceAll(file.Path, "\\", "/"))
-	if !strings.HasPrefix(file.Path, "mods/") || path.Clean(file.Path) != file.Path || strings.Contains(file.Path, "../") {
-		return errors.New("file path must be a clean relative mods/ path")
-	}
-	name := strings.TrimPrefix(file.Path, "mods/")
-	if name == "" || strings.Contains(name, "/") || len(name) > 180 || !safeMRPackFileName.MatchString(name) {
-		return errors.New("unsafe or non-JAR file name")
+	var err error
+	file.Path, err = normalizeMRPackFilePath(file.Path)
+	if err != nil {
+		return err
 	}
 	if file.FileSize <= 0 {
 		return errors.New("fileSize must be a positive byte count")
@@ -157,16 +164,37 @@ func validateMRPackFile(file *mrpackFile) error {
 	if len(file.Downloads) == 0 {
 		return errors.New("an HTTPS Modrinth download is required")
 	}
-	for _, download := range file.Downloads {
-		parsed, err := url.Parse(download)
-		if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "cdn.modrinth.com") {
-			return errors.New("download must use the official Modrinth CDN over HTTPS")
-		}
+	if _, _, ok := consistentModrinthDownloadIdentity(file.Downloads); !ok {
+		return errors.New("downloads must use one consistent official Modrinth CDN identity over HTTPS")
 	}
 	if !validMRPackEnvironment(file.Env.Client) || !validMRPackEnvironment(file.Env.Server) {
 		return errors.New("invalid client or server environment")
 	}
 	return nil
+}
+
+func normalizeMRPackFilePath(value string) (string, error) {
+	value = norm.NFC.String(strings.TrimSpace(strings.ReplaceAll(value, "\\", "/")))
+	if !strings.HasPrefix(value, "mods/") || path.Clean(value) != value || strings.Contains(value, "../") {
+		return "", errors.New("file path must be a clean relative mods/ path")
+	}
+	name := strings.TrimPrefix(value, "mods/")
+	if name == "" || strings.Contains(name, "/") || len(name) > 180 || !safeMRPackFileName.MatchString(name) {
+		return "", errors.New("unsafe or non-JAR file name")
+	}
+	return value, nil
+}
+
+func portableMRPackFilePathKey(value string) (string, error) {
+	normalized, err := normalizeMRPackFilePath(value)
+	if err != nil {
+		return "", err
+	}
+	compatible, err := normalizeMRPackFilePath(norm.NFKC.String(normalized))
+	if err != nil {
+		return "", fmt.Errorf("Unicode compatibility normalization is unsafe: %w", err)
+	}
+	return norm.NFKC.String(cases.Fold().String(compatible)), nil
 }
 
 func validHexDigest(value string, length int) bool {

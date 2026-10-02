@@ -64,7 +64,7 @@ func TestInsertMinecraftServerUnresolvedModIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	unresolvedModIDs := []string{"unrecorded_test_mod", "another_unrecorded_test_mod"}
-	if err = insertMinecraftServerMods(ctx, tx, serverID, []createServerModRequest{
+	if err = insertMinecraftServerMods(ctx, tx, serverID, []trustedServerModEvidence{
 		{ID: unresolvedModIDs[0], Source: "configuration", Confidence: "inferred"},
 		{ID: unresolvedModIDs[1], Source: "manual", Confidence: "declared"},
 		{ID: resolvedModID, Source: "manual", Confidence: "declared"},
@@ -103,6 +103,12 @@ func TestInsertMinecraftServerUnresolvedModIntegration(t *testing.T) {
 		if mod.Resolved || mod.ModPublicID != "" || mod.ModID != "" {
 			t.Fatalf("unresolved server mod returned resolved fields: %#v", mod)
 		}
+		if mod.ID == unresolvedModIDs[0] && (mod.Source != "configuration" || mod.Confidence != "inferred") {
+			t.Fatalf("trusted probe evidence was not persisted: %#v", mod)
+		}
+		if mod.ID == unresolvedModIDs[1] && (mod.Source != "manual" || mod.Confidence != "declared") {
+			t.Fatalf("manual declaration provenance is incorrect: %#v", mod)
+		}
 		seen[mod.ID] = true
 	}
 	for _, modID := range unresolvedModIDs {
@@ -112,5 +118,39 @@ func TestInsertMinecraftServerUnresolvedModIntegration(t *testing.T) {
 	}
 	if !seen[resolvedModID] {
 		t.Fatalf("server detail omitted resolved mod %q", resolvedModID)
+	}
+
+	declarations := []createServerModRequest{
+		{ID: unresolvedModIDs[0], Version: "client-version"},
+		{ID: unresolvedModIDs[1]},
+		{ID: "new_client_declared_mod"},
+	}
+	if err = replaceMinecraftServerDeclarations(ctx, tx, serverID, declarations); err != nil {
+		t.Fatal(err)
+	}
+	var selectedEvidenceCount int
+	if err = tx.QueryRow(ctx, `select count(*) from minecraft_server_mod_evidence evidence
+		join minecraft_server_mods server_mod on server_mod.id=evidence.server_mod_id
+		where server_mod.server_id=$1 and server_mod.raw_mod_id=$2`, serverID, unresolvedModIDs[0]).Scan(&selectedEvidenceCount); err != nil {
+		t.Fatal(err)
+	}
+	if selectedEvidenceCount != 2 {
+		t.Fatalf("selected mod retained %d independent evidence records, want machine and manual", selectedEvidenceCount)
+	}
+	updated, err := readMinecraftServerMods(ctx, tx, serverPublicID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedByID := make(map[string]minecraftServerMod, len(updated))
+	for _, mod := range updated {
+		updatedByID[mod.ID] = mod
+	}
+	if mod := updatedByID[unresolvedModIDs[0]]; mod.Source != "configuration" || mod.Confidence != "inferred" || mod.Version != "client-version" {
+		t.Fatalf("selected trusted evidence was not preserved across update: %#v", mod)
+	}
+	for _, modID := range []string{unresolvedModIDs[1], "new_client_declared_mod"} {
+		if mod := updatedByID[modID]; mod.Source != "manual" || mod.Confidence != "declared" {
+			t.Fatalf("client declaration %q acquired trusted evidence: %#v", modID, mod)
+		}
 	}
 }

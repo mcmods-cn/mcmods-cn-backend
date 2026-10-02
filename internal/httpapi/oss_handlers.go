@@ -4,22 +4,12 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/binary"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"image"
-	"image/gif"
-	"image/jpeg"
-	"image/png"
 	"io"
+	"log"
 	"mime"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -28,10 +18,10 @@ import (
 	"time"
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
-	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
 	"github.com/jackc/pgx/v5"
-	xwebp "golang.org/x/image/webp"
 )
+
+var errOSSConfigurationUnavailable = errors.New("OSS configuration is unavailable")
 
 const maxOSSUploadBytes = 2 << 30
 
@@ -41,13 +31,13 @@ const (
 )
 
 const (
-	ossDownloadModePresigned        = "oss_presigned"
-	ossDownloadModeESAPrivateOrigin = "esa_private_origin"
-	ossProjectIntroCategory         = "project/intro"
-	ossProjectDownloadCategory      = "project/download"
-	ossModExportScopePrefix         = "mod_export:"
-	ossModCatalogScopePrefix        = "mod_catalog:"
-	ossProjectDownloadScopePrefix   = "project_download:"
+	ossDownloadModePresigned      = "oss_presigned"
+	maxOSSDownloadURLTTLMinutes   = 60
+	ossProjectIntroCategory       = "project/intro"
+	ossProjectDownloadCategory    = "project/download"
+	ossModExportScopePrefix       = "mod_export:"
+	ossModCatalogScopePrefix      = "mod_catalog:"
+	ossProjectDownloadScopePrefix = "project_download:"
 )
 
 var defaultOSSAllowedExtensions = []string{
@@ -94,7 +84,6 @@ type ossDirectUploadRequest struct {
 	ProjectUniqueID string `json:"projectUniqueId"`
 	ProjectType     string `json:"projectType"`
 	ContentPublicID string `json:"contentPublicId"`
-	PreferMultipart bool   `json:"preferMultipart"`
 	ExpiresMinutes  int    `json:"expiresMinutes"`
 }
 
@@ -136,8 +125,8 @@ func (s *Server) updateOSSConfig(w http.ResponseWriter, r *http.Request) {
 	if payload.DownloadURLTTLMinutes <= 0 {
 		payload.DownloadURLTTLMinutes = 10
 	}
-	if payload.DownloadURLTTLMinutes > 10080 {
-		payload.DownloadURLTTLMinutes = 10080
+	if payload.DownloadURLTTLMinutes > maxOSSDownloadURLTTLMinutes {
+		payload.DownloadURLTTLMinutes = maxOSSDownloadURLTTLMinutes
 	}
 
 	current := s.ossConfigFromSettings(r.Context())
@@ -213,6 +202,10 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	}
 	ext := strings.ToLower(filepath.Ext(req.OriginalName))
 	blueprintUpload := scope == "user" && isBlueprintExtension(ext)
+	if blueprintUpload && (req.SizeBytes <= 0 || req.SizeBytes > maxBlueprintSourceBytes) {
+		writeAPIError(w, http.StatusRequestEntityTooLarge, "BLUEPRINT_SOURCE_SIZE_LIMIT", "blueprint source exceeds the processing size limit", 0, nil)
+		return
+	}
 	modExportUniqueID := strings.TrimPrefix(scope, ossModExportScopePrefix)
 	isModExport := modExportUniqueID != scope && modExportUniqueID != ""
 	modCatalogUniqueID := strings.TrimPrefix(scope, ossModCatalogScopePrefix)
@@ -223,7 +216,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "举报附件类型不支持或超过 25MB")
 		return
 	}
-	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && ext != ".jar") || (!isReportEvidence && !isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
+	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && !projectFileExtensionAllowed(projectDownloadType, ext)) || (!isReportEvidence && !isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -274,7 +267,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		}
 	} else if isModExport {
 		category = ossModImportCategory(modExportUniqueID, "mcmods-exporter", "packages")
-		objectCategory = category
+		objectCategory = ossOwnerObjectCategory(category, currentClaims(r).Subject)
 		objectPrefix = ossRoot(cfg.Prefix)
 	} else if isModCatalog {
 		category = ossModImportCategory(modCatalogUniqueID, source, "catalog")
@@ -282,7 +275,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		objectPrefix = ossRoot(cfg.Prefix)
 	} else if isProjectDownload {
 		category = ossProjectReleaseCategory(projectDownloadType, projectDownloadID)
-		objectCategory = category
+		objectCategory = ossOwnerObjectCategory(category, currentClaims(r).Subject)
 		objectPrefix = ossRoot(cfg.Prefix)
 	} else if isReportEvidence {
 		category = path.Join("moderation", "report-evidence", strconv.FormatInt(currentClaims(r).Subject, 10))
@@ -307,7 +300,12 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		contentType = "application/octet-stream"
 	}
 	if blueprintUpload {
-		if blueprint := s.reusableBlueprintByHash(r.Context(), req.SHA256, req.SizeBytes, currentClaims(r).Subject); blueprint != nil {
+		blueprint, reuseErr := s.reusableBlueprintByHash(r.Context(), req.SHA256, req.SizeBytes, currentClaims(r).Subject)
+		if reuseErr != nil {
+			writeError(w, http.StatusInternalServerError, "读取可复用蓝图失败")
+			return
+		}
+		if blueprint != nil {
 			writeJSON(w, http.StatusOK, map[string]any{
 				"uploadRequired": false,
 				"blueprint":      blueprint,
@@ -334,7 +332,11 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 			uploaderID := currentClaims(r).Subject
 			lookup.UploaderID = &uploaderID
 		}
-		existing, exists = s.findExistingOSSFileByHashExact(r.Context(), req.SHA256, req.SizeBytes, lookup)
+		existing, exists, err = s.findExistingOSSFileByHashExact(r.Context(), req.SHA256, req.SizeBytes, lookup)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "读取可复用 OSS 文件失败")
+			return
+		}
 	}
 	var existingInternalID int64
 	if exists && (blueprintUpload || coverBlueprintID > 0) {
@@ -381,7 +383,12 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 			"storageUrl":     ossStoredObjectURL(cfg, objectKey),
 		}
 		if blueprintUpload {
-			if blueprint := s.blueprintForExistingFile(r.Context(), existingInternalID, currentClaims(r).Subject); blueprint != nil {
+			blueprint, blueprintErr := s.blueprintForExistingFile(r.Context(), existingInternalID, currentClaims(r).Subject)
+			if blueprintErr != nil {
+				writeBlueprintUploadAssociationError(w, blueprintErr, "failed to register blueprint processing task")
+				return
+			}
+			if blueprint != nil {
 				response["blueprint"] = blueprint
 				response["blueprintId"] = blueprint["id"]
 			}
@@ -392,18 +399,33 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusOK, response)
 		return
 	}
+	var quotaLimits ossUserQuotaLimits
+	deferStoredSizeCheck := false
 	if scope == "user" {
-		deferStoredSizeCheck := shouldPersistMarkdownImageAsWebP(req.OriginalName, contentType, source, category) ||
-			isModResourceRenderUploadSource(source)
-		if err := s.enforceUserFileUploadLimits(r, req.SizeBytes, deferStoredSizeCheck); err != nil {
-			writeError(w, http.StatusForbidden, err.Error())
+		quotaLimits, err = ossUserQuotaLimitsForRequest(r)
+		if err == nil {
+			err = quotaLimits.validateSingle(req.SizeBytes)
+		}
+		if err != nil {
+			writeOSSUserQuotaError(w, err)
 			return
 		}
+		deferStoredSizeCheck = shouldPersistMarkdownImageAsWebP(req.OriginalName, contentType, source, category) ||
+			isModResourceRenderUploadSource(source)
 	}
+	expiresMinutes := req.ExpiresMinutes
+	if expiresMinutes <= 0 {
+		expiresMinutes = 10
+	}
+	if expiresMinutes > 60 {
+		expiresMinutes = 60
+	}
+	expires := time.Duration(expiresMinutes) * time.Minute
+	uploadExpiresAt := time.Now().Add(expires)
 	blueprintID := int64(0)
 	blueprintPublicID := ""
 	if blueprintUpload {
-		blueprintID, blueprintPublicID, err = s.createPendingBlueprint(r.Context(), currentClaims(r).Subject, req.OriginalName)
+		blueprintID, blueprintPublicID, err = s.createPendingBlueprint(r.Context(), currentClaims(r).Subject, req.OriginalName, uploadExpiresAt)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "创建蓝图记录失败")
 			return
@@ -414,31 +436,80 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	}
 	objectKey := buildOSSObjectKeyForFile(objectPrefix, objectCategory, req.OriginalName)
 	if blueprintID > 0 {
-		_, _ = s.db.Exec(r.Context(), `update blueprints set original_object_key=$2,updated_at=now() where id=$1`, blueprintID, objectKey)
+		command, updateErr := s.db.Exec(r.Context(), `update blueprints set original_object_key=$2,updated_at=now() where id=$1 and status='uploading'`, blueprintID, objectKey)
+		if updateErr != nil || command.RowsAffected() != 1 {
+			if discardErr := s.discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, blueprintID, ""); discardErr != nil {
+				log.Printf("discard blueprint upload %d after object-key persistence failure: %v", blueprintID, discardErr)
+			}
+			writeError(w, http.StatusInternalServerError, "保存蓝图上传会话失败")
+			return
+		}
 	}
 	_ = coverBlueprintID
-	expiresMinutes := req.ExpiresMinutes
-	if expiresMinutes <= 0 {
-		expiresMinutes = 10
+	quotaReservationObjectKey := ""
+	if scope == "user" {
+		storedReservation := req.SizeBytes
+		if deferStoredSizeCheck {
+			storedReservation = 0
+		}
+		if err = s.reserveUserOSSUploadQuota(r.Context(), currentClaims(r).Subject, objectKey,
+			req.SizeBytes, storedReservation, uploadExpiresAt, quotaLimits); err != nil {
+			if blueprintID > 0 {
+				if discardErr := s.discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, blueprintID, ""); discardErr != nil {
+					log.Printf("discard blueprint upload %d after quota rejection: %v", blueprintID, discardErr)
+				}
+			}
+			writeOSSUserQuotaError(w, err)
+			return
+		}
+		quotaReservationObjectKey = objectKey
 	}
-	if expiresMinutes > 60 {
-		expiresMinutes = 60
+	releaseQuotaReservation := func() {
+		if quotaReservationObjectKey == "" {
+			return
+		}
+		if releaseErr := s.releaseUserOSSUploadQuotaReservation(r.Context(), currentClaims(r).Subject, quotaReservationObjectKey); releaseErr != nil {
+			log.Printf("release OSS upload quota reservation for %s: %v", quotaReservationObjectKey, releaseErr)
+		}
 	}
-	expires := time.Duration(expiresMinutes) * time.Minute
-	if shouldUseOSSMultipart(req.PreferMultipart, req.SizeBytes) {
+	if shouldUseOSSMultipart(req.SizeBytes) {
 		multipart, multipartErr := s.initiateOSSMultipartUpload(
 			r.Context(), client, cfg, objectKey, contentType, req.SHA256, req.SizeBytes, expires,
 		)
 		if multipartErr != nil {
+			releaseQuotaReservation()
+			if blueprintID > 0 {
+				if discardErr := s.discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, blueprintID, ""); discardErr != nil {
+					log.Printf("discard blueprint upload %d after multipart initialization failure: %v", blueprintID, discardErr)
+				}
+			}
 			s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, objectKey, req.OriginalName, req.SizeBytes, s.requestClientLocation(r).IP, r.UserAgent(), "failed", multipartErr.Error())
 			writeError(w, http.StatusBadGateway, "生成 OSS 分片上传请求失败")
+			return
+		}
+		sessionRequest := req
+		sessionRequest.ContentType = contentType
+		sessionRequest.Category = category
+		sessionRequest.Source = source
+		if multipartErr = s.registerOSSMultipartSession(r.Context(), currentClaims(r).Subject, cfg, sessionRequest,
+			objectKey, multipart.UploadID, uploadExpiresAt); multipartErr != nil {
+			abortErr := abortOSSMultipartUpload(r.Context(), client, cfg, objectKey, multipart.UploadID)
+			releaseQuotaReservation()
+			if blueprintID > 0 {
+				if discardErr := s.discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, blueprintID, ""); discardErr != nil {
+					log.Printf("discard blueprint upload %d after multipart session persistence failure: %v", blueprintID, discardErr)
+				}
+			}
+			s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, objectKey, req.OriginalName, req.SizeBytes,
+				s.requestClientLocation(r).IP, r.UserAgent(), "failed", errors.Join(multipartErr, abortErr).Error())
+			writeError(w, http.StatusInternalServerError, "保存 OSS 分片上传会话失败")
 			return
 		}
 		response := map[string]any{
 			"method": "MULTIPART", "multipart": multipart,
 			"bucket": cfg.Bucket, "objectKey": objectKey, "category": category, "source": source,
 			"originalName": req.OriginalName, "contentType": contentType, "sizeBytes": req.SizeBytes,
-			"sha256": req.SHA256, "uploadRequired": true, "expiresAt": time.Now().Add(expires),
+			"sha256": req.SHA256, "uploadRequired": true, "expiresAt": uploadExpiresAt,
 			"storageUrl": ossStoredObjectURL(cfg, objectKey),
 		}
 		if blueprintPublicID != "" {
@@ -460,6 +531,12 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		aliyunoss.PresignExpires(expires),
 	)
 	if err != nil {
+		releaseQuotaReservation()
+		if blueprintID > 0 {
+			if discardErr := s.discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, blueprintID, ""); discardErr != nil {
+				log.Printf("discard blueprint upload %d after presign failure: %v", blueprintID, discardErr)
+			}
+		}
 		s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, objectKey, req.OriginalName, req.SizeBytes, s.requestClientLocation(r).IP, r.UserAgent(), "failed", err.Error())
 		writeError(w, http.StatusBadGateway, "生成 OSS 上传链接失败")
 		return
@@ -477,7 +554,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		"sizeBytes":      req.SizeBytes,
 		"sha256":         req.SHA256,
 		"uploadRequired": true,
-		"expiresAt":      time.Now().Add(expires),
+		"expiresAt":      uploadExpiresAt,
 		"storageUrl":     ossStoredObjectURL(cfg, objectKey),
 	}
 	if blueprintPublicID != "" {
@@ -550,7 +627,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadRequest, "举报附件类型不支持或超过 25MB")
 		return
 	}
-	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && ext != ".jar") || (!isReportEvidence && !isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
+	if (isModExport && ext != ".zip") || (isModCatalog && ext != ".json") || (isProjectDownload && !projectFileExtensionAllowed(projectDownloadType, ext)) || (!isReportEvidence && !isModExport && !isModCatalog && !isProjectDownload && !allowedUploadExtension(ext, cfg.AllowedExtensions)) {
 		writeError(w, http.StatusBadRequest, "当前文件类型不允许上传")
 		return
 	}
@@ -595,7 +672,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		req.Category = catalogCategory
 	} else if isProjectDownload {
 		downloadCategory := ossProjectReleaseCategory(projectDownloadType, projectDownloadID)
-		downloadPrefix := ossObjectPrefix(cfg.Prefix, downloadCategory)
+		downloadPrefix := ossObjectPrefix(cfg.Prefix, ossOwnerObjectCategory(downloadCategory, currentClaims(r).Subject))
 		if !isAllowedObjectKey(req.ObjectKey, downloadPrefix) {
 			writeError(w, http.StatusBadRequest, "OSS ObjectKey does not belong to this project download directory")
 			return
@@ -618,9 +695,31 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		}
 	}
 	if req.MultipartUploadID != "" && req.MultipartAction == "abort" {
-		if abortErr := abortOSSMultipartUpload(r.Context(), client, cfg, req.ObjectKey, req.MultipartUploadID); abortErr != nil {
+		settlement, settlementErr := s.beginOSSMultipartSettlement(r.Context(), currentClaims(r).Subject, cfg, req, "abort")
+		if writeOSSMultipartSettlementError(w, settlementErr) {
+			return
+		}
+		var abortErr error
+		if !settlement.Already {
+			abortErr = abortOSSMultipartUpload(r.Context(), client, cfg, req.ObjectKey, req.MultipartUploadID)
+		}
+		if settlementErr = s.finishOSSMultipartSettlement(r.Context(), settlement, "abort", abortErr); settlementErr != nil {
+			writeError(w, http.StatusInternalServerError, "保存 OSS 分片取消状态失败")
+			return
+		}
+		if abortErr != nil {
 			writeError(w, http.StatusBadGateway, "取消 OSS 分片上传失败")
 			return
+		}
+		if scope == "user" {
+			if releaseErr := s.releaseUserOSSUploadQuotaReservation(r.Context(), currentClaims(r).Subject, req.ObjectKey); releaseErr != nil {
+				writeError(w, http.StatusInternalServerError, "释放上传额度预留失败")
+				return
+			}
+			if discardErr := s.discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, 0, req.ObjectKey); discardErr != nil {
+				writeError(w, http.StatusInternalServerError, "清理已取消的蓝图上传失败")
+				return
+			}
 		}
 		s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, req.ObjectKey, req.OriginalName, req.SizeBytes, s.requestClientLocation(r).IP, r.UserAgent(), "cancelled", "multipart upload aborted")
 		writeJSON(w, http.StatusOK, map[string]any{"aborted": true})
@@ -628,48 +727,85 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	}
 	if isReportEvidence {
 		var evidenceID, scanStatus string
-		if s.db.QueryRow(r.Context(), `select public_id,scan_status from report_evidence where uploader_id=$1 and object_key=$2 and status='temporary'`,
-			currentClaims(r).Subject, req.ObjectKey).Scan(&evidenceID, &scanStatus) == nil {
+		err = s.db.QueryRow(r.Context(), `select public_id,scan_status from report_evidence
+			where uploader_id=$1 and object_key=$2 and sha256=$3 and ($4::bigint<=0 or byte_size=$4) and status='temporary'`,
+			currentClaims(r).Subject, req.ObjectKey, req.SHA256, req.SizeBytes).Scan(&evidenceID, &scanStatus)
+		if err == nil {
 			writeJSON(w, http.StatusOK, map[string]any{"id": evidenceID, "evidenceId": evidenceID, "scanStatus": scanStatus, "idempotent": true})
+			return
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "读取已登记举报附件失败")
 			return
 		}
 	}
 	if !isReportEvidence {
-		if existingFileID, existing, found := s.findCompletedOSSUpload(r.Context(), currentClaims(r).Subject, req); found {
+		existingFileID, existing, found, lookupErr := s.findCompletedOSSUpload(r.Context(), currentClaims(r).Subject, req)
+		if lookupErr != nil {
+			writeError(w, http.StatusInternalServerError, "读取已完成 OSS 上传失败")
+			return
+		}
+		if found {
+			if scope == "user" {
+				if releaseErr := s.releaseUserOSSUploadQuotaReservation(r.Context(), currentClaims(r).Subject, req.ObjectKey); releaseErr != nil {
+					writeError(w, http.StatusInternalServerError, "释放已完成上传额度预留失败")
+					return
+				}
+			}
 			response, responseErr := s.completedOSSUploadResponse(r.Context(), cfg, existing)
 			if responseErr != nil {
 				writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
 				return
 			}
 			if err := s.attachCompletedOSSUploadAssociations(r.Context(), response, existingFileID, currentClaims(r).Subject, req.Source); err != nil {
-				writeError(w, http.StatusInternalServerError, "恢复已完成上传的关联数据失败")
+				writeBlueprintUploadAssociationError(w, err, "failed to restore completed upload associations")
 				return
 			}
 			writeJSON(w, http.StatusOK, response)
 			return
 		}
 	}
+	var head *aliyunoss.HeadObjectResult
 	if req.MultipartUploadID != "" {
 		if req.MultipartAction != "" && req.MultipartAction != "complete" {
 			writeError(w, http.StatusBadRequest, "OSS 分片上传操作不合法")
 			return
 		}
-		if completeErr := completeOSSMultipartUpload(r.Context(), client, cfg, req.ObjectKey, req.MultipartUploadID); completeErr != nil {
+		settlement, settlementErr := s.beginOSSMultipartSettlement(r.Context(), currentClaims(r).Subject, cfg, req, "complete")
+		if writeOSSMultipartSettlementError(w, settlementErr) {
+			return
+		}
+		var completeErr error
+		if !settlement.Already {
+			completeErr = completeOSSMultipartUpload(r.Context(), client, cfg, req.ObjectKey, req.MultipartUploadID)
+			if completeErr == nil {
+				head, completeErr = verifyCompletedOSSMultipartObject(
+					r.Context(), client, cfg, req.ObjectKey, req.SizeBytes, req.SHA256,
+				)
+			}
+		}
+		if settlementErr = s.finishOSSMultipartSettlement(r.Context(), settlement, "complete", completeErr); settlementErr != nil {
+			writeError(w, http.StatusInternalServerError, "保存 OSS 分片完成状态失败")
+			return
+		}
+		if completeErr != nil {
 			writeError(w, http.StatusBadGateway, "合并 OSS 分片失败")
 			return
 		}
 	}
-	head, err := client.HeadObject(
-		r.Context(),
-		&aliyunoss.HeadObjectRequest{
-			Bucket: aliyunoss.Ptr(cfg.Bucket),
-			Key:    aliyunoss.Ptr(req.ObjectKey),
-		},
-	)
-	if err != nil {
-		s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, req.ObjectKey, req.OriginalName, req.SizeBytes, s.requestClientLocation(r).IP, r.UserAgent(), "failed", err.Error())
-		writeError(w, http.StatusBadGateway, "确认 OSS 文件失败")
-		return
+	if head == nil {
+		head, err = client.HeadObject(
+			r.Context(),
+			&aliyunoss.HeadObjectRequest{
+				Bucket: aliyunoss.Ptr(cfg.Bucket),
+				Key:    aliyunoss.Ptr(req.ObjectKey),
+			},
+		)
+		if err != nil {
+			s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, req.ObjectKey, req.OriginalName, req.SizeBytes, s.requestClientLocation(r).IP, r.UserAgent(), "failed", err.Error())
+			writeError(w, http.StatusBadGateway, "确认 OSS 文件失败")
+			return
+		}
 	}
 	if req.SizeBytes > 0 && head.ContentLength != req.SizeBytes {
 		writeError(w, http.StatusBadRequest, "OSS 文件大小与上传记录不一致")
@@ -689,7 +825,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	sourceSize := size
 	if isReportEvidence {
 		if inspectErr := validateReportEvidenceObject(r.Context(), client, cfg, req.ObjectKey, req.OriginalName, contentType, size); inspectErr != nil {
-			s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, req.ObjectKey)
+			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, req.ObjectKey, "report-evidence-validation-failed")
 			writeError(w, http.StatusUnprocessableEntity, inspectErr.Error())
 			return
 		}
@@ -697,11 +833,11 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	converted := false
 	imageProcessLog := ""
 	if isModResourceRenderUploadSource(req.Source) {
-		resizedObject, resized, resizeErr := persistOversizedModResourceRender(
+		resizedObject, resized, resizeErr := s.persistOversizedModResourceRender(
 			r.Context(), client, cfg, req.ObjectKey, contentType, size, req.SHA256,
 		)
 		if resizeErr != nil {
-			s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, req.ObjectKey)
+			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, req.ObjectKey, "mod-resource-render-failed")
 			s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, req.ObjectKey, req.OriginalName, size, s.requestClientLocation(r).IP, r.UserAgent(), "failed", resizeErr.Error())
 			writeError(w, http.StatusBadGateway, imageProcessErrorMessage(resizeErr))
 			return
@@ -715,9 +851,9 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		}
 	}
 	if shouldPersistMarkdownImageAsWebP(req.OriginalName, contentType, req.Source, req.Category) {
-		convertedObject, conversionErr := persistImageAsWebP(r.Context(), client, cfg, req.ObjectKey, req.OriginalName)
+		convertedObject, conversionErr := s.persistImageAsWebP(r.Context(), client, cfg, req.ObjectKey, req.OriginalName)
 		if conversionErr != nil {
-			s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, req.ObjectKey)
+			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, req.ObjectKey, "markdown-webp-conversion-failed")
 			s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, req.ObjectKey, req.OriginalName, size, s.requestClientLocation(r).IP, r.UserAgent(), "failed", conversionErr.Error())
 			writeError(w, http.StatusBadGateway, imageProcessErrorMessage(conversionErr))
 			return
@@ -736,9 +872,9 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 			expectedRasterHash = ""
 		}
 		if inspectErr := validateOSSUploadedRaster(r.Context(), client, cfg, req.ObjectKey, contentType, size, expectedRasterHash, req.Source); inspectErr != nil {
-			s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, req.ObjectKey)
+			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, req.ObjectKey, "synchronous-raster-validation-failed")
 			if converted {
-				s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, sourceObjectKey)
+				s.deleteOSSObjectIfUnregistered(r.Context(), cfg, sourceObjectKey, "converted-source-validation-failed")
 			}
 			s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, req.ObjectKey, req.OriginalName, size, s.requestClientLocation(r).IP, r.UserAgent(), "failed", inspectErr.Error())
 			writeError(w, http.StatusUnprocessableEntity, "resource image content is invalid")
@@ -746,32 +882,54 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		}
 		scanStatus = "clean"
 	}
+	var quotaLimits ossUserQuotaLimits
 	if scope == "user" {
-		if err := s.enforceUserStoredFileLimit(r, size); err != nil {
-			if existingFileID, existing, found := s.findCompletedOSSUpload(r.Context(), currentClaims(r).Subject, req); found {
-				response, responseErr := s.completedOSSUploadResponse(r.Context(), cfg, existing)
-				if responseErr != nil {
-					writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
-					return
-				}
-				if associationErr := s.attachCompletedOSSUploadAssociations(r.Context(), response, existingFileID, currentClaims(r).Subject, req.Source); associationErr != nil {
-					writeError(w, http.StatusInternalServerError, "恢复已完成上传的关联数据失败")
-					return
-				}
-				writeJSON(w, http.StatusOK, response)
-				return
-			}
-			s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, req.ObjectKey)
+		quotaLimits, err = ossUserQuotaLimitsForRequest(r)
+		if err == nil {
+			err = quotaLimits.validateSingle(sourceSize)
+		}
+		if err != nil {
+			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, req.ObjectKey, "user-quota-validation-failed")
 			if converted {
-				s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, sourceObjectKey)
+				s.deleteOSSObjectIfUnregistered(r.Context(), cfg, sourceObjectKey, "converted-source-quota-failed")
 			}
-			writeError(w, http.StatusForbidden, err.Error())
+			writeOSSUserQuotaError(w, err)
 			return
 		}
 	}
 	var fileID int64
 	var filePublicID string
-	err = s.db.QueryRow(
+	var quotaTx pgx.Tx
+	var evidenceTx pgx.Tx
+	insertQueryRow := s.db.QueryRow
+	if scope == "user" {
+		quotaTx, err = s.db.Begin(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "开始上传额度结算失败")
+			return
+		}
+		defer quotaTx.Rollback(r.Context())
+		if err = settleUserOSSUploadQuotaTx(r.Context(), quotaTx, currentClaims(r).Subject, sourceObjectKey,
+			sourceSize, size, quotaLimits); err != nil {
+			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, req.ObjectKey, "user-quota-settlement-failed")
+			if converted {
+				s.deleteOSSObjectIfUnregistered(r.Context(), cfg, sourceObjectKey, "converted-source-settlement-failed")
+			}
+			writeOSSUserQuotaError(w, err)
+			return
+		}
+		insertQueryRow = quotaTx.QueryRow
+	}
+	if isReportEvidence {
+		evidenceTx, err = s.db.Begin(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "开始举报附件登记失败")
+			return
+		}
+		defer evidenceTx.Rollback(r.Context())
+		insertQueryRow = evidenceTx.QueryRow
+	}
+	err = insertQueryRow(
 		r.Context(),
 		`insert into oss_files (bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, uploader_id, status, scan_status)
 		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'active', $14)
@@ -793,14 +951,42 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		scanStatus,
 	).Scan(&fileID, &filePublicID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		if existingFileID, existing, found := s.findCompletedOSSUpload(r.Context(), currentClaims(r).Subject, req); found {
+		if quotaTx != nil {
+			_ = quotaTx.Rollback(r.Context())
+			if releaseErr := s.releaseUserOSSUploadQuotaReservation(r.Context(), currentClaims(r).Subject, sourceObjectKey); releaseErr != nil {
+				writeError(w, http.StatusInternalServerError, "释放重复上传额度预留失败")
+				return
+			}
+		}
+		if evidenceTx != nil {
+			_ = evidenceTx.Rollback(r.Context())
+		}
+		existingFileID, existing, found, lookupErr := s.findCompletedOSSUpload(r.Context(), currentClaims(r).Subject, req)
+		if lookupErr != nil {
+			writeError(w, http.StatusInternalServerError, "读取已完成 OSS 上传失败")
+			return
+		}
+		if found {
+			if isReportEvidence {
+				evidenceID, evidenceScanStatus, recoveryErr := s.restoreReportEvidenceForCompletedOSSFile(
+					r.Context(), existingFileID, currentClaims(r).Subject, req,
+				)
+				if recoveryErr != nil {
+					writeError(w, http.StatusInternalServerError, "恢复已完成举报附件失败")
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{
+					"id": evidenceID, "evidenceId": evidenceID, "scanStatus": evidenceScanStatus, "idempotent": true,
+				})
+				return
+			}
 			response, responseErr := s.completedOSSUploadResponse(r.Context(), cfg, existing)
 			if responseErr != nil {
 				writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
 				return
 			}
 			if associationErr := s.attachCompletedOSSUploadAssociations(r.Context(), response, existingFileID, currentClaims(r).Subject, req.Source); associationErr != nil {
-				writeError(w, http.StatusInternalServerError, "恢复已完成上传的关联数据失败")
+				writeBlueprintUploadAssociationError(w, associationErr, "failed to restore completed upload associations")
 				return
 			}
 			writeJSON(w, http.StatusOK, response)
@@ -809,40 +995,49 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	}
 	if err != nil {
 		if converted {
-			s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, req.ObjectKey)
-			s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, sourceObjectKey)
+			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, req.ObjectKey, "converted-file-registration-failed")
+			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, sourceObjectKey, "converted-source-registration-failed")
 		}
 		writeError(w, http.StatusInternalServerError, "保存 OSS 文件记录失败")
 		return
 	}
 	var reportEvidenceID string
 	if isReportEvidence {
-		if err = s.db.QueryRow(r.Context(), `insert into report_evidence(uploader_id,object_key,original_name,content_type,byte_size,sha256,scan_status)
+		if err = evidenceTx.QueryRow(r.Context(), `insert into report_evidence(uploader_id,object_key,original_name,content_type,byte_size,sha256,scan_status)
 			values($1,$2,$3,$4,$5,$6,$7) returning public_id`, currentClaims(r).Subject, req.ObjectKey, sourceOriginalName,
 			contentType, sourceSize, req.SHA256, scanStatus).Scan(&reportEvidenceID); err != nil {
+			_ = evidenceTx.Rollback(r.Context())
 			writeError(w, http.StatusInternalServerError, "登记举报附件失败")
+			return
+		}
+	}
+	if quotaTx != nil {
+		if err = quotaTx.Commit(r.Context()); err != nil {
+			if converted {
+				s.deleteOSSObjectIfUnregistered(r.Context(), cfg, req.ObjectKey, "converted-quota-commit-failed")
+				s.deleteOSSObjectIfUnregistered(r.Context(), cfg, sourceObjectKey, "converted-source-quota-commit-failed")
+			}
+			writeError(w, http.StatusInternalServerError, "提交 OSS 文件额度结算失败")
+			return
+		}
+	}
+	if evidenceTx != nil {
+		if err = evidenceTx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "提交举报附件登记失败")
 			return
 		}
 	}
 	logMessage := "direct-to-oss"
 	if converted {
 		logMessage = "direct-to-oss; " + imageProcessLog
-		s.deleteOSSObjectIfUnregistered(r.Context(), client, cfg, sourceObjectKey)
+		s.deleteOSSObjectIfUnregistered(r.Context(), cfg, sourceObjectKey, "converted-source-superseded")
 	}
 	s.insertOSSUploadLog(r.Context(), &fileID, currentClaims(r).Subject, req.ObjectKey, sourceOriginalName, sourceSize, s.requestClientLocation(r).IP, r.UserAgent(), "success", logMessage)
 	scanMessage := "等待接入文件查杀引擎"
 	if scanStatus == "clean" {
 		scanMessage = "上传时已完成同步图片字节校验"
 	}
-	_, _ = s.db.Exec(
-		r.Context(),
-		`insert into oss_scan_logs (file_id, object_key, engine, result, message)
-		 values ($1, $2, 'manual', $3, $4)`,
-		fileID,
-		req.ObjectKey,
-		scanStatus,
-		scanMessage,
-	)
+	s.recordOSSScanLog(r.Context(), fileID, req.ObjectKey, scanStatus, scanMessage)
 	access, accessErr := s.resolveOSSObjectAccessWithConfig(r.Context(), cfg, req.ObjectKey, ossObjectAccessOptions{})
 	if accessErr != nil {
 		writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
@@ -871,7 +1066,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		response["evidenceId"] = reportEvidenceID
 	}
 	if blueprint, blueprintErr := s.completeBlueprintUpload(r.Context(), fileID, currentClaims(r).Subject, req.ObjectKey, sourceOriginalName, contentType, size, req.SHA256); blueprintErr != nil {
-		writeError(w, http.StatusInternalServerError, "登记蓝图处理任务失败")
+		writeBlueprintUploadAssociationError(w, blueprintErr, "failed to register blueprint processing task")
 		return
 	} else if blueprint != nil {
 		response["blueprint"] = blueprint
@@ -978,9 +1173,9 @@ func validateReportEvidenceZIP(raw []byte) error {
 	return nil
 }
 
-func (s *Server) findCompletedOSSUpload(ctx context.Context, uploaderID int64, req ossCompleteUploadRequest) (int64, map[string]any, bool) {
+func (s *Server) findCompletedOSSUpload(ctx context.Context, uploaderID int64, req ossCompleteUploadRequest) (int64, map[string]any, bool, error) {
 	if uploaderID <= 0 || req.ObjectKey == "" || req.SHA256 == "" || req.Category == "" {
-		return 0, nil, false
+		return 0, nil, false, nil
 	}
 	objectKeys := []string{req.ObjectKey}
 	contentType := req.ContentType
@@ -1010,11 +1205,67 @@ func (s *Server) findCompletedOSSUpload(ctx context.Context, uploaderID int64, r
 	err := s.db.QueryRow(ctx, query, uploaderID, req.Category, req.Source, req.SHA256, objectKeys, req.SizeBytes).
 		Scan(&internalID, &publicID, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &sourceOriginalName,
 			&storedContentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil, false, nil
+	}
 	if err != nil {
-		return 0, nil, false
+		return 0, nil, false, fmt.Errorf("find completed OSS upload: %w", err)
 	}
 	return internalID, ossFileRecord(publicID, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName,
-		storedContentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt), true
+		storedContentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt), true, nil
+}
+
+func (s *Server) restoreReportEvidenceForCompletedOSSFile(
+	ctx context.Context,
+	fileID int64,
+	uploaderID int64,
+	req ossCompleteUploadRequest,
+) (string, string, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback(ctx)
+	var originalName, contentType, sha256, scanStatus string
+	var byteSize int64
+	err = tx.QueryRow(ctx, `select coalesce(nullif(source_original_name,''),original_name),content_type,
+			coalesce(nullif(source_size_bytes,0),size_bytes),sha256,scan_status
+		from oss_files
+		where id=$1 and uploader_id=$2 and object_key=$3 and category=$4 and source=$5 and sha256=$6
+		  and status='active' and ($7::bigint<=0 or coalesce(nullif(source_size_bytes,0),size_bytes)=$7)
+		for update`, fileID, uploaderID, req.ObjectKey, req.Category, "report_evidence", req.SHA256, req.SizeBytes).
+		Scan(&originalName, &contentType, &byteSize, &sha256, &scanStatus)
+	if err != nil {
+		return "", "", fmt.Errorf("lock completed report evidence OSS file: %w", err)
+	}
+	var evidenceID, evidenceOriginalName, evidenceContentType, evidenceSHA, evidenceScanStatus, evidenceStatus string
+	var evidenceUploaderID, evidenceByteSize int64
+	err = tx.QueryRow(ctx, `select public_id,uploader_id,original_name,content_type,byte_size,sha256,scan_status,status
+		from report_evidence where object_key=$1 for update`, req.ObjectKey).
+		Scan(&evidenceID, &evidenceUploaderID, &evidenceOriginalName, &evidenceContentType, &evidenceByteSize,
+			&evidenceSHA, &evidenceScanStatus, &evidenceStatus)
+	if err == nil {
+		if evidenceUploaderID != uploaderID || evidenceOriginalName != originalName || evidenceContentType != contentType ||
+			evidenceByteSize != byteSize || evidenceSHA != sha256 || evidenceScanStatus != scanStatus || evidenceStatus != "temporary" {
+			return "", "", errors.New("completed report evidence identity conflicts with its OSS file")
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return "", "", err
+		}
+		return evidenceID, evidenceScanStatus, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", "", fmt.Errorf("read completed report evidence: %w", err)
+	}
+	if err = tx.QueryRow(ctx, `insert into report_evidence(uploader_id,object_key,original_name,content_type,byte_size,sha256,scan_status)
+		values($1,$2,$3,$4,$5,$6,$7) returning public_id`, uploaderID, req.ObjectKey, originalName, contentType,
+		byteSize, sha256, scanStatus).Scan(&evidenceID); err != nil {
+		return "", "", fmt.Errorf("restore completed report evidence: %w", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return "", "", err
+	}
+	return evidenceID, scanStatus, nil
 }
 
 func (s *Server) completedOSSUploadResponse(ctx context.Context, cfg ossConfigPayload, file map[string]any) (map[string]any, error) {
@@ -1045,7 +1296,11 @@ func (s *Server) completedOSSUploadResponse(ctx context.Context, cfg ossConfigPa
 }
 
 func (s *Server) attachCompletedOSSUploadAssociations(ctx context.Context, response map[string]any, fileID, ownerID int64, source string) error {
-	if blueprint := s.blueprintForExistingFile(ctx, fileID, ownerID); blueprint != nil {
+	blueprint, err := s.blueprintForExistingFile(ctx, fileID, ownerID)
+	if err != nil {
+		return err
+	}
+	if blueprint != nil {
 		response["blueprint"] = blueprint
 		response["blueprintId"] = blueprint["id"]
 	}
@@ -1067,6 +1322,17 @@ func (s *Server) attachCompletedOSSUploadAssociations(ctx context.Context, respo
 		response["blueprintId"] = coverPublicID
 	}
 	return nil
+}
+
+func writeBlueprintUploadAssociationError(w http.ResponseWriter, err error, fallback string) {
+	switch {
+	case errors.Is(err, errBlueprintUserJobLimit):
+		writeAPIError(w, http.StatusTooManyRequests, "BLUEPRINT_JOB_CONCURRENCY_LIMIT", "too many blueprint jobs are already active", 60, nil)
+	case errors.Is(err, errBlueprintSourceTooLarge):
+		writeAPIError(w, http.StatusRequestEntityTooLarge, "BLUEPRINT_SOURCE_SIZE_LIMIT", "blueprint source exceeds the processing size limit", 0, nil)
+	default:
+		writeError(w, http.StatusInternalServerError, fallback)
+	}
 }
 
 func blueprintCoverPublicID(source string) (string, bool) {
@@ -1103,15 +1369,17 @@ func persistedModResourceRenderObjectKey(sourceObjectKey string) string {
 	return destinationObjectKey
 }
 
-func (s *Server) deleteOSSObjectIfUnregistered(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey string) {
+func (s *Server) deleteOSSObjectIfUnregistered(ctx context.Context, cfg ossConfigPayload, objectKey, reason string) error {
 	if strings.TrimSpace(objectKey) == "" {
-		return
+		return nil
 	}
-	var registered bool
-	if err := s.db.QueryRow(ctx, `select exists(select 1 from oss_files where object_key=$1)`, objectKey).Scan(&registered); err != nil || registered {
-		return
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	if err := s.enqueueUnregisteredOSSObjectDeletion(cleanupCtx, cfg, objectKey, reason); err != nil {
+		s.observeOSSWriteFailure("deletion_enqueue", objectKey, err)
+		return err
 	}
-	_, _ = client.DeleteObject(ctx, &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey)})
+	return nil
 }
 
 func imageProcessErrorMessage(err error) string {
@@ -1127,1231 +1395,4 @@ func imageProcessErrorMessage(err error) string {
 		}
 	}
 	return "OSS 图片处理失败"
-}
-
-func (s *Server) ossFiles(w http.ResponseWriter, r *http.Request) {
-	limit := boundedLimit(r.URL.Query().Get("limit"), 100, 500)
-	category := strings.TrimSpace(r.URL.Query().Get("category"))
-	prefix := strings.TrimSpace(r.URL.Query().Get("prefix"))
-	args := []any{}
-	where := []string{"1 = 1"}
-	if category != "" {
-		args = append(args, category)
-		where = append(where, fmt.Sprintf("category = $%d", len(args)))
-	}
-	if prefix != "" {
-		args = append(args, prefix+"%")
-		where = append(where, fmt.Sprintf("object_key like $%d", len(args)))
-	}
-	args = append(args, limit)
-	rows, err := s.db.Query(
-		r.Context(),
-		`select public_id, bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, status, scan_status, created_at, updated_at
-		 from oss_files
-		 where `+strings.Join(where, " and ")+`
-		 order by created_at desc
-		 limit $`+strconv.Itoa(len(args)),
-		args...,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取 OSS 文件目录失败")
-		return
-	}
-	defer rows.Close()
-
-	files := make([]map[string]any, 0)
-	for rows.Next() {
-		var size, sourceSize int64
-		var id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, sha, status, scanStatus string
-		var createdAt, updatedAt time.Time
-		if err := rows.Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &sourceOriginalName, &contentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "解析 OSS 文件目录失败")
-			return
-		}
-		files = append(files, ossFileRecord(id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt))
-	}
-	writeJSON(w, http.StatusOK, files)
-}
-
-func (s *Server) updateOSSFileScanStatus(w http.ResponseWriter, r *http.Request) {
-	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("publicId")))
-	if !validCatalogPublicID(publicID) {
-		writeError(w, http.StatusBadRequest, "无效的 OSS 文件 ID")
-		return
-	}
-	var request struct {
-		Status string `json:"status"`
-		Note   string `json:"note"`
-	}
-	if err := decodeJSON(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "无效的扫描状态")
-		return
-	}
-	request.Status = strings.ToLower(strings.TrimSpace(request.Status))
-	request.Note = strings.TrimSpace(request.Note)
-	if request.Status != "pending" && request.Status != "clean" && request.Status != "rejected" {
-		writeError(w, http.StatusBadRequest, "扫描状态必须是 pending、clean 或 rejected")
-		return
-	}
-	if len(request.Note) > 1000 {
-		writeError(w, http.StatusBadRequest, "扫描备注过长")
-		return
-	}
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "无法更新扫描状态")
-		return
-	}
-	defer tx.Rollback(r.Context())
-	var internalID int64
-	var previousStatus, previousFileStatus string
-	err = tx.QueryRow(r.Context(), `select id,scan_status,status from oss_files where public_id=$1 for update`, publicID).
-		Scan(&internalID, &previousStatus, &previousFileStatus)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "OSS 文件不存在")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "无法读取 OSS 文件")
-		return
-	}
-	if previousFileStatus == "deleted" {
-		writeError(w, http.StatusConflict, "deleted OSS files cannot be rescanned")
-		return
-	}
-	fileStatus := "quarantined"
-	if request.Status == "clean" {
-		fileStatus = "active"
-	} else if request.Status == "rejected" {
-		fileStatus = "quarantined"
-	}
-	if _, err = tx.Exec(r.Context(), `update oss_files
-		set scan_status=$2,status=$3,updated_at=now() where id=$1`, internalID, request.Status, fileStatus); err != nil {
-		writeError(w, http.StatusInternalServerError, "无法更新扫描状态")
-		return
-	}
-	if _, err = tx.Exec(r.Context(), `update report_evidence set
-		scan_status=$2,
-		status=case when $2='rejected' then 'pending_delete' else status end,
-		cleanup_after=case when $2='rejected' then now() else cleanup_after end,
-		last_error=case when $2='rejected' then $3 else '' end
-		where object_key=(select object_key from oss_files where id=$1) and status<>'deleted'`,
-		internalID, request.Status, request.Note); err != nil {
-		writeError(w, http.StatusInternalServerError, "无法同步举报附件扫描状态")
-		return
-	}
-	metadata, _ := json.Marshal(map[string]any{
-		"previousStatus":     previousStatus,
-		"previousFileStatus": previousFileStatus,
-		"status":             request.Status,
-		"fileStatus":         fileStatus,
-		"note":               request.Note,
-	})
-	if _, err = tx.Exec(r.Context(), `insert into audit_events(
-		aggregate_type,aggregate_key,actor_id,action,ip,user_agent,metadata)
-		values('oss_file',$1,$2,'scan_status_update',$3,$4,$5::jsonb)`,
-		publicID, currentClaims(r).Subject, s.requestClientLocation(r).IP, r.UserAgent(), metadata); err != nil {
-		writeError(w, http.StatusInternalServerError, "无法记录扫描状态变更")
-		return
-	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "无法提交扫描状态变更")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": publicID, "scanStatus": request.Status, "status": fileStatus})
-}
-
-func (s *Server) resolveActiveOSSFileInternalIDForUploader(ctx context.Context, publicID string, uploaderID int64) (int64, error) {
-	var internalID int64
-	err := s.db.QueryRow(ctx, `select id from oss_files
-		where public_id=$1 and uploader_id=$2 and status='active'`, publicID, uploaderID).Scan(&internalID)
-	return internalID, err
-}
-
-func requiresSynchronousCatalogImageValidation(source string) bool {
-	source = strings.ToLower(strings.TrimSpace(source))
-	return strings.HasPrefix(source, "mod_resource:") ||
-		strings.HasPrefix(source, "recipe_gui:") ||
-		strings.HasPrefix(source, "catalog_resource:") ||
-		strings.HasPrefix(source, "catalog_recipe:") ||
-		strings.HasPrefix(source, "blueprint_cover:")
-}
-
-const maximumSynchronousRasterBytes = int64(16 << 20)
-
-func readOSSUploadedRaster(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey string, expectedSize int64, expectedSHA256 string) ([]byte, error) {
-	if expectedSize <= 0 || expectedSize > maximumSynchronousRasterBytes {
-		return nil, errors.New("resource image exceeds the upload limit")
-	}
-	result, err := client.GetObject(ctx, &aliyunoss.GetObjectRequest{
-		Bucket: aliyunoss.Ptr(cfg.Bucket),
-		Key:    aliyunoss.Ptr(objectKey),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("read uploaded image: %w", err)
-	}
-	defer result.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(result.Body, maximumSynchronousRasterBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read uploaded image body: %w", err)
-	}
-	if int64(len(data)) != expectedSize || int64(len(data)) > maximumSynchronousRasterBytes {
-		return nil, errors.New("uploaded image size mismatch")
-	}
-	if expectedSHA256 != "" {
-		digest := sha256.Sum256(data)
-		if hex.EncodeToString(digest[:]) != expectedSHA256 {
-			return nil, errors.New("uploaded image hash mismatch")
-		}
-	}
-	return data, nil
-}
-
-func validateOSSUploadedRaster(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey, declaredContentType string, expectedSize int64, expectedSHA256, source string) error {
-	data, err := readOSSUploadedRaster(ctx, client, cfg, objectKey, expectedSize, expectedSHA256)
-	if err != nil {
-		return err
-	}
-	if _, err = validateRasterImageBytes(data, declaredContentType); err != nil {
-		return err
-	}
-	return validateModResourceImageSpec(data, declaredContentType, source)
-}
-
-const maxModResourceRenderEdge = 1024
-
-func validateModResourceImageSpec(data []byte, declaredContentType, source string) error {
-	source = strings.ToLower(strings.TrimSpace(source))
-	expectedWidth, expectedHeight := 0, 0
-	renderImage := false
-	switch {
-	case strings.HasSuffix(source, ":icon_32"):
-		expectedWidth, expectedHeight = 32, 32
-	case strings.HasSuffix(source, ":icon_128"):
-		expectedWidth, expectedHeight = 128, 128
-	case isModResourceRenderUploadSource(source):
-		renderImage = true
-	default:
-		return nil
-	}
-	config, err := validateModResourcePNGConfig(data, declaredContentType)
-	if err != nil {
-		return err
-	}
-	if renderImage {
-		if max(config.Width, config.Height) > maxModResourceRenderEdge {
-			return fmt.Errorf("mod resource rendered image longest edge must not exceed %dpx", maxModResourceRenderEdge)
-		}
-		return nil
-	}
-	if config.Width != expectedWidth || config.Height != expectedHeight {
-		return fmt.Errorf("mod resource image must be %dx%d PNG", expectedWidth, expectedHeight)
-	}
-	return nil
-}
-
-func validateModResourcePNGConfig(data []byte, declaredContentType string) (image.Config, error) {
-	if normalizeRasterContentType(declaredContentType) != "image/png" {
-		return image.Config{}, errors.New("mod resource images must use PNG")
-	}
-	config, format, err := image.DecodeConfig(bytes.NewReader(data))
-	if err != nil || format != "png" || config.Width <= 0 || config.Height <= 0 {
-		return image.Config{}, errors.New("mod resource image must be a valid PNG")
-	}
-	// PNG color types 4 and 6 have an alpha channel. Indexed PNG may carry
-	// transparency through a validated tRNS chunk.
-	if len(data) < 26 || (data[25] != 4 && data[25] != 6 && !bytes.Contains(data, []byte("tRNS"))) {
-		return image.Config{}, errors.New("mod resource PNG must support a transparent background")
-	}
-	return config, nil
-}
-
-func webPDimensions(data []byte) (int, int, bool) {
-	if len(data) < 20 || !bytes.Equal(data[:4], []byte("RIFF")) || !bytes.Equal(data[8:12], []byte("WEBP")) {
-		return 0, 0, false
-	}
-	// RIFF size is the number of bytes after the first eight bytes. Requiring
-	// an exact match rejects both truncated files and data hidden after the
-	// declared container.
-	if uint64(binary.LittleEndian.Uint32(data[4:8]))+8 != uint64(len(data)) {
-		return 0, 0, false
-	}
-	width, height := 0, 0
-	canvasWidth, canvasHeight := 0, 0
-	foundCanvasHeader := false
-	foundImageData := false
-	for offset := 12; offset < len(data); {
-		if len(data)-offset < 8 {
-			return 0, 0, false
-		}
-		chunkType := string(data[offset : offset+4])
-		chunkSize := uint64(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
-		payloadStart := uint64(offset + 8)
-		payloadEnd := payloadStart + chunkSize
-		paddedEnd := payloadEnd + chunkSize%2
-		if payloadEnd < payloadStart || paddedEnd > uint64(len(data)) {
-			return 0, 0, false
-		}
-		if chunkSize%2 != 0 && data[int(payloadEnd)] != 0 {
-			return 0, 0, false
-		}
-		payload := data[int(payloadStart):int(payloadEnd)]
-		switch chunkType {
-		case "VP8X":
-			// VP8X only describes the extended canvas. It is not image data
-			// by itself and must be followed by a complete VP8/VP8L payload.
-			if foundCanvasHeader || foundImageData || len(payload) != 10 {
-				return 0, 0, false
-			}
-			canvasWidth = 1 + int(payload[4]) + int(payload[5])<<8 + int(payload[6])<<16
-			canvasHeight = 1 + int(payload[7]) + int(payload[8])<<8 + int(payload[9])<<16
-			foundCanvasHeader = true
-		case "VP8L":
-			if foundImageData || len(payload) < 10 || payload[0] != 0x2f {
-				return 0, 0, false
-			}
-			width = 1 + ((int(payload[1]) | int(payload[2])<<8) & 0x3fff)
-			height = 1 + ((int(payload[2])>>6 | int(payload[3])<<2 | int(payload[4])<<10) & 0x3fff)
-			foundImageData = true
-		case "VP8 ":
-			if foundImageData || len(payload) < 11 || !bytes.Equal(payload[3:6], []byte{0x9d, 0x01, 0x2a}) {
-				return 0, 0, false
-			}
-			frameTag := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16
-			firstPartitionSize := int(frameTag >> 5)
-			if frameTag&1 != 0 || (frameTag>>1)&7 > 3 || (frameTag>>4)&1 == 0 ||
-				firstPartitionSize <= 0 || 10+firstPartitionSize > len(payload) {
-				return 0, 0, false
-			}
-			width = (int(payload[6]) | int(payload[7])<<8) & 0x3fff
-			height = (int(payload[8]) | int(payload[9])<<8) & 0x3fff
-			foundImageData = true
-		case "ANIM", "ANMF":
-			// Animated WebP needs frame-by-frame compressed-stream validation
-			// that the standard library does not provide. Reject it instead of
-			// treating a syntactically complete RIFF as a decoded image.
-			return 0, 0, false
-		}
-		offset = int(paddedEnd)
-	}
-	if !foundImageData || width <= 0 || height <= 0 {
-		return 0, 0, false
-	}
-	if foundCanvasHeader {
-		if canvasWidth <= 0 || canvasHeight <= 0 || canvasWidth != width || canvasHeight != height {
-			return 0, 0, false
-		}
-		width, height = canvasWidth, canvasHeight
-	}
-	return width, height, true
-}
-
-const maxValidatedRasterPixels = int64(16_777_216)
-
-func validateRasterImageBytes(data []byte, declaredContentType string) (string, error) {
-	if len(data) == 0 {
-		return "", errors.New("empty raster image")
-	}
-	declared := normalizeRasterContentType(declaredContentType)
-	detected := normalizeRasterContentType(http.DetectContentType(data))
-	if !supportedRasterContentType(declared) {
-		return "", errors.New("unsupported resource image content type")
-	}
-	if detected != declared {
-		return "", fmt.Errorf("resource image type mismatch: declared %s, detected %s", declared, detected)
-	}
-	if declared == "image/webp" {
-		width, height, ok := webPDimensions(data)
-		if !ok || int64(width)*int64(height) > maxValidatedRasterPixels {
-			return "", errors.New("invalid or oversized WebP image")
-		}
-		config, err := xwebp.DecodeConfig(bytes.NewReader(data))
-		if err != nil || config.Width != width || config.Height != height {
-			return "", errors.New("invalid WebP image bitstream")
-		}
-		if _, err = xwebp.Decode(bytes.NewReader(data)); err != nil {
-			return "", errors.New("invalid or truncated WebP image")
-		}
-		return declared, nil
-	}
-	config, format, err := image.DecodeConfig(bytes.NewReader(data))
-	if err != nil || normalizeRasterContentType("image/"+format) != declared || config.Width <= 0 || config.Height <= 0 {
-		return "", errors.New("invalid raster image")
-	}
-	if int64(config.Width)*int64(config.Height) > maxValidatedRasterPixels {
-		return "", errors.New("resource image dimensions are too large")
-	}
-	switch declared {
-	case "image/png":
-		_, err = png.Decode(bytes.NewReader(data))
-	case "image/jpeg":
-		_, err = jpeg.Decode(bytes.NewReader(data))
-	case "image/gif":
-		// Decode only the first frame. DecodeAll would allocate every frame
-		// before a total-pixel guard could run and makes compressed GIFs a
-		// disproportionate memory-amplification vector.
-		_, err = gif.Decode(bytes.NewReader(data))
-	}
-	if err != nil {
-		return "", errors.New("invalid or truncated raster image")
-	}
-	return declared, nil
-}
-
-func normalizeRasterContentType(value string) string {
-	value = strings.ToLower(strings.TrimSpace(strings.Split(value, ";")[0]))
-	switch value {
-	case "image/apng":
-		return "image/png"
-	case "image/jpg":
-		return "image/jpeg"
-	default:
-		return value
-	}
-}
-
-func supportedRasterContentType(value string) bool {
-	switch normalizeRasterContentType(value) {
-	case "image/png", "image/jpeg", "image/gif", "image/webp":
-		return true
-	default:
-		return false
-	}
-}
-
-type ossFileHashLookup struct {
-	UploaderID    *int64
-	Category      string
-	Source        string
-	ScanStatuses  []string
-	RequireRaster bool
-	// RequireTrusted prevents an unscanned upload from becoming a public
-	// catalog image merely because its bytes match a later request.
-	RequireTrusted bool
-}
-
-func (s *Server) findExistingOSSFileByHashExact(ctx context.Context, sha256 string, sizeBytes int64, lookup ossFileHashLookup) (map[string]any, bool) {
-	if sha256 == "" || sizeBytes <= 0 || len(lookup.ScanStatuses) == 0 {
-		return nil, false
-	}
-	var size, sourceSize int64
-	var id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, sha, status, scanStatus string
-	var createdAt, updatedAt time.Time
-	query := `select public_id, bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, status, scan_status, created_at, updated_at
-		from oss_files
-		where sha256 = $1 and coalesce(nullif(source_size_bytes, 0), size_bytes) = $2 and status = 'active'
-		  and scan_status = any($3::text[])`
-	args := []any{sha256, sizeBytes, lookup.ScanStatuses}
-	if lookup.UploaderID != nil {
-		args = append(args, *lookup.UploaderID)
-		query += fmt.Sprintf(` and uploader_id = $%d`, len(args))
-	}
-	if lookup.Category != "" {
-		args = append(args, lookup.Category)
-		query += fmt.Sprintf(` and category = $%d`, len(args))
-	}
-	if lookup.Source != "" {
-		args = append(args, lookup.Source)
-		query += fmt.Sprintf(` and source = $%d`, len(args))
-	}
-	if lookup.RequireTrusted {
-		query += ` and scan_status in ('clean','trusted_generated')`
-	}
-	if lookup.RequireRaster {
-		query += ` and lower(split_part(content_type,';',1)) in ('image/png','image/jpeg','image/jpg','image/gif','image/webp')`
-	}
-	query += ` order by created_at asc limit 1`
-	err := s.db.QueryRow(ctx, query, args...).Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &sourceOriginalName, &contentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt)
-	if err != nil {
-		_ = ignoreNoRows(err)
-		return nil, false
-	}
-	return ossFileRecord(id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt), true
-}
-
-func ossFileRecord(id string, bucket string, endpoint string, region string, objectKey string, category string, source string, originalName string, sourceOriginalName string, contentType string, size int64, sourceSize int64, sha string, status string, scanStatus string, createdAt time.Time, updatedAt time.Time) map[string]any {
-	if sourceOriginalName == "" {
-		sourceOriginalName = originalName
-	}
-	if sourceSize <= 0 {
-		sourceSize = size
-	}
-	sourceExtension := strings.ToLower(filepath.Ext(sourceOriginalName))
-	converted := (contentType == "image/webp" && (sourceExtension == ".jpg" || sourceExtension == ".jpeg" || sourceExtension == ".png")) ||
-		sourceSize != size || strings.HasSuffix(objectKey, ".render-1024.png")
-	return map[string]any{
-		"id":                 id,
-		"bucket":             bucket,
-		"endpoint":           endpoint,
-		"region":             region,
-		"objectKey":          objectKey,
-		"category":           category,
-		"source":             source,
-		"originalName":       originalName,
-		"sourceOriginalName": sourceOriginalName,
-		"contentType":        contentType,
-		"sizeBytes":          size,
-		"sourceSizeBytes":    sourceSize,
-		"converted":          converted,
-		"sha256":             sha,
-		"status":             status,
-		"scanStatus":         scanStatus,
-		"createdAt":          createdAt,
-		"updatedAt":          updatedAt,
-	}
-}
-
-func (s *Server) enforceUserFileUploadLimits(r *http.Request, sizeBytes int64, deferStoredSizeCheck bool) error {
-	claims := currentClaims(r)
-	singleLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.single_limit"))
-	dailyLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.daily_limit"))
-	totalLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.total_limit"))
-	if singleLimit <= 0 {
-		return errors.New("没有单文件上传权限")
-	}
-	if dailyLimit <= 0 {
-		return errors.New("没有每日上传额度")
-	}
-	if totalLimit <= 0 {
-		return errors.New("没有用户文件总容量额度")
-	}
-	if singleLimit != maxPermissionBytes && sizeBytes > singleLimit {
-		return fmt.Errorf("文件超过单文件大小限制：%s", formatLimitBytes(singleLimit))
-	}
-	var dailyUsed, totalUsed int64
-	_ = s.db.QueryRow(
-		r.Context(),
-		`select coalesce(sum(coalesce(nullif(source_size_bytes, 0), size_bytes)), 0)
-		 from oss_files
-		 where uploader_id = $1 and status = 'active' and created_at >= current_date`,
-		claims.Subject,
-	).Scan(&dailyUsed)
-	_ = s.db.QueryRow(
-		r.Context(),
-		`select coalesce(sum(size_bytes), 0)
-		 from oss_files
-		 where uploader_id = $1 and status = 'active'`,
-		claims.Subject,
-	).Scan(&totalUsed)
-	if dailyLimit != maxPermissionBytes && dailyUsed+sizeBytes > dailyLimit {
-		return fmt.Errorf("超过每日上传额度：%s", formatLimitBytes(dailyLimit))
-	}
-	if totalLimit != maxPermissionBytes && !deferStoredSizeCheck && totalUsed+sizeBytes > totalLimit {
-		return fmt.Errorf("超过用户文件总容量：%s", formatLimitBytes(totalLimit))
-	}
-	return nil
-}
-
-func (s *Server) enforceUserStoredFileLimit(r *http.Request, sizeBytes int64) error {
-	claims := currentClaims(r)
-	totalLimit := permissionMiBToBytes(claimsNumericPermissionValue(claims, "user.file.total_limit"))
-	if totalLimit <= 0 {
-		return errors.New("没有用户文件总容量额度")
-	}
-	if totalLimit == maxPermissionBytes {
-		return nil
-	}
-	var totalUsed int64
-	_ = s.db.QueryRow(
-		r.Context(),
-		`select coalesce(sum(size_bytes), 0)
-		 from oss_files
-		 where uploader_id = $1 and status = 'active'`,
-		claims.Subject,
-	).Scan(&totalUsed)
-	if totalUsed+sizeBytes > totalLimit {
-		return fmt.Errorf("超过用户文件总容量：%s", formatLimitBytes(totalLimit))
-	}
-	return nil
-}
-
-func (s *Server) presignOSSFile(w http.ResponseWriter, r *http.Request) {
-	var req ossPresignRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	s.presignOSSFileWithRequest(w, r, req)
-}
-
-func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Request, req ossPresignRequest) bool {
-	req.ObjectKey = strings.TrimSpace(req.ObjectKey)
-	if req.ObjectKey == "" {
-		writeError(w, http.StatusBadRequest, "missing OSS ObjectKey")
-		return false
-	}
-	cfg := s.ossConfigFromSettings(r.Context())
-	if req.ExpiresMinutes <= 0 {
-		req.ExpiresMinutes = cfg.DownloadURLTTLMinutes
-	}
-	if req.ExpiresMinutes > 10080 {
-		req.ExpiresMinutes = 10080
-	}
-	expires := time.Duration(req.ExpiresMinutes) * time.Minute
-	originalName := s.originalNameForOSSObject(r.Context(), req.ObjectKey)
-	contentDisposition := downloadContentDisposition(originalName)
-	access, err := s.resolveOSSObjectAccessWithConfig(r.Context(), cfg, req.ObjectKey, ossObjectAccessOptions{
-		Expires:            expires,
-		ContentDisposition: contentDisposition,
-	})
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate OSS download URL")
-		return false
-	}
-	_, _ = s.db.Exec(
-		r.Context(),
-		`insert into oss_download_stats (object_key, downloads, last_download_at)
-		 values ($1, 1, now())
-		 on conflict (object_key) do update
-		 set downloads = oss_download_stats.downloads + 1, last_download_at = now()`,
-		req.ObjectKey,
-	)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"url":             access.URL,
-		"expiresAt":       access.ExpiresAt,
-		"downloadUrlMode": access.Mode,
-		"filename":        originalName,
-	})
-	return true
-}
-
-func (s *Server) ossUploadLogs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.querySimpleRows(r, `select id, file_id, uploader_id, object_key, original_name, size_bytes, ip, user_agent, result, message, created_at from oss_upload_logs order by created_at desc limit $1`, boundedLimit(r.URL.Query().Get("limit"), 100, 500)))
-}
-
-func (s *Server) ossScanLogs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.querySimpleRows(r, `select id, file_id, object_key, engine, result, message, payload, created_at from oss_scan_logs order by created_at desc limit $1`, boundedLimit(r.URL.Query().Get("limit"), 100, 500)))
-}
-
-func (s *Server) ossDownloadStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.querySimpleRows(r, `select object_key, downloads, total_bytes, last_download_at from oss_download_stats order by downloads desc, last_download_at desc nulls last limit $1`, boundedLimit(r.URL.Query().Get("limit"), 100, 500)))
-}
-
-func (s *Server) ossConfigFromSettings(ctx context.Context) ossConfigPayload {
-	payload := defaultOSSConfig()
-	var raw []byte
-	err := s.db.QueryRow(ctx, `select value from system_settings where key = 'oss.aliyun'`).Scan(&raw)
-	if err != nil {
-		_ = ignoreNoRows(err)
-		return payload
-	}
-	if err := s.openSystemSetting(raw, &payload); err != nil {
-		return defaultOSSConfig()
-	}
-	payload = normalizeOSSConfig(payload)
-	if payload.DownloadURLTTLMinutes <= 0 {
-		payload.DownloadURLTTLMinutes = 10
-	}
-	return payload
-}
-
-func (s *Server) ossClient(ctx context.Context) (*aliyunoss.Client, ossConfigPayload, error) {
-	cfg := s.ossConfigFromSettings(ctx)
-	if !cfg.Enabled {
-		return nil, cfg, fmt.Errorf("OSS 尚未启用")
-	}
-	if cfg.Region == "" || cfg.Endpoint == "" || cfg.Bucket == "" || cfg.AccessKeyID == "" || cfg.AccessKeySecret == "" {
-		return nil, cfg, fmt.Errorf("OSS 配置不完整")
-	}
-	if requiresSecurityToken(cfg.AccessKeyID) && cfg.SecurityToken == "" {
-		return nil, cfg, fmt.Errorf("OSS STS 临时凭证缺少 SecurityToken")
-	}
-	return newOSSClient(cfg, cfg.Endpoint, cfg.UseCName), cfg, nil
-}
-
-func (s *Server) ossDownloadClient(ctx context.Context, cfg ossConfigPayload) (*aliyunoss.Client, error) {
-	if !cfg.Enabled {
-		return nil, fmt.Errorf("OSS 尚未启用")
-	}
-	if cfg.Region == "" || cfg.Endpoint == "" || cfg.Bucket == "" || cfg.AccessKeyID == "" || cfg.AccessKeySecret == "" {
-		return nil, fmt.Errorf("OSS 配置不完整")
-	}
-	if requiresSecurityToken(cfg.AccessKeyID) && cfg.SecurityToken == "" {
-		return nil, fmt.Errorf("OSS STS 临时凭证缺少 SecurityToken")
-	}
-	endpoint := cfg.Endpoint
-	return newOSSClient(cfg, endpoint, isCustomOSSEndpoint(endpoint)), nil
-}
-
-func newOSSClient(cfg ossConfigPayload, endpoint string, useCName bool) *aliyunoss.Client {
-	ossCfg := aliyunoss.LoadDefaultConfig().
-		WithCredentialsProvider(credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.AccessKeySecret, cfg.SecurityToken)).
-		WithRegion(cfg.Region).
-		WithEndpoint(endpoint).
-		WithUseCName(useCName || isCustomOSSEndpoint(endpoint))
-	return aliyunoss.NewClient(ossCfg)
-}
-
-func redactOSSConfig(payload ossConfigPayload) map[string]any {
-	return map[string]any{
-		"enabled":                 payload.Enabled,
-		"region":                  payload.Region,
-		"endpoint":                payload.Endpoint,
-		"publicEndpoint":          payload.PublicEndpoint,
-		"bucket":                  payload.Bucket,
-		"accessKeyId":             payload.AccessKeyID,
-		"hasAccessKeySecret":      strings.TrimSpace(payload.AccessKeySecret) != "",
-		"hasSecurityToken":        strings.TrimSpace(payload.SecurityToken) != "",
-		"useCName":                payload.UseCName || isCustomOSSEndpoint(payload.Endpoint),
-		"prefix":                  payload.Prefix,
-		"downloadUrlTtlMinutes":   payload.DownloadURLTTLMinutes,
-		"downloadUrlMode":         payload.DownloadURLMode,
-		"allowedExtensions":       payload.AllowedExtensions,
-		"bucketAccessPolicy":      "private-read-write",
-		"temporaryDownloadPolicy": payload.DownloadURLMode,
-	}
-}
-
-func normalizeOSSConfig(payload ossConfigPayload) ossConfigPayload {
-	payload.Region = strings.TrimSpace(payload.Region)
-	payload.Endpoint = normalizeOSSEndpoint(payload.Endpoint)
-	payload.PublicEndpoint = normalizeOSSEndpoint(payload.PublicEndpoint)
-	payload.Bucket = strings.TrimSpace(payload.Bucket)
-	payload.AccessKeyID = strings.TrimSpace(payload.AccessKeyID)
-	payload.AccessKeySecret = strings.TrimSpace(payload.AccessKeySecret)
-	payload.SecurityToken = strings.TrimSpace(payload.SecurityToken)
-	payload.Prefix = normalizeObjectPrefix(payload.Prefix)
-	if payload.Prefix == "" {
-		payload.Prefix = "mcmods"
-	}
-	if payload.Region != "" && payload.Endpoint == "" {
-		payload.Endpoint = defaultOSSEndpoint(payload.Region)
-	}
-	if payload.PublicEndpoint == "" && isCustomOSSEndpoint(payload.Endpoint) {
-		payload.PublicEndpoint = payload.Endpoint
-		payload.Endpoint = defaultOSSEndpoint(payload.Region)
-		payload.UseCName = false
-	}
-	if payload.PublicEndpoint == "" {
-		payload.PublicEndpoint = "https://oss.mcmods.cn"
-	}
-	if !isCustomOSSEndpoint(payload.Endpoint) {
-		payload.UseCName = false
-	}
-	if payload.DownloadURLTTLMinutes <= 0 {
-		payload.DownloadURLTTLMinutes = 10
-	}
-	payload.DownloadURLMode = normalizeOSSDownloadMode(payload.DownloadURLMode)
-	return payload
-}
-
-func (payload ossConfigPayload) displayEndpoint() string {
-	if payload.PublicEndpoint != "" {
-		return payload.PublicEndpoint
-	}
-	return payload.Endpoint
-}
-
-func defaultOSSConfig() ossConfigPayload {
-	return ossConfigPayload{
-		Prefix:                "mcmods",
-		PublicEndpoint:        "https://oss.mcmods.cn",
-		DownloadURLTTLMinutes: 10,
-		DownloadURLMode:       ossDownloadModeESAPrivateOrigin,
-		AllowedExtensions:     defaultOSSAllowedExtensions,
-	}
-}
-
-func normalizeOSSDownloadMode(value string) string {
-	switch strings.TrimSpace(value) {
-	case ossDownloadModePresigned, "presigned-url":
-		return ossDownloadModePresigned
-	case ossDownloadModeESAPrivateOrigin, "esa-private-origin":
-		return ossDownloadModeESAPrivateOrigin
-	default:
-		return ossDownloadModeESAPrivateOrigin
-	}
-}
-
-func ossStoredObjectURLWithDisposition(cfg ossConfigPayload, objectKey string, contentDisposition string) string {
-	rawURL := ossStoredObjectURL(cfg, objectKey)
-	if contentDisposition == "" {
-		return rawURL
-	}
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	query := parsed.Query()
-	query.Set("response-content-disposition", contentDisposition)
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
-}
-
-func (s *Server) originalNameForOSSObject(ctx context.Context, objectKey string) string {
-	var originalName string
-	err := s.db.QueryRow(ctx, `select original_name from oss_files where object_key = $1`, objectKey).Scan(&originalName)
-	if err != nil || strings.TrimSpace(originalName) == "" {
-		return path.Base(objectKey)
-	}
-	return originalName
-}
-
-func downloadContentDisposition(filename string) string {
-	filename = strings.TrimSpace(filename)
-	if filename == "" {
-		filename = "download"
-	}
-	asciiFallback := strings.Map(func(r rune) rune {
-		if r < 0x20 || r == '"' || r == '\\' || r == ';' {
-			return '-'
-		}
-		if r > 0x7e {
-			return '-'
-		}
-		return r
-	}, filename)
-	asciiFallback = strings.TrimSpace(asciiFallback)
-	if asciiFallback == "" {
-		asciiFallback = "download"
-	}
-	return fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, asciiFallback, url.PathEscape(filename))
-}
-
-func (s *Server) insertOSSUploadLog(ctx context.Context, fileID *int64, uploaderID int64, objectKey string, originalName string, sizeBytes int64, ip string, userAgent string, result string, message string) {
-	_, _ = s.db.Exec(
-		ctx,
-		`insert into oss_upload_logs (file_id, uploader_id, object_key, original_name, size_bytes, ip, user_agent, result, message)
-		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		fileID,
-		uploaderID,
-		objectKey,
-		originalName,
-		sizeBytes,
-		ip,
-		userAgent,
-		result,
-		message,
-	)
-}
-
-func (s *Server) resolveUserOSSUploadCategory(r *http.Request, category, source string) (string, error) {
-	claims := currentClaims(r)
-	normalizedSource := strings.ToLower(strings.TrimSpace(source))
-	if siteID, contentID, ok := parseModTextUploadSource(normalizedSource); ok {
-		identity, err := s.modIdentity(r.Context(), siteID)
-		if err != nil || !canEditMod(claims, identity) {
-			return "", errors.New("没有权限向该模组资料正文目录上传文件")
-		}
-		return ossProjectTextCategory("mod", identity.UniqueID, contentID, "content"), nil
-	}
-	if strings.HasPrefix(normalizedSource, "mod_text:") {
-		return "", errors.New("模组资料正文上传目标不完整")
-	}
-	if strings.HasPrefix(normalizedSource, "mod_resource:") {
-		parts := strings.SplitN(strings.TrimPrefix(normalizedSource, "mod_resource:"), ":", 4)
-		if len(parts) < 3 {
-			return "", errors.New("模组资料图片上传目标不完整")
-		}
-		siteID := strings.TrimSpace(parts[0])
-		resourceKind := normalizeObjectSegment(parts[1])
-		assetKind := normalizeObjectSegment(parts[2])
-		if resourceKind == "" {
-			resourceKind = "resource"
-		}
-		if assetKind != "icon" && assetKind != "render" {
-			return "", errors.New("模组资料图片类型不正确")
-		}
-		identity, err := s.modIdentity(r.Context(), siteID)
-		if err != nil || !canEditMod(claims, identity) {
-			return "", errors.New("没有权限向该模组资料目录上传文件")
-		}
-		return ossProjectCategory("mod", identity.UniqueID, "icons", resourceKind, "original"), nil
-	}
-	if strings.HasPrefix(normalizedSource, "recipe_gui:") {
-		parts := strings.Split(strings.TrimPrefix(normalizedSource, "recipe_gui:"), ":")
-		recipeTypePublicID := normalizeObjectSegment(parts[0])
-		templatePublicID := "staging"
-		if len(parts) > 1 && normalizeObjectSegment(parts[1]) != "" {
-			templatePublicID = normalizeObjectSegment(parts[1])
-		}
-		var exists bool
-		if recipeTypePublicID == "" || !claimsAllow(claims, "content.write") ||
-			s.db.QueryRow(r.Context(), `select exists(select 1 from catalog_entities where public_id=$1 and entity_type='recipe_type' and status='active')`, recipeTypePublicID).Scan(&exists) != nil || !exists {
-			return "", errors.New("没有权限向该配方模板目录上传文件")
-		}
-		return ossProjectCategory("catalog", "_shared", "recipe-gui", recipeTypePublicID, templatePublicID), nil
-	}
-	if strings.HasPrefix(normalizedSource, "creator_avatar:") {
-		parts := strings.SplitN(strings.TrimPrefix(normalizedSource, "creator_avatar:"), ":", 2)
-		if len(parts) != 2 {
-			return "", errors.New("作者头像上传目标不完整")
-		}
-		kind, publicID := normalizeObjectSegment(parts[0]), normalizeObjectSegment(parts[1])
-		var storedKind string
-		if s.db.QueryRow(r.Context(), `select kind from creators where public_id=$1 and review_status='approved'`, publicID).
-			Scan(&storedKind) != nil {
-			return "", errors.New("作者或团队不存在")
-		}
-		canEdit := claimsAllow(claims, "admin.*") || claimsAllow(claims, "creator.edit") ||
-			claimsAllow(claims, "creator.edit."+publicID)
-		if !canEdit || kind != normalizeObjectSegment(storedKind) {
-			return "", errors.New("没有权限向该作者或团队目录上传文件")
-		}
-		return ossProjectCategory(kind, publicID, "icons", "avatar", "original"), nil
-	}
-	for _, candidate := range []struct {
-		prefix      string
-		destination string
-		projectType string
-	}{
-		{prefix: "mod_gallery:", destination: "gallery", projectType: "mod"},
-		{prefix: "modpack_gallery:", destination: "gallery", projectType: "modpack"},
-		{prefix: "iconexport:", destination: "iconexporter", projectType: "mod"},
-	} {
-		if !strings.HasPrefix(normalizedSource, candidate.prefix) {
-			continue
-		}
-		remainder := strings.TrimSpace(strings.TrimPrefix(normalizedSource, candidate.prefix))
-		siteID := strings.TrimSpace(strings.SplitN(remainder, ":", 2)[0])
-		if siteID == "" || siteID == "draft" {
-			return ossUserCategory(claims.Subject, normalizeOSSUserFileScope(category, source)), nil
-		}
-		if candidate.projectType == "modpack" {
-			pack, err := s.modpackBySiteID(r.Context(), normalizeModSiteID(siteID), claims.Subject, true)
-			if err != nil {
-				return ossUserCategory(claims.Subject, normalizeOSSUserFileScope(category, source)), nil
-			}
-			if !canEditModpack(claims, pack) {
-				return "", errors.New("没有权限向该整合包目录上传文件")
-			}
-			return ossProjectTextCategory("modpack", pack.PublicID, pack.PublicID, "gallery"), nil
-		}
-		identity, err := s.modIdentity(r.Context(), siteID)
-		if err != nil && candidate.destination == "gallery" {
-			return ossUserCategory(claims.Subject, normalizeOSSUserFileScope(category, source)), nil
-		}
-		if err != nil || !canEditMod(claims, identity) {
-			return "", errors.New("没有权限向该模组目录上传文件")
-		}
-		if candidate.destination == "gallery" {
-			return ossProjectTextCategory("mod", identity.UniqueID, identity.UniqueID, "gallery"), nil
-		}
-		return ossModImportCategory(identity.UniqueID, candidate.destination, "catalog"), nil
-	}
-	return ossUserCategory(claims.Subject, normalizeOSSUserFileScope(category, source)), nil
-}
-
-func parseModTextUploadSource(source string) (siteID string, contentID string, ok bool) {
-	source = strings.ToLower(strings.TrimSpace(source))
-	if !strings.HasPrefix(source, "mod_text:") {
-		return "", "", false
-	}
-	parts := strings.SplitN(strings.TrimPrefix(source, "mod_text:"), ":", 2)
-	if len(parts) != 2 {
-		return "", "", false
-	}
-	siteID = strings.TrimSpace(parts[0])
-	contentID = normalizeObjectSegment(parts[1])
-	if siteID == "" || contentID == "" {
-		return "", "", false
-	}
-	return siteID, contentID, true
-}
-
-func ossProjectDownloadScope(projectType, projectID string) string {
-	return ossProjectDownloadScopePrefix + normalizeOSSProjectKind(projectType) + ":" + normalizeProjectObjectSegment(projectID)
-}
-
-func parseOSSProjectDownloadScope(scope string) (string, string, bool) {
-	if !strings.HasPrefix(scope, ossProjectDownloadScopePrefix) {
-		return "", "", false
-	}
-	value := strings.TrimPrefix(scope, ossProjectDownloadScopePrefix)
-	parts := strings.SplitN(value, ":", 2)
-	if len(parts) == 1 {
-		return "mod", normalizeProjectObjectSegment(parts[0]), parts[0] != ""
-	}
-	projectID := normalizeProjectObjectSegment(parts[1])
-	return parts[0], projectID, parts[1] != ""
-}
-
-type persistedWebPObject struct {
-	ObjectKey    string
-	OriginalName string
-	SizeBytes    int64
-}
-
-type persistedModResourceRenderObject struct {
-	ObjectKey string
-	SizeBytes int64
-}
-
-func persistOversizedModResourceRender(
-	ctx context.Context,
-	client *aliyunoss.Client,
-	cfg ossConfigPayload,
-	sourceObjectKey string,
-	contentType string,
-	sourceSize int64,
-	sourceSHA256 string,
-) (persistedModResourceRenderObject, bool, error) {
-	data, err := readOSSUploadedRaster(ctx, client, cfg, sourceObjectKey, sourceSize, sourceSHA256)
-	if err != nil {
-		return persistedModResourceRenderObject{}, false, err
-	}
-	config, err := validateModResourcePNGConfig(data, contentType)
-	if err != nil {
-		return persistedModResourceRenderObject{}, false, err
-	}
-	if max(config.Width, config.Height) <= maxModResourceRenderEdge {
-		return persistedModResourceRenderObject{}, false, nil
-	}
-
-	destinationObjectKey := persistedModResourceRenderObjectKey(sourceObjectKey)
-	encodedDestination := base64.RawURLEncoding.EncodeToString([]byte(destinationObjectKey))
-	result, err := client.ProcessObject(ctx, &aliyunoss.ProcessObjectRequest{
-		Bucket: aliyunoss.Ptr(cfg.Bucket),
-		Key:    aliyunoss.Ptr(sourceObjectKey),
-		Process: aliyunoss.Ptr(
-			fmt.Sprintf("image/resize,l_%d,limit_1|image/format,png|sys/saveas,o_%s", maxModResourceRenderEdge, encodedDestination),
-		),
-	})
-	if err != nil {
-		return persistedModResourceRenderObject{}, false, err
-	}
-	if result.ProcessStatus != "" && !strings.EqualFold(result.ProcessStatus, "OK") {
-		_, _ = client.DeleteObject(ctx, &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(destinationObjectKey)})
-		return persistedModResourceRenderObject{}, false, fmt.Errorf("OSS image process status: %s", result.ProcessStatus)
-	}
-	head, err := client.HeadObject(ctx, &aliyunoss.HeadObjectRequest{
-		Bucket: aliyunoss.Ptr(cfg.Bucket),
-		Key:    aliyunoss.Ptr(destinationObjectKey),
-	})
-	if err != nil {
-		_, _ = client.DeleteObject(ctx, &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(destinationObjectKey)})
-		return persistedModResourceRenderObject{}, false, err
-	}
-	return persistedModResourceRenderObject{ObjectKey: destinationObjectKey, SizeBytes: head.ContentLength}, true, nil
-}
-
-func shouldPersistMarkdownImageAsWebP(originalName string, contentType string, source string, category string) bool {
-	extension := strings.ToLower(filepath.Ext(originalName))
-	if extension != ".jpg" && extension != ".jpeg" && extension != ".png" {
-		return false
-	}
-	contentType = strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
-	if contentType != "image/jpeg" && contentType != "image/jpg" && contentType != "image/png" {
-		return false
-	}
-	source = normalizeObjectSegment(source)
-	category = strings.ToLower(strings.TrimSpace(category))
-	if source == "playground" || source == "comment" || source == "markdown" || source == "project_intro" || source == "projectintro" {
-		return true
-	}
-	return strings.Contains(category, "/files/text/") ||
-		strings.HasSuffix(category, "/files/playground") ||
-		strings.HasSuffix(category, "/files/comments") ||
-		category == "users/playground" ||
-		category == "users/comments" ||
-		strings.HasSuffix(category, "/description")
-}
-
-func persistImageAsWebP(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, sourceObjectKey string, sourceOriginalName string) (persistedWebPObject, error) {
-	destinationObjectKey := persistedWebPObjectKey(sourceObjectKey)
-	encodedDestination := base64.RawURLEncoding.EncodeToString([]byte(destinationObjectKey))
-	result, err := client.ProcessObject(ctx, &aliyunoss.ProcessObjectRequest{
-		Bucket:  aliyunoss.Ptr(cfg.Bucket),
-		Key:     aliyunoss.Ptr(sourceObjectKey),
-		Process: aliyunoss.Ptr("image/format,webp|sys/saveas,o_" + encodedDestination),
-	})
-	if err != nil {
-		return persistedWebPObject{}, err
-	}
-	if result.ProcessStatus != "" && !strings.EqualFold(result.ProcessStatus, "OK") {
-		return persistedWebPObject{}, fmt.Errorf("OSS image process status: %s", result.ProcessStatus)
-	}
-	head, err := client.HeadObject(ctx, &aliyunoss.HeadObjectRequest{
-		Bucket: aliyunoss.Ptr(cfg.Bucket),
-		Key:    aliyunoss.Ptr(destinationObjectKey),
-	})
-	if err != nil {
-		return persistedWebPObject{}, err
-	}
-	baseName := strings.TrimSuffix(path.Base(sourceOriginalName), filepath.Ext(sourceOriginalName))
-	if baseName == "" {
-		baseName = "image"
-	}
-	return persistedWebPObject{
-		ObjectKey:    destinationObjectKey,
-		OriginalName: baseName + ".webp",
-		SizeBytes:    head.ContentLength,
-	}, nil
-}
-
-func randomObjectName() string {
-	random := make([]byte, 16)
-	_, _ = rand.Read(random)
-	hexValue := hex.EncodeToString(random)
-	return hexValue[0:8] + "-" + hexValue[8:12] + "-" + hexValue[12:16] + "-" + hexValue[16:20] + "-" + hexValue[20:32]
-}
-
-func normalizeObjectPrefix(value string) string {
-	parts := strings.Split(strings.Trim(value, "/ "), "/")
-	cleaned := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if segment := normalizeObjectSegment(part); segment != "" {
-			cleaned = append(cleaned, segment)
-		}
-	}
-	return strings.Join(cleaned, "/")
-}
-
-func isAllowedObjectKey(objectKey string, configuredPrefix string) bool {
-	objectKey = strings.TrimSpace(objectKey)
-	if objectKey == "" || strings.HasPrefix(objectKey, "/") || strings.Contains(objectKey, "..") {
-		return false
-	}
-	prefix := normalizeObjectPrefix(configuredPrefix)
-	if prefix == "" {
-		return true
-	}
-	return objectKey == prefix || strings.HasPrefix(objectKey, prefix+"/")
-}
-
-func normalizeSHA256(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if len(value) != 64 {
-		return ""
-	}
-	for _, r := range value {
-		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
-			return ""
-		}
-	}
-	return value
-}
-
-func metadataValue(metadata map[string]string, key string) string {
-	for currentKey, value := range metadata {
-		if strings.EqualFold(currentKey, key) {
-			return value
-		}
-	}
-	return ""
-}
-
-func normalizeOSSEndpoint(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
-		return "https://" + value
-	}
-	return value
-}
-
-func defaultOSSEndpoint(region string) string {
-	region = strings.TrimSpace(region)
-	if region == "" {
-		return ""
-	}
-	return "https://oss-" + region + ".aliyuncs.com"
-}
-
-func isCustomOSSEndpoint(endpoint string) bool {
-	endpoint = strings.ToLower(endpoint)
-	return endpoint != "" && !strings.Contains(endpoint, ".aliyuncs.com") && !strings.Contains(endpoint, ".aliyun.com")
-}
-
-func requiresSecurityToken(accessKeyID string) bool {
-	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(accessKeyID)), "STS.")
-}
-
-func normalizeObjectSegment(value string) string {
-	value = strings.TrimSpace(value)
-	value = strings.ToLower(value)
-	var builder strings.Builder
-	for _, r := range value {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
-			builder.WriteRune(r)
-		}
-	}
-	return builder.String()
-}
-
-func normalizeProjectObjectSegment(value string) string {
-	value = normalizeObjectSegment(value)
-	if value == "" {
-		return "unassigned"
-	}
-	return value
-}
-
-const maxPermissionBytes int64 = 1<<63 - 1
-
-func permissionMiBToBytes(value int32) int64 {
-	if value <= 0 {
-		return 0
-	}
-	if value == maxPermissionValue {
-		return maxPermissionBytes
-	}
-	return int64(value) * 1024 * 1024
-}
-
-func formatLimitBytes(value int64) string {
-	if value == maxPermissionBytes {
-		return "unlimited"
-	}
-	if value%(1024*1024) == 0 {
-		return fmt.Sprintf("%d MiB", value/(1024*1024))
-	}
-	return fmt.Sprintf("%d bytes", value)
-}
-
-func allowedUploadExtension(ext string, allowedExtensions []string) bool {
-	ext = normalizeExtension(ext)
-	if ext == "" {
-		return false
-	}
-	allowed := make(map[string]struct{}, len(allowedExtensions))
-	for _, item := range normalizeAllowedExtensions(allowedExtensions) {
-		allowed[item] = struct{}{}
-	}
-	_, ok := allowed[ext]
-	return ok
-}
-
-func normalizeAllowedExtensions(values []string) []string {
-	if len(values) == 0 {
-		values = defaultOSSAllowedExtensions
-	}
-	seen := make(map[string]struct{}, len(values))
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		ext := normalizeExtension(value)
-		if ext == "" {
-			continue
-		}
-		if _, ok := seen[ext]; ok {
-			continue
-		}
-		seen[ext] = struct{}{}
-		result = append(result, ext)
-	}
-	if len(result) == 0 {
-		return append([]string(nil), defaultOSSAllowedExtensions...)
-	}
-	return result
-}
-
-func normalizeExtension(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" {
-		return ""
-	}
-	if !strings.HasPrefix(value, ".") {
-		value = "." + value
-	}
-	if len(value) < 2 || strings.ContainsAny(value, `/\:*?"<>|`) {
-		return ""
-	}
-	for _, r := range value[1:] {
-		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '+') {
-			return ""
-		}
-	}
-	return value
 }

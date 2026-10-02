@@ -49,6 +49,101 @@ func commentSchemaStatements() []string {
 		`create index idx_comments_target_hot
 			on comments(target_type,target_id,target_version_id,pinned_at desc,hot_score desc,id desc)
 			where parent_id is null and status='published'`,
+		`create index idx_comments_target_roots_latest
+			on comments(target_type,target_id,coalesce(target_version_id,0),(pinned_at is not null) desc,
+				pinned_at desc,created_at desc,id desc)
+			where parent_id is null and status in ('published','deleted')`,
+		`create index idx_comments_target_roots_oldest
+			on comments(target_type,target_id,coalesce(target_version_id,0),(pinned_at is not null) desc,
+				pinned_at desc,created_at,id)
+			where parent_id is null and status in ('published','deleted')`,
+		`create index idx_comments_target_roots_hot_keyset
+			on comments(target_type,target_id,coalesce(target_version_id,0),(pinned_at is not null) desc,
+				pinned_at desc,hot_score desc,created_at desc,id desc)
+			where parent_id is null and status in ('published','deleted')`,
+		`create index idx_comments_target_roots_replies_keyset
+			on comments(target_type,target_id,coalesce(target_version_id,0),(pinned_at is not null) desc,
+				pinned_at desc,descendant_count desc,created_at desc,id desc)
+			where parent_id is null and status in ('published','deleted')`,
+		`create index idx_comments_parent_created_visible
+			on comments(parent_id,created_at,id) where status in ('published','deleted')`,
+		`create table comment_target_counts (
+			target_type text not null,
+			target_id bigint not null,
+			target_version_key bigint not null,
+			visible_count bigint not null default 0 check(visible_count>=0),
+			updated_at timestamptz not null default now(),
+			primary key(target_type,target_id,target_version_key)
+		)`,
+		`create table comment_target_author_counts (
+			target_type text not null,
+			target_id bigint not null,
+			target_version_key bigint not null,
+			author_id bigint not null,
+			visible_count bigint not null default 0 check(visible_count>=0),
+			updated_at timestamptz not null default now(),
+			primary key(target_type,target_id,target_version_key,author_id)
+		)`,
+		`create or replace function adjust_comment_target_counts(
+			changed_target_type text,changed_target_id bigint,changed_target_version_key bigint,
+			changed_author_id bigint,delta bigint) returns void as $$
+		begin
+			if delta>0 then
+				insert into comment_target_counts(target_type,target_id,target_version_key,visible_count)
+				values(changed_target_type,changed_target_id,changed_target_version_key,delta)
+				on conflict(target_type,target_id,target_version_key) do update
+				set visible_count=comment_target_counts.visible_count+excluded.visible_count,updated_at=now();
+				insert into comment_target_author_counts(target_type,target_id,target_version_key,author_id,visible_count)
+				values(changed_target_type,changed_target_id,changed_target_version_key,changed_author_id,delta)
+				on conflict(target_type,target_id,target_version_key,author_id) do update
+				set visible_count=comment_target_author_counts.visible_count+excluded.visible_count,updated_at=now();
+			else
+				update comment_target_counts set visible_count=greatest(0,visible_count+delta),updated_at=now()
+				where target_type=changed_target_type and target_id=changed_target_id
+				  and target_version_key=changed_target_version_key;
+				update comment_target_author_counts set visible_count=greatest(0,visible_count+delta),updated_at=now()
+				where target_type=changed_target_type and target_id=changed_target_id
+				  and target_version_key=changed_target_version_key and author_id=changed_author_id;
+				delete from comment_target_counts where target_type=changed_target_type
+				  and target_id=changed_target_id and target_version_key=changed_target_version_key and visible_count=0;
+				delete from comment_target_author_counts where target_type=changed_target_type
+				  and target_id=changed_target_id and target_version_key=changed_target_version_key
+				  and author_id=changed_author_id and visible_count=0;
+			end if;
+		end;
+		$$ language plpgsql`,
+		`create or replace function maintain_comment_target_counts() returns trigger as $$
+		begin
+			if tg_op='UPDATE' and old.target_type=new.target_type and old.target_id=new.target_id
+				and old.target_version_id is not distinct from new.target_version_id and old.author_id=new.author_id
+				and (old.status in ('published','deleted'))=(new.status in ('published','deleted')) then
+				return new;
+			end if;
+			if tg_op<>'INSERT' and old.status in ('published','deleted') then
+				perform adjust_comment_target_counts(old.target_type,old.target_id,coalesce(old.target_version_id,0),old.author_id,-1);
+			end if;
+			if tg_op<>'DELETE' and new.status in ('published','deleted') then
+				perform adjust_comment_target_counts(new.target_type,new.target_id,coalesce(new.target_version_id,0),new.author_id,1);
+			end if;
+			if tg_op='DELETE' then return old; end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_comments_target_counts after insert or update of status,target_type,target_id,target_version_id,author_id or delete on comments
+			for each row execute function maintain_comment_target_counts()`,
+		`create or replace function rebuild_comment_target_counts() returns void as $$
+		begin
+			truncate table comment_target_author_counts,comment_target_counts;
+			insert into comment_target_counts(target_type,target_id,target_version_key,visible_count)
+			select target_type,target_id,coalesce(target_version_id,0),count(*)
+			from comments where status in ('published','deleted')
+			group by target_type,target_id,coalesce(target_version_id,0);
+			insert into comment_target_author_counts(target_type,target_id,target_version_key,author_id,visible_count)
+			select target_type,target_id,coalesce(target_version_id,0),author_id,count(*)
+			from comments where status in ('published','deleted')
+			group by target_type,target_id,coalesce(target_version_id,0),author_id;
+		end;
+		$$ language plpgsql`,
 		`create table comment_closure (
 			ancestor_id bigint not null references comments(id) on delete cascade,
 			descendant_id bigint not null references comments(id) on delete cascade,
@@ -84,6 +179,10 @@ func commentSchemaStatements() []string {
 		)`,
 		`create index idx_comment_watches_user_activity
 			on comment_watches(user_id,status,last_activity_at desc,id desc)`,
+		`create index idx_comment_watches_user_created
+			on comment_watches(user_id,created_at desc,id desc) where status='active'`,
+		`create index idx_comment_watches_user_unread
+			on comment_watches(user_id,unread_count desc,last_activity_at desc,id desc) where status='active'`,
 		`create index idx_comment_watches_comment_active
 			on comment_watches(comment_id,user_id) where status='active'`,
 		`create table comment_watch_replies (
@@ -98,14 +197,18 @@ func commentSchemaStatements() []string {
 			on comment_watch_replies(watch_id,created_at,comment_id) where read_at is null`,
 		`create table comment_heat_refresh_queue (
 			comment_id bigint primary key references comments(id) on delete cascade,
+			status text not null default 'pending',
 			attempts integer not null default 0 check(attempts>=0),
 			available_at timestamptz not null default now(),
 			locked_at timestamptz,
 			last_error text not null default '',
-			updated_at timestamptz not null default now()
+			updated_at timestamptz not null default now(),
+			check(status in ('pending','processing','failed'))
 		)`,
 		`create index idx_comment_heat_refresh_ready
-			on comment_heat_refresh_queue(available_at,updated_at,comment_id)`,
+			on comment_heat_refresh_queue(available_at,updated_at,comment_id) where status='pending'`,
+		`create index idx_comment_heat_refresh_stale
+			on comment_heat_refresh_queue(locked_at,comment_id) where status='processing'`,
 		`create or replace function enqueue_comment_heat_refresh(changed_comment_id bigint) returns void as $$
 		declare root_comment_id bigint;
 		begin
@@ -114,6 +217,7 @@ func commentSchemaStatements() []string {
 			insert into comment_heat_refresh_queue(comment_id,available_at,locked_at,last_error,updated_at)
 			values(root_comment_id,now(),null,'',now())
 			on conflict(comment_id) do update set available_at=least(comment_heat_refresh_queue.available_at,excluded.available_at),
+				status='pending',attempts=case when comment_heat_refresh_queue.status='failed' then 0 else comment_heat_refresh_queue.attempts end,
 				locked_at=null,last_error='',updated_at=now();
 		end;
 		$$ language plpgsql`,

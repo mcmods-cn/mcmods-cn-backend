@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -28,10 +30,10 @@ func queueExportDocumentEntries(batch *modExportWriteBatch, resolver catalogReso
 		return err
 	}
 	entries := exportDocumentEntries(assetPath, document)
-	for ordinal, entry := range entries {
-		revisionID := exportRevisionForNamespace(revisions, entry.Namespace)
-		if revisionID == "" {
-			continue
+	for _, entry := range entries {
+		revisionID, revisionErr := exportRevisionForNamespace(revisions, entry.Namespace)
+		if revisionErr != nil {
+			return fmt.Errorf("document %s entry %q: %w", assetPath, entry.ID, revisionErr)
 		}
 		encodedNames, err := json.Marshal(supportedExportNames(entry.Names))
 		if err != nil {
@@ -60,21 +62,19 @@ func queueExportDocumentEntries(batch *modExportWriteBatch, resolver catalogReso
 			TranslationKey: entry.TranslationKey, Names: string(encodedNames), Data: string(encodedData),
 			IconPath: entry.IconPath, PreviewPath: entry.PreviewPath,
 		})
-		_ = ordinal
 	}
 	return nil
 }
 
-func exportRevisionForNamespace(revisions map[string]string, namespace string) string {
-	if revisionID := revisions[strings.ToLower(strings.TrimSpace(namespace))]; revisionID != "" {
-		return revisionID
+func exportRevisionForNamespace(revisions map[string]string, namespace string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(namespace))
+	if normalized == "" {
+		return "", errors.New("entry has no namespace")
 	}
-	if len(revisions) == 1 {
-		for _, revisionID := range revisions {
-			return revisionID
-		}
+	if revisionID := strings.TrimSpace(revisions[normalized]); revisionID != "" {
+		return revisionID, nil
 	}
-	return ""
+	return "", fmt.Errorf("namespace %q has no import revision", normalized)
 }
 
 func resolveExportResourceIdentity(
@@ -99,12 +99,20 @@ func exportSourceResourceParts(sourceKind, objectID, explicitNamespace string) (
 		resourcePath := objectID
 		if namespace == "" {
 			var found bool
-			namespace, resourcePath, found = strings.Cut(objectID, ".")
+			// Exporters use both mod.keyinfo.action and key.mod.action.
+			// "key" is a translation-key prefix, never an owning namespace.
+			namespace, resourcePath, found = strings.Cut(strings.TrimPrefix(objectID, "key."), ".")
 			if !found {
 				return "", "", false
 			}
 		} else {
-			resourcePath = strings.TrimPrefix(objectID, namespace+".")
+			if strings.HasPrefix(objectID, namespace+".") {
+				resourcePath = strings.TrimPrefix(objectID, namespace+".")
+			} else if strings.HasPrefix(objectID, "key."+namespace+".") {
+				resourcePath = strings.TrimPrefix(objectID, "key."+namespace+".")
+			} else {
+				return "", "", false
+			}
 		}
 		return namespace, strings.TrimSpace(resourcePath), namespace != "" && strings.TrimSpace(resourcePath) != ""
 	}
@@ -130,8 +138,60 @@ func validateCatalogDocumentContract(assetPath string, document map[string]any) 
 		if exported, exists := document["internal_templates_exported"]; exists && exported != false {
 			return fmt.Errorf("%s must not export internal structure templates", assetPath)
 		}
+	case "worldgen/data_files.json":
+		files, valid := document["files"].([]any)
+		if !valid {
+			return fmt.Errorf("%s files must be an array", assetPath)
+		}
+		for index, value := range files {
+			file, valid := value.(map[string]any)
+			if !valid {
+				return fmt.Errorf("%s file %d must be an object", assetPath, index)
+			}
+			if _, err := exportWorldgenDataResourceID(file); err != nil {
+				return fmt.Errorf("%s file %d: %w", assetPath, index, err)
+			}
+		}
 	}
 	return nil
+}
+
+// Worldgen v1 supplies a resource_id separately from the archive path and
+// object_id. The resource identity includes its registry directory and .json
+// suffix; using object_id would merge different kinds of source files.
+func exportWorldgenDataResourceID(file map[string]any) (string, error) {
+	resourceID := strings.TrimSpace(exportString(file["resource_id"]))
+	explicitID := strings.TrimSpace(exportString(file["id"]))
+	assetPath := strings.TrimSpace(exportString(file["path"]))
+	if resourceID == "" {
+		resourceID = explicitID
+	}
+	if resourceID == "" && assetPath != "" {
+		parts := strings.SplitN(assetPath, "/", 3)
+		if len(parts) != 3 || parts[0] != "data" {
+			return "", errors.New("worldgen file path must be data/<namespace>/<resource path>")
+		}
+		resourceID = parts[1] + ":" + parts[2]
+	}
+	namespace, resourcePath, found := strings.Cut(resourceID, ":")
+	invalidPart := func(value string, allowSlash bool) bool {
+		return value == "" || strings.IndexFunc(value, func(character rune) bool {
+			return !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' || character == '-' || character == '.' || allowSlash && character == '/')
+		}) >= 0
+	}
+	if !found || invalidPart(namespace, false) || invalidPart(resourcePath, true) || strings.HasPrefix(resourcePath, "/") || path.Clean(resourcePath) != resourcePath || resourcePath == "." || resourcePath == ".." || strings.HasPrefix(resourcePath, "../") {
+		return "", fmt.Errorf("invalid worldgen file resource identity %q", resourceID)
+	}
+	if explicitID != "" && explicitID != resourceID {
+		return "", errors.New("worldgen file id conflicts with resource_id")
+	}
+	if explicitNamespace := strings.TrimSpace(exportString(file["namespace"])); explicitNamespace != "" && explicitNamespace != namespace {
+		return "", errors.New("worldgen file namespace conflicts with resource identity")
+	}
+	if assetPath != "" && assetPath != "data/"+namespace+"/"+resourcePath {
+		return "", errors.New("worldgen file path conflicts with resource identity")
+	}
+	return resourceID, nil
 }
 
 func exportDocumentKind(assetPath string) string {
@@ -217,8 +277,9 @@ func exportDocumentEntries(assetPath string, document map[string]any) []exportDo
 				entry.ID = strings.TrimSpace(exportString(value["unique_id"]))
 			}
 		}
-		if assetPath == "worldgen/data_files.json" && entry.ID == "" {
-			entry.ID = strings.TrimSpace(exportString(value["path"]))
+		if assetPath == "worldgen/data_files.json" {
+			// The queue validates the complete contract before materialization.
+			entry.ID, _ = exportWorldgenDataResourceID(value)
 		}
 		if assetPath == "advancements/advancements.json" {
 			display := exportObject(value["display"])
@@ -283,12 +344,10 @@ func exportDocumentEntries(assetPath string, document map[string]any) []exportDo
 			}
 		}
 		entry.Namespace = strings.TrimSpace(exportString(value["namespace"]))
-		if entry.Namespace == "" {
-			separator := ":"
-			if assetPath == "registries/key_mappings.json" {
-				separator = "."
-			}
-			entry.Namespace, _, _ = strings.Cut(entry.ID, separator)
+		if assetPath == "registries/key_mappings.json" {
+			entry.Namespace, _, _ = exportSourceResourceParts("key_mappings", entry.ID, entry.Namespace)
+		} else if entry.Namespace == "" {
+			entry.Namespace, _, _ = strings.Cut(entry.ID, ":")
 		}
 		if entry.ID != "" {
 			result = append(result, entry)

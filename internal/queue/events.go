@@ -1,10 +1,16 @@
 package queue
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
+
+var ErrInvalidEventEnvelope = errors.New("invalid event envelope")
 
 type EventEnvelope struct {
 	EventID       string          `json:"event_id"`
@@ -28,10 +34,15 @@ func EventIDFromContext(ctx context.Context) string {
 	return value
 }
 
-func UnwrapEvent(raw []byte) ([]byte, *EventEnvelope) {
+func UnwrapEvent(raw []byte) ([]byte, *EventEnvelope, error) {
 	var envelope EventEnvelope
-	if json.Unmarshal(raw, &envelope) == nil && envelope.EventID != "" && envelope.SchemaVersion > 0 && envelope.Payload != nil {
-		return envelope.Payload, &envelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidEventEnvelope, err)
 	}
-	return raw, nil
+	if strings.TrimSpace(envelope.EventID) == "" || strings.TrimSpace(envelope.EventType) == "" || envelope.SchemaVersion != 1 ||
+		envelope.OccurredAt.IsZero() || strings.TrimSpace(envelope.AggregateType) == "" || strings.TrimSpace(envelope.AggregateID) == "" ||
+		len(envelope.Payload) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Payload), []byte("null")) {
+		return nil, nil, ErrInvalidEventEnvelope
+	}
+	return envelope.Payload, &envelope, nil
 }

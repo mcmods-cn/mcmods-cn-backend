@@ -16,7 +16,13 @@ import (
 	"mcmods-cn-backend/internal/security"
 )
 
-const maxAIProviderResponseBytes = int64(8 << 20)
+const (
+	maxAIProviderResponseBytes         = int64(8 << 20)
+	maxAITranslationPromptBytes        = 1 << 20
+	maxAITranslationOutputTokens       = 32768
+	aiTranslationRequestOverheadTokens = int64(1024)
+	aiTranslationSystemPrompt          = "You are a precise localization translator. Respond with JSON only."
+)
 
 type aiTaskUsage struct {
 	InputTokens  int64
@@ -47,6 +53,15 @@ type anthropicCompletionResponse struct {
 	} `json:"usage"`
 }
 
+type preparedAITask struct {
+	provider          aiProviderConfig
+	model             aiModelConfig
+	prompt            string
+	timeout           time.Duration
+	maxOutputTokens   int
+	reservationTokens int64
+}
+
 func (worker *AIWorker) executeTask(
 	ctx context.Context,
 	taskType string,
@@ -54,40 +69,92 @@ func (worker *AIWorker) executeTask(
 	modelID string,
 	rawPayload []byte,
 ) (map[string]any, aiTaskUsage, error) {
+	prepared, err := worker.prepareTask(ctx, taskType, providerCode, modelID, rawPayload)
+	if err != nil {
+		return nil, aiTaskUsage{}, err
+	}
+	return worker.executePreparedTask(ctx, prepared)
+}
+
+func (worker *AIWorker) prepareTask(
+	ctx context.Context,
+	taskType string,
+	providerCode string,
+	modelID string,
+	rawPayload []byte,
+) (preparedAITask, error) {
 	if taskType != aiTaskPermissionTranslation && taskType != aiTaskI18nTranslation &&
 		taskType != aiTaskNotificationTranslation && taskType != aiTaskContentTranslation {
-		return nil, aiTaskUsage{}, fmt.Errorf("unsupported AI task type: %s", taskType)
+		return preparedAITask{}, fmt.Errorf("unsupported AI task type: %s", taskType)
 	}
 	cfg := aiConfigFromDatabase(ctx, worker.db, worker.settingsEncryptionKey)
 	provider, model, ok := resolveAIModel(cfg, providerCode+"/"+modelID)
 	if !ok {
-		return nil, aiTaskUsage{}, errors.New("AI task provider or model is unavailable")
+		return preparedAITask{}, errors.New("AI task provider or model is unavailable")
 	}
 	binding, ok := findAITaskModel(cfg.TaskModels, taskType)
 	if !ok {
-		return nil, aiTaskUsage{}, errors.New("AI task model binding is missing")
+		return preparedAITask{}, errors.New("AI task model binding is missing")
 	}
 	timeout := time.Duration(binding.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	requestContext, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
 	prompt, err := buildTranslationPrompt(taskType, binding.Prompt, rawPayload)
 	if err != nil {
-		return nil, aiTaskUsage{}, err
+		return preparedAITask{}, err
 	}
-	content, usage, err := requestAICompletion(requestContext, provider, model.Model, prompt)
+	maxOutputTokens, reservationTokens, err := aiTranslationTokenReservation(model, prompt)
 	if err != nil {
-		return nil, aiTaskUsage{}, err
+		return preparedAITask{}, err
+	}
+	return preparedAITask{
+		provider: provider, model: model, prompt: prompt, timeout: timeout,
+		maxOutputTokens: maxOutputTokens, reservationTokens: reservationTokens,
+	}, nil
+}
+
+func (worker *AIWorker) executePreparedTask(ctx context.Context, prepared preparedAITask) (map[string]any, aiTaskUsage, error) {
+	requestContext, cancel := context.WithTimeout(ctx, prepared.timeout)
+	defer cancel()
+	content, usage, err := requestAICompletion(
+		requestContext, prepared.provider, prepared.model.Model, prepared.prompt, prepared.maxOutputTokens,
+	)
+	usage.CostMicros = calculateAICostMicros(prepared.model, usage)
+	if err != nil {
+		return nil, usage, err
 	}
 	result, err := parseAIJSONResult(content)
 	if err != nil {
-		return nil, aiTaskUsage{}, err
+		return nil, usage, err
 	}
-	usage.CostMicros = calculateAICostMicros(model, usage)
 	return result, usage, nil
+}
+
+func aiTranslationTokenReservation(model aiModelConfig, prompt string) (int, int64, error) {
+	promptBytes := len([]byte(prompt))
+	if promptBytes > maxAITranslationPromptBytes {
+		return 0, 0, fmt.Errorf("AI translation prompt exceeds %d bytes", maxAITranslationPromptBytes)
+	}
+	if model.ContextTokens <= 0 || model.MaxOutputTokens <= 0 {
+		return 0, 0, errors.New("AI model token limits are unavailable")
+	}
+	inputReservation := int64(promptBytes) + aiTranslationRequestOverheadTokens
+	availableOutput := int64(model.ContextTokens) - inputReservation
+	if availableOutput <= 0 {
+		return 0, 0, errors.New("AI translation prompt exceeds the model context limit")
+	}
+	maxOutputTokens := model.MaxOutputTokens
+	if maxOutputTokens > maxAITranslationOutputTokens {
+		maxOutputTokens = maxAITranslationOutputTokens
+	}
+	if int64(maxOutputTokens) > availableOutput {
+		maxOutputTokens = int(availableOutput)
+	}
+	if maxOutputTokens <= 0 {
+		return 0, 0, errors.New("AI model has no output capacity for the translation prompt")
+	}
+	return maxOutputTokens, inputReservation + int64(maxOutputTokens), nil
 }
 
 func aiConfigFromDatabase(ctx context.Context, db *pgxpool.Pool, settingsEncryptionKey string) aiConfigPayload {
@@ -141,11 +208,12 @@ func requestAICompletion(
 	provider aiProviderConfig,
 	model string,
 	prompt string,
+	maxOutputTokens int,
 ) (string, aiTaskUsage, error) {
 	if provider.Protocol == "anthropic" {
-		return requestAnthropicCompletion(ctx, provider, model, prompt)
+		return requestAnthropicCompletion(ctx, provider, model, prompt, maxOutputTokens)
 	}
-	return requestOpenAICompatibleCompletion(ctx, provider, model, prompt)
+	return requestOpenAICompatibleCompletion(ctx, provider, model, prompt, maxOutputTokens)
 }
 
 func requestOpenAICompatibleCompletion(
@@ -153,11 +221,13 @@ func requestOpenAICompatibleCompletion(
 	provider aiProviderConfig,
 	model string,
 	prompt string,
+	maxOutputTokens int,
 ) (string, aiTaskUsage, error) {
 	body := map[string]any{
-		"model": model,
+		"model":      model,
+		"max_tokens": maxOutputTokens,
 		"messages": []map[string]string{
-			{"role": "system", "content": "You are a precise localization translator. Respond with JSON only."},
+			{"role": "system", "content": aiTranslationSystemPrompt},
 			{"role": "user", "content": prompt},
 		},
 		"temperature": 0.1,
@@ -172,13 +242,14 @@ func requestOpenAICompatibleCompletion(
 	); err != nil {
 		return "", aiTaskUsage{}, err
 	}
-	if len(response.Choices) == 0 || strings.TrimSpace(response.Choices[0].Message.Content) == "" {
-		return "", aiTaskUsage{}, errors.New("AI provider returned no translated content")
-	}
-	return response.Choices[0].Message.Content, aiTaskUsage{
+	usage := aiTaskUsage{
 		InputTokens:  response.Usage.PromptTokens,
 		OutputTokens: response.Usage.CompletionTokens,
-	}, nil
+	}
+	if len(response.Choices) == 0 || strings.TrimSpace(response.Choices[0].Message.Content) == "" {
+		return "", usage, errors.New("AI provider returned no translated content")
+	}
+	return response.Choices[0].Message.Content, usage, nil
 }
 
 func requestAnthropicCompletion(
@@ -186,11 +257,12 @@ func requestAnthropicCompletion(
 	provider aiProviderConfig,
 	model string,
 	prompt string,
+	maxOutputTokens int,
 ) (string, aiTaskUsage, error) {
 	body := map[string]any{
 		"model":       model,
-		"max_tokens":  8192,
-		"system":      "You are a precise localization translator. Respond with JSON only.",
+		"max_tokens":  maxOutputTokens,
+		"system":      aiTranslationSystemPrompt,
 		"messages":    []map[string]string{{"role": "user", "content": prompt}},
 		"temperature": 0.1,
 	}
@@ -213,13 +285,14 @@ func requestAnthropicCompletion(
 			parts = append(parts, item.Text)
 		}
 	}
-	if len(parts) == 0 {
-		return "", aiTaskUsage{}, errors.New("AI provider returned no translated content")
-	}
-	return strings.Join(parts, "\n"), aiTaskUsage{
+	usage := aiTaskUsage{
 		InputTokens:  response.Usage.InputTokens,
 		OutputTokens: response.Usage.OutputTokens,
-	}, nil
+	}
+	if len(parts) == 0 {
+		return "", usage, errors.New("AI provider returned no translated content")
+	}
+	return strings.Join(parts, "\n"), usage, nil
 }
 
 func sendAIJSONRequest(ctx context.Context, endpoint string, headers map[string]string, payload any, target any) error {
@@ -296,28 +369,40 @@ func calculateAICostMicros(model aiModelConfig, usage aiTaskUsage) int64 {
 	return int64(inputCost + outputCost)
 }
 
-func (worker *AIWorker) persistNotificationTranslation(ctx context.Context, userID int64, rawPayload []byte, result map[string]any) {
-	var payload struct {
-		NotificationID int64  `json:"notificationId"`
-		TargetLocale   string `json:"targetLocale"`
+type notificationTranslationPayload struct {
+	NotificationID int64  `json:"notificationId"`
+	TargetLocale   string `json:"targetLocale"`
+}
+
+func decodeNotificationTranslation(rawPayload []byte, result map[string]any) (notificationTranslationPayload, map[string]string, error) {
+	var payload notificationTranslationPayload
+	if err := json.Unmarshal(rawPayload, &payload); err != nil {
+		return notificationTranslationPayload{}, nil, fmt.Errorf("decode notification translation payload: %w", err)
 	}
-	if json.Unmarshal(rawPayload, &payload) != nil || payload.NotificationID <= 0 || payload.TargetLocale == "" {
-		return
+	var supported bool
+	payload.TargetLocale, supported = normalizeNotificationTranslationLocale(payload.TargetLocale)
+	if payload.NotificationID <= 0 || !supported {
+		return notificationTranslationPayload{}, nil, errors.New("notification translation payload is invalid")
 	}
-	translated := map[string]string{}
-	items, _ := result["items"].([]any)
-	for _, rawItem := range items {
-		item, _ := rawItem.(map[string]any)
-		key, _ := item["key"].(string)
-		text, _ := item["text"].(string)
-		if key != "" && text != "" {
-			translated[key] = text
-		}
+	translated, err := strictTranslationItemsToMap(result, stringSet("title", "body"))
+	if err != nil {
+		return notificationTranslationPayload{}, nil, fmt.Errorf("decode notification translation result: %w", err)
 	}
 	if translated["title"] == "" && translated["body"] == "" {
-		return
+		return notificationTranslationPayload{}, nil, errors.New("notification translation result is empty")
 	}
-	_, _ = worker.db.Exec(
+	return payload, translated, nil
+}
+
+func (worker *AIWorker) persistNotificationTranslation(ctx context.Context, userID int64, rawPayload []byte, result map[string]any) error {
+	if userID <= 0 {
+		return errors.New("notification translation user is invalid")
+	}
+	payload, translated, err := decodeNotificationTranslation(rawPayload, result)
+	if err != nil {
+		return fmt.Errorf("validate notification translation: %w", err)
+	}
+	_, err = worker.db.Exec(
 		ctx,
 		`insert into notification_translations (notification_id, user_id, locale, title, body)
 		 values ($1, $2, $3, $4, $5)
@@ -329,4 +414,5 @@ func (worker *AIWorker) persistNotificationTranslation(ctx context.Context, user
 		translated["title"],
 		translated["body"],
 	)
+	return err
 }

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -31,22 +32,21 @@ func TestContentReviewQueueQueryIntegration(t *testing.T) {
 	}
 	defer pool.Close()
 
-	rows, err := pool.Query(ctx, contentReviewQueueQuery, []string{}, true, true, int64(0))
-	if err != nil {
+	var itemsJSON, facetsJSON []byte
+	var total int64
+	if err = pool.QueryRow(ctx, contentReviewQueueQuery, []string{}, true, true, int64(0), "", "", "", "", 50, int64(0)).
+		Scan(&itemsJSON, &total, &facetsJSON); err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var item modContentReviewItem
-		if err = rows.Scan(
-			&item.ID, &item.Source, &item.Category, &item.Operation, &item.AggregateType,
-			&item.ProjectType, &item.ProjectID, &item.ModSiteID, &item.ModName, &item.SubmittedBy,
-			&item.UserID, &item.Username, &item.Title, &item.Summary, &item.CreatedAt, &item.RequiresGlobal,
-		); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err = rows.Err(); err != nil {
+	var items []modContentReviewItem
+	if err = json.Unmarshal(itemsJSON, &items); err != nil {
 		t.Fatal(err)
+	}
+	var facets map[string]json.RawMessage
+	if err = json.Unmarshal(facetsJSON, &facets); err != nil {
+		t.Fatal(err)
+	}
+	if total < int64(len(items)) || facets["categories"] == nil || facets["operations"] == nil || facets["projectTypes"] == nil {
+		t.Fatalf("invalid queue aggregate: total=%d items=%d facets=%s", total, len(items), facetsJSON)
 	}
 }

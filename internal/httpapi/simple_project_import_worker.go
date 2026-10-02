@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -13,81 +12,44 @@ import (
 )
 
 func importModrinthSimpleProject(ctx context.Context, client *http.Client, cfg modImportConfig, projectType, sourceURL, reference string) (simpleProjectSnapshot, error) {
-	headers := providerHeaders(cfg.UserAgent, "", "")
-	if cfg.Modrinth.Token != "" {
-		headers.Set("Authorization", cfg.Modrinth.Token)
+	snapshot, err := loadModrinthProviderSnapshot(ctx, client, cfg, reference)
+	if err != nil {
+		return simpleProjectSnapshot{}, err
 	}
-	var project modrinthProject
-	if err := getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(reference), headers, &project); err != nil {
-		return simpleProjectSnapshot{}, fmt.Errorf("read Modrinth project: %w", err)
-	}
-	var versions []modrinthVersion
-	_ = getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(project.ID)+"/version", headers, &versions)
+	project := snapshot.Project
 	gameVersions := append([]string(nil), project.GameVersions...)
 	externalLoaders := append([]string(nil), project.Loaders...)
-	for _, version := range versions {
+	for _, version := range snapshot.Versions {
 		gameVersions = append(gameVersions, version.GameVersions...)
 		externalLoaders = append(externalLoaders, version.Loaders...)
 	}
 	if !modrinthProjectMatchesSimpleType(projectType, project.ProjectType, externalLoaders) {
 		return simpleProjectSnapshot{}, fmt.Errorf("the Modrinth project is not a %s", projectImportDisplayName(projectType))
 	}
-	authors := make([]modAuthorPayload, 0)
-	if project.Team != "" {
-		var members []modrinthTeamMember
-		if getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/team/"+url.PathEscape(project.Team)+"/members", headers, &members) == nil {
-			for _, member := range members {
-				name := strings.TrimSpace(member.User.Name)
-				if name == "" {
-					name = strings.TrimSpace(member.User.Username)
-				}
-				if name != "" {
-					authors = append(authors, modAuthorPayload{Name: name, Kind: "author", AvatarURL: member.User.AvatarURL, Role: member.Role})
-				}
-			}
-		}
-	}
 	externalValues := append(append([]string{}, project.Categories...), project.AdditionalCategories...)
 	externalValues = append(externalValues, externalLoaders...)
-	externalValues = append(externalValues, project.Title, project.Description, project.Body)
 	return simpleProjectDraftFromExternal(simpleProjectImportData{
 		ProjectType: projectType, Provider: "modrinth", ProviderURL: sourceURL, ProviderProjectID: project.ID,
 		Slug: project.Slug, Name: project.Title, Summary: project.Description, BodyMarkdown: project.Body,
-		IconURL: project.IconURL, MinecraftVersions: gameVersions, ExternalValues: externalValues,
+		IconURL: project.IconURL, MinecraftVersions: gameVersions, StructuredValues: externalValues,
 		Status: project.Status, Archived: strings.EqualFold(project.Status, "archived"), License: project.License.ID,
-		Authors: authors, SourceCodeURL: project.SourceURL, IssuesURL: project.IssuesURL, WikiURL: project.WikiURL,
+		Authors: snapshot.Authors, SourceCodeURL: project.SourceURL, IssuesURL: project.IssuesURL, WikiURL: project.WikiURL,
 		DiscordURL: project.DiscordURL,
 	}), nil
 }
 
 func importCurseForgeSimpleProject(ctx context.Context, client *http.Client, cfg modImportConfig, projectType, sourceURL, reference string) (simpleProjectSnapshot, error) {
-	headers := providerHeaders(cfg.UserAgent, "", cfg.CurseForge.APIKey)
+	headers := providerCredentialHeaders(cfg.UserAgent, "curseforge", cfg.CurseForge.BaseURL, "", cfg.CurseForge.APIKey)
 	section := curseForgeSectionFromURL(sourceURL)
 	classID, err := curseForgeClassID(ctx, client, cfg, headers, section)
 	if err != nil {
 		return simpleProjectSnapshot{}, err
 	}
-	searchURL, _ := url.Parse(cfg.CurseForge.BaseURL + "/mods/search")
-	query := searchURL.Query()
-	query.Set("gameId", "432")
-	query.Set("classId", strconv.FormatInt(classID, 10))
-	query.Set("slug", reference)
-	query.Set("pageSize", "1")
-	searchURL.RawQuery = query.Encode()
-	var search struct {
-		Data []curseForgeMod `json:"data"`
+	snapshot, err := loadCurseForgeProviderSnapshot(ctx, client, cfg, headers, classID, reference)
+	if err != nil {
+		return simpleProjectSnapshot{}, err
 	}
-	if err = getProviderJSON(ctx, client, searchURL.String(), headers, &search); err != nil {
-		return simpleProjectSnapshot{}, fmt.Errorf("search CurseForge project: %w", err)
-	}
-	if len(search.Data) == 0 || !strings.EqualFold(search.Data[0].Slug, reference) || search.Data[0].ClassID != classID {
-		return simpleProjectSnapshot{}, errors.New("CurseForge project was not found in the requested section")
-	}
-	project := search.Data[0]
-	var description struct {
-		Data string `json:"data"`
-	}
-	_ = getProviderJSON(ctx, client, cfg.CurseForge.BaseURL+"/mods/"+strconv.FormatInt(project.ID, 10)+"/description", headers, &description)
+	project := snapshot.Project
 	externalValues := []string{section}
 	gameVersions := make([]string, 0, len(project.LatestFilesIndexes))
 	for _, category := range project.Categories {
@@ -107,25 +69,18 @@ func importCurseForgeSimpleProject(ctx context.Context, client *http.Client, cfg
 			}
 		}
 	}
-	externalValues = append(externalValues, project.Name, project.Summary, description.Data)
-	authors := make([]modAuthorPayload, 0, len(project.Authors))
-	for _, author := range project.Authors {
-		if name := strings.TrimSpace(author.Name); name != "" {
-			authors = append(authors, modAuthorPayload{Name: name, Kind: "author", AvatarURL: author.AvatarURL, Role: "Author"})
-		}
-	}
 	return simpleProjectDraftFromExternal(simpleProjectImportData{
 		ProjectType: projectType, Provider: "curseforge", ProviderURL: sourceURL,
 		ProviderProjectID: strconv.FormatInt(project.ID, 10), Slug: project.Slug, Name: project.Name,
-		Summary: project.Summary, BodyMarkdown: htmlToMarkdown(description.Data), IconURL: project.Logo.ThumbnailURL,
-		MinecraftVersions: gameVersions, ExternalValues: externalValues, Status: "active", Archived: !project.IsAvailable,
-		Authors: authors, SourceCodeURL: project.Links.SourceURL, IssuesURL: project.Links.IssuesURL, WikiURL: project.Links.WikiURL,
+		Summary: project.Summary, BodyMarkdown: htmlToMarkdown(snapshot.DescriptionHTML), IconURL: project.Logo.ThumbnailURL,
+		MinecraftVersions: gameVersions, StructuredValues: externalValues, Status: "active", Archived: !project.IsAvailable,
+		Authors: curseForgeAuthors(project), SourceCodeURL: project.Links.SourceURL, IssuesURL: project.Links.IssuesURL, WikiURL: project.Links.WikiURL,
 	}), nil
 }
 
 type simpleProjectImportData struct {
 	ProjectType, Provider, ProviderProjectID, Slug, Name, Summary, BodyMarkdown, IconURL string
-	MinecraftVersions, ExternalValues                                                    []string
+	MinecraftVersions, StructuredValues                                                  []string
 	Status                                                                               string
 	Archived                                                                             bool
 	License                                                                              string
@@ -134,9 +89,9 @@ type simpleProjectImportData struct {
 }
 
 func simpleProjectDraftFromExternal(data simpleProjectImportData) simpleProjectSnapshot {
-	loaders := simpleProjectLoadersFromExternal(data.ProjectType, data.ExternalValues)
-	categories := simpleProjectCategoriesFromExternal(data.ProjectType, data.ExternalValues)
-	features := simpleProjectFeaturesFromExternal(data.ProjectType, data.ExternalValues)
+	loaders := simpleProjectLoadersFromExternal(data.ProjectType, data.StructuredValues)
+	categories := simpleProjectCategoriesFromExternal(data.ProjectType, data.StructuredValues)
+	features := simpleProjectFeaturesFromExternal(data.ProjectType, data.StructuredValues)
 	draft := simpleProjectSnapshot{
 		ProjectType: data.ProjectType, SiteID: modSiteIDBase(data.Slug), DefaultLocale: "en-US",
 		Localizations:     []simpleProjectLocalization{{Locale: "en-US", Name: strings.TrimSpace(data.Name), Summary: strings.TrimSpace(data.Summary), BodyMarkdown: strings.TrimSpace(data.BodyMarkdown)}},
@@ -154,9 +109,9 @@ func simpleProjectDraftFromExternal(data simpleProjectImportData) simpleProjectS
 	}
 	switch data.ProjectType {
 	case "resource_pack":
-		draft.Resolution = simpleProjectResolutionFromExternal(data.ExternalValues)
+		draft.Resolution = simpleProjectResolutionFromExternal(data.StructuredValues)
 	case "shader_pack":
-		draft.Performance = simpleProjectPerformanceFromExternal(data.ExternalValues)
+		draft.Performance = simpleProjectPerformanceFromExternal(data.StructuredValues)
 	case "map":
 		draft.MapSize = "medium"
 	}

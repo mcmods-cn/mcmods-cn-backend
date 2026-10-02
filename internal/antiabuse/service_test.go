@@ -2,6 +2,7 @@ package antiabuse
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,6 +91,35 @@ func TestValidateSettingsRejectsUnknownPolicyAndThresholdOrder(t *testing.T) {
 	}
 }
 
+func TestValidateSettingsRejectsEverySilentlyNormalizedGlobalBound(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Settings)
+	}{
+		{"log threshold maximum", func(value *Settings) {
+			value.LogThreshold, value.ModerationThreshold, value.ChallengeThreshold, value.TempBlockThreshold, value.DenyThreshold = 101, 101, 101, 101, 101
+		}},
+		{"moderation threshold maximum", func(value *Settings) {
+			value.ModerationThreshold, value.ChallengeThreshold, value.TempBlockThreshold, value.DenyThreshold = 201, 201, 201, 201
+		}},
+		{"challenge threshold maximum", func(value *Settings) {
+			value.ChallengeThreshold, value.TempBlockThreshold, value.DenyThreshold = 301, 301, 301
+		}},
+		{"temporary block threshold maximum", func(value *Settings) { value.TempBlockThreshold, value.DenyThreshold = 501, 501 }},
+		{"trusted level minimum", func(value *Settings) { value.TrustedMinimumLevel = -1 }},
+		{"trusted level maximum", func(value *Settings) { value.TrustedMinimumLevel = 1001 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := DefaultSettings()
+			test.mutate(&value)
+			if ValidateSettings(value) == nil {
+				t.Fatalf("out-of-range settings were accepted: %+v", value)
+			}
+		})
+	}
+}
+
 func TestTrustAndRestrictionClassification(t *testing.T) {
 	now := time.Now()
 	settings := DefaultSettings()
@@ -99,13 +129,38 @@ func TestTrustAndRestrictionClassification(t *testing.T) {
 	if got := classifyTrust(accountProfile{CreatedAt: now.Add(-365 * 24 * time.Hour), EmailVerified: true, Level: 10}, settings, now); got != "trusted" {
 		t.Fatalf("established contributor classified as %q", got)
 	}
-	profile := accountProfile{RestrictionMode: "no_comment", RestrictionActions: []string{"comment.create"}, RestrictionEnd: now.Add(time.Hour)}
-	if !restrictionApplies(profile, "comment.create", now) || restrictionApplies(profile, "message.send", now) {
-		t.Fatal("action-scoped restriction mapping is incorrect")
+	profile := accountProfile{RestrictionMode: "no_comment", RestrictionEnd: now.Add(time.Hour),
+		RestrictionChallengeEnd: now.Add(time.Hour), RestrictionModerationEnd: now.Add(time.Hour)}
+	if !restrictionApplies(profile, now) || !profile.RestrictionChallengeEnd.After(now) || !profile.RestrictionModerationEnd.After(now) {
+		t.Fatal("action-scoped restriction effects were not retained")
 	}
-	profile.RestrictionMode = "challenge"
-	if restrictionApplies(profile, "comment.create", now) || !restrictionMatchesAction(profile, "comment.create", now) {
-		t.Fatal("challenge restriction must challenge rather than hard-block")
+	profile.RestrictionMode = ""
+	if restrictionApplies(profile, now) {
+		t.Fatal("challenge and moderation effects must not become a hard block")
+	}
+}
+
+func TestAccountRestrictionQueryFiltersBeforeAggregationAndScopesCacheByAction(t *testing.T) {
+	t.Parallel()
+	definition := strings.ToLower(strings.Join(strings.Fields(accountProfileSQL), " "))
+	for _, required := range []string{
+		"restriction.actions&&array[$4,'*']::text[]",
+		"filter(where mode not in ('challenge','moderation'))",
+		"filter(where mode='challenge')",
+		"filter(where mode='moderation')",
+	} {
+		if !strings.Contains(definition, required) {
+			t.Fatalf("account restriction query is missing %q", required)
+		}
+	}
+	if strings.Contains(definition, "limit 1") {
+		t.Fatal("account restriction query truncates active restrictions before matching the action")
+	}
+	service := &Service{cfg: config.AntiAbuseConfig{IPHashSecret: "test-only"}}
+	commentKey := service.accountCacheKey(42, "ip", "device", "comment.create")
+	messageKey := service.accountCacheKey(42, "ip", "device", "message.send")
+	if commentKey == messageKey || !strings.HasPrefix(commentKey, accountCacheKeyPrefix+"42:") {
+		t.Fatalf("account cache is not action-scoped: comment=%q message=%q", commentKey, messageKey)
 	}
 }
 
@@ -121,7 +176,7 @@ func TestNetworkAndClientSignals(t *testing.T) {
 func TestAccountStateInvalidationOnlyRemovesTargetAccount(t *testing.T) {
 	ctx := context.Background()
 	cache := querycache.New(config.RedisConfig{})
-	service := New(config.AntiAbuseConfig{}, nil, cache)
+	service := New(context.Background(), config.AntiAbuseConfig{}, nil, cache)
 	targetPrefix := accountCacheKeyPrefix + "42:"
 	targetKeys := []string{targetPrefix + "ip-a:device-a", targetPrefix + "ip-b:device-b"}
 	otherKey := accountCacheKeyPrefix + "43:ip-a:device-a"

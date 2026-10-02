@@ -1,85 +1,55 @@
 package httpapi
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
-const fabricLoaderVersionsURL = "https://meta.fabricmc.net/v2/versions/loader/"
-
-func resolveMRPackLoaderVersion(ctx context.Context, minecraftVersion, loader string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(loader)) {
-	case "fabric":
-		payload, err := fetchMinecraftSource(ctx, fabricLoaderVersionsURL+minecraftVersion)
-		if err != nil {
-			return "", err
-		}
-		var items []struct {
-			Loader struct {
-				Version string `json:"version"`
-				Stable  bool   `json:"stable"`
-			} `json:"loader"`
-		}
-		if err = json.Unmarshal(payload, &items); err != nil {
-			return "", err
-		}
-		for _, item := range items {
-			if item.Loader.Stable && item.Loader.Version != "" {
-				return item.Loader.Version, nil
-			}
-		}
-		for _, item := range items {
-			if item.Loader.Version != "" {
-				return item.Loader.Version, nil
-			}
-		}
-	case "forge":
-		payload, err := fetchMinecraftSource(ctx, forgeMavenMetadataURL)
-		if err != nil {
-			return "", err
-		}
-		versions, err := decodeMavenMetadataVersions(payload)
-		if err != nil {
-			return "", err
-		}
-		return selectLoaderArtifactVersion(versions, minecraftVersion+"-")
-	case "neoforge":
-		url := neoForgeMavenMetadataURL
-		if minecraftVersion == "1.20.1" {
-			url = neoForgeLegacyMetadataURL
-		}
-		payload, err := fetchMinecraftSource(ctx, url)
-		if err != nil {
-			return "", err
-		}
-		versions, err := decodeMavenMetadataVersions(payload)
-		if err != nil {
-			return "", err
-		}
-		prefix := neoForgeArtifactPrefix(minecraftVersion)
-		return selectLoaderArtifactVersion(versions, prefix)
-	}
-	return "", errors.New("no loader version is available for the selected Minecraft version")
-}
-
-func neoForgeArtifactPrefix(minecraftVersion string) string {
+func neoForgeArtifactPrefix(minecraftVersion string) (string, error) {
+	minecraftVersion = strings.TrimSpace(minecraftVersion)
 	if minecraftVersion == "1.20.1" {
-		return "1.20.1-"
+		return "1.20.1-", nil
 	}
 	parts := strings.Split(minecraftVersion, ".")
-	if len(parts) >= 2 {
-		return strings.TrimLeft(parts[1], "0") + "." + firstNonEmpty(strings.TrimLeft(parts[len(parts)-1], "0"), "0") + "."
+	if len(parts) < 2 || len(parts) > 3 {
+		return "", fmt.Errorf("unsupported Minecraft version %q for NeoForge artifacts", minecraftVersion)
 	}
-	return minecraftVersion + "-"
+	components := make([]int, len(parts))
+	for index, part := range parts {
+		if part == "" {
+			return "", fmt.Errorf("unsupported Minecraft version %q for NeoForge artifacts", minecraftVersion)
+		}
+		for _, character := range part {
+			if character < '0' || character > '9' {
+				return "", fmt.Errorf("unsupported Minecraft version %q for NeoForge artifacts", minecraftVersion)
+			}
+		}
+		value, err := strconv.Atoi(part)
+		if err != nil {
+			return "", fmt.Errorf("unsupported Minecraft version %q for NeoForge artifacts", minecraftVersion)
+		}
+		components[index] = value
+	}
+	patch := 0
+	if len(components) == 3 {
+		patch = components[2]
+	}
+	if components[0] == 1 && components[1] >= 20 {
+		return fmt.Sprintf("%d.%d.", components[1], patch), nil
+	}
+	if components[0] >= 26 {
+		return fmt.Sprintf("%d.%d.%d.", components[0], components[1], patch), nil
+	}
+	return "", fmt.Errorf("unsupported Minecraft version %q for NeoForge artifacts", minecraftVersion)
 }
 
 func selectLoaderArtifactVersion(versions []string, prefix string) (string, error) {
 	matches := make([]string, 0)
 	for _, version := range versions {
-		if strings.HasPrefix(version, prefix) && !strings.Contains(strings.ToLower(version), "beta") {
+		if stableLoaderArtifactVersion(version, prefix) {
 			matches = append(matches, version)
 		}
 	}
@@ -92,6 +62,27 @@ func selectLoaderArtifactVersion(versions []string, prefix string) (string, erro
 		selected = strings.TrimPrefix(selected, prefix)
 	}
 	return selected, nil
+}
+
+func stableLoaderArtifactVersion(version, prefix string) bool {
+	if prefix == "" || !strings.HasPrefix(version, prefix) {
+		return false
+	}
+	release := strings.TrimPrefix(version, prefix)
+	if release == "" {
+		return false
+	}
+	for _, component := range strings.Split(release, ".") {
+		if component == "" {
+			return false
+		}
+		for _, character := range component {
+			if character < '0' || character > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func compareNumericVersion(left, right string) int {

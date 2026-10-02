@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,9 +14,31 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"mcmods-cn-backend/internal/queue"
+	"mcmods-cn-backend/internal/security"
 )
 
-const favoriteModpackExportTaskCode = "favorite_modpack_export"
+const (
+	favoriteModpackExportTaskCode       = "favorite_modpack_export"
+	favoriteModpackExportReportVersion  = 1
+	favoriteModpackExportSourceCurrent  = "current_collection"
+	favoriteModpackExportSourceOriginal = "original_snapshot"
+)
+
+var (
+	errFavoriteExportConcurrencyLimit  = errors.New("favorite export active task limit reached")
+	errFavoriteExportDailyLimit        = errors.New("favorite export daily task limit reached")
+	errFavoriteExportDuplicateCooldown = errors.New("favorite export duplicate cooldown active")
+)
+
+// favoriteTargetNameSQL is the one export-report name projection for the
+// generation 89 favorite target closed set. Keep it beside
+// favoriteTargetJoinsSQL so every supported non-Mod item has an auditable
+// stable name even though MRPack intentionally skips it.
+const favoriteTargetNameSQL = `case item.entity_type
+	when 'mod' then mods.primary_name
+	when 'modpack' then modpack.primary_name
+	when 'blueprint' then blueprint.title
+	else null end`
 
 func favoriteExportMaxActive(value int) int {
 	if value <= 0 {
@@ -42,6 +65,7 @@ const (
 	exportReasonMissingSHA512                = "MISSING_SHA512"
 	exportReasonMissingFileSize              = "MISSING_FILE_SIZE"
 	exportReasonRequiredDependencyUnresolved = "REQUIRED_DEPENDENCY_UNRESOLVED"
+	exportReasonFilePathConflict             = "FILE_PATH_CONFLICT"
 	exportReasonProjectHidden                = "PROJECT_HIDDEN"
 	exportReasonDuplicateProject             = "DUPLICATE_PROJECT"
 	exportReasonExternalAPIError             = "EXTERNAL_API_ERROR"
@@ -51,6 +75,8 @@ const (
 type favoriteModpackExportRequest struct {
 	MinecraftVersion      string `json:"minecraftVersion"`
 	Loader                string `json:"loader"`
+	PreviewID             string `json:"previewId"`
+	PreviewHash           string `json:"previewHash"`
 	ExportCompatibleOnly  bool   `json:"exportCompatibleOnly"`
 	ConfirmCompatibleOnly bool   `json:"confirmCompatibleOnly"`
 }
@@ -80,19 +106,29 @@ type favoriteModpackExportItem struct {
 	DependencyOf           []string `json:"dependencyOf,omitempty"`
 }
 
-type favoriteModpackExportPreview struct {
+type favoriteModpackExportPreviewSnapshot struct {
 	CollectionID        int64                       `json:"-"`
 	CollectionPublicID  string                      `json:"collectionId"`
 	CollectionName      string                      `json:"collectionName"`
 	MinecraftVersion    string                      `json:"minecraftVersion"`
 	Loader              string                      `json:"loader"`
 	LoaderVersion       string                      `json:"loaderVersion"`
+	AllowCompatibleOnly bool                        `json:"allowCompatibleOnly"`
+	ReportVersion       int                         `json:"reportVersion"`
+	RebuildSource       string                      `json:"rebuildSource"`
 	CollectionItemCount int                         `json:"collectionItemCount"`
 	ExportedModCount    int                         `json:"exportedModCount"`
 	AutoDependencyCount int                         `json:"autoDependencyCount"`
 	SkippedItemCount    int                         `json:"skippedItemCount"`
 	FailedItemCount     int                         `json:"failedItemCount"`
 	Items               []favoriteModpackExportItem `json:"items"`
+}
+
+type favoriteModpackExportPreview struct {
+	PreviewID   string    `json:"previewId"`
+	PreviewHash string    `json:"previewHash"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+	favoriteModpackExportPreviewSnapshot
 }
 
 type favoriteModpackExportMessage struct {
@@ -104,7 +140,14 @@ func (s *Server) preflightFavoriteModpackExport(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	preview, err := s.buildFavoriteModpackExportPreview(r.Context(), currentClaims(r).Subject, r.PathValue("id"), request)
+	preview, err := s.buildFavoriteModpackExportPreview(r.Context(), currentClaims(r), r.PathValue("id"), request)
+	if err != nil {
+		writeFavoriteExportError(w, err)
+		return
+	}
+	preview.ReportVersion = favoriteModpackExportReportVersion
+	preview.RebuildSource = favoriteModpackExportSourceCurrent
+	preview, err = s.persistFavoriteModpackExportPreview(r.Context(), currentClaims(r).Subject, preview)
 	if err != nil {
 		writeFavoriteExportError(w, err)
 		return
@@ -117,58 +160,75 @@ func (s *Server) createFavoriteModpackExport(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	preview, err := s.buildFavoriteModpackExportPreview(r.Context(), currentClaims(r).Subject, r.PathValue("id"), request)
-	if err != nil {
-		writeFavoriteExportError(w, err)
-		return
-	}
-	if preview.ExportedModCount+preview.AutoDependencyCount == 0 {
-		writeAPIError(w, http.StatusUnprocessableEntity, "MODPACK_EXPORT_EMPTY", "no compatible Mod can be exported", 0, nil)
-		return
-	}
-	if preview.SkippedItemCount+preview.FailedItemCount > 0 && (!request.ExportCompatibleOnly || !request.ConfirmCompatibleOnly) {
-		writeAPIError(w, http.StatusConflict, "MODPACK_EXPORT_COMPATIBLE_ONLY_CONFIRMATION_REQUIRED", "confirm exporting only compatible projects", 0, map[string]any{"preview": preview})
+	if !validCatalogPublicID(request.PreviewID) || len(request.PreviewHash) != sha256.Size*2 {
+		writeAPIError(w, http.StatusBadRequest, "MODPACK_EXPORT_PREVIEW_REQUIRED", "confirm a current export preview", 0, nil)
 		return
 	}
 	userID := currentClaims(r).Subject
-	var active, daily, recentDuplicate int
-	if err = s.db.QueryRow(r.Context(), `select
-		count(*) filter(where status in ('pending','processing')),
-		count(*) filter(where created_at>=now()-interval '24 hours'),
-		count(*) filter(where collection_id=$2 and minecraft_version=$3 and loader_type=$4 and created_at>=now()-interval '30 seconds')
-		from favorite_modpack_export_tasks where owner_user_id=$1`, userID, preview.CollectionID, preview.MinecraftVersion, preview.Loader).Scan(&active, &daily, &recentDuplicate); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to check export limits")
-		return
-	}
-	if active >= favoriteExportMaxActive(s.cfg.FavoriteExport.MaxActivePerUser) {
-		writeAPIError(w, http.StatusTooManyRequests, "MODPACK_EXPORT_CONCURRENCY_LIMIT", "too many exports are already processing", 60, nil)
-		return
-	}
-	if daily >= favoriteExportDailyLimit(s.cfg.FavoriteExport.MaxDailyPerUser) {
-		writeAPIError(w, http.StatusTooManyRequests, "MODPACK_EXPORT_DAILY_LIMIT", "daily export limit reached", 3600, nil)
-		return
-	}
-	if recentDuplicate > 0 {
-		writeAPIError(w, http.StatusTooManyRequests, "MODPACK_EXPORT_DUPLICATE_COOLDOWN", "wait before repeating the same export", 30, nil)
-		return
-	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create export task")
 		return
 	}
 	defer tx.Rollback(r.Context())
+	collectionPublicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	preview, previewRowID, err := loadFavoriteModpackExportPreviewForCreate(r.Context(), tx, userID, collectionPublicID, request)
+	if err != nil {
+		writeFavoriteExportPreviewError(w, err)
+		return
+	}
+	if favoriteExportHasPathConflict(preview.Items) {
+		writeAPIError(w, http.StatusUnprocessableEntity, "MODPACK_EXPORT_FILE_PATH_CONFLICT", "selected files have conflicting portable paths", 0, map[string]any{"preview": preview})
+		return
+	}
+	if preview.ExportedModCount+preview.AutoDependencyCount == 0 {
+		writeAPIError(w, http.StatusUnprocessableEntity, "MODPACK_EXPORT_EMPTY", "no compatible Mod can be exported", 0, nil)
+		return
+	}
+	if favoriteExportHasRequiredDependencyFailure(preview.Items) {
+		writeAPIError(w, http.StatusUnprocessableEntity, "MODPACK_EXPORT_REQUIRED_DEPENDENCY_UNRESOLVED", "a required dependency could not be resolved", 0, map[string]any{"preview": preview})
+		return
+	}
+	if preview.RebuildSource == favoriteModpackExportSourceOriginal &&
+		(request.ExportCompatibleOnly != preview.AllowCompatibleOnly || request.ConfirmCompatibleOnly != preview.AllowCompatibleOnly) {
+		writeAPIError(w, http.StatusConflict, "MODPACK_EXPORT_REBUILD_CONFIRMATION_MISMATCH", "the original compatible-only confirmation must be preserved", 0, map[string]any{"preview": preview})
+		return
+	}
+	if preview.SkippedItemCount+preview.FailedItemCount > 0 && (!request.ExportCompatibleOnly || !request.ConfirmCompatibleOnly) {
+		writeAPIError(w, http.StatusConflict, "MODPACK_EXPORT_COMPATIBLE_ONLY_CONFIRMATION_REQUIRED", "confirm exporting only compatible projects", 0, map[string]any{"preview": preview})
+		return
+	}
+	if err = reserveFavoriteModpackExportQuota(r.Context(), tx, userID, preview.CollectionPublicID,
+		preview.MinecraftVersion, preview.Loader, favoriteExportMaxActive(s.cfg.FavoriteExport.MaxActivePerUser),
+		favoriteExportDailyLimit(s.cfg.FavoriteExport.MaxDailyPerUser)); err != nil &&
+		!errors.Is(err, errFavoriteExportConcurrencyLimit) && !errors.Is(err, errFavoriteExportDailyLimit) &&
+		!errors.Is(err, errFavoriteExportDuplicateCooldown) {
+		writeError(w, http.StatusInternalServerError, "failed to check export limits")
+		return
+	}
+	if errors.Is(err, errFavoriteExportConcurrencyLimit) {
+		writeAPIError(w, http.StatusTooManyRequests, "MODPACK_EXPORT_CONCURRENCY_LIMIT", "too many exports are already processing", 60, nil)
+		return
+	}
+	if errors.Is(err, errFavoriteExportDailyLimit) {
+		writeAPIError(w, http.StatusTooManyRequests, "MODPACK_EXPORT_DAILY_LIMIT", "daily export limit reached", 3600, nil)
+		return
+	}
+	if errors.Is(err, errFavoriteExportDuplicateCooldown) {
+		writeAPIError(w, http.StatusTooManyRequests, "MODPACK_EXPORT_DUPLICATE_COOLDOWN", "wait before repeating the same export", 30, nil)
+		return
+	}
 	// Persist the pack version with the task so dispatcher retries produce the
 	// same index, while separate exports receive a readable revision identifier.
 	packVersion := time.Now().UTC().Format("2006.01.02-150405")
 	var taskID string
-	err = tx.QueryRow(r.Context(), `insert into favorite_modpack_export_tasks(owner_user_id,collection_id,pack_name,pack_version_id,
+	err = tx.QueryRow(r.Context(), `insert into favorite_modpack_export_tasks(owner_user_id,collection_id,collection_public_id_snapshot,pack_name,pack_version_id,
 		minecraft_version,loader_type,loader_version,allow_compatible_only,collection_item_count,exported_mod_count,
-		auto_dependency_count,skipped_item_count,failed_item_count,final_file_count)
-		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) returning public_id`, userID, preview.CollectionID,
-		preview.CollectionName, packVersion, preview.MinecraftVersion, preview.Loader, preview.LoaderVersion, request.ExportCompatibleOnly,
+		auto_dependency_count,skipped_item_count,failed_item_count,final_file_count,report_version)
+		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) returning public_id`, userID, nullableFavoriteCollectionID(preview.CollectionID),
+		preview.CollectionPublicID, preview.CollectionName, packVersion, preview.MinecraftVersion, preview.Loader, preview.LoaderVersion, request.ExportCompatibleOnly,
 		preview.CollectionItemCount, preview.ExportedModCount, preview.AutoDependencyCount, preview.SkippedItemCount,
-		preview.FailedItemCount, preview.ExportedModCount+preview.AutoDependencyCount).Scan(&taskID)
+		preview.FailedItemCount, preview.ExportedModCount+preview.AutoDependencyCount, preview.ReportVersion).Scan(&taskID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create export task")
 		return
@@ -190,6 +250,10 @@ func (s *Server) createFavoriteModpackExport(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
+	if err = markFavoriteModpackExportPreviewConsumed(r.Context(), tx, previewRowID); err != nil {
+		writeFavoriteExportPreviewError(w, err)
+		return
+	}
 	message := favoriteModpackExportMessage{TaskID: taskID}
 	if _, err = queue.EnqueueTx(r.Context(), tx, favoriteModpackExportTaskCode, "favorite.modpack_export.requested", "favorite_modpack_export", taskID, r.Header.Get("X-Request-ID"), message); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to enqueue export task")
@@ -202,6 +266,36 @@ func (s *Server) createFavoriteModpackExport(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusAccepted, map[string]any{"taskId": taskID, "status": "pending", "preview": preview})
 }
 
+func reserveFavoriteModpackExportQuota(ctx context.Context, tx pgx.Tx, userID int64, collectionPublicID, minecraftVersion, loader string,
+	maxActive, maxDaily int) error {
+	// Every production task insertion passes through this transaction. Holding
+	// the per-user lock until commit makes the following counts and the caller's
+	// task/item/outbox insertion one atomic quota reservation across instances.
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(
+		hashtextextended('favorite-modpack-export-quota:'||$1::bigint::text,0))`, userID); err != nil {
+		return fmt.Errorf("lock favorite export quota: %w", err)
+	}
+	var active, daily, recentDuplicate int
+	if err := tx.QueryRow(ctx, `select
+		count(*) filter(where status in ('pending','processing')),
+		count(*) filter(where created_at>=now()-interval '24 hours'),
+		count(*) filter(where collection_public_id_snapshot=$2 and minecraft_version=$3 and loader_type=$4 and created_at>=now()-interval '30 seconds')
+		from favorite_modpack_export_tasks where owner_user_id=$1`, userID, collectionPublicID, minecraftVersion, loader).
+		Scan(&active, &daily, &recentDuplicate); err != nil {
+		return err
+	}
+	if active >= maxActive {
+		return errFavoriteExportConcurrencyLimit
+	}
+	if daily >= maxDaily {
+		return errFavoriteExportDailyLimit
+	}
+	if recentDuplicate > 0 {
+		return errFavoriteExportDuplicateCooldown
+	}
+	return nil
+}
+
 func decodeFavoriteModpackExportRequest(w http.ResponseWriter, r *http.Request) (favoriteModpackExportRequest, bool) {
 	var request favoriteModpackExportRequest
 	if decodeJSON(r, &request) != nil {
@@ -210,8 +304,10 @@ func decodeFavoriteModpackExportRequest(w http.ResponseWriter, r *http.Request) 
 	}
 	request.MinecraftVersion = strings.TrimSpace(request.MinecraftVersion)
 	request.Loader = strings.ToLower(strings.TrimSpace(request.Loader))
-	if request.MinecraftVersion == "" || strings.HasSuffix(strings.ToUpper(request.MinecraftVersion), ".X") {
-		writeAPIError(w, http.StatusUnprocessableEntity, "MODPACK_EXPORT_EXACT_VERSION_REQUIRED", "select one exact Minecraft version", 0, nil)
+	request.PreviewID = strings.ToLower(strings.TrimSpace(request.PreviewID))
+	request.PreviewHash = strings.ToLower(strings.TrimSpace(request.PreviewHash))
+	if !validMinecraftVersionCode(request.MinecraftVersion) {
+		writeAPIError(w, http.StatusUnprocessableEntity, "MODPACK_EXPORT_INVALID_MINECRAFT_VERSION", "select one enabled exact Minecraft version", 0, nil)
 		return request, false
 	}
 	if _, err := mrpackLoaderDependencyKey(request.Loader); err != nil {
@@ -221,37 +317,40 @@ func decodeFavoriteModpackExportRequest(w http.ResponseWriter, r *http.Request) 
 	return request, true
 }
 
-func (s *Server) buildFavoriteModpackExportPreview(ctx context.Context, actorID int64, collectionID string, request favoriteModpackExportRequest) (favoriteModpackExportPreview, error) {
+func (s *Server) buildFavoriteModpackExportPreview(ctx context.Context, claims security.Claims, collectionID string, request favoriteModpackExportRequest) (favoriteModpackExportPreview, error) {
 	collectionID = strings.ToLower(strings.TrimSpace(collectionID))
-	var preview favoriteModpackExportPreview
+	preview := favoriteModpackExportPreview{favoriteModpackExportPreviewSnapshot: favoriteModpackExportPreviewSnapshot{}}
 	preview.CollectionPublicID, preview.MinecraftVersion, preview.Loader = collectionID, request.MinecraftVersion, request.Loader
 	if len(collectionID) != 9 {
 		return preview, pgx.ErrNoRows
 	}
-	if err := s.db.QueryRow(ctx, `select id,name from favorite_collections where public_id=$1 and (user_id=$2 or is_public)`, collectionID, actorID).Scan(&preview.CollectionID, &preview.CollectionName); err != nil {
+	if err := s.db.QueryRow(ctx, `select id,name from favorite_collections where public_id=$1 and (user_id=$2 or is_public)`, collectionID, claims.Subject).Scan(&preview.CollectionID, &preview.CollectionName); err != nil {
 		return preview, err
 	}
-	loaderVersion, err := resolveMRPackLoaderVersion(ctx, request.MinecraftVersion, request.Loader)
+	loaderVersion, err := resolveSynchronizedMRPackLoaderVersion(ctx, s.db, request.MinecraftVersion, request.Loader)
 	if err != nil {
 		return preview, fmt.Errorf("loader version: %w", err)
 	}
 	preview.LoaderVersion = loaderVersion
 	rows, err := s.db.Query(ctx, `select item.id,
-		item.entity_type,item.entity_id,route.id,route.public_id,coalesce(mods.primary_name,coalesce(modpacks.primary_name,'')),
-		coalesce(mods.review_status,coalesce(modpacks.review_status,''))
-		from favorite_collection_items item join public_routes route on route.entity_type=item.entity_type and route.internal_id=item.entity_id
-		left join mods on item.entity_type='mod' and mods.id=item.entity_id
-		left join modpacks on item.entity_type='modpack' and modpacks.id=item.entity_id
-		where item.collection_id=$1 order by item.created_at,item.entity_type,item.entity_id`, preview.CollectionID)
+		item.entity_type,item.entity_id,route.id,route.public_id,coalesce(`+favoriteTargetNameSQL+`,''),
+		coalesce(mods.review_status,coalesce(modpack.review_status,'')),coalesce(export_source.external_project_id,'')
+		from favorite_collection_items item
+		`+favoriteTargetJoinsSQL+`
+		left join project_external_sources export_source on export_source.project_route_id=route.id and export_source.source_type='modrinth'
+		where item.collection_id=$1 and `+favoriteTargetVisibilitySQL("$2", "$3")+`
+		order by item.created_at,item.entity_type,item.entity_id`, preview.CollectionID, claims.Subject,
+		claimsAllow(claims, "admin.*") || claimsAllow(claims, "project.review"))
 	if err != nil {
 		return preview, err
 	}
 	defer rows.Close()
 	seen := map[int64]struct{}{}
+	candidates := make([]favoriteExportFileCandidate, 0)
 	for rows.Next() {
 		var itemID, internalID, routeID int64
-		var entityType, publicID, name, status string
-		if err = rows.Scan(&itemID, &entityType, &internalID, &routeID, &publicID, &name, &status); err != nil {
+		var entityType, publicID, name, status, projectID string
+		if err = rows.Scan(&itemID, &entityType, &internalID, &routeID, &publicID, &name, &status, &projectID); err != nil {
 			return preview, err
 		}
 		item := favoriteModpackExportItem{SourceCollectionItemID: int64Pointer(itemID), SourceProjectRouteID: int64Pointer(routeID), SourceProjectID: publicID, SourceProjectType: entityType, SourceProjectName: name}
@@ -264,15 +363,7 @@ func (s *Server) buildFavoriteModpackExportPreview(ctx context.Context, actorID 
 			item.ResultType, item.ReasonCode = "skipped", exportReasonDuplicateProject
 		default:
 			seen[internalID] = struct{}{}
-			file, reason, detail := s.resolveFavoriteModrinthFile(ctx, routeID, request.MinecraftVersion, request.Loader)
-			if reason != "" {
-				item.ResultType, item.ReasonCode, item.ReasonDetail = "skipped", reason, detail
-				if reason == exportReasonExternalAPIError || reason == exportReasonInternalProcessingError {
-					item.ResultType = "failed"
-				}
-			} else {
-				populateFavoriteExportFile(&item, file, request)
-			}
+			candidates = append(candidates, favoriteExportFileCandidate{ItemIndex: len(preview.Items), RouteID: routeID, ProjectID: projectID})
 		}
 		preview.Items = append(preview.Items, item)
 	}
@@ -280,7 +371,41 @@ func (s *Server) buildFavoriteModpackExportPreview(ctx context.Context, actorID 
 		return preview, err
 	}
 	preview.CollectionItemCount = len(preview.Items)
-	preview.Items = s.appendFavoriteExportDependencies(ctx, preview.Items, request)
+	var providerConfig modImportConfig
+	var providerConfigErr error
+	if len(candidates) != 0 {
+		providerConfig, providerConfigErr = s.modImportConfigFromSettings(ctx)
+		resolutions, resolveErr := resolveFavoriteExportFileCandidates(ctx, candidates, func(resolveContext context.Context, candidate favoriteExportFileCandidate) favoriteExportFileResolution {
+			if candidate.ProjectID == "" {
+				return favoriteExportFileResolution{Reason: exportReasonNoModrinthSource}
+			}
+			if providerConfigErr != nil {
+				return favoriteExportFileResolution{Reason: exportReasonExternalAPIError, Detail: "provider configuration unavailable"}
+			}
+			file, reason, detail := s.resolveFavoriteModrinthProjectFile(resolveContext, candidate.ProjectID, request.MinecraftVersion, request.Loader, providerConfig)
+			return favoriteExportFileResolution{File: file, Reason: reason, Detail: detail}
+		})
+		if resolveErr != nil {
+			return preview, resolveErr
+		}
+		for index, candidate := range candidates {
+			resolution := resolutions[index]
+			item := &preview.Items[candidate.ItemIndex]
+			if resolution.Reason != "" {
+				item.ResultType, item.ReasonCode, item.ReasonDetail = "skipped", resolution.Reason, resolution.Detail
+				if resolution.Reason == exportReasonExternalAPIError || resolution.Reason == exportReasonInternalProcessingError {
+					item.ResultType = "failed"
+				}
+			} else {
+				populateFavoriteExportFile(item, resolution.File, request)
+			}
+		}
+	}
+	preview.Items, err = s.appendFavoriteExportDependencies(ctx, preview.Items, request, providerConfig)
+	if err != nil {
+		return preview, err
+	}
+	markFavoriteExportPathConflicts(preview.Items)
 	for _, item := range preview.Items {
 		switch item.ResultType {
 		case "exported":
@@ -294,63 +419,6 @@ func (s *Server) buildFavoriteModpackExportPreview(ctx context.Context, actorID 
 		}
 	}
 	return preview, nil
-}
-
-// appendFavoriteExportDependencies follows only explicit dependency
-// relationships that resolve to a real on-site Mod. Optional/name-only
-// relationships are deliberately not guessed.
-func (s *Server) appendFavoriteExportDependencies(ctx context.Context, items []favoriteModpackExportItem, request favoriteModpackExportRequest) []favoriteModpackExportItem {
-	knownRoutes := make(map[int64]int)
-	queueRoutes := make([]int64, 0)
-	for index := range items {
-		if items[index].SourceProjectRouteID != nil && items[index].ResultType == "exported" {
-			knownRoutes[*items[index].SourceProjectRouteID] = index
-			queueRoutes = append(queueRoutes, *items[index].SourceProjectRouteID)
-		}
-	}
-	for cursor := 0; cursor < len(queueRoutes) && cursor < 100; cursor++ {
-		sourceRouteID := queueRoutes[cursor]
-		sourceIndex := knownRoutes[sourceRouteID]
-		rows, err := s.db.Query(ctx, `select dependent_route.id,dependent_route.public_id,dependent.primary_name
-			from public_routes source_route join mod_relationships relationship
-			  on source_route.entity_type='mod' and relationship.mod_id=source_route.internal_id
-			join mods dependent on dependent.id=relationship.related_mod_id and dependent.review_status='approved'
-			join public_routes dependent_route on dependent_route.entity_type='mod' and dependent_route.internal_id=dependent.id
-			left join mod_relationship_groups relation_group on relation_group.id=relationship.group_id
-			where source_route.id=$1 and relationship.relation_type='dependency'
-			  and (relation_group.id is null or cardinality(relation_group.minecraft_versions)=0 or $2=any(relation_group.minecraft_versions))
-			  and (relation_group.id is null or relation_group.loader='' or lower(relation_group.loader)=lower($3))
-			order by relationship.display_order,relationship.id`, sourceRouteID, request.MinecraftVersion, request.Loader)
-		if err != nil {
-			continue
-		}
-		for rows.Next() {
-			var routeID int64
-			var publicID, name string
-			if rows.Scan(&routeID, &publicID, &name) != nil {
-				continue
-			}
-			if existingIndex, exists := knownRoutes[routeID]; exists {
-				items[existingIndex].DependencyOf = appendUniqueString(items[existingIndex].DependencyOf, items[sourceIndex].SourceProjectName)
-				continue
-			}
-			item := favoriteModpackExportItem{SourceProjectRouteID: int64Pointer(routeID), SourceProjectID: publicID,
-				SourceProjectType: "mod", SourceProjectName: name, ResultType: "auto_dependency",
-				DependencyOf: []string{items[sourceIndex].SourceProjectName}}
-			file, reason, detail := s.resolveFavoriteModrinthFile(ctx, routeID, request.MinecraftVersion, request.Loader)
-			if reason != "" {
-				item.ResultType, item.ReasonCode, item.ReasonDetail = "failed", exportReasonRequiredDependencyUnresolved, firstNonEmpty(detail, reason)
-			} else {
-				populateFavoriteExportFile(&item, file, request)
-				item.ResultType = "auto_dependency"
-				queueRoutes = append(queueRoutes, routeID)
-			}
-			knownRoutes[routeID] = len(items)
-			items = append(items, item)
-		}
-		rows.Close()
-	}
-	return items
 }
 
 func appendUniqueString(values []string, value string) []string {
@@ -371,17 +439,43 @@ func populateFavoriteExportFile(item *favoriteModpackExportItem, file providerPr
 	item.FileSize, item.SHA1, item.SHA512, item.DownloadURL = file.SizeBytes, file.SHA1, file.SHA512, file.DirectURL
 }
 
-func (s *Server) resolveFavoriteModrinthFile(ctx context.Context, routeID int64, minecraftVersion, loader string) (providerProjectFile, string, string) {
-	var projectID string
-	if err := s.db.QueryRow(ctx, `select external_project_id from project_external_sources where project_route_id=$1 and source_type='modrinth'`, routeID).Scan(&projectID); errors.Is(err, pgx.ErrNoRows) {
-		return providerProjectFile{}, exportReasonNoModrinthSource, ""
-	} else if err != nil {
-		return providerProjectFile{}, exportReasonInternalProcessingError, ""
+func markFavoriteExportPathConflicts(items []favoriteModpackExportItem) {
+	pathGroups := make(map[string][]int)
+	for index := range items {
+		if items[index].ResultType != "exported" && items[index].ResultType != "auto_dependency" {
+			continue
+		}
+		key, err := portableMRPackFilePathKey("mods/" + items[index].SelectedFileName)
+		if err != nil {
+			items[index].ResultType = "failed"
+			items[index].ReasonCode = exportReasonNoCompatibleFile
+			items[index].ReasonDetail = "unsafe JAR file path"
+			continue
+		}
+		pathGroups[key] = append(pathGroups[key], index)
 	}
-	cfg, err := s.modImportConfigFromSettings(ctx)
-	if err != nil {
-		return providerProjectFile{}, exportReasonExternalAPIError, "provider configuration unavailable"
+	for _, indices := range pathGroups {
+		if len(indices) < 2 {
+			continue
+		}
+		for _, index := range indices {
+			items[index].ResultType = "failed"
+			items[index].ReasonCode = exportReasonFilePathConflict
+			items[index].ReasonDetail = fmt.Sprintf("portable file path conflicts with %d other selected file(s)", len(indices)-1)
+		}
 	}
+}
+
+func favoriteExportHasPathConflict(items []favoriteModpackExportItem) bool {
+	for _, item := range items {
+		if item.ReasonCode == exportReasonFilePathConflict {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) resolveFavoriteModrinthProjectFile(ctx context.Context, projectID, minecraftVersion, loader string, cfg modImportConfig) (providerProjectFile, string, string) {
 	files, err := s.cachedProviderProjectFiles(ctx, "modrinth", projectID, cfg)
 	if err != nil {
 		return providerProjectFile{}, exportReasonExternalAPIError, "Modrinth API unavailable"
@@ -419,7 +513,8 @@ func (s *Server) resolveFavoriteModrinthFile(ctx context.Context, routeID int64,
 		return candidates[i].FileName < candidates[j].FileName
 	})
 	for _, file := range candidates {
-		if strings.HasSuffix(strings.ToLower(file.FileName), ".jar") && file.SHA1 != "" && file.SHA512 != "" && file.SizeBytes > 0 && verifiedModrinthDownloadURL(file.DirectURL, projectID, file.ProviderVersionID) {
+		_, pathErr := portableMRPackFilePathKey("mods/" + file.FileName)
+		if pathErr == nil && file.SHA1 != "" && file.SHA512 != "" && file.SizeBytes > 0 && verifiedModrinthDownloadURL(file.DirectURL, projectID, file.ProviderVersionID) {
 			return file, "", ""
 		}
 	}
@@ -460,15 +555,58 @@ func releaseChannelRank(value string) int {
 	return 2
 }
 func verifiedModrinthDownloadURL(raw, projectID, versionID string) bool {
-	return strings.HasPrefix(raw, "https://cdn.modrinth.com/") && strings.Contains(raw, "/data/"+projectID+"/versions/"+versionID+"/")
+	downloadProjectID, downloadVersionID, ok := modrinthDownloadIdentity(raw)
+	return ok && downloadProjectID == projectID && downloadVersionID == versionID
 }
 func int64Pointer(value int64) *int64                       { return &value }
 func hasInt64Key(values map[int64]struct{}, key int64) bool { _, ok := values[key]; return ok }
+
+func nullableFavoriteCollectionID(value int64) any {
+	if value <= 0 {
+		return nil
+	}
+	return value
+}
 
 func writeFavoriteExportError(w http.ResponseWriter, err error) {
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeAPIError(w, http.StatusNotFound, "FAVORITE_COLLECTION_NOT_FOUND", "favorite collection was not found", 0, nil)
 		return
 	}
+	if errors.Is(err, errFavoriteExportDependencyLimit) {
+		writeAPIError(w, http.StatusUnprocessableEntity, "MODPACK_EXPORT_DEPENDENCY_LIMIT", "the required dependency graph exceeds the export limit", 0, nil)
+		return
+	}
+	if errors.Is(err, errMinecraftVersionNotAuthoritative) {
+		writeAPIError(w, http.StatusUnprocessableEntity, "MODPACK_EXPORT_INVALID_MINECRAFT_VERSION", "the Minecraft version is not enabled for the selected loader", 0, nil)
+		return
+	}
+	if errors.Is(err, errMinecraftLoaderArtifactUnavailable) {
+		writeAPIError(w, http.StatusUnprocessableEntity, "MODPACK_EXPORT_LOADER_SNAPSHOT_UNAVAILABLE", "the selected loader is not available in the synchronized Minecraft catalog", 0, nil)
+		return
+	}
+	if errors.Is(err, errMinecraftVersionConfigUnavailable) || errors.Is(err, errMinecraftLoaderArtifactAuthorityUnavailable) {
+		writeAPIError(w, http.StatusInternalServerError, "MODPACK_EXPORT_CATALOG_UNAVAILABLE", "the synchronized Minecraft catalog is unavailable", 0, nil)
+		return
+	}
+	if errors.Is(err, errFavoriteModpackExportPreviewAuthority) {
+		writeAPIError(w, http.StatusInternalServerError, "MODPACK_EXPORT_PREVIEW_UNAVAILABLE", "failed to preserve the export preview", 0, nil)
+		return
+	}
 	writeAPIError(w, http.StatusBadGateway, "MODPACK_EXPORT_PREFLIGHT_FAILED", "failed to inspect the collection", 0, nil)
+}
+
+func writeFavoriteExportPreviewError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errFavoriteModpackExportPreviewExpired):
+		writeAPIError(w, http.StatusConflict, "MODPACK_EXPORT_PREVIEW_EXPIRED", "the export preview expired; inspect the collection again", 0, nil)
+	case errors.Is(err, errFavoriteModpackExportPreviewConsumed):
+		writeAPIError(w, http.StatusConflict, "MODPACK_EXPORT_PREVIEW_CONSUMED", "the export preview was already used", 0, nil)
+	case errors.Is(err, errFavoriteModpackExportPreviewNotFound):
+		writeAPIError(w, http.StatusConflict, "MODPACK_EXPORT_PREVIEW_NOT_FOUND", "the export preview is no longer available", 0, nil)
+	case errors.Is(err, errFavoriteModpackExportPreviewMismatch):
+		writeAPIError(w, http.StatusConflict, "MODPACK_EXPORT_PREVIEW_MISMATCH", "the export settings no longer match the confirmed preview", 0, nil)
+	default:
+		writeAPIError(w, http.StatusInternalServerError, "MODPACK_EXPORT_PREVIEW_UNAVAILABLE", "failed to read the confirmed export preview", 0, nil)
+	}
 }

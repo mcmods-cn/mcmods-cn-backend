@@ -2,79 +2,23 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
 	"path"
 	"path/filepath"
 	"strings"
-	"sync"
-	"time"
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"golang.org/x/sync/errgroup"
 )
 
-const (
-	maxOSSRehomeJobs        = 2
-	maxOSSRehomeConcurrency = 4
-	maxOSSRehomeQueue       = 64
-)
-
-type ossRehomeTask struct {
-	server *Server
-	modID  int64
-}
-
-type ossRehomeTaskKey struct {
-	server *Server
-	modID  int64
-}
-
-var (
-	ossRehomeQueue     = make(chan ossRehomeTask, maxOSSRehomeQueue)
-	ossRehomeWorkers   sync.Once
-	ossRehomeScheduled sync.Map
-)
+const maxOSSRehomeConcurrency = 4
 
 type modGalleryObjectForRehome struct {
 	galleryPublicID string
 	fileID          int64
 	objectKey       string
 	originalName    string
-}
-
-func (s *Server) scheduleModGalleryOSSRehome(modID int64) {
-	if modID <= 0 {
-		return
-	}
-	key := ossRehomeTaskKey{server: s, modID: modID}
-	if _, alreadyScheduled := ossRehomeScheduled.LoadOrStore(key, struct{}{}); alreadyScheduled {
-		return
-	}
-	ossRehomeWorkers.Do(func() {
-		for range maxOSSRehomeJobs {
-			go runOSSRehomeWorker()
-		}
-	})
-	select {
-	case ossRehomeQueue <- ossRehomeTask{server: s, modID: modID}:
-	default:
-		ossRehomeScheduled.Delete(key)
-		log.Printf("cannot schedule OSS gallery rehome for mod %d: bounded queue is full", modID)
-	}
-}
-
-func runOSSRehomeWorker() {
-	for task := range ossRehomeQueue {
-		key := ossRehomeTaskKey(task)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		err := task.server.rehomeModGalleryOSSObjects(ctx, task.modID)
-		cancel()
-		ossRehomeScheduled.Delete(key)
-		if err != nil {
-			log.Printf("rehome OSS gallery objects for mod %d: %v", task.modID, err)
-		}
-	}
 }
 
 func (s *Server) rehomeModGalleryOSSObjects(ctx context.Context, modID int64) error {
@@ -136,33 +80,36 @@ func (s *Server) rehomeModGalleryOSSObjects(ctx context.Context, modID int64) er
 			}
 			tx, updateErr := s.db.Begin(groupContext)
 			if updateErr != nil {
-				s.deleteOSSObjectIfUnregistered(groupContext, client, cfg, targetKey)
+				s.deleteOSSObjectIfUnregistered(groupContext, cfg, targetKey, "mod-gallery-rehome-begin-failed")
 				return fmt.Errorf("begin gallery %s rehome transaction: %w", item.galleryPublicID, updateErr)
 			}
 			defer tx.Rollback(groupContext)
 			command, updateErr := tx.Exec(groupContext, `update oss_files set object_key=$2,category=$3,updated_at=now()
 				where id=$1 and object_key=$4 and status='active'`, item.fileID, targetKey, category, item.objectKey)
 			if updateErr != nil {
-				s.deleteOSSObjectIfUnregistered(groupContext, client, cfg, targetKey)
-				return fmt.Errorf("record gallery %s destination: %w", item.galleryPublicID, updateErr)
+				rollbackErr := tx.Rollback(groupContext)
+				s.deleteOSSObjectIfUnregistered(groupContext, cfg, targetKey, "mod-gallery-rehome-record-failed")
+				return errors.Join(fmt.Errorf("record gallery %s destination: %w", item.galleryPublicID, updateErr), rollbackErr)
 			}
 			if command.RowsAffected() != 1 {
 				var currentKey string
 				if queryErr := tx.QueryRow(groupContext, `select object_key from oss_files where id=$1 and status='active'`, item.fileID).Scan(&currentKey); queryErr == nil && currentKey == targetKey {
 					return nil
 				}
-				s.deleteOSSObjectIfUnregistered(groupContext, client, cfg, targetKey)
-				return fmt.Errorf("record gallery %s destination: source changed", item.galleryPublicID)
+				rollbackErr := tx.Rollback(groupContext)
+				s.deleteOSSObjectIfUnregistered(groupContext, cfg, targetKey, "mod-gallery-rehome-source-changed")
+				return errors.Join(fmt.Errorf("record gallery %s destination: source changed", item.galleryPublicID), rollbackErr)
 			}
 			if updateErr = enqueueOSSObjectDeletionTx(groupContext, tx, ossDeletionTarget{
 				Bucket: cfg.Bucket, Endpoint: cfg.Endpoint, Region: cfg.Region, UseCName: cfg.UseCName,
 				ObjectKey: item.objectKey, Reason: "mod-gallery-rehome",
 			}); updateErr != nil {
-				s.deleteOSSObjectIfUnregistered(groupContext, client, cfg, targetKey)
-				return fmt.Errorf("queue gallery %s source deletion: %w", item.galleryPublicID, updateErr)
+				rollbackErr := tx.Rollback(groupContext)
+				s.deleteOSSObjectIfUnregistered(groupContext, cfg, targetKey, "mod-gallery-rehome-source-delete-queue-failed")
+				return errors.Join(fmt.Errorf("queue gallery %s source deletion: %w", item.galleryPublicID, updateErr), rollbackErr)
 			}
 			if updateErr = tx.Commit(groupContext); updateErr != nil {
-				s.deleteOSSObjectIfUnregistered(groupContext, client, cfg, targetKey)
+				s.deleteOSSObjectIfUnregistered(groupContext, cfg, targetKey, "mod-gallery-rehome-commit-failed")
 				return fmt.Errorf("commit gallery %s rehome: %w", item.galleryPublicID, updateErr)
 			}
 			return nil

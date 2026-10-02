@@ -10,6 +10,10 @@ import (
 const fabricDirectRegistryChannel = "fabric:registry/sync/direct"
 
 func parseFabricRegistrySync(data []byte) ([]string, []string, error) {
+	return parseFabricRegistrySyncWithBudget(data, newConfigurationParseBudget())
+}
+
+func parseFabricRegistrySyncWithBudget(data []byte, budget *configurationParseBudget) ([]string, []string, error) {
 	if len(data) == 0 {
 		return nil, nil, errors.New("empty Fabric registry sync")
 	}
@@ -17,6 +21,9 @@ func parseFabricRegistrySync(data []byte) ([]string, []string, error) {
 	reader := bytes.NewReader(data)
 	namespaceGroupCount, err := readBoundedConfigurationVarInt(reader, "registry namespace group", 4096)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err = budget.claim("registry namespace group", namespaceGroupCount, reader.Len(), 2); err != nil {
 		return nil, nil, err
 	}
 
@@ -29,8 +36,11 @@ func parseFabricRegistrySync(data []byte) ([]string, []string, error) {
 		}
 		registryNamespace = unoptimizeFabricNamespace(registryNamespace)
 
-		registryCount, err := readBoundedConfigurationVarInt(reader, "registry", 1_000_000)
+		registryCount, err := readBoundedConfigurationVarInt(reader, "registry", maximumConfigurationIdentifiers)
 		if err != nil {
+			return nil, nil, fmt.Errorf("registry namespace %q: %w", registryNamespace, err)
+		}
+		if err = budget.claim("registry", registryCount, reader.Len(), 2); err != nil {
 			return nil, nil, fmt.Errorf("registry namespace %q: %w", registryNamespace, err)
 		}
 		for registryIndex := int32(0); registryIndex < registryCount; registryIndex++ {
@@ -40,8 +50,11 @@ func parseFabricRegistrySync(data []byte) ([]string, []string, error) {
 			}
 			registryNames = append(registryNames, registryNamespace+":"+registryPath)
 
-			entryNamespaceCount, err := readBoundedConfigurationVarInt(reader, "entry namespace", 1_000_000)
+			entryNamespaceCount, err := readBoundedConfigurationVarInt(reader, "entry namespace", maximumConfigurationIdentifiers)
 			if err != nil {
+				return nil, nil, fmt.Errorf("registry %s:%s: %w", registryNamespace, registryPath, err)
+			}
+			if err = budget.claim("entry namespace", entryNamespaceCount, reader.Len(), 2); err != nil {
 				return nil, nil, fmt.Errorf("registry %s:%s: %w", registryNamespace, registryPath, err)
 			}
 			for entryNamespaceIndex := int32(0); entryNamespaceIndex < entryNamespaceCount; entryNamespaceIndex++ {
@@ -57,7 +70,7 @@ func parseFabricRegistrySync(data []byte) ([]string, []string, error) {
 				}
 				entryNamespace = unoptimizeFabricNamespace(entryNamespace)
 
-				bulkCount, err := readBoundedConfigurationVarInt(reader, "raw id bulk", 1_000_000)
+				bulkCount, err := readBoundedConfigurationVarInt(reader, "raw id bulk", maximumConfigurationIdentifiers)
 				if err != nil {
 					return nil, nil, fmt.Errorf(
 						"registry %s:%s namespace %s: %w",
@@ -66,6 +79,10 @@ func parseFabricRegistrySync(data []byte) ([]string, []string, error) {
 						entryNamespace,
 						err,
 					)
+				}
+				if err = budget.claim("raw id bulk", bulkCount, reader.Len(), 2); err != nil {
+					return nil, nil, fmt.Errorf("registry %s:%s namespace %s: %w",
+						registryNamespace, registryPath, entryNamespace, err)
 				}
 				for bulkIndex := int32(0); bulkIndex < bulkCount; bulkIndex++ {
 					if _, err = readVarInt(reader); err != nil {
@@ -78,7 +95,7 @@ func parseFabricRegistrySync(data []byte) ([]string, []string, error) {
 							err,
 						)
 					}
-					bulkSize, err := readBoundedConfigurationVarInt(reader, "raw id bulk entry", 1_000_000)
+					bulkSize, err := readBoundedConfigurationVarInt(reader, "raw id bulk entry", maximumConfigurationIdentifiers)
 					if err != nil {
 						return nil, nil, fmt.Errorf(
 							"registry %s:%s namespace %s bulk %d: %w",
@@ -89,8 +106,8 @@ func parseFabricRegistrySync(data []byte) ([]string, []string, error) {
 							err,
 						)
 					}
-					if int64(len(entries))+int64(bulkSize) > 5_000_000 {
-						return nil, nil, errors.New("fabric registry sync contains more than 5000000 entries")
+					if err = budget.claim("raw id bulk entry", bulkSize, reader.Len(), 1); err != nil {
+						return nil, nil, err
 					}
 					for entryIndex := int32(0); entryIndex < bulkSize; entryIndex++ {
 						entryPath, err := readProtocolString(reader, maxConfigurationPacketBytes)

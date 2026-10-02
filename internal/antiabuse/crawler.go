@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type botRule struct {
@@ -25,22 +27,25 @@ var crawlerDNSCache = struct {
 	values map[string]dnsCacheEntry
 }{values: map[string]dnsCacheEntry{}}
 
-func (s *Service) ClassifyCrawler(ctx context.Context, ip, userAgent, botToken string) CrawlerClass {
+func (s *Service) ClassifyCrawler(ctx context.Context, ip, userAgent, botToken string) (CrawlerClass, error) {
 	if !s.Enabled() {
-		return HumanCrawler
+		return HumanCrawler, nil
 	}
 	userAgentLower := strings.ToLower(strings.TrimSpace(userAgent))
-	rules := s.botRules(ctx)
+	rules, err := s.botRules(ctx)
+	if err != nil {
+		return SuspiciousBot, err
+	}
 	for _, rule := range rules {
 		if rule.Kind == "blocked_bot" || rule.Kind == "ip_block" {
 			if ruleMatches(rule.Matcher, ip, userAgentLower) {
-				return BlockedBot
+				return BlockedBot, nil
 			}
 		}
 	}
 	for _, rule := range rules {
 		if rule.Kind == "ip_allow" && ruleMatches(rule.Matcher, ip, userAgentLower) {
-			return AllowedBot
+			return AllowedBot, nil
 		}
 	}
 	if botToken != "" {
@@ -48,23 +53,23 @@ func (s *Service) ClassifyCrawler(ctx context.Context, ip, userAgent, botToken s
 		for _, rule := range rules {
 			if rule.SecretHash == hash && (rule.Kind == "allowed_bot" || rule.Kind == "monitoring_bot") && ruleMatches(rule.Matcher, ip, userAgentLower) {
 				if rule.Kind == "monitoring_bot" {
-					return MonitoringBot
+					return MonitoringBot, nil
 				}
-				return AllowedBot
+				return AllowedBot, nil
 			}
 		}
 	}
 	known, suffixes := knownSearchCrawler(userAgentLower)
 	if known {
 		if s.verifySearchEngineDNS(ctx, ip, suffixes) {
-			return VerifiedSearchEngine
+			return VerifiedSearchEngine, nil
 		}
-		return SuspiciousBot
+		return SuspiciousBot, nil
 	}
 	if crawlerUserAgent(userAgentLower) {
-		return UnknownCrawler
+		return UnknownCrawler, nil
 	}
-	return HumanCrawler
+	return HumanCrawler, nil
 }
 
 func (s *Service) ReadLimit(ctx context.Context, class CrawlerClass, ip, path string) (bool, time.Duration) {
@@ -91,9 +96,28 @@ func (s *Service) ReadLimit(ctx context.Context, class CrawlerClass, ip, path st
 	return result.Allowed, result.RetryAfter
 }
 
-func (s *Service) RecordCrawler(ctx context.Context, class CrawlerClass, ip, userAgent, path string, allowed bool) {
+// ExpensiveReadLimit applies a separate budget to bounded-but-nontrivial public
+// reads. Unlike crawler policy, this budget intentionally includes ordinary
+// anonymous clients so rotating user agents cannot bypass database protection.
+func (s *Service) ExpensiveReadLimit(ctx context.Context, scope, identity string, limit int, window time.Duration) (bool, time.Duration) {
+	if s == nil || !s.Enabled() || s.cache == nil {
+		return true, 0
+	}
+	limit = max(1, min(limit, 10_000))
+	if window < time.Second {
+		window = time.Second
+	}
+	if window > time.Hour {
+		window = time.Hour
+	}
+	result := s.cache.ConsumeRateLimit(ctx,
+		"expensive-read:"+truncate(scope, 80)+":"+s.privateHash("read", identity), limit, window)
+	return result.Allowed, result.RetryAfter
+}
+
+func (s *Service) RecordCrawler(ctx context.Context, class CrawlerClass, ip, userAgent, path string, allowed bool) error {
 	if class == HumanCrawler || !s.cache.ClaimThrottle(ctx, "crawler-log:"+string(class)+":"+s.privateHash("ip", ip), time.Minute) {
-		return
+		return nil
 	}
 	outcome := AllowWithLog
 	code := "crawler_read"
@@ -102,35 +126,59 @@ func (s *Service) RecordCrawler(ctx context.Context, class CrawlerClass, ip, use
 	}
 	input := Evaluation{Action: "read.crawl", IP: ip, UserAgent: userAgent, ObjectType: "path", ObjectKey: path}
 	decision := Decision{Outcome: outcome, Code: code, RiskScore: 0, Rules: []string{code}}
-	_, _ = s.insertEvent(ctx, input, decision, class)
+	_, err := s.insertEvent(ctx, input, decision, class)
+	if err != nil {
+		s.riskEventFailed.Add(1)
+	}
+	return err
 }
 
-func (s *Service) botRules(ctx context.Context) []botRule {
+func (s *Service) botRules(ctx context.Context) ([]botRule, error) {
 	if s.db == nil {
-		return nil
+		return nil, nil
 	}
 	raw, err := s.cache.GetOrLoad(ctx, botRulesCacheKey, func(loadCtx context.Context) ([]byte, error) {
-		rows, err := s.db.Query(loadCtx, `select kind,matcher,secret_hash from anti_abuse_bot_rules
-			where enabled and (expires_at is null or expires_at>now()) order by id`)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		values := make([]botRule, 0)
-		for rows.Next() {
-			var value botRule
-			if rows.Scan(&value.Kind, &value.Matcher, &value.SecretHash) == nil {
-				values = append(values, value)
-			}
+		values, loadErr := loadBotRules(loadCtx, s.db)
+		if loadErr != nil {
+			return nil, loadErr
 		}
 		return json.Marshal(values)
 	})
 	if err != nil {
-		return nil
+		s.botRuleLoadFailed.Add(1)
+		return nil, err
 	}
 	var values []botRule
-	_ = json.Unmarshal(raw, &values)
-	return values
+	if err = json.Unmarshal(raw, &values); err != nil {
+		s.botRuleLoadFailed.Add(1)
+		return nil, err
+	}
+	return values, nil
+}
+
+type botRuleQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func loadBotRules(ctx context.Context, queryer botRuleQueryer) ([]botRule, error) {
+	rows, err := queryer.Query(ctx, `select kind,matcher,secret_hash from anti_abuse_bot_rules
+		where enabled and (expires_at is null or expires_at>now()) order by id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := make([]botRule, 0)
+	for rows.Next() {
+		var value botRule
+		if err = rows.Scan(&value.Kind, &value.Matcher, &value.SecretHash); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return values, nil
 }
 
 func ruleMatches(matcher, ip, userAgent string) bool {

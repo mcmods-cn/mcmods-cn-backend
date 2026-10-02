@@ -11,7 +11,8 @@ import (
 	"mcmods-cn-backend/internal/config"
 )
 
-func TestSimpleProjectCatalogCountIntegration(t *testing.T) {
+// This is a separate schema smoke test, not catalog behavior evidence.
+func TestSimpleProjectCatalogSchemaSQLSmokeIntegration(t *testing.T) {
 	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
 		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 to inspect the development database")
 	}
@@ -39,7 +40,23 @@ func TestSimpleProjectCatalogCountIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			var scanned int
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					t.Fatal(err)
+				}
+				scanned++
+			}
+			rowErr := rows.Err()
 			rows.Close()
+			if rowErr != nil {
+				t.Fatal(rowErr)
+			}
+			if scanned > total || scanned > 24 {
+				t.Fatalf("smoke rows=%d total=%d", scanned, total)
+			}
 		})
 	}
 }

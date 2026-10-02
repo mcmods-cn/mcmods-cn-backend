@@ -63,9 +63,9 @@ func deriveModExportBlockBindings(files map[string]*zip.File, resolver catalogRe
 	index := newExportResourcePathIndex(files, revisions)
 	result := make([]modExportBlockBinding, 0, len(blocks))
 	for _, block := range blocks {
-		revisionID := revisions[strings.ToLower(block.Namespace)]
-		if revisionID == "" {
-			continue
+		revisionID, revisionErr := exportRevisionForNamespace(revisions, block.Namespace)
+		if revisionErr != nil {
+			return nil, fmt.Errorf("block binding %q: %w", block.ID, revisionErr)
 		}
 		itemID := strings.TrimSpace(block.Item)
 		if itemID == "" {

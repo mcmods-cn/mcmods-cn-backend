@@ -109,6 +109,10 @@ func ossObjectPrefix(prefix, category string) string {
 	return path.Join(ossRoot(prefix), strings.Trim(category, "/"))
 }
 
+func ossOwnerObjectCategory(category string, ownerID int64) string {
+	return path.Join(category, "owners", strconv.FormatInt(ownerID, 10))
+}
+
 func ossCategoryFromObjectKey(objectKey, prefix string) string {
 	root := ossRoot(prefix)
 	relative := strings.TrimPrefix(strings.TrimSpace(objectKey), root+"/")

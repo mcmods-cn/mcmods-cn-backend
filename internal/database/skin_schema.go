@@ -23,8 +23,11 @@ func skinSchemaStatements() []string {
 			width integer not null check(width > 0),
 			height integer not null check(height > 0),
 			size_bytes bigint not null check(size_bytes > 0),
+			active_reference_count bigint not null default 0 check(active_reference_count >= 0),
 			created_at timestamptz not null default now()
 		)`,
+		`create index idx_skin_texture_blobs_unreferenced
+			on skin_texture_blobs(created_at,hash) where active_reference_count=0`,
 		`create table skin_assets (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
@@ -46,7 +49,62 @@ func skinSchemaStatements() []string {
 		`create index idx_skin_assets_catalog on skin_assets(status,review_status,visibility,kind,created_at desc,id desc)`,
 		`create index idx_skin_assets_owner on skin_assets(owner_id,status,updated_at desc,id desc)`,
 		`create index idx_skin_assets_blob on skin_assets(blob_hash,id)`,
+		`create index idx_skin_assets_active_blob on skin_assets(blob_hash,id) where status='active'`,
 		`create index idx_skin_assets_tags on skin_assets using gin(tags)`,
+		`create or replace function maintain_skin_texture_blob_reference_count() returns trigger as $$
+		declare
+			changed bigint;
+		begin
+			if tg_op='INSERT' then
+				if new.status='active' then
+					update skin_texture_blobs set active_reference_count=active_reference_count+1 where hash=new.blob_hash;
+					get diagnostics changed=row_count;
+					if changed<>1 then raise exception 'skin texture blob reference increment failed'; end if;
+				end if;
+				return new;
+			elsif tg_op='DELETE' then
+				if old.status='active' then
+					update skin_texture_blobs set active_reference_count=active_reference_count-1
+					where hash=old.blob_hash and active_reference_count>0;
+					get diagnostics changed=row_count;
+					if changed<>1 then raise exception 'skin texture blob reference decrement failed'; end if;
+				end if;
+				return old;
+			end if;
+			if old.status='active' and (new.status<>'active' or old.blob_hash<>new.blob_hash) then
+				update skin_texture_blobs set active_reference_count=active_reference_count-1
+				where hash=old.blob_hash and active_reference_count>0;
+				get diagnostics changed=row_count;
+				if changed<>1 then raise exception 'skin texture blob reference decrement failed'; end if;
+			end if;
+			if new.status='active' and (old.status<>'active' or old.blob_hash<>new.blob_hash) then
+				update skin_texture_blobs set active_reference_count=active_reference_count+1 where hash=new.blob_hash;
+				get diagnostics changed=row_count;
+				if changed<>1 then raise exception 'skin texture blob reference increment failed'; end if;
+			end if;
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_skin_assets_blob_reference_count
+			after insert or update of blob_hash,status or delete on skin_assets
+			for each row execute function maintain_skin_texture_blob_reference_count()`,
+		`create or replace function rebuild_skin_texture_blob_reference_counts() returns bigint as $$
+		declare
+			changed bigint;
+		begin
+			perform pg_advisory_xact_lock(hashtext('minecraft-texture-reference'),hashtext('calibration'));
+			with counts as (
+				select blob.hash,count(asset.id)::bigint as reference_count
+				from skin_texture_blobs blob
+				left join skin_assets asset on asset.blob_hash=blob.hash and asset.status='active'
+				group by blob.hash
+			)
+			update skin_texture_blobs blob set active_reference_count=counts.reference_count
+			from counts where blob.hash=counts.hash and blob.active_reference_count<>counts.reference_count;
+			get diagnostics changed=row_count;
+			return changed;
+		end;
+		$$ language plpgsql`,
 		`create table skin_wardrobe (
 			user_id bigint not null references users(id) on delete cascade,
 			asset_id bigint not null references skin_assets(id) on delete cascade,

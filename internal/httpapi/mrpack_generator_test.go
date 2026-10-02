@@ -56,6 +56,12 @@ func TestBuildMRPackRejectsUnsafeOrIncompleteFiles(t *testing.T) {
 		{"path traversal", func(file *mrpackFile) { file.Path = "mods/../evil.jar" }},
 		{"missing sha512", func(file *mrpackFile) { delete(file.Hashes, "sha512") }},
 		{"untrusted download", func(file *mrpackFile) { file.Downloads = []string{"https://example.com/mod.jar"} }},
+		{"lookalike CDN", func(file *mrpackFile) {
+			file.Downloads = []string{"https://cdn.modrinth.com.evil.example/data/project/versions/version/mod.jar"}
+		}},
+		{"identity in query", func(file *mrpackFile) {
+			file.Downloads = []string{"https://cdn.modrinth.com/mod.jar?path=/data/project/versions/version/mod.jar"}
+		}},
 		{"zero size", func(file *mrpackFile) { file.FileSize = 0 }},
 	}
 	for _, testCase := range testCases {

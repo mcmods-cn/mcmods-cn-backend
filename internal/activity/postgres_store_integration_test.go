@@ -2,6 +2,7 @@ package activity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -9,11 +10,139 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
 )
+
+type replayProjectionProcessor struct {
+	fail      bool
+	attempts  int
+	committed int
+}
+
+func (processor *replayProjectionProcessor) ProcessActivityBatch(context.Context, []Event) error {
+	return errors.New("durable projection used the non-transactional processor")
+}
+
+func (processor *replayProjectionProcessor) ProcessActivityBatchTx(ctx context.Context, tx pgx.Tx, events []Event) error {
+	processor.attempts++
+	if processor.fail {
+		return errors.New("injected progression failure")
+	}
+	for _, event := range events {
+		if _, err := tx.Exec(ctx, `insert into durable_projection_probe(user_id,projected)
+			values($1,1) on conflict(user_id) do update
+			set projected=durable_projection_probe.projected+1`, event.UserID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (processor *replayProjectionProcessor) ActivityBatchCommitted(context.Context, []Event) {
+	processor.committed++
+}
+
+func TestDurableOutboxProjectionFailureRollsBackAndReplaysIntegration(t *testing.T) {
+	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
+		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 to verify atomic durable activity projection")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	poolConfig, err := pgxpool.ParseConfig(config.Load().DB.ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	poolConfig.MaxConns = 1
+	poolConfig.MinConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err = database.InstallEphemeralSchema(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if dropErr := database.DropEphemeralSchema(context.Background(), pool); dropErr != nil {
+			t.Errorf("drop ephemeral schema: %v", dropErr)
+		}
+	}()
+	if _, err = pool.Exec(ctx, `create temporary table durable_projection_probe(
+		user_id bigint primary key,projected integer not null)`); err != nil {
+		t.Fatal(err)
+	}
+
+	var userID int64
+	suffix := time.Now().UnixNano()
+	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
+		values($1,$2,'projection-replay-test',true) returning id`,
+		fmt.Sprintf("projection-replay-%d", suffix), fmt.Sprintf("projection-replay-%d@example.invalid", suffix)).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	processor := &replayProjectionProcessor{fail: true}
+	store := newPostgresStore(pool, processor)
+	if err = store.EnqueueDurable(ctx, Event{
+		UserID: userID, ActionID: ActionCreate, ObjectTypeID: ObjectUser, OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if count, drainErr := store.DrainDurable(ctx, 10); drainErr == nil || count != 0 {
+		t.Fatalf("failed projection drained count=%d err=%v; want 0/error", count, drainErr)
+	}
+	assertDurableActivityState(t, ctx, pool, userID, 1, 0)
+	assertDurableProjectionState(t, ctx, pool, userID, 0)
+	if processor.committed != 0 {
+		t.Fatalf("post-commit hook called %d times after rollback", processor.committed)
+	}
+	if processor.attempts != 1 {
+		t.Fatalf("transactional processor called %d times after failure; want 1", processor.attempts)
+	}
+
+	processor.fail = false
+	if _, err = pool.Exec(ctx, `update activity_event_outbox set available_at=clock_timestamp() where user_id=$1`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if count, drainErr := store.DrainDurable(ctx, 10); drainErr != nil || count != 1 {
+		t.Fatalf("replayed projection drained count=%d err=%v; want 1/nil", count, drainErr)
+	}
+	assertDurableActivityState(t, ctx, pool, userID, 0, 1)
+	assertDurableProjectionState(t, ctx, pool, userID, 1)
+	if processor.committed != 1 {
+		t.Fatalf("post-commit hook called %d times; want 1", processor.committed)
+	}
+	if processor.attempts != 2 {
+		t.Fatalf("transactional processor called %d times after replay; want 2", processor.attempts)
+	}
+}
+
+func assertDurableActivityState(t *testing.T, ctx context.Context, pool *pgxpool.Pool, userID int64, wantOutbox, wantRaw int) {
+	t.Helper()
+	var outboxRows, rawRows int
+	if err := pool.QueryRow(ctx, `select
+		(select count(*) from activity_event_outbox where user_id=$1),
+		(select count(*) from user_activity_events where user_id=$1)`, userID).Scan(&outboxRows, &rawRows); err != nil {
+		t.Fatal(err)
+	}
+	if outboxRows != wantOutbox || rawRows != wantRaw {
+		t.Fatalf("durable state outbox=%d raw=%d; want %d/%d", outboxRows, rawRows, wantOutbox, wantRaw)
+	}
+}
+
+func assertDurableProjectionState(t *testing.T, ctx context.Context, pool *pgxpool.Pool, userID int64, want int) {
+	t.Helper()
+	var projected int
+	if err := pool.QueryRow(ctx, `select coalesce(max(projected),0) from durable_projection_probe where user_id=$1`, userID).Scan(&projected); err != nil {
+		t.Fatal(err)
+	}
+	if projected != want {
+		t.Fatalf("durable projection=%d; want %d", projected, want)
+	}
+}
 
 func TestDurableOutboxSurvivesProducerAndDrainsExactlyOnceAcrossWorkers(t *testing.T) {
 	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {

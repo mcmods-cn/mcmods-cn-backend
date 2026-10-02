@@ -75,9 +75,8 @@ func revisionPublicIDForInternal(ctx context.Context, query revisionQuery, inter
 	return &publicID, nil
 }
 
-func revisionPublicIDValue(ctx context.Context, query revisionQuery, internalID *int64) *string {
-	publicID, _ := revisionPublicIDForInternal(ctx, query, internalID)
-	return publicID
+func revisionPublicIDValue(ctx context.Context, query revisionQuery, internalID *int64) (*string, error) {
+	return revisionPublicIDForInternal(ctx, query, internalID)
 }
 
 func ossFilePublicIDForInternal(ctx context.Context, query revisionQuery, internalID *int64) (*string, error) {

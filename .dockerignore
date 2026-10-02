@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+.env
+.env.*
+!.env.example
+*.out
+*.log
+docs
+audit-workspace
+MCMods-full-project-audit-*.zip

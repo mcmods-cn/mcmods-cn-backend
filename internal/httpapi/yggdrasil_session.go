@@ -28,18 +28,10 @@ func (s *Server) yggdrasilJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var tokenID, userID, profileID int64
-	var profileUUID string
-	err := s.db.QueryRow(r.Context(),
-		`select t.id,t.user_id,t.player_profile_id,p.uuid::text
-		 from yggdrasil_tokens t
-		 join yggdrasil_accounts a on a.user_id=t.user_id and a.enabled=true
-		 join users u on u.id=t.user_id and u.status='active'
-		 join player_profiles p on p.id=t.player_profile_id and p.status='active'
-		 where t.access_token_hash=$1 and t.status='active' and t.expires_at>now()`,
-		hashYggdrasilToken(request.AccessToken),
-	).Scan(&tokenID, &userID, &profileID, &profileUUID)
-	profileUnsigned, profileOK := unsignedYggdrasilUUID(profileUUID)
+	accessTokenHash := hashYggdrasilToken(request.AccessToken)
+	var userID int64
+	err := s.db.QueryRow(r.Context(), `select user_id from yggdrasil_tokens
+		where access_token_hash=$1 and status='active' and expires_at>now()`, accessTokenHash).Scan(&userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeYggdrasilInvalidToken(w)
 		return
@@ -48,14 +40,46 @@ func (s *Server) yggdrasilJoin(w http.ResponseWriter, r *http.Request) {
 		writeYggdrasilInternalError(w)
 		return
 	}
-	if !profileOK || profileUnsigned != selectedUUID || !s.yggdrasilUserAllowed(r.Context(), userID) {
+	if !s.yggdrasilUserAllowed(r.Context(), userID) {
+		writeYggdrasilInvalidToken(w)
+		return
+	}
+
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeYggdrasilInternalError(w)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	var tokenID, lockedUserID, profileID int64
+	var profileUUID string
+	err = tx.QueryRow(r.Context(),
+		`select t.id,t.user_id,t.player_profile_id,p.uuid::text
+		 from yggdrasil_tokens t
+		 join yggdrasil_accounts a on a.user_id=t.user_id and a.enabled=true
+		 join users u on u.id=t.user_id and u.status='active'
+		 join player_profiles p on p.id=t.player_profile_id and p.status='active'
+		 where t.access_token_hash=$1 and t.status='active' and t.expires_at>now()
+		 for update of t`, accessTokenHash,
+	).Scan(&tokenID, &lockedUserID, &profileID, &profileUUID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeYggdrasilInvalidToken(w)
+		return
+	}
+	if err != nil {
+		writeYggdrasilInternalError(w)
+		return
+	}
+	profileUnsigned, profileOK := unsignedYggdrasilUUID(profileUUID)
+	if lockedUserID != userID || !profileOK || profileUnsigned != selectedUUID {
 		writeYggdrasilInvalidToken(w)
 		return
 	}
 
 	clientIP := s.yggdrasilClientLocation(r).IP
 	expiresAt := time.Now().Add(s.yggdrasilJoinTTL())
-	command, err := s.db.Exec(r.Context(),
+	command, err := tx.Exec(r.Context(),
 		`insert into yggdrasil_join_sessions
 		 (server_id,token_id,player_profile_id,client_ip,expires_at,created_at)
 		 values ($1,$2,$3,$4,$5,now())
@@ -65,11 +89,25 @@ func (s *Server) yggdrasilJoin(w http.ResponseWriter, r *http.Request) {
 		 where yggdrasil_join_sessions.expires_at<=now()
 		    or yggdrasil_join_sessions.token_id=excluded.token_id`,
 		request.ServerID, tokenID, profileID, clientIP, expiresAt)
-	if err != nil || command.RowsAffected() != 1 {
+	if err != nil {
+		writeYggdrasilInternalError(w)
+		return
+	}
+	if command.RowsAffected() != 1 {
 		writeYggdrasilInvalidToken(w)
 		return
 	}
-	if _, err = s.db.Exec(r.Context(), `update yggdrasil_tokens set last_used_at=now() where id=$1`, tokenID); err != nil {
+	command, err = tx.Exec(r.Context(), `update yggdrasil_tokens set last_used_at=now()
+		where id=$1 and status='active' and expires_at>now()`, tokenID)
+	if err != nil {
+		writeYggdrasilInternalError(w)
+		return
+	}
+	if command.RowsAffected() != 1 {
+		writeYggdrasilInvalidToken(w)
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
 		writeYggdrasilInternalError(w)
 		return
 	}

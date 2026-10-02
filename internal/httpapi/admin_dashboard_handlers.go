@@ -149,53 +149,49 @@ func (s *Server) loadAdminDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminDashboardProjects(w http.ResponseWriter, r *http.Request) {
-	limit := boundedLimit(r.URL.Query().Get("limit"), 30, 100)
-	offset := boundedOffset(r.URL.Query().Get("offset"))
-	query := strings.TrimSpace(r.URL.Query().Get("q"))
-	projectType := normalizeAdminProjectType(r.URL.Query().Get("type"))
-	if strings.TrimSpace(r.URL.Query().Get("type")) != "" && projectType == "" {
-		writeError(w, http.StatusBadRequest, "invalid project type")
+	request, err := parseAdminProjectPageRequest(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var total int64
-	if err := s.db.QueryRow(r.Context(), `select count(*) from top_level_project_catalog project
-		where ($1='' or project.entity_type=$1) and ($2='' or project.name ilike '%'||$2||'%' or project.public_id=$2)`,
-		projectType, query).Scan(&total); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to count projects")
-		return
-	}
-	rows, err := s.db.Query(r.Context(), `select project.public_id,project.entity_type,project.name,project.canonical_path,
-		project.review_status,coalesce(metrics.total_view_count,0),coalesce(metrics.edit_count,0),
-		coalesce(popularity.heat_score,0),coalesce(popularity.rating_average,0),coalesce(popularity.favorite_count,0),
-		coalesce(popularity.comment_count,0),coalesce(popularity.download_count,0),project.created_at,project.updated_at,
-		metrics.last_edited_at
-		from top_level_project_catalog project
-		left join content_route_metrics metrics on metrics.object_route_id=project.object_route_id
-		left join content_popularity_stats popularity on popularity.object_route_id=project.object_route_id
-		where ($1='' or project.entity_type=$1) and ($2='' or project.name ilike '%'||$2||'%' or project.public_id=$2)
-		order by coalesce(popularity.heat_score,0) desc,project.updated_at desc,project.object_route_id desc
-		limit $3 offset $4`, projectType, query, limit, offset)
+	query, arguments := adminProjectPageSQL(request)
+	rows, err := s.db.Query(r.Context(), query, arguments...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load projects")
 		return
 	}
 	defer rows.Close()
-	items := make([]adminProjectSummary, 0, limit)
+	pageRows := make([]adminProjectPageRow, 0, request.Limit+1)
 	for rows.Next() {
-		var item adminProjectSummary
+		var row adminProjectPageRow
+		item := &row.Summary
 		if err = rows.Scan(&item.ID, &item.Type, &item.Name, &item.URL, &item.ReviewStatus, &item.Views,
 			&item.EditCount, &item.Heat, &item.Rating, &item.Favorites, &item.Comments, &item.Downloads,
-			&item.CreatedAt, &item.UpdatedAt, &item.LastEditedAt); err != nil {
+			&item.CreatedAt, &item.UpdatedAt, &item.LastEditedAt, &row.HeatSort, &row.RouteID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode projects")
 			return
 		}
-		items = append(items, item)
+		pageRows = append(pageRows, row)
 	}
 	if err = rows.Err(); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load projects")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
+	hasMore := len(pageRows) > request.Limit
+	if hasMore {
+		pageRows = pageRows[:request.Limit]
+	}
+	items := make([]adminProjectSummary, 0, len(pageRows))
+	for _, row := range pageRows {
+		items = append(items, row.Summary)
+	}
+	nextCursor := ""
+	if hasMore && len(pageRows) != 0 {
+		nextCursor = adminProjectNextCursor(request, pageRows[len(pageRows)-1])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items, "limit": request.Limit, "hasMore": hasMore, "nextCursor": nextCursor,
+	})
 }
 
 func (s *Server) adminDashboardProject(w http.ResponseWriter, r *http.Request) {

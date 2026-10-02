@@ -17,7 +17,18 @@ import (
 
 const simpleProjectAggregate = "simple_project"
 
-var simpleProjectTypes = stringSet("plugin", "map", "resource_pack", "shader_pack", "datapack", "addon")
+const simpleProjectCatalogLocalizationsSQL = `select project.id,localization.locale,localization.name,localization.summary
+	from simple_projects project join lateral (
+		select candidate.locale,candidate.name,candidate.summary from simple_project_localizations candidate
+		where candidate.project_id=project.id
+		order by case when candidate.locale=$2 then 0 when candidate.locale=project.default_locale then 1
+			when split_part(lower(candidate.locale),'-',1)=split_part(lower($2),'-',1) then 2 else 3 end,candidate.locale
+		limit 2
+	) localization on true where project.id=any($1) order by project.id,
+	case when localization.locale=$2 then 0 when localization.locale=project.default_locale then 1 else 2 end,localization.locale`
+
+var simpleProjectTypeRegistry = []string{"plugin", "map", "resource_pack", "shader_pack", "datapack", "addon"}
+var simpleProjectTypes = stringSet(simpleProjectTypeRegistry...)
 var simpleProjectParentTypes = stringSet("mod", "modpack", "plugin", "map", "resource_pack", "shader_pack", "datapack")
 
 type simpleProjectLocalization struct {
@@ -80,6 +91,53 @@ type simpleProjectResponse struct {
 	CanEdit              bool       `json:"canEdit"`
 }
 
+type catalogCardAuthorPayload struct {
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
+type simpleProjectCatalogLocalization struct {
+	Locale  string `json:"locale"`
+	Name    string `json:"name"`
+	Summary string `json:"summary"`
+}
+
+type simpleProjectCatalogParent struct {
+	PublicID   string `json:"publicId,omitempty"`
+	Type       string `json:"type"`
+	Identifier string `json:"identifier,omitempty"`
+	Name       string `json:"name,omitempty"`
+	SiteID     string `json:"siteId,omitempty"`
+	Unresolved bool   `json:"unresolved"`
+}
+
+type simpleProjectCatalogCard struct {
+	ID                int64                              `json:"-"`
+	PublicID          string                             `json:"id"`
+	ProjectType       string                             `json:"projectType"`
+	SiteID            string                             `json:"siteId"`
+	DefaultLocale     string                             `json:"defaultLocale"`
+	Localizations     []simpleProjectCatalogLocalization `json:"localizations"`
+	Abbreviation      string                             `json:"abbreviation"`
+	MinecraftVersions []string                           `json:"minecraftVersions"`
+	Loaders           []string                           `json:"loaders"`
+	Categories        []string                           `json:"categories"`
+	Features          []string                           `json:"features"`
+	Resolution        string                             `json:"resolution"`
+	Performance       string                             `json:"performance"`
+	MapSize           string                             `json:"mapSize"`
+	OfficialStatus    string                             `json:"officialStatus"`
+	SourceStatus      string                             `json:"sourceStatus"`
+	License           string                             `json:"license"`
+	IconURL           string                             `json:"iconUrl"`
+	Authors           []catalogCardAuthorPayload         `json:"authors"`
+	ParentProjects    []simpleProjectCatalogParent       `json:"parentProjects"`
+	ReviewStatus      string                             `json:"reviewStatus"`
+	CreatedAt         time.Time                          `json:"createdAt"`
+	UpdatedAt         time.Time                          `json:"updatedAt"`
+	PublishedAt       *time.Time                         `json:"publishedAt,omitempty"`
+}
+
 const simpleProjectCatalogFilter = `where project.project_type=$1
 	and (project.review_status='approved' or project.submitted_by=$2)
 	and (($7 and project.id=any($8::bigint[])) or (not $7 and ($3='' or project.slug ilike '%%'||$3||'%%' or project.public_id ilike '%%'||$3||'%%'
@@ -119,7 +177,9 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
+	requestedLocale, validLocale := simpleProjectCatalogLocale(r)
 	query, validQuery := parseCatalogQuery(r.URL.Query().Get("q"))
+	excludeSiteID, exclusionErr := parseCatalogSlugExclusion(r.URL.Query())
 	categories, validCategories := parseCatalogList(r.URL.Query().Get("category"), 20)
 	versions, validVersions := parseCatalogList(r.URL.Query().Get("version"), 20)
 	loaders, validLoaders := parseCatalogList(r.URL.Query().Get("loader"), 20)
@@ -133,7 +193,7 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 	licenses, validLicenses := parseCatalogList(r.URL.Query().Get("license"), 20)
 	updatedDays, validUpdated := parseCatalogUpdatedRange(r.URL.Query().Get("updated"))
 	versionMode, validVersionMode := parseCatalogVersionMode(r.URL.Query().Get("versionMode"))
-	if !validQuery || !validCategories || !validVersions || !validLoaders || !validFeatures || !validResolutions ||
+	if !validLocale || !validQuery || exclusionErr != nil || !validCategories || !validVersions || !validLoaders || !validFeatures || !validResolutions ||
 		!validPerformances || !validMapSizes || !validParents || !validStatuses || !validSources ||
 		!validLicenses || !validUpdated || !validVersionMode || !validSimpleProjectOptions(projectType, loaders, categories, features) ||
 		!everyCatalogValueAllowed(statuses, allowedModStatuses) || !everyCatalogValueAllowed(sources, allowedModSourceStatuses) ||
@@ -143,7 +203,7 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	rawSort := r.URL.Query().Get("sort")
 	sort, validSort := parseCatalogSort(rawSort)
-	direction, validDirection := parseCatalogSortDirection(r.URL.Query().Get("order"), rawSort)
+	direction, validDirection := parseCatalogSortDirection(r.URL.Query().Get("order"), sort)
 	if !validSort || !validDirection {
 		writeError(w, http.StatusBadRequest, "invalid catalog sort")
 		return
@@ -153,7 +213,7 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 	indexed := indexedSearchPage{}
 	filtered := len(categories)+len(versions)+len(loaders)+len(features)+len(resolutions)+len(performances)+
 		len(mapSizes)+len(parents)+len(statuses)+len(sources)+len(licenses) > 0 || updatedDays != 0
-	if catalogSortUsesSearchIndex(sort) && !filtered {
+	if catalogSortUsesSearchIndex(sort) && !filtered && excludeSiteID == "" {
 		indexed = s.searchProjectPage(r.Context(), query, projectType, firstCatalogValue(categories), firstCatalogValue(versions), firstCatalogValue(loaders), claims, limit, offset)
 	}
 	databaseOffset := offset
@@ -163,9 +223,9 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 	var total int
 	if indexed.Used {
 		total = indexed.Total
-	} else if err := s.db.QueryRow(r.Context(), `select count(*) from simple_projects project `+simpleProjectCatalogFilter,
+	} else if err := s.db.QueryRow(r.Context(), `select count(*) from simple_projects project `+simpleProjectCatalogFilter+` and ($19='' or project.slug<>$19)`,
 		projectType, claims.Subject, query, categories, versions, loaders, false, []int64{}, features, resolutions,
-		performances, mapSizes, parents, statuses, sources, licenses, updatedDays, versionMode).Scan(&total); err != nil {
+		performances, mapSizes, parents, statuses, sources, licenses, updatedDays, versionMode, excludeSiteID).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count projects")
 		return
 	}
@@ -173,58 +233,47 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		"coalesce(project.published_at,project.created_at)", "project.updated_at", "project.id", "project.primary_name")
 	rows, err := s.db.Query(r.Context(), `select project.id,project.public_id,project.project_type,project.slug,project.default_locale,
 		project.abbreviation,project.minecraft_versions,project.loaders,project.categories,project.features,project.resolution,
-		project.performance,project.map_size,project.official_status,project.source_status,project.license,
-		project.curseforge_project_id,project.modrinth_project_id,project.icon_url,project.search_keywords,
-		project.submission_method,project.review_status,project.submitted_by,coalesce(account.public_id,''),revision.public_id,
-		project.created_at,project.updated_at,project.published_at from simple_projects project
-		left join users account on account.id=project.submitted_by
-		left join content_revisions revision on revision.id=project.published_revision_id
+		project.performance,project.map_size,project.official_status,project.source_status,project.license,project.icon_url,
+		project.review_status,project.created_at,project.updated_at,project.published_at from simple_projects project
 		left join public_routes popularity_route on popularity_route.entity_type=project.project_type and popularity_route.internal_id=project.id
 		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
-		`+simpleProjectCatalogFilter+`
+		`+simpleProjectCatalogFilter+` and ($19='' or project.slug<>$19)
 		order by `+orderSQL+`
-		limit $19 offset $20`, projectType, claims.Subject, query, categories, versions, loaders,
+		limit $20 offset $21`, projectType, claims.Subject, query, categories, versions, loaders,
 		indexed.Used, indexed.IDs, features, resolutions, performances, mapSizes, parents, statuses, sources,
-		licenses, updatedDays, versionMode, limit, databaseOffset)
+		licenses, updatedDays, versionMode, excludeSiteID, limit, databaseOffset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load projects")
 		return
 	}
 	defer rows.Close()
-	items := make([]simpleProjectResponse, 0)
+	items := make([]simpleProjectCatalogCard, 0)
 	for rows.Next() {
-		item, scanErr := scanSimpleProject(rows)
+		item, scanErr := scanSimpleProjectCatalogCard(rows)
 		if scanErr != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode project")
 			return
 		}
 		items = append(items, item)
 	}
-	if err = rows.Err(); err != nil || s.loadSimpleProjectAssociations(r.Context(), items) != nil {
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load project details")
+		return
+	}
+	rows.Close()
+	if err = s.loadSimpleProjectCatalogAssociations(r.Context(), items, requestedLocale); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load project details")
 		return
 	}
 	ossCfg := s.ossConfigFromSettings(r.Context())
 	for index := range items {
-		items[index].CanEdit = canEditSimpleProject(claims, items[index])
 		items[index].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, items[index].IconURL)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "failed to generate project icon URL")
 			return
 		}
-		for parentIndex := range items[index].ParentProjects {
-			items[index].ParentProjects[parentIndex].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, items[index].ParentProjects[parentIndex].IconURL)
-			if err != nil {
-				writeError(w, http.StatusBadGateway, "failed to generate parent project icon URL")
-				return
-			}
-		}
-		if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, items[index].Authors); err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate project author avatar URL")
-			return
-		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total})
+	writeBoundedCatalogJSON(w, map[string]any{"items": items, "total": total})
 }
 
 func (s *Server) simpleProjectItem(w http.ResponseWriter, r *http.Request) {
@@ -337,7 +386,11 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 		err = ensureSimpleProjectSiteIDAvailable(r.Context(), tx, projectType, snapshot.SiteID, 0)
 	}
 	if err != nil {
-		writeError(w, http.StatusConflict, "project site ID is already used")
+		if errors.Is(err, errSimpleProjectSiteIDTaken) {
+			writeError(w, http.StatusConflict, "project site ID is already used")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to allocate project site ID")
+		}
 		return
 	}
 	publicID, err := availableModUniqueID(r.Context(), tx)
@@ -398,11 +451,23 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 		writeError(w, http.StatusInternalServerError, "failed to save project relations")
 		return
 	}
+	if err = runProjectCreationTransactionHook(r.Context(), tx, projectCreationTransactionResult{
+		ProjectType: projectType, ProjectID: projectID, ProjectPublicID: publicID, SiteID: snapshot.SiteID,
+		ProjectTitle: localization.Name, TargetURL: simpleProjectWebPath(projectType, url.PathEscape(snapshot.SiteID)),
+		ReviewStatus: reviewStatus, ChangeRequestID: created.ChangeRequestID, ChangeRequestUID: created.ChangeRequestPublicID,
+	}); err != nil {
+		log.Printf("finalize transactional %s creation: project=%s: %v", projectType, publicID, err)
+		writeError(w, http.StatusInternalServerError, "failed to commit project associations")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit project")
 		return
 	}
-	_ = s.refreshProjectACLVersion(r.Context())
+	if !s.requireSecurityVersionRefresh(w, r, "create_simple_project", 0,
+		s.refreshProjectACLVersion(r.Context())) {
+		return
+	}
 	item, err := s.simpleProjectBySiteID(r.Context(), projectType, snapshot.SiteID, claims.Subject, true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read created project")
@@ -440,7 +505,11 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err = ensureSimpleProjectSiteIDAvailable(r.Context(), s.db, projectType, request.Snapshot.SiteID, current.ID); err != nil {
-		writeError(w, http.StatusConflict, "project site ID is already used")
+		if errors.Is(err, errSimpleProjectSiteIDTaken) {
+			writeError(w, http.StatusConflict, "project site ID is already used")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to validate project site ID")
+		}
 		return
 	}
 	status := "approved"
@@ -495,7 +564,10 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "failed to save project revision")
 		return
 	}
-	_ = s.refreshProjectACLVersion(r.Context())
+	if !s.requireSecurityVersionRefresh(w, r, "create_simple_project_revision", 0,
+		s.refreshProjectACLVersion(r.Context())) {
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"id": created.RevisionPublicID, "status": status, "siteId": request.Snapshot.SiteID, "changeRequestId": created.ChangeRequestPublicID})
 }
 
@@ -823,6 +895,117 @@ func scanSimpleProject(row scanner) (simpleProjectResponse, error) {
 	return item, err
 }
 
+func scanSimpleProjectCatalogCard(row scanner) (simpleProjectCatalogCard, error) {
+	var item simpleProjectCatalogCard
+	err := row.Scan(&item.ID, &item.PublicID, &item.ProjectType, &item.SiteID, &item.DefaultLocale, &item.Abbreviation,
+		&item.MinecraftVersions, &item.Loaders, &item.Categories, &item.Features, &item.Resolution, &item.Performance,
+		&item.MapSize, &item.OfficialStatus, &item.SourceStatus, &item.License, &item.IconURL, &item.ReviewStatus,
+		&item.CreatedAt, &item.UpdatedAt, &item.PublishedAt)
+	item.Localizations = []simpleProjectCatalogLocalization{}
+	item.Authors = []catalogCardAuthorPayload{}
+	item.ParentProjects = []simpleProjectCatalogParent{}
+	return item, err
+}
+
+func simpleProjectCatalogLocale(r *http.Request) (string, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get("locale"))
+	if raw != "" && !validContentLocaleTag(raw) {
+		return "", false
+	}
+	locale := normalizeContentLocale(raw)
+	if locale == "" {
+		locale = firstAcceptedContentLocale(r.Header.Get("Accept-Language"))
+		if locale != "" && !validContentLocaleTag(locale) {
+			locale = ""
+		}
+	}
+	if locale == "" {
+		locale = "zh-CN"
+	}
+	return locale, true
+}
+
+func (s *Server) loadSimpleProjectCatalogAssociations(ctx context.Context, items []simpleProjectCatalogCard, requestedLocale string) error {
+	if len(items) == 0 {
+		return nil
+	}
+	byID := make(map[int64]*simpleProjectCatalogCard, len(items))
+	ids := make([]int64, 0, len(items))
+	for index := range items {
+		byID[items[index].ID] = &items[index]
+		ids = append(ids, items[index].ID)
+	}
+	rows, err := s.db.Query(ctx, simpleProjectCatalogLocalizationsSQL, ids, requestedLocale)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int64
+		var value simpleProjectCatalogLocalization
+		if err = rows.Scan(&id, &value.Locale, &value.Name, &value.Summary); err != nil {
+			rows.Close()
+			return err
+		}
+		byID[id].Localizations = append(byID[id].Localizations, value)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	rows, err = s.db.Query(ctx, `select subject_id,name,role from (
+		select binding.subject_id,creator.name,coalesce(role.name,binding.role_snapshot) role,row_number() over(
+			partition by binding.subject_id order by binding.display_order,binding.id) position
+		from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
+		left join creator_role_definitions role on role.id=binding.role_id
+		join simple_projects project on project.id=binding.subject_id and project.project_type=binding.subject_type
+		where project.id=any($1) and binding.status='approved'
+	) ranked where position<=8 order by subject_id,position`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int64
+		var value catalogCardAuthorPayload
+		if err = rows.Scan(&id, &value.Name, &value.Role); err != nil {
+			rows.Close()
+			return err
+		}
+		byID[id].Authors = append(byID[id].Authors, value)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	rows, err = s.db.Query(ctx, `select project_id,public_id,target_type,raw_identifier,site_id,name,target_id is null from (
+		select ref.project_id,coalesce(route.public_id,'') public_id,ref.target_type,ref.raw_identifier,
+			coalesce(mod.slug,modpack.slug,target.slug,'') site_id,
+			coalesce(mod.primary_name,modpack.primary_name,target.primary_name,ref.raw_identifier) name,ref.target_id,
+			row_number() over(partition by ref.project_id order by ref.display_order,ref.id) position
+		from simple_project_parent_refs ref
+		left join public_routes route on route.entity_type=ref.target_type and route.internal_id=ref.target_id
+		left join mods mod on ref.target_type='mod' and mod.id=ref.target_id
+		left join modpacks modpack on ref.target_type='modpack' and modpack.id=ref.target_id
+		left join simple_projects target on target.project_type=ref.target_type and target.id=ref.target_id
+		where ref.project_id=any($1)
+	) ranked where position<=3 order by project_id,position`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int64
+		var value simpleProjectCatalogParent
+		if err = rows.Scan(&id, &value.PublicID, &value.Type, &value.Identifier, &value.SiteID, &value.Name, &value.Unresolved); err != nil {
+			rows.Close()
+			return err
+		}
+		byID[id].ParentProjects = append(byID[id].ParentProjects, value)
+	}
+	rows.Close()
+	return rows.Err()
+}
+
 func (s *Server) simpleProjectBySiteID(ctx context.Context, projectType, siteID string, viewerID int64, editor bool) (simpleProjectResponse, error) {
 	row := s.db.QueryRow(ctx, `select project.id,project.public_id,project.project_type,project.slug,project.default_locale,
 		project.abbreviation,project.minecraft_versions,project.loaders,project.categories,project.features,project.resolution,
@@ -866,7 +1049,9 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 		}
 		byID[id].Localizations = append(byID[id].Localizations, value)
 	}
-	rows.Close()
+	if err = finishRows(rows); err != nil {
+		return err
+	}
 	rows, err = s.db.Query(ctx, `select project_id,link_type,url,note from simple_project_links where project_id=any($1) order by project_id,display_order,id`, ids)
 	if err != nil {
 		return err
@@ -880,7 +1065,9 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 		}
 		byID[id].Links = append(byID[id].Links, value)
 	}
-	rows.Close()
+	if err = finishRows(rows); err != nil {
+		return err
+	}
 	rows, err = s.db.Query(ctx, `select binding.subject_id,creator.public_id,creator.kind,creator.name,creator.avatar_url,
 		coalesce(role.public_id,''),coalesce(role.name,binding.role_snapshot),coalesce((select jsonb_agg(jsonb_build_object(
 		'creatorId',member.public_id,'kind',member.kind,'name',member.name,'avatarUrl',member.avatar_url,
@@ -906,7 +1093,9 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 		_ = json.Unmarshal(raw, &value.Members)
 		byID[id].Authors = append(byID[id].Authors, value)
 	}
-	rows.Close()
+	if err = finishRows(rows); err != nil {
+		return err
+	}
 	rows, err = s.db.Query(ctx, `select gallery.project_id,gallery.public_id,file.public_id,file.original_name,file.content_type,file.size_bytes
 		from simple_project_gallery_images gallery join oss_files file on file.id=gallery.oss_file_id and file.status='active'
 		where gallery.project_id=any($1) order by gallery.project_id,gallery.display_order,gallery.id`, ids)
@@ -923,7 +1112,9 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 		value.URL = "/api/v1/content-projects/" + url.PathEscape(byID[id].ProjectType) + "/" + url.PathEscape(byID[id].SiteID) + "/gallery/" + value.PublicID
 		byID[id].GalleryImages = append(byID[id].GalleryImages, value)
 	}
-	rows.Close()
+	if err = finishRows(rows); err != nil {
+		return err
+	}
 	rows, err = s.db.Query(ctx, `select ref.project_id,coalesce(route.public_id,''),ref.target_type,ref.raw_identifier,
 		coalesce(mod.slug,modpack.slug,target.slug,''),coalesce(mod.primary_name,modpack.primary_name,target.primary_name,ref.raw_identifier),
 		coalesce(mod.icon_url,modpack.icon_url,target.icon_url,''),ref.target_id is null
@@ -944,12 +1135,11 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 		}
 		byID[id].ParentProjects = append(byID[id].ParentProjects, value)
 	}
-	rows.Close()
-	return rows.Err()
+	return finishRows(rows)
 }
 
 func simpleProjectTypeValues() []string {
-	return []string{"plugin", "map", "resource_pack", "shader_pack", "datapack", "addon"}
+	return simpleProjectTypeRegistry
 }
 
 func canEditSimpleProject(claims security.Claims, item simpleProjectResponse) bool {
@@ -983,18 +1173,27 @@ func simpleProjectWebPath(projectType, siteID string) string {
 	return prefixes[projectType] + siteID
 }
 
-func availableSimpleProjectSiteID(ctx context.Context, query databaseQuery, projectType, name string) (string, error) {
+var errSimpleProjectSiteIDTaken = errors.New("project site ID exists")
+
+func availableSimpleProjectSiteID(ctx context.Context, tx pgx.Tx, projectType, name string) (string, error) {
 	base := modSiteIDBase(name)
+	// Keep allocation serialized until its insert commits, across server instances.
+	// A process-local lock or a read before taking this lock cannot reserve a slug.
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1,0))`, "simple-project-slug:"+projectType+":"+base); err != nil {
+		return "", err
+	}
 	for suffix := 0; suffix < 1000; suffix++ {
 		candidate := base
 		if suffix > 0 {
 			candidate = fmt.Sprintf("%s_%d", base, suffix+1)
 		}
-		if ensureSimpleProjectSiteIDAvailable(ctx, query, projectType, candidate, 0) == nil {
+		if err := ensureSimpleProjectSiteIDAvailable(ctx, tx, projectType, candidate, 0); err == nil {
 			return candidate, nil
+		} else if !errors.Is(err, errSimpleProjectSiteIDTaken) {
+			return "", err
 		}
 	}
-	return "", errors.New("unable to allocate project site ID")
+	return "", fmt.Errorf("unable to allocate project site ID: %w", errSimpleProjectSiteIDTaken)
 }
 
 func ensureSimpleProjectSiteIDAvailable(ctx context.Context, query databaseQuery, projectType, siteID string, excludeID int64) error {
@@ -1003,7 +1202,7 @@ func ensureSimpleProjectSiteIDAvailable(ctx context.Context, query databaseQuery
 		return err
 	}
 	if exists {
-		return errors.New("project site ID exists")
+		return errSimpleProjectSiteIDTaken
 	}
 	return nil
 }
@@ -1070,12 +1269,30 @@ func (s *Server) simpleProjectGalleryImage(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) simpleProjectHistory(w http.ResponseWriter, r *http.Request) {
-	item, err := s.simpleProjectBySiteID(r.Context(), normalizeSimpleProjectType(r.PathValue("projectType")), normalizeModSiteID(r.PathValue("siteId")), currentClaims(r).Subject, false)
+	claims := currentClaims(r)
+	projectType := normalizeSimpleProjectType(r.PathValue("projectType"))
+	siteID := normalizeModSiteID(r.PathValue("siteId"))
+	pageRequest, err := parseContentHistoryPageRequest(r.URL.Query(), contentHistoryScope("simple-project", projectType, siteID))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	item, err := s.simpleProjectBySiteID(r.Context(), projectType, siteID, claims.Subject, true)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
-	include := canEditSimpleProject(currentClaims(r), item) || claimsAllow(currentClaims(r), "content.review") || claimsAllow(currentClaims(r), "admin.*")
+	canEdit := canEditSimpleProject(claims, item)
+	visibility := projectPendingReviewVisibility(claims, item.PublicID, canEdit)
+	submittedBy := int64(0)
+	if item.SubmittedByInternal != nil {
+		submittedBy = *item.SubmittedByInternal
+	}
+	isSubmitter := submittedBy > 0 && submittedBy == claims.Subject
+	if item.ReviewStatus != "approved" && !isSubmitter && !visibility.allows(item.ReviewStatus, submittedBy) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
 	var published *int64
 	if item.PublishedRevisionID != nil {
 		var id int64
@@ -1083,10 +1300,10 @@ func (s *Server) simpleProjectHistory(w http.ResponseWriter, r *http.Request) {
 			published = &id
 		}
 	}
-	items, err := contentRevisionHistory(r.Context(), s.db, simpleProjectAggregate, item.PublicID, published, include)
+	items, err := contentRevisionHistoryPage(r.Context(), s.db, simpleProjectAggregate, item.PublicID, published, visibility, pageRequest)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load project history")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, mergeContentHistoryPage(items, nil, pageRequest))
 }

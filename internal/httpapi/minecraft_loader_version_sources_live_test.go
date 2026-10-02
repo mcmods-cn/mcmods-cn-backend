@@ -24,7 +24,7 @@ func TestMinecraftLoaderVersionSourcesLive(t *testing.T) {
 	tests := []struct {
 		name     string
 		expected string
-		fetch    func(context.Context, []string) ([]string, string, bool, error)
+		fetch    func(context.Context, []string) ([]string, []string, bool, error)
 	}{
 		{name: "Forge", expected: "1.20.1", fetch: fetchForgeMinecraftVersions},
 		{name: "NeoForge", expected: "1.21.1", fetch: fetchNeoForgeMinecraftVersions},
@@ -33,12 +33,12 @@ func TestMinecraftLoaderVersionSourcesLive(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			versions, sourceURL, _, err := test.fetch(ctx, known)
+			versions, sourceURLs, _, err := test.fetch(ctx, known)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if sourceURL == "" || !containsMinecraftVersion(versions, test.expected) {
-				t.Fatalf("source %q returned %d versions without expected %q", sourceURL, len(versions), test.expected)
+			if len(sourceURLs) == 0 || !containsMinecraftVersion(versions, test.expected) {
+				t.Fatalf("sources %q returned %d versions without expected %q", sourceURLs, len(versions), test.expected)
 			}
 		})
 	}

@@ -1,0 +1,12 @@
+name: Initialize owned CI test database
+description: Install the complete schema and seeds only in the job-local test service
+runs:
+  using: composite
+  steps:
+    - name: Initialize schema and seeds with the guarded development reset
+      shell: bash
+      env:
+        APP_ENV: development
+        DB_RESET_ON_START: "true"
+        DB_RESET_CONFIRM: RESET mcmods_test
+      run: go run ./cmd/db-reset

@@ -155,7 +155,12 @@ func resourceKindForRegistry(registry string) string {
 	case "structures", "world_structures", "structure":
 		return "minecraft.structure"
 	default:
-		return "import.document"
+		// Unknown registries must remain separate resource identities. Keeping a
+		// bounded digest in the kind code avoids exposing attacker-controlled
+		// registry text as a schema key while preserving stable case-insensitive
+		// identity across repeated imports.
+		digest := sha256.Sum256([]byte(normalized))
+		return "import.document." + hex.EncodeToString(digest[:12])
 	}
 }
 

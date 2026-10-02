@@ -87,6 +87,38 @@ func TestUnreadReconciliationRepairsDrift(t *testing.T) {
 	}
 }
 
+func TestUnreadReconciliationCandidatesRotateOnlyLiveServedEntries(t *testing.T) {
+	cache := New(config.RedisConfig{UnreadTTL: time.Minute})
+	ctx := context.Background()
+	for _, userID := range []int64{30, 10, 20} {
+		if _, err := cache.LoadUnread(ctx, userID, func(context.Context) (UnreadSummary, error) {
+			return UnreadSummary{Notifications: userID}, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache.mu.Lock()
+	expired := cache.unread[20]
+	expired.expiresAt = time.Now().Add(-time.Second)
+	cache.unread[20] = expired
+	cache.mu.Unlock()
+
+	first := cache.UnreadReconciliationCandidates(1)
+	second := cache.UnreadReconciliationCandidates(1)
+	if len(first) != 1 || len(second) != 1 || first[0] != 10 || second[0] != 30 {
+		t.Fatalf("rotating candidates first=%v second=%v", first, second)
+	}
+	if third := cache.UnreadReconciliationCandidates(10); len(third) != 2 || third[0] != 10 || third[1] != 30 {
+		t.Fatalf("wrapped candidates=%v", third)
+	}
+	cache.mu.Lock()
+	_, retainedExpired := cache.unread[20]
+	cache.mu.Unlock()
+	if retainedExpired {
+		t.Fatal("expired unread derivative remained a reconciliation candidate")
+	}
+}
+
 func TestRedisKeysAreEnvironmentNamespaced(t *testing.T) {
 	cache, redisServer := redisStateTestCache(t)
 	cache.Set(context.Background(), "session:hashed", []byte("value"), time.Minute)

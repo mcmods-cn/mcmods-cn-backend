@@ -1,47 +1,34 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	"mcmods-cn-backend/internal/security"
 )
 
 type modContentReviewItem struct {
-	ID             string    `json:"id"`
-	Source         string    `json:"source"`
-	Category       string    `json:"category"`
-	Operation      string    `json:"operation"`
-	AggregateType  string    `json:"aggregateType"`
-	ProjectType    string    `json:"projectType,omitempty"`
-	ProjectID      string    `json:"projectId,omitempty"`
-	ModSiteID      string    `json:"modSiteId"`
-	ModName        string    `json:"modName"`
-	UserID         *string   `json:"userId,omitempty"`
-	Username       string    `json:"username"`
-	Title          string    `json:"title"`
-	Summary        string    `json:"summary"`
-	CreatedAt      time.Time `json:"createdAt"`
-	ReviewURL      string    `json:"reviewUrl"`
-	ReviewerScope  string    `json:"reviewerScope"`
-	SubmittedBy    int64     `json:"-"`
-	RequiresGlobal bool      `json:"-"`
+	ID            string    `json:"id"`
+	Source        string    `json:"source"`
+	Category      string    `json:"category"`
+	Operation     string    `json:"operation"`
+	AggregateType string    `json:"aggregateType"`
+	ProjectType   string    `json:"projectType,omitempty"`
+	ProjectID     string    `json:"projectId,omitempty"`
+	ModSiteID     string    `json:"modSiteId"`
+	ModName       string    `json:"modName"`
+	UserID        *string   `json:"userId,omitempty"`
+	Username      string    `json:"username"`
+	Title         string    `json:"title"`
+	Summary       string    `json:"summary"`
+	CreatedAt     time.Time `json:"createdAt"`
+	ReviewURL     string    `json:"reviewUrl"`
+	ReviewerScope string    `json:"reviewerScope"`
 }
 
-type reviewQueueFacet struct {
-	Value string `json:"value"`
-	Count int    `json:"count"`
-}
-
-const contentReviewQueueQuery = `
-	select queue.id,queue.source,queue.category,queue.operation,queue.aggregate_type,
-	       queue.project_type,queue.project_id,queue.slug,queue.project_name,coalesce(queue.user_id,0),
-	       user_account.public_id,coalesce(user_account.username,''),queue.title,queue.summary,
-	       queue.created_at,queue.requires_global
-	from (
+const contentReviewQueueCTE = `
+	with queue as materialized (
 		select revision.public_id id,'revision'::text source,'mod'::text category,
 		       case when request.base_revision_id is null then 'create' else 'edit' end operation,
 		       revision.aggregate_type,'mod'::text project_type,mod.project_code project_id,
@@ -124,7 +111,7 @@ const contentReviewQueueQuery = `
 		select revision.public_id,'blueprint','blueprint',coalesce(nullif(request.metadata->>'operation',''),case when request.base_revision_id is null then 'create' else 'edit' end),
 		       revision.aggregate_type,''::text,''::text,blueprint.public_id,blueprint.title,request.submitted_by,
 		       'Blueprint: ' || blueprint.title,
-		       coalesce((select string_agg(change.path || ': ' || coalesce(change.before_value::text,'empty') || ' -> ' || coalesce(change.after_value::text,'empty'), E'\n')
+		       coalesce((select left(string_agg(change.path || ': ' || coalesce(change.before_value::text,'empty') || ' -> ' || coalesce(change.after_value::text,'empty'), E'\n' order by change.id),8192)
 		                 from content_change_items change where change.revision_id=revision.id),request.reason),revision.created_at,true
 		from content_revisions revision
 		join change_requests request on request.proposed_revision_id=revision.id
@@ -142,7 +129,7 @@ const contentReviewQueueQuery = `
 		select revision.public_id,'creator','creator',case when request.base_revision_id is null then 'create' else 'edit' end,
 		       revision.aggregate_type,''::text,''::text,creator.public_id,creator.name,request.submitted_by,
 		       case creator.kind when 'team' then 'Team: ' else 'Author: ' end || creator.name,
-		       coalesce((select string_agg(change.path || ': ' || coalesce(change.before_value::text,'empty') || ' -> ' || coalesce(change.after_value::text,'empty'), E'\n')
+		       coalesce((select left(string_agg(change.path || ': ' || coalesce(change.before_value::text,'empty') || ' -> ' || coalesce(change.after_value::text,'empty'), E'\n' order by change.id),8192)
 		                 from content_change_items change where change.revision_id=revision.id),request.reason),revision.created_at,true
 		from content_revisions revision
 		join change_requests request on request.proposed_revision_id=revision.id
@@ -183,14 +170,55 @@ const contentReviewQueueQuery = `
 		from catalog_import_revisions export_revision
 		join mods mod on mod.id=export_revision.mod_id
 		where export_revision.status in ('ready','partial') and not export_revision.is_active
-	) queue
-	left join users user_account on user_account.id=queue.user_id
-	where ($2::boolean and queue.requires_global)
-	   or (not queue.requires_global and ($3::boolean or (
-	       queue.project_id=any($1::text[]) and coalesce(queue.user_id,0)>0 and coalesce(queue.user_id,0)<>$4::bigint
-	   )))
-	order by queue.created_at asc
-	limit 2000`
+	), visible as materialized (
+		select queue.id,queue.source,queue.category,queue.operation,queue.aggregate_type,
+		       queue.project_type,queue.project_id,queue.slug,queue.project_name,
+		       user_account.public_id user_public_id,coalesce(user_account.username,'') username,
+		       queue.title,queue.summary,queue.created_at,
+		       case when queue.requires_global or $3::boolean then 'global' else 'project' end reviewer_scope,
+		       case queue.source
+		         when 'revision' then '/api/v1/mods/' || queue.slug || '/revisions/' || queue.id
+		         when 'export' then '/api/v1/admin/export-revisions/' || queue.id || '/activate'
+		         else '/api/v1/content-revisions/' || queue.id end review_url
+		from queue
+		left join users user_account on user_account.id=queue.user_id
+		where ($2::boolean and queue.requires_global)
+		   or (not queue.requires_global and ($3::boolean or (
+		       queue.project_id=any($1::text[]) and coalesce(queue.user_id,0)>0 and coalesce(queue.user_id,0)<>$4::bigint
+		   )))
+	), filtered as materialized (
+		select * from visible
+		where ($5::text='' or category=$5)
+		  and ($6::text='' or operation=$6)
+		  and ($7::text='' or project_type=$7)
+		  and ($8::text='' or strpos(lower(project_name || ' ' || title || ' ' || username || ' ' || project_id),$8)>0)
+	)`
+
+const contentReviewQueueQuery = contentReviewQueueCTE + `,
+	page as materialized (
+		select * from filtered order by created_at,id,source limit $9 offset $10
+	), category_facets as (
+		select coalesce(jsonb_agg(jsonb_build_object('value',value,'count',item_count) order by value),'[]'::jsonb) value
+		from (select category value,count(*)::bigint item_count from visible where category<>'' group by category) facet
+	), operation_facets as (
+		select coalesce(jsonb_agg(jsonb_build_object('value',value,'count',item_count) order by value),'[]'::jsonb) value
+		from (select operation value,count(*)::bigint item_count from visible where operation<>'' group by operation) facet
+	), project_type_facets as (
+		select coalesce(jsonb_agg(jsonb_build_object('value',value,'count',item_count) order by value),'[]'::jsonb) value
+		from (select project_type value,count(*)::bigint item_count from visible where project_type<>'' group by project_type) facet
+	)
+	select coalesce((select jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+		'id',id,'source',source,'category',category,'operation',operation,'aggregateType',aggregate_type,
+		'projectType',nullif(project_type,''),'projectId',nullif(project_id,''),'modSiteId',slug,'modName',project_name,
+		'userId',user_public_id,'username',username,'title',title,'summary',summary,'createdAt',created_at,
+		'reviewUrl',review_url,'reviewerScope',reviewer_scope
+	)) order by created_at,id,source) from page),'[]'::jsonb),
+	(select count(*)::bigint from filtered),
+	jsonb_build_object(
+		'categories',(select value from category_facets),
+		'operations',(select value from operation_facets),
+		'projectTypes',(select value from project_type_facets)
+	)`
 
 func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
@@ -198,108 +226,30 @@ func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
-	rows, err := s.db.Query(
-		r.Context(), contentReviewQueueQuery, projectReviewIDs(claims), canReviewAllContent(claims), canReviewAllProjects(claims), claims.Subject,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load pending reviews")
-		return
-	}
-	defer rows.Close()
-	accessible := make([]modContentReviewItem, 0)
-	for rows.Next() {
-		var item modContentReviewItem
-		if err = rows.Scan(
-			&item.ID, &item.Source, &item.Category, &item.Operation, &item.AggregateType,
-			&item.ProjectType, &item.ProjectID, &item.ModSiteID, &item.ModName, &item.SubmittedBy,
-			&item.UserID, &item.Username, &item.Title, &item.Summary, &item.CreatedAt, &item.RequiresGlobal,
-		); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to decode pending reviews")
-			return
-		}
-		if !reviewQueueItemAllowed(claims, item) {
-			continue
-		}
-		item.ReviewerScope = "project"
-		if item.RequiresGlobal || canReviewAllProjects(claims) {
-			item.ReviewerScope = "global"
-		}
-		item.ReviewURL = contentReviewURL(item)
-		accessible = append(accessible, item)
-	}
-	if err = rows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load pending reviews")
-		return
-	}
-
-	facets := map[string][]reviewQueueFacet{
-		"categories":   reviewQueueFacets(accessible, func(item modContentReviewItem) string { return item.Category }),
-		"operations":   reviewQueueFacets(accessible, func(item modContentReviewItem) string { return item.Operation }),
-		"projectTypes": reviewQueueFacets(accessible, func(item modContentReviewItem) string { return item.ProjectType }),
-	}
-	filtered := filterReviewQueue(accessible, r)
-	total := len(filtered)
-	limit := boundedReviewQueueInt(r.URL.Query().Get("limit"), 50, 1, 100)
-	offset := boundedReviewQueueInt(r.URL.Query().Get("offset"), 0, 0, max(total, 0))
-	if offset > total {
-		offset = total
-	}
-	end := min(total, offset+limit)
-	writeJSON(w, http.StatusOK, map[string]any{"items": filtered[offset:end], "total": total, "facets": facets})
-}
-
-func reviewQueueItemAllowed(claims security.Claims, item modContentReviewItem) bool {
-	if item.RequiresGlobal {
-		return canReviewAllContent(claims)
-	}
-	return canReviewProjectSubmission(claims, item.ProjectID, item.SubmittedBy)
-}
-
-func contentReviewURL(item modContentReviewItem) string {
-	switch item.Source {
-	case "revision":
-		return "/api/v1/mods/" + item.ModSiteID + "/revisions/" + item.ID
-	case "export":
-		return "/api/v1/admin/export-revisions/" + item.ID + "/activate"
-	default:
-		return "/api/v1/content-revisions/" + item.ID
-	}
-}
-
-func filterReviewQueue(items []modContentReviewItem, r *http.Request) []modContentReviewItem {
 	category := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("category")))
 	operation := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("operation")))
 	projectType := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("projectType")))
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-	if len(query) > 100 {
-		query = query[:100]
+	queryRunes := []rune(query)
+	if len(queryRunes) > 100 {
+		query = string(queryRunes[:100])
 	}
-	filtered := make([]modContentReviewItem, 0, len(items))
-	for _, item := range items {
-		if category != "" && item.Category != category || operation != "" && item.Operation != operation || projectType != "" && item.ProjectType != projectType {
-			continue
-		}
-		if query != "" && !strings.Contains(strings.ToLower(item.ModName+" "+item.Title+" "+item.Username+" "+item.ProjectID), query) {
-			continue
-		}
-		filtered = append(filtered, item)
+	limit := boundedReviewQueueInt(r.URL.Query().Get("limit"), 50, 1, 100)
+	offset := reviewQueueOffset(r.URL.Query().Get("offset"))
+	var items, facets []byte
+	var total int64
+	err := s.db.QueryRow(
+		r.Context(), contentReviewQueueQuery,
+		projectReviewIDs(claims), canReviewAllContent(claims), canReviewAllProjects(claims), claims.Subject,
+		category, operation, projectType, query, limit, offset,
+	).Scan(&items, &total, &facets)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load pending reviews")
+		return
 	}
-	return filtered
-}
-
-func reviewQueueFacets(items []modContentReviewItem, value func(modContentReviewItem) string) []reviewQueueFacet {
-	counts := make(map[string]int)
-	for _, item := range items {
-		if key := strings.TrimSpace(value(item)); key != "" {
-			counts[key]++
-		}
-	}
-	result := make([]reviewQueueFacet, 0, len(counts))
-	for key, count := range counts {
-		result = append(result, reviewQueueFacet{Value: key, Count: count})
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Value < result[j].Value })
-	return result
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": json.RawMessage(items), "total": total, "facets": json.RawMessage(facets),
+	})
 }
 
 func boundedReviewQueueInt(raw string, fallback, minimum, maximum int) int {
@@ -308,4 +258,12 @@ func boundedReviewQueueInt(raw string, fallback, minimum, maximum int) int {
 		return fallback
 	}
 	return min(maximum, max(minimum, value))
+}
+
+func reviewQueueOffset(raw string) int64 {
+	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
 }

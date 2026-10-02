@@ -127,7 +127,6 @@ func catalogEditorSchemaStatements() []string {
 			unique(recipe_type_id,template_key),
 			check(jsonb_typeof(definition)='object')
 		)`,
-		`create index idx_recipe_layout_templates_type on recipe_layout_templates(recipe_type_id,template_key)`,
 		`create table recipe_template_slots (
 			id bigserial primary key,
 			identity_key text not null unique,
@@ -200,5 +199,11 @@ func catalogEditorSchemaStatements() []string {
 		$$ language plpgsql`,
 		`create trigger trg_recipe_candidate_output_fields before insert or update on recipe_binding_candidates
 			for each row execute function validate_recipe_candidate_output_fields()`,
+		`create table catalog_dataset_state (
+			singleton boolean primary key default true check(singleton),
+			version bigint not null default 1 check(version>0),
+			updated_at timestamptz not null default now()
+		)`,
+		`insert into catalog_dataset_state(singleton,version) values(true,1)`,
 	}
 }

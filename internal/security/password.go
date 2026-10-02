@@ -1,15 +1,11 @@
 package security
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
@@ -45,10 +41,10 @@ func HashPassword(password string) (string, error) {
 }
 
 func VerifyPassword(password string, encoded string) bool {
-	if strings.HasPrefix(encoded, "argon2id$") {
-		return verifyArgon2ID(password, encoded)
+	if !strings.HasPrefix(encoded, "argon2id$") {
+		return false
 	}
-	return verifyPBKDF2(password, encoded)
+	return verifyArgon2ID(password, encoded)
 }
 
 func verifyArgon2ID(password string, encoded string) bool {
@@ -81,27 +77,6 @@ func verifyArgon2ID(password string, encoded string) bool {
 	return subtle.ConstantTimeCompare(actual, expected) == 1
 }
 
-func verifyPBKDF2(password string, encoded string) bool {
-	parts := strings.Split(encoded, "$")
-	if len(parts) != 5 || parts[0] != "pbkdf2" || parts[1] != "sha256" {
-		return false
-	}
-	iterations, err := strconv.Atoi(parts[2])
-	if err != nil || iterations < 100000 || iterations > 2_000_000 {
-		return false
-	}
-	salt, err := base64.RawStdEncoding.DecodeString(parts[3])
-	if err != nil || len(salt) < 8 || len(salt) > 64 {
-		return false
-	}
-	expected, err := base64.RawStdEncoding.DecodeString(parts[4])
-	if err != nil || len(expected) < 16 || len(expected) > 64 {
-		return false
-	}
-	actual := pbkdf2SHA256([]byte(password), salt, iterations, len(expected))
-	return subtle.ConstantTimeCompare(actual, expected) == 1
-}
-
 func HashCode(code string) (string, error) {
 	if strings.TrimSpace(code) == "" {
 		return "", errors.New("empty code")
@@ -111,37 +86,4 @@ func HashCode(code string) (string, error) {
 
 func VerifyCode(code string, encoded string) bool {
 	return VerifyPassword(code, encoded)
-}
-
-func pbkdf2SHA256(password []byte, salt []byte, iterations int, keyLen int) []byte {
-	hashLen := sha256.Size
-	numBlocks := (keyLen + hashLen - 1) / hashLen
-	output := make([]byte, 0, numBlocks*hashLen)
-
-	for block := 1; block <= numBlocks; block++ {
-		u := prf(password, appendInt(salt, uint32(block))) // #nosec G115 -- key length is bounded to 64 bytes.
-		t := make([]byte, hashLen)
-		copy(t, u)
-		for i := 1; i < iterations; i++ {
-			u = prf(password, u)
-			for j := 0; j < hashLen; j++ {
-				t[j] ^= u[j]
-			}
-		}
-		output = append(output, t...)
-	}
-	return output[:keyLen]
-}
-
-func prf(key []byte, data []byte) []byte {
-	mac := hmac.New(sha256.New, key)
-	mac.Write(data)
-	return mac.Sum(nil)
-}
-
-func appendInt(salt []byte, block uint32) []byte {
-	out := make([]byte, len(salt)+4)
-	copy(out, salt)
-	binary.BigEndian.PutUint32(out[len(salt):], block)
-	return out
 }

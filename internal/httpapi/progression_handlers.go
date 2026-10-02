@@ -1,8 +1,11 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -15,8 +18,20 @@ import (
 )
 
 type levelConfigPayload struct {
-	RoleTrackCode   string  `json:"roleTrackCode"`
-	LevelThresholds []int64 `json:"levelThresholds"`
+	RoleTrackCode   string                     `json:"roleTrackCode"`
+	LevelThresholds []int64                    `json:"levelThresholds"`
+	Version         int64                      `json:"version,omitempty"`
+	Recalculation   *levelRecalculationPayload `json:"recalculation,omitempty"`
+}
+
+type levelRecalculationPayload struct {
+	ConfigVersion  int64  `json:"configVersion"`
+	Status         string `json:"status"`
+	CursorUserID   int64  `json:"cursorUserId"`
+	ProcessedCount int64  `json:"processedCount"`
+	Attempts       int    `json:"attempts"`
+	MaxAttempts    int    `json:"maxAttempts"`
+	LastError      string `json:"lastError,omitempty"`
 }
 
 type taskPayload struct {
@@ -30,6 +45,69 @@ type taskPayload struct {
 	Condition     map[string]any `json:"condition"`
 	Rewards       map[string]any `json:"rewards"`
 	Status        string         `json:"status"`
+}
+
+var errTaskCurrencyRewardDuplicate = errors.New("task currency reward codes must be unique")
+var errTaskRewardStoreUnavailable = errors.New("task reward store is unavailable")
+
+func (payload *taskPayload) UnmarshalJSON(data []byte) error {
+	if err := validateTaskCurrencyRewardJSONKeys(data); err != nil {
+		return err
+	}
+	type taskPayloadAlias taskPayload
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var decoded taskPayloadAlias
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	*payload = taskPayload(decoded)
+	return nil
+}
+
+func validateTaskCurrencyRewardJSONKeys(data []byte) error {
+	var envelope struct {
+		Rewards json.RawMessage `json:"rewards"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil || len(envelope.Rewards) == 0 {
+		return err
+	}
+	var rewards struct {
+		Currencies json.RawMessage `json:"currencies"`
+	}
+	if err := json.Unmarshal(envelope.Rewards, &rewards); err != nil || len(rewards.Currencies) == 0 || bytes.Equal(bytes.TrimSpace(rewards.Currencies), []byte("null")) {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(rewards.Currencies))
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	for decoder.More() {
+		rawCode, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		code, ok := rawCode.(string)
+		if !ok {
+			return errors.New("task currency reward code is invalid")
+		}
+		normalized := normalizeCode(code)
+		if _, duplicate := seen[normalized]; duplicate {
+			return errTaskCurrencyRewardDuplicate
+		}
+		seen[normalized] = struct{}{}
+		var value json.RawMessage
+		if err = decoder.Decode(&value); err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
 }
 
 func (s *Server) userTasks(w http.ResponseWriter, r *http.Request) {
@@ -75,12 +153,18 @@ func (s *Server) userTasks(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to decode tasks")
 			return
 		}
-		item.translations = map[string]any{}
-		item.condition = map[string]any{}
-		item.rewards = map[string]any{}
-		_ = json.Unmarshal(translationsRaw, &item.translations)
-		_ = json.Unmarshal(conditionRaw, &item.condition)
-		_ = json.Unmarshal(rewardsRaw, &item.rewards)
+		item.translations, err = decodeStoredJSONObject(translationsRaw, "task translations")
+		if err != nil {
+			log.Printf("load user task %s translations: %v", item.publicID, err)
+			writeError(w, http.StatusInternalServerError, "failed to decode task translations")
+			return
+		}
+		item.condition, item.rewards, err = decodeTaskConfigurationMaps(conditionRaw, rewardsRaw)
+		if err != nil {
+			log.Printf("load user task %s configuration: %v", item.publicID, err)
+			writeError(w, http.StatusInternalServerError, "failed to decode task configuration")
+			return
+		}
 		item.periodKey = progression.PeriodKey(item.refreshPeriod, now, location)
 		tasks = append(tasks, item)
 		taskIDs = append(taskIDs, item.id)
@@ -145,16 +229,28 @@ func (s *Server) userTasks(w http.ResponseWriter, r *http.Request) {
 func (s *Server) adminLevelConfig(w http.ResponseWriter, r *http.Request) {
 	var roleTrack *string
 	var thresholds []int64
-	if err := s.db.QueryRow(r.Context(), `select role_track_code,level_thresholds
-		from level_system_config where singleton`).Scan(&roleTrack, &thresholds); err != nil {
+	var payload levelConfigPayload
+	var job levelRecalculationPayload
+	if err := s.db.QueryRow(r.Context(), `select config.role_track_code,config.level_thresholds,config.version,
+		coalesce(job.config_version,0),coalesce(job.status,''),coalesce(job.cursor_user_id,0),
+		coalesce(job.processed_count,0),coalesce(job.attempts,0),coalesce(job.max_attempts,0),coalesce(job.last_error,'')
+		from level_system_config config left join lateral (
+			select config_version,status,cursor_user_id,processed_count,attempts,max_attempts,last_error
+			from level_recalculation_jobs order by config_version desc limit 1
+		) job on true where config.singleton`).Scan(&roleTrack, &thresholds, &payload.Version,
+		&job.ConfigVersion, &job.Status, &job.CursorUserID, &job.ProcessedCount,
+		&job.Attempts, &job.MaxAttempts, &job.LastError); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load level configuration")
 		return
 	}
-	code := ""
+	payload.LevelThresholds = thresholds
 	if roleTrack != nil {
-		code = *roleTrack
+		payload.RoleTrackCode = *roleTrack
 	}
-	writeJSON(w, http.StatusOK, levelConfigPayload{RoleTrackCode: code, LevelThresholds: thresholds})
+	if job.Status != "" {
+		payload.Recalculation = &job
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) updateLevelConfig(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +259,10 @@ func (s *Server) updateLevelConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid level configuration")
 		return
 	}
+	if payload.LevelThresholds == nil {
+		payload.LevelThresholds = []int64{}
+	}
+	roleIDs := make([]int64, 0)
 	payload.RoleTrackCode = strings.TrimSpace(payload.RoleTrackCode)
 	for index, threshold := range payload.LevelThresholds {
 		if threshold < 0 || (index > 0 && threshold <= payload.LevelThresholds[index-1]) {
@@ -170,19 +270,30 @@ func (s *Server) updateLevelConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if payload.RoleTrackCode == "" {
-		if len(payload.LevelThresholds) != 0 {
-			writeError(w, http.StatusBadRequest, "a role track is required when thresholds are configured")
+	if payload.RoleTrackCode == "" && len(payload.LevelThresholds) != 0 {
+		writeError(w, http.StatusBadRequest, "a role track is required when thresholds are configured")
+		return
+	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start level configuration update")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if payload.RoleTrackCode != "" {
+		if err = tx.QueryRow(r.Context(), `select coalesce(array_agg(role_id order by position),'{}'::bigint[])
+			from (select track_role.role_id,track_role.position from permission_role_tracks track
+				join permission_role_track_roles track_role on track_role.track_code=track.code
+				where track.code=$1 order by track_role.position for share of track,track_role) locked_roles`,
+			payload.RoleTrackCode).Scan(&roleIDs); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load role track")
 			return
 		}
-	} else {
-		var roleCount int
-		if err := s.db.QueryRow(r.Context(), `select count(*) from permission_role_track_roles
-			where track_code=$1`, payload.RoleTrackCode).Scan(&roleCount); err != nil || roleCount == 0 {
+		if len(roleIDs) == 0 {
 			writeError(w, http.StatusBadRequest, "role track was not found")
 			return
 		}
-		if len(payload.LevelThresholds) != roleCount {
+		if len(payload.LevelThresholds) != len(roleIDs) {
 			writeError(w, http.StatusBadRequest, "the number of levels must match the number of roles in the selected track")
 			return
 		}
@@ -191,55 +302,33 @@ func (s *Server) updateLevelConfig(w http.ResponseWriter, r *http.Request) {
 	if payload.RoleTrackCode != "" {
 		track = payload.RoleTrackCode
 	}
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to start level configuration update")
-		return
-	}
-	defer tx.Rollback(r.Context())
-	if _, err = tx.Exec(r.Context(), `update level_system_config set role_track_code=$1,
-		level_thresholds=$2,updated_by=$3,updated_at=now() where singleton`,
-		track, payload.LevelThresholds, currentClaims(r).Subject); err != nil {
+	var configVersion int64
+	if err = tx.QueryRow(r.Context(), `update level_system_config set role_track_code=$1,
+		level_thresholds=$2,version=version+1,updated_by=$3,updated_at=now() where singleton
+		returning version`, track, payload.LevelThresholds, currentClaims(r).Subject).Scan(&configVersion); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save level configuration")
 		return
 	}
-	rows, err := tx.Query(r.Context(), `select user_id,experience from user_experience for update`)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load user experience")
+	if _, err = tx.Exec(r.Context(), `update level_recalculation_jobs set status='superseded',locked_by='',
+		lease_expires_at=null,finished_at=now(),updated_at=now()
+		where status in ('queued','processing')`); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to supersede the previous level recalculation")
 		return
 	}
-	type experienceRow struct {
-		userID     int64
-		experience int64
-	}
-	users := make([]experienceRow, 0)
-	for rows.Next() {
-		var item experienceRow
-		if err = rows.Scan(&item.userID, &item.experience); err != nil {
-			rows.Close()
-			writeError(w, http.StatusInternalServerError, "failed to decode user experience")
-			return
-		}
-		users = append(users, item)
-	}
-	rows.Close()
-	for _, user := range users {
-		level := progression.LevelForExperience(user.experience, payload.LevelThresholds)
-		if _, err = tx.Exec(r.Context(), `update user_experience set level=$2,updated_at=now() where user_id=$1`,
-			user.userID, level); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to update user level")
-			return
-		}
-		if payload.RoleTrackCode != "" {
-			if err = progression.SyncTrackRole(r.Context(), tx, user.userID, payload.RoleTrackCode, level); err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to synchronize level role")
-				return
-			}
-		}
+	if _, err = tx.Exec(r.Context(), `insert into level_recalculation_jobs(
+		config_version,role_track_code,level_thresholds,role_ids,created_by)
+		values($1,$2,$3,$4,$5)`, configVersion, payload.RoleTrackCode,
+		payload.LevelThresholds, roleIDs, currentClaims(r).Subject); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to enqueue level recalculation")
+		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit level configuration")
 		return
+	}
+	payload.Version = configVersion
+	payload.Recalculation = &levelRecalculationPayload{
+		ConfigVersion: configVersion, Status: "queued", MaxAttempts: 8,
 	}
 	writeJSON(w, http.StatusOK, payload)
 }
@@ -261,13 +350,23 @@ func (s *Server) adminTasks(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to decode tasks")
 			return
 		}
-		item.Translations = map[string]any{}
-		item.Condition = map[string]any{}
-		item.Rewards = map[string]any{}
-		_ = json.Unmarshal(translationsRaw, &item.Translations)
-		_ = json.Unmarshal(conditionRaw, &item.Condition)
-		_ = json.Unmarshal(rewardsRaw, &item.Rewards)
+		item.Translations, err = decodeStoredJSONObject(translationsRaw, "task translations")
+		if err != nil {
+			log.Printf("load admin task %s translations: %v", item.PublicID, err)
+			writeError(w, http.StatusInternalServerError, "failed to decode task translations")
+			return
+		}
+		item.Condition, item.Rewards, err = decodeTaskConfigurationMaps(conditionRaw, rewardsRaw)
+		if err != nil {
+			log.Printf("load admin task %s configuration: %v", item.PublicID, err)
+			writeError(w, http.StatusInternalServerError, "failed to decode task configuration")
+			return
+		}
 		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load tasks")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -282,8 +381,12 @@ func (s *Server) updateTask(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) saveTask(w http.ResponseWriter, r *http.Request, currentPublicID string) {
 	var payload taskPayload
-	if decodeJSON(r, &payload) != nil {
-		writeError(w, http.StatusBadRequest, "invalid task")
+	if err := decodeJSON(r, &payload); err != nil {
+		if errors.Is(err, errTaskCurrencyRewardDuplicate) {
+			writeError(w, http.StatusBadRequest, errTaskCurrencyRewardDuplicate.Error())
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid task")
+		}
 		return
 	}
 	payload.Code = normalizeCode(payload.Code)
@@ -306,14 +409,29 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request, currentPublicI
 		return
 	}
 	if err := s.validateTaskRewards(r, payload.Rewards); err != nil {
+		if errors.Is(err, errTaskRewardStoreUnavailable) {
+			writeError(w, http.StatusInternalServerError, "failed to validate task rewards")
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	translations, _ := json.Marshal(payload.Translations)
-	condition, _ := json.Marshal(payload.Condition)
-	rewards, _ := json.Marshal(payload.Rewards)
+	translations, err := json.Marshal(payload.Translations)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "task translations are invalid")
+		return
+	}
+	condition, err := json.Marshal(payload.Condition)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "task condition is invalid")
+		return
+	}
+	rewards, err := json.Marshal(payload.Rewards)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "task rewards are invalid")
+		return
+	}
 	var publicID string
-	var err error
 	if currentPublicID == "" {
 		err = s.db.QueryRow(r.Context(), `insert into task_definitions(
 			code,name,description,icon,translations,refresh_period,condition,rewards,status,created_by
@@ -359,6 +477,42 @@ func (s *Server) deleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+type adminActivityEventRow struct {
+	id                 string
+	userID             *string
+	username           *string
+	actionCode         string
+	actionName         string
+	objectCode         string
+	objectName         string
+	objectPublicID     string
+	markdownAddedBytes int
+	occurredAt         time.Time
+}
+
+func collectAdminActivityEvents(rows checkedRows) ([]map[string]any, error) {
+	defer rows.Close()
+	items := make([]map[string]any, 0)
+	for rows.Next() {
+		var item adminActivityEventRow
+		if err := rows.Scan(&item.id, &item.userID, &item.username, &item.actionCode, &item.actionName,
+			&item.objectCode, &item.objectName, &item.objectPublicID, &item.markdownAddedBytes, &item.occurredAt); err != nil {
+			return nil, fmt.Errorf("scan activity event: %w", err)
+		}
+		items = append(items, map[string]any{
+			"id": item.id, "userId": item.userID, "username": item.username,
+			"action": item.actionCode, "actionName": item.actionName,
+			"objectType": item.objectCode, "objectTypeName": item.objectName,
+			"objectPublicId": item.objectPublicID, "markdownAddedBytes": item.markdownAddedBytes,
+			"occurredAt": item.occurredAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate activity events: %w", err)
+	}
+	return items, nil
 }
 
 func (s *Server) adminActivityEvents(w http.ResponseWriter, r *http.Request) {
@@ -409,27 +563,10 @@ func (s *Server) adminActivityEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load activity events")
 		return
 	}
-	defer rows.Close()
-	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var id string
-		var userID *string
-		var username *string
-		var actionCode, actionName, objectCode, objectName, objectPublicID string
-		var markdownAddedBytes int
-		var occurredAt time.Time
-		if err = rows.Scan(&id, &userID, &username, &actionCode, &actionName, &objectCode, &objectName,
-			&objectPublicID, &markdownAddedBytes, &occurredAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to decode activity events")
-			return
-		}
-		items = append(items, map[string]any{
-			"id": id, "userId": userID, "username": username,
-			"action": actionCode, "actionName": actionName,
-			"objectType": objectCode, "objectTypeName": objectName,
-			"objectPublicId": objectPublicID, "markdownAddedBytes": markdownAddedBytes,
-			"occurredAt": occurredAt,
-		})
+	items, err := collectAdminActivityEvents(rows)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load activity events")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "limit": limit, "offset": offset})
 }
@@ -465,25 +602,56 @@ func (s *Server) validateTaskRewards(r *http.Request, rewards map[string]any) er
 	}
 	rewards["experience"] = experience
 	rawCurrencies, _ := rewards["currencies"].(map[string]any)
-	currencies := make(map[string]int64, len(rawCurrencies))
-	for code, value := range rawCurrencies {
-		code = normalizeCode(code)
-		amount := int64Value(value)
-		if code == "" || amount <= 0 {
-			return errors.New("task currency rewards must use a currency code and positive amount")
-		}
+	currencies, err := normalizeTaskCurrencyRewards(rawCurrencies)
+	if err != nil {
+		return err
+	}
+	for code := range currencies {
 		var exists bool
-		if err := s.db.QueryRow(r.Context(), `select exists(select 1 from currencies where code=$1 and status='active')`, code).
-			Scan(&exists); err != nil || !exists {
+		if queryErr := s.db.QueryRow(r.Context(), `select exists(select 1 from currencies where code=$1 and status='active')`, code).
+			Scan(&exists); queryErr != nil {
+			return fmt.Errorf("%w: %v", errTaskRewardStoreUnavailable, queryErr)
+		}
+		if !exists {
 			return errors.New("task reward references an unknown currency")
 		}
-		currencies[code] = amount
 	}
 	rewards["currencies"] = currencies
 	if experience == 0 && len(currencies) == 0 {
 		return errors.New("task must provide at least one reward")
 	}
 	return nil
+}
+
+func decodeTaskConfigurationMaps(conditionRaw, rewardsRaw []byte) (map[string]any, map[string]any, error) {
+	if err := progression.ValidateTaskConfiguration(conditionRaw, rewardsRaw); err != nil {
+		return nil, nil, err
+	}
+	condition := make(map[string]any)
+	if err := json.Unmarshal(conditionRaw, &condition); err != nil {
+		return nil, nil, fmt.Errorf("decode task condition: %w", err)
+	}
+	rewards := make(map[string]any)
+	if err := json.Unmarshal(rewardsRaw, &rewards); err != nil {
+		return nil, nil, fmt.Errorf("decode task rewards: %w", err)
+	}
+	return condition, rewards, nil
+}
+
+func normalizeTaskCurrencyRewards(rawCurrencies map[string]any) (map[string]int64, error) {
+	currencies := make(map[string]int64, len(rawCurrencies))
+	for rawCode, value := range rawCurrencies {
+		code := normalizeCode(rawCode)
+		amount := int64Value(value)
+		if code == "" || amount <= 0 {
+			return nil, errors.New("task currency rewards must use a currency code and positive amount")
+		}
+		if _, duplicate := currencies[code]; duplicate {
+			return nil, errTaskCurrencyRewardDuplicate
+		}
+		currencies[code] = amount
+	}
+	return currencies, nil
 }
 
 func stringIn(value string, allowed ...string) bool {

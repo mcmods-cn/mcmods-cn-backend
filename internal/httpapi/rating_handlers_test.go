@@ -29,11 +29,10 @@ func TestRatingDimensionsCoverEverySupportedTarget(t *testing.T) {
 	}
 }
 
-func TestNormalizeRatingTargetType(t *testing.T) {
+func TestNormalizeRatingTargetTypeAcceptsOnlyCanonicalTypes(t *testing.T) {
 	tests := map[string]string{
-		"server": "minecraft_server", "minecraft-server": "minecraft_server",
-		"resource-pack": "resource_pack", "shader": "shader_pack",
-		" MOD ": "mod", "unknown": "",
+		" MOD ": "mod", "minecraft_server": "minecraft_server", "resource_pack": "resource_pack", "shader_pack": "shader_pack",
+		"server": "", "minecraft-server": "", "resource-pack": "", "shader": "", "shader-pack": "", "unknown": "",
 	}
 	for input, expected := range tests {
 		if actual := normalizeRatingTargetType(input); actual != expected {
@@ -89,7 +88,7 @@ func cloneRatingScores(source map[string]int) map[string]int {
 func TestEffectivePromotionPowerDiminishesRepeatedUse(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		used int
+		used int64
 		want float64
 	}{{0, 1}, {1, 1 / 1.2}, {5, 0.5}}
 	for _, test := range tests {

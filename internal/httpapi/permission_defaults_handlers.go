@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/systemactor"
 )
 
 const permissionDefaultsSettingKey = "permission.default_roles"
@@ -35,18 +37,28 @@ func (s *Server) updatePermissionDefaults(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "新注册用户权限组和封禁用户权限组不能相同")
 		return
 	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存默认权限组失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if err = lockRoleGraphMutationTx(r.Context(), tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "锁定权限组图失败")
+		return
+	}
 	for _, role := range []string{payload.RegisteredRole, payload.BannedRole} {
 		if role == "" {
 			continue
 		}
 		var exists bool
-		if err := s.db.QueryRow(r.Context(), `select exists(select 1 from roles where code = $1 and status = 'active')`, role).Scan(&exists); err != nil || !exists {
+		if err = tx.QueryRow(r.Context(), `select exists(select 1 from roles where code=$1 and status='active')`, role).Scan(&exists); err != nil || !exists {
 			writeError(w, http.StatusBadRequest, "权限组不存在: "+role)
 			return
 		}
 	}
 	raw, _ := json.Marshal(payload)
-	_, err := s.db.Exec(
+	_, err = tx.Exec(
 		r.Context(),
 		`insert into system_settings (key, value, updated_by, updated_at)
 		 values ($1, $2::jsonb, $3, now())
@@ -57,6 +69,10 @@ func (s *Server) updatePermissionDefaults(w http.ResponseWriter, r *http.Request
 		currentClaims(r).Subject,
 	)
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存默认权限组失败")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存默认权限组失败")
 		return
 	}
@@ -75,16 +91,25 @@ func (s *Server) updateUserStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	request.Status = strings.ToLower(strings.TrimSpace(request.Status))
-	if request.Status != "active" && request.Status != "banned" && request.Status != "disabled" && request.Status != "deleted" {
-		writeError(w, http.StatusBadRequest, "用户状态不正确")
-		return
-	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "修改用户状态失败")
 		return
 	}
 	defer tx.Rollback(r.Context())
+	var username, email string
+	if err = tx.QueryRow(r.Context(), `select username,email from users where id=$1 for update`, userID).Scan(&username, &email); err != nil {
+		if err == pgx.ErrNoRows {
+			writeError(w, http.StatusNotFound, "用户不存在")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "修改用户状态失败")
+		return
+	}
+	if !validSecurityManagedUserStatus(username, email, request.Status) {
+		writeError(w, http.StatusBadRequest, "用户状态不正确")
+		return
+	}
 	tag, err := tx.Exec(r.Context(), `update users set status = $2, updated_at = now() where id = $1`, userID, request.Status)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "修改用户状态失败")
@@ -108,9 +133,19 @@ func (s *Server) updateUserStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "修改用户状态失败")
 		return
 	}
-	_ = s.refreshAuthVersion(r.Context(), userID)
-	_ = s.refreshPermissionVersion(r.Context(), userID)
+	if !s.requireSecurityVersionRefresh(w, r, "update_user_status", userID,
+		s.refreshAuthVersionForIdentity(r.Context(), userID, identity.PublicID),
+		s.refreshPermissionVersion(r.Context(), userID)) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": r.PathValue("id"), "status": request.Status})
+}
+
+func validSecurityManagedUserStatus(username, email, status string) bool {
+	if username == systemactor.AutobotUsername && strings.EqualFold(email, systemactor.AutobotEmail) {
+		return status == systemactor.AutobotStatus || status == "disabled" || status == "deleted"
+	}
+	return status == "active" || status == "banned" || status == "disabled" || status == "deleted"
 }
 
 func (s *Server) permissionDefaultsFromSettings(ctx context.Context) permissionDefaultsPayload {
@@ -134,35 +169,9 @@ func (s *Server) assignConfiguredRoleTx(ctx context.Context, tx pgx.Tx, userID i
 	if kind == "banned" {
 		role = defaults.BannedRole
 	}
-	if role == "" {
-		return nil
-	}
-	_, err := tx.Exec(
-		ctx,
-		`insert into user_role_bindings (user_id, role_id)
-		 select $1, id from roles where code = $2 and status = 'active'
-		 on conflict do nothing`,
-		userID,
-		role,
-	)
-	return err
+	return replaceAccountStatusRoleTx(ctx, tx, userID, kind, role)
 }
 
 func (s *Server) removeConfiguredRoleTx(ctx context.Context, tx pgx.Tx, userID int64, kind string) error {
-	defaults := s.permissionDefaultsFromSettings(ctx)
-	role := defaults.RegisteredRole
-	if kind == "banned" {
-		role = defaults.BannedRole
-	}
-	if role == "" {
-		return nil
-	}
-	_, err := tx.Exec(
-		ctx,
-		`delete from user_role_bindings b using roles r
-		 where b.role_id = r.id and b.user_id = $1 and r.code = $2`,
-		userID,
-		role,
-	)
-	return err
+	return replaceAccountStatusRoleTx(ctx, tx, userID, kind, "")
 }

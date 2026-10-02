@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/queue"
 )
 
 const (
@@ -100,13 +102,51 @@ func (s *Server) failModExportJob(jobID, runToken, code string, failure error) {
 }
 
 func (s *Server) recoverStaleModExportJobs(ctx context.Context) error {
-	_, err := s.db.Exec(ctx, `
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = s.compensateStaleCatalogImportArtifactsTx(ctx, tx); err != nil {
+		return err
+	}
+	if _, err = recoverStaleModExportJobsTx(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func recoverStaleModExportJobsTx(ctx context.Context, tx pgx.Tx) (int, error) {
+	rows, err := tx.Query(ctx, `
 		update catalog_import_jobs
 		set status='queued',progress=0,current_stage='recovery',run_token='',heartbeat_at=null,
 			started_at=null,finished_at=null,error_code='',error_detail='{}'::jsonb,updated_at=now()
 		where status in ('validating','importing')
-		  and coalesce(heartbeat_at,updated_at) < now() - $1::interval`, pgInterval(modExportStaleAfter))
-	return err
+		  and coalesce(heartbeat_at,updated_at) < now() - $1::interval
+		returning id`, pgInterval(modExportStaleAfter))
+	if err != nil {
+		return 0, err
+	}
+	jobIDs := make([]string, 0)
+	for rows.Next() {
+		var jobID string
+		if err = rows.Scan(&jobID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		jobIDs = append(jobIDs, jobID)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	for _, jobID := range jobIDs {
+		if err = enqueueModExportAttemptTx(ctx, tx, jobID, "mod.catalog_import.recovered"); err != nil {
+			return 0, err
+		}
+	}
+	return len(jobIDs), nil
 }
 
 func (s *Server) markStalledModExportJob(ctx context.Context, jobID string, modID int64) (bool, error) {
@@ -120,7 +160,26 @@ func (s *Server) markStalledModExportJob(ctx context.Context, jobID string, modI
 }
 
 func (s *Server) resetModExportJobForRetry(ctx context.Context, jobID string, modID, actorID int64) (bool, error) {
-	tag, err := s.db.Exec(ctx, `
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	retried, err := resetModExportJobForRetryTx(ctx, tx, jobID, modID, actorID)
+	if err != nil || !retried {
+		return retried, err
+	}
+	if err = s.compensateCatalogImportArtifactsTx(ctx, tx, jobID, "", "catalog-import-retried"); err != nil {
+		return false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func resetModExportJobForRetryTx(ctx context.Context, tx pgx.Tx, jobID string, modID, actorID int64) (bool, error) {
+	tag, err := tx.Exec(ctx, `
 		update catalog_import_jobs
 		set status='queued',progress=0,current_stage='recovery',error_code='',error_detail='{}'::jsonb,
 			created_by=$3,started_at=null,finished_at=null,heartbeat_at=null,run_token='',updated_at=now()
@@ -128,23 +187,18 @@ func (s *Server) resetModExportJobForRetry(ctx context.Context, jobID string, mo
 			status in ('failed','cancelled') or
 			(status in ('validating','importing') and coalesce(heartbeat_at,updated_at) < now() - $4::interval)
 		)`, jobID, modID, actorID, pgInterval(modExportStaleAfter))
-	return err == nil && tag.RowsAffected() > 0, err
+	if err != nil || tag.RowsAffected() == 0 {
+		return false, err
+	}
+	if err = enqueueModExportAttemptTx(ctx, tx, jobID, "mod.catalog_import.retried"); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-func (s *Server) dispatchModExportJob(ctx context.Context, jobID string) {
-	if s.cfg.NATS.OutboxEnabled {
-		return
-	}
-	message := modExportJobMessage{JobID: jobID}
-	if s.queue != nil && s.queue.PublishTask(ctx, modExportTaskCode, message) == nil {
-		_, _ = s.db.Exec(ctx, `update nats_outbox set published_at=now() where aggregate_type='mod_export_job' and aggregate_id=$1 and published_at is null`, jobID)
-		return
-	}
-	jobContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Hour)
-	go func() {
-		defer cancel()
-		_ = s.importModExportJob(jobContext, jobID)
-	}()
+func enqueueModExportAttemptTx(ctx context.Context, tx pgx.Tx, jobID, eventType string) error {
+	_, err := queue.EnqueueTx(ctx, tx, modExportTaskCode, eventType, "mod_export_job", jobID, "", modExportJobMessage{JobID: jobID})
+	return err
 }
 
 func (s *Server) runModExportTransaction(ctx context.Context, action func(pgx.Tx) error) error {
@@ -159,12 +213,61 @@ func (s *Server) runModExportTransaction(ctx context.Context, action func(pgx.Tx
 	return tx.Commit(ctx)
 }
 
-func (s *Server) cleanupModExportStaging(ctx context.Context, packageID string, modID int64, runToken string) error {
-	if packageID == "" || modID <= 0 || runToken == "" {
+func (s *Server) cleanupModExportStaging(ctx context.Context, jobID, packageID string, modID int64, runToken string) error {
+	if jobID == "" || runToken == "" {
 		return nil
 	}
-	_, err := s.db.Exec(ctx, `delete from catalog_import_revisions where package_id=$1 and mod_id=$2 and status='staging' and import_run_token=$3`, packageID, modID, runToken)
-	return err
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = s.compensateCatalogImportArtifactsTx(ctx, tx, jobID, runToken, "catalog-import-failed"); err != nil {
+		return err
+	}
+	if packageID != "" && modID > 0 {
+		if _, err = tx.Exec(ctx, `delete from catalog_import_revisions
+			where package_id=$1 and mod_id=$2 and status='staging' and import_run_token=$3`, packageID, modID, runToken); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Server) compensateStaleCatalogImportArtifactsTx(ctx context.Context, tx pgx.Tx) error {
+	rows, err := tx.Query(ctx, `select id,run_token from catalog_import_jobs
+		where status in ('validating','importing') and run_token<>''
+		  and coalesce(heartbeat_at,updated_at) < now() - $1::interval
+		order by id for update`, pgInterval(modExportStaleAfter))
+	if err != nil {
+		return err
+	}
+	type staleAttempt struct {
+		jobID    string
+		runToken string
+	}
+	attempts := make([]staleAttempt, 0)
+	for rows.Next() {
+		var attempt staleAttempt
+		if err = rows.Scan(&attempt.jobID, &attempt.runToken); err != nil {
+			rows.Close()
+			return err
+		}
+		attempts = append(attempts, attempt)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, attempt := range attempts {
+		if err = s.compensateCatalogImportArtifactsTx(
+			ctx, tx, attempt.jobID, attempt.runToken, "catalog-import-stale-attempt",
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func pgInterval(value time.Duration) string {

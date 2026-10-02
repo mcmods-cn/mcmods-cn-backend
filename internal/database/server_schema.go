@@ -52,6 +52,14 @@ func serverSchemaStatements() []string {
 		)`,
 		`create index idx_minecraft_servers_catalog
 			on minecraft_servers(review_status,primary_tag,updated_at desc,id desc)`,
+		`create index idx_minecraft_servers_public_updated
+			on minecraft_servers(updated_at desc,id desc) where review_status='approved'`,
+		`create index idx_minecraft_servers_public_created
+			on minecraft_servers(created_at desc,updated_at desc,id desc) where review_status='approved'`,
+		`create index idx_minecraft_servers_public_name
+			on minecraft_servers(lower(name),id) where review_status='approved'`,
+		`create index idx_minecraft_servers_review_page
+			on minecraft_servers(review_status,created_at,id)`,
 		`create index idx_minecraft_servers_probe
 			on minecraft_servers(next_probe_at,id) where review_status='approved'`,
 		`create unique index idx_minecraft_servers_active_address
@@ -81,9 +89,6 @@ func serverSchemaStatements() []string {
 			server_id bigint not null references minecraft_servers(id) on delete cascade,
 			mod_id bigint references mods(id) on delete set null,
 			raw_mod_id text not null,
-			version text not null default '',
-			source text not null default 'manual' check(source in ('forge_status','configuration','agent','manual')),
-			confidence text not null default 'declared' check(confidence in ('exact','high','inferred','declared')),
 			created_at timestamptz not null default now(),
 			unique(server_id,raw_mod_id)
 		)`,
@@ -91,6 +96,20 @@ func serverSchemaStatements() []string {
 			on minecraft_server_mods(mod_id,server_id) where mod_id is not null`,
 		`create index idx_minecraft_server_mods_raw
 			on minecraft_server_mods(lower(raw_mod_id),server_id)`,
+		`create table minecraft_server_mod_evidence (
+			server_mod_id bigint not null references minecraft_server_mods(id) on delete cascade,
+			source text not null check(source in ('forge_status','configuration','agent','manual')),
+			version text not null default '',
+			confidence text not null,
+			observed_at timestamptz not null default now(),
+			primary key(server_mod_id,source),
+			constraint minecraft_server_mod_evidence_confidence_check check(
+				(source='manual' and confidence='declared') or
+				(source<>'manual' and confidence in ('exact','high','inferred'))
+			)
+		)`,
+		`create index idx_minecraft_server_mod_evidence_source
+			on minecraft_server_mod_evidence(source,server_mod_id) where source<>'manual'`,
 
 		`create table minecraft_server_proof_files (
 			server_id bigint not null references minecraft_servers(id) on delete cascade,

@@ -3,6 +3,8 @@
 import { writeFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 
+import { classifyLoadResponse, summarizeLoadOutcomes } from "./load-test-lib.mjs";
+
 const baseURL = new URL(process.env.MCMODS_LOAD_BASE_URL ?? "http://127.0.0.1:8080");
 const localHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 if (!localHosts.has(baseURL.hostname) && process.env.MCMODS_LOAD_ALLOW_REMOTE !== "1") {
@@ -26,8 +28,12 @@ const botToken = process.env.MCMODS_LOAD_BOT_TOKEN ?? "";
 const outputPath = process.env.MCMODS_LOAD_OUTPUT ?? "";
 const requestTimeoutMS = boundedNumber(process.env.MCMODS_LOAD_TIMEOUT_MS, 10_000, 500, 120_000);
 const includeReadinessProbe = process.env.MCMODS_LOAD_INCLUDE_READY === "1";
+const minimumSuccessfulResponses = boundedNumber(process.env.MCMODS_LOAD_MIN_SUCCESSFUL_RESPONSES, 1, 1, 1_000_000_000);
+const minimumRiskRejects = boundedNumber(process.env.MCMODS_LOAD_MIN_RISK_REJECTS, scenarioName === "antiabuse" ? 1 : 0, 0, 1_000_000_000);
+const requiredCodes = splitValues(process.env.MCMODS_LOAD_REQUIRED_CODES ?? "");
 
 const results = [];
+const outcomes = [];
 const statusCounts = new Map();
 const scenarioCounts = new Map();
 const antiAbuseCodes = new Map();
@@ -36,6 +42,9 @@ let completed = 0;
 let stopped = false;
 const startedAt = new Date();
 const started = performance.now();
+const requestPools = createRequestPools();
+const selectedRequests = scenarioName === "mixed" ? createMixedRequests(requestPools) : requestPools[scenarioName];
+if (!selectedRequests?.length) throw new Error(`Scenario ${scenarioName} has no runnable requests with the supplied configuration.`);
 
 process.on("SIGINT", () => { stopped = true; });
 
@@ -51,6 +60,14 @@ const sorted = results.toSorted((left, right) => left - right);
 const success = [...statusCounts.entries()].filter(([status]) => status >= 200 && status < 400).reduce((sum, [, count]) => sum + count, 0);
 const clientErrors = [...statusCounts.entries()].filter(([status]) => status >= 400 && status < 500).reduce((sum, [, count]) => sum + count, 0);
 const serverErrors = [...statusCounts.entries()].filter(([status]) => status >= 500).reduce((sum, [, count]) => sum + count, 0);
+const outcomeSummary = summarizeLoadOutcomes({
+  outcomes,
+  networkErrors,
+  completed,
+  minimumSuccessfulResponses,
+  minimumRiskRejects,
+  requiredCodes,
+});
 const report = {
   generatedAt: new Date().toISOString(),
   startedAt: startedAt.toISOString(),
@@ -63,7 +80,11 @@ const report = {
   clientErrors,
   serverErrors,
   networkErrors,
-  errorRate: completed ? round((clientErrors + serverErrors + networkErrors) / completed) : 0,
+  expectedResponses: outcomeSummary.expectedResponses,
+  expectedRejects: outcomeSummary.expectedRejects,
+  successfulResponses: outcomeSummary.successfulResponses,
+  unexpectedResponses: outcomeSummary.unexpectedResponses,
+  errorRate: outcomeSummary.failureRate,
   requestsPerSecond: round(completed / elapsedSeconds),
   latencyMS: {
     average: round(sorted.reduce((sum, value) => sum + value, 0) / Math.max(1, sorted.length)),
@@ -76,21 +97,29 @@ const report = {
   statuses: Object.fromEntries([...statusCounts.entries()].sort(([left], [right]) => left - right)),
   requestsByScenario: Object.fromEntries([...scenarioCounts.entries()].sort()),
   antiAbuseCodes: Object.fromEntries([...antiAbuseCodes.entries()].sort()),
+  contract: {
+    minimumSuccessfulResponses,
+    minimumRiskRejects,
+    requiredCodes,
+    missingRequiredCodes: outcomeSummary.missingRequiredCodes,
+    failureReasons: outcomeSummary.failureReasons,
+  },
   notes: [
     "This client does not infer backend CPU, memory, DB connections, locks, or cache hit rate; capture those from the test environment telemetry.",
     "The script never calls the destructive cleanup execute endpoint. Activity cleanup load covers preview only.",
+    "errorRate counts network failures and responses outside each request's explicit contract; expected anti-abuse/crawler rejections are reported separately.",
     enableMutations ? "Comment mutations were explicitly enabled; run only against disposable test data." : "Comment mutations were disabled (safe default).",
   ],
 };
 
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 if (outputPath) await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-if (networkErrors || serverErrors) process.exitCode = 1;
+if (outcomeSummary.failureReasons.length) process.exitCode = 1;
 
 async function worker(workerID, deadline) {
   let sequence = workerID;
   while (!stopped && performance.now() < deadline) {
-    const request = chooseRequest(scenarioName, sequence++);
+    const request = chooseRequest(sequence++);
     if (!request) {
       await delay(100);
       continue;
@@ -114,11 +143,21 @@ async function worker(workerID, deadline) {
         signal: controller.signal,
       });
       const responseBody = await response.text();
+      let code = "";
       try {
-        const code = JSON.parse(responseBody)?.code;
-        if (typeof code === "string" && code) antiAbuseCodes.set(code, (antiAbuseCodes.get(code) ?? 0) + 1);
+        const parsedCode = JSON.parse(responseBody)?.code;
+        if (typeof parsedCode === "string" && parsedCode) {
+          code = parsedCode;
+          antiAbuseCodes.set(code, (antiAbuseCodes.get(code) ?? 0) + 1);
+        }
       } catch {}
       statusCounts.set(response.status, (statusCounts.get(response.status) ?? 0) + 1);
+      outcomes.push({
+        name: request.name,
+        status: response.status,
+        code,
+        ...classifyLoadResponse(request, response.status, code),
+      });
     } catch {
       networkErrors++;
     } finally {
@@ -130,8 +169,8 @@ async function worker(workerID, deadline) {
   }
 }
 
-function chooseRequest(scenario, sequence) {
-  const pools = {
+function createRequestPools() {
+  return {
     catalogs: catalogRequests(),
     cards: cardRequests(),
     comments: commentRequests(),
@@ -142,7 +181,10 @@ function chooseRequest(scenario, sequence) {
     crawlers: crawlerRequests(),
     infrastructure: infrastructureRequests(),
   };
-  const mixed = interleave([
+}
+
+function createMixedRequests(pools) {
+  return interleave([
     repeat(pools.catalogs, 6),
     repeat(pools.cards, 2),
     repeat(pools.comments, 2),
@@ -150,9 +192,10 @@ function chooseRequest(scenario, sequence) {
     pools.statistics,
     pools.activity,
   ]);
-  const selected = scenario === "mixed" ? mixed : pools[scenario];
-  if (!selected?.length) return null;
-  return selected[sequence % selected.length];
+}
+
+function chooseRequest(sequence) {
+  return selectedRequests[sequence % selectedRequests.length];
 }
 
 function infrastructureRequests() {
@@ -250,19 +293,37 @@ function antiAbuseRequests() {
   if (!enableMutations || !token || !commentTargetType || !commentTargetID) return [];
   const path = `/api/v1/comment-targets/${encodeURIComponent(commentTargetType)}/${encodeURIComponent(commentTargetID)}/comments`;
   const replayKey = fixedCommentIdempotencyKey || `replay-${startedAt.getTime()}`;
+  const expectedStatuses = [200, 201, 202, 403, 412, 429];
+  const expectedRiskCodes = [
+    "action_restricted",
+    "challenge_required",
+    "duplicate_content",
+    "pending_review_limit",
+    "rate_limited",
+    "request_denied",
+    "temporarily_blocked",
+  ];
   return [
-    { name: "spam-exact", path, method: "POST", token, bodyFactory: (workerID, sequence) => ({ body: "[mcmods-anti-abuse-load] exact duplicate", idempotencyKey: `exact-${workerID}-${sequence}-${startedAt.getTime()}` }) },
-    { name: "spam-near", path, method: "POST", token, bodyFactory: (workerID, sequence) => ({ body: `[mcmods-anti-abuse-load] repeated template number ${sequence % 5}`, idempotencyKey: `near-${workerID}-${sequence}-${startedAt.getTime()}` }) },
-    { name: "idempotent-replay", path, method: "POST", token, body: { body: "[mcmods-anti-abuse-load] idempotent replay", idempotencyKey: replayKey }, headers: { "Idempotency-Key": replayKey } },
+    { name: "spam-exact", path, method: "POST", token, expectedStatuses, expectedRiskCodes,
+      bodyFactory: (workerID, sequence) => ({ body: "[mcmods-anti-abuse-load] exact duplicate", idempotencyKey: `exact-${workerID}-${sequence}-${startedAt.getTime()}` }) },
+    { name: "spam-near", path, method: "POST", token, expectedStatuses, expectedRiskCodes,
+      bodyFactory: (workerID, sequence) => ({ body: `[mcmods-anti-abuse-load] repeated template number ${sequence % 5}`, idempotencyKey: `near-${workerID}-${sequence}-${startedAt.getTime()}` }) },
+    { name: "idempotent-replay", path, method: "POST", token, expectedStatuses, expectedRiskCodes,
+      body: { body: "[mcmods-anti-abuse-load] idempotent replay", idempotencyKey: replayKey }, headers: { "Idempotency-Key": replayKey } },
     { name: "normal-comment-read", path: `${path}?sort=latest&limit=20`, token },
   ];
 }
 
 function crawlerRequests() {
+  const expectedStatuses = [200, 403, 429];
+  const expectedRiskCodes = ["crawler_rate_limited", "rate_limited", "request_denied", "temporarily_blocked"];
   const requests = [
-    { name: "unknown-crawler-catalog", path: "/api/v1/mods?limit=20", headers: { "User-Agent": "MCModsResearchCrawler/1.0" } },
-    { name: "spoofed-googlebot", path: "/api/v1/community/posts?kind=tutorial&limit=20", headers: { "User-Agent": "Googlebot/2.1" } },
-    { name: "crawler-search", path: "/api/v1/search?q=minecraft", headers: { "User-Agent": "ExampleSpider/1.0" } },
+    { name: "unknown-crawler-catalog", path: "/api/v1/mods?limit=20", expectedStatuses, expectedRiskCodes,
+      headers: { "User-Agent": "MCModsResearchCrawler/1.0" } },
+    { name: "spoofed-googlebot", path: "/api/v1/community/posts?kind=tutorial&limit=20", expectedStatuses, expectedRiskCodes,
+      headers: { "User-Agent": "Googlebot/2.1" } },
+    { name: "crawler-search", path: "/api/v1/search?q=minecraft", expectedStatuses, expectedRiskCodes,
+      headers: { "User-Agent": "ExampleSpider/1.0" } },
   ];
   if (botToken) requests.push({ name: "allowed-readonly-bot", path: "/api/v1/mods?limit=20", headers: { "User-Agent": "MCModsAllowedIndexer/1.0", "X-MCMods-Bot-Token": botToken } });
   return requests;

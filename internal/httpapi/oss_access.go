@@ -51,7 +51,15 @@ func (s *Server) writeGeneratedOSSObject(ctx context.Context, objectKey, origina
 			content_type=excluded.content_type,size_bytes=excluded.size_bytes,source_size_bytes=excluded.source_size_bytes,sha256=excluded.sha256,
 			uploader_id=excluded.uploader_id,status='active',scan_status='trusted_generated' returning id`,
 		cfg.Bucket, cfg.displayEndpoint(), cfg.Region, objectKey, ossCategoryFromObjectKey(objectKey, cfg.Prefix), source, originalName, contentType, len(data), sha, uploaderID).Scan(&fileID)
-	return fileID, err
+	if err == nil {
+		return fileID, nil
+	}
+	registrationErr := fmt.Errorf("record generated OSS object: %w", err)
+	cleanupErr := s.deleteOSSObjectIfUnregistered(ctx, cfg, objectKey, "generated-object-registration-failed")
+	if cleanupErr != nil {
+		return 0, errors.Join(registrationErr, fmt.Errorf("queue generated OSS cleanup: %w", cleanupErr))
+	}
+	return 0, registrationErr
 }
 
 // resolveOSSObjectAccess is the single policy boundary for URLs that read an
@@ -78,13 +86,12 @@ func (s *Server) resolveOSSObjectAccessWithConfig(
 	if expires <= 0 {
 		expires = 10 * time.Minute
 	}
-	access := ossObjectAccess{
-		Mode:      normalizeOSSDownloadMode(cfg.DownloadURLMode),
-		ExpiresAt: time.Now().Add(expires),
+	if expires > maxOSSDownloadURLTTLMinutes*time.Minute {
+		expires = maxOSSDownloadURLTTLMinutes * time.Minute
 	}
-	if access.Mode == ossDownloadModeESAPrivateOrigin {
-		access.URL = ossStoredObjectURLWithDisposition(cfg, objectKey, options.ContentDisposition)
-		return access, nil
+	access := ossObjectAccess{
+		Mode:      ossDownloadModePresigned,
+		ExpiresAt: time.Now().Add(expires),
 	}
 	client, err := s.ossDownloadClient(ctx, cfg)
 	if err != nil {
@@ -193,7 +200,7 @@ func (s *Server) publicInlineOSSFile(w http.ResponseWriter, r *http.Request) {
 func isPublicInlineOSSFileSource(source string) bool {
 	source = strings.ToLower(strings.TrimSpace(source))
 	return source == "playground" || source == "server-content" ||
-		source == "sticker" ||
+		source == "sticker_derived" ||
 		strings.Contains(source, "_text:") || strings.HasPrefix(source, "mod_text:")
 }
 

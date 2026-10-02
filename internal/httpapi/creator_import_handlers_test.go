@@ -2,8 +2,10 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -51,15 +53,63 @@ func TestImportedCreatorRoleCode(t *testing.T) {
 		want  string
 	}{
 		{role: "Dev", want: "developer"},
+		{role: "Maintainer", want: "maintainer"},
 		{role: "Artist", want: "artist"},
 		{role: "Project Lead", want: "leader"},
-		{role: "Supporter", want: "developer"},
+		{role: "Supporter", want: "contributor"},
+		{role: "Ownership supporter", want: "contributor"},
+		{role: strings.Repeat("developer", 1000), want: "contributor"},
 		{role: "Dev", owner: true, want: "owner"},
 	}
 	for _, test := range tests {
 		if got := importedCreatorRoleCode(test.role, test.owner); got != test.want {
 			t.Errorf("importedCreatorRoleCode(%q, %t) = %q, want %q", test.role, test.owner, got, test.want)
 		}
+	}
+}
+
+func TestCreatorImportPreviewHasNoPersistentIdentitiesOrUnsafeAvatar(t *testing.T) {
+	t.Parallel()
+	preview, err := buildCreatorImportPreview(importedCreatorProfile{
+		Kind: "team", Name: " Example Team ", AvatarURL: "https://tracker.example/team.png",
+		Members: []importedCreatorMember{
+			{Name: "Supporter", AvatarURL: "https://cdn.modrinth.com/data/supporter.webp", Role: "Supporter",
+				Links: []creatorLinkPayload{{Type: "modrinth", URL: "https://modrinth.com/user/supporter"}}},
+			{Name: "Maintainer", AvatarURL: "http://cdn.modrinth.com/data/maintainer.webp", Role: "Maintainer"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Name != "Example Team" || preview.AvatarURL != "" || len(preview.Members) != 2 {
+		t.Fatalf("unexpected preview: %#v", preview)
+	}
+	if preview.Members[0].SuggestedRoleCode != "contributor" ||
+		preview.Members[0].AvatarURL == "" || preview.Members[0].ProfileURL == "" {
+		t.Fatalf("unsafe contributor preview: %#v", preview.Members[0])
+	}
+	if preview.Members[1].SuggestedRoleCode != "maintainer" || preview.Members[1].AvatarURL != "" {
+		t.Fatalf("unexpected maintainer preview: %#v", preview.Members[1])
+	}
+	raw, err := json.Marshal(preview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"creatorId", "roleId", "avatarFileId", "createdMembers"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Errorf("preview leaked persistent field %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestCreatorImportPreviewCannotPersistExternalAvatarURL(t *testing.T) {
+	t.Parallel()
+	snapshot := creatorSnapshot{Kind: "author", Name: "Preview", AvatarURL: "https://cdn.modrinth.com/data/avatar.webp"}
+	if err := (&Server{}).resolveCreatorAvatarTx(context.Background(), nil, 42, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.AvatarURL != "" || snapshot.AvatarInternalID != nil {
+		t.Fatalf("external preview avatar survived persistence normalization: %#v", snapshot)
 	}
 }
 
@@ -130,8 +180,8 @@ func TestImportCurseForgeAuthor(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		if r.Header.Get("x-api-key") != "test-key" {
-			t.Errorf("missing CurseForge API key")
+		if got := r.Header.Get("x-api-key"); got != "" {
+			t.Errorf("CurseForge API key leaked to custom origin: %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[{"authors":[{

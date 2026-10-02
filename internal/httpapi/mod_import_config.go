@@ -13,6 +13,12 @@ import (
 
 const modImportConfigSettingKey = "mods.import_sources"
 
+var modImportCredentialOrigins = map[string]string{
+	"modrinth":   "https://api.modrinth.com",
+	"curseforge": "https://api.curseforge.com",
+	"github":     "https://api.github.com",
+}
+
 type modImportProviderConfig struct {
 	Enabled     bool   `json:"enabled"`
 	BaseURL     string `json:"baseUrl"`
@@ -87,10 +93,7 @@ func (s *Server) updateModImportConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取模组数据源配置失败")
 		return
 	}
-	preserveModImportSecrets(&payload.Modrinth, current.Modrinth)
-	preserveModImportSecrets(&payload.CurseForge, current.CurseForge)
-	preserveModImportSecrets(&payload.GitHub, current.GitHub)
-	if err = normalizeModImportConfig(&payload); err != nil {
+	if err = prepareModImportConfigUpdate(&payload, current); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -147,12 +150,13 @@ func normalizeModImportConfig(cfg *modImportConfig) error {
 	}
 	providers := []struct {
 		name     string
+		code     string
 		provider *modImportProviderConfig
 		fallback string
 	}{
-		{"Modrinth", &cfg.Modrinth, defaults.Modrinth.BaseURL},
-		{"CurseForge", &cfg.CurseForge, defaults.CurseForge.BaseURL},
-		{"GitHub", &cfg.GitHub, defaults.GitHub.BaseURL},
+		{"Modrinth", "modrinth", &cfg.Modrinth, defaults.Modrinth.BaseURL},
+		{"CurseForge", "curseforge", &cfg.CurseForge, defaults.CurseForge.BaseURL},
+		{"GitHub", "github", &cfg.GitHub, defaults.GitHub.BaseURL},
 	}
 	for _, item := range providers {
 		item.provider.Token = strings.TrimSpace(item.provider.Token)
@@ -166,11 +170,36 @@ func normalizeModImportConfig(cfg *modImportConfig) error {
 			return errors.New(item.name + " API 地址不正确")
 		}
 		item.provider.BaseURL = baseURL
+		if (item.provider.Token != "" || item.provider.APIKey != "") && !providerCredentialOriginAllowed(item.code, baseURL) {
+			return errors.New(item.name + " 凭据只能发送到官方 API 地址")
+		}
 	}
 	if cfg.CurseForge.Enabled && cfg.CurseForge.APIKey == "" {
 		return errors.New("启用 CurseForge 前必须填写 API Key")
 	}
 	return nil
+}
+
+func prepareModImportConfigUpdate(next *modImportConfig, current modImportConfig) error {
+	defaults := defaultModImportConfig()
+	providers := []struct {
+		next     *modImportProviderConfig
+		current  modImportProviderConfig
+		fallback string
+	}{
+		{&next.Modrinth, current.Modrinth, defaults.Modrinth.BaseURL},
+		{&next.CurseForge, current.CurseForge, defaults.CurseForge.BaseURL},
+		{&next.GitHub, current.GitHub, defaults.GitHub.BaseURL},
+	}
+	for _, item := range providers {
+		baseURL, err := normalizeProviderBaseURL(item.next.BaseURL, item.fallback)
+		if err != nil {
+			return errors.New("API 地址不正确")
+		}
+		item.next.BaseURL = baseURL
+		preserveModImportSecrets(item.next, item.current)
+	}
+	return normalizeModImportConfig(next)
 }
 
 func normalizeProviderBaseURL(value, fallback string) (string, error) {
@@ -191,14 +220,49 @@ func normalizeProviderBaseURL(value, fallback string) (string, error) {
 func preserveModImportSecrets(next *modImportProviderConfig, current modImportProviderConfig) {
 	if next.ClearToken {
 		next.Token = ""
-	} else if strings.TrimSpace(next.Token) == "" {
+	} else if strings.TrimSpace(next.Token) == "" && sameProviderOrigin(next.BaseURL, current.BaseURL) {
 		next.Token = current.Token
 	}
 	if next.ClearAPIKey {
 		next.APIKey = ""
-	} else if strings.TrimSpace(next.APIKey) == "" {
+	} else if strings.TrimSpace(next.APIKey) == "" && sameProviderOrigin(next.BaseURL, current.BaseURL) {
 		next.APIKey = current.APIKey
 	}
+}
+
+func sameProviderOrigin(left, right string) bool {
+	leftOrigin, leftOK := providerOrigin(left)
+	rightOrigin, rightOK := providerOrigin(right)
+	return leftOK && rightOK && leftOrigin == rightOrigin
+}
+
+func providerCredentialOriginAllowed(provider, baseURL string) bool {
+	expected, ok := modImportCredentialOrigins[strings.ToLower(strings.TrimSpace(provider))]
+	if !ok {
+		return false
+	}
+	origin, valid := providerOrigin(baseURL)
+	return valid && origin == expected
+}
+
+func providerOrigin(raw string) (string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil {
+		return "", false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	hostname := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if strings.Contains(hostname, ":") {
+		hostname = "[" + hostname + "]"
+	}
+	if port != "" {
+		hostname += ":" + port
+	}
+	return scheme + "://" + hostname, true
 }
 
 func redactModImportConfig(cfg modImportConfig) modImportConfig {

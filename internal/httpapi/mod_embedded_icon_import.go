@@ -29,12 +29,18 @@ import (
 )
 
 const (
-	embeddedIconImportMaxBytes = int64(128 << 20)
-	embeddedIconImportBatch    = 250
-	iconRendererImportSource   = "iconrenderer"
-	letMeSeeSeeImportSource    = "letmeseesee"
-	irrImportSource            = "irr"
+	embeddedIconImportMaxBytes      = int64(128 << 20)
+	embeddedIconImportBatch         = 250
+	iconRendererImportSource        = "iconrenderer"
+	letMeSeeSeeImportSource         = "letmeseesee"
+	irrImportSource                 = "irr"
+	maxEmbeddedIconEncodedBytes     = 8 << 20
+	maxEmbeddedIconEdge             = 4096
+	maxEmbeddedIconDecodedPixels    = 4_194_304
+	maxEmbeddedIconBuildConcurrency = 2
 )
+
+var embeddedIconBuildSlots = make(chan struct{}, maxEmbeddedIconBuildConcurrency)
 
 var embeddedIconResourceIDPattern = regexp.MustCompile(`^[a-z0-9_.-]+:[a-z0-9_./-]+$`)
 var minecraftFormattingCodePattern = regexp.MustCompile(`(?i)[§搂][0-9a-fk-or]`)
@@ -152,10 +158,16 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 	}
 
 	claims := currentClaims(r)
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create catalog import job")
+		return
+	}
+	defer tx.Rollback(r.Context())
 	var originalName, objectKey, digest, source, category string
 	var archiveFileID, size int64
-	err := s.db.QueryRow(r.Context(), `select id,original_name,object_key,sha256,size_bytes,source,category
-		from oss_files where public_id=$1 and uploader_id=$2 and status='active'`, request.OSSFileID, claims.Subject).
+	err = tx.QueryRow(r.Context(), `select id,original_name,object_key,sha256,size_bytes,source,category
+		from oss_files where public_id=$1 and uploader_id=$2 and status='active' for key share`, request.OSSFileID, claims.Subject).
 		Scan(&archiveFileID, &originalName, &objectKey, &digest, &size, &source, &category)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusBadRequest, "catalog import file is unavailable")
@@ -173,25 +185,18 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 	}
 
 	packageID, jobID := newExportID(), newExportID()
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create catalog import job")
-		return
-	}
-	defer tx.Rollback(r.Context())
 	manifest, _ := json.Marshal(map[string]any{"source": request.Source, "format": "jsonl", "originalName": originalName})
-	err = tx.QueryRow(r.Context(), `insert into catalog_import_packages
-		(id,sha256,archive_file_id,archive_name,schema_version,exporter_version,minecraft_version,loader,manifest,namespaces,profile,uploaded_by)
-		values($1,$2,$3,$4,$5,$6,'','unknown',$7::jsonb,'{}'::text[],'icons',$8)
-		on conflict(sha256) do update set archive_file_id=excluded.archive_file_id,archive_name=excluded.archive_name,
-			schema_version=excluded.schema_version,exporter_version=excluded.exporter_version,manifest=excluded.manifest,uploaded_by=excluded.uploaded_by
-		returning id`, packageID, digest, archiveFileID, originalName, importerVersion, request.Source, string(manifest), claims.Subject).Scan(&packageID)
+	packageID, err = insertCatalogImportPackage(r.Context(), tx, catalogImportPackageInput{
+		ID: packageID, SHA256: digest, ArchiveFileID: archiveFileID, ArchiveName: originalName,
+		SchemaVersion: importerVersion, ExporterVersion: request.Source, Loader: "unknown",
+		Manifest: manifest, Profile: "icons", UploadedBy: claims.Subject,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save catalog import package")
 		return
 	}
 
-	deduplicated, shouldPublish, cleanupDuplicate := false, false, false
+	deduplicated, shouldPublish := false, false
 	var existingStatus string
 	var existingStalled bool
 	err = tx.QueryRow(r.Context(), `select id,status,status in ('validating','importing') and coalesce(heartbeat_at,updated_at)<now()-$6::interval
@@ -213,17 +218,13 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 		shouldPublish = err == nil
 	case err == nil:
 		deduplicated = true
-		cleanupDuplicate = existingStatus == "ready" || existingStatus == "partial"
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save catalog import job")
 		return
 	}
 	if shouldPublish {
-		eventID := newExportID()
-		payload, _ := json.Marshal(modExportJobMessage{JobID: jobID})
-		if _, err = tx.Exec(r.Context(), `insert into nats_outbox(event_id,event_type,subject,aggregate_type,aggregate_id,payload)
-			values($1,'mod.embedded_icon_import.requested',$2,'mod_export_job',$3,$4::jsonb)`, eventID, modExportTaskCode, jobID, string(payload)); err != nil {
+		if err = enqueueModExportAttemptTx(r.Context(), tx, jobID, "mod.embedded_icon_import.requested"); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to queue catalog import")
 			return
 		}
@@ -232,22 +233,9 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
-	if cleanupDuplicate {
-		if _, err = tx.Exec(r.Context(), `update catalog_import_packages set archive_file_id=null where id=$1 and archive_file_id=$2`, packageID, archiveFileID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to detach duplicate catalog archive")
-			return
-		}
-		if err = s.tombstoneOSSFileTx(r.Context(), tx, archiveFileID, "duplicate-catalog-import"); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to queue duplicate catalog archive deletion")
-			return
-		}
-	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit catalog import job")
 		return
-	}
-	if shouldPublish {
-		s.dispatchModExportJob(r.Context(), jobID)
 	}
 	response, _ := s.modExportJobByID(r.Context(), jobID, identity.ID)
 	response.Deduplicated = deduplicated
@@ -282,12 +270,17 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 	var modID int64
 	defer func() {
 		stopHeartbeat()
-		if resultErr == nil || errors.Is(resultErr, errModExportLeaseLost) || errors.Is(context.Cause(ctx), errModExportLeaseLost) {
+		if resultErr == nil {
 			return
 		}
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_ = s.cleanupModExportStaging(cleanupContext, packageID, modID, runToken)
+		if cleanupErr := s.cleanupModExportStaging(cleanupContext, jobID, packageID, modID, runToken); cleanupErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("compensate catalog import artifacts: %w", cleanupErr))
+		}
 		cancel()
+		if errors.Is(resultErr, errModExportLeaseLost) || errors.Is(context.Cause(ctx), errModExportLeaseLost) {
+			return
+		}
 		s.failModExportJob(jobID, runToken, "import_failed", resultErr)
 	}()
 
@@ -315,6 +308,9 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 	}
 	raw, err := downloadEmbeddedIconCatalog(ctx, client, cfg.Bucket, objectKey, expectedHash)
 	if err != nil {
+		return err
+	}
+	if err = markCatalogImportPackageContentVerified(ctx, s.db, packageID, sourceFileID, expectedHash); err != nil {
 		return err
 	}
 	if err = s.updateModExportJob(ctx, jobID, runToken, "validating", 12, "parsing"); err != nil {
@@ -388,6 +384,7 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 		return err
 	}
 	uploadedObjects := make(map[string]struct{})
+	artifactFileIDs := make(map[string]int64)
 	pngAssetCount := 0
 	for start := 0; start < len(entries); start += embeddedIconImportBatch {
 		end := min(start+embeddedIconImportBatch, len(entries))
@@ -407,20 +404,41 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 		}
 		uploadContext, cancelUploads := context.WithCancel(ctx)
 		pool := newModExportPNGUploadPool(uploadContext, client, cfg.Bucket)
+		pool.uploadGuard = s.catalogImportUploadGuard(jobID, runToken)
+		pendingUploads := make([]modExportUploadAsset, 0, len(media))
 		for _, item := range media {
 			if _, exists := uploadedObjects[item.ObjectKey]; exists {
 				continue
 			}
 			uploadedObjects[item.ObjectKey] = struct{}{}
-			pool.submit(item.ObjectKey, item.AssetPath, item.Digest, pngByPath[item.AssetPath])
+			pendingUploads = append(pendingUploads, modExportUploadAsset{
+				ObjectKey: item.ObjectKey, Original: item.Original, Digest: item.Digest,
+				ContentType: "image/png", ByteLength: item.ByteLength, Data: pngByPath[item.AssetPath],
+			})
+		}
+		registered, registerErr := s.registerCatalogImportArtifacts(
+			ctx, jobID, runToken, cfg, createdBy, source, pendingUploads,
+		)
+		if registerErr != nil {
+			cancelUploads()
+			return registerErr
+		}
+		for objectKey, fileID := range registered {
+			artifactFileIDs[objectKey] = fileID
+		}
+		for _, upload := range pendingUploads {
+			pool.submitAsset(upload.ObjectKey, upload.Original, upload.Digest, upload.ContentType, upload.Data)
 		}
 		if uploadErr := pool.wait(); uploadErr != nil {
 			cancelUploads()
 			return uploadErr
 		}
 		cancelUploads()
+		if err = bindCatalogImportArtifactFileIDs(media, nil, artifactFileIDs); err != nil {
+			return err
+		}
 		if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
-			if persistErr := persistExportPNGMedia(ctx, tx, cfg, uniqueID, createdBy, source, media); persistErr != nil {
+			if persistErr := persistExportPNGMedia(ctx, tx, media); persistErr != nil {
 				return persistErr
 			}
 			return persistCatalogResources(ctx, tx, resources)
@@ -441,6 +459,9 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 	sort.Strings(revisionIDs)
 	canActivate := createdBy > 0 && s.userHasPermission(ctx, createdBy, "project.no-review."+uniqueID)
 	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		if lockErr := lockCatalogImportAttemptTx(ctx, tx, jobID, runToken); lockErr != nil {
+			return lockErr
+		}
 		for _, revisionID := range revisionIDs {
 			if canActivate {
 				var namespace, revisionSource string
@@ -464,9 +485,15 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 			if syncErr := syncImportedResourcesToContentVersionTx(ctx, tx, revisionIDs, targetVersionID, overwrite, createdBy); syncErr != nil {
 				return syncErr
 			}
+			if versionErr := bumpCatalogDatasetVersionTx(ctx, tx); versionErr != nil {
+				return versionErr
+			}
 		}
 		if statsErr := refreshModExportRevisionStats(ctx, tx, revisionIDs); statsErr != nil {
 			return statsErr
+		}
+		if artifactErr := activateCatalogImportArtifactsTx(ctx, tx, jobID, runToken); artifactErr != nil {
+			return artifactErr
 		}
 		detail, _ := json.Marshal(map[string]any{"entryCount": len(entries), "pngAssetCount": pngAssetCount, "source": source})
 		tag, updateErr := tx.Exec(ctx, `update catalog_import_jobs set status='ready',progress=100,
@@ -645,7 +672,7 @@ func buildEmbeddedIconImports(ctx context.Context, cfg ossConfigPayload, uniqueI
 ) ([]embeddedIconImportBuild, error) {
 	result := make([]embeddedIconImportBuild, len(entries))
 	group, groupContext := errgroup.WithContext(ctx)
-	group.SetLimit(maxExportPNGConcurrency)
+	group.SetLimit(maxEmbeddedIconBuildConcurrency)
 	for index := range entries {
 		index := index
 		group.Go(func() error {
@@ -654,7 +681,7 @@ func buildEmbeddedIconImports(ctx context.Context, cfg ossConfigPayload, uniqueI
 				return groupContext.Err()
 			default:
 			}
-			build, err := buildEmbeddedIconImport(cfg, uniqueID, source, resolver, revisions, entries[index])
+			build, err := buildEmbeddedIconImport(groupContext, cfg, uniqueID, source, resolver, revisions, entries[index])
 			if err != nil {
 				return fmt.Errorf("%s: %w", entries[index].RegisterName, err)
 			}
@@ -668,7 +695,7 @@ func buildEmbeddedIconImports(ctx context.Context, cfg ossConfigPayload, uniqueI
 	return result, nil
 }
 
-func buildEmbeddedIconImport(cfg ossConfigPayload, uniqueID, source string, resolver catalogResourceIdentityResolver,
+func buildEmbeddedIconImport(ctx context.Context, cfg ossConfigPayload, uniqueID, source string, resolver catalogResourceIdentityResolver,
 	revisions map[string]string, entry embeddedIconCatalogEntry,
 ) (embeddedIconImportBuild, error) {
 	kindCode, registry := "minecraft.item", "items"
@@ -687,6 +714,11 @@ func buildEmbeddedIconImport(cfg ossConfigPayload, uniqueID, source string, reso
 	media := make([]modExportPNGMedia, 0, 3)
 	iconBytes := make(map[int][]byte, 3)
 	if strings.TrimSpace(entry.SmallIcon) != "" || strings.TrimSpace(entry.LargeIcon) != "" {
+		release, err := acquireEmbeddedIconBuildSlot(ctx)
+		if err != nil {
+			return embeddedIconImportBuild{}, err
+		}
+		defer release()
 		small, smallErr := decodeEmbeddedIconPNG(entry.SmallIcon)
 		large, largeErr := decodeEmbeddedIconPNG(entry.LargeIcon)
 		if smallErr != nil && largeErr != nil {
@@ -764,6 +796,15 @@ func buildEmbeddedIconImport(cfg ossConfigPayload, uniqueID, source string, reso
 	return embeddedIconImportBuild{resource: resource, media: media, data: dataByPath}, nil
 }
 
+func acquireEmbeddedIconBuildSlot(ctx context.Context) (func(), error) {
+	select {
+	case embeddedIconBuildSlots <- struct{}{}:
+		return func() { <-embeddedIconBuildSlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func decodeEmbeddedIconPNG(encoded string) (image.Image, error) {
 	encoded = strings.TrimSpace(encoded)
 	if separator := strings.Index(encoded, ","); strings.HasPrefix(strings.ToLower(encoded), "data:image/png") && separator >= 0 {
@@ -772,19 +813,30 @@ func decodeEmbeddedIconPNG(encoded string) (image.Image, error) {
 	if encoded == "" {
 		return nil, errors.New("icon is empty")
 	}
+	if len(encoded) > base64.StdEncoding.EncodedLen(maxEmbeddedIconEncodedBytes) {
+		return nil, errors.New("icon exceeds size limit")
+	}
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > 16<<20 {
+	if len(data) > maxEmbeddedIconEncodedBytes {
 		return nil, errors.New("icon exceeds size limit")
+	}
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || format != "png" {
+		return nil, errors.New("icon is not a valid PNG")
+	}
+	pixels := int64(config.Width) * int64(config.Height)
+	if config.Width <= 0 || config.Height <= 0 || config.Width > maxEmbeddedIconEdge || config.Height > maxEmbeddedIconEdge || pixels > maxEmbeddedIconDecodedPixels {
+		return nil, errors.New("icon dimensions are invalid")
 	}
 	decoded, format, err := image.Decode(bytes.NewReader(data))
 	if err != nil || format != "png" {
 		return nil, errors.New("icon is not a valid PNG")
 	}
 	bounds := decoded.Bounds()
-	if bounds.Dx() <= 0 || bounds.Dy() <= 0 || int64(bounds.Dx())*int64(bounds.Dy()) > 100_000_000 {
+	if bounds.Dx() != config.Width || bounds.Dy() != config.Height {
 		return nil, errors.New("icon dimensions are invalid")
 	}
 	return decoded, nil

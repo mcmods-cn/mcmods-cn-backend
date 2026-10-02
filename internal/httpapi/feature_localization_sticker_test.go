@@ -91,12 +91,17 @@ func TestStickerCodeAndAllLocaleNames(t *testing.T) {
 
 func TestFeatureLimitDefaultsAndOverrides(t *testing.T) {
 	defaults := normalizedStickerLimits(config.StickerConfig{})
-	if defaults.MaxBytes != 4<<20 || defaults.MaxEdge != 1024 || defaults.MaxGIFDuration != 30*time.Second {
+	if defaults.MaxBytes != 4<<20 || defaults.MaxEdge != 1024 || defaults.MaxGIFDuration != 30*time.Second ||
+		defaults.MaxPacks != 64 || defaults.MaxStickersPerPack != 128 || defaults.MaxCatalogItems != 1024 {
 		t.Fatalf("unexpected sticker defaults: %#v", defaults)
 	}
-	override := normalizedStickerLimits(config.StickerConfig{MaxBytes: 1024, MaxEdge: 64, MaxPixels: 4096, MaxGIFFrames: 2, MaxGIFDecodedPixels: 8192, MaxGIFDuration: time.Second})
-	if override.MaxBytes != 1024 || override.MaxGIFFrames != 2 || override.MaxGIFDuration != time.Second {
+	override := normalizedStickerLimits(config.StickerConfig{MaxBytes: 1024, MaxEdge: 64, MaxPixels: 4096, MaxGIFFrames: 2, MaxGIFDecodedPixels: 8192, MaxGIFDuration: time.Second, MaxPacks: 8, MaxStickersPerPack: 16, MaxCatalogItems: 64})
+	if override.MaxBytes != 1024 || override.MaxGIFFrames != 2 || override.MaxGIFDuration != time.Second || override.MaxPacks != 8 || override.MaxStickersPerPack != 16 || override.MaxCatalogItems != 64 {
 		t.Fatalf("sticker overrides were not preserved: %#v", override)
+	}
+	clamped := normalizedStickerLimits(config.StickerConfig{MaxPacks: 1000, MaxStickersPerPack: 1000, MaxCatalogItems: 100000})
+	if clamped.MaxPacks != 256 || clamped.MaxStickersPerPack != 512 || clamped.MaxCatalogItems != 4096 {
+		t.Fatalf("unsafe sticker catalog limits were not clamped: %#v", clamped)
 	}
 	if favoriteExportMaxActive(0) != 2 || favoriteExportMaxActive(5) != 5 || favoriteExportDailyLimit(0) != 20 || favoriteExportDailyLimit(30) != 30 || favoriteExportMaxAttempts(0) != 3 || favoriteExportMaxAttempts(7) != 7 {
 		t.Fatal("favorite export defaults or overrides are incorrect")

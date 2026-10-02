@@ -3,6 +3,7 @@ package querycache
 import (
 	"context"
 	"errors"
+	"sort"
 	"strconv"
 	"time"
 
@@ -28,13 +29,31 @@ func (c *Cache) TouchUserPresence(ctx context.Context, userID int64, sessionHash
 	}
 	c.metrics.presenceWrites.Add(1)
 	c.mu.Lock()
+	entries := c.pruneUserPresenceLocked(now.Add(-ttl))
+	if _, exists := c.userPresence[userID][sessionHash]; !exists && entries >= maxLocalPresenceEntries {
+		// This is only the bounded, approximate local fallback. Redis remains
+		// authoritative and authentication/session lifetime is not changed.
+		var oldestUser int64
+		var oldestSession string
+		var oldest time.Time
+		for candidateUser, candidates := range c.userPresence {
+			for candidateSession, seenAt := range candidates {
+				if oldestUser == 0 || seenAt.Before(oldest) {
+					oldestUser, oldestSession, oldest = candidateUser, candidateSession, seenAt
+				}
+			}
+		}
+		delete(c.userPresence[oldestUser], oldestSession)
+		if len(c.userPresence[oldestUser]) == 0 {
+			delete(c.userPresence, oldestUser)
+		}
+	}
 	sessions := c.userPresence[userID]
 	if sessions == nil {
 		sessions = make(map[string]time.Time)
 		c.userPresence[userID] = sessions
 	}
 	sessions[sessionHash] = now
-	c.pruneUserPresenceLocked(now.Add(-ttl))
 	c.mu.Unlock()
 	if c.redis == nil || !c.cfg.PresenceEnabled {
 		c.metrics.localFallbacks.Add(1)
@@ -141,7 +160,8 @@ func (c *Cache) UsersOnline(ctx context.Context, userIDs []int64, now time.Time,
 	return result
 }
 
-func (c *Cache) pruneUserPresenceLocked(cutoff time.Time) {
+func (c *Cache) pruneUserPresenceLocked(cutoff time.Time) int {
+	entries := 0
 	for userID, sessions := range c.userPresence {
 		for session, seenAt := range sessions {
 			if seenAt.Before(cutoff) {
@@ -151,7 +171,9 @@ func (c *Cache) pruneUserPresenceLocked(cutoff time.Time) {
 		if len(sessions) == 0 {
 			delete(c.userPresence, userID)
 		}
+		entries += len(sessions)
 	}
+	return entries
 }
 
 func (c *Cache) TouchChatPresence(ctx context.Context, userID, conversationID int64, ttl time.Duration) {
@@ -161,8 +183,23 @@ func (c *Cache) TouchChatPresence(ctx context.Context, userID, conversationID in
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
-	expiresAt := time.Now().Add(ttl)
+	now := time.Now()
+	expiresAt := now.Add(ttl)
 	c.mu.Lock()
+	var oldestUser int64
+	var oldestExpiry time.Time
+	for candidateUser, entry := range c.chatPresence {
+		if !now.Before(entry.expiresAt) {
+			delete(c.chatPresence, candidateUser)
+			continue
+		}
+		if oldestUser == 0 || entry.expiresAt.Before(oldestExpiry) {
+			oldestUser, oldestExpiry = candidateUser, entry.expiresAt
+		}
+	}
+	if _, exists := c.chatPresence[userID]; !exists && len(c.chatPresence) >= maxLocalPresenceEntries {
+		delete(c.chatPresence, oldestUser)
+	}
 	c.chatPresence[userID] = chatPresenceEntry{conversationID: conversationID, expiresAt: expiresAt}
 	c.mu.Unlock()
 	if c.redis == nil || !c.cfg.PresenceEnabled {
@@ -276,6 +313,43 @@ func (c *Cache) ReconcileUnread(ctx context.Context, userID int64, truth UnreadS
 	c.InvalidateUnread(ctx, userID)
 	_, err = c.LoadUnread(ctx, userID, func(context.Context) (UnreadSummary, error) { return truth, nil })
 	return true, err
+}
+
+// UnreadReconciliationCandidates returns a rotating, bounded sample of live
+// derivatives that this process has actually served. Expired entries are not
+// useful calibration targets and are removed instead of causing a PostgreSQL
+// walk over every account in the system.
+func (c *Cache) UnreadReconciliationCandidates(limit int) []int64 {
+	if c == nil || limit <= 0 {
+		return nil
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ids := make([]int64, 0, min(limit, len(c.unread)))
+	for userID, entry := range c.unread {
+		if !now.Before(entry.expiresAt) {
+			delete(c.unread, userID)
+			continue
+		}
+		ids = append(ids, userID)
+	}
+	if len(ids) == 0 {
+		c.unreadSampleCursor = 0
+		return nil
+	}
+	sort.Slice(ids, func(left, right int) bool { return ids[left] < ids[right] })
+	start := sort.Search(len(ids), func(index int) bool { return ids[index] > c.unreadSampleCursor })
+	if start == len(ids) {
+		start = 0
+	}
+	count := min(limit, len(ids))
+	sample := make([]int64, 0, count)
+	for offset := range count {
+		sample = append(sample, ids[(start+offset)%len(ids)])
+	}
+	c.unreadSampleCursor = sample[len(sample)-1]
+	return sample
 }
 
 func (c *Cache) SetUnread(ctx context.Context, userID int64, value UnreadSummary, epoch int64) {

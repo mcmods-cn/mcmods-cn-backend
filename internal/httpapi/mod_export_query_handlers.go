@@ -16,6 +16,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+const maxModExportReviewNoteBytes = 4096
+
 type modExportRevisionSummary struct {
 	ID                    string         `json:"id"`
 	RevisionNo            int64          `json:"revisionNo"`
@@ -74,10 +76,27 @@ func (s *Server) modExportDataSummary(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to decode export revision")
 			return
 		}
-		_ = json.Unmarshal(counts, &item.RegistryCounts)
-		_ = json.Unmarshal(documentCounts, &item.DocumentCounts)
-		_ = json.Unmarshal(capabilities, &item.Capabilities)
+		if err = decodeModExportJSON(counts, &item.RegistryCounts, "revision registry counts"); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode export revision")
+			return
+		}
+		if err = decodeModExportJSON(documentCounts, &item.DocumentCounts, "revision document counts"); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode export revision")
+			return
+		}
+		if err = decodeModExportJSON(capabilities, &item.Capabilities, "revision capability statuses"); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode export revision")
+			return
+		}
+		if item.RegistryCounts == nil || item.DocumentCounts == nil || item.Capabilities == nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode export revision")
+			return
+		}
 		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read export revisions")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -108,12 +127,24 @@ func (s *Server) modExportRegistry(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to decode registry")
 			return
 		}
-		item := map[string]any{"entityId": publicID, "publicId": publicID, "id": objectID, "registry": registry,
+		namesValue, decodeErr := decodeModExportJSONObjectValue(names, "registry entry names")
+		if decodeErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode registry")
+			return
+		}
+		dataValue, decodeErr := decodeModExportJSONObjectValue(data, "registry entry data")
+		if decodeErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode registry")
+			return
+		}
+		item := map[string]any{"publicId": publicID, "id": objectID, "registry": registry,
 			"namespace": namespace, "path": objectPath, "translationKey": translationKey,
-			"iconPath": iconPath, "previewPath": previewPath}
-		item["names"] = jsonValue(names)
-		item["data"] = jsonValue(data)
+			"iconPath": iconPath, "previewPath": previewPath, "names": namesValue, "data": dataValue}
 		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read registry")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"registry": registry, "items": items})
 }
@@ -144,9 +175,6 @@ func (s *Server) modExportRegistryEntries(w http.ResponseWriter, r *http.Request
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	locale := normalizeExportContentLocale(r.URL.Query().Get("locale"))
 	limit := boundedLimit(r.URL.Query().Get("limit"), 80, 100)
-	if r.URL.Query().Get("all") == "1" {
-		limit = 10000
-	}
 	offset := boundedOffset(r.URL.Query().Get("offset"))
 	summaryOnly := r.URL.Query().Get("summary") == "1"
 	var total int
@@ -200,10 +228,24 @@ func (s *Server) modExportRegistryEntries(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusInternalServerError, "failed to decode registry entry")
 			return
 		}
+		namesValue, decodeErr := decodeModExportJSONObjectValue(names, "registry entry names")
+		if decodeErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode registry entry")
+			return
+		}
+		dataValue, decodeErr := decodeModExportJSONObjectValue(data, "registry entry data")
+		if decodeErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode registry entry")
+			return
+		}
 		items = append(items, map[string]any{
-			"entityId": publicID, "publicId": publicID, "id": objectID, "registry": registry, "namespace": namespace, "path": objectPath,
-			"translationKey": translationKey, "iconPath": iconPath, "previewPath": previewPath, "names": jsonValue(names), "data": jsonValue(data),
+			"publicId": publicID, "id": objectID, "registry": registry, "namespace": namespace, "path": objectPath,
+			"translationKey": translationKey, "iconPath": iconPath, "previewPath": previewPath, "names": namesValue, "data": dataValue,
 		})
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read registry entries")
+		return
 	}
 	if err = s.decorateExportTranslationNames(r.Context(), revisionID, locale, items); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve registry translations")
@@ -241,8 +283,16 @@ func (s *Server) writeModExportRegistryEntrySummaries(w http.ResponseWriter, r *
 			if loadErr = rows.Scan(&publicID, &objectID, &registry, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); loadErr != nil {
 				return nil, loadErr
 			}
-			items = append(items, map[string]any{"entityId": publicID, "publicId": publicID, "id": objectID, "registry": registry, "namespace": namespace, "path": objectPath,
-				"translationKey": translationKey, "iconPath": iconPath, "previewPath": previewPath, "names": jsonValue(names), "data": jsonValue(data)})
+			namesValue, decodeErr := decodeModExportJSONObjectValue(names, "registry summary names")
+			if decodeErr != nil {
+				return nil, decodeErr
+			}
+			dataValue, decodeErr := decodeModExportJSONObjectValue(data, "registry summary data")
+			if decodeErr != nil {
+				return nil, decodeErr
+			}
+			items = append(items, map[string]any{"publicId": publicID, "id": objectID, "registry": registry, "namespace": namespace, "path": objectPath,
+				"translationKey": translationKey, "iconPath": iconPath, "previewPath": previewPath, "names": namesValue, "data": dataValue})
 		}
 		if loadErr = rows.Err(); loadErr != nil {
 			return nil, loadErr
@@ -273,9 +323,6 @@ func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	locale := normalizeExportContentLocale(r.URL.Query().Get("locale"))
 	limit := boundedLimit(r.URL.Query().Get("limit"), 80, 100)
-	if r.URL.Query().Get("all") == "1" {
-		limit = 10000
-	}
 	offset := boundedOffset(r.URL.Query().Get("offset"))
 	summaryOnly := r.URL.Query().Get("summary") == "1"
 	cacheKey := fmt.Sprintf("export-document:v10:%s:%s:%s:%s:%d:%d:%t", revisionID, kind, query, locale, limit, offset, summaryOnly)
@@ -321,10 +368,18 @@ func (s *Server) modExportDocumentEntries(w http.ResponseWriter, r *http.Request
 			if loadErr = rows.Scan(&publicID, &id, &names, &namespace, &translationKey, &iconPath, &previewPath, &data); loadErr != nil {
 				return nil, loadErr
 			}
+			namesValue, decodeErr := decodeModExportJSONObjectValue(names, "document entry names")
+			if decodeErr != nil {
+				return nil, decodeErr
+			}
+			dataValue, decodeErr := decodeModExportJSONObjectValue(data, "document entry data")
+			if decodeErr != nil {
+				return nil, decodeErr
+			}
 			items = append(items, map[string]any{
-				"entityId": publicID, "publicId": publicID, "id": id, "registry": kind, "namespace": namespace, "path": id,
+				"publicId": publicID, "id": id, "registry": kind, "namespace": namespace, "path": id,
 				"translationKey": translationKey, "iconPath": iconPath, "previewPath": previewPath,
-				"names": jsonValue(names), "data": jsonValue(data),
+				"names": namesValue, "data": dataValue,
 			})
 		}
 		if loadErr = rows.Err(); loadErr != nil {
@@ -386,50 +441,41 @@ func (s *Server) modExportAssetIndex(w http.ResponseWriter, r *http.Request) {
 	if !s.canReadModExportRevision(w, r, revisionID) {
 		return
 	}
-	if r.URL.Query().Get("pathsOnly") == "1" {
-		rows, err := s.db.Query(r.Context(),
-			`select asset_path from catalog_import_text_assets where revision_id=$1
-			 union select asset_path from catalog_import_binary_assets where revision_id=$1
-			 union select asset_path from catalog_import_media where revision_id=$1 order by 1`, revisionID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to read asset paths")
-			return
-		}
-		defer rows.Close()
-		items := make([]string, 0, 4096)
-		for rows.Next() {
-			var assetPath string
-			if err = rows.Scan(&assetPath); err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to decode asset path")
-				return
-			}
-			items = append(items, assetPath)
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	pathsOnly := r.URL.Query().Get("pathsOnly") == "1"
+	limit := boundedLimit(r.URL.Query().Get("limit"), 200, 500)
+	scope := "assets:full"
+	if pathsOnly {
+		scope = "assets:paths"
+	}
+	cursor, err := decodeModExportPageCursor(r.URL.Query().Get("cursor"), revisionID, scope)
+	if err != nil || cursor.Second != "" || (pathsOnly && cursor.Ordinal != 0) || (!pathsOnly && cursor.Ordinal > 2) {
+		writeError(w, http.StatusBadRequest, "invalid asset cursor")
 		return
 	}
-	rows, err := s.db.Query(r.Context(),
-		`select asset_path,asset_kind,content_type,sha256,byte_length,false from catalog_import_text_assets where revision_id=$1
-		 union all select asset_path,asset_kind,content_type,sha256,byte_length,false from catalog_import_binary_assets where revision_id=$1
-		 union all select asset_path,media_kind,content_type,sha256,byte_length,true from catalog_import_media where revision_id=$1
-		 order by 1`, revisionID)
+	rows, hasMore, err := loadModExportAssetPage(r.Context(), s.db, revisionID, pathsOnly, cursor.First, cursor.Ordinal, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read asset index")
 		return
 	}
-	defer rows.Close()
-	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var assetPath, kind, contentType, hash string
-		var size int64
-		var media bool
-		if err = rows.Scan(&assetPath, &kind, &contentType, &hash, &size, &media); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to decode asset index")
-			return
-		}
-		items = append(items, map[string]any{"path": assetPath, "kind": kind, "contentType": contentType, "sha256": hash, "byteLength": size, "media": media})
+	nextCursor := ""
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		nextCursor = encodeModExportPageCursor(modExportPageCursor{RevisionID: revisionID, Scope: scope, First: last.Path, Ordinal: last.SourceOrder})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	if pathsOnly {
+		items := make([]string, len(rows))
+		for index, row := range rows {
+			items[index] = row.Path
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "limit": limit, "hasMore": hasMore, "nextCursor": nextCursor})
+		return
+	}
+	items := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, map[string]any{"path": row.Path, "kind": row.Kind, "contentType": row.ContentType,
+			"sha256": row.SHA256, "byteLength": row.ByteLength, "media": row.Media})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "limit": limit, "hasMore": hasMore, "nextCursor": nextCursor})
 }
 
 func (s *Server) modExportAssetContent(w http.ResponseWriter, r *http.Request) {
@@ -492,9 +538,17 @@ func (s *Server) modExportStructures(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to decode structures")
 			return
 		}
-		item := map[string]any{"id": id, "structureId": structureID, "assetPath": assetPath, "sourceFormat": sourceFormat}
-		item["summary"] = jsonValue(summary)
+		summaryValue, decodeErr := decodeModExportJSONObjectValue(summary, "structure summary")
+		if decodeErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode structures")
+			return
+		}
+		item := map[string]any{"id": id, "structureId": structureID, "assetPath": assetPath, "sourceFormat": sourceFormat, "summary": summaryValue}
 		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read structures")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -533,8 +587,14 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid review request")
 		return
 	}
+	request.Status = strings.ToLower(strings.TrimSpace(request.Status))
+	request.Note = strings.TrimSpace(request.Note)
 	if request.Status != "approved" && request.Status != "rejected" {
 		writeError(w, http.StatusBadRequest, "review status must be approved or rejected")
+		return
+	}
+	if len(request.Note) > maxModExportReviewNoteBytes {
+		writeError(w, http.StatusBadRequest, "review note is too long")
 		return
 	}
 	tx, err := s.db.Begin(r.Context())
@@ -545,11 +605,12 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 	defer tx.Rollback(r.Context())
 	var modID int64
 	var namespace, sourceKind, status string
+	var isActive bool
 	var targetVersionID int64
 	var overwriteExistingImportData bool
-	err = tx.QueryRow(r.Context(), `select revision.mod_id,revision.source_namespace,revision.source_kind,revision.status,revision.target_version_id,job.overwrite_existing
+	err = tx.QueryRow(r.Context(), `select revision.mod_id,revision.source_namespace,revision.source_kind,revision.status,revision.is_active,revision.target_version_id,job.overwrite_existing
 		from catalog_import_revisions revision join catalog_import_jobs job on job.id=revision.job_id where revision.id=$1 for update`, revisionID).
-		Scan(&modID, &namespace, &sourceKind, &status, &targetVersionID, &overwriteExistingImportData)
+		Scan(&modID, &namespace, &sourceKind, &status, &isActive, &targetVersionID, &overwriteExistingImportData)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "export revision not found")
 		return
@@ -558,9 +619,25 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusConflict, "export revision is not ready")
 		return
 	}
+	audit := modExportRevisionReviewAudit{
+		RevisionID: revisionID, Decision: request.Status, Note: request.Note,
+		BeforeStatus: status, BeforeActive: isActive, ModID: modID, TargetVersionID: targetVersionID,
+		Namespace: namespace, SourceKind: sourceKind, ActorID: currentClaims(r).Subject,
+		IP: s.requestClientLocation(r).IP, UserAgent: r.UserAgent(),
+	}
 	if request.Status == "rejected" {
 		if _, err = tx.Exec(r.Context(), `update catalog_import_revisions set status='rejected',is_active=false where id=$1`, revisionID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to reject export revision")
+			return
+		}
+		audit.AfterStatus = "rejected"
+		audit.AfterActive = false
+		if err = recordModExportRevisionReviewTx(r.Context(), tx, audit); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record export review")
+			return
+		}
+		if err = bumpCatalogDatasetVersionTx(r.Context(), tx); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update catalog version")
 			return
 		}
 		if err = tx.Commit(r.Context()); err != nil {
@@ -586,11 +663,55 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to promote imported recipe templates")
 		return
 	}
+	audit.AfterStatus = status
+	audit.AfterActive = true
+	if err = recordModExportRevisionReviewTx(r.Context(), tx, audit); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record export review")
+		return
+	}
+	if err = bumpCatalogDatasetVersionTx(r.Context(), tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update catalog version")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit export revision")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": revisionID, "status": status, "isActive": true})
+}
+
+type modExportRevisionReviewAudit struct {
+	RevisionID      string
+	Decision        string
+	Note            string
+	BeforeStatus    string
+	BeforeActive    bool
+	AfterStatus     string
+	AfterActive     bool
+	ModID           int64
+	TargetVersionID int64
+	Namespace       string
+	SourceKind      string
+	ActorID         int64
+	IP              string
+	UserAgent       string
+}
+
+func recordModExportRevisionReviewTx(ctx context.Context, tx pgx.Tx, audit modExportRevisionReviewAudit) error {
+	_, err := tx.Exec(ctx, `insert into audit_events(
+		aggregate_type,aggregate_key,actor_id,action,ip,user_agent,metadata)
+		values('catalog_import_revision',$1,$2,$3,$4,$5,jsonb_build_object(
+			'decision',$6::text,'note',$7::text,'beforeStatus',$8::text,'beforeActive',$9::boolean,
+			'afterStatus',$10::text,'afterActive',$11::boolean,'modId',$12::bigint,'targetVersionId',$13::bigint,
+			'namespace',$14::text,'sourceKind',$15::text))`,
+		audit.RevisionID, audit.ActorID, "review_"+audit.Decision, audit.IP, audit.UserAgent,
+		audit.Decision, audit.Note, audit.BeforeStatus, audit.BeforeActive,
+		audit.AfterStatus, audit.AfterActive, audit.ModID, audit.TargetVersionID,
+		audit.Namespace, audit.SourceKind)
+	if err != nil {
+		return fmt.Errorf("record mod export revision review: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) canReadModExportRevision(w http.ResponseWriter, r *http.Request, revisionID string) bool {

@@ -46,7 +46,7 @@ func (s *Server) authenticationRateLimited(ctx context.Context, action string, d
 		}
 		key := "auth:" + action + ":" + dimension.name + ":" + dimension.value
 		result := s.cache.ConsumeLocalRateLimit(key, dimension.degradedLimit, dimension.window)
-		if s.cache.Config().AuthRateLimitEnabled {
+		if cacheConfig := s.cache.Config(); cacheConfig.AuthRateLimitEnabled || cacheConfig.RateLimitFailClosed {
 			result = s.cache.ConsumeRateLimitPolicy(ctx, key, dimension.limit, dimension.degradedLimit, dimension.window)
 		}
 		if !result.Allowed {

@@ -289,7 +289,7 @@ func publishCatalogEditorSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID i
 		if result.RowsAffected() != 1 {
 			return errCatalogEditorConflict
 		}
-		return nil
+		return bumpCatalogDatasetVersionTx(ctx, tx)
 	}
 
 	if _, err := tx.Exec(ctx, `update catalog_entities set status='active',archived_at=null,default_locale=$2,published_revision_id=$3,updated_at=now() where id=$1`,
@@ -302,20 +302,25 @@ func publishCatalogEditorSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID i
 	if err := publishCatalogLocalizationsTx(ctx, tx, snapshot.EntityID, snapshot.PublicID, snapshot.Kind, snapshot.Localizations, revisionID, actorID); err != nil {
 		return err
 	}
+	var publishErr error
 	switch snapshot.Kind {
 	case "resource":
-		return publishCatalogResourceTx(ctx, tx, snapshot, revisionID, actorID, rasterScope)
+		publishErr = publishCatalogResourceTx(ctx, tx, snapshot, revisionID, actorID, rasterScope)
 	case "tag":
-		return publishCatalogTagTx(ctx, tx, snapshot, revisionID)
+		publishErr = publishCatalogTagTx(ctx, tx, snapshot, revisionID)
 	case "recipe_type":
-		return publishCatalogRecipeTypeTx(ctx, tx, snapshot, revisionID, actorID)
+		publishErr = publishCatalogRecipeTypeTx(ctx, tx, snapshot, revisionID, actorID)
 	case "recipe_template":
-		return publishCatalogRecipeTemplateTx(ctx, tx, snapshot, revisionID, actorID, rasterScope)
+		publishErr = publishCatalogRecipeTemplateTx(ctx, tx, snapshot, revisionID, actorID, rasterScope)
 	case "recipe":
-		return publishCatalogRecipeTx(ctx, tx, snapshot, revisionID, actorID)
+		publishErr = publishCatalogRecipeTx(ctx, tx, snapshot, revisionID, actorID)
 	default:
 		return errCatalogEditorInvalid
 	}
+	if publishErr != nil {
+		return publishErr
+	}
+	return bumpCatalogDatasetVersionTx(ctx, tx)
 }
 
 // Revision snapshots contain public identities only. Internal keys are resolved
@@ -520,7 +525,7 @@ func publishCatalogLocalizationSnapshotTx(ctx context.Context, tx pgx.Tx, revisi
 		snapshot.AITaskID, revisionNo, snapshot.Editable, revisionID, nullableActorID(actorID)); err != nil {
 		return err
 	}
-	return nil
+	return bumpCatalogDatasetVersionTx(ctx, tx)
 }
 
 func invalidateAIDerivedLocalizationsTx(ctx context.Context, tx pgx.Tx, subjectID int64, subjectType, sourceLocale string) error {

@@ -20,6 +20,7 @@ func contentMetricsSchemaStatements() []string {
 			on content_route_metrics(total_view_count desc,object_route_id)`,
 		`create table content_stats_refresh_queue (
 			object_route_id bigint primary key references public_routes(id) on delete cascade,
+			status text not null default 'pending',
 			refresh_metrics boolean not null default true,
 			refresh_popularity boolean not null default false,
 			attempts integer not null default 0 check(attempts>=0),
@@ -27,10 +28,13 @@ func contentMetricsSchemaStatements() []string {
 			locked_at timestamptz,
 			last_error text not null default '',
 			created_at timestamptz not null default now(),
-			updated_at timestamptz not null default now()
+			updated_at timestamptz not null default now(),
+			check(status in ('pending','processing','failed'))
 		)`,
 		`create index idx_content_stats_refresh_ready
-			on content_stats_refresh_queue(available_at,updated_at,object_route_id)`,
+			on content_stats_refresh_queue(available_at,updated_at,object_route_id) where status='pending'`,
+		`create index idx_content_stats_refresh_stale
+			on content_stats_refresh_queue(locked_at,object_route_id) where status='processing'`,
 		`create or replace function enqueue_content_stats_refresh(
 			target_route_id bigint,
 			include_metrics boolean default true,
@@ -42,6 +46,8 @@ func contentMetricsSchemaStatements() []string {
 				object_route_id,refresh_metrics,refresh_popularity,available_at,locked_at,last_error,updated_at
 			) values(target_route_id,include_metrics,include_popularity,now(),null,'',now())
 			on conflict(object_route_id) do update set
+				status='pending',
+				attempts=case when content_stats_refresh_queue.status='failed' then 0 else content_stats_refresh_queue.attempts end,
 				refresh_metrics=content_stats_refresh_queue.refresh_metrics or excluded.refresh_metrics,
 				refresh_popularity=content_stats_refresh_queue.refresh_popularity or excluded.refresh_popularity,
 				available_at=least(content_stats_refresh_queue.available_at,excluded.available_at),

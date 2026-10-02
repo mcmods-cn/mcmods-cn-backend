@@ -94,16 +94,21 @@ func TestCatalogCoreSortFieldsSupportBothDirections(t *testing.T) {
 	}
 }
 
-func TestCatalogSortDirectionRejectsUnknownValuesAndKeepsLegacyLinks(t *testing.T) {
+func TestCatalogSortUsesCanonicalFieldAndDirectionOnly(t *testing.T) {
 	t.Parallel()
-	if direction, ok := parseCatalogSortDirection("asc", "published"); !ok || direction != catalogSortAscending {
+	if direction, ok := parseCatalogSortDirection("asc", catalogSortPublished); !ok || direction != catalogSortAscending {
 		t.Fatalf("ascending direction was not accepted: %q %v", direction, ok)
 	}
-	if direction, ok := parseCatalogSortDirection("", "oldest"); !ok || direction != catalogSortAscending {
-		t.Fatalf("legacy oldest link did not map to ascending: %q %v", direction, ok)
+	if direction, ok := parseCatalogSortDirection("", catalogSortName); !ok || direction != catalogSortAscending {
+		t.Fatalf("canonical name default did not map to ascending: %q %v", direction, ok)
 	}
-	if _, ok := parseCatalogSortDirection("desc nulls last; drop table users", "heat"); ok {
+	if _, ok := parseCatalogSortDirection("desc nulls last; drop table users", catalogSortHeat); ok {
 		t.Fatal("untrusted sort direction was accepted")
+	}
+	for _, legacy := range []string{"latest", "oldest", "created", "nameAsc", "nameDesc"} {
+		if _, ok := parseCatalogSort(legacy); ok {
+			t.Fatalf("legacy sort alias %q was accepted", legacy)
+		}
 	}
 }
 

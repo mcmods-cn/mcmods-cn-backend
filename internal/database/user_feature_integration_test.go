@@ -31,9 +31,9 @@ func TestCurrentUserFeaturesIntegration(t *testing.T) {
 	}
 	for _, relation := range []string{
 		"user_presence_sessions", "user_statistics_daily", "user_statistics_totals",
-		"user_content_creation_facts", "activity_cleanup_runs", "activity_event_outbox",
+		"user_statistics_retained_actions", "user_content_creation_facts", "activity_cleanup_runs", "activity_event_outbox",
 		"project_automation_activity",
-		"favorite_modpack_export_tasks", "favorite_modpack_export_items",
+		"favorite_modpack_export_previews", "favorite_modpack_export_tasks", "favorite_modpack_export_items",
 		"sticker_packs", "stickers", "project_follows", "project_update_events",
 		"creator_claims", "creator_team_members", "project_editor_applications", "project_editor_assignments",
 	} {
@@ -53,8 +53,8 @@ func TestCurrentUserFeaturesIntegration(t *testing.T) {
 	}
 	var autobotID int64
 	var passwordHash string
-	if err = pool.QueryRow(ctx, `select id,password_hash from users where username=$1 and email=$2 and status='active'`,
-		systemactor.AutobotUsername, systemactor.AutobotEmail).Scan(&autobotID, &passwordHash); err != nil {
+	if err = pool.QueryRow(ctx, `select id,password_hash from users where username=$1 and email=$2 and status=$3`,
+		systemactor.AutobotUsername, systemactor.AutobotEmail, systemactor.AutobotStatus).Scan(&autobotID, &passwordHash); err != nil {
 		t.Fatalf("autobot seed account missing: %v", err)
 	}
 	if passwordHash != "password-login-disabled" {

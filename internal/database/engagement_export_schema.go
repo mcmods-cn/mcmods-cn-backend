@@ -7,11 +7,44 @@ package database
 // backfill or dual-read path.
 func engagementExportSchemaStatements() []string {
 	return []string{
+		`create table minecraft_loader_artifact_versions (
+			catalog_hash text not null check(catalog_hash ~ '^[0-9a-f]{64}$'),
+			minecraft_version text not null check(length(btrim(minecraft_version)) between 1 and 80),
+			loader_type text not null,
+			loader_version text not null check(length(btrim(loader_version)) between 1 and 160),
+			source_url text not null check(length(btrim(source_url)) between 1 and 2000),
+			observed_at timestamptz not null,
+			primary key(catalog_hash,minecraft_version,loader_type),
+			check(loader_type in ('neoforge','fabric','forge'))
+		)`,
+		`create table favorite_modpack_export_previews (
+			id bigserial primary key,
+			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
+			owner_user_id bigint not null references users(id) on delete cascade,
+			collection_id bigint references favorite_collections(id) on delete set null,
+			collection_public_id_snapshot text not null check(collection_public_id_snapshot ~ '^[a-z0-9]{9}$'),
+			source_mode text not null default 'current_collection',
+			minecraft_version text not null,
+			loader_type text not null,
+			loader_version text not null,
+			preview_snapshot jsonb not null,
+			content_hash text not null check(content_hash ~ '^[0-9a-f]{64}$'),
+			expires_at timestamptz not null,
+			consumed_at timestamptz,
+			created_at timestamptz not null default now(),
+			check(source_mode in ('current_collection','original_snapshot')),
+			check(loader_type in ('neoforge','fabric','forge')),
+			check(expires_at>created_at),
+			check(consumed_at is null or consumed_at>=created_at)
+		)`,
+		`create index idx_favorite_modpack_export_previews_owner_expiry on favorite_modpack_export_previews(owner_user_id,expires_at,id)`,
+		`create index idx_favorite_modpack_export_previews_collection on favorite_modpack_export_previews(collection_id,id)`,
 		`create table favorite_modpack_export_tasks (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			owner_user_id bigint not null references users(id) on delete cascade,
-			collection_id bigint not null references favorite_collections(id) on delete cascade,
+			collection_id bigint references favorite_collections(id) on delete set null,
+			collection_public_id_snapshot text not null check(collection_public_id_snapshot ~ '^[a-z0-9]{9}$'),
 			pack_name text not null,
 			pack_version_id text not null,
 			minecraft_version text not null,
@@ -33,7 +66,6 @@ func engagementExportSchemaStatements() []string {
 			result_sha256 text not null default '',
 			result_file_id bigint references oss_files(id) on delete set null,
 			report_version integer not null default 1,
-			report_snapshot jsonb not null default '{}'::jsonb,
 			error_code text not null default '',
 			error_detail text not null default '',
 			created_at timestamptz not null default now(),
@@ -46,8 +78,12 @@ func engagementExportSchemaStatements() []string {
 			check(pack_version_id <> minecraft_version)
 		)`,
 		`create index idx_favorite_modpack_export_tasks_owner_created on favorite_modpack_export_tasks(owner_user_id,created_at desc,id desc)`,
+		`create index idx_favorite_modpack_export_tasks_owner_status_created on favorite_modpack_export_tasks(owner_user_id,status,created_at desc,id desc)`,
+		`create index idx_favorite_modpack_export_tasks_collection on favorite_modpack_export_tasks(collection_id,id) where collection_id is not null`,
 		`create index idx_favorite_modpack_export_tasks_queue on favorite_modpack_export_tasks(status,created_at,id) where status in ('pending','processing')`,
 		`create index idx_favorite_modpack_export_tasks_expiry on favorite_modpack_export_tasks(expires_at,id) where status='ready'`,
+		`create unique index uq_favorite_modpack_export_tasks_result_file on favorite_modpack_export_tasks(result_file_id) where result_file_id is not null`,
+		`create index idx_oss_files_favorite_export_orphan_recovery on oss_files(created_at,id) where source='favorite_modpack_export' and status='active'`,
 		`create table favorite_modpack_export_items (
 			id bigserial primary key,
 			task_id bigint not null references favorite_modpack_export_tasks(id) on delete cascade,
@@ -82,12 +118,6 @@ func engagementExportSchemaStatements() []string {
 
 		`create index idx_catalog_import_jobs_confirmation on catalog_import_jobs(created_by,updated_at desc) where status='confirmation_required'`,
 
-		`create table sticker_catalog_state (
-			singleton boolean primary key default true check(singleton),
-			version bigint not null default 1,
-			updated_at timestamptz not null default now()
-		)`,
-		`insert into sticker_catalog_state(singleton) values(true)`,
 		`create table sticker_packs (
 			id bigserial primary key,
 			code text not null unique check(code ~ '^[a-z0-9][a-z0-9_-]{0,47}$'),
@@ -120,6 +150,7 @@ func engagementExportSchemaStatements() []string {
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
 			unique(pack_id,code),
+			constraint uq_stickers_image_file unique(image_file_id),
 			check(mime_type in ('image/png','image/gif')),
 			check(width>0 and height>0 and file_size>0),
 			check(status in ('active','disabled'))
@@ -147,7 +178,7 @@ func engagementExportSchemaStatements() []string {
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			project_route_id bigint not null references public_routes(id) on delete cascade,
-			revision_id text,
+			revision_id bigint references content_revisions(id) on delete restrict,
 			actor_user_id bigint references users(id) on delete set null,
 			update_kind text not null,
 			changed_sections text[] not null default '{}'::text[],
@@ -172,5 +203,6 @@ func engagementExportSchemaStatements() []string {
 		`create index idx_project_update_notification_tasks_ready on project_update_notification_tasks(status,next_attempt_at,event_id)`,
 		`alter table notifications add column project_update_event_id bigint references project_update_events(id) on delete set null`,
 		`create unique index uq_notifications_project_update_recipient on notifications(recipient_id,project_update_event_id) where project_update_event_id is not null`,
+		`create index idx_notifications_project_update_event on notifications(project_update_event_id) where project_update_event_id is not null`,
 	}
 }

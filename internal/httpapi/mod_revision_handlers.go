@@ -26,23 +26,24 @@ type reviewModRevisionRequest struct {
 }
 
 type modRevisionResponse struct {
-	ID              string           `json:"id"`
-	ModID           string           `json:"modId"`
-	ModInternalID   int64            `json:"-"`
-	Version         int              `json:"version"`
-	Status          string           `json:"status"`
-	Snapshot        createModRequest `json:"snapshot"`
-	ChangeReason    string           `json:"changeReason"`
-	SubmittedBy     *string          `json:"submittedBy,omitempty"`
-	SubmittedByName string           `json:"submittedByName"`
-	ReviewedBy      *string          `json:"reviewedBy,omitempty"`
-	ReviewNote      string           `json:"reviewNote"`
-	CreatedAt       time.Time        `json:"createdAt"`
-	ReviewedAt      *time.Time       `json:"reviewedAt,omitempty"`
-	BaseRevisionID  *string          `json:"baseRevisionId,omitempty"`
-	ChangeRequestID string           `json:"changeRequestId"`
-	SchemaVersion   int              `json:"schemaVersion"`
-	SnapshotHash    string           `json:"snapshotHash"`
+	ID                    string           `json:"id"`
+	ModID                 string           `json:"modId"`
+	ModInternalID         int64            `json:"-"`
+	Version               int              `json:"version"`
+	Status                string           `json:"status"`
+	Snapshot              createModRequest `json:"snapshot"`
+	ChangeReason          string           `json:"changeReason"`
+	SubmittedByInternalID int64            `json:"-"`
+	SubmittedBy           *string          `json:"submittedBy,omitempty"`
+	SubmittedByName       string           `json:"submittedByName"`
+	ReviewedBy            *string          `json:"reviewedBy,omitempty"`
+	ReviewNote            string           `json:"reviewNote"`
+	CreatedAt             time.Time        `json:"createdAt"`
+	ReviewedAt            *time.Time       `json:"reviewedAt,omitempty"`
+	BaseRevisionID        *string          `json:"baseRevisionId,omitempty"`
+	ChangeRequestID       string           `json:"changeRequestId"`
+	SchemaVersion         int              `json:"schemaVersion"`
+	SnapshotHash          string           `json:"snapshotHash"`
 }
 
 type modRevisionChangeResponse struct {
@@ -175,14 +176,18 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to record automatic approval")
 			return
 		}
+		if err = enqueueOSSRehomeJobTx(r.Context(), tx, identity.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to schedule gallery object rehome")
+			return
+		}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit revision")
 		return
 	}
-	_ = s.refreshProjectACLVersion(r.Context())
-	if status == "approved" {
-		s.scheduleModGalleryOSSRehome(identity.ID)
+	if !s.requireSecurityVersionRefresh(w, r, "submit_mod_revision", 0,
+		s.refreshProjectACLVersion(r.Context())) {
+		return
 	}
 	revision, err := s.modRevisionByID(r.Context(), created.RevisionID)
 	if err != nil {
@@ -204,10 +209,14 @@ func (s *Server) modRevisionHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load mod")
 		return
 	}
-	canSeePending := canEditMod(claims, identity) || claimsAllow(claims, "project.review")
-	rows, err := s.db.Query(r.Context(), modRevisionSelect+`
-		where revision.aggregate_type='mod' and revision.aggregate_key=$1 and ($2 or request.status='approved')
-		order by revision.revision_no desc`, identity.UniqueID, canSeePending)
+	request, err := parseModRevisionHistoryPageRequest(r.URL.Query(), identity.UniqueID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	visibility := projectPendingReviewVisibility(claims, identity.UniqueID, canEditMod(claims, identity))
+	query, arguments := modRevisionHistoryPageSQL(identity.UniqueID, visibility, request)
+	rows, err := s.db.Query(r.Context(), query, arguments...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load revision history")
 		return
@@ -226,7 +235,19 @@ func (s *Server) modRevisionHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load revision history")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	hasMore := len(items) > request.Limit
+	if hasMore {
+		items = items[:request.Limit]
+	}
+	nextCursor := ""
+	if hasMore {
+		nextCursor = encodeModRevisionHistoryPageCursor(modRevisionHistoryPageCursor{
+			Version: modRevisionHistoryCursorVersion, Scope: request.Scope, RevisionNo: int64(items[len(items)-1].Version),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items, "limit": request.Limit, "hasMore": hasMore, "nextCursor": nextCursor,
+	})
 }
 
 func (s *Server) compareModRevisions(w http.ResponseWriter, r *http.Request) {
@@ -252,8 +273,8 @@ func (s *Server) compareModRevisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
-	canSeePending := canEditMod(claims, identity) || claimsAllow(claims, "project.review")
-	if !canSeePending && (before.Status != "approved" || after.Status != "approved") {
+	visibility := projectPendingReviewVisibility(claims, identity.UniqueID, canEditMod(claims, identity))
+	if !visibility.allows(before.Status, before.SubmittedByInternalID) || !visibility.allows(after.Status, after.SubmittedByInternalID) {
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
@@ -356,15 +377,25 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to record review")
 		return
 	}
+	if request.Status == "approved" {
+		if err = enqueueOSSRehomeJobTx(r.Context(), tx, modID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to schedule gallery object rehome")
+			return
+		}
+	}
+	updated, err := scanModRevision(tx.QueryRow(r.Context(), modRevisionSelect+`where revision.public_id=$1 and revision.aggregate_type='mod'`, revisionPublicID))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read reviewed revision")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit review")
 		return
 	}
-	_ = s.refreshProjectACLVersion(r.Context())
-	if request.Status == "approved" {
-		s.scheduleModGalleryOSSRehome(modID)
+	if !s.requireSecurityVersionRefresh(w, r, "review_mod_revision", 0,
+		s.refreshProjectACLVersion(r.Context())) {
+		return
 	}
-	updated, _ := s.modRevisionByPublicID(r.Context(), revisionPublicID)
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -394,16 +425,26 @@ func canSkipProjectReview(claims security.Claims, identity modIdentityRecord) bo
 
 const modRevisionSelect = `select
 	revision.public_id,revision.entity_id,revision.aggregate_key,revision.revision_no,request.status,revision.snapshot,request.reason,
-	(select account.public_id from users account where account.id=request.submitted_by),
-	coalesce(nullif(request.submitted_by_snapshot,''),nullif(revision.created_by_snapshot,''),(select account.username from users account where account.id=request.submitted_by),'system'),
-	(select account.public_id from review_events event join users account on account.id=event.actor_id
-	 where event.change_request_id=request.id and event.event_type in ('approved','rejected','conflicted') order by event.id desc limit 1),
-	coalesce((select event.note from review_events event where event.change_request_id=request.id and event.event_type in ('approved','rejected','conflicted') order by event.id desc limit 1),''),
+	coalesce(request.submitted_by,0),
+	submitter.public_id,
+	coalesce(nullif(request.submitted_by_snapshot,''),nullif(revision.created_by_snapshot,''),submitter.username,'system'),
+	reviewer.public_id,
+	coalesce(latest_review.note,''),
 	revision.created_at,
-	(select event.created_at from review_events event where event.change_request_id=request.id and event.event_type in ('approved','rejected','conflicted') order by event.id desc limit 1),
-	(select base.public_id from content_revisions base where base.id=revision.base_revision_id),
+	latest_review.created_at,
+	base.public_id,
 	request.public_id,revision.schema_version,revision.snapshot_hash
-	from content_revisions revision join change_requests request on request.proposed_revision_id=revision.id `
+	from content_revisions revision
+	join change_requests request on request.proposed_revision_id=revision.id
+	left join users submitter on submitter.id=request.submitted_by
+	left join content_revisions base on base.id=revision.base_revision_id
+	left join lateral (
+		select event.actor_id,event.note,event.created_at
+		from review_events event
+		where event.change_request_id=request.id and event.event_type in ('approved','rejected','conflicted')
+		order by event.created_at desc,event.id desc limit 1
+	) latest_review on true
+	left join users reviewer on reviewer.id=latest_review.actor_id `
 
 func (s *Server) modRevisionByID(ctx context.Context, id int64) (modRevisionResponse, error) {
 	return scanModRevision(s.db.QueryRow(ctx, modRevisionSelect+`where revision.id=$1 and revision.aggregate_type='mod'`, id))
@@ -418,7 +459,7 @@ func scanModRevision(row scanner) (modRevisionResponse, error) {
 	var snapshot []byte
 	err := row.Scan(
 		&result.ID, &result.ModInternalID, &result.ModID, &result.Version, &result.Status, &snapshot, &result.ChangeReason,
-		&result.SubmittedBy, &result.SubmittedByName, &result.ReviewedBy, &result.ReviewNote, &result.CreatedAt, &result.ReviewedAt,
+		&result.SubmittedByInternalID, &result.SubmittedBy, &result.SubmittedByName, &result.ReviewedBy, &result.ReviewNote, &result.CreatedAt, &result.ReviewedAt,
 		&result.BaseRevisionID, &result.ChangeRequestID, &result.SchemaVersion, &result.SnapshotHash,
 	)
 	if err != nil {

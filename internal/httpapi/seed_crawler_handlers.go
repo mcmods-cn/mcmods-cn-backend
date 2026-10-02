@@ -1,10 +1,12 @@
 package httpapi
 
 import (
-	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 var seedCrawlerProjectTypes = stringSet("mod", "plugin", "shader_pack", "resource_pack")
@@ -100,55 +102,110 @@ func (s *Server) adminSeedCrawlerRuns(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"id": id, "status": "pending", "dryRun": request.DryRun})
 		return
 	}
-	limit := boundedLimit(r.URL.Query().Get("limit"), 30, 100)
-	rows, err := s.db.Query(r.Context(), `select public_id,status,dry_run,attempts,stats,last_error,created_at,started_at,finished_at
-		from seed_crawler_runs order by created_at desc,id desc limit $1`, limit)
+	request, err := parseSeedCrawlerRunPageRequest(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "爬虫任务分页参数不正确")
+		return
+	}
+	query, args := seedCrawlerRunPageSQL(request)
+	rows, err := s.db.Query(r.Context(), query, args...)
 	if err != nil {
 		writeError(w, 500, "读取爬虫任务失败")
 		return
 	}
 	defer rows.Close()
-	items := make([]map[string]any, 0)
+	items := make([]seedCrawlerRunSummary, 0, request.Limit+1)
 	for rows.Next() {
-		var id, status, lastError string
-		var dryRun bool
-		var attempts int
-		var stats []byte
-		var created any
-		var started, finished any
-		if err = rows.Scan(&id, &status, &dryRun, &attempts, &stats, &lastError, &created, &started, &finished); err != nil {
+		var item seedCrawlerRunSummary
+		if err = rows.Scan(&item.InternalID, &item.ID, &item.Status, &item.DryRun, &item.Attempts, &item.Stats, &item.LastError,
+			&item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 			writeError(w, 500, "解析爬虫任务失败")
 			return
 		}
-		items = append(items, map[string]any{"id": id, "status": status, "dryRun": dryRun, "attempts": attempts, "stats": json.RawMessage(stats), "lastError": lastError, "createdAt": created, "startedAt": started, "finishedAt": finished})
+		items = append(items, item)
 	}
-	writeJSON(w, 200, map[string]any{"items": items})
+	if err = rows.Err(); err != nil {
+		writeError(w, 500, "读取爬虫任务失败")
+		return
+	}
+	hasMore := len(items) > request.Limit
+	if hasMore {
+		items = items[:request.Limit]
+	}
+	nextCursor := ""
+	if hasMore {
+		last := items[len(items)-1]
+		nextCursor = encodeSeedCrawlerRunPageCursor(seedCrawlerRunPageCursor{
+			Version: seedCrawlerCursorVersion, Scope: request.Scope, CreatedAt: last.CreatedAt, ID: last.InternalID,
+		})
+	}
+	writeBoundedCatalogJSON(w, map[string]any{
+		"items": items, "limit": request.Limit, "hasMore": hasMore, "nextCursor": nextCursor,
+	})
+}
+
+func (s *Server) seedCrawlerCandidateDetail(w http.ResponseWriter, r *http.Request) {
+	externalProjectID := strings.TrimSpace(r.PathValue("id"))
+	if externalProjectID == "" || len(externalProjectID) > 200 {
+		writeError(w, http.StatusBadRequest, "爬虫候选 ID 不正确")
+		return
+	}
+	var item seedCrawlerCandidateDetailResponse
+	err := s.db.QueryRow(r.Context(), seedCrawlerCandidateDetailSQL, externalProjectID).Scan(
+		&item.ExternalProjectID, &item.ProjectType, &item.Downloads, &item.Status, &item.FirstSeenRunID, &item.LastSeenRunID,
+		&item.Payload, &item.LastError,
+		&item.CreatedAt, &item.UpdatedAt, &item.DraftID,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "爬虫候选不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取爬虫候选详情失败")
+		return
+	}
+	writeBoundedCatalogJSON(w, item)
 }
 
 func (s *Server) adminSeedCrawlerCandidates(w http.ResponseWriter, r *http.Request) {
-	status := strings.TrimSpace(r.URL.Query().Get("status"))
-	rows, err := s.db.Query(r.Context(), `select candidate.external_project_id,candidate.project_type,candidate.downloads,candidate.status,
-		candidate.payload,candidate.last_error,candidate.created_at,candidate.updated_at,draft.public_id
-		from seed_crawler_candidates candidate left join user_drafts draft
-			on draft.draft_key='seed-crawler:'||candidate.external_project_id and draft.submitted_at is null
-		where ($1='' or candidate.status=$1) order by candidate.downloads desc,candidate.id desc limit 100`, status)
+	request, err := parseSeedCrawlerCandidatePageRequest(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "爬虫候选分页参数不正确")
+		return
+	}
+	query, args := seedCrawlerCandidatePageSQL(request)
+	rows, err := s.db.Query(r.Context(), query, args...)
 	if err != nil {
 		writeError(w, 500, "读取爬虫候选失败")
 		return
 	}
 	defer rows.Close()
-	items := make([]map[string]any, 0)
+	items := make([]seedCrawlerCandidateSummary, 0, request.Limit+1)
 	for rows.Next() {
-		var id, projectType, status, lastError string
-		var downloads int64
-		var payload []byte
-		var created, updated any
-		var draftID *string
-		if err = rows.Scan(&id, &projectType, &downloads, &status, &payload, &lastError, &created, &updated, &draftID); err != nil {
+		var item seedCrawlerCandidateSummary
+		if err = rows.Scan(&item.InternalID, &item.ExternalProjectID, &item.ProjectType, &item.Downloads, &item.Status,
+			&item.FirstSeenRunID, &item.LastSeenRunID, &item.LastError, &item.CreatedAt, &item.UpdatedAt, &item.DraftID); err != nil {
 			writeError(w, 500, "解析爬虫候选失败")
 			return
 		}
-		items = append(items, map[string]any{"externalProjectId": id, "projectType": projectType, "downloads": downloads, "status": status, "payload": json.RawMessage(payload), "lastError": lastError, "createdAt": created, "updatedAt": updated, "draftId": draftID})
+		items = append(items, item)
 	}
-	writeJSON(w, 200, map[string]any{"items": items})
+	if err = rows.Err(); err != nil {
+		writeError(w, 500, "读取爬虫候选失败")
+		return
+	}
+	hasMore := len(items) > request.Limit
+	if hasMore {
+		items = items[:request.Limit]
+	}
+	nextCursor := ""
+	if hasMore {
+		last := items[len(items)-1]
+		nextCursor = encodeSeedCrawlerCandidatePageCursor(seedCrawlerCandidatePageCursor{
+			Version: seedCrawlerCursorVersion, Scope: request.Scope, Downloads: last.Downloads, ID: last.InternalID,
+		})
+	}
+	writeBoundedCatalogJSON(w, map[string]any{
+		"items": items, "limit": request.Limit, "hasMore": hasMore, "nextCursor": nextCursor,
+	})
 }

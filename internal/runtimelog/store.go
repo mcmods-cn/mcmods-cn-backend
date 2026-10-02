@@ -2,8 +2,10 @@ package runtimelog
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -47,10 +49,32 @@ func NewStore(capacity int) *Store {
 	return &Store{capacity: capacity, entries: make([]Entry, capacity)}
 }
 
-// Install mirrors the standard logger to stderr and the process ring buffer.
+// Install makes slog the single process logging pipeline. SetDefault also
+// bridges the standard log package through this handler, so structured and
+// legacy records reach stderr and the bounded administration view together.
 // It must run before the first application log line is written.
 func Install() {
-	log.SetOutput(io.MultiWriter(os.Stderr, processStore))
+	output := io.MultiWriter(os.Stderr, processStore)
+	logger := slog.New(slog.NewTextHandler(output, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(logger)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	log.SetOutput(legacyLogBridge{logger: logger})
+}
+
+type legacyLogBridge struct {
+	logger *slog.Logger
+}
+
+func (bridge legacyLogBridge) Write(payload []byte) (int, error) {
+	for _, line := range strings.Split(strings.TrimRight(string(payload), "\r\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		bridge.logger.Log(context.Background(), legacySlogLevel(line), line)
+	}
+	return len(payload), nil
 }
 
 func Entries() []Entry {
@@ -98,7 +122,12 @@ func (s *Store) appendLineLocked(line string) {
 		line = line[:maxLineBytes] + " …[truncated]"
 	}
 	createdAt := time.Now()
-	if len(line) >= 19 {
+	if strings.HasPrefix(line, "time=") {
+		rawTime := strings.TrimPrefix(strings.SplitN(line, " ", 2)[0], "time=")
+		if parsed, err := time.Parse(time.RFC3339Nano, rawTime); err == nil {
+			createdAt = parsed
+		}
+	} else if len(line) >= 19 {
 		if parsed, err := time.ParseInLocation("2006/01/02 15:04:05", line[:19], time.Local); err == nil {
 			createdAt = parsed
 		}
@@ -116,6 +145,24 @@ func (s *Store) appendLineLocked(line string) {
 
 func inferLevel(line string) string {
 	value := strings.ToLower(line)
+	for _, marker := range []string{"level=error", "level=warn", "level=info", "level=debug"} {
+		if !strings.Contains(value, marker) {
+			continue
+		}
+		switch marker {
+		case "level=error":
+			return "error"
+		case "level=warn":
+			return "warn"
+		default:
+			return "info"
+		}
+	}
+	return inferLegacyLevel(value)
+}
+
+func inferLegacyLevel(value string) string {
+	value = strings.ToLower(value)
 	for _, marker := range []string{"panic", "fatal", "error", "failed", "failure"} {
 		if strings.Contains(value, marker) {
 			return "error"
@@ -127,4 +174,15 @@ func inferLevel(line string) string {
 		}
 	}
 	return "info"
+}
+
+func legacySlogLevel(line string) slog.Level {
+	switch inferLegacyLevel(line) {
+	case "error":
+		return slog.LevelError
+	case "warn":
+		return slog.LevelWarn
+	default:
+		return slog.LevelInfo
+	}
 }

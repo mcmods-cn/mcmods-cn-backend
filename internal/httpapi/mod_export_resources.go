@@ -2,7 +2,7 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -13,7 +13,6 @@ type exportResourceKey struct {
 }
 
 type exportResourceSource struct {
-	EntityID        string
 	PublicID        string
 	RevisionID      string
 	ModSiteID       string
@@ -70,7 +69,7 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 		join catalog_import_revisions preferred on preferred.id::text=request.preferred_revision_id
 	)
 	select requested.preferred_revision_id,requested.resource_id,requested.resource_kind,
-		coalesce(source.public_id,''),coalesce(source.public_id,''),coalesce(source.revision_id,''),
+		coalesce(source.public_id,''),coalesce(source.revision_id,''),
 		coalesce(source.site_id,''),coalesce(source.version_public_id,''),coalesce(source.kind_code,''),coalesce(source.registry,''),
 		coalesce(source.object_id,''),coalesce(source.icon_path,''),coalesce(source.preview_path,''),coalesce(source.names,'{}'::jsonb)
 	from requested left join lateral (
@@ -91,8 +90,9 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 			left join mod_content_versions version on version.id=revision.target_version_id
 			where resource.canonical_id=requested.resource_id
 		) candidate
-		where candidate.revision_id=requested.preferred_revision_id
-			or (candidate.is_active and candidate.status in ('ready','partial'))
+		where (requested.resource_kind='' or candidate.resource_kind=requested.resource_kind)
+			and (candidate.revision_id=requested.preferred_revision_id
+				or (candidate.is_active and candidate.status in ('ready','partial')))
 		order by (candidate.revision_id=requested.preferred_revision_id) desc,
 			(candidate.resource_kind=requested.resource_kind) desc,
 			(candidate.minecraft_version=requested.minecraft_version) desc,
@@ -109,14 +109,16 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 		var key exportResourceKey
 		var source exportResourceSource
 		var names []byte
-		if err = rows.Scan(&key.RevisionID, &key.ResourceID, &key.Kind, &source.EntityID, &source.PublicID,
+		if err = rows.Scan(&key.RevisionID, &key.ResourceID, &key.Kind, &source.PublicID,
 			&source.RevisionID, &source.ModSiteID, &source.VersionPublicID, &source.KindCode, &source.Registry, &source.ObjectID,
 			&source.IconPath, &source.PreviewPath, &names); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal(names, &source.Names)
-		if source.Names == nil {
-			source.Names = map[string]string{}
+		if err = decodeModExportJSON(names, &source.Names, "resolved resource names "+key.ResourceID); err != nil || source.Names == nil {
+			if err == nil {
+				err = fmt.Errorf("resolved resource names %s must be a JSON object", key.ResourceID)
+			}
+			return nil, err
 		}
 		if source.RevisionID != "" {
 			resolved[key] = source
@@ -168,11 +170,13 @@ func (s *Server) resolveManualModContentResources(ctx context.Context, keys []ex
 			 where localization.resource_id=resource.entity_id and localization.version_id=version.id),'{}'::jsonb) names
 		from game_resources resource
 		join catalog_entities entity on entity.id=resource.entity_id and entity.status='active'
+		join resource_kinds kind on kind.code=resource.kind_code
 		join mod_resource_bindings binding on binding.resource_id=resource.entity_id
 		join mods mod on mod.id=binding.mod_id and mod.status='active'
 		join mod_resource_version_details detail on detail.resource_id=resource.entity_id and detail.status='active'
 		join mod_content_versions version on version.id=detail.version_id and version.status='active'
 		where lower(resource.canonical_id)=lower(requested.resource_id)
+			and (requested.resource_kind='' or lower(kind.family)=lower(requested.resource_kind))
 		order by (lower(resource.kind_code)=lower('minecraft.'||requested.resource_kind)) desc,
 			version.updated_at desc,resource.entity_id limit 1
 	) source on true`, revisions, resourceIDs, kinds)
@@ -188,7 +192,12 @@ func (s *Server) resolveManualModContentResources(ctx context.Context, keys []ex
 			&source.VersionPublicID, &source.KindCode, &source.ObjectID, &names); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal(names, &source.Names)
+		if err = decodeModExportJSON(names, &source.Names, "manual resource names "+key.ResourceID); err != nil || source.Names == nil {
+			if err == nil {
+				err = fmt.Errorf("manual resource names %s must be a JSON object", key.ResourceID)
+			}
+			return nil, err
+		}
 		if source.PublicID != "" {
 			result[key] = source
 		}
@@ -441,7 +450,7 @@ func exportResourceSourceMap(data map[string]any) map[string]any {
 
 func exportResourceSourceValue(id string, source exportResourceSource, locales ...string) map[string]any {
 	return map[string]any{
-		"id": id, "entityId": source.EntityID, "publicId": source.PublicID,
+		"id": id, "publicId": source.PublicID,
 		"sourceRevisionId": source.RevisionID, "sourceModSiteId": source.ModSiteID,
 		"sourceVersionPublicId": source.VersionPublicID,
 		"detailUrl":             canonicalResourceDetailURL(source),

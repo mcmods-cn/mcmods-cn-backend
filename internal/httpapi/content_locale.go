@@ -25,7 +25,6 @@ type contentLocaleResolution struct {
 	Reason                string
 	RequestedExists       bool
 	RequestedEditable     bool
-	ShouldAutoTranslate   bool
 	CanRequestTranslation bool
 }
 
@@ -184,10 +183,9 @@ func resolveContentLocale(primary, secondary, defaultLocale string, available []
 		return result
 	}
 
-	// A missing supported locale is generated automatically and does not use a
-	// user's daily AI allowance. Unsupported locales are opt-in and consume it.
-	result.ShouldAutoTranslate = result.RequestedEditable && len(availableSet) > 0
-	result.CanRequestTranslation = !result.RequestedEditable && len(availableSet) > 0
+	// Public reads are side-effect free. Every missing locale uses the same
+	// explicit, authenticated and quota-backed translation request path.
+	result.CanRequestTranslation = len(availableSet) > 0
 
 	type candidate struct {
 		locale string
@@ -237,11 +235,64 @@ func resolveContentLocale(primary, secondary, defaultLocale string, available []
 }
 
 func firstAcceptedContentLocale(header string) string {
+	bestLocale := ""
+	bestQuality := -1
 	for _, rawItem := range strings.Split(header, ",") {
-		item := strings.TrimSpace(strings.SplitN(rawItem, ";", 2)[0])
-		if locale := normalizeContentLocale(item); locale != "" && locale != "*" {
-			return locale
+		parts := strings.Split(rawItem, ";")
+		rawLocale := strings.TrimSpace(parts[0])
+		if rawLocale == "" || rawLocale == "*" {
+			continue
 		}
+		if !validContentLocaleTag(rawLocale) {
+			continue
+		}
+		quality := 1000
+		if len(parts) > 1 {
+			if len(parts) != 2 {
+				continue
+			}
+			parameter := strings.SplitN(strings.TrimSpace(parts[1]), "=", 2)
+			if len(parameter) != 2 || !strings.EqualFold(strings.TrimSpace(parameter[0]), "q") {
+				continue
+			}
+			var ok bool
+			quality, ok = parseLanguageQuality(strings.TrimSpace(parameter[1]))
+			if !ok {
+				continue
+			}
+		}
+		if quality == 0 || quality <= bestQuality {
+			continue
+		}
+		bestLocale = normalizeContentLocale(rawLocale)
+		bestQuality = quality
 	}
-	return ""
+	return bestLocale
+}
+
+func parseLanguageQuality(value string) (int, bool) {
+	if value == "0" {
+		return 0, true
+	}
+	if value == "1" {
+		return 1000, true
+	}
+	if len(value) < 2 || len(value) > 5 || value[1] != '.' || value[0] != '0' && value[0] != '1' {
+		return 0, false
+	}
+	digits := value[2:]
+	quality := 0
+	for _, char := range digits {
+		if char < '0' || char > '9' || value[0] == '1' && char != '0' {
+			return 0, false
+		}
+		quality = quality*10 + int(char-'0')
+	}
+	for padding := len(digits); padding < 3; padding++ {
+		quality *= 10
+	}
+	if value[0] == '1' {
+		quality = 1000
+	}
+	return quality, true
 }

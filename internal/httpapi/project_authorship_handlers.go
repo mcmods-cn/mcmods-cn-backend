@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,9 +16,29 @@ import (
 )
 
 type resolvedProjectCreatorBinding struct {
+	ID                 int64
 	CreatorID          int64
 	RoleID             *int64
 	CreatorKind        string
+	NameSnapshot       string
+	RoleSnapshot       string
+	PermissionGranting bool
+	Status             string
+	DisplayOrder       int
+}
+
+type requestedProjectCreatorBinding struct {
+	CreatorID          int64
+	RoleID             *int64
+	CreatorKind        string
+	NameSnapshot       string
+	RoleSnapshot       string
+	PermissionGranting bool
+}
+
+type projectCreatorBindingMutation struct {
+	CreatorID          int64
+	RoleID             int64
 	NameSnapshot       string
 	RoleSnapshot       string
 	PermissionGranting bool
@@ -30,6 +51,12 @@ type projectAuthorshipReviewRequest struct {
 	Note   string `json:"note"`
 }
 
+const projectCreatorBindingsForUpdateSQL = `select binding.id,binding.creator_id,binding.role_id,creator.kind,binding.name_snapshot,
+	binding.role_snapshot,binding.permission_granting,binding.status,binding.display_order
+	from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
+	where binding.subject_type=$1 and binding.subject_id=$2
+	order by binding.id for update of binding`
+
 func projectRelationshipPermissions(claimsPermission func(string) bool) (bool, bool) {
 	return claimsPermission("project.authorship.manage"), claimsPermission("project.team_relation.manage")
 }
@@ -40,11 +67,10 @@ func projectRelationshipPermissionsForClaims(claims security.Claims) (bool, bool
 	})
 }
 
-// syncProjectCreatorBindingsTx keeps approved relationships stable when an
-// editor without authorship authority publishes an unrelated content change.
-// New relationships stay pending until a dedicated relationship reviewer
-// approves them; removing an approved relationship also requires the matching
-// sensitive permission.
+// syncProjectCreatorBindingsTx changes relationships in place so their public
+// audit identity and timestamps remain stable. Editors without the matching
+// sensitive authority cannot remove any existing relationship state, including
+// pending, rejected, and revoked rows that may be absent from their snapshot.
 func syncProjectCreatorBindingsTx(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -58,16 +84,13 @@ func syncProjectCreatorBindingsTx(
 	r *http.Request,
 ) error {
 	existing := map[string]resolvedProjectCreatorBinding{}
-	rows, err := tx.Query(ctx, `select binding.creator_id,binding.role_id,creator.kind,binding.name_snapshot,
-		binding.role_snapshot,binding.permission_granting,binding.status,binding.display_order
-		from content_creator_bindings binding join creators creator on creator.id=binding.creator_id
-		where binding.subject_type=$1 and binding.subject_id=$2`, subjectType, subjectID)
+	rows, err := tx.Query(ctx, projectCreatorBindingsForUpdateSQL, subjectType, subjectID)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var item resolvedProjectCreatorBinding
-		if err = rows.Scan(&item.CreatorID, &item.RoleID, &item.CreatorKind, &item.NameSnapshot,
+		if err = rows.Scan(&item.ID, &item.CreatorID, &item.RoleID, &item.CreatorKind, &item.NameSnapshot,
 			&item.RoleSnapshot, &item.PermissionGranting, &item.Status, &item.DisplayOrder); err != nil {
 			rows.Close()
 			return err
@@ -80,69 +103,254 @@ func syncProjectCreatorBindingsTx(
 	}
 	rows.Close()
 
-	next := make([]resolvedProjectCreatorBinding, 0, len(authors)+len(existing))
-	requested := make(map[string]struct{}, len(authors))
-	for index, author := range authors {
-		creatorID, name, role, resolveErr := resolveProjectAuthorForCreateTx(ctx, tx, author, actorID, r)
-		if resolveErr != nil {
-			return resolveErr
-		}
-		roleID, resolveErr := creatorRoleInternalIDTx(ctx, tx, author.RoleID)
-		if resolveErr != nil {
-			return resolveErr
-		}
-		var creatorKind string
-		if resolveErr = tx.QueryRow(ctx, `select kind from creators where id=$1`, creatorID).Scan(&creatorKind); resolveErr != nil {
-			return resolveErr
-		}
-		permissionGranting, resolveErr := creatorRolePermissionGrantingTx(ctx, tx, roleID)
-		if resolveErr != nil {
-			return resolveErr
-		}
-		key := projectCreatorBindingKey(creatorID, roleID)
+	resolved, err := resolveRequestedProjectCreatorBindingsTx(ctx, tx, authors, actorID, r)
+	if err != nil {
+		return err
+	}
+	requested := make(map[string]struct{}, len(resolved))
+	mutations := make([]projectCreatorBindingMutation, 0, len(resolved)+len(existing))
+	for index, author := range resolved {
+		key := projectCreatorBindingKey(author.CreatorID, author.RoleID)
 		if _, duplicate := requested[key]; duplicate {
 			return errors.New("duplicate project author or team relationship")
 		}
 		requested[key] = struct{}{}
+		previous, found := existing[key]
 		status := "pending"
-		if previous, found := existing[key]; found && previous.Status == "approved" {
+		if found && previous.Status == "approved" {
 			status = "approved"
-		} else if projectApproved && relationshipChangeAllowed(creatorKind, canManageAuthors, canManageTeams) {
+		} else if projectApproved && relationshipChangeAllowed(author.CreatorKind, canManageAuthors, canManageTeams) {
 			status = "approved"
 		}
-		next = append(next, resolvedProjectCreatorBinding{
-			CreatorID: creatorID, RoleID: roleID, CreatorKind: creatorKind, NameSnapshot: name,
-			RoleSnapshot: role, PermissionGranting: permissionGranting, Status: status, DisplayOrder: index,
+		if found && previous.NameSnapshot == author.NameSnapshot && previous.RoleSnapshot == author.RoleSnapshot &&
+			previous.PermissionGranting == author.PermissionGranting && previous.Status == status && previous.DisplayOrder == index {
+			continue
+		}
+		mutations = append(mutations, projectCreatorBindingMutation{
+			CreatorID: author.CreatorID, RoleID: nullableProjectCreatorRoleID(author.RoleID),
+			NameSnapshot: author.NameSnapshot, RoleSnapshot: author.RoleSnapshot,
+			PermissionGranting: author.PermissionGranting, Status: status, DisplayOrder: index,
 		})
 	}
 
 	for key, previous := range existing {
-		if previous.Status != "approved" {
-			continue
-		}
 		if _, retained := requested[key]; retained {
 			continue
 		}
-		if relationshipChangeAllowed(previous.CreatorKind, canManageAuthors, canManageTeams) {
+		if !relationshipChangeAllowed(previous.CreatorKind, canManageAuthors, canManageTeams) {
 			continue
 		}
-		previous.DisplayOrder = len(next)
-		next = append(next, previous)
-	}
-
-	if _, err = tx.Exec(ctx, `delete from content_creator_bindings where subject_type=$1 and subject_id=$2`, subjectType, subjectID); err != nil {
-		return err
-	}
-	for _, item := range next {
-		if _, err = tx.Exec(ctx, `insert into content_creator_bindings(subject_type,subject_id,creator_id,role_id,
-			name_snapshot,role_snapshot,status,permission_granting,approved_by,approved_at,display_order)
-			values($1,$2,$3,$4,$5,$6,$7,$8,case when $7='approved' then $9 else null end,
-			case when $7='approved' then now() else null end,$10)`, subjectType, subjectID, item.CreatorID, item.RoleID,
-			item.NameSnapshot, item.RoleSnapshot, item.Status, item.PermissionGranting, actorID, item.DisplayOrder); err != nil {
-			return err
+		if previous.Status != "revoked" {
+			mutations = append(mutations, projectCreatorBindingMutation{
+				CreatorID: previous.CreatorID, RoleID: nullableProjectCreatorRoleID(previous.RoleID),
+				NameSnapshot: previous.NameSnapshot, RoleSnapshot: previous.RoleSnapshot,
+				PermissionGranting: previous.PermissionGranting, Status: "revoked", DisplayOrder: previous.DisplayOrder,
+			})
 		}
 	}
+	return applyProjectCreatorBindingMutationsTx(ctx, tx, subjectType, subjectID, actorID, mutations)
+}
+
+func resolveRequestedProjectCreatorBindingsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	authors []modAuthorPayload,
+	actorID int64,
+	r *http.Request,
+) ([]requestedProjectCreatorBinding, error) {
+	creatorPublicIDs := make([]string, 0, len(authors))
+	rolePublicIDs := make([]string, 0, len(authors))
+	seenCreators := map[string]bool{}
+	seenRoles := map[string]bool{}
+	for _, author := range authors {
+		if author.CreatorID != "" && !seenCreators[author.CreatorID] {
+			seenCreators[author.CreatorID] = true
+			creatorPublicIDs = append(creatorPublicIDs, author.CreatorID)
+		}
+		if author.RoleID != nil && !seenRoles[*author.RoleID] {
+			seenRoles[*author.RoleID] = true
+			rolePublicIDs = append(rolePublicIDs, *author.RoleID)
+		}
+	}
+	creatorIDsByPublicID := make(map[string]int64, len(creatorPublicIDs))
+	if len(creatorPublicIDs) > 0 {
+		rows, err := tx.Query(ctx, `select public_id,id from creators where public_id=any($1)`, creatorPublicIDs)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var publicID string
+			var creatorID int64
+			if err = rows.Scan(&publicID, &creatorID); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			creatorIDsByPublicID[publicID] = creatorID
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+		if len(creatorIDsByPublicID) != len(creatorPublicIDs) {
+			return nil, errors.New("selected author or team does not exist")
+		}
+	}
+	type roleFacts struct {
+		ID                 int64
+		Name               string
+		PermissionGranting bool
+	}
+	rolesByPublicID := make(map[string]roleFacts, len(rolePublicIDs))
+	if len(rolePublicIDs) > 0 {
+		rows, err := tx.Query(ctx, `select public_id,id,name,permission_granting
+			from creator_role_definitions where public_id=any($1)`, rolePublicIDs)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var publicID string
+			var role roleFacts
+			if err = rows.Scan(&publicID, &role.ID, &role.Name, &role.PermissionGranting); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			rolesByPublicID[publicID] = role
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+		if len(rolesByPublicID) != len(rolePublicIDs) {
+			return nil, errors.New("selected creator role does not exist")
+		}
+	}
+	creatorIDs := make([]int64, len(authors))
+	for index, author := range authors {
+		if author.CreatorID != "" {
+			creatorIDs[index] = creatorIDsByPublicID[author.CreatorID]
+			continue
+		}
+		kind := author.Kind
+		if kind == "" {
+			kind = "author"
+		}
+		creatorID, _, _, err := ensureNamedCreatorSnapshotTx(ctx, tx, creatorSnapshot{
+			Kind: kind, Name: author.Name, AvatarURL: author.AvatarURL,
+			AvatarFileID: author.AvatarFileID, AvatarInternalID: author.AvatarInternalID,
+		}, actorID, "pending", r)
+		if err != nil {
+			return nil, err
+		}
+		creatorIDs[index] = creatorID
+	}
+	type creatorFacts struct {
+		Name string
+		Kind string
+	}
+	creatorsByID := make(map[int64]creatorFacts, len(creatorIDs))
+	if len(creatorIDs) > 0 {
+		rows, err := tx.Query(ctx, `select id,name,kind from creators where id=any($1)`, creatorIDs)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var creatorID int64
+			var creator creatorFacts
+			if err = rows.Scan(&creatorID, &creator.Name, &creator.Kind); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			creatorsByID[creatorID] = creator
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	result := make([]requestedProjectCreatorBinding, 0, len(authors))
+	for index, author := range authors {
+		creator, ok := creatorsByID[creatorIDs[index]]
+		if !ok {
+			return nil, errors.New("selected author or team does not exist")
+		}
+		value := requestedProjectCreatorBinding{
+			CreatorID: creatorIDs[index], CreatorKind: creator.Kind, NameSnapshot: creator.Name,
+			RoleSnapshot: author.Role,
+		}
+		if author.RoleID != nil {
+			role := rolesByPublicID[*author.RoleID]
+			value.RoleID = &role.ID
+			value.RoleSnapshot = role.Name
+			value.PermissionGranting = role.PermissionGranting
+		}
+		result = append(result, value)
+	}
+	return result, nil
+}
+
+func applyProjectCreatorBindingMutationsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	subjectType string,
+	subjectID, actorID int64,
+	mutations []projectCreatorBindingMutation,
+) error {
+	if len(mutations) == 0 {
+		return nil
+	}
+	creatorIDs := make([]int64, len(mutations))
+	roleIDs := make([]int64, len(mutations))
+	names := make([]string, len(mutations))
+	roles := make([]string, len(mutations))
+	permissionGranting := make([]bool, len(mutations))
+	statuses := make([]string, len(mutations))
+	displayOrders := make([]int, len(mutations))
+	for index, mutation := range mutations {
+		creatorIDs[index] = mutation.CreatorID
+		roleIDs[index] = mutation.RoleID
+		names[index] = mutation.NameSnapshot
+		roles[index] = mutation.RoleSnapshot
+		permissionGranting[index] = mutation.PermissionGranting
+		statuses[index] = mutation.Status
+		displayOrders[index] = mutation.DisplayOrder
+	}
+	tag, err := tx.Exec(ctx, `with input as (
+		select * from unnest($3::bigint[],$4::bigint[],$5::text[],$6::text[],$7::boolean[],$8::text[],$9::integer[])
+			as value(creator_id,role_id,name_snapshot,role_snapshot,permission_granting,status,display_order)
+	)
+	insert into content_creator_bindings(subject_type,subject_id,creator_id,role_id,name_snapshot,role_snapshot,
+		status,permission_granting,approved_by,approved_at,display_order)
+	select $1,$2,creator_id,nullif(role_id,0),name_snapshot,role_snapshot,status,permission_granting,
+		case when status='approved' then $10::bigint else null end,
+		case when status='approved' then now() else null end,display_order from input
+	on conflict(subject_type,subject_id,creator_id,(coalesce(role_id,0))) do update set
+		name_snapshot=excluded.name_snapshot,role_snapshot=excluded.role_snapshot,
+		permission_granting=excluded.permission_granting,status=excluded.status,display_order=excluded.display_order,
+		approved_by=case when excluded.status='approved' and content_creator_bindings.status<>'approved'
+			then $10 else content_creator_bindings.approved_by end,
+		approved_at=case when excluded.status='approved' and content_creator_bindings.status<>'approved'
+			then now() else content_creator_bindings.approved_at end
+	where (content_creator_bindings.name_snapshot,content_creator_bindings.role_snapshot,
+		content_creator_bindings.permission_granting,content_creator_bindings.status,content_creator_bindings.display_order)
+		is distinct from (excluded.name_snapshot,excluded.role_snapshot,excluded.permission_granting,excluded.status,excluded.display_order)`,
+		subjectType, subjectID, creatorIDs, roleIDs, names, roles, permissionGranting, statuses, displayOrders, actorID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != int64(len(mutations)) {
+		return fmt.Errorf("creator binding mutation count mismatch: got %d want %d", tag.RowsAffected(), len(mutations))
+	}
 	return nil
+}
+
+func nullableProjectCreatorRoleID(roleID *int64) int64 {
+	if roleID == nil {
+		return 0
+	}
+	return *roleID
 }
 
 func relationshipChangeAllowed(kind string, canManageAuthors, canManageTeams bool) bool {
@@ -167,44 +375,77 @@ func (s *Server) adminProjectAuthorshipRelations(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusForbidden, "project relationship review permission is required")
 		return
 	}
-	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
-	if status == "" {
-		status = "pending"
-	}
-	if status != "pending" && status != "approved" && status != "rejected" && status != "revoked" {
-		writeError(w, http.StatusBadRequest, "relationship status is invalid")
+	request, err := parseProjectAuthorshipPageRequest(r.URL.Query(), claims.Subject, canManageAuthors, canManageTeams)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rows, err := s.db.Query(r.Context(), `select binding.public_id,binding.subject_type,route.public_id,
+	arguments := []any{request.Status, canManageAuthors, canManageTeams}
+	cursorPredicate := ""
+	if request.Cursor != nil {
+		cursorPredicate = `and (binding.created_at,binding.id)>($4,$5)`
+		arguments = append(arguments, request.Cursor.CreatedAt, request.Cursor.ID)
+	}
+	arguments = append(arguments, request.Limit+1)
+	limitParameter := len(arguments)
+	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`select binding.public_id,binding.subject_type,route.public_id,
 		creator.public_id,creator.kind,creator.name,coalesce(role.name,binding.role_snapshot),binding.permission_granting,
-		binding.status,binding.created_at
+		binding.status,binding.created_at,binding.id
 		from content_creator_bindings binding
 		join public_routes route on route.entity_type=binding.subject_type and route.internal_id=binding.subject_id
 		join creators creator on creator.id=binding.creator_id
 		left join creator_role_definitions role on role.id=binding.role_id
 		where binding.status=$1
 		  and ((creator.kind='author' and $2) or (creator.kind='team' and $3))
-		order by binding.created_at,binding.id limit 200`, status, canManageAuthors, canManageTeams)
+		  %s
+		order by binding.created_at,binding.id limit $%d`, cursorPredicate, limitParameter), arguments...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load project authorship relationships")
 		return
 	}
 	defer rows.Close()
-	items := make([]map[string]any, 0)
+	type projectAuthorshipPageRow struct {
+		Item      map[string]any
+		CreatedAt time.Time
+		ID        int64
+	}
+	pageRows := make([]projectAuthorshipPageRow, 0, request.Limit+1)
 	for rows.Next() {
 		var id, projectType, projectID, creatorID, creatorKind, creatorName, roleName, relationStatus string
 		var permissionGranting bool
 		var createdAt time.Time
+		var internalID int64
 		if err = rows.Scan(&id, &projectType, &projectID, &creatorID, &creatorKind, &creatorName, &roleName,
-			&permissionGranting, &relationStatus, &createdAt); err != nil {
+			&permissionGranting, &relationStatus, &createdAt, &internalID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to parse project authorship relationships")
 			return
 		}
-		items = append(items, map[string]any{"id": id, "projectType": projectType, "projectId": projectID,
-			"creatorId": creatorID, "creatorKind": creatorKind, "creatorName": creatorName, "roleName": roleName,
-			"permissionGranting": permissionGranting, "status": relationStatus, "createdAt": createdAt})
+		pageRows = append(pageRows, projectAuthorshipPageRow{Item: map[string]any{
+			"id": id, "projectType": projectType, "projectId": projectID, "creatorId": creatorID,
+			"creatorKind": creatorKind, "creatorName": creatorName, "roleName": roleName,
+			"permissionGranting": permissionGranting, "status": relationStatus, "createdAt": createdAt,
+		}, CreatedAt: createdAt, ID: internalID})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load project authorship relationships")
+		return
+	}
+	hasMore := len(pageRows) > request.Limit
+	if hasMore {
+		pageRows = pageRows[:request.Limit]
+	}
+	nextCursor := ""
+	if hasMore {
+		last := pageRows[len(pageRows)-1]
+		nextCursor = encodeProjectAuthorshipPageCursor(projectAuthorshipPageCursor{
+			Version: projectAuthorshipCursorVersion, Scope: request.Scope, CreatedAt: last.CreatedAt, ID: last.ID,
+		})
+	}
+	items := make([]map[string]any, 0, len(pageRows))
+	for _, row := range pageRows {
+		items = append(items, row.Item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "hasMore": hasMore, "nextCursor": nextCursor})
 }
 
 func (s *Server) reviewProjectAuthorshipRelation(w http.ResponseWriter, r *http.Request) {
@@ -258,7 +499,7 @@ func (s *Server) reviewProjectAuthorshipRelation(w http.ResponseWriter, r *http.
 			return
 		}
 	}
-	if _, err = tx.Exec(r.Context(), `update content_creator_bindings set status=$2,approved_by=case when $2='approved' then $3 else null end,
+	if _, err = tx.Exec(r.Context(), `update content_creator_bindings set status=$2,approved_by=case when $2='approved' then $3::bigint else null end,
 		approved_at=case when $2='approved' then now() else null end where id=$1`, bindingID, request.Status, claims.Subject); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to review project authorship relationship")
 		return
@@ -274,7 +515,10 @@ func (s *Server) reviewProjectAuthorshipRelation(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusInternalServerError, "failed to commit project relationship review")
 		return
 	}
-	_ = s.refreshProjectACLVersion(r.Context())
+	if !s.requireSecurityVersionRefresh(w, r, "review_project_authorship", 0,
+		s.refreshProjectACLVersion(r.Context())) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": r.PathValue("id"), "status": request.Status})
 }
 

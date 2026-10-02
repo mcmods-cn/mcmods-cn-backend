@@ -140,18 +140,26 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 			}
 		}
 	}
+	if err = httpapi.NewOSSMultipartCleanupWorker(cfg, db).Start(ctx); err != nil {
+		sharedCache.Close()
+		return nil, &runtimeInitializationError{Component: "oss", Code: "oss_multipart_lifecycle_unavailable",
+			PublicMessage: "OSS multipart lifecycle policy is unavailable", Err: err}
+	}
 	httpapi.StartUnreadReconciliation(ctx, db, sharedCache, cfg.Redis.UnreadCounterEnabled, cfg.Redis.UnreadReconcileInterval, cfg.Redis.UnreadReconcileBatchSize)
 
 	httpapi.StartMinecraftVersionSyncScheduler(ctx, db)
 	httpapi.StartMinecraftServerProbeScheduler(ctx, db)
 	httpapi.StartPopularityRefreshScheduler(ctx, db)
 	httpapi.NewOSSDeletionWorker(cfg, db).Start(ctx)
+	httpapi.NewOSSRehomeWorker(cfg, db).Start(ctx)
 	httpapi.NewMaintenanceWorker(db, sharedCache).Start(ctx)
+	httpapi.NewLogRetentionWorker(db).Start(ctx)
+	httpapi.NewLevelRecalculationWorker(db).Start(ctx)
 	httpapi.NewSeedCrawlerWorker(cfg, db).Start(ctx)
 	httpapi.NewProjectAutomationWorker(cfg, db).Start(ctx)
 	httpapi.NewActivityRetentionWorker(db).Start(ctx)
 	progressionService := progression.NewService(db, sharedCache)
-	activityMonitor := activity.NewMonitor(activityDB, progressionService.ProcessActivityBatch, activity.Options{
+	activityMonitor := activity.NewMonitor(activityDB, progressionService, activity.Options{
 		BatchSize: cfg.Activity.BatchSize, QueueCapacity: cfg.Activity.QueueCapacity,
 		FlushInterval: cfg.Activity.FlushInterval, RetryMinDelay: cfg.Activity.RetryMinDelay,
 		RetryMaxDelay: cfg.Activity.RetryMaxDelay, WriteTimeout: cfg.Activity.WriteTimeout,
@@ -174,7 +182,7 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	}
 	modExportWorker := httpapi.NewModExportWorker(cfg, db, queueClient)
 	if err = modExportWorker.Start(); err != nil {
-		log.Printf("mod catalog import worker unavailable; API fallback remains enabled: %v", err)
+		log.Printf("mod catalog import worker recovery failed; committed outbox tasks remain pending: %v", err)
 	}
 	modMetadataWorker := httpapi.NewModMetadataImportWorker(cfg, db, queueClient)
 	if err = modMetadataWorker.Start(ctx); err != nil {
@@ -184,6 +192,10 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	if err = blueprintWorker.Start(ctx); err != nil {
 		log.Printf("blueprint worker unavailable; queued jobs remain recoverable: %v", err)
 	}
+	commentLogWorker := httpapi.NewCommentLogAttachmentWorker(cfg, db, queueClient)
+	if err = commentLogWorker.Start(ctx); err != nil {
+		log.Printf("comment log attachment worker unavailable; queued jobs remain recoverable: %v", err)
+	}
 	favoriteExportWorker := httpapi.NewFavoriteModpackExportWorker(cfg, db, queueClient)
 	if err = favoriteExportWorker.Start(ctx); err != nil {
 		log.Printf("favorite Modrinth export worker unavailable; database scanner remains enabled: %v", err)
@@ -192,7 +204,7 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	if err = projectUpdateWorker.Start(ctx); err != nil {
 		log.Printf("project update notification queue unavailable; database scanner remains enabled: %v", err)
 	}
-	outboxDispatcher := queue.NewOutboxDispatcher(db, queueClient, natsCfg.OutboxEnabled)
+	outboxDispatcher := queue.NewOutboxDispatcher(db, queueClient, true)
 	outboxDispatcher.Start(ctx)
 	searchClient := searchindex.New(cfg.Typesense)
 	searchindex.NewWorker(db, searchClient).Start(ctx)

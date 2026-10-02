@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"strconv"
@@ -17,6 +18,22 @@ type metricTarget struct {
 	InternalID int64
 	PublicID   string
 	Type       string
+}
+
+const (
+	metricViewSourceWindow        = 5 * time.Minute
+	metricViewSharedSourceLimit   = 60
+	metricViewLocalSourceLimit    = 12
+	metricViewDeduplicationWindow = 24 * time.Hour
+)
+
+var (
+	errMetricPageInvalid     = errors.New("metric page is not registered")
+	errMetricViewRateLimited = errors.New("metric view rate limit exceeded")
+)
+
+type metricPageQueryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
 type contentMetricActor struct {
@@ -64,7 +81,6 @@ type contentMetricsResponse struct {
 	TotalViews       int64                    `json:"totalViews"`
 	HeatScore        *float64                 `json:"heatScore,omitempty"`
 	RecentEditors    []contentMetricActor     `json:"recentEditors"`
-	RecentViewers    []contentMetricActor     `json:"recentViewers"`
 	Editors          []contentMetricEditor    `json:"editors"`
 	Developers       []contentMetricDeveloper `json:"developers"`
 	Tutorials        []contentMetricReference `json:"tutorials"`
@@ -92,7 +108,7 @@ func (s *Server) contentMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response := contentMetricsResponse{
-		ID: target.PublicID, Type: target.Type, RecentEditors: []contentMetricActor{}, RecentViewers: []contentMetricActor{},
+		ID: target.PublicID, Type: target.Type, RecentEditors: []contentMetricActor{},
 		Editors: []contentMetricEditor{}, Developers: []contentMetricDeveloper{}, Tutorials: []contentMetricReference{}, Issues: []contentMetricReference{},
 		News: []contentMetricReference{}, Discussions: []contentMetricReference{}, IncludesChildren: target.Type == "mod",
 	}
@@ -121,10 +137,6 @@ func (s *Server) contentMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	if response.RecentEditors, err = s.loadRecentMetricEditors(r.Context(), target); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load recent content editors")
-		return
-	}
-	if response.RecentViewers, err = s.loadRecentMetricViewers(r.Context(), target.RouteID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load recent content viewers")
 		return
 	}
 	if metricProjectTypes[target.Type] {
@@ -170,15 +182,13 @@ func (s *Server) loadMetricProjectEditors(ctx context.Context, target metricTarg
 			case when access.access_level='developer' then 0 else 1 end priority
 		from effective_project_access access
 		where access.project_type=$1 and access.project_id=$2
-		union all
-		select content_target_owner_id($3),'developer',0
 	), selected as (
 		select distinct on(user_id) user_id,role_code from candidates where user_id is not null
 		order by user_id,priority
 	)
 	select account.public_id,account.username,account.avatar_url,selected.role_code
 	from selected join users account on account.id=selected.user_id and account.status='active'
-	order by selected.role_code,lower(account.username),account.id`, target.Type, target.InternalID, target.RouteID)
+	order by selected.role_code,lower(account.username),account.id`, target.Type, target.InternalID)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +219,13 @@ func (s *Server) recordMetricView(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve content statistics target")
 		return
 	}
-	if err = s.recordContentRouteView(r.Context(), r, target.RouteID, metricProjectTypes[target.Type]); err != nil {
+	if err = s.recordContentRouteView(r.Context(), r, target); errors.Is(err, errMetricPageInvalid) {
+		writeAPIError(w, http.StatusBadRequest, "METRIC_PAGE_INVALID", "content statistics page is not registered", 0, nil)
+		return
+	} else if errors.Is(err, errMetricViewRateLimited) {
+		writeAPIError(w, http.StatusTooManyRequests, "METRIC_VIEW_RATE_LIMIT", "content view rate exceeded", int(metricViewSourceWindow/time.Second), nil)
+		return
+	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record content view")
 		return
 	}
@@ -253,21 +269,30 @@ func (s *Server) resolveMetricTarget(ctx context.Context, publicID string) (metr
 	return target, nil
 }
 
-func (s *Server) recordContentRouteView(ctx context.Context, r *http.Request, routeID int64, includePopularity bool) error {
+func (s *Server) recordContentRouteView(ctx context.Context, r *http.Request, target metricTarget) error {
 	viewerID := currentClaims(r).Subject
-	viewerIdentity := "anonymous:" + normalizeIPAddress(remoteIP(r.RemoteAddr)) + ":" + r.UserAgent()
+	_, _, sourceID := anonymousPresenceIdentity(s.cfg.AntiAbuse.HMACSecret, s.requestClientLocation(r).IP, r.UserAgent(), "")
+	viewerIdentity := "anonymous:" + sourceID
 	if viewerID > 0 {
 		viewerIdentity = "user:" + strconv.FormatInt(viewerID, 10)
+		sourceID = viewerIdentity
+	}
+	limit := s.cache.ConsumeRateLimitPolicy(ctx, "metric-view:"+sourceID,
+		metricViewSharedSourceLimit, metricViewLocalSourceLimit, metricViewSourceWindow)
+	if !limit.Allowed {
+		return errMetricViewRateLimited
+	}
+	pageKey, err := resolveMetricPageKey(ctx, s.db, target, r.URL.Query().Get("pageKey"))
+	if err != nil {
+		return err
 	}
 	viewerHash := sha256.Sum256([]byte(viewerIdentity))
-	pageKey := strings.TrimSpace(r.URL.Query().Get("pageKey"))
-	if pageKey == "" {
-		pageKey = "detail"
-	}
-	if len(pageKey) > 200 {
-		pageKey = pageKey[:200]
-	}
 	pageHash := sha256.Sum256([]byte(pageKey))
+	deduplicationKey := "metric-view-deduplicate:" + strconv.FormatInt(target.RouteID, 10) + ":" +
+		hex.EncodeToString(pageHash[:8]) + ":" + hex.EncodeToString(viewerHash[:8])
+	if !s.cache.ClaimThrottle(ctx, deduplicationKey, metricViewDeduplicationWindow) {
+		return nil
+	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -276,7 +301,7 @@ func (s *Server) recordContentRouteView(ctx context.Context, r *http.Request, ro
 	shard := int16(viewerHash[0] % 32)
 	if _, err = tx.Exec(ctx, `insert into content_view_daily(object_route_id,view_date,counter_shard,views)
 		values($1,current_date,$2,1) on conflict(object_route_id,view_date,counter_shard) do update
-		set views=content_view_daily.views+1`, routeID, shard); err != nil {
+		set views=content_view_daily.views+1`, target.RouteID, shard); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `insert into site_view_daily(metric_date,counter_shard,views)
@@ -291,18 +316,57 @@ func (s *Server) recordContentRouteView(ctx context.Context, r *http.Request, ro
 	if _, err = tx.Exec(ctx, `insert into content_unique_views(object_route_id,viewer_hash,viewer_user_id)
 		values($1,$2,$3) on conflict(object_route_id,viewer_hash) do update set last_seen_at=now(),
 		viewer_user_id=coalesce(content_unique_views.viewer_user_id,excluded.viewer_user_id)`,
-		routeID, viewerHash[:], nullableViewerID); err != nil {
+		target.RouteID, viewerHash[:], nullableViewerID); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `insert into content_project_pages(object_route_id,page_hash)
-		values($1,$2) on conflict do nothing`, routeID, pageHash[:]); err != nil {
+		values($1,$2) on conflict do nothing`, target.RouteID, pageHash[:]); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `select enqueue_content_stats_refresh($1,true,$2),enqueue_parent_project_metrics($1)`,
-		routeID, includePopularity); err != nil {
+		target.RouteID, metricProjectTypes[target.Type]); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func parseMetricPageKey(raw string) (kind, publicID string, err error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" || value == "detail" {
+		return "detail", "", nil
+	}
+	if strings.Count(value, ":") == 1 && strings.HasPrefix(value, "version:") {
+		publicID = strings.TrimPrefix(value, "version:")
+		if validCatalogPublicID(publicID) {
+			return "version", publicID, nil
+		}
+	}
+	return "", "", errMetricPageInvalid
+}
+
+func resolveMetricPageKey(ctx context.Context, queryer metricPageQueryer, target metricTarget, raw string) (string, error) {
+	kind, publicID, err := parseMetricPageKey(raw)
+	if err != nil {
+		return "", err
+	}
+	if kind == "detail" {
+		return "detail", nil
+	}
+	if target.Type != "resource" || target.InternalID <= 0 {
+		return "", errMetricPageInvalid
+	}
+	var exists bool
+	if err = queryer.QueryRow(ctx, `select exists(
+		select 1 from mod_resource_version_details detail
+		join mod_content_versions version on version.id=detail.version_id
+		where detail.resource_id=$1 and detail.status='active' and version.status='active' and version.public_id=$2
+	)`, target.InternalID, publicID).Scan(&exists); err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", errMetricPageInvalid
+	}
+	return "version:" + publicID, nil
 }
 
 func (s *Server) loadRecentMetricEditors(ctx context.Context, target metricTarget) ([]contentMetricActor, error) {
@@ -329,30 +393,6 @@ func (s *Server) loadRecentMetricEditors(ctx context.Context, target metricTarge
 	for rows.Next() {
 		var item contentMetricActor
 		if err = rows.Scan(&item.ID, &item.Name, &item.AvatarURL, &item.OccurredAt, &item.Count); err != nil {
-			return nil, err
-		}
-		item.URL = "/" + item.ID
-		items = append(items, item)
-	}
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-	return s.resolveMetricActorAvatars(ctx, items)
-}
-
-func (s *Server) loadRecentMetricViewers(ctx context.Context, routeID int64) ([]contentMetricActor, error) {
-	rows, err := s.db.Query(ctx, `select account.public_id,account.username,account.avatar_url,view.last_seen_at
-		from content_unique_views view join users account on account.id=view.viewer_user_id
-		where view.object_route_id=$1 and account.status='active'
-		order by view.last_seen_at desc,account.id desc limit 8`, routeID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := make([]contentMetricActor, 0, 8)
-	for rows.Next() {
-		var item contentMetricActor
-		if err = rows.Scan(&item.ID, &item.Name, &item.AvatarURL, &item.OccurredAt); err != nil {
 			return nil, err
 		}
 		item.URL = "/" + item.ID

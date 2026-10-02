@@ -375,7 +375,14 @@ func (s *Server) persistReadyLogShare(ctx context.Context, ownerID int64, source
 }
 
 func (s *Server) publicLogShare(w http.ResponseWriter, r *http.Request) {
-	share, entries, err := s.loadLogShare(r.Context(), r.PathValue("code"), false, currentClaims(r).Subject)
+	if !s.allowLogShareRead(w, r, "log-share-metadata", 30) {
+		return
+	}
+	if len(r.URL.Query()) != 0 {
+		writeAPIError(w, http.StatusBadRequest, "LOG_SHARE_METADATA_QUERY_INVALID", "log share metadata does not accept query parameters", 0, nil)
+		return
+	}
+	share, _, err := s.loadLogShareMetadata(r.Context(), r.PathValue("code"), false, currentClaims(r).Subject)
 	if err != nil {
 		status := http.StatusNotFound
 		if errors.Is(err, errLogShareGone) {
@@ -386,72 +393,53 @@ func (s *Server) publicLogShare(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
-	share["entries"] = entries
-	writeJSON(w, http.StatusOK, share)
+	payload, err := json.Marshal(apiResponse{Data: share})
+	if err != nil || len(payload)+1 > maxLogShareMetadataResponseBytes {
+		writeAPIError(w, http.StatusRequestEntityTooLarge, "LOG_SHARE_METADATA_RESPONSE_BUDGET", "log share metadata exceeds response budget", 0, nil)
+		return
+	}
+	writeJSONBytes(w, http.StatusOK, append(payload, '\n'))
 }
 
 var errLogShareGone = errors.New("log share gone")
 
-func (s *Server) loadLogShare(ctx context.Context, code string, ownerOnly bool, viewerID int64) (map[string]any, []map[string]any, error) {
-	code = strings.TrimSpace(code)
-	var id int64
-	var ownerID *int64
-	var sourceType, title, originalName, status string
-	var redactionVersion int
-	var counts []byte
-	var createdAt, expiresAt time.Time
-	err := s.db.QueryRow(ctx, `select id,owner_user_id,source_type,title,original_name,status,redaction_version,redaction_counts,created_at,expires_at
-		from log_shares where public_code=$1`, code).Scan(&id, &ownerID, &sourceType, &title, &originalName, &status, &redactionVersion, &counts, &createdAt, &expiresAt)
-	if err != nil {
-		return nil, nil, err
-	}
-	if ownerOnly && (ownerID == nil || *ownerID != viewerID) {
-		return nil, nil, pgx.ErrNoRows
-	}
-	if status != "ready" || !expiresAt.After(time.Now()) {
-		return nil, nil, errLogShareGone
-	}
-	rows, err := s.db.Query(ctx, `select entry_index,safe_display_name,content_type,sanitized_text,byte_size,line_count,checksum
-		from log_share_entries where log_share_id=$1 and status='ready' order by entry_index`, id)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
-	entries := make([]map[string]any, 0)
-	for rows.Next() {
-		var index int
-		var name, contentType, text, checksum string
-		var size, lines int64
-		if err = rows.Scan(&index, &name, &contentType, &text, &size, &lines, &checksum); err != nil {
-			return nil, nil, err
-		}
-		entries = append(entries, map[string]any{"index": index, "name": name, "contentType": contentType, "text": text, "byteSize": size, "lineCount": lines, "checksum": checksum})
-	}
-	var redactionCounts any
-	_ = jsonUnmarshal(counts, &redactionCounts)
-	return map[string]any{"publicCode": code, "sourceType": sourceType, "title": title, "originalName": originalName,
-		"status": status, "redactionVersion": redactionVersion, "redactionCounts": redactionCounts,
-		"createdAt": createdAt, "expiresAt": expiresAt, "downloadable": sourceType == "file"}, entries, rows.Err()
-}
-
 func (s *Server) downloadLogShare(w http.ResponseWriter, r *http.Request) {
-	share, entries, err := s.loadLogShare(r.Context(), r.PathValue("code"), false, currentClaims(r).Subject)
-	if err != nil || share["sourceType"] != "file" {
+	release, ok := s.acquireLogShareBodyRead(w, r, "log-share-download", 5)
+	if !ok {
+		return
+	}
+	defer release()
+	share, record, err := s.loadLogShareMetadata(r.Context(), r.PathValue("code"), false, currentClaims(r).Subject)
+	if err != nil || record.SourceType != "file" {
 		writeError(w, http.StatusNotFound, "该日志不能下载")
 		return
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
-	name, _ := share["originalName"].(string)
-	if strings.EqualFold(filepath.Ext(name), ".zip") || len(entries) > 1 {
+	name := record.OriginalName
+	if strings.EqualFold(filepath.Ext(name), ".zip") || len(share.Entries) > 1 {
+		rows, queryErr := s.db.Query(r.Context(), `select left(safe_display_name,512),sanitized_text
+			from log_share_entries where log_share_id=$1 and status='ready' and sanitized_text is not null order by entry_index`, record.ID)
+		if queryErr != nil {
+			writeError(w, http.StatusInternalServerError, "读取脱敏日志下载内容失败")
+			return
+		}
+		defer rows.Close()
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", contentDispositionAttachment(safeLogDownloadName(name, ".zip")))
 		writer := zip.NewWriter(w)
-		for _, entry := range entries {
-			part, createErr := writer.Create(entry["name"].(string))
-			if createErr == nil {
-				_, _ = io.WriteString(part, entry["text"].(string))
+		for rows.Next() {
+			var entryName, text string
+			if scanErr := rows.Scan(&entryName, &text); scanErr != nil {
+				_ = writer.Close()
+				return
 			}
+			part, createErr := writer.Create(entryName)
+			if createErr != nil {
+				_ = writer.Close()
+				return
+			}
+			_, _ = io.WriteString(part, text)
 		}
 		_ = writer.Close()
 		return
@@ -460,9 +448,15 @@ func (s *Server) downloadLogShare(w http.ResponseWriter, r *http.Request) {
 	if extension != ".log" && extension != ".txt" {
 		extension = ".log"
 	}
+	var text string
+	if err = s.db.QueryRow(r.Context(), `select sanitized_text from log_share_entries
+		where log_share_id=$1 and entry_index=$2 and status='ready' and sanitized_text is not null`, record.ID, share.Entries[0].Index).Scan(&text); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取脱敏日志下载内容失败")
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(safeLogDownloadName(name, extension)))
-	_, _ = io.WriteString(w, entries[0]["text"].(string))
+	_, _ = io.WriteString(w, text)
 }
 
 func (s *Server) myLogShares(w http.ResponseWriter, r *http.Request) {
@@ -495,10 +489,14 @@ func (s *Server) myLogShares(w http.ResponseWriter, r *http.Request) {
 	if direction == "asc" {
 		order = "created_at asc,id asc"
 	}
-	items := s.querySimpleRows(r, `select public_code,source_type,title,original_name,status,redaction_version,created_at,expires_at
+	items, err := s.querySimpleRows(r, `select public_code,source_type,title,original_name,status,redaction_version,created_at,expires_at
 		from log_shares where owner_user_id=$1 and deleted_at is null and ($2='' or source_type=$2) and ($3='' or status=$3)
 		and ($4='' or title ilike '%'||$4||'%' or original_name ilike '%'||$4||'%')
 		order by `+order+` limit $5 offset $6`, claims.Subject, sourceType, status, query, limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取日志历史失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
 }
 
@@ -558,5 +556,3 @@ func jsonMarshal(value any) (string, error) {
 	raw, err := json.Marshal(value)
 	return string(raw), err
 }
-
-func jsonUnmarshal(raw []byte, target any) error { return json.Unmarshal(raw, target) }

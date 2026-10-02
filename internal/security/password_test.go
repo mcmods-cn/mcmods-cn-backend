@@ -27,3 +27,17 @@ func TestVerifyPasswordRejectsExcessiveArgon2Parameters(t *testing.T) {
 		t.Fatal("unsafe Argon2 parameters were accepted")
 	}
 }
+
+func TestVerifyPasswordRejectsLegacyPBKDF2(t *testing.T) {
+	// This is a valid PBKDF2-HMAC-SHA256 hash for "legacy-password",
+	// 100,000 iterations and the salt "legacy-salt". The development schema
+	// has no legacy-password compatibility contract, so accepting it would
+	// silently restore the removed authentication branch.
+	legacy := "pbkdf2$sha256$100000$bGVnYWN5LXNhbHQ$9bFnZntVcT0mdppBMIIbUSDM/+6YmsHsW1Nx1Pytmro"
+	if VerifyPassword("legacy-password", legacy) {
+		t.Fatal("legacy PBKDF2 password was accepted")
+	}
+	if VerifyCode("legacy-password", legacy) {
+		t.Fatal("legacy PBKDF2 verification remained reachable through VerifyCode")
+	}
+}

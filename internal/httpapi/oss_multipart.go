@@ -30,8 +30,8 @@ type ossMultipartUploadTicket struct {
 	Parts    []ossMultipartPartTicket `json:"parts"`
 }
 
-func shouldUseOSSMultipart(preferred bool, sizeBytes int64) bool {
-	return preferred && sizeBytes >= ossMultipartThreshold
+func shouldUseOSSMultipart(sizeBytes int64) bool {
+	return sizeBytes >= ossMultipartThreshold
 }
 
 func ossMultipartPartCount(sizeBytes, partSize int64) int {
@@ -128,12 +128,44 @@ func completeOSSMultipartUpload(ctx context.Context, client *aliyunoss.Client, c
 	})
 	var serviceError *aliyunoss.ServiceError
 	if errors.As(err, &serviceError) && serviceError.Code == "NoSuchUpload" {
-		// Completion is safe to retry. The caller performs HeadObject plus size
-		// and SHA-256 metadata verification next, so a completed upload can be
-		// accepted even when the first success response was lost in transit.
+		// The caller verifies the final object before persisting completion. This
+		// recovers a lost success response without confusing a lifecycle abort
+		// with a completed upload.
 		return nil
 	}
 	return err
+}
+
+func verifyCompletedOSSMultipartObject(
+	ctx context.Context,
+	client *aliyunoss.Client,
+	cfg ossConfigPayload,
+	objectKey string,
+	sizeBytes int64,
+	sha256 string,
+) (*aliyunoss.HeadObjectResult, error) {
+	head, err := client.HeadObject(ctx, &aliyunoss.HeadObjectRequest{
+		Bucket: aliyunoss.Ptr(cfg.Bucket),
+		Key:    aliyunoss.Ptr(objectKey),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("verify completed OSS multipart object: %w", err)
+	}
+	if !completedOSSMultipartObjectMatches(head, sizeBytes, sha256) {
+		if sizeBytes > 0 && head.ContentLength != sizeBytes {
+			return nil, errors.New("completed OSS multipart object size does not match the session")
+		}
+		return nil, errors.New("completed OSS multipart object SHA-256 does not match the session")
+	}
+	return head, nil
+}
+
+func completedOSSMultipartObjectMatches(head *aliyunoss.HeadObjectResult, sizeBytes int64, sha256 string) bool {
+	if head == nil || sizeBytes > 0 && head.ContentLength != sizeBytes {
+		return false
+	}
+	metadataHash := normalizeSHA256(metadataValue(head.Metadata, "sha256"))
+	return metadataHash != "" && metadataHash == sha256
 }
 
 func abortOSSMultipartUpload(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey, uploadID string) error {

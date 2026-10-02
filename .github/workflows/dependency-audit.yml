@@ -1,0 +1,46 @@
+name: Dependency vulnerability audit
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "21 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install the official vulnerability scanner
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+
+      - name: Scan reachable Go vulnerabilities
+        id: govulncheck
+        continue-on-error: true
+        run: |
+          mkdir -p security-reports
+          govulncheck -format json ./... > security-reports/govulncheck.json
+
+      - name: Archive govulncheck report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: govulncheck-${{ github.run_id }}-${{ github.run_attempt }}
+          path: security-reports/govulncheck.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce vulnerability gate
+        if: always() && steps.govulncheck.outcome != 'success'
+        run: exit 1

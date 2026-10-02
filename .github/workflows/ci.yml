@@ -1,0 +1,139 @@
+name: Backend CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_ENV: test
+  DATABASE_URL: postgres://postgres@127.0.0.1:5432/mcmods_test?sslmode=disable
+  JWT_SECRET: ci-test-only-signing-secret-at-least-32-bytes
+  SETTINGS_ENCRYPTION_KEY: ci-test-only-encryption-key-at-least-32-bytes
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: postgres
+          POSTGRES_DB: mcmods_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mcmods_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Verify module files
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Initialize the owned job database
+        uses: ./.github/actions/initialize-test-database
+      - name: Test and enforce the coverage floor
+        run: |
+          go test ./... -count=1 -coverprofile=coverage.out
+          go tool cover -func=coverage.out | tee coverage.txt
+          awk -v minimum=27.0 '/^total:/ { gsub("%", "", $3); if (($3 + 0) < minimum) exit 1; found=1 } END { if (!found) exit 2 }' coverage.txt
+      - name: Vet and build
+        run: |
+          go vet ./...
+          go build ./...
+      - name: Archive coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            coverage.out
+            coverage.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: postgres
+          POSTGRES_DB: mcmods_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mcmods_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      MCMODS_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/mcmods_test?sslmode=disable
+      MCMODS_RUN_DB_INTEGRATION: "1"
+      MCMODS_RUN_ACTIVITY_LOAD: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Initialize the owned job database
+        uses: ./.github/actions/initialize-test-database
+      - name: Run every discovered test in isolated serial PostgreSQL batches
+        run: go run ./tools/testing/db_suite
+
+  race:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: postgres
+          POSTGRES_DB: mcmods_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mcmods_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Initialize the owned job database
+        uses: ./.github/actions/initialize-test-database
+      - name: Run the Linux race detector
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race ./... -count=1
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build the production image
+        run: docker build --pull --tag mcmods-cn-backend:ci .

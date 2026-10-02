@@ -8,7 +8,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"mcmods-cn-backend/internal/activitycatalog"
 )
 
 var (
@@ -18,48 +21,62 @@ var (
 )
 
 const (
-	ActionEdit     int16 = 1
-	ActionCreate   int16 = 2
-	ActionView     int16 = 3
-	ActionDelete   int16 = 4
-	ActionClaim    int16 = 5
-	ActionDownload int16 = 6
-	ActionUpload   int16 = 7
-	ActionPurchase int16 = 8
-	ActionTransfer int16 = 9
-	ActionCheckIn  int16 = 10
-	ActionUse      int16 = 11
+	ActionEdit     = activitycatalog.ActionEdit
+	ActionCreate   = activitycatalog.ActionCreate
+	ActionView     = activitycatalog.ActionView
+	ActionDelete   = activitycatalog.ActionDelete
+	ActionClaim    = activitycatalog.ActionClaim
+	ActionDownload = activitycatalog.ActionDownload
+	ActionUpload   = activitycatalog.ActionUpload
+	ActionPurchase = activitycatalog.ActionPurchase
+	ActionTransfer = activitycatalog.ActionTransfer
+	ActionCheckIn  = activitycatalog.ActionCheckIn
+	ActionUse      = activitycatalog.ActionUse
 )
 
 const (
-	ObjectRecipe        int16 = 1
-	ObjectMod           int16 = 2
-	ObjectBlueprint     int16 = 3
-	ObjectPlugin        int16 = 4
-	ObjectAuthor        int16 = 5
-	ObjectTeam          int16 = 6
-	ObjectUser          int16 = 7
-	ObjectComment       int16 = 8
-	ObjectTag           int16 = 9
-	ObjectFile          int16 = 10
-	ObjectEconomy       int16 = 11
-	ObjectTask          int16 = 12
-	ObjectShopItem      int16 = 13
-	ObjectResource      int16 = 14
-	ObjectModpack       int16 = 15
-	ObjectServer        int16 = 16
-	ObjectMap           int16 = 17
-	ObjectResourcePack  int16 = 18
-	ObjectShaderPack    int16 = 19
-	ObjectDatapack      int16 = 20
-	ObjectAddon         int16 = 21
-	ObjectCommunityPost int16 = 22
-	ObjectReview        int16 = 23
-	ObjectSkin          int16 = 24
-	ObjectPlayerProfile int16 = 25
-	ObjectChangelog     int16 = 26
-	ObjectRating        int16 = 27
+	ObjectRecipe        = activitycatalog.ObjectRecipe
+	ObjectMod           = activitycatalog.ObjectMod
+	ObjectBlueprint     = activitycatalog.ObjectBlueprint
+	ObjectPlugin        = activitycatalog.ObjectPlugin
+	ObjectAuthor        = activitycatalog.ObjectAuthor
+	ObjectTeam          = activitycatalog.ObjectTeam
+	ObjectUser          = activitycatalog.ObjectUser
+	ObjectComment       = activitycatalog.ObjectComment
+	ObjectTag           = activitycatalog.ObjectTag
+	ObjectFile          = activitycatalog.ObjectFile
+	ObjectEconomy       = activitycatalog.ObjectEconomy
+	ObjectTask          = activitycatalog.ObjectTask
+	ObjectShopItem      = activitycatalog.ObjectShopItem
+	ObjectResource      = activitycatalog.ObjectResource
+	ObjectModpack       = activitycatalog.ObjectModpack
+	ObjectServer        = activitycatalog.ObjectServer
+	ObjectMap           = activitycatalog.ObjectMap
+	ObjectResourcePack  = activitycatalog.ObjectResourcePack
+	ObjectShaderPack    = activitycatalog.ObjectShaderPack
+	ObjectDatapack      = activitycatalog.ObjectDatapack
+	ObjectAddon         = activitycatalog.ObjectAddon
+	ObjectCommunityPost = activitycatalog.ObjectCommunityPost
+	ObjectReview        = activitycatalog.ObjectReview
+	ObjectSkin          = activitycatalog.ObjectSkin
+	ObjectPlayerProfile = activitycatalog.ObjectPlayerProfile
+	ObjectChangelog     = activitycatalog.ObjectChangelog
+	ObjectRating        = activitycatalog.ObjectRating
 )
+
+type DictionaryEntry = activitycatalog.Entry
+
+func ActionDefinitions() []DictionaryEntry { return activitycatalog.ActionDefinitions() }
+
+func ObjectTypeDefinitions() []DictionaryEntry { return activitycatalog.ObjectTypeDefinitions() }
+
+func ActionIDs() map[string]int16 { return activitycatalog.ActionIDs() }
+
+func ObjectTypeIDs() map[string]int16 { return activitycatalog.ObjectTypeIDs() }
+
+func ActionID(code string) int16 { return activitycatalog.ActionID(code) }
+
+func ObjectTypeID(code string) int16 { return activitycatalog.ObjectTypeID(code) }
 
 type Event struct {
 	UserID        int64
@@ -78,7 +95,14 @@ type Event struct {
 	OccurredAt           time.Time
 }
 
-type BatchProcessor func(context.Context, []Event) error
+// ProjectionProcessor keeps durable activity facts and their business
+// projections inside one database commit. The non-transactional entry point is
+// reserved for explicitly lossy best-effort activity such as anonymous views.
+type ProjectionProcessor interface {
+	ProcessActivityBatch(context.Context, []Event) error
+	ProcessActivityBatchTx(context.Context, pgx.Tx, []Event) error
+	ActivityBatchCommitted(context.Context, []Event)
+}
 
 type Options struct {
 	BatchSize             int
@@ -153,7 +177,7 @@ type Monitor struct {
 	metrics   monitorMetrics
 }
 
-func NewMonitor(db *pgxpool.Pool, processor BatchProcessor, options Options) *Monitor {
+func NewMonitor(db *pgxpool.Pool, processor ProjectionProcessor, options Options) *Monitor {
 	return newMonitor(newPostgresStore(db, processor), options)
 }
 
@@ -500,9 +524,13 @@ func AddedMarkdownBytes(previous, current string) int {
 	return added
 }
 
-// MarkdownDeltaBytes returns inserted and deleted UTF-8 bytes in the same
-// minimal insert/delete edit script. The sum is the documented total-edit
-// byte count; net growth is added minus deleted.
+const markdownDeltaMaxExactDistance = 1024
+
+// MarkdownDeltaBytes returns inserted and deleted UTF-8 bytes. It computes the
+// exact minimal insert/delete script only while the edit distance stays inside
+// a fixed work and memory budget; larger rewrites conservatively count the
+// unmatched middle as deleted plus inserted. The fallback preserves net growth
+// and never lets activity accounting scale memory with the JSON request limit.
 func MarkdownDeltaBytes(previous, current string) (added int, deleted int) {
 	if previous == current {
 		return 0, 0
@@ -528,7 +556,7 @@ func MarkdownDeltaBytes(previous, current string) (added int, deleted int) {
 	if len(newBytes) == 0 {
 		return 0, len(oldBytes)
 	}
-	distance, ok := insertDeleteDistance(oldBytes, newBytes, 8192)
+	distance, ok := insertDeleteDistance(oldBytes, newBytes, markdownDeltaMaxExactDistance)
 	if !ok {
 		return len(newBytes), len(oldBytes)
 	}
@@ -545,8 +573,8 @@ func insertDeleteDistance(oldBytes, newBytes []byte, limit int) (int, bool) {
 	if limit <= 0 || limit > maximum {
 		limit = maximum
 	}
-	offset := maximum + 1
-	frontier := make([]int, maximum*2+3)
+	offset := limit + 1
+	frontier := make([]int, boundedEditFrontierSize(len(oldBytes), len(newBytes), limit))
 	frontier[offset+1] = 0
 	for distance := 0; distance <= limit; distance++ {
 		for diagonal := -distance; diagonal <= distance; diagonal += 2 {
@@ -569,4 +597,15 @@ func insertDeleteDistance(oldBytes, newBytes []byte, limit int) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+func boundedEditFrontierSize(oldLength, newLength, limit int) int {
+	maximum := oldLength + newLength
+	if maximum <= 0 {
+		return 0
+	}
+	if limit <= 0 || limit > maximum {
+		limit = maximum
+	}
+	return limit*2 + 3
 }

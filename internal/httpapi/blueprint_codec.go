@@ -19,11 +19,15 @@ import (
 
 const (
 	blueprintSchemaVersion       = "mcmods-blueprint/v1"
-	maxBlueprintDecodedNBTBytes  = int64(256 << 20)
+	maxBlueprintDecodedNBTBytes  = int64(32 << 20)
 	maxBlueprintDimension        = 4096
-	maxBlueprintVolume           = 16 << 20
-	maxBlueprintNonAirBlockCount = 8 << 20
+	maxBlueprintVolume           = 2 << 20
+	maxBlueprintNonAirBlockCount = 250_000
+	maxBlueprintMaterialCount    = 8_192
+	maxBlueprintNormalizedBytes  = 64 << 20
 )
+
+var errBlueprintEntityDataWouldBeLost = errors.New("blueprint entity data cannot be represented without loss")
 
 type blueprintDocument struct {
 	SchemaVersion string           `json:"schemaVersion"`
@@ -185,7 +189,11 @@ func decodeVanillaStructure(root map[string]any) (blueprintDocument, error) {
 	}
 	palette := make([]blueprintBlockState, 0, len(paletteValues))
 	for _, raw := range paletteValues {
-		palette = append(palette, blockStateFromMap(anyMap(raw)))
+		state, err := decodeNamedBlueprintBlockState(anyMap(raw))
+		if err != nil {
+			return blueprintDocument{}, err
+		}
+		palette = append(palette, state)
 	}
 	if len(palette) == 0 {
 		return blueprintDocument{}, errors.New("structure palette is empty")
@@ -196,9 +204,9 @@ func decodeVanillaStructure(root map[string]any) (blueprintDocument, error) {
 	document := blueprintDocument{Size: size, DataVersion: intValue(root["DataVersion"])}
 	for _, raw := range anySlice(root["blocks"]) {
 		block := anyMap(raw)
-		stateIndex := intValue(block["state"])
-		if stateIndex < 0 || stateIndex >= len(palette) {
-			continue
+		stateIndex, valid := spongePaletteIndex(block["state"])
+		if !valid || stateIndex < 0 || stateIndex >= len(palette) {
+			return blueprintDocument{}, errors.New("structure block references an invalid palette index")
 		}
 		state := palette[stateIndex]
 		if state.ID == "" || state.ID == "minecraft:air" || state.ID == "air" {
@@ -226,6 +234,11 @@ func decodeSpongeSchematic(root map[string]any) (blueprintDocument, error) {
 	}
 	size := [3]int{intValue(root["Width"]), intValue(root["Height"]), intValue(root["Length"])}
 	blocksRoot := anyMap(root["Blocks"])
+	if err := rejectUnmappedBlueprintEntityData("Sponge schematic",
+		root["BlockEntities"], root["TileEntities"], root["Entities"],
+		blocksRoot["BlockEntities"], blocksRoot["TileEntities"]); err != nil {
+		return blueprintDocument{}, err
+	}
 	paletteRaw := anyMap(root["Palette"])
 	dataRaw := root["BlockData"]
 	if len(blocksRoot) > 0 {
@@ -239,15 +252,9 @@ func decodeSpongeSchematic(root map[string]any) (blueprintDocument, error) {
 	if err != nil {
 		return blueprintDocument{}, err
 	}
-	maxPalette := 0
-	for _, value := range paletteRaw {
-		if index := intValue(value); index > maxPalette {
-			maxPalette = index
-		}
-	}
-	palette := make([]blueprintBlockState, maxPalette+1)
-	for state, value := range paletteRaw {
-		palette[intValue(value)] = parseBlockState(state)
+	palette, err := decodeSpongePalette(paletteRaw)
+	if err != nil {
+		return blueprintDocument{}, err
 	}
 	indices, err := decodeVarInts(byteSlice(dataRaw), volume)
 	if err != nil {
@@ -256,7 +263,7 @@ func decodeSpongeSchematic(root map[string]any) (blueprintDocument, error) {
 	document := blueprintDocument{Size: size, DataVersion: intValue(root["DataVersion"])}
 	for linear, paletteIndex := range indices {
 		if paletteIndex < 0 || paletteIndex >= len(palette) {
-			continue
+			return blueprintDocument{}, errors.New("schematic block data references an unknown palette index")
 		}
 		state := palette[paletteIndex]
 		if state.ID == "" || state.ID == "minecraft:air" || state.ID == "air" {
@@ -271,6 +278,60 @@ func decodeSpongeSchematic(root map[string]any) (blueprintDocument, error) {
 		document.Blocks = append(document.Blocks, blueprintBlock{Position: [3]int{x, y, z}, State: state})
 	}
 	return document, nil
+}
+
+func decodeSpongePalette(raw map[string]any) ([]blueprintBlockState, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("schematic palette is empty")
+	}
+	if len(raw) > maxBlueprintMaterialCount {
+		return nil, errors.New("schematic palette exceeds the processing limit")
+	}
+	// Allocate from the bounded number of entries, never from an attacker-
+	// supplied index. Requiring a bijection over [0,len) also rejects sparse and
+	// duplicate indices before BlockData is decoded.
+	palette := make([]blueprintBlockState, len(raw))
+	occupied := make([]bool, len(raw))
+	for state, value := range raw {
+		if strings.TrimSpace(parseBlockState(state).ID) == "" {
+			return nil, errors.New("schematic palette contains an empty block state")
+		}
+		index, ok := spongePaletteIndex(value)
+		if !ok || index < 0 || index >= len(palette) {
+			return nil, errors.New("schematic palette indices must be dense non-negative integers")
+		}
+		if occupied[index] {
+			return nil, errors.New("schematic palette contains a duplicate index")
+		}
+		occupied[index] = true
+		palette[index] = parseBlockState(state)
+	}
+	for _, exists := range occupied {
+		if !exists {
+			return nil, errors.New("schematic palette indices must be contiguous")
+		}
+	}
+	return palette, nil
+}
+
+func spongePaletteIndex(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int8:
+		return int(typed), true
+	case int16:
+		return int(typed), true
+	case int32:
+		return int(typed), true
+	case int64:
+		if typed > int64(math.MaxInt) || typed < int64(math.MinInt) {
+			return 0, false
+		}
+		return int(typed), true
+	default:
+		return 0, false
+	}
 }
 
 func decodeLitematic(root map[string]any) (blueprintDocument, error) {
@@ -291,6 +352,9 @@ func decodeLitematic(root map[string]any) (blueprintDocument, error) {
 	parsed := make([]regionData, 0, len(regions))
 	for _, raw := range regions {
 		region := anyMap(raw)
+		if err := rejectUnmappedBlueprintEntityData("Litematic region", region["TileEntities"], region["BlockEntities"], region["Entities"]); err != nil {
+			return blueprintDocument{}, err
+		}
 		origin := coordinateTriplet(region["Position"])
 		rawSize := coordinateTriplet(region["Size"])
 		size := [3]int{absInt(rawSize[0]), absInt(rawSize[1]), absInt(rawSize[2])}
@@ -303,7 +367,11 @@ func decodeLitematic(root map[string]any) (blueprintDocument, error) {
 		}
 		states := make([]blueprintBlockState, 0)
 		for _, state := range anySlice(region["BlockStatePalette"]) {
-			states = append(states, blockStateFromMap(anyMap(state)))
+			parsedState, err := decodeNamedBlueprintBlockState(anyMap(state))
+			if err != nil {
+				return blueprintDocument{}, err
+			}
+			states = append(states, parsedState)
 		}
 		if len(states) == 0 {
 			continue
@@ -332,10 +400,13 @@ func decodeLitematic(root map[string]any) (blueprintDocument, error) {
 		if err != nil {
 			return blueprintDocument{}, err
 		}
+		if len(region.packed) < (total*bits+63)/64 {
+			return blueprintDocument{}, errors.New("litematic packed block data is truncated")
+		}
 		for linear := 0; linear < total; linear++ {
 			paletteIndex := packedValue(region.packed, linear, bits)
 			if paletteIndex < 0 || paletteIndex >= len(region.states) {
-				continue
+				return blueprintDocument{}, errors.New("litematic block references an unknown palette index")
 			}
 			state := region.states[paletteIndex]
 			if state.ID == "" || state.ID == "minecraft:air" || state.ID == "air" {
@@ -357,6 +428,9 @@ func decodeLitematic(root map[string]any) (blueprintDocument, error) {
 }
 
 func decodeLegacySchematic(root map[string]any) (blueprintDocument, error) {
+	if err := rejectUnmappedBlueprintEntityData("legacy schematic", root["TileEntities"], root["BlockEntities"], root["Entities"]); err != nil {
+		return blueprintDocument{}, err
+	}
 	size := [3]int{intValue(root["Width"]), intValue(root["Height"]), intValue(root["Length"])}
 	blocks := byteSlice(root["Blocks"])
 	metadata := byteSlice(root["Data"])
@@ -398,9 +472,13 @@ func encodeBlueprint(document blueprintDocument, format string) ([]byte, string,
 		return nil, "", err
 	}
 	format = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(format)), ".")
+	if format != "json" && (len(document.BlockEntities) > 0 || len(document.Entities) > 0) {
+		return nil, "", fmt.Errorf("%w: target format %q has no verified mapping for %d block entities and %d entities",
+			errBlueprintEntityDataWouldBeLost, format, len(document.BlockEntities), len(document.Entities))
+	}
 	switch format {
 	case "json":
-		raw, err := json.Marshal(document)
+		raw, err := encodeNormalizedBlueprintJSON(document)
 		return raw, "application/json", err
 	case "nbt":
 		return encodeVanillaStructure(document)
@@ -411,6 +489,22 @@ func encodeBlueprint(document blueprintDocument, format string) ([]byte, string,
 	default:
 		return nil, "", fmt.Errorf("unsupported target format %q", format)
 	}
+}
+
+func rejectUnmappedBlueprintEntityData(source string, values ...any) error {
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		entries, ok := value.([]any)
+		if !ok {
+			return fmt.Errorf("%w: %s has a malformed entity container", errBlueprintEntityDataWouldBeLost, source)
+		}
+		if len(entries) > 0 {
+			return fmt.Errorf("%w: %s contains entity payloads that this decoder does not map", errBlueprintEntityDataWouldBeLost, source)
+		}
+	}
+	return nil
 }
 
 func encodeLitematic(document blueprintDocument) ([]byte, string, error) {
@@ -587,12 +681,15 @@ func encodeGzipNBT(root map[string]any, rootName string) ([]byte, string, error)
 	return output.Bytes(), "application/octet-stream", nil
 }
 
-func blueprintMaterials(document blueprintDocument) []blueprintMaterial {
+func blueprintMaterials(document blueprintDocument) ([]blueprintMaterial, error) {
 	counts := make(map[string]*blueprintMaterial)
 	for _, block := range document.Blocks {
 		state := formatBlockState(block.State)
 		material := counts[state]
 		if material == nil {
+			if len(counts) >= maxBlueprintMaterialCount {
+				return nil, errors.New("blueprint contains too many distinct materials")
+			}
 			material = &blueprintMaterial{State: state, BlockID: block.State.ID, Properties: block.State.Properties}
 			counts[state] = material
 		}
@@ -608,7 +705,7 @@ func blueprintMaterials(document blueprintDocument) []blueprintMaterial {
 		}
 		return result[left].Count > result[right].Count
 	})
-	return result
+	return result, nil
 }
 
 func buildPalette(document blueprintDocument) ([]blueprintBlockState, []int) {
@@ -629,6 +726,18 @@ func buildPalette(document blueprintDocument) ([]blueprintBlockState, []int) {
 		palette = append(palette, blueprintBlockState{ID: "minecraft:air"})
 	}
 	return palette, indices
+}
+
+func decodeNamedBlueprintBlockState(value map[string]any) (blueprintBlockState, error) {
+	name, exists := value["Name"]
+	if !exists {
+		name = value["name"]
+	}
+	text, valid := name.(string)
+	if !valid || strings.TrimSpace(text) == "" {
+		return blueprintBlockState{}, errors.New("blueprint palette requires a nonempty block name")
+	}
+	return blockStateFromMap(value), nil
 }
 
 func blockStateFromMap(value map[string]any) blueprintBlockState {

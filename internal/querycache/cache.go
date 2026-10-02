@@ -2,7 +2,9 @@ package querycache
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,9 +19,11 @@ import (
 )
 
 const (
-	maxLocalEntries = 512
-	maxLocalClaims  = 4096
-	maxLocalLimits  = 8192
+	maxLocalEntries          = 512
+	maxLocalClaims           = 4096
+	maxLocalLimits           = 8192
+	maxLocalPresenceEntries  = 4096
+	maxSharedPresenceEntries = 50_000
 )
 
 type localEntry struct {
@@ -30,6 +34,22 @@ type localEntry struct {
 type localLimit struct {
 	count     int
 	expiresAt time.Time
+}
+
+type localRealtimeLease struct {
+	userID    int64
+	sessionID string
+	expiresAt time.Time
+}
+
+type RealtimeLease struct {
+	cache     *Cache
+	id        string
+	userID    int64
+	sessionID string
+	ttl       time.Duration
+	shared    bool
+	released  atomic.Bool
 }
 
 type unreadEntry struct {
@@ -52,53 +72,57 @@ type RateLimitResult struct {
 }
 
 type Metrics struct {
-	Requests           uint64        `json:"requests"`
-	Hits               uint64        `json:"hits"`
-	Misses             uint64        `json:"misses"`
-	RedisHits          uint64        `json:"redisHits"`
-	RedisMisses        uint64        `json:"redisMisses"`
-	CacheHitRate       float64       `json:"cacheHitRate"`
-	RedisHitRate       float64       `json:"redisHitRate"`
-	Errors             uint64        `json:"errors"`
-	Timeouts           uint64        `json:"timeouts"`
-	LocalFallbacks     uint64        `json:"localFallbacks"`
-	PostgresLoads      uint64        `json:"postgresLoads"`
-	RateLimitFalls     uint64        `json:"rateLimitFallbacks"`
-	PresenceWrites     uint64        `json:"presenceWrites"`
-	UnreadRebuilds     uint64        `json:"unreadRebuilds"`
-	UnreadCalibrations uint64        `json:"unreadCalibrations"`
-	UnreadDrifts       uint64        `json:"unreadDrifts"`
-	AverageLatency     time.Duration `json:"averageLatency"`
-	P95Latency         time.Duration `json:"p95Latency"`
+	Requests            uint64        `json:"requests"`
+	Hits                uint64        `json:"hits"`
+	Misses              uint64        `json:"misses"`
+	RedisHits           uint64        `json:"redisHits"`
+	RedisMisses         uint64        `json:"redisMisses"`
+	CacheHitRate        float64       `json:"cacheHitRate"`
+	RedisHitRate        float64       `json:"redisHitRate"`
+	Errors              uint64        `json:"errors"`
+	Timeouts            uint64        `json:"timeouts"`
+	LocalFallbacks      uint64        `json:"localFallbacks"`
+	PostgresLoads       uint64        `json:"postgresLoads"`
+	RateLimitFalls      uint64        `json:"rateLimitFallbacks"`
+	RateLimitFailClosed uint64        `json:"rateLimitFailClosed"`
+	PresenceWrites      uint64        `json:"presenceWrites"`
+	UnreadRebuilds      uint64        `json:"unreadRebuilds"`
+	UnreadCalibrations  uint64        `json:"unreadCalibrations"`
+	UnreadDrifts        uint64        `json:"unreadDrifts"`
+	AverageLatency      time.Duration `json:"averageLatency"`
+	P95Latency          time.Duration `json:"p95Latency"`
 }
 
 type metricCounters struct {
 	requests, hits, misses, errors, timeouts                         atomic.Uint64
 	redisHits, redisMisses                                           atomic.Uint64
 	localFallbacks, postgresLoads, rateLimitFallbacks                atomic.Uint64
+	rateLimitFailClosed                                              atomic.Uint64
 	presenceWrites, unreadRebuilds, unreadCalibrations, unreadDrifts atomic.Uint64
 	latencyTotal                                                     atomic.Uint64
 }
 
 type Cache struct {
-	redis        *redis.Client
-	cfg          config.RedisConfig
-	prefix       string
-	ttl          time.Duration
-	mu           sync.Mutex
-	local        map[string]localEntry
-	presence     map[string]time.Time
-	userPresence map[int64]map[string]time.Time
-	chatPresence map[int64]chatPresenceEntry
-	unread       map[int64]unreadEntry
-	unreadEpoch  int64
-	claims       map[string]time.Time
-	limits       map[string]localLimit
-	group        singleflight.Group
-	metrics      metricCounters
-	latencyMu    sync.Mutex
-	latencies    []time.Duration
-	latencyIndex int
+	redis              *redis.Client
+	cfg                config.RedisConfig
+	prefix             string
+	ttl                time.Duration
+	mu                 sync.Mutex
+	local              map[string]localEntry
+	presence           map[string]time.Time
+	userPresence       map[int64]map[string]time.Time
+	chatPresence       map[int64]chatPresenceEntry
+	unread             map[int64]unreadEntry
+	unreadEpoch        int64
+	unreadSampleCursor int64
+	claims             map[string]time.Time
+	limits             map[string]localLimit
+	realtimeLeases     map[string]localRealtimeLease
+	group              singleflight.Group
+	metrics            metricCounters
+	latencyMu          sync.Mutex
+	latencies          []time.Duration
+	latencyIndex       int
 }
 
 func UserPermissionVersionKey(userID int64) string {
@@ -118,7 +142,7 @@ func New(cfg config.RedisConfig) *Cache {
 		cfg: cfg, prefix: basePrefix + ":" + namespace + ":", ttl: cfg.TTL,
 		local: make(map[string]localEntry), presence: make(map[string]time.Time), userPresence: make(map[int64]map[string]time.Time),
 		chatPresence: make(map[int64]chatPresenceEntry), unread: make(map[int64]unreadEntry), claims: make(map[string]time.Time),
-		limits: make(map[string]localLimit), latencies: make([]time.Duration, 256),
+		limits: make(map[string]localLimit), realtimeLeases: make(map[string]localRealtimeLease), latencies: make([]time.Duration, 256),
 	}
 	if cache.ttl <= 0 {
 		cache.ttl = 2 * time.Minute
@@ -170,8 +194,9 @@ func (c *Cache) Metrics() Metrics {
 		Errors: c.metrics.errors.Load(), Timeouts: c.metrics.timeouts.Load(),
 		LocalFallbacks: c.metrics.localFallbacks.Load(), PostgresLoads: c.metrics.postgresLoads.Load(),
 		RateLimitFalls: c.metrics.rateLimitFallbacks.Load(), PresenceWrites: c.metrics.presenceWrites.Load(),
-		UnreadRebuilds:     c.metrics.unreadRebuilds.Load(),
-		UnreadCalibrations: c.metrics.unreadCalibrations.Load(), UnreadDrifts: c.metrics.unreadDrifts.Load(),
+		RateLimitFailClosed: c.metrics.rateLimitFailClosed.Load(),
+		UnreadRebuilds:      c.metrics.unreadRebuilds.Load(),
+		UnreadCalibrations:  c.metrics.unreadCalibrations.Load(), UnreadDrifts: c.metrics.unreadDrifts.Load(),
 	}
 	if decisions := result.Hits + result.Misses; decisions > 0 {
 		result.CacheHitRate = float64(result.Hits) / float64(decisions)
@@ -229,15 +254,17 @@ func (c *Cache) redisKey(key string) (string, bool) {
 
 // ConsumeRateLimit atomically consumes one slot from a bounded fixed window.
 // Redis keeps the decision shared between replicas. A bounded local counter is
-// used for single-process development and as fail-soft protection when Redis
-// is unavailable; callers can include Backend in internal diagnostics without
-// exposing it to clients.
+// used for single-process development. Multi-replica deployments set
+// RateLimitFailClosed, which rejects requests during a Redis outage rather than
+// multiplying the quota by the number of replicas. Callers can include Backend
+// in internal diagnostics without exposing it to clients.
 func (c *Cache) ConsumeRateLimit(ctx context.Context, key string, limit int, window time.Duration) RateLimitResult {
 	return c.ConsumeRateLimitPolicy(ctx, key, limit, limit, window)
 }
 
 // ConsumeRateLimitPolicy uses a deliberately smaller localFallbackLimit for
-// security-sensitive actions when shared Redis state is unavailable.
+// single-replica deployments when shared Redis state is unavailable. A cache
+// configured with RateLimitFailClosed never enters that local branch.
 func (c *Cache) ConsumeRateLimitPolicy(ctx context.Context, key string, redisLimit, localFallbackLimit int, window time.Duration) RateLimitResult {
 	if c == nil || key == "" || redisLimit <= 0 || window <= 0 {
 		return RateLimitResult{Allowed: true, Remaining: max(redisLimit-1, 0), Backend: "disabled"}
@@ -261,6 +288,10 @@ return {count,ttl}
 				Allowed: count <= redisLimit, Remaining: max(redisLimit-count, 0), RetryAfter: retry, Backend: "redis",
 			}
 		}
+	}
+	if c.cfg.RateLimitFailClosed {
+		c.metrics.rateLimitFailClosed.Add(1)
+		return RateLimitResult{Allowed: false, RetryAfter: min(window, 5*time.Second), Backend: "unavailable"}
 	}
 	c.metrics.localFallbacks.Add(1)
 	c.metrics.rateLimitFallbacks.Add(1)
@@ -360,6 +391,151 @@ func (c *Cache) pruneClaimsLocked(now time.Time) {
 	}
 }
 
+// AcquireRealtimeLease atomically applies deployment-wide total, user and
+// session connection budgets when Redis is available. The bounded local lease
+// table is the exact single-process implementation and the fail-safe fallback.
+func (c *Cache) AcquireRealtimeLease(ctx context.Context, userID int64, sessionID string, totalLimit, userLimit, sessionLimit int, ttl time.Duration) (*RealtimeLease, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	if c == nil || userID <= 0 || sessionID == "" || len(sessionID) > 128 || totalLimit <= 0 || userLimit <= 0 || sessionLimit <= 0 || ttl <= 0 {
+		return nil, false
+	}
+	lease := &RealtimeLease{
+		cache: c, id: newRealtimeLeaseID(), userID: userID, sessionID: sessionID, ttl: ttl,
+	}
+	if allKey, allOK := c.redisKey("realtime:leases:all"); c.redis != nil && allOK {
+		userKey, userOK := c.redisKey("realtime:leases:user:" + strconv.FormatInt(userID, 10))
+		sessionKey, sessionOK := c.redisKey("realtime:leases:session:" + sessionID)
+		if userOK && sessionOK {
+			now := time.Now().UnixMilli()
+			expiresAt := now + ttl.Milliseconds()
+			started := time.Now()
+			allowed, err := c.redis.Eval(ctx, `
+for index,key in ipairs(KEYS) do redis.call('ZREMRANGEBYSCORE',key,'-inf',ARGV[1]) end
+if redis.call('ZCARD',KEYS[1])>=tonumber(ARGV[4]) then return 0 end
+if redis.call('ZCARD',KEYS[2])>=tonumber(ARGV[5]) then return 0 end
+if redis.call('ZCARD',KEYS[3])>=tonumber(ARGV[6]) then return 0 end
+for index,key in ipairs(KEYS) do
+ redis.call('ZADD',key,ARGV[2],ARGV[3])
+ redis.call('PEXPIRE',key,ARGV[7])
+end
+return 1
+`, []string{allKey, userKey, sessionKey}, now, expiresAt, lease.id, totalLimit, userLimit, sessionLimit, max(ttl.Milliseconds()*2, int64(1))).Int()
+			c.recordRedisResult(started, err)
+			if err == nil {
+				if allowed != 1 {
+					return nil, false
+				}
+				lease.shared = true
+				return lease, true
+			}
+			c.metrics.localFallbacks.Add(1)
+		}
+	}
+	return c.acquireLocalRealtimeLease(lease, totalLimit, userLimit, sessionLimit)
+}
+
+func (c *Cache) acquireLocalRealtimeLease(lease *RealtimeLease, totalLimit, userLimit, sessionLimit int) (*RealtimeLease, bool) {
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id, existing := range c.realtimeLeases {
+		if !now.Before(existing.expiresAt) {
+			delete(c.realtimeLeases, id)
+		}
+	}
+	if len(c.realtimeLeases) >= totalLimit {
+		return nil, false
+	}
+	userCount, sessionCount := 0, 0
+	for _, existing := range c.realtimeLeases {
+		if existing.userID == lease.userID {
+			userCount++
+		}
+		if existing.sessionID == lease.sessionID {
+			sessionCount++
+		}
+	}
+	if userCount >= userLimit || sessionCount >= sessionLimit {
+		return nil, false
+	}
+	c.realtimeLeases[lease.id] = localRealtimeLease{userID: lease.userID, sessionID: lease.sessionID, expiresAt: now.Add(lease.ttl)}
+	return lease, true
+}
+
+func (lease *RealtimeLease) Refresh(ctx context.Context) bool {
+	if lease == nil || lease.cache == nil || lease.released.Load() {
+		return false
+	}
+	if lease.shared {
+		allKey, allOK := lease.cache.redisKey("realtime:leases:all")
+		userKey, userOK := lease.cache.redisKey("realtime:leases:user:" + strconv.FormatInt(lease.userID, 10))
+		sessionKey, sessionOK := lease.cache.redisKey("realtime:leases:session:" + lease.sessionID)
+		if !allOK || !userOK || !sessionOK || lease.cache.redis == nil {
+			return false
+		}
+		expiresAt := time.Now().Add(lease.ttl).UnixMilli()
+		started := time.Now()
+		refreshed, err := lease.cache.redis.Eval(ctx, `
+for index,key in ipairs(KEYS) do if not redis.call('ZSCORE',key,ARGV[1]) then return 0 end end
+for index,key in ipairs(KEYS) do redis.call('ZADD',key,'XX',ARGV[2],ARGV[1]); redis.call('PEXPIRE',key,ARGV[3]) end
+return 1
+`, []string{allKey, userKey, sessionKey}, lease.id, expiresAt, max(lease.ttl.Milliseconds()*2, int64(1))).Int()
+		lease.cache.recordRedisResult(started, err)
+		return err == nil && refreshed == 1
+	}
+	now := time.Now()
+	lease.cache.mu.Lock()
+	defer lease.cache.mu.Unlock()
+	existing, ok := lease.cache.realtimeLeases[lease.id]
+	if !ok || !now.Before(existing.expiresAt) {
+		delete(lease.cache.realtimeLeases, lease.id)
+		return false
+	}
+	existing.expiresAt = now.Add(lease.ttl)
+	lease.cache.realtimeLeases[lease.id] = existing
+	return true
+}
+
+func (lease *RealtimeLease) Release(ctx context.Context) {
+	if lease == nil || lease.cache == nil || !lease.released.CompareAndSwap(false, true) {
+		return
+	}
+	if lease.shared && lease.cache.redis != nil {
+		allKey, allOK := lease.cache.redisKey("realtime:leases:all")
+		userKey, userOK := lease.cache.redisKey("realtime:leases:user:" + strconv.FormatInt(lease.userID, 10))
+		sessionKey, sessionOK := lease.cache.redisKey("realtime:leases:session:" + lease.sessionID)
+		if allOK && userOK && sessionOK {
+			if ctx == nil || ctx.Err() != nil {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+			}
+			started := time.Now()
+			err := lease.cache.redis.ZRem(ctx, allKey, lease.id).Err()
+			if err == nil {
+				_, err = lease.cache.redis.Pipelined(ctx, func(pipeline redis.Pipeliner) error {
+					pipeline.ZRem(ctx, userKey, lease.id)
+					pipeline.ZRem(ctx, sessionKey, lease.id)
+					return nil
+				})
+			}
+			lease.cache.recordRedisResult(started, err)
+		}
+		return
+	}
+	lease.cache.mu.Lock()
+	delete(lease.cache.realtimeLeases, lease.id)
+	lease.cache.mu.Unlock()
+}
+
+func newRealtimeLeaseID() string {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err == nil {
+		return fmt.Sprintf("%x", random[:])
+	}
+	return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+}
+
 // TouchPresence records an opaque visitor fingerprint in the short-lived
 // online set. Redis provides a shared view across replicas; the bounded local
 // set is both the single-process implementation and a graceful Redis fallback.
@@ -368,18 +544,35 @@ func (c *Cache) TouchPresence(ctx context.Context, visitor string, now time.Time
 		return
 	}
 	c.mu.Lock()
-	c.presence[visitor] = now
 	c.prunePresenceLocked(now.Add(-5 * time.Minute))
+	if _, exists := c.presence[visitor]; !exists && len(c.presence) >= maxLocalPresenceEntries {
+		oldestKey := ""
+		var oldest time.Time
+		for key, seenAt := range c.presence {
+			if oldestKey == "" || seenAt.Before(oldest) {
+				oldestKey, oldest = key, seenAt
+			}
+		}
+		delete(c.presence, oldestKey)
+	}
+	c.presence[visitor] = now
 	c.mu.Unlock()
 	if c.redis == nil {
 		return
 	}
 	key := c.prefix + "presence:online"
-	pipeline := c.redis.Pipeline()
-	pipeline.ZAdd(ctx, key, redis.Z{Score: float64(now.Unix()), Member: visitor})
-	pipeline.ZRemRangeByScore(ctx, key, "-inf", formatUnix(now.Add(-5*time.Minute).Unix()))
-	pipeline.Expire(ctx, key, 10*time.Minute)
-	_, _ = pipeline.Exec(ctx)
+	started := time.Now()
+	err := c.redis.Eval(ctx, `
+redis.call('ZADD',KEYS[1],ARGV[1],ARGV[2])
+redis.call('ZREMRANGEBYSCORE',KEYS[1],'-inf',ARGV[3])
+local count=redis.call('ZCARD',KEYS[1])
+local maximum=tonumber(ARGV[4])
+if count>maximum then redis.call('ZREMRANGEBYRANK',KEYS[1],0,count-maximum-1) end
+redis.call('EXPIRE',KEYS[1],ARGV[5])
+return 1
+`, []string{key}, now.Unix(), visitor, now.Add(-5*time.Minute).Unix(), maxSharedPresenceEntries, int64((10*time.Minute)/time.Second)).Err()
+	c.recordRedisResult(started, err)
+	c.metrics.presenceWrites.Add(1)
 }
 
 // OnlinePresenceCount returns visitors active during the preceding five
@@ -590,8 +783,16 @@ func (c *Cache) Set(ctx context.Context, key string, value []byte, ttl time.Dura
 }
 
 func (c *Cache) Delete(ctx context.Context, keys ...string) {
+	_ = c.DeleteShared(ctx, keys...)
+}
+
+// DeleteShared removes exact coordination keys from both the local map and
+// Redis and reports whether the cross-instance invalidation reached Redis.
+// Callers that mutate authorization facts must not silently discard this
+// result after their database transaction commits.
+func (c *Cache) DeleteShared(ctx context.Context, keys ...string) error {
 	if c == nil || len(keys) == 0 {
-		return
+		return nil
 	}
 	c.mu.Lock()
 	for _, key := range keys {
@@ -599,20 +800,23 @@ func (c *Cache) Delete(ctx context.Context, keys ...string) {
 	}
 	c.mu.Unlock()
 	if c.redis == nil {
-		return
+		return nil
 	}
 	redisKeys := make([]string, 0, len(keys))
 	for _, key := range keys {
 		if value, valid := c.redisKey(key); valid {
 			redisKeys = append(redisKeys, value)
+		} else {
+			return fmt.Errorf("invalid shared cache key %q", key)
 		}
 	}
 	if len(redisKeys) == 0 {
-		return
+		return nil
 	}
 	started := time.Now()
 	err := c.redis.Del(ctx, redisKeys...).Err()
 	c.recordRedisResult(started, err)
+	return err
 }
 
 func (c *Cache) InvalidatePrefix(ctx context.Context, prefix string) {

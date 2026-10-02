@@ -73,14 +73,14 @@ func (s *Service) createChallenge(ctx context.Context, input Evaluation, session
 		prompt = fmt.Sprintf("请输入 %d + %d 的结果", leftValue, rightValue)
 	}
 	var publicID string
-	err = s.db.QueryRow(ctx, `insert into anti_abuse_challenges(user_id,session_hash,action,object_key,kind,provider,token_hash,answer_hash,status,ip_hash,expires_at)
-		values($1,$2,$3,$4,'human',$5,$6,$7,'pending',$8,$9) returning public_id`, input.UserID, sessionHash,
-		input.Action, truncate(input.ObjectKey, 160), provider, tokenHash(token), answerHash, ipHash, expiresAt).Scan(&publicID)
+	err = s.db.QueryRow(ctx, `insert into anti_abuse_challenges
+		(user_id,session_hash,action,object_key,kind,provider,token_hash,answer_hash,status,ip_hash,expires_at,metadata)
+		values($1,$2,$3,$4,'human',$5,$6,$7,'pending',$8,$9,jsonb_build_object('nonce',$10::text)) returning public_id`,
+		input.UserID, sessionHash, input.Action, truncate(input.ObjectKey, 160), provider, tokenHash(token), answerHash,
+		ipHash, expiresAt, token).Scan(&publicID)
 	if err != nil {
 		return ChallengeInfo{}, err
 	}
-	metadata, _ := json.Marshal(map[string]string{"nonce": token})
-	_, _ = s.db.Exec(ctx, `update anti_abuse_challenges set metadata=$2::jsonb where public_id=$1`, publicID, metadata)
 	return ChallengeInfo{ID: publicID, Provider: provider, Prompt: prompt, SiteKey: s.cfg.TurnstileSiteKey, ExpiresAt: expiresAt}, nil
 }
 

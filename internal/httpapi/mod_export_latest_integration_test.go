@@ -144,7 +144,11 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	if _, err = tx.Exec(context.Background(), `set local idle_in_transaction_session_timeout='15s'`); err != nil {
 		t.Fatal(err)
 	}
-	var modID int64
+	var uploaderID, modID int64
+	if err = tx.QueryRow(context.Background(), `insert into users(username,email,password_hash)
+		values('catalog_import_contract','catalog_import_contract@example.invalid','test') returning id`).Scan(&uploaderID); err != nil {
+		t.Fatal(err)
+	}
 	if err = tx.QueryRow(context.Background(), `insert into mods(project_code,slug,primary_name,review_status)
 		values('tst9z9x01','catalog-import-integration-test','Catalog import integration test','approved') returning id`).Scan(&modID); err != nil {
 		t.Fatal(err)
@@ -152,8 +156,14 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	packageID := "00000000-0000-4000-8000-000000000001"
 	revisionID := "00000000-0000-4000-8000-000000000002"
 	jobID := "00000000-0000-4000-8000-000000000003"
-	if _, err = tx.Exec(context.Background(), `insert into catalog_import_packages(id,sha256,archive_name,schema_version,exporter_version,minecraft_version,loader,manifest)
-		values($1,$2,'test.zip','mcmods-export/v1','0.6.0','1.20.1','forge','{}')`, packageID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); err != nil {
+	archiveHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var archiveFileID int64
+	if err = tx.QueryRow(context.Background(), `insert into oss_files(object_key,original_name,sha256,uploader_id)
+		values('tests/latest-exporter/package.zip','test.zip',$1,$2) returning id`, archiveHash, uploaderID).Scan(&archiveFileID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(context.Background(), `insert into catalog_import_packages(id,sha256,archive_file_id,archive_name,schema_version,exporter_version,minecraft_version,loader,manifest,uploaded_by)
+		values($1,$2,$3,'test.zip','mcmods-export/v1','0.6.0','1.20.1','forge','{}',$4)`, packageID, archiveHash, archiveFileID, uploaderID); err != nil {
 		t.Fatal(err)
 	}
 	var versionID int64
@@ -176,6 +186,16 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	revisions := map[string]string{"minecraft": revisionID}
+	var keyMappingDocument map[string]any
+	if err = json.Unmarshal(read("registries/key_mappings.json"), &keyMappingDocument); err != nil {
+		t.Fatal(err)
+	}
+	expectedKeyMappings := len(exportObjectArray(keyMappingDocument["entries"]))
+	expectedKeyMappingPages := 0
+	if expectedKeyMappings > 0 {
+		expectedKeyMappingPages = 1
+	}
+	t.Logf("source_key_mappings=%d (absent source entries must not create phantom content)", expectedKeyMappings)
 	for _, category := range categoryDocument.Categories {
 		revisions[exportResourceNamespace(category.RecipeTypeID)] = revisionID
 	}
@@ -442,6 +462,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		t.Fatalf("sync imported resources into the selected content version: %v", err)
 	}
 	mark("promotion and content-version sync")
+	assertExporterEnchantmentSourceFields(t, context.Background(), tx, versionID, read("registries/enchantments.json"))
 	var lootTableSections, lootTableResources int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int
 		from mod_content_sections section
@@ -497,8 +518,8 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		Scan(&populatedCatalogSections); err != nil {
 		t.Fatal(err)
 	}
-	if populatedCatalogSections != 3 {
-		t.Fatalf("expected populated biome, enchantment, and key-mapping pages, got %d", populatedCatalogSections)
+	if populatedCatalogSections != 2+expectedKeyMappingPages {
+		t.Fatalf("expected biome/enchantment and %d source-backed key-mapping pages, got %d", expectedKeyMappingPages, populatedCatalogSections)
 	}
 	var speedEffectPlacements int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int from mod_content_section_resources section_resource
@@ -517,7 +538,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	var dimensionsWithSpecificData, biomesWithSpecificData, keyMappingsWithSpecificData int
 	if err = tx.QueryRow(context.Background(), `select
 		count(*) filter(where resource.kind_code='minecraft.enchantment'
-			and detail.definition ?& array['minimumLevel','maximumLevel','rarityWeight','supportedItems'])::int,
+			and detail.definition ?& array['minimumLevel','maximumLevel','rarityWeight'])::int,
 		count(*) filter(where resource.kind_code='minecraft.mob_effect'
 			and detail.definition ?& array['category','colorRGB','instant'])::int,
 		count(*) filter(where resource.kind_code='minecraft.fluid'
@@ -546,7 +567,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if enchantmentsWithSpecificData == 0 || effectsWithSpecificData == 0 || fluidsWithSpecificData == 0 || advancementsWithSpecificData == 0 || advancementLinks == 0 || dimensionsWithSpecificData == 0 || biomesWithSpecificData == 0 || keyMappingsWithSpecificData == 0 {
+	if enchantmentsWithSpecificData == 0 || effectsWithSpecificData == 0 || fluidsWithSpecificData == 0 || advancementsWithSpecificData == 0 || advancementLinks == 0 || dimensionsWithSpecificData == 0 || biomesWithSpecificData == 0 || keyMappingsWithSpecificData != expectedKeyMappings {
 		t.Fatalf("resource-specific canonical data was discarded: enchantments=%d effects=%d fluids=%d advancements=%d links=%d dimensions=%d biomes=%d keyMappings=%d",
 			enchantmentsWithSpecificData, effectsWithSpecificData, fluidsWithSpecificData, advancementsWithSpecificData, advancementLinks,
 			dimensionsWithSpecificData, biomesWithSpecificData, keyMappingsWithSpecificData)
@@ -671,8 +692,8 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		Scan(&rebuiltPopulatedCatalogSections); err != nil {
 		t.Fatal(err)
 	}
-	if rebuiltPopulatedCatalogSections != 2 {
-		t.Fatalf("reimport did not rebuild populated enchantment and key-mapping pages: got %d", rebuiltPopulatedCatalogSections)
+	if rebuiltPopulatedCatalogSections != 1+expectedKeyMappingPages {
+		t.Fatalf("reimport did not rebuild enchantment and %d source-backed key-mapping pages: got %d", expectedKeyMappingPages, rebuiltPopulatedCatalogSections)
 	}
 	if err = tx.QueryRow(context.Background(), `select count(*)::int from (
 		select root.id
@@ -691,6 +712,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		t.Fatalf("reimport did not rebuild exactly one item/block page with both child categories: got %d", rebuiltItemBlockRoots)
 	}
 	mark("delete-all and same-package reimport rebuild")
+	assertExporterEnchantmentSourceFields(t, context.Background(), tx, versionID, read("registries/enchantments.json"))
 
 	var recipeTypes, templates, recipes, alternatives int
 	if err = tx.QueryRow(context.Background(), `select count(*)::int from recipe_type_import_snapshots where revision_id=$1`, revisionID).Scan(&recipeTypes); err != nil {

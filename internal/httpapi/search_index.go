@@ -75,8 +75,8 @@ func (s *Server) searchCommunityPage(ctx context.Context, query, kind, projectID
 	return indexedSearchPage{IDs: result.IDs, Total: result.Found, Used: true}
 }
 
-func (s *Server) searchCreatorPage(ctx context.Context, query, kind string, claims security.Claims, admin bool, limit int) indexedSearchPage {
-	if strings.TrimSpace(query) == "" || s.search == nil || !s.search.Ready() {
+func (s *Server) searchCreatorPage(ctx context.Context, query, kind string, claims security.Claims, admin bool, limit, offset int) indexedSearchPage {
+	if strings.TrimSpace(query) == "" || !searchPageSupported(s.search, limit, offset) {
 		return indexedSearchPage{}
 	}
 	filters := make([]string, 0, 2)
@@ -92,7 +92,7 @@ func (s *Server) searchCreatorPage(ctx context.Context, query, kind string, clai
 	}
 	result, err := s.search.Search(ctx, searchindex.SearchRequest{
 		Collection: "creators", Query: query, QueryBy: []string{"name", "text"}, Infix: []string{"fallback", "off"}, FilterBy: strings.Join(filters, " && "),
-		SortBy: "_text_match:desc,updated_at:desc", Page: 1, PerPage: limit,
+		SortBy: "_text_match:desc,updated_at:desc", Page: offset/limit + 1, PerPage: limit,
 	})
 	if err != nil {
 		return indexedSearchPage{}
@@ -144,40 +144,38 @@ func (s *Server) searchResourcePage(ctx context.Context, query, kindCode, namesp
 	return indexedSearchPage{IDs: result.IDs, Total: result.Found, Used: true}
 }
 
-func (s *Server) searchServerPage(ctx context.Context, query, tag, language, version string, modFilters []string,
-	modded, online, whitelist, onlineMode string, limit, offset int) indexedSearchPage {
-	if strings.TrimSpace(query) == "" || !searchPageSupported(s.search, limit, offset) {
-		return indexedSearchPage{}
+type indexedServerPage struct {
+	Hits    []searchindex.SearchHit
+	HasMore bool
+	Used    bool
+}
+
+func (s *Server) searchServerPage(ctx context.Context, request serverCatalogPageRequest) indexedServerPage {
+	if request.Sort == catalogSortName || request.Cursor != nil && request.Cursor.Mode == serverCatalogCursorSQL {
+		return indexedServerPage{}
 	}
-	filters := []string{"review_status:=approved"}
-	if tag != "" {
-		filters = append(filters, "primary_tag:="+typesenseFilterValue(tag))
+	if !searchPageSupported(s.search, request.Limit, 0) {
+		return indexedServerPage{}
 	}
-	if language != "" {
-		filters = append(filters, "languages:="+typesenseFilterValue(language))
-	}
-	if version != "" {
-		filters = append(filters, "minecraft_versions:="+typesenseFilterValue(version))
-	}
-	for _, mod := range modFilters {
-		filters = append(filters, "mods:="+typesenseFilterValue(mod))
-	}
-	for _, filter := range []struct{ field, value string }{
-		{"modded", modded}, {"online", online}, {"whitelist", whitelist}, {"online_mode", onlineMode},
-	} {
-		if filter.value == "true" || filter.value == "false" {
-			filters = append(filters, filter.field+":="+filter.value)
-		}
+	query := request.Query
+	if strings.TrimSpace(query) == "" {
+		query = "*"
 	}
 	result, err := s.search.Search(ctx, searchindex.SearchRequest{
 		Collection: "servers", Query: query, QueryBy: []string{"name", "text", "mods", "public_id"},
-		Infix: []string{"fallback", "off", "fallback", "always"}, FilterBy: strings.Join(filters, " && "),
-		SortBy: "_text_match:desc,updated_at:desc", Page: offset/limit + 1, PerPage: limit,
+		Infix: []string{"fallback", "off", "fallback", "always"}, FilterBy: serverCatalogIndexFilter(request),
+		SortBy: serverCatalogIndexSort(request), Page: 1, PerPage: request.Limit + 1,
 	})
 	if err != nil {
-		return indexedSearchPage{}
+		return indexedServerPage{}
 	}
-	return indexedSearchPage{IDs: result.IDs, Total: result.Found, Used: true}
+	hits := result.Hits
+	hasMore := false
+	if len(hits) > request.Limit {
+		hasMore = true
+		hits = hits[:request.Limit]
+	}
+	return indexedServerPage{Hits: hits, HasMore: hasMore, Used: true}
 }
 
 func searchPageSupported(client *searchindex.Client, limit, offset int) bool {

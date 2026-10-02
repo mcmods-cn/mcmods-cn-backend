@@ -4,7 +4,6 @@ import (
 	"compress/gzip"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 )
 
@@ -92,24 +91,71 @@ func (w *compressedResponseWriter) decide() {
 }
 
 func acceptsGzip(value string) bool {
+	var explicitSeen, explicitAccepted, explicitInvalid bool
+	var wildcardSeen, wildcardAccepted, wildcardInvalid bool
 	for _, part := range strings.Split(value, ",") {
 		segments := strings.Split(strings.TrimSpace(part), ";")
-		if !strings.EqualFold(strings.TrimSpace(segments[0]), "gzip") && strings.TrimSpace(segments[0]) != "*" {
+		encoding := strings.TrimSpace(segments[0])
+		if !strings.EqualFold(encoding, "gzip") && encoding != "*" {
 			continue
 		}
-		accepted := true
-		for _, parameter := range segments[1:] {
-			key, raw, found := strings.Cut(strings.TrimSpace(parameter), "=")
-			if found && strings.EqualFold(strings.TrimSpace(key), "q") {
-				quality, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
-				accepted = err != nil || quality > 0
-			}
+		accepted, valid := acceptsEncodingQuality(segments[1:])
+		if strings.EqualFold(encoding, "gzip") {
+			explicitSeen = true
+			explicitAccepted = explicitAccepted || accepted
+			explicitInvalid = explicitInvalid || !valid
+			continue
 		}
-		if accepted {
-			return true
+		wildcardSeen = true
+		wildcardAccepted = wildcardAccepted || accepted
+		wildcardInvalid = wildcardInvalid || !valid
+	}
+	if explicitSeen {
+		return !explicitInvalid && explicitAccepted
+	}
+	return wildcardSeen && !wildcardInvalid && wildcardAccepted
+}
+
+func acceptsEncodingQuality(parameters []string) (bool, bool) {
+	accepted := true
+	qualitySeen := false
+	for _, parameter := range parameters {
+		key, raw, found := strings.Cut(strings.TrimSpace(parameter), "=")
+		if !strings.EqualFold(strings.TrimSpace(key), "q") {
+			continue
+		}
+		if !found || qualitySeen {
+			return false, false
+		}
+		qualitySeen = true
+		var valid bool
+		accepted, valid = parseEncodingQuality(strings.TrimSpace(raw))
+		if !valid {
+			return false, false
 		}
 	}
-	return false
+	return accepted, true
+}
+
+func parseEncodingQuality(value string) (bool, bool) {
+	integer, fraction, decimal := strings.Cut(value, ".")
+	if integer != "0" && integer != "1" {
+		return false, false
+	}
+	if !decimal {
+		return integer == "1", true
+	}
+	if len(fraction) > 3 {
+		return false, false
+	}
+	positive := integer == "1"
+	for _, digit := range fraction {
+		if digit < '0' || digit > '9' || integer == "1" && digit != '0' {
+			return false, false
+		}
+		positive = positive || digit != '0'
+	}
+	return positive, true
 }
 
 func compressibleContentType(value string) bool {

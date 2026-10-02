@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -161,12 +163,11 @@ func (s *Server) loadRBACVersion(ctx context.Context) (int64, error) {
 }
 
 func (s *Server) refreshRBACVersion(ctx context.Context) error {
-	var version int64
-	if err := s.db.QueryRow(ctx, `select version from runtime_versions where name='rbac'`).Scan(&version); err != nil {
-		return err
-	}
-	s.cache.SetShared(ctx, "versions:rbac", []byte(strconv.FormatInt(version, 10)), 10*time.Second)
-	return nil
+	return s.refreshSharedVersionPointer(ctx, "versions:rbac", func() (int64, error) {
+		var version int64
+		err := s.db.QueryRow(ctx, `select version from runtime_versions where name='rbac'`).Scan(&version)
+		return version, err
+	})
 }
 
 func (s *Server) loadProjectACLVersion(ctx context.Context) (int64, error) {
@@ -189,12 +190,11 @@ func (s *Server) loadProjectACLVersion(ctx context.Context) (int64, error) {
 }
 
 func (s *Server) refreshProjectACLVersion(ctx context.Context) error {
-	var version int64
-	if err := s.db.QueryRow(ctx, `select version from runtime_versions where name='project_acl'`).Scan(&version); err != nil {
-		return err
-	}
-	s.cache.SetShared(ctx, "versions:project-acl", []byte(strconv.FormatInt(version, 10)), 10*time.Second)
-	return nil
+	return s.refreshSharedVersionPointer(ctx, "versions:project-acl", func() (int64, error) {
+		var version int64
+		err := s.db.QueryRow(ctx, `select version from runtime_versions where name='project_acl'`).Scan(&version)
+		return version, err
+	})
 }
 
 func (s *Server) loadPermissionVersion(ctx context.Context, userID int64) (int64, error) {
@@ -221,20 +221,59 @@ func (s *Server) loadPermissionVersion(ctx context.Context, userID int64) (int64
 // version for a user. The database trigger owns the increment; this method
 // only updates the shared pointer used by other API instances.
 func (s *Server) refreshPermissionVersion(ctx context.Context, userID int64) error {
-	var version int64
-	if err := s.db.QueryRow(ctx, `select permission_version from users where id=$1`, userID).Scan(&version); err != nil {
-		return err
-	}
-	s.cache.SetShared(ctx, querycache.UserPermissionVersionKey(userID), []byte(strconv.FormatInt(version, 10)), 10*time.Second)
-	return nil
+	return s.refreshSharedVersionPointer(ctx, querycache.UserPermissionVersionKey(userID), func() (int64, error) {
+		var version int64
+		err := s.db.QueryRow(ctx, `select permission_version from users where id=$1`, userID).Scan(&version)
+		return version, err
+	})
 }
 
 func (s *Server) refreshAuthVersion(ctx context.Context, userID int64) error {
 	var publicID string
-	var version int64
-	if err := s.db.QueryRow(ctx, `select public_id,auth_version from users where id=$1`, userID).Scan(&publicID, &version); err != nil {
+	if err := s.db.QueryRow(ctx, `select public_id from users where id=$1`, userID).Scan(&publicID); err != nil {
 		return err
 	}
-	s.cache.SetShared(ctx, userAuthVersionCacheKey(publicID), []byte(strconv.FormatInt(version, 10)), 10*time.Second)
-	return nil
+	return s.refreshAuthVersionForIdentity(ctx, userID, publicID)
+}
+
+func (s *Server) refreshAuthVersionForIdentity(ctx context.Context, userID int64, publicID string) error {
+	return s.refreshSharedVersionPointer(ctx, userAuthVersionCacheKey(publicID), func() (int64, error) {
+		var version int64
+		err := s.db.QueryRow(ctx, `select auth_version from users where id=$1 and public_id=$2`, userID, publicID).Scan(&version)
+		return version, err
+	})
+}
+
+func (s *Server) refreshSharedVersionPointer(ctx context.Context, key string, load func() (int64, error)) error {
+	if s == nil || s.cache == nil {
+		return errors.New("security version cache is unavailable")
+	}
+	invalidateErr := s.cache.DeleteShared(ctx, key)
+	version, loadErr := load()
+	if loadErr != nil {
+		return errors.Join(invalidateErr, fmt.Errorf("load authoritative version for %s: %w", key, loadErr))
+	}
+	if !s.cache.Enabled() {
+		return nil
+	}
+	if s.cache.SetShared(ctx, key, []byte(strconv.FormatInt(version, 10)), 10*time.Second) {
+		// A successful SET overwrites any stale value even when the preceding
+		// DEL reported a transient error.
+		return nil
+	}
+	return errors.Join(invalidateErr, fmt.Errorf("publish authoritative version for %s", key))
+}
+
+func (s *Server) requireSecurityVersionRefresh(w http.ResponseWriter, r *http.Request, operation string, userID int64, refreshErrors ...error) bool {
+	err := errors.Join(refreshErrors...)
+	if err == nil {
+		return true
+	}
+	s.securityVersionRefreshFailures.Add(1)
+	slog.Error("security version refresh failed after commit",
+		"operation", operation, "target_user_id", userID, "error", err)
+	writeAPIError(w, http.StatusServiceUnavailable, "SECURITY_VERSION_REFRESH_FAILED",
+		"安全状态已提交，但会话或权限缓存刷新失败", 1,
+		map[string]any{"committed": true, "operation": operation})
+	return false
 }

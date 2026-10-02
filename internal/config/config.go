@@ -27,6 +27,7 @@ type Config struct {
 	JWTTTL                time.Duration
 	DB                    DBConfig
 	Activity              ActivityConfig
+	Favorite              FavoriteConfig
 	FavoriteExport        FavoriteExportConfig
 	Sticker               StickerConfig
 	SMTP                  SMTPConfig
@@ -35,6 +36,11 @@ type Config struct {
 	AntiAbuse             AntiAbuseConfig
 	Typesense             TypesenseConfig
 	Yggdrasil             YggdrasilConfig
+}
+
+type FavoriteConfig struct {
+	MaxCollectionsPerUser int
+	MaxItemsPerUser       int
 }
 
 type FavoriteExportConfig struct {
@@ -52,6 +58,9 @@ type StickerConfig struct {
 	MaxGIFFrames        int
 	MaxGIFDecodedPixels int64
 	MaxGIFDuration      time.Duration
+	MaxPacks            int
+	MaxStickersPerPack  int
+	MaxCatalogItems     int
 }
 
 type DBConfig struct {
@@ -85,6 +94,7 @@ type ActivityConfig struct {
 }
 
 type SMTPConfig struct {
+	Enabled  bool
 	Host     string
 	Port     int
 	Username string
@@ -110,13 +120,14 @@ type JetStreamConfig struct {
 	Enabled        bool          `json:"enabled"`
 	Stream         string        `json:"stream"`
 	MaxDeliver     int           `json:"maxDeliver"`
-	AckWait        time.Duration `json:"-"`
-	PublishTimeout time.Duration `json:"-"`
+	AckWait        time.Duration `json:"ackWait"`
+	PublishTimeout time.Duration `json:"publishTimeout"`
 }
 
 type RedisConfig struct {
 	Enabled                  bool
 	Required                 bool
+	RateLimitFailClosed      bool
 	Addr                     string
 	Username                 string
 	Password                 string
@@ -196,11 +207,12 @@ type NATSTaskConfig struct {
 func Load() Config {
 	loadDotEnvUpwards(".env")
 	jwtSecret := getenv("JWT_SECRET", "change-this-in-production")
+	replicaCount := getenvInt("APP_REPLICA_COUNT", 1)
 
-	return Config{
+	cfg := Config{
 		Addr:                  getenv("APP_ADDR", ":8080"),
 		Env:                   getenv("APP_ENV", "development"),
-		ReplicaCount:          getenvInt("APP_REPLICA_COUNT", 1),
+		ReplicaCount:          replicaCount,
 		FrontendOrigin:        strings.TrimRight(getenv("FRONTEND_ORIGIN", "http://localhost:3000"), "/"),
 		TrustedProxyCIDRs:     splitCommaSeparated(os.Getenv("TRUSTED_PROXY_CIDRS")),
 		JWTSecret:             jwtSecret,
@@ -230,6 +242,10 @@ func Load() Config {
 			DBMaxConns:            int32(getenvInt("ACTIVITY_DB_MAX_CONNS", 4)),
 			DBMinConns:            int32(getenvInt("ACTIVITY_DB_MIN_CONNS", 1)),
 		},
+		Favorite: FavoriteConfig{
+			MaxCollectionsPerUser: getenvInt("FAVORITE_MAX_COLLECTIONS_PER_USER", 100),
+			MaxItemsPerUser:       getenvInt("FAVORITE_MAX_ITEMS_PER_USER", 10_000),
+		},
 		FavoriteExport: FavoriteExportConfig{
 			MaxActivePerUser: getenvInt("FAVORITE_EXPORT_MAX_ACTIVE_PER_USER", 2),
 			MaxDailyPerUser:  getenvInt("FAVORITE_EXPORT_MAX_DAILY_PER_USER", 20),
@@ -244,8 +260,12 @@ func Load() Config {
 			MaxGIFFrames:        getenvInt("STICKER_MAX_GIF_FRAMES", 120),
 			MaxGIFDecodedPixels: int64(getenvInt("STICKER_MAX_GIF_DECODED_PIXELS", 64_000_000)),
 			MaxGIFDuration:      time.Duration(getenvInt("STICKER_MAX_GIF_DURATION_SECONDS", 30)) * time.Second,
+			MaxPacks:            getenvInt("STICKER_MAX_PACKS", 64),
+			MaxStickersPerPack:  getenvInt("STICKER_MAX_PER_PACK", 128),
+			MaxCatalogItems:     getenvInt("STICKER_MAX_CATALOG_ITEMS", 1024),
 		},
 		SMTP: SMTPConfig{
+			Enabled:  getenvBool("SMTP_ENABLED", strings.TrimSpace(os.Getenv("SMTP_HOST")) != ""),
 			Host:     os.Getenv("SMTP_HOST"),
 			Port:     getenvInt("SMTP_PORT", 587),
 			Username: os.Getenv("SMTP_USERNAME"),
@@ -263,7 +283,7 @@ func Load() Config {
 			OutboxEnabled: getenvBool("NATS_OUTBOX_ENABLED", true),
 			Realtime:      getenvBool("REALTIME_ENABLED", true),
 			JetStream: JetStreamConfig{
-				Enabled:        getenvBool("NATS_JETSTREAM_ENABLED", false),
+				Enabled:        getenvBool("NATS_JETSTREAM_ENABLED", true),
 				Stream:         getenv("NATS_JETSTREAM_STREAM", "MCMODS_TASKS"),
 				MaxDeliver:     getenvInt("NATS_JETSTREAM_MAX_DELIVER", 8),
 				AckWait:        time.Duration(getenvInt("NATS_JETSTREAM_ACK_WAIT_SECONDS", 300)) * time.Second,
@@ -307,6 +327,7 @@ func Load() Config {
 		Redis: RedisConfig{
 			Enabled:                  getenvBool("REDIS_ENABLED", false),
 			Required:                 getenvBool("REDIS_REQUIRED", false),
+			RateLimitFailClosed:      getenvBool("REDIS_RATE_LIMIT_FAIL_CLOSED", replicaCount > 1),
 			Addr:                     getenv("REDIS_ADDR", "127.0.0.1:6379"),
 			Username:                 os.Getenv("REDIS_USERNAME"),
 			Password:                 os.Getenv("REDIS_PASSWORD"),
@@ -371,6 +392,7 @@ func Load() Config {
 			TextureMaxBytes:   int64(getenvInt("YGGDRASIL_TEXTURE_MAX_BYTES", 2*1024*1024)),
 		},
 	}
+	return cfg
 }
 
 func (db DBConfig) ConnString() string {
@@ -443,8 +465,20 @@ func (cfg Config) Validate() error {
 	if cfg.ReplicaCount > 1 && !cfg.Redis.Enabled {
 		problems = append(problems, errors.New("REDIS_ENABLED must be true when APP_REPLICA_COUNT is greater than 1 so cross-instance throttles remain correct"))
 	}
+	if cfg.ReplicaCount > 1 && !cfg.Redis.Required {
+		problems = append(problems, errors.New("REDIS_REQUIRED must be true when APP_REPLICA_COUNT is greater than 1 so a replica cannot start without shared throttles"))
+	}
+	if cfg.ReplicaCount > 1 && !cfg.Redis.RateLimitFailClosed {
+		problems = append(problems, errors.New("REDIS_RATE_LIMIT_FAIL_CLOSED must be true when APP_REPLICA_COUNT is greater than 1 so runtime Redis failures cannot multiply quotas"))
+	}
+	if cfg.ReplicaCount > 1 && !cfg.Redis.AuthRateLimitEnabled {
+		problems = append(problems, errors.New("REDIS_AUTH_RATE_LIMIT_ENABLED must be true when APP_REPLICA_COUNT is greater than 1"))
+	}
 	if cfg.Redis.Required && !cfg.Redis.Enabled {
 		problems = append(problems, errors.New("REDIS_ENABLED must be true when REDIS_REQUIRED=true"))
+	}
+	if cfg.Redis.RateLimitFailClosed && !cfg.Redis.Enabled {
+		problems = append(problems, errors.New("REDIS_ENABLED must be true when REDIS_RATE_LIMIT_FAIL_CLOSED=true"))
 	}
 	if cfg.Redis.Enabled {
 		if strings.TrimSpace(cfg.Redis.Addr) == "" {
@@ -475,6 +509,9 @@ func (cfg Config) Validate() error {
 		if cfg.NATS.JetStream.AckWait < time.Second || cfg.NATS.JetStream.PublishTimeout < 100*time.Millisecond {
 			problems = append(problems, errors.New("JetStream acknowledgement and publish timeouts are invalid"))
 		}
+	}
+	if cfg.SMTP.Enabled && (strings.TrimSpace(cfg.SMTP.Host) == "" || strings.TrimSpace(cfg.SMTP.From) == "" || cfg.SMTP.Port < 1 || cfg.SMTP.Port > 65535) {
+		problems = append(problems, errors.New("SMTP_HOST, SMTP_FROM, and a valid SMTP_PORT are required when SMTP_ENABLED=true"))
 	}
 	if cfg.DB.MaxConns < 2 || cfg.DB.MaxConns > 500 || cfg.DB.MinConns < 0 || cfg.DB.MinConns > cfg.DB.MaxConns {
 		problems = append(problems, errors.New("DB_MIN_CONNS and DB_MAX_CONNS must define a valid pool between 2 and 500 connections"))

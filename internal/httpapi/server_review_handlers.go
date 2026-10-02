@@ -39,68 +39,145 @@ type minecraftServerReviewItem struct {
 	ProofFiles        []minecraftServerProofFile `json:"proofFiles"`
 	Links             []minecraftServerLink      `json:"links"`
 	Mods              []minecraftServerMod       `json:"mods"`
+	ProofFileCount    int                        `json:"proofFileCount"`
+	LinkCount         int                        `json:"linkCount"`
+	ModCount          int                        `json:"modCount"`
 	CreatedAt         time.Time                  `json:"createdAt"`
 	ReviewedAt        *time.Time                 `json:"reviewedAt,omitempty"`
 }
 
-const minecraftServerReviewListQuery = `select server.public_id,server.name,server.address,
-	server.short_description,server.body_markdown,server.minecraft_versions,
-	server.dedicated_client,server.languages,server.primary_tag,server.has_whitelist,
-	server.online_mode,server.modded,server.loader,server.proof_text,server.review_status,
-	server.review_note,submitter.public_id,submitter.username,server.created_at,
-	server.reviewed_at
-	from minecraft_servers server join users submitter on submitter.id=server.submitted_by
-	where server.review_status=$1 order by server.created_at,server.id limit 200`
+type minecraftServerReviewSummary struct {
+	ID                string     `json:"id"`
+	Name              string     `json:"name"`
+	Address           string     `json:"address"`
+	ShortDescription  string     `json:"shortDescription"`
+	MinecraftVersions []string   `json:"minecraftVersions"`
+	DedicatedClient   bool       `json:"dedicatedClient"`
+	Languages         []string   `json:"languages"`
+	PrimaryTag        string     `json:"primaryTag"`
+	HasWhitelist      bool       `json:"hasWhitelist"`
+	OnlineMode        bool       `json:"onlineMode"`
+	Modded            bool       `json:"modded"`
+	Loader            string     `json:"loader"`
+	ReviewStatus      string     `json:"reviewStatus"`
+	ReviewNote        string     `json:"reviewNote"`
+	SubmitterID       string     `json:"submitterId"`
+	SubmitterUsername string     `json:"submitterUsername"`
+	ProofFileCount    int64      `json:"proofFileCount"`
+	LinkCount         int64      `json:"linkCount"`
+	ModCount          int64      `json:"modCount"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	ReviewedAt        *time.Time `json:"reviewedAt,omitempty"`
+}
 
 func (s *Server) adminMinecraftServerReviews(w http.ResponseWriter, r *http.Request) {
-	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
-	if status == "" {
-		status = "pending"
-	}
-	if status != "pending" && status != "approved" && status != "rejected" {
-		writeError(w, http.StatusBadRequest, "审核状态不正确")
+	request, err := parseServerReviewPageRequest(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rows, err := s.db.Query(r.Context(), minecraftServerReviewListQuery, status)
+	query, arguments := serverReviewPageSQL(request)
+	rows, err := s.db.Query(r.Context(), query, arguments...)
 	if err != nil {
-		log.Printf("load minecraft server review list status=%s: %v", status, err)
+		log.Printf("load minecraft server review list status=%s: %v", request.Status, err)
 		writeError(w, http.StatusInternalServerError, "读取服务器审核列表失败")
 		return
 	}
-	defer rows.Close()
-	items := make([]minecraftServerReviewItem, 0)
+	type serverReviewPageRow struct {
+		Item       minecraftServerReviewSummary
+		CreatedAt  time.Time
+		InternalID int64
+	}
+	pageRows := make([]serverReviewPageRow, 0, request.Limit+1)
 	for rows.Next() {
-		var item minecraftServerReviewItem
+		var row serverReviewPageRow
+		item := &row.Item
 		if err = rows.Scan(&item.ID, &item.Name, &item.Address, &item.ShortDescription,
-			&item.BodyMarkdown, &item.MinecraftVersions, &item.DedicatedClient,
+			&item.MinecraftVersions, &item.DedicatedClient,
 			&item.Languages, &item.PrimaryTag, &item.HasWhitelist, &item.OnlineMode,
-			&item.Modded, &item.Loader, &item.ProofText, &item.ReviewStatus,
+			&item.Modded, &item.Loader, &item.ReviewStatus,
 			&item.ReviewNote, &item.SubmitterID, &item.SubmitterUsername,
-			&item.CreatedAt, &item.ReviewedAt); err != nil {
-			log.Printf("scan minecraft server review list status=%s: %v", status, err)
+			&item.CreatedAt, &item.ReviewedAt, &row.InternalID,
+			&item.ProofFileCount, &item.LinkCount, &item.ModCount); err != nil {
+			rows.Close()
+			log.Printf("scan minecraft server review list status=%s: %v", request.Status, err)
 			writeError(w, http.StatusInternalServerError, "解析服务器审核列表失败")
 			return
 		}
-		item.ProofFiles, err = s.minecraftServerProofFiles(r.Context(), item.ID)
-		if err == nil {
-			item.Links, err = s.minecraftServerLinks(r.Context(), item.ID)
-		}
-		if err == nil {
-			item.Mods, err = s.minecraftServerMods(r.Context(), item.ID)
-		}
-		if err != nil {
-			log.Printf("load minecraft server review details server=%s: %v", item.ID, err)
-			writeError(w, http.StatusInternalServerError, "读取服务器审核资料失败")
-			return
-		}
-		items = append(items, item)
+		row.CreatedAt = item.CreatedAt
+		pageRows = append(pageRows, row)
 	}
 	if err = rows.Err(); err != nil {
-		log.Printf("iterate minecraft server review list status=%s: %v", status, err)
+		rows.Close()
+		log.Printf("iterate minecraft server review list status=%s: %v", request.Status, err)
 		writeError(w, http.StatusInternalServerError, "读取服务器审核列表失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	rows.Close()
+	hasMore := len(pageRows) > request.Limit
+	if hasMore {
+		pageRows = pageRows[:request.Limit]
+	}
+	nextCursor := ""
+	if hasMore {
+		last := pageRows[len(pageRows)-1]
+		nextCursor = encodeServerReviewPageCursor(serverReviewPageCursor{
+			Version: serverReviewCursorVersion, Scope: request.Scope,
+			CreatedAt: last.CreatedAt, ID: last.InternalID,
+		})
+	}
+	items := make([]minecraftServerReviewSummary, 0, len(pageRows))
+	for _, row := range pageRows {
+		items = append(items, row.Item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "hasMore": hasMore, "nextCursor": nextCursor})
+}
+
+func (s *Server) adminMinecraftServerReviewDetail(w http.ResponseWriter, r *http.Request) {
+	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("serverId")))
+	if !validCatalogPublicID(publicID) {
+		writeError(w, http.StatusBadRequest, "服务器编号不正确")
+		return
+	}
+	var item minecraftServerReviewItem
+	err := s.db.QueryRow(r.Context(), `select server.public_id,server.name,server.address,
+		server.short_description,server.body_markdown,server.minecraft_versions,
+		server.dedicated_client,server.languages,server.primary_tag,server.has_whitelist,
+		server.online_mode,server.modded,server.loader,server.proof_text,server.review_status,
+		server.review_note,submitter.public_id,submitter.username,server.created_at,server.reviewed_at
+		from minecraft_servers server join users submitter on submitter.id=server.submitted_by
+		where server.public_id=$1`, publicID).Scan(
+		&item.ID, &item.Name, &item.Address, &item.ShortDescription, &item.BodyMarkdown,
+		&item.MinecraftVersions, &item.DedicatedClient, &item.Languages, &item.PrimaryTag,
+		&item.HasWhitelist, &item.OnlineMode, &item.Modded, &item.Loader, &item.ProofText,
+		&item.ReviewStatus, &item.ReviewNote, &item.SubmitterID, &item.SubmitterUsername,
+		&item.CreatedAt, &item.ReviewedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "服务器不存在")
+		return
+	}
+	if err != nil {
+		log.Printf("load minecraft server review detail server=%s: %v", publicID, err)
+		writeError(w, http.StatusInternalServerError, "读取服务器审核资料失败")
+		return
+	}
+	item.ProofFiles, err = s.minecraftServerProofFiles(r.Context(), publicID)
+	if err == nil {
+		item.Links, err = s.minecraftServerLinks(r.Context(), publicID)
+	}
+	if err == nil {
+		item.Mods, err = s.minecraftServerMods(r.Context(), publicID)
+	}
+	if err != nil {
+		log.Printf("load minecraft server review associations server=%s: %v", publicID, err)
+		writeError(w, http.StatusInternalServerError, "读取服务器审核资料失败")
+		return
+	}
+	item.ProofFileCount = len(item.ProofFiles)
+	item.LinkCount = len(item.Links)
+	item.ModCount = len(item.Mods)
+	writeJSON(w, http.StatusOK, item)
 }
 
 func (s *Server) minecraftServerProofFiles(ctx context.Context, publicID string) ([]minecraftServerProofFile, error) {
@@ -156,7 +233,13 @@ func (s *Server) reviewMinecraftServer(w http.ResponseWriter, r *http.Request) {
 	}
 	var submitterID int64
 	var name string
-	err := s.db.QueryRow(r.Context(), `update minecraft_servers set
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存服务器审核结果失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	err = tx.QueryRow(r.Context(), `update minecraft_servers set
 		review_status=$2,review_note=$3,reviewed_by=$4,reviewed_at=now(),
 		published_at=case when $2='approved' then coalesce(published_at,now()) else published_at end,
 		next_probe_at=case when $2='approved' then now() else next_probe_at end,
@@ -176,12 +259,23 @@ func (s *Server) reviewMinecraftServer(w http.ResponseWriter, r *http.Request) {
 	if request.Status == "rejected" {
 		templateCode = "review_rejected"
 	}
-	s.sendTemplatedNotification(r.Context(), submitterID, templateCode, map[string]string{
-		"name": name, "reason": request.Note,
-	}, map[string]any{
-		"serverId": publicID, "reviewStatus": request.Status,
-		"targetLabel": name, "url": "/servers/" + publicID,
-	})
+	err = enqueueTemplatedNotificationTx(r.Context(), tx, "minecraft_server.review."+request.Status,
+		submitterID, currentClaims(r).Subject, templateCode, map[string]string{
+			"name": name, "reason": request.Note,
+		}, map[string]any{
+			"serverId": publicID, "reviewStatus": request.Status,
+			"targetLabel": name, "url": "/servers/" + publicID,
+		}, "")
+	if err != nil {
+		log.Printf("persist minecraft server review notification server=%s: %v", publicID, err)
+		writeError(w, http.StatusInternalServerError, "保存服务器审核通知失败")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		log.Printf("commit minecraft server review server=%s: %v", publicID, err)
+		writeError(w, http.StatusInternalServerError, "保存服务器审核结果失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": request.Status})
 }
 

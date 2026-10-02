@@ -63,14 +63,15 @@ func TestImportDocumentsReportsPerDocumentFailure(t *testing.T) {
 	}
 }
 
-func TestSelectedDistinguishesRebuildFromDeleteOnlyBatch(t *testing.T) {
-	all, _ := selected(nil)
-	if !all {
-		t.Fatal("nil IDs must select all documents during rebuild")
-	}
-	all, ids := selected([]int64{})
-	if all || ids == nil {
-		t.Fatal("an incremental delete-only batch must select no documents")
+func TestSearchDocumentIDPageQueriesUseStableKeysets(t *testing.T) {
+	for _, documentType := range []string{"mod", "modpack", "simple_project", "community_post", "creator", "resource", "server"} {
+		query, err := searchDocumentIDPageQuery(documentType)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(query, ">$1") || !strings.Contains(query, "order by") || !strings.Contains(query, "limit $2") {
+			t.Errorf("%s ID page is not a stable keyset: %s", documentType, query)
+		}
 	}
 }
 
