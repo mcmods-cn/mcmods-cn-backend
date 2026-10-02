@@ -107,18 +107,22 @@
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "d937706bf7b7ab7391397f7ae04fe28bb3464f749ee3f6e78923fdefb34f5608",
+      "final_sha256": "2c0ae3e1f051c18c7d3e8b594df7dd447dc5b823e88b44bb75d954ee58660b1e",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
-      "baseline_sha256": "d937706bf7b7ab7391397f7ae04fe28bb3464f749ee3f6e78923fdefb34f5608",
+      "baseline_sha256": "2c0ae3e1f051c18c7d3e8b594df7dd447dc5b823e88b44bb75d954ee58660b1e",
       "category": "config",
       "focus": "CI质量、PG发现批次、race和容器构建；新增两组Python守卫纳入quality",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
-      "validation": [],
+      "validation": [
+        "4 existing Python tests and fresh owned3 initialization/health/cleanup PASS; exact startup clock evidence; three CI TCP probes and explicit four guarded-test instructions reviewed"
+      ],
       "exclusion": "",
-      "findings": [],
+      "findings": [
+        "OCT02-R-003"
+      ],
       "behavior_claim": false,
       "deletion_reviewed": false,
       "deletion_reason": ""
@@ -4781,22 +4785,27 @@
       "read_ranges": [
         [
           1,
-          100
+          116
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "ad5ac2670ca1778ba21de790a5d65689e8543307db77e6f40d5bce50431c428a",
+      "final_sha256": "330cb79c7d6f919a5248458e5d8c40ed9921170b2b451b5e09b486a935452366",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
-      "baseline_sha256": "ad5ac2670ca1778ba21de790a5d65689e8543307db77e6f40d5bce50431c428a",
+      "baseline_sha256": "330cb79c7d6f919a5248458e5d8c40ed9921170b2b451b5e09b486a935452366",
       "category": "documentation",
       "focus": "专属回环服务初始化、真实与fixture测试、opt-in区分、所有权清理",
       "focus_symbols": [],
       "responsibility": "Owned loopback resources, pinned versions, exact setup/test/cleanup and actual live origins",
       "call_chain": "",
-      "validation": [],
+      "validation": [
+        "4 existing Python tests and fresh owned3 initialization/health/cleanup PASS; exact startup clock evidence; three CI TCP probes and explicit four guarded-test instructions reviewed",
+        "Root actual full final read; new TEMP statistics target +5 explicitly owned serial fixture boundaries reviewed; real PG targeted evidence separately bound"
+      ],
       "exclusion": "",
-      "findings": [],
+      "findings": [
+        "OCT02-R-003"
+      ],
       "behavior_claim": false,
       "deletion_reviewed": false,
       "deletion_reason": ""
@@ -5227,24 +5236,27 @@
       "read_ranges": [
         [
           1,
-          162
+          163
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "d7b9484375d35c6985f11d89b53463f3e670043686d1ff6f37076fa1b9ba528f",
+      "final_sha256": "1ad76dcc16c96e42ad461e68e972d328abfc01e993c19286472a49066eccae0d",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
-      "baseline_sha256": "d7b9484375d35c6985f11d89b53463f3e670043686d1ff6f37076fa1b9ba528f",
+      "baseline_sha256": "1ad76dcc16c96e42ad461e68e972d328abfc01e993c19286472a49066eccae0d",
       "category": "script",
       "focus": "根执行者全文与最终修改行实际复查",
       "focus_symbols": [],
       "responsibility": "Pinned owned Docker resources/private state, exact label/loopback verification, safe reset and cleanup",
       "call_chain": "",
       "validation": [
+        "4 existing Python tests and fresh owned3 initialization/health/cleanup PASS; exact startup clock evidence; three CI TCP probes and explicit four guarded-test instructions reviewed",
         "PASS: Python 3 tests and real owned Docker services/full-schema initialization"
       ],
       "exclusion": "",
-      "findings": [],
+      "findings": [
+        "OCT02-R-003"
+      ],
       "behavior_claim": false,
       "deletion_reviewed": false,
       "deletion_reason": ""
@@ -5355,25 +5367,27 @@
       "read_ranges": [
         [
           1,
-          67
+          113
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "c1c4030aeea51d89e126577dedaab77596a752c9fbc889b5b17b305e5a4a81ed",
+      "final_sha256": "d5ad574c4f7ffec181fab1ed66a918b904b45ad88d57b5a8e1ccd744feb7b4e0",
       "blob_sha": "",
       "baseline": "262e1c0136bfed4624a011cf5f445b1d71cf93c0",
       "baseline_sha256": "993bddcd73367ea559d057c396849ce5e968d5de0420cffec94e9faf3cdf4252",
       "category": ".mts",
-      "focus": "",
+      "focus": "Held initial auth and precise list retry; old assertions retained; entire113 lines actually read",
       "focus_symbols": [],
       "responsibility": "Production controlled API prevents unread localization replacement and list retry preserves submitted filters",
       "call_chain": "",
       "validation": [
-        "PASS: production build-r2 4/4 controlled API recovery browser scenarios; actual DB persistence not inferred"
+        "Named browser results recorded separately; read is not behavior proof"
       ],
       "exclusion": "",
-      "findings": [],
-      "behavior_claim": true,
+      "findings": [
+        "OCT02-R-022"
+      ],
+      "behavior_claim": false,
       "deletion_reviewed": false,
       "deletion_reason": ""
     },
@@ -5387,21 +5401,22 @@
       "read_ranges": [
         [
           1,
-          72
+          77
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "1004a35d941d50befafba5454ae111a4d72499d1c53c7934c745d5c3e7b15eb3",
+      "final_sha256": "2776b4042a4f30fab394bd0dbcf77bb895c925253e7304a885c2b862e78495dd",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
-      "baseline_sha256": "1004a35d941d50befafba5454ae111a4d72499d1c53c7934c745d5c3e7b15eb3",
+      "baseline_sha256": "2776b4042a4f30fab394bd0dbcf77bb895c925253e7304a885c2b862e78495dd",
       "category": "documentation",
       "focus": "R001–R020根因、跨模块去重、环境与实际回归边界",
       "focus_symbols": [],
       "responsibility": "Root actual finding scope/versions/status/evidence and pending integration boundaries",
       "call_chain": "",
       "validation": [
-        "NOT_RUN: progress evidence, not a completed final report"
+        "NOT_RUN: progress evidence, not a completed final report",
+        "Root current full final contents read; current R5 quality/live, exact16 cleanup, PG-r4 one-fixture version boundary and original failures reviewed"
       ],
       "exclusion": "",
       "findings": [],
@@ -5751,20 +5766,22 @@
       "read_ranges": [
         [
           1,
-          131
+          135
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "83b7fe67ad1fef485d615c55dc2afb1bbb6997a5f044a79e53f97af65a3280c7",
+      "final_sha256": "408fb004ad1ec0e516e32c5a4109ee207e0fc13474da7e2ec045cbab3f0f2a38",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
-      "baseline_sha256": "83b7fe67ad1fef485d615c55dc2afb1bbb6997a5f044a79e53f97af65a3280c7",
+      "baseline_sha256": "408fb004ad1ec0e516e32c5a4109ee207e0fc13474da7e2ec045cbab3f0f2a38",
       "category": "documentation",
       "focus": "前后端结果、真实计数/范围、部署次序和未验证边界",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
-      "validation": [],
+      "validation": [
+        "Root current full final contents read; current R5 quality/live, exact16 cleanup, PG-r4 one-fixture version boundary and original failures reviewed"
+      ],
       "exclusion": "",
       "findings": [],
       "behavior_claim": false,
@@ -5781,20 +5798,22 @@
       "read_ranges": [
         [
           1,
-          94
+          110
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "b247ff87cfc93d7fbc1592c0d6471f1684d4b63607e3d633859a7c07f899ec0b",
+      "final_sha256": "ccefcd8f56d458c2d59cd99c1ba3e0af4cc7e938c2b931c2521408af2e9c8445",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
-      "baseline_sha256": "b247ff87cfc93d7fbc1592c0d6471f1684d4b63607e3d633859a7c07f899ec0b",
+      "baseline_sha256": "ccefcd8f56d458c2d59cd99c1ba3e0af4cc7e938c2b931c2521408af2e9c8445",
       "category": "documentation",
       "focus": "PASS/FAIL/SKIP与指纹绑定，既往失败和未取得证据",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
-      "validation": [],
+      "validation": [
+        "Root current full final contents read; current R5 quality/live, exact16 cleanup, PG-r4 one-fixture version boundary and original failures reviewed"
+      ],
       "exclusion": "",
       "findings": [],
       "behavior_claim": false,
@@ -5811,20 +5830,23 @@
       "read_ranges": [
         [
           1,
-          793
+          1132
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "3ebfae1546559ade5bbbe81c0ee639c9d9f59f4b9e75e4f80d1ea97bf70bf959",
+      "final_sha256": "053cb739752eaa14762bf2c57ffab871616616ad705bd3ac5361b1361a9df159",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
-      "baseline_sha256": "3ebfae1546559ade5bbbe81c0ee639c9d9f59f4b9e75e4f80d1ea97bf70bf959",
+      "baseline_sha256": "3be4fc396e6c4b9fdf7ce9288e2c473853f9cf04be37b30631d2a02f0cb2013d",
       "category": "documentation",
       "focus": "逐命令退出码、计数、私有原始证据哈希及安全边界；不含凭据值",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
-      "validation": [],
+      "validation": [
+        "Root current full final contents read; current R5 quality/live, exact16 cleanup, PG-r4 one-fixture version boundary and original failures reviewed",
+        "Root actually read final staged-scan documentation delta; eleven-file scan exit0/no findings, prior classifications preserved."
+      ],
       "exclusion": "",
       "findings": [],
       "behavior_claim": false,
@@ -5841,20 +5863,22 @@
       "read_ranges": [
         [
           1,
-          193
+          210
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "11d767c2676f8aaeb08b52d3a730f500d1c998247a796b91c349d02f38a5d94e",
+      "final_sha256": "aec45d12bdc0ee2362f665eb6e580c706c591344845004eddbdd90be7e429a73",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
-      "baseline_sha256": "11d767c2676f8aaeb08b52d3a730f500d1c998247a796b91c349d02f38a5d94e",
+      "baseline_sha256": "aec45d12bdc0ee2362f665eb6e580c706c591344845004eddbdd90be7e429a73",
       "category": "documentation",
       "focus": "模型/索引/事务/168前向修复、实库与生产未验证分开",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
-      "validation": [],
+      "validation": [
+        "Root current full final contents read; current R5 quality/live, exact16 cleanup, PG-r4 one-fixture version boundary and original failures reviewed"
+      ],
       "exclusion": "",
       "findings": [],
       "behavior_claim": false,
@@ -5871,16 +5895,16 @@
       "read_ranges": [
         [
           1,
-          43
+          49
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "795dbf9f05f52efdb683b1a2b94a117c8f1cb0770e26cf19d275f8c3ef570678",
+      "final_sha256": "ad02d2784e764acc0fde811f6d004669d869f180ebf783c2197ec6bb7364d20f",
       "blob_sha": "",
       "baseline": "262e1c0136bfed4624a011cf5f445b1d71cf93c0",
       "baseline_sha256": "795dbf9f05f52efdb683b1a2b94a117c8f1cb0770e26cf19d275f8c3ef570678",
       "category": "documentation",
-      "focus": "前端修复、八语言、实际fixture与真实API旅程边界及发布顺序",
+      "focus": "Final full-read49-line FE audit; R8 build/R9 strict async options test and actual API boundary; final HEAD resolved by PR",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
@@ -5901,20 +5925,23 @@
       "read_ranges": [
         [
           1,
-          103
+          105
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "c24dbc0f333d5f2cfdadd473507c950e94f5231bc52c3d6b5e7fd46aae503125",
+      "final_sha256": "da8eadd37f178f9205e78f445e41a97de4e1a528b72d6ac6c07a8314cacd0398",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
-      "baseline_sha256": "c24dbc0f333d5f2cfdadd473507c950e94f5231bc52c3d6b5e7fd46aae503125",
+      "baseline_sha256": "4aa9a0f39aadea6f8895c8f71e1d1f24f506bad027e440c351f9c22caee20e04",
       "category": "documentation",
       "focus": "正式审计证据与验证边界，主执行者全文及最终差异复查",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
-      "validation": [],
+      "validation": [
+        "Root current full final contents read; current R5 quality/live, exact16 cleanup, PG-r4 one-fixture version boundary and original failures reviewed",
+        "Root actually read final staged-scan documentation delta; eleven-file scan exit0/no findings, prior classifications preserved."
+      ],
       "exclusion": "",
       "findings": [],
       "behavior_claim": false,
@@ -5961,28 +5988,262 @@
       "read_ranges": [
         [
           1,
-          184
+          194
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "9362f7dc3a9c37ea840c54e98b87ac945cf1be3e1dcda99e4068571a5fddf69e",
+      "final_sha256": "c3909f6a2f5d510c06b52bcd55a01a1411dddced39354e142ca67ad1c4e3b109",
       "blob_sha": "",
       "baseline": "262e1c0136bfed4624a011cf5f445b1d71cf93c0",
       "baseline_sha256": "9362f7dc3a9c37ea840c54e98b87ac945cf1be3e1dcda99e4068571a5fddf69e",
       "category": "test",
-      "focus": "FP012 picker与PUT语言契约；FP051 popup真实类型解析、Retry、失败保留和精确提交；FP068 native同tick/initialPOST挂起排他",
+      "focus": "Controlled recipe options pending state and option-attached synchronization; exact original selected type/write/draft assertions retained; entire194 lines actually read",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
       "validation": [
-        "Root actual184-line semantic review; dedicated3PASS and root independent whole73PASS0FAIL0SKIP180.621s, lint/typeexit0; R7source647 drift[]; controlled API not real persistence"
+        "Named browser results recorded separately; read is not behavior proof"
       ],
       "exclusion": "",
       "findings": [
-        "OCT02-FP-012",
-        "OCT02-FP-051",
-        "OCT02-FP-068"
+        "OCT02-FP-051"
       ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "app/_components/skin-library.tsx",
+      "owner": "root",
+      "source": "root.json",
+      "kind": "ownership",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          138
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "bbe116e9327451e8ff083d92028bba8756b3a8a982d94eee453d53f2ee122243",
+      "blob_sha": "",
+      "baseline": "262e1c0136bfed4624a011cf5f445b1d71cf93c0",
+      "baseline_sha256": "bbe116e9327451e8ff083d92028bba8756b3a8a982d94eee453d53f2ee122243",
+      "category": "frontend-source",
+      "focus": "Initial identity readiness/actor-key filter isolation; native disabled controls; entire138 lines actually read",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        "Named browser results recorded separately; read is not behavior proof"
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-R-022"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "docs/frontend-state-recovery.md",
+      "owner": "root",
+      "source": "root.json",
+      "kind": "ownership",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          59
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "793506fbce4585e999d6857dc6f35cc286d58ddcd0908f910f1311f4f1c3671c",
+      "blob_sha": "",
+      "baseline": "262e1c0136bfed4624a011cf5f445b1d71cf93c0",
+      "baseline_sha256": "793506fbce4585e999d6857dc6f35cc286d58ddcd0908f910f1311f4f1c3671c",
+      "category": "documentation",
+      "focus": "Formal readiness/preserve filters on retry policy; entire59 lines actually read",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        "Named browser results recorded separately; read is not behavior proof"
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-R-022"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "internal/httpapi/project_update_notification_worker.go",
+      "owner": "root",
+      "source": "root.json",
+      "kind": "ownership",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          293
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "e5265d837af52abd68823aa6f4a674f66f5dfa0122f57325acdc999aaec0f350",
+      "blob_sha": "",
+      "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
+      "baseline_sha256": "e5265d837af52abd68823aa6f4a674f66f5dfa0122f57325acdc999aaec0f350",
+      "category": "backend-source",
+      "focus": "Whole293 lines primary review; live PostgreSQL claim clock/EPQ after row-lock wait; original transaction/page/visibility/retry boundaries",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        "Named actual PG race9top/2sub PASS; new full suite separately RUNNING"
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-C-017"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "internal/httpapi/oct02_project_update_claim_clock_integration_test.go",
+      "owner": "root",
+      "source": "root.json",
+      "kind": "ownership",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          191
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "0f9dd1029bdaf25d56a5c96c69492ec2858ff082c4f02ae5749523899716ea6d",
+      "blob_sha": "",
+      "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
+      "baseline_sha256": "0f9dd1029bdaf25d56a5c96c69492ec2858ff082c4f02ae5749523899716ea6d",
+      "category": "test",
+      "focus": "Whole191 lines primary review; real tracer interleavings and observed PG lock wait; no fake DB results, future window and duplicate201 recipients assertions",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        "Named actual PG race9top/2sub PASS; new full suite separately RUNNING"
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-C-017"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "PROJECT_FOLLOW_NOTIFICATIONS.md",
+      "owner": "root",
+      "source": "root.json",
+      "kind": "ownership",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          25
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "9c40347d0c38b623785fa50ea3ec7a6c909f67c9472065839750b20041c5d21a",
+      "blob_sha": "",
+      "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
+      "baseline_sha256": "9c40347d0c38b623785fa50ea3ec7a6c909f67c9472065839750b20041c5d21a",
+      "category": "documentation",
+      "focus": "Whole25 lines primary review; notification current-clock claim semantics, unchanged merge/backoff, permissions and unique delivery",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        "Named actual PG race9top/2sub PASS; new full suite separately RUNNING"
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-C-017"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "internal/httpapi/log_pagination_integration_test.go",
+      "owner": "root",
+      "source": "root.json",
+      "kind": "ownership",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          238
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "29e72c3731a3464f6e0a045864a7c6720de0fd75d92b660589f47af5751b6626",
+      "blob_sha": "",
+      "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
+      "baseline_sha256": "29e72c3731a3464f6e0a045864a7c6720de0fd75d92b660589f47af5751b6626",
+      "category": "test",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        "Root actual full final read; new TEMP statistics target +5 explicitly owned serial fixture boundaries reviewed; real PG targeted evidence separately bound"
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-DB-013"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "tools/audit/database_inventory/main_test.go",
+      "owner": "root",
+      "source": "root.json",
+      "kind": "ownership",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          91
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "80c6855e3ceae3ace95a5d29ffaa05d6413828205001283e0ec28c103b3d7e52",
+      "blob_sha": "",
+      "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
+      "baseline_sha256": "80c6855e3ceae3ace95a5d29ffaa05d6413828205001283e0ec28c103b3d7e52",
+      "category": "test",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        "Root actual full final read; new TEMP statistics target +5 explicitly owned serial fixture boundaries reviewed; real PG targeted evidence separately bound"
+      ],
+      "exclusion": "",
+      "findings": [],
       "behavior_claim": false,
       "deletion_reviewed": false,
       "deletion_reason": ""
@@ -34925,6 +35186,45 @@
     },
     {
       "repo": "mcmods-cn-backend",
+      "path": "internal/httpapi/oct02_project_update_claim_clock_integration_test.go",
+      "owner": "backend_c",
+      "source": "backend_c.json",
+      "kind": "ownership",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          110
+        ],
+        [
+          111,
+          191
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "0f9dd1029bdaf25d56a5c96c69492ec2858ff082c4f02ae5749523899716ea6d",
+      "blob_sha": "",
+      "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
+      "baseline_sha256": "",
+      "category": "test",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Real PG task due clock schedules across transaction start/row lock wait; bounded201 recipients, future eligibility and replay. Actual final191 lines fully read in two untruncated segments.",
+      "call_chain": "",
+      "validation": [
+        "evidence/backend_c-project-update-clock-green-race.log:9top2sub0SKIP realPG18.6-race PASS83.745s",
+        "evidence/backend_c-project-update-clock-vet.log:go vet ./internal/httpapi exit0"
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-C-017"
+      ],
+      "behavior_claim": true,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
       "path": "docs/audit/20261002/ISSUES.md",
       "owner": "backend_c",
       "source": "backend_c.json",
@@ -34933,18 +35233,30 @@
       "read_ranges": [
         [
           1,
-          299
+          76
+        ],
+        [
+          77,
+          152
+        ],
+        [
+          153,
+          228
+        ],
+        [
+          229,
+          305
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "da1bf34a993a63d121c60897f8bce5f0782889b1e777ca7c6b58467a3312ea56",
+      "final_sha256": "c59998968cf5e251844f06fe723b45f3d1bc9ceada72dc226cbec41a4b6baa68",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
       "baseline_sha256": "",
       "category": "documentation",
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Consolidate source-based stable IDs, root cause, severity, fixes, evidence and exclusions without inheriting historical CLOSED or substituting adjacent tests. Prior complete 233-record human field review, original bounded blocks and final corrections are preserved in backend_c-issues-r6-final-proof.json. R7 follow-up actually read all five changed/new records completely, current metadata completely, specific-journeys.browser.mts all184 lines, all105-line named assertion proof, actual targeted3/whole73 terminal summaries, Python RED/GREEN logs, resource cleanup evidence and cleanup ownership/control-flow/test segments. 229 complete record objects match the previous fully read current R6 input exactly; hash equality binds earlier actual human review, never creates semantic review. Current ISSUES all299 lines read in untruncated ranges1–75,76–150,151–225,226–299. JSON view preserved every field, removing whitespace only. Current counts reflect only exact named assertions; UI fixtures do not prove DB/OSS/ZIP/supplier or full role matrices.",
+      "responsibility": "Consolidate source-based stable IDs, root cause, severity, fixes, evidence and exclusions without inheriting historical CLOSED or substituting adjacent tests. Prior actual complete human field review of 235 objects is preserved in backend_c-issues-r8-final-proof.json and backend_c-findings-r8-complete-read-input.json; proof chains to prior full field reads remain available. Current follow-up actually read all10 changed/new record objects completely (A015,B021,B030,C017,FP012,FP051,FP068,R003,R021,DB013) and every current metadata field with no omitted fields. 227 unchanged complete objects match the full R8 read input; fingerprint equality only binds that earlier actual human review and never creates semantic review. Current top-level237-ID Git path associations were actually read completely in four record ranges1-60,61-120,121-180,181-237; path association is not per-line attribution. A015 missing actual helper/test locations were corrected after reading helper360-560 and full80-line regression. Current ISSUES305 was actually fully read in bounded ranges1-76,77-152,153-228,229-305 after final gate text, with the clipped258-273 portion explicitly reread and final paragraph9/row66 reread after metadata/location corrections; final R003 row28/object was reread after correcting the CI line-count typo168 to actual143, and unchanged CI file1-143 was fully reread with the same SHA; findings record views preserve every field and omit whitespace only. C017 source293/newtest191/originalTEST018299/formal25 were actually read in full; true PG RED1top2sub and GREENrace9top2sub were executed without altering original TEST018 assertions/budget. R003 tool163/existingtest50 were actually fully read; fixed safe startup timeline and separate exact-owned fresh up/health/down evidence were read, 4Python PASS. Current DB report210 was fully read in ranges1-110,111-210 before B030 location synchronization; DB013 finding/proof and final238-line TEMP statistics test were actually fully read, exact sparse-frequency/index assertions retained, targeted real PG race1PASS0skip5.076s scoped separately from old fullPG-r4. FP012/051/068 named fixture behavior does not prove DB/supplier. All statement/count gates preserve their own version, original failures and external boundaries; source fingerprints do not create business verification. Parent independently owns Git/PR/CI and resource cleanup.",
       "call_chain": "",
       "validation": [
         "Report schema/count/alias/current location fingerprint checks PASS; this is not business test evidence",
@@ -34966,18 +35278,18 @@
       "read_ranges": [
         [
           1,
-          9870
+          12833
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "b61580e188793df19d50b2802029a41b8f8ceca8dfbd95bc7ea01ab5d4b7f74a",
+      "final_sha256": "ceaee31f5792fdc7366c2777c9b95f9cb6eb24d3eb6aaeefd539c039e5183486",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
       "baseline_sha256": "",
       "category": "audit_data",
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Consolidate source-based stable IDs, root cause, severity, fixes, evidence and exclusions without inheriting historical CLOSED or substituting adjacent tests. Prior complete 233-record human field review, original bounded blocks and final corrections are preserved in backend_c-issues-r6-final-proof.json. R7 follow-up actually read all five changed/new records completely, current metadata completely, specific-journeys.browser.mts all184 lines, all105-line named assertion proof, actual targeted3/whole73 terminal summaries, Python RED/GREEN logs, resource cleanup evidence and cleanup ownership/control-flow/test segments. 229 complete record objects match the previous fully read current R6 input exactly; hash equality binds earlier actual human review, never creates semantic review. Current ISSUES all299 lines read in untruncated ranges1–75,76–150,151–225,226–299. JSON view preserved every field, removing whitespace only. Current counts reflect only exact named assertions; UI fixtures do not prove DB/OSS/ZIP/supplier or full role matrices.",
+      "responsibility": "Consolidate source-based stable IDs, root cause, severity, fixes, evidence and exclusions without inheriting historical CLOSED or substituting adjacent tests. Prior actual complete human field review of 235 objects is preserved in backend_c-issues-r8-final-proof.json and backend_c-findings-r8-complete-read-input.json; proof chains to prior full field reads remain available. Current follow-up actually read all10 changed/new record objects completely (A015,B021,B030,C017,FP012,FP051,FP068,R003,R021,DB013) and every current metadata field with no omitted fields. 227 unchanged complete objects match the full R8 read input; fingerprint equality only binds that earlier actual human review and never creates semantic review. Current top-level237-ID Git path associations were actually read completely in four record ranges1-60,61-120,121-180,181-237; path association is not per-line attribution. A015 missing actual helper/test locations were corrected after reading helper360-560 and full80-line regression. Current ISSUES305 was actually fully read in bounded ranges1-76,77-152,153-228,229-305 after final gate text, with the clipped258-273 portion explicitly reread and final paragraph9/row66 reread after metadata/location corrections; final R003 row28/object was reread after correcting the CI line-count typo168 to actual143, and unchanged CI file1-143 was fully reread with the same SHA; findings record views preserve every field and omit whitespace only. C017 source293/newtest191/originalTEST018299/formal25 were actually read in full; true PG RED1top2sub and GREENrace9top2sub were executed without altering original TEST018 assertions/budget. R003 tool163/existingtest50 were actually fully read; fixed safe startup timeline and separate exact-owned fresh up/health/down evidence were read, 4Python PASS. Current DB report210 was fully read in ranges1-110,111-210 before B030 location synchronization; DB013 finding/proof and final238-line TEMP statistics test were actually fully read, exact sparse-frequency/index assertions retained, targeted real PG race1PASS0skip5.076s scoped separately from old fullPG-r4. FP012/051/068 named fixture behavior does not prove DB/supplier. All statement/count gates preserve their own version, original failures and external boundaries; source fingerprints do not create business verification. Parent independently owns Git/PR/CI and resource cleanup.",
       "call_chain": "",
       "validation": [
         "Report schema/count/alias/current location fingerprint checks PASS; this is not business test evidence",
@@ -35793,26 +36105,28 @@
       "owner": "database_docs",
       "source": "database_docs.json",
       "kind": "ownership",
-      "status": "reviewed",
+      "status": "rechecked",
       "read_ranges": [
         [
           1,
-          23
+          25
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "9a06ac8c8a34e38967152bbde9359d25de3d558ae83137eeec8b6dcfbdc0954a",
+      "final_sha256": "9c40347d0c38b623785fa50ea3ec7a6c909f67c9472065839750b20041c5d21a",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
       "baseline_sha256": "9a06ac8c8a34e38967152bbde9359d25de3d558ae83137eeec8b6dcfbdc0954a",
       "category": ".md",
-      "focus": "",
+      "focus": "Final follow/project update notification contract: actual clock comparison after serialized row lock, bounded batch200, merge-window/retry due guard, persisted progress and unique notification recipient-event; no schema/API/config change. C017 new source/test fully cross-read; behavioral gates attributed to owner.",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
       "validation": [],
       "exclusion": "",
-      "findings": [],
+      "findings": [
+        "OCT02-C-017"
+      ],
       "behavior_claim": false,
       "deletion_reviewed": false,
       "deletion_reason": ""
@@ -41532,20 +41846,20 @@
       "read_ranges": [
         [
           1,
-          100
+          105
         ],
         [
-          101,
-          193
+          106,
+          202
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "11d767c2676f8aaeb08b52d3a730f500d1c998247a796b91c349d02f38a5d94e",
+      "final_sha256": "91c0aca02d753cc10bf2534f1a68c11908c9aff661e5dc3e5de161df9ea700fc",
       "blob_sha": "",
       "baseline": "",
       "baseline_sha256": "696a77c42a46f53b3909a72ea851ca1963883edaa658cf2e9b1c2356fe40ac76",
       "category": ".md",
-      "focus": "",
+      "focus": "Final database report with C017 current wall-clock claim semantics under READ COMMITTED and row-lock EPQ; directed owner PG evidence9top2sub0skip83.745s separately attributed; no new whole gate claim, schema168 and existing forward deployment unchanged.",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
@@ -41555,7 +41869,8 @@
       ],
       "exclusion": "",
       "findings": [
-        "OCT02-B-030"
+        "OCT02-B-030",
+        "OCT02-C-017"
       ],
       "behavior_claim": false,
       "deletion_reviewed": false,
@@ -48725,14 +49040,14 @@
       "read_ranges": [
         [
           1,
-          180
+          196
         ],
         [
-          181,
-          360
+          197,
+          392
         ],
         [
-          361,
+          393,
           587
         ]
       ],
@@ -48747,7 +49062,8 @@
       "responsibility": "",
       "call_chain": "",
       "validation": [
-        "FINAL whole-file semantic cross-review fp-db-final-proof.json; behavior evidence remains separate"
+        "FINAL whole-file semantic cross-review fp-db-final-proof.json; behavior evidence remains separate",
+        "FP051 remoteCI exact empty-select failure deterministically reproduced with held type options; test fixed by actual option readiness, no source modification. Current test194/source587 full reread; dedicated3 browserGREEN exit0; R9 whole74 still running. See frontend-pages-fp051-ci-final-proof.json."
       ],
       "exclusion": "",
       "findings": [
@@ -51294,11 +51610,11 @@
       "read_ranges": [
         [
           1,
-          136
+          138
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "33c80e480210273e228503704e2f581c2c889f0d2be7fa657e7b18744985d23f",
+      "final_sha256": "bbe116e9327451e8ff083d92028bba8756b3a8a982d94eee453d53f2ee122243",
       "blob_sha": "",
       "baseline": "262e1c0136bfed4624a011cf5f445b1d71cf93c0",
       "baseline_sha256": "05f02cbf4933077381188e853f30cf47bba020f062b9fbb57f0b481840748000",
@@ -51310,13 +51626,16 @@
       "validation": [
         "FINAL whole-file semantic cross-review root-fp-extra-final.json; behavior evidence remains separate",
         "FP050 current exact final source review in fp-db-final-proof.json; actual R5 browser pending (prior R4 not latest source).",
-        "FINAL R6 production artifact09:17:13 includes current source: rootfullbrowser70PASS/0FAIL/0SKIP exit0, evidence/frontend-final-r6-browser.log. FP050 contrast/mobile, FP087 initialread and originalguest, FP074 globaloffset3specificcases actualPASS; does not imply wholefile/allroles/provider/DBjourneys verified."
+        "FINAL R6 production artifact09:17:13 includes current source: rootfullbrowser70PASS/0FAIL/0SKIP exit0, evidence/frontend-final-r6-browser.log. FP050 contrast/mobile, FP087 initialread and originalguest, FP074 globaloffset3specificcases actualPASS; does not imply wholefile/allroles/provider/DBjourneys verified.",
+        "R022 CI genuine filter loss followed by delayed-auth oldproduction actual RED; native readiness fieldset added, current138lines full reread. Target ESLint/diffcheck PASS; freshR8 browser NOT_RUN pending root artifact. See frontend-pages-r022-final-proof.json.",
+        "FreshR8 actual whole browser named3 asset cases PASS; R022 native delayed auth input guard and original retry string/count assertions pass. evidence/frontend-final-r8-browser.log; scope limits in frontend-pages-r022-final-proof.json. No repeat fixture run by owner."
       ],
       "exclusion": "",
       "findings": [
         "OCT02-FP-026",
         "OCT02-R-016",
-        "OCT02-FP-050"
+        "OCT02-FP-050",
+        "OCT02-R-022"
       ],
       "behavior_claim": false,
       "deletion_reviewed": false,
@@ -52428,11 +52747,11 @@
       "read_ranges": [
         [
           1,
-          57
+          59
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "7eaf01850bf14fc99ae572c68bf9ff58a085c63a8ab8bd0e44553a1d032cda8a",
+      "final_sha256": "793506fbce4585e999d6857dc6f35cc286d58ddcd0908f910f1311f4f1c3671c",
       "blob_sha": "",
       "baseline": "",
       "baseline_sha256": "",
@@ -52443,12 +52762,14 @@
       "call_chain": "",
       "validation": [
         "FINAL complete source read in frontend_pages turn; actual behavior recorded in separate PASS/FAIL fixture evidence",
-        "FINAL R6 production artifact09:17:13 includes current source: rootfullbrowser70PASS/0FAIL/0SKIP exit0, evidence/frontend-final-r6-browser.log. FP050 contrast/mobile, FP087 initialread and originalguest, FP074 globaloffset3specificcases actualPASS; does not imply wholefile/allroles/provider/DBjourneys verified."
+        "FINAL R6 production artifact09:17:13 includes current source: rootfullbrowser70PASS/0FAIL/0SKIP exit0, evidence/frontend-final-r6-browser.log. FP050 contrast/mobile, FP087 initialread and originalguest, FP074 globaloffset3specificcases actualPASS; does not imply wholefile/allroles/provider/DBjourneys verified.",
+        "Root R022 formal note actually full read current59lines; explains disabled initial auth filter, account isolation/retry retention, with no DB migration claims."
       ],
       "exclusion": "",
       "findings": [
         "OCT02-FP-050",
-        "OCT02-FP-087"
+        "OCT02-FP-087",
+        "OCT02-R-022"
       ],
       "behavior_claim": false,
       "deletion_reviewed": false,
@@ -52761,19 +53082,19 @@
       "owner": "frontend_pages",
       "source": "frontend_pages.json",
       "kind": "ownership",
-      "status": "reviewed",
+      "status": "rereviewed",
       "read_ranges": [
         [
           1,
-          112
+          103
         ],
         [
-          113,
-          184
+          104,
+          194
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "9362f7dc3a9c37ea840c54e98b87ac945cf1be3e1dcda99e4068571a5fddf69e",
+      "final_sha256": "c3909f6a2f5d510c06b52bcd55a01a1411dddced39354e142ca67ad1c4e3b109",
       "blob_sha": "",
       "baseline": "",
       "baseline_sha256": "",
@@ -52783,7 +53104,9 @@
       "responsibility": "",
       "call_chain": "",
       "validation": [
-        "Full current184lines actually displayed [1,112]/[113,184] and semantically reviewed; targeted real production Chromium3PASS/0FAIL/0SKIP exit0; ESLint/typecheck/diffcheck actual exit0; first/second failed runs retained with precise fixture classifications."
+        "Full current184lines actually displayed [1,112]/[113,184] and semantically reviewed; targeted real production Chromium3PASS/0FAIL/0SKIP exit0; ESLint/typecheck/diffcheck actual exit0; first/second failed runs retained with precise fixture classifications.",
+        "FP051 remoteCI exact empty-select failure deterministically reproduced with held type options; test fixed by actual option readiness, no source modification. Current test194/source587 full reread; dedicated3 browserGREEN exit0; R9 whole74 still running. See frontend-pages-fp051-ci-final-proof.json.",
+        "R9 whole74 current production/browser transport fixtures actual exit0,194.434861243s; snapshot647 rows actual_drift[]. Heldtype options synchronization is a test repair; CI73PASS1FAIL and intentional exact RED preserved."
       ],
       "exclusion": "",
       "findings": [
@@ -99081,18 +99404,30 @@
       "read_ranges": [
         [
           1,
-          299
+          76
+        ],
+        [
+          77,
+          152
+        ],
+        [
+          153,
+          228
+        ],
+        [
+          229,
+          305
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "da1bf34a993a63d121c60897f8bce5f0782889b1e777ca7c6b58467a3312ea56",
+      "final_sha256": "c59998968cf5e251844f06fe723b45f3d1bc9ceada72dc226cbec41a4b6baa68",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
       "baseline_sha256": "",
       "category": "documentation",
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Consolidate source-based stable IDs, root cause, severity, fixes, evidence and exclusions without inheriting historical CLOSED or substituting adjacent tests. Prior complete 233-record human field review, original bounded blocks and final corrections are preserved in backend_c-issues-r6-final-proof.json. R7 follow-up actually read all five changed/new records completely, current metadata completely, specific-journeys.browser.mts all184 lines, all105-line named assertion proof, actual targeted3/whole73 terminal summaries, Python RED/GREEN logs, resource cleanup evidence and cleanup ownership/control-flow/test segments. 229 complete record objects match the previous fully read current R6 input exactly; hash equality binds earlier actual human review, never creates semantic review. Current ISSUES all299 lines read in untruncated ranges1–75,76–150,151–225,226–299. JSON view preserved every field, removing whitespace only. Current counts reflect only exact named assertions; UI fixtures do not prove DB/OSS/ZIP/supplier or full role matrices.",
+      "responsibility": "Consolidate source-based stable IDs, root cause, severity, fixes, evidence and exclusions without inheriting historical CLOSED or substituting adjacent tests. Prior actual complete human field review of 235 objects is preserved in backend_c-issues-r8-final-proof.json and backend_c-findings-r8-complete-read-input.json; proof chains to prior full field reads remain available. Current follow-up actually read all10 changed/new record objects completely (A015,B021,B030,C017,FP012,FP051,FP068,R003,R021,DB013) and every current metadata field with no omitted fields. 227 unchanged complete objects match the full R8 read input; fingerprint equality only binds that earlier actual human review and never creates semantic review. Current top-level237-ID Git path associations were actually read completely in four record ranges1-60,61-120,121-180,181-237; path association is not per-line attribution. A015 missing actual helper/test locations were corrected after reading helper360-560 and full80-line regression. Current ISSUES305 was actually fully read in bounded ranges1-76,77-152,153-228,229-305 after final gate text, with the clipped258-273 portion explicitly reread and final paragraph9/row66 reread after metadata/location corrections; final R003 row28/object was reread after correcting the CI line-count typo168 to actual143, and unchanged CI file1-143 was fully reread with the same SHA; findings record views preserve every field and omit whitespace only. C017 source293/newtest191/originalTEST018299/formal25 were actually read in full; true PG RED1top2sub and GREENrace9top2sub were executed without altering original TEST018 assertions/budget. R003 tool163/existingtest50 were actually fully read; fixed safe startup timeline and separate exact-owned fresh up/health/down evidence were read, 4Python PASS. Current DB report210 was fully read in ranges1-110,111-210 before B030 location synchronization; DB013 finding/proof and final238-line TEMP statistics test were actually fully read, exact sparse-frequency/index assertions retained, targeted real PG race1PASS0skip5.076s scoped separately from old fullPG-r4. FP012/051/068 named fixture behavior does not prove DB/supplier. All statement/count gates preserve their own version, original failures and external boundaries; source fingerprints do not create business verification. Parent independently owns Git/PR/CI and resource cleanup.",
       "call_chain": "",
       "validation": [
         "Report schema/count/alias/current location fingerprint checks PASS; this is not business test evidence",
@@ -99114,18 +99449,18 @@
       "read_ranges": [
         [
           1,
-          9870
+          12833
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "b61580e188793df19d50b2802029a41b8f8ceca8dfbd95bc7ea01ab5d4b7f74a",
+      "final_sha256": "ceaee31f5792fdc7366c2777c9b95f9cb6eb24d3eb6aaeefd539c039e5183486",
       "blob_sha": "",
       "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
       "baseline_sha256": "",
       "category": "audit_data",
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Consolidate source-based stable IDs, root cause, severity, fixes, evidence and exclusions without inheriting historical CLOSED or substituting adjacent tests. Prior complete 233-record human field review, original bounded blocks and final corrections are preserved in backend_c-issues-r6-final-proof.json. R7 follow-up actually read all five changed/new records completely, current metadata completely, specific-journeys.browser.mts all184 lines, all105-line named assertion proof, actual targeted3/whole73 terminal summaries, Python RED/GREEN logs, resource cleanup evidence and cleanup ownership/control-flow/test segments. 229 complete record objects match the previous fully read current R6 input exactly; hash equality binds earlier actual human review, never creates semantic review. Current ISSUES all299 lines read in untruncated ranges1–75,76–150,151–225,226–299. JSON view preserved every field, removing whitespace only. Current counts reflect only exact named assertions; UI fixtures do not prove DB/OSS/ZIP/supplier or full role matrices.",
+      "responsibility": "Consolidate source-based stable IDs, root cause, severity, fixes, evidence and exclusions without inheriting historical CLOSED or substituting adjacent tests. Prior actual complete human field review of 235 objects is preserved in backend_c-issues-r8-final-proof.json and backend_c-findings-r8-complete-read-input.json; proof chains to prior full field reads remain available. Current follow-up actually read all10 changed/new record objects completely (A015,B021,B030,C017,FP012,FP051,FP068,R003,R021,DB013) and every current metadata field with no omitted fields. 227 unchanged complete objects match the full R8 read input; fingerprint equality only binds that earlier actual human review and never creates semantic review. Current top-level237-ID Git path associations were actually read completely in four record ranges1-60,61-120,121-180,181-237; path association is not per-line attribution. A015 missing actual helper/test locations were corrected after reading helper360-560 and full80-line regression. Current ISSUES305 was actually fully read in bounded ranges1-76,77-152,153-228,229-305 after final gate text, with the clipped258-273 portion explicitly reread and final paragraph9/row66 reread after metadata/location corrections; final R003 row28/object was reread after correcting the CI line-count typo168 to actual143, and unchanged CI file1-143 was fully reread with the same SHA; findings record views preserve every field and omit whitespace only. C017 source293/newtest191/originalTEST018299/formal25 were actually read in full; true PG RED1top2sub and GREENrace9top2sub were executed without altering original TEST018 assertions/budget. R003 tool163/existingtest50 were actually fully read; fixed safe startup timeline and separate exact-owned fresh up/health/down evidence were read, 4Python PASS. Current DB report210 was fully read in ranges1-110,111-210 before B030 location synchronization; DB013 finding/proof and final238-line TEMP statistics test were actually fully read, exact sparse-frequency/index assertions retained, targeted real PG race1PASS0skip5.076s scoped separately from old fullPG-r4. FP012/051/068 named fixture behavior does not prove DB/supplier. All statement/count gates preserve their own version, original failures and external boundaries; source fingerprints do not create business verification. Parent independently owns Git/PR/CI and resource cleanup.",
       "call_chain": "",
       "validation": [
         "Report schema/count/alias/current location fingerprint checks PASS; this is not business test evidence",
@@ -99165,6 +99500,525 @@
       ],
       "exclusion": "",
       "findings": [],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "app/_components/skin-library.tsx",
+      "owner": "INDEPENDENT",
+      "source": "frontend-pages-r022-final-proof.json",
+      "kind": "proof",
+      "status": "rereviewed",
+      "read_ranges": [
+        [
+          1,
+          138
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "bbe116e9327451e8ff083d92028bba8756b3a8a982d94eee453d53f2ee122243",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [],
+      "exclusion": "",
+      "findings": [],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "browser-tests/asset-editor-recovery.browser.mts",
+      "owner": "INDEPENDENT",
+      "source": "frontend-pages-r022-final-proof.json",
+      "kind": "proof",
+      "status": "rereviewed",
+      "read_ranges": [
+        [
+          1,
+          113
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "d5ad574c4f7ffec181fab1ed66a918b904b45ad88d57b5a8e1ccd744feb7b4e0",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [],
+      "exclusion": "",
+      "findings": [],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "browser-tests/specific-journeys.browser.mts",
+      "owner": "INDEPENDENT",
+      "source": "frontend-pages-fp051-ci-final-proof.json",
+      "kind": "proof",
+      "status": "rereviewed",
+      "read_ranges": [
+        [
+          1,
+          103
+        ],
+        [
+          104,
+          194
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "c3909f6a2f5d510c06b52bcd55a01a1411dddced39354e142ca67ad1c4e3b109",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [],
+      "exclusion": "",
+      "findings": [],
+      "behavior_claim": true,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "app/_components/editor/recipe-editor.tsx",
+      "owner": "INDEPENDENT",
+      "source": "frontend-pages-fp051-ci-final-proof.json",
+      "kind": "proof",
+      "status": "rereviewed",
+      "read_ranges": [
+        [
+          1,
+          196
+        ],
+        [
+          197,
+          392
+        ],
+        [
+          393,
+          587
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "88eff242fae78cd8fbafe93f364dbf76cb9a6ad2e5fecf93c13ccd37de232164",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [],
+      "exclusion": "",
+      "findings": [],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "internal/httpapi/project_update_notification_worker.go",
+      "owner": "INDEPENDENT",
+      "source": "backend_c-c017-final-proof.json",
+      "kind": "proof",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          170
+        ],
+        [
+          171,
+          293
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "e5265d837af52abd68823aa6f4a674f66f5dfa0122f57325acdc999aaec0f350",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "source",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        "evidence/backend_c-project-update-clock-green-race.log:9top2sub0SKIP realPG18.6-race PASS83.745s",
+        "evidence/backend_c-project-update-clock-vet.log:go vet ./internal/httpapi exit0"
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-C-017"
+      ],
+      "behavior_claim": true,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "internal/httpapi/oct02_project_update_claim_clock_integration_test.go",
+      "owner": "INDEPENDENT",
+      "source": "backend_c-c017-final-proof.json",
+      "kind": "proof",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          110
+        ],
+        [
+          111,
+          191
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "0f9dd1029bdaf25d56a5c96c69492ec2858ff082c4f02ae5749523899716ea6d",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "test",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        "evidence/backend_c-project-update-clock-green-race.log:9top2sub0SKIP realPG18.6-race PASS83.745s",
+        "evidence/backend_c-project-update-clock-vet.log:go vet ./internal/httpapi exit0"
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-C-017"
+      ],
+      "behavior_claim": true,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "PROJECT_FOLLOW_NOTIFICATIONS.md",
+      "owner": "INDEPENDENT",
+      "source": "backend_c-c017-final-proof.json",
+      "kind": "proof",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          25
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "9c40347d0c38b623785fa50ea3ec7a6c909f67c9472065839750b20041c5d21a",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "documentation",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        "evidence/backend_c-project-update-clock-green-race.log:9top2sub0SKIP realPG18.6-race PASS83.745s",
+        "evidence/backend_c-project-update-clock-vet.log:go vet ./internal/httpapi exit0"
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-C-017"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "internal/httpapi/test018_project_update_notification_worker_integration_test.go",
+      "owner": "INDEPENDENT",
+      "source": "backend_c-c017-final-proof.json",
+      "kind": "proof",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          180
+        ],
+        [
+          181,
+          299
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "91efbf8657d3c58f3ca1a6d51fb31ead70c8c7ada5cd5568171a97013a7461ac",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "test",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        "evidence/backend_c-project-update-clock-green-race.log:9top2sub0SKIP realPG18.6-race PASS83.745s",
+        "evidence/backend_c-project-update-clock-vet.log:go vet ./internal/httpapi exit0"
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-C-017"
+      ],
+      "behavior_claim": true,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "internal/httpapi/project_update_notification_worker.go",
+      "owner": "INDEPENDENT",
+      "source": "database-c017-final-proof.json",
+      "kind": "proof",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          175
+        ],
+        [
+          176,
+          293
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "e5265d837af52abd68823aa6f4a674f66f5dfa0122f57325acdc999aaec0f350",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "Current clock_timestamp claim due predicate is reevaluated under READ COMMITTED after actual row lock waits, so current next_user_id and due time progress correctly. Lock serializes task, recipient-event unique index keeps dedupe, batch<=200 and future window/backoff retained. Scan now() is its own short autocommit statement; this change affects no schema/index/config.",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        {
+          "status": "PASS",
+          "evidence": "backend_c-project-update-clock-green-race.log",
+          "top_level_tests": 9,
+          "subtests": 2,
+          "skipped": 0,
+          "boundary": "Owner C executed real PG18.6 targeted race83.745s; this independent semantic reviewer did not rerun or infer new whole gates."
+        }
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-C-017"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "internal/httpapi/oct02_project_update_claim_clock_integration_test.go",
+      "owner": "INDEPENDENT",
+      "source": "database-c017-final-proof.json",
+      "kind": "proof",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          110
+        ],
+        [
+          111,
+          191
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "0f9dd1029bdaf25d56a5c96c69492ec2858ff082c4f02ae5749523899716ea6d",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "Real PG QueryTracer schedules actual before-claim old transaction and old row-lock waiter; pg_stat_activity Lock proves ordering, no SQL result replacement/sleep-based schedule. Assert201 two serial batches, future one hour remainspending0 and completed replay201unique. Nil queue/cache scope; no NATS/production verification.",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        {
+          "status": "PASS",
+          "evidence": "backend_c-project-update-clock-green-race.log",
+          "top_level_tests": 9,
+          "subtests": 2,
+          "skipped": 0,
+          "boundary": "Owner C executed real PG18.6 targeted race83.745s; this independent semantic reviewer did not rerun or infer new whole gates."
+        }
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-C-017"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "PROJECT_FOLLOW_NOTIFICATIONS.md",
+      "owner": "INDEPENDENT",
+      "source": "database-c017-final-proof.json",
+      "kind": "proof",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          25
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "9c40347d0c38b623785fa50ea3ec7a6c909f67c9472065839750b20041c5d21a",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "Formal current-clock claim contract and bounded/deduped due semantics fully reread.",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        {
+          "status": "PASS",
+          "evidence": "backend_c-project-update-clock-green-race.log",
+          "top_level_tests": 9,
+          "subtests": 2,
+          "skipped": 0,
+          "boundary": "Owner C executed real PG18.6 targeted race83.745s; this independent semantic reviewer did not rerun or infer new whole gates."
+        }
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-C-017"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "docs/audit/20261002/DATABASE_REVIEW.md",
+      "owner": "INDEPENDENT",
+      "source": "database-c017-final-proof.json",
+      "kind": "proof",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          105
+        ],
+        [
+          106,
+          202
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "91c0aca02d753cc10bf2534f1a68c11908c9aff661e5dc3e5de161df9ea700fc",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "Final202-line report fully reread; C017 minimal semantic and migration boundary addition; current279/35832line owned scope; existing structure/test/production limitations retained.",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        {
+          "status": "PASS",
+          "evidence": "backend_c-project-update-clock-green-race.log",
+          "top_level_tests": 9,
+          "subtests": 2,
+          "skipped": 0,
+          "boundary": "Owner C executed real PG18.6 targeted race83.745s; this independent semantic reviewer did not rerun or infer new whole gates."
+        }
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-C-017"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "internal/httpapi/log_pagination_integration_test.go",
+      "owner": "INDEPENDENT",
+      "source": "database-log-stats-final-proof.json",
+      "kind": "proof",
+      "status": "rechecked",
+      "read_ranges": [
+        [
+          1,
+          140
+        ],
+        [
+          141,
+          238
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "29e72c3731a3464f6e0a045864a7c6720de0fd75d92b660589f47af5751b6626",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "{'symbols': ['TestLogPaginationSearchAndCleanupStayIndexedAtScaleIntegration', 'logScalePlan'], 'responsibility': 'Isolated real PostgreSQL TEMP 1.3M-row log keyset/search/cleanup regression; no production schema/statistics/query changes.', 'call_chain': ['parseLogPageRequest', 'Server.loadLogPage', 'logPageSQL', 'logCleanupStatements'], 'semantics': 'Four TEMP search_document statistics targets 10000 request samples larger than each known fixture; assert actual pg_stats lexeme and .0001/.001 frequencies within float4 tolerance before retaining original GIN/noSeqScan plan assertions. MaxConns=MinConns=1 keeps temp schema and pg_my_temp_schema query in the owning session; original context120s, keyset/disjoint pages and exactly1000 cleanup retained.'}",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        {
+          "status": "PASS",
+          "command": "MCMODS_RUN_DB_INTEGRATION=1 go test -race ./internal/httpapi -run '^TestLogPaginationSearchAndCleanupStayIndexedAtScaleIntegration$' -count=1 -v",
+          "top_level_tests": 1,
+          "skipped": 0,
+          "evidence": "database-log-stats-targeted-green.log",
+          "boundary": "Owned loopback PostgreSQL service, single-session TEMP tables only. Does not inherit previous r4 whole-suite result for this changed fixture."
+        },
+        {
+          "status": "PASS",
+          "command": "git diff --check"
+        },
+        {
+          "status": "FAIL",
+          "evidence": "backend-ci-adab-push-pg-mcp.log",
+          "boundary": "Original adab683 push CI observed default ANALYZE sparse-term miss, estimated5000, page Btree and249975 filtered rows; PR CI for same source passed. Retain both outcomes; do not describe all CI green."
+        },
+        {
+          "status": "PASS",
+          "evidence": "database-log-stats-probe.log",
+          "boundary": "Private controlled missing-statistics replay reproduced original plan; actual default100 local random sample passed; full TEMP target10000 yielded known frequency and GIN naturally. Controlled replay is not claimed to be the original random-sampling RED."
+        }
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT02-DB-013"
+      ],
       "behavior_claim": false,
       "deletion_reviewed": false,
       "deletion_reason": ""

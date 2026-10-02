@@ -1,28 +1,29 @@
 {
   "schema_version": 1,
-  "captured_at": "2026-10-02T10:05:56.364064+00:00",
+  "captured_at": "2026-10-02T12:03:01.481944+00:00",
   "branch": "codex/full-audit-20261002",
   "baseline": {
     "mcmods-cn-backend": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
     "mcmods-cn-frontend": "262e1c0136bfed4624a011cf5f445b1d71cf93c0"
   },
-  "counting_rule": "本次真实稳定OCT02-ID按canonical计，aliases/审查集合/未证实候选/证伪均不计确认数；不同handler问题不因共享技术家族自动合一。历史449原条目独立LEGACY_REVIEW，不按CLOSED继承、不加入这里新增数。",
-  "record_count": 234,
-  "confirmed_canonical_count": 224,
+  "counting_rule": "本次真实稳定OCT02-ID按canonical计，aliases/审查集合/未证实候选/证伪均不计确认数；不同handler问题不因共享技术家族自动合一。历史449原条目独立LEGACY_REVIEW，不按CLOSED继承、不加入这里新增数。 confirmed是本表canonical计数标志；DB013已确认辅助夹具纠正以fixture_correction_confirmed=true单列，confirmed=false表示不重复新增产品canonical，关联原PERF033。",
+  "record_count": 237,
+  "confirmed_canonical_count": 226,
   "confirmed_severity_counts": {
     "P1": 83,
-    "P2": 140,
+    "P2": 142,
     "P3": 1
   },
   "status_counts": {
-    "fixed_verified": 170,
+    "fixed_verified": 172,
     "alias": 4,
     "fixed_static_regression_pass": 5,
     "unconfirmed_candidate": 3,
     "fixed_documentation": 1,
     "fixed_partial_verification": 48,
     "scope_only": 2,
-    "ruled_out": 1
+    "ruled_out": 1,
+    "test_fixture_correction": 1
   },
   "source_records": {
     "backend:docs/audit/20261002/ROOT_PROGRESS.md": {
@@ -46,12 +47,12 @@
       "lines": 114
     },
     "task:frontend_pages-progress.md": {
-      "sha256": "2873e2ea791ad8dce21877be0e630f31283a123e03057043b015a3a487aeacf9",
-      "lines": 214
+      "sha256": "ce2f122d6e7e5a02700ca2621e9d8d653df0318b4d0b5787fc8fea8ce6f9803d",
+      "lines": 222
     },
     "task:backend_c-findings.json": {
-      "sha256": "11ceeb1a9281e2aafa710942313ef03b70092a9621e4589c7d213c1e3c55a7d0",
-      "lines": 329
+      "sha256": "3e16c951b992c7cd90ec81c65ec56a15f4a52f1b89eabd4ac504e10039400f28",
+      "lines": 349
     },
     "task:backend_c-b028-finding.json": {
       "sha256": "54de21489f99e8e33c665804e2ab3024d38aa39823a4b1a92252b27619c62c36",
@@ -70,8 +71,8 @@
       "lines": 111
     },
     "task:root.json": {
-      "sha256": "b4caec097a165c520e1ece75f0e49216956bdbdf1d9aae11ba127c6fc70117fb",
-      "lines": 4214
+      "sha256": "a3080f51a2715462ef6def6bccd87acd52aa1c872c518cdcbea38695b9daa51c",
+      "lines": 4216
     },
     "task:backend_a.json": {
       "sha256": "443b7d3cafa7a1b78dcc7085debd391496e03d7fd71f1e9ce5e17e3859529d39",
@@ -90,8 +91,8 @@
       "lines": 6774
     },
     "task:frontend_pages.json": {
-      "sha256": "f1b11764e7af46f0853bdacbc304181f28ea364e701ac086ccb1dba7c9f1a582",
-      "lines": 11037
+      "sha256": "0a350a4200b469d74ba2396d3bc1681d8b6b51677629a40e8377a8789f9aacea",
+      "lines": 11076
     },
     "task:frontend_shared.json": {
       "sha256": "6187443e5da00b294bb00d0f3028ab0bf22d7ad21820a8d6d927e78de39ed070",
@@ -100,10 +101,34 @@
     "task:frontend-pages-specific-journeys-proof.json": {
       "sha256": "1da514fb7c03cf0af6e91548630b3f3ac33eef66129503e57a66355f9af390ec",
       "lines": 105
+    },
+    "task:frontend-pages-r022-final-proof.json": {
+      "sha256": "8e7349f2bc05d6c3b42d6105fd68016cf5935346e2830f110b25263ab26be8b4",
+      "lines": 109
+    },
+    "task:backend_c-c017-final-proof.json": {
+      "sha256": "29b4502619e6cbe2da1d6c1e3bf2db549f529a61b7a6ae0739527fbccc95c33f",
+      "lines": 190
+    },
+    "task:frontend-pages-fp051-ci-final-proof.json": {
+      "sha256": "572453665076d4f480a2a6f73f00ee826c0528da93a0e361f425b69de0d30482",
+      "lines": 138
+    },
+    "task:backend_c-readiness-final-proof.json": {
+      "sha256": "8e5b7a27465a05652249a5074c8036a1dd77f9188b6b3a79566c228ed866030d",
+      "lines": 87
+    },
+    "task:database-log-stats-finding.json": {
+      "sha256": "8bb9ab558a52fe13662320c974e5ba5eaf2c9ae0ecee7b86dd0ea08930b04869",
+      "lines": 47
+    },
+    "task:database-log-stats-final-proof.json": {
+      "sha256": "2f131410c1a8305ba7500af7066643d9bb6243d8b76c32988da66ceae808b6c5",
+      "lines": 69
     }
   },
   "external_boundary": "仅专用隔离PG18、controlled HTTP/NATS/Typesense/Redis与production UI fixture，另有实际自有API/PG登录收藏会话联通。无生产访问、真实付费AI、线上重译、真实OSS或供应商质量/账单证明。",
-  "global_gate": "默认go test/race均exit0（1239 topPASS/554 topSKIP，子785PASS/76SKIP），vet/build0；实际PG18 r2完整1793发现/调用，76批0FAIL，1786topPASS/7SKIP退出0，1194当前Go指纹与r2 snapshot一致；Typesense29.0真实回环服务加searchindex整包racePASS6.822s。7SKIP为外部样本/服务场景，不称通过。firstPG1749/74批8FAIL保留。实际API登录/收藏/退出双语言移动live1topPASS3.441s（用例3.066s），无本项目API fixture。R6 unit344PASS0SKIP/build0与生产产物字节保持；最终R7 Chromium73PASS/0FAIL/0SKIP180.621399795s，全量lint/type退出0，647指纹drift[]，包含FP012/051/068三专用实际fixture旅程。R6 BUILD_ID09:17:13晚于最后global08:54源码。r5此前69PASS含FP050/FP087，但不覆盖最后global保护，版本界限保留。PR与CI尚未验证，不把局部或测试库PASS推定全部业务/生产健康。",
+  "global_gate": "当前1195Go（含最终stats fixture）质量r5默认unit/race各exit0（1240topPASS/554topSKIP，787subPASS/76subSKIP；race22packagePASS/9skip），vet/build0、默认语句覆盖30.8%。C017真实PG18.6定向-race9top2sub0SKIP PASS83.745s；新PG-r3全1794/76批在平台断线后进程终止（停batch17，未取得终态），不能称通过或已确认业务失败；新PG-r4已实际exit0：1794发现/调用、76批0失败，1782topPASS/12topSKIP，1195当次源码指纹无漂移；之后仅log_pagination_integration_test.go统计fixture发生变化，新fixture-race1top0SKIP PASS5.076s及质量r5单列，不把旧完整PG门拼成新版本单次全通过；7外部/Typesense条件SKIP与5显式owned目标保护SKIP保留，5项显式owned补充串行-race门已实际5top/24sub/0SKIP PASS（database1.479s/httpapi40.720s/inventory1.090s），不能改写r4原始SKIP或拼成单次完整零skip。BE首远端PG1793/76批真实1批FAIL（TEST018 pending200/201）与C017受控旧RED1top2sub1.969s保留；旧1194Go/1793PG-r2仅绑定修改前版本。当前FE R9 lint/type/unitexit0、344unitPASS0SKIP、Chromium74PASS0FAIL0SKIP194.434861243s，647当前指纹无漂移；仅type-options测试同步改变，R8生产产物可复用。最新真实R5 API联通1PASS3.873506876s（case3.52344232s）无项目API fixture，范围为登录/收藏/删除/退出及双语言移动。FE首远端quality72PASS1FAIL与后续73PASS1FAIL均保留，分别产品就绪门修复和测试options同步修复。根实际核验FE9f0217a六check通过；BEadab683的PR检查全通过，但同HEAD push PG另出现LogPaginationSearchAndCleanupStayIndexedAtScaleIntegration计划断言失败（合计9成功/1失败），稀疏needle夹具采样缺失已独立修正DB013，当前真实PG-race1top0skip5.076s；仅辅助测试纠正，不增产品canonical，不能用PR或本地成功抹除原失败。后续新HEAD逐check CI另列；生产健康、真实供应商/AI质量与账单未验证。根最终exact-owner收尾PASS：累计16任务容器已删除（原10+readiness3+C0173），原3云服务保持、任务live进程0、6旧合成env精确移除、私有修复备份保留。当前远端结果只绑定adab683 PR5success/push4success1FAIL；后续HEAD不继承这些结果。",
   "findings": [
     {
       "id": "OCT02-A-001",
@@ -606,6 +631,16 @@
           "repo": "mcmods-cn-backend",
           "path": "internal/httpapi/comment_handlers.go",
           "current_sha256": "1dadeb2d18b7462553730c7ca6d6b9e1e7530be9a7e71b2005d78a70c607dc1b"
+        },
+        {
+          "repo": "mcmods-cn-backend",
+          "path": "internal/httpapi/comment_detail_handlers.go",
+          "current_sha256": "5a9f60df3c380a0139173bae9dcd439978c89d16db84704ed4a2edfc1e637dc4"
+        },
+        {
+          "repo": "mcmods-cn-backend",
+          "path": "internal/httpapi/oct02_comment_preview_integration_test.go",
+          "current_sha256": "0350422a72298fcc0b56ff0444f4b9f98b35d515108c05cfbce4937b39f35074"
         }
       ],
       "remaining_boundary": "全库最终回归与 CI 单列；本条局部证据不证明生产健康、真实供应商或真实 AI 翻译质量/费用。",
@@ -2380,7 +2415,7 @@
         {
           "repo": "mcmods-cn-backend",
           "path": "internal/httpapi/project_update_notification_worker.go",
-          "current_sha256": "67b6a464dbae34f0ae9bcaad5d895fae60e19d932fa57849bcf68693f39a5fb1"
+          "current_sha256": "e5265d837af52abd68823aa6f4a674f66f5dfa0122f57325acdc999aaec0f350"
         },
         {
           "repo": "mcmods-cn-backend",
@@ -2699,7 +2734,7 @@
         {
           "repo": "mcmods-cn-backend",
           "path": "docs/audit/20261002/DATABASE_REVIEW.md",
-          "current_sha256": "11d767c2676f8aaeb08b52d3a730f500d1c998247a796b91c349d02f38a5d94e"
+          "current_sha256": "aec45d12bdc0ee2362f665eb6e580c706c591344845004eddbdd90be7e429a73"
         },
         {
           "repo": "mcmods-cn-backend",
@@ -3614,6 +3649,56 @@
       "related_findings": [],
       "summary_zh": "activity load producer提前失败后无receiver，unbuffered发送不理ctx；peer cancel+cancellable send安全收尾，2000events/20producer PG-race3top通过，无旧故障注入；可选site聚合42883未验证。",
       "deduplication_note": "辅助测试收尾修复，仅此C ID；不再计root辅助修复。"
+    },
+    {
+      "id": "OCT02-C-017",
+      "severity": "P2",
+      "status": "fixed_verified",
+      "kind": "defect",
+      "confirmed": true,
+      "root_cause_and_impact": "通知worker按事务启动时now()判断到期；较早启动的事务晚领取或等待行锁后，把另一个worker刚提交的下一批误判未到期，返回成功但201接收者仅送200。",
+      "fix_and_validation": "仅领取条件使用当前数据库clock_timestamp()，保留200人批次行锁、唯一通知、未来窗口和退避；真实PG18.6两种受控交错旧RED同CI状态，修后-race9top2sub0SKIP PASS83.745s，原TEST018过滤/缓存/失败重试/旧processing恢复/隐藏目标断言不改。未来任务零发送和已完成重放201唯一通过，vet0。",
+      "source_records": [
+        {
+          "source": "task:backend_c-findings.json",
+          "line": null
+        },
+        {
+          "source": "task:backend_c-c017-final-proof.json",
+          "line": null
+        }
+      ],
+      "locations": [
+        {
+          "repo": "mcmods-cn-backend",
+          "path": "internal/httpapi/project_update_notification_worker.go",
+          "current_sha256": "e5265d837af52abd68823aa6f4a674f66f5dfa0122f57325acdc999aaec0f350"
+        },
+        {
+          "repo": "mcmods-cn-backend",
+          "path": "internal/httpapi/oct02_project_update_claim_clock_integration_test.go",
+          "current_sha256": "0f9dd1029bdaf25d56a5c96c69492ec2858ff082c4f02ae5749523899716ea6d"
+        },
+        {
+          "repo": "mcmods-cn-backend",
+          "path": "PROJECT_FOLLOW_NOTIFICATIONS.md",
+          "current_sha256": "9c40347d0c38b623785fa50ea3ec7a6c909f67c9472065839750b20041c5d21a"
+        }
+      ],
+      "remaining_boundary": "扫描器15秒可能恢复遗漏批次，故P2延迟/假无任务成功，不称永久丢通知。真实隔离PG与确定性执行交错通过；该新回归queue为nil，不据此证明实际NATS分发/生产吞吐。根PG-r4已绑定1195源码通过1794/76批（12SKIP明确保留），本条两交错及原TEST018均PASS；远端同HEAD其他日志计划fixture失败单列，不扩大为全业务或全CI健康。",
+      "baseline_red": [
+        "evidence/backend-ci-pg-first-failure.log remoteTEST0181FAIL; evidence/backend_c-project-update-clock-red.log deterministic1top2subFAIL1.969s",
+        "两受控sub：旧事务晚SELECT、旧事务确实等任务行锁，均pending200而应completed201；1top2subFAIL1.969s exit1"
+      ],
+      "validation": [
+        "evidence/backend_c-project-update-clock-green-race.log:realPG18.6-race9top2sub0SKIP PASS83.745s; both controlled schedules/future due/replay and originalTEST018 full assertions",
+        "evidence/backend_c-project-update-clock-vet.log:go vet ./internal/httpapi exit0",
+        "evidence/final-pg18-db-suite-r4.log:C017top1.57s/two controlledsubsPASS,originalTEST0181.60sPASS;whole1794/76/0failed1782PASS12SKIPexit0source1195drift[]"
+      ],
+      "deployment": "无需schema/API/config迁移；仅worker代码。",
+      "related_findings": [
+        "OCT02-B-021"
+      ]
     },
     {
       "id": "OCT02-DB-001",
@@ -4573,7 +4658,7 @@
       "kind": "defect",
       "confirmed": true,
       "root_cause_and_impact": "切换界面语言重载内容偏好，覆盖未保存选择。",
-      "fix_and_validation": "production picker选fr-FR/ja-JP后切zh，选择保留且不多GET，PUT精确primary/secondary值；专用Chromium断言已实际通过。 targeted3PASS/0FAIL/0SKIP11.541s；最终R7 whole73PASS/0SKIP180.621s。",
+      "fix_and_validation": "production picker选fr-FR/ja-JP后切zh，选择保留且不多GET，PUT精确primary/secondary值；专用Chromium断言已实际通过；最初专用3case PASS11.541s，当前R9完整74PASS/0FAIL/0SKIP194.434861243s包括此命名断言。",
       "source_records": [
         {
           "source": "task:frontend_pages-progress.md",
@@ -4608,17 +4693,18 @@
         {
           "repo": "mcmods-cn-frontend",
           "path": "browser-tests/specific-journeys.browser.mts",
-          "current_sha256": "9362f7dc3a9c37ea840c54e98b87ac945cf1be3e1dcda99e4068571a5fddf69e"
+          "current_sha256": "c3909f6a2f5d510c06b52bcd55a01a1411dddced39354e142ca67ad1c4e3b109"
         }
       ],
       "remaining_boundary": "只验证命名偏好选择/切界面语言/保存请求。合成API回复不证明真实设置落库，也不涵盖全部支持语言。",
       "validation": [
         "evidence/frontend-pages-specific-journeys-third.log:3PASS0FAIL0SKIP11.541580157s",
         "evidence/frontend-final-r7-browser.log:73PASS0FAIL0SKIP180.621399795s",
-        "task:frontend-pages-specific-journeys-proof.json:首两轮fixture失败保留，非业务RED"
+        "task:frontend-pages-specific-journeys-proof.json:首两轮fixture失败保留，非业务RED",
+        "evidence/frontend-final-r9-browser.log:74PASS0FAIL0SKIP194.434861243s, named current194-line specific journeys assertions; R8 production reused, synthetic API boundary unchanged"
       ],
       "related_findings": [],
-      "summary_zh": "切换界面语言重载内容偏好，覆盖未保存选择。；production picker选fr-FR/ja-JP后切zh，选择保留且不多GET，PUT精确primary/secondary值；专用Chromium断言已实际通过。；专用3case及R7 whole已通过，合成API不证明DB/供应商。"
+      "summary_zh": "切换界面语言重载内容偏好，覆盖未保存选择；production picker选fr-FR/ja-JP后切zh，选择保留且不多GET，PUT精确primary/secondary值；专用Chromium断言已实际通过；专用3case及当前R9 whole已通过，合成API不证明DB/供应商。"
     },
     {
       "id": "OCT02-FP-013",
@@ -5214,7 +5300,7 @@
         {
           "repo": "mcmods-cn-frontend",
           "path": "app/_components/skin-library.tsx",
-          "current_sha256": "33c80e480210273e228503704e2f581c2c889f0d2be7fa657e7b18744985d23f"
+          "current_sha256": "bbe116e9327451e8ff083d92028bba8756b3a8a982d94eee453d53f2ee122243"
         },
         {
           "repo": "mcmods-cn-frontend",
@@ -6360,7 +6446,7 @@
         {
           "repo": "mcmods-cn-frontend",
           "path": "app/_components/skin-library.tsx",
-          "current_sha256": "33c80e480210273e228503704e2f581c2c889f0d2be7fa657e7b18744985d23f"
+          "current_sha256": "bbe116e9327451e8ff083d92028bba8756b3a8a982d94eee453d53f2ee122243"
         },
         {
           "repo": "mcmods-cn-frontend",
@@ -6410,7 +6496,7 @@
         {
           "repo": "mcmods-cn-frontend",
           "path": "docs/frontend-state-recovery.md",
-          "current_sha256": "7eaf01850bf14fc99ae572c68bf9ff58a085c63a8ab8bd0e44553a1d032cda8a"
+          "current_sha256": "793506fbce4585e999d6857dc6f35cc286d58ddcd0908f910f1311f4f1c3671c"
         }
       ],
       "remaining_boundary": "只覆盖已识别filled accent状态与实际双theme断言，不承诺全站任意配色、第三方图片或全部WCAG条款已验收。",
@@ -6427,7 +6513,7 @@
       "kind": "defect",
       "confirmed": true,
       "root_cause_and_impact": "imported recipe编辑把canonical type当成真实type publicId，导致编辑路由错误。",
-      "fix_and_validation": "production资源卡打开popup；首次recipeGET503可见Retry，取得真实typeID后进入editor；首次PUT503保留draft，第二PUT精确type/template/baseRevision/dirtyLocale，成功关闭popup。 targeted3PASS/0FAIL/0SKIP11.541s；最终R7 whole73PASS/0SKIP180.621s。",
+      "fix_and_validation": "production资源卡打开popup；首次recipeGET503可见Retry，取得真实typeID后进入editor；首次PUT503保留draft，第二PUT精确type/template/baseRevision/dirtyLocale，成功关闭popup；最初专用3case PASS11.541s，当前R9完整74PASS/0FAIL/0SKIP194.434861243s包括此命名断言。",
       "source_records": [
         {
           "source": "task:frontend_pages-progress.md",
@@ -6446,6 +6532,10 @@
         {
           "source": "task:frontend-pages-specific-journeys-proof.json",
           "line": null
+        },
+        {
+          "source": "task:frontend-pages-fp051-ci-final-proof.json",
+          "line": null
         }
       ],
       "locations": [
@@ -6457,17 +6547,19 @@
         {
           "repo": "mcmods-cn-frontend",
           "path": "browser-tests/specific-journeys.browser.mts",
-          "current_sha256": "9362f7dc3a9c37ea840c54e98b87ac945cf1be3e1dcda99e4068571a5fddf69e"
+          "current_sha256": "c3909f6a2f5d510c06b52bcd55a01a1411dddced39354e142ca67ad1c4e3b109"
         }
       ],
       "remaining_boundary": "实际UI读取/路由解析/提交/错误/结果闭环使用合成API；服务端授权、审核policy及数据库持久化另单列，不由fixture证明。",
       "validation": [
         "evidence/frontend-pages-specific-journeys-third.log:3PASS0FAIL0SKIP11.541580157s",
         "evidence/frontend-final-r7-browser.log:73PASS0FAIL0SKIP180.621399795s",
-        "task:frontend-pages-specific-journeys-proof.json:首两轮fixture失败保留，非业务RED"
+        "task:frontend-pages-specific-journeys-proof.json:首两轮fixture失败保留，非业务RED",
+        "evidence/frontend-final-r9-browser.log:74PASS0FAIL0SKIP194.434861243s, named current194-line specific journeys assertions; R8 production reused, synthetic API boundary unchanged"
       ],
       "related_findings": [],
-      "summary_zh": "imported recipe编辑把canonical type当成真实type publicId，导致编辑路由错误。；production资源卡打开popup；首次recipeGET503可见Retry，取得真实typeID后进入editor；首次PUT503保留draft，第二PUT精确type/template/baseRevision/dirtyLocale，成功关闭popup。；专用3case及R7 whole已通过，合成API不证明DB/供应商。"
+      "summary_zh": "imported recipe编辑把canonical type当成真实type publicId，导致编辑路由错误；production资源卡打开popup；首次recipeGET503可见Retry，取得真实typeID后进入editor；首次PUT503保留draft，第二PUT精确type/template/baseRevision/dirtyLocale，成功关闭popup；专用3case及当前R9 whole已通过，合成API不证明DB/供应商。",
+      "related_test_regression": "第二次实际FE远端quality73PASS1FAIL：旧test等待recipe name但不等待独立type options，disabled select尚仅loading option时inputValue为空。受控held-options旧断言RED，等待真实type option attached后保留原精准type/PUT/baseRevision/draft断言，targeted3PASS11.402s及R9全74PASS；生产0改，不再新增产品缺陷计数。"
     },
     {
       "id": "OCT02-FP-052",
@@ -7091,7 +7183,7 @@
       "kind": "defect",
       "confirmed": true,
       "root_cause_and_impact": "初次导入jobPOST等待期间仍可再次drop，导致重复上传/覆盖当前任务。",
-      "fix_and_validation": "native DragEvent同tick双drop及初次jobPOST未返回时第三drop，presign/jobPOST各恰好1；响应后仅poll job-one，完成恢复input且次数仍1。 targeted3PASS/0FAIL/0SKIP11.541s；最终R7 whole73PASS/0SKIP180.621s。",
+      "fix_and_validation": "native DragEvent同tick双drop及初次jobPOST未返回时第三drop，presign/jobPOST各恰好1；响应后仅poll job-one，完成恢复input且次数仍1；最初专用3case PASS11.541s，当前R9完整74PASS/0FAIL/0SKIP194.434861243s包括此命名断言。",
       "source_records": [
         {
           "source": "task:frontend_pages-progress.md",
@@ -7121,17 +7213,18 @@
         {
           "repo": "mcmods-cn-frontend",
           "path": "browser-tests/specific-journeys.browser.mts",
-          "current_sha256": "9362f7dc3a9c37ea840c54e98b87ac945cf1be3e1dcda99e4068571a5fddf69e"
+          "current_sha256": "c3909f6a2f5d510c06b52bcd55a01a1411dddced39354e142ca67ad1c4e3b109"
         }
       ],
       "remaining_boundary": "实际React同步排他与浏览器IndexedDB流程通过；OSS去重、ready job为合成响应，不证明真实ZIP解析/worker或外部请求严格一次。",
       "validation": [
         "evidence/frontend-pages-specific-journeys-third.log:3PASS0FAIL0SKIP11.541580157s",
         "evidence/frontend-final-r7-browser.log:73PASS0FAIL0SKIP180.621399795s",
-        "task:frontend-pages-specific-journeys-proof.json:首两轮fixture失败保留，非业务RED"
+        "task:frontend-pages-specific-journeys-proof.json:首两轮fixture失败保留，非业务RED",
+        "evidence/frontend-final-r9-browser.log:74PASS0FAIL0SKIP194.434861243s, named current194-line specific journeys assertions; R8 production reused, synthetic API boundary unchanged"
       ],
       "related_findings": [],
-      "summary_zh": "初次导入jobPOST等待期间仍可再次drop，导致重复上传/覆盖当前任务。；native DragEvent同tick双drop及初次jobPOST未返回时第三drop，presign/jobPOST各恰好1；响应后仅poll job-one，完成恢复input且次数仍1。；专用3case及R7 whole已通过，合成API不证明DB/供应商。"
+      "summary_zh": "初次导入jobPOST等待期间仍可再次drop，导致重复上传/覆盖当前任务；native DragEvent同tick双drop及初次jobPOST未返回时第三drop，presign/jobPOST各恰好1；响应后仅poll job-one，完成恢复input且次数仍1；专用3case及当前R9 whole已通过，合成API不证明DB/供应商。"
     },
     {
       "id": "OCT02-FP-069",
@@ -9231,12 +9324,17 @@
       "status": "fixed_verified",
       "kind": "defect",
       "confirmed": true,
-      "root_cause_and_impact": "测试配置可能读取祖先.env；增加显式跳过选项及带身份校验的专用环境工具。",
-      "fix_and_validation": "配置测试、Python三项及真实空库初始化通过；无需真实凭据。",
+      "root_cause_and_impact": "测试配置可能读取祖先.env；增加显式跳过选项及带身份校验的专用环境工具。后续首次up误把入口初始化临时Unix-socket PG就绪当作最终TCP就绪，实际host连接失败；固定启动日志确认临时ready10:48:16.695、最终TCP首次listen10:48:17.111",
+      "fix_and_validation": "隔离配置测试与空库初始化通过；readiness仅加容器内-h127.0.0.1，保留60次预算、owner验证和显式自有库初始化。同机制CI三个PG health probe已同步TCP（当前143行已全读；远端该工具改动后CI另列）。四既有Python测试PASS0.001s；新独立3容器up/health/down真实通过（PG18.6、287base tables、RedisPONG、NATS TCP INFO），仅新增3精确owner/id当时清理、C017原3为全库回归保留；根最终收尾证据确认累计16任务容器已删除/原3云服务保持。未执行socket0/TCP1故障注入；原真实up失败和时间线保留。",
       "source_records": [
         {
           "source": "backend:docs/audit/20261002/ROOT_PROGRESS.md",
           "line": 18
+        },
+        {
+          "source": "task:backend_c-readiness-final-proof.json",
+          "issue": "OCT02-R-003",
+          "evidence": "evidence/backend_c-owned-pg-startup-readiness.json"
         }
       ],
       "locations": [
@@ -9248,7 +9346,12 @@
         {
           "repo": "mcmods-cn-backend",
           "path": "tools/testing/isolated_environment.py",
-          "current_sha256": "d7b9484375d35c6985f11d89b53463f3e670043686d1ff6f37076fa1b9ba528f"
+          "current_sha256": "1ad76dcc16c96e42ad461e68e972d328abfc01e993c19286472a49066eccae0d"
+        },
+        {
+          "repo": "mcmods-cn-backend",
+          "path": ".github/workflows/ci.yml",
+          "current_sha256": "2c0ae3e1f051c18c7d3e8b594df7dd447dc5b823e88b44bb75d954ee58660b1e"
         }
       ],
       "remaining_boundary": "全库最终回归与 CI 单列；本条局部证据不证明生产健康、真实供应商或真实 AI 翻译质量/费用。",
@@ -9607,11 +9710,13 @@
         {
           "repo": "mcmods-cn-frontend",
           "path": "app/_components/skin-library.tsx",
-          "current_sha256": "33c80e480210273e228503704e2f581c2c889f0d2be7fa657e7b18744985d23f"
+          "current_sha256": "bbe116e9327451e8ff083d92028bba8756b3a8a982d94eee453d53f2ee122243"
         }
       ],
-      "remaining_boundary": "皮肤列表 GET retry保留filters实际浏览器通过；详情/档案其它分支静态复查，不称完整交互矩阵通过。",
-      "related_findings": []
+      "remaining_boundary": "皮肤列表GET重试保持filters具R8真实production fixture断言；初次身份未ready输入丢失另由R022修复。皮肤详情/播放器档案其它分支仅静态复核，仍保留partial，不称完整资产交互矩阵通过。",
+      "related_findings": [
+        "OCT02-R-022"
+      ]
     },
     {
       "id": "OCT02-R-017",
@@ -9828,10 +9933,14 @@
       "kind": "defect",
       "confirmed": true,
       "root_cause_and_impact": "隔离测试环境down移除已确认归属的容器及凭据后，因目录保留修复备份而rmdir ENOTEMPTY报错。",
-      "fix_and_validation": "仅捕获ENOTEMPTY/EEXIST保留额外文件，其他OSError继续传播；所有owner检查仍先于任何rm，不递归删除。新增保留备份测试旧RED1error/3PASS→新4PASS0.001s；实际7任务容器、4进程已按exact身份收尾，原3云服务保持，备份保留。",
+      "fix_and_validation": "仅捕获ENOTEMPTY/EEXIST保留额外文件，其他OSError继续传播；所有owner检查仍先于任何rm，不递归删除。保留备份旧RED1error/3PASS→新4PASS0.001s；最初7/后续10均为历史，最终exact-owner收尾累计16任务容器（10旧+3readiness+3C017）、原3云服务保持、任务live进程0、6旧合成env精确移除，私有修复备份保留。",
       "source_records": [
         {
           "source": "root coordination:2026-10-02",
+          "line": null
+        },
+        {
+          "source": "task:evidence/final-owned-resource-cleanup.json",
           "line": null
         }
       ],
@@ -9839,7 +9948,7 @@
         {
           "repo": "mcmods-cn-backend",
           "path": "tools/testing/isolated_environment.py",
-          "current_sha256": "d7b9484375d35c6985f11d89b53463f3e670043686d1ff6f37076fa1b9ba528f"
+          "current_sha256": "1ad76dcc16c96e42ad461e68e972d328abfc01e993c19286472a49066eccae0d"
         },
         {
           "repo": "mcmods-cn-backend",
@@ -9847,24 +9956,2878 @@
           "current_sha256": "930ed21d6dc54918fd836e869210824c48b0760cc4ed9f5898bf433f7f38e521"
         }
       ],
-      "remaining_boundary": "本工具边界是测试资源收尾；不操作生产或用户原资源。其他OSError传播具源码证据，未逐种故障注入；一个已退出子进程为PID1待回收defunct，无running任务进程。",
+      "remaining_boundary": "仅收尾明确owned测试资源；生产或用户原资源未操作。其他OSError传播具源码证据，未逐种故障注入；早期退出子进程的PID1回收行为不作承诺。终态资源事实使用final-owned-resource-cleanup.json，不将历史7误作当前总数。",
       "validation": [
         "evidence/root-cleanup-preserved-backup-red.log:4tests/1ERROR DirectoryNotEmpty",
         "evidence/root-cleanup-preserved-backup-green.log:4PASS0.001s",
-        "evidence/owned-resource-cleanup.json:7owned removed/4process stopped/original3services unchanged/backups preserved"
+        "evidence/owned-resource-cleanup.json:7owned removed/4process stopped/original3services unchanged/backups preserved",
+        "evidence/backend_c-readiness-fresh-cleanup.json:only3newexactownedremoved;C017existing3remainrunning",
+        "evidence/final-owned-resource-cleanup.json:PASS16ownedremoved/original3stillrunning/0runningtaskliveprocesses/privatebackupspreserved"
       ],
       "baseline_red": "确定性Python资源归属/备份回归，Docker调用为受控mock；实际容器清理证据独立记录。"
+    },
+    {
+      "id": "OCT02-R-022",
+      "severity": "P2",
+      "status": "fixed_verified",
+      "kind": "defect",
+      "confirmed": true,
+      "root_cause_and_impact": "皮肤列表初次认证未ready仍接受输入，确认身份后actor-key重新挂载清空已输入筛选；首次远端CI出现空input与原retry保留断言失败。",
+      "fix_and_validation": "认证确认前native fieldset disabled={!ready}，保持账号隔离key、原布局及loading；旧R6 held-auth浏览器明确RED1FAIL，新增控件禁用/不发skins请求/ready后精确query断言与原retry断言在fresh R8均通过。全套74PASS/0FAIL/0SKIP 188.529s，unit344/build/lint/type退出0。",
+      "source_records": [
+        {
+          "source": "task:frontend-pages-r022-final-proof.json",
+          "line": null
+        }
+      ],
+      "locations": [
+        {
+          "repo": "mcmods-cn-frontend",
+          "path": "app/_components/skin-library.tsx",
+          "current_sha256": "bbe116e9327451e8ff083d92028bba8756b3a8a982d94eee453d53f2ee122243"
+        },
+        {
+          "repo": "mcmods-cn-frontend",
+          "path": "browser-tests/asset-editor-recovery.browser.mts",
+          "current_sha256": "d5ad574c4f7ffec181fab1ed66a918b904b45ad88d57b5a8e1ccd744feb7b4e0"
+        },
+        {
+          "repo": "mcmods-cn-frontend",
+          "path": "docs/frontend-state-recovery.md",
+          "current_sha256": "793506fbce4585e999d6857dc6f35cc286d58ddcd0908f910f1311f4f1c3671c"
+        }
+      ],
+      "remaining_boundary": "实际Chromium production React配合明确合成API transport；不证明真实DB/身份供应商。只覆盖初始认证就绪及原retry筛选保留；首次CI FAIL保留，后续远端check由根分别核验，不宣称CI全绿。",
+      "baseline_red": [
+        "evidence/frontend-ci-first-failure.log:远端quality首轮72PASS1FAIL input为空；另一push通过不抹除此失败",
+        "evidence/frontend-pages-r022-auth-readiness-red.log:held-auth实际R6 1FAIL/0SKIP，input错误可编辑"
+      ],
+      "validation": [
+        "evidence/frontend-final-r8-browser.log:74PASS0FAIL0SKIP 188.528907s",
+        "evidence/frontend-final-r8-unit.log:344PASS0SKIP",
+        "evidence/frontend-final-r8-lint.log",
+        "evidence/frontend-final-r8-typecheck.log",
+        "evidence/frontend-final-r8-build.log"
+      ],
+      "related_findings": [
+        "OCT02-R-016"
+      ]
+    },
+    {
+      "id": "OCT02-DB-013",
+      "severity": "P2",
+      "status": "test_fixture_correction",
+      "kind": "test_fixture_correction",
+      "confirmed": false,
+      "fixture_correction_confirmed": true,
+      "canonical_exclusion_reason": "已确认并修复辅助夹具统计采样不稳定；未证实生产查询/索引缺陷，不另增历史PERF033产品问题或本表226canonical。",
+      "root_cause_and_impact": "1.3M行TEMP日志夹具默认statistics target100只抽样约30000行，100/1M稀疏needle可能未入统计，估算回退0.005→5000，CI不稳定选分页Btree/过滤249975行而违反原GIN断言。生产SQL/索引原已存在，未证实生产查询缺陷。",
+      "fix_and_validation": "仅四TEMP tsvector列target10000使请求样本覆盖已知全量，先断言pg_stats词条及0.0001/0.001频率；原4个GIN/noSeqScan、120s context、disjoint keyset、page/cleanup Btree、exact1000清理全部保持。新238行真实自有PG-race1top0SKIP PASS5.076s；不改生产schema/统计policy、未强制关闭seqscan。",
+      "source_records": [
+        {
+          "source": "task:database-log-stats-finding.json",
+          "line": null
+        },
+        {
+          "source": "task:database-log-stats-final-proof.json",
+          "line": null
+        }
+      ],
+      "locations": [
+        {
+          "repo": "mcmods-cn-backend",
+          "path": "internal/httpapi/log_pagination_integration_test.go",
+          "current_sha256": "29e72c3731a3464f6e0a045864a7c6720de0fd75d92b660589f47af5751b6626"
+        }
+      ],
+      "remaining_boundary": "原adab同HEAD PR通过、push真实FAIL同时保留。受控缺失统计回放复现旧计划；默认100本地随机样本曾通过，不能伪称受控回放是原随机采样RED。完整PG-r4绑定旧fixture字节；新1test定向验证和后续新质量门分别绑定，不拼成当前一次全库门。生产真实数据分布、统计维护和性能未验证。",
+      "baseline_red": [
+        "evidence/backend-ci-adab-push-pg-mcp.log:originalremoteplanFAILestimated5000/Btree249975filtered",
+        "evidence/database-log-stats-probe.log:controlledmissingstatisticsreplay;defaultlocalsamplePASSnotRED"
+      ],
+      "validation": [
+        {
+          "status": "PASS",
+          "command": "MCMODS_RUN_DB_INTEGRATION=1 go test -race ./internal/httpapi -run '^TestLogPaginationSearchAndCleanupStayIndexedAtScaleIntegration$' -count=1 -v",
+          "exit_code": 0,
+          "top_level_tests": 1,
+          "skipped": 0,
+          "seconds": 5.076,
+          "evidence": "database-log-stats-targeted-green.log",
+          "boundary": "Owned loopback PostgreSQL service, single-session TEMP tables only. Does not inherit previous r4 whole-suite result for this changed fixture."
+        },
+        {
+          "status": "PASS",
+          "command": "git diff --check",
+          "exit_code": 0
+        },
+        {
+          "status": "FAIL",
+          "evidence": "backend-ci-adab-push-pg-mcp.log",
+          "boundary": "Original adab683 push CI observed default ANALYZE sparse-term miss, estimated5000, page Btree and249975 filtered rows; PR CI for same source passed. Retain both outcomes; do not describe all CI green."
+        },
+        {
+          "status": "PASS",
+          "evidence": "database-log-stats-probe.log",
+          "boundary": "Private controlled missing-statistics replay reproduced original plan; actual default100 local random sample passed; full TEMP target10000 yielded known frequency and GIN naturally. Controlled replay is not claimed to be the original random-sampling RED."
+        }
+      ],
+      "related_findings": [
+        "legacy:PERF033"
+      ],
+      "deployment": "无生产schema/API/config变更；仅测试夹具统计与其严格前置断言。"
     }
   ],
   "gate_evidence": {
-    "postgres": "evidence/final-pg18-db-suite-r2.log",
-    "go_source_binding": "evidence/backend-final-r2-source-snapshot.json",
+    "postgres": "evidence/final-pg18-db-suite-r4.log（pre-final-statistics-fixture source; new single fixture target separately bound）",
+    "go_source_binding": "evidence/backend-final-r5-source-snapshot.json",
     "frontend_r5": "evidence/frontend-final-r5-browser.log",
-    "actual_api_live": "evidence/live-backend-final-r3.log",
+    "actual_api_live": "evidence/live-backend-final-r5.log",
     "frontend_r6": "evidence/frontend-final-r6-browser.log",
     "frontend_r6_source_binding": "evidence/frontend-r6-final-verified-source-snapshot.json",
     "actual_typesense_search_race": "evidence/root-final-infra-race.log（Typesense29.0为服务版本；普通非-v输出不逐项计数）",
     "frontend_r7": "evidence/frontend-final-r7-browser.log",
-    "frontend_current_source_binding": "evidence/frontend-r7-final-verified-source-snapshot.json"
+    "frontend_current_source_binding": "evidence/frontend-r9-source-snapshot.json",
+    "frontend_r8": "evidence/frontend-final-r8-browser.log",
+    "frontend_first_ci_failure": "evidence/frontend-ci-first-failure.log",
+    "backend_first_ci_pg_failure": "evidence/backend-ci-pg-first-failure.log",
+    "backend_c017_targeted_race": "evidence/backend_c-project-update-clock-green-race.log",
+    "current_whole_status": "Current1195Go qualityr5 PASS0 (unit/race/vet/build);previous1195before1statsfixturePG-r4PASS1794/76/0failed1782PASS12SKIP;newstatsfixturetargetPASS1/0skip5.076s and exact-owned5guarded serialracePASS5top24sub0skip separately;liveR5PASS1;finalexactownedcleanupPASS16removed/original3unchanged;newHEADCI remains separately verified by root.",
+    "go_current_quality": "evidence/backend-final-r5-quality-exits.json",
+    "frontend_r9": "evidence/frontend-final-r9-browser.log",
+    "frontend_followup_ci_failure": "evidence/frontend-ci-r022-followup-failure.log",
+    "owned_pg_health": "evidence/backend_c-c017-pg-health.json",
+    "readiness_startup_timeline": "evidence/backend_c-owned-pg-startup-readiness.json",
+    "readiness_fresh_full_environment": "task:backend_c-readiness-final-proof.json",
+    "postgres_interrupted": "evidence/final-pg18-db-suite-r3-interrupted.log",
+    "backend_adab_push_pg_failure": "evidence/backend-ci-adab-push-pg-mcp.log",
+    "postgres_current": "evidence/final-pg18-db-suite-r4.log",
+    "postgres_current_counts": "evidence/final-pg18-db-suite-r4-counts.json",
+    "postgres_current_exit": "evidence/final-pg18-db-suite-r4-exit.json",
+    "sparse_log_fixture_targeted_race": "evidence/database-log-stats-targeted-green.log",
+    "sparse_log_fixture_proof": "task:database-log-stats-final-proof.json",
+    "go_previous_pg_source_binding": "evidence/backend-final-r4-source-snapshot.json",
+    "owned_guarded_tests": "evidence/backend-owned-guarded-final-r5.log",
+    "owned_guarded_counts": "evidence/backend-owned-guarded-final-r5-counts.json",
+    "owned_guarded_exit": "evidence/backend-owned-guarded-final-r5-exit.json",
+    "go_current_default_unit": "evidence/backend-final-r5-unit.jsonl",
+    "go_current_default_race": "evidence/backend-final-r5-race.jsonl",
+    "final_resource_cleanup": "evidence/final-owned-resource-cleanup.json",
+    "postgres_pre_c017": "evidence/final-pg18-db-suite-r2.log"
+  },
+  "source_record_version_policy": "source_records为合并时实际读取的输入快照（明确保存当时行数与SHA），不宣称输入仍等于后来各代理持续更新的最终文档；locations.current_sha256单独绑定目前修复位置。报告生成使用不含自身的不可变源清单，避免自引用；当前版调用链与实际验证边界按每项单列。",
+  "auxiliary_fixture_corrections": 1,
+  "associated_commits_by_finding": {
+    "OCT02-A-001": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/ai_translation.go"
+        ]
+      }
+    ],
+    "OCT02-A-002": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/content_localization_worker.go"
+        ]
+      }
+    ],
+    "OCT02-A-003": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/ai_translation.go",
+          "internal/httpapi/community_post_translation_handlers.go",
+          "internal/httpapi/content_localization_worker.go"
+        ]
+      }
+    ],
+    "OCT02-A-004": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/ai_handlers.go",
+          "internal/httpapi/ai_task_queue.go",
+          "internal/httpapi/content_localization_worker.go"
+        ]
+      }
+    ],
+    "OCT02-A-005": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/ai_translation.go",
+          "internal/httpapi/community_post_translation_handlers.go",
+          "internal/httpapi/content_localization_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-006": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/ai_handlers.go",
+          "internal/httpapi/ai_translation.go"
+        ]
+      }
+    ],
+    "OCT02-A-007": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/ai_translation.go"
+        ]
+      }
+    ],
+    "OCT02-A-008": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/auth_cache.go",
+          "internal/httpapi/auth_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-009": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/creator_mutation_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-010": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/blueprint_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-011": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/content_localization_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-012": [],
+    "OCT02-A-013": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/comment_log_attachment_worker.go"
+        ]
+      }
+    ],
+    "OCT02-A-014": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/comment_detail_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-015": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/comment_detail_handlers.go",
+          "internal/httpapi/oct02_comment_preview_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-A-016": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/auth_cache.go",
+          "internal/httpapi/auth_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-017": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/blueprint_worker.go",
+          "internal/httpapi/catalog_editor_service.go",
+          "internal/httpapi/oct02_localization_transaction_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-A-018": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/blueprint_worker.go",
+          "internal/httpapi/catalog_editor_handlers.go",
+          "internal/httpapi/catalog_editor_service.go",
+          "internal/httpapi/community_post_handlers.go",
+          "internal/httpapi/content_history_handlers.go",
+          "internal/httpapi/content_metrics_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-019": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/admin_handlers.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/anti_abuse_handlers.go",
+          "internal/httpapi/auth_handlers.go",
+          "internal/httpapi/oct02_anti_abuse_read_error_test.go"
+        ]
+      }
+    ],
+    "OCT02-A-020": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/activity_retention_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-021": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/content_metrics_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-022": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/content_metrics_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-023": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/catalog_editor_handlers.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/anti_abuse_handlers.go",
+          "internal/httpapi/oct02_anti_abuse_read_error_test.go"
+        ]
+      }
+    ],
+    "OCT02-A-024": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/community_post_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-025": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/blueprint_codec.go"
+        ]
+      }
+    ],
+    "OCT02-A-026": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/blueprint_codec.go",
+          "internal/httpapi/blueprint_worker.go"
+        ]
+      }
+    ],
+    "OCT02-A-027": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/auth_rate_limit.go"
+        ]
+      }
+    ],
+    "OCT02-A-028": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/access_log_ingestor_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-A-029": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/admin_user_details.go"
+        ]
+      }
+    ],
+    "OCT02-A-030": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/admin_handlers.go",
+          "internal/httpapi/role_track_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-031": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/ai_handlers.go",
+          "internal/httpapi/ai_task_delivery.go",
+          "internal/httpapi/oct02_ai_delivery_integration_test.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-console-infrastructure.tsx",
+          "app/_lib/ai-delivery-retry.mts",
+          "app/_lib/ai-delivery-retry.test.mts",
+          "app/_locales/de.ts",
+          "app/_locales/en-US.ts",
+          "app/_locales/es.ts",
+          "app/_locales/fr.ts",
+          "app/_locales/ja.ts",
+          "app/_locales/ru.ts",
+          "app/_locales/zh-CN.ts",
+          "app/_locales/zh-TW.ts",
+          "browser-tests/ai-delivery-retry.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-A-032": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/auth_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-033": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/creator_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-A-034": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/admin_handlers.go",
+          "internal/httpapi/ai_handlers.go",
+          "internal/httpapi/oct02_ai_settings_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-B-001": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "docs/favorites.md",
+          "internal/httpapi/favorite_cleanup_integration_test.go",
+          "internal/httpapi/favorite_handlers.go",
+          "internal/httpapi/favorite_handlers_test.go"
+        ]
+      }
+    ],
+    "OCT02-B-002": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/oauth_error_logging_test.go",
+          "internal/httpapi/oauth_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-003": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/middleware.go",
+          "internal/httpapi/middleware_test.go"
+        ]
+      }
+    ],
+    "OCT02-B-004": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/mod_handlers.go",
+          "internal/httpapi/mod_revision_handlers.go",
+          "internal/httpapi/modpack_handlers.go",
+          "internal/httpapi/oct02_c_project_icon_authorization_integration_test.go",
+          "internal/httpapi/rating_handlers.go",
+          "internal/httpapi/simple_project_handlers.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "CONTENT_PROJECT_SECURITY.md",
+          "internal/httpapi/oss_access.go",
+          "internal/httpapi/oss_admin_handlers.go",
+          "internal/httpapi/oss_stored_image_authorization.go",
+          "internal/httpapi/oss_stored_image_authorization_integration_test.go",
+          "internal/httpapi/user_block_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-005": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "docs/profile-and-editor-errors.md",
+          "internal/httpapi/economy_handlers.go",
+          "internal/httpapi/mod_create_image_pool_integration_test.go",
+          "internal/httpapi/mod_handlers.go",
+          "internal/httpapi/modpack_handlers.go",
+          "internal/httpapi/oct02_c_imported_project_pool_integration_test.go",
+          "internal/httpapi/profile_editor_store_error_test.go",
+          "internal/httpapi/profile_settings_handlers.go",
+          "internal/httpapi/profile_showcase_handlers.go",
+          "internal/httpapi/profile_showcase_pool_integration_test.go",
+          "internal/httpapi/simple_project_handlers.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "CONTENT_PROJECT_SECURITY.md",
+          "docs/oss-object-layout.md",
+          "internal/httpapi/middleware.go",
+          "internal/httpapi/oss_admin_handlers.go",
+          "internal/httpapi/oss_deletion_outbox.go",
+          "internal/httpapi/oss_failed_registration_cleanup_integration_test.go",
+          "internal/httpapi/oss_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-006": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/mod_import_worker.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/provider_proxy_security_test.go"
+        ]
+      }
+    ],
+    "OCT02-B-007": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/mod_import_worker.go",
+          "internal/httpapi/mod_metadata_import_fencing_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-B-008": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/favorite_collection_popularity_integration_test.go",
+          "internal/httpapi/favorite_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-009": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/notification_handlers.go",
+          "internal/httpapi/profile_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-010": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/project_revision_preview.go"
+        ]
+      }
+    ],
+    "OCT02-B-011": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "docs/changelog-update-errors.md",
+          "internal/httpapi/governance_handlers.go",
+          "internal/httpapi/oct02_changelog_lookup_error_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-B-012": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/oss_admin_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-013": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/oss_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-014": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/log_share_handlers.go",
+          "internal/httpapi/oss_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-015": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/notification_handlers.go",
+          "internal/httpapi/notification_worker.go"
+        ]
+      }
+    ],
+    "OCT02-B-016": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/economy_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-017": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "81521918f78d0818ce2c11df02dbc731346b8699",
+        "paths": [
+          "cmd/db-log-redaction-upgrade/main.go",
+          "cmd/db-log-redaction-upgrade/main_test.go",
+          "docs/log-redaction-upgrade.md",
+          "internal/database/log_redaction_upgrade.go",
+          "internal/database/log_redaction_upgrade_integration_test.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "LOG_SHARE_SECURITY.md",
+          "internal/httpapi/log_share_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-018": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/project_changelog_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-019": [],
+    "OCT02-B-020": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/log_handlers.go",
+          "internal/httpapi/oct02_log_retention_normalization_test.go"
+        ]
+      }
+    ],
+    "OCT02-B-021": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "adab6834f3a65f015fbd769cedc0d500099e4dc0",
+        "paths": [
+          "internal/httpapi/project_update_notification_worker.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "SYSTEM_NOTIFICATION_LOCALIZATION.md",
+          "internal/httpapi/notification_template_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-022": [],
+    "OCT02-B-023": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/profile_handlers.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/user_block_handlers.go",
+          "internal/httpapi/user_relationship_lock.go"
+        ]
+      }
+    ],
+    "OCT02-B-024": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/economy_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-025": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/project_automation_worker.go"
+        ]
+      }
+    ],
+    "OCT02-B-026": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/project_automation_worker.go"
+        ]
+      }
+    ],
+    "OCT02-B-027": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/log_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-B-028": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/admin_handlers.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "docs/oauth-settings.md",
+          "internal/httpapi/oauth_handlers.go",
+          "internal/httpapi/oct02_oauth_settings_failure_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-B-029": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/oss_admin_handlers.go",
+          "internal/httpapi/oss_settings.go"
+        ]
+      }
+    ],
+    "OCT02-B-030": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "docs/project-changelogs.md",
+          "internal/httpapi/project_changelog_category_pagination.go",
+          "internal/httpapi/project_changelog_category_pagination_integration_test.go",
+          "internal/httpapi/project_changelog_handlers.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "f98196bf564b36de8d368cf44304d69852bd91df",
+        "paths": [
+          "docs/audit/20261002/DATABASE_REVIEW.md"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/project-changelog-editor.tsx",
+          "app/_lib/project-changelog-api.ts",
+          "app/_lib/project-changelog-categories.test.mts",
+          "browser-tests/changelog-categories.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-B-031": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "REPORT_AND_MODERATION_DESIGN.md",
+          "internal/httpapi/governance_handlers.go",
+          "internal/httpapi/oct02_report_review_idempotency_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-B-032": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "docs/profile-and-editor-errors.md",
+          "internal/httpapi/profile_editor_store_error_test.go",
+          "internal/httpapi/profile_settings_handlers.go",
+          "internal/httpapi/project_editor_application_handlers.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/log_share_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-C-001": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "YGGDRASIL_SESSION_SECURITY.md",
+          "internal/httpapi/oct02_c_yggdrasil_revocation_integration_test.go",
+          "internal/httpapi/yggdrasil_profiles.go"
+        ]
+      }
+    ],
+    "OCT02-C-002": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/oct02_c_realtime_revocation_integration_test.go",
+          "internal/httpapi/realtime_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-C-003": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/oct02_c_user_block_pool_integration_test.go",
+          "internal/httpapi/user_block_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-C-004": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/oct02_c_parent_visibility_integration_test.go",
+          "internal/httpapi/simple_project_handlers.go",
+          "internal/httpapi/simple_project_parent_facets.go",
+          "internal/httpapi/simple_project_parent_facets_test.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "CONTENT_PROJECT_SECURITY.md"
+        ]
+      }
+    ],
+    "OCT02-C-005": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/oct02_c_skin_pool_integration_test.go",
+          "internal/httpapi/skin_handlers.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "YGGDRASIL_SESSION_SECURITY.md"
+        ]
+      }
+    ],
+    "OCT02-C-006": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/sticker_handlers.go",
+          "internal/httpapi/sticker_image_sanitization_test.go"
+        ]
+      }
+    ],
+    "OCT02-C-007": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/content_history_handlers.go",
+          "internal/httpapi/mod_content_capabilities.go",
+          "internal/httpapi/mod_content_handlers.go",
+          "internal/httpapi/mod_content_layout_query.go",
+          "internal/httpapi/mod_content_resource_handlers.go",
+          "internal/httpapi/mod_export_query_handlers.go",
+          "internal/httpapi/oct02_c_mod_content_visibility_integration_test.go",
+          "internal/httpapi/resource_versions.go",
+          "internal/httpapi/server_catalog_handlers.go",
+          "internal/httpapi/server_mod_save_integration_test.go",
+          "internal/httpapi/server_review_projection_integration_test.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "CONTENT_PROJECT_SECURITY.md"
+        ]
+      }
+    ],
+    "OCT02-C-008": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/oct02_c_role_track_pool_integration_test.go",
+          "internal/httpapi/role_track_handlers.go"
+        ]
+      }
+    ],
+    "OCT02-C-009": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/mod_export_resource_resolution_integration_test.go",
+          "internal/httpapi/mod_export_resources.go",
+          "internal/httpapi/mod_export_resources_test.go",
+          "internal/httpapi/oct02_c_mod_content_visibility_integration_test.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "CONTENT_PROJECT_SECURITY.md"
+        ]
+      }
+    ],
+    "OCT02-C-010": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/mod_export_handlers.go",
+          "internal/httpapi/oct02_c_mod_content_visibility_integration_test.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "CONTENT_PROJECT_SECURITY.md"
+        ]
+      }
+    ],
+    "OCT02-C-011": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/mod_export_resources.go",
+          "internal/httpapi/oct02_c_mod_content_visibility_integration_test.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "CONTENT_PROJECT_SECURITY.md"
+        ]
+      }
+    ],
+    "OCT02-C-012": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/mod_export_recipe_import.go",
+          "internal/httpapi/oct02_c_export_cancel_test.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "CONTENT_PROJECT_SECURITY.md"
+        ]
+      }
+    ],
+    "OCT02-C-013": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/mod_export_resource_resolution_integration_test.go",
+          "internal/httpapi/mod_export_resources.go",
+          "internal/httpapi/oct02_c_mod_content_visibility_integration_test.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "CONTENT_PROJECT_SECURITY.md"
+        ]
+      }
+    ],
+    "OCT02-C-014": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/mod_export_handlers.go",
+          "internal/httpapi/mod_export_import_handlers.go",
+          "internal/httpapi/oct02_c_export_media_test.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "CONTENT_PROJECT_SECURITY.md"
+        ]
+      }
+    ],
+    "OCT02-C-015": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/queue/outbox_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-C-016": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/activity/postgres_store_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-C-017": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "adab6834f3a65f015fbd769cedc0d500099e4dc0",
+        "paths": [
+          "PROJECT_FOLLOW_NOTIFICATIONS.md",
+          "internal/httpapi/oct02_project_update_claim_clock_integration_test.go",
+          "internal/httpapi/project_update_notification_worker.go"
+        ]
+      }
+    ],
+    "OCT02-DB-001": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "81521918f78d0818ce2c11df02dbc731346b8699",
+        "paths": [
+          "internal/database/governance_automation_seeds.go",
+          "internal/database/governance_automation_seeds_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-DB-002": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "81521918f78d0818ce2c11df02dbc731346b8699",
+        "paths": [
+          "internal/database/governance_automation_seeds.go",
+          "internal/database/governance_automation_seeds_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-DB-003": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "81521918f78d0818ce2c11df02dbc731346b8699",
+        "paths": [
+          "internal/database/governance_automation_seeds_integration_test.go",
+          "internal/database/seeds.go"
+        ]
+      }
+    ],
+    "OCT02-DB-004": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "81521918f78d0818ce2c11df02dbc731346b8699",
+        "paths": [
+          "internal/database/database.go"
+        ]
+      }
+    ],
+    "OCT02-DB-005": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "81521918f78d0818ce2c11df02dbc731346b8699",
+        "paths": [
+          "COMMENT_FLOOR_DESIGN.md",
+          "USER_STATISTICS_DESIGN.md"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "COMMENT_MARKDOWN_EDITOR.md",
+          "RECIPE_VERSION_BINDING_DESIGN.md",
+          "REPORT_AND_MODERATION_DESIGN.md"
+        ]
+      }
+    ],
+    "OCT02-DB-006": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "81521918f78d0818ce2c11df02dbc731346b8699",
+        "paths": [
+          "cmd/db-function-repair/main.go",
+          "cmd/db-function-repair/main_test.go",
+          "docs/database-function-repair.md",
+          "internal/database/changelog_schema.go",
+          "internal/database/oct02_projection_integration_test.go",
+          "internal/database/projection_function_definitions.go",
+          "internal/database/projection_function_repair.go",
+          "internal/database/projection_function_repair_integration_test.go",
+          "internal/database/projection_function_repair_test.go",
+          "internal/database/search_schema.go",
+          "internal/database/testdata/oct02_legacy_functions.sql"
+        ]
+      }
+    ],
+    "OCT02-DB-007": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "81521918f78d0818ce2c11df02dbc731346b8699",
+        "paths": [
+          "cmd/db-function-repair/main.go",
+          "cmd/db-function-repair/main_test.go",
+          "docs/database-function-repair.md",
+          "internal/database/changelog_schema.go",
+          "internal/database/oct02_projection_integration_test.go",
+          "internal/database/projection_function_definitions.go",
+          "internal/database/projection_function_repair.go",
+          "internal/database/projection_function_repair_integration_test.go",
+          "internal/database/projection_function_repair_test.go",
+          "internal/database/search_schema.go",
+          "internal/database/testdata/oct02_legacy_functions.sql"
+        ]
+      }
+    ],
+    "OCT02-DB-008": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "81521918f78d0818ce2c11df02dbc731346b8699",
+        "paths": [
+          "internal/database/comment_popularity_statement_integration_test.go",
+          "internal/database/comment_popularity_triggers.go"
+        ]
+      }
+    ],
+    "OCT02-DB-009": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "tools/remediation/verify_findings/main.go"
+        ]
+      }
+    ],
+    "OCT02-DB-010": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "81521918f78d0818ce2c11df02dbc731346b8699",
+        "paths": [
+          "tools/audit/database_inventory/main.go",
+          "tools/audit/database_inventory/main_test.go"
+        ]
+      }
+    ],
+    "OCT02-DB-011": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "81521918f78d0818ce2c11df02dbc731346b8699",
+        "paths": [
+          "tools/audit/database_inventory/main.go",
+          "tools/audit/database_inventory/main_test.go"
+        ]
+      }
+    ],
+    "OCT02-DB-012": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/favorite_modpack_export_worker.go",
+          "internal/httpapi/oct02_favorite_export_notification_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-FP-001": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/project-changelog-editor.tsx",
+          "app/_lib/changelog-form.mts",
+          "app/_lib/changelog-form.test.mts",
+          "browser-tests/oct02-forms.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-002": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/project-changelog-editor.tsx",
+          "browser-tests/oct02-forms.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-003": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/site-shell.tsx",
+          "app/_components/theme-provider.tsx",
+          "app/_components/tools-playground.tsx",
+          "browser-tests/oct02-forms.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-004": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/site-shell.tsx",
+          "browser-tests/oct02-forms.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-005": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/minecraft-version-picker.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-006": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/creator-editor.tsx",
+          "app/_components/creator-member-manager.tsx",
+          "app/_components/localized-asset-editor.tsx",
+          "app/_components/mod-editor.tsx",
+          "app/_components/modpack-editor.tsx",
+          "app/_components/simple-project-editor.tsx",
+          "browser-tests/oct02-forms.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-007": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-editor.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-008": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-editor.tsx",
+          "app/_components/modpack-editor.tsx",
+          "app/_components/simple-project-editor.tsx",
+          "browser-tests/oct02-forms.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-009": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/project-follows-panel.tsx",
+          "browser-tests/oct02-forms.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-010": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/localized-asset-editor.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-011": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-editor.tsx",
+          "app/_components/modpack-editor.tsx",
+          "app/_components/simple-project-editor.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-012": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "5372a30b51b673b2fca9c3ee61159e1864d25bb2",
+        "paths": [
+          "browser-tests/specific-journeys.browser.mts"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/content-language-preferences.tsx",
+          "browser-tests/oct02-forms.browser.mts"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "f2eac2e096336be795ad77009ab5a2c31cabf4be",
+        "paths": [
+          "browser-tests/specific-journeys.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-013": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/simple-project-editor.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-014": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/content-history.tsx",
+          "app/_components/mod-history.tsx",
+          "app/_components/project-changelog-entry.tsx",
+          "app/_components/project-changelog-history.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-015": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/simple-project-catalog.tsx",
+          "browser-tests/oct02-forms.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-016": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-catalog.tsx",
+          "app/_components/simple-project-catalog.tsx",
+          "browser-tests/oct02-forms.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-017": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-catalog.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-018": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/user-home.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-019": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/user-home.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-020": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/tools-playground.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-021": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/tools-playground.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-022": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/content-metrics-panel.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-023": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/content-metrics-panel.tsx",
+          "app/_components/mod-resource-components.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-024": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/community-post-detail.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-025": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-console-infrastructure.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-026": [],
+    "OCT02-FP-027": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/community-post-editor.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-028": [],
+    "OCT02-FP-029": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/blueprint-detail.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-030": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/blueprint-upload.tsx",
+          "app/_components/skin-upload.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-031": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/skin-upload.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-032": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/creator-editor.tsx",
+          "app/_components/creator-member-manager.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-033": [],
+    "OCT02-FP-034": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/permission-comparison.tsx",
+          "app/_components/site-affairs-pages.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-035": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/editor/content-translation-control.tsx",
+          "app/_components/user-network-list.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-036": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/messages-center.tsx",
+          "browser-tests/oct02-state.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-037": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/messages-center.tsx",
+          "browser-tests/oct02-state.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-038": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/markdown-renderer.tsx",
+          "app/_lib/markdown-code-boundaries.mts",
+          "app/_lib/markdown-code-boundaries.test.mts",
+          "app/_lib/markdown-markers.mts",
+          "app/_lib/markdown-markers.test.mts",
+          "browser-tests/oct02-state.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-039": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/markdown-renderer.tsx",
+          "app/_lib/markdown-toc.mts",
+          "app/_lib/markdown-toc.test.mts",
+          "browser-tests/oct02-state.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-040": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-content-workspace.tsx",
+          "browser-tests/oct02-recovery.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-041": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-content-workspace.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-042": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-content-resource-editor.tsx",
+          "browser-tests/oct02-state.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-043": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-content-resource-editor.tsx",
+          "app/_components/project-changelog-editor.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-044": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-content-layout-editor.tsx",
+          "app/_lib/mod-content-layout-groups.mts",
+          "app/_lib/mod-content-layout-groups.test.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-045": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-content-layout-editor.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-046": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/user-player-profiles-panel.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-047": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/catalog-manual-editors.tsx",
+          "app/_components/mod-catalog.tsx",
+          "app/_components/server-catalog.tsx",
+          "app/_components/site-shell.tsx",
+          "app/_components/user-avatar.tsx",
+          "app/_components/user-profile.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-048": [],
+    "OCT02-FP-049": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/user-profile-overview.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-050": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "1a2be01792050176ef96ceb0d39ffc5390972ae1",
+        "paths": [
+          "app/_components/skin-library.tsx",
+          "docs/frontend-state-recovery.md"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/blueprint-viewer.tsx",
+          "app/_components/catalog-list-ui.tsx",
+          "app/_components/catalog-minecraft-version-filter.tsx",
+          "app/_components/catalog-resource-catalog.tsx",
+          "app/_components/content-history.tsx",
+          "app/_components/creator-catalog.tsx",
+          "app/_components/editor/resource-picker-dialog.tsx",
+          "app/_components/global-catalog.tsx",
+          "app/_components/messages-center.tsx",
+          "app/_components/minecraft-language-picker.tsx",
+          "app/_components/mod-catalog.tsx",
+          "app/_components/mod-content-layout-editor.tsx",
+          "app/_components/mod-content-resource-detail.tsx",
+          "app/_components/project-submission-modal.tsx",
+          "app/_components/server-submission-wizard.tsx",
+          "app/_components/simple-project-catalog.tsx",
+          "app/_components/site-login-panel.tsx",
+          "app/_components/site-shell.tsx",
+          "app/_components/skin-detail.tsx",
+          "app/_components/skin-library.tsx",
+          "app/_components/timezone-picker.tsx",
+          "app/_components/tools-plantuml.tsx",
+          "app/_components/tools-playground.tsx",
+          "app/_components/user-comment-watches-panel.tsx",
+          "app/_components/user-network-list.tsx",
+          "app/_components/user-player-profiles-panel.tsx",
+          "app/_components/user-profile-overview.tsx",
+          "app/_components/user-profile.tsx",
+          "app/globals.css",
+          "browser-tests/accent-and-draft-readiness.browser.mts",
+          "docs/frontend-state-recovery.md"
+        ]
+      }
+    ],
+    "OCT02-FP-051": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "5372a30b51b673b2fca9c3ee61159e1864d25bb2",
+        "paths": [
+          "browser-tests/specific-journeys.browser.mts"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/global-catalog.tsx"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "f2eac2e096336be795ad77009ab5a2c31cabf4be",
+        "paths": [
+          "browser-tests/specific-journeys.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-052": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-content-section-page.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-053": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/catalog-manual-editors.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-054": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/comment-markdown-editor.tsx",
+          "app/_components/creator-detail.tsx",
+          "app/_components/project-editor-application.tsx",
+          "app/_lib/application-attachment-lifecycle.test.mts",
+          "browser-tests/application-attachments.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-055": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/comment-section.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-056": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/editor/loot-table-visual-editor.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-057": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/editor/resource-picker-dialog.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-058": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/creator-detail.tsx",
+          "app/_components/editor/editor-shell.tsx",
+          "app/_components/editor/recipe-editor.tsx",
+          "app/_components/editor/recipe-template-editor.tsx",
+          "app/_components/project-editor-application.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-059": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/catalog-resource-catalog.tsx",
+          "app/_components/editor/recipe-editor.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-060": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/editor/recipe-template-editor.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-061": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/favorite-modpack-export.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-062": [],
+    "OCT02-FP-063": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/project-auto-update-settings.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-064": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/creator-catalog.tsx",
+          "app/_components/server-catalog.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-065": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/server-detail.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-066": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/server-submission-wizard.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-067": [],
+    "OCT02-FP-068": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "5372a30b51b673b2fca9c3ee61159e1864d25bb2",
+        "paths": [
+          "browser-tests/specific-journeys.browser.mts"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-catalog-data.tsx"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "f2eac2e096336be795ad77009ab5a2c31cabf4be",
+        "paths": [
+          "browser-tests/specific-journeys.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-069": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/log-share-viewer.tsx",
+          "app/_components/sticker-picker.tsx",
+          "app/_components/tools-plantuml.tsx",
+          "browser-tests/oct02-state.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-070": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/user-home.tsx",
+          "browser-tests/oct02-state.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-071": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-editor.tsx",
+          "app/_components/site-shell.tsx",
+          "browser-tests/oct02-state.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-072": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/minecraft-version-picker.tsx",
+          "app/_components/modpack-editor.tsx",
+          "app/_components/simple-project-editor.tsx",
+          "browser-tests/oct02-picker.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-073": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/project-changelog-editor.tsx"
+        ]
+      }
+    ],
+    "OCT02-FP-074": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/global-catalog.tsx",
+          "app/_components/mod-catalog.tsx",
+          "app/_components/simple-project-catalog.tsx",
+          "browser-tests/accent-and-draft-readiness.browser.mts",
+          "browser-tests/oct02-picker.browser.mts",
+          "browser-tests/oct02-recovery.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-075": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/global-catalog.tsx",
+          "browser-tests/oct02-recovery.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-076": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/site-shell.tsx",
+          "browser-tests/oct02-recovery.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-077": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/mod-catalog.tsx",
+          "browser-tests/oct02-picker.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-078": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/user-profile.tsx",
+          "browser-tests/oct02-recovery.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-080": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/tools-playground.tsx",
+          "browser-tests/oct02-recovery.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-081": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/global-catalog.tsx",
+          "browser-tests/oct02-recovery.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-082": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/user-network-list.tsx",
+          "browser-tests/oct02-recovery.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-083": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/rating-panel.tsx",
+          "browser-tests/oct02-recovery.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-084": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "PROJECT_AUTO_UPDATE_DESIGN.md"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/project-auto-update-settings.tsx",
+          "browser-tests/oct02-picker.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-085": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/markdown-renderer.tsx",
+          "browser-tests/oct02-state.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-086": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/project-downloads.tsx",
+          "app/_components/server-submission-wizard.tsx",
+          "browser-tests/oct02-recovery.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FP-087": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/tools-playground.tsx",
+          "browser-tests/accent-and-draft-readiness.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-FS-001": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/auth-bootstrap-race.test.mts",
+          "app/_lib/auth.ts"
+        ]
+      }
+    ],
+    "OCT02-FS-002": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/i18n-message.mts",
+          "app/_lib/i18n-message.test.mts",
+          "app/_lib/i18n-provider.tsx"
+        ]
+      }
+    ],
+    "OCT02-FS-003": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          ".github/workflows/release-container.yml",
+          "Dockerfile",
+          "app/_lib/ci-deployment-contract.test.mts"
+        ]
+      }
+    ],
+    "OCT02-FS-004": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/[publicId]/page.tsx",
+          "app/_lib/short-link-state.mts",
+          "app/_lib/short-link-state.test.mts"
+        ]
+      }
+    ],
+    "OCT02-FS-005": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/api.ts",
+          "app/_lib/auth.ts",
+          "app/_lib/browser-storage.mts",
+          "app/_lib/browser-storage.test.mts",
+          "app/_lib/catalog-state.ts",
+          "app/_lib/i18n-provider.tsx"
+        ]
+      }
+    ],
+    "OCT02-FS-006": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/i18n-resources.test.mts",
+          "app/_locales/de.ts",
+          "app/_locales/es.ts",
+          "app/_locales/fr.ts",
+          "app/_locales/ja.ts",
+          "app/_locales/ru.ts",
+          "app/_locales/zh-TW.ts"
+        ]
+      }
+    ],
+    "OCT02-FS-007": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/api-transport-contract.test.mts",
+          "app/_lib/api.ts"
+        ]
+      }
+    ],
+    "OCT02-FS-008": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/api-transport-contract.test.mts",
+          "app/_lib/favorite-api.ts"
+        ]
+      }
+    ],
+    "OCT02-FS-009": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/job-polling.mts",
+          "app/_lib/job-polling.test.mts"
+        ]
+      }
+    ],
+    "OCT02-FS-010": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/global-catalog-api.ts",
+          "app/_lib/resource-picker-loaders.ts",
+          "app/_lib/tag-picker-locale.test.mts"
+        ]
+      }
+    ],
+    "OCT02-FS-011": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_locales/de.ts",
+          "app/_locales/es.ts",
+          "app/_locales/fr.ts",
+          "app/_locales/ja.ts",
+          "app/_locales/ru.ts",
+          "app/_locales/zh-TW.ts"
+        ]
+      }
+    ],
+    "OCT02-FS-012": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/i18n-resources.test.mts",
+          "app/_locales/en-US.ts",
+          "app/_locales/zh-CN.ts"
+        ]
+      }
+    ],
+    "OCT02-FS-013": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/structure-disposal.test.mts",
+          "lib/mcmods-exporter/renderer/structureScene.ts"
+        ]
+      }
+    ],
+    "OCT02-FS-014": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "components/mcmods-exporter/StructureCanvas.tsx",
+          "lib/mcmods-exporter/renderer/StructureRenderer.ts"
+        ]
+      }
+    ],
+    "OCT02-FS-015": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "scripts/blueprint-scene-browser-benchmark.html"
+        ]
+      }
+    ],
+    "OCT02-FS-016": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/skin-texture-lifecycle.test.mts",
+          "browser-tests/renderers.browser.mts",
+          "components/mcmods-exporter/BlockModelCanvas.tsx",
+          "components/mcmods-exporter/StructureCanvas.tsx",
+          "components/minecraft-skin/SkinViewerCanvas.tsx"
+        ]
+      }
+    ],
+    "OCT02-FS-017": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/catalog-sort.ts",
+          "app/_lib/development-api-contract.test.mts"
+        ]
+      }
+    ],
+    "OCT02-FS-018": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/api-transport-contract.test.mts",
+          "app/_lib/rating-api.ts"
+        ]
+      }
+    ],
+    "OCT02-FS-019": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-anti-abuse-panel.tsx",
+          "app/_lib/admin-anti-abuse-lifecycle.test.mts"
+        ]
+      }
+    ],
+    "OCT02-FS-020": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/blueprint-detail.tsx",
+          "app/_lib/blueprint-csv.mts",
+          "app/_lib/blueprint-csv.test.mts"
+        ]
+      }
+    ],
+    "OCT02-FS-021": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-console.tsx"
+        ]
+      }
+    ],
+    "OCT02-FS-022": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-mod-panels.tsx",
+          "app/_components/admin-review-preview.tsx",
+          "app/_lib/admin-review-preview.mts",
+          "app/_lib/admin-review-preview.test.mts",
+          "browser-tests/admin-data-protection.browser.mts",
+          "docs/admin-data-integrity.md"
+        ]
+      }
+    ],
+    "OCT02-FS-023": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-sticker-panel.tsx"
+        ]
+      }
+    ],
+    "OCT02-FS-024": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-community-panels.tsx",
+          "app/_components/admin-console-infrastructure.tsx",
+          "app/_components/admin-console-users.tsx",
+          "browser-tests/admin-data-protection.browser.mts",
+          "docs/admin-data-integrity.md"
+        ]
+      }
+    ],
+    "OCT02-FS-025": [],
+    "OCT02-FS-026": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-console-users.tsx",
+          "app/_lib/admin-user-create-lifecycle.test.mts",
+          "docs/admin-data-integrity.md"
+        ]
+      }
+    ],
+    "OCT02-FS-027": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-console-oss.tsx",
+          "app/_components/admin-console-users.tsx",
+          "browser-tests/admin-data-protection.browser.mts",
+          "docs/admin-data-integrity.md"
+        ]
+      }
+    ],
+    "OCT02-FS-028": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-console-permissions.tsx",
+          "app/_components/admin-console-users.tsx",
+          "app/_lib/i18n-ai-edit-protection.test.mts",
+          "app/_lib/i18n-message.mts",
+          "app/_lib/i18n-provider.tsx",
+          "browser-tests/admin-data-protection.browser.mts",
+          "docs/admin-data-integrity.md"
+        ]
+      }
+    ],
+    "OCT02-FS-029": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-console-permissions.tsx",
+          "browser-tests/admin-data-protection.browser.mts",
+          "docs/admin-data-integrity.md"
+        ]
+      }
+    ],
+    "OCT02-FS-030": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-console-oss.tsx",
+          "docs/admin-data-integrity.md"
+        ]
+      }
+    ],
+    "OCT02-FS-031": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-dashboard-panel.tsx",
+          "app/_lib/admin-chart-date.test.mts",
+          "docs/admin-data-integrity.md"
+        ]
+      }
+    ],
+    "OCT02-FS-032": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/admin-console-users.tsx"
+        ]
+      }
+    ],
+    "OCT02-FS-033": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/auth.ts",
+          "docs/admin-data-integrity.md"
+        ]
+      }
+    ],
+    "OCT02-R-001": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/antiabuse/crawler.go",
+          "internal/antiabuse/crawler_scope_test.go"
+        ]
+      }
+    ],
+    "OCT02-R-002": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/antiabuse/crawler.go",
+          "internal/antiabuse/crawler_scope_test.go"
+        ]
+      }
+    ],
+    "OCT02-R-003": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "1d909d8a51d7e2ed9d2b75b1e6fcdc3cea646fab",
+        "paths": [
+          ".github/workflows/ci.yml",
+          "tools/testing/isolated_environment.py"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b60039f60e84ee0ae0943d6ca9018f537cd36adb",
+        "paths": [
+          "tools/testing/isolated_environment.py"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/config/config.go"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "c02cf4fc4d1813e302e8eb2a4811e91068983dfd",
+        "paths": [
+          ".github/workflows/ci.yml",
+          "tools/testing/isolated_environment.py"
+        ]
+      }
+    ],
+    "OCT02-R-004": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/queue/dead_letter_timeout_test.go",
+          "internal/queue/nats.go"
+        ]
+      }
+    ],
+    "OCT02-R-005": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/searchindex/typesense.go"
+        ]
+      }
+    ],
+    "OCT02-R-006": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/searchindex/worker.go"
+        ]
+      }
+    ],
+    "OCT02-R-007": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/activity/monitor.go",
+          "internal/activity/monitor_shutdown_test.go"
+        ]
+      }
+    ],
+    "OCT02-R-008": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/httpapi/nats_handlers.go",
+          "internal/queue/nats.go"
+        ]
+      }
+    ],
+    "OCT02-R-009": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/queue/dead_letter_recovery.go",
+          "internal/queue/nats.go"
+        ]
+      }
+    ],
+    "OCT02-R-010": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/searchindex/worker.go"
+        ]
+      }
+    ],
+    "OCT02-R-011": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/log-share-tool.tsx"
+        ]
+      }
+    ],
+    "OCT02-R-012": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "internal/httpapi/player_profile_texture_batch_source_test.go"
+        ]
+      }
+    ],
+    "OCT02-R-013": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/queue/nats.go"
+        ]
+      }
+    ],
+    "OCT02-R-014": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "bb08ec763ef61a726b1bf235c9d6c530232bae10",
+        "paths": [
+          "internal/config/config.go"
+        ]
+      }
+    ],
+    "OCT02-R-015": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/localized-asset-editor.tsx"
+        ]
+      }
+    ],
+    "OCT02-R-016": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "1a2be01792050176ef96ceb0d39ffc5390972ae1",
+        "paths": [
+          "app/_components/skin-library.tsx"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/player-profile-detail.tsx",
+          "app/_components/skin-detail.tsx",
+          "app/_components/skin-library.tsx"
+        ]
+      }
+    ],
+    "OCT02-R-017": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_lib/activity-cleanup-filter.mts",
+          "app/_lib/activity-cleanup-filter.test.mts",
+          "browser-tests/admin-data-protection.browser.mts"
+        ]
+      }
+    ],
+    "OCT02-R-018": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "SYSTEM_NOTIFICATION_LOCALIZATION.md",
+          "internal/httpapi/content_localization_worker.go",
+          "internal/httpapi/notification_template_handlers.go",
+          "internal/httpapi/oct02_review_settings_boundary_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-R-019": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "docs/favorites.md",
+          "internal/httpapi/favorite_modpack_dependency_graph.go",
+          "internal/httpapi/favorite_modpack_dependency_graph_integration_test.go",
+          "internal/httpapi/oct02_favorite_graph_work_budget_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-R-020": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b38eb321e64d06d40741a1b359627195b38692d0",
+        "paths": [
+          "docs/seed-crawler-leases.md",
+          "internal/httpapi/oct02_seed_crawler_heartbeat_integration_test.go",
+          "internal/httpapi/seed_crawler_worker.go",
+          "internal/httpapi/test020_seed_crawler_worker_integration_test.go"
+        ]
+      }
+    ],
+    "OCT02-R-021": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "1d909d8a51d7e2ed9d2b75b1e6fcdc3cea646fab",
+        "paths": [
+          "tools/testing/isolated_environment.py",
+          "tools/testing/isolated_environment_test.py"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "b60039f60e84ee0ae0943d6ca9018f537cd36adb",
+        "paths": [
+          "tools/testing/isolated_environment.py",
+          "tools/testing/isolated_environment_test.py"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "c02cf4fc4d1813e302e8eb2a4811e91068983dfd",
+        "paths": [
+          "tools/testing/isolated_environment.py"
+        ]
+      }
+    ],
+    "OCT02-R-022": [
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "1a2be01792050176ef96ceb0d39ffc5390972ae1",
+        "paths": [
+          "app/_components/skin-library.tsx",
+          "browser-tests/asset-editor-recovery.browser.mts",
+          "docs/frontend-state-recovery.md"
+        ]
+      },
+      {
+        "repo": "mcmods-cn-frontend",
+        "commit": "6f4d2f664c706f0c5ac0d2d16c02b4bba8020394",
+        "paths": [
+          "app/_components/skin-library.tsx",
+          "browser-tests/asset-editor-recovery.browser.mts",
+          "docs/frontend-state-recovery.md"
+        ]
+      }
+    ],
+    "OCT02-DB-013": [
+      {
+        "repo": "mcmods-cn-backend",
+        "commit": "4065ba6bc65d7f164e75047ce07bfb6ea1d58fa5",
+        "paths": [
+          "internal/httpapi/log_pagination_integration_test.go"
+        ]
+      }
+    ]
+  },
+  "associated_commits_policy": {
+    "method": "git rev-list baseline..local_HEAD plus diff-tree actual touched paths; associations only where locations paths were touched within that repository range",
+    "qualification": "路径关联非精准逐行归因；同一文件同时承载不同修复时，本映射不能证明某提交实现了该ID的全部根因。源码/最终SHA、专属回归与剩余边界仍按各项独立记录。",
+    "empty_records": "aliases/scope_only/unconfirmed_candidate/ruled_out保持[]，别名以canonical_id为准；真实范围未触及修复路径同样[]。",
+    "final_documentation_commit": "尚未提交的最终汇总文档不预造commit；提交后的文档关联由最终PR HEAD/diff核对，避免包含自身提交指纹的循环。",
+    "repositories": {
+      "mcmods-cn-backend": {
+        "baseline": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
+        "local_head": "4065ba6bc65d7f164e75047ce07bfb6ea1d58fa5",
+        "commits_in_baseline_to_head": 9
+      },
+      "mcmods-cn-frontend": {
+        "baseline": "262e1c0136bfed4624a011cf5f445b1d71cf93c0",
+        "local_head": "9f0217a4c219f218259d4539f352ade216ef661f",
+        "commits_in_baseline_to_head": 6
+      }
+    },
+    "captured_at": "2026-10-02T12:11:16.638371+00:00"
   }
 }

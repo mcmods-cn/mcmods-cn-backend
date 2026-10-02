@@ -2,17 +2,20 @@
 
 这是本轮实际新增问题合并账本，不是历史449项的复验结论。历史问题见同目录 `LEGACY_REVIEW.md`；原台账不改写。分支与前后端基线见 `ROOT_PROGRESS.md`。完整当前位置、指纹、原始来源映射及剩余边界在 [findings.json](findings.json)。
 
-本次登记 234 个稳定 ID；按明确别名去重后确认 224 项。确认数含已修但仅部分验证、正式文档和辅助测试缺陷，不等于全部业务验收通过。状态分布：alias 4、fixed_documentation 1、fixed_partial_verification 48、fixed_static_regression_pass 5、fixed_verified 170、ruled_out 1、scope_only 2、unconfirmed_candidate 3。
+本次登记 237 个稳定 ID；按明确别名去重后确认 226 项。确认数含已修但仅部分验证、正式文档和辅助测试缺陷，不等于全部业务验收通过。状态分布：alias 4、fixed_documentation 1、fixed_partial_verification 48、fixed_static_regression_pass 5、fixed_verified 172、ruled_out 1、scope_only 2、unconfirmed_candidate 3、test_fixture_correction 1（辅助、不计canonical）。
 
 ## 口径与验证边界
+
+`findings.json.source_records` 保存合并时实际读取的输入快照（当时行数/SHA）；这些历史输入不冒充持续更新的最终文档版本。修复位置的当前指纹在各项 `locations` 单独核对，验证范围与阅读范围分别记录。逐ID关联提交在 `associated_commits_by_finding`，取真实baseline..当前本地HEAD触及路径；这是路径关联非精准逐行归因，最终文档提交通过PR HEAD核对避免自引用。
 
 - 只有稳定已确认根因计入确认数。B022、FP048、FP067为未证实候选；FS025已证伪；FP026/FP033是归类集合。
 - A012→DB008、B019→R019、FP028→FS020、FP062→R011为明确别名。C015/C016辅助修复不再计根代理；独立handler的连接生命周期问题保留各自作用点。
 - NATS配置和诊断脱敏共同归R008；B阶段记录误标R009已纠正。R009仅指持久死信恢复。
 - `fixed_verified`表示所列局部断言已实际执行；source-contract、确定性mock、TEMP PG、完整schema PG和浏览器fixture边界分别保留。未覆盖真实浏览器/外部供应商的项目仍说明局限。
-- 默认测试的DB SKIP不是集成通过。最终实际PG18 r2：1793发现/调用、76批0FAIL、1786topPASS/7外部样本/服务SKIP，退出0；1194当前Go指纹与对应snapshot一致。Typesense29.0真实回环服务加searchindex整包racePASS6.822s。首轮PG1749/74批8FAIL、环境错误及业务RED均保留。
-- R6 unit344PASS0SKIP/build0和生产产物字节保持，最终R7 production Chromium73PASS/0FAIL/0SKIP180.621s；全量lint/type退出0，647源码指纹无漂移。FP012/051/068三个专用fixture旅程已通过；真实DB/供应商边界分别保留。r5的69PASS覆盖FP050/FP087，但不覆盖最后global保护，产物界限保留。
+- 默认测试的DB SKIP不是集成通过。此前PG18 r2（1793调用/76批0FAIL/1786PASS7SKIP）绑定修改前1194Go。首次远端PG1793/76批出现TEST018真实1批FAIL，C017已确定性修复；新PG-r4整体1794/76批0FAIL已通过并绑定当次1195源码，1782PASS/12SKIP保留；不能使用旧snapshot证明当前源。早期PG1749/74批8FAIL及环境错误也保留。
+- 当前R9 lint/type/unit退出0，344unitPASS0SKIP；production Chromium74PASS/0FAIL/0SKIP194.435s，647指纹无漂移。只有type-options测试同步变更，R8生产产物复用；FP012/051/068三专用fixture旅程仍不证明DB/供应商。
 - 无生产数据库、真实供应商/付费AI或线上批量重译。合成数据计划/预算通过不证明生产健康、供应商语义质量或费用准确。
+- FE远端quality首72PASS1FAIL暴露R022初始就绪门；后续73PASS1FAIL为FP051测试等待name而非独立type options。分别保留旧held-auth/held-options确定性RED，R9严格断言全74通过；另一push通过不抹除原失败，后续远端CI逐check单列。
 
 ## 已确认项目
 
@@ -22,10 +25,10 @@
 | --- | --- | --- | --- |
 | OCT02-R-001 P1 | fixed_verified | Google/Bing DNS信任结果共用仅IP缓存，改为IP与供应商后缀组合键；确定性DNS回归实际RED/GREEN。 | internal/antiabuse/crawler.go, internal/antiabuse/crawler_scope_test.go, internal/antiabuse/crawler_test.go |
 | OCT02-R-002 P1 | fixed_verified | 不匹配IP/CIDR的策略继续由伪造UA命中；要求实际规则匹配；六项边界回归通过。 | internal/antiabuse/crawler.go, internal/antiabuse/crawler_scope_test.go, internal/antiabuse/crawler_test.go |
-| OCT02-R-003 P2 | fixed_verified | 测试配置可能读取祖先.env；增加显式跳过选项及带身份校验的专用环境工具；配置测试、Python三项及真实空库初始化通过；无需真实凭据。 | internal/config/config.go, tools/testing/isolated_environment.py |
+| OCT02-R-003 P2 | fixed_verified | 测试配置可能读取祖先.env；增加显式跳过选项及带身份校验的专用环境工具。后续首次up误把入口初始化临时Unix-socket PG就绪当作最终TCP就绪，实际host连接失败；固定启动日志确认临时ready10:48:16.695、最终TCP首次listen10:48:17.111；隔离配置测试与空库初始化通过；readiness仅加容器内-h127.0.0.1，保留60次预算、owner验证和显式自有库初始化。同机制CI三个PG health probe已同步TCP（当前143行已全读；远端该工具改动后CI另列）。四既有Python测试PASS0.001s；新独立3容器up/health/down真实通过（PG18.6、287base tables、RedisPONG、NATS TCP INFO），仅新增3精确owner/id当时清理、C017原3为全库回归保留；根最终收尾证据确认累计16任务容器已删除/原3云服务保持。未执行socket0/TCP1故障注入；原真实up失败和时间线保留。 | internal/config/config.go, tools/testing/isolated_environment.py, .github/workflows/ci.yml |
 | OCT02-R-004 P1 | fixed_verified | 耗尽超时的任务context使死信DB写入立即失败；独立有界恢复context；实际超时任务RED/GREEN。 | internal/queue/nats.go, internal/queue/dead_letter_timeout_test.go |
 | OCT02-R-005 P1 | fixed_verified | Typesense空、少量或额外确认行仍被接受；严格核对逐条确认总数及结果；六项HTTP确定性RED/GREEN。 | internal/searchindex/typesense.go |
-| OCT02-R-006 P2 | fixed_verified | 数组首项空字符串终止投影，丢失后续可用搜索文本；跳过空值并保留预算；跳过空字符串并保留后续可用文本与预算；三项定向回归通过，Typesense29.0真实回环服务上的searchindex整包race通过6.822s。29.0是服务版本，不是测试数量。 | internal/searchindex/worker.go |
+| OCT02-R-006 P2 | fixed_verified | 数组首项空字符串终止投影，丢失后续可用搜索文本；跳过空字符串并保留后续可用文本与预算；三项定向回归通过，Typesense29.0真实回环服务上的searchindex整包race通过6.822s。29.0是服务版本，不是测试数量。 | internal/searchindex/worker.go |
 | OCT02-R-007 P2 | fixed_verified | 已取消的Close调用没有发出停止信号；停止与调用者等待context分离；生命周期RED/GREEN；真实PG整包race通过。 | internal/activity/monitor.go, internal/activity/monitor_shutdown_test.go |
 | OCT02-R-008 P1 | fixed_verified | NATS错误中的URL或token进入状态返回；集中脱敏诊断；合成凭据五项RED/GREEN；整包race通过；B另修admin NATS配置响应userinfo脱敏/省略密钥保留/显式clear，真实嵌入broker8cases通过。 | internal/httpapi/nats_handlers.go, internal/queue/nats.go |
 | OCT02-R-009 P1 | fixed_verified | 数据库不可用时耗尽任务缺持久死信；原事件ID还被broker去重；独立broker身份、持久恢复消费者和幂等DB补写；实际重启/双worker/毒旧消息/人工重放保护race通过。 | internal/queue/dead_letter_recovery.go, internal/queue/nats.go |
@@ -40,7 +43,8 @@
 | OCT02-R-018 P1 | fixed_verified | 审核配置读/JSON错误回退false可跳审核；模板raw重复key被map合并隐藏，并发版本读取不原子；真PG配置错误及重复key两组RED/GREEN；缺行默认、全需审核故障回退、重复400且不写、并发版本与单连接3顶层race通过3.224秒；并发版本没有独立旧版RED。 | SYSTEM_NOTIFICATION_LOCALIZATION.md, internal/httpapi/content_localization_worker.go, internal/httpapi/notification_template_handlers.go 等4处 |
 | OCT02-R-019 P1 | fixed_verified | 依赖图SQL先无限递归遍历/展开后才LIMIT结果，既有PERF040查询预算无效；按唯一节点/候选邻接关系前置准入预算，8000链旧8000→1001；dense旧79600→4001；真实PG RED/GREEN最终race3top PASS46.673s，百万关系索引31.54ms/原2s断言通过。 | docs/favorites.md, internal/httpapi/favorite_modpack_dependency_graph.go, internal/httpapi/favorite_modpack_export.go 等6处 |
 | OCT02-R-020 P1 | fixed_verified | 正常stop取消在途heartbeat SQL，被误判为真故障，已完成seed run可标failed；实际TEST020 completed2want3；私有cancel cause仅忽略自身normal-stop Canceled且父context活跃；parent取消、23514和owner lost保留。受控PG旧RED1FAIL3PASS→新13top/0skip-race PASS46.800s。 | docs/seed-crawler-leases.md, internal/httpapi/seed_crawler_worker.go, internal/httpapi/oct02_seed_crawler_heartbeat_integration_test.go 等4处 |
-| OCT02-R-021 P2 | fixed_verified | 隔离测试环境down移除已确认归属的容器及凭据后，因目录保留修复备份而rmdir ENOTEMPTY报错；仅捕获ENOTEMPTY/EEXIST保留额外文件，其他OSError继续传播；所有owner检查仍先于任何rm，不递归删除。新增保留备份测试旧RED1error/3PASS→新4PASS0.001s；实际7任务容器、4进程已按exact身份收尾，原3云服务保持，备份保留。 | tools/testing/isolated_environment.py, tools/testing/isolated_environment_test.py |
+| OCT02-R-021 P2 | fixed_verified | 隔离测试环境down移除已确认归属的容器及凭据后，因目录保留修复备份而rmdir ENOTEMPTY报错；仅捕获ENOTEMPTY/EEXIST保留额外文件，其他OSError继续传播；所有owner检查仍先于任何rm，不递归删除。保留备份旧RED1error/3PASS→新4PASS0.001s；最初7/后续10均为历史，最终exact-owner收尾累计16任务容器（10旧+3readiness+3C017）、原3云服务保持、任务live进程0、6旧合成env精确移除，私有修复备份保留。 | tools/testing/isolated_environment.py, tools/testing/isolated_environment_test.py |
+| OCT02-R-022 P2 | fixed_verified | 皮肤列表初次认证未ready仍接受输入，确认身份后actor-key重新挂载清空已输入筛选；首次远端CI出现空input与原retry保留断言失败；认证确认前native fieldset disabled={!ready}，保持账号隔离key、原布局及loading；旧R6 held-auth浏览器明确RED1FAIL，新增控件禁用/不发skins请求/ready后精确query断言与原retry断言在fresh R8均通过。全套74PASS/0FAIL/0SKIP 188.529s，unit344/build/lint/type退出0。 | FE:app/_components/skin-library.tsx, FE:browser-tests/asset-editor-recovery.browser.mts, FE:docs/frontend-state-recovery.md |
 
 ### AI、认证、目录与评论
 
@@ -57,9 +61,9 @@
 | OCT02-A-009 P2 | fixed_verified | 列表遍历持有 rows 时签名 helper 现在要再查数据库，pool=1 会死锁；逐项查产生 N+1；creator/blueprint rows 关闭后一次授权；目录头像100项、MaxConns1、<=4 SQL 实际 PostgreSQL 通过。 | internal/httpapi/creator_mutation_handlers.go |
 | OCT02-A-010 P1 | fixed_verified | 已软删除蓝图仍可下载 approved variant；排队等待的 complete upload 可将 deleted 重新 queued；下载增加非 deleted；advisory 锁后重新读取蓝图状态 FOR UPDATE；访客/owner/admin 删除下载 404；锁等待+并发删除不会复活 | internal/httpapi/blueprint_handlers.go |
 | OCT02-A-011 P1 | fixed_verified | 目录 resource 的 POST 翻译可返回缓存译文，缺少 GET 已有 global_resource.view 门；POST 缓存译文复用 global_resource.view 权限；A018 真实 pending GET/cachedPOST 拒绝回归通过。 | internal/httpapi/content_localization_handlers.go |
-| OCT02-A-013 P2 | fixed_verified | 末次附件处理崩溃遗留processing，失败无法终止；最后一次附件处理崩溃留 processing；有限恢复 failed 并同步附件，原故障及恢复回归。 | internal/httpapi/comment_log_attachment_worker.go |
+| OCT02-A-013 P2 | fixed_verified | 末次附件处理崩溃遗留processing，失败无法终止；有限恢复 failed 并同步附件，原故障及恢复回归。 | internal/httpapi/comment_log_attachment_worker.go |
 | OCT02-A-014 P2 | fixed_verified | watch已读标记可覆盖并发新增回复；watch 锁后读取 fresh 回复快照，防 read marker 覆盖并发新回复；实际 PostgreSQL 红绿。 | internal/httpapi/comment_detail_handlers.go |
-| OCT02-A-015 P1 | fixed_verified | 评论预览树无界，过滤屏蔽与分页边界不完整；预览64 descendants/depth<=3，先过滤 blocked，201节点旧红→65总节点绿；AST源门不替代行为。 | internal/httpapi/comment_handlers.go |
+| OCT02-A-015 P1 | fixed_verified | 评论预览树无界，过滤屏蔽与分页边界不完整；预览64 descendants/depth<=3，先过滤 blocked，201节点旧红→65总节点绿；AST源门不替代行为。 | internal/httpapi/comment_handlers.go, internal/httpapi/comment_detail_handlers.go, internal/httpapi/oct02_comment_preview_integration_test.go |
 | OCT02-A-016 P1 | fixed_verified | 已撤销会话可被inflight旧loader重新填回正缓存；撤销marker覆盖 inflight loader 回填；真实 PG tracer/miniredis 竞争红绿。 | internal/httpapi/auth_cache.go, internal/httpapi/auth_handlers.go |
 | OCT02-A-017 P1 | fixed_verified | 业务事务持连接却从pool读审核设置，单连接自锁；人工本地化/creator 配置读取复用本TX；未提交设置和目录100图Max1<=4SQL PG通过；不宣称所有事务故障已注入。 | internal/httpapi/blueprint_worker.go, internal/httpapi/catalog_editor_service.go, internal/httpapi/oct02_localization_transaction_integration_test.go |
 | OCT02-A-018 P1 | fixed_verified | 公共目录挑选未批准源，继承viewer权限的loader写共享缓存，并保留未授权derived字段；公开源在latest/limit之前 approved；共享缓存清claims/generation同步，蓝图/资产/搜索/短链/community投影与缓存ACL实测通过；父发布/隐藏B同Tx generation和root搜索投影须共同交付。 | internal/httpapi/blueprint_worker.go, internal/httpapi/catalog_editor_handlers.go, internal/httpapi/catalog_editor_service.go 等12处 |
@@ -135,6 +139,7 @@
 | OCT02-C-014 P2 | fixed_verified | PNG只看generic header，截断PNG/改后缀JPEG可登记trusted；PNG完整decode及现有100M预算/单gate/cancel checks，实际HTTP持久Outbox/受控OSS和race通过，运行中标准库decode不可立即中断。 | CONTENT_PROJECT_SECURITY.md, internal/httpapi/mod_export_handlers.go, internal/httpapi/mod_export_import_handlers.go 等4处 |
 | OCT02-C-015 P2 | fixed_static_regression_pass | Outbox测试Begin后t.Fatal路径无deferRollback可阻收尾；3处立即defer，原断言不变；PG+embedded NATS race8top通过，无旧挂起故障注入。 | internal/queue/outbox_integration_test.go |
 | OCT02-C-016 P2 | fixed_static_regression_pass | activity load producer提前失败后无receiver，unbuffered发送不理ctx；peer cancel+cancellable send安全收尾，2000events/20producer PG-race3top通过，无旧故障注入；可选site聚合42883未验证。 | internal/activity/postgres_store_integration_test.go |
+| OCT02-C-017 P2 | fixed_verified | 通知worker按事务启动时now()判断到期；较早启动的事务晚领取或等待行锁后，把另一个worker刚提交的下一批误判未到期，返回成功但201接收者仅送200；仅领取条件使用当前数据库clock_timestamp()，保留200人批次行锁、唯一通知、未来窗口和退避；真实PG18.6两种受控交错旧RED同CI状态，修后-race9top2sub0SKIP PASS83.745s，原TEST018过滤/缓存/失败重试/旧processing恢复/隐藏目标断言不改。未来任务零发送和已完成重放201唯一通过，vet0。 | internal/httpapi/project_update_notification_worker.go, internal/httpapi/oct02_project_update_claim_clock_integration_test.go, PROJECT_FOLLOW_NOTIFICATIONS.md |
 
 ### 数据库、种子与治理
 
@@ -205,7 +210,7 @@
 | OCT02-FP-009 P2 | fixed_partial_verification | 取消项目关注async未catch，失败无恢复反馈；guarded mutation与error/saving状态；eslint PASS，失败API browser未验证 | FE:app/_components/project-follows-panel.tsx, FE:browser-tests/oct02-forms.browser.mts |
 | OCT02-FP-010 P2 | fixed_partial_verification | 资产加载失败仍提供编辑并可能无更新却显示提交成功；加载边界，必须有真实skin/blueprint才可save；eslint PASS，真实资产写入未验证 | FE:app/_components/localized-asset-editor.tsx |
 | OCT02-FP-011 P2 | fixed_verified | 三种导入poll离页继续，旧timer清理使Promise悬挂；共享waitForPolledJob+AbortSignal，卸载/token切换取消本页请求；定向10 node PASS（含取消断言） | FE:app/_components/mod-editor.tsx, FE:app/_components/modpack-editor.tsx, FE:app/_components/simple-project-editor.tsx |
-| OCT02-FP-012 P2 | fixed_verified | 切换界面语言重载内容偏好，覆盖未保存选择；production picker选fr-FR/ja-JP后切zh，选择保留且不多GET，PUT精确primary/secondary值；专用Chromium断言已实际通过；专用3case及R7 whole已通过，合成API不证明DB/供应商。 | FE:app/_components/content-language-preferences.tsx, FE:browser-tests/oct02-forms.browser.mts, FE:browser-tests/specific-journeys.browser.mts |
+| OCT02-FP-012 P2 | fixed_verified | 切换界面语言重载内容偏好，覆盖未保存选择；production picker选fr-FR/ja-JP后切zh，选择保留且不多GET，PUT精确primary/secondary值；专用Chromium断言已实际通过；专用3case及R9 whole已通过，合成API不证明DB/供应商。 | FE:app/_components/content-language-preferences.tsx, FE:browser-tests/oct02-forms.browser.mts, FE:browser-tests/specific-journeys.browser.mts |
 | OCT02-FP-013 P2 | fixed_partial_verification | simple icon裁剪preview ObjectURL未释放；missing/token路径与finally释放；eslint PASS，内存长测未执行 | FE:app/_components/simple-project-editor.tsx |
 | OCT02-FP-014 P2 | fixed_partial_verification | history/changelogentry/history旧请求无取消，endpoint游标未隔离；初载显示空历史；资源key与取消守卫；初始loading；现有pagination契约3 PASS | FE:app/_components/content-history.tsx, FE:app/_components/mod-history.tsx, FE:app/_components/project-changelog-entry.tsx 等5处 |
 | OCT02-FP-015 P1 | fixed_verified | SimpleProjectCatalog请求无守卫，旧筛选结果覆盖新URL列表；逐次abort与取消后禁止写入；controlled迟到response browser PASS | FE:app/_components/simple-project-catalog.tsx, FE:browser-tests/oct02-forms.browser.mts |
@@ -240,7 +245,7 @@
 | OCT02-FP-047 P1 | fixed_partial_verification | profile/card请求取消守卫+actor身份key；UserHome/编辑器同cookie actor隔离，无上一账号私有状态留存；P1 已修，部分静态验证 | FE:app/_components/catalog-manual-editors.tsx, FE:app/_components/mod-catalog.tsx, FE:app/_components/server-catalog.tsx 等6处 |
 | OCT02-FP-049 P2 | fixed_partial_verification | heatmap数据按UTC日键，日期格式显式UTC避免负offset偏前一天；完整时区/月份矩阵未交互测试；P2 已修，部分静态验证 | FE:app/_components/user-profile-overview.tsx |
 | OCT02-FP-050 P2 | fixed_verified | filled accent改主题on-accent，深主题保留亮绿底/深字；旧light4.09/dark2.22/hover1.66低4.5实际RED保留，r5双theme Chromiumcomputed/WCAG断言通过：light4.821/hover6.086、dark8.347/hover11.165，390zh无溢出。 | FE:app/globals.css, FE:app/_components/blueprint-viewer.tsx, FE:app/_components/catalog-list-ui.tsx 等31处 |
-| OCT02-FP-051 P1 | fixed_verified | imported recipe编辑把canonical type当成真实type publicId，导致编辑路由错误；production资源卡打开popup；首次recipeGET503可见Retry，取得真实typeID后进入editor；首次PUT503保留draft，第二PUT精确type/template/baseRevision/dirtyLocale，成功关闭popup；专用3case及R7 whole已通过，合成API不证明DB/供应商。 | FE:app/_components/global-catalog.tsx, FE:browser-tests/specific-journeys.browser.mts |
+| OCT02-FP-051 P1 | fixed_verified | imported recipe编辑把canonical type当成真实type publicId，导致编辑路由错误；production资源卡打开popup；首次recipeGET503可见Retry，取得真实typeID后进入editor；首次PUT503保留draft，第二PUT精确type/template/baseRevision/dirtyLocale，成功关闭popup；专用3case及R9 whole已通过；后续CI的type-options等待缺陷由受控屏障和原严格断言修正，生产0改，合成API不证明DB/供应商。 | FE:app/_components/global-catalog.tsx, FE:browser-tests/specific-journeys.browser.mts |
 | OCT02-FP-052 P2 | fixed_partial_verification | section继续加载的旧then/catch/finally可覆盖新筛选；ref与搜索/refresh scope隔离旧结果及busy。完整源码已复查，乱序失败浏览器断言未执行。 | FE:app/_components/mod-content-section-page.tsx |
 | OCT02-FP-053 P1 | fixed_partial_verification | Tag/RecipeType原加载失败开放空编辑；loaded gate+Retry，actor隔离，初contentLocale不随UIlocale覆盖；P1 已修，部分静态验证 | FE:app/_components/catalog-manual-editors.tsx |
 | OCT02-FP-054 P2 | fixed_verified | 部分附件成功后后续失败丢已有proofID，申请重试重新上传；同tick无ref互斥，账号/目标切换仍可迟到写入；认领/编辑申请成功proofID逐项保留、批量失败只重试失败文件、申请失败保留全部ID；ref排他/字段冻结/关闭守卫/actor key。四确定性用例PASS，当前r4受控production浏览器对应case通过；已修；FS独立回归 | FE:app/_components/comment-markdown-editor.tsx, FE:app/_components/creator-detail.tsx, FE:app/_components/project-editor-application.tsx 等5处 |
@@ -255,7 +260,7 @@
 | OCT02-FP-064 P2 | fixed_partial_verification | server/creator debounce窗口旧cursor+新query；loadedScope与当前params相同才允许loadMore，保留既有generation；P2 已修，部分静态验证 | FE:app/_components/creator-catalog.tsx, FE:app/_components/creator-picker.tsx, FE:app/_components/server-catalog.tsx |
 | OCT02-FP-065 P2 | fixed_partial_verification | Server历史请求失败永久skeleton；错误可见且Retry，范围更改清旧图；P2 已修，部分静态验证 | FE:app/_components/server-detail.tsx |
 | OCT02-FP-066 P2 | fixed_partial_verification | Server probe busyguard；主服务器写成功draftcomplete失败不false-fail诱导重复提交；取消busy旅程未全面验收；P2 已修，部分静态验证 | FE:app/_components/server-submission-wizard.tsx |
-| OCT02-FP-068 P1 | fixed_verified | 初次导入jobPOST等待期间仍可再次drop，导致重复上传/覆盖当前任务；native DragEvent同tick双drop及初次jobPOST未返回时第三drop，presign/jobPOST各恰好1；响应后仅poll job-one，完成恢复input且次数仍1；专用3case及R7 whole已通过，合成API不证明DB/供应商。 | FE:app/_components/mod-catalog-data.tsx, FE:browser-tests/specific-journeys.browser.mts |
+| OCT02-FP-068 P1 | fixed_verified | 初次导入jobPOST等待期间仍可再次drop，导致重复上传/覆盖当前任务；native DragEvent同tick双drop及初次jobPOST未返回时第三drop，presign/jobPOST各恰好1；响应后仅poll job-one，完成恢复input且次数仍1；专用3case及R9 whole已通过，合成API不证明DB/供应商。 | FE:app/_components/mod-catalog-data.tsx, FE:browser-tests/specific-journeys.browser.mts |
 | OCT02-FP-069 P2 | fixed_verified | 复制拒绝仍显示成功、表情目录失败不可恢复；复制捕获并显示copyFailed，目录Retry并选择合法pack。生产代码块与fixture回归通过，平台剪贴板权限未全验。 | FE:app/_components/log-share-viewer.tsx, FE:app/_components/sticker-picker.tsx, FE:app/_components/tools-plantuml.tsx 等4处 |
 | OCT02-FP-070 P2 | fixed_verified | UserHome初始部分读取错误可见/Retry；profile原编辑草稿不随读取重置；notification成功读取前禁猜测默认写；files分支独立反馈与locale日期。state6相应用例R2 PASS；已修 | FE:app/_components/user-home.tsx, FE:browser-tests/oct02-state.browser.mts |
 | OCT02-FP-071 P2 | fixed_verified | ModEditor原读取失败不开放空draft/autoDraft；规范化成功后才recordLoaded，保存ref、所有上传busy保护，draftcomplete失败独立提示。state6中3项目加载失败R2 PASS；已修 | FE:app/_components/mod-editor.tsx, FE:app/_components/site-shell.tsx, FE:browser-tests/oct02-state.browser.mts |
@@ -289,11 +294,12 @@
 | OCT02-FP-062 | alias → OCT02-R-011 | 根因与最终实施/验证并入 OCT02-R-011，按canonical计一次；原阶段候选或待验表述不再代表当前修复状态。 |
 | OCT02-FP-067 | unconfirmed_candidate | 未擅自重定义经济币种/材料kind与alternative策略；无实际资金损失或XSS复现。 |
 | OCT02-FS-025 | ruled_out | 已证伪，不作代码修复。 |
+| OCT02-DB-013 | test_fixture_correction（辅助） | 1.3M行TEMP日志夹具默认statistics target100只抽样约30000行，100/1M稀疏needle可能未入统计，估算回退0.005→5000，CI不稳定选分页Btree/过滤249975行而违反原GIN断言。生产SQL/索引原已存在，未证实生产查询缺陷；仅四TEMP tsvector列target10000使请求样本覆盖已知全量，先断言pg_stats词条及0.0001/0.001频率；原4个GIN/noSeqScan、120s context、disjoint keyset、page/cleanup Btree、exact1000清理全部保持。新238行真实自有PG-race1top0SKIP PASS5.076s；不改生产schema/统计policy、未强制关闭seqscan。 关联历史PERF033；保留同HEAD PR通过/push失败，受控统计缺失回放不称原随机采样RED；PG-r4旧fixture与新定向门分列，生产统计policy未验证。 |
 
 ## 交付与剩余验证
 
 数据库generation168前向函数修复以及日志applied-redactor列须按 `DATABASE_REVIEW.md` 和正式修复说明先执行；本任务没有对生产执行。AI provider请求账本启用依现有generation168表，不承诺外部请求或计费严格一次。后端精确修订预览、类别分页、AI投递恢复及可选预算字段先部署，前端随后；未知/损坏配置现在稳定失败关闭，不以默认值覆盖数据。
 
-默认go test/race（1239 topPASS/554 topSKIP）及vet/build均exit0。实际PG18整库r2：1793全部调用、76批0FAIL、1786topPASS/7SKIP退出0，日志 `evidence/final-pg18-db-suite-r2.log`，与1194当前Go指纹一致；Typesense29.0真实回环服务加searchindex整包racePASS6.822s。实际API/PG登录、收藏持久化及退出双语言移动live1topPASS3.441s（用例3.066s），没有本项目API mock。当前前端lint/type退出0；R6 unit344PASS0SKIP/build0、生产产物字节不变；最终R7 production Chromium73PASS/0FAIL/0SKIP180.621s，证据 `evidence/frontend-final-r7-browser.log`，647源码指纹无漂移，新增三项fixture各依实际断言更新。提交/关联PR与CI尚未验证。本表不把整库通过扩大为全部业务或生产健康。未证实蓝图迟到PUT补偿/锁序与公共事件合并重播仅保留候选，不擅自改变商业/权限policy。
+当前1195Go（含最终stats fixture）质量r5默认unit/race各exit0（1240topPASS/554topSKIP，787subPASS/76subSKIP；race22packagePASS/9skip），vet/build0、默认语句覆盖30.8%。C017真实PG18.6定向-race9top2sub0SKIP PASS83.745s；新PG-r3全1794/76批在平台断线后进程终止（停batch17，未取得终态），不能称通过或已确认业务失败；新PG-r4已实际exit0：1794发现/调用、76批0失败，1782topPASS/12topSKIP，1195当次源码指纹无漂移；之后仅log_pagination_integration_test.go统计fixture发生变化，新fixture-race1top0SKIP PASS5.076s及质量r5单列，不把旧完整PG门拼成新版本单次全通过；7外部/Typesense条件SKIP与5显式owned目标保护SKIP保留，5项显式owned补充串行-race门已实际5top/24sub/0SKIP PASS（database1.479s/httpapi40.720s/inventory1.090s），不能改写r4原始SKIP或拼成单次完整零skip。BE首远端PG1793/76批真实1批FAIL（TEST018 pending200/201）与C017受控旧RED1top2sub1.969s保留；旧1194Go/1793PG-r2仅绑定修改前版本。当前FE R9 lint/type/unitexit0、344unitPASS0SKIP、Chromium74PASS0FAIL0SKIP194.434861243s，647当前指纹无漂移；仅type-options测试同步改变，R8生产产物可复用。最新真实R5 API联通1PASS3.873506876s（case3.52344232s）无项目API fixture，范围为登录/收藏/删除/退出及双语言移动。FE首远端quality72PASS1FAIL与后续73PASS1FAIL均保留，分别产品就绪门修复和测试options同步修复。根实际核验FE9f0217a六check通过；BEadab683的PR检查全通过，但同HEAD push PG另出现LogPaginationSearchAndCleanupStayIndexedAtScaleIntegration计划断言失败（合计9成功/1失败），稀疏needle夹具采样缺失已独立修正DB013，当前真实PG-race1top0skip5.076s；仅辅助测试纠正，不增产品canonical，不能用PR或本地成功抹除原失败。后续新HEAD逐check CI另列；生产健康、真实供应商/AI质量与账单未验证。根最终exact-owner收尾PASS：累计16任务容器已删除（原10+readiness3+C0173），原3云服务保持、任务live进程0、6旧合成env精确移除、私有修复备份保留。当前远端结果只绑定adab683 PR5success/push4success1FAIL；后续HEAD不继承这些结果。证据 `evidence/backend-final-r5-source-snapshot.json`、`evidence/final-pg18-db-suite-r4-counts.json`、`evidence/backend-owned-guarded-final-r5-counts.json`、`evidence/database-log-stats-targeted-green.log`、`evidence/final-owned-resource-cleanup.json`、`evidence/backend-ci-adab-push-pg-mcp.log`、`evidence/frontend-final-r9-browser.log`。前向数据库部署与真实供应商/生产健康边界不因门变化而扩大。
 
 本文件由七方完整进度/正式报告及最终handoff人工核对后合并；JSON是同一记录的生成视图。原始日志和环境身份记录私存任务目录，不提交密钥、DSN、用户数据或敏感payload。

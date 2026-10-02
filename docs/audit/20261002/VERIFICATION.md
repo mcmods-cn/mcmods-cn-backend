@@ -25,19 +25,20 @@
 | 检查 | 当前结果与准确范围 |
 | --- | --- |
 | 修改前 PostgreSQL 基线 | PASS：1606 个顶层测试中 1600 PASS、6 条件 SKIP；属于修改前版本。 |
-| 当前 `go test ./... -count=1 -coverprofile=… -json` | PASS / exit0：1239 顶层 PASS、554 条件 SKIP；子测试 785 PASS、76 SKIP。默认模式不启用专门的外部/数据库 opt-in。 |
+| 当前 `go test ./... -count=1 -coverprofile=… -json` | PASS / exit0：1240 顶层 PASS、554 条件 SKIP；子测试 787 PASS、76 SKIP。默认模式不启用专门的外部/数据库 opt-in。 |
 | 当前 `go test -race ./... -count=1 -json` | PASS / exit0：同上顶层及子测试，22 包 PASS、9 包 SKIP；实际 DB 并发另列，不将默认 SKIP 当成集成通过。 |
 | `go vet ./...`、`go build ./...` | PASS / exit0。 |
 | 当前默认 Go 语句覆盖率 | 30.8%，实际 `go tool cover`；不是文件阅读比例、全部业务场景比例或真实 DB 覆盖率。 |
-| 当前真实 PG 全库 `go run ./tools/testing/db_suite` | PASS / exit0：1793 顶层调用、1786 PASS、7 条件 SKIP；76 批、零失败。明确 owned PostgreSQL、RUN_DB_INTEGRATION=1，并启用精确测试目标下的函数恢复测试。 |
+| 真实 PG 全库 `go run ./tools/testing/db_suite` | 含C017的1195源码r4 PASS / exit0：1794调用、1782 PASS、12条件SKIP，76批零失败、指纹漂移0。随后仅日志统计测试改了1文件，其独立PG race PASS5.076s；原完整门绑定修改前测试，不能称最终测试也在同次整套执行。 |
+| 明确独占目标PG修复/恢复/事务/库存race | PASS / exit0：5顶层/24子例、0SKIP；-p1 -parallel1串行，确认本任务资源与精确库名；不改原整套SKIP。 |
 | 真实 queue / searchindex / activity 整包 race | PASS；NATS 重启/双 worker 恢复、Typesense29 回环服务、PG 活动清理分别实测。最终 queue 22.903s；不能据此推断生产集群健康。 |
 | AI 专项真实 PG race | PASS：30 顶层、0 SKIP，4.115s；供应商是确定性本地 HTTP，未产生真实付费调用。 |
 | 依赖图工作预算与百万关系索引 race | PASS：3 顶层、0 SKIP，46.673s；长链与稠密环真实执行计划 RED/GREEN，既有百万关系索引与两秒断言保留。 |
 | 种子爬虫正常停机/租约保护 race | PASS：13 顶层、0 SKIP，46.800s；查询边界真实取消、数据库 CHECK 故障及旧 lease owner 均验证。 |
 | 图标导入 MaxConns=1 | PASS：Mod 创建旧 deadline RED→GREEN；整合包和简单项目同根因 12 顶层 race PASS；原并发 slug 断言保留。 |
-| 前端 lint / typecheck / unit | PASS / exit0：R7当前最终 lint/typecheck；r6 全部344单元测试通过、0 SKIP，生产源码未再修改。 |
-| 前端 production build | r6 PASS / exit0，明确示例 HTTPS 编译目标；09:17产物晚于08:54最后分页修改，最终源码快照漂移为零。 |
-| Chromium 生产界面受控 API | R7单次完整73 PASS、0FAIL/0SKIP，180.621s；包含语言偏好、配方类型编辑/失败恢复和初始导入排他。R6同一生产产物70PASS/166.280s保留；不把局部结果相加冒充全套。 |
+| 前端 lint / typecheck / unit | PASS / exit0：R9全部344单元测试通过、0 SKIP，lint/typecheck均通过；源版本绑定R9快照。 |
+| 前端 production build | R8 PASS / exit0，明确示例 HTTPS 编译目标；10:27产物晚于最后皮肤修改，最终源码快照漂移为零。 |
+| Chromium 生产界面受控 API | R9单次完整74 PASS、0FAIL/0SKIP，194.435s；配方选项明确受控异步同步，精确类型及PUT草稿断言保留。生产源码与R8构建相同；R8完整74项、R7完整73项和R6完整70项保留各自版本。 |
 | 当前真实前后端浏览器旅程 | PASS / exit0：真实 cookie 登录、HttpOnly、收藏创建/刷新持久化、删除取消/确认、退出、英中切换及390px。本项目 API 无 fixture；精确终态及版本见 JSON。 |
 | 文件审查发布器 | 11项真实本地回归 PASS，覆盖漏段/旧指纹拒绝、人工资产不可误排、私有环境不读、删除保留及快照重放；不执行业务测试。 |
 | 依赖安全与密钥 | 结果见 `SECURITY_REVIEW.md`；真实供应商连通性/语义质量/账单及生产运行健康 NOT_RUN。 |
@@ -46,6 +47,19 @@
 保存脱敏命令、退出码、计数和证据 SHA256，不保存数据库 URL、密码、原文或日志全文。
 
 ## 失败记录与修正
+
+实际远端CI首轮皮肤retry失败72PASS/1FAIL，确认是初始身份重新挂载丢筛选；held-auth
+旧产物明确RED，新就绪门在R8新构建及R9完整浏览器通过。后续配方选择框失败
+73PASS/1FAIL是测试提前读取未加载选项：受控held-options复现，验证原生禁用及加载
+状态、等待真实option后仍保留精确类型和全部提交字段断言，未修改该生产行为。
+
+另一次adab同源码push CI日志规模测试FAIL，而PR CI通过：普通ANALYZE样本可能遗漏100/1M稀疏词条，导致估5000及分页索引过滤249975行。独立TEMP实验分开保留受控missing-MCE重放、默认样本这次PASS、完整统计GREEN；最终只提高四TEMP列统计采样并断言真实词频，原GIN/无SeqScan/分页/清理1000/120s断言保留。该辅助修正关联PERF033，不增加产品canonical数，不声称生产查询策略已改善。
+
+后端远端PG首1793/76批仅1批FAIL，原TEST018并发第二批未完成；两种真实事务
+交错明确RED后修复领取时钟，9顶层/2子例race通过，原TEST018断言及预算不变。
+最后本地新PG r3在第17批遭云端执行通道断开，子进程终止、无整套summary/exit，
+记录为BLOCKED/INTERRUPTED。自建3服务健康、无旧应用连接/阻塞锁核验后，以
+精确owner和实际回环映射确认目标，重新初始化专用库并独立执行r4；不拼接旧批。
 
 首轮修改版 PG 全库实际运行 1749 顶层/74 批，8 批失败：蓝图夹具缺新投影字段、
 OSS 现有文件长度约束各一批；六批撞上分类分页实现的中间编译状态。均保留首失败，
@@ -68,9 +82,7 @@ r5完整69项通过，但最后全局目录偏移守卫及第三项边界测试�
 输入异常不能无证据归因为身份草稿GET；可控延迟GET单独复现了已登录初次读取覆盖
 输入的真实缺陷，修复后该测试及原访客场景均通过。
 
-最终PG的7条SKIP为Minecraft loader在线来源、四项exporter真实样本、Modrinth真实
-元数据及真实Typesense opt-in。最后一项已由独立Typesense29整包race验证，仍保留
-本次PG命令本身的SKIP，不把其它命令的PASS改写到它的计数中。
+r4真实PG命令的12条SKIP包括7条外部/Typesense条件，以及5条需精确独占库授权的修复/恢复/事务/库存故障注入。后者另以明确owner/实际回环目标及精确库名串行race全部PASS；Typesense另有实际29整包race。各独立命令的PASS不改写原整套SKIP；旧r2显式启用目标的7SKIP保留其原版本边界。
 
 后续一次受限公开上游验证实际PASS：Loader四供应商子例2.78s、Modrinth真实元数据
 0.32s，整包3.322s/exit0（`backend-a-public-live-once.log`）。测试未读取供应商密钥。
@@ -78,13 +90,17 @@ r5完整69项通过，但最后全局目录偏移守卫及第三项边界测试�
 两仓库及本地样本目录；第三仓库元信息显示private，未继续读取其源码/样本。
 最低解除条件是提供获授权、与当前契约对应的真实导出样本及其来源/版本。
 
+专用环境首次启动的ConnectError经固定启动日志核实：临时初始化服务仅Unix socket就绪，最终TCP监听尚未启动。隔离工具及CI的PG健康探测增加明确回环host，原60次就绪预算不变；4项既有Python及独立fresh3真实up/287表初始化/RedisPONG/NATS INFO/down全部PASS。该环境失败保留，不称为业务旧版RED。
+
 工具与依赖清单亦实际执行：隔离环境Python最终4项、审查发布器Python11项均PASS；
 `go mod tidy -diff`和`go mod verify`均exit0，go.mod/go.sum无改动。quality CI已纳入
 上述两组Python检查。50个选中Go模块的许可文本与剩余授权缺口见安全报告。
 
-任务资源终态实际核对：7个带精确身份的自建容器已删除，4任务进程已停止，原3云端
+任务清理前根自检一度将Docker未发布的EXPOSE端口null误当非回环映射，断言退出、未改资源；修正为检查实际发布映射及各服务必需端口后，精确owner/id清理成功，命令失败另存。
+
+任务资源终态实际核对：累计16个带精确身份的自建容器已删除，任务服务均停止，原3云端
 服务仍运行；私有修复备份保留，临时环境凭据文件已移除。清理工具目录非空误报
-以真实4项Python RED/GREEN修复，原失败保存，不递归删除未知文件。
+以真实4项Python RED/GREEN修复；再次真实CLI清理保留额外文件且exit0，原失败保存，不递归删除未知文件。
 
 ## 未取得的证据
 

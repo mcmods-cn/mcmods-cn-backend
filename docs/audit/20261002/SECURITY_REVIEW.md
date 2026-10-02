@@ -70,9 +70,9 @@ Boost 与 Unlicense；`yaml.v3` 对 libyaml 衍生文件使用 MIT，其余使�
 | 范围 | 实际结果 | 分类与限制 |
 | --- | --- | --- |
 | 可访问 Git 历史 | 本轮基线可达 commit 为后端41、前端38；对应历史扫描日志分别报告40/37个被扫描commit，命中后端9、前端0。新增本任务提交另查，不将基线数量描述为最终HEAD数量。 | 计数口径分开保留。主执行者已逐个核验当前/历史上下文：后端命中为合成测试配置、本地 HTTP 夹具或 SQL 公开 ID/幂等键；没有确认真实服务密钥。无法据此排除不可访问、不可达或尚未获取的历史。 |
-| 最终后端工作区 | `evidence/backend-secrets-final-working.json`：10 个命中。 | 与上述类别一致，包括新增 AI 本地夹具；没有为使计数变成 0 而添加 blanket allowlist 或删测试。 |
+| 后端源码扫描快照（最终文档追加前） | `evidence/backend-secrets-final-working.json`：10 个命中。 | 与上述类别一致，包括新增 AI 本地夹具；没有为使计数变成 0 而添加 blanket allowlist 或删测试。 |
 | 前端完整目录 | `evidence/frontend-secrets-final-working.json`：15 个命中，路径全部在 `.next/`。 | 构建/开发生成的缓存及框架密钥，属于被 Git 忽略的产物；不当作人工源码泄露，不纳入提交。 |
-| 前端人工维护文件 | 独立复制 Git tracked + 非 ignored 的新增文件，共 646 个文件；`evidence/frontend-secrets-final-maintained.json` 为 0 个命中，退出码 0。 | 明确排除 `.next` 和 `node_modules` 后的源码扫描结果；不把排除后的 0 替换完整目录的 15。 |
+| 前端人工维护文件扫描快照 | 独立复制 Git tracked + 非 ignored 的新增文件，共 646 个文件；`evidence/frontend-secrets-final-maintained.json` 为 0 个命中，退出码 0。 | 明确排除 `.next` 和 `node_modules` 后的源码扫描结果；不把排除后的 0 替换完整目录的 15。 |
 
 脱敏分类参考 `evidence/secret-fixture-classification-draft.json`；主执行者复核了实际夹具上下文，
 没有使用或轮换任何真实供应商密钥。检测到形似密钥的测试值不等于确认线上泄露；
@@ -87,9 +87,11 @@ Git基线commit值，逐项与已核实的两仓库基线精确比较；不是�
 
 本任务曾误将专用回环测试环境文件的内容输出，主执行者已明确记录该失误。涉及的是本任务
 临时合成凭据，没有证据表明输出生产凭据；不能因其属于测试环境就省略记录。
-主执行者已按精确身份删除7自建容器、停止4测试进程并移除临时环境凭据文件，
-原3云端服务仍运行；修复备份保留。资源终态证据为`owned-resource-cleanup.json`，
+主执行者已按精确身份累计删除16自建容器、停止任务服务并移除临时环境凭据文件，
+原3云端服务仍运行；修复备份保留。资源终态证据为`final-owned-resource-cleanup.json`，
 清理目录非空误报另以R-021回归修复，没有递归删除未知文件。
+后续R022就绪门、配方选项同步、通知时钟、TCP就绪及日志统计fixture staged扫描各0；原领域1和审计16的退出码/合成及baseline SHA分类保留。最终6份早期合成环境文件已按精确已知路径移除。
+后端最后11份审计文件的完整staged差异另行扫描，exit0、命中0（`backend-final-audit-staged-secrets.json`）；旧16项baseline SHA误报分类继续保留。
 
 ## 安全验证范围和剩余条件
 

@@ -1,18 +1,18 @@
 {
   "versions": {
     "mcmods-cn-backend": {
-      "head": "b60039f60e84ee0ae0943d6ca9018f537cd36adb",
+      "head": "4065ba6bc65d7f164e75047ce07bfb6ea1d58fa5",
       "branch": "codex/full-audit-20261002"
     },
     "mcmods-cn-frontend": {
-      "head": "f2eac2e096336be795ad77009ab5a2c31cabf4be",
+      "head": "9f0217a4c219f218259d4539f352ade216ef661f",
       "branch": "codex/full-audit-20261002"
     }
   },
   "stats": {
     "mcmods-cn-backend": {
-      "total": 1365,
-      "complete": 1326,
+      "total": 1366,
+      "complete": 1327,
       "partial": 0,
       "unreviewed": 0,
       "excluded": 39
@@ -148,8 +148,8 @@
       "path": ".github/workflows/ci.yml",
       "owner": "root",
       "category": "config",
-      "sha256": "d937706bf7b7ab7391397f7ae04fe28bb3464f749ee3f6e78923fdefb34f5608",
-      "blob_sha": "63989f4b8980eed64836520081c11d2fd4a7d69b",
+      "sha256": "2c0ae3e1f051c18c7d3e8b594df7dd447dc5b823e88b44bb75d954ee58660b1e",
+      "blob_sha": "e3a66eb946da77c83f520f36ab680aad0d266026",
       "lines": 143,
       "status": "complete",
       "read_ranges": [
@@ -163,7 +163,16 @@
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
       "behavior_claim": false,
-      "behavior_evidence": [],
+      "behavior_evidence": [
+        {
+          "source": "root.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            "4 existing Python tests and fresh owned3 initialization/health/cleanup PASS; exact startup clock evidence; three CI TCP probes and explicit four guarded-test instructions reviewed"
+          ]
+        }
+      ],
       "validation_documents": [
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
@@ -172,7 +181,9 @@
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
-      "findings": [],
+      "findings": [
+        "OCT02-R-003"
+      ],
       "proofs": [
         "root.json"
       ],
@@ -1549,14 +1560,14 @@
       "path": "PROJECT_FOLLOW_NOTIFICATIONS.md",
       "owner": "database_docs",
       "category": ".md",
-      "sha256": "9a06ac8c8a34e38967152bbde9359d25de3d558ae83137eeec8b6dcfbdc0954a",
-      "blob_sha": "2f3234b4eefdca4965517624788c38a23618b221",
-      "lines": 23,
+      "sha256": "9c40347d0c38b623785fa50ea3ec7a6c909f67c9472065839750b20041c5d21a",
+      "blob_sha": "8fcb98726f738bcd06cb9e1ca53fbd9ef3f6dbe8",
+      "lines": 25,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          23
+          25
         ]
       ],
       "content_read": true,
@@ -1566,32 +1577,70 @@
       "behavior_claim": false,
       "behavior_evidence": [
         {
-          "source": "backend_b-offline-reviews.json",
+          "source": "root.json",
           "human_behavior_claim": false,
           "version_matches_current": true,
+          "validation": [
+            "Named actual PG race9top/2sub PASS; new full suite separately RUNNING"
+          ]
+        },
+        {
+          "source": "backend_b-offline-reviews.json",
+          "human_behavior_claim": false,
+          "version_matches_current": false,
           "validation": "NOT_RUN: 云环境offline，固定Git基线静态审查不代替最终版本或行为验证"
+        },
+        {
+          "source": "backend_c-c017-final-proof.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            "evidence/backend_c-project-update-clock-green-race.log:9top2sub0SKIP realPG18.6-race PASS83.745s",
+            "evidence/backend_c-project-update-clock-vet.log:go vet ./internal/httpapi exit0"
+          ]
+        },
+        {
+          "source": "database-c017-final-proof.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            {
+              "status": "PASS",
+              "evidence": "backend_c-project-update-clock-green-race.log",
+              "top_level_tests": 9,
+              "subtests": 2,
+              "skipped": 0,
+              "boundary": "Owner C executed real PG18.6 targeted race83.745s; this independent semantic reviewer did not rerun or infer new whole gates."
+            }
+          ]
         }
       ],
       "validation_documents": [
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
       ],
-      "focus": "",
+      "focus": "Final follow/project update notification contract: actual clock comparison after serialized row lock, bounded batch200, merge-window/retry due guard, persisted progress and unique notification recipient-event; no schema/API/config change. C017 new source/test fully cross-read; behavioral gates attributed to owner.",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
-      "findings": [],
+      "findings": [
+        "OCT02-C-017"
+      ],
       "proofs": [
-        "backend_b-offline-reviews.json",
-        "backend_b.json",
-        "database_docs.json"
+        "backend_c-c017-final-proof.json",
+        "database-c017-final-proof.json",
+        "database_docs.json",
+        "root.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "backend_b-offline-reviews.json",
         "backend_b.json",
-        "database_docs.json"
+        "backend_c-c017-final-proof.json",
+        "database-c017-final-proof.json",
+        "database_docs.json",
+        "root.json"
       ]
     },
     {
@@ -2842,18 +2891,14 @@
       "path": "docs/audit/20261002/DATABASE_REVIEW.md",
       "owner": "database_docs",
       "category": ".md",
-      "sha256": "11d767c2676f8aaeb08b52d3a730f500d1c998247a796b91c349d02f38a5d94e",
-      "blob_sha": "c4645b6e00deebaef69c1c9ad96a420759a89c17",
-      "lines": 193,
+      "sha256": "aec45d12bdc0ee2362f665eb6e580c706c591344845004eddbdd90be7e429a73",
+      "blob_sha": "a4efe96a5d023aa7af9d50189721c63de2d13196",
+      "lines": 210,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          100
-        ],
-        [
-          101,
-          193
+          210
         ]
       ],
       "content_read": true,
@@ -2863,12 +2908,35 @@
       "behavior_claim": false,
       "behavior_evidence": [
         {
-          "source": "database_docs.json",
+          "source": "root.json",
           "human_behavior_claim": false,
           "version_matches_current": true,
           "validation": [
+            "Root current full final contents read; current R5 quality/live, exact16 cleanup, PG-r4 one-fixture version boundary and original failures reviewed"
+          ]
+        },
+        {
+          "source": "database_docs.json",
+          "human_behavior_claim": false,
+          "version_matches_current": false,
+          "validation": [
             "Complete final semantic reread after coordinated changes; content and reviewed call-chain contract checked. Historical PASS is not current behavior evidence; responsible root/A/C logs supply their execution results.",
             "2026-10-02 final semantic reread of current coordinated documentation; static contract evidence only, owner runtime results remain separate."
+          ]
+        },
+        {
+          "source": "database-c017-final-proof.json",
+          "human_behavior_claim": false,
+          "version_matches_current": false,
+          "validation": [
+            {
+              "status": "PASS",
+              "evidence": "backend_c-project-update-clock-green-race.log",
+              "top_level_tests": 9,
+              "subtests": 2,
+              "skipped": 0,
+              "boundary": "Owner C executed real PG18.6 targeted race83.745s; this independent semantic reviewer did not rerun or infer new whole gates."
+            }
           ]
         }
       ],
@@ -2876,20 +2944,21 @@
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
       ],
-      "focus": "",
+      "focus": "模型/索引/事务/168前向修复、实库与生产未验证分开",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
       "findings": [
-        "OCT02-B-030"
+        "OCT02-B-030",
+        "OCT02-C-017"
       ],
       "proofs": [
-        "database_docs.json",
         "root.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
+        "database-c017-final-proof.json",
         "database_docs.json",
         "root.json"
       ]
@@ -2929,14 +2998,26 @@
       "path": "docs/audit/20261002/ISSUES.md",
       "owner": "backend_c",
       "category": "documentation",
-      "sha256": "da1bf34a993a63d121c60897f8bce5f0782889b1e777ca7c6b58467a3312ea56",
-      "blob_sha": "77007177dfb4ccc7de05326659b8004be3dc113f",
-      "lines": 299,
+      "sha256": "c59998968cf5e251844f06fe723b45f3d1bc9ceada72dc226cbec41a4b6baa68",
+      "blob_sha": "c066e1bf87a775bf0993331498124964bdc5d5b5",
+      "lines": 305,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          299
+          76
+        ],
+        [
+          77,
+          152
+        ],
+        [
+          153,
+          228
+        ],
+        [
+          229,
+          305
         ]
       ],
       "content_read": true,
@@ -2970,7 +3051,7 @@
       ],
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Consolidate source-based stable IDs, root cause, severity, fixes, evidence and exclusions without inheriting historical CLOSED or substituting adjacent tests. Prior complete 233-record human field review, original bounded blocks and final corrections are preserved in backend_c-issues-r6-final-proof.json. R7 follow-up actually read all five changed/new records completely, current metadata completely, specific-journeys.browser.mts all184 lines, all105-line named assertion proof, actual targeted3/whole73 terminal summaries, Python RED/GREEN logs, resource cleanup evidence and cleanup ownership/control-flow/test segments. 229 complete record objects match the previous fully read current R6 input exactly; hash equality binds earlier actual human review, never creates semantic review. Current ISSUES all299 lines read in untruncated ranges1–75,76–150,151–225,226–299. JSON view preserved every field, removing whitespace only. Current counts reflect only exact named assertions; UI fixtures do not prove DB/OSS/ZIP/supplier or full role matrices.",
+      "responsibility": "Consolidate source-based stable IDs, root cause, severity, fixes, evidence and exclusions without inheriting historical CLOSED or substituting adjacent tests. Prior actual complete human field review of 235 objects is preserved in backend_c-issues-r8-final-proof.json and backend_c-findings-r8-complete-read-input.json; proof chains to prior full field reads remain available. Current follow-up actually read all10 changed/new record objects completely (A015,B021,B030,C017,FP012,FP051,FP068,R003,R021,DB013) and every current metadata field with no omitted fields. 227 unchanged complete objects match the full R8 read input; fingerprint equality only binds that earlier actual human review and never creates semantic review. Current top-level237-ID Git path associations were actually read completely in four record ranges1-60,61-120,121-180,181-237; path association is not per-line attribution. A015 missing actual helper/test locations were corrected after reading helper360-560 and full80-line regression. Current ISSUES305 was actually fully read in bounded ranges1-76,77-152,153-228,229-305 after final gate text, with the clipped258-273 portion explicitly reread and final paragraph9/row66 reread after metadata/location corrections; final R003 row28/object was reread after correcting the CI line-count typo168 to actual143, and unchanged CI file1-143 was fully reread with the same SHA; findings record views preserve every field and omit whitespace only. C017 source293/newtest191/originalTEST018299/formal25 were actually read in full; true PG RED1top2sub and GREENrace9top2sub were executed without altering original TEST018 assertions/budget. R003 tool163/existingtest50 were actually fully read; fixed safe startup timeline and separate exact-owned fresh up/health/down evidence were read, 4Python PASS. Current DB report210 was fully read in ranges1-110,111-210 before B030 location synchronization; DB013 finding/proof and final238-line TEMP statistics test were actually fully read, exact sparse-frequency/index assertions retained, targeted real PG race1PASS0skip5.076s scoped separately from old fullPG-r4. FP012/051/068 named fixture behavior does not prove DB/supplier. All statement/count gates preserve their own version, original failures and external boundaries; source fingerprints do not create business verification. Parent independently owns Git/PR/CI and resource cleanup.",
       "call_chain": "",
       "findings": [],
       "proofs": [
@@ -3205,14 +3286,14 @@
       "path": "docs/audit/20261002/ROOT_PROGRESS.md",
       "owner": "root",
       "category": "documentation",
-      "sha256": "1004a35d941d50befafba5454ae111a4d72499d1c53c7934c745d5c3e7b15eb3",
-      "blob_sha": "a2d069152e4113634bcf416483acb78443b58647",
-      "lines": 72,
+      "sha256": "2776b4042a4f30fab394bd0dbcf77bb895c925253e7304a885c2b862e78495dd",
+      "blob_sha": "eb3516361f64bffff0a25dedd5e56cef38484b62",
+      "lines": 77,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          72
+          77
         ]
       ],
       "content_read": true,
@@ -3226,7 +3307,8 @@
           "human_behavior_claim": false,
           "version_matches_current": true,
           "validation": [
-            "NOT_RUN: progress evidence, not a completed final report"
+            "NOT_RUN: progress evidence, not a completed final report",
+            "Root current full final contents read; current R5 quality/live, exact16 cleanup, PG-r4 one-fixture version boundary and original failures reviewed"
           ]
         }
       ],
@@ -3253,14 +3335,14 @@
       "path": "docs/audit/20261002/SECURITY_REVIEW.md",
       "owner": "backend_b",
       "category": ".md",
-      "sha256": "c24dbc0f333d5f2cfdadd473507c950e94f5231bc52c3d6b5e7fd46aae503125",
-      "blob_sha": "31e439c913b60249db1998be9f0eb93207b9c0b6",
-      "lines": 103,
+      "sha256": "da8eadd37f178f9205e78f445e41a97de4e1a528b72d6ac6c07a8314cacd0398",
+      "blob_sha": "346d917ef19461246def8e56d1b9dc51d21da060",
+      "lines": 105,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          103
+          105
         ]
       ],
       "content_read": true,
@@ -3269,6 +3351,15 @@
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
       "behavior_claim": false,
       "behavior_evidence": [
+        {
+          "source": "root.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            "Root current full final contents read; current R5 quality/live, exact16 cleanup, PG-r4 one-fixture version boundary and original failures reviewed",
+            "Root actually read final staged-scan documentation delta; eleven-file scan exit0/no findings, prior classifications preserved."
+          ]
+        },
         {
           "source": "backend_b.json",
           "human_behavior_claim": false,
@@ -3311,14 +3402,14 @@
       "path": "docs/audit/20261002/SUMMARY.md",
       "owner": "root",
       "category": "documentation",
-      "sha256": "83b7fe67ad1fef485d615c55dc2afb1bbb6997a5f044a79e53f97af65a3280c7",
-      "blob_sha": "71db9e1f8a7b1e9f11fbc0dd3540a6505a71079c",
-      "lines": 131,
+      "sha256": "408fb004ad1ec0e516e32c5a4109ee207e0fc13474da7e2ec045cbab3f0f2a38",
+      "blob_sha": "c3d3aa741efe393ab7b118401a033ca6c9efa0a6",
+      "lines": 135,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          131
+          135
         ]
       ],
       "content_read": true,
@@ -3326,7 +3417,16 @@
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
       "behavior_claim": false,
-      "behavior_evidence": [],
+      "behavior_evidence": [
+        {
+          "source": "root.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            "Root current full final contents read; current R5 quality/live, exact16 cleanup, PG-r4 one-fixture version boundary and original failures reviewed"
+          ]
+        }
+      ],
       "validation_documents": [
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
@@ -3350,14 +3450,14 @@
       "path": "docs/audit/20261002/VERIFICATION.md",
       "owner": "root",
       "category": "documentation",
-      "sha256": "b247ff87cfc93d7fbc1592c0d6471f1684d4b63607e3d633859a7c07f899ec0b",
-      "blob_sha": "96b97b89c586b0944986a0c24c0724b31d83c056",
-      "lines": 94,
+      "sha256": "ccefcd8f56d458c2d59cd99c1ba3e0af4cc7e938c2b931c2521408af2e9c8445",
+      "blob_sha": "b6d1e30a58dd8a70ed1bda0f3dd40a4dffc87701",
+      "lines": 110,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          94
+          110
         ]
       ],
       "content_read": true,
@@ -3365,7 +3465,16 @@
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
       "behavior_claim": false,
-      "behavior_evidence": [],
+      "behavior_evidence": [
+        {
+          "source": "root.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            "Root current full final contents read; current R5 quality/live, exact16 cleanup, PG-r4 one-fixture version boundary and original failures reviewed"
+          ]
+        }
+      ],
       "validation_documents": [
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
@@ -3419,14 +3528,14 @@
       "path": "docs/audit/20261002/findings.json",
       "owner": "backend_c",
       "category": "audit_data",
-      "sha256": "b61580e188793df19d50b2802029a41b8f8ceca8dfbd95bc7ea01ab5d4b7f74a",
-      "blob_sha": "adfeeac96e2e5d52bf393240702b832682206f7f",
-      "lines": 9870,
+      "sha256": "ceaee31f5792fdc7366c2777c9b95f9cb6eb24d3eb6aaeefd539c039e5183486",
+      "blob_sha": "b76cc52bba9ddace267f8ffa365c52f83814c714",
+      "lines": 12833,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          9870
+          12833
         ]
       ],
       "content_read": true,
@@ -3460,7 +3569,7 @@
       ],
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Consolidate source-based stable IDs, root cause, severity, fixes, evidence and exclusions without inheriting historical CLOSED or substituting adjacent tests. Prior complete 233-record human field review, original bounded blocks and final corrections are preserved in backend_c-issues-r6-final-proof.json. R7 follow-up actually read all five changed/new records completely, current metadata completely, specific-journeys.browser.mts all184 lines, all105-line named assertion proof, actual targeted3/whole73 terminal summaries, Python RED/GREEN logs, resource cleanup evidence and cleanup ownership/control-flow/test segments. 229 complete record objects match the previous fully read current R6 input exactly; hash equality binds earlier actual human review, never creates semantic review. Current ISSUES all299 lines read in untruncated ranges1–75,76–150,151–225,226–299. JSON view preserved every field, removing whitespace only. Current counts reflect only exact named assertions; UI fixtures do not prove DB/OSS/ZIP/supplier or full role matrices.",
+      "responsibility": "Consolidate source-based stable IDs, root cause, severity, fixes, evidence and exclusions without inheriting historical CLOSED or substituting adjacent tests. Prior actual complete human field review of 235 objects is preserved in backend_c-issues-r8-final-proof.json and backend_c-findings-r8-complete-read-input.json; proof chains to prior full field reads remain available. Current follow-up actually read all10 changed/new record objects completely (A015,B021,B030,C017,FP012,FP051,FP068,R003,R021,DB013) and every current metadata field with no omitted fields. 227 unchanged complete objects match the full R8 read input; fingerprint equality only binds that earlier actual human review and never creates semantic review. Current top-level237-ID Git path associations were actually read completely in four record ranges1-60,61-120,121-180,181-237; path association is not per-line attribution. A015 missing actual helper/test locations were corrected after reading helper360-560 and full80-line regression. Current ISSUES305 was actually fully read in bounded ranges1-76,77-152,153-228,229-305 after final gate text, with the clipped258-273 portion explicitly reread and final paragraph9/row66 reread after metadata/location corrections; final R003 row28/object was reread after correcting the CI line-count typo168 to actual143, and unchanged CI file1-143 was fully reread with the same SHA; findings record views preserve every field and omit whitespace only. C017 source293/newtest191/originalTEST018299/formal25 were actually read in full; true PG RED1top2sub and GREENrace9top2sub were executed without altering original TEST018 assertions/budget. R003 tool163/existingtest50 were actually fully read; fixed safe startup timeline and separate exact-owned fresh up/health/down evidence were read, 4Python PASS. Current DB report210 was fully read in ranges1-110,111-210 before B030 location synchronization; DB013 finding/proof and final238-line TEMP statistics test were actually fully read, exact sparse-frequency/index assertions retained, targeted real PG race1PASS0skip5.076s scoped separately from old fullPG-r4. FP012/051/068 named fixture behavior does not prove DB/supplier. All statement/count gates preserve their own version, original failures and external boundaries; source fingerprints do not create business verification. Parent independently owns Git/PR/CI and resource cleanup.",
       "call_chain": "",
       "findings": [],
       "proofs": [
@@ -3509,14 +3618,14 @@
       "path": "docs/audit/20261002/verification-results.json",
       "owner": "root",
       "category": "documentation",
-      "sha256": "3ebfae1546559ade5bbbe81c0ee639c9d9f59f4b9e75e4f80d1ea97bf70bf959",
-      "blob_sha": "f86e89e6890875dc121aef3edf374d3ea9fc8119",
-      "lines": 793,
+      "sha256": "053cb739752eaa14762bf2c57ffab871616616ad705bd3ac5361b1361a9df159",
+      "blob_sha": "c5ff4e1893b0db2b516b52b72aaa4f6208182d6d",
+      "lines": 1132,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          793
+          1132
         ]
       ],
       "content_read": true,
@@ -3524,7 +3633,17 @@
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
       "behavior_claim": false,
-      "behavior_evidence": [],
+      "behavior_evidence": [
+        {
+          "source": "root.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            "Root current full final contents read; current R5 quality/live, exact16 cleanup, PG-r4 one-fixture version boundary and original failures reviewed",
+            "Root actually read final staged-scan documentation delta; eleven-file scan exit0/no findings, prior classifications preserved."
+          ]
+        }
+      ],
       "validation_documents": [
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
@@ -6221,14 +6340,14 @@
       "path": "docs/testing-isolated-environment.md",
       "owner": "root",
       "category": "documentation",
-      "sha256": "ad5ac2670ca1778ba21de790a5d65689e8543307db77e6f40d5bce50431c428a",
-      "blob_sha": "8547af6eeee359488470bd953a205eaf6e6785b9",
-      "lines": 100,
+      "sha256": "330cb79c7d6f919a5248458e5d8c40ed9921170b2b451b5e09b486a935452366",
+      "blob_sha": "053d41242b75a674c38e7a6a02ee6a49d177a449",
+      "lines": 116,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          100
+          116
         ]
       ],
       "content_read": true,
@@ -6236,7 +6355,17 @@
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
       "behavior_claim": false,
-      "behavior_evidence": [],
+      "behavior_evidence": [
+        {
+          "source": "root.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            "4 existing Python tests and fresh owned3 initialization/health/cleanup PASS; exact startup clock evidence; three CI TCP probes and explicit four guarded-test instructions reviewed",
+            "Root actual full final read; new TEMP statistics target +5 explicitly owned serial fixture boundaries reviewed; real PG targeted evidence separately bound"
+          ]
+        }
+      ],
       "validation_documents": [
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
@@ -6245,7 +6374,9 @@
       "focus_symbols": [],
       "responsibility": "Owned loopback resources, pinned versions, exact setup/test/cleanup and actual live origins",
       "call_chain": "",
-      "findings": [],
+      "findings": [
+        "OCT02-R-003"
+      ],
       "proofs": [
         "root.json"
       ],
@@ -31796,14 +31927,14 @@
       "path": "internal/httpapi/log_pagination_integration_test.go",
       "owner": "backend_b",
       "category": ".go",
-      "sha256": "580e77327a42097c73f3cd986a6639f065231bf0a09bac6d624addde7f60f120",
-      "blob_sha": "bcc81f14b8745d65a8be297eb1a90c2f90ad1d7c",
-      "lines": 215,
+      "sha256": "29e72c3731a3464f6e0a045864a7c6720de0fd75d92b660589f47af5751b6626",
+      "blob_sha": "4e00a0f171a48fbb6c7154d2a75a35595662db5f",
+      "lines": 238,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          215
+          238
         ]
       ],
       "content_read": true,
@@ -31813,10 +31944,47 @@
       "behavior_claim": false,
       "behavior_evidence": [
         {
-          "source": "frontend_shared-offline-backend.json",
+          "source": "root.json",
           "human_behavior_claim": false,
           "version_matches_current": true,
+          "validation": [
+            "Root actual full final read; new TEMP statistics target +5 explicitly owned serial fixture boundaries reviewed; real PG targeted evidence separately bound"
+          ]
+        },
+        {
+          "source": "frontend_shared-offline-backend.json",
+          "human_behavior_claim": false,
+          "version_matches_current": false,
           "validation": "NOT_RUN"
+        },
+        {
+          "source": "database-log-stats-final-proof.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            {
+              "status": "PASS",
+              "command": "MCMODS_RUN_DB_INTEGRATION=1 go test -race ./internal/httpapi -run '^TestLogPaginationSearchAndCleanupStayIndexedAtScaleIntegration$' -count=1 -v",
+              "top_level_tests": 1,
+              "skipped": 0,
+              "evidence": "database-log-stats-targeted-green.log",
+              "boundary": "Owned loopback PostgreSQL service, single-session TEMP tables only. Does not inherit previous r4 whole-suite result for this changed fixture."
+            },
+            {
+              "status": "PASS",
+              "command": "git diff --check"
+            },
+            {
+              "status": "FAIL",
+              "evidence": "backend-ci-adab-push-pg-mcp.log",
+              "boundary": "Original adab683 push CI observed default ANALYZE sparse-term miss, estimated5000, page Btree and249975 filtered rows; PR CI for same source passed. Retain both outcomes; do not describe all CI green."
+            },
+            {
+              "status": "PASS",
+              "evidence": "database-log-stats-probe.log",
+              "boundary": "Private controlled missing-statistics replay reproduced original plan; actual default100 local random sample passed; full TEMP target10000 yielded known frequency and GIN naturally. Controlled replay is not claimed to be the original random-sampling RED."
+            }
+          ]
         }
       ],
       "validation_documents": [
@@ -31827,16 +31995,20 @@
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
-      "findings": [],
+      "findings": [
+        "OCT02-DB-013"
+      ],
       "proofs": [
-        "backend_b.json",
-        "frontend_shared-offline-backend.json"
+        "database-log-stats-final-proof.json",
+        "root.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "backend_b.json",
-        "frontend_shared-offline-backend.json"
+        "database-log-stats-final-proof.json",
+        "frontend_shared-offline-backend.json",
+        "root.json"
       ]
     },
     {
@@ -43324,6 +43496,99 @@
     },
     {
       "repo": "mcmods-cn-backend",
+      "path": "internal/httpapi/oct02_project_update_claim_clock_integration_test.go",
+      "owner": "backend_c",
+      "category": "test",
+      "sha256": "0f9dd1029bdaf25d56a5c96c69492ec2858ff082c4f02ae5749523899716ea6d",
+      "blob_sha": "4268ec9b737b0f483bb6e2ac9af2d5898265e202",
+      "lines": 191,
+      "status": "complete",
+      "read_ranges": [
+        [
+          1,
+          110
+        ],
+        [
+          111,
+          191
+        ]
+      ],
+      "content_read": true,
+      "semantic_review": true,
+      "behavior_verified": false,
+      "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
+      "behavior_claim": true,
+      "behavior_evidence": [
+        {
+          "source": "root.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            "Named actual PG race9top/2sub PASS; new full suite separately RUNNING"
+          ]
+        },
+        {
+          "source": "backend_c.json",
+          "human_behavior_claim": true,
+          "version_matches_current": true,
+          "validation": [
+            "evidence/backend_c-project-update-clock-green-race.log:9top2sub0SKIP realPG18.6-race PASS83.745s",
+            "evidence/backend_c-project-update-clock-vet.log:go vet ./internal/httpapi exit0"
+          ]
+        },
+        {
+          "source": "backend_c-c017-final-proof.json",
+          "human_behavior_claim": true,
+          "version_matches_current": true,
+          "validation": [
+            "evidence/backend_c-project-update-clock-green-race.log:9top2sub0SKIP realPG18.6-race PASS83.745s",
+            "evidence/backend_c-project-update-clock-vet.log:go vet ./internal/httpapi exit0"
+          ]
+        },
+        {
+          "source": "database-c017-final-proof.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            {
+              "status": "PASS",
+              "evidence": "backend_c-project-update-clock-green-race.log",
+              "top_level_tests": 9,
+              "subtests": 2,
+              "skipped": 0,
+              "boundary": "Owner C executed real PG18.6 targeted race83.745s; this independent semantic reviewer did not rerun or infer new whole gates."
+            }
+          ]
+        }
+      ],
+      "validation_documents": [
+        "docs/audit/20261002/VERIFICATION.md",
+        "docs/audit/20261002/ISSUES.md"
+      ],
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Real PG task due clock schedules across transaction start/row lock wait; bounded201 recipients, future eligibility and replay. Actual final191 lines fully read in two untruncated segments.",
+      "call_chain": "",
+      "findings": [
+        "OCT02-C-017"
+      ],
+      "proofs": [
+        "backend_c-c017-final-proof.json",
+        "backend_c.json",
+        "database-c017-final-proof.json",
+        "root.json"
+      ],
+      "exclusion": "",
+      "tracked_deletion": false,
+      "record_sources": [
+        "backend_c-c017-final-proof.json",
+        "backend_c.json",
+        "database-c017-final-proof.json",
+        "root.json"
+      ]
+    },
+    {
+      "repo": "mcmods-cn-backend",
       "path": "internal/httpapi/oct02_public_catalog_source_integration_test.go",
       "owner": "backend_a",
       "category": ".go",
@@ -50544,49 +50809,86 @@
       "path": "internal/httpapi/project_update_notification_worker.go",
       "owner": "backend_b",
       "category": ".go",
-      "sha256": "67b6a464dbae34f0ae9bcaad5d895fae60e19d932fa57849bcf68693f39a5fb1",
-      "blob_sha": "9d7fb562f31f5d0f13326564c0a7beaa00ad314d",
-      "lines": 290,
+      "sha256": "e5265d837af52abd68823aa6f4a674f66f5dfa0122f57325acdc999aaec0f350",
+      "blob_sha": "5cb45c357365959968f0634c85f024d90a24259c",
+      "lines": 293,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          290
+          293
         ]
       ],
       "content_read": true,
       "semantic_review": true,
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
-      "behavior_claim": false,
+      "behavior_claim": true,
       "behavior_evidence": [
+        {
+          "source": "root.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            "Named actual PG race9top/2sub PASS; new full suite separately RUNNING"
+          ]
+        },
         {
           "source": "backend_b-offline-reviews.json",
           "human_behavior_claim": false,
-          "version_matches_current": true,
+          "version_matches_current": false,
           "validation": "NOT_RUN:云环境offline"
+        },
+        {
+          "source": "backend_c-c017-final-proof.json",
+          "human_behavior_claim": true,
+          "version_matches_current": true,
+          "validation": [
+            "evidence/backend_c-project-update-clock-green-race.log:9top2sub0SKIP realPG18.6-race PASS83.745s",
+            "evidence/backend_c-project-update-clock-vet.log:go vet ./internal/httpapi exit0"
+          ]
+        },
+        {
+          "source": "database-c017-final-proof.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            {
+              "status": "PASS",
+              "evidence": "backend_c-project-update-clock-green-race.log",
+              "top_level_tests": 9,
+              "subtests": 2,
+              "skipped": 0,
+              "boundary": "Owner C executed real PG18.6 targeted race83.745s; this independent semantic reviewer did not rerun or infer new whole gates."
+            }
+          ]
         }
       ],
       "validation_documents": [
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
       ],
-      "focus": "",
+      "focus": "Whole293 lines primary review; live PostgreSQL claim clock/EPQ after row-lock wait; original transaction/page/visibility/retry boundaries",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
       "findings": [
-        "OCT02-B-021"
+        "OCT02-B-021",
+        "OCT02-C-017"
       ],
       "proofs": [
-        "backend_b-offline-reviews.json",
-        "backend_b.json"
+        "backend_c-c017-final-proof.json",
+        "database-c017-final-proof.json",
+        "root.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "backend_b-offline-reviews.json",
-        "backend_b.json"
+        "backend_b.json",
+        "backend_c-c017-final-proof.json",
+        "database-c017-final-proof.json",
+        "root.json"
       ]
     },
     {
@@ -57774,7 +58076,7 @@
       "semantic_review": true,
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
-      "behavior_claim": false,
+      "behavior_claim": true,
       "behavior_evidence": [
         {
           "source": "backend_c.json",
@@ -57789,6 +58091,15 @@
           "human_behavior_claim": false,
           "version_matches_current": true,
           "validation": "NOT_RUN fixed-baseline remote read only"
+        },
+        {
+          "source": "backend_c-c017-final-proof.json",
+          "human_behavior_claim": true,
+          "version_matches_current": true,
+          "validation": [
+            "evidence/backend_c-project-update-clock-green-race.log:9top2sub0SKIP realPG18.6-race PASS83.745s",
+            "evidence/backend_c-project-update-clock-vet.log:go vet ./internal/httpapi exit0"
+          ]
         }
       ],
       "validation_documents": [
@@ -57799,14 +58110,18 @@
       "focus_symbols": [],
       "responsibility": "自新建可销毁DB真实Migrate，205recipients含禁通知/全局关闭/unfollow/suspend/actor排除201按源UIlocale分101/100，两worker并发幂等、故障pendingretry/崩溃processing回收、pendingtarget不通知、缓存unread实际内存derivative；fixture各自创建DB不是生产。",
       "call_chain": "",
-      "findings": [],
+      "findings": [
+        "OCT02-C-017"
+      ],
       "proofs": [
+        "backend_c-c017-final-proof.json",
         "backend_c-offline.json",
         "backend_c.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
+        "backend_c-c017-final-proof.json",
         "backend_c-offline.json",
         "backend_c.json"
       ]
@@ -65091,6 +65406,14 @@
       "behavior_claim": false,
       "behavior_evidence": [
         {
+          "source": "root.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            "Root actual full final read; new TEMP statistics target +5 explicitly owned serial fixture boundaries reviewed; real PG targeted evidence separately bound"
+          ]
+        },
+        {
           "source": "database_docs.json",
           "human_behavior_claim": false,
           "version_matches_current": true,
@@ -65112,12 +65435,14 @@
         "OCT02-DB-011"
       ],
       "proofs": [
-        "database_docs.json"
+        "database_docs.json",
+        "root.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
-        "database_docs.json"
+        "database_docs.json",
+        "root.json"
       ]
     },
     {
@@ -65694,14 +66019,14 @@
       "path": "tools/testing/isolated_environment.py",
       "owner": "root",
       "category": "script",
-      "sha256": "d7b9484375d35c6985f11d89b53463f3e670043686d1ff6f37076fa1b9ba528f",
-      "blob_sha": "dc3ccb0b6707eebe109008a6bf89d2d593cde76b",
-      "lines": 162,
+      "sha256": "1ad76dcc16c96e42ad461e68e972d328abfc01e993c19286472a49066eccae0d",
+      "blob_sha": "e34aa24c585a7ddb73505600201110806969b733",
+      "lines": 163,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          162
+          163
         ]
       ],
       "content_read": true,
@@ -65715,6 +66040,7 @@
           "human_behavior_claim": false,
           "version_matches_current": true,
           "validation": [
+            "4 existing Python tests and fresh owned3 initialization/health/cleanup PASS; exact startup clock evidence; three CI TCP probes and explicit four guarded-test instructions reviewed",
             "PASS: Python 3 tests and real owned Docker services/full-schema initialization"
           ]
         }
@@ -65727,7 +66053,9 @@
       "focus_symbols": [],
       "responsibility": "Pinned owned Docker resources/private state, exact label/loopback verification, safe reset and cleanup",
       "call_chain": "",
-      "findings": [],
+      "findings": [
+        "OCT02-R-003"
+      ],
       "proofs": [
         "root.json"
       ],
@@ -69073,14 +69401,14 @@
       "read_ranges": [
         [
           1,
-          180
+          196
         ],
         [
-          181,
-          360
+          197,
+          392
         ],
         [
-          361,
+          393,
           587
         ]
       ],
@@ -69095,7 +69423,8 @@
           "human_behavior_claim": false,
           "version_matches_current": true,
           "validation": [
-            "FINAL whole-file semantic cross-review fp-db-final-proof.json; behavior evidence remains separate"
+            "FINAL whole-file semantic cross-review fp-db-final-proof.json; behavior evidence remains separate",
+            "FP051 remoteCI exact empty-select failure deterministically reproduced with held type options; test fixed by actual option readiness, no source modification. Current test194/source587 full reread; dedicated3 browserGREEN exit0; R9 whole74 still running. See frontend-pages-fp051-ci-final-proof.json."
           ]
         }
       ],
@@ -69114,12 +69443,14 @@
       ],
       "proofs": [
         "fp-db-final-proof.json",
+        "frontend-pages-fp051-ci-final-proof.json",
         "frontend_pages.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "fp-db-final-proof.json",
+        "frontend-pages-fp051-ci-final-proof.json",
         "frontend-pages-offline-baseline.json",
         "frontend_pages.json"
       ]
@@ -72803,14 +73134,14 @@
       "path": "app/_components/skin-library.tsx",
       "owner": "frontend_pages",
       "category": ".tsx",
-      "sha256": "33c80e480210273e228503704e2f581c2c889f0d2be7fa657e7b18744985d23f",
-      "blob_sha": "2079ea938a9d36cfa5eef6c5e633e65aae9c4441",
-      "lines": 136,
+      "sha256": "bbe116e9327451e8ff083d92028bba8756b3a8a982d94eee453d53f2ee122243",
+      "blob_sha": "5be4190bd3a45b3648e611db5bdf5113d7734734",
+      "lines": 138,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          136
+          138
         ]
       ],
       "content_read": true,
@@ -72820,13 +73151,23 @@
       "behavior_claim": false,
       "behavior_evidence": [
         {
+          "source": "root.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            "Named browser results recorded separately; read is not behavior proof"
+          ]
+        },
+        {
           "source": "frontend_pages.json",
           "human_behavior_claim": false,
           "version_matches_current": true,
           "validation": [
             "FINAL whole-file semantic cross-review root-fp-extra-final.json; behavior evidence remains separate",
             "FP050 current exact final source review in fp-db-final-proof.json; actual R5 browser pending (prior R4 not latest source).",
-            "FINAL R6 production artifact09:17:13 includes current source: rootfullbrowser70PASS/0FAIL/0SKIP exit0, evidence/frontend-final-r6-browser.log. FP050 contrast/mobile, FP087 initialread and originalguest, FP074 globaloffset3specificcases actualPASS; does not imply wholefile/allroles/provider/DBjourneys verified."
+            "FINAL R6 production artifact09:17:13 includes current source: rootfullbrowser70PASS/0FAIL/0SKIP exit0, evidence/frontend-final-r6-browser.log. FP050 contrast/mobile, FP087 initialread and originalguest, FP074 globaloffset3specificcases actualPASS; does not imply wholefile/allroles/provider/DBjourneys verified.",
+            "R022 CI genuine filter loss followed by delayed-auth oldproduction actual RED; native readiness fieldset added, current138lines full reread. Target ESLint/diffcheck PASS; freshR8 browser NOT_RUN pending root artifact. See frontend-pages-r022-final-proof.json.",
+            "FreshR8 actual whole browser named3 asset cases PASS; R022 native delayed auth input guard and original retry string/count assertions pass. evidence/frontend-final-r8-browser.log; scope limits in frontend-pages-r022-final-proof.json. No repeat fixture run by owner."
           ]
         },
         {
@@ -72849,19 +73190,23 @@
       "findings": [
         "OCT02-FP-026",
         "OCT02-FP-050",
-        "OCT02-R-016"
+        "OCT02-R-016",
+        "OCT02-R-022"
       ],
       "proofs": [
-        "fp-db-final-proof.json",
-        "frontend_pages.json"
+        "frontend-pages-r022-final-proof.json",
+        "frontend_pages.json",
+        "root.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "fp-db-final-proof.json",
         "frontend-pages-offline-baseline.json",
+        "frontend-pages-r022-final-proof.json",
         "frontend_pages.json",
-        "root-fp-extra-final.json"
+        "root-fp-extra-final.json",
+        "root.json"
       ]
     },
     {
@@ -91879,28 +92224,28 @@
       "path": "browser-tests/asset-editor-recovery.browser.mts",
       "owner": "root",
       "category": ".mts",
-      "sha256": "c1c4030aeea51d89e126577dedaab77596a752c9fbc889b5b17b305e5a4a81ed",
-      "blob_sha": "73b3cee3e801c25d69aae71f8caafcba34a98a6d",
-      "lines": 67,
+      "sha256": "d5ad574c4f7ffec181fab1ed66a918b904b45ad88d57b5a8e1ccd744feb7b4e0",
+      "blob_sha": "ed0f2a998716da0e86c3b97a489eb61788e3098d",
+      "lines": 113,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          67
+          113
         ]
       ],
       "content_read": true,
       "semantic_review": true,
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
-      "behavior_claim": true,
+      "behavior_claim": false,
       "behavior_evidence": [
         {
           "source": "root.json",
-          "human_behavior_claim": true,
+          "human_behavior_claim": false,
           "version_matches_current": true,
           "validation": [
-            "PASS: production build-r2 4/4 controlled API recovery browser scenarios; actual DB persistence not inferred"
+            "Named browser results recorded separately; read is not behavior proof"
           ]
         }
       ],
@@ -91908,17 +92253,21 @@
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
       ],
-      "focus": "",
+      "focus": "Held initial auth and precise list retry; old assertions retained; entire113 lines actually read",
       "focus_symbols": [],
       "responsibility": "Production controlled API prevents unread localization replacement and list retry preserves submitted filters",
       "call_chain": "",
-      "findings": [],
+      "findings": [
+        "OCT02-R-022"
+      ],
       "proofs": [
+        "frontend-pages-r022-final-proof.json",
         "root.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
+        "frontend-pages-r022-final-proof.json",
         "root.json"
       ]
     },
@@ -92653,18 +93002,18 @@
       "path": "browser-tests/specific-journeys.browser.mts",
       "owner": "frontend_pages",
       "category": ".mts",
-      "sha256": "9362f7dc3a9c37ea840c54e98b87ac945cf1be3e1dcda99e4068571a5fddf69e",
-      "blob_sha": "60ca2c4a8907379ae067dd46a77be8bd6746a587",
-      "lines": 184,
+      "sha256": "c3909f6a2f5d510c06b52bcd55a01a1411dddced39354e142ca67ad1c4e3b109",
+      "blob_sha": "ac5108e0b38b3b0ad971724a797db9d2a2a225f6",
+      "lines": 194,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          112
+          103
         ],
         [
-          113,
-          184
+          104,
+          194
         ]
       ],
       "content_read": true,
@@ -92678,7 +93027,7 @@
           "human_behavior_claim": false,
           "version_matches_current": true,
           "validation": [
-            "Root actual184-line semantic review; dedicated3PASS and root independent whole73PASS0FAIL0SKIP180.621s, lint/typeexit0; R7source647 drift[]; controlled API not real persistence"
+            "Named browser results recorded separately; read is not behavior proof"
           ]
         },
         {
@@ -92686,8 +93035,16 @@
           "human_behavior_claim": true,
           "version_matches_current": true,
           "validation": [
-            "Full current184lines actually displayed [1,112]/[113,184] and semantically reviewed; targeted real production Chromium3PASS/0FAIL/0SKIP exit0; ESLint/typecheck/diffcheck actual exit0; first/second failed runs retained with precise fixture classifications."
+            "Full current184lines actually displayed [1,112]/[113,184] and semantically reviewed; targeted real production Chromium3PASS/0FAIL/0SKIP exit0; ESLint/typecheck/diffcheck actual exit0; first/second failed runs retained with precise fixture classifications.",
+            "FP051 remoteCI exact empty-select failure deterministically reproduced with held type options; test fixed by actual option readiness, no source modification. Current test194/source587 full reread; dedicated3 browserGREEN exit0; R9 whole74 still running. See frontend-pages-fp051-ci-final-proof.json.",
+            "R9 whole74 current production/browser transport fixtures actual exit0,194.434861243s; snapshot647 rows actual_drift[]. Heldtype options synchronization is a test repair; CI73PASS1FAIL and intentional exact RED preserved."
           ]
+        },
+        {
+          "source": "frontend-pages-fp051-ci-final-proof.json",
+          "human_behavior_claim": true,
+          "version_matches_current": true,
+          "validation": []
         }
       ],
       "validation_documents": [
@@ -92704,12 +93061,14 @@
         "OCT02-FP-068"
       ],
       "proofs": [
+        "frontend-pages-fp051-ci-final-proof.json",
         "frontend_pages.json",
         "root.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
+        "frontend-pages-fp051-ci-final-proof.json",
         "frontend_pages.json",
         "root.json"
       ]
@@ -92978,14 +93337,14 @@
       "path": "docs/audit/20261002/SUMMARY.md",
       "owner": "root",
       "category": "documentation",
-      "sha256": "795dbf9f05f52efdb683b1a2b94a117c8f1cb0770e26cf19d275f8c3ef570678",
-      "blob_sha": "5052141d6e978efbcc2db6e1f058660a6eecc202",
-      "lines": 43,
+      "sha256": "ad02d2784e764acc0fde811f6d004669d869f180ebf783c2197ec6bb7364d20f",
+      "blob_sha": "0c771b38bc4e25bbd1a7695352b69d8b1c1510eb",
+      "lines": 49,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          43
+          49
         ]
       ],
       "content_read": true,
@@ -92998,7 +93357,7 @@
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
       ],
-      "focus": "前端修复、八语言、实际fixture与真实API旅程边界及发布顺序",
+      "focus": "Final full-read49-line FE audit; R8 build/R9 strict async options test and actual API boundary; final HEAD resolved by PR",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
@@ -93056,14 +93415,14 @@
       "path": "docs/frontend-state-recovery.md",
       "owner": "frontend_pages",
       "category": ".md",
-      "sha256": "7eaf01850bf14fc99ae572c68bf9ff58a085c63a8ab8bd0e44553a1d032cda8a",
-      "blob_sha": "31e3fe07f47c4fb670af6f9d0ee7d48afd227a31",
-      "lines": 57,
+      "sha256": "793506fbce4585e999d6857dc6f35cc286d58ddcd0908f910f1311f4f1c3671c",
+      "blob_sha": "b5ec51cecc37c049beffac21afffb3b25e7d2dcb",
+      "lines": 59,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          57
+          59
         ]
       ],
       "content_read": true,
@@ -93073,12 +93432,21 @@
       "behavior_claim": false,
       "behavior_evidence": [
         {
+          "source": "root.json",
+          "human_behavior_claim": false,
+          "version_matches_current": true,
+          "validation": [
+            "Named browser results recorded separately; read is not behavior proof"
+          ]
+        },
+        {
           "source": "frontend_pages.json",
           "human_behavior_claim": false,
           "version_matches_current": true,
           "validation": [
             "FINAL complete source read in frontend_pages turn; actual behavior recorded in separate PASS/FAIL fixture evidence",
-            "FINAL R6 production artifact09:17:13 includes current source: rootfullbrowser70PASS/0FAIL/0SKIP exit0, evidence/frontend-final-r6-browser.log. FP050 contrast/mobile, FP087 initialread and originalguest, FP074 globaloffset3specificcases actualPASS; does not imply wholefile/allroles/provider/DBjourneys verified."
+            "FINAL R6 production artifact09:17:13 includes current source: rootfullbrowser70PASS/0FAIL/0SKIP exit0, evidence/frontend-final-r6-browser.log. FP050 contrast/mobile, FP087 initialread and originalguest, FP074 globaloffset3specificcases actualPASS; does not imply wholefile/allroles/provider/DBjourneys verified.",
+            "Root R022 formal note actually full read current59lines; explains disabled initial auth filter, account isolation/retry retention, with no DB migration claims."
           ]
         }
       ],
@@ -93092,15 +93460,18 @@
       "call_chain": "",
       "findings": [
         "OCT02-FP-050",
-        "OCT02-FP-087"
+        "OCT02-FP-087",
+        "OCT02-R-022"
       ],
       "proofs": [
-        "frontend_pages.json"
+        "frontend_pages.json",
+        "root.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
-        "frontend_pages.json"
+        "frontend_pages.json",
+        "root.json"
       ]
     },
     {
