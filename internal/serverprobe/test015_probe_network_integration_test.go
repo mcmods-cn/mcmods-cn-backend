@@ -398,9 +398,20 @@ func TestTEST015CompressedConfigurationFramesOverTCP(t *testing.T) {
 	}
 }
 
+type test015ReadCountingConn struct {
+	net.Conn
+	bytesRead *atomic.Int64
+}
+
+func (connection *test015ReadCountingConn) Read(data []byte) (int, error) {
+	n, err := connection.Conn.Read(data)
+	connection.bytesRead.Add(int64(n))
+	return n, err
+}
+
 // The test changes only the final TCP destination to an owned loopback listener.
 // DNS validation, fixed-IP dialing, status and configuration decoding are production paths.
-func test015ConfigurationTCP(t *testing.T, serve func(*configurationPacketConn) error) (Result, error, <-chan error) {
+func test015ConfigurationTCP(t *testing.T, serve func(*configurationPacketConn) error, bytesRead *atomic.Int64) (Result, error, <-chan error) {
 	t.Helper()
 	local, finished := newTEST015TCP(t, 2, func(index int, connection net.Conn) error {
 		packet := &configurationPacketConn{conn: connection, reader: bufio.NewReader(connection), compressionThreshold: -1}
@@ -442,7 +453,11 @@ func test015ConfigurationTCP(t *testing.T, serve func(*configurationPacketConn) 
 		if address != net.JoinHostPort("1.1.1.1", port) {
 			return nil, fmt.Errorf("not pinned: %s", address)
 		}
-		return (&net.Dialer{}).DialContext(ctx, network, local)
+		connection, err := (&net.Dialer{}).DialContext(ctx, network, local)
+		if err != nil || bytesRead == nil {
+			return connection, err
+		}
+		return &test015ReadCountingConn{Conn: connection, bytesRead: bytesRead}, nil
 	})
 	return result, err, finished
 }
@@ -481,6 +496,7 @@ func TestTEST015FabricRegistryAggregateBoundaryOverTCP(t *testing.T) {
 	} {
 		t.Run(sample.name, func(t *testing.T) {
 			var sent atomic.Int64
+			var received atomic.Int64
 			result, err, finished := test015ConfigurationTCP(t, func(packet *configurationPacketConn) error {
 				for offset := 0; offset < len(padded); offset += 1 << 20 {
 					if err := test015FabricPacket(packet, padded[offset:offset+(1<<20)]); err != nil {
@@ -496,10 +512,8 @@ func TestTEST015FabricRegistryAggregateBoundaryOverTCP(t *testing.T) {
 					if sample.legacy64 {
 						for sent.Load() < 64<<20 {
 							if err := test015FabricPacket(packet, padded[:1<<20]); err != nil {
-								// The receiver must close before consuming the advertised legacy stream.
-								if sent.Load() > 10<<20 {
-									return fmt.Errorf("legacy stream consumed %d bytes before closure", sent.Load())
-								}
+								// Successful writes include unread kernel-buffered bytes;
+								// consumption is checked on the actual client's Read path.
 								return nil
 							}
 							sent.Add(1 << 20)
@@ -525,7 +539,7 @@ func TestTEST015FabricRegistryAggregateBoundaryOverTCP(t *testing.T) {
 					return fmt.Errorf("Fabric completion channel=%q err=%v", channel, err)
 				}
 				return packet.writePacket(3, nil)
-			})
+			}, &received)
 			if err != nil || !result.Online || result.ModListComplete || result.Loader != "fabric" {
 				t.Fatalf("bounded full status/configuration TCP result=%+v err=%v", result, err)
 			}
@@ -539,7 +553,10 @@ func TestTEST015FabricRegistryAggregateBoundaryOverTCP(t *testing.T) {
 			if serverErr := <-finished; serverErr != nil {
 				t.Fatal(serverErr)
 			}
-			t.Logf("actual Fabric bytes sent=%d; complete-JAR-list claim remains false", sent.Load())
+			if sample.legacy64 && received.Load() > 10<<20 {
+				t.Fatalf("legacy stream consumed %d bytes before closure", received.Load())
+			}
+			t.Logf("actual Fabric bytes sent=%d, TCP bytes read=%d; complete-JAR-list claim remains false", sent.Load(), received.Load())
 		})
 	}
 }
@@ -553,7 +570,7 @@ func TestTEST015MillionRegistryCountOverConfigurationTCP(t *testing.T) {
 			return err
 		}
 		return packet.writePacket(3, nil)
-	})
+	}, nil)
 	if err != nil || !result.Online || result.ModListComplete || len(result.Mods) != 0 || !strings.Contains(result.DetectionDiagnostic, "count") {
 		t.Fatalf("hostile count did not fail closed at actual TCP parser: %+v err=%v", result, err)
 	}
