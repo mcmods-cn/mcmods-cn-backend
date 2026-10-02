@@ -46,6 +46,10 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
+      - name: Verify isolated setup and review evidence tooling
+        run: |
+          python3 -B -m unittest discover -s tools/testing -p '*_test.py' -v
+          python3 -B -m unittest discover -s tools/audit -p 'test_review_ledger.py' -v
       - name: Initialize the owned job database
         uses: ./.github/actions/initialize-test-database
       - name: Test and enforce the coverage floor
