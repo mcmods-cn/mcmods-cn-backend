@@ -44,6 +44,8 @@ func featureUpdateSchemaStatements() []string {
 			original_name text not null default '',
 			status text not null default 'processing',
 			redaction_version integer not null default 1,
+			redaction_applied_version integer not null default 1
+				constraint log_shares_redaction_applied_version_check check(redaction_applied_version>=1),
 			redaction_counts jsonb not null default '{}'::jsonb,
 			created_at timestamptz not null default now(),
 			expires_at timestamptz not null,

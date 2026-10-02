@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/database"
 )
 
 type column struct {
@@ -30,10 +31,9 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, config.Load().DB.ConnString())
+	pool, err := database.Connect(ctx, config.Load())
 	must(err)
 	defer pool.Close()
-	must(pool.Ping(ctx))
 
 	var version string
 	must(pool.QueryRow(ctx, `select current_setting('server_version')`).Scan(&version))
@@ -92,9 +92,13 @@ func main() {
 }
 
 func queryColumns(ctx context.Context, pool *pgxpool.Pool) []column {
-	rows, err := pool.Query(ctx, `select table_name,ordinal_position,column_name,
-		case when data_type='USER-DEFINED' then udt_name else data_type end,is_nullable,coalesce(column_default,'')
-		from information_schema.columns where table_schema='public' order by table_name,ordinal_position`)
+	rows, err := pool.Query(ctx, `select column_info.table_name,column_info.ordinal_position,column_info.column_name,
+		case when column_info.data_type='USER-DEFINED' then column_info.udt_name else column_info.data_type end,
+		column_info.is_nullable,coalesce(column_info.column_default,'')
+		from information_schema.columns column_info join information_schema.tables table_info
+		  on table_info.table_schema=column_info.table_schema and table_info.table_name=column_info.table_name
+		where column_info.table_schema='public' and table_info.table_type='BASE TABLE'
+		order by column_info.table_name,column_info.ordinal_position`)
 	must(err)
 	defer rows.Close()
 	result := make([]column, 0, 2048)
@@ -150,7 +154,7 @@ func queryNames(ctx context.Context, pool *pgxpool.Pool, query string) []string 
 }
 
 func queryStats(ctx context.Context, pool *pgxpool.Pool) map[string]int64 {
-	rows, err := pool.Query(ctx, `select relname,greatest(n_live_tup,0)::bigint from pg_stat_user_tables`)
+	rows, err := pool.Query(ctx, `select relname,greatest(n_live_tup,0)::bigint from pg_stat_user_tables where schemaname='public'`)
 	must(err)
 	defer rows.Close()
 	result := map[string]int64{}

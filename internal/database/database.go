@@ -2,9 +2,12 @@ package database
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
@@ -24,7 +27,7 @@ func ConnectActivity(ctx context.Context, cfg config.Config) (*pgxpool.Pool, err
 func connectPool(ctx context.Context, dbConfig config.DBConfig, minConns, maxConns int32, applicationName string) (*pgxpool.Pool, error) {
 	poolConfig, err := pgxpool.ParseConfig(dbConfig.ConnString())
 	if err != nil {
-		return nil, err
+		return nil, &connectionError{stage: "parse database configuration", cause: err}
 	}
 	poolConfig.MaxConns = maxConns
 	poolConfig.MinConns = minConns
@@ -45,11 +48,49 @@ func connectPool(ctx context.Context, dbConfig config.DBConfig, minConns, maxCon
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
-		return nil, err
+		return nil, &connectionError{stage: "initialize database pool", cause: err}
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return nil, err
+		return nil, &connectionError{stage: "connect to database", cause: err}
 	}
 	return pool, nil
+}
+
+// pgx can redact the outer DSN yet include it again in a nested URL parse
+// error. Never stringify a driver error at this logging boundary; preserve
+// its type and cause for errors.As / errors.Is instead.
+type connectionError struct {
+	stage string
+	cause error
+}
+
+func (err *connectionError) Error() string {
+	if errors.Is(err.cause, context.Canceled) {
+		return err.stage + ": context canceled"
+	}
+	if errors.Is(err.cause, context.DeadlineExceeded) {
+		return err.stage + ": deadline exceeded"
+	}
+	var postgresError *pgconn.PgError
+	if errors.As(err.cause, &postgresError) && validSQLState(postgresError.Code) {
+		return err.stage + ": PostgreSQL SQLSTATE " + postgresError.Code
+	}
+	return fmt.Sprintf("%s: %T", err.stage, err.cause)
+}
+
+func (err *connectionError) Unwrap() error { return err.cause }
+
+func validSQLState(code string) bool {
+	if len(code) != 5 {
+		return false
+	}
+	for _, character := range code {
+		if character < '0' || character > '9' {
+			if character < 'A' || character > 'Z' {
+				return false
+			}
+		}
+	}
+	return true
 }

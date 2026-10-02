@@ -31,11 +31,11 @@ RETURNING last_floor;
 - 回复不更新计数器。
 - 不可见楼层定位返回“不可见/不存在”，绝不复用为另一条评论。
 
-## 历史回填
+## 开发库与已有数据
 
-按对象分区，以 `created_at, id` 稳定排序执行 `row_number()`；只处理顶级且尚无楼层的评论。随后以最大已分配楼层幂等初始化计数器。
+当前 generation 168 按 `DEVELOPMENT_SCHEMA_RESET.md` 的开发期重置策略安装空库结构，没有历史评论楼层的前向回填迁移。不能把该流程用于需要保留数据的数据库。
 
-当前迁移适用于开发数据库。生产评论量很大时，应把该 SQL 拆为按对象批次执行，并在创建唯一索引前校验重复值。
+若将来为已有数据引入前向升级，可按对象分区，以 `created_at, id` 稳定排序为尚无楼层的顶级评论分配 `row_number()`，再以最大楼层初始化计数器。这是待实现的迁移方案，需要核对既有楼层、分批边界、并发写入和重复值后才能执行，不能视为当前已支持或已验证的恢复能力。
 
 ## API 与前端定位
 
@@ -50,4 +50,3 @@ GET /api/v1/comment-targets/{targetType}/{targetKey}/comments/floors/{floor}
 ## “数字+楼”解析
 
 `MarkdownRenderer` 中的 remark 插件只遍历 AST 普通文本节点，识别 1–9 位正整数加“楼”。父节点为 link、linkReference、code 或 inlineCode 时跳过；原始 Markdown 不被改写，避免嵌套链接、URL 破坏和 HTML 字符串替换型 XSS。
-
