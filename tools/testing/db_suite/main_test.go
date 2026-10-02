@@ -1,9 +1,45 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
 	"reflect"
 	"testing"
 )
+
+func TestPackageListSeparatesDiagnosticsAndRejectsFailedDiscovery(t *testing.T) {
+	for _, scenario := range []string{"success", "failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			command := exec.Command(os.Args[0], "-test.run=^TestPackageListHelperProcess$", "--", scenario)
+			command.Env = append(os.Environ(), "MCMODS_PACKAGE_LIST_HELPER=1")
+			packages, err := listPackages(command)
+			if scenario == "failure" {
+				if err == nil || len(packages) != 0 {
+					t.Fatalf("failed discovery returned packages=%v err=%v", packages, err)
+				}
+				return
+			}
+			want := []string{"example.test/first", "example.test/second"}
+			if err != nil || !reflect.DeepEqual(packages, want) {
+				t.Fatalf("package list includes diagnostics or loses packages: got=%v want=%v err=%v", packages, want, err)
+			}
+		})
+	}
+}
+
+func TestPackageListHelperProcess(t *testing.T) {
+	if os.Getenv("MCMODS_PACKAGE_LIST_HELPER") != "1" {
+		return
+	}
+	fmt.Fprintln(os.Stderr, "go: downloading example.test/dependency v1.0.0")
+	fmt.Fprintln(os.Stdout, "example.test/first\nexample.test/second")
+	if os.Args[len(os.Args)-1] == "failure" {
+		fmt.Fprintln(os.Stderr, "go: package discovery failed")
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
 
 func TestDiscoveryKeepsEveryTestAndFuzzSeedWithoutPackageNoise(t *testing.T) {
 	got := parseTestNames("TestSchema\r\nTestHTTP\nFuzzCodec\nok\tpackage\t0.01s\n? package [no test files]\nTestInvalid/name\n")

@@ -37,12 +37,12 @@ func main() {
 	if len(packages) == 0 {
 		packages = []string{"./..."}
 	}
-	list, err := exec.Command(goBinary, append([]string{"list"}, packages...)...).CombinedOutput()
+	listedPackages, err := listPackages(exec.Command(goBinary, append([]string{"list"}, packages...)...))
 	if err != nil {
-		fatal(fmt.Errorf("list packages: %w\n%s", err, list))
+		fatal(err)
 	}
 	var discovered, invoked, batches, failures int
-	for _, pkg := range strings.Fields(string(list)) {
+	for _, pkg := range listedPackages {
 		output, listErr := exec.Command(goBinary, "test", "-list", "^(Test|Fuzz)", pkg).CombinedOutput()
 		if listErr != nil {
 			fatal(fmt.Errorf("discover tests in %s: %w\n%s", pkg, listErr, output))
@@ -71,6 +71,17 @@ func main() {
 	if discovered == 0 || invoked != discovered || failures > 0 {
 		os.Exit(1)
 	}
+}
+
+func listPackages(command *exec.Cmd) ([]string, error) {
+	// Go writes module download and other diagnostics to stderr. Only stdout
+	// contains package paths; keep diagnostics visible without parsing them.
+	command.Stderr = os.Stderr
+	output, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list packages: %w\n%s", err, output)
+	}
+	return strings.Fields(string(output)), nil
 }
 
 func parseTestNames(output string) []string {
