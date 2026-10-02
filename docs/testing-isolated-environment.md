@@ -47,7 +47,22 @@ python3 -B tools/testing/isolated_environment.py run -- go run ./tools/testing/d
 `MCMODS_TEST_DATABASE_URL`并设`MCMODS_RUN_DB_INTEGRATION=0`；应用`DATABASE_URL`
 仍只能指向本任务拥有的回环库。真实DB门设`MCMODS_RUN_DB_INTEGRATION=1`，
 并使专用测试URL与应用URL精确匹配。不要以RUN=0配合非空专用URL运行：旧opt-in测试
-可能因此被启用，再被schema安全守卫拒绝。函数/日志前向恢复测试另需显式独占目标。
+可能因此被启用，再被schema安全守卫拒绝。
+
+四项会临时改动 public 对象或注入故障的回归另需显式独占目标：评论热度差分、日志前向升级、
+函数修复/恢复及收藏导出终态事务。先核对状态文件的随机所有权标签、实际回环端口和数据库身份，
+确认该库为本任务新建、可丢弃且没有其它测试/应用使用，再将
+`MCMODS_DB_FUNCTION_REPAIR_TEST_TARGET` 设置为该状态文件记录的精确数据库名。
+不能从继承的连接串或名称包含 test 推定这些权限。独占目标确认后可单独执行：
+
+```sh
+python3 -B tools/testing/isolated_environment.py run -- go test -race ./internal/database ./internal/httpapi \
+  -run '^(TestOCT02CommentPopularityStatementDeltas|TestOCT02LogRedactionForwardUpgradeIntegration|TestOCT02ProjectionFunctionForwardRepairAndRecovery|TestOCT02FavoriteExportTerminalStateAndNotificationCommitTogetherIntegration)$' \
+  -count=1 -v
+```
+
+没有显式目标时四项会 SKIP；另一次独占命令的 PASS 不改变原整套命令的 SKIP 数。
+恢复步骤及测试角色要求见[函数修复说明](database-function-repair.md)和[日志升级说明](log-redaction-upgrade.md)。
 
 初次应用当前 schema 后可启动真实后端：
 

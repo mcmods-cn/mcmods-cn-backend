@@ -96,10 +96,11 @@ def up(state, go_binary):
         environment[key] = ""
     write_private(state / "environment.json", json.dumps(environment, indent=2) + "\n")
     write_private(state / "activate.sh", "".join(f"export {key}={shlex.quote(value)}\n" for key, value in environment.items()))
-    # pg_isready checks only our newly created container, never an inherited URL.
+    # The entrypoint's temporary initialization server uses a Unix socket only.
+    # Check our container's TCP listener before using its published host port.
     for attempt in range(60):
         try:
-            docker("exec", record["containers"]["postgres"], "pg_isready", "-U", "mcmods", "-d", database, capture=True)
+            docker("exec", record["containers"]["postgres"], "pg_isready", "-h", "127.0.0.1", "-U", "mcmods", "-d", database, capture=True)
             break
         except subprocess.CalledProcessError:
             if attempt == 59:
