@@ -123,10 +123,11 @@ const simpleProjectParentFacetOptionsSQL = `with parent_options as (
 		coalesce(nullif(btrim(parent_mod.primary_name),''),nullif(btrim(parent_pack.primary_name),''),nullif(btrim(parent_project.primary_name),''),nullif(btrim(ref.raw_identifier),''),ref.target_type) facet_label
 	from simple_projects project
 	join simple_project_parent_refs ref on ref.project_id=project.id
-	left join mods parent_mod on ref.target_type='mod' and parent_mod.id=ref.target_id
-	left join modpacks parent_pack on ref.target_type='modpack' and parent_pack.id=ref.target_id
-	left join simple_projects parent_project on ref.target_type=parent_project.project_type and parent_project.id=ref.target_id
+	left join mods parent_mod on ref.target_type='mod' and parent_mod.id=ref.target_id and parent_mod.review_status='approved'
+	left join modpacks parent_pack on ref.target_type='modpack' and parent_pack.id=ref.target_id and parent_pack.review_status='approved'
+	left join simple_projects parent_project on ref.target_type=parent_project.project_type and parent_project.id=ref.target_id and parent_project.review_status='approved'
 	where project.project_type=$1 and (project.review_status='approved' or project.submitted_by=$2)
+	  and (ref.target_id is null or coalesce(parent_mod.id,parent_pack.id,parent_project.id) is not null)
 )
 select facet_key,facet_label from parent_options
 where facet_key<>'' %s

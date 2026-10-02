@@ -4,7 +4,36 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"mcmods-cn-backend/internal/security"
 )
+
+// Resource references can span many projects. Build a bounded SQL visibility
+// scope from the already-resolved request permissions, preserving their
+// priority and explicit-deny semantics without a query per referenced mod.
+func resourceReferencePreviewScope(ctx context.Context) (bool, []string, []string) {
+	claims, _ := ctx.Value(claimsContextKey).(security.Claims)
+	allowed, denied := []string{}, []string{}
+	if claims.Subject <= 0 {
+		return false, allowed, denied
+	}
+	review := claimsAllow(claims, "content.review") || claimsAllow(claims, "project.review")
+	all := review || claimsAllow(claims, "project.edit") || claimsAllow(claims, "project.edit.")
+	seen := make(map[string]bool)
+	for _, rule := range claims.PermissionRules {
+		code, ok := strings.CutPrefix(rule.Code, "project.edit.")
+		if !ok || code == "" || strings.ContainsAny(code, ".*") || seen[code] {
+			continue
+		}
+		seen[code] = true
+		if review || canEditMod(claims, modIdentityRecord{UniqueID: code}) {
+			allowed = append(allowed, code)
+		} else {
+			denied = append(denied, code)
+		}
+	}
+	return all, allowed, denied
+}
 
 type exportResourceKey struct {
 	RevisionID string
@@ -61,10 +90,11 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 		resourceIDs[index] = key.ResourceID
 		kinds[index] = key.Kind
 	}
+	previewAll, previewAllowed, previewDenied := resourceReferencePreviewScope(ctx)
 
 	rows, err := s.db.Query(ctx, `with requested as (
 		select distinct request.preferred_revision_id,request.resource_id,request.resource_kind,
-			preferred.minecraft_version,preferred.loader
+			preferred.minecraft_version,preferred.loader,preferred.mod_id preferred_mod_id
 		from unnest($1::text[],$2::text[],$3::text[]) request(preferred_revision_id,resource_id,resource_kind)
 		join catalog_import_revisions preferred on preferred.id::text=request.preferred_revision_id
 	)
@@ -86,7 +116,9 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 			join catalog_entities entity on entity.id=resource.entity_id
 			join resource_import_snapshots snapshot on snapshot.resource_id=resource.entity_id
 			join catalog_import_revisions revision on revision.id=snapshot.revision_id
-			join mods mod on mod.id=revision.mod_id
+			join mods mod on mod.id=revision.mod_id and (mod.review_status='approved'
+				or (mod.id=requested.preferred_mod_id and (
+					($4 and not(mod.project_code=any($6::text[]))) or mod.project_code=any($5::text[]))))
 			left join mod_content_versions version on version.id=revision.target_version_id
 			where resource.canonical_id=requested.resource_id
 		) candidate
@@ -100,7 +132,7 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 			(candidate.namespace=split_part(requested.resource_id,':',1)) desc,
 			case when requested.resource_kind='' or candidate.resource_kind=requested.resource_kind then 0 else 1 end,
 			candidate.source_time desc limit 1
-	) source on true`, revisionIDs, resourceIDs, kinds)
+	) source on true`, revisionIDs, resourceIDs, kinds, previewAll, previewAllowed, previewDenied)
 	if err != nil {
 		return nil, err
 	}
@@ -155,9 +187,11 @@ func (s *Server) resolveManualModContentResources(ctx context.Context, keys []ex
 	for index, key := range keys {
 		revisions[index], resourceIDs[index], kinds[index] = key.RevisionID, key.ResourceID, key.Kind
 	}
+	previewAll, previewAllowed, previewDenied := resourceReferencePreviewScope(ctx)
 	rows, err := s.db.Query(ctx, `with requested as (
-		select request.preferred_revision_id,request.resource_id,request.resource_kind
+		select request.preferred_revision_id,request.resource_id,request.resource_kind,preferred.mod_id preferred_mod_id
 		from unnest($1::text[],$2::text[],$3::text[]) request(preferred_revision_id,resource_id,resource_kind)
+		left join catalog_import_revisions preferred on preferred.id::text=request.preferred_revision_id
 	)
 	select requested.preferred_revision_id,requested.resource_id,requested.resource_kind,
 		coalesce(source.public_id,''),coalesce(source.site_id,''),coalesce(source.version_public_id,''),
@@ -172,14 +206,16 @@ func (s *Server) resolveManualModContentResources(ctx context.Context, keys []ex
 		join catalog_entities entity on entity.id=resource.entity_id and entity.status='active'
 		join resource_kinds kind on kind.code=resource.kind_code
 		join mod_resource_bindings binding on binding.resource_id=resource.entity_id
-		join mods mod on mod.id=binding.mod_id and mod.status='active'
+		join mods mod on mod.id=binding.mod_id and (mod.review_status='approved'
+			or (mod.id=requested.preferred_mod_id and (
+				($4 and not(mod.project_code=any($6::text[]))) or mod.project_code=any($5::text[]))))
 		join mod_resource_version_details detail on detail.resource_id=resource.entity_id and detail.status='active'
-		join mod_content_versions version on version.id=detail.version_id and version.status='active'
+		join mod_content_versions version on version.id=detail.version_id and version.status='active' and version.mod_id=binding.mod_id
 		where lower(resource.canonical_id)=lower(requested.resource_id)
 			and (requested.resource_kind='' or lower(kind.family)=lower(requested.resource_kind))
 		order by (lower(resource.kind_code)=lower('minecraft.'||requested.resource_kind)) desc,
 			version.updated_at desc,resource.entity_id limit 1
-	) source on true`, revisions, resourceIDs, kinds)
+	) source on true`, revisions, resourceIDs, kinds, previewAll, previewAllowed, previewDenied)
 	if err != nil {
 		return nil, err
 	}
@@ -439,11 +475,16 @@ func (s *Server) decorateReferencedResources(
 	return nil
 }
 
-func exportResourceSourceMap(data map[string]any) map[string]any {
-	if sources, ok := data["resourceSources"].(map[string]any); ok {
+// This in-process type distinguishes authorized response decorations from
+// identically named fields in untrusted imported JSON. Multiple decorators
+// may extend the same response, but imported presentation is never authority.
+type resolvedExportResourceSources map[string]any
+
+func exportResourceSourceMap(data map[string]any) resolvedExportResourceSources {
+	if sources, ok := data["resourceSources"].(resolvedExportResourceSources); ok {
 		return sources
 	}
-	sources := make(map[string]any)
+	sources := make(resolvedExportResourceSources)
 	data["resourceSources"] = sources
 	return sources
 }
@@ -526,7 +567,13 @@ func walkLootTableDefinition(data map[string]any, visit func(map[string]any)) {
 }
 
 func lootTableIconPreviews(data map[string]any) []map[string]string {
-	sources, _ := data["resourceSources"].(map[string]any)
+	sources, ok := data["resourceSources"].(resolvedExportResourceSources)
+	if !ok {
+		// Accept the plain map for callers working on a decoded, already
+		// decorated response; authorization is performed by the decorators.
+		plain, _ := data["resourceSources"].(map[string]any)
+		sources = resolvedExportResourceSources(plain)
+	}
 	previews := make([]map[string]string, 0, len(sources))
 	for _, itemID := range lootTableItemIDs(data) {
 		source, _ := sources[itemID].(map[string]any)

@@ -71,8 +71,8 @@ func TestSimpleProjectParentFacetTraversesVisibleDistinctOptionsIntegration(t *t
 		review_status text not null,submitted_by bigint not null
 	); create temp table simple_project_parent_refs(
 		id bigint primary key,project_id bigint not null,target_type text not null,target_id bigint,raw_identifier text not null
-	); create temp table mods(id bigint primary key,slug text not null,primary_name text not null);
-	create temp table modpacks(id bigint primary key,slug text not null,primary_name text not null);
+	); create temp table mods(id bigint primary key,slug text not null,primary_name text not null,review_status text not null default 'approved');
+	create temp table modpacks(id bigint primary key,slug text not null,primary_name text not null,review_status text not null default 'approved');
 	insert into simple_projects(id,project_type,slug,primary_name,review_status,submitted_by)
 	select value,'addon','addon-'||value,'Addon '||value,'approved',7 from generate_series(1,125) value;
 	insert into mods(id,slug,primary_name)

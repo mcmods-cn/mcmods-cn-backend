@@ -102,17 +102,29 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "recipe type not found")
 		return
 	}
+	if !s.requirePublicCatalogEntity(w, r, typeEntity) {
+		return
+	}
+
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	limit := boundedLimit(r.URL.Query().Get("limit"), 40, 100)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
 	var total int
 	if err = s.db.QueryRow(r.Context(), `select count(*)::int from recipes recipe
 		join catalog_entities entity on entity.id=recipe.entity_id
-		where recipe.recipe_type_id=$1 and entity.status='active' and ($2='' or coalesce(recipe.canonical_source_id,'') ilike '%'||$2||'%')`,
+		where recipe.recipe_type_id=$1 and entity.status='active' and `+publicCatalogEntitySQL("entity", "recipe")+` and ($2='' or coalesce(recipe.canonical_source_id,'') ilike '%'||$2||'%')`,
 		typeEntity.ID, query).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count recipes")
 		return
 	}
+	versionConfig, err := loadMinecraftVersionConfig(r.Context(), s.db)
+	if err != nil {
+		logCatalogEditorReadFailure("recipe list Minecraft versions", err)
+		writeError(w, http.StatusInternalServerError, "failed to read Minecraft versions")
+		return
+	}
+	versionOrder := minecraftVersionOrder(versionConfig)
+
 	rows, err := s.db.Query(r.Context(), `select entity.public_id,coalesce(recipe.canonical_source_id,''),recipe.identity_source,
 		(select revision.public_id from content_revisions revision where revision.id=entity.published_revision_id),
 		coalesce(template_entity.public_id,imported_template_entity.public_id,''),
@@ -131,17 +143,17 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 		left join lateral (select snapshot.*,version.public_id as source_version_public_id from recipe_import_snapshots snapshot
 		 join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		 join mod_content_versions version on version.id=revision.target_version_id
-		 where snapshot.recipe_id=recipe.entity_id and revision.is_active and revision.status in ('ready','partial')
+		 where snapshot.recipe_id=recipe.entity_id and revision.is_active and revision.status in ('ready','partial') and exists(select 1 from mods public_source where public_source.id=revision.mod_id and public_source.review_status='approved')
 		 order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1) observation on true
 		left join recipe_template_import_snapshots import_template on import_template.id=observation.template_id
 		left join catalog_entities imported_template_entity on imported_template_entity.id=import_template.canonical_template_id
 		left join mod_content_versions canonical_source_version on canonical_source_version.id=definition.source_mod_content_version_id
-		left join mod_content_versions effective_source_version on effective_source_version.public_id=
+		left join mod_content_versions effective_source_version on effective_source_version.status='active' and exists(select 1 from mods public_source where public_source.id=effective_source_version.mod_id and public_source.review_status='approved') and effective_source_version.public_id=
 			case when definition.recipe_id is not null then canonical_source_version.public_id else observation.source_version_public_id end
 		left join mods source_mod on source_mod.id=effective_source_version.mod_id
 		left join lateral (select jsonb_agg(binding.version_code order by binding.created_at,binding.version_code) versions
 			from recipe_version_bindings binding where binding.recipe_id=recipe.entity_id) applicable on true
-		where recipe.recipe_type_id=$1 and entity.status='active' and ($2='' or coalesce(recipe.canonical_source_id,'') ilike '%'||$2||'%')
+		where recipe.recipe_type_id=$1 and entity.status='active' and `+publicCatalogEntitySQL("entity", "recipe")+` and ($2='' or coalesce(recipe.canonical_source_id,'') ilike '%'||$2||'%')
 		order by coalesce(recipe.canonical_source_id,''),entity.public_id limit $3 offset $4`, typeEntity.ID, query, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read recipes")
@@ -149,13 +161,6 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	primary, secondary := s.catalogRequestedLocales(r)
-	versionConfig, err := loadMinecraftVersionConfig(r.Context(), s.db)
-	if err != nil {
-		logCatalogEditorReadFailure("recipe list Minecraft versions", err)
-		writeError(w, http.StatusInternalServerError, "failed to read Minecraft versions")
-		return
-	}
-	versionOrder := minecraftVersionOrder(versionConfig)
 	items := make([]map[string]any, 0, limit)
 	for rows.Next() {
 		var publicID, canonicalID, identitySource, templatePublicID, observationID, importRevisionID string
@@ -262,6 +267,9 @@ func (s *Server) normalizeCatalogRecipeEdit(ctx context.Context, typeID, recipeI
 		}
 		roles[key] = role
 	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
 	if len(roles) == 0 {
 		return errCatalogEditorReference
 	}
@@ -301,6 +309,10 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if r.Method == http.MethodGet && !s.requirePublicCatalogEntity(w, r, entity) {
+		return
+	}
+
 	if r.Method == http.MethodPut {
 		var edit catalogRecipeEdit
 		if decodeJSON(r, &edit) != nil {
@@ -345,12 +357,12 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 		left join lateral (select snapshot.*,version.public_id as source_version_public_id from recipe_import_snapshots snapshot
 		 join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		 join mod_content_versions version on version.id=revision.target_version_id
-			where snapshot.recipe_id=recipe.entity_id and revision.is_active and revision.status in ('ready','partial')
+			where snapshot.recipe_id=recipe.entity_id and revision.is_active and revision.status in ('ready','partial') and exists(select 1 from mods public_source where public_source.id=revision.mod_id and public_source.review_status='approved')
 			order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1) observation on true
 		left join recipe_template_import_snapshots import_template on import_template.id=observation.template_id
 		left join catalog_entities imported_template_entity on imported_template_entity.id=import_template.canonical_template_id
 		left join mod_content_versions canonical_source_version on canonical_source_version.id=definition.source_mod_content_version_id
-		left join mod_content_versions effective_source_version on effective_source_version.public_id=
+		left join mod_content_versions effective_source_version on effective_source_version.status='active' and exists(select 1 from mods public_source where public_source.id=effective_source_version.mod_id and public_source.review_status='approved') and effective_source_version.public_id=
 			case when definition.recipe_id is not null then canonical_source_version.public_id else observation.source_version_public_id end
 		left join mods source_mod on source_mod.id=effective_source_version.mod_id
 		left join lateral (select jsonb_agg(binding.version_code order by binding.created_at,binding.version_code) versions
@@ -586,9 +598,9 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID int64, primary,
 		left join lateral (select snapshot.names,snapshot.revision_id,snapshot.icon_path,mod.slug mod_site_id
 		 from resource_import_snapshots snapshot join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		 join mods mod on mod.id=revision.mod_id where snapshot.resource_id=resource.entity_id
-		 and revision.is_active and revision.status in ('ready','partial')
+		 and revision.is_active and revision.status in ('ready','partial') and exists(select 1 from mods public_source where public_source.id=revision.mod_id and public_source.review_status='approved')
 		 order by (snapshot.icon_path<>'') desc,coalesce(revision.activated_at,revision.created_at) desc limit 1) imported on true
-		join catalog_entities entity on entity.id=resource.entity_id where member.tag_id=$1 order by member.ordinal`, tagID)
+		join catalog_entities entity on entity.id=resource.entity_id where member.tag_id=$1 and `+publicCatalogEntitySQL("entity", "resource")+` order by member.ordinal`, tagID)
 	if err != nil {
 		return nil, err
 	}
@@ -626,7 +638,7 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID int64, primary,
 	rows, err = s.db.Query(ctx, `with selected as (
 		select snapshot.id,snapshot.revision_id from tag_import_snapshots snapshot
 		join catalog_import_revisions revision on revision.id=snapshot.revision_id
-		where snapshot.tag_id=$1 and revision.is_active and revision.status in ('ready','partial')
+		where snapshot.tag_id=$1 and revision.is_active and revision.status in ('ready','partial') and exists(select 1 from mods public_source where public_source.id=revision.mod_id and public_source.review_status='approved')
 	), selected_members as (
 		select distinct on(member.resource_id) selected.revision_id,member.resource_id,member.ordinal
 		from selected join tag_import_members member on member.tag_snapshot_id=selected.id
@@ -641,10 +653,11 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID int64, primary,
 	join game_resources resource on resource.entity_id=member.resource_id
 	join catalog_entities entity on entity.id=resource.entity_id
 	left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
-	left join lateral (select candidate.names,candidate.revision_id,candidate.icon_path from resource_import_snapshots candidate where candidate.resource_id=resource.entity_id
+	left join lateral (select candidate.names,candidate.revision_id,candidate.icon_path from resource_import_snapshots candidate join catalog_import_revisions source_revision on source_revision.id=candidate.revision_id join mods source_mod on source_mod.id=source_revision.mod_id and source_mod.review_status='approved' where source_revision.is_active and source_revision.status in ('ready','partial') and candidate.resource_id=resource.entity_id
 	 order by (candidate.revision_id=member.revision_id) desc,(candidate.icon_path<>'') desc,candidate.created_at desc limit 1) resource_snapshot on true
 	left join catalog_import_revisions revision on revision.id=resource_snapshot.revision_id
 	left join mods mod on mod.id=revision.mod_id
+	where `+publicCatalogEntitySQL("entity", "resource")+`
 	order by member.ordinal`, tagID)
 	if err != nil {
 		return nil, err
@@ -699,10 +712,11 @@ func (s *Server) catalogRecipeTypesCatalysts(ctx context.Context, typeIDs []int6
 		from recipe_type_catalysts catalyst join game_resources resource on resource.entity_id=catalyst.resource_id
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 		join catalog_entities entity on entity.id=resource.entity_id
-		where catalyst.recipe_type_id=any($1::bigint[]) order by catalyst.recipe_type_id,catalyst.ordinal`, typeIDs)
+		where catalyst.recipe_type_id=any($1::bigint[]) and `+publicCatalogEntitySQL("entity", "resource")+` order by catalyst.recipe_type_id,catalyst.ordinal`, typeIDs)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		var publicID, kindCode, canonicalID, registry, defaultLocale string
 		var iconID sql.NullString
@@ -741,7 +755,7 @@ func (s *Server) catalogRecipeTypesCatalysts(ctx context.Context, typeIDs []int6
 	rows, err = s.db.Query(ctx, `select distinct on (snapshot.recipe_type_id)
 		snapshot.recipe_type_id,snapshot.catalysts,snapshot.revision_id from recipe_type_import_snapshots snapshot
 		join catalog_import_revisions revision on revision.id=snapshot.revision_id
-		where snapshot.recipe_type_id=any($1::bigint[]) and revision.is_active and revision.status in ('ready','partial')
+		where snapshot.recipe_type_id=any($1::bigint[]) and revision.is_active and revision.status in ('ready','partial') and exists(select 1 from mods public_source where public_source.id=revision.mod_id and public_source.review_status='approved')
 		order by snapshot.recipe_type_id,coalesce(revision.activated_at,revision.created_at) desc,
 			revision.created_at desc,snapshot.id desc`, missing)
 	if err != nil {
@@ -806,12 +820,12 @@ func (s *Server) catalogRecipeBindingRows(ctx context.Context, recipeID int64) (
 		coalesce(imported.revision_id,''),coalesce(imported.icon_path,'')
 		from recipe_bindings binding join recipe_template_slots slot on slot.id=binding.template_slot_id
 		left join recipe_binding_candidates candidate on candidate.binding_id=binding.id
-		left join game_resources resource on resource.entity_id=candidate.resource_id
+		left join game_resources resource on resource.entity_id=candidate.resource_id and exists(select 1 from catalog_entities public_entity where public_entity.id=resource.entity_id and `+publicCatalogEntitySQL("public_entity", "resource")+`)
 		left join catalog_entities entity on entity.id=resource.entity_id
 		left join catalog_resource_definitions resource_definition on resource_definition.resource_id=resource.entity_id
 		left join oss_files icon_file on icon_file.id=resource_definition.icon_file_id and icon_file.status='active'
-		left join lateral (select source.revision_id,source.icon_path from resource_import_snapshots source
-		 where source.resource_id=resource.entity_id order by (source.icon_path<>'') desc,source.created_at desc limit 1) imported on true
+		left join lateral (select source.revision_id,source.icon_path from resource_import_snapshots source join catalog_import_revisions source_revision on source_revision.id=source.revision_id join mods source_mod on source_mod.id=source_revision.mod_id and source_mod.review_status='approved'
+		 where source_revision.is_active and source_revision.status in ('ready','partial') and source.resource_id=resource.entity_id order by (source.icon_path<>'') desc,source.created_at desc limit 1) imported on true
 		where binding.recipe_id=$1 order by binding.ordinal,binding.id,candidate.candidate_index`, recipeID)
 	if err != nil {
 		return nil, err
@@ -860,12 +874,12 @@ func (s *Server) catalogImportedRecipeBindingRows(ctx context.Context, snapshotI
 		from recipe_import_bindings binding
 		join recipe_template_import_slots slot on slot.id=binding.template_slot_id
 		left join recipe_import_binding_candidates candidate on candidate.binding_id=binding.id
-		left join game_resources resource on resource.entity_id=candidate.resource_id
+		left join game_resources resource on resource.entity_id=candidate.resource_id and exists(select 1 from catalog_entities public_entity where public_entity.id=resource.entity_id and `+publicCatalogEntitySQL("public_entity", "resource")+`)
 		left join catalog_entities resource_entity on resource_entity.id=resource.entity_id
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 		left join oss_files icon_file on icon_file.id=definition.icon_file_id and icon_file.status='active'
-		left join lateral (select source.revision_id,source.icon_path from resource_import_snapshots source
-		 where source.resource_id=resource.entity_id order by (source.icon_path<>'') desc,source.created_at desc limit 1) imported on true
+		left join lateral (select source.revision_id,source.icon_path from resource_import_snapshots source join catalog_import_revisions source_revision on source_revision.id=source.revision_id join mods source_mod on source_mod.id=source_revision.mod_id and source_mod.review_status='approved'
+		 where source_revision.is_active and source_revision.status in ('ready','partial') and source.resource_id=resource.entity_id order by (source.icon_path<>'') desc,source.created_at desc limit 1) imported on true
 		where binding.recipe_snapshot_id=$1 order by binding.ordinal,candidate.alternative_index`, snapshotID)
 	if err != nil {
 		return nil, err

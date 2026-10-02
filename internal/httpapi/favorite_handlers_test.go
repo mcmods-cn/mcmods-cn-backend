@@ -15,7 +15,8 @@ func TestFavoriteReadsAndWritesKeepTargetVisibilityBoundary(t *testing.T) {
 	for _, required := range []string{
 		"beginFavoriteMembershipTx(r.Context(), claims.Subject)",
 		"beginFavoriteMembershipTx(r.Context(), userID)",
-		"resolveFavoriteTargetWithQueryer(r.Context(), tx, request.EntityType, request.EntityPublicID, claims)",
+		"resolveFavoriteMutationTargetWithQueryer(r.Context(), tx, request.EntityType, request.EntityPublicID, claims, len(request.AddCollectionIDs) == 0)",
+		"resolveFavoriteMutationTargetWithQueryer(r.Context(), tx, request.EntityType, request.EntityPublicID, claims, len(request.CollectionIDs) == 0)",
 		"writeFavoriteCollectionPage(w, r, identity.InternalID, false, currentClaims(r))",
 		"parseFavoriteItemPageRequest(r.URL.Query(), ownerID, includePrivate, collectionPublicID, claims)",
 		"item.entity_type in ('mod','modpack','blueprint')",

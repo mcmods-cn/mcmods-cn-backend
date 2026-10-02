@@ -112,6 +112,36 @@ func TestFinalEntryStillRequiresCodeTestCommandAndPassingResult(t *testing.T) {
 	}
 }
 
+func TestFinalEntryRejectsNonPassingResultWords(t *testing.T) {
+	for _, result := range []string{"NOT_PASS", "BYPASS", "NOT PASS", "FAIL; PASS", "未通过", "不通过", "失败；通过"} {
+		entry := ledgerEntry{ID: "BUG-001", Status: "CLOSED", CurrentCode: "handler", FixSummary: "atomic transaction", AutomatedTest: "TestActualHTTP", ValidationCommand: "go test", Result: result}
+		var errs []string
+		validateFinalEntry(entry, &errs)
+		if len(errs) == 0 {
+			t.Errorf("non-passing result accepted: %q", result)
+		}
+	}
+	for _, result := range []string{"PASS", "PASS：real regression", "PASS（实际回归）", "PASS (real regression)", "通过：实际验证"} {
+		entry := ledgerEntry{ID: "BUG-001", Status: "CLOSED", CurrentCode: "handler", FixSummary: "atomic transaction", AutomatedTest: "TestActualHTTP", ValidationCommand: "go test", Result: result}
+		var errs []string
+		validateFinalEntry(entry, &errs)
+		if len(errs) != 0 {
+			t.Errorf("passing result rejected: %q", result)
+		}
+	}
+}
+
+func TestLedgerRejectsExtraColumns(t *testing.T) {
+	row := "| BUG-001 | High | BUG | module | root | CLOSED | code | fix | db | api | test | command | PASS | commit | reason | unexpected |\n"
+	path := filepath.Join(t.TempDir(), "ledger.md")
+	if err := os.WriteFile(path, []byte(row), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, errs := scanLedger(path); len(errs) == 0 {
+		t.Fatal("ledger accepted an extra column")
+	}
+}
+
 func TestFinalValidatorCLIRetainsAllInventoryClosureAndEvidenceGuards(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()

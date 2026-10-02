@@ -413,7 +413,7 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int
 		join lateral (
 			select candidate.mod_id from (
 				select revision.mod_id,0 priority,coalesce(revision.activated_at,revision.created_at) matched_at
-				from catalog_import_revisions revision
+				from catalog_import_revisions revision join mods public_source on public_source.id=revision.mod_id and public_source.review_status='approved'
 				where revision.source_namespace=namespace.source_namespace
 				  and revision.is_active and revision.status in ('ready','partial')
 				union all
@@ -440,7 +440,7 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int
 		publishedRevisionID = *existingPublishedRevisionID
 	}
 	if revisionCount == 0 {
-		reviewRequired := loadReviewConfig(ctx, worker.db).BlueprintCreate
+		reviewRequired := loadReviewConfig(ctx, tx).BlueprintCreate
 		revisionStatus := "approved"
 		reviewStatus = "approved"
 		if reviewRequired {

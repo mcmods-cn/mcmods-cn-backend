@@ -51,8 +51,13 @@ func TestCommunityPostReferenceResolutionAndReplacementStayConstantAtMaximumInte
 	create temporary table skin_assets(
 		id bigint primary key,display_name text not null,status text not null,visibility text not null,
 		review_status text not null,owner_id bigint not null,updated_at timestamptz not null);
-	create temporary table catalog_entities(id bigint primary key,public_id text not null,status text not null);
-	create temporary table game_resources(entity_id bigint primary key,kind_code text not null);
+	create temporary table catalog_entities(id bigint primary key,public_id text not null,status text not null,archived_at timestamptz);
+	create temporary table game_resources(entity_id bigint primary key,kind_code text not null,owner_mod_id bigint,created_from_revision_id text);
+	create temporary table catalog_resource_definitions(resource_id bigint primary key);
+	create temporary table resource_import_snapshots(resource_id bigint,revision_id text);
+	create temporary table catalog_import_revisions(id text primary key,mod_id bigint,is_active boolean,status text);
+	create temporary table mod_resource_version_details(resource_id bigint,version_id bigint,status text);
+	create temporary table mod_content_versions(id bigint primary key,mod_id bigint,status text);
 	create temporary table resource_kinds(code text primary key);
 	create temporary table community_post_project_refs(
 		id bigint generated always as identity primary key,post_id bigint not null,target_type text not null,
@@ -72,9 +77,9 @@ func TestCommunityPostReferenceResolutionAndReplacementStayConstantAtMaximumInte
 	from generate_series(1,16) value;
 	insert into mods
 	select value,'mod '||value,'approved',1,now() from generate_series(1,16) value;
-	insert into catalog_entities
+	insert into catalog_entities(id,public_id,status)
 	select value,'r'||lpad(value::text,8,'0'),'active' from generate_series(1,32) value;
-	insert into game_resources
+	insert into game_resources(entity_id,kind_code)
 	select value,'minecraft.item' from generate_series(1,32) value`); err != nil {
 		t.Fatal(err)
 	}

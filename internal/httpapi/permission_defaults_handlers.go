@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -23,7 +24,12 @@ type updateUserStatusRequest struct {
 }
 
 func (s *Server) getPermissionDefaults(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.permissionDefaultsFromSettings(r.Context()))
+	payload, err := permissionDefaultsFromSettingsWithQueryer(r.Context(), s.db)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取默认权限组失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) updatePermissionDefaults(w http.ResponseWriter, r *http.Request) {
@@ -52,7 +58,11 @@ func (s *Server) updatePermissionDefaults(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		var exists bool
-		if err = tx.QueryRow(r.Context(), `select exists(select 1 from roles where code=$1 and status='active')`, role).Scan(&exists); err != nil || !exists {
+		if err = tx.QueryRow(r.Context(), `select exists(select 1 from roles where code=$1 and status='active')`, role).Scan(&exists); err != nil {
+			writeError(w, http.StatusInternalServerError, "读取权限组失败")
+			return
+		}
+		if !exists {
 			writeError(w, http.StatusBadRequest, "权限组不存在: "+role)
 			return
 		}
@@ -128,7 +138,10 @@ func (s *Server) updateUserStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "移除封禁权限组失败")
 		return
 	}
-	s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &userID, "update_user_status", map[string]any{"status": request.Status})
+	if err := s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &userID, "update_user_status", map[string]any{"status": request.Status}); err != nil {
+		writeError(w, http.StatusInternalServerError, "记录用户状态变更失败")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "修改用户状态失败")
 		return
@@ -148,13 +161,20 @@ func validSecurityManagedUserStatus(username, email, status string) bool {
 	return status == "active" || status == "banned" || status == "disabled" || status == "deleted"
 }
 
-func (s *Server) permissionDefaultsFromSettings(ctx context.Context) permissionDefaultsPayload {
+func permissionDefaultsFromSettingsWithQueryer(ctx context.Context, query revisionQuery) (permissionDefaultsPayload, error) {
 	var payload permissionDefaultsPayload
 	var raw []byte
-	if err := s.db.QueryRow(ctx, `select value from system_settings where key = $1`, permissionDefaultsSettingKey).Scan(&raw); err == nil {
-		_ = json.Unmarshal(raw, &payload)
+	err := query.QueryRow(ctx, `select value from system_settings where key = $1`, permissionDefaultsSettingKey).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return payload, nil
 	}
-	return normalizePermissionDefaults(payload)
+	if err != nil {
+		return payload, err
+	}
+	if err = json.Unmarshal(raw, &payload); err != nil {
+		return permissionDefaultsPayload{}, err
+	}
+	return normalizePermissionDefaults(payload), nil
 }
 
 func normalizePermissionDefaults(payload permissionDefaultsPayload) permissionDefaultsPayload {
@@ -164,7 +184,10 @@ func normalizePermissionDefaults(payload permissionDefaultsPayload) permissionDe
 }
 
 func (s *Server) assignConfiguredRoleTx(ctx context.Context, tx pgx.Tx, userID int64, kind string) error {
-	defaults := s.permissionDefaultsFromSettings(ctx)
+	defaults, err := permissionDefaultsFromSettingsWithQueryer(ctx, tx)
+	if err != nil {
+		return err
+	}
 	role := defaults.RegisteredRole
 	if kind == "banned" {
 		role = defaults.BannedRole

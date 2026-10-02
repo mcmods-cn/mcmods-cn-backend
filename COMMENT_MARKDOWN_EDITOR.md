@@ -38,7 +38,7 @@ GET /api/v1/comments/{commentId}/attachments/{fileId}/download
 - `comment_attachments` 保存所有普通和日志附件关系及处理状态。
 - `comment_log_bindings` 只保存日志附件与脱敏分享的子类型关系。
 - 评论列表通过一次批量查询加载当前页全部附件，避免逐条评论或逐个文件查询。
-- Schema generation 85 为当前开发期权威结构；不保留旧开发库双读或兼容表。
+- Schema generation 168 为当前开发期权威结构；不保留旧开发库双读或兼容表。下方 2026-08-19 验证记录属于当时版本，不代表当前版本已重新完成全部验证。
 
 ## 验证
 

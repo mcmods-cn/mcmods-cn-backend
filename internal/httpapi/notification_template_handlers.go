@@ -229,12 +229,24 @@ func renderNotificationTemplateForLocale(config notificationTemplateConfig, requ
 	valuesCopy := make(map[string]string, len(values))
 	for key, value := range values {
 		valuesCopy[key] = value
-		selected.Title = strings.ReplaceAll(selected.Title, "{"+key+"}", value)
-		selected.Body = strings.ReplaceAll(selected.Body, "{"+key+"}", value)
 	}
-	if missing := unresolvedNotificationVariables(selected.Title + "\n" + selected.Body); len(missing) > 0 {
+	missing := make([]string, 0)
+	for _, key := range unresolvedNotificationVariables(selected.Title + "\n" + selected.Body) {
+		if _, exists := values[key]; !exists {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
 		return renderedNotificationTemplate{}, fmt.Errorf("notification template %q missing values: %s", code, strings.Join(missing, ","))
 	}
+	// Only the original template carries instructions. Values are ordinary user
+	// data, even when a project name or rejection reason contains braces.
+	render := func(template string) string {
+		return notificationTemplateVariablePattern.ReplaceAllStringFunc(template, func(match string) string {
+			return values[match[1:len(match)-1]]
+		})
+	}
+	selected.Title, selected.Body = render(selected.Title), render(selected.Body)
 	return renderedNotificationTemplate{Key: code, Version: max(1, definition.Version), Locale: selectedLocale, Title: selected.Title, Body: selected.Body, Values: valuesCopy}, nil
 }
 
@@ -313,7 +325,24 @@ func (s *Server) updateNotificationTemplates(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	current, err := loadNotificationTemplateConfig(r.Context(), s.db)
+	// Check the submitted list before merge collapses it into a map.
+	if err := validateNotificationTemplateCodes(request); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "保存通知模板失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	// Template versions are source identities for cached/generated translations.
+	// Concurrent saves must observe the preceding committed version.
+	if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtextextended('settings:notifications.templates',0))`); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "保存通知模板失败")
+		return
+	}
+	current, err := loadNotificationTemplateConfig(r.Context(), tx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取通知模板失败")
 		return
@@ -324,7 +353,7 @@ func (s *Server) updateNotificationTemplates(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	raw, _ := json.Marshal(request)
-	_, err = s.db.Exec(r.Context(), `insert into system_settings(key,value,updated_by,updated_at)
+	_, err = tx.Exec(r.Context(), `insert into system_settings(key,value,updated_by,updated_at)
 		values($1,$2::jsonb,$3,now())
 		on conflict(key) do update
 		set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`,
@@ -333,7 +362,26 @@ func (s *Server) updateNotificationTemplates(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "保存通知模板失败")
 		return
 	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "保存通知模板失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, request)
+}
+
+func validateNotificationTemplateCodes(config notificationTemplateConfig) error {
+	seen := make(map[string]struct{}, len(config.Templates))
+	for _, item := range config.Templates {
+		code := strings.TrimSpace(item.Code)
+		if code == "" || len(code) > 80 {
+			return errors.New("通知模板 Key 不正确")
+		}
+		if _, exists := seen[code]; exists {
+			return fmt.Errorf("通知模板 Key 重复：%s", code)
+		}
+		seen[code] = struct{}{}
+	}
+	return nil
 }
 
 func versionNotificationTemplateChanges(current, next notificationTemplateConfig) notificationTemplateConfig {
@@ -387,7 +435,12 @@ func validateNotificationTemplateConfig(config notificationTemplateConfig) error
 }
 
 func (s *Server) getReviewConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, loadReviewConfig(r.Context(), s.db))
+	config, err := readReviewConfig(r.Context(), s.db)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取审核设置失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
 }
 
 func (s *Server) updateReviewConfig(w http.ResponseWriter, r *http.Request) {
@@ -414,13 +467,35 @@ type reviewConfigQueryRower interface {
 }
 
 func loadReviewConfig(ctx context.Context, db reviewConfigQueryRower) reviewConfig {
+	config, err := readReviewConfig(ctx, db)
+	if err == nil {
+		return config
+	}
+	// Absence keeps the documented defaults. A failed/invalid read cannot prove
+	// that an administrator disabled moderation. Never partially apply JSON.
+	slog.Warn("review policy unavailable; moderation required", "error_class", fmt.Sprintf("%T", err))
+	config = defaultReviewConfig()
+	config.BlueprintCreate, config.ModContentSectionCreate, config.AITranslation = true, true, true
+	return config
+}
+
+func readReviewConfig(ctx context.Context, db reviewConfigQueryRower) (reviewConfig, error) {
 	var raw []byte
 	config := defaultReviewConfig()
 	err := db.QueryRow(ctx, `select value from system_settings where key=$1`, reviewConfigSettingKey).Scan(&raw)
-	if err == nil {
-		_ = json.Unmarshal(raw, &config)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return config, nil
 	}
-	return config
+	if err != nil {
+		return reviewConfig{}, err
+	}
+	if value := strings.TrimSpace(string(raw)); !strings.HasPrefix(value, "{") {
+		return reviewConfig{}, errors.New("review configuration must be an object")
+	}
+	if err = json.Unmarshal(raw, &config); err != nil {
+		return reviewConfig{}, err
+	}
+	return config, nil
 }
 
 func defaultReviewConfig() reviewConfig {

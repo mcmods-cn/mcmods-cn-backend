@@ -200,21 +200,32 @@ func (s *Server) loadUserClaimedAuthors(ctx context.Context, userID int64) ([]us
 	}
 	defer rows.Close()
 	items := make([]userShowcaseItem, 0)
-	ossCfg := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var item userShowcaseItem
 		item.EntityType = "author"
 		if err = rows.Scan(&item.PublicID, &item.Name, &item.Summary, &item.IconURL, &item.Href, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
-		item.IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, item.IconURL)
-		if err != nil {
-			return nil, err
-		}
 		item.Roles = []string{"claimed_author"}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	ossCfg := s.ossConfigFromSettings(ctx)
+	urls := make([]string, len(items))
+	for i := range items {
+		urls[i] = items[i].IconURL
+	}
+	urls, err = s.resolveStoredOSSImageURLsWithConfig(ctx, ossCfg, urls)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		items[i].IconURL = urls[i]
+	}
+	return items, nil
 }
 
 func (s *Server) userContributions(w http.ResponseWriter, r *http.Request) {
@@ -242,16 +253,11 @@ func (s *Server) loadUserShowcaseProjects(ctx context.Context, userID int64) ([]
 	}
 	defer rows.Close()
 	items := make([]userShowcaseItem, 0)
-	ossCfg := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var item userShowcaseItem
 		var isDeveloper, isEditor bool
 		if err = rows.Scan(&item.EntityType, &item.PublicID, &item.Name, &item.Summary, &item.IconURL,
 			&item.Href, &isDeveloper, &isEditor, &item.UpdatedAt); err != nil {
-			return nil, err
-		}
-		item.IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, item.IconURL)
-		if err != nil {
 			return nil, err
 		}
 		item.Roles = make([]string, 0, 2)
@@ -263,7 +269,23 @@ func (s *Server) loadUserShowcaseProjects(ctx context.Context, userID int64) ([]
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	ossCfg := s.ossConfigFromSettings(ctx)
+	urls := make([]string, len(items))
+	for i := range items {
+		urls[i] = items[i].IconURL
+	}
+	urls, err = s.resolveStoredOSSImageURLsWithConfig(ctx, ossCfg, urls)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		items[i].IconURL = urls[i]
+	}
+	return items, nil
 }
 
 func (s *Server) loadUserShowcaseUploads(ctx context.Context, userID int64) ([]userShowcaseItem, error) {
@@ -288,20 +310,31 @@ func (s *Server) loadUserShowcaseUploads(ctx context.Context, userID int64) ([]u
 	}
 	defer rows.Close()
 	items := make([]userShowcaseItem, 0)
-	ossCfg := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var item userShowcaseItem
 		if err = rows.Scan(&item.EntityType, &item.PublicID, &item.Name, &item.Summary, &item.IconURL, &item.Href, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
-		item.IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, item.IconURL)
-		if err != nil {
-			return nil, err
-		}
 		item.Roles = []string{"uploader"}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	ossCfg := s.ossConfigFromSettings(ctx)
+	urls := make([]string, len(items))
+	for i := range items {
+		urls[i] = items[i].IconURL
+	}
+	urls, err = s.resolveStoredOSSImageURLsWithConfig(ctx, ossCfg, urls)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		items[i].IconURL = urls[i]
+	}
+	return items, nil
 }
 
 func (s *Server) loadUserShowcasePosts(ctx context.Context, userID int64) ([]userShowcaseItem, error) {

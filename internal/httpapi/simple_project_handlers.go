@@ -156,10 +156,11 @@ const simpleProjectCatalogFilter = `where project.project_type=$1
 	and (cardinality($11::text[])=0 or project.performance=any($11::text[]))
 	and (cardinality($12::text[])=0 or project.map_size=any($12::text[]))
 	and (cardinality($13::text[])=0 or exists(select 1 from simple_project_parent_refs parent
-		left join mods parent_mod on parent.target_type='mod' and parent_mod.id=parent.target_id
-		left join modpacks parent_pack on parent.target_type='modpack' and parent_pack.id=parent.target_id
-		left join simple_projects parent_project on parent.target_type=parent_project.project_type and parent_project.id=parent.target_id
-		where parent.project_id=project.id and parent.target_type||':'||coalesce(parent_mod.slug,parent_pack.slug,parent_project.slug,parent.raw_identifier)=any($13::text[])))
+		left join mods parent_mod on parent.target_type='mod' and parent_mod.id=parent.target_id and parent_mod.review_status='approved'
+		left join modpacks parent_pack on parent.target_type='modpack' and parent_pack.id=parent.target_id and parent_pack.review_status='approved'
+		left join simple_projects parent_project on parent.target_type=parent_project.project_type and parent_project.id=parent.target_id and parent_project.review_status='approved'
+		where parent.project_id=project.id and (parent.target_id is null or coalesce(parent_mod.id,parent_pack.id,parent_project.id) is not null)
+		and parent.target_type||':'||coalesce(parent_mod.slug,parent_pack.slug,parent_project.slug,parent.raw_identifier)=any($13::text[])))
 	and (cardinality($14::text[])=0 or project.official_status=any($14::text[]))
 	and (cardinality($15::text[])=0 or project.source_status=any($15::text[]))
 	and (cardinality($16::text[])=0 or project.license=any($16::text[]))
@@ -266,12 +267,17 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ossCfg := s.ossConfigFromSettings(r.Context())
+	iconURLs := make([]string, len(items))
 	for index := range items {
-		items[index].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, items[index].IconURL)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate project icon URL")
-			return
-		}
+		iconURLs[index] = items[index].IconURL
+	}
+	iconURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, iconURLs)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate project icon URL")
+		return
+	}
+	for index := range items {
+		items[index].IconURL = iconURLs[index]
 	}
 	writeBoundedCatalogJSON(w, map[string]any{"items": items, "total": total})
 }
@@ -299,12 +305,17 @@ func (s *Server) simpleProjectItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "failed to generate project icon URL")
 		return
 	}
+	parentIconURLs := make([]string, len(item.ParentProjects))
 	for index := range item.ParentProjects {
-		item.ParentProjects[index].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.ParentProjects[index].IconURL)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate parent project icon URL")
-			return
-		}
+		parentIconURLs[index] = item.ParentProjects[index].IconURL
+	}
+	parentIconURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, parentIconURLs)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate parent project icon URL")
+		return
+	}
+	for index := range item.ParentProjects {
+		item.ParentProjects[index].IconURL = parentIconURLs[index]
 	}
 	if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, item.Authors); err != nil {
 		writeError(w, http.StatusBadGateway, "failed to generate project author avatar URL")
@@ -374,12 +385,28 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 	if antiAbuseModerationRequired(r) {
 		reviewStatus = "pending"
 	}
+	ossCfg := s.ossConfigFromSettings(r.Context())
+	publicID, err := availableModUniqueID(r.Context(), s.db)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to allocate project ID")
+		return
+	}
+	if err = s.prepareImportedSimpleProjectAssets(r.Context(), &snapshot, publicID, claims.Subject); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// External mirroring reads settings and registers files through the pool.
+	// Keep slug allocation, parent checks and final live-file locks in the Tx.
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start project creation")
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if err = validateSimpleProjectParentsTx(r.Context(), tx, snapshot.ParentProjects); err != nil {
+		writeSimpleProjectParentValidationError(w, err)
+		return
+	}
 	if snapshot.SiteID == "" {
 		snapshot.SiteID, err = availableSimpleProjectSiteID(r.Context(), tx, projectType, defaultSimpleProjectLocalization(snapshot).Name)
 	} else {
@@ -393,13 +420,13 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 		}
 		return
 	}
-	publicID, err := availableModUniqueID(r.Context(), tx)
+	snapshot.IconURL, err = validateStoredProjectIconURL(r.Context(), tx, ossCfg, snapshot.IconURL, "", claims.Subject)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to allocate project ID")
-		return
-	}
-	if err = s.prepareImportedSimpleProjectAssets(r.Context(), &snapshot, publicID, claims.Subject); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errInvalidStoredProjectIcon) {
+			writeError(w, http.StatusBadRequest, "project icon must be an accessible, scanned raster image")
+		} else {
+			writeError(w, http.StatusServiceUnavailable, "project icon validation is unavailable")
+		}
 		return
 	}
 	localization := defaultSimpleProjectLocalization(snapshot)
@@ -519,12 +546,26 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 	if antiAbuseModerationRequired(r) {
 		status = "pending"
 	}
+	ossCfg := s.ossConfigFromSettings(r.Context())
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start project revision")
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if err = validateSimpleProjectParentsTx(r.Context(), tx, request.Snapshot.ParentProjects); err != nil {
+		writeSimpleProjectParentValidationError(w, err)
+		return
+	}
+	request.Snapshot.IconURL, err = validateStoredProjectIconURL(r.Context(), tx, ossCfg, request.Snapshot.IconURL, current.IconURL, claims.Subject)
+	if err != nil {
+		if errors.Is(err, errInvalidStoredProjectIcon) {
+			writeError(w, http.StatusBadRequest, "project icon must be an accessible, scanned raster image")
+		} else {
+			writeError(w, http.StatusServiceUnavailable, "project icon validation is unavailable")
+		}
+		return
+	}
 	if err = validateSimpleProjectGalleryTx(r.Context(), tx, current.ID, claims.Subject, request.Snapshot.GalleryImages); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -767,6 +808,37 @@ func defaultSimpleProjectLocalization(snapshot simpleProjectSnapshot) simpleProj
 	return simpleProjectLocalization{}
 }
 
+var errUnavailableSimpleProjectParent = errors.New("selected parent project is not published")
+
+func validateSimpleProjectParentsTx(ctx context.Context, tx pgx.Tx, parents []simpleProjectParent) error {
+	for _, parent := range parents {
+		if parent.PublicID == "" {
+			continue
+		}
+		var available bool
+		err := tx.QueryRow(ctx, `select exists(select 1 from public_routes route
+			left join mods mod on route.entity_type='mod' and mod.id=route.internal_id and mod.review_status='approved'
+			left join modpacks pack on route.entity_type='modpack' and pack.id=route.internal_id and pack.review_status='approved'
+			left join simple_projects project on project.project_type=route.entity_type and project.id=route.internal_id and project.review_status='approved'
+			where route.public_id=$1 and route.entity_type=$2 and coalesce(mod.id,pack.id,project.id) is not null)`, parent.PublicID, parent.Type).Scan(&available)
+		if err != nil {
+			return err
+		}
+		if !available {
+			return errUnavailableSimpleProjectParent
+		}
+	}
+	return nil
+}
+
+func writeSimpleProjectParentValidationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errUnavailableSimpleProjectParent) {
+		writeError(w, http.StatusBadRequest, "selected parent project is not published")
+	} else {
+		writeError(w, http.StatusServiceUnavailable, "parent project validation is unavailable")
+	}
+}
+
 func applySimpleProjectSnapshotTx(ctx context.Context, tx pgx.Tx, projectID, revisionID, actorID int64,
 	canManageAuthors, canManageTeams bool, snapshot simpleProjectSnapshot) error {
 	localization := defaultSimpleProjectLocalization(snapshot)
@@ -985,10 +1057,10 @@ func (s *Server) loadSimpleProjectCatalogAssociations(ctx context.Context, items
 			row_number() over(partition by ref.project_id order by ref.display_order,ref.id) position
 		from simple_project_parent_refs ref
 		left join public_routes route on route.entity_type=ref.target_type and route.internal_id=ref.target_id
-		left join mods mod on ref.target_type='mod' and mod.id=ref.target_id
-		left join modpacks modpack on ref.target_type='modpack' and modpack.id=ref.target_id
-		left join simple_projects target on target.project_type=ref.target_type and target.id=ref.target_id
-		where ref.project_id=any($1)
+		left join mods mod on ref.target_type='mod' and mod.id=ref.target_id and mod.review_status='approved'
+		left join modpacks modpack on ref.target_type='modpack' and modpack.id=ref.target_id and modpack.review_status='approved'
+		left join simple_projects target on target.project_type=ref.target_type and target.id=ref.target_id and target.review_status='approved'
+		where ref.project_id=any($1) and (ref.target_id is null or coalesce(mod.id,modpack.id,target.id) is not null)
 	) ranked where position<=3 order by project_id,position`, ids)
 	if err != nil {
 		return err
@@ -1119,10 +1191,10 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 		coalesce(mod.slug,modpack.slug,target.slug,''),coalesce(mod.primary_name,modpack.primary_name,target.primary_name,ref.raw_identifier),
 		coalesce(mod.icon_url,modpack.icon_url,target.icon_url,''),ref.target_id is null
 		from simple_project_parent_refs ref left join public_routes route on route.entity_type=ref.target_type and route.internal_id=ref.target_id
-		left join mods mod on ref.target_type='mod' and mod.id=ref.target_id
-		left join modpacks modpack on ref.target_type='modpack' and modpack.id=ref.target_id
-		left join simple_projects target on target.project_type=ref.target_type and target.id=ref.target_id
-		where ref.project_id=any($1) order by ref.project_id,ref.display_order,ref.id`, ids)
+		left join mods mod on ref.target_type='mod' and mod.id=ref.target_id and mod.review_status='approved'
+		left join modpacks modpack on ref.target_type='modpack' and modpack.id=ref.target_id and modpack.review_status='approved'
+		left join simple_projects target on target.project_type=ref.target_type and target.id=ref.target_id and target.review_status='approved'
+		where ref.project_id=any($1) and (ref.target_id is null or coalesce(mod.id,modpack.id,target.id) is not null) order by ref.project_id,ref.display_order,ref.id`, ids)
 	if err != nil {
 		return err
 	}

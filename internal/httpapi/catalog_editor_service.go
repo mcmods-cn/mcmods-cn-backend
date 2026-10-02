@@ -110,7 +110,7 @@ func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEd
 	if err != nil {
 		return result, err
 	}
-	reviewConfig := loadReviewConfig(r.Context(), s.db)
+	reviewConfig := loadReviewConfig(r.Context(), tx)
 	reviewRequired := catalogMutationReviewRequired(reviewConfig, snapshot.Operation)
 	if catalogMutationBypassesReview(claims) {
 		reviewRequired = false
@@ -371,34 +371,34 @@ func materializeCatalogImportLocalizationsTx(ctx context.Context, tx pgx.Tx, sna
 		err = tx.QueryRow(ctx, `select imported.names,resource.canonical_id from resource_import_snapshots imported
 			join catalog_import_revisions revision on revision.id=imported.revision_id
 			join game_resources resource on resource.entity_id=imported.resource_id
-			where imported.resource_id=$1 and revision.is_active and revision.status in ('ready','partial')
+			where imported.resource_id=$1 and revision.is_active and revision.status in ('ready','partial') and exists(select 1 from mods public_source where public_source.id=revision.mod_id and public_source.review_status='approved')
 			order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1`, snapshot.EntityID).
 			Scan(&raw, &fallbackName)
 	case "recipe_type":
 		err = tx.QueryRow(ctx, `select imported.title_names,type.canonical_id from recipe_type_import_snapshots imported
 			join catalog_import_revisions revision on revision.id=imported.revision_id
 			join recipe_types type on type.entity_id=imported.recipe_type_id
-			where imported.recipe_type_id=$1 and revision.is_active and revision.status in ('ready','partial')
+			where imported.recipe_type_id=$1 and revision.is_active and revision.status in ('ready','partial') and exists(select 1 from mods public_source where public_source.id=revision.mod_id and public_source.review_status='approved')
 			order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1`, snapshot.EntityID).
 			Scan(&raw, &fallbackName)
 	case "tag":
 		err = tx.QueryRow(ctx, `select '{}'::jsonb,tag.canonical_id from tag_import_snapshots imported
 			join catalog_import_revisions revision on revision.id=imported.revision_id
 			join catalog_tags tag on tag.entity_id=imported.tag_id
-			where imported.tag_id=$1 and revision.is_active and revision.status in ('ready','partial')
+			where imported.tag_id=$1 and revision.is_active and revision.status in ('ready','partial') and exists(select 1 from mods public_source where public_source.id=revision.mod_id and public_source.review_status='approved')
 			order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1`, snapshot.EntityID).
 			Scan(&raw, &fallbackName)
 	case "recipe_template":
 		err = tx.QueryRow(ctx, `select '{}'::jsonb,imported.source_template_id from recipe_template_import_snapshots imported
 			join catalog_import_revisions revision on revision.id=imported.revision_id
-			where imported.canonical_template_id=$1 and revision.is_active and revision.status in ('ready','partial')
+			where imported.canonical_template_id=$1 and revision.is_active and revision.status in ('ready','partial') and exists(select 1 from mods public_source where public_source.id=revision.mod_id and public_source.review_status='approved')
 			order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1`, snapshot.EntityID).
 			Scan(&raw, &fallbackName)
 	case "recipe":
 		err = tx.QueryRow(ctx, `select '{}'::jsonb,coalesce(nullif(recipe.canonical_source_id,''),imported.source_recipe_id,imported.source_recipe_key)
 			from recipe_import_snapshots imported join catalog_import_revisions revision on revision.id=imported.revision_id
 			join recipes recipe on recipe.entity_id=imported.recipe_id
-			where imported.recipe_id=$1 and revision.is_active and revision.status in ('ready','partial')
+			where imported.recipe_id=$1 and revision.is_active and revision.status in ('ready','partial') and exists(select 1 from mods public_source where public_source.id=revision.mod_id and public_source.review_status='approved')
 			order by coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc limit 1`, snapshot.EntityID).
 			Scan(&raw, &fallbackName)
 	default:

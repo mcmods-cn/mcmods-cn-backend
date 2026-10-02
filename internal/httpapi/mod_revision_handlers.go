@@ -95,17 +95,28 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	snapshot, err := json.Marshal(request.Snapshot)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to encode revision")
-		return
-	}
+	ossCfg := s.ossConfigFromSettings(r.Context())
+	reviewConfig := loadReviewConfig(r.Context(), s.db)
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start revision")
 		return
 	}
 	defer tx.Rollback(r.Context())
+	request.Snapshot.IconURL, err = validateStoredProjectIconURL(r.Context(), tx, ossCfg, request.Snapshot.IconURL, "", claims.Subject)
+	if errors.Is(err, errInvalidStoredProjectIcon) {
+		writeError(w, http.StatusBadRequest, errInvalidStoredProjectIcon.Error())
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to validate project icon")
+		return
+	}
+	snapshot, err := json.Marshal(request.Snapshot)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to encode revision")
+		return
+	}
 
 	var publishedRevisionID *int64
 	if err = tx.QueryRow(r.Context(), `select published_revision_id from mods where id=$1 for update`, identity.ID).Scan(&publishedRevisionID); err != nil {
@@ -136,7 +147,7 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status := "pending"
-	if !loadReviewConfig(r.Context(), s.db).ModEdit || canSkipProjectReview(claims, identity) {
+	if !reviewConfig.ModEdit || canSkipProjectReview(claims, identity) {
 		status = "approved"
 	}
 	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
@@ -194,7 +205,13 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to read revision")
 		return
 	}
-	writeJSON(w, http.StatusCreated, revision)
+	// Resolve on the transport copy; the immutable snapshot remains unchanged.
+	items := []modRevisionResponse{revision}
+	if err = s.resolveModRevisionIconURLs(r.Context(), items); err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate revision icon URL")
+		return
+	}
+	writeJSON(w, http.StatusCreated, items[0])
 }
 
 func (s *Server) modRevisionHistory(w http.ResponseWriter, r *http.Request) {
@@ -235,6 +252,7 @@ func (s *Server) modRevisionHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load revision history")
 		return
 	}
+	rows.Close()
 	hasMore := len(items) > request.Limit
 	if hasMore {
 		items = items[:request.Limit]
@@ -244,6 +262,10 @@ func (s *Server) modRevisionHistory(w http.ResponseWriter, r *http.Request) {
 		nextCursor = encodeModRevisionHistoryPageCursor(modRevisionHistoryPageCursor{
 			Version: modRevisionHistoryCursorVersion, Scope: request.Scope, RevisionNo: int64(items[len(items)-1].Version),
 		})
+	}
+	if err = s.resolveModRevisionIconURLs(r.Context(), items); err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate revision icon URL")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items, "limit": request.Limit, "hasMore": hasMore, "nextCursor": nextCursor,
@@ -279,6 +301,12 @@ func (s *Server) compareModRevisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	changes := revisionChanges(before.Snapshot, after.Snapshot)
+	items := []modRevisionResponse{before, after}
+	if err = s.resolveModRevisionIconURLs(r.Context(), items); err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate revision icon URL")
+		return
+	}
+	before, after = items[0], items[1]
 	writeJSON(w, http.StatusOK, modRevisionComparisonResponse{
 		Before: before, After: after, ChangedFields: topLevelChangedFields(changes), Changes: changes,
 	})
@@ -396,7 +424,30 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 		s.refreshProjectACLVersion(r.Context())) {
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
+	items := []modRevisionResponse{updated}
+	if err = s.resolveModRevisionIconURLs(r.Context(), items); err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate revision icon URL")
+		return
+	}
+	writeJSON(w, http.StatusOK, items[0])
+}
+
+// Resolve only HTTP response copies, after comparisons and transactions have
+// finished, so stored snapshots/hashes and semantic diffs retain stable URLs.
+func (s *Server) resolveModRevisionIconURLs(ctx context.Context, items []modRevisionResponse) error {
+	cfg := s.ossConfigFromSettings(ctx)
+	icons := make([]storedProjectRevisionIcon, len(items))
+	for i := range items {
+		icons[i] = storedProjectRevisionIcon{"mod", items[i].ModInternalID, items[i].ID, items[i].Snapshot.IconURL}
+	}
+	urls, err := s.resolveStoredProjectRevisionIconURLs(ctx, cfg, icons)
+	if err != nil {
+		return err
+	}
+	for i := range items {
+		items[i].Snapshot.IconURL = urls[i]
+	}
+	return nil
 }
 
 type modIdentityRecord struct {
@@ -548,7 +599,12 @@ func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID, relatio
 	if err = insertModCompatibilities(ctx, tx, modID, snapshot.Compatibilities); err != nil {
 		return err
 	}
-	return insertModRelationshipGroups(ctx, tx, modID, snapshot.RelationshipGroups)
+	if err = insertModRelationshipGroups(ctx, tx, modID, snapshot.RelationshipGroups); err != nil {
+		return err
+	}
+	// Approved source visibility and metadata participate in the public global
+	// catalog cache. Change its generation in the publication transaction.
+	return bumpCatalogDatasetVersionTx(ctx, tx)
 }
 
 func appendReviewResolutionTx(ctx context.Context, tx pgx.Tx, requestID int64, status string, actorID int64, note string, r *http.Request) error {

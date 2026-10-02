@@ -35,11 +35,16 @@ func (s *Server) userOverview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取用户主页概览失败")
 		return
 	}
+	balance, err := s.userAIDailyBalance(r.Context(), claims.Subject, claims)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load AI token balance")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"followers": followers,
 		"following": following,
 		"blocked":   blocked,
-		"aiBalance": s.userAIDailyBalance(r.Context(), claims.Subject, claims),
+		"aiBalance": balance,
 	})
 }
 
@@ -194,6 +199,19 @@ func (s *Server) followUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if err = lockUserRelationshipPairTx(r.Context(), tx, claims.Subject, targetID); err != nil {
+		writeError(w, http.StatusInternalServerError, "检查用户关系失败")
+		return
+	}
+	if err = tx.QueryRow(r.Context(), `select exists(select 1 from user_blocks
+		where (blocker_id=$1 and blocked_id=$2) or (blocker_id=$2 and blocked_id=$1))`, claims.Subject, targetID).Scan(&blocked); err != nil {
+		writeError(w, http.StatusInternalServerError, "检查用户关系失败")
+		return
+	}
+	if blocked {
+		writeError(w, http.StatusForbidden, "当前无法关注该用户")
+		return
+	}
 	tag, err := tx.Exec(
 		r.Context(),
 		`insert into user_follows (follower_id, followed_id)

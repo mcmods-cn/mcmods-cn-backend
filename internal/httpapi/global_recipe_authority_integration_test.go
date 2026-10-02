@@ -157,7 +157,7 @@ func openGlobalCatalogTestDB(t *testing.T) *pgxpool.Pool {
 
 func createGlobalRecipeAuthorityTestTables(t *testing.T, ctx context.Context, db *pgxpool.Pool) {
 	t.Helper()
-	if _, err := db.Exec(ctx, `create temp table mods(id bigint primary key,slug text not null);
+	if _, err := db.Exec(ctx, `create temp table mods(id bigint primary key,slug text not null,review_status text not null default 'approved');
 		create temp table catalog_entities(id bigint primary key,public_id text not null,status text not null,default_locale text not null);
 		create temp table content_revisions(id bigint primary key,public_id text not null);
 		create temp table catalog_import_revisions(
@@ -181,8 +181,10 @@ func createGlobalRecipeAuthorityTestTables(t *testing.T, ctx context.Context, db
 		create temp table recipe_binding_candidates(
 			binding_id bigint not null,candidate_index integer not null,resource_id bigint not null,amount numeric not null,
 			probability numeric,byproduct boolean not null,definition jsonb not null);
-		create temp table game_resources(entity_id bigint primary key,kind_code text not null,canonical_id text not null,namespace text not null);
-		create temp table content_localizations(catalog_entity_id bigint,locale text not null,name text not null);
+		create temp table game_resources(entity_id bigint primary key,kind_code text not null,canonical_id text not null,namespace text not null,owner_mod_id bigint,created_from_revision_id text);
+		create temp table mod_content_versions(id bigint primary key,mod_id bigint,status text);
+        create temp table mod_resource_version_details(resource_id bigint,version_id bigint,status text);
+        create temp table content_localizations(catalog_entity_id bigint,locale text not null,name text not null);
 		create temp table resource_import_snapshots(id text primary key,resource_id bigint not null,revision_id text not null,icon_path text not null);
 		create temp table oss_files(id bigint primary key,public_id text not null);
 		create temp table catalog_resource_definitions(resource_id bigint primary key,icon_file_id bigint);

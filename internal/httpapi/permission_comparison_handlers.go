@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 
 	"mcmods-cn-backend/internal/domain"
 	"mcmods-cn-backend/internal/security"
@@ -79,12 +82,12 @@ func (s *Server) comparePermissions(w http.ResponseWriter, r *http.Request) {
 	}
 	left, err := s.resolvePermissionComparisonSubject(r.Context(), currentClaims(r).Subject, request.Left)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writePermissionComparisonError(w, err)
 		return
 	}
 	right, err := s.resolvePermissionComparisonSubject(r.Context(), currentClaims(r).Subject, request.Right)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writePermissionComparisonError(w, err)
 		return
 	}
 	rows := mergePermissionComparisonRows(left.Permissions, right.Permissions)
@@ -93,6 +96,15 @@ func (s *Server) comparePermissions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"left": left, "right": right, "rows": rows})
+}
+
+func writePermissionComparisonError(w http.ResponseWriter, err error) {
+	var request *requestError
+	if errors.As(err, &request) {
+		writeError(w, http.StatusBadRequest, request.Error())
+		return
+	}
+	writeError(w, http.StatusServiceUnavailable, "读取权限组失败")
 }
 
 func (s *Server) attachPermissionComparisonMetadata(ctx context.Context, rows []permissionComparisonRow) error {
@@ -203,7 +215,10 @@ func (s *Server) resolvePermissionComparisonSubject(ctx context.Context, userID 
 	}
 	var name string
 	if err := s.db.QueryRow(ctx, `select coalesce(nullif(name, ''), code) from roles where code = $1 and status = 'active'`, selection.Code).Scan(&name); err != nil {
-		return permissionComparisonSubject{}, &requestError{message: "权限组不存在: " + selection.Code}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return permissionComparisonSubject{}, &requestError{message: "权限组不存在: " + selection.Code}
+		}
+		return permissionComparisonSubject{}, err
 	}
 	return permissionComparisonSubject{Kind: "role", Code: selection.Code, Name: name, Groups: []string{selection.Code}, Permissions: permissions}, nil
 }

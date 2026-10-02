@@ -211,13 +211,19 @@ func (s *Server) creators(w http.ResponseWriter, r *http.Request) {
 		nextCursor = creatorSQLPageCursor(request, pageRows[len(pageRows)-1])
 	}
 	items := make([]creatorSummary, 0, len(pageRows))
+	rows.Close()
 	ossCfg := s.ossConfigFromSettings(r.Context())
-	for _, row := range pageRows {
-		row.Summary.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, row.Summary.AvatarURL)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate creator avatar URL")
-			return
-		}
+	avatarURLs := make([]string, len(pageRows))
+	for index, row := range pageRows {
+		avatarURLs[index] = row.Summary.AvatarURL
+	}
+	avatarURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, avatarURLs)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate creator avatar URL")
+		return
+	}
+	for index, row := range pageRows {
+		row.Summary.AvatarURL = avatarURLs[index]
 		items = append(items, row.Summary)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -253,10 +259,18 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	var claimedUserID *int64
 	var currentClaimStatus string
-	_ = s.db.QueryRow(r.Context(), `select user_id from creator_claims where creator_id=$1 and status='approved'`, id).Scan(&claimedUserID)
+	err = s.db.QueryRow(r.Context(), `select user_id from creator_claims where creator_id=$1 and status='approved'`, id).Scan(&claimedUserID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to load creator claim")
+		return
+	}
 	if claims.Subject > 0 {
-		_ = s.db.QueryRow(r.Context(), `select status from creator_claims where creator_id=$1 and user_id=$2
+		err = s.db.QueryRow(r.Context(), `select status from creator_claims where creator_id=$1 and user_id=$2
 			order by created_at desc,id desc limit 1`, id, claims.Subject).Scan(&currentClaimStatus)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "failed to load creator claim status")
+			return
+		}
 	}
 	item.Claimed = claimedUserID != nil
 	item.AvatarURL, err = s.resolveStoredOSSObjectAccessURL(r.Context(), item.AvatarURL)
@@ -303,13 +317,16 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 	if claimedUserID != nil {
 		var userPublicID, username, avatarURL string
 		if scanErr := s.db.QueryRow(r.Context(), `select public_id,username,avatar_url from users where id=$1`, *claimedUserID).
-			Scan(&userPublicID, &username, &avatarURL); scanErr == nil {
-			avatarURL, _ = s.resolveStoredOSSObjectAccessURL(r.Context(), avatarURL)
-			claimedUser = map[string]any{
-				"id": userPublicID, "publicId": userPublicID, "username": username,
-				"avatarUrl": avatarURL,
-			}
+			Scan(&userPublicID, &username, &avatarURL); scanErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load claimed user")
+			return
 		}
+		avatarURL, err = s.resolveStoredOSSObjectAccessURL(r.Context(), avatarURL)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to generate claimed user avatar URL")
+			return
+		}
+		claimedUser = map[string]any{"id": userPublicID, "publicId": userPublicID, "username": username, "avatarUrl": avatarURL}
 	}
 	capabilities := resolveCreatorCapabilities(claims, item.Kind, publicID)
 	publishedRevisionPublicID, revisionErr := revisionPublicIDValue(r.Context(), s.db, publishedRevisionID)
@@ -436,7 +453,7 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		snapshot.AvatarFileID = currentAvatarFileID
 	}
 	status := "approved"
-	if creatorReviewRequired(loadReviewConfig(r.Context(), s.db), kind, "edit") &&
+	if creatorReviewRequired(loadReviewConfig(r.Context(), tx), kind, "edit") &&
 		!claimsAllow(claims, "admin.*") {
 		status = "pending"
 	}
@@ -666,8 +683,16 @@ func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "claim not found")
 		return
 	}
-	if err != nil || status != "pending" {
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load creator claim")
+		return
+	}
+	if status != "pending" {
 		writeError(w, http.StatusConflict, "claim cannot be reviewed")
+		return
+	}
+	if userID == claims.Subject {
+		writeAPIError(w, http.StatusForbidden, "CREATOR_CLAIM_INDEPENDENT_REVIEW_REQUIRED", "an author identity claim must be reviewed by another account", 0, nil)
 		return
 	}
 	if kind != "author" {
@@ -783,8 +808,18 @@ func (s *Server) creatorRoles(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to decode creator roles")
 			return
 		}
-		_ = json.Unmarshal(translationsRaw, &item.Translations)
+		if err = json.Unmarshal(translationsRaw, &item.Translations); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode creator role translations")
+			return
+		}
+		if item.Translations == nil {
+			item.Translations = map[string]any{}
+		}
 		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load creator roles")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }

@@ -68,7 +68,8 @@ func TestServerReviewSummaryUsesOneQueryAndLoadsLargeDetailOnDemandIntegration(t
 			primary key(server_mod_id,source)
 		);
 		create temporary table mods (
-			id bigint primary key,project_code text not null,primary_name text not null,slug text not null,icon_url text not null
+			id bigint primary key,project_code text not null,primary_name text not null,slug text not null,icon_url text not null,
+			review_status text not null default 'approved'
 		);
 		create temporary table mod_identifiers (
 			id bigint primary key,mod_id bigint not null,identifier text not null,is_primary boolean not null,display_order integer not null

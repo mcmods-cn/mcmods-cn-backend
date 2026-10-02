@@ -17,6 +17,7 @@ var (
 	findingIDPattern = `(?:BUG|SEC|PERF|DB|ARCH|REUSE|TEST|OPS|STYLE|MAP|LEGACY|DEAD)-[0-9]{3}`
 	findingIDRE      = regexp.MustCompile(`\b` + findingIDPattern + `\b`)
 	ledgerRowRE      = regexp.MustCompile(`^\|\s*(` + findingIDPattern + `)\s*\|`)
+	passingResultRE  = regexp.MustCompile(`^(?:PASS|通过)(?:$|[\s:：；;，,。.（(])`)
 	allowedStatuses  = map[string]bool{
 		"OPEN": true, "IN_PROGRESS": true, "FIXED_PENDING_VERIFICATION": true,
 		"CLOSED": true, "NOT_APPLICABLE": true, "BLOCKED_EXTERNAL": true,
@@ -169,7 +170,7 @@ func scanLedger(path string) (map[string]ledgerEntry, map[string][]int, []string
 			continue
 		}
 		parts := strings.Split(line, "|")
-		if len(parts) < 17 {
+		if len(parts) != 17 {
 			return entries, nil, []string{fmt.Sprintf("ledger line %d has %d columns; expected 15", lineNo, len(parts)-2)}
 		}
 		field := func(index int) string { return strings.TrimSpace(parts[index]) }
@@ -214,7 +215,7 @@ func validateFinalEntry(entry ledgerEntry, errs *[]string) {
 			*errs = append(*errs, fmt.Sprintf("%s is %s but %s is missing", entry.ID, entry.Status, name))
 		}
 	}
-	if !strings.Contains(strings.ToUpper(entry.Result), "PASS") && !strings.Contains(entry.Result, "通过") {
+	if !passingResultRE.MatchString(strings.ToUpper(strings.TrimSpace(entry.Result))) {
 		*errs = append(*errs, fmt.Sprintf("%s is %s but result does not state PASS/通过", entry.ID, entry.Status))
 	}
 }

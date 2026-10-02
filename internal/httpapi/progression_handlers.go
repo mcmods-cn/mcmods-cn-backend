@@ -596,12 +596,18 @@ func validateTaskCondition(condition map[string]any) error {
 }
 
 func (s *Server) validateTaskRewards(r *http.Request, rewards map[string]any) error {
+	if rewards == nil {
+		return errors.New("task rewards must be an object")
+	}
 	experience := int64Value(rewards["experience"])
 	if experience < 0 {
 		return errors.New("task experience reward cannot be negative")
 	}
 	rewards["experience"] = experience
-	rawCurrencies, _ := rewards["currencies"].(map[string]any)
+	rawCurrencies, object := rewards["currencies"].(map[string]any)
+	if rewards["currencies"] != nil && !object {
+		return errors.New("task currencies must be an object")
+	}
 	currencies, err := normalizeTaskCurrencyRewards(rawCurrencies)
 	if err != nil {
 		return err
@@ -655,8 +661,8 @@ func normalizeTaskCurrencyRewards(rawCurrencies map[string]any) (map[string]int6
 }
 
 func stringIn(value string, allowed ...string) bool {
-	index := sort.SearchStrings(appendSorted(allowed), value)
 	sorted := appendSorted(allowed)
+	index := sort.SearchStrings(sorted, value)
 	return index < len(sorted) && sorted[index] == value
 }
 

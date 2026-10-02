@@ -138,13 +138,16 @@ func TestCatalogReviewAndBypassPermissionsAreSeparated(t *testing.T) {
 
 func TestContentTranslationConcurrencyKeyTracksSourceAndActor(t *testing.T) {
 	source := catalogLocalizationPayload{Locale: "zh_cn", RevisionNo: 3}
-	first := contentTranslationConcurrencyKey(1, source, "ja", 11)
-	updated := contentTranslationConcurrencyKey(1, catalogLocalizationPayload{Locale: "zh-CN", RevisionNo: 4}, "ja", 11)
+	first := contentTranslationConcurrencyKey("mod", 1, source, "ja", 11)
+	updated := contentTranslationConcurrencyKey("mod", 1, catalogLocalizationPayload{Locale: "zh-CN", RevisionNo: 4}, "ja", 11)
+	if first == contentTranslationConcurrencyKey("blueprint", 1, source, "ja", 11) {
+		t.Fatal("independent subject sequences must not reuse another resource type's task")
+	}
 	if first == updated {
 		t.Fatal("a source revision change must create a new translation task key")
 	}
-	firstUser := contentTranslationConcurrencyKey(1, source, "pt-BR", 11)
-	secondUser := contentTranslationConcurrencyKey(1, source, "pt-BR", 12)
+	firstUser := contentTranslationConcurrencyKey("mod", 1, source, "pt-BR", 11)
+	secondUser := contentTranslationConcurrencyKey("mod", 1, source, "pt-BR", 12)
 	if firstUser == secondUser {
 		t.Fatal("quota-backed tasks must be scoped to the requesting user")
 	}

@@ -37,14 +37,20 @@ func TestCatalogRecipeBindingsUseOneQueryAtMaximumSlotScaleIntegration(t *testin
 		create temp table recipe_binding_candidates(
 			id bigint primary key,binding_id bigint not null,candidate_index integer not null,resource_id bigint not null,
 			amount numeric not null,probability numeric,byproduct boolean not null,definition jsonb not null);
-		create temp table game_resources(entity_id bigint primary key,kind_code text not null,canonical_id text not null,resolved boolean not null);
+		create temp table game_resources(entity_id bigint primary key,kind_code text not null,canonical_id text not null,resolved boolean not null,owner_mod_id bigint,created_from_revision_id text);
 		create temp table catalog_entities(id bigint primary key,public_id text not null);
 		create temp table catalog_resource_definitions(resource_id bigint primary key,icon_file_id bigint);
 		create temp table oss_files(id bigint primary key,public_id text not null,status text not null);
-		create temp table resource_import_snapshots(
+		create temp table mods(id bigint primary key,review_status text not null);
+        create temp table catalog_import_revisions(id text primary key,mod_id bigint,status text,is_active boolean);
+        create temp table mod_content_versions(id bigint primary key,mod_id bigint,status text);
+        create temp table mod_resource_version_details(resource_id bigint,version_id bigint,status text);
+        insert into mods values(1,'approved');
+        insert into catalog_import_revisions values('revision-1',1,'ready',true);
+        create temp table resource_import_snapshots(
 			id bigint primary key,resource_id bigint not null,revision_id text not null,icon_path text not null,created_at timestamptz not null);
 		insert into catalog_entities values(1,'resource1'),(2,'resource2');
-		insert into game_resources values(1,'minecraft.item','minecraft:stone',true),(2,'minecraft.item','unknown:raw',false);
+		insert into game_resources(entity_id,kind_code,canonical_id,resolved) values(1,'minecraft.item','minecraft:stone',true),(2,'minecraft.item','unknown:raw',false);
 		insert into oss_files values(1,'iconfile1','active');
 		insert into catalog_resource_definitions values(1,1);
 		insert into resource_import_snapshots values(1,1,'revision-1','icons/stone.png',now());

@@ -70,7 +70,7 @@ func (s *Server) modContentResourceHistory(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	identity, err := s.modIdentity(r.Context(), siteID)
+	identity, err := s.readableModIdentity(r.Context(), siteID, claims, "content.review")
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "mod not found")
 		return

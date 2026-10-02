@@ -118,12 +118,14 @@ func (s *Server) projectChangelogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	categories := make([]projectChangelogCategoryResponse, 0)
+	categoryPage := projectChangelogCategoryPage{}
 	if pageRequest.Cursor == nil {
-		categories, err = loadProjectChangelogCategories(r.Context(), s.db, target.RouteID, locale)
+		categoryPage, err = loadProjectChangelogCategoryPage(r.Context(), s.db, target, locale, "")
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load changelog categories")
 			return
 		}
+		categories = categoryPage.Categories
 	}
 	page, err := s.loadProjectChangelogs(r.Context(), target, locale, pageRequest)
 	if err != nil {
@@ -132,6 +134,7 @@ func (s *Server) projectChangelogs(w http.ResponseWriter, r *http.Request) {
 	}
 	writeBoundedCatalogJSON(w, map[string]any{
 		"target": target, "categories": categories, "items": page.Items, "limit": pageRequest.Limit,
+		"categoriesHasMore": categoryPage.HasMore, "categoriesNextCursor": categoryPage.NextCursor,
 		"hasMore": page.HasMore, "nextCursor": page.NextCursor,
 	})
 }
@@ -183,9 +186,13 @@ func (s *Server) projectChangelogItem(w http.ResponseWriter, r *http.Request) {
 	if requireReview {
 		status = "pending"
 	}
-	entryID := entryInternalIDTx(r.Context(), tx, publicID)
-	if entryID <= 0 {
+	entryID, err := entryInternalIDTx(r.Context(), tx, publicID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "changelog not found")
+		return
+	}
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "CHANGELOG_LOOKUP_FAILED", "failed to load changelog", 0, nil)
 		return
 	}
 	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
@@ -424,10 +431,10 @@ func canSkipChangelogReview(claims security.Claims, targetPublicID string) bool 
 		claimsAllow(claims, "project.no-review") || claimsAllow(claims, "project.no-review."+targetPublicID)
 }
 
-func entryInternalIDTx(ctx context.Context, query databaseQuery, publicID string) int64 {
+func entryInternalIDTx(ctx context.Context, query databaseQuery, publicID string) (int64, error) {
 	var id int64
-	_ = query.QueryRow(ctx, `select id from project_changelogs where public_id=$1`, publicID).Scan(&id)
-	return id
+	err := query.QueryRow(ctx, `select id from project_changelogs where public_id=$1`, publicID).Scan(&id)
+	return id, err
 }
 
 func projectChangelogCategoryID(ctx context.Context, query databaseQuery, publicID string, targetRouteID int64) (*int64, error) {
@@ -510,41 +517,6 @@ func recordApprovedChangelogManualOverrideTx(ctx context.Context, tx pgx.Tx, cha
 		  and binding.changelog_public_id=changelog.public_id and binding.source_managed and not binding.manual_override`,
 		changelogID, revisionID, projectChangelogAggregate)
 	return err
-}
-
-func loadProjectChangelogCategories(ctx context.Context, query interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}, targetRouteID int64, locale string) ([]projectChangelogCategoryResponse, error) {
-	rows, err := query.Query(ctx, `select category.public_id,category.default_locale,
-		coalesce(jsonb_object_agg(localization.locale,localization.name) filter(where localization.locale is not null),'{}'::jsonb)
-		from project_changelog_categories category
-		left join project_changelog_category_localizations localization on localization.category_id=category.id
-		where category.object_route_id=$1 group by category.id order by category.created_at,category.id
-		limit 101`, targetRouteID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := make([]projectChangelogCategoryResponse, 0)
-	for rows.Next() {
-		var item projectChangelogCategoryResponse
-		var raw []byte
-		if err = rows.Scan(&item.ID, &item.DefaultLocale, &raw); err != nil {
-			return nil, err
-		}
-		if err = json.Unmarshal(raw, &item.Names); err != nil || len(item.Names) > projectChangelogMaximumLocalizations {
-			return nil, errors.New("changelog category localization limit exceeded")
-		}
-		item.Name = localizedChangelogValue(item.Names, locale, item.DefaultLocale)
-		items = append(items, item)
-	}
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(items) > projectChangelogMaximumCategories {
-		return nil, errors.New("changelog category limit exceeded")
-	}
-	return items, nil
 }
 
 func localizedChangelogValue(values map[string]string, locale, fallback string) string {

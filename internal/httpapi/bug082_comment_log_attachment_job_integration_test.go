@@ -89,7 +89,8 @@ func TestCommentLogAttachmentJobsRollbackRetryAndRecoverIntegration(t *testing.T
 			id bigserial primary key,public_code text not null unique,owner_user_id bigint,source_type text not null,
 			source_file_id bigint,title text not null,original_name text not null,status text not null,
 			redaction_version integer not null,redaction_counts jsonb not null,expires_at timestamptz not null,
-			deleted_at timestamptz,created_at timestamptz not null default now(),unique(source_file_id,redaction_version)
+			deleted_at timestamptz,created_at timestamptz not null default now(),unique(source_file_id,redaction_version),
+			redaction_applied_version integer not null default 1
 		);
 		create temporary table log_share_entries(
 			id bigserial primary key,log_share_id bigint not null,entry_index integer not null,original_name text not null,

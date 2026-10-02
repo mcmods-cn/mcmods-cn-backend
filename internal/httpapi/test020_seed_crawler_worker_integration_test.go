@@ -246,7 +246,12 @@ func TestTEST020SeedCrawlerWorkerRetriesDegradesHonorsConcurrencyAndOwnsLeasesIn
 		t.Fatal(err)
 	}
 	if err = pool.QueryRow(ctx, `select count(*)::int from seed_crawler_runs where id=any($1) and status='completed'`, concurrentRunIDs).Scan(&attempts); err != nil || attempts != 3 {
-		t.Fatalf("concurrent completed runs=%d err=%v", attempts, err)
+		var diagnostics []byte
+		diagnosticErr := pool.QueryRow(ctx, `select coalesce(jsonb_agg(jsonb_build_object(
+			'id',id,'status',status,'attempts',attempts,'lastError',last_error,'stats',stats,
+			'hasOwner',lease_owner<>'','leaseExpiresAt',lease_expires_at) order by id),'[]'::jsonb)
+			from seed_crawler_runs where id=any($1)`, concurrentRunIDs).Scan(&diagnostics)
+		t.Fatalf("concurrent completed runs=%d err=%v state=%s diagnosticErr=%v", attempts, err, diagnostics, diagnosticErr)
 	}
 
 	if _, err = pool.Exec(ctx, `update seed_crawler_configs set max_concurrency=1`); err != nil {

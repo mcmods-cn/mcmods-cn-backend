@@ -220,13 +220,18 @@ func (worker *NotificationWorker) aggregateCommentWatchNotification(ctx context.
 			_, err = tx.Exec(ctx, `delete from notification_receipts where notification_id=$1 and user_id=$2`,
 				notificationID, event.RecipientID)
 		}
+		if err == nil {
+			_, err = tx.Exec(ctx, `delete from notification_translations where notification_id=$1`, notificationID)
+		}
 	}
 	if err != nil {
 		return err
 	}
 	if event.ActorID > 0 {
-		_, _ = tx.Exec(ctx, `insert into notification_actors(notification_id,actor_id)
-			values($1,$2) on conflict do nothing`, notificationID, event.ActorID)
+		if _, err = tx.Exec(ctx, `insert into notification_actors(notification_id,actor_id)
+			values($1,$2) on conflict do nothing`, notificationID, event.ActorID); err != nil {
+			return err
+		}
 	}
 	if err = tx.Commit(ctx); err == nil {
 		worker.cache.InvalidateUnread(ctx, event.RecipientID)
@@ -336,6 +341,9 @@ func (worker *NotificationWorker) aggregateFollowerNotification(ctx context.Cont
 	if _, err := tx.Exec(ctx, `update notifications set title=$2,body=$3,source_locale=$4,
 		template_key=$5,template_version=$6,template_params=$7::jsonb,updated_at=clock_timestamp() where id=$1`,
 		notificationID, rendered.Title, rendered.Body, rendered.Locale, rendered.Key, rendered.Version, string(params)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `delete from notification_translations where notification_id=$1`, notificationID); err != nil {
 		return err
 	}
 	if err := enqueueUserEmailTx(ctx, tx, event.RecipientID, rendered.Title, rendered.Body); err != nil {

@@ -10,8 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"image"
-	_ "image/png"
+	"image/png"
 	"io"
 	"mime"
 	"path"
@@ -697,10 +696,32 @@ func queueExportBinary(batch *modExportWriteBatch, revisionID, name string, data
 	return nil
 }
 
-func inspectExportPNG(cfg ossConfigPayload, revisionID, uniqueID, name string, data []byte, resolver catalogResourceIdentityResolver) (modExportPNGMedia, error) {
-	imageConfig, _, err := image.DecodeConfig(bytes.NewReader(data))
+// Decode one import image at a time across workers: a legal image can reach
+// the existing 100-million-pixel budget. Upload concurrency is independent.
+var exportPNGDecodeSlots = make(chan struct{}, 1)
+
+func inspectExportPNG(ctx context.Context, cfg ossConfigPayload, revisionID, uniqueID, name string, data []byte, resolver catalogResourceIdentityResolver) (modExportPNGMedia, error) {
+	imageConfig, err := png.DecodeConfig(bytes.NewReader(data))
 	if err != nil || imageConfig.Width <= 0 || imageConfig.Height <= 0 || int64(imageConfig.Width)*int64(imageConfig.Height) > 100_000_000 {
 		return modExportPNGMedia{}, fmt.Errorf("invalid or oversized PNG: %s", name)
+	}
+	if err = context.Cause(ctx); err != nil {
+		return modExportPNGMedia{}, err
+	}
+	select {
+	case exportPNGDecodeSlots <- struct{}{}:
+		defer func() { <-exportPNGDecodeSlots }()
+	case <-ctx.Done():
+		return modExportPNGMedia{}, context.Cause(ctx)
+	}
+	if err = context.Cause(ctx); err != nil {
+		return modExportPNGMedia{}, err
+	}
+	if _, err = png.Decode(bytes.NewReader(data)); err != nil {
+		return modExportPNGMedia{}, fmt.Errorf("invalid or truncated PNG: %s", name)
+	}
+	if err = context.Cause(ctx); err != nil {
+		return modExportPNGMedia{}, err
 	}
 	digest := sha256Hex(data)
 	return modExportPNGMedia{RevisionID: revisionID, AssetPath: name, ObjectKey: modExportResolvedMediaObjectKey(cfg.Prefix, uniqueID, revisionID, name, resolver), Digest: digest, ByteLength: int64(len(data)), Width: imageConfig.Width, Height: imageConfig.Height, Original: path.Base(name)}, nil

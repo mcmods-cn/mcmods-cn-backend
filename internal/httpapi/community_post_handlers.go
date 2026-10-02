@@ -321,7 +321,8 @@ func (s *Server) createCommunityPost(w http.ResponseWriter, r *http.Request) {
 		Metadata: map[string]any{"kind": snapshot.Kind, "title": snapshot.Title}, Request: r,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		logCommunityPostDataFailure("create_revision", publicID, err)
+		writeError(w, http.StatusInternalServerError, "failed to save community post revision")
 		return
 	}
 	if status == "approved" {
@@ -462,7 +463,8 @@ func (s *Server) updateCommunityPost(w http.ResponseWriter, r *http.Request, pub
 			writeError(w, http.StatusConflict, errReviewInProgress.Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		logCommunityPostDataFailure("update_revision", publicID, err)
+		writeError(w, http.StatusInternalServerError, "failed to save community post revision")
 		return
 	}
 	if status == "approved" {
@@ -917,7 +919,8 @@ func resolveCommunityPostReferences(ctx context.Context, tx pgx.Tx, claims secur
 	if len(resourcePublicIDs) > 0 {
 		rows, queryErr := tx.Query(ctx, `select entity.public_id,entity.id,resource.kind_code
 			from catalog_entities entity join game_resources resource on resource.entity_id=entity.id
-			where entity.public_id=any($1::text[]) and entity.status='active'`, resourcePublicIDs)
+			where entity.public_id=any($1::text[]) and entity.status='active' and entity.archived_at is null
+			and `+publicCatalogEntitySQL("entity", "resource"), resourcePublicIDs)
 		if queryErr != nil {
 			return errors.New("selected resource was not found")
 		}
@@ -1282,19 +1285,25 @@ func loadCommunityPostResourceReferencesWithQueryer(ctx context.Context, queryer
 	rows, err := queryer.Query(ctx, `select ref.post_id,coalesce(entity.public_id,''),ref.kind_code,ref.raw_resource_id,
 		coalesce(resource.canonical_id,ref.raw_resource_id),coalesce(detail.version_id,0),coalesce(version.public_id,''),
 		coalesce(detail.icon_file_id,0),coalesce(snapshot.revision_id,''),coalesce(snapshot.icon_path,''),
-		coalesce(localized.names,snapshot.names,'{}'::jsonb)
+		coalesce(localized.names,snapshot.names,'{}'::jsonb),ref.resource_id is not null
 		from community_post_resource_refs ref left join catalog_entities entity on entity.id=ref.resource_id
-		left join game_resources resource on resource.entity_id=ref.resource_id
+		 and entity.status='active' and entity.archived_at is null and `+publicCatalogEntitySQL("entity", "resource")+`
+		left join game_resources resource on resource.entity_id=entity.id
 		left join lateral (select value.version_id,coalesce(value.icon_small_file_id,value.icon_file_id) icon_file_id
-			from mod_resource_version_details value where value.resource_id=ref.resource_id and value.status='active'
+			from mod_resource_version_details value
+			join mod_content_versions public_version on public_version.id=value.version_id and public_version.status='active'
+			join mods public_mod on public_mod.id=public_version.mod_id and public_mod.review_status='approved'
+			where value.resource_id=entity.id and value.status='active'
 			order by value.updated_at desc limit 1) detail on true
 		left join mod_content_versions version on version.id=detail.version_id
 		left join lateral (select imported.revision_id,imported.icon_path,imported.names from resource_import_snapshots imported
 			join catalog_import_revisions import_revision on import_revision.id=imported.revision_id
-			where imported.resource_id=ref.resource_id order by (import_revision.target_version_id=detail.version_id) desc,
+			join mods public_mod on public_mod.id=import_revision.mod_id and public_mod.review_status='approved'
+			where imported.resource_id=entity.id and import_revision.is_active and import_revision.status in ('ready','partial')
+			order by (import_revision.target_version_id=detail.version_id) desc,
 			(imported.icon_path<>'') desc,imported.created_at desc limit 1) snapshot on true
 		left join lateral (select jsonb_object_agg(value.locale,value.name) names from content_localizations value
-			where value.catalog_entity_id=ref.resource_id and value.name<>'') localized on true
+			where value.catalog_entity_id=entity.id and value.name<>'') localized on true
 		where ref.post_id=any($1::bigint[]) order by ref.post_id,ref.display_order,ref.id`, postIDs)
 	if err != nil {
 		return nil, err
@@ -1305,14 +1314,16 @@ func loadCommunityPostResourceReferencesWithQueryer(ctx context.Context, queryer
 		var ref communityPostReference
 		var versionInternalID, iconFileID int64
 		var namesRaw []byte
+		var resolvedReference bool
 		if err = rows.Scan(&postID, &ref.PublicID, &ref.Kind, &ref.Identifier, &ref.Name, &versionInternalID, &ref.VersionID,
-			&iconFileID, &ref.RevisionID, &ref.IconPath, &namesRaw); err != nil {
+			&iconFileID, &ref.RevisionID, &ref.IconPath, &namesRaw, &resolvedReference); err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal(namesRaw, &ref.Names); err != nil {
 			return nil, fmt.Errorf("decode community resource names for post %d resource %q: %w", postID, ref.Identifier, err)
 		}
-		ref.Unresolved = ref.PublicID == ""
+		ref.Unavailable = resolvedReference && ref.PublicID == ""
+		ref.Unresolved = !resolvedReference
 		if iconFileID > 0 && ref.PublicID != "" && ref.VersionID != "" {
 			ref.IconURL = "/api/v1/catalog/resources/" + ref.PublicID + "/versions/" + ref.VersionID + "/assets/icon-small"
 		}

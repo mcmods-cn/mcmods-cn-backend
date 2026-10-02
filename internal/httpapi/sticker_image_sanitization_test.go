@@ -99,6 +99,23 @@ func TestSanitizeStickerImageRejectsDeclaredTypeMismatchAndTruncation(t *testing
 	}
 }
 
+func TestSanitizeStickerRejectsOversizedPNGHeaderBeforePixelDecode(t *testing.T) {
+	t.Parallel()
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, image.NewNRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	// Keep only a valid signature/IHDR. Its huge claimed canvas must be
+	// rejected by the configured budget before a decoder reads pixel chunks.
+	header := append([]byte(nil), encoded.Bytes()[:33]...)
+	binary.BigEndian.PutUint32(header[16:20], 1_000_000)
+	binary.BigEndian.PutUint32(header[29:33], crc32.ChecksumIEEE(header[12:29]))
+	_, _, _, err := sanitizeStickerImage(header, "image/png", normalizedStickerLimits(config.StickerConfig{}))
+	if err == nil || err.Error() != "sticker dimensions exceed the safety limit" {
+		t.Fatalf("oversized canvas reached pixel decoding: %v", err)
+	}
+}
+
 func TestOnlySanitizedStickerDerivativesArePublicInlineFiles(t *testing.T) {
 	t.Parallel()
 	if isPublicInlineOSSFileSource("sticker") || isPublicInlineOSSFileSource("sticker-upload") {

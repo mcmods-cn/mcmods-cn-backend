@@ -28,24 +28,28 @@ func TestBlueprintMaterialRevisionLookupStaysNamespaceScopedAtScaleIntegration(t
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if _, err = pool.Exec(ctx, `create temporary table catalog_import_revisions(
+	if _, err = pool.Exec(ctx, `create temporary table mods(id bigint primary key,review_status text not null);
+		insert into mods values(1,'approved'),(2,'pending');
+		create temporary table catalog_import_revisions(
 		id text primary key,source_namespace text not null,status text not null,is_active boolean not null,
-		activated_at timestamptz,created_at timestamptz not null);
+		activated_at timestamptz,created_at timestamptz not null,mod_id bigint not null default 1 references mods(id));
 		create index idx_catalog_import_revisions_material_namespace
 		 on catalog_import_revisions(source_namespace,coalesce(activated_at,created_at) desc,id desc)
 		 where is_active and status in ('ready','partial')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = pool.Exec(ctx, `insert into catalog_import_revisions
+	if _, err = pool.Exec(ctx, `insert into catalog_import_revisions(id,source_namespace,status,is_active,activated_at,created_at)
 		select 'noise-'||value,'noise_'||lpad(value::text,8,'0'),'ready',true,null,
 			timestamptz '2025-01-01 00:00:00+00'+value*interval '1 second'
 		from generate_series(1,100000) value;
-		insert into catalog_import_revisions values
+		insert into catalog_import_revisions(id,source_namespace,status,is_active,activated_at,created_at) values
 			('alpha-old','used_alpha','ready',true,null,'2026-01-01 00:00:00+00'),
 			('alpha-new','used_alpha','partial',true,'2026-02-01 00:00:00+00','2026-01-01 00:00:00+00'),
 			('alpha-inactive','used_alpha','ready',false,'2026-03-01 00:00:00+00','2026-01-01 00:00:00+00'),
 			('beta-new','used_beta','ready',true,null,'2026-02-02 00:00:00+00'),
-			('beta-rejected','used_beta','rejected',true,'2026-03-02 00:00:00+00','2026-01-01 00:00:00+00')`); err != nil {
+			('beta-rejected','used_beta','rejected',true,'2026-03-02 00:00:00+00','2026-01-01 00:00:00+00');
+		insert into catalog_import_revisions(id,source_namespace,status,is_active,activated_at,created_at,mod_id) values
+		 ('alpha-private','used_alpha','ready',true,'2026-04-01 00:00:00+00','2026-04-01 00:00:00+00',2)`); err != nil {
 		t.Fatal(err)
 	}
 	namespaces := []string{"used_alpha", "used_alpha", "used_beta"}
@@ -105,7 +109,7 @@ func TestBlueprintMaterialRevisionLookupStaysNamespaceScopedAtScaleIntegration(t
 		t.Logf("%d-row namespace lookup: %s\n%s", scale, duration, planText)
 	}
 	check(100_000)
-	if _, err = pool.Exec(ctx, `insert into catalog_import_revisions
+	if _, err = pool.Exec(ctx, `insert into catalog_import_revisions(id,source_namespace,status,is_active,activated_at,created_at)
 		select 'noise-'||value,'noise_'||lpad(value::text,8,'0'),'ready',true,null,
 			timestamptz '2025-01-01 00:00:00+00'+value*interval '1 second'
 		from generate_series(100001,1000000) value`); err != nil {

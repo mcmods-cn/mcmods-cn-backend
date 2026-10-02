@@ -34,7 +34,8 @@ func TestDeletedCommentDetachesAttachmentsAtomicallyAndPreservesLogShareIntegrat
 		create temporary table mod_content_versions(id bigint primary key,mod_id bigint not null);
 		create temporary table community_posts(id bigint primary key,author_id bigint not null,kind text not null,accepted_comment_id bigint);
 		create temporary table log_shares(
-			id bigint primary key,public_code text not null,status text not null,expires_at timestamptz not null
+			id bigint primary key,public_code text not null,status text not null,expires_at timestamptz not null,
+			redaction_applied_version integer not null default 1
 		);
 		create temporary table comment_attachments(
 			comment_id bigint not null,attachment_file_id bigint not null,kind text not null default 'file',
@@ -105,10 +106,11 @@ func TestDeletedCommentSerializationNeverReturnsAttachmentMetadataIntegration(t 
 			processing_status text not null,created_at timestamptz not null default now()
 		);
 		create temporary table comment_log_bindings(comment_id bigint,attachment_file_id bigint,log_share_id bigint);
-		create temporary table log_shares(id bigint primary key,public_code text,status text,expires_at timestamptz);
+		create temporary table log_shares(id bigint primary key,public_code text,status text,expires_at timestamptz,
+			redaction_applied_version integer not null default 1);
 		insert into oss_files values(841,'b083file','latest.log','latest.log','text/plain',4096,'active','clean');
 		insert into comment_attachments(comment_id,attachment_file_id,kind,processing_status) values(840,841,'log','ready');
-		insert into log_shares values(842,'b083leak','ready',now()+interval '1 day');
+		insert into log_shares(id,public_code,status,expires_at) values(842,'b083leak','ready',now()+interval '1 day');
 		insert into comment_log_bindings values(840,841,842);
 	`); err != nil {
 		t.Fatal(err)

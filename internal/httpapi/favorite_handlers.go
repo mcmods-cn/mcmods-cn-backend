@@ -325,13 +325,14 @@ func (s *Server) deleteFavoriteCollection(w http.ResponseWriter, r *http.Request
 		return
 	}
 	claims := currentClaims(r)
-	tx, err := s.db.Begin(r.Context())
+	membershipTx, err := s.beginFavoriteMembershipTx(r.Context(), claims.Subject)
 	if err != nil {
 		logFavoriteCollectionWriteFailure("delete", publicID, claims.Subject, err)
 		writeError(w, http.StatusInternalServerError, "failed to delete favorite collection")
 		return
 	}
-	defer tx.Rollback(r.Context())
+	defer membershipTx.close()
+	tx := membershipTx.tx
 	var collectionID int64
 	err = tx.QueryRow(r.Context(), `select id from favorite_collections
 		where public_id=$1 and user_id=$2 and not is_default for update`, publicID, claims.Subject).Scan(&collectionID)
@@ -348,6 +349,13 @@ func (s *Server) deleteFavoriteCollection(w http.ResponseWriter, r *http.Request
 		error_code='SOURCE_COLLECTION_DELETED',error_detail='source favorite collection was deleted',finished_at=now(),
 		lease_token='',lease_expires_at=null,updated_at=now()
 		where collection_id=$1 and status in ('pending','processing')`, collectionID); err != nil {
+		logFavoriteCollectionWriteFailure("delete", publicID, claims.Subject, err)
+		writeError(w, http.StatusInternalServerError, "failed to delete favorite collection")
+		return
+	}
+	// Remove children while the parent still identifies their owner. The
+	// popularity trigger needs that identity for first/last membership facts.
+	if _, err = tx.Exec(r.Context(), `delete from favorite_collection_items where collection_id=$1`, collectionID); err != nil {
 		logFavoriteCollectionWriteFailure("delete", publicID, claims.Subject, err)
 		writeError(w, http.StatusInternalServerError, "failed to delete favorite collection")
 		return
@@ -412,7 +420,7 @@ func (s *Server) patchFavoriteMembership(w http.ResponseWriter, r *http.Request)
 	}
 	defer membershipTx.close()
 	tx := membershipTx.tx
-	target, err := resolveFavoriteTargetWithQueryer(r.Context(), tx, request.EntityType, request.EntityPublicID, claims)
+	target, err := resolveFavoriteMutationTargetWithQueryer(r.Context(), tx, request.EntityType, request.EntityPublicID, claims, len(request.AddCollectionIDs) == 0)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "favorite target does not exist or is not visible")
 		return
@@ -439,18 +447,18 @@ func (s *Server) patchFavoriteMembership(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to reserve favorite quota")
 		return
 	}
-	if len(request.RemoveCollectionIDs) > 0 {
+	for _, collectionID := range request.RemoveCollectionIDs {
 		if _, err = tx.Exec(r.Context(), `delete from favorite_collection_items item using favorite_collections collection
-			where item.collection_id=collection.id and collection.user_id=$1 and collection.public_id=any($2::text[])
-			  and item.entity_type=$3 and item.entity_id=$4`, claims.Subject, request.RemoveCollectionIDs, target.Type, target.InternalID); err != nil {
+			where item.collection_id=collection.id and collection.user_id=$1 and collection.public_id=$2
+			  and item.entity_type=$3 and item.entity_id=$4`, claims.Subject, collectionID, target.Type, target.InternalID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to save favorites")
 			return
 		}
 	}
-	if len(request.AddCollectionIDs) > 0 {
+	for _, collectionID := range request.AddCollectionIDs {
 		if _, err = tx.Exec(r.Context(), `insert into favorite_collection_items(collection_id,entity_type,entity_id)
-			select id,$3,$4 from favorite_collections where user_id=$1 and public_id=any($2::text[])
-			on conflict do nothing`, claims.Subject, request.AddCollectionIDs, target.Type, target.InternalID); err != nil {
+			select id,$3,$4 from favorite_collections where user_id=$1 and public_id=$2
+			on conflict do nothing`, claims.Subject, collectionID, target.Type, target.InternalID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to save favorites")
 			return
 		}
@@ -501,7 +509,7 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 	}
 	defer membershipTx.close()
 	tx := membershipTx.tx
-	target, err := resolveFavoriteTargetWithQueryer(r.Context(), tx, request.EntityType, request.EntityPublicID, claims)
+	target, err := resolveFavoriteMutationTargetWithQueryer(r.Context(), tx, request.EntityType, request.EntityPublicID, claims, len(request.CollectionIDs) == 0)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "favorite target does not exist or is not visible")
 		return
@@ -534,17 +542,36 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to reserve favorite quota")
 		return
 	}
-	if _, err = tx.Exec(r.Context(), `delete from favorite_collection_items item using favorite_collections collection
-		where item.collection_id=collection.id and collection.user_id=$1
-		  and item.entity_type=$2 and item.entity_id=$3`, userID, target.Type, target.InternalID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save favorites")
+	existingIDs, err := favoriteMembershipCollectionIDsTx(r.Context(), tx, userID, target.Type, target.InternalID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read favorites")
 		return
 	}
-	if len(request.CollectionIDs) > 0 {
+	desired := make(map[string]bool, len(request.CollectionIDs))
+	for _, id := range request.CollectionIDs {
+		desired[id] = true
+	}
+	existing := make(map[string]bool, len(existingIDs))
+	for _, id := range existingIDs {
+		existing[id] = true
+		if desired[id] {
+			continue
+		}
+		if _, err = tx.Exec(r.Context(), `delete from favorite_collection_items item using favorite_collections collection
+			where item.collection_id=collection.id and collection.user_id=$1 and collection.public_id=$2
+			  and item.entity_type=$3 and item.entity_id=$4`, userID, id, target.Type, target.InternalID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save favorites")
+			return
+		}
+	}
+	for _, id := range request.CollectionIDs {
+		if existing[id] {
+			continue
+		}
 		tag, insertErr := tx.Exec(r.Context(), `insert into favorite_collection_items(collection_id,entity_type,entity_id)
-			select id,$3,$4 from favorite_collections where user_id=$1 and public_id=any($2::text[])
-			on conflict do nothing`, userID, request.CollectionIDs, target.Type, target.InternalID)
-		if insertErr != nil || tag.RowsAffected() != int64(len(request.CollectionIDs)) {
+			select id,$3,$4 from favorite_collections where user_id=$1 and public_id=$2
+			on conflict do nothing`, userID, id, target.Type, target.InternalID)
+		if insertErr != nil || tag.RowsAffected() != 1 {
 			writeError(w, http.StatusInternalServerError, "failed to save favorites")
 			return
 		}
@@ -554,6 +581,28 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"saved": true, "collectionIds": request.CollectionIDs})
+}
+
+// Membership writes are serialized for the user. Apply one collection change
+// per statement so AFTER-row popularity triggers observe each transition.
+func favoriteMembershipCollectionIDsTx(ctx context.Context, tx pgx.Tx, userID int64, entityType string, entityID int64) ([]string, error) {
+	rows, err := tx.Query(ctx, `select collection.public_id from favorite_collection_items item
+		join favorite_collections collection on collection.id=item.collection_id
+		where collection.user_id=$1 and item.entity_type=$2 and item.entity_id=$3
+		order by collection.public_id`, userID, entityType, entityID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (s *Server) favoriteCollectionItems(w http.ResponseWriter, r *http.Request) {
@@ -600,23 +649,19 @@ func (s *Server) writeFavoriteCollectionItems(w http.ResponseWriter, r *http.Req
 	}
 	items := make([]favoriteCollectionItem, 0, len(pageRows))
 	ossCfg := s.ossConfigFromSettings(r.Context())
+	iconURLs := make([]string, 0, len(pageRows)*3)
+	for i := range pageRows {
+		row := &pageRows[i].Item
+		iconURLs = append(iconURLs, row.iconURL, row.blueprintIconURL, row.modpackIconURL)
+	}
+	iconURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, iconURLs)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate favorite icon URL")
+		return
+	}
 	for index := range pageRows {
 		row := &pageRows[index].Item
-		row.iconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, row.iconURL)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate favorite icon URL")
-			return
-		}
-		row.blueprintIconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, row.blueprintIconURL)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate favorite icon URL")
-			return
-		}
-		row.modpackIconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, row.modpackIconURL)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate favorite icon URL")
-			return
-		}
+		row.iconURL, row.blueprintIconURL, row.modpackIconURL = iconURLs[index*3], iconURLs[index*3+1], iconURLs[index*3+2]
 		metadata := map[string]any{}
 		switch row.entityType {
 		case "mod":
@@ -660,4 +705,28 @@ func resolveFavoriteTargetWithQueryer(ctx context.Context, queryer followProject
 		return followProjectTarget{}, err
 	}
 	return target, nil
+}
+
+// Removing one's own membership must remain possible after its target becomes
+// hidden. The fallback reveals no target metadata and cannot authorize adding
+// a hidden target to another collection.
+func resolveFavoriteMutationTargetWithQueryer(ctx context.Context, queryer followProjectQueryer, entityType, publicID string, claims security.Claims, removalOnly bool) (followProjectTarget, error) {
+	target, err := resolveFavoriteTargetWithQueryer(ctx, queryer, entityType, publicID, claims)
+	if !removalOnly || !errors.Is(err, pgx.ErrNoRows) || claims.Subject <= 0 {
+		return target, err
+	}
+	entityType = strings.ToLower(strings.TrimSpace(entityType))
+	publicID = strings.ToLower(strings.TrimSpace(publicID))
+	if _, ok := favoriteTargetTypes[entityType]; !ok || !validCatalogPublicID(publicID) {
+		return followProjectTarget{}, pgx.ErrNoRows
+	}
+	target = followProjectTarget{}
+	err = queryer.QueryRow(ctx, `select route.internal_id,route.entity_type
+		from public_routes route
+		where route.public_id=$1 and route.entity_type=$2 and exists(
+			select 1 from favorite_collection_items item
+			join favorite_collections collection on collection.id=item.collection_id
+			where collection.user_id=$3 and item.entity_type=route.entity_type and item.entity_id=route.internal_id
+		)`, publicID, entityType, claims.Subject).Scan(&target.InternalID, &target.Type)
+	return target, err
 }

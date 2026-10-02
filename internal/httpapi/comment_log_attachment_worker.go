@@ -220,6 +220,23 @@ func commentLogAttachmentRetryDelay(attempts int) time.Duration {
 }
 
 func (worker *CommentLogAttachmentWorker) recoverDueJobs(ctx context.Context) (int, error) {
+	// A worker can crash after claiming the final attempt. These expired leases
+	// cannot be claimed again, but must still leave processing and expose a
+	// terminal failure to the UI.
+	if _, err := worker.db.Exec(ctx, `with expired as materialized (
+		select id from comment_log_attachment_jobs
+		where status='processing' and attempts>=max_attempts and coalesce(lease_expires_at,updated_at)<=now()
+		order by coalesce(lease_expires_at,updated_at),id for update skip locked limit $1
+	), failed as (
+		update comment_log_attachment_jobs job set status='failed',lease_expires_at=null,locked_by='',
+		last_error='worker lease expired after the final attempt',finished_at=now(),updated_at=now()
+		from expired where job.id=expired.id
+		returning job.comment_id,job.attachment_file_id
+	)
+	update comment_attachments attachment set kind='log',processing_status='failed'
+	from failed where attachment.comment_id=failed.comment_id and attachment.attachment_file_id=failed.attachment_file_id`, commentLogAttachmentRecoveryBatch); err != nil {
+		return 0, err
+	}
 	rows, err := worker.db.Query(ctx, `select id from comment_log_attachment_jobs
 		where (status='queued' and next_attempt_at<=now() and attempts<max_attempts)
 		   or (status='processing' and coalesce(lease_expires_at,updated_at)<=now() and attempts<max_attempts)

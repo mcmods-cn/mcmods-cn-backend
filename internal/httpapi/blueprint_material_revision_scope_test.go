@@ -15,8 +15,12 @@ func TestBlueprintMaterialRevisionsAreLimitedToUsedNamespaces(t *testing.T) {
 	if !strings.Contains(handler, "source_namespace=any($1::text[])") {
 		t.Fatal("blueprint material revision lookup is not limited to the blueprint's namespace array")
 	}
-	if !strings.Contains(handler, "order by source_namespace,coalesce(activated_at,created_at) desc,id desc") {
+	if !strings.Contains(handler, "order by revision.source_namespace,coalesce(revision.activated_at,revision.created_at) desc,revision.id desc") {
 		t.Fatal("blueprint material revision lookup has no deterministic latest-revision order")
+	}
+
+	if !strings.Contains(handler, "public_source.review_status='approved'") {
+		t.Fatal("blueprint material revision lookup admits unpublished source projects")
 	}
 
 	migrationBytes, err := os.ReadFile("../database/migrations.go")

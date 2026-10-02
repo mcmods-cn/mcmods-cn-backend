@@ -143,12 +143,16 @@ func (s *Server) reportEvidenceAccess(w http.ResponseWriter, r *http.Request) {
 	err := s.db.QueryRow(r.Context(), `select evidence.object_key,evidence.status,evidence.scan_status,evidence.uploader_id,report.reporter_id
 		from report_evidence evidence left join reports report on report.id=evidence.report_id where evidence.public_id=$1`, publicID).
 		Scan(&objectKey, &status, &scanStatus, &uploaderID, &reporterID)
-	if errors.Is(err, pgx.ErrNoRows) || status == "deleted" || scanStatus != "clean" {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "举报附件不存在或尚不可用")
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取举报附件失败")
+		return
+	}
+	if status == "deleted" || scanStatus != "clean" {
+		writeError(w, http.StatusNotFound, "举报附件不存在或尚不可用")
 		return
 	}
 	isOwner := uploaderID == claims.Subject || reporterID != nil && *reporterID == claims.Subject
@@ -831,8 +835,13 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if _, err = tx.Exec(r.Context(), `insert into report_reviews(report_id,reviewer_id,conclusion,note,idempotency_key) values($1,$2,$3,$4,$5) on conflict(report_id,idempotency_key) do nothing`, reportID, claims.Subject, request.Conclusion, strings.TrimSpace(request.Note), request.IdempotencyKey); err != nil {
+	reviewTag, err := tx.Exec(r.Context(), `insert into report_reviews(report_id,reviewer_id,conclusion,note,idempotency_key) values($1,$2,$3,$4,$5) on conflict(report_id,idempotency_key) do nothing`, reportID, claims.Subject, request.Conclusion, strings.TrimSpace(request.Note), request.IdempotencyKey)
+	if err != nil {
 		writeError(w, 500, "保存审核结论失败")
+		return
+	}
+	if reviewTag.RowsAffected() != 1 {
+		writeError(w, http.StatusConflict, "该幂等键已用于此前的审核操作")
 		return
 	}
 	if request.DeleteTarget {
@@ -929,13 +938,23 @@ func (s *Server) reopenUnifiedReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "举报尚未完成或已重新打开")
 		return
 	}
+	var conflict *pgconn.PgError
+	if errors.As(err, &conflict) && conflict.Code == "23505" && conflict.ConstraintName == "uq_reports_open_reporter_target" {
+		writeError(w, http.StatusConflict, "同一目标已有待处理举报，无法重新打开")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "重新打开举报失败")
 		return
 	}
-	if _, err = tx.Exec(r.Context(), `insert into report_reviews(report_id,reviewer_id,conclusion,note,idempotency_key)
-		values($1,$2,'reopened',$3,$4) on conflict(report_id,idempotency_key) do nothing`, reportID, currentClaims(r).Subject, strings.TrimSpace(request.Reason), strings.TrimSpace(request.IdempotencyKey)); err != nil {
+	reviewTag, err := tx.Exec(r.Context(), `insert into report_reviews(report_id,reviewer_id,conclusion,note,idempotency_key)
+		values($1,$2,'reopened',$3,$4) on conflict(report_id,idempotency_key) do nothing`, reportID, currentClaims(r).Subject, strings.TrimSpace(request.Reason), strings.TrimSpace(request.IdempotencyKey))
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "记录重新打开操作失败")
+		return
+	}
+	if reviewTag.RowsAffected() != 1 {
+		writeError(w, http.StatusConflict, "该幂等键已用于此前的审核操作")
 		return
 	}
 	// Only cancel deletion that has not yet been claimed. Evidence already
@@ -960,7 +979,10 @@ func (s *Server) moderationHideTarget(ctx context.Context, tx pgx.Tx, targetType
 	case "user":
 		return errors.New("用户主页不能作为内容删除；请使用封禁动作")
 	case "mod":
-		return expectModerationUpdate(tx.Exec(ctx, `update mods set review_status='rejected',updated_at=now() where project_code=$1 and review_status<>'rejected'`, publicID))
+		if err := expectModerationUpdate(tx.Exec(ctx, `update mods set review_status='rejected',updated_at=now() where project_code=$1 and review_status<>'rejected'`, publicID)); err != nil {
+			return err
+		}
+		return bumpCatalogDatasetVersionTx(ctx, tx)
 	case "modpack":
 		return expectModerationUpdate(tx.Exec(ctx, `update modpacks set review_status='rejected',updated_at=now() where public_id=$1 and review_status<>'rejected'`, publicID))
 	case "plugin", "map", "shader", "resource_pack", "datapack", "addon":

@@ -48,10 +48,11 @@ const blueprintGlobalActiveConversionCountSQL = `select count(*) from (
 	limit $1
 ) active`
 
-const blueprintMaterialRevisionSQL = `select distinct on(source_namespace) source_namespace,id::text
-	from catalog_import_revisions
-	where source_namespace=any($1::text[]) and is_active and status in ('ready','partial')
-	order by source_namespace,coalesce(activated_at,created_at) desc,id desc`
+const blueprintMaterialRevisionSQL = `select distinct on(revision.source_namespace) revision.source_namespace,revision.id::text
+	from catalog_import_revisions revision join mods public_source on public_source.id=revision.mod_id
+	where revision.source_namespace=any($1::text[]) and revision.is_active and revision.status in ('ready','partial')
+	and public_source.review_status='approved'
+	order by revision.source_namespace,coalesce(revision.activated_at,revision.created_at) desc,revision.id desc`
 
 func logBlueprintReadFailure(publicID, stage string, err error) {
 	slog.Error("load blueprint data", "module", "blueprint", "public_id", publicID, "stage", stage, "error", err)
@@ -375,6 +376,17 @@ func (s *Server) completeBlueprintUpload(ctx context.Context, fileID, ownerID in
 	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
 		return nil, err
 	}
+	// Upload completion may have waited behind another transaction. Re-read and
+	// lock its lifecycle state before binding the file or enqueueing work.
+	if err = tx.QueryRow(ctx, `select status from blueprints where id=$1 and owner_id=$2 for update`, blueprintID, ownerID).Scan(&status); err != nil {
+		return nil, err
+	}
+	if status == "queued" {
+		return map[string]any{"id": publicID, "status": status}, tx.Commit(ctx)
+	}
+	if status != "uploading" && status != "failed" {
+		return nil, errBlueprintNotFound
+	}
 	var existingPublicID, existingStatus string
 	existingErr := tx.QueryRow(ctx, `select public_id,status from blueprints
 		where owner_id=$1 and original_file_id=$2 and status<>'deleted' and id<>$3
@@ -440,7 +452,7 @@ func (s *Server) blueprints(w http.ResponseWriter, r *http.Request) {
 		queryArg := len(args)
 		where = append(where, fmt.Sprintf(`(b.title ilike $%[1]d or b.description_markdown ilike $%[1]d or b.public_id ilike $%[1]d
 			or exists (
-				select 1 from blueprint_mods blueprint_mod join mods mod on mod.id=blueprint_mod.mod_id
+				select 1 from blueprint_mods blueprint_mod join mods mod on mod.id=blueprint_mod.mod_id and mod.review_status='approved'
 				where blueprint_mod.blueprint_id=b.id and (
 					blueprint_mod.source_namespace ilike $%[1]d or mod.slug ilike $%[1]d or mod.project_code ilike $%[1]d or mod.primary_name ilike $%[1]d
 					or mod.secondary_name ilike $%[1]d or mod.abbreviation ilike $%[1]d
@@ -503,12 +515,17 @@ func (s *Server) blueprints(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]map[string]any, 0, len(listRows))
 	ossCfg := s.ossConfigFromSettings(r.Context())
-	for _, item := range listRows {
-		item.Avatar, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.Avatar)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate blueprint uploader avatar URL")
-			return
-		}
+	avatarURLs := make([]string, len(listRows))
+	for index, item := range listRows {
+		avatarURLs[index] = item.Avatar
+	}
+	avatarURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, avatarURLs)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate blueprint uploader avatar URL")
+		return
+	}
+	for index, item := range listRows {
+		item.Avatar = avatarURLs[index]
 		items = append(items, map[string]any{"id": item.PublicID, "title": item.Title, "description": item.Description, "sourceFormat": item.Format, "status": item.Status,
 			"size": []int{item.SizeX, item.SizeY, item.SizeZ}, "blockCount": item.BlockCount, "paletteCount": item.PaletteCount, "createdAt": item.CreatedAt, "updatedAt": item.UpdatedAt,
 			"coverUrl": "/api/v1/blueprints/" + item.PublicID + "/cover?v=" + strconv.FormatInt(item.UpdatedAt.Unix(), 10), "requiredMods": requiredMods[item.InternalID],
@@ -531,7 +548,7 @@ func (s *Server) blueprintRequiredModsByID(ctx context.Context, blueprintIDs []i
 	ossCfg := s.ossConfigFromSettings(ctx)
 	rows, err := s.db.Query(ctx, `select blueprint_mod.blueprint_id,mod.project_code,mod.slug,mod.primary_name,mod.secondary_name,
 		primary_identifier.identifier,mod.icon_url,array_agg(distinct blueprint_mod.source_namespace order by blueprint_mod.source_namespace)
-		from blueprint_mods blueprint_mod join mods mod on mod.id=blueprint_mod.mod_id
+		from blueprint_mods blueprint_mod join mods mod on mod.id=blueprint_mod.mod_id and mod.review_status='approved'
 		join lateral (select identifier.identifier from mod_identifiers identifier where identifier.mod_id=mod.id
 			order by identifier.is_primary desc,identifier.display_order,identifier.id limit 1) primary_identifier on true
 		where blueprint_mod.blueprint_id=any($1::bigint[])
@@ -548,13 +565,32 @@ func (s *Server) blueprintRequiredModsByID(ctx context.Context, blueprintIDs []i
 			&mod.ModID, &mod.IconURL, &mod.Namespaces); err != nil {
 			return nil, err
 		}
-		mod.IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, mod.IconURL)
-		if err != nil {
-			return nil, err
-		}
 		result[blueprintID] = append(result[blueprintID], mod)
 	}
-	return result, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	iconURLs := make([]string, 0)
+	for _, blueprintID := range blueprintIDs {
+		for _, mod := range result[blueprintID] {
+			iconURLs = append(iconURLs, mod.IconURL)
+		}
+	}
+	iconURLs, err = s.resolveStoredOSSImageURLsWithConfig(ctx, ossCfg, iconURLs)
+	if err != nil {
+		return nil, err
+	}
+	urlIndex := 0
+	for _, blueprintID := range blueprintIDs {
+		mods := result[blueprintID]
+		for index := range mods {
+			mods[index].IconURL = iconURLs[urlIndex]
+			urlIndex++
+		}
+		result[blueprintID] = mods
+	}
+	return result, nil
 }
 
 func (s *Server) blueprintDetail(w http.ResponseWriter, r *http.Request) {
@@ -634,7 +670,8 @@ func (s *Server) blueprintAssetRevisions(ctx context.Context, blueprintID int64)
 	)
 	select paths.revision_id,mods.slug,array_agg(paths.asset_path order by paths.asset_path)
 	from paths join catalog_import_revisions revision on revision.id=paths.revision_id
-	join mods on mods.id=revision.mod_id
+	join mods on mods.id=revision.mod_id and mods.review_status='approved'
+	where revision.status in ('ready','partial')
 	group by paths.revision_id,mods.slug order by paths.revision_id`, blueprintID)
 	if err != nil {
 		return nil, fmt.Errorf("query blueprint asset revisions: %w", err)
@@ -927,7 +964,7 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	initialSubmission := baseRevisionID == nil || errors.Is(latestRevisionErr, pgx.ErrNoRows) || latestRevisionSource == "blueprint_upload"
-	reviewConfig := loadReviewConfig(r.Context(), s.db)
+	reviewConfig := loadReviewConfig(r.Context(), tx)
 	reviewRequired := reviewConfig.BlueprintEdit
 	reason := strings.TrimSpace(request.Reason)
 	if reason == "" {
@@ -1112,7 +1149,7 @@ func (s *Server) downloadBlueprintVariant(w http.ResponseWriter, r *http.Request
 	var ownerID int64
 	claims := currentClaims(r)
 	err := s.db.QueryRow(r.Context(), `select v.object_key,b.owner_id from blueprint_variants v join blueprints b on b.id=v.blueprint_id
-		where b.public_id=$1 and v.public_id=$2 and v.status='ready' and (b.review_status in ('not_required','approved') or b.owner_id=$3 or $4)`,
+		where b.public_id=$1 and b.status<>'deleted' and v.public_id=$2 and v.status='ready' and (b.review_status in ('not_required','approved') or b.owner_id=$3 or $4)`,
 		publicID, variantID, claims.Subject, claimsAllow(claims, "admin.*")).Scan(&objectKey, &ownerID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "蓝图格式文件不存在")
@@ -1156,6 +1193,18 @@ func (s *Server) resolvePublicLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "解析短链接失败")
 		return
 	}
+	switch entityType {
+	case "resource", "structure", "document", "recipe", "recipe_type", "tag", "recipe_template":
+		visible, visibilityErr := s.catalogEntityIsPublic(r.Context(), internalID, entityType)
+		if visibilityErr != nil {
+			writeError(w, http.StatusInternalServerError, "解析短链接发布状态失败")
+			return
+		}
+		if !visible {
+			writeError(w, http.StatusNotFound, "该内容暂时没有可访问页面")
+			return
+		}
+	}
 	if target == "" {
 		target = s.catalogPublicTarget(r.Context(), entityType, internalID, publicID)
 	}
@@ -1180,7 +1229,8 @@ func (s *Server) catalogPublicTarget(ctx context.Context, entityType string, int
 			from game_resources resource
 			join resource_import_snapshots snapshot on snapshot.resource_id=resource.entity_id
 			join catalog_import_revisions revision on revision.id=snapshot.revision_id and revision.is_active
-			join mods mod on mod.id=revision.mod_id where resource.entity_id=$1 order by revision.activated_at desc nulls last limit 1`, internalID).
+			join mods mod on mod.id=revision.mod_id and mod.review_status='approved'
+			where resource.entity_id=$1 and revision.status in ('ready','partial') order by revision.activated_at desc nulls last limit 1`, internalID).
 			Scan(&revisionID, &siteID, &registry, &kind)
 		if err != nil {
 			return ""

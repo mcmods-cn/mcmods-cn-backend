@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,9 +14,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/queue"
+	"mcmods-cn-backend/internal/security"
 )
 
 const (
@@ -165,13 +168,14 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 		return errors.New("ai task message missing task id")
 	}
 	started := time.Now()
-	claimed, err := claimAITaskForExecution(ctx, worker.db, msg.TaskID)
+	run, err := claimAITaskExecution(ctx, worker.db, msg.TaskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if !claimed {
-		return nil
-	}
+	ctx = context.WithValue(ctx, aiTaskExecutionKey{}, run)
 	worker.writeTaskLog(ctx, msg.TaskID, "info", "task_started", "AI task claimed by reliable worker", msg)
 
 	var taskType, provider, model string
@@ -186,7 +190,7 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 		return errors.Join(err, failureErr)
 	}
 
-	result, usage, err := worker.executeTask(ctx, taskType, provider, model, rawPayload)
+	result, _, err := worker.executeTask(ctx, taskType, provider, model, rawPayload)
 	if err != nil {
 		failureErr := worker.failTask(ctx, msg.TaskID, err)
 		return errors.Join(err, failureErr)
@@ -222,17 +226,13 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 		`update ai_tasks
 		 set status = 'completed',
 		     result = $2::jsonb,
-		     input_tokens = $3,
-		     output_tokens = $4,
-		     cost_micros = $5,
+		     quota_reserved_tokens = case when input_tokens+output_tokens>0 then 0 else quota_reserved_tokens end,
 		     finished_at = now(),
 		     updated_at = now()
-		 where id = $1 and status = 'running'`,
+		 where id = $1 and status = 'running' and started_at=$3`,
 		msg.TaskID,
 		string(rawResult),
-		usage.InputTokens,
-		usage.OutputTokens,
-		usage.CostMicros,
+		run.Started,
 	)
 	if err != nil {
 		failureErr := worker.failTask(ctx, msg.TaskID, err)
@@ -243,7 +243,7 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 		failureErr := worker.failTask(ctx, msg.TaskID, err)
 		return errors.Join(err, failureErr)
 	}
-	worker.writeTaskLog(ctx, msg.TaskID, "info", "task_completed", "AI task completed by placeholder executor", map[string]any{
+	worker.writeTaskLog(ctx, msg.TaskID, "info", "task_completed", "AI translation completed", map[string]any{
 		"durationMs": time.Since(started).Milliseconds(),
 	})
 	worker.writeAICallLog(ctx, msg.TaskID, msg.TaskType, provider, model, time.Since(started))
@@ -273,13 +273,21 @@ func (worker *AIWorker) failTask(ctx context.Context, taskID int64, cause error)
 	if cause != nil {
 		message = cause.Error()
 	}
+	query := `update ai_tasks
+		 set status = 'failed', error = $2, finished_at = now(), updated_at = now()
+		 where id = $1 and status = 'running'`
+	args := []any{taskID, message}
+	if run, ok := ctx.Value(aiTaskExecutionKey{}).(aiTaskExecution); ok {
+		query = `update ai_tasks set status='failed',error=$2,finished_at=now(),updated_at=now(),
+			quota_reserved_tokens=case when input_tokens+output_tokens>0 then 0 else quota_reserved_tokens end
+			where id=$1 and status='running'`
+		query += " and started_at=$3"
+		args = append(args, run.Started)
+	}
 	tag, err := worker.db.Exec(
 		ctx,
-		`update ai_tasks
-		 set status = 'failed', error = $2, finished_at = now(), updated_at = now()
-		 where id = $1 and status = 'running'`,
-		taskID,
-		message,
+		query,
+		args...,
 	)
 	if err != nil {
 		logAITranslationFailure("persist_failed_state", strconv.FormatInt(taskID, 10), err)
@@ -328,7 +336,11 @@ func (worker *AIWorker) writeAICallLog(ctx context.Context, taskID int64, taskTy
 }
 
 func (s *Server) getAIConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := s.aiConfigFromSettings(r.Context())
+	cfg, err := readAIConfigFromSettings(r.Context(), s.db, s.cfg.SettingsEncryptionKey)
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "AI_SETTINGS_UNAVAILABLE", "AI settings are temporarily unavailable", 0, nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, redactAIConfig(cfg))
 }
 
@@ -338,8 +350,44 @@ func (s *Server) updateAIConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	current := s.aiConfigFromSettings(r.Context())
 	payload = normalizeAIConfig(payload)
+	if err := validateAIQuotas(payload.Quotas); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	providerCodes := make(map[string]bool, len(payload.Providers))
+	for _, provider := range payload.Providers {
+		if provider.Code == "" || providerCodes[provider.Code] {
+			writeAPIError(w, http.StatusBadRequest, "AI_PROVIDER_CODE_INVALID", "provider codes must be nonempty and unique", 0, nil)
+			return
+		}
+		providerCodes[provider.Code] = true
+		if err := validateAIProviderEndpoint(provider.BaseURL); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	for _, binding := range payload.TaskModels {
+		if binding.TimeoutSeconds > 600 {
+			writeError(w, http.StatusBadRequest, "AI task timeout cannot exceed 600 seconds")
+			return
+		}
+	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "AI_SETTINGS_UNAVAILABLE", "AI settings are temporarily unavailable", 0, nil)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext('ai-config-settings-write'))`); err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "AI_SETTINGS_UNAVAILABLE", "AI settings are temporarily unavailable", 0, nil)
+		return
+	}
+	current, err := readAIConfigFromSettings(r.Context(), tx, s.cfg.SettingsEncryptionKey)
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "AI_SETTINGS_UNAVAILABLE", "AI settings are temporarily unavailable", 0, nil)
+		return
+	}
 	for index := range payload.Providers {
 		if payload.Providers[index].APIKey == "" {
 			payload.Providers[index].APIKey = providerAPIKey(current.Providers, payload.Providers[index].Code)
@@ -350,7 +398,7 @@ func (s *Server) updateAIConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "AI 配置格式不正确")
 		return
 	}
-	_, err = s.db.Exec(
+	_, err = tx.Exec(
 		r.Context(),
 		`insert into system_settings (key, value, updated_by, updated_at)
 		 values ('ai.config', $1::jsonb, $2, now())
@@ -359,7 +407,7 @@ func (s *Server) updateAIConfig(w http.ResponseWriter, r *http.Request) {
 		raw,
 		currentClaims(r).Subject,
 	)
-	if err != nil {
+	if err != nil || tx.Commit(r.Context()) != nil {
 		writeError(w, http.StatusInternalServerError, "保存 AI 配置失败")
 		return
 	}
@@ -403,7 +451,7 @@ func (s *Server) adminAITasks(w http.ResponseWriter, r *http.Request) {
 		`select t.task_uid as id, t.task_uid, t.task_type, t.provider, t.model, t.status, t.priority,
 		        t.concurrency_key, t.input_tokens, t.output_tokens, t.cost_micros, t.payload,
 		        t.result, t.error, u.public_id as created_by, u.username as created_by_username,
-		        t.created_at, t.queued_at, t.started_at, t.finished_at, t.updated_at
+		        t.created_at, t.queued_at, t.started_at, t.finished_at, t.updated_at, `+aiTaskDeliveryFailureProjectionSQL+`
 		 from ai_tasks t
 		 left join users u on u.id = t.created_by
 		 where `+strings.Join(where, " and ")+`
@@ -427,8 +475,8 @@ func (s *Server) adminAITask(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.querySimpleRows(
 		r,
 		`select task_uid as id, task_uid, task_type, provider, model, status, input_tokens, output_tokens,
-		        cost_micros, result, error, created_at, started_at, finished_at, updated_at
-		 from ai_tasks
+		        cost_micros, result, error, created_at, started_at, finished_at, updated_at, `+aiTaskDeliveryFailureProjectionSQL+`
+		 from ai_tasks t
 		 where task_uid = $1
 		 limit 1`,
 		taskUID,
@@ -458,7 +506,11 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "任务类型不能为空")
 		return
 	}
-	cfg := s.aiConfigFromSettings(r.Context())
+	cfg, err := readAIConfigFromSettings(r.Context(), s.db, s.cfg.SettingsEncryptionKey)
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "AI_SETTINGS_UNAVAILABLE", "AI settings are temporarily unavailable", 0, nil)
+		return
+	}
 	binding, ok := findAITaskModel(cfg.TaskModels, req.TaskType)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "该 AI 任务尚未配置任务模型")
@@ -479,6 +531,12 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "任务 Payload 格式不正确")
 		return
 	}
+	if _, err = aiTranslationReservationForPayload(req.TaskType, binding, model, rawPayload); err != nil {
+		writeError(w, http.StatusBadRequest, "AI translation payload exceeds the model limits or has invalid source items")
+		return
+	}
+	payloadHash := sha256.Sum256(rawPayload)
+	req.ConcurrencyKey = strings.Join([]string{req.TaskType, provider.Code, model.Model, req.ConcurrencyKey, hex.EncodeToString(payloadHash[:]), strconv.FormatInt(currentClaims(r).Subject, 10)}, ":")
 	taskUID := "ai_" + randomHex(16)
 	var taskID int64
 	tx, err := s.db.Begin(r.Context())
@@ -487,6 +545,25 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext($1))`, req.ConcurrencyKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "创建 AI 任务失败")
+		return
+	}
+	var existingUID, existingStatus string
+	err = tx.QueryRow(r.Context(), `select task_uid,status from ai_tasks where task_type=$1 and concurrency_key=$2
+		and status in ('queued','running','retrying') order by created_at desc limit 1`, req.TaskType, req.ConcurrencyKey).Scan(&existingUID, &existingStatus)
+	if err == nil {
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "创建 AI 任务失败")
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"id": existingUID, "taskUid": existingUID, "status": existingStatus})
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "创建 AI 任务失败")
+		return
+	}
 	err = tx.QueryRow(
 		r.Context(),
 		`insert into ai_tasks (task_uid, task_type, provider, model, status, priority, concurrency_key, payload, created_by, queued_at)
@@ -546,24 +623,59 @@ func (s *Server) adminAIStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取 AI 统计失败")
 		return
 	}
+	requestBudget, err := s.querySimpleRows(r, `select payload->>'provider' as provider,payload->>'model' as model,payload->>'state' as state,
+		count(*) as requests,coalesce(sum((payload->>'inputTokens')::bigint),0) as input_tokens,
+		coalesce(sum((payload->>'outputTokens')::bigint),0) as output_tokens,coalesce(sum((payload->>'costMicros')::bigint),0) as cost_micros,
+		coalesce(sum((payload->>'reservedTokens')::bigint),0) as reserved_tokens,
+		coalesce(sum((payload->>'reservedCostMicros')::bigint),0) as reserved_cost_micros
+		from ai_task_logs where event=$1 and created_at>=now()-interval '30 days'
+		group by payload->>'provider',payload->>'model',payload->>'state' order by provider,model,state`, aiRequestBudgetEvent)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取 AI 调用预算失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"byStatus":   stats,
-		"byProvider": byProvider,
+		"byStatus":      stats,
+		"byProvider":    byProvider,
+		"requestBudget": requestBudget,
 	})
 }
 
-func (s *Server) aiConfigFromSettings(ctx context.Context) aiConfigPayload {
+type aiConfigQueryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func readAIConfigFromSettings(ctx context.Context, queryer aiConfigQueryer, encryptionKey string) (aiConfigPayload, error) {
 	payload := defaultAIConfig()
 	var raw []byte
-	err := s.db.QueryRow(ctx, `select value from system_settings where key = 'ai.config'`).Scan(&raw)
-	if err != nil {
-		_ = ignoreNoRows(err)
-		return payload
+	err := queryer.QueryRow(ctx, `select value from system_settings where key = 'ai.config'`).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return payload, nil
 	}
-	if err := s.openSystemSetting(raw, &payload); err != nil {
+	if err != nil {
+		return aiConfigPayload{}, err
+	}
+	raw, err = security.DecryptSetting(encryptionKey, raw)
+	if err != nil {
+		return aiConfigPayload{}, err
+	}
+	if _, err = decodeStoredJSONObject(raw, "AI settings"); err != nil {
+		return aiConfigPayload{}, err
+	}
+	if err = json.Unmarshal(raw, &payload); err != nil {
+		return aiConfigPayload{}, err
+	}
+	return normalizeAIConfig(payload), nil
+}
+
+func (s *Server) aiConfigFromSettings(ctx context.Context) aiConfigPayload {
+	payload, err := readAIConfigFromSettings(ctx, s.db, s.cfg.SettingsEncryptionKey)
+	if err != nil {
+		// Execution-oriented callers fail closed with disabled providers. Admin
+		// reads/writes use the error-returning reader, never a successful fallback.
 		return defaultAIConfig()
 	}
-	return normalizeAIConfig(payload)
+	return payload
 }
 
 func (s *Server) writeAITaskLog(ctx context.Context, taskID int64, level string, event string, message string, payload any) {

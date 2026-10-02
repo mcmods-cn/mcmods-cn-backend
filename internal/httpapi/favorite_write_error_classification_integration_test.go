@@ -47,6 +47,10 @@ func TestFavoriteCollectionWritesClassifyDatabaseFailuresIntegration(t *testing.
 			updated_at timestamptz not null default now()
 		);
 		create unique index arch024_favorite_names on favorite_collections(user_id,lower(name));
+		create temporary table favorite_collection_items(
+			collection_id bigint references favorite_collections(id) on delete cascade,
+			entity_type text,entity_id bigint
+		);
 		create temporary table favorite_modpack_export_tasks(
 			id bigint generated always as identity primary key,collection_id bigint,status text,stage text,
 			error_code text,error_detail text,finished_at timestamptz,lease_token text,lease_expires_at timestamptz,updated_at timestamptz

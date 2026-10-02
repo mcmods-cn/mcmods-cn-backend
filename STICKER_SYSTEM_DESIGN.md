@@ -12,6 +12,8 @@ Code 只允许 `[a-z0-9][a-z0-9_-]{0,47}`。已发布 code 不提供重命名接
 
 默认限制 4 MiB、边长 1024、总像素 4,194,304；GIF 额外限制 120 帧、总解码像素 64,000,000 和 30 秒。SVG、伪装格式、截断图片、超大动画及重编码后仍超限的文件均拒绝。OSS 仍是统一文件事实记录，公开只暴露受控内容路由，不暴露对象凭据。
 
+PNG 在读取像素前先解析 IHDR 并检查表情专用边长与像素预算，避免先分配大画布再拒绝。通过头部预算仍须完整解码和重编码，头部校验不能替代完整图片验证。
+
 上述阈值不是散落在 Handler 中的不可调整策略，分别由 `STICKER_MAX_BYTES`、`STICKER_MAX_EDGE`、`STICKER_MAX_PIXELS`、`STICKER_MAX_GIF_FRAMES`、`STICKER_MAX_GIF_DECODED_PIXELS`、`STICKER_MAX_GIF_DURATION_SECONDS` 读取；非法的零值配置安全回退到默认限制。
 
 目录默认最多 64 个包、每包 128 个表情、全站 1024 个表情，由 `STICKER_MAX_PACKS`、`STICKER_MAX_PER_PACK`、`STICKER_MAX_CATALOG_ITEMS` 配置，并分别受 256、512、4096 的硬上限约束。创建入口以全站 advisory transaction lock 原子检查预算；公开和后台目录再以 `LIMIT + 1` 与迭代计数防御异常数据，因而不存在无界响应或无界后台 DOM 输入。

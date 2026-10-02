@@ -972,7 +972,13 @@ func insertModContentActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, s
 }
 
 func (s *Server) requireEditableMod(w http.ResponseWriter, r *http.Request) (modIdentityRecord, bool) {
-	identity, err := s.modIdentity(r.Context(), r.PathValue("siteId"))
+	var identity modIdentityRecord
+	var err error
+	if r.Method == http.MethodGet {
+		identity, err = s.readableModIdentity(r.Context(), r.PathValue("siteId"), currentClaims(r), "content.review")
+	} else {
+		identity, err = s.modIdentity(r.Context(), r.PathValue("siteId"))
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "mod not found")
 		return identity, false
@@ -1127,7 +1133,7 @@ func (s *Server) modContentSections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	identity, err = s.modIdentity(r.Context(), r.PathValue("siteId"))
+	identity, err = s.readableModIdentity(r.Context(), r.PathValue("siteId"), currentClaims(r), "content.review")
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "mod not found")
 		return
@@ -1188,7 +1194,7 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 	if !s.allowModContentRead(w, r, "mod-content-section-cards", 60) {
 		return
 	}
-	identity, err := s.modIdentity(r.Context(), r.PathValue("siteId"))
+	identity, err := s.readableModIdentity(r.Context(), r.PathValue("siteId"), currentClaims(r), "content.review")
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "mod not found")
 		return

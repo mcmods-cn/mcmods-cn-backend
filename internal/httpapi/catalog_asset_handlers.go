@@ -34,10 +34,11 @@ func (s *Server) catalogResourceAsset(w http.ResponseWriter, r *http.Request) {
 		from catalog_entities entity
 		join mod_resource_version_details detail on detail.resource_id=entity.id and detail.status='active'
 		join mod_content_versions version on version.id=detail.version_id and version.status='active'
+		join mods public_mod on public_mod.id=version.mod_id and public_mod.review_status='approved'
 		join oss_files file on file.id=`+versionColumn+` and file.status='active'
 		  and file.scan_status in ('clean','trusted_generated')
 		where entity.public_id=$1 and entity.entity_type='resource' and entity.status='active'
-		  and entity.archived_at is null and ($2='' or version.public_id=$2)
+		  and entity.archived_at is null and `+publicCatalogEntitySQL("entity", "resource")+` and ($2='' or version.public_id=$2)
 		order by case when version.public_id=$2 then 0 else 1 end,detail.updated_at desc
 		limit 1`, publicID, versionPublicID).Scan(&objectKey, &contentType)
 	if errors.Is(err, pgx.ErrNoRows) && assetKind == "icon-small" {
@@ -45,10 +46,11 @@ func (s *Server) catalogResourceAsset(w http.ResponseWriter, r *http.Request) {
 			from catalog_entities entity
 			join mod_resource_version_details detail on detail.resource_id=entity.id and detail.status='active'
 			join mod_content_versions version on version.id=detail.version_id and version.status='active'
+		join mods public_mod on public_mod.id=version.mod_id and public_mod.review_status='approved'
 			join oss_files file on file.id=detail.icon_file_id and file.status='active'
 			  and file.scan_status in ('clean','trusted_generated')
 			where entity.public_id=$1 and entity.entity_type='resource' and entity.status='active'
-			  and entity.archived_at is null and ($2='' or version.public_id=$2)
+			  and entity.archived_at is null and `+publicCatalogEntitySQL("entity", "resource")+` and ($2='' or version.public_id=$2)
 			order by case when version.public_id=$2 then 0 else 1 end,detail.updated_at desc
 			limit 1`, publicID, versionPublicID).Scan(&objectKey, &contentType)
 	}
@@ -58,7 +60,7 @@ func (s *Server) catalogResourceAsset(w http.ResponseWriter, r *http.Request) {
 		join catalog_resource_definitions definition on definition.resource_id=entity.id
 		join oss_files file on file.id=`+definitionColumn+`
 		where entity.public_id=$1 and entity.entity_type='resource' and entity.status='active'
-		  and entity.archived_at is null and file.status='active'
+		  and entity.archived_at is null and `+publicCatalogEntitySQL("entity", "resource")+` and file.status='active'
 		  and file.scan_status in ('clean','trusted_generated')`, publicID).Scan(&objectKey, &contentType)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -72,7 +74,7 @@ func (s *Server) catalogResourceAsset(w http.ResponseWriter, r *http.Request) {
 			from catalog_entities entity
 			join latest_resource_snapshots snapshot on snapshot.resource_id=entity.id
 			where entity.public_id=$1 and entity.entity_type='resource' and entity.status='active'
-			  and entity.archived_at is null and `+snapshotColumn+`<>''`, publicID).Scan(&revisionID, &assetPath)
+			  and entity.archived_at is null and `+publicCatalogEntitySQL("entity", "resource")+` and `+snapshotColumn+`<>''`, publicID).Scan(&revisionID, &assetPath)
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "catalog resource asset does not exist")
 			return
@@ -105,7 +107,7 @@ func (s *Server) catalogRecipeTemplateBackground(w http.ResponseWriter, r *http.
 		join catalog_entities type_entity on type_entity.id=template.recipe_type_id
 		join oss_files file on file.id=template.background_file_id
 		where entity.public_id=$1 and entity.entity_type='recipe_template' and entity.status='active'
-		  and entity.archived_at is null and type_entity.status='active' and type_entity.archived_at is null
+		  and entity.archived_at is null and `+publicCatalogEntitySQL("entity", "recipe_template")+` and type_entity.status='active' and type_entity.archived_at is null
 		  and file.status='active' and file.scan_status in ('clean','trusted_generated')`, publicID).Scan(&objectKey, &contentType)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var revisionID, assetPath string
@@ -114,8 +116,8 @@ func (s *Server) catalogRecipeTemplateBackground(w http.ResponseWriter, r *http.
 			join catalog_entities type_entity on type_entity.id=template.recipe_type_id
 			join recipe_template_import_snapshots snapshot on snapshot.id=template.import_snapshot_id
 			where entity.public_id=$1 and entity.entity_type='recipe_template' and entity.status='active'
-			  and entity.archived_at is null and type_entity.status='active' and type_entity.archived_at is null
-			  and template.background_file_id is null`, publicID).
+			  and entity.archived_at is null and `+publicCatalogEntitySQL("entity", "recipe_template")+` and type_entity.status='active' and type_entity.archived_at is null
+			  and template.background_file_id is null and exists(select 1 from catalog_import_revisions source_revision join mods source_mod on source_mod.id=source_revision.mod_id where source_revision.id=snapshot.revision_id and source_revision.is_active and source_revision.status in ('ready','partial') and source_mod.review_status='approved')`, publicID).
 			Scan(&revisionID, &assetPath)
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "recipe template background does not exist")

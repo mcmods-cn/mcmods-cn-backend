@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -194,19 +195,30 @@ func (s *Server) loadMetricProjectEditors(ctx context.Context, target metricTarg
 	}
 	defer rows.Close()
 	items := make([]contentMetricEditor, 0)
-	config := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var item contentMetricEditor
 		if err = rows.Scan(&item.ID, &item.Name, &item.AvatarURL, &item.Role); err != nil {
 			return nil, err
 		}
 		item.URL = "/" + item.ID
-		if item.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, config, item.AvatarURL); err != nil {
-			return nil, err
-		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	urls := make([]string, len(items))
+	for index := range items {
+		urls[index] = items[index].AvatarURL
+	}
+	resolved, err := s.resolveStoredOSSImageURLsWithConfig(ctx, s.ossConfigFromSettings(ctx), urls)
+	if err != nil {
+		return nil, err
+	}
+	for index := range items {
+		items[index].AvatarURL = resolved[index]
+	}
+	return items, nil
 }
 
 func (s *Server) recordMetricView(w http.ResponseWriter, r *http.Request) {
@@ -249,7 +261,8 @@ func (s *Server) resolveMetricTarget(ctx context.Context, publicID string) (metr
 	var err error
 	switch target.Type {
 	case "resource":
-		err = s.db.QueryRow(ctx, `select status in ('active','placeholder') from catalog_entities where id=$1`, target.InternalID).Scan(&visible)
+		err = s.db.QueryRow(ctx, `select status in ('active','placeholder') and archived_at is null
+		 and `+publicCatalogEntitySQL("entity", "resource")+` from catalog_entities entity where id=$1`, target.InternalID).Scan(&visible)
 	case "mod":
 		err = s.db.QueryRow(ctx, `select review_status='approved' from mods where id=$1`, target.InternalID).Scan(&visible)
 	case "modpack":
@@ -269,7 +282,7 @@ func (s *Server) resolveMetricTarget(ctx context.Context, publicID string) (metr
 	return target, nil
 }
 
-func (s *Server) recordContentRouteView(ctx context.Context, r *http.Request, target metricTarget) error {
+func (s *Server) recordContentRouteView(ctx context.Context, r *http.Request, target metricTarget) (resultErr error) {
 	viewerID := currentClaims(r).Subject
 	_, _, sourceID := anonymousPresenceIdentity(s.cfg.AntiAbuse.HMACSecret, s.requestClientLocation(r).IP, r.UserAgent(), "")
 	viewerIdentity := "anonymous:" + sourceID
@@ -290,9 +303,23 @@ func (s *Server) recordContentRouteView(ctx context.Context, r *http.Request, ta
 	pageHash := sha256.Sum256([]byte(pageKey))
 	deduplicationKey := "metric-view-deduplicate:" + strconv.FormatInt(target.RouteID, 10) + ":" +
 		hex.EncodeToString(pageHash[:8]) + ":" + hex.EncodeToString(viewerHash[:8])
-	if !s.cache.ClaimThrottle(ctx, deduplicationKey, metricViewDeduplicationWindow) {
+	reservation, claimed, err := s.cache.ClaimThrottleLease(ctx, deduplicationKey, metricViewDeduplicationWindow)
+	if err != nil {
+		return err
+	}
+	if !claimed {
 		return nil
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			defer cancel()
+			if releaseErr := reservation.Release(releaseCtx); releaseErr != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("release failed content metric reservation: %w", releaseErr))
+			}
+		}
+	}()
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -327,7 +354,11 @@ func (s *Server) recordContentRouteView(ctx context.Context, r *http.Request, ta
 		target.RouteID, metricProjectTypes[target.Type]); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func parseMetricPageKey(raw string) (kind, publicID string, err error) {
@@ -405,13 +436,16 @@ func (s *Server) loadRecentMetricEditors(ctx context.Context, target metricTarge
 }
 
 func (s *Server) resolveMetricActorAvatars(ctx context.Context, items []contentMetricActor) ([]contentMetricActor, error) {
-	config := s.ossConfigFromSettings(ctx)
+	urls := make([]string, len(items))
 	for index := range items {
-		resolved, err := s.resolveStoredOSSObjectAccessURLWithConfig(ctx, config, items[index].AvatarURL)
-		if err != nil {
-			return nil, err
-		}
-		items[index].AvatarURL = resolved
+		urls[index] = items[index].AvatarURL
+	}
+	resolved, err := s.resolveStoredOSSImageURLsWithConfig(ctx, s.ossConfigFromSettings(ctx), urls)
+	if err != nil {
+		return nil, err
+	}
+	for index := range items {
+		items[index].AvatarURL = resolved[index]
 	}
 	return items, nil
 }
@@ -429,7 +463,6 @@ func (s *Server) loadMetricDevelopers(ctx context.Context, target metricTarget) 
 	}
 	defer rows.Close()
 	items := make([]contentMetricDeveloper, 0)
-	config := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var item contentMetricDeveloper
 		if err = rows.Scan(&item.ID, &item.Kind, &item.Name, &item.AvatarURL, &item.Role); err != nil {
@@ -439,12 +472,24 @@ func (s *Server) loadMetricDevelopers(ctx context.Context, target metricTarget) 
 		if item.Kind == "team" {
 			item.URL = "/teams/" + item.ID
 		}
-		if item.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, config, item.AvatarURL); err != nil {
-			return nil, err
-		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	urls := make([]string, len(items))
+	for index := range items {
+		urls[index] = items[index].AvatarURL
+	}
+	resolved, err := s.resolveStoredOSSImageURLsWithConfig(ctx, s.ossConfigFromSettings(ctx), urls)
+	if err != nil {
+		return nil, err
+	}
+	for index := range items {
+		items[index].AvatarURL = resolved[index]
+	}
+	return items, nil
 }
 
 func (s *Server) loadMetricReferences(ctx context.Context, target metricTarget, locale string) ([]contentMetricReference, error) {

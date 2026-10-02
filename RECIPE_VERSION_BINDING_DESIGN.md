@@ -8,7 +8,7 @@
 
 - 语义完全相同的 1.20.1 与 1.21.1 合成表可复用同一 `recipes.entity_id`；
 - NBT、Data Component、条件、平台限制或输入输出语义不同的记录仍产生不同身份；
-- 本次迁移不重新计算或替换既有合成表 ID。
+- 导入和编辑不会重新计算或替换既有合成表 ID。
 
 ## 关系模型
 
@@ -17,7 +17,7 @@ recipes(entity_id)
   1 ── N recipe_version_bindings(recipe_id, version_code)
 ```
 
-`version_code` 是站内 Minecraft 版本配置中的权威 code。唯一主键 `(recipe_id, version_code)` 同时承担并发去重和幂等保证；`source` 记录 `import/editor/backfill/split`，`created_by` 记录可用的操作者。
+`version_code` 是站内 Minecraft 版本配置中的权威 code。唯一主键 `(recipe_id, version_code)` 同时承担并发去重和幂等保证；当前 `source` 只允许实际写入链使用的 `import/editor`，`created_by` 记录可用的操作者。
 
 当前 Minecraft 版本目录尚不是独立关系表，因此绑定使用权威 code 而不是另建一份版本列表。写 API 每次都用当前目录验证 code。
 
@@ -53,9 +53,8 @@ recipes(entity_id)
 
 共享内容修改会明确提示影响所有绑定。当前未提供部分版本拆分 UI，避免伪装成仅修改当前页面。
 
-## 回填与校验
+## 开发库与校验
 
-回填优先使用导入修订目标资料版本，其次使用手工 `recipe_definitions.source_mod_content_version_id`。语句使用 `DISTINCT + ON CONFLICT DO NOTHING`，可以重复执行。
+当前 generation 168 按开发期重置策略安装结构，没有旧库前向回填迁移。`recipe_definitions.source_mod_content_version_id` 和导入修订的目标资料版本可以提供来源信息；需要保留既有数据时，应先为真实 schema、现存绑定和剩余 provenance 制定单独升级方案，不能把这些来源字段的存在视为已经支持回填或执行 RESET。
 
-校验项：无空 code、无重复主键、无零绑定合成表、不同入口的同一 recipe ID 返回一致版本数组。开发环境真实迁移已执行；生产大数据量需先将回填拆为批处理。
-
+应核对无空 code、无重复主键、发布后的合成表至少有一个版本绑定，以及不同入口的同一 recipe ID 返回一致版本数组。数据库 CHECK 只约束 code 非空和 `source` 枚举；版本是否仍在站内目录及至少一个绑定由应用发布链验证，不能从建库成功推断这些业务不变量全部通过。

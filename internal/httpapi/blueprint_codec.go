@@ -133,13 +133,22 @@ func decodeNBTMap(data []byte) (map[string]any, error) {
 	if closer != nil {
 		defer closer.Close()
 	}
-	limited := &io.LimitedReader{R: reader, N: maxBlueprintDecodedNBTBytes + 1}
-	result := map[string]any{}
-	if _, err := nbt.NewDecoder(limited).Decode(&result); err != nil {
+	decoded, err := io.ReadAll(io.LimitReader(reader, maxBlueprintDecodedNBTBytes+1))
+	if err != nil {
 		return nil, err
 	}
-	if limited.N <= 0 {
+	if int64(len(decoded)) > maxBlueprintDecodedNBTBytes {
 		return nil, errors.New("decoded blueprint NBT exceeds processing limit")
+	}
+	// The generic NBT decoder allocates arrays and lists from their declared
+	// lengths before reading their payload. Validate the complete bounded wire
+	// document first, so a tiny malformed upload cannot request a huge allocation.
+	if err := validateBlueprintNBT(decoded); err != nil {
+		return nil, err
+	}
+	result := map[string]any{}
+	if _, err := nbt.NewDecoder(bytes.NewReader(decoded)).Decode(&result); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -441,20 +450,28 @@ func decodeLegacySchematic(root map[string]any) (blueprintDocument, error) {
 	if err != nil {
 		return blueprintDocument{}, err
 	}
+	if len(blocks) != volume || len(metadata) != volume {
+		return blueprintDocument{}, errors.New("legacy schematic block and metadata lengths do not match its dimensions")
+	}
+	additional, hasAdditional := root["AddBlocks"]
+	additionalIDs := byteSlice(additional)
+	if hasAdditional && len(additionalIDs) != (volume+1)/2 {
+		return blueprintDocument{}, errors.New("legacy schematic extended ID length does not match its dimensions")
+	}
 	document := blueprintDocument{Size: size}
-	limit := minInt(len(blocks), volume)
-	for linear := 0; linear < limit; linear++ {
+	for linear := 0; linear < volume; linear++ {
 		id := int(blocks[linear])
+		if hasAdditional {
+			shift := uint((linear % 2) * 4)
+			id |= int((additionalIDs[linear/2]>>shift)&0x0f) << 8
+		}
 		if id == 0 {
 			continue
 		}
 		if len(document.Blocks) >= maxBlueprintNonAirBlockCount {
 			return blueprintDocument{}, errors.New("blueprint contains too many non-air blocks")
 		}
-		data := 0
-		if linear < len(metadata) {
-			data = int(metadata[linear])
-		}
+		data := int(metadata[linear])
 		x := linear % size[0]
 		z := (linear / size[0]) % size[2]
 		y := linear / (size[0] * size[2])

@@ -71,9 +71,7 @@ func (worker *ProjectAutomationWorker) run(ctx context.Context) {
 }
 
 func (worker *ProjectAutomationWorker) tick(ctx context.Context) error {
-	if _, err := worker.server.db.Exec(ctx, `update project_auto_update_runs set status='pending',lease_owner='',lease_expires_at=null,
-		next_attempt_at=now(),last_error_code='lease_expired',last_error='worker lease expired'
-		where status='running' and lease_expires_at<now()`); err != nil {
+	if err := worker.recoverExpiredLeases(ctx); err != nil {
 		return fmt.Errorf("recover expired project automation leases: %w", err)
 	}
 	if err := worker.scheduleDue(ctx); err != nil {
@@ -141,6 +139,7 @@ func (worker *ProjectAutomationWorker) scheduleDue(ctx context.Context) error {
 
 type projectAutomationJob struct {
 	RunID           int64
+	LeaseOwner      string
 	SettingID       int64
 	RouteID         int64
 	InternalID      int64
@@ -181,9 +180,10 @@ func (worker *ProjectAutomationWorker) processOne(ctx context.Context) (bool, er
 	if err != nil {
 		return false, err
 	}
-	if _, err = tx.Exec(ctx, `update project_auto_update_runs set status='running',lease_owner='project-auto-update',
+	job.LeaseOwner = "project-auto-update:" + newExportID()
+	if _, err = tx.Exec(ctx, `update project_auto_update_runs set status='running',lease_owner=$3,
 		lease_expires_at=now()+$2::interval,attempts=attempts+1,started_at=coalesce(started_at,now()) where id=$1`,
-		job.RunID, projectAutomationLease.String()); err != nil {
+		job.RunID, projectAutomationLease.String(), job.LeaseOwner); err != nil {
 		return false, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -194,7 +194,7 @@ func (worker *ProjectAutomationWorker) processOne(ctx context.Context) (bool, er
 		return true, worker.fail(ctx, job, "automation_actor_unavailable", actorErr, []byte(`{}`))
 	}
 	job.ActorID = actor.Subject
-	if _, actorErr = worker.server.db.Exec(ctx, `update project_auto_update_runs set actor_id=$2 where id=$1`, job.RunID, job.ActorID); actorErr != nil {
+	if _, actorErr = worker.mutateProjectAutomationRun(ctx, job, `update project_auto_update_runs set actor_id=$2 where id=$1`, job.RunID, job.ActorID); actorErr != nil {
 		return true, worker.fail(ctx, job, "automation_actor_unavailable", actorErr, []byte(`{}`))
 	}
 
@@ -209,6 +209,9 @@ func (worker *ProjectAutomationWorker) processOne(ctx context.Context) (bool, er
 		return true, err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockProjectAutomationRunTx(ctx, tx, job); err != nil {
+		return true, err
+	}
 	if _, err = tx.Exec(ctx, `update project_auto_update_runs set status='completed',result=$2::jsonb,last_error_code='',last_error='',
 		lease_owner='',lease_expires_at=null,finished_at=now() where id=$1`, job.RunID, raw); err != nil {
 		return true, err
@@ -229,6 +232,9 @@ func (worker *ProjectAutomationWorker) fail(ctx context.Context, job projectAuto
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockProjectAutomationRunTx(ctx, tx, job); err != nil {
+		return err
+	}
 	var attempts int
 	if err = tx.QueryRow(ctx, `select attempts from project_auto_update_runs where id=$1 for update`, job.RunID).Scan(&attempts); err != nil {
 		return err
@@ -403,6 +409,9 @@ func (worker *ProjectAutomationWorker) mergeCompatibility(ctx context.Context, j
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockProjectAutomationRunTx(ctx, tx, job); err != nil {
+		return nil, err
+	}
 	added := int64(0)
 	if job.ProjectType == "mod" {
 		for _, pair := range pairs {
@@ -611,6 +620,10 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 		if err != nil {
 			return nil, err
 		}
+		if err = lockProjectAutomationRunTx(ctx, tx, job); err != nil {
+			_ = tx.Rollback(ctx)
+			return nil, err
+		}
 		var bindingID int64
 		var changelogID *string
 		var previousHash string
@@ -754,7 +767,7 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 			existing++
 			var previous providerProjectFile
 			if decodeErr := json.Unmarshal(currentMetadata, &previous); decodeErr != nil {
-				if _, updateErr := worker.server.db.Exec(ctx, `update mirrored_project_files set status='review'
+				if _, updateErr := worker.mutateProjectAutomationRun(ctx, job, `update mirrored_project_files set status='review'
 					where source_type=$1 and external_file_id=$2 and status<>'ready'`, job.SourceType, file.ID); updateErr != nil {
 					return result(), fmt.Errorf("mark corrupt project mirror metadata for review: %w", updateErr)
 				}
@@ -763,7 +776,7 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 			}
 			previousSignature, incomingSignature := providerFileHashSignature(previous), providerFileHashSignature(file)
 			if currentSize != file.SizeBytes || previousSignature != "" && incomingSignature != "" && previousSignature != incomingSignature {
-				if _, updateErr := worker.server.db.Exec(ctx, `update mirrored_project_files set status='source_changed'
+				if _, updateErr := worker.mutateProjectAutomationRun(ctx, job, `update mirrored_project_files set status='source_changed'
 					where source_type=$1 and external_file_id=$2`, job.SourceType, file.ID); updateErr != nil {
 					return result(), fmt.Errorf("mark changed project mirror source: %w", updateErr)
 				}
@@ -778,14 +791,14 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 				review++
 			case "scanning", "ready":
 				if currentScanStatus == "rejected" || currentFileStatus == "deleted" || currentFileStatus == "" {
-					if _, updateErr := worker.server.db.Exec(ctx, `update mirrored_project_files set status='failed'
+					if _, updateErr := worker.mutateProjectAutomationRun(ctx, job, `update mirrored_project_files set status='failed'
 						where source_type=$1 and external_file_id=$2 and status in ('scanning','ready')`, job.SourceType, file.ID); updateErr != nil {
 						return result(), fmt.Errorf("mark rejected project mirror scan: %w", updateErr)
 					}
 					scanFailures++
 					review++
 				} else if currentScanStatus == "pending" {
-					if _, updateErr := worker.server.db.Exec(ctx, `update mirrored_project_files set status='scanning'
+					if _, updateErr := worker.mutateProjectAutomationRun(ctx, job, `update mirrored_project_files set status='scanning'
 						where source_type=$1 and external_file_id=$2 and status='ready'`, job.SourceType, file.ID); updateErr != nil {
 						return result(), fmt.Errorf("mark project mirror rescan pending: %w", updateErr)
 					}
@@ -810,10 +823,13 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 			return nil, txErr
 		}
 		var ossFileID int64
-		txErr = tx.QueryRow(ctx, `insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
+		txErr = lockProjectAutomationRunTx(ctx, tx, job)
+		if txErr == nil {
+			txErr = tx.QueryRow(ctx, `insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
 			content_type,size_bytes,source_size_bytes,sha256,status,scan_status) values($1,$2,$3,$4,$5,'project_auto_update',$6,$6,
 			'application/octet-stream',$7,$7,$8,'active','pending') returning id`, ossCfg.Bucket, ossCfg.displayEndpoint(), ossCfg.Region,
-			objectKey, ossCategoryFromObjectKey(objectKey, ossCfg.Prefix), file.FileName, size, digest).Scan(&ossFileID)
+				objectKey, ossCategoryFromObjectKey(objectKey, ossCfg.Prefix), file.FileName, size, digest).Scan(&ossFileID)
+		}
 		if txErr == nil {
 			_, txErr = tx.Exec(ctx, `insert into mirrored_project_files(project_route_id,source_type,external_file_id,file_sha256,byte_size,oss_file_id,
 			license_spdx_id,status,metadata) values($1,$2,$3,$4,$5,$6,coalesce(
@@ -1142,6 +1158,32 @@ func (worker *ProjectAutomationWorker) promoteCleanMirrors(ctx context.Context) 
 		}
 		if lockedStatus != "scanning" && lockedStatus != "failed" {
 			_ = tx.Rollback(ctx)
+			continue
+		}
+		// The first scan is only a candidate list. Hold the actual bound file
+		// through publication so a concurrent rescan or tombstone cannot turn
+		// an obsolete clean result into an active downloadable file.
+		var liveStatus, liveScan string
+		fileErr := tx.QueryRow(ctx, `select file.status,file.scan_status from oss_files file
+			join mirrored_project_files mirror on mirror.oss_file_id=file.id
+			where mirror.id=$1 and file.id=$2 for share of file`, item.id, item.ossID).Scan(&liveStatus, &liveScan)
+		if fileErr != nil && !errors.Is(fileErr, pgx.ErrNoRows) {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("recheck bound project mirror scan: %w", fileErr)
+		}
+		if fileErr != nil || liveStatus != "active" || liveScan != "clean" && liveScan != "trusted_generated" {
+			status := "failed"
+			if liveStatus == "active" && liveScan == "pending" {
+				status = "scanning"
+			}
+			if _, fileErr = tx.Exec(ctx, `update mirrored_project_files set status=$2 where id=$1`, item.id, status); fileErr == nil {
+				fileErr = tx.Commit(ctx)
+			} else {
+				_ = tx.Rollback(ctx)
+			}
+			if fileErr != nil {
+				return fmt.Errorf("persist changed project mirror scan: %w", fileErr)
+			}
 			continue
 		}
 		projectApproved, insertErr := projectFileTargetIsApprovedTx(ctx, tx, item.projectType, item.internalID)

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -83,7 +82,10 @@ func (s *Server) enqueueCommunityPostTranslation(ctx context.Context, publicID s
 		"sourceRevisionId": revisionID, "sourceLocale": sourceLocale, "targetLocale": targetLocale,
 		"quotaBacked": true, "items": []map[string]string{{"key": "title", "text": title}, {"key": "bodyMarkdown", "text": body}}}
 	raw, _ := json.Marshal(payload)
-	reserved := int64(utf8.RuneCountInString(title+body)*2 + 256)
+	reserved, err := aiTranslationReservationForPayload(aiTaskContentTranslation, binding, model, raw)
+	if err != nil {
+		return enqueuedContentTranslation{}, err
+	}
 	concurrencyKey := "community-post:" + publicID + ":" + targetLocale + ":" + strconv.FormatInt(revisionID, 10) + ":actor:" + strconv.FormatInt(actorID, 10)
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -196,16 +198,27 @@ func (worker *AIWorker) persistCommunityPostTranslation(ctx context.Context, tas
 	if strings.TrimSpace(translated["title"]) == "" || strings.TrimSpace(translated["bodyMarkdown"]) == "" {
 		return errors.New("community post translation result is incomplete")
 	}
+	tx, err := worker.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = lockAITaskExecutionTx(ctx, tx); err != nil {
+		return err
+	}
 	var currentRevision int64
-	if err = worker.db.QueryRow(ctx, `select published_revision_id from community_posts where id=$1 and review_status='approved'`, payload.PostInternalID).Scan(&currentRevision); err != nil {
+	if err = tx.QueryRow(ctx, `select published_revision_id from community_posts where id=$1 and status='active' and review_status='approved' for update`, payload.PostInternalID).Scan(&currentRevision); err != nil {
 		return fmt.Errorf("load community post translation source revision: %w", err)
 	}
 	if currentRevision != payload.SourceRevision {
 		return errors.New("community post changed while translation was running")
 	}
-	_, err = worker.db.Exec(ctx, `insert into community_post_translations(post_id,locale,title,body_markdown,source_revision_id,ai_task_id)
+	_, err = tx.Exec(ctx, `insert into community_post_translations(post_id,locale,title,body_markdown,source_revision_id,ai_task_id)
 		values($1,$2,$3,$4,$5,$6) on conflict(post_id,locale) do update set title=excluded.title,
 		body_markdown=excluded.body_markdown,source_revision_id=excluded.source_revision_id,ai_task_id=excluded.ai_task_id,updated_at=now()`,
 		payload.PostInternalID, normalizeContentLocale(payload.TargetLocale), translated["title"], translated["bodyMarkdown"], payload.SourceRevision, taskID)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

@@ -38,6 +38,7 @@ func NewSeedCrawlerWorker(cfg config.Config, db *pgxpool.Pool) *SeedCrawlerWorke
 }
 
 var errSeedCrawlerLeaseOwnershipLost = errors.New("seed crawler lease ownership lost")
+var errSeedCrawlerHeartbeatStopped = errors.New("seed crawler heartbeat stopped")
 
 func (worker *SeedCrawlerWorker) Start(ctx context.Context) {
 	if worker == nil || worker.server == nil || worker.server.db == nil {
@@ -287,7 +288,7 @@ func (worker *SeedCrawlerWorker) effectiveHeartbeatInterval() time.Duration {
 
 func (worker *SeedCrawlerWorker) startLeaseHeartbeat(ctx context.Context, runID int64, leaseOwner string) (context.Context, func() error) {
 	runContext, cancelRun := context.WithCancel(ctx)
-	heartbeatContext, cancelHeartbeat := context.WithCancel(ctx)
+	heartbeatContext, cancelHeartbeat := context.WithCancelCause(ctx)
 	done := make(chan error, 1)
 	go func() {
 		ticker := time.NewTicker(worker.effectiveHeartbeatInterval())
@@ -295,7 +296,7 @@ func (worker *SeedCrawlerWorker) startLeaseHeartbeat(ctx context.Context, runID 
 		for {
 			select {
 			case <-heartbeatContext.Done():
-				done <- nil
+				done <- ctx.Err()
 				return
 			case <-ticker.C:
 				command, err := worker.server.db.Exec(heartbeatContext, `update seed_crawler_runs
@@ -306,6 +307,11 @@ func (worker *SeedCrawlerWorker) startLeaseHeartbeat(ctx context.Context, runID 
 					err = errSeedCrawlerLeaseOwnershipLost
 				}
 				if err != nil {
+					if errors.Is(err, context.Canceled) &&
+						errors.Is(context.Cause(heartbeatContext), errSeedCrawlerHeartbeatStopped) && ctx.Err() == nil {
+						done <- nil
+						return
+					}
 					cancelRun()
 					done <- fmt.Errorf("renew seed crawler lease: %w", err)
 					return
@@ -314,7 +320,7 @@ func (worker *SeedCrawlerWorker) startLeaseHeartbeat(ctx context.Context, runID 
 		}
 	}()
 	return runContext, func() error {
-		cancelHeartbeat()
+		cancelHeartbeat(errSeedCrawlerHeartbeatStopped)
 		err := <-done
 		cancelRun()
 		return err

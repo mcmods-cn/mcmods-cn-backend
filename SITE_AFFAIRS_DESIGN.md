@@ -6,6 +6,8 @@
 
 `site_pages` 保证 `about` 只有一个当前页面，`site_page_translations` 以 `(page_id, locale)` 唯一。空库种子发布站内语言注册表中的 8 种语言。公开接口优先当前语言，再按站内回退顺序返回，并明确返回实际 locale；前端在回退时提示。后台可选择语言、编辑安全 Markdown、预览、保存草稿和发布，权限为 `site_affairs.about.manage`。
 
+默认 Markdown 正文使用真实换行分隔标题和段落。重复启动补充缺失语言，并只修正精确匹配旧默认正文中字面 `\n` 的未编辑种子：要求版本为 1、操作者为空、仍已发布且标题匹配原默认文案。修正后递增版本，重复启动不会再修改。已编辑、草稿或不匹配默认内容的行保持不变，管理员可在现有编辑页核对并修正。
+
 ## 更新日志
 
 `site_changelogs` 保存共同日期与发布状态，`site_changelog_translations` 保存同一事件的多语言标题和正文。列表按日期和 ID 稳定倒序，详情安全渲染 Markdown。后台支持日期、当日快捷按钮、语言、标题、正文、预览和发布，权限为 `site_affairs.changelog.manage`。

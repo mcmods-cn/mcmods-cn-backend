@@ -265,7 +265,10 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 	if direction < 0 {
 		action = "downgrade_role_track"
 	}
-	s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &userID, action, map[string]any{"track": trackCode, "from": current, "to": targets})
+	if err := s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &userID, action, map[string]any{"track": trackCode, "from": current, "to": targets}); err != nil {
+		writeError(w, http.StatusInternalServerError, "记录权限组调整失败")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "调整用户权限组失败")
 		return
@@ -305,7 +308,12 @@ func shiftRoleTrackRoles(track []string, current []string, direction int) []stri
 }
 
 func (s *Server) loadRoleTracks(ctx context.Context) ([]roleTrackPayload, error) {
-	rows, err := s.db.Query(ctx, `select code, name, description from permission_role_tracks order by code`)
+	rows, err := s.db.Query(ctx, `select track.code,track.name,track.description,
+		coalesce(array_agg(role.code order by member.position) filter(where role.id is not null),'{}'::text[])
+		from permission_role_tracks track
+		left join permission_role_track_roles member on member.track_code=track.code
+		left join roles role on role.id=member.role_id
+		group by track.code,track.name,track.description order by track.code`)
 	if err != nil {
 		return nil, err
 	}
@@ -313,43 +321,10 @@ func (s *Server) loadRoleTracks(ctx context.Context) ([]roleTrackPayload, error)
 	tracks := make([]roleTrackPayload, 0)
 	for rows.Next() {
 		var track roleTrackPayload
-		if err := rows.Scan(&track.Code, &track.Name, &track.Description); err != nil {
-			return nil, err
-		}
-		track.Roles, err = s.roleTrackRoles(ctx, track.Code)
-		if err != nil {
+		if err := rows.Scan(&track.Code, &track.Name, &track.Description, &track.Roles); err != nil {
 			return nil, err
 		}
 		tracks = append(tracks, track)
 	}
 	return tracks, rows.Err()
-}
-
-func (s *Server) roleTrackRoles(ctx context.Context, code string) ([]string, error) {
-	var exists bool
-	if err := s.db.QueryRow(ctx, `select exists(select 1 from permission_role_tracks where code = $1)`, code).Scan(&exists); err != nil {
-		return nil, err
-	}
-	if !exists {
-		return nil, pgx.ErrNoRows
-	}
-	rows, err := s.db.Query(
-		ctx,
-		`select r.code from permission_role_track_roles tr join roles r on r.id = tr.role_id
-		 where tr.track_code = $1 order by tr.position`,
-		code,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	roles := make([]string, 0)
-	for rows.Next() {
-		var role string
-		if err := rows.Scan(&role); err != nil {
-			return nil, err
-		}
-		roles = append(roles, role)
-	}
-	return roles, rows.Err()
 }

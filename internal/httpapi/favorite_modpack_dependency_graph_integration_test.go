@@ -25,7 +25,7 @@ import (
 type favoriteDependencyGraphQueryCounter struct{ queries atomic.Int64 }
 
 func (counter *favoriteDependencyGraphQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	if strings.Contains(data.SQL, "with recursive reachable(route_id)") {
+	if data.SQL == favoriteExportDependencyGraphSQL {
 		counter.queries.Add(1)
 	}
 	return ctx

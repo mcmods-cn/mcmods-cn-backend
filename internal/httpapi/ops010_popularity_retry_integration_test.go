@@ -300,6 +300,7 @@ func assertOPS010QueueDeleted(t *testing.T, ctx context.Context, pool *pgxpool.P
 
 func newOPS010IsolatedDatabase(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	t.Helper()
+	requireOCT02DatabaseIntegration(t)
 	baseConfig, err := pgxpool.ParseConfig(appconfig.Load().DB.ConnString())
 	if err != nil {
 		t.Fatal(err)

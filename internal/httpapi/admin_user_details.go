@@ -58,7 +58,7 @@ func (s *Server) loadAdminUserDetails(ctx context.Context, userID int64) (adminU
 	err := s.db.QueryRow(
 		ctx,
 		`select id, public_id, username, email, email_verified, status, created_at, last_login_at,
-		        country, timezone, preferred_content_language, preferred_ui_language,
+		        country, timezone, preferred_content_language, secondary_content_language,
 		        registration_ip, registration_country_code, registration_city
 		 from users where id = $1`,
 		userID,

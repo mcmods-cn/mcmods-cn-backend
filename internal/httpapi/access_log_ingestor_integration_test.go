@@ -39,11 +39,13 @@ func TestAccessLogIngestionDoesNotExtendRequestsDuringDatabaseLockIntegration(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer lockConnection.Release()
 	lockTransaction, err := lockConnection.Begin(ctx)
 	if err != nil {
 		lockConnection.Release()
 		t.Fatal(err)
 	}
+	defer rollbackIntegrationTransaction(lockTransaction)
 	if _, err = lockTransaction.Exec(ctx, `lock table app_logs in access exclusive mode`); err != nil {
 		_ = lockTransaction.Rollback(ctx)
 		lockConnection.Release()
@@ -59,8 +61,10 @@ func TestAccessLogIngestionDoesNotExtendRequestsDuringDatabaseLockIntegration(t 
 	}))
 	path := fmt.Sprintf("/api/v1/perf032/%d", time.Now().UnixNano())
 	defer func() {
+		rollbackIntegrationTransaction(lockTransaction)
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
+		_ = ingestor.Close(cleanupCtx)
 		_, _ = pool.Exec(cleanupCtx, `delete from app_logs where path=$1`, path)
 	}()
 

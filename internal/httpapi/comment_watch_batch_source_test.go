@@ -1,6 +1,9 @@
 package httpapi
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"strings"
 	"testing"
@@ -18,8 +21,11 @@ func TestMyCommentWatchesBatchAssemblesCommentsAndTargets(t *testing.T) {
 	}
 	source := string(sourceBytes) + "\n" + string(detailBytes)
 	start := strings.Index(source, "func (s *Server) myCommentWatches")
+	if start < 0 {
+		t.Fatal("watch handler bounds missing")
+	}
 	end := strings.Index(source[start:], "func (s *Server) commentWatchItem")
-	if start < 0 || end < 0 {
+	if end < 0 {
 		t.Fatal("watch handler bounds missing")
 	}
 	body := source[start : start+end]
@@ -39,22 +45,55 @@ func TestMyCommentWatchesBatchAssemblesCommentsAndTargets(t *testing.T) {
 
 func TestCommentAuthorAvatarsAreResolvedOncePerUniqueStoredURL(t *testing.T) {
 	t.Parallel()
-	sourceBytes, err := os.ReadFile("comment_handlers.go")
+	file, err := parser.ParseFile(token.NewFileSet(), "comment_detail_handlers.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	detailBytes, err := os.ReadFile("comment_detail_handlers.go")
-	if err != nil {
-		t.Fatal(err)
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "queryCommentItems" {
+			continue
+		}
+		batchCalls := 0
+		inspectCalls := func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			method, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			switch method.Sel.Name {
+			case "resolveStoredOSSObjectAccessURLWithConfig":
+				t.Error("comment assembly still invokes the per-image database resolver")
+			case "resolveStoredOSSImageURLsWithConfig":
+				batchCalls++
+			}
+			return true
+		}
+		ast.Inspect(function.Body, inspectCalls)
+		if batchCalls != 1 {
+			t.Fatalf("comment assembly batch calls=%d want exactly one", batchCalls)
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			var body *ast.BlockStmt
+			switch loop := node.(type) {
+			case *ast.ForStmt:
+				body = loop.Body
+			case *ast.RangeStmt:
+				body = loop.Body
+			default:
+				return true
+			}
+			batchCalls = 0
+			ast.Inspect(body, inspectCalls)
+			if batchCalls != 0 {
+				t.Error("comment assembly invokes the batch resolver inside an item loop")
+			}
+			return false
+		})
+		return
 	}
-	source := string(sourceBytes) + "\n" + string(detailBytes)
-	start := strings.Index(source, "func (s *Server) queryCommentItems")
-	end := strings.Index(source[start:], "var errCommentAttachmentUnavailable")
-	if start < 0 || end < 0 {
-		t.Fatal("comment assembly bounds missing")
-	}
-	body := source[start : start+end]
-	if !strings.Contains(body, "resolvedAvatarURLs") {
-		t.Fatal("comment assembly does not cache unique avatar access URLs")
-	}
+	t.Fatal("comment assembly function missing")
 }

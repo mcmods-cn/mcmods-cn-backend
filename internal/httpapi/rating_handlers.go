@@ -284,12 +284,17 @@ func (s *Server) ratingReviews(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ossConfig := s.ossConfigFromSettings(r.Context())
+	avatarURLs := make([]string, len(items))
 	for index := range items {
-		items[index].AuthorAvatar, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossConfig, items[index].AuthorAvatar)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to resolve rating author avatar")
-			return
-		}
+		avatarURLs[index] = items[index].AuthorAvatar
+	}
+	avatarURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossConfig, avatarURLs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve rating author avatar")
+		return
+	}
+	for index := range items {
+		items[index].AuthorAvatar = avatarURLs[index]
 	}
 	nextCursor := ""
 	if hasMore && len(pageRows) > 0 {
@@ -302,6 +307,10 @@ func (s *Server) ratingReviews(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) resolveRateableTarget(ctx context.Context, rawType, rawPublicID string) (rateableTarget, error) {
+	return resolveRateableTargetWithQueryer(ctx, s.db, rawType, rawPublicID)
+}
+
+func resolveRateableTargetWithQueryer(ctx context.Context, query revisionQuery, rawType, rawPublicID string) (rateableTarget, error) {
 	targetType := normalizeRatingTargetType(rawType)
 	publicID := strings.ToLower(strings.TrimSpace(rawPublicID))
 	if targetType == "" || !validCatalogPublicID(publicID) {
@@ -310,7 +319,7 @@ func (s *Server) resolveRateableTarget(ctx context.Context, rawType, rawPublicID
 	var target rateableTarget
 	target.Type = targetType
 	target.PublicID = publicID
-	if err := s.db.QueryRow(ctx, `select id,internal_id from public_routes where entity_type=$1 and public_id=$2`,
+	if err := query.QueryRow(ctx, `select id,internal_id from public_routes where entity_type=$1 and public_id=$2`,
 		targetType, publicID).Scan(&target.RouteID, &target.InternalID); err != nil {
 		return rateableTarget{}, err
 	}
@@ -318,13 +327,13 @@ func (s *Server) resolveRateableTarget(ctx context.Context, rawType, rawPublicID
 	var err error
 	switch targetType {
 	case "mod":
-		err = s.db.QueryRow(ctx, `select review_status from mods where id=$1`, target.InternalID).Scan(&status)
+		err = query.QueryRow(ctx, `select review_status from mods where id=$1`, target.InternalID).Scan(&status)
 	case "modpack":
-		err = s.db.QueryRow(ctx, `select review_status from modpacks where id=$1`, target.InternalID).Scan(&status)
+		err = query.QueryRow(ctx, `select review_status from modpacks where id=$1`, target.InternalID).Scan(&status)
 	case "minecraft_server":
-		err = s.db.QueryRow(ctx, `select review_status from minecraft_servers where id=$1`, target.InternalID).Scan(&status)
+		err = query.QueryRow(ctx, `select review_status from minecraft_servers where id=$1`, target.InternalID).Scan(&status)
 	default:
-		err = s.db.QueryRow(ctx, `select review_status from simple_projects where id=$1 and project_type=$2`,
+		err = query.QueryRow(ctx, `select review_status from simple_projects where id=$1 and project_type=$2`,
 			target.InternalID, targetType).Scan(&status)
 	}
 	if err != nil {

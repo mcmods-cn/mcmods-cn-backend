@@ -55,6 +55,7 @@ func TestCatalogDatasetVersionCommitRollbackAndPlanIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer rollbackIntegrationTransaction(tx)
 	if err = bumpCatalogDatasetVersionTx(ctx, tx); err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +70,7 @@ func TestCatalogDatasetVersionCommitRollbackAndPlanIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer rollbackIntegrationTransaction(tx)
 	if err = bumpCatalogDatasetVersionTx(ctx, tx); err != nil {
 		t.Fatal(err)
 	}
@@ -109,6 +111,7 @@ func TestCatalogDatasetVersionCommitRollbackAndPlanIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer rollbackIntegrationTransaction(tx)
 	if err = bumpCatalogDatasetVersionTx(ctx, tx); err == nil || !strings.Contains(err.Error(), "singleton is missing") {
 		t.Fatalf("missing version singleton returned %v", err)
 	}

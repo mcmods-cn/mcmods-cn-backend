@@ -404,7 +404,7 @@ func (s *Server) transferCurrency(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to debit sender")
 		return
 	}
-	recipientBalance, err := changeCurrencyBalanceByIDTx(
+	_, err = changeCurrencyBalanceByIDTx(
 		r.Context(), tx, recipientID, currencyID, received, "transfer_in",
 		&senderID, "transfer", referenceKey, map[string]any{"tax": tax, "sent": request.Amount},
 	)
@@ -418,7 +418,7 @@ func (s *Server) transferCurrency(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"currency": request.Currency, "amount": request.Amount, "tax": tax, "received": received,
-		"senderBalance": senderBalance, "recipientBalance": recipientBalance,
+		"senderBalance": senderBalance,
 	})
 }
 
@@ -466,7 +466,7 @@ func (s *Server) purchaseShopItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "shop item type is not supported")
 		return
 	}
-	if permission != "" && !s.userHasPermission(r.Context(), userID, permission) {
+	if permission != "" && !claimsAllow(currentClaims(r), permission) {
 		writeError(w, http.StatusForbidden, "missing permission to purchase this item")
 		return
 	}
@@ -553,7 +553,7 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load shop item")
 		return
 	}
-	if permission != "" && !s.userHasPermission(r.Context(), userID, permission) {
+	if permission != "" && !claimsAllow(currentClaims(r), permission) {
 		writeError(w, http.StatusForbidden, "missing permission to use this item")
 		return
 	}
@@ -579,7 +579,7 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "profile background file is required")
 			return
 		}
-		backgroundURL := ossStoredObjectURL(s.ossConfigFromSettings(r.Context()), file.ObjectKey)
+		backgroundURL := ossStoredObjectURL(s.ossConfigFromSettingsWithQueryer(r.Context(), tx), file.ObjectKey)
 		if _, err = tx.Exec(r.Context(), `update users set profile_background_file_id=$2,
 			profile_background_url=$3,updated_at=now() where id=$1`, userID, file.ID, backgroundURL); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to update profile background")
@@ -600,7 +600,7 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "a collected project target is required")
 			return
 		}
-		target, resolveErr := s.resolveRateableTarget(r.Context(), targetType, request.TargetID)
+		target, resolveErr := resolveRateableTargetWithQueryer(r.Context(), tx, targetType, request.TargetID)
 		if resolveErr != nil {
 			writeError(w, http.StatusNotFound, "heat boost target was not found")
 			return
@@ -990,6 +990,14 @@ func (s *Server) loadCurrencies(ctx context.Context, includeDisabled bool) ([]cu
 }
 
 func (s *Server) loadShopItems(ctx context.Context, includeDisabled bool, userID int64) ([]map[string]any, error) {
+	var resolved []security.PermissionRule
+	if userID > 0 {
+		_, permissions, permissionErr := s.resolveUserRootPermissions(ctx, userID)
+		if permissionErr != nil {
+			return nil, permissionErr
+		}
+		resolved = permissions
+	}
 	where := "where item.status='active' and currency.status='active'"
 	if includeDisabled {
 		where = ""
@@ -1005,14 +1013,6 @@ func (s *Server) loadShopItems(ctx context.Context, includeDisabled bool, userID
 		return nil, err
 	}
 	defer rows.Close()
-	var resolved []security.PermissionRule
-	if userID > 0 {
-		_, permissions, permissionErr := s.resolveUserRootPermissions(ctx, userID)
-		if permissionErr != nil {
-			return nil, permissionErr
-		}
-		resolved = permissions
-	}
 	allows := func(permission string) bool {
 		if permission == "" {
 			return true
