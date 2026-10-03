@@ -8,6 +8,28 @@
 uploading / failed；queued 的重复 complete 保持既有幂等返回。锁等待期间发生
 删除时返回资源不存在，不把 deleted 重置成 queued。无 Schema 或 API URL 变化。
 
+蓝图派生物 PUT 返回后重新核对任务 run token、attempt，以及精确 artifact/file/key
+身份和 pending 状态。失去主体或租约的结果返回 lease lost；独立于请求取消的
+10 秒清理上下文把该 key 的删除意图重新入队。已经 abandoned/deleted 的同一
+派生物允许重开 completed/dead 删除意图，继续复用唯一 Outbox 行；active 文件
+与其他 attempt/key 不允许走这条补偿。数据库写入失败明确返回，事务不部分提交。
+若物理 DELETE 已结束但旧任务尚未确认，精确 file/bucket/endpoint/key 的 processing
+删除任务也会在同一事务中重置为 pending 并清除旧 token。该更新等待删除执行者
+持有的共享行锁及 HTTP 副作用结束；旧 complete/failure 的 token 条件写入随后失败，
+新执行者再删除迟到字节。其他文件实例的 token 不允许重置，补偿写入失败全部回滚。
+这条 PUT 后补偿只由新版本蓝图 worker 执行。部署时先排空或停止旧蓝图 worker，
+再替换 worker 与 API；保留现有持久化队列与恢复机制。旧 worker 在滚动替换中仍然
+活跃时会执行旧路径，不能声称新旧 worker 混合运行也具备这条严格补偿保障。
+本说明是部署顺序要求，本次没有停止或部署任何生产 worker。
+这覆盖活跃进程在首次删除完成后才收到迟到 PUT 结果的窗口；真实 PostgreSQL
+和本地 OSS HTTP 验证租约回收、任务/蓝图级联删除、清理故障回滚、取消后清理、
+错误 key 拒绝及正常新 attempt 的 active 保护。
+
+数据库与外部 OSS 没有跨系统事务。本次不证明进程在 PUT 返回后、补偿持久化前
+崩溃，或供应商在客户端超时/取消后仍继续写入时完全不存在孤儿对象；长期数据库
+故障期间也不能保证立即清理。保留精确 key 的 artifact 和 Outbox 记录用于恢复，
+不能以此测试结果宣称全部外部对象严格一次写入/删除或生产存储已健康。
+
 creator 关系/成员/团队/作品、蓝图列表/所需模组和评论作者头像使用共享 Stored OSS
 批量授权：先完整读取并关闭列表 rows，再按整页 URL 查询权限和签名，避免持有
 连接期间回入连接池，也不对每个内部图片重复查询。未经可见绑定或所有者许可的
