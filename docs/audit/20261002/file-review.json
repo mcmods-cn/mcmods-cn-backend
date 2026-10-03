@@ -1,11 +1,11 @@
 {
   "versions": {
     "mcmods-cn-backend": {
-      "head": "f3afe0d1c53b2c0ee868744158f18369191cbcdd",
+      "head": "0d01bbaf916ed334f21955040a8e971996f93af2",
       "branch": "codex/acceptance-followup-20261003"
     },
     "mcmods-cn-frontend": {
-      "head": "1f5c77f75fef20429d6328d007051fe8647a20b4",
+      "head": "b46d533f8b9dfcfb8da590ed72756f07627703b6",
       "branch": "codex/acceptance-followup-20261003"
     }
   },
@@ -4292,14 +4292,14 @@
       "path": "docs/audit/20261003/ACCEPTANCE.md",
       "owner": "root",
       "category": ".md",
-      "sha256": "b3398f846102e1d6c552550479bcb8ff618a2f649980bfa7f40f8dc7b8d15978",
-      "blob_sha": "f600482f9ea2db94c46cc37573eba0e62b9889cf",
-      "lines": 143,
+      "sha256": "f3e1a5a1500a3296cc552a13bfe3c0bd0126ad815d8d1345650c2da938b18ec9",
+      "blob_sha": "58db9d115c9e409099943dc38fc8d9080954a785",
+      "lines": 144,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          143
+          144
         ]
       ],
       "content_read": true,
@@ -4458,14 +4458,14 @@
       "path": "docs/audit/20261003/acceptance-results.json",
       "owner": "root",
       "category": ".json",
-      "sha256": "50d2764b15fd4c48f275b7983c13f016a4d8641e605e2667c384ba59dd316218",
-      "blob_sha": "8c5bec967c00603a2d04d9ebc4927b0a82045bf0",
-      "lines": 177,
+      "sha256": "2e2a27f21f7bcbfce200c5683ea23f932b432360ec21c7ffb3078dd6d7e12d5c",
+      "blob_sha": "2ffacfd6979188bd4541171b9808a7f0a993fa2f",
+      "lines": 183,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          177
+          183
         ]
       ],
       "content_read": true,
@@ -107718,39 +107718,65 @@
       "path": "browser-tests/oct03-root-acceptance.browser.mts",
       "owner": "root",
       "category": ".mts",
-      "sha256": "078b2330e597abb0f317e270ff3b0587a07c3f1647a136078ce1d4539972e892",
-      "blob_sha": "7b54a5d6f5653d539f02566793fb351f8038763d",
-      "lines": 478,
+      "sha256": "a1026076c187a284e6a3d1a92f8ee0318e5d4bda69461e922af88537d0bcbe1c",
+      "blob_sha": "ed60ccc6ee34966b84aca1c57699c97eb7070b92",
+      "lines": 493,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          478
+          493
         ]
       ],
       "content_read": true,
       "semantic_review": true,
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
-      "behavior_claim": false,
-      "behavior_evidence": [],
+      "behavior_claim": true,
+      "behavior_evidence": [
+        {
+          "source": "root-server-selector-final-proof.json",
+          "human_behavior_claim": true,
+          "version_matches_current": true,
+          "validation": [
+            {
+              "status": "FAIL_EXPECTED",
+              "evidence": "20261003/server-selector-staging-red.log",
+              "scope": "Exact old selector in deterministic observed staging shape returns2; original remote167PASS/1FAIL preserved separately."
+            },
+            {
+              "status": "PASS",
+              "evidence": "20261003/server-selector-staging-green.log",
+              "scope": "One actual production case passes original stale-cursor and request assertions."
+            },
+            {
+              "status": "FAIL_EXPECTED",
+              "evidence": "20261003/server-selector-two-visible-negative.log",
+              "scope": "Two visible controls remain rejected; no first/nth selection or UI hiding."
+            }
+          ]
+        }
+      ],
       "validation_documents": [
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
       ],
-      "focus": "Complete final 12 controlled-API production-browser assertions read; actual native cancellation, popup message, failure retention, scope cursors, retry and no-write paths reviewed. No backend persistence claim.",
+      "focus": "All original journey cases; server scope/cursor regression selects exactly one visible input and deterministic hidden SSR staging clone; two-visible negative still fails.",
       "focus_symbols": [],
       "responsibility": "",
       "call_chain": "",
-      "findings": [],
+      "findings": [
+        "OCT03-R-001"
+      ],
       "proofs": [
-        "100-root-final-review.json"
+        "root-server-selector-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "100-root-final-review.json",
-        "new-task-ownership.json"
+        "new-task-ownership.json",
+        "root-server-selector-final-proof.json"
       ]
     },
     {
@@ -108567,14 +108593,14 @@
       "path": "docs/audit/acceptance-20261003.md",
       "owner": "root",
       "category": ".md",
-      "sha256": "f97f03d6ef507a4428c280417f578c8fd4d5f3ef5ea307acf9a38e45c778fc2d",
-      "blob_sha": "a76466dc6b07469da9b22f510e9de783659127d8",
-      "lines": 94,
+      "sha256": "f3f9df9093effe80059fb79794d71eefbf752f9783e589ddfeb55936d4947139",
+      "blob_sha": "b6a59a7695ae513729d115765ed1ec8676153595",
+      "lines": 102,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          94
+          102
         ]
       ],
       "content_read": true,

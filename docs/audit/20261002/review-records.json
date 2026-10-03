@@ -215571,11 +215571,11 @@
       "read_ranges": [
         [
           1,
-          143
+          144
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "b3398f846102e1d6c552550479bcb8ff618a2f649980bfa7f40f8dc7b8d15978",
+      "final_sha256": "f3e1a5a1500a3296cc552a13bfe3c0bd0126ad815d8d1345650c2da938b18ec9",
       "blob_sha": "",
       "baseline": "",
       "baseline_sha256": "",
@@ -215603,11 +215603,11 @@
       "read_ranges": [
         [
           1,
-          177
+          183
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "50d2764b15fd4c48f275b7983c13f016a4d8641e605e2667c384ba59dd316218",
+      "final_sha256": "2e2a27f21f7bcbfce200c5683ea23f932b432360ec21c7ffb3078dd6d7e12d5c",
       "blob_sha": "",
       "baseline": "",
       "baseline_sha256": "",
@@ -215667,11 +215667,11 @@
       "read_ranges": [
         [
           1,
-          94
+          102
         ]
       ],
       "semantic_review": true,
-      "final_sha256": "f97f03d6ef507a4428c280417f578c8fd4d5f3ef5ea307acf9a38e45c778fc2d",
+      "final_sha256": "f3f9df9093effe80059fb79794d71eefbf752f9783e589ddfeb55936d4947139",
       "blob_sha": "",
       "baseline": "",
       "baseline_sha256": "",
@@ -215746,6 +215746,54 @@
       "exclusion": "",
       "findings": [],
       "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "browser-tests/oct03-root-acceptance.browser.mts",
+      "owner": "INDEPENDENT",
+      "source": "root-server-selector-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          493
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "a1026076c187a284e6a3d1a92f8ee0318e5d4bda69461e922af88537d0bcbe1c",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "All original journey cases; server scope/cursor regression selects exactly one visible input and deterministic hidden SSR staging clone; two-visible negative still fails.",
+      "focus_symbols": [],
+      "responsibility": "",
+      "call_chain": "",
+      "validation": [
+        {
+          "status": "FAIL_EXPECTED",
+          "evidence": "20261003/server-selector-staging-red.log",
+          "scope": "Exact old selector in deterministic observed staging shape returns2; original remote167PASS/1FAIL preserved separately."
+        },
+        {
+          "status": "PASS",
+          "evidence": "20261003/server-selector-staging-green.log",
+          "scope": "One actual production case passes original stale-cursor and request assertions."
+        },
+        {
+          "status": "FAIL_EXPECTED",
+          "evidence": "20261003/server-selector-two-visible-negative.log",
+          "scope": "Two visible controls remain rejected; no first/nth selection or UI hiding."
+        }
+      ],
+      "exclusion": "",
+      "findings": [
+        "OCT03-R-001"
+      ],
+      "behavior_claim": true,
       "deletion_reviewed": false,
       "deletion_reason": ""
     }
