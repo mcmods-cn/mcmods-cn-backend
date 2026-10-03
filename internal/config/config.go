@@ -573,17 +573,21 @@ func (cfg Config) Validate() error {
 			problems = append(problems, errors.New("TYPESENSE_COLLECTION_PREFIX may only contain letters, numbers, underscores, and hyphens"))
 		}
 	}
-	if cfg.AntiAbuse.Enabled {
+	// Public presence signs anonymous identities even when mutation anti-abuse
+	// is disabled. Its production secret must not depend on that feature flag.
+	if cfg.AntiAbuse.Enabled || (environment != "development" && environment != "test") {
 		if len(strings.TrimSpace(cfg.AntiAbuse.HMACSecret)) < 32 {
 			problems = append(problems, errors.New("ANTI_ABUSE_HMAC_SECRET must contain at least 32 characters"))
 		}
+		if environment != "development" && environment != "test" && strings.TrimSpace(cfg.AntiAbuse.HMACSecret) == defaultDevelopmentAntiAbuseHMACSecret {
+			problems = append(problems, errors.New("ANTI_ABUSE_HMAC_SECRET must be changed outside development"))
+		}
+	}
+	if cfg.AntiAbuse.Enabled {
 		if len(strings.TrimSpace(cfg.AntiAbuse.IPHashSecret)) < 32 {
 			problems = append(problems, errors.New("ANTI_ABUSE_IP_HASH_SECRET must contain at least 32 characters"))
 		}
 		if environment != "development" && environment != "test" {
-			if cfg.AntiAbuse.HMACSecret == defaultDevelopmentAntiAbuseHMACSecret {
-				problems = append(problems, errors.New("ANTI_ABUSE_HMAC_SECRET must be changed outside development"))
-			}
 			if cfg.AntiAbuse.IPHashSecret == defaultDevelopmentAntiAbuseIPSecret {
 				problems = append(problems, errors.New("ANTI_ABUSE_IP_HASH_SECRET must be changed outside development"))
 			}
