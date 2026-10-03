@@ -101,6 +101,19 @@ npm run test:browser
 Typesense 的真实回环服务是可选的单独测试，见 [搜索投影说明](typesense-search.md)。
 所有这些通过结果都不证明生产数据健康、备份可恢复或真实供应商语义质量。
 
+## 临时 schema 安装回归
+
+`InstallEphemeralSchema` 为每次安装编译函数资格化模式，ASCII 语句通过组合模式单次扫描，
+含非 ASCII 内容或折叠重名的情形保留原顺序转换。全部真实 schema 语句有逐字节等价回归。
+不会跨安装缓存或改变临时命名空间、事务和清理规则。
+这是测试工具的重复编译开销修复，不改变生产迁移。原有 30 秒热度回归预算保留。
+完整安装、触发器行为、清理及 public generation 保持可用以下真实 PostgreSQL 回归验证：
+
+```sh
+python3 -B tools/testing/isolated_environment.py run -- go test -race -p 1 ./internal/database \
+  -run '^(TestOCT03CEphemeralFunctionQualification.*|TestRefreshContentPopularityThresholdLookupIntegration|TestInstallEphemeralSchemaStaysInSessionTemporaryNamespaceIntegration|TestUserContentCreationFactsFollowAuthoritativeActorLifecycleIntegration)$' -count=1 -v
+```
+
 ## 结束与失败恢复
 
 先停止本次启动的前后端进程，然后：
