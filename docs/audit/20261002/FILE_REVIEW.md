@@ -12,8 +12,8 @@
 
 | 仓库 | 总数 | 完整 | 部分 | 未审 | 排除 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| mcmods-cn-backend | 1366 | 1327 | 0 | 0 | 39 |
-| mcmods-cn-frontend | 649 | 647 | 0 | 0 | 2 |
+| mcmods-cn-backend | 1390 | 1351 | 0 | 0 | 39 |
+| mcmods-cn-frontend | 664 | 662 | 0 | 0 | 2 |
 
 复现（Python 标准库，无网络或生产服务）：
 
@@ -82,6 +82,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/YGGDRASIL_SESSION_SECURITY.md | backend_c | 27 | complete | 1–27 | 6d339c07d18cda568aeca2431bd3503cbbba5715ff9c47039a45c05fc9b53ff1 |  |
 | mcmods-cn-backend/cmd/db-function-repair/main.go | database_docs | 137 | complete | 1–137 | 6110086b558a175c51994d0475340d1ed05bd23083b8061b6c7592cfb397c3fe |  |
 | mcmods-cn-backend/cmd/db-function-repair/main_test.go | database_docs | 42 | complete | 1–42 | 78e019671c83a41c291a3750554d35732c7803f40f64a2d4777b8849ddfb0de1 |  |
+| mcmods-cn-backend/cmd/db-index-repair/main.go | backend_c | 99 | complete | 1–99 | 2772aa826e76c8a97bb707158ee6c63bca15225cddd827e52459d0ad22383c52 |  |
 | mcmods-cn-backend/cmd/db-log-redaction-upgrade/main.go | database_docs | 88 | complete | 1–88 | ce8b9b0920d845b468946506a2a2dee11d24acac9fac7e8fb20c05701ed6aa47 |  |
 | mcmods-cn-backend/cmd/db-log-redaction-upgrade/main_test.go | database_docs | 31 | complete | 1–31 | 8fc60d3ddef2a19c4ae227bf358bd08c774899e624ea9e236b5c05686fa73f4f |  |
 | mcmods-cn-backend/cmd/db-reset/main.go | root | 45 | complete | 1–45 | f88b545d6c2323a740d41c9b99a8dbe2620dfe5fe9919d6115ba650e20e440bc |  |
@@ -93,7 +94,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/docs/anti-abuse-administration.md | backend_a | 7 | complete | 1–7 | 79b06786a8693950d1d58474336c6206f5f80afb16c6632055f2d9404178653f |  |
 | mcmods-cn-backend/docs/audit/20261002/AI_REVIEW.md | backend_a | 111 | complete | 1–111 | 7a2a23e1649e1639edc45ac8bd0ecf55f5e6c171bb5e44a4c0d3eba56d461bc6 |  |
 | mcmods-cn-backend/docs/audit/20261002/DATABASE_REVIEW.md | database_docs | 210 | complete | 1–210 | aec45d12bdc0ee2362f665eb6e580c706c591344845004eddbdd90be7e429a73 |  |
-| mcmods-cn-backend/docs/audit/20261002/FILE_REVIEW.md | UNASSIGNED | 0 | excluded |  | 未读取 | Generated ledger output; review generator and human source records, not self-referential bytes |
+| mcmods-cn-backend/docs/audit/20261002/FILE_REVIEW.md | root | 0 | excluded |  | 未读取 | Generated ledger output; review generator and human source records, not self-referential bytes |
 | mcmods-cn-backend/docs/audit/20261002/ISSUES.md | backend_c | 305 | complete | 1–76, 77–152, 153–228, 229–305 | c59998968cf5e251844f06fe723b45f3d1bc9ceada72dc226cbec41a4b6baa68 |  |
 | mcmods-cn-backend/docs/audit/20261002/LEGACY_REVIEW.json | backend_a | 118566 | excluded |  | 9ba3d65d87626a75bd81aa6892f056aa43801197ccdaee2a461c0bb8e56799d6 | Mechanical derived JSON from449 explicitly human-reviewed records; full original fields and hand judgments embedded, schema/canonicalhash/ID/field invariants validated; not manually maintained business/translation JSON |
 | mcmods-cn-backend/docs/audit/20261002/LEGACY_REVIEW.md | backend_a | 527 | complete | 1–527 | 1941169c56b8508b18db34ef85a959ab26a9fc6d45f69aef2c29512d1ed4a933 |  |
@@ -101,12 +102,16 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/docs/audit/20261002/PUBLIC_SOURCE_CHECK.md | backend_a | 45 | complete | 1–45 | ffa41e1b52ab90c88cc36e17f932a5dd6d9eab0635c23cbffe11b6805ec6c77f |  |
 | mcmods-cn-backend/docs/audit/20261002/ROOT_PROGRESS.md | root | 77 | complete | 1–77 | 2776b4042a4f30fab394bd0dbcf77bb895c925253e7304a885c2b862e78495dd |  |
 | mcmods-cn-backend/docs/audit/20261002/SECURITY_REVIEW.md | backend_b | 105 | complete | 1–105 | da8eadd37f178f9205e78f445e41a97de4e1a528b72d6ac6c07a8314cacd0398 |  |
-| mcmods-cn-backend/docs/audit/20261002/SUMMARY.md | root | 135 | complete | 1–135 | 408fb004ad1ec0e516e32c5a4109ee207e0fc13474da7e2ec045cbab3f0f2a38 |  |
-| mcmods-cn-backend/docs/audit/20261002/VERIFICATION.md | root | 110 | complete | 1–110 | ccefcd8f56d458c2d59cd99c1ba3e0af4cc7e938c2b931c2521408af2e9c8445 |  |
-| mcmods-cn-backend/docs/audit/20261002/file-review.json | UNASSIGNED | 0 | excluded |  | 未读取 | Generated ledger output; review generator and human source records, not self-referential bytes |
+| mcmods-cn-backend/docs/audit/20261002/SUMMARY.md | root | 138 | complete | 1–138 | 122989072daccda3a88e4d5d5b2829922bf597cbe0e756aee99f03faa667cb96 |  |
+| mcmods-cn-backend/docs/audit/20261002/VERIFICATION.md | root | 113 | complete | 1–113 | 6070ed1c44720e3928885be8b91d712963316f56ab164377aeef9faea7880e55 |  |
+| mcmods-cn-backend/docs/audit/20261002/file-review.json | root | 0 | excluded |  | 未读取 | Generated ledger output; review generator and human source records, not self-referential bytes |
 | mcmods-cn-backend/docs/audit/20261002/findings.json | backend_c | 12833 | complete | 1–12833 | ceaee31f5792fdc7366c2777c9b95f9cb6eb24d3eb6aaeefd539c039e5183486 |  |
-| mcmods-cn-backend/docs/audit/20261002/review-records.json | UNASSIGNED | 0 | excluded |  | 未读取 | Generated ledger output; review generator and human source records, not self-referential bytes |
+| mcmods-cn-backend/docs/audit/20261002/review-records.json | root | 0 | excluded |  | 未读取 | Generated ledger output; review generator and human source records, not self-referential bytes |
 | mcmods-cn-backend/docs/audit/20261002/verification-results.json | root | 1132 | complete | 1–1132 | 053cb739752eaa14762bf2c57ffab871616616ad705bd3ac5361b1361a9df159 |  |
+| mcmods-cn-backend/docs/audit/20261003/ACCEPTANCE.md | root | 143 | complete | 1–143 | b3398f846102e1d6c552550479bcb8ff618a2f649980bfa7f40f8dc7b8d15978 |  |
+| mcmods-cn-backend/docs/audit/20261003/LIVE_ACCEPTANCE.md | backend_a | 104 | complete | 1–104 | 7c22cf6b32d3e40b4077c2b327bb3b21522889c1dbf38e56506fd1d5d5e456ea |  |
+| mcmods-cn-backend/docs/audit/20261003/SECURITY.md | backend_a | 112 | complete | 1–112 | dce5b6a1b5d0ca44372c89e0c38d5086d9691cd009e61805d25ae849dff68f2f |  |
+| mcmods-cn-backend/docs/audit/20261003/acceptance-results.json | root | 177 | complete | 1–177 | 50d2764b15fd4c48f275b7983c13f016a4d8641e605e2667c384ba59dd316218 |  |
 | mcmods-cn-backend/docs/audit/full-project-audit/00_EXECUTIVE_SUMMARY.md | database_docs | 70 | complete | 1–70 | 1dbb60c2aeda3c8009abe59b9fa5e264b6397afb397cdcca608ae769efc6c8a7 |  |
 | mcmods-cn-backend/docs/audit/full-project-audit/01_AUDIT_COVERAGE.md | database_docs | 112 | complete | 1–112 | 05aed62d6c14154d7abacda9dd211836da66a68e2859c1e015782ab8a5d5e281 |  |
 | mcmods-cn-backend/docs/audit/full-project-audit/02_ARCHITECTURE_AND_MODULE_RELATIONS.md | database_docs | 141 | complete | 1–141 | d6c80e4dbaf46e7b0c4b92dbdc611560e8cf80997ca0763beab1335c9c3387df |  |
@@ -124,7 +129,8 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/docs/audit/full-project-audit/database/SCHEMA_CATALOG.md | root | 7326 | excluded |  | efa1491f2c838349d64276546dd2327178afe655c9079c55fe6661ae15dd7059 | historical machine-generated inventory/results |
 | mcmods-cn-backend/docs/audit/full-project-audit/modules/API_ROUTE_INVENTORY.md | root | 497 | excluded |  | c32e7a04f3cafd691749f1913c2e1d4281797b007d722a3fccb0b5028a56fc84 | historical machine-generated inventory/results |
 | mcmods-cn-backend/docs/audit/full-project-audit/modules/FILE_COVERAGE_INVENTORY.md | root | 911 | excluded |  | cb618a07ae8fa935b03d1b6b3282b451f7b89a31fc486903479dc65ce48e738c | historical machine-generated inventory/results |
-| mcmods-cn-backend/docs/blueprint-and-comment-lifecycle.md | backend_a | 46 | complete | 1–46 | 380082ed8b82f2569df7bcf92c7bc016aa48315cc3262adba30798f8a94d00af |  |
+| mcmods-cn-backend/docs/blueprint-and-comment-lifecycle.md | backend_a | 68 | complete | 1–68 | 96ef5aca270be9f1ae7e33c65d2a6c484ab6e66bb78af0376f75c0a566222d0b |  |
+| mcmods-cn-backend/docs/catalog-tag-prefix-index.md | backend_c | 116 | complete | 1–116 | 7f0f46f97e4d9873e2eb5b72f95904b3d440c40d53cad4af8e6931fe907327a2 |  |
 | mcmods-cn-backend/docs/changelog-update-errors.md | backend_b | 24 | complete | 1–24 | bffa7d9b66d949f51c84159c69c25f40feaecb835e9b16204736d5c0af9d086b |  |
 | mcmods-cn-backend/docs/creator-identity-claims.md | backend_a | 11 | complete | 1–11 | 7a28410baa2834a541cd8a7793b160ed379dbca2981e8f659c0bf3790b084080 |  |
 | mcmods-cn-backend/docs/database-function-repair.md | database_docs | 61 | complete | 1–61 | 29090434d18be0fa5260982598b8bebab33e79351a0bf99ccad1b32c00e1ab92 |  |
@@ -135,6 +141,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/docs/load-observer.md | database_docs | 27 | complete | 1–27 | 29e9cff5ca48accaac0b5751cc04c3bee2e63323e5231813c2e5aac8d1871196 |  |
 | mcmods-cn-backend/docs/load-testing.md | database_docs | 47 | complete | 1–47 | 720c41100f043158af1513de91cabf1c0e18dd23bd753f41f2ba5c4fa9b83c0d |  |
 | mcmods-cn-backend/docs/log-redaction-upgrade.md | database_docs | 78 | complete | 1–78 | e16ef9ca37317385ae8f1e45964828fc58d547e7e47d6f5d213b50b34fa02f62 |  |
+| mcmods-cn-backend/docs/minecraft-server-probing.md | backend_b | 17 | complete | 1–17 | 10231aa08b4bc761c90dcb9c2acdfe5da6e2b8bd0a0e6ba6235de54ee9c5544e |  |
 | mcmods-cn-backend/docs/nats-settings.md | backend_b | 17 | complete | 1–17 | c786cb6fee7f35f6f68283c93fbc523baab80f7314dc3f6be691ea18f1532cab |  |
 | mcmods-cn-backend/docs/oauth-settings.md | backend_b | 39 | complete | 1–39 | 8136599d50668898fa087d463e5dc4f6eaa715f9ceb43bae83ef987b83cf1cbd |  |
 | mcmods-cn-backend/docs/oss-object-layout.md | database_docs | 156 | complete | 1–156 | 7ae07c255eee67a57f50d4c22c478ba5d176b24f966ed5f56b13d6056ebcf905 |  |
@@ -144,7 +151,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/docs/project-reviews.md | backend_b | 38 | complete | 1–38 | ee088e626ac41e6be17d153a941902bc1dab77c1033e0933c408f2c92aa7fa49 |  |
 | mcmods-cn-backend/docs/public-catalog-source-policy.md | backend_a | 15 | complete | 1–15 | 9c1f705087aaba020fbed601763bd4bbdb00135a32b3e47efdd8aef0afb00c05 |  |
 | mcmods-cn-backend/docs/queue-recovery.md | root | 37 | complete | 1–37 | 0dfc79fb33850f9130d02595b0d3c6800ba7c38dd85a9856f648d0a08f3e3cd6 |  |
-| mcmods-cn-backend/docs/redis-rate-limiting.md | database_docs | 28 | complete | 1–28 | 1a764ad138a74903923116dbd5425071ea6c0545ff060c7e83aef78963880991 |  |
+| mcmods-cn-backend/docs/redis-rate-limiting.md | database_docs | 36 | complete | 1–36 | 01586dca39119bda5d42034e7e15302f3264c36d1bff3aaecaaf734351ad3f76 |  |
 | mcmods-cn-backend/docs/remediation/full-audit-remediation/00_MASTER_PLAN.md | database_docs | 52 | complete | 1–52 | a957c82fa07aeb0cbf3cab5352969dd718ced594e9e8ebd4f37e2226be7a20f1 |  |
 | mcmods-cn-backend/docs/remediation/full-audit-remediation/01_FINDING_STATUS.md | database_docs | 459 | complete | 1–459 | 28ab8eee326279e0354c5eb09ecf7c4899c27ca7c460f86e6730d22ac6436813 |  |
 | mcmods-cn-backend/docs/remediation/full-audit-remediation/02_ROOT_CAUSE_CLUSTERS.md | database_docs | 231 | complete | 1–231 | 4b5a26ad5a28ba597877a09d53d9624de311747987c4d60dc64711388ada4471 |  |
@@ -159,7 +166,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/docs/seed-crawler-leases.md | root | 36 | complete | 1–36 | b1c429a8299b1159c11fa17306c87c6b95b4812a20915aa6f560066b48c65f8b |  |
 | mcmods-cn-backend/docs/session-revocation.md | backend_a | 43 | complete | 1–43 | 3037ab4d2b0bd22f7c5565b2e541ab04c5edebde7f5085cdae0d93cf33a8b969 |  |
 | mcmods-cn-backend/docs/task-configuration.md | backend_b | 9 | complete | 1–9 | 0985302d4b7ad67c5765e2cdda77507a0f6d4932e2366ae9193c7af3df21f125 |  |
-| mcmods-cn-backend/docs/testing-isolated-environment.md | root | 116 | complete | 1–116 | 330cb79c7d6f919a5248458e5d8c40ed9921170b2b451b5e09b486a935452366 |  |
+| mcmods-cn-backend/docs/testing-isolated-environment.md | root | 129 | complete | 1–129 | ed2b8dd2194e6b7f0d7e2c2882c05cd8b2551f82cf26e97cb33890e84ce565cd |  |
 | mcmods-cn-backend/docs/typesense-search.md | database_docs | 57 | complete | 1–57 | 97b94d6d6f12f71434f2cef2a523f7fab3e73f3c0644d6bb8b381d90b5e8ca64 |  |
 | mcmods-cn-backend/go.mod | root | 37 | complete | 1–37 | dfe2654a7b6c8c3cb9a4f2b9e62285f4406fa77cebc50ae3a38e19a6cd0adcc9 |  |
 | mcmods-cn-backend/go.sum | root | 71 | excluded |  | 3d4129080836e753e0c3b6c7580b9e3872924273a6af00c11c00f2f32384b652 | dependency lockfile: consistency/security checks |
@@ -195,11 +202,12 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/internal/catalogpolicy/modpack_categories.go | root | 39 | complete | 1–39 | 3cffc192dce2e8cc9f870254e7df95667e43ff790539df838b715ffa8a465815 |  |
 | mcmods-cn-backend/internal/catalogvisibility/sql.go | backend_a | 64 | complete | 1–64 | c798dd9b23be0d8fef9c7980b0aa1b2820d04d42f374b304cb9802aa8602e8f4 |  |
 | mcmods-cn-backend/internal/config/activity_config_test.go | root | 67 | complete | 1–67 | 0fad319847b5f2fc74eab28e23549b934346f9ec0f5228012c1ce24da52dd97e |  |
-| mcmods-cn-backend/internal/config/config.go | root | 709 | complete | 1–709 | 748a26cd35236a320a1efe53bb120141b70ad87ab69775d66c44062d6a16481b |  |
+| mcmods-cn-backend/internal/config/config.go | root | 713 | complete | 1–713 | 997504c1b5cf00c647b6584c4409ab4c80eda3d274eb7a495597bdbf075e3a75 |  |
 | mcmods-cn-backend/internal/config/database_name_redaction_test.go | root | 18 | complete | 1–18 | 695f3a21703a1af160662a9776341042adb78e275b15179bad29e7f32d75b432 |  |
 | mcmods-cn-backend/internal/config/database_reset_config_test.go | root | 41 | complete | 1–41 | f3b87a91311f1b99e68874977e9de2ce8bf6b701ae4bcf34a00fc8c8ce907f24 |  |
 | mcmods-cn-backend/internal/config/dotenv_isolation_test.go | root | 31 | complete | 1–31 | 7765a09f1a2a2ffae46dc562e9a155ad8c4690a3bc2cae02450ebceb39743939 |  |
 | mcmods-cn-backend/internal/config/nats_config_test.go | root | 12 | complete | 1–12 | d7140f62330405ae37fe58dc8e5e6eb0a34b9ac30d50c25a7d16214a6a23021e |  |
+| mcmods-cn-backend/internal/config/oct03_presence_secret_test.go | backend_b | 31 | complete | 1–31 | 4262066a5bcc09734ff70759cb4604d438a2bfc4361432b707a2bc85daee9ab2 |  |
 | mcmods-cn-backend/internal/config/sec002_supply_chain_test.go | root | 50 | complete | 1–50 | d160a3a4575c792a126f9ce2a74bd60b3107b9ec39abd27fa2c3049ba54bed22 |  |
 | mcmods-cn-backend/internal/config/sec003_rate_limit_failure_test.go | root | 37 | complete | 1–37 | 320aabd4750146810dad73f611c9afbdb78ec66741e3aa103b1ca65665be2923 |  |
 | mcmods-cn-backend/internal/config/smtp_config_test.go | root | 17 | complete | 1–17 | 1ab49685651c5c6330938e56628c600311625149f3e3b8f80526a40c277ba356 |  |
@@ -230,6 +238,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/internal/database/catalog_import_package_schema_test.go | database_docs | 30 | complete | 1–30 | 7bef1855f8167724f6c0ea202707aabe3610dad71c9d1f8354819ffe21331a6a |  |
 | mcmods-cn-backend/internal/database/catalog_reference_lookup_schema_test.go | database_docs | 26 | complete | 1–26 | ba276e4044676a6d2360591c8a91a0056e174a21535542b68e18bda9e4f40c78 |  |
 | mcmods-cn-backend/internal/database/catalog_schema.go | database_docs | 439 | complete | 1–439 | 336a8e83e4c386911176470f88c3921829d39cdb33917267365fc40257f9bbd1 |  |
+| mcmods-cn-backend/internal/database/catalog_tag_prefix_index.go | backend_c | 169 | complete | 1–169 | bfd5f6c968cf777842464abe58411ace67f7c3855078bed197fbe4b5b87f5db4 |  |
 | mcmods-cn-backend/internal/database/changelog_schema.go | database_docs | 96 | complete | 1–96 | 2f4b0d57c1d98ee937577d6ec93a3f9afbdd3baaf77eb719bb195d4813917b69 |  |
 | mcmods-cn-backend/internal/database/changelog_schema_test.go | database_docs | 25 | complete | 1–25 | aa7112840be365c2ddf5386025a896d86808b2342a4eb2375957451594136403 |  |
 | mcmods-cn-backend/internal/database/chat_presence_schema_integration_test.go | database_docs | 68 | complete | 1–68 | 598b9a69883b45e3e29072a50ee6501e74d313ae1fde778efeff6de45eb95d03 |  |
@@ -261,7 +270,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/internal/database/economy_schema_test.go | database_docs | 29 | complete | 1–29 | 9b0c6431ef5291aba57eaf6980bbd8fd071f1121f1c7734f6dd5de6693da78b9 |  |
 | mcmods-cn-backend/internal/database/engagement_export_schema.go | database_docs | 208 | complete | 1–208 | ba7f859c85af22f10712b2dff60e70b695dd08a040b9eba8d6bdeed3a2d0746f |  |
 | mcmods-cn-backend/internal/database/engagement_export_schema_test.go | database_docs | 117 | complete | 1–117 | 53a835fdc347fd071a2b7bbbb3f4bbc83bd8c582b2ce2a543c76dd099130060a |  |
-| mcmods-cn-backend/internal/database/ephemeral_schema.go | database_docs | 152 | complete | 1–152 | 79da816b12205ad7a6c7123ed3fc1130f636757dc8c86e7e6ee61f8eb7dc84e2 |  |
+| mcmods-cn-backend/internal/database/ephemeral_schema.go | database_docs | 187 | complete | 1–187 | 8c052e63dca070443bd754de320b4afe74eeecbd37dee6774066bece24a4f395 |  |
 | mcmods-cn-backend/internal/database/ephemeral_schema_integration_test.go | database_docs | 560 | complete | 1–560 | 5680d992737ef78e63c97cb3e6a311db3842fbffe946bc2408b65fcbd2d5653d |  |
 | mcmods-cn-backend/internal/database/favorite_modpack_export_pagination_schema_test.go | database_docs | 32 | complete | 1–32 | 6360bea9550ad255ddaadc60147c1817e3fa92806ee55235741d427ab03e4c38 |  |
 | mcmods-cn-backend/internal/database/favorite_pagination_schema.go | database_docs | 14 | complete | 1–14 | dd6c5f58d41e1941fd6a9a5e2c5c4a7b3d4c9f7e06a76f8fb471b35f339a579b |  |
@@ -284,7 +293,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/internal/database/map003_activity_dictionary_source_test.go | database_docs | 55 | complete | 1–55 | 7b47cdfff06c256115520804be8c14b8b24417a1a95cc2c1736b25c51b8b61bb |  |
 | mcmods-cn-backend/internal/database/markdown_playground_schema_test.go | database_docs | 24 | complete | 1–24 | 0ca49427d9dd05242e1b2145f2cc7b9dc4e94a06ea90f4c2fe01226fba6bafb4 |  |
 | mcmods-cn-backend/internal/database/migrations.go | database_docs | 1600 | complete | 1–1600 | 94f7eae9c7cb1b1ea70b5f5949385c4b1d75b50be8cde6d191c448dc646e02e4 |  |
-| mcmods-cn-backend/internal/database/migrator.go | database_docs | 607 | complete | 1–607 | 589b2f581b7909a052d5342dc7913b02aa3c46de2df19b1510525661312240fe |  |
+| mcmods-cn-backend/internal/database/migrator.go | database_docs | 610 | complete | 1–610 | 83c314a5097edd7cb382f5ec60105fc8333f80a9cf066a8553c4d58841a8c693 |  |
 | mcmods-cn-backend/internal/database/migrator_test.go | database_docs | 29 | complete | 1–29 | 411bc4a0d18debe5edca2643a69f4e5af6c152433881e6b0bab194b57391e3f5 |  |
 | mcmods-cn-backend/internal/database/mod_content_category_depth_integration_test.go | database_docs | 110 | complete | 1–110 | 5ea82aed633bacf9bd47958155f38a9c3540ee188f56835c1df9ca1307ee3f04 |  |
 | mcmods-cn-backend/internal/database/mod_content_document_schema.go | database_docs | 181 | complete | 1–181 | dde59137732a4dd08817539736a426982a2a2e5ec653eaec219df54a1af390bf |  |
@@ -297,6 +306,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/internal/database/nats_outbox_schema_consolidation_test.go | database_docs | 43 | complete | 1–43 | e0fe77a9e0b51733bd2ac7206c9b92afe6ba842c093dfd2668c174e15bf279bf |  |
 | mcmods-cn-backend/internal/database/notification_read_watermark_schema_test.go | database_docs | 39 | complete | 1–39 | c222a34940673f68827c3ac045d504ae73c4f805ba71852b595c841dcf339af8 |  |
 | mcmods-cn-backend/internal/database/oct02_projection_integration_test.go | database_docs | 111 | complete | 1–111 | bd22e13fdef752dc0ddd39b483acf8fe9babce0aec2301819707ad5018cce4c9 |  |
+| mcmods-cn-backend/internal/database/oct03_c_ephemeral_schema_test.go | backend_c | 69 | complete | 1–69 | 9d995ccf1bdfc7358af5e165923eec5cf130d82cf8ca603804013ad8522df10f |  |
 | mcmods-cn-backend/internal/database/ops010_popularity_queue_schema_test.go | database_docs | 24 | complete | 1–24 | d60d2d38757f57566e0d69c9fd316cc040f20eb1345fcc5ed2a4ae2e02aa0fb9 |  |
 | mcmods-cn-backend/internal/database/oss_deletion_schema_test.go | database_docs | 32 | complete | 1–32 | b1bc3cc9de701902816917e3ac57ea0f7b0c7c45e5998252810b58198715f211 |  |
 | mcmods-cn-backend/internal/database/oss_multipart_schema_test.go | database_docs | 30 | complete | 1–30 | 7e5dc2113bbcba3675c23da06ab965e1099e20451c4ca1e8f006fe01da296bc2 |  |
@@ -407,7 +417,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/internal/httpapi/authorization_source_integration_test.go | backend_a | 152 | complete | 1–152 | f0274b46408f1299aded7666fc2890dfc044827a0057d8f52213567a6d5d1d57 |  |
 | mcmods-cn-backend/internal/httpapi/automation_actor.go | backend_a | 29 | complete | 1–30 | 5f3339307b6496a863210b52c713db59fa5061a78c1c94c4fcad94f871d33a96 |  |
 | mcmods-cn-backend/internal/httpapi/automation_actor_integration_test.go | backend_a | 41 | complete | 1–42 | 7ff9f018ddce75fcba27cf0f025ee5cc7cc2c8a8cbab153346922b98fc53b573 |  |
-| mcmods-cn-backend/internal/httpapi/blueprint_artifacts.go | backend_a | 299 | complete | 1–299 | 96609f10d357a5f60611f51005769b3782d36288f47970782cd33d02a70062b7 |  |
+| mcmods-cn-backend/internal/httpapi/blueprint_artifacts.go | backend_a | 367 | complete | 1–367 | 999bbc07da60239f412dfba4e1fa31c9cadf26bf6cc32ee0d4be94cd7d38a5bb |  |
 | mcmods-cn-backend/internal/httpapi/blueprint_cache_test.go | backend_a | 31 | complete | 1–32 | 6b6672e3e5d4140a8e5a49aeb0f47996842d4e0175c014409dbe5ab7c7f540b0 |  |
 | mcmods-cn-backend/internal/httpapi/blueprint_codec.go | backend_a | 1059 | complete | 1–1059 | 6d3b96883d44a000252b1caf7273561c16ff259446e94e29e0a337a79c36ffa6 |  |
 | mcmods-cn-backend/internal/httpapi/blueprint_codec_test.go | backend_a | 51 | complete | 1–52 | cdd7963ed2b859b032138543f92cb501b034f26b5c0ee1175a809417b6d264be |  |
@@ -803,7 +813,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/internal/httpapi/mod_export_locale_bundles_test.go | backend_c | 87 | complete | 1–87 | d3350e5e19afeaf367ae06ca68a03c559fe92a31b33afcafd937d9764880e291 |  |
 | mcmods-cn-backend/internal/httpapi/mod_export_locales.go | backend_c | 86 | complete | 1–86 | 6c83e365dc72c38c265aa0bb693b8fd0852fabbcf50cc4e1198f89a2d413c7b9 |  |
 | mcmods-cn-backend/internal/httpapi/mod_export_orphan_sections_integration_test.go | backend_c | 65 | complete | 1–65 | 46ba6423b27212423c4277e0211efb80e951f7775acbc8ac1293a0eca1a5b97f |  |
-| mcmods-cn-backend/internal/httpapi/mod_export_pagination.go | backend_c | 221 | complete | 1–221 | 0f9977c191600d21118bc4da9a36a26309fac304cee76e0cde7380dd865e7393 |  |
+| mcmods-cn-backend/internal/httpapi/mod_export_pagination.go | backend_c | 225 | complete | 1–225 | 70fb9c349bac46c0a9c58ba61d4f4b2bcf87893fe7f47ccaed51b813bb373dd0 |  |
 | mcmods-cn-backend/internal/httpapi/mod_export_pagination_integration_test.go | backend_c | 250 | complete | 1–250 | 40f01ed1ffd4e9c7d6629badf3db0b9ba36c9c28011ff52117f2cd70bffdeba7 |  |
 | mcmods-cn-backend/internal/httpapi/mod_export_public_query_source_test.go | backend_c | 126 | complete | 1–126 | c521dfe254a8f5a9ecf49b6740d991a32b190987ebc5aa2557867cf1c86e28df |  |
 | mcmods-cn-backend/internal/httpapi/mod_export_query_handlers.go | backend_c | 800 | complete | 1–800 | 09e1aecc726422d281ff3886b9a266f2ad7b4187ebf0f354a4386d2adf4377c2 |  |
@@ -929,6 +939,17 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/internal/httpapi/oct02_report_review_idempotency_integration_test.go | backend_b | 211 | complete | 1–211 | ecab71739eafae8a262b254a24ceed5f37f1bd410506e148ec45d6a35d12a56e |  |
 | mcmods-cn-backend/internal/httpapi/oct02_review_settings_boundary_integration_test.go | root | 153 | complete | 1–153 | 51a78f352bdef6c1af2e4a5317b590eeb83ab3d6e2d4e6cd087ec46d7dbc45df |  |
 | mcmods-cn-backend/internal/httpapi/oct02_seed_crawler_heartbeat_integration_test.go | root | 124 | complete | 1–124 | a2dc377b5e9525b9d466d0c0d76c2bdbf90015b5989c5cfd97f97546fe95a331 |  |
+| mcmods-cn-backend/internal/httpapi/oct03_blueprint_late_upload_integration_test.go | backend_a | 344 | complete | 1–344 | e6b21921aa0d843bcede1643e7b8127e51f500ab119a6479fddbd61a5e92754c |  |
+| mcmods-cn-backend/internal/httpapi/oct03_c_admin_read_model_authorization_integration_test.go | backend_c | 66 | complete | 1–66 | 13ee342932cf6e442a2081c4d1e8a607aeee3baf95e6b082d47046dcc8fa8ce2 |  |
+| mcmods-cn-backend/internal/httpapi/oct03_c_authorization_concurrency_integration_test.go | backend_c | 222 | complete | 1–222 | 84d7ac26da9cc6fcae51571ce1ef8a08fc3930b4ef126e24369d0136c4cc3eea |  |
+| mcmods-cn-backend/internal/httpapi/oct03_c_mod_export_query_acceptance_integration_test.go | backend_c | 317 | complete | 1–317 | 4c96101e7772f5e749abf229d28719430d96d6660f093132e7328e12223994df |  |
+| mcmods-cn-backend/internal/httpapi/oct03_c_tag_prefix_upgrade_integration_test.go | backend_c | 415 | complete | 1–415 | 45684576c87517e6cbd24d3a8f01861a25e924a8b66fd3b8ed1f603c69d3047b |  |
+| mcmods-cn-backend/internal/httpapi/oct03_creator_search_integration_test.go | frontend_shared | 192 | complete | 1–192 | 79bbb47b392e3c40cb810f4c23c8b96e89270e75329bb2267f1c14ad15c9bf17 |  |
+| mcmods-cn-backend/internal/httpapi/oct03_minecraft_sync_release_integration_test.go | backend_a | 99 | complete | 1–99 | 0edaacb07c67846d56a88ad17c60f5fd91407db03a3fcae51c68af489e34caae |  |
+| mcmods-cn-backend/internal/httpapi/oct03_presence_http_integration_test.go | backend_b | 134 | complete | 1–134 | 8da4505265354f0292dd7e15b6e3f47e7fda28f249f2e76d1e6ce6ae5ab47df4 |  |
+| mcmods-cn-backend/internal/httpapi/oct03_presence_identity_test.go | backend_b | 38 | complete | 1–38 | 9c522468dfee9d557f2d0371ee5c605f6dba4f9658dd8ade4b1b732e2f0b8555 |  |
+| mcmods-cn-backend/internal/httpapi/oct03_server_probe_concurrency_integration_test.go | backend_b | 265 | complete | 1–150, 151–265 | 73a2e6e45ddf77e2e99c14498db904862170320088aec7d23d86f480076bdedb |  |
+| mcmods-cn-backend/internal/httpapi/oct03_sticker_budget_integration_test.go | frontend_shared | 174 | complete | 1–174 | 7d390cd58bb03009435fe4290ca812755efb5f9486ee70a42442bf721709c2aa |  |
 | mcmods-cn-backend/internal/httpapi/ops003_catalog_import_artifact_lifecycle_integration_test.go | backend_b | 197 | complete | 1–197 | e1af5a7221a6b1a7f8201ae53560bae6a05982d081e51dbc35037ab9b97e4ed8 |  |
 | mcmods-cn-backend/internal/httpapi/ops004_project_update_retry_integration_test.go | backend_b | 81 | complete | 1–81 | df059ca9ecd2c6ed78693e7b99a3a0c0f30e58a52e82e5f686147d2d5b23240b |  |
 | mcmods-cn-backend/internal/httpapi/ops004_project_update_retry_source_test.go | backend_b | 36 | complete | 1–36 | 4a05c2d26c31eb3af3296aa92db0ca356e1ddebe4e509d4320e5149f947d1880 |  |
@@ -1145,7 +1166,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/internal/httpapi/server_catalog_scale_integration_test.go | backend_c | 240 | complete | 1–150, 151–240 | f5d013143ba980cbc72ba161a07579da8d40a190a8c54b2b40640eb01e1a7ac0 |  |
 | mcmods-cn-backend/internal/httpapi/server_cors_test.go | backend_c | 78 | complete | 1–78 | 6c067f4f822c32861d34c395ed5835af693a8c1b3bae379884de55ae36d1cafb |  |
 | mcmods-cn-backend/internal/httpapi/server_mod_save_integration_test.go | backend_c | 171 | complete | 1–171 | 91f0598a2786d9742e7b565f253669a039a0b28c5a4f980a42945df782190905 |  |
-| mcmods-cn-backend/internal/httpapi/server_probe_scheduler.go | backend_c | 174 | complete | 1–174 | dbdf58d8e2c61870ca95125bcd1d09996541dd9156d9808a16eba1f3989bb2a4 |  |
+| mcmods-cn-backend/internal/httpapi/server_probe_scheduler.go | backend_c | 180 | complete | 1–180 | 979879fb4e15fee39773d4ac1f6976a4e029f86acb077daff3c7c0d418468345 |  |
 | mcmods-cn-backend/internal/httpapi/server_review_handlers.go | backend_c | 301 | complete | 1–301 | cbccd7e00b224ef23af085d1891fe23a79e8f08e27ae301e44aa52787b9f33bb |  |
 | mcmods-cn-backend/internal/httpapi/server_review_handlers_integration_test.go | backend_c | 65 | complete | 1–65 | 737ae7dbf5d3fdaded9a71448444ebffe01c28904c0b06e673ccf64f4a2c5427 |  |
 | mcmods-cn-backend/internal/httpapi/server_review_pagination.go | backend_c | 146 | complete | 1–146 | 5de8280a46cad67126616301509306e5ed921384e92ab6f84420874d90202baf |  |
@@ -1274,6 +1295,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/internal/progression/test031_progression_state_machine_integration_test.go | root | 327 | complete | 1–327 | f6adbdabd8db2f1402c942365e3503cc7a7758223d174946da6944c335e82f5d |  |
 | mcmods-cn-backend/internal/querycache/cache.go | root | 892 | complete | 1–892 | 9e0bdb824524dd6c26e0b2776004b641e1b78a7230c105f28622eb710cd9fdc0 |  |
 | mcmods-cn-backend/internal/querycache/cache_test.go | root | 138 | complete | 1–138 | 588ac7798a58bfc4711f5df209ccd36dfe90cd1e6fdc0992a6176eff6e5d38e2 |  |
+| mcmods-cn-backend/internal/querycache/oct03_presence_redis_integration_test.go | backend_b | 200 | complete | 1–200 | 9e673ca6214d61936fbc39c321327d89781c5e4a2c6d67de4458b0b4f2be7f2b |  |
 | mcmods-cn-backend/internal/querycache/sec003_rate_limit_failure_test.go | root | 65 | complete | 1–65 | 002b0c6c1345dc58ae044478504ac5f7d048f1e67440b82fc5830f36e0dd378f |  |
 | mcmods-cn-backend/internal/querycache/sec004_shared_invalidation_test.go | root | 39 | complete | 1–39 | 7ec7c9e20eb3c3c3049a9eb802f628859dbbad6bc80b035d2b544d4fdd219a36 |  |
 | mcmods-cn-backend/internal/querycache/shared_version_test.go | root | 65 | complete | 1–65 | a9803b17977c197a9f8f3d6b05d4031ac6a8edd42b458c9917c1a2d0960be5d6 |  |
@@ -1394,6 +1416,8 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/tools/testing/db_suite/main_test.go | root | 90 | complete | 1–90 | 17c8e0abcefad18a0f7ff597f74f5e2c58e3ced55e8810eb4df1474e361f88de |  |
 | mcmods-cn-backend/tools/testing/isolated_environment.py | root | 163 | complete | 1–163 | 1ad76dcc16c96e42ad461e68e972d328abfc01e993c19286472a49066eccae0d |  |
 | mcmods-cn-backend/tools/testing/isolated_environment_test.py | root | 50 | complete | 1–50 | 930ed21d6dc54918fd836e869210824c48b0760cc4ed9f5898bf433f7f38e521 |  |
+| mcmods-cn-backend/tools/testing/live_acceptance.py | backend_a | 741 | complete | 1–200, 201–386, 387–580, 581–741 | fbc89cef17d62979b5986c945bbec02608b55ec8cf6de038ce1d781e86aa8af6 |  |
+| mcmods-cn-backend/tools/testing/live_acceptance_test.py | backend_a | 272 | complete | 1–135, 136–272 | decabb31b5329baf269d29336f2961406f72184bcae335003bc9544f43cef60d |  |
 | mcmods-cn-frontend/.dockerignore | frontend_shared | 9 | complete | 1–9 | 22efebd11ec16ff1afc4b061ad269793c7e6bbb94e2db45fe344cf7391d613a8 |  |
 | mcmods-cn-frontend/.env.example | frontend_shared | 9 | complete | 1–9 | b04ff261ea39cf58be480ba6e34eea5d10322d70fb58e4c65a4f7ae8157cf79f |  |
 | mcmods-cn-frontend/.github/workflows/ci.yml | frontend_shared | 55 | complete | 1–55 | 90b69b8d4edd55d809fc24b758c7410b38777df3757eb984e1386c5538b1e0e7 |  |
@@ -1402,15 +1426,15 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-frontend/.gitignore | frontend_shared | 44 | complete | 1–44 | 474191dd723bcf00a2ea6af6f6a8bd1bb3ecfb1407f6d4da8f1c746815ff53ab |  |
 | mcmods-cn-frontend/AGENTS.md | frontend_shared | 5 | complete | 1–5 | e3447d84251880fb34cfae09131cb4c57471529bbfe60976a3245793cf621627 |  |
 | mcmods-cn-frontend/CLAUDE.md | frontend_shared | 1 | complete | 1–1 | 336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49 |  |
-| mcmods-cn-frontend/Dockerfile | frontend_shared | 43 | complete | 1–43 | 654214bf91fe4b9d33da324c43bbcebf20bc839aa28dbd904c80a9073ed6b0f6 |  |
-| mcmods-cn-frontend/README.md | frontend_shared | 86 | complete | 1–86 | 44bce5191364fc3bf32b24c581c6e10fc0926a32feb7965ebd4e19e301f6501e |  |
+| mcmods-cn-frontend/Dockerfile | frontend_shared | 48 | complete | 1–48 | fde04ee03128c3d9c7a1719901e1731dbf61cf9726f736c5689fe4e76bf37c67 |  |
+| mcmods-cn-frontend/README.md | frontend_shared | 103 | complete | 1–103 | 2d8025c789bb03b6a1f5d83abb29f74ac42d2d35a2e852c0fbf6d68d76c58a2f |  |
 | mcmods-cn-frontend/app/[publicId]/page.tsx | frontend_pages | 46 | complete | 1–46 | 4f9624be1bf4a508d2be5977ce1fc2bfbe9dd70e31e475c5c4ca90f254030b0f |  |
 | mcmods-cn-frontend/app/_components/admin-activity-retention-panel.tsx | frontend_shared | 188 | complete | 1–188 | 22f664b9c6ae3e207fe8888eab2b9329cdc096cd3a01a1212a071fef5e8b6098 |  |
 | mcmods-cn-frontend/app/_components/admin-anti-abuse-panel.tsx | frontend_shared | 208 | complete | 1–208 | a4ddde263a795bad9343260ac36ecfdd1c5bb8ab72fa1d1af95a60f70840b195 |  |
 | mcmods-cn-frontend/app/_components/admin-automation-panels.tsx | frontend_shared | 365 | complete | 1–365 | cea7c7753ec84313f2d18dfa1ae24eef1a6360bd2da84011d24e066f0821f4ac |  |
 | mcmods-cn-frontend/app/_components/admin-ban-panel.tsx | frontend_shared | 283 | complete | 1–283 | bea29a1e8741580937e2f78dbdb620c5532c930a2acebc246974d5e51cc654d1 |  |
 | mcmods-cn-frontend/app/_components/admin-community-panels.tsx | frontend_shared | 1764 | complete | 1–1764 | 166d267acc207fd96bff171f31d629c427a8486b0b025a17a5d1b31adeb35565 |  |
-| mcmods-cn-frontend/app/_components/admin-console-infrastructure.tsx | frontend_shared | 1473 | complete | 1–1473 | 5ddf6ad8137381ac6613692901653b8d36c1fa34e8e64707a3d1273d7186aa3d |  |
+| mcmods-cn-frontend/app/_components/admin-console-infrastructure.tsx | frontend_shared | 1509 | complete | 1–1509 | dff98652a50ab72be8dccb546e0dc511078a1224b0fcd9d219443e4a75ab8e95 |  |
 | mcmods-cn-frontend/app/_components/admin-console-oss.tsx | frontend_shared | 902 | complete | 1–902 | 2128154955db8d1420162050eeb2ae8cadf0ed3fbf95268319d116ff33c147d2 |  |
 | mcmods-cn-frontend/app/_components/admin-console-permissions.tsx | frontend_shared | 1398 | complete | 1–1398 | d429c7925514458ad9384e776b85b715877fb4388991bd6dec359c14c6816158 |  |
 | mcmods-cn-frontend/app/_components/admin-console-shared.tsx | frontend_shared | 964 | complete | 1–964 | dbcd35247b33ef0fa2695126e3a23529f25a7a1a12775776af65755d778b7e61 |  |
@@ -1420,14 +1444,14 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-frontend/app/_components/admin-dashboard-panel.tsx | frontend_shared | 465 | complete | 1–465 | 9691d8e64aaab8912e8644fdf079af0da42420c543dd29a10141f81de7a6b6bc |  |
 | mcmods-cn-frontend/app/_components/admin-dead-letter-panel.tsx | frontend_shared | 167 | complete | 1–167 | a0ddbe84e24f8410625a782dba613bb7aa5587d8f79f5050db4d4434622661b9 |  |
 | mcmods-cn-frontend/app/_components/admin-governance-shared.tsx | frontend_shared | 276 | complete | 1–276 | 98cb86fa1b06ac5a605a6ede71eddc0ebb10a4b9fcc5b6e33303fed915733c81 |  |
-| mcmods-cn-frontend/app/_components/admin-mod-panels.tsx | frontend_shared | 326 | complete | 1–326 | 3be76f8371510f77bd5a08dfdab9290c8e1591c6eb81b365abab2210d5c1d83a |  |
+| mcmods-cn-frontend/app/_components/admin-mod-panels.tsx | frontend_shared | 332 | complete | 1–332 | 903e81f778e76a082b6bbee51ecc954d593a82e6c5e4cddbce84785316e24a3b |  |
 | mcmods-cn-frontend/app/_components/admin-project-authorship-panel.tsx | frontend_shared | 123 | complete | 1–123 | 085de806780b052421014afd54db796694bf0e7e4c864a61cf56aa9addc4f401 |  |
 | mcmods-cn-frontend/app/_components/admin-report-panel.tsx | frontend_shared | 435 | complete | 1–435 | 8899c602b3f287f91b7d8dc95625150275681ec88944b41080207525f006c269 |  |
 | mcmods-cn-frontend/app/_components/admin-review-preview.tsx | frontend_shared | 50 | complete | 1–50 | 2cf78f88cb4a09d87cce48c14fd2722528fe385272a3bb25b96df8452641740c |  |
 | mcmods-cn-frontend/app/_components/admin-server-panels.tsx | frontend_shared | 326 | complete | 1–326 | f76f3ddc7bf344843a0d4779d0f8ef45352754cc064580c6cffa84818eb0314b |  |
-| mcmods-cn-frontend/app/_components/admin-site-affairs-panels.tsx | frontend_shared | 507 | complete | 1–507 | 6151b911d9bcf4d091cc0f7973e7c87e1e49381560ac860c8f9d359be0ccfbda |  |
+| mcmods-cn-frontend/app/_components/admin-site-affairs-panels.tsx | frontend_shared | 536 | complete | 1–185, 186–370, 371–536 | 712283d32814304dc1eede64d96602afc3fdd77e8b5e5a737bdf3004660492bf |  |
 | mcmods-cn-frontend/app/_components/admin-sticker-panel.tsx | frontend_shared | 464 | complete | 1–464 | a2cb995caf1e0bf006c51434abc2d46ff05aa556346dc0d1c775a2ebdc624cb0 |  |
-| mcmods-cn-frontend/app/_components/admin-unresolved-references.tsx | frontend_shared | 181 | complete | 1–181 | e6d530f20bf5bee4c09f295c5ffd2778fd293369a991f9537b764506a364607c |  |
+| mcmods-cn-frontend/app/_components/admin-unresolved-references.tsx | frontend_shared | 185 | complete | 1–185 | d4a900da65b13aefcdcac747daf2aff30c5dc5c4f92fec183319d23a375bbbf1 |  |
 | mcmods-cn-frontend/app/_components/admin-yggdrasil-panel.tsx | frontend_shared | 143 | complete | 1–143 | 2f408488f21a3adbaba3854dd6d386269ed8e3a53bf35df9e051fe9e7bbab153 |  |
 | mcmods-cn-frontend/app/_components/anti-abuse-challenge.tsx | frontend_pages | 87 | complete | 1–87 | 9035e24fcdd5e160e34d09e156afd4c7003505919da7ec907e5ebab5afe82e3d |  |
 | mcmods-cn-frontend/app/_components/aspect-image-crop-dialog.tsx | frontend_pages | 230 | complete | 1–230 | b87f8f5b172007bb59a84d8fb12eb666503cef197580f15b27f0fc8b1c6b33b3 |  |
@@ -1466,10 +1490,10 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-frontend/app/_components/editor/mod-resource-picker.tsx | frontend_pages | 254 | complete | 1–254 | 631bce2e87d6ae21f4d5d4e37f121e2b0a1ed045534e925966426144e506e2f6 |  |
 | mcmods-cn-frontend/app/_components/editor/recipe-editor.tsx | frontend_pages | 587 | complete | 1–196, 197–392, 393–587 | 88eff242fae78cd8fbafe93f364dbf76cb9a6ad2e5fecf93c13ccd37de232164 |  |
 | mcmods-cn-frontend/app/_components/editor/recipe-template-editor.tsx | frontend_pages | 556 | complete | 1–180, 181–360, 361–556 | 1aa44c6986ea4ec182b4620513bd3245978717081531246287014c994265a19d |  |
-| mcmods-cn-frontend/app/_components/editor/resource-picker-dialog.tsx | frontend_pages | 363 | complete | 1–363 | d4a12f67d9fe56eac32ac055b13d1010f45d7f133cda177381ac7d1c4854447d |  |
+| mcmods-cn-frontend/app/_components/editor/resource-picker-dialog.tsx | frontend_pages | 372 | complete | 1–192, 193–372 | 0a28a177862f81a9d8963e6a845fd9d86af3e259c3bdf0969f041b6d3705aeea |  |
 | mcmods-cn-frontend/app/_components/editor/review-status-panel.tsx | frontend_pages | 65 | complete | 1–65 | c3a4868663dd649dfdd5190f35ba254291afcef6ecfaeb849375bdc7940542f0 |  |
 | mcmods-cn-frontend/app/_components/editor/selected-resource-list.tsx | frontend_pages | 70 | complete | 1–70 | da309015169d405a945f0b7863380d4c750aea5b9384ca5a430bcf3393cd0e88 |  |
-| mcmods-cn-frontend/app/_components/favorite-modpack-export.tsx | frontend_pages | 598 | complete | 1–230, 231–445, 446–598 | 44ef6a554182aa1b74b70b0867b5a31f7731568d278a8069e6cc76490210bc9f |  |
+| mcmods-cn-frontend/app/_components/favorite-modpack-export.tsx | frontend_pages | 613 | complete | 1–195, 196–400, 401–613 | 4a5f558cc99b617c79a5ec602c55da3fdd59b091a3d4c7bbc02ddd7de693485b |  |
 | mcmods-cn-frontend/app/_components/favorite-picker-modal.tsx | frontend_pages | 149 | complete | 1–149 | 122556a29eee42ad3622c98afc425a1574904c42341830a41b773ccc1f8ba4cc |  |
 | mcmods-cn-frontend/app/_components/file-drop-zone.tsx | frontend_pages | 97 | complete | 1–97 | b29c6021667054b5e41b040b4fb0d275b9ee2db8e00f9d4c0e1b84c90571d735 |  |
 | mcmods-cn-frontend/app/_components/floating-tooltip.tsx | frontend_pages | 63 | complete | 1–63 | 134e9eccde40ac8bd95ac6c7dae8b19cea33a8354150a9e985da3875c1f39774 |  |
@@ -1668,7 +1692,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-frontend/app/_lib/i18n-ai-edit-protection.test.mts | frontend_shared | 63 | complete | 1–63 | f0a57e204126def16f8b3f02abbeadf18c8707e69bb8471b0ab5e4f766cc9b48 |  |
 | mcmods-cn-frontend/app/_lib/i18n-message.mts | frontend_shared | 37 | complete | 1–37 | 9400cf9fe9e3ddc0ad998eaac2e1f1264e27a228e1518faf8c431afe7d3be673 |  |
 | mcmods-cn-frontend/app/_lib/i18n-message.test.mts | frontend_shared | 15 | complete | 1–15 | acb8c8e7b6253079bb8d209438d7e4a672b8345c49a6f4b5d25684e0c16f0163 |  |
-| mcmods-cn-frontend/app/_lib/i18n-provider.tsx | frontend_shared | 187 | complete | 1–187 | 4b07c78029da9ca0917208b6becd9c91b400da44e6fb1e9708ee48efb5510bd0 |  |
+| mcmods-cn-frontend/app/_lib/i18n-provider.tsx | frontend_shared | 197 | complete | 1–197 | 7af8bb52ddf996d2342c6c712b025c97f79f29532eb6d33461c46f1ce56c26b9 |  |
 | mcmods-cn-frontend/app/_lib/i18n-resources.test.mts | frontend_shared | 88 | complete | 1–88 | bb978d310751d9fc32a0c135bac403ad01faa60e6f7865b2f85039ec51ef732b |  |
 | mcmods-cn-frontend/app/_lib/iconfont-url.mts | frontend_shared | 45 | complete | 1–45 | 1d1b55793f056b323b7899dba1048ff7419406d60701cc2f0ef8df61cb46520e |  |
 | mcmods-cn-frontend/app/_lib/iconfont-url.test.mts | frontend_shared | 45 | complete | 1–45 | 28fec50f70337f81b8697bc6dd8e52367c8de1d7dc5775d6f6425d8098522de5 |  |
@@ -1726,6 +1750,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-frontend/app/_lib/nats-config.test.mts | frontend_shared | 39 | complete | 1–39 | e9f21f4ec0145a0e22b3b45efac52a81cc0434be1d245de270873df783e1fffd |  |
 | mcmods-cn-frontend/app/_lib/navigation.ts | frontend_shared | 15 | complete | 1–15 | b728fde11578b6e862f0c84a6860a3acb4fc2a28a3a1d57a5cb9e869614fdb13 |  |
 | mcmods-cn-frontend/app/_lib/notification-pagination.test.mts | frontend_shared | 12 | complete | 1–12 | d0dbd84f88d51b4bd5b140d40376f3081c14c624a7837ebb869553097906e545 |  |
+| mcmods-cn-frontend/app/_lib/oct03-ui-locale-sync.test.mts | frontend_shared | 21 | complete | 1–21 | fa7d3775fed97f4d588a3ddf42ab4143bf46a73b206de45029db5778a43ad893 |  |
 | mcmods-cn-frontend/app/_lib/oss-file-hash.test.mts | frontend_shared | 137 | complete | 1–137 | 997156c4af8fd7850735a40d43737a10028a448d513131b141a102c1dac48c60 |  |
 | mcmods-cn-frontend/app/_lib/oss-file-hash.ts | frontend_shared | 178 | complete | 1–178 | 28d1fba63017aa2fd9bf2201c3e4a4d0e180bc7eff3f97365d4a4f7415cefe19 |  |
 | mcmods-cn-frontend/app/_lib/oss-private-access.test.mts | frontend_shared | 19 | complete | 1–19 | 5bb3888de16800d3a4e0f8d603d3abac83a98d82bff475a9d20cccbe7fa61c8e |  |
@@ -1812,9 +1837,9 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-frontend/app/_lib/task-currency-rewards.mts | frontend_shared | 41 | complete | 1–41 | 04b0038960b07d5a4febe5a6561631a057bdfadc370019e53e65cc2e2c6a7343 |  |
 | mcmods-cn-frontend/app/_lib/task-currency-rewards.test.mts | frontend_shared | 31 | complete | 1–31 | e4408a628e6d1d73e0cd565eaf4969fb00f3f8e5439c0eaf77038ddf5e005afb |  |
 | mcmods-cn-frontend/app/_lib/timezones.ts | frontend_shared | 87 | complete | 1–87 | 6f36efa116941bddde391bf1fbf5828c76445798e1a8bad64832059425f3db5d |  |
-| mcmods-cn-frontend/app/_lib/ui-locale.mts | frontend_shared | 48 | complete | 1–48 | 281433aae43b5bc2c77eea4dc49a1e381684db61f99a8a0df2ff6e3771d7cce9 |  |
+| mcmods-cn-frontend/app/_lib/ui-locale.mts | frontend_shared | 72 | complete | 1–72 | fbf44584383c19b8a845f721beed4d9e3b6a18444e9ffa61fc374e58bd577a01 |  |
 | mcmods-cn-frontend/app/_lib/ui-locale.test.mts | frontend_shared | 43 | complete | 1–43 | be44a4b070529ed40d690757c04a02669e695655dcfd238fcacfc404f2bb9a1a |  |
-| mcmods-cn-frontend/app/_lib/unresolved-reference-pagination.test.mts | frontend_shared | 42 | complete | 1–42 | 5b7479590eb7c9352f44cf2a81a16b3f70f79fbc1adf935ba2a1b6ac528f5ef7 |  |
+| mcmods-cn-frontend/app/_lib/unresolved-reference-pagination.test.mts | frontend_shared | 43 | complete | 1–43 | 05c5990046dc9f3b13cd47f4cc426a2d6e75d5322dc77ed48863dc86902cebef |  |
 | mcmods-cn-frontend/app/_lib/unresolved-reference-source-routing.test.mts | frontend_shared | 14 | complete | 1–14 | 3649fb9486b61e3f50b67622d33a28c884d5b72fbe34734e6ba2fe5e1b1107bb |  |
 | mcmods-cn-frontend/app/_lib/unresolved-reference-types.test.mts | frontend_shared | 12 | complete | 1–12 | 5eafc67b8adf425d8e39ba720253865ec18e6c6d23c5fc27542eb6fc8d471518 |  |
 | mcmods-cn-frontend/app/_lib/use-auto-draft.ts | frontend_shared | 155 | complete | 1–155 | 422271311dd01720a68c203951872f4900299aefb72b5e5ac93e2deffaa92f7a |  |
@@ -1968,6 +1993,19 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-frontend/browser-tests/oct02-picker.browser.mts | frontend_pages | 200 | complete | 1–200 | f82e7a485e35c36f8fdaf82e15a46910e7be790eb71f15498e107ad1d59fa041 |  |
 | mcmods-cn-frontend/browser-tests/oct02-recovery.browser.mts | frontend_pages | 448 | complete | 1–230, 231–448 | 492ac892627ae1c3fd797941bcd1629e68397ea79ed0cf411cfb0fa5ae2fee52 |  |
 | mcmods-cn-frontend/browser-tests/oct02-state.browser.mts | frontend_pages | 180 | complete | 1–180 | ccc05e49037937585fdb1ea638da9f645ec3356c7bf6c38e79397d6064d09e6e |  |
+| mcmods-cn-frontend/browser-tests/oct03-ai-config.browser.mts | frontend_shared | 208 | complete | 1–208 | 048ad86f6e467e22c000bbcb54bf58e275e44f2ffdb3b6f5be8888379727dfdb |  |
+| mcmods-cn-frontend/browser-tests/oct03-autosave.browser.mts | backend_a | 171 | complete | 1–171 | 3c797957a5b07bb66c982c6739de4024bc6b3fbfe9d66ed182ab6ae50d080638 |  |
+| mcmods-cn-frontend/browser-tests/oct03-cross-legacy-acceptance.browser.mts | backend_b | 554 | complete | 1–180, 181–365, 366–475, 476–554 | 86232a022e3027ccef090eedff6c3e139b71253d7db3b4aa82bd4f06f46fdf8e |  |
+| mcmods-cn-frontend/browser-tests/oct03-page-acceptance.browser.mts | frontend_pages | 276 | complete | 1–140, 141–276 | 6b95ecf19896944f01df02b329609a2b17a664c487883d88dd379ecb2cac9d3d |  |
+| mcmods-cn-frontend/browser-tests/oct03-page-admin-acceptance.browser.mts | frontend_pages | 263 | complete | 1–132, 133–263 | 2304dfaa661db96c330a989eaf75fcd9a0a4d5a1c3bb454e74b5f02a2df5f97d |  |
+| mcmods-cn-frontend/browser-tests/oct03-page-catalog-acceptance.browser.mts | frontend_pages | 138 | complete | 1–138 | 699dcf9e7747a36fa9b18b8d29357fe0c3102c18a6b8c4d5869840ef3270dc2c |  |
+| mcmods-cn-frontend/browser-tests/oct03-page-editor-acceptance.browser.mts | frontend_pages | 212 | complete | 1–108, 109–212 | e3c3c233d51980938e272c0aecd9f00bc8a32d1bfb0f778eb1a369d3adecfda1 |  |
+| mcmods-cn-frontend/browser-tests/oct03-page-remaining.browser.mts | frontend_pages | 287 | complete | 1–111, 112–212, 213–287 | 6c067f8903e14b506b6eac61c80ad159daf79eeca48a286d25ec2fca5e307ca7 |  |
+| mcmods-cn-frontend/browser-tests/oct03-page-upload-acceptance.browser.mts | frontend_pages | 171 | complete | 1–171 | fcd089066a71f1399aedf894ce6fbb7b4a5c6496fc627afbfe8e19dbcdd7fea1 |  |
+| mcmods-cn-frontend/browser-tests/oct03-rendering-acceptance.browser.mts | database_docs | 627 | complete | 1–170, 171–332, 333–490, 491–627 | 6cd22ac8aedce77efb1b64908e767d022685277b35ed3f17b3d8d02c7050be03 |  |
+| mcmods-cn-frontend/browser-tests/oct03-root-acceptance.browser.mts | root | 478 | complete | 1–478 | 078b2330e597abb0f317e270ff3b0587a07c3f1647a136078ce1d4539972e892 |  |
+| mcmods-cn-frontend/browser-tests/oct03-shared-acceptance.browser.mts | frontend_shared | 701 | complete | 1–701 | 599c17311466c209e30535c7c94f9f139c04b5feb2a44a9c9d8cbb0053ba8ea1 |  |
+| mcmods-cn-frontend/browser-tests/oct03-shared-remaining.browser.mts | frontend_shared | 450 | complete | 1–450 | 9106e3b770a484b01aab6c988d7c1287880510053d582f9200a062177eeacb5c |  |
 | mcmods-cn-frontend/browser-tests/realtime.browser.mts | frontend_shared | 242 | complete | 1–242 | 3621315709af3cddc38cc505cf62148e1889520ec061472de9503fdf4fc4ef6f |  |
 | mcmods-cn-frontend/browser-tests/renderers.browser.mts | frontend_shared | 51 | complete | 1–51 | b278ac78aa0345f6919caf58d11e32cda44d6abbc74baedb7d133b39a9754cc3 |  |
 | mcmods-cn-frontend/browser-tests/server-api-transport.mjs | frontend_shared | 18 | complete | 1–18 | b1a96b4b9cb44c53f6be0e2d40e5f0364b46f08afb8be97219b41f71c0a1687b |  |
@@ -1978,13 +2016,14 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-frontend/components/mcmods-exporter/BlockModelCanvas.tsx | frontend_shared | 124 | complete | 1–124 | 964014f5e5bb0cade89ca71b22b6a6e770b6b904d6309afc6ba1533462d460c7 |  |
 | mcmods-cn-frontend/components/mcmods-exporter/StructureCanvas.tsx | frontend_shared | 175 | complete | 1–175 | f9285ca6a2221ab832461fbffdd12160e9764bb83f8194f4c316ea9cb2a9a490 |  |
 | mcmods-cn-frontend/components/minecraft-skin/SkinViewerCanvas.tsx | frontend_shared | 302 | complete | 1–302 | a7cf1c95a73ed0d859d806c6b6a5a788a566b366742802261524a399224bff76 |  |
-| mcmods-cn-frontend/docs/admin-data-integrity.md | frontend_shared | 71 | complete | 1–71 | bffb126f503279ac4da659589f7def90e95342dd41578361f362a4b5a3dfd6dc |  |
-| mcmods-cn-frontend/docs/audit/20261002/SUMMARY.md | root | 49 | complete | 1–49 | ad02d2784e764acc0fde811f6d004669d869f180ebf783c2197ec6bb7364d20f |  |
+| mcmods-cn-frontend/docs/admin-data-integrity.md | frontend_shared | 79 | complete | 1–79 | ede32a1c74a8a4740d7942353ce04cf66c4d4cf6db08fcfeff80accd1a5c8a53 |  |
+| mcmods-cn-frontend/docs/audit/20261002/SUMMARY.md | root | 52 | complete | 1–52 | 95c747b1214ea5e17b4b79ab20da2621fa64ab7f7863da81c5da0aab5315607b |  |
+| mcmods-cn-frontend/docs/audit/acceptance-20261003.md | root | 94 | complete | 1–94 | f97f03d6ef507a4428c280417f578c8fd4d5f3ef5ea307acf9a38e45c778fc2d |  |
 | mcmods-cn-frontend/docs/audit/frontend-shared-20261002.md | frontend_shared | 114 | complete | 1–114 | e2169485c46164edb856ceb1633642a1887d53fe599b4514fd4237612abfac6c |  |
-| mcmods-cn-frontend/docs/frontend-state-recovery.md | frontend_pages | 59 | complete | 1–59 | 793506fbce4585e999d6857dc6f35cc286d58ddcd0908f910f1311f4f1c3671c |  |
+| mcmods-cn-frontend/docs/frontend-state-recovery.md | frontend_pages | 67 | complete | 1–67 | 06190b70dccb17e802f511a4188acce34ca143d16f700a6b0c03a80b3b596e55 |  |
 | mcmods-cn-frontend/eslint.config.mjs | frontend_shared | 18 | complete | 1–18 | 870f1adccecf3051cbcd9fd307cef51d7633cf510979c181a81f4b1797273493 |  |
-| mcmods-cn-frontend/lib/mcmods-exporter/renderer/README.md | frontend_shared | 38 | complete | 1–38 | e40b615129a72f2ecf4a96d99b28054bcb89142ad5525c48cc14a953b864fd45 |  |
-| mcmods-cn-frontend/lib/mcmods-exporter/renderer/StructureRenderer.ts | frontend_shared | 440 | complete | 1–440 | 8135aa7a994927f31367bed3aaf083cd510c98c828d31603c383303f224cc58b |  |
+| mcmods-cn-frontend/lib/mcmods-exporter/renderer/README.md | frontend_shared | 42 | complete | 1–42 | b007de99c1dbf211d58cd7325d493180324ea39773cfed523452468146e00d24 |  |
+| mcmods-cn-frontend/lib/mcmods-exporter/renderer/StructureRenderer.ts | frontend_shared | 491 | complete | 1–180, 181–345, 346–491 | 8a911b613475e8ee9b2bdf58bcfcfdda253576d7088a8124ca026607edcba50a |  |
 | mcmods-cn-frontend/lib/mcmods-exporter/renderer/blueprint.ts | frontend_shared | 409 | complete | 1–409 | 6a402a2ac7b5aa1ea006901a5976f60d1d2251b91cdc36152a7e3e82363734e8 |  |
 | mcmods-cn-frontend/lib/mcmods-exporter/renderer/httpAssetSource.ts | frontend_shared | 83 | complete | 1–83 | db83f5839115de6b35531eabbbe279d2aaea7d5a88e41e5814d0046425cfe8f2 |  |
 | mcmods-cn-frontend/lib/mcmods-exporter/renderer/index.ts | frontend_shared | 6 | complete | 1–6 | 0893ef57a99d6877f6fd0565a09a62d4c689a01095cd50949da7234e914fc170 |  |
