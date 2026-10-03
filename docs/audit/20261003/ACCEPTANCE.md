@@ -9,7 +9,7 @@
 | 仓库 | 本轮实际检出基线 | 已提交业务与验收版本 |
 | --- | --- | --- |
 | backend | `af52f6e58ca748e320d5c647ed6362bb5b32d40b` | `5dbe92853fe65a29000683e5a5a4f87073345768` |
-| frontend | `4a611deb25125cc04928512b25765512743c10a3` | `f27ce5a0e7fbe10faebb8589f0bc341ea96c19b5` |
+| frontend | `4a611deb25125cc04928512b25765512743c10a3` | `afa8ee2af8a3dab74a064cf870fbf620eeec6f3f` |
 
 两个基线均实际 fetch 核验，原两仓库 PR #6 已合并；合并树与首轮交付一致。
 本轮分别沿用 `codex/acceptance-followup-20261003`，没有修改 main、重写历史、
@@ -53,9 +53,10 @@ PERF-010、PERF-067、PERF-068、TEST-046、TEST-047；OPS-015 新补偿已验�
 | OCT03-C-003 | P2 工具 | TEMP 建库逐语句/逐函数编译和扫描，真实原 30 秒回归超时。每安装组合扫描，非 ASCII 保留原顺序；1198 语句/183 函数逐字节等价，原预算最终 7.90 秒通过。 |
 | OCT03-A-003 | P2 工具 | 测试脚本存在目标篡改、退出 leader 遗留后代和旧停止凭据复用窗口。启动前所有权/映射校验、pidfd 及本次 run ID 原子记录；独立 RED→GREEN；另真实内核复现僵尸进程 environ 拒绝读取，仅 pidfd 确认退出才忽略，存活/错误归属仍拒绝，19 Python及新的整次联通通过。 |
 | OCT03-ENV-001 | 环境兼容 | npm ci 遇代理 CA 不受信。可选 BuildKit secret 仅给安装命令增信，保持 strict TLS；实际 Docker build/runtime/nonroot/CSP/CA 不入镜像通过。 |
+| OCT03-R-001 | P2 工具 | 最终文档CI的ID选择器把隐藏Next流式暂存输入算成第二控件。真实观察一hidden S:1/一visible；确定性同形旧selector RED，新visible strictcount1 GREEN；两visible反例仍失败，原游标/预算断言保留。 |
 | OCT03-A-002 | P2 未修 | 新 braces 公告影响五个开发依赖包，官方无修复版本。受控栈耗尽复现，完整 npm audit 失败保留；生产 omit=dev 扫描无该公告，未降低门槛或跨 major 降级。 |
 
-共 15 个产品缺陷修复、3 个测试工具修复、1 个构建兼容修复；公告未修项单列。
+共 15 个产品缺陷修复、4 个测试工具修复、1 个构建兼容修复；公告未修项单列。
 配置、API、索引和 worker 的正式文档同步更新，未删除功能、放宽权限或预算。
 
 ## 模块、数据库、i18n 与 AI
@@ -66,7 +67,7 @@ PERF-010、PERF-067、PERF-068、TEST-046、TEST-047；OPS-015 新补偿已验�
 | 后台编辑、审核及诊断 | 生产 React 的 CAS、语言草稿、分页、失败重试、账户切换及旧响应隔离；PG 角色并发锁和图约束。 | UI API 受控，实际写入/授权分别由 Go 回归证明。 |
 | 搜索及目录 | 实际 Typesense 29 创作者排序/游标/可见性；真实 PG 前缀/大样本索引；真实选择器批量调用次数。 | 样本计划不推断生产容量或任意分布性能。 |
 | 文件、上传及异步清理 | 实际 PG 和 SDK 对受控 OSS 验证配额、分片、归属、60 秒签名过期和迟到补偿。 | 没有商业 OSS 或长期断网保证。 |
-| 结构渲染 | 原生 SwiftShader 600k 准入/切层/恢复/释放、100k 三次重建、预算拒绝和真正未完成加载取消。 | R9整次All恢复12.885秒，最长记录13.642秒；另一次CPU/timeline诊断见下文，呈现延迟根因及物理GPU/长期内存未验证。 |
+| 结构渲染 | 原生 SwiftShader 600k 准入/切层/恢复/释放、100k 三次重建、预算拒绝和真正未完成加载取消。 | R9最终R5整次All恢复14.502秒，最长记录14.300秒；另一次CPU/timeline诊断见下文，呈现延迟根因及物理GPU/长期内存未验证。 |
 | i18n 与 AI | 界面偏好、各语言草稿、回退和人工修改保护；源版本、任务并发/恢复、输出与费用协议以 PG/确定性 HTTP 验证。 | 真实供应商连通、母语语义质量、真实 usage/账单未验证；付费请求为零。 |
 
 数据结构沿用 generation168 的领域表、约束和恢复机制。新前缀索引为非破坏性
@@ -96,7 +97,7 @@ SQLSTATE53100 的磁盘失败保留；只清理已确认的任务生成物，Go 
 | 默认语句覆盖率 | 30.8%，27% 门槛保持；不是文件阅读或业务覆盖比例。 |
 | 完整真实 PG race | 最终整次1818调用/76批，1812主PASS/1262子PASS/6主SKIP/0FAIL，2629.308秒，exit0及源码漂移0；原版调度失败保留，未拼接旧批。 |
 | 前端 check/unit/build | exit0；346 unit PASS/0SKIP，R9 production build `cxcdMg6fyUnzZQuSDjmcz`；check/unit/build 31.995/7.432/7.152秒，源码漂移0。 |
-| 完整生产界面浏览器 | 最终R9同次168PASS/0FAIL/0CANCEL/0SKIP，445.696秒，exit0、构建ID及全部运行文件指纹不变；原R8一项轮询同步失败保留。 |
+| 完整生产界面浏览器 | 最终R5同次168PASS/0FAIL/0CANCEL/0SKIP，452.875秒（仍用同一R9生产产物），exit0、构建ID及全部运行文件指纹不变；原R8轮询同步和1f5c77f的CI选择器失败均保留。 |
 | 浏览器文件指纹守卫 | 最终整次exit0、所有文件漂移0；早期R7因README单独漂移的exit1原样保留，后续未再编辑运行中的文件。 |
 | 最终真实前后端 | 新r6整门exit0；真实浏览器1PASS/0SKIP、3.955秒，1211 Go/606 FE漂移0和五项落库后置0；进程/子库/43所属Redis key/NATS stream清理均核实。r5清理失败未改写。 |
 | 公开只读数据源 | 两项 opt-in：2主/4子PASS、0SKIP、4.655秒；loader镜像回退允许，不能证明逐官方host直连，也不重算整次数据库6SKIP。 |
@@ -112,7 +113,7 @@ PERF-069另做一次冻结R9的Chrome CPU/timeline诊断：同600k用例1PASS，
 updateInstanceBounds→Three.computeBoundingBox/Sphere；rAF约11毫秒，Style/Layout约0.974毫秒。
 EventTiming的processingEnd至commitFinish另有14.1667秒，主要CPU采样仍落在未归属
 JS的(root→program)。因此当前证据把延迟缩小到事件处理后呈现/native边界，
-不能称为已实测GPU耗时、实体GPU缺失或已定位可安全修复的JS循环；最大规模响应仍需改进。最后仅修改Python工具；Go的1211源码及2模块文件与全量门逐字节一致，已独立核对，不声称重跑未改的Go。
+不能称为已实测GPU耗时、实体GPU缺失或已定位可安全修复的JS循环；最大规模响应仍需改进。后端最后仅修改Python工具；Go的1211源码及2模块文件与全量门逐字节一致，已独立核对，不声称重跑未改的Go。前端后续仅测试和文档改变；R9运行源码及真实联通606输入再核对零漂移，selector修复后的check/346unit和完整浏览器另外重跑，未虚构重建。
 
 本任务专属PG/Redis/NATS三容器和精确Typesense进程已停止/移除，原有三个服务的状态与启动时间保持。r5独立cleanup因未确认停止正确拒绝、原失败凭据保留；其子资源最终随已核对归属的父环境丢弃。只删除身份确认的测试凭据，反例/未确认私有fixture保留，未清理未知用户文件。
 
@@ -139,5 +140,5 @@ JS的(root→program)。因此当前证据把延迟缩小到事件处理后呈�
 修复与验收已分组提交并推送，后续草稿 [后端 #7](https://github.com/mcmods-cn/mcmods-cn-backend/pull/7)
 及 [前端 #7](https://github.com/mcmods-cn/mcmods-cn-frontend/pull/7) 已创建、互链并关联任务。
 本轮修复、最终台账和整次结果交付这些 PR；不修改已合并 #6。
-15:27 UTC核对业务提交：前端f27ce5a的quality与container四项通过、npm-audit两项上游公告失败；后端5dbe928的10项全部通过（含两个真实PG门）。随后的纯文档/台账HEAD检查在PR与最终答复另核对，未宣称CI全绿。
+最后业务/验收CI快照：前端afa8ee2的quality与container四项通过、npm-audit两项上游公告失败；后端文档86978cc的8项通过、两个PG门在运行，之前5dbe928的10项已全部通过。随后的纯文档/台账HEAD检查在PR与最终答复另核对，未宣称CI全绿。
 CI 结果与本地测试分别记录。自动合并、生产部署及任务结束后的监控均未执行。
