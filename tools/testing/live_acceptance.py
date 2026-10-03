@@ -337,7 +337,7 @@ def prepare():
     identity = sql(parent, database, 'select current_database();')
     if identity != database:
         raise RuntimeError('child identity check failed')
-    checks = sql(parent, database, "select (select count(*) from information_schema.tables where table_schema='public'),"
+    checks = sql(parent, database, "select (select count(*) from information_schema.tables where table_schema='public' and table_type='BASE TABLE'),"
        "(select count(*) from users where username='admin' and password_hash<>'password-login-disabled'),"
        "(select count(*) from seed_crawler_configs where enabled),"
        "(select count(*) from seed_crawler_runs),"
@@ -382,6 +382,13 @@ def wait_response(url, wanted, processes, seconds=90):
     raise RuntimeError('owned readiness exceeded startup bound')
 
 
+def pidfd_has_exited(handle):
+    """A pinned pidfd becomes readable on exit, including an unreaped zombie."""
+    with selectors.DefaultSelector() as selector:
+        selector.register(handle,selectors.EVENT_READ)
+        return bool(selector.select(0))
+
+
 def owned_group_handles(processes, owner):
     """Pin live members of our recorded sessions; never signal a reused PID."""
     groups = {process.pid for process in processes}
@@ -398,6 +405,8 @@ def owned_group_handles(processes, owner):
                 handle = os.pidfd_open(int(entry.name))
                 environment = (entry/'environ').read_bytes().split(b'\0')
                 current = (entry/'stat').read_text().rsplit(')',1)[1].split()
+                if pidfd_has_exited(handle):
+                    continue
                 if current[19] != fields[19] or current[2:4] != fields[2:4]:
                     raise RuntimeError('process identity changed while pinning owned session')
                 if ('MCMODS_LIVE_PROCESS_OWNER='+owner).encode() not in environment:
@@ -406,6 +415,12 @@ def owned_group_handles(processes, owner):
                 handle = None
             except (FileNotFoundError,ProcessLookupError):
                 pass
+            except PermissionError:
+                # Linux can revoke /proc/environ access after our live stat
+                # and pin, when that exact process exits. Never treat a live
+                # unreadable process, or an unpinned identity, as stopped.
+                if handle is None or not pidfd_has_exited(handle):
+                    raise
             finally:
                 if handle is not None:
                     os.close(handle)

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import selectors
 import subprocess
 import sys
 import tempfile
@@ -204,6 +205,67 @@ class AcceptanceGuardTest(unittest.TestCase):
             self.assertTrue(not path.exists() or path.read_text().rsplit(')',1)[1].split()[0] == 'Z')
         finally:
             live.stop_owned_groups([leader], nonce, grace_seconds=1, force_seconds=1)
+
+    def test_real_exit_between_pidfd_pin_and_environ_read_is_safe(self):
+        owner = secrets.token_hex(16)
+        process = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"],
+                                   env=os.environ | {"MCMODS_LIVE_PROCESS_OWNER": owner}, start_new_session=True)
+        original_open = os.pidfd_open
+        pinned = []
+        def exit_after_pin(pid, *args):
+            handle = original_open(pid, *args)
+            if pid == process.pid:
+                pinned.append(handle)
+                process.terminate()
+                # Keep the actual child unreaped: Linux denies environ reads
+                # after it becomes a zombie, despite the earlier live stat.
+                with selectors.DefaultSelector() as selector:
+                    selector.register(handle, selectors.EVENT_READ)
+                    self.assertTrue(selector.select(5), "actual pidfd must confirm child exit")
+            return handle
+        try:
+            with mock.patch.object(live.os, "pidfd_open", side_effect=exit_after_pin):
+                self.assertEqual(live.owned_group_handles([process], owner), [])
+            self.assertEqual(len(pinned), 1)
+            with self.assertRaises(OSError):
+                os.fstat(pinned[0])
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+
+    def test_live_kernel_permission_denial_remains_fail_closed(self):
+        owner = secrets.token_hex(16)
+        code = "import ctypes,time;assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0;print('ready',flush=True);time.sleep(60)"
+        process = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True,
+                                   env=os.environ | {"MCMODS_LIVE_PROCESS_OWNER": owner}, start_new_session=True)
+        handle = os.pidfd_open(process.pid)
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                self.assertTrue(selector.select(5))
+            self.assertEqual(process.stdout.readline().strip(), "ready")
+            with self.assertRaises(PermissionError):
+                live.owned_group_handles([process], owner)
+            with selectors.DefaultSelector() as selector:
+                selector.register(handle, selectors.EVENT_READ)
+                self.assertFalse(selector.select(0), "a live unreadable process must remain alive, not be ignored/signalled")
+        finally:
+            os.close(handle)
+            process.terminate()
+            process.wait(timeout=5)
+            process.stdout.close()
+
+    def test_live_process_with_another_nonce_is_never_authorized(self):
+        process = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"],
+                                   env=os.environ | {"MCMODS_LIVE_PROCESS_OWNER": secrets.token_hex(16)}, start_new_session=True)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "lacks this live run owner"):
+                live.owned_group_handles([process], secrets.token_hex(16))
+            self.assertIsNone(process.poll())
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
 
 
 if __name__ == "__main__":
