@@ -23,6 +23,8 @@ BE = Path(__file__).resolve().parents[2]
 FE = STATE = SCOPE = COPY = BASE = None
 ADOPT_PREPARED_COPY = False
 SCOPE_CREATED_THIS_CALL = False
+FRONTEND_SOURCE_DIRS = ('app', 'components', 'lib', 'public')
+FRONTEND_SOURCE_FILES = ('next.config.ts', 'proxy.ts', 'package.json', 'package-lock.json', 'tsconfig.json', 'postcss.config.mjs')
 CLEANUP_GO_SOURCE = r'''
 // Private test-resource cleanup; Python verifies container owners and endpoints.
 package main
@@ -250,12 +252,15 @@ def frontend_sync():
         raise RuntimeError('root-prepared independent frontend copy is missing')
     if any(COPY.glob('.env*')):
         raise RuntimeError('refusing development copy containing dotenv files')
-    for directory in ['app', 'lib', 'public']:
+    for directory in FRONTEND_SOURCE_DIRS:
         target = COPY/directory
         if target.is_symlink() or any(p.is_symlink() for p in target.rglob('*')):
             raise RuntimeError('refusing symlinked frontend-copy source paths')
-    names = ['next.config.ts', 'package.json', 'package-lock.json', 'tsconfig.json', 'postcss.config.mjs']
-    paths = [p for directory in ['app', 'lib', 'public'] for p in (FE / directory).rglob('*') if p.is_file()]
+    names = FRONTEND_SOURCE_FILES
+    for name in names:
+        if (COPY / name).is_symlink():
+            raise RuntimeError('refusing symlinked frontend-copy source paths')
+    paths = [p for directory in FRONTEND_SOURCE_DIRS for p in (FE / directory).rglob('*') if p.is_file()]
     paths += [FE / name for name in names if (FE / name).is_file()]
     manifest = {}
     for source in paths:
@@ -267,9 +272,11 @@ def frontend_sync():
         if not target.exists() or fingerprint(target) != fingerprint(source):
             target.write_bytes(source.read_bytes())
         manifest[str(relative)] = fingerprint(source)
-    for directory in ['app', 'lib', 'public']:
+    for directory in FRONTEND_SOURCE_DIRS:
         if any(str(p.relative_to(COPY)) not in manifest for p in (COPY / directory).rglob('*') if p.is_file()):
             raise RuntimeError('unexpected stale source in independent copy; refusing cleanup')
+    if any((COPY / name).exists() and name not in manifest for name in names):
+        raise RuntimeError('unexpected stale source in independent copy; refusing cleanup')
     if any(fingerprint(COPY / name) != value for name, value in manifest.items()):
         raise RuntimeError('frontend source changed while copying')
     private_json(SCOPE / 'frontend-source.json', manifest)
@@ -582,10 +589,10 @@ def run():
         current = source_files()
         outcome['backend_source_drift'] = sorted(set(original) ^ set(current)) + [
             name for name in original.keys() & current.keys() if original[name] != current[name]]
-        current_frontend_paths = [p for directory in ['app','lib','public']
+        current_frontend_paths = [p for directory in FRONTEND_SOURCE_DIRS
             for p in (FE/directory).rglob('*') if p.is_file()]
         current_frontend = {str(p.relative_to(FE)):fingerprint(p) for p in current_frontend_paths}
-        current_frontend.update({name:fingerprint(FE/name) for name in ['next.config.ts','package.json','package-lock.json','tsconfig.json','postcss.config.mjs'] if (FE/name).is_file()})
+        current_frontend.update({name:fingerprint(FE/name) for name in FRONTEND_SOURCE_FILES if (FE/name).is_file()})
         outcome['frontend_copy_drift'] = sorted(set(frontend)^set(current_frontend))+[
             name for name in frontend.keys()&current_frontend.keys() if frontend[name]!=current_frontend[name]]
         if outcome['backend_source_drift'] or outcome['frontend_copy_drift']:

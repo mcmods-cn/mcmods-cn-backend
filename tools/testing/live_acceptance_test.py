@@ -102,6 +102,76 @@ class AcceptanceGuardTest(unittest.TestCase):
             live.copy_guard(self.parent)
         self.assertEqual(json.loads(marker.read_text()), value)
 
+    def test_frontend_components_are_copied_and_fingerprinted_from_a_fresh_source(self):
+        live.SCOPE.mkdir()
+        component = live.FE / "components" / "skin" / "Canvas.tsx"
+        component.parent.mkdir(parents=True)
+        component.write_text("export const Canvas = () => null;\n")
+        manifest = live.frontend_sync()
+        relative = "components/skin/Canvas.tsx"
+        self.assertIn(relative, manifest)
+        self.assertEqual((live.COPY / relative).read_bytes(), component.read_bytes())
+        self.assertEqual(manifest[relative], live.fingerprint(component))
+
+    def test_frontend_components_changes_update_both_copy_and_manifest(self):
+        live.SCOPE.mkdir()
+        component = live.FE / "components" / "Canvas.tsx"
+        component.parent.mkdir()
+        component.write_text("export const revision = 1;\n")
+        first = live.frontend_sync()
+        component.write_text("export const revision = 2;\n")
+        second = live.frontend_sync()
+        relative = "components/Canvas.tsx"
+        self.assertIn(relative, first)
+        self.assertNotEqual(first[relative], second[relative])
+        self.assertEqual((live.COPY / relative).read_bytes(), component.read_bytes())
+        self.assertEqual(second[relative], live.fingerprint(component))
+
+    def test_frontend_components_stale_files_are_refused_without_deleting_them(self):
+        live.SCOPE.mkdir()
+        stale = live.COPY / "components" / "Unknown.tsx"
+        stale.parent.mkdir()
+        stale.write_text("synthetic unknown file")
+        with self.assertRaisesRegex(RuntimeError, "unexpected stale source"):
+            live.frontend_sync()
+        self.assertEqual(stale.read_text(), "synthetic unknown file")
+
+    def test_frontend_components_symlink_is_refused_before_copying_inputs(self):
+        live.SCOPE.mkdir()
+        foreign = self.root / "foreign"
+        foreign.mkdir()
+        (live.COPY / "components").symlink_to(foreign, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, "symlinked frontend-copy"):
+            live.frontend_sync()
+        self.assertFalse((live.SCOPE / "frontend-source.json").exists())
+
+    def test_frontend_proxy_is_copied_and_fingerprinted(self):
+        live.SCOPE.mkdir()
+        proxy = live.FE / "proxy.ts"
+        proxy.write_text("export const proxy = () => 'synthetic CSP boundary';\n")
+        manifest = live.frontend_sync()
+        self.assertIn("proxy.ts", manifest)
+        self.assertEqual((live.COPY / "proxy.ts").read_bytes(), proxy.read_bytes())
+        self.assertEqual(manifest["proxy.ts"], live.fingerprint(proxy))
+
+    def test_frontend_root_config_symlink_cannot_overwrite_another_file(self):
+        live.SCOPE.mkdir()
+        (live.FE / "next.config.ts").write_text("export default {};\n")
+        foreign = self.root / "foreign-config"
+        foreign.write_text("synthetic file must stay intact")
+        (live.COPY / "next.config.ts").symlink_to(foreign)
+        with self.assertRaisesRegex(RuntimeError, "symlinked frontend-copy"):
+            live.frontend_sync()
+        self.assertEqual(foreign.read_text(), "synthetic file must stay intact")
+
+    def test_frontend_removed_proxy_is_refused_without_deleting_stale_copy(self):
+        live.SCOPE.mkdir()
+        proxy = live.COPY / "proxy.ts"
+        proxy.write_text("synthetic old proxy")
+        with self.assertRaisesRegex(RuntimeError, "unexpected stale source"):
+            live.frontend_sync()
+        self.assertEqual(proxy.read_text(), "synthetic old proxy")
+
     def test_live_runtime_cannot_be_cleaned_by_a_false_stopped_record(self):
         live.SCOPE.mkdir()
         record = {"parent_owner": self.owner, "parent_container": self.parent["containers"]["postgres"],
