@@ -59,7 +59,7 @@ OCT03-A-003 修复三个测试工具误用窗口：父缓存/队列与持久化�
 已退出 npm/Docker leader 的存活后代仍按 session、nonce、starttime 和 pidfd 清理；
 每次启动前原子替换 RUNNING/stopped=false 记录，最终停止凭据绑定本次 run ID。
 旧成功凭据不能授权新运行清理或掩盖中断。独立交叉 probe 保留原 RED 和最终 GREEN；
-12 个工具回归覆盖错误主机/owner/query override、私有环境、副本、子目标/命名空间、
+15 个工具回归覆盖错误主机/owner/query override、私有环境、副本、子目标/命名空间、
 旧凭据以及真实“leader 已退出、60 秒子进程仍存活”的停止行为。
 
 正常结束向精确进程发送 TERM，必要时 KILL，再确认没有属于本次的存活成员。
@@ -79,21 +79,25 @@ OCT03-A-003 修复三个测试工具误用窗口：父缓存/队列与持久化�
 刷新后仍存在；中文/英文切换、390px 布局；取消删除保留收藏；确认删除=204，刷新
 后消失；退出=200、旧 cookie me=401，再刷新出现登录提示；浏览器 pageerror 为 0。
 
-最终 726 行 runner 的实际运行为 1 PASS、0 SKIP、4.519 秒；
-工具 SHA256 为 `387d6fcfee36e770f142fe7817ced1ce837e50226cf65a902d47e1c2a7d6e898`。
-实际核对 1,210 个 Go 源码文件，复制 606 个前端运行源码/配置文件；
-Go 与前端运行后漂移均为空。
-该轮新编译二进制 SHA256 为
-`b056cdc978c9871b507e390f0645e6fed7897184a0de0290c897dd3b00411c9b`，
-包含最终 187 行数据库 helper 的严格等价函数限定优化及新增测试快照；
-helper SHA256 为 `8c052e63dca070443bd754de320b4afe74eeecbd37dee6774066bece24a4f395`。
-没有复用早期旧二进制。
-旅程后活跃 session、该用例收藏、AI task、provider usage 和 crawler run 均为 0；
-停止所属进程，确认子库不存在、43 个所属 Redis key 已清空、所属 NATS stream 已删除。
-第一轮加入最后 run ID 保护前也实际通过 1/1、4.237 秒，单独保留其版本证据。
-中间版本为 158 行 schema 预检 helper、1/1、4.091 秒、44 个所属 Redis key；
-该轮也实际执行最后 run ID 保护，但不包含后来的 helper 优化与新增测试。
-最终轮再次新建 nonce 子库、编译和绑定本次 run ID，不将前轮通过冒充最终版本重跑。
+最终741行runner的r6整门退出0，浏览器1PASS、0SKIP、3.955秒；
+源码SHA256为 `fbc89cef17d62979b5986c945bbec02608b55ec8cf6de038ce1d781e86aa8af6`。
+实际核对1211个Go源码文件、606个前端运行文件，运行后漂移均为空。
+新编译二进制SHA256为 `c4ea8d82904ffd01e62743405d9b53226a27c518cc460421a2e33f983d69a549`；
+包含最终Go调用链，构建绑定5dbe928，前端副本绑定f27ce5a实际运行代码。
+准备阶段实际287个BASE TABLE；3个VIEW不混入表计数，最低250阈值保持。
+旅程后活跃session、用例收藏、AI task、provider usage、crawler run均为0；
+停止所属进程、确认子库不存在、43个所属Redis key及所属NATS stream清理完成。
+
+r5浏览器曾通过，但整门因清理PermissionError失败，原stopped=false和exit1仍保留。
+真实Linux内核复现：进程活跃stat与pidfd pin之后退出为未回收僵尸，environ读取被拒绝。
+仅在已pin的pidfd可读、确认该精确进程退出时忽略读取错误；存活且不可读、未pin或
+错误nonce仍拒绝。新增三项真实OS回归加原16项环境/live测试共19PASS、0SKIP。
+旧r5独立cleanup实际拒绝且未修改DB/namespace；最终已校验owner的父环境down
+移除其剩余可丢弃资源，没有伪造旧成功凭据。早期r1–r4通过另保留版本证据。
+
+完成所有测试后，本任务专属三个容器与精确Typesense进程已停止/删除；
+原有三个服务的运行状态与启动时间不变。身份确认的临时测试凭据删除；
+不满足身份条件的私有反例fixture保留，不删除未知文件。
 
 本项不覆盖全部角色/模块、生产数据库健康、真实邮件/OSS/AI 语义或计费、长期故障、
 浏览器之外的部署代理配置。不会因此将历史所有 partial 状态升级为通过。私有原始
