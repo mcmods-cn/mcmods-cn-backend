@@ -1,7 +1,7 @@
 # 当前 Go 与 Next dev 的真实前后端联通验收
 
 使用 [live_acceptance.py](../../../tools/testing/live_acceptance.py) 编译当前 Go，并将
-当前前端 app/lib/public 与运行配置复制到独立 Next dev 目录。浏览器执行前端现有
+当前前端 app/components/lib/public 与运行配置（含根proxy.ts）复制到独立Next dev目录。统一输入常量同时用于拷贝和运行后校验。浏览器执行前端现有
 `browser-tests/live-backend.mts`，登录、收藏和退出的项目 API 均访问真实 Go 与
 完整 PostgreSQL 子库，没有替换项目 API 响应。此项与生产构建的受控 API 浏览器
 夹具验收分开；Next dev 通过不能证明所有 production 页面完整联通。
@@ -75,23 +75,31 @@ OCT03-A-003 修复三个测试工具误用窗口：父缓存/队列与持久化�
 
 ## 实际验收与限制
 
+本次还实际断言登录文档HTTP200、真实nonce CSP与配置的回环API origin，未输出nonce值。
 本次真实用户旅程验证：匿名 me=401；登录=200 与 HttpOnly cookie；收藏创建=201，
 刷新后仍存在；中文/英文切换、390px 布局；取消删除保留收藏；确认删除=204，刷新
 后消失；退出=200、旧 cookie me=401，再刷新出现登录提示；浏览器 pageerror 为 0。
 
-最终741行runner的r6整门退出0，浏览器1PASS、0SKIP、3.955秒；
-源码SHA256为 `fbc89cef17d62979b5986c945bbec02608b55ec8cf6de038ce1d781e86aa8af6`。
-实际核对1211个Go源码文件、606个前端运行文件，运行后漂移均为空。
-新编译二进制SHA256为 `c4ea8d82904ffd01e62743405d9b53226a27c518cc460421a2e33f983d69a549`；
-包含最终Go调用链，构建绑定5dbe928，前端副本绑定f27ce5a实际运行代码。
-准备阶段实际287个BASE TABLE；3个VIEW不混入表计数，最低250阈值保持。
-旅程后活跃session、用例收藏、AI task、provider usage、crawler run均为0；
-停止所属进程、确认子库不存在、43个所属Redis key及所属NATS stream清理完成。
+最终748行runner的r10整门退出0，浏览器1PASS、0SKIP、4.535秒；
+runner源码SHA256为 `a79e920757a228584fab085082312a87b89b97c7be1d500fa7c80c168172c9fd`。
+实际核对1211个Go源码、610个前端运行输入，运行后漂移均为空；业务提交后端
+`55e6f63403fef01faaf9f0f0e16c3fd7cf57fa58`、前端`c6410b73b78b3a9ad9d60f568dda616a7f0cf894`。新副本起始只有package/lock安装输入，npm ci成功，
+组件与proxy由本工具复制，没有人工预填。新二进制SHA256为
+`5e362bfdf32675faea88841d3063c14bd0e854b6874b9b8348d693fa70ce0e5d`。准备阶段287 BASE TABLE和3 VIEW，最低250阈值保持。
+五项旅程后计数均0；所属进程停止、子库不存在、44个Redis key和独立NATS stream清理完成。
+
+OCT03-A-004来自全新r7副本的真实失败：登录成功后/user缺少SkinViewerCanvas模块，
+收藏入口不可达；旧拷贝只枚举app/lib/public，漏了components及根proxy.ts。
+旧r6浏览器通过记录保留，但606输入不证明这些额外文件与当前源码绑定。
+修复后拷贝与最终校验统一610输入；7项原版文件系统回归均RED，新版GREEN，
+根配置symlink和来源已移除的stale proxy拒绝，未知文件不删除。
+当前精确live测试的nonce CSP/真实API旅程在全新r10通过；r9尝试跨父环境复用
+副本被所有权守卫拒绝，随后新建匹配父环境副本，没有改写所有者标记。
 
 r5浏览器曾通过，但整门因清理PermissionError失败，原stopped=false和exit1仍保留。
 真实Linux内核复现：进程活跃stat与pidfd pin之后退出为未回收僵尸，environ读取被拒绝。
 仅在已pin的pidfd可读、确认该精确进程退出时忽略读取错误；存活且不可读、未pin或
-错误nonce仍拒绝。新增三项真实OS回归加原16项环境/live测试共19PASS、0SKIP。
+错误nonce仍拒绝。当时新增三项真实OS回归加原16项环境/live测试共19PASS、0SKIP；本次另加7项拷贝/指纹/拒绝回归，最终26PASS、0SKIP。
 旧r5独立cleanup实际拒绝且未修改DB/namespace；最终已校验owner的父环境down
 移除其剩余可丢弃资源，没有伪造旧成功凭据。早期r1–r4通过另保留版本证据。
 
