@@ -69,14 +69,18 @@ func loadModExportTagPage(
 	revisionID, registry, query, afterRegistry, afterID string,
 	limit int,
 ) ([]modExportTagListRow, bool, error) {
+	searchPrefix := ""
+	if query != "" {
+		searchPrefix = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query) + "%"
+	}
 	rows, err := db.Query(ctx, `select entity.public_id,tag.registry,tag.canonical_id,snapshot.member_count
 		from catalog_tags tag
 		join tag_import_snapshots snapshot on snapshot.tag_id=tag.entity_id and snapshot.revision_id=$1
 		join catalog_entities entity on entity.id=tag.entity_id
 		where ($2='' or tag.registry=$2)
-		  and ($3='' or lower(tag.canonical_id) like lower($3)||'%')
+		  and ($3='' or lower(tag.canonical_id) like lower($3) escape '\')
 		  and ($4='' or (tag.registry,tag.canonical_id)>($4,$5))
-		order by tag.registry,tag.canonical_id limit $6`, revisionID, registry, query, afterRegistry, afterID, limit+1)
+		order by tag.registry,tag.canonical_id limit $6`, revisionID, registry, searchPrefix, afterRegistry, afterID, limit+1)
 	if err != nil {
 		return nil, false, err
 	}

@@ -301,6 +301,9 @@ func schemaInstallationStatements() []string {
 	statements = append(statements, baselineSchemaStatements()...)
 	statements = append(statements, catalogImportArtifactSchemaStatements()...)
 	statements = append(statements, catalogSchemaStatements()...)
+	// Additive forward change20261003_01 is included for fresh installations.
+	// Existing generation168 databases require explicit db-index-repair apply.
+	statements = append(statements, catalogTagPrefixIndexSQL)
 	statements = append(statements, catalogEditorSchemaStatements()...)
 	statements = append(statements, skinSchemaStatements()...)
 	statements = append(statements, reviewSchemaStatements()...)

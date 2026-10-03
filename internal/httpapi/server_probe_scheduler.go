@@ -13,6 +13,10 @@ import (
 
 const minecraftServerProbeInterval = 5 * time.Minute
 
+// All scheduler invocations in this process share the probe budget. Database
+// claims prevent duplicate work across instances; they do not limit concurrency.
+var minecraftServerProbeSlots = make(chan struct{}, 32)
+
 // StartMinecraftServerProbeScheduler records one status sample every five
 // minutes for approved servers. Work is claimed with SKIP LOCKED so multiple
 // application instances do not probe the same server in the same interval.
@@ -94,7 +98,6 @@ func probeDueMinecraftServersWithProbe(ctx context.Context, db *pgxpool.Pool, pr
 		return
 	}
 
-	semaphore := make(chan struct{}, 32)
 	var waitGroup sync.WaitGroup
 	for _, item := range targets {
 		if ctx.Err() != nil {
@@ -104,11 +107,14 @@ func probeDueMinecraftServersWithProbe(ctx context.Context, db *pgxpool.Pool, pr
 		go func(item target) {
 			defer waitGroup.Done()
 			select {
-			case semaphore <- struct{}{}:
+			case minecraftServerProbeSlots <- struct{}{}:
 			case <-ctx.Done():
 				return
 			}
-			defer func() { <-semaphore }()
+			defer func() { <-minecraftServerProbeSlots }()
+			if ctx.Err() != nil {
+				return
+			}
 			result, probeErr := probe(ctx, item.address)
 			if persistErr := persistMinecraftServerProbe(ctx, db, item.id, result, probeErr); persistErr != nil {
 				log.Printf("persist Minecraft server %d probe: %v", item.id, persistErr)
