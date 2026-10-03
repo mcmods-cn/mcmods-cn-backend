@@ -1,11 +1,11 @@
 {
   "versions": {
     "mcmods-cn-backend": {
-      "head": "0d01bbaf916ed334f21955040a8e971996f93af2",
+      "head": "ad0ab523499c9e612b16718b6e2ed5c83c921cb4",
       "branch": "codex/acceptance-followup-20261003"
     },
     "mcmods-cn-frontend": {
-      "head": "b46d533f8b9dfcfb8da590ed72756f07627703b6",
+      "head": "21c3a7244b5c906ead398167c687f3d3aec47fbb",
       "branch": "codex/acceptance-followup-20261003"
     }
   },
@@ -4292,14 +4292,14 @@
       "path": "docs/audit/20261003/ACCEPTANCE.md",
       "owner": "root",
       "category": ".md",
-      "sha256": "f3e1a5a1500a3296cc552a13bfe3c0bd0126ad815d8d1345650c2da938b18ec9",
-      "blob_sha": "58db9d115c9e409099943dc38fc8d9080954a785",
-      "lines": 144,
+      "sha256": "47acd2575ba9b4dba0214fa731c7ddd6c0ef3f68bc832894629a9bb5c2e5298c",
+      "blob_sha": "d04bb738adc4fb87cb800d702ec82fd4109ca696",
+      "lines": 154,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          144
+          154
         ]
       ],
       "content_read": true,
@@ -4314,19 +4314,23 @@
       ],
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Final cross-repository acceptance scopes, per-ID assertions, observed gate results, retained failures, precise cleanup/CPU-profile boundaries, compatibility and deployment order.",
-      "call_chain": "Actual final local/remote receipts -> authored final public reports -> existing formal fingerprint ledger; immutable historical snapshots and simulated-provider boundaries preserved.",
+      "responsibility": "Final counts, roots, actual gates, partial scopes, compatibility and CI snapshot boundaries.",
+      "call_chain": "Current tests/source equivalence -> named findings -> final audit and deployment order.",
       "findings": [
-        "OCT03-A-002"
+        "OCT03-A-002",
+        "OCT03-A-004",
+        "OCT03-DB-002",
+        "OCT03-R-002"
       ],
       "proofs": [
-        "root-final-report-proof.json"
+        "root-continuation-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "117-root-report-review-r1.json",
         "new-task-ownership.json",
+        "root-continuation-final-proof.json",
         "root-final-report-proof.json"
       ]
     },
@@ -4335,14 +4339,14 @@
       "path": "docs/audit/20261003/LIVE_ACCEPTANCE.md",
       "owner": "backend_a",
       "category": ".md",
-      "sha256": "7c22cf6b32d3e40b4077c2b327bb3b21522889c1dbf38e56506fd1d5d5e456ea",
-      "blob_sha": "0822727fad2cacb99a15a6b0fa27c02ad35673ab",
-      "lines": 104,
+      "sha256": "0b24065f982814c2b469b7a4fa45f4700af81f386f1d28b19d984c3256dec592",
+      "blob_sha": "c2475ffee1a1a06b574f84520b22c8e779287f8e",
+      "lines": 112,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          104
+          112
         ]
       ],
       "content_read": true,
@@ -4375,19 +4379,21 @@
       ],
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Final cross-repository acceptance scopes, per-ID assertions, observed gate results, retained failures, precise cleanup/CPU-profile boundaries, compatibility and deployment order.",
-      "call_chain": "Actual final local/remote receipts -> authored final public reports -> existing formal fingerprint ledger; immutable historical snapshots and simulated-provider boundaries preserved.",
+      "responsibility": "Fresh-copy reproduction, exact ownership/nonce protections, retained606binding limitation and current610proof.",
+      "call_chain": "Current748runner and26Python tests -> fresh r10 live/browser/PG/CSP -> exact44key/stream/child/process cleanup.",
       "findings": [
-        "OCT03-A-003"
+        "OCT03-A-003",
+        "OCT03-A-004"
       ],
       "proofs": [
-        "root-final-report-proof.json"
+        "root-continuation-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "76-backend_a-delivery-final-proof.json",
         "new-task-ownership.json",
+        "root-continuation-final-proof.json",
         "root-final-report-proof.json"
       ]
     },
@@ -4458,14 +4464,14 @@
       "path": "docs/audit/20261003/acceptance-results.json",
       "owner": "root",
       "category": ".json",
-      "sha256": "2e2a27f21f7bcbfce200c5683ea23f932b432360ec21c7ffb3078dd6d7e12d5c",
-      "blob_sha": "2ffacfd6979188bd4541171b9808a7f0a993fa2f",
-      "lines": 183,
+      "sha256": "292ab4a7e492887a9e65cf3a7851c0d41a26bdbbadb469038127eb75825b0089",
+      "blob_sha": "16d779bb5df01d0972e10fca4c4473c6c4b641fc",
+      "lines": 200,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          183
+          200
         ]
       ],
       "content_read": true,
@@ -4480,19 +4486,23 @@
       ],
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Final cross-repository acceptance scopes, per-ID assertions, observed gate results, retained failures, precise cleanup/CPU-profile boundaries, compatibility and deployment order.",
-      "call_chain": "Actual final local/remote receipts -> authored final public reports -> existing formal fingerprint ledger; immutable historical snapshots and simulated-provider boundaries preserved.",
+      "responsibility": "Immutable legacy/prior named rows plus three new findings/current gates and preserved failures.",
+      "call_chain": "Previously complete-read be4985f SHA matched;112/113 unchanged rows byte-equivalent; changed PERF069 and authored final validation/new3 reviewed against actual receipts.",
       "findings": [
-        "OCT03-A-002"
+        "OCT03-A-002",
+        "OCT03-A-004",
+        "OCT03-DB-002",
+        "OCT03-R-002"
       ],
       "proofs": [
-        "root-final-report-proof.json"
+        "root-continuation-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "117-root-report-review-r1.json",
         "new-task-ownership.json",
+        "root-continuation-final-proof.json",
         "root-final-report-proof.json"
       ]
     },
@@ -77872,33 +77882,21 @@
       "path": "tools/testing/live_acceptance.py",
       "owner": "backend_a",
       "category": ".py",
-      "sha256": "fbc89cef17d62979b5986c945bbec02608b55ec8cf6de038ce1d781e86aa8af6",
-      "blob_sha": "680d9135975316c0ca63a33ecf0278bbbda06340",
-      "lines": 741,
+      "sha256": "a79e920757a228584fab085082312a87b89b97c7be1d500fa7c80c168172c9fd",
+      "blob_sha": "1be8dfb2741ec7c928ec49848bb055b7de653246",
+      "lines": 748,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          200
-        ],
-        [
-          201,
-          386
-        ],
-        [
-          387,
-          580
-        ],
-        [
-          581,
-          741
+          748
         ]
       ],
       "content_read": true,
       "semantic_review": true,
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
-      "behavior_claim": false,
+      "behavior_claim": true,
       "behavior_evidence": [
         {
           "source": "72-backend-b-live-runner-final-proof.json",
@@ -77937,7 +77935,7 @@
         {
           "source": "backend_a-live-cleanup-race-final-proof.json",
           "human_behavior_claim": false,
-          "version_matches_current": true,
+          "version_matches_current": false,
           "validation": [
             {
               "status": "PASS",
@@ -77950,21 +77948,28 @@
               "scope": "actual owner3 read-only inspections; original false receipt rejects cleanup before any namespace/DB mutation, old receipt SHA unchanged"
             }
           ]
+        },
+        {
+          "source": "root-continuation-final-proof.json",
+          "human_behavior_claim": true,
+          "version_matches_current": true,
+          "validation": []
         }
       ],
       "validation_documents": [
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
       ],
-      "focus": "pidfd_has_exited; owned_group_handles; stop_owned_groups; prepare BASE TABLE inventory; unchanged nonce/receipt/child guards",
+      "focus": "",
       "focus_symbols": [],
-      "responsibility": "",
-      "call_chain": "",
+      "responsibility": "Complete live-copy inputs, exact ownership, source consistency and fail-closed resource cleanup.",
+      "call_chain": "frontend_sync/constants -> real Next/proxy/component copy -> Go/PG live journey -> final fingerprint and exact cleanup.",
       "findings": [
-        "OCT03-A-003"
+        "OCT03-A-003",
+        "OCT03-A-004"
       ],
       "proofs": [
-        "backend_a-live-cleanup-race-final-proof.json"
+        "root-continuation-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
@@ -77973,7 +77978,8 @@
         "72-backend-b-live-runner-final-proof.json",
         "76-backend_a-delivery-final-proof.json",
         "backend_a-live-cleanup-race-final-proof.json",
-        "new-task-ownership.json"
+        "new-task-ownership.json",
+        "root-continuation-final-proof.json"
       ]
     },
     {
@@ -77981,25 +77987,21 @@
       "path": "tools/testing/live_acceptance_test.py",
       "owner": "backend_a",
       "category": ".py",
-      "sha256": "decabb31b5329baf269d29336f2961406f72184bcae335003bc9544f43cef60d",
-      "blob_sha": "7a948292f26ef150c942557ae0bef4de0042cf1a",
-      "lines": 272,
+      "sha256": "ee6058ffc7228650697b7d36690e306299882d1675fcc00fb6ebb0e58196c8cf",
+      "blob_sha": "95f4dda122d87190243a8522b654656e32f01cf9",
+      "lines": 342,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          135
-        ],
-        [
-          136,
-          272
+          342
         ]
       ],
       "content_read": true,
       "semantic_review": true,
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
-      "behavior_claim": false,
+      "behavior_claim": true,
       "behavior_evidence": [
         {
           "source": "72-backend-b-live-runner-final-proof.json",
@@ -78038,7 +78040,7 @@
         {
           "source": "backend_a-live-cleanup-race-final-proof.json",
           "human_behavior_claim": false,
-          "version_matches_current": true,
+          "version_matches_current": false,
           "validation": [
             {
               "status": "PASS",
@@ -78051,21 +78053,28 @@
               "scope": "actual owner3 read-only inspections; original false receipt rejects cleanup before any namespace/DB mutation, old receipt SHA unchanged"
             }
           ]
+        },
+        {
+          "source": "root-continuation-final-proof.json",
+          "human_behavior_claim": true,
+          "version_matches_current": true,
+          "validation": []
         }
       ],
       "validation_documents": [
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
       ],
-      "focus": "actual unreaped child exits after real pidfd pin; actual PR_SET_DUMPABLE kernel denied live process; wrong live nonce; existing12 guards",
+      "focus": "",
       "focus_symbols": [],
-      "responsibility": "",
-      "call_chain": "",
+      "responsibility": "Seven filesystem RED/GREEN copy/fingerprint/symlink/stale regressions plus retained real pidfd/owner tests.",
+      "call_chain": "Actual temporary files and symlinks -> frontend_sync; real process exit/permission/owner -> resource safety guards.",
       "findings": [
-        "OCT03-A-003"
+        "OCT03-A-003",
+        "OCT03-A-004"
       ],
       "proofs": [
-        "backend_a-live-cleanup-race-final-proof.json"
+        "root-continuation-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
@@ -78074,7 +78083,8 @@
         "72-backend-b-live-runner-final-proof.json",
         "76-backend_a-delivery-final-proof.json",
         "backend_a-live-cleanup-race-final-proof.json",
-        "new-task-ownership.json"
+        "new-task-ownership.json",
+        "root-continuation-final-proof.json"
       ]
     },
     {
@@ -106724,26 +106734,26 @@
       "path": "browser-tests/live-backend.mts",
       "owner": "root",
       "category": ".mts",
-      "sha256": "c8762328ca723f5504c6655d18de08515a65398d0698704064ba226cccf4888b",
-      "blob_sha": "a26656086645560e6c49574fa3ff9e0fc74179a2",
-      "lines": 89,
+      "sha256": "932a8773b9e2d8f0b26eb89e78e1f78f60864cab4f12f0eec0a9e2deb626d47d",
+      "blob_sha": "461cc4683e7952411dc2d98c280f343c55ccd4ac",
+      "lines": 93,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          89
+          93
         ]
       ],
       "content_read": true,
       "semantic_review": true,
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
-      "behavior_claim": false,
+      "behavior_claim": true,
       "behavior_evidence": [
         {
           "source": "root.json",
           "human_behavior_claim": false,
-          "version_matches_current": true,
+          "version_matches_current": false,
           "validation": [
             "NOT_RUN against final artifact; prior source-specific red/intermediate green retained separately"
           ]
@@ -106751,7 +106761,7 @@
         {
           "source": "root.json",
           "human_behavior_claim": false,
-          "version_matches_current": true,
+          "version_matches_current": false,
           "validation": [
             "NOT_RUN against final artifact; prior source-specific red/intermediate green retained separately"
           ]
@@ -106759,7 +106769,7 @@
         {
           "source": "80-backend_a-live-repository-final-proof.json",
           "human_behavior_claim": false,
-          "version_matches_current": true,
+          "version_matches_current": false,
           "validation": [
             {
               "status": "PASS",
@@ -106770,6 +106780,12 @@
               "evidence": "backend-a-live-cleanup.json"
             }
           ]
+        },
+        {
+          "source": "root-continuation-final-proof.json",
+          "human_behavior_claim": true,
+          "version_matches_current": true,
+          "validation": []
         }
       ],
       "validation_documents": [
@@ -106778,14 +106794,13 @@
       ],
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Opt-in actual API/cookie/DB favorites journey, loopback-only origins, no own API fixture",
-      "call_chain": "",
-      "findings": [],
+      "responsibility": "Actual nonce CSP/API origin and real login/favorites/locale/mobile/session journey.",
+      "call_chain": "New installed complete610input Next copy -> proxy document header -> projectGo APIs -> true PG persistence and postconditions; no own API mocks.",
+      "findings": [
+        "OCT03-A-004"
+      ],
       "proofs": [
-        "102-backend-b-live-runner-cross-review.json",
-        "72-backend-b-live-runner-final-proof.json",
-        "80-backend_a-live-repository-final-proof.json",
-        "root.json"
+        "root-continuation-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
@@ -106793,6 +106808,7 @@
         "102-backend-b-live-runner-cross-review.json",
         "72-backend-b-live-runner-final-proof.json",
         "80-backend_a-live-repository-final-proof.json",
+        "root-continuation-final-proof.json",
         "root.json"
       ]
     },
@@ -107651,38 +107667,26 @@
       "path": "browser-tests/oct03-rendering-acceptance.browser.mts",
       "owner": "database_docs",
       "category": ".mts",
-      "sha256": "6cd22ac8aedce77efb1b64908e767d022685277b35ed3f17b3d8d02c7050be03",
-      "blob_sha": "a4a676a21448b7198784dd538847bc60712c7deb",
-      "lines": 627,
+      "sha256": "abdcdc9b19f28d3ec55ed5c588251180d7fa3aee438c39d84daa27fe0b648bac",
+      "blob_sha": "d855e87e4f26e93b5adde7da0b9bc627c03d4696",
+      "lines": 784,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          170
-        ],
-        [
-          171,
-          332
-        ],
-        [
-          333,
-          490
-        ],
-        [
-          491,
-          627
+          784
         ]
       ],
       "content_read": true,
       "semantic_review": true,
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
-      "behavior_claim": false,
+      "behavior_claim": true,
       "behavior_evidence": [
         {
           "source": "88-database_docs-rendering-final-proof.json",
           "human_behavior_claim": false,
-          "version_matches_current": true,
+          "version_matches_current": false,
           "validation": [
             "Old renderer/native unchanged camera actualRED8frames154→170 submissions retained (20261003-rendering-db001-red.log)",
             "Current renderer/test final eslint/typecheck/diffcheck exit0",
@@ -107690,27 +107694,36 @@
             "r7 fivePASS/twoFAIL and r8 sixPASS/one5sAllACKFAIL retained; same120s overall/native60s budgets and all max-instance/restore/dispose assertions",
             "Measured600kAll restoration12.657s and large longtasks remain; this PASS does not prove realtime responsiveness,600kx3current or physicalVRAMreclamation"
           ]
+        },
+        {
+          "source": "root-continuation-final-proof.json",
+          "human_behavior_claim": true,
+          "version_matches_current": true,
+          "validation": []
         }
       ],
       "validation_documents": [
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
       ],
-      "focus": "['Actual production components and retained native GL draw implementations', '600k admission/layers/budget; separate100k3rebuild and600001 rejection', 'FirstPerson/PointerLock/blur/capture/latePNG native lifecycle', 'Idle render regression camera exact same and8frames no draws; actual orbit/damping/resize', 'PERF070 true unfinished two-state load, native PNG held, actual client unmount, model fetch abort and no late native allocations/capture', 'No driver-side successes mocked: all GL outcomes/errors retained; bounded native timing/longtask diagnostics and optional actualCDP sampled CPU profile; All realfocus+keyboard with original120s overall/native60s']",
+      "focus": "",
       "focus_symbols": [],
-      "responsibility": "",
-      "call_chain": "",
+      "responsibility": "Native frame-scoped submission, PNG pixels, readable fallback and pending-unmount regressions.",
+      "call_chain": "Real production fixture -> delegated native GL/rAF/image reads -> exact pass counts/screenshots/abort/dispose assertions -> nine terminal cases.",
       "findings": [
-        "OCT03-DB-001"
+        "OCT03-DB-001",
+        "OCT03-DB-002",
+        "OCT03-R-002"
       ],
       "proofs": [
-        "88-database_docs-rendering-final-proof.json"
+        "root-continuation-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "88-database_docs-rendering-final-proof.json",
-        "new-task-ownership.json"
+        "new-task-ownership.json",
+        "root-continuation-final-proof.json"
       ]
     },
     {
@@ -108593,14 +108606,14 @@
       "path": "docs/audit/acceptance-20261003.md",
       "owner": "root",
       "category": ".md",
-      "sha256": "f3f9df9093effe80059fb79794d71eefbf752f9783e589ddfeb55936d4947139",
-      "blob_sha": "b6a59a7695ae513729d115765ed1ec8676153595",
-      "lines": 102,
+      "sha256": "0d4c71ce8ba845572ea4c9d987a210b507f59cd709d28b37b76ecb8c808658d9",
+      "blob_sha": "627fe1d8ffe05e25afd9971d0055e6d4b1e69acc",
+      "lines": 113,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          102
+          113
         ]
       ],
       "content_read": true,
@@ -108615,19 +108628,23 @@
       ],
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Final cross-repository acceptance scopes, per-ID assertions, observed gate results, retained failures, precise cleanup/CPU-profile boundaries, compatibility and deployment order.",
-      "call_chain": "Actual final local/remote receipts -> authored final public reports -> existing formal fingerprint ledger; immutable historical snapshots and simulated-provider boundaries preserved.",
+      "responsibility": "Current R12/full170 and exact fresh610input live, behavior changes and remaining response latency.",
+      "call_chain": "FE c6410b7 runtime/tests and source equivalence -> actual final gates -> bounded public acceptance report.",
       "findings": [
-        "OCT03-A-002"
+        "OCT03-A-002",
+        "OCT03-A-004",
+        "OCT03-DB-002",
+        "OCT03-R-002"
       ],
       "proofs": [
-        "root-final-report-proof.json"
+        "root-continuation-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "117-root-report-review-r1.json",
         "new-task-ownership.json",
+        "root-continuation-final-proof.json",
         "root-final-report-proof.json"
       ]
     },
@@ -108845,14 +108862,14 @@
       "path": "lib/mcmods-exporter/renderer/README.md",
       "owner": "frontend_shared",
       "category": ".md",
-      "sha256": "b007de99c1dbf211d58cd7325d493180324ea39773cfed523452468146e00d24",
-      "blob_sha": "b7cfde2e084d3bb144a36414281cfb73ec4e118b",
-      "lines": 42,
+      "sha256": "e44e7c0395f8054469710d3f8a5801946537d44f209f593bec4743292b3b34f2",
+      "blob_sha": "efa191807da4ca52942a7e77ae5d2b988641aa39",
+      "lines": 44,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          42
+          44
         ]
       ],
       "content_read": true,
@@ -108864,7 +108881,7 @@
         {
           "source": "88-database_docs-rendering-final-proof.json",
           "human_behavior_claim": false,
-          "version_matches_current": true,
+          "version_matches_current": false,
           "validation": [
             "Old renderer/native unchanged camera actualRED8frames154→170 submissions retained (20261003-rendering-db001-red.log)",
             "Current renderer/test final eslint/typecheck/diffcheck exit0",
@@ -108878,22 +108895,24 @@
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
       ],
-      "focus": "['Actual update/texture/capture behavior and acceptance size boundaries', 'SoftwareGL/native deletion does not establish physical GPU lifetime or VRAM zero', 'Cancellation test explicitly excludes synchronous CPU parse interruption', '结构字节先读取，WebGL 构造后异步模型加载；缺失模型按已有回退策略处理，不能把异步 PNG 请求等同未完成 load']",
+      "focus": "",
       "focus_symbols": [],
-      "responsibility": "结构预览资源读取、解析/模型/实例预算、交互及释放：README",
-      "call_chain": {},
+      "responsibility": "Document renderer analysis bounds, material compatibility and delayed disposal behavior.",
+      "call_chain": "Actual model/scene implementation and nine native case receipts -> formal integration behavior.",
       "findings": [
-        "OCT03-DB-001"
+        "OCT03-DB-001",
+        "OCT03-DB-002"
       ],
       "proofs": [
-        "88-database_docs-rendering-final-proof.json"
+        "root-continuation-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "100-root-final-review.json",
         "88-database_docs-rendering-final-proof.json",
-        "frontend_shared.json"
+        "frontend_shared.json",
+        "root-continuation-final-proof.json"
       ]
     },
     {
@@ -109122,22 +109141,29 @@
       "path": "lib/mcmods-exporter/renderer/minecraftBlockModel.ts",
       "owner": "frontend_shared",
       "category": ".ts",
-      "sha256": "641ccb6728c2a91a7f91eb99f4d1d6e52a2c4e18c6f99591dc38fedeb6295330",
-      "blob_sha": "832eb9c52abb2dd1d8234216660bd3fc91ea3ce7",
-      "lines": 942,
+      "sha256": "889dd45e55d5dde4dd24ad16357b47e4e32ecd6f9523fde17c00e3fbcbb42118",
+      "blob_sha": "3e8bdb05dc09d1d3bb894d78de1df84e1196c26d",
+      "lines": 978,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          942
+          978
         ]
       ],
       "content_read": true,
       "semantic_review": true,
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
-      "behavior_claim": false,
-      "behavior_evidence": [],
+      "behavior_claim": true,
+      "behavior_evidence": [
+        {
+          "source": "root-continuation-final-proof.json",
+          "human_behavior_claim": true,
+          "version_matches_current": true,
+          "validation": []
+        }
+      ],
       "validation_documents": [
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
@@ -109148,16 +109174,19 @@
         "buildMinecraftBlockModel",
         "atlas"
       ],
-      "responsibility": "结构预览资源读取、解析/模型/实例预算、交互及释放：minecraftBlockModel",
-      "call_chain": {},
-      "findings": [],
+      "responsibility": "Conservative decoded opaque-plane optimization, bounded image analysis, disposal and fallbacks.",
+      "call_chain": "standardfaces -> shared material -> late PNG callback -> bounded all-alpha255 probe -> original instance material; OBJ/entity/chest bypass preserved.",
+      "findings": [
+        "OCT03-DB-002"
+      ],
       "proofs": [
-        "frontend_shared.json"
+        "root-continuation-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
-        "frontend_shared.json"
+        "frontend_shared.json",
+        "root-continuation-final-proof.json"
       ]
     },
     {
@@ -109213,26 +109242,26 @@
       "path": "lib/mcmods-exporter/renderer/structureScene.ts",
       "owner": "frontend_shared",
       "category": ".ts",
-      "sha256": "445f593575a512350ff4b288a40c12cbdca39f8e88400ddeb3d2d8743b13fcc5",
-      "blob_sha": "b9fef6175875ad1de07c7f96622224e0adf91d40",
-      "lines": 544,
+      "sha256": "e2de69eb646bbbbb2800d0b5321536e52064b327af753ead1bcd7ac2f027cf28",
+      "blob_sha": "76012e63311826f3084bf0e6e4d98741c9aca5e0",
+      "lines": 546,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          544
+          546
         ]
       ],
       "content_read": true,
       "semantic_review": true,
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
-      "behavior_claim": false,
+      "behavior_claim": true,
       "behavior_evidence": [
         {
           "source": "frontend_shared.json",
           "human_behavior_claim": false,
-          "version_matches_current": true,
+          "version_matches_current": false,
           "validation": [
             {
               "status": "PASS",
@@ -109244,7 +109273,7 @@
         {
           "source": "frontend_shared.json",
           "human_behavior_claim": false,
-          "version_matches_current": true,
+          "version_matches_current": false,
           "validation": [
             {
               "status": "PASS",
@@ -109252,6 +109281,12 @@
               "evidence": "frontend-shared-typecheck.log"
             }
           ]
+        },
+        {
+          "source": "root-continuation-final-proof.json",
+          "human_behavior_claim": true,
+          "version_matches_current": true,
+          "validation": []
         }
       ],
       "validation_documents": [
@@ -109267,18 +109302,20 @@
         "structureBlockAtInstance",
         "disposeStructureGroup"
       ],
-      "responsibility": "结构预览资源读取、解析/模型/实例预算、交互及释放：structureScene",
-      "call_chain": {},
+      "responsibility": "Prototype/material ownership, instance layer packing, translucent context ordering and disposal.",
+      "call_chain": "Prototype original material -> mainInstancedMesh; transparentMaterial clone .16 -> explicit two passes; shared textures/dispose dedup.",
       "findings": [
-        "OCT02-FS-013"
+        "OCT02-FS-013",
+        "OCT03-DB-002"
       ],
       "proofs": [
-        "frontend_shared.json"
+        "root-continuation-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
-        "frontend_shared.json"
+        "frontend_shared.json",
+        "root-continuation-final-proof.json"
       ]
     },
     {

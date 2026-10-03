@@ -108,10 +108,10 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/docs/audit/20261002/findings.json | backend_c | 12833 | complete | 1–12833 | ceaee31f5792fdc7366c2777c9b95f9cb6eb24d3eb6aaeefd539c039e5183486 |  |
 | mcmods-cn-backend/docs/audit/20261002/review-records.json | root | 0 | excluded |  | 未读取 | Generated ledger output; review generator and human source records, not self-referential bytes |
 | mcmods-cn-backend/docs/audit/20261002/verification-results.json | root | 1132 | complete | 1–1132 | 053cb739752eaa14762bf2c57ffab871616616ad705bd3ac5361b1361a9df159 |  |
-| mcmods-cn-backend/docs/audit/20261003/ACCEPTANCE.md | root | 144 | complete | 1–144 | f3e1a5a1500a3296cc552a13bfe3c0bd0126ad815d8d1345650c2da938b18ec9 |  |
-| mcmods-cn-backend/docs/audit/20261003/LIVE_ACCEPTANCE.md | backend_a | 104 | complete | 1–104 | 7c22cf6b32d3e40b4077c2b327bb3b21522889c1dbf38e56506fd1d5d5e456ea |  |
+| mcmods-cn-backend/docs/audit/20261003/ACCEPTANCE.md | root | 154 | complete | 1–154 | 47acd2575ba9b4dba0214fa731c7ddd6c0ef3f68bc832894629a9bb5c2e5298c |  |
+| mcmods-cn-backend/docs/audit/20261003/LIVE_ACCEPTANCE.md | backend_a | 112 | complete | 1–112 | 0b24065f982814c2b469b7a4fa45f4700af81f386f1d28b19d984c3256dec592 |  |
 | mcmods-cn-backend/docs/audit/20261003/SECURITY.md | backend_a | 112 | complete | 1–112 | dce5b6a1b5d0ca44372c89e0c38d5086d9691cd009e61805d25ae849dff68f2f |  |
-| mcmods-cn-backend/docs/audit/20261003/acceptance-results.json | root | 183 | complete | 1–183 | 2e2a27f21f7bcbfce200c5683ea23f932b432360ec21c7ffb3078dd6d7e12d5c |  |
+| mcmods-cn-backend/docs/audit/20261003/acceptance-results.json | root | 200 | complete | 1–200 | 292ab4a7e492887a9e65cf3a7851c0d41a26bdbbadb469038127eb75825b0089 |  |
 | mcmods-cn-backend/docs/audit/full-project-audit/00_EXECUTIVE_SUMMARY.md | database_docs | 70 | complete | 1–70 | 1dbb60c2aeda3c8009abe59b9fa5e264b6397afb397cdcca608ae769efc6c8a7 |  |
 | mcmods-cn-backend/docs/audit/full-project-audit/01_AUDIT_COVERAGE.md | database_docs | 112 | complete | 1–112 | 05aed62d6c14154d7abacda9dd211836da66a68e2859c1e015782ab8a5d5e281 |  |
 | mcmods-cn-backend/docs/audit/full-project-audit/02_ARCHITECTURE_AND_MODULE_RELATIONS.md | database_docs | 141 | complete | 1–141 | d6c80e4dbaf46e7b0c4b92dbdc611560e8cf80997ca0763beab1335c9c3387df |  |
@@ -1416,8 +1416,8 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-backend/tools/testing/db_suite/main_test.go | root | 90 | complete | 1–90 | 17c8e0abcefad18a0f7ff597f74f5e2c58e3ced55e8810eb4df1474e361f88de |  |
 | mcmods-cn-backend/tools/testing/isolated_environment.py | root | 163 | complete | 1–163 | 1ad76dcc16c96e42ad461e68e972d328abfc01e993c19286472a49066eccae0d |  |
 | mcmods-cn-backend/tools/testing/isolated_environment_test.py | root | 50 | complete | 1–50 | 930ed21d6dc54918fd836e869210824c48b0760cc4ed9f5898bf433f7f38e521 |  |
-| mcmods-cn-backend/tools/testing/live_acceptance.py | backend_a | 741 | complete | 1–200, 201–386, 387–580, 581–741 | fbc89cef17d62979b5986c945bbec02608b55ec8cf6de038ce1d781e86aa8af6 |  |
-| mcmods-cn-backend/tools/testing/live_acceptance_test.py | backend_a | 272 | complete | 1–135, 136–272 | decabb31b5329baf269d29336f2961406f72184bcae335003bc9544f43cef60d |  |
+| mcmods-cn-backend/tools/testing/live_acceptance.py | backend_a | 748 | complete | 1–748 | a79e920757a228584fab085082312a87b89b97c7be1d500fa7c80c168172c9fd |  |
+| mcmods-cn-backend/tools/testing/live_acceptance_test.py | backend_a | 342 | complete | 1–342 | ee6058ffc7228650697b7d36690e306299882d1675fcc00fb6ebb0e58196c8cf |  |
 | mcmods-cn-frontend/.dockerignore | frontend_shared | 9 | complete | 1–9 | 22efebd11ec16ff1afc4b061ad269793c7e6bbb94e2db45fe344cf7391d613a8 |  |
 | mcmods-cn-frontend/.env.example | frontend_shared | 9 | complete | 1–9 | b04ff261ea39cf58be480ba6e34eea5d10322d70fb58e4c65a4f7ae8157cf79f |  |
 | mcmods-cn-frontend/.github/workflows/ci.yml | frontend_shared | 55 | complete | 1–55 | 90b69b8d4edd55d809fc24b758c7410b38777df3757eb984e1386c5538b1e0e7 |  |
@@ -1987,7 +1987,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-frontend/browser-tests/changelog-categories.browser.mts | frontend_shared | 64 | complete | 1–64 | f79de1c4a09ad2f32acfe603861a3413b3a0dcab101a705a7666f39f1c397ad9 |  |
 | mcmods-cn-frontend/browser-tests/fixture.mts | frontend_shared | 221 | complete | 1–221 | cf773d9573022edaba8275deba652cded085a6cccc869a5f491c663b70145cf1 |  |
 | mcmods-cn-frontend/browser-tests/governance.browser.mts | frontend_shared | 101 | complete | 1–101 | c733f76f12bbe09becfa28a139687fb7db55cb70c167b06cca59594d5440dc41 |  |
-| mcmods-cn-frontend/browser-tests/live-backend.mts | root | 89 | complete | 1–89 | c8762328ca723f5504c6655d18de08515a65398d0698704064ba226cccf4888b |  |
+| mcmods-cn-frontend/browser-tests/live-backend.mts | root | 93 | complete | 1–93 | 932a8773b9e2d8f0b26eb89e78e1f78f60864cab4f12f0eec0a9e2deb626d47d |  |
 | mcmods-cn-frontend/browser-tests/log-tool-recovery.browser.mts | root | 85 | complete | 1–85 | abcd23ef72ef2fb61684bb9b8e0c6a2c99a7630507e4f773ae58d6ff681c2920 |  |
 | mcmods-cn-frontend/browser-tests/oct02-forms.browser.mts | frontend_pages | 431 | complete | 1–130, 131–310, 311–431 | a3142bd987da8a6a7de9b2287a501a7ad700c128f94c317d21bf0680910389fb |  |
 | mcmods-cn-frontend/browser-tests/oct02-picker.browser.mts | frontend_pages | 200 | complete | 1–200 | f82e7a485e35c36f8fdaf82e15a46910e7be790eb71f15498e107ad1d59fa041 |  |
@@ -2002,7 +2002,7 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-frontend/browser-tests/oct03-page-editor-acceptance.browser.mts | frontend_pages | 212 | complete | 1–108, 109–212 | e3c3c233d51980938e272c0aecd9f00bc8a32d1bfb0f778eb1a369d3adecfda1 |  |
 | mcmods-cn-frontend/browser-tests/oct03-page-remaining.browser.mts | frontend_pages | 287 | complete | 1–111, 112–212, 213–287 | 6c067f8903e14b506b6eac61c80ad159daf79eeca48a286d25ec2fca5e307ca7 |  |
 | mcmods-cn-frontend/browser-tests/oct03-page-upload-acceptance.browser.mts | frontend_pages | 171 | complete | 1–171 | fcd089066a71f1399aedf894ce6fbb7b4a5c6496fc627afbfe8e19dbcdd7fea1 |  |
-| mcmods-cn-frontend/browser-tests/oct03-rendering-acceptance.browser.mts | database_docs | 627 | complete | 1–170, 171–332, 333–490, 491–627 | 6cd22ac8aedce77efb1b64908e767d022685277b35ed3f17b3d8d02c7050be03 |  |
+| mcmods-cn-frontend/browser-tests/oct03-rendering-acceptance.browser.mts | database_docs | 784 | complete | 1–784 | abdcdc9b19f28d3ec55ed5c588251180d7fa3aee438c39d84daa27fe0b648bac |  |
 | mcmods-cn-frontend/browser-tests/oct03-root-acceptance.browser.mts | root | 493 | complete | 1–493 | a1026076c187a284e6a3d1a92f8ee0318e5d4bda69461e922af88537d0bcbe1c |  |
 | mcmods-cn-frontend/browser-tests/oct03-shared-acceptance.browser.mts | frontend_shared | 701 | complete | 1–701 | 599c17311466c209e30535c7c94f9f139c04b5feb2a44a9c9d8cbb0053ba8ea1 |  |
 | mcmods-cn-frontend/browser-tests/oct03-shared-remaining.browser.mts | frontend_shared | 450 | complete | 1–450 | 9106e3b770a484b01aab6c988d7c1287880510053d582f9200a062177eeacb5c |  |
@@ -2018,18 +2018,18 @@ python3 tools/audit/review_ledger.py --backend-root . --frontend-root ../mcmods-
 | mcmods-cn-frontend/components/minecraft-skin/SkinViewerCanvas.tsx | frontend_shared | 302 | complete | 1–302 | a7cf1c95a73ed0d859d806c6b6a5a788a566b366742802261524a399224bff76 |  |
 | mcmods-cn-frontend/docs/admin-data-integrity.md | frontend_shared | 79 | complete | 1–79 | ede32a1c74a8a4740d7942353ce04cf66c4d4cf6db08fcfeff80accd1a5c8a53 |  |
 | mcmods-cn-frontend/docs/audit/20261002/SUMMARY.md | root | 52 | complete | 1–52 | 95c747b1214ea5e17b4b79ab20da2621fa64ab7f7863da81c5da0aab5315607b |  |
-| mcmods-cn-frontend/docs/audit/acceptance-20261003.md | root | 102 | complete | 1–102 | f3f9df9093effe80059fb79794d71eefbf752f9783e589ddfeb55936d4947139 |  |
+| mcmods-cn-frontend/docs/audit/acceptance-20261003.md | root | 113 | complete | 1–113 | 0d4c71ce8ba845572ea4c9d987a210b507f59cd709d28b37b76ecb8c808658d9 |  |
 | mcmods-cn-frontend/docs/audit/frontend-shared-20261002.md | frontend_shared | 114 | complete | 1–114 | e2169485c46164edb856ceb1633642a1887d53fe599b4514fd4237612abfac6c |  |
 | mcmods-cn-frontend/docs/frontend-state-recovery.md | frontend_pages | 67 | complete | 1–67 | 06190b70dccb17e802f511a4188acce34ca143d16f700a6b0c03a80b3b596e55 |  |
 | mcmods-cn-frontend/eslint.config.mjs | frontend_shared | 18 | complete | 1–18 | 870f1adccecf3051cbcd9fd307cef51d7633cf510979c181a81f4b1797273493 |  |
-| mcmods-cn-frontend/lib/mcmods-exporter/renderer/README.md | frontend_shared | 42 | complete | 1–42 | b007de99c1dbf211d58cd7325d493180324ea39773cfed523452468146e00d24 |  |
+| mcmods-cn-frontend/lib/mcmods-exporter/renderer/README.md | frontend_shared | 44 | complete | 1–44 | e44e7c0395f8054469710d3f8a5801946537d44f209f593bec4743292b3b34f2 |  |
 | mcmods-cn-frontend/lib/mcmods-exporter/renderer/StructureRenderer.ts | frontend_shared | 491 | complete | 1–180, 181–345, 346–491 | 8a911b613475e8ee9b2bdf58bcfcfdda253576d7088a8124ca026607edcba50a |  |
 | mcmods-cn-frontend/lib/mcmods-exporter/renderer/blueprint.ts | frontend_shared | 409 | complete | 1–409 | 6a402a2ac7b5aa1ea006901a5976f60d1d2251b91cdc36152a7e3e82363734e8 |  |
 | mcmods-cn-frontend/lib/mcmods-exporter/renderer/httpAssetSource.ts | frontend_shared | 83 | complete | 1–83 | db83f5839115de6b35531eabbbe279d2aaea7d5a88e41e5814d0046425cfe8f2 |  |
 | mcmods-cn-frontend/lib/mcmods-exporter/renderer/index.ts | frontend_shared | 6 | complete | 1–6 | 0893ef57a99d6877f6fd0565a09a62d4c689a01095cd50949da7234e914fc170 |  |
-| mcmods-cn-frontend/lib/mcmods-exporter/renderer/minecraftBlockModel.ts | frontend_shared | 942 | complete | 1–942 | 641ccb6728c2a91a7f91eb99f4d1d6e52a2c4e18c6f99591dc38fedeb6295330 |  |
+| mcmods-cn-frontend/lib/mcmods-exporter/renderer/minecraftBlockModel.ts | frontend_shared | 978 | complete | 1–978 | 889dd45e55d5dde4dd24ad16357b47e4e32ecd6f9523fde17c00e3fbcbb42118 |  |
 | mcmods-cn-frontend/lib/mcmods-exporter/renderer/structureLoadControl.mts | frontend_shared | 159 | complete | 1–159 | f9bb7b3627945b6547d789ecd3326f13426b5dd98ac16c916bacaf246cf3c0a9 |  |
-| mcmods-cn-frontend/lib/mcmods-exporter/renderer/structureScene.ts | frontend_shared | 544 | complete | 1–544 | 445f593575a512350ff4b288a40c12cbdca39f8e88400ddeb3d2d8743b13fcc5 |  |
+| mcmods-cn-frontend/lib/mcmods-exporter/renderer/structureScene.ts | frontend_shared | 546 | complete | 1–546 | e2de69eb646bbbbb2800d0b5321536e52064b327af753ead1bcd7ac2f027cf28 |  |
 | mcmods-cn-frontend/lib/mcmods-exporter/renderer/structureSceneBudget.mts | frontend_shared | 173 | complete | 1–173 | 0637f1a906907e3cbf638e71d6fdf333ac4db1e0d36583b60617c6535924d254 |  |
 | mcmods-cn-frontend/lib/mcmods-exporter/renderer/types.ts | frontend_shared | 20 | complete | 1–20 | 5ddfc0d3eceec8728574b19af809c219340ec246696dc56bcaa666887e2427bd |  |
 | mcmods-cn-frontend/next.config.ts | frontend_shared | 43 | complete | 1–43 | f123d9ebe1f9ae1dd08145e547eaa2c3eb158f68f35c82b79f9e38f3082af1a3 |  |

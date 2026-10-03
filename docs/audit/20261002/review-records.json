@@ -215796,6 +215796,366 @@
       "behavior_claim": true,
       "deletion_reviewed": false,
       "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "tools/testing/live_acceptance.py",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          748
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "a79e920757a228584fab085082312a87b89b97c7be1d500fa7c80c168172c9fd",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Complete live-copy inputs, exact ownership, source consistency and fail-closed resource cleanup.",
+      "call_chain": "frontend_sync/constants -> real Next/proxy/component copy -> Go/PG live journey -> final fingerprint and exact cleanup.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-A-004"
+      ],
+      "behavior_claim": true,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "tools/testing/live_acceptance_test.py",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          342
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "ee6058ffc7228650697b7d36690e306299882d1675fcc00fb6ebb0e58196c8cf",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Seven filesystem RED/GREEN copy/fingerprint/symlink/stale regressions plus retained real pidfd/owner tests.",
+      "call_chain": "Actual temporary files and symlinks -> frontend_sync; real process exit/permission/owner -> resource safety guards.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-A-004",
+        "OCT03-A-003"
+      ],
+      "behavior_claim": true,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "lib/mcmods-exporter/renderer/minecraftBlockModel.ts",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          978
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "889dd45e55d5dde4dd24ad16357b47e4e32ecd6f9523fde17c00e3fbcbb42118",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Conservative decoded opaque-plane optimization, bounded image analysis, disposal and fallbacks.",
+      "call_chain": "standardfaces -> shared material -> late PNG callback -> bounded all-alpha255 probe -> original instance material; OBJ/entity/chest bypass preserved.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-DB-002"
+      ],
+      "behavior_claim": true,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "lib/mcmods-exporter/renderer/structureScene.ts",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          546
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "e2de69eb646bbbbb2800d0b5321536e52064b327af753ead1bcd7ac2f027cf28",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Prototype/material ownership, instance layer packing, translucent context ordering and disposal.",
+      "call_chain": "Prototype original material -> mainInstancedMesh; transparentMaterial clone .16 -> explicit two passes; shared textures/dispose dedup.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-DB-002"
+      ],
+      "behavior_claim": true,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "browser-tests/oct03-rendering-acceptance.browser.mts",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          784
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "abdcdc9b19f28d3ec55ed5c588251180d7fa3aee438c39d84daa27fe0b648bac",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Native frame-scoped submission, PNG pixels, readable fallback and pending-unmount regressions.",
+      "call_chain": "Real production fixture -> delegated native GL/rAF/image reads -> exact pass counts/screenshots/abort/dispose assertions -> nine terminal cases.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-DB-002",
+        "OCT03-R-002"
+      ],
+      "behavior_claim": true,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "browser-tests/live-backend.mts",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          93
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "932a8773b9e2d8f0b26eb89e78e1f78f60864cab4f12f0eec0a9e2deb626d47d",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Actual nonce CSP/API origin and real login/favorites/locale/mobile/session journey.",
+      "call_chain": "New installed complete610input Next copy -> proxy document header -> projectGo APIs -> true PG persistence and postconditions; no own API mocks.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-A-004"
+      ],
+      "behavior_claim": true,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "lib/mcmods-exporter/renderer/README.md",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          44
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "e44e7c0395f8054469710d3f8a5801946537d44f209f593bec4743292b3b34f2",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Document renderer analysis bounds, material compatibility and delayed disposal behavior.",
+      "call_chain": "Actual model/scene implementation and nine native case receipts -> formal integration behavior.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-DB-002"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "docs/audit/20261003/ACCEPTANCE.md",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          154
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "47acd2575ba9b4dba0214fa731c7ddd6c0ef3f68bc832894629a9bb5c2e5298c",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Final counts, roots, actual gates, partial scopes, compatibility and CI snapshot boundaries.",
+      "call_chain": "Current tests/source equivalence -> named findings -> final audit and deployment order.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-DB-002",
+        "OCT03-A-004",
+        "OCT03-R-002"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "docs/audit/20261003/LIVE_ACCEPTANCE.md",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          112
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "0b24065f982814c2b469b7a4fa45f4700af81f386f1d28b19d984c3256dec592",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Fresh-copy reproduction, exact ownership/nonce protections, retained606binding limitation and current610proof.",
+      "call_chain": "Current748runner and26Python tests -> fresh r10 live/browser/PG/CSP -> exact44key/stream/child/process cleanup.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-A-004"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "docs/audit/20261003/acceptance-results.json",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          200
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "292ab4a7e492887a9e65cf3a7851c0d41a26bdbbadb469038127eb75825b0089",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Immutable legacy/prior named rows plus three new findings/current gates and preserved failures.",
+      "call_chain": "Previously complete-read be4985f SHA matched;112/113 unchanged rows byte-equivalent; changed PERF069 and authored final validation/new3 reviewed against actual receipts.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-DB-002",
+        "OCT03-A-004",
+        "OCT03-R-002"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "docs/audit/acceptance-20261003.md",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          113
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "0d4c71ce8ba845572ea4c9d987a210b507f59cd709d28b37b76ecb8c808658d9",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Current R12/full170 and exact fresh610input live, behavior changes and remaining response latency.",
+      "call_chain": "FE c6410b7 runtime/tests and source equivalence -> actual final gates -> bounded public acceptance report.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-DB-002",
+        "OCT03-A-004",
+        "OCT03-R-002"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
     }
   ]
 }
