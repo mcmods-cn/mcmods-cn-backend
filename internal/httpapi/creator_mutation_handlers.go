@@ -153,7 +153,7 @@ func (s *Server) applyCreatorSnapshotTx(
 			return err
 		}
 		avatarFileID = &file.ID
-		snapshot.AvatarURL = ossStoredObjectURL(s.ossConfigFromSettings(ctx), file.ObjectKey)
+		snapshot.AvatarURL = ossStoredObjectURL(s.ossConfigFromSettingsWithQueryer(ctx, tx), file.ObjectKey)
 	}
 	if _, err := tx.Exec(ctx, `update creators set
 		name=$2,normalized_name=$3,description_markdown=$4,avatar_url=$5,avatar_file_id=$6,
@@ -194,7 +194,7 @@ func (s *Server) resolveCreatorAvatarTx(
 	}
 	snapshot.AvatarFileID = &publicID
 	snapshot.AvatarInternalID = &file.ID
-	snapshot.AvatarURL = ossStoredObjectURL(s.ossConfigFromSettings(ctx), file.ObjectKey)
+	snapshot.AvatarURL = ossStoredObjectURL(s.ossConfigFromSettingsWithQueryer(ctx, tx), file.ObjectKey)
 	return nil
 }
 
@@ -316,6 +316,7 @@ func (s *Server) creatorLinks(ctx context.Context, creatorID int64) ([]creatorLi
 }
 
 func (s *Server) creatorCollaborators(ctx context.Context, creatorID int64) ([]creatorSummary, error) {
+	ossCfg := s.ossConfigFromSettings(ctx)
 	rows, err := s.db.Query(ctx, `
 		select distinct collaborator.public_id,collaborator.kind,collaborator.name,collaborator.avatar_url,
 		       collaborator.review_status,exists(select 1 from creator_claims claim
@@ -341,22 +342,33 @@ func (s *Server) creatorCollaborators(ctx context.Context, creatorID int64) ([]c
 	}
 	defer rows.Close()
 	result := make([]creatorSummary, 0)
-	ossCfg := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var item creatorSummary
 		if err = rows.Scan(&item.PublicID, &item.Kind, &item.Name, &item.AvatarURL, &item.ReviewStatus, &item.Claimed, &item.WorkCount); err != nil {
 			return nil, err
 		}
-		item.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, item.AvatarURL)
-		if err != nil {
-			return nil, err
-		}
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	avatarURLs := make([]string, len(result))
+	for index := range result {
+		avatarURLs[index] = result[index].AvatarURL
+	}
+	avatarURLs, err = s.resolveStoredOSSImageURLsWithConfig(ctx, ossCfg, avatarURLs)
+	if err != nil {
+		return nil, err
+	}
+	for index := range result {
+		result[index].AvatarURL = avatarURLs[index]
+	}
+	return result, nil
 }
 
 func (s *Server) creatorMembers(ctx context.Context, creatorID, viewerID int64, admin bool) ([]map[string]any, error) {
+	ossCfg := s.ossConfigFromSettings(ctx)
 	rows, err := s.db.Query(ctx, `
 		select member.public_id,member.name,member.avatar_url,role.public_id,role.code,role.name,relation.title
 		from creator_team_members relation
@@ -370,14 +382,9 @@ func (s *Server) creatorMembers(ctx context.Context, creatorID, viewerID int64, 
 	}
 	defer rows.Close()
 	result := make([]map[string]any, 0)
-	ossCfg := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var publicID, name, avatarURL, roleID, roleCode, roleName, title string
 		if err = rows.Scan(&publicID, &name, &avatarURL, &roleID, &roleCode, &roleName, &title); err != nil {
-			return nil, err
-		}
-		avatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, avatarURL)
-		if err != nil {
 			return nil, err
 		}
 		result = append(result, map[string]any{
@@ -385,10 +392,26 @@ func (s *Server) creatorMembers(ctx context.Context, creatorID, viewerID int64, 
 			"role": map[string]any{"id": roleID, "code": roleCode, "name": roleName}, "title": title,
 		})
 	}
-	return result, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	avatarURLs := make([]string, len(result))
+	for index, item := range result {
+		avatarURLs[index] = item["avatarUrl"].(string)
+	}
+	avatarURLs, err = s.resolveStoredOSSImageURLsWithConfig(ctx, ossCfg, avatarURLs)
+	if err != nil {
+		return nil, err
+	}
+	for index, item := range result {
+		item["avatarUrl"] = avatarURLs[index]
+	}
+	return result, nil
 }
 
 func (s *Server) creatorTeams(ctx context.Context, creatorID int64) ([]map[string]any, error) {
+	ossCfg := s.ossConfigFromSettings(ctx)
 	rows, err := s.db.Query(ctx, `
 		select team.public_id,team.kind,team.name,team.avatar_url,team.review_status,
 		       false,
@@ -407,7 +430,6 @@ func (s *Server) creatorTeams(ctx context.Context, creatorID int64) ([]map[strin
 	}
 	defer rows.Close()
 	result := make([]map[string]any, 0)
-	ossCfg := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var team creatorSummary
 		var roleID, roleCode, roleName, title string
@@ -417,20 +439,34 @@ func (s *Server) creatorTeams(ctx context.Context, creatorID int64) ([]map[strin
 		); err != nil {
 			return nil, err
 		}
-		team.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, team.AvatarURL)
-		if err != nil {
-			return nil, err
-		}
 		result = append(result, map[string]any{
 			"team":  team,
 			"role":  map[string]any{"id": roleID, "code": roleCode, "name": roleName},
 			"title": title,
 		})
 	}
-	return result, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	avatarURLs := make([]string, len(result))
+	for index, item := range result {
+		avatarURLs[index] = item["team"].(creatorSummary).AvatarURL
+	}
+	avatarURLs, err = s.resolveStoredOSSImageURLsWithConfig(ctx, ossCfg, avatarURLs)
+	if err != nil {
+		return nil, err
+	}
+	for index, item := range result {
+		team := item["team"].(creatorSummary)
+		team.AvatarURL = avatarURLs[index]
+		item["team"] = team
+	}
+	return result, nil
 }
 
 func (s *Server) creatorWorks(ctx context.Context, creatorID int64) ([]map[string]any, error) {
+	ossCfg := s.ossConfigFromSettings(ctx)
 	rows, err := s.db.Query(ctx, `
 		select distinct mod.project_code,mod.slug,mod.primary_name,mod.secondary_name,mod.summary,mod.icon_url
 		from content_creator_bindings binding join mods mod on mod.id=binding.subject_id
@@ -441,14 +477,9 @@ func (s *Server) creatorWorks(ctx context.Context, creatorID int64) ([]map[strin
 	}
 	defer rows.Close()
 	result := make([]map[string]any, 0)
-	ossCfg := s.ossConfigFromSettings(ctx)
 	for rows.Next() {
 		var uniqueID, siteID, primaryName, secondaryName, summary, iconURL string
 		if err = rows.Scan(&uniqueID, &siteID, &primaryName, &secondaryName, &summary, &iconURL); err != nil {
-			return nil, err
-		}
-		iconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, iconURL)
-		if err != nil {
 			return nil, err
 		}
 		result = append(result, map[string]any{
@@ -456,7 +487,22 @@ func (s *Server) creatorWorks(ctx context.Context, creatorID int64) ([]map[strin
 			"secondaryName": secondaryName, "summary": summary, "iconUrl": iconURL,
 		})
 	}
-	return result, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	iconURLs := make([]string, len(result))
+	for index, item := range result {
+		iconURLs[index] = item["iconUrl"].(string)
+	}
+	iconURLs, err = s.resolveStoredOSSImageURLsWithConfig(ctx, ossCfg, iconURLs)
+	if err != nil {
+		return nil, err
+	}
+	for index, item := range result {
+		item["iconUrl"] = iconURLs[index]
+	}
+	return result, nil
 }
 
 func normalizeCreatorSnapshot(snapshot *creatorSnapshot) error {

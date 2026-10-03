@@ -6,50 +6,77 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 )
 
 const (
 	maxFavoriteExportDependencyNodes = 1000
 	maxFavoriteExportDependencyEdges = 4000
 	maxFavoriteExportFileConcurrency = 8
+	maxFavoriteExportGraphDuration   = 5 * time.Second
 )
 
 var errFavoriteExportDependencyLimit = errors.New("favorite export dependency graph exceeds its resource limit")
 
-const favoriteExportDependencyGraphSQL = `with recursive reachable(route_id) as (
-	select seed.route_id from unnest($1::bigint[]) seed(route_id)
-	union
-	select dependent_route.id
+// Carry visited IDs and a frontier so each source expands only once. A bounded
+// batch records the first overflow witness; sorting happens after completion.
+// The lateral OFFSET barrier keeps source lookups parameterized rather than
+// building an unrestricted relationship join before the batch limit.
+const favoriteExportDependencyGraphSQL = `with recursive reachable(node_ids,frontier,edge_ids,over_limit) as (
+	select seeds.node_ids,seeds.node_ids,array[]::bigint[],cardinality(seeds.node_ids)>=$4
+	from (select array_agg(distinct route_id) node_ids from unnest($1::bigint[]) seed(route_id)) seeds
+	union all
+	select current.node_ids || discovered.node_ids,discovered.node_ids,
+		current.edge_ids || batch.edge_ids,
+		cardinality(current.node_ids)+cardinality(discovered.node_ids)>=$4
+		or cardinality(current.edge_ids)+cardinality(batch.edge_ids)>=$5
 	from reachable current
-	join public_routes source_route on source_route.id=current.route_id and source_route.entity_type='mod'
-	join mod_relationships relationship on relationship.mod_id=source_route.internal_id and relationship.relation_type='dependency'
-	join mods dependent on dependent.id=relationship.related_mod_id and dependent.review_status='approved'
-	join public_routes dependent_route on dependent_route.entity_type='mod' and dependent_route.internal_id=dependent.id
-	left join mod_relationship_groups relation_group on relation_group.id=relationship.group_id
-	where (relation_group.id is null or cardinality(relation_group.minecraft_versions)=0 or $2=any(relation_group.minecraft_versions))
-	and (relation_group.id is null or relation_group.loader='' or lower(relation_group.loader)=lower($3))
-), bounded_routes as materialized (
-	select route_id from reachable order by route_id limit $4
+	cross join lateral (
+		select coalesce(array_agg(candidate.relationship_id),array[]::bigint[]) edge_ids,
+			coalesce(array_agg(candidate.target_route_id),array[]::bigint[]) target_route_ids
+		from (
+			select relationship.id relationship_id,dependent_route.id target_route_id
+			from unnest(current.frontier) frontier(route_id)
+			join public_routes source_route on source_route.id=frontier.route_id and source_route.entity_type='mod'
+			join lateral (
+				select id,related_mod_id,group_id from mod_relationships
+				where mod_id=source_route.internal_id and relation_type='dependency' offset 0
+			) relationship on true
+			join mods dependent on dependent.id=relationship.related_mod_id and dependent.review_status='approved'
+			join public_routes dependent_route on dependent_route.entity_type='mod' and dependent_route.internal_id=dependent.id
+			left join mod_relationship_groups relation_group on relation_group.id=relationship.group_id
+			where (relation_group.id is null or cardinality(relation_group.minecraft_versions)=0 or $2=any(relation_group.minecraft_versions))
+			and (relation_group.id is null or relation_group.loader='' or lower(relation_group.loader)=lower($3))
+			limit greatest($5-cardinality(current.edge_ids),1)
+		) candidate
+	) batch
+	cross join lateral (
+		select coalesce(array_agg(distinct target_route_id),array[]::bigint[]) node_ids
+		from unnest(batch.target_route_ids) candidate(target_route_id)
+		where not target_route_id=any(current.node_ids)
+	) discovered
+	where not current.over_limit and cardinality(current.frontier)>0
+), completed as materialized (
+	select node_ids,edge_ids,over_limit from reachable
+	where over_limit or cardinality(frontier)=0
 ), graph_nodes as (
 	select route.id route_id,route.public_id,mod.primary_name,
 		coalesce(external.external_project_id,'') modrinth_project_id
-	from bounded_routes bounded
+	from completed
+	cross join lateral unnest(completed.node_ids) bounded(route_id)
 	join public_routes route on route.id=bounded.route_id and route.entity_type='mod'
 	join mods mod on mod.id=route.internal_id
 	left join project_external_sources external on external.project_route_id=route.id and external.source_type='modrinth'
-), graph_edges as materialized (
+	where not completed.over_limit
+), graph_edges as (
 	select source_route.id source_route_id,dependent_route.id target_route_id,
 		relationship.display_order,relationship.id relationship_id
-	from bounded_routes current
-	join public_routes source_route on source_route.id=current.route_id and source_route.entity_type='mod'
-	join mod_relationships relationship on relationship.mod_id=source_route.internal_id and relationship.relation_type='dependency'
-	join mods dependent on dependent.id=relationship.related_mod_id and dependent.review_status='approved'
-	join public_routes dependent_route on dependent_route.entity_type='mod' and dependent_route.internal_id=dependent.id
-	left join mod_relationship_groups relation_group on relation_group.id=relationship.group_id
-	where (relation_group.id is null or cardinality(relation_group.minecraft_versions)=0 or $2=any(relation_group.minecraft_versions))
-	and (relation_group.id is null or relation_group.loader='' or lower(relation_group.loader)=lower($3))
-	order by source_route.id,relationship.display_order,relationship.id
-	limit $5
+	from completed
+	cross join lateral unnest(completed.edge_ids) bounded(relationship_id)
+	join mod_relationships relationship on relationship.id=bounded.relationship_id
+	join public_routes source_route on source_route.entity_type='mod' and source_route.internal_id=relationship.mod_id
+	join public_routes dependent_route on dependent_route.entity_type='mod' and dependent_route.internal_id=relationship.related_mod_id
+	where not completed.over_limit
 )
 select 0::smallint kind,route_id,public_id,primary_name,modrinth_project_id,
 	0::bigint source_route_id,0::bigint target_route_id,0::integer display_order,0::bigint relationship_id
@@ -58,6 +85,9 @@ union all
 select 1::smallint,0::bigint,''::text,''::text,''::text,
 	source_route_id,target_route_id,display_order,relationship_id
 from graph_edges
+union all
+select 2::smallint,0::bigint,''::text,''::text,''::text,0::bigint,0::bigint,0::integer,0::bigint
+from completed where over_limit
 order by 1,2,6,8,9`
 
 type favoriteExportDependencyNode struct {
@@ -87,7 +117,9 @@ func (s *Server) loadFavoriteExportDependencyGraph(ctx context.Context, seedRout
 	if len(seedRouteIDs) == 0 {
 		return graph, nil
 	}
-	rows, err := s.db.Query(ctx, favoriteExportDependencyGraphSQL, seedRouteIDs, request.MinecraftVersion, request.Loader,
+	queryContext, cancel := context.WithTimeout(ctx, maxFavoriteExportGraphDuration)
+	defer cancel()
+	rows, err := s.db.Query(queryContext, favoriteExportDependencyGraphSQL, seedRouteIDs, request.MinecraftVersion, request.Loader,
 		maxFavoriteExportDependencyNodes+1, maxFavoriteExportDependencyEdges+1)
 	if err != nil {
 		return graph, fmt.Errorf("query favorite export dependency graph: %w", err)
@@ -115,6 +147,8 @@ func (s *Server) loadFavoriteExportDependencyGraph(ctx context.Context, seedRout
 				return graph, fmt.Errorf("%w: more than %d edges", errFavoriteExportDependencyLimit, maxFavoriteExportDependencyEdges)
 			}
 			graph.Edges[edge.SourceRouteID] = append(graph.Edges[edge.SourceRouteID], edge)
+		case 2:
+			return graph, errFavoriteExportDependencyLimit
 		default:
 			return graph, errors.New("favorite export dependency graph returned an unknown row kind")
 		}

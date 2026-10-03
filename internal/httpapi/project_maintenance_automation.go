@@ -84,6 +84,9 @@ func (worker *ProjectAutomationWorker) applyProjectMaintenancePolicy(
 		return result, err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockProjectAutomationRunTx(ctx, tx, job); err != nil {
+		return result, err
+	}
 
 	var currentStatus string
 	var createdAt time.Time

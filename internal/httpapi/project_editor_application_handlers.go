@@ -85,6 +85,10 @@ func (s *Server) projectEditorTargetByPublicID(ctx context.Context, projectType,
 }
 
 func (s *Server) projectEditorTargetName(ctx context.Context, projectType string, internalID int64) (string, error) {
+	return projectEditorTargetNameWithQueryer(ctx, s.db, projectType, internalID)
+}
+
+func projectEditorTargetNameWithQueryer(ctx context.Context, queryer revisionQuery, projectType string, internalID int64) (string, error) {
 	var query string
 	switch projectType {
 	case "mod":
@@ -105,7 +109,7 @@ func (s *Server) projectEditorTargetName(ctx context.Context, projectType string
 		return "", pgx.ErrNoRows
 	}
 	var name string
-	err := s.db.QueryRow(ctx, query, internalID).Scan(&name)
+	err := queryer.QueryRow(ctx, query, internalID).Scan(&name)
 	return name, err
 }
 
@@ -236,13 +240,13 @@ func (s *Server) reviewProjectEditorApplication(w http.ResponseWriter, r *http.R
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var applicationID, targetRouteID, userID int64
+	var applicationID, targetRouteID, targetInternalID, userID int64
 	var targetType, targetID, targetName string
 	err = tx.QueryRow(r.Context(), `select application.id,application.target_route_id,application.user_id,
-		route.entity_type,route.public_id
+		route.entity_type,route.public_id,route.internal_id
 		from project_editor_applications application join public_routes route on route.id=application.target_route_id
 		where application.public_id=$1 and application.status='pending' for update of application`, applicationPublicID).
-		Scan(&applicationID, &targetRouteID, &userID, &targetType, &targetID)
+		Scan(&applicationID, &targetRouteID, &userID, &targetType, &targetID, &targetInternalID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusConflict, "application does not exist or was already reviewed")
 		return
@@ -251,11 +255,15 @@ func (s *Server) reviewProjectEditorApplication(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusInternalServerError, "failed to load editor application")
 		return
 	}
-	targetName, _ = s.projectEditorTargetName(r.Context(), targetType, func() int64 {
-		var internalID int64
-		_ = tx.QueryRow(r.Context(), `select internal_id from public_routes where id=$1`, targetRouteID).Scan(&internalID)
-		return internalID
-	}())
+	targetName, err = projectEditorTargetNameWithQueryer(r.Context(), tx, targetType, targetInternalID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusConflict, "application target is no longer available")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load application target")
+		return
+	}
 	claims := currentClaims(r)
 	if _, err = tx.Exec(r.Context(), `update project_editor_applications set status=$2,reviewed_by=$3,
 		review_note=$4,reviewed_at=now(),updated_at=now() where id=$1`, applicationID, request.Status, claims.Subject, request.Note); err != nil {
@@ -271,8 +279,11 @@ func (s *Server) reviewProjectEditorApplication(w http.ResponseWriter, r *http.R
 			return
 		}
 		payload, _ := json.Marshal(map[string]any{"applicationId": applicationPublicID, "targetType": targetType, "targetId": targetID})
-		_, _ = tx.Exec(r.Context(), `insert into permission_audit_logs(operator_id,target_user_id,action,payload)
-			values($1,$2,'project_editor.grant',$3::jsonb)`, claims.Subject, userID, payload)
+		if _, err = tx.Exec(r.Context(), `insert into permission_audit_logs(operator_id,target_user_id,action,payload)
+			values($1,$2,'project_editor.grant',$3::jsonb)`, claims.Subject, userID, payload); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record editor assignment audit")
+			return
+		}
 	}
 	templateCode := "project_editor_application_rejected"
 	if request.Status == "approved" {
@@ -300,8 +311,12 @@ func (s *Server) reviewProjectEditorApplication(w http.ResponseWriter, r *http.R
 
 func (s *Server) revokeProjectEditorAssignment(w http.ResponseWriter, r *http.Request) {
 	target, err := s.projectEditorTargetByPublicID(r.Context(), r.PathValue("projectType"), r.PathValue("projectId"))
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load project")
 		return
 	}
 	userPublicID := strings.ToLower(strings.TrimSpace(r.PathValue("userId")))
@@ -320,21 +335,33 @@ func (s *Server) revokeProjectEditorAssignment(w http.ResponseWriter, r *http.Re
 	}
 	defer tx.Rollback(r.Context())
 	var userID int64
-	if err = tx.QueryRow(r.Context(), `select id from users where public_id=$1`, userPublicID).Scan(&userID); err != nil {
+	err = tx.QueryRow(r.Context(), `select id from users where public_id=$1`, userPublicID).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load user")
 		return
 	}
 	claims := currentClaims(r)
 	result, err := tx.Exec(r.Context(), `update project_editor_assignments set status='revoked',revoked_by=$3,
 		revoked_at=now(),revoke_reason=$4,updated_at=now() where target_route_id=$1 and user_id=$2 and status='active'`,
 		target.RouteID, userID, claims.Subject, request.Reason)
-	if err != nil || result.RowsAffected() != 1 {
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to revoke editor assignment")
+		return
+	}
+	if result.RowsAffected() != 1 {
 		writeError(w, http.StatusNotFound, "active editor assignment not found")
 		return
 	}
 	payload, _ := json.Marshal(map[string]any{"targetType": target.Type, "targetId": target.PublicID, "reason": request.Reason})
-	_, _ = tx.Exec(r.Context(), `insert into permission_audit_logs(operator_id,target_user_id,action,payload)
-		values($1,$2,'project_editor.revoke',$3::jsonb)`, claims.Subject, userID, payload)
+	if _, err = tx.Exec(r.Context(), `insert into permission_audit_logs(operator_id,target_user_id,action,payload)
+		values($1,$2,'project_editor.revoke',$3::jsonb)`, claims.Subject, userID, payload); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record editor revocation audit")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit editor revocation")
 		return
@@ -428,6 +455,7 @@ func (s *Server) queryProjectEditorApplicationsBounded(
 	if err = rows.Err(); err != nil {
 		return nil, false, err
 	}
+	rows.Close()
 	hasMore := resultLimit > 0 && len(items) > resultLimit
 	if hasMore {
 		items = items[:resultLimit]

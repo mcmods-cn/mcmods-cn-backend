@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/gif"
 	"image/jpeg"
@@ -282,10 +283,61 @@ func validateModResourcePNGConfig(data []byte, declaredContentType string) (imag
 	}
 	// PNG color types 4 and 6 have an alpha channel. Indexed PNG may carry
 	// transparency through a validated tRNS chunk.
-	if len(data) < 26 || (data[25] != 4 && data[25] != 6 && !bytes.Contains(data, []byte("tRNS"))) {
+	if !pngSupportsTransparency(data) {
 		return image.Config{}, errors.New("mod resource PNG must support a transparent background")
 	}
 	return config, nil
+}
+
+func pngSupportsTransparency(data []byte) bool {
+	if len(data) < 33 || !bytes.Equal(data[:8], []byte("\x89PNG\r\n\x1a\n")) {
+		return false
+	}
+	colorType := data[25]
+	transparent := colorType == 4 || colorType == 6
+	seenImageData, paletteSize := false, 0
+	for offset := 8; offset < len(data); {
+		if len(data)-offset < 12 {
+			return false
+		}
+		length := uint64(binary.BigEndian.Uint32(data[offset : offset+4]))
+		end := uint64(offset) + 12 + length
+		if end > uint64(len(data)) {
+			return false
+		}
+		kind := string(data[offset+4 : offset+8])
+		payload := data[offset+8 : int(end)-4]
+		if crc32.ChecksumIEEE(data[offset+4:int(end)-4]) != binary.BigEndian.Uint32(data[int(end)-4:int(end)]) {
+			return false
+		}
+		switch kind {
+		case "PLTE":
+			paletteSize = len(payload) / 3
+		case "IDAT":
+			seenImageData = true
+		case "tRNS":
+			if seenImageData {
+				return false
+			}
+			switch colorType {
+			case 0:
+				transparent = len(payload) == 2
+			case 2:
+				transparent = len(payload) == 6
+			case 3:
+				transparent = len(payload) > 0 && len(payload) <= paletteSize
+			default:
+				return false
+			}
+			if !transparent {
+				return false
+			}
+		case "IEND":
+			return transparent && seenImageData && len(payload) == 0 && int(end) == len(data)
+		}
+		offset = int(end)
+	}
+	return false
 }
 
 func webPDimensions(data []byte) (int, int, bool) {
@@ -803,24 +855,6 @@ func (s *Server) ossDownloadStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
-}
-
-func (s *Server) ossConfigFromSettings(ctx context.Context) ossConfigPayload {
-	payload := defaultOSSConfig()
-	var raw []byte
-	err := s.db.QueryRow(ctx, `select value from system_settings where key = 'oss.aliyun'`).Scan(&raw)
-	if err != nil {
-		_ = ignoreNoRows(err)
-		return payload
-	}
-	if err := s.openSystemSetting(raw, &payload); err != nil {
-		return defaultOSSConfig()
-	}
-	payload = normalizeOSSConfig(payload)
-	if payload.DownloadURLTTLMinutes <= 0 {
-		payload.DownloadURLTTLMinutes = 10
-	}
-	return payload
 }
 
 func (s *Server) ossClient(ctx context.Context) (*aliyunoss.Client, ossConfigPayload, error) {

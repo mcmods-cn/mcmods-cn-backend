@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -195,7 +194,12 @@ func (s *Server) unreadSummary(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) aiDailyBalance(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	writeJSON(w, http.StatusOK, s.userAIDailyBalance(r.Context(), claims.Subject, claims))
+	balance, err := s.userAIDailyBalance(r.Context(), claims.Subject, claims)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load AI token balance")
+		return
+	}
+	writeJSON(w, http.StatusOK, balance)
 }
 
 func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
@@ -246,6 +250,9 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 			"cached": true, "translation": map[string]string{"title": cachedTitle, "body": cachedBody},
 		})
 		return
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusServiceUnavailable, "failed to load notification translation")
+		return
 	}
 	limit := int64(claimsNumericPermissionValue(claims, "user.ai.daily_token_limit"))
 	if limit <= 0 {
@@ -270,9 +277,10 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		"items":          []map[string]string{{"key": "title", "text": title}, {"key": "body", "text": body}},
 	}
 	rawPayload, _ := json.Marshal(payload)
-	reserved := int64(utf8.RuneCountInString(title+body)*2 + 128)
-	if reserved < 128 {
-		reserved = 128
+	reserved, err := aiTranslationReservationForPayload(aiTaskNotificationTranslation, binding, model, rawPayload)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "通知内容超过模型翻译限制")
+		return
 	}
 
 	tx, err := s.db.Begin(r.Context())
@@ -281,21 +289,32 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	_, _ = tx.Exec(r.Context(), `select pg_advisory_xact_lock($1)`, claims.Subject)
-	var used, pending int64
-	if err := tx.QueryRow(
-		r.Context(),
-		`select
-		 coalesce(sum(case when status = 'completed' then input_tokens + output_tokens else 0 end), 0),
-		 coalesce(sum(case when status in ('queued', 'running', 'retrying') then quota_reserved_tokens else 0 end), 0)
-		 from ai_tasks where created_by = $1 and created_at >= date_trunc('day', now())`,
-		claims.Subject,
-	).Scan(&used, &pending); err != nil {
+	concurrencyKey := "notification:" + strconv.FormatInt(notificationID, 10) + ":" + req.TargetLocale + ":actor:" + strconv.FormatInt(claims.Subject, 10)
+	if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext($1))`, concurrencyKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "创建翻译任务失败")
+		return
+	}
+	var existingUID, existingStatus string
+	err = tx.QueryRow(r.Context(), `select task_uid,status from ai_tasks where task_type=$1 and concurrency_key=$2
+		and payload=$3::jsonb and status in ('queued','running','retrying') order by created_at desc limit 1`, aiTaskNotificationTranslation, concurrencyKey, string(rawPayload)).Scan(&existingUID, &existingStatus)
+	if err == nil {
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "创建翻译任务失败")
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"cached": false, "taskId": existingUID, "status": existingStatus})
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusInternalServerError, "读取 AI Token 额度失败")
 		return
 	}
-	if limit != int64(maxPermissionValue) && used+pending+reserved > limit {
+	if err = reserveAITaskQuotaTx(r.Context(), tx, claims.Subject, limit, reserved); errors.Is(err, errAIQuotaExceeded) {
 		writeError(w, http.StatusTooManyRequests, "今日 AI Token 余额不足")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取 AI Token 额度失败")
 		return
 	}
 	taskUID := "ai_" + randomHex(16)
@@ -311,7 +330,7 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		aiTaskNotificationTranslation,
 		provider.Code,
 		model.Model,
-		"notification:"+strconv.FormatInt(notificationID, 10),
+		concurrencyKey,
 		string(rawPayload),
 		claims.Subject,
 		reserved,
@@ -381,29 +400,32 @@ func decodeStoredNotificationTranslation(payloadRaw, resultRaw []byte) (map[stri
 	return translated, err
 }
 
-func (s *Server) userAIDailyUsage(ctx context.Context, userID int64) (int64, int64) {
+func (s *Server) userAIDailyUsage(ctx context.Context, userID int64) (int64, int64, error) {
 	var used, reserved int64
-	_ = s.db.QueryRow(
+	err := s.db.QueryRow(
 		ctx,
 		`select
-		 coalesce(sum(case when status = 'completed' then input_tokens + output_tokens else 0 end), 0),
-		 coalesce(sum(case when status in ('queued', 'running', 'retrying') then quota_reserved_tokens else 0 end), 0)
+		 coalesce(sum(case when status in ('completed','failed') then greatest(input_tokens + output_tokens,quota_reserved_tokens) else 0 end), 0),
+		 coalesce(sum(case when status in ('queued', 'running', 'retrying') then greatest(input_tokens+output_tokens,quota_reserved_tokens) else 0 end), 0)
 		 from ai_tasks where created_by = $1 and created_at >= date_trunc('day', now())`,
 		userID,
 	).Scan(&used, &reserved)
-	return used, reserved
+	return used, reserved, err
 }
 
-func (s *Server) userAIDailyBalance(ctx context.Context, userID int64, claims security.Claims) aiDailyBalancePayload {
+func (s *Server) userAIDailyBalance(ctx context.Context, userID int64, claims security.Claims) (aiDailyBalancePayload, error) {
 	limit := int64(claimsNumericPermissionValue(claims, "user.ai.daily_token_limit"))
-	used, reserved := s.userAIDailyUsage(ctx, userID)
+	used, reserved, err := s.userAIDailyUsage(ctx, userID)
+	if err != nil {
+		return aiDailyBalancePayload{}, err
+	}
 	return aiDailyBalancePayload{
 		UsedTokens:      used,
 		ReservedTokens:  reserved,
 		LimitTokens:     limit,
 		RemainingTokens: remainingTokens(limit, used+reserved),
 		Unlimited:       limit == int64(maxPermissionValue),
-	}
+	}, nil
 }
 
 func remainingTokens(limit int64, used int64) int64 {

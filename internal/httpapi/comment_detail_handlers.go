@@ -36,7 +36,25 @@ func (s *Server) commentWatchItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPost:
-		tag, err := s.db.Exec(r.Context(), `with selected as (
+		tx, err := s.db.Begin(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "更新插眼已读状态失败")
+			return
+		}
+		defer tx.Rollback(r.Context())
+		var numericWatchID int64
+		if err = tx.QueryRow(r.Context(), `select id from comment_watches
+			where public_id=$1 and user_id=$2 and status='active' for update`, watchID, claims.Subject).Scan(&numericWatchID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "插眼记录不存在")
+			} else {
+				writeError(w, http.StatusInternalServerError, "更新插眼已读状态失败")
+			}
+			return
+		}
+		// Read a fresh READ COMMITTED snapshot after obtaining the watch lock.
+		// Concurrent delivery increments wait until this mark-read commits.
+		tag, err := tx.Exec(r.Context(), `with selected as (
 			select id from comment_watches where public_id=$1 and user_id=$2 and status='active'
 		), marked as (
 			update comment_watch_replies reply set read_at=now()
@@ -52,6 +70,10 @@ func (s *Server) commentWatchItem(w http.ResponseWriter, r *http.Request) {
 		}
 		if tag.RowsAffected() == 0 {
 			writeError(w, http.StatusNotFound, "插眼记录不存在")
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "更新插眼已读状态失败")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"read": true})
@@ -109,18 +131,16 @@ func (s *Server) queryCommentItems(ctx context.Context, ids []int64, includeTree
 		items[index].Author.OnlineStatus = mapPublicOnlineVisibility(items[index].Author.showOnline, online[items[index].Author.internalID])
 	}
 	ossCfg := s.ossConfigFromSettings(ctx)
-	resolvedAvatarURLs := make(map[string]string, len(items))
+	avatarURLs := make([]string, len(items))
 	for index := range items {
-		storedURL := items[index].Author.AvatarURL
-		resolvedURL, exists := resolvedAvatarURLs[storedURL]
-		if !exists {
-			resolvedURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, storedURL)
-			if err != nil {
-				return nil, err
-			}
-			resolvedAvatarURLs[storedURL] = resolvedURL
-		}
-		items[index].Author.AvatarURL = resolvedURL
+		avatarURLs[index] = items[index].Author.AvatarURL
+	}
+	avatarURLs, err = s.resolveStoredOSSImageURLsWithConfig(ctx, ossCfg, avatarURLs)
+	if err != nil {
+		return nil, err
+	}
+	for index := range items {
+		items[index].Author.AvatarURL = avatarURLs[index]
 	}
 	if err = s.annotateCommentPermissions(ctx, items, claims); err != nil {
 		return nil, err
@@ -345,13 +365,25 @@ func (s *Server) downloadCommentAttachment(w http.ResponseWriter, r *http.Reques
 	s.redirectOSSObjectAccess(w, r, objectKey, ossObjectAccessOptions{ContentDisposition: downloadContentDisposition(fileName)})
 }
 
+const maxCommentListPreviewReplies = 64
+
 func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, ids []int64, includeTree bool, maxDepth int, viewerID int64) ([]commentResponse, error) {
 	if len(ids) == 0 {
 		return []commentResponse{}, nil
 	}
 	where := "c.id=any($1)"
 	if includeTree {
-		where = "(c.id=any($1) or c.root_id=any($1)) and c.depth<=$2"
+		// Limit the preview before reactions, attachments and author decoration.
+		// Ordering by depth retains ancestors before their children;
+		// the existing per-comment reply endpoint loads omitted replies.
+		where = `(c.id=any($1) or c.id in (
+			select preview.id from comments preview
+			where preview.root_id=any($1) and preview.depth<=$2
+			  and not (preview.id=any($1)) and preview.status in ('published','deleted')
+			  and ($3::bigint=0 or not exists(select 1 from user_blocks block
+				where block.blocker_id=$3 and block.blocked_id=preview.author_id))
+			order by preview.depth,preview.created_at,preview.id limit $4
+		)) and c.depth<=$2`
 	}
 	args := []any{ids}
 	viewerIndex := 2
@@ -360,6 +392,9 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 		viewerIndex = 3
 	}
 	args = append(args, viewerID)
+	if includeTree {
+		args = append(args, maxCommentListPreviewReplies)
+	}
 	rows, err := queryer.Query(ctx, fmt.Sprintf(`select c.id,c.public_id,c.floor_number,coalesce(parent.public_id,''),
 		coalesce(root.public_id,''),c.depth,c.body,c.status,c.child_count,c.descendant_count,c.hot_score,
 		author.id,author.public_id,author.username,author.avatar_url,author.show_online_status,
@@ -447,6 +482,15 @@ func queryCommentItemsWithQueryer(ctx context.Context, queryer commentQueryer, i
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err
+	}
+	if includeTree {
+		loadedChildren := make(map[string]int, len(items))
+		for _, item := range items {
+			loadedChildren[item.ParentID]++
+		}
+		for index := range items {
+			items[index].HasMoreReplies = items[index].ChildCount > loadedChildren[items[index].ID]
+		}
 	}
 	return items, nil
 }
@@ -704,7 +748,7 @@ func resolveCommentTargetWithQueryer(ctx context.Context, queryer commentTargetQ
 			from catalog_entities entity join catalog_tags definition on definition.entity_id=entity.id
 			left join lateral (select name from content_localizations where catalog_entity_id=entity.id
 				and name<>'' order by case locale when 'zh-CN' then 0 when 'en-US' then 1 else 2 end limit 1) localization on true
-			where entity.public_id=$1 and entity.entity_type='tag' and entity.status='active'`,
+			where entity.public_id=$1 and entity.entity_type='tag' and entity.status='active' and `+publicCatalogEntitySQL("entity", "tag"),
 			targetKey).Scan(&info.InternalID, &info.Title, &info.URL)
 		return info, err
 	case "recipe_type":
@@ -713,7 +757,7 @@ func resolveCommentTargetWithQueryer(ctx context.Context, queryer commentTargetQ
 			from catalog_entities entity join recipe_types definition on definition.entity_id=entity.id
 			left join lateral (select name from content_localizations where catalog_entity_id=entity.id
 				and name<>'' order by case locale when 'zh-CN' then 0 when 'en-US' then 1 else 2 end limit 1) localization on true
-			where entity.public_id=$1 and entity.entity_type='recipe_type' and entity.status='active'`,
+			where entity.public_id=$1 and entity.entity_type='recipe_type' and entity.status='active' and `+publicCatalogEntitySQL("entity", "recipe_type"),
 			targetKey).Scan(&info.InternalID, &info.Title, &info.URL)
 		return info, err
 	case "mod_resource":

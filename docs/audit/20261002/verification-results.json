@@ -1,0 +1,1132 @@
+{
+  "format_version": 1,
+  "recorded_at": "2026-10-02T12:00:43.025138+00:00",
+  "boundary": "Actual command exits recorded by task runner; private raw logs are represented by filename and SHA256 only. A test invocation, a source read and production health are different claims.",
+  "baselines": {
+    "mcmods-cn-backend": "95694ccff038a28a3e6126b05e3e7c5037bc7854",
+    "mcmods-cn-frontend": "262e1c0136bfed4624a011cf5f445b1d71cf93c0"
+  },
+  "runtime": {
+    "go": "1.26.6",
+    "node": "24.19.0",
+    "npm": "11.9.0",
+    "playwright": "1.62.1",
+    "chromium_revision": "1234",
+    "postgresql": "18.6",
+    "redis": "7.4.11",
+    "nats": "2.11.17",
+    "typesense": "29.0"
+  },
+  "source_binding": [
+    {
+      "file": "backend-final-r5-source-snapshot.json",
+      "sha256": "83e7819d5f0d49f643483b85cf35c3e309b272b7c8bd4879258b3ed145199cd8",
+      "bytes": 151480
+    },
+    {
+      "file": "frontend-r9-source-snapshot.json",
+      "sha256": "729e99a7824431974c71adadaa1d884d2112fb0242d9c2e7a7c09c176238d115",
+      "bytes": 72654
+    }
+  ],
+  "results": [
+    {
+      "scope": "backend default unit",
+      "command": "go test ./... -count=1 -coverprofile=<private-output> -json",
+      "status": "PASS",
+      "exit_code": 0,
+      "top_pass": 1240,
+      "top_skip": 554,
+      "sub_pass": 787,
+      "sub_skip": 76,
+      "statement_coverage_percent": 30.8,
+      "environment": "Owned loopback application DB; RUN_DB_INTEGRATION=0; dedicated opt-in URL unset",
+      "evidence": [
+        {
+          "file": "backend-final-r5-unit.jsonl",
+          "sha256": "e050c6f733cf6434fa9a63cad513aadacb1c0515be6a1d91fab208d948539fb6",
+          "bytes": 2874390
+        },
+        {
+          "file": "backend-final-r5-unit.stderr",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "file": "backend-final-r5.coverage",
+          "sha256": "12bd96b54f05cb906984b068b3701abfc600451c3434941501d373d414749c2c",
+          "bytes": 2752686
+        }
+      ],
+      "source_boundary": "Current1195 Go fingerprints, final R5 defaults; source drift0, exits0; the old PG-r4 complete gate remains separately versioned"
+    },
+    {
+      "scope": "backend default race",
+      "command": "go test -race ./... -count=1 -json",
+      "status": "PASS",
+      "exit_code": 0,
+      "top_pass": 1240,
+      "top_skip": 554,
+      "sub_pass": 787,
+      "sub_skip": 76,
+      "environment": "Same default opt-in boundary; not a replacement for the real PostgreSQL suite",
+      "evidence": [
+        {
+          "file": "backend-final-r5-race.jsonl",
+          "sha256": "0f5bff78b363a6e89f1190c4ce64e345b17f934bd5134c294c57880fcf47799a",
+          "bytes": 2870870
+        },
+        {
+          "file": "backend-final-r5-race.stderr",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      ],
+      "source_boundary": "Current1195 Go fingerprints, final R5 defaults; source drift0, exits0; the old PG-r4 complete gate remains separately versioned"
+    },
+    {
+      "scope": "backend vet/build",
+      "command": "go vet ./...; go build ./...",
+      "status": "PASS",
+      "exit_code": 0,
+      "evidence": [
+        {
+          "file": "backend-final-r5-vet.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "file": "backend-final-r5-build.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      ],
+      "source_boundary": "Current1195 Go fingerprints, final R5 defaults; source drift0, exits0; the old PG-r4 complete gate remains separately versioned"
+    },
+    {
+      "scope": "real PostgreSQL 18.6 whole suite",
+      "command": "go run ./tools/testing/db_suite",
+      "status": "PASS",
+      "exit_code": 0,
+      "discovered": 1794,
+      "invoked": 1794,
+      "top_pass": 1782,
+      "top_skip": 12,
+      "batches": 76,
+      "failed_batches": 0,
+      "environment": "Owned exact loopback DB, RUN_DB_INTEGRATION=1; explicit public repair target not enabled in this command",
+      "evidence": [
+        {
+          "file": "final-pg18-db-suite-r4.log",
+          "sha256": "39e18feed9265e2956d8a7150271d7742b5a846dad82e8352a26342e2097e8e4",
+          "bytes": 836193
+        }
+      ],
+      "version_boundary": "Contains C017, snapshot1195; final source differs only one TEMP statistics fixture. Its new targeted race is separately PASS; not a single final-source whole PG run",
+      "source_binding": {
+        "file": "backend-final-r4-source-snapshot.json",
+        "sha256": "2c614838ca9a3a462758cd81ca1e373feba45d4ec10e0e6bf879b7eac686593e",
+        "bytes": 151388
+      },
+      "previous_pass": {
+        "source_snapshot_count": 1194,
+        "discovered": 1793,
+        "top_pass": 1786,
+        "top_skip": 7,
+        "batches": 76,
+        "exit_code": 0,
+        "evidence": {
+          "file": "final-pg18-db-suite-r2.log",
+          "sha256": "cc78e7f89d3edc25ffe69a61c5129ab29594eb936970f69372c8d7dc13e35a1b",
+          "bytes": 839763
+        }
+      }
+    },
+    {
+      "scope": "queue/search/activity whole race",
+      "command": "go test -race ./internal/queue ./internal/searchindex ./internal/activity -count=1",
+      "status": "PASS",
+      "exit_code": 0,
+      "environment": "Owned NATS/PG and Typesense server version29.0; server version is not test count",
+      "package_seconds": {
+        "queue": 23.079,
+        "searchindex": 6.822,
+        "activity": 50.031
+      },
+      "evidence": [
+        {
+          "file": "root-final-infra-race.log",
+          "sha256": "4924fe7a4d73d430a2bada3790b1d9f3da8dfbb355c230aed94965e039d7c872",
+          "bytes": 146
+        }
+      ]
+    },
+    {
+      "scope": "queue final shutdown whole race",
+      "command": "go test -race ./internal/queue -count=1",
+      "status": "PASS",
+      "exit_code": 0,
+      "package_seconds": 22.903,
+      "evidence": [
+        {
+          "file": "root-queue-shutdown-final-race.log",
+          "sha256": "62d99c32c873a234b0a5b6cbe15c2d481315788b6ebbc5e7764fd8cef49ad58a",
+          "bytes": 46
+        }
+      ]
+    },
+    {
+      "scope": "review settings/template transactions",
+      "command": "go test -race ./internal/httpapi -run '^TestOCT02(UnavailableReviewPolicyNeverDisablesModeration|DuplicateNotificationTemplateKeysDoNotSilentlyOverwrite|ConcurrentNotificationTemplateSavesKeepDistinctSourceVersions)Integration$' -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "top_pass": 3,
+      "top_skip": 0,
+      "package_seconds": 3.224,
+      "evidence": [
+        {
+          "file": "root-review-config-final-race-r2.log",
+          "sha256": "997e9ba36c5f5527823794d25ad78f2d6d0d95cda9c8328edf52a36d70c66810",
+          "bytes": 1003
+        }
+      ]
+    },
+    {
+      "scope": "recursive graph SQL work budget",
+      "command": "go test -race ./internal/httpapi -run '^(TestOCT02FavoriteDependencyGraphBoundsTraversalWork|TestFavoriteExportDependencyGraphTraversesCyclesAndReportsLimits|TestFavoriteExportDependencyGraphStaysIndexedAtMillionRelationships)Integration$' -count=1 -v",
+      "status": "PASS",
+      "exit_code": 0,
+      "top_pass": 3,
+      "top_skip": 0,
+      "package_seconds": 46.673,
+      "previous_failure_evidence": {
+        "file": "root-r019-work-budget-red-r2.log",
+        "sha256": "58794b0ab6d203e05fd0e83cc18765352b3e3b69cb1c108f4b5b4c52af09bf4c",
+        "bytes": 1071
+      },
+      "evidence": [
+        {
+          "file": "root-r019-graph-final-race.log",
+          "sha256": "a9fde7e0d04cbec43948912459ff2f7c566cd34ba38a71405c308aee466b7438",
+          "bytes": 15845
+        }
+      ]
+    },
+    {
+      "scope": "frontend final lint/type",
+      "command": "npm run lint; npm run typecheck",
+      "status": "PASS",
+      "exit_code": 0,
+      "evidence": [
+        {
+          "file": "frontend-final-r9-lint.log",
+          "sha256": "90add008ad66f5aec319b9e2f36163bd09be985cec40e7b69ce48a3aab474385",
+          "bytes": 43
+        },
+        {
+          "file": "frontend-final-r9-typecheck.log",
+          "sha256": "1754a7df412f05b38ca436398768674d1913fb04a6edbc4d0ff29644f829730d",
+          "bytes": 54
+        }
+      ]
+    },
+    {
+      "scope": "frontend final unit",
+      "command": "npm test",
+      "status": "PASS",
+      "exit_code": 0,
+      "tests": 344,
+      "passed": 344,
+      "skipped": 0,
+      "evidence": [
+        {
+          "file": "frontend-final-r9-unit.log",
+          "sha256": "6ebb8de4aa2843a858096fa75cdb1eac41d002c8dde16c6cbc610f8567bdbd96",
+          "bytes": 40199
+        }
+      ]
+    },
+    {
+      "scope": "frontend final production build",
+      "command": "npm run build",
+      "status": "PASS",
+      "exit_code": 0,
+      "environment": "Example HTTPS public build targets; fresh R8 artifact at10:27UTC after skin initial-auth readiness fix",
+      "evidence": [
+        {
+          "file": "frontend-final-r8-build.log",
+          "sha256": "4e23f67fb949ca218da67462868db83550acf3ee140a864c6dc3c4e763f5ce42",
+          "bytes": 3896
+        }
+      ]
+    },
+    {
+      "scope": "frontend production browser with controlled API",
+      "command": "npm run test:browser",
+      "status": "PASS",
+      "exit_code": 0,
+      "tests": 74,
+      "passed": 74,
+      "skipped": 0,
+      "seconds": 194.434861243,
+      "environment": "Actual production React UI and Chromium1234; explicit synthetic API responses; not real API persistence",
+      "evidence": [
+        {
+          "file": "frontend-final-r9-browser.log",
+          "sha256": "ab047dc8f2b8aeca0cf1b196a4c96c5016a4a0c6b7088615492ba5e055b5d234",
+          "bytes": 10818
+        }
+      ]
+    },
+    {
+      "scope": "live backend/browser/PG",
+      "command": "npm run test:live",
+      "status": "PASS",
+      "exit_code": 0,
+      "tests": 1,
+      "passed": 1,
+      "skipped": 0,
+      "test_seconds": 3.52344232,
+      "total_seconds": 3.873506876,
+      "environment": "Final current API binary and independent current frontend; owned PG; real own APIs/cookies; external media blocked; no own API fixture; process groups stopped",
+      "evidence": [
+        {
+          "file": "live-backend-final-r5.log",
+          "sha256": "3d8bb61f2eac85c346bd37a406f01b78149cc3767a7ea63c6c998ec81abf082b",
+          "bytes": 307
+        },
+        {
+          "file": "live-backend-final-r5-exit.json",
+          "sha256": "3e813dfed35e24c2685c9a904811c3958deecc5297c6dd9493bd4fb6a54f1e34",
+          "bytes": 221
+        }
+      ]
+    },
+    {
+      "scope": "root legacy CLI/load contracts",
+      "command": "node --test scripts/load-test-cli.test.mjs scripts/load-test-contract.test.mjs",
+      "status": "PASS",
+      "exit_code": 0,
+      "tests": 6,
+      "passed": 6,
+      "skipped": 0,
+      "environment": "Real local command/tool contracts; not a new production load measurement",
+      "evidence": [
+        {
+          "file": "root-legacy-load-contract.log",
+          "sha256": "606a875f266d9ecb56cd08fc76b9350c5314f346c41e78d8012fb48286d7912f",
+          "bytes": 645
+        }
+      ]
+    }
+  ],
+  "pg_conditional_skip_names": [
+    "TestOCT02CommentPopularityStatementDeltas",
+    "TestOCT02LogRedactionForwardUpgradeIntegration",
+    "TestOCT02ProjectionFunctionForwardRepairAndRecovery",
+    "TestMinecraftLoaderVersionSourcesLive",
+    "TestExporterSamplePackageContracts",
+    "TestLatestExporterWorldgenV2Contract",
+    "TestLatestExporterCatalogImportIntegration",
+    "TestRealExporterKeyMappingsRoundTripIntegration",
+    "TestBuildMRPackWithRealModrinthMetadata",
+    "TestOCT02FavoriteExportTerminalStateAndNotificationCommitTogetherIntegration",
+    "TestRealTypesenseImportsAndFindsLocalizedTextIntegration",
+    "TestInventoryColumnsExcludeViewsIntegration"
+  ],
+  "additional_local_checks": {
+    "review_ledger_python_tests": {
+      "status": "PASS",
+      "exit_code": 0,
+      "tests": 11,
+      "seconds": 0.171,
+      "latest_rerun": {
+        "status": "PASS",
+        "exit_code": 0,
+        "tests": 11,
+        "evidence": {
+          "file": "root-final-ledger-python-r2.log",
+          "sha256": "a8747cdd57faa926338c2c70a8cb26d080d9d654f626298b270b68515147cb62",
+          "bytes": 1799
+        }
+      }
+    },
+    "ai_actual_pg_race": {
+      "status": "PASS",
+      "top_pass": 30,
+      "top_skip": 0,
+      "seconds": 4.115,
+      "provider": "deterministic local HTTP"
+    },
+    "seed_crawler_lease_actual_pg_race": {
+      "status": "PASS",
+      "top_pass": 13,
+      "top_skip": 0,
+      "seconds": 46.8
+    },
+    "isolated_environment_python_tests": {
+      "status": "PASS",
+      "exit_code": 0,
+      "tests": 4,
+      "seconds": 0.001,
+      "evidence": {
+        "file": "root-cleanup-preserved-backup-green.log",
+        "sha256": "309b0394a5401dc1e146c94aca6b1bdd77c55fac55e81cae4c9b4f9a4f45637b",
+        "bytes": 894
+      },
+      "regression_red": {
+        "file": "root-cleanup-preserved-backup-red.log",
+        "sha256": "074c6862ab91d65ad8ddbec01785b60fea15e8c2d2284c1ecb64d2d5fd139668",
+        "bytes": 1649
+      },
+      "latest_rerun": {
+        "status": "PASS",
+        "exit_code": 0,
+        "tests": 4,
+        "evidence": {
+          "file": "backend_c-readiness-python-green.log",
+          "sha256": "288208279bb788b1eeb5d886cfe0bdc7c61583be6b02b4b5f8b2ef49f1442172",
+          "bytes": 240
+        },
+        "source_boundary": "Current TCP readiness source; existing4 tests unchanged"
+      }
+    },
+    "go_module_consistency": {
+      "status": "PASS",
+      "exit_code": 0,
+      "commands": [
+        "go mod tidy -diff",
+        "go mod verify"
+      ],
+      "module_files_modified": false
+    },
+    "public_loader_and_modrinth_once": {
+      "status": "PASS",
+      "exit_code": 0,
+      "top_pass": 2,
+      "sub_pass": 4,
+      "top_skip": 0,
+      "seconds": 3.322,
+      "environment": "Fixed public upstream IDs/URLs; no AI calls or provider keys; does not change original PG command SKIP count",
+      "evidence": {
+        "file": "backend-a-public-live-once.log",
+        "sha256": "2d8d6d7eda2af143ebae05e0d7da5fb4cc110114258649f59258dcd4efdfcfc2",
+        "bytes": 762
+      }
+    },
+    "exporter_real_samples": {
+      "conditions": "BLOCKED",
+      "execution": "NOT_RUN",
+      "tests": 4,
+      "reason": "Project-specific real samples with authorized provenance/version unavailable; synthetic or unrelated exporter ZIP is not a substitute"
+    },
+    "owned_cleanup_with_extra_file": {
+      "status": "PASS",
+      "exit_code": 0,
+      "environment": "Fresh three owned containers removed; synthetic extra file preserved; ownership guard unchanged",
+      "evidence": {
+        "file": "post-ci-owned-cleanup.log",
+        "sha256": "e9b30c1211f8cedd940aa816483176b07d437ffe5ee8add628d4bcf3c587cf59",
+        "bytes": 138
+      }
+    },
+    "python_command_mismatch": {
+      "status": "FAIL",
+      "exit_code": 1,
+      "reason": "Incorrect root module-style unittest imports; documented discover commands corrected and both real suites PASS",
+      "evidence": {
+        "file": "root-final-python-command-mismatch.json",
+        "sha256": "c5a711fea2881aa5ce6231b0539b296be34fd1e613057f9bf16065ec48903e86",
+        "bytes": 324
+      }
+    },
+    "recipe_options_test_sync": {
+      "status": "PASS",
+      "exit_code": 0,
+      "top_pass": 3,
+      "seconds": 11.402303411,
+      "classification": "Test synchronization; production source unchanged; all precise assertions retained",
+      "evidence": {
+        "file": "frontend-pages-fp051-type-options-controlled-green.log",
+        "sha256": "387559492f5181aae9203803398d63e492a64fff6387e6ff3e86ed49f6bfb21e",
+        "bytes": 458
+      },
+      "deterministic_old_assertion_red": {
+        "file": "frontend-pages-fp051-type-options-held-red.log",
+        "sha256": "f96f42173b37d88cb3703fadd72e1c75fea9db46940affb00537e813d2eb51ab",
+        "bytes": 955
+      }
+    },
+    "notification_claim_clock_actual_pg_race": {
+      "status": "PASS",
+      "exit_code": 0,
+      "top_pass": 9,
+      "sub_pass": 2,
+      "top_skip": 0,
+      "seconds": 83.745,
+      "environment": "Owned PG18.6; actual lock-wait observation plus old transaction delayed claim; future due and duplicate deliveries kept",
+      "evidence": {
+        "file": "backend_c-project-update-clock-green-race.log",
+        "sha256": "e10bab8b77dc1e63c8f89180bb50e89c28857a41420d5dab218eb34c1413bc43",
+        "bytes": 3803
+      },
+      "deterministic_product_red": {
+        "file": "backend_c-project-update-clock-red.log",
+        "sha256": "085b61caeed8565a2f9f3e23f84af11b8ec9a7a427d7c57438b65a22df387d96",
+        "bytes": 895
+      }
+    },
+    "owned_guarded_public_objects_race": {
+      "status": "PASS",
+      "exit_code": 0,
+      "top_pass": 5,
+      "sub_pass": 24,
+      "top_skip": 0,
+      "command": "go test -race -p 1 -parallel 1 ./internal/database ./internal/httpapi ./tools/audit/database_inventory -run '<five explicit targets in formal guide>' -count=1 -v",
+      "environment": "Exact owned loopback DB and explicit matching disposable target; packages/cases serial; after the whole PG command",
+      "evidence": [
+        {
+          "file": "backend-owned-guarded-final-r5.log",
+          "sha256": "b94ff857561491bd3a4dd5b2810eb6a631eea7ea1c14bd61779d4fc5f4f73834",
+          "bytes": 6397
+        },
+        {
+          "file": "backend-owned-guarded-final-r5-exit.json",
+          "sha256": "d6fe3af724e7a6de501de31e5f267c96617ecd885ee07e3f3794c69f8b814492",
+          "bytes": 147
+        }
+      ],
+      "count_boundary": "Does not rewrite original complete PG command12 SKIP"
+    },
+    "log_sparse_statistics_fixture": {
+      "status": "PASS",
+      "exit_code": 0,
+      "top_pass": 1,
+      "top_skip": 0,
+      "seconds": 5.076,
+      "classification": "OCT02-DB-013 auxiliary test fixture correction; legacy PERF033; no production SQL/index/schema/statistics changes",
+      "evidence": [
+        {
+          "file": "database-log-stats-targeted-green.log",
+          "sha256": "b0a71450513c703abac86d28d53808bc78e0984174da9d6b9aa49736d53606a0",
+          "bytes": 902
+        },
+        {
+          "file": "database-log-stats-probe.log",
+          "sha256": "637c60a045abd659107f9d246e9ce113ff2edad487c5b87f6db40c59a179e758",
+          "bytes": 5098
+        }
+      ],
+      "reproduction_boundary": "Original push CI random sparse stats FAIL retained; controlled missing-MCE experiment reproduces plan; default local random sample this time PASS; full TEMP stats frequency and all original assertions GREEN"
+    },
+    "owned_readiness_fresh_environment": {
+      "status": "PASS",
+      "exit_code": 0,
+      "services": 3,
+      "base_tables": 287,
+      "postgres": "18.6",
+      "redis_ping": "PONG",
+      "nats_tcp_info": true,
+      "resources_cleaned": 3,
+      "evidence": [
+        {
+          "file": "backend_c-owned-pg-startup-readiness.json",
+          "sha256": "0cf033aba314eb9aded0d4fc9b38c58f2f126b9d84457eba071a87c6e93392be",
+          "bytes": 832
+        },
+        {
+          "file": "backend_c-readiness-fresh-health.json",
+          "sha256": "c1bb233fc5df5b4be9ee5e5e2752c3eb0c4bf80e0d12908ef58cd2c0a44ac57a",
+          "bytes": 1269
+        },
+        {
+          "file": "backend_c-readiness-fresh-cleanup.json",
+          "sha256": "dae441bc8f1e14008bf6547024bde7f9e9cb09779ba82add6ffec45a7af7d994",
+          "bytes": 606
+        }
+      ]
+    },
+    "cleanup_preflight_command_mismatch": {
+      "status": "FAIL",
+      "scope": "root own command, no resource mutation",
+      "reason": "Unpublished Docker EXPOSE ports are null; corrected to inspect published mappings and mandatory service ports",
+      "evidence": {
+        "file": "root-final-cleanup-preflight-mismatch.json",
+        "sha256": "f55134bced6b285a8b60003debee31ba7438ee650f2732bba371a415d3d8f2d5",
+        "bytes": 288
+      }
+    }
+  },
+  "security": {
+    "npm_audit": {
+      "exit_code": 0,
+      "counts": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0,
+        "total": 0
+      },
+      "evidence": {
+        "file": "npm-audit-final-r2.json",
+        "sha256": "3c86f6a266c095fae153c54b5c9c049e1069d30a5feb7bf37ae1408c41bf3cd9",
+        "bytes": 365
+      }
+    },
+    "go_vulnerability_check": {
+      "exit_code": 0,
+      "version": "1.7.0",
+      "module_only_findings": [
+        {
+          "id": "GO-2026-5932",
+          "summary": "The golang.org/x/crypto/openpgp package is unmaintained, unsafe by design, and has known security issues",
+          "fixed_version": null,
+          "trace": [
+            {
+              "module": "golang.org/x/crypto",
+              "version": "v0.53.0"
+            }
+          ],
+          "affected_imports": [
+            "golang.org/x/crypto/openpgp",
+            "golang.org/x/crypto/openpgp/armor",
+            "golang.org/x/crypto/openpgp/clearsign",
+            "golang.org/x/crypto/openpgp/elgamal",
+            "golang.org/x/crypto/openpgp/errors",
+            "golang.org/x/crypto/openpgp/packet",
+            "golang.org/x/crypto/openpgp/s2k"
+          ]
+        },
+        {
+          "id": "GO-2026-6303",
+          "summary": "Source-address critical option not enforced for non-public-key auth callbacks in golang.org/x/crypto/ssh",
+          "fixed_version": "v0.55.0",
+          "trace": [
+            {
+              "module": "golang.org/x/crypto",
+              "version": "v0.53.0"
+            }
+          ],
+          "affected_imports": [
+            "golang.org/x/crypto/ssh"
+          ]
+        },
+        {
+          "id": "GO-2026-6354",
+          "summary": "Prevent DoS on deadlocked undecided channel in golang.org/x/crypto/ssh",
+          "fixed_version": "v0.56.0",
+          "trace": [
+            {
+              "module": "golang.org/x/crypto",
+              "version": "v0.53.0"
+            }
+          ],
+          "affected_imports": [
+            "golang.org/x/crypto/ssh"
+          ]
+        },
+        {
+          "id": "GO-2026-6355",
+          "summary": "Prevent DoS on deadlocked established channel in golang.org/x/crypto/ssh",
+          "fixed_version": "v0.56.0",
+          "trace": [
+            {
+              "module": "golang.org/x/crypto",
+              "version": "v0.53.0"
+            }
+          ],
+          "affected_imports": [
+            "golang.org/x/crypto/ssh"
+          ]
+        }
+      ],
+      "affected_packages_in_current_runtime_or_test_dependency_graph": false,
+      "evidence": [
+        {
+          "file": "govulncheck-final-r2.json",
+          "sha256": "892f779f8c3b8adf02789ea5a49321237700211835c38a0eeadb4bfa9b3383bf",
+          "bytes": 538406
+        },
+        {
+          "file": "backend-security-imports.txt",
+          "sha256": "b20471d4a2ffaa77e4169b2f971d18fef4d10b146d90786feae83ea450cdcef4",
+          "bytes": 8360
+        },
+        {
+          "file": "backend-security-test-imports.txt",
+          "sha256": "3ddf058aa56ff9d2ca544cda2582ed0f8f0d7c0e931af691fef35d95f5ecb48b",
+          "bytes": 12954
+        }
+      ]
+    },
+    "license": {
+      "npm_lock_entries": 584,
+      "license_counts": {
+        "MIT": 484,
+        "Apache-2.0": 36,
+        "LGPL-3.0-or-later": 10,
+        "Apache-2.0 AND LGPL-3.0-or-later AND MIT": 1,
+        "Apache-2.0 AND LGPL-3.0-or-later": 3,
+        "BlueOak-1.0.0": 1,
+        "ISC": 20,
+        "Python-2.0": 1,
+        "MPL-2.0": 13,
+        "CC-BY-4.0": 1,
+        "BSD-2-Clause": 8,
+        "BSD-3-Clause": 4,
+        "CC0-1.0": 1,
+        "0BSD": 1
+      },
+      "installed_entries": 513,
+      "lock_install_mismatches": 0,
+      "installed_license_text_not_located": 23,
+      "go_selected_modules": 50,
+      "go_modules_with_local_license_text": 49,
+      "not_verified": "Final distribution obligations, project licensing, origins/licenses of40SVG and the specific logex grant; all50 module source versions obtained",
+      "go_license_text_files_read": 66,
+      "go_license_lines_read": 3711,
+      "go_license_source_versions_verified": 50,
+      "go_module_license_not_confirmed": [
+        "github.com/chzyer/logex v1.1.10"
+      ],
+      "go_license_evidence": {
+        "file": "backend-license-metadata.json",
+        "sha256": "a9cb98fdc62c148119cf65963edd3d3ea19b4e15e7b722c8015ebd943017b97f",
+        "bytes": 58173
+      }
+    },
+    "secret_scanning": {
+      "redaction_percent": 100,
+      "backend_working_hits": 10,
+      "backend_history_hits": 9,
+      "frontend_full_directory_hits": 15,
+      "frontend_full_directory_hit_scope": ".next generated outputs only",
+      "frontend_maintained_hits": 0,
+      "frontend_maintained_scanned_files": 646,
+      "history_scanner_commits": {
+        "backend": 40,
+        "frontend": 37
+      },
+      "baseline_reachable_commits": {
+        "backend": 41,
+        "frontend": 38
+      },
+      "human_context_review": "Each current/history match reviewed as synthetic fixture or object/business key; no real service secret confirmed; no blanket allowlist added",
+      "classification_locations": [
+        {
+          "scope": "backend-secrets-working.json",
+          "path": "internal/httpapi/bug038_mirror_scan_state_integration_test.go",
+          "line": 105,
+          "commit": ""
+        },
+        {
+          "scope": "backend-secrets-working.json",
+          "path": "internal/httpapi/bug082_comment_log_attachment_job_integration_test.go",
+          "line": 126,
+          "commit": ""
+        },
+        {
+          "scope": "backend-secrets-working.json",
+          "path": "internal/httpapi/bug092_community_translation_queue_state_integration_test.go",
+          "line": 51,
+          "commit": ""
+        },
+        {
+          "scope": "backend-secrets-working.json",
+          "path": "internal/httpapi/blueprint_read_error_observability_integration_test.go",
+          "line": 63,
+          "commit": ""
+        },
+        {
+          "scope": "backend-secrets-working.json",
+          "path": "internal/httpapi/bug113_modpack_report_integration_test.go",
+          "line": 86,
+          "commit": ""
+        },
+        {
+          "scope": "backend-secrets-working.json",
+          "path": "internal/httpapi/bug040_seed_crawler_translation_integration_test.go",
+          "line": 125,
+          "commit": ""
+        },
+        {
+          "scope": "backend-secrets-working.json",
+          "path": "internal/httpapi/oct02_ai_translation_integration_test.go",
+          "line": 177,
+          "commit": ""
+        },
+        {
+          "scope": "backend-secrets-working.json",
+          "path": "internal/security/settings_test.go",
+          "line": 9,
+          "commit": ""
+        },
+        {
+          "scope": "backend-secrets-working.json",
+          "path": "internal/httpapi/test048_governance_http_state_machine_integration_test.go",
+          "line": 252,
+          "commit": ""
+        },
+        {
+          "scope": "backend-secrets-working.json",
+          "path": "internal/httpapi/test038_comment_http_lifecycle_integration_test.go",
+          "line": 227,
+          "commit": ""
+        },
+        {
+          "scope": "backend-secrets-history.json",
+          "path": "internal/httpapi/test048_governance_http_state_machine_integration_test.go",
+          "line": 252,
+          "commit": "e432ae097bc030d255d53eda153498a4dba2df42"
+        },
+        {
+          "scope": "backend-secrets-history.json",
+          "path": "internal/httpapi/bug038_mirror_scan_state_integration_test.go",
+          "line": 105,
+          "commit": "0e6fdb2fddd5d6ef30310a251182a366d82549f3"
+        },
+        {
+          "scope": "backend-secrets-history.json",
+          "path": "internal/httpapi/bug040_seed_crawler_translation_integration_test.go",
+          "line": 125,
+          "commit": "0e6fdb2fddd5d6ef30310a251182a366d82549f3"
+        },
+        {
+          "scope": "backend-secrets-history.json",
+          "path": "internal/httpapi/test038_comment_http_lifecycle_integration_test.go",
+          "line": 227,
+          "commit": "e432ae097bc030d255d53eda153498a4dba2df42"
+        },
+        {
+          "scope": "backend-secrets-history.json",
+          "path": "internal/httpapi/bug082_comment_log_attachment_job_integration_test.go",
+          "line": 125,
+          "commit": "0e6fdb2fddd5d6ef30310a251182a366d82549f3"
+        },
+        {
+          "scope": "backend-secrets-history.json",
+          "path": "internal/httpapi/blueprint_read_error_observability_integration_test.go",
+          "line": 63,
+          "commit": "0e6fdb2fddd5d6ef30310a251182a366d82549f3"
+        },
+        {
+          "scope": "backend-secrets-history.json",
+          "path": "internal/httpapi/bug113_modpack_report_integration_test.go",
+          "line": 86,
+          "commit": "0e6fdb2fddd5d6ef30310a251182a366d82549f3"
+        },
+        {
+          "scope": "backend-secrets-history.json",
+          "path": "internal/httpapi/bug092_community_translation_queue_state_integration_test.go",
+          "line": 51,
+          "commit": "0e6fdb2fddd5d6ef30310a251182a366d82549f3"
+        },
+        {
+          "scope": "backend-secrets-history.json",
+          "path": "internal/security/settings_test.go",
+          "line": 9,
+          "commit": "786c54618b5bc62b1206fd2a537ce87decd77dd1"
+        }
+      ],
+      "staged_code_commits": [
+        {
+          "scope": "database",
+          "exit_code": 0,
+          "redacted_hits": 0,
+          "evidence": {
+            "file": "backend-db-staged-secrets.json",
+            "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+            "bytes": 3
+          }
+        },
+        {
+          "scope": "security",
+          "exit_code": 0,
+          "redacted_hits": 0,
+          "evidence": {
+            "file": "backend-security-staged-secrets.json",
+            "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+            "bytes": 3
+          }
+        },
+        {
+          "scope": "domain",
+          "exit_code": 1,
+          "redacted_hits": 1,
+          "evidence": {
+            "file": "backend-domain-staged-secrets.json",
+            "sha256": "aad9fa9e6e6a671b1ce3294bb33704648b06afa68316e1a30ae5e70363c7f349",
+            "bytes": 621
+          }
+        },
+        {
+          "scope": "frontend",
+          "exit_code": 0,
+          "redacted_hits": 0,
+          "evidence": {
+            "file": "frontend-product-staged-secrets.json",
+            "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+            "bytes": 3
+          }
+        },
+        {
+          "scope": "audit tools",
+          "exit_code": 0,
+          "redacted_hits": 0,
+          "evidence": {
+            "file": "backend-audit-tools-staged-secrets.json",
+            "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+            "bytes": 3
+          }
+        },
+        {
+          "scope": "cleanup regression",
+          "exit_code": 0,
+          "redacted_hits": 0,
+          "evidence": {
+            "file": "backend-cleanup-staged-secrets.json",
+            "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+            "bytes": 3
+          }
+        },
+        {
+          "scope": "specific browser journeys",
+          "exit_code": 0,
+          "redacted_hits": 0,
+          "evidence": {
+            "file": "frontend-specific-journeys-staged-secrets.json",
+            "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+            "bytes": 3
+          }
+        },
+        {
+          "scope": "skin auth-readiness source, browser regression and formal doc",
+          "exit_code": 0,
+          "redacted_hits": 0,
+          "evidence": {
+            "file": "frontend-r022-staged-secrets.json",
+            "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+            "bytes": 3
+          }
+        },
+        {
+          "scope": "Recipe options async browser-test synchronization",
+          "exit_code": 0,
+          "redacted_hits": 0,
+          "evidence": {
+            "file": "frontend-fp051-synchronization-staged-secrets.json",
+            "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+            "bytes": 3
+          }
+        },
+        {
+          "scope": "notification current-clock source/regression/formal doc",
+          "exit_code": 0,
+          "redacted_hits": 0,
+          "evidence": {
+            "file": "backend-notification-clock-staged-secrets.json",
+            "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+            "bytes": 3
+          }
+        }
+      ],
+      "staged_audit_docs": {
+        "backend": {
+          "exit_code": 1,
+          "redacted_hits": 16,
+          "classification": "Every matched value exactly equals one of the known40-hex baseline commits in legacy evidence; false matches preserved without allowlist",
+          "evidence": {
+            "file": "backend-audit-docs-staged-secrets.json",
+            "sha256": "991166869462710acfbe67601807db98d4a1811305c4d1ce0c0e24e6e38198c9",
+            "bytes": 8703
+          },
+          "classification_evidence": {
+            "file": "backend-audit-docs-secret-classification.json",
+            "sha256": "e113100e12459b08fbc63f87e721178249908706e4cd1d7989ca70c9dda619ad",
+            "bytes": 3153
+          }
+        },
+        "frontend": {
+          "exit_code": 0,
+          "redacted_hits": 0,
+          "evidence": {
+            "file": "frontend-audit-docs-staged-secrets.json",
+            "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+            "bytes": 3
+          },
+          "latest_rerun": {
+            "exit_code": 0,
+            "redacted_hits": 0,
+            "evidence": {
+              "file": "frontend-r9-audit-docs-staged-secrets.json",
+              "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+              "bytes": 3
+            }
+          }
+        }
+      }
+    },
+    "late_readiness_staged": {
+      "status": "PASS",
+      "exit_code": 0,
+      "hits": 0,
+      "evidence": {
+        "file": "backend-readiness-staged-secrets.json",
+        "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+        "bytes": 3
+      }
+    },
+    "late_statistics_staged": {
+      "status": "PASS",
+      "exit_code": 0,
+      "hits": 0,
+      "evidence": {
+        "file": "backend-log-statistics-staged-secrets.json",
+        "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+        "bytes": 3
+      }
+    },
+    "final_audit_staged": {
+      "status": "PASS",
+      "exit_code": 0,
+      "findings": 0,
+      "scope": "Last eleven backend audit files staged diff; prior baseline SHA false positives remain separately classified. Actual scan repeated after this metadata update.",
+      "evidence": {
+        "file": "backend-final-audit-staged-secrets.json",
+        "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+      }
+    }
+  },
+  "not_run": [
+    "Production database health/capacity/replication/backup restore",
+    "Production deployment/multi-node rolling upgrade",
+    "Real paid AI requests, semantic translation quality and supplier billing",
+    "Four real exporter contracts requiring authorized versioned project-specific samples",
+    "Long-running production WebGL/GPU and every role/language journey"
+  ],
+  "prior_failures_retained": [
+    "First modified PG suite1749/74batches8failed, followed by1793/76zero failed",
+    "Wrong default opt-in environment enabled4legacyDBtests but safe schema guard rejected; corrected default full run passed",
+    "Frontend unit342/344 source contracts corrected after actual cancellation/scope semantics reviewed",
+    "Browser cache activation omitted once; genuine launch failure preserved",
+    "Earlier r4 product/fixture failures retained and repaired; r5 passed69 but predates final offset guard; fresh r6 passed70",
+    {
+      "scope": "Three dedicated browser journeys",
+      "reason": "First two invocations failed due to fixture selector/count assumptions; corrected fixtures, retained strict endpoints; third invocation3PASS; not productRED"
+    },
+    {
+      "scope": "Frontend first PR quality at845b1a8",
+      "status": "FAIL",
+      "tests": 73,
+      "passed": 72,
+      "failed": 1,
+      "reason": "Skin initial identity remount; held-auth RED and R8 new production GREEN retained",
+      "evidence": {
+        "file": "frontend-ci-first-failure.log",
+        "sha256": "5d2fc6ed679a76725f4ff6e320a98afa74451b6617b60baa7b46e10d55bf2bce",
+        "bytes": 32944
+      }
+    },
+    {
+      "scope": "Frontend follow-up PR quality at1a2be01",
+      "status": "FAIL",
+      "tests": 74,
+      "passed": 73,
+      "failed": 1,
+      "reason": "Recipe type assertion before independent option load; explicit synchronization follow-up recorded separately",
+      "evidence": {
+        "file": "frontend-ci-r022-followup-failure.log",
+        "sha256": "c7defda4d190c3b13c9c71ca9c67f3e800ba86e55a4314de0d6cc2983ef7a559",
+        "bytes": 32930
+      }
+    },
+    {
+      "scope": "Backend first push PostgreSQL integration atf98196b",
+      "status": "FAIL",
+      "discovered": 1793,
+      "invoked": 1793,
+      "batches": 76,
+      "failed_batches": 1,
+      "reason": "TEST018 concurrent second notification batch remained pending; transaction-clock regression follow-up recorded separately",
+      "evidence": {
+        "file": "backend-ci-pg-first-failure.log",
+        "sha256": "0459d1baf69c5471d9d70347b639a386d88e482737dde1e1e2e855d4fc3be577",
+        "bytes": 2008168
+      }
+    },
+    {
+      "scope": "New1195-source PostgreSQL whole r3",
+      "status": "BLOCKED",
+      "execution_state": "INTERRUPTED",
+      "exit_code": null,
+      "last_batch": 17,
+      "reason": "Exec-server disconnect terminated child process; PG health and absence of lingering locks checked; restarted full r4 without joining partial outputs",
+      "evidence": {
+        "file": "final-pg18-db-suite-r3-interrupted.log",
+        "sha256": "44ccac724ff70ff975f7c84dc6ac65f5ae137241c7c7a571c06c205451628022",
+        "bytes": 128579
+      }
+    },
+    {
+      "scope": "backend adab push CI PG scale plan",
+      "status": "FAIL",
+      "job": 110810397867,
+      "failed_test": "TestLogPaginationSearchAndCleanupStayIndexedAtScaleIntegration",
+      "related_id": "OCT02-DB-013 / PERF033",
+      "source_head": "adab6834f3a65f015fbd769cedc0d500099e4dc0",
+      "same_head_pr_pg": "PASS",
+      "evidence": {
+        "file": "backend-ci-adab-push-pg-mcp.log",
+        "sha256": "9d1c799d507b7ef76d695eae5afabc4ae24d195a25ee864cc8227748b527d30c",
+        "bytes": 1511830
+      },
+      "metadata": {
+        "file": "backend-ci-adab-push-pg-failure.json",
+        "sha256": "afac155f59b0a94bea8b2ab87c3a510ab7d101cca51257d1440d945584997b2f",
+        "bytes": 603
+      }
+    }
+  ],
+  "owned_resource_cleanup": {
+    "status": "PASS",
+    "owned_containers_removed_total": 16,
+    "current_exact_owned_containers_removed": 3,
+    "readiness_fresh_containers_removed": 3,
+    "previous_owned_containers_removed": 10,
+    "original_services_still_running": 3,
+    "running_task_live_processes": 0,
+    "original_resources_changed": false,
+    "temporary_environment_credentials_removed": true,
+    "additional_old_synthetic_environment_files_removed": [
+      "backend_a.env",
+      "backend_a-pg18.env",
+      "backend_b.env",
+      "backend_b-pg18.env",
+      "backend_c.env",
+      "backend_c-pg18.env"
+    ],
+    "private_repair_backups_preserved": true,
+    "cleanup_tool_regression_fixed": "R021 backup preservation; R003 final TCP readiness; exact owner guard retained",
+    "evidence": {
+      "file": "final-owned-resource-cleanup.json",
+      "sha256": "916aef541b6d2929d14c1e1fe7d0ef29c981dc84155bcff1a28494664b7873ff",
+      "bytes": 728
+    }
+  },
+  "remote_delivery": {
+    "status": "PULL_REQUESTS_CREATED_DRAFT",
+    "backend_pr": "https://github.com/mcmods-cn/mcmods-cn-backend/pull/6",
+    "frontend_pr": "https://github.com/mcmods-cn/mcmods-cn-frontend/pull/6",
+    "branch": "codex/full-audit-20261002",
+    "ci_at_report_commit": "FE9f0217a all6SUCCESS; BEadab PR5SUCCESS and push4SUCCESS/1PGFAIL. New final fixture+report HEAD checks queried separately after push; no older success inherited",
+    "head_boundary": "Source bytes are bound above; audit-report commit hashes are self-referential and resolved by current PR HEAD",
+    "auto_merge": false,
+    "production_deployment": false,
+    "source_head_ci_observation": {
+      "file": "ci-latest-source-heads-before-final-docs.json",
+      "sha256": "0872df733e105b01f425e6c2273df8eddef512ea70b30c7a8ca0369e7beed720",
+      "bytes": 4566
+    }
+  }
+}

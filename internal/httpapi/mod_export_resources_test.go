@@ -1,10 +1,38 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
+
+	"mcmods-cn-backend/internal/security"
 )
+
+func TestResourceReferencePreviewScopePreservesResolvedPermissionRules(t *testing.T) {
+	cases := []struct {
+		name            string
+		rules           []security.PermissionRule
+		all             bool
+		allowed, denied []string
+	}{
+		{"visitor", nil, false, []string{}, []string{}},
+		{"scoped editor", []security.PermissionRule{{Code: "project.edit.target", Allow: true}}, false, []string{"target"}, []string{}},
+		{"wildcard with specific denial", []security.PermissionRule{{Code: "project.edit.*", Allow: true}, {Code: "project.edit.target", Allow: false}}, true, []string{}, []string{"target"}},
+		{"higher priority wildcard", []security.PermissionRule{{Code: "project.edit.*", Allow: true, Priority: 10}, {Code: "project.edit.target", Allow: false}}, true, []string{"target"}, []string{}},
+		{"higher priority denial", []security.PermissionRule{{Code: "project.edit.*", Allow: true}, {Code: "project.edit.target", Allow: false, Priority: 10}}, true, []string{}, []string{"target"}},
+		{"review independent of edit denial", []security.PermissionRule{{Code: "content.review", Allow: true}, {Code: "project.edit.target", Allow: false}}, true, []string{"target"}, []string{}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.WithValue(context.Background(), claimsContextKey, security.Claims{Subject: 1, PermissionRules: test.rules})
+			all, allowed, denied := resourceReferencePreviewScope(ctx)
+			if all != test.all || !reflect.DeepEqual(allowed, test.allowed) || !reflect.DeepEqual(denied, test.denied) {
+				t.Fatalf("scope all=%v allowed=%v denied=%v", all, allowed, denied)
+			}
+		})
+	}
+}
 
 func TestNormalizeExportResourceKind(t *testing.T) {
 	tests := map[string]string{

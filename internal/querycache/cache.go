@@ -116,6 +116,7 @@ type Cache struct {
 	unreadEpoch        int64
 	unreadSampleCursor int64
 	claims             map[string]time.Time
+	claimOwners        map[string]string
 	limits             map[string]localLimit
 	realtimeLeases     map[string]localRealtimeLease
 	group              singleflight.Group
@@ -142,7 +143,8 @@ func New(cfg config.RedisConfig) *Cache {
 		cfg: cfg, prefix: basePrefix + ":" + namespace + ":", ttl: cfg.TTL,
 		local: make(map[string]localEntry), presence: make(map[string]time.Time), userPresence: make(map[int64]map[string]time.Time),
 		chatPresence: make(map[int64]chatPresenceEntry), unread: make(map[int64]unreadEntry), claims: make(map[string]time.Time),
-		limits: make(map[string]localLimit), realtimeLeases: make(map[string]localRealtimeLease), latencies: make([]time.Duration, 256),
+		claimOwners: make(map[string]string),
+		limits:      make(map[string]localLimit), realtimeLeases: make(map[string]localRealtimeLease), latencies: make([]time.Duration, 256),
 	}
 	if cache.ttl <= 0 {
 		cache.ttl = 2 * time.Minute
@@ -272,6 +274,9 @@ func (c *Cache) ConsumeRateLimitPolicy(ctx context.Context, key string, redisLim
 	if localFallbackLimit <= 0 || localFallbackLimit > redisLimit {
 		localFallbackLimit = redisLimit
 	}
+	// Keep the current replica's fallback window warm during healthy shared
+	// operation, and consume this attempt only once if Redis fails below.
+	localResult := c.consumeLocalRateLimit(key, localFallbackLimit, window)
 	if redisKey, valid := c.redisKey("limit:" + key); c.redis != nil && valid {
 		started := time.Now()
 		result, err := c.redis.Eval(ctx, `
@@ -295,7 +300,7 @@ return {count,ttl}
 	}
 	c.metrics.localFallbacks.Add(1)
 	c.metrics.rateLimitFallbacks.Add(1)
-	return c.consumeLocalRateLimit(key, localFallbackLimit, window)
+	return localResult
 }
 
 func (c *Cache) consumeLocalRateLimit(key string, limit int, window time.Duration) RateLimitResult {
@@ -363,10 +368,12 @@ func (c *Cache) ClaimThrottle(ctx context.Context, key string, window time.Durat
 	if len(c.claims) >= maxLocalClaims {
 		for existingKey := range c.claims {
 			delete(c.claims, existingKey)
+			delete(c.claimOwners, existingKey)
 			break
 		}
 	}
 	c.claims[key] = now.Add(window)
+	delete(c.claimOwners, key)
 	return true
 }
 
@@ -377,16 +384,19 @@ func (c *Cache) recordLocalClaim(key string, expiresAt, now time.Time) {
 	if len(c.claims) >= maxLocalClaims {
 		for existingKey := range c.claims {
 			delete(c.claims, existingKey)
+			delete(c.claimOwners, existingKey)
 			break
 		}
 	}
 	c.claims[key] = expiresAt
+	delete(c.claimOwners, key)
 }
 
 func (c *Cache) pruneClaimsLocked(now time.Time) {
 	for key, expiresAt := range c.claims {
 		if !now.Before(expiresAt) {
 			delete(c.claims, key)
+			delete(c.claimOwners, key)
 		}
 	}
 }

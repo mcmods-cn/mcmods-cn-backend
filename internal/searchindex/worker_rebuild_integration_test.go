@@ -82,6 +82,22 @@ func TestLoadProjectDocumentsUsesBatchedPreaggregationsIntegration(t *testing.T)
 			t.Errorf("%s = %#v, want %#v", field, document[field], expected)
 		}
 	}
+	if _, err = pool.Exec(ctx, `update mods set secondary_name='',abbreviation='',summary='' where id=42`); err != nil {
+		t.Fatal(err)
+	}
+	documents, err = worker.loadTypedDocuments(ctx, "mod", ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(documents) != 1 {
+		t.Fatalf("project documents = %d, want 1", len(documents))
+	}
+	if got := fmt.Sprint(documents[0]["names"]); got != "[Primary English name Chinese name]" {
+		t.Fatalf("optional empty names hid localizations: %s", got)
+	}
+	if got := fmt.Sprint(documents[0]["text"]); got != "[Body English summary English body Chinese summary Chinese body]" {
+		t.Fatalf("empty summary hid body text: %s", got)
+	}
 }
 
 func TestSearchRebuildKeysetPagingScaleIntegration(t *testing.T) {

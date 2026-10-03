@@ -60,6 +60,7 @@ func TestBUG031CompleteProbeReplacesOnlyMachineEvidenceIntegration(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer rollbackIntegrationTransaction(tx)
 	if err = insertMinecraftServerMods(ctx, tx, serverID, []trustedServerModEvidence{
 		{ID: "mixed_mod", Version: "declared", Source: "manual", Confidence: "declared"},
 		{ID: "mixed_mod", Version: "observed", Source: "configuration", Confidence: "inferred"},
@@ -98,6 +99,7 @@ func TestBUG031CompleteProbeReplacesOnlyMachineEvidenceIntegration(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer rollbackIntegrationTransaction(tx)
 	if err = insertMinecraftServerMods(ctx, tx, serverID, []trustedServerModEvidence{
 		{ID: "incomplete_retained_mod", Source: "configuration", Confidence: "inferred"},
 	}); err != nil {

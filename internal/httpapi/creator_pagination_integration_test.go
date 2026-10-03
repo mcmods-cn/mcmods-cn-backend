@@ -90,6 +90,7 @@ func TestCreatorCatalogKeysetCursorTraversesEverySQLSortIntegration(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer planRows.Close()
 	var plan strings.Builder
 	for planRows.Next() {
 		var line string

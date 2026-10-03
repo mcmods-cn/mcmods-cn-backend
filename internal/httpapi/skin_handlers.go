@@ -601,7 +601,7 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		writeError(w, http.StatusInternalServerError, "failed to encode skin revision")
 		return
 	}
-	reviewConfig := loadReviewConfig(r.Context(), s.db)
+	reviewConfig := loadReviewConfig(r.Context(), tx)
 	operation := "edit"
 	reviewRequired := catalogMutationReviewRequired(reviewConfig, operation) && !catalogMutationBypassesReview(claims)
 	reviewStatus := "approved"

@@ -74,16 +74,17 @@ func TestCommunityPostCatalogBoundsMillionRowsAndOmitsBodiesIntegration(t *testi
 	create temporary table community_post_resource_refs(
 		id bigint primary key,post_id bigint not null,resource_id bigint,kind_code text not null,
 		raw_resource_id text not null,display_order integer not null);
-	create temporary table catalog_entities(id bigint primary key,public_id text not null);
-	create temporary table game_resources(entity_id bigint primary key,canonical_id text not null);
+	create temporary table catalog_entities(id bigint primary key,public_id text not null,status text,archived_at timestamptz);
+	create temporary table game_resources(entity_id bigint primary key,canonical_id text not null,owner_mod_id bigint,created_from_revision_id text);
+	create temporary table catalog_resource_definitions(resource_id bigint primary key);
 	create temporary table mod_resource_version_details(
 		resource_id bigint not null,status text not null,updated_at timestamptz not null,
 		version_id bigint,icon_small_file_id bigint,icon_file_id bigint);
-	create temporary table mod_content_versions(id bigint primary key,public_id text not null);
+	create temporary table mod_content_versions(id bigint primary key,public_id text not null,mod_id bigint,status text);
 	create temporary table resource_import_snapshots(
 		resource_id bigint not null,revision_id text not null,icon_path text not null,names jsonb not null,
 		created_at timestamptz not null);
-	create temporary table catalog_import_revisions(id text primary key,target_version_id bigint);
+	create temporary table catalog_import_revisions(id text primary key,target_version_id bigint,mod_id bigint,status text,is_active boolean);
 	create temporary table content_localizations(catalog_entity_id bigint not null,locale text not null,name text not null);
 	create temporary table community_post_bounties(
 		post_id bigint primary key,currency_id bigint not null,amount bigint not null,status text not null,

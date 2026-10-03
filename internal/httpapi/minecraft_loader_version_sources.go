@@ -201,7 +201,7 @@ func syncMinecraftVersionCatalog(ctx context.Context, db *pgxpool.Pool) (config 
 		return minecraftVersionConfig{}, err
 	}
 
-	current, err := loadMinecraftVersionConfig(ctx, db)
+	current, err := loadMinecraftVersionConfig(ctx, lease.connection)
 	if err != nil {
 		return minecraftVersionConfig{}, fmt.Errorf("load Minecraft version configuration before synchronization: %w", err)
 	}
@@ -220,7 +220,7 @@ func syncMinecraftVersionCatalog(ctx context.Context, db *pgxpool.Pool) (config 
 	if err != nil {
 		return minecraftVersionConfig{}, err
 	}
-	if err = saveSynchronizedMinecraftVersionConfig(ctx, db, normalized, artifacts); err != nil {
+	if err = saveSynchronizedMinecraftVersionConfig(ctx, lease.connection, normalized, artifacts); err != nil {
 		return minecraftVersionConfig{}, fmt.Errorf("failed to save synchronized Minecraft versions: %w", err)
 	}
 	return normalized, nil

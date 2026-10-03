@@ -930,11 +930,16 @@ func (s *Server) minecraftServerMods(ctx context.Context, publicID string) ([]mi
 		return nil, err
 	}
 	ossCfg := s.ossConfigFromSettings(ctx)
+	iconURLs := make([]string, len(items))
 	for index := range items {
-		items[index].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, items[index].IconURL)
-		if err != nil {
-			return nil, err
-		}
+		iconURLs[index] = items[index].IconURL
+	}
+	iconURLs, err = s.resolveStoredOSSImageURLsWithConfig(ctx, ossCfg, iconURLs)
+	if err != nil {
+		return nil, err
+	}
+	for index := range items {
+		items[index].IconURL = iconURLs[index]
 	}
 	return items, nil
 }
@@ -967,7 +972,7 @@ func readMinecraftServerMods(ctx context.Context, query minecraftServerModQuerie
 				when 'configuration' then 3 when 'manual' then 4 else 5 end
 			limit 1
 		) selected_evidence on true
-		left join mods mod on mod.id=server_mod.mod_id
+		left join mods mod on mod.id=server_mod.mod_id and mod.review_status='approved'
 		left join lateral (select identifier.identifier from mod_identifiers identifier where identifier.mod_id=mod.id
 			order by identifier.is_primary desc,identifier.display_order,identifier.id limit 1) primary_identifier on true
 		where server.public_id=$1 order by lower(coalesce(mod.primary_name,server_mod.raw_mod_id)),server_mod.id`, publicID)

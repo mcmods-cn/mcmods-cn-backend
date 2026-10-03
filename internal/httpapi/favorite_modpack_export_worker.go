@@ -211,7 +211,12 @@ func (worker *FavoriteModpackExportWorker) recoverOrphanedArtifacts(ctx context.
 
 func (worker *FavoriteModpackExportWorker) failExhaustedLeases(ctx context.Context) error {
 	maxAttempts := favoriteExportMaxAttempts(worker.server.cfg.FavoriteExport.MaxBuildAttempts)
-	rows, err := worker.server.db.Query(ctx, `update favorite_modpack_export_tasks set status='failed',stage='failed',
+	tx, err := worker.server.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin exhausted favorite export leases: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `update favorite_modpack_export_tasks set status='failed',stage='failed',
 		error_code='WORKER_LEASE_EXHAUSTED',error_detail='export processing failed',lease_token='',lease_expires_at=null,
 		finished_at=now(),updated_at=now()
 		where id in (select id from favorite_modpack_export_tasks where status='processing' and lease_expires_at<now()
@@ -238,13 +243,15 @@ func (worker *FavoriteModpackExportWorker) failExhaustedLeases(ctx context.Conte
 		return fmt.Errorf("iterate exhausted favorite export leases: %w", err)
 	}
 	rows.Close()
-	var notificationErrors []error
 	for _, item := range exports {
-		if err = worker.server.sendTemplatedNotification(ctx, item.ownerID, "modpack_export_failed", map[string]string{"pack_name": item.name, "stage": "processing", "reason": "WORKER_LEASE_EXHAUSTED"}, map[string]any{"url": "/account/favorites/exports/" + item.taskID, "taskId": item.taskID}); err != nil {
-			notificationErrors = append(notificationErrors, fmt.Errorf("notify exhausted favorite export %s: %w", item.taskID, err))
+		if err = enqueueTemplatedNotificationTx(ctx, tx, "notification.direct", item.ownerID, 0, "modpack_export_failed", map[string]string{"pack_name": item.name, "stage": "processing", "reason": "WORKER_LEASE_EXHAUSTED"}, map[string]any{"url": "/user?section=favorites&exportTask=" + item.taskID, "taskId": item.taskID}, ""); err != nil {
+			return fmt.Errorf("enqueue exhausted favorite export %s notification: %w", item.taskID, err)
 		}
 	}
-	return errors.Join(notificationErrors...)
+	if err = tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit exhausted favorite export leases: %w", err)
+	}
+	return nil
 }
 
 // expireCompleted removes only the generated temporary artifact. The task and
@@ -292,17 +299,14 @@ func (worker *FavoriteModpackExportWorker) expireCompleted(ctx context.Context) 
 		if tag.RowsAffected() != 1 {
 			return fmt.Errorf("favorite export %s lost its ready state during expiration", artifact.publicID)
 		}
+		if err = enqueueTemplatedNotificationTx(ctx, tx, "notification.direct", artifact.ownerID, 0, "modpack_export_expired", map[string]string{"pack_name": artifact.name}, map[string]any{"taskId": artifact.publicID, "url": "/user?section=favorites&exportTask=" + artifact.publicID}, ""); err != nil {
+			return fmt.Errorf("enqueue expired favorite export %s notification: %w", artifact.publicID, err)
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit favorite export expiration: %w", err)
 	}
-	var notificationErrors []error
-	for _, artifact := range artifacts {
-		if err = worker.server.sendTemplatedNotification(ctx, artifact.ownerID, "modpack_export_expired", map[string]string{"pack_name": artifact.name}, map[string]any{"taskId": artifact.publicID, "url": "/user?section=favorites&exportTask=" + artifact.publicID}); err != nil {
-			notificationErrors = append(notificationErrors, fmt.Errorf("notify expired favorite export %s: %w", artifact.publicID, err))
-		}
-	}
-	return errors.Join(notificationErrors...)
+	return nil
 }
 
 func (worker *FavoriteModpackExportWorker) handle(ctx context.Context, raw []byte) error {
@@ -403,21 +407,10 @@ func (worker *FavoriteModpackExportWorker) process(ctx context.Context, taskID s
 		return worker.fail(ctx, taskID, leaseToken, "OSS_UPLOAD_FAILED", err)
 	}
 	expires := time.Now().Add(favoriteExportArtifactTTL(worker.server.cfg.FavoriteExport.ArtifactTTL))
-	completed, err := worker.finalizeFavoriteExportArtifact(ctx, taskID, leaseToken, fileID, result.Size, result.SHA256, expires)
+	_, err = worker.finalizeFavoriteExportArtifact(ctx, taskID, leaseToken, fileID, result.Size, result.SHA256, expires)
 	if err != nil {
 		compensationErr := worker.compensateUnlinkedFavoriteExportArtifact(ctx, taskID, fileID)
 		return errors.Join(err, compensationErr)
-	}
-	if !completed {
-		return nil
-	}
-	template := "modpack_export_completed"
-	skipped := taskCounts.Skipped + taskCounts.Failed
-	if skipped > 0 {
-		template = "modpack_export_completed_with_skips"
-	}
-	if err = worker.server.sendTemplatedNotification(ctx, ownerID, template, map[string]string{"pack_name": name, "minecraft_version": minecraftVersion, "loader": strings.ToUpper(loader) + " " + loaderVersion, "exported": fmt.Sprint(taskCounts.Exported), "dependencies": fmt.Sprint(taskCounts.AutoDependencies), "skipped": fmt.Sprint(skipped)}, map[string]any{"url": "/user?section=favorites&exportTask=" + taskID, "taskId": taskID}); err != nil {
-		return fmt.Errorf("notify completed favorite export %s: %w", taskID, err)
 	}
 	return nil
 }
@@ -491,6 +484,24 @@ func (worker *FavoriteModpackExportWorker) finalizeFavoriteExportArtifact(ctx co
 	if tag.RowsAffected() != 1 {
 		return false, errors.New("favorite export lease was lost before completion")
 	}
+	var ownerID int64
+	var name, minecraftVersion, loader, loaderVersion string
+	var exported, dependencies, skipped int
+	if err = tx.QueryRow(ctx, `select owner_user_id,pack_name,minecraft_version,loader_type,loader_version,
+		exported_mod_count,auto_dependency_count,skipped_item_count+failed_item_count
+		from favorite_modpack_export_tasks where public_id=$1`, taskID).
+		Scan(&ownerID, &name, &minecraftVersion, &loader, &loaderVersion, &exported, &dependencies, &skipped); err != nil {
+		return false, fmt.Errorf("load completed favorite export notification: %w", err)
+	}
+	template := "modpack_export_completed"
+	if skipped > 0 {
+		template = "modpack_export_completed_with_skips"
+	}
+	if err = enqueueTemplatedNotificationTx(ctx, tx, "notification.direct", ownerID, 0, template,
+		map[string]string{"pack_name": name, "minecraft_version": minecraftVersion, "loader": strings.ToUpper(loader) + " " + loaderVersion, "exported": fmt.Sprint(exported), "dependencies": fmt.Sprint(dependencies), "skipped": fmt.Sprint(skipped)},
+		map[string]any{"url": "/user?section=favorites&exportTask=" + taskID, "taskId": taskID}, ""); err != nil {
+		return false, fmt.Errorf("enqueue completed favorite export %s notification: %w", taskID, err)
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit favorite export completion: %w", err)
 	}
@@ -529,14 +540,22 @@ func (worker *FavoriteModpackExportWorker) fail(ctx context.Context, taskID, lea
 	}
 	var ownerID int64
 	var name string
-	err := worker.server.db.QueryRow(ctx, `update favorite_modpack_export_tasks set status='failed',stage='failed',
+	tx, err := worker.server.db.Begin(ctx)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("begin terminal favorite export failure: %w", err))
+	}
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx, `update favorite_modpack_export_tasks set status='failed',stage='failed',
 		error_code=$3,error_detail='export processing failed',finished_at=now(),lease_token='',lease_expires_at=null,updated_at=now()
 		where public_id=$1 and lease_token=$2 returning owner_user_id,pack_name`, taskID, leaseToken, code).Scan(&ownerID, &name)
 	if err != nil {
 		return errors.Join(cause, fmt.Errorf("persist terminal favorite export failure: %w", err))
 	}
-	if err = worker.server.sendTemplatedNotification(ctx, ownerID, "modpack_export_failed", map[string]string{"pack_name": name, "stage": "processing", "reason": code}, map[string]any{"url": "/user?section=favorites&exportTask=" + taskID, "taskId": taskID}); err != nil {
-		return errors.Join(cause, fmt.Errorf("notify failed favorite export %s: %w", taskID, err))
+	if err = enqueueTemplatedNotificationTx(ctx, tx, "notification.direct", ownerID, 0, "modpack_export_failed", map[string]string{"pack_name": name, "stage": "processing", "reason": code}, map[string]any{"url": "/user?section=favorites&exportTask=" + taskID, "taskId": taskID}, ""); err != nil {
+		return errors.Join(cause, fmt.Errorf("enqueue failed favorite export %s notification: %w", taskID, err))
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return errors.Join(cause, fmt.Errorf("commit terminal favorite export failure: %w", err))
 	}
 	return cause
 }

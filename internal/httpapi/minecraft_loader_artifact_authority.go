@@ -98,7 +98,11 @@ func saveMinecraftVersionConfigAndInvalidateStaleArtifacts(ctx context.Context, 
 	return tx.Commit(ctx)
 }
 
-func saveSynchronizedMinecraftVersionConfig(ctx context.Context, db *pgxpool.Pool, config minecraftVersionConfig, artifacts []minecraftLoaderArtifactSnapshot) error {
+type minecraftVersionTransactionStarter interface {
+	Begin(context.Context) (pgx.Tx, error)
+}
+
+func saveSynchronizedMinecraftVersionConfig(ctx context.Context, db minecraftVersionTransactionStarter, config minecraftVersionConfig, artifacts []minecraftLoaderArtifactSnapshot) error {
 	normalized, raw, catalogHash, err := normalizedMinecraftVersionConfigJSON(config)
 	if err != nil {
 		return err

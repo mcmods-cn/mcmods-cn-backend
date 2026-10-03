@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -49,9 +50,19 @@ const maxOAuthResponseBytes = 1 << 20
 
 var oauthHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
+var errOAuthSettingsUnavailable = errors.New("OAuth settings are unavailable")
+
+type oauthSettingsQueryRower interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
 func (s *Server) oauthStart(w http.ResponseWriter, r *http.Request) {
 	provider := strings.ToLower(strings.TrimSpace(r.PathValue("provider")))
-	cfg, ok := s.oauthProviderConfig(r.Context(), provider)
+	cfg, ok, err := s.oauthProviderConfig(r.Context(), provider)
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "OAUTH_SETTINGS_UNAVAILABLE", "third-party login settings are temporarily unavailable", 0, nil)
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "不支持的第三方登录")
 		return
@@ -84,7 +95,11 @@ func (s *Server) oauthStart(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	provider := strings.ToLower(strings.TrimSpace(r.PathValue("provider")))
-	cfg, ok := s.oauthProviderConfig(r.Context(), provider)
+	cfg, ok, err := s.oauthProviderConfig(r.Context(), provider)
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "OAUTH_SETTINGS_UNAVAILABLE", "third-party login settings are temporarily unavailable", 0, nil)
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "不支持的第三方登录")
 		return
@@ -104,7 +119,9 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 
 	profile, err := s.fetchOAuthProfile(r.Context(), provider, cfg, code)
 	if err != nil {
-		log.Printf("oauth callback failed provider=%s: %v", provider, err)
+		// Provider errors and transport URL errors may contain a client secret,
+		// authorization code or access token. Record only their type here.
+		log.Printf("oauth callback failed provider=%s error_type=%T", provider, err)
 		writeError(w, http.StatusBadGateway, "third-party login provider request failed")
 		return
 	}
@@ -135,12 +152,31 @@ func (s *Server) updateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	current := s.oauthConfig(r.Context())
-	if current.Providers == nil {
-		current.Providers = map[string]oauthProviderConfig{}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "OAUTH_SETTINGS_UNAVAILABLE", "third-party login settings are temporarily unavailable", 0, nil)
+		return
 	}
+	defer tx.Rollback(r.Context())
+	// Serialize first insertion and read/merge/write across replicas, including
+	// omitted secrets and updates to different providers in this one setting.
+	if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtextextended('settings:auth.oauth',0))`); err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "OAUTH_SETTINGS_UNAVAILABLE", "third-party login settings are temporarily unavailable", 0, nil)
+		return
+	}
+	current, err := s.oauthConfigFromQuery(r.Context(), tx)
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "OAUTH_SETTINGS_UNAVAILABLE", "third-party login settings are temporarily unavailable", 0, nil)
+		return
+	}
+	seenProviders := make(map[string]struct{}, len(payload.Providers))
 	for provider, cfg := range payload.Providers {
 		provider = strings.ToLower(strings.TrimSpace(provider))
+		if _, duplicate := seenProviders[provider]; duplicate {
+			writeError(w, http.StatusBadRequest, "第三方登录配置包含重复提供商")
+			return
+		}
+		seenProviders[provider] = struct{}{}
 		if _, ok := supportedOAuthProviders[provider]; !ok {
 			writeError(w, http.StatusBadRequest, "不支持的第三方登录: "+provider)
 			return
@@ -171,11 +207,11 @@ func (s *Server) updateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, err := s.sealSystemSetting(current)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "第三方登录配置格式不正确")
+		writeAPIError(w, http.StatusServiceUnavailable, "OAUTH_SETTINGS_UNAVAILABLE", "third-party login settings are temporarily unavailable", 0, nil)
 		return
 	}
 	claims := currentClaims(r)
-	_, err = s.db.Exec(
+	_, err = tx.Exec(
 		r.Context(),
 		`insert into system_settings (key, value, updated_by, updated_at)
 		 values ('auth.oauth', $1::jsonb, $2, now())
@@ -188,39 +224,50 @@ func (s *Server) updateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存第三方登录配置失败")
 		return
 	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存第三方登录配置失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, redactOAuthConfig(current))
 }
 
-func (s *Server) oauthConfig(ctx context.Context) oauthConfigPayload {
-	cfg := oauthConfigPayload{Providers: map[string]oauthProviderConfig{}}
-	for provider := range supportedOAuthProviders {
-		cfg.Providers[provider] = oauthProviderConfig{}
-	}
+func (s *Server) oauthConfig(ctx context.Context) (oauthConfigPayload, error) {
+	return s.oauthConfigFromQuery(ctx, s.db)
+}
+
+func (s *Server) oauthConfigFromQuery(ctx context.Context, queryer oauthSettingsQueryRower) (oauthConfigPayload, error) {
+	var cfg oauthConfigPayload
 	var raw []byte
-	err := s.db.QueryRow(ctx, `select value from system_settings where key = 'auth.oauth'`).Scan(&raw)
-	if err != nil {
-		_ = ignoreNoRows(err)
-		return cfg
-	}
-	if err := s.openSystemSetting(raw, &cfg); err != nil {
-		return cfg
-	}
-	if cfg.Providers == nil {
+	err := queryer.QueryRow(ctx, `select value from system_settings where key = 'auth.oauth'`).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
 		cfg.Providers = map[string]oauthProviderConfig{}
+	} else if err != nil {
+		return oauthConfigPayload{}, fmt.Errorf("%w: %w", errOAuthSettingsUnavailable, err)
+	} else {
+		if err = s.openSystemSetting(raw, &cfg); err != nil {
+			return oauthConfigPayload{}, fmt.Errorf("%w: %w", errOAuthSettingsUnavailable, err)
+		}
+		if cfg.Providers == nil {
+			return oauthConfigPayload{}, fmt.Errorf("%w: providers must be an object", errOAuthSettingsUnavailable)
+		}
 	}
 	for provider := range supportedOAuthProviders {
 		if _, ok := cfg.Providers[provider]; !ok {
 			cfg.Providers[provider] = oauthProviderConfig{}
 		}
 	}
-	return cfg
+	return cfg, nil
 }
 
-func (s *Server) oauthProviderConfig(ctx context.Context, provider string) (oauthProviderConfig, bool) {
+func (s *Server) oauthProviderConfig(ctx context.Context, provider string) (oauthProviderConfig, bool, error) {
 	if _, ok := supportedOAuthProviders[provider]; !ok {
-		return oauthProviderConfig{}, false
+		return oauthProviderConfig{}, false, nil
 	}
-	return s.oauthConfig(ctx).Providers[provider], true
+	cfg, err := s.oauthConfig(ctx)
+	if err != nil {
+		return oauthProviderConfig{}, true, err
+	}
+	return cfg.Providers[provider], true, nil
 }
 
 func redactOAuthConfig(cfg oauthConfigPayload) map[string]any {

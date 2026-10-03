@@ -46,22 +46,25 @@ func TestCommunityPostCorruptReferencesAndTranslationResultsFailClosedIntegratio
 			id bigint primary key,post_id bigint not null,resource_id bigint,kind_code text not null,
 			raw_resource_id text not null,display_order integer not null
 		);
-		create temporary table catalog_entities(id bigint primary key,public_id text not null);
-		create temporary table game_resources(entity_id bigint primary key,canonical_id text not null);
+		create temporary table catalog_entities(id bigint primary key,public_id text not null,status text not null default 'active',archived_at timestamptz);
+		create temporary table game_resources(entity_id bigint primary key,canonical_id text not null,owner_mod_id bigint,created_from_revision_id text);
+		create temporary table catalog_resource_definitions(resource_id bigint primary key);
+		create temporary table mods(id bigint primary key,review_status text not null);
 		create temporary table mod_resource_version_details(
 			resource_id bigint not null,status text not null,updated_at timestamptz not null,
 			version_id bigint,icon_small_file_id bigint,icon_file_id bigint
 		);
-		create temporary table mod_content_versions(id bigint primary key,public_id text not null);
-		create temporary table catalog_import_revisions(id text primary key,target_version_id bigint);
+		create temporary table mod_content_versions(id bigint primary key,public_id text not null,mod_id bigint,status text);
+		create temporary table catalog_import_revisions(id text primary key,target_version_id bigint,mod_id bigint,is_active boolean,status text);
 		create temporary table resource_import_snapshots(
 			resource_id bigint not null,revision_id text not null,icon_path text not null,
 			names jsonb not null,created_at timestamptz not null
 		);
 		create temporary table content_localizations(catalog_entity_id bigint not null,locale text not null,name text not null);
-		insert into catalog_entities values(11,'r00000011');
-		insert into game_resources values(11,'minecraft:stone');
-		insert into catalog_import_revisions values('arch025-revision',null);
+		insert into catalog_entities(id,public_id) values(11,'r00000011');
+		insert into game_resources(entity_id,canonical_id) values(11,'minecraft:stone');
+		insert into mods values(1,'approved');
+		insert into catalog_import_revisions values('arch025-revision',null,1,true,'ready');
 		insert into resource_import_snapshots values(11,'arch025-revision','', '"corrupt-names"'::jsonb,now());
 		insert into community_post_resource_refs values(1,7,11,'block','minecraft:stone',0);
 

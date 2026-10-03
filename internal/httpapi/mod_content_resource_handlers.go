@@ -263,7 +263,7 @@ func (s *Server) submitNewModContentResource(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) modContentSimilarResources(w http.ResponseWriter, r *http.Request) {
-	identity, err := s.modIdentity(r.Context(), r.PathValue("siteId"))
+	identity, err := s.readableModIdentity(r.Context(), r.PathValue("siteId"), currentClaims(r), "content.review")
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "mod not found")
 		return
@@ -352,7 +352,7 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 	var identity modIdentityRecord
 	if r.Method == http.MethodGet {
 		var err error
-		identity, err = s.modIdentity(r.Context(), r.PathValue("siteId"))
+		identity, err = s.readableModIdentity(r.Context(), r.PathValue("siteId"), currentClaims(r), "content.review")
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "mod not found")
 			return

@@ -29,7 +29,8 @@ func TestFavoriteCollectionWritesSeparateBusinessAndDatabaseFailures(t *testing.
 			"http.StatusInternalServerError",
 		},
 		"delete": {
-			"Begin(r.Context())",
+			"s.beginFavoriteMembershipTx(r.Context(), claims.Subject)",
+			"defer membershipTx.close()",
 			"tx.QueryRow(r.Context()",
 			"tx.Commit(r.Context())",
 			"errors.Is(err, pgx.ErrNoRows)",

@@ -42,7 +42,7 @@ type modExportRevisionSummary struct {
 }
 
 func (s *Server) modExportDataSummary(w http.ResponseWriter, r *http.Request) {
-	identity, err := s.modIdentity(r.Context(), r.PathValue("siteId"))
+	identity, err := s.readableModIdentity(r.Context(), r.PathValue("siteId"), currentClaims(r), "project.review")
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "mod not found")
 		return
@@ -718,7 +718,7 @@ func (s *Server) canReadModExportRevision(w http.ResponseWriter, r *http.Request
 	var identity modIdentityRecord
 	var active bool
 	err := s.db.QueryRow(r.Context(), `select m.id,m.project_code,m.slug,m.submitted_by,
-		(e.is_active and version.status='active')
+		(e.is_active and version.status='active' and m.review_status='approved')
 		from catalog_import_revisions e
 		join mods m on m.id=e.mod_id
 		join mod_content_versions version on version.id=e.target_version_id

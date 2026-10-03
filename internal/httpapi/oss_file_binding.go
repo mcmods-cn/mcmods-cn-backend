@@ -60,7 +60,7 @@ func resolveTrustedRasterOSSFilePublicID(
 		where public_id=$1 and status='active'
 		  and scan_status in ('clean','trusted_generated')
 		  and lower(trim(split_part(content_type,';',1)))=any($4::text[])
-		  and ($2 or uploader_id=$3)`,
+		  and ($2 or uploader_id=$3) for share`,
 		publicID, scope.AllowAnyUploader, scope.UploaderID, safeRasterContentTypes,
 	).Scan(
 		&file.ID,

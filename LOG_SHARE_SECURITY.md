@@ -11,15 +11,24 @@
 
 ## 脱敏
 
-规则版本为 1，固定替换符为 `❄`。当前覆盖：Authorization/Bearer/Basic、常见 secret/token/password 字段、JWT、GitHub/Discord token、邮箱、中国大陆手机号、IPv4、IPv6、MAC、Windows/Linux/macOS 用户目录、URL token/key/secret、数据库/Redis/NATS URI 密码及 Cookie。
+规则版本为 2，固定替换符为 `❄`。当前覆盖：Authorization/Bearer/Basic、常见 secret/token/password 字段（包括 JSON 引号键和值）、JWT、GitHub/Discord token、邮箱、中国大陆手机号、IPv4、IPv6、MAC、Windows/Linux/macOS 用户目录、URL token/key/secret、数据库/Redis/NATS URI userinfo（包括 NATS username-only Token）及 Cookie。
 
 实现使用 Go RE2 正则，避免灾难性回溯；先转换 UTF-8（支持 GBK 回退）、移除 ANSI 与危险控制字符，再按规则处理。仅记录规则类别与命中数量，不记录原敏感值。无法解码或确认是文本时失败关闭，不创建 ready 短链。
 
 页面固定提示自动规则不能覆盖所有自定义秘密，分享者应检查脱敏预览。
 
+旧分享首次公开读取时，只重新处理已脱敏副本，不读取原始 OSS 文件，也不恢复已隐藏内容。
+服务端在同事务更新正文、字节数、行数、checksum、命中数和 `redaction_applied_version`。
+创建版本 `redaction_version` 保留其去重身份；同源 v1 与 v2 分享可以并存，原短码和源文件关系保留。
+升级最多两个并发、单条目 20 MiB、200 条/总 100 MiB，30 秒超时和 2 秒锁等待；失败返回 503，不返回旧未完成脱敏的副本。
+分块 cursor 升为版本 2，旧 cursor 需从首块重新读取，避免升级后字符偏移错位。
+部署前先执行 `cmd/db-log-redaction-upgrade` 的 inspect/显式 apply 前向扩展；无删除/降级迁移。
+回滚到旧脱敏代码会恢复遗漏规则的风险，不是安全恢复方案。生产历史副本和真实数据库未在本任务访问。
+
 ## ZIP
 
 默认限制：压缩源 20 MiB、总解压 100 MiB、最多 200 个文件、目录深度 12、压缩比 200、单条目 20 MiB。拒绝路径穿越、绝对路径、符号链接/设备/管道/socket、重复文件名、加密 ZIP、嵌套 ZIP、超限和读取长度不一致。
+路径按 Unix 和 Windows 同时校验：规范化反斜杠后拒绝父目录、盘符、UNC、空目录段和冒号流名，重复检查使用同一规范路径。举报附件 ZIP 使用相同便携路径边界。
 
 公开副本只保留 `.log/.txt/.json/.cfg/.properties/.toml/.yml/.yaml/.xml/.md` 文本。未知二进制不进入公开 ZIP；若没有安全条目则整个分享失败。
 
@@ -44,7 +53,6 @@
 ## 尚未完成的强化
 
 - 大文件尚未进入 PostgreSQL 任务 + Outbox 后台处理；当前同步上限不可无审核调高。
-- 查看 API 尚未实现 Range/分块，前端只做最大渲染量保护。
+- 查看 API 使用有界 cursor 分块；不支持任意 HTTP Range。当前格式的元数据和单块读取分别保持有界响应，旧副本首次完整重脱敏与普通读取的成本分别验证。
 - 目前是“脱敏并保存后预览”，不是预览确认后第二次发布。
-- 评论提交与分享绑定间仍存在极小进程崩溃窗口，依赖幂等重试恢复；后续应移入事务 Outbox。
-
+- 评论与附件分析任务在同一数据库事务提交，现有后台任务领取与重试恢复分析。分享不可用会记录失败状态，不回退原文件；数据库意图持久化不保证外部文件读取严格只执行一次。

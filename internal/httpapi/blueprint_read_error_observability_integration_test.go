@@ -52,9 +52,16 @@ func TestBlueprintDerivedReadFailuresAreObservableIntegration(t *testing.T) {
 			properties jsonb not null,block_count bigint not null
 		);
 		create temp table catalog_import_revisions(
-			id text primary key,source_namespace text not null,status text not null,is_active boolean not null,
+			id text primary key,mod_id bigint not null,source_namespace text not null,status text not null,is_active boolean not null,
 			activated_at timestamptz,created_at timestamptz not null
 		);
+		create temp table mods(id bigint primary key,slug text not null,review_status text not null);
+		insert into mods values(1,'synthetic-blueprint-source','approved');
+		-- Deliberately broken asset projection, rather than relying on unrelated
+		-- absent tables or a stale revision schema to produce this read failure.
+		create temp table catalog_import_text_assets(revision_id text not null,broken_asset_path text not null);
+		create temp table catalog_import_binary_assets(revision_id text not null,asset_path text not null);
+		create temp table catalog_import_media(revision_id text not null,asset_path text not null);
 		create temp table oss_files(
 			id bigint primary key,object_key text not null,content_type text not null,status text not null,scan_status text not null
 		);
@@ -63,7 +70,7 @@ func TestBlueprintDerivedReadFailuresAreObservableIntegration(t *testing.T) {
 			1,'arch019-blueprint',7,null,'ARCH-019 blueprint','','nbt','ready','approved','original/key','normalized/key','',null,
 			1,1,1,1,1,0,3700,'',now(),now()
 		);
-		insert into catalog_import_revisions values('arch019-revision','minecraft','ready',true,now(),now());
+		insert into catalog_import_revisions values('arch019-revision',1,'minecraft','ready',true,now(),now());
 	`); err != nil {
 		t.Fatal(err)
 	}

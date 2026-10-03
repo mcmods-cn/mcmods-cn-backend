@@ -49,6 +49,7 @@ func TestTransactionalOutboxRollbackAndDispatchIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer tx.Rollback(ctx)
 	rolledBackID, err := EnqueueTx(ctx, tx, "outbox_test", "test.rolled_back", "integration_test", prefix+"-rollback", "", map[string]bool{"ok": false})
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +66,7 @@ func TestTransactionalOutboxRollbackAndDispatchIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer tx.Rollback(ctx)
 	eventID, err := EnqueueTx(ctx, tx, "outbox_test", "test.committed", "integration_test", prefix, "trace-test", map[string]bool{"ok": true})
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +139,7 @@ func TestOutboxRetriesAfterJetStreamDisconnectIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer tx.Rollback(ctx)
 	eventID, err := EnqueueTx(ctx, tx, "disconnect_test", "test.disconnect", "integration_test", "disconnect", "", map[string]bool{"ok": true})
 	if err != nil {
 		t.Fatal(err)

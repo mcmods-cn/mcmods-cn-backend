@@ -32,7 +32,7 @@ func (s *Server) catalogResourcePresentation(w http.ResponseWriter, r *http.Requ
 		left join lateral (select candidate.locale,candidate.name from content_localizations candidate
 		 where candidate.catalog_entity_id=entity.id order by case candidate.locale when $2 then 0 when $3 then 1
 		 when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
-		where entity.status='active' and (entity.public_id=$1 or lower(resource.canonical_id)=$1) limit 1`, reference, primary, secondary).
+		where entity.status='active' and `+publicCatalogEntitySQL("entity", "resource")+` and (entity.public_id=$1 or lower(resource.canonical_id)=$1) limit 1`, reference, primary, secondary).
 		Scan(&publicID, &kind, &canonicalID, &namespace, &defaultLocale, &locale, &name, &iconFileID, &importedIconPath, &names)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

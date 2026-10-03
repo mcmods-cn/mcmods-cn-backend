@@ -554,7 +554,11 @@ func (s *Server) executeActivityCleanup(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"previewId": request.PreviewID, "matchedCount": matched, "deletedCount": totalDeleted, "status": "completed"})
 }
 
-func deleteActivityEventsInBatches(ctx context.Context, db *pgxpool.Pool, runID string, filter normalizedActivityCleanupFilter) (int64, error) {
+type activityCleanupTransactionSource interface {
+	Begin(context.Context) (pgx.Tx, error)
+}
+
+func deleteActivityEventsInBatches(ctx context.Context, db activityCleanupTransactionSource, runID string, filter normalizedActivityCleanupFilter) (int64, error) {
 	where, args := activityCleanupWhere(filter, 1)
 	args = append(args, filter.BatchSize)
 	limitPlaceholder := len(args)
@@ -648,20 +652,27 @@ func (worker *ActivityRetentionWorker) prune(ctx context.Context) {
 	if err = conn.QueryRow(ctx, `select pg_try_advisory_lock(hashtext('mcmods-activity-retention'))`).Scan(&locked); err != nil || !locked {
 		return
 	}
-	defer conn.Exec(context.Background(), `select pg_advisory_unlock(hashtext('mcmods-activity-retention'))`)
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(unlockCtx, `select pg_advisory_unlock(hashtext('mcmods-activity-retention'))`)
+	}()
 	config := defaultActivityRetentionConfig()
 	var raw []byte
-	if err := worker.db.QueryRow(ctx, `select value from system_settings where key=$1`, activityRetentionSettingKey).Scan(&raw); err == nil {
+	if err := conn.QueryRow(ctx, `select value from system_settings where key=$1`, activityRetentionSettingKey).Scan(&raw); err == nil {
 		if json.Unmarshal(raw, &config) != nil {
 			return
 		}
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		log.Printf("load automatic activity retention policy: %v", err)
+		return
 	}
 	config, err = normalizeActivityRetentionConfig(config)
 	if err != nil || !config.Enabled {
 		return
 	}
 	var recentlyRan bool
-	if err = worker.db.QueryRow(ctx, `select exists(select 1 from activity_cleanup_runs where source='automatic' and started_at>now()-make_interval(mins=>$1))`, config.RunIntervalMinutes).Scan(&recentlyRan); err != nil {
+	if err = conn.QueryRow(ctx, `select exists(select 1 from activity_cleanup_runs where source='automatic' and started_at>now()-make_interval(mins=>$1))`, config.RunIntervalMinutes).Scan(&recentlyRan); err != nil {
 		log.Printf("check recent automatic activity cleanup: %v", err)
 		return
 	}
@@ -680,17 +691,17 @@ func (worker *ActivityRetentionWorker) prune(ctx context.Context) {
 			Summary: activityCleanupFilterRequest{Actions: []string{action}}}
 		rawFilter, _ := json.Marshal(filter)
 		var runID string
-		if err = worker.db.QueryRow(ctx, `insert into activity_cleanup_runs(source,status,filters) values('automatic','running',$1::jsonb) returning public_id`, rawFilter).Scan(&runID); err != nil {
+		if err = conn.QueryRow(ctx, `insert into activity_cleanup_runs(source,status,filters) values('automatic','running',$1::jsonb) returning public_id`, rawFilter).Scan(&runID); err != nil {
 			log.Printf("start automatic activity cleanup %s: %v", action, err)
 			continue
 		}
-		deleted, cleanupErr := deleteActivityEventsInBatches(ctx, worker.db, runID, filter)
+		deleted, cleanupErr := deleteActivityEventsInBatches(ctx, conn, runID, filter)
 		status, message := "completed", ""
 		if cleanupErr != nil {
 			status, message = "failed", cleanupErr.Error()
 		}
 		finalCtx, finalCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_, finalErr := finalizeActivityCleanupRun(finalCtx, worker.db, runID, status, message)
+		_, finalErr := finalizeActivityCleanupRun(finalCtx, conn, runID, status, message)
 		finalCancel()
 		if finalErr != nil {
 			log.Printf("finalize automatic activity cleanup %s/%s after deleting %d events: %v", action, runID, deleted, finalErr)

@@ -119,6 +119,21 @@ func TestInsertMinecraftServerUnresolvedModIntegration(t *testing.T) {
 	if !seen[resolvedModID] {
 		t.Fatalf("server detail omitted resolved mod %q", resolvedModID)
 	}
+	if _, err = tx.Exec(ctx, `update mods set review_status='pending' where id=$1`, resolvedModInternalID); err != nil {
+		t.Fatal(err)
+	}
+	unpublished, err := readMinecraftServerMods(ctx, tx, serverPublicID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mod := range unpublished {
+		if mod.ID == resolvedModID && (mod.Resolved || mod.ModPublicID != "" || mod.ModID != "" || mod.ModName != "" || mod.ModSlug != "" || mod.IconURL != "") {
+			t.Fatalf("server exposed unpublished linked mod metadata: %#v", mod)
+		}
+	}
+	if _, err = tx.Exec(ctx, `update mods set review_status='approved' where id=$1`, resolvedModInternalID); err != nil {
+		t.Fatal(err)
+	}
 
 	declarations := []createServerModRequest{
 		{ID: unresolvedModIDs[0], Version: "client-version"},

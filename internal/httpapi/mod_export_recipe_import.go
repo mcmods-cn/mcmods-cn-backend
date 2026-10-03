@@ -974,6 +974,11 @@ func processExportRecipeJSONFiles[T any](ctx context.Context, files map[string]*
 		if firstErr != nil {
 			continue
 		}
+		if err := context.Cause(ctx); err != nil {
+			firstErr = err
+			cancel()
+			continue
+		}
 		if parsed.err != nil {
 			firstErr = fmt.Errorf("decode %s: %w", parsed.name, parsed.err)
 			cancel()
@@ -984,7 +989,10 @@ func processExportRecipeJSONFiles[T any](ctx context.Context, files map[string]*
 			cancel()
 		}
 	}
-	return firstErr
+	if firstErr != nil {
+		return firstErr
+	}
+	return context.Cause(ctx)
 }
 
 func exportRevisionForRecipeType(revisions map[string]string, recipeTypeID string) (string, error) {

@@ -14,10 +14,10 @@ import (
 
 const latestGlobalExportScopeCTE = `
 latest_packages as (
-	select distinct on (mod_id) mod_id,package_id
-	from catalog_import_revisions
-	where is_active and status in ('ready','partial')
-	order by mod_id,coalesce(activated_at,created_at) desc,created_at desc,package_id desc
+	select distinct on (revision.mod_id) revision.mod_id,revision.package_id
+	from catalog_import_revisions revision join mods public_mod on public_mod.id=revision.mod_id
+	where revision.is_active and revision.status in ('ready','partial') and public_mod.review_status='approved'
+	order by revision.mod_id,coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc,revision.package_id desc
 ), latest_revisions as (
 	select revision.* from catalog_import_revisions revision
 	join latest_packages package on package.mod_id=revision.mod_id and package.package_id=revision.package_id
@@ -57,7 +57,7 @@ latest_recipe_observations as (
 	join catalog_entities entity on entity.id=recipe.entity_id and entity.status='active'
 	join catalog_entities type_entity on type_entity.id=recipe.recipe_type_id and type_entity.status='active'
 	left join content_revisions revision on revision.id=definition.published_revision_id
-	left join mods mod on mod.id=recipe.owner_mod_id
+	left join mods mod on mod.id=recipe.owner_mod_id and mod.review_status='approved'
 	left join recipe_content_overrides override on override.recipe_id=recipe.entity_id
 	union all
 	select recipe.entity_id,entity.public_id,type_entity.public_id,
@@ -75,10 +75,15 @@ latest_recipe_observations as (
 
 func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	canonicalID := strings.TrimSpace(r.URL.Query().Get("canonicalId"))
+	if len(canonicalID) > 512 {
+		writeError(w, http.StatusBadRequest, "invalid exact recipe type filter")
+		return
+	}
 	primary, secondary := requestedContentLocales(r)
 	limit := boundedLimit(r.URL.Query().Get("limit"), 24, 60)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
-	key := fmt.Sprintf("recipe-types:v5:list:%s:%s:%s:%d:%d", query, primary, secondary, limit, offset)
+	key := fmt.Sprintf("recipe-types:v6:list:%s:%s:%s:%d:%d:exact:%s", query, primary, secondary, limit, offset, canonicalID)
 	s.writeCachedCatalog(w, r, key, func(ctx context.Context) (any, error) {
 		var total int
 		if err := s.db.QueryRow(ctx, `with `+latestGlobalExportScopeCTE+`, imported as (
@@ -89,10 +94,10 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 			select count(*)::int from recipe_types recipe_type
 			join catalog_entities entity on entity.id=recipe_type.entity_id
 			left join imported on imported.recipe_type_id=recipe_type.entity_id
-			where entity.status='active' and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
+			where entity.status='active' and `+publicCatalogEntitySQL("entity", "recipe_type")+` and ($4='' or recipe_type.canonical_id=$4) and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
 			 or imported.title_names->>$2 ilike '%'||$1||'%' or imported.title_names->>$3 ilike '%'||$1||'%'
 			 or exists(select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%'))`,
-			query, primary, secondary).Scan(&total); err != nil {
+			query, primary, secondary, canonicalID).Scan(&total); err != nil {
 			return nil, err
 		}
 		rows, err := s.db.Query(ctx, `with `+publicRecipeSelectionCTE+`, imported as (
@@ -106,13 +111,13 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 			(select count(*)::int from public_recipes public_recipe join recipes recipe on recipe.entity_id=public_recipe.entity_id
 			 where recipe.recipe_type_id=recipe_type.entity_id),
 			(select count(*)::int from recipe_layout_templates template join catalog_entities template_entity on template_entity.id=template.entity_id
-			 where template.recipe_type_id=recipe_type.entity_id and template_entity.status='active')
+			 where template.recipe_type_id=recipe_type.entity_id and template_entity.status='active' and `+publicCatalogEntitySQL("template_entity", "recipe_template")+`)
 		from recipe_types recipe_type join catalog_entities entity on entity.id=recipe_type.entity_id
 		left join imported on imported.recipe_type_id=recipe_type.entity_id
-		where entity.status='active' and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
+		where entity.status='active' and `+publicCatalogEntitySQL("entity", "recipe_type")+` and ($6='' or recipe_type.canonical_id=$6) and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
 		 or imported.title_names->>$2 ilike '%'||$1||'%' or imported.title_names->>$3 ilike '%'||$1||'%'
 		 or exists(select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%'))
-		order by recipe_type.canonical_id limit $4 offset $5`, query, primary, secondary, limit, offset)
+		order by recipe_type.canonical_id limit $4 offset $5`, query, primary, secondary, limit, offset, canonicalID)
 		if err != nil {
 			return nil, err
 		}
@@ -172,7 +177,7 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 			from recipe_types recipe_type
 			join catalog_entities entity on entity.id=recipe_type.entity_id and entity.status='active'
 			left join imported on imported.recipe_type_id=recipe_type.entity_id
-			where entity.public_id=$1
+			where entity.public_id=$1 and `+publicCatalogEntitySQL("entity", "recipe_type")+`
 			limit 1`, publicID).Scan(&entityID, &publicID, &canonicalID, &names)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errCatalogNotFound
@@ -195,7 +200,7 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 				 join recipes recipe on recipe.entity_id=public_recipe.entity_id where recipe.recipe_type_id=$1),
 				(select count(*)::int from recipe_layout_templates template
 				 join catalog_entities entity on entity.id=template.entity_id
-				 where template.recipe_type_id=$1 and entity.status='active')`, entityID).Scan(&total, &templateCount); err != nil {
+				 where template.recipe_type_id=$1 and entity.status='active' and `+publicCatalogEntitySQL("entity", "recipe_template")+`)`, entityID).Scan(&total, &templateCount); err != nil {
 			return nil, err
 		}
 		rows, err := s.db.Query(ctx, `with `+publicRecipeSelectionCTE+`
@@ -314,7 +319,7 @@ func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[stri
 			}
 		}
 	}
-	resolved, err := s.resolveExportResources(ctx, keys)
+	resolved, err := s.resolveExportResources(publicCatalogContext(ctx), keys)
 	if err != nil {
 		return err
 	}
@@ -337,6 +342,9 @@ func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[stri
 					delete(alternative, alias)
 				}
 				key := exportResourceKey{RevisionID: revisionID, ResourceID: itemID, Kind: normalizedKind}
+				for _, field := range []string{"publicId", "detailUrl", "names", "iconPath", "iconUrl", "iconURL", "previewPath", "previewUrl", "sourceRevisionId", "sourceModSiteId", "sourceVersionPublicId"} {
+					delete(alternative, field)
+				}
 				source, exists := resolved[key]
 				if !exists {
 					continue
@@ -389,8 +397,8 @@ func (s *Server) writeCachedCatalog(w http.ResponseWriter, r *http.Request, key 
 		writeError(w, http.StatusInternalServerError, "failed to read catalog version")
 		return
 	}
-	cacheKey := key + ":dataset:" + datasetVersion
-	data, err := s.cache.GetOrLoad(r.Context(), cacheKey, func(ctx context.Context) ([]byte, error) {
+	cacheKey := "public-source:v1:" + key + ":dataset:" + datasetVersion
+	data, err := s.cache.GetOrLoad(publicCatalogContext(r.Context()), cacheKey, func(ctx context.Context) ([]byte, error) {
 		value, loadErr := loader(ctx)
 		if loadErr != nil {
 			return nil, loadErr
@@ -512,7 +520,7 @@ func (s *Server) decorateCatalystBatches(ctx context.Context, batches []catalogC
 			}
 		}
 	}
-	resolved, err := s.resolveExportResources(ctx, keys)
+	resolved, err := s.resolveExportResources(publicCatalogContext(ctx), keys)
 	if err != nil {
 		return nil, err
 	}
@@ -528,6 +536,9 @@ func (s *Server) decorateCatalystBatches(ctx context.Context, batches []catalogC
 			}
 			for _, alias := range []string{"entityId", "item", "resource_location", "canonicalId", "kindCode"} {
 				delete(catalyst, alias)
+			}
+			for _, field := range []string{"publicId", "detailUrl", "names", "iconPath", "iconUrl", "iconURL", "previewPath", "previewUrl", "revisionId", "modSiteId", "versionPublicId"} {
+				delete(catalyst, field)
 			}
 			source, exists := resolved[exportResourceKey{RevisionID: batch.RevisionID, ResourceID: itemID, Kind: "item"}]
 			if !exists {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
+	"github.com/jackc/pgx/v5"
 )
 
 const profileConfigSettingKey = "profile.config"
@@ -127,6 +129,38 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 		}
 		request.PublicCardStatSlots = &values
 	}
+	if (request.ClearAvatar || request.AvatarFileID != nil) && !claimsAllow(claims, "user.avatar.update") {
+		writeError(w, http.StatusForbidden, "没有更换头像权限")
+		return
+	}
+	var checkedAvatar trustedRasterOSSFile
+	if request.AvatarFileID != nil {
+		var err error
+		checkedAvatar, err = resolveTrustedRasterOSSFilePublicID(r.Context(), s.db, *request.AvatarFileID, ossRasterBindingScope{UploaderID: claims.Subject})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errOSSFileNotBindable) {
+				writeError(w, http.StatusBadRequest, "avatar file does not exist")
+			} else {
+				writeError(w, http.StatusServiceUnavailable, "failed to load avatar file")
+			}
+			return
+		}
+		if !isSupportedAvatarImage(checkedAvatar.OriginalName, checkedAvatar.ContentType) {
+			writeError(w, http.StatusBadRequest, "头像仅支持 PNG、JPEG、WebP、GIF 或 APNG 图片")
+			return
+		}
+		// Remote animation detection happens before the user row/transaction is
+		// locked. The binding is checked again inside the transaction below.
+		animated, err := s.isAnimatedAvatarObject(r.Context(), checkedAvatar.ObjectKey, checkedAvatar.OriginalName, checkedAvatar.ContentType)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "无法验证头像文件是否为动态图")
+			return
+		}
+		if animated && !claimsAllow(claims, "user.avatar.animated") {
+			writeError(w, http.StatusForbidden, "没有使用动态头像权限")
+			return
+		}
+	}
 
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -197,39 +231,26 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	if request.ClearAvatar {
-		if !s.userHasPermission(r.Context(), claims.Subject, "user.avatar.update") {
-			writeError(w, http.StatusForbidden, "没有更换头像权限")
-			return
-		}
 		if _, err := tx.Exec(r.Context(), `update users set avatar_file_id = null, avatar_url = '', updated_at = now() where id = $1`, claims.Subject); err != nil {
 			writeError(w, http.StatusInternalServerError, "清除头像失败")
 			return
 		}
 	}
 	if request.AvatarFileID != nil {
-		if !s.userHasPermission(r.Context(), claims.Subject, "user.avatar.update") {
-			writeError(w, http.StatusForbidden, "没有更换头像权限")
-			return
-		}
 		file, resolveErr := resolveTrustedRasterOSSFilePublicID(r.Context(), tx, *request.AvatarFileID, ossRasterBindingScope{UploaderID: claims.Subject})
 		if resolveErr != nil {
-			writeError(w, http.StatusBadRequest, "avatar file does not exist")
+			if errors.Is(resolveErr, pgx.ErrNoRows) || errors.Is(resolveErr, errOSSFileNotBindable) {
+				writeError(w, http.StatusBadRequest, "avatar file does not exist")
+			} else {
+				writeError(w, http.StatusServiceUnavailable, "failed to load avatar file")
+			}
 			return
 		}
-		if !isSupportedAvatarImage(file.OriginalName, file.ContentType) {
-			writeError(w, http.StatusBadRequest, "头像仅支持 PNG、JPEG、WebP、GIF 或 APNG 图片")
+		if file != checkedAvatar {
+			writeError(w, http.StatusConflict, "头像文件状态已变化，请重新提交")
 			return
 		}
-		animated, err := s.isAnimatedAvatarObject(r.Context(), file.ObjectKey, file.OriginalName, file.ContentType)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "无法验证头像文件是否为动态图")
-			return
-		}
-		if animated && !s.userHasPermission(r.Context(), claims.Subject, "user.avatar.animated") {
-			writeError(w, http.StatusForbidden, "没有使用动态头像权限")
-			return
-		}
-		avatarURL := ossStoredObjectURL(s.ossConfigFromSettings(r.Context()), file.ObjectKey)
+		avatarURL := ossStoredObjectURL(s.ossConfigFromSettingsWithQueryer(r.Context(), tx), file.ObjectKey)
 		if _, err := tx.Exec(
 			r.Context(),
 			`update users set avatar_file_id = $2, avatar_url = $3, updated_at = now() where id = $1`,

@@ -140,32 +140,8 @@ func searchSchemaStatements() []string {
 			return new;
 		end;
 		$$ language plpgsql`,
-		`create or replace function enqueue_search_servers_for_mod() returns trigger as $$
-		declare target_id bigint;
-		begin
-			target_id=case when TG_OP='DELETE' then old.id else new.id end;
-			insert into search_index_queue(document_type,document_id,operation)
-			select 'server',server_id,'upsert' from minecraft_server_mods where mod_id=target_id
-			on conflict(document_type,document_id) do update set
-				operation='upsert',attempts=0,available_at=now(),last_error='',updated_at=now();
-			if TG_OP='DELETE' then return old; end if;
-			return new;
-		end;
-		$$ language plpgsql`,
-		`create or replace function enqueue_search_servers_for_mod_parent() returns trigger as $$
-		declare old_id bigint; new_id bigint;
-		begin
-			if TG_OP<>'INSERT' then old_id=old.mod_id; end if;
-			if TG_OP<>'DELETE' then new_id=new.mod_id; end if;
-			insert into search_index_queue(document_type,document_id,operation)
-			select 'server',server_id,'upsert' from minecraft_server_mods
-			where mod_id=old_id or mod_id=new_id
-			on conflict(document_type,document_id) do update set
-				operation='upsert',attempts=0,available_at=now(),last_error='',updated_at=now();
-			if TG_OP='DELETE' then return old; end if;
-			return new;
-		end;
-		$$ language plpgsql`,
+		searchServersForModFunctionSQL,
+		searchServersForModParentFunctionSQL,
 		`create or replace function enqueue_search_server_popularity() returns trigger as $$
 		declare route record;
 		begin

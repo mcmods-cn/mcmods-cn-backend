@@ -7,7 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -32,7 +36,8 @@ type aiTaskUsage struct {
 
 type aiCompletionResponse struct {
 	Choices []struct {
-		Message struct {
+		FinishReason string `json:"finish_reason"`
+		Message      struct {
 			Content string `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
@@ -43,7 +48,8 @@ type aiCompletionResponse struct {
 }
 
 type anthropicCompletionResponse struct {
-	Content []struct {
+	StopReason string `json:"stop_reason"`
+	Content    []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"content"`
@@ -60,6 +66,9 @@ type preparedAITask struct {
 	timeout           time.Duration
 	maxOutputTokens   int
 	reservationTokens int64
+	taskType          string
+	rawPayload        []byte
+	quotas            []aiQuotaConfig
 }
 
 func (worker *AIWorker) executeTask(
@@ -97,6 +106,9 @@ func (worker *AIWorker) prepareTask(
 		return preparedAITask{}, errors.New("AI task model binding is missing")
 	}
 	timeout := time.Duration(binding.TimeoutSeconds) * time.Second
+	if binding.TimeoutSeconds > 600 {
+		return preparedAITask{}, errors.New("AI task timeout cannot exceed 600 seconds")
+	}
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
@@ -108,24 +120,60 @@ func (worker *AIWorker) prepareTask(
 	if err != nil {
 		return preparedAITask{}, err
 	}
+	if run, claimed := ctx.Value(aiTaskExecutionKey{}).(aiTaskExecution); claimed {
+		var queuedReservation int64
+		if err = worker.db.QueryRow(ctx, `select quota_reserved_tokens from ai_tasks where id=$1 and status='running' and started_at=$2`, run.ID, run.Started).Scan(&queuedReservation); err != nil {
+			return preparedAITask{}, err
+		}
+		if queuedReservation > 0 && reservationTokens > queuedReservation {
+			inputReservation := reservationTokens - int64(maxOutputTokens)
+			if queuedReservation <= inputReservation {
+				return preparedAITask{}, errors.New("AI prompt no longer fits its admitted token reservation")
+			}
+			maxOutputTokens = int(queuedReservation - inputReservation)
+			reservationTokens = queuedReservation
+		}
+	}
 	return preparedAITask{
 		provider: provider, model: model, prompt: prompt, timeout: timeout,
 		maxOutputTokens: maxOutputTokens, reservationTokens: reservationTokens,
+		taskType: taskType, rawPayload: rawPayload,
+		quotas: cfg.Quotas,
 	}, nil
 }
 
 func (worker *AIWorker) executePreparedTask(ctx context.Context, prepared preparedAITask) (map[string]any, aiTaskUsage, error) {
+	ledgerID, budget, err := worker.reserveProviderRequestBudget(ctx, prepared)
+	if err != nil {
+		return nil, aiTaskUsage{}, err
+	}
 	requestContext, cancel := context.WithTimeout(ctx, prepared.timeout)
 	defer cancel()
 	content, usage, err := requestAICompletion(
 		requestContext, prepared.provider, prepared.model.Model, prepared.prompt, prepared.maxOutputTokens,
 	)
+	if usage.InputTokens > prepared.reservationTokens-int64(prepared.maxOutputTokens) || usage.OutputTokens > int64(prepared.maxOutputTokens) {
+		usage = aiTaskUsage{}
+		err = errors.New("AI provider reported token usage beyond the admitted request limits")
+	}
 	usage.CostMicros = calculateAICostMicros(prepared.model, usage)
+	if settleErr := worker.settleProviderRequestBudget(ctx, ledgerID, budget, usage); settleErr != nil {
+		return nil, usage, errors.Join(err, fmt.Errorf("settle AI provider request budget: %w", settleErr))
+	}
+	if run, ok := ctx.Value(aiTaskExecutionKey{}).(aiTaskExecution); ok {
+		if _, writeErr := worker.db.Exec(ctx, `update ai_tasks set input_tokens=input_tokens+$3,output_tokens=output_tokens+$4,cost_micros=cost_micros+$5
+			where id=$1 and status='running' and started_at=$2`, run.ID, run.Started, usage.InputTokens, usage.OutputTokens, usage.CostMicros); writeErr != nil {
+			return nil, usage, errors.Join(err, fmt.Errorf("persist AI provider usage: %w", writeErr))
+		}
+	}
 	if err != nil {
 		return nil, usage, err
 	}
 	result, err := parseAIJSONResult(content)
 	if err != nil {
+		return nil, usage, err
+	}
+	if err = validateAITranslationResult(prepared.taskType, prepared.rawPayload, result); err != nil {
 		return nil, usage, err
 	}
 	return result, usage, nil
@@ -184,6 +232,25 @@ func buildTranslationPrompt(taskType string, customPrompt string, rawPayload []b
 	}
 	if len(items) > 100 {
 		return "", errors.New("AI translation batch cannot exceed 100 items")
+	}
+	validationItems := make([]any, len(items))
+	fields := []string{"key", "text"}
+	if taskType == aiTaskPermissionTranslation {
+		fields = []string{"key", "name", "description"}
+	}
+	for index, rawItem := range items {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			return "", errors.New("AI translation source item is not an object")
+		}
+		projected := make(map[string]any, len(fields))
+		for _, field := range fields {
+			projected[field] = item[field]
+		}
+		validationItems[index] = projected
+	}
+	if err := validateAITranslationResult(taskType, rawPayload, map[string]any{"items": validationItems}); err != nil {
+		return "", err
 	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -246,6 +313,12 @@ func requestOpenAICompatibleCompletion(
 		InputTokens:  response.Usage.PromptTokens,
 		OutputTokens: response.Usage.CompletionTokens,
 	}
+	if response.Usage.PromptTokens < 0 || response.Usage.CompletionTokens < 0 {
+		return "", aiTaskUsage{}, errors.New("AI provider returned invalid token usage")
+	}
+	if len(response.Choices) > 0 && response.Choices[0].FinishReason != "" && response.Choices[0].FinishReason != "stop" {
+		return "", usage, errors.New("AI provider did not finish the translation normally")
+	}
 	if len(response.Choices) == 0 || strings.TrimSpace(response.Choices[0].Message.Content) == "" {
 		return "", usage, errors.New("AI provider returned no translated content")
 	}
@@ -289,6 +362,12 @@ func requestAnthropicCompletion(
 		InputTokens:  response.Usage.InputTokens,
 		OutputTokens: response.Usage.OutputTokens,
 	}
+	if response.Usage.InputTokens < 0 || response.Usage.OutputTokens < 0 {
+		return "", aiTaskUsage{}, errors.New("AI provider returned invalid token usage")
+	}
+	if response.StopReason != "" && response.StopReason != "end_turn" && response.StopReason != "stop_sequence" {
+		return "", usage, errors.New("AI provider did not finish the translation normally")
+	}
 	if len(parts) == 0 {
 		return "", usage, errors.New("AI provider returned no translated content")
 	}
@@ -296,6 +375,9 @@ func requestAnthropicCompletion(
 }
 
 func sendAIJSONRequest(ctx context.Context, endpoint string, headers map[string]string, payload any, target any) error {
+	if err := validateAIProviderEndpoint(endpoint); err != nil {
+		return err
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -308,18 +390,30 @@ func sendAIJSONRequest(ctx context.Context, endpoint string, headers map[string]
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
-	client, err := newProviderHTTPClient(45*time.Second, endpoint)
+	timeout := 45 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = time.Until(deadline)
+		if timeout <= 0 {
+			return ctx.Err()
+		}
+	}
+	client, err := newProviderHTTPClient(timeout, endpoint)
 	if err != nil {
 		return fmt.Errorf("AI provider endpoint is invalid: %w", err)
 	}
 	response, err := client.Do(req)
 	if err != nil {
+		var requestError *url.Error
+		if errors.As(err, &requestError) {
+			err = requestError.Err
+		}
 		return fmt.Errorf("AI provider request failed: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("AI provider returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(message)))
+		// Provider error bodies can echo credentials or source content. Persist only
+		// the status, never untrusted response text in task errors and application logs.
+		return fmt.Errorf("AI provider returned HTTP %d", response.StatusCode)
 	}
 	rawResponse, err := io.ReadAll(io.LimitReader(response.Body, maxAIProviderResponseBytes+1))
 	if err != nil {
@@ -330,6 +424,24 @@ func sendAIJSONRequest(ctx context.Context, endpoint string, headers map[string]
 	}
 	if err := json.Unmarshal(rawResponse, target); err != nil {
 		return fmt.Errorf("AI provider response is invalid: %w", err)
+	}
+	return nil
+}
+
+func validateAIProviderEndpoint(endpoint string) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("AI provider endpoint must be an HTTP(S) URL without credentials, query, or fragment")
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production") {
+		address := net.ParseIP(parsed.Hostname())
+		if strings.EqualFold(parsed.Hostname(), "localhost") || (address != nil && address.IsLoopback()) {
+			return errors.New("AI provider loopback endpoints are unavailable in production")
+		}
+	}
+	if address := net.ParseIP(parsed.Hostname()); address != nil && !address.IsLoopback() &&
+		(address.IsPrivate() || address.IsUnspecified() || address.IsLinkLocalUnicast() || address.IsMulticast()) {
+		return errors.New("AI provider private network endpoints are unavailable")
 	}
 	return nil
 }
@@ -348,16 +460,15 @@ func parseAIJSONResult(content string) (map[string]any, error) {
 	content = strings.TrimPrefix(content, "```")
 	content = strings.TrimSuffix(content, "```")
 	content = strings.TrimSpace(content)
-	start := strings.IndexByte(content, '{')
-	end := strings.LastIndexByte(content, '}')
-	if start < 0 || end < start {
-		return nil, errors.New("AI provider did not return a JSON object")
-	}
-	var result map[string]any
-	if err := json.Unmarshal([]byte(content[start:end+1]), &result); err != nil {
+	decoded, err := decodeUniqueAIJSON(content)
+	if err != nil {
 		return nil, fmt.Errorf("AI translation JSON is invalid: %w", err)
 	}
-	if _, ok := result["items"].([]any); !ok {
+	result, ok := decoded.(map[string]any)
+	if !ok || len(result) != 1 {
+		return nil, errors.New("AI translation result must contain only an items array")
+	}
+	if items, ok := result["items"].([]any); !ok || len(items) == 0 || len(items) > 100 {
 		return nil, errors.New("AI translation result has no items array")
 	}
 	return result, nil
@@ -366,7 +477,7 @@ func parseAIJSONResult(content string) (map[string]any, error) {
 func calculateAICostMicros(model aiModelConfig, usage aiTaskUsage) int64 {
 	inputCost := float64(usage.InputTokens) * model.InputPricePerMillion
 	outputCost := float64(usage.OutputTokens) * model.OutputPricePerMillion
-	return int64(inputCost + outputCost)
+	return int64(math.Ceil(inputCost + outputCost))
 }
 
 type notificationTranslationPayload struct {
@@ -402,7 +513,38 @@ func (worker *AIWorker) persistNotificationTranslation(ctx context.Context, user
 	if err != nil {
 		return fmt.Errorf("validate notification translation: %w", err)
 	}
-	_, err = worker.db.Exec(
+	tx, err := worker.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = lockAITaskExecutionTx(ctx, tx); err != nil {
+		return err
+	}
+	if _, claimed := ctx.Value(aiTaskExecutionKey{}).(aiTaskExecution); claimed {
+		var source struct {
+			Items []struct {
+				Key  string `json:"key"`
+				Text string `json:"text"`
+			} `json:"items"`
+		}
+		if err = json.Unmarshal(rawPayload, &source); err != nil {
+			return err
+		}
+		fields := make(map[string]string, len(source.Items))
+		for _, item := range source.Items {
+			fields[item.Key] = item.Text
+		}
+		var title, body string
+		if err = tx.QueryRow(ctx, `select title,body from notifications
+			where id=$1 and (recipient_id is null or recipient_id=$2) and kind<>'system' for share`, payload.NotificationID, userID).Scan(&title, &body); err != nil {
+			return fmt.Errorf("load notification translation source: %w", err)
+		}
+		if fields["title"] != title || fields["body"] != body {
+			return errors.New("notification source changed while translation was running")
+		}
+	}
+	_, err = tx.Exec(
 		ctx,
 		`insert into notification_translations (notification_id, user_id, locale, title, body)
 		 values ($1, $2, $3, $4, $5)
@@ -414,5 +556,8 @@ func (worker *AIWorker) persistNotificationTranslation(ctx context.Context, user
 		translated["title"],
 		translated["body"],
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

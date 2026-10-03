@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -220,7 +219,7 @@ func (s *Server) updateCatalogEntityContent(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	claims := currentClaims(r)
-	reviewRequired := contentLocalizationReviewRequired(loadReviewConfig(r.Context(), s.db), entity.EntityType)
+	reviewRequired := contentLocalizationReviewRequired(loadReviewConfig(r.Context(), tx), entity.EntityType)
 	if catalogMutationBypassesReview(claims) {
 		reviewRequired = false
 	}
@@ -365,6 +364,10 @@ func (s *Server) requestCatalogContentTranslation(w http.ResponseWriter, r *http
 		writeError(w, http.StatusInternalServerError, "failed to load localized content")
 		return
 	}
+	if entity.EntityType == "resource" && !claimsAllow(currentClaims(r), "global_resource.view") {
+		writeError(w, http.StatusNotFound, "localized content subject does not exist")
+		return
+	}
 	if existing, ok := entity.Localizations[request.TargetLocale]; ok {
 		writeJSON(w, http.StatusOK, map[string]any{"cached": true, "localization": existing})
 		return
@@ -484,6 +487,21 @@ func (s *Server) loadCatalogEntityLocalizations(ctx context.Context, publicID st
 	if err != nil {
 		return result, err
 	}
+	// Public catalog localization routes use the same publication policy as
+	// their list/detail counterparts. Technical resource administration retains
+	// its separate global_resource.view permission boundary.
+	if !contentVisibilityBypassed(ctx) {
+		switch result.EntityType {
+		case "tag", "recipe_type", "recipe_template", "recipe":
+			visible, visibilityErr := s.catalogEntityIsPublic(ctx, result.EntityID, result.EntityType)
+			if visibilityErr != nil {
+				return result, visibilityErr
+			}
+			if !visible {
+				return result, pgx.ErrNoRows
+			}
+		}
+	}
 	if result.CanonicalPath == "" {
 		result.CanonicalPath = s.catalogContentCanonicalPath(ctx, result.EntityType, result.PublicID, result.EntityID)
 	}
@@ -566,7 +584,7 @@ func (s *Server) requestContentLocales(r *http.Request) (string, string) {
 var errAIQuotaExceeded = errors.New("AI token quota exceeded")
 
 func reserveAITaskQuotaTx(ctx context.Context, tx pgx.Tx, actorID, tokenLimit, reserved int64) error {
-	if actorID <= 0 || tokenLimit <= 0 {
+	if actorID <= 0 || tokenLimit <= 0 || reserved <= 0 {
 		return errAIQuotaExceeded
 	}
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, actorID); err != nil {
@@ -575,8 +593,8 @@ func reserveAITaskQuotaTx(ctx context.Context, tx pgx.Tx, actorID, tokenLimit, r
 	var used, pending int64
 	if err := tx.QueryRow(ctx, `
 		select
-		 coalesce(sum(case when status='completed' then input_tokens+output_tokens else 0 end),0),
-		 coalesce(sum(case when status in ('queued','running','retrying') then quota_reserved_tokens else 0 end),0)
+		 coalesce(sum(case when status in ('completed','failed') then greatest(input_tokens+output_tokens,quota_reserved_tokens) else 0 end),0),
+		 coalesce(sum(case when status in ('queued','running','retrying') then greatest(input_tokens+output_tokens,quota_reserved_tokens) else 0 end),0)
 		from ai_tasks where created_by=$1 and created_at>=date_trunc('day',now())`, actorID).Scan(&used, &pending); err != nil {
 		return err
 	}
@@ -620,12 +638,15 @@ func (s *Server) enqueueCatalogContentTranslation(
 		"sourceLocale": source.Locale, "sourceRevisionNo": source.RevisionNo, "targetLocale": targetLocale, "items": items,
 		"quotaBacked": true,
 	}
-	rawPayload, _ := json.Marshal(payload)
-	reserved := int64(utf8.RuneCountInString(source.Name+source.Summary+source.ContentMarkdown)*2 + 256)
-	if reserved < 256 {
-		reserved = 256
+	if target, ok := entity.Localizations[targetLocale]; ok {
+		payload["targetRevisionId"] = target.PublishedRevisionID
 	}
-	concurrencyKey := contentTranslationConcurrencyKey(entity.EntityID, source, targetLocale, actorID)
+	rawPayload, _ := json.Marshal(payload)
+	reserved, err := aiTranslationReservationForPayload(aiTaskContentTranslation, binding, model, rawPayload)
+	if err != nil {
+		return enqueuedContentTranslation{}, err
+	}
+	concurrencyKey := contentTranslationConcurrencyKey(entity.EntityType, entity.EntityID, source, targetLocale, actorID)
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return enqueuedContentTranslation{}, err
@@ -681,9 +702,10 @@ func (s *Server) enqueueCatalogContentTranslation(
 	return enqueuedContentTranslation{TaskUID: taskUID, Status: "queued"}, nil
 }
 
-func contentTranslationConcurrencyKey(entityID int64, source catalogLocalizationPayload, targetLocale string, actorID int64) string {
+func contentTranslationConcurrencyKey(entityType string, entityID int64, source catalogLocalizationPayload, targetLocale string, actorID int64) string {
 	parts := []string{
 		"catalog-content",
+		entityType,
 		strconv.FormatInt(entityID, 10),
 		normalizeContentLocale(source.Locale),
 		strconv.FormatInt(source.RevisionNo, 10),

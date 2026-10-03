@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -39,7 +40,9 @@ type logRetentionConfigQueryer interface {
 var appLogRetentionCategories = []string{"system", "user_interaction", "admin_operation", "api_access", "ai_call", "download"}
 
 func (r *responseRecorder) WriteHeader(status int) {
-	r.status = status
+	if r.status == 0 && (status >= 200 || status == http.StatusSwitchingProtocols) {
+		r.status = status
+	}
 	r.ResponseWriter.WriteHeader(status)
 }
 
@@ -420,28 +423,32 @@ func normalizeLogConfig(payload logRetentionConfig) logRetentionConfig {
 	if payload.DefaultDays > 3650 {
 		payload.DefaultDays = 3650
 	}
-	if payload.CategoryDays == nil {
-		payload.CategoryDays = map[string]int{}
+	normalized := defaults.CategoryDays
+	keys := make([]string, 0, len(payload.CategoryDays))
+	for category := range payload.CategoryDays {
+		keys = append(keys, category)
 	}
-	for category, days := range defaults.CategoryDays {
-		if _, exists := payload.CategoryDays[category]; !exists {
-			payload.CategoryDays[category] = days
-		}
-	}
-	for category, days := range payload.CategoryDays {
-		category = strings.TrimSpace(category)
-		if category == "" {
-			delete(payload.CategoryDays, category)
+	slices.Sort(keys)
+	seen := make(map[string]bool, len(keys))
+	for _, rawCategory := range keys {
+		category := strings.TrimSpace(rawCategory)
+		if category == "" || seen[category] {
 			continue
 		}
+		// Explicit canonical keys take precedence over whitespace aliases. If
+		// only aliases exist, sorted input gives a stable choice on every load.
+		days, canonical := payload.CategoryDays[category]
+		if !canonical {
+			days = payload.CategoryDays[rawCategory]
+		}
+		seen[category] = true
 		if days <= 0 {
-			delete(payload.CategoryDays, category)
+			delete(normalized, category)
 			continue
 		}
-		if days > 3650 {
-			payload.CategoryDays[category] = 3650
-		}
+		normalized[category] = min(days, 3650)
 	}
+	payload.CategoryDays = normalized
 	return payload
 }
 

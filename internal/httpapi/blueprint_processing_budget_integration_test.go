@@ -60,6 +60,7 @@ func TestBlueprintJobAdmissionAndBulkMaterialsIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer rollbackIntegrationTransaction(tx)
 	if reserveErr := reserveBlueprintUserJobBudgetTx(ctx, tx, userID); !errors.Is(reserveErr, errBlueprintUserJobLimit) {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("fifth active job reservation error = %v", reserveErr)
@@ -74,6 +75,7 @@ func TestBlueprintJobAdmissionAndBulkMaterialsIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer rollbackIntegrationTransaction(tx)
 	if err = reserveBlueprintUserJobBudgetTx(ctx, tx, userID); err != nil {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("reservation after one completion: %v", err)
@@ -93,6 +95,7 @@ func TestBlueprintJobAdmissionAndBulkMaterialsIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer rollbackIntegrationTransaction(tx)
 	started := time.Now()
 	if err = replaceBlueprintMaterialsTx(ctx, tx, blueprintID, materials); err != nil {
 		_ = tx.Rollback(ctx)

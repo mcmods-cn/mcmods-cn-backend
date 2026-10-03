@@ -301,19 +301,28 @@ func TestDurableOutboxConcurrentLoadIntegration(t *testing.T) {
 					case errCh <- enqueueErr:
 					default:
 					}
+					cancel()
 					return
 				}
 			}
 		}(worker)
 	}
+sendJobs:
 	for sequence := range eventCount {
-		jobs <- sequence
+		select {
+		case jobs <- sequence:
+		case <-ctx.Done():
+			break sendJobs
+		}
 	}
 	close(jobs)
 	producers.Wait()
 	close(errCh)
 	for enqueueErr := range errCh {
 		t.Fatalf("concurrent durable enqueue failed: %v", enqueueErr)
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("concurrent durable enqueue cancelled: %v", err)
 	}
 	enqueueDuration := time.Since(startedAt)
 

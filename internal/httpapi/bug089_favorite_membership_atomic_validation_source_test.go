@@ -29,10 +29,13 @@ func TestFavoriteMembershipReplacementValidatesBeforeMutationSource(t *testing.T
 	if validateAt < 0 || defaultAt < 0 || deleteAt < 0 || validateAt > defaultAt || validateAt > deleteAt {
 		t.Fatal("every requested collection must be locked and validated before any replacement side effect")
 	}
-	if strings.Contains(handler, "for _, collectionPublicID := range request.CollectionIDs") {
-		t.Fatal("replacement must not silently ignore individual collection insert misses")
-	}
-	if !strings.Contains(handler, "tag.RowsAffected() != int64(len(request.CollectionIDs))") {
-		t.Fatal("bulk replacement must verify the exact inserted relation count")
+	for _, required := range []string{
+		"for _, id := range request.CollectionIDs",
+		"if existing[id] {",
+		"tag.RowsAffected() != 1",
+	} {
+		if !strings.Contains(handler, required) {
+			t.Fatalf("replacement must retain existing relations and strictly verify every new insert: missing %q", required)
+		}
 	}
 }

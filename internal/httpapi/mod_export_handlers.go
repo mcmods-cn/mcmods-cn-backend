@@ -406,7 +406,11 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "提交导入任务失败")
 		return
 	}
-	response, _ := s.modExportJobByID(r.Context(), jobID, identity.ID)
+	response, err := s.modExportJobByID(r.Context(), jobID, identity.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取导入任务失败")
+		return
+	}
 	response.Deduplicated = deduplicated
 	writeJSON(w, http.StatusAccepted, response)
 }
@@ -1100,7 +1104,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			switch extension {
 			case ".png":
 				var media modExportPNGMedia
-				if media, err = inspectExportPNG(cfg, revisionID, uniqueID, name, data, resourceResolver); err != nil {
+				if media, err = inspectExportPNG(ctx, cfg, revisionID, uniqueID, name, data, resourceResolver); err != nil {
 					return err
 				}
 				pngMedia = append(pngMedia, media)

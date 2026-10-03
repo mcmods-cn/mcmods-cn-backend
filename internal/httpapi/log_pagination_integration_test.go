@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"strings"
@@ -85,6 +86,13 @@ func TestLogPaginationSearchAndCleanupStayIndexedAtScaleIntegration(t *testing.T
 		from generate_series(1,100000) gs;
 		create index idx_log_scale_upload_page on oss_upload_logs(created_at desc,id desc);
 		create index idx_log_scale_upload_search on oss_upload_logs using gin(search_document);
+		-- Only these temporary fixtures need a full ANALYZE sample: the default
+		-- sample can miss the 1-in-10000 term and estimate 5000 matches instead of
+		-- 100. Target 10000 requests 3M rows, exceeding each fixture's population.
+		alter table app_logs alter column search_document set statistics 10000;
+		alter table permission_audit_logs alter column search_document set statistics 10000;
+		alter table user_login_logs alter column search_document set statistics 10000;
+		alter table oss_upload_logs alter column search_document set statistics 10000;
 		analyze users; analyze oss_files; analyze app_logs; analyze permission_audit_logs; analyze user_login_logs; analyze oss_upload_logs;
 	`); err != nil {
 		t.Fatal(err)
@@ -141,15 +149,30 @@ func TestLogPaginationSearchAndCleanupStayIndexedAtScaleIntegration(t *testing.T
 	}
 
 	for _, source := range []struct {
-		category string
-		table    string
-		index    string
+		category      string
+		table         string
+		index         string
+		termFrequency float64
 	}{
-		{category: "api_access", table: "app_logs", index: "idx_log_scale_app_search"},
-		{category: "permission_change", table: "permission_audit_logs", index: "idx_log_scale_permission_search"},
-		{category: "login_security", table: "user_login_logs", index: "idx_log_scale_login_search"},
-		{category: "file_upload", table: "oss_upload_logs", index: "idx_log_scale_upload_search"},
+		{category: "api_access", table: "app_logs", index: "idx_log_scale_app_search", termFrequency: 0.0001},
+		{category: "permission_change", table: "permission_audit_logs", index: "idx_log_scale_permission_search", termFrequency: 0.001},
+		{category: "login_security", table: "user_login_logs", index: "idx_log_scale_login_search", termFrequency: 0.001},
+		{category: "file_upload", table: "oss_upload_logs", index: "idx_log_scale_upload_search", termFrequency: 0.001},
 	} {
+		var commonTerms string
+		var termFrequency float64
+		if err = pool.QueryRow(ctx, `
+			select most_common_elems::text, most_common_elem_freqs[1]
+			from pg_stats
+			where schemaname=(select nspname from pg_namespace where oid=pg_my_temp_schema())
+				and tablename=$1 and attname='search_document'
+		`, source.table).Scan(&commonTerms, &termFrequency); err != nil {
+			t.Fatalf("%s temporary search statistics: %v", source.table, err)
+		}
+		if commonTerms != "{perf033needle}" || math.Abs(termFrequency-source.termFrequency) > 1e-8 {
+			t.Fatalf("%s temporary search statistics terms=%q frequency=%g; want perf033needle at %g", source.table, commonTerms, termFrequency, source.termFrequency)
+		}
+		t.Logf("%s temporary search statistics contain perf033needle at frequency %.8f", source.table, termFrequency)
 		searchRequest, parseErr := parseLogPageRequest(url.Values{
 			"category": {source.category}, "q": {"perf033needle"}, "limit": {"25"},
 		})

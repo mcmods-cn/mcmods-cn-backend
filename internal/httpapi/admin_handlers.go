@@ -88,6 +88,16 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "SITE_SETTINGS_UNAVAILABLE", "site settings are temporarily unavailable", 0, nil)
 		return
 	}
+	oauthCfg, err := s.oauthConfig(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "OAUTH_SETTINGS_UNAVAILABLE", "third-party login settings are temporarily unavailable", 0, nil)
+		return
+	}
+	aiCfg, err := readAIConfigFromSettings(r.Context(), s.db, s.cfg.SettingsEncryptionKey)
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "AI_SETTINGS_UNAVAILABLE", "AI settings are temporarily unavailable", 0, nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"general": general,
 		"auth": map[string]any{
@@ -101,13 +111,13 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 			"reservedUsernames":        []string{"admin", "root", "system", "api", "login", "register", "mods", "mod", "users", "settings"},
 			"tokenTTLHours":            int(s.cfg.JWTTTL.Hours()),
 		},
-		"oauth":     redactOAuthConfig(s.oauthConfig(r.Context())),
+		"oauth":     redactOAuthConfig(oauthCfg),
 		"mail":      redactMailConfig(mailCfg),
 		"oss":       redactOSSConfig(s.ossConfigFromSettings(r.Context())),
 		"markdown":  s.markdownConfigFromSettings(r.Context()),
 		"profile":   s.profileConfigFromSettings(r.Context()),
 		"yggdrasil": s.redactedYggdrasilConfig(),
-		"ai":        redactAIConfig(s.aiConfigFromSettings(r.Context())),
+		"ai":        redactAIConfig(aiCfg),
 		"permissions": map[string]any{
 			"mode":              "RBAC + user override",
 			"temporaryGrant":    true,
@@ -219,7 +229,13 @@ func (s *Server) createPermission(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "权限翻译格式不正确")
 		return
 	}
-	_, err = s.db.Exec(
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "数据库事务创建失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	_, err = tx.Exec(
 		r.Context(),
 		`insert into permissions (code, module, name, description, translations)
 		 values ($1, $2, $3, $4, $5)
@@ -238,7 +254,14 @@ func (s *Server) createPermission(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存权限节点失败")
 		return
 	}
-	s.auditPermissionChange(r.Context(), currentClaims(r).Subject, nil, "upsert_permission_node", req)
+	if err := s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, nil, "upsert_permission_node", req); err != nil {
+		writeError(w, http.StatusInternalServerError, "记录权限变更审计失败")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存权限节点失败")
+		return
+	}
 	if !s.requireSecurityVersionRefresh(w, r, "upsert_permission_node", 0, s.refreshRBACVersion(r.Context())) {
 		return
 	}
@@ -300,7 +323,10 @@ func (s *Server) createRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, nil, "create_role", req)
+	if err := s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, nil, "create_role", req); err != nil {
+		writeError(w, http.StatusInternalServerError, "记录权限变更审计失败")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存权限组失败")
 		return
@@ -378,7 +404,10 @@ func (s *Server) updateRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, nil, "update_role", req)
+	if err := s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, nil, "update_role", req); err != nil {
+		writeError(w, http.StatusInternalServerError, "记录权限变更审计失败")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存权限组失败")
 		return
@@ -439,7 +468,10 @@ func (s *Server) deleteRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "权限组不存在")
 		return
 	}
-	s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, nil, "delete_role", map[string]string{"code": code})
+	if err := s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, nil, "delete_role", map[string]string{"code": code}); err != nil {
+		writeError(w, http.StatusInternalServerError, "记录权限变更审计失败")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "删除权限组失败")
 		return
@@ -557,7 +589,11 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 		req.Status,
 	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
 	if err != nil {
-		writeError(w, http.StatusConflict, "用户名或邮箱已被占用")
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "用户名或邮箱已被占用")
+		} else {
+			writeError(w, http.StatusInternalServerError, "创建用户失败")
+		}
 		return
 	}
 	for _, role := range req.Roles {
@@ -595,12 +631,15 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "分配默认权限组失败")
 		return
 	}
-	s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &user.ID, "create_user", map[string]any{
+	if err := s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &user.ID, "create_user", map[string]any{
 		"username": user.Username,
 		"email":    user.Email,
 		"status":   user.Status,
 		"roles":    req.Roles,
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "记录权限变更审计失败")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建用户失败")
 		return
@@ -753,11 +792,14 @@ func (s *Server) updateUserPermissions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
-	s.auditPermissionChangeTx(r.Context(), tx, claims.Subject, &userID, "update_user_permissions", map[string]any{
+	if err := s.auditPermissionChangeTx(r.Context(), tx, claims.Subject, &userID, "update_user_permissions", map[string]any{
 		"permissions": req.Permissions,
 		"ip":          s.requestClientLocation(r).IP,
 		"userAgent":   r.UserAgent(),
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "记录权限变更审计失败")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存用户权限失败")
 		return
@@ -1373,9 +1415,12 @@ func parseOptionalTime(value string) (*time.Time, error) {
 	return &parsed, nil
 }
 
-func (s *Server) auditPermissionChange(ctx context.Context, operatorID int64, targetUserID *int64, action string, payload any) {
-	raw, _ := json.Marshal(payload)
-	_, _ = s.db.Exec(
+func (s *Server) auditPermissionChangeTx(ctx context.Context, tx pgx.Tx, operatorID int64, targetUserID *int64, action string, payload any) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(
 		ctx,
 		`insert into permission_audit_logs (operator_id, target_user_id, action, payload)
 		 values ($1, $2, $3, $4::jsonb)`,
@@ -1384,19 +1429,7 @@ func (s *Server) auditPermissionChange(ctx context.Context, operatorID int64, ta
 		action,
 		string(raw),
 	)
-}
-
-func (s *Server) auditPermissionChangeTx(ctx context.Context, tx pgx.Tx, operatorID int64, targetUserID *int64, action string, payload any) {
-	raw, _ := json.Marshal(payload)
-	_, _ = tx.Exec(
-		ctx,
-		`insert into permission_audit_logs (operator_id, target_user_id, action, payload)
-		 values ($1, $2, $3, $4::jsonb)`,
-		operatorID,
-		targetUserID,
-		action,
-		string(raw),
-	)
+	return err
 }
 
 func smtpConfigFromPayload(payload mailConfigPayload) config.SMTPConfig {

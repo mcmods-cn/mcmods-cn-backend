@@ -380,8 +380,9 @@ func ratingSchemaStatements() []string {
 		`create trigger trg_content_ratings_popularity before insert or update or delete on content_ratings
 			for each row execute function refresh_popularity_from_rating()`,
 		contentPopularityCommentRefreshFunctionStatement(),
-		`create trigger trg_comments_popularity after insert or update of status or delete on comments
-			for each row execute function refresh_popularity_from_comment()`,
+		commentPopularityTriggerDefinitions["trg_comments_popularity_insert"],
+		commentPopularityTriggerDefinitions["trg_comments_popularity_update"],
+		commentPopularityTriggerDefinitions["trg_comments_popularity_delete"],
 		`create or replace function refresh_popularity_from_favorite() returns trigger as $$
 		declare route_id bigint; actor_user_id bigint; remaining bigint; trust numeric; metric_eligible boolean;
 		begin
@@ -434,33 +435,47 @@ func contentRouteForCommentFunctionStatement() string {
 func contentPopularityCommentRefreshFunctionStatement() string {
 	return `create or replace function refresh_popularity_from_comment() returns trigger as $$
 	declare
-		route_id bigint; comment_author_id bigint; trust numeric;
-		old_published boolean; new_published boolean; old_metric boolean:=false; new_metric boolean:=false; author_count bigint;
+		changes_sql text; source_sql text; changed record;
+		author_count bigint; previous_count bigint; commenter_delta bigint;
+		trust numeric; metric_eligible boolean;
 	begin
-		route_id:=content_route_for_comment(
-			case when tg_op='DELETE' then old.target_type else new.target_type end,
-			case when tg_op='DELETE' then old.target_id else new.target_id end,
-			case when tg_op='DELETE' then old.target_version_id else new.target_version_id end);
-		if route_id is null then if tg_op='DELETE' then return old; end if; return new; end if;
-		comment_author_id:=case when tg_op='DELETE' then old.author_id else new.author_id end;
-		trust:=coalesce(content_user_trust(comment_author_id),0.2);
-		old_published:=tg_op<>'INSERT' and old.status='published'
-			and not content_target_user_is_developer(route_id,old.author_id);
-		new_published:=tg_op<>'DELETE' and new.status='published'
-			and not content_target_user_is_developer(route_id,new.author_id);
-		old_metric:=tg_op<>'INSERT' and old.status='published' and content_popularity_actor_eligible(route_id,old.author_id);
-		new_metric:=tg_op<>'DELETE' and new.status='published' and content_popularity_actor_eligible(route_id,new.author_id);
-		select count(*) into author_count from comments comment
-		where comment.status='published' and comment.author_id=comment_author_id
-		  and content_route_for_comment(comment.target_type,comment.target_id,comment.target_version_id)=route_id;
-		perform adjust_content_popularity_lifetime_facts(route_id,0,0,0,0,
-			case when new_metric then 1 else 0 end-case when old_metric then 1 else 0 end,
-			case when not old_metric and new_metric and author_count=1 then 1
-				when old_metric and not new_metric and author_count=0 then -1 else 0 end,0,0);
-		if not old_published and new_published and author_count=1 then perform record_popularity_event(route_id,'comment',3*trust);
-		elsif old_published and not new_published and author_count=0 then perform record_popularity_event(route_id,'comment',-3*trust); end if;
-		perform enqueue_content_stats_refresh(route_id,true,true);
-		if tg_op='DELETE' then return old; end if; return new;
+		-- Final transition-table state is grouped before counting, so a batch
+		-- of first/last rows contributes exactly one author transition.
+		if tg_op='INSERT' then
+			source_sql:='select target_type,target_id,target_version_id,author_id,1::bigint delta from comment_popularity_new where status=''published''';
+		elsif tg_op='DELETE' then
+			source_sql:='select target_type,target_id,target_version_id,author_id,-1::bigint delta from comment_popularity_old where status=''published''';
+		else
+			source_sql:='select target_type,target_id,target_version_id,author_id,-1::bigint delta from comment_popularity_old where status=''published'' union all select target_type,target_id,target_version_id,author_id,1::bigint delta from comment_popularity_new where status=''published''';
+		end if;
+		changes_sql:='select content_route_for_comment(target_type,target_id,target_version_id) route_id,author_id,sum(delta)::bigint published_delta from ('||source_sql||') changes group by 1,2 having sum(delta)<>0 and content_route_for_comment(target_type,target_id,target_version_id) is not null order by 1,2';
+		-- Target/author row counters finish before this statement trigger.
+		-- Reuse fact row locks, in route order, before reading or changing facts.
+		for changed in execute 'select distinct route_id from ('||changes_sql||') grouped order by route_id' loop
+			insert into content_popularity_lifetime_facts(object_route_id)
+			values(changed.route_id) on conflict(object_route_id) do nothing;
+			perform 1 from content_popularity_lifetime_facts where object_route_id=changed.route_id for update;
+		end loop;
+		for changed in execute changes_sql loop
+			-- VOLATILE SQL reads a fresh READ COMMITTED snapshot after lock wait.
+			select count(*) into author_count from comments comment
+			where comment.status='published' and comment.author_id=changed.author_id
+			  and content_route_for_comment(comment.target_type,comment.target_id,comment.target_version_id)=changed.route_id;
+			previous_count:=author_count-changed.published_delta;
+			commenter_delta:=case when previous_count=0 and author_count>0 then 1
+				when previous_count>0 and author_count=0 then -1 else 0 end;
+			metric_eligible:=content_popularity_actor_eligible(changed.route_id,changed.author_id);
+			if metric_eligible then
+				perform adjust_content_popularity_lifetime_facts(changed.route_id,0,0,0,0,
+					changed.published_delta,commenter_delta,0,0);
+			end if;
+			if commenter_delta<>0 and not content_target_user_is_developer(changed.route_id,changed.author_id) then
+				trust:=coalesce(content_user_trust(changed.author_id),0.2);
+				perform record_popularity_event(changed.route_id,'comment',commenter_delta*3*trust);
+			end if;
+			perform enqueue_content_stats_refresh(changed.route_id,true,true);
+		end loop;
+		return null;
 	end;
 	$$ language plpgsql`
 }

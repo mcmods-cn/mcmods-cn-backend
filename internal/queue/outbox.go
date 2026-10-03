@@ -69,13 +69,17 @@ func NewPostgresDeadLetterSink(db *pgxpool.Pool) DeadLetterSink {
 		if len(lastError) > 1000 {
 			lastError = lastError[:1000]
 		}
+		payload := dead.Payload
+		if !json.Valid(payload) {
+			// Keep malformed input inspectable without making the jsonb sink
+			// permanently fail. It remains ineligible for administrator replay.
+			payload, _ = json.Marshal(map[string]string{"invalidEnvelope": string(payload)})
+		}
 		_, err := db.Exec(ctx, `insert into dead_letter_events(
 			event_id,event_type,subject,payload,failure_stage,aggregate_type,aggregate_id,attempts,last_error)
 			values($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9)
-			on conflict(event_id,failure_stage) do update set
-			aggregate_type=excluded.aggregate_type,aggregate_id=excluded.aggregate_id,
-			attempts=excluded.attempts,last_error=excluded.last_error,failed_at=now(),replayed_at=null`,
-			dead.EventID, dead.EventType, dead.TaskCode, string(dead.Payload), dead.FailureStage,
+			on conflict(event_id,failure_stage) do nothing`,
+			dead.EventID, dead.EventType, dead.TaskCode, string(payload), dead.FailureStage,
 			dead.AggregateType, dead.AggregateID, dead.Attempts, lastError)
 		return err
 	}

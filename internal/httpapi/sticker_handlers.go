@@ -891,14 +891,17 @@ func sanitizeStickerImage(data []byte, declaredContentType string, limits config
 	var output bytes.Buffer
 	var width, height int
 	if declaredContentType == "image/png" {
-		decoded, err := png.Decode(bytes.NewReader(data))
+		header, err := png.DecodeConfig(bytes.NewReader(data))
 		if err != nil {
 			return nil, 0, 0, errors.New("PNG image is invalid or truncated")
 		}
-		bounds := decoded.Bounds()
-		width, height = bounds.Dx(), bounds.Dy()
+		width, height = header.Width, header.Height
 		if width <= 0 || height <= 0 || width > limits.MaxEdge || height > limits.MaxEdge || int64(width)*int64(height) > limits.MaxPixels {
 			return nil, 0, 0, errors.New("sticker dimensions exceed the safety limit")
+		}
+		decoded, err := png.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil, 0, 0, errors.New("PNG image is invalid or truncated")
 		}
 		if err = png.Encode(&output, decoded); err != nil {
 			return nil, 0, 0, errors.New("failed to encode sanitized PNG")

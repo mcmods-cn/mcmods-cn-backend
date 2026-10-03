@@ -35,6 +35,10 @@ func sessionNegativeCacheKey(sessionID string) string {
 	return "session-invalid:" + hex.EncodeToString(security.SessionFingerprint(sessionID))
 }
 
+func sessionRevokedCacheKey(sessionID string) string {
+	return "session-revoked:" + hex.EncodeToString(security.SessionFingerprint(sessionID))
+}
+
 func userAuthVersionCacheKey(publicID string) string {
 	return "auth:user-version:" + publicID
 }
@@ -49,6 +53,9 @@ func (s *Server) resolveCachedSessionSubject(ctx context.Context, claims securit
 	if !cacheConfig.AuthSessionCacheEnabled {
 		return s.loadSessionSubject(ctx, claims)
 	}
+	if _, revoked := s.cache.Get(ctx, sessionRevokedCacheKey(claims.SessionID)); revoked {
+		return record, pgx.ErrNoRows
+	}
 	if _, invalid := s.cache.Get(ctx, sessionNegativeCacheKey(claims.SessionID)); invalid {
 		return record, pgx.ErrNoRows
 	}
@@ -61,7 +68,9 @@ func (s *Server) resolveCachedSessionSubject(ctx context.Context, claims securit
 	if ttl <= 0 {
 		return record, pgx.ErrNoRows
 	}
-	raw, err := s.cache.GetOrLoadTTL(ctx, key, ttl, func(loadCtx context.Context) ([]byte, error) {
+	// Session revocation is a per-session fact, so another replica must not
+	// accept a process-local positive entry after the shared key was removed.
+	raw, err := s.cache.GetSharedOrLoadTTL(ctx, key, ttl, func(loadCtx context.Context) ([]byte, error) {
 		loaded, loadErr := s.loadSessionSubject(loadCtx, claims)
 		if loadErr != nil {
 			return nil, loadErr
@@ -87,6 +96,12 @@ func (s *Server) resolveCachedSessionSubject(ctx context.Context, claims securit
 		encoded, _ := json.Marshal(record)
 		s.cache.Set(ctx, key, encoded, ttl)
 	}
+	// A loader may have read PostgreSQL before logout committed and filled the
+	// positive cache afterwards. Its positive write cannot replace the separate
+	// revocation marker, which lasts until this token expires.
+	if _, revoked := s.cache.Get(ctx, sessionRevokedCacheKey(claims.SessionID)); revoked {
+		return cachedSessionSubject{}, pgx.ErrNoRows
+	}
 	versionRaw, versionErr := s.cache.GetSharedOrLoadTTL(ctx, userAuthVersionCacheKey(record.PublicID), min(ttl, 10*time.Second), func(loadCtx context.Context) ([]byte, error) {
 		var version int64
 		if scanErr := s.db.QueryRow(loadCtx, `select auth_version from users where public_id=$1 and status='active'`, record.PublicID).Scan(&version); scanErr != nil {
@@ -102,7 +117,20 @@ func (s *Server) resolveCachedSessionSubject(ctx context.Context, claims securit
 		s.cache.Delete(ctx, key)
 		return cachedSessionSubject{}, pgx.ErrNoRows
 	}
+	if _, revoked := s.cache.Get(ctx, sessionRevokedCacheKey(claims.SessionID)); revoked {
+		return cachedSessionSubject{}, pgx.ErrNoRows
+	}
 	return record, nil
+}
+
+func (s *Server) revokeSessionCache(ctx context.Context, claims security.Claims) error {
+	if s.cache != nil && s.cache.Enabled() {
+		remaining := time.Until(time.Unix(claims.ExpiresAt, 0))
+		if remaining > 0 && !s.cache.SetShared(ctx, sessionRevokedCacheKey(claims.SessionID), []byte("1"), remaining) {
+			return errors.New("publish shared session revocation failed")
+		}
+	}
+	return s.cache.DeleteShared(ctx, sessionCacheKey(claims.SessionID), sessionNegativeCacheKey(claims.SessionID))
 }
 
 func (s *Server) loadSessionSubject(ctx context.Context, claims security.Claims) (cachedSessionSubject, error) {

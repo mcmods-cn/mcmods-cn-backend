@@ -23,6 +23,8 @@ import (
 
 var verificationCodePattern = regexp.MustCompile(`^[0-9]{6}$`)
 
+var errInvalidEmailVerificationCode = errors.New("invalid email verification code")
+
 const loginDummyPasswordHash = "argon2id$v=19$m=65536,t=3,p=2$bWNtb2RzLWxvZ2luLXBhZA$qQ5NxyYK2yue8JX3kj4JZleY7qpvnj43TJm5qJKxDAE"
 
 var reservedUsernames = map[string]struct{}{
@@ -84,7 +86,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	req.PreferredContentLanguage = normalizeContentLocale(defaultString(strings.TrimSpace(req.PreferredContentLanguage), "zh-CN"))
 	req.SecondaryContentLanguage = normalizeContentLocale(defaultString(strings.TrimSpace(req.SecondaryContentLanguage), "en-US"))
 	req.PreferredUILanguage = normalizeContentLocale(defaultString(strings.TrimSpace(req.PreferredUILanguage), "en-US"))
-	if !validContentLocaleTag(req.PreferredContentLanguage) || !validContentLocaleTag(req.SecondaryContentLanguage) {
+	if !validContentLocaleTag(req.PreferredContentLanguage) || !isEditableContentLocale(req.SecondaryContentLanguage) {
 		writeError(w, http.StatusBadRequest, "content language preference is invalid")
 		return
 	}
@@ -131,6 +133,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	if err := consumeEmailVerificationCodeTx(r.Context(), tx, req.Email, "register", req.Code); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) && !errors.Is(err, errInvalidEmailVerificationCode) {
+			writeError(w, http.StatusServiceUnavailable, "注册服务暂时不可用")
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "验证码不正确或已过期")
 		return
 	}
@@ -158,7 +164,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		location.City,
 	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
 	if err != nil {
-		writeError(w, http.StatusConflict, "用户名或邮箱已被占用")
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "用户名或邮箱已被占用")
+		} else {
+			writeError(w, http.StatusInternalServerError, "注册失败")
+		}
 		return
 	}
 	if err := s.assignConfiguredRoleTx(r.Context(), tx, user.ID, "registered"); err != nil {
@@ -345,12 +355,20 @@ func (s *Server) emailLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.consumeEmailLoginCode(r.Context(), req.Email, req.Code); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) && !errors.Is(err, errInvalidEmailVerificationCode) {
+			writeError(w, http.StatusServiceUnavailable, "登录服务暂时不可用")
+			return
+		}
 		s.recordLogin(r.Context(), nil, req.Email, location, r.UserAgent(), false, "invalid_email_code")
 		writeError(w, http.StatusUnauthorized, "验证码不正确或已过期")
 		return
 	}
 	user, err := s.findUserByEmail(r.Context(), req.Email)
 	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusServiceUnavailable, "登录服务暂时不可用")
+			return
+		}
 		s.recordLogin(r.Context(), nil, req.Email, location, r.UserAgent(), false, "email_not_registered")
 		writeError(w, http.StatusNotFound, "该邮箱尚未注册")
 		return
@@ -405,7 +423,7 @@ func consumeEmailVerificationCodeTx(ctx context.Context, tx pgx.Tx, email, purpo
 		return err
 	}
 	if !security.VerifyCode(code, codeHash) {
-		return fmt.Errorf("invalid email verification code")
+		return errInvalidEmailVerificationCode
 	}
 	if _, err := tx.Exec(ctx, `update email_verification_codes set consumed_at=now() where id=$1 and consumed_at is null`, codeID); err != nil {
 		return err
@@ -417,6 +435,10 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	user, err := s.findUserByID(r.Context(), claims.Subject)
 	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusServiceUnavailable, "用户资料暂时不可用")
+			return
+		}
 		writeError(w, http.StatusNotFound, "用户不存在")
 		return
 	}
@@ -445,10 +467,29 @@ func (s *Server) evaluatePermission(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	_, _ = s.db.Exec(r.Context(), `update auth_sessions set revoked_at=coalesce(revoked_at,now())
-		where session_hash=$1 and user_id=$2`, security.SessionFingerprint(claims.SessionID), claims.Subject)
-	_, _ = s.db.Exec(r.Context(), `delete from user_presence_sessions where session_hash=$1 and user_id=$2`, security.SessionFingerprint(claims.SessionID), claims.Subject)
-	s.invalidateSessionCache(r.Context(), claims)
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "logout is temporarily unavailable")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if _, err = tx.Exec(r.Context(), `update auth_sessions set revoked_at=coalesce(revoked_at,now())
+		where session_hash=$1 and user_id=$2`, security.SessionFingerprint(claims.SessionID), claims.Subject); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "logout is temporarily unavailable")
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `delete from user_presence_sessions where session_hash=$1 and user_id=$2`, security.SessionFingerprint(claims.SessionID), claims.Subject); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "logout is temporarily unavailable")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "logout is temporarily unavailable")
+		return
+	}
+	if !s.requireSecurityVersionRefresh(w, r, "logout", claims.Subject,
+		s.revokeSessionCache(r.Context(), claims)) {
+		return
+	}
 	s.cache.RemoveUserPresence(r.Context(), claims.Subject, hex.EncodeToString(security.SessionFingerprint(claims.SessionID)), time.Now(), s.cache.Config().PresenceTTL)
 	s.clearAuthSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

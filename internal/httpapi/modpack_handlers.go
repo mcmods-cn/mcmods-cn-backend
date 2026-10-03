@@ -298,12 +298,17 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ossCfg := s.ossConfigFromSettings(r.Context())
+	iconURLs := make([]string, len(items))
 	for index := range items {
-		items[index].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, items[index].IconURL)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate modpack icon URL")
-			return
-		}
+		iconURLs[index] = items[index].IconURL
+	}
+	iconURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, iconURLs)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate modpack icon URL")
+		return
+	}
+	for index := range items {
+		items[index].IconURL = iconURLs[index]
 	}
 	writeBoundedCatalogJSON(w, modpackListResponse{Items: items, Total: total})
 }
@@ -331,12 +336,17 @@ func (s *Server) modpackItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "failed to generate modpack icon URL")
 		return
 	}
+	modIconURLs := make([]string, len(item.Mods))
 	for index := range item.Mods {
-		item.Mods[index].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.Mods[index].IconURL)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate contained mod icon URL")
-			return
-		}
+		modIconURLs[index] = item.Mods[index].IconURL
+	}
+	modIconURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, modIconURLs)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate contained mod icon URL")
+		return
+	}
+	for index := range item.Mods {
+		item.Mods[index].IconURL = modIconURLs[index]
 	}
 	if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, item.Authors); err != nil {
 		writeError(w, http.StatusBadGateway, "failed to generate modpack author avatar URL")
@@ -382,6 +392,18 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 	if reviewRequired {
 		reviewStatus = "pending"
 	}
+	ossCfg := s.ossConfigFromSettings(r.Context())
+	publicID, err := availableModUniqueID(r.Context(), s.db)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to allocate modpack ID")
+		return
+	}
+	if err = s.prepareImportedModpackAssets(r.Context(), &snapshot, publicID, claims.Subject); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	// External mirroring reads settings and registers files through the pool.
+	// Keep slug allocation, parent checks and final live-file locks in the Tx.
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start modpack creation")
@@ -397,13 +419,13 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "modpack site ID is already used")
 		return
 	}
-	publicID, err := availableModUniqueID(r.Context(), tx)
+	snapshot.IconURL, err = validateStoredProjectIconURL(r.Context(), tx, ossCfg, snapshot.IconURL, "", claims.Subject)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to allocate modpack ID")
-		return
-	}
-	if err = s.prepareImportedModpackAssets(r.Context(), &snapshot, publicID, claims.Subject); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		if errors.Is(err, errInvalidStoredProjectIcon) {
+			writeError(w, http.StatusBadRequest, "project icon must be an accessible, scanned raster image")
+		} else {
+			writeError(w, http.StatusServiceUnavailable, "project icon validation is unavailable")
+		}
 		return
 	}
 	var modpackID int64
@@ -511,12 +533,22 @@ func (s *Server) createModpackRevision(w http.ResponseWriter, r *http.Request, s
 	if reviewRequired {
 		status = "pending"
 	}
+	ossCfg := s.ossConfigFromSettings(r.Context())
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start modpack revision")
 		return
 	}
 	defer tx.Rollback(r.Context())
+	request.Snapshot.IconURL, err = validateStoredProjectIconURL(r.Context(), tx, ossCfg, request.Snapshot.IconURL, current.IconURL, claims.Subject)
+	if err != nil {
+		if errors.Is(err, errInvalidStoredProjectIcon) {
+			writeError(w, http.StatusBadRequest, "project icon must be an accessible, scanned raster image")
+		} else {
+			writeError(w, http.StatusServiceUnavailable, "project icon validation is unavailable")
+		}
+		return
+	}
 	if err = ensureModpackSiteIDAvailable(r.Context(), tx, request.Snapshot.SiteID, current.ID); err != nil {
 		writeError(w, http.StatusConflict, "modpack site ID is already used")
 		return

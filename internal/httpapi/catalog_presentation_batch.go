@@ -149,7 +149,7 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 	), selected as materialized (
 		select distinct match.entity_id from input join lateral (
 			select resource.entity_id from game_resources resource join catalog_entities entity on entity.id=resource.entity_id
-			where entity.status='active' and (
+			where entity.status='active' and `+publicCatalogEntitySQL("entity", "resource")+` and (
 				(input.public_id<>'' and entity.public_id=input.public_id) or
 				(input.identifier<>'' and (lower(resource.canonical_id)=input.identifier or exists(
 					select 1 from game_resource_aliases alias where alias.resource_id=resource.entity_id
@@ -168,7 +168,7 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 	join catalog_entities entity on entity.id=resource.entity_id
 	left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 	left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
-	left join mods owner on owner.id=resource.owner_mod_id
+	left join mods owner on owner.id=resource.owner_mod_id and owner.review_status='approved'
 	left join lateral (select candidate.locale,candidate.name from content_localizations candidate
 		where candidate.catalog_entity_id=entity.id order by case candidate.locale when $5 then 0 when $6 then 1
 		when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
@@ -207,7 +207,7 @@ func (s *Server) loadCatalogTagPresentations(ctx context.Context, items []catalo
 	), selected as materialized (
 		select distinct match.entity_id from input join lateral (
 			select tag.entity_id from catalog_tags tag join catalog_entities entity on entity.id=tag.entity_id
-			where entity.status='active' and ((input.public_id<>'' and entity.public_id=input.public_id) or
+			where entity.status='active' and `+publicCatalogEntitySQL("entity", "tag")+` and ((input.public_id<>'' and entity.public_id=input.public_id) or
 				(input.identifier<>'' and (lower(tag.canonical_id)=input.identifier or lower(tag.registry||':'||tag.canonical_id)=input.identifier)
 				and (input.registry='' or lower(tag.registry)=input.registry)))
 			order by case when entity.public_id=input.public_id then 0 else 1 end limit 1

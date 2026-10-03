@@ -88,18 +88,7 @@ func changelogSchemaStatements() []string {
 		$$ language plpgsql`,
 		`create trigger trg_project_changelogs_remove_public_route after delete on project_changelogs
 			for each row execute function remove_project_changelog_public_route()`,
-		`create or replace function record_changelog_popularity_event() returns trigger as $$
-		begin
-			if old.review_status<>'approved' and new.review_status='approved' and new.status='active' then
-				perform record_popularity_event(new.object_route_id,'release',5);
-				perform enqueue_content_stats_refresh(new.object_route_id,true,true);
-			elsif old.review_status='approved' and (new.review_status<>'approved' or new.status<>'active') then
-				perform record_popularity_event(new.object_route_id,'release',-5);
-				perform enqueue_content_stats_refresh(new.object_route_id,true,true);
-			end if;
-			return new;
-		end;
-		$$ language plpgsql`,
+		changelogPopularityFunctionSQL,
 		`create trigger trg_project_changelogs_popularity
 			after update of review_status,status on project_changelogs
 			for each row execute function record_changelog_popularity_event()`,

@@ -186,13 +186,11 @@ func ruleMatches(matcher, ip, userAgent string) bool {
 	if matcher == "" {
 		return true
 	}
-	if parsed := net.ParseIP(ip); parsed != nil {
-		if _, network, err := net.ParseCIDR(matcher); err == nil {
-			return network.Contains(parsed)
-		}
-		if matcher == strings.ToLower(parsed.String()) {
-			return true
-		}
+	if _, network, err := net.ParseCIDR(matcher); err == nil {
+		return network.Contains(net.ParseIP(ip))
+	}
+	if address := net.ParseIP(matcher); address != nil {
+		return address.Equal(net.ParseIP(ip))
 	}
 	return strings.Contains(userAgent, matcher)
 }
@@ -223,8 +221,11 @@ func crawlerUserAgent(value string) bool {
 
 func (s *Service) verifySearchEngineDNS(ctx context.Context, ip string, suffixes []string) bool {
 	now := s.now()
+	// A successful Google reverse/forward check must not authorize a Bing
+	// user agent, and a negative check for one provider must not poison another.
+	cacheKey := ip + "\x00" + strings.Join(suffixes, "\x00")
 	crawlerDNSCache.Lock()
-	if cached, exists := crawlerDNSCache.values[ip]; exists && now.Before(cached.expiresAt) {
+	if cached, exists := crawlerDNSCache.values[cacheKey]; exists && now.Before(cached.expiresAt) {
 		crawlerDNSCache.Unlock()
 		return cached.class == VerifiedSearchEngine
 	}
@@ -265,7 +266,7 @@ func (s *Service) verifySearchEngineDNS(ctx context.Context, ip string, suffixes
 			break
 		}
 	}
-	crawlerDNSCache.values[ip] = dnsCacheEntry{class: class, expiresAt: now.Add(s.cfg.DNSCacheTTL)}
+	crawlerDNSCache.values[cacheKey] = dnsCacheEntry{class: class, expiresAt: now.Add(s.cfg.DNSCacheTTL)}
 	crawlerDNSCache.Unlock()
 	return verified
 }

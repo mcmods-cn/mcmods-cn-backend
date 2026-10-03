@@ -34,7 +34,8 @@ func TestPublicLogShareResponsesStayBoundedForSingleAndZipScaleIntegration(t *te
 	if _, err = pool.Exec(ctx, `create temporary table log_shares (
 		id bigint primary key,public_code text not null,owner_user_id bigint,source_type text not null,title text not null,
 		original_name text not null,status text not null,redaction_version integer not null,redaction_counts jsonb not null,
-		created_at timestamptz not null,expires_at timestamptz not null,deleted_at timestamptz
+		created_at timestamptz not null,expires_at timestamptz not null,deleted_at timestamptz,
+		redaction_applied_version integer not null default 1
 	); create temporary table log_share_entries (
 		log_share_id bigint not null,entry_index integer not null,safe_display_name text not null,content_type text not null,
 		sanitized_text text,byte_size bigint not null,line_count bigint not null,checksum text not null,status text not null
@@ -43,8 +44,8 @@ func TestPublicLogShareResponsesStayBoundedForSingleAndZipScaleIntegration(t *te
 	}
 	started := time.Now()
 	if _, err = pool.Exec(ctx, `insert into log_shares values
-		(1,'single-scale-code',null,'file','Single scale','latest.log','ready',1,'{}',now(),now()+interval '1 day',null),
-		(2,'zip-scale-code',null,'file','ZIP scale','logs.zip','ready',1,'{}',now(),now()+interval '1 day',null)`); err != nil {
+		(1,'single-scale-code',null,'file','Single scale','latest.log','ready',2,'{}',now(),now()+interval '1 day',null),
+		(2,'zip-scale-code',null,'file','ZIP scale','logs.zip','ready',2,'{}',now(),now()+interval '1 day',null)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `insert into log_share_entries

@@ -328,32 +328,47 @@ func SeedRBAC(ctx context.Context, db *pgxpool.Pool) error {
 }
 
 func seedDefaultRoles(ctx context.Context, db *pgxpool.Pool) error {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.Background())
+
 	for _, role := range seedRoles {
 		var roleID int64
-		if _, err := db.Exec(ctx, `insert into roles(code,name,description,weight,status,updated_at)
+		created, err := tx.Exec(ctx, `insert into roles(code,name,description,weight,status,updated_at)
 			values($1,$2,$3,$4,'active',now())
-			on conflict(code) do nothing`, role.Code, role.Name, role.Description, role.Weight); err != nil {
+			on conflict(code) do nothing`, role.Code, role.Name, role.Description, role.Weight)
+		if err != nil {
 			return err
 		}
-		if err := db.QueryRow(ctx, `select id from roles where code=$1`, role.Code).Scan(&roleID); err != nil {
+		// Existing role definitions are operator-managed. Re-adding a removed
+		// grant on startup would undo an explicit permission revocation.
+		// Built-in denial rules remain fail-closed on every startup.
+		if created.RowsAffected() == 0 && len(role.Denials) == 0 {
+			continue
+		}
+		if err := tx.QueryRow(ctx, `select id from roles where code=$1`, role.Code).Scan(&roleID); err != nil {
 			return err
 		}
-		for _, permission := range role.Permissions {
-			if _, err := db.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow,updated_at)
-				select $1,id,true,now() from permissions where code=$2
-				on conflict(role_id,permission_id) do nothing`, roleID, permission); err != nil {
-				return err
+		if created.RowsAffected() != 0 {
+			for _, permission := range role.Permissions {
+				if _, err := tx.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow,updated_at)
+					select $1,id,true,now() from permissions where code=$2
+					on conflict(role_id,permission_id) do nothing`, roleID, permission); err != nil {
+					return err
+				}
 			}
 		}
 		for _, permission := range role.Denials {
-			if _, err := db.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow,updated_at)
+			if _, err := tx.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow,updated_at)
 				select $1,id,false,now() from permissions where code=$2
 				on conflict(role_id,permission_id) do update set allow=false,updated_at=now()`, roleID, permission); err != nil {
 				return err
 			}
 		}
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func seedPermissionDefaults(ctx context.Context, db *pgxpool.Pool) error {

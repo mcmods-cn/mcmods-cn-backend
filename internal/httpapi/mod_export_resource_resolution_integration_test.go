@@ -17,13 +17,13 @@ func TestExportResourceResolutionRequiresRequestedKindBeforeRevisionPreferenceIn
 		create temp table resource_import_snapshots(
 			resource_id bigint not null,revision_id text not null,registry text not null default '',icon_path text not null default '',
 			preview_path text not null default '',names jsonb not null default '{}'::jsonb);
-		create temp table mods(id bigint primary key,slug text not null,status text not null default 'active');
-		create temp table mod_content_versions(id bigint primary key,public_id text not null,status text not null default 'active',updated_at timestamptz not null default now());
+		create temp table mods(id bigint primary key,slug text not null,project_code text not null default '',review_status text not null default 'approved');
+		create temp table mod_content_versions(id bigint primary key,mod_id bigint not null,public_id text not null,status text not null default 'active',updated_at timestamptz not null default now());
 		create temp table mod_resource_bindings(resource_id bigint not null,mod_id bigint not null);
 		create temp table mod_resource_version_details(resource_id bigint not null,version_id bigint not null,status text not null default 'active');
 		create temp table mod_resource_version_detail_localizations(resource_id bigint not null,version_id bigint not null,locale text not null,name text not null);
 		insert into mods(id,slug) values(1,'preferred-mod'),(2,'correct-kind-mod');
-		insert into mod_content_versions(id,public_id) values(11,'preferred-version'),(22,'correct-version');
+		insert into mod_content_versions(id,mod_id,public_id) values(11,1,'preferred-version'),(22,2,'correct-version');
 		insert into catalog_import_revisions(id,mod_id,target_version_id,minecraft_version,loader,is_active,status,activated_at)
 		values('preferred',1,11,'1.21.1','neoforge',true,'ready',now()),
 			('correct-kind',2,22,'1.21.1','neoforge',true,'ready',now()-interval '1 minute');

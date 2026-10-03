@@ -38,7 +38,7 @@ func (s *Server) modContentAdvancementGraph(w http.ResponseWriter, r *http.Reque
 	if !s.allowModContentRead(w, r, "mod-content-advancement-graph", 30) {
 		return
 	}
-	identity, err := s.modIdentity(r.Context(), r.PathValue("siteId"))
+	identity, err := s.readableModIdentity(r.Context(), r.PathValue("siteId"), currentClaims(r), "content.review")
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "mod not found")
 		return

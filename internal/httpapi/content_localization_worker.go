@@ -10,13 +10,14 @@ import (
 )
 
 type contentTranslationTaskPayload struct {
-	EntityID         int64  `json:"internalEntityId"`
-	PublicID         string `json:"publicId"`
-	EntityType       string `json:"entityType"`
-	SourceLocale     string `json:"sourceLocale"`
-	SourceRevisionNo int64  `json:"sourceRevisionNo"`
-	TargetLocale     string `json:"targetLocale"`
-	QuotaBacked      bool   `json:"quotaBacked"`
+	EntityID         int64   `json:"internalEntityId"`
+	PublicID         string  `json:"publicId"`
+	EntityType       string  `json:"entityType"`
+	SourceLocale     string  `json:"sourceLocale"`
+	SourceRevisionNo int64   `json:"sourceRevisionNo"`
+	TargetLocale     string  `json:"targetLocale"`
+	QuotaBacked      bool    `json:"quotaBacked"`
+	TargetRevisionID *string `json:"targetRevisionId"`
 }
 
 func decodeContentTranslationTaskPayload(rawPayload []byte) (contentTranslationTaskPayload, error) {
@@ -50,12 +51,16 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 	if translated["name"] == "" && translated["summary"] == "" && translated["contentMarkdown"] == "" {
 		return errors.New("catalog translation result is empty")
 	}
+	reviewRequired := loadReviewConfig(ctx, worker.db).AITranslation
 
 	tx, err := worker.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockAITaskExecutionTx(ctx, tx); err != nil {
+		return err
+	}
 	var taskUID string
 	if err = tx.QueryRow(ctx, `select task_uid from ai_tasks where id=$1`, taskID).Scan(&taskUID); err != nil {
 		return fmt.Errorf("resolve AI task public identity: %w", err)
@@ -71,20 +76,20 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 	if alreadyRecorded {
 		return tx.Commit(ctx)
 	}
-	var entityType string
-	var entityID int64
-	if err = tx.QueryRow(ctx, `
-		select route.entity_type,route.internal_id from public_routes route
-		join content_subjects subject on subject.subject_id=route.internal_id and subject.subject_type=route.entity_type
-		where route.internal_id=$1 and route.public_id=$2 for update`, payload.EntityID, payload.PublicID).Scan(&entityType, &entityID); err != nil {
+	entity, entityID, err := loadEditableContentSubjectTx(ctx, tx, payload.PublicID)
+	if err != nil {
 		return fmt.Errorf("load translated content subject: %w", err)
+	}
+	entityType := entity.EntityType
+	if entityID != payload.EntityID {
+		return errors.New("content translation subject identity changed")
 	}
 	if payload.EntityType != "" && payload.EntityType != entityType {
 		return errors.New("content translation subject type changed")
 	}
 	var currentSourceRevisionNo int64
 	if err = tx.QueryRow(ctx, `select revision_no from content_localizations
-		where subject_id=$1 and subject_type=$2 and locale=$3 and review_status='approved'`,
+		where subject_id=$1 and subject_type=$2 and locale=$3 and review_status='approved' for update`,
 		entityID, entityType, payload.SourceLocale).Scan(&currentSourceRevisionNo); err != nil {
 		return fmt.Errorf("load content translation source revision: %w", err)
 	}
@@ -93,16 +98,21 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 	}
 	revisionEntityID := entityID
 	var baseRevisionID *int64
+	var currentTargetRevisionID *string
+	var targetProvenance string
 	err = tx.QueryRow(ctx, `
-		select published_revision_id from content_localizations
-		where subject_id=$1 and subject_type=$2 and locale=$3`, entityID, entityType, payload.TargetLocale).Scan(&baseRevisionID)
+		select localization.published_revision_id,revision.public_id,localization.provenance from content_localizations localization
+		left join content_revisions revision on revision.id=localization.published_revision_id
+		where localization.subject_id=$1 and localization.subject_type=$2 and localization.locale=$3
+		for update of localization`, entityID, entityType, payload.TargetLocale).Scan(&baseRevisionID, &currentTargetRevisionID, &targetProvenance)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		baseRevisionID = nil
+	} else if targetProvenance != "ai" || payload.TargetRevisionID == nil || currentTargetRevisionID == nil || *payload.TargetRevisionID != *currentTargetRevisionID {
+		return errors.New("target localization was edited while translation was running")
 	}
-	reviewRequired := loadReviewConfig(ctx, worker.db).AITranslation
 	reviewStatus := "approved"
 	if reviewRequired {
 		reviewStatus = "pending"

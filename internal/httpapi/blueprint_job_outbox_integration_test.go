@@ -72,6 +72,7 @@ func TestBlueprintJobAndOutboxCommitOrRollbackTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer rollbackIntegrationTransaction(tx)
 	jobPublicID, err := enqueueBlueprintJobTx(ctx, tx, 41, 7, "normalize", "")
 	if err != nil {
 		t.Fatal(err)
@@ -100,6 +101,7 @@ func TestBlueprintJobAndOutboxCommitOrRollbackTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer rollbackIntegrationTransaction(tx)
 	if _, err = enqueueBlueprintJobTx(ctx, tx, 42, 7, "convert", "schem"); err == nil {
 		t.Fatal("outbox constraint failure was not returned")
 	}

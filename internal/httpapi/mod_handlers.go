@@ -201,17 +201,12 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		publishedAt = &now
 	}
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "创建模组失败")
-		return
-	}
-	defer tx.Rollback(r.Context())
-
+	ossCfg := s.ossConfigFromSettings(r.Context())
+	var err error
 	if req.SiteID == "" {
-		req.SiteID, err = availableModSiteID(r.Context(), tx, req.PrimaryName)
+		req.SiteID, err = availableModSiteID(r.Context(), s.db, req.PrimaryName)
 	} else {
-		err = ensureModSiteIDAvailable(r.Context(), tx, req.SiteID, 0)
+		err = ensureModSiteIDAvailable(r.Context(), s.db, req.SiteID, 0)
 	}
 	if errors.Is(err, errModSiteIDTaken) {
 		writeError(w, http.StatusConflict, "模组站内 ID 已被占用")
@@ -221,7 +216,7 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "生成模组站内 ID 失败")
 		return
 	}
-	uniqueID, err := availableModUniqueID(r.Context(), tx)
+	uniqueID, err := availableModUniqueID(r.Context(), s.db)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "生成模组唯一 ID 失败")
 		return
@@ -256,6 +251,24 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.IconURL = mirroredIconURL
+	}
+	// Mirroring reads settings and registers its owned OSS file through the pool.
+	// Prepare it before acquiring the business connection; final file ownership
+	// and live scan state are still checked and locked inside this transaction.
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "创建模组失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	req.IconURL, err = validateStoredProjectIconURL(r.Context(), tx, ossCfg, req.IconURL, "", claims.Subject)
+	if errors.Is(err, errInvalidStoredProjectIcon) {
+		writeError(w, http.StatusBadRequest, errInvalidStoredProjectIcon.Error())
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to validate project icon")
+		return
 	}
 	var modID int64
 	err = tx.QueryRow(
@@ -511,12 +524,17 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ossCfg := s.ossConfigFromSettings(r.Context())
+	iconURLs := make([]string, len(items))
 	for index := range items {
-		items[index].IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, items[index].IconURL)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate mod icon URL")
-			return
-		}
+		iconURLs[index] = items[index].IconURL
+	}
+	iconURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, iconURLs)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate mod icon URL")
+		return
+	}
+	for index := range items {
+		items[index].IconURL = iconURLs[index]
 		if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, items[index].Authors); err != nil {
 			writeError(w, http.StatusBadGateway, "failed to generate mod author avatar URL")
 			return

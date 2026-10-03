@@ -2,11 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/queue"
 )
@@ -19,6 +21,41 @@ const (
 
 type aiTaskExecutor interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+type aiTaskExecutionKey struct{}
+
+type aiTaskExecution struct {
+	ID      int64
+	Started time.Time
+}
+
+var errAITaskExecutionLost = errors.New("AI task execution was canceled or superseded")
+
+func claimAITaskExecution(ctx context.Context, db *pgxpool.Pool, taskID int64) (aiTaskExecution, error) {
+	run := aiTaskExecution{ID: taskID}
+	err := db.QueryRow(ctx, `update ai_tasks
+		set status='running',started_at=clock_timestamp(),finished_at=null,error='',updated_at=now()
+		where id=$1 and status in ('queued','retrying') returning started_at`, taskID).Scan(&run.Started)
+	return run, err
+}
+
+// Lock the task while writing its business result, so recovery/cancellation
+// cannot replace the execution between the ownership check and its write.
+func lockAITaskExecutionTx(ctx context.Context, tx pgx.Tx) error {
+	run, ok := ctx.Value(aiTaskExecutionKey{}).(aiTaskExecution)
+	if !ok {
+		return nil // Isolated persistence callers without a claimed queue task.
+	}
+	var started *time.Time
+	var status string
+	if err := tx.QueryRow(ctx, `select status,started_at from ai_tasks where id=$1 for update`, run.ID).Scan(&status, &started); err != nil {
+		return err
+	}
+	if status != "running" || started == nil || !started.Equal(run.Started) {
+		return errAITaskExecutionLost
+	}
+	return nil
 }
 
 func enqueueAITaskTx(ctx context.Context, tx pgx.Tx, eventType string, taskID int64, taskUID, taskType, traceID string) error {

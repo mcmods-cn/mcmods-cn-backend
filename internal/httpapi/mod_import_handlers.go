@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"mcmods-cn-backend/internal/queue"
 )
 
@@ -66,7 +68,15 @@ func (s *Server) getSimpleProjectMetadataImport(w http.ResponseWriter, r *http.R
 		return
 	}
 	job, err := s.modMetadataImportJob(r.Context(), strings.TrimSpace(r.PathValue("jobId")), currentClaims(r).Subject)
-	if err != nil || job.ProjectType != projectType {
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "project import job not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load project import job")
+		return
+	}
+	if job.ProjectType != projectType {
 		writeError(w, http.StatusNotFound, "project import job not found")
 		return
 	}
@@ -129,8 +139,12 @@ func (s *Server) createProjectMetadataImport(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) getModMetadataImport(w http.ResponseWriter, r *http.Request) {
 	job, err := s.modMetadataImportJob(r.Context(), strings.TrimSpace(r.PathValue("jobId")), currentClaims(r).Subject)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "模组导入任务不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取模组导入任务失败")
 		return
 	}
 	writeJSON(w, http.StatusOK, job)

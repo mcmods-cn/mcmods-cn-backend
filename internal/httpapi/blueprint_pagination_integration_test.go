@@ -48,7 +48,7 @@ func TestBlueprintCatalogKeysetCursorTraversesEverySortBeyondSixtyIntegration(t 
 		create temporary table blueprint_mods (blueprint_id bigint, mod_id bigint, source_namespace text);
 		create temporary table mods (
 			id bigint primary key, project_code text, slug text, primary_name text,
-			secondary_name text, abbreviation text, icon_url text
+			secondary_name text, abbreviation text, icon_url text, review_status text not null default 'approved'
 		);
 		create temporary table mod_identifiers (
 			id bigint primary key, mod_id bigint, identifier text, is_primary boolean, display_order integer

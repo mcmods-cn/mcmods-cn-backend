@@ -14,8 +14,11 @@ func TestPlayerProfileListsBatchTextureAssembly(t *testing.T) {
 	}
 	source := string(sourceBytes)
 	start := strings.Index(source, "func (s *Server) loadPlayerProfiles")
+	if start < 0 {
+		t.Fatal("player profile list loader start missing")
+	}
 	end := strings.Index(source[start:], "func (s *Server) loadPlayerProfileByPublicIDForViewer")
-	if start < 0 || end < 0 {
+	if end < 0 {
 		t.Fatal("player profile list loader bounds missing")
 	}
 	body := source[start : start+end]

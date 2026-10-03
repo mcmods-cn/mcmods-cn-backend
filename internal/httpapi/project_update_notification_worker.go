@@ -111,11 +111,14 @@ func (worker *ProjectUpdateNotificationWorker) process(ctx context.Context, even
 	var routeID, actorID, nextUserID int64
 	var updateKind, projectName, projectURL string
 	var sections []string
+	// A concurrent batch may advance next_attempt_at after this transaction
+	// starts. Recheck its due time using the live clock, including after a row
+	// lock wait; transaction-stable now() would skip that immediately due batch.
 	err = tx.QueryRow(ctx, `select event.project_route_id,coalesce(event.actor_user_id,0),event.update_kind,event.changed_sections,
 		task.next_user_id,route.canonical_path from project_update_notification_tasks task
 		join project_update_events event on event.id=task.event_id
 		join public_routes route on route.id=event.project_route_id
-		where task.event_id=$1 and task.status in ('pending','processing') and task.next_attempt_at<=now()
+		where task.event_id=$1 and task.status in ('pending','processing') and task.next_attempt_at<=clock_timestamp()
 		for update of task`, eventID).Scan(&routeID, &actorID, &updateKind, &sections, &nextUserID, &projectURL)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil

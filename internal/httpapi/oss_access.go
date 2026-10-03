@@ -136,17 +136,11 @@ func (s *Server) resolveStoredOSSObjectAccessURLWithConfig(ctx context.Context, 
 	if storedURL == "" {
 		return "", nil
 	}
-	endpoints := []string{cfg.PublicEndpoint, cfg.Endpoint}
-	for _, endpoint := range endpoints {
-		if objectKey, ok := ossObjectKeyUnderEndpoint(storedURL, endpoint); ok {
-			access, err := s.resolveOSSObjectAccessWithConfig(ctx, cfg, objectKey, ossObjectAccessOptions{})
-			if err != nil {
-				return "", err
-			}
-			return access.URL, nil
-		}
+	resolved, err := s.resolveStoredOSSImageURLsWithConfig(ctx, cfg, []string{storedURL})
+	if err != nil {
+		return "", err
 	}
-	return storedURL, nil
+	return resolved[0], nil
 }
 
 func (s *Server) redirectStoredRasterURL(w http.ResponseWriter, r *http.Request, storedURL string) {
@@ -155,25 +149,18 @@ func (s *Server) redirectStoredRasterURL(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusNotFound, "image does not exist")
 		return
 	}
-	var objectKey, contentType string
-	err := s.db.QueryRow(r.Context(), `select object_key,content_type from oss_files
-		where status='active' and scan_status in ('clean','trusted_generated')
-		  and $1=rtrim(endpoint,'/')||'/'||ltrim(object_key,'/')
-		order by updated_at desc limit 1`, storedURL).Scan(&objectKey, &contentType)
-	if err == nil {
-		s.redirectCatalogOSSAsset(w, r, objectKey, contentType)
-		return
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	cfg := s.ossConfigFromSettings(r.Context())
+	resolved, err := s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), cfg, storedURL)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve stored image")
 		return
 	}
-	if !validHTTPURL(storedURL) {
+	if resolved == "" || !validHTTPURL(resolved) {
 		writeError(w, http.StatusNotFound, "image does not exist")
 		return
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
-	http.Redirect(w, r, storedURL, http.StatusTemporaryRedirect)
+	http.Redirect(w, r, resolved, http.StatusTemporaryRedirect)
 }
 
 func (s *Server) publicInlineOSSFile(w http.ResponseWriter, r *http.Request) {
