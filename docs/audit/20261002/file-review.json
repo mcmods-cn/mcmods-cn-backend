@@ -1,11 +1,11 @@
 {
   "versions": {
     "mcmods-cn-backend": {
-      "head": "ad0ab523499c9e612b16718b6e2ed5c83c921cb4",
+      "head": "5a0d2ef63d385781642acf7df13baa2b1eb2d173",
       "branch": "codex/acceptance-followup-20261003"
     },
     "mcmods-cn-frontend": {
-      "head": "21c3a7244b5c906ead398167c687f3d3aec47fbb",
+      "head": "45565c71a24f949d4d2821652534d1e2eea583aa",
       "branch": "codex/acceptance-followup-20261003"
     }
   },
@@ -4292,14 +4292,14 @@
       "path": "docs/audit/20261003/ACCEPTANCE.md",
       "owner": "root",
       "category": ".md",
-      "sha256": "47acd2575ba9b4dba0214fa731c7ddd6c0ef3f68bc832894629a9bb5c2e5298c",
-      "blob_sha": "d04bb738adc4fb87cb800d702ec82fd4109ca696",
-      "lines": 154,
+      "sha256": "d950499d8a8ddf5b490ee069021614ef0a68cdaad43e96f931e787648c37ddc1",
+      "blob_sha": "35355be8555fdc22246982b7bf6ac4a221f03374",
+      "lines": 198,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          154
+          198
         ]
       ],
       "content_read": true,
@@ -4314,22 +4314,25 @@
       ],
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Final counts, roots, actual gates, partial scopes, compatibility and CI snapshot boundaries.",
-      "call_chain": "Current tests/source equivalence -> named findings -> final audit and deployment order.",
+      "responsibility": "Final counts and explicit local/CI/production/remaining boundaries.",
+      "call_chain": "Actual per-ID/gate receipts -> named scope -> deployment order and pending CI.",
       "findings": [
         "OCT03-A-002",
         "OCT03-A-004",
         "OCT03-DB-002",
-        "OCT03-R-002"
+        "OCT03-R-002",
+        "OCT03-R-003",
+        "OCT03-R-004"
       ],
       "proofs": [
-        "root-continuation-final-proof.json"
+        "root-continuation-ci-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "117-root-report-review-r1.json",
         "new-task-ownership.json",
+        "root-continuation-ci-final-proof.json",
         "root-continuation-final-proof.json",
         "root-final-report-proof.json"
       ]
@@ -4464,14 +4467,14 @@
       "path": "docs/audit/20261003/acceptance-results.json",
       "owner": "root",
       "category": ".json",
-      "sha256": "292ab4a7e492887a9e65cf3a7851c0d41a26bdbbadb469038127eb75825b0089",
-      "blob_sha": "16d779bb5df01d0972e10fca4c4473c6c4b641fc",
-      "lines": 200,
+      "sha256": "2db8541af477014b1f9d61ff8d047fe23319197b68defb7bf120787906016cd3",
+      "blob_sha": "3b7717fb9572ff2c65b7716a9d424a369b497214",
+      "lines": 216,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          200
+          216
         ]
       ],
       "content_read": true,
@@ -4486,22 +4489,25 @@
       ],
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Immutable legacy/prior named rows plus three new findings/current gates and preserved failures.",
-      "call_chain": "Previously complete-read be4985f SHA matched;112/113 unchanged rows byte-equivalent; changed PERF069 and authored final validation/new3 reviewed against actual receipts.",
+      "responsibility": "Immutable historical rows and explicit new tool fixes/current regression scopes with retained failures.",
+      "call_chain": "Exact previously read292ab4 baseline -> reviewed R003/R004 delta -> actual runtime and whole gate evidence.",
       "findings": [
         "OCT03-A-002",
         "OCT03-A-004",
         "OCT03-DB-002",
-        "OCT03-R-002"
+        "OCT03-R-002",
+        "OCT03-R-003",
+        "OCT03-R-004"
       ],
       "proofs": [
-        "root-continuation-final-proof.json"
+        "root-continuation-ci-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "117-root-report-review-r1.json",
         "new-task-ownership.json",
+        "root-continuation-ci-final-proof.json",
         "root-continuation-final-proof.json",
         "root-final-report-proof.json"
       ]
@@ -106873,34 +106879,26 @@
       "path": "browser-tests/oct02-forms.browser.mts",
       "owner": "frontend_pages",
       "category": ".mts",
-      "sha256": "a3142bd987da8a6a7de9b2287a501a7ad700c128f94c317d21bf0680910389fb",
-      "blob_sha": "42584ae2f827cf30249375f9459f1081d4ac352a",
-      "lines": 431,
+      "sha256": "83cf25c904eb549b5971b7fc791a4e8c9db589787b5941b10e55aa76c5e65ade",
+      "blob_sha": "0c7bb3bf2b8ba63e47bdb4dae4ed1ad4322dadd4",
+      "lines": 446,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          130
-        ],
-        [
-          131,
-          310
-        ],
-        [
-          311,
-          431
+          446
         ]
       ],
       "content_read": true,
       "semantic_review": true,
       "behavior_verified": false,
       "behavior_boundary": "This tool does not execute tests or validate inherited behavior claims",
-      "behavior_claim": false,
+      "behavior_claim": true,
       "behavior_evidence": [
         {
           "source": "frontend_pages.json",
           "human_behavior_claim": false,
-          "version_matches_current": true,
+          "version_matches_current": false,
           "validation": [
             "eslint PASS；production browser NOT_RUN等待最终构建",
             "FINAL complete source read in frontend_pages turn; actual behavior recorded in separate PASS/FAIL fixture evidence",
@@ -106912,7 +106910,7 @@
         {
           "source": "frontend_pages.json",
           "human_behavior_claim": false,
-          "version_matches_current": true,
+          "version_matches_current": false,
           "validation": [
             "eslint PASS；production browser NOT_RUN等待最终构建",
             "FINAL complete source read in frontend_pages turn; actual behavior recorded in separate PASS/FAIL fixture evidence",
@@ -106920,16 +106918,22 @@
             "Latest R4 actual production Chromium: owned3 files34 PASS0FAIL0SKIP exit0, frontend-pages-browser-r4-corrected-final.log. First failures retained with product-vs-fixture classification.",
             "FP012/FP051/FP068 named dedicated behavior now actually PASS in specific-journeys production browser fixtures, 3PASS/0FAIL/0SKIP exit0; exact assertions and limits in frontend-pages-specific-journeys-proof.json. Whole-file behavior flag is unchanged."
           ]
+        },
+        {
+          "source": "root-continuation-ci-final-proof.json",
+          "human_behavior_claim": true,
+          "version_matches_current": true,
+          "validation": []
         }
       ],
       "validation_documents": [
         "docs/audit/20261002/VERIFICATION.md",
         "docs/audit/20261002/ISSUES.md"
       ],
-      "focus": "Explicit synthetic API fixtures on shipped production React: language/input/guest/auth/forms/storage/translation races; no database persistence or supplier-quality claim",
+      "focus": "",
       "focus_symbols": [],
-      "responsibility": "",
-      "call_chain": "",
+      "responsibility": "Complete form/recovery/locale coverage; explicit translation button and semantic preferences with genuine abortedGET and late-provider assertions.",
+      "call_chain": "ProductionBrowserFixture -> true production CommunityPostDetail -> preferences/translation APIs -> requestfailed ERR_ABORTED -> late provider/French retained.",
       "findings": [
         "OCT02-FP-001",
         "OCT02-FP-002",
@@ -106940,15 +106944,17 @@
         "OCT02-FP-009",
         "OCT02-FP-012",
         "OCT02-FP-015",
-        "OCT02-FP-016"
+        "OCT02-FP-016",
+        "OCT03-R-004"
       ],
       "proofs": [
-        "frontend_pages.json"
+        "root-continuation-ci-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
-        "frontend_pages.json"
+        "frontend_pages.json",
+        "root-continuation-ci-final-proof.json"
       ]
     },
     {
@@ -107667,14 +107673,14 @@
       "path": "browser-tests/oct03-rendering-acceptance.browser.mts",
       "owner": "database_docs",
       "category": ".mts",
-      "sha256": "abdcdc9b19f28d3ec55ed5c588251180d7fa3aee438c39d84daa27fe0b648bac",
-      "blob_sha": "d855e87e4f26e93b5adde7da0b9bc627c03d4696",
-      "lines": 784,
+      "sha256": "4b4bbf3e375f20df28418d5716316d6bf44e853b72d78c3c13d447c87e5211c5",
+      "blob_sha": "5268a483d21416fec7eed60433a07e53526b3b44",
+      "lines": 789,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          784
+          789
         ]
       ],
       "content_read": true,
@@ -107698,6 +107704,12 @@
         {
           "source": "root-continuation-final-proof.json",
           "human_behavior_claim": true,
+          "version_matches_current": false,
+          "validation": []
+        },
+        {
+          "source": "root-continuation-ci-final-proof.json",
+          "human_behavior_claim": true,
           "version_matches_current": true,
           "validation": []
         }
@@ -107708,21 +107720,23 @@
       ],
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Native frame-scoped submission, PNG pixels, readable fallback and pending-unmount regressions.",
-      "call_chain": "Real production fixture -> delegated native GL/rAF/image reads -> exact pass counts/screenshots/abort/dispose assertions -> nine terminal cases.",
+      "responsibility": "Native draw and texture readiness preserve original60/120s gates and exact GPU resource assertions.",
+      "call_chain": "ProductionBrowserFixture -> delegated actualGL/rAF -> combined readiness -> passes/layers/disposal.",
       "findings": [
         "OCT03-DB-001",
         "OCT03-DB-002",
-        "OCT03-R-002"
+        "OCT03-R-002",
+        "OCT03-R-003"
       ],
       "proofs": [
-        "root-continuation-final-proof.json"
+        "root-continuation-ci-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "88-database_docs-rendering-final-proof.json",
         "new-task-ownership.json",
+        "root-continuation-ci-final-proof.json",
         "root-continuation-final-proof.json"
       ]
     },
@@ -108606,14 +108620,14 @@
       "path": "docs/audit/acceptance-20261003.md",
       "owner": "root",
       "category": ".md",
-      "sha256": "0d4c71ce8ba845572ea4c9d987a210b507f59cd709d28b37b76ecb8c808658d9",
-      "blob_sha": "627fe1d8ffe05e25afd9971d0055e6d4b1e69acc",
-      "lines": 113,
+      "sha256": "7e0597f6ca133185aabc432c5f588a235132c87b06597d8bf84281020b3a97aa",
+      "blob_sha": "79a5b9154e5f137229e4ec4f0e1ea39c9165a251",
+      "lines": 155,
       "status": "complete",
       "read_ranges": [
         [
           1,
-          113
+          155
         ]
       ],
       "content_read": true,
@@ -108628,22 +108642,25 @@
       ],
       "focus": "",
       "focus_symbols": [],
-      "responsibility": "Current R12/full170 and exact fresh610input live, behavior changes and remaining response latency.",
-      "call_chain": "FE c6410b7 runtime/tests and source equivalence -> actual final gates -> bounded public acceptance report.",
+      "responsibility": "Final frontend runtime/build/readiness and conservative performance claims.",
+      "call_chain": "Actual current170 and true live610 proof -> frontend acceptance and CI/deployment boundaries.",
       "findings": [
         "OCT03-A-002",
         "OCT03-A-004",
         "OCT03-DB-002",
-        "OCT03-R-002"
+        "OCT03-R-002",
+        "OCT03-R-003",
+        "OCT03-R-004"
       ],
       "proofs": [
-        "root-continuation-final-proof.json"
+        "root-continuation-ci-final-proof.json"
       ],
       "exclusion": "",
       "tracked_deletion": false,
       "record_sources": [
         "117-root-report-review-r1.json",
         "new-task-ownership.json",
+        "root-continuation-ci-final-proof.json",
         "root-continuation-final-proof.json",
         "root-final-report-proof.json"
       ]

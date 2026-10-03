@@ -216156,6 +216156,171 @@
       "behavior_claim": false,
       "deletion_reviewed": false,
       "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "browser-tests/oct03-rendering-acceptance.browser.mts",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-ci-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          789
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "4b4bbf3e375f20df28418d5716316d6bf44e853b72d78c3c13d447c87e5211c5",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Native draw and texture readiness preserve original60/120s gates and exact GPU resource assertions.",
+      "call_chain": "ProductionBrowserFixture -> delegated actualGL/rAF -> combined readiness -> passes/layers/disposal.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-R-003",
+        "OCT03-DB-002",
+        "OCT03-R-002"
+      ],
+      "behavior_claim": true,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "browser-tests/oct02-forms.browser.mts",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-ci-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          446
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "83cf25c904eb549b5971b7fc791a4e8c9db589787b5941b10e55aa76c5e65ade",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Complete form/recovery/locale coverage; explicit translation button and semantic preferences with genuine abortedGET and late-provider assertions.",
+      "call_chain": "ProductionBrowserFixture -> true production CommunityPostDetail -> preferences/translation APIs -> requestfailed ERR_ABORTED -> late provider/French retained.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-R-004"
+      ],
+      "behavior_claim": true,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "docs/audit/20261003/ACCEPTANCE.md",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-ci-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          198
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "d950499d8a8ddf5b490ee069021614ef0a68cdaad43e96f931e787648c37ddc1",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Final counts and explicit local/CI/production/remaining boundaries.",
+      "call_chain": "Actual per-ID/gate receipts -> named scope -> deployment order and pending CI.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-R-003",
+        "OCT03-R-004"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-backend",
+      "path": "docs/audit/20261003/acceptance-results.json",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-ci-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          216
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "2db8541af477014b1f9d61ff8d047fe23319197b68defb7bf120787906016cd3",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Immutable historical rows and explicit new tool fixes/current regression scopes with retained failures.",
+      "call_chain": "Exact previously read292ab4 baseline -> reviewed R003/R004 delta -> actual runtime and whole gate evidence.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-R-003",
+        "OCT03-R-004"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
+    },
+    {
+      "repo": "mcmods-cn-frontend",
+      "path": "docs/audit/acceptance-20261003.md",
+      "owner": "INDEPENDENT",
+      "source": "root-continuation-ci-final-proof.json",
+      "kind": "proof",
+      "status": "reviewed",
+      "read_ranges": [
+        [
+          1,
+          155
+        ]
+      ],
+      "semantic_review": true,
+      "final_sha256": "7e0597f6ca133185aabc432c5f588a235132c87b06597d8bf84281020b3a97aa",
+      "blob_sha": "",
+      "baseline": "",
+      "baseline_sha256": "",
+      "category": "",
+      "focus": "",
+      "focus_symbols": [],
+      "responsibility": "Final frontend runtime/build/readiness and conservative performance claims.",
+      "call_chain": "Actual current170 and true live610 proof -> frontend acceptance and CI/deployment boundaries.",
+      "validation": [],
+      "exclusion": "",
+      "findings": [
+        "OCT03-R-003",
+        "OCT03-R-004"
+      ],
+      "behavior_claim": false,
+      "deletion_reviewed": false,
+      "deletion_reason": ""
     }
   ]
 }
