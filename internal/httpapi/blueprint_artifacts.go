@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/jackc/pgx/v5"
@@ -64,8 +65,9 @@ func blueprintArtifactObjectKey(prefix, category string, jobID int64, attempt in
 }
 
 // writePendingBlueprintArtifact persists the ownership and deletion target
-// before uploading. If the process exits at any later point, job lease
-// recovery can enumerate the pending record and enqueue an idempotent delete.
+// before uploading. Job lease recovery can enumerate pending records and
+// enqueue deletes. The post-upload guard also compensates live workers whose
+// HTTP operation returns after that original deletion has already completed.
 func (worker *BlueprintWorker) writePendingBlueprintArtifact(
 	ctx context.Context,
 	jobID int64,
@@ -121,7 +123,7 @@ func (worker *BlueprintWorker) writePendingBlueprintArtifact(
 	if err = tx.Commit(ctx); err != nil {
 		return blueprintArtifact{}, err
 	}
-	_, err = client.PutObject(ctx, &aliyunoss.PutObjectRequest{
+	_, uploadErr := client.PutObject(ctx, &aliyunoss.PutObjectRequest{
 		Bucket:        aliyunoss.Ptr(cfg.Bucket),
 		Key:           aliyunoss.Ptr(objectKey),
 		ContentType:   aliyunoss.Ptr(contentType),
@@ -129,10 +131,38 @@ func (worker *BlueprintWorker) writePendingBlueprintArtifact(
 		Body:          bytes.NewReader(data),
 		Metadata:      map[string]string{"sha256": sha},
 	})
-	if err != nil {
-		return artifact, fmt.Errorf("upload pending blueprint %s artifact: %w", role, err)
+	if uploadErr != nil {
+		uploadErr = fmt.Errorf("upload pending blueprint %s artifact: %w", role, uploadErr)
 	}
-	return artifact, nil
+	// A provider can finish a PUT after lease recovery has already deleted the
+	// pending key. Verify the durable owner again after the HTTP operation, and
+	// reopen that exact key's deletion intent if this attempt was abandoned.
+	// Run the guard even on an HTTP error: the provider may have stored bytes
+	// before the SDK observed a disconnected or cancelled response.
+	return artifact, errors.Join(uploadErr, worker.verifyBlueprintArtifactUpload(ctx, artifact, runToken))
+}
+
+func (worker *BlueprintWorker) verifyBlueprintArtifactUpload(ctx context.Context, artifact blueprintArtifact, runToken string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	var owned bool
+	err := worker.db.QueryRow(cleanupCtx, `select exists(
+		select 1 from blueprint_job_artifacts artifact
+		join blueprint_jobs job on job.id=artifact.job_id
+		join oss_files file on file.id=artifact.file_id
+		where artifact.id=$1 and artifact.file_id=$2 and artifact.job_id=$3
+		and artifact.attempt=$4 and artifact.role=$5 and artifact.object_key=$6
+		and artifact.status='pending' and file.status='pending'
+		and job.status='processing' and job.attempts=$4 and job.locked_by=$7)`,
+		artifact.id, artifact.fileID, artifact.jobID, artifact.attempt, artifact.role, artifact.objectKey, runToken).Scan(&owned)
+	if err != nil {
+		return fmt.Errorf("verify uploaded blueprint artifact ownership: %w", err)
+	}
+	if owned {
+		return nil
+	}
+	return errors.Join(errBlueprintJobLeaseLost,
+		worker.abandonBlueprintArtifact(cleanupCtx, artifact, "blueprint-artifact-upload-after-lease-lost"))
 }
 
 func (worker *BlueprintWorker) abandonBlueprintArtifact(ctx context.Context, artifact blueprintArtifact, reason string) error {
@@ -178,18 +208,56 @@ func activateBlueprintArtifactTx(ctx context.Context, tx pgx.Tx, artifact bluepr
 
 func abandonBlueprintArtifactTx(ctx context.Context, tx pgx.Tx, artifact blueprintArtifact, reason string) error {
 	var target pendingBlueprintArtifactTarget
-	err := tx.QueryRow(ctx, `select id,file_id,bucket,endpoint,region,use_cname,object_key
+	err := tx.QueryRow(ctx, `select id,file_id,status,bucket,endpoint,region,use_cname,object_key
 		from blueprint_job_artifacts
-		where id=$1 and job_id=$2 and attempt=$3 and role=$4 and status='pending' for update`,
-		artifact.id, artifact.jobID, artifact.attempt, artifact.role).
-		Scan(&target.artifactID, &target.fileID, &target.bucket, &target.endpoint, &target.region, &target.useCName, &target.objectKey)
+		where id=$1 and (job_id=$2 or job_id is null) and attempt=$3 and role=$4
+		and file_id=$5 and ($6='' or object_key=$6) and status in ('pending','abandoned') for update`,
+		artifact.id, artifact.jobID, artifact.attempt, artifact.role, artifact.fileID, artifact.objectKey).
+		Scan(&target.artifactID, &target.fileID, &target.status, &target.bucket, &target.endpoint, &target.region, &target.useCName, &target.objectKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errBlueprintArtifactState
 	}
 	if err != nil {
 		return err
 	}
-	target.status = "pending"
+	if target.status == "abandoned" {
+		var fileStatus string
+		if err = tx.QueryRow(ctx, `select status from oss_files where id=$1`, target.fileID).Scan(&fileStatus); err != nil {
+			return err
+		}
+		if fileStatus != "deleted" {
+			return errBlueprintArtifactState
+		}
+		fileID := target.fileID
+		if err = enqueueOSSObjectDeletionTx(ctx, tx, ossDeletionTarget{
+			FileID: &fileID, Bucket: target.bucket, Endpoint: target.endpoint, Region: target.region,
+			UseCName: target.useCName, ObjectKey: target.objectKey, Reason: strings.TrimSpace(reason),
+		}); err != nil {
+			return err
+		}
+		// The old DELETE may have returned while its acknowledgement is still
+		// pending. enqueue above takes the outbox's row lock, waiting for any
+		// deleteObject FOR SHARE guard and its HTTP side effect to finish. Clear
+		// that precise execution token so its late complete/failure cannot erase
+		// this new deletion intent. Never replace another file's execution.
+		if _, err = tx.Exec(ctx, `update oss_object_deletion_outbox set
+			status='pending',attempts=0,next_attempt_at=now(),locked_at=null,locked_by='',
+			last_error='',failure_class='',deleted_at=null,dead_at=null,updated_at=now()
+			where oss_file_id=$1 and bucket=$2 and endpoint=$3 and object_key=$4 and status='processing'`,
+			target.fileID, target.bucket, target.endpoint, target.objectKey); err != nil {
+			return err
+		}
+		var queued bool
+		if err = tx.QueryRow(ctx, `select exists(select 1 from oss_object_deletion_outbox
+			where oss_file_id=$1 and bucket=$2 and endpoint=$3 and object_key=$4 and status='pending')`,
+			target.fileID, target.bucket, target.endpoint, target.objectKey).Scan(&queued); err != nil {
+			return err
+		}
+		if !queued {
+			return errBlueprintArtifactState
+		}
+		return nil
+	}
 	return abandonPendingBlueprintArtifactTargetTx(ctx, tx, target, reason)
 }
 

@@ -51,14 +51,12 @@ func InstallEphemeralSchema(ctx context.Context, db *pgxpool.Pool) error {
 	defer tx.Rollback(ctx)
 	statements := schemaInstallationStatements()
 	functionNames := ephemeralSchemaFunctionNames(statements)
+	qualifyFunctions := ephemeralSchemaFunctionQualifier(namespace, functionNames)
 	for _, raw := range statements {
 		statement := ephemeralTableDeclarationPattern.ReplaceAllString(raw, "create temporary table")
 		statement = strings.ReplaceAll(statement, "on public.%I", "on %I")
 		statement = strings.ReplaceAll(statement, "namespace_row.nspname='public'", "namespace_row.oid=pg_my_temp_schema()")
-		for _, name := range functionNames {
-			call := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(name) + `\s*\(`)
-			statement = call.ReplaceAllString(statement, namespace+"."+name+"(")
-		}
+		statement = qualifyFunctions(statement)
 		if _, err = tx.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("install ephemeral schema generation %d: %w", schemaGeneration, err)
 		}
@@ -97,6 +95,43 @@ func ephemeralSchemaFunctionNames(statements []string) []string {
 		}
 	}
 	return names
+}
+
+func ephemeralSchemaFunctionQualifier(namespace string, names []string) func(string) string {
+	if len(names) == 0 {
+		return func(statement string) string { return statement }
+	}
+	patterns := make([]*regexp.Regexp, len(names))
+	quoted := make([]string, len(names))
+	canonicalNames := make(map[string]string, len(names))
+	allASCII := true
+	for i, name := range names {
+		quoted[i] = regexp.QuoteMeta(name)
+		patterns[i] = regexp.MustCompile(`(?i)\b` + quoted[i] + `\s*\(`)
+		key := strings.ToLower(name)
+		_, duplicate := canonicalNames[key]
+		if duplicate || strings.IndexFunc(name, func(r rune) bool { return r > 127 }) >= 0 {
+			allASCII = false
+		}
+		canonicalNames[key] = name
+	}
+	combined := regexp.MustCompile(`(?i)\b(?:` + strings.Join(quoted, "|") + `)\s*\(`)
+	return func(statement string) string {
+		// The original case-insensitive regex has Unicode folding and ASCII
+		// word boundaries. Preserve that ordered behavior for non-ASCII SQL.
+		if !allASCII || strings.IndexFunc(statement, func(r rune) bool { return r > 127 }) >= 0 {
+			for i, name := range names {
+				if patterns[i].MatchString(statement) {
+					statement = patterns[i].ReplaceAllString(statement, namespace+"."+name+"(")
+				}
+			}
+			return statement
+		}
+		return combined.ReplaceAllStringFunc(statement, func(call string) string {
+			name := strings.ToLower(strings.TrimSpace(call[:len(call)-1]))
+			return namespace + "." + canonicalNames[name] + "("
+		})
+	}
 }
 
 // DropEphemeralSchema removes every relation and routine installed by
