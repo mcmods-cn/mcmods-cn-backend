@@ -36,6 +36,7 @@ type Server struct {
 	trustedProxies                 []*net.IPNet
 	serverProbe                    minecraftServerProbeFunc
 	realtime                       *realtimeHub
+	realtimeAdmission              realtimeLeaseCoordinator
 	realtimeOriginOnce             sync.Once
 	realtimeOrigin                 string
 	accessLogs                     *accessLogIngestor
@@ -64,6 +65,7 @@ func NewServer(ctx context.Context, cfg config.Config, db *pgxpool.Pool, queueCl
 		mux:               http.NewServeMux(),
 		trustedProxies:    parseTrustedProxyNetworks(cfg.TrustedProxyCIDRs),
 		realtime:          newRealtimeHub(),
+		realtimeAdmission: postgresRealtimeLeaseCoordinator{db: db},
 		accessLogs:        newDefaultAccessLogIngestor(db),
 		logShareBodyReads: make(chan struct{}, maxConcurrentLogShareBodyReads),
 	}

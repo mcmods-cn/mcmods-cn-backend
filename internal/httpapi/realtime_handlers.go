@@ -116,7 +116,8 @@ func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer lease.Release(r.Context())
-	admitted, err := s.acquireRealtimeDatabaseLease(r.Context(), lease.ID(), claims.Subject, sessionID)
+	coordinator := s.realtimeLeaseCoordinator()
+	admitted, err := coordinator.Acquire(r.Context(), lease.ID(), claims.Subject, sessionID)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "realtime admission unavailable")
 		return
@@ -126,7 +127,7 @@ func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusTooManyRequests, "REALTIME_CONNECTION_LIMIT", "realtime connection limit reached", 30, nil)
 		return
 	}
-	defer s.releaseRealtimeDatabaseLease(lease.ID())
+	defer coordinator.Release(lease.ID())
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
@@ -152,7 +153,7 @@ func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
 		case <-lifetime.C:
 			return
 		case <-heartbeat.C:
-			if !s.realtimeSessionValid(r.Context(), claims, true) || !lease.Refresh(r.Context()) || !s.refreshRealtimeDatabaseLease(r.Context(), lease.ID()) {
+			if !s.realtimeSessionValid(r.Context(), claims, true) || !lease.Refresh(r.Context()) || !coordinator.Refresh(r.Context(), lease.ID()) {
 				return
 			}
 			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {

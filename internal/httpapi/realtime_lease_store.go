@@ -2,13 +2,41 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// PostgreSQL preserves admission across a volatile Redis restart. Redis still
-// has to grant its lease; neither dependency's failure enables local admission.
-func (s *Server) acquireRealtimeDatabaseLease(ctx context.Context, id string, userID int64, session string) (bool, error) {
-	tx, err := s.db.Begin(ctx)
+// realtimeLeaseCoordinator owns the durable admission lease for one stream.
+// The normal server always uses PostgreSQL. The private dependency permits a
+// middleware unit test to supply its own coordinator without a runtime setting
+// that could weaken cross-instance admission.
+type realtimeLeaseCoordinator interface {
+	Acquire(context.Context, string, int64, string) (bool, error)
+	Refresh(context.Context, string) bool
+	Release(string)
+}
+
+type postgresRealtimeLeaseCoordinator struct {
+	db *pgxpool.Pool
+}
+
+func (s *Server) realtimeLeaseCoordinator() realtimeLeaseCoordinator {
+	if s.realtimeAdmission != nil {
+		return s.realtimeAdmission
+	}
+	return postgresRealtimeLeaseCoordinator{db: s.db}
+}
+
+// PostgreSQL preserves admission across a volatile Redis restart. The cache
+// policy grants the first lease (shared, or optional single-instance local);
+// neither mode bypasses this durable cross-instance quota.
+func (store postgresRealtimeLeaseCoordinator) Acquire(ctx context.Context, id string, userID int64, session string) (bool, error) {
+	if store.db == nil {
+		return false, errors.New("realtime admission database is unavailable")
+	}
+	tx, err := store.db.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -35,15 +63,21 @@ func (s *Server) acquireRealtimeDatabaseLease(ctx context.Context, id string, us
 	return true, nil
 }
 
-func (s *Server) refreshRealtimeDatabaseLease(ctx context.Context, id string) bool {
+func (store postgresRealtimeLeaseCoordinator) Refresh(ctx context.Context, id string) bool {
+	if store.db == nil {
+		return false
+	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	tag, err := s.db.Exec(ctx, `update realtime_connection_leases set expires_at=clock_timestamp()+$2*interval '1 millisecond' where lease_id=$1 and expires_at>clock_timestamp()`, id, realtimeLeaseTTL.Milliseconds())
+	tag, err := store.db.Exec(ctx, `update realtime_connection_leases set expires_at=clock_timestamp()+$2*interval '1 millisecond' where lease_id=$1 and expires_at>clock_timestamp()`, id, realtimeLeaseTTL.Milliseconds())
 	return err == nil && tag.RowsAffected() == 1
 }
 
-func (s *Server) releaseRealtimeDatabaseLease(id string) {
+func (store postgresRealtimeLeaseCoordinator) Release(id string) {
+	if store.db == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, _ = s.db.Exec(ctx, `delete from realtime_connection_leases where lease_id=$1`, id)
+	_, _ = store.db.Exec(ctx, `delete from realtime_connection_leases where lease_id=$1`, id)
 }

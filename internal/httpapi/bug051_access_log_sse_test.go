@@ -27,10 +27,28 @@ func (writer *bug051CancelOnFlushWriter) Flush() {
 	writer.cancel()
 }
 
+// This fake isolates middleware writer semantics. Real cross-instance quota and
+// PostgreSQL/Redis failures are verified by the MSG-001 integration tests.
+type bug051MiddlewareLeaseCoordinator struct {
+	acquiredID      string
+	releasedID      string
+	acquiredUser    int64
+	acquiredSession string
+}
+
+func (store *bug051MiddlewareLeaseCoordinator) Acquire(_ context.Context, id string, userID int64, session string) (bool, error) {
+	store.acquiredID, store.acquiredUser, store.acquiredSession = id, userID, session
+	return true, nil
+}
+func (*bug051MiddlewareLeaseCoordinator) Refresh(context.Context, string) bool { return true }
+func (store *bug051MiddlewareLeaseCoordinator) Release(id string)              { store.releasedID = id }
+
 func TestBUG051RealtimeSSESurvivesTheCompleteMiddlewareChain(t *testing.T) {
+	leases := &bug051MiddlewareLeaseCoordinator{}
 	server := &Server{
-		cache:    querycache.New(config.RedisConfig{}),
-		realtime: newRealtimeHub(),
+		cache:             querycache.New(config.RedisConfig{}),
+		realtime:          newRealtimeHub(),
+		realtimeAdmission: leases,
 	}
 	handler := server.securityHeaders(server.cors(server.cookieRequestOrigin(server.yggdrasilALI(
 		server.compression(server.logAccess(server.botTraffic(http.HandlerFunc(server.realtimeEvents)))),
@@ -55,6 +73,9 @@ func TestBUG051RealtimeSSESurvivesTheCompleteMiddlewareChain(t *testing.T) {
 	}
 	if !response.Flushed || !strings.Contains(response.Body.String(), ": connected\n\n") {
 		t.Fatalf("initial SSE frame was not flushed: flushed=%v body=%q", response.Flushed, response.Body.String())
+	}
+	if leases.acquiredID == "" || leases.releasedID != leases.acquiredID || leases.acquiredUser != 51 || leases.acquiredSession == "" {
+		t.Fatalf("middleware stream did not acquire/release its admission lease: %#v", leases)
 	}
 }
 
