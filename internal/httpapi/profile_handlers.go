@@ -249,8 +249,22 @@ func (s *Server) unfollowUser(w http.ResponseWriter, r *http.Request) {
 	}
 	targetID := identity.InternalID
 	claims := currentClaims(r)
-	_, err := s.db.Exec(r.Context(), `delete from user_follows where follower_id = $1 and followed_id = $2`, claims.Subject, targetID)
+	tx, err := s.db.Begin(r.Context())
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, "取消关注失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	_, err = tx.Exec(r.Context(), `delete from user_follows where follower_id = $1 and followed_id = $2`, claims.Subject, targetID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "取消关注失败")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist user preference activity")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "取消关注失败")
 		return
 	}
@@ -275,7 +289,13 @@ func (s *Server) updateNotificationSettings(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	claims := currentClaims(r)
-	_, err := s.db.Exec(
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存通知设置失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	_, err = tx.Exec(
 		r.Context(),
 		`insert into user_notification_settings (user_id,email_enabled,project_updates_enabled,updated_at)
 		 values ($1,coalesce($2,false),coalesce($3,true),now())
@@ -287,6 +307,14 @@ func (s *Server) updateNotificationSettings(w http.ResponseWriter, r *http.Reque
 		req.ProjectUpdatesEnabled,
 	)
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存通知设置失败")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist user preference activity")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存通知设置失败")
 		return
 	}
