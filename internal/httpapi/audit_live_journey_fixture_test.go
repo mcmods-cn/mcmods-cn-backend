@@ -104,7 +104,14 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 		frontendOrigin = "http://127.0.0.1:3311"
 	}
 	t.Setenv("FRONTEND_ORIGIN", frontendOrigin)
+	// Serialize only the owned schema installation/drop, not the external
+	// browser's observation window. Later cleanup callbacks close the live
+	// API/Worker before this callback reacquires the lock for the helper's drop.
+	unlockDDL := auditGlobalCatalogPGLock(t)
+	t.Cleanup(func() { unlockDDL() })
 	f := newAuditFixGRFixture(t, 45*time.Minute)
+	unlockDDL()
+	t.Cleanup(func() { unlockDDL = auditGlobalCatalogPGLock(t) })
 	journeyCtx, cancelJourney := context.WithCancel(f.ctx)
 	defer cancelJourney()
 	// Reuse the helper's owned, fully migrated schema with the supported default
