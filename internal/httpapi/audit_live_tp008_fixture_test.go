@@ -89,7 +89,7 @@ func TestAuditLiveTP008Fixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	var draftQualification bool
-	if err = roleTx.QueryRow(ctx, `select exists(select 1 from user_roles binding join roles role on role.id=binding.role_id join role_permissions entry on entry.role_id=role.id join permissions permission on permission.id=entry.permission_id where binding.user_id=$1 and role.code=$2 and entry.allow and permission.code='user.draft.retention_seconds.2592000')`, f.userIDs[f.editor], defaults.RegisteredRole).Scan(&draftQualification); err != nil || !draftQualification {
+	if err = roleTx.QueryRow(ctx, `select exists(select 1 from user_role_bindings binding join roles role on role.id=binding.role_id join role_permissions entry on entry.role_id=role.id join permissions permission on permission.id=entry.permission_id where binding.user_id=$1 and role.code=$2 and entry.allow and permission.code='user.draft.retention_seconds.2592000')`, f.userIDs[f.editor], defaults.RegisteredRole).Scan(&draftQualification); err != nil || !draftQualification {
 		t.Fatal("ordinary registered role lacks the documented 30-day draft qualification", err)
 	}
 	if err = roleTx.Commit(ctx); err != nil {
