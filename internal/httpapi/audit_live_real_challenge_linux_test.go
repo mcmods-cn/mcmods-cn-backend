@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -48,7 +49,15 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		t.Fatal(err)
 	}
-	f := newAuditFixGRFixture(t, 22*time.Minute)
+	waitMinutes := 30
+	if raw := os.Getenv("MCMODS_AUDIT_CHALLENGE_WAIT_MINUTES"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 20 || value > 40 {
+			t.Fatal("owned fixture wait must be20..40minutes, product challenge TTL is unchanged")
+		}
+		waitMinutes = value
+	}
+	f := newAuditFixGRFixture(t, time.Duration(waitMinutes+2)*time.Minute)
 	t.Cleanup(func() {
 		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 			t.Error(err)
@@ -144,19 +153,50 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(dir, "runtime.json"), runtime, 0600); err != nil {
 		t.Fatal(err)
 	}
+	checkpoints, err := os.OpenFile(filepath.Join(dir, "sql-checkpoints.ndjson"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer checkpoints.Close()
 	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("REAL_CHALLENGE_READY runtime=%s source=%s defaultTTL600 ordinaryactors=true", filepath.Join(dir, "runtime.json"), strings.TrimSpace(string(head)))
-	wait, cancel := context.WithTimeout(f.ctx, 20*time.Minute)
+	wait, cancel := context.WithTimeout(f.ctx, time.Duration(waitMinutes)*time.Minute)
 	defer cancel()
 	poll := time.NewTicker(250 * time.Millisecond)
 	defer poll.Stop()
+	var lastCheckpoint time.Time
 	for {
 		select {
 		case <-wait.Done():
 			t.Fatal("browser completion absent; no challenge acceptance inferred")
 		case <-poll.C:
+			if time.Since(lastCheckpoint) >= 15*time.Second {
+				// Persist actual read-only observations while the same browser run
+				// is live. A missing final marker cannot erase a genuine SQL fact,
+				// and an intermediate checkpoint is never a final acceptance seal.
+				observed, stop := context.WithTimeout(f.ctx, 5*time.Second)
+				var at time.Time
+				var total, pending, others int
+				err := f.db.QueryRow(observed, `select clock_timestamp(),(select count(*) from mods where submitted_by=$1),(select count(*) from mods where submitted_by=$1 and review_status='pending'),(select count(*) from mods where submitted_by=any($2::bigint[]))`, ids["creator"], []int64{ids["expiry"], ids["failure"], ids["probe"]}).Scan(&at, &total, &pending, &others)
+				stop()
+				record := map[string]any{"observation": "INTERMEDIATE_NOT_FINAL_SEAL", "sourceCommit": strings.TrimSpace(string(head)), "productionExecuted": false}
+				if err != nil {
+					record["status"] = "BLOCKED_ENV_DB_OBSERVATION"
+				} else {
+					record["status"] = "OBSERVED"
+					record["databaseTime"] = at
+					record["creatorModCount"] = total
+					record["creatorPendingModCount"] = pending
+					record["otherActorModCount"] = others
+				}
+				line, _ := json.Marshal(record)
+				if _, err := checkpoints.Write(append(line, '\n')); err != nil {
+					t.Fatal("checkpoint write failed")
+				}
+				lastCheckpoint = time.Now()
+			}
 			if _, err = os.Stat(filepath.Join(dir, "done.flag")); os.IsNotExist(err) {
 				continue
 			} else if err != nil {
