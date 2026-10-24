@@ -83,3 +83,71 @@ func TestAuditMsgReviewLateCommitSummaryMatchesVisibleRevisionIntegration(t *tes
 		})
 	}
 }
+
+func TestAuditMsgReviewLateBroadcastSnapshotSummaryAndUserReceiptsIntegration(t *testing.T) {
+	f := newTEST022Fixture(t, false)
+	worker := auditNotifyWorker(f)
+	lateEvent := notificationEvent{Action: "system", Title: "Audit broadcast held", Body: "Late broadcast commit"}
+	release := auditNotificationBarrier(t, f, "new.title='Audit broadcast held'", "insert", 92233403)
+	done := make(chan error, 1)
+	go func() { done <- auditDeliver(worker, f.ctx, "audit-msg-broadcast-held", lateEvent) }()
+	auditWaitNotificationBlocked(t, f.db, f.ctx, 92233403)
+	if err := auditDeliver(worker, f.ctx, "audit-msg-broadcast-visible", notificationEvent{Action: "system", Title: "Visible later broadcast ID", Body: "Visible at both read boundaries"}); err != nil {
+		t.Fatal(err)
+	}
+	readSummary := func(token string) int64 {
+		t.Helper()
+		raw := f.requireAt(t, 0, token, http.MethodGet, "/api/v1/me/unread-summary", nil, 200)
+		return decodeTEST022Data[test021UnreadSummary](t, raw).Notifications
+	}
+	for _, token := range []string{f.editor, f.otherEditor} {
+		auditReadAll(t, f, token)
+		if count := readSummary(token); count != 0 {
+			t.Fatalf("read boundary=%d", count)
+		}
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	items := auditNotificationItems(t, f, f.editor)
+	var lateID string
+	unread := 0
+	for _, item := range items {
+		if !item.Read {
+			unread++
+			lateID = item.ID
+			if item.Title != "Audit broadcast held" {
+				t.Fatalf("wrong unread broadcast: %+v", item)
+			}
+		}
+	}
+	if len(items) != 2 || unread != 1 {
+		t.Fatalf("late broadcast items=%+v", items)
+	}
+	for _, token := range []string{f.editor, f.otherEditor} {
+		if count := readSummary(token); count != 1 {
+			t.Fatalf("late broadcast summary=%d want1", count)
+		}
+	}
+	if err := auditDeliver(worker, f.ctx, "audit-msg-broadcast-held", lateEvent); err != nil {
+		t.Fatal(err)
+	}
+	if count := readSummary(f.editor); count != 1 {
+		t.Fatalf("broadcast duplicate summary=%d", count)
+	}
+	for range 2 {
+		f.requireAt(t, 0, f.editor, http.MethodPost, "/api/v1/notifications/"+lateID+"/read", nil, 200)
+	}
+	if count := readSummary(f.editor); count != 0 {
+		t.Fatalf("explicit broadcast receipt summary=%d", count)
+	}
+	if count := readSummary(f.otherEditor); count != 1 {
+		t.Fatalf("one user's receipt changed another user=%d", count)
+	}
+	auditReadAll(t, f, f.otherEditor)
+	if count := readSummary(f.otherEditor); count != 0 {
+		t.Fatalf("second user's read-all=%d", count)
+	}
+	t.Log("broadcast held before higher ID/read-all: both snapshot summaries1; per-user receipt0/1; duplicate stable; independent read-all0")
+}

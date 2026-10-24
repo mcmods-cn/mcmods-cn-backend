@@ -21,13 +21,14 @@ type visibilityQuery interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 type visibilityInspection struct {
-	ColumnsPresent          int  `json:"columns_present"`
-	ColumnsCorrect          int  `json:"columns_correct"`
-	LeaseTablePresent       bool `json:"lease_table_present"`
-	LeaseColumnsCorrect     bool `json:"lease_columns_correct"`
-	LeaseConstraintsCorrect bool `json:"lease_constraints_correct"`
-	TriggerCorrect          bool `json:"trigger_correct"`
-	Ready                   bool `json:"ready"`
+	BroadcastRevisionIndexCorrect bool `json:"broadcast_revision_index_correct"`
+	ColumnsPresent                int  `json:"columns_present"`
+	ColumnsCorrect                int  `json:"columns_correct"`
+	LeaseTablePresent             bool `json:"lease_table_present"`
+	LeaseColumnsCorrect           bool `json:"lease_columns_correct"`
+	LeaseConstraintsCorrect       bool `json:"lease_constraints_correct"`
+	TriggerCorrect                bool `json:"trigger_correct"`
+	Ready                         bool `json:"ready"`
 }
 
 func inspectVisibilitySchema(ctx context.Context, query visibilityQuery) (visibilityInspection, error) {
@@ -62,11 +63,17 @@ func inspectVisibilitySchema(ctx context.Context, query visibilityQuery) (visibi
  and trigger_row.tgenabled='O' and trigger_row.tgtype=23 and trigger_row.tgqual is null and not trigger_row.tgisinternal
  and routine_namespace.nspname='public' and routine.proname='stamp_notification_revision' and routine.pronargs=0
  and routine.prorettype='pg_catalog.trigger'::regtype
+        and routine.prolang=(select oid from pg_language where lanname='plpgsql')
  and regexp_replace(lower(routine.prosrc),'[[:space:]]','','g')='beginnew.revision_xid:=pg_current_xact_id();returnnew;end')
  from actual`).Scan(&result.ColumnsPresent, &result.ColumnsCorrect, &result.LeaseTablePresent, &result.LeaseColumnsCorrect, &result.LeaseConstraintsCorrect, &result.TriggerCorrect)
-	result.Ready = result.ColumnsCorrect == 3 && result.LeaseColumnsCorrect && result.LeaseConstraintsCorrect && result.TriggerCorrect
+	if err == nil {
+		result.BroadcastRevisionIndexCorrect, err = database.NotificationVisibilityIndexReady(ctx, query)
+	}
+	result.Ready = result.ColumnsCorrect == 3 && result.LeaseColumnsCorrect && result.LeaseConstraintsCorrect && result.TriggerCorrect && result.BroadcastRevisionIndexCorrect
 	return result, err
 }
+
+var errVisibilityPostconditions = errors.New("notification migration postconditions not satisfied")
 
 type migrationOptions struct {
 	Apply                              bool
@@ -125,13 +132,16 @@ func runVisibilityMigration(ctx context.Context, pool *pgxpool.Pool, options mig
 		if err == nil {
 			after, err = inspectVisibilitySchema(ctx, tx)
 			if err == nil && !after.Ready {
-				err = errors.New("migration postconditions not satisfied")
+				err = errVisibilityPostconditions
 			}
 		}
 		if err == nil {
 			err = tx.Commit(ctx)
 		}
 		if err != nil {
+			if errors.Is(err, errVisibilityPostconditions) {
+				return errors.New("notification extension failed final schema postconditions; transaction rolled back")
+			}
 			return errors.New("notification extension failed; transaction rolled back")
 		}
 		after, err = inspectVisibilitySchema(ctx, connection)

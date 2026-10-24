@@ -1,0 +1,65 @@
+-- Frozen source: backend 480cf76b6adbd9cdfd57efea2b319d45fab7fdd8 internal/httpapi/unread_truth.go
+with selected_users as materialized (select id,public_id from users where status='active' and id=any($1::bigint[])),
+targets as materialized (
+	select selected.id user_id,selected.public_id,watermark.max_notification_id,watermark.read_at,watermark.visibility_snapshot
+	from selected_users selected
+	left join notification_read_watermarks watermark on watermark.user_id=selected.id
+),
+direct_notification_counts as (
+	select target.user_id,count(*)::bigint unread
+	from notifications n
+	join targets target on target.user_id=n.recipient_id
+	left join notification_receipts receipt on receipt.notification_id=n.id and receipt.user_id=target.user_id
+	where n.recipient_id=any($1::bigint[]) and (
+		(receipt.notification_id is not null and (receipt.read_at is null or not coalesce(receipt.read_revision_xid=n.revision_xid,true)))
+		or (receipt.notification_id is null and not (
+			n.id<=coalesce(target.max_notification_id,0)
+			and n.updated_at<=coalesce(target.read_at,'-infinity'::timestamptz)
+            and (target.visibility_snapshot is null or pg_visible_in_snapshot(n.revision_xid,target.visibility_snapshot))
+		))
+	)
+	group by target.user_id
+),
+message_counts as (
+	select message.recipient_id user_id,count(*)::bigint unread
+	from direct_messages message
+	where message.read_at is null and message.recipient_id=any($1::bigint[])
+	group by message.recipient_id
+),
+broadcast_baselines as (
+	select target.user_id,case when target.max_notification_id is null then state.live_count else
+		(case when target.max_notification_id<=state.max_notification_id/2 then
+			state.live_count-(select count(*) from notifications prefix
+				where prefix.recipient_id is null and prefix.id<=target.max_notification_id)
+		else (select count(*) from notifications suffix
+			where suffix.recipient_id is null and suffix.id>target.max_notification_id) end)
+		+(select count(*) from notifications changed
+			where changed.recipient_id is null and changed.id<=target.max_notification_id
+				and (changed.updated_at>target.read_at or (target.visibility_snapshot is not null and not pg_visible_in_snapshot(changed.revision_xid,target.visibility_snapshot))))
+	end::bigint baseline
+	from targets target cross join notification_broadcast_state state
+	where state.singleton
+),
+broadcast_receipt_corrections as (
+	select target.user_id,coalesce(sum(case
+		when (receipt.read_at is null or not coalesce(receipt.read_revision_xid=notification.revision_xid,true)) and not (
+			target.max_notification_id is null or notification.id>target.max_notification_id or notification.updated_at>target.read_at or (target.visibility_snapshot is not null and not pg_visible_in_snapshot(notification.revision_xid,target.visibility_snapshot))
+		) then 1
+		when receipt.read_at is not null and coalesce(receipt.read_revision_xid=notification.revision_xid,true) and (
+			target.max_notification_id is null or notification.id>target.max_notification_id or notification.updated_at>target.read_at or (target.visibility_snapshot is not null and not pg_visible_in_snapshot(notification.revision_xid,target.visibility_snapshot))
+		) then -1
+		else 0 end),0)::bigint correction
+	from targets target
+	join notification_receipts receipt on receipt.user_id=target.user_id
+	join notifications notification on notification.id=receipt.notification_id and notification.recipient_id is null
+	group by target.user_id
+)
+select target.user_id,target.public_id,
+	greatest(coalesce(direct.unread,0)+coalesce(broadcast.baseline,0)+coalesce(correction.correction,0),0)::bigint notifications,
+	coalesce(message.unread,0)::bigint messages
+from targets target
+left join direct_notification_counts direct on direct.user_id=target.user_id
+left join broadcast_baselines broadcast on broadcast.user_id=target.user_id
+left join broadcast_receipt_corrections correction on correction.user_id=target.user_id
+left join message_counts message on message.user_id=target.user_id
+order by target.user_id

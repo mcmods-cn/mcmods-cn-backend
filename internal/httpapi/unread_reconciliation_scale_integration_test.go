@@ -37,6 +37,8 @@ func TestUnreadCachedSampleStaysConstantAtTenMillionBroadcastsIntegration(t *tes
             revision_xid xid8 not null default pg_current_xact_id());
 		create index idx_notifications_recipient_id on notifications(recipient_id,id);
 		create index idx_notifications_broadcast_id on notifications(id) where recipient_id is null;
+ create index idx_notifications_broadcast_page on notifications(updated_at desc,id desc) where recipient_id is null;
+ create index idx_notifications_broadcast_revision on notifications(revision_xid,id) include(updated_at) where recipient_id is null;
 		create temporary table notification_receipts(notification_id bigint not null,user_id bigint not null,read_at timestamptz,primary key(notification_id,user_id),
             read_revision_xid xid8);
 		create temporary table notification_read_watermarks(user_id bigint primary key,max_notification_id bigint not null,read_at timestamptz not null,

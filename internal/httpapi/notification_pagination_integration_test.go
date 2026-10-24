@@ -48,6 +48,7 @@ func TestNotificationPagesAndReadWatermarkStayBoundedAtOneMillionRowsIntegration
 		create index idx_notifications_broadcast_page on notifications(updated_at desc,id desc) where recipient_id is null;
 		create index idx_notifications_broadcast_kind_page on notifications(kind,updated_at desc,id desc) where recipient_id is null;
 		create index idx_notifications_broadcast_id on notifications(id) where recipient_id is null;
+ create index idx_notifications_broadcast_revision on notifications(revision_xid,id) include(updated_at) where recipient_id is null;
 		create temporary table notification_broadcast_state(
 			singleton boolean primary key,live_count bigint not null,max_notification_id bigint not null,updated_at timestamptz not null
 		);

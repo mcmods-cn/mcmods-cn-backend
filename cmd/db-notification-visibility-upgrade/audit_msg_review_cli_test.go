@@ -50,6 +50,7 @@ func newAuditMsgReviewDatabase(t *testing.T) (context.Context, *pgxpool.Pool, st
 	}
 	targetCfg := cfg.Copy()
 	targetCfg.ConnConfig.Database = name
+	targetCfg.MaxConns = 1
 	db, err := pgxpool.NewWithConfig(ctx, targetCfg)
 	if err != nil {
 		t.Fatal(err)
@@ -102,6 +103,13 @@ func TestAuditMsgReviewMigrationPinsPublicAndVerifiesActualState(t *testing.T) {
 		t.Fatalf("dry-run guessed completion: %s", output.Bytes())
 	}
 	output.Reset()
+	if _, err := db.Exec(ctx, `set search_path=audit_shadow,public`); err != nil {
+		t.Fatal(err)
+	}
+	var callerPath string
+	if err := db.QueryRow(ctx, `show search_path`).Scan(&callerPath); err != nil || !strings.HasPrefix(callerPath, "audit_shadow") {
+		t.Fatalf("wrong caller-path precondition: %s/%v", callerPath, err)
+	}
 	if err := runVisibilityMigration(ctx, db, migrationOptions{Apply: true, ConfirmedDatabase: name, BackupReference: "synthetic-owned-copy"}, &output); err != nil {
 		t.Fatal(err)
 	}
@@ -135,6 +143,9 @@ func TestAuditMsgReviewMigrationRejectsWrongTypesAndWrongTarget(t *testing.T) {
 		if err == nil {
 			t.Fatalf("unsafe target/types accepted: target=%s output=%s", target, output.Bytes())
 		}
+		if target != name && !strings.Contains(err.Error(), "apply requires exact") {
+			t.Fatalf("wrong target rejection reason: %v", err)
+		}
 		if target == name && !strings.Contains(err.Error(), "incompatible types") {
 			t.Fatalf("wrong rejection reason: %v", err)
 		}
@@ -164,5 +175,44 @@ func TestAuditMsgReviewInspectionRejectsWrongTriggerBindingAndBody(t *testing.T)
 		if err := database.Migrate(ctx, db); err == nil || !strings.Contains(err.Error(), "notification visibility extension") {
 			t.Fatalf("startup accepted bad trigger or wrong reason: %v", err)
 		}
+	}
+}
+
+func TestAuditMsgReviewMigrationRequiresExactSnapshotIndex(t *testing.T) {
+	ctx, db, name := newAuditMsgReviewDatabase(t)
+	if _, err := db.Exec(ctx, `drop index public.idx_notifications_broadcast_revision`); err != nil {
+		t.Fatal(err)
+	}
+	state, err := inspectVisibilitySchema(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Ready || state.BroadcastRevisionIndexCorrect {
+		t.Fatalf("missing index was ready: %+v", state)
+	}
+	if err := database.Migrate(ctx, db); err == nil || !strings.Contains(err.Error(), "notification visibility extension") {
+		t.Fatalf("startup accepted missing index or wrong reason: %v", err)
+	}
+	var output bytes.Buffer
+	if err := runVisibilityMigration(ctx, db, migrationOptions{Apply: true, ConfirmedDatabase: name, BackupReference: "synthetic-owned-copy"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	state, err = inspectVisibilitySchema(ctx, db)
+	if err != nil || !state.Ready {
+		t.Fatalf("explicit index upgrade=%+v/%v", state, err)
+	}
+	if _, err := db.Exec(ctx, `drop index public.idx_notifications_broadcast_revision;create index idx_notifications_broadcast_revision on public.notifications(id) where recipient_id is null`); err != nil {
+		t.Fatal(err)
+	}
+	state, err = inspectVisibilitySchema(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Ready || state.BroadcastRevisionIndexCorrect {
+		t.Fatalf("same name with wrong columns was ready: %+v", state)
+	}
+	output.Reset()
+	if err := runVisibilityMigration(ctx, db, migrationOptions{Apply: true, ConfirmedDatabase: name, BackupReference: "synthetic-owned-copy"}, &output); err == nil || !strings.Contains(err.Error(), "final schema postconditions") {
+		t.Fatalf("wrong index rejection=%v output=%s", err, output.Bytes())
 	}
 }
