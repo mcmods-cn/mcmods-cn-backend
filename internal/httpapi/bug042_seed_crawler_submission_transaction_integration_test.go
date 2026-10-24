@@ -83,6 +83,13 @@ func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *te
 	if err = pool.QueryRow(ctx, `insert into seed_crawler_runs(actor_id,dry_run) values($1,false) returning id`, actorID).Scan(&runID); err != nil {
 		t.Fatal(err)
 	}
+	// A direct business integration call still carries a real owned run lease;
+	// it cannot manufacture publication authority after the queue owner changed.
+	const leaseOwner = "bug042-owned-positive-fixture"
+	if _, err = pool.Exec(ctx, `update seed_crawler_runs set actor_id=$2,status='running',lease_owner=$3,lease_expires_at=now()+interval '2 minutes' where id=$1`, runID, actorID, leaseOwner); err != nil {
+		t.Fatal(err)
+	}
+	ctx = withSeedCrawlerRunLease(ctx, runID, leaseOwner)
 	if err = pool.QueryRow(ctx, `insert into seed_crawler_candidates(first_seen_run_id,last_seen_run_id,external_project_id,project_type,downloads,payload)
 		values($1,$1,'bug042-external','mod',1000,'{}') returning id`, runID).Scan(&candidateID); err != nil {
 		t.Fatal(err)
