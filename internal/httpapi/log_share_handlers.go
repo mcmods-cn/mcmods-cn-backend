@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -150,56 +149,24 @@ func (s *Server) createFileLogShares(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	claims := currentClaims(r)
-	items := make([]map[string]any, 0, len(request.FileIDs))
-	for _, fileID := range request.FileIDs {
-		item := map[string]any{"fileId": fileID, "status": "failed"}
-		result, processErr := s.createFileLogShare(r.Context(), claims.Subject, fileID, expiresAt)
-		if processErr != nil {
-			item["error"] = processErr.Error()
-		} else {
-			item = result
-			item["fileId"] = fileID
-		}
-		items = append(items, item)
+	items, err := s.createFileLogShareBatch(r, request.FileIDs, expiresAt)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "LOG_SHARE_BATCH_PERSIST_FAILED", "保存脱敏日志及活动失败，请稍后重试", 0, nil)
+		return
 	}
 	writeJSON(w, http.StatusMultiStatus, map[string]any{"items": items})
 }
 
 func (s *Server) createFileLogShare(ctx context.Context, userID int64, publicFileID string, expiresAt time.Time) (map[string]any, error) {
-	var fileID, size int64
-	var objectKey, name, contentType, digest string
-	err := s.db.QueryRow(ctx, `select id,object_key,coalesce(nullif(source_original_name,''),original_name),content_type,source_size_bytes,sha256
-		from oss_files where public_id=$1 and uploader_id=$2 and status='active'
-		  and (scan_status in ('clean','trusted_generated') or (source in ('log_share','comment') and scan_status='pending'))`, strings.ToLower(strings.TrimSpace(publicFileID)), userID).
-		Scan(&fileID, &objectKey, &name, &contentType, &size, &digest)
+	prepared, err := s.prepareFileLogShare(ctx, userID, publicFileID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errors.New("文件不存在、未完成安全检查或不属于当前用户")
-		}
-		return nil, errors.New("读取日志文件记录失败，请稍后重试")
+		return nil, err
 	}
-	if size <= 0 || size > maxLogSourceBytes {
-		return nil, fmt.Errorf("文件超过 %d MiB 限制", maxLogSourceBytes>>20)
+	if prepared.Ready != nil {
+		return prepared.Ready, nil
 	}
+	result, err := s.persistReadyLogShare(ctx, userID, "file", prepared.FileID, prepared.Name, prepared.Name, expiresAt, prepared.Counts, prepared.Entries)
 	var existingCode string
-	lookupErr := s.db.QueryRow(ctx, `select public_code from log_shares where source_file_id=$1 and redaction_version=$2
-		and status='ready' and deleted_at is null and expires_at>now()`, fileID, logRedactionVersion).Scan(&existingCode)
-	if lookupErr == nil {
-		return map[string]any{"publicCode": existingCode, "url": "/log/s/" + existingCode, "status": "ready", "reused": true}, nil
-	}
-	if !errors.Is(lookupErr, pgx.ErrNoRows) {
-		return nil, errors.New("读取已有日志分享失败，请稍后重试")
-	}
-	raw, err := s.readLogOSSObject(ctx, objectKey, size, digest)
-	if err != nil {
-		return nil, err
-	}
-	entries, counts, err := sanitizeLogFile(name, contentType, raw)
-	if err != nil {
-		return nil, err
-	}
-	result, err := s.persistReadyLogShare(ctx, userID, "file", fileID, name, name, expiresAt, counts, entries)
 	if err == nil {
 		return result, nil
 	}
@@ -210,7 +177,7 @@ func (s *Server) createFileLogShare(ctx context.Context, userID int64, publicFil
 	// request sanitized the same source file first, return that share instead
 	// of surfacing a spurious batch failure.
 	if s.db.QueryRow(ctx, `select public_code from log_shares where source_file_id=$1 and redaction_version=$2
-		and status='ready' and deleted_at is null and expires_at>now()`, fileID, logRedactionVersion).Scan(&existingCode) == nil {
+		and status='ready' and deleted_at is null and expires_at>now()`, prepared.FileID, logRedactionVersion).Scan(&existingCode) == nil {
 		return map[string]any{"publicCode": existingCode, "url": "/log/s/" + existingCode, "status": "ready", "reused": true}, nil
 	}
 	return nil, errors.New("保存脱敏日志失败，请稍后重试")
@@ -357,6 +324,17 @@ func (s *Server) persistReadyLogShare(ctx context.Context, ownerID int64, source
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	result, err := s.persistReadyLogShareTx(ctx, tx, ownerID, sourceType, sourceFileID, title, originalName, expiresAt, counts, entries)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Server) persistReadyLogShareTx(ctx context.Context, tx pgx.Tx, ownerID int64, sourceType string, sourceFileID int64, title, originalName string, expiresAt time.Time, counts map[string]int, entries []logShareEntryWrite) (map[string]any, error) {
 	code, err := randomLogShareCode()
 	if err != nil {
 		return nil, err
@@ -381,9 +359,6 @@ func (s *Server) persistReadyLogShare(ctx context.Context, ownerID int64, source
 			values($1,$2,$3,$3,$4,$5,$6,$7,$8,'ready')`, shareID, index, entry.Name, entry.ContentType, entry.Text, entry.Size, entry.Lines, entry.Checksum); err != nil {
 			return nil, err
 		}
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return nil, err
 	}
 	return map[string]any{"publicCode": code, "url": "/log/s/" + code, "status": "ready", "expiresAt": expiresAt,
 		"redactionVersion": logRedactionVersion, "redactionCounts": counts, "entryCount": len(entries)}, nil
