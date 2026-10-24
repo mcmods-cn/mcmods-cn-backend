@@ -129,12 +129,16 @@ func TestEconomyHandlersUseTransactionalConfigurationInvariants(t *testing.T) {
 	if strings.Contains(source, "select count(*) from content_heat_promotions where object_route_id=$1") {
 		t.Fatal("heat-promotion sequence still depends on a racy count query")
 	}
-	for _, functionName := range []string{"func (s *Server) checkIn", "func (s *Server) recordOwnedContentDownload"} {
-		start := strings.Index(source, functionName)
+	downloadRaw, err := os.ReadFile("economy_download_rewards.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for functionName, currentSource := range map[string]string{"func (s *Server) checkIn": source, "func (s *Server) recordOwnedContentDownloadTx": string(downloadRaw)} {
+		start := strings.Index(currentSource, functionName)
 		if start < 0 {
 			t.Fatalf("could not find %s", functionName)
 		}
-		segment := source[start:]
+		segment := currentSource[start:]
 		lockIndex := strings.Index(segment, "lockEconomyConfigurationTx")
 		loadIndex := strings.Index(segment, "loadEconomyConfig")
 		if lockIndex < 0 || loadIndex < 0 || lockIndex > loadIndex {

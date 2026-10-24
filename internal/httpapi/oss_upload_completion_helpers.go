@@ -212,18 +212,24 @@ func (s *Server) lockOSSCompletionAssociationsTx(ctx context.Context, tx pgx.Tx,
 }
 
 // Signing stays outside this transaction; the ticket is disclosed only after its
-// original activity and download counter have committed together.
+// original activity and any authoritative business hook have committed together.
 func (s *Server) commitOSSDownloadTicket(r *http.Request, objectKey string) error {
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(r.Context())
-	if err = persistOSSDownloadStat(r.Context(), tx, objectKey); err != nil {
+	if err = runOSSDownloadTransactionHook(r.Context(), tx); err != nil {
 		return err
 	}
 	if err = enqueueRequestActivityTx(r, tx); err != nil {
 		return err
 	}
-	return tx.Commit(r.Context())
+	if err = tx.Commit(r.Context()); err != nil {
+		return err
+	}
+	// ARCH020: general OSS operational telemetry is best-effort. Its failure
+	// cannot roll back a successfully committed business settlement/capability.
+	s.recordOSSDownloadStat(r.Context(), objectKey)
+	return nil
 }

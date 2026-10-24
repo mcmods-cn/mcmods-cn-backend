@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -1160,12 +1159,10 @@ func (s *Server) downloadBlueprintVariant(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "读取蓝图格式文件失败")
 		return
 	}
-	if s.presignOSSFileWithRequest(w, r, ossPresignRequest{ObjectKey: objectKey}) {
-		if rewardErr := s.recordOwnedContentDownload(r.Context(), "blueprint", publicID, ownerID, claims.Subject); rewardErr != nil {
-			log.Printf("blueprint download reward: public_id=%s owner=%d downloader=%d: %v",
-				publicID, ownerID, claims.Subject, rewardErr)
-		}
-	}
+	r = r.WithContext(withOSSDownloadTransactionHook(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+		return s.recordOwnedContentDownloadTx(ctx, tx, "blueprint", publicID, ownerID, claims.Subject)
+	}))
+	s.presignOSSFileWithRequest(w, r, ossPresignRequest{ObjectKey: objectKey})
 }
 
 func (s *Server) blueprintOwnerAccess(r *http.Request, publicID string) (int64, bool) {
