@@ -99,10 +99,17 @@ func (s *Server) subscribeReviewCompletion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	targetLabel, targetURL := reviewTargetInfoTx(r.Context(), tx, entityType, internalID, publicID, canonicalPath)
-	if _, err = tx.Exec(r.Context(), `insert into review_completion_subscriptions(
+	inserted, err := tx.Exec(r.Context(), `insert into review_completion_subscriptions(
 		change_request_id,user_id,target_label,target_url) values($1,$2,$3,$4)
-		on conflict(change_request_id,user_id) do nothing`, requestID, currentClaims(r).Subject, targetLabel, targetURL); err != nil {
+		on conflict(change_request_id,user_id) do nothing`, requestID, currentClaims(r).Subject, targetLabel, targetURL)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to subscribe to review completion")
+		return
+	}
+	if inserted.RowsAffected() == 0 {
+		skipRequestActivity(r)
+	} else if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist review subscription activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {

@@ -206,10 +206,24 @@ func (s *Server) adminUpdateAntiAbuseUserState(w http.ResponseWriter, r *http.Re
 		}
 		return
 	}
-	_, err := s.db.Exec(r.Context(), `insert into anti_abuse_user_states(user_id,trust_level,risk_score,manually_trusted,updated_at)
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update user risk state")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	_, err = tx.Exec(r.Context(), `insert into anti_abuse_user_states(user_id,trust_level,risk_score,manually_trusted,updated_at)
 		values($1,$2,$3,$4,now()) on conflict(user_id) do update set trust_level=excluded.trust_level,risk_score=excluded.risk_score,
 		manually_trusted=excluded.manually_trusted,updated_at=now()`, userID, request.TrustLevel, request.RiskScore, request.ManuallyTrusted)
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update user risk state")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist anti-abuse user state activity")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update user risk state")
 		return
 	}
