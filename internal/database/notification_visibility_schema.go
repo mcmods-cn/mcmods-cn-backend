@@ -10,8 +10,17 @@ func requireNotificationVisibilitySchema(ctx context.Context, query logRedaction
 	err := query.QueryRow(ctx, `select
 		(select count(*)=3 from information_schema.columns where table_schema='public' and
 		(table_name,column_name,udt_name) in (('notifications','revision_xid','xid8'),('notification_receipts','read_revision_xid','xid8'),('notification_read_watermarks','visibility_snapshot','pg_snapshot')))
-		and exists(select 1 from pg_trigger where tgrelid='public.notifications'::regclass and tgname='trg_notifications_revision' and tgenabled='O')
-		and to_regclass('public.realtime_connection_leases') is not null`).Scan(&ready)
+		and exists(select 1 from pg_trigger trigger_row join pg_proc routine on routine.oid=trigger_row.tgfoid
+        join pg_namespace routine_namespace on routine_namespace.oid=routine.pronamespace
+        where trigger_row.tgrelid='public.notifications'::regclass and trigger_row.tgname='trg_notifications_revision'
+        and trigger_row.tgenabled='O' and trigger_row.tgtype=23 and trigger_row.tgqual is null and not trigger_row.tgisinternal
+        and routine_namespace.nspname='public' and routine.proname='stamp_notification_revision' and routine.pronargs=0
+        and routine.prorettype='pg_catalog.trigger'::regtype
+        and regexp_replace(lower(routine.prosrc),'[[:space:]]','','g')='beginnew.revision_xid:=pg_current_xact_id();returnnew;end')
+        and (select count(*)=4 from (values ('lease_id','pg_catalog.text'::regtype::oid),('user_id','pg_catalog.int8'::regtype::oid),
+        ('session_hash','pg_catalog.text'::regtype::oid),('expires_at','pg_catalog.timestamptz'::regtype::oid)) expected(name,type_oid)
+        join pg_attribute attribute on attribute.attrelid=to_regclass('public.realtime_connection_leases') and attribute.attname=expected.name
+        and attribute.atttypid=expected.type_oid and attribute.attnotnull and not attribute.attisdropped)`).Scan(&ready)
 	if err != nil {
 		return err
 	}
