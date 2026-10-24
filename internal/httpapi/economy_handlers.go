@@ -775,6 +775,10 @@ func (s *Server) updateEconomyConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to save economy configuration")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist economy configuration activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit economy configuration")
 		return
@@ -881,6 +885,10 @@ func (s *Server) saveCurrency(w http.ResponseWriter, r *http.Request, currentPub
 		writeError(w, http.StatusInternalServerError, "failed to save currency")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist economy configuration activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit currency")
 		return
@@ -930,11 +938,6 @@ func (s *Server) saveShopItem(w http.ResponseWriter, r *http.Request, currentPub
 		writeError(w, http.StatusBadRequest, "shop item fields are invalid")
 		return
 	}
-	for _, permission := range []string{payload.PurchasePermission, payload.UsePermission} {
-		if permission != "" {
-			s.registerDeclaredPermission(permission)
-		}
-	}
 	translations, err := json.Marshal(payload.Translations)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "shop item translations are invalid")
@@ -954,6 +957,12 @@ func (s *Server) saveShopItem(w http.ResponseWriter, r *http.Request, currentPub
 	if err = lockEconomyConfigurationTx(r.Context(), tx); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to lock economy configuration")
 		return
+	}
+	for _, permission := range []string{payload.PurchasePermission, payload.UsePermission} {
+		if err = registerDeclaredPermissionWithQueryer(r.Context(), tx, permission); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to declare shop item permission")
+			return
+		}
 	}
 	var publicID string
 	if currentPublicID == "" {
@@ -986,6 +995,10 @@ func (s *Server) saveShopItem(w http.ResponseWriter, r *http.Request, currentPub
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to save shop item")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist economy configuration activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {

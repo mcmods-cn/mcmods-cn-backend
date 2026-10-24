@@ -161,22 +161,10 @@ func (s *Server) requirePermission(permission string, next http.HandlerFunc) htt
 }
 
 func (s *Server) registerDeclaredPermission(permission string) {
-	permission = normalizeCode(permission)
-	if permission == "" || s.db == nil {
+	if s.db == nil {
 		return
 	}
-	module := permission
-	if index := strings.Index(permission, "."); index > 0 {
-		module = permission[:index]
-	}
-	_, _ = s.db.Exec(
-		context.Background(),
-		`insert into permissions (code, module, name, description)
-		 values ($1, $2, $1, 'Permission declared by application code')
-		 on conflict (code) do nothing`,
-		permission,
-		module,
-	)
+	_ = registerDeclaredPermissionWithQueryer(context.Background(), s.db, permission)
 }
 
 func currentClaims(r *http.Request) security.Claims {
