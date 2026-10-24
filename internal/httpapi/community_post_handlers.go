@@ -340,6 +340,10 @@ func (s *Server) createCommunityPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist project activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit community post")
 		return
@@ -479,6 +483,10 @@ func (s *Server) updateCommunityPost(w http.ResponseWriter, r *http.Request, pub
 	if err != nil {
 		logCommunityPostDataFailure("update_apply", publicID, err)
 		writeError(w, http.StatusInternalServerError, "failed to save community post")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist project activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {

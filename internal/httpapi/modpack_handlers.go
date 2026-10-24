@@ -478,6 +478,10 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist project activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit modpack")
 		return
@@ -586,6 +590,12 @@ func (s *Server) createModpackRevision(w http.ResponseWriter, r *http.Request, s
 		if err = applyModpackSnapshotTx(r.Context(), tx, current.ID, created.RevisionID, claims.Subject,
 			canManageAuthors, canManageTeams, request.Snapshot); err == nil {
 			err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic approval", r)
+		}
+	}
+	if err == nil {
+		if intentErr := enqueueRequestActivityTx(r, tx); intentErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist project activity")
+			return
 		}
 	}
 	if err != nil || tx.Commit(r.Context()) != nil {

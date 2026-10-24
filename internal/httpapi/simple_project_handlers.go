@@ -487,6 +487,10 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 		writeError(w, http.StatusInternalServerError, "failed to commit project associations")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist project activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit project")
 		return
@@ -599,6 +603,12 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 		if err = applySimpleProjectSnapshotTx(r.Context(), tx, current.ID, created.RevisionID, claims.Subject,
 			canManageAuthors, canManageTeams, request.Snapshot); err == nil {
 			err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic approval", r)
+		}
+	}
+	if err == nil {
+		if intentErr := enqueueRequestActivityTx(r, tx); intentErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist project activity")
+			return
 		}
 	}
 	if err != nil || tx.Commit(r.Context()) != nil {
