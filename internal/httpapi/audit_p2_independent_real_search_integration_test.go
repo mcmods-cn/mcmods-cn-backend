@@ -158,14 +158,14 @@ func TestAuditP2NEXT002RealTypesenseStaleIndexHTTPPostgresIntegration(t *testing
 	check("", "P2StaleIndexFixture", 2)
 	t.Log("REAL_TYPESENSE delayed-index single hidden total0; restore no duplicates; multi-page/last-page, deleted candidate and owner/other isolation PASS; no browser/Worker claim")
 	if os.Getenv("MCMODS_RUN_LIVE_P2_SEARCH") == "1" {
-		auditP2HoldRealSearchForBrowser(t, f, prefix, address.String())
+		auditP2HoldRealSearchForBrowser(t, f, prefix, address.String(), client)
 	}
 }
 
 // Opt-in test controller only: no control route or policy override is exposed
 // by the product server. The frontend driver may observe real public responses
 // while an owned file requests the same isolated SQL state changes as above.
-func auditP2HoldRealSearchForBrowser(t *testing.T, f test013Fixture, prefix, typesenseOrigin string) {
+func auditP2HoldRealSearchForBrowser(t *testing.T, f test013Fixture, prefix, typesenseOrigin string, client *searchindex.Client) {
 	t.Helper()
 	directory := os.Getenv("MCMODS_AUDIT_P2_SEARCH_DIR")
 	if !filepath.IsAbs(directory) {
@@ -173,6 +173,26 @@ func auditP2HoldRealSearchForBrowser(t *testing.T, f test013Fixture, prefix, typ
 	}
 	if err := os.Mkdir(directory, 0700); err != nil {
 		t.Fatal("live search output directory already exists or unavailable")
+	}
+	// The real browser exposes page sizes 20/40/60. Keep the original tiny
+	// counterexample separate, and seed a distinct 21-row group for actual
+	// Next/Previous navigation with its unchanged minimum page size.
+	var pagingControlledID int64
+	var pagingControlledPublic string
+	pagingDocuments := make([]map[string]any, 0, 21)
+	for i := 0; i < 21; i++ {
+		public := randomCatalogPublicID()
+		var id int64
+		if err := f.db.QueryRow(f.ctx, `insert into mods(project_code,slug,primary_name,review_status,submitted_by) values($1,$2,$3,'approved',$4) returning id`, public, "p2-browser-"+public, fmt.Sprintf("P2BrowserPagingFixture %02d", i), f.userIDs[f.otherEditor]).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			pagingControlledID, pagingControlledPublic = id, public
+		}
+		pagingDocuments = append(pagingDocuments, map[string]any{"id": fmt.Sprintf("mod_%d", id), "internal_id": id, "entity_type": "mod", "updated_at": int64(1000 + i), "names": []string{"P2BrowserPagingFixture"}, "identifiers": []string{}, "creators": []string{}, "keywords": []string{}, "text": []string{}, "slug": "p2-browser-" + public, "public_id": public})
+	}
+	if err := client.ImportDocuments(f.ctx, client.VersionedCollection("projects", 6), pagingDocuments); err != nil {
+		t.Fatal("import owned browser paging documents failed")
 	}
 	write := func(name string, value any) {
 		t.Helper()
@@ -188,7 +208,7 @@ func auditP2HoldRealSearchForBrowser(t *testing.T, f test013Fixture, prefix, typ
 	if err != nil {
 		t.Fatal(err)
 	}
-	write("runtime.json", map[string]any{"owner": "exporter-independent-next002-20261024", "apiOrigin": f.origin.URL, "backendSource": auditJourneyRevision(cwd), "typesenseOrigin": typesenseOrigin, "ownedTypesensePrefix": prefix, "singleQuery": "P2OnlyFirst", "multiQuery": "P2StaleIndexFixture", "singleProjectPublicId": f.modCode, "initialMultiTotal": 2, "sourceState": "approved", "indexDocumentCount": 3, "commandPath": filepath.Join(directory, "command.json"), "ackPath": filepath.Join(directory, "command-ack.json"), "stopPath": filepath.Join(directory, "STOP"), "layer": "actual mounted API + PostgreSQL18 + actual Typesense29; no index Worker; external actual browser required"})
+	write("runtime.json", map[string]any{"owner": "exporter-independent-next002-20261024", "apiOrigin": f.origin.URL, "backendSource": auditJourneyRevision(cwd), "typesenseOrigin": typesenseOrigin, "ownedTypesensePrefix": prefix, "singleQuery": "P2OnlyFirst", "multiQuery": "P2StaleIndexFixture", "singleProjectPublicId": f.modCode, "initialMultiTotal": 2, "pagingQuery": "P2BrowserPagingFixture", "pagingTotal": 21, "pagingControlledPublicId": pagingControlledPublic, "pagingHiddenTotal": 20, "pagingControlInitiallyLastPage": true, "sourceState": "approved", "indexDocumentCount": 24, "commandPath": filepath.Join(directory, "command.json"), "ackPath": filepath.Join(directory, "command-ack.json"), "stopPath": filepath.Join(directory, "STOP"), "layer": "actual mounted API + PostgreSQL18 + actual Typesense29; no index Worker; external actual browser required"})
 	last := ""
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
@@ -211,6 +231,7 @@ func auditP2HoldRealSearchForBrowser(t *testing.T, f test013Fixture, prefix, typ
 		var command struct {
 			ID    string `json:"commandId"`
 			State string `json:"state"`
+			Scope string `json:"scope"`
 		}
 		if json.Unmarshal(raw, &command) != nil || command.ID == "" || command.ID == last {
 			continue
@@ -218,10 +239,16 @@ func auditP2HoldRealSearchForBrowser(t *testing.T, f test013Fixture, prefix, typ
 		if command.State != "approved" && command.State != "pending" && command.State != "rejected" {
 			t.Fatal("invalid owned test state command")
 		}
-		if _, err = f.db.Exec(f.ctx, `update mods set review_status=$2 where id=$1`, f.modID, command.State); err != nil {
+		id := f.modID
+		if command.Scope == "paging" {
+			id = pagingControlledID
+		} else if command.Scope != "" && command.Scope != "single" {
+			t.Fatal("invalid owned source scope")
+		}
+		if _, err = f.db.Exec(f.ctx, `update mods set review_status=$2 where id=$1`, id, command.State); err != nil {
 			t.Fatal(err)
 		}
 		last = command.ID
-		write("command-ack.json", map[string]any{"commandId": command.ID, "state": command.State, "acknowledgedAt": time.Now().UTC().Format(time.RFC3339Nano), "scope": "only this invocation's synthetic source Mod"})
+		write("command-ack.json", map[string]any{"commandId": command.ID, "state": command.State, "acknowledgedAt": time.Now().UTC().Format(time.RFC3339Nano), "scope": command.Scope, "syntheticSourceOnly": true})
 	}
 }
