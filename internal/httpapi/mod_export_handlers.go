@@ -848,7 +848,25 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	if _, err = s.db.Exec(ctx, `delete from catalog_import_revisions where job_id=$1 and mod_id=$2 and status='staging'`, jobID, modID); err != nil {
 		return err
 	}
+	categoryFile := files["recipes/jei/categories.json"]
+	if categoryFile == nil {
+		return fmt.Errorf("export package is missing recipes/jei/categories.json")
+	}
+	categoryData, readErr := readExportZIPFile(categoryFile, maxExportJSONSize)
+	if readErr != nil {
+		return fmt.Errorf("read recipes/jei/categories.json: %w", readErr)
+	}
 	revisions := make(map[string]string, len(namespaces))
+	// Validate provenance against admitted namespaces before any staging revision
+	// is written. The transaction below replaces these nonpersisted markers with
+	// actual IDs before any dependency observation can be queued.
+	for _, namespace := range namespaces {
+		revisions[namespace] = "pending:" + namespace
+	}
+	recipeScope, scopeErr := newExportRecipeImportScope(revisions, categoryData)
+	if scopeErr != nil {
+		return scopeErr
+	}
 	err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
 		for _, namespace := range namespaces {
 			lockKey := fmt.Sprintf("mod-export:%d:%s:%s:%s", modID, manifest.MinecraftVersion, loader, namespace)
@@ -945,16 +963,8 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	if err = validateExportBaseRecipeDocument(baseRecipeData); err != nil {
 		return err
 	}
-	categoryFile := files["recipes/jei/categories.json"]
-	if categoryFile == nil {
-		return fmt.Errorf("export package is missing recipes/jei/categories.json")
-	}
-	categoryData, readErr := readExportZIPFile(categoryFile, maxExportJSONSize)
-	if readErr != nil {
-		return fmt.Errorf("read recipes/jei/categories.json: %w", readErr)
-	}
 	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
-		return importExportRecipeTypes(ctx, tx, packageID, revisions, categoryData)
+		return recipeScope.importTypes(ctx, tx, packageID)
 	}); err != nil {
 		return err
 	}
@@ -963,7 +973,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}
 	if err = processExportRecipeJSONFiles(ctx, files, "recipes/jei/templates/", decodeExportJEITemplateCollection,
 		func(name string, document exportJEITemplateCollection) error {
-			if queueErr := queueExportJEITemplateCollection(writeBatch, revisions, name, document); queueErr != nil {
+			if queueErr := recipeScope.queueTemplates(writeBatch, name, document); queueErr != nil {
 				return queueErr
 			}
 			if writeBatch.shouldFlush() {
@@ -992,7 +1002,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}
 	if err = processExportRecipeJSONFiles(ctx, files, "recipes/jei/recipes/", decodeExportJEIRecipeCollection,
 		func(name string, document exportJEIRecipeCollection) error {
-			if queueErr := queueExportJEIRecipeCollection(writeBatch, resourceResolver, packageID, revisions, name, document); queueErr != nil {
+			if queueErr := recipeScope.queueRecipes(writeBatch, resourceResolver, packageID, name, document); queueErr != nil {
 				return queueErr
 			}
 			if writeBatch.shouldFlush() {

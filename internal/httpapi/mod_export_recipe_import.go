@@ -555,21 +555,27 @@ func queueExportJEITemplateCollection(batch *modExportWriteBatch, revisions map[
 			import_snapshot_id=excluded.import_snapshot_id,background_file_id=null,canvas_width=excluded.canvas_width,
 			canvas_height=excluded.canvas_height,image_scale=excluded.image_scale,definition=excluded.definition,updated_by=null,updated_at=now()
 			where recipe_layout_templates.published_revision_id is null and exists(
-				select 1 from catalog_entities entity where entity.id=recipe_layout_templates.entity_id
+				select 1 from recipe_template_import_snapshots previous
+				join catalog_import_revisions previous_revision on previous_revision.id=previous.revision_id
+				join catalog_import_revisions incoming_revision on incoming_revision.id=$9
+				where previous.id=recipe_layout_templates.import_snapshot_id
+				and previous_revision.mod_id=incoming_revision.mod_id
+				and previous_revision.source_namespace=incoming_revision.source_namespace)
+			and exists(select 1 from catalog_entities entity where entity.id=recipe_layout_templates.entity_id
 				and entity.published_revision_id is null and entity.status='active')`, int64(len(definition)),
 			canonicalIdentity.ID, typeIdentity.ID, template.TemplateID, templateID, canvas.Width, canvas.Height, document.ImageScale, definition, revisionID)
 		batch.queue(`update recipe_template_slots slot set ordinal=slot.ordinal+1000000
 			where slot.template_id=catalog_entity_internal_id($1) and exists(select 1 from recipe_layout_templates template
 				join catalog_entities entity on entity.id=template.entity_id where template.entity_id=catalog_entity_internal_id($1)
-				and template.published_revision_id is null and template.import_snapshot_id is not null
+				and template.published_revision_id is null and template.import_snapshot_id=$3
 				and entity.published_revision_id is null and entity.status='active')
-			and exists(select 1 from catalog_import_revisions revision where revision.id=$2 and revision.is_active)`, 0, canonicalIdentity.ID, revisionID)
+			and exists(select 1 from catalog_import_revisions revision where revision.id=$2 and revision.is_active)`, 0, canonicalIdentity.ID, revisionID, templateID)
 		batch.queue(`delete from recipe_template_slots slot where slot.template_id=catalog_entity_internal_id($1)
 			and not exists(select 1 from recipe_bindings binding where binding.template_slot_id=slot.id)
 			and exists(select 1 from recipe_layout_templates template join catalog_entities entity on entity.id=template.entity_id
-				where template.entity_id=catalog_entity_internal_id($1) and template.published_revision_id is null and template.import_snapshot_id is not null
+				where template.entity_id=catalog_entity_internal_id($1) and template.published_revision_id is null and template.import_snapshot_id=$3
 				and entity.published_revision_id is null and entity.status='active')
-			and exists(select 1 from catalog_import_revisions revision where revision.id=$2 and revision.is_active)`, 0, canonicalIdentity.ID, revisionID)
+			and exists(select 1 from catalog_import_revisions revision where revision.id=$2 and revision.is_active)`, 0, canonicalIdentity.ID, revisionID, templateID)
 		seenSlots := make(map[string]struct{}, len(template.Slots))
 		for ordinal, slot := range template.Slots {
 			slot.SlotID = strings.TrimSpace(slot.SlotID)
@@ -603,7 +609,7 @@ func queueExportJEITemplateCollection(batch *modExportWriteBatch, revisions map[
 			batch.queue(`insert into recipe_template_slots(identity_key,template_id,slot_key,role,output_index,ordinal,x,y,width,height,definition)
 				select $1,catalog_entity_internal_id($2),$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb from recipe_layout_templates template
 				join catalog_entities entity on entity.id=template.entity_id where template.entity_id=catalog_entity_internal_id($2)
-				and template.published_revision_id is null and template.import_snapshot_id is not null
+				and template.published_revision_id is null and template.import_snapshot_id=$13
 				and entity.published_revision_id is null and entity.status='active'
 				and exists(select 1 from catalog_import_revisions revision where revision.id=$12 and revision.is_active)
 				on conflict(template_id,slot_key) do update set
@@ -613,7 +619,7 @@ func queueExportJEITemplateCollection(batch *modExportWriteBatch, revisions map[
 					then recipe_template_slots.output_index else excluded.output_index end,
 				ordinal=excluded.ordinal,x=excluded.x,y=excluded.y,width=excluded.width,height=excluded.height,
 				definition=excluded.definition`, int64(len(slotDefinition)), canonicalSlotID, canonicalIdentity.ID, slot.SlotID,
-				canonicalRole, slot.OutputIndex, ordinal, rect.X, rect.Y, rect.Width, rect.Height, slotDefinition, revisionID)
+				canonicalRole, slot.OutputIndex, ordinal, rect.X, rect.Y, rect.Width, rect.Height, slotDefinition, revisionID, templateID)
 		}
 	}
 	return nil
@@ -637,7 +643,7 @@ type importedRecipeTemplatePromotion struct {
 // promoteImportedRecipeTemplatesTx replays normalized observations only after
 // a revision becomes active. Pending/rejected imports therefore never replace
 // the public canonical editor state, while manual publication remains protected
-// by the published_revision_id guards in queueExportJEITemplateCollection.
+// by the publication and source-owner guards in queueExportJEITemplateCollection.
 func loadImportedRecipeTemplatePromotions(ctx context.Context, tx pgx.Tx, revisionID string) ([]importedRecipeTemplatePromotion, error) {
 	rows, err := tx.Query(ctx, `select recipe_type.canonical_id,snapshot.schema_version,snapshot.template_collection_path,
 		snapshot.source_template_id,snapshot.background_path,snapshot.background_contains_ingredients,
