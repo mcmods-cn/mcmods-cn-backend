@@ -58,6 +58,11 @@ func auditGlobalCatalogTP007Ancestors(t *testing.T, f auditFixGRFixture, directo
 	if !ticket.UploadRequired || ticket.Method != http.MethodPut || ticket.Multipart.UploadID != "" || ticket.SHA256 != sourceSHA {
 		t.Fatal("expected ordinary small-file upload ticket")
 	}
+	parsedUpload, parseError := url.Parse(ticket.URL)
+	if parseError != nil {
+		t.Fatal(parseError)
+	}
+	auditJourneyWriteJSON(t, filepath.Join(directory, "tp007-upload-route-facts.json"), map[string]any{"method": ticket.Method, "requestPath": parsedUpload.EscapedPath(), "objectPath": "/" + ticket.ObjectKey, "queryValuesRecorded": false})
 	request, err := http.NewRequestWithContext(f.ctx, ticket.Method, ticket.URL, bytes.NewReader(source))
 	if err != nil {
 		t.Fatal(err)
