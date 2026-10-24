@@ -352,6 +352,7 @@ func schemaInstallationStatements() []string {
 	statements = append(statements, auditIdentityOSSSchemaStatements()...)
 	statements = append(statements, CatalogImportPolicySchemaStatements()...)
 	statements = append(statements, OSSMultipartActivitySchemaStatements()...)
+	statements = append(statements, OSSUploadByteBindingSchemaStatements()...)
 	return append(statements, foreignKeyIndexStatement())
 }
 
