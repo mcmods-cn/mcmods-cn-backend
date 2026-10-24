@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 const favoriteModpackExportPreviewTTL = 15 * time.Minute
 
 var (
+	errFavoriteExportActivityPersistence     = errors.New("failed to persist favorite export activity")
 	errFavoriteModpackExportPreviewNotFound  = errors.New("favorite modpack export preview not found")
 	errFavoriteModpackExportPreviewExpired   = errors.New("favorite modpack export preview expired")
 	errFavoriteModpackExportPreviewConsumed  = errors.New("favorite modpack export preview already consumed")
@@ -47,7 +49,7 @@ func favoriteModpackExportPreviewHash(snapshot favoriteModpackExportPreviewSnaps
 	return hex.EncodeToString(digest[:]), raw, nil
 }
 
-func (s *Server) persistFavoriteModpackExportPreview(ctx context.Context, ownerID int64, preview favoriteModpackExportPreview) (favoriteModpackExportPreview, error) {
+func (s *Server) persistFavoriteModpackExportPreview(ctx context.Context, ownerID int64, preview favoriteModpackExportPreview, requests ...*http.Request) (favoriteModpackExportPreview, error) {
 	if preview.ReportVersion == 0 {
 		preview.ReportVersion = favoriteModpackExportReportVersion
 	}
@@ -82,6 +84,11 @@ func (s *Server) persistFavoriteModpackExportPreview(ctx context.Context, ownerI
 		return preview, fmt.Errorf("%w: save snapshot: %v", errFavoriteModpackExportPreviewAuthority, err)
 	}
 	preview.PreviewHash = contentHash
+	if len(requests) > 0 && requests[0] != nil {
+		if err = enqueueRequestActivityTx(requests[0], tx); err != nil {
+			return preview, errFavoriteExportActivityPersistence
+		}
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return preview, fmt.Errorf("%w: commit snapshot: %v", errFavoriteModpackExportPreviewAuthority, err)
 	}

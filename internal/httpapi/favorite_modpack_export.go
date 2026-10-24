@@ -147,7 +147,7 @@ func (s *Server) preflightFavoriteModpackExport(w http.ResponseWriter, r *http.R
 	}
 	preview.ReportVersion = favoriteModpackExportReportVersion
 	preview.RebuildSource = favoriteModpackExportSourceCurrent
-	preview, err = s.persistFavoriteModpackExportPreview(r.Context(), currentClaims(r).Subject, preview)
+	preview, err = s.persistFavoriteModpackExportPreview(r.Context(), currentClaims(r).Subject, preview, r)
 	if err != nil {
 		writeFavoriteExportError(w, err)
 		return
@@ -257,6 +257,10 @@ func (s *Server) createFavoriteModpackExport(w http.ResponseWriter, r *http.Requ
 	message := favoriteModpackExportMessage{TaskID: taskID}
 	if _, err = queue.EnqueueTx(r.Context(), tx, favoriteModpackExportTaskCode, "favorite.modpack_export.requested", "favorite_modpack_export", taskID, r.Header.Get("X-Request-ID"), message); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to enqueue export task")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "MODPACK_EXPORT_ACTIVITY_UNAVAILABLE", "failed to persist favorite export activity", 0, nil)
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
@@ -569,6 +573,10 @@ func nullableFavoriteCollectionID(value int64) any {
 }
 
 func writeFavoriteExportError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errFavoriteExportActivityPersistence) {
+		writeAPIError(w, http.StatusInternalServerError, "MODPACK_EXPORT_ACTIVITY_UNAVAILABLE", "failed to persist favorite export activity", 0, nil)
+		return
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeAPIError(w, http.StatusNotFound, "FAVORITE_COLLECTION_NOT_FOUND", "favorite collection was not found", 0, nil)
 		return

@@ -80,7 +80,7 @@ func (s *Server) rebuildFavoriteModpackExportPreview(w http.ResponseWriter, r *h
 	}
 	preview.AllowCompatibleOnly = task.AllowCompatibleOnly
 	preview.RebuildSource = request.Source
-	preview, err = s.persistFavoriteModpackExportPreview(r.Context(), currentClaims(r).Subject, preview)
+	preview, err = s.persistFavoriteModpackExportPreview(r.Context(), currentClaims(r).Subject, preview, r)
 	if err != nil {
 		writeFavoriteExportError(w, err)
 		return
