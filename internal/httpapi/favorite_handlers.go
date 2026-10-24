@@ -261,6 +261,10 @@ func (s *Server) createFavoriteCollection(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "failed to create favorite collection")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist favorite activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		logFavoriteCollectionWriteFailure("create", item.ID, userID, err)
 		writeError(w, http.StatusInternalServerError, "failed to create favorite collection")
@@ -295,8 +299,14 @@ func (s *Server) updateFavoriteCollection(w http.ResponseWriter, r *http.Request
 		visibility = *request.IsPublic
 	}
 	claims := currentClaims(r)
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update favorite collection")
+		return
+	}
+	defer tx.Rollback(r.Context())
 	var item favoriteCollectionSummary
-	err := s.db.QueryRow(r.Context(), `update favorite_collections set
+	err = tx.QueryRow(r.Context(), `update favorite_collections set
 		name=case when is_default or $3='' then name else $3 end,
 		is_public=coalesce($4::boolean,is_public),updated_at=now()
 		where public_id=$1 and user_id=$2
@@ -313,6 +323,14 @@ func (s *Server) updateFavoriteCollection(w http.ResponseWriter, r *http.Request
 			return
 		}
 		logFavoriteCollectionWriteFailure("update", publicID, claims.Subject, err)
+		writeError(w, http.StatusInternalServerError, "failed to update favorite collection")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist favorite activity")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update favorite collection")
 		return
 	}
@@ -363,6 +381,10 @@ func (s *Server) deleteFavoriteCollection(w http.ResponseWriter, r *http.Request
 	if _, err = tx.Exec(r.Context(), `delete from favorite_collections where id=$1`, collectionID); err != nil {
 		logFavoriteCollectionWriteFailure("delete", publicID, claims.Subject, err)
 		writeError(w, http.StatusInternalServerError, "failed to delete favorite collection")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist favorite activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
@@ -471,6 +493,10 @@ func (s *Server) patchFavoriteMembership(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to load favorite membership")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist favorite activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save favorites")
 		return
@@ -575,6 +601,10 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to save favorites")
 			return
 		}
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist favorite activity")
+		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save favorites")
