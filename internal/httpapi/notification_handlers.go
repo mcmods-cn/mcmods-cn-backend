@@ -161,6 +161,10 @@ func (s *Server) markAllNotificationsRead(w http.ResponseWriter, r *http.Request
 	claims := currentClaims(r)
 	var readBefore time.Time
 	err := s.db.QueryRow(r.Context(), markAllNotificationsReadSQL, claims.Subject).Scan(&readBefore)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// A newer concurrent snapshot already won the conditional upsert.
+		err = s.db.QueryRow(r.Context(), `select read_at from notification_read_watermarks where user_id=$1`, claims.Subject).Scan(&readBefore)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "更新通知状态失败")
 		return

@@ -52,6 +52,10 @@ type RealtimeLease struct {
 	released  atomic.Bool
 }
 
+// ID identifies this lease for the durable admission fence. It is random and
+// contains neither a user ID nor an authentication credential.
+func (lease *RealtimeLease) ID() string { return lease.id }
+
 type unreadEntry struct {
 	notifications int64
 	messages      int64
@@ -402,8 +406,8 @@ func (c *Cache) pruneClaimsLocked(now time.Time) {
 }
 
 // AcquireRealtimeLease atomically applies deployment-wide total, user and
-// session connection budgets when Redis is available. The bounded local lease
-// table is the exact single-process implementation and the fail-safe fallback.
+// session connection budgets. A configured shared backend must succeed; local
+// leases are only valid when Redis is explicitly disabled for a single instance.
 func (c *Cache) AcquireRealtimeLease(ctx context.Context, userID int64, sessionID string, totalLimit, userLimit, sessionLimit int, ttl time.Duration) (*RealtimeLease, bool) {
 	sessionID = strings.TrimSpace(sessionID)
 	if c == nil || userID <= 0 || sessionID == "" || len(sessionID) > 128 || totalLimit <= 0 || userLimit <= 0 || sessionLimit <= 0 || ttl <= 0 {
@@ -438,8 +442,10 @@ return 1
 				lease.shared = true
 				return lease, true
 			}
-			c.metrics.localFallbacks.Add(1)
 		}
+	}
+	if c.cfg.Enabled {
+		return nil, false
 	}
 	return c.acquireLocalRealtimeLease(lease, totalLimit, userLimit, sessionLimit)
 }

@@ -32,11 +32,14 @@ func TestUnreadReconciliationQueryIntegration(t *testing.T) {
 	defer pool.Close()
 	if _, err = pool.Exec(ctx, `
 		create temporary table users(id bigint primary key,public_id text not null,status text not null);
-		create temporary table notifications(id bigint primary key,recipient_id bigint,updated_at timestamptz not null);
+		create temporary table notifications(id bigint primary key,recipient_id bigint,updated_at timestamptz not null,
+            revision_xid xid8 not null default pg_current_xact_id());
 		create index idx_notifications_recipient_id on notifications(recipient_id,id);
 		create index idx_notifications_broadcast_id on notifications(id) where recipient_id is null;
-		create temporary table notification_receipts(notification_id bigint not null,user_id bigint not null,read_at timestamptz,primary key(notification_id,user_id));
-		create temporary table notification_read_watermarks(user_id bigint primary key,max_notification_id bigint not null,read_at timestamptz not null);
+		create temporary table notification_receipts(notification_id bigint not null,user_id bigint not null,read_at timestamptz,primary key(notification_id,user_id),
+            read_revision_xid xid8);
+		create temporary table notification_read_watermarks(user_id bigint primary key,max_notification_id bigint not null,read_at timestamptz not null,
+            visibility_snapshot pg_snapshot);
 		create temporary table notification_broadcast_state(singleton boolean primary key,live_count bigint not null,max_notification_id bigint not null);
 		create temporary table direct_messages(id bigint primary key,recipient_id bigint not null,read_at timestamptz);
 		create index idx_direct_messages_recipient_read on direct_messages(recipient_id,read_at);

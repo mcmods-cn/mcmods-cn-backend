@@ -337,6 +337,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/mods/{siteId}/catalog-imports/{jobId}/cancel", s.requireAuth(s.cancelModExportJob))
 	s.mux.HandleFunc("GET /api/v1/mods/{siteId}/export-data", s.optionalAuth(s.modExportDataSummary))
 	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/registries/{registry}", s.optionalAuth(s.modExportRegistry))
+	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}", s.optionalAuth(s.modExportRevisionDetail))
+	s.mux.HandleFunc("GET /api/v1/admin/comments/pending", s.requireAuth(s.pendingComments))
+	s.mux.HandleFunc("PATCH /api/v1/comments/{commentId}/review", s.requireAuth(s.reviewPendingComment))
 	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/registry-entries", s.optionalAuth(s.modExportRegistryEntries))
 	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/document-entries", s.optionalAuth(s.modExportDocumentEntries))
 	s.mux.HandleFunc("GET /api/v1/export-revisions/{revisionId}/tags", s.optionalAuth(s.modExportTags))
@@ -577,7 +580,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/admin/tasks", s.requirePermission("task.write", s.createTask))
 	s.mux.HandleFunc("PUT /api/v1/admin/tasks/{publicId}", s.requirePermission("task.write", s.updateTask))
 	s.mux.HandleFunc("DELETE /api/v1/admin/tasks/{publicId}", s.requirePermission("task.write", s.deleteTask))
-	s.mux.HandleFunc("PATCH /api/v1/admin/export-revisions/{revisionId}/activate", s.requirePermission("project.review", s.activateModExportRevision))
+	s.mux.HandleFunc("PATCH /api/v1/admin/export-revisions/{revisionId}/activate", s.requireAuth(s.activateModExportRevision))
 	s.mux.HandleFunc("POST /api/v1/admin/oss/uploads/presign", s.requirePermission("oss.write", s.createOSSDirectUpload))
 	s.mux.HandleFunc("POST /api/v1/admin/oss/uploads/complete", s.requirePermission("oss.write", s.completeOSSDirectUpload))
 	s.mux.HandleFunc("GET /api/v1/admin/oss/files", s.requirePermission("oss.read", s.ossFiles))
@@ -644,6 +647,9 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		redisCancel()
 		if err == nil {
 			dependencies["redis"] = "ready"
+		} else {
+			dependencies["redis"] = "unavailable"
+			status, statusCode = "not_ready", http.StatusServiceUnavailable
 		}
 	}
 	queueStatus := s.queue.Status()

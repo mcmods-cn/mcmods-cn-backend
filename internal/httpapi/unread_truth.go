@@ -29,7 +29,7 @@ const unreadTruthAnyInternalUsersSQL = `with selected_users as materialized (
 // then applied as corrections to the baseline.
 const unreadTruthSQLTail = `,
 targets as materialized (
-	select selected.id user_id,selected.public_id,watermark.max_notification_id,watermark.read_at
+	select selected.id user_id,selected.public_id,watermark.max_notification_id,watermark.read_at,watermark.visibility_snapshot
 	from selected_users selected
 	left join notification_read_watermarks watermark on watermark.user_id=selected.id
 ),
@@ -39,10 +39,11 @@ direct_notification_counts as (
 	join targets target on target.user_id=n.recipient_id
 	left join notification_receipts receipt on receipt.notification_id=n.id and receipt.user_id=target.user_id
 	where n.recipient_id=any($1::bigint[]) and (
-		(receipt.notification_id is not null and receipt.read_at is null)
+		(receipt.notification_id is not null and (receipt.read_at is null or not coalesce(receipt.read_revision_xid=n.revision_xid,true)))
 		or (receipt.notification_id is null and not (
 			n.id<=coalesce(target.max_notification_id,0)
 			and n.updated_at<=coalesce(target.read_at,'-infinity'::timestamptz)
+            and (target.visibility_snapshot is null or pg_visible_in_snapshot(n.revision_xid,target.visibility_snapshot))
 		))
 	)
 	group by target.user_id
@@ -62,18 +63,18 @@ broadcast_baselines as (
 			where suffix.recipient_id is null and suffix.id>target.max_notification_id) end)
 		+(select count(*) from notifications changed
 			where changed.recipient_id is null and changed.id<=target.max_notification_id
-				and changed.updated_at>target.read_at)
+				and (changed.updated_at>target.read_at or (target.visibility_snapshot is not null and not pg_visible_in_snapshot(changed.revision_xid,target.visibility_snapshot))))
 	end::bigint baseline
 	from targets target cross join notification_broadcast_state state
 	where state.singleton
 ),
 broadcast_receipt_corrections as (
 	select target.user_id,coalesce(sum(case
-		when receipt.read_at is null and not (
-			target.max_notification_id is null or notification.id>target.max_notification_id or notification.updated_at>target.read_at
+		when (receipt.read_at is null or not coalesce(receipt.read_revision_xid=notification.revision_xid,true)) and not (
+			target.max_notification_id is null or notification.id>target.max_notification_id or notification.updated_at>target.read_at or (target.visibility_snapshot is not null and not pg_visible_in_snapshot(notification.revision_xid,target.visibility_snapshot))
 		) then 1
-		when receipt.read_at is not null and (
-			target.max_notification_id is null or notification.id>target.max_notification_id or notification.updated_at>target.read_at
+		when receipt.read_at is not null and coalesce(receipt.read_revision_xid=notification.revision_xid,true) and (
+			target.max_notification_id is null or notification.id>target.max_notification_id or notification.updated_at>target.read_at or (target.visibility_snapshot is not null and not pg_visible_in_snapshot(notification.revision_xid,target.visibility_snapshot))
 		) then -1
 		else 0 end),0)::bigint correction
 	from targets target

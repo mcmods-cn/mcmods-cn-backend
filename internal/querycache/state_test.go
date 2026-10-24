@@ -62,6 +62,24 @@ func TestUnreadCacheLoadsOnceAndNeverGoesNegative(t *testing.T) {
 	}
 }
 
+func TestAuditNEXT001LegacyUnreadDerivativeIsRebuilt(t *testing.T) {
+	cache, redisServer := redisStateTestCache(t)
+	ctx := context.Background()
+	key := cache.prefix + "unread:user:9"
+	redisServer.HSet(key, "notifications", "77", "messages", "0", "epoch", "0")
+	cache.AdjustUnread(ctx, 9, "messages", 1)
+	if redisServer.HGet(key, "version") != "" {
+		t.Fatal("delta promoted an unverified legacy derivative")
+	}
+	value, err := cache.LoadUnread(ctx, 9, func(context.Context) (UnreadSummary, error) { return UnreadSummary{Notifications: 1}, nil })
+	if err != nil || value.Notifications != 1 {
+		t.Fatalf("legacy derivative reused: %+v err=%v", value, err)
+	}
+	if redisServer.HGet(key, "version") != "2" {
+		t.Fatal("rebuilt unread derivative did not record its format")
+	}
+}
+
 func TestUnreadReconciliationRepairsDrift(t *testing.T) {
 	cache, _ := redisStateTestCache(t)
 	ctx := context.Background()

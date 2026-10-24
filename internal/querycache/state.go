@@ -265,7 +265,7 @@ func (c *Cache) LoadUnread(ctx context.Context, userID int64, loader func(contex
 			storedEpoch, epochErr := strconv.ParseInt(fields["epoch"], 10, 64)
 			notifications, notificationErr := strconv.ParseInt(fields["notifications"], 10, 64)
 			messages, messageErr := strconv.ParseInt(fields["messages"], 10, 64)
-			if epochErr == nil && notificationErr == nil && messageErr == nil && storedEpoch == epoch {
+			if fields["version"] == "2" && epochErr == nil && notificationErr == nil && messageErr == nil && storedEpoch == epoch {
 				c.metrics.redisHits.Add(1)
 				value := UnreadSummary{Notifications: max(notifications, 0), Messages: max(messages, 0)}
 				c.storeLocalUnread(userID, value, epoch, c.cfg.UnreadTTL)
@@ -375,7 +375,7 @@ func (c *Cache) SetUnread(ctx context.Context, userID int64, value UnreadSummary
 	}
 	started := time.Now()
 	pipe := c.redis.Pipeline()
-	pipe.HSet(ctx, key, "notifications", value.Notifications, "messages", value.Messages, "epoch", epoch)
+	pipe.HSet(ctx, key, "notifications", value.Notifications, "messages", value.Messages, "epoch", epoch, "version", "2")
 	pipe.Expire(ctx, key, ttl)
 	_, err := pipe.Exec(ctx)
 	c.recordRedisResult(started, err)
@@ -410,6 +410,7 @@ func (c *Cache) AdjustUnread(ctx context.Context, userID int64, field string, de
 	started := time.Now()
 	_, err := c.redis.Eval(ctx, `
 if redis.call('EXISTS',KEYS[1])==0 then return -1 end
+if redis.call('HGET',KEYS[1],'version')~='2' then return -1 end
 local value=redis.call('HINCRBY',KEYS[1],ARGV[1],ARGV[2])
 if value<0 then value=0 redis.call('HSET',KEYS[1],ARGV[1],0) end
 redis.call('HSET',KEYS[1],'epoch',ARGV[3])

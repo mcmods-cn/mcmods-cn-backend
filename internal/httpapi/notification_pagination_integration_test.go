@@ -39,7 +39,8 @@ func TestNotificationPagesAndReadWatermarkStayBoundedAtOneMillionRowsIntegration
 		create temporary table users(id bigint primary key,public_id text not null,username text not null,status text not null default 'active');
 		create temporary table notifications(
 			id bigint primary key,public_id text not null,recipient_id bigint,kind text not null,title text not null,body text not null,
-			source_locale text not null,data jsonb not null,created_at timestamptz not null,updated_at timestamptz not null
+			source_locale text not null,data jsonb not null,created_at timestamptz not null,updated_at timestamptz not null,
+            revision_xid xid8 not null default pg_current_xact_id()
 		);
 		create index idx_notifications_recipient_page on notifications(recipient_id,updated_at desc,id desc);
 		create index idx_notifications_recipient_kind_page on notifications(recipient_id,kind,updated_at desc,id desc);
@@ -52,10 +53,12 @@ func TestNotificationPagesAndReadWatermarkStayBoundedAtOneMillionRowsIntegration
 		);
 		create temporary table notification_receipts(
 			notification_id bigint not null,user_id bigint not null,read_at timestamptz,created_at timestamptz not null default now(),
-			primary key(notification_id,user_id)
+			primary key(notification_id,user_id),
+            read_revision_xid xid8
 		);
 		create temporary table notification_read_watermarks(
-			user_id bigint primary key,max_notification_id bigint not null,read_at timestamptz not null,updated_at timestamptz not null
+			user_id bigint primary key,max_notification_id bigint not null,read_at timestamptz not null,updated_at timestamptz not null,
+            visibility_snapshot pg_snapshot
 		);
 		create temporary table notification_actors(notification_id bigint not null,actor_id bigint not null,primary key(notification_id,actor_id));
 		create temporary table direct_messages(id bigint primary key,recipient_id bigint not null,read_at timestamptz);

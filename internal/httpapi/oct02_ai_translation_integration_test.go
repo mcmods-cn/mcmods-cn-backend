@@ -69,7 +69,8 @@ func oct02AITestPool(t *testing.T) *pgxpool.Pool {
 		 payload jsonb not null default '{}',created_at timestamptz not null default now());
 		create table app_logs(category text,level text,action text,target text,latency_ms bigint,payload jsonb);
 		create table system_settings(key text primary key,value jsonb);
-		create table notifications(id bigint primary key,recipient_id bigint,title text,body text,kind text);
+		create table notifications(id bigint primary key,recipient_id bigint,title text,body text,kind text,
+            revision_xid xid8 not null default pg_current_xact_id());
 		create table notification_translations(notification_id bigint,user_id bigint,locale text,title text,body text,
 		 created_at timestamptz default now(),primary key(notification_id,user_id,locale));
 		create table community_posts(id bigint primary key,published_revision_id bigint,status text,review_status text);

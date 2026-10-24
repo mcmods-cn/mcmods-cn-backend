@@ -138,8 +138,10 @@ func notificationPageSQL(userID int64, request notificationPageRequest) (string,
 	select n.id,n.public_id,n.kind,n.title,n.body,n.source_locale,n.data,
 		coalesce(actor_page.items,'[]'::jsonb),
 		case when receipt.notification_id is not null then receipt.read_at is not null
+            and coalesce(receipt.read_revision_xid=n.revision_xid,true)
 			else n.id<=coalesce(watermark.max_notification_id,0)
-				and n.updated_at<=coalesce(watermark.read_at,'-infinity'::timestamptz) end,
+				and n.updated_at<=coalesce(watermark.read_at,'-infinity'::timestamptz)
+            and (watermark.visibility_snapshot is null or pg_visible_in_snapshot(n.revision_xid,watermark.visibility_snapshot)) end,
 		n.created_at,n.updated_at,n.kind<>'system'
 	from selected page
 	join notifications n on n.id=page.id
@@ -198,25 +200,27 @@ func (s *Server) loadNotificationPage(ctx context.Context, userID int64, request
 	return notificationPage{Items: items, HasMore: hasMore, NextCursor: nextCursor}, nil
 }
 
-const markAllNotificationsReadSQL = `insert into notification_read_watermarks(user_id,max_notification_id,read_at,updated_at)
-	values($1,coalesce((select max(id) from notifications),0),clock_timestamp(),clock_timestamp())
-	on conflict(user_id) do update set
-		max_notification_id=greatest(notification_read_watermarks.max_notification_id,excluded.max_notification_id),
-		read_at=greatest(notification_read_watermarks.read_at,excluded.read_at),updated_at=excluded.updated_at
-returning read_at`
+const markAllNotificationsReadSQL = `insert into notification_read_watermarks(user_id,max_notification_id,read_at,updated_at,visibility_snapshot)
+ values($1,coalesce((select max(id) from notifications),0),clock_timestamp(),clock_timestamp(),pg_current_snapshot())
+ on conflict(user_id) do update set
+  max_notification_id=excluded.max_notification_id,read_at=excluded.read_at,
+  updated_at=excluded.updated_at,visibility_snapshot=excluded.visibility_snapshot
+ where notification_read_watermarks.read_at<=excluded.read_at
+ returning read_at`
 
-const markNotificationReadSQL = `insert into notification_receipts(notification_id,user_id,read_at)
-select n.id,$2,clock_timestamp() from notifications n
+const markNotificationReadSQL = `insert into notification_receipts(notification_id,user_id,read_at,read_revision_xid)
+select n.id,$2,clock_timestamp(),n.revision_xid from notifications n
 left join notification_receipts receipt on receipt.notification_id=n.id and receipt.user_id=$2
 left join notification_read_watermarks watermark on watermark.user_id=$2
 where n.id=$1 and (n.recipient_id is null or n.recipient_id=$2) and ` + notificationUnreadPredicateSQL + `
-on conflict(notification_id,user_id) do update set read_at=excluded.read_at
-where notification_receipts.read_at is null`
+on conflict(notification_id,user_id) do update set read_at=excluded.read_at,read_revision_xid=excluded.read_revision_xid
+where notification_receipts.read_at is null or notification_receipts.read_revision_xid is distinct from excluded.read_revision_xid`
 
 const notificationUnreadPredicateSQL = `(
-	(receipt.notification_id is not null and receipt.read_at is null)
-	or (receipt.notification_id is null and not (
-		n.id<=coalesce(watermark.max_notification_id,0)
-		and n.updated_at<=coalesce(watermark.read_at,'-infinity'::timestamptz)
-	))
+ (receipt.notification_id is not null and (receipt.read_at is null or not coalesce(receipt.read_revision_xid=n.revision_xid,true)))
+ or (receipt.notification_id is null and not (
+  n.id<=coalesce(watermark.max_notification_id,0)
+  and n.updated_at<=coalesce(watermark.read_at,'-infinity'::timestamptz)
+  and (watermark.visibility_snapshot is null or pg_visible_in_snapshot(n.revision_xid,watermark.visibility_snapshot))
+ ))
 )`
