@@ -1,17 +1,21 @@
 package httpapi
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -125,8 +129,28 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	cfg.FrontendOrigin = frontendOrigin
 	cfg.NATS = queueConfig
 	f.origin.Close()
+	unreadBarrierEnabled := os.Getenv("MCMODS_AUDIT_UNREAD_BARRIER") == "1"
+	armPath := filepath.Join(directory, "unread-arm")
+	startedPath := filepath.Join(directory, "unread-started.json")
+	releasePath := filepath.Join(directory, "unread-release")
+	var actorA, actorB string
+	if err = db.QueryRow(f.ctx, `select public_id from users where id=$1`, f.userIDs[f.editor]).Scan(&actorA); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(f.ctx, `select public_id from users where id=$1`, f.userIDs[f.otherEditor]).Scan(&actorB); err != nil {
+		t.Fatal(err)
+	}
+	if unreadBarrierEnabled {
+		if _, err = db.Exec(f.ctx, `insert into notifications(recipient_id,kind,title,body) select $1,'system','Synthetic identity boundary','Task-owned unread boundary fixture' from generate_series(1,3)`, f.userIDs[f.editor]); err != nil {
+			t.Fatal(err)
+		}
+	}
 	api := NewServer(journeyCtx, cfg, db, q, nil, nil, nil)
-	origin := httptest.NewServer(api)
+	var apiHandler http.Handler = api
+	if unreadBarrierEnabled {
+		apiHandler = auditJourneyUnreadBarrier(api, f.editor, actorA, armPath, startedPath, releasePath)
+	}
+	origin := httptest.NewServer(apiHandler)
 	t.Cleanup(func() {
 		origin.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -169,7 +193,7 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	}
 	runtimePath := filepath.Join(directory, "runtime.json")
 	stopPath := filepath.Join(directory, "STOP")
-	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "ossOrigin": f.provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": "auditfixture", "minecraftVersion": "1.20.1", "loader": "fabric", "modVersion": "1.0.0", "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": expectedSampleHash, "sampleProducerCommit": sampleProducer, "samplePath": samplePath, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED"}
+	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "ossOrigin": f.provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": "auditfixture", "minecraftVersion": "1.20.1", "loader": "fabric", "modVersion": "1.0.0", "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": expectedSampleHash, "sampleProducerCommit": sampleProducer, "samplePath": samplePath, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED", "unreadBarrier": map[string]any{"enabled": unreadBarrierEnabled, "armPath": armPath, "startedPath": startedPath, "releasePath": releasePath, "actorAPublicId": actorA, "actorBPublicId": actorB, "initialUnreadA": 3, "initialUnreadB": 0}}
 	updateRuntime := func(state string) {
 		runtime["state"] = state
 		runtime["updatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
@@ -246,4 +270,89 @@ func auditJourneyRevision(directory string) map[string]any {
 	state, _ := exec.Command("git", "-C", directory, "status", "--porcelain").Output()
 	digest := sha256.Sum256(diff)
 	return map[string]any{"commit": strings.TrimSpace(string(head)), "dirty": len(state) > 0, "trackedDiffSha256": hex.EncodeToString(digest[:])}
+}
+
+// The delay occurs after the real server has authenticated and read its actual
+// database/cache snapshot. Wire headers/status/body are preserved exactly. The
+// opt-in barrier only applies after an explicit owned ARM file and never changes
+// a production handler or creates a substitute API response.
+func auditJourneyUnreadBarrier(next http.Handler, actorToken, actorPublicID, armPath, startedPath, releasePath string) http.Handler {
+	var captured atomic.Bool
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, authErr := authTokenFromRequest(r)
+		_, armErr := os.Stat(armPath)
+		if r.Method != "GET" || r.URL.Path != "/api/v1/me/unread-summary" || authErr != nil || token != actorToken || armErr != nil || !captured.CompareAndSwap(false, true) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		recorder := httptest.NewRecorder()
+		next.ServeHTTP(recorder, r)
+		wire := append([]byte(nil), recorder.Body.Bytes()...)
+		decoded := wire
+		if recorder.Header().Get("Content-Encoding") == "gzip" {
+			reader, err := gzip.NewReader(bytes.NewReader(wire))
+			if err == nil {
+				body, readErr := io.ReadAll(io.LimitReader(reader, 65537))
+				reader.Close()
+				if readErr == nil && len(body) <= 65536 {
+					decoded = body
+				}
+			}
+		}
+		wireHash := sha256.Sum256(wire)
+		decodedHash := sha256.Sum256(decoded)
+		var observed struct {
+			Data map[string]int64 `json:"data"`
+		}
+		_ = json.Unmarshal(decoded, &observed)
+		evidence := map[string]any{"actorPublicId": actorPublicID, "status": recorder.Code, "bodySha256": hex.EncodeToString(decodedHash[:]), "wireBodySha256": hex.EncodeToString(wireHash[:]), "contentEncoding": recorder.Header().Get("Content-Encoding"), "actualCounts": observed.Data, "capturedAt": time.Now().UTC().Format(time.RFC3339Nano), "actualHandlerAndDatabase": true, "released": false}
+		persist := func() error {
+			raw, err := json.MarshalIndent(evidence, "", "  ")
+			if err != nil {
+				return err
+			}
+			temporary := startedPath + ".tmp"
+			if err = os.WriteFile(temporary, raw, 0600); err != nil {
+				return err
+			}
+			return os.Rename(temporary, startedPath)
+		}
+		if err := persist(); err != nil {
+			http.Error(w, "owned barrier evidence write failed", 503)
+			return
+		}
+		ticker := time.NewTicker(25 * time.Millisecond)
+		defer ticker.Stop()
+		deadline := time.NewTimer(120 * time.Second)
+		defer deadline.Stop()
+		waiting := true
+		for waiting {
+			select {
+			case <-r.Context().Done():
+				evidence["clientCanceled"] = true
+				_ = persist()
+				return
+			case <-deadline.C:
+				evidence["barrierExpired"] = true
+				_ = persist()
+				http.Error(w, "owned barrier release expired", 503)
+				return
+			case <-ticker.C:
+				if _, err := os.Stat(releasePath); err == nil {
+					waiting = false
+				}
+			}
+		}
+		evidence["released"] = true
+		evidence["releasedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
+		if err := persist(); err != nil {
+			http.Error(w, "owned barrier evidence write failed", 503)
+			return
+		}
+		for name, values := range recorder.Header() {
+			w.Header()[name] = append([]string(nil), values...)
+		}
+		w.WriteHeader(recorder.Code)
+		_, _ = w.Write(wire)
+	})
 }
