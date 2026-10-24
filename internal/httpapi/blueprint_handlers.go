@@ -54,6 +54,8 @@ const blueprintMaterialRevisionSQL = `select distinct on(revision.source_namespa
 	and public_source.review_status='approved'
 	order by revision.source_namespace,coalesce(revision.activated_at,revision.created_at) desc,revision.id desc`
 
+var errBlueprintActivityPersistence = errors.New("blueprint activity intent persistence failed")
+
 func logBlueprintReadFailure(publicID, stage string, err error) {
 	slog.Error("load blueprint data", "module", "blueprint", "public_id", publicID, "stage", stage, "error", err)
 }
@@ -228,7 +230,7 @@ func reserveBlueprintUserJobBudgetTx(ctx context.Context, tx pgx.Tx, createdBy i
 	return nil
 }
 
-func (s *Server) enqueueBlueprintJob(ctx context.Context, blueprintID, createdBy int64, operation, targetFormat string) (string, error) {
+func (s *Server) enqueueBlueprintJob(ctx context.Context, blueprintID, createdBy int64, operation, targetFormat string, requests ...*http.Request) (string, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return "", err
@@ -238,13 +240,20 @@ func (s *Server) enqueueBlueprintJob(ctx context.Context, blueprintID, createdBy
 	if err != nil {
 		return "", err
 	}
+	// Direct Worker/integration callers have no HTTP activity. Actual requests
+	// attach their existing middleware event to the same job/outbox transaction.
+	if len(requests) > 0 && requests[0] != nil {
+		if err = enqueueRequestActivityTx(requests[0], tx); err != nil {
+			return "", errors.Join(errBlueprintActivityPersistence, err)
+		}
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return "", err
 	}
 	return jobPublicID, nil
 }
 
-func (s *Server) retryBlueprintJob(ctx context.Context, publicID string, ownerID, actorID int64) (string, error) {
+func (s *Server) retryBlueprintJob(ctx context.Context, publicID string, ownerID, actorID int64, requests ...*http.Request) (string, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return "", err
@@ -281,6 +290,13 @@ func (s *Server) retryBlueprintJob(ctx context.Context, publicID string, ownerID
 			return "", errBlueprintNotRetryable
 		}
 		return "", err
+	}
+	// Direct Worker/integration callers have no HTTP activity. Actual requests
+	// attach their existing middleware event to the same job/outbox transaction.
+	if len(requests) > 0 && requests[0] != nil {
+		if err = enqueueRequestActivityTx(requests[0], tx); err != nil {
+			return "", errors.Join(errBlueprintActivityPersistence, err)
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return "", err
@@ -1090,7 +1106,7 @@ func (s *Server) convertBlueprint(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "variantId": existingID, "alreadyExists": true})
 		return
 	}
-	jobID, err := s.enqueueBlueprintJob(r.Context(), blueprintID, claims.Subject, "convert", format)
+	jobID, err := s.enqueueBlueprintJob(r.Context(), blueprintID, claims.Subject, "convert", format, r)
 	if errors.Is(err, errBlueprintUserJobLimit) {
 		writeAPIError(w, http.StatusTooManyRequests, "BLUEPRINT_JOB_CONCURRENCY_LIMIT", "too many blueprint jobs are already active", 60, nil)
 		return
@@ -1101,6 +1117,10 @@ func (s *Server) convertBlueprint(w http.ResponseWriter, r *http.Request) {
 	}
 	if isBlueprintActiveJobConflict(err) {
 		writeAPIError(w, http.StatusConflict, "BLUEPRINT_CONVERSION_ALREADY_QUEUED", "the requested blueprint conversion is already active", 30, nil)
+		return
+	}
+	if errors.Is(err, errBlueprintActivityPersistence) {
+		writeError(w, http.StatusInternalServerError, "failed to persist blueprint activity")
 		return
 	}
 	if err != nil {
@@ -1122,7 +1142,7 @@ func (s *Server) retryBlueprint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "没有权限重试该蓝图")
 		return
 	}
-	jobID, err := s.retryBlueprintJob(r.Context(), publicID, ownerID, currentClaims(r).Subject)
+	jobID, err := s.retryBlueprintJob(r.Context(), publicID, ownerID, currentClaims(r).Subject, r)
 	if errors.Is(err, errBlueprintNotFound) {
 		writeError(w, http.StatusNotFound, "蓝图不存在")
 		return
@@ -1133,6 +1153,10 @@ func (s *Server) retryBlueprint(w http.ResponseWriter, r *http.Request) {
 	}
 	if errors.Is(err, errBlueprintUserJobLimit) {
 		writeAPIError(w, http.StatusTooManyRequests, "BLUEPRINT_JOB_CONCURRENCY_LIMIT", "too many blueprint jobs are already active", 60, nil)
+		return
+	}
+	if errors.Is(err, errBlueprintActivityPersistence) {
+		writeError(w, http.StatusInternalServerError, "failed to persist blueprint activity")
 		return
 	}
 	if err != nil {
