@@ -13,7 +13,7 @@ func TestExternalProviderSnapshotsReturnValidatedSharedFacts(t *testing.T) {
 			response.Header().Set("Content-Type", "application/json")
 			switch request.URL.Path {
 			case "/project/example":
-				_, _ = response.Write([]byte(`{"id":"project-id","project_type":"mod","team":"team-id","slug":"example"}`))
+				_, _ = response.Write([]byte(`{"id":"project-id","project_type":"mod","team":"team-id","slug":"example","status":"approved"}`))
 			case "/project/project-id/version":
 				_, _ = response.Write([]byte(`[{"id":"version-id","game_versions":["1.21.1"],"loaders":["fabric"]}]`))
 			case "/team/team-id/members":
