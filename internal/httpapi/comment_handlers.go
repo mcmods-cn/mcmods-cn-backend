@@ -938,16 +938,22 @@ func (s *Server) commentPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "更新评论置顶失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
 	pinned := r.Method == http.MethodPut
 	if pinned {
-		_, err := s.db.Exec(r.Context(), `update comments set pinned_at=now(),pinned_by=$2,updated_at=now()
+		_, err := tx.Exec(r.Context(), `update comments set pinned_at=now(),pinned_by=$2,updated_at=now()
 			where id=$1 and status='published'`, commentID, claims.Subject)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "置顶评论失败")
 			return
 		}
 	} else {
-		_, err := s.db.Exec(r.Context(), `update comments set pinned_at=null,pinned_by=null,updated_at=now()
+		_, err := tx.Exec(r.Context(), `update comments set pinned_at=null,pinned_by=null,updated_at=now()
 			where id=$1`, commentID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "取消置顶失败")
@@ -955,6 +961,14 @@ func (s *Server) commentPin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	annotateActivity(r, activity.ActionEdit, activity.ObjectComment, publicID, 0)
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist comment interaction activity")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "更新评论置顶失败")
+		return
+	}
 	items, err := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims)
 	if err != nil || len(items) == 0 {
 		writeError(w, http.StatusInternalServerError, "读取评论失败")
@@ -986,13 +1000,27 @@ func (s *Server) commentReaction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "表态类型不正确")
 		return
 	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "更新评论表态失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
 	if r.Method == http.MethodDelete {
-		_, err = s.db.Exec(r.Context(), `delete from comment_reactions where comment_id=$1 and user_id=$2 and reaction=$3`, commentID, claims.Subject, reaction)
+		_, err = tx.Exec(r.Context(), `delete from comment_reactions where comment_id=$1 and user_id=$2 and reaction=$3`, commentID, claims.Subject, reaction)
 	} else {
-		_, err = s.db.Exec(r.Context(), `insert into comment_reactions(comment_id,user_id,reaction)
+		_, err = tx.Exec(r.Context(), `insert into comment_reactions(comment_id,user_id,reaction)
 			values($1,$2,$3) on conflict do nothing`, commentID, claims.Subject, reaction)
 	}
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, "更新评论表态失败")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist comment interaction activity")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "更新评论表态失败")
 		return
 	}
