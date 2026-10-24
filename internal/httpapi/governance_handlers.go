@@ -692,6 +692,10 @@ func (s *Server) claimReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "记录举报领取失败")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist report activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "提交举报领取失败")
 		return
@@ -746,6 +750,10 @@ func (s *Server) takeoverReport(w http.ResponseWriter, r *http.Request) {
 	if _, err = tx.Exec(r.Context(), `insert into report_assignment_events(report_id,action,actor_id,previous_assignee_id,assignee_id,reason)
 		values($1,'takeover',$2,$3,$2,$4)`, reportID, claims.Subject, previousAssigneeID, request.Reason); err != nil {
 		writeError(w, http.StatusInternalServerError, "记录举报接管失败")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist report activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
@@ -901,6 +909,10 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist report activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, 500, "提交举报审核失败")
 		return
@@ -962,6 +974,10 @@ func (s *Server) reopenUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	if _, err = tx.Exec(r.Context(), `update report_evidence set status='bound',cleanup_after='infinity'
 		where report_id=$1 and status='pending_delete'`, reportID); err != nil {
 		writeError(w, http.StatusInternalServerError, "取消附件清理失败")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist report activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
