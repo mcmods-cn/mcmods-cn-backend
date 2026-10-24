@@ -156,7 +156,8 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 	), selected as materialized (
 		select match.entity_id,input.input_index from input join lateral (
 			select resource.entity_id from game_resources resource join catalog_entities entity on entity.id=resource.entity_id
-			where entity.status='active' and `+publicCatalogEntitySQL("entity", "resource")+` and (
+			where entity.status='active' and `+publicCatalogEntitySQL("entity", "resource")+`
+			and (input.kind='' or input.kind='resource' or resource.kind_code=input.kind) and (
 				(input.public_id<>'' and entity.public_id=input.public_id) or
 				(input.identifier<>'' and (lower(resource.canonical_id)=input.identifier or exists(
 					select 1 from game_resource_aliases alias where alias.resource_id=resource.entity_id
@@ -219,7 +220,8 @@ func (s *Server) loadCatalogTagPresentations(ctx context.Context, items []catalo
 	), selected as materialized (
 		select match.entity_id,input.input_index from input join lateral (
 			select tag.entity_id from catalog_tags tag join catalog_entities entity on entity.id=tag.entity_id
-			where entity.status='active' and `+publicCatalogEntitySQL("entity", "tag")+` and ((input.public_id<>'' and entity.public_id=input.public_id) or
+			where entity.status='active' and `+publicCatalogEntitySQL("entity", "tag")+`
+			and (input.registry='' or lower(tag.registry)=input.registry) and ((input.public_id<>'' and entity.public_id=input.public_id) or
 				(input.identifier<>'' and (lower(tag.canonical_id)=input.identifier or lower(tag.registry||':'||tag.canonical_id)=input.identifier)
 				and (input.registry='' or lower(tag.registry)=input.registry)))
 			order by case when entity.public_id=input.public_id then 0 else 1 end limit 1

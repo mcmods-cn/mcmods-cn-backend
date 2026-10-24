@@ -62,6 +62,21 @@ func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEd
 	if snapshot.EntityID <= 0 {
 		return result, errCatalogEditorInvalid
 	}
+	// Review takes aggregate lock then entity lock. Submission must use the
+	// same order, or a reviewer and an editor can deadlock each other.
+	var lockPublicID, lockKind string
+	if err = tx.QueryRow(r.Context(), `select public_id,entity_type from catalog_entities where id=$1`, snapshot.EntityID).
+		Scan(&lockPublicID, &lockKind); errors.Is(err, pgx.ErrNoRows) {
+		return result, errCatalogEditorNotFound
+	} else if err != nil {
+		return result, err
+	}
+	if lockKind != snapshot.Kind {
+		return result, errCatalogEditorConflict
+	}
+	if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext($1))`, catalogAggregateForKind(lockKind)+":"+lockPublicID); err != nil {
+		return result, err
+	}
 	var publishedRevisionID *int64
 	var status, publicID, entityType string
 	if err = tx.QueryRow(r.Context(), `select status,published_revision_id,public_id,entity_type from catalog_entities where id=$1 for update`, snapshot.EntityID).

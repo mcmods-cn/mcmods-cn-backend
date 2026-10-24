@@ -15,7 +15,7 @@ func TestAuditFixRPH005AliasInputMappingAndManualResourceShortlink(t *testing.T)
 		t.Fatal(err)
 	}
 	raw := f.require(t, "", http.MethodPost, "/api/v1/catalog/resource-presentations", catalogPresentationBatchRequest{Items: []catalogPresentationBatchReference{
-		{ID: " LEGACY:ONE ", Kind: "minecraft.item"}, {ID: "legacy:two", Kind: "minecraft.item"}, {PublicID: resource.PublicID, Kind: "minecraft.item"}, {ID: "legacy:one", Kind: "minecraft.block"}, {ID: "legacy:missing", Kind: "minecraft.item"},
+		{ID: " LEGACY:ONE ", Kind: "minecraft.item"}, {ID: "legacy:two", Kind: "minecraft.item"}, {PublicID: resource.PublicID, Kind: "minecraft.item"}, {ID: "legacy:one", Kind: "minecraft.block"}, {ID: "legacy:missing", Kind: "minecraft.item"}, {PublicID: resource.PublicID, Kind: "minecraft.block"},
 	}}, http.StatusOK)
 	var result struct {
 		Data struct {
@@ -26,7 +26,7 @@ func TestAuditFixRPH005AliasInputMappingAndManualResourceShortlink(t *testing.T)
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Data.Items) != 3 || len(result.Data.Unresolved) != 2 || result.Data.Unresolved[0] != 3 || result.Data.Unresolved[1] != 4 {
+	if len(result.Data.Items) != 3 || len(result.Data.Unresolved) != 3 || result.Data.Unresolved[0] != 3 || result.Data.Unresolved[1] != 4 || result.Data.Unresolved[2] != 5 {
 		t.Fatalf("mapping: %s", raw)
 	}
 	seen := map[int]bool{}

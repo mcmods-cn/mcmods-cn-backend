@@ -180,12 +180,12 @@ func (s *Server) projectChangelogItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if !validateProjectChangelogCategory(w, r, tx, snapshot.CategoryID, target.RouteID) {
+		return
+	}
 	requestedBase, baseErr := resolveRevisionPublicID(r.Context(), tx, snapshot.BaseRevisionID)
 	if baseErr != nil || !sameRevision(requestedBase, publishedRevisionID) {
 		writeError(w, http.StatusConflict, "changelog changed after this edit was loaded")
-		return
-	}
-	if !validateProjectChangelogCategory(w, r, tx, snapshot.CategoryID, target.RouteID) {
 		return
 	}
 	requireReview := loadReviewConfig(r.Context(), tx).ChangelogEdit && !canSkipChangelogReview(claims, target.PublicID)
@@ -208,7 +208,11 @@ func (s *Server) projectChangelogItem(w http.ResponseWriter, r *http.Request) {
 		Snapshot: snapshotRaw, Reason: snapshot.Reason, ActorID: claims.Subject, Source: "user", Status: status,
 		Metadata: map[string]any{"targetLabel": target.Name + " - " + snapshot.ProjectVersion, "targetURL": target.CanonicalPath + "?tab=changelog"}, Request: r,
 	})
-	if errors.Is(err, errReviewInProgress) || errors.Is(err, errCatalogEditorConflict) {
+	if errors.Is(err, errCatalogEditorConflict) {
+		writeError(w, http.StatusConflict, "changelog changed after this edit was loaded")
+		return
+	}
+	if errors.Is(err, errReviewInProgress) {
 		writeError(w, http.StatusConflict, "changelog already has a pending review")
 		return
 	}

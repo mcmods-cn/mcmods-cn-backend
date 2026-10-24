@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 )
@@ -68,5 +69,32 @@ func TestAuditFixCONT001IndependentReviewFiveKinds(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestAuditFixCONT001NumericPublicIdentityDoesNotSelectInternalCollision(t *testing.T) {
+	f := newTEST013Fixture(t)
+	version := f.version(t, f.editor, "test013-mod", "Numeric catalog identity revision")
+	var unrelatedID, revisionID int64
+	if err := f.db.QueryRow(f.ctx, `insert into catalog_entities(identity_key,entity_type,status)
+ values('audit:collision:unrelated','resource','placeholder') returning id`).Scan(&unrelatedID); err != nil {
+		t.Fatal(err)
+	}
+	numericPublicID := fmt.Sprintf("%09d", unrelatedID)
+	if err := f.db.QueryRow(f.ctx, `select id from content_revisions where public_id=$1`, version.RevisionID).Scan(&revisionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `insert into catalog_entities(identity_key,public_id,entity_type,status,published_revision_id)
+ values('audit:collision:target',$1,'resource','active',$2)`, numericPublicID, revisionID); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(f.ctx)
+	got, err := publishedCatalogEditorRevisionTx(f.ctx, tx, numericPublicID)
+	if err != nil || got == nil || *got != revisionID {
+		t.Fatalf("numeric public identity selected unrelated internal row: got=%v expected=%d err=%v", got, revisionID, err)
 	}
 }
