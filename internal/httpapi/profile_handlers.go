@@ -231,6 +231,10 @@ func (s *Server) followUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist user activity")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "关注用户失败")
 		return

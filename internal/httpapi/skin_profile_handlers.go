@@ -268,6 +268,10 @@ func (s *Server) launcherCredential(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to update launcher credential")
 			return
 		}
+		if err = enqueueRequestActivityTx(r, tx); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist user activity")
+			return
+		}
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to update launcher credential")
 			return
@@ -288,6 +292,10 @@ func (s *Server) launcherCredential(w http.ResponseWriter, r *http.Request) {
 		var accountUserID int64
 		err = tx.QueryRow(r.Context(), `select user_id from yggdrasil_accounts where user_id=$1 for update`, userID).Scan(&accountUserID)
 		if errors.Is(err, pgx.ErrNoRows) {
+			if err = enqueueRequestActivityTx(r, tx); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to persist user activity")
+				return
+			}
 			if err = tx.Commit(r.Context()); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to disable launcher credential")
 				return
@@ -309,6 +317,10 @@ func (s *Server) launcherCredential(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err = tx.Exec(r.Context(), `update yggdrasil_tokens set status='revoked',revoked_at=now() where user_id=$1 and status<>'revoked'`, userID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to revoke launcher sessions")
+			return
+		}
+		if err = enqueueRequestActivityTx(r, tx); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist user activity")
 			return
 		}
 		if err = tx.Commit(r.Context()); err != nil {
@@ -392,6 +404,10 @@ func (s *Server) launcherSession(w http.ResponseWriter, r *http.Request) {
 	if _, err = tx.Exec(r.Context(), `delete from yggdrasil_join_sessions where token_id=
 		(select id from yggdrasil_tokens where public_id=$1 and user_id=$2)`, sessionID, userID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to revoke launcher session")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist user activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {

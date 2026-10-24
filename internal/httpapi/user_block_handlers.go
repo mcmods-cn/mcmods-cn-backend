@@ -93,6 +93,10 @@ func (s *Server) userBlock(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "解除拉黑失败")
 			return
 		}
+		if err = enqueueRequestActivityTx(r, tx); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist user activity")
+			return
+		}
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "解除拉黑失败")
 			return
@@ -125,6 +129,10 @@ func (s *Server) userBlock(w http.ResponseWriter, r *http.Request) {
 	if _, err = tx.Exec(r.Context(), `delete from user_follows
 		where (follower_id=$1 and followed_id=$2) or (follower_id=$2 and followed_id=$1)`, claims.Subject, identity.InternalID); err != nil {
 		writeError(w, http.StatusInternalServerError, "拉黑用户失败")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist user activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {

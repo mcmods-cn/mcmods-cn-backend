@@ -346,6 +346,10 @@ func (s *Server) deleteUserOSSFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "创建 OSS 文件删除任务失败")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist user activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "提交文件删除记录失败")
 		return
