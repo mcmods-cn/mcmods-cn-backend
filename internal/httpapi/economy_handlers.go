@@ -529,11 +529,15 @@ func (s *Server) purchaseShopItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to record purchase")
 		return
 	}
+	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: userID, ActionID: activity.ActionCreate, ObjectTypeID: activity.ObjectShopItem, ObjectPublicID: publicID}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist shop activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit purchase")
 		return
 	}
-	annotateActivity(r, activity.ActionCreate, activity.ObjectShopItem, publicID, 0)
+	skipRequestActivity(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"itemCode": request.ItemCode, "quantity": inventoryQuantity, "balance": balance,
 	})
@@ -685,11 +689,15 @@ func (s *Server) useShopItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to consume item")
 		return
 	}
+	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: userID, ActionID: activity.ActionUse, ObjectTypeID: activity.ObjectShopItem, ObjectPublicID: publicID}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist shop activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit item use")
 		return
 	}
-	annotateActivity(r, activity.ActionUse, activity.ObjectShopItem, publicID, 0)
+	skipRequestActivity(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"itemCode": request.ItemCode, "remaining": quantity - 1, "itemPublicId": publicID,
 	})

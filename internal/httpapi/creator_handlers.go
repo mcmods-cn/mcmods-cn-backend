@@ -386,6 +386,10 @@ func (s *Server) createCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create creator")
 		return
 	}
+	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: claims.Subject, ActionID: activity.ActionCreate, ObjectTypeID: creatorObjectType(snapshot.Kind), ObjectPublicID: publicID, MarkdownAddedBytes: len(snapshot.DescriptionMarkdown), MarkdownDeletedBytes: 0}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist creator activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit creator")
 		return
@@ -393,7 +397,7 @@ func (s *Server) createCreator(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurityVersionRefresh(w, r, "create_creator", 0, s.refreshProjectACLVersion(r.Context())) {
 		return
 	}
-	annotateActivity(r, activity.ActionCreate, creatorObjectType(snapshot.Kind), publicID, len(snapshot.DescriptionMarkdown))
+	skipRequestActivity(r)
 	writeJSON(w, http.StatusCreated, map[string]any{"publicId": publicID, "revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID, "reviewStatus": status})
 }
 
@@ -482,6 +486,11 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	addedBytes, deletedBytes := activity.MarkdownDeltaBytes(previousDescription, snapshot.DescriptionMarkdown)
+	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: claims.Subject, ActionID: activity.ActionEdit, ObjectTypeID: creatorObjectType(kind), ObjectPublicID: publicID, MarkdownAddedBytes: addedBytes, MarkdownDeletedBytes: deletedBytes}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist creator activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit creator revision")
 		return
@@ -489,8 +498,7 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurityVersionRefresh(w, r, "update_creator", 0, s.refreshProjectACLVersion(r.Context())) {
 		return
 	}
-	addedBytes, deletedBytes := activity.MarkdownDeltaBytes(previousDescription, snapshot.DescriptionMarkdown)
-	annotateActivityDelta(r, activity.ActionEdit, creatorObjectType(kind), publicID, addedBytes, deletedBytes)
+	skipRequestActivity(r)
 	writeJSON(w, http.StatusOK, map[string]any{"revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID, "reviewStatus": status})
 }
 
@@ -567,11 +575,15 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: claims.Subject, ActionID: activity.ActionClaim, ObjectTypeID: creatorObjectType(kind), ObjectPublicID: publicID, MarkdownAddedBytes: len(request.ProofMarkdown), MarkdownDeletedBytes: 0}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist creator activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit claim")
 		return
 	}
-	annotateActivity(r, activity.ActionClaim, creatorObjectType(kind), publicID, len(request.ProofMarkdown))
+	skipRequestActivity(r)
 	writeJSON(w, http.StatusCreated, map[string]any{"id": claimPublicID, "status": status, "name": name})
 }
 
@@ -675,9 +687,25 @@ func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var claimID, creatorID, userID int64
 	var publicID, kind, name, status string
+	// Every competing review and new claim takes the creator lock first.
+	// Locking separate claims first can deadlock when approval rejects peers.
+	if err = tx.QueryRow(r.Context(), `select creator_id from creator_claims where public_id=$1`, claimPublicID).Scan(&creatorID); errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "claim not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve creator claim")
+		return
+	}
+	if err = tx.QueryRow(r.Context(), `select id from creators where id=$1 for update`, creatorID).Scan(&creatorID); errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "creator not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock claim creator")
+		return
+	}
 	err = tx.QueryRow(r.Context(), `select claim.id,creator.id,claim.user_id,creator.public_id,creator.kind,creator.name,claim.status
 		from creator_claims claim join creators creator on creator.id=claim.creator_id
-		where claim.public_id=$1 for update of claim,creator`, claimPublicID).
+		where claim.public_id=$1 for update of claim`, claimPublicID).
 		Scan(&claimID, &creatorID, &userID, &publicID, &kind, &name, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "claim not found")
