@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -882,6 +884,10 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadRequest, "OSS 文件哈希与上传记录不一致")
 		return
 	}
+	if verifyErr := verifyOSSUploadedSourceBytes(r.Context(), client, cfg, req.ObjectKey, head.ContentLength, req.SHA256); verifyErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, "OSS source bytes do not match the declared size and SHA256")
+		return
+	}
 	size := head.ContentLength
 	contentType := req.ContentType
 	if head.ContentType != nil && *head.ContentType != "" {
@@ -949,6 +955,14 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		}
 		scanStatus = "clean"
 	}
+	storedSHA256 := req.SHA256
+	if converted {
+		storedSHA256, err = hashOSSObjectBytes(r.Context(), client, cfg, req.ObjectKey, size)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "cannot verify converted object bytes")
+			return
+		}
+	}
 	var quotaLimits ossUserQuotaLimits
 	if scope == "user" {
 		quotaLimits, err = ossUserQuotaLimitsForRequest(r)
@@ -1000,9 +1014,12 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	}
 	err = insertQueryRow(
 		r.Context(),
-		`insert into oss_files (bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, uploader_id, status, scan_status)
-		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'active', $14)
-		 on conflict (object_key) do nothing
+		`insert into oss_files (bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, uploader_id, status, scan_status, source_hash_verified, stored_sha256)
+		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'active', $14, true, $15)
+		 on conflict (object_key) do update set source_hash_verified=true,stored_sha256=excluded.stored_sha256
+        where oss_files.uploader_id=excluded.uploader_id and oss_files.status='active'
+        and oss_files.sha256=excluded.sha256 and oss_files.source_size_bytes=excluded.source_size_bytes
+        and oss_files.category=excluded.category and oss_files.source=excluded.source
 		 returning id,public_id`,
 		cfg.Bucket,
 		cfg.displayEndpoint(),
@@ -1018,6 +1035,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		req.SHA256,
 		currentClaims(r).Subject,
 		scanStatus,
+		storedSHA256,
 	).Scan(&fileID, &filePublicID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if quotaTx != nil {
@@ -1133,10 +1151,11 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		"sourceSizeBytes":    sourceSize,
 		"converted":          converted,
 		"sha256":             req.SHA256,
-		"scanStatus":         scanStatus,
-		"url":                access.URL,
-		"accessUrl":          access.URL,
-		"storageUrl":         ossStoredObjectURL(cfg, req.ObjectKey),
+		"sourceSha256":       req.SHA256, "storedSha256": storedSHA256,
+		"scanStatus": scanStatus,
+		"url":        access.URL,
+		"accessUrl":  access.URL,
+		"storageUrl": ossStoredObjectURL(cfg, req.ObjectKey),
 	}
 	if reportEvidenceID != "" {
 		response["id"] = reportEvidenceID
@@ -1267,10 +1286,11 @@ func (s *Server) findCompletedOSSUpload(ctx context.Context, uploaderID int64, r
 	var internalID, size, sourceSize int64
 	var publicID, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, storedContentType, sha, status, scanStatus string
 	var createdAt, updatedAt time.Time
+	var storedSHA string
 	query := `select id,public_id,bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
-			content_type,size_bytes,source_size_bytes,sha256,status,scan_status,created_at,updated_at
+			content_type,size_bytes,source_size_bytes,sha256,status,scan_status,created_at,updated_at,stored_sha256
 		from oss_files
-		where uploader_id=$1 and category=$2 and source=$3 and sha256=$4 and status='active'
+		where uploader_id=$1 and category=$2 and source=$3 and sha256=$4 and status='active' and source_hash_verified
 		  and object_key=any($5::text[])
 		  and ($6::bigint <= 0 or coalesce(nullif(source_size_bytes,0),size_bytes)=$6)`
 	if _, ok := blueprintCoverPublicID(req.Source); ok {
@@ -1280,15 +1300,17 @@ func (s *Server) findCompletedOSSUpload(ctx context.Context, uploaderID int64, r
 	query += ` order by created_at asc limit 1`
 	err := s.db.QueryRow(ctx, query, uploaderID, req.Category, req.Source, req.SHA256, objectKeys, req.SizeBytes).
 		Scan(&internalID, &publicID, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &sourceOriginalName,
-			&storedContentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt)
+			&storedContentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt, &storedSHA)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil, false, nil
 	}
 	if err != nil {
 		return 0, nil, false, fmt.Errorf("find completed OSS upload: %w", err)
 	}
-	return internalID, ossFileRecord(publicID, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName,
-		storedContentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt), true, nil
+	file := ossFileRecord(publicID, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName,
+		storedContentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt)
+	file["sourceSha256"], file["storedSha256"] = sha, storedSHA
+	return internalID, file, true, nil
 }
 
 func (s *Server) restoreReportEvidenceForCompletedOSSFile(
@@ -1471,4 +1493,41 @@ func imageProcessErrorMessage(err error) string {
 		}
 	}
 	return "OSS 图片处理失败"
+}
+
+// Stream rather than buffer ordinary files (up to the existing upload limit).
+// The SHA column denotes original source bytes, even when image conversion
+// stores different bytes. Metadata supplied during presigning is never proof.
+func verifyOSSUploadedSourceBytes(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey string, expectedSize int64, expectedHash string) error {
+	if normalizeSHA256(expectedHash) == "" {
+		return errors.New("invalid source hash")
+	}
+	actual, err := hashOSSObjectBytes(ctx, client, cfg, objectKey, expectedSize)
+	if err != nil {
+		return err
+	}
+	if actual != expectedHash {
+		return errors.New("source hash mismatch")
+	}
+	return nil
+}
+
+func hashOSSObjectBytes(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey string, expectedSize int64) (string, error) {
+	if expectedSize <= 0 || expectedSize > maxOSSUploadBytes {
+		return "", errors.New("invalid byte size")
+	}
+	result, err := client.GetObject(ctx, &aliyunoss.GetObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey)})
+	if err != nil {
+		return "", fmt.Errorf("read source bytes: %w", err)
+	}
+	defer result.Body.Close()
+	digest := sha256.New()
+	size, err := io.Copy(digest, io.LimitReader(result.Body, expectedSize+1))
+	if err != nil {
+		return "", err
+	}
+	if size != expectedSize {
+		return "", errors.New("object size mismatch")
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }

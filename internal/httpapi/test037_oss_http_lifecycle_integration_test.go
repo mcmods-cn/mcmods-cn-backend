@@ -265,17 +265,18 @@ func (f test037Fixture) unchanged(t *testing.T, before map[string]string) {
 }
 
 type test037Ticket struct {
-	Method       string                   `json:"method"`
-	URL          string                   `json:"url"`
-	Headers      map[string]string        `json:"headers"`
-	ObjectKey    string                   `json:"objectKey"`
-	Category     string                   `json:"category"`
-	Source       string                   `json:"source"`
-	OriginalName string                   `json:"originalName"`
-	ContentType  string                   `json:"contentType"`
-	SizeBytes    int64                    `json:"sizeBytes"`
-	SHA256       string                   `json:"sha256"`
-	Multipart    ossMultipartUploadTicket `json:"multipart"`
+	UploadRequired bool                     `json:"uploadRequired"`
+	Method         string                   `json:"method"`
+	URL            string                   `json:"url"`
+	Headers        map[string]string        `json:"headers"`
+	ObjectKey      string                   `json:"objectKey"`
+	Category       string                   `json:"category"`
+	Source         string                   `json:"source"`
+	OriginalName   string                   `json:"originalName"`
+	ContentType    string                   `json:"contentType"`
+	SizeBytes      int64                    `json:"sizeBytes"`
+	SHA256         string                   `json:"sha256"`
+	Multipart      ossMultipartUploadTicket `json:"multipart"`
 }
 
 func (ticket test037Ticket) completion() map[string]any {

@@ -22,8 +22,8 @@ func (s *Server) adminOSSRehomeJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := boundedLimit(r.URL.Query().Get("limit"), 50, 100)
-	rows, err := s.db.Query(r.Context(), `select id,mod_id,status,generation,claimed_generation,attempts,max_attempts,
-		failure_class,left(last_error,1000),created_at,updated_at,completed_at,dead_at,replay_count,last_replayed_at,last_replayed_by
+	rows, err := s.db.Query(r.Context(), `select public_id,(select project_code from mods where id=mod_id),status,generation,claimed_generation,attempts,max_attempts,
+		failure_class,left(last_error,1000),created_at,updated_at,completed_at,dead_at,replay_count,last_replayed_at,(select public_id from users where id=last_replayed_by)
 		from oss_rehome_jobs where status=$1
 		order by case when status='dead' then dead_at else updated_at end desc nulls last,id desc limit $2`, status, limit)
 	if err != nil {
@@ -33,8 +33,10 @@ func (s *Server) adminOSSRehomeJobs(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := make([]map[string]any, 0, limit)
 	for rows.Next() {
-		var id, modID, generation int64
-		var claimedGeneration, lastReplayedBy *int64
+		var id, modID string
+		var generation int64
+		var claimedGeneration *int64
+		var lastReplayedBy *string
 		var itemStatus, failureClass, lastError string
 		var attempts, maxAttempts, replayCount int
 		var createdAt, updatedAt time.Time
@@ -59,11 +61,22 @@ func (s *Server) adminOSSRehomeJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminReplayOSSRehome(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || id <= 0 {
+	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	if !validCatalogPublicID(publicID) {
 		writeError(w, http.StatusBadRequest, "invalid OSS rehome job id")
 		return
 	}
+	var id int64
+	err := s.db.QueryRow(r.Context(), `select id from oss_rehome_jobs where public_id=$1`, publicID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "OSS job not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve OSS job")
+		return
+	}
+
 	err = s.replayOSSRehome(r.Context(), id, currentClaims(r).Subject)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "OSS rehome job not found")
@@ -78,7 +91,7 @@ func (s *Server) adminReplayOSSRehome(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to replay OSS rehome job")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"queued": true, "id": id})
+	writeJSON(w, http.StatusAccepted, map[string]any{"queued": true, "id": publicID})
 }
 
 func (s *Server) replayOSSRehome(ctx context.Context, id, actorID int64) error {

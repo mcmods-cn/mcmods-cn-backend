@@ -24,9 +24,9 @@ func (s *Server) adminOSSMultipartSessions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	limit := boundedLimit(r.URL.Query().Get("limit"), 50, 100)
-	rows, err := s.db.Query(r.Context(), `select id,owner_id,bucket,object_key,upload_id,original_name,size_bytes,status,
+	rows, err := s.db.Query(r.Context(), `select public_id,(select public_id from users where id=owner_id),bucket,object_key,upload_id,original_name,size_bytes,status,
 		attempts,max_attempts,failure_class,left(last_error,1000),expires_at,created_at,updated_at,completed_at,aborted_at,dead_at,
-		replay_count,last_replayed_at,last_replayed_by from oss_multipart_sessions where status=$1
+		replay_count,last_replayed_at,(select public_id from users where id=last_replayed_by) from oss_multipart_sessions where status=$1
 		order by case when status='dead' then dead_at else updated_at end desc nulls last,id desc limit $2`, status, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load OSS multipart sessions")
@@ -35,8 +35,9 @@ func (s *Server) adminOSSMultipartSessions(w http.ResponseWriter, r *http.Reques
 	defer rows.Close()
 	items := make([]map[string]any, 0, limit)
 	for rows.Next() {
-		var id, sizeBytes int64
-		var ownerID, replayedBy *int64
+		var id string
+		var sizeBytes int64
+		var ownerID, replayedBy *string
 		var bucket, objectKey, uploadID, originalName, itemStatus, failureClass, lastError string
 		var attempts, maxAttempts, replayCount int
 		var expiresAt, createdAt, updatedAt time.Time
@@ -61,11 +62,22 @@ func (s *Server) adminOSSMultipartSessions(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) adminReplayOSSMultipartSession(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || id <= 0 {
+	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	if !validCatalogPublicID(publicID) {
 		writeError(w, http.StatusBadRequest, "invalid OSS multipart session id")
 		return
 	}
+	var id int64
+	err := s.db.QueryRow(r.Context(), `select id from oss_multipart_sessions where public_id=$1`, publicID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "OSS job not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve OSS job")
+		return
+	}
+
 	err = s.replayOSSMultipartSession(r.Context(), id, currentClaims(r).Subject)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "OSS multipart session not found")
@@ -80,7 +92,7 @@ func (s *Server) adminReplayOSSMultipartSession(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusInternalServerError, "failed to replay OSS multipart cleanup")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"queued": true, "id": id})
+	writeJSON(w, http.StatusAccepted, map[string]any{"queued": true, "id": publicID})
 }
 
 func (s *Server) replayOSSMultipartSession(ctx context.Context, id, actorID int64) error {
