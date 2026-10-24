@@ -64,7 +64,9 @@ func registeredImportedCatalogJSONRule(code string) *exportJSONRule {
 	case "costs":
 		rule := exportObjectRule(map[string]*exportJSONRule{})
 		rule.items = rule
-		exportFields(rule, "level min max min_cost max_cost minimum maximum", exportNumberRule())
+		// base is an existing optional storage-contract field (the MC1.20.1
+		// producer can omit costs entirely); do not widen to arbitrary JSON.
+		exportFields(rule, "level base per_level_above_first min max min_cost max_cost minimum maximum", exportNumberRule())
 		return rule
 	case "spawnData":
 		return exportMapRule(exportArrayRule(exportObjectRule(map[string]*exportJSONRule{"type": exportStringRule(), "weight": exportNumberRule(), "minCount": exportNumberRule(), "maxCount": exportNumberRule(), "min_count": exportNumberRule(), "max_count": exportNumberRule()})))
