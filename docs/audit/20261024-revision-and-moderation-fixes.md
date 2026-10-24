@@ -19,7 +19,7 @@
 
 ## 评论人工审核
 
-`GET /api/v1/admin/comments/pending?status=pending|hidden` 提供当前全站评论审核员队列（单页 limit 1–100）。
+`GET /api/v1/admin/comments/pending?status=pending|hidden` 提供当前全站评论审核员队列（单页 limit 1–100），返回 `hasMore`/`nextCursor`；用 `cursor` 续取，游标绑定状态与稳定创建时间/公开ID，审核移走前页内容不使后页跳项。即使某页有不可见父对象被过滤，仍保留可前进的游标。
 `PATCH /api/v1/comments/{id}/review` 接受 `{status:"approved"|"rejected"|"restore",note}`。
 全站 `comment.moderate` 沿用全局治理能力，项目范围审核员只能审核对应项目且不能审核自己。
 父对象当前不可读时禁止批准。重复决定返回 409；状态、审核事件、通知意图和原作者活动意图在同一事务提交。
@@ -96,3 +96,5 @@ go run ./cmd/diagnose-activity-intents --since 2026-10-24T00:00:00Z --until 2026
 本次工具在任务隔离数据库运行；合成回归构造一条缺失意图和一条仍在队列的正常意图，核验精确识别且业务、意图、任务和账本均未修改。生产未执行。
 
 `enqueueRequestActivityTx` 与响应记录器共用活动快照/推断函数，保留原动作、身份和Markdown字节并尊重已有skip；只在真实业务事务提交前调用，不机械注入所有修订创建。皮肤库九条写入动词分别注入出站活动失败，完整事实不变，恢复后成功，正常共享blob引用保留。
+
+实际人工内容审核的approved/rejected决定也在原事务记录一次活动；自动批准和conflicted错误分支保留原起始变更活动/无成功活动语义，不追加审核奖励。审核活动故障回滚完整决定，重复决定409且只留一次成功意图。

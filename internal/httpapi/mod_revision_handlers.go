@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"mcmods-cn-backend/internal/activity"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -653,6 +654,14 @@ func appendReviewResolutionTx(ctx context.Context, tx pgx.Tx, requestID int64, s
 	}
 	if err = createReviewCompletionNotificationsTx(ctx, tx, requestID, status); err != nil {
 		return fmt.Errorf("notify review completion subscribers: %w", err)
+	}
+	// Record successful manual decisions in the same transaction. Automatic
+	// approvals belong to their originating mutation; conflicts return an HTTP
+	// error and must not create the successful-request activity they never had.
+	if r != nil && (status == "approved" || status == "rejected") && inferredActivityObject(r.URL.Path) == activity.ObjectReview {
+		if err = enqueueRequestActivityTx(r, tx); err != nil {
+			return fmt.Errorf("persist review activity: %w", err)
+		}
 	}
 	return nil
 }

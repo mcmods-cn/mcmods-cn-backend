@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -11,6 +13,12 @@ import (
 	"mcmods-cn-backend/internal/activity"
 	"mcmods-cn-backend/internal/security"
 )
+
+type pendingCommentCursor struct {
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"createdAt"`
+	PublicID  string    `json:"publicId"`
+}
 
 type pendingCommentResponse struct {
 	ID              string            `json:"id"`
@@ -48,10 +56,22 @@ func (s *Server) pendingComments(w http.ResponseWriter, r *http.Request) {
 		}
 		status = value
 	}
+	var cursorTime *time.Time
+	cursorID := ""
+	if encoded := r.URL.Query().Get("cursor"); encoded != "" {
+		var cursor pendingCommentCursor
+		decoded, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
+		if len(encoded) > 1024 || decodeErr != nil || json.Unmarshal(decoded, &cursor) != nil || cursor.Status != status || cursor.CreatedAt.IsZero() || !validCatalogPublicID(cursor.PublicID) {
+			writeError(w, http.StatusBadRequest, "invalid comment moderation cursor")
+			return
+		}
+		cursorTime, cursorID = &cursor.CreatedAt, cursor.PublicID
+	}
 	rows, err := s.db.Query(r.Context(), `select comment.public_id,comment.body,comment.status,author.public_id,comment.created_at,
  comment.target_type,comment.target_id,comment.target_version_id,comment.author_id
  from comments comment join users author on author.id=comment.author_id where comment.status=$1
- order by comment.created_at,comment.id limit $2`, status, limit)
+ and ($3::timestamptz is null or (comment.created_at,comment.public_id)>($3::timestamptz,$4::text))
+ order by comment.created_at,comment.public_id limit $2`, status, limit+1, cursorTime, cursorID)
 	if err != nil {
 		writeError(w, 500, "failed to load pending comments")
 		return
@@ -73,6 +93,14 @@ func (s *Server) pendingComments(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "failed to read pending comments")
 		return
 	}
+	hasMore := len(candidates) > limit
+	nextCursor := ""
+	if hasMore {
+		candidates = candidates[:limit]
+		last := candidates[len(candidates)-1]
+		raw, _ := json.Marshal(pendingCommentCursor{Status: status, CreatedAt: last.CreatedAt, PublicID: last.ID})
+		nextCursor = base64.RawURLEncoding.EncodeToString(raw)
+	}
 	items := make([]pendingCommentResponse, 0, len(candidates))
 	for _, item := range candidates {
 		target, loadErr := s.resolveCommentTargetByInternal(r.Context(), item.targetType, item.targetID, item.targetVersionID, security.Claims{})
@@ -86,7 +114,7 @@ func (s *Server) pendingComments(w http.ResponseWriter, r *http.Request) {
 		item.Target = target
 		items = append(items, item)
 	}
-	writeJSON(w, 200, map[string]any{"items": items})
+	writeJSON(w, 200, map[string]any{"items": items, "hasMore": hasMore, "nextCursor": nextCursor})
 }
 
 func (s *Server) reviewPendingComment(w http.ResponseWriter, r *http.Request) {
