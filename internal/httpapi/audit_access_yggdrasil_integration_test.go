@@ -31,6 +31,12 @@ func TestAuditCMP001PrivateYggdrasilChainFullHTTPIntegration(t *testing.T) {
 	f.conditionalTexture(t, asset.TextureURL, asset.TextureHash, 404)
 	assertTEST039TextureBytes(t, f.require(t, f.editor, http.MethodGet, asset.TextureURL, nil, 200), asset.TextureHash)
 	f.require(t, f.otherEditor, http.MethodGet, asset.TextureURL, nil, 404)
+	// Preserve the existing skin.admin inspection scope; content.review alone
+	// does not authorize private skin bytes.
+	assertTEST039TextureBytes(t, f.require(t, f.reviewer, http.MethodGet, asset.TextureURL, nil, 200), asset.TextureHash)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.denied], "content.review")
+	f.require(t, f.denied, http.MethodGet, asset.TextureURL, nil, 404)
+
 	// Sharing bytes does not grant access to a private identity, but a current
 	// independently published asset is a valid public reference to those bytes.
 	publicFile := f.upload(t, f.otherEditor, "audit-shared.png", raw)

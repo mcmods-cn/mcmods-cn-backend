@@ -475,6 +475,8 @@ func (s *Server) authorizeYggdrasilTextureChange(r *http.Request, uuid string) (
 
 func (s *Server) yggdrasilTextureContent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Add("Vary", "Authorization")
+	w.Header().Add("Vary", "Cookie")
 	hash := strings.ToLower(strings.TrimSpace(r.PathValue("hash")))
 	if !yggdrasilTextureHashPattern.MatchString(hash) {
 		writeYggdrasilError(w, http.StatusNotFound, "NotFoundException", "Texture not found.", "")
@@ -486,8 +488,8 @@ func (s *Server) yggdrasilTextureContent(w http.ResponseWriter, r *http.Request)
 		from skin_texture_blobs blob join oss_files file on file.id=blob.oss_file_id and file.status='active'
 		where blob.hash=$1 and exists (
             select 1 from skin_assets asset where asset.blob_hash=blob.hash and asset.status='active'
-            and ((asset.review_status='approved' and asset.visibility<>'private') or asset.owner_id=$2)
-        )`, hash, currentClaims(r).Subject).
+            and ((asset.review_status='approved' and asset.visibility<>'private') or asset.owner_id=$2 or $3::boolean)
+        )`, hash, currentClaims(r).Subject, isSkinAdmin(currentClaims(r))).
 		Scan(&objectKey, &sizeBytes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeYggdrasilError(w, http.StatusNotFound, "NotFoundException", "Texture not found.", "")
