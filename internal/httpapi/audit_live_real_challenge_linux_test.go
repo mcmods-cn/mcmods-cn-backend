@@ -63,8 +63,14 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if f.server.cfg.FrontendOrigin != "http://127.0.0.1:3311" || !f.server.cfg.AntiAbuse.Enabled || f.server.cfg.AntiAbuse.ChallengeProvider != "proof" || f.server.cfg.AntiAbuse.ChallengeTTL != 10*time.Minute || f.server.cfg.AntiAbuse.FormMinimumAge != 800*time.Millisecond {
+	frontendOrigin := f.server.cfg.FrontendOrigin
+	if (frontendOrigin != "http://127.0.0.1:3311" && frontendOrigin != "http://127.0.0.1:3331") || !f.server.cfg.AntiAbuse.Enabled || f.server.cfg.AntiAbuse.ChallengeProvider != "proof" || f.server.cfg.AntiAbuse.ChallengeTTL != 10*time.Minute || f.server.cfg.AntiAbuse.FormMinimumAge != 800*time.Millisecond {
 		t.Fatal("requires actual default proof/10min TTL/800ms form age with exact browser origin")
+	}
+	expiryOnly := os.Getenv("MCMODS_AUDIT_CHALLENGE_MODE") == "expiry-only"
+	caseID, frontendCommit := os.Getenv("MCMODS_AUDIT_CHALLENGE_CASE_ID"), os.Getenv("MCMODS_AUDIT_EXPECT_FRONTEND_COMMIT")
+	if expiryOnly && (caseID == "" || !auditChallengeHex(frontendCommit, 40)) {
+		t.Fatal("expiry-only run requires declared caseID and exact expected frontend commit")
 	}
 	settings, err := f.server.antiAbuse.Settings(f.ctx)
 	if err != nil {
@@ -157,7 +163,11 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 	if err = private.Close(); err != nil {
 		t.Fatal(err)
 	}
-	runtime, _ := json.MarshalIndent(map[string]any{"apiOrigin": f.origin.URL, "frontendOrigin": "http://127.0.0.1:3311", "authCookieName": authSessionCookieName, "authPath": authPath, "actorPublicIds": publicIDs, "payload": payload("proof-browser-created"), "expiryPayload": payload("proof-browser-expiry"), "failurePayload": payload("proof-browser-failure"), "cancelPayload": payload("proof-browser-cancel"), "normalizedSeedContentSHA256": antiabuse.ContentHash(normalizedSeed), "collectedEqualContentFields": 4, "sourceCommit": strings.TrimSpace(string(head)), "sourceTreeClean": true, "challengeTTLSeconds": 600, "minimumFormAgeMilliseconds": 800, "unchangedPolicy": true, "trigger": "actual successful ordinary other-user identical wording fingerprint + new unverified account; no force or threshold override", "preflight": "actual HTTP 428 challenge_required", "expectedCreatorPendingModCount": 1, "productionExecuted": false}, "", "  ")
+	expectedCreated := 1
+	if expiryOnly {
+		expectedCreated = 0
+	}
+	runtime, _ := json.MarshalIndent(map[string]any{"apiOrigin": f.origin.URL, "frontendOrigin": frontendOrigin, "frontendExpectedCommit": frontendCommit, "caseId": caseID, "expiryOnly": expiryOnly, "authCookieName": authSessionCookieName, "authPath": authPath, "actorPublicIds": publicIDs, "payload": payload("proof-browser-created"), "expiryPayload": payload("proof-browser-expiry"), "failurePayload": payload("proof-browser-failure"), "cancelPayload": payload("proof-browser-cancel"), "normalizedSeedContentSHA256": antiabuse.ContentHash(normalizedSeed), "collectedEqualContentFields": 4, "sourceCommit": strings.TrimSpace(string(head)), "sourceTreeClean": true, "challengeTTLSeconds": 600, "minimumFormAgeMilliseconds": 800, "unchangedPolicy": true, "trigger": "actual successful ordinary other-user identical wording fingerprint + new unverified account; no force or threshold override", "preflight": "actual HTTP 428 challenge_required", "expectedCreatorPendingModCount": expectedCreated, "productionExecuted": false}, "", "  ")
 	if err = os.WriteFile(filepath.Join(dir, "runtime.json"), runtime, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -210,8 +220,39 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
+			seedHash := antiabuse.ContentHash(normalizedSeed)
+			if err = writeAuditChallengeSQLSnapshot(f.ctx, f, ids, seedHash, filepath.Join(dir, "actors-before-final-seal.json")); err != nil {
+				t.Fatal("could not preserve final pre-seal SQL facts: ", err)
+			}
+			var expirySeal map[string]any
+			if expiryOnly {
+				expirySeal, err = sealAuditExpiredBrowserRequest(f.ctx, f, ids, publicIDs, dir, caseID, strings.TrimSpace(string(head)), frontendCommit, seedHash)
+				if err != nil {
+					failure, _ := json.MarshalIndent(map[string]any{"result": "FAIL_REQUIRED_EXPIRY_EVENT_BINDING_NOT_VERIFIED", "reason": err.Error(), "productionExecuted": false}, "", "  ")
+					_ = os.WriteFile(filepath.Join(dir, "expiry-specific-failure.json"), failure, 0600)
+					_ = writeAuditChallengeSQLSnapshot(f.ctx, f, ids, seedHash, filepath.Join(dir, "actors-after-seal-failure.json"))
+					t.Fatal("specific expiry request not verified; saved available facts: ", err)
+				}
+			}
+			// Browser completion is the boundary: drain the owned telemetry
+			// writers before reading final facts, then clean up this fixture.
+			drain, stopDrain := context.WithTimeout(f.ctx, 10*time.Second)
+			if err = f.server.antiAbuse.Close(drain); err != nil {
+				stopDrain()
+				t.Fatal("could not drain final anti-abuse telemetry")
+			}
+			stopDrain()
+			if err = writeAuditChallengeSQLSnapshot(f.ctx, f, ids, seedHash, filepath.Join(dir, "actors-final-sql.json")); err != nil {
+				t.Fatal("could not preserve final SQL facts: ", err)
+			}
+			if expiryOnly {
+				encoded, _ := json.MarshalIndent(expirySeal, "", "  ")
+				if err = os.WriteFile(filepath.Join(dir, "expiry-specific-seal.json"), encoded, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var total, pending, others int
-			if err = f.db.QueryRow(f.ctx, `select count(*),count(*) filter(where review_status='pending') from mods where submitted_by=$1`, ids["creator"]).Scan(&total, &pending); err != nil || total != 1 || pending != 1 {
+			if err = f.db.QueryRow(f.ctx, `select count(*),count(*) filter(where review_status='pending') from mods where submitted_by=$1`, ids["creator"]).Scan(&total, &pending); err != nil || total != expectedCreated || pending != expectedCreated {
 				t.Fatalf("creator total=%d pending=%d err=%v", total, pending, err)
 			}
 			if err = f.db.QueryRow(f.ctx, `select count(*) from mods where submitted_by=any($1::bigint[])`, []int64{ids["expiry"], ids["failure"], ids["cancel"], ids["probe"]}).Scan(&others); err != nil || others != 0 {
@@ -225,11 +266,11 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 			if !bytes.Equal(settingsBefore, after) {
 				t.Fatal("anti-abuse policy was changed")
 			}
-			report, _ := json.MarshalIndent(map[string]any{"result": "PASS", "scope": "actual browser proof business outcome independently checked; browser evidence owns error/cancel/expiry UI detail", "sourceCommit": strings.TrimSpace(string(head)), "creatorModCount": total, "pendingModCount": pending, "failedExpiredProbeModCount": others, "policyUnchanged": true, "challengeTTLSeconds": 600, "productionExecuted": false}, "", "  ")
+			report, _ := json.MarshalIndent(map[string]any{"result": "PASS", "scope": "actual browser proof business outcome independently checked; browser evidence owns error/cancel/expiry UI detail", "sourceCommit": strings.TrimSpace(string(head)), "frontendExpectedCommit": frontendCommit, "expiryOnly": expiryOnly, "specificExpiryEventBound": expiryOnly, "creatorModCount": total, "pendingModCount": pending, "failedExpiredProbeModCount": others, "policyUnchanged": true, "challengeTTLSeconds": 600, "productionExecuted": false}, "", "  ")
 			if err = os.WriteFile(filepath.Join(dir, "backend-postconditions.json"), report, 0600); err != nil {
 				t.Fatal(err)
 			}
-			t.Log(fmt.Sprintf("REAL_CHALLENGE_PASS actual creator1pending, other0, policy unchanged; production=false"))
+			t.Log(fmt.Sprintf("REAL_CHALLENGE_PASS creatorPending=%d others0 specificExpiryBound=%v policyUnchanged=true production=false", expectedCreated, expiryOnly))
 			return
 		}
 	}
