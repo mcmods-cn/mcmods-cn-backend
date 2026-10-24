@@ -143,6 +143,10 @@ func (s *Server) adminAboutPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err == nil {
+		if err = enqueueRequestActivityTx(r, tx); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist site affairs activity")
+			return
+		}
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {
@@ -241,6 +245,10 @@ func (s *Server) adminSiteChangelogs(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(r.Context(), `insert into site_changelog_translations(changelog_id,locale,title,body_markdown,status,updated_by) values($1,$2,$3,$4,$5,$6)`, id, request.Locale, request.Title, request.BodyMarkdown, status, currentClaims(r).Subject)
 	}
 	if err == nil {
+		if err = enqueueRequestActivityTx(r, tx); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist site affairs activity")
+			return
+		}
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {
@@ -346,6 +354,10 @@ func (s *Server) adminSiteChangelogDetail(w http.ResponseWriter, r *http.Request
 			internalID, request.Locale, request.Title, request.BodyMarkdown, status, currentClaims(r).Subject)
 	}
 	if err == nil {
+		if err = enqueueRequestActivityTx(r, tx); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist site affairs activity")
+			return
+		}
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {
