@@ -80,23 +80,38 @@ func TestAuditMSG001And003RealRedisTwoHTTPInstancesColdRestart(t *testing.T) {
 		t.Cleanup(origin.Close)
 		origins = append(origins, origin)
 	}
-	request := func(index int, path string, want int) *http.Response {
+	requestWithToken := func(index int, path string, want int, token string) *http.Response {
 		t.Helper()
 		req, err := http.NewRequestWithContext(f.ctx, http.MethodGet, origins[index].URL+path, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		req.Header.Set("Authorization", "Bearer "+f.editor)
+		req.Header.Set("Authorization", "Bearer "+token)
 		response, err := origins[index].Client().Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if response.StatusCode != want {
 			defer response.Body.Close()
+			// A mistakenly admitted SSE must fail immediately, rather than
+			// waiting for its unbounded stream while printing an error body.
+			if strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
+				t.Fatalf("%s unexpectedly opened SSE%d, want%d", path, response.StatusCode, want)
+			}
 			body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 			t.Fatalf("%s=%d want%d: %s", path, response.StatusCode, want, body)
 		}
+		if want == http.StatusTooManyRequests {
+			body, err := io.ReadAll(io.LimitReader(response.Body, 4096))
+			if err != nil || !strings.Contains(string(body), `"code":"REALTIME_CONNECTION_LIMIT"`) || response.Header.Get("Retry-After") != "30" {
+				response.Body.Close()
+				t.Fatalf("wrong realtime quota rejection: body=%s retryAfter=%q err=%v", body, response.Header.Get("Retry-After"), err)
+			}
+		}
 		return response
+	}
+	request := func(index int, path string, want int) *http.Response {
+		return requestWithToken(index, path, want, f.editor)
 	}
 	path := "/api/v1/realtime/events"
 	first := request(0, path, 200)
@@ -104,15 +119,35 @@ func TestAuditMSG001And003RealRedisTwoHTTPInstancesColdRestart(t *testing.T) {
 	second := request(1, path, 200)
 	defer second.Body.Close()
 	request(0, path, 429).Body.Close()
+	// Preserve the original two-connection/session gate before extending the
+	// same real Redis/two-HTTP cluster to the independent four/user budget.
+	var established, sessions int
+	assertDurableBudget := func(wantConnections, wantSessions int) {
+		t.Helper()
+		if err := f.db.QueryRow(f.ctx, `select count(*),count(distinct session_hash) from realtime_connection_leases where user_id=$1`, f.userIDs[f.editor]).Scan(&established, &sessions); err != nil || established != wantConnections || sessions != wantSessions {
+			t.Fatalf("durable user quota=%d connections/%d sessions, want%d/%d err=%v", established, sessions, wantConnections, wantSessions, err)
+		}
+	}
+	assertDurableBudget(2, 1)
+	secondToken := mintTEST048Token(t, f.ctx, f.db, cfg, f.userIDs[f.editor])
+	thirdToken := mintTEST048Token(t, f.ctx, f.db, cfg, f.userIDs[f.editor])
+	third := requestWithToken(0, path, 200, secondToken)
+	defer third.Body.Close()
+	fourth := requestWithToken(1, path, 200, secondToken)
+	defer fourth.Body.Close()
+	assertDurableBudget(4, 2)
+	requestWithToken(0, path, 429, thirdToken).Body.Close()
 	request(0, "/ready", 200).Body.Close()
 	stopRedis()
 	request(0, "/ready", 503).Body.Close()
 	request(1, "/ready", 503).Body.Close()
 	request(0, path, 429).Body.Close()
 	request(1, path, 429).Body.Close()
+	requestWithToken(1, path, 429, thirdToken).Body.Close()
+	assertDurableBudget(4, 2)
 	request(0, "/live", 200).Body.Close()
-	// Cold Redis has lost every shared key. PostgreSQL must still reject a
-	// third connection while the two established HTTP connections are alive.
+	// Cold Redis has lost every shared key. PostgreSQL must reject both a
+	// third/session and a fifth/user while all four established streams live.
 	stopRedis = startAuditRealRedis(t, port)
 	recoveryDeadline := time.Now().Add(5 * time.Second)
 	for {
@@ -130,14 +165,15 @@ func TestAuditMSG001And003RealRedisTwoHTTPInstancesColdRestart(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	var established int
-	if err = f.db.QueryRow(f.ctx, `select count(*) from realtime_connection_leases`).Scan(&established); err != nil || established != 2 {
-		t.Fatalf("cold-restart barrier lost live leases: %d err=%v", established, err)
-	}
+	assertDurableBudget(4, 2)
 	request(0, path, 429).Body.Close()
 	request(1, path, 429).Body.Close()
+	requestWithToken(0, path, 429, thirdToken).Body.Close()
+	assertDurableBudget(4, 2)
 	first.Body.Close()
 	second.Body.Close()
+	third.Body.Close()
+	fourth.Body.Close()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		var count int
@@ -157,6 +193,7 @@ func TestAuditMSG001And003RealRedisTwoHTTPInstancesColdRestart(t *testing.T) {
 	replacement.Body.Close()
 	request(1, "/ready", 200).Body.Close()
 	stopRedis()
+	t.Log("real Redis/two HTTP: original2/session and4/user across2sessions; healthy/outage/cold restart enforce429 code/retry; PostgreSQL durable4→0; replacement200")
 }
 
 func TestAuditMSG003OptionalRedisKeepsIndependentReadinessSemantics(t *testing.T) {
