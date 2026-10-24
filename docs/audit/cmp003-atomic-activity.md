@@ -21,6 +21,7 @@ Implemented and individually fault-tested families as of the commits below:
 | 5f392ac | report claim/takeover/resolve/reopen | Real HTTP report creation and full workflow, exact failure rolls assignment/moderation/review/notification facts back; valid hiding/invalid preservation, idempotency and owner policy neighbors |
 | 48c98b2 | admin account creation, manual authorization, status | Exact activity fault rolls identity/default role/manual grant/status/audit back; actual PG and isolated9dd+owned files race with original authorization/SEC004/SEC021 neighbors |
 | 6f44a3c | unfollow and notification preferences | Actual/no-op unfollow, partial preference update and user isolation; PG fault recovery and isolated race |
+| e8d17f3 | comment pin/unpin and reaction add/remove | Precise activity fault preserves full thread/counter/heat facts; recovery and whole original TEST038 matrix, normal20.264s and race28.171s. Pin verbs remain Edit; private watch retains explicit skip. |
 
 These rows establish those tested boundaries. They do not establish every mutation route, every asynchronous consumer, final frontend behavior, or a frozen three-repository release. Additional commits may follow. The external audit result ledger records the exact commands, first failures, corrected fixtures, race results and remaining conditions. Creator create/edit/claim and shop purchase/use are handled separately in fd4d188; this document does not substitute for its test evidence.
 

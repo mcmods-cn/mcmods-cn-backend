@@ -46,6 +46,8 @@ add('createAdminUser updateUserPermissions updateUserStatus', '48c98b2', 'logs/b
 
 add('unfollowUser updateNotificationSettings', '6f44a3c', 'logs/backend_revisions/pg-profile-preferences-activity-first.log', 'Existing/no-op unfollow and partial notification preference updates: precise activity fault leaves all relationship/user/preference facts unchanged, recovery exact1 event per call, cross-user preferences isolated. Additional isolated9dd+owned files race includes financial refactor and original language/follow/block neighbors.')
 
+add('commentPin commentReaction', 'e8d17f3', 'logs/backend_revisions/pg-comment-interaction-activity-isolated.log', 'Pin/unpin preserve explicitEdit and reaction add/remove preserve existingEdit/Delete; precise activity failure full comment/counter/heat/association snapshots unchanged, recovery exact1 intent, full original TEST038 matrix normal20.264s and race28.171s.')
+
 existing_fact_handlers = {'contentLanguageSettings', 'createCatalogResource', 'catalogTags', 'catalogTagDetail', 'createCatalogRecipeType', 'catalogRecipeTypeDetail', 'createCatalogRecipe', 'catalogRecipeDetail', 'catalogRecipeTemplates', 'catalogRecipeTemplateDetail', 'updateCatalogEntityContent', 'ownedSkinContent', 'ownedBlueprintContent'}
 counts = collections.Counter()
 for route in report['routes']:
@@ -53,6 +55,9 @@ for route in report['routes']:
     if handler in reviewed:
         route['reviewed_disposition'] = 'ATOMIC_AT_LISTED_TESTED_SCOPES_REQUIRES_FINAL_FIXED_COMBINATION_REGRESSION'
         route['reviewed_evidence'] = reviewed[handler]
+    elif handler in {'commentWatch', 'commentWatchItem'}:
+        route['reviewed_disposition'] = 'EXPLICIT_SKIP_PRIVATE_USER_STATE_NO_NEW_REWARD_POLICY'
+        route['remaining_condition'] = 'Production handler unconditionally skips request activity at entry; preserve private watch state policy instead of inventing activity or rewards.'
     elif handler in existing_fact_handlers:
         route['reviewed_disposition'] = 'EXISTING_ACTIVITY_FACT_IN_BUSINESS_TRANSACTION_PROGRESSION_POLICY_SEPARATE'
         route['remaining_condition'] = 'Verify specific HTTP branch and historical progression contract; do not create duplicate intent merely because immutable fact has no outbox row.'
