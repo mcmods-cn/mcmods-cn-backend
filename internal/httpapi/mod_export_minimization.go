@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"strings"
 )
 
 // Preserve encoded pixels, alpha, palette and color interpretation. Text,
@@ -45,17 +44,28 @@ func minimizeExportPNG(data []byte) ([]byte, error) {
 }
 
 func minimizeExportManifest(manifest *modExportManifest) {
+	if len(manifest.Errors) > 128 {
+		manifest.Errors = manifest.Errors[:128]
+	}
 	for index := range manifest.Errors {
 		var diagnostic struct {
 			Stage string `json:"stage"`
 		}
 		_ = json.Unmarshal(manifest.Errors[index], &diagnostic)
 		// Stages use identifiers, never machine paths or arbitrary exception text.
-		if len(diagnostic.Stage) > 80 || strings.ContainsAny(diagnostic.Stage, "/\\:\n\r") {
+		if !registeredExportDiagnosticStage(diagnostic.Stage) {
 			diagnostic.Stage = "unknown"
 		}
 		manifest.Errors[index], _ = json.Marshal(map[string]string{"stage": diagnostic.Stage, "code": "export_stage_error"})
 	}
+}
+
+func registeredExportDiagnosticStage(stage string) bool {
+	switch stage {
+	case "registry", "registries", "registry_data", "languages", "compatibility", "content_associations", "associations", "trades", "tags", "recipes", "advancements", "worldgen", "worldgen_data", "resources", "block_entity_models", "entity_models", "item_icons", "block_icons", "mob_effect_icons", "effect_icons", "jei", "jei_ingredients", "jei_recipe_gui", "entity_renders":
+		return true
+	}
+	return false
 }
 
 func minimizeExportLocaleText(raw json.RawMessage) json.RawMessage {
@@ -81,7 +91,7 @@ func minimizeAdvancementDisplay(value any) any {
 		return value
 	}
 	result := make(map[string]any)
-	for _, key := range []string{"frame", "background", "show_toast", "announce_to_chat", "hidden", "x", "y", "width", "height"} {
+	for _, key := range []string{"frame", "background", "show_toast", "announce_chat", "announce_to_chat", "hidden", "x", "y", "width", "height", "title_translation_key", "description_translation_key"} {
 		if v, exists := source[key]; exists {
 			switch v.(type) {
 			case string, bool, float64, int:

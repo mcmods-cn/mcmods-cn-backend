@@ -379,6 +379,9 @@ func canonicalizeCatalogResourceRows(ctx context.Context, tx pgx.Tx, rows []cata
 		if normalizeErr != nil {
 			return fmt.Errorf("normalize %s as %s: %w", row.CanonicalID, entryTypeCode, normalizeErr)
 		}
+		if projectionErr := projectImportedCatalogJSONFields(templates, row.KindCode, entryTypeCode, source, canonical); projectionErr != nil {
+			return projectionErr
+		}
 		inferredEntryTypeCode := inferImportedEntryTypeCode(row.KindCode, row.ResourcePath, source)
 		if entryTypeCode != inferredEntryTypeCode {
 			log.Printf("resource document %s matched configured type %s instead of default inference %s", row.CanonicalID, entryTypeCode, inferredEntryTypeCode)

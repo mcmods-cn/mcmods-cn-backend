@@ -107,6 +107,10 @@ func deriveModExportBlockEntityModels(files map[string]*zip.File, resolver catal
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", modExportBlockEntityIndexPath, err)
 	}
+	raw, err = projectExportAsset(modExportBlockEntityIndexPath, raw, exportAssetNormalized)
+	if err != nil {
+		return nil, err
+	}
 	var index exportBlockEntityIndex
 	if err = json.Unmarshal(raw, &index); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", modExportBlockEntityIndexPath, err)
@@ -197,6 +201,10 @@ func decodeExportBlockEntityVariant(files map[string]*zip.File, blockID string, 
 	meshRaw, err := readExportZIPFile(files[variant.MeshPath], maxExportJSONSize)
 	if err != nil {
 		return variant, nil, mesh, fmt.Errorf("read block entity mesh %s: %w", variant.MeshPath, err)
+	}
+	meshRaw, err = projectExportAsset(variant.MeshPath, meshRaw, exportAssetNormalized)
+	if err != nil {
+		return variant, nil, mesh, err
 	}
 	if err = json.Unmarshal(meshRaw, &mesh); err != nil {
 		return variant, nil, mesh, fmt.Errorf("decode block entity mesh %s: %w", variant.MeshPath, err)

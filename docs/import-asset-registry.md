@@ -1,0 +1,47 @@
+# 导入资产用途注册与隐私边界（importer 1.6.0）
+
+上传的源 ZIP 是创建者提供的私有来源证据，SHA-256 始终针对原字节。系统保留它用于校验、重试和重新导入，不把改写后的包伪装成原游戏产物。原包不属于公开内联 OSS 来源；匿名 `/oss/files/{publicId}/content` 返回 404。上传凭据只能写入其限定对象，管理读取另需 `oss.read`；业务 Worker 使用服务存储凭据。存储桶仍须私有，短期预签名链接的实际有效期遵循 OSS 配置。此修复未改变已有私有源包留存/人工清理策略，也未执行生产清理。
+
+源包、规范化数据库投影、衍生渲染资产具有不同用途。审批只能公开经过相应用途规则投影的后两者。错误、机器路径、凭据、玩家身份或调试附件不能因为与合法资料同包而获得公开权限。
+
+## 当前注册用途
+
+| 路径/内容 | 衍生策略 |
+| --- | --- |
+| manifest / capabilities | 保留结构化版本/模块状态与有界诊断，丢弃异常正文和未注册 extras；不复制原文 |
+| registries、规范化目录、tags、JEI | 按已有业务投影；import-only JSON 字段另执行嵌套用途注册，数量、概率、业务 SNBT、引用保留 |
+| `assets/<namespace>/models/*.json` | Minecraft 模型元素、面、变换、材质、覆盖、Forge composite/OBJ 的明确字段；资源引用校验 |
+| blockstates / texture `.png.mcmeta` | 变体、multipart、动画帧、纹理过滤字段 |
+| Wavefront OBJ/MTL | 保留数值几何、面索引、对象/材质名和同 namespace 内材质/纹理引用；删除注释。未注册指令及带额外选项的纹理 codec 明确报错 |
+| entity 模型 metadata / block-entity index、variant、UV mesh | 固定字段和顶点/UV/法线数组；嵌套 JSON 不再直接保存原文 |
+| PNG | 保留像素/alpha/palette 和必要颜色解释 chunk；删除 tEXt/iTXt/zTXt/EXIF/时间等不相关 ancillary 元数据，衍生哈希针对实际保存字节 |
+| partial advancement / vanilla worldgen definition | 只有明确 `raw_definition_path`、`definition_path`、`placed_feature_definition_path`、`configured_feature_definition_path(s)` 引用取得用途；再次执行已注册嵌套投影 |
+| `.log` | 仅为源包诊断，不复制入公开资产表 |
+| 未注册附件/业务扩展 | 在创建导入修订和衍生资产前，或相应规范化事务内，明确失败；不默认公开、不悄悄删除该业务扩展 |
+
+`data/...json` 完整规范化源定义仅随私有源包保留；只有明确 partial 引用才生成公开回退投影。任意字符串碰巧等于 ZIP 路径不能授权保留该附件。独立 NBT/SNBT/schematic 附件没有现行 exporter 的公开资产用途：当前结构 v2 明确不导出内部 NBT 零件。物品字段 `nbt_snbt` 等仍是受支持业务字段。
+
+## 未注册扩展的可审查流程
+
+错误码文本 `unregistered_export_asset` 包含用途和 `path_sha256`，不记录未知字段值、异常正文或可能含身份信息的路径。普通资产的摘要输入是 ZIP 相对路径；`catalog_json_field` 的输入是 `<kindCode>/<fieldCode>`。创建者可以在自己的源包和字段清单中计算相同 SHA-256 来定位，不需要把私密正文复制到日志。
+
+新增业务扩展需要提供：生产者/版本、路径或字段位置、业务用途、明确类型及嵌套键、引用和权限范围、最小正反金样、保留/公开策略。实现者在 `mod_export_asset_registry.go`、`mod_export_asset_projection.go` 或 `mod_export_catalog_json_projection.go` 注册对应规则，再跑真实 HTTP+数据库回归。复杂 mod worldgen codecs、触发器条件、模型 loader 扩展及 MTL 选项需要按这个流程增加适配；当前拒绝会显示明确注册错误，不将缺失功能记作通过。
+
+已知的无关隐私元数据键会被投影移除；未知业务键会报错。动态映射（材质名、方块状态、locale、计分板等）只能承载用途明确的类型，不能借机嵌入任意对象。人工编辑器的契约独立，未通过本次修复扩大或缩小其权限/业务政策。GR-Q05 variants 与 CONT-Q01 通用扩展政策的待决结果不能自动扩大本注册表。
+
+## 存量和兼容
+
+1. 先执行只读 `db-import-privacy-audit`，按修订/实体 ID、用途和摘要定位候选。报告只记录分类/计数/摘要，不输出正文。超过扫描上限会明确标记 truncated。
+2. 新 importer 为 `1.6.0`，允许同一不可变原 ZIP 在新的 importer 版本下通过正常创建者授权、目标版本校验、实际 Worker 和独立审核重新导入。它不会把旧修订自动记成已修复。
+3. 存量受影响修订应由有权操作员核对并通过既定撤回/访问处置及重新导入流程处理。不要直接覆盖已有账本/审计、批量删除共享 blob 或在原不可变媒体 URL 上替换字节。保留原失败证据和新修订映射。
+4. 本修复未自动执行生产数据修改；历史公开资产、缓存和第三方已下载副本不能声称已撤回。旧私密 JSON 仍在存量表中的事实，必须与“未来导入投影已修复”分别报告。
+
+无新增数据库 DDL。部署后新旧源包上传协议保持一致，JEI v6/v7 的既有兼容门保持独立；新增拒绝仅针对未注册公开资产/嵌套扩展。先部署 backend 规则，再允许相应扩展生产者。回滚到旧 importer 会恢复泄露风险，不能把降低 importer 版本视为数据回滚。
+
+只读诊断命令（使用已授权的数据库连接，显式核对目标）：
+
+```sh
+go run ./cmd/db-import-privacy-audit --database <exact_database_name> --revision <revision_id> --limit 1000 > import-privacy-findings.json
+```
+
+CLI 固定 `public,pg_catalog` 并启用数据库 `default_transaction_read_only`，无 apply/删除模式。合成旧数据副本的测试验证候选定位、作用域隔离、报告脱敏、上限和原行不变。它检测已知无关隐私键与资产注册问题；不能把 findings 为空当作所有未知秘密均不存在。单条超过 1MiB 的诊断负载明确记待检查，不假装扫描完整。外部 PNG/存储桶和缓存须另以授权资产字节核验，诊断不联网下载原包或读取生产对象。

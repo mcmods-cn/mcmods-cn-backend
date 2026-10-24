@@ -65,17 +65,32 @@ func collectPartialNormalizationFallbacks(value any, available, result map[strin
 
 func collectAvailableArchivePaths(value any, available, result map[string]struct{}) {
 	switch typed := value.(type) {
-	case string:
-		if _, exists := available[typed]; exists {
-			result[typed] = struct{}{}
-		}
 	case []any:
 		for _, item := range typed {
 			collectAvailableArchivePaths(item, available, result)
 		}
 	case map[string]any:
-		for _, item := range typed {
-			collectAvailableArchivePaths(item, available, result)
+		for key, item := range typed {
+			// Only exporter-declared definition references confer a fallback
+			// purpose. An arbitrary diagnostic string matching a ZIP path cannot.
+			switch key {
+			case "raw_definition_path", "definition_path", "placed_feature_definition_path", "configured_feature_definition_path":
+				if name, ok := item.(string); ok {
+					if _, exists := available[name]; exists {
+						result[name] = struct{}{}
+					}
+				}
+			case "configured_feature_definition_paths":
+				for _, reference := range exportObjectArray(item) {
+					if name, ok := reference["path"].(string); ok {
+						if _, exists := available[name]; exists {
+							result[name] = struct{}{}
+						}
+					}
+				}
+			default:
+				collectAvailableArchivePaths(item, available, result)
+			}
 		}
 	}
 }
@@ -84,7 +99,7 @@ func retainExportTextAsset(name string, fallbackPaths map[string]struct{}) bool 
 	if _, required := fallbackPaths[name]; required {
 		return true
 	}
-	return !isNormalizedExportSourceJSON(name)
+	return exportPurposeRetainsText(registeredExportAssetPurpose(name))
 }
 
 func isNormalizedExportSourceJSON(name string) bool {

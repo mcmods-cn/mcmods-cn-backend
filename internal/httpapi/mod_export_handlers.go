@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	modExportImporterVersion  = "1.5.0"
+	modExportImporterVersion  = "1.6.0"
 	modExportTaskCode         = "mod_export_import"
 	maxExportFileCount        = 200_000
 	maxExportUncompressedSize = int64(8 << 30)
@@ -823,6 +823,12 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}
 	minimizeExportManifest(&manifest)
 	manifestJSON, _ := json.Marshal(manifest)
+	// Validate asset purposes before creating revisions or derived artifacts.
+	// Source ZIP ownership is independent from permission to publish its bytes.
+	assetPlan, err := buildExportAssetPlan(files)
+	if err != nil {
+		return err
+	}
 	namespaces := normalizeExportNamespaces(manifest.Configuration.Namespaces)
 	if len(namespaces) == 0 {
 		return errors.New("manifest contains no valid namespace")
@@ -1019,10 +1025,6 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	if err = s.updateModExportJob(ctx, jobID, runToken, "importing", 70, "assets"); err != nil {
 		return err
 	}
-	fallbackAssetPaths, err := normalizedExportFallbackAssetPaths(files)
-	if err != nil {
-		return err
-	}
 	assetFileNames := exportAssetFileNames(fileNames, files)
 	processedFiles := 0
 	for start := 0; start < len(assetFileNames); {
@@ -1137,7 +1139,11 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 				if err = queueExportDocumentEntries(writeBatch, resourceResolver, revisions, name, data); err != nil {
 					return err
 				}
-				if retainExportTextAsset(name, fallbackAssetPaths) {
+				if exportPurposeRetainsText(assetPlan[name]) {
+					data, err = projectExportAsset(name, data, assetPlan[name])
+					if err != nil {
+						return err
+					}
 					for _, revisionID := range sortedExportRevisionIDs(revisions) {
 						if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
 							return err
@@ -1174,16 +1180,15 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 						ContentType: "image/png", ByteLength: media.ByteLength, Data: data,
 					})
 				}
-			case ".nbt", ".schem", ".schematic", ".litematic":
-				if err = queueExportBinary(writeBatch, revisionID, name, data); err != nil {
-					return err
-				}
-				binaryAssetCount++
 			case ".json", ".obj", ".mtl", ".snbt", ".mcmeta":
 				if int64(len(data)) > maxExportJSONSize && extension == ".json" {
 					return fmt.Errorf("JSON asset too large: %s", name)
 				}
-				if extension != ".json" || retainExportTextAsset(name, fallbackAssetPaths) {
+				if exportPurposeRetainsText(assetPlan[name]) {
+					data, err = projectExportAsset(name, data, assetPlan[name])
+					if err != nil {
+						return err
+					}
 					if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
 						return err
 					}
