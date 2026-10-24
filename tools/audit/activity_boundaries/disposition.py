@@ -40,6 +40,8 @@ add('checkIn transferCurrency', '1bfb498', 'logs/backend_revisions/pg-economy-ac
 
 add('createFavoriteCollection updateFavoriteCollection deleteFavoriteCollection patchFavoriteMembership setFavoriteMembership', '831a6a8', 'logs/backend_revisions/pg-favorite-activity-first.log', 'Collection create/edit/delete, membership replace and both delta add/remove: exact activity failure leaves quota/popularity/export-task/association facts unchanged, recovery exact create/edit/delete1/4/1; visibility/popularity/DB-error neighbors under race.')
 
+add('claimReport takeoverReport resolveUnifiedReport reopenUnifiedReport', '5f392ac', 'logs/backend_revisions/pg-report-activity-first.log', 'Actual HTTP report creation through claim, privileged takeover, valid-with-hide/invalid-without-hide resolution, reopen; exact outbox failure rolls all assignment/moderation/review/notification facts back, recover once, duplicate reopen409; existing responsibility/idempotency/punitive-boundary neighbors.')
+
 existing_fact_handlers = {'createCatalogResource', 'catalogTags', 'catalogTagDetail', 'createCatalogRecipeType', 'catalogRecipeTypeDetail', 'createCatalogRecipe', 'catalogRecipeDetail', 'catalogRecipeTemplates', 'catalogRecipeTemplateDetail', 'updateCatalogEntityContent', 'ownedSkinContent', 'ownedBlueprintContent'}
 counts = collections.Counter()
 for route in report['routes']:

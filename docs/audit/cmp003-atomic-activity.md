@@ -15,10 +15,10 @@ Implemented and individually fault-tested families as of the commits below:
 | 4d39641 | question answer award/self-solve refund, independent server review | HTTP + PostgreSQL, real money/ledger/held state, notification intent and conflict replay |
 | 36b495c | creator claim approve/reject/revoke, team members, editor application approve/reject | HTTP + PostgreSQL, permissions/audit/notifications and recovery |
 | 09cf6df | blueprint conversion and retry | HTTP + PostgreSQL + actual business Worker with controlled OSS, precise activity failure rolls back job+NATS intent, recovered artifact becomes readable |
-
 | 98810a7 | launcher credential/session, follow, block/unblock, user file deletion | HTTP + PostgreSQL, complete session/relationship/file/quota/outbox rollback; real controlled OSS |
 | 1bfb498 | check-in and transfer | HTTP + PostgreSQL, exact balance/ledger/check-in rollback/recovery, FID-001 recipient boundary and economy concurrency neighbors |
 | 831a6a8 | favorite collection CRUD, membership replace/add/remove | HTTP + PostgreSQL, quota/popularity/association facts, exact activity1/4/1 and error/visibility/popularity neighbors |
+| 5f392ac | report claim/takeover/resolve/reopen | Real HTTP report creation and full workflow, exact failure rolls assignment/moderation/review/notification facts back; valid hiding/invalid preservation, idempotency and owner policy neighbors |
 
 These rows establish those tested boundaries. They do not establish every mutation route, every asynchronous consumer, final frontend behavior, or a frozen three-repository release. Additional commits may follow. The external audit result ledger records the exact commands, first failures, corrected fixtures, race results and remaining conditions. Creator create/edit/claim and shop purchase/use are handled separately in fd4d188; this document does not substitute for its test evidence.
 
