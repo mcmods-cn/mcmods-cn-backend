@@ -120,7 +120,11 @@ func (s *Server) startConversation(w http.ResponseWriter, r *http.Request) {
 	request.UserID = strings.ToLower(strings.TrimSpace(request.UserID))
 	var targetUserID int64
 	if err := s.db.QueryRow(r.Context(), `select id from users where public_id=$1 and status='active'`, request.UserID).Scan(&targetUserID); err != nil {
-		writeError(w, http.StatusNotFound, "目标用户不存在")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "目标用户不存在")
+		} else {
+			writeError(w, http.StatusInternalServerError, "读取目标用户失败")
+		}
 		return
 	}
 	claims := currentClaims(r)
