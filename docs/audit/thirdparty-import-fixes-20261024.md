@@ -12,14 +12,14 @@ Imported simple-project collection fields serialize as arrays, including the non
 
 ## Verification scope
 
-New named tests live in `internal/httpapi/audit_thirdparty_contract_test.go` and `audit_thirdparty_http_integration_test.go`. The former uses real HTTP with controlled provider fixtures plus unit/serialization and scripted redirect assertions. The latter uses a real API server and PostgreSQL, ordinary creators and independent reviewers. Existing `TestTEST035ModpackImportWorkerBoundariesAndFinalStatesIntegration` verifies the actual business Worker against PostgreSQL and a controlled TLS provider. These tests do not establish real upstream provider behavior, real browser operation of all eleven editor combinations, or full release acceptance.
+New named tests live in `internal/httpapi/audit_thirdparty_contract_test.go` and `audit_thirdparty_http_integration_test.go`. The former uses real HTTP with controlled provider fixtures plus unit/serialization and scripted redirect assertions. The latter uses a real API server and PostgreSQL, ordinary creators and independent reviewers. `TestAuditTP008ElevenSourceCombinationsProviderHTTPToIndependentPublicationIntegration` verifies all eleven source combinations through ordinary-user editing, business API, PostgreSQL, independent review and anonymous publication. Five Modrinth combinations additionally create tasks and explicitly invoke the actual Worker; the six CurseForge combinations invoke the importer over controlled HTTP. The production credential/origin rule correctly prevents configuring a credentialed local CF provider, so these six do not claim CF Worker coverage. Synthetic actual result samples can be exported with `MCMODS_AUDIT_SAMPLE_DIR`. `TestAuditTP003TP004TP005CurseForgeArchiveHTTPContracts` separately tests a second-page release, real TLS ZIP downloads, discriminator/reference rejection and quests producer/consumer acceptance. Existing `TestTEST035ModpackImportWorkerBoundariesAndFinalStatesIntegration` verifies the actual business Worker against PostgreSQL and a controlled TLS provider. These tests do not establish real upstream provider behavior, real browser operation of all eleven editor combinations, or full release acceptance.
 
 Activate the environment's Go toolchain, configure an owned PostgreSQL database and run:
 
 ```sh
 source /workspace/.cloud-setup/activate.sh
 MCMODS_RUN_DB_INTEGRATION=1 go test ./internal/httpapi \
-  -run 'Test(TP00|DGR003|AuditCMP007|AuditTP001|TEST035ModpackImportWorkerBoundariesAndFinalStatesIntegration|ModImport|ExternalMetadata|Provider|Modrinth|CurseForge|SimpleProjectDraft)' \
+  -run 'Test(TP00|DGR003|AuditCMP007|AuditTP00|TEST035ModpackImportWorkerBoundariesAndFinalStatesIntegration|ModImport|ExternalMetadata|Provider|Modrinth|CurseForge|SimpleProjectDraft)' \
   -count=1 -v
 ```
 

@@ -323,3 +323,27 @@ func TestTP008LegacyResultCollectionBoundaryPreservesNonemptyValuesAndExtensions
 		t.Fatal("non-array collection silently accepted")
 	}
 }
+
+func TestTP002ModImportUsesActualHTTPVersionPairs(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/project/example":
+			_, _ = io.WriteString(w, `{"id":"example","slug":"example","title":"Example","project_type":"mod","status":"approved","loaders":["fabric","forge"],"game_versions":["1.20.1","1.21.1"],"license":{"id":"MIT"}}`)
+		case "/project/example/version":
+			_, _ = io.WriteString(w, `[{"status":"listed","loaders":["fabric"],"game_versions":["1.20.1"]},{"status":"listed","loaders":["forge"],"game_versions":["1.21.1"]}]`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+	cfg := defaultModImportConfig()
+	cfg.Modrinth.BaseURL = provider.URL
+	draft, err := importModrinthProject(context.Background(), provider.Client(), cfg, "example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []modLoaderCompatibilityPayload{{Loader: "Fabric", Versions: []string{"1.20.1"}}, {Loader: "Forge", Versions: []string{"1.21.1"}}}
+	if !reflect.DeepEqual(draft.Compatibilities, want) {
+		t.Fatalf("HTTP import invented relations: %#v", draft.Compatibilities)
+	}
+}
