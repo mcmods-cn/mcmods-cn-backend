@@ -161,6 +161,20 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "publicId must be a 9-character mcmods.cn public ID")
 		return
 	}
+	// The cached public projection is not authority for the current parent
+	// state. Recheck before either a conditional cache response or its loader.
+	entity, err := s.catalogEditorEntityByPublicID(r.Context(), publicID, "recipe_type")
+	if errors.Is(err, errCatalogEditorNotFound) {
+		writeError(w, http.StatusNotFound, "recipe type not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read recipe type")
+		return
+	}
+	if !s.requirePublicCatalogEntity(w, r, entity) {
+		return
+	}
 	key := fmt.Sprintf("recipe-types:v8:detail:%s:%s:%s:%d:%d", publicID, primary, secondary, limit, offset)
 	s.writeCachedCatalog(w, r, key, func(ctx context.Context) (any, error) {
 		var entityID int64
