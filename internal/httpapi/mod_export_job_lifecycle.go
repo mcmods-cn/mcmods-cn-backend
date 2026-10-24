@@ -183,7 +183,7 @@ func resetModExportJobForRetryTx(ctx context.Context, tx pgx.Tx, jobID string, m
 		update catalog_import_jobs
 		set status='queued',progress=0,current_stage='recovery',error_code='',error_detail='{}'::jsonb,
 			started_at=null,finished_at=null,heartbeat_at=null,run_token='',updated_at=now()
-		where id=$1 and mod_id=$2 and created_by=$3 and (
+		where id=$1 and mod_id=$2 and created_by=$3 and right(error_code,18)<>'_reupload_required' and (
 			status in ('failed','cancelled') or
 			(status in ('validating','importing') and coalesce(heartbeat_at,updated_at) < now() - $4::interval)
 		)`, jobID, modID, actorID, pgInterval(modExportStaleAfter))

@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
 )
@@ -392,4 +394,320 @@ func TestAuditFixJEIV7ProducerProjectionWorkerIntegration(t *testing.T) {
 	}
 	f.reviewGR(t, revision, "approved")
 	f.require(t, "", "GET", "/api/v1/export-revisions/"+revision+"/assets", nil, 200)
+}
+
+// auditFixFlushBarrier selects a reachable schedule at the actual recipe
+// transaction boundary. Its observations use the separate fixture pool; it
+// never borrows another connection from the pool under test.
+type auditFixWorkerContextKey struct{}
+type auditFixFlushBarrier struct {
+	observer *pgxpool.Pool
+	ready    chan string
+	release  chan struct{}
+	mu       sync.Mutex
+	seen     map[string]bool
+}
+
+func (b *auditFixFlushBarrier) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	return ctx
+}
+func (b *auditFixFlushBarrier) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	job, _ := ctx.Value(auditFixWorkerContextKey{}).(string)
+	if job == "" || strings.ToLower(data.CommandTag.String()) != "begin" {
+		return
+	}
+	var progress int
+	if b.observer.QueryRow(ctx, `select progress from catalog_import_jobs where id=$1`, job).Scan(&progress) != nil || progress < 36 || progress > 64 {
+		return
+	}
+	b.mu.Lock()
+	if b.seen[job] {
+		b.mu.Unlock()
+		return
+	}
+	b.seen[job] = true
+	b.mu.Unlock()
+	b.ready <- job
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+	}
+}
+
+func TestAuditFixGRR01ConcurrentWorkersProgressAtSupportedPoolSizesIntegration(t *testing.T) {
+	for _, size := range []int32{2, 12} {
+		t.Run(fmt.Sprintf("pool%d", size), func(t *testing.T) {
+			f := newAuditFixGRFixture(t)
+			other := f
+			other.editor = f.otherEditor
+			other.modID = f.otherModID
+			other.modCode = f.otherModCode
+			if _, err := f.db.Exec(f.ctx, `insert into mod_identifiers(mod_id,identifier,is_primary) values($1,'auditother',true)`, other.modID); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.QueryRow(f.ctx, `insert into mod_content_versions(mod_id,label,minecraft_versions,loaders,status,created_by,updated_by) values($1,'Concurrent 1.20.1',array['1.20.1'],array['forge'],'active',$2,$2) returning id,public_id`, other.modID, f.userIDs[other.editor]).Scan(&other.versionID, &other.versionPublic); err != nil {
+				t.Fatal(err)
+			}
+			overrides := map[string]string{}
+			for path, name := range map[string]string{"recipes/jei/categories.json": "jei-categories-v7.json", "recipes/jei/templates/example/pressing.json": "jei-templates-v2.json", "recipes/jei/recipes/example/pressing.json": "jei-recipes-v2.json"} {
+				raw, err := os.ReadFile("testdata/audit-20261024/" + name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				overrides[path] = string(raw)
+			}
+			firstRaw := auditFixGRZip(t, overrides)
+			secondFiles := map[string]string{}
+			for name, value := range overrides {
+				secondFiles[strings.ReplaceAll(name, "example", "auditother")] = strings.ReplaceAll(value, "example", "auditother")
+			}
+			secondFiles["manifest.json"] = `{"schema_version":"mcmods-export/v1","exporter_version":"audit-synthetic-current-v7","status":"complete","minecraft_version":"1.20.1","loader":"forge","package_format":"zip","configuration":{"namespaces":["auditother"],"profile":"all"},"stages":[],"errors":[],"error_count":0}`
+			secondFiles["registries/items.json"] = `{"registry":"items","entries":[{"id":"auditother:audit_item","namespace":"auditother","names":{"en-US":"Other item"},"max_stack_size":64}]}`
+			secondRaw := auditFixGRZip(t, secondFiles)
+			firstJob := f.job(t, f.upload(t, firstRaw))
+			secondJob := other.job(t, other.upload(t, secondRaw))
+			barrier := &auditFixFlushBarrier{observer: f.db, ready: make(chan string, 2), release: make(chan struct{}), seen: map[string]bool{}}
+			poolConfig := f.db.Config()
+			poolConfig.MaxConns = size
+			poolConfig.ConnConfig.Tracer = barrier
+			workers, err := pgxpool.NewWithConfig(f.ctx, poolConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer workers.Close()
+			// The service graph uses its original pool for auth/cache; only the actual
+			// business Worker database pool is varied for this resource-dependency test.
+			f.server.db = workers
+			ctx, cancel := context.WithTimeout(f.ctx, 15*time.Second)
+			defer cancel()
+			results := make(chan error, 2)
+			for _, job := range []string{firstJob.ID, secondJob.ID} {
+				go func(id string) {
+					results <- f.server.importMCModsExportJob(context.WithValue(ctx, auditFixWorkerContextKey{}, id), id)
+				}(job)
+			}
+			for i := 0; i < 2; i++ {
+				select {
+				case <-barrier.ready:
+				case <-ctx.Done():
+					close(barrier.release)
+					t.Fatal("workers did not reach actual recipe transaction barrier")
+				}
+			}
+			if workers.Stat().AcquiredConns() != 2 {
+				close(barrier.release)
+				t.Fatalf("barrier not holding both transaction connections: %d", workers.Stat().AcquiredConns())
+			}
+			close(barrier.release)
+			for i := 0; i < 2; i++ {
+				if err := <-results; err != nil {
+					t.Fatalf("concurrent Worker: %v", err)
+				}
+			}
+			if n := f.number(t, `select count(*) from catalog_import_jobs where id=any($1::text[]) and status='ready' and current_stage='review'`, []string{firstJob.ID, secondJob.ID}); n != 2 {
+				t.Fatalf("ready/review jobs=%d", n)
+			}
+			if n := f.number(t, `select count(*) from catalog_import_revisions where job_id=any($1::text[]) and status='staging'`, []string{firstJob.ID, secondJob.ID}); n != 0 {
+				t.Fatalf("staging leak=%d", n)
+			}
+			t.Logf("actual two Workers completed with pool=%d; actual transaction barrier, no sleep; queue transport not exercised", size)
+		})
+	}
+}
+
+func TestAuditFixExecutionPolicyCancelsInvalidQueuedRequirementsIntegration(t *testing.T) {
+	for _, scenario := range []string{"banned", "edit_revoked", "automatic_revoked", "archived", "legacy_unknown"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newAuditFixGRFixture(t)
+			if scenario == "automatic_revoked" {
+				grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "project.no-review."+f.modCode)
+			}
+			job := f.job(t, f.upload(t, auditFixGRZip(t, nil)))
+			switch scenario {
+			case "banned":
+				grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "account.banned")
+			case "edit_revoked", "automatic_revoked":
+				code := "project.edit." + f.modCode
+				if scenario == "automatic_revoked" {
+					code = "project.no-review." + f.modCode
+				}
+				if _, err := f.db.Exec(f.ctx, `update user_permissions grant_row set allow=false from permissions permission where grant_row.user_id=$1 and permission.id=grant_row.permission_id and permission.code=$2`, f.userIDs[f.editor], code); err != nil {
+					t.Fatal(err)
+				}
+			case "archived":
+				if _, err := f.db.Exec(f.ctx, `update mod_content_versions set status='archived' where id=$1`, f.versionID); err != nil {
+					t.Fatal(err)
+				}
+			case "legacy_unknown":
+				if _, err := f.db.Exec(f.ctx, `update catalog_import_jobs set requested_publication_mode='legacy_unknown' where id=$1`, job.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := f.server.importMCModsExportJob(f.ctx, job.ID); err != nil {
+				t.Fatal(err)
+			}
+			var status, code, lease string
+			if err := f.db.QueryRow(f.ctx, `select status,error_code,run_token from catalog_import_jobs where id=$1`, job.ID).Scan(&status, &code, &lease); err != nil {
+				t.Fatal(err)
+			}
+			if status != "cancelled" || !strings.HasSuffix(code, "_reupload_required") || lease != "" {
+				t.Fatalf("policy state %s/%s leasePresent=%v", status, code, lease != "")
+			}
+			if n := f.number(t, `select count(*) from catalog_import_revisions where job_id=$1`, job.ID); n != 0 {
+				t.Fatalf("policy cancellation left revisions=%d", n)
+			}
+			if n := f.number(t, `select count(*) from audit_events where aggregate_key=$1 and action='execution_cancelled'`, job.ID); n != 1 {
+				t.Fatalf("cancellation audit=%d", n)
+			}
+			if n := f.number(t, `select count(*) from nats_outbox where aggregate_id=$1`, job.ID); n != 1 {
+				t.Fatalf("cancellation emitted publication/retry outbox=%d", n)
+			}
+			if retried, err := f.server.resetModExportJobForRetry(f.ctx, job.ID, f.modID, f.userIDs[f.editor]); err != nil || retried {
+				t.Fatalf("policy terminal task retried=%v/%v", retried, err)
+			}
+			// A delayed delivery cannot claim the terminal task or create another audit.
+			if err := f.server.importMCModsExportJob(f.ctx, job.ID); err != nil {
+				t.Fatal(err)
+			}
+			if n := f.number(t, `select count(*) from audit_events where aggregate_key=$1 and action='execution_cancelled'`, job.ID); n != 1 {
+				t.Fatalf("late delivery duplicated audit=%d", n)
+			}
+		})
+	}
+}
+
+func TestAuditFixCONT002ManualAndMixedRecipeCatalogHTTPIntegration(t *testing.T) {
+	f := newAuditFixGRFixture(t)
+	tx, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(f.ctx)
+	insertEntity := func(identity catalogIdentity, kind string) int64 {
+		t.Helper()
+		var id int64
+		if err := tx.QueryRow(f.ctx, `insert into catalog_entities(identity_key,public_id,entity_type,status) values($1,$2,$3,'active') returning id`, identity.ID, identity.PublicID, kind).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	typeIdentity := recipeTypeIdentity("example:pressing")
+	typeID := insertEntity(typeIdentity, "recipe_type")
+	resource := resourceIdentity("minecraft.item", "example:manual_resource")
+	resourceID := insertEntity(resource, "resource")
+	template := catalogIdentity{ID: "audit:manual:template", PublicID: randomCatalogPublicID()}
+	templateID := insertEntity(template, "recipe_template")
+	recipe := recipeIdentity("", "example:pressing", "example:manual", true)
+	recipeID := insertEntity(recipe, "recipe")
+	statements := []struct {
+		sql  string
+		args []any
+	}{
+		{`insert into recipe_types(entity_id,canonical_id) values($1,'example:pressing')`, []any{typeID}},
+		{`insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path) values($1,'minecraft.item','example:manual_resource','example','manual_resource')`, []any{resourceID}},
+		{`insert into recipes(entity_id,recipe_type_id,canonical_source_id,semantic_fingerprint,identity_source) values($1,$2,'example:manual','audit-manual-fingerprint','manual')`, []any{recipeID, typeID}},
+		{`insert into recipe_layout_templates(entity_id,recipe_type_id,template_key,canvas_width,canvas_height,image_scale) values($1,$2,'audit-manual-layout',100,50,1)`, []any{templateID, typeID}},
+		{`insert into recipe_template_slots(identity_key,template_id,slot_key,role,ordinal,x,y,width,height) values('audit:manual:empty',$1,'empty','input',0,1,1,16,16),('audit:manual:output',$1,'output','output',1,30,1,16,16)`, []any{templateID}},
+		{`insert into recipe_definitions(recipe_id,template_id,definition) values($1,$2,'{"layout_kind":"not_applicable"}')`, []any{recipeID, templateID}},
+		{`insert into recipe_bindings(identity_key,recipe_id,template_slot_id,ordinal) select 'audit:manual:binding',$1,id,1 from recipe_template_slots where template_id=$2 and slot_key='output'`, []any{recipeID, templateID}},
+		{`insert into recipe_binding_candidates(identity_key,binding_id,candidate_index,resource_id,amount,probability) select 'audit:manual:candidate',id,0,$1,3,.5 from recipe_bindings where recipe_id=$2`, []any{resourceID, recipeID}},
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(f.ctx, statement.sql, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertCatalog := func(want int) {
+		t.Helper()
+		raw := f.require(t, "", "GET", "/api/v1/recipe-types/"+typeIdentity.PublicID+"/catalog?limit=1", nil, 200)
+		data := decodeTEST022Data[map[string]any](t, raw)
+		if data["total"] != float64(want) {
+			t.Fatalf("catalog total=%v want=%d", data["total"], want)
+		}
+		recipes, _ := data["recipes"].([]any)
+		if len(recipes) != 1 {
+			t.Fatalf("paged recipes=%d", len(recipes))
+		}
+		if want == 1 {
+			value := recipes[0].(map[string]any)
+			layout := value["layout"].(map[string]any)
+			slots := layout["slots"].([]any)
+			if len(slots) != 2 || slots[0].(map[string]any)["ingredient_present"] != false {
+				t.Fatalf("empty slot lost: %#v", slots)
+			}
+			candidates := slots[1].(map[string]any)["alternatives"].([]any)
+			candidate := candidates[0].(map[string]any)
+			if candidate["amount"] != float64(3) || candidate["probability"] != .5 {
+				t.Fatalf("quantity/probability changed: %#v", candidate)
+			}
+		}
+		f.require(t, "", "GET", "/api/v1/catalog/recipes/"+recipe.PublicID+"/render", nil, 200)
+	}
+	assertCatalog(1)
+	overrides := map[string]string{}
+	for path, name := range map[string]string{"recipes/jei/categories.json": "jei-categories-v7.json", "recipes/jei/templates/example/pressing.json": "jei-templates-v2.json", "recipes/jei/recipes/example/pressing.json": "jei-recipes-v2.json"} {
+		raw, err := os.ReadFile("testdata/audit-20261024/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		overrides[path] = string(raw)
+	}
+	_, revision := f.imported(t, auditFixGRZip(t, overrides))
+	f.reviewGR(t, revision, "approved")
+	assertCatalog(2)
+	raw := f.require(t, "", "GET", "/api/v1/recipe-types/"+typeIdentity.PublicID+"/catalog?limit=1&offset=1", nil, 200)
+	data := decodeTEST022Data[map[string]any](t, raw)
+	if len(data["recipes"].([]any)) != 1 {
+		t.Fatal("mixed second page missing")
+	}
+	// Remove only this synthetic manual definition to exercise imported-only.
+	if _, err := f.db.Exec(f.ctx, `delete from recipe_definitions where recipe_id=$1`, recipeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `update catalog_dataset_state set version=version+1 where singleton`); err != nil {
+		t.Fatal(err)
+	}
+	raw = f.require(t, "", "GET", "/api/v1/recipe-types/"+typeIdentity.PublicID+"/catalog", nil, 200)
+	data = decodeTEST022Data[map[string]any](t, raw)
+	if data["total"] != float64(1) {
+		t.Fatalf("import-only catalog=%#v", data)
+	}
+}
+
+func TestAuditFixActualGamePackageHTTPWorkerIntegration(t *testing.T) {
+	path := os.Getenv("MCMODS_AUDIT_ACTUAL_GAME_ZIP")
+	if path == "" {
+		t.Skip("set MCMODS_AUDIT_ACTUAL_GAME_ZIP to the untouched real Minecraft package")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(raw)
+	t.Logf("actual original Minecraft package sha256=%s bytes=%d", hex.EncodeToString(digest[:]), len(raw))
+	f := newAuditFixGRFixture(t)
+	if _, err := f.db.Exec(f.ctx, `update mod_identifiers set identifier='auditfixture' where mod_id=$1`, f.modID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `update mod_content_versions set label='1.0.0',loaders=array['fabric'] where id=$1`, f.versionID); err != nil {
+		t.Fatal(err)
+	}
+	_, revision := f.imported(t, raw)
+	f.require(t, f.reviewer, "GET", "/api/v1/export-revisions/"+revision, nil, 200)
+	f.reviewGR(t, revision, "approved")
+	if n := f.number(t, `select count(*) from recipe_import_snapshots where revision_id=$1`, revision); n != 2 {
+		t.Fatalf("actual game recipe snapshots=%d", n)
+	}
+	if n := f.number(t, `select count(*) from catalog_import_media where revision_id=$1`, revision); n < 1 {
+		t.Fatalf("actual PNG media=%d", n)
+	}
+	var typePublicID string
+	if err := f.db.QueryRow(f.ctx, `select entity.public_id from recipe_type_import_snapshots snapshot join catalog_entities entity on entity.id=snapshot.recipe_type_id where revision_id=$1 limit 1`, revision).Scan(&typePublicID); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, "", "GET", "/api/v1/recipe-types/"+typePublicID+"/catalog", nil, 200)
+	t.Log("real game bytes -> HTTP upload -> PostgreSQL -> directly invoked business Worker -> independent review -> anonymous catalog: PASS; browser/NATS not exercised by this test")
 }

@@ -197,24 +197,27 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 	}
 
 	deduplicated, shouldPublish := false, false
-	var existingStatus string
+	var existingStatus, existingErrorCode string
 	var existingStalled bool
-	err = tx.QueryRow(r.Context(), `select id,status,status in ('validating','importing') and coalesce(heartbeat_at,updated_at)<now()-$6::interval
+	err = tx.QueryRow(r.Context(), `select id,status,error_code,status in ('validating','importing') and coalesce(heartbeat_at,updated_at)<now()-$6::interval
 		from catalog_import_jobs where mod_id=$1 and package_id=$2 and importer_version=$3 and target_version_id=$4 and overwrite_existing=$5 for update`,
 		identity.ID, packageID, importerVersion, targetVersionID, request.OverwriteExistingImportData, pgInterval(modExportStaleAfter)).
-		Scan(&jobID, &existingStatus, &existingStalled)
+		Scan(&jobID, &existingStatus, &existingErrorCode, &existingStalled)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		jobID = newExportID()
 		_, err = tx.Exec(r.Context(), `insert into catalog_import_jobs
-			(id,mod_id,package_id,importer_version,target_version_id,overwrite_existing,created_by)
-			values($1,$2,$3,$4,$5,$6,$7)`, jobID, identity.ID, packageID, importerVersion,
-			targetVersionID, request.OverwriteExistingImportData, claims.Subject)
+			(id,mod_id,package_id,importer_version,target_version_id,overwrite_existing,created_by,requested_publication_mode)
+			values($1,$2,$3,$4,$5,$6,$7,$8)`, jobID, identity.ID, packageID, importerVersion,
+			targetVersionID, request.OverwriteExistingImportData, claims.Subject, catalogImportRequestedMode(claims, identity.UniqueID))
 		shouldPublish = err == nil
+	case err == nil && strings.HasSuffix(existingErrorCode, "_reupload_required"):
+		writeError(w, http.StatusConflict, "This import was cancelled by current permissions or target state; upload a new source file.")
+		return
 	case err == nil && (shouldRetryModExportStatus(existingStatus) || existingStalled):
 		_, err = tx.Exec(r.Context(), `update catalog_import_jobs set status='queued',progress=0,current_stage='recovery',
-			error_code='',error_detail='{}'::jsonb,created_by=$2,started_at=null,finished_at=null,heartbeat_at=null,
-			run_token='',updated_at=now() where id=$1`, jobID, claims.Subject)
+			error_code='',error_detail='{}'::jsonb,started_at=null,finished_at=null,heartbeat_at=null,
+			run_token='',updated_at=now() where id=$1`, jobID)
 		shouldPublish = err == nil
 	case err == nil:
 		deduplicated = true
@@ -281,6 +284,13 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 		if errors.Is(resultErr, errModExportLeaseLost) || errors.Is(context.Cause(ctx), errModExportLeaseLost) {
 			return
 		}
+		policyContext, stopPolicy := context.WithTimeout(context.Background(), 30*time.Second)
+		cancelled, policyErr := s.enforceCatalogImportExecutionPolicy(policyContext, jobID, runToken)
+		stopPolicy()
+		if policyErr == nil && cancelled {
+			resultErr = nil
+			return
+		}
 		s.failModExportJob(jobID, runToken, "import_failed", resultErr)
 	}()
 
@@ -298,6 +308,11 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 			&objectKey, &uniqueID, &minecraftVersions, &loaders)
 	if err != nil {
 		return err
+	}
+	if cancelled, policyErr := s.enforceCatalogImportExecutionPolicy(ctx, jobID, runToken); policyErr != nil {
+		return policyErr
+	} else if cancelled {
+		return nil
 	}
 	if objectKey == "" {
 		return errors.New("catalog import source file is unavailable")
@@ -457,8 +472,13 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 		revisionIDs = append(revisionIDs, revisionID)
 	}
 	sort.Strings(revisionIDs)
-	canActivate := createdBy > 0 && s.userHasPermission(ctx, createdBy, "project.no-review."+uniqueID)
+	canActivate := false
 	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		var policyErr error
+		canActivate, policyErr = catalogImportEligibilityTx(ctx, tx, jobID, runToken)
+		if policyErr != nil {
+			return policyErr
+		}
 		if lockErr := lockCatalogImportAttemptTx(ctx, tx, jobID, runToken); lockErr != nil {
 			return lockErr
 		}
@@ -510,6 +530,9 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 		}
 		return s.tombstoneOSSFileTx(ctx, tx, sourceFileID, "catalog-import-consumed")
 	}); err != nil {
+		if errors.Is(err, errCatalogImportPolicyCancel) {
+			return s.cancelCatalogImportForPolicy(ctx, jobID, runToken, err)
+		}
 		return err
 	}
 	s.notifyModExportResult(context.Background(), jobID, "ready", nil)

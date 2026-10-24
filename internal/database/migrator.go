@@ -266,7 +266,16 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		return fmt.Errorf("database schema generation %d is incompatible with generation %d; reset the development database", currentGeneration, schemaGeneration)
 	}
 	if currentGeneration == schemaGeneration {
-		return requireLogRedactionSchema(ctx, conn)
+		if err = requireLogRedactionSchema(ctx, conn); err != nil {
+			return err
+		}
+		if err = requireAuditIdentityOSSSchema(ctx, conn); err != nil {
+			return err
+		}
+		if err = requireNotificationVisibilitySchema(ctx, conn); err != nil {
+			return err
+		}
+		return RequireCatalogImportPolicySchema(ctx, conn)
 	}
 
 	tx, err := conn.Begin(ctx)
@@ -336,6 +345,9 @@ func schemaInstallationStatements() []string {
 	statements = append(statements, unresolvedReferenceCatalogSchemaStatements()...)
 	statements = append(statements, engagementExportSchemaStatements()...)
 	statements = append(statements, stickerReferenceSchemaStatements()...)
+	statements = append(statements, NotificationVisibilitySchemaStatements()...)
+	statements = append(statements, auditIdentityOSSSchemaStatements()...)
+	statements = append(statements, CatalogImportPolicySchemaStatements()...)
 	return append(statements, foreignKeyIndexStatement())
 }
 

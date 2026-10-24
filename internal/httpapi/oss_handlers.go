@@ -354,6 +354,9 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 			ScanStatuses:   []string{"pending", "clean", "trusted_generated"},
 			RequireRaster:  isCatalogImageUpload,
 			RequireTrusted: isCatalogImageUpload,
+			// A policy-cancelled attempt requires a genuinely new upload. Keep
+			// its old immutable source for audit, but do not deduplicate back to it.
+			ExcludePolicyCancelledSources: isModExport || isModCatalog,
 		}
 		if scope == "user" || isModExport || isModCatalog || isReportEvidence {
 			uploaderID := currentClaims(r).Subject

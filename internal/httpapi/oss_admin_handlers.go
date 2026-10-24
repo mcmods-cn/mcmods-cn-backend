@@ -658,7 +658,8 @@ type ossFileHashLookup struct {
 	RequireRaster bool
 	// RequireTrusted prevents an unscanned upload from becoming a public
 	// catalog image merely because its bytes match a later request.
-	RequireTrusted bool
+	RequireTrusted                bool
+	ExcludePolicyCancelledSources bool
 }
 
 func (s *Server) findExistingOSSFileByHashExact(ctx context.Context, sha256 string, sizeBytes int64, lookup ossFileHashLookup) (map[string]any, bool, error) {
@@ -685,6 +686,12 @@ func (s *Server) findExistingOSSFileByHashExact(ctx context.Context, sha256 stri
 	if lookup.Source != "" {
 		args = append(args, lookup.Source)
 		query += fmt.Sprintf(` and source = $%d`, len(args))
+	}
+	if lookup.ExcludePolicyCancelledSources {
+		query += ` and not exists(select 1 from catalog_import_packages package
+			join catalog_import_jobs job on job.package_id=package.id
+			where package.archive_file_id=oss_files.id
+			  and job.status='cancelled' and right(job.error_code,18)='_reupload_required')`
 	}
 	if lookup.RequireTrusted {
 		query += ` and scan_status in ('clean','trusted_generated')`
