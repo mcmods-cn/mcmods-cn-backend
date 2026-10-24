@@ -36,11 +36,11 @@
 
 ## 预览、确认和执行
 
-1. `POST /api/v1/admin/activity-logs/cleanup/preview` 保存不可变过滤快照和 `snapshotBefore`。
+1. `POST /api/v1/admin/activity-logs/cleanup/preview` 在同一条有界查询的数据库快照内，保存不可变过滤条件、`snapshotBefore` 和精确命中事件 ID 集合（最多 100000 条，`membershipVersion=1`）。计数、分组、样例和成员集合来自同一 CTE；不是用时间或 ID 最大值推断成员。
 2. 响应包含命中总数、按动作/对象类型/用户分组、时间范围、少量只含数值关系的样例、条件摘要、15 分钟一次性确认 token 和危险范围标记。
 3. 管理员必须提交同一 preview ID、token 以及精确短语 `DELETE <命中数>` 到 `POST .../execute`。
-4. 后端校验同一操作者、未过期、状态为 preview、常量时间 token hash、动作策略仍允许删除。
-5. 按有限批次删除并持续更新独立审计记录；不提供 GET 删除接口。
+4. 后端校验同一操作者、未过期、状态为 preview、常量时间 token hash、动作策略仍允许删除，以及成员版本、去重数量和确认数量一致。
+5. 仅从已保存成员集合按有限批次删除并持续更新独立审计记录；预览之后提交的事件（包括更低 sequence 和更旧 occurred_at）不进入本次范围。不提供 GET 删除接口。并发清理已移走部分成员时，返回真实删除数，不会以新事件补足确认数。
 
 权限使用现有 `log.read`/`log.write` 后端中间件。前端使用 Authorization Bearer token，不依赖跨站 cookie；既有 CORS/认证链继续阻止跨站伪造。对象和用户均由服务端重新解析，不能通过隐藏按钮或前端用户名越权。
 
@@ -71,3 +71,12 @@
 - `GET /api/v1/admin/activity-logs/ingestion` 需要 `log.read`，返回队列深度、Outbox 积压与最老时间、丢弃/失败/重试计数和连接池等待指标。
 - 多实例必须设置正确的 `APP_REPLICA_COUNT` 并启用 Redis；否则启动配置校验失败，避免视图节流在每个实例重复计数。
 - 安全、权限、资金等权威审计仍在业务事务和专用审计表内完成；通用动作 Outbox 是活动/统计流，不替代领域账本。
+
+
+## 2026-10-24 手动预览成员格式兼容
+
+现有 `filters` JSON 存储新成员版本与内部数字 ID；不新增表、列或回填事件，不在公开预览响应暴露全部内部成员。旧的待确认预览没有精确成员，执行返回 `409 ACTIVITY_CLEANUP_PREVIEW_REFRESH_REQUIRED`，要求重新预览。旧的手动 `running` 清理没有精确成员时，恢复器保留已记录的删除计数并将其标为失败，停止扩大删除范围；不会重新按宽过滤器继续删除。自动保留任务继续采用自身保留策略，不借用手动确认数量。
+
+部署时先停止旧版本手动清理执行和恢复器，再启用新版本预览/执行。旧二进制会忽略新 JSON 成员字段，不能在仍有可执行新格式预览/运行时回滚到旧执行器；应先停止执行并使这些短期预览失效或等待其到期，再回滚。生产未执行任何清理、失效或数据回填。
+
+回归 `TestAuditCMPQ02CleanupDeletesOnlyPreviewedCommittedMembershipHTTPIntegration` 使用真实 HTTP/PostgreSQL 和显式提交屏障：预览只看到一行；低 sequence 的未提交旧事件随后提交，再插入另一旧时间事件。修复前原确认删除三行，修复后只删除预览行，两个迟到行保留，审计保持 matched=1/deleted=1，重复确认冲突。原审计恢复测试仍验证批次进度故障回滚、恢复和最终审计持久化；其夹具现在与真实新预览一样保存精确成员与 matched_count。

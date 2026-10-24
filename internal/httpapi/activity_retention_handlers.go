@@ -63,15 +63,17 @@ type activityCleanupFilterRequest struct {
 }
 
 type normalizedActivityCleanupFilter struct {
-	UserIDs        []int64                      `json:"userIds,omitempty"`
-	ObjectRouteIDs []int64                      `json:"objectRouteIds,omitempty"`
-	ObjectTypeIDs  []int16                      `json:"objectTypeIds,omitempty"`
-	ActionIDs      []int16                      `json:"actionIds,omitempty"`
-	From           *time.Time                   `json:"from,omitempty"`
-	To             *time.Time                   `json:"to,omitempty"`
-	SnapshotBefore time.Time                    `json:"snapshotBefore"`
-	BatchSize      int                          `json:"batchSize"`
-	Summary        activityCleanupFilterRequest `json:"summary"`
+	MembershipVersion int                          `json:"membershipVersion,omitempty"`
+	EventIDs          []int64                      `json:"eventIds,omitempty"`
+	UserIDs           []int64                      `json:"userIds,omitempty"`
+	ObjectRouteIDs    []int64                      `json:"objectRouteIds,omitempty"`
+	ObjectTypeIDs     []int16                      `json:"objectTypeIds,omitempty"`
+	ActionIDs         []int16                      `json:"actionIds,omitempty"`
+	From              *time.Time                   `json:"from,omitempty"`
+	To                *time.Time                   `json:"to,omitempty"`
+	SnapshotBefore    time.Time                    `json:"snapshotBefore"`
+	BatchSize         int                          `json:"batchSize"`
+	Summary           activityCleanupFilterRequest `json:"summary"`
 }
 
 type activityCleanupExecuteRequest struct {
@@ -81,6 +83,7 @@ type activityCleanupExecuteRequest struct {
 }
 
 type activityCleanupPreviewSummary struct {
+	EventIDs     []int64
 	Total        int64
 	ByAction     map[string]int64
 	ByObjectType map[string]int64
@@ -305,6 +308,9 @@ func activityCleanupWhere(filter normalizedActivityCleanupFilter, firstPlacehold
 		args = append(args, value)
 		conditions = append(conditions, fmt.Sprintf(sql, firstPlaceholder+len(args)-1))
 	}
+	if filter.MembershipVersion == 1 {
+		add("event.id=any($%d::bigint[])", filter.EventIDs)
+	}
 	add("event.occurred_at<$%d", filter.SnapshotBefore)
 	if filter.From != nil {
 		add("event.occurred_at>=$%d", *filter.From)
@@ -377,6 +383,10 @@ func (s *Server) previewActivityCleanup(w http.ResponseWriter, r *http.Request) 
 			map[string]any{"maximumMatchedCount": maxActivityCleanupPreviewEvents, "minimumMatchedCount": summary.Total})
 		return
 	}
+	// IDs come from the same bounded statement snapshot as the counts. A late
+	// transaction with an old occurred_at or lower sequence is never a member.
+	filter.MembershipVersion = 1
+	filter.EventIDs = summary.EventIDs
 	token, tokenHash, err := newCleanupConfirmationToken()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create cleanup confirmation")
@@ -433,7 +443,8 @@ func activityCleanupPreviewSummarySQL(where string, limitPlaceholder int) string
 		coalesce((select jsonb_object_agg(group_key,count) from user_counts),'{}'::jsonb),
 		coalesce((select jsonb_agg(jsonb_build_object(
 			'id',id,'user_ref',user_ref,'action',action,'object_type',object_type,
-			'object_ref',object_ref,'occurred_at',occurred_at) order by occurred_at,id) from sample_rows),'[]'::jsonb)`
+			'object_ref',object_ref,'occurred_at',occurred_at) order by occurred_at,id) from sample_rows),'[]'::jsonb),
+		coalesce((select array_agg(id order by id) from candidates),'{}'::bigint[])`
 }
 
 func (s *Server) loadActivityCleanupPreviewSummary(ctx context.Context, where string, args []any) (activityCleanupPreviewSummary, error) {
@@ -441,7 +452,7 @@ func (s *Server) loadActivityCleanupPreviewSummary(ctx context.Context, where st
 	var summary activityCleanupPreviewSummary
 	var byAction, byObjectType, byUser, samples []byte
 	err := s.db.QueryRow(ctx, activityCleanupPreviewSummarySQL(where, len(args)), args...).Scan(
-		&summary.Total, &byAction, &byObjectType, &byUser, &samples,
+		&summary.Total, &byAction, &byObjectType, &byUser, &samples, &summary.EventIDs,
 	)
 	if err != nil {
 		return summary, err
@@ -508,6 +519,11 @@ func (s *Server) executeActivityCleanup(w http.ResponseWriter, r *http.Request) 
 	var filter normalizedActivityCleanupFilter
 	if err = json.Unmarshal(rawFilter, &filter); err != nil {
 		writeError(w, http.StatusInternalServerError, "invalid stored cleanup filter")
+		return
+	}
+	if !validActivityCleanupMembership(filter, matched) {
+		writeAPIError(w, http.StatusConflict, "ACTIVITY_CLEANUP_PREVIEW_REFRESH_REQUIRED",
+			"activity cleanup preview predates exact membership protection; create a new preview", 0, nil)
 		return
 	}
 	config, err := s.activityRetentionConfig(r.Context())
@@ -713,7 +729,7 @@ func (worker *ActivityRetentionWorker) prune(ctx context.Context) {
 }
 
 func repairActivityCleanupRuns(ctx context.Context, db *pgxpool.Pool) {
-	rows, err := db.Query(ctx, `select public_id,filters from activity_cleanup_runs
+	rows, err := db.Query(ctx, `select public_id,source,matched_count,filters from activity_cleanup_runs
 		where status='running' and started_at<now()-interval '1 minute'
 		order by started_at,id limit 20`)
 	if err != nil {
@@ -721,13 +737,15 @@ func repairActivityCleanupRuns(ctx context.Context, db *pgxpool.Pool) {
 		return
 	}
 	type repairRun struct {
-		id     string
-		filter []byte
+		id      string
+		source  string
+		matched int64
+		filter  []byte
 	}
 	runs := make([]repairRun, 0, 20)
 	for rows.Next() {
 		var run repairRun
-		if err = rows.Scan(&run.id, &run.filter); err != nil {
+		if err = rows.Scan(&run.id, &run.source, &run.matched, &run.filter); err != nil {
 			rows.Close()
 			log.Printf("scan activity cleanup audit repair: %v", err)
 			return
@@ -752,6 +770,12 @@ func repairActivityCleanupRuns(ctx context.Context, db *pgxpool.Pool) {
 			}
 			continue
 		}
+		if run.source == "manual" && !validActivityCleanupMembership(filter, run.matched) {
+			if _, finalErr := finalizeActivityCleanupRun(ctx, db, run.id, "failed", "legacy manual cleanup has no exact preview membership; create a new preview"); finalErr != nil {
+				log.Printf("finalize legacy activity cleanup audit repair %s: %v", run.id, finalErr)
+			}
+			continue
+		}
 		if _, err = deleteActivityEventsInBatches(ctx, db, run.id, filter); err != nil {
 			log.Printf("resume activity cleanup audit repair %s: %v", run.id, err)
 			continue
@@ -763,3 +787,20 @@ func repairActivityCleanupRuns(ctx context.Context, db *pgxpool.Pool) {
 }
 
 func timePointer(value time.Time) *time.Time { return &value }
+
+func validActivityCleanupMembership(filter normalizedActivityCleanupFilter, matched int64) bool {
+	if filter.MembershipVersion != 1 || matched < 0 || matched > maxActivityCleanupPreviewEvents || int64(len(filter.EventIDs)) != matched {
+		return false
+	}
+	seen := make(map[int64]struct{}, len(filter.EventIDs))
+	for _, id := range filter.EventIDs {
+		if id <= 0 {
+			return false
+		}
+		if _, exists := seen[id]; exists {
+			return false
+		}
+		seen[id] = struct{}{}
+	}
+	return true
+}

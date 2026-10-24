@@ -55,13 +55,17 @@ func TestActivityCleanupProgressAndAuditRepairStayConsistentIntegration(t *testi
 		UserIDs: []int64{userID}, ActionIDs: []int16{3}, SnapshotBefore: time.Now().UTC().Add(time.Minute), BatchSize: 1,
 		Summary: activityCleanupFilterRequest{Actions: []string{"view"}},
 	}
+	filter.MembershipVersion = 1
+	if err = pool.QueryRow(ctx, `select array_agg(id order by id) from user_activity_events where user_id=$1`, userID).Scan(&filter.EventIDs); err != nil {
+		t.Fatal(err)
+	}
 	rawFilter, err := json.Marshal(filter)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var runID string
-	if err = pool.QueryRow(ctx, `insert into activity_cleanup_runs(source,status,filters,started_at)
-		values('manual','running',$1::jsonb,now()-interval '2 minutes') returning public_id`, rawFilter).Scan(&runID); err != nil {
+	if err = pool.QueryRow(ctx, `insert into activity_cleanup_runs(source,status,filters,matched_count,started_at)
+		values('manual','running',$1::jsonb,3,now()-interval '2 minutes') returning public_id`, rawFilter).Scan(&runID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `alter table activity_cleanup_runs add constraint reject_second_progress check(deleted_count<=1)`); err != nil {
