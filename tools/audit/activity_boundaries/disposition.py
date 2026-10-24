@@ -67,6 +67,9 @@ add('ossDownloadStats ossUploadLogs', 'b6f66dd', 'logs/backend_access/oss-observ
 
 add('createFileLogShares', 'c4a7b9f', 'logs/backend_revisions/race-log-share-review-boundaries-final.log', 'New share batch and original single Create/File event atomically; precise activity fault/zero facts, reuse/allfailed no new creation, two one-slot HTTP pools and reverse barriers, exact occupied-source conflict207. Normal first4.890s and final race10.454s; temp hard-crash cleanup unverified.')
 
+add('createEmbeddedIconImportUpload completeEmbeddedIconImportUpload createModExportUpload completeModExportUpload presignCreatorClaimAttachment presignProjectEditorApplicationAttachment presignMinecraftServerProof', '6abbcb6', 'logs/backend_revisions/race-seven-wrappers-and-summary-original-neighbors.log', 'Seven actual HTTP/PG wrapper branches: exact activity failure, unchanged full facts, correct owner/permission/association, original event identity, actual owned source and signed GET bytes. Review evidence uses real scan HTTP and actual claim/application submission; server pending stage explicitly typed, original TEST015 independent neighbor. Import completed replay no new event. Named race22.163s only, not all helper branches or full release.')
+add('favoriteMembershipSummary', '2e2a963', 'logs/backend_revisions/race-seven-wrappers-and-summary-original-neighbors.log', 'Only SELECT query explicitly View/User under existingARCH006 lossy policy. Real before monitor2Create/25XP/3diamond/1ledger; after2requests one throttledView, zero creations/rewards. No task/reward/permission policy change, old rows not relabeled.')
+
 supplemental = {}
 for path in args.supplement_route_ledger:
     for row in json.loads(path.read_text()).get('routes', []):
@@ -80,15 +83,14 @@ for route in report['routes']:
     handler = route['handler']
     sibling = supplemental.get(route['pattern'])
     if sibling:
+        route['related_sibling_evidence'] = sibling
+    if sibling and handler not in reviewed:
         route['reviewed_disposition'] = sibling['disposition']
         route['reviewed_evidence'] = sibling
         route['remaining_condition'] = 'Sibling named scope only; shared-wrapper branches still require exact owner evidence and final fixed-combination regression.'
     elif handler == 'probeMinecraftServer':
         route['reviewed_disposition'] = 'EXPLICIT_SKIP_READ_ONLY_PROBE_NO_NEW_REWARD_POLICY'
         route['remaining_condition'] = 'Successful endpoint explicitly skips activity, probes network and checks duplicates only; this is source characterization, not a new product behavior or browser acceptance.'
-    elif handler == 'favoriteMembershipSummary':
-        route['reviewed_disposition'] = 'READ_ONLY_POST_DEFAULT_CREATE_CLASSIFICATION_NEEDS_DECISION'
-        route['remaining_condition'] = 'Read-only SELECT endpoint currently inherits Create/User by HTTP path inference; no persisted business mutation is missing. Do not invent new View or reward policy from this diagnostic. Keep existing request logging and ask owner to define intended event.'
     elif handler in reviewed:
         route['reviewed_disposition'] = 'ATOMIC_AT_LISTED_TESTED_SCOPES_REQUIRES_FINAL_FIXED_COMBINATION_REGRESSION'
         route['reviewed_evidence'] = reviewed[handler]
