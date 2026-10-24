@@ -158,14 +158,14 @@ func TestAuditP2NEXT002RealTypesenseStaleIndexHTTPPostgresIntegration(t *testing
 	check("", "P2StaleIndexFixture", 2)
 	t.Log("REAL_TYPESENSE delayed-index single hidden total0; restore no duplicates; multi-page/last-page, deleted candidate and owner/other isolation PASS; no browser/Worker claim")
 	if os.Getenv("MCMODS_RUN_LIVE_P2_SEARCH") == "1" {
-		auditP2HoldRealSearchForBrowser(t, f, prefix, address.String(), client)
+		auditP2HoldRealSearchForBrowser(t, f, prefix, address.String(), collection, client)
 	}
 }
 
 // Opt-in test controller only: no control route or policy override is exposed
 // by the product server. The frontend driver may observe real public responses
 // while an owned file requests the same isolated SQL state changes as above.
-func auditP2HoldRealSearchForBrowser(t *testing.T, f test013Fixture, prefix, typesenseOrigin string, client *searchindex.Client) {
+func auditP2HoldRealSearchForBrowser(t *testing.T, f test013Fixture, prefix, typesenseOrigin, collection string, client *searchindex.Client) {
 	t.Helper()
 	directory := os.Getenv("MCMODS_AUDIT_P2_SEARCH_DIR")
 	if !filepath.IsAbs(directory) {
@@ -191,8 +191,8 @@ func auditP2HoldRealSearchForBrowser(t *testing.T, f test013Fixture, prefix, typ
 		}
 		pagingDocuments = append(pagingDocuments, map[string]any{"id": fmt.Sprintf("mod_%d", id), "internal_id": id, "entity_type": "mod", "updated_at": int64(1000 + i), "names": []string{"P2BrowserPagingFixture"}, "identifiers": []string{}, "creators": []string{}, "keywords": []string{}, "text": []string{}, "slug": "p2-browser-" + public, "public_id": public})
 	}
-	if err := client.ImportDocuments(f.ctx, client.VersionedCollection("projects", 6), pagingDocuments); err != nil {
-		t.Fatal("import owned browser paging documents failed")
+	if err := client.ImportDocuments(f.ctx, collection, pagingDocuments); err != nil {
+		t.Fatalf("import owned synthetic browser paging documents: %v", err)
 	}
 	write := func(name string, value any) {
 		t.Helper()
