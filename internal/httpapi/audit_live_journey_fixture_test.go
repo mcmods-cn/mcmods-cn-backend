@@ -35,6 +35,34 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	if os.Getenv("MCMODS_RUN_LIVE_GAME_JOURNEY") != "1" {
 		t.Skip("opt-in long-lived owned JetStream/API/Worker fixture")
 	}
+	packageDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout, err := exec.Command("git", "-C", packageDirectory, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Fatal("cannot identify actual compiled checkout:", err)
+	}
+	backendCheckout := strings.TrimSpace(string(checkout))
+	frontendCheckout := os.Getenv("MCMODS_AUDIT_FRONTEND_REPO")
+	if frontendCheckout == "" {
+		frontendCheckout = "/workspace/mcmods-cn-frontend"
+	}
+	exporterCheckout := os.Getenv("MCMODS_AUDIT_EXPORTER_REPO")
+	if exporterCheckout == "" {
+		exporterCheckout = "/workspace/mcmods_exporter"
+	}
+	revisions := map[string]any{}
+	for name, path := range map[string]string{"mcmods-cn-backend": backendCheckout, "mcmods-cn-frontend": frontendCheckout, "mcmods_exporter": exporterCheckout} {
+		revision := auditJourneyRevision(path)
+		if revision["error"] != nil || revision["dirty"] != false {
+			t.Fatalf("formal live fixture requires clean identified checkout: %s", name)
+		}
+		revisions[name] = revision
+	}
+	if expected := os.Getenv("MCMODS_AUDIT_EXPECT_BACKEND_COMMIT"); expected != "" && revisions["mcmods-cn-backend"].(map[string]any)["commit"] != expected {
+		t.Fatal("actual backend checkout HEAD differs from pinned full commit")
+	}
 	directory := os.Getenv("MCMODS_AUDIT_JOURNEY_DIR")
 	if !filepath.IsAbs(directory) {
 		t.Fatal("MCMODS_AUDIT_JOURNEY_DIR must be an absolute task-owned output directory")
@@ -189,13 +217,9 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	}
 	authPath := filepath.Join(directory, "auth.private.json")
 	auditJourneyWriteJSON(t, authPath, map[string]any{"creatorToken": f.editor, "reviewerToken": f.reviewer, "otherEditorToken": f.otherEditor})
-	revisions := map[string]any{}
-	for _, name := range []string{"mcmods-cn-backend", "mcmods-cn-frontend", "mcmods_exporter"} {
-		revisions[name] = auditJourneyRevision(filepath.Join("/workspace", name))
-	}
 	runtimePath := filepath.Join(directory, "runtime.json")
 	stopPath := filepath.Join(directory, "STOP")
-	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "ossOrigin": f.provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": "auditfixture", "minecraftVersion": "1.20.1", "loader": "fabric", "modVersion": "1.0.0", "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": expectedSampleHash, "sampleProducerCommit": sampleProducer, "samplePath": samplePath, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED", "unreadBarrier": map[string]any{"enabled": unreadBarrierEnabled, "armPath": armPath, "startedPath": startedPath, "releasePath": releasePath, "actorAPublicId": actorA, "actorBPublicId": actorB, "initialUnreadA": seededUnreadA, "initialUnreadB": 0}}
+	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "sourceCheckoutPath": backendCheckout, "compilerSourceCheckoutPath": backendCheckout, "testPackageWorkingDirectory": packageDirectory, "apiOrigin": origin.URL, "ossOrigin": f.provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": "auditfixture", "minecraftVersion": "1.20.1", "loader": "fabric", "modVersion": "1.0.0", "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": expectedSampleHash, "sampleProducerCommit": sampleProducer, "samplePath": samplePath, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED", "unreadBarrier": map[string]any{"enabled": unreadBarrierEnabled, "armPath": armPath, "startedPath": startedPath, "releasePath": releasePath, "actorAPublicId": actorA, "actorBPublicId": actorB, "initialUnreadA": seededUnreadA, "initialUnreadB": 0}}
 	updateRuntime := func(state string) {
 		runtime["state"] = state
 		runtime["updatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
@@ -271,7 +295,7 @@ func auditJourneyRevision(directory string) map[string]any {
 	diff, _ := exec.Command("git", "-C", directory, "diff", "--binary", "HEAD").Output()
 	state, _ := exec.Command("git", "-C", directory, "status", "--porcelain").Output()
 	digest := sha256.Sum256(diff)
-	return map[string]any{"commit": strings.TrimSpace(string(head)), "dirty": len(state) > 0, "trackedDiffSha256": hex.EncodeToString(digest[:])}
+	return map[string]any{"checkoutPath": directory, "commit": strings.TrimSpace(string(head)), "dirty": len(state) > 0, "trackedDiffSha256": hex.EncodeToString(digest[:])}
 }
 
 // The delay occurs after the real server has authenticated and read its actual
