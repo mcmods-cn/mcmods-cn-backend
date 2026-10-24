@@ -65,6 +65,8 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	}
 	t.Setenv("FRONTEND_ORIGIN", frontendOrigin)
 	f := newAuditFixGRFixture(t, 45*time.Minute)
+	journeyCtx, cancelJourney := context.WithCancel(f.ctx)
+	defer cancelJourney()
 	// Reuse the helper's owned, fully migrated schema with the supported default
 	// API/Worker pool size. The original single-connection helper pool remains
 	// owned by its cleanup and is never repurposed as another database.
@@ -104,8 +106,8 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 		t.Fatal("owned official JetStream server not ready")
 	}
 	t.Cleanup(func() { broker.Shutdown(); broker.WaitForShutdown() })
-	queueConfig := config.NATSConfig{Enabled: true, URL: broker.ClientURL(), SubjectPrefix: "mcmods-audit-journey", OutboxEnabled: true, Tasks: queue.DefaultTaskConfigs(), JetStream: config.JetStreamConfig{Enabled: true, Stream: "MCMODS_AUDIT_GAME_JOURNEY", MaxDeliver: 5, AckWait: 30 * time.Second, PublishTimeout: 5 * time.Second}}
-	q := queue.New(f.ctx, queueConfig)
+	queueConfig := config.NATSConfig{Enabled: true, URL: broker.ClientURL(), SubjectPrefix: "mcmods-audit-journey", OutboxEnabled: true, Tasks: f.server.cfg.NATS.Tasks, JetStream: config.JetStreamConfig{Enabled: true, Stream: "MCMODS_AUDIT_GAME_JOURNEY", MaxDeliver: 5, AckWait: 30 * time.Second, PublishTimeout: 5 * time.Second}}
+	q := queue.New(journeyCtx, queueConfig)
 	t.Cleanup(q.Close)
 	q.SetDeadLetterSink(queue.NewPostgresDeadLetterSink(db))
 	if status := q.Status(); !status.Connected || !status.JetStream {
@@ -115,7 +117,7 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	cfg.FrontendOrigin = frontendOrigin
 	cfg.NATS = queueConfig
 	f.origin.Close()
-	api := NewServer(f.ctx, cfg, db, q, nil, nil, nil)
+	api := NewServer(journeyCtx, cfg, db, q, nil, nil, nil)
 	origin := httptest.NewServer(api)
 	t.Cleanup(func() {
 		origin.Close()
@@ -133,12 +135,12 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	if err = NewNotificationWorker(db, q, api.cache, cfg.SMTP, cfg.SettingsEncryptionKey).Start(); err != nil {
 		t.Fatal(err)
 	}
-	if err = NewProjectUpdateNotificationWorker(db, q, api.cache).Start(f.ctx); err != nil {
+	if err = NewProjectUpdateNotificationWorker(db, q, api.cache).Start(journeyCtx); err != nil {
 		t.Fatal(err)
 	}
-	NewOSSRehomeWorker(cfg, db).Start(f.ctx)
+	NewOSSRehomeWorker(cfg, db).Start(journeyCtx)
 	dispatcher := queue.NewOutboxDispatcher(db, q, true)
-	dispatcher.Start(f.ctx)
+	dispatcher.Start(journeyCtx)
 	observer, err := nats.Connect(broker.ClientURL())
 	if err != nil {
 		t.Fatal(err)
