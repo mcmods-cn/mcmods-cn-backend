@@ -630,6 +630,14 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 	// reviewer must use the same order before locking a revision: row-first
 	// review can otherwise deadlock against a Worker already owning advisory.
 	if _, err = lockImportedContentVersionTx(r.Context(), tx, targetVersionID); errors.Is(err, pgx.ErrNoRows) {
+		if err = cancelArchivedImportReviewTx(r.Context(), tx, revisionID, currentClaims(r).Subject); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to cancel import for archived target")
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to commit archived-target cancellation")
+			return
+		}
 		writeError(w, http.StatusConflict, "target content version is no longer active; upload again after restoring it")
 		return
 	} else if err != nil {

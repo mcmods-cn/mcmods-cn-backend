@@ -148,3 +148,33 @@ func TestAuditImportApproveThenRejectRacePreservesPublicationIntegration(t *test
 	f.require(t, "", "GET", "/api/v1/export-revisions/"+revision+"/assets", nil, 200)
 	t.Log("first independent approval200; queued rejection409; publication/assets/approval audit preserved")
 }
+
+func TestAuditImportArchivedBeforeReviewCancelsUnpublishedAttemptIntegration(t *testing.T) {
+	f := newAuditFixGRFixture(t)
+	_, previous := f.imported(t, auditRecipeNegativePackage(t, "valid"))
+	f.reviewGR(t, previous, "approved")
+	jobID, pending := f.imported(t, auditRecipeNegativePackage(t, "valid-second"))
+	if _, err := f.db.Exec(f.ctx, `update mod_content_versions set status='archived' where id=$1`, f.versionID); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, f.reviewer, "PATCH", "/api/v1/admin/export-revisions/"+pending+"/activate", map[string]any{"status": "approved"}, 409)
+	if f.number(t, `select count(*) from catalog_import_jobs where id=$1 and status='cancelled' and current_stage='cancelled' and error_code='target_archived_reupload_required' and run_token=''`, jobID) != 1 ||
+		f.number(t, `select count(*) from catalog_import_revisions where id=$1 and status='rejected' and not is_active`, pending) != 1 ||
+		f.number(t, `select count(*) from audit_events where aggregate_key=$1 and action='execution_cancelled' and metadata->>'reason'='target_archived_reupload_required'`, jobID) != 1 {
+		t.Fatal("archived pre-review attempt was not cancelled with a durable exact policy audit")
+	}
+	if f.number(t, `select count(*) from catalog_import_revisions where id=$1 and is_active and status='ready'`, previous) != 1 ||
+		f.number(t, `select count(*) from audit_events where aggregate_key=$1 and action in ('review_approved','review_rejected')`, pending) != 0 {
+		t.Fatal("cancellation changed old publication or invented an independent review decision")
+	}
+	// Restoring the version does not revive the cancelled attempt or its review.
+	if _, err := f.db.Exec(f.ctx, `update mod_content_versions set status='active' where id=$1`, f.versionID); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, f.reviewer, "PATCH", "/api/v1/admin/export-revisions/"+pending+"/activate", map[string]any{"status": "approved"}, 409)
+	f.require(t, f.editor, "POST", "/api/v1/mods/audit-gr-"+f.modCode+"/export-imports/"+jobID+"/retry", nil, 409)
+	if f.number(t, `select count(*) from audit_events where aggregate_key=$1 and action='execution_cancelled'`, jobID) != 1 {
+		t.Fatal("repeat review or retry duplicated cancellation audit")
+	}
+	t.Log("archive before independent review cancels unpublished results with one audit; prior active revision retained; restoring target cannot revive/retry the attempt")
+}
