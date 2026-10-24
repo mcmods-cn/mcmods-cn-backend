@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -248,6 +249,15 @@ func TestAuditLiveGlobalCatalogFixture(t *testing.T) {
 		runtime["state"] = state
 		runtime["updatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
 		runtime["cacheMetrics"] = api.cache.Metrics()
+		// A failed browser attempt is retained and unlocks its transaction, but
+		// does not tear down unrelated cases. A timeout is never a release/PASS.
+		if failures, e := filepath.Glob(filepath.Join(directory, "rph-barrier-*-timeout.json")); e == nil {
+			names := make([]string, len(failures))
+			for i, path := range failures {
+				names[i] = filepath.Base(path)
+			}
+			runtime["failedBarrierAttempts"] = names
+		}
 		var entities, requests, outbox []byte
 		if e := db.QueryRow(f.ctx, `select coalesce((select jsonb_agg(jsonb_build_object('publicId',e.public_id,'kind',e.entity_type,'status',e.status,'publishedRevisionId',revision.public_id)) from catalog_entities e left join content_revisions revision on revision.id=e.published_revision_id),'[]'::jsonb),coalesce((select jsonb_agg(jsonb_build_object('publicId',q.public_id,'kind',q.aggregate_type,'key',q.aggregate_key,'status',q.status,'revisionPublicId',revision.public_id,'submitterPublicId',actor.public_id)) from change_requests q join content_revisions revision on revision.id=q.proposed_revision_id left join users actor on actor.id=q.submitted_by),'[]'::jsonb),coalesce((select jsonb_object_agg(status,n) from(select status,count(*) n from nats_outbox group by status) totals),'{}'::jsonb)`).Scan(&entities, &requests, &outbox); e != nil {
 			runtime["snapshotError"] = true
@@ -287,6 +297,8 @@ func TestAuditLiveGlobalCatalogFixture(t *testing.T) {
 
 // Optional external scheduling fence: actual browser requests must both reach
 // the production aggregate lock before release. No API response is substituted.
+var errAuditGlobalBarrierTimeout = errors.New("two actual handlers did not reach the owned scheduling fence")
+
 func auditGlobalCatalogBarrier(ctx context.Context, control, observer *pgxpool.Pool, application, directory string, targets map[string]map[string]string) error {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
@@ -353,7 +365,7 @@ func auditGlobalCatalogBarrier(ctx context.Context, control, observer *pgxpool.P
 						return nil
 					case <-deadline.C:
 						_ = persist(filepath.Join(directory, "rph-barrier-"+arm.AttemptID+"-timeout.json"), map[string]any{"status": "FAIL_TWO_ACTUAL_REQUESTS_DID_NOT_REACH_LOCK"})
-						return fmt.Errorf("two actual RPH handlers did not reach owned aggregate lock")
+						return errAuditGlobalBarrierTimeout
 					case <-ticker.C:
 						var count int
 						if e = observer.QueryRow(ctx, `select count(*) from pg_locks waiting join pg_stat_activity actor on actor.pid=waiting.pid join pg_locks held on held.locktype=waiting.locktype and held.database=waiting.database and held.classid=waiting.classid and held.objid=waiting.objid and held.objsubid=waiting.objsubid where not waiting.granted and waiting.locktype='advisory' and actor.application_name=$1 and held.pid=$2 and held.granted`, application, pid).Scan(&count); e != nil {
@@ -369,7 +381,7 @@ func auditGlobalCatalogBarrier(ctx context.Context, control, observer *pgxpool.P
 					}
 				}
 			}
-			if e = finish(); e != nil {
+			if e = finish(); e != nil && !errors.Is(e, errAuditGlobalBarrierTimeout) {
 				return e
 			}
 		}
