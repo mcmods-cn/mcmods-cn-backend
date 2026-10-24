@@ -1,6 +1,6 @@
 # CMP-003: durable activity transaction boundaries
 
-Business mutations must persist the activity intent in the transaction which commits their successful state. A post-response best-effort attempt cannot reconstruct an intent lost before an idempotent retry. `enqueueRequestActivityTx` uses the same annotations, action/object inference, identity, Markdown deltas and exclusion rules as the legacy recorder. It persists only durable actions and marks the request to suppress a duplicate post-response event. Call it after the final annotation and before commit. Direct domain/Worker calls without HTTP annotations remain unchanged.
+Business mutations must persist the activity intent in the transaction which commits their successful state. A post-response best-effort attempt cannot reconstruct an intent lost before an idempotent retry. `enqueueRequestActivityTx` uses the same annotations, action/object inference, identity, Markdown deltas and exclusion rules as the legacy recorder. It persists only durable actions and marks the request to suppress a duplicate post-response event. Call it after the final annotation and before commit. Direct domain/Worker calls without HTTP annotations remain unchanged. Credential deletion and other successful no-op events retain their existing activity semantics; no reward policy is changed here.
 
 Implemented and individually fault-tested families as of the commits below:
 
@@ -15,6 +15,10 @@ Implemented and individually fault-tested families as of the commits below:
 | 4d39641 | question answer award/self-solve refund, independent server review | HTTP + PostgreSQL, real money/ledger/held state, notification intent and conflict replay |
 | 36b495c | creator claim approve/reject/revoke, team members, editor application approve/reject | HTTP + PostgreSQL, permissions/audit/notifications and recovery |
 | 09cf6df | blueprint conversion and retry | HTTP + PostgreSQL + actual business Worker with controlled OSS, precise activity failure rolls back job+NATS intent, recovered artifact becomes readable |
+
+| 98810a7 | launcher credential/session, follow, block/unblock, user file deletion | HTTP + PostgreSQL, complete session/relationship/file/quota/outbox rollback; real controlled OSS |
+| 1bfb498 | check-in and transfer | HTTP + PostgreSQL, exact balance/ledger/check-in rollback/recovery, FID-001 recipient boundary and economy concurrency neighbors |
+| 831a6a8 | favorite collection CRUD, membership replace/add/remove | HTTP + PostgreSQL, quota/popularity/association facts, exact activity1/4/1 and error/visibility/popularity neighbors |
 
 These rows establish those tested boundaries. They do not establish every mutation route, every asynchronous consumer, final frontend behavior, or a frozen three-repository release. Additional commits may follow. The external audit result ledger records the exact commands, first failures, corrected fixtures, race results and remaining conditions. Creator create/edit/claim and shop purchase/use are handled separately in fd4d188; this document does not substitute for its test evidence.
 
@@ -38,3 +42,5 @@ A route with a reachable atomic helper can still have uncovered success branches
 `cmd/diagnose-activity-intents` performs a bounded, read-only Repeatable Read scan of a caller-selected interval and optional exact public author. It separates absent facts/intents from queued intents, excludes bodies and credentials, and has no apply mode. Candidates require correlation with immutable business evidence and ledger provenance. Do not manufacture historical activities, repeat financial rewards, or modify existing currency ledger rows. An authorized compensation would need its own idempotency key, bounded dry run/count reconciliation and reversal explanation. No production diagnosis or compensation has been executed by this task.
 
 There is no database migration for these boundary changes. Existing intent consumers must remain enabled during deployment; pending intents retain their schema. Rolling back application code restores the historical post-response failure window, so keep this limit visible during rollback planning.
+
+The legacy user-block regression fixture originally attempted `Migrate` against a populated shared `public` schema and stopped at the explicit identity/OSS upgrade gate. Commit 4a8dd4c uses the existing owned isolated empty-install HTTP fixture, retaining every original assertion. The first setup failure and the complete passing race rerun are retained separately; no shared/production migration gate was bypassed.
