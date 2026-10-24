@@ -1,0 +1,188 @@
+package httpapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"mcmods-cn-backend/internal/antiabuse"
+)
+
+// This service seeds legitimate identical wording from another user's actual
+// successful submission. The normal duplicate/network rule plus a new account
+// triggers the unchanged production challenge policy; no forced risk state,
+// synthetic challenge, permission bypass or shortened expiry is installed.
+func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
+	if os.Getenv("MCMODS_RUN_LIVE_REAL_CHALLENGE") != "1" {
+		t.Skip("opt-in real anti-abuse browser fixture")
+	}
+	dir, authPath, lockPath := os.Getenv("MCMODS_AUDIT_CHALLENGE_DIR"), os.Getenv("MCMODS_AUDIT_CHALLENGE_AUTH"), os.Getenv("MCMODS_AUDIT_PG_LOCK")
+	if !filepath.IsAbs(dir) || !filepath.IsAbs(authPath) || !filepath.IsAbs(lockPath) {
+		t.Fatal("absolute task paths required")
+	}
+	head, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := exec.Command("git", "status", "--porcelain").Output()
+	if err != nil || len(bytes.TrimSpace(status)) != 0 {
+		t.Fatal("requires clean immutable source checkout")
+	}
+	if err = os.Mkdir(dir, 0700); err != nil {
+		t.Fatal("runtime must be new task-owned directory")
+	}
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); _ = lock.Close() })
+	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	f := newAuditFixGRFixture(t, 22*time.Minute)
+	t.Cleanup(func() {
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+			t.Error(err)
+		}
+	})
+	if f.server.cfg.FrontendOrigin != "http://127.0.0.1:3311" || !f.server.cfg.AntiAbuse.Enabled || f.server.cfg.AntiAbuse.ChallengeProvider != "proof" || f.server.cfg.AntiAbuse.ChallengeTTL != 10*time.Minute || f.server.cfg.AntiAbuse.FormMinimumAge != 800*time.Millisecond {
+		t.Fatal("requires actual default proof/10min TTL/800ms form age with exact browser origin")
+	}
+	settings, err := f.server.antiAbuse.Settings(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.ChallengeThreshold != antiabuse.DefaultSettings().ChallengeThreshold {
+		t.Fatal("challenge threshold differs from default")
+	}
+	settingsBefore, _ := json.Marshal(settings)
+	const content = "Independent legitimate community proof fixture wording"
+	payload := func(slug string) createModRequest {
+		return createModRequest{SiteID: slug, PrimaryName: content, DefaultLocale: "en-US", Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: content, Summary: content, ContentMarkdown: content}}, Environment: "bothRequired", PrimaryCategory: "utility", ModIDs: []modIdentifierPayload{{Identifier: strings.ReplaceAll(slug, "-", "_"), Primary: true}}, Compatibilities: []modLoaderCompatibilityPayload{{Loader: "forge", Versions: []string{"1.20.1"}}}, OfficialStatus: "active", SourceStatus: "open", License: "MIT", SubmissionMethod: "manual"}
+	}
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "project.create.mod")
+	f.require(t, f.otherEditor, http.MethodPost, "/api/v1/mods", payload("proof-reference-seed"), 201)
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var n int
+		if err = f.db.QueryRow(f.ctx, `select count(*) from anti_abuse_content_fingerprints where user_id=$1 and action='review.submit' and object_key='/api/v1/mods'`, f.userIDs[f.otherEditor]).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("actual successful seed did not produce fingerprint")
+		case <-ticker.C:
+		}
+	}
+	tokens := map[string]string{}
+	ids := map[string]int64{}
+	publicIDs := map[string]string{}
+	for _, name := range []string{"creator", "expiry", "failure", "probe"} {
+		id, public, token := createTEST044User(t, f.ctx, f.db, f.server.cfg, "browser-real-proof-"+name+"-"+randomHex(4), "UTC")
+		grantTEST044Permissions(t, f.ctx, f.db, id, "project.create.mod")
+		tokens[name+"Token"] = token
+		ids[name] = id
+		publicIDs[name] = public
+	}
+	// Real request preflight proves this ordinary state actually reaches 428.
+	form := decodeTEST022Data[antiabuse.FormToken](t, f.require(t, tokens["probeToken"], http.MethodGet, "/api/v1/anti-abuse/form-token?action=review.submit&object=/api/v1/mods", nil, 200))
+	select {
+	case <-time.After(time.Second):
+	case <-f.ctx.Done():
+		t.Fatal(f.ctx.Err())
+	}
+	body, _ := json.Marshal(payload("proof-probe-unused"))
+	req, err := http.NewRequestWithContext(f.ctx, http.MethodPost, f.origin.URL+"/api/v1/mods", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tokens["probeToken"])
+	req.Header.Set("X-Anti-Abuse-Form", form.Token)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36")
+	res, err := f.origin.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var challenge map[string]any
+	if err = json.NewDecoder(res.Body).Decode(&challenge); err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != 428 || challenge["code"] != "challenge_required" {
+		t.Fatalf("ordinary exact-network duplicate did not reach precise challenge: status=%d body=%v", res.StatusCode, challenge)
+	}
+	delete(tokens, "probeToken")
+	auth, _ := json.Marshal(tokens)
+	private, err := os.OpenFile(authPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		t.Fatal("private auth must be new")
+	}
+	if _, err = private.Write(auth); err != nil {
+		private.Close()
+		t.Fatal(err)
+	}
+	if err = private.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runtime, _ := json.MarshalIndent(map[string]any{"apiOrigin": f.origin.URL, "frontendOrigin": "http://127.0.0.1:3311", "authCookieName": authSessionCookieName, "authPath": authPath, "actorPublicIds": publicIDs, "payload": payload("proof-browser-created"), "expiryPayload": payload("proof-browser-expiry"), "failurePayload": payload("proof-browser-failure"), "sourceCommit": strings.TrimSpace(string(head)), "sourceTreeClean": true, "challengeTTLSeconds": 600, "minimumFormAgeMilliseconds": 800, "unchangedPolicy": true, "trigger": "actual successful ordinary other-user identical wording fingerprint + new unverified account; no force or threshold override", "preflight": "actual HTTP 428 challenge_required", "expectedCreatorPendingModCount": 1, "productionExecuted": false}, "", "  ")
+	if err = os.WriteFile(filepath.Join(dir, "runtime.json"), runtime, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("REAL_CHALLENGE_READY runtime=%s source=%s defaultTTL600 ordinaryactors=true", filepath.Join(dir, "runtime.json"), strings.TrimSpace(string(head)))
+	wait, cancel := context.WithTimeout(f.ctx, 20*time.Minute)
+	defer cancel()
+	poll := time.NewTicker(250 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		select {
+		case <-wait.Done():
+			t.Fatal("browser completion absent; no challenge acceptance inferred")
+		case <-poll.C:
+			if _, err = os.Stat(filepath.Join(dir, "done.flag")); os.IsNotExist(err) {
+				continue
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			var total, pending, others int
+			if err = f.db.QueryRow(f.ctx, `select count(*),count(*) filter(where review_status='pending') from mods where submitted_by=$1`, ids["creator"]).Scan(&total, &pending); err != nil || total != 1 || pending != 1 {
+				t.Fatalf("creator total=%d pending=%d err=%v", total, pending, err)
+			}
+			if err = f.db.QueryRow(f.ctx, `select count(*) from mods where submitted_by=any($1::bigint[])`, []int64{ids["expiry"], ids["failure"], ids["probe"]}).Scan(&others); err != nil || others != 0 {
+				t.Fatalf("failed/expired/probe actors wrote mods=%d err=%v", others, err)
+			}
+			current, err := f.server.antiAbuse.Settings(f.ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, _ := json.Marshal(current)
+			if !bytes.Equal(settingsBefore, after) {
+				t.Fatal("anti-abuse policy was changed")
+			}
+			report, _ := json.MarshalIndent(map[string]any{"result": "PASS", "scope": "actual browser proof business outcome independently checked; browser evidence owns error/cancel/expiry UI detail", "sourceCommit": strings.TrimSpace(string(head)), "creatorModCount": total, "pendingModCount": pending, "failedExpiredProbeModCount": others, "policyUnchanged": true, "challengeTTLSeconds": 600, "productionExecuted": false}, "", "  ")
+			if err = os.WriteFile(filepath.Join(dir, "backend-postconditions.json"), report, 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Log(fmt.Sprintf("REAL_CHALLENGE_PASS actual creator1pending, other0, policy unchanged; production=false"))
+			return
+		}
+	}
+}
