@@ -13,6 +13,11 @@ import (
 
 const directUserPermissionPriority = 1_000_000_000
 
+type permissionQuery interface {
+	databaseQuery
+	catalogResourceResolverQuery
+}
+
 type permissionRole struct {
 	Code        string
 	Weight      int
@@ -92,16 +97,20 @@ func (s *Server) resolveUserRootPermissionsUncached(ctx context.Context, userID 
 // inheritance and deny semantics as the single-user authorization path. It is
 // used when a response needs permission-derived metadata for several authors.
 func (s *Server) resolveUsersRootPermissions(ctx context.Context, userIDs []int64) (map[int64]resolvedUserRootPermissions, error) {
+	return resolveUsersRootPermissionsQuery(ctx, s.db, userIDs)
+}
+
+func resolveUsersRootPermissionsQuery(ctx context.Context, query permissionQuery, userIDs []int64) (map[int64]resolvedUserRootPermissions, error) {
 	result := make(map[int64]resolvedUserRootPermissions, len(userIDs))
 	if len(userIDs) == 0 {
 		return result, nil
 	}
-	rolesByCode, templates, err := s.loadPermissionRoles(ctx)
+	rolesByCode, templates, err := loadPermissionRolesQuery(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 
-	roleRows, err := s.db.Query(
+	roleRows, err := query.Query(
 		ctx,
 		`select distinct b.user_id, r.code
 		 from user_role_bindings b
@@ -130,7 +139,7 @@ func (s *Server) resolveUsersRootPermissions(ctx context.Context, userIDs []int6
 	}
 	roleRows.Close()
 
-	accessRows, err := s.db.Query(ctx, `select distinct user_id,access_level,project_public_id
+	accessRows, err := query.Query(ctx, `select distinct user_id,access_level,project_public_id
 		from effective_project_access where user_id=any($1)
 		order by user_id,access_level,project_public_id`, userIDs)
 	if err != nil {
@@ -162,7 +171,7 @@ func (s *Server) resolveUsersRootPermissions(ctx context.Context, userIDs []int6
 		candidatesByUser[userID] = candidates
 	}
 
-	claimRows, err := s.db.Query(ctx, `select distinct claim.user_id,creator.public_id
+	claimRows, err := query.Query(ctx, `select distinct claim.user_id,creator.public_id
 		from creator_claims claim join creators creator on creator.id=claim.creator_id
 		where claim.user_id=any($1) and claim.status='approved' and creator.kind='author'`, userIDs)
 	if err != nil {
@@ -185,7 +194,7 @@ func (s *Server) resolveUsersRootPermissions(ctx context.Context, userIDs []int6
 	}
 	claimRows.Close()
 
-	directRows, err := s.db.Query(
+	directRows, err := query.Query(
 		ctx,
 		`select up.user_id,p.code,up.allow,up.source
 		 from user_permissions up
@@ -270,7 +279,11 @@ func permissionRulesFromCandidates(candidates map[string]permissionCandidate) []
 }
 
 func (s *Server) loadPermissionRoles(ctx context.Context) (map[string]permissionRole, []permissionRole, error) {
-	rows, err := s.db.Query(ctx, `select code, weight, parents from roles where status = 'active'`)
+	return loadPermissionRolesQuery(ctx, s.db)
+}
+
+func loadPermissionRolesQuery(ctx context.Context, query permissionQuery) (map[string]permissionRole, []permissionRole, error) {
+	rows, err := query.Query(ctx, `select code, weight, parents from roles where status = 'active'`)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -290,7 +303,7 @@ func (s *Server) loadPermissionRoles(ctx context.Context) (map[string]permission
 	}
 	rows.Close()
 
-	permissionRows, err := s.db.Query(
+	permissionRows, err := query.Query(
 		ctx,
 		`select r.code, p.code, rp.allow
 		 from role_permissions rp

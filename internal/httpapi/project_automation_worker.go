@@ -258,6 +258,9 @@ func (worker *ProjectAutomationWorker) fail(ctx context.Context, job projectAuto
 }
 
 func (worker *ProjectAutomationWorker) execute(ctx context.Context, job projectAutomationJob) (map[string]any, string, error) {
+	if _, err := authorizeAutomationProject(ctx, worker.server.db, job.ActorID, job.ProjectPublicID, false, true); err != nil {
+		return nil, "automation_permission_denied", err
+	}
 	cfg, err := worker.server.modImportConfigFromSettings(ctx)
 	if err != nil {
 		return nil, "configuration_error", err
@@ -286,6 +289,9 @@ func (worker *ProjectAutomationWorker) execute(ctx context.Context, job projectA
 			return nil, providerFailureCode(loadErr), loadErr
 		}
 		result, updateErr := worker.syncChangelogs(ctx, job, releases)
+		if errors.Is(updateErr, errAutomationPermissionDenied) {
+			return result, "automation_permission_denied", updateErr
+		}
 		result, maintenanceErr := worker.withMaintenanceResult(ctx, job, result, latestProviderReleaseActivity(releases))
 		if updateErr == nil && maintenanceErr != nil {
 			return result, "maintenance_status_update_failed", maintenanceErr
@@ -621,6 +627,10 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 			return nil, err
 		}
 		if err = lockProjectAutomationRunTx(ctx, tx, job); err != nil {
+			_ = tx.Rollback(ctx)
+			return nil, err
+		}
+		if _, err = authorizeAutomationProject(ctx, tx, job.ActorID, job.ProjectPublicID, false, true); err != nil {
 			_ = tx.Rollback(ctx)
 			return nil, err
 		}

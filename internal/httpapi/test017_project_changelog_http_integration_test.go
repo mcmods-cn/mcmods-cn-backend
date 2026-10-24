@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"mcmods-cn-backend/internal/systemactor"
 )
 
 // The release synchronization fixture calls the real transaction worker; all
@@ -68,16 +70,26 @@ func test017Snapshot(body string) projectChangelogSnapshot {
 
 func (f test017Fixture) managed(t *testing.T, other bool) (string, *ProjectAutomationWorker, projectAutomationJob, projectAutomationRelease) {
 	t.Helper()
-	internalID, publicID, actor := f.modID, f.modCode, f.editor
+	internalID, publicID := f.modID, f.modCode
 	if other {
-		internalID, publicID, actor = f.otherModID, f.otherModCode, f.otherEditor
+		internalID, publicID = f.otherModID, f.otherModCode
 	}
+	// Automated publication now enforces the same current service identity and
+	// RBAC as a queued run. The fixture must use that real identity rather than
+	// borrowing an interactive editor for a privileged worker call.
+	var actorID int64
+	if err := f.db.QueryRow(f.ctx, `insert into users(username,email,password_hash,email_verified,status)
+		values($1,$2,'login-disabled',true,$3) on conflict(username) do update set username=excluded.username returning id`,
+		systemactor.AutobotUsername, systemactor.AutobotEmail, systemactor.AutobotStatus).Scan(&actorID); err != nil {
+		t.Fatal(err)
+	}
+	grantTEST044Permissions(t, f.ctx, f.db, actorID, "project.edit", "project.no-review", "content.no-review")
 	var routeID int64
 	if err := f.db.QueryRow(f.ctx, `select id from public_routes where entity_type='mod' and internal_id=$1`, internalID).Scan(&routeID); err != nil {
 		t.Fatal(err)
 	}
 	worker := &ProjectAutomationWorker{server: f.origin.Config.Handler.(*Server)}
-	job := projectAutomationJob{RouteID: routeID, InternalID: internalID, ProjectType: "mod", ProjectPublicID: publicID, SourceType: "modrinth", ActorID: f.userIDs[actor]}
+	job := projectAutomationJob{RouteID: routeID, InternalID: internalID, ProjectType: "mod", ProjectPublicID: publicID, SourceType: "modrinth", ActorID: actorID}
 	release := projectAutomationRelease{ID: "test017-managed-" + publicID, Version: "upstream-v1", PublishedAt: time.Now().UTC(), GameVersions: []string{"1.21.1"}, Body: "Original upstream " + publicID, URL: "https://example.invalid/release/" + publicID}
 	result, err := worker.syncChangelogs(f.ctx, job, []projectAutomationRelease{release})
 	if err != nil || result["created"] != 1 {
@@ -94,6 +106,9 @@ type test017Mutation struct{ ID, Status, RequestID, RevisionID string }
 
 func (f test017Fixture) submit(t *testing.T, token, method, path string, snapshot projectChangelogSnapshot, want int) test017Mutation {
 	t.Helper()
+	if method == http.MethodPut && snapshot.BaseRevisionID == nil {
+		snapshot.BaseRevisionID = f.detail(t, token, strings.TrimPrefix(path, "/api/v1/changelogs/"), http.StatusOK).PublishedRevisionID
+	}
 	raw := f.require(t, token, method, path, snapshot, want)
 	var response struct {
 		Data struct {

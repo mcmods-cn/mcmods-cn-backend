@@ -213,7 +213,7 @@ func (worker *SeedCrawlerWorker) processOne(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	runContext, stopHeartbeat := worker.startLeaseHeartbeat(ctx, runID, leaseOwner)
-	actor, actorErr := worker.server.automationActor(runContext)
+	actor, actorErr := authorizeAutomationProject(runContext, worker.server.db, 0, "", true, false)
 	if actorErr != nil {
 		heartbeatErr := stopHeartbeat()
 		if heartbeatErr != nil {
@@ -975,8 +975,16 @@ func seedDraftTranslationValues(raw any) (map[string]string, bool, error) {
 }
 
 func (worker *SeedCrawlerWorker) submitSeedDraft(ctx context.Context, candidateID int64, draftID string, actor security.Claims, projectType, externalProjectID, externalURL string, raw []byte) (string, error) {
+	currentActor, actorErr := authorizeAutomationProject(ctx, worker.server.db, actor.Subject, "", true, false)
+	if actorErr != nil {
+		return "", actorErr
+	}
+	actor = currentActor
 	finalizedStatus := ""
 	hook := func(hookContext context.Context, tx pgx.Tx, result projectCreationTransactionResult) error {
+		if _, err := authorizeAutomationProject(hookContext, tx, actor.Subject, result.ProjectPublicID, true, result.ReviewStatus == "approved"); err != nil {
+			return err
+		}
 		if result.ProjectType != projectType || result.ProjectID <= 0 || result.ProjectPublicID == "" || result.SiteID == "" ||
 			result.ChangeRequestID <= 0 || result.ChangeRequestUID == "" ||
 			(result.ReviewStatus != "approved" && result.ReviewStatus != "pending") {
