@@ -108,6 +108,16 @@ func TestAuditIdentityOSSFreshAndExistingUpgradeIntegration(t *testing.T) {
 	if err = pool.QueryRow(ctx, `select public_id from oss_object_deletion_outbox where id=$1`, internalID).Scan(&again); err != nil || again != publicID {
 		t.Fatalf("repeat upgrade changed identity: %q %q %v", publicID, again, err)
 	}
+	if _, err = pool.Exec(ctx, `alter table oss_files alter column source_hash_verified set default true`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ApplyAuditIdentityOSSUpgrade(ctx, pool, name, "owned-copy-backup"); err == nil {
+		t.Fatal("incompatible legacy trust default was silently accepted")
+	}
+	if _, err = pool.Exec(ctx, `alter table oss_files alter column source_hash_verified set default false`); err != nil {
+		t.Fatal(err)
+	}
+
 	if err = Migrate(ctx, pool); err != nil {
 		t.Fatalf("expanded old-generation startup: %v", err)
 	}
