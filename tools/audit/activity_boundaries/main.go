@@ -95,7 +95,20 @@ func main() {
 				return true
 			})
 			sort.Strings(b.Callees)
-			boundaries[fn.Name.Name] = b
+			// Several workers intentionally share names with HTTP handlers. Keep
+			// their receiver-qualified symbols instead of replacing the Server
+			// entry point (for example BlueprintWorker.convertBlueprint).
+			key := fn.Name.Name
+			if fn.Recv != nil && len(fn.Recv.List) > 0 {
+				receiver := fn.Recv.List[0].Type
+				if pointer, ok := receiver.(*ast.StarExpr); ok {
+					receiver = pointer.X
+				}
+				if named, ok := receiver.(*ast.Ident); ok && named.Name != "Server" {
+					key = named.Name + "." + key
+				}
+			}
+			boundaries[key] = b
 		}
 	}
 	routes := []Route{}
@@ -141,7 +154,7 @@ func main() {
 		RouteCount int                  `json:"route_count"`
 		Routes     []Route              `json:"routes"`
 		Functions  map[string]*Boundary `json:"functions"`
-	}{1, "Direct call inventory only. Inferred activity middleware may apply even without annotateActivity. Atomic calls/skips in one branch do not establish all branches or transitive helpers are safe. This tool performs no data repair or reward reconstruction.", len(routes), routes, boundaries}
+	}{2, "Receiver-disambiguated Server route inventory. Direct call inventory only. Inferred activity middleware may apply even without annotateActivity. Atomic calls/skips in one branch do not establish all branches or transitive helpers are safe. This tool performs no data repair or reward reconstruction.", len(routes), routes, boundaries}
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
 	if err = encoder.Encode(report); err != nil {

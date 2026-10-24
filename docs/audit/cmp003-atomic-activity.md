@@ -1,0 +1,40 @@
+# CMP-003: durable activity transaction boundaries
+
+Business mutations must persist the activity intent in the transaction which commits their successful state. A post-response best-effort attempt cannot reconstruct an intent lost before an idempotent retry. `enqueueRequestActivityTx` uses the same annotations, action/object inference, identity, Markdown deltas and exclusion rules as the legacy recorder. It persists only durable actions and marks the request to suppress a duplicate post-response event. Call it after the final annotation and before commit. Direct domain/Worker calls without HTTP annotations remain unchanged.
+
+Implemented and individually fault-tested families as of the commits below:
+
+| Commit | Business boundary | Real verification |
+| --- | --- | --- |
+| c37392c, 1fa99ab | comment create/approve/edit/delete, changelog create/edit | HTTP + PostgreSQL + actual activity/progression consumers; outage rollback, restart, idempotent/concurrent replay, exact task/XP/currency/ledger |
+| 6cd207e | server create/edit, rating create/edit/delete, actual/no-op admin balance adjustment | HTTP + PostgreSQL, controlled server probe; exact outbox failure and full business snapshots |
+| d8c1f52 | skin/profile CRUD, wardrobe add/remove, profile texture equip | HTTP + PostgreSQL + controlled OSS with actual PNG, legitimate shared blob references |
+| 740ac02 | four community create/edit, six simple project create/edit, Mod create, modpack create/edit | HTTP + PostgreSQL, independent review and publication, precise outbox failure and association snapshots |
+| cc1ac92 | successful manual content review decisions | HTTP + PostgreSQL, decision/audit/notification/publication/activity rollback, duplicate409 |
+| 7c85df1 | Mod revision submit, blueprint metadata | HTTP + PostgreSQL, review-required/no-review, initial blueprint/edit and actual source NBT |
+| 4d39641 | question answer award/self-solve refund, independent server review | HTTP + PostgreSQL, real money/ledger/held state, notification intent and conflict replay |
+| 36b495c | creator claim approve/reject/revoke, team members, editor application approve/reject | HTTP + PostgreSQL, permissions/audit/notifications and recovery |
+| 09cf6df | blueprint conversion and retry | HTTP + PostgreSQL + actual business Worker with controlled OSS, precise activity failure rolls back job+NATS intent, recovered artifact becomes readable |
+
+These rows establish those tested boundaries. They do not establish every mutation route, every asynchronous consumer, final frontend behavior, or a frozen three-repository release. Additional commits may follow. The external audit result ledger records the exact commands, first failures, corrected fixtures, race results and remaining conditions. Creator create/edit/claim and shop purchase/use are handled separately in fd4d188; this document does not substitute for its test evidence.
+
+Catalog and owned skin/blueprint localized-content edits already insert an immutable activity fact in their transaction and skip middleware. Changing their historical progression policy is a separate question from losing a post-response outbox intent. Editor application creation/assignment revocation have no default activity object under the current contract; this fix does not invent reward events for those routes.
+
+## Read-only route diagnostics
+
+The AST inventory is a branch-review aid, never an acceptance count. Server and Worker methods with identical names are disambiguated. The optional diagnostic test uses the actual production middleware inference and touches no database:
+
+```sh
+go run ./tools/audit/activity_boundaries -root . > /tmp/activity-boundaries.json
+MCMODS_ACTIVITY_BOUNDARY_INVENTORY_INPUT=/tmp/activity-boundaries.json \
+MCMODS_ACTIVITY_BOUNDARY_INVENTORY_OUTPUT=/tmp/activity-route-inference.json \
+go test -tags=audittools ./internal/httpapi -run '^TestAuditToolActivityBoundaryInventory$' -count=1 -v
+```
+
+A route with a reachable atomic helper can still have uncovered success branches. A route without a default event may use explicit annotations or dynamically dispatch by project kind. Read/probe/presign routes are not automatically business mutations just because the historic HTTP inference marks them durable. The generated report deliberately gives no route a PASS.
+
+## Historical data and production safety
+
+`cmd/diagnose-activity-intents` performs a bounded, read-only Repeatable Read scan of a caller-selected interval and optional exact public author. It separates absent facts/intents from queued intents, excludes bodies and credentials, and has no apply mode. Candidates require correlation with immutable business evidence and ledger provenance. Do not manufacture historical activities, repeat financial rewards, or modify existing currency ledger rows. An authorized compensation would need its own idempotency key, bounded dry run/count reconciliation and reversal explanation. No production diagnosis or compensation has been executed by this task.
+
+There is no database migration for these boundary changes. Existing intent consumers must remain enabled during deployment; pending intents retain their schema. Rolling back application code restores the historical post-response failure window, so keep this limit visible during rollback planning.
