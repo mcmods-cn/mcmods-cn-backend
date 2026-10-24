@@ -822,10 +822,12 @@ func TestTEST016ModrinthEmptyOrUnusableVersionDoesNotSpin(t *testing.T) {
 		cfg.Modrinth.BaseURL, cfg.Modrinth.Token = endpoint, ""
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
+		started := time.Now()
 		page, err := api.loadModrinthProjectFilePage(ctx, projectFileContext{ProjectType: "mod", ProjectID: "mod000001", ModrinthProjectID: "owned"}, projectFilePageRequest{Source: "modrinth", Limit: 1, Scope: "owned"}, cfg)
 		if err != nil || len(page.Items) != 0 || page.HasMore || page.NextCursor != "" {
 			t.Fatalf("empty version did not terminate cleanly: %+v %v", page, err)
 		}
+		t.Logf("business pager completed within unchanged 1s context: %s", time.Since(started))
 		return
 	}
 	for _, mode := range []string{"empty", "invalid-url", "missing-hash"} {
@@ -859,7 +861,10 @@ func TestTEST016ModrinthEmptyOrUnusableVersionDoesNotSpin(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			command := exec.CommandContext(ctx, binary, "-test.run=^TestTEST016ModrinthEmptyOrUnusableVersionDoesNotSpin$", "-test.v")
-			command.Env = append(os.Environ(), "MCMODS_TEST016_OWNED_EMPTY_PROVIDER="+provider.URL)
+			// Race's default 1s atexit sleep is diagnostic process teardown,
+			// not provider work. Preserve the 1s business and 2s child budgets.
+			command.Env = append(os.Environ(), "MCMODS_TEST016_OWNED_EMPTY_PROVIDER="+provider.URL,
+				"GORACE="+strings.TrimSpace(os.Getenv("GORACE")+" atexit_sleep_ms=0"))
 			output, err := command.CombinedOutput()
 			if err != nil {
 				t.Fatalf("owned provider %s pager did not finish within the fixed child budget: providerCalls=%d deadline=%v err=%v\n%s", mode, calls.Load(), ctx.Err(), err, output)
