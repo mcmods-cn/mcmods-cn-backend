@@ -785,7 +785,13 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "评论内容不正确")
 			return
 		}
-		previousBody, _, err := updateCommentBodyAtVersion(r.Context(), s.db, commentID, request.Body, request.BaseUpdatedAt)
+		tx, err := s.db.Begin(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "修改评论失败")
+			return
+		}
+		defer tx.Rollback(r.Context())
+		previousBody, _, err := updateCommentBodyAtVersion(r.Context(), tx, commentID, request.Body, request.BaseUpdatedAt)
 		var conflict *commentEditConflictError
 		if errors.As(err, &conflict) {
 			writeAPIError(w, http.StatusConflict, "COMMENT_EDIT_CONFLICT",
@@ -797,7 +803,16 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		addedBytes, deletedBytes := activity.MarkdownDeltaBytes(previousBody, request.Body)
-		annotateActivityDelta(r, activity.ActionEdit, activity.ObjectComment, publicID, addedBytes, deletedBytes)
+		if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: claims.Subject, ActionID: activity.ActionEdit,
+			ObjectTypeID: activity.ObjectComment, ObjectPublicID: publicID, MarkdownAddedBytes: addedBytes, MarkdownDeletedBytes: deletedBytes}); err != nil {
+			writeError(w, http.StatusInternalServerError, "保存评论活动失败")
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "修改评论失败")
+			return
+		}
+		skipRequestActivity(r)
 		items, _ := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims)
 		if len(items) > 0 {
 			writeJSON(w, http.StatusOK, items[0])
@@ -830,11 +845,16 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "删除评论失败")
 			return
 		}
+		if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: claims.Subject, ActionID: activity.ActionDelete,
+			ObjectTypeID: activity.ObjectComment, ObjectPublicID: publicID}); err != nil {
+			writeError(w, http.StatusInternalServerError, "保存评论活动失败")
+			return
+		}
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "删除评论失败")
 			return
 		}
-		annotateActivity(r, activity.ActionDelete, activity.ObjectComment, publicID, 0)
+		skipRequestActivity(r)
 		writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 		return
 	}

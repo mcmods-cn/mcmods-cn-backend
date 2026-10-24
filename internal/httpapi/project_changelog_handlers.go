@@ -226,11 +226,15 @@ func (s *Server) projectChangelogItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: claims.Subject, ActionID: activity.ActionEdit, ObjectTypeID: activity.ObjectChangelog, ObjectPublicID: publicID}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist changelog activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save changelog")
 		return
 	}
-	annotateActivity(r, activity.ActionEdit, activity.ObjectChangelog, publicID, 0)
+	skipRequestActivity(r)
 	writeJSON(w, http.StatusOK, map[string]any{"id": publicID, "reviewStatus": status, "changeRequestId": created.ChangeRequestPublicID})
 }
 
@@ -291,11 +295,15 @@ func (s *Server) createProjectChangelog(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
+	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: claims.Subject, ActionID: activity.ActionCreate, ObjectTypeID: activity.ObjectChangelog, ObjectPublicID: publicID}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist changelog activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save changelog")
 		return
 	}
-	annotateActivity(r, activity.ActionCreate, activity.ObjectChangelog, publicID, 0)
+	skipRequestActivity(r)
 	writeJSON(w, http.StatusCreated, map[string]any{"id": publicID, "reviewStatus": status, "changeRequestId": created.ChangeRequestPublicID})
 }
 
