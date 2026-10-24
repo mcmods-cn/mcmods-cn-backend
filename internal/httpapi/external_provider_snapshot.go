@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+var errProviderSourceNotPublic = errors.New("import source is not confirmed public")
+
 type modrinthProviderSnapshot struct {
 	Project  modrinthProject
 	Versions []modrinthVersion
@@ -27,7 +29,7 @@ func loadModrinthProviderSnapshot(ctx context.Context, client *http.Client, cfg 
 		return modrinthProviderSnapshot{}, errors.New("Modrinth project response is incomplete")
 	}
 	if !publicModrinthProjectStatus(result.Project.Status) {
-		return modrinthProviderSnapshot{}, errors.New("Modrinth source is not public")
+		return modrinthProviderSnapshot{}, errProviderSourceNotPublic
 	}
 	if err := getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(result.Project.ID)+"/version", headers, &result.Versions); err != nil {
 		return modrinthProviderSnapshot{}, fmt.Errorf("read Modrinth project versions: %w", err)
@@ -161,7 +163,7 @@ func verifyPublicImportSource(ctx context.Context, cfg modImportConfig, projectT
 			return err
 		}
 		if repository.Private == nil || *repository.Private {
-			return errors.New("GitHub source is not confirmed public")
+			return errProviderSourceNotPublic
 		}
 		return nil
 	}
@@ -172,7 +174,7 @@ func verifyPublicImportSource(ctx context.Context, cfg modImportConfig, projectT
 			return err
 		}
 		if !publicModrinthProjectStatus(project.Status) {
-			return errors.New("Modrinth source is not public")
+			return errProviderSourceNotPublic
 		}
 	}
 	return nil

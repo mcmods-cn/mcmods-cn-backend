@@ -112,7 +112,11 @@ func TestAuditTP001StoredImportResultRechecksPublicSourceAndOwnershipHTTPIntegra
 	f.require(t, f.otherEditor, http.MethodGet, path, nil, 404)
 	for _, state := range []string{"private", "draft", "rejected", "unknown", "outage"} {
 		status.Store(state)
-		raw := string(f.require(t, f.editor, http.MethodGet, path, nil, 503))
+		want := http.StatusForbidden
+		if state == "outage" {
+			want = http.StatusServiceUnavailable
+		}
+		raw := string(f.require(t, f.editor, http.MethodGet, path, nil, want))
 		if strings.Contains(raw, "SYNTHETIC_SOURCE_DOCUMENT") {
 			t.Fatalf("%s source leaked saved result", state)
 		}

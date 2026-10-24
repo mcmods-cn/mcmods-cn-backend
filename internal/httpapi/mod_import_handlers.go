@@ -143,6 +143,10 @@ func (s *Server) getModMetadataImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "模组导入任务不存在")
 		return
 	}
+	if errors.Is(err, errProviderSourceNotPublic) {
+		writeError(w, http.StatusForbidden, "导入来源当前未确认公开，请公开来源或重新导入")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "读取模组导入任务失败")
 		return
@@ -170,7 +174,10 @@ func (s *Server) modMetadataImportJob(ctx context.Context, jobID string, userID 
 				return modMetadataImportJobResponse{}, err
 			}
 			if err = verifyPublicImportSource(ctx, cfg, job.ProjectType, job.Provider, job.SourceURL); err != nil {
-				return modMetadataImportJobResponse{}, errors.New("import source is unavailable or no longer public")
+				if errors.Is(err, errProviderSourceNotPublic) {
+					return modMetadataImportJobResponse{}, errProviderSourceNotPublic
+				}
+				return modMetadataImportJobResponse{}, errors.New("import source verification is unavailable")
 			}
 		}
 		if simpleProjectTypes[job.ProjectType] {

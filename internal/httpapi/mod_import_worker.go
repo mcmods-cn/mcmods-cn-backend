@@ -474,7 +474,7 @@ func importGitHubRepository(ctx context.Context, client *http.Client, cfg modImp
 		return createModRequest{}, fmt.Errorf("读取 GitHub 仓库失败: %w", err)
 	}
 	if repository.Private == nil || *repository.Private {
-		return createModRequest{}, errors.New("GitHub source is not confirmed public")
+		return createModRequest{}, errProviderSourceNotPublic
 	}
 	readmeHeaders := headers.Clone()
 	readmeHeaders.Set("Accept", "application/vnd.github.raw+json")
