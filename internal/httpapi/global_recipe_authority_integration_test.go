@@ -55,7 +55,7 @@ func TestPublicRecipeSelectionPrefersCanonicalAndKeepsImportFallbackIntegration(
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	createGlobalRecipeAuthorityTestTables(t, ctx, db)
-	if _, err := db.Exec(ctx, `insert into mods(id,slug) values(50,'source-mod');
+	if _, err := db.Exec(ctx, `insert into mods(id,slug,review_status) values(50,'source-mod','approved');
 		insert into catalog_entities(id,public_id,status,default_locale) values
 			(1,'type00001','active','en-US'),(2,'manual001','active','en-US'),(3,'import001','active','en-US'),
 			(4,'resource1','active','en-US'),(5,'template1','active','en-US');
@@ -71,7 +71,7 @@ func TestPublicRecipeSelectionPrefersCanonicalAndKeepsImportFallbackIntegration(
 			values(2,5,'{"layout_kind":"shaped"}',70);
 		insert into recipe_bindings(id,recipe_id,template_slot_id,ordinal,definition) values(20,2,10,0,'{}');
 		insert into game_resources(entity_id,kind_code,canonical_id,namespace) values(4,'minecraft.item','minecraft:stone','minecraft');
-		insert into content_localizations(catalog_entity_id,locale,name) values(4,'en-US','Stone'),(4,'zh-CN','石头');
+		insert into content_localizations(catalog_entity_id,locale,name,review_status) values(4,'en-US','Stone','approved'),(4,'zh-CN','石头','approved');
 		insert into recipe_binding_candidates(binding_id,candidate_index,resource_id,amount,probability,byproduct,definition)
 			values(20,0,4,2,0.5,false,'{}');
 		insert into catalog_import_revisions(id,mod_id,package_id,is_active,status,activated_at,created_at)
@@ -157,8 +157,8 @@ func openGlobalCatalogTestDB(t *testing.T) *pgxpool.Pool {
 
 func createGlobalRecipeAuthorityTestTables(t *testing.T, ctx context.Context, db *pgxpool.Pool) {
 	t.Helper()
-	if _, err := db.Exec(ctx, `create temp table mods(id bigint primary key,slug text not null,review_status text not null default 'approved');
-		create temp table catalog_entities(id bigint primary key,public_id text not null,status text not null,default_locale text not null);
+	if _, err := db.Exec(ctx, `create temp table mods(id bigint primary key,slug text not null,review_status text not null default 'pending');
+		create temp table catalog_entities(id bigint primary key,public_id text not null,status text not null default 'placeholder',default_locale text not null default 'en-US',published_revision_id bigint,archived_at timestamptz);
 		create temp table content_revisions(id bigint primary key,public_id text not null);
 		create temp table catalog_import_revisions(
 			id text primary key,mod_id bigint not null,package_id text not null,is_active boolean not null,status text not null,
@@ -182,9 +182,10 @@ func createGlobalRecipeAuthorityTestTables(t *testing.T, ctx context.Context, db
 			binding_id bigint not null,candidate_index integer not null,resource_id bigint not null,amount numeric not null,
 			probability numeric,byproduct boolean not null,definition jsonb not null);
 		create temp table game_resources(entity_id bigint primary key,kind_code text not null,canonical_id text not null,namespace text not null,owner_mod_id bigint,created_from_revision_id text);
-		create temp table mod_content_versions(id bigint primary key,mod_id bigint,status text);
-        create temp table mod_resource_version_details(resource_id bigint,version_id bigint,status text);
-        create temp table content_localizations(catalog_entity_id bigint,locale text not null,name text not null);
+		create temp table mod_content_versions(id bigint primary key,public_id text,mod_id bigint not null,status text not null default 'active');
+        create temp table mod_resource_version_details(resource_id bigint,version_id bigint,status text not null default 'active');
+		create temp table content_localizations(catalog_entity_id bigint,locale text not null,name text not null,
+			review_status text not null default 'approved');
 		create temp table resource_import_snapshots(id text primary key,resource_id bigint not null,revision_id text not null,icon_path text not null);
 		create temp table oss_files(id bigint primary key,public_id text not null);
 		create temp table catalog_resource_definitions(resource_id bigint primary key,icon_file_id bigint);

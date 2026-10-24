@@ -108,6 +108,17 @@ func TestTEST008EmbeddedCatalogHTTPOutboxOSSWorkerLifecycleIntegration(t *testin
 		values($1,'TEST-008','active',$2,$2) returning id,public_id`, modID, actorID).Scan(&versionID, &versionPublicID); err != nil {
 		t.Fatal(err)
 	}
+	// The actual Worker re-resolves persisted RBAC. A handler-only fabricated
+	// grant is not authority for the later queued execution.
+	grantTEST044Permissions(t, ctx, pool, actorID, "project.edit."+projectCode)
+	resolved, err := resolveUsersRootPermissionsQuery(ctx, pool, []int64{actorID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := security.Claims{Subject: actorID, PermissionRules: resolved[actorID].Permissions}
+	if !automationScopedPermission(actor, "project.edit", projectCode) || claimsAllow(actor, "admin.*") || claimsAllow(actor, "content.no-review") {
+		t.Fatal("fixture needs only persisted exact project edit permission")
+	}
 	objectKey := "mcmods/test008/source-" + nonce + ".json"
 	category := ossModImportCategory(projectCode, iconRendererImportSource, "catalog")
 	if err = pool.QueryRow(ctx, `insert into oss_files(
@@ -123,9 +134,7 @@ func TestTEST008EmbeddedCatalogHTTPOutboxOSSWorkerLifecycleIntegration(t *testin
 		sourceFilePublicID, versionPublicID)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/mods/"+modSiteID+"/catalog-imports", bytes.NewBufferString(requestBody))
 	request.SetPathValue("siteId", modSiteID)
-	request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{
-		Subject: actorID, PermissionRules: []security.PermissionRule{{Code: "project.edit", Allow: true, Priority: 100}},
-	}))
+	request = request.WithContext(context.WithValue(ctx, claimsContextKey, actor))
 	response := httptest.NewRecorder()
 	server.createEmbeddedIconImportJob(response, request)
 	if response.Code != http.StatusAccepted {
@@ -192,8 +201,8 @@ func TestTEST008EmbeddedCatalogHTTPOutboxOSSWorkerLifecycleIntegration(t *testin
 
 	cancelJobID, cancelRunToken := newExportID(), newExportID()
 	if _, err = pool.Exec(ctx, `insert into catalog_import_jobs(
-		id,mod_id,package_id,target_version_id,importer_version,status,progress,current_stage,created_by,run_token,heartbeat_at)
-		select $1,mod_id,package_id,target_version_id,'test008-cancel','importing',70,'assets',created_by,$2,now()
+		id,mod_id,package_id,target_version_id,importer_version,status,progress,current_stage,created_by,run_token,heartbeat_at,requested_publication_mode)
+		select $1,mod_id,package_id,target_version_id,'test008-cancel','importing',70,'assets',created_by,$2,now(),requested_publication_mode
 		from catalog_import_jobs where id=$3`, cancelJobID, cancelRunToken, jobID); err != nil {
 		t.Fatal(err)
 	}
@@ -294,8 +303,8 @@ func TestTEST008EmbeddedCatalogHTTPOutboxOSSWorkerLifecycleIntegration(t *testin
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `insert into catalog_import_jobs(
-		id,mod_id,package_id,target_version_id,importer_version,status,progress,current_stage,created_by)
-		select $1,mod_id,package_id,$3,importer_version,'queued',0,'queued',created_by
+		id,mod_id,package_id,target_version_id,importer_version,status,progress,current_stage,created_by,requested_publication_mode)
+		select $1,mod_id,package_id,$3,importer_version,'queued',0,'queued',created_by,requested_publication_mode
 		from catalog_import_jobs where id=$2`, failedJobID, jobID, failedVersionID); err != nil {
 		t.Fatal(err)
 	}
@@ -306,6 +315,10 @@ func TestTEST008EmbeddedCatalogHTTPOutboxOSSWorkerLifecycleIntegration(t *testin
 	failedMessage, _ := json.Marshal(modExportJobMessage{JobID: failedJobID})
 	if err = worker.handle(ctx, failedMessage); err == nil {
 		t.Fatal("injected final activation failure was swallowed")
+	}
+	var activationErr *pgconn.PgError
+	if !errors.As(err, &activationErr) || activationErr.Code != "23514" || activationErr.ConstraintName != "test008_reject_activation" {
+		t.Fatalf("failure did not reach the exact injected activation constraint: %v", err)
 	}
 	t.Logf("injected finalization result: %v", err)
 	var failedStatus string
