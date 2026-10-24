@@ -1208,6 +1208,12 @@ func (s *Server) resolvePublicLink(w http.ResponseWriter, r *http.Request) {
 	if target == "" {
 		target = s.catalogPublicTarget(r.Context(), entityType, internalID, publicID)
 	}
+	// These objects live in the account's economy workspace. Historical route
+	// registry rows still contain retired standalone paths, so normalize on read
+	// for both existing rows and newly generated public IDs.
+	if entityType == "currency" || entityType == "shop_item" || entityType == "task" {
+		target = "/user?section=economy&objectType=" + url.QueryEscape(entityType) + "&publicId=" + url.QueryEscape(publicID)
+	}
 	if target == "" {
 		writeError(w, http.StatusNotFound, "该内容暂时没有可访问页面")
 		return
@@ -1225,6 +1231,22 @@ func (s *Server) catalogPublicTarget(ctx context.Context, entityType string, int
 		return "/recipe-types?recipePublicId=" + url.QueryEscape(publicID)
 	case "resource", "structure", "document":
 		var revisionID, siteID, registry, kind string
+		// Manual publications use a content-version identity, rather than an
+		// import revision. Prefer a currently visible manual source and use a
+		// deterministic version ordering when there are several publications.
+		manualErr := s.db.QueryRow(ctx, `select version.public_id,mod.slug,resource.kind_code
+			from mod_resource_version_details detail
+			join mod_content_versions version on version.id=detail.version_id and version.status='active'
+			join mods mod on mod.id=version.mod_id and mod.review_status='approved'
+			join game_resources resource on resource.entity_id=detail.resource_id
+			where detail.resource_id=$1 and detail.status='active' and detail.published_revision_id is not null
+			order by version.updated_at desc,version.id desc limit 1`, internalID).Scan(&revisionID, &siteID, &kind)
+		if manualErr == nil {
+			return "/mods/" + url.PathEscape(siteID) + "/data/" + url.PathEscape(revisionID) + "/" + url.PathEscape(categoryForResourceKind(kind)) + "/entry?publicId=" + url.QueryEscape(publicID)
+		}
+		if !errors.Is(manualErr, pgx.ErrNoRows) {
+			return ""
+		}
 		err := s.db.QueryRow(ctx, `select snapshot.revision_id,mod.slug,snapshot.registry,resource.kind_code
 			from game_resources resource
 			join resource_import_snapshots snapshot on snapshot.resource_id=resource.entity_id

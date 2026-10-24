@@ -18,7 +18,7 @@ func TestCatalogPresentationBatchNormalizesAndBoundsReferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if primary != "zh-CN" || secondary != "zh-TW" || len(items) != 1 || items[0].PublicID != "abc123456" || items[0].ID != "minecraft:stone" {
+	if primary != "zh-CN" || secondary != "zh-TW" || len(items) != 2 || items[0].InputIndex != 0 || items[1].InputIndex != 1 || items[0].PublicID != "abc123456" || items[0].ID != "minecraft:stone" {
 		t.Fatalf("normalized primary=%q secondary=%q items=%+v", primary, secondary, items)
 	}
 

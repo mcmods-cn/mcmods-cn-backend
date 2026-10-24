@@ -10,10 +10,11 @@ import (
 const maxCatalogPresentationBatchItems = 1000
 
 type catalogPresentationBatchReference struct {
-	PublicID string `json:"publicId"`
-	ID       string `json:"id"`
-	Kind     string `json:"kind"`
-	Registry string `json:"registry"`
+	InputIndex int    `json:"-"`
+	PublicID   string `json:"publicId"`
+	ID         string `json:"id"`
+	Kind       string `json:"kind"`
+	Registry   string `json:"registry"`
 }
 
 type catalogPresentationBatchRequest struct {
@@ -29,6 +30,7 @@ type catalogPresentationSource struct {
 }
 
 type catalogPresentationBatchItem struct {
+	InputIndex     int                       `json:"inputIndex"`
 	PublicID       string                    `json:"publicId"`
 	ID             string                    `json:"id"`
 	Registry       string                    `json:"registry"`
@@ -64,8 +66,8 @@ func normalizeCatalogPresentationBatchRequest(request catalogPresentationBatchRe
 		secondary = "zh-CN"
 	}
 	items := make([]catalogPresentationBatchReference, 0, len(request.Items))
-	seen := make(map[string]struct{}, len(request.Items))
-	for _, item := range request.Items {
+	for index, item := range request.Items {
+		item.InputIndex = index
 		item.PublicID = strings.ToLower(strings.TrimSpace(item.PublicID))
 		item.ID = strings.ToLower(strings.TrimSpace(item.ID))
 		item.Kind = strings.ToLower(strings.TrimSpace(item.Kind))
@@ -74,11 +76,6 @@ func normalizeCatalogPresentationBatchRequest(request catalogPresentationBatchRe
 			len(item.Kind) > 64 || len(item.Registry) > 128 {
 			return "", "", nil, errors.New("invalid resource presentation reference")
 		}
-		key := item.PublicID + "\x00" + item.ID + "\x00" + item.Kind + "\x00" + item.Registry
-		if _, duplicate := seen[key]; duplicate {
-			continue
-		}
-		seen[key] = struct{}{}
 		items = append(items, item)
 	}
 	return primary, secondary, items, nil
@@ -128,7 +125,17 @@ func (s *Server) catalogResourcePresentations(w http.ResponseWriter, r *http.Req
 		}
 		items = append(items, loaded...)
 	}
-	writeBoundedCatalogJSON(w, map[string]any{"items": items})
+	resolved := make(map[int]bool, len(items))
+	for _, item := range items {
+		resolved[item.InputIndex] = true
+	}
+	unresolved := make([]int, 0)
+	for index := range request.Items {
+		if !resolved[index] {
+			unresolved = append(unresolved, index)
+		}
+	}
+	writeBoundedCatalogJSON(w, map[string]any{"items": items, "unresolvedInputIndices": unresolved})
 }
 
 func catalogPresentationInputs(items []catalogPresentationBatchReference) ([]string, []string, []string, []string) {
@@ -145,9 +152,9 @@ func catalogPresentationInputs(items []catalogPresentationBatchReference) ([]str
 func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []catalogPresentationBatchReference, primary, secondary string) ([]catalogPresentationBatchItem, error) {
 	publicIDs, identifiers, kinds, registries := catalogPresentationInputs(items)
 	rows, err := s.db.Query(ctx, `with input as (
-		select * from unnest($1::text[],$2::text[],$3::text[],$4::text[]) input(public_id,identifier,kind,registry)
+		select * from unnest($1::text[],$2::text[],$3::text[],$4::text[]) with ordinality input(public_id,identifier,kind,registry,input_index)
 	), selected as materialized (
-		select distinct match.entity_id from input join lateral (
+		select match.entity_id,input.input_index from input join lateral (
 			select resource.entity_id from game_resources resource join catalog_entities entity on entity.id=resource.entity_id
 			where entity.status='active' and `+publicCatalogEntitySQL("entity", "resource")+` and (
 				(input.public_id<>'' and entity.public_id=input.public_id) or
@@ -158,7 +165,7 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 			order by case when entity.public_id=input.public_id then 0 else 1 end limit 1
 		) match on true
 	), `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
-	select entity.public_id,resource.canonical_id,resource.namespace,resource.kind_code,entity.default_locale,
+	select selected.input_index,entity.public_id,resource.canonical_id,resource.namespace,resource.kind_code,entity.default_locale,
 		coalesce(localization.locale,''),coalesce(localization.name,''),
 		coalesce(imported.names,'{}'::jsonb) || coalesce((select jsonb_object_agg(candidate.locale,candidate.name)
 			from content_localizations candidate where candidate.catalog_entity_id=entity.id and candidate.name<>''),'{}'::jsonb),
@@ -180,9 +187,10 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 	result := make([]catalogPresentationBatchItem, 0, len(items))
 	for rows.Next() {
 		var item catalogPresentationBatchItem
+		var inputIndex int
 		var defaultLocale, locale, name, iconFileID, importedIconPath string
 		var names []byte
-		if err = rows.Scan(&item.PublicID, &item.ID, &item.Registry, &item.Kind, &defaultLocale, &locale, &name, &names,
+		if err = rows.Scan(&inputIndex, &item.PublicID, &item.ID, &item.Registry, &item.Kind, &defaultLocale, &locale, &name, &names,
 			&iconFileID, &importedIconPath, &item.Source.PublicID, &item.Source.SiteID, &item.Source.Name); err != nil {
 			return nil, err
 		}
@@ -195,6 +203,10 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 		if item.Source.PublicID != "" || item.Source.SiteID != "" || item.Source.Name != "" {
 			item.Source.Type = "mod"
 		}
+		if inputIndex < 1 || inputIndex > len(items) {
+			return nil, errors.New("invalid presentation input mapping")
+		}
+		item.InputIndex = items[inputIndex-1].InputIndex
 		result = append(result, item)
 	}
 	return result, rows.Err()
@@ -203,9 +215,9 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 func (s *Server) loadCatalogTagPresentations(ctx context.Context, items []catalogPresentationBatchReference, primary, secondary string) ([]catalogPresentationBatchItem, error) {
 	publicIDs, identifiers, _, registries := catalogPresentationInputs(items)
 	rows, err := s.db.Query(ctx, `with input as (
-		select * from unnest($1::text[],$2::text[],$3::text[]) input(public_id,identifier,registry)
+		select * from unnest($1::text[],$2::text[],$3::text[]) with ordinality input(public_id,identifier,registry,input_index)
 	), selected as materialized (
-		select distinct match.entity_id from input join lateral (
+		select match.entity_id,input.input_index from input join lateral (
 			select tag.entity_id from catalog_tags tag join catalog_entities entity on entity.id=tag.entity_id
 			where entity.status='active' and `+publicCatalogEntitySQL("entity", "tag")+` and ((input.public_id<>'' and entity.public_id=input.public_id) or
 				(input.identifier<>'' and (lower(tag.canonical_id)=input.identifier or lower(tag.registry||':'||tag.canonical_id)=input.identifier)
@@ -213,7 +225,7 @@ func (s *Server) loadCatalogTagPresentations(ctx context.Context, items []catalo
 			order by case when entity.public_id=input.public_id then 0 else 1 end limit 1
 		) match on true
 	)
-	select entity.public_id,tag.canonical_id,tag.registry,entity.default_locale,
+	select selected.input_index,entity.public_id,tag.canonical_id,tag.registry,entity.default_locale,
 		coalesce(localization.locale,''),coalesce(localization.name,''),
 		coalesce((select jsonb_object_agg(candidate.locale,candidate.name) from content_localizations candidate
 			where candidate.catalog_entity_id=entity.id and candidate.name<>''),'{}'::jsonb)
@@ -230,9 +242,10 @@ func (s *Server) loadCatalogTagPresentations(ctx context.Context, items []catalo
 	result := make([]catalogPresentationBatchItem, 0, len(items))
 	for rows.Next() {
 		var item catalogPresentationBatchItem
+		var inputIndex int
 		var defaultLocale, locale, name string
 		var names []byte
-		if err = rows.Scan(&item.PublicID, &item.ID, &item.Registry, &defaultLocale, &locale, &name, &names); err != nil {
+		if err = rows.Scan(&inputIndex, &item.PublicID, &item.ID, &item.Registry, &defaultLocale, &locale, &name, &names); err != nil {
 			return nil, err
 		}
 		if resolvedLocale, resolvedName := catalogResolvedName(names, primary, secondary, defaultLocale); resolvedName != "" {
@@ -241,6 +254,10 @@ func (s *Server) loadCatalogTagPresentations(ctx context.Context, items []catalo
 		item.Kind = "tag"
 		item.ResolvedLocale, item.ResolvedName = locale, truncateUTF8(name, 512)
 		item.Names = presentationName(locale, item.ResolvedName)
+		if inputIndex < 1 || inputIndex > len(items) {
+			return nil, errors.New("invalid presentation input mapping")
+		}
+		item.InputIndex = items[inputIndex-1].InputIndex
 		result = append(result, item)
 	}
 	return result, rows.Err()
@@ -249,9 +266,9 @@ func (s *Server) loadCatalogTagPresentations(ctx context.Context, items []catalo
 func (s *Server) loadProjectPresentations(ctx context.Context, items []catalogPresentationBatchReference, primary, _ string) ([]catalogPresentationBatchItem, error) {
 	publicIDs, identifiers, kinds, _ := catalogPresentationInputs(items)
 	rows, err := s.db.Query(ctx, `with input as (
-		select * from unnest($1::text[],$2::text[],$3::text[]) input(public_id,identifier,kind)
+		select * from unnest($1::text[],$2::text[],$3::text[]) with ordinality input(public_id,identifier,kind,input_index)
 	)
-	select match.public_id,match.identifier,match.registry,match.kind,match.name,match.icon_url,
+	select input.input_index,match.public_id,match.identifier,match.registry,match.kind,match.name,match.icon_url,
 		match.source_public_id,match.source_site_id,match.source_name
 	from input join lateral (
 		select candidate.* from (
@@ -286,7 +303,8 @@ func (s *Server) loadProjectPresentations(ctx context.Context, items []catalogPr
 	result := make([]catalogPresentationBatchItem, 0, len(items))
 	for rows.Next() {
 		var item catalogPresentationBatchItem
-		if err = rows.Scan(&item.PublicID, &item.ID, &item.Registry, &item.Kind, &item.ResolvedName, &item.IconURL,
+		var inputIndex int
+		if err = rows.Scan(&inputIndex, &item.PublicID, &item.ID, &item.Registry, &item.Kind, &item.ResolvedName, &item.IconURL,
 			&item.Source.PublicID, &item.Source.SiteID, &item.Source.Name); err != nil {
 			return nil, err
 		}
@@ -294,6 +312,10 @@ func (s *Server) loadProjectPresentations(ctx context.Context, items []catalogPr
 		item.ResolvedLocale = primary
 		item.Names = presentationName(primary, item.ResolvedName)
 		item.Source.Type = item.Kind
+		if inputIndex < 1 || inputIndex > len(items) {
+			return nil, errors.New("invalid presentation input mapping")
+		}
+		item.InputIndex = items[inputIndex-1].InputIndex
 		result = append(result, item)
 	}
 	return result, rows.Err()
