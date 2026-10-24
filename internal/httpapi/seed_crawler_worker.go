@@ -59,10 +59,21 @@ func lockSeedCrawlerRunLeaseTx(ctx context.Context, tx pgx.Tx, actorID int64) er
 	if !ok || lease.ID <= 0 || lease.Owner == "" || actorID <= 0 {
 		return errSeedCrawlerLeaseOwnershipLost
 	}
+	var lockedID int64
+	err := tx.QueryRow(ctx, `select id from seed_crawler_runs where id=$1 for update`, lease.ID).Scan(&lockedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errSeedCrawlerLeaseOwnershipLost
+	}
+	if err != nil {
+		return err
+	}
+	// LockRows may evaluate a SELECT target list before it waits for an
+	// unchanged tuple's lock. Read the clock in a new statement after the lock
+	// has actually been acquired, rather than accepting that earlier boolean.
 	var valid bool
-	err := tx.QueryRow(ctx, `select status='running' and lease_owner=$2
+	err = tx.QueryRow(ctx, `select status='running' and lease_owner=$2
 		and lease_expires_at>clock_timestamp() and actor_id=$3
-		from seed_crawler_runs where id=$1 for update`, lease.ID, lease.Owner, actorID).Scan(&valid)
+		from seed_crawler_runs where id=$1`, lease.ID, lease.Owner, actorID).Scan(&valid)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !valid) {
 		return errSeedCrawlerLeaseOwnershipLost
 	}

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -68,7 +69,7 @@ func TestIndependentP1F001ActualClaimNotificationWorkerDeliversOnce(t *testing.T
 }
 
 func TestIndependentP1CMP006CrawlerRechecksAuthorityAndLeaseAfterFetch(t *testing.T) {
-	for _, mode := range []string{"revoke-during-fetch", "replace-lease-during-fetch", "expire-lease-during-fetch", "replace-lease-before-publication", "revoke-before-publication"} {
+	for _, mode := range []string{"revoke-during-fetch", "replace-lease-during-fetch", "expire-lease-during-fetch", "replace-lease-before-publication", "revoke-before-publication", "wait-unmodified-row-past-expiry"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newTEST013Fixture(t)
 			s := f.origin.Config.Handler.(*Server)
@@ -129,7 +130,8 @@ func TestIndependentP1CMP006CrawlerRechecksAuthorityAndLeaseAfterFetch(t *testin
 				t.Fatal(err)
 			}
 			worker := NewSeedCrawlerWorker(s.cfg, f.db)
-			if strings.HasSuffix(mode, "before-publication") {
+			locked := make(chan pgx.Tx, 1)
+			if strings.HasSuffix(mode, "before-publication") || mode == "wait-unmodified-row-past-expiry" {
 				// The first check protects the draft transaction. The second is
 				// inside the actual create/publish transaction, after its tentative
 				// domain writes, so this independently verifies final rollback.
@@ -137,7 +139,23 @@ func TestIndependentP1CMP006CrawlerRechecksAuthorityAndLeaseAfterFetch(t *testin
 				var checks atomic.Int32
 				cfg.ConnConfig.Tracer = independentQueryStartHook(func(data pgx.TraceQueryStartData) {
 					if strings.Contains(data.SQL, "from seed_crawler_runs where id=$1 for update") && checks.Add(1) == 2 {
-						change()
+						if mode == "wait-unmodified-row-past-expiry" {
+							lock, err := f.db.Begin(f.ctx)
+							if err == nil {
+								_, err = lock.Exec(f.ctx, `select id from seed_crawler_runs where id=$1 for update`, runID)
+							}
+							if err != nil {
+								t.Error(err)
+								if lock != nil {
+									_ = lock.Rollback(f.ctx)
+								}
+								return
+							}
+							changed.Store(true)
+							locked <- lock
+						} else {
+							change()
+						}
 					}
 				})
 				pool, err := pgxpool.NewWithConfig(f.ctx, cfg)
@@ -147,7 +165,33 @@ func TestIndependentP1CMP006CrawlerRechecksAuthorityAndLeaseAfterFetch(t *testin
 				t.Cleanup(pool.Close)
 				worker.server.db = pool
 			}
-			processed, err := worker.processOne(f.ctx)
+			var processed bool
+			if mode == "wait-unmodified-row-past-expiry" {
+				worker.leaseDuration = 4 * time.Second
+				type result struct {
+					processed bool
+					err       error
+				}
+				done := make(chan result, 1)
+				go func() { p, e := worker.processOne(f.ctx); done <- result{p, e} }()
+				var lock pgx.Tx
+				select {
+				case lock = <-locked:
+				case r := <-done:
+					t.Fatalf("worker did not reach final lease lock: %v", r.err)
+				case <-f.ctx.Done():
+					t.Fatal("final lock barrier timed out")
+				}
+				defer lock.Rollback(f.ctx)
+				independentAwaitCrawlerLeaseLockAndExpiry(t, f, runID)
+				if err := lock.Commit(f.ctx); err != nil {
+					t.Fatal(err)
+				}
+				r := <-done
+				processed, err = r.processed, r.err
+			} else {
+				processed, err = worker.processOne(f.ctx)
+			}
 			if !processed {
 				t.Fatalf("actual business Worker did not run: %v", err)
 			}
@@ -170,7 +214,7 @@ func TestIndependentP1CMP006CrawlerRechecksAuthorityAndLeaseAfterFetch(t *testin
 			if projects != 0 || approvedRevisions != 0 {
 				t.Errorf("late/revoked worker published: projects=%d approvedRevisions=%d mode=%s", projects, approvedRevisions, mode)
 			}
-			if e := f.db.QueryRow(f.ctx, `select count(*) from nats_outbox where subject='project-updates'`).Scan(&publishedEvents); e != nil || publishedEvents != 0 {
+			if e := f.db.QueryRow(f.ctx, `select (select count(*) from project_update_events)+(select count(*) from nats_outbox where aggregate_type='project_update_event')+(select count(*) from activity_event_outbox where user_id=$1)`, actor).Scan(&publishedEvents); e != nil || publishedEvents != 0 {
 				t.Errorf("late/revoked worker publication events=%d/%v", publishedEvents, e)
 			}
 			if !leaseLost {
@@ -183,6 +227,63 @@ func TestIndependentP1CMP006CrawlerRechecksAuthorityAndLeaseAfterFetch(t *testin
 				}
 			}
 		})
+	}
+}
+
+func independentAwaitCrawlerLeaseLockAndExpiry(t *testing.T, f test013Fixture, runID int64) {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	await := func(query string, args ...any) {
+		for {
+			var done bool
+			if err := f.db.QueryRow(f.ctx, query, args...).Scan(&done); err != nil {
+				t.Fatal(err)
+			}
+			if done {
+				return
+			}
+			select {
+			case <-ticker.C:
+			case <-f.ctx.Done():
+				t.Fatal("deterministic lease barrier timed out")
+			}
+		}
+	}
+	await(`select exists(select 1 from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query like '%from seed_crawler_runs where id=$1 for update%')`)
+	await(`select clock_timestamp()>=lease_expires_at from seed_crawler_runs where id=$1`, runID)
+	t.Log("Actual final publication query is blocked on an unmodified run tuple; DB wall clock has passed its original lease expiry before release")
+}
+
+func TestIndependentP1CMP006LeaseHelperChecksExpiryAfterLockWait(t *testing.T) {
+	f := newTEST013Fixture(t)
+	var runID int64
+	const owner = "independent-unmodified-run-lock"
+	actor := f.userIDs[f.editor]
+	if err := f.db.QueryRow(f.ctx, `insert into seed_crawler_runs(status,actor_id,lease_owner,lease_expires_at,dry_run) values('running',$1,$2,clock_timestamp()+interval '2 seconds',false) returning id`, actor, owner).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Rollback(f.ctx)
+	if _, err = lock.Exec(f.ctx, `select id from seed_crawler_runs where id=$1 for update`, runID); err != nil {
+		t.Fatal(err)
+	}
+	check, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Rollback(f.ctx)
+	done := make(chan error, 1)
+	go func() { done <- lockSeedCrawlerRunLeaseTx(withSeedCrawlerRunLease(f.ctx, runID, owner), check, actor) }()
+	independentAwaitCrawlerLeaseLockAndExpiry(t, f, runID)
+	if err = lock.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; !errors.Is(err, errSeedCrawlerLeaseOwnershipLost) {
+		t.Fatalf("unmodified run expired during row-lock wait was accepted: %v", err)
 	}
 }
 
