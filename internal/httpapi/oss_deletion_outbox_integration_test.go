@@ -180,8 +180,12 @@ func TestOSSDeletionReplayAndCompletedKeyReuseAreAuditedIntegration(t *testing.T
 		t.Fatalf("dead deletion list = %d/%s", listResponse.Code, listResponse.Body.String())
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/oss-deletions/22/replay", nil)
-	request.SetPathValue("id", "22")
+	var publicID string
+	if err := pool.QueryRow(ctx, `select public_id from oss_object_deletion_outbox where id=$1`, 22).Scan(&publicID); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/oss-deletions/"+publicID+"/replay", nil)
+	request.SetPathValue("id", publicID)
 	request = request.WithContext(context.WithValue(request.Context(), claimsContextKey, security.Claims{Subject: 7001}))
 	response := httptest.NewRecorder()
 	server.adminReplayOSSDeletion(response, request)
@@ -211,8 +215,8 @@ func TestOSSDeletionReplayAndCompletedKeyReuseAreAuditedIntegration(t *testing.T
 		failure_class='authorization',last_error='still denied',dead_at=now() where id=22`); err != nil {
 		t.Fatal(err)
 	}
-	thirdRequest := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/oss-deletions/22/replay", nil)
-	thirdRequest.SetPathValue("id", "22")
+	thirdRequest := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/oss-deletions/"+publicID+"/replay", nil)
+	thirdRequest.SetPathValue("id", publicID)
 	thirdRequest = thirdRequest.WithContext(context.WithValue(thirdRequest.Context(), claimsContextKey, security.Claims{Subject: 7002}))
 	thirdResponse := httptest.NewRecorder()
 	server.adminReplayOSSDeletion(thirdResponse, thirdRequest)
@@ -275,7 +279,7 @@ func openOSSDeletionStateTestDB(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	if _, err = pool.Exec(ctx, `create temp table oss_object_deletion_outbox(
-		id bigserial primary key,oss_file_id bigint,bucket text not null,endpoint text not null,region text not null,use_cname boolean not null default false,
+		id bigserial primary key,public_id text not null unique default new_public_id(),oss_file_id bigint,bucket text not null,endpoint text not null,region text not null,use_cname boolean not null default false,
 		object_key text not null,reason text not null default '',status text not null default 'pending',attempts integer not null default 0,max_attempts integer not null default 12,
 		next_attempt_at timestamptz not null default now(),locked_at timestamptz,locked_by text not null default '',last_error text not null default '',failure_class text not null default '',
 		created_at timestamptz not null default now(),updated_at timestamptz not null default now(),deleted_at timestamptz,dead_at timestamptz,replay_count integer not null default 0,
@@ -284,7 +288,7 @@ func openOSSDeletionStateTestDB(t *testing.T) *pgxpool.Pool {
 		create index test_oss_deletion_dead on oss_object_deletion_outbox(dead_at desc,id desc) where status='dead';
 		create index test_oss_deletion_exhausted on oss_object_deletion_outbox(updated_at,id)
 			where status in ('pending','processing') and attempts>=max_attempts;
-		create temp table oss_files(id bigint primary key,bucket text not null,endpoint text not null,region text not null,object_key text not null,status text not null,updated_at timestamptz not null default now());
+		create temp table oss_files(id bigint primary key,public_id text not null unique default new_public_id(),bucket text not null,endpoint text not null,region text not null,object_key text not null,status text not null,updated_at timestamptz not null default now());
 		create temp table log_shares(source_file_id bigint,status text not null default 'active',deleted_at timestamptz);
 		create temp table app_logs(id bigserial primary key,category text not null,level text not null,action text not null,target text not null,payload jsonb not null default '{}'::jsonb)`); err != nil {
 		pool.Close()

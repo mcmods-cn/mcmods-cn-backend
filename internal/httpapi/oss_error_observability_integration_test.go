@@ -35,7 +35,7 @@ func TestOSSReuseMetricsAndCleanupFailuresAreObservableIntegration(t *testing.T)
 			id bigserial primary key,public_id text not null,bucket text not null,endpoint text not null,region text not null,
 			object_key text not null unique,category text not null,source text not null,original_name text not null,
 			source_original_name text not null,content_type text not null,size_bytes bigint not null,source_size_bytes bigint not null,
-			sha256 text not null,uploader_id bigint,status text not null,scan_status text not null,
+			sha256 text not null,source_hash_verified boolean not null default false,stored_sha256 text not null default '',uploader_id bigint,status text not null,scan_status text not null,
 			created_at timestamptz not null default now(),updated_at timestamptz not null default now()
 		);
 		create temp table blueprints(
@@ -55,9 +55,9 @@ func TestOSSReuseMetricsAndCleanupFailuresAreObservableIntegration(t *testing.T)
 		create temp table oss_scan_logs(dummy integer);
 		create temp table oss_download_stats(dummy integer);
 		insert into oss_files(public_id,bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
-			content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status)
+			content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status,source_hash_verified,stored_sha256)
 		values('oss-observable-1','bucket','https://oss.example.test','region','objects/existing.bin','misc','test','existing.bin',
-			'existing.bin','application/octet-stream',10,10,repeat('a',64),7,'active','clean');
+			'existing.bin','application/octet-stream',10,10,repeat('a',64),7,'active','clean',true,repeat('a',64));
 		insert into blueprints values(1,'observable-blueprint','ready',1,7,'approved',now());
 	`); err != nil {
 		t.Fatal(err)

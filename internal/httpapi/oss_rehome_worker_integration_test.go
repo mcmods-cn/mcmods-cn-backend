@@ -193,8 +193,12 @@ func TestOSSRehomeAdminReplayIsAuditedIntegration(t *testing.T) {
 	if listResponse.Code != http.StatusOK || !strings.Contains(listResponse.Body.String(), `"failureClass":"authorization"`) {
 		t.Fatalf("dead rehome list = %d/%s", listResponse.Code, listResponse.Body.String())
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/oss-rehomes/30/replay", nil)
-	request.SetPathValue("id", "30")
+	var publicID string
+	if err := pool.QueryRow(ctx, `select public_id from oss_rehome_jobs where id=$1`, 30).Scan(&publicID); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/oss-rehomes/"+publicID+"/replay", nil)
+	request.SetPathValue("id", publicID)
 	request = request.WithContext(context.WithValue(request.Context(), claimsContextKey, security.Claims{Subject: 7001}))
 	response := httptest.NewRecorder()
 	server.adminReplayOSSRehome(response, request)
@@ -281,10 +285,10 @@ func openOSSRehomeStateTestDB(t *testing.T) *pgxpool.Pool {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err = pool.Exec(ctx, `create temp table mods(id bigint primary key);
+	if _, err = pool.Exec(ctx, `create temp table mods(id bigint primary key,project_code text not null unique default new_public_id());
 		insert into mods(id) select value from generate_series(1,10) value;
 		create temp table oss_rehome_jobs(
-			id bigserial primary key,mod_id bigint not null unique references mods(id) on delete cascade,status text not null default 'queued',
+			id bigserial primary key,public_id text not null unique default new_public_id(),mod_id bigint not null unique references mods(id) on delete cascade,status text not null default 'queued',
 			generation bigint not null default 1,claimed_generation bigint,attempts integer not null default 0,max_attempts integer not null default 8,
 			next_attempt_at timestamptz not null default now(),locked_by text not null default '',lease_expires_at timestamptz,last_error text not null default '',
 			failure_class text not null default '',created_at timestamptz not null default now(),updated_at timestamptz not null default now(),completed_at timestamptz,

@@ -155,8 +155,12 @@ func TestOSSMultipartDeadReplayIsAuditedIntegration(t *testing.T) {
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"failureClass":"authorization"`) {
 		t.Fatalf("dead list = %d/%s", list.Code, list.Body.String())
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/oss-multipart-sessions/30/replay", nil)
-	request.SetPathValue("id", "30")
+	var publicID string
+	if err := pool.QueryRow(ctx, `select public_id from oss_multipart_sessions where id=$1`, 30).Scan(&publicID); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/oss-multipart-sessions/"+publicID+"/replay", nil)
+	request.SetPathValue("id", publicID)
 	request = request.WithContext(context.WithValue(request.Context(), claimsContextKey, security.Claims{Subject: 7001}))
 	response := httptest.NewRecorder()
 	server.adminReplayOSSMultipartSession(response, request)
@@ -256,7 +260,7 @@ func openOSSMultipartStateTestDB(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	if _, err = pool.Exec(ctx, `create temp table oss_multipart_sessions(
-		id bigserial primary key,owner_id bigint,bucket text not null,endpoint text not null,region text not null,use_cname boolean not null default false,
+		id bigserial primary key,public_id text not null unique default new_public_id(),owner_id bigint,bucket text not null,endpoint text not null,region text not null,use_cname boolean not null default false,
 		object_key text not null,upload_id text not null,original_name text not null,content_type text not null,size_bytes bigint not null,sha256 text not null,
 		category text not null,source text not null,status text not null default 'active',attempts integer not null default 0,max_attempts integer not null default 12,
 		next_attempt_at timestamptz not null default now(),locked_by text not null default '',lease_expires_at timestamptz,last_error text not null default '',
