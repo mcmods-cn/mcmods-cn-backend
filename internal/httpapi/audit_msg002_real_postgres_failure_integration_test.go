@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -102,6 +104,13 @@ func TestAuditMSG002RealPostgresLookupFailuresPreserveBusinessState(t *testing.T
 			restored = true
 		}
 		defer restore()
+		// Prove the injected database condition itself, not merely any500.
+		var targetID int64
+		lookupErr := f.db.QueryRow(f.ctx, `select id from users where public_id=$1 and status='active'`, f.publicIDs[f.otherEditor]).Scan(&targetID)
+		var postgresError *pgconn.PgError
+		if !errors.As(lookupErr, &postgresError) || postgresError.Code != "42703" {
+			t.Fatalf("expected precise missing-column PostgreSQL42703, got %v", lookupErr)
+		}
 		assertLookupError(t, invoke(f.ctx))
 		restore()
 		assertUnchanged(t, beforeFault)
