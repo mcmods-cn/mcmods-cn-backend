@@ -335,13 +335,19 @@ func createNotificationTemplateTestTables(t *testing.T, ctx context.Context, db 
 			id bigserial primary key,recipient_id bigint,kind text not null,title text not null,body text not null,
 			source_locale text not null,data jsonb not null default '{}'::jsonb,source_event_id text,
 			template_key text,template_version integer not null default 0,template_params jsonb not null default '{}'::jsonb,
-			updated_at timestamptz not null default now());
+			updated_at timestamptz not null default now(),revision_xid xid8 not null default pg_current_xact_id());
 		create unique index notification_source_event_unique on notifications(source_event_id) where source_event_id is not null;
 		create temp table notification_actors(
 			notification_id bigint not null,actor_id bigint not null,created_at timestamptz not null default now(),
 			primary key(notification_id,actor_id));
 		create temp table notification_receipts(
-			notification_id bigint not null,user_id bigint not null,read_at timestamptz,primary key(notification_id,user_id));
+			notification_id bigint not null references notifications(id) on delete cascade,
+			user_id bigint not null references users(id) on delete cascade,read_at timestamptz,read_revision_xid xid8,
+			created_at timestamptz not null default now(),primary key(notification_id,user_id));
+		create temp table notification_read_watermarks(
+			user_id bigint primary key references users(id) on delete cascade,
+			max_notification_id bigint not null default 0 check(max_notification_id>=0),
+			read_at timestamptz not null,updated_at timestamptz not null default now(),visibility_snapshot pg_snapshot);
 		create temp table nats_outbox(
 			id bigserial primary key,event_id text not null unique,event_type text not null,schema_version integer not null default 1,
 			subject text not null,aggregate_type text not null,aggregate_id text not null,trace_id text not null default '',
