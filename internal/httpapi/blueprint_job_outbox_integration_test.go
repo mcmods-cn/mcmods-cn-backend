@@ -29,10 +29,19 @@ func TestBlueprintJobsUseOneTransactionalOutboxPath(t *testing.T) {
 		t.Fatal("blueprint upload completion boundary was not found")
 	}
 	upload := text[start:end]
-	queued := strings.Index(upload, "enqueueBlueprintJobTx(ctx, tx")
+	queued := strings.Index(upload, "completeBlueprintUploadTx(ctx, tx")
 	committed := strings.LastIndex(upload, "tx.Commit(ctx)")
 	if queued < 0 || committed < 0 || queued > committed {
-		t.Fatal("upload completion does not atomically enqueue the normalization job and outbox event")
+		t.Fatal("upload completion does not delegate to the same transaction before commit")
+	}
+	helper, err := os.ReadFile("oss_upload_completion_helpers.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperText := string(helper)
+	startHelper := strings.Index(helperText, "func (s *Server) completeBlueprintUploadTx(")
+	if startHelper < 0 || !strings.Contains(helperText[startHelper:], "enqueueBlueprintJobTx(ctx, tx") || strings.Contains(helperText[startHelper:], "tx.Commit(ctx)") {
+		t.Fatal("shared upload transaction helper must enqueue normalization and leave commit to its caller")
 	}
 
 	start = strings.Index(text, "func (s *Server) enqueueBlueprintJob(")

@@ -29,7 +29,11 @@ func TestBlueprintUploadFailureAndAbortPathsDiscardPendingSubjects(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	blueprintHandlers := string(blueprintSource)
+	completionSource, err := os.ReadFile("oss_upload_completion_helpers.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blueprintHandlers := string(blueprintSource) + string(completionSource)
 	for _, required := range []string{
 		"insert into blueprints(owner_id,title,source_format,upload_expires_at,review_status)",
 		"values($1,$2,$3,$4,'pending')",

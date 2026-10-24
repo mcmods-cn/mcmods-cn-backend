@@ -1,0 +1,10 @@
+{
+  "purpose": "Deterministic synthetic codec fixtures; controlled OSS processing returns actual decodable losslessWebP with the exact corresponding PNG pixels. No provider or production evidence.",
+  "source_pattern": "64x64RGBA: R=(x+77)%256,G=y,B=x^y,A=255;2x2 fixture fully transparentRGBA0.",
+  "encoder": "Pillow losslessWebP exact=True; generated once, Go tests need no Pillow runtime.",
+  "sha256": {
+    "oss-atomic-source.png": "0491d2c3a7edf61cdd3ad98f84ea667f589ef82096b3eff52d2abb7810948b7c",
+    "oss-atomic-source.webp": "f15572d00dd635b508234717f291e4f73f1799852d24b74b647c063ac97b0a91",
+    "oss-atomic-transparent-2x2.webp": "e5a2f0af4dfb54bb6b7cc3cdc67e7478466a9323f1bcb57438ee47a2b763312b"
+  }
+}

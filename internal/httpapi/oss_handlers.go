@@ -186,6 +186,10 @@ func (s *Server) updateOSSConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存 OSS 配置失败")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist OSS configuration activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存 OSS 配置失败")
 		return
@@ -803,6 +807,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 			where uploader_id=$1 and object_key=$2 and sha256=$3 and ($4::bigint<=0 or byte_size=$4) and status='temporary'`,
 			currentClaims(r).Subject, req.ObjectKey, req.SHA256, req.SizeBytes).Scan(&evidenceID, &scanStatus)
 		if err == nil {
+			skipRequestActivity(r)
 			writeJSON(w, http.StatusOK, map[string]any{"id": evidenceID, "evidenceId": evidenceID, "scanStatus": scanStatus, "idempotent": true})
 			return
 		}
@@ -833,6 +838,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 				writeBlueprintUploadAssociationError(w, err, "failed to restore completed upload associations")
 				return
 			}
+			skipRequestActivity(r)
 			writeJSON(w, http.StatusOK, response)
 			return
 		}
@@ -981,22 +987,46 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 			return
 		}
 	}
-	var fileID int64
-	var filePublicID string
-	var quotaTx pgx.Tx
-	var evidenceTx pgx.Tx
-	insertQueryRow := s.db.QueryRow
+	// All remote reads/conversion/hash verification have completed. Signing is
+	// also done before acquiring quota/object locks or a registration connection.
+	access, accessErr := s.resolveOSSObjectAccessWithConfig(r.Context(), cfg, req.ObjectKey, ossObjectAccessOptions{})
+	if accessErr != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
+		return
+	}
+	registrationTx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "开始 OSS 文件登记失败")
+		return
+	}
+	defer registrationTx.Rollback(r.Context())
+	if _, err = registrationTx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtextextended('oss-completion:'||$1,0))`, req.ObjectKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "锁定 OSS 文件登记失败")
+		return
+	}
+	var wasRegistered, wasCompleted bool
+	if err = registrationTx.QueryRow(r.Context(), `select exists(select 1 from oss_files where object_key=$1),exists(select 1 from oss_files where object_key=$1 and source_hash_verified)`, req.ObjectKey).Scan(&wasRegistered, &wasCompleted); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取 OSS 文件登记状态失败")
+		return
+	}
+	if err = s.lockOSSCompletionAssociationsTx(r.Context(), registrationTx, currentClaims(r).Subject, req.ObjectKey, req.Source, wasRegistered); err != nil {
+		writeError(w, http.StatusInternalServerError, "锁定上传关联对象失败")
+		return
+	}
 	if scope == "user" {
-		quotaTx, err = s.db.Begin(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "开始上传额度结算失败")
-			return
+		if wasRegistered {
+			// An already registered row is already included in quota buckets.
+			// Release only its reservation; never validate it as another file.
+			_, err = lockOSSUserQuotaTx(r.Context(), registrationTx, currentClaims(r).Subject)
+			if err == nil {
+				_, err = releaseOSSUserQuotaReservationTx(r.Context(), registrationTx, currentClaims(r).Subject, sourceObjectKey)
+			}
+		} else {
+			err = settleUserOSSUploadQuotaTx(r.Context(), registrationTx, currentClaims(r).Subject, sourceObjectKey, sourceSize, size, quotaLimits)
 		}
-		defer quotaTx.Rollback(r.Context())
-		if err = settleUserOSSUploadQuotaTx(r.Context(), quotaTx, currentClaims(r).Subject, sourceObjectKey,
-			sourceSize, size, quotaLimits); err != nil {
+		if err != nil {
 			// Cleanup owns a separate transaction; release this connection first.
-			_ = quotaTx.Rollback(r.Context())
+			_ = registrationTx.Rollback(r.Context())
 			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, req.ObjectKey, "user-quota-settlement-failed")
 			if converted {
 				s.deleteOSSObjectIfUnregistered(r.Context(), cfg, sourceObjectKey, "converted-source-settlement-failed")
@@ -1004,18 +1034,11 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 			writeOSSUserQuotaError(w, err)
 			return
 		}
-		insertQueryRow = quotaTx.QueryRow
 	}
-	if isReportEvidence {
-		evidenceTx, err = s.db.Begin(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "开始举报附件登记失败")
-			return
-		}
-		defer evidenceTx.Rollback(r.Context())
-		insertQueryRow = evidenceTx.QueryRow
-	}
-	err = insertQueryRow(
+	var fileID int64
+	var filePublicID string
+
+	err = registrationTx.QueryRow(
 		r.Context(),
 		`insert into oss_files (bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, uploader_id, status, scan_status, source_hash_verified, stored_sha256)
 		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'active', $14, true, $15)
@@ -1041,16 +1064,14 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		storedSHA256,
 	).Scan(&fileID, &filePublicID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		if quotaTx != nil {
-			_ = quotaTx.Rollback(r.Context())
+		_ = registrationTx.Rollback(r.Context())
+		if scope == "user" {
 			if releaseErr := s.releaseUserOSSUploadQuotaReservation(r.Context(), currentClaims(r).Subject, sourceObjectKey); releaseErr != nil {
 				writeError(w, http.StatusInternalServerError, "释放重复上传额度预留失败")
 				return
 			}
 		}
-		if evidenceTx != nil {
-			_ = evidenceTx.Rollback(r.Context())
-		}
+
 		existingFileID, existing, found, lookupErr := s.findCompletedOSSUpload(r.Context(), currentClaims(r).Subject, req)
 		if lookupErr != nil {
 			writeError(w, http.StatusInternalServerError, "读取已完成 OSS 上传失败")
@@ -1079,19 +1100,14 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 				writeBlueprintUploadAssociationError(w, associationErr, "failed to restore completed upload associations")
 				return
 			}
+			skipRequestActivity(r)
 			writeJSON(w, http.StatusOK, response)
 			return
 		}
 	}
 	if err != nil {
-		// Cleanup opens its own transaction. Release a failed quota/evidence
-		// transaction before acquiring another connection from the same pool.
-		if quotaTx != nil {
-			_ = quotaTx.Rollback(r.Context())
-		}
-		if evidenceTx != nil {
-			_ = evidenceTx.Rollback(r.Context())
-		}
+		// Cleanup opens its own transaction; never wait while owning this one.
+		_ = registrationTx.Rollback(r.Context())
 		if converted {
 			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, req.ObjectKey, "converted-file-registration-failed")
 			s.deleteOSSObjectIfUnregistered(r.Context(), cfg, sourceObjectKey, "converted-source-registration-failed")
@@ -1101,30 +1117,39 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	}
 	var reportEvidenceID string
 	if isReportEvidence {
-		if err = evidenceTx.QueryRow(r.Context(), `insert into report_evidence(uploader_id,object_key,original_name,content_type,byte_size,sha256,scan_status)
+		if err = registrationTx.QueryRow(r.Context(), `insert into report_evidence(uploader_id,object_key,original_name,content_type,byte_size,sha256,scan_status)
 			values($1,$2,$3,$4,$5,$6,$7) returning public_id`, currentClaims(r).Subject, req.ObjectKey, sourceOriginalName,
 			contentType, sourceSize, req.SHA256, scanStatus).Scan(&reportEvidenceID); err != nil {
-			_ = evidenceTx.Rollback(r.Context())
+			_ = registrationTx.Rollback(r.Context())
 			writeError(w, http.StatusInternalServerError, "登记举报附件失败")
 			return
 		}
 	}
-	if quotaTx != nil {
-		if err = quotaTx.Commit(r.Context()); err != nil {
-			if converted {
-				s.deleteOSSObjectIfUnregistered(r.Context(), cfg, req.ObjectKey, "converted-quota-commit-failed")
-				s.deleteOSSObjectIfUnregistered(r.Context(), cfg, sourceObjectKey, "converted-source-quota-commit-failed")
-			}
-			writeError(w, http.StatusInternalServerError, "提交 OSS 文件额度结算失败")
+	blueprint, blueprintErr := s.completeBlueprintUploadTx(r.Context(), registrationTx, fileID, currentClaims(r).Subject, req.ObjectKey, sourceOriginalName, contentType, size, req.SHA256)
+	if blueprintErr != nil {
+		writeBlueprintUploadAssociationError(w, blueprintErr, "failed to register blueprint processing task")
+		return
+	}
+	coverPublicID, isCover := blueprintCoverPublicID(req.Source)
+	if isCover {
+		if err = s.bindOSSBlueprintCoverTx(r.Context(), registrationTx, coverPublicID, fileID, currentClaims(r).Subject); err != nil {
+			writeError(w, http.StatusInternalServerError, "登记蓝图封面失败")
 			return
 		}
 	}
-	if evidenceTx != nil {
-		if err = evidenceTx.Commit(r.Context()); err != nil {
-			writeError(w, http.StatusInternalServerError, "提交举报附件登记失败")
-			return
-		}
+	if wasRegistered {
+		skipRequestActivity(r)
+	} else if err = enqueueRequestActivityTx(r, registrationTx); err != nil {
+		// Retain the uploaded source for retry. No file, quota, projection,
+		// processing job or intent may commit when activity persistence fails.
+		writeError(w, http.StatusInternalServerError, "failed to persist upload activity")
+		return
 	}
+	if err = registrationTx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "提交 OSS 文件登记失败")
+		return
+	}
+
 	logMessage := "direct-to-oss"
 	if converted {
 		logMessage = "direct-to-oss; " + imageProcessLog
@@ -1136,11 +1161,6 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		scanMessage = "上传时已完成同步图片字节校验"
 	}
 	s.recordOSSScanLog(r.Context(), fileID, req.ObjectKey, scanStatus, scanMessage)
-	access, accessErr := s.resolveOSSObjectAccessWithConfig(r.Context(), cfg, req.ObjectKey, ossObjectAccessOptions{})
-	if accessErr != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
-		return
-	}
 	response := map[string]any{
 		"id":                 filePublicID,
 		"bucket":             cfg.Bucket,
@@ -1164,27 +1184,18 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		response["id"] = reportEvidenceID
 		response["evidenceId"] = reportEvidenceID
 	}
-	if blueprint, blueprintErr := s.completeBlueprintUpload(r.Context(), fileID, currentClaims(r).Subject, req.ObjectKey, sourceOriginalName, contentType, size, req.SHA256); blueprintErr != nil {
-		writeBlueprintUploadAssociationError(w, blueprintErr, "failed to register blueprint processing task")
-		return
-	} else if blueprint != nil {
+	if blueprint != nil {
 		response["blueprint"] = blueprint
 		response["blueprintId"] = blueprint["id"]
 	}
-	if coverPublicID, ok := blueprintCoverPublicID(req.Source); ok {
-		result, associationErr := s.db.Exec(r.Context(), `update blueprints blueprint
-			set cover_file_id=$2,cover_object_key=file.object_key,updated_at=now()
-			from oss_files file
-			where blueprint.public_id=$1 and blueprint.owner_id=$3 and file.id=$2
-			  and file.uploader_id=$3 and file.status='active'
-			  and file.scan_status in ('clean','trusted_generated')
-			  and lower(split_part(file.content_type,';',1)) in ('image/png','image/jpeg','image/jpg','image/gif','image/webp')`,
-			coverPublicID, fileID, currentClaims(r).Subject)
-		if associationErr != nil || result.RowsAffected() == 0 {
-			writeError(w, http.StatusInternalServerError, "登记蓝图封面失败")
-			return
-		}
+	if isCover {
 		response["blueprintId"] = coverPublicID
+	}
+
+	if wasCompleted || (isReportEvidence && wasRegistered) {
+		response["idempotent"] = true
+		writeJSON(w, http.StatusOK, response)
+		return
 	}
 	writeJSON(w, http.StatusCreated, response)
 }
@@ -1314,115 +1325,6 @@ func (s *Server) findCompletedOSSUpload(ctx context.Context, uploaderID int64, r
 		storedContentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt)
 	file["sourceSha256"], file["storedSha256"] = sha, storedSHA
 	return internalID, file, true, nil
-}
-
-func (s *Server) restoreReportEvidenceForCompletedOSSFile(
-	ctx context.Context,
-	fileID int64,
-	uploaderID int64,
-	req ossCompleteUploadRequest,
-) (string, string, error) {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return "", "", err
-	}
-	defer tx.Rollback(ctx)
-	var originalName, contentType, sha256, scanStatus string
-	var byteSize int64
-	err = tx.QueryRow(ctx, `select coalesce(nullif(source_original_name,''),original_name),content_type,
-			coalesce(nullif(source_size_bytes,0),size_bytes),sha256,scan_status
-		from oss_files
-		where id=$1 and uploader_id=$2 and object_key=$3 and category=$4 and source=$5 and sha256=$6
-		  and status='active' and ($7::bigint<=0 or coalesce(nullif(source_size_bytes,0),size_bytes)=$7)
-		for update`, fileID, uploaderID, req.ObjectKey, req.Category, "report_evidence", req.SHA256, req.SizeBytes).
-		Scan(&originalName, &contentType, &byteSize, &sha256, &scanStatus)
-	if err != nil {
-		return "", "", fmt.Errorf("lock completed report evidence OSS file: %w", err)
-	}
-	var evidenceID, evidenceOriginalName, evidenceContentType, evidenceSHA, evidenceScanStatus, evidenceStatus string
-	var evidenceUploaderID, evidenceByteSize int64
-	err = tx.QueryRow(ctx, `select public_id,uploader_id,original_name,content_type,byte_size,sha256,scan_status,status
-		from report_evidence where object_key=$1 for update`, req.ObjectKey).
-		Scan(&evidenceID, &evidenceUploaderID, &evidenceOriginalName, &evidenceContentType, &evidenceByteSize,
-			&evidenceSHA, &evidenceScanStatus, &evidenceStatus)
-	if err == nil {
-		if evidenceUploaderID != uploaderID || evidenceOriginalName != originalName || evidenceContentType != contentType ||
-			evidenceByteSize != byteSize || evidenceSHA != sha256 || evidenceScanStatus != scanStatus || evidenceStatus != "temporary" {
-			return "", "", errors.New("completed report evidence identity conflicts with its OSS file")
-		}
-		if err = tx.Commit(ctx); err != nil {
-			return "", "", err
-		}
-		return evidenceID, evidenceScanStatus, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return "", "", fmt.Errorf("read completed report evidence: %w", err)
-	}
-	if err = tx.QueryRow(ctx, `insert into report_evidence(uploader_id,object_key,original_name,content_type,byte_size,sha256,scan_status)
-		values($1,$2,$3,$4,$5,$6,$7) returning public_id`, uploaderID, req.ObjectKey, originalName, contentType,
-		byteSize, sha256, scanStatus).Scan(&evidenceID); err != nil {
-		return "", "", fmt.Errorf("restore completed report evidence: %w", err)
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return "", "", err
-	}
-	return evidenceID, scanStatus, nil
-}
-
-func (s *Server) completedOSSUploadResponse(ctx context.Context, cfg ossConfigPayload, file map[string]any) (map[string]any, error) {
-	objectKey := fmt.Sprint(file["objectKey"])
-	access, err := s.resolveOSSObjectAccessWithConfig(ctx, cfg, objectKey, ossObjectAccessOptions{})
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{
-		"id":                 file["id"],
-		"bucket":             file["bucket"],
-		"objectKey":          file["objectKey"],
-		"category":           file["category"],
-		"source":             file["source"],
-		"originalName":       file["originalName"],
-		"sourceOriginalName": file["sourceOriginalName"],
-		"contentType":        file["contentType"],
-		"sizeBytes":          file["sizeBytes"],
-		"sourceSizeBytes":    file["sourceSizeBytes"],
-		"converted":          file["converted"],
-		"sha256":             file["sha256"],
-		"scanStatus":         file["scanStatus"],
-		"url":                access.URL,
-		"accessUrl":          access.URL,
-		"storageUrl":         ossStoredObjectURL(cfg, objectKey),
-		"idempotent":         true,
-	}, nil
-}
-
-func (s *Server) attachCompletedOSSUploadAssociations(ctx context.Context, response map[string]any, fileID, ownerID int64, source string) error {
-	blueprint, err := s.blueprintForExistingFile(ctx, fileID, ownerID)
-	if err != nil {
-		return err
-	}
-	if blueprint != nil {
-		response["blueprint"] = blueprint
-		response["blueprintId"] = blueprint["id"]
-	}
-	if coverPublicID, ok := blueprintCoverPublicID(source); ok {
-		result, err := s.db.Exec(ctx, `update blueprints blueprint
-			set cover_file_id=$2,cover_object_key=file.object_key,updated_at=now()
-			from oss_files file
-			where blueprint.public_id=$1 and blueprint.owner_id=$3 and file.id=$2
-			  and file.uploader_id=$3 and file.status='active'
-			  and file.scan_status in ('clean','trusted_generated')
-			  and lower(split_part(file.content_type,';',1)) in ('image/png','image/jpeg','image/jpg','image/gif','image/webp')`,
-			coverPublicID, fileID, ownerID)
-		if err != nil {
-			return err
-		}
-		if result.RowsAffected() == 0 {
-			return errors.New("blueprint cover is not a trusted raster")
-		}
-		response["blueprintId"] = coverPublicID
-	}
-	return nil
 }
 
 func writeBlueprintUploadAssociationError(w http.ResponseWriter, err error, fallback string) {

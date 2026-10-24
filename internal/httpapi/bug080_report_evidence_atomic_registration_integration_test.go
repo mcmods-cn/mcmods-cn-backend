@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"mcmods-cn-backend/internal/database"
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/security"
@@ -28,18 +28,20 @@ func TestReportEvidenceFileAndMetadataCommitTogetherAndRetryIntegration(t *testi
 		}
 		databaseURL = "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
 	}
-	poolConfig, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	poolConfig.MaxConns = 1
-	pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	fixture, err := database.NewIsolatedTestSchema(ctx, databaseURL, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := fixture.Pool
+	defer func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		if err := fixture.Close(cleanup); err != nil {
+			t.Error(err)
+		}
+	}()
 
 	evidenceBody := []byte("BUG-080 transient registration evidence\n")
 	digest := sha256.Sum256(evidenceBody)
@@ -56,44 +58,16 @@ func TestReportEvidenceFileAndMetadataCommitTogetherAndRetryIntegration(t *testi
 	}))
 	defer provider.Close()
 
-	if _, err = pool.Exec(ctx, `
-		create temporary table system_settings(key text primary key,value jsonb not null);
-		create temporary sequence bug080_file_public_id;
-		create temporary sequence bug080_evidence_public_id;
-		create temporary sequence bug080_reject_once;
-		create temporary table oss_files(
-			id bigserial primary key,
-			public_id text not null unique default ('f'||lpad(nextval('pg_temp.bug080_file_public_id')::text,8,'0')),
-			bucket text not null,endpoint text not null,region text not null,object_key text not null unique,
-			category text not null,source text not null,original_name text not null,source_original_name text not null,
-			content_type text not null,size_bytes bigint not null,source_size_bytes bigint not null,sha256 text not null,
-			uploader_id bigint not null,status text not null,scan_status text not null,
-			created_at timestamptz not null default now(),updated_at timestamptz not null default now()
-		);
-		create temporary table report_evidence(
-			id bigserial primary key,
-			public_id text not null unique default ('e'||lpad(nextval('pg_temp.bug080_evidence_public_id')::text,8,'0')),
-			uploader_id bigint not null,object_key text not null unique,original_name text not null,
-			content_type text not null,byte_size bigint not null,sha256 text not null,scan_status text not null,
-			status text not null default 'temporary'
-		);
-		create temporary table oss_upload_logs(
-			file_id bigint,uploader_id bigint,object_key text,original_name text,size_bytes bigint,
-			ip text,user_agent text,result text,message text
-		);
-		create temporary table oss_scan_logs(file_id bigint,object_key text,engine text,result text,message text);
-		create function pg_temp.reject_first_bug080_evidence() returns trigger language plpgsql as $$
-		begin
-			if nextval('pg_temp.bug080_reject_once')=1 then
-				raise exception 'BUG-080 transient evidence registration failure';
-			end if;
-			return new;
-		end $$;
-		create trigger reject_first_bug080_evidence before insert on report_evidence
-			for each row execute function pg_temp.reject_first_bug080_evidence();
-	`); err != nil {
+	// Install the exact migrated schema, then inject only the specific owned
+	// metadata failure. A missing/incorrect fixture column must never count as
+	// reaching this business boundary.
+	if _, err = pool.Exec(ctx, `insert into users(id,username,email,password_hash) values(800,'bug080-owner','bug080-owner@example.invalid','synthetic-only');
+	 create sequence bug080_reject_once;
+	 create function reject_first_bug080_evidence() returns trigger language plpgsql as $$ begin if nextval('bug080_reject_once')=1 then raise exception 'BUG-080 transient evidence registration failure' using errcode='XX001'; end if; return new; end $$;
+	 create trigger reject_first_bug080_evidence before insert on report_evidence for each row execute function reject_first_bug080_evidence()`); err != nil {
 		t.Fatal(err)
 	}
+
 	server := &Server{db: pool, cfg: config.Load()}
 	ossConfig := ossConfigPayload{
 		Enabled: true, Region: "cn-test", Endpoint: provider.URL, PublicEndpoint: "https://public.example.test",
@@ -113,8 +87,12 @@ func TestReportEvidenceFileAndMetadataCommitTogetherAndRetryIntegration(t *testi
 		"sizeBytes": len(evidenceBody), "sha256": sha,
 	}
 	first := invokeBUG080ReportEvidenceComplete(t, ctx, server, body)
-	if first.Code != http.StatusInternalServerError {
-		t.Fatalf("first completion status = %d body=%s", first.Code, first.Body.String())
+	if first.Code != http.StatusInternalServerError || !strings.Contains(first.Body.String(), "登记举报附件失败") {
+		t.Fatalf("first completion must reach specific evidence metadata fault: status=%d body=%s", first.Code, first.Body.String())
+	}
+	var injected int64
+	if err = pool.QueryRow(ctx, `select last_value from bug080_reject_once`).Scan(&injected); err != nil || injected != 1 {
+		t.Fatalf("expected specific injected fault executions=1, got%d err=%v", injected, err)
 	}
 	var filesAfterFailure, evidenceAfterFailure int
 	if err = pool.QueryRow(ctx, `select (select count(*) from oss_files),(select count(*) from report_evidence)`).

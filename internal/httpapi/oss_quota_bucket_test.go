@@ -44,7 +44,7 @@ func TestOSSUploadQuotaHotPathsUseAtomicBuckets(t *testing.T) {
 		}
 	}
 	completeBody := goFunctionBody(t, ossSource, "completeOSSDirectUploadWithScope")
-	for _, fragment := range []string{"settleUserOSSUploadQuotaTx", "quotaTx.QueryRow", "releaseUserOSSUploadQuotaReservation"} {
+	for _, fragment := range []string{"settleUserOSSUploadQuotaTx", "registrationTx.QueryRow", "enqueueRequestActivityTx(r, registrationTx)", "registrationTx.Commit", "releaseUserOSSUploadQuotaReservation"} {
 		if !strings.Contains(completeBody, fragment) {
 			t.Fatalf("direct upload completion does not atomically settle quota step %q", fragment)
 		}

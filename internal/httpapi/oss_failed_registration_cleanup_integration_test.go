@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	xwebp "golang.org/x/image/webp"
 	"image"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -45,27 +47,46 @@ func TestOCT02ConvertedUploadRegistrationFailureReleasesQuotaConnectionIntegrati
 	hash := hex.EncodeToString(digest[:])
 	key := fmt.Sprintf("mcmods/user/%d/files/playground/synthetic.png", actor)
 	convertedKey := persistedWebPObjectKey(key)
+	converted, err := os.ReadFile("testdata/audit-20261024/oss-atomic-transparent-2x2.webp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := xwebp.Decode(bytes.NewReader(converted))
+	if err != nil || decoded.Bounds().Dx() != 2 || decoded.Bounds().Dy() != 2 {
+		t.Fatalf("invalid actual WebP fixture: %v", err)
+	}
 	var processes atomic.Int64
-	// Only the external OSS protocol is simulated. The handler, quota transaction,
-	// failed insert and durable compensation all use the actual PostgreSQL schema.
+	// Simulate only the external provider, with actual readable PNG and WebP.
+	// The test must reach its specific PostgreSQL registration constraint rather
+	// than treating an earlier unsupported GET/hash error as that failure.
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodPost:
+		if r.Method == http.MethodPost {
 			processes.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"status":"OK"}`))
-		case http.MethodHead:
-			w.Header().Set("ETag", `"synthetic"`)
-			w.Header().Set("x-oss-meta-sha256", hash)
-			if strings.HasSuffix(r.URL.Path, ".webp") {
-				w.Header().Set("Content-Type", "image/webp")
-				w.Header().Set("Content-Length", "32")
-			} else {
-				w.Header().Set("Content-Type", "image/png")
-				w.Header().Set("Content-Length", fmt.Sprint(source.Len()))
+			return
+		}
+		raw := source.Bytes()
+		contentType := "image/png"
+		if strings.HasSuffix(r.URL.Path, ".webp") {
+			if processes.Load() == 0 {
+				w.WriteHeader(404)
+				return
 			}
-		default:
+			raw = converted
+			contentType = "image/webp"
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		checksum := sha256.Sum256(raw)
+		w.Header().Set("ETag", `"synthetic"`)
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Length", fmt.Sprint(len(raw)))
+		w.Header().Set("x-oss-meta-sha256", hex.EncodeToString(checksum[:]))
+		if r.Method == http.MethodGet {
+			_, _ = w.Write(raw)
 		}
 	}))
 	defer provider.Close()
@@ -100,7 +121,7 @@ func TestOCT02ConvertedUploadRegistrationFailureReleasesQuotaConnectionIntegrati
 	if err = pool.QueryRow(ctx, `select (select count(*) from oss_files where uploader_id=$1),(select count(*) from oss_object_deletion_outbox where object_key=any($2::text[]) and status='pending')`, actor, []string{key, convertedKey}).Scan(&files, &intents); err != nil {
 		t.Fatal(err)
 	}
-	if response.Code != http.StatusInternalServerError || elapsed > 2*time.Second || files != 0 || intents != 2 || processes.Load() != 1 {
+	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), "保存 OSS 文件记录失败") || elapsed > 2*time.Second || files != 0 || intents != 2 || processes.Load() != 1 {
 		t.Fatalf("registration recovery status=%d elapsed=%s files=%d compensation=%d conversionCalls=%d", response.Code, elapsed, files, intents, processes.Load())
 	}
 	if _, err = pool.Exec(ctx, `alter table oss_files drop constraint oct02_reject_converted_registration`); err != nil {

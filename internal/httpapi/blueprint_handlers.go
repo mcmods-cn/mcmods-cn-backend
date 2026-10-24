@@ -367,74 +367,16 @@ func (s *Server) reusableBlueprintByHash(ctx context.Context, sha string, size, 
 }
 
 func (s *Server) completeBlueprintUpload(ctx context.Context, fileID, ownerID int64, objectKey, originalName, contentType string, size int64, sha string) (map[string]any, error) {
-	if size <= 0 || size > maxBlueprintSourceBytes {
-		return nil, errBlueprintSourceTooLarge
-	}
-	var blueprintID int64
-	var publicID, status, format string
-	err := s.db.QueryRow(ctx, `select id,public_id,status,source_format from blueprints where owner_id=$1 and original_object_key=$2 and status in ('uploading','queued','failed') order by created_at desc limit 1`, ownerID, objectKey).
-		Scan(&blueprintID, &publicID, &status, &format)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if status == "queued" {
-		return map[string]any{"id": publicID, "status": status}, nil
-	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	lockKey := fmt.Sprintf("blueprint:%d:%d", ownerID, fileID)
-	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
-		return nil, err
-	}
-	// Upload completion may have waited behind another transaction. Re-read and
-	// lock its lifecycle state before binding the file or enqueueing work.
-	if err = tx.QueryRow(ctx, `select status from blueprints where id=$1 and owner_id=$2 for update`, blueprintID, ownerID).Scan(&status); err != nil {
-		return nil, err
-	}
-	if status == "queued" {
-		return map[string]any{"id": publicID, "status": status}, tx.Commit(ctx)
-	}
-	if status != "uploading" && status != "failed" {
-		return nil, errBlueprintNotFound
-	}
-	var existingPublicID, existingStatus string
-	existingErr := tx.QueryRow(ctx, `select public_id,status from blueprints
-		where owner_id=$1 and original_file_id=$2 and status<>'deleted' and id<>$3
-		order by created_at limit 1 for update`, ownerID, fileID, blueprintID).Scan(&existingPublicID, &existingStatus)
-	if existingErr == nil {
-		if _, err = tx.Exec(ctx, `delete from blueprints where id=$1`, blueprintID); err != nil {
-			return nil, err
-		}
-		if err = tx.Commit(ctx); err != nil {
-			return nil, err
-		}
-		return map[string]any{"id": existingPublicID, "status": existingStatus}, nil
-	}
-	if !errors.Is(existingErr, pgx.ErrNoRows) {
-		return nil, existingErr
-	}
-	if _, err = tx.Exec(ctx, `update blueprints set original_file_id=$2,status='queued',upload_expires_at=null,last_error='',updated_at=now() where id=$1`, blueprintID, fileID); err != nil {
-		return nil, err
-	}
-	if _, err = tx.Exec(ctx, `insert into blueprint_variants(blueprint_id,format,file_id,object_key,original,recommended,status,original_name,content_type,size_bytes,sha256,created_by)
-		values($1,$2,$3,$4,true,true,'ready',$5,$6,$7,$8,$9) on conflict(blueprint_id,object_key) do update set file_id=excluded.file_id,status='ready'`,
-		blueprintID, format, fileID, objectKey, originalName, contentType, size, sha, ownerID); err != nil {
-		return nil, err
-	}
-	jobPublicID, err := enqueueBlueprintJobTx(ctx, tx, blueprintID, ownerID, "normalize", "")
+	result, err := s.completeBlueprintUploadTx(ctx, tx, fileID, ownerID, objectKey, originalName, contentType, size, sha)
 	if err != nil {
 		return nil, err
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	return map[string]any{"id": publicID, "status": "queued", "jobId": jobPublicID}, nil
+	return result, tx.Commit(ctx)
 }
 
 func int64Value(value any) int64 {
