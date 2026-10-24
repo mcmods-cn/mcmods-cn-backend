@@ -292,8 +292,14 @@ func auditJourneyRevision(directory string) map[string]any {
 	if err != nil {
 		return map[string]any{"error": "git revision unavailable"}
 	}
-	diff, _ := exec.Command("git", "-C", directory, "diff", "--binary", "HEAD").Output()
-	state, _ := exec.Command("git", "-C", directory, "status", "--porcelain").Output()
+	diff, err := exec.Command("git", "-C", directory, "diff", "--binary", "HEAD").Output()
+	if err != nil {
+		return map[string]any{"error": "git source diff unavailable"}
+	}
+	state, err := exec.Command("git", "-C", directory, "status", "--porcelain").Output()
+	if err != nil {
+		return map[string]any{"error": "git source status unavailable"}
+	}
 	digest := sha256.Sum256(diff)
 	return map[string]any{"checkoutPath": directory, "commit": strings.TrimSpace(string(head)), "dirty": len(state) > 0, "trackedDiffSha256": hex.EncodeToString(digest[:])}
 }
