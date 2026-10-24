@@ -626,9 +626,13 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
-	// Take the common target lock before either revision row. Different
-	// candidates cannot deadlock while replacing one another's active row.
-	if _, err = tx.Exec(r.Context(), `select id from mod_content_versions where id=$1 for update`, targetVersionID); err != nil {
+	// The actual Worker/publication path takes advisory -> version row. A
+	// reviewer must use the same order before locking a revision: row-first
+	// review can otherwise deadlock against a Worker already owning advisory.
+	if _, err = lockImportedContentVersionTx(r.Context(), tx, targetVersionID); errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusConflict, "target content version is no longer active; upload again after restoring it")
+		return
+	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to lock target content version")
 		return
 	}
