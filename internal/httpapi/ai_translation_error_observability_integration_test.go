@@ -5,44 +5,29 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/security"
 )
 
 func TestCatalogTranslationResultRejectsCorruptCompletedTasksIntegration(t *testing.T) {
-	databaseURL := strings.TrimSpace(os.Getenv("MCMODS_TEST_DATABASE_URL"))
-	if databaseURL == "" {
-		if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
-			t.Skip("set MCMODS_TEST_DATABASE_URL or MCMODS_RUN_DB_INTEGRATION=1 to verify AI translation result failures")
-		}
-		databaseURL = "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
-	}
-	poolConfig, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	poolConfig.MaxConns = 1
-	pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// The source-visibility contract needs real parent tables and constraints;
+	// a task-only temporary table cannot represent a currently readable source.
+	f := newTEST013Fixture(t)
+	pool := f.db
+	ctx, cancel := context.WithTimeout(f.ctx, 20*time.Second)
 	defer cancel()
-
+	var err error
 	if _, err = pool.Exec(ctx, `
-		create temporary table ai_tasks(
-			id bigint generated always as identity primary key,task_uid text unique not null,task_type text not null,status text not null,
-			result jsonb not null,payload jsonb not null,error text not null default '',created_by bigint,
-			input_tokens bigint not null default 0,output_tokens bigint not null default 0,
-			finished_at timestamptz,updated_at timestamptz not null default now()
-		);
+        insert into users(id,username,email,password_hash,status) values
+          (42,'arch026-owner','arch026-owner@example.test','not-used','active'),
+          (77,'arch026-other','arch026-other@example.test','not-used','active');
+        insert into mods(id,project_code,slug,primary_name,review_status) values(7,'m00000007','arch026-source','Source','approved');
+        insert into content_subjects(subject_type,subject_id,default_locale) values('mod',7,'en-US') on conflict do nothing;
+        insert into content_localizations(subject_type,subject_id,locale,name,review_status) values('mod',7,'en-US','Source','approved') on conflict do nothing;
+        insert into notifications(id,recipient_id,kind,title,body) values(17,42,'system','Source','Body'),(18,42,'system','Source','Body');
 		insert into ai_tasks(task_uid,task_type,status,result,payload,error,created_by,input_tokens,output_tokens) values
 			('arch026good','content_translation_completion','completed','{"items":[{"key":"name","text":"名称"}]}'::jsonb,
 			 '{"internalEntityId":7,"publicId":"m00000007","sourceLocale":"en-US","sourceRevisionNo":3,"targetLocale":"zh-CN"}'::jsonb,'',42,10,20),
@@ -52,7 +37,7 @@ func TestCatalogTranslationResultRejectsCorruptCompletedTasksIntegration(t *test
 			 '{"internalEntityId":7,"publicId":"m00000007","sourceLocale":"en-US","sourceRevisionNo":3,"targetLocale":"zh-CN"}'::jsonb,'',42,10,20),
 			('arch026item','content_translation_completion','completed','{"items":[{"key":"name","text":17}]}'::jsonb,
 			 '{"internalEntityId":7,"publicId":"m00000007","sourceLocale":"en-US","sourceRevisionNo":3,"targetLocale":"zh-CN"}'::jsonb,'',42,10,20),
-			('arch026running','content_translation_completion','running','"not-yet-a-result"'::jsonb,'"not-yet-needed"'::jsonb,'',42,0,0),
+			('arch026running','content_translation_completion','running','"not-yet-a-result"'::jsonb,'{"internalEntityId":7,"publicId":"m00000007","sourceLocale":"en-US","sourceRevisionNo":3,"targetLocale":"zh-CN"}'::jsonb,'',42,0,0),
 			('arch026other','content_translation_completion','completed','{"items":[{"key":"name","text":"名称"}]}'::jsonb,
 			 '{"internalEntityId":7,"publicId":"m00000007","sourceLocale":"en-US","sourceRevisionNo":3,"targetLocale":"zh-CN"}'::jsonb,'',77,10,20),
 			('arch026notifgood','notification_translation_completion','completed','{"items":[{"key":"title","text":"标题"},{"key":"body","text":"正文"}]}'::jsonb,
@@ -63,11 +48,6 @@ func TestCatalogTranslationResultRejectsCorruptCompletedTasksIntegration(t *test
 			 '{"notificationId":18,"targetLocale":"zh-CN"}'::jsonb,'',42,5,7),
 			('arch026notifitem','notification_translation_completion','completed','{"items":[{"key":"body","text":17}]}'::jsonb,
 			 '{"notificationId":18,"targetLocale":"zh-CN"}'::jsonb,'',42,5,7);
-		create temporary table notification_translations(
-			notification_id bigint not null,user_id bigint not null,locale text not null,
-			title text not null,body text not null,created_at timestamptz not null default now(),
-			unique(notification_id,user_id,locale)
-		);
 		insert into notification_translations(notification_id,user_id,locale,title,body,created_at)
 			values(18,42,'zh-CN','标题','正文','2020-01-01T00:00:00Z');
 	`); err != nil {

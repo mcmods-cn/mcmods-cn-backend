@@ -436,6 +436,25 @@ func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusForbidden, "translation task belongs to another user")
 		return
 	}
+	payload, payloadErr := decodeContentTranslationTaskPayload(payloadRaw)
+	if payloadErr != nil {
+		writeError(w, http.StatusInternalServerError, "translation task data is invalid")
+		return
+	}
+	entity, sourceErr := s.loadCatalogEntityLocalizations(r.Context(), payload.PublicID)
+	if errors.Is(sourceErr, pgx.ErrNoRows) || (sourceErr == nil && entity.EntityType == "resource" && !claimsAllow(claims, "global_resource.view")) {
+		writeError(w, http.StatusNotFound, "translation source not found")
+		return
+	}
+	if sourceErr != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to check translation source")
+		return
+	}
+	if entity.EntityID != payload.EntityID || (payload.EntityType != "" && entity.EntityType != payload.EntityType) {
+		writeError(w, http.StatusInternalServerError, "translation source identity is inconsistent")
+		return
+	}
+
 	response := map[string]any{
 		"taskId": taskUID, "status": status, "error": errorMessage,
 		"inputTokens": inputTokens, "outputTokens": outputTokens,

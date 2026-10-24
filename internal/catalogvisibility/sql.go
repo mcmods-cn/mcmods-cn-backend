@@ -52,7 +52,16 @@ func EntitySQL(alias, entityType string) string {
 	default:
 		panic("unsupported public catalog entity type")
 	}
-	return fmt.Sprintf("(%s or %s or %s)", canonical, observation, identity)
+	predicate := fmt.Sprintf("(%s or %s or %s)", canonical, observation, identity)
+	if entityType == "recipe" {
+		predicate += ` and exists(select 1 from recipes public_child join catalog_entities public_parent on public_parent.id=public_child.recipe_type_id
+         where public_child.entity_id=` + alias + `.id and public_parent.status='active' and public_parent.archived_at is null)`
+	}
+	if entityType == "recipe_template" {
+		predicate += ` and exists(select 1 from recipe_layout_templates public_child join catalog_entities public_parent on public_parent.id=public_child.recipe_type_id
+         where public_child.entity_id=` + alias + `.id and public_parent.status='active' and public_parent.archived_at is null)`
+	}
+	return "(" + predicate + ")"
 }
 
 func snapshotSQL(alias, table, column string) string {

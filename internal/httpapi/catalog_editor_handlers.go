@@ -76,7 +76,7 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		select count(*)::int from game_resources resource
 		join catalog_entities entity on entity.id=resource.entity_id
 		left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
-		where entity.status=$4 and ($1='' or resource.kind_code=$1) and ($3='' or resource.namespace=$3)
+		where entity.status=$4 and `+publicCatalogEntitySQL("entity", "resource")+` and ($1='' or resource.kind_code=$1) and ($3='' or resource.namespace=$3)
 		and ($5='' or ($5='true' and exists(select 1 from mod_resource_version_details detail where detail.resource_id=resource.entity_id))
 		 or ($5='false' and not exists(select 1 from mod_resource_version_details detail where detail.resource_id=resource.entity_id))) and
 		($2='' or entity.public_id=$2 or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations localization
@@ -103,7 +103,7 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		left join mods owner on owner.id=resource.owner_mod_id and owner.review_status='approved'
 		left join lateral (select candidate.* from content_localizations candidate where candidate.catalog_entity_id=entity.id
 			 order by case candidate.locale when $4 then 0 when $5 then 1 when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
-		where entity.status=$10 and ($1='' or resource.kind_code=$1) and ($3='' or resource.namespace=$3)
+		where entity.status=$10 and `+publicCatalogEntitySQL("entity", "resource")+` and ($1='' or resource.kind_code=$1) and ($3='' or resource.namespace=$3)
 		and ($11='' or ($11='true' and exists(select 1 from mod_resource_version_details detail where detail.resource_id=resource.entity_id))
 		 or ($11='false' and not exists(select 1 from mod_resource_version_details detail where detail.resource_id=resource.entity_id))) and
 		(($6 and entity.id=any($7::bigint[])) or (not $6 and ($2='' or entity.public_id=$2 or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations candidate

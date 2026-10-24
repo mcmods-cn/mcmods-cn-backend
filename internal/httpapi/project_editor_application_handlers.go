@@ -102,14 +102,14 @@ func projectEditorTargetNameWithQueryer(ctx context.Context, queryer revisionQue
 	case "blueprint":
 		query = `select title from blueprints where id=$1 and status='ready' and review_status in ('approved','not_required')`
 	case "skin":
-		query = `select display_name from skin_assets where id=$1 and status='active' and review_status='approved'`
+		query = `select display_name from skin_assets where id=$1 and status='active' and review_status='approved' and visibility<>'private'`
 	case "community_post":
-		query = `select title from community_posts where id=$1 and review_status='approved'`
+		query = `select title from community_posts where id=$1 and review_status='approved' and status='active'`
 	default:
 		return "", pgx.ErrNoRows
 	}
 	var name string
-	err := queryer.QueryRow(ctx, query, internalID).Scan(&name)
+	err := queryer.QueryRow(ctx, query+" for share", internalID).Scan(&name)
 	return name, err
 }
 
@@ -154,6 +154,16 @@ func (s *Server) projectEditorApplications(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// Lock and revalidate the current target inside the mutation transaction.
+	// A hide/revoke racing application creation or review cannot cross this lock.
+	if _, targetErr := projectEditorTargetNameWithQueryer(r.Context(), tx, target.Type, target.InternalID); errors.Is(targetErr, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	} else if targetErr != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to check application target")
+		return
+	}
+
 	var alreadyAssigned bool
 	if err = tx.QueryRow(r.Context(), `select exists(select 1 from effective_project_access
 		where user_id=$1 and project_type=$2 and project_id=$3)`, claims.Subject, target.Type, target.InternalID).Scan(&alreadyAssigned); err != nil {

@@ -160,8 +160,8 @@ func (f test039Fixture) conditionalTexture(t *testing.T, route, hash string, wan
 	if err != nil || response.StatusCode != want {
 		t.Fatalf("conditional texture status=%d want=%d err=%v", response.StatusCode, want, err)
 	}
-	if want == 304 && (len(raw) != 0 || response.Header.Get("ETag") != `"`+hash+`"` || response.Header.Get("Cache-Control") != "public, max-age=31536000, immutable") {
-		t.Fatal("healthy immutable launcher revalidation contract changed")
+	if want == 304 && (len(raw) != 0 || response.Header.Get("ETag") != `"`+hash+`"` || response.Header.Get("Cache-Control") != "private, no-cache") {
+		t.Fatal("healthy authorized launcher revalidation contract changed")
 	}
 }
 
@@ -204,12 +204,12 @@ func TestTEST039PrivateMetadataAndDeletedBlobContentRemainDistinctFullHTTPIntegr
 	file := f.upload(t, f.editor, "private-bytes.png", test039PNG(t, 64, 64, 2))
 	asset := f.asset(t, f.editor, file, "private bytes", "private")
 	before := f.facts(t)
-	// Existing launcher hash URLs are content-addressed bearers, not asset ACLs.
-	// The private metadata boundary must not be replaced by a shared-blob owner.
+	// CMP-001 supersedes the old anonymous hash-bearer policy. Current
+	// private assets require ownership; legitimate public shared references remain readable.
 	f.require(t, "", http.MethodGet, "/api/v1/skins/"+asset.PublicID, nil, 404)
 	f.require(t, f.otherEditor, http.MethodGet, "/api/v1/skins/"+asset.PublicID, nil, 404)
-	assertTEST039TextureBytes(t, f.require(t, "", http.MethodGet, asset.TextureURL, nil, 200), asset.TextureHash)
-	f.conditionalTexture(t, asset.TextureURL, asset.TextureHash, 304)
+	f.require(t, "", http.MethodGet, asset.TextureURL, nil, 404)
+	f.conditionalTexture(t, asset.TextureURL, asset.TextureHash, 404)
 	assertTEST039TextureBytes(t, f.require(t, f.editor, http.MethodGet, asset.TextureURL, nil, 200), asset.TextureHash)
 	f.unchanged(t, before)
 	f.review(t, asset.PublicID, "approved")

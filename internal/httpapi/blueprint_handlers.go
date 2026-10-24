@@ -337,7 +337,7 @@ func (s *Server) reusableBlueprintByHash(ctx context.Context, sha string, size, 
 	err := s.db.QueryRow(ctx, `select blueprint.public_id,blueprint.status
 		from blueprints blueprint
 		join oss_files file on file.id=blueprint.original_file_id and file.status='active'
-		where file.sha256=$1 and coalesce(nullif(file.source_size_bytes,0),file.size_bytes)=$2
+		where file.sha256=$1 and file.source_hash_verified and coalesce(nullif(file.source_size_bytes,0),file.size_bytes)=$2
 		  and blueprint.status<>'deleted'
 		  and (blueprint.owner_id=$3 or (blueprint.status='ready' and blueprint.review_status in ('not_required','approved')))
 		order by (blueprint.owner_id=$3) desc,blueprint.created_at asc limit 1`, sha, size, requesterID).Scan(&publicID, &status)
@@ -1191,6 +1191,15 @@ func (s *Server) resolvePublicLink(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "解析短链接失败")
+		return
+	}
+	visible, visibilityErr := s.publicLinkTargetIsVisible(r.Context(), entityType, internalID)
+	if visibilityErr != nil {
+		writeError(w, http.StatusInternalServerError, "解析短链接发布状态失败")
+		return
+	}
+	if !visible {
+		writeError(w, http.StatusNotFound, "短链接不存在")
 		return
 	}
 	switch entityType {

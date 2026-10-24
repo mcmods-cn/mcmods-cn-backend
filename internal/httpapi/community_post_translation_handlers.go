@@ -145,14 +145,22 @@ func (s *Server) communityPostTranslationResult(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusInternalServerError, "failed to load translation task")
 		return
 	}
+	payload, payloadErr := decodeCommunityPostTranslationTaskPayload(payloadRaw)
+	if payloadErr != nil {
+		writeError(w, http.StatusInternalServerError, "translation task data is invalid")
+		return
+	}
+	var sourceVisible bool
+	if err = s.db.QueryRow(r.Context(), `select exists(select 1 from community_posts where id=$1 and status='active' and review_status='approved')`, payload.PostInternalID).Scan(&sourceVisible); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to check translation source")
+		return
+	}
+	if !sourceVisible {
+		writeError(w, http.StatusNotFound, "translation source not found")
+		return
+	}
 	response := map[string]any{"taskId": taskUID, "status": status, "error": errorText}
 	if status == "completed" {
-		payload, payloadErr := decodeCommunityPostTranslationTaskPayload(payloadRaw)
-		if payloadErr != nil {
-			logCommunityPostDataFailure("translation_payload", taskUID, payloadErr)
-			writeError(w, http.StatusInternalServerError, "translation task data is invalid")
-			return
-		}
 		var title, body string
 		err = s.db.QueryRow(r.Context(), `select title,body_markdown from community_post_translations where post_id=$1 and locale=$2 and source_revision_id=$3`, payload.PostInternalID, payload.TargetLocale, payload.SourceRevision).Scan(&title, &body)
 		if errors.Is(err, pgx.ErrNoRows) {

@@ -103,6 +103,7 @@ func (s *Server) buildYggdrasilProfile(ctx context.Context, profileID int64, sig
 }
 
 func (s *Server) yggdrasilProfileByUUID(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	databaseUUID, ok := databaseYggdrasilUUID(r.PathValue("uuid"))
 	if !ok {
 		writeYggdrasilNoContent(w)
@@ -129,6 +130,7 @@ func (s *Server) yggdrasilProfileByUUID(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) yggdrasilProfilesByName(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	var names []string
 	if err := decodeYggdrasilJSON(w, r, &names); err != nil || len(names) > 100 {
 		writeYggdrasilError(w, http.StatusBadRequest, "IllegalArgumentException", "Invalid profile query.", "")
@@ -177,6 +179,7 @@ func (s *Server) yggdrasilProfilesByName(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) yggdrasilProfileByName(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	name := strings.TrimSpace(r.PathValue("username"))
 	if name == "" {
 		writeYggdrasilNoContent(w)
@@ -471,6 +474,7 @@ func (s *Server) authorizeYggdrasilTextureChange(r *http.Request, uuid string) (
 }
 
 func (s *Server) yggdrasilTextureContent(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	hash := strings.ToLower(strings.TrimSpace(r.PathValue("hash")))
 	if !yggdrasilTextureHashPattern.MatchString(hash) {
 		writeYggdrasilError(w, http.StatusNotFound, "NotFoundException", "Texture not found.", "")

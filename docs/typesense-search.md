@@ -55,3 +55,15 @@ API Key 仅保存在后端环境中，不应传给浏览器。该 Key 需要健�
 - 新目录序列在Typesense ready时使用索引，否则从首屏开始使用PostgreSQL keyset；名称排序固定使用SQL。游标签入筛选scope、排序tuple和`index`/`sql` authority，续页期间不会静默切换来源。
 - 已签发index cursor后Typesense失效会返回503；调用方可从首屏重新开始。SQL cursor即使Typesense恢复也继续SQL。该约束避免不同排序快照在序列中混用而产生重复或遗漏。
 - 目录不提供page、offset或精确total；每页以limit+1产生`hasMore/nextCursor`。`sort=relevance`不支持稳定续页并返回400，不回退到伪确定排序。
+
+## Current publication state during index delay (NEXT-002 / RPH-003)
+
+Project/resource search treats indexed IDs as ranked candidates. Current PostgreSQL
+publication/source predicates filter the complete bounded match set before total
+and page slicing; hidden or deleted candidates cannot inflate total or leave a
+stale empty intermediate page. Index review-status filters are not authoritative,
+so a restored object present in the candidate set can reappear immediately.
+Candidate work is capped at 5,000 IDs / 20 provider pages per request. An incomplete,
+changing, failed or larger match set uses the existing SQL fallback. This is a
+controlled correctness fallback; it is not evidence that live Typesense, full site
+performance budgets, browser pagination or every source state has been accepted.
