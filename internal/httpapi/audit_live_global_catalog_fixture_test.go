@@ -168,7 +168,17 @@ func TestAuditLiveGlobalCatalogFixture(t *testing.T) {
 	type seedSet struct{ version, section, resource, template modContentMutationResult }
 	var lastReviewBurst time.Time
 	seedRPH := func(suffix string) seedSet {
-		versionEdit := modContentVersionEdit{Label: "UI concurrency baseline" + suffix, MinecraftVersions: []string{"1.20.1"}, Loaders: []string{"fabric"}, ModVersion: "1.0" + suffix, Reason: "Owned prerequisite; not an RPH update"}
+		purpose := "Establish the first pair of tabs reading a stable public baseline"
+		sectionPurpose := "Organize the item section used to compare two simultaneous tab changes"
+		resourcePurpose := "Publish an item whose human name can be changed by the first tab pair"
+		templatePurpose := "Define the custom content fields edited in the same-account schedule"
+		if suffix != "" {
+			purpose = "Prepare a separate collaborative workspace for independently authorized editors"
+			sectionPurpose = "Arrange the second workspace before comparing independent editor layouts"
+			resourcePurpose = "Introduce the collaborative item shared by two project editors"
+			templatePurpose = "Describe editable machine metadata for the multi-account comparison"
+		}
+		versionEdit := modContentVersionEdit{Label: "UI concurrency baseline" + suffix, MinecraftVersions: []string{"1.20.1"}, Loaders: []string{"fabric"}, ModVersion: "1.0" + suffix, Reason: purpose}
 		version := decodeTEST022Data[modContentMutationResult](t, f.require(t, f.otherEditor, "POST", projectPath+"/content-versions", versionEdit, 201))
 		if version.ReviewStatus != "approved" {
 			t.Fatal("RPH version seed must be published through actual no-review HTTP")
@@ -189,17 +199,17 @@ func TestAuditLiveGlobalCatalogFixture(t *testing.T) {
 			}
 		}
 		lastReviewBurst = time.Now()
-		sectionEdit := modContentSectionEdit{VersionPublicID: version.PublicID, TemplatePublicID: builtIn, DefaultLocale: "en-US", DisplayMode: "compact", Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "UI concurrency section" + suffix}}, Reason: "Owned prerequisite"}
+		sectionEdit := modContentSectionEdit{VersionPublicID: version.PublicID, TemplatePublicID: builtIn, DefaultLocale: "en-US", DisplayMode: "compact", Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "UI concurrency section" + suffix}}, Reason: sectionPurpose}
 		section := decodeTEST022Data[modContentMutationResult](t, f.require(t, f.otherEditor, "POST", projectPath+"/content-sections", sectionEdit, 201))
 		if section.ReviewStatus != "approved" {
 			t.Fatal("RPH layout seed must be actually published")
 		}
-		resourceEdit := modContentResourceEdit{VersionPublicID: version.PublicID, SectionPublicID: &section.PublicID, CanonicalID: "example:ui_race_resource" + suffix, KindCode: "minecraft.item", EntryTypeCode: "default", DefaultLocale: "en-US", Definition: map[string]any{}, Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "UI race resource" + suffix}}, Reason: "Owned prerequisite"}
+		resourceEdit := modContentResourceEdit{VersionPublicID: version.PublicID, SectionPublicID: &section.PublicID, CanonicalID: "example:ui_race_resource" + suffix, KindCode: "minecraft.item", EntryTypeCode: "default", DefaultLocale: "en-US", Definition: map[string]any{}, Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "UI race resource" + suffix}}, Reason: resourcePurpose}
 		resource := decodeTEST022Data[modContentMutationResult](t, f.require(t, f.otherEditor, "POST", projectPath+"/content-resources", resourceEdit, 201))
 		if resource.ReviewStatus != "approved" {
 			t.Fatal("RPH resource seed must be actually published")
 		}
-		templateEdit := modContentTemplateEdit{Code: "auditui" + suffix, DefaultLocale: "en-US", DefaultDisplayMode: "compact", Definition: templateSchemaGuardMap(false, "number", false), Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "UI race template" + suffix}}, Reason: "Owned prerequisite"}
+		templateEdit := modContentTemplateEdit{Code: "auditui" + suffix, DefaultLocale: "en-US", DefaultDisplayMode: "compact", Definition: templateSchemaGuardMap(false, "number", false), Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "UI race template" + suffix}}, Reason: templatePurpose}
 		template := decodeTEST022Data[modContentMutationResult](t, f.require(t, f.otherEditor, "POST", projectPath+"/content-templates", templateEdit, 201))
 		if template.ReviewStatus != "approved" {
 			t.Fatal("RPH template seed must be actually published")
