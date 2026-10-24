@@ -130,6 +130,7 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	cfg.NATS = queueConfig
 	f.origin.Close()
 	unreadBarrierEnabled := os.Getenv("MCMODS_AUDIT_UNREAD_BARRIER") == "1"
+	seededUnreadA := 0
 	armPath := filepath.Join(directory, "unread-arm")
 	startedPath := filepath.Join(directory, "unread-started.json")
 	releasePath := filepath.Join(directory, "unread-release")
@@ -141,6 +142,7 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	if unreadBarrierEnabled {
+		seededUnreadA = 3
 		if _, err = db.Exec(f.ctx, `insert into notifications(recipient_id,kind,title,body) select $1,'system','Synthetic identity boundary','Task-owned unread boundary fixture' from generate_series(1,3)`, f.userIDs[f.editor]); err != nil {
 			t.Fatal(err)
 		}
@@ -193,7 +195,7 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	}
 	runtimePath := filepath.Join(directory, "runtime.json")
 	stopPath := filepath.Join(directory, "STOP")
-	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "ossOrigin": f.provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": "auditfixture", "minecraftVersion": "1.20.1", "loader": "fabric", "modVersion": "1.0.0", "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": expectedSampleHash, "sampleProducerCommit": sampleProducer, "samplePath": samplePath, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED", "unreadBarrier": map[string]any{"enabled": unreadBarrierEnabled, "armPath": armPath, "startedPath": startedPath, "releasePath": releasePath, "actorAPublicId": actorA, "actorBPublicId": actorB, "initialUnreadA": 3, "initialUnreadB": 0}}
+	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "ossOrigin": f.provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": "auditfixture", "minecraftVersion": "1.20.1", "loader": "fabric", "modVersion": "1.0.0", "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": expectedSampleHash, "sampleProducerCommit": sampleProducer, "samplePath": samplePath, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED", "unreadBarrier": map[string]any{"enabled": unreadBarrierEnabled, "armPath": armPath, "startedPath": startedPath, "releasePath": releasePath, "actorAPublicId": actorA, "actorBPublicId": actorB, "initialUnreadA": seededUnreadA, "initialUnreadB": 0}}
 	updateRuntime := func(state string) {
 		runtime["state"] = state
 		runtime["updatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
@@ -305,7 +307,7 @@ func auditJourneyUnreadBarrier(next http.Handler, actorToken, actorPublicID, arm
 			Data map[string]int64 `json:"data"`
 		}
 		_ = json.Unmarshal(decoded, &observed)
-		evidence := map[string]any{"actorPublicId": actorPublicID, "status": recorder.Code, "bodySha256": hex.EncodeToString(decodedHash[:]), "wireBodySha256": hex.EncodeToString(wireHash[:]), "contentEncoding": recorder.Header().Get("Content-Encoding"), "actualCounts": observed.Data, "capturedAt": time.Now().UTC().Format(time.RFC3339Nano), "actualHandlerAndDatabase": true, "released": false}
+		evidence := map[string]any{"actorPublicId": actorPublicID, "status": recorder.Code, "bodySha256": hex.EncodeToString(decodedHash[:]), "wireBodySha256": hex.EncodeToString(wireHash[:]), "contentEncoding": recorder.Header().Get("Content-Encoding"), "actualCounts": observed.Data, "capturedAt": time.Now().UTC().Format(time.RFC3339Nano), "actualServerHandler": true, "source": "owned PostgreSQL-backed API with normal cache", "released": false}
 		persist := func() error {
 			raw, err := json.MarshalIndent(evidence, "", "  ")
 			if err != nil {
