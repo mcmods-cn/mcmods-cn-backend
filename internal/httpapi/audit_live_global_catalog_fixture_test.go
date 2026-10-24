@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -72,7 +73,13 @@ func TestAuditLiveGlobalCatalogFixture(t *testing.T) {
 	}
 	frontendOrigin := "http://127.0.0.1:3311"
 	t.Setenv("FRONTEND_ORIGIN", frontendOrigin)
+	unlockDDL := auditGlobalCatalogPGLock(t)
+	// The reusable fixture owns schema creation/drop; hold the cross-process
+	// DDL lock only for those phases, never through the browser lifetime.
+	t.Cleanup(func() { unlockDDL() })
 	f := newAuditFixGRFixture(t, 45*time.Minute)
+	unlockDDL()
+	t.Cleanup(func() { unlockDDL = auditGlobalCatalogPGLock(t) })
 	barrierContext, cancelBarrier := context.WithCancel(f.ctx)
 	defer cancelBarrier()
 	dbConfig := f.db.Config()
@@ -162,10 +169,6 @@ func TestAuditLiveGlobalCatalogFixture(t *testing.T) {
 	templatePayload["slots"] = []map[string]any{{"slotKey": "input", "role": "input", "ordinal": 0, "rect": map[string]any{"x": 4, "y": 10, "width": 16, "height": 16}}, {"slotKey": "output", "role": "output", "ordinal": 1, "rect": map[string]any{"x": 40, "y": 10, "width": 16, "height": 16}}}
 	dependencyTemplate := create("/api/v1/recipe-types/"+dependencyType.ObjectPublicID+"/templates", templatePayload)
 	projectPath := "/api/v1/mods/audit-gr-" + f.modCode
-	var builtIn string
-	if err = db.QueryRow(f.ctx, `select public_id from mod_content_templates where builtin and code='item_block' and status='active'`).Scan(&builtIn); err != nil {
-		t.Fatal(err)
-	}
 	type seedSet struct{ version, section, resource, template modContentMutationResult }
 	var lastReviewBurst time.Time
 	seedRPH := func(suffix string) seedSet {
@@ -200,24 +203,25 @@ func TestAuditLiveGlobalCatalogFixture(t *testing.T) {
 			}
 		}
 		lastReviewBurst = time.Now()
-		sectionEdit := modContentSectionEdit{VersionPublicID: version.PublicID, TemplatePublicID: builtIn, DefaultLocale: "en-US", DisplayMode: "compact", Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "UI concurrency section" + suffix}}, Reason: sectionPurpose}
-		section := decodeTEST022Data[modContentMutationResult](t, f.require(t, f.otherEditor, "POST", projectPath+"/content-sections", sectionEdit, 201))
-		if section.ReviewStatus != "approved" {
-			t.Fatal("RPH layout seed must be actually published")
-		}
-		resourceEdit := modContentResourceEdit{VersionPublicID: version.PublicID, SectionPublicID: &section.PublicID, CanonicalID: "example:ui_race_resource" + suffix, KindCode: "minecraft.item", EntryTypeCode: "default", DefaultLocale: "en-US", Definition: map[string]any{}, Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "UI race resource" + suffix}}, Reason: resourcePurpose}
-		resource := decodeTEST022Data[modContentMutationResult](t, f.require(t, f.otherEditor, "POST", projectPath+"/content-resources", resourceEdit, 201))
-		if resource.ReviewStatus != "approved" {
-			t.Fatal("RPH resource seed must be actually published")
-		}
 		templateEdit := modContentTemplateEdit{Code: "auditui" + suffix, DefaultLocale: "en-US", DefaultDisplayMode: "compact", Definition: templateSchemaGuardMap(false, "number", false), Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "UI race template" + suffix}}, Reason: templatePurpose}
 		template := decodeTEST022Data[modContentMutationResult](t, f.require(t, f.otherEditor, "POST", projectPath+"/content-templates", templateEdit, 201))
 		if template.ReviewStatus != "approved" {
 			t.Fatal("RPH template seed must be actually published")
 		}
+		sectionEdit := modContentSectionEdit{VersionPublicID: version.PublicID, TemplatePublicID: template.PublicID, DefaultLocale: "en-US", DisplayMode: "compact", Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "UI concurrency section" + suffix}}, Reason: sectionPurpose}
+		section := decodeTEST022Data[modContentMutationResult](t, f.require(t, f.otherEditor, "POST", projectPath+"/content-sections", sectionEdit, 201))
+		if section.ReviewStatus != "approved" {
+			t.Fatal("RPH layout seed must be actually published")
+		}
+		resourceEdit := modContentResourceEdit{VersionPublicID: version.PublicID, SectionPublicID: &section.PublicID, CanonicalID: "example:ui_race_resource" + suffix, KindCode: "minecraft.item", EntryTypeCode: "machine", DefaultLocale: "en-US", Definition: map[string]any{"power": 1}, Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "UI race resource" + suffix}}, Reason: resourcePurpose}
+		resource := decodeTEST022Data[modContentMutationResult](t, f.require(t, f.otherEditor, "POST", projectPath+"/content-resources", resourceEdit, 201))
+		if resource.ReviewStatus != "approved" {
+			t.Fatal("RPH resource seed must be actually published")
+		}
 		return seedSet{version, section, resource, template}
 	}
 	primary, secondary := seedRPH(""), seedRPH("2")
+	tp007 := auditGlobalCatalogTP007Ancestors(t, f, directory)
 	targets := map[string]map[string]string{}
 	for suffix, seed := range map[string]seedSet{"": primary, "_second": secondary} {
 		targets["version"+suffix] = map[string]string{"publicId": seed.version.PublicID, "baseRevisionId": seed.version.RevisionID, "aggregateKey": modContentAggregateVersion + ":" + seed.version.PublicID}
@@ -240,7 +244,7 @@ func TestAuditLiveGlobalCatalogFixture(t *testing.T) {
 	authPath := filepath.Join(directory, "auth.private.json")
 	auditJourneyWriteJSON(t, authPath, map[string]string{"creatorToken": f.editor, "reviewerToken": f.reviewer, "readerToken": f.denied, "noReviewEditorToken": f.otherEditor, "secondNoReviewEditorToken": secondToken})
 	runtimePath, stopPath := filepath.Join(directory, "runtime.json"), filepath.Join(directory, "STOP")
-	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "repoRevisions": revisions, "actors": actors, "antiAbuseEnabled": cfg.AntiAbuse.Enabled, "reviewConfig": review, "permissionSetup": "Explicit existing ordinary capabilities fixed before first API exposure; no admin; creator has no bypass; reviewer has content.review; reader only list/view; bootstrap/noReview editor separately declared", "draftQualification": "user.draft.retention_seconds.2592000 from existing registered seed; migration helper has no registration-role seeds; no actual registration UI claim", "dependencies": map[string]string{"resourcePublicId": dependencyResource.ObjectPublicID, "recipeTypePublicId": dependencyType.ObjectPublicID, "recipeTemplatePublicId": dependencyTemplate.ObjectPublicID}, "rph": map[string]any{"projectPublicId": f.modCode, "projectSiteId": "audit-gr-" + f.modCode, "versionPublicId": primary.version.PublicID, "sectionPublicId": primary.section.PublicID, "targets": targets, "groups": map[string]string{"twoTabs": "unsuffixed targets", "twoEditors": "_second targets"}, "normalReviewBurstReadyAt": lastReviewBurst.Add(61 * time.Second).UTC().Format(time.RFC3339Nano), "barrierArmPath": filepath.Join(directory, "rph-barrier-arm.json"), "targetRevisionsAreInitialSeeds": true, "barrierFormat": "unique attemptId[a-z0-9-], kind version/resource/template/layout or _second variants. Locked/released files use rph-barrier-<attemptId>-started.json and -released.json"}, "queueLayer": "NOT_RUN; real PostgreSQL outbox only, no actual NATS/dispatch/notification delivery claim", "scope": "Actual API/PostgreSQL normal review; only parent dependencies seeded through HTTP. External browser must create five subjects, review and verify publication. Fixture exit is not PASS."}
+	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "repoRevisions": revisions, "actors": actors, "antiAbuseEnabled": cfg.AntiAbuse.Enabled, "reviewConfig": review, "permissionSetup": "Explicit existing ordinary capabilities fixed before first API exposure; no admin; creator has no bypass; reviewer has content.review; reader only list/view; bootstrap/noReview editor separately declared", "draftQualification": "user.draft.retention_seconds.2592000 from existing registered seed; migration helper has no registration-role seeds; no actual registration UI claim", "dependencies": map[string]string{"resourcePublicId": dependencyResource.ObjectPublicID, "recipeTypePublicId": dependencyType.ObjectPublicID, "recipeTemplatePublicId": dependencyTemplate.ObjectPublicID}, "rph": map[string]any{"projectPublicId": f.modCode, "projectSiteId": "audit-gr-" + f.modCode, "versionPublicId": primary.version.PublicID, "sectionPublicId": primary.section.PublicID, "targets": targets, "groups": map[string]string{"twoTabs": "unsuffixed targets", "twoEditors": "_second targets"}, "normalReviewBurstReadyAt": lastReviewBurst.Add(61 * time.Second).UTC().Format(time.RFC3339Nano), "barrierArmPath": filepath.Join(directory, "rph-barrier-arm.json"), "targetRevisionsAreInitialSeeds": true, "barrierFormat": "unique attemptId[a-z0-9-], kind version/resource/template/layout or _second variants. Locked/released files use rph-barrier-<attemptId>-started.json and -released.json"}, "queueLayer": "NOT_RUN; real PostgreSQL outbox only, no actual NATS/dispatch/notification delivery claim", "tp007": tp007, "scope": "Actual API/PostgreSQL normal review; only parent dependencies seeded through HTTP. External browser must create five subjects, review and verify publication. Fixture exit is not PASS."}
 	barrierErrors := make(chan error, 1)
 	go func() {
 		barrierErrors <- auditGlobalCatalogBarrier(barrierContext, f.db, db, applicationName, directory, targets)
@@ -384,6 +388,38 @@ func auditGlobalCatalogBarrier(ctx context.Context, control, observer *pgxpool.P
 			if e = finish(); e != nil && !errors.Is(e, errAuditGlobalBarrierTimeout) {
 				return e
 			}
+		}
+	}
+}
+
+// Uses the same cooperative lock as other task-owned migration fixtures. The
+// child exits when its private stdin closes; it never owns the service lifetime.
+func auditGlobalCatalogPGLock(t *testing.T) func() {
+	t.Helper()
+	command := exec.Command("flock", "-x", "/workspace/audit-fixes-20261024/pg-test.lock", "sh", "-c", "printf 'locked\\n'; cat >/dev/null")
+	input, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if line, e := bufio.NewReader(output).ReadString('\n'); e != nil || line != "locked\n" {
+		t.Fatal("owned DDL lock handshake failed")
+	}
+	closed := false
+	return func() {
+		if closed {
+			return
+		}
+		closed = true
+		_ = input.Close()
+		if err := command.Wait(); err != nil {
+			t.Error("owned DDL lock release failed:", err)
 		}
 	}
 }
