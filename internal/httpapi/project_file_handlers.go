@@ -211,6 +211,10 @@ func (s *Server) projectFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist project file activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit project file deletion")
 		return
@@ -316,14 +320,21 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 	metadata, _ := json.Marshal(map[string]any{"projectType": project.ProjectType, "projectId": project.ProjectID, "ossFileId": request.OSSFileID})
-	_, _ = tx.Exec(r.Context(), `insert into audit_events(aggregate_type,aggregate_key,actor_id,action,ip,user_agent,metadata)
-		values('project_file',$1,$2,'create',$3,$4,$5::jsonb)`, publicID, currentClaims(r).Subject, s.requestClientLocation(r).IP, r.UserAgent(), metadata)
+	if _, err = tx.Exec(r.Context(), `insert into audit_events(aggregate_type,aggregate_key,actor_id,action,ip,user_agent,metadata)
+		values('project_file',$1,$2,'create',$3,$4,$5::jsonb)`, publicID, currentClaims(r).Subject, s.requestClientLocation(r).IP, r.UserAgent(), metadata); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist project file creation audit")
+		return
+	}
 	if approved && publicationStatus == "active" {
 		if err = enqueueProjectFileUpdateEventTx(r.Context(), tx, project, currentClaims(r).Subject,
 			"download_added", publicID, publicationGeneration); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to enqueue project update")
 			return
 		}
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist project file activity")
+		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit project file creation")
@@ -560,6 +571,10 @@ func (s *Server) downloadProjectFile(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to persist project download statistics")
 			return
 		}
+		if err = enqueueRequestActivityTx(r, tx); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist project download activity")
+			return
+		}
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to commit project file download")
 			return
@@ -598,6 +613,29 @@ func (s *Server) downloadProjectFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil || !validProviderDownloadURL(downloadURL) {
 		writeError(w, http.StatusBadGateway, "the provider did not return a downloadable file URL")
+		return
+	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start project file download")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	approved, statusErr := projectFileTargetIsApprovedTx(r.Context(), tx, project.ProjectType, project.ProjectInternalID)
+	if statusErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load project publication status")
+		return
+	}
+	if !approved {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist project download activity")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit project file download")
 		return
 	}
 	s.writeAppLog(r.Context(), "download", "info", "download_project_file", selected.FileName, currentClaims(r).Subject, r, http.StatusOK, 0,
