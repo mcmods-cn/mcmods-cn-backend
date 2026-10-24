@@ -43,7 +43,7 @@ func (s *Server) buildYggdrasilProfile(ctx context.Context, profileID int64, sig
 	rows, err := s.db.Query(ctx,
 		`select t.kind,b.hash,coalesce(a.model,'default')
 		 from player_profile_textures t
-		 join skin_assets a on a.id=t.asset_id and a.status='active'
+		 join skin_assets a on a.id=t.asset_id and a.status='active' and a.review_status='approved' and a.visibility<>'private'
 		 join skin_texture_blobs b on b.hash=a.blob_hash
 		 where t.profile_id=$1`, profileID)
 	if err != nil {
@@ -109,7 +109,7 @@ func (s *Server) yggdrasilProfileByUUID(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var profileID int64
-	err := s.db.QueryRow(r.Context(), `select id from player_profiles where uuid=$1 and status='active'`, databaseUUID).Scan(&profileID)
+	err := s.db.QueryRow(r.Context(), `select id from player_profiles where uuid=$1 and status='active' and visibility<>'private'`, databaseUUID).Scan(&profileID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeYggdrasilNoContent(w)
 		return
@@ -124,7 +124,7 @@ func (s *Server) yggdrasilProfileByUUID(w http.ResponseWriter, r *http.Request) 
 		writeYggdrasilInternalError(w)
 		return
 	}
-	w.Header().Set("Cache-Control", "public, max-age=60")
+	w.Header().Set("Cache-Control", "private, no-store")
 	writeYggdrasilJSON(w, http.StatusOK, profile)
 }
 
@@ -154,7 +154,7 @@ func (s *Server) yggdrasilProfilesByName(w http.ResponseWriter, r *http.Request)
 	}
 	rows, err := s.db.Query(r.Context(),
 		`select id,uuid::text,name from player_profiles
-		 where status='active' and lower(name)=any($1::text[])`, normalized)
+		 where status='active' and visibility<>'private' and lower(name)=any($1::text[])`, normalized)
 	if err != nil {
 		writeYggdrasilInternalError(w)
 		return
@@ -184,7 +184,7 @@ func (s *Server) yggdrasilProfileByName(w http.ResponseWriter, r *http.Request) 
 	}
 	var record yggdrasilProfileRecord
 	err := s.db.QueryRow(r.Context(),
-		`select id,uuid::text,name from player_profiles where status='active' and lower(name)=lower($1)`, name).
+		`select id,uuid::text,name from player_profiles where status='active' and visibility<>'private' and lower(name)=lower($1)`, name).
 		Scan(&record.InternalID, &record.UUID, &record.Name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeYggdrasilNoContent(w)
@@ -480,7 +480,10 @@ func (s *Server) yggdrasilTextureContent(w http.ResponseWriter, r *http.Request)
 	var sizeBytes int64
 	err := s.db.QueryRow(r.Context(), `select blob.object_key,blob.size_bytes
 		from skin_texture_blobs blob join oss_files file on file.id=blob.oss_file_id and file.status='active'
-		where blob.hash=$1`, hash).
+		where blob.hash=$1 and exists (
+            select 1 from skin_assets asset where asset.blob_hash=blob.hash and asset.status='active'
+            and ((asset.review_status='approved' and asset.visibility<>'private') or asset.owner_id=$2)
+        )`, hash, currentClaims(r).Subject).
 		Scan(&objectKey, &sizeBytes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeYggdrasilError(w, http.StatusNotFound, "NotFoundException", "Texture not found.", "")
@@ -493,7 +496,7 @@ func (s *Server) yggdrasilTextureContent(w http.ResponseWriter, r *http.Request)
 	etag := `"` + hash + `"`
 	if r.Header.Get("If-None-Match") == etag {
 		w.Header().Set("ETag", etag)
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("Cache-Control", "private, no-cache")
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -511,7 +514,7 @@ func (s *Server) yggdrasilTextureContent(w http.ResponseWriter, r *http.Request)
 	defer result.Body.Close()
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("Cache-Control", "private, no-cache")
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Length", strconv.FormatInt(sizeBytes, 10))
 	w.WriteHeader(http.StatusOK)

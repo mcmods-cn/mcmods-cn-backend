@@ -217,7 +217,7 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 func (s *Server) modRevisionHistory(w http.ResponseWriter, r *http.Request) {
 	siteID := normalizeModSiteID(r.PathValue("siteId"))
 	claims := currentClaims(r)
-	identity, err := s.modIdentity(r.Context(), siteID)
+	identity, err := s.readableModIdentity(r.Context(), siteID, claims, "project.review")
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "mod not found")
 		return
@@ -273,7 +273,7 @@ func (s *Server) modRevisionHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) compareModRevisions(w http.ResponseWriter, r *http.Request) {
-	identity, err := s.modIdentity(r.Context(), normalizeModSiteID(r.PathValue("siteId")))
+	identity, err := s.readableModIdentity(r.Context(), normalizeModSiteID(r.PathValue("siteId")), currentClaims(r), "project.review")
 	if err != nil {
 		writeError(w, http.StatusNotFound, "mod not found")
 		return

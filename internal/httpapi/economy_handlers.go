@@ -340,17 +340,27 @@ func (s *Server) checkIn(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) transferCurrency(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Recipient string `json:"recipient"`
-		Currency  string `json:"currency"`
-		Amount    int64  `json:"amount"`
+		Recipient         string `json:"recipient"`
+		RecipientPublicID string `json:"recipientPublicId"`
+		Currency          string `json:"currency"`
+		Amount            int64  `json:"amount"`
 	}
 	if decodeJSON(r, &request) != nil {
 		writeError(w, http.StatusBadRequest, "invalid transfer request")
 		return
 	}
 	request.Recipient = strings.TrimSpace(request.Recipient)
+	request.RecipientPublicID = strings.ToLower(strings.TrimSpace(request.RecipientPublicID))
+	if request.Recipient != "" && request.RecipientPublicID != "" {
+		writeError(w, http.StatusBadRequest, "supply either recipient or recipientPublicId")
+		return
+	}
+	if request.RecipientPublicID != "" && !validCatalogPublicID(request.RecipientPublicID) {
+		writeError(w, http.StatusBadRequest, "recipientPublicId is invalid")
+		return
+	}
 	request.Currency = normalizeCode(request.Currency)
-	if request.Recipient == "" || request.Currency == "" || request.Amount <= 0 || request.Amount > maxCurrencyAmount {
+	if (request.Recipient == "" && request.RecipientPublicID == "") || request.Currency == "" || request.Amount <= 0 || request.Amount > maxCurrencyAmount {
 		writeError(w, http.StatusBadRequest, "recipient, currency and an amount within the supported range are required")
 		return
 	}
@@ -362,7 +372,16 @@ func (s *Server) transferCurrency(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 
-	recipientID, err := resolveTransferRecipient(r.Context(), tx, request.Recipient)
+	var recipientID int64
+	if request.RecipientPublicID != "" {
+		err = tx.QueryRow(r.Context(), `select id from users where public_id=$1 and status='active'`, request.RecipientPublicID).Scan(&recipientID)
+	} else {
+		recipientID, err = resolveTransferRecipient(r.Context(), tx, request.Recipient)
+	}
+	if errors.Is(err, errAmbiguousTransferRecipient) {
+		writeAPIError(w, http.StatusConflict, "TRANSFER_RECIPIENT_AMBIGUOUS", "recipient matches more than one account; use recipientPublicId", 0, nil)
+		return
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "recipient was not found")
 		return
@@ -1276,16 +1295,35 @@ func checkedCurrencyBalance(current, delta int64) (int64, error) {
 	return current + delta, nil
 }
 
+var errAmbiguousTransferRecipient = errors.New("ambiguous transfer recipient")
+
+// Public identities and human lookup values never denote an internal primary key.
+// A legacy lookup that matches different accounts must be made explicit by the caller.
 func resolveTransferRecipient(ctx context.Context, tx pgx.Tx, value string) (int64, error) {
-	if id, err := strconv.ParseInt(value, 10, 64); err == nil && id > 0 {
-		var userID int64
-		err = tx.QueryRow(ctx, `select id from users where id=$1 and status='active'`, id).Scan(&userID)
-		return userID, err
+	rows, err := tx.Query(ctx, `select id from users where status='active' and
+  (lower(username)=lower($1) or lower(email)=lower($1) or public_id=lower($1)) limit 2`, value)
+	if err != nil {
+		return 0, err
 	}
+	defer rows.Close()
 	var userID int64
-	err := tx.QueryRow(ctx, `select id from users where status='active' and
-		(lower(username)=lower($1) or lower(email)=lower($1) or public_id=lower($1))`, value).Scan(&userID)
-	return userID, err
+	count := 0
+	for rows.Next() {
+		if err = rows.Scan(&userID); err != nil {
+			return 0, err
+		}
+		count++
+	}
+	if err = rows.Err(); err != nil {
+		return 0, err
+	}
+	if count == 0 {
+		return 0, pgx.ErrNoRows
+	}
+	if count > 1 {
+		return 0, errAmbiguousTransferRecipient
+	}
+	return userID, nil
 }
 
 func lockCurrencyBalancesTx(ctx context.Context, tx pgx.Tx, currencyID, firstUserID, secondUserID int64) error {

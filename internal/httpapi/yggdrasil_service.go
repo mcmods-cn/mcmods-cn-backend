@@ -249,7 +249,7 @@ func (s *Server) yggdrasilRoutes() {
 	handle("GET /api/yggdrasil/users/profiles/minecraft/{username}", s.yggdrasilProfileByName)
 	handle("PUT /api/yggdrasil/api/user/profile/{uuid}/{textureType}", s.yggdrasilSetTexture)
 	handle("DELETE /api/yggdrasil/api/user/profile/{uuid}/{textureType}", s.yggdrasilDeleteTexture)
-	s.mux.HandleFunc("GET /api/yggdrasil/textures/{hash}", s.yggdrasilTextureContent)
+	s.mux.HandleFunc("GET /api/yggdrasil/textures/{hash}", s.optionalAuth(s.yggdrasilTextureContent))
 }
 
 func (s *Server) requireYggdrasilService(next http.HandlerFunc) http.HandlerFunc {

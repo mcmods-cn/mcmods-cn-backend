@@ -116,6 +116,13 @@ func canEditReviewTarget(ctx context.Context, query databaseQuery, claims securi
 	if claims.Subject <= 0 {
 		return false
 	}
+	if entityType == "community_post" {
+		var authorID int64
+		if query.QueryRow(ctx, `select author_id from community_posts where id=$1 and status='active'`, internalID).Scan(&authorID) != nil {
+			return false
+		}
+		return claims.Subject == authorID || claimsAllow(claims, "community.edit") || claimsAllow(claims, "admin.*")
+	}
 	if claimsAllow(claims, "admin.*") || claimsAllow(claims, "content.review") || claimsAllow(claims, "project.review") {
 		return true
 	}
@@ -144,8 +151,6 @@ func canEditReviewTarget(ctx context.Context, query databaseQuery, claims securi
 		return canEditReviewTarget(ctx, query, claims, targetType, targetInternalID, targetPublicID)
 	case "creator":
 		return claimsAllow(claims, "creator.edit") || claimsAllow(claims, "creator.edit."+publicID)
-	case "community_post":
-		return claimsAllow(claims, "project.edit."+publicID) || claimsAllow(claims, "community.edit")
 	case "blueprint":
 		return claimsAllow(claims, "project.edit."+publicID) || claimsAllow(claims, "blueprint.review")
 	case "skin":

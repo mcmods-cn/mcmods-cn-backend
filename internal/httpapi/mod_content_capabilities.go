@@ -22,7 +22,15 @@ func (s *Server) readableModIdentity(ctx context.Context, siteID string, claims 
 	if err != nil {
 		return identity, err
 	}
-	if !approved && !canEditMod(claims, identity) && !claimsAllow(claims, reviewPermission) {
+	canReview := claimsAllow(claims, reviewPermission)
+	if reviewPermission == "project.review" {
+		submittedBy := int64(0)
+		if identity.SubmittedByID != nil {
+			submittedBy = *identity.SubmittedByID
+		}
+		canReview = canReviewProjectSubmission(claims, identity.UniqueID, submittedBy)
+	}
+	if !approved && !canEditMod(claims, identity) && !canReview {
 		return modIdentityRecord{}, pgx.ErrNoRows
 	}
 	return identity, nil

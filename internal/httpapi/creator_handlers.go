@@ -550,7 +550,7 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 	var claimID int64
 	var claimPublicID string
 	err = tx.QueryRow(r.Context(), `insert into creator_claims(creator_id,user_id,proof_markdown,status,reviewed_by,reviewed_at)
-		values($1,$2,$3,$4,case when $4='approved' then $2 else null end,case when $4='approved' then now() else null end)
+		values($1,$2,$3,$4,null,null)
 		returning id,public_id`, creatorID, claims.Subject, request.ProofMarkdown, status).Scan(&claimID, &claimPublicID)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -715,6 +715,16 @@ func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	code := "creator_claim_approved"
+	if request.Status == "rejected" {
+		code = "creator_claim_rejected"
+	}
+	if err = enqueueTemplatedNotificationTx(r.Context(), tx, "creator.claim."+request.Status, userID, claims.Subject, code,
+		map[string]string{"name": name, "reason": request.Note},
+		map[string]any{"creatorId": publicID, "claimId": claimPublicID, "targetLabel": name, "url": creatorPath(kind, publicID)}, r.Header.Get("X-Request-ID")); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to queue author claim review notification")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit claim review")
 		return
@@ -725,13 +735,6 @@ func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	code := "creator_claim_approved"
-	if request.Status == "rejected" {
-		code = "creator_claim_rejected"
-	}
-	s.sendTemplatedNotification(r.Context(), userID, code, map[string]string{"name": name, "reason": request.Note}, map[string]any{
-		"creatorId": publicID, "targetLabel": name, "url": creatorPath(kind, publicID),
-	})
 	writeJSON(w, http.StatusOK, map[string]any{"id": claimPublicID, "status": request.Status})
 }
 
