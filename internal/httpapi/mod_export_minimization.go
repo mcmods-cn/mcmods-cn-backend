@@ -25,6 +25,9 @@ func minimizeExportPNG(data []byte) ([]byte, error) {
 			return nil, errors.New("truncated PNG data")
 		}
 		end := offset + 12 + int(n)
+		if crc32.ChecksumIEEE(data[offset+4:end-4]) != binary.BigEndian.Uint32(data[end-4:end]) {
+			return nil, errors.New("invalid PNG chunk checksum")
+		}
 		switch string(data[offset+4 : offset+8]) {
 		case "iCCP":
 			payload, err := projectExportICCChunk(data[offset+8 : end-4])

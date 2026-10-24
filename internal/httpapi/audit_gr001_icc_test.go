@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -110,10 +109,9 @@ func TestAuditGR001ICCMetadataRemovedWhileColorTransformsRemain(t *testing.T) {
 		t.Error("ICC metadata removal changed pixel/alpha")
 	}
 	if directory := os.Getenv("MCMODS_AUDIT_ICC_EVIDENCE_DIR"); directory != "" {
-		if !strings.HasPrefix(directory, "/workspace/audit-fixes-20261024/artifacts/") {
-			t.Fatal("ICC evidence destination is not task-owned artifacts")
-		}
-		if err := os.MkdirAll(directory, 0700); err != nil {
+		// The caller explicitly chooses a new evidence directory. Exclusive
+		// creation establishes ownership without relying on cloud-only paths.
+		if err := os.Mkdir(directory, 0700); err != nil {
 			t.Fatal(err)
 		}
 		for name, data := range map[string][]byte{"source.icc": profile, "sanitized.icc": sanitized, "sanitized.png": clean} {
@@ -137,6 +135,12 @@ func TestAuditGR001ICCTagRejectsUnregisteredTrailingPayload(t *testing.T) {
 	}
 	if registeredExportICCColorTag("rTRC", append(curve, []byte(auditGR001PrivateMarker)...)) {
 		t.Fatal("non-transform trailing metadata inherited ICC color permission")
+	}
+	_, enriched, _ := auditGR001ICCFixture(t)
+	corrupt := append([]byte(nil), enriched...)
+	corrupt[len(corrupt)-1] ^= 1
+	if _, err := minimizeExportPNG(corrupt); err == nil || err.Error() != "invalid PNG chunk checksum" {
+		t.Fatalf("expected exact invalid PNG checksum rejection, got %v", err)
 	}
 }
 

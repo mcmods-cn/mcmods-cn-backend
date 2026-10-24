@@ -47,3 +47,9 @@ go run ./cmd/db-import-privacy-audit --database <exact_database_name> --revision
 CLI 固定 `public,pg_catalog` 并启用数据库 `default_transaction_read_only`，无 apply/删除模式。合成旧数据副本的测试验证候选定位、作用域隔离、报告脱敏、上限和原行不变。它检测已知无关隐私键与资产注册问题；不能把 findings 为空当作所有未知秘密均不存在。单条超过 1MiB 的诊断负载明确记待检查，不假装扫描完整。外部 PNG/存储桶和缓存须另以授权资产字节核验，诊断不联网下载原包或读取生产对象。
 
 ICC 回归金样 `testdata/audit-20261024/icc-srgb-private-label.icc` 使用 LittleCMS 合法 sRGB profile，仅加入合成描述标记。验证真实 HTTP/数据库/实际 Worker/独审后匿名 PNG 字节、衍生哈希、像素/alpha、九个必要颜色 tag 原字节和 LittleCMS 289 个 RGB 样本转换结果。源 ICC 和派生 ICC 都能加载，转换逐字节一致。ICC 输入解压上限 4MiB，支持 RGB/GRAY 的 v2/v4 和已注册变换结构；未知 vendor tag、named-color/其它 color-space/多处理元素 codec 需提供明确颜色用途和正反金样后注册，不能以丢弃 ICC 通过验证。
+
+颜色复核命令：在执行 `TestAuditGR001ICCMetadataRemovedWhileColorTransformsRemain` 时设置 `MCMODS_AUDIT_ICC_EVIDENCE_DIR` 为新的本任务 artifacts 子目录（测试以 O_EXCL 创建三份样本，拒绝覆盖已有证据），然后运行：
+
+```sh
+python3 tools/audit/verify_icc_color_equivalence.py --source <evidence_dir>/source.icc --sanitized <evidence_dir>/sanitized.icc --output <evidence_dir>/color-equivalence.json
+```

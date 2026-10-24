@@ -54,6 +54,14 @@ func projectExportICCProfile(profile []byte) ([]byte, error) {
 	if pcs := string(profile[20:24]); pcs != "XYZ " && pcs != "Lab " {
 		return nil, errExportICCRegistration
 	}
+	switch string(profile[12:16]) {
+	case "scnr", "mntr", "prtr", "spac":
+	default:
+		return nil, errExportICCRegistration
+	}
+	if binary.BigEndian.Uint32(profile[64:68]) > 3 {
+		return nil, errExportICCRegistration
+	}
 	count := int(binary.BigEndian.Uint32(profile[128:132]))
 	if count > 1024 || count > (len(profile)-132)/12 {
 		return nil, errExportICCRegistration
@@ -92,6 +100,7 @@ func projectExportICCProfile(profile []byte) ([]byte, error) {
 		tags["cprt"] = append([]byte("text\x00\x00\x00\x00Metadata retained in private source"), 0)
 	}
 	result := append([]byte(nil), profile[:128]...)
+	clear(result[10:12])
 	clear(result[4:8])
 	clear(result[24:36])
 	binary.BigEndian.PutUint16(result[24:26], 2000)
