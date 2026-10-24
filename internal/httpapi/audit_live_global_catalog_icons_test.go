@@ -54,7 +54,7 @@ func auditGlobalCatalogTP007Ancestors(t *testing.T, f auditFixGRFixture, directo
 	if err := os.WriteFile(sourcePath, source, 0600); err != nil {
 		t.Fatal(err)
 	}
-	ticket := decodeTEST022Data[test037Ticket](t, f.require(t, f.editor, http.MethodPost, "/api/v1/users/me/oss/uploads/presign", map[string]any{"originalName": "tp007-icon.png", "contentType": "image/png", "source": "tp007_icon", "category": "mod_icon", "sizeBytes": len(source), "sha256": sourceSHA}, 200))
+	ticket := decodeTEST022Data[test037Ticket](t, f.require(t, f.editor, http.MethodPost, "/api/v1/users/me/oss/uploads/presign", map[string]any{"originalName": "tp007-icon.png", "contentType": "image/png", "source": "mod_resource:audit-gr-" + f.modCode + ":item:icon", "category": "mod_icon", "sizeBytes": len(source), "sha256": sourceSHA}, 200))
 	if !ticket.UploadRequired || ticket.Method != http.MethodPut || ticket.Multipart.UploadID != "" || ticket.SHA256 != sourceSHA {
 		t.Fatal("expected ordinary small-file upload ticket")
 	}
@@ -84,6 +84,7 @@ func auditGlobalCatalogTP007Ancestors(t *testing.T, f auditFixGRFixture, directo
 		SizeBytes   int64  `json:"sizeBytes"`
 	}
 	result := decodeTEST022Data[completed](t, f.require(t, f.editor, http.MethodPost, "/api/v1/users/me/oss/uploads/complete", ticket.completion(), 201))
+	auditJourneyWriteJSON(t, filepath.Join(directory, "tp007-upload-completion-facts.json"), map[string]any{"hasPublicId": result.ID != "", "hasStableReference": result.StorageURL != "", "contentType": result.ContentType, "sourceSHA256": result.SourceSHA, "storedSHA256": result.StoredSHA, "scanStatus": result.ScanStatus, "storedBytes": result.SizeBytes, "sourceContract": "Actual authorized Mod resource icon upload; synchronous raster validation stays enabled"})
 	if result.ID == "" || result.StorageURL == "" || result.ContentType != "image/png" || result.SourceSHA != sourceSHA || result.ScanStatus != "clean" {
 		t.Fatal("ordinary icon completion lacks validated scanned PNG facts")
 	}
