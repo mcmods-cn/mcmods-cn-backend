@@ -30,11 +30,27 @@ type yggdrasilTexture struct {
 }
 
 func (s *Server) buildYggdrasilProfile(ctx context.Context, profileID int64, signed bool) (yggdrasilProfile, error) {
-	yggdrasilConfig, service := s.yggdrasilRuntimeSnapshot()
 	profile, err := s.yggdrasilProfileRecordByID(ctx, profileID)
 	if err != nil {
 		return yggdrasilProfile{}, err
 	}
+	return s.buildYggdrasilProfileRecord(ctx, profile, signed)
+}
+
+func (s *Server) buildPublicYggdrasilProfile(ctx context.Context, profileID int64, signed bool) (yggdrasilProfile, error) {
+	// Fetch the record and its visibility together. An earlier UUID lookup
+	// must not authorize a newly renamed private record fetched afterwards.
+	var profile yggdrasilProfileRecord
+	err := s.db.QueryRow(ctx, `select id,uuid::text,name from player_profiles where id=$1 and status='active' and visibility<>'private'`, profileID).
+		Scan(&profile.InternalID, &profile.UUID, &profile.Name)
+	if err != nil {
+		return yggdrasilProfile{}, err
+	}
+	return s.buildYggdrasilProfileRecord(ctx, profile, signed)
+}
+
+func (s *Server) buildYggdrasilProfileRecord(ctx context.Context, profile yggdrasilProfileRecord, signed bool) (yggdrasilProfile, error) {
+	yggdrasilConfig, service := s.yggdrasilRuntimeSnapshot()
 	unsignedID, ok := unsignedYggdrasilUUID(profile.UUID)
 	if !ok {
 		return yggdrasilProfile{}, errors.New("invalid profile UUID in database")
@@ -45,7 +61,7 @@ func (s *Server) buildYggdrasilProfile(ctx context.Context, profileID int64, sig
 		 from player_profile_textures t
 		 join skin_assets a on a.id=t.asset_id and a.status='active' and a.review_status='approved' and a.visibility<>'private'
 		 join skin_texture_blobs b on b.hash=a.blob_hash
-		 where t.profile_id=$1`, profileID)
+		 where t.profile_id=$1`, profile.InternalID)
 	if err != nil {
 		return yggdrasilProfile{}, err
 	}
@@ -120,7 +136,11 @@ func (s *Server) yggdrasilProfileByUUID(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	signed := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("unsigned")), "false")
-	profile, err := s.buildYggdrasilProfile(r.Context(), profileID, signed)
+	profile, err := s.buildPublicYggdrasilProfile(r.Context(), profileID, signed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeYggdrasilNoContent(w)
+		return
+	}
 	if err != nil {
 		writeYggdrasilInternalError(w)
 		return
