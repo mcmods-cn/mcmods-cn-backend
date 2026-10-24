@@ -100,6 +100,22 @@ func blueprintFormatFromName(name string) string {
 }
 
 func (s *Server) createPendingBlueprint(ctx context.Context, ownerID int64, originalName string, uploadExpiresAt time.Time) (int64, string, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, "", err
+	}
+	defer tx.Rollback(ctx)
+	id, publicID, err := createPendingBlueprintTx(ctx, tx, ownerID, originalName, uploadExpiresAt, randomCatalogPublicID())
+	if err != nil {
+		return 0, "", err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, "", err
+	}
+	return id, publicID, nil
+}
+
+func createPendingBlueprintTx(ctx context.Context, tx pgx.Tx, ownerID int64, originalName string, uploadExpiresAt time.Time, publicID string) (int64, string, error) {
 	format := blueprintFormatFromName(originalName)
 	if !blueprintFormats[format] || format == "json" {
 		return 0, "", fmt.Errorf("unsupported blueprint format %q", format)
@@ -109,22 +125,14 @@ func (s *Server) createPendingBlueprint(ctx context.Context, ownerID int64, orig
 	}
 	title := strings.TrimSuffix(filepath.Base(originalName), filepath.Ext(originalName))
 	var id int64
-	var publicID string
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return 0, "", err
-	}
-	defer tx.Rollback(ctx)
+	var err error
 	// Uploads are private until normalization creates an approved revision or
 	// an actual review request; the schema's not_required default is not publish.
-	if err = tx.QueryRow(ctx, `insert into blueprints(owner_id,title,source_format,upload_expires_at,review_status) values($1,$2,$3,$4,'pending') returning id,public_id`, ownerID, title, format, uploadExpiresAt).Scan(&id, &publicID); err != nil {
+	if err = tx.QueryRow(ctx, `insert into blueprints(owner_id,title,source_format,upload_expires_at,review_status,public_id) values($1,$2,$3,$4,'pending',$5) returning id,public_id`, ownerID, title, format, uploadExpiresAt, publicID).Scan(&id, &publicID); err != nil {
 		return 0, "", err
 	}
 	if _, err = tx.Exec(ctx, `insert into content_localizations(subject_type,subject_id,locale,name,provenance,editable,review_status,updated_by)
 		values('blueprint',$1,'en-US',$2,'human',true,'approved',$3)`, id, title, ownerID); err != nil {
-		return 0, "", err
-	}
-	if err = tx.Commit(ctx); err != nil {
 		return 0, "", err
 	}
 	return id, publicID, nil
@@ -322,27 +330,50 @@ func (s *Server) blueprintForExistingFile(ctx context.Context, fileID, ownerID i
 	if fileID <= 0 {
 		return nil, nil
 	}
-	var publicID, status string
-	if s.db.QueryRow(ctx, `select public_id,status from blueprints where owner_id=$1 and original_file_id=$2 and status<>'deleted' order by created_at limit 1`, ownerID, fileID).Scan(&publicID, &status) == nil {
-		return map[string]any{"id": publicID, "status": status}, nil
-	}
-	var objectKey, originalName, contentType, sha string
-	var size int64
-	if s.db.QueryRow(ctx, `select object_key,source_original_name,content_type,source_size_bytes,sha256 from oss_files where id=$1 and uploader_id=$2 and status='active'`, fileID, ownerID).
-		Scan(&objectKey, &originalName, &contentType, &size, &sha) != nil || !isBlueprintExtension(filepath.Ext(originalName)) {
-		return nil, nil
-	}
-	blueprintID, publicID, err := s.createPendingBlueprint(ctx, ownerID, originalName, time.Now().Add(time.Hour))
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
-	_, _ = s.db.Exec(ctx, `update blueprints set original_object_key=$2 where id=$1`, blueprintID, objectKey)
-	blueprint, err := s.completeBlueprintUpload(ctx, fileID, ownerID, objectKey, originalName, contentType, size, sha)
+	defer tx.Rollback(ctx)
+	blueprint, err := s.blueprintForExistingFileTx(ctx, tx, fileID, ownerID)
 	if err != nil {
-		_, cleanupErr := s.db.Exec(ctx, `delete from blueprints where id=$1 and status='uploading'`, blueprintID)
-		return nil, errors.Join(err, cleanupErr)
+		return nil, err
 	}
-	return blueprint, nil
+	return blueprint, tx.Commit(ctx)
+}
+
+func (s *Server) blueprintForExistingFileTx(ctx context.Context, tx pgx.Tx, fileID, ownerID int64) (map[string]any, error) {
+	if fileID <= 0 {
+		return nil, nil
+	}
+	var publicID, status string
+	err := tx.QueryRow(ctx, `select public_id,status from blueprints where owner_id=$1 and original_file_id=$2 and status<>'deleted' order by created_at limit 1 for update`, ownerID, fileID).Scan(&publicID, &status)
+	if err == nil {
+		return map[string]any{"id": publicID, "status": status}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	var objectKey, originalName, contentType, sha string
+	var size int64
+	err = tx.QueryRow(ctx, `select object_key,source_original_name,content_type,source_size_bytes,sha256 from oss_files where id=$1 and uploader_id=$2 and status='active' for update`, fileID, ownerID).Scan(&objectKey, &originalName, &contentType, &size, &sha)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !isBlueprintExtension(filepath.Ext(originalName)) {
+		return nil, nil
+	}
+	id, _, err := createPendingBlueprintTx(ctx, tx, ownerID, originalName, time.Now().Add(time.Hour), randomCatalogPublicID())
+	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(ctx, `update blueprints set original_object_key=$2 where id=$1`, id, objectKey); err != nil {
+		return nil, err
+	}
+	return s.completeBlueprintUploadTx(ctx, tx, fileID, ownerID, objectKey, originalName, contentType, size, sha)
 }
 
 func (s *Server) reusableBlueprintByHash(ctx context.Context, sha string, size, requesterID int64) (map[string]any, error) {

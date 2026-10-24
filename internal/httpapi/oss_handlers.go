@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"mime"
 	"net/http"
 	"os"
@@ -337,6 +336,10 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 			return
 		}
 		if blueprint != nil {
+			if _, activityErr := s.commitOSSReuseTicket(r, 0, 0, "", "", false); activityErr != nil {
+				writeError(w, http.StatusInternalServerError, "failed to persist reused OSS upload ticket")
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]any{
 				"uploadRequired": false,
 				"blueprint":      blueprint,
@@ -389,19 +392,6 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		}
 	}
 	if exists {
-		if coverBlueprintID > 0 {
-			if existingInternalID > 0 {
-				bindErr := s.bindReusableBlueprintCover(r.Context(), coverBlueprintID, currentClaims(r).Subject, fmt.Sprint(existing["id"]), fmt.Sprint(existing["objectKey"]))
-				if errors.Is(bindErr, errReusableBlueprintCoverChanged) {
-					writeError(w, http.StatusConflict, "蓝图或封面文件状态已变化，请重新提交")
-					return
-				}
-				if bindErr != nil {
-					writeError(w, http.StatusInternalServerError, "保存蓝图封面失败")
-					return
-				}
-			}
-		}
 		objectKey := fmt.Sprint(existing["objectKey"])
 		access, accessErr := s.resolveOSSObjectAccessWithConfig(r.Context(), cfg, objectKey, ossObjectAccessOptions{})
 		if accessErr != nil {
@@ -423,16 +413,22 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 			"accessUrl":      access.URL,
 			"storageUrl":     ossStoredObjectURL(cfg, objectKey),
 		}
-		if blueprintUpload {
-			blueprint, blueprintErr := s.blueprintForExistingFile(r.Context(), existingInternalID, currentClaims(r).Subject)
-			if blueprintErr != nil {
-				writeBlueprintUploadAssociationError(w, blueprintErr, "failed to register blueprint processing task")
+		blueprint, commitErr := s.commitOSSReuseTicket(r, existingInternalID, coverBlueprintID, fmt.Sprint(existing["id"]), objectKey, blueprintUpload)
+		if commitErr != nil {
+			if errors.Is(commitErr, errReusableBlueprintCoverChanged) {
+				writeError(w, http.StatusConflict, "蓝图或封面文件状态已变化，请重新提交")
 				return
 			}
-			if blueprint != nil {
-				response["blueprint"] = blueprint
-				response["blueprintId"] = blueprint["id"]
+			if errors.Is(commitErr, errOSSReuseCoverBinding) {
+				writeError(w, http.StatusInternalServerError, "保存蓝图封面失败")
+				return
 			}
+			writeBlueprintUploadAssociationError(w, commitErr, "failed to persist reused OSS upload ticket")
+			return
+		}
+		if blueprint != nil {
+			response["blueprint"] = blueprint
+			response["blueprintId"] = blueprint["id"]
 		}
 		if coverPublicID != "" {
 			response["blueprintId"] = coverPublicID
@@ -463,146 +459,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 	}
 	expires := time.Duration(expiresMinutes) * time.Minute
 	uploadExpiresAt := time.Now().Add(expires)
-	blueprintID := int64(0)
-	blueprintPublicID := ""
-	if blueprintUpload {
-		blueprintID, blueprintPublicID, err = s.createPendingBlueprint(r.Context(), currentClaims(r).Subject, req.OriginalName, uploadExpiresAt)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "创建蓝图记录失败")
-			return
-		}
-		category = ossBlueprintReleaseCategory(blueprintPublicID, "original")
-		objectCategory = category
-		objectPrefix = ossRoot(cfg.Prefix)
-	}
-	objectKey := buildOSSObjectKeyForFile(objectPrefix, objectCategory, req.OriginalName)
-	if blueprintID > 0 {
-		command, updateErr := s.db.Exec(r.Context(), `update blueprints set original_object_key=$2,updated_at=now() where id=$1 and status='uploading'`, blueprintID, objectKey)
-		if updateErr != nil || command.RowsAffected() != 1 {
-			if discardErr := s.discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, blueprintID, ""); discardErr != nil {
-				log.Printf("discard blueprint upload %d after object-key persistence failure: %v", blueprintID, discardErr)
-			}
-			writeError(w, http.StatusInternalServerError, "保存蓝图上传会话失败")
-			return
-		}
-	}
-	_ = coverBlueprintID
-	quotaReservationObjectKey := ""
-	if scope == "user" {
-		storedReservation := req.SizeBytes
-		if deferStoredSizeCheck {
-			storedReservation = 0
-		}
-		if err = s.reserveUserOSSUploadQuota(r.Context(), currentClaims(r).Subject, objectKey,
-			req.SizeBytes, storedReservation, uploadExpiresAt, quotaLimits); err != nil {
-			if blueprintID > 0 {
-				if discardErr := s.discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, blueprintID, ""); discardErr != nil {
-					log.Printf("discard blueprint upload %d after quota rejection: %v", blueprintID, discardErr)
-				}
-			}
-			writeOSSUserQuotaError(w, err)
-			return
-		}
-		quotaReservationObjectKey = objectKey
-	}
-	releaseQuotaReservation := func() {
-		if quotaReservationObjectKey == "" {
-			return
-		}
-		if releaseErr := s.releaseUserOSSUploadQuotaReservation(r.Context(), currentClaims(r).Subject, quotaReservationObjectKey); releaseErr != nil {
-			log.Printf("release OSS upload quota reservation for %s: %v", quotaReservationObjectKey, releaseErr)
-		}
-	}
-	if shouldUseOSSMultipart(req.SizeBytes) {
-		multipart, multipartErr := s.initiateOSSMultipartUpload(
-			r.Context(), client, cfg, objectKey, contentType, req.SHA256, req.SizeBytes, expires,
-		)
-		if multipartErr != nil {
-			releaseQuotaReservation()
-			if blueprintID > 0 {
-				if discardErr := s.discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, blueprintID, ""); discardErr != nil {
-					log.Printf("discard blueprint upload %d after multipart initialization failure: %v", blueprintID, discardErr)
-				}
-			}
-			s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, objectKey, req.OriginalName, req.SizeBytes, s.requestClientLocation(r).IP, r.UserAgent(), "failed", multipartErr.Error())
-			writeError(w, http.StatusBadGateway, "生成 OSS 分片上传请求失败")
-			return
-		}
-		sessionRequest := req
-		sessionRequest.ContentType = contentType
-		sessionRequest.Category = category
-		sessionRequest.Source = source
-		if multipartErr = s.registerOSSMultipartSession(r.Context(), currentClaims(r).Subject, cfg, sessionRequest,
-			objectKey, multipart.UploadID, uploadExpiresAt); multipartErr != nil {
-			abortErr := abortOSSMultipartUpload(r.Context(), client, cfg, objectKey, multipart.UploadID)
-			releaseQuotaReservation()
-			if blueprintID > 0 {
-				if discardErr := s.discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, blueprintID, ""); discardErr != nil {
-					log.Printf("discard blueprint upload %d after multipart session persistence failure: %v", blueprintID, discardErr)
-				}
-			}
-			s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, objectKey, req.OriginalName, req.SizeBytes,
-				s.requestClientLocation(r).IP, r.UserAgent(), "failed", errors.Join(multipartErr, abortErr).Error())
-			writeError(w, http.StatusInternalServerError, "保存 OSS 分片上传会话失败")
-			return
-		}
-		response := map[string]any{
-			"method": "MULTIPART", "multipart": multipart,
-			"bucket": cfg.Bucket, "objectKey": objectKey, "category": category, "source": source,
-			"originalName": req.OriginalName, "contentType": contentType, "sizeBytes": req.SizeBytes,
-			"sha256": req.SHA256, "uploadRequired": true, "expiresAt": uploadExpiresAt,
-			"storageUrl": ossStoredObjectURL(cfg, objectKey),
-		}
-		if blueprintPublicID != "" {
-			response["blueprintId"] = blueprintPublicID
-			response["blueprint"] = map[string]any{"id": blueprintPublicID, "status": "uploading"}
-		}
-		writeJSON(w, http.StatusOK, response)
-		return
-	}
-	result, err := client.Presign(
-		r.Context(),
-		&aliyunoss.PutObjectRequest{
-			Bucket:          aliyunoss.Ptr(cfg.Bucket),
-			Key:             aliyunoss.Ptr(objectKey),
-			ContentType:     aliyunoss.Ptr(contentType),
-			ForbidOverwrite: aliyunoss.Ptr("true"),
-			Metadata:        map[string]string{"sha256": req.SHA256},
-		},
-		aliyunoss.PresignExpires(expires),
-	)
-	if err != nil {
-		releaseQuotaReservation()
-		if blueprintID > 0 {
-			if discardErr := s.discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, blueprintID, ""); discardErr != nil {
-				log.Printf("discard blueprint upload %d after presign failure: %v", blueprintID, discardErr)
-			}
-		}
-		s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, objectKey, req.OriginalName, req.SizeBytes, s.requestClientLocation(r).IP, r.UserAgent(), "failed", err.Error())
-		writeError(w, http.StatusBadGateway, "生成 OSS 上传链接失败")
-		return
-	}
-	response := map[string]any{
-		"method":         result.Method,
-		"url":            result.URL,
-		"headers":        result.SignedHeaders,
-		"bucket":         cfg.Bucket,
-		"objectKey":      objectKey,
-		"category":       category,
-		"source":         source,
-		"originalName":   req.OriginalName,
-		"contentType":    contentType,
-		"sizeBytes":      req.SizeBytes,
-		"sha256":         req.SHA256,
-		"uploadRequired": true,
-		"expiresAt":      uploadExpiresAt,
-		"storageUrl":     ossStoredObjectURL(cfg, objectKey),
-	}
-	if blueprintPublicID != "" {
-		response["blueprintId"] = blueprintPublicID
-		response["blueprint"] = map[string]any{"id": blueprintPublicID, "status": "uploading"}
-	}
-	writeJSON(w, http.StatusOK, response)
+	s.issueOSSUploadTicket(w, r, client, cfg, req, scope, category, source, objectPrefix, objectCategory, contentType, uploadExpiresAt, expires, blueprintUpload, quotaLimits, deferStoredSizeCheck)
 }
 
 var errReusableBlueprintCoverChanged = errors.New("reusable blueprint cover changed")
@@ -613,6 +470,14 @@ func (s *Server) bindReusableBlueprintCover(ctx context.Context, blueprintID, ow
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = bindReusableBlueprintCoverTx(ctx, tx, blueprintID, ownerID, filePublicID, objectKey); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func bindReusableBlueprintCoverTx(ctx context.Context, tx pgx.Tx, blueprintID, ownerID int64, filePublicID, objectKey string) error {
+	var err error
 	var locked int64
 	if err = tx.QueryRow(ctx, `select id from blueprints where id=$1 and owner_id=$2 and status<>'deleted' for update`, blueprintID, ownerID).Scan(&locked); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -637,7 +502,7 @@ func (s *Server) bindReusableBlueprintCover(ctx context.Context, blueprintID, ow
 	if command.RowsAffected() != 1 {
 		return errReusableBlueprintCoverChanged
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func (s *Server) completeOSSDirectUpload(w http.ResponseWriter, r *http.Request) {

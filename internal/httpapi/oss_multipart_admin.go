@@ -78,7 +78,7 @@ func (s *Server) adminReplayOSSMultipartSession(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	err = s.replayOSSMultipartSession(r.Context(), id, currentClaims(r).Subject)
+	err = s.replayOSSMultipartSessionWithRequest(r.Context(), id, currentClaims(r).Subject, r)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "OSS multipart session not found")
 		return
@@ -96,6 +96,10 @@ func (s *Server) adminReplayOSSMultipartSession(w http.ResponseWriter, r *http.R
 }
 
 func (s *Server) replayOSSMultipartSession(ctx context.Context, id, actorID int64) error {
+	return s.replayOSSMultipartSessionWithRequest(ctx, id, actorID, nil)
+}
+
+func (s *Server) replayOSSMultipartSessionWithRequest(ctx context.Context, id, actorID int64, request *http.Request) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -120,6 +124,11 @@ func (s *Server) replayOSSMultipartSession(ctx context.Context, id, actorID int6
 			'actorUserId',$2::bigint,'attempts',$3::integer,'maxAttempts',$4::integer,
 			'failureClass',$5::text,'lastError',$6::text))`, strconv.FormatInt(id, 10), actorID, attempts, maxAttempts, failureClass, lastError); err != nil {
 		return err
+	}
+	if request != nil {
+		if err = enqueueRequestActivityTx(request, tx); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }

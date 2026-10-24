@@ -111,21 +111,27 @@ func (s *Server) loadOSSUserQuotaAdmissionSnapshots(ctx context.Context, userID 
 }
 
 func (s *Server) reserveUserOSSUploadQuota(
-	ctx context.Context,
-	userID int64,
-	objectKey string,
-	sourceBytes, storedBytes int64,
-	expiresAt time.Time,
-	limits ossUserQuotaLimits,
+	ctx context.Context, userID int64, objectKey string,
+	sourceBytes, storedBytes int64, expiresAt time.Time, limits ossUserQuotaLimits,
 ) error {
-	if userID <= 0 || objectKey == "" || sourceBytes <= 0 || storedBytes < 0 || !expiresAt.After(time.Now()) {
-		return errors.New("上传额度预留参数不正确")
-	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = reserveUserOSSUploadQuotaTx(ctx, tx, userID, objectKey, sourceBytes, storedBytes, expiresAt, limits); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func reserveUserOSSUploadQuotaTx(
+	ctx context.Context, tx pgx.Tx, userID int64, objectKey string,
+	sourceBytes, storedBytes int64, expiresAt time.Time, limits ossUserQuotaLimits,
+) error {
+	if userID <= 0 || objectKey == "" || sourceBytes <= 0 || storedBytes < 0 || !expiresAt.After(time.Now()) {
+		return errors.New("上传额度预留参数不正确")
+	}
 	usageDate, err := lockOSSUserQuotaTx(ctx, tx, userID)
 	if err != nil {
 		return err
@@ -164,7 +170,7 @@ func (s *Server) reserveUserOSSUploadQuota(
 		ossUserQuotaReservation{usageDate: usageDate, sourceBytes: sourceBytes, storedBytes: storedBytes}, 1); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func (s *Server) releaseUserOSSUploadQuotaReservation(ctx context.Context, userID int64, objectKey string) error {

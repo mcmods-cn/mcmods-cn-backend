@@ -15,8 +15,9 @@ import (
 func TestOSSMultipartPersistenceAndAdminRoutesStayWired(t *testing.T) {
 	t.Parallel()
 	assertions := map[string][]string{
+		"oss_upload_ticket.go": {"registerOSSMultipartSessionTx", "initiateOSSMultipartUpload"},
 		"oss_handlers.go": {
-			"registerOSSMultipartSession",
+			"issueOSSUploadTicket",
 			"beginOSSMultipartSettlement",
 			"finishOSSMultipartSettlement",
 		},

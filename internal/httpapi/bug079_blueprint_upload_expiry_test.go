@@ -11,18 +11,25 @@ func TestBlueprintUploadFailureAndAbortPathsDiscardPendingSubjects(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ossHandlers := string(ossSource)
-	for _, required := range []string{
-		"createPendingBlueprint(r.Context(), currentClaims(r).Subject, req.OriginalName, uploadExpiresAt)",
-		"discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, blueprintID",
-		"discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, 0, req.ObjectKey)",
-	} {
-		if !strings.Contains(ossHandlers, required) {
-			t.Fatalf("blueprint upload lifecycle is missing %q", required)
+	ticketSource, err := os.ReadFile("oss_upload_ticket.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := string(ossSource) + string(ticketSource)
+	ticket := goFunctionBody(t, combined, "persistOSSUploadTicket")
+	for _, required := range []string{"createPendingBlueprintTx", "original_object_key=$2", "reserveUserOSSUploadQuotaTx", "registerOSSMultipartSessionTx", "enqueueRequestActivityTx(r, tx)", "defer tx.Rollback(ctx)", "tx.Commit(ctx)"} {
+		if !strings.Contains(ticket, required) {
+			t.Fatalf("pending blueprint/ticket rollback contract is missing %q", required)
 		}
 	}
-	if count := strings.Count(ossHandlers, "discardPendingBlueprintUpload("); count < 6 {
-		t.Fatalf("blueprint discard coverage = %d call sites, want quota/object-key/multipart/presign/abort coverage", count)
+	issuer := goFunctionBody(t, combined, "issueOSSUploadTicket")
+	if strings.Contains(issuer, "createPendingBlueprint(") || strings.Contains(issuer, "reserveUserOSSUploadQuota(") {
+		t.Fatal("remote ticket issuer commits partial blueprint/quota facts before its final transaction")
+	}
+	// A failed ticket never persisted a subject to discard; the original abort
+	// entry must still clean an already issued pending upload.
+	if !strings.Contains(combined, "discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, 0, req.ObjectKey)") {
+		t.Fatal("issued pending blueprint abort cleanup disappeared")
 	}
 
 	blueprintSource, err := os.ReadFile("blueprint_handlers.go")
@@ -35,8 +42,8 @@ func TestBlueprintUploadFailureAndAbortPathsDiscardPendingSubjects(t *testing.T)
 	}
 	blueprintHandlers := string(blueprintSource) + string(completionSource)
 	for _, required := range []string{
-		"insert into blueprints(owner_id,title,source_format,upload_expires_at,review_status)",
-		"values($1,$2,$3,$4,'pending')",
+		"insert into blueprints(owner_id,title,source_format,upload_expires_at,review_status,public_id)",
+		"values($1,$2,$3,$4,'pending',$5)",
 		"delete from content_localizations where subject_type='blueprint'",
 		"delete from content_subjects where subject_type='blueprint'",
 		"upload_expires_at=null",

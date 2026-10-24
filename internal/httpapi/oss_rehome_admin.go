@@ -77,7 +77,7 @@ func (s *Server) adminReplayOSSRehome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = s.replayOSSRehome(r.Context(), id, currentClaims(r).Subject)
+	err = s.replayOSSRehomeWithRequest(r.Context(), id, currentClaims(r).Subject, r)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "OSS rehome job not found")
 		return
@@ -95,6 +95,10 @@ func (s *Server) adminReplayOSSRehome(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) replayOSSRehome(ctx context.Context, id, actorID int64) error {
+	return s.replayOSSRehomeWithRequest(ctx, id, actorID, nil)
+}
+
+func (s *Server) replayOSSRehomeWithRequest(ctx context.Context, id, actorID int64, request *http.Request) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -128,6 +132,11 @@ func (s *Server) replayOSSRehome(ctx context.Context, id, actorID int64) error {
 		strconv.FormatInt(id, 10), actorID, modID, generation, attempts, maxAttempts, failureClass, lastError)
 	if err != nil {
 		return err
+	}
+	if request != nil {
+		if err = enqueueRequestActivityTx(request, tx); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5"
+	"net/http"
 )
 
 func (s *Server) restoreReportEvidenceForCompletedOSSFile(
@@ -208,4 +209,21 @@ func (s *Server) lockOSSCompletionAssociationsTx(ctx context.Context, tx pgx.Tx,
 		}
 	}
 	return nil
+}
+
+// Signing stays outside this transaction; the ticket is disclosed only after its
+// original activity and download counter have committed together.
+func (s *Server) commitOSSDownloadTicket(r *http.Request, objectKey string) error {
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(r.Context())
+	if err = persistOSSDownloadStat(r.Context(), tx, objectKey); err != nil {
+		return err
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		return err
+	}
+	return tx.Commit(r.Context())
 }

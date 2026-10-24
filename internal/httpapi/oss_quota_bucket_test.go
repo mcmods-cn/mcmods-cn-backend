@@ -15,7 +15,11 @@ func TestOSSUploadQuotaHotPathsUseAtomicBuckets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ossSource := string(ossBytes) + string(ossAdminBytes)
+	ticketBytes, err := os.ReadFile("oss_upload_ticket.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ossSource := string(ossBytes) + string(ossAdminBytes) + string(ticketBytes)
 	for _, name := range []string{"enforceUserFileUploadLimits", "enforceUserStoredFileLimit"} {
 		body := goFunctionBody(t, ossSource, name)
 		if strings.Contains(strings.ToLower(body), "sum(") || strings.Contains(body, "from oss_files") {
@@ -38,9 +42,13 @@ func TestOSSUploadQuotaHotPathsUseAtomicBuckets(t *testing.T) {
 		}
 	}
 	presignBody := goFunctionBody(t, ossSource, "createOSSDirectUploadWithScope")
-	for _, fragment := range []string{"reserveUserOSSUploadQuota", "releaseQuotaReservation", "quotaReservationObjectKey"} {
-		if !strings.Contains(presignBody, fragment) {
-			t.Fatalf("direct upload presign does not use quota reservation step %q", fragment)
+	if !strings.Contains(presignBody, "issueOSSUploadTicket") {
+		t.Fatal("direct upload presign bypasses its transactional ticket issuer")
+	}
+	ticketBody := goFunctionBody(t, ossSource, "persistOSSUploadTicket")
+	for _, fragment := range []string{"reserveUserOSSUploadQuotaTx", "enqueueRequestActivityTx(r, tx)", "tx.Commit(ctx)", "defer tx.Rollback(ctx)"} {
+		if !strings.Contains(ticketBody, fragment) {
+			t.Fatalf("ticket reservation is not atomic with original activity: %q", fragment)
 		}
 	}
 	completeBody := goFunctionBody(t, ossSource, "completeOSSDirectUploadWithScope")

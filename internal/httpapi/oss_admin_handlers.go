@@ -808,7 +808,10 @@ func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadGateway, "failed to generate OSS download URL")
 		return false
 	}
-	s.recordOSSDownloadStat(r.Context(), req.ObjectKey)
+	if err = s.commitOSSDownloadTicket(r, req.ObjectKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist OSS download")
+		return false
+	}
 	writeJSON(w, http.StatusOK, payload)
 	return true
 }

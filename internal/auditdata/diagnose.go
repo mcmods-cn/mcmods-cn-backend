@@ -28,6 +28,7 @@ func Inspect(ctx context.Context, pool *pgxpool.Pool, since, until time.Time, li
 		"Numeric-recipient collision candidates do not establish sender intent. Never change balances from this report; correlate original request evidence and preserve the ledger.",
 		"Unverified source hashes are unknown, not proven corrupt. Shared references are retained. Converted bytes cannot prove a missing original source hash.",
 		"Sensitive JSON key matches are triage candidates; values are never returned. PNG chunks, original attachments and third-party downloads are not inspected or recalled.",
+		"Historical OSS status, upload logs and file metadata cannot prove an absent activity or intended reward. This report never synthesizes rewards; recover only an existing exact durable intent through its fenced worker.",
 		"This tool performs no repair or publication changes. Production execution requires its own authorization and backup/compensation review.",
 	}}
 	if since.IsZero() || !until.After(since) || limit < 1 || limit > 1000 {
@@ -102,6 +103,9 @@ func Inspect(ctx context.Context, pool *pgxpool.Pool, since, until time.Time, li
 		return report, err
 	}
 	if err = run("rejected_active_import_projection_candidates", `select count(*) over(),to_jsonb(mod.project_code) from catalog_import_revisions revision join mods mod on mod.id=revision.mod_id where revision.status='rejected' and revision.is_active and revision.created_at>=$1 and revision.created_at<$2 order by revision.id limit $3`); err != nil {
+		return report, err
+	}
+	if err = inspectOSSLifecycle(run); err != nil {
 		return report, err
 	}
 	// Count real FK references without returning object paths, titles or private

@@ -31,7 +31,11 @@ func (s *Server) registerOSSMultipartSession(
 	objectKey, uploadID string,
 	expiresAt time.Time,
 ) error {
-	_, err := s.db.Exec(ctx, `insert into oss_multipart_sessions(
+	return registerOSSMultipartSessionTx(ctx, s.db, ownerID, cfg, req, objectKey, uploadID, expiresAt)
+}
+
+func registerOSSMultipartSessionTx(ctx context.Context, writer ossDownloadStatWriter, ownerID int64, cfg ossConfigPayload, req ossDirectUploadRequest, objectKey, uploadID string, expiresAt time.Time) error {
+	_, err := writer.Exec(ctx, `insert into oss_multipart_sessions(
 		owner_id,bucket,endpoint,region,use_cname,object_key,upload_id,original_name,content_type,
 		size_bytes,sha256,category,source,expires_at)
 		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,

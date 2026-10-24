@@ -77,7 +77,7 @@ func (s *Server) adminReplayOSSDeletion(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	err = s.replayOSSDeletion(r.Context(), id, currentClaims(r).Subject)
+	err = s.replayOSSDeletionWithRequest(r.Context(), id, currentClaims(r).Subject, r)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "OSS deletion job not found")
 		return
@@ -95,6 +95,10 @@ func (s *Server) adminReplayOSSDeletion(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) replayOSSDeletion(ctx context.Context, id, actorID int64) error {
+	return s.replayOSSDeletionWithRequest(ctx, id, actorID, nil)
+}
+
+func (s *Server) replayOSSDeletionWithRequest(ctx context.Context, id, actorID int64, request *http.Request) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -127,6 +131,11 @@ func (s *Server) replayOSSDeletion(ctx context.Context, id, actorID int64) error
 		strconv.FormatInt(id, 10), actorID, attempts, maxAttempts, failureClass, lastError)
 	if err != nil {
 		return err
+	}
+	if request != nil {
+		if err = enqueueRequestActivityTx(request, tx); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
