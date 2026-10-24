@@ -72,29 +72,12 @@ func TestAuditLiveTP008Fixture(t *testing.T) {
 	f := newAuditFixGRFixture(t, 45*time.Minute)
 	ctx, cancel := context.WithCancel(f.ctx)
 	defer cancel()
-	// createTEST044User deliberately starts without registration roles. This
-	// browser actor needs the existing ordinary registered user's autosave
-	// qualification, so apply the same configured role path as registration
-	// before the fixture exposes its first request. No runtime escalation occurs.
-	roleTx, err := f.db.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer roleTx.Rollback(ctx)
-	defaults, err := permissionDefaultsFromSettingsWithQueryer(ctx, roleTx)
-	if err != nil || defaults.RegisteredRole != "registered" {
-		t.Fatal("fixture requires the seeded ordinary registered role", err)
-	}
-	if err = f.server.assignConfiguredRoleTx(ctx, roleTx, f.userIDs[f.editor], "registered"); err != nil {
-		t.Fatal(err)
-	}
-	var draftQualification bool
-	if err = roleTx.QueryRow(ctx, `select exists(select 1 from user_role_bindings binding join roles role on role.id=binding.role_id join role_permissions entry on entry.role_id=role.id join permissions permission on permission.id=entry.permission_id where binding.user_id=$1 and role.code=$2 and entry.allow and permission.code='user.draft.retention_seconds.2592000')`, f.userIDs[f.editor], defaults.RegisteredRole).Scan(&draftQualification); err != nil || !draftQualification {
-		t.Fatal("ordinary registered role lacks the documented 30-day draft qualification", err)
-	}
-	if err = roleTx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
+	// The isolated migration helper does not install registration-role seeds.
+	// Configure only the existing ordinary user's documented draft capability
+	// before exposing the API, rather than silently seeding unrelated roles or
+	// changing permissions during a failed business flow. This permission is in
+	// seedRoles[registered]; it grants storage duration, never review bypass.
+	grantTEST044Permissions(t, ctx, f.db, f.userIDs[f.editor], "user.draft.retention_seconds.2592000")
 	types := []string{"plugin", "map", "resource_pack", "shader_pack", "datapack", "addon"}
 	for _, kind := range types {
 		grantTEST044Permissions(t, ctx, f.db, f.userIDs[f.editor], "project.create."+kind)
@@ -282,7 +265,7 @@ func TestAuditLiveTP008Fixture(t *testing.T) {
 	authPath := filepath.Join(directory, "auth.private.json")
 	auditJourneyWriteJSON(t, authPath, map[string]any{"creatorToken": f.editor, "reviewerToken": f.reviewer})
 	runtimePath, stopPath := filepath.Join(directory, "runtime.json"), filepath.Join(directory, "STOP")
-	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "repoRevisions": revisions, "creatorPublicId": creator, "reviewerPublicId": reviewer, "parentModPublicId": f.modCode, "parentModSiteId": "audit-gr-" + f.modCode, "parentModName": "Audit game import 0", "relationCreatorPublicId": relationCreator, "relationCreatorName": "TP008 Public Author", "supportedCombinations": combinations, "natsURL": broker.ClientURL(), "natsStream": cfg.NATS.JetStream.Stream, "antiAbuseEnabled": cfg.AntiAbuse.Enabled, "draftStorageQualification": map[string]any{"role": defaults.RegisteredRole, "permission": "user.draft.retention_seconds.2592000", "assignedBeforeAPIExposure": true, "viaActualRegistrationRolePath": true, "sources": []string{"internal/database/seeds.go:registered", "internal/httpapi/auth_handlers.go:assignConfiguredRoleTx", "internal/httpapi/permission_defaults_handlers.go:assignConfiguredRoleTx"}}, "scope": "Actual controlled provider HTTP, API/PostgreSQL, real JetStream+metadata Worker for MR5. CF6 adapter+draft boundary only. External browser evidence and final DB/queue review required; fixture exit is not acceptance."}
+	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "repoRevisions": revisions, "creatorPublicId": creator, "reviewerPublicId": reviewer, "parentModPublicId": f.modCode, "parentModSiteId": "audit-gr-" + f.modCode, "parentModName": "Audit game import 0", "relationCreatorPublicId": relationCreator, "relationCreatorName": "TP008 Public Author", "supportedCombinations": combinations, "natsURL": broker.ClientURL(), "natsStream": cfg.NATS.JetStream.Stream, "antiAbuseEnabled": cfg.AntiAbuse.Enabled, "draftStorageQualification": map[string]any{"permission": "user.draft.retention_seconds.2592000", "assignedBeforeAPIExposure": true, "viaActualRegistrationRolePath": false, "configuration": "isolated migration helper has no registration-role seeds; explicit ordinary capability from existing registered seed", "sources": []string{"internal/database/seeds.go:seedRoles[registered]", "internal/httpapi/draft_handlers.go:draftRetentionSeconds"}}, "scope": "Actual controlled provider HTTP, API/PostgreSQL, real JetStream+metadata Worker for MR5. CF6 adapter+draft boundary only. External browser evidence and final DB/queue review required; fixture exit is not acceptance."}
 	update := func(state string) {
 		runtime["state"] = state
 		runtime["updatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
