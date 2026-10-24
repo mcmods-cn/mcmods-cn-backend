@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"mcmods-cn-backend/internal/activity"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -396,6 +397,9 @@ func (s *Server) deleteFavoriteCollection(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) favoriteMembershipSummary(w http.ResponseWriter, r *http.Request) {
+	// This POST is a bounded read query. Preserve view history and avoid
+	// manufacturing a business Create contribution from the HTTP verb.
+	annotateActivity(r, activity.ActionView, activity.ObjectUser, "", 0)
 	var request favoriteMembershipSummaryRequest
 	if decodeJSON(r, &request) != nil {
 		writeError(w, http.StatusBadRequest, "invalid favorite membership summary")
