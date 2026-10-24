@@ -256,9 +256,13 @@ func TestAuditP2SL001RecipeParentArchiveRestoreAndIndependentPublicObjectHTTPPos
 func TestAuditP2SL001SkinCurrentStateAndRoleMatrixHTTPPostgresIntegration(t *testing.T) {
 	f := newTEST039Fixture(t)
 	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.denied], "admin.*")
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "project.editor.apply")
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.reviewer], "project.editor.review")
 	file := f.upload(t, f.editor, "p2-shortlink-skin.png", test039PNG(t, 64, 64, 101))
 	skin := f.asset(t, f.editor, file, "P2 hidden skin title", "public")
 	f.review(t, skin.PublicID, "approved")
+	applicationPath := "/api/v1/projects/skin/" + skin.PublicID + "/editor-applications"
+	application := decodeTEST022Data[projectEditorApplicationResponse](t, f.require(t, f.otherEditor, http.MethodPost, applicationPath, map[string]string{"proofMarkdown": "Synthetic legal skin application"}, 201))
 	for _, state := range []struct {
 		visibility, review, status string
 		want                       int
@@ -285,8 +289,31 @@ func TestAuditP2SL001SkinCurrentStateAndRoleMatrixHTTPPostgresIntegration(t *tes
 			}
 		}
 		if state.visibility == "private" && state.status == "active" && state.review == "approved" {
+			counts := func() [3]int64 {
+				t.Helper()
+				var n [3]int64
+				for i, table := range []string{"project_editor_applications", "project_editor_assignments", "nats_outbox"} {
+					if err := f.db.QueryRow(f.ctx, `select count(*) from `+table).Scan(&n[i]); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return n
+			}
+			before := counts()
+			for _, method := range []string{http.MethodGet, http.MethodPost} {
+				f.require(t, f.otherEditor, method, applicationPath, map[string]string{"proofMarkdown": "Private target proof"}, 404)
+			}
+			f.require(t, f.reviewer, http.MethodPatch, "/api/v1/admin/project-editor-applications/"+application.ID, map[string]string{"status": "approved"}, 409)
+			if after := counts(); after != before {
+				t.Fatalf("private skin resolution/application/review changed rows %v -> %v", before, after)
+			}
 			f.require(t, f.editor, http.MethodGet, "/api/v1/skins/"+skin.PublicID, nil, 200)
 			f.require(t, f.otherEditor, http.MethodGet, "/api/v1/skins/"+skin.PublicID, nil, 404)
 		}
+	}
+	f.require(t, f.reviewer, http.MethodPatch, "/api/v1/admin/project-editor-applications/"+application.ID, map[string]string{"status": "approved", "note": "Independent restored public skin"}, 200)
+	var grants int
+	if err := f.db.QueryRow(f.ctx, `select count(*) from project_editor_assignments assignment join public_routes route on route.id=assignment.target_route_id where route.public_id=$1 and assignment.user_id=$2 and assignment.status='active'`, skin.PublicID, f.userIDs[f.otherEditor]).Scan(&grants); err != nil || grants != 1 {
+		t.Fatalf("restored legal skin grants=%d err=%v", grants, err)
 	}
 }
