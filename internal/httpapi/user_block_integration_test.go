@@ -6,37 +6,21 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"mcmods-cn-backend/internal/config"
-	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/querycache"
 	"mcmods-cn-backend/internal/security"
 )
 
 func TestUserBlockRelationshipAndOwnedCommentTargetsIntegration(t *testing.T) {
-	databaseURL := os.Getenv("MCMODS_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
-			t.Skip("set MCMODS_TEST_DATABASE_URL or MCMODS_RUN_DB_INTEGRATION=1 to run the user block integration test")
-		}
-		databaseURL = config.Load().DB.ConnString()
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	db, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err = database.Migrate(ctx, db); err != nil {
-		t.Fatal(err)
-	}
+	// Use the same owned isolated empty-install database as the full HTTP
+	// lifecycle. Running Migrate on an already populated shared public schema
+	// requires explicit identity/OSS upgrade authorization and is not a fixture.
+	fixture := newTEST013Fixture(t)
+	ctx, db := fixture.ctx, fixture.db
+	var err error
 
 	fixtureKey := fmt.Sprintf("user-block-integration-%d", time.Now().UnixNano())
 	var ownerID, blockedID int64
