@@ -578,6 +578,15 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	if scope == "user" {
 		blueprintPrefix := path.Join(ossRoot(cfg.Prefix), ossProjectDirectory, normalizeOSSProjectKind("blueprint"))
 		isBlueprintObject := isAllowedObjectKey(req.ObjectKey, blueprintPrefix) && (s.userOwnsPendingBlueprintObject(r.Context(), currentClaims(r).Subject, req.ObjectKey) || s.userOwnsBlueprintObject(r.Context(), currentClaims(r).Subject, req.ObjectKey))
+		// A successful cancellation removes its pending blueprint. The immutable
+		// uploader-bound session still authorizes an idempotent abort response.
+		if !isBlueprintObject && isAllowedObjectKey(req.ObjectKey, blueprintPrefix) && req.MultipartAction == "abort" && req.MultipartUploadID != "" {
+			isBlueprintObject, err = s.ownsMultipartBlueprintAbort(r.Context(), currentClaims(r).Subject, cfg, req)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "读取 OSS 分片取消权限失败")
+				return
+			}
+		}
 		expectedCategory := ""
 		if !isBlueprintObject {
 			expectedCategory, err = s.resolveUserOSSUploadCategory(r, rawCategory, req.Source)
@@ -636,7 +645,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		}
 	}
 	if req.MultipartUploadID != "" && req.MultipartAction == "abort" {
-		settlement, settlementErr := s.beginOSSMultipartSettlement(r.Context(), currentClaims(r).Subject, cfg, req, "abort")
+		settlement, settlementErr := s.beginOSSMultipartSettlementWithRequest(r.Context(), currentClaims(r).Subject, cfg, req, "abort", r)
 		if writeOSSMultipartSettlementError(w, settlementErr) {
 			return
 		}
@@ -652,16 +661,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 			writeError(w, http.StatusBadGateway, "取消 OSS 分片上传失败")
 			return
 		}
-		if scope == "user" {
-			if releaseErr := s.releaseUserOSSUploadQuotaReservation(r.Context(), currentClaims(r).Subject, req.ObjectKey); releaseErr != nil {
-				writeError(w, http.StatusInternalServerError, "释放上传额度预留失败")
-				return
-			}
-			if discardErr := s.discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, 0, req.ObjectKey); discardErr != nil {
-				writeError(w, http.StatusInternalServerError, "清理已取消的蓝图上传失败")
-				return
-			}
-		}
+
 		s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, req.ObjectKey, req.OriginalName, req.SizeBytes, s.requestClientLocation(r).IP, r.UserAgent(), "cancelled", "multipart upload aborted")
 		writeJSON(w, http.StatusOK, map[string]any{"aborted": true})
 		return

@@ -26,10 +26,16 @@ func TestBlueprintUploadFailureAndAbortPathsDiscardPendingSubjects(t *testing.T)
 	if strings.Contains(issuer, "createPendingBlueprint(") || strings.Contains(issuer, "reserveUserOSSUploadQuota(") {
 		t.Fatal("remote ticket issuer commits partial blueprint/quota facts before its final transaction")
 	}
-	// A failed ticket never persisted a subject to discard; the original abort
-	// entry must still clean an already issued pending upload.
-	if !strings.Contains(combined, "discardPendingBlueprintUpload(r.Context(), currentClaims(r).Subject, 0, req.ObjectKey)") {
-		t.Fatal("issued pending blueprint abort cleanup disappeared")
+	// A failed ticket never persisted a subject to discard. Issued upload aborts
+	// and recovered leases share the final transactional subject cleanup.
+	abortSource, err := os.ReadFile("oss_multipart_activity.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"finishOSSMultipartAbort", "deletePendingBlueprintUploadRowsTx(ctx, tx, ids)", "releaseOSSUserQuotaReservationTx(ctx, tx, actor, objectKey)", "tx.Commit(ctx)"} {
+		if !strings.Contains(string(abortSource), fragment) {
+			t.Fatalf("issued pending blueprint abort lost atomic cleanup %q", fragment)
+		}
 	}
 
 	blueprintSource, err := os.ReadFile("blueprint_handlers.go")

@@ -275,7 +275,10 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		if err = requireNotificationVisibilitySchema(ctx, conn); err != nil {
 			return err
 		}
-		return RequireCatalogImportPolicySchema(ctx, conn)
+		if err = RequireCatalogImportPolicySchema(ctx, conn); err != nil {
+			return err
+		}
+		return RequireOSSMultipartActivitySchema(ctx, conn)
 	}
 
 	tx, err := conn.Begin(ctx)
@@ -348,6 +351,7 @@ func schemaInstallationStatements() []string {
 	statements = append(statements, NotificationVisibilitySchemaStatements()...)
 	statements = append(statements, auditIdentityOSSSchemaStatements()...)
 	statements = append(statements, CatalogImportPolicySchemaStatements()...)
+	statements = append(statements, OSSMultipartActivitySchemaStatements()...)
 	return append(statements, foreignKeyIndexStatement())
 }
 

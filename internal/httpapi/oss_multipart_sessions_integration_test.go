@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -249,33 +250,22 @@ func openOSSMultipartStateTestDB(t *testing.T) *pgxpool.Pool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	fixture, err := database.NewIsolatedTestSchema(ctx, databaseURL, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	poolConfig.MaxConns = 1
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-	if err != nil {
+	t.Cleanup(func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := fixture.Close(cleanup); err != nil {
+			t.Error(err)
+		}
+	})
+	pool := fixture.Pool
+	if _, err = pool.Exec(ctx, `insert into users(id,username,email,password_hash) values(101,'multipart-state-owner','multipart-owner@example.invalid','synthetic'),(202,'multipart-state-other','multipart-other@example.invalid','synthetic'),(7001,'multipart-state-reviewer','multipart-reviewer@example.invalid','synthetic')`); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pool.Close)
-	if _, err = pool.Exec(ctx, `create temp table oss_multipart_sessions(
-		id bigserial primary key,public_id text not null unique default new_public_id(),owner_id bigint,bucket text not null,endpoint text not null,region text not null,use_cname boolean not null default false,
-		object_key text not null,upload_id text not null,original_name text not null,content_type text not null,size_bytes bigint not null,sha256 text not null,
-		category text not null,source text not null,status text not null default 'active',attempts integer not null default 0,max_attempts integer not null default 12,
-		next_attempt_at timestamptz not null default now(),locked_by text not null default '',lease_expires_at timestamptz,last_error text not null default '',
-		failure_class text not null default '',expires_at timestamptz not null,created_at timestamptz not null default now(),updated_at timestamptz not null default now(),
-		completed_at timestamptz,aborted_at timestamptz,dead_at timestamptz,replay_count integer not null default 0,last_replayed_at timestamptz,last_replayed_by bigint,
-		unique(bucket,endpoint,object_key,upload_id));
-		create index idx_oss_multipart_sessions_expired on oss_multipart_sessions(expires_at,id) where status='active' and attempts<max_attempts;
-		create index idx_oss_multipart_sessions_cleanup on oss_multipart_sessions(next_attempt_at,id) where status='cleanup_pending' and attempts<max_attempts;
-		create index idx_oss_multipart_sessions_lease on oss_multipart_sessions(lease_expires_at,id) where status in ('completing','aborting') and attempts<max_attempts;
-		create index idx_oss_multipart_sessions_exhausted on oss_multipart_sessions(updated_at,id) where status in ('active','completing','cleanup_pending','aborting') and attempts>=max_attempts;
-		create index idx_oss_multipart_sessions_dead on oss_multipart_sessions(dead_at desc,id desc) where status='dead';
-		create temp table app_logs(id bigserial primary key,category text not null,level text not null,action text not null,target text not null,payload jsonb not null default '{}'::jsonb)`); err != nil {
-		pool.Close()
-		t.Fatal(err)
-	}
+
 	return pool
 }
 

@@ -51,6 +51,10 @@ func (s *Server) beginOSSMultipartSettlement(
 	req ossCompleteUploadRequest,
 	action string,
 ) (ossMultipartSettlement, error) {
+	return s.beginOSSMultipartSettlementWithRequest(ctx, ownerID, cfg, req, action, nil)
+}
+
+func (s *Server) beginOSSMultipartSettlementWithRequest(ctx context.Context, ownerID int64, cfg ossConfigPayload, req ossCompleteUploadRequest, action string, request *http.Request) (ossMultipartSettlement, error) {
 	var settlement ossMultipartSettlement
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -60,11 +64,12 @@ func (s *Server) beginOSSMultipartSettlement(
 	var sessionOwner *int64
 	var status, originalName, contentType, sha256, category, source string
 	var sizeBytes int64
-	var leaseExpiresAt *time.Time
-	err = tx.QueryRow(ctx, `select id,owner_id,status,original_name,content_type,size_bytes,sha256,category,source,lease_expires_at
+	var intentRaw []byte
+	var leaseActive bool
+	err = tx.QueryRow(ctx, `select id,owner_id,status,original_name,content_type,size_bytes,sha256,category,source,coalesce(lease_expires_at>clock_timestamp(),false),abort_activity_intent
 		from oss_multipart_sessions where bucket=$1 and endpoint=$2 and object_key=$3 and upload_id=$4 for update`,
 		cfg.Bucket, cfg.Endpoint, req.ObjectKey, req.MultipartUploadID).
-		Scan(&settlement.ID, &sessionOwner, &status, &originalName, &contentType, &sizeBytes, &sha256, &category, &source, &leaseExpiresAt)
+		Scan(&settlement.ID, &sessionOwner, &status, &originalName, &contentType, &sizeBytes, &sha256, &category, &source, &leaseActive, &intentRaw)
 	if err != nil {
 		return settlement, err
 	}
@@ -74,6 +79,13 @@ func (s *Server) beginOSSMultipartSettlement(
 	if originalName != req.OriginalName || contentType != req.ContentType || sizeBytes != req.SizeBytes || sha256 != req.SHA256 || category != req.Category || source != req.Source {
 		return settlement, errOSSMultipartSessionForbidden
 	}
+	existingIntent, err := decodeOSSMultipartAbortIntent(intentRaw, ownerID)
+	if err != nil {
+		return settlement, err
+	}
+	if action == "complete" && existingIntent != nil && !existingIntent.Queued {
+		return settlement, errOSSMultipartSessionConflict
+	}
 	terminal := "completed"
 	processing := "completing"
 	if action == "abort" {
@@ -82,29 +94,46 @@ func (s *Server) beginOSSMultipartSettlement(
 	}
 	if status == terminal {
 		settlement.Already = true
-		return settlement, tx.Commit(ctx)
+		err = tx.Commit(ctx)
+		if err == nil && action == "abort" && request != nil {
+			skipRequestActivity(request)
+		}
+		return settlement, err
 	}
-	if (status == "completing" || status == "aborting") && leaseExpiresAt != nil && leaseExpiresAt.After(time.Now()) {
+	if (status == "completing" || status == "aborting") && leaseActive {
 		return settlement, errOSSMultipartSessionConflict
 	}
 	allowedStale := (action == "complete" && status == "completing") || (action == "abort" && (status == "completing" || status == "aborting"))
 	if status != "active" && status != "cleanup_pending" && !allowedStale {
 		return settlement, errOSSMultipartSessionConflict
 	}
+	if action == "abort" && request != nil && existingIntent == nil {
+		intentRaw, err = newOSSMultipartAbortIntent(request, ownerID)
+		if err != nil {
+			return settlement, err
+		}
+	}
 	settlement.Token = "multipart-http:" + newExportID()
 	tag, err := tx.Exec(ctx, `update oss_multipart_sessions set status=$2,locked_by=$3,
-		lease_expires_at=now()+interval '2 minutes',last_error='',failure_class='',updated_at=now()
-		where id=$1 and status=$4`, settlement.ID, processing, settlement.Token, status)
+		lease_expires_at=now()+interval '2 minutes',last_error='',failure_class='',abort_activity_intent=$5::jsonb,updated_at=now()
+		where id=$1 and status=$4`, settlement.ID, processing, settlement.Token, status, intentRaw)
 	if err != nil {
 		return settlement, err
 	}
 	if tag.RowsAffected() != 1 {
 		return settlement, errOSSMultipartSessionConflict
 	}
-	return settlement, tx.Commit(ctx)
+	err = tx.Commit(ctx)
+	if err == nil && action == "abort" && request != nil {
+		skipRequestActivity(request)
+	}
+	return settlement, err
 }
 
 func (s *Server) finishOSSMultipartSettlement(ctx context.Context, settlement ossMultipartSettlement, action string, operationErr error) error {
+	if action == "abort" && operationErr == nil {
+		return s.finishOSSMultipartAbort(ctx, settlement)
+	}
 	if settlement.Already {
 		return nil
 	}
@@ -118,16 +147,16 @@ func (s *Server) finishOSSMultipartSettlement(ctx context.Context, settlement os
 	var err error
 	if operationErr == nil {
 		query := fmt.Sprintf(`update oss_multipart_sessions set status=$3,locked_by='',lease_expires_at=null,
-			last_error='',failure_class='',%s=now(),updated_at=now() where id=$1 and locked_by=$2`, timeColumn)
+			last_error='',failure_class='',%s=now(),updated_at=now() where id=$1 and locked_by=$2 and status='completing' and lease_expires_at>clock_timestamp()`, timeColumn)
 		tag, err = s.db.Exec(ctx, query, settlement.ID, settlement.Token, status)
 	} else if action == "abort" {
 		decision := classifyOSSDeletionFailure(operationErr)
 		tag, err = s.db.Exec(ctx, `update oss_multipart_sessions set status='cleanup_pending',locked_by='',lease_expires_at=null,
-			next_attempt_at=now(),last_error=$3,failure_class=$4,updated_at=now() where id=$1 and locked_by=$2`,
+			next_attempt_at=now(),last_error=$3,failure_class=$4,updated_at=now() where id=$1 and locked_by=$2 and status='aborting' and lease_expires_at>clock_timestamp()`,
 			settlement.ID, settlement.Token, truncateOSSDeletionError(operationErr), decision.class)
 	} else {
 		tag, err = s.db.Exec(ctx, `update oss_multipart_sessions set status='active',locked_by='',lease_expires_at=null,
-			last_error=$3,failure_class='',updated_at=now() where id=$1 and locked_by=$2`,
+			last_error=$3,failure_class='',updated_at=now() where id=$1 and locked_by=$2 and status='completing' and lease_expires_at>clock_timestamp()`,
 			settlement.ID, settlement.Token, truncateOSSDeletionError(operationErr))
 	}
 	if err != nil {

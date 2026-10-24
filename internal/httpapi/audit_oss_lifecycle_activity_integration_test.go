@@ -17,15 +17,15 @@ import (
 )
 
 func TestAuditCMP003OSSReplayCommitsQueueAuditAndExistingActivityHTTPIntegration(t *testing.T) {
-	f := newTEST037Fixture(t)
-	actor := f.userIDs[f.reviewer]
-	grantTEST044Permissions(t, f.ctx, f.db, actor, "admin.config.write")
 	for _, row := range []struct{ table, route, insert, status, logAction string }{
 		{"oss_object_deletion_outbox", "oss-deletions", `insert into oss_object_deletion_outbox(id,bucket,endpoint,region,object_key,status) values(9007199254740995,'fixture','https://example.test','fixture','audit-atomic-replay','dead') returning public_id`, "pending", "oss_deletion_replayed"},
 		{"oss_rehome_jobs", "oss-rehomes", `insert into oss_rehome_jobs(id,mod_id,status) values(9007199254740997,$1,'dead') returning public_id`, "queued", "oss_rehome_replayed"},
 		{"oss_multipart_sessions", "oss-multipart-sessions", `insert into oss_multipart_sessions(id,owner_id,bucket,endpoint,region,object_key,upload_id,original_name,content_type,size_bytes,sha256,category,source,status,expires_at) values(9007199254740999,$1,'fixture','https://example.test','fixture','audit-atomic-multipart','audit-atomic-upload','fixture.bin','application/octet-stream',1,repeat('a',64),'audit','audit','dead',now()+interval '1 hour') returning public_id`, "cleanup_pending", "oss_multipart_cleanup_replayed"},
 	} {
 		t.Run(row.route, func(t *testing.T) {
+			f := newTEST037Fixture(t)
+			actor := f.userIDs[f.reviewer]
+			grantTEST044Permissions(t, f.ctx, f.db, actor, "admin.config.write")
 			var publicID string
 			var args []any
 			if row.table == "oss_rehome_jobs" {

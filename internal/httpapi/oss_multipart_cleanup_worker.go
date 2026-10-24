@@ -160,16 +160,7 @@ func (worker *OSSMultipartCleanupWorker) abortProviderUpload(ctx context.Context
 }
 
 func (worker *OSSMultipartCleanupWorker) complete(ctx context.Context, job ossMultipartCleanupJob) error {
-	tag, err := worker.server.db.Exec(ctx, `update oss_multipart_sessions set status='aborted',aborted_at=now(),
-		locked_by='',lease_expires_at=null,last_error='',failure_class='',updated_at=now()
-		where id=$1 and status='aborting' and locked_by=$2`, job.ID, job.LockToken)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() != 1 {
-		return errOSSMultipartSessionLeaseLost
-	}
-	return nil
+	return worker.server.finishOSSMultipartAbort(ctx, ossMultipartSettlement{ID: job.ID, Token: job.LockToken})
 }
 
 func (worker *OSSMultipartCleanupWorker) recordFailure(ctx context.Context, job ossMultipartCleanupJob, abortErr error) (string, error) {
@@ -188,7 +179,7 @@ func (worker *OSSMultipartCleanupWorker) recordFailure(ctx context.Context, job 
 	err = tx.QueryRow(ctx, `update oss_multipart_sessions set status=$3,next_attempt_at=$4,
 		locked_by='',lease_expires_at=null,last_error=$5,failure_class=$6,
 		dead_at=case when $3='dead' then now() else null end,updated_at=now()
-		where id=$1 and status='aborting' and locked_by=$2 returning status`,
+		where id=$1 and status='aborting' and locked_by=$2 and lease_expires_at>clock_timestamp() returning status`,
 		job.ID, job.LockToken, state, time.Now().Add(ossDeletionRetryDelay(job.Attempts)),
 		truncateOSSDeletionError(abortErr), decision.class).Scan(&persisted)
 	if errors.Is(err, pgx.ErrNoRows) {
