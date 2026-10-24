@@ -62,7 +62,13 @@ func (s *Server) updateProfileConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "用户资料配置格式不正确")
 		return
 	}
-	_, err = s.db.Exec(
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存用户资料配置失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	_, err = tx.Exec(
 		r.Context(),
 		`insert into system_settings (key, value, updated_by, updated_at)
 		 values ($1, $2::jsonb, $3, now())
@@ -73,6 +79,14 @@ func (s *Server) updateProfileConfig(w http.ResponseWriter, r *http.Request) {
 		currentClaims(r).Subject,
 	)
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存用户资料配置失败")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist profile activity")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存用户资料配置失败")
 		return
 	}
@@ -306,6 +320,10 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusInternalServerError, "failed to record user profile revision")
 			return
 		}
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist profile activity")
+		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存用户设置失败")

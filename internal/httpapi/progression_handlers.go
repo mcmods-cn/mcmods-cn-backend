@@ -322,6 +322,10 @@ func (s *Server) updateLevelConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to enqueue level recalculation")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist progression activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit level configuration")
 		return
@@ -431,15 +435,21 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request, currentPublicI
 		writeError(w, http.StatusBadRequest, "task rewards are invalid")
 		return
 	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save task")
+		return
+	}
+	defer tx.Rollback(r.Context())
 	var publicID string
 	if currentPublicID == "" {
-		err = s.db.QueryRow(r.Context(), `insert into task_definitions(
+		err = tx.QueryRow(r.Context(), `insert into task_definitions(
 			code,name,description,icon,translations,refresh_period,condition,rewards,status,created_by
 		) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning public_id`,
 			payload.Code, payload.Name, payload.Description, payload.Icon, translations,
 			payload.RefreshPeriod, condition, rewards, payload.Status, currentClaims(r).Subject).Scan(&publicID)
 	} else {
-		err = s.db.QueryRow(r.Context(), `update task_definitions set code=$2,name=$3,description=$4,
+		err = tx.QueryRow(r.Context(), `update task_definitions set code=$2,name=$3,description=$4,
 			icon=$5,translations=$6,refresh_period=$7,condition=$8,rewards=$9,status=$10,updated_at=now()
 			where public_id=$1 returning public_id`,
 			currentPublicID, payload.Code, payload.Name, payload.Description, payload.Icon, translations,
@@ -457,6 +467,14 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request, currentPublicI
 		writeError(w, http.StatusInternalServerError, "failed to save task")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist progression activity")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save task")
+		return
+	}
 	payload.PublicID = publicID
 	status := http.StatusOK
 	if currentPublicID == "" {
@@ -467,13 +485,27 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request, currentPublicI
 
 func (s *Server) deleteTask(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("publicId")))
-	tag, err := s.db.Exec(r.Context(), `delete from task_definitions where public_id=$1`, publicID)
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete task")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	tag, err := tx.Exec(r.Context(), `delete from task_definitions where public_id=$1`, publicID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete task")
 		return
 	}
 	if tag.RowsAffected() == 0 {
 		writeError(w, http.StatusNotFound, "task was not found")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist progression activity")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete task")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})

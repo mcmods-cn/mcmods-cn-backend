@@ -218,6 +218,14 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 	}
 	rows.Close()
 	if len(current) == 0 {
+		if err = enqueueRequestActivityTx(r, tx); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist role track activity")
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "调整用户权限组失败")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"changed": false, "roles": []string{}})
 		return
 	}
@@ -267,6 +275,10 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 	}
 	if err := s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &userID, action, map[string]any{"track": trackCode, "from": current, "to": targets}); err != nil {
 		writeError(w, http.StatusInternalServerError, "记录权限组调整失败")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist role track activity")
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
