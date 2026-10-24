@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -32,7 +33,22 @@ func TestAuditP2NEXT002RealTypesenseStaleIndexHTTPPostgresIntegration(t *testing
 		t.Fatal("task-owned synthetic Typesense key required")
 	}
 	var f test013Fixture
+	var liveMutex *os.File
 	if os.Getenv("MCMODS_RUN_LIVE_P2_SEARCH") == "1" {
+		lockPath := os.Getenv("MCMODS_AUDIT_P2_PG_LOCK")
+		if !filepath.IsAbs(lockPath) {
+			t.Fatal("owned absolute PostgreSQL fixture mutex required")
+		}
+		liveMutex, err = os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = syscall.Flock(int(liveMutex.Fd()), syscall.LOCK_EX); err != nil {
+			liveMutex.Close()
+			t.Fatal(err)
+		}
+		// Registered first, this unlock runs after the fixture's schema drop.
+		t.Cleanup(func() { _ = syscall.Flock(int(liveMutex.Fd()), syscall.LOCK_UN); _ = liveMutex.Close() })
 		f = newAuditFixGRFixture(t, 25*time.Minute).test013Fixture
 	} else {
 		f = newTEST013Fixture(t)
@@ -158,14 +174,14 @@ func TestAuditP2NEXT002RealTypesenseStaleIndexHTTPPostgresIntegration(t *testing
 	check("", "P2StaleIndexFixture", 2)
 	t.Log("REAL_TYPESENSE delayed-index single hidden total0; restore no duplicates; multi-page/last-page, deleted candidate and owner/other isolation PASS; no browser/Worker claim")
 	if os.Getenv("MCMODS_RUN_LIVE_P2_SEARCH") == "1" {
-		auditP2HoldRealSearchForBrowser(t, f, prefix, address.String(), collection, client)
+		auditP2HoldRealSearchForBrowser(t, f, prefix, address.String(), collection, client, liveMutex)
 	}
 }
 
 // Opt-in test controller only: no control route or policy override is exposed
 // by the product server. The frontend driver may observe real public responses
 // while an owned file requests the same isolated SQL state changes as above.
-func auditP2HoldRealSearchForBrowser(t *testing.T, f test013Fixture, prefix, typesenseOrigin, collection string, client *searchindex.Client) {
+func auditP2HoldRealSearchForBrowser(t *testing.T, f test013Fixture, prefix, typesenseOrigin, collection string, client *searchindex.Client, liveMutex *os.File) {
 	t.Helper()
 	directory := os.Getenv("MCMODS_AUDIT_P2_SEARCH_DIR")
 	if !filepath.IsAbs(directory) {
@@ -209,6 +225,16 @@ func auditP2HoldRealSearchForBrowser(t *testing.T, f test013Fixture, prefix, typ
 		t.Fatal(err)
 	}
 	write("runtime.json", map[string]any{"owner": "exporter-independent-next002-20261024", "apiOrigin": f.origin.URL, "backendSource": auditJourneyRevision(cwd), "typesenseOrigin": typesenseOrigin, "ownedTypesensePrefix": prefix, "singleQuery": "P2OnlyFirst", "multiQuery": "P2StaleIndexFixture", "singleProjectPublicId": f.modCode, "initialMultiTotal": 2, "pagingQuery": "P2BrowserPagingFixture", "pagingTotal": 21, "pagingControlledPublicId": pagingControlledPublic, "pagingHiddenTotal": 20, "pagingControlInitiallyLastPage": true, "sourceState": "approved", "indexDocumentCount": 24, "commandPath": filepath.Join(directory, "command.json"), "ackPath": filepath.Join(directory, "command-ack.json"), "stopPath": filepath.Join(directory, "STOP"), "layer": "actual mounted API + PostgreSQL18 + actual Typesense29; no index Worker; external actual browser required"})
+	if err := syscall.Flock(int(liveMutex.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	// Serve without monopolizing the shared DDL mutex. Reacquire before all
+	// registered PostgreSQL teardown callbacks, including the owned schema drop.
+	defer func() {
+		if err := syscall.Flock(int(liveMutex.Fd()), syscall.LOCK_EX); err != nil {
+			t.Error(err)
+		}
+	}()
 	last := ""
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
