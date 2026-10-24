@@ -69,7 +69,7 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 	payload := func(slug string) createModRequest {
 		return createModRequest{SiteID: slug, PrimaryName: content, DefaultLocale: "en-US", Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: content, Summary: content, ContentMarkdown: content}}, Environment: "bothRequired", PrimaryCategory: "utility", ModIDs: []modIdentifierPayload{{Identifier: strings.ReplaceAll(slug, "-", "_"), Primary: true}}, Compatibilities: []modLoaderCompatibilityPayload{{Loader: "forge", Versions: []string{"1.20.1"}}}, OfficialStatus: "active", SourceStatus: "open", License: "MIT", SubmissionMethod: "manual"}
 	}
-	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "project.create.mod")
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "project.create", "project.create.mod")
 	f.require(t, f.otherEditor, http.MethodPost, "/api/v1/mods", payload("proof-reference-seed"), 201)
 	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
@@ -94,7 +94,7 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 	publicIDs := map[string]string{}
 	for _, name := range []string{"creator", "expiry", "failure", "probe"} {
 		id, public, token := createTEST044User(t, f.ctx, f.db, f.server.cfg, "browser-real-proof-"+name+"-"+randomHex(4), "UTC")
-		grantTEST044Permissions(t, f.ctx, f.db, id, "project.create.mod")
+		grantTEST044Permissions(t, f.ctx, f.db, id, "project.create", "project.create.mod")
 		tokens[name+"Token"] = token
 		ids[name] = id
 		publicIDs[name] = public
