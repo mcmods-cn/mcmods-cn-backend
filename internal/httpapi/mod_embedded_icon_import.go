@@ -235,6 +235,13 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusInternalServerError, "failed to record catalog import activity")
 			return
 		}
+		if err = enqueueRequestActivityTx(r, tx); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist import activity")
+			return
+		}
+	} else {
+		// Reusing the same job is not a second creation or reward opportunity.
+		skipRequestActivity(r)
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit catalog import job")

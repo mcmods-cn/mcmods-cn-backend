@@ -219,6 +219,9 @@ func (s *Server) resumeModExportUpload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Re-signing an existing key / listing its uploaded parts creates no new
+	// upload ticket, file, session or job. Completion records the actual upload.
+	skipRequestActivity(r)
 	var request resumeModExportUploadRequest
 	if decodeJSON(r, &request) != nil {
 		writeError(w, http.StatusBadRequest, "Invalid upload task")
@@ -254,10 +257,11 @@ func (s *Server) resumeModExportUpload(w http.ResponseWriter, r *http.Request) {
 		result, presignErr := client.Presign(
 			r.Context(),
 			&aliyunoss.PutObjectRequest{
-				Bucket:      aliyunoss.Ptr(cfg.Bucket),
-				Key:         aliyunoss.Ptr(request.ObjectKey),
-				ContentType: aliyunoss.Ptr(request.ContentType),
-				Metadata:    map[string]string{"sha256": request.SHA256},
+				Bucket:          aliyunoss.Ptr(cfg.Bucket),
+				Key:             aliyunoss.Ptr(request.ObjectKey),
+				ContentType:     aliyunoss.Ptr(request.ContentType),
+				ForbidOverwrite: aliyunoss.Ptr("true"),
+				Metadata:        map[string]string{"sha256": request.SHA256},
 			},
 			aliyunoss.PresignExpires(expires),
 		)
@@ -408,6 +412,12 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "记录导入用户行为失败")
 			return
 		}
+		if err = enqueueRequestActivityTx(r, tx); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist import activity")
+			return
+		}
+	} else {
+		skipRequestActivity(r)
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "提交导入任务失败")
@@ -520,8 +530,12 @@ func (s *Server) retryModExportJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobID := r.PathValue("jobId")
-	retried, err := s.resetModExportJobForRetry(r.Context(), jobID, identity.ID, currentClaims(r).Subject)
+	retried, err := s.resetModExportJobForRetryWithRequest(r.Context(), jobID, identity.ID, currentClaims(r).Subject, r)
 	if err != nil {
+		if errors.Is(err, errImportActivityPersistence) {
+			writeError(w, http.StatusInternalServerError, "failed to persist import activity")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "Failed to retry the import job")
 		return
 	}
@@ -583,6 +597,10 @@ func (s *Server) cancelModExportJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if tag.RowsAffected() == 0 {
 		writeError(w, http.StatusConflict, "任务已经开始或不存在")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist import activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {

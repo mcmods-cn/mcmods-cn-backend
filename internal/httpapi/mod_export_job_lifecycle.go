@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,6 +19,7 @@ const (
 )
 
 var errModExportLeaseLost = errors.New("mod export job lease was lost")
+var errImportActivityPersistence = errors.New("failed to persist import activity")
 
 func (s *Server) claimModExportJob(ctx context.Context, jobID string) (string, error) {
 	runToken := newExportID()
@@ -160,6 +162,10 @@ func (s *Server) markStalledModExportJob(ctx context.Context, jobID string, modI
 }
 
 func (s *Server) resetModExportJobForRetry(ctx context.Context, jobID string, modID, actorID int64) (bool, error) {
+	return s.resetModExportJobForRetryWithRequest(ctx, jobID, modID, actorID, nil)
+}
+
+func (s *Server) resetModExportJobForRetryWithRequest(ctx context.Context, jobID string, modID, actorID int64, r *http.Request) (bool, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -171,6 +177,11 @@ func (s *Server) resetModExportJobForRetry(ctx context.Context, jobID string, mo
 	}
 	if err = s.compensateCatalogImportArtifactsTx(ctx, tx, jobID, "", "catalog-import-retried"); err != nil {
 		return false, err
+	}
+	if r != nil {
+		if err = enqueueRequestActivityTx(r, tx); err != nil {
+			return false, fmt.Errorf("%w: %v", errImportActivityPersistence, err)
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return false, err

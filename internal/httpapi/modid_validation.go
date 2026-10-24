@@ -215,6 +215,10 @@ func (s *Server) confirmModExportMODIDMismatch(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusInternalServerError, "无法记录 MODID 确认操作")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist import activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "无法提交 MODID 确认")
 		return

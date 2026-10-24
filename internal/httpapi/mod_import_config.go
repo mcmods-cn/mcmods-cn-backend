@@ -102,11 +102,25 @@ func (s *Server) updateModImportConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "模组数据源配置格式不正确")
 		return
 	}
-	if _, err = s.db.Exec(r.Context(),
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存模组数据源配置失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if _, err = tx.Exec(r.Context(),
 		`insert into system_settings(key,value,updated_by,updated_at) values($1,$2::jsonb,$3,now())
 		 on conflict(key) do update set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`,
 		modImportConfigSettingKey, raw, currentClaims(r).Subject,
 	); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存模组数据源配置失败")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist import activity")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存模组数据源配置失败")
 		return
 	}
