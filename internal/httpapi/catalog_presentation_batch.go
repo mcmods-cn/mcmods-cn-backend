@@ -169,7 +169,7 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 	select selected.input_index,entity.public_id,resource.canonical_id,resource.namespace,resource.kind_code,entity.default_locale,
 		coalesce(localization.locale,''),coalesce(localization.name,''),
 		coalesce(imported.names,'{}'::jsonb) || coalesce((select jsonb_object_agg(candidate.locale,candidate.name)
-			from content_localizations candidate where candidate.catalog_entity_id=entity.id and candidate.name<>''),'{}'::jsonb),
+			from content_localizations candidate where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' and candidate.name<>''),'{}'::jsonb),
 		coalesce((select public_id from oss_files where id=definition.icon_file_id),''),coalesce(imported.icon_path,''),
 		coalesce(owner.project_code,''),coalesce(owner.slug,''),coalesce(owner.primary_name,'')
 	from selected join game_resources resource on resource.entity_id=selected.entity_id
@@ -178,7 +178,7 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 	left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
 	left join mods owner on owner.id=resource.owner_mod_id and owner.review_status='approved'
 	left join lateral (select candidate.locale,candidate.name from content_localizations candidate
-		where candidate.catalog_entity_id=entity.id order by case candidate.locale when $5 then 0 when $6 then 1
+		where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' order by case candidate.locale when $5 then 0 when $6 then 1
 		when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
 	order by resource.kind_code,resource.canonical_id`, publicIDs, identifiers, kinds, registries, primary, secondary)
 	if err != nil {
@@ -230,11 +230,11 @@ func (s *Server) loadCatalogTagPresentations(ctx context.Context, items []catalo
 	select selected.input_index,entity.public_id,tag.canonical_id,tag.registry,entity.default_locale,
 		coalesce(localization.locale,''),coalesce(localization.name,''),
 		coalesce((select jsonb_object_agg(candidate.locale,candidate.name) from content_localizations candidate
-			where candidate.catalog_entity_id=entity.id and candidate.name<>''),'{}'::jsonb)
+			where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' and candidate.name<>''),'{}'::jsonb)
 	from selected join catalog_tags tag on tag.entity_id=selected.entity_id
 	join catalog_entities entity on entity.id=tag.entity_id
 	left join lateral (select candidate.locale,candidate.name from content_localizations candidate
-		where candidate.catalog_entity_id=entity.id order by case candidate.locale when $4 then 0 when $5 then 1
+		where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' order by case candidate.locale when $4 then 0 when $5 then 1
 		when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
 	order by tag.registry,tag.canonical_id`, publicIDs, identifiers, registries, primary, secondary)
 	if err != nil {

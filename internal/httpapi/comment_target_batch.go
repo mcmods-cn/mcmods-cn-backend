@@ -134,7 +134,7 @@ func queryCommentTargetsByInternalWithQueryer(ctx context.Context, queryer comme
 			from requested request
 			join catalog_entities entity on request.target_type='tag' and entity.id=request.target_id and entity.entity_type='tag'
 			join catalog_tags definition on definition.entity_id=entity.id
-			left join lateral (select name from content_localizations where catalog_entity_id=entity.id and name<>''
+			left join lateral (select name from content_localizations where catalog_entity_id=entity.id and review_status='approved' and name<>''
 				order by case locale when 'zh-CN' then 0 when 'en-US' then 1 else 2 end limit 1) localization on true
 			where entity.status='active'`)
 	}
@@ -145,7 +145,7 @@ func queryCommentTargetsByInternalWithQueryer(ctx context.Context, queryer comme
 			from requested request
 			join catalog_entities entity on request.target_type='recipe_type' and entity.id=request.target_id and entity.entity_type='recipe_type'
 			join recipe_types definition on definition.entity_id=entity.id
-			left join lateral (select name from content_localizations where catalog_entity_id=entity.id and name<>''
+			left join lateral (select name from content_localizations where catalog_entity_id=entity.id and review_status='approved' and name<>''
 				order by case locale when 'zh-CN' then 0 when 'en-US' then 1 else 2 end limit 1) localization on true
 			where entity.status='active'`)
 	}

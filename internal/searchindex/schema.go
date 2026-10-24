@@ -7,10 +7,11 @@ import (
 
 // Increment when an indexed field or document shape changes after deployment.
 // The worker will build new collections and switch aliases without downtime.
-// Version 5 removes unpublished import names and associated mod metadata from
-// public search, and retains version 4's optional-empty-field correction.
+// Version 6 additionally excludes nonapproved canonical resource localizations.
+// Rebuild existing version-5 documents so old pending/rejected terms are removed.
+// Retain the earlier public-source and optional-empty-field corrections.
 // The collection shape and public search contract are stable.
-const projectionSchemaVersion = 5
+const projectionSchemaVersion = 6
 
 type searchDocumentLoader func(context.Context, *Worker, []int64) ([]map[string]any, error)
 

@@ -863,7 +863,7 @@ func (worker *Worker) loadResourceDocuments(ctx context.Context, ids []int64) ([
 	rows, err := worker.db.Query(ctx, `select entity.id,entity.public_id,resource.kind_code,resource.namespace,resource.canonical_id,entity.status,
 		greatest(entity.updated_at,resource.updated_at),
 		coalesce((select array_agg(distinct value) from (
-			select localization.name value from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name<>''
+			select localization.name value from content_localizations localization where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name<>''
 			union all select imported_name.value from resource_import_snapshots snapshot
 			join catalog_import_revisions revision on revision.id=snapshot.revision_id
 			join mods source_mod on source_mod.id=revision.mod_id

@@ -132,7 +132,7 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 		case when definition.recipe_id is not null then (select count(*)::int from recipe_bindings binding where binding.recipe_id=recipe.entity_id)
 		 else coalesce(observation.binding_count,0) end,
 		coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-		 where localization.catalog_entity_id=entity.id and localization.name<>''),'{}'::jsonb),definition.recipe_id is not null,
+		 where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name<>''),'{}'::jsonb),definition.recipe_id is not null,
 		coalesce(effective_source_version.public_id,''),coalesce(source_mod.project_code,''),coalesce(source_mod.slug,''),
 		coalesce(source_mod.primary_name,''),coalesce(effective_source_version.label,''),
 		coalesce(effective_source_version.minecraft_versions,'{}'::text[]),coalesce(effective_source_version.loaders,'{}'::text[]),
@@ -553,7 +553,7 @@ func (s *Server) catalogLocalizationRows(ctx context.Context, entityID int64) ([
 		(select task_uid from ai_tasks where id=content_localizations.ai_task_id),revision_no,
 		editable,review_status,
 		(select revision.public_id from content_revisions revision where revision.id=content_localizations.published_revision_id)
-		from content_localizations where catalog_entity_id=$1 order by locale`, entityID)
+		from content_localizations where catalog_entity_id=$1 and review_status='approved' order by locale`, entityID)
 	if err != nil {
 		return nil, err
 	}
@@ -592,7 +592,7 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID int64, primary,
 	rows, err := s.db.Query(ctx, `select entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,
 		entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(imported.mod_site_id,''),
 		coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-		 where localization.catalog_entity_id=entity.id and localization.name<>''),imported.names,'{}'::jsonb)
+		 where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name<>''),imported.names,'{}'::jsonb)
 		from catalog_tag_members member join game_resources resource on resource.entity_id=member.resource_id
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 		left join lateral (select snapshot.names,snapshot.revision_id,snapshot.icon_path,mod.slug mod_site_id
@@ -647,7 +647,7 @@ func (s *Server) catalogTagMemberRows(ctx context.Context, tagID int64, primary,
 	select entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,entity.default_locale,
 		(select public_id from oss_files where id=definition.icon_file_id),coalesce(resource_snapshot.revision_id,''),coalesce(resource_snapshot.icon_path,''),coalesce(mod.slug,''),
 		coalesce((select jsonb_object_agg(localization.locale,localization.name)
-		 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name<>''),
+		 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name<>''),
 		 resource_snapshot.names,'{}'::jsonb)
 	from selected_members member
 	join game_resources resource on resource.entity_id=member.resource_id
@@ -708,7 +708,7 @@ func (s *Server) catalogRecipeTypesCatalysts(ctx context.Context, typeIDs []int6
 		catalyst.recipe_type_id,
 		entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),
 		coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-		 where localization.catalog_entity_id=entity.id and localization.name<>''),'{}'::jsonb)
+		 where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name<>''),'{}'::jsonb)
 		from recipe_type_catalysts catalyst join game_resources resource on resource.entity_id=catalyst.resource_id
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 		join catalog_entities entity on entity.id=resource.entity_id

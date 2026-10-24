@@ -80,7 +80,7 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		and ($5='' or ($5='true' and exists(select 1 from mod_resource_version_details detail where detail.resource_id=resource.entity_id))
 		 or ($5='false' and not exists(select 1 from mod_resource_version_details detail where detail.resource_id=resource.entity_id))) and
 		($2='' or entity.public_id=$2 or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations localization
-		 where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$2||'%')
+		 where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name ilike '%'||$2||'%')
 		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$2||'%')`, kindCode, query, registry, status, hasBindings).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count resources")
 		return
@@ -92,22 +92,22 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		(select public_id from oss_files where id=definition.icon_file_id),
 		(select public_id from oss_files where id=definition.render_file_id),
 		coalesce(imported.names,'{}'::jsonb) || coalesce((select jsonb_object_agg(candidate.locale,candidate.name) from content_localizations candidate
-		 where candidate.catalog_entity_id=entity.id and candidate.name<>''),'{}'::jsonb),
+		 where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' and candidate.name<>''),'{}'::jsonb),
 		coalesce((select jsonb_object_agg(candidate.locale,candidate.provenance) from content_localizations candidate
-		 where candidate.catalog_entity_id=entity.id and candidate.name<>''),'{}'::jsonb),
+		 where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' and candidate.name<>''),'{}'::jsonb),
 		coalesce(owner.project_code,''),coalesce(owner.slug,''),coalesce(owner.primary_name,''),coalesce(imported.icon_path,''),
 		(select count(*)::int from mod_resource_version_details detail where detail.resource_id=resource.entity_id)
 		from game_resources resource join catalog_entities entity on entity.id=resource.entity_id
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 		left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
 		left join mods owner on owner.id=resource.owner_mod_id and owner.review_status='approved'
-		left join lateral (select candidate.* from content_localizations candidate where candidate.catalog_entity_id=entity.id
+		left join lateral (select candidate.* from content_localizations candidate where candidate.catalog_entity_id=entity.id and candidate.review_status='approved'
 			 order by case candidate.locale when $4 then 0 when $5 then 1 when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
 		where entity.status=$10 and `+publicCatalogEntitySQL("entity", "resource")+` and ($1='' or resource.kind_code=$1) and ($3='' or resource.namespace=$3)
 		and ($11='' or ($11='true' and exists(select 1 from mod_resource_version_details detail where detail.resource_id=resource.entity_id))
 		 or ($11='false' and not exists(select 1 from mod_resource_version_details detail where detail.resource_id=resource.entity_id))) and
 		(($6 and entity.id=any($7::bigint[])) or (not $6 and ($2='' or entity.public_id=$2 or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations candidate
-		 where candidate.catalog_entity_id=entity.id and candidate.name ilike '%'||$2||'%')
+		 where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' and candidate.name ilike '%'||$2||'%')
 		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$2||'%')))
 		order by case when $6 then array_position($7::bigint[],entity.id) end,resource.kind_code,resource.canonical_id
 		limit $8 offset $9`, kindCode, query, registry, primary, secondary, indexed.Used, indexed.IDs, limit, databaseOffset, status, hasBindings)
@@ -428,7 +428,7 @@ func (s *Server) catalogTags(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.QueryRow(r.Context(), `select count(*)::int from catalog_tags tag
 		join catalog_entities entity on entity.id=tag.entity_id
 		where entity.status='active' and `+publicCatalogEntitySQL("entity", "tag")+` and ($2='' or tag.canonical_id=$2) and ($3='' or tag.registry=$3) and ($1='' or tag.canonical_id ilike '%'||$1||'%' or exists(
-		 select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%'))`, query, canonicalID, registry).Scan(&total); err != nil {
+		 select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name ilike '%'||$1||'%'))`, query, canonicalID, registry).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count tags")
 		return
 	}
@@ -443,13 +443,13 @@ func (s *Server) catalogTags(w http.ResponseWriter, r *http.Request) {
 		else (select count(*)::int from catalog_tag_members member where member.tag_id=tag.entity_id) end,
 		coalesce(localization.locale,''),coalesce(localization.name,''),
 		coalesce((select jsonb_object_agg(candidate.locale,candidate.name) from content_localizations candidate
-		 where candidate.catalog_entity_id=entity.id and candidate.name<>''),'{}'::jsonb)
+		 where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' and candidate.name<>''),'{}'::jsonb)
 		from catalog_tags tag join catalog_entities entity on entity.id=tag.entity_id
 		left join lateral (select candidate.locale,candidate.name from content_localizations candidate
-		 where candidate.catalog_entity_id=entity.id order by case candidate.locale when $2 then 0 when $3 then 1
+		 where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' order by case candidate.locale when $2 then 0 when $3 then 1
 			 when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
 		where entity.status='active' and `+publicCatalogEntitySQL("entity", "tag")+` and ($6='' or tag.canonical_id=$6) and ($7='' or tag.registry=$7) and ($1='' or tag.canonical_id ilike '%'||$1||'%' or exists(
-		 select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%'))
+		 select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name ilike '%'||$1||'%'))
 		order by tag.registry,tag.canonical_id limit $4 offset $5`, query, primary, secondary, limit, offset, canonicalID, registry)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read tags")
@@ -510,7 +510,7 @@ func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []int64, allo
 	select member.tag_id,entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,
 	 entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(imported.mod_site_id,''),
 	 coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-	  where localization.catalog_entity_id=entity.id and localization.name<>''),imported.names,'{}'::jsonb)
+	  where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name<>''),imported.names,'{}'::jsonb)
 	from selected_members member join game_resources resource on resource.entity_id=member.resource_id
 	join catalog_entities entity on entity.id=resource.entity_id
 	left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
@@ -549,7 +549,7 @@ func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []int64, allo
 	select member.tag_id,entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,
 	 entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(mod.slug,''),
 	 coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-	  where localization.catalog_entity_id=entity.id and localization.name<>''),imported.names,'{}'::jsonb)
+	  where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name<>''),imported.names,'{}'::jsonb)
 	from ranked_members member join game_resources resource on resource.entity_id=member.resource_id
 	join catalog_entities entity on entity.id=resource.entity_id
 	left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id

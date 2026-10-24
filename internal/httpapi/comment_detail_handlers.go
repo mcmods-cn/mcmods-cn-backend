@@ -746,7 +746,7 @@ func resolveCommentTargetWithQueryer(ctx context.Context, queryer commentTargetQ
 		err := queryer.QueryRow(ctx, `select entity.id,coalesce(nullif(localization.name,''),'#'||definition.canonical_id),
 			'/mods-tag?publicId='||entity.public_id
 			from catalog_entities entity join catalog_tags definition on definition.entity_id=entity.id
-			left join lateral (select name from content_localizations where catalog_entity_id=entity.id
+			left join lateral (select name from content_localizations where catalog_entity_id=entity.id and review_status='approved'
 				and name<>'' order by case locale when 'zh-CN' then 0 when 'en-US' then 1 else 2 end limit 1) localization on true
 			where entity.public_id=$1 and entity.entity_type='tag' and entity.status='active' and `+publicCatalogEntitySQL("entity", "tag"),
 			targetKey).Scan(&info.InternalID, &info.Title, &info.URL)
@@ -755,7 +755,7 @@ func resolveCommentTargetWithQueryer(ctx context.Context, queryer commentTargetQ
 		err := queryer.QueryRow(ctx, `select entity.id,coalesce(nullif(localization.name,''),definition.canonical_id),
 			'/recipe-types?publicId='||entity.public_id
 			from catalog_entities entity join recipe_types definition on definition.entity_id=entity.id
-			left join lateral (select name from content_localizations where catalog_entity_id=entity.id
+			left join lateral (select name from content_localizations where catalog_entity_id=entity.id and review_status='approved'
 				and name<>'' order by case locale when 'zh-CN' then 0 when 'en-US' then 1 else 2 end limit 1) localization on true
 			where entity.public_id=$1 and entity.entity_type='recipe_type' and entity.status='active' and `+publicCatalogEntitySQL("entity", "recipe_type"),
 			targetKey).Scan(&info.InternalID, &info.Title, &info.URL)

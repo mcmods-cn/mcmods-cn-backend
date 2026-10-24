@@ -35,6 +35,10 @@ func TestPublicSearchDocumentsExcludeUnapprovedSourceMetadataIntegration(t *test
 	 ('r010-public-snapshot',1001,'r010-public','items','{"en-US":"PublishedResourceNeedle"}'),
 	 ('r010-mixed-snapshot',1001,'r010-private','items','{"en-US":"HiddenMixedNeedle"}'),
 	 ('r010-private-snapshot',1002,'r010-private','items','{"en-US":"HiddenOnlyNeedle"}');
+	 insert into content_localizations(subject_type,subject_id,catalog_entity_id,locale,name,review_status) values
+	 ('resource',1001,1001,'en-US','ApprovedCanonicalResourceNeedle','approved'),
+	 ('resource',1001,1001,'zh-CN','HiddenPendingLocalizationNeedle','pending'),
+	 ('resource',1001,1001,'fr-FR','HiddenRejectedLocalizationNeedle','rejected');
 	 insert into minecraft_servers(id,public_id,slug,address,normalized_address,handshake_host,connect_host,connect_port,name,primary_tag,submitted_by,review_status)
 	 values(3001,'r010sv001','r010-server','synthetic.invalid:25565','synthetic.invalid:25565','synthetic.invalid','127.0.0.1',25565,'Synthetic Server','technology',1,'approved');
 	 insert into minecraft_server_mods(server_id,raw_mod_id,mod_id) values(3001,'observed_public_id',101),(3001,'observed_private_id',102);
@@ -52,6 +56,9 @@ func TestPublicSearchDocumentsExcludeUnapprovedSourceMetadataIntegration(t *test
 	}
 	for _, resource := range resources {
 		names := fmt.Sprint(resource["names"])
+		if !strings.Contains(names, "ApprovedCanonicalResourceNeedle") || !strings.Contains(names, "PublishedResourceNeedle") {
+			t.Errorf("approved canonical/imported resource names missing: %s", names)
+		}
 		if strings.Contains(names, "Hidden") {
 			t.Errorf("private source name entered public search: %s", names)
 		}
