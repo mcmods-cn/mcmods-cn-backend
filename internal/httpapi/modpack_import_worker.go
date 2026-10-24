@@ -115,7 +115,7 @@ func importModrinthModpack(ctx context.Context, client *http.Client, cfg modImpo
 	}
 	defer os.RemoveAll(temporaryDirectory)
 	archivePath := filepath.Join(temporaryDirectory, safeTemporaryArchiveName(archive.Filename, ".mrpack"))
-	if err = downloadProviderArchive(ctx, archive.URL, archivePath, cfg.RequestTimeoutSeconds); err != nil {
+	if err = downloadProviderArchive(ctx, archive.URL, archivePath, cfg.RequestTimeoutSeconds, cfg.Modrinth.BaseURL); err != nil {
 		return createModpackRequest{}, fmt.Errorf("下载 Modrinth 整合包失败: %w", err)
 	}
 	var index modrinthPackIndex
@@ -136,7 +136,7 @@ func importModrinthModpack(ctx context.Context, client *http.Client, cfg modImpo
 		Summary:           project.Description,
 		DefaultLocale:     externalModpackLocale,
 		Environment:       modpackEnvironmentFromSides(project.ClientSide, project.ServerSide),
-		PrimaryCategory:   primaryCategoryFromExternal(categoryValues),
+		PrimaryCategory:   primaryModpackCategoryFromExternal(categoryValues),
 		PackType:          modpackTypeFromExternal(categoryValues),
 		PackagingMethod:   "modrinth",
 		Compatibilities:   compatibilitiesForLoaders(loaders, minecraftVersions),
@@ -248,14 +248,7 @@ func importCurseForgeModpack(ctx context.Context, client *http.Client, cfg modIm
 		return createModpackRequest{}, err
 	}
 	project := snapshot.Project
-	var files struct {
-		Data []curseForgePackFile `json:"data"`
-	}
-	filesEndpoint := cfg.CurseForge.BaseURL + "/mods/" + strconv.FormatInt(project.ID, 10) + "/files?pageSize=50"
-	if err := getProviderJSON(ctx, client, filesEndpoint, headers, &files); err != nil || len(files.Data) == 0 {
-		return createModpackRequest{}, errors.New("CurseForge 整合包没有可下载文件")
-	}
-	selected, err := selectCurseForgePackFile(files.Data)
+	selected, err := loadCurseForgePackFile(ctx, client, cfg, project.ID, headers)
 	if err != nil {
 		return createModpackRequest{}, err
 	}
@@ -274,12 +267,15 @@ func importCurseForgeModpack(ctx context.Context, client *http.Client, cfg modIm
 	}
 	defer os.RemoveAll(temporaryDirectory)
 	archivePath := filepath.Join(temporaryDirectory, safeTemporaryArchiveName(selected.FileName, ".zip"))
-	if err = downloadProviderArchive(ctx, selected.DownloadURL, archivePath, cfg.RequestTimeoutSeconds); err != nil {
+	if err = downloadProviderArchive(ctx, selected.DownloadURL, archivePath, cfg.RequestTimeoutSeconds, cfg.CurseForge.BaseURL); err != nil {
 		return createModpackRequest{}, fmt.Errorf("下载 CurseForge 整合包失败: %w", err)
 	}
 	var manifest curseForgePackManifest
 	if err = readJSONFromArchive(archivePath, []string{"manifest.json"}, &manifest); err != nil {
 		return createModpackRequest{}, fmt.Errorf("读取 CurseForge manifest.json 失败: %w", err)
+	}
+	if err = validateCurseForgePackManifest(manifest); err != nil {
+		return createModpackRequest{}, err
 	}
 	if len(manifest.Files) > maxModpackIndexFiles {
 		return createModpackRequest{}, fmt.Errorf("CurseForge manifest contains more than %d files", maxModpackIndexFiles)
@@ -296,7 +292,7 @@ func importCurseForgeModpack(ctx context.Context, client *http.Client, cfg modIm
 	}
 	return createModpackRequest{
 		SiteID: modSiteIDBase(project.Slug), PrimaryName: project.Name, Summary: project.Summary, DefaultLocale: externalModpackLocale,
-		Environment: "bothRequired", PrimaryCategory: primaryCategoryFromExternal(categoryValues),
+		Environment: "bothRequired", PrimaryCategory: primaryModpackCategoryFromExternal(categoryValues),
 		PackType: modpackTypeFromExternal(categoryValues), PackagingMethod: "curseforge", Compatibilities: compatibilities,
 		Tags: modpackCategoriesFromExternal(categoryValues), SearchKeywords: uniqueTrimmed([]string{project.Slug, manifest.Name, manifest.Version}, 80),
 		Authors: curseForgeAuthors(project), OfficialStatus: statusFromExternal("active", !project.IsAvailable), SourceStatus: "unknown", License: "Custom",
@@ -403,11 +399,11 @@ func curseForgePackCompatibilities(manifest curseForgePackManifest, fallbackVers
 	return compatibilitiesForLoaders(uniqueTrimmed(loaders, 30), versions)
 }
 
-func downloadProviderArchive(ctx context.Context, rawURL, destination string, timeoutSeconds int) error {
+func downloadProviderArchive(ctx context.Context, rawURL, destination string, timeoutSeconds int, trustedBaseURLs ...string) error {
 	if !validProviderDownloadURL(rawURL) {
 		return errors.New("provider archive URL is not allowed")
 	}
-	client, err := newProviderHTTPClient(time.Duration(timeoutSeconds)*time.Second, rawURL)
+	client, err := newProviderDownloadHTTPClient(time.Duration(timeoutSeconds)*time.Second, rawURL, trustedBaseURLs...)
 	if err != nil {
 		return err
 	}
@@ -568,4 +564,89 @@ func modpackEnvironmentFromSides(clientSide, serverSide string) string {
 	default:
 		return "bothRequired"
 	}
+}
+
+func primaryModpackCategoryFromExternal(values []string) string {
+	categories := modpackCategoriesFromExternal(values)
+	if len(categories) == 0 {
+		return "adventure"
+	}
+	return categories[0]
+}
+
+func validateCurseForgePackManifest(manifest curseForgePackManifest) error {
+	if manifest.ManifestType != "minecraftModpack" || manifest.ManifestVersion != 1 {
+		return errors.New("unsupported CurseForge manifest type or version (expected minecraftModpack version 1)")
+	}
+	if !isMinecraftVersionLabel(manifest.Minecraft.Version) || len(manifest.Minecraft.ModLoaders) == 0 {
+		return errors.New("CurseForge manifest requires a Minecraft version and mod loader")
+	}
+	for _, loader := range manifest.Minecraft.ModLoaders {
+		if strings.TrimSpace(loader.ID) == "" {
+			return errors.New("CurseForge manifest contains an empty mod loader")
+		}
+	}
+	seen := make(map[int64]int64)
+	for _, file := range manifest.Files {
+		if file.ProjectID <= 0 || file.FileID <= 0 {
+			return errors.New("CurseForge manifest contains an invalid project or file reference")
+		}
+		if previous, ok := seen[file.ProjectID]; ok && previous != file.FileID {
+			return errors.New("CurseForge manifest contains conflicting project references")
+		}
+		seen[file.ProjectID] = file.FileID
+	}
+	return nil
+}
+
+// Bound API work independently of provider-supplied totals. A missing pagination
+// object is only conclusive for a short page; a full page requires another read.
+func loadCurseForgePackFile(ctx context.Context, client *http.Client, cfg modImportConfig, projectID int64, headers http.Header) (curseForgePackFile, error) {
+	const pageSize, maxPages = 50, 20
+	budget := time.Duration(cfg.RequestTimeoutSeconds) * time.Second
+	if budget <= 0 {
+		budget = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	var candidates []curseForgePackFile
+	seen := make(map[int64]bool)
+	for page := 0; page < maxPages; page++ {
+		var response struct {
+			Data       []curseForgePackFile `json:"data"`
+			Pagination *struct {
+				Index       int `json:"index"`
+				ResultCount int `json:"resultCount"`
+				TotalCount  int `json:"totalCount"`
+			} `json:"pagination"`
+		}
+		endpoint := fmt.Sprintf("%s/mods/%d/files?pageSize=%d&index=%d", cfg.CurseForge.BaseURL, projectID, pageSize, page*pageSize)
+		if err := getProviderJSON(ctx, client, endpoint, headers, &response); err != nil {
+			return curseForgePackFile{}, fmt.Errorf("CurseForge file pagination failed: %w", err)
+		}
+		if len(response.Data) > pageSize {
+			return curseForgePackFile{}, errors.New("CurseForge file pagination returned an oversized page")
+		}
+		for _, file := range response.Data {
+			if seen[file.ID] {
+				return curseForgePackFile{}, errors.New("CurseForge file pagination repeated a file")
+			}
+			seen[file.ID] = true
+			candidates = append(candidates, file)
+		}
+		complete := len(response.Data) < pageSize
+		if p := response.Pagination; p != nil {
+			if p.Index != page*pageSize || p.ResultCount != len(response.Data) || p.TotalCount < p.Index+p.ResultCount {
+				return curseForgePackFile{}, errors.New("CurseForge file pagination metadata is inconsistent")
+			}
+			complete = p.Index+p.ResultCount >= p.TotalCount
+			if !complete && len(response.Data) == 0 {
+				return curseForgePackFile{}, errors.New("CurseForge file pagination did not advance")
+			}
+		}
+		if complete {
+			return selectCurseForgePackFile(candidates)
+		}
+	}
+	return curseForgePackFile{}, errors.New("CurseForge file pagination budget exhausted (1000 files)")
 }

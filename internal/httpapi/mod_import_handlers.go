@@ -162,6 +162,23 @@ func (s *Server) modMetadataImportJob(ctx context.Context, jobID string, userID 
 		return modMetadataImportJobResponse{}, err
 	}
 	if string(result) != "null" {
+		// Recheck the live source before exposing a stored result. Shared provider
+		// credentials are never authority for this site's importing user.
+		if job.Provider == "github" || job.Provider == "modrinth" {
+			cfg, err := s.modImportConfigFromSettings(ctx)
+			if err != nil {
+				return modMetadataImportJobResponse{}, err
+			}
+			if err = verifyPublicImportSource(ctx, cfg, job.ProjectType, job.Provider, job.SourceURL); err != nil {
+				return modMetadataImportJobResponse{}, errors.New("import source is unavailable or no longer public")
+			}
+		}
+		if simpleProjectTypes[job.ProjectType] {
+			result, err = normalizeSimpleProjectImportResultCollections(result)
+			if err != nil {
+				return modMetadataImportJobResponse{}, err
+			}
+		}
 		job.Result = result
 	}
 	return job, nil

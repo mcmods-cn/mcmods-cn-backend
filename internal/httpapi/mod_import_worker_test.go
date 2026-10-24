@@ -215,7 +215,7 @@ func newGitHubImportTestServer(t *testing.T, readmeStatus int, readmeBody string
 	return httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/repos/example/repository" {
 			response.Header().Set("Content-Type", "application/json")
-			_, _ = response.Write([]byte(`{"id":1,"name":"repository","full_name":"example/repository","html_url":"https://github.com/example/repository","description":"Summary","owner":{"login":"alice"},"license":{"spdx_id":"MIT"}}`))
+			_, _ = response.Write([]byte(`{"id":1,"private":false,"name":"repository","full_name":"example/repository","html_url":"https://github.com/example/repository","description":"Summary","owner":{"login":"alice"},"license":{"spdx_id":"MIT"}}`))
 			return
 		}
 		writeProviderTestResponse(response, readmeStatus, readmeBody)

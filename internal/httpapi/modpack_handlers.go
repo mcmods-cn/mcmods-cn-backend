@@ -854,7 +854,7 @@ func replaceModpackAssociationsTx(ctx context.Context, tx pgx.Tx, modpackID, rev
 			if _, err := tx.Exec(ctx, `insert into unresolved_references(
 				source_type,source_id,field_path,reference_type,raw_identifier,normalized_identifier,metadata
 			) values('modpack_mod',$1,'mods','mod',$2,lower($2),jsonb_build_object(
-				'provider',$3,'projectId',$4,'versionId',$5,'fileName',$6,'modpackId',$7))
+				'provider',$3::text,'projectId',$4::text,'versionId',$5::text,'fileName',$6::text,'modpackId',$7::bigint))
 			on conflict(source_type,source_id,field_path,reference_type,normalized_identifier) do update
 			set raw_identifier=excluded.raw_identifier,status='pending',resolved_type='',resolved_id=null,
 				resolved_at=null,metadata=excluded.metadata,updated_at=now()`, entryID, rawIdentifier,

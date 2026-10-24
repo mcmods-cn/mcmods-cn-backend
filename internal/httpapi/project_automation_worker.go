@@ -949,7 +949,7 @@ func (worker *ProjectAutomationWorker) uploadProviderFile(ctx context.Context, c
 }
 
 func downloadProviderFile(ctx context.Context, file providerProjectFile, cfg modImportConfig) (*spooledProviderFile, error) {
-	client, err := newProviderHTTPClient(time.Duration(cfg.RequestTimeoutSeconds)*time.Second, file.DirectURL)
+	client, err := newProviderDownloadHTTPClient(time.Duration(cfg.RequestTimeoutSeconds)*time.Second, file.DirectURL, providerDownloadTrustedBase(file.Source, cfg))
 	if err != nil {
 		return nil, err
 	}

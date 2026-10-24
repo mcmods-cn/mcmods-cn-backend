@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -98,7 +100,8 @@ func simpleProjectDraftFromExternal(data simpleProjectImportData) simpleProjectS
 		MinecraftVersions: uniqueMinecraftVersions(data.MinecraftVersions), Loaders: loaders, Categories: categories, Features: features,
 		OfficialStatus: statusFromExternal(data.Status, data.Archived), SourceStatus: sourceStatusFromLicense(data.License),
 		License: normalizeExternalLicense(data.License), IconURL: strings.TrimSpace(data.IconURL), SearchKeywords: uniqueTrimmed([]string{data.Slug}, 80),
-		SubmissionMethod: data.Provider, Authors: data.Authors,
+		SubmissionMethod: data.Provider, Authors: append([]modAuthorPayload{}, data.Authors...),
+		GalleryImages: []modGalleryImagePayload{}, ParentProjects: []simpleProjectParent{},
 		Links: compactLinks([]modLinkPayload{{Type: data.Provider, URL: data.ProviderURL}, externalSourceLink(data.SourceCodeURL),
 			{Type: "wiki", URL: data.WikiURL}, {Type: "issue", URL: data.IssuesURL}, {Type: "discord", URL: data.DiscordURL}}),
 	}
@@ -345,4 +348,28 @@ func containsJoinedMarker(joined string, markers ...string) bool {
 
 func containsExternalValue(values []string, markers ...string) bool {
 	return containsJoinedMarker(externalClassificationText(values), markers...)
+}
+
+// Preserve existing nonempty fields and unknown registered extensions while
+// bringing stored pre-fix results onto the same array contract as new imports.
+func normalizeSimpleProjectImportResultCollections(raw []byte) ([]byte, error) {
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, errors.New("invalid simple project import result")
+	}
+	for _, key := range []string{"localizations", "minecraftVersions", "loaders", "categories", "features", "searchKeywords", "authors", "links", "galleryImages", "parentProjects"} {
+		value := result[key]
+		if len(value) == 0 || string(value) == "null" {
+			result[key] = json.RawMessage("[]")
+			continue
+		}
+		var entries []json.RawMessage
+		if err := json.Unmarshal(value, &entries); err != nil {
+			return nil, errors.New("invalid simple project import collection")
+		}
+	}
+	return json.Marshal(result)
 }

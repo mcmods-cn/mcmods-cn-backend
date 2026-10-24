@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type modrinthProviderSnapshot struct {
@@ -24,6 +25,9 @@ func loadModrinthProviderSnapshot(ctx context.Context, client *http.Client, cfg 
 	}
 	if strings.TrimSpace(result.Project.ID) == "" || strings.TrimSpace(result.Project.ProjectType) == "" {
 		return modrinthProviderSnapshot{}, errors.New("Modrinth project response is incomplete")
+	}
+	if !publicModrinthProjectStatus(result.Project.Status) {
+		return modrinthProviderSnapshot{}, errors.New("Modrinth source is not public")
 	}
 	if err := getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(result.Project.ID)+"/version", headers, &result.Versions); err != nil {
 		return modrinthProviderSnapshot{}, fmt.Errorf("read Modrinth project versions: %w", err)
@@ -106,4 +110,70 @@ func curseForgeAuthors(project curseForgeMod) []modAuthorPayload {
 		}
 	}
 	return authors
+}
+
+// Public direct-link projects remain importable; moderation and unknown states
+// never inherit the administrator's shared provider authorization.
+func publicModrinthProjectStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "approved", "archived", "unlisted":
+		return true
+	default:
+		return false
+	}
+}
+
+func modrinthVersionCompatibilities(versions []modrinthVersion) []modLoaderCompatibilityPayload {
+	pairs := make(map[string][]string)
+	for _, version := range versions {
+		switch version.Status {
+		case "listed", "archived", "unlisted":
+		default:
+			continue
+		}
+		for _, loader := range normalizeLoaders(version.Loaders) {
+			pairs[loader] = append(pairs[loader], version.GameVersions...)
+		}
+	}
+	return compatibilityMapToPayload(pairs)
+}
+
+func verifyPublicImportSource(ctx context.Context, cfg modImportConfig, projectType, provider, sourceURL string) error {
+	_, _, reference, err := parseProjectImportSource(projectType, provider, sourceURL)
+	if err != nil {
+		return err
+	}
+	baseURL := cfg.Modrinth.BaseURL
+	if provider == "github" {
+		baseURL = cfg.GitHub.BaseURL
+	}
+	client, err := newProviderHTTPClient(time.Duration(cfg.RequestTimeoutSeconds)*time.Second, baseURL)
+	if err != nil {
+		return err
+	}
+	if err = ensureModImportProviderAvailable(cfg, provider); err != nil {
+		return err
+	}
+	if provider == "github" {
+		var repository githubRepository
+		headers := providerCredentialHeaders(cfg.UserAgent, "github", cfg.GitHub.BaseURL, bearerAuthorization(cfg.GitHub.Token), "")
+		if err = getProviderJSON(ctx, client, cfg.GitHub.BaseURL+"/repos/"+reference, headers, &repository); err != nil {
+			return err
+		}
+		if repository.Private == nil || *repository.Private {
+			return errors.New("GitHub source is not confirmed public")
+		}
+		return nil
+	}
+	if provider == "modrinth" {
+		var project modrinthProject
+		headers := providerCredentialHeaders(cfg.UserAgent, "modrinth", cfg.Modrinth.BaseURL, cfg.Modrinth.Token, "")
+		if err = getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(reference), headers, &project); err != nil {
+			return err
+		}
+		if !publicModrinthProjectStatus(project.Status) {
+			return errors.New("Modrinth source is not public")
+		}
+	}
+	return nil
 }

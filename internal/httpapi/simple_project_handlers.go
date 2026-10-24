@@ -697,6 +697,9 @@ func normalizeAndValidateSimpleProjectDraft(snapshot *simpleProjectSnapshot, all
 		return err
 	}
 	snapshot.Authors = authors
+	if snapshot.GalleryImages == nil {
+		snapshot.GalleryImages = []modGalleryImagePayload{}
+	}
 	if len(snapshot.GalleryImages) > 32 {
 		return errors.New("project contains too many gallery images")
 	}
@@ -719,7 +722,7 @@ func normalizeAndValidateSimpleProjectDraft(snapshot *simpleProjectSnapshot, all
 		return errors.New("an add-on requires at least one parent project")
 	}
 	if snapshot.ProjectType != "addon" {
-		parents = nil
+		parents = []simpleProjectParent{}
 	}
 	snapshot.ParentProjects = parents
 	return nil

@@ -322,14 +322,13 @@ func importModrinthProject(ctx context.Context, client *http.Client, cfg modImpo
 		return createModRequest{}, errors.New("该 Modrinth 项目不是模组")
 	}
 	categoryValues := append(append([]string{}, project.Categories...), project.AdditionalCategories...)
-	loaders := normalizeLoaders(project.Loaders)
 	return createModRequest{
 		SiteID:            modSiteIDBase(project.Slug),
 		PrimaryName:       project.Title,
 		Summary:           project.Description,
 		Environment:       environmentFromSides(project.ClientSide, project.ServerSide),
 		PrimaryCategory:   primaryCategoryFromExternal(categoryValues),
-		Compatibilities:   compatibilitiesForLoaders(loaders, project.GameVersions),
+		Compatibilities:   modrinthVersionCompatibilities(snapshot.Versions),
 		Tags:              tagsFromExternal(categoryValues),
 		SearchKeywords:    uniqueTrimmed([]string{project.Slug}, 40),
 		Authors:           snapshot.Authors,
@@ -456,7 +455,7 @@ type githubRepository struct {
 	HTMLURL     string   `json:"html_url"`
 	Topics      []string `json:"topics"`
 	Archived    bool     `json:"archived"`
-	Private     bool     `json:"private"`
+	Private     *bool    `json:"private"`
 	Owner       struct {
 		Login     string `json:"login"`
 		AvatarURL string `json:"avatar_url"`
@@ -473,6 +472,9 @@ func importGitHubRepository(ctx context.Context, client *http.Client, cfg modImp
 	var repository githubRepository
 	if err := getProviderJSON(ctx, client, cfg.GitHub.BaseURL+"/repos/"+reference, headers, &repository); err != nil {
 		return createModRequest{}, fmt.Errorf("读取 GitHub 仓库失败: %w", err)
+	}
+	if repository.Private == nil || *repository.Private {
+		return createModRequest{}, errors.New("GitHub source is not confirmed public")
 	}
 	readmeHeaders := headers.Clone()
 	readmeHeaders.Set("Accept", "application/vnd.github.raw+json")
@@ -654,11 +656,8 @@ func getProviderBytesLimited(ctx context.Context, client *http.Client, endpoint 
 		return nil, errors.New("provider response is too large")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		message := strings.TrimSpace(string(body))
-		if len(message) > 300 {
-			message = message[:300]
-		}
-		return nil, &providerHTTPStatusError{statusCode: response.StatusCode, message: message}
+		// Provider errors can contain private documents or credential-bearing URLs.
+		return nil, &providerHTTPStatusError{statusCode: response.StatusCode, message: "provider request failed"}
 	}
 	return body, nil
 }
