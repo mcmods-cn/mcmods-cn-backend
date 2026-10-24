@@ -49,14 +49,22 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	}
 	samplePath := os.Getenv("MCMODS_AUDIT_GAME_PACKAGE")
 	if samplePath == "" {
-		samplePath = "/workspace/audit-fixes-20261024/artifacts/exporter/game-fixed/auditfixture-20261024-095721-280.zip"
+		samplePath = "/workspace/audit-fixes-20261024/artifacts/exporter/game-fabric-final/auditfixture-20261024-101102-941.zip"
 	}
 	sample, err := os.ReadFile(samplePath)
 	if err != nil {
 		t.Fatal("unchanged real-game package is required:", err)
 	}
+	expectedSampleHash := os.Getenv("MCMODS_AUDIT_GAME_SHA256")
+	if expectedSampleHash == "" {
+		expectedSampleHash = "059b1c56921a3f70b934bd577fd940486982da03b24d2f6dca7c0efcfb5af2eb"
+	}
+	sampleProducer := os.Getenv("MCMODS_AUDIT_EXPORTER_COMMIT")
+	if sampleProducer == "" {
+		sampleProducer = "806214802c1e3447a9895fa5311e73f3be6edfcc"
+	}
 	sampleDigest := sha256.Sum256(sample)
-	if hex.EncodeToString(sampleDigest[:]) != "ef5f535f6f47d44d4f7866199c5cfc4c9a5f2b3295d5f1e38902bbd005dd1607" {
+	if hex.EncodeToString(sampleDigest[:]) != expectedSampleHash {
 		t.Fatal("real-game package hash differs from the reviewed named sample")
 	}
 	frontendOrigin := os.Getenv("MCMODS_AUDIT_FRONTEND_ORIGIN")
@@ -161,7 +169,7 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	}
 	runtimePath := filepath.Join(directory, "runtime.json")
 	stopPath := filepath.Join(directory, "STOP")
-	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "ossOrigin": f.provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": "auditfixture", "minecraftVersion": "1.20.1", "loader": "fabric", "modVersion": "1.0.0", "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": "ef5f535f6f47d44d4f7866199c5cfc4c9a5f2b3295d5f1e38902bbd005dd1607", "samplePath": samplePath, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED"}
+	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "ossOrigin": f.provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": "auditfixture", "minecraftVersion": "1.20.1", "loader": "fabric", "modVersion": "1.0.0", "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": expectedSampleHash, "sampleProducerCommit": sampleProducer, "samplePath": samplePath, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED"}
 	updateRuntime := func(state string) {
 		runtime["state"] = state
 		runtime["updatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
