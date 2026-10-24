@@ -76,7 +76,15 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 	settingsBefore, _ := json.Marshal(settings)
 	const content = "Independent legitimate community proof fixture wording"
 	payload := func(slug string) createModRequest {
-		return createModRequest{SiteID: slug, PrimaryName: content, DefaultLocale: "en-US", Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: content, Summary: content, ContentMarkdown: content}}, Environment: "bothRequired", PrimaryCategory: "utility", ModIDs: []modIdentifierPayload{{Identifier: strings.ReplaceAll(slug, "-", "_"), Primary: true}}, Compatibilities: []modLoaderCompatibilityPayload{{Loader: "forge", Versions: []string{"1.20.1"}}}, OfficialStatus: "active", SourceStatus: "open", License: "MIT", SubmissionMethod: "manual"}
+		return createModRequest{SiteID: slug, PrimaryName: content, SecondaryName: content, Summary: content, BodyMarkdown: content, DefaultLocale: "en-US", Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: content, Summary: content, ContentMarkdown: content}}, Environment: "bothRequired", PrimaryCategory: "utility", ModIDs: []modIdentifierPayload{{Identifier: strings.ReplaceAll(slug, "-", "_"), Primary: true}}, Compatibilities: []modLoaderCompatibilityPayload{{Loader: "forge", Versions: []string{"1.20.1"}}}, OfficialStatus: "active", SourceStatus: "open", License: "MIT", SubmissionMethod: "manual"}
+	}
+	seedRaw, _ := json.Marshal(payload("proof-reference-seed"))
+	seedRequest, _ := http.NewRequest(http.MethodPost, "/api/v1/mods", bytes.NewReader(seedRaw))
+	seedRequest.Header.Set("Content-Type", "application/json")
+	_, seedContent := inspectAntiAbuseBody(seedRequest)
+	normalizedSeed := antiabuse.NormalizeContent(seedContent)
+	if strings.Count(normalizedSeed, strings.ToLower(content)) != 4 {
+		t.Fatal("reference must match actual ModEditor legacy aliases plus default-localization four collected strings")
 	}
 	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "project.create", "project.create.mod")
 	f.require(t, f.otherEditor, http.MethodPost, "/api/v1/mods", payload("proof-reference-seed"), 201)
@@ -101,7 +109,7 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 	tokens := map[string]string{}
 	ids := map[string]int64{}
 	publicIDs := map[string]string{}
-	for _, name := range []string{"creator", "expiry", "failure", "probe"} {
+	for _, name := range []string{"creator", "expiry", "failure", "cancel", "probe"} {
 		id, public, token := createTEST044User(t, f.ctx, f.db, f.server.cfg, "browser-real-proof-"+name+"-"+randomHex(4), "UTC")
 		grantTEST044Permissions(t, f.ctx, f.db, id, "project.create", "project.create.mod")
 		tokens[name+"Token"] = token
@@ -149,7 +157,7 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 	if err = private.Close(); err != nil {
 		t.Fatal(err)
 	}
-	runtime, _ := json.MarshalIndent(map[string]any{"apiOrigin": f.origin.URL, "frontendOrigin": "http://127.0.0.1:3311", "authCookieName": authSessionCookieName, "authPath": authPath, "actorPublicIds": publicIDs, "payload": payload("proof-browser-created"), "expiryPayload": payload("proof-browser-expiry"), "failurePayload": payload("proof-browser-failure"), "sourceCommit": strings.TrimSpace(string(head)), "sourceTreeClean": true, "challengeTTLSeconds": 600, "minimumFormAgeMilliseconds": 800, "unchangedPolicy": true, "trigger": "actual successful ordinary other-user identical wording fingerprint + new unverified account; no force or threshold override", "preflight": "actual HTTP 428 challenge_required", "expectedCreatorPendingModCount": 1, "productionExecuted": false}, "", "  ")
+	runtime, _ := json.MarshalIndent(map[string]any{"apiOrigin": f.origin.URL, "frontendOrigin": "http://127.0.0.1:3311", "authCookieName": authSessionCookieName, "authPath": authPath, "actorPublicIds": publicIDs, "payload": payload("proof-browser-created"), "expiryPayload": payload("proof-browser-expiry"), "failurePayload": payload("proof-browser-failure"), "cancelPayload": payload("proof-browser-cancel"), "normalizedSeedContentSHA256": antiabuse.ContentHash(normalizedSeed), "collectedEqualContentFields": 4, "sourceCommit": strings.TrimSpace(string(head)), "sourceTreeClean": true, "challengeTTLSeconds": 600, "minimumFormAgeMilliseconds": 800, "unchangedPolicy": true, "trigger": "actual successful ordinary other-user identical wording fingerprint + new unverified account; no force or threshold override", "preflight": "actual HTTP 428 challenge_required", "expectedCreatorPendingModCount": 1, "productionExecuted": false}, "", "  ")
 	if err = os.WriteFile(filepath.Join(dir, "runtime.json"), runtime, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +187,7 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 				observed, stop := context.WithTimeout(f.ctx, 5*time.Second)
 				var at time.Time
 				var total, pending, others int
-				err := f.db.QueryRow(observed, `select clock_timestamp(),(select count(*) from mods where submitted_by=$1),(select count(*) from mods where submitted_by=$1 and review_status='pending'),(select count(*) from mods where submitted_by=any($2::bigint[]))`, ids["creator"], []int64{ids["expiry"], ids["failure"], ids["probe"]}).Scan(&at, &total, &pending, &others)
+				err := f.db.QueryRow(observed, `select clock_timestamp(),(select count(*) from mods where submitted_by=$1),(select count(*) from mods where submitted_by=$1 and review_status='pending'),(select count(*) from mods where submitted_by=any($2::bigint[]))`, ids["creator"], []int64{ids["expiry"], ids["failure"], ids["cancel"], ids["probe"]}).Scan(&at, &total, &pending, &others)
 				stop()
 				record := map[string]any{"observation": "INTERMEDIATE_NOT_FINAL_SEAL", "sourceCommit": strings.TrimSpace(string(head)), "productionExecuted": false}
 				if err != nil {
@@ -206,7 +214,7 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 			if err = f.db.QueryRow(f.ctx, `select count(*),count(*) filter(where review_status='pending') from mods where submitted_by=$1`, ids["creator"]).Scan(&total, &pending); err != nil || total != 1 || pending != 1 {
 				t.Fatalf("creator total=%d pending=%d err=%v", total, pending, err)
 			}
-			if err = f.db.QueryRow(f.ctx, `select count(*) from mods where submitted_by=any($1::bigint[])`, []int64{ids["expiry"], ids["failure"], ids["probe"]}).Scan(&others); err != nil || others != 0 {
+			if err = f.db.QueryRow(f.ctx, `select count(*) from mods where submitted_by=any($1::bigint[])`, []int64{ids["expiry"], ids["failure"], ids["cancel"], ids["probe"]}).Scan(&others); err != nil || others != 0 {
 				t.Fatalf("failed/expired/probe actors wrote mods=%d err=%v", others, err)
 			}
 			current, err := f.server.antiAbuse.Settings(f.ctx)
