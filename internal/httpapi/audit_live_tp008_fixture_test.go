@@ -77,6 +77,10 @@ func TestAuditLiveTP008Fixture(t *testing.T) {
 		grantTEST044Permissions(t, ctx, f.db, f.userIDs[f.editor], "project.create."+kind)
 	}
 	grantTEST044Permissions(t, ctx, f.db, f.userIDs[f.reviewer], "project.review")
+	var relationCreator string
+	if err = f.db.QueryRow(ctx, `insert into creators(kind,name,normalized_name,review_status) values('author','TP008 Public Author','tp008 public author','approved') returning public_id`).Scan(&relationCreator); err != nil {
+		t.Fatal(err)
+	}
 	dbConfig := f.db.Config()
 	dbConfig.MaxConns = 12
 	dbConfig.MinConns = 1
@@ -255,7 +259,7 @@ func TestAuditLiveTP008Fixture(t *testing.T) {
 	authPath := filepath.Join(directory, "auth.private.json")
 	auditJourneyWriteJSON(t, authPath, map[string]any{"creatorToken": f.editor, "reviewerToken": f.reviewer})
 	runtimePath, stopPath := filepath.Join(directory, "runtime.json"), filepath.Join(directory, "STOP")
-	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "repoRevisions": revisions, "creatorPublicId": creator, "reviewerPublicId": reviewer, "parentModPublicId": f.modCode, "parentModSiteId": "audit-gr-" + f.modCode, "supportedCombinations": combinations, "natsURL": broker.ClientURL(), "natsStream": cfg.NATS.JetStream.Stream, "antiAbuseEnabled": cfg.AntiAbuse.Enabled, "scope": "Actual controlled provider HTTP, API/PostgreSQL, real JetStream+metadata Worker for MR5. CF6 adapter+draft boundary only. External browser evidence and final DB/queue review required; fixture exit is not acceptance."}
+	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "repoRevisions": revisions, "creatorPublicId": creator, "reviewerPublicId": reviewer, "parentModPublicId": f.modCode, "parentModSiteId": "audit-gr-" + f.modCode, "parentModName": "Audit game import 0", "relationCreatorPublicId": relationCreator, "relationCreatorName": "TP008 Public Author", "supportedCombinations": combinations, "natsURL": broker.ClientURL(), "natsStream": cfg.NATS.JetStream.Stream, "antiAbuseEnabled": cfg.AntiAbuse.Enabled, "scope": "Actual controlled provider HTTP, API/PostgreSQL, real JetStream+metadata Worker for MR5. CF6 adapter+draft boundary only. External browser evidence and final DB/queue review required; fixture exit is not acceptance."}
 	update := func(state string) {
 		runtime["state"] = state
 		runtime["updatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
