@@ -48,6 +48,7 @@ type projectChangelogSnapshot struct {
 	CategoryID        string                         `json:"categoryId,omitempty"`
 	NewCategory       *projectChangelogNewCategory   `json:"newCategory,omitempty"`
 	Localizations     []projectChangelogLocalization `json:"localizations"`
+	BaseRevisionID    *string                        `json:"baseRevisionId,omitempty"`
 	Reason            string                         `json:"reason,omitempty"`
 }
 
@@ -69,23 +70,24 @@ type projectChangelogCategoryResponse struct {
 }
 
 type projectChangelogResponse struct {
-	ID                string                            `json:"id"`
-	EventAt           time.Time                         `json:"eventAt"`
-	MinecraftVersions []string                          `json:"minecraftVersions"`
-	ProjectVersion    string                            `json:"projectVersion"`
-	DefaultLocale     string                            `json:"defaultLocale"`
-	Category          *projectChangelogCategoryResponse `json:"category,omitempty"`
-	BodyMarkdown      string                            `json:"bodyMarkdown"`
-	Locale            string                            `json:"locale"`
-	AvailableLocales  []string                          `json:"availableLocales"`
-	Localizations     []projectChangelogLocalization    `json:"localizations,omitempty"`
-	ReviewStatus      string                            `json:"reviewStatus"`
-	PendingChange     bool                              `json:"pendingChange"`
-	CanEdit           bool                              `json:"canEdit"`
-	CreatedByID       string                            `json:"createdById"`
-	CreatedByName     string                            `json:"createdByName"`
-	CreatedAt         time.Time                         `json:"createdAt"`
-	UpdatedAt         time.Time                         `json:"updatedAt"`
+	ID                  string                            `json:"id"`
+	EventAt             time.Time                         `json:"eventAt"`
+	MinecraftVersions   []string                          `json:"minecraftVersions"`
+	ProjectVersion      string                            `json:"projectVersion"`
+	DefaultLocale       string                            `json:"defaultLocale"`
+	Category            *projectChangelogCategoryResponse `json:"category,omitempty"`
+	BodyMarkdown        string                            `json:"bodyMarkdown"`
+	Locale              string                            `json:"locale"`
+	AvailableLocales    []string                          `json:"availableLocales"`
+	Localizations       []projectChangelogLocalization    `json:"localizations,omitempty"`
+	ReviewStatus        string                            `json:"reviewStatus"`
+	PendingChange       bool                              `json:"pendingChange"`
+	CanEdit             bool                              `json:"canEdit"`
+	CreatedByID         string                            `json:"createdById"`
+	CreatedByName       string                            `json:"createdByName"`
+	PublishedRevisionID *string                           `json:"publishedRevisionId"`
+	CreatedAt           time.Time                         `json:"createdAt"`
+	UpdatedAt           time.Time                         `json:"updatedAt"`
 }
 
 func (s *Server) projectChangelogs(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +180,11 @@ func (s *Server) projectChangelogItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	requestedBase, baseErr := resolveRevisionPublicID(r.Context(), tx, snapshot.BaseRevisionID)
+	if baseErr != nil || !sameRevision(requestedBase, publishedRevisionID) {
+		writeError(w, http.StatusConflict, "changelog changed after this edit was loaded")
+		return
+	}
 	if !validateProjectChangelogCategory(w, r, tx, snapshot.CategoryID, target.RouteID) {
 		return
 	}
@@ -201,7 +208,7 @@ func (s *Server) projectChangelogItem(w http.ResponseWriter, r *http.Request) {
 		Snapshot: snapshotRaw, Reason: snapshot.Reason, ActorID: claims.Subject, Source: "user", Status: status,
 		Metadata: map[string]any{"targetLabel": target.Name + " - " + snapshot.ProjectVersion, "targetURL": target.CanonicalPath + "?tab=changelog"}, Request: r,
 	})
-	if errors.Is(err, errReviewInProgress) {
+	if errors.Is(err, errReviewInProgress) || errors.Is(err, errCatalogEditorConflict) {
 		writeError(w, http.StatusConflict, "changelog already has a pending review")
 		return
 	}
@@ -635,6 +642,13 @@ func (s *Server) loadProjectChangelogEditor(ctx context.Context, publicID string
 		item.Localizations = append(item.Localizations, projectChangelogLocalization{Locale: key, BodyMarkdown: bodyValues[key]})
 	}
 	item.CanEdit = target.CanEdit
+	if publishedRevisionID != nil {
+		var publicRevisionID string
+		if err = s.db.QueryRow(ctx, `select public_id from content_revisions where id=$1`, *publishedRevisionID).Scan(&publicRevisionID); err != nil {
+			return item, target, nil, err
+		}
+		item.PublishedRevisionID = &publicRevisionID
+	}
 	if categoryID != "" {
 		categoryNames := map[string]string{}
 		if err = json.Unmarshal(categoryRaw, &categoryNames); err != nil || len(categoryNames) > projectChangelogMaximumLocalizations {

@@ -1093,9 +1093,11 @@ func catalogEditorAggregate(aggregateType string) bool {
 	}
 }
 
-func publishedCatalogEditorRevisionTx(ctx context.Context, tx pgx.Tx, entityID string) (*int64, error) {
+func publishedCatalogEditorRevisionTx(ctx context.Context, tx pgx.Tx, publicID string) (*int64, error) {
 	var revisionID *int64
-	err := tx.QueryRow(ctx, `select published_revision_id from catalog_entities where id=$1 for update`, entityID).Scan(&revisionID)
+	// Change-request aggregate keys are public identities, including when their
+	// spelling contains only digits. Resolve and lock that exact public object.
+	err := tx.QueryRow(ctx, `select published_revision_id from catalog_entities where public_id=$1 for update`, publicID).Scan(&revisionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errCatalogEditorNotFound
 	}

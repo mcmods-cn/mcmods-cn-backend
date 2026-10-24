@@ -87,6 +87,12 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
 		return result, fmt.Errorf("lock content aggregate: %w", err)
 	}
+	// The handler's initial read is only an early error check. Recheck the
+	// published pointer after acquiring the aggregate lock, before writing any
+	// revision, audit event or publication. This also protects automatic approval.
+	if err := checkContentRevisionBaseTx(ctx, tx, params); err != nil {
+		return result, err
+	}
 	var pending bool
 	if err := tx.QueryRow(ctx, `select exists(select 1 from change_requests
 		where aggregate_type=$1 and aggregate_key=$2 and status='pending')`,
@@ -175,6 +181,40 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 		annotateActivityID(params.Request, actionID, activityObjectTypeForEntityType(params.EntityType), params.EntityType, params.EntityID, 0)
 	}
 	return result, nil
+}
+
+func checkContentRevisionBaseTx(ctx context.Context, tx pgx.Tx, params createContentRevisionParams) error {
+	var published *int64
+	var err error
+	switch {
+	case modContentAggregate(params.AggregateType):
+		var snapshot modContentSnapshot
+		if err = json.Unmarshal(params.Snapshot, &snapshot); err != nil {
+			return errCatalogEditorInvalid
+		}
+		if modContentSnapshotAggregateKey(snapshot) != params.AggregateKey {
+			return errCatalogEditorConflict
+		}
+		if err = tx.QueryRow(ctx, `select id from mods where project_code=$1`, snapshot.ModPublicID).Scan(&snapshot.ModID); err != nil {
+			return fmt.Errorf("resolve content owner: %w", err)
+		}
+		published, err = publishedModContentRevisionTx(ctx, tx, snapshot)
+	case params.AggregateType == projectChangelogAggregate:
+		err = tx.QueryRow(ctx, `select published_revision_id from project_changelogs
+			where public_id=$1 for update`, params.AggregateKey).Scan(&published)
+	default:
+		return nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errCatalogEditorNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("read locked content baseline: %w", err)
+	}
+	if !sameRevision(params.BaseRevision, published) {
+		return errCatalogEditorConflict
+	}
+	return nil
 }
 
 func withdrawPendingContentRequestsTx(ctx context.Context, tx pgx.Tx, aggregateType, aggregateKey string, actorID int64, request *http.Request) error {
