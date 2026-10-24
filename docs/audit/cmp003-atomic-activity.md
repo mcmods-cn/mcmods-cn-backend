@@ -19,10 +19,12 @@ Implemented and individually fault-tested families as of the commits below:
 | 1bfb498 | check-in and transfer | HTTP + PostgreSQL, exact balance/ledger/check-in rollback/recovery, FID-001 recipient boundary and economy concurrency neighbors |
 | 831a6a8 | favorite collection CRUD, membership replace/add/remove | HTTP + PostgreSQL, quota/popularity/association facts, exact activity1/4/1 and error/visibility/popularity neighbors |
 | 5f392ac | report claim/takeover/resolve/reopen | Real HTTP report creation and full workflow, exact failure rolls assignment/moderation/review/notification facts back; valid hiding/invalid preservation, idempotency and owner policy neighbors |
+| 48c98b2 | admin account creation, manual authorization, status | Exact activity fault rolls identity/default role/manual grant/status/audit back; actual PG and isolated9dd+owned files race with original authorization/SEC004/SEC021 neighbors |
+| 6f44a3c | unfollow and notification preferences | Actual/no-op unfollow, partial preference update and user isolation; PG fault recovery and isolated race |
 
 These rows establish those tested boundaries. They do not establish every mutation route, every asynchronous consumer, final frontend behavior, or a frozen three-repository release. Additional commits may follow. The external audit result ledger records the exact commands, first failures, corrected fixtures, race results and remaining conditions. Creator create/edit/claim and shop purchase/use are handled separately in fd4d188; this document does not substitute for its test evidence.
 
-Catalog and owned skin/blueprint localized-content edits already insert an immutable activity fact in their transaction and skip middleware. Changing their historical progression policy is a separate question from losing a post-response outbox intent. Editor application creation/assignment revocation have no default activity object under the current contract; this fix does not invent reward events for those routes.
+Catalog and owned skin/blueprint localized-content edits already insert an immutable activity fact in their transaction and skip middleware. Changing their historical progression policy is a separate question from losing a post-response outbox intent. User content-language settings also already insert their immutable activity fact and skip middleware; original STYLE003 fault tests preserve that boundary. Editor application creation/assignment revocation have no default activity object under the current contract; this fix does not invent reward events for those routes.
 
 ## Read-only route diagnostics
 
@@ -44,3 +46,5 @@ A route with a reachable atomic helper can still have uncovered success branches
 There is no database migration for these boundary changes. Existing intent consumers must remain enabled during deployment; pending intents retain their schema. Rolling back application code restores the historical post-response failure window, so keep this limit visible during rollback planning.
 
 The legacy user-block regression fixture originally attempted `Migrate` against a populated shared `public` schema and stopped at the explicit identity/OSS upgrade gate. Commit 4a8dd4c uses the existing owned isolated empty-install HTTP fixture, retaining every original assertion. The first setup failure and the complete passing race rerun are retained separately; no shared/production migration gate was bypassed.
+
+Commit784803d moves recipient resolution and transactional currency balance/ledger helpers, unchanged, into economy_ledger_store.go. The production handler remains1392 lines under the unchanged1500-line module gate. No source assertion or SQL was removed; the complete FID-001/TEST044/check-in/transfer and profile/language neighbor race regression passed. This pure module split is separate from the activity changes.

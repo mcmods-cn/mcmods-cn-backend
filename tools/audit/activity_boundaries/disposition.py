@@ -42,7 +42,11 @@ add('createFavoriteCollection updateFavoriteCollection deleteFavoriteCollection 
 
 add('claimReport takeoverReport resolveUnifiedReport reopenUnifiedReport', '5f392ac', 'logs/backend_revisions/pg-report-activity-first.log', 'Actual HTTP report creation through claim, privileged takeover, valid-with-hide/invalid-without-hide resolution, reopen; exact outbox failure rolls all assignment/moderation/review/notification facts back, recover once, duplicate reopen409; existing responsibility/idempotency/punitive-boundary neighbors.')
 
-existing_fact_handlers = {'createCatalogResource', 'catalogTags', 'catalogTagDetail', 'createCatalogRecipeType', 'catalogRecipeTypeDetail', 'createCatalogRecipe', 'catalogRecipeDetail', 'catalogRecipeTemplates', 'catalogRecipeTemplateDetail', 'updateCatalogEntityContent', 'ownedSkinContent', 'ownedBlueprintContent'}
+add('createAdminUser updateUserPermissions updateUserStatus', '48c98b2', 'logs/backend_revisions/pg-admin-account-isolated-9dd89ed.log', 'Admin identity/default role/manual permission/status audit and intent rollback/recovery; exact owned3 files over clean9dd89ed base, source SHA index preserved. Original admin authorization/SEC004/SEC021 neighbors under race.')
+
+add('unfollowUser updateNotificationSettings', '6f44a3c', 'logs/backend_revisions/pg-profile-preferences-activity-first.log', 'Existing/no-op unfollow and partial notification preference updates: precise activity fault leaves all relationship/user/preference facts unchanged, recovery exact1 event per call, cross-user preferences isolated. Additional isolated9dd+owned files race includes financial refactor and original language/follow/block neighbors.')
+
+existing_fact_handlers = {'contentLanguageSettings', 'createCatalogResource', 'catalogTags', 'catalogTagDetail', 'createCatalogRecipeType', 'catalogRecipeTypeDetail', 'createCatalogRecipe', 'catalogRecipeDetail', 'catalogRecipeTemplates', 'catalogRecipeTemplateDetail', 'updateCatalogEntityContent', 'ownedSkinContent', 'ownedBlueprintContent'}
 counts = collections.Counter()
 for route in report['routes']:
     handler = route['handler']
