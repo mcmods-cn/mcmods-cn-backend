@@ -72,6 +72,8 @@ func TestAuditLiveGlobalCatalogFixture(t *testing.T) {
 	frontendOrigin := "http://127.0.0.1:3311"
 	t.Setenv("FRONTEND_ORIGIN", frontendOrigin)
 	f := newAuditFixGRFixture(t, 45*time.Minute)
+	barrierContext, cancelBarrier := context.WithCancel(f.ctx)
+	defer cancelBarrier()
 	dbConfig := f.db.Config()
 	dbConfig.MaxConns = 12
 	dbConfig.MinConns = 1
@@ -197,7 +199,7 @@ func TestAuditLiveGlobalCatalogFixture(t *testing.T) {
 	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "apiOrigin": origin.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "repoRevisions": revisions, "actors": actors, "antiAbuseEnabled": cfg.AntiAbuse.Enabled, "reviewConfig": review, "permissionSetup": "Explicit existing ordinary capabilities fixed before first API exposure; no admin; creator has no bypass; reviewer has content.review; reader only list/view; bootstrap/noReview editor separately declared", "draftQualification": "user.draft.retention_seconds.2592000 from existing registered seed; migration helper has no registration-role seeds; no actual registration UI claim", "dependencies": map[string]string{"resourcePublicId": dependencyResource.ObjectPublicID, "recipeTypePublicId": dependencyType.ObjectPublicID, "recipeTemplatePublicId": dependencyTemplate.ObjectPublicID}, "rph": map[string]any{"projectPublicId": f.modCode, "projectSiteId": "audit-gr-" + f.modCode, "versionPublicId": version.PublicID, "sectionPublicId": section.PublicID, "targets": targets, "barrierArmPath": filepath.Join(directory, "rph-barrier-arm.json"), "barrierFormat": "unique attemptId[a-z0-9-], kind version/resource/template/layout. Locked/released files use rph-barrier-<attemptId>-started.json and -released.json"}, "queueLayer": "NOT_RUN; real PostgreSQL outbox only, no actual NATS/dispatch/notification delivery claim", "scope": "Actual API/PostgreSQL normal review; only parent dependencies seeded through HTTP. External browser must create five subjects, review and verify publication. Fixture exit is not PASS."}
 	barrierErrors := make(chan error, 1)
 	go func() {
-		barrierErrors <- auditGlobalCatalogBarrier(f.ctx, f.db, db, applicationName, directory, targets)
+		barrierErrors <- auditGlobalCatalogBarrier(barrierContext, f.db, db, applicationName, directory, targets)
 	}()
 	update := func(state string) {
 		runtime["state"] = state
