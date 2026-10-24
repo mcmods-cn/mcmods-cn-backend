@@ -193,6 +193,10 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist project activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit revision")
 		return
@@ -658,9 +662,13 @@ func appendReviewResolutionTx(ctx context.Context, tx pgx.Tx, requestID int64, s
 	// Record successful manual decisions in the same transaction. Automatic
 	// approvals belong to their originating mutation; conflicts return an HTTP
 	// error and must not create the successful-request activity they never had.
-	if r != nil && (status == "approved" || status == "rejected") && inferredActivityObject(r.URL.Path) == activity.ObjectReview {
-		if err = enqueueRequestActivityTx(r, tx); err != nil {
-			return fmt.Errorf("persist review activity: %w", err)
+	if r != nil && (status == "approved" || status == "rejected") {
+		annotation, _ := r.Context().Value(requestActivityContextKey).(*requestActivity)
+		event, valid := requestActivityEvent(r, annotation)
+		if valid && event.ObjectTypeID == activity.ObjectReview {
+			if err = enqueueRequestActivityTx(r, tx); err != nil {
+				return fmt.Errorf("persist review activity: %w", err)
+			}
 		}
 	}
 	return nil
