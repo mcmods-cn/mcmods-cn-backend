@@ -42,6 +42,13 @@ The original package bytes are checked before tests read them; counterexamples
 and multi-owner data are controlled in-memory/DB fixtures, not claims of more
 actual game exports.
 
+The unchanged archive that failed the earlier real-JetStream exploratory journey
+is also retained as `auditfixture-original-journey-fabric-v7.zip`, SHA256
+`ef5f535f6f47d44d4f7866199c5cfc4c9a5f2b3295d5f1e38902bbd005dd1607`.
+The same bytes now pass HTTP/PostgreSQL/direct-Worker import, independent review
+and public metadata/assets. That replay closes the identical-byte business
+counterexample; the formal subscribed-Worker/browser replay remains separate.
+
 Validation uses an explicitly owned loopback PostgreSQL database. Configure both
 `DATABASE_URL` and `MCMODS_TEST_DATABASE_URL` to that database and set
 `MCMODS_RUN_DB_INTEGRATION=1`, then run:

@@ -5,12 +5,25 @@ package httpapi
 // the browser/real-JetStream journey. Foreign template observations below are
 // controlled DB fixtures for the canonical projection ownership predicate.
 import (
+	"archive/zip"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"testing"
 )
 
 func TestAuditRecipeScopeActualGameHTTPWorkerAndIndependentReviewIntegration(t *testing.T) {
+	auditRecipeScopeHTTPWorkerAndReview(t, "auditfixture-minecraft1201-fabric-jei1520-v7.zip", "059b1c56921a3f70b934bd577fd940486982da03b24d2f6dca7c0efcfb5af2eb")
+}
+
+func TestAuditRecipeScopeOriginalFailedJourneyArchiveHTTPWorkerIntegration(t *testing.T) {
+	auditRecipeScopeHTTPWorkerAndReview(t, "auditfixture-original-journey-fabric-v7.zip", "ef5f535f6f47d44d4f7866199c5cfc4c9a5f2b3295d5f1e38902bbd005dd1607")
+}
+
+func auditRecipeScopeHTTPWorkerAndReview(t *testing.T, name, expectedSHA256 string) {
+	t.Helper()
 	f := newAuditFixGRFixture(t)
 	if _, err := f.db.Exec(f.ctx, `update mod_identifiers set identifier='auditfixture' where mod_id=$1 and identifier='example'`, f.modID); err != nil {
 		t.Fatal(err)
@@ -18,12 +31,17 @@ func TestAuditRecipeScopeActualGameHTTPWorkerAndIndependentReviewIntegration(t *
 	if _, err := f.db.Exec(f.ctx, `update mod_content_versions set label='1.0.0',minecraft_versions=ARRAY['1.20.1'],loaders=ARRAY['fabric'] where id=$1`, f.versionID); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile("testdata/audit-20261024/auditfixture-minecraft1201-fabric-jei1520-v7.zip")
+	raw, err := os.ReadFile("testdata/audit-20261024/" + name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The test helper's client filename is arbitrary; the exact archive bytes and
-	// content hash remain the original recorded 059b1c... game sample.
+	digest := sha256.Sum256(raw)
+	if hex.EncodeToString(digest[:]) != expectedSHA256 {
+		t.Fatal("original game archive bytes changed")
+	}
+	t.Logf("original_game_archive_sha256=%s", expectedSHA256)
+	// The test helper's client filename is arbitrary. Its uploaded bytes and
+	// computed content hash are the exact recorded game archive above.
 	job, revision := f.imported(t, raw)
 	if n := f.number(t, `select count(*) from catalog_import_jobs where id=$1 and status='ready'`, job); n != 1 {
 		t.Fatal("actual full export did not reach ready")
@@ -45,7 +63,14 @@ func TestAuditRecipeScopeActualGameHTTPWorkerAndIndependentReviewIntegration(t *
  where snapshot.revision_id=$1 and candidate.amount=2`, revision); n != 1 {
 		t.Fatalf("actual quantity-two output=%d", n)
 	}
-	files := auditRecipeScopePackage(t, false)
+	archive, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := validateExportZIP(archive.File)
+	if err != nil {
+		t.Fatal(err)
+	}
 	templates, err := decodeExportJEITemplateCollection(auditRecipeScopeRead(t, files, "recipes/jei/templates/minecraft/crafting.json"))
 	if err != nil {
 		t.Fatal(err)
