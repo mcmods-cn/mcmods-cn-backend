@@ -43,6 +43,7 @@ API Key 仅保存在后端环境中，不应传给浏览器。该 Key 需要健�
 
 隔离环境使用真实 Typesense 29.0 验证过 schema、文档导入、多语言名称/正文检索和删除。
 这仅验证合成样本的搜索契约，不代表生产吞吐、相关性质量或线上索引健康。
+GR-R02 的 `TestAuditGRR02RealTypesenseRebuildRemovesLegacyNonapprovedTermsIntegration` 还通过真实 PostgreSQL 与实际业务 rebuild Worker 验证 v5→v6、别名切换、旧词移除、已批准名称保留及幂等重跑；它使用异常合成 projection，不证明普通用户写入可达。
 可选测试 `TestRealTypesenseImportsAndFindsLocalizedTextIntegration` 只接受明确的回环 HTTP 地址，
 需设置 `MCMODS_RUN_TYPESENSE_INTEGRATION=1`、`MCMODS_TEST_TYPESENSE_URL` 和专用随机
 `MCMODS_TEST_TYPESENSE_API_KEY`；未提供时明确跳过，不会使用运行配置中的搜索凭据。
