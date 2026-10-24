@@ -553,6 +553,7 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 	err = tx.QueryRow(r.Context(), `select task_uid,status from ai_tasks where task_type=$1 and concurrency_key=$2
 		and status in ('queued','running','retrying') order by created_at desc limit 1`, req.TaskType, req.ConcurrencyKey).Scan(&existingUID, &existingStatus)
 	if err == nil {
+		skipRequestActivity(r) // Reusing an existing task is not a second business creation.
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "创建 AI 任务失败")
 			return
@@ -585,6 +586,10 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 	message := aiTaskMessage{TaskID: taskID, TaskUID: taskUID, TaskType: req.TaskType}
 	if err = enqueueAITaskTx(r.Context(), tx, "ai.task.requested", taskID, taskUID, req.TaskType, r.Header.Get("X-Request-ID")); err != nil {
 		writeError(w, http.StatusInternalServerError, "AI 任务可靠入队失败")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist AI activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {

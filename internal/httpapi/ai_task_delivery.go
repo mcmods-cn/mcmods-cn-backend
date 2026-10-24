@@ -112,7 +112,14 @@ func (s *Server) retryAITaskDelivery(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusConflict, "AI_DELIVERY_RETRY_UNAVAILABLE", "AI task delivery is not eligible for retry", 0, nil)
 		return
 	}
-	if err != nil || tx.Commit(r.Context()) != nil {
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "AI_DELIVERY_RETRY_FAILED", "failed to retry AI delivery", 0, nil)
+		return
+	}
+	// retryAITaskDeliveryTx persists the administrative security audit with the
+	// original publisher event. Redelivery is not a second task creation.
+	skipRequestActivity(r)
+	if tx.Commit(r.Context()) != nil {
 		writeAPIError(w, http.StatusInternalServerError, "AI_DELIVERY_RETRY_FAILED", "failed to retry AI delivery", 0, nil)
 		return
 	}

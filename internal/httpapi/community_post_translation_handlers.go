@@ -43,6 +43,7 @@ func (s *Server) requestCommunityPostTranslation(w http.ResponseWriter, r *http.
 	var cachedTitle, cachedBody string
 	err = s.db.QueryRow(r.Context(), `select title,body_markdown from community_post_translations where post_id=$1 and locale=$2 and source_revision_id=$3`, postID, targetLocale, revisionID).Scan(&cachedTitle, &cachedBody)
 	if err == nil {
+		skipRequestActivity(r) // Cached translation creates no new task.
 		writeJSON(w, http.StatusOK, map[string]any{"cached": true, "translation": map[string]string{"title": cachedTitle, "bodyMarkdown": cachedBody}})
 		return
 	}
@@ -56,7 +57,7 @@ func (s *Server) requestCommunityPostTranslation(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusForbidden, "no daily AI token allowance is available")
 		return
 	}
-	task, err := s.enqueueCommunityPostTranslation(r.Context(), publicID, postID, revisionID, sourceLocale, targetLocale, title, body, claims.Subject, limit)
+	task, err := s.enqueueCommunityPostTranslation(r.Context(), publicID, postID, revisionID, sourceLocale, targetLocale, title, body, claims.Subject, limit, r)
 	if errors.Is(err, errAIQuotaExceeded) {
 		writeError(w, http.StatusTooManyRequests, "daily AI token allowance is insufficient")
 		return
@@ -68,7 +69,11 @@ func (s *Server) requestCommunityPostTranslation(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusAccepted, map[string]any{"taskId": task.TaskUID, "status": task.Status, "countsTowardDailyTokenQuota": true})
 }
 
-func (s *Server) enqueueCommunityPostTranslation(ctx context.Context, publicID string, postID, revisionID int64, sourceLocale, targetLocale, title, body string, actorID, tokenLimit int64) (enqueuedContentTranslation, error) {
+func (s *Server) enqueueCommunityPostTranslation(ctx context.Context, publicID string, postID, revisionID int64, sourceLocale, targetLocale, title, body string, actorID, tokenLimit int64, requests ...*http.Request) (enqueuedContentTranslation, error) {
+	var request *http.Request
+	if len(requests) > 0 {
+		request = requests[0]
+	}
 	cfg := s.aiConfigFromSettings(ctx)
 	binding, ok := findAITaskModel(cfg.TaskModels, aiTaskContentTranslation)
 	if !ok {
@@ -100,6 +105,9 @@ func (s *Server) enqueueCommunityPostTranslation(ctx context.Context, publicID s
 		and status in ('queued','running','retrying') order by created_at desc limit 1`, aiTaskContentTranslation, concurrencyKey).
 		Scan(&existing.TaskUID, &existing.Status)
 	if err == nil {
+		if request != nil {
+			skipRequestActivity(request)
+		}
 		if err = tx.Commit(ctx); err != nil {
 			return enqueuedContentTranslation{}, err
 		}
@@ -121,6 +129,11 @@ func (s *Server) enqueueCommunityPostTranslation(ctx context.Context, publicID s
 	}
 	if err = enqueueAITaskTx(ctx, tx, "ai.community_post_translation.requested", taskID, taskUID, aiTaskContentTranslation, ""); err != nil {
 		return enqueuedContentTranslation{}, err
+	}
+	if request != nil {
+		if err = enqueueRequestActivityTx(request, tx); err != nil {
+			return enqueuedContentTranslation{}, errors.New("failed to persist AI translation activity")
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return enqueuedContentTranslation{}, err
