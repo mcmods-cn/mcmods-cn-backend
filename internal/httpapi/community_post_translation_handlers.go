@@ -147,6 +147,7 @@ func (s *Server) communityPostTranslationResult(w http.ResponseWriter, r *http.R
 	}
 	payload, payloadErr := decodeCommunityPostTranslationTaskPayload(payloadRaw)
 	if payloadErr != nil {
+		logCommunityPostDataFailure("translation_payload", taskUID, payloadErr)
 		writeError(w, http.StatusInternalServerError, "translation task data is invalid")
 		return
 	}

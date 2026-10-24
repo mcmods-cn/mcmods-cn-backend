@@ -72,6 +72,11 @@ func TestCommunityPostCorruptReferencesAndTranslationResultsFailClosedIntegratio
 			task_uid text primary key,task_type text not null,status text not null,error text not null default '',
 			created_by bigint,payload jsonb not null
 		);
+		-- DGR-001 checks the current parent even when the translated task is
+		-- complete. These two parents are explicitly public so the existing
+		-- healthy/result-missing assertions reach their intended boundaries.
+		create temporary table community_posts(id bigint primary key,status text not null,review_status text not null);
+		insert into community_posts values(7,'active','approved'),(8,'active','approved');
 		create temporary table community_post_translations(
 			post_id bigint not null,locale text not null,title text not null,body_markdown text not null,
 			source_revision_id bigint not null
@@ -95,17 +100,24 @@ func TestCommunityPostCorruptReferencesAndTranslationResultsFailClosedIntegratio
 		name, taskID string
 		want         int
 		translation  bool
+		errorText    string
 	}{
-		{"healthy completed result", "arch025good", http.StatusOK, true},
-		{"corrupt completed payload", "arch025bad", http.StatusInternalServerError, false},
-		{"completed result missing", "arch025missing", http.StatusInternalServerError, false},
-		{"wrong owner", "arch025other", http.StatusNotFound, false},
-		{"missing task", "arch025absent", http.StatusNotFound, false},
+		{"healthy completed result", "arch025good", http.StatusOK, true, ""},
+		{"corrupt completed payload", "arch025bad", http.StatusInternalServerError, false, "translation task data is invalid"},
+		{"completed result missing", "arch025missing", http.StatusInternalServerError, false, "translation result is unavailable"},
+		{"wrong owner", "arch025other", http.StatusNotFound, false, "translation task not found"},
+		{"missing task", "arch025absent", http.StatusNotFound, false, "translation task not found"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			status, body := invokeCommunityTranslationResult(server, ctx, test.taskID)
 			if status != test.want {
 				t.Fatalf("status=%d body=%s; want %d", status, body, test.want)
+			}
+			if test.errorText != "" {
+				var envelope struct{ Error string }
+				if err := json.Unmarshal([]byte(body), &envelope); err != nil || envelope.Error != test.errorText {
+					t.Fatalf("wrong failure boundary: body=%s want %q err=%v", body, test.errorText, err)
+				}
 			}
 			if test.translation {
 				var envelope struct {
@@ -124,8 +136,8 @@ func TestCommunityPostCorruptReferencesAndTranslationResultsFailClosedIntegratio
 	if _, err = pool.Exec(ctx, `alter table ai_tasks rename column task_type to arch025_broken_task_type`); err != nil {
 		t.Fatal(err)
 	}
-	if status, body := invokeCommunityTranslationResult(server, ctx, "arch025good"); status != http.StatusInternalServerError {
-		t.Fatalf("task database failure status=%d body=%s; want 500", status, body)
+	if status, body := invokeCommunityTranslationResult(server, ctx, "arch025good"); status != http.StatusInternalServerError || !strings.Contains(body, `"error":"failed to load translation task"`) {
+		t.Fatalf("task database failure status=%d body=%s; want exact task-read failure500", status, body)
 	}
 }
 
