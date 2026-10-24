@@ -491,7 +491,7 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 	}
 
 	watchNotifications := make([]pendingWatchNotification, 0)
-	if parentID != nil {
+	if parentID != nil && request.Status == "published" {
 		watchNotifications, err = recordCommentWatchReplies(r.Context(), tx, *parentID, commentID, claims.Subject)
 		if err != nil {
 			log.Printf("record comment watch replies comment_id=%d parent_id=%d: %v", commentID, *parentID, err)
@@ -505,12 +505,17 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 			writeError(w, http.StatusInternalServerError, "保存评论通知失败")
 			return
 		}
+		if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: claims.Subject, ActionID: activity.ActionCreate,
+			ObjectTypeID: activity.ObjectComment, ObjectPublicID: publicID, MarkdownAddedBytes: len(request.Body)}); err != nil {
+			writeError(w, http.StatusInternalServerError, "保存评论活动失败")
+			return
+		}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "发布评论失败")
 		return
 	}
-	annotateActivity(r, activity.ActionCreate, activity.ObjectComment, publicID, len(request.Body))
+	skipRequestActivity(r)
 	if request.Status == "pending" {
 		writeJSON(w, http.StatusAccepted, map[string]any{"id": publicID, "status": "pending", "moderation": true})
 		return

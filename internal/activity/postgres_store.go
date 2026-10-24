@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -23,7 +24,23 @@ func newPostgresStore(db *pgxpool.Pool, processor ProjectionProcessor) activityS
 }
 
 func (store *postgresStore) EnqueueDurable(ctx context.Context, event Event) error {
-	_, err := store.db.Exec(ctx, `insert into activity_event_outbox(
+	return enqueueDurable(ctx, store.db, event)
+}
+
+// EnqueueDurableTx persists the intent in the caller's business transaction.
+// Do not also record this mutation in the post-response middleware.
+func EnqueueDurableTx(ctx context.Context, tx pgx.Tx, event Event) error {
+	event, valid := normalizeEvent(event)
+	if !valid || !IsDurableAction(event.ActionID) {
+		return ErrInvalidEvent
+	}
+	return enqueueDurable(ctx, tx, event)
+}
+
+func enqueueDurable(ctx context.Context, query interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, event Event) error {
+	_, err := query.Exec(ctx, `insert into activity_event_outbox(
 		user_id,action_id,object_type_id,object_route_id,object_public_id,
 		object_entity_type,object_internal_id,markdown_added_bytes,
 		markdown_deleted_bytes,occurred_at
