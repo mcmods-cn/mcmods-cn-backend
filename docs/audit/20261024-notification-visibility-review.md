@@ -62,3 +62,22 @@ new fields alone; the command reports that limitation.
 Task evidence preserves the original failure, intermediate attempts and final
 passes in `logs/messaging-review/`, including frozen-query/source provenance.
 Further receipt-race work, if present, is tracked separately from this scale fix.
+
+## Receipt ordering follow-up
+
+Two additional reachable follower-aggregation races were reproduced with real
+HTTP and PostgreSQL barriers. An old single-read statement could write its old
+revision receipt after the aggregation committed. A later read-all then failed
+to cover the now-visible revision. Two single-read statements could also finish
+in reverse order and replace the newer receipt with the old revision marker.
+Both original failures remain in the task evidence.
+
+The common notification unread predicate now governs page flags, explicit-read
+eligibility, direct truth counts and follower aggregation selection. A covering
+read-all snapshot can supersede an obsolete non-null receipt. Existing
+`read_at=NULL` explicit-unread markers retain their previous precedence, and
+current per-item reads can clear them. Broadcast correction uses the same rule.
+The single-read conflict branch checks whether the existing marker's revision
+was visible to the older statement snapshot before replacing it; it does not
+compare numeric XID maxima. Actual row-version, list and summary assertions
+cover both races, plus preserved NULL markers and user isolation.

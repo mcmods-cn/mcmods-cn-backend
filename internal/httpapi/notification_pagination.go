@@ -137,11 +137,7 @@ func notificationPageSQL(userID int64, request notificationPageRequest) (string,
 	)
 	select n.id,n.public_id,n.kind,n.title,n.body,n.source_locale,n.data,
 		coalesce(actor_page.items,'[]'::jsonb),
-		case when receipt.notification_id is not null then receipt.read_at is not null
-            and coalesce(receipt.read_revision_xid=n.revision_xid,true)
-			else n.id<=coalesce(watermark.max_notification_id,0)
-				and n.updated_at<=coalesce(watermark.read_at,'-infinity'::timestamptz)
-            and (watermark.visibility_snapshot is null or pg_visible_in_snapshot(n.revision_xid,watermark.visibility_snapshot)) end,
+		not ` + notificationUnreadPredicateSQL + `,
 		n.created_at,n.updated_at,n.kind<>'system'
 	from selected page
 	join notifications n on n.id=page.id
@@ -208,19 +204,30 @@ const markAllNotificationsReadSQL = `insert into notification_read_watermarks(us
  where notification_read_watermarks.read_at<=excluded.read_at
  returning read_at`
 
+// An older INSERT statement can wait behind a newer receipt transaction.
+// Its conflict branch must preserve a marker for a notification revision that
+// was invisible to the older statement snapshot; numeric XID order is not a
+// commit-order oracle.
 const markNotificationReadSQL = `insert into notification_receipts(notification_id,user_id,read_at,read_revision_xid)
 select n.id,$2,clock_timestamp(),n.revision_xid from notifications n
 left join notification_receipts receipt on receipt.notification_id=n.id and receipt.user_id=$2
 left join notification_read_watermarks watermark on watermark.user_id=$2
 where n.id=$1 and (n.recipient_id is null or n.recipient_id=$2) and ` + notificationUnreadPredicateSQL + `
 on conflict(notification_id,user_id) do update set read_at=excluded.read_at,read_revision_xid=excluded.read_revision_xid
-where notification_receipts.read_at is null or notification_receipts.read_revision_xid is distinct from excluded.read_revision_xid`
+where (notification_receipts.read_at is null or notification_receipts.read_revision_xid is distinct from excluded.read_revision_xid)
+ and (notification_receipts.read_revision_xid is null
+      or pg_visible_in_snapshot(notification_receipts.read_revision_xid,pg_current_snapshot()))`
 
+// A NULL receipt is an explicit unread marker. Otherwise a receipt for the
+// current revision or a read-all snapshot that observed that revision marks it
+// read. A stale non-NULL receipt must not override a newer covering watermark.
+const notificationReadWatermarkCoversRevisionSQL = `(
+ n.id<=coalesce(watermark.max_notification_id,0)
+ and n.updated_at<=coalesce(watermark.read_at,'-infinity'::timestamptz)
+ and (watermark.visibility_snapshot is null or pg_visible_in_snapshot(n.revision_xid,watermark.visibility_snapshot))
+)`
 const notificationUnreadPredicateSQL = `(
- (receipt.notification_id is not null and (receipt.read_at is null or not coalesce(receipt.read_revision_xid=n.revision_xid,true)))
- or (receipt.notification_id is null and not (
-  n.id<=coalesce(watermark.max_notification_id,0)
-  and n.updated_at<=coalesce(watermark.read_at,'-infinity'::timestamptz)
-  and (watermark.visibility_snapshot is null or pg_visible_in_snapshot(n.revision_xid,watermark.visibility_snapshot))
- ))
+ (receipt.notification_id is not null and receipt.read_at is null)
+ or ((receipt.notification_id is null or not coalesce(receipt.read_revision_xid=n.revision_xid,true))
+     and not ` + notificationReadWatermarkCoversRevisionSQL + `)
 )`

@@ -43,19 +43,12 @@ targets as materialized (
 	left join notification_read_watermarks watermark on watermark.user_id=selected.id
 ),
 direct_notification_counts as (
-	select target.user_id,count(*)::bigint unread
-	from notifications n
-	join targets target on target.user_id=n.recipient_id
-	left join notification_receipts receipt on receipt.notification_id=n.id and receipt.user_id=target.user_id
-	where n.recipient_id=any($1::bigint[]) and (
-		(receipt.notification_id is not null and (receipt.read_at is null or not coalesce(receipt.read_revision_xid=n.revision_xid,true)))
-		or (receipt.notification_id is null and not (
-			n.id<=coalesce(target.max_notification_id,0)
-			and n.updated_at<=coalesce(target.read_at,'-infinity'::timestamptz)
-            and (target.visibility_snapshot is null or pg_visible_in_snapshot(n.revision_xid,target.visibility_snapshot))
-		))
-	)
-	group by target.user_id
+ select watermark.user_id,count(*)::bigint unread
+ from notifications n
+ join targets watermark on watermark.user_id=n.recipient_id
+ left join notification_receipts receipt on receipt.notification_id=n.id and receipt.user_id=watermark.user_id
+ where n.recipient_id=any($1::bigint[]) and ` + notificationUnreadPredicateSQL + `
+ group by watermark.user_id
 ),
 message_counts as (
 	select message.recipient_id user_id,count(*)::bigint unread
@@ -101,7 +94,7 @@ broadcast_baselines as materialized (
 ),
 broadcast_receipt_corrections as (
 	select target.user_id,coalesce(sum(case
-		when (receipt.read_at is null or not coalesce(receipt.read_revision_xid=notification.revision_xid,true)) and not (
+		when receipt.read_at is null and not (
 			target.max_notification_id is null or notification.id>target.max_notification_id or notification.updated_at>target.read_at or (target.visibility_snapshot is not null and not pg_visible_in_snapshot(notification.revision_xid,target.visibility_snapshot))
 		) then 1
 		when receipt.read_at is not null and coalesce(receipt.read_revision_xid=notification.revision_xid,true) and (

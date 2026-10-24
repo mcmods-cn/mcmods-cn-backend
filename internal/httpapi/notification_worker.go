@@ -261,17 +261,10 @@ func (worker *NotificationWorker) aggregateFollowerNotification(ctx context.Cont
 	err = tx.QueryRow(
 		ctx,
 		`select n.id
-		 from notifications n
-		 left join notification_receipts r on r.notification_id = n.id and r.user_id = $1
-		 left join notification_read_watermarks watermark on watermark.user_id=$1
-		 where n.recipient_id = $1 and n.kind = 'new_follower' and (
-			(r.notification_id is not null and (r.read_at is null or not coalesce(r.read_revision_xid=n.revision_xid,true)))
-			or (r.notification_id is null and not (
-				n.id<=coalesce(watermark.max_notification_id,0)
-				and n.updated_at<=coalesce(watermark.read_at,'-infinity'::timestamptz)
-                and (watermark.visibility_snapshot is null or pg_visible_in_snapshot(n.revision_xid,watermark.visibility_snapshot))
-			))
-		 )
+         from notifications n
+         left join notification_receipts receipt on receipt.notification_id=n.id and receipt.user_id=$1
+         left join notification_read_watermarks watermark on watermark.user_id=$1
+         where n.recipient_id=$1 and n.kind='new_follower' and `+notificationUnreadPredicateSQL+`
 		 order by n.updated_at desc
 		 limit 1
 		 for update of n`,
