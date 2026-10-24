@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"hash/crc32"
 )
 
 // Preserve encoded pixels, alpha, palette and color interpretation. Text,
@@ -25,7 +26,18 @@ func minimizeExportPNG(data []byte) ([]byte, error) {
 		}
 		end := offset + 12 + int(n)
 		switch string(data[offset+4 : offset+8]) {
-		case "IHDR", "PLTE", "IDAT", "IEND", "tRNS", "gAMA", "cHRM", "sRGB", "iCCP", "sBIT":
+		case "iCCP":
+			payload, err := projectExportICCChunk(data[offset+8 : end-4])
+			if err != nil {
+				return nil, err
+			}
+			chunk := make([]byte, len(payload)+12)
+			binary.BigEndian.PutUint32(chunk[:4], uint32(len(payload)))
+			copy(chunk[4:8], "iCCP")
+			copy(chunk[8:], payload)
+			binary.BigEndian.PutUint32(chunk[len(chunk)-4:], crc32.ChecksumIEEE(chunk[4:len(chunk)-4]))
+			result = append(result, chunk...)
+		case "IHDR", "PLTE", "IDAT", "IEND", "tRNS", "gAMA", "cHRM", "sRGB", "sBIT":
 			result = append(result, data[offset:end]...)
 		default:
 			if data[offset+4]&0x20 == 0 {

@@ -1166,7 +1166,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			case ".png":
 				data, err = minimizeExportPNG(data)
 				if err != nil {
-					return fmt.Errorf("minimize PNG %s: %w", name, err)
+					return fmt.Errorf("minimize PNG path_sha256=%s: %w", sha256Hex([]byte(name)), err)
 				}
 				var media modExportPNGMedia
 				if media, err = inspectExportPNG(ctx, cfg, revisionID, uniqueID, name, data, resourceResolver); err != nil {

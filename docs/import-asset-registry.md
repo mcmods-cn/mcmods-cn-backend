@@ -14,7 +14,7 @@
 | blockstates / texture `.png.mcmeta` | 变体、multipart、动画帧、纹理过滤字段 |
 | Wavefront OBJ/MTL | 保留数值几何、面索引、对象/材质名和同 namespace 内材质/纹理引用；删除注释。未注册指令及带额外选项的纹理 codec 明确报错 |
 | entity 模型 metadata / block-entity index、variant、UV mesh | 固定字段和顶点/UV/法线数组；嵌套 JSON 不再直接保存原文 |
-| PNG | 保留像素/alpha/palette 和必要颜色解释 chunk；删除 tEXt/iTXt/zTXt/EXIF/时间等不相关 ancillary 元数据，衍生哈希针对实际保存字节 |
+| PNG | 保留像素/alpha/palette 和必要颜色解释 chunk；删除 tEXt/iTXt/zTXt/EXIF/时间等不相关 ancillary 元数据；ICC 按颜色用途重建 profile，剥离名称/描述/设备/创建者/private tags，已注册矩阵/TRC/LUT 等颜色变换负载保留，未知 codec 明确注册错误；衍生哈希针对实际保存字节 |
 | partial advancement / vanilla worldgen definition | 只有明确 `raw_definition_path`、`definition_path`、`placed_feature_definition_path`、`configured_feature_definition_path(s)` 引用取得用途；再次执行已注册嵌套投影 |
 | `.log` | 仅为源包诊断，不复制入公开资产表 |
 | 未注册附件/业务扩展 | 在创建导入修订和衍生资产前，或相应规范化事务内，明确失败；不默认公开、不悄悄删除该业务扩展 |
@@ -45,3 +45,5 @@ go run ./cmd/db-import-privacy-audit --database <exact_database_name> --revision
 ```
 
 CLI 固定 `public,pg_catalog` 并启用数据库 `default_transaction_read_only`，无 apply/删除模式。合成旧数据副本的测试验证候选定位、作用域隔离、报告脱敏、上限和原行不变。它检测已知无关隐私键与资产注册问题；不能把 findings 为空当作所有未知秘密均不存在。单条超过 1MiB 的诊断负载明确记待检查，不假装扫描完整。外部 PNG/存储桶和缓存须另以授权资产字节核验，诊断不联网下载原包或读取生产对象。
+
+ICC 回归金样 `testdata/audit-20261024/icc-srgb-private-label.icc` 使用 LittleCMS 合法 sRGB profile，仅加入合成描述标记。验证真实 HTTP/数据库/实际 Worker/独审后匿名 PNG 字节、衍生哈希、像素/alpha、九个必要颜色 tag 原字节和 LittleCMS 289 个 RGB 样本转换结果。源 ICC 和派生 ICC 都能加载，转换逐字节一致。ICC 输入解压上限 4MiB，支持 RGB/GRAY 的 v2/v4 和已注册变换结构；未知 vendor tag、named-color/其它 color-space/多处理元素 codec 需提供明确颜色用途和正反金样后注册，不能以丢弃 ICC 通过验证。
