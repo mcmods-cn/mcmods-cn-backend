@@ -753,6 +753,10 @@ func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to queue author claim review notification")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist governance activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit claim review")
 		return
@@ -810,6 +814,10 @@ func (s *Server) revokeCreatorClaim(w http.ResponseWriter, r *http.Request) {
 		map[string]any{"creatorId": authorID, "claimId": claimPublicID, "url": "/authors/" + authorID},
 		r.Header.Get("X-Request-ID")); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to queue author claim revocation notification")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist governance activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {

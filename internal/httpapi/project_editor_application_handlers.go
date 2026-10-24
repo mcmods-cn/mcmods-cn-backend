@@ -306,6 +306,10 @@ func (s *Server) reviewProjectEditorApplication(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusInternalServerError, "failed to queue editor application notification")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist governance activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit editor application review")
 		return
