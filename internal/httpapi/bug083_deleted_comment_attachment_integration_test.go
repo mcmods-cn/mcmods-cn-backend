@@ -11,46 +11,21 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/security"
 )
 
 func TestDeletedCommentDetachesAttachmentsAtomicallyAndPreservesLogShareIntegration(t *testing.T) {
 	ctx, pool := newBUG083Pool(t)
+	if err := database.InstallEphemeralSchema(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := database.DropEphemeralSchema(context.Background(), pool); err != nil {
+			t.Error(err)
+		}
+	})
 	if _, err := pool.Exec(ctx, `
-		create temporary table comments(
-			id bigint primary key,public_id text not null unique,author_id bigint not null,body text not null,
-			target_type text not null,target_id bigint not null,target_version_id bigint,root_id bigint,status text not null,
-			deleted_at timestamptz,pinned_at timestamptz,pinned_by bigint,updated_at timestamptz not null default now()
-		);
-		create temporary table mods(
-			id bigint primary key,project_code text not null,primary_name text not null,
-			review_status text not null,submitted_by bigint not null
-		);
-		create temporary table public_routes(
-			public_id text not null,entity_type text not null,internal_id bigint not null,canonical_path text not null
-		);
-		create temporary table modpacks(id bigint primary key,public_id text not null);
-		create temporary table simple_projects(id bigint primary key,project_type text not null,public_id text not null);
-		create temporary table mod_content_versions(id bigint primary key,mod_id bigint not null);
-		create temporary table community_posts(id bigint primary key,author_id bigint not null,kind text not null,accepted_comment_id bigint);
-		create temporary table log_shares(
-			id bigint primary key,public_code text not null,status text not null,expires_at timestamptz not null,
-			redaction_applied_version integer not null default 1
-		);
-		create temporary table comment_attachments(
-			comment_id bigint not null,attachment_file_id bigint not null,kind text not null default 'file',
-			processing_status text not null default 'processing',created_at timestamptz not null default now(),
-			primary key(comment_id,attachment_file_id)
-		);
-		create temporary table comment_log_bindings(
-			comment_id bigint not null,attachment_file_id bigint not null,log_share_id bigint not null,
-			primary key(comment_id,attachment_file_id),
-			foreign key(comment_id,attachment_file_id) references comment_attachments(comment_id,attachment_file_id) on delete cascade
-		);
-		create temporary table comment_log_attachment_jobs(
-			id bigint primary key,comment_id bigint not null,attachment_file_id bigint not null,
-			foreign key(comment_id,attachment_file_id) references comment_attachments(comment_id,attachment_file_id) on delete cascade
-		);
 		create temporary sequence bug083_reject_detach_once;
 		create function pg_temp.reject_first_bug083_detach() returns trigger language plpgsql as $$
 		begin
@@ -65,25 +40,35 @@ func TestDeletedCommentDetachesAttachmentsAtomicallyAndPreservesLogShareIntegrat
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `
-		insert into mods values(832,'b083mod01','BUG083 Mod','approved',831);
-		insert into public_routes values('b083mod01','mod',832,'/mods/b083mod01');
+		insert into users(id,username,email,password_hash,email_verified) values(831,'bug083-author','bug083@example.invalid','disabled',true);
+ insert into mods(id,project_code,slug,primary_name,review_status,submitted_by) values(832,'b083mod01','bug083-mod','BUG083 Mod','approved',831);
+ insert into oss_files(id,object_key,content_type,status,scan_status) values(834,'bug083/latest.log','text/plain','active','clean');
 		insert into comments(id,public_id,author_id,body,target_type,target_id,status)
-		values(830,'b083comment',831,'private crash path','mod',832,'published');
-		insert into log_shares(id,public_code,status,expires_at) values(833,'b083share','ready',now()+interval '1 day');
+		values(830,'b083c0001',831,'private crash path','mod',832,'published');
+		insert into log_shares(id,public_code,source_type,status,expires_at) values(833,'bug083_share01','paste','ready',now()+interval '1 day');
 		insert into comment_attachments(comment_id,attachment_file_id,kind,processing_status) values(830,834,'log','ready');
 		insert into comment_log_bindings(comment_id,attachment_file_id,log_share_id) values(830,834,833);
-		insert into comment_log_attachment_jobs(id,comment_id,attachment_file_id) values(835,830,834);
+		insert into comment_log_attachment_jobs(id,comment_id,attachment_file_id,requested_by) values(835,830,834,831);
 	`); err != nil {
 		t.Fatal(err)
 	}
 
 	server := &Server{db: pool}
-	if _, err := server.resolveVisibleComment(ctx, "b083comment", security.Claims{Subject: 831}); err != nil {
+	if _, err := server.resolveVisibleComment(ctx, "b083c0001", security.Claims{Subject: 831}); err != nil {
 		t.Fatalf("resolve visible BUG083 comment: %v", err)
 	}
 	first := invokeBUG083CommentDelete(t, ctx, server)
-	if first.Code != http.StatusInternalServerError {
+	if first.Code != http.StatusInternalServerError || !strings.Contains(first.Body.String(), "删除评论失败") {
 		t.Fatalf("first delete status=%d body=%s, want rollback error", first.Code, first.Body.String())
+	}
+	var sequenceValue int64
+	var called bool
+	if err := pool.QueryRow(ctx, `select last_value,is_called from pg_temp.bug083_reject_detach_once`).Scan(&sequenceValue, &called); err != nil || sequenceValue != 1 || !called {
+		t.Fatalf("intended detach fault was not reached: value=%d called=%v err=%v", sequenceValue, called, err)
+	}
+	var intents int
+	if err := pool.QueryRow(ctx, `select count(*) from activity_event_outbox`).Scan(&intents); err != nil || intents != 0 {
+		t.Fatalf("failed detach intents=%d err=%v", intents, err)
 	}
 	assertBUG083State(t, ctx, pool, "published", "private crash path", 1, 1, 1, 1)
 
@@ -92,6 +77,9 @@ func TestDeletedCommentDetachesAttachmentsAtomicallyAndPreservesLogShareIntegrat
 		t.Fatalf("retry delete status=%d body=%s", second.Code, second.Body.String())
 	}
 	assertBUG083State(t, ctx, pool, "deleted", "", 0, 0, 0, 1)
+	if err := pool.QueryRow(ctx, `select count(*) from activity_event_outbox where user_id=831 and object_public_id='b083c0001'`).Scan(&intents); err != nil || intents != 1 {
+		t.Fatalf("delete recovery intents=%d err=%v", intents, err)
+	}
 }
 
 func TestDeletedCommentSerializationNeverReturnsAttachmentMetadataIntegration(t *testing.T) {
@@ -150,8 +138,8 @@ func newBUG083Pool(t *testing.T) (context.Context, *pgxpool.Pool) {
 
 func invokeBUG083CommentDelete(t *testing.T, ctx context.Context, server *Server) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodDelete, "/api/v1/comments/b083comment", nil)
-	request.SetPathValue("commentId", "b083comment")
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/comments/b083c0001", nil)
+	request.SetPathValue("commentId", "b083c0001")
 	request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{
 		Subject:         831,
 		PermissionRules: []security.PermissionRule{{Code: "comment.delete.own", Allow: true}},

@@ -12,7 +12,6 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
-	"mcmods-cn-backend/internal/security"
 )
 
 func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *testing.T) {
@@ -48,6 +47,8 @@ func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	faults := &automationFixtureFaultTrace{}
+	poolConfig.ConnConfig.Tracer = faults
 	poolConfig.MaxConns = 1
 	poolConfig.MinConns = 1
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
@@ -64,11 +65,8 @@ func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *te
 		}
 	}()
 
-	var actorID int64
-	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
-		values('bug042-actor','bug042@example.test','integration-test',true) returning id`).Scan(&actorID); err != nil {
-		t.Fatal(err)
-	}
+	actor := seedAuthorizedAutomationFixture(t, ctx, pool, "project.create", "project.create.mod", "project.create.plugin", "content.no-review")
+	actorID := actor.Subject
 	worker := NewSeedCrawlerWorker(loaded, pool)
 	importConfig := defaultModImportConfig()
 	importConfig.Modrinth.BaseURL = provider.URL
@@ -96,11 +94,10 @@ func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *te
 		t.Fatal(err)
 	}
 
-	actor := security.Claims{Subject: actorID, Username: "bug042-actor", PermissionRules: []security.PermissionRule{{Code: "admin.*", Allow: true, Priority: 100}}}
 	hit := seedModrinthHit{ProjectID: "bug042-external", Slug: "bug042-seed", Title: "Atomic seed", Downloads: 1000}
 	status, submissionErr := worker.createSeedDraft(ctx, candidateID, actor, "mod", hit,
 		seedCrawlerRuntimeConfig{AIDailyTokenBudget: 0, AutoSubmitReview: true})
-	if submissionErr == nil {
+	if submissionErr == nil || !faults.reached("BUG042 forced source binding failure") {
 		t.Fatalf("forced source failure returned status %q without an error", status)
 	}
 	var projectCount, sourceCount, activeDrafts, submittedDrafts int
@@ -166,7 +163,7 @@ func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *te
 	pluginHit := seedModrinthHit{ProjectID: "bug042-plugin-external", Slug: "bug042-plugin", Title: "Atomic plugin", Downloads: 2000}
 	pluginStatus, pluginErr := worker.createSeedDraft(ctx, pluginCandidateID, actor, "plugin", pluginHit,
 		seedCrawlerRuntimeConfig{AIDailyTokenBudget: 0, AutoSubmitReview: true})
-	if pluginErr == nil {
+	if pluginErr == nil || !faults.reached("BUG042 forced candidate completion failure") {
 		t.Fatalf("forced plugin candidate failure returned status %q without an error", pluginStatus)
 	}
 	if err = pool.QueryRow(ctx, `select
@@ -227,7 +224,7 @@ func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *te
 	manualHit := seedModrinthHit{ProjectID: "bug042-manual-external", Slug: "bug042-manual", Title: "Atomic manual draft", Downloads: 3000}
 	manualStatus, manualErr := worker.createSeedDraft(ctx, manualCandidateID, actor, "mod", manualHit,
 		seedCrawlerRuntimeConfig{AIDailyTokenBudget: 0, AutoSubmitReview: false})
-	if manualErr == nil {
+	if manualErr == nil || !faults.reached("BUG042 forced draft stage failure") {
 		t.Fatalf("forced manual draft failure returned status %q without an error", manualStatus)
 	}
 	if err = pool.QueryRow(ctx, `select

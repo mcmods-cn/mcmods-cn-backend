@@ -14,7 +14,6 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
-	"mcmods-cn-backend/internal/security"
 )
 
 func TestBUG040SeedCrawlerTranslationsReachDraftAndSubmittedProjectIntegration(t *testing.T) {
@@ -104,11 +103,8 @@ func TestBUG040SeedCrawlerTranslationsReachDraftAndSubmittedProjectIntegration(t
 		}
 	}()
 
-	var actorID int64
-	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
-		values('bug040-actor','bug040@example.test','integration-test',true) returning id`).Scan(&actorID); err != nil {
-		t.Fatal(err)
-	}
+	actor := seedAuthorizedAutomationFixture(t, ctx, pool, "project.create", "project.create.mod", "project.create.plugin", "content.no-review")
+	actorID := actor.Subject
 	worker := NewSeedCrawlerWorker(loaded, pool)
 	importConfig := defaultModImportConfig()
 	importConfig.Modrinth.BaseURL = provider.URL
@@ -142,7 +138,6 @@ func TestBUG040SeedCrawlerTranslationsReachDraftAndSubmittedProjectIntegration(t
 		values($1,$1,'bug040-external','mod',1000,'{}') returning id`, crawlerRunID).Scan(&candidateID); err != nil {
 		t.Fatal(err)
 	}
-	actor := security.Claims{Subject: actorID, Username: "bug040-actor", PermissionRules: []security.PermissionRule{{Code: "admin.*", Allow: true, Priority: 100}}}
 	status, createErr := worker.createSeedDraft(ctx, candidateID, actor, "mod", seedModrinthHit{
 		ProjectID: "bug040-external", Slug: "bug040-seed", Title: "English name", Downloads: 1000,
 	}, seedCrawlerRuntimeConfig{AIDailyTokenBudget: 10000, AutoSubmitReview: true})

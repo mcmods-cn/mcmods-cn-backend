@@ -95,9 +95,10 @@ func TestBUG033ProjectCompatibilityWritesUseAuthoritativeMinecraftVersionsIntegr
 		t.Fatalf("unknown-version changelog status=%d body=%s, want 400", changelogResponse.Code, changelogResponse.Body.String())
 	}
 
+	actor := seedAuthorizedAutomationFixture(t, ctx, pool, "project.edit.b033m0001", "project.no-review.b033m0001")
 	worker := &ProjectAutomationWorker{server: server}
 	job := projectAutomationJob{RouteID: routeID, InternalID: projectInternalID, ProjectType: "mod", ProjectPublicID: projectID,
-		SourceType: "modrinth", ActorID: userID}
+		SourceType: "modrinth", ActorID: actor.Subject}
 	result, err := worker.syncChangelogs(ctx, job, []projectAutomationRelease{
 		{ID: "unknown-release", Version: "2.0.0", PublishedAt: time.Now().UTC(), GameVersions: []string{"future-provider"}, Body: "Unknown only", URL: "https://example.invalid/unknown"},
 		{ID: "mixed-release", Version: "2.1.0", PublishedAt: time.Now().UTC(), GameVersions: []string{"1.21.1", "future-provider"}, Body: "Mixed", URL: "https://example.invalid/mixed"},

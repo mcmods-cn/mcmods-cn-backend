@@ -49,7 +49,9 @@ func TestOCT02ChangelogLookupDatabaseFailureIsNotNotFoundIntegration(t *testing.
 	defer origin.Close()
 	faultFixture := f
 	faultFixture.origin = origin
-	response := faultFixture.require(t, f.editor, http.MethodPut, "/api/v1/changelogs/"+proposal.ID, test017Snapshot("Must not be published"), http.StatusInternalServerError)
+	snapshot := test017Snapshot("Must not be published")
+	snapshot.BaseRevisionID = f.detail(t, f.editor, proposal.ID, http.StatusOK).PublishedRevisionID
+	response := faultFixture.require(t, f.editor, http.MethodPut, "/api/v1/changelogs/"+proposal.ID, snapshot, http.StatusInternalServerError)
 	if fault.hits.Load() != 1 {
 		t.Fatalf("exact lookup fault hits=%d, want 1", fault.hits.Load())
 	}

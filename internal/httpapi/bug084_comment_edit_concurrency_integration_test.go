@@ -13,37 +13,30 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/security"
 )
 
 func TestCommentEditRejectsStaleAndMissingVersionIntegration(t *testing.T) {
 	ctx, pool := newBUG084Pool(t)
+	if err := database.InstallEphemeralSchema(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := database.DropEphemeralSchema(context.Background(), pool); err != nil {
+			t.Error(err)
+		}
+	})
 	if _, err := pool.Exec(ctx, `
-		create temporary table comments(
-			id bigint primary key,public_id text not null unique,author_id bigint not null,body text not null,
-			target_type text not null,target_id bigint not null,target_version_id bigint,root_id bigint,status text not null,
-			deleted_at timestamptz,pinned_at timestamptz,pinned_by bigint,updated_at timestamptz not null
-		);
-		create temporary table mods(
-			id bigint primary key,project_code text not null,primary_name text not null,
-			review_status text not null,submitted_by bigint not null
-		);
-		create temporary table public_routes(
-			public_id text not null,entity_type text not null,internal_id bigint not null,canonical_path text not null
-		);
-		create temporary table modpacks(id bigint primary key,public_id text not null);
-		create temporary table simple_projects(id bigint primary key,project_type text not null,public_id text not null);
-		create temporary table mod_content_versions(id bigint primary key,mod_id bigint not null);
-		create temporary table community_posts(id bigint primary key,author_id bigint not null,kind text not null,accepted_comment_id bigint);
-		insert into mods values(842,'b084mod01','BUG084 Mod','approved',841);
-		insert into public_routes values('b084mod01','mod',842,'/mods/b084mod01');
+ insert into users(id,username,email,password_hash,email_verified) values(841,'bug084-author','bug084@example.invalid','disabled',true);
+ insert into mods(id,project_code,slug,primary_name,review_status,submitted_by) values(842,'b084mod01','bug084-mod','BUG084 Mod','approved',841);
 		insert into comments(id,public_id,author_id,body,target_type,target_id,status,updated_at)
-		values(840,'b084comment',841,'original body','mod',842,'published','2026-08-23T01:00:00Z');
+		values(840,'b084c0001',841,'original body','mod',842,'published','2026-08-23T01:00:00Z');
 	`); err != nil {
 		t.Fatal(err)
 	}
 	server := &Server{db: pool}
-	if _, err := server.resolveVisibleComment(ctx, "b084comment", security.Claims{Subject: 841}); err != nil {
+	if _, err := server.resolveVisibleComment(ctx, "b084c0001", security.Claims{Subject: 841}); err != nil {
 		t.Fatalf("resolve visible BUG084 comment: %v", err)
 	}
 	baseUpdatedAt := time.Date(2026, 8, 23, 1, 0, 0, 0, time.UTC)
@@ -81,6 +74,10 @@ func TestCommentEditRejectsStaleAndMissingVersionIntegration(t *testing.T) {
 	}
 	assertBUG084Body(t, ctx, pool, "first editor body")
 
+	var intents int
+	if err := pool.QueryRow(ctx, `select count(*) from activity_event_outbox`).Scan(&intents); err != nil || intents != 0 {
+		t.Fatalf("stale/missing base intents=%d err=%v", intents, err)
+	}
 	retry := invokeBUG084CommentPatch(t, ctx, server, map[string]any{
 		"body": "explicit retry body", "baseUpdatedAt": conflict.Details.UpdatedAt,
 	})
@@ -88,6 +85,9 @@ func TestCommentEditRejectsStaleAndMissingVersionIntegration(t *testing.T) {
 		t.Fatalf("retry status=%d body=%s", retry.Code, retry.Body.String())
 	}
 	assertBUG084Body(t, ctx, pool, "explicit retry body")
+	if err := pool.QueryRow(ctx, `select count(*) from activity_event_outbox where user_id=841 and object_public_id='b084c0001'`).Scan(&intents); err != nil || intents != 1 {
+		t.Fatalf("edit retry intents=%d err=%v", intents, err)
+	}
 	var retryUpdatedAt time.Time
 	if err := pool.QueryRow(ctx, `select updated_at from comments where id=840`).Scan(&retryUpdatedAt); err != nil {
 		t.Fatal(err)
@@ -127,8 +127,8 @@ func invokeBUG084CommentPatch(t *testing.T, ctx context.Context, server *Server,
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/comments/b084comment", bytes.NewReader(body))
-	request.SetPathValue("commentId", "b084comment")
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/comments/b084c0001", bytes.NewReader(body))
+	request.SetPathValue("commentId", "b084c0001")
 	request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{
 		Subject:         841,
 		PermissionRules: []security.PermissionRule{{Code: "comment.edit.own", Allow: true}},

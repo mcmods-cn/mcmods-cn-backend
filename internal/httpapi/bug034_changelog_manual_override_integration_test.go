@@ -69,9 +69,10 @@ func TestBUG034ManualChangelogOverrideStartsOnlyAfterApprovalIntegration(t *test
 		t.Fatal(err)
 	}
 	server := &Server{db: pool}
+	actor := seedAuthorizedAutomationFixture(t, ctx, pool, "project.edit.b034m0001", "project.no-review.b034m0001")
 	worker := &ProjectAutomationWorker{server: server}
 	job := projectAutomationJob{RouteID: routeID, InternalID: projectInternalID, ProjectType: "mod", ProjectPublicID: projectID,
-		SourceType: "modrinth", ActorID: userIDs[0]}
+		SourceType: "modrinth", ActorID: actor.Subject}
 	initial := projectAutomationRelease{ID: "managed-release", Version: "1.0.0", PublishedAt: time.Now().UTC(), GameVersions: []string{"1.21.1"},
 		Body: "Initial upstream", URL: "https://example.invalid/managed-release"}
 	if result, syncErr := worker.syncChangelogs(ctx, job, []projectAutomationRelease{initial}); syncErr != nil || result["created"] != 1 {
@@ -132,7 +133,11 @@ func TestBUG034ManualChangelogOverrideStartsOnlyAfterApprovalIntegration(t *test
 
 func invokeBUG034ManualChangelogEdit(t *testing.T, ctx context.Context, server *Server, actorID int64, changelogPublicID, body string) string {
 	t.Helper()
-	payload, err := json.Marshal(projectChangelogSnapshot{EventAt: time.Now().UTC(), MinecraftVersions: []string{"1.21.1"},
+	var base string
+	if err := server.db.QueryRow(ctx, `select revision.public_id from project_changelogs entry join content_revisions revision on revision.id=entry.published_revision_id where entry.public_id=$1`, changelogPublicID).Scan(&base); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(projectChangelogSnapshot{BaseRevisionID: &base, EventAt: time.Now().UTC(), MinecraftVersions: []string{"1.21.1"},
 		ProjectVersion: "manual", DefaultLocale: "en-US", Localizations: []projectChangelogLocalization{{Locale: "en-US", BodyMarkdown: body}}, Reason: "BUG034 review"})
 	if err != nil {
 		t.Fatal(err)
