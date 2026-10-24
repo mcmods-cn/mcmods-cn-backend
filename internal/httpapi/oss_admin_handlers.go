@@ -29,6 +29,8 @@ import (
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
 	"github.com/jackc/pgx/v5"
 	xwebp "golang.org/x/image/webp"
+
+	"mcmods-cn-backend/internal/activity"
 )
 
 func (s *Server) ossFiles(w http.ResponseWriter, r *http.Request) {
@@ -848,6 +850,8 @@ func (s *Server) prepareOSSFileDownloadWithConfig(ctx context.Context, cfg ossCo
 }
 
 func (s *Server) ossUploadLogs(w http.ResponseWriter, r *http.Request) {
+	// Reading operational telemetry is a view, never an upload/download contribution.
+	annotateActivity(r, activity.ActionView, activity.ObjectFile, "", 0)
 	items, err := s.querySimpleRows(r, `select id, file_id, uploader_id, object_key, original_name, size_bytes, ip, user_agent, result, message, created_at from oss_upload_logs order by created_at desc limit $1`, boundedLimit(r.URL.Query().Get("limit"), 100, 500))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read OSS upload logs")
@@ -866,6 +870,8 @@ func (s *Server) ossScanLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) ossDownloadStats(w http.ResponseWriter, r *http.Request) {
+	// Reading operational telemetry is a view, never an upload/download contribution.
+	annotateActivity(r, activity.ActionView, activity.ObjectFile, "", 0)
 	items, err := s.querySimpleRows(r, `select object_key, downloads, total_bytes, last_download_at from oss_download_stats order by downloads desc, last_download_at desc nulls last limit $1`, boundedLimit(r.URL.Query().Get("limit"), 100, 500))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read OSS download statistics")

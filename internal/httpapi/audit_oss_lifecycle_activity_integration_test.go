@@ -74,6 +74,10 @@ func TestAuditCMP003OSSReplayCommitsQueueAuditAndExistingActivityHTTPIntegration
 	}
 }
 
+// The historical test name is retained for execution-ledger continuity. This
+// asserts failed activity grants no ticket/counter and successful issuance keeps
+// the existing counter; the separate telemetry-failure case proves ARCH020's
+// best-effort counter is not a mandatory transaction participant.
 func TestAuditCMP003OSSSignedDownloadCommitsCounterAndExistingActivityHTTPIntegration(t *testing.T) {
 	for _, scope := range []string{"user", "admin"} {
 		t.Run(scope, func(t *testing.T) {
