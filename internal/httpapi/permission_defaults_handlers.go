@@ -142,6 +142,10 @@ func (s *Server) updateUserStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "记录用户状态变更失败")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist account governance activity")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "修改用户状态失败")
 		return

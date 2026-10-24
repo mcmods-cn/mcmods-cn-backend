@@ -640,6 +640,10 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "记录权限变更审计失败")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist account governance activity")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建用户失败")
 		return
@@ -798,6 +802,10 @@ func (s *Server) updateUserPermissions(w http.ResponseWriter, r *http.Request) {
 		"userAgent":   r.UserAgent(),
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "记录权限变更审计失败")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist account governance activity")
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
