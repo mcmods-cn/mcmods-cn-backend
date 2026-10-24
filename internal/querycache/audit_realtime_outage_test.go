@@ -10,8 +10,8 @@ import (
 
 func TestAuditMSG001SharedLeaseDoesNotFallBackDuringRedisOutage(t *testing.T) {
 	redisServer := miniredis.RunT(t)
-	first := newSEC003SharedRateLimitCache(t, redisServer.Addr(), "audit-msg001", false)
-	second := newSEC003SharedRateLimitCache(t, redisServer.Addr(), "audit-msg001", false)
+	first := newSEC003SharedRateLimitCache(t, redisServer.Addr(), "audit-msg001", true)
+	second := newSEC003SharedRateLimitCache(t, redisServer.Addr(), "audit-msg001", true)
 	ctx := context.Background()
 	lease, ok := first.AcquireRealtimeLease(ctx, 42, "session", 2, 1, 1, time.Minute)
 	if !ok {

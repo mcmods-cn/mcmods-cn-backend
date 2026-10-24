@@ -648,8 +648,10 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			dependencies["redis"] = "ready"
 		} else {
-			dependencies["redis"] = "unavailable"
-			status, statusCode = "not_ready", http.StatusServiceUnavailable
+			if s.cfg.Redis.Required || s.cfg.Redis.RateLimitFailClosed || s.cfg.ReplicaCount > 1 {
+				dependencies["redis"] = "unavailable"
+				status, statusCode = "not_ready", http.StatusServiceUnavailable
+			}
 		}
 	}
 	queueStatus := s.queue.Status()

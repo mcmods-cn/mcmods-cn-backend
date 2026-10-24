@@ -406,8 +406,9 @@ func (c *Cache) pruneClaimsLocked(now time.Time) {
 }
 
 // AcquireRealtimeLease atomically applies deployment-wide total, user and
-// session connection budgets. A configured shared backend must succeed; local
-// leases are only valid when Redis is explicitly disabled for a single instance.
+// session connection budgets. Validated multi-instance configurations require
+// Redis; optional single-instance caching may use the bounded local lease table.
+// The HTTP server also applies its durable database admission fence.
 func (c *Cache) AcquireRealtimeLease(ctx context.Context, userID int64, sessionID string, totalLimit, userLimit, sessionLimit int, ttl time.Duration) (*RealtimeLease, bool) {
 	sessionID = strings.TrimSpace(sessionID)
 	if c == nil || userID <= 0 || sessionID == "" || len(sessionID) > 128 || totalLimit <= 0 || userLimit <= 0 || sessionLimit <= 0 || ttl <= 0 {
@@ -444,7 +445,7 @@ return 1
 			}
 		}
 	}
-	if c.cfg.Enabled {
+	if c.cfg.Required || c.cfg.RateLimitFailClosed {
 		return nil, false
 	}
 	return c.acquireLocalRealtimeLease(lease, totalLimit, userLimit, sessionLimit)

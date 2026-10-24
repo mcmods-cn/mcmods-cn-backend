@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -59,6 +60,9 @@ func TestAuditMSG001And003RealRedisTwoHTTPInstancesColdRestart(t *testing.T) {
 	stopRedis := startAuditRealRedis(t, port)
 	cfg := f.origin.Config.Handler.(*Server).cfg
 	cfg.Redis.Enabled = true
+	cfg.Redis.Required = true
+	cfg.Redis.RateLimitFailClosed = true
+	cfg.ReplicaCount = 2
 	cfg.Redis.Addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	cfg.Redis.Namespace = "audit-" + randomCatalogPublicID()
 	cfg.Redis.AuthSessionCacheEnabled = false
@@ -153,4 +157,24 @@ func TestAuditMSG001And003RealRedisTwoHTTPInstancesColdRestart(t *testing.T) {
 	replacement.Body.Close()
 	request(1, "/ready", 200).Body.Close()
 	stopRedis()
+}
+
+func TestAuditMSG003OptionalRedisKeepsIndependentReadinessSemantics(t *testing.T) {
+	f := newTEST022Fixture(t, true)
+	if f.servers[0].cfg.Redis.Required || f.servers[0].cfg.Redis.RateLimitFailClosed || f.servers[0].cfg.ReplicaCount > 1 {
+		t.Fatal("optional dependency fixture requires single-instance optional Redis configuration")
+	}
+	f.redis.Close()
+	response, err := f.origins[0].Client().Get(f.origins[0].URL + "/ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 8192))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"redis":"degraded"`) {
+		t.Fatalf("optional Redis changed process readiness: status=%d body=%s", response.StatusCode, body)
+	}
 }

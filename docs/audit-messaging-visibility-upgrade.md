@@ -17,8 +17,11 @@ transaction lock serializes admission, including total/user/session budgets;
 heartbeats extend leases and disconnect if either dependency fails. Disconnect
 releases both leases; after a process crash the lease expires after 90 seconds.
 The table is bounded by the existing 2,048-connection deployment budget and stale
-rows are pruned at admission. Explicit Redis-disabled operation remains available
-and also uses the database budget. Required Redis failure returns `/ready` 503;
+rows are pruned at admission. Explicit single-instance optional/disabled Redis
+operation remains available and also uses the database budget. Required Redis
+(or configured fail-closed/shared operation) failure returns `/ready` 503;
+optional single-instance caching reports a degraded dependency without making
+the process unready.
 `/live` keeps its independent process-alive meaning.
 
 ## Installation and upgrade
