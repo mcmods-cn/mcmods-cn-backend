@@ -215,6 +215,10 @@ func (s *Server) acceptCommunityPostAnswer(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to persist answer settlement notification")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist settlement activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit answer settlement")
 		return
@@ -259,6 +263,10 @@ func (s *Server) selfSolveCommunityPost(w http.ResponseWriter, r *http.Request) 
 	if _, err = tx.Exec(r.Context(), `update community_posts set resolution_status='self_solved',accepted_comment_id=null,
 		resolved_at=now(),updated_at=now() where id=$1`, postID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve question")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist settlement activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {

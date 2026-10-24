@@ -271,6 +271,10 @@ func (s *Server) reviewMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存服务器审核通知失败")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist settlement activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		log.Printf("commit minecraft server review server=%s: %v", publicID, err)
 		writeError(w, http.StatusInternalServerError, "保存服务器审核结果失败")
