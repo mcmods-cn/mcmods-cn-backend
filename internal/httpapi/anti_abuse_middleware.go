@@ -80,7 +80,7 @@ func (s *Server) serveProtectedMutation(w http.ResponseWriter, r *http.Request, 
 		if decision.Outcome == antiabuse.Challenge {
 			status = http.StatusPreconditionRequired
 		}
-		retry := max(0, int(decision.RetryAfter.Round(time.Second).Seconds()))
+		retry := antiAbuseRetryAfterSeconds(decision.RetryAfter)
 		if persistErr := s.antiAbuse.RecordDecision(r.Context(), input, decision, input.CrawlerClass); persistErr != nil {
 			s.writeAppLog(context.Background(), "system", "error", "anti_abuse_state_persist_failed", action, claims.Subject, r,
 				http.StatusServiceUnavailable, 0, map[string]any{"error": persistErr.Error()})
@@ -124,6 +124,16 @@ func antiAbuseDecisionBlocks(outcome antiabuse.Outcome) bool {
 	default:
 		return false
 	}
+}
+
+// Retry-After is an integer number of seconds, but the limiter's remaining
+// window can be fractional. Rounding down invites a retry before admission is
+// possible; subtracting before division also avoids duration-addition overflow.
+func antiAbuseRetryAfterSeconds(remaining time.Duration) int {
+	if remaining <= 0 {
+		return 0
+	}
+	return int((remaining-1)/time.Second) + 1
 }
 
 func antiAbuseModerationRequired(r *http.Request) bool {
@@ -301,7 +311,7 @@ func (s *Server) botTraffic(next http.Handler) http.Handler {
 					http.StatusServiceUnavailable, 0, map[string]any{"error": recordErr.Error(), "crawlerClass": class})
 			}
 			if !allowed {
-				seconds := max(1, int(retry.Round(time.Second).Seconds()))
+				seconds := max(1, antiAbuseRetryAfterSeconds(retry))
 				writeAPIError(w, http.StatusTooManyRequests, "crawler_rate_limited", "读取请求过于频繁，请稍后重试", seconds, nil)
 				return
 			}
