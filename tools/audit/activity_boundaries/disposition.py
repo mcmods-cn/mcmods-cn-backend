@@ -15,6 +15,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--inference', required=True, type=pathlib.Path)
 parser.add_argument('--output', required=True, type=pathlib.Path)
 parser.add_argument('--repo', required=True, type=pathlib.Path)
+parser.add_argument('--supplement-route-ledger', action='append', default=[], type=pathlib.Path,
+                    help='Optional per-route sibling evidence; shared-wrapper evidence stays a separate unverified condition.')
 args = parser.parse_args()
 report = json.loads(args.inference.read_text())
 reviewed = {}
@@ -48,11 +50,46 @@ add('unfollowUser updateNotificationSettings', '6f44a3c', 'logs/backend_revision
 
 add('commentPin commentReaction', 'e8d17f3', 'logs/backend_revisions/pg-comment-interaction-activity-isolated.log', 'Pin/unpin preserve explicitEdit and reaction add/remove preserve existingEdit/Delete; precise activity failure full comment/counter/heat/association snapshots unchanged, recovery exact1 intent, full original TEST038 matrix normal20.264s and race28.171s.')
 
-existing_fact_handlers = {'contentLanguageSettings', 'createCatalogResource', 'catalogTags', 'catalogTagDetail', 'createCatalogRecipeType', 'catalogRecipeTypeDetail', 'createCatalogRecipe', 'catalogRecipeDetail', 'catalogRecipeTemplates', 'catalogRecipeTemplateDetail', 'updateCatalogEntityContent', 'ownedSkinContent', 'ownedBlueprintContent'}
+add('updateEconomyConfig createCurrency updateCurrency createShopItem updateShopItem', 'cdf0364', 'logs/backend_revisions/pg-economy-configuration-activity-first.log', 'Economy config, currency create/edit and shop create/edit: exact outbox fault preserves all settings/currency/shop/permission/ledger rows; declarations moved into same tx with identical startup SQL; recovery exact1 intent. Active-reference conflict/invariants/module gate/TEST044 race PASS.')
+
+add('createTask updateTask deleteTask updateLevelConfig upgradeUserRoleTrack downgradeUserRoleTrack updateProfileConfig updateUserProfileSettings', '2ec6587', 'logs/backend_revisions/race-fixtures-progression-profile.log', 'Eight actual HTTP mutation routes, eleven success branches: task CRUD, level config plus job, up/down plus no-op, profile admin config and first Create/later Edit/no-op settings. Exact activity failure/fullfacts/recovery, original role lock concurrency and module gate. Legacy and REMQ02 matrices also pass in same selected race48.295s; not all profile/avatar branches or final fixed3repo acceptance.')
+add('adminSiteChangelogs adminSiteChangelogDetail', '78e7505', 'logs/backend_revisions/pg-site-affairs-activity-first.log', 'POST creation and PUT edit only: changelog translation/facts/outbox rollback on exact failure, recovery1 intent, anonymous public title and stale409zero writes. GET dispatch only reads; no new activity policy. Selected AI/site race6.917s alsoPASS.')
+add('createAITask retryAITaskDelivery requestCommunityPostTranslation', 'd8687cb', 'logs/backend_revisions/race-ai-site-activity-final.log', 'Actual new admin AI task and community translation quota/task/NATS/activity atomic; duplicate202 and cached200 create no new activity. Retry-delivery preserves same event/task and transactional security app-log, skips duplicate Create reward. Real activity consumer proves1 reward/7XP/2diamonds; actual controlled TLS Worker failure/recovery/duplicate neighbor separatelyPASS. Typed cached fixture is not provider execution. Selected race6.917sPASS.')
+add('preflightFavoriteModpackExport createFavoriteModpackExport rebuildFavoriteModpackExportPreview', '1214a95', 'logs/backend_revisions/race-favorite-export-activity.log', 'Preflight/job/two rebuild sources exact activity failure/fullfacts/recovery; typed selected-file snapshot separate from actual Worker neighbor; race9.413s. No vendor/browser acceptance inferred.')
+add('adminUpdateAntiAbuseUserState subscribeReviewCompletion', '97f31f2', 'logs/backend_revisions/race-risk-and-review-subscription-activity.log', 'Account risk state and unique review subscription with notification intent; precise failure/fullfacts/recovery and duplicate no new Create; race18.759s. Notification intent is not live queue delivery.')
+add('projectFiles projectFile downloadProjectFile createProjectFileUpload completeProjectFileUpload', '36c96fb', 'logs/backend_revisions/race-project-file-activity.log', 'Project version create/delete/audit and internal/external downloads; source upload wrapper activity; actual owned PUT/GET bytes and original TEST016 neighbors under race30.086s. Current parent approved checked before external disclosure.')
+add('downloadCommentAttachment downloadFavoriteModpackExport', 'f23b162', 'logs/backend_revisions/race-prepared-download-redirect.log', 'Authenticated prepared redirects commit original classified activity before Location; exact failure no disclosure, signed GET bytes, anonymous unchanged and foreign export410. Typed generated artifact is not producer acceptance.')
+add('downloadBlueprintVariant', 'e9be10b', 'logs/backend_revisions/race-owned-download-reward-exact-constraint.log', 'Existing owner reward/count/ledger and original activity commit before capability. Exact23514 rollback, recovery/self/anonymous policies; actual three format Worker/review/bytes neighbors. General telemetry best effort perARCH020.')
+add('completeOSSDirectUpload completeUserOSSDirectUpload updateOSSFileScanStatus updateOSSConfig', '1f2e49a', 'agent-results/backend_access_oss_activity.json', 'Use sibling ledger core completion/scan/config named precise activity fault+registration/quota/audit cases and actual conversion bytes. This handler entry does not certify all scoped wrappers or final CMP003.')
+add('createOSSDirectUpload createUserOSSDirectUpload presignOSSFile presignUserOSSFile adminReplayOSSDeletion adminReplayOSSRehome adminReplayOSSMultipartSession', 'f889d76', 'logs/backend_access/oss-ticket-replay-race-r2.log', 'Sibling named ticket reservation/session/association, original route event and three replay queue/audit boundaries. Named scopes only; telemetry behavior superseded by e9be10b+b6f66dd.')
+add('abortOSSDirectUpload', '3b8e26c', 'logs/backend_access/oss-deferred-review-boundaries-race-r2.log', 'Typed original intent with real DB-clock lease fencing through HTTP/replacement Worker/consumer; exact expiry/migration guards and recovery59.213s. See sibling migration/quiescence policy; legacy empty intents do not infer rewards.')
+add('ossDownloadStats ossUploadLogs', 'b6f66dd', 'logs/backend_access/oss-observability-view-and-telemetry-race.log', 'Only two operational administrator GETs explicitly View/File; actual consumer cannot award Upload/Download contribution. General telemetry fault remains200 with metric, actual signed bytes and original durable activity. True GET downloads retain their original classifications.')
+
+add('createFileLogShares', 'c4a7b9f', 'logs/backend_revisions/race-log-share-review-boundaries-final.log', 'New share batch and original single Create/File event atomically; precise activity fault/zero facts, reuse/allfailed no new creation, two one-slot HTTP pools and reverse barriers, exact occupied-source conflict207. Normal first4.890s and final race10.454s; temp hard-crash cleanup unverified.')
+
+supplemental = {}
+for path in args.supplement_route_ledger:
+    for row in json.loads(path.read_text()).get('routes', []):
+        if row.get('pattern') in supplemental:
+            raise ValueError('duplicate supplemental route: ' + row['pattern'])
+        supplemental[row['pattern']] = dict(row, ledger=str(path))
+
+existing_fact_handlers = {'contentLanguageSettings', 'createCatalogResource', 'catalogTags', 'catalogTagDetail', 'createCatalogRecipeType', 'catalogRecipeTypeDetail', 'createCatalogRecipe', 'catalogRecipeDetail', 'catalogRecipeTemplates', 'catalogRecipeTemplateDetail', 'updateCatalogEntityContent', 'ownedSkinContent', 'ownedBlueprintContent', 'modContentResources', 'modContentResource', 'modContentVersions', 'modContentVersion', 'modContentTemplates', 'modContentTemplate', 'modContentSections', 'deleteModContentSection', 'modContentSectionLayout'}
 counts = collections.Counter()
 for route in report['routes']:
     handler = route['handler']
-    if handler in reviewed:
+    sibling = supplemental.get(route['pattern'])
+    if sibling:
+        route['reviewed_disposition'] = sibling['disposition']
+        route['reviewed_evidence'] = sibling
+        route['remaining_condition'] = 'Sibling named scope only; shared-wrapper branches still require exact owner evidence and final fixed-combination regression.'
+    elif handler == 'probeMinecraftServer':
+        route['reviewed_disposition'] = 'EXPLICIT_SKIP_READ_ONLY_PROBE_NO_NEW_REWARD_POLICY'
+        route['remaining_condition'] = 'Successful endpoint explicitly skips activity, probes network and checks duplicates only; this is source characterization, not a new product behavior or browser acceptance.'
+    elif handler == 'favoriteMembershipSummary':
+        route['reviewed_disposition'] = 'READ_ONLY_POST_DEFAULT_CREATE_CLASSIFICATION_NEEDS_DECISION'
+        route['remaining_condition'] = 'Read-only SELECT endpoint currently inherits Create/User by HTTP path inference; no persisted business mutation is missing. Do not invent new View or reward policy from this diagnostic. Keep existing request logging and ask owner to define intended event.'
+    elif handler in reviewed:
         route['reviewed_disposition'] = 'ATOMIC_AT_LISTED_TESTED_SCOPES_REQUIRES_FINAL_FIXED_COMBINATION_REGRESSION'
         route['reviewed_evidence'] = reviewed[handler]
     elif handler in {'commentWatch', 'commentWatchItem'}:

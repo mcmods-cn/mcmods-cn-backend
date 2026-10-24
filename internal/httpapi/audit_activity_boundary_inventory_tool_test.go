@@ -69,7 +69,7 @@ func TestAuditToolActivityBoundaryInventory(t *testing.T) {
 			if lines, ok := fn["atomic_enqueue_lines"].([]any); ok && len(lines) > 0 {
 				atomicFns = append(atomicFns, name)
 			}
-			if name == "insertCatalogActivityTx" {
+			if name == "insertCatalogActivityTx" || name == "insertModContentActivityTx" {
 				factFns = append(factFns, name)
 			}
 			callees, _ := fn["callees"].([]any)
