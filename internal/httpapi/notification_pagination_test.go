@@ -74,7 +74,12 @@ func TestNotificationPageSQLMergesBoundedDirectAndBroadcastKeysets(t *testing.T)
 		!strings.Contains(markAllNotificationsReadSQL, "select max(id) from notifications") {
 		t.Fatal("read-all is not a single watermark upsert")
 	}
-	for _, required := range []string{"notificationUnreadPredicateSQL", "notification_read_watermarks", "where notification_receipts.read_at is null"} {
+	for _, required := range []string{
+		"notificationUnreadPredicateSQL", "notification_read_watermarks",
+		"where (notification_receipts.read_at is null or notification_receipts.read_revision_xid is distinct from excluded.read_revision_xid)",
+		"and (notification_receipts.read_revision_xid is null",
+		"or pg_visible_in_snapshot(notification_receipts.read_revision_xid,pg_current_snapshot()))",
+	} {
 		if required == "notificationUnreadPredicateSQL" {
 			if !strings.Contains(markNotificationReadSQL, "receipt.notification_id is not null") {
 				t.Fatal("single-read SQL does not use the logical unread predicate")
