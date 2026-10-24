@@ -42,6 +42,9 @@ func validateModExportManifest(manifest modExportManifest) error {
 	if !strings.EqualFold(strings.TrimSpace(manifest.PackageFormat), modExportExpectedPackage) {
 		return fmt.Errorf("unsupported package format: %s", manifest.PackageFormat)
 	}
+	if manifest.Configuration.AllNamespaces {
+		return errors.New("this website import targets one project: export explicit namespace(s) for that project instead of all_namespaces=true")
+	}
 	if strings.TrimSpace(manifest.MinecraftVersion) == "" || strings.TrimSpace(manifest.ExporterVersion) == "" || strings.TrimSpace(manifest.Loader) == "" || len(manifest.Configuration.Namespaces) == 0 {
 		return errors.New("manifest required fields are missing")
 	}
@@ -92,7 +95,8 @@ func decodeModExportCapabilities(raw []byte, manifest modExportManifest) ([]modE
 			return nil, fmt.Errorf("capability %s has unsupported status %q", value.ID, value.Status)
 		}
 		seen[value.ID] = struct{}{}
-		result = append(result, modExportCapability{ID: value.ID, Status: value.Status, Source: value.Source, Data: rawCapability})
+		projected, _ := json.Marshal(value)
+		result = append(result, modExportCapability{ID: value.ID, Status: value.Status, Source: value.Source, Data: projected})
 	}
 	return result, nil
 }

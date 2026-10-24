@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"image/png"
 	"io"
+	"math"
 	"mime"
 	"path"
 	"path/filepath"
@@ -52,13 +53,30 @@ func exportIngredientKind(ingredientType string) string {
 	}
 }
 
-func exportRecipeAmount(alternative map[string]any) float64 {
+// Amount fields are optional, but an explicitly supplied value is business
+// data: it must never fall back to one when malformed.
+func validatedExportRecipeAmount(alternative map[string]any) (float64, error) {
+	amount := float64(1)
+	found := false
 	for _, key := range []string{"count", "amount"} {
-		if value, ok := alternative[key].(float64); ok && value > 0 {
-			return value
+		raw, exists := alternative[key]
+		if !exists {
+			continue
 		}
+		value, ok := catalogFiniteNumber(raw)
+		if !ok || value <= 0 || value > 9007199254740991 {
+			return 0, fmt.Errorf("%s must be a positive finite quantity within the exact numeric range", key)
+		}
+		kind := exportIngredientKind(exportString(alternative["type"]))
+		if (key == "count" || kind == "item") && value != math.Trunc(value) {
+			return 0, fmt.Errorf("%s must be an integer for item stacks", key)
+		}
+		if found && amount != value {
+			return 0, errors.New("count and amount disagree")
+		}
+		amount, found = value, true
 	}
-	return 1
+	return amount, nil
 }
 
 func nonEmptyJSON(value json.RawMessage, fallback string) string {

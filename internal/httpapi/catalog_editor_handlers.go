@@ -228,6 +228,9 @@ func normalizeCatalogResourceEdit(ctx context.Context, query modContentTemplateR
 		return err
 	}
 	edit.Definition = nonNilJSONObject(edit.Definition)
+	if err = validateCatalogResourceDefinition(edit.KindCode, edit.Definition); err != nil {
+		return err
+	}
 	edit.Definition, err = canonicalizeGlobalCatalogResourceDefinition(ctx, query, edit.KindCode, edit.CanonicalID, edit.Definition)
 	if err != nil {
 		return err

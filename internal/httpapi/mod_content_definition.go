@@ -339,6 +339,9 @@ func normalizeModContentFieldValue(field modContentEntryTypeField, value any) (a
 		}
 		return result, len(result) > 0, nil
 	case "json":
+		if field.Code == "display" {
+			value = minimizeAdvancementDisplay(value)
+		}
 		encoded, err := json.Marshal(value)
 		if err != nil || len(encoded) > 256*1024 || catalogJSONDepth(value, 0) > 16 {
 			return nil, false, errCatalogEditorInvalid

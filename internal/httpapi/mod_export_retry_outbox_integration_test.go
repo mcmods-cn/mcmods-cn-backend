@@ -89,7 +89,7 @@ func TestModExportRetryAndRecoveryCreateAtomicOutboxAttempts(t *testing.T) {
 		payload jsonb not null,occurred_at timestamptz not null default now(),status text not null default 'pending',
 		available_at timestamptz not null default now(),created_at timestamptz not null default now());
 		insert into catalog_import_jobs(id,mod_id,status,created_by) values
-			('retry-job',11,'failed',1),
+			('retry-job',11,'failed',22),
 			('stale-job',11,'importing',1),
 			('fresh-job',11,'validating',1);
 		update catalog_import_jobs set heartbeat_at=now()-interval '10 minutes',updated_at=now()-interval '10 minutes'
@@ -102,7 +102,12 @@ func TestModExportRetryAndRecoveryCreateAtomicOutboxAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	retried, err := resetModExportJobForRetryTx(ctx, tx, "retry-job", 11, 22)
+	retried, err := resetModExportJobForRetryTx(ctx, tx, "retry-job", 11, 23)
+	if err != nil || retried {
+		t.Fatalf("other account retry = %v/%v", retried, err)
+	}
+	assertModExportAttemptState(t, ctx, tx, "retry-job", "failed", "mod.catalog_import.retried", 0)
+	retried, err = resetModExportJobForRetryTx(ctx, tx, "retry-job", 11, 22)
 	if err != nil || !retried {
 		t.Fatalf("retry reset = %v/%v", retried, err)
 	}
@@ -151,7 +156,7 @@ func TestModExportRetryAndRecoveryCreateAtomicOutboxAttempts(t *testing.T) {
 	assertModExportAttemptState(t, ctx, connection, "stale-job", "queued", "mod.catalog_import.recovered", 1)
 
 	if _, err = connection.Exec(ctx, `insert into catalog_import_jobs(id,mod_id,status,created_by)
-		values('outbox-failure-job',11,'failed',1);
+		values('outbox-failure-job',11,'failed',22);
 		alter table nats_outbox add constraint reject_outbox_failure_job check(aggregate_id<>'outbox-failure-job')`); err != nil {
 		t.Fatal(err)
 	}

@@ -365,12 +365,13 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 	deduplicated := false
 	shouldPublish := false
 	var existingStatus string
+	var existingCreator int64
 	var existingStalled bool
 	err = tx.QueryRow(r.Context(),
-		`select id,status,status in ('validating','importing') and coalesce(heartbeat_at,updated_at) < now() - $6::interval
+		`select id,status,created_by,status in ('validating','importing') and coalesce(heartbeat_at,updated_at) < now() - $6::interval
 		 from catalog_import_jobs where mod_id=$1 and package_id=$2 and importer_version=$3 and target_version_id=$4 and overwrite_existing=$5 for update`,
 		identity.ID, packageID, modExportImporterVersion, targetVersionID, request.OverwriteExistingImportData, pgInterval(modExportStaleAfter),
-	).Scan(&jobID, &existingStatus, &existingStalled)
+	).Scan(&jobID, &existingStatus, &existingCreator, &existingStalled)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		jobID = newExportID()
@@ -379,10 +380,13 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 			jobID, identity.ID, packageID, modExportImporterVersion, targetVersionID, request.OverwriteExistingImportData, claims.Subject,
 		)
 		shouldPublish = err == nil
+	case err == nil && existingCreator != claims.Subject:
+		writeError(w, http.StatusConflict, "该导入已属于其他用户，不能接管其任务")
+		return
 	case err == nil && (shouldRestartModExportStatus(existingStatus) || existingStalled):
 		_, err = tx.Exec(r.Context(),
-			`update catalog_import_jobs set status='queued',progress=0,current_stage='recovery',error_code='',error_detail='{}'::jsonb,created_by=$2,started_at=null,finished_at=null,heartbeat_at=null,run_token='',updated_at=now() where id=$1`,
-			jobID, claims.Subject,
+			`update catalog_import_jobs set status='queued',progress=0,current_stage='recovery',error_code='',error_detail='{}'::jsonb,started_at=null,finished_at=null,heartbeat_at=null,run_token='',updated_at=now() where id=$1`,
+			jobID,
 		)
 		shouldPublish = err == nil
 	case err == nil:
@@ -544,8 +548,8 @@ func (s *Server) cancelModExportJob(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("jobId")
 	var runToken string
 	if err = tx.QueryRow(r.Context(), `select run_token from catalog_import_jobs
-		where id=$1 and mod_id=$2 and status in ('queued','validating','confirmation_required','importing')
-		for update`, jobID, identity.ID).Scan(&runToken); errors.Is(err, pgx.ErrNoRows) {
+		where id=$1 and mod_id=$2 and created_by=$3 and status in ('queued','validating','confirmation_required','importing')
+		for update`, jobID, identity.ID, currentClaims(r).Subject).Scan(&runToken); errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusConflict, "任务已经开始或不存在")
 		return
 	} else if err != nil {
@@ -568,8 +572,8 @@ func (s *Server) cancelModExportJob(w http.ResponseWriter, r *http.Request) {
 	tag, err := tx.Exec(r.Context(), `update catalog_import_jobs
 		set status='cancelled',progress=least(progress,99),current_stage='cancelled',
 			finished_at=now(),heartbeat_at=now(),run_token='',updated_at=now()
-		where id=$1 and mod_id=$2 and status in ('queued','validating','confirmation_required','importing')`,
-		jobID, identity.ID)
+		where id=$1 and mod_id=$2 and created_by=$3 and status in ('queued','validating','confirmation_required','importing')`,
+		jobID, identity.ID, currentClaims(r).Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "取消导入任务失败")
 		return
@@ -802,6 +806,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			unavailableCapabilityCount++
 		}
 	}
+	minimizeExportManifest(&manifest)
 	manifestJSON, _ := json.Marshal(manifest)
 	namespaces := normalizeExportNamespaces(manifest.Configuration.Namespaces)
 	if len(namespaces) == 0 {
@@ -891,7 +896,26 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	binaryAssetCount := 0
 	supportedTranslations := make(map[string]map[string]string, len(exportContentLocaleByCode))
 	flushWriteBatch := func() error {
+		if writeBatch.onStage != nil {
+			for _, pending := range []struct {
+				stage string
+				count int
+			}{
+				{"recipes", len(writeBatch.recipes)},
+				{"recipe_bindings", len(writeBatch.recipeBindings)},
+				{"recipe_candidates", len(writeBatch.recipeCandidates)},
+			} {
+				if pending.count > 0 {
+					if reportErr := writeBatch.onStage(pending.stage); reportErr != nil {
+						return reportErr
+					}
+				}
+			}
+		}
 		return s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+			observer := writeBatch.onStage
+			writeBatch.onStage = nil
+			defer func() { writeBatch.onStage = observer }()
 			return writeBatch.flush(ctx, tx)
 		})
 	}
@@ -1066,6 +1090,12 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 				continue
 			}
 			if name == modExportCapabilitiesPath {
+				// Publish the validated capability projection, never its raw extras.
+				projected := make([]json.RawMessage, 0, len(capabilities))
+				for _, capability := range capabilities {
+					projected = append(projected, capability.Data)
+				}
+				data, _ = json.Marshal(map[string]any{"schema_version": modExportCapabilitySchema, "minecraft_version": manifest.MinecraftVersion, "loader": manifest.Loader, "format_contract": manifest.SchemaVersion, "capabilities": projected})
 				for _, revisionID := range revisions {
 					if err = queueExportTextAsset(writeBatch, revisionID, name, data); err != nil {
 						return err
@@ -1103,6 +1133,10 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			}
 			switch extension {
 			case ".png":
+				data, err = minimizeExportPNG(data)
+				if err != nil {
+					return fmt.Errorf("minimize PNG %s: %w", name, err)
+				}
 				var media modExportPNGMedia
 				if media, err = inspectExportPNG(ctx, cfg, revisionID, uniqueID, name, data, resourceResolver); err != nil {
 					return err

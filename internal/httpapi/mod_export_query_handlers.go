@@ -608,15 +608,38 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 	var isActive bool
 	var targetVersionID int64
 	var overwriteExistingImportData bool
-	err = tx.QueryRow(r.Context(), `select revision.mod_id,revision.source_namespace,revision.source_kind,revision.status,revision.is_active,revision.target_version_id,job.overwrite_existing
-		from catalog_import_revisions revision join catalog_import_jobs job on job.id=revision.job_id where revision.id=$1 for update`, revisionID).
-		Scan(&modID, &namespace, &sourceKind, &status, &isActive, &targetVersionID, &overwriteExistingImportData)
+	var projectID string
+	var submittedBy int64
+	err = tx.QueryRow(r.Context(), `select revision.mod_id,revision.source_namespace,revision.source_kind,revision.status,revision.is_active,revision.target_version_id,job.overwrite_existing,mod.project_code,coalesce(revision.submitted_by,job.created_by,0)
+		from catalog_import_revisions revision join catalog_import_jobs job on job.id=revision.job_id
+		join mods mod on mod.id=revision.mod_id where revision.id=$1`, revisionID).
+		Scan(&modID, &namespace, &sourceKind, &status, &isActive, &targetVersionID, &overwriteExistingImportData, &projectID, &submittedBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "export revision not found")
 		return
 	}
 	if err != nil || (status != "ready" && status != "partial") {
 		writeError(w, http.StatusConflict, "export revision is not ready")
+		return
+	}
+	if !canReviewProjectSubmission(currentClaims(r), projectID, submittedBy) {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	// Take the common target lock before either revision row. Different
+	// candidates cannot deadlock while replacing one another's active row.
+	if _, err = tx.Exec(r.Context(), `select id from mod_content_versions where id=$1 for update`, targetVersionID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock target content version")
+		return
+	}
+	if err = tx.QueryRow(r.Context(), `select status,is_active from catalog_import_revisions where id=$1 for update`, revisionID).Scan(&status, &isActive); err != nil || (status != "ready" && status != "partial") {
+		writeError(w, http.StatusConflict, "export revision is not ready")
+		return
+	}
+	// Rejecting a published revision would leave its public projection behind.
+	// Publication withdrawal is a separate, projection-aware state transition.
+	if request.Status == "rejected" && isActive {
+		writeError(w, http.StatusConflict, "published imports cannot be rejected; withdraw the publication first")
 		return
 	}
 	audit := modExportRevisionReviewAudit{
@@ -717,12 +740,14 @@ func recordModExportRevisionReviewTx(ctx context.Context, tx pgx.Tx, audit modEx
 func (s *Server) canReadModExportRevision(w http.ResponseWriter, r *http.Request, revisionID string) bool {
 	var identity modIdentityRecord
 	var active bool
+	var submittedBy int64
 	err := s.db.QueryRow(r.Context(), `select m.id,m.project_code,m.slug,m.submitted_by,
-		(e.is_active and version.status='active' and m.review_status='approved')
+		(e.is_active and version.status='active' and m.review_status='approved'),coalesce(e.submitted_by,job.created_by,0)
 		from catalog_import_revisions e
 		join mods m on m.id=e.mod_id
+		join catalog_import_jobs job on job.id=e.job_id
 		join mod_content_versions version on version.id=e.target_version_id
-		where e.id=$1`, revisionID).Scan(&identity.ID, &identity.UniqueID, &identity.SiteID, &identity.SubmittedByID, &active)
+		where e.id=$1`, revisionID).Scan(&identity.ID, &identity.UniqueID, &identity.SiteID, &identity.SubmittedByID, &active, &submittedBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "export revision not found")
 		return false
@@ -732,7 +757,7 @@ func (s *Server) canReadModExportRevision(w http.ResponseWriter, r *http.Request
 		return false
 	}
 	claims := currentClaims(r)
-	if !active && !canEditMod(claims, identity) && !claimsAllow(claims, "project.review") {
+	if !active && !canEditMod(claims, identity) && !canReviewProjectSubmission(claims, identity.UniqueID, submittedBy) {
 		writeError(w, http.StatusForbidden, "export revision is awaiting review")
 		return false
 	}

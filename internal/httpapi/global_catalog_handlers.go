@@ -216,7 +216,8 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 		defer rows.Close()
 		recipes := make([]map[string]any, 0, limit)
 		for rows.Next() {
-			var recipeEntityID, recipePublicID, recipeID, sourceKind, fingerprint, snapshotID, sourceRevisionID, siteID, note string
+			var recipeEntityID int64
+			var recipePublicID, recipeID, sourceKind, fingerprint, snapshotID, sourceRevisionID, siteID, note string
 			var canonical, authoritative bool
 			var raw []byte
 			if err = rows.Scan(&recipeEntityID, &recipePublicID, &recipeID, &sourceKind, &canonical, &fingerprint,

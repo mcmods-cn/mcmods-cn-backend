@@ -28,6 +28,9 @@ type exportJEICategoryDocument struct {
 
 type exportJEICategory struct {
 	RecipeTypeID        string          `json:"recipe_type_id"`
+	ExportMode          string          `json:"export_mode"`
+	RecipesOmitted      bool            `json:"recipes_omitted"`
+	SourceRecipeCount   int             `json:"source_recipe_count"`
 	TitleTranslationKey string          `json:"title_translation_key"`
 	TitleNames          json.RawMessage `json:"title_names"`
 	Width               int             `json:"width"`
@@ -212,7 +215,7 @@ func importExportRecipeTypes(ctx context.Context, tx pgx.Tx, packageID string, r
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return fmt.Errorf("decode recipes/jei/categories.json: %w", err)
 	}
-	if document.SchemaVersion != "mcmods-jei-categories/v6" {
+	if document.SchemaVersion != "mcmods-jei-categories/v6" && document.SchemaVersion != "mcmods-jei-categories/v7" {
 		return fmt.Errorf("unsupported JEI category schema: %s", document.SchemaVersion)
 	}
 	batch := &pgx.Batch{}
@@ -227,6 +230,18 @@ func importExportRecipeTypes(ctx context.Context, tx pgx.Tx, packageID string, r
 			return fmt.Errorf("duplicate JEI category %s", category.RecipeTypeID)
 		}
 		seenCategories[category.RecipeTypeID] = struct{}{}
+		if document.SchemaVersion == "mcmods-jei-categories/v6" && (category.ExportMode == "templates_only" || category.RecipesOmitted) {
+			return fmt.Errorf("JEI category %s uses v7 omission semantics with a v6 schema", category.RecipeTypeID)
+		}
+		if document.SchemaVersion == "mcmods-jei-categories/v7" {
+			if category.ExportMode != "full" && category.ExportMode != "templates_only" {
+				return fmt.Errorf("JEI category %s has unsupported export_mode", category.RecipeTypeID)
+			}
+			if category.RecipesOmitted != (category.ExportMode == "templates_only") ||
+				(category.RecipesOmitted && (category.RecipeCount != 0 || category.ExportedRecipeCount != 0)) {
+				return fmt.Errorf("JEI category %s has inconsistent templates-only recipe counts", category.RecipeTypeID)
+			}
+		}
 		if category.TemplateCount != category.BackgroundCount {
 			return fmt.Errorf("JEI category %s declares %d templates but %d backgrounds", category.RecipeTypeID, category.TemplateCount, category.BackgroundCount)
 		}
@@ -856,6 +871,10 @@ func queueExportRecipeBindings(batch *modExportWriteBatch, resolver catalogResou
 			TagIdentity: tagIdentityKey, TagPublicID: tagPublicID, TagCanonicalID: tagID,
 		})
 		for alternativeIndex, alternative := range binding.Alternatives {
+			amount, amountErr := validatedExportRecipeAmount(alternative)
+			if amountErr != nil {
+				return fmt.Errorf("slot %s alternative %d: %w", binding.SlotID, alternativeIndex, amountErr)
+			}
 			ingredientType := strings.TrimSpace(exportString(alternative["type"]))
 			ingredientKind := exportIngredientKind(ingredientType)
 			resourceID := strings.TrimSpace(exportString(alternative["item"]))
@@ -879,12 +898,12 @@ func queueExportRecipeBindings(batch *modExportWriteBatch, resolver catalogResou
 				ResourceIdentity: resource.ID, ResourcePublicID: resource.PublicID,
 				ResourceCanonicalID: resource.CanonicalID, ResourceRawID: resourceID, ResourceAliasID: resourceAliasID,
 				ResourceNamespace: namespace, ResourcePath: resourcePath, KindCode: kindCode,
-				Amount: exportRecipeAmount(alternative), IngredientKind: ingredientKind,
+				Amount: amount, IngredientKind: ingredientKind,
 				IngredientType: ingredientType, UniqueID: uniqueID, NBTSNBT: nbtSNBT,
 				ChanceAvailable: binding.ChanceAvailable, Chance: binding.Chance,
 				ChancePercent: binding.ChancePercent, ChanceComparator: binding.ChanceComparator,
 				ChanceSource: binding.ChanceSource, ChanceText: binding.ChanceText,
-				ChanceTexts:          json.RawMessage(nonEmptyJSON(binding.ChanceTexts, `{}`)),
+				ChanceTexts:          minimizeExportLocaleText(binding.ChanceTexts),
 				ChanceTranslationKey: binding.ChanceTranslationKey, ChanceRenderX: binding.ChanceRenderX,
 				ChanceRenderY: binding.ChanceRenderY, Byproduct: byproduct,
 			})
@@ -1131,6 +1150,9 @@ func validateExportRecipeChance(binding exportJEIBinding) error {
 	}
 	if binding.ChancePercent != nil && (*binding.ChancePercent < 0 || *binding.ChancePercent > 100) {
 		return fmt.Errorf("chance_percent must be between 0 and 100")
+	}
+	if binding.Chance != nil && binding.ChancePercent != nil && math.Abs(*binding.Chance*100-*binding.ChancePercent) > 1e-7 {
+		return fmt.Errorf("chance and chance_percent must describe the same probability")
 	}
 	return nil
 }

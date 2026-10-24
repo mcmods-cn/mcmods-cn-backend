@@ -3,11 +3,17 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
 
 func TestImportedContentSyncReconcilesOnlyItsSourceScopeIntegration(t *testing.T) {
+	for _, overwrite := range []bool{false, true} {
+		t.Run(fmt.Sprintf("overwrite=%v", overwrite), func(t *testing.T) { testImportedContentSyncReconcilesOnlyItsSourceScope(t, overwrite) })
+	}
+}
+func testImportedContentSyncReconcilesOnlyItsSourceScope(t *testing.T, overwrite bool) {
 	db := openGlobalCatalogTestDB(t)
 	ctx := context.Background()
 	if _, err := db.Exec(ctx, `create temp table mod_content_versions(id bigint primary key,mod_id bigint not null,status text not null);
@@ -84,7 +90,7 @@ func TestImportedContentSyncReconcilesOnlyItsSourceScopeIntegration(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = syncImportedResourcesToContentVersionTx(ctx, tx, []string{"a2"}, 100, false, 42); err != nil {
+	if err = syncImportedResourcesToContentVersionTx(ctx, tx, []string{"a2"}, 100, overwrite, 42); err != nil {
 		t.Fatal(err)
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -103,10 +109,14 @@ func TestImportedContentSyncReconcilesOnlyItsSourceScopeIntegration(t *testing.T
 	if err = json.Unmarshal(definitionRaw, &definition); err != nil {
 		t.Fatal(err)
 	}
-	if status != "active" || source != "import" || namespace != "alpha" || revision != "a2" || iconFileID != nil || definition["keep"] != float64(10) || definition["added"] != float64(3) {
+	wantKeep := float64(10)
+	if !overwrite {
+		wantKeep = 1
+	}
+	if status != "active" || source != "import" || namespace != "alpha" || revision != "a2" || (overwrite && iconFileID != nil) || (!overwrite && (iconFileID == nil || *iconFileID != 700)) || definition["keep"] != wantKeep || definition["added"] != float64(3) {
 		t.Fatalf("replacement projection mismatch: status=%s source=%s namespace=%s revision=%s icon=%v definition=%#v", status, source, namespace, revision, iconFileID, definition)
 	}
-	if _, exists := definition["removed"]; exists {
+	if _, exists := definition["removed"]; exists == overwrite {
 		t.Fatalf("removed imported field survived replacement: %#v", definition)
 	}
 
@@ -121,7 +131,11 @@ func TestImportedContentSyncReconcilesOnlyItsSourceScopeIntegration(t *testing.T
 	if err = db.QueryRow(ctx, `select projection_source,definition from mod_resource_version_details where resource_id=5 and version_id=100`).Scan(&manualSource, &manualDefinition); err != nil {
 		t.Fatal(err)
 	}
-	if oldStatus != "archived" || betaStatus != "active" || betaRevision != "b1" || manualSource != "manual" || string(manualDefinition) != `{"manual": true}` {
+	wantOldStatus := "active"
+	if overwrite {
+		wantOldStatus = "archived"
+	}
+	if oldStatus != wantOldStatus || betaStatus != "active" || betaRevision != "b1" || manualSource != "manual" || string(manualDefinition) != `{"manual": true}` {
 		t.Fatalf("scope/manual isolation failed: old=%s beta=%s/%s manual=%s/%s", oldStatus, betaStatus, betaRevision, manualSource, manualDefinition)
 	}
 
@@ -141,7 +155,14 @@ func TestImportedContentSyncReconcilesOnlyItsSourceScopeIntegration(t *testing.T
 		t.Fatal(err)
 	}
 	rows.Close()
-	if len(localizations) != 2 || localizations["en-us"] != "New:import" || localizations["fr-FR"] != "Nom manuel:human" {
+	wantCount, wantName := 2, "New:import"
+	if !overwrite {
+		wantCount, wantName = 3, "Old:import"
+		if localizations["zh-cn"] != "旧:import" {
+			t.Fatal("preserve import mode removed previous locale")
+		}
+	}
+	if len(localizations) != wantCount || localizations["en-us"] != wantName || localizations["fr-FR"] != "Nom manuel:human" {
 		t.Fatalf("import locale replacement did not preserve only human facts: %#v", localizations)
 	}
 
@@ -153,7 +174,11 @@ func TestImportedContentSyncReconcilesOnlyItsSourceScopeIntegration(t *testing.T
 		Scan(&oldPlacement, &betaPlacement, &newPlacement, &manualPlacement); err != nil {
 		t.Fatal(err)
 	}
-	if oldPlacement != 0 || betaPlacement != 1 || newPlacement != 1 || manualPlacement != 0 {
+	wantOldPlacement := 0
+	if !overwrite {
+		wantOldPlacement = 1
+	}
+	if oldPlacement != wantOldPlacement || betaPlacement != 1 || newPlacement != 1 || manualPlacement != 0 {
 		t.Fatalf("placement reconciliation old=%d beta=%d new=%d manual=%d", oldPlacement, betaPlacement, newPlacement, manualPlacement)
 	}
 }

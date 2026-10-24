@@ -15,7 +15,7 @@ import (
 // syncImportedResourcesToContentVersionTx materializes importer-owned fields in
 // the selected, neutral content version. Human summaries and Markdown bodies
 // are intentionally stored in different columns and are never replaced here.
-func syncImportedResourcesToContentVersionTx(ctx context.Context, tx pgx.Tx, revisionIDs []string, versionID int64, _ bool, actorID int64) error {
+func syncImportedResourcesToContentVersionTx(ctx context.Context, tx pgx.Tx, revisionIDs []string, versionID int64, overwrite bool, actorID int64) error {
 	if len(revisionIDs) == 0 || versionID <= 0 {
 		return nil
 	}
@@ -23,8 +23,10 @@ func syncImportedResourcesToContentVersionTx(ctx context.Context, tx pgx.Tx, rev
 	if err != nil {
 		return err
 	}
-	if err = archiveStaleImportedResourceDetailsTx(ctx, tx, revisionIDs, versionID, actorID); err != nil {
-		return err
+	if overwrite {
+		if err = archiveStaleImportedResourceDetailsTx(ctx, tx, revisionIDs, versionID, actorID); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(ctx, `insert into mod_resource_bindings(resource_id,mod_id)
 		select distinct snapshot.resource_id,$2::bigint from resource_import_snapshots snapshot
@@ -49,27 +51,27 @@ func syncImportedResourcesToContentVersionTx(ctx context.Context, tx pgx.Tx, rev
 			entry_type_code=excluded.entry_type_code,
 			definition_schema_version=excluded.definition_schema_version,
 			default_locale=excluded.default_locale,
-			definition=excluded.definition,
-			icon_file_id=excluded.icon_file_id,
-			render_file_id=excluded.render_file_id,
+			definition=case when $4::boolean then excluded.definition else excluded.definition || mod_resource_version_details.definition end,
+			icon_file_id=case when $4::boolean then excluded.icon_file_id else coalesce(mod_resource_version_details.icon_file_id,excluded.icon_file_id) end,
+			render_file_id=case when $4::boolean then excluded.render_file_id else coalesce(mod_resource_version_details.render_file_id,excluded.render_file_id) end,
 			projection_source='import',
 			import_source_namespace=excluded.import_source_namespace,
 			import_source_kind=excluded.import_source_kind,
 			import_revision_id=excluded.import_revision_id,
 			status='active',published_revision_id=null,
 			updated_by=excluded.updated_by,updated_at=now()
-		where mod_resource_version_details.projection_source='import'`, revisionIDs, versionID, actorID); err != nil {
+		where mod_resource_version_details.projection_source='import'`, revisionIDs, versionID, actorID, overwrite); err != nil {
 		return fmt.Errorf("sync imported resource version details: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `delete from mod_resource_version_detail_localizations localization
 		using mod_resource_version_details detail
 		where localization.resource_id=detail.resource_id and localization.version_id=detail.version_id
-		  and detail.version_id=$2 and detail.projection_source='import' and localization.provenance='import'
+		  and $3::boolean and detail.version_id=$2 and detail.projection_source='import' and localization.provenance='import'
 		  and exists(select 1 from resource_import_snapshots snapshot
 			join catalog_import_revisions revision on revision.id=snapshot.revision_id
 			where snapshot.revision_id=any($1::text[]) and snapshot.resource_id=detail.resource_id
 			  and revision.source_namespace=detail.import_source_namespace
-			  and revision.source_kind=detail.import_source_kind)`, revisionIDs, versionID); err != nil {
+			  and revision.source_kind=detail.import_source_kind)`, revisionIDs, versionID, overwrite); err != nil {
 		return fmt.Errorf("clear replaced imported resource localizations: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `insert into mod_resource_version_detail_localizations(
@@ -86,7 +88,7 @@ func syncImportedResourcesToContentVersionTx(ctx context.Context, tx pgx.Tx, rev
 		order by snapshot.resource_id,replace(lower(name.locale),'_','-'),revision.revision_no desc,revision.id,name.locale
 		on conflict(resource_id,version_id,locale) do update set
 			name=excluded.name
-		where mod_resource_version_detail_localizations.provenance='import'`, revisionIDs, versionID); err != nil {
+		where $3::boolean and mod_resource_version_detail_localizations.provenance='import'`, revisionIDs, versionID, overwrite); err != nil {
 		return fmt.Errorf("sync imported resource localizations: %w", err)
 	}
 	if err := ensureImportedContentSectionsTx(ctx, tx, revisionIDs, versionID, modID, actorID); err != nil {
@@ -409,7 +411,7 @@ func checkedImportedContentSQLAlias(value string) string {
 
 func insertModExportImportActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, versionPublicID string) error {
 	_, err := tx.Exec(ctx, `insert into user_activity_events(user_id,action_id,object_type_id,object_route_id,occurred_at)
-		select nullif($1,0),$2,$3,route.id,$5
+		select nullif($1::bigint,0),$2,$3,route.id,$5
 		from mod_content_versions version
 		join public_routes route on route.entity_type='mod' and route.internal_id=version.mod_id
 		where version.public_id=$4`, actorID, activity.ActionUpload, activity.ObjectMod, versionPublicID, time.Now().UTC())

@@ -900,7 +900,7 @@ func normalizeEmbeddedIconStrings(values []string) []string {
 
 func insertEmbeddedIconImportActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, versionPublicID string) error {
 	_, err := tx.Exec(ctx, `insert into user_activity_events(user_id,action_id,object_type_id,object_route_id,occurred_at)
-		select nullif($1,0),$2,$3,route.id,$5
+		select nullif($1::bigint,0),$2,$3,route.id,$5
 		from mod_content_versions version
 		join public_routes route on route.entity_type='mod' and route.internal_id=version.mod_id
 		where version.public_id=$4`, actorID, activity.ActionUpload, activity.ObjectMod,

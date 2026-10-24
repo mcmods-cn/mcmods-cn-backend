@@ -1,0 +1,72 @@
+{
+  "schema_version": "mcmods-jei-template-collection/v2",
+  "recipe_type_id": "example:pressing",
+  "export_mode": "full",
+  "recipes_omitted": false,
+  "coordinate_space": "logical_pixels",
+  "image_scale": 4,
+  "canvas": {
+    "x": 0,
+    "y": 0,
+    "width": 132,
+    "height": 82
+  },
+  "image_pixels": {
+    "x": 0,
+    "y": 0,
+    "width": 528,
+    "height": 328
+  },
+  "content": {
+    "x": 16,
+    "y": 16,
+    "width": 100,
+    "height": 50
+  },
+  "template_count": 1,
+  "templates": [
+    {
+      "schema_version": "mcmods-jei-layout-template/v2",
+      "template_id": "template_0123456789abcdef",
+      "background": "recipes/jei/backgrounds/example/pressing/template_0123456789abcdef.png",
+      "background_contains_ingredients": false,
+      "slot_count": 2,
+      "slots": [
+        {
+          "slot_id": "input_0",
+          "role": "input",
+          "coordinates_available": true,
+          "rect": {
+            "x": 20,
+            "y": 20,
+            "width": 16,
+            "height": 16
+          },
+          "visual_rect": {
+            "x": 18,
+            "y": 18,
+            "width": 20,
+            "height": 20
+          }
+        },
+        {
+          "slot_id": "output_0",
+          "role": "output",
+          "coordinates_available": true,
+          "rect": {
+            "x": 80,
+            "y": 20,
+            "width": 16,
+            "height": 16
+          },
+          "visual_rect": {
+            "x": 78,
+            "y": 18,
+            "width": 20,
+            "height": 20
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "schema_version": "mcmods-jei-recipe-collection/v2",
+  "recipe_type_id": "example:pressing",
+  "export_mode": "full",
+  "recipes_omitted": false,
+  "template_collection": "recipes/jei/templates/example/pressing.json",
+  "count": 1,
+  "recipes": [
+    {
+      "recipe_type_id": "example:pressing",
+      "recipe_id": "example:plate",
+      "recipe_id_source": "minecraft_recipe",
+      "recipe_id_canonical": true,
+      "source_mod_id": "example",
+      "source_mod_version": "1.0",
+      "source_mod_id_source": "recipe_id_namespace",
+      "origin_kind": "registered_recipe",
+      "underlying_recipe_type_id": "example:pressing",
+      "layout_kind": "not_applicable",
+      "ordered": null,
+      "layout_classification_source": "recipe_type",
+      "recipe_key": "example:plate",
+      "template_id": "template_0123456789abcdef",
+      "schema_version": "mcmods-jei-recipe-bindings/v2",
+      "render_locale": "en_us",
+      "parameter_count": 0,
+      "parameters": {},
+      "binding_count": 2,
+      "bindings": [
+        {
+          "slot_id": "input_0",
+          "semantic_role": "input",
+          "ingredient_present": false,
+          "clickable": false,
+          "placeholder_item": "minecraft:air",
+          "alternatives": []
+        },
+        {
+          "slot_id": "output_0",
+          "semantic_role": "output",
+          "ingredient_present": true,
+          "clickable": true,
+          "chance_available": false,
+          "alternatives": [
+            {
+              "type": "minecraft:item_stack",
+              "item": "example:plate",
+              "count": 2
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

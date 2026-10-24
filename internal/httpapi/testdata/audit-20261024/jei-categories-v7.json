@@ -1,0 +1,77 @@
+{
+  "schema_version": "mcmods-jei-categories/v7",
+  "category_count": 1,
+  "recipe_count": 1,
+  "layout_sample_count": 1,
+  "filter_summary": {
+    "policy": "source_recipe_namespace_with_recipe_id_deduplication",
+    "discovered_recipe_presentations": 1,
+    "exported_recipe_presentations": 1,
+    "layout_sample_presentations": 1,
+    "excluded_recipe_presentations": 0,
+    "excluded_by_reason": {},
+    "excluded_by_recipe_type": {},
+    "template_only_recipe_presentations": 0,
+    "configured_excluded_recipe_type_ids": [],
+    "configured_template_only_recipe_type_ids": []
+  },
+  "categories": [
+    {
+      "recipe_type_id": "example:pressing",
+      "title_names": {
+        "en_us": "Pressing",
+        "zh_cn": "压制"
+      },
+      "width": 100,
+      "height": 50,
+      "export_mode": "full",
+      "recipes_omitted": false,
+      "source_recipe_count": 1,
+      "recipe_count": 1,
+      "exported_recipe_count": 1,
+      "template_count": 1,
+      "background_count": 1,
+      "template_collection": "recipes/jei/templates/example/pressing.json",
+      "recipe_collection": "recipes/jei/recipes/example/pressing.json",
+      "image_scale": 4,
+      "canvas": {
+        "x": 0,
+        "y": 0,
+        "width": 132,
+        "height": 82
+      },
+      "catalyst_count": 1,
+      "catalysts": [
+        {
+          "type": "item_stack",
+          "resource_location": "example:press",
+          "item": "example:press",
+          "count": 1
+        }
+      ]
+    }
+  ],
+  "recipes": [
+    {
+      "recipe_type_id": "example:pressing",
+      "recipe_id": "example:plate",
+      "recipe_id_source": "minecraft_recipe",
+      "recipe_id_canonical": true,
+      "source_mod_id": "example",
+      "source_mod_version": "1.0",
+      "source_mod_id_source": "recipe_id_namespace",
+      "origin_kind": "registered_recipe",
+      "underlying_recipe_type_id": "example:pressing",
+      "layout_kind": "not_applicable",
+      "ordered": null,
+      "layout_classification_source": "recipe_type",
+      "recipe_key": "example:plate",
+      "template_id": "template_0123456789abcdef",
+      "template_collection": "recipes/jei/templates/example/pressing.json",
+      "recipe_collection": "recipes/jei/recipes/example/pressing.json",
+      "background": "recipes/jei/backgrounds/example/pressing/template_0123456789abcdef.png",
+      "layout_available": true,
+      "background_available": true
+    }
+  ]
+}

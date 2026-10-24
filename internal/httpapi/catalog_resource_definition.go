@@ -33,6 +33,21 @@ func validateCatalogResourceDefinition(kindCode string, definition map[string]an
 			}
 		}
 	}
+	// The canonical content template flattens known properties. Validate that
+	// representation as well as the legacy nested editing representation.
+	if err = validateCatalogNumericFields(definition, []catalogNumericField{
+		{"maxStackSize", 1, math.MaxInt32, true}, {"maxDamage", 0, math.MaxInt32, true},
+		{"durability", 0, math.MaxInt32, true}, {"hardness", -1, 1e9, false},
+		{"explosionResistance", 0, 1e12, false}, {"friction", 0, 1, false},
+		{"speedFactor", 0, 100, false}, {"jumpFactor", 0, 100, false}, {"lightLevel", 0, 15, true},
+		{"miningSpeed", 0, 1e9, false}, {"attackDamage", -1e6, 1e6, false},
+		{"attackSpeed", -1024, 1024, false}, {"enchantability", 0, 1e6, true},
+		{"harvestLevel", -1, 1e6, true}, {"tierDurability", 0, math.MaxInt32, true},
+		{"density", -1e9, 1e9, true}, {"viscosity", 0, 1e12, true},
+		{"temperature", 0, 1e9, true}, {"luminosity", 0, 15, true},
+	}); err != nil {
+		return err
+	}
 	if err = validateCatalogPhysicalProperties(catalogObject(definition["physical"])); err != nil {
 		return err
 	}
