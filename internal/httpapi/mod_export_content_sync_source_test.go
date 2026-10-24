@@ -56,7 +56,10 @@ func TestImportedProjectionReconciliationIsSourceScopedAndReplaceBased(t *testin
 	for _, required := range []string{
 		"archiveStaleImportedResourceDetailsTx", "incoming_scopes", "incoming_resources",
 		"projection_source='import'", "import_source_namespace", "import_source_kind", "import_revision_id",
-		"definition=excluded.definition", "localization.provenance='import'",
+		// overwrite=true replaces importer-owned facts; false preserves existing
+		// values while filling missing imported fields. Real PostgreSQL cases
+		// below cover both modes and source/manual ownership isolation.
+		"definition=case when $4::boolean then excluded.definition else excluded.definition || mod_resource_version_details.definition end", "localization.provenance='import'",
 	} {
 		if !strings.Contains(source, required) {
 			t.Errorf("import projection reconciliation is missing %q", required)
