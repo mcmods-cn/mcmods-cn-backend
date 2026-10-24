@@ -40,6 +40,35 @@ func NewSeedCrawlerWorker(cfg config.Config, db *pgxpool.Pool) *SeedCrawlerWorke
 var errSeedCrawlerLeaseOwnershipLost = errors.New("seed crawler lease ownership lost")
 var errSeedCrawlerHeartbeatStopped = errors.New("seed crawler heartbeat stopped")
 
+type seedCrawlerRunLease struct {
+	ID    int64
+	Owner string
+}
+
+type seedCrawlerRunLeaseContextKey struct{}
+
+func withSeedCrawlerRunLease(ctx context.Context, runID int64, owner string) context.Context {
+	return context.WithValue(ctx, seedCrawlerRunLeaseContextKey{}, seedCrawlerRunLease{ID: runID, Owner: owner})
+}
+
+// Keep the run row locked until the same transaction commits its draft or
+// publication. Heartbeat cancellation and a final run-status update alone do
+// not stop a worker which lost its lease while waiting for a provider.
+func lockSeedCrawlerRunLeaseTx(ctx context.Context, tx pgx.Tx, actorID int64) error {
+	lease, ok := ctx.Value(seedCrawlerRunLeaseContextKey{}).(seedCrawlerRunLease)
+	if !ok || lease.ID <= 0 || lease.Owner == "" || actorID <= 0 {
+		return errSeedCrawlerLeaseOwnershipLost
+	}
+	var valid bool
+	err := tx.QueryRow(ctx, `select status='running' and lease_owner=$2
+		and lease_expires_at>clock_timestamp() and actor_id=$3
+		from seed_crawler_runs where id=$1 for update`, lease.ID, lease.Owner, actorID).Scan(&valid)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !valid) {
+		return errSeedCrawlerLeaseOwnershipLost
+	}
+	return err
+}
+
 func (worker *SeedCrawlerWorker) Start(ctx context.Context) {
 	if worker == nil || worker.server == nil || worker.server.db == nil {
 		return
@@ -213,6 +242,7 @@ func (worker *SeedCrawlerWorker) processOne(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	runContext, stopHeartbeat := worker.startLeaseHeartbeat(ctx, runID, leaseOwner)
+	runContext = withSeedCrawlerRunLease(runContext, runID, leaseOwner)
 	actor, actorErr := authorizeAutomationProject(runContext, worker.server.db, 0, "", true, false)
 	if actorErr != nil {
 		heartbeatErr := stopHeartbeat()
@@ -225,7 +255,7 @@ func (worker *SeedCrawlerWorker) processOne(ctx context.Context) (bool, error) {
 		return true, worker.failRun(ctx, runID, leaseOwner, actorErr)
 	}
 	command, actorErr := worker.server.db.Exec(runContext, `update seed_crawler_runs set actor_id=$2
-		where id=$1 and status='running' and lease_owner=$3`, runID, actor.Subject, leaseOwner)
+		where id=$1 and status='running' and lease_owner=$3 and lease_expires_at>clock_timestamp()`, runID, actor.Subject, leaseOwner)
 	if actorErr == nil && command.RowsAffected() != 1 {
 		actorErr = errSeedCrawlerLeaseOwnershipLost
 	}
@@ -247,6 +277,9 @@ func (worker *SeedCrawlerWorker) processOne(ctx context.Context) (bool, error) {
 		}
 		runErr = errors.Join(runErr, heartbeatErr)
 	}
+	if errors.Is(runErr, errSeedCrawlerLeaseOwnershipLost) {
+		return true, runErr
+	}
 	if runErr != nil {
 		return true, worker.failRunWithStats(ctx, runID, leaseOwner, runErr, statsRaw)
 	}
@@ -257,7 +290,7 @@ func (worker *SeedCrawlerWorker) processOne(ctx context.Context) (bool, error) {
 	defer tx.Rollback(ctx)
 	command, err = tx.Exec(ctx, `update seed_crawler_runs set status='completed',stats=$2::jsonb,last_error='',
 		lease_owner='',lease_expires_at=null,finished_at=now()
-		where id=$1 and status='running' and lease_owner=$3`, runID, statsRaw, leaseOwner)
+		where id=$1 and status='running' and lease_owner=$3 and lease_expires_at>clock_timestamp()`, runID, statsRaw, leaseOwner)
 	if err != nil {
 		return true, err
 	}
@@ -301,7 +334,7 @@ func (worker *SeedCrawlerWorker) startLeaseHeartbeat(ctx context.Context, runID 
 			case <-ticker.C:
 				command, err := worker.server.db.Exec(heartbeatContext, `update seed_crawler_runs
 					set lease_expires_at=now()+$3::interval
-					where id=$1 and status='running' and lease_owner=$2`,
+					where id=$1 and status='running' and lease_owner=$2 and lease_expires_at>clock_timestamp()`,
 					runID, leaseOwner, worker.effectiveLeaseDuration().String())
 				if err == nil && command.RowsAffected() != 1 {
 					err = errSeedCrawlerLeaseOwnershipLost
@@ -406,6 +439,9 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, ac
 			}
 			status, processErr := worker.createSeedDraft(ctx, candidateID, actor, projectType, hit, cfg)
 			if processErr != nil {
+				if errors.Is(processErr, errSeedCrawlerLeaseOwnershipLost) {
+					return stats, processErr
+				}
 				stats["failed"]++
 				if _, updateErr := worker.server.db.Exec(ctx, `update seed_crawler_candidates set status='failed',last_error=$2,updated_at=now()
 					where id=$1 and status not in ('submitted','existing')`, candidateID, truncateRunes(processErr.Error(), 2000)); updateErr != nil {
@@ -598,6 +634,12 @@ func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateI
 		return "", fmt.Errorf("begin seed crawler draft stage: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if err = lockSeedCrawlerRunLeaseTx(ctx, tx, actor.Subject); err != nil {
+		return "", err
+	}
+	if _, err = authorizeAutomationProject(ctx, tx, actor.Subject, "", true, false); err != nil {
+		return "", err
+	}
 	var draftID string
 	err = tx.QueryRow(ctx, `insert into user_drafts(user_id,draft_key,project_key,project_title,kind,title,edit_url,payload,expires_at)
 		values($1,$2,$3,$4,'seed_crawler_import',$4,$5,$6::jsonb,now()+interval '3 years')
@@ -981,9 +1023,13 @@ func (worker *SeedCrawlerWorker) submitSeedDraft(ctx context.Context, candidateI
 	}
 	actor = currentActor
 	finalizedStatus := ""
+	var eligibilityErr error
 	hook := func(hookContext context.Context, tx pgx.Tx, result projectCreationTransactionResult) error {
-		if _, err := authorizeAutomationProject(hookContext, tx, actor.Subject, result.ProjectPublicID, true, result.ReviewStatus == "approved"); err != nil {
-			return err
+		if eligibilityErr = lockSeedCrawlerRunLeaseTx(hookContext, tx, actor.Subject); eligibilityErr != nil {
+			return eligibilityErr
+		}
+		if _, eligibilityErr = authorizeAutomationProject(hookContext, tx, actor.Subject, result.ProjectPublicID, true, result.ReviewStatus == "approved"); eligibilityErr != nil {
+			return eligibilityErr
 		}
 		if result.ProjectType != projectType || result.ProjectID <= 0 || result.ProjectPublicID == "" || result.SiteID == "" ||
 			result.ChangeRequestID <= 0 || result.ChangeRequestUID == "" ||
@@ -1032,6 +1078,9 @@ func (worker *SeedCrawlerWorker) submitSeedDraft(ctx context.Context, candidateI
 		worker.server.createMod(response, request)
 	} else {
 		worker.server.createSimpleProject(response, request, projectType)
+	}
+	if eligibilityErr != nil {
+		return "", eligibilityErr
 	}
 	if response.Code >= 200 && response.Code < 300 && (finalizedStatus == "approved" || finalizedStatus == "pending") {
 		return finalizedStatus, nil
