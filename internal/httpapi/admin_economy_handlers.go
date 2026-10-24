@@ -101,10 +101,16 @@ func (s *Server) adjustAdminUserBalance(w http.ResponseWriter, r *http.Request) 
 		delta = request.Amount - current
 	}
 	if delta == 0 {
+		if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: currentClaims(r).Subject,
+			ActionID: inferredActivityAction(r), ObjectTypeID: inferredActivityObject(r.URL.Path), ObjectPublicID: identity.PublicID}); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to persist balance activity")
+			return
+		}
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to commit user balance")
 			return
 		}
+		skipRequestActivity(r)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"currencyCode": request.CurrencyCode, "previousBalance": current,
 			"balance": current, "amountDelta": int64(0),
@@ -123,11 +129,16 @@ func (s *Server) adjustAdminUserBalance(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "failed to adjust user balance")
 		return
 	}
+	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: currentClaims(r).Subject, ActionID: activity.ActionEdit,
+		ObjectTypeID: activity.ObjectEconomy, ObjectEntityType: "user", ObjectInternalID: identity.InternalID}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist balance activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit user balance")
 		return
 	}
-	annotateActivityID(r, activity.ActionEdit, activity.ObjectEconomy, "user", identity.InternalID, 0)
+	skipRequestActivity(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"currencyCode": request.CurrencyCode, "previousBalance": current,
 		"balance": next, "amountDelta": delta,

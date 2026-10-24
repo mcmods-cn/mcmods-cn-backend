@@ -20,6 +20,12 @@ func auditFixActivityMonitor(t *testing.T, f test013Fixture) *activity.Monitor {
 	t.Helper()
 	s := f.origin.Config.Handler.(*Server)
 	m := activity.NewMonitor(f.db, progression.NewService(f.db, s.cache), activity.Options{BatchSize: 16, QueueCapacity: 32, FlushInterval: 20 * time.Millisecond, RetryMinDelay: 20 * time.Millisecond, RetryMaxDelay: 50 * time.Millisecond, WriteTimeout: time.Second, DurableEnqueueTimeout: time.Second})
+	// Attach the initial real monitor so the pre-fix fault exercises the actual
+	// post-response middleware path as well. Restarting only the consumer keeps
+	// this pointer stable; fixed writes enqueue in their own business transaction.
+	if s.activity == nil {
+		s.activity = m
+	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

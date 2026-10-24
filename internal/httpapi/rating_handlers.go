@@ -204,21 +204,32 @@ func (s *Server) ratingItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	actionID := activity.ActionCreate
+	if existingID > 0 {
+		actionID = activity.ActionEdit
+	}
+	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: currentClaims(r).Subject, ActionID: actionID,
+		ObjectTypeID: activity.ObjectRating, ObjectPublicID: target.PublicID}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist rating activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit rating")
 		return
 	}
 	item.Scores = request.Scores
-	actionID := activity.ActionCreate
-	if existingID > 0 {
-		actionID = activity.ActionEdit
-	}
-	annotateActivity(r, actionID, activity.ObjectRating, target.PublicID, 0)
+	skipRequestActivity(r)
 	writeJSON(w, http.StatusOK, item)
 }
 
 func (s *Server) deleteRating(w http.ResponseWriter, r *http.Request, target rateableTarget) {
-	result, err := s.db.Exec(r.Context(), `delete from content_ratings where object_route_id=$1 and author_id=$2`,
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin rating deletion")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	result, err := tx.Exec(r.Context(), `delete from content_ratings where object_route_id=$1 and author_id=$2`,
 		target.RouteID, currentClaims(r).Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete rating")
@@ -228,7 +239,16 @@ func (s *Server) deleteRating(w http.ResponseWriter, r *http.Request, target rat
 		writeError(w, http.StatusNotFound, "rating not found")
 		return
 	}
-	annotateActivity(r, activity.ActionDelete, activity.ObjectRating, target.PublicID, 0)
+	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: currentClaims(r).Subject, ActionID: activity.ActionDelete,
+		ObjectTypeID: activity.ObjectRating, ObjectPublicID: target.PublicID}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist rating activity")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit rating deletion")
+		return
+	}
+	skipRequestActivity(r)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -352,11 +352,16 @@ func (s *Server) createMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存服务器状态失败")
 		return
 	}
+	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: claims.Subject, ActionID: activity.ActionCreate,
+		ObjectTypeID: activity.ObjectServer, ObjectEntityType: "minecraft_server", ObjectInternalID: serverID, MarkdownAddedBytes: len(request.BodyMarkdown)}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist server activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "提交服务器失败")
 		return
 	}
-	annotateActivityID(r, activity.ActionCreate, activity.ObjectServer, "minecraft_server", serverID, len(request.BodyMarkdown))
+	skipRequestActivity(r)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": publicID, "reviewStatus": reviewStatus, "published": reviewStatus == "approved",
 	})
@@ -439,12 +444,18 @@ func (s *Server) updateMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "更新服务器模组状态失败")
 		return
 	}
+	addedBytes, deletedBytes := activity.MarkdownDeltaBytes(previousBody, request.BodyMarkdown)
+	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: claims.Subject, ActionID: activity.ActionEdit,
+		ObjectTypeID: activity.ObjectServer, ObjectEntityType: "minecraft_server", ObjectInternalID: serverID,
+		MarkdownAddedBytes: addedBytes, MarkdownDeletedBytes: deletedBytes}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist server activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "更新服务器失败")
 		return
 	}
-	addedBytes, deletedBytes := activity.MarkdownDeltaBytes(previousBody, request.BodyMarkdown)
-	annotateActivityIDDelta(r, activity.ActionEdit, activity.ObjectServer, "minecraft_server", serverID, addedBytes, deletedBytes)
+	skipRequestActivity(r)
 	writeJSON(w, http.StatusOK, map[string]any{"id": publicID})
 }
 
