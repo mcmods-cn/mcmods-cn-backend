@@ -19,7 +19,12 @@ func TestOSSReadsWritesAndCleanupHaveObservableFailureContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	completionRaw, err := os.ReadFile("oss_upload_completion_helpers.go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	handlers, admin, deletion := string(handlersRaw), string(adminRaw), string(deletionRaw)
+	completion := string(completionRaw)
 	for _, forbidden := range []string{
 		"existing, exists = s.findExistingOSSFileByHashExact",
 		"func (s *Server) findExistingOSSFileByHashExact(ctx context.Context, sha256 string, sizeBytes int64, lookup ossFileHashLookup) (map[string]any, bool)",
@@ -29,7 +34,7 @@ func TestOSSReadsWritesAndCleanupHaveObservableFailureContracts(t *testing.T) {
 		"_, _ = s.db.Exec(\n\t\tr.Context(),\n\t\t`insert into oss_scan_logs",
 		"_, _ = client.DeleteObject",
 	} {
-		if strings.Contains(handlers+admin, forbidden) {
+		if strings.Contains(handlers+admin+completion, forbidden) {
 			t.Fatalf("OSS path still hides a failure: %q", forbidden)
 		}
 	}
@@ -43,7 +48,7 @@ func TestOSSReadsWritesAndCleanupHaveObservableFailureContracts(t *testing.T) {
 		"enqueueUnregisteredOSSObjectDeletion",
 		"context.WithoutCancel(ctx)",
 	} {
-		if !strings.Contains(handlers+admin+deletion, required) {
+		if !strings.Contains(handlers+admin+deletion+completion, required) {
 			t.Fatalf("OSS path is missing failure contract %q", required)
 		}
 	}
