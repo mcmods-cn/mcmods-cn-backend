@@ -19,7 +19,7 @@ import (
 func auditImportActivityFacts(t *testing.T, f test013Fixture) map[string]string {
 	t.Helper()
 	facts := auditAccessActivityFacts(t, f)
-	for _, table := range []string{"system_settings", "catalog_import_jobs", "catalog_import_packages", "catalog_import_revisions", "catalog_import_job_artifacts", "mod_metadata_import_jobs", "oss_files", "oss_object_deletion_outbox", "user_drafts"} {
+	for _, table := range []string{"system_settings", "catalog_import_jobs", "catalog_import_packages", "catalog_import_revisions", "catalog_import_job_artifacts", "mod_metadata_import_jobs", "oss_files", "oss_object_deletion_outbox", "user_drafts", "user_experience", "user_task_progress"} {
 		var value string
 		if err := f.db.QueryRow(f.ctx, `select coalesce(jsonb_agg(to_jsonb(fact) order by to_jsonb(fact)::text),'[]'::jsonb)::text from `+pgx.Identifier{table}.Sanitize()+` fact`).Scan(&value); err != nil {
 			t.Fatal(err)
@@ -169,6 +169,18 @@ func TestAuditCMP003ResumeExistingCapabilityHasNoNewActivityAndForbidsOverwrite(
 	digest := sha256.Sum256(raw)
 	base := "/api/v1/mods/audit-gr-" + f.modCode + "/export-imports/uploads/"
 	ticket := decodeTEST022Data[test037Ticket](t, f.require(t, f.editor, http.MethodPost, base+"presign", map[string]any{"originalName": "resume.zip", "contentType": "application/zip", "source": "mcmods_exporter", "sizeBytes": len(raw), "sha256": hex.EncodeToString(digest[:])}, 200))
+	if n := auditFixActivityIntentCount(t, f.test013Fixture, f.editor, activity.ActionUpload, activity.ObjectMod); n != 1 {
+		t.Fatalf("initial new capability must preserve its real original upload intent: %d", n)
+	}
+	auditFixActivityMonitor(t, f.test013Fixture)
+	auditFixWaitActivity(t, func() bool {
+		var n int
+		err := f.db.QueryRow(f.ctx, `select count(*) from activity_event_outbox`).Scan(&n)
+		return err == nil && n == 0
+	})
+	if n := f.number(t, `select count(*) from user_activity_events where user_id=$1 and action_id=$2 and object_type_id=$3`, f.userIDs[f.editor], activity.ActionUpload, activity.ObjectMod); n != 1 {
+		t.Fatalf("real initial capability event was not consumed once: %d", n)
+	}
 	before := auditImportActivityFacts(t, f.test013Fixture)
 	for range 3 {
 		resumed := decodeTEST022Data[test037Ticket](t, f.require(t, f.editor, http.MethodPost, base+"resume", resumeModExportUploadRequest{ObjectKey: ticket.ObjectKey, OriginalName: ticket.OriginalName, ContentType: ticket.ContentType, SizeBytes: ticket.SizeBytes, SHA256: ticket.SHA256}, 200))
@@ -182,6 +194,9 @@ func TestAuditCMP003ResumeExistingCapabilityHasNoNewActivityAndForbidsOverwrite(
 			t.Error("resumed write capability lacks the initial ticket's OSS forbid-overwrite protection")
 		}
 	}
+	// The following request on the same owned HTTP client also lets the
+	// previous response middleware finish before inspecting consumer facts.
+	f.require(t, "", http.MethodGet, "/live", nil, 200)
 	auditFixRequireProjectFactsUnchanged(t, before, auditImportActivityFacts(t, f.test013Fixture))
 	if !t.Failed() {
 		t.Log("Three real resume HTTP requests preserve existing capability only: no task/file/session/counter/activity/XP/currency writes; actual signed header immutable=true. Controlled OSS signing, no vendor storage immutability claim")
