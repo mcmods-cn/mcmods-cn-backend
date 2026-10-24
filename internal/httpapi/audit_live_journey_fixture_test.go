@@ -125,6 +125,10 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	grantTEST044Permissions(t, f.ctx, db, f.userIDs[f.reviewer], "project.review")
+	// A distinct ordinary reader is qualified for the real catalogue selector
+	// before this fixture exposes its API. These existing read capabilities do
+	// not grant publication, private-source access or review bypass.
+	grantTEST044Permissions(t, f.ctx, db, f.userIDs[f.otherEditor], "global_resource.list", "global_resource.view")
 	// Only the synthetic OSS service gets this exact browser-origin response
 	// wrapper. Production API CORS, upload scanning and visibility are unchanged.
 	originalOSSHandler := f.provider.Config.Handler
@@ -216,10 +220,10 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 		t.Fatal("actual import consumer is not registered:", err)
 	}
 	authPath := filepath.Join(directory, "auth.private.json")
-	auditJourneyWriteJSON(t, authPath, map[string]any{"creatorToken": f.editor, "reviewerToken": f.reviewer, "otherEditorToken": f.otherEditor})
+	auditJourneyWriteJSON(t, authPath, map[string]any{"creatorToken": f.editor, "reviewerToken": f.reviewer, "otherEditorToken": f.otherEditor, "catalogReaderToken": f.otherEditor})
 	runtimePath := filepath.Join(directory, "runtime.json")
 	stopPath := filepath.Join(directory, "STOP")
-	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "sourceCheckoutPath": backendCheckout, "compilerSourceCheckoutPath": backendCheckout, "testPackageWorkingDirectory": packageDirectory, "apiOrigin": origin.URL, "ossOrigin": f.provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": "auditfixture", "minecraftVersion": "1.20.1", "loader": "fabric", "modVersion": "1.0.0", "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": expectedSampleHash, "sampleProducerCommit": sampleProducer, "samplePath": samplePath, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED", "unreadBarrier": map[string]any{"enabled": unreadBarrierEnabled, "armPath": armPath, "startedPath": startedPath, "releasePath": releasePath, "actorAPublicId": actorA, "actorBPublicId": actorB, "initialUnreadA": seededUnreadA, "initialUnreadB": 0}}
+	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "sourceCheckoutPath": backendCheckout, "compilerSourceCheckoutPath": backendCheckout, "testPackageWorkingDirectory": packageDirectory, "apiOrigin": origin.URL, "ossOrigin": f.provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": "auditfixture", "minecraftVersion": "1.20.1", "loader": "fabric", "modVersion": "1.0.0", "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": expectedSampleHash, "sampleProducerCommit": sampleProducer, "samplePath": samplePath, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED", "catalogReader": map[string]any{"publicId": actorB, "permissions": []string{"global_resource.list", "global_resource.view"}, "assignedBeforeAPIExposure": true, "scope": "Distinct ordinary authorized selector reader; no admin, publication or review-bypass capability"}, "unreadBarrier": map[string]any{"enabled": unreadBarrierEnabled, "armPath": armPath, "startedPath": startedPath, "releasePath": releasePath, "actorAPublicId": actorA, "actorBPublicId": actorB, "initialUnreadA": seededUnreadA, "initialUnreadB": 0}}
 	updateRuntime := func(state string) {
 		runtime["state"] = state
 		runtime["updatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
