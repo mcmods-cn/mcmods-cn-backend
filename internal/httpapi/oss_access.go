@@ -118,6 +118,10 @@ func (s *Server) redirectOSSObjectAccess(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadGateway, "failed to generate OSS access URL")
 		return false
 	}
+	if err = s.commitRequestActivity(r); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist download activity")
+		return false
+	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	http.Redirect(w, r, access.URL, http.StatusTemporaryRedirect)
 	return true
