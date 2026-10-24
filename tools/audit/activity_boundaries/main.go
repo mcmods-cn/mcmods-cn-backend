@@ -85,7 +85,7 @@ func main() {
 					b.Commits = append(b.Commits, line)
 				case "annotateActivity", "annotateActivityID", "annotateActivityDelta", "annotateActivityIDDelta":
 					b.Annotations = append(b.Annotations, line)
-				case "EnqueueDurableTx":
+				case "EnqueueDurableTx", "enqueueRequestActivityTx":
 					b.AtomicEnqueues = append(b.AtomicEnqueues, line)
 				case "skipRequestActivity":
 					b.Skips = append(b.Skips, line)

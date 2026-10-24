@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"mcmods-cn-backend/internal/activity"
 )
 
@@ -115,12 +117,11 @@ func skipRequestActivity(r *http.Request) {
 	annotation.mu.Unlock()
 }
 
-func (s *Server) recordRequestActivity(r *http.Request, annotation *requestActivity) {
-	if s.activity == nil || annotation == nil {
-		return
-	}
-	if isHighFrequencyActivityExcluded(r) {
-		return
+// requestActivityEvent is shared by transactional mutation handlers and the
+// legacy response recorder so action, identity and Markdown accounting agree.
+func requestActivityEvent(r *http.Request, annotation *requestActivity) (activity.Event, bool) {
+	if annotation == nil || isHighFrequencyActivityExcluded(r) {
+		return activity.Event{}, false
 	}
 	annotation.mu.Lock()
 	event := activity.Event{
@@ -137,7 +138,7 @@ func (s *Server) recordRequestActivity(r *http.Request, annotation *requestActiv
 	skip := annotation.skip
 	annotation.mu.Unlock()
 	if skip || event.UserID <= 0 {
-		return
+		return activity.Event{}, false
 	}
 	if event.ActionID == 0 {
 		event.ActionID = inferredActivityAction(r)
@@ -149,6 +150,33 @@ func (s *Server) recordRequestActivity(r *http.Request, annotation *requestActiv
 		event.ObjectPublicID = inferredPublicID(r.URL.Path)
 	}
 	if event.ActionID == 0 || event.ObjectTypeID == 0 {
+		return activity.Event{}, false
+	}
+	return event, true
+}
+
+// Call after all activity annotations and before committing business writes.
+// Existing explicit skip markers are honored, preventing duplicate events for
+// handlers that already persist their own activity facts or intents.
+func enqueueRequestActivityTx(r *http.Request, tx pgx.Tx) error {
+	annotation, _ := r.Context().Value(requestActivityContextKey).(*requestActivity)
+	event, valid := requestActivityEvent(r, annotation)
+	if !valid || !activity.IsDurableAction(event.ActionID) {
+		return nil
+	}
+	if err := activity.EnqueueDurableTx(r.Context(), tx, event); err != nil {
+		return err
+	}
+	skipRequestActivity(r)
+	return nil
+}
+
+func (s *Server) recordRequestActivity(r *http.Request, annotation *requestActivity) {
+	if s.activity == nil {
+		return
+	}
+	event, valid := requestActivityEvent(r, annotation)
+	if !valid {
 		return
 	}
 	if event.ActionID == activity.ActionView {

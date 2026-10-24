@@ -436,6 +436,10 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to add skin asset to wardrobe")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist skin library activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create skin asset")
 		return
@@ -656,6 +660,10 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 			return
 		}
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist skin library activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update skin asset")
 		return
@@ -811,6 +819,10 @@ func (s *Server) deleteSkin(w http.ResponseWriter, r *http.Request, publicID str
 	}
 	if err = s.softDeleteSkinAssetTx(r.Context(), tx, assetID, blobHash, "skin_asset_deleted"); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete skin asset")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist skin library activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
@@ -985,6 +997,10 @@ func (s *Server) skinWardrobeItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist skin library activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update wardrobe")
 		return
@@ -1082,6 +1098,10 @@ func (s *Server) createPlayerProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err = ensureYggdrasilAccountTx(r.Context(), tx, claims.Subject); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create launcher account identity")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist skin library activity")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
@@ -1224,6 +1244,10 @@ func (s *Server) updatePlayerProfile(w http.ResponseWriter, r *http.Request, pub
 			return
 		}
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist skin library activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update player profile")
 		return
@@ -1300,6 +1324,10 @@ func (s *Server) deletePlayerProfile(w http.ResponseWriter, r *http.Request, pub
 			writeError(w, http.StatusInternalServerError, "failed to find replacement default player profile")
 			return
 		}
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist skin library activity")
+		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete player profile")

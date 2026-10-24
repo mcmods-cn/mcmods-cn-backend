@@ -124,6 +124,10 @@ func (s *Server) setPlayerProfileTexture(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to update player profile")
 		return
 	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist skin library activity")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update player texture")
 		return
