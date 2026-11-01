@@ -67,19 +67,12 @@ func TestGeneratedOSSObjectRegistrationFailureQueuesDurableCompensationIntegrati
 			content_type text not null,size_bytes bigint not null,source_size_bytes bigint not null,sha256 text not null,
 			uploader_id bigint,status text not null,scan_status text not null,updated_at timestamptz not null default now()
 		);
-		create temp table oss_object_deletion_outbox(
-			id bigserial primary key,oss_file_id bigint,bucket text not null,endpoint text not null,region text not null,
-			use_cname boolean not null default false,object_key text not null,reason text not null default '',
-			status text not null default 'pending',attempts integer not null default 0,max_attempts integer not null default 12,
-			next_attempt_at timestamptz not null default now(),locked_at timestamptz,locked_by text not null default '',
-			last_error text not null default '',failure_class text not null default '',dead_at timestamptz,deleted_at timestamptz,
-			created_at timestamptz not null default now(),updated_at timestamptz not null default now(),
-			unique(bucket,endpoint,object_key)
-		);
+		create temp sequence arch021_registration_fault;
 		create function pg_temp.reject_arch021_generated_registration() returns trigger language plpgsql as $$
 		begin
 			if new.object_key like 'generated/fails-%' then
-				raise exception 'ARCH-021 registration failure';
+				perform nextval('pg_temp.arch021_registration_fault');
+				raise exception 'ARCH-021 registration failure' using errcode='XX001';
 			end if;
 			return new;
 		end $$;
@@ -88,6 +81,7 @@ func TestGeneratedOSSObjectRegistrationFailureQueuesDurableCompensationIntegrati
 	`); err != nil {
 		t.Fatal(err)
 	}
+	installAccessCurrentOSSDeletionFixture(t, ctx, pool)
 	server := &Server{db: pool, cfg: config.Load()}
 	ossConfig := ossConfigPayload{
 		Enabled: true, Region: "cn-test", Endpoint: provider.URL, PublicEndpoint: "https://public.example.test",
@@ -105,9 +99,19 @@ func TestGeneratedOSSObjectRegistrationFailureQueuesDurableCompensationIntegrati
 	if err != nil || healthyID <= 0 {
 		t.Fatalf("healthy generated object = %d/%v", healthyID, err)
 	}
+	beforeFailure := accessFixtureBusinessRows(t, ctx, pool, "oss_files")
 	_, err = server.writeGeneratedOSSObject(ctx, "generated/fails-registration.bin", "failed.bin", "application/octet-stream", []byte("failed"), 7, "arch021_test")
 	if err == nil || !strings.Contains(err.Error(), "ARCH-021 registration failure") {
 		t.Fatalf("registration failure = %v", err)
+	}
+	requireAccessFixturePGError(t, err, "XX001", "", "ARCH-021 registration failure")
+	var injected int64
+	var called bool
+	if err = pool.QueryRow(ctx, `select last_value,is_called from pg_temp.arch021_registration_fault`).Scan(&injected, &called); err != nil || !called || injected != 1 {
+		t.Fatalf("specific first generated registration fault count=%d called=%t err=%v", injected, called, err)
+	}
+	if after := accessFixtureBusinessRows(t, ctx, pool, "oss_files"); after != beforeFailure {
+		t.Fatal("failed generated registration changed the existing healthy file")
 	}
 	var queued, withFile int
 	var reason string
@@ -122,9 +126,18 @@ func TestGeneratedOSSObjectRegistrationFailureQueuesDurableCompensationIntegrati
 	if _, err = pool.Exec(ctx, `alter table oss_object_deletion_outbox rename column reason to arch021_broken_reason`); err != nil {
 		t.Fatal(err)
 	}
+	beforeCompensationFailure := accessFixtureBusinessRows(t, ctx, pool, "oss_files", "oss_object_deletion_outbox")
 	_, err = server.writeGeneratedOSSObject(ctx, "generated/fails-compensation.bin", "failed-again.bin", "application/octet-stream", []byte("failed again"), 7, "arch021_test")
 	if err == nil || !strings.Contains(err.Error(), "ARCH-021 registration failure") || !strings.Contains(err.Error(), "queue generated OSS cleanup") {
 		t.Fatalf("registration plus compensation failure = %v", err)
+	}
+	requireAccessFixturePGError(t, err, "XX001", "", "ARCH-021 registration failure")
+	requireAccessFixturePGError(t, err, "42703", "", `column "reason"`)
+	if err = pool.QueryRow(ctx, `select last_value,is_called from pg_temp.arch021_registration_fault`).Scan(&injected, &called); err != nil || !called || injected != 2 {
+		t.Fatalf("specific second generated registration fault count=%d called=%t err=%v", injected, called, err)
+	}
+	if after := accessFixtureBusinessRows(t, ctx, pool, "oss_files", "oss_object_deletion_outbox"); after != beforeCompensationFailure {
+		t.Fatal("specific compensation fault changed existing file or durable intent rows")
 	}
 	metrics := server.ossWrites.snapshot()
 	if metrics.DeletionEnqueueFailures != 1 {

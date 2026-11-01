@@ -53,14 +53,6 @@ func TestOPS003CatalogImportArtifactsRegisterActivateAndCompensateAtomicallyInte
 			id text primary key,package_id text not null,mod_id bigint not null,status text not null,import_run_token text not null
 		);
 		create temp table log_shares(source_file_id bigint,status text,deleted_at timestamptz);
-		create temp table oss_object_deletion_outbox(
-			id bigserial primary key,oss_file_id bigint,bucket text not null,endpoint text not null,region text not null,
-			use_cname boolean not null default false,object_key text not null,reason text not null default '',
-			status text not null default 'pending',attempts integer not null default 0,max_attempts integer not null default 12,
-			next_attempt_at timestamptz not null default now(),locked_at timestamptz,locked_by text not null default '',
-			last_error text not null default '',failure_class text not null default '',dead_at timestamptz,deleted_at timestamptz,
-			updated_at timestamptz not null default now(),unique(bucket,endpoint,object_key)
-		);
 		insert into catalog_import_jobs(id,status,run_token,heartbeat_at)
 		values('active-job','importing','active-run',now()),
 		      ('failed-job','importing','failed-run',now()),
@@ -69,6 +61,7 @@ func TestOPS003CatalogImportArtifactsRegisterActivateAndCompensateAtomicallyInte
 	`); err != nil {
 		t.Fatal(err)
 	}
+	installAccessCurrentOSSDeletionFixture(t, ctx, pool)
 	server := &Server{db: pool}
 	cfg := ossConfigPayload{Bucket: "catalog-bucket", Endpoint: "oss.example.test", Region: "cn-test", Prefix: "mcmods"}
 	asset := func(job string) modExportUploadAsset {
@@ -127,9 +120,11 @@ func TestOPS003CatalogImportArtifactsRegisterActivateAndCompensateAtomicallyInte
 		check(reason<>'catalog-import-failed') not valid`); err != nil {
 		t.Fatal(err)
 	}
+	beforeFailure := accessFixtureBusinessRows(t, ctx, pool, "catalog_import_jobs", "catalog_import_job_artifacts", "catalog_import_revisions", "oss_files", "oss_object_deletion_outbox")
 	err = server.cleanupModExportStaging(ctx, "rollback-job", "package", 1, "rollback-run")
-	if err == nil {
-		t.Fatal("compensation persistence failure was swallowed")
+	requireAccessFixturePGError(t, err, "23514", "reject_rollback_cleanup", "")
+	if after := accessFixtureBusinessRows(t, ctx, pool, "catalog_import_jobs", "catalog_import_job_artifacts", "catalog_import_revisions", "oss_files", "oss_object_deletion_outbox"); after != beforeFailure {
+		t.Fatal("specific catalog cleanup constraint changed business or compensation rows")
 	}
 	assertCatalogImportArtifactState(t, ctx, pool, "rollback-job", "rollback-run", "planned", "pending", 0)
 	if _, err = pool.Exec(ctx, `update catalog_import_jobs set status='failed',run_token='' where id='rollback-job'`); err != nil {

@@ -68,8 +68,11 @@ func TestBlueprintJobLeaseRecoveryIsBoundedAndAtomicIntegration(t *testing.T) {
 		alter table nats_outbox add constraint reject_blueprint_recovery check(event_type<>'blueprint.conversion.recovered') not valid`); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = worker.recoverStaleBlueprintJobs(ctx); err == nil {
-		t.Fatal("recovery event persistence failure was ignored")
+	beforeFailure := accessFixtureBusinessRows(t, ctx, pool, "blueprints", "blueprint_jobs", "oss_files", "blueprint_job_artifacts", "oss_object_deletion_outbox", "nats_outbox")
+	_, _, err = worker.recoverStaleBlueprintJobs(ctx)
+	requireAccessFixturePGError(t, err, "23514", "reject_blueprint_recovery", "")
+	if after := accessFixtureBusinessRows(t, ctx, pool, "blueprints", "blueprint_jobs", "oss_files", "blueprint_job_artifacts", "oss_object_deletion_outbox", "nats_outbox"); after != beforeFailure {
+		t.Fatal("specific recovery fault changed business, deletion or outbox rows")
 	}
 	assertBlueprintJobLeaseState(t, ctx, pool, 13, "processing", "stopped-worker", boolPointer(false), 1)
 	var rollbackBlueprintStatus string
@@ -123,6 +126,7 @@ func TestBlueprintArtifactActivationCompletionAndFailureCompensationAreAtomicInt
 		t.Fatal(err)
 	}
 	failureArtifact := blueprintArtifact{id: 2001, fileID: 201, jobID: 71, attempt: 1, role: blueprintArtifactNormalized}
+	beforeFailure := accessFixtureBusinessRows(t, ctx, pool, "blueprints", "blueprint_jobs", "oss_files", "blueprint_job_artifacts", "oss_object_deletion_outbox", "nats_outbox")
 	tx, err = pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -131,10 +135,11 @@ func TestBlueprintArtifactActivationCompletionAndFailureCompensationAreAtomicInt
 	if err == nil {
 		err = completeBlueprintJobTx(ctx, tx, 71, "worker:failure")
 	}
-	if err == nil {
-		t.Fatal("fault-injected artifact activation unexpectedly succeeded")
-	}
 	_ = tx.Rollback(ctx)
+	requireAccessFixturePGError(t, err, "23514", "reject_artifact_201_activation", "")
+	if after := accessFixtureBusinessRows(t, ctx, pool, "blueprints", "blueprint_jobs", "oss_files", "blueprint_job_artifacts", "oss_object_deletion_outbox", "nats_outbox"); after != beforeFailure {
+		t.Fatal("specific activation fault changed business, deletion or outbox rows")
+	}
 	assertBlueprintArtifactState(t, ctx, pool, 2001, "pending", "pending", 0)
 	assertBlueprintJobLeaseState(t, ctx, pool, 71, "processing", "worker:failure", boolPointer(true), 1)
 
@@ -197,8 +202,11 @@ func TestBlueprintOrphanArtifactRecoveryIsBoundedAndAtomicIntegration(t *testing
 		check(reason<>'blueprint-job-artifact-orphaned') not valid`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = worker.recoverOrphanedBlueprintArtifacts(ctx); err == nil {
-		t.Fatal("orphan compensation persistence failure was ignored")
+	beforeFailure := accessFixtureBusinessRows(t, ctx, pool, "blueprints", "blueprint_jobs", "oss_files", "blueprint_job_artifacts", "oss_object_deletion_outbox", "nats_outbox")
+	_, err = worker.recoverOrphanedBlueprintArtifacts(ctx)
+	requireAccessFixturePGError(t, err, "23514", "reject_orphan_compensation", "")
+	if after := accessFixtureBusinessRows(t, ctx, pool, "blueprints", "blueprint_jobs", "oss_files", "blueprint_job_artifacts", "oss_object_deletion_outbox", "nats_outbox"); after != beforeFailure {
+		t.Fatal("specific orphan fault changed business, deletion or outbox rows")
 	}
 	assertBlueprintArtifactState(t, ctx, pool, 2103, "pending", "pending", 0)
 }
@@ -372,8 +380,11 @@ func TestBlueprintRetryAndOutboxCommitOrRollbackTogetherIntegration(t *testing.T
 	if _, err = pool.Exec(ctx, `alter table nats_outbox add constraint reject_retry_event check(event_type<>'blueprint.conversion.requested') not valid`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = server.retryBlueprintJob(ctx, "retryfail", 7, 9); err == nil {
-		t.Fatal("outbox rejection did not fail retry")
+	beforeFailure := accessFixtureBusinessRows(t, ctx, pool, "blueprints", "blueprint_jobs", "oss_files", "blueprint_job_artifacts", "oss_object_deletion_outbox", "nats_outbox")
+	_, err = server.retryBlueprintJob(ctx, "retryfail", 7, 9)
+	requireAccessFixturePGError(t, err, "23514", "reject_retry_event", "")
+	if after := accessFixtureBusinessRows(t, ctx, pool, "blueprints", "blueprint_jobs", "oss_files", "blueprint_job_artifacts", "oss_object_deletion_outbox", "nats_outbox"); after != beforeFailure {
+		t.Fatal("specific retry fault changed business, deletion or outbox rows")
 	}
 	assertBlueprintStatus(t, ctx, pool, 31, "failed")
 	if err = pool.QueryRow(ctx, `select count(*) from blueprint_jobs where blueprint_id=31`).Scan(&jobs); err != nil || jobs != 0 {
@@ -427,12 +438,6 @@ func openBlueprintJobStateTestDB(t *testing.T) *pgxpool.Pool {
 			activated_at timestamptz,abandoned_at timestamptz,unique(job_id,attempt,role));
 		create index test_blueprint_artifacts_pending on blueprint_job_artifacts(id,job_id,attempt) where status='pending';
 		create index test_blueprint_artifacts_active_orphan on blueprint_job_artifacts(id) where status='active' and blueprint_id is null;
-		create temp table oss_object_deletion_outbox(
-			id bigserial primary key,oss_file_id bigint,bucket text not null,endpoint text not null,region text not null,use_cname boolean not null default false,
-			object_key text not null,reason text not null default '',status text not null default 'pending',attempts integer not null default 0,max_attempts integer not null default 12,
-			next_attempt_at timestamptz not null default now(),locked_at timestamptz,locked_by text not null default '',last_error text not null default '',failure_class text not null default '',
-			created_at timestamptz not null default now(),updated_at timestamptz not null default now(),deleted_at timestamptz,dead_at timestamptz,
-			replay_count integer not null default 0,last_replayed_at timestamptz,last_replayed_by bigint,unique(bucket,endpoint,object_key));
 		create temp table nats_outbox(
 		id bigserial primary key,event_id text not null unique,event_type text not null,schema_version integer not null default 1,
 		subject text not null,aggregate_type text not null,aggregate_id text not null,trace_id text not null default '',payload jsonb not null,
@@ -442,6 +447,7 @@ func openBlueprintJobStateTestDB(t *testing.T) *pgxpool.Pool {
 		pool.Close()
 		t.Fatal(err)
 	}
+	installAccessCurrentOSSDeletionFixture(t, ctx, pool)
 	return pool
 }
 

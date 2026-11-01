@@ -24,14 +24,6 @@ func TestStickerImageTombstoneRequiresNoRemainingOwner(t *testing.T) {
 		`create temp table log_shares(
 			source_file_id bigint,status text not null,deleted_at timestamptz
 		) on commit drop`,
-		`create temp table oss_object_deletion_outbox(
-			oss_file_id bigint,bucket text not null,endpoint text not null,region text not null,use_cname boolean not null,
-			object_key text not null,reason text not null,status text not null default 'pending',attempts integer not null default 0,max_attempts integer not null default 12,
-			next_attempt_at timestamptz not null default now(),locked_at timestamptz,locked_by text not null default '',last_error text not null default '',failure_class text not null default '',
-			updated_at timestamptz not null default now(),deleted_at timestamptz,dead_at timestamptz,replay_count integer not null default 0,
-			last_replayed_at timestamptz,last_replayed_by bigint,
-			unique(bucket,endpoint,object_key)
-		) on commit drop`,
 		`insert into oss_files values(10,'bucket','https://oss-cn-test.aliyuncs.com','cn-test','stickers/derived/test.png','active',now())`,
 		`insert into stickers values(20,10)`,
 	} {
@@ -39,6 +31,7 @@ func TestStickerImageTombstoneRequiresNoRemainingOwner(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	installAccessCurrentOSSDeletionFixture(t, ctx, tx)
 	server := &Server{db: db}
 	if err = server.tombstoneUnreferencedStickerFileTx(ctx, tx, 10, "still_owned"); err != nil {
 		t.Fatal(err)
@@ -52,10 +45,14 @@ func TestStickerImageTombstoneRequiresNoRemainingOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertStickerFileLifecycleState(t, ctx, tx, "deleted", 1)
+	beforeReplay := accessFixtureBusinessRows(t, ctx, tx, "oss_files", "stickers", "log_shares", "oss_object_deletion_outbox", "oss_upload_byte_bindings")
 	if err = server.tombstoneUnreferencedStickerFileTx(ctx, tx, 10, "sticker_replaced_retry"); err != nil {
 		t.Fatal(err)
 	}
 	assertStickerFileLifecycleState(t, ctx, tx, "deleted", 1)
+	if after := accessFixtureBusinessRows(t, ctx, tx, "oss_files", "stickers", "log_shares", "oss_object_deletion_outbox", "oss_upload_byte_bindings"); after != beforeReplay {
+		t.Fatal("replayed sticker tombstone changed business or deletion rows")
+	}
 }
 
 func assertStickerFileLifecycleState(t *testing.T, ctx context.Context, queryer stickerReferenceQueryer, wantStatus string, wantOutbox int) {
