@@ -176,6 +176,11 @@ func TestAuditCMP005MaintenanceMissingSourceWrongPinsAndReferencesRemainUnchange
 		t.Fatalf("wrong explicit byte pin accepted: %+v", got)
 	}
 	plan.Entries[0].ExpectedSourceSHA = sha256Hex(source)
+	small := plan
+	small.MaxReferenceCols = 1
+	if got := auditOSSByteMaintenanceRun(t, f, f.db, small, true); got.Status != "REFERENCE_BUDGET_EXCEEDED" {
+		t.Fatalf("incomplete inventory was treated as no references: %+v", got)
+	}
 	if _, err := f.db.Exec(f.ctx, `create table audit_owned_manual_asset_ref(body jsonb)`); err != nil {
 		t.Fatal(err)
 	}
