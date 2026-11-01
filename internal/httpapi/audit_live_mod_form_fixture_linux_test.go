@@ -28,6 +28,7 @@ import (
 type auditModFormCase struct {
 	CaseID              string                    `json:"caseId"`
 	ActorPublicID       string                    `json:"actorPublicId"`
+	ReviewerPublicID    string                    `json:"reviewerPublicId"`
 	SiteID              string                    `json:"siteId"`
 	Mode                string                    `json:"mode"`
 	DefaultLocale       string                    `json:"defaultLocale"`
@@ -44,6 +45,8 @@ type auditModFormCase struct {
 	ChangeReason        string                    `json:"changeReason,omitempty"`
 	AdditionalRevisions int                       `json:"expectedFinalAdditionalRevisions"`
 	ActorID             int64                     `json:"-"`
+	ReviewerID          int64                     `json:"-"`
+	ReviewerToken       string                    `json:"-"`
 	ModID               int64                     `json:"-"`
 	Token               string                    `json:"-"`
 }
@@ -265,11 +268,11 @@ func auditModFormPending(t *testing.T, f auditFixGRFixture, c *auditModFormCase)
 	return revision
 }
 
-func auditModFormApprove(t *testing.T, f auditFixGRFixture, site, revision string) []map[string]any {
+func auditModFormApprove(t *testing.T, f auditFixGRFixture, reviewer, site, revision string) []map[string]any {
 	t.Helper()
 	outcomes := []map[string]any{}
 	for {
-		status, _, headers := auditModFormDo(t, f, f.reviewer, http.MethodPatch, "/api/v1/mods/"+site+"/revisions/"+revision, reviewModRevisionRequest{Status: "approved", Note: "ordinary independent native Mod form acceptance"}, nil)
+		status, _, headers := auditModFormDo(t, f, reviewer, http.MethodPatch, "/api/v1/mods/"+site+"/revisions/"+revision, reviewModRevisionRequest{Status: "approved", Note: "ordinary independent native Mod form acceptance"}, nil)
 		outcomes = append(outcomes, map[string]any{"status": status, "revisionId": revision, "requestId": headers.Get("X-Request-ID"), "at": time.Now().UTC().Format(time.RFC3339Nano)})
 		if status == http.StatusOK {
 			return outcomes
@@ -341,6 +344,21 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 		t.Fatal("requires default challenge threshold")
 	}
 	settingsBefore, _ := json.Marshal(settings)
+	if settings.Policies["review.submit"].HourLimit != 20 {
+		t.Fatal("predeclared two-reviewer matrix requires the actual normal HourLimit20; no quota is changed")
+	}
+	// 3 baseline approvals + 1 successful revision + 32 locale approvals =36.
+	// One normal reviewer has20/hour. Declare the minimum two reviewers now,
+	// before any matrix operation, and keep each at18 fixed operations.
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.denied], "content.review")
+	reviewerPublicIDs := map[string]string{}
+	for _, token := range []string{f.reviewer, f.denied} {
+		var public string
+		if err = f.db.QueryRow(f.ctx, `select public_id from users where id=$1 and email_verified and created_at<now()-interval '7 days'`, f.userIDs[token]).Scan(&public); err != nil {
+			t.Fatal("ordinary established reviewer prerequisite missing")
+		}
+		reviewerPublicIDs[token] = public
+	}
 	attemptFile, err := os.OpenFile(filepath.Join(directory, "http-attempts.ndjson"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		t.Fatal(err)
@@ -350,7 +368,7 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 	f.origin.Close()
 	f.origin = httptest.NewServer(recorder.handler(f.server))
 	t.Cleanup(f.origin.Close)
-	private := map[string]any{"revision": map[string]string{}, "localizations": map[string]string{}, "reviewerToken": f.reviewer}
+	private := map[string]any{"revision": map[string]string{}, "localizations": map[string]string{}, "reviewerToken": f.reviewer, "reviewerTokens": map[string]string{reviewerPublicIDs[f.reviewer]: f.reviewer, reviewerPublicIDs[f.denied]: f.denied}}
 	locales := []string{"zh-CN", "zh-TW", "en-US", "ja-JP", "fr-FR", "de-DE", "es-ES", "ru-RU"}
 	localeCases, revisionCases := []*auditModFormCase{}, []*auditModFormCase{}
 	for index, locale := range locales {
@@ -387,6 +405,11 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 				t.Fatal("fixture semantic case invalid: ", err)
 			}
 			c := &auditModFormCase{CaseID: caseID, ActorPublicID: public, SiteID: site, Mode: mode, DefaultLocale: locale, OtherLocale: other, NewURL: "/mods/new", PublicURL: "/mods/" + site, FormValues: payload, Expected: expected, ActorID: id, Token: token}
+			c.ReviewerToken = f.reviewer
+			if len(localeCases) >= 14 {
+				c.ReviewerToken = f.denied
+			}
+			c.ReviewerID, c.ReviewerPublicID = f.userIDs[c.ReviewerToken], reviewerPublicIDs[c.ReviewerToken]
 			localeCases = append(localeCases, c)
 			private["localizations"].(map[string]string)[caseID] = token
 			recorder.register(site, caseID)
@@ -403,13 +426,14 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 		payload.BodyMarkdown = "Original baseline description " + randomCatalogPublicID()
 		payload.Localizations = []catalogLocalizationEdit{{Locale: "en-US", Name: payload.SecondaryName, Summary: payload.Summary, ContentMarkdown: payload.BodyMarkdown}}
 		c := &auditModFormCase{CaseID: caseID, ActorPublicID: public, SiteID: site, Mode: mode, DefaultLocale: "en-US", EditURL: "/mods/" + site + "/edit", PublicURL: "/mods/" + site, InitialSnapshot: &payload, ActorID: id, Token: token, ChangeReason: "User supplied revision reason retained during proof"}
+		c.ReviewerToken, c.ReviewerID, c.ReviewerPublicID = f.reviewer, f.userIDs[f.reviewer], reviewerPublicIDs[f.reviewer]
 		if mode == "success" {
 			c.AdditionalRevisions = 1
 		}
 		recorder.register(site, caseID)
 		auditModFormInitialSubmit(t, f, token, payload)
 		revision := auditModFormPending(t, f, c)
-		auditModFormApprove(t, f, c.SiteID, revision)
+		auditModFormApprove(t, f, c.ReviewerToken, c.SiteID, revision)
 		if err = f.db.QueryRow(f.ctx, `select mod.project_code,revision.public_id from mods mod join content_revisions revision on revision.id=mod.published_revision_id where mod.id=$1`, c.ModID).Scan(&c.ProjectPublicID, &c.BaseRevisionID); err != nil {
 			t.Fatal(err)
 		}
@@ -498,7 +522,7 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 	if err = f.db.QueryRow(f.ctx, `select current_schema()`).Scan(&schema); err != nil || !regexp.MustCompile(`^mcmods_audit_[0-9a-f]{16}$`).MatchString(schema) {
 		t.Fatal("owned regular schema required")
 	}
-	runtime := map[string]any{"owner": "mcmods-live-mod-form", "state": "READY", "pid": os.Getpid(), "ownedSchema": schema, "apiOrigin": f.origin.URL, "frontendOrigin": "http://127.0.0.1:3531", "authCookieName": authSessionCookieName, "authPath": authPath, "repoRevisions": revisions, "revisionCases": revisionCases, "localeCases": localeCases, "referenceContentSHA256": seedHash, "preflight": map[string]any{"status": 428, "code": "challenge_required", "actorIsSeparateScopedProbe": true, "actualSuccessfulOtherUserFingerprint": true, "cases": preflights}, "policy": map[string]any{"defaultThreshold": settings.ChallengeThreshold, "challengeTTLSeconds": 600, "formMinimumAgeMilliseconds": 800, "unchanged": true, "reviewer": "one independent agedverified content.review account; actualRetryAfter obeyed", "matrixActorRationale": "32 predeclared independent locale/variant cases, each submits one distinct Mod"}, "reviewProtocol": map[string]string{"request": "review-request.<caseId>.json {caseId,siteId,bodySHA256}", "response": "review-result.<caseId>.json", "done": "done.flag only after native completion; PG independently validated", "stop": "STOP to end without acceptance"}, "stopPath": filepath.Join(directory, "STOP"), "createdAt": time.Now().UTC(), "serveDeadline": time.Now().Add(55 * time.Minute).UTC(), "scope": "ACTUAL_HTTP_POSTGRESQL_NATIVE_DRIVER_SEPARATE; no game/queue/production claim"}
+	runtime := map[string]any{"owner": "mcmods-live-mod-form", "state": "READY", "pid": os.Getpid(), "ownedSchema": schema, "apiOrigin": f.origin.URL, "frontendOrigin": "http://127.0.0.1:3531", "authCookieName": authSessionCookieName, "authPath": authPath, "repoRevisions": revisions, "revisionCases": revisionCases, "localeCases": localeCases, "referenceContentSHA256": seedHash, "preflight": map[string]any{"status": 428, "code": "challenge_required", "actorIsSeparateScopedProbe": true, "actualSuccessfulOtherUserFingerprint": true, "cases": preflights}, "policy": map[string]any{"defaultThreshold": settings.ChallengeThreshold, "challengeTTLSeconds": 600, "formMinimumAgeMilliseconds": 800, "unchanged": true, "reviewer": "two predeclared ordinary independent content.review reviewers A18/B18; actualRetryAfter obeyed", "normalReviewHourLimit": settings.Policies["review.submit"].HourLimit, "reviewerPlan": []map[string]any{{"label": "A", "publicId": reviewerPublicIDs[f.reviewer], "baselineReviews": 3, "successRevisionReviews": 1, "localeReviews": 14, "totalPlanned": 18}, {"label": "B", "publicId": reviewerPublicIDs[f.denied], "baselineReviews": 0, "successRevisionReviews": 0, "localeReviews": 18, "totalPlanned": 18}}, "matrixActorRationale": "32 predeclared independent locale/variant cases, each submits one distinct Mod"}, "reviewProtocol": map[string]string{"request": "review-request.<caseId>.json {caseId,siteId,bodySHA256}", "response": "review-result.<caseId>.json", "done": "done.flag only after native completion; PG independently validated", "stop": "STOP to end without acceptance"}, "stopPath": filepath.Join(directory, "STOP"), "createdAt": time.Now().UTC(), "serveDeadline": time.Now().Add(55 * time.Minute).UTC(), "scope": "ACTUAL_HTTP_POSTGRESQL_NATIVE_DRIVER_SEPARATE; no game/queue/production claim"}
 	auditModFormJSON(t, filepath.Join(directory, "runtime.json"), runtime)
 	t.Logf("MOD_FORM_READY runtime=%s locales=32 revision=3 defaultpolicy=true natural_separate_probe428=true", filepath.Join(directory, "runtime.json"))
 	reviewed := map[string]bool{}
@@ -537,12 +561,16 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 					t.Fatal(readErr)
 				}
 				var receipt struct {
-					CaseID     string `json:"caseId"`
-					SiteID     string `json:"siteId"`
-					BodySHA256 string `json:"bodySHA256"`
+					CaseID           string `json:"caseId"`
+					SiteID           string `json:"siteId"`
+					BodySHA256       string `json:"bodySHA256"`
+					ReviewerPublicID string `json:"reviewerPublicId"`
 				}
 				if json.Unmarshal(request, &receipt) != nil || receipt.CaseID != key || receipt.SiteID != all[key].SiteID || !auditChallengeHex(receipt.BodySHA256, 64) {
 					t.Fatal("invalid owned review receipt")
+				}
+				if receipt.ReviewerPublicID != "" && receipt.ReviewerPublicID != all[key].ReviewerPublicID {
+					t.Fatal("receipt changes predeclared independent reviewer")
 				}
 				recorder.mu.Lock()
 				matched := false
@@ -561,10 +589,10 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 				}
 				c := all[key]
 				revision := auditModFormPending(t, f, c)
-				outcomes := auditModFormApprove(t, f, c.SiteID, revision)
+				outcomes := auditModFormApprove(t, f, c.ReviewerToken, c.SiteID, revision)
 				auditModFormCheckPublished(t, f, c)
 				reviewed[key] = true
-				auditModFormJSON(t, filepath.Join(directory, "review-result."+key+".json"), map[string]any{"status": "APPROVED_ACTUAL_INDEPENDENT_HTTP", "caseId": key, "siteId": c.SiteID, "revisionId": revision, "bodySHA256": receipt.BodySHA256, "outcomes": outcomes, "publicPath": c.PublicURL})
+				auditModFormJSON(t, filepath.Join(directory, "review-result."+key+".json"), map[string]any{"status": "APPROVED_ACTUAL_INDEPENDENT_HTTP", "caseId": key, "siteId": c.SiteID, "revisionId": revision, "bodySHA256": receipt.BodySHA256, "reviewerPublicId": c.ReviewerPublicID, "outcomes": outcomes, "publicPath": c.PublicURL})
 			}
 			if _, err = os.Stat(filepath.Join(directory, "done.flag")); os.IsNotExist(err) {
 				continue
@@ -626,7 +654,7 @@ func auditModFormTerminal(t *testing.T, f auditFixGRFixture, directory string, l
 	checks := []map[string]any{}
 	for _, c := range locales {
 		var total, published, decisions int
-		if err = f.db.QueryRow(f.ctx, `select count(*),count(*) filter(where mod.review_status='approved'),(select count(*) from change_requests request join content_revisions revision on revision.id=request.proposed_revision_id where request.submitted_by=$1 and request.status='approved' and revision.entity_type='mod' and exists(select 1 from review_events event where event.change_request_id=request.id and event.actor_id=$2 and event.event_type='approved')) from mods mod where mod.submitted_by=$1`, c.ActorID, f.userIDs[f.reviewer]).Scan(&total, &published, &decisions); err != nil || total != 1 || published != 1 || decisions != 1 {
+		if err = f.db.QueryRow(f.ctx, `select count(*),count(*) filter(where mod.review_status='approved'),(select count(*) from change_requests request join content_revisions revision on revision.id=request.proposed_revision_id where request.submitted_by=$1 and request.status='approved' and revision.entity_type='mod' and exists(select 1 from review_events event where event.change_request_id=request.id and event.actor_id=$2 and event.event_type='approved')) from mods mod where mod.submitted_by=$1`, c.ActorID, c.ReviewerID).Scan(&total, &published, &decisions); err != nil || total != 1 || published != 1 || decisions != 1 {
 			t.Fatalf("ordinary independent published counts%s=%d/%d/%d err%v", c.CaseID, total, published, decisions, err)
 		}
 		count, accepted := 0, 0
@@ -654,12 +682,16 @@ func auditModFormTerminal(t *testing.T, f auditFixGRFixture, directory string, l
 			t.Fatalf("one accepted UI create required%s=%d", c.CaseID, accepted)
 		}
 		auditModFormCheckPublished(t, f, c)
-		checks = append(checks, map[string]any{"caseId": c.CaseID, "actorPublicId": c.ActorPublicID, "siteId": c.SiteID, "published": 1, "independentDecisions": 1, "businessPOSTs": count, "defaultLocale": c.DefaultLocale, "expectedLocalizations": c.Expected})
+		checks = append(checks, map[string]any{"caseId": c.CaseID, "actorPublicId": c.ActorPublicID, "reviewerPublicId": c.ReviewerPublicID, "siteId": c.SiteID, "published": 1, "independentDecisions": 1, "businessPOSTs": count, "defaultLocale": c.DefaultLocale, "expectedLocalizations": c.Expected})
 	}
 	for _, c := range revisions {
 		var projects, revisionCount int
 		if err = f.db.QueryRow(f.ctx, `select count(*),(select count(*) from content_revisions where entity_type='mod' and entity_id=$2 and created_by=$1) from mods where submitted_by=$1`, c.ActorID, c.ModID).Scan(&projects, &revisionCount); err != nil || projects != 1 || revisionCount != 1+c.AdditionalRevisions {
 			t.Fatalf("revision%s countprojects%d revisions%d err%v", c.CaseID, projects, revisionCount, err)
+		}
+		var independentReviews int
+		if err = f.db.QueryRow(f.ctx, `select count(*) from review_events event join change_requests request on request.id=event.change_request_id join content_revisions revision on revision.id=request.proposed_revision_id where revision.entity_type='mod' and revision.entity_id=$1 and request.submitted_by=$2 and event.actor_id=$3 and event.event_type='approved'`, c.ModID, c.ActorID, c.ReviewerID).Scan(&independentReviews); err != nil || independentReviews != 1+c.AdditionalRevisions {
+			t.Fatal("revision was not independently approved by its predeclared reviewer")
 		}
 		if c.Mode != "success" {
 			initial := *c
@@ -729,7 +761,7 @@ func auditModFormTerminal(t *testing.T, f auditFixGRFixture, directory string, l
 		if !bound {
 			t.Fatalf("specific actual %s event is not bound to this native request; arbitrary refusal is insufficient", requiredRule)
 		}
-		checks = append(checks, map[string]any{"caseId": c.CaseID, "actorPublicId": c.ActorPublicID, "projectCount": projects, "baselinePlusAdditionalRevisions": revisionCount, "nativeAttempts": selected, "safeAntiAbuseEvents": json.RawMessage(events)})
+		checks = append(checks, map[string]any{"caseId": c.CaseID, "actorPublicId": c.ActorPublicID, "reviewerPublicId": c.ReviewerPublicID, "independentReviews": independentReviews, "projectCount": projects, "baselinePlusAdditionalRevisions": revisionCount, "nativeAttempts": selected, "safeAntiAbuseEvents": json.RawMessage(events)})
 	}
 	auditModFormJSON(t, filepath.Join(directory, "sql-terminal-seal.json"), map[string]any{"status": "PASS_ACTUAL_HTTP_PG_NORMAL_REVIEW_AND_NATIVE_REQUEST_POSTCONDITIONS", "recordedAt": time.Now().UTC(), "repoRevisions": pins, "checks": checks, "localizationCases": 32, "revisionCases": 3, "policyUnchanged": true, "productionExecuted": false, "scope": "Native driver is separate evidence. No game/queue/release claim. No real balances or production data changed."})
 }
