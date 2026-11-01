@@ -79,8 +79,11 @@ The helper creates only the declared ordinary synthetic actors and the target
 approved Mod/version before exposure. Actual browser HTTP creates the upload,
 completion, job and independent approval. Creator has scoped project edit/file
 quotas; reviewer has actual content.review/project.review, no administrator or
-review bypass. A distinct ordinary catalog reader has only the existing read
-permissions. The native driver must use actual DOM selection, exact original
+review bypass. A distinct ordinary catalog reader receives the two existing
+catalog read capabilities; the shared fixture also gives this actor exact edit
+and file limits for its other synthetic Mod. Do not describe the actor as having
+only two permissions or use it instead of the separate anonymous public reader.
+The native driver must use actual DOM selection, exact original
 bytes, real job progress, independent review/history/source SHA/target, anonymous
 public recipes and image decoding. `browser-tests/audit-game-live.mts` provides
 the existing complete assertion sequence; read current DOM before running and
