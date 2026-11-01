@@ -34,6 +34,17 @@ func TestAuditMsgReviewSnapshotWatermarkUnreadSampleScaleIntegration(t *testing.
 		t.Fatal(err)
 	}
 	defer db.Close()
+	var tempIdentity auditMsgReviewTempIdentity
+	tempRecorded := false
+	// Register before the old-XID defers: rollback and oldPool.Close retain
+	// their order, then remove the proved own TEMP table before db.Close.
+	defer func() {
+		if tempRecorded {
+			if err := cleanupAuditMsgReviewTempTable(ctx, db, tempIdentity); err != nil {
+				t.Errorf("synchronous own notification TEMP cleanup failed: %v", err)
+			}
+		}
+	}()
 	// Keep an unrelated old top-level XID open while newer notification rows
 	// commit. An xmin-only shortcut cannot prove those rows visible cheaply.
 	oldConfig := cfg.Copy()
@@ -67,6 +78,12 @@ func TestAuditMsgReviewSnapshotWatermarkUnreadSampleScaleIntegration(t *testing.
  insert into notification_broadcast_state values(true,0,0)`); err != nil {
 		t.Fatal(err)
 	}
+	tempIdentity, err = captureAuditMsgReviewTempIdentity(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tempRecorded = true
+	t.Logf("owned notification TEMP before load: backend=%d schema=%d table=%d owner=%d", tempIdentity.BackendPID, tempIdentity.SchemaOID, tempIdentity.TableOID, tempIdentity.OwnerOID)
 	users := make([]int64, unreadReconcileMaxSampleSize)
 	for i := range users {
 		users[i] = int64(i + 1)
