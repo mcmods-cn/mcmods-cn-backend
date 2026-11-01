@@ -27,6 +27,8 @@ const auditCommentProcessConfig = "MCMODS_AUDIT_COMMENT_PROCESS_CONFIG"
 
 type auditCommentProcessInput struct {
 	Connection  string
+	Database    string
+	Parameters  map[string]string
 	Application string
 	Config      config.Config
 	Consume     bool
@@ -38,6 +40,7 @@ type auditCommentProcess struct {
 	control io.WriteCloser
 	done    chan error
 	logs    *bytes.Buffer
+	output  *bytes.Buffer
 	waited  bool
 }
 
@@ -55,6 +58,12 @@ func auditRunCommentProcess(t *testing.T, path string) {
 		t.Fatal("invalid private child configuration")
 	}
 	poolConfig, err := pgxpool.ParseConfig(input.Connection)
+	if err == nil {
+		// ConnString retains the original parsed DSN even when a fixture changes
+		// ConnConfig.Database. Preserve its actual owned target explicitly.
+		poolConfig.ConnConfig.Database = input.Database
+		poolConfig.ConnConfig.RuntimeParams = input.Parameters
+	}
 	if err != nil || poolConfig == nil || (poolConfig.ConnConfig.Host != "127.0.0.1" && poolConfig.ConnConfig.Host != "localhost" && poolConfig.ConnConfig.Host != "::1") || !strings.HasPrefix(poolConfig.ConnConfig.Database, "test018_project_update_") {
 		t.Fatal("child requires the exact owned TEST018 loopback database")
 	}
@@ -111,7 +120,8 @@ func auditRunCommentProcess(t *testing.T, path string) {
 func auditStartCommentProcess(t *testing.T, f test013Fixture, consume bool, suffix string) *auditCommentProcess {
 	t.Helper()
 	name := fmt.Sprintf("audit_cmp003_comment_%s_%d", suffix, time.Now().UnixNano())
-	input := auditCommentProcessInput{Connection: f.db.Config().ConnConfig.ConnString(), Application: name, Config: f.origin.Config.Handler.(*Server).cfg, Consume: consume}
+	connection := f.db.Config().ConnConfig
+	input := auditCommentProcessInput{Connection: connection.ConnString(), Database: connection.Database, Parameters: connection.RuntimeParams, Application: name, Config: f.origin.Config.Handler.(*Server).cfg, Consume: consume}
 	raw, err := json.Marshal(input)
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +140,7 @@ func auditStartCommentProcess(t *testing.T, f test013Fixture, consume bool, suff
 	if err != nil {
 		t.Fatal(err)
 	}
-	child := &auditCommentProcess{name: name, control: control, done: make(chan error, 1), logs: new(bytes.Buffer)}
+	child := &auditCommentProcess{name: name, control: control, done: make(chan error, 1), logs: new(bytes.Buffer), output: new(bytes.Buffer)}
 	command.Stderr = child.logs
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
@@ -141,6 +151,8 @@ func auditStartCommentProcess(t *testing.T, f test013Fixture, consume bool, suff
 		for scanner.Scan() {
 			if address, ok := strings.CutPrefix(scanner.Text(), "AUDIT_COMMENT_PROCESS_READY "); ok {
 				ready <- address
+			} else {
+				fmt.Fprintln(child.output, scanner.Text())
 			}
 		}
 		child.done <- command.Wait()
@@ -157,7 +169,7 @@ func auditStartCommentProcess(t *testing.T, f test013Fixture, consume bool, suff
 		}
 	case err := <-child.done:
 		child.waited = true
-		t.Fatalf("owned child failed before readiness: %v %s", err, child.logs.String())
+		t.Fatalf("owned child failed before readiness: %v %s %s", err, child.logs.String(), child.output.String())
 	case <-f.ctx.Done():
 		t.Fatal("owned child readiness exceeded the original fixture budget")
 	}
