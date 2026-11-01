@@ -392,7 +392,8 @@ func (s *Server) requestCatalogContentTranslation(w http.ResponseWriter, r *http
 		writeError(w, http.StatusForbidden, "no daily AI token allowance is available")
 		return
 	}
-	task, err := s.enqueueCatalogContentTranslation(r.Context(), entity, source, request.TargetLocale, claims.Subject, limit)
+	annotateActivity(r, 0, catalogActivityObjectType(entity.EntityType), publicID, 0)
+	task, err := s.enqueueCatalogContentTranslation(r.Context(), entity, source, request.TargetLocale, claims.Subject, limit, r)
 	if errors.Is(err, errAIQuotaExceeded) {
 		writeError(w, http.StatusTooManyRequests, "daily AI token allowance is insufficient")
 		return
@@ -401,7 +402,6 @@ func (s *Server) requestCatalogContentTranslation(w http.ResponseWriter, r *http
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	annotateActivity(r, 0, catalogActivityObjectType(entity.EntityType), publicID, 0)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"cached": false, "taskId": task.TaskUID, "status": task.Status, "countsTowardDailyTokenQuota": true,
 	})
@@ -630,7 +630,12 @@ func (s *Server) enqueueCatalogContentTranslation(
 	targetLocale string,
 	actorID int64,
 	tokenLimit int64,
+	requests ...*http.Request,
 ) (enqueuedContentTranslation, error) {
+	var request *http.Request
+	if len(requests) > 0 {
+		request = requests[0]
+	}
 	targetLocale = normalizeContentLocale(targetLocale)
 	if targetLocale == "" || source.Locale == "" {
 		return enqueuedContentTranslation{}, errors.New("translation locales are invalid")
@@ -689,6 +694,9 @@ func (s *Server) enqueueCatalogContentTranslation(
 		&existing.TaskUID, &existing.Status,
 	)
 	if err == nil {
+		if request != nil {
+			skipRequestActivity(request)
+		}
 		if commitErr := tx.Commit(ctx); commitErr != nil {
 			return enqueuedContentTranslation{}, commitErr
 		}
@@ -713,6 +721,11 @@ func (s *Server) enqueueCatalogContentTranslation(
 	}
 	if err = enqueueAITaskTx(ctx, tx, "ai.content_translation.requested", taskID, taskUID, aiTaskContentTranslation, ""); err != nil {
 		return enqueuedContentTranslation{}, err
+	}
+	if request != nil {
+		if err = enqueueRequestActivityTx(request, tx); err != nil {
+			return enqueuedContentTranslation{}, errors.New("failed to persist AI translation activity")
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return enqueuedContentTranslation{}, err
