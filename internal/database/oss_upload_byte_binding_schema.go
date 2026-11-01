@@ -30,7 +30,7 @@ const ossUploadByteBindingProofSignature = `public.oss_upload_byte_binding_shape
 const ossUploadByteBindingProofExpression = `oss_upload_byte_binding_shape(status, owner_id, declared_sha256, declared_size_bytes, upload_object_key, sealed_source_key, stored_object_key, source_verified_sha256, source_verified_size_bytes, stored_verified_sha256, stored_verified_size_bytes, file_id)`
 
 func OSSUploadByteBindingSchemaStatements() []string {
-	return []string{
+	statements := []string{
 		`create or replace function oss_upload_byte_binding_shape(p_status text,p_owner bigint,p_declared_sha text,p_declared_size bigint,p_upload_key text,p_sealed_key text,p_stored_key text,p_source_sha text,p_source_size bigint,p_stored_sha text,p_stored_size bigint,p_file_id bigint) returns boolean language sql immutable parallel safe as $$` + ossUploadByteBindingProofBody + `$$`,
 		`create table if not exists oss_upload_byte_bindings (
    id uuid primary key,
@@ -55,6 +55,7 @@ func OSSUploadByteBindingSchemaStatements() []string {
 		`create index if not exists oss_upload_byte_bindings_reconcile on oss_upload_byte_bindings(lease_expires_at,id) where status in ('cleanup_pending','discarded')`,
 		`alter table oss_upload_byte_bindings add column if not exists file_endpoint text not null default ''`,
 	}
+	return append(statements, OSSByteMaintenanceSchemaStatements()...)
 }
 
 type OSSUploadByteBindingState struct {
@@ -67,6 +68,7 @@ type OSSUploadByteBindingState struct {
 	Discarded            int64  `json:"discarded"`
 	ReconciliationReady  bool   `json:"reconciliation_ready"`
 	EndpointMappingReady bool   `json:"endpoint_mapping_ready"`
+	MaintenanceReady     bool   `json:"maintenance_ready"`
 	LegacyActiveFiles    int64  `json:"legacy_active_files_without_binding"`
 }
 type ossUploadByteBindingQuery interface {
@@ -156,7 +158,9 @@ func inspectOSSUploadByteBindings(ctx context.Context, q ossUploadByteBindingQue
 			return state, err
 		}
 	}
-	return state, nil
+	var maintenanceErr error
+	state.MaintenanceReady, maintenanceErr = inspectOSSByteMaintenanceSchema(ctx, q)
+	return state, maintenanceErr
 }
 func InspectOSSUploadByteBindings(ctx context.Context, pool *pgxpool.Pool) (OSSUploadByteBindingState, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
@@ -213,6 +217,11 @@ func ApplyOSSUploadByteBindingUpgrade(ctx context.Context, pool *pgxpool.Pool, e
 		statement = strings.Replace(statement, "table if not exists oss_upload_byte_bindings (", "table if not exists public.oss_upload_byte_bindings (", 1)
 		statement = strings.Replace(statement, "references oss_files(id)", "references public.oss_files(id)", 1)
 		statement = strings.Replace(statement, "check(oss_upload_byte_binding_shape(", "check(public.oss_upload_byte_binding_shape(", 1)
+		statement = strings.Replace(statement, "function oss_upload_maintenance_shape(", "function public.oss_upload_maintenance_shape(", 1)
+		statement = strings.Replace(statement, "table if not exists oss_upload_maintenance_actions (", "table if not exists public.oss_upload_maintenance_actions (", 1)
+		statement = strings.Replace(statement, "references oss_upload_byte_bindings(id)", "references public.oss_upload_byte_bindings(id)", 1)
+		statement = strings.Replace(statement, "check(oss_upload_maintenance_shape(", "check(public.oss_upload_maintenance_shape(", 1)
+		statement = strings.Replace(statement, "on oss_upload_maintenance_actions(", "on public.oss_upload_maintenance_actions(", 1)
 		statement = strings.Replace(statement, "alter table oss_upload_byte_bindings ", "alter table public.oss_upload_byte_bindings ", 1)
 		statement = strings.Replace(statement, "on oss_upload_byte_bindings(", "on public.oss_upload_byte_bindings(", 1)
 		if _, err = tx.Exec(ctx, statement); err != nil {

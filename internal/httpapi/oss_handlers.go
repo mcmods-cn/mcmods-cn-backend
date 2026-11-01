@@ -806,7 +806,9 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 	originalRequestContext := r.Context()
 	byteBinding, bindingErr := s.sealOSSUploadedSource(r.Context(), client, cfg, req, currentClaims(r).Subject, head)
 	if bindingErr != nil {
-		if errors.Is(bindingErr, errOSSByteBindingPersistence) {
+		if errors.Is(bindingErr, errOSSRawUploadRetired) {
+			writeError(w, http.StatusGone, "原上传已按保留规则清理，请重新上传")
+		} else if errors.Is(bindingErr, errOSSByteBindingPersistence) {
 			writeError(w, http.StatusInternalServerError, "保存上传确认失败")
 		} else {
 			writeError(w, http.StatusBadGateway, "暂时无法核对上传文件，请稍后重试")

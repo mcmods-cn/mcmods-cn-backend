@@ -46,8 +46,7 @@ func (s *Server) sealOSSUploadedSource(ctx context.Context, client *aliyunoss.Cl
 	b := &ossUploadByteBinding{ID: newExportID(), Token: newExportID(), UploadKey: req.ObjectKey, cfg: cfg}
 	b.SourceKey = path.Join(path.Dir(req.ObjectKey), ossSealedUploadComponent, b.ID, path.Base(req.ObjectKey))
 	b.StoredKey = b.SourceKey
-	if _, err := s.db.Exec(ctx, `insert into oss_upload_byte_bindings(id,owner_id,bucket,endpoint,region,use_cname,upload_object_key,logical_category,source,original_name,declared_sha256,declared_size_bytes,sealed_source_key,stored_object_key,run_token,lease_expires_at,file_endpoint)
- values($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$14,clock_timestamp()+make_interval(secs=>$15),$16)`, b.ID, owner, cfg.Bucket, cfg.Endpoint, cfg.Region, cfg.UseCName || isCustomOSSEndpoint(cfg.Endpoint), req.ObjectKey, req.Category, req.Source, req.OriginalName, req.SHA256, head.ContentLength, b.SourceKey, b.Token, int(ossByteBindingLease/time.Second), cfg.displayEndpoint()); err != nil {
+	if err := s.persistOSSByteBindingPreparation(ctx, b, req, owner, head.ContentLength); err != nil {
 		return nil, fmt.Errorf("%w: %w", errOSSByteBindingPersistence, err)
 	}
 	b.ctx, b.stop = s.startOSSByteBindingHeartbeat(ctx, b)
