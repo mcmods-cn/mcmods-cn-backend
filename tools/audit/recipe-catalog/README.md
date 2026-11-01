@@ -28,3 +28,22 @@ python3 tools/audit/recipe-catalog/diagnose.py \
 2026-11-01已执行的具名层次与首次观察器错误、原生浏览器报告，见外部主台账中的
 CONT-002/CONT-003/GR-010分项。GR-010的真实原样游戏item与合成fluid/gas层分开；
 本夹具不把尚未执行的格式或发布环境标为通过。
+
+`TestAuditLiveRecipeGeometryFixture` 是独立的三类合成 v7 配方夹具，使用
+`MCMODS_RUN_LIVE_RECIPE_GEOMETRY=1` 和全新的 `MCMODS_AUDIT_RECIPE_GEOMETRY_DIR`。
+需要真实图片时还须设置 `MCMODS_AUDIT_GEOMETRY_WITH_ASSETS=1`；只有坐标的样本不能
+代替图片绘制验收。可选 `MCMODS_AUDIT_GEOMETRY_VERIFY_WITHDRAWAL=1` 在正常 STOP 后
+通过普通版本归档申请和独立审核验证四张图片撤公开及目录缓存失效。
+
+对正在服务的带图片夹具可执行以下只读命令（需要 Pillow）：
+
+```sh
+python3 tools/audit/recipe-catalog/diagnose-geometry-canonical.py \
+  /workspace/audit-fixes-20261024/NEW/runtime.json \
+  /workspace/audit-fixes-20261024/NEW/terminal-canonical
+```
+
+该命令继承基础观察器的全部所有权保护，另以数据库快照核对 item、fluid、gas 的
+公开身份、具体种类、来源修订、资料版本和图标引用，并检查四张实际公开 PNG 的尺寸、
+全部 RGBA 像素及文本元数据清理。输出不包含临时重定向凭据。这些检查不能替代浏览器
+的实际绘制、触摸、键盘或缩放断言，也不证明真实游戏化学资源导出或 NATS 传输成功。
