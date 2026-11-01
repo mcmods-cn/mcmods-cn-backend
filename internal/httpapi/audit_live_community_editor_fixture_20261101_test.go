@@ -186,6 +186,8 @@ func TestAuditLiveCommunityEditorFixture20261101(t *testing.T) {
 		snapshot := communityPostSnapshot{Kind: kind, Title: title, SourceLocale: "en-US", BodyMarkdown: body, MinecraftVersions: []string{}, Projects: []communityPostReference{}, Resources: []communityPostReference{}}
 		if kind == "issue" {
 			snapshot.Severity = "minor"
+			snapshot.ModVersionMin = "1.0.0"
+			snapshot.ModVersionMax = "1.0.0"
 			snapshot.MinecraftVersions = []string{"1.20.1"}
 			snapshot.Projects = []communityPostReference{{PublicID: f.modCode, Type: "mod"}}
 		}
