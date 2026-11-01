@@ -68,7 +68,7 @@ func TestOCT02SeedCrawlerHeartbeatDatabaseFailureSurvivesStopIntegration(t *test
 		t.Fatal("database renewal failure did not cancel the active run")
 	}
 	var databaseErr *pgconn.PgError
-	if err := stop(); !errors.As(err, &databaseErr) || databaseErr.Code != "23514" {
+	if err := stop(); !errors.As(err, &databaseErr) || databaseErr.Code != "23514" || databaseErr.ConstraintName != "oct02_reject_renewal" {
 		t.Fatalf("actual database constraint failure was hidden by stop: %v", err)
 	}
 }
@@ -109,12 +109,12 @@ func newOCT02SeedHeartbeatFixture(t *testing.T, tracer pgx.QueryTracer, rejectRe
 	t.Cleanup(cancel)
 	if _, err = pool.Exec(ctx, `create temporary table seed_crawler_runs(
 		id bigint primary key,status text not null,lease_owner text not null,lease_expires_at timestamptz
-	); insert into seed_crawler_runs values(1,'running','current-owner','2000-01-01')`); err != nil {
+	); insert into seed_crawler_runs values(1,'running','current-owner',clock_timestamp()+interval '1 minute')`); err != nil {
 		t.Fatal(err)
 	}
 	if rejectRenewal {
 		if _, err = pool.Exec(ctx, `alter table seed_crawler_runs add constraint oct02_reject_renewal
-			check(lease_expires_at<'2001-01-01'::timestamptz)`); err != nil {
+			check(lease_expires_at<'2001-01-01'::timestamptz) not valid`); err != nil {
 			t.Fatal(err)
 		}
 	}
