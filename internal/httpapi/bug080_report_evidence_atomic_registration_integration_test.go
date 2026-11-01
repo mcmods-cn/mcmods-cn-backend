@@ -299,11 +299,21 @@ func newBUG080OwnedEvidenceProvider(t *testing.T, body []byte, inputs ...string)
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		store.mu.Lock()
 		defer store.mu.Unlock()
-		key := strings.TrimPrefix(r.URL.Path, "/")
+		// The locked SDK selects path style for IP endpoints even when
+		// UseCName is true. Our loopback provider must remove exactly its
+		// declared bucket, rather than treating it as part of the object key.
+		const bucketPrefix = "/bug080-bucket/"
+		pathStyleBucket := strings.HasPrefix(r.URL.Path, bucketPrefix)
+		key := strings.TrimPrefix(r.URL.Path, bucketPrefix)
 		providerError := func(status int, code string) {
 			w.Header().Set("Content-Type", "application/xml")
 			w.WriteHeader(status)
 			_, _ = fmt.Fprintf(w, "<Error><Code>%s</Code><Message>owned BUG080 fixture</Message></Error>", code)
+		}
+		t.Logf("BUG080_PROVIDER method=%s exact_path_style_bucket=%t", r.Method, pathStyleBucket)
+		if !pathStyleBucket || key == "" {
+			providerError(http.StatusBadRequest, "InvalidArgument")
+			return
 		}
 		if r.Method == http.MethodPut {
 			actualBody, readErr := io.ReadAll(io.LimitReader(r.Body, 1))
