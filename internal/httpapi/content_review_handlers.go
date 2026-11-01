@@ -326,6 +326,18 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		code := "review_approved"
+		if request.Status == "rejected" {
+			code = "review_rejected"
+		}
+		if submittedBy > 0 {
+			if err = enqueueTemplatedNotificationTx(r.Context(), tx, "notification.direct", submittedBy, 0, code, map[string]string{"name": title, "reason": request.Note}, map[string]any{
+				"modpackId": aggregateKey, "targetLabel": title, "url": "/modpacks/" + snapshot.SiteID,
+			}, ""); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to persist modpack review notification")
+				return
+			}
+		}
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to commit modpack review")
 			return
@@ -334,13 +346,6 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			s.refreshProjectACLVersion(r.Context())) {
 			return
 		}
-		code := "review_approved"
-		if request.Status == "rejected" {
-			code = "review_rejected"
-		}
-		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": title, "reason": request.Note}, map[string]any{
-			"modpackId": aggregateKey, "targetLabel": title, "url": "/modpacks/" + snapshot.SiteID,
-		})
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status, "publicId": aggregateKey})
 		return
 	}
@@ -394,6 +399,19 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		code := "review_approved"
+		if request.Status == "rejected" {
+			code = "review_rejected"
+		}
+		if submittedBy > 0 {
+			if err = enqueueTemplatedNotificationTx(r.Context(), tx, "notification.direct", submittedBy, 0, code, map[string]string{"name": title, "reason": request.Note}, map[string]any{
+				"projectId": aggregateKey, "projectType": snapshot.ProjectType, "targetLabel": title,
+				"url": simpleProjectWebPath(snapshot.ProjectType, snapshot.SiteID),
+			}, ""); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to persist project review notification")
+				return
+			}
+		}
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to commit project review")
 			return
@@ -402,14 +420,6 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			s.refreshProjectACLVersion(r.Context())) {
 			return
 		}
-		code := "review_approved"
-		if request.Status == "rejected" {
-			code = "review_rejected"
-		}
-		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": title, "reason": request.Note}, map[string]any{
-			"projectId": aggregateKey, "projectType": snapshot.ProjectType, "targetLabel": title,
-			"url": simpleProjectWebPath(snapshot.ProjectType, snapshot.SiteID),
-		})
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status, "publicId": aggregateKey})
 		return
 	}
@@ -599,6 +609,18 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to record creator review")
 			return
 		}
+		code := "review_approved"
+		if request.Status == "rejected" {
+			code = "review_rejected"
+		}
+		if submittedBy > 0 {
+			if err = enqueueTemplatedNotificationTx(r.Context(), tx, "notification.direct", submittedBy, 0, code, map[string]string{"name": name, "reason": request.Note}, map[string]any{
+				"creatorId": aggregateKey, "targetLabel": name, "url": creatorPath(kind, aggregateKey),
+			}, ""); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to persist creator review notification")
+				return
+			}
+		}
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to commit creator review")
 			return
@@ -607,13 +629,6 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			s.refreshProjectACLVersion(r.Context())) {
 			return
 		}
-		code := "review_approved"
-		if request.Status == "rejected" {
-			code = "review_rejected"
-		}
-		s.sendTemplatedNotification(r.Context(), submittedBy, code, map[string]string{"name": name, "reason": request.Note}, map[string]any{
-			"creatorId": aggregateKey, "targetLabel": name, "url": creatorPath(kind, aggregateKey),
-		})
 		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status})
 		return
 	}
