@@ -347,11 +347,18 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 					payload.Localizations = append(payload.Localizations, catalogLocalizationEdit{Locale: other, ContentMarkdown: "Only supplied other-language body " + randomCatalogPublicID()})
 				}
 			}
-			expected := payload
-			if err = normalizeAndValidateModRequest(&expected); err != nil {
+			// Expected public values come from the declared human input, not
+			// the normalizer under test. Only the documented literal fallback
+			// for a wholly absent localization is permitted.
+			expected := append([]catalogLocalizationEdit{}, payload.Localizations...)
+			if len(expected) == 0 {
+				expected = []catalogLocalizationEdit{{Locale: locale, Name: primary}}
+			}
+			validation := payload
+			if err = normalizeAndValidateModRequest(&validation); err != nil {
 				t.Fatal("fixture semantic case invalid: ", err)
 			}
-			c := &auditModFormCase{CaseID: caseID, ActorPublicID: public, SiteID: site, Mode: mode, DefaultLocale: locale, OtherLocale: other, NewURL: "/mods/new", PublicURL: "/mods/" + site, FormValues: payload, Expected: expected.Localizations, ActorID: id, Token: token}
+			c := &auditModFormCase{CaseID: caseID, ActorPublicID: public, SiteID: site, Mode: mode, DefaultLocale: locale, OtherLocale: other, NewURL: "/mods/new", PublicURL: "/mods/" + site, FormValues: payload, Expected: expected, ActorID: id, Token: token}
 			localeCases = append(localeCases, c)
 			private["localizations"].(map[string]string)[caseID] = token
 			recorder.register(site, caseID)
@@ -509,8 +516,12 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 				}
 				recorder.mu.Lock()
 				matched := false
+				expectedPath := "/api/v1/mods"
+				if all[key].Mode == "success" {
+					expectedPath = "/api/v1/mods/" + all[key].SiteID + "/revisions"
+				}
 				for _, attempt := range recorder.attempts {
-					if attempt.CaseID == key && attempt.Status == 201 && attempt.BodySHA256 == receipt.BodySHA256 {
+					if attempt.CaseID == key && attempt.Path == expectedPath && attempt.Status == 201 && attempt.BodySHA256 == receipt.BodySHA256 {
 						matched = true
 					}
 				}
