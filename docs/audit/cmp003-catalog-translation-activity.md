@@ -42,8 +42,16 @@ There is no migration or automatic historical correction. Existing AI task rows
 and their retained publisher intents can establish a task identity; old
 Create/Mod activity and task-reward rows alone cannot prove which translation
 request/retry caused them. Retention and legitimate Mod creation overlap further
-limit attribution. Preserve those facts and use the bounded read-only activity
-diagnostic with independently correlated request/task evidence; do not invent
+limit attribution. The existing activity CLI covers comment candidates, so it
+must not be presented as catalog-task attribution. The separate bounded
+[catalog candidate query](../../tools/audit/catalog-translation-activity/README.md)
+counts declared actor/target/time-window task and activity families, preserves
+unknown/truncated scopes and always reports historical attribution as false.
+Its actual HTTP-created task/consumer fixture verifies1task/1activity/queue0 and
+precise wrong-database22023 refusal, with no business/financial changes. The
+first draft's wrong task-type filter and2.795s failure are retained; the query
+uses the existing stored `content_translation_completion` contract. Correlate
+these candidates with independent request/task evidence; do not invent
 missing events, relabel old activities or subtract balances/XP automatically.
 Production diagnosis and compensation were not executed. Keep consumers enabled
 when deploying; rollback restores the historical loss/duplicate window.
