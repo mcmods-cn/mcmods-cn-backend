@@ -147,6 +147,26 @@ func TestOSSByteBindingFreshLegacyUpgradePreservesIdentityAndRejectsSchemaDriftI
 	if err = RequireOSSUploadByteBindingSchema(ctx, db); err != nil {
 		t.Fatal(err)
 	}
+	// The provider API endpoint and the file display/CDN endpoint have separate
+	// semantics. An older typed table may lack the latter snapshot; expansion
+	// adds an unknown blank value without inventing a proof for historical rows.
+	if _, err = db.Exec(ctx, `alter table oss_upload_byte_bindings drop column file_endpoint`); err != nil {
+		t.Fatal(err)
+	}
+	oldEndpointMapping, e := InspectOSSUploadByteBindings(ctx, db)
+	if e != nil || oldEndpointMapping.EndpointMappingReady {
+		t.Fatalf("missing endpoint mapping was not an inspectable old expansion: %+v %v", oldEndpointMapping, e)
+	}
+	if err = RequireOSSUploadByteBindingSchema(ctx, db); err == nil || !strings.Contains(err.Error(), "expansion required") {
+		t.Fatalf("writer accepted missing endpoint mapping: %v", err)
+	}
+	mapped, e := ApplyOSSUploadByteBindingUpgrade(ctx, db, legacy.Database, "owned schema-only backup")
+	if e != nil || !mapped.EndpointMappingReady {
+		t.Fatalf("explicit endpoint expansion=%+v err=%v", mapped, e)
+	}
+	if snapshot() != before {
+		t.Fatal("endpoint expansion changed a legacy file")
+	}
 	// A preparing receipt is not an asset, deduplication authority or old-data
 	// backfill. The committed shape cannot be forged merely by toggling status.
 	if _, err = db.Exec(ctx, `insert into oss_upload_byte_bindings(id,owner_id,bucket,endpoint,region,upload_object_key,logical_category,original_name,declared_sha256,declared_size_bytes,sealed_source_key,run_token,lease_expires_at) values('11111111-1111-4111-8111-111111111111',2147483648,'owned','https://example.invalid','owned','uploads/source.zip','owned','source.zip',repeat('a',64),17,'uploads/_mcmods_sealed_v1/11111111-1111-4111-8111-111111111111/source.zip','owned-token',now()+interval '2 minutes')`); err != nil {
@@ -203,5 +223,46 @@ func TestOSSByteBindingFreshLegacyUpgradePreservesIdentityAndRejectsSchemaDriftI
 	}
 	if snapshot() != before {
 		t.Fatal("proof tests rewrote a legacy file or falsely upgraded its trust")
+	}
+}
+
+func TestOSSByteBindingOldTypedEndpointExpansionPreservesUnknownProofIntegration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	db := newOSSByteBindingSchemaTestDatabase(t, ctx)
+	var owner, fileID int64
+	var filePublicID string
+	if err := db.QueryRow(ctx, `insert into users(username,email,password_hash) values('old-binding-map','old-binding-map@example.invalid','synthetic') returning id`).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	key := "uploads/_mcmods_sealed_v1/22222222-2222-4222-8222-222222222222/source.zip"
+	if err := db.QueryRow(ctx, `insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,size_bytes,source_size_bytes,sha256,stored_sha256,source_hash_verified,uploader_id,status) values('owned','https://owned-display.invalid','owned',$1,'owned','test','source.zip',17,17,repeat('a',64),repeat('a',64),true,$2,'active') returning id,public_id`, key, owner).Scan(&fileID, &filePublicID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `insert into oss_upload_byte_bindings(id,owner_id,bucket,endpoint,region,file_endpoint,upload_object_key,logical_category,source,original_name,declared_sha256,declared_size_bytes,sealed_source_key,stored_object_key,source_verified_sha256,source_verified_size_bytes,stored_verified_sha256,stored_verified_size_bytes,file_id,status,run_token,lease_expires_at) values('22222222-2222-4222-8222-222222222222',$1,'owned','https://owned-provider.invalid','owned','https://owned-display.invalid','uploads/source.zip','owned','test','source.zip',repeat('a',64),17,$2,$2,repeat('a',64),17,repeat('a',64),17,$3,'committed','owned-old-proof',now())`, owner, key, fileID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `alter table oss_upload_byte_bindings drop column file_endpoint`); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := func() string {
+		var raw string
+		if err := db.QueryRow(ctx, `select jsonb_build_object('file',to_jsonb(file),'receipt',to_jsonb(binding)-'file_endpoint')::text from oss_files file join oss_upload_byte_bindings binding on binding.file_id=file.id where file.public_id=$1`, filePublicID).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	before := snapshot()
+	old, err := InspectOSSUploadByteBindings(ctx, db)
+	if err != nil || old.EndpointMappingReady || old.Committed != 1 || old.LegacyActiveFiles != 1 {
+		t.Fatalf("old typed rows were silently given a location proof: %+v %v", old, err)
+	}
+	after, err := ApplyOSSUploadByteBindingUpgrade(ctx, db, old.Database, "owned schema-only backup")
+	if err != nil || !after.EndpointMappingReady || after.Committed != 1 || after.LegacyActiveFiles != 1 || snapshot() != before {
+		t.Fatalf("typed endpoint expansion changed identity/proof/data: %+v %v", after, err)
+	}
+	var endpoint string
+	if err = db.QueryRow(ctx, `select file_endpoint from oss_upload_byte_bindings where file_id=$1`, fileID).Scan(&endpoint); err != nil || endpoint != "" {
+		t.Fatal("expansion inferred historical endpoint from current file metadata")
 	}
 }

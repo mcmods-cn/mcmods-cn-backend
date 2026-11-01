@@ -20,6 +20,11 @@ Successful replays keep the same public file identity and contribute no second
 upload event. Original-key user downloads/deletion and completion-result replays
 resolve the alias before their existing owner/source checks.
 
+The receipt records both the actual provider endpoint and the file's display
+endpoint. These may differ when a CDN/public endpoint is configured. File proof
+and alias lookups require the exact recorded bucket, display endpoint, key and
+business/hash/length fields; they never equate a CDN with the provider endpoint.
+
 A converted file retains its private verified source for actual source/stored
 re-verification. The source is not an independently downloadable user file. File
 tombstoning queues that exclusively owned source in the same transaction as the
@@ -35,8 +40,16 @@ object deletion worker performs provider deletion.
 
 A deletion acknowledgement alone is not a terminal absence proof. After all
 exact deletion jobs complete, reconciliation performs provider HEAD outside the
-database transaction. A currently absent candidate becomes `discarded` and keeps
-an indexed hourly recheck. A candidate still present is queued for deletion again.
+database transaction and lists incomplete multipart copies under each exact
+receipt-owned key. Only exact keys/upload IDs are aborted; prefix-only neighbors
+are retained. Listing uses at most four pages of32 results per key. Denials,
+malformed cursors and exhausted budgets remain pending. The existing required
+bucket AbortMultipartUpload lifecycle of at most seven days remains a fallback.
+This worker therefore needs ListMultipartUploads and AbortMultipartUpload for
+its owned upload scope in addition to the existing object read/delete access;
+this task does not alter remote permissions. A currently absent candidate with
+completed bounded multipart cleanup becomes `discarded` and keeps an indexed
+hourly recheck. A candidate still present is queued for deletion again.
 Provider errors leave it pending. Claim and finish use the receipt row and exact
 claim deadline, so late checks cannot overwrite a replacement claim. This makes
 late provider completion recoverable without claiming that cancellation prevents
@@ -78,6 +91,12 @@ The default command uses a read-only repeatable-read transaction, fixed catalog/
 public/temp search path, and count-only output. Missing schema/index is reported
 as requiring expansion; incompatible same-name definitions are rejected. It does
 not backfill proofs or change public IDs, file fields, balances or shared blobs.
+The additive `file_endpoint` snapshot is independently inspected. An older typed
+receipt table missing it requires explicit expansion; old rows receive an unknown
+blank value and cannot supply a new location proof. No endpoint is inferred from
+current settings or the file's potentially relocated metadata. Such early typed
+rows remain in scoped legacy diagnosis until their actual source/stored bytes
+and intended location can be established.
 
 After an operator-owned backup and review, the explicit schema-only form is:
 

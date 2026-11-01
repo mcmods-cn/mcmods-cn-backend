@@ -60,7 +60,8 @@ func TestTEST037ProviderDeleteKeepsLeaseLockedUntilSideEffectCompletesIntegratio
 	raw := []byte("TEST037 actual blocked provider DELETE\n")
 	ticket := f.ticket(t, f.editor, "/api/v1/users/me/oss/uploads/presign", "inflight.zip", "application/octet-stream", "test037-private", raw)
 	f.put(t, ticket, raw)
-	f.require(t, f.editor, http.MethodPost, "/api/v1/users/me/oss/uploads/complete", ticket.completion(), 201)
+	completed := decodeTEST022Data[map[string]any](t, f.require(t, f.editor, http.MethodPost, "/api/v1/users/me/oss/uploads/complete", ticket.completion(), 201))
+	storedKey := completed["objectKey"].(string)
 	f.require(t, f.editor, http.MethodDelete, "/api/v1/users/me/files", map[string]any{"objectKey": ticket.ObjectKey}, 200)
 	first := NewOSSDeletionWorker(f.server.cfg, f.db)
 	job, err := first.claim(f.ctx)
@@ -84,7 +85,7 @@ func TestTEST037ProviderDeleteKeepsLeaseLockedUntilSideEffectCompletesIntegratio
 	}
 	f.unchanged(t, before)
 	f.store.mu.Lock()
-	object, exists := f.store.objects[ticket.ObjectKey]
+	object, exists := f.store.objects[storedKey]
 	f.store.mu.Unlock()
 	if !exists || !bytes.Equal(object.data, raw) {
 		t.Fatal("blocked provider fixture did not preserve bytes before release")
@@ -97,9 +98,10 @@ func TestTEST037ProviderDeleteKeepsLeaseLockedUntilSideEffectCompletesIntegratio
 		t.Fatal(err)
 	}
 	f.store.mu.Lock()
-	_, exists = f.store.objects[ticket.ObjectKey]
+	_, exists = f.store.objects[storedKey]
+	input, inputExists := f.store.objects[ticket.ObjectKey]
 	f.store.mu.Unlock()
-	if exists {
-		t.Fatal("provider did not execute DELETE after its controlled release")
+	if exists || !inputExists || !bytes.Equal(input.data, raw) {
+		t.Fatal("provider did not delete the registered candidate after release or discarded the retained input alias")
 	}
 }

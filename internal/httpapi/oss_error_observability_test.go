@@ -26,7 +26,7 @@ func TestOSSReadsWritesAndCleanupHaveObservableFailureContracts(t *testing.T) {
 	handlers, admin, deletion := string(handlersRaw), string(adminRaw), string(deletionRaw)
 	completion := string(completionRaw)
 	var bindingSources strings.Builder
-	for _, filename := range []string{"oss_upload_completed_lookup.go", "oss_upload_byte_binding.go", "oss_upload_byte_binding_copy.go", "oss_upload_byte_binding_cleanup.go", "oss_upload_byte_binding_reconcile.go", "oss_upload_binding_replay.go", "oss_upload_binding_reverify.go"} {
+	for _, filename := range []string{"oss_upload_completed_lookup.go", "oss_upload_byte_binding.go", "oss_upload_byte_binding_copy.go", "oss_upload_byte_binding_cleanup.go", "oss_upload_byte_binding_reconcile.go", "oss_upload_byte_binding_multipart.go", "oss_upload_binding_replay.go", "oss_upload_binding_reverify.go"} {
 		raw, err := os.ReadFile(filename)
 		if err != nil {
 			t.Fatal(err)

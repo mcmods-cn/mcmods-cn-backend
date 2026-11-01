@@ -46,8 +46,8 @@ func (s *Server) sealOSSUploadedSource(ctx context.Context, client *aliyunoss.Cl
 	b := &ossUploadByteBinding{ID: newExportID(), Token: newExportID(), UploadKey: req.ObjectKey, cfg: cfg}
 	b.SourceKey = path.Join(path.Dir(req.ObjectKey), ossSealedUploadComponent, b.ID, path.Base(req.ObjectKey))
 	b.StoredKey = b.SourceKey
-	if _, err := s.db.Exec(ctx, `insert into oss_upload_byte_bindings(id,owner_id,bucket,endpoint,region,use_cname,upload_object_key,logical_category,source,original_name,declared_sha256,declared_size_bytes,sealed_source_key,stored_object_key,run_token,lease_expires_at)
- values($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$14,clock_timestamp()+make_interval(secs=>$15))`, b.ID, owner, cfg.Bucket, cfg.Endpoint, cfg.Region, cfg.UseCName || isCustomOSSEndpoint(cfg.Endpoint), req.ObjectKey, req.Category, req.Source, req.OriginalName, req.SHA256, head.ContentLength, b.SourceKey, b.Token, int(ossByteBindingLease/time.Second)); err != nil {
+	if _, err := s.db.Exec(ctx, `insert into oss_upload_byte_bindings(id,owner_id,bucket,endpoint,region,use_cname,upload_object_key,logical_category,source,original_name,declared_sha256,declared_size_bytes,sealed_source_key,stored_object_key,run_token,lease_expires_at,file_endpoint)
+ values($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$14,clock_timestamp()+make_interval(secs=>$15),$16)`, b.ID, owner, cfg.Bucket, cfg.Endpoint, cfg.Region, cfg.UseCName || isCustomOSSEndpoint(cfg.Endpoint), req.ObjectKey, req.Category, req.Source, req.OriginalName, req.SHA256, head.ContentLength, b.SourceKey, b.Token, int(ossByteBindingLease/time.Second), cfg.displayEndpoint()); err != nil {
 		return nil, fmt.Errorf("%w: %w", errOSSByteBindingPersistence, err)
 	}
 	b.ctx, b.stop = s.startOSSByteBindingHeartbeat(ctx, b)
@@ -137,7 +137,13 @@ func lockOSSByteBindingTx(ctx context.Context, tx pgx.Tx, b *ossUploadByteBindin
 }
 
 func commitOSSByteBindingTx(ctx context.Context, tx pgx.Tx, b *ossUploadByteBinding, fileID int64, sourceSHA string, sourceSize int64, storedSHA string, storedSize int64) error {
-	tag, err := tx.Exec(ctx, `update oss_upload_byte_bindings set status='committed',file_id=$3,source_verified_sha256=$4,source_verified_size_bytes=$5,stored_verified_sha256=$6,stored_verified_size_bytes=$7,updated_at=clock_timestamp() where id=$1::uuid and run_token=$2 and status='preparing' and lease_expires_at>clock_timestamp()`, b.ID, b.Token, fileID, sourceSHA, sourceSize, storedSHA, storedSize)
+	tag, err := tx.Exec(ctx, `update oss_upload_byte_bindings binding set status='committed',file_id=$3,source_verified_sha256=$4,source_verified_size_bytes=$5,stored_verified_sha256=$6,stored_verified_size_bytes=$7,updated_at=clock_timestamp()
+ where binding.id=$1::uuid and binding.run_token=$2 and binding.status='preparing' and binding.lease_expires_at>clock_timestamp()
+ and binding.file_endpoint<>'' and binding.file_endpoint=$8
+ and exists(select 1 from oss_files file where file.id=$3 and file.bucket=binding.bucket and file.endpoint=binding.file_endpoint
+ and file.object_key=binding.stored_object_key and file.uploader_id=binding.owner_id
+ and file.category=binding.logical_category and file.source=binding.source and file.status='active'
+ and file.sha256=$4 and file.source_size_bytes=$5 and file.stored_sha256=$6 and file.size_bytes=$7)`, b.ID, b.Token, fileID, sourceSHA, sourceSize, storedSHA, storedSize, b.cfg.displayEndpoint())
 	if err != nil {
 		return err
 	}
@@ -159,10 +165,8 @@ func (s *Server) canonicalOSSCompletedUploadAlias(ctx context.Context, cfg ossCo
  where binding.bucket=$1 and binding.endpoint=$2 and binding.owner_id=$3
  and binding.stored_object_key=$4 and binding.declared_sha256=$5
  and ($6::bigint<=0 or binding.declared_size_bytes=$6)
- and binding.status='committed' and file.status='active' and file.uploader_id=$3
- and file.object_key=binding.stored_object_key and file.sha256=binding.source_verified_sha256
- and file.stored_sha256=binding.stored_verified_sha256 and file.source_size_bytes=binding.source_verified_size_bytes
- and file.size_bytes=binding.stored_verified_size_bytes and file.category=binding.logical_category and file.source=binding.source`, cfg.Bucket, cfg.Endpoint, owner, req.ObjectKey, req.SHA256, req.SizeBytes).Scan(&originalKey, &originalName)
+ and file.status='active' and file.uploader_id=$3
+ and `+ossByteBindingCurrentFileProofSQL+` `, cfg.Bucket, cfg.Endpoint, owner, req.ObjectKey, req.SHA256, req.SizeBytes).Scan(&originalKey, &originalName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errOSSSealedReplayIdentity
 	}
@@ -181,10 +185,7 @@ func (s *Server) resolvedOSSUploadObjectKey(ctx context.Context, cfg ossConfigPa
 	err := s.db.QueryRow(ctx, `select binding.stored_object_key from oss_upload_byte_bindings binding
  join oss_files file on file.id=binding.file_id
  where binding.bucket=$1 and binding.endpoint=$2 and binding.upload_object_key=$3
- and binding.status='committed' and file.status='active' and file.object_key=binding.stored_object_key
- and file.uploader_id=binding.owner_id and file.category=binding.logical_category and file.source=binding.source
- and file.sha256=binding.source_verified_sha256 and file.source_size_bytes=binding.source_verified_size_bytes
- and file.stored_sha256=binding.stored_verified_sha256 and file.size_bytes=binding.stored_verified_size_bytes
+ and file.status='active' and `+ossByteBindingCurrentFileProofSQL+`
  and ($4::bigint<=0 or (binding.owner_id=$4 and file.uploader_id=$4))`, cfg.Bucket, cfg.Endpoint, key, owner).Scan(&stored)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return key, nil

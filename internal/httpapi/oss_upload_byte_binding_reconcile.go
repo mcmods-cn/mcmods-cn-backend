@@ -72,6 +72,9 @@ func (s *Server) reconcileOSSByteBindingCleanup(ctx context.Context) (bool, erro
 		cfg.Bucket, cfg.Endpoint, cfg.Region, cfg.UseCName = b.cfg.Bucket, b.cfg.Endpoint, b.cfg.Region, b.cfg.UseCName
 		client := newOSSClient(cfg, cfg.Endpoint, cfg.UseCName || isCustomOSSEndpoint(cfg.Endpoint))
 		for _, key := range keys {
+			if cfgErr = cleanupOSSByteBindingMultiparts(inspectCtx, client, b, key); cfgErr != nil {
+				break
+			}
 			_, headErr := client.HeadObject(inspectCtx, &aliyunoss.HeadObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(key)})
 			if headErr == nil {
 				present = true

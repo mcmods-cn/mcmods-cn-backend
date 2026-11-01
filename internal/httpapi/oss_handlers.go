@@ -979,6 +979,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'active', $14, true, $15)
 		 on conflict (object_key) do update set source_hash_verified=true,stored_sha256=excluded.stored_sha256
         where oss_files.uploader_id=excluded.uploader_id and oss_files.status='active'
+        and oss_files.bucket=excluded.bucket and oss_files.endpoint=excluded.endpoint
         and oss_files.sha256=excluded.sha256 and oss_files.source_size_bytes=excluded.source_size_bytes
         and oss_files.category=excluded.category and oss_files.source=excluded.source
 		 returning id,public_id`,

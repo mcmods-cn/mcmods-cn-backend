@@ -36,6 +36,7 @@ func OSSUploadByteBindingSchemaStatements() []string {
    id uuid primary key,
    owner_id bigint not null,
    bucket text not null,endpoint text not null,region text not null,
+   file_endpoint text not null default '',
    use_cname boolean not null default false,
    upload_object_key text not null,logical_category text not null,
    source text not null default '',original_name text not null,
@@ -52,19 +53,21 @@ func OSSUploadByteBindingSchemaStatements() []string {
 		`create index if not exists oss_upload_byte_bindings_file on oss_upload_byte_bindings(file_id) where status='committed'`,
 		`create index if not exists oss_upload_byte_bindings_cleanup on oss_upload_byte_bindings(lease_expires_at,id) where status in ('preparing','cleanup_pending')`,
 		`create index if not exists oss_upload_byte_bindings_reconcile on oss_upload_byte_bindings(lease_expires_at,id) where status in ('cleanup_pending','discarded')`,
+		`alter table oss_upload_byte_bindings add column if not exists file_endpoint text not null default ''`,
 	}
 }
 
 type OSSUploadByteBindingState struct {
-	Database            string `json:"database"`
-	Generation          int    `json:"generation"`
-	Present             bool   `json:"present"`
-	Committed           int64  `json:"committed"`
-	Preparing           int64  `json:"preparing"`
-	CleanupPending      int64  `json:"cleanup_pending"`
-	Discarded           int64  `json:"discarded"`
-	ReconciliationReady bool   `json:"reconciliation_ready"`
-	LegacyActiveFiles   int64  `json:"legacy_active_files_without_binding"`
+	Database             string `json:"database"`
+	Generation           int    `json:"generation"`
+	Present              bool   `json:"present"`
+	Committed            int64  `json:"committed"`
+	Preparing            int64  `json:"preparing"`
+	CleanupPending       int64  `json:"cleanup_pending"`
+	Discarded            int64  `json:"discarded"`
+	ReconciliationReady  bool   `json:"reconciliation_ready"`
+	EndpointMappingReady bool   `json:"endpoint_mapping_ready"`
+	LegacyActiveFiles    int64  `json:"legacy_active_files_without_binding"`
 }
 type ossUploadByteBindingQuery interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
@@ -110,6 +113,12 @@ func inspectOSSUploadByteBindings(ctx context.Context, q ossUploadByteBindingQue
 			return state, fmt.Errorf("incompatible OSS byte binding column: %s", name)
 		}
 	}
+	if endpointColumn, exists := columns["file_endpoint"]; exists {
+		if endpointColumn.Type != "text" || !endpointColumn.NotNull || endpointColumn.Default != "''::text" {
+			return state, errors.New("incompatible OSS byte binding file endpoint column")
+		}
+		state.EndpointMappingReady = true
+	}
 	var body, expression string
 	var functionValid, fkValid, indexValid bool
 	if err := q.QueryRow(ctx, `select coalesce((select prosrc from pg_proc where oid=to_regprocedure($1)),''),coalesce((select provolatile='i' and not prosecdef and proparallel='s' and prorettype='boolean'::regtype from pg_proc where oid=to_regprocedure($1)),false),coalesce((select pg_get_expr(conbin,conrelid) from pg_constraint where conrelid='public.oss_upload_byte_bindings'::regclass and conname='oss_upload_byte_bindings_shape' and contype='c' and convalidated),''),exists(select 1 from pg_constraint where conrelid='public.oss_upload_byte_bindings'::regclass and conname='oss_upload_byte_bindings_file_fk' and contype='f' and confrelid='public.oss_files'::regclass and confdeltype='r' and convalidated)`, ossUploadByteBindingProofSignature).Scan(&body, &functionValid, &expression, &fkValid); err != nil {
@@ -139,7 +148,11 @@ func inspectOSSUploadByteBindings(ctx context.Context, q ossUploadByteBindingQue
 		}
 	}
 	if counts {
-		if err := q.QueryRow(ctx, `select count(*) filter(where status='committed'),count(*) filter(where status='preparing'),count(*) filter(where status='cleanup_pending'),count(*) filter(where status='discarded'),(select count(*) from public.oss_files file where file.status='active' and not exists(select 1 from public.oss_upload_byte_bindings binding where binding.file_id=file.id and binding.status='committed' and binding.stored_object_key=file.object_key and binding.stored_verified_sha256=file.stored_sha256)) from public.oss_upload_byte_bindings`).Scan(&state.Committed, &state.Preparing, &state.CleanupPending, &state.Discarded, &state.LegacyActiveFiles); err != nil {
+		locationProof := "false"
+		if state.EndpointMappingReady {
+			locationProof = "binding.bucket=file.bucket and binding.file_endpoint<>'' and binding.file_endpoint=file.endpoint"
+		}
+		if err := q.QueryRow(ctx, `select count(*) filter(where status='committed'),count(*) filter(where status='preparing'),count(*) filter(where status='cleanup_pending'),count(*) filter(where status='discarded'),(select count(*) from public.oss_files file where file.status='active' and not exists(select 1 from public.oss_upload_byte_bindings binding where binding.file_id=file.id and binding.status='committed' and binding.stored_object_key=file.object_key and binding.stored_verified_sha256=file.stored_sha256 and `+locationProof+`)) from public.oss_upload_byte_bindings`).Scan(&state.Committed, &state.Preparing, &state.CleanupPending, &state.Discarded, &state.LegacyActiveFiles); err != nil {
 			return state, err
 		}
 	}
@@ -165,7 +178,7 @@ func RequireOSSUploadByteBindingSchema(ctx context.Context, q ossUploadByteBindi
 	if err != nil {
 		return err
 	}
-	if !state.Present || !state.ReconciliationReady {
+	if !state.Present || !state.ReconciliationReady || !state.EndpointMappingReady {
 		return errors.New("OSS upload byte binding expansion required: inspect and explicitly apply cmd/db-oss-byte-binding-upgrade")
 	}
 	return nil
@@ -200,6 +213,7 @@ func ApplyOSSUploadByteBindingUpgrade(ctx context.Context, pool *pgxpool.Pool, e
 		statement = strings.Replace(statement, "table if not exists oss_upload_byte_bindings (", "table if not exists public.oss_upload_byte_bindings (", 1)
 		statement = strings.Replace(statement, "references oss_files(id)", "references public.oss_files(id)", 1)
 		statement = strings.Replace(statement, "check(oss_upload_byte_binding_shape(", "check(public.oss_upload_byte_binding_shape(", 1)
+		statement = strings.Replace(statement, "alter table oss_upload_byte_bindings ", "alter table public.oss_upload_byte_bindings ", 1)
 		statement = strings.Replace(statement, "on oss_upload_byte_bindings(", "on public.oss_upload_byte_bindings(", 1)
 		if _, err = tx.Exec(ctx, statement); err != nil {
 			return before, fmt.Errorf("expand OSS byte binding schema: %w", err)
@@ -209,8 +223,8 @@ func ApplyOSSUploadByteBindingUpgrade(ctx context.Context, pool *pgxpool.Pool, e
 	if err != nil {
 		return after, err
 	}
-	if !after.Present || !after.ReconciliationReady {
-		return after, errors.New("OSS upload byte binding expansion did not create the public receipt table and reconciliation index")
+	if !after.Present || !after.ReconciliationReady || !after.EndpointMappingReady {
+		return after, errors.New("OSS upload byte binding expansion did not create the public receipt table, endpoint mapping and reconciliation index")
 	}
 	return after, tx.Commit(ctx)
 }

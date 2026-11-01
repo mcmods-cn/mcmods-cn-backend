@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	xwebp "golang.org/x/image/webp"
 	"image"
@@ -22,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/security"
@@ -66,7 +68,7 @@ func TestOCT02ConvertedUploadRegistrationFailureReleasesQuotaConnectionIntegrati
 	// The test must reach its specific PostgreSQL registration constraint rather
 	// than treating an earlier unsupported GET/hash error as that failure.
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestKey := strings.TrimPrefix(r.URL.Path, "/")
+		requestKey := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/"), "owned-cleanup/")
 		if r.Method == http.MethodPut && r.Header.Get("x-oss-copy-source") != "" {
 			if r.Header.Get("x-oss-copy-source") != "/owned-cleanup/"+key || !isOSSSealedObjectKey(requestKey) || path.Base(requestKey) != path.Base(key) {
 				http.Error(w, "wrong copy identity", 400)
@@ -135,6 +137,11 @@ func TestOCT02ConvertedUploadRegistrationFailureReleasesQuotaConnectionIntegrati
 	if _, err = pool.Exec(ctx, `alter table oss_files add constraint oct02_reject_converted_registration check(source<>'playground') not valid`); err != nil {
 		t.Fatal(err)
 	}
+	_, probeErr := pool.Exec(ctx, `insert into oss_files(bucket,endpoint,region,object_key,source,original_name,content_type,size_bytes,sha256,uploader_id) values($1,$2,$3,'owned-registration-fault-probe','playground','probe.webp','image/webp',1,repeat('a',64),$4)`, cfg.Bucket, cfg.displayEndpoint(), cfg.Region, actor)
+	var pgerr *pgconn.PgError
+	if !errors.As(probeErr, &pgerr) || pgerr.Code != "23514" || pgerr.ConstraintName != "oct02_reject_converted_registration" {
+		t.Fatalf("fixture did not establish its exact registration CHECK fault: %v", probeErr)
+	}
 	body, _ := json.Marshal(ossCompleteUploadRequest{ObjectKey: key, OriginalName: "synthetic.png", ContentType: "image/png", SizeBytes: int64(source.Len()), SHA256: hash, Category: "playground", Source: "playground"})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/users/me/oss/uploads/complete", bytes.NewReader(body))
 	request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: actor, PermissionRules: []security.PermissionRule{{Code: "user.file.single_limit.64", Allow: true}, {Code: "user.file.daily_limit.256", Allow: true}, {Code: "user.file.total_limit.256", Allow: true}}}))
@@ -142,6 +149,9 @@ func TestOCT02ConvertedUploadRegistrationFailureReleasesQuotaConnectionIntegrati
 	start := time.Now()
 	server.completeUserOSSDirectUpload(response, request)
 	elapsed := time.Since(start)
+	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), "保存 OSS 文件记录失败") || processes.Load() != 1 {
+		t.Fatalf("specific converted registration boundary not reached: status=%d conversions=%d body=%s", response.Code, processes.Load(), response.Body.String())
+	}
 	var files, intents, rawCleanup int
 	var sealedSource, convertedKey string
 	if err = pool.QueryRow(ctx, `select sealed_source_key,stored_object_key from oss_upload_byte_bindings where upload_object_key=$1 and owner_id=$2 and status='cleanup_pending' and file_id is null`, key, actor).Scan(&sealedSource, &convertedKey); err != nil {

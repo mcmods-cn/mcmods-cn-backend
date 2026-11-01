@@ -32,15 +32,11 @@ func (s *Server) findCompletedOSSUpload(ctx context.Context, uploaderID int64, r
 	var storedSHA string
 	query := `select id,public_id,bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
 			content_type,size_bytes,source_size_bytes,sha256,status,scan_status,created_at,updated_at,stored_sha256
-		from oss_files
+		from oss_files file
 		where uploader_id=$1 and category=$2 and source=$3 and sha256=$4 and status='active' and source_hash_verified
 		  and (object_key=any($5::text[]) or exists(select 1 from oss_upload_byte_bindings binding
-          where binding.file_id=oss_files.id and binding.status='committed'
-          and binding.owner_id=oss_files.uploader_id and binding.upload_object_key=any($5::text[])
-          and binding.logical_category=oss_files.category and binding.source=oss_files.source
-          and binding.source_verified_sha256=oss_files.sha256 and binding.source_verified_size_bytes=oss_files.source_size_bytes
-          and binding.stored_object_key=oss_files.object_key and binding.stored_verified_sha256=oss_files.stored_sha256
-          and binding.stored_verified_size_bytes=oss_files.size_bytes))
+          where binding.file_id=file.id and binding.upload_object_key=any($5::text[])
+          and ` + ossByteBindingCurrentFileProofSQL + `))
 		  and ($6::bigint <= 0 or coalesce(nullif(source_size_bytes,0),size_bytes)=$6)`
 	if _, ok := blueprintCoverPublicID(req.Source); ok {
 		query += ` and scan_status in ('clean','trusted_generated')
@@ -65,12 +61,14 @@ func (s *Server) findCompletedOSSUpload(ctx context.Context, uploaderID int64, r
 // Hash-based reuse uses the same persisted source/stored proof for ordinary
 // uploads and blueprint originals. A legacy boolean is not a byte receipt.
 // Callers use the fixed SQL table alias "file"; no request text enters SQL.
-const ossCommittedSourceHashProofSQL = `exists(select 1 from oss_upload_byte_bindings binding
-          where binding.file_id=file.id and binding.status='committed'
+const ossByteBindingCurrentFileProofSQL = `binding.status='committed'
           and binding.stored_object_key=file.object_key and binding.bucket=file.bucket
+          and binding.file_endpoint<>'' and binding.file_endpoint=file.endpoint
           and binding.owner_id=file.uploader_id and binding.logical_category=file.category and binding.source=file.source
           and binding.source_verified_sha256=file.sha256 and binding.source_verified_size_bytes=file.source_size_bytes
-          and binding.stored_verified_sha256=file.stored_sha256 and binding.stored_verified_size_bytes=file.size_bytes)`
+          and binding.stored_verified_sha256=file.stored_sha256 and binding.stored_verified_size_bytes=file.size_bytes`
+const ossCommittedSourceHashProofSQL = `exists(select 1 from oss_upload_byte_bindings binding
+          where binding.file_id=file.id and ` + ossByteBindingCurrentFileProofSQL + `)`
 
 type ossFileHashLookup struct {
 	UploaderID    *int64

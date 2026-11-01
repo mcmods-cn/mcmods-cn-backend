@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"image"
 	"image/png"
@@ -83,6 +84,49 @@ func newTEST037Fixture(t *testing.T) test037Fixture {
 		f.store.mu.Lock()
 		defer f.store.mu.Unlock()
 		w.Header().Set("ETag", `"test037-owned"`)
+		if r.Method == http.MethodGet && q.Has("uploads") {
+			type listedUpload struct {
+				Key string `xml:"Key"`
+				ID  string `xml:"UploadId"`
+			}
+			result := struct {
+				XMLName     xml.Name       `xml:"ListMultipartUploadsResult"`
+				Bucket      string         `xml:"Bucket"`
+				Prefix      string         `xml:"Prefix"`
+				IsTruncated bool           `xml:"IsTruncated"`
+				NextKey     string         `xml:"NextKeyMarker,omitempty"`
+				NextUpload  string         `xml:"NextUploadIdMarker,omitempty"`
+				Uploads     []listedUpload `xml:"Upload"`
+			}{Bucket: "test037-owned", Prefix: q.Get("prefix")}
+			var uploads []listedUpload
+			for id, upload := range f.store.uploads {
+				if strings.HasPrefix(upload.key, result.Prefix) && (upload.key > q.Get("key-marker") || (upload.key == q.Get("key-marker") && id > q.Get("upload-id-marker"))) {
+					uploads = append(uploads, listedUpload{upload.key, id})
+				}
+			}
+			sort.Slice(uploads, func(i, j int) bool {
+				if uploads[i].Key == uploads[j].Key {
+					return uploads[i].ID < uploads[j].ID
+				}
+				return uploads[i].Key < uploads[j].Key
+			})
+			limit, _ := strconv.Atoi(q.Get("max-uploads"))
+			if limit < 1 || limit > 1000 {
+				limit = 1000
+			}
+			if len(uploads) > limit {
+				result.IsTruncated = true
+				uploads = uploads[:limit]
+				result.NextKey = uploads[len(uploads)-1].Key
+				result.NextUpload = uploads[len(uploads)-1].ID
+			}
+			result.Uploads = uploads
+			w.Header().Set("Content-Type", "application/xml")
+			if err := xml.NewEncoder(w).Encode(result); err != nil {
+				t.Error(err)
+			}
+			return
+		}
 		if r.Method == http.MethodPost && q.Has("uploads") {
 			f.store.sequence++
 			id := fmt.Sprintf("upload-test037-%08d", f.store.sequence)
@@ -640,13 +684,15 @@ func TestTEST037MultipartActualPartsCompletionAndAbandonedRestartIntegration(t *
 				var status string
 				var files int
 				var reserved int64
-				if err := f.db.QueryRow(f.ctx, `select session.status,(select count(*) from oss_files where object_key=$1 and status='active'),
-				(select reserved_source_bytes from oss_user_quota_usage where user_id=$2)
-				from oss_multipart_sessions session where object_key=$1`, ticket.ObjectKey, f.userIDs[f.editor]).Scan(&status, &files, &reserved); err != nil {
+				var storedKey string
+				if err := f.db.QueryRow(f.ctx, `select session.status,(select count(*) from oss_files file join oss_upload_byte_bindings binding on binding.file_id=file.id where binding.upload_object_key=$1 and binding.status='committed' and file.status='active'),
+				(select reserved_source_bytes from oss_user_quota_usage where user_id=$2),
+				(select stored_object_key from oss_upload_byte_bindings where upload_object_key=$1 and status='committed')
+				from oss_multipart_sessions session where object_key=$1`, ticket.ObjectKey, f.userIDs[f.editor]).Scan(&status, &files, &reserved, &storedKey); err != nil {
 					t.Fatal(err)
 				}
 				f.store.mu.Lock()
-				object, exists := f.store.objects[ticket.ObjectKey]
+				object, exists := f.store.objects[storedKey]
 				_, unfinished := f.store.uploads[ticket.Multipart.UploadID]
 				f.store.mu.Unlock()
 				if status != "completed" || files != 1 || reserved != 0 || !exists || unfinished || !bytes.Equal(object.data, raw) {

@@ -14,16 +14,17 @@ var errOSSCompletedIdentityConflict = errors.New("completed OSS upload identity 
 func completedOSSByteBindingForUploadTx(ctx context.Context, tx pgx.Tx, cfg ossConfigPayload, key string, owner int64, req ossCompleteUploadRequest, size int64) (bool, error) {
 	var actualOwner, actualSize int64
 	var category, source, sha, fileStatus string
-	err := tx.QueryRow(ctx, `select binding.owner_id,binding.logical_category,binding.source,binding.declared_sha256,binding.declared_size_bytes,file.status
+	var currentFileProof bool
+	err := tx.QueryRow(ctx, `select binding.owner_id,binding.logical_category,binding.source,binding.declared_sha256,binding.declared_size_bytes,file.status,`+ossByteBindingCurrentFileProofSQL+`
  from oss_upload_byte_bindings binding join oss_files file on file.id=binding.file_id
- where binding.bucket=$1 and binding.endpoint=$2 and binding.upload_object_key=$3 and binding.status='committed'`, cfg.Bucket, cfg.Endpoint, key).Scan(&actualOwner, &category, &source, &sha, &actualSize, &fileStatus)
+ where binding.bucket=$1 and binding.endpoint=$2 and binding.upload_object_key=$3 and binding.status='committed'`, cfg.Bucket, cfg.Endpoint, key).Scan(&actualOwner, &category, &source, &sha, &actualSize, &fileStatus, &currentFileProof)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	if actualOwner != owner || category != req.Category || source != req.Source || sha != req.SHA256 || actualSize != size || fileStatus != "active" {
+	if !currentFileProof || actualOwner != owner || category != req.Category || source != req.Source || sha != req.SHA256 || actualSize != size || fileStatus != "active" {
 		return false, errOSSCompletedIdentityConflict
 	}
 	return true, nil
