@@ -81,15 +81,32 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 	}
 	settingsBefore, _ := json.Marshal(settings)
 	const content = "Independent legitimate community proof fixture wording"
+	distinctFields := os.Getenv("MCMODS_AUDIT_CHALLENGE_DISTINCT_FIELDS") == "1"
+	if distinctFields && expiryOnly {
+		t.Fatal("distinct-fields live run is a separate successful-proof fixture, not an old expiry seal")
+	}
 	payload := func(slug string) createModRequest {
-		return createModRequest{SiteID: slug, PrimaryName: content, SecondaryName: content, Summary: content, BodyMarkdown: content, DefaultLocale: "en-US", Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: content, Summary: content, ContentMarkdown: content}}, Environment: "bothRequired", PrimaryCategory: "utility", ModIDs: []modIdentifierPayload{{Identifier: strings.ReplaceAll(slug, "-", "_"), Primary: true}}, Compatibilities: []modLoaderCompatibilityPayload{{Loader: "forge", Versions: []string{"1.20.1"}}}, OfficialStatus: "active", SourceStatus: "open", License: "MIT", SubmissionMethod: "manual"}
+		name, summary, body := content, content, content
+		if distinctFields {
+			name = "Human authored canonical proof source"
+			summary = "A short overview of this ordinary source submission"
+			body = "Detailed documentation of the independent source with different business wording"
+		}
+		return createModRequest{SiteID: slug, PrimaryName: name, SecondaryName: name, Summary: summary, BodyMarkdown: body, DefaultLocale: "en-US", Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: name, Summary: summary, ContentMarkdown: body}}, Environment: "bothRequired", PrimaryCategory: "utility", ModIDs: []modIdentifierPayload{{Identifier: strings.ReplaceAll(slug, "-", "_"), Primary: true}}, Compatibilities: []modLoaderCompatibilityPayload{{Loader: "forge", Versions: []string{"1.20.1"}}}, OfficialStatus: "active", SourceStatus: "open", License: "MIT", SubmissionMethod: "manual"}
 	}
 	seedRaw, _ := json.Marshal(payload("proof-reference-seed"))
 	seedRequest, _ := http.NewRequest(http.MethodPost, "/api/v1/mods", bytes.NewReader(seedRaw))
 	seedRequest.Header.Set("Content-Type", "application/json")
 	_, seedContent := inspectAntiAbuseBody(seedRequest)
 	normalizedSeed := antiabuse.NormalizeContent(seedContent)
-	if strings.Count(normalizedSeed, strings.ToLower(content)) != 4 {
+	collected, unique := strings.Split(seedContent, "\n"), map[string]bool{}
+	for _, field := range collected {
+		unique[field] = true
+	}
+	if distinctFields && (len(collected) != 4 || len(unique) != 3) {
+		t.Fatal("distinct native ModEditor name/summary/body required; summary compatibility alias must match its actual localization")
+	}
+	if !distinctFields && strings.Count(normalizedSeed, strings.ToLower(content)) != 4 {
 		t.Fatal("reference must match actual ModEditor legacy aliases plus default-localization four collected strings")
 	}
 	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "project.create", "project.create.mod")
@@ -167,7 +184,7 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 	if expiryOnly {
 		expectedCreated = 0
 	}
-	runtime, _ := json.MarshalIndent(map[string]any{"apiOrigin": f.origin.URL, "frontendOrigin": frontendOrigin, "frontendExpectedCommit": frontendCommit, "caseId": caseID, "expiryOnly": expiryOnly, "authCookieName": authSessionCookieName, "authPath": authPath, "actorPublicIds": publicIDs, "payload": payload("proof-browser-created"), "expiryPayload": payload("proof-browser-expiry"), "failurePayload": payload("proof-browser-failure"), "cancelPayload": payload("proof-browser-cancel"), "normalizedSeedContentSHA256": antiabuse.ContentHash(normalizedSeed), "collectedEqualContentFields": 4, "sourceCommit": strings.TrimSpace(string(head)), "sourceTreeClean": true, "challengeTTLSeconds": 600, "minimumFormAgeMilliseconds": 800, "unchangedPolicy": true, "trigger": "actual successful ordinary other-user identical wording fingerprint + new unverified account; no force or threshold override", "preflight": "actual HTTP 428 challenge_required", "expectedCreatorPendingModCount": expectedCreated, "productionExecuted": false}, "", "  ")
+	runtime, _ := json.MarshalIndent(map[string]any{"apiOrigin": f.origin.URL, "frontendOrigin": frontendOrigin, "frontendExpectedCommit": frontendCommit, "caseId": caseID, "expiryOnly": expiryOnly, "authCookieName": authSessionCookieName, "authPath": authPath, "actorPublicIds": publicIDs, "payload": payload("proof-browser-created"), "expiryPayload": payload("proof-browser-expiry"), "failurePayload": payload("proof-browser-failure"), "cancelPayload": payload("proof-browser-cancel"), "normalizedSeedContentSHA256": antiabuse.ContentHash(normalizedSeed), "collectedEqualContentFields": len(collected) - len(unique) + 1, "collectedBusinessFields": len(collected), "distinctBusinessFields": len(unique), "distinctFieldsMode": distinctFields, "sourceCommit": strings.TrimSpace(string(head)), "sourceTreeClean": true, "challengeTTLSeconds": 600, "minimumFormAgeMilliseconds": 800, "unchangedPolicy": true, "trigger": "actual successful ordinary other-user identical wording fingerprint + new unverified account; no force or threshold override", "preflight": "actual HTTP 428 challenge_required", "expectedCreatorPendingModCount": expectedCreated, "productionExecuted": false}, "", "  ")
 	if err = os.WriteFile(filepath.Join(dir, "runtime.json"), runtime, 0600); err != nil {
 		t.Fatal(err)
 	}
