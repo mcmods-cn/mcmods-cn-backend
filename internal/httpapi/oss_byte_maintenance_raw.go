@@ -64,7 +64,7 @@ func (run *ossMaintenanceRun) cleanupRaw(ctx context.Context, e OSSByteMaintenan
 			out.Status = "DATABASE_ERROR"
 			return out
 		}
-		if err == nil && oldSHA != ossMaintenancePlanSHA(e, run.plan.RetentionCutoff) {
+		if err == nil && oldSHA != ossMaintenancePlanSHA(e, run.plan) {
 			out.Status = "PLAN_CONFLICT"
 			return out
 		}
@@ -113,15 +113,22 @@ func (run *ossMaintenanceRun) cleanupRaw(ctx context.Context, e OSSByteMaintenan
 		return out
 	}
 	raw, err := run.observe(ctx, client, cfg, proof.Key)
+	alreadyAbsent := false
 	if err != nil {
-		out.Status = ossMaintenanceReadStatus(err, "ALREADY_ABSENT")
-		return out
+		status := ossMaintenanceReadStatus(err, "ALREADY_ABSENT")
+		if status != "ALREADY_ABSENT" || !run.opts.Apply {
+			out.Status = status
+			return out
+		}
+		alreadyAbsent = true
 	}
-	if raw.SHA != expectedSHA || raw.Size != expectedSize {
-		out.Status = "RAW_BYTE_IDENTITY_MISMATCH"
-		return out
+	if !alreadyAbsent {
+		if raw.SHA != expectedSHA || raw.Size != expectedSize {
+			out.Status = "RAW_BYTE_IDENTITY_MISMATCH"
+			return out
+		}
+		out.SourceObservedSHA, out.SourceBytes = raw.SHA, raw.Size
 	}
-	out.SourceObservedSHA, out.SourceBytes = raw.SHA, raw.Size
 	if !run.opts.Apply {
 		out.Status = "READY_RAW_RETENTION_CLEANUP"
 		return out
@@ -137,6 +144,9 @@ func (run *ossMaintenanceRun) cleanupRaw(ctx context.Context, e OSSByteMaintenan
 		out.Status = ossMaintenanceErrorStatus(err)
 	} else {
 		out.Status = "RAW_REMOVED"
+		if alreadyAbsent {
+			out.Status = "RAW_ABSENCE_RECORDED"
+		}
 	}
 	return out
 }
@@ -228,7 +238,7 @@ func (run *ossMaintenanceRun) executeRawCleanup(ctx context.Context, e OSSByteMa
 	}
 	_, err = client.HeadObject(remote, &aliyunoss.HeadObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(proof.Key)})
 	var service *aliyunoss.ServiceError
-	if !errors.As(err, &service) || service.StatusCode != 404 {
+	if !errors.As(err, &service) || !(service.Code == "NoSuchKey" || (service.StatusCode == 404 && service.Code == "BadErrorResponse")) {
 		return errors.New("raw object absence was not established")
 	}
 	if err = lockOSSByteMaintenanceActionTx(ctx, tx, e.ActionID, token, "processing"); err != nil {

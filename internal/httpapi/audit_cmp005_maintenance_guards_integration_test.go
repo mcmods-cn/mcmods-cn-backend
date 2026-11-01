@@ -8,6 +8,8 @@ import (
 	"path"
 	"testing"
 	"time"
+
+	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 )
 
 func auditOSSByteRawFixture(t *testing.T) (test037Fixture, test037Ticket, string, OSSByteMaintenancePlan) {
@@ -286,5 +288,35 @@ func TestAuditCMP005MaintenanceActionClockRejectsExpiryAcrossUnmodifiedRowWaitIn
 	}
 	if err = <-done; !errors.Is(err, errOSSByteBindingLeaseLost) {
 		t.Fatalf("expired action admitted after an unchanged-row wait: %v", err)
+	}
+}
+
+func TestAuditCMP005MaintenanceAlreadyAbsentInputIsRecordedAndSizePinsRemainExactIntegration(t *testing.T) {
+	f, ticket, bindingID, plan := auditOSSByteRawFixture(t)
+	client, cfg, err := f.server.ossClient(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.DeleteObject(f.ctx, &aliyunoss.DeleteObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(ticket.ObjectKey)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := auditOSSByteMaintenanceRun(t, f, f.db, plan, false); got.Status != "ALREADY_ABSENT" {
+		t.Fatalf("already-absent dry-run: %+v", got)
+	}
+	if got := auditOSSByteMaintenanceRun(t, f, f.db, plan, true); got.Status != "RAW_ABSENCE_RECORDED" {
+		t.Fatalf("absent input did not get a durable retirement without a false removed count: %+v", got)
+	}
+	var state string
+	if err = f.db.QueryRow(f.ctx, `select state from oss_upload_maintenance_actions where id=$1::uuid`, plan.Entries[0].ActionID).Scan(&state); err != nil || state != "completed" {
+		t.Fatal("actual absence did not complete its durable scoped intent")
+	}
+	var id string
+	if err = f.db.QueryRow(f.ctx, `select file.public_id from oss_files file join oss_upload_byte_bindings binding on binding.file_id=file.id where binding.id=$1::uuid`, bindingID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	entry := OSSByteMaintenanceEntry{ActionID: newExportID(), Operation: "promote", FilePublicID: id, ExpectedDisplayEndpoint: cfg.displayEndpoint(), ExpectedSourceSHA: ticket.SHA256, ExpectedStoredSHA: ticket.SHA256, ExpectedSourceSize: ticket.SizeBytes + 1, ExpectedStoredSize: ticket.SizeBytes}
+	wrongSize := auditOSSByteMaintenancePlan(t, f, entry)
+	if got := auditOSSByteMaintenanceRun(t, f, f.db, wrongSize, true); got.Status != "PLAN_PROOF_MISMATCH" {
+		t.Fatalf("existing typed receipt ignored explicit length pin: %+v", got)
 	}
 }

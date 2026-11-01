@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"net/url"
+	"path/filepath"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -118,12 +119,28 @@ func ossMaintenanceReferencesStatus(refs ossMaintenanceReferences, err error) st
 }
 
 func knownOSSLegacySourceKey(file ossMaintenanceFile, explicit string) (string, bool) {
-	if strings.TrimSpace(explicit) == "" {
-		if file.SourceSize == file.Size && (file.SourceOriginalName == "" || file.SourceOriginalName == file.OriginalName) {
+	sourceExt := strings.ToLower(filepath.Ext(file.SourceOriginalName))
+	storedExt := strings.ToLower(filepath.Ext(file.OriginalName))
+	converted := file.SourceSize != file.Size || (sourceExt != "" && sourceExt != storedExt) || strings.HasSuffix(file.Key, ".render-1024.png")
+	explicit = strings.TrimSpace(explicit)
+	if explicit == "" {
+		if !converted {
 			return file.Key, true
 		}
 		return "", false
 	}
-	explicit = strings.TrimSpace(explicit)
-	return explicit, explicit == file.Key || persistedWebPObjectKey(explicit) == file.Key || persistedModResourceRenderObjectKey(explicit) == file.Key
+	if explicit == file.Key {
+		return explicit, !converted
+	}
+	// A converted output cannot supply a missing original, even if a legacy
+	// length field happens to equal the output length. Require the known input
+	// format and exact recognized path relationship, never an arbitrary sibling.
+	inputExt := strings.ToLower(filepath.Ext(explicit))
+	if sourceExt == "" || sourceExt != inputExt {
+		return "", false
+	}
+	rasterInput := inputExt == ".png" || inputExt == ".jpg" || inputExt == ".jpeg"
+	webp := storedExt == ".webp" && rasterInput && persistedWebPObjectKey(explicit) == file.Key
+	render := (rasterInput || inputExt == ".webp") && strings.HasSuffix(file.Key, ".render-1024.png") && persistedModResourceRenderObjectKey(explicit) == file.Key
+	return explicit, webp || render
 }

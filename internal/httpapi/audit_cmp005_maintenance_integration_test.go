@@ -121,6 +121,11 @@ func TestAuditCMP005MaintenanceLegacyPromotionAndRawRetentionKeepPublicIdentityI
 			if after := auditOSSAllFacts(t, f); !reflect.DeepEqual(after, before) {
 				t.Fatal("promotion replay changed business facts")
 			}
+			changedBudget := plan
+			changedBudget.MaxReadBytes++
+			if got := auditOSSByteMaintenanceRun(t, f, pool, changedBudget, true); got.Status != "PLAN_CONFLICT" {
+				t.Fatalf("same action accepted different reviewed global budgets: %+v", got)
+			}
 			// Backdate only this owned synthetic receipt to exercise the explicit
 			// seven-day retention guard. No real historical rows are modified.
 			if _, err = f.db.Exec(f.ctx, `update oss_upload_byte_bindings set created_at=clock_timestamp()-interval '10 days' where id=$1::uuid`, bindingID); err != nil {
@@ -210,5 +215,28 @@ func TestAuditCMP005MaintenancePlanRejectsUnboundedOrUnconfirmedApply(t *testing
 	plan.MaxReadBytes = 0
 	if err := validateOSSByteMaintenancePlan(plan, OSSByteMaintenanceOptions{}); err == nil {
 		t.Fatal("unbounded byte inventory accepted")
+	}
+}
+
+func TestAuditCMP005MaintenanceConvertedOutputCannotReplaceMissingOriginalIntegration(t *testing.T) {
+	f := newTEST037Fixture(t)
+	id, key, _, _, stored := auditOSSByteLegacyFile(t, f, true)
+	// Initial synthetic old metadata makes both lengths equal. Source and stored
+	// byte counts coinciding must never turn the output into original evidence.
+	if _, err := f.db.Exec(f.ctx, `update oss_files set source_size_bytes=size_bytes where public_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	e := OSSByteMaintenanceEntry{ActionID: newExportID(), Operation: "promote", FilePublicID: id, OriginalSourceKey: key, ExpectedDisplayEndpoint: f.cfg.displayEndpoint(), ExpectedSourceSHA: sha256Hex(stored), ExpectedStoredSHA: sha256Hex(stored), ExpectedSourceSize: int64(len(stored)), ExpectedStoredSize: int64(len(stored))}
+	plan := auditOSSByteMaintenancePlan(t, f, e)
+	before := auditOSSAllFacts(t, f)
+	if got := auditOSSByteMaintenanceRun(t, f, f.db, plan, true); got.Status != "SOURCE_SCOPE_MISMATCH" {
+		t.Fatalf("converted output supplied unproven original source: %+v", got)
+	}
+	if after := auditOSSAllFacts(t, f); !reflect.DeepEqual(after, before) {
+		t.Fatal("unproven converted original changed files/quota/history")
+	}
+	var rows int
+	if err := f.db.QueryRow(f.ctx, `select (select count(*) from oss_upload_byte_bindings)+(select count(*) from oss_upload_maintenance_actions)`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatal("unproven source created a receipt or repair intent")
 	}
 }

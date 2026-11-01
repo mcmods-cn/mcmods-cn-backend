@@ -113,6 +113,9 @@ func validateOSSByteMaintenancePlan(plan OSSByteMaintenancePlan, opts OSSByteMai
 			return errors.New("unique explicit maintenance action UUIDs are required")
 		}
 		seen[strings.ToLower(e.ActionID)] = true
+		if (e.ExpectedSourceSHA != "" && normalizeSHA256(e.ExpectedSourceSHA) == "") || (e.ExpectedStoredSHA != "" && normalizeSHA256(e.ExpectedStoredSHA) == "") || e.ExpectedSourceSize < 0 || e.ExpectedStoredSize < 0 || e.ExpectedSourceSize > maxOSSUploadBytes || e.ExpectedStoredSize > maxOSSUploadBytes {
+			return errors.New("invalid explicit byte pins")
+		}
 		if e.Operation == "promote" {
 			if !validCatalogPublicID(e.FilePublicID) || e.BindingID != "" || e.RawSourceKind != "" {
 				return errors.New("promotion requires one exact public file ID")
@@ -123,6 +126,9 @@ func validateOSSByteMaintenancePlan(plan OSSByteMaintenancePlan, opts OSSByteMai
 		} else if e.Operation == "cleanup_raw" {
 			if !ossMaintenanceUUIDPattern.MatchString(e.BindingID) || plan.RetentionCutoff.IsZero() || e.FilePublicID != "" || e.OriginalSourceKey != "" {
 				return errors.New("raw cleanup requires one exact receipt UUID and an explicit cutoff")
+			}
+			if e.ExpectedDisplayEndpoint != "" || e.ExpectedSourceSHA != "" || e.ExpectedStoredSHA != "" || e.ExpectedSourceSize != 0 || e.ExpectedStoredSize != 0 {
+				return errors.New("raw cleanup uses receipt proofs rather than unrelated promotion pins")
 			}
 			if e.RawSourceKind != "" && e.RawSourceKind != "upload" && e.RawSourceKind != "legacy_original" {
 				return errors.New("unsupported raw receipt source kind")
@@ -175,11 +181,19 @@ func RunOSSByteMaintenance(ctx context.Context, pool *pgxpool.Pool, cfg config.C
 	return report, nil
 }
 
-func ossMaintenancePlanSHA(e OSSByteMaintenanceEntry, cutoff time.Time) string {
-	data, _ := json.Marshal(struct {
-		Entry  OSSByteMaintenanceEntry
-		Cutoff time.Time
-	}{e, cutoff})
+func ossMaintenancePlanSHA(e OSSByteMaintenanceEntry, plan OSSByteMaintenancePlan) string {
+	// Bind this action and every global budget/target, without coupling its
+	// idempotence to unrelated entries in the same operator batch.
+	e.ActionID = strings.ToLower(e.ActionID)
+	e.BindingID = strings.ToLower(e.BindingID)
+	if e.ExpectedSourceSHA != "" {
+		e.ExpectedSourceSHA = normalizeSHA256(e.ExpectedSourceSHA)
+	}
+	if e.ExpectedStoredSHA != "" {
+		e.ExpectedStoredSHA = normalizeSHA256(e.ExpectedStoredSHA)
+	}
+	plan.Entries = []OSSByteMaintenanceEntry{e}
+	data, _ := json.Marshal(plan)
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:])
 }

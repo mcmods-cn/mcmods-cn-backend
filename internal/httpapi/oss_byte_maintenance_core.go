@@ -106,7 +106,7 @@ func (run *ossMaintenanceRun) claimAction(ctx context.Context, cfg ossConfigPayl
 			return "", errOSSRawUploadRetired
 		}
 	}
-	planSHA := ossMaintenancePlanSHA(e, run.plan.RetentionCutoff)
+	planSHA := ossMaintenancePlanSHA(e, run.plan)
 	var oldSHA, state, oldSnapshot string
 	err = tx.QueryRow(ctx, `select plan_sha256,state,file_preimage::text from public.oss_upload_maintenance_actions where id=$1::uuid for update`, e.ActionID).Scan(&oldSHA, &state, &oldSnapshot)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {

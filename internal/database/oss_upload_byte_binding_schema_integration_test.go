@@ -266,3 +266,35 @@ func TestOSSByteBindingOldTypedEndpointExpansionPreservesUnknownProofIntegration
 		t.Fatal("expansion inferred historical endpoint from current file metadata")
 	}
 }
+
+func TestOSSByteBindingMaintenanceJournalIsExplicitAndRejectsSameNameDriftIntegration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	db := newOSSByteBindingSchemaTestDatabase(t, ctx)
+	if _, err := db.Exec(ctx, `drop table oss_upload_maintenance_actions;drop function oss_upload_maintenance_shape(text,text,bigint,text,text,text)`); err != nil {
+		t.Fatal(err)
+	}
+	old, err := InspectOSSUploadByteBindings(ctx, db)
+	if err != nil || old.MaintenanceReady {
+		t.Fatalf("missing optional journal inspection: %+v %v", old, err)
+	}
+	if err = RequireOSSUploadByteBindingSchema(ctx, db); err != nil {
+		t.Fatal("normal upload startup incorrectly required an uninstalled optional data tool journal")
+	}
+	if err = RequireOSSByteMaintenanceSchema(ctx, db); err == nil || !strings.Contains(err.Error(), "journal expansion required") {
+		t.Fatalf("data apply accepted missing journal: %v", err)
+	}
+	after, err := ApplyOSSUploadByteBindingUpgrade(ctx, db, old.Database, "owned schema-only backup")
+	if err != nil || !after.MaintenanceReady {
+		t.Fatalf("explicit optional journal upgrade: %+v %v", after, err)
+	}
+	if _, err = db.Exec(ctx, `alter table oss_upload_maintenance_actions drop constraint oss_upload_maintenance_shape;alter table oss_upload_maintenance_actions add constraint oss_upload_maintenance_shape check(true)`); err != nil {
+		t.Fatal(err)
+	}
+	if err = RequireOSSByteMaintenanceSchema(ctx, db); err == nil || !strings.Contains(err.Error(), "proof constraint") {
+		t.Fatalf("same-name CHECK(true) accepted: %v", err)
+	}
+	if _, err = ApplyOSSUploadByteBindingUpgrade(ctx, db, old.Database, "owned schema-only backup"); err == nil {
+		t.Fatal("explicit apply silently replaced incompatible journal policy")
+	}
+}

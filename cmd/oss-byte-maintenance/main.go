@@ -42,6 +42,26 @@ func readPlan(path string) (httpapi.OSSByteMaintenancePlan, error) {
 	return plan, nil
 }
 
+func reportHasHolds(report httpapi.OSSByteMaintenanceReport, apply bool) bool {
+	for status, count := range report.Counts {
+		if count == 0 {
+			continue
+		}
+		if apply {
+			switch status {
+			case "PROMOTED", "RESTORED_TYPED_ENDPOINT", "ALREADY_VERIFIED", "RAW_REMOVED", "RAW_ABSENCE_RECORDED", "ALREADY_COMPLETED", "ALREADY_ABSENT":
+				continue
+			}
+			return true
+		}
+		switch status {
+		case "DATABASE_ERROR", "REFERENCE_QUERY_ERROR", "OPERATION_ERROR", "PROVIDER_ERROR", "CONFIGURATION_UNAVAILABLE":
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
 	planPath := flag.String("plan", "", "private reviewed exact-ID plan file")
 	reportPath := flag.String("report", "", "new private count/hash diagnostic report file")
@@ -89,5 +109,9 @@ func main() {
 	// status counts; no object keys, preimages, credentials or signed URLs.
 	if err = json.NewEncoder(os.Stdout).Encode(map[string]any{"dryRun": report.DryRun, "readBytes": report.ReadBytes, "counts": report.Counts, "privateReportWritten": true}); err != nil {
 		os.Exit(1)
+	}
+	if reportHasHolds(report, *apply) {
+		fmt.Fprintln(os.Stderr, "one or more entries remain held; inspect the private report")
+		os.Exit(2)
 	}
 }

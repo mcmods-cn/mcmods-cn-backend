@@ -93,7 +93,10 @@ versioning, encryption and bucket lifecycle policies are not changed.
 Normal preparation uses the same short original-key mutex and refuses retired
 inputs; it retains no connection during copy/read/hash. Ordinary completed
 replay and owner-authorized original aliases read sealed bytes after retention.
-Same action ID/plan is idempotent; changed plans conflict. Expired action owners
+Same action ID/plan is idempotent; changed entries, database or global budgets
+conflict. Dry-run may report unresolved proof without changing data; apply holds
+and execution errors exit nonzero after writing the private report. An already
+absent input is recorded as retired on apply without claiming a deleted object. Expired action owners
 cannot commit. Interrupted candidates use the existing exact receipt recovery;
 interrupted cleanup stays durable and can be retried under the same reviewed
 plan after failure/lease expiry.

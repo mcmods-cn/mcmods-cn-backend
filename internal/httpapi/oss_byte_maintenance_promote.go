@@ -62,7 +62,7 @@ func (run *ossMaintenanceRun) promote(ctx context.Context, e OSSByteMaintenanceE
 			out.Status = "DATABASE_ERROR"
 			return out
 		}
-		if priorErr == nil && (priorSHA != ossMaintenancePlanSHA(e, run.plan.RetentionCutoff) || priorFile != file.ID) {
+		if priorErr == nil && (priorSHA != ossMaintenancePlanSHA(e, run.plan) || priorFile != file.ID) {
 			out.Status = "PLAN_CONFLICT"
 			return out
 		}
@@ -89,7 +89,7 @@ func (run *ossMaintenanceRun) promote(ctx context.Context, e OSSByteMaintenanceE
 		}
 	}
 	if typed && file.Verified && proof.FileEndpoint == file.Endpoint && proof.StoredKey == file.Key && proof.SourceSHA == file.SHA && proof.StoredSHA == file.StoredSHA && proof.SourceSize == file.SourceSize && proof.StoredSize == file.Size {
-		if (e.ExpectedSourceSHA != "" && normalizeSHA256(e.ExpectedSourceSHA) != proof.SourceSHA) || (e.ExpectedStoredSHA != "" && normalizeSHA256(e.ExpectedStoredSHA) != proof.StoredSHA) {
+		if (e.ExpectedSourceSHA != "" && normalizeSHA256(e.ExpectedSourceSHA) != proof.SourceSHA) || (e.ExpectedStoredSHA != "" && normalizeSHA256(e.ExpectedStoredSHA) != proof.StoredSHA) || (e.ExpectedSourceSize > 0 && e.ExpectedSourceSize != proof.SourceSize) || (e.ExpectedStoredSize > 0 && e.ExpectedStoredSize != proof.StoredSize) {
 			out.Status = "PLAN_PROOF_MISMATCH"
 		} else {
 			out.Status = "ALREADY_VERIFIED"
@@ -102,6 +102,9 @@ func (run *ossMaintenanceRun) promote(ctx context.Context, e OSSByteMaintenanceE
 	}
 	if !known {
 		out.Status = "MISSING_ORIGINAL_SOURCE"
+		if e.OriginalSourceKey != "" {
+			out.Status = "SOURCE_SCOPE_MISMATCH"
+		}
 		return out
 	}
 	if !isAllowedObjectKey(sourceKey, cfg.Prefix) {
@@ -227,7 +230,7 @@ func ossMaintenanceReadStatus(err error, missing string) string {
 		return "BYTE_BUDGET_EXCEEDED"
 	}
 	var service *aliyunoss.ServiceError
-	if errors.As(err, &service) && (service.Code == "NoSuchKey" || service.StatusCode == 404) {
+	if errors.As(err, &service) && (service.Code == "NoSuchKey" || (service.StatusCode == 404 && service.Code == "BadErrorResponse")) {
 		return missing
 	}
 	return "PROVIDER_ERROR"
