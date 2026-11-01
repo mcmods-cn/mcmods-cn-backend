@@ -288,5 +288,24 @@ func TestAuditResumeCMP007ForeignProjectGalleryRejectedWithoutMixedReferenceWrit
 	if len(published.GalleryImages) != 1 || published.GalleryImages[0].FileID != foreign {
 		t.Fatal("legitimate scanned-file owner publication lost exact image identity")
 	}
+	// File ownership is insufficient to move an existing pack's gallery into
+	// another pack, whether the caller supplies only its file or its public
+	// gallery identity. The same ordinary actor must still be refused.
+	for _, tc := range []struct{ name, message string }{{"bound-file", "gallery image is already used"}, {"foreign-gallery-identity", "gallery image reference is invalid"}} {
+		draft.SiteID = "cross-pack-" + tc.name + "-" + f.modCode
+		draft.GalleryImages = []modGalleryImagePayload{{FileID: foreign}}
+		if tc.name == "foreign-gallery-identity" {
+			draft.GalleryImages[0].PublicID = published.GalleryImages[0].PublicID
+			if draft.GalleryImages[0].PublicID == "" {
+				t.Fatal("existing source gallery identity prerequisite missing")
+			}
+		}
+		before = auditResumeModpackFacts(t, f)
+		refused := f.require(t, f.otherEditor, http.MethodPost, "/api/v1/modpacks", draft, 400)
+		if !strings.Contains(string(refused), tc.message) {
+			t.Fatalf("cross-pack %s was not refused by exact binding guard", tc.name)
+		}
+		auditResumeRequireFacts(t, before, auditResumeModpackFacts(t, f))
+	}
 	t.Log("CMP007_FOREIGN_FILE actual scanned64x64PNG; same-project editor of source is not uploader; foreign400 zero mixed rows/outbox; actual owner201 independent200 public exactfile")
 }
