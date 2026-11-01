@@ -161,7 +161,8 @@ func (s *Server) canonicalOSSCompletedUploadAlias(ctx context.Context, cfg ossCo
  and ($6::bigint<=0 or binding.declared_size_bytes=$6)
  and binding.status='committed' and file.status='active' and file.uploader_id=$3
  and file.object_key=binding.stored_object_key and file.sha256=binding.source_verified_sha256
- and file.stored_sha256=binding.stored_verified_sha256`, cfg.Bucket, cfg.Endpoint, owner, req.ObjectKey, req.SHA256, req.SizeBytes).Scan(&originalKey, &originalName)
+ and file.stored_sha256=binding.stored_verified_sha256 and file.source_size_bytes=binding.source_verified_size_bytes
+ and file.size_bytes=binding.stored_verified_size_bytes and file.category=binding.logical_category and file.source=binding.source`, cfg.Bucket, cfg.Endpoint, owner, req.ObjectKey, req.SHA256, req.SizeBytes).Scan(&originalKey, &originalName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errOSSSealedReplayIdentity
 	}
@@ -181,6 +182,9 @@ func (s *Server) resolvedOSSUploadObjectKey(ctx context.Context, cfg ossConfigPa
  join oss_files file on file.id=binding.file_id
  where binding.bucket=$1 and binding.endpoint=$2 and binding.upload_object_key=$3
  and binding.status='committed' and file.status='active' and file.object_key=binding.stored_object_key
+ and file.uploader_id=binding.owner_id and file.category=binding.logical_category and file.source=binding.source
+ and file.sha256=binding.source_verified_sha256 and file.source_size_bytes=binding.source_verified_size_bytes
+ and file.stored_sha256=binding.stored_verified_sha256 and file.size_bytes=binding.stored_verified_size_bytes
  and ($4::bigint<=0 or (binding.owner_id=$4 and file.uploader_id=$4))`, cfg.Bucket, cfg.Endpoint, key, owner).Scan(&stored)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return key, nil

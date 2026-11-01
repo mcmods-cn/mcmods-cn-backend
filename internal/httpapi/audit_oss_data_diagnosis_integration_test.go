@@ -20,12 +20,13 @@ func TestAuditKnownOSSLifecycleDiagnosisCountsCandidatesWithoutRepairOrDisclosur
 	f.put(t, ticket, raw)
 	auditOSSRequire(t, f, f.editor, http.MethodPost, "/api/v1/reports/evidence/uploads/complete", ticket.completion(), 201)
 	var fileID int64
-	if err := f.db.QueryRow(f.ctx, `select id from oss_files where object_key=$1 and source_hash_verified`, ticket.ObjectKey).Scan(&fileID); err != nil {
+	var storedKey string
+	if err := f.db.QueryRow(f.ctx, `select file.id,file.object_key from oss_files file join oss_upload_byte_bindings binding on binding.file_id=file.id where binding.upload_object_key=$1 and binding.status='committed' and file.source_hash_verified`, ticket.ObjectKey).Scan(&fileID, &storedKey); err != nil {
 		t.Fatal(err)
 	}
 	// Model old metadata loss on an owned test copy. It is not a claim that the
 	// fixed atomic upload can produce the same anomaly through normal requests.
-	if _, err := f.db.Exec(f.ctx, `delete from report_evidence where object_key=$1`, ticket.ObjectKey); err != nil {
+	if _, err := f.db.Exec(f.ctx, `delete from report_evidence where object_key=$1`, storedKey); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.server.reserveUserOSSUploadQuota(f.ctx, owner, "private-expired-reservation", 17, 17, time.Now().Add(time.Hour), ossUserQuotaLimits{single: 64 << 20, daily: 256 << 20, total: 256 << 20}); err != nil {
@@ -74,7 +75,7 @@ func TestAuditKnownOSSLifecycleDiagnosisCountsCandidatesWithoutRepairOrDisclosur
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, private := range []string{ticket.ObjectKey, "private-candidate-source.txt", "private-expired-reservation", "private-provider.invalid", "private-delete-key", "private-multipart-key", "never-publish-original-upload-id", "private-source-name.zip"} {
+	for _, private := range []string{ticket.ObjectKey, storedKey, "private-candidate-source.txt", "private-expired-reservation", "private-provider.invalid", "private-delete-key", "private-multipart-key", "never-publish-original-upload-id", "private-source-name.zip"} {
 		if strings.Contains(string(encoded), private) {
 			t.Fatal("diagnosis disclosed a private lifecycle field")
 		}

@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	xwebp "golang.org/x/image/webp"
 	"image"
 	"image/png"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"path"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -46,7 +50,6 @@ func TestOCT02ConvertedUploadRegistrationFailureReleasesQuotaConnectionIntegrati
 	digest := sha256.Sum256(source.Bytes())
 	hash := hex.EncodeToString(digest[:])
 	key := fmt.Sprintf("mcmods/user/%d/files/playground/synthetic.png", actor)
-	convertedKey := persistedWebPObjectKey(key)
 	converted, err := os.ReadFile("testdata/audit-20261024/oss-atomic-transparent-2x2.webp")
 	if err != nil {
 		t.Fatal(err)
@@ -56,11 +59,33 @@ func TestOCT02ConvertedUploadRegistrationFailureReleasesQuotaConnectionIntegrati
 		t.Fatalf("invalid actual WebP fixture: %v", err)
 	}
 	var processes atomic.Int64
+	var copiedSource, processedObject atomic.Value
+	copiedSource.Store("")
+	processedObject.Store("")
 	// Simulate only the external provider, with actual readable PNG and WebP.
 	// The test must reach its specific PostgreSQL registration constraint rather
 	// than treating an earlier unsupported GET/hash error as that failure.
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestKey := strings.TrimPrefix(r.URL.Path, "/")
+		if r.Method == http.MethodPut && r.Header.Get("x-oss-copy-source") != "" {
+			if r.Header.Get("x-oss-copy-source") != "/owned-cleanup/"+key || !isOSSSealedObjectKey(requestKey) || path.Base(requestKey) != path.Base(key) {
+				http.Error(w, "wrong copy identity", 400)
+				return
+			}
+			copiedSource.Store(requestKey)
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = io.WriteString(w, `<CopyObjectResult><LastModified>2026-10-01T00:00:00.000Z</LastModified><ETag>owned-copy</ETag></CopyObjectResult>`)
+			return
+		}
 		if r.Method == http.MethodPost {
+			body, readErr := io.ReadAll(io.LimitReader(r.Body, 8193))
+			values, parseErr := url.ParseQuery(string(body))
+			destination := persistedWebPObjectKey(requestKey)
+			if readErr != nil || parseErr != nil || len(body) > 8192 || requestKey != copiedSource.Load().(string) || values.Get("x-oss-process") != "image/format,webp|sys/saveas,o_"+base64.RawURLEncoding.EncodeToString([]byte(destination)) {
+				http.Error(w, "wrong sealed process source or destination", 400)
+				return
+			}
+			processedObject.Store(destination)
 			processes.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"status":"OK"}`))
@@ -68,13 +93,13 @@ func TestOCT02ConvertedUploadRegistrationFailureReleasesQuotaConnectionIntegrati
 		}
 		raw := source.Bytes()
 		contentType := "image/png"
-		if strings.HasSuffix(r.URL.Path, ".webp") {
-			if processes.Load() == 0 {
-				w.WriteHeader(404)
-				return
-			}
-			raw = converted
-			contentType = "image/webp"
+		switch requestKey {
+		case key, copiedSource.Load().(string):
+		case processedObject.Load().(string):
+			raw, contentType = converted, "image/webp"
+		default:
+			w.WriteHeader(404)
+			return
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -117,12 +142,19 @@ func TestOCT02ConvertedUploadRegistrationFailureReleasesQuotaConnectionIntegrati
 	start := time.Now()
 	server.completeUserOSSDirectUpload(response, request)
 	elapsed := time.Since(start)
-	var files, intents int
-	if err = pool.QueryRow(ctx, `select (select count(*) from oss_files where uploader_id=$1),(select count(*) from oss_object_deletion_outbox where object_key=any($2::text[]) and status='pending')`, actor, []string{key, convertedKey}).Scan(&files, &intents); err != nil {
+	var files, intents, rawCleanup int
+	var sealedSource, convertedKey string
+	if err = pool.QueryRow(ctx, `select sealed_source_key,stored_object_key from oss_upload_byte_bindings where upload_object_key=$1 and owner_id=$2 and status='cleanup_pending' and file_id is null`, key, actor).Scan(&sealedSource, &convertedKey); err != nil {
 		t.Fatal(err)
 	}
-	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), "保存 OSS 文件记录失败") || elapsed > 2*time.Second || files != 0 || intents != 2 || processes.Load() != 1 {
-		t.Fatalf("registration recovery status=%d elapsed=%s files=%d compensation=%d conversionCalls=%d", response.Code, elapsed, files, intents, processes.Load())
+	if sealedSource != copiedSource.Load().(string) || convertedKey != processedObject.Load().(string) || convertedKey != persistedWebPObjectKey(sealedSource) {
+		t.Fatal("provider source/result did not match the exact unadopted receipt")
+	}
+	if err = pool.QueryRow(ctx, `select (select count(*) from oss_files where uploader_id=$1),(select count(*) from oss_object_deletion_outbox where object_key=any($2::text[]) and status='pending'),(select count(*) from oss_object_deletion_outbox where object_key=$3)`, actor, []string{sealedSource, convertedKey}, key).Scan(&files, &intents, &rawCleanup); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), "保存 OSS 文件记录失败") || elapsed > 2*time.Second || files != 0 || intents != 2 || rawCleanup != 0 || processes.Load() != 1 {
+		t.Fatalf("registration recovery status=%d elapsed=%s files=%d compensation=%d rawCleanup=%d conversionCalls=%d", response.Code, elapsed, files, intents, rawCleanup, processes.Load())
 	}
 	if _, err = pool.Exec(ctx, `alter table oss_files drop constraint oct02_reject_converted_registration`); err != nil {
 		t.Fatal(err)

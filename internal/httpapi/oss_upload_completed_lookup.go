@@ -62,6 +62,16 @@ func (s *Server) findCompletedOSSUpload(ctx context.Context, uploaderID int64, r
 	return internalID, file, true, nil
 }
 
+// Hash-based reuse uses the same persisted source/stored proof for ordinary
+// uploads and blueprint originals. A legacy boolean is not a byte receipt.
+// Callers use the fixed SQL table alias "file"; no request text enters SQL.
+const ossCommittedSourceHashProofSQL = `exists(select 1 from oss_upload_byte_bindings binding
+          where binding.file_id=file.id and binding.status='committed'
+          and binding.stored_object_key=file.object_key and binding.bucket=file.bucket
+          and binding.owner_id=file.uploader_id and binding.logical_category=file.category and binding.source=file.source
+          and binding.source_verified_sha256=file.sha256 and binding.source_verified_size_bytes=file.source_size_bytes
+          and binding.stored_verified_sha256=file.stored_sha256 and binding.stored_verified_size_bytes=file.size_bytes)`
+
 type ossFileHashLookup struct {
 	UploaderID    *int64
 	Category      string
@@ -83,14 +93,10 @@ func (s *Server) findExistingOSSFileByHashExact(ctx context.Context, sha256 stri
 	var createdAt, updatedAt time.Time
 	var storedSHA string
 	query := `select public_id, bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, status, scan_status, created_at, updated_at, stored_sha256
-		from oss_files
+		from oss_files file
 		where sha256 = $1 and coalesce(nullif(source_size_bytes, 0), size_bytes) = $2 and status = 'active' and source_hash_verified
 		  and scan_status = any($3::text[])
-          and exists(select 1 from oss_upload_byte_bindings binding where binding.file_id=oss_files.id
-          and binding.status='committed' and binding.stored_object_key=oss_files.object_key
-          and binding.owner_id=oss_files.uploader_id and binding.logical_category=oss_files.category and binding.source=oss_files.source
-          and binding.source_verified_sha256=oss_files.sha256 and binding.source_verified_size_bytes=oss_files.source_size_bytes
-          and binding.stored_verified_sha256=oss_files.stored_sha256 and binding.stored_verified_size_bytes=oss_files.size_bytes)`
+          and ` + ossCommittedSourceHashProofSQL
 	args := []any{sha256, sizeBytes, lookup.ScanStatuses}
 	if lookup.UploaderID != nil {
 		args = append(args, *lookup.UploaderID)
@@ -107,7 +113,7 @@ func (s *Server) findExistingOSSFileByHashExact(ctx context.Context, sha256 stri
 	if lookup.ExcludePolicyCancelledSources {
 		query += ` and not exists(select 1 from catalog_import_packages package
 			join catalog_import_jobs job on job.package_id=package.id
-			where package.archive_file_id=oss_files.id
+			where package.archive_file_id=file.id
 			  and job.status='cancelled' and right(job.error_code,18)='_reupload_required')`
 	}
 	if lookup.RequireTrusted {

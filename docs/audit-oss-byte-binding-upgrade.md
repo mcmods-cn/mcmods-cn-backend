@@ -48,10 +48,14 @@ behavior is not inferred from protocol fixtures.
 
 Old public IDs, objects, audit rows and references are not moved or deleted by
 schema expansion. Old `source_hash_verified=true` alone is excluded from new
-source-hash deduplication; a matching committed byte receipt is required. Already
+source-hash deduplication, including blueprint-original reuse; both use the same
+matching committed source/stored byte-receipt predicate. Already
 completed legacy reads/replays retain their existing identity. An existing
 sealed receipt whose trust marker is cleared is re-established only by reading
 its actual source/stored bytes and retaining the same file ID.
+Aliases resolve only while the current file still matches its recorded uploader,
+source, logical category, source/stored hashes and byte lengths. A later trusted
+regeneration of a deleted physical key does not inherit the old upload alias.
 
 Legacy objects lacking a sealed receipt still require scoped byte diagnosis and
 an explicit alias-compatible promotion/compensation procedure. This checkpoint

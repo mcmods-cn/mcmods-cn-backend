@@ -384,6 +384,7 @@ func (s *Server) reusableBlueprintByHash(ctx context.Context, sha string, size, 
 		from blueprints blueprint
 		join oss_files file on file.id=blueprint.original_file_id and file.status='active'
 		where file.sha256=$1 and file.source_hash_verified and coalesce(nullif(file.source_size_bytes,0),file.size_bytes)=$2
+		  and `+ossCommittedSourceHashProofSQL+`
 		  and blueprint.status<>'deleted'
 		  and (blueprint.owner_id=$3 or (blueprint.status='ready' and blueprint.review_status in ('not_required','approved')))
 		order by (blueprint.owner_id=$3) desc,blueprint.created_at asc limit 1`, sha, size, requesterID).Scan(&publicID, &status)
