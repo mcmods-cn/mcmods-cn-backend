@@ -2,9 +2,12 @@
 
 This test-only follow-up covers the eleven other Go helpers which create a
 disposable database and previously dropped it with `WITH (FORCE)`. It is based
-on the separate TEST018 ownership candidate. Neither batch is dynamically
-verified at the time of this commit. The original 748e full PostgreSQL run and
-its failures remain separate evidence.
+on the separate TEST018 ownership candidate. Exact initial `ffd5afc` normal
+and race runs each passed 6 top-level / 21 named tests. Exact phase-two
+`f0e76fd` normal and race runs each passed 22 / 70, including all 13 original
+callers and real owned PostgreSQL negatives. Both have independent reviews.
+The combined repair HEAD still needs its own full gates; the original 748e
+incomplete PostgreSQL run and its failures remain separate evidence.
 
 Each helper retains its original name prefix, signature, caller contexts,
 migration and pool configuration. In particular, TEST043 keeps six maximum
