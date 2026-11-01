@@ -281,6 +281,11 @@ func (run *ossMaintenanceRun) adoptLegacy(ctx context.Context, e OSSByteMaintena
 	if err = commitOSSByteBindingTx(ctx, tx, b, file.ID, source.SHA, source.Size, stored.SHA, stored.Size); err != nil {
 		return err
 	}
+	// File updates and reference work may cross the action expiry. Recheck
+	// the current DB clock before marking this owner terminal.
+	if err = lockOSSByteMaintenanceActionTx(ctx, tx, e.ActionID, token, "preparing"); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `update public.oss_upload_maintenance_actions set state='promoted',binding_id=$2::uuid,write_fence_tables=$3::text[],updated_at=clock_timestamp() where id=$1::uuid`, e.ActionID, b.ID, fencedTables); err != nil {
 		return err
 	}
@@ -330,6 +335,11 @@ func (run *ossMaintenanceRun) restoreTypedEndpoint(ctx context.Context, e OSSByt
 		return err
 	}
 	if _, err = tx.Exec(ctx, `update public.oss_files set source_hash_verified=true where id=$1`, file.ID); err != nil {
+		return err
+	}
+	// File updates and reference work may cross the action expiry. Recheck
+	// the current DB clock before marking this owner terminal.
+	if err = lockOSSByteMaintenanceActionTx(ctx, tx, e.ActionID, token, "preparing"); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `update public.oss_upload_maintenance_actions set state='promoted',binding_id=$2::uuid,updated_at=clock_timestamp() where id=$1::uuid`, e.ActionID, proof.ID); err != nil {
