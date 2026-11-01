@@ -18,7 +18,7 @@ func canReviewAllProjects(claims security.Claims) bool {
 }
 
 func canAccessAnyReviewQueue(claims security.Claims) bool {
-	if canReviewAllProjects(claims) {
+	if canReviewAllProjects(claims) || claimsAllow(claims, "project.review.*") {
 		return true
 	}
 	for _, rule := range claims.PermissionRules {
@@ -52,6 +52,32 @@ func projectReviewIDs(claims security.Claims) []string {
 	return projectIDs
 }
 
+// projectReviewDeniedIDs narrows an effective scoped wildcard with the same
+// concrete rules evaluated by the decision action. Returning real IDs keeps
+// SQL scope arguments distinct from permission syntax. An overridden deny is
+// not an exclusion: priority, specificity and expiry remain claimsAllow's job.
+func projectReviewDeniedIDs(claims security.Claims) []string {
+	denied := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, rule := range claims.PermissionRules {
+		code := strings.ToLower(strings.TrimSpace(rule.Code))
+		if !strings.HasPrefix(code, "project.review.") || strings.ContainsAny(code, "<>*[]") || claimsAllow(claims, code) {
+			continue
+		}
+		id := strings.TrimPrefix(code, "project.review.")
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		denied = append(denied, id)
+	}
+	sort.Strings(denied)
+	return denied
+}
+
 // canReviewProjectSubmission deliberately prevents a project-scoped reviewer
 // from approving their own submission. Site-wide reviewers retain the
 // existing ability to resolve any queue item.
@@ -77,12 +103,7 @@ func projectPendingReviewVisibility(claims security.Claims, projectID string, ca
 		return visibility
 	}
 	projectID = strings.ToLower(strings.TrimSpace(projectID))
-	for _, allowedProjectID := range projectReviewIDs(claims) {
-		if allowedProjectID == projectID {
-			visibility.includeScoped = true
-			break
-		}
-	}
+	visibility.includeScoped = projectID != "" && claimsAllow(claims, "project.review."+projectID)
 	return visibility
 }
 

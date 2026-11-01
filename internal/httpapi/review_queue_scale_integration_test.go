@@ -74,7 +74,7 @@ func TestContentReviewQueueScalesToOneHundredThousandPendingItemsIntegration(t *
 		t.Fatal(err)
 	}
 
-	args := []any{[]string{}, true, true, reviewerID, "", "", "", "", 100, int64(99900)}
+	args := []any{[]string{}, true, true, reviewerID, "", "", "", "", 100, int64(99900), false, []string{}}
 	counter.queries.Store(0)
 	var itemsRaw, facetsRaw []byte
 	var total int64
@@ -167,7 +167,7 @@ func TestContentReviewQueueScalesToOneMillionPendingItemsIntegration(t *testing.
 		t.Fatal(err)
 	}
 
-	args := []any{[]string{}, true, true, int64(2), "", "", "", "", 100, int64(999900)}
+	args := []any{[]string{}, true, true, int64(2), "", "", "", "", 100, int64(999900), false, []string{}}
 	counter.queries.Store(0)
 	var itemsRaw, facetsRaw []byte
 	var total int64

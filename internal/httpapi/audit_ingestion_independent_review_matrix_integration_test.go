@@ -9,6 +9,37 @@ import (
 	"time"
 )
 
+type auditGR004QueueEnvelope struct {
+	Data struct {
+		Items  []modContentReviewItem `json:"items"`
+		Total  int                    `json:"total"`
+		Facets map[string][]struct {
+			Value string `json:"value"`
+			Count int    `json:"count"`
+		} `json:"facets"`
+	} `json:"data"`
+}
+
+func auditGR004RequireQueueTotals(t *testing.T, response auditGR004QueueEnvelope, want int) {
+	t.Helper()
+	if response.Data.Total != want || len(response.Data.Items) != want {
+		t.Fatalf("queue total/items=%d/%d want%d", response.Data.Total, len(response.Data.Items), want)
+	}
+	for _, key := range []string{"categories", "operations", "projectTypes"} {
+		rows, exists := response.Data.Facets[key]
+		if !exists || rows == nil {
+			t.Fatalf("queue omitted exact empty facet array %s", key)
+		}
+		count := 0
+		for _, row := range rows {
+			count += row.Count
+		}
+		if count != want || len(rows) != want {
+			t.Fatalf("queue facet %s rows=%d/count=%d want%d", key, len(rows), count, want)
+		}
+	}
+}
+
 // Queue visibility, pending payload permission and the decision endpoint must
 // agree for each currently authorized scope. Independent fixtures keep the
 // ordinary write budget and published state of each role unrelated.
@@ -62,15 +93,15 @@ func TestAuditGR004IndependentQueueReadDecisionRoleMatrixHTTPPostgresIntegration
 			}
 			queue := f.require(t, actor, http.MethodGet, "/api/v1/admin/mod-content-reviews?category=catalog_import&limit=100", nil, queueStatus)
 			if canQueue {
-				var envelope struct {
-					Data struct {
-						Items []modContentReviewItem `json:"items"`
-						Total int                    `json:"total"`
-					} `json:"data"`
-				}
+				var envelope auditGR004QueueEnvelope
 				if e := json.Unmarshal(queue, &envelope); e != nil {
 					t.Fatal(e)
 				}
+				expected := 0
+				if canDecide {
+					expected = 1
+				}
+				auditGR004RequireQueueTotals(t, envelope, expected)
 				found := false
 				for _, item := range envelope.Data.Items {
 					if item.ID == revision {

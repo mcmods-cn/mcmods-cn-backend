@@ -80,6 +80,29 @@ func TestProjectReviewIDsAreResolvedDeduplicatedAndSorted(t *testing.T) {
 	}
 }
 
+func TestProjectReviewWildcardUsesEffectiveDenyAndKeepsScopedSelfBoundary(t *testing.T) {
+	claims := security.Claims{Subject: 42, PermissionRules: []security.PermissionRule{
+		{Code: "project.review.*", Allow: true, Priority: 10},
+		{Code: "project.review.denied123", Allow: false, Priority: 10},
+		{Code: "project.review.restored1", Allow: false, Priority: 5},
+		{Code: "project.review.restored1", Allow: true, Priority: 20},
+	}}
+	if !canAccessAnyReviewQueue(claims) {
+		t.Fatal("effective wildcard cannot discover reviewable submissions")
+	}
+	if denied := projectReviewDeniedIDs(claims); len(denied) != 1 || denied[0] != "denied123" {
+		t.Fatalf("query exclusions differ from effective permission decisions: %v", denied)
+	}
+	if !canReviewProjectSubmission(claims, "abc123def", 41) || canReviewProjectSubmission(claims, "abc123def", 42) || canReviewProjectSubmission(claims, "denied123", 41) {
+		t.Fatal("scoped wildcard changed project decision or self-review policy")
+	}
+	if !projectPendingReviewVisibility(claims, "abc123def", false).allows("pending", 41) ||
+		projectPendingReviewVisibility(claims, "abc123def", false).allows("pending", 42) ||
+		projectPendingReviewVisibility(claims, "denied123", false).allows("pending", 41) {
+		t.Fatal("pending read scope differs from current wildcard decision authority")
+	}
+}
+
 func TestPendingReviewVisibilityUsesExactProjectScopeAndSubmitter(t *testing.T) {
 	projectClaims := security.Claims{Subject: 42, PermissionRules: []security.PermissionRule{
 		{Code: "project.review.abc123def", Allow: true, Priority: 100},

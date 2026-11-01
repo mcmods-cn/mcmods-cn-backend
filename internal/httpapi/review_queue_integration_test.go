@@ -34,7 +34,7 @@ func TestContentReviewQueueQueryIntegration(t *testing.T) {
 
 	var itemsJSON, facetsJSON []byte
 	var total int64
-	if err = pool.QueryRow(ctx, contentReviewQueueQuery, []string{}, true, true, int64(0), "", "", "", "", 50, int64(0)).
+	if err = pool.QueryRow(ctx, contentReviewQueueQuery, []string{}, true, true, int64(0), "", "", "", "", 50, int64(0), false, []string{}).
 		Scan(&itemsJSON, &total, &facetsJSON); err != nil {
 		t.Fatal(err)
 	}

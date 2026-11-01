@@ -184,7 +184,8 @@ const contentReviewQueueCTE = `
 		left join users user_account on user_account.id=queue.user_id
 		where ($2::boolean and queue.requires_global)
 		   or (not queue.requires_global and ($3::boolean or (
-		       queue.project_id=any($1::text[]) and coalesce(queue.user_id,0)>0 and coalesce(queue.user_id,0)<>$4::bigint
+		       (queue.project_id=any($1::text[]) or ($11::boolean and not queue.project_id=any($12::text[])))
+               and coalesce(queue.user_id,0)>0 and coalesce(queue.user_id,0)<>$4::bigint
 		   )))
 	), filtered as materialized (
 		select * from visible
@@ -242,6 +243,7 @@ func (s *Server) adminModContentReviews(w http.ResponseWriter, r *http.Request) 
 		r.Context(), contentReviewQueueQuery,
 		projectReviewIDs(claims), canReviewAllContent(claims), canReviewAllProjects(claims), claims.Subject,
 		category, operation, projectType, query, limit, offset,
+		claimsAllow(claims, "project.review.*"), projectReviewDeniedIDs(claims),
 	).Scan(&items, &total, &facets)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load pending reviews")
