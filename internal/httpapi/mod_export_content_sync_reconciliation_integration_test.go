@@ -52,14 +52,15 @@ func testImportedContentSyncReconcilesOnlyItsSourceScope(t *testing.T, overwrite
 		create temp table game_resource_asset_bindings(snapshot_id text primary key,item_resource_id bigint,block_resource_id bigint);
 		insert into mod_content_versions values(100,500,'active');
 		insert into catalog_import_revisions values
-			('a1','alpha','mcmods_exporter',1),('a2','alpha','mcmods_exporter',2),('b1','beta','mcmods_exporter',1);
+			('a1','alpha','mcmods_exporter',1),('a2','alpha','mcmods_exporter',2),('b1','beta','mcmods_exporter',1),('c1','alpha','iconrenderer',1);
 		insert into game_resources values
 			(1,'minecraft.item','alpha:keep'),(2,'minecraft.item','alpha:old_name'),
-			(3,'minecraft.item','beta:neighbor'),(4,'minecraft.item','alpha:new_name'),(5,'minecraft.item','alpha:manual');
+			(3,'minecraft.item','beta:neighbor'),(4,'minecraft.item','alpha:new_name'),(5,'minecraft.item','alpha:manual'),(6,'minecraft.item','alpha:icon_neighbor');
 		insert into resource_import_snapshots(id,resource_id,revision_id,names,data,icon_path) values
 			('a1-keep',1,'a1','{"en_US":"Old","zh_CN":"旧"}','{"keep":1,"removed":2}','old.png'),
 			('a1-old',2,'a1','{"en_US":"Old name"}','{"old":true}',''),
 			('b1-neighbor',3,'b1','{"en_US":"Neighbor"}','{"beta":true}',''),
+            ('c1-neighbor',6,'c1','{"en_US":"Other source same namespace"}','{"other_source":true}',''),
 			('a2-keep',1,'a2','{"en_US":"New"}','{"keep":10,"added":3}',''),
 			('a2-new',4,'a2','{"en_US":"New name"}','{"new":true}',''),
 			('a2-manual',5,'a2','{"en_US":"Imported manual"}','{"manual":false,"incoming":true}','');
@@ -72,7 +73,7 @@ func testImportedContentSyncReconcilesOnlyItsSourceScope(t *testing.T, overwrite
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = syncImportedResourcesToContentVersionTx(ctx, tx, []string{"a1", "b1"}, 100, true, 41); err != nil {
+	if err = syncImportedResourcesToContentVersionTx(ctx, tx, []string{"a1", "b1", "c1"}, 100, true, 41); err != nil {
 		t.Fatal(err)
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -120,6 +121,13 @@ func testImportedContentSyncReconcilesOnlyItsSourceScope(t *testing.T, overwrite
 		t.Fatalf("removed imported field survived replacement: %#v", definition)
 	}
 
+	var otherSourceStatus, otherSourceRevision string
+	if err = db.QueryRow(ctx, `select status,import_revision_id from mod_resource_version_details where resource_id=6 and version_id=100`).Scan(&otherSourceStatus, &otherSourceRevision); err != nil {
+		t.Fatal(err)
+	}
+	if otherSourceStatus != "active" || otherSourceRevision != "c1" {
+		t.Fatalf("same namespace other producer changed: %s/%s", otherSourceStatus, otherSourceRevision)
+	}
 	var oldStatus, betaStatus, betaRevision, manualSource string
 	var manualDefinition []byte
 	if err = db.QueryRow(ctx, `select status from mod_resource_version_details where resource_id=2 and version_id=100`).Scan(&oldStatus); err != nil {
@@ -177,6 +185,13 @@ func testImportedContentSyncReconcilesOnlyItsSourceScope(t *testing.T, overwrite
 	wantOldPlacement := 0
 	if !overwrite {
 		wantOldPlacement = 1
+	}
+	var otherSourcePlacement int
+	if err = db.QueryRow(ctx, `select count(*)::int from mod_content_section_resources where resource_id=6 and version_id=100`).Scan(&otherSourcePlacement); err != nil {
+		t.Fatal(err)
+	}
+	if otherSourcePlacement != 1 {
+		t.Fatal("same namespace other producer placement removed")
 	}
 	if oldPlacement != wantOldPlacement || betaPlacement != 1 || newPlacement != 1 || manualPlacement != 0 {
 		t.Fatalf("placement reconciliation old=%d beta=%d new=%d manual=%d", oldPlacement, betaPlacement, newPlacement, manualPlacement)
