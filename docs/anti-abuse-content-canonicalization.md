@@ -18,7 +18,7 @@
 
 `TestAuditAntiAbuseCanonicalObjectOrderPreservesArrayOrder` 和 `TestAuditAntiAbuseCanonicalConcurrentFingerprintsAgree` 验证不同 JSON 键序、多次及并发提取的一致性，并保留不同数组元素顺序。`TestAuditAntiAbuseCanonicalCollectionKeepsExistingBudgets` 核验原字段/字符边界。
 
-`TestAuditAntiAbuseCanonicalDistinctFieldsActualHTTPProofSingleWriteIntegration` 通过默认启用的真实 proof、普通新用户、HTTP 和 PostgreSQL：以另一普通用户已成功提交产生的指纹自然触发 428，四个采集业务文本互不相同；正确回答保持原业务值、改变 JSON 键序后成功创建且仍待独立审核；重复 proof 精确拒绝，只有一条目标业务对象和审核申请。未修改挑战门槛、TTL、配额、风险状态，未设置管理员、特殊 UA 或模拟 proof 结果。
+`TestAuditAntiAbuseCanonicalDistinctFieldsActualHTTPProofSingleWriteIntegration` 通过默认启用的真实 proof、普通新 verified 用户、正常经过 800ms 的表单、HTTP 和 PostgreSQL：以另一普通用户已成功提交产生的指纹自然触发 428，四个采集业务文本互不相同；正确回答保持原业务值、改变 JSON 键序后成功创建且仍待独立审核。重复 proof 由该新账号现有限额首先精确返回 429 `rate_limited` 和正 `Retry-After`，全部业务事实不变；不把这个结果冒充 duplicate 拒绝或 proof 单独验证拒绝。数据库证明 proof 已 consumed，目标只有一条业务对象和审核申请。未修改挑战门槛、TTL、配额、风险状态，未设置管理员、特殊 UA 或模拟 proof 结果。
 
 示例命令（隔离测试数据库，数据库用例按项目合作锁串行）：
 

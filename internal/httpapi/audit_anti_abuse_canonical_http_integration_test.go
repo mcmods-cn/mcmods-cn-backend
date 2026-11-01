@@ -112,6 +112,12 @@ func TestAuditAntiAbuseCanonicalDistinctFieldsActualHTTPProofSingleWriteIntegrat
 			_ = json.Unmarshal(data, &failure)
 			t.Fatalf("normal actor proof status=%d expected=%d code=%s (body and credentials omitted)", response.StatusCode, want, failure.Code)
 		}
+		if want == http.StatusTooManyRequests {
+			retryAfter, err := strconv.Atoi(response.Header.Get("Retry-After"))
+			if err != nil || retryAfter <= 0 {
+				t.Fatal("rate refusal must retain the current positive Retry-After contract")
+			}
+		}
 		return data
 	}
 	form := decodeTEST022Data[antiabuse.FormToken](t, f.require(t, token, http.MethodGet, "/api/v1/anti-abuse/form-token?action=review.submit&object=/api/v1/mods", nil, 200))
@@ -178,12 +184,15 @@ func TestAuditAntiAbuseCanonicalDistinctFieldsActualHTTPProofSingleWriteIntegrat
 		t.Fatalf("proof/result mismatch consumed=%t rows=%d requests=%d", status == "consumed", rows, requests)
 	}
 	beforeReplay := auditResumeModpackFacts(t, f)
-	replayed := do(retry, "", proof, 403)
+	// This new account's existing policy checks its rate window before
+	// duplicate content. Preserve that precise refusal instead of changing
+	// quotas, waiting out the window or treating any error as a valid replay.
+	replayed := do(retry, "", proof, 429)
 	var replayError struct {
 		Code string `json:"code"`
 	}
-	if err = json.Unmarshal(replayed, &replayError); err != nil || replayError.Code != "duplicate_content" {
-		t.Fatal("replay did not hit precise duplicate refusal")
+	if err = json.Unmarshal(replayed, &replayError); err != nil || replayError.Code != "rate_limited" {
+		t.Fatal("replay did not hit the current precise rate refusal")
 	}
 	auditResumeRequireFacts(t, beforeReplay, auditResumeModpackFacts(t, f))
 	settings, err = f.server.antiAbuse.Settings(f.ctx)
@@ -197,7 +206,7 @@ func TestAuditAntiAbuseCanonicalDistinctFieldsActualHTTPProofSingleWriteIntegrat
 	if !bytes.Equal(settingsBefore, settingsAfter) {
 		t.Fatal("challenge/quota policy changed")
 	}
-	t.Log("CANONICAL_PROOF actual normal HTTP+PG four distinct fields, genuine default challenge428 zero business writes; correct proof with reordered keys201 one pending Mod+one request; consumed proof replay403 duplicate_content zero additional facts; no thresholds, quotas, TTLs, admin or UA override")
+	t.Log("CANONICAL_PROOF actual normal HTTP+PG four distinct fields, genuine default challenge428 zero business writes; correct proof with reordered keys201 one pending Mod+one request; consumed proof replay429 rate_limited with positive Retry-After zero additional facts; no thresholds, quotas, TTLs, admin or UA override")
 }
 
 func httptestCanonicalRequest(raw []byte) *http.Request {
