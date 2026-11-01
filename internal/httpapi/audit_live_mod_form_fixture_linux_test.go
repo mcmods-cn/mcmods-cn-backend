@@ -602,7 +602,7 @@ func auditModFormTerminal(t *testing.T, f auditFixGRFixture, directory string, l
 				count++
 				if attempt.Status == 201 {
 					accepted++
-				} else if attempt.Status != 429 || attempt.RetryAfter <= 0 {
+				} else if attempt.Status != 429 || attempt.Code != "rate_limited" || attempt.RetryAfter <= 0 {
 					t.Fatalf("unexpected pre-valid/business POST for%s status%d", c.CaseID, attempt.Status)
 				}
 				copy := attempt
@@ -649,6 +649,9 @@ func auditModFormTerminal(t *testing.T, f auditFixGRFixture, directory string, l
 		if c.Mode == "wrong" {
 			if len(selected) != 2 || !selected[1].HasProof || selected[1].Status == 201 || selected[0].BodySHA256 != selected[1].BodySHA256 || selected[0].IdempotencySHA == "" || selected[0].IdempotencySHA != selected[1].IdempotencySHA || selected[0].ClientIDSHA == "" || selected[0].ClientIDSHA != selected[1].ClientIDSHA {
 				t.Fatal("wrong proof did not preserve body/zero-write semantics")
+			}
+			if !((selected[1].Status == 428 && selected[1].Code == "challenge_required") || (selected[1].Status == 429 && selected[1].Code == "rate_limited" && selected[1].RetryAfter > 0)) {
+				t.Fatal("wrong proof refusal is not the precise challenge/rate contract")
 			}
 		}
 		var events []byte
