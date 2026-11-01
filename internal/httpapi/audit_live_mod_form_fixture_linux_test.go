@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -52,20 +53,22 @@ type auditModFormCase struct {
 }
 
 type auditModFormAttempt struct {
-	CaseID         string `json:"caseId"`
-	Method         string `json:"method"`
-	Path           string `json:"path"`
-	SiteID         string `json:"siteId"`
-	Status         int    `json:"status"`
-	Code           string `json:"code,omitempty"`
-	RequestID      string `json:"requestId"`
-	BodySHA256     string `json:"bodySHA256"`
-	ContentSHA256  string `json:"contentSHA256"`
-	IdempotencySHA string `json:"idempotencyKeySHA256,omitempty"`
-	ClientIDSHA    string `json:"clientIdSHA256,omitempty"`
-	HasProof       bool   `json:"hasProof"`
-	RetryAfter     int    `json:"retryAfterSeconds,omitempty"`
-	At             string `json:"at"`
+	CaseID           string `json:"caseId"`
+	Method           string `json:"method"`
+	Path             string `json:"path"`
+	SiteID           string `json:"siteId"`
+	Status           int    `json:"status"`
+	Code             string `json:"code,omitempty"`
+	RequestID        string `json:"requestId"`
+	BodySHA256       string `json:"bodySHA256"`
+	ContentSHA256    string `json:"contentSHA256"`
+	IdempotencySHA   string `json:"idempotencyKeySHA256,omitempty"`
+	ClientIDSHA      string `json:"clientIdSHA256,omitempty"`
+	HasProof         bool   `json:"hasProof"`
+	RetryAfter       int    `json:"retryAfterSeconds,omitempty"`
+	ResponseEncoding string `json:"responseContentEncoding,omitempty"`
+	ResponseDecoded  bool   `json:"responseJSONDecoded"`
+	At               string `json:"at"`
 }
 
 type auditModFormRecorder struct {
@@ -149,10 +152,23 @@ func (recorder *auditModFormRecorder) handler(next http.Handler) http.Handler {
 		next.ServeHTTP(observed, r)
 		attempt.Status = observed.status
 		attempt.RetryAfter, _ = strconv.Atoi(observed.Header().Get("Retry-After"))
+		attempt.ResponseEncoding = observed.Header().Get("Content-Encoding")
+		decodedResponse := observed.body.Bytes()
+		// This outer observation sees normal compressed wire bytes. Decode a
+		// bounded copy for the error code without modifying any client response.
+		if strings.EqualFold(attempt.ResponseEncoding, "gzip") {
+			reader, err := gzip.NewReader(bytes.NewReader(decodedResponse))
+			if err == nil {
+				if value, readErr := io.ReadAll(io.LimitReader(reader, (1<<20)+1)); readErr == nil && len(value) <= 1<<20 {
+					decodedResponse = value
+				}
+				_ = reader.Close()
+			}
+		}
 		var errorBody struct {
 			Code string `json:"code"`
 		}
-		_ = json.Unmarshal(observed.body.Bytes(), &errorBody)
+		attempt.ResponseDecoded = json.Unmarshal(decodedResponse, &errorBody) == nil
 		attempt.Code = errorBody.Code
 		recorder.mu.Lock()
 		defer recorder.mu.Unlock()
@@ -272,12 +288,16 @@ func auditModFormApprove(t *testing.T, f auditFixGRFixture, reviewer, site, revi
 	t.Helper()
 	outcomes := []map[string]any{}
 	for {
-		status, _, headers := auditModFormDo(t, f, reviewer, http.MethodPatch, "/api/v1/mods/"+site+"/revisions/"+revision, reviewModRevisionRequest{Status: "approved", Note: "ordinary independent native Mod form acceptance"}, nil)
-		outcomes = append(outcomes, map[string]any{"status": status, "revisionId": revision, "requestId": headers.Get("X-Request-ID"), "at": time.Now().UTC().Format(time.RFC3339Nano)})
+		status, raw, headers := auditModFormDo(t, f, reviewer, http.MethodPatch, "/api/v1/mods/"+site+"/revisions/"+revision, reviewModRevisionRequest{Status: "approved", Note: "ordinary independent native Mod form acceptance"}, nil)
+		var failure struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(raw, &failure)
+		outcomes = append(outcomes, map[string]any{"status": status, "code": failure.Code, "revisionId": revision, "requestId": headers.Get("X-Request-ID"), "at": time.Now().UTC().Format(time.RFC3339Nano)})
 		if status == http.StatusOK {
 			return outcomes
 		}
-		if status != http.StatusTooManyRequests {
+		if status != http.StatusTooManyRequests || failure.Code != "rate_limited" {
 			t.Fatalf("ordinary independent review status=%d; no review or actor bypass", status)
 		}
 		seconds, err := strconv.Atoi(headers.Get("Retry-After"))
