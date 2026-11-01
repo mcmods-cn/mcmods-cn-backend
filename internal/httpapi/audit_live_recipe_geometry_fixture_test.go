@@ -169,6 +169,10 @@ func TestAuditLiveRecipeGeometryFixture(t *testing.T) {
 	})
 	f.db, f.server, f.origin = db, api, origin
 	raw := auditRecipeGeometryZIP(t)
+	withAssets := os.Getenv("MCMODS_AUDIT_GEOMETRY_WITH_ASSETS") == "1"
+	if withAssets {
+		raw = auditRecipeGeometryAssetZIP(t)
+	}
 	digest := sha256.Sum256(raw)
 	if err := os.WriteFile(filepath.Join(directory, "synthetic-jei-v7-three-kinds.zip"), raw, 0600); err != nil {
 		t.Fatal(err)
@@ -202,6 +206,10 @@ func TestAuditLiveRecipeGeometryFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := map[string]any{"owner": "mcmods-live-recipe-geometry", "pid": os.Getpid(), "state": "READY", "createdAt": time.Now().UTC().Format(time.RFC3339Nano), "apiOrigin": origin.URL, "frontendOrigin": frontendOrigin, "repoRevisions": revisions, "ownedSchema": schema, "gr010": map[string]any{"cases": cases}, "sampleSHA256": hex.EncodeToString(digest[:]), "jobId": job, "revisionId": revision, "creatorInternalId": f.userIDs[f.editor], "reviewerInternalId": f.userIDs[f.reviewer], "layer": "ACTUAL_HTTP_POSTGRESQL_DIRECT_BUSINESS_WORKER_INDEPENDENT_REVIEW_SYNTHETIC_CONTRACT; browser separate; no actual queue/game claim", "stopPath": filepath.Join(directory, "STOP")}
+	runtime["assetsIncluded"] = withAssets
+	if withAssets {
+		runtime["renderAssets"] = auditGeometryAssetExpectations()
+	}
 	auditJourneyWriteJSON(t, filepath.Join(directory, "runtime.json"), runtime)
 	t.Logf("RECIPE_GEOMETRY_READY runtime=%s; independent ordinary creator/reviewer, no browser/game/queue PASS inferred", filepath.Join(directory, "runtime.json"))
 	ticker := time.NewTicker(time.Second)
@@ -212,6 +220,10 @@ func TestAuditLiveRecipeGeometryFixture(t *testing.T) {
 			t.Fatal("owned geometry fixture expired before STOP")
 		case <-ticker.C:
 			if _, err := os.Stat(filepath.Join(directory, "STOP")); err == nil {
+				if withAssets && os.Getenv("MCMODS_AUDIT_GEOMETRY_VERIFY_WITHDRAWAL") == "1" {
+					auditGeometryIndependentWithdrawalSeal(t, f, revision, directory)
+					runtime["independentWithdrawalVerified"] = true
+				}
 				runtime["state"], runtime["stoppedAt"] = "STOPPED", time.Now().UTC().Format(time.RFC3339Nano)
 				auditJourneyWriteJSON(t, filepath.Join(directory, "runtime.json"), runtime)
 				return
