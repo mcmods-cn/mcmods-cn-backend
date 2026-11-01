@@ -34,7 +34,7 @@ func TestAuditTP008SixRevokedCreatesAndBoundGalleryRejectWithoutBusinessWritesHT
 	if err := f.db.QueryRow(f.ctx, `select
 		(select count(*) from simple_project_gallery_images gallery join simple_projects project on project.id=gallery.project_id join oss_files file on file.id=gallery.oss_file_id where project.public_id=$1 and project.review_status='approved' and gallery.published_revision_id=project.published_revision_id and file.public_id=$2),
 		(select count(*) from review_events event join change_requests request on request.id=event.change_request_id join content_revisions revision on revision.id=request.proposed_revision_id where revision.public_id=$3 and revision.created_by=$4 and event.actor_id=$5 and event.actor_id<>revision.created_by and event.event_type='approved'),
-		(select count(*) from content_creator_bindings binding where binding.project_id=(select id from simple_projects where public_id=$1) and binding.project_type='plugin' and binding.status='pending')`,
+		(select count(*) from content_creator_bindings binding where binding.subject_id=(select id from simple_projects where public_id=$1) and binding.subject_type='plugin' and binding.status='pending')`,
 		created.PublicID, fileID, created.SubmissionRevisionID, f.ids["owner"], f.ids["reviewer"]).Scan(&bound, &independent, &pendingAuthors); err != nil || bound != 1 || independent != 1 || pendingAuthors != 1 {
 		t.Fatalf("normal bound gallery/review/author prerequisites: bound=%d independent=%d pendingAuthors=%d err=%v", bound, independent, pendingAuthors, err)
 	}
