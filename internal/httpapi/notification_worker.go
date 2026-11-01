@@ -91,7 +91,12 @@ func (worker *NotificationWorker) createSystemNotification(ctx context.Context, 
 		event.SourceLocale = "zh-CN"
 	}
 	rawData, _ := json.Marshal(event.Data)
-	tag, err := worker.db.Exec(
+	tx, err := worker.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(
 		ctx,
 		`insert into notifications (recipient_id,kind,title,body,source_locale,data,source_event_id)
 		 values (null,'system',$1,$2,$3,$4::jsonb,nullif($5,'')) on conflict(source_event_id) where source_event_id is not null do nothing`,
@@ -107,10 +112,15 @@ func (worker *NotificationWorker) createSystemNotification(ctx context.Context, 
 	if tag.RowsAffected() == 0 {
 		return nil
 	}
-	worker.cache.BumpUnreadEpoch(ctx)
 	if event.SendEmail {
-		worker.sendBroadcastEmail(ctx, event.Title, event.Body)
+		if err = worker.sendBroadcastEmail(ctx, tx, event.Title, event.Body); err != nil {
+			return err
+		}
 	}
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	worker.cache.BumpUnreadEpoch(ctx)
 	return nil
 }
 
@@ -368,8 +378,8 @@ func claimProcessedEventTx(ctx context.Context, tx pgx.Tx, consumer string) (boo
 	return err == nil && tag.RowsAffected() > 0, err
 }
 
-func (worker *NotificationWorker) sendBroadcastEmail(ctx context.Context, subject string, body string) {
-	rows, err := worker.db.Query(
+func (worker *NotificationWorker) sendBroadcastEmail(ctx context.Context, tx pgx.Tx, subject string, body string) error {
+	rows, err := tx.Query(
 		ctx,
 		`select u.id
 		 from user_notification_settings s
@@ -377,8 +387,7 @@ func (worker *NotificationWorker) sendBroadcastEmail(ctx context.Context, subjec
 		 where s.email_enabled = true and u.email_verified = true and u.status = 'active'`,
 	)
 	if err != nil {
-		slog.Warn("read notification broadcast recipients", "error", err)
-		return
+		return err
 	}
 	defer rows.Close()
 	userIDs := make([]int64, 0)
@@ -386,35 +395,19 @@ func (worker *NotificationWorker) sendBroadcastEmail(ctx context.Context, subjec
 		var userID int64
 		if err = rows.Scan(&userID); err != nil {
 			rows.Close()
-			slog.Warn("scan notification broadcast recipient", "error", err)
-			return
+			return err
 		}
 		userIDs = append(userIDs, userID)
 	}
 	if err = finishRows(rows); err != nil {
-		slog.Warn("iterate notification broadcast recipients", "error", err)
-		return
+		return err
 	}
 	for _, userID := range userIDs {
-		if err = worker.enqueueUserEmail(ctx, userID, subject, body); err != nil {
-			slog.Warn("persist notification email", "user_id", userID, "error", err)
+		if err = enqueueUserEmailTx(ctx, tx, userID, subject, body); err != nil {
+			return err
 		}
 	}
-}
-
-func (worker *NotificationWorker) enqueueUserEmail(ctx context.Context, userID int64, subject string, body string) error {
-	if userID <= 0 {
-		return nil
-	}
-	tx, err := worker.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if err = enqueueUserEmailTx(ctx, tx, userID, subject, body); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func (worker *NotificationWorker) sendUserEmail(ctx context.Context, userID int64, subject string, body string) error {
