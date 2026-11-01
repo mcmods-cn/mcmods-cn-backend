@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -118,6 +120,50 @@ func TestAuditLiveCommunityEditorFixture20261101(t *testing.T) {
 		api.cache.Close()
 	})
 	f.server, f.origin, f.db = api, origin, db
+	// Setting a password deliberately advances auth_version and revokes the
+	// helper session. Obtain its replacement through the normal login endpoint;
+	// reusing the helper token would make this fixture fail before authoring.
+	for _, role := range []string{"creator", "other"} {
+		payload, err := json.Marshal(loginRequest{Account: private[role+"Account"].(string), Password: private[role+"Password"].(string)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := http.NewRequestWithContext(f.ctx, http.MethodPost, origin.URL+"/api/v1/auth/login", bytes.NewReader(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", frontendOrigin)
+		response, err := origin.Client().Do(request)
+		if err != nil {
+			t.Fatal("owned normal login failed")
+		}
+		_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, 4<<20))
+		response.Body.Close()
+		if readErr != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("owned %s normal login status=%d", role, response.StatusCode)
+		}
+		var token string
+		for _, cookie := range response.Cookies() {
+			if cookie.Name == authSessionCookieName {
+				token = cookie.Value
+			}
+		}
+		if token == "" {
+			t.Fatal("normal login did not set its session cookie")
+		}
+		old := f.editor
+		if role == "other" {
+			old = f.otherEditor
+		}
+		f.userIDs[token] = f.userIDs[old]
+		if role == "creator" {
+			f.editor = token
+		} else {
+			f.otherEditor = token
+		}
+		private[role+"Token"] = token
+	}
 	rows := []map[string]any{}
 	purposes := map[string]string{"tutorial": "Configure a supported client safely using a published community guide.", "issue": "Describe a reproducible menu rendering issue for the declared project.", "news": "Announce the next documented maintenance release with source references.", "discussion": "Discuss resource selection behavior and preserve author editing access."}
 	collections := map[string]string{"tutorial": "tutorials", "issue": "issues", "news": "news", "discussion": "discussions"}
