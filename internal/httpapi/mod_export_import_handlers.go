@@ -929,32 +929,3 @@ func nullableUserID(value int64) any {
 	}
 	return value
 }
-
-func (s *Server) notifyModExportResult(ctx context.Context, jobID, status string, failure error) {
-	var recipientID int64
-	var siteID, modName string
-	var skipped int
-	err := s.db.QueryRow(ctx,
-		`select coalesce(j.created_by,0),m.slug,m.primary_name,coalesce((j.error_detail->>'translationValuesSkipped')::int,0)
-		 from catalog_import_jobs j join mods m on m.id=j.mod_id where j.id=$1`, jobID,
-	).Scan(&recipientID, &siteID, &modName, &skipped)
-	if err != nil || recipientID <= 0 {
-		return
-	}
-	code := "mod_import_success"
-	values := map[string]string{"name": modName, "skipped": fmt.Sprintf("%d", skipped), "error": ""}
-	if status == "partial" {
-		code = "mod_import_partial"
-	}
-	if status == "failed" {
-		code = "mod_import_failure"
-		values["error"] = "未知错误"
-		if failure != nil {
-			values["error"] = failure.Error()
-		}
-	}
-	s.sendTemplatedNotification(ctx, recipientID, code, values, map[string]any{
-		"type": "mod_export_import", "jobId": jobID, "modSiteId": siteID, "status": status,
-		"translationValuesSkipped": skipped, "targetLabel": modName, "url": "/mods/" + siteID,
-	})
-}

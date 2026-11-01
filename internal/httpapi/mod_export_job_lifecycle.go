@@ -78,29 +78,34 @@ func (s *Server) updateModExportJob(ctx context.Context, jobID, runToken, status
 	return nil
 }
 
-func (s *Server) failModExportJob(jobID, runToken, code string, failure error) {
+func (s *Server) failModExportJob(jobID, runToken, code string, failure error) error {
+	var lastErr error
 	detail, _ := json.Marshal(map[string]string{"message": failure.Error()})
-	var updated bool
 	for attempt := 0; attempt < 4; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		tag, err := s.db.Exec(ctx, `
-			update catalog_import_jobs
-			set status='failed',error_code=$3,error_detail=$4::jsonb,finished_at=now(),heartbeat_at=now(),updated_at=now(),run_token=''
-			where id=$1 and run_token=$2`, jobID, runToken, code, string(detail))
+		err := s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx, `update catalog_import_jobs
+    set status='failed',error_code=$3,error_detail=$4::jsonb,finished_at=now(),heartbeat_at=now(),updated_at=now(),run_token=''
+    where id=$1 and run_token=$2`, jobID, runToken, code, string(detail))
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() == 0 {
+				return nil
+			}
+			if _, err = tx.Exec(ctx, `insert into catalog_import_job_logs(job_id,level,stage,message) values($1,'error','failed',$2)`, jobID, failure.Error()); err != nil {
+				return err
+			}
+			return enqueueModExportResultTx(ctx, tx, jobID, "failed", failure)
+		})
 		cancel()
 		if err == nil {
-			updated = tag.RowsAffected() > 0
-			break
+			return nil
 		}
+		lastErr = err
 		time.Sleep(time.Duration(attempt+1) * 250 * time.Millisecond)
 	}
-	if !updated {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_, _ = s.db.Exec(ctx, `insert into catalog_import_job_logs(job_id,level,stage,message) values($1,'error','failed',$2)`, jobID, failure.Error())
-	s.notifyModExportResult(ctx, jobID, "failed", failure)
+	return lastErr
 }
 
 func (s *Server) recoverStaleModExportJobs(ctx context.Context) error {
@@ -152,13 +157,27 @@ func recoverStaleModExportJobsTx(ctx context.Context, tx pgx.Tx) (int, error) {
 }
 
 func (s *Server) markStalledModExportJob(ctx context.Context, jobID string, modID int64) (bool, error) {
-	detail, _ := json.Marshal(map[string]string{"message": "The import worker stopped updating this job. Retry the import."})
-	tag, err := s.db.Exec(ctx, `
-		update catalog_import_jobs
-		set status='failed',error_code='worker_stalled',error_detail=$3::jsonb,finished_at=now(),run_token='',updated_at=now()
-		where id=$1 and mod_id=$2 and status in ('validating','importing')
-		  and coalesce(heartbeat_at,updated_at) < now() - $4::interval`, jobID, modID, string(detail), pgInterval(modExportStaleAfter))
-	return err == nil && tag.RowsAffected() > 0, err
+	failure := errors.New("The import worker stopped updating this job. Retry the import.")
+	detail, _ := json.Marshal(map[string]string{"message": failure.Error()})
+	updated := false
+	err := s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `update catalog_import_jobs
+   set status='failed',error_code='worker_stalled',error_detail=$3::jsonb,finished_at=now(),run_token='',updated_at=now()
+   where id=$1 and mod_id=$2 and status in ('validating','importing')
+    and coalesce(heartbeat_at,updated_at)<now()-$4::interval`, jobID, modID, string(detail), pgInterval(modExportStaleAfter))
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return nil
+		}
+		if err = enqueueModExportResultTx(ctx, tx, jobID, "failed", failure); err != nil {
+			return err
+		}
+		updated = true
+		return nil
+	})
+	return err == nil && updated, err
 }
 
 func (s *Server) resetModExportJobForRetry(ctx context.Context, jobID string, modID, actorID int64) (bool, error) {

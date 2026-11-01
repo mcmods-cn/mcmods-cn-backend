@@ -466,7 +466,6 @@ func (s *Server) getModExportJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Failed to inspect the import job")
 		return
 	} else if stalled {
-		s.notifyModExportResult(r.Context(), jobID, "failed", errors.New("import worker stopped responding"))
 		job, err = s.modExportJobByIDForCreator(r.Context(), jobID, identity.ID, currentClaims(r).Subject)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "读取导入任务失败")
@@ -495,11 +494,9 @@ func (s *Server) getActiveModExportJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Failed to inspect active import jobs")
 		return
 	}
-	if stalled, markErr := s.markStalledModExportJob(r.Context(), jobID, identity.ID); markErr != nil {
+	if _, markErr := s.markStalledModExportJob(r.Context(), jobID, identity.ID); markErr != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to inspect the active import job")
 		return
-	} else if stalled {
-		s.notifyModExportResult(r.Context(), jobID, "failed", errors.New("import worker stopped responding"))
 	}
 	job, err := s.modExportJobByIDForCreator(r.Context(), jobID, identity.ID, currentClaims(r).Subject)
 	if err != nil {
@@ -710,7 +707,9 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			resultErr = nil
 			return
 		}
-		s.failModExportJob(jobID, runToken, "import_failed", resultErr)
+		if err := s.failModExportJob(jobID, runToken, "import_failed", resultErr); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("persist failed import result: %w", err))
+		}
 	}()
 
 	var expectedHash, objectKey, archiveName, uniqueID, targetVersionPublicID string
@@ -1367,7 +1366,10 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 		if _, updateErr = tx.Exec(ctx, `update catalog_import_packages set imported_at=now() where id=$1`, packageID); updateErr != nil {
 			return updateErr
 		}
-		return s.tombstoneOSSFileTx(ctx, tx, sourceFileID, "mod-export-import-consumed")
+		if err := s.tombstoneOSSFileTx(ctx, tx, sourceFileID, "mod-export-import-consumed"); err != nil {
+			return err
+		}
+		return enqueueModExportResultTx(ctx, tx, jobID, jobStatus, nil)
 	})
 	if errors.Is(err, errCatalogImportPolicyCancel) {
 		return s.cancelCatalogImportForPolicy(ctx, jobID, runToken, err)
@@ -1375,6 +1377,5 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	if err != nil {
 		return err
 	}
-	s.notifyModExportResult(context.Background(), jobID, jobStatus, nil)
 	return nil
 }

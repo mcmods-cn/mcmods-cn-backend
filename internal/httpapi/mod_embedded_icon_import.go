@@ -298,7 +298,9 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 			resultErr = nil
 			return
 		}
-		s.failModExportJob(jobID, runToken, "import_failed", resultErr)
+		if err := s.failModExportJob(jobID, runToken, "import_failed", resultErr); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("persist failed import result: %w", err))
+		}
 	}()
 
 	var createdBy, sourceFileID, targetVersionID int64
@@ -535,14 +537,16 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 		if _, updateErr = tx.Exec(ctx, `update catalog_import_packages set imported_at=now() where id=$1`, packageID); updateErr != nil {
 			return updateErr
 		}
-		return s.tombstoneOSSFileTx(ctx, tx, sourceFileID, "catalog-import-consumed")
+		if err := s.tombstoneOSSFileTx(ctx, tx, sourceFileID, "catalog-import-consumed"); err != nil {
+			return err
+		}
+		return enqueueModExportResultTx(ctx, tx, jobID, "ready", nil)
 	}); err != nil {
 		if errors.Is(err, errCatalogImportPolicyCancel) {
 			return s.cancelCatalogImportForPolicy(ctx, jobID, runToken, err)
 		}
 		return err
 	}
-	s.notifyModExportResult(context.Background(), jobID, "ready", nil)
 	return nil
 }
 
