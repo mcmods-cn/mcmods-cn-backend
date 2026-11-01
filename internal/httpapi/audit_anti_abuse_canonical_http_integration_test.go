@@ -33,6 +33,12 @@ func TestAuditAntiAbuseCanonicalDistinctFieldsActualHTTPProofSingleWriteIntegrat
 	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "project.create", "project.create.mod")
 	actor, _, token := createTEST044User(t, f.ctx, f.db, f.server.cfg, "canonical-proof-"+randomHex(4), "UTC")
 	grantTEST044Permissions(t, f.ctx, f.db, actor, "project.create", "project.create.mod")
+	// A new verified account and a normally aged one-use form place the
+	// documented network duplicate rule in the challenge band. Keep the
+	// actual Go client UA and all production risk thresholds unchanged.
+	if _, err = f.db.Exec(f.ctx, `update users set email_verified=true where id=$1`, actor); err != nil {
+		t.Fatal(err)
+	}
 	payload := func(site string) createModRequest {
 		return createModRequest{SiteID: site, PrimaryName: "Distinct visible primary name", Summary: "Legacy summary used only as independent compatibility input", BodyMarkdown: "Long independent technical description of the normal proof sample", DefaultLocale: "en-US", Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "Human authored source display name", Summary: "A short translated overview of the published source", ContentMarkdown: "Full localized content with separate wording from each overview"}}, Environment: "bothRequired", PrimaryCategory: "utility", ModIDs: []modIdentifierPayload{{Identifier: strings.ReplaceAll(site, "-", "_"), Primary: true}}, Compatibilities: []modLoaderCompatibilityPayload{{Loader: "forge", Versions: []string{"1.20.1"}}}, OfficialStatus: "active", SourceStatus: "open", License: "MIT", SubmissionMethod: "manual"}
 	}
@@ -76,7 +82,7 @@ func TestAuditAntiAbuseCanonicalDistinctFieldsActualHTTPProofSingleWriteIntegrat
 	if err != nil {
 		t.Fatal(err)
 	}
-	do := func(body []byte, proof string, want int) []byte {
+	do := func(body []byte, form, proof string, want int) []byte {
 		t.Helper()
 		r, err := http.NewRequestWithContext(f.ctx, http.MethodPost, f.origin.URL+"/api/v1/mods", bytes.NewReader(body))
 		if err != nil {
@@ -84,6 +90,9 @@ func TestAuditAntiAbuseCanonicalDistinctFieldsActualHTTPProofSingleWriteIntegrat
 		}
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set("Authorization", "Bearer "+token)
+		if form != "" {
+			r.Header.Set("X-Anti-Abuse-Form", form)
+		}
 		if proof != "" {
 			r.Header.Set("X-Anti-Abuse-Challenge", proof)
 		}
@@ -105,8 +114,16 @@ func TestAuditAntiAbuseCanonicalDistinctFieldsActualHTTPProofSingleWriteIntegrat
 		}
 		return data
 	}
+	form := decodeTEST022Data[antiabuse.FormToken](t, f.require(t, token, http.MethodGet, "/api/v1/anti-abuse/form-token?action=review.submit&object=/api/v1/mods", nil, 200))
+	minimumAge := time.NewTimer(f.server.cfg.AntiAbuse.FormMinimumAge + 20*time.Millisecond)
+	defer minimumAge.Stop()
+	select {
+	case <-minimumAge.C:
+	case <-f.ctx.Done():
+		t.Fatal(f.ctx.Err())
+	}
 	before := auditResumeModpackFacts(t, f)
-	challengeBody := do(raw, "", 428)
+	challengeBody := do(raw, form.Token, "", 428)
 	var failure struct {
 		Code    string `json:"code"`
 		Details struct {
@@ -148,7 +165,7 @@ func TestAuditAntiAbuseCanonicalDistinctFieldsActualHTTPProofSingleWriteIntegrat
 	if antiabuse.ContentHash(antiabuse.NormalizeContent(retryContent)) != expected {
 		t.Fatal("same genuine content changed fingerprint during challenge recovery")
 	}
-	created := decodeTEST022Data[modResponse](t, do(retry, proof, 201))
+	created := decodeTEST022Data[modResponse](t, do(retry, "", proof, 201))
 	if created.ReviewStatus != "pending" || created.SubmissionRevisionID == "" {
 		t.Fatal("normal challenge success bypassed independent review")
 	}
@@ -161,7 +178,7 @@ func TestAuditAntiAbuseCanonicalDistinctFieldsActualHTTPProofSingleWriteIntegrat
 		t.Fatalf("proof/result mismatch consumed=%t rows=%d requests=%d", status == "consumed", rows, requests)
 	}
 	beforeReplay := auditResumeModpackFacts(t, f)
-	replayed := do(retry, proof, 403)
+	replayed := do(retry, "", proof, 403)
 	var replayError struct {
 		Code string `json:"code"`
 	}

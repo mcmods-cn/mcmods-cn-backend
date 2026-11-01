@@ -142,16 +142,18 @@ func TestAuditLiveCMP007MixedModpackFixture(t *testing.T) {
 	}
 	t.Cleanup(func() { broker.Shutdown(); broker.WaitForShutdown() })
 	cfg := f.server.cfg
+	workerContext, stopWorkers := context.WithCancel(f.ctx)
+	t.Cleanup(stopWorkers)
 	cfg.FrontendOrigin = frontendOrigin
 	cfg.NATS = config.NATSConfig{Enabled: true, URL: broker.ClientURL(), SubjectPrefix: "mcmods-audit-cmp007", OutboxEnabled: true, Tasks: cfg.NATS.Tasks, JetStream: config.JetStreamConfig{Enabled: true, Stream: "MCMODS_AUDIT_CMP007", MaxDeliver: 5, AckWait: 30 * time.Second, PublishTimeout: 5 * time.Second}}
-	q := queue.New(f.ctx, cfg.NATS)
+	q := queue.New(workerContext, cfg.NATS)
 	t.Cleanup(q.Close)
 	q.SetDeadLetterSink(queue.NewPostgresDeadLetterSink(db))
 	if status := q.Status(); !status.Connected || !status.JetStream {
 		t.Fatal("actual queue unavailable")
 	}
 	f.origin.Close()
-	api := NewServer(f.ctx, cfg, db, q, nil, nil, nil)
+	api := NewServer(workerContext, cfg, db, q, nil, nil, nil)
 	origin := httptest.NewServer(api)
 	t.Cleanup(func() {
 		origin.Close()
@@ -162,17 +164,17 @@ func TestAuditLiveCMP007MixedModpackFixture(t *testing.T) {
 		}
 		api.cache.Close()
 	})
-	if err = NewModMetadataImportWorker(cfg, db, q).Start(f.ctx); err != nil {
+	if err = NewModMetadataImportWorker(cfg, db, q).Start(workerContext); err != nil {
 		t.Fatal(err)
 	}
 	if err = NewNotificationWorker(db, q, api.cache, cfg.SMTP, cfg.SettingsEncryptionKey).Start(); err != nil {
 		t.Fatal(err)
 	}
-	if err = NewProjectUpdateNotificationWorker(db, q, api.cache).Start(f.ctx); err != nil {
+	if err = NewProjectUpdateNotificationWorker(db, q, api.cache).Start(workerContext); err != nil {
 		t.Fatal(err)
 	}
 	dispatcher := queue.NewOutboxDispatcher(db, q, true)
-	dispatcher.Start(f.ctx)
+	dispatcher.Start(workerContext)
 	observer, err := nats.Connect(broker.ClientURL())
 	if err != nil {
 		t.Fatal(err)
@@ -224,6 +226,7 @@ func TestAuditLiveCMP007MixedModpackFixture(t *testing.T) {
 			auditJourneyWriteJSON(t, filepath.Join(directory, "runtime.json"), runtime)
 			if _, err = os.Stat(stop); err == nil {
 				auditJourneyWriteJSON(t, filepath.Join(directory, "runtime-terminal.json"), runtime)
+				stopWorkers()
 				t.Log("CMP007_LIVE_STOP owned graceful cleanup; runtime is evidence only, no browser acceptance inferred")
 				return
 			}
