@@ -613,9 +613,13 @@ func publishModContentSnapshotTx(ctx context.Context, tx pgx.Tx, revisionID int6
 				where public_id=$1 and mod_id=$3 returning id`, snapshot.PublicID, revisionID, snapshot.ModID).Scan(&versionID); err != nil {
 				return err
 			}
-			_, err := tx.Exec(ctx, `update catalog_import_revisions set is_active=false,status='superseded'
-				where target_version_id=$1 and is_active`, versionID)
-			return err
+			if _, err := tx.Exec(ctx, `update catalog_import_revisions set is_active=false,status='superseded'
+				where target_version_id=$1 and is_active`, versionID); err != nil {
+				return err
+			}
+			// Removing a version also removes imported global catalog sources.
+			// Change their cache generation in the same publication transaction.
+			return bumpCatalogDatasetVersionTx(ctx, tx)
 		}
 		_, err := tx.Exec(ctx, `update `+table+` set status='archived',published_revision_id=$2,updated_at=now() where public_id=$1`, snapshot.PublicID, revisionID)
 		return err
