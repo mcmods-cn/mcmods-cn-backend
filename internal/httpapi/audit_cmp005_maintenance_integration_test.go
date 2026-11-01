@@ -19,7 +19,33 @@ func auditOSSByteMaintenancePlan(t *testing.T, f test037Fixture, e OSSByteMainte
 	if err := f.db.QueryRow(f.ctx, `select current_database()`).Scan(&name); err != nil {
 		t.Fatal(err)
 	}
-	return OSSByteMaintenancePlan{Version: 1, Database: name, MaxDurationSeconds: 60, MaxFiles: 1, MaxReadBytes: 1 << 20, MaxReferenceRows: 100000, MaxReferenceCols: 2048, MaxReferenceBytes: 4 << 20, Entries: []OSSByteMaintenanceEntry{e}}
+	plan := OSSByteMaintenancePlan{Version: 1, Database: name, MaxDurationSeconds: 60, MaxFiles: 1, MaxReadBytes: 1 << 20, MaxReferenceRows: 100000, MaxReferenceCols: 2048, MaxReferenceBytes: 4 << 20, Entries: []OSSByteMaintenanceEntry{e}}
+	auditOSSByteReferenceScope(t, f, &plan, []string{"oss_files"})
+	return plan
+}
+
+// These isolated fixtures have no application writers during maintenance.
+// The separate writer-barrier regression deliberately exercises the explicit
+// locked scope; operator declarations are never called online safety evidence.
+func auditOSSByteReferenceScope(t *testing.T, f test037Fixture, plan *OSSByteMaintenancePlan, locked []string) {
+	t.Helper()
+	plan.ReferenceWritesQuiesced = true
+	plan.ReferenceWriteTables = append([]string{}, locked...)
+	plan.QuiescedReferenceTables = nil
+	scope, _, err := inspectOSSByteMaintenanceWriteScope(f.ctx, f.db, *plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReferenceSchemaSHA = scope.SchemaSHA
+	selected := map[string]bool{}
+	for _, table := range locked {
+		selected[table] = true
+	}
+	for _, table := range scope.PotentialTables {
+		if !selected[table] {
+			plan.QuiescedReferenceTables = append(plan.QuiescedReferenceTables, table)
+		}
+	}
 }
 
 func auditOSSByteMaintenanceRun(t *testing.T, f test037Fixture, pool *pgxpool.Pool, plan OSSByteMaintenancePlan, apply bool) OSSByteMaintenanceResult {
@@ -192,6 +218,7 @@ func TestAuditCMP005MaintenanceMissingSourceWrongPinsAndReferencesRemainUnchange
 	if _, err := f.db.Exec(f.ctx, `insert into audit_owned_manual_asset_ref values(jsonb_build_object('manualText',$1::text))`, "Keep this exact manual URL/key: "+key); err != nil {
 		t.Fatal(err)
 	}
+	auditOSSByteReferenceScope(t, f, &plan, []string{"oss_files"})
 	if got := auditOSSByteMaintenanceRun(t, f, f.db, plan, true); got.Status != "NEEDS_SCOPED_REFERENCE_PLAN" || got.ReferenceRows < 1 {
 		t.Fatalf("manual/shared reference not protected: %+v", got)
 	}

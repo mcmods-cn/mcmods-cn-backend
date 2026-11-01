@@ -25,11 +25,14 @@ func OSSByteMaintenanceSchemaStatements() []string {
  binding_id uuid references oss_upload_byte_bindings(id) on delete restrict,
  target_key text not null,source_key text not null default '',
  plan_sha256 text not null,backup_reference text not null,file_preimage jsonb not null,
+ reference_schema_sha256 text not null default '',quiescence_declared boolean not null default false,
+ quiesced_reference_tables text[] not null default '{}'::text[],write_fence_tables text[] not null default '{}'::text[],
  run_token text not null,lease_expires_at timestamptz not null,
  created_at timestamptz not null default now(),updated_at timestamptz not null default now(),
  constraint oss_upload_maintenance_shape check(oss_upload_maintenance_shape(operation,state,file_id,target_key,plan_sha256,backup_reference))
 )`,
 		`create index if not exists oss_upload_maintenance_raw_guard on oss_upload_maintenance_actions(target_key) where operation='cleanup_raw'`,
+		`alter table oss_upload_maintenance_actions add column if not exists reference_schema_sha256 text not null default '',add column if not exists quiescence_declared boolean not null default false,add column if not exists quiesced_reference_tables text[] not null default '{}'::text[],add column if not exists write_fence_tables text[] not null default '{}'::text[]`,
 	}
 }
 
@@ -54,6 +57,24 @@ func inspectOSSByteMaintenanceSchema(ctx context.Context, q ossUploadByteBinding
 			return false, fmt.Errorf("incompatible OSS maintenance column: %s", name)
 		}
 	}
+	scopeReady := true
+	for name, kind := range map[string]string{"reference_schema_sha256": "text", "quiescence_declared": "boolean", "quiesced_reference_tables": "text[]", "write_fence_tables": "text[]"} {
+		c, ok := columns[name]
+		if !ok {
+			scopeReady = false
+			continue
+		}
+		want := "'{}'::text[]"
+		if kind == "boolean" {
+			want = "false"
+		}
+		if kind == "text" {
+			want = "''::text"
+		}
+		if c.Type != kind || !c.NotNull || c.Default != want {
+			return false, fmt.Errorf("incompatible OSS maintenance scope column: %s", name)
+		}
+	}
 	var body, expression string
 	var valid bool
 	if err := q.QueryRow(ctx, `select coalesce((select prosrc from pg_proc where oid=to_regprocedure('public.oss_upload_maintenance_shape(text,text,bigint,text,text,text)')),''),coalesce((select pg_get_expr(conbin,conrelid) from pg_constraint where conrelid='public.oss_upload_maintenance_actions'::regclass and conname='oss_upload_maintenance_shape' and convalidated),''),exists(select 1 from pg_proc where oid=to_regprocedure('public.oss_upload_maintenance_shape(text,text,bigint,text,text,text)') and provolatile='i' and not prosecdef and proparallel='s' and prorettype='boolean'::regtype)`).Scan(&body, &expression, &valid); err != nil {
@@ -73,7 +94,7 @@ func inspectOSSByteMaintenanceSchema(ctx context.Context, q ossUploadByteBinding
 	if !keysValid {
 		return false, errors.New("incompatible OSS maintenance identity, references or raw guard index")
 	}
-	return true, nil
+	return scopeReady, nil
 }
 
 func RequireOSSByteMaintenanceSchema(ctx context.Context, q ossUploadByteBindingQuery) error {

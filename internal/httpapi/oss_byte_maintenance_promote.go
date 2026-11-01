@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path"
 	"strings"
+	"time"
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/jackc/pgx/v5"
@@ -237,27 +238,36 @@ func ossMaintenanceReadStatus(err error, missing string) string {
 }
 
 func (run *ossMaintenanceRun) adoptLegacy(ctx context.Context, e OSSByteMaintenanceEntry, token string, file ossMaintenanceFile, cfg ossConfigPayload, b *ossUploadByteBinding, source, stored ossMaintenanceObject) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	tx, err := run.s.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended('oss-completion:'||$1,0))`, cfg.Bucket+":"+cfg.Endpoint+":"+file.Key); err != nil {
+	acquire, cancelAcquire := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelAcquire()
+	if _, err = tx.Exec(acquire, `select pg_advisory_xact_lock(hashtextextended('oss-completion:'||$1,0))`, cfg.Bucket+":"+cfg.Endpoint+":"+file.Key); err != nil {
 		return err
 	}
-	if err = lockOSSByteBindingTx(ctx, tx, b); err != nil {
+	fencedTables, err := run.freezeReferenceWriteScope(acquire, tx)
+	if err != nil {
 		return err
 	}
-	if err = lockOSSByteMaintenanceActionTx(ctx, tx, e.ActionID, token, "preparing"); err != nil {
+	if err = lockOSSByteBindingTx(acquire, tx, b); err != nil {
+		return err
+	}
+	if err = lockOSSByteMaintenanceActionTx(acquire, tx, e.ActionID, token, "preparing"); err != nil {
 		return err
 	}
 	var locked int64
-	if err = tx.QueryRow(ctx, `select id from public.oss_files file where id=$1 and to_jsonb(file)=$2::jsonb for update`, file.ID, file.snapshot).Scan(&locked); err != nil {
+	if err = tx.QueryRow(acquire, `select id from public.oss_files file where id=$1 and to_jsonb(file)=$2::jsonb for update`, file.ID, file.snapshot).Scan(&locked); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errOSSMaintenanceConflict
 		}
 		return err
 	}
+	cancelAcquire()
 	refs, err := inspectOSSByteMaintenanceReferences(ctx, tx, file.ID, file.Key, run.plan, true)
 	if err != nil {
 		return err
@@ -271,7 +281,7 @@ func (run *ossMaintenanceRun) adoptLegacy(ctx context.Context, e OSSByteMaintena
 	if err = commitOSSByteBindingTx(ctx, tx, b, file.ID, source.SHA, source.Size, stored.SHA, stored.Size); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `update public.oss_upload_maintenance_actions set state='promoted',binding_id=$2::uuid,updated_at=clock_timestamp() where id=$1::uuid`, e.ActionID, b.ID); err != nil {
+	if _, err = tx.Exec(ctx, `update public.oss_upload_maintenance_actions set state='promoted',binding_id=$2::uuid,write_fence_tables=$3::text[],updated_at=clock_timestamp() where id=$1::uuid`, e.ActionID, b.ID, fencedTables); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

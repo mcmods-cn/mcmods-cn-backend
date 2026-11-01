@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,16 +17,20 @@ import (
 )
 
 type OSSByteMaintenancePlan struct {
-	Version            int                       `json:"version"`
-	Database           string                    `json:"database"`
-	MaxDurationSeconds int                       `json:"maxDurationSeconds"`
-	MaxFiles           int                       `json:"maxFiles"`
-	MaxReadBytes       int64                     `json:"maxReadBytes"`
-	MaxReferenceRows   int                       `json:"maxReferenceRows"`
-	MaxReferenceCols   int                       `json:"maxReferenceColumns"`
-	MaxReferenceBytes  int                       `json:"maxReferenceFieldBytes"`
-	RetentionCutoff    time.Time                 `json:"retentionCutoff,omitempty"`
-	Entries            []OSSByteMaintenanceEntry `json:"entries"`
+	Version                 int                       `json:"version"`
+	Database                string                    `json:"database"`
+	MaxDurationSeconds      int                       `json:"maxDurationSeconds"`
+	MaxFiles                int                       `json:"maxFiles"`
+	MaxReadBytes            int64                     `json:"maxReadBytes"`
+	MaxReferenceRows        int                       `json:"maxReferenceRows"`
+	MaxReferenceCols        int                       `json:"maxReferenceColumns"`
+	MaxReferenceBytes       int                       `json:"maxReferenceFieldBytes"`
+	ReferenceWritesQuiesced bool                      `json:"referenceWritesQuiesced"`
+	ReferenceWriteTables    []string                  `json:"referenceWriteTables,omitempty"`
+	QuiescedReferenceTables []string                  `json:"quiescedReferenceTables,omitempty"`
+	ReferenceSchemaSHA      string                    `json:"referenceSchemaSha256,omitempty"`
+	RetentionCutoff         time.Time                 `json:"retentionCutoff,omitempty"`
+	Entries                 []OSSByteMaintenanceEntry `json:"entries"`
 }
 
 type OSSByteMaintenanceEntry struct {
@@ -62,10 +67,11 @@ type OSSByteMaintenanceResult struct {
 }
 
 type OSSByteMaintenanceReport struct {
-	DryRun    bool                       `json:"dryRun"`
-	ReadBytes int64                      `json:"readBytes"`
-	Counts    map[string]int             `json:"counts"`
-	Results   []OSSByteMaintenanceResult `json:"results"`
+	DryRun         bool                             `json:"dryRun"`
+	ReadBytes      int64                            `json:"readBytes"`
+	Counts         map[string]int                   `json:"counts"`
+	ReferenceScope OSSByteMaintenanceReferenceScope `json:"referenceScope"`
+	Results        []OSSByteMaintenanceResult       `json:"results"`
 }
 
 type ossMaintenanceFile struct {
@@ -98,6 +104,8 @@ type ossMaintenanceRun struct {
 	hasJournal bool
 }
 
+var ossMaintenanceTablePattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+
 var ossMaintenanceUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 func validateOSSByteMaintenancePlan(plan OSSByteMaintenancePlan, opts OSSByteMaintenanceOptions) error {
@@ -106,6 +114,25 @@ func validateOSSByteMaintenancePlan(plan OSSByteMaintenancePlan, opts OSSByteMai
 	}
 	if opts.Apply && strings.TrimSpace(opts.BackupReference) == "" {
 		return errors.New("apply requires the operator's existing backup reference")
+	}
+	if len(plan.ReferenceWriteTables) > 16 || len(plan.QuiescedReferenceTables) > 2048 {
+		return errors.New("explicit reference write scope exceeds its table budget")
+	}
+	scopeSeen := map[string]bool{}
+	hasFiles := false
+	for _, table := range append(append([]string{}, plan.ReferenceWriteTables...), plan.QuiescedReferenceTables...) {
+		if !ossMaintenanceTablePattern.MatchString(table) || scopeSeen[table] {
+			return errors.New("reference table names must be unique reviewed public identifiers")
+		}
+		scopeSeen[table] = true
+	}
+	for _, table := range plan.ReferenceWriteTables {
+		if table == "oss_files" {
+			hasFiles = true
+		}
+	}
+	if opts.Apply && (!plan.ReferenceWritesQuiesced || !hasFiles || normalizeSHA256(plan.ReferenceSchemaSHA) == "") {
+		return errors.New("apply requires reviewed schema hash, bounded write locks and explicit related-writer/DDL quiescence")
 	}
 	seen := map[string]bool{}
 	for _, e := range plan.Entries {
@@ -161,6 +188,18 @@ func RunOSSByteMaintenance(ctx context.Context, pool *pgxpool.Pool, cfg config.C
 			return report, err
 		}
 	}
+	scope, scopeStatus, scopeErr := inspectOSSByteMaintenanceWriteScope(ctx, pool, plan)
+	report.ReferenceScope = scope
+	if scopeErr != nil {
+		return report, scopeErr
+	}
+	if opts.Apply && scopeStatus != "" {
+		for _, e := range plan.Entries {
+			report.Results = append(report.Results, OSSByteMaintenanceResult{ActionID: e.ActionID, FilePublicID: e.FilePublicID, Operation: e.Operation, Status: scopeStatus})
+			report.Counts[scopeStatus]++
+		}
+		return report, nil
+	}
 	run := ossMaintenanceRun{s: &Server{db: pool, cfg: cfg}, plan: plan, opts: opts}
 	if err := pool.QueryRow(ctx, `select to_regclass('public.oss_upload_maintenance_actions') is not null`).Scan(&run.hasJournal); err != nil {
 		return report, err
@@ -192,6 +231,11 @@ func ossMaintenancePlanSHA(e OSSByteMaintenanceEntry, plan OSSByteMaintenancePla
 	if e.ExpectedStoredSHA != "" {
 		e.ExpectedStoredSHA = normalizeSHA256(e.ExpectedStoredSHA)
 	}
+	plan.ReferenceWriteTables = append([]string{}, plan.ReferenceWriteTables...)
+	sort.Strings(plan.ReferenceWriteTables)
+	plan.QuiescedReferenceTables = append([]string{}, plan.QuiescedReferenceTables...)
+	sort.Strings(plan.QuiescedReferenceTables)
+	plan.ReferenceSchemaSHA = normalizeSHA256(plan.ReferenceSchemaSHA)
 	plan.Entries = []OSSByteMaintenanceEntry{e}
 	data, _ := json.Marshal(plan)
 	digest := sha256.Sum256(data)

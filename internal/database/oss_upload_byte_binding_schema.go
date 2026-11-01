@@ -222,6 +222,7 @@ func ApplyOSSUploadByteBindingUpgrade(ctx context.Context, pool *pgxpool.Pool, e
 		statement = strings.Replace(statement, "references oss_upload_byte_bindings(id)", "references public.oss_upload_byte_bindings(id)", 1)
 		statement = strings.Replace(statement, "check(oss_upload_maintenance_shape(", "check(public.oss_upload_maintenance_shape(", 1)
 		statement = strings.Replace(statement, "on oss_upload_maintenance_actions(", "on public.oss_upload_maintenance_actions(", 1)
+		statement = strings.Replace(statement, "alter table oss_upload_maintenance_actions ", "alter table public.oss_upload_maintenance_actions ", 1)
 		statement = strings.Replace(statement, "alter table oss_upload_byte_bindings ", "alter table public.oss_upload_byte_bindings ", 1)
 		statement = strings.Replace(statement, "on oss_upload_byte_bindings(", "on public.oss_upload_byte_bindings(", 1)
 		if _, err = tx.Exec(ctx, statement); err != nil {
@@ -232,7 +233,7 @@ func ApplyOSSUploadByteBindingUpgrade(ctx context.Context, pool *pgxpool.Pool, e
 	if err != nil {
 		return after, err
 	}
-	if !after.Present || !after.ReconciliationReady || !after.EndpointMappingReady {
+	if !after.Present || !after.ReconciliationReady || !after.EndpointMappingReady || !after.MaintenanceReady {
 		return after, errors.New("OSS upload byte binding expansion did not create the public receipt table, endpoint mapping and reconciliation index")
 	}
 	return after, tx.Commit(ctx)

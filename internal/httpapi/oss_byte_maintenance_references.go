@@ -62,23 +62,7 @@ func inspectOSSByteMaintenanceReferences(ctx context.Context, tx pgx.Tx, fileID 
 			}
 		}
 	}
-	rows, err := tx.Query(ctx, `select table_row.relname,a.attname from pg_class table_row join pg_namespace n on n.oid=table_row.relnamespace join pg_attribute a on a.attrelid=table_row.oid join pg_type typ on typ.oid=a.atttypid where n.nspname='public' and table_row.relkind in ('r','p') and not table_row.relispartition and a.attnum>0 and not a.attisdropped and (typ.oid in ('text'::regtype,'varchar'::regtype,'json'::regtype,'jsonb'::regtype) or typ.typcategory='A') order by table_row.relname,a.attnum`)
-	if err != nil {
-		return result, err
-	}
-	var columns [][2]string
-	for rows.Next() {
-		var table, column string
-		if err = rows.Scan(&table, &column); err != nil {
-			rows.Close()
-			return result, err
-		}
-		if !ossMaintenanceNonBindingTables[table] {
-			columns = append(columns, [2]string{table, column})
-		}
-	}
-	err = rows.Err()
-	rows.Close()
+	columns, err := ossMaintenanceReferenceColumns(ctx, tx)
 	if err != nil {
 		return result, err
 	}

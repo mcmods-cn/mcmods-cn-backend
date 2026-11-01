@@ -64,6 +64,7 @@ func TestAuditCMP005MaintenanceRawCutoffReservationAttemptSessionAndManualRefere
 				}
 				want = "NEEDS_SCOPED_REFERENCE_PLAN"
 			}
+			auditOSSByteReferenceScope(t, f, &plan, []string{"oss_files"})
 			before := f.facts(t)
 			if got := auditOSSByteMaintenanceRun(t, f, f.db, plan, true); got.Status != want {
 				t.Fatalf("specific %s guard not reached: %+v want=%s", kind, got, want)
@@ -85,6 +86,10 @@ func TestAuditCMP005MaintenanceRawCutoffReservationAttemptSessionAndManualRefere
 
 func TestAuditCMP005MaintenanceExecutorRechecksLateReferenceAndRetiresPreparationIntegration(t *testing.T) {
 	f, ticket, _, plan := auditOSSByteRawFixture(t)
+	if _, err := f.db.Exec(f.ctx, `create table audit_owned_late_ref(body jsonb)`); err != nil {
+		t.Fatal(err)
+	}
+	auditOSSByteReferenceScope(t, f, &plan, []string{"oss_files", "audit_owned_late_ref"})
 	run := ossMaintenanceRun{s: f.server, plan: plan, opts: OSSByteMaintenanceOptions{Apply: true, BackupReference: "owned synthetic snapshot"}, hasJournal: true}
 	client, cfg, err := f.server.ossClient(f.ctx)
 	if err != nil {
@@ -100,9 +105,6 @@ func TestAuditCMP005MaintenanceExecutorRechecksLateReferenceAndRetiresPreparatio
 	}
 	// An ordinary live reference appears after durable intent creation. No
 	// source bytes are changed; the executor must recheck this current binding.
-	if _, err = f.db.Exec(f.ctx, `create table audit_owned_late_ref(body jsonb)`); err != nil {
-		t.Fatal(err)
-	}
 	if _, err = f.db.Exec(f.ctx, `insert into audit_owned_late_ref values(jsonb_build_object('url',$1::text))`, ticket.ObjectKey); err != nil {
 		t.Fatal(err)
 	}

@@ -298,3 +298,48 @@ func TestOSSByteBindingMaintenanceJournalIsExplicitAndRejectsSameNameDriftIntegr
 		t.Fatal("explicit apply silently replaced incompatible journal policy")
 	}
 }
+
+func TestOSSByteBindingOldMaintenanceScopeExpansionNeverInventsHistoricalFencesIntegration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	db := newOSSByteBindingSchemaTestDatabase(t, ctx)
+	var fileID int64
+	if err := db.QueryRow(ctx, `insert into oss_files(bucket,endpoint,region,object_key,status) values('owned','https://example.invalid','owned','owned-legacy-journal-file','active') returning id`).Scan(&fileID); err != nil {
+		t.Fatal(err)
+	}
+	const action = "22222222-2222-4222-8222-222222222222"
+	if _, err := db.Exec(ctx, `insert into oss_upload_maintenance_actions(id,operation,state,file_id,bucket,endpoint,region,target_key,plan_sha256,backup_reference,file_preimage,run_token,lease_expires_at) values($1::uuid,'cleanup_raw','failed',$2,'owned','https://example.invalid','owned','owned-legacy-input',repeat('a',64),'owned synthetic backup','{"oldSnapshot":true}','original-token',clock_timestamp()-interval '1 hour')`, action, fileID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `alter table oss_upload_maintenance_actions drop column reference_schema_sha256,drop column quiescence_declared,drop column quiesced_reference_tables,drop column write_fence_tables`); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := func() string {
+		var raw string
+		if err := db.QueryRow(ctx, `select (to_jsonb(journal)-'reference_schema_sha256'-'quiescence_declared'-'quiesced_reference_tables'-'write_fence_tables')::text from oss_upload_maintenance_actions journal where id=$1::uuid`, action).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	before := snapshot()
+	old, err := InspectOSSUploadByteBindings(ctx, db)
+	if err != nil || old.MaintenanceReady {
+		t.Fatalf("old optional scope was inferred: %+v %v", old, err)
+	}
+	if err = RequireOSSUploadByteBindingSchema(ctx, db); err != nil {
+		t.Fatalf("normal startup rejected old optional scope: %v", err)
+	}
+	if err = RequireOSSByteMaintenanceSchema(ctx, db); err == nil || !strings.Contains(err.Error(), "journal expansion required") {
+		t.Fatalf("data apply accepted missing typed scope: %v", err)
+	}
+	after, err := ApplyOSSUploadByteBindingUpgrade(ctx, db, old.Database, "owned schema-only backup")
+	if err != nil || !after.MaintenanceReady || snapshot() != before {
+		t.Fatalf("scope expansion changed existing journal or failed: %+v %v", after, err)
+	}
+	var schema string
+	var declared bool
+	var quiesced, locks []string
+	if err = db.QueryRow(ctx, `select reference_schema_sha256,quiescence_declared,quiesced_reference_tables,write_fence_tables from oss_upload_maintenance_actions where id=$1::uuid`, action).Scan(&schema, &declared, &quiesced, &locks); err != nil || schema != "" || declared || len(quiesced) != 0 || len(locks) != 0 {
+		t.Fatalf("schema-only expansion invented old maintenance proof: sha=%q declared=%v quiesced=%v locks=%v err=%v", schema, declared, quiesced, locks, err)
+	}
+}

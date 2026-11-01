@@ -135,3 +135,15 @@ SDK2GiB multipart-range/encryption-header contracts. Protocol-provider tests do
 not establish actual cloud versioning, SSE/KMS encryption or2GiB payload streaming.
 The previously automatically blocked client-overwrite reproduction has not been
 retried or replaced; its unverified layer remains explicit in the task report.
+
+
+The optional maintenance journal also has additive typed reference-scope fields:
+reviewed schema fingerprint, an operator pause assertion, individually paused
+reference tables and actual final-executor fence tables. Explicit expansion of
+an old journal adds only unknown blank/false/empty values and preserves existing
+IDs, plan digests, tokens, timestamps, preimages and file/receipt identities.
+Normal upload startup remains compatible with that old optional journal, while
+data-tool apply requires the explicit expansion. Retain the additive columns
+and private journal on rollback; a code rollback cannot reverse external object
+deletions. See `audit-oss-byte-maintenance.md` for the required writer/DDL pause
+and bounded actual lock scope.

@@ -43,7 +43,7 @@ Unknown reserved-key ownership, unsupported location and size/accounting changes
 remain holds. Historical sender/uploader intent is never inferred from today's
 bytes; `historicalIntentProven` remains false.
 
-For apply, review the diagnosis and add explicit `expectedDisplayEndpoint`,
+For apply, first establish the maintenance window described below. Review the diagnosis and add explicit `expectedDisplayEndpoint`,
 `expectedSourceSha256`, `expectedStoredSha256`, `expectedSourceSize` and
 `expectedStoredSize` pins. Provide a real operator-owned backup reference and
 confirm the exact database separately:
@@ -56,8 +56,8 @@ go run ./cmd/oss-byte-maintenance --plan private-reviewed-plan.json \
 
 Eligible legacy files are copied into new server-only UUID candidates, followed
 by full actual GET/hash/length checks. Converted files keep separate original
-source and stored bytes. The final transaction locks the original identity,
-receipt, action and unchanged file snapshot, rechecks references and current
+source and stored bytes. The final transaction locks the original identity, the selected reference-write
+tables, receipt, action and unchanged file snapshot, rechecks references and current
 database-clock leases, and preserves the file/public ID, owner, names, category,
 source, scan/review state and existing byte accounting. Old raw objects remain.
 An explicitly pinned source/stored hash correction is recorded by the private
@@ -85,7 +85,8 @@ compensation bytes and an exact raw-byte match. Registered objects, preparing
 attempts, unfinished/dead multipart sessions, reservations and live raw-key
 references block it. File-ID references to the adopted sealed file remain valid.
 A dedicated durable-intent executor repeats these guards under the original-key
-mutex and current receipt/file/action locks through bounded DELETE and HEAD.
+mutex, selected reference-write table locks and current receipt/file/action locks
+through bounded DELETE and HEAD. The scan happens after these locks are acquired.
 Completion means the current object is absent. It does not erase old provider
 versions or promise physical byte reclamation for a versioned bucket. Existing
 versioning, encryption and bucket lifecycle policies are not changed.
@@ -108,3 +109,72 @@ input can be reconstructed from its recorded retained source or stored proof
 under a separate authorized action; converted PNG/WebP proofs are not
 interchangeable. Production execution and any reference migration require their
 own concrete scoped review; this command supplies no blanket cleanup policy.
+
+
+## Required maintenance window and reference scope
+
+This data tool is an offline, scoped maintenance operation. Before apply, the
+operator must pause all application, Worker, administrator and SQL writers that
+can create or change references in the affected scope, and pause related DDL.
+Keep them paused from before the final reviewed diagnosis through apply and its
+post-checks. The tool cannot verify that operational pause. The report always
+sets `onlineRaceSafe: false`; an operator declaration is not a database lock or
+proof of universal online safety.
+
+Dry-run does not acquire write-conflict table locks. Its private
+`referenceScope` lists `potentialReferenceTables` and a
+`referenceSchemaSha256` fingerprint of the discovered public text/JSON/array/
+domain columns, table identities and inheritance topology. Live file foreign
+keys are also inspected for relocation. Control/history tables are explicitly
+excluded and their applicable lease/session/reservation states are checked
+separately. Non-public or externally encoded references require separate
+inventory and the same paused writers; this command does not claim to discover
+every arbitrary representation of an asset identifier.
+
+After reviewing that inventory, add these fields to the apply plan:
+
+- `referenceSchemaSha256`: the exact reviewed fingerprint;
+- `referenceWritesQuiesced: true`: the operator's actual related-writer and DDL
+  pause, not permission for the tool to stop services;
+- `referenceWriteTables`: at most16 named public reference tables, including
+  `oss_files`, whose writers the tool will additionally block with database
+  `SHARE ROW EXCLUSIVE` locks;
+- `quiescedReferenceTables`: each remaining discovered potential reference
+  table by its exact name, whose writers remain paused operationally.
+
+The two lists cannot overlap. An uncovered table is
+`REFERENCE_WRITE_SCOPE_GAP`; an unreviewed metadata change is
+`REFERENCE_SCHEMA_CHANGED`. Both hold apply before a durable action is created.
+Foreign relations cannot enter the actual lock list. Partition descendants are
+expanded and counted, with a total cap of16 physical tables including parents;
+a larger or cross-schema expansion holds before taking partial table locks.
+This is deliberately not a whole-database lock. Every listed but unlocked table
+still depends on the operator pause, even when `mutationPreconditionsMet` is
+true. That field records checked plan prerequisites, not observed quiescence.
+
+The final executor acquires the original identity, migration-coordination lock,
+selected table locks and receipt/action/file locks in a fixed order with a
+shared5s acquisition deadline, then repeats the inventory and reference scan
+inside the locks. The total final critical section is at most30s, provider
+DELETE+HEAD at most20s, and each reference SQL statement at most2s. Normal
+writers that straggle into selected tables can wait for that critical section;
+lock failures/timeouts hold or fail the action rather than broadening the lock
+scope or waiting forever. Unlocked writers must remain paused throughout.
+
+The journal records the reviewed fingerprint and operator pause assertion
+separately from `write_fence_tables`, the actual physical table locks completed
+by a successful final executor. Old journal rows gain blank/false/empty defaults
+only during explicit additive schema expansion; they acquire no inferred past
+pause or fence proof. Normal upload startup does not require this optional
+journal expansion. Old plan digests are preserved: do not silently reuse an old
+action ID with the new scope or discard its intent; review its state and use an
+explicit new action where appropriate.
+
+A provider DELETE and a database transaction cannot be rolled back atomically.
+If DELETE succeeds but HEAD/commit fails, the durable intent remains failed or
+processing, the retained typed compensation bytes remain, and the same exact
+reviewed plan can reconcile an already-absent raw input. An expired/superseded
+owner cannot commit. Keep the maintenance pause until those postconditions are
+checked. A later compensating restore requires a separate authorized action;
+the tool never promises to reconstruct old provider versions or delete bytes
+already downloaded by another party.

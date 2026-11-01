@@ -138,9 +138,9 @@ func (run *ossMaintenanceRun) claimAction(ctx context.Context, cfg ossConfigPayl
 		return "", err
 	}
 	token := newExportID()
-	_, err = tx.Exec(ctx, `insert into public.oss_upload_maintenance_actions(id,operation,state,file_id,bucket,endpoint,region,use_cname,target_key,source_key,plan_sha256,backup_reference,file_preimage,run_token,lease_expires_at)
- values($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,clock_timestamp()+interval '10 minutes')
- on conflict(id) do update set state=excluded.state,run_token=excluded.run_token,lease_expires_at=excluded.lease_expires_at,updated_at=clock_timestamp()`, e.ActionID, e.Operation, initialState, file.ID, cfg.Bucket, cfg.Endpoint, cfg.Region, cfg.UseCName || isCustomOSSEndpoint(cfg.Endpoint), targetKey, sourceKey, planSHA, run.opts.BackupReference, file.snapshot, token)
+	_, err = tx.Exec(ctx, `insert into public.oss_upload_maintenance_actions(id,operation,state,file_id,bucket,endpoint,region,use_cname,target_key,source_key,plan_sha256,backup_reference,file_preimage,run_token,lease_expires_at,reference_schema_sha256,quiescence_declared,quiesced_reference_tables)
+ values($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,clock_timestamp()+interval '10 minutes',$15,$16,$17::text[])
+ on conflict(id) do update set state=excluded.state,run_token=excluded.run_token,lease_expires_at=excluded.lease_expires_at,updated_at=clock_timestamp()`, e.ActionID, e.Operation, initialState, file.ID, cfg.Bucket, cfg.Endpoint, cfg.Region, cfg.UseCName || isCustomOSSEndpoint(cfg.Endpoint), targetKey, sourceKey, planSHA, run.opts.BackupReference, file.snapshot, token, run.plan.ReferenceSchemaSHA, run.plan.ReferenceWritesQuiesced, run.plan.QuiescedReferenceTables)
 	if err != nil {
 		return "", err
 	}
@@ -190,6 +190,9 @@ func (run *ossMaintenanceRun) failActionState(actionID, token, state string) {
 }
 
 func ossMaintenanceErrorStatus(err error) string {
+	if status := ossMaintenanceScopeStatus(err); status != "" {
+		return status
+	}
 	if errors.Is(err, errOSSMaintenanceDone) {
 		return "ALREADY_COMPLETED"
 	}

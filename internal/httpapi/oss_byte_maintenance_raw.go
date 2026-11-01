@@ -190,31 +190,40 @@ func (run *ossMaintenanceRun) rawGuards(ctx context.Context, tx pgx.Tx, file oss
 // through DELETE+HEAD, exactly as the existing deletion worker fences its own
 // provider side effect. No helper acquires a second pool connection inside it.
 func (run *ossMaintenanceRun) executeRawCleanup(ctx context.Context, e OSSByteMaintenanceEntry, token string, file ossMaintenanceFile, proof ossMaintenanceRawProof, cfg ossConfigPayload, client *aliyunoss.Client) error {
+	ctx, cancelCritical := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelCritical()
 	tx, err := run.s.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended('oss-completion:'||$1,0))`, cfg.Bucket+":"+cfg.Endpoint+":"+proof.Key); err != nil {
+	acquire, cancelAcquire := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelAcquire()
+	if _, err = tx.Exec(acquire, `select pg_advisory_xact_lock(hashtextextended('oss-completion:'||$1,0))`, cfg.Bucket+":"+cfg.Endpoint+":"+proof.Key); err != nil {
+		return err
+	}
+	fencedTables, err := run.freezeReferenceWriteScope(acquire, tx)
+	if err != nil {
 		return err
 	}
 	var binding string
-	if err = tx.QueryRow(ctx, `select id::text from public.oss_upload_byte_bindings where id=$1::uuid and file_id=$2 and status='committed' for share`, proof.ID, file.ID).Scan(&binding); err != nil {
+	if err = tx.QueryRow(acquire, `select id::text from public.oss_upload_byte_bindings where id=$1::uuid and file_id=$2 and status='committed' for share`, proof.ID, file.ID).Scan(&binding); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errOSSMaintenanceConflict
 		}
 		return err
 	}
-	if err = lockOSSByteMaintenanceActionTx(ctx, tx, e.ActionID, token, "processing"); err != nil {
+	if err = lockOSSByteMaintenanceActionTx(acquire, tx, e.ActionID, token, "processing"); err != nil {
 		return err
 	}
 	var fileID int64
-	if err = tx.QueryRow(ctx, `select id from public.oss_files file where id=$1 and to_jsonb(file)=$2::jsonb for update`, file.ID, file.snapshot).Scan(&fileID); err != nil {
+	if err = tx.QueryRow(acquire, `select id from public.oss_files file where id=$1 and to_jsonb(file)=$2::jsonb for update`, file.ID, file.snapshot).Scan(&fileID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errOSSMaintenanceConflict
 		}
 		return err
 	}
+	cancelAcquire()
 	var valid bool
 	if err = tx.QueryRow(ctx, `select exists(select 1 from public.oss_files file join public.oss_upload_byte_bindings binding on binding.file_id=file.id where binding.id=$1::uuid and binding.bucket=$2 and binding.endpoint=$3 and file.status='active' and file.source_hash_verified and `+ossByteBindingCurrentFileProofSQL+`)`, proof.ID, cfg.Bucket, cfg.Endpoint).Scan(&valid); err != nil {
 		return err
@@ -244,7 +253,7 @@ func (run *ossMaintenanceRun) executeRawCleanup(ctx context.Context, e OSSByteMa
 	if err = lockOSSByteMaintenanceActionTx(ctx, tx, e.ActionID, token, "processing"); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `update public.oss_upload_maintenance_actions set state='completed',binding_id=$2::uuid,updated_at=clock_timestamp() where id=$1::uuid`, e.ActionID, proof.ID); err != nil {
+	if _, err = tx.Exec(ctx, `update public.oss_upload_maintenance_actions set state='completed',binding_id=$2::uuid,write_fence_tables=$3::text[],updated_at=clock_timestamp() where id=$1::uuid`, e.ActionID, proof.ID, fencedTables); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
