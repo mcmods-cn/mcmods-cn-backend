@@ -3,7 +3,6 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 	"testing"
 )
 
@@ -37,13 +36,58 @@ func TestAuditFixRPH005AliasInputMappingAndManualResourceShortlink(t *testing.T)
 		seen[item.InputIndex] = true
 	}
 	link := f.require(t, "", http.MethodGet, "/api/v1/public-links/"+resource.PublicID, nil, 200)
-	if !strings.Contains(string(link), "/data/"+v.PublicID+"/") || !strings.Contains(string(link), "publicId="+resource.PublicID) {
-		t.Fatalf("manual shortlink lost resource/version: %s", link)
+	var resolved struct {
+		Data struct {
+			Target string `json:"target"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(link, &resolved); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/mods/test013-mod/resources/" + resource.PublicID + "?version=" + v.PublicID; resolved.Data.Target != want {
+		t.Fatalf("manual shortlink must use the existing exact resource detail route: got=%s want=%s", resolved.Data.Target, want)
 	}
 	if _, err := f.db.Exec(f.ctx, `update mod_content_versions set status='archived' where public_id=$1`, v.PublicID); err != nil {
 		t.Fatal(err)
 	}
 	f.require(t, "", http.MethodGet, "/api/v1/public-links/"+resource.PublicID, nil, 404)
+}
+
+func TestAuditFixSL003ImportedLinkUsesCurrentContentVersionAndSourceState(t *testing.T) {
+	f := newAuditFixGRFixture(t)
+	_, revision := f.imported(t, auditFixGRZip(t, nil))
+	f.reviewGR(t, revision, "approved")
+	var publicID string
+	if err := f.db.QueryRow(f.ctx, `select entity.public_id from catalog_entities entity join game_resources resource on resource.entity_id=entity.id where resource.canonical_id='example:audit_item' and resource.kind_code='minecraft.item'`).Scan(&publicID); err != nil {
+		t.Fatal(err)
+	}
+	link := f.require(t, "", http.MethodGet, "/api/v1/public-links/"+publicID, nil, 200)
+	var resolved struct {
+		Data struct {
+			Target string `json:"target"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(link, &resolved); err != nil {
+		t.Fatal(err)
+	}
+	if want := "/mods/audit-gr-" + f.modCode + "/resources/" + publicID + "?version=" + f.versionPublic; resolved.Data.Target != want {
+		t.Fatalf("import link must use resource and target content version, never import revision: got=%s want=%s", resolved.Data.Target, want)
+	}
+	f.require(t, "", http.MethodGet, "/api/v1/mods/audit-gr-"+f.modCode+"/content-resources/"+publicID, nil, 200)
+	// Isolated source-state fixtures test current visibility, without claiming
+	// that these SQL transitions are a public withdrawal API.
+	if _, err := f.db.Exec(f.ctx, `update catalog_import_revisions set is_active=false where id=$1`, revision); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, "", http.MethodGet, "/api/v1/public-links/"+publicID, nil, 404)
+	if _, err := f.db.Exec(f.ctx, `update catalog_import_revisions set is_active=true where id=$1`, revision); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, "", http.MethodGet, "/api/v1/public-links/"+publicID, nil, 200)
+	if _, err := f.db.Exec(f.ctx, `update mod_content_versions set status='archived' where id=$1`, f.versionID); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, "", http.MethodGet, "/api/v1/public-links/"+publicID, nil, 404)
 }
 
 func TestAuditFixSL002EconomyLinksUseExistingWorkspace(t *testing.T) {

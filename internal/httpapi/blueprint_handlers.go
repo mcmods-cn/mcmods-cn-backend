@@ -1238,35 +1238,37 @@ func (s *Server) catalogPublicTarget(ctx context.Context, entityType string, int
 	case "recipe":
 		return "/recipe-types?recipePublicId=" + url.QueryEscape(publicID)
 	case "resource", "structure", "document":
-		var revisionID, siteID, registry, kind string
+		var versionID, siteID string
 		// Manual publications use a content-version identity, rather than an
 		// import revision. Prefer a currently visible manual source and use a
 		// deterministic version ordering when there are several publications.
-		manualErr := s.db.QueryRow(ctx, `select version.public_id,mod.slug,resource.kind_code
+		manualErr := s.db.QueryRow(ctx, `select version.public_id,mod.slug
 			from mod_resource_version_details detail
 			join mod_content_versions version on version.id=detail.version_id and version.status='active'
 			join mods mod on mod.id=version.mod_id and mod.review_status='approved'
 			join game_resources resource on resource.entity_id=detail.resource_id
 			where detail.resource_id=$1 and detail.status='active' and detail.published_revision_id is not null
-			order by version.updated_at desc,version.id desc limit 1`, internalID).Scan(&revisionID, &siteID, &kind)
+			order by version.updated_at desc,version.id desc limit 1`, internalID).Scan(&versionID, &siteID)
 		if manualErr == nil {
-			return "/mods/" + url.PathEscape(siteID) + "/data/" + url.PathEscape(revisionID) + "/" + url.PathEscape(categoryForResourceKind(kind)) + "/entry?publicId=" + url.QueryEscape(publicID)
+			return "/mods/" + url.PathEscape(siteID) + "/resources/" + url.PathEscape(publicID) + "?version=" + url.QueryEscape(versionID)
 		}
 		if !errors.Is(manualErr, pgx.ErrNoRows) {
 			return ""
 		}
-		err := s.db.QueryRow(ctx, `select snapshot.revision_id,mod.slug,snapshot.registry,resource.kind_code
+		// Resource detail pages select a content version. An import revision is
+		// a source for that version, not a frontend route/version identity.
+		err := s.db.QueryRow(ctx, `select version.public_id,mod.slug
 			from game_resources resource
 			join resource_import_snapshots snapshot on snapshot.resource_id=resource.entity_id
 			join catalog_import_revisions revision on revision.id=snapshot.revision_id and revision.is_active
 			join mods mod on mod.id=revision.mod_id and mod.review_status='approved'
+			join mod_content_versions version on version.id=revision.target_version_id and version.mod_id=mod.id and version.status='active'
 			where resource.entity_id=$1 and revision.status in ('ready','partial') order by revision.activated_at desc nulls last limit 1`, internalID).
-			Scan(&revisionID, &siteID, &registry, &kind)
+			Scan(&versionID, &siteID)
 		if err != nil {
 			return ""
 		}
-		category := categoryForResourceKind(kind)
-		return "/mods/" + url.PathEscape(siteID) + "/data/" + url.PathEscape(revisionID) + "/" + url.PathEscape(category) + "/entry?publicId=" + url.QueryEscape(publicID) + "&registry=" + url.QueryEscape(registry)
+		return "/mods/" + url.PathEscape(siteID) + "/resources/" + url.PathEscape(publicID) + "?version=" + url.QueryEscape(versionID)
 	}
 	return ""
 }
