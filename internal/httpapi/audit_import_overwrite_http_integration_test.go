@@ -43,6 +43,12 @@ func TestAuditGR003ActualHTTPWorkerOverwritePreservesHumanAndMissingEntriesInteg
 			if err := f.db.QueryRow(f.ctx, `select id from catalog_import_revisions where job_id=$1 and status='ready' and not is_active`, job.ID).Scan(&second); err != nil {
 				t.Fatal(err)
 			}
+			detail := decodeTEST022Data[map[string]any](t, f.require(t, f.reviewer, http.MethodGet, "/api/v1/export-revisions/"+second, nil, 200))
+			changes, ok := detail["resourceChanges"].(map[string]any)
+			if !ok || detail["previousRevisionId"] != first || changes["added"] != float64(1) || changes["changed"] != float64(2) || changes["removed"] != float64(1) {
+				t.Fatalf("pending source comparison does not identify exact old revision: previous=%v changes=%v", detail["previousRevisionId"], changes)
+			}
+			f.require(t, "", http.MethodGet, "/api/v1/export-revisions/"+second, nil, 403)
 			f.reviewGR(t, second, "approved")
 			wantStack := float64(64)
 			wantRemoved, removedHTTP := "active", 200
