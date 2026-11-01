@@ -32,11 +32,13 @@ type test016FileFixture struct {
 	server   *Server
 	provider *httptest.Server
 	requests *atomic.Int64
+	copies   *atomic.Int64
+	objects  func() map[string]string
 }
 
 func newTEST016FileFixture(t *testing.T) test016FileFixture {
 	t.Helper()
-	f := test016FileFixture{test013Fixture: newTEST013Fixture(t), requests: new(atomic.Int64)}
+	f := test016FileFixture{test013Fixture: newTEST013Fixture(t), requests: new(atomic.Int64), copies: new(atomic.Int64)}
 	f.server = f.origin.Config.Handler.(*Server)
 	type object struct {
 		data              []byte
@@ -44,13 +46,54 @@ func newTEST016FileFixture(t *testing.T) test016FileFixture {
 	}
 	objects := map[string]object{}
 	var mu sync.Mutex
+	f.objects = func() map[string]string {
+		mu.Lock()
+		defer mu.Unlock()
+		result := map[string]string{}
+		for key, stored := range objects {
+			result[key] = sha256Hex(stored.data)
+		}
+		return result
+	}
 	f.provider = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.requests.Add(1)
 		mu.Lock()
 		defer mu.Unlock()
+		key := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/"), "test016-owned/")
+		providerError := func(status int, code string) {
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, "<Error><Code>"+code+"</Code><Message>owned TEST016 protocol response</Message></Error>")
+		}
 		if r.Method == http.MethodPut {
-			if _, exists := objects[r.URL.Path]; exists {
-				w.WriteHeader(http.StatusConflict)
+			if _, exists := objects[key]; exists {
+				providerError(http.StatusConflict, "FileAlreadyExists")
+				return
+			}
+			if source := r.Header.Get("x-oss-copy-source"); source != "" {
+				body, readErr := io.ReadAll(io.LimitReader(r.Body, 1))
+				sealedTarget := isOSSSealedObjectKey(key)
+				forbidOverwrite := r.Header.Get("x-oss-forbid-overwrite") == "true"
+				t.Logf("TEST016_COPY actual_content_length=%d actual_body_bytes=%d sealed_target=%v forbid_overwrite=%v", r.ContentLength, len(body), sealedTarget, forbidOverwrite)
+				if readErr != nil || len(body) != 0 || !sealedTarget || !forbidOverwrite {
+					providerError(http.StatusBadRequest, "InvalidArgument")
+					return
+				}
+				decoded, err := url.PathUnescape(source)
+				if err != nil || !strings.HasPrefix(decoded, "/test016-owned/") {
+					providerError(http.StatusBadRequest, "InvalidArgument")
+					return
+				}
+				original, exists := objects[strings.TrimPrefix(decoded, "/test016-owned/")]
+				if !exists {
+					providerError(http.StatusNotFound, "NoSuchKey")
+					return
+				}
+				objects[key] = object{bytes.Clone(original.data), original.hash, original.contentType}
+				f.copies.Add(1)
+				w.Header().Set("ETag", `"test016-owned"`)
+				w.Header().Set("Content-Type", "application/xml")
+				_, _ = io.WriteString(w, `<CopyObjectResult><LastModified>2026-09-30T00:00:00.000Z</LastModified><ETag>test016-owned</ETag></CopyObjectResult>`)
 				return
 			}
 			data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
@@ -58,14 +101,19 @@ func newTEST016FileFixture(t *testing.T) test016FileFixture {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			objects[r.URL.Path] = object{data, r.Header.Get("x-oss-meta-sha256"), r.Header.Get("Content-Type")}
+			objects[key] = object{data, r.Header.Get("x-oss-meta-sha256"), r.Header.Get("Content-Type")}
 			w.Header().Set("ETag", `"test016-owned"`)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		entry, exists := objects[r.URL.Path]
+		if r.Method == http.MethodDelete {
+			delete(objects, key)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		entry, exists := objects[key]
 		if !exists {
-			w.WriteHeader(http.StatusNotFound)
+			providerError(http.StatusNotFound, "NoSuchKey")
 			return
 		}
 		if r.Method != http.MethodHead && r.Method != http.MethodGet {
@@ -188,6 +236,15 @@ func (f test016FileFixture) register(t *testing.T, token, base, name string) (st
 		t.Fatalf("registration lacks public ID: %v %s", err, raw)
 	}
 	return response.Data.ID, upload
+}
+
+func (f test016FileFixture) storedKey(t *testing.T, publicID string, upload ossCompleteUploadRequest) string {
+	t.Helper()
+	var key string
+	if err := f.db.QueryRow(f.ctx, `select file.object_key from oss_files file join oss_upload_byte_bindings binding on binding.file_id=file.id where file.public_id=$1 and binding.upload_object_key=$2 and file.uploader_id=$3 and binding.bucket='test016-owned' and binding.endpoint=$4 and `+ossByteBindingCurrentFileProofSQL, publicID, upload.ObjectKey, f.userIDs[f.editor], f.provider.URL).Scan(&key); err != nil || key == upload.ObjectKey || !isOSSSealedObjectKey(key) {
+		t.Fatalf("registered public file lacks its exact owner/bucket/provider/alias/sealed proof: %v", err)
+	}
+	return key
 }
 
 func test016Metadata(ossID string) createProjectFileRequest {
@@ -337,6 +394,7 @@ func TestTEST016ProjectDownloadCountersFailAtomicallyBeforeSuccessHTTPIntegratio
 	f := newTEST016FileFixture(t)
 	base := "/api/v1/projects/mod/" + f.modCode + "/files"
 	ossID, upload := f.register(t, f.editor, base, "download.jar")
+	storedKey := f.storedKey(t, ossID, upload)
 	id := f.attach(t, f.editor, base, ossID)
 	f.scan(t, ossID, "clean", http.StatusOK)
 	download := base + "/internal/" + id + "/download"
@@ -388,7 +446,7 @@ func TestTEST016ProjectDownloadCountersFailAtomicallyBeforeSuccessHTTPIntegratio
 		t.Fatal("signed owned GET did not return the actual immutable artifact")
 	}
 	var count, stats int
-	if err = f.db.QueryRow(f.ctx, `select download_count,(select downloads from oss_download_stats where object_key=$2) from project_files where public_id=$1`, id, upload.ObjectKey).Scan(&count, &stats); err != nil || count != 1 || stats != 1 {
+	if err = f.db.QueryRow(f.ctx, `select download_count,(select downloads from oss_download_stats where object_key=$2) from project_files where public_id=$1 and oss_file_id=(select id from oss_files where public_id=$3)`, id, storedKey, ossID).Scan(&count, &stats); err != nil || count != 1 || stats != 1 {
 		t.Fatalf("download counts diverged: %d/%d %v", count, stats, err)
 	}
 	type outcome struct {
@@ -423,7 +481,7 @@ func TestTEST016ProjectDownloadCountersFailAtomicallyBeforeSuccessHTTPIntegratio
 			t.Fatalf("concurrent download failed: %+v", result)
 		}
 	}
-	if err = f.db.QueryRow(f.ctx, `select download_count,(select downloads from oss_download_stats where object_key=$2) from project_files where public_id=$1`, id, upload.ObjectKey).Scan(&count, &stats); err != nil || count != 17 || stats != 17 {
+	if err = f.db.QueryRow(f.ctx, `select download_count,(select downloads from oss_download_stats where object_key=$2) from project_files where public_id=$1 and oss_file_id=(select id from oss_files where public_id=$3)`, id, storedKey, ossID).Scan(&count, &stats); err != nil || count != 17 || stats != 17 {
 		t.Fatalf("concurrent counters lost/duplicated increments: %d/%d %v", count, stats, err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"mcmods-cn-backend/internal/activity"
 	"net/http"
 	"net/url"
+	"reflect"
 	"testing"
 )
 
@@ -87,19 +88,40 @@ func TestAuditFixCMP003UserFileDeletionActivitySharesTombstoneAndQuotaTransactio
 	raw := []byte("Synthetic exact bytes for user deletion transaction")
 	ticket := f.ticket(t, f.editor, "/api/v1/users/me/oss/uploads/presign", "atomic-delete.zip", "application/octet-stream", "test037-atomic", raw)
 	f.put(t, ticket, raw)
-	f.require(t, f.editor, http.MethodPost, "/api/v1/users/me/oss/uploads/complete", ticket.completion(), 201)
+	registered := decodeTEST022Data[struct{ ID string }](t, f.require(t, f.editor, http.MethodPost, "/api/v1/users/me/oss/uploads/complete", ticket.completion(), 201))
+	var fileID int64
+	var storedKey, fileBucket, fileEndpoint, providerBucket, providerEndpoint, bindingID string
+	if err := f.db.QueryRow(f.ctx, `select file.id,file.object_key,file.bucket,file.endpoint,binding.bucket,binding.endpoint,binding.id::text from oss_files file join oss_upload_byte_bindings binding on binding.file_id=file.id where file.public_id=$1 and file.uploader_id=$2 and file.status='active' and binding.upload_object_key=$3 and `+ossByteBindingCurrentFileProofSQL, registered.ID, f.userIDs[f.editor], ticket.ObjectKey).Scan(&fileID, &storedKey, &fileBucket, &fileEndpoint, &providerBucket, &providerEndpoint, &bindingID); err != nil || storedKey == ticket.ObjectKey || !isOSSSealedObjectKey(storedKey) {
+		t.Fatal("normal completion lacks its exact public file, owner and sealed/provider receipt identity")
+	}
 	body := map[string]string{"objectKey": ticket.ObjectKey}
 	auditFixInjectActivityFailure(t, f.test013Fixture, f.userIDs[f.editor], true)
-	before := f.facts(t)
+	before := auditOSSByteCapabilityFacts(t, f)
 	response := f.require(t, f.editor, http.MethodDelete, "/api/v1/users/me/files", body, 500)
 	auditFixRequireSpecificActivityError(t, response, "failed to persist user activity")
-	f.unchanged(t, before)
+	if !reflect.DeepEqual(before, auditOSSByteCapabilityFacts(t, f)) {
+		t.Fatal("failed deletion changed business/quota/activity/receipt/grant/journal or actual provider bytes")
+	}
 	auditFixInjectActivityFailure(t, f.test013Fixture, f.userIDs[f.editor], false)
 	f.require(t, f.editor, http.MethodDelete, "/api/v1/users/me/files", body, 200)
 	var status string
-	var intents int
-	if err := f.db.QueryRow(f.ctx, `select status,(select count(*) from oss_object_deletion_outbox where object_key=$1) from oss_files where object_key=$1`, ticket.ObjectKey).Scan(&status, &intents); err != nil || status != "deleted" || intents != 1 {
-		t.Fatalf("actual file status=%s deleteIntents=%d err=%v", status, intents, err)
+	var storedIntents, rawIntents, allIntents int
+	var rawDeferred bool
+	if err := f.db.QueryRow(f.ctx, `select file.status,
+ (select count(*) from oss_object_deletion_outbox where oss_file_id=file.id and bucket=$3 and endpoint=$4 and object_key=$2 and raw_upload_binding_id is null and reason='user-delete' and status='pending'),
+ (select count(*) from oss_object_deletion_outbox where oss_file_id=file.id and bucket=$5 and endpoint=$6 and object_key=$7 and raw_upload_binding_id=$8::uuid and reason='deleted-upload-original-input' and status='pending'),
+ (select count(*) from oss_object_deletion_outbox),
+ exists(select 1 from oss_object_deletion_outbox deletion join oss_upload_capabilities capability on capability.bucket=deletion.bucket and capability.endpoint=deletion.endpoint and capability.object_key=deletion.object_key where deletion.oss_file_id=file.id and deletion.raw_upload_binding_id=$8::uuid and deletion.attempts=0 and deletion.next_attempt_at>=capability.max_expires_at+interval '1 second')
+ from oss_files file where file.id=$1 and file.public_id=$9 and file.object_key=$2 and file.bucket=$3 and file.endpoint=$4`, fileID, storedKey, fileBucket, fileEndpoint, providerBucket, providerEndpoint, ticket.ObjectKey, bindingID, registered.ID).Scan(&status, &storedIntents, &rawIntents, &allIntents, &rawDeferred); err != nil || status != "deleted" || storedIntents != 1 || rawIntents != 1 || allIntents != 2 || !rawDeferred {
+		t.Fatalf("exact file/physical targets/raw deadline: status=%s stored=%d raw=%d all=%d deferred=%v err=%v", status, storedIntents, rawIntents, allIntents, rawDeferred, err)
+	}
+	var total, daily int64
+	var reservations int
+	if err := f.db.QueryRow(f.ctx, `select (select active_source_bytes+active_stored_bytes+reserved_source_bytes+reserved_stored_bytes from oss_user_quota_usage where user_id=$1),(select coalesce(sum(active_source_bytes+active_stored_bytes+reserved_source_bytes+reserved_stored_bytes),0) from oss_user_daily_quota_usage where user_id=$1),(select count(*) from oss_user_upload_quota_reservations where user_id=$1)`, f.userIDs[f.editor]).Scan(&total, &daily, &reservations); err != nil || total != 0 || daily != 0 || reservations != 0 {
+		t.Fatalf("deleted file quota retained: total=%d daily=%d reservations=%d err=%v", total, daily, reservations, err)
+	}
+	if after := auditOSSByteCapabilityFacts(t, f); after["ownedObjectBytesAndMetadata"] != before["ownedObjectBytesAndMetadata"] {
+		t.Fatal("intent-only user deletion changed physical bytes before its dedicated worker")
 	}
 	if count := auditFixActivityIntentCount(t, f.test013Fixture, f.editor, activity.ActionDelete, activity.ObjectFile); count != 1 {
 		t.Fatalf("file deletion activity=%d want1", count)
