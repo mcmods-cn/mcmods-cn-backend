@@ -112,15 +112,10 @@ func TestOptionalAuthTreatsInvalidCookieAsGuest(t *testing.T) {
 	if got := response.Header().Get(authStateHeader); got != authStateInvalid {
 		t.Fatalf("authentication state header = %q, want %q", got, authStateInvalid)
 	}
-	cleared := false
 	for _, cookie := range response.Result().Cookies() {
-		if cookie.Name == authSessionCookieName && cookie.MaxAge < 0 {
-			cleared = true
-			break
+		if cookie.Name == authSessionCookieName {
+			t.Fatal("optional read must not delete a newer login through a late response")
 		}
-	}
-	if !cleared {
-		t.Fatal("expected invalid authentication cookie to be cleared")
 	}
 }
 

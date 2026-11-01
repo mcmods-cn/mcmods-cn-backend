@@ -90,14 +90,10 @@ func (s *Server) optionalAuth(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) continueOptionalAuthAsGuest(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
 	// Optional authentication must never turn a public endpoint into a protected
-	// one. Expire an invalid cookie so subsequent public requests do not repeat
-	// the lookup; an explicit Authorization header is owned by the API client.
+	// one. Do not mutate its session cookie: this response can arrive after a
+	// newer login, and browsers apply Set-Cookie before a client generation guard
+	// can reject the old response. Explicit logout owns cookie deletion.
 	w.Header().Set(authStateHeader, authStateInvalid)
-	if strings.TrimSpace(r.Header.Get("Authorization")) == "" {
-		if _, err := r.Cookie(authSessionCookieName); err == nil {
-			s.clearAuthSessionCookie(w, r)
-		}
-	}
 	next.ServeHTTP(w, r)
 }
 
