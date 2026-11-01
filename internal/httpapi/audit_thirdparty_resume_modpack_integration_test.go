@@ -13,9 +13,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
-
-	"mcmods-cn-backend/internal/antiabuse"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -173,49 +170,15 @@ func TestAuditResumeCMP007ManualAndActualProviderWorkerResolveAfterIndependentAp
 				t.Fatal("normal mixed pack did not remain pending with two logical references")
 			}
 			auditResumeRequireUnresolved(t, f, pack, future, false, "")
-			// The anti-abuse success fingerprint is asynchronous after HTTP201.
-			// Wait for the actual matching persisted fact before asserting its
-			// specific duplicate refusal; never weaken the domain409 check.
-			if mode == "provider-worker" {
-				encoded, err := json.Marshal(draft)
-				if err != nil {
-					t.Fatal(err)
-				}
-				request := httptest.NewRequest(http.MethodPost, "/api/v1/modpacks", bytes.NewReader(encoded))
-				request.Header.Set("Content-Type", "application/json")
-				_, content := inspectAntiAbuseBody(request)
-				normalized := antiabuse.NormalizeContent(content)
-				if normalized == "" {
-					t.Fatal("provider duplicate has no content fingerprint premise")
-				}
-				expectedHash := antiabuse.ContentHash(normalized)
-				deadline := time.NewTimer(3 * time.Second)
-				ticker := time.NewTicker(10 * time.Millisecond)
-				defer deadline.Stop()
-				defer ticker.Stop()
-				for {
-					var persisted bool
-					if err := f.db.QueryRow(f.ctx, `select exists(select 1 from anti_abuse_content_fingerprints where user_id=$1 and action='review.submit' and exact_hash=$2)`, f.userIDs[f.editor], expectedHash).Scan(&persisted); err != nil {
-						t.Fatal(err)
-					}
-					if persisted {
-						break
-					}
-					select {
-					case <-ticker.C:
-					case <-deadline.C:
-						t.Fatal("actual successful submission fingerprint not persisted within bounded observer window")
-					}
-				}
-			}
+			// A distinct proposal with the same site identity must reach the
+			// domain conflict. Exact repeated content can legitimately be refused
+			// earlier by anti-abuse, which is a different contract.
+			duplicateDraft := draft
+			duplicateDraft.BodyMarkdown = "Different proposal for an already registered pack identity: " + f.modCode
 			before := auditResumeModpackFacts(t, f)
-			rejection := 409
-			if mode == "provider-worker" {
-				rejection = 403
-			}
-			duplicate := f.require(t, f.editor, http.MethodPost, "/api/v1/modpacks", draft, rejection)
-			if mode == "provider-worker" && !strings.Contains(string(duplicate), `"code":"duplicate_content"`) {
-				t.Fatal("provider duplicate hit an unrelated refusal")
+			duplicate := f.require(t, f.editor, http.MethodPost, "/api/v1/modpacks", duplicateDraft, 409)
+			if !strings.Contains(string(duplicate), "modpack site ID is already used") {
+				t.Fatal("duplicate identity hit an unrelated conflict")
 			}
 			auditResumeRequireFacts(t, before, auditResumeModpackFacts(t, f))
 			f.require(t, "", http.MethodGet, "/api/v1/modpacks/"+pack.SiteID, nil, 404)
