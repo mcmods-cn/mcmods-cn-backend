@@ -129,13 +129,13 @@ func (recorder *auditModFormRecorder) handler(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.Header.Get("Idempotency-Key") == "owned-independent-revision-probe" {
+		if strings.HasPrefix(r.Header.Get("Idempotency-Key"), "owned-independent-revision-probe-") {
 			caseID = "preflight-" + caseID
 		}
 		inspect, _ := http.NewRequest(http.MethodPost, r.URL.Path, bytes.NewReader(raw))
 		inspect.Header.Set("Content-Type", "application/json")
 		_, content := inspectAntiAbuseBody(inspect)
-		attempt := auditModFormAttempt{CaseID: caseID, Method: r.Method, Path: r.URL.Path, SiteID: site, BodySHA256: sha256Hex(raw), ContentSHA256: antiabuse.ContentHash(antiabuse.NormalizeContent(content)), HasProof: r.Header.Get("X-Anti-Abuse-Challenge") != "", At: time.Now().UTC().Format(time.RFC3339Nano)}
+		attempt := auditModFormAttempt{CaseID: caseID, Method: r.Method, Path: r.URL.Path, SiteID: site, RequestID: r.Header.Get("X-Request-ID"), BodySHA256: sha256Hex(raw), ContentSHA256: antiabuse.ContentHash(antiabuse.NormalizeContent(content)), HasProof: r.Header.Get("X-Anti-Abuse-Challenge") != "", At: time.Now().UTC().Format(time.RFC3339Nano)}
 		if key := r.Header.Get("Idempotency-Key"); key != "" {
 			attempt.IdempotencySHA = sha256Hex([]byte(key))
 		}
@@ -144,7 +144,7 @@ func (recorder *auditModFormRecorder) handler(next http.Handler) http.Handler {
 		}
 		observed := &auditModFormResponse{ResponseWriter: w}
 		next.ServeHTTP(observed, r)
-		attempt.Status, attempt.RequestID = observed.status, observed.Header().Get("X-Request-ID")
+		attempt.Status = observed.status
 		attempt.RetryAfter, _ = strconv.Atoi(observed.Header().Get("Retry-After"))
 		var errorBody struct {
 			Code string `json:"code"`
@@ -190,6 +190,9 @@ func auditModFormDo(t *testing.T, f auditFixGRFixture, token, method, path strin
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
 	r.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36")
+	if method != http.MethodGet {
+		r.Header.Set("X-Request-ID", "owned-form-"+randomCatalogPublicID())
+	}
 	if body != nil {
 		r.Header.Set("Content-Type", "application/json")
 	}
@@ -210,21 +213,46 @@ func auditModFormDo(t *testing.T, f auditFixGRFixture, token, method, path strin
 
 func auditModFormInitialSubmit(t *testing.T, f auditFixGRFixture, token string, payload createModRequest) {
 	t.Helper()
-	form := decodeTEST022Data[antiabuse.FormToken](t, f.require(t, token, http.MethodGet, "/api/v1/anti-abuse/form-token?action=review.submit&object=/api/v1/mods", nil, 200))
-	timer := time.NewTimer(f.server.cfg.AntiAbuse.FormMinimumAge + 30*time.Millisecond)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-	case <-f.ctx.Done():
-		t.Fatal(f.ctx.Err())
-	}
-	status, raw, _ := auditModFormDo(t, f, token, http.MethodPost, "/api/v1/mods", payload, map[string]string{"X-Anti-Abuse-Form": form.Token, "Idempotency-Key": "owned-initial-" + payload.SiteID})
-	if status != http.StatusCreated {
+	auditModFormSubmitExpect(t, f, token, "/api/v1/mods", payload, "owned-initial-"+payload.SiteID, http.StatusCreated)
+}
+
+func auditModFormSubmitExpect(t *testing.T, f auditFixGRFixture, token, path string, body any, idempotency string, want int) (int, []byte) {
+	t.Helper()
+	for {
+		form := decodeTEST022Data[antiabuse.FormToken](t, f.require(t, token, http.MethodGet, "/api/v1/anti-abuse/form-token?action=review.submit&object="+url.QueryEscape(path), nil, 200))
+		timer := time.NewTimer(f.server.cfg.AntiAbuse.FormMinimumAge + 30*time.Millisecond)
+		select {
+		case <-timer.C:
+		case <-f.ctx.Done():
+			timer.Stop()
+			t.Fatal(f.ctx.Err())
+		}
+		status, raw, headers := auditModFormDo(t, f, token, http.MethodPost, path, body, map[string]string{"X-Anti-Abuse-Form": form.Token, "Idempotency-Key": idempotency})
+		if status == want {
+			return status, raw
+		}
 		var failure struct {
 			Code string `json:"code"`
 		}
 		_ = json.Unmarshal(raw, &failure)
-		t.Fatalf("ordinary initial creation status=%d code=%s", status, failure.Code)
+		if status != 429 || failure.Code != "rate_limited" {
+			t.Fatalf("ordinary form status=%d expected=%d code=%s; no policy bypass", status, want, failure.Code)
+		}
+		seconds, err := strconv.Atoi(headers.Get("Retry-After"))
+		if err != nil || seconds <= 0 {
+			t.Fatal("normal form quota lacks precise positive Retry-After")
+		}
+		t.Logf("MOD_FORM_SETUP_QUOTA path=%s wait_actual_RetryAfter_seconds=%d snapshot_and_idempotency_unchanged=true", path, seconds)
+		timer = time.NewTimer(time.Duration(seconds) * time.Second)
+		select {
+		case <-timer.C:
+		case <-f.ctx.Done():
+			timer.Stop()
+			t.Fatal(f.ctx.Err())
+		}
+		// A previous response consumed its one-use form metadata, including a
+		// quota refusal. Refresh it normally after the real wait, then keep the
+		// same business body and idempotency key for the retry.
 	}
 }
 
@@ -401,7 +429,8 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 	seed.Summary = "Independent supplied overview of normal revision content"
 	seed.BodyMarkdown = "Detailed ordinary revision source written separately from its supplied summary"
 	seed.Localizations = []catalogLocalizationEdit{{Locale: "en-US", Name: seed.SecondaryName, Summary: seed.Summary, ContentMarkdown: seed.BodyMarkdown}}
-	f.require(t, f.otherEditor, http.MethodPost, "/api/v1/mods", seed, 201)
+	recorder.register(seed.SiteID, "setup-reference")
+	auditModFormInitialSubmit(t, f, f.otherEditor, seed)
 	raw, _ := json.Marshal(seed)
 	inspect, _ := http.NewRequest(http.MethodPost, "/api/v1/mods", bytes.NewReader(raw))
 	inspect.Header.Set("Content-Type", "application/json")
@@ -440,23 +469,24 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 			t.Fatal("revision snapshot content differs from ordinary successful source")
 		}
 	}
-	probeID, _, probeToken := createTEST044User(t, f.ctx, f.db, f.server.cfg, "mod-form-probe-"+randomCatalogPublicID(), "UTC")
-	grantTEST044Permissions(t, f.ctx, f.db, probeID, "project.edit."+revisionCases[0].ProjectPublicID)
-	probePath := "/api/v1/mods/" + revisionCases[0].SiteID + "/revisions"
-	form := decodeTEST022Data[antiabuse.FormToken](t, f.require(t, probeToken, http.MethodGet, "/api/v1/anti-abuse/form-token?action=review.submit&object="+url.QueryEscape(probePath), nil, 200))
-	timer := time.NewTimer(f.server.cfg.AntiAbuse.FormMinimumAge + 30*time.Millisecond)
-	select {
-	case <-timer.C:
-	case <-f.ctx.Done():
-		t.Fatal(f.ctx.Err())
-	}
-	status, response, _ := auditModFormDo(t, f, probeToken, http.MethodPost, probePath, submitModRevisionRequest{Snapshot: revisionCases[0].FormValues, ChangeReason: revisionCases[0].ChangeReason, BaseRevisionID: &revisionCases[0].BaseRevisionID}, map[string]string{"X-Anti-Abuse-Form": form.Token, "Idempotency-Key": "owned-independent-revision-probe"})
-	var preflight struct {
-		Code string `json:"code"`
-	}
-	_ = json.Unmarshal(response, &preflight)
-	if status != 428 || preflight.Code != "challenge_required" {
-		t.Fatalf("natural ordinary revision probe status=%d code=%s", status, preflight.Code)
+	preflights := []map[string]any{}
+	for _, c := range revisionCases {
+		probeID, public, probeToken := createTEST044User(t, f.ctx, f.db, f.server.cfg, "mod-form-probe-"+c.Mode+"-"+randomCatalogPublicID(), "UTC")
+		grantTEST044Permissions(t, f.ctx, f.db, probeID, c.EditPermission)
+		probePath := "/api/v1/mods/" + c.SiteID + "/revisions"
+		status, response := auditModFormSubmitExpect(t, f, probeToken, probePath, submitModRevisionRequest{Snapshot: c.FormValues, ChangeReason: c.ChangeReason, BaseRevisionID: &c.BaseRevisionID}, "owned-independent-revision-probe-"+c.Mode, 428)
+		var preflight struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(response, &preflight)
+		if status != 428 || preflight.Code != "challenge_required" {
+			t.Fatalf("natural ordinary revision probe status=%d code=%s", status, preflight.Code)
+		}
+		var created int
+		if err = f.db.QueryRow(f.ctx, `select count(*) from content_revisions where created_by=$1`, probeID).Scan(&created); err != nil || created != 0 {
+			t.Fatal("preflight probe wrote a revision")
+		}
+		preflights = append(preflights, map[string]any{"caseId": c.CaseID, "probeActorPublicId": public, "status": status, "code": preflight.Code, "additionalRevisions": created, "scope": c.EditPermission})
 	}
 	privateDir := filepath.Join(directory, ".private")
 	if err = os.Mkdir(privateDir, 0700); err != nil {
@@ -468,7 +498,7 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 	if err = f.db.QueryRow(f.ctx, `select current_schema()`).Scan(&schema); err != nil || !regexp.MustCompile(`^mcmods_audit_[0-9a-f]{16}$`).MatchString(schema) {
 		t.Fatal("owned regular schema required")
 	}
-	runtime := map[string]any{"owner": "mcmods-live-mod-form", "state": "READY", "pid": os.Getpid(), "ownedSchema": schema, "apiOrigin": f.origin.URL, "frontendOrigin": "http://127.0.0.1:3531", "authCookieName": authSessionCookieName, "authPath": authPath, "repoRevisions": revisions, "revisionCases": revisionCases, "localeCases": localeCases, "referenceContentSHA256": seedHash, "preflight": map[string]any{"status": 428, "code": "challenge_required", "actorIsSeparateScopedProbe": true, "actualSuccessfulOtherUserFingerprint": true}, "policy": map[string]any{"defaultThreshold": settings.ChallengeThreshold, "challengeTTLSeconds": 600, "formMinimumAgeMilliseconds": 800, "unchanged": true, "reviewer": "one independent agedverified content.review account; actualRetryAfter obeyed", "matrixActorRationale": "32 predeclared independent locale/variant cases, each submits one distinct Mod"}, "reviewProtocol": map[string]string{"request": "review-request.<caseId>.json {caseId,siteId,bodySHA256}", "response": "review-result.<caseId>.json", "done": "done.flag only after native completion; PG independently validated", "stop": "STOP to end without acceptance"}, "stopPath": filepath.Join(directory, "STOP"), "createdAt": time.Now().UTC(), "serveDeadline": time.Now().Add(55 * time.Minute).UTC(), "scope": "ACTUAL_HTTP_POSTGRESQL_NATIVE_DRIVER_SEPARATE; no game/queue/production claim"}
+	runtime := map[string]any{"owner": "mcmods-live-mod-form", "state": "READY", "pid": os.Getpid(), "ownedSchema": schema, "apiOrigin": f.origin.URL, "frontendOrigin": "http://127.0.0.1:3531", "authCookieName": authSessionCookieName, "authPath": authPath, "repoRevisions": revisions, "revisionCases": revisionCases, "localeCases": localeCases, "referenceContentSHA256": seedHash, "preflight": map[string]any{"status": 428, "code": "challenge_required", "actorIsSeparateScopedProbe": true, "actualSuccessfulOtherUserFingerprint": true, "cases": preflights}, "policy": map[string]any{"defaultThreshold": settings.ChallengeThreshold, "challengeTTLSeconds": 600, "formMinimumAgeMilliseconds": 800, "unchanged": true, "reviewer": "one independent agedverified content.review account; actualRetryAfter obeyed", "matrixActorRationale": "32 predeclared independent locale/variant cases, each submits one distinct Mod"}, "reviewProtocol": map[string]string{"request": "review-request.<caseId>.json {caseId,siteId,bodySHA256}", "response": "review-result.<caseId>.json", "done": "done.flag only after native completion; PG independently validated", "stop": "STOP to end without acceptance"}, "stopPath": filepath.Join(directory, "STOP"), "createdAt": time.Now().UTC(), "serveDeadline": time.Now().Add(55 * time.Minute).UTC(), "scope": "ACTUAL_HTTP_POSTGRESQL_NATIVE_DRIVER_SEPARATE; no game/queue/production claim"}
 	auditModFormJSON(t, filepath.Join(directory, "runtime.json"), runtime)
 	t.Logf("MOD_FORM_READY runtime=%s locales=32 revision=3 defaultpolicy=true natural_separate_probe428=true", filepath.Join(directory, "runtime.json"))
 	reviewed := map[string]bool{}
