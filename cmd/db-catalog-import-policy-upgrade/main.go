@@ -77,7 +77,12 @@ func main() {
 			os.Exit(1)
 		}
 		defer tx.Rollback(context.Background())
-		_, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('mcmods-cn-schema-migrations'))`)
+		// Diagnosis and postconditions inspect public. The caller's connection
+		// search_path must not redirect additive DDL to another same-named table.
+		_, err = tx.Exec(ctx, `set local search_path=pg_catalog,public,pg_temp`)
+		if err == nil {
+			_, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('mcmods-cn-schema-migrations'))`)
+		}
 		if err == nil {
 			for _, statement := range database.CatalogImportPolicySchemaStatements() {
 				if _, err = tx.Exec(ctx, statement); err != nil {

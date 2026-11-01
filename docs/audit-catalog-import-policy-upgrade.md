@@ -21,6 +21,8 @@ go run ./cmd/db-catalog-import-policy-upgrade --apply \
 
 The backup reference is an operator assertion; this tool does not create a data backup. Apply requires a generation-168 database, an exact database name and a nonempty backup reference. The additive DDL runs under the shared migration advisory lock in one transaction. Repeating it preserves explicit modes, rows and keys. Startup checks the extension, text type, NOT NULL, review default and validated domain constraint; an old database without the extension receives an actionable error rather than a later request-time 500. Fresh installation includes the extension.
 
+Apply fixes its transaction-local lookup order to `pg_catalog,public,pg_temp`, matching the public schema used by diagnosis and validation. A connection configured with another schema first cannot redirect DDL to an unrelated table; the caller's schema contents are preserved. The actual CLI subprocess tests cover both an already ready public schema and an old public schema with such a shadow table, read-only diagnosis, target/backup refusals, preserved legacy rows and repeated application.
+
 Stop old enqueue endpoints and old import workers before upgrading; do not run mixed old/new workers. Back up, diagnose and review affected task IDs, run all required generation-168 extensions (including the separate identity/OSS and notification tools), then start the new backend and worker before reopening enqueue. The exporter payload is unchanged by this policy extension. Existing upload/project/hash/Minecraft/loader checks remain in force.
 
 ## Rollback and data preservation
