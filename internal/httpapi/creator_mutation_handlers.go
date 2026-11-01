@@ -148,12 +148,20 @@ func (s *Server) applyCreatorSnapshotTx(
 	}
 	var avatarFileID *int64
 	if snapshot.AvatarFileID != nil {
-		file, err := resolveTrustedRasterOSSFilePublicID(ctx, tx, *snapshot.AvatarFileID, ossRasterBindingScope{UploaderID: uploaderID})
+		scope := ossRasterBindingScope{UploaderID: uploaderID}
+		var currentReference, currentKey string
+		err := tx.QueryRow(ctx, `select creator.avatar_url,file.object_key from creators creator join oss_files file on file.id=creator.avatar_file_id where creator.id=$1 and file.public_id=$2`, creatorID, *snapshot.AvatarFileID).Scan(&currentReference, &currentKey)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		cfg := s.ossConfigFromSettingsWithQueryer(ctx, tx)
+		scope.AllowAnyUploader = err == nil && snapshot.AvatarURL == ossStoredObjectURL(cfg, currentKey) && creatorAvatarReferenceMatchesFile(cfg, currentReference, currentKey)
+		file, err := resolveTrustedRasterOSSFilePublicID(ctx, tx, *snapshot.AvatarFileID, scope)
 		if err != nil {
 			return err
 		}
 		avatarFileID = &file.ID
-		snapshot.AvatarURL = ossStoredObjectURL(s.ossConfigFromSettingsWithQueryer(ctx, tx), file.ObjectKey)
+		snapshot.AvatarURL = ossStoredObjectURL(cfg, file.ObjectKey)
 	}
 	if _, err := tx.Exec(ctx, `update creators set
 		name=$2,normalized_name=$3,description_markdown=$4,avatar_url=$5,avatar_file_id=$6,

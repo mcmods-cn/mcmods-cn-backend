@@ -232,8 +232,62 @@ func inspectAntiAbuseBody(r *http.Request) ([]byte, string) {
 		return body, ""
 	}
 	parts := make([]string, 0, 8)
-	collectContentStrings(value, "", &parts)
+	if reference := creatorMutationAvatarReference(r, body); reference != "" {
+		collectCreatorMutationContent(value, reference, &parts)
+	} else {
+		collectContentStrings(value, "", &parts)
+	}
 	return body, strings.Join(parts, "\n")
+}
+
+// Only this concrete DTO's top-level public avatar identity distinguishes a
+// real creator image edit from duplicate text. Unknown/nested fields and other
+// endpoints cannot use the same spelling as an anti-abuse nonce.
+func creatorMutationAvatarReference(r *http.Request, body []byte) string {
+	creatorWrite := r.Method == http.MethodPost && r.URL.Path == "/api/v1/creators"
+	if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/creators/") {
+		publicID := strings.TrimPrefix(r.URL.Path, "/api/v1/creators/")
+		creatorWrite = validCatalogPublicID(strings.ToLower(publicID))
+	}
+	if !creatorWrite {
+		return ""
+	}
+	var request struct {
+		Kind         string  `json:"kind"`
+		AvatarFileID *string `json:"avatarFileId"`
+	}
+	if json.Unmarshal(body, &request) != nil || request.AvatarFileID == nil {
+		return ""
+	}
+	kind := strings.ToLower(strings.TrimSpace(request.Kind))
+	reference := strings.ToLower(strings.TrimSpace(*request.AvatarFileID))
+	if (kind != "author" && kind != "team") || !validCatalogPublicID(reference) {
+		return ""
+	}
+	return reference
+}
+func collectCreatorMutationContent(value any, reference string, result *[]string) {
+	object, ok := value.(map[string]any)
+	if !ok {
+		collectContentStrings(value, "", result)
+		return
+	}
+	keys := make([]string, 0, len(object))
+	for key := range object {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	included := false
+	for _, key := range keys {
+		if strings.EqualFold(key, "avatarFileId") {
+			if !included && len(*result) < 16 {
+				*result = append(*result, "creator-avatar:"+reference)
+				included = true
+			}
+			continue
+		}
+		collectContentStrings(object[key], strings.ToLower(key), result)
+	}
 }
 
 func collectContentStrings(value any, key string, result *[]string) {

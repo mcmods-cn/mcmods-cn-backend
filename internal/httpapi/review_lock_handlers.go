@@ -33,9 +33,8 @@ func (s *Server) reviewLock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
-	var internalID int64
-	if err := s.db.QueryRow(r.Context(), `select internal_id from public_routes
-		where entity_type=$1 and public_id=$2`, entityType, publicID).Scan(&internalID); err != nil {
+	internalID, _, err := resolveReviewLockTarget(r.Context(), s.db, entityType, publicID)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "review target not found")
 		return
 	}
@@ -45,7 +44,7 @@ func (s *Server) reviewLock(w http.ResponseWriter, r *http.Request) {
 	}
 	var response reviewLockResponse
 	response.CanSubscribe = claims.Subject > 0
-	err := s.db.QueryRow(r.Context(), `select request.public_id,request.submitted_at,
+	err = s.db.QueryRow(r.Context(), `select request.public_id,request.submitted_at,
 		case when $3::bigint>0 then exists(select 1 from review_completion_subscriptions subscription
 			where subscription.change_request_id=request.id and subscription.user_id=$3) else false end
 		from change_requests request
@@ -77,10 +76,8 @@ func (s *Server) subscribeReviewCompletion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var internalID int64
-	var canonicalPath string
-	if err = tx.QueryRow(r.Context(), `select internal_id,coalesce(canonical_path,'') from public_routes
-		where entity_type=$1 and public_id=$2`, entityType, publicID).Scan(&internalID, &canonicalPath); err != nil {
+	internalID, canonicalPath, err := resolveReviewLockTarget(r.Context(), tx, entityType, publicID)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "review target not found")
 		return
 	}
@@ -119,6 +116,24 @@ func (s *Server) subscribeReviewCompletion(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]bool{"subscribed": true})
 }
 
+// Creator is the shared review aggregate; canonical routes retain the concrete
+// author/team kind. Resolve both representations through the authoritative
+// creator row, never through a synthetic alias or a same-number foreign route.
+func resolveReviewLockTarget(ctx context.Context, query databaseQuery, entityType, publicID string) (int64, string, error) {
+	var internalID int64
+	var canonicalPath string
+	var err error
+	if entityType == "creator" {
+		err = query.QueryRow(ctx, `select route.internal_id,coalesce(route.canonical_path,'')
+   from public_routes route join creators creator
+    on creator.id=route.internal_id and creator.public_id=route.public_id and creator.kind=route.entity_type
+   where creator.public_id=$1 and route.entity_type in ('author','team')`, publicID).Scan(&internalID, &canonicalPath)
+	} else {
+		err = query.QueryRow(ctx, `select internal_id,coalesce(canonical_path,'') from public_routes where entity_type=$1 and public_id=$2`, entityType, publicID).Scan(&internalID, &canonicalPath)
+	}
+	return internalID, canonicalPath, err
+}
+
 func canEditReviewTarget(ctx context.Context, query databaseQuery, claims security.Claims, entityType string, internalID int64, publicID string) bool {
 	if claims.Subject <= 0 {
 		return false
@@ -130,6 +145,16 @@ func canEditReviewTarget(ctx context.Context, query databaseQuery, claims securi
 		}
 		return claims.Subject == authorID || claimsAllow(claims, "community.edit") || claimsAllow(claims, "admin.*")
 	}
+	if entityType == "creator" {
+		var kind, status string
+		var creatorID *int64
+		if query.QueryRow(ctx, `select kind,review_status,created_by from creators where id=$1 and public_id=$2`, internalID, publicID).Scan(&kind, &status, &creatorID) != nil {
+			return false
+		}
+		visible := status == "approved" || (creatorID != nil && *creatorID == claims.Subject) || claimsAllow(claims, "admin.*") || claimsAllow(claims, "content.review")
+		return visible && resolveCreatorCapabilities(claims, kind, publicID).EditProfile
+	}
+
 	if claimsAllow(claims, "admin.*") || claimsAllow(claims, "content.review") || claimsAllow(claims, "project.review") {
 		return true
 	}
@@ -156,8 +181,6 @@ func canEditReviewTarget(ctx context.Context, query databaseQuery, claims securi
 			return false
 		}
 		return canEditReviewTarget(ctx, query, claims, targetType, targetInternalID, targetPublicID)
-	case "creator":
-		return claimsAllow(claims, "creator.edit") || claimsAllow(claims, "creator.edit."+publicID)
 	case "blueprint":
 		return claimsAllow(claims, "project.edit."+publicID) || claimsAllow(claims, "blueprint.review")
 	case "skin":

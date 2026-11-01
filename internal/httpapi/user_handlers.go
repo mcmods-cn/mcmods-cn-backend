@@ -280,18 +280,53 @@ func (s *Server) presignUserOSSFile(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	cfg := s.ossConfigFromSettings(r.Context())
 	req.ObjectKey = strings.TrimSpace(req.ObjectKey)
+	req.FilePublicID = strings.ToLower(strings.TrimSpace(req.FilePublicID))
+	var fileKey string
+	if req.FilePublicID != "" {
+		if !validCatalogPublicID(req.FilePublicID) {
+			writeError(w, http.StatusBadRequest, "文件 ID 不正确")
+			return
+		}
+		if err := s.db.QueryRow(r.Context(), `select object_key from oss_files where public_id=$1 and uploader_id=$2 and status='active'`, req.FilePublicID, claims.Subject).Scan(&fileKey); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusForbidden, "只能访问自己的用户文件")
+			} else {
+				writeError(w, http.StatusInternalServerError, "读取文件身份失败")
+			}
+			return
+		}
+		if req.ObjectKey == "" {
+			req.ObjectKey = fileKey
+		}
+	}
 	resolvedKey, aliasErr := s.resolvedOSSUploadObjectKey(r.Context(), cfg, req.ObjectKey, claims.Subject)
 	if aliasErr != nil {
 		writeError(w, http.StatusInternalServerError, "读取文件身份失败")
 		return
 	}
 	req.ObjectKey = resolvedKey
-	if req.ObjectKey == "" || !isAllowedObjectKey(req.ObjectKey, ossUserPrefix(cfg.Prefix, claims.Subject)) {
+	if fileKey != "" && fileKey != req.ObjectKey {
+		writeError(w, http.StatusBadRequest, "文件 ID 与 ObjectKey 不一致")
+		return
+	}
+	allowed := req.ObjectKey != "" && isAllowedObjectKey(req.ObjectKey, ossUserPrefix(cfg.Prefix, claims.Subject))
+	if !allowed && req.ObjectKey != "" {
+		// Only the uploader's exact creator-avatar purpose may extend this route
+		// outside personal files. Recheck the current creator and edit permission;
+		// do not turn ownership into a generic project-directory signing grant.
+		var source string
+		if err := s.db.QueryRow(r.Context(), `select source from oss_files where object_key=$1 and uploader_id=$2 and status='active'`, req.ObjectKey, claims.Subject).Scan(&source); err == nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(source)), "creator_avatar:") {
+			if category, err := s.resolveUserOSSUploadCategory(r, "", source); err == nil {
+				allowed = isAllowedObjectKey(req.ObjectKey, ossObjectPrefix(cfg.Prefix, category))
+			}
+		}
+	}
+	if !allowed {
 		writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于用户文件目录")
 		return
 	}
 	var ownerID int64
-	err := s.db.QueryRow(r.Context(), `select uploader_id from oss_files where object_key = $1 and status = 'active'`, req.ObjectKey).Scan(&ownerID)
+	err := s.db.QueryRow(r.Context(), `select uploader_id from oss_files where object_key=$1 and status='active'`, req.ObjectKey).Scan(&ownerID)
 	if err != nil || ownerID != claims.Subject {
 		writeError(w, http.StatusForbidden, "只能访问自己的用户文件")
 		return

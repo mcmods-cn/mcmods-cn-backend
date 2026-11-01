@@ -203,7 +203,8 @@ func requiresSynchronousCatalogImageValidation(source string) bool {
 		strings.HasPrefix(source, "recipe_gui:") ||
 		strings.HasPrefix(source, "catalog_resource:") ||
 		strings.HasPrefix(source, "catalog_recipe:") ||
-		strings.HasPrefix(source, "blueprint_cover:")
+		strings.HasPrefix(source, "blueprint_cover:") ||
+		strings.HasPrefix(source, "creator_avatar:")
 }
 
 const maximumSynchronousRasterBytes = int64(16 << 20)
@@ -1048,6 +1049,17 @@ func (s *Server) resolveUserOSSUploadCategory(r *http.Request, category, source 
 			return "", errors.New("作者头像上传目标不完整")
 		}
 		kind, publicID := normalizeObjectSegment(parts[0]), normalizeObjectSegment(parts[1])
+		if kind != "author" && kind != "team" {
+			return "", errors.New("作者头像类型不正确")
+		}
+		if publicID == "new" {
+			if !claimsAllow(claims, "creator.create") {
+				return "", errors.New("没有权限创建作者或团队")
+			}
+			// A new profile has no project identity yet. Keep its candidate in the
+			// current uploader's private staging directory until a real creator bind.
+			return ossUserCategory(claims.Subject, "creator-avatar", kind), nil
+		}
 		var storedKind string
 		if s.db.QueryRow(r.Context(), `select kind from creators where public_id=$1 and review_status='approved'`, publicID).
 			Scan(&storedKind) != nil {

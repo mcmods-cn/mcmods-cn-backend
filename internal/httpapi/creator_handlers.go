@@ -273,7 +273,39 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	item.Claimed = claimedUserID != nil
-	item.AvatarURL, err = s.resolveStoredOSSObjectAccessURL(r.Context(), item.AvatarURL)
+	ossCfg := s.ossConfigFromSettings(r.Context())
+	avatarStorageURL := item.AvatarURL
+	avatarNeedsVerification := temporaryCreatorAvatarReference(avatarStorageURL)
+	verifiedAvatarKey := ""
+	if avatarNeedsVerification {
+		avatarStorageURL = ""
+		if avatarFileID != nil {
+			file, loadErr := resolveTrustedRasterOSSFilePublicID(r.Context(), s.db, *avatarFileID, ossRasterBindingScope{AllowAnyUploader: true})
+			if loadErr != nil && !errors.Is(loadErr, pgx.ErrNoRows) && !errors.Is(loadErr, errOSSFileNotBindable) {
+				writeError(w, http.StatusInternalServerError, "failed to verify creator avatar reference")
+				return
+			}
+			if loadErr == nil && creatorAvatarReferenceMatchesFile(ossCfg, item.AvatarURL, file.ObjectKey) {
+				allowed, authErr := storedRasterOSSFileAuthorized(r.Context(), s.db, ossCfg, file.ObjectKey, claims.Subject, false)
+				if authErr != nil {
+					writeError(w, http.StatusInternalServerError, "failed to authorize creator avatar reference")
+					return
+				}
+				if allowed {
+					avatarStorageURL = ossStoredObjectURL(ossCfg, file.ObjectKey)
+					verifiedAvatarKey = file.ObjectKey
+					avatarNeedsVerification = false
+				}
+			}
+		}
+	}
+	if verifiedAvatarKey != "" {
+		var access ossObjectAccess
+		access, err = s.resolveOSSObjectAccessWithConfig(r.Context(), ossCfg, verifiedAvatarKey, ossObjectAccessOptions{})
+		item.AvatarURL = access.URL
+	} else {
+		item.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.AvatarURL)
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "failed to generate creator avatar URL")
 		return
@@ -340,9 +372,11 @@ func (s *Server) creatorDetail(w http.ResponseWriter, r *http.Request) {
 		"defaultLocale": defaultLocale, "localizations": localizations,
 		"claimedUser": claimedUser, "canEditProfile": capabilities.EditProfile, "canManageMembers": capabilities.ManageMembers,
 		"canCreateRoles": capabilities.CreateRoles, "claimStatus": currentClaimStatus,
-		"avatarFileId":        avatarFileID,
-		"canClaim":            claims.Subject > 0 && item.Kind == "author" && claimedUserID == nil && currentClaimStatus != "pending" && item.ReviewStatus == "approved",
-		"publishedRevisionId": publishedRevisionPublicID,
+		"avatarFileId":                     avatarFileID,
+		"avatarStorageUrl":                 avatarStorageURL,
+		"avatarReferenceNeedsVerification": avatarNeedsVerification,
+		"canClaim":                         claims.Subject > 0 && item.Kind == "author" && claimedUserID == nil && currentClaimStatus != "pending" && item.ReviewStatus == "approved",
+		"publishedRevisionId":              publishedRevisionPublicID,
 	})
 }
 
@@ -427,10 +461,11 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	var kind, previousDescription string
 	var createdBy, baseRevisionID *int64
 	var currentAvatarFileID *string
+	var currentAvatarURL string
 	err = tx.QueryRow(r.Context(), `select id,kind,description_markdown,created_by,published_revision_id,
-		(select public_id from oss_files where id=creators.avatar_file_id)
+		(select public_id from oss_files where id=creators.avatar_file_id),avatar_url
 		from creators where public_id=$1 for update`, publicID).
-		Scan(&id, &kind, &previousDescription, &createdBy, &baseRevisionID, &currentAvatarFileID)
+		Scan(&id, &kind, &previousDescription, &createdBy, &baseRevisionID, &currentAvatarFileID, &currentAvatarURL)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "creator not found")
 		return
@@ -449,12 +484,9 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "creator kind cannot be changed")
 		return
 	}
-	if err = s.resolveCreatorAvatarTx(r.Context(), tx, claims.Subject, &snapshot); err != nil {
+	if err = s.resolveCreatorAvatarUpdateTx(r.Context(), tx, claims.Subject, currentAvatarFileID, currentAvatarURL, &snapshot); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
-	}
-	if snapshot.AvatarFileID == nil && snapshot.AvatarURL != "" {
-		snapshot.AvatarFileID = currentAvatarFileID
 	}
 	status := "approved"
 	if creatorReviewRequired(loadReviewConfig(r.Context(), tx), kind, "edit") &&
@@ -882,4 +914,47 @@ func (s *Server) presignCreatorClaimAttachment(w http.ResponseWriter, r *http.Re
 		return
 	}
 	s.presignOSSFileWithRequest(w, r, ossPresignRequest{ObjectKey: file.ObjectKey})
+}
+
+// The current binding is already part of this editable creator. Retaining it
+// grants no right to replace it with another uploader's candidate. Legacy
+// unbound references are preserved only when exactly unchanged; this is not a
+// new validation/ownership proof for historical bytes.
+func (s *Server) resolveCreatorAvatarUpdateTx(ctx context.Context, tx pgx.Tx, actorID int64, currentFileID *string, currentURL string, snapshot *creatorSnapshot) error {
+	if snapshot.AvatarFileID != nil {
+		normalized := strings.ToLower(strings.TrimSpace(*snapshot.AvatarFileID))
+		if normalized == "" {
+			snapshot.AvatarFileID = nil
+		} else {
+			snapshot.AvatarFileID = &normalized
+		}
+	}
+	if snapshot.AvatarFileID == nil && snapshot.AvatarURL != "" {
+		if snapshot.AvatarURL != currentURL {
+			return errors.New("creator avatar changes require an uploaded file")
+		}
+		if currentFileID == nil {
+			if temporaryCreatorAvatarReference(currentURL) {
+				return errors.New("creator avatar legacy reference requires verification")
+			}
+			snapshot.AvatarInternalID = nil
+			return nil
+		}
+		value := *currentFileID
+		snapshot.AvatarFileID = &value
+	}
+	if snapshot.AvatarFileID != nil && currentFileID != nil && *snapshot.AvatarFileID == *currentFileID {
+		file, err := resolveTrustedRasterOSSFilePublicID(ctx, tx, *currentFileID, ossRasterBindingScope{AllowAnyUploader: true})
+		if err != nil {
+			return errors.New("creator avatar file was not found")
+		}
+		cfg := s.ossConfigFromSettingsWithQueryer(ctx, tx)
+		canonical := ossStoredObjectURL(cfg, file.ObjectKey)
+		if creatorAvatarReferenceMatchesFile(cfg, currentURL, file.ObjectKey) {
+			snapshot.AvatarInternalID = &file.ID
+			snapshot.AvatarURL = canonical
+			return nil
+		}
+	}
+	return s.resolveCreatorAvatarTx(ctx, tx, actorID, snapshot)
 }

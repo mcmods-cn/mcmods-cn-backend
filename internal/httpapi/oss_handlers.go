@@ -70,6 +70,7 @@ type ossConfigPayload struct {
 }
 
 type ossPresignRequest struct {
+	FilePublicID   string `json:"fileId,omitempty"`
 	ObjectKey      string `json:"objectKey"`
 	ExpiresMinutes int    `json:"expiresMinutes"`
 }
