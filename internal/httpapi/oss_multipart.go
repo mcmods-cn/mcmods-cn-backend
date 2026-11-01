@@ -50,6 +50,9 @@ func (s *Server) initiateOSSMultipartUpload(
 	expires time.Duration,
 ) (ossMultipartUploadTicket, error) {
 	var ticket ossMultipartUploadTicket
+	if isOSSSealedObjectKey(objectKey) {
+		return ticket, errors.New("reserved OSS upload namespace")
+	}
 	partCount := ossMultipartPartCount(sizeBytes, ossMultipartPartSize)
 	if partCount <= 0 || partCount > ossMultipartMaxParts {
 		return ticket, errors.New("invalid OSS multipart upload size")
@@ -90,6 +93,9 @@ func presignExistingOSSMultipartUpload(
 	expires time.Duration,
 ) (ossMultipartUploadTicket, error) {
 	var ticket ossMultipartUploadTicket
+	if isOSSSealedObjectKey(objectKey) {
+		return ticket, errors.New("reserved OSS upload namespace")
+	}
 	if !validOSSMultipartUploadID(uploadID) {
 		return ticket, errors.New("invalid OSS multipart upload ID")
 	}

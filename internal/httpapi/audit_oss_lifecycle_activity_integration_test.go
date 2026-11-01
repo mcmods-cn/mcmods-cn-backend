@@ -107,7 +107,7 @@ func TestAuditCMP003OSSSignedDownloadCommitsCounterAndExistingActivityHTTPIntegr
 			}
 			auditOSSRequire(t, f, f.editor, http.MethodPost, route, map[string]any{"objectKey": ticket.ObjectKey}, 200)
 			var downloads, intents int
-			if err := f.db.QueryRow(f.ctx, `select (select downloads from oss_download_stats where object_key=$1),(select count(*) from activity_event_outbox where user_id=$2 and action_id=$3 and object_type_id=$4)`, ticket.ObjectKey, f.userIDs[f.editor], activity.ActionCreate, activity.ObjectFile).Scan(&downloads, &intents); err != nil || downloads != 1 || intents != prior+1 {
+			if err := f.db.QueryRow(f.ctx, `select (select downloads from oss_download_stats where object_key=(select stored_object_key from oss_upload_byte_bindings where upload_object_key=$1 and status='committed')),(select count(*) from activity_event_outbox where user_id=$2 and action_id=$3 and object_type_id=$4)`, ticket.ObjectKey, f.userIDs[f.editor], activity.ActionCreate, activity.ObjectFile).Scan(&downloads, &intents); err != nil || downloads != 1 || intents != prior+1 {
 				t.Fatalf("downloads/intents=%d/%d prior=%d err=%v", downloads, intents, prior, err)
 			}
 			t.Logf("%s signed capability preserves existing %s/%s classification; one actual counter+intent", scope, fmt.Sprint(activity.ActionCreate), fmt.Sprint(activity.ObjectFile))
@@ -239,16 +239,5 @@ func auditOSSInstallTransparentCoverConversion(t *testing.T, f test037Fixture, t
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := f.provider.Config.Handler
-	f.provider.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/"+ticket.ObjectKey) {
-			f.store.mu.Lock()
-			f.store.objects[persistedWebPObjectKey(ticket.ObjectKey)] = test036Object{data: bytes.Clone(converted), contentType: "image/webp"}
-			f.store.mu.Unlock()
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"status":"OK"}`))
-			return
-		}
-		handler.ServeHTTP(w, r)
-	})
+	auditOSSInstallBindingWebPConversion(t, f, ticket, converted)
 }

@@ -23,6 +23,10 @@ func (s *Server) issueOSSUploadTicket(w http.ResponseWriter, r *http.Request, cl
 		objectPrefix = ossRoot(cfg.Prefix)
 	}
 	objectKey := buildOSSObjectKeyForFile(objectPrefix, objectCategory, req.OriginalName)
+	if isOSSSealedObjectKey(objectKey) {
+		writeError(w, http.StatusBadRequest, "reserved OSS upload namespace")
+		return
+	}
 	req.Category, req.Source, req.ContentType = category, source, contentType
 	response := map[string]any{"bucket": cfg.Bucket, "objectKey": objectKey, "category": category, "source": source, "originalName": req.OriginalName, "contentType": contentType, "sizeBytes": req.SizeBytes, "sha256": req.SHA256, "uploadRequired": true, "expiresAt": expiresAt, "storageUrl": ossStoredObjectURL(cfg, objectKey)}
 	if blueprintPublicID != "" {

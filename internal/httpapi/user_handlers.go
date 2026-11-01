@@ -280,6 +280,12 @@ func (s *Server) presignUserOSSFile(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	cfg := s.ossConfigFromSettings(r.Context())
 	req.ObjectKey = strings.TrimSpace(req.ObjectKey)
+	resolvedKey, aliasErr := s.resolvedOSSUploadObjectKey(r.Context(), cfg, req.ObjectKey, claims.Subject)
+	if aliasErr != nil {
+		writeError(w, http.StatusInternalServerError, "读取文件身份失败")
+		return
+	}
+	req.ObjectKey = resolvedKey
 	if req.ObjectKey == "" || !isAllowedObjectKey(req.ObjectKey, ossUserPrefix(cfg.Prefix, claims.Subject)) {
 		writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于用户文件目录")
 		return
@@ -302,6 +308,12 @@ func (s *Server) deleteUserOSSFile(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	cfg := s.ossConfigFromSettings(r.Context())
 	req.ObjectKey = strings.TrimSpace(req.ObjectKey)
+	resolvedKey, aliasErr := s.resolvedOSSUploadObjectKey(r.Context(), cfg, req.ObjectKey, claims.Subject)
+	if aliasErr != nil {
+		writeError(w, http.StatusInternalServerError, "读取文件身份失败")
+		return
+	}
+	req.ObjectKey = resolvedKey
 	userPrefix := ossUserPrefix(cfg.Prefix, claims.Subject)
 	if req.ObjectKey == "" || !isAllowedObjectKey(req.ObjectKey, userPrefix) {
 		writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于用户文件目录")

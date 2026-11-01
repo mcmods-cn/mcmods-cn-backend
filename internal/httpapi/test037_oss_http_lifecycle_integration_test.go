@@ -356,7 +356,8 @@ func TestTEST037PrivateDownloadFullHTTPRejectsCrossOwnerTamperingAndRealExpiryIn
 		raw := []byte(fmt.Sprintf("TEST037 private file %d\n", index))
 		ticket := f.ticket(t, token, "/api/v1/users/me/oss/uploads/presign", fmt.Sprintf("private-%d.zip", index), "application/octet-stream", "test037-private", raw)
 		f.put(t, ticket, raw)
-		f.require(t, token, http.MethodPost, "/api/v1/users/me/oss/uploads/complete", ticket.completion(), 201)
+		completed := decodeTEST022Data[map[string]any](t, f.require(t, token, http.MethodPost, "/api/v1/users/me/oss/uploads/complete", ticket.completion(), 201))
+		ticket.ObjectKey = completed["objectKey"].(string)
 		tickets = append(tickets, ticket)
 	}
 	before := f.facts(t)
@@ -437,7 +438,7 @@ func TestTEST037ReportUploadRegistrationAndBindingFaultsRollbackFullHTTPIntegrat
 	}
 	before = f.facts(t)
 	f.require(t, f.editor, http.MethodPost, "/api/v1/reports/evidence/uploads/complete", ticket.completion(), 500)
-	f.unchanged(t, before)
+	auditOSSAssertFailureOnlyCompensatesOwnCandidates(t, f, before)
 	if _, err := f.db.Exec(f.ctx, "alter table report_evidence drop constraint test037_reject_registration"); err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +475,7 @@ func TestTEST037ReportUploadRegistrationAndBindingFaultsRollbackFullHTTPIntegrat
 	var reports, snapshots, bound, files int
 	if err := f.db.QueryRow(f.ctx, `select (select count(*) from reports),(select count(*) from report_snapshots),
 		(select count(*) from report_evidence where public_id=$1 and status='bound' and report_id is not null and cleanup_after='infinity'),
-		(select count(*) from oss_files where object_key=$2 and uploader_id=$3 and status='active')`, first.ID, ticket.ObjectKey, f.userIDs[f.editor]).Scan(&reports, &snapshots, &bound, &files); err != nil {
+		(select count(*) from oss_files file join oss_upload_byte_bindings binding on binding.file_id=file.id where binding.upload_object_key=$2 and file.uploader_id=$3 and file.status='active' and binding.status='committed')`, first.ID, ticket.ObjectKey, f.userIDs[f.editor]).Scan(&reports, &snapshots, &bound, &files); err != nil {
 		t.Fatal(err)
 	}
 	if reports != 1 || snapshots != 1 || bound != 1 || files != 1 {

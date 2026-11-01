@@ -278,7 +278,10 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		if err = RequireCatalogImportPolicySchema(ctx, conn); err != nil {
 			return err
 		}
-		return RequireOSSMultipartActivitySchema(ctx, conn)
+		if err = RequireOSSMultipartActivitySchema(ctx, conn); err != nil {
+			return err
+		}
+		return RequireOSSUploadByteBindingSchema(ctx, conn)
 	}
 
 	tx, err := conn.Begin(ctx)

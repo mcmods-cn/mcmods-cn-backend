@@ -108,6 +108,26 @@ func (worker *OSSMultipartCleanupWorker) run(ctx context.Context) {
 }
 
 func (worker *OSSMultipartCleanupWorker) drain(ctx context.Context) {
+	for i := 0; i < ossMultipartCleanupBatchSize; i++ {
+		more, err := worker.server.recoverOSSByteBindingAttempt(ctx)
+		if err != nil {
+			log.Printf("recover OSS upload byte binding: %v", err)
+			break
+		}
+		if !more {
+			break
+		}
+	}
+	for i := 0; i < ossMultipartCleanupBatchSize; i++ {
+		more, err := worker.server.reconcileOSSByteBindingCleanup(ctx)
+		if err != nil {
+			log.Printf("reconcile OSS upload candidate cleanup: %v", err)
+			break
+		}
+		if !more {
+			break
+		}
+	}
 	if _, err := worker.deadLetterExhausted(ctx); err != nil {
 		log.Printf("dead-letter exhausted OSS multipart sessions: %v", err)
 		return

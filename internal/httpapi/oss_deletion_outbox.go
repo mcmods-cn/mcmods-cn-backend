@@ -396,6 +396,9 @@ func (s *Server) tombstoneOSSFileTx(ctx context.Context, tx pgx.Tx, fileID int64
 		where source_file_id=$1 and deleted_at is null`, fileID); err != nil {
 		return err
 	}
+	if err = queueDeletedOSSByteBindingSourcesTx(ctx, tx, fileID); err != nil {
+		return err
+	}
 	return enqueueOSSObjectDeletionTx(ctx, tx, target)
 }
 

@@ -19,22 +19,22 @@ func (s *Server) restoreReportEvidenceForCompletedOSSFile(
 		return "", "", err
 	}
 	defer tx.Rollback(ctx)
-	var originalName, contentType, sha256, scanStatus string
+	var originalName, contentType, sha256, scanStatus, actualObjectKey string
 	var byteSize int64
 	err = tx.QueryRow(ctx, `select coalesce(nullif(source_original_name,''),original_name),content_type,
-			coalesce(nullif(source_size_bytes,0),size_bytes),sha256,scan_status
+			coalesce(nullif(source_size_bytes,0),size_bytes),sha256,scan_status,object_key
 		from oss_files
-		where id=$1 and uploader_id=$2 and object_key=$3 and category=$4 and source=$5 and sha256=$6
+		where id=$1 and uploader_id=$2 and (object_key=$3 or exists(select 1 from oss_upload_byte_bindings binding where binding.file_id=oss_files.id and binding.status='committed' and binding.owner_id=$2 and binding.upload_object_key=$3 and binding.stored_object_key=oss_files.object_key)) and category=$4 and source=$5 and sha256=$6
 		  and status='active' and ($7::bigint<=0 or coalesce(nullif(source_size_bytes,0),size_bytes)=$7)
 		for update`, fileID, uploaderID, req.ObjectKey, req.Category, "report_evidence", req.SHA256, req.SizeBytes).
-		Scan(&originalName, &contentType, &byteSize, &sha256, &scanStatus)
+		Scan(&originalName, &contentType, &byteSize, &sha256, &scanStatus, &actualObjectKey)
 	if err != nil {
 		return "", "", fmt.Errorf("lock completed report evidence OSS file: %w", err)
 	}
 	var evidenceID, evidenceOriginalName, evidenceContentType, evidenceSHA, evidenceScanStatus, evidenceStatus string
 	var evidenceUploaderID, evidenceByteSize int64
 	err = tx.QueryRow(ctx, `select public_id,uploader_id,original_name,content_type,byte_size,sha256,scan_status,status
-		from report_evidence where object_key=$1 for update`, req.ObjectKey).
+		from report_evidence where object_key=$1 for update`, actualObjectKey).
 		Scan(&evidenceID, &evidenceUploaderID, &evidenceOriginalName, &evidenceContentType, &evidenceByteSize,
 			&evidenceSHA, &evidenceScanStatus, &evidenceStatus)
 	if err == nil {
@@ -51,7 +51,7 @@ func (s *Server) restoreReportEvidenceForCompletedOSSFile(
 		return "", "", fmt.Errorf("read completed report evidence: %w", err)
 	}
 	if err = tx.QueryRow(ctx, `insert into report_evidence(uploader_id,object_key,original_name,content_type,byte_size,sha256,scan_status)
-		values($1,$2,$3,$4,$5,$6,$7) returning public_id`, uploaderID, req.ObjectKey, originalName, contentType,
+		values($1,$2,$3,$4,$5,$6,$7) returning public_id`, uploaderID, actualObjectKey, originalName, contentType,
 		byteSize, sha256, scanStatus).Scan(&evidenceID); err != nil {
 		return "", "", fmt.Errorf("restore completed report evidence: %w", err)
 	}
@@ -118,10 +118,14 @@ func (s *Server) attachCompletedOSSUploadAssociations(ctx context.Context, respo
 	return nil
 }
 
-func (s *Server) completeBlueprintUploadTx(ctx context.Context, tx pgx.Tx, fileID, ownerID int64, objectKey, originalName, contentType string, size int64, sha string) (map[string]any, error) {
+func (s *Server) completeBlueprintUploadTx(ctx context.Context, tx pgx.Tx, fileID, ownerID int64, objectKey, originalName, contentType string, size int64, sha string, originalUploadKeys ...string) (map[string]any, error) {
+	lookupKey := objectKey
+	if len(originalUploadKeys) > 0 {
+		lookupKey = originalUploadKeys[0]
+	}
 	var blueprintID int64
 	var publicID, status, format string
-	err := tx.QueryRow(ctx, `select id,public_id,status,source_format from blueprints where owner_id=$1 and original_object_key=$2 and status in ('uploading','queued','failed') order by created_at desc limit 1`, ownerID, objectKey).
+	err := tx.QueryRow(ctx, `select id,public_id,status,source_format from blueprints where owner_id=$1 and original_object_key=$2 and status in ('uploading','queued','failed') order by created_at desc limit 1`, ownerID, lookupKey).
 		Scan(&blueprintID, &publicID, &status, &format)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil

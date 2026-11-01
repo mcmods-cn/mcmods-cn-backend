@@ -131,6 +131,22 @@ func TestOSSByteBindingFreshLegacyUpgradePreservesIdentityAndRejectsSchemaDriftI
 	if err = RequireOSSUploadByteBindingSchema(ctx, db); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = db.Exec(ctx, `drop index oss_upload_byte_bindings_reconcile`); err != nil {
+		t.Fatal(err)
+	}
+	if err = RequireOSSUploadByteBindingSchema(ctx, db); err == nil || !strings.Contains(err.Error(), "expansion required") {
+		t.Fatalf("missing reconciliation expansion was silently accepted: %v", err)
+	}
+	beforeReconcile, e := InspectOSSUploadByteBindings(ctx, db)
+	if e != nil || beforeReconcile.ReconciliationReady {
+		t.Fatalf("partial old binding schema inspection=%+v err=%v", beforeReconcile, e)
+	}
+	if _, err = ApplyOSSUploadByteBindingUpgrade(ctx, db, legacy.Database, "owned schema-only backup"); err != nil {
+		t.Fatal(err)
+	}
+	if err = RequireOSSUploadByteBindingSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
 	// A preparing receipt is not an asset, deduplication authority or old-data
 	// backfill. The committed shape cannot be forged merely by toggling status.
 	if _, err = db.Exec(ctx, `insert into oss_upload_byte_bindings(id,owner_id,bucket,endpoint,region,upload_object_key,logical_category,original_name,declared_sha256,declared_size_bytes,sealed_source_key,run_token,lease_expires_at) values('11111111-1111-4111-8111-111111111111',2147483648,'owned','https://example.invalid','owned','uploads/source.zip','owned','source.zip',repeat('a',64),17,'uploads/_mcmods_sealed_v1/11111111-1111-4111-8111-111111111111/source.zip','owned-token',now()+interval '2 minutes')`); err != nil {

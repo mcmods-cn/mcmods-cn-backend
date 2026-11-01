@@ -656,68 +656,6 @@ func supportedRasterContentType(value string) bool {
 	}
 }
 
-type ossFileHashLookup struct {
-	UploaderID    *int64
-	Category      string
-	Source        string
-	ScanStatuses  []string
-	RequireRaster bool
-	// RequireTrusted prevents an unscanned upload from becoming a public
-	// catalog image merely because its bytes match a later request.
-	RequireTrusted                bool
-	ExcludePolicyCancelledSources bool
-}
-
-func (s *Server) findExistingOSSFileByHashExact(ctx context.Context, sha256 string, sizeBytes int64, lookup ossFileHashLookup) (map[string]any, bool, error) {
-	if sha256 == "" || sizeBytes <= 0 || len(lookup.ScanStatuses) == 0 {
-		return nil, false, nil
-	}
-	var size, sourceSize int64
-	var id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, sha, status, scanStatus string
-	var createdAt, updatedAt time.Time
-	var storedSHA string
-	query := `select public_id, bucket, endpoint, region, object_key, category, source, original_name, source_original_name, content_type, size_bytes, source_size_bytes, sha256, status, scan_status, created_at, updated_at, stored_sha256
-		from oss_files
-		where sha256 = $1 and coalesce(nullif(source_size_bytes, 0), size_bytes) = $2 and status = 'active' and source_hash_verified
-		  and scan_status = any($3::text[])`
-	args := []any{sha256, sizeBytes, lookup.ScanStatuses}
-	if lookup.UploaderID != nil {
-		args = append(args, *lookup.UploaderID)
-		query += fmt.Sprintf(` and uploader_id = $%d`, len(args))
-	}
-	if lookup.Category != "" {
-		args = append(args, lookup.Category)
-		query += fmt.Sprintf(` and category = $%d`, len(args))
-	}
-	if lookup.Source != "" {
-		args = append(args, lookup.Source)
-		query += fmt.Sprintf(` and source = $%d`, len(args))
-	}
-	if lookup.ExcludePolicyCancelledSources {
-		query += ` and not exists(select 1 from catalog_import_packages package
-			join catalog_import_jobs job on job.package_id=package.id
-			where package.archive_file_id=oss_files.id
-			  and job.status='cancelled' and right(job.error_code,18)='_reupload_required')`
-	}
-	if lookup.RequireTrusted {
-		query += ` and scan_status in ('clean','trusted_generated')`
-	}
-	if lookup.RequireRaster {
-		query += ` and lower(split_part(content_type,';',1)) in ('image/png','image/jpeg','image/jpg','image/gif','image/webp')`
-	}
-	query += ` order by created_at asc limit 1`
-	err := s.db.QueryRow(ctx, query, args...).Scan(&id, &bucket, &endpoint, &region, &objectKey, &category, &source, &originalName, &sourceOriginalName, &contentType, &size, &sourceSize, &sha, &status, &scanStatus, &createdAt, &updatedAt, &storedSHA)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("find existing OSS file by hash: %w", err)
-	}
-	file := ossFileRecord(id, bucket, endpoint, region, objectKey, category, source, originalName, sourceOriginalName, contentType, size, sourceSize, sha, status, scanStatus, createdAt, updatedAt)
-	file["sourceSha256"], file["storedSha256"] = sha, storedSHA
-	return file, true, nil
-}
-
 func ossFileRecord(id string, bucket string, endpoint string, region string, objectKey string, category string, source string, originalName string, sourceOriginalName string, contentType string, size int64, sourceSize int64, sha string, status string, scanStatus string, createdAt time.Time, updatedAt time.Time) map[string]any {
 	if sourceOriginalName == "" {
 		sourceOriginalName = originalName
@@ -800,7 +738,13 @@ func (s *Server) presignOSSFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Request, req ossPresignRequest) bool {
-	req.ObjectKey = strings.TrimSpace(req.ObjectKey)
+	cfg := s.ossConfigFromSettings(r.Context())
+	resolvedKey, aliasErr := s.resolvedOSSUploadObjectKey(r.Context(), cfg, strings.TrimSpace(req.ObjectKey), 0)
+	if aliasErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load OSS file identity")
+		return false
+	}
+	req.ObjectKey = resolvedKey
 	if req.ObjectKey == "" {
 		writeError(w, http.StatusBadRequest, "missing OSS ObjectKey")
 		return false
@@ -822,6 +766,11 @@ func (s *Server) presignOSSFileWithRequest(w http.ResponseWriter, r *http.Reques
 // commit their authoritative download facts before disclosing the signed URL.
 func (s *Server) prepareOSSFileDownload(ctx context.Context, req ossPresignRequest) (map[string]any, error) {
 	cfg := s.ossConfigFromSettings(ctx)
+	resolvedKey, aliasErr := s.resolvedOSSUploadObjectKey(ctx, cfg, req.ObjectKey, 0)
+	if aliasErr != nil {
+		return nil, aliasErr
+	}
+	req.ObjectKey = resolvedKey
 	return s.prepareOSSFileDownloadWithConfig(ctx, cfg, req, s.originalNameForOSSObject(ctx, req.ObjectKey))
 }
 

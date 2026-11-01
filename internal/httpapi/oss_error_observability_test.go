@@ -25,6 +25,15 @@ func TestOSSReadsWritesAndCleanupHaveObservableFailureContracts(t *testing.T) {
 	}
 	handlers, admin, deletion := string(handlersRaw), string(adminRaw), string(deletionRaw)
 	completion := string(completionRaw)
+	var bindingSources strings.Builder
+	for _, filename := range []string{"oss_upload_completed_lookup.go", "oss_upload_byte_binding.go", "oss_upload_byte_binding_copy.go", "oss_upload_byte_binding_cleanup.go", "oss_upload_byte_binding_reconcile.go", "oss_upload_binding_replay.go", "oss_upload_binding_reverify.go"} {
+		raw, err := os.ReadFile(filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bindingSources.Write(raw)
+	}
+
 	for _, forbidden := range []string{
 		"existing, exists = s.findExistingOSSFileByHashExact",
 		"func (s *Server) findExistingOSSFileByHashExact(ctx context.Context, sha256 string, sizeBytes int64, lookup ossFileHashLookup) (map[string]any, bool)",
@@ -34,7 +43,7 @@ func TestOSSReadsWritesAndCleanupHaveObservableFailureContracts(t *testing.T) {
 		"_, _ = s.db.Exec(\n\t\tr.Context(),\n\t\t`insert into oss_scan_logs",
 		"_, _ = client.DeleteObject",
 	} {
-		if strings.Contains(handlers+admin+completion, forbidden) {
+		if strings.Contains(handlers+admin+completion+bindingSources.String(), forbidden) {
 			t.Fatalf("OSS path still hides a failure: %q", forbidden)
 		}
 	}
@@ -48,7 +57,7 @@ func TestOSSReadsWritesAndCleanupHaveObservableFailureContracts(t *testing.T) {
 		"enqueueUnregisteredOSSObjectDeletion",
 		"context.WithoutCancel(ctx)",
 	} {
-		if !strings.Contains(handlers+admin+deletion+completion, required) {
+		if !strings.Contains(handlers+admin+deletion+completion+bindingSources.String(), required) {
 			t.Fatalf("OSS path is missing failure contract %q", required)
 		}
 	}

@@ -13,7 +13,6 @@ import (
 	"os"
 	"reflect"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"mcmods-cn-backend/internal/activity"
@@ -43,7 +42,7 @@ func TestAuditCMP003OSSCompletionSharesRegistrationAndQuotaTransactionHTTPIntegr
 			if !strings.Contains(string(raw), "failed to persist upload activity") {
 				t.Fatalf("completion failed at an unrelated boundary: %s", raw)
 			}
-			f.unchanged(t, before)
+			auditOSSAssertFailureOnlyCompensatesOwnCandidates(t, f, before)
 			auditFixInjectActivityFailure(t, f.test013Fixture, f.userIDs[f.editor], false)
 			var prior int
 			if err := f.db.QueryRow(f.ctx, `select count(*) from activity_event_outbox where user_id=$1 and action_id=$2 and object_type_id=$3`, f.userIDs[f.editor], activity.ActionUpload, activity.ObjectFile).Scan(&prior); err != nil {
@@ -52,7 +51,7 @@ func TestAuditCMP003OSSCompletionSharesRegistrationAndQuotaTransactionHTTPIntegr
 			result := decodeTEST022Data[map[string]any](t, auditOSSRequire(t, f, f.editor, http.MethodPost, base+"complete", ticket.completion(), 201))
 			var files, intents int
 			var verified bool
-			if err := f.db.QueryRow(f.ctx, `select count(*),bool_and(source_hash_verified) from oss_files where object_key=$1 and status='active'`, ticket.ObjectKey).Scan(&files, &verified); err != nil || files != 1 || !verified {
+			if err := f.db.QueryRow(f.ctx, `select count(*),bool_and(file.source_hash_verified) from oss_files file join oss_upload_byte_bindings binding on binding.file_id=file.id where binding.upload_object_key=$1 and binding.status='committed' and file.status='active'`, ticket.ObjectKey).Scan(&files, &verified); err != nil || files != 1 || !verified {
 				t.Fatalf("registered files=%d verified=%v err=%v", files, verified, err)
 			}
 			if err := f.db.QueryRow(f.ctx, `select count(*) from activity_event_outbox where user_id=$1 and action_id=$2 and object_type_id=$3`, f.userIDs[f.editor], activity.ActionUpload, activity.ObjectFile).Scan(&intents); err != nil || intents != prior+1 {
@@ -149,9 +148,7 @@ func TestAuditCMP003OSSBlueprintCompletionIncludesNormalizeOutboxHTTPIntegration
 			if !strings.Contains(string(response), message) {
 				t.Fatalf("wrong failure boundary: %s", response)
 			}
-			if after := auditOSSAllFacts(t, f); !reflect.DeepEqual(before, after) {
-				t.Fatal("failed upload committed file/quota/blueprint/job/outbox facts")
-			}
+			auditOSSAssertFailureOnlyCompensatesOwnCandidates(t, f, before)
 			if failure == "activity" {
 				auditFixInjectActivityFailure(t, f.test013Fixture, f.userIDs[f.editor], false)
 			} else {
@@ -164,7 +161,7 @@ func TestAuditCMP003OSSBlueprintCompletionIncludesNormalizeOutboxHTTPIntegration
 				t.Fatal("valid blueprint did not queue normalization")
 			}
 			var files, jobs, variants, outbox int
-			if err := f.db.QueryRow(f.ctx, `select (select count(*) from oss_files where object_key=$1 and status='active'),(select count(*) from blueprint_jobs where operation='normalize' and status='queued'),(select count(*) from blueprint_variants),(select count(*) from nats_outbox where event_type='blueprint.conversion.requested')`, ticket.ObjectKey).Scan(&files, &jobs, &variants, &outbox); err != nil || files != 1 || jobs != 1 || variants != 1 || outbox != 1 {
+			if err := f.db.QueryRow(f.ctx, `select (select count(*) from oss_files file join oss_upload_byte_bindings binding on binding.file_id=file.id where binding.upload_object_key=$1 and binding.status='committed' and file.status='active'),(select count(*) from blueprint_jobs where operation='normalize' and status='queued'),(select count(*) from blueprint_variants),(select count(*) from nats_outbox where event_type='blueprint.conversion.requested')`, ticket.ObjectKey).Scan(&files, &jobs, &variants, &outbox); err != nil || files != 1 || jobs != 1 || variants != 1 || outbox != 1 {
 				t.Fatalf("recovered files/jobs/variants/outbox=%d/%d/%d/%d err=%v", files, jobs, variants, outbox, err)
 			}
 			before = auditOSSAllFacts(t, f)
@@ -264,7 +261,7 @@ func TestAuditCMP003OSSConcurrentCompletionHasOneIntentAndHashesOutsidePoolHTTPI
 	}
 	var files, intents int
 	var bytes int64
-	if err := f.db.QueryRow(f.ctx, `select (select count(*) from oss_files where object_key=$1),(select count(*) from activity_event_outbox where user_id=$2 and action_id=$3 and object_type_id=$4),(select active_stored_bytes from oss_user_quota_usage where user_id=$2)`, ticket.ObjectKey, f.userIDs[f.editor], activity.ActionUpload, activity.ObjectFile).Scan(&files, &intents, &bytes); err != nil || files != 1 || intents != prior+1 || bytes != int64(len(raw)) {
+	if err := f.db.QueryRow(f.ctx, `select (select count(*) from oss_files file join oss_upload_byte_bindings binding on binding.file_id=file.id where binding.upload_object_key=$1 and binding.status='committed'),(select count(*) from activity_event_outbox where user_id=$2 and action_id=$3 and object_type_id=$4),(select active_stored_bytes from oss_user_quota_usage where user_id=$2)`, ticket.ObjectKey, f.userIDs[f.editor], activity.ActionUpload, activity.ObjectFile).Scan(&files, &intents, &bytes); err != nil || files != 1 || intents != prior+1 || bytes != int64(len(raw)) {
 		t.Fatalf("concurrent facts files=%d intents=%d prior=%d stored=%d err=%v", files, intents, prior, bytes, err)
 	}
 }
@@ -344,30 +341,16 @@ func TestAuditCMP003OSSConvertedUploadActivityFailureRetainsRetryableSourceHTTPI
 	}
 	ticket := f.ticket(t, f.editor, "/api/v1/users/me/oss/uploads/presign", "atomic-image.png", "image/png", "markdown", source)
 	f.put(t, ticket, source)
-	destination := persistedWebPObjectKey(ticket.ObjectKey)
-	handler := f.provider.Config.Handler
-	var processes atomic.Int64
-	f.provider.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/"+ticket.ObjectKey) {
-			processes.Add(1)
-			f.store.mu.Lock()
-			f.store.objects[destination] = test036Object{data: bytes.Clone(converted), contentType: "image/webp"}
-			f.store.mu.Unlock()
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"status":"OK"}`))
-			return
-		}
-		handler.ServeHTTP(w, r)
-	})
+	conversionFacts := auditOSSInstallBindingWebPConversion(t, f, ticket, converted)
+
 	auditFixInjectActivityFailure(t, f.test013Fixture, f.userIDs[f.editor], true)
 	before := auditOSSAllFacts(t, f)
 	response := auditOSSRequire(t, f, f.editor, http.MethodPost, "/api/v1/users/me/oss/uploads/complete", ticket.completion(), 500)
 	if !bytes.Contains(response, []byte("failed to persist upload activity")) {
 		t.Fatal("converted upload did not reach its activity-intent boundary")
 	}
-	if after := auditOSSAllFacts(t, f); !reflect.DeepEqual(before, after) {
-		t.Fatal("failed converted upload changed quota/file/asset/outbox facts")
-	}
+	auditOSSAssertFailureOnlyCompensatesOwnCandidates(t, f, before)
+	destination, _ := conversionFacts()
 	f.store.mu.Lock()
 	_, sourcePresent := f.store.objects[ticket.ObjectKey]
 	stored := bytes.Clone(f.store.objects[destination].data)
@@ -388,8 +371,9 @@ func TestAuditCMP003OSSConvertedUploadActivityFailureRetainsRetryableSourceHTTPI
 	}
 	var sourceBytes, storedBytes int64
 	var intents int
-	if err := f.db.QueryRow(f.ctx, `select active_source_bytes,active_stored_bytes,(select count(*) from activity_event_outbox where user_id=$1 and action_id=$2 and object_type_id=$3) from oss_user_quota_usage where user_id=$1`, f.userIDs[f.editor], activity.ActionUpload, activity.ObjectFile).Scan(&sourceBytes, &storedBytes, &intents); err != nil || sourceBytes != int64(len(source)) || storedBytes != int64(len(converted)) || intents != prior+1 || processes.Load() != 2 {
-		t.Fatalf("converted recovery bytes=%d/%d intents=%d prior=%d processes=%d err=%v", sourceBytes, storedBytes, intents, prior, processes.Load(), err)
+	_, processes := conversionFacts()
+	if err := f.db.QueryRow(f.ctx, `select active_source_bytes,active_stored_bytes,(select count(*) from activity_event_outbox where user_id=$1 and action_id=$2 and object_type_id=$3) from oss_user_quota_usage where user_id=$1`, f.userIDs[f.editor], activity.ActionUpload, activity.ObjectFile).Scan(&sourceBytes, &storedBytes, &intents); err != nil || sourceBytes != int64(len(source)) || storedBytes != int64(len(converted)) || intents != prior+1 || processes != 2 {
+		t.Fatalf("converted recovery bytes=%d/%d intents=%d prior=%d processes=%d err=%v", sourceBytes, storedBytes, intents, prior, processes, err)
 	}
 	repeated := decodeTEST022Data[map[string]any](t, auditOSSRequire(t, f, f.editor, http.MethodPost, "/api/v1/users/me/oss/uploads/complete", ticket.completion(), 200))
 	if repeated["sourceSha256"] != completed["sourceSha256"] || repeated["storedSha256"] != completed["storedSha256"] {

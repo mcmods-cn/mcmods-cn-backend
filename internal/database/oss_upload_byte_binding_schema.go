@@ -51,17 +51,20 @@ func OSSUploadByteBindingSchemaStatements() []string {
 		`create unique index if not exists oss_upload_byte_bindings_committed_upload on oss_upload_byte_bindings(bucket,endpoint,upload_object_key) where status='committed'`,
 		`create index if not exists oss_upload_byte_bindings_file on oss_upload_byte_bindings(file_id) where status='committed'`,
 		`create index if not exists oss_upload_byte_bindings_cleanup on oss_upload_byte_bindings(lease_expires_at,id) where status in ('preparing','cleanup_pending')`,
+		`create index if not exists oss_upload_byte_bindings_reconcile on oss_upload_byte_bindings(lease_expires_at,id) where status in ('cleanup_pending','discarded')`,
 	}
 }
 
 type OSSUploadByteBindingState struct {
-	Database          string `json:"database"`
-	Generation        int    `json:"generation"`
-	Present           bool   `json:"present"`
-	Committed         int64  `json:"committed"`
-	Preparing         int64  `json:"preparing"`
-	CleanupPending    int64  `json:"cleanup_pending"`
-	LegacyActiveFiles int64  `json:"legacy_active_files_without_binding"`
+	Database            string `json:"database"`
+	Generation          int    `json:"generation"`
+	Present             bool   `json:"present"`
+	Committed           int64  `json:"committed"`
+	Preparing           int64  `json:"preparing"`
+	CleanupPending      int64  `json:"cleanup_pending"`
+	Discarded           int64  `json:"discarded"`
+	ReconciliationReady bool   `json:"reconciliation_ready"`
+	LegacyActiveFiles   int64  `json:"legacy_active_files_without_binding"`
 }
 type ossUploadByteBindingQuery interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
@@ -122,8 +125,21 @@ func inspectOSSUploadByteBindings(ctx context.Context, q ossUploadByteBindingQue
 	if !indexValid {
 		return state, errors.New("incompatible OSS committed-upload identity index")
 	}
+	var reconcileIndexPresent bool
+	if err := q.QueryRow(ctx, `select to_regclass('public.oss_upload_byte_bindings_reconcile') is not null`).Scan(&reconcileIndexPresent); err != nil {
+		return state, err
+	}
+	if reconcileIndexPresent {
+		var predicate string
+		if err := q.QueryRow(ctx, `select index_row.indisvalid and index_row.indrelid='public.oss_upload_byte_bindings'::regclass and index_row.indnkeyatts=2 and pg_get_indexdef(index_row.indexrelid,1,true)='lease_expires_at' and pg_get_indexdef(index_row.indexrelid,2,true)='id',pg_get_expr(index_row.indpred,index_row.indrelid) from pg_index index_row where index_row.indexrelid='public.oss_upload_byte_bindings_reconcile'::regclass`).Scan(&state.ReconciliationReady, &predicate); err != nil {
+			return state, err
+		}
+		if !state.ReconciliationReady || normalize(predicate) != normalize("(status = ANY (ARRAY['cleanup_pending'::text, 'discarded'::text]))") {
+			return state, errors.New("incompatible OSS byte binding reconciliation index")
+		}
+	}
 	if counts {
-		if err := q.QueryRow(ctx, `select count(*) filter(where status='committed'),count(*) filter(where status='preparing'),count(*) filter(where status='cleanup_pending'),(select count(*) from public.oss_files file where file.status='active' and not exists(select 1 from public.oss_upload_byte_bindings binding where binding.file_id=file.id and binding.status='committed' and binding.stored_object_key=file.object_key and binding.stored_verified_sha256=file.stored_sha256)) from public.oss_upload_byte_bindings`).Scan(&state.Committed, &state.Preparing, &state.CleanupPending, &state.LegacyActiveFiles); err != nil {
+		if err := q.QueryRow(ctx, `select count(*) filter(where status='committed'),count(*) filter(where status='preparing'),count(*) filter(where status='cleanup_pending'),count(*) filter(where status='discarded'),(select count(*) from public.oss_files file where file.status='active' and not exists(select 1 from public.oss_upload_byte_bindings binding where binding.file_id=file.id and binding.status='committed' and binding.stored_object_key=file.object_key and binding.stored_verified_sha256=file.stored_sha256)) from public.oss_upload_byte_bindings`).Scan(&state.Committed, &state.Preparing, &state.CleanupPending, &state.Discarded, &state.LegacyActiveFiles); err != nil {
 			return state, err
 		}
 	}
@@ -149,7 +165,7 @@ func RequireOSSUploadByteBindingSchema(ctx context.Context, q ossUploadByteBindi
 	if err != nil {
 		return err
 	}
-	if !state.Present {
+	if !state.Present || !state.ReconciliationReady {
 		return errors.New("OSS upload byte binding expansion required: inspect and explicitly apply cmd/db-oss-byte-binding-upgrade")
 	}
 	return nil
@@ -193,8 +209,8 @@ func ApplyOSSUploadByteBindingUpgrade(ctx context.Context, pool *pgxpool.Pool, e
 	if err != nil {
 		return after, err
 	}
-	if !after.Present {
-		return after, errors.New("OSS upload byte binding expansion did not create the public receipt table")
+	if !after.Present || !after.ReconciliationReady {
+		return after, errors.New("OSS upload byte binding expansion did not create the public receipt table and reconciliation index")
 	}
 	return after, tx.Commit(ctx)
 }
