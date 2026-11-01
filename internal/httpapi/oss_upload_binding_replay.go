@@ -76,6 +76,10 @@ func (s *Server) writeCompletedOSSByteBindingReplay(w http.ResponseWriter, r *ht
 }
 
 func writeOSSByteBindingMutationError(w http.ResponseWriter, err error, fallback string) {
+	if errors.Is(err, errOSSRawUploadRetired) {
+		writeError(w, http.StatusConflict, "原始上传已结束，请重新上传")
+		return
+	}
 	if errors.Is(err, errOSSCompletedIdentityConflict) {
 		writeError(w, http.StatusConflict, "此上传已使用不同文件信息完成，请重新上传")
 		return

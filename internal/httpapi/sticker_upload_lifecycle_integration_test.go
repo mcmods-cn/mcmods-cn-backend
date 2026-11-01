@@ -4,56 +4,25 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/security"
 )
 
 func TestTemporaryStickerUploadsAreExplicitlyDiscardedOrExpiredIntegration(t *testing.T) {
-	databaseURL := strings.TrimSpace(os.Getenv("MCMODS_TEST_DATABASE_URL"))
-	if databaseURL == "" {
-		if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
-			t.Skip("set MCMODS_TEST_DATABASE_URL or MCMODS_RUN_DB_INTEGRATION=1 to run sticker upload lifecycle tests")
-		}
-		databaseURL = config.Load().DB.ConnString()
-	}
-	poolConfig, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	poolConfig.MaxConns = 1
+	// Install the real functions, typed receipt/FK and quota constraints. The
+	// old partial pg_temp tables hid missing migration dependencies.
+	db := openOSSDeletionStateTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	db, err := pgxpool.NewWithConfig(ctx, poolConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
 	connection, err := db.Acquire(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
-		`create temporary table oss_files(
-			id bigint primary key,public_id text not null unique,uploader_id bigint not null,source text not null,
-			bucket text not null,endpoint text not null,region text not null,object_key text not null,
-			status text not null,created_at timestamptz not null,updated_at timestamptz not null default now()
-		)`,
-		`create temporary table stickers(id bigint primary key,image_file_id bigint not null)`,
-		`create temporary table log_shares(source_file_id bigint,status text not null,deleted_at timestamptz)`,
-		`create temporary table oss_object_deletion_outbox(
-			oss_file_id bigint,bucket text not null,endpoint text not null,region text not null,use_cname boolean not null,
-			object_key text not null,reason text not null,status text not null default 'pending',attempts integer not null default 0,max_attempts integer not null default 12,
-			next_attempt_at timestamptz not null default now(),locked_at timestamptz,locked_by text not null default '',last_error text not null default '',failure_class text not null default '',
-			updated_at timestamptz not null default now(),deleted_at timestamptz,dead_at timestamptz,replay_count integer not null default 0,
-			last_replayed_at timestamptz,last_replayed_by bigint,unique(bucket,endpoint,object_key)
-		)`,
 		`insert into oss_files(id,public_id,uploader_id,source,bucket,endpoint,region,object_key,status,created_at) values
 			(10,'f00000010',7001,'sticker-upload','bucket','https://oss-cn-test.aliyuncs.com','cn-test','temporary/expired-legacy.png','active',now()-interval '2 hours'),
 			(11,'f00000011',7001,'sticker-upload:new','bucket','https://oss-cn-test.aliyuncs.com','cn-test','temporary/new.png','active',now()),
@@ -62,7 +31,8 @@ func TestTemporaryStickerUploadsAreExplicitlyDiscardedOrExpiredIntegration(t *te
 			(14,'f00000014',7001,'sticker-upload:already','bucket','https://oss-cn-test.aliyuncs.com','cn-test','temporary/already.png','deleted',now()-interval '2 hours'),
 			(15,'f00000015',7001,'sticker-upload:discard','bucket','https://oss-cn-test.aliyuncs.com','cn-test','temporary/discard.png','active',now()),
 			(16,'f00000016',7002,'sticker-upload:foreign','bucket','https://oss-cn-test.aliyuncs.com','cn-test','temporary/foreign.png','active',now())`,
-		`insert into stickers values(20,13)`,
+		`insert into sticker_packs(id,code) values(50,'owned_retention_pack')`,
+		`insert into stickers(id,pack_id,code,image_file_id,mime_type,width,height,file_size,checksum) values(20,50,'owned_retention',13,'image/png',1,1,1,'synthetic-owned')`,
 	} {
 		if _, err = connection.Exec(ctx, statement); err != nil {
 			connection.Release()

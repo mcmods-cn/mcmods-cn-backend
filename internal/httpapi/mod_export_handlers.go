@@ -269,13 +269,17 @@ func (s *Server) resumeModExportUpload(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "Failed to resume the OSS upload")
 			return
 		}
+		if err := s.recordResumedOSSUploadCapability(r, cfg, request.ObjectKey, ossUploadCapability{Kind: "put", ExpiresAt: result.Expiration}); err != nil {
+			writeOSSByteBindingMutationError(w, err, "cannot record resumed OSS write capability")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"method": result.Method, "url": result.URL, "headers": result.SignedHeaders,
 			"bucket": cfg.Bucket, "objectKey": request.ObjectKey,
 			"category": expectedCategory, "source": "mcmods_exporter",
 			"originalName": request.OriginalName, "contentType": request.ContentType,
 			"sizeBytes": request.SizeBytes, "sha256": request.SHA256,
-			"uploadRequired": true, "expiresAt": time.Now().Add(expires),
+			"uploadRequired": true, "expiresAt": result.Expiration,
 			"storageUrl": ossStoredObjectURL(cfg, request.ObjectKey),
 		})
 		return
@@ -287,13 +291,17 @@ func (s *Server) resumeModExportUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "Failed to resume the OSS multipart upload")
 		return
 	}
+	if err := s.recordResumedOSSUploadCapability(r, cfg, request.ObjectKey, ossUploadCapability{Kind: "multipart", UploadID: request.MultipartUploadID, ExpiresAt: multipart.ExpiresAt}); err != nil {
+		writeOSSByteBindingMutationError(w, err, "cannot record resumed OSS multipart capability")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"method": "MULTIPART", "multipart": multipart,
 		"bucket": cfg.Bucket, "objectKey": request.ObjectKey,
 		"category": expectedCategory, "source": "mcmods_exporter",
 		"originalName": request.OriginalName, "contentType": request.ContentType,
 		"sizeBytes": request.SizeBytes, "sha256": request.SHA256,
-		"uploadRequired": true, "expiresAt": time.Now().Add(expires),
+		"uploadRequired": true, "expiresAt": multipart.ExpiresAt,
 		"storageUrl": ossStoredObjectURL(cfg, request.ObjectKey),
 	})
 }

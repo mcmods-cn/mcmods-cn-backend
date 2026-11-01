@@ -91,14 +91,14 @@ func (s *Server) recoverOSSByteBindingAttempt(ctx context.Context) (bool, error)
 // File deletion owns both its public stored object and these exclusive sources;
 // keep shared active-file protection by leaving FileID nil for source cleanup.
 func queueDeletedOSSByteBindingSourcesTx(ctx context.Context, tx pgx.Tx, fileID int64) error {
-	rows, err := tx.Query(ctx, `select id::text,sealed_source_key,stored_object_key,bucket,endpoint,region,use_cname from oss_upload_byte_bindings where file_id=$1 and status='committed' and sealed_source_key<>stored_object_key`, fileID)
+	rows, err := tx.Query(ctx, `select id::text,upload_object_key,sealed_source_key,stored_object_key,bucket,endpoint,region,use_cname from oss_upload_byte_bindings where file_id=$1 and status='committed'`, fileID)
 	if err != nil {
 		return err
 	}
 	var sources []*ossUploadByteBinding
 	for rows.Next() {
 		b := &ossUploadByteBinding{}
-		if err = rows.Scan(&b.ID, &b.SourceKey, &b.StoredKey, &b.cfg.Bucket, &b.cfg.Endpoint, &b.cfg.Region, &b.cfg.UseCName); err != nil {
+		if err = rows.Scan(&b.ID, &b.UploadKey, &b.SourceKey, &b.StoredKey, &b.cfg.Bucket, &b.cfg.Endpoint, &b.cfg.Region, &b.cfg.UseCName); err != nil {
 			rows.Close()
 			return err
 		}
@@ -110,12 +110,35 @@ func queueDeletedOSSByteBindingSourcesTx(ctx context.Context, tx pgx.Tx, fileID 
 		return err
 	}
 	for _, b := range sources {
-		if !ownedOSSByteBindingCandidate(b, b.SourceKey) {
+		if !ownedOSSByteBindingCandidate(b, b.SourceKey) || b.UploadKey == "" || isOSSSealedObjectKey(b.UploadKey) || b.UploadKey == b.StoredKey || b.UploadKey == b.SourceKey {
 			return errors.New("deleted file source is outside its recorded byte-binding attempt")
 		}
-		if err = enqueueOSSObjectDeletionTx(ctx, tx, ossDeletionTarget{Bucket: b.cfg.Bucket, Endpoint: b.cfg.Endpoint, Region: b.cfg.Region, UseCName: b.cfg.UseCName, ObjectKey: b.SourceKey, Reason: "deleted-upload-sealed-source"}); err != nil {
+		if b.SourceKey != b.StoredKey {
+			if err = enqueueOSSObjectDeletionTx(ctx, tx, ossDeletionTarget{Bucket: b.cfg.Bucket, Endpoint: b.cfg.Endpoint, Region: b.cfg.Region, UseCName: b.cfg.UseCName, ObjectKey: b.SourceKey, Reason: "deleted-upload-sealed-source"}); err != nil {
+				return err
+			}
+		}
+		if err := queueDeletedOSSOriginalInputTx(ctx, tx, b, fileID); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func queueDeletedOSSOriginalInputTx(ctx context.Context, tx pgx.Tx, b *ossUploadByteBinding, fileID int64) error {
+	if err := enqueueOSSObjectDeletionTx(ctx, tx, ossDeletionTarget{FileID: &fileID, RawUploadBindingID: &b.ID, Bucket: b.cfg.Bucket, Endpoint: b.cfg.Endpoint, Region: b.cfg.Region, UseCName: b.cfg.UseCName, ObjectKey: b.UploadKey, Reason: "deleted-upload-original-input"}); err != nil {
+		return err
+	}
+	// The issued SDK deadline can be later than the original request timestamp,
+	// and a concurrent old issuer can still commit before this tombstone. The
+	// Worker always rereads the latest deadline under the original-key fence.
+	tag, err := tx.Exec(ctx, `update oss_object_deletion_outbox set next_attempt_at=greatest(next_attempt_at,coalesce((select max_expires_at+interval '1 second' from oss_upload_capabilities where bucket=$2 and endpoint=$3 and object_key=$4),clock_timestamp())),updated_at=clock_timestamp()
+ where raw_upload_binding_id=$1::uuid and bucket=$2 and endpoint=$3 and object_key=$4 and status='pending'`, b.ID, b.cfg.Bucket, b.cfg.Endpoint, b.UploadKey)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("terminal raw deletion intent does not match its committed receipt")
 	}
 	return nil
 }

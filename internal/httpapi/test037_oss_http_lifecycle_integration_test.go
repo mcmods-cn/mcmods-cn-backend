@@ -53,7 +53,14 @@ type test037Fixture struct {
 
 func newTEST037Fixture(t *testing.T) test037Fixture {
 	t.Helper()
-	f := test037Fixture{test013Fixture: newTEST013Fixture(t), store: &test037Store{
+	return newTEST037FixtureWithBase(t, newTEST013Fixture(t))
+}
+
+// Keep the identical provider oracle while a long real-expiry test supplies an
+// explicitly owned schema and context. Ordinary TEST037 keeps its old default.
+func newTEST037FixtureWithBase(t *testing.T, base test013Fixture) test037Fixture {
+	t.Helper()
+	f := test037Fixture{test013Fixture: base, store: &test037Store{
 		objects: make(map[string]test036Object), uploads: make(map[string]*test037Multipart), aborts: make(map[string]int),
 	}}
 	f.server = f.origin.Config.Handler.(*Server)
@@ -230,7 +237,7 @@ func newTEST037Fixture(t *testing.T) test037Fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = f.db.Exec(f.ctx, "insert into system_settings(key,value) values('oss.aliyun',$1::jsonb)", sealed); err != nil {
+	if _, err = f.db.Exec(f.ctx, "insert into system_settings(key,value) values('oss.aliyun',$1::jsonb) on conflict(key) do update set value=excluded.value", sealed); err != nil {
 		t.Fatal(err)
 	}
 	for _, token := range []string{f.editor, f.otherEditor} {

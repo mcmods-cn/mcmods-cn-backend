@@ -42,6 +42,7 @@ func (s *Server) issueOSSUploadTicket(w http.ResponseWriter, r *http.Request, cl
 			return
 		}
 		uploadID = multipart.UploadID
+		expiresAt = multipart.ExpiresAt
 		response["method"], response["multipart"] = "MULTIPART", multipart
 	} else {
 		result, err := client.Presign(r.Context(), &aliyunoss.PutObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey), ContentType: aliyunoss.Ptr(contentType), ForbidOverwrite: aliyunoss.Ptr("true"), Metadata: map[string]string{"sha256": req.SHA256}}, aliyunoss.PresignExpires(expires))
@@ -50,7 +51,9 @@ func (s *Server) issueOSSUploadTicket(w http.ResponseWriter, r *http.Request, cl
 			return
 		}
 		response["method"], response["url"], response["headers"] = result.Method, result.URL, result.SignedHeaders
+		expiresAt = result.Expiration
 	}
+	response["expiresAt"] = expiresAt
 	if err := s.persistOSSUploadTicket(r, cfg, req, scope, objectKey, uploadID, blueprintPublicID, expiresAt, limits, deferStored); err != nil {
 		// The capability has not been disclosed. Abort only the multipart upload
 		// created above, and persist retryable cleanup if its provider is unavailable.
@@ -79,6 +82,13 @@ func (s *Server) persistOSSUploadTicket(r *http.Request, cfg ossConfigPayload, r
 		return err
 	}
 	defer tx.Rollback(ctx)
+	kind := "put"
+	if uploadID != "" {
+		kind = "multipart"
+	}
+	if err := recordOSSUploadCapabilityTx(ctx, tx, cfg, objectKey, currentClaims(r).Subject, ossUploadCapability{Kind: kind, UploadID: uploadID, ExpiresAt: expiresAt}); err != nil {
+		return err
+	}
 	if blueprintPublicID != "" {
 		id, _, createErr := createPendingBlueprintTx(ctx, tx, currentClaims(r).Subject, req.OriginalName, expiresAt, blueprintPublicID)
 		if createErr != nil {

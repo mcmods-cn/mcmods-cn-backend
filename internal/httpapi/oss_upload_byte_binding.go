@@ -136,6 +136,12 @@ func lockOSSByteBindingTx(ctx context.Context, tx pgx.Tx, b *ossUploadByteBindin
 }
 
 func commitOSSByteBindingTx(ctx context.Context, tx pgx.Tx, b *ossUploadByteBinding, fileID int64, sourceSHA string, sourceSize int64, storedSHA string, storedSize int64) error {
+	// The registration transaction already holds the original-key mutex. A
+	// candidate that copied bytes before the source file's tombstone cannot
+	// revive that retired logical key after its remote work finishes.
+	if err := requireOSSOriginalUploadLiveTx(ctx, tx, b.cfg, b.UploadKey); err != nil {
+		return err
+	}
 	tag, err := tx.Exec(ctx, `update oss_upload_byte_bindings binding set status='committed',file_id=$3,source_verified_sha256=$4,source_verified_size_bytes=$5,stored_verified_sha256=$6,stored_verified_size_bytes=$7,updated_at=clock_timestamp()
  where binding.id=$1::uuid and binding.run_token=$2 and binding.status='preparing' and binding.lease_expires_at>clock_timestamp()
  and binding.file_endpoint<>'' and binding.file_endpoint=$8

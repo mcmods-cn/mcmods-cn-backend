@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-var errOSSRawUploadRetired = errors.New("original OSS upload was retired by scoped maintenance")
+var errOSSRawUploadRetired = errors.New("original OSS upload has been retired")
 
 func (s *Server) persistOSSByteBindingPreparation(ctx context.Context, b *ossUploadByteBinding, req ossCompleteUploadRequest, owner, sourceSize int64) error {
 	tx, err := s.db.Begin(ctx)
@@ -15,6 +15,9 @@ func (s *Server) persistOSSByteBindingPreparation(ctx context.Context, b *ossUpl
 	}
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended('oss-completion:'||$1,0))`, b.cfg.Bucket+":"+b.cfg.Endpoint+":"+b.UploadKey); err != nil {
+		return err
+	}
+	if err := requireOSSOriginalUploadLiveTx(ctx, tx, b.cfg, b.UploadKey); err != nil {
 		return err
 	}
 	var journal bool

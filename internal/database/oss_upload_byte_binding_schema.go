@@ -55,7 +55,8 @@ func OSSUploadByteBindingSchemaStatements() []string {
 		`create index if not exists oss_upload_byte_bindings_reconcile on oss_upload_byte_bindings(lease_expires_at,id) where status in ('cleanup_pending','discarded')`,
 		`alter table oss_upload_byte_bindings add column if not exists file_endpoint text not null default ''`,
 	}
-	return append(statements, OSSByteMaintenanceSchemaStatements()...)
+	statements = append(statements, OSSByteMaintenanceSchemaStatements()...)
+	return append(statements, OSSRawRetirementSchemaStatements()...)
 }
 
 type OSSUploadByteBindingState struct {
@@ -68,6 +69,7 @@ type OSSUploadByteBindingState struct {
 	Discarded            int64  `json:"discarded"`
 	ReconciliationReady  bool   `json:"reconciliation_ready"`
 	EndpointMappingReady bool   `json:"endpoint_mapping_ready"`
+	RawRetirementReady   bool   `json:"raw_retirement_ready"`
 	MaintenanceReady     bool   `json:"maintenance_ready"`
 	LegacyActiveFiles    int64  `json:"legacy_active_files_without_binding"`
 }
@@ -160,6 +162,10 @@ func inspectOSSUploadByteBindings(ctx context.Context, q ossUploadByteBindingQue
 	}
 	var maintenanceErr error
 	state.MaintenanceReady, maintenanceErr = inspectOSSByteMaintenanceSchema(ctx, q)
+	if maintenanceErr != nil {
+		return state, maintenanceErr
+	}
+	state.RawRetirementReady, maintenanceErr = inspectOSSRawRetirementSchema(ctx, q)
 	return state, maintenanceErr
 }
 func InspectOSSUploadByteBindings(ctx context.Context, pool *pgxpool.Pool) (OSSUploadByteBindingState, error) {
@@ -182,7 +188,7 @@ func RequireOSSUploadByteBindingSchema(ctx context.Context, q ossUploadByteBindi
 	if err != nil {
 		return err
 	}
-	if !state.Present || !state.ReconciliationReady || !state.EndpointMappingReady {
+	if !state.Present || !state.ReconciliationReady || !state.EndpointMappingReady || !state.RawRetirementReady {
 		return errors.New("OSS upload byte binding expansion required: inspect and explicitly apply cmd/db-oss-byte-binding-upgrade")
 	}
 	return nil
@@ -225,6 +231,11 @@ func ApplyOSSUploadByteBindingUpgrade(ctx context.Context, pool *pgxpool.Pool, e
 		statement = strings.Replace(statement, "alter table oss_upload_maintenance_actions ", "alter table public.oss_upload_maintenance_actions ", 1)
 		statement = strings.Replace(statement, "alter table oss_upload_byte_bindings ", "alter table public.oss_upload_byte_bindings ", 1)
 		statement = strings.Replace(statement, "on oss_upload_byte_bindings(", "on public.oss_upload_byte_bindings(", 1)
+		statement = strings.Replace(statement, "function oss_upload_capability_shape(", "function public.oss_upload_capability_shape(", 1)
+		statement = strings.Replace(statement, "table if not exists oss_upload_capabilities (", "table if not exists public.oss_upload_capabilities (", 1)
+		statement = strings.Replace(statement, "check(oss_upload_capability_shape(", "check(public.oss_upload_capability_shape(", 1)
+		statement = strings.Replace(statement, "alter table oss_object_deletion_outbox ", "alter table public.oss_object_deletion_outbox ", 1)
+		statement = strings.Replace(statement, "on oss_object_deletion_outbox(", "on public.oss_object_deletion_outbox(", 1)
 		if _, err = tx.Exec(ctx, statement); err != nil {
 			return before, fmt.Errorf("expand OSS byte binding schema: %w", err)
 		}
@@ -233,7 +244,7 @@ func ApplyOSSUploadByteBindingUpgrade(ctx context.Context, pool *pgxpool.Pool, e
 	if err != nil {
 		return after, err
 	}
-	if !after.Present || !after.ReconciliationReady || !after.EndpointMappingReady || !after.MaintenanceReady {
+	if !after.Present || !after.ReconciliationReady || !after.EndpointMappingReady || !after.MaintenanceReady || !after.RawRetirementReady {
 		return after, errors.New("OSS upload byte binding expansion did not create the public receipt table, endpoint mapping and reconciliation index")
 	}
 	return after, tx.Commit(ctx)

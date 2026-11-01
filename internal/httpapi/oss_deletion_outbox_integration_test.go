@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -114,14 +115,16 @@ func TestOSSDeletionReplayAndCompletedKeyReuseAreAuditedIntegration(t *testing.T
 	pool := openOSSDeletionStateTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if _, err := pool.Exec(ctx, `insert into oss_object_deletion_outbox(
+	// A completed unregistered-key cleanup can precede its new registered
+	// incarnation. The real schema forbids two file rows with one object_key.
+	if _, err := pool.Exec(ctx, `insert into oss_files(id,bucket,endpoint,region,object_key,status) values
+		(21,'bucket','oss.example','region','repeat','deleted'),
+		(22,'bucket','oss.example','region','dead','deleted'),(23,'bucket','oss.example','region-new','reused','active');
+		insert into oss_object_deletion_outbox(
 		id,oss_file_id,bucket,endpoint,region,object_key,reason,status,attempts,max_attempts,last_error,failure_class,deleted_at,dead_at) values
-		(20,20,'bucket','oss.example','region','reused','old','completed',4,12,'old error','unknown',now(),null),
+		(20,null,'bucket','oss.example','region','reused','old','completed',4,12,'old error','unknown',now(),null),
 		(21,21,'bucket','oss.example','region','repeat','old','completed',1,12,'','','now',null),
-		(22,22,'bucket','oss.example','region','dead','manual','dead',12,12,'permission denied','authorization',null,now());
-		insert into oss_files(id,bucket,endpoint,region,object_key,status) values
-		(20,'bucket','oss.example','region','reused','deleted'),(21,'bucket','oss.example','region','repeat','deleted'),
-		(22,'bucket','oss.example','region','dead','deleted'),(23,'bucket','oss.example','region-new','reused','active')`); err != nil {
+		(22,22,'bucket','oss.example','region','dead','manual','dead',12,12,'permission denied','authorization',null,now())`); err != nil {
 		t.Fatal(err)
 	}
 	server := &Server{db: pool}
@@ -247,12 +250,12 @@ func TestOSSDeletionRecoveryAndAdminPlansUsePartialIndexesIntegration(t *testing
 		where attempts>=max_attempts and (status='pending' or
 			(status='processing' and locked_at<now()-make_interval(secs => 300)))
 		order by updated_at,id for update skip locked limit 32`)
-	if !strings.Contains(strings.ToLower(exhaustedPlan), "test_oss_deletion_exhausted") {
+	if !strings.Contains(strings.ToLower(exhaustedPlan), "idx_oss_object_deletion_outbox_exhausted") {
 		t.Fatalf("exhausted recovery plan missed partial index:\n%s", exhaustedPlan)
 	}
 	deadPlan := explainOSSDeletionPlan(t, ctx, pool, `select id from oss_object_deletion_outbox
 		where status='dead' order by dead_at desc nulls last,id desc limit 50`)
-	if !strings.Contains(strings.ToLower(deadPlan), "test_oss_deletion_dead") {
+	if !strings.Contains(strings.ToLower(deadPlan), "idx_oss_object_deletion_outbox_dead") {
 		t.Fatalf("dead admin plan missed partial index:\n%s", deadPlan)
 	}
 }
@@ -272,29 +275,27 @@ func openOSSDeletionStateTestDB(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	poolConfig.MaxConns = 1
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if poolConfig.ConnConfig.Host != "127.0.0.1" && poolConfig.ConnConfig.Host != "localhost" && poolConfig.ConnConfig.Host != "::1" {
+		t.Fatal("requires owned loopback PostgreSQL")
+	}
+	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
+		t.Setenv("MCMODS_RUN_DB_INTEGRATION", "1")
+	}
+	fixture, err := database.NewIsolatedTestSchema(ctx, databaseURL, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pool.Close)
-	if _, err = pool.Exec(ctx, `create temp table oss_object_deletion_outbox(
-		id bigserial primary key,public_id text not null unique default new_public_id(),oss_file_id bigint,bucket text not null,endpoint text not null,region text not null,use_cname boolean not null default false,
-		object_key text not null,reason text not null default '',status text not null default 'pending',attempts integer not null default 0,max_attempts integer not null default 12,
-		next_attempt_at timestamptz not null default now(),locked_at timestamptz,locked_by text not null default '',last_error text not null default '',failure_class text not null default '',
-		created_at timestamptz not null default now(),updated_at timestamptz not null default now(),deleted_at timestamptz,dead_at timestamptz,replay_count integer not null default 0,
-		last_replayed_at timestamptz,last_replayed_by bigint,unique(bucket,endpoint,object_key));
-		create index test_oss_deletion_pending on oss_object_deletion_outbox(next_attempt_at,id) where status in ('pending','processing');
-		create index test_oss_deletion_dead on oss_object_deletion_outbox(dead_at desc,id desc) where status='dead';
-		create index test_oss_deletion_exhausted on oss_object_deletion_outbox(updated_at,id)
-			where status in ('pending','processing') and attempts>=max_attempts;
-		create temp table oss_files(id bigint primary key,public_id text not null unique default new_public_id(),bucket text not null,endpoint text not null,region text not null,object_key text not null,status text not null,updated_at timestamptz not null default now());
-		create temp table log_shares(source_file_id bigint,status text not null default 'active',deleted_at timestamptz);
-		create temp table app_logs(id bigserial primary key,category text not null,level text not null,action text not null,target text not null,payload jsonb not null default '{}'::jsonb)`); err != nil {
-		pool.Close()
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 15*time.Second)
+		defer stop()
+		if e := fixture.Close(cleanup); e != nil {
+			t.Error(e)
+		}
+	})
+	if _, err = fixture.Pool.Exec(ctx, `insert into users(id,username,email,password_hash) values(7001,'owned-deletion-a','owned-deletion-a@example.invalid','synthetic'),(7002,'owned-deletion-b','owned-deletion-b@example.invalid','synthetic')`); err != nil {
 		t.Fatal(err)
 	}
-	return pool
+	return fixture.Pool
 }
 
 func explainOSSDeletionPlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string) string {

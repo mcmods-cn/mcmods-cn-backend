@@ -31,26 +31,28 @@ var (
 )
 
 type ossDeletionTarget struct {
-	FileID    *int64
-	Bucket    string
-	Endpoint  string
-	Region    string
-	UseCName  bool
-	ObjectKey string
-	Reason    string
+	FileID             *int64
+	RawUploadBindingID *string
+	Bucket             string
+	Endpoint           string
+	Region             string
+	UseCName           bool
+	ObjectKey          string
+	Reason             string
 }
 
 type ossDeletionJob struct {
-	ID          int64
-	FileID      *int64
-	Bucket      string
-	Endpoint    string
-	Region      string
-	UseCName    bool
-	ObjectKey   string
-	Attempts    int
-	MaxAttempts int
-	LockToken   string
+	ID                 int64
+	FileID             *int64
+	RawUploadBindingID *string
+	Bucket             string
+	Endpoint           string
+	Region             string
+	UseCName           bool
+	ObjectKey          string
+	Attempts           int
+	MaxAttempts        int
+	LockToken          string
 }
 
 type OSSDeletionWorker struct {
@@ -98,6 +100,12 @@ func (worker *OSSDeletionWorker) drain(ctx context.Context) {
 			return
 		}
 		if err = worker.deleteObject(ctx, job); err != nil {
+			if errors.Is(err, errOSSRawDeletionDeferred) {
+				continue
+			}
+			if job.RawUploadBindingID != nil && errors.Is(err, errOSSDeletionLeaseLost) {
+				continue
+			}
 			if ctx.Err() != nil {
 				return
 			}
@@ -123,13 +131,16 @@ func (worker *OSSDeletionWorker) claim(ctx context.Context) (ossDeletionJob, err
 			where attempts<max_attempts and ((status='pending' and next_attempt_at<=now())
 			   or (status='processing' and locked_at<now()-make_interval(secs => $1)))
 			order by next_attempt_at,id for update skip locked limit 1)
-		returning id,oss_file_id,bucket,endpoint,region,use_cname,object_key,attempts,max_attempts`,
+		returning id,oss_file_id,bucket,endpoint,region,use_cname,object_key,attempts,max_attempts,raw_upload_binding_id::text`,
 		int(ossDeletionLeaseTimeout/time.Second), job.LockToken).
-		Scan(&job.ID, &job.FileID, &job.Bucket, &job.Endpoint, &job.Region, &job.UseCName, &job.ObjectKey, &job.Attempts, &job.MaxAttempts)
+		Scan(&job.ID, &job.FileID, &job.Bucket, &job.Endpoint, &job.Region, &job.UseCName, &job.ObjectKey, &job.Attempts, &job.MaxAttempts, &job.RawUploadBindingID)
 	return job, err
 }
 
 func (worker *OSSDeletionWorker) complete(ctx context.Context, job ossDeletionJob) error {
+	if job.RawUploadBindingID != nil {
+		return worker.completeOriginalUpload(ctx, job)
+	}
 	tag, err := worker.server.db.Exec(ctx, `update oss_object_deletion_outbox set
 		status='completed',deleted_at=now(),dead_at=null,locked_at=null,locked_by='',last_error='',failure_class='',updated_at=now()
 		where id=$1 and status='processing' and locked_by=$2`, job.ID, job.LockToken)
@@ -144,6 +155,9 @@ func (worker *OSSDeletionWorker) complete(ctx context.Context, job ossDeletionJo
 
 func (worker *OSSDeletionWorker) deleteObject(ctx context.Context, job ossDeletionJob) error {
 	cfg := worker.server.ossConfigFromSettings(ctx)
+	if job.RawUploadBindingID != nil {
+		return worker.deleteOriginalUpload(ctx, job, cfg)
+	}
 	tx, err := worker.server.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin OSS deletion lease guard: %w", err)
@@ -245,16 +259,27 @@ func (worker *OSSDeletionWorker) recordFailure(ctx context.Context, job ossDelet
 		return false, err
 	}
 	defer tx.Rollback(ctx)
+	if job.RawUploadBindingID != nil {
+		var id int64
+		if err = tx.QueryRow(ctx, `select id from oss_object_deletion_outbox where id=$1 and status='processing' and locked_by=$2 for update`, job.ID, job.LockToken).Scan(&id); errors.Is(err, pgx.ErrNoRows) {
+			return false, errOSSDeletionLeaseLost
+		} else if err != nil {
+			return false, err
+		}
+		if _, err = requireOSSRawDeletionLeaseTx(ctx, tx, job); err != nil {
+			return false, err
+		}
+	}
 	lastError := truncateOSSDeletionError(deletionErr)
 	var tag pgconn.CommandTag
 	if dead {
 		tag, err = tx.Exec(ctx, `update oss_object_deletion_outbox set status='dead',dead_at=now(),
-			next_attempt_at=now(),locked_at=null,locked_by='',last_error=$3,failure_class=$4,updated_at=now()
+		next_attempt_at=now(),locked_at=null,locked_by='',last_error=$3,failure_class=$4,raw_hold_reason='',updated_at=now()
 			where id=$1 and status='processing' and locked_by=$2`, job.ID, job.LockToken, lastError, decision.class)
 	} else {
 		nextAttempt := time.Now().Add(ossDeletionRetryDelay(job.Attempts))
 		tag, err = tx.Exec(ctx, `update oss_object_deletion_outbox set status='pending',next_attempt_at=$3,
-			locked_at=null,locked_by='',last_error=$4,failure_class=$5,updated_at=now()
+			locked_at=null,locked_by='',last_error=$4,failure_class=$5,raw_hold_reason='',updated_at=now()
 			where id=$1 and status='processing' and locked_by=$2`, job.ID, job.LockToken, nextAttempt, lastError, decision.class)
 	}
 	if err != nil {
@@ -446,11 +471,13 @@ func enqueueOSSObjectDeletionTx(ctx context.Context, tx pgx.Tx, target ossDeleti
 		return fmt.Errorf("OSS deletion target is incomplete")
 	}
 	_, err := tx.Exec(ctx, `insert into oss_object_deletion_outbox(
-		oss_file_id,bucket,endpoint,region,use_cname,object_key,reason)
-		values($1,$2,$3,$4,$5,$6,$7)
+		oss_file_id,bucket,endpoint,region,use_cname,object_key,reason,raw_upload_binding_id)
+		values($1,$2,$3,$4,$5,$6,$7,$8::uuid)
 		on conflict(bucket,endpoint,object_key) do update set
+			raw_upload_binding_id=coalesce(oss_object_deletion_outbox.raw_upload_binding_id,excluded.raw_upload_binding_id),
 			oss_file_id=case when oss_object_deletion_outbox.status in ('completed','dead')
 				then coalesce(excluded.oss_file_id,oss_object_deletion_outbox.oss_file_id)
+				when excluded.raw_upload_binding_id is not null and oss_object_deletion_outbox.raw_upload_binding_id is null then excluded.oss_file_id
 				else oss_object_deletion_outbox.oss_file_id end,
 			region=case when oss_object_deletion_outbox.status in ('completed','dead')
 				then excluded.region else oss_object_deletion_outbox.region end,
@@ -467,6 +494,6 @@ func enqueueOSSObjectDeletionTx(ctx context.Context, tx pgx.Tx, target ossDeleti
 			deleted_at=case when oss_object_deletion_outbox.status in ('completed','dead') then null else oss_object_deletion_outbox.deleted_at end,
 			dead_at=case when oss_object_deletion_outbox.status in ('completed','dead') then null else oss_object_deletion_outbox.dead_at end,
 			updated_at=now()`,
-		target.FileID, target.Bucket, target.Endpoint, target.Region, target.UseCName, target.ObjectKey, target.Reason)
+		target.FileID, target.Bucket, target.Endpoint, target.Region, target.UseCName, target.ObjectKey, target.Reason, target.RawUploadBindingID)
 	return err
 }

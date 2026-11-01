@@ -25,9 +25,10 @@ type ossMultipartPartTicket struct {
 }
 
 type ossMultipartUploadTicket struct {
-	UploadID string                   `json:"uploadId"`
-	PartSize int64                    `json:"partSize"`
-	Parts    []ossMultipartPartTicket `json:"parts"`
+	UploadID  string                   `json:"uploadId"`
+	PartSize  int64                    `json:"partSize"`
+	Parts     []ossMultipartPartTicket `json:"parts"`
+	ExpiresAt time.Time                `json:"-"`
 }
 
 func shouldUseOSSMultipart(sizeBytes int64) bool {
@@ -104,6 +105,7 @@ func presignExistingOSSMultipartUpload(
 		return ticket, errors.New("invalid OSS multipart upload size")
 	}
 	parts := make([]ossMultipartPartTicket, 0, partCount)
+	var latestExpiry time.Time
 	for partNumber := 1; partNumber <= partCount; partNumber++ {
 		partLength := min(ossMultipartPartSize, sizeBytes-int64(partNumber-1)*ossMultipartPartSize)
 		presigned, presignErr := client.Presign(ctx, &aliyunoss.UploadPartRequest{
@@ -113,12 +115,18 @@ func presignExistingOSSMultipartUpload(
 		if presignErr != nil {
 			return ticket, fmt.Errorf("presign OSS multipart part %d: %w", partNumber, presignErr)
 		}
+		if presigned.Expiration.IsZero() {
+			return ticket, errors.New("OSS multipart part has no actual signature expiry")
+		}
+		if presigned.Expiration.After(latestExpiry) {
+			latestExpiry = presigned.Expiration
+		}
 		parts = append(parts, ossMultipartPartTicket{
 			PartNumber: partNumber, SizeBytes: partLength, Method: presigned.Method,
 			URL: presigned.URL, Headers: presigned.SignedHeaders,
 		})
 	}
-	return ossMultipartUploadTicket{UploadID: uploadID, PartSize: ossMultipartPartSize, Parts: parts}, nil
+	return ossMultipartUploadTicket{UploadID: uploadID, PartSize: ossMultipartPartSize, Parts: parts, ExpiresAt: latestExpiry}, nil
 }
 
 func completeOSSMultipartUpload(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey, uploadID string) error {

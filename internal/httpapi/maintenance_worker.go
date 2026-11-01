@@ -336,13 +336,14 @@ func (worker *MaintenanceWorker) expireBans(ctx context.Context) {
 // durable retries; marking the file deleted immediately also closes the access
 // path before physical deletion succeeds.
 func (worker *MaintenanceWorker) pruneReportEvidence(ctx context.Context) {
+	server := &Server{db: worker.db}
 	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
 		tx, err := worker.db.Begin(ctx)
 		if err != nil {
 			log.Printf("begin report evidence cleanup: %v", err)
 			return
 		}
-		rows, err := tx.Query(ctx, `select evidence.id,file.id,file.bucket,file.endpoint,file.region,file.object_key
+		rows, err := tx.Query(ctx, `select evidence.id,file.id
 			from report_evidence evidence
 			left join oss_files file on file.object_key=evidence.object_key
 			where evidence.status in ('temporary','pending_delete') and evidence.cleanup_after<=now()
@@ -355,15 +356,11 @@ func (worker *MaintenanceWorker) pruneReportEvidence(ctx context.Context) {
 		type cleanupItem struct {
 			evidenceID int64
 			fileID     *int64
-			bucket     *string
-			endpoint   *string
-			region     *string
-			objectKey  *string
 		}
 		items := make([]cleanupItem, 0, maintenanceBatchSize)
 		for rows.Next() {
 			var item cleanupItem
-			if err = rows.Scan(&item.evidenceID, &item.fileID, &item.bucket, &item.endpoint, &item.region, &item.objectKey); err != nil {
+			if err = rows.Scan(&item.evidenceID, &item.fileID); err != nil {
 				break
 			}
 			items = append(items, item)
@@ -378,12 +375,8 @@ func (worker *MaintenanceWorker) pruneReportEvidence(ctx context.Context) {
 			return
 		}
 		for _, item := range items {
-			if item.fileID != nil && item.bucket != nil && item.endpoint != nil && item.region != nil && item.objectKey != nil {
-				target := ossDeletionTarget{FileID: item.fileID, Bucket: *item.bucket, Endpoint: *item.endpoint, Region: *item.region, ObjectKey: *item.objectKey, Reason: "report_evidence_retention_expired"}
-				if err = enqueueOSSObjectDeletionTx(ctx, tx, target); err != nil {
-					break
-				}
-				if _, err = tx.Exec(ctx, `update oss_files set status='deleted',updated_at=now() where id=$1`, *item.fileID); err != nil {
+			if item.fileID != nil {
+				if err = server.tombstoneOSSFileTx(ctx, tx, *item.fileID, "report_evidence_retention_expired"); err != nil {
 					break
 				}
 			}

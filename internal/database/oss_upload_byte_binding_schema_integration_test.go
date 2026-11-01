@@ -93,7 +93,7 @@ func TestOSSByteBindingFreshLegacyUpgradePreservesIdentityAndRejectsSchemaDriftI
 		return raw
 	}
 	before := snapshot()
-	if _, err := db.Exec(ctx, `drop table oss_upload_maintenance_actions; drop function oss_upload_maintenance_shape(text,text,bigint,text,text,text); drop table oss_upload_byte_bindings; drop function oss_upload_byte_binding_shape(text,bigint,text,bigint,text,text,text,text,bigint,text,bigint,bigint)`); err != nil {
+	if _, err := db.Exec(ctx, `alter table oss_object_deletion_outbox drop column raw_upload_binding_id,drop column raw_hold_reason; drop table oss_upload_capabilities; drop function oss_upload_capability_shape(text,text,text,bigint,text,text,timestamptz,timestamptz,timestamptz,bigint); drop table oss_upload_maintenance_actions; drop function oss_upload_maintenance_shape(text,text,bigint,text,text,text); drop table oss_upload_byte_bindings; drop function oss_upload_byte_binding_shape(text,bigint,text,bigint,text,text,text,text,bigint,text,bigint,bigint)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := RequireOSSUploadByteBindingSchema(ctx, db); err == nil || !strings.Contains(err.Error(), "OSS upload byte binding expansion required") {
