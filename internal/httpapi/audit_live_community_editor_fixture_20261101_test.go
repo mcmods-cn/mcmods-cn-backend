@@ -62,6 +62,7 @@ func TestAuditLiveCommunityEditorFixture20261101(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	identityOnly := os.Getenv("MCMODS_AUDIT_COMMUNITY_IDENTITY_ONLY") == "1"
 	frontendOrigin := "http://127.0.0.1:3341"
 	t.Setenv("FRONTEND_ORIGIN", frontendOrigin)
 	unlockDDL := auditGlobalCatalogPGLock(t)
@@ -80,7 +81,9 @@ func TestAuditLiveCommunityEditorFixture20261101(t *testing.T) {
 	}
 	t.Cleanup(db.Close)
 	caps := []string{"community.tutorial.create", "user.draft.retention_seconds.2592000"}
-	grantTEST044Permissions(t, f.ctx, db, f.userIDs[f.editor], caps...)
+	if !identityOnly {
+		grantTEST044Permissions(t, f.ctx, db, f.userIDs[f.editor], caps...)
+	}
 	// Existing reviewer has only content.review; other editor keeps its unrelated
 	// project.edit capability. No community.edit, no-review or administrator grant.
 	cfg := f.server.cfg
@@ -114,7 +117,11 @@ func TestAuditLiveCommunityEditorFixture20261101(t *testing.T) {
 	// do not change that policy or claim continuous same-author creation here.
 	authorTokens := map[string]string{"tutorial": f.editor}
 	authorActors := map[string]any{"tutorial": actors["creator"]}
-	for _, kind := range []string{"issue", "news", "discussion"} {
+	authorKinds := []string{"issue", "news", "discussion"}
+	if identityOnly {
+		authorKinds = nil
+	}
+	for _, kind := range authorKinds {
 		id, publicID, token := createTEST044User(t, f.ctx, db, cfg, "community-"+kind+"-"+randomCatalogPublicID(), "UTC")
 		f.userIDs[token] = id
 		if _, err := db.Exec(f.ctx, `update users set created_at=now()-interval '30 days',email_verified=true where id=$1`, id); err != nil {
@@ -196,7 +203,11 @@ func TestAuditLiveCommunityEditorFixture20261101(t *testing.T) {
 	rows := []map[string]any{}
 	purposes := map[string]string{"tutorial": "Configure a supported client safely using a published community guide.", "issue": "Describe a reproducible menu rendering issue for the declared project.", "news": "Announce the next documented maintenance release with source references.", "discussion": "Discuss resource selection behavior and preserve author editing access."}
 	collections := map[string]string{"tutorial": "tutorials", "issue": "issues", "news": "news", "discussion": "discussions"}
-	for index, kind := range []string{"tutorial", "issue", "news", "discussion", "tutorial"} {
+	postKinds := []string{"tutorial", "issue", "news", "discussion", "tutorial"}
+	if identityOnly {
+		postKinds = nil
+	}
+	for index, kind := range postKinds {
 		authorToken := authorTokens[kind]
 		pending := index == 4
 		title := "Community editor " + kind
@@ -282,7 +293,12 @@ func TestAuditLiveCommunityEditorFixture20261101(t *testing.T) {
 		}
 		conversation := decodeTEST022Data[map[string]string](t, f.require(t, row.owner, http.MethodPost, "/api/v1/messages/conversations", startConversationRequest{UserID: peerPublicID}, 200))
 		path := "/api/v1/messages/conversations/" + conversation["id"]
-		message := decodeTEST022Data[directMessageItem](t, f.require(t, row.owner, http.MethodPost, path, sendDirectMessageRequest{Body: row.body}, 201))
+		message := decodeTEST022Data[struct {
+			Message directMessageItem `json:"message"`
+		}](t, f.require(t, row.owner, http.MethodPost, path, sendDirectMessageRequest{Body: row.body}, 201)).Message
+		if message.ID == "" || message.ConversationID != conversation["id"] || message.SenderID != ownerPublicID || message.RecipientID != peerPublicID || message.Body != row.body {
+			t.Fatal("normal message response lost actual public identity or body")
+		}
 		foreign := f.otherEditor
 		if row.key == "B" {
 			foreign = f.editor
@@ -292,7 +308,7 @@ func TestAuditLiveCommunityEditorFixture20261101(t *testing.T) {
 	}
 	snapshotFacts := func(name string) {
 		var facts []byte
-		err := db.QueryRow(f.ctx, `select jsonb_agg(jsonb_build_object('id',post.public_id,'kind',post.kind,'status',post.status,'reviewStatus',post.review_status,'authorId',actor.public_id,'publishedRevisionId',revision.public_id,'title',post.title) order by post.public_id) from community_posts post join users actor on actor.id=post.author_id left join content_revisions revision on revision.id=post.published_revision_id`).Scan(&facts)
+		err := db.QueryRow(f.ctx, `select coalesce(jsonb_agg(jsonb_build_object('id',post.public_id,'kind',post.kind,'status',post.status,'reviewStatus',post.review_status,'authorId',actor.public_id,'publishedRevisionId',revision.public_id,'title',post.title) order by post.public_id),'[]'::jsonb) from community_posts post join users actor on actor.id=post.author_id left join content_revisions revision on revision.id=post.published_revision_id`).Scan(&facts)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -310,6 +326,17 @@ func TestAuditLiveCommunityEditorFixture20261101(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := map[string]any{"owner": "mcmods-live-community-editor", "pid": os.Getpid(), "apiOrigin": origin.URL, "frontendOrigin": frontendOrigin, "repoRevisions": revisions, "authFile": authFile, "ownedSchema": schema, "actors": actors, "posts": rows, "messageCases": messageCases, "stopPath": filepath.Join(directory, "STOP"), "createdAt": time.Now().UTC().Format(time.RFC3339Nano), "scope": "Four predeclared kind-specific ordinary authors, normal HTTP creation and independent review prerequisites, actual PostgreSQL; same-author fourth-submit429 remains its separate historical quota result. Two normal HTTP private message conversations for A/B identity-race testing. External native browser still required. No queue, administrator or no-review claim."}
+	deadline, ok := f.ctx.Deadline()
+	if !ok {
+		t.Fatal("fixture must declare its exact execution window")
+	}
+	runtime["readyAt"] = time.Now().UTC().Format(time.RFC3339Nano)
+	runtime["expiresAt"] = deadline.UTC().Format(time.RFC3339Nano)
+	runtime["identityOnly"] = identityOnly
+	if identityOnly {
+		runtime["owner"] = "mcmods-live-identity-session"
+		runtime["scope"] = "Normal native A/B identity tests only: two normally created private conversations/messages and valid password login prerequisites, no replay of completed CMP002 authoring/reviews. Actual PostgreSQL, no queue/admin/permission bypass. Fixed45min harness window (not product request timeout) explicitly advertised."
+	}
 	auditJourneyWriteJSON(t, filepath.Join(directory, "runtime.json"), runtime)
 	t.Logf("COMMUNITY_EDITOR_READY runtime=%s; private credentials omitted", filepath.Join(directory, "runtime.json"))
 	ticker := time.NewTicker(time.Second)
