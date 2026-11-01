@@ -959,7 +959,14 @@ func (worker *ProjectAutomationWorker) uploadProviderFile(ctx context.Context, c
 }
 
 func downloadProviderFile(ctx context.Context, file providerProjectFile, cfg modImportConfig) (*spooledProviderFile, error) {
-	client, err := newProviderDownloadHTTPClient(time.Duration(cfg.RequestTimeoutSeconds)*time.Second, file.DirectURL, providerDownloadTrustedBase(file.Source, cfg))
+	return downloadProviderFileWithClientFactory(ctx, file, cfg, newProviderDownloadHTTPClient)
+}
+
+// Production always enters through the fixed safe factory above. The explicit
+// private dependency permits bounded TLS download regressions without changing
+// DNS, redirect policy, trusted origins, or a runtime/global setting.
+func downloadProviderFileWithClientFactory(ctx context.Context, file providerProjectFile, cfg modImportConfig, newClient func(time.Duration, string, ...string) (*http.Client, error)) (*spooledProviderFile, error) {
+	client, err := newClient(time.Duration(cfg.RequestTimeoutSeconds)*time.Second, file.DirectURL, providerDownloadTrustedBase(file.Source, cfg))
 	if err != nil {
 		return nil, err
 	}
