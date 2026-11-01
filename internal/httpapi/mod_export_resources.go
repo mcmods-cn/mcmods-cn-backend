@@ -122,10 +122,13 @@ func (s *Server) resolveExportResources(ctx context.Context, keys []exportResour
 			left join mod_content_versions version on version.id=revision.target_version_id
 			where resource.canonical_id=requested.resource_id
 		) candidate
-		where (requested.resource_kind='' or candidate.resource_kind=requested.resource_kind)
+		where (requested.resource_kind='' or candidate.resource_kind=requested.resource_kind
+            or (requested.resource_kind in ('gas','infusion','pigment','slurry')
+                and candidate.kind_code='mekanism.'||requested.resource_kind))
 			and (candidate.revision_id=requested.preferred_revision_id
 				or (candidate.is_active and candidate.status in ('ready','partial')))
 		order by (candidate.revision_id=requested.preferred_revision_id) desc,
+            (candidate.kind_code='mekanism.'||requested.resource_kind) desc,
 			(candidate.resource_kind=requested.resource_kind) desc,
 			(candidate.minecraft_version=requested.minecraft_version) desc,
 			(candidate.loader=requested.loader) desc,
@@ -212,8 +215,11 @@ func (s *Server) resolveManualModContentResources(ctx context.Context, keys []ex
 		join mod_resource_version_details detail on detail.resource_id=resource.entity_id and detail.status='active'
 		join mod_content_versions version on version.id=detail.version_id and version.status='active' and version.mod_id=binding.mod_id
 		where lower(resource.canonical_id)=lower(requested.resource_id)
-			and (requested.resource_kind='' or lower(kind.family)=lower(requested.resource_kind))
-		order by (lower(resource.kind_code)=lower('minecraft.'||requested.resource_kind)) desc,
+			and (requested.resource_kind='' or lower(kind.family)=lower(requested.resource_kind)
+                or (requested.resource_kind in ('gas','infusion','pigment','slurry')
+                    and resource.kind_code='mekanism.'||requested.resource_kind))
+		order by (resource.kind_code='mekanism.'||requested.resource_kind) desc,
+            (lower(resource.kind_code)=lower('minecraft.'||requested.resource_kind)) desc,
 			version.updated_at desc,resource.entity_id limit 1
 	) source on true`, revisions, resourceIDs, kinds, previewAll, previewAllowed, previewDenied)
 	if err != nil {
@@ -260,7 +266,7 @@ func normalizeExportResourceKind(value string) string {
 		return "fluid"
 	case strings.Contains(value, "gas"):
 		return "gas"
-	case strings.Contains(value, "infusion"):
+	case value == "mekanism_infuse_type", value == "infuse_type", strings.Contains(value, "infusion"):
 		return "infusion"
 	case strings.Contains(value, "pigment"):
 		return "pigment"

@@ -122,6 +122,14 @@ func TestAuditF002FourChemicalKindsResolveTheirOwnCanonicalIdentityAndImageHTTPP
 		if source.PublicID != publicID || source.KindCode != kind.code || source.IconPath != iconPath || source.RevisionID != revision {
 			t.Fatalf("supported %s canonical source/image missing or cross-kind: got public=%s kind=%s icon=%s expected=%s/%s", kind.ingredient, source.PublicID, source.KindCode, source.IconPath, publicID, kind.code)
 		}
+		fallbackKey := exportResourceKey{ResourceID: "example:chemical_shared", Kind: kind.suffix}
+		fallback, err := f.server.resolveManualModContentResources(f.ctx, []exportResourceKey{fallbackKey})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if candidate := fallback[fallbackKey]; candidate.PublicID != publicID || candidate.KindCode != kind.code || candidate.VersionPublicID != f.versionPublic {
+			t.Fatalf("typed canonical fallback crossed chemical identities for %s: %#v", kind.code, candidate)
+		}
 		if err := f.db.QueryRow(f.ctx, `select entity.public_id from recipes recipe join catalog_entities entity on entity.id=recipe.entity_id where recipe.canonical_source_id=$1`, "example:collision_"+kind.suffix).Scan(&recipeID); err != nil {
 			t.Fatal(err)
 		}
@@ -130,6 +138,10 @@ func TestAuditF002FourChemicalKindsResolveTheirOwnCanonicalIdentityAndImageHTTPP
 		if output["publicId"] != publicID || output["kind"] != kind.code || output["iconPath"] != iconPath || output["sourceRevisionId"] != revision || output["ingredient_kind"] != kind.ingredient || output["amount"] != float64(1000+index) {
 			t.Fatalf("actual anonymous recipe projection loses typed %s reference: %#v", kind.code, output)
 		}
+	}
+	unrelated, err := f.server.resolveExportResources(f.ctx, []exportResourceKey{{RevisionID: revision, ResourceID: "example:chemical_shared", Kind: "item"}})
+	if err != nil || len(unrelated) != 0 {
+		t.Fatalf("chemical canonical ID resolved as unrelateditem: %#v/%v", unrelated, err)
 	}
 	t.Log("actual HTTP/Worker/independent review resolves four same-canonical chemical IDs to four distinct own public identities/icons, including producer infuse_type alias; no family-level chemical wildcard")
 }
