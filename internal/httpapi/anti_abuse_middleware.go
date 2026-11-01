@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -241,8 +242,16 @@ func collectContentStrings(value any, key string, result *[]string) {
 	}
 	switch typed := value.(type) {
 	case map[string]any:
-		for childKey, child := range typed {
-			collectContentStrings(child, strings.ToLower(childKey), result)
+		// JSON object order carries no meaning. A stable traversal also keeps
+		// both fingerprinting and the bounded field selection independent of
+		// Go's randomized map iteration. Arrays retain their original order.
+		keys := make([]string, 0, len(typed))
+		for childKey := range typed {
+			keys = append(keys, childKey)
+		}
+		slices.Sort(keys)
+		for _, childKey := range keys {
+			collectContentStrings(typed[childKey], strings.ToLower(childKey), result)
 		}
 	case []any:
 		for _, child := range typed {

@@ -77,7 +77,7 @@ func TestAuditAntiAbuseCanonicalCollectionKeepsExistingBudgets(t *testing.T) {
 	}
 	parts = nil
 	collectContentStrings(map[string]any{"name": strings.Repeat("界", 20001), "summary": "different second field"}, "", &parts)
-	if len(parts) != 2 || utf8.RuneCountInString(parts[0]) != 20000 || parts[1] != "different second field" {
+	if len(parts) != 2 || utf8.RuneCountInString(parts[0]) != 20001 || parts[0] != strings.Repeat("界", 20000)+"…" || parts[1] != "different second field" {
 		t.Fatal("per-field budget or key ordering changed")
 	}
 	parts = nil
