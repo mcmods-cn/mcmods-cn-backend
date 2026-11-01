@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"path"
 	"reflect"
 	"strconv"
 	"strings"
@@ -25,6 +27,13 @@ type test036Object struct {
 	data              []byte
 	contentType, hash string
 }
+type test036CopyRequest struct {
+	Source, Destination, ForbidOverwrite string
+	Bytes                                int
+	SHA256                               string
+	ContentLength                        int64
+	BodyBytes                            int
+}
 type test036Fixture struct {
 	test013Fixture
 	server           *Server
@@ -32,6 +41,7 @@ type test036Fixture struct {
 	mu               *sync.Mutex
 	objects          map[string]test036Object
 	failGET, failPUT *atomic.Bool
+	copyRequests     *[]test036CopyRequest
 }
 
 func TestTEST036LargeValidNormalizedArtifactStillConvertsAtOriginalBudgetsFullHTTPIntegration(t *testing.T) {
@@ -101,7 +111,7 @@ func TestTEST036LargeValidNormalizedArtifactStillConvertsAtOriginalBudgetsFullHT
 
 func newTEST036Fixture(t *testing.T) test036Fixture {
 	t.Helper()
-	f := test036Fixture{test013Fixture: newTEST013Fixture(t), mu: new(sync.Mutex), objects: make(map[string]test036Object), failGET: new(atomic.Bool), failPUT: new(atomic.Bool)}
+	f := test036Fixture{test013Fixture: newTEST013Fixture(t), mu: new(sync.Mutex), objects: make(map[string]test036Object), failGET: new(atomic.Bool), failPUT: new(atomic.Bool), copyRequests: &[]test036CopyRequest{}}
 	f.server = f.origin.Config.Handler.(*Server)
 	f.provider = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if (r.Method == http.MethodGet && f.failGET.Load()) || (r.Method == http.MethodPut && f.failPUT.Load()) {
@@ -123,6 +133,49 @@ func newTEST036Fixture(t *testing.T) test036Fixture {
 			return
 		}
 		if r.Method == http.MethodPut {
+			if encodedSource := r.Header.Get("x-oss-copy-source"); encodedSource != "" {
+				// CopyObject has no upload body. Preserve exact actual source bytes
+				// and metadata under the private destination requested by production;
+				// never turn a zero-length copy request into a new empty upload.
+				source, err := url.PathUnescape(encodedSource)
+				body, bodyErr := io.ReadAll(io.LimitReader(r.Body, 1))
+				request := test036CopyRequest{Source: source, Destination: objectPath, ForbidOverwrite: r.Header.Get("x-oss-forbid-overwrite"), ContentLength: r.ContentLength, BodyBytes: len(body)}
+				*f.copyRequests = append(*f.copyRequests, request)
+				providerError := func(status int, code string) {
+					w.Header().Set("Content-Type", "application/xml")
+					w.WriteHeader(status)
+					_, _ = fmt.Fprintf(w, "<Error><Code>%s</Code><Message>owned TEST036 copy boundary</Message></Error>", code)
+				}
+				if err != nil || bodyErr != nil || len(body) != 0 || !strings.HasPrefix(source, "/test036-owned/") || request.ForbidOverwrite != "true" || !isOSSSealedObjectKey(objectPath) {
+					providerError(400, "InvalidArgument")
+					return
+				}
+				sourcePath := "/" + strings.TrimPrefix(source, "/test036-owned/")
+				attempt := path.Base(path.Dir(objectPath))
+				exactPrivateTarget := path.Join(path.Dir(sourcePath), ossSealedUploadComponent, attempt, path.Base(sourcePath))
+				if sourcePath == objectPath || len(attempt) != 36 || objectPath != exactPrivateTarget {
+					providerError(400, "InvalidArgument")
+					return
+				}
+				original, exists := f.objects[sourcePath]
+				if !exists {
+					providerError(404, "NoSuchKey")
+					return
+				}
+				if _, exists = f.objects[objectPath]; exists {
+					providerError(409, "FileAlreadyExists")
+					return
+				}
+				original.data = bytes.Clone(original.data)
+				f.objects[objectPath] = original
+				last := len(*f.copyRequests) - 1
+				(*f.copyRequests)[last].Bytes = len(original.data)
+				(*f.copyRequests)[last].SHA256 = sha256Hex(original.data)
+				w.Header().Set("Content-Type", "application/xml")
+				w.Header().Set("ETag", `"test036-owned"`)
+				_, _ = io.WriteString(w, "<CopyObjectResult><LastModified>2026-09-30T00:00:00.000Z</LastModified><ETag>test036-owned</ETag></CopyObjectResult>")
+				return
+			}
 			raw, err := io.ReadAll(io.LimitReader(r.Body, maxBlueprintNormalizedBytes+1))
 			if err != nil || int64(len(raw)) != r.ContentLength || len(raw) > maxBlueprintNormalizedBytes {
 				w.WriteHeader(400)
@@ -156,6 +209,14 @@ func newTEST036Fixture(t *testing.T) test036Fixture {
 		}
 	}))
 	t.Cleanup(f.provider.Close)
+	t.Cleanup(func() {
+		f.mu.Lock()
+		requests := append([]test036CopyRequest(nil), (*f.copyRequests)...)
+		f.mu.Unlock()
+		for i, request := range requests {
+			t.Logf("TEST036_PROVIDER_COPY index=%d method=PUT source=%q destination=%q forbid_overwrite=%q declared_content_length=%d actual_body_bytes=%d copied_bytes=%d actual_sha256=%s", i, request.Source, request.Destination, request.ForbidOverwrite, request.ContentLength, request.BodyBytes, request.Bytes, request.SHA256)
+		}
+	})
 	cfg := defaultOSSConfig()
 	cfg.Enabled, cfg.UseCName = true, true
 	cfg.Bucket, cfg.Region = "test036-owned", "cn-test"

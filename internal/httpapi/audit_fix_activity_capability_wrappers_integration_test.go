@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -16,7 +18,7 @@ import (
 func auditCapabilityWrapperFacts(t *testing.T, f test013Fixture) map[string]string {
 	t.Helper()
 	facts := auditImportActivityFacts(t, f)
-	for _, table := range []string{"oss_user_upload_quota_reservations", "oss_multipart_sessions", "oss_download_stats", "creator_claim_attachments", "project_editor_application_attachments", "minecraft_server_proof_files", "minecraft_servers", "creator_claims", "project_editor_applications"} {
+	for _, table := range []string{"oss_user_upload_quota_reservations", "oss_multipart_sessions", "oss_download_stats", "creator_claim_attachments", "project_editor_application_attachments", "minecraft_server_proof_files", "minecraft_servers", "creator_claims", "project_editor_applications", "oss_upload_capabilities", "oss_rehome_jobs", "report_evidence", "reports", "report_snapshots", "mod_gallery_images", "blueprints", "blueprint_jobs", "blueprint_variants", "content_localizations", "content_subjects", "oss_user_quota_usage", "oss_user_daily_quota_usage"} {
 		var text string
 		if err := f.db.QueryRow(f.ctx, `select coalesce(jsonb_agg(to_jsonb(fact) order by to_jsonb(fact)::text),'[]'::jsonb)::text from `+pgx.Identifier{table}.Sanitize()+` fact`).Scan(&text); err != nil {
 			t.Fatal(err)
@@ -24,6 +26,88 @@ func auditCapabilityWrapperFacts(t *testing.T, f test013Fixture) map[string]stri
 		facts[table] = text
 	}
 	return facts
+}
+
+func auditCMP003WrapperReceiptRows(t *testing.T, f auditFixGRFixture) map[string]json.RawMessage {
+	t.Helper()
+	var raw []byte
+	if err := f.db.QueryRow(f.ctx, `select coalesce(jsonb_object_agg(id::text,to_jsonb(binding)),'{}'::jsonb) from oss_upload_byte_bindings binding`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var rows map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+func auditCMP003WrapperObjects(f auditFixGRFixture) map[string]test036Object {
+	f.objectMu.Lock()
+	defer f.objectMu.Unlock()
+	result := make(map[string]test036Object, len(f.objects))
+	for key, object := range f.objects {
+		object.data = bytes.Clone(object.data)
+		result[key] = object
+	}
+	return result
+}
+
+// A failed complete may retain only its exact private, unadopted byte-binding
+// candidate and its durable compensation. Business/activity/quota facts and
+// every pre-existing provider object, receipt and cleanup row stay unchanged.
+func auditCMP003WrapperFailureCompensation(t *testing.T, f auditFixGRFixture, ticket test037Ticket, raw []byte, before map[string]string, receiptsBefore map[string]json.RawMessage, objectsBefore map[string]test036Object) {
+	t.Helper()
+	receiptsAfter := auditCMP003WrapperReceiptRows(t, f)
+	var candidate string
+	newReceipts := 0
+	for id, row := range receiptsAfter {
+		if prior, exists := receiptsBefore[id]; exists {
+			if !bytes.Equal(prior, row) {
+				t.Fatal("failed completion changed a pre-existing byte receipt")
+			}
+			continue
+		}
+		newReceipts++
+		var exact bool
+		if err := f.db.QueryRow(f.ctx, `select sealed_source_key,
+ owner_id=$2 and bucket='audit-owned' and endpoint=$3 and file_endpoint=$3
+ and upload_object_key=$4 and logical_category=$5 and source=$6 and original_name=$7
+ and declared_sha256=$8 and declared_size_bytes=$9
+ and status='cleanup_pending' and file_id is null and stored_object_key=sealed_source_key
+ from oss_upload_byte_bindings where id=$1::uuid`, id, f.userIDs[f.editor], f.provider.URL, ticket.ObjectKey, ticket.Category, ticket.Source, ticket.OriginalName, ticket.SHA256, ticket.SizeBytes).Scan(&candidate, &exact); err != nil || !exact {
+			t.Fatalf("failed completion lacks the exact current ticket's unadopted candidate: %v", err)
+		}
+		if !ownedOSSByteBindingCandidate(&ossUploadByteBinding{ID: id, SourceKey: candidate}, candidate) || candidate == ticket.ObjectKey {
+			t.Fatal("compensation candidate escaped the current private attempt")
+		}
+		var exactIntent int
+		if err := f.db.QueryRow(f.ctx, `select count(*) from oss_object_deletion_outbox where bucket='audit-owned' and endpoint=$1 and object_key=$2 and oss_file_id is null and raw_upload_binding_id is null and status='pending' and attempts=0 and reason='upload-byte-binding-not-adopted'`, f.provider.URL, candidate).Scan(&exactIntent); err != nil || exactIntent != 1 {
+			t.Fatalf("failed complete candidate's exact compensating intent=%d err=%v", exactIntent, err)
+		}
+	}
+	if len(receiptsAfter) != len(receiptsBefore)+1 || newReceipts != 1 {
+		t.Fatal("failed completion removed old receipts or created extra attempts")
+	}
+	objectsAfter := auditCMP003WrapperObjects(f)
+	if len(objectsAfter) != len(objectsBefore)+1 {
+		t.Fatal("failed completion changed objects beyond its one private candidate")
+	}
+	for key, old := range objectsBefore {
+		if current, exists := objectsAfter[key]; !exists || !reflect.DeepEqual(old, current) {
+			t.Fatal("failed completion changed a pre-existing provider object")
+		}
+	}
+	if original, exists := objectsAfter[ticket.ObjectKey]; !exists || !bytes.Equal(original.data, raw) {
+		t.Fatal("failed completion changed the actual client source bytes")
+	}
+	if copied, exists := objectsAfter[candidate]; !exists || !reflect.DeepEqual(copied, objectsBefore[ticket.ObjectKey]) {
+		t.Fatal("private candidate does not retain the exact source bytes and metadata")
+	}
+	// This shared assertion compares the entire original business fact map and
+	// permits only exact owned pending candidate rows; it keeps all old outbox
+	// rows byte-for-byte, including any unrelated cleanup.
+	auditOSSAssertFailureOnlyCompensatesOwnCandidates(t, test037Fixture{test013Fixture: f.test013Fixture}, before)
+	t.Logf("CMP003_WRAPPER_COMPENSATION ticket_category=%s source=%s exact_unadopted_receipt=1 exact_private_intent=1 actual_source_sha256=%s original_objects_and_all_business_facts_unchanged=true", ticket.Category, ticket.Source, sha256Hex(raw))
 }
 
 func TestAuditFixCMP003ImportUploadWrappersPreserveAtomicOriginalActivity(t *testing.T) {
@@ -75,9 +159,11 @@ func TestAuditFixCMP003ImportUploadWrappersPreserveAtomicOriginalActivity(t *tes
 			f.require(t, f.otherEditor, http.MethodPost, base+"complete", ticket.completion(), 403)
 			auditFixRequireProjectFactsUnchanged(t, before, auditCapabilityWrapperFacts(t, f.test013Fixture))
 			auditFixInjectActivityFailure(t, f.test013Fixture, f.userIDs[f.editor], true)
+			receiptsBefore := auditCMP003WrapperReceiptRows(t, f)
+			objectsBefore := auditCMP003WrapperObjects(f)
 			failed = f.require(t, f.editor, http.MethodPost, base+"complete", ticket.completion(), 500)
 			auditFixRequireSpecificActivityError(t, failed, "failed to persist upload activity")
-			auditFixRequireProjectFactsUnchanged(t, before, auditCapabilityWrapperFacts(t, f.test013Fixture))
+			auditCMP003WrapperFailureCompensation(t, f, ticket, raw, before, receiptsBefore, objectsBefore)
 			auditFixInjectActivityFailure(t, f.test013Fixture, f.userIDs[f.editor], false)
 			file := decodeTEST022Data[struct {
 				ID string `json:"id"`
