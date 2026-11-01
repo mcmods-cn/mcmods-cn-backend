@@ -560,7 +560,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/admin/anti-abuse/bot-rules", s.requirePermission("security.anti-abuse.read", s.adminAntiAbuseBotRules))
 	s.mux.HandleFunc("POST /api/v1/admin/anti-abuse/bot-rules", s.requirePermission("security.anti-abuse.write", s.adminAntiAbuseBotRules))
 	s.mux.HandleFunc("DELETE /api/v1/admin/anti-abuse/bot-rules/{id}", s.requirePermission("security.anti-abuse.write", s.adminDeleteAntiAbuseBotRule))
-	s.mux.HandleFunc("GET /api/v1/admin/mod-content-reviews", s.requirePermission("content.review", s.adminModContentReviews))
+	s.mux.HandleFunc("GET /api/v1/admin/mod-content-reviews", s.requireAuth(s.adminModContentReviews))
 	s.mux.HandleFunc("GET /api/v1/admin/unresolved-references", s.requirePermission("reference.unresolved.read", s.adminUnresolvedReferences))
 	s.mux.HandleFunc("GET /api/v1/admin/unresolved-reference-types", s.requirePermission("reference.unresolved.read", s.adminUnresolvedReferenceTypes))
 	s.mux.HandleFunc("GET /api/v1/admin/creator-claims", s.requirePermission("creator.claim.review", s.adminCreatorClaims))

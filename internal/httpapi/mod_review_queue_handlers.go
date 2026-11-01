@@ -166,7 +166,7 @@ const contentReviewQueueCTE = `
 		       mod.slug,mod.primary_name,export_revision.submitted_by,
 		       'mcmods_exporter ' || export_revision.minecraft_version || ' / ' || export_revision.loader,
 		       export_revision.source_namespace || ' revision ' || export_revision.revision_no,
-		       export_revision.created_at,true
+		       export_revision.created_at,false
 		from catalog_import_revisions export_revision
 		join mods mod on mod.id=export_revision.mod_id
 		where export_revision.status in ('ready','partial') and not export_revision.is_active
