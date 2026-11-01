@@ -53,3 +53,13 @@ ICC 回归金样 `testdata/audit-20261024/icc-srgb-private-label.icc` 使用 Lit
 ```sh
 python3 tools/audit/verify_icc_color_equivalence.py --source <evidence_dir>/source.icc --sanitized <evidence_dir>/sanitized.icc --output <evidence_dir>/color-equivalence.json
 ```
+
+JEI ingredient icons emitted by the supported producer live under
+`ingredients/<type-slug>/<size>/<namespace>/<path>--<hash>.png` (see
+`JeiIngredientStage.exportEntry` and `ingredientIconPath`). They are registered
+render images, linked by the existing `ingredients/ingredients.json` entries'
+`icons` map. The exact same PNG projection removes unrelated text and preserves
+pixels, alpha and necessary color interpretation before storage and serving.
+Registering this image family does not register unknown ingredient JSON or any
+opaque extension object. Recipe-bound source namespaces still use the existing
+project provenance rules.

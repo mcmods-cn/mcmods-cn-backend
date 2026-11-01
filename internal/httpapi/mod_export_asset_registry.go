@@ -96,7 +96,7 @@ func registeredExportAssetPurpose(name string) exportAssetPurpose {
 		return exportAssetNormalized
 	case strings.HasSuffix(name, ".log"):
 		return exportAssetDiagnostic
-	case strings.HasSuffix(name, ".png") && (strings.HasPrefix(name, "assets/") || strings.HasPrefix(name, "icons/") || strings.HasPrefix(name, "recipes/jei/backgrounds/") || strings.HasPrefix(name, "entities/") || strings.HasPrefix(name, "block_entities/")):
+	case strings.HasSuffix(name, ".png") && (strings.HasPrefix(name, "assets/") || strings.HasPrefix(name, "icons/") || strings.HasPrefix(name, "ingredients/") || strings.HasPrefix(name, "recipes/jei/backgrounds/") || strings.HasPrefix(name, "entities/") || strings.HasPrefix(name, "block_entities/")):
 		return exportAssetImage
 	case strings.HasPrefix(name, "assets/") && strings.Contains(name, "/models/"):
 		switch strings.ToLower(path.Ext(name)) {
