@@ -304,6 +304,15 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 	if os.Getenv("MCMODS_RUN_LIVE_MOD_FORM") != "1" {
 		t.Skip("opt-in owned actual Mod form/revision browser fixture")
 	}
+	mode := os.Getenv("MCMODS_AUDIT_MOD_FORM_MODE")
+	localizationsOnly := mode == "localizations-only"
+	if mode != "" && mode != "all" && !localizationsOnly {
+		t.Fatal("unknown declared Mod form mode")
+	}
+	reviewerASize := 14
+	if localizationsOnly {
+		reviewerASize = 16
+	}
 	directory, frontend := os.Getenv("MCMODS_AUDIT_MOD_FORM_DIR"), os.Getenv("MCMODS_AUDIT_FRONTEND_REPO")
 	if !filepath.IsAbs(directory) || !filepath.IsAbs(frontend) {
 		t.Fatal("new absolute output and clean frontend checkout required")
@@ -378,6 +387,13 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 			primary := "Provided primary " + randomCatalogPublicID()
 			id, public, token := createTEST044User(t, f.ctx, f.db, f.server.cfg, "mod-form-"+caseID+"-"+randomCatalogPublicID(), "UTC")
 			f.userIDs[token] = id
+			if localizationsOnly {
+				// REM003 is ordinary form semantics, not new-account risk. This
+				// fixed established cohort is declared before its first request.
+				if _, err = f.db.Exec(f.ctx, `update users set created_at=now()-interval '30 days',email_verified=true where id=$1`, id); err != nil {
+					t.Fatal(err)
+				}
+			}
 			grantTEST044Permissions(t, f.ctx, f.db, id, "project.create", "project.create.mod")
 			payload := auditModFormPayload(site, primary, locale)
 			other := locales[(index+1)%len(locales)]
@@ -406,7 +422,7 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 			}
 			c := &auditModFormCase{CaseID: caseID, ActorPublicID: public, SiteID: site, Mode: mode, DefaultLocale: locale, OtherLocale: other, NewURL: "/mods/new", PublicURL: "/mods/" + site, FormValues: payload, Expected: expected, ActorID: id, Token: token}
 			c.ReviewerToken = f.reviewer
-			if len(localeCases) >= 14 {
+			if len(localeCases) >= reviewerASize {
 				c.ReviewerToken = f.denied
 			}
 			c.ReviewerID, c.ReviewerPublicID = f.userIDs[c.ReviewerToken], reviewerPublicIDs[c.ReviewerToken]
@@ -415,102 +431,105 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 			recorder.register(site, caseID)
 		}
 	}
-	for _, mode := range []string{"success", "wrong", "cancel"} {
-		caseID, site := "revision-proof-"+mode, "audit-rev-"+randomCatalogPublicID()
-		id, public, token := createTEST044User(t, f.ctx, f.db, f.server.cfg, "mod-form-"+mode+"-"+randomCatalogPublicID(), "UTC")
-		f.userIDs[token] = id
-		grantTEST044Permissions(t, f.ctx, f.db, id, "project.create", "project.create.mod")
-		payload := auditModFormPayload(site, "Initial primary "+randomCatalogPublicID(), "en-US")
-		payload.SecondaryName = "Initial supplied name " + randomCatalogPublicID()
-		payload.Summary = "Independent initial overview " + randomCatalogPublicID()
-		payload.BodyMarkdown = "Original baseline description " + randomCatalogPublicID()
-		payload.Localizations = []catalogLocalizationEdit{{Locale: "en-US", Name: payload.SecondaryName, Summary: payload.Summary, ContentMarkdown: payload.BodyMarkdown}}
-		c := &auditModFormCase{CaseID: caseID, ActorPublicID: public, SiteID: site, Mode: mode, DefaultLocale: "en-US", EditURL: "/mods/" + site + "/edit", PublicURL: "/mods/" + site, InitialSnapshot: &payload, ActorID: id, Token: token, ChangeReason: "User supplied revision reason retained during proof"}
-		c.ReviewerToken, c.ReviewerID, c.ReviewerPublicID = f.reviewer, f.userIDs[f.reviewer], reviewerPublicIDs[f.reviewer]
-		if mode == "success" {
-			c.AdditionalRevisions = 1
-		}
-		recorder.register(site, caseID)
-		auditModFormInitialSubmit(t, f, token, payload)
-		revision := auditModFormPending(t, f, c)
-		auditModFormApprove(t, f, c.ReviewerToken, c.SiteID, revision)
-		if err = f.db.QueryRow(f.ctx, `select mod.project_code,revision.public_id from mods mod join content_revisions revision on revision.id=mod.published_revision_id where mod.id=$1`, c.ModID).Scan(&c.ProjectPublicID, &c.BaseRevisionID); err != nil {
-			t.Fatal(err)
-		}
-		// Submission authorship alone is not the repository's edit policy.
-		// Declare the ordinary author's one legitimate project edit scope.
-		c.EditPermission = "project.edit." + c.ProjectPublicID
-		grantTEST044Permissions(t, f.ctx, f.db, c.ActorID, c.EditPermission)
-		f.require(t, token, http.MethodGet, "/api/v1/mods/"+site+"/editor", nil, 200)
-		revisionCases = append(revisionCases, c)
-		private["revision"].(map[string]string)[caseID] = token
-	}
-	// This is a real successful ordinary submission, not an inserted fingerprint,
-	// synthetic restriction, forced risk state or threshold override.
-	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "project.create", "project.create.mod")
-	seed := auditModFormPayload("audit-reference-"+randomCatalogPublicID(), "Canonical primary provided by user", "en-US")
-	seed.SecondaryName = "Human authored canonical revision source"
-	seed.Summary = "Independent supplied overview of normal revision content"
-	seed.BodyMarkdown = "Detailed ordinary revision source written separately from its supplied summary"
-	seed.Localizations = []catalogLocalizationEdit{{Locale: "en-US", Name: seed.SecondaryName, Summary: seed.Summary, ContentMarkdown: seed.BodyMarkdown}}
-	recorder.register(seed.SiteID, "setup-reference")
-	auditModFormInitialSubmit(t, f, f.otherEditor, seed)
-	raw, _ := json.Marshal(seed)
-	inspect, _ := http.NewRequest(http.MethodPost, "/api/v1/mods", bytes.NewReader(raw))
-	inspect.Header.Set("Content-Type", "application/json")
-	_, content := inspectAntiAbuseBody(inspect)
-	seedHash := antiabuse.ContentHash(antiabuse.NormalizeContent(content))
-	deadline := time.NewTimer(10 * time.Second)
-	defer deadline.Stop()
-	pollFingerprint := time.NewTicker(20 * time.Millisecond)
-	defer pollFingerprint.Stop()
-	for {
-		var exists bool
-		if err = f.db.QueryRow(f.ctx, `select exists(select 1 from anti_abuse_content_fingerprints where user_id=$1 and action='review.submit' and exact_hash=$2)`, f.userIDs[f.otherEditor], seedHash).Scan(&exists); err != nil {
-			t.Fatal(err)
-		}
-		if exists {
-			break
-		}
-		select {
-		case <-deadline.C:
-			t.Fatal("actual successful source fingerprint absent")
-		case <-pollFingerprint.C:
-		}
-	}
-	for _, c := range revisionCases {
-		expected := seed
-		expected.SiteID = c.SiteID
-		expected.ModIDs = c.InitialSnapshot.ModIDs
-		c.FormValues = expected
-		c.Expected = expected.Localizations
-		probe := submitModRevisionRequest{Snapshot: expected, ChangeReason: c.ChangeReason, BaseRevisionID: &c.BaseRevisionID}
-		encoded, _ := json.Marshal(probe)
-		request, _ := http.NewRequest(http.MethodPost, "/", bytes.NewReader(encoded))
-		request.Header.Set("Content-Type", "application/json")
-		_, value := inspectAntiAbuseBody(request)
-		if antiabuse.ContentHash(antiabuse.NormalizeContent(value)) != seedHash {
-			t.Fatal("revision snapshot content differs from ordinary successful source")
-		}
-	}
+	seedHash := ""
 	preflights := []map[string]any{}
-	for _, c := range revisionCases {
-		probeID, public, probeToken := createTEST044User(t, f.ctx, f.db, f.server.cfg, "mod-form-probe-"+c.Mode+"-"+randomCatalogPublicID(), "UTC")
-		grantTEST044Permissions(t, f.ctx, f.db, probeID, c.EditPermission)
-		probePath := "/api/v1/mods/" + c.SiteID + "/revisions"
-		status, response := auditModFormSubmitExpect(t, f, probeToken, probePath, submitModRevisionRequest{Snapshot: c.FormValues, ChangeReason: c.ChangeReason, BaseRevisionID: &c.BaseRevisionID}, "owned-independent-revision-probe-"+c.Mode, 428)
-		var preflight struct {
-			Code string `json:"code"`
+	if !localizationsOnly {
+		for _, mode := range []string{"success", "wrong", "cancel"} {
+			caseID, site := "revision-proof-"+mode, "audit-rev-"+randomCatalogPublicID()
+			id, public, token := createTEST044User(t, f.ctx, f.db, f.server.cfg, "mod-form-"+mode+"-"+randomCatalogPublicID(), "UTC")
+			f.userIDs[token] = id
+			grantTEST044Permissions(t, f.ctx, f.db, id, "project.create", "project.create.mod")
+			payload := auditModFormPayload(site, "Initial primary "+randomCatalogPublicID(), "en-US")
+			payload.SecondaryName = "Initial supplied name " + randomCatalogPublicID()
+			payload.Summary = "Independent initial overview " + randomCatalogPublicID()
+			payload.BodyMarkdown = "Original baseline description " + randomCatalogPublicID()
+			payload.Localizations = []catalogLocalizationEdit{{Locale: "en-US", Name: payload.SecondaryName, Summary: payload.Summary, ContentMarkdown: payload.BodyMarkdown}}
+			c := &auditModFormCase{CaseID: caseID, ActorPublicID: public, SiteID: site, Mode: mode, DefaultLocale: "en-US", EditURL: "/mods/" + site + "/edit", PublicURL: "/mods/" + site, InitialSnapshot: &payload, ActorID: id, Token: token, ChangeReason: "User supplied revision reason retained during proof"}
+			c.ReviewerToken, c.ReviewerID, c.ReviewerPublicID = f.reviewer, f.userIDs[f.reviewer], reviewerPublicIDs[f.reviewer]
+			if mode == "success" {
+				c.AdditionalRevisions = 1
+			}
+			recorder.register(site, caseID)
+			auditModFormInitialSubmit(t, f, token, payload)
+			revision := auditModFormPending(t, f, c)
+			auditModFormApprove(t, f, c.ReviewerToken, c.SiteID, revision)
+			if err = f.db.QueryRow(f.ctx, `select mod.project_code,revision.public_id from mods mod join content_revisions revision on revision.id=mod.published_revision_id where mod.id=$1`, c.ModID).Scan(&c.ProjectPublicID, &c.BaseRevisionID); err != nil {
+				t.Fatal(err)
+			}
+			// Submission authorship alone is not the repository's edit policy.
+			// Declare the ordinary author's one legitimate project edit scope.
+			c.EditPermission = "project.edit." + c.ProjectPublicID
+			grantTEST044Permissions(t, f.ctx, f.db, c.ActorID, c.EditPermission)
+			f.require(t, token, http.MethodGet, "/api/v1/mods/"+site+"/editor", nil, 200)
+			revisionCases = append(revisionCases, c)
+			private["revision"].(map[string]string)[caseID] = token
 		}
-		_ = json.Unmarshal(response, &preflight)
-		if status != 428 || preflight.Code != "challenge_required" {
-			t.Fatalf("natural ordinary revision probe status=%d code=%s", status, preflight.Code)
+		// This is a real successful ordinary submission, not an inserted fingerprint,
+		// synthetic restriction, forced risk state or threshold override.
+		grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "project.create", "project.create.mod")
+		seed := auditModFormPayload("audit-reference-"+randomCatalogPublicID(), "Canonical primary provided by user", "en-US")
+		seed.SecondaryName = "Human authored canonical revision source"
+		seed.Summary = "Independent supplied overview of normal revision content"
+		seed.BodyMarkdown = "Detailed ordinary revision source written separately from its supplied summary"
+		seed.Localizations = []catalogLocalizationEdit{{Locale: "en-US", Name: seed.SecondaryName, Summary: seed.Summary, ContentMarkdown: seed.BodyMarkdown}}
+		recorder.register(seed.SiteID, "setup-reference")
+		auditModFormInitialSubmit(t, f, f.otherEditor, seed)
+		raw, _ := json.Marshal(seed)
+		inspect, _ := http.NewRequest(http.MethodPost, "/api/v1/mods", bytes.NewReader(raw))
+		inspect.Header.Set("Content-Type", "application/json")
+		_, content := inspectAntiAbuseBody(inspect)
+		seedHash = antiabuse.ContentHash(antiabuse.NormalizeContent(content))
+		deadline := time.NewTimer(10 * time.Second)
+		defer deadline.Stop()
+		pollFingerprint := time.NewTicker(20 * time.Millisecond)
+		defer pollFingerprint.Stop()
+		for {
+			var exists bool
+			if err = f.db.QueryRow(f.ctx, `select exists(select 1 from anti_abuse_content_fingerprints where user_id=$1 and action='review.submit' and exact_hash=$2)`, f.userIDs[f.otherEditor], seedHash).Scan(&exists); err != nil {
+				t.Fatal(err)
+			}
+			if exists {
+				break
+			}
+			select {
+			case <-deadline.C:
+				t.Fatal("actual successful source fingerprint absent")
+			case <-pollFingerprint.C:
+			}
 		}
-		var created int
-		if err = f.db.QueryRow(f.ctx, `select count(*) from content_revisions where created_by=$1`, probeID).Scan(&created); err != nil || created != 0 {
-			t.Fatal("preflight probe wrote a revision")
+		for _, c := range revisionCases {
+			expected := seed
+			expected.SiteID = c.SiteID
+			expected.ModIDs = c.InitialSnapshot.ModIDs
+			c.FormValues = expected
+			c.Expected = expected.Localizations
+			probe := submitModRevisionRequest{Snapshot: expected, ChangeReason: c.ChangeReason, BaseRevisionID: &c.BaseRevisionID}
+			encoded, _ := json.Marshal(probe)
+			request, _ := http.NewRequest(http.MethodPost, "/", bytes.NewReader(encoded))
+			request.Header.Set("Content-Type", "application/json")
+			_, value := inspectAntiAbuseBody(request)
+			if antiabuse.ContentHash(antiabuse.NormalizeContent(value)) != seedHash {
+				t.Fatal("revision snapshot content differs from ordinary successful source")
+			}
 		}
-		preflights = append(preflights, map[string]any{"caseId": c.CaseID, "probeActorPublicId": public, "status": status, "code": preflight.Code, "additionalRevisions": created, "scope": c.EditPermission})
+		for _, c := range revisionCases {
+			probeID, public, probeToken := createTEST044User(t, f.ctx, f.db, f.server.cfg, "mod-form-probe-"+c.Mode+"-"+randomCatalogPublicID(), "UTC")
+			grantTEST044Permissions(t, f.ctx, f.db, probeID, c.EditPermission)
+			probePath := "/api/v1/mods/" + c.SiteID + "/revisions"
+			status, response := auditModFormSubmitExpect(t, f, probeToken, probePath, submitModRevisionRequest{Snapshot: c.FormValues, ChangeReason: c.ChangeReason, BaseRevisionID: &c.BaseRevisionID}, "owned-independent-revision-probe-"+c.Mode, 428)
+			var preflight struct {
+				Code string `json:"code"`
+			}
+			_ = json.Unmarshal(response, &preflight)
+			if status != 428 || preflight.Code != "challenge_required" {
+				t.Fatalf("natural ordinary revision probe status=%d code=%s", status, preflight.Code)
+			}
+			var created int
+			if err = f.db.QueryRow(f.ctx, `select count(*) from content_revisions where created_by=$1`, probeID).Scan(&created); err != nil || created != 0 {
+				t.Fatal("preflight probe wrote a revision")
+			}
+			preflights = append(preflights, map[string]any{"caseId": c.CaseID, "probeActorPublicId": public, "status": status, "code": preflight.Code, "additionalRevisions": created, "scope": c.EditPermission})
+		}
 	}
 	privateDir := filepath.Join(directory, ".private")
 	if err = os.Mkdir(privateDir, 0700); err != nil {
@@ -523,14 +542,31 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 		t.Fatal("owned regular schema required")
 	}
 	runtime := map[string]any{"owner": "mcmods-live-mod-form", "state": "READY", "pid": os.Getpid(), "ownedSchema": schema, "apiOrigin": f.origin.URL, "frontendOrigin": "http://127.0.0.1:3531", "authCookieName": authSessionCookieName, "authPath": authPath, "repoRevisions": revisions, "revisionCases": revisionCases, "localeCases": localeCases, "referenceContentSHA256": seedHash, "preflight": map[string]any{"status": 428, "code": "challenge_required", "actorIsSeparateScopedProbe": true, "actualSuccessfulOtherUserFingerprint": true, "cases": preflights}, "policy": map[string]any{"defaultThreshold": settings.ChallengeThreshold, "challengeTTLSeconds": 600, "formMinimumAgeMilliseconds": 800, "unchanged": true, "reviewer": "two predeclared ordinary independent content.review reviewers A18/B18; actualRetryAfter obeyed", "normalReviewHourLimit": settings.Policies["review.submit"].HourLimit, "reviewerPlan": []map[string]any{{"label": "A", "publicId": reviewerPublicIDs[f.reviewer], "baselineReviews": 3, "successRevisionReviews": 1, "localeReviews": 14, "totalPlanned": 18}, {"label": "B", "publicId": reviewerPublicIDs[f.denied], "baselineReviews": 0, "successRevisionReviews": 0, "localeReviews": 18, "totalPlanned": 18}}, "matrixActorRationale": "32 predeclared independent locale/variant cases, each submits one distinct Mod"}, "reviewProtocol": map[string]string{"request": "review-request.<caseId>.json {caseId,siteId,bodySHA256}", "response": "review-result.<caseId>.json", "done": "done.flag only after native completion; PG independently validated", "stop": "STOP to end without acceptance"}, "stopPath": filepath.Join(directory, "STOP"), "createdAt": time.Now().UTC(), "serveDeadline": time.Now().Add(55 * time.Minute).UTC(), "scope": "ACTUAL_HTTP_POSTGRESQL_NATIVE_DRIVER_SEPARATE; no game/queue/production claim"}
+
+	if localizationsOnly {
+		runtime["mode"] = "localizations-only"
+		runtime["preflight"] = map[string]any{"status": "NOT_RUN_OUTSIDE_REM003_SCOPE", "reason": "REM002 fresh revision/challenge evidence is independently sealed in phase03", "cases": preflights}
+		policy := runtime["policy"].(map[string]any)
+		policy["localeActorCohort"] = "ordinary established30day emailverified, onlydeclaredcreatepermissions, noadmin/noReview/noRateMultiplier"
+		policy["reviewer"] = "two predeclared normal independent content.review reviewers16/16; no onrefusal swap"
+		policy["reviewerPlan"] = []map[string]any{{"label": "A", "publicId": reviewerPublicIDs[f.reviewer], "baselineReviews": 0, "successRevisionReviews": 0, "localeReviews": 16, "totalPlanned": 16}, {"label": "B", "publicId": reviewerPublicIDs[f.denied], "baselineReviews": 0, "successRevisionReviews": 0, "localeReviews": 16, "totalPlanned": 16}}
+		policy["sharedIPNormalHourLimit"] = settings.Policies["review.submit"].HourLimit * 4
+		policy["plannedCreateAndReviewRequests"] = 64
+	} else {
+		runtime["mode"] = "all"
+	}
 	auditModFormJSON(t, filepath.Join(directory, "runtime.json"), runtime)
-	t.Logf("MOD_FORM_READY runtime=%s locales=32 revision=3 defaultpolicy=true natural_separate_probe428=true", filepath.Join(directory, "runtime.json"))
+	t.Logf("MOD_FORM_READY runtime=%s locales=%d revision=%d defaultpolicy=true natural_separate_probe428=%v", filepath.Join(directory, "runtime.json"), len(localeCases), len(revisionCases), !localizationsOnly)
 	reviewed := map[string]bool{}
 	all := map[string]*auditModFormCase{}
 	for _, c := range localeCases {
 		all[c.CaseID] = c
 	}
-	all[revisionCases[0].CaseID] = revisionCases[0]
+	for _, c := range revisionCases {
+		if c.Mode == "success" {
+			all[c.CaseID] = c
+		}
+	}
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	wait, cancel := context.WithTimeout(f.ctx, 55*time.Minute)
@@ -599,8 +635,8 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
-			if len(reviewed) != 33 {
-				t.Fatalf("native completion before actual33 independent reviews: got%d", len(reviewed))
+			if len(reviewed) != len(all) {
+				t.Fatalf("native completion before actual%d independent reviews: got%d", len(all), len(reviewed))
 			}
 			auditModFormTerminal(t, f, directory, localeCases, revisionCases, recorder, seedHash, settingsBefore, revisions)
 			return
@@ -763,5 +799,5 @@ func auditModFormTerminal(t *testing.T, f auditFixGRFixture, directory string, l
 		}
 		checks = append(checks, map[string]any{"caseId": c.CaseID, "actorPublicId": c.ActorPublicID, "reviewerPublicId": c.ReviewerPublicID, "independentReviews": independentReviews, "projectCount": projects, "baselinePlusAdditionalRevisions": revisionCount, "nativeAttempts": selected, "safeAntiAbuseEvents": json.RawMessage(events)})
 	}
-	auditModFormJSON(t, filepath.Join(directory, "sql-terminal-seal.json"), map[string]any{"status": "PASS_ACTUAL_HTTP_PG_NORMAL_REVIEW_AND_NATIVE_REQUEST_POSTCONDITIONS", "recordedAt": time.Now().UTC(), "repoRevisions": pins, "checks": checks, "localizationCases": 32, "revisionCases": 3, "policyUnchanged": true, "productionExecuted": false, "scope": "Native driver is separate evidence. No game/queue/release claim. No real balances or production data changed."})
+	auditModFormJSON(t, filepath.Join(directory, "sql-terminal-seal.json"), map[string]any{"status": "PASS_ACTUAL_HTTP_PG_NORMAL_REVIEW_AND_NATIVE_REQUEST_POSTCONDITIONS", "recordedAt": time.Now().UTC(), "repoRevisions": pins, "checks": checks, "localizationCases": len(locales), "revisionCases": len(revisions), "policyUnchanged": true, "productionExecuted": false, "scope": "Native driver is separate evidence. No game/queue/release claim. No real balances or production data changed."})
 }
