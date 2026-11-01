@@ -96,7 +96,16 @@ type curseForgePackManifest struct {
 	} `json:"files"`
 }
 
+// Archive requests remain separate from credentialed metadata API requests.
+// Production callers always supply newProviderDownloadHTTPClient; the private
+// dependency permits complete Worker tests against an owned verified TLS peer.
+type modpackArchiveHTTPClientFactory func(time.Duration, string, ...string) (*http.Client, error)
+
 func importModrinthModpack(ctx context.Context, client *http.Client, cfg modImportConfig, reference string) (createModpackRequest, error) {
+	return importModrinthModpackWithArchiveClientFactory(ctx, client, cfg, reference, newProviderDownloadHTTPClient)
+}
+
+func importModrinthModpackWithArchiveClientFactory(ctx context.Context, client *http.Client, cfg modImportConfig, reference string, archiveClient modpackArchiveHTTPClientFactory) (createModpackRequest, error) {
 	snapshot, err := loadModrinthProviderSnapshot(ctx, client, cfg, reference)
 	if err != nil {
 		return createModpackRequest{}, err
@@ -115,7 +124,7 @@ func importModrinthModpack(ctx context.Context, client *http.Client, cfg modImpo
 	}
 	defer os.RemoveAll(temporaryDirectory)
 	archivePath := filepath.Join(temporaryDirectory, safeTemporaryArchiveName(archive.Filename, ".mrpack"))
-	if err = downloadProviderArchive(ctx, archive.URL, archivePath, cfg.RequestTimeoutSeconds, cfg.Modrinth.BaseURL); err != nil {
+	if err = downloadProviderArchiveWithClientFactory(ctx, archive.URL, archivePath, cfg.RequestTimeoutSeconds, archiveClient, cfg.Modrinth.BaseURL); err != nil {
 		return createModpackRequest{}, fmt.Errorf("下载 Modrinth 整合包失败: %w", err)
 	}
 	var index modrinthPackIndex
@@ -242,6 +251,10 @@ func modrinthIndexMods(index modrinthPackIndex) []modpackModPayload {
 }
 
 func importCurseForgeModpack(ctx context.Context, client *http.Client, cfg modImportConfig, reference string) (createModpackRequest, error) {
+	return importCurseForgeModpackWithArchiveClientFactory(ctx, client, cfg, reference, newProviderDownloadHTTPClient)
+}
+
+func importCurseForgeModpackWithArchiveClientFactory(ctx context.Context, client *http.Client, cfg modImportConfig, reference string, archiveClient modpackArchiveHTTPClientFactory) (createModpackRequest, error) {
 	headers := providerCredentialHeaders(cfg.UserAgent, "curseforge", cfg.CurseForge.BaseURL, "", cfg.CurseForge.APIKey)
 	snapshot, err := loadCurseForgeProviderSnapshot(ctx, client, cfg, headers, 4471, reference)
 	if err != nil {
@@ -267,7 +280,7 @@ func importCurseForgeModpack(ctx context.Context, client *http.Client, cfg modIm
 	}
 	defer os.RemoveAll(temporaryDirectory)
 	archivePath := filepath.Join(temporaryDirectory, safeTemporaryArchiveName(selected.FileName, ".zip"))
-	if err = downloadProviderArchive(ctx, selected.DownloadURL, archivePath, cfg.RequestTimeoutSeconds, cfg.CurseForge.BaseURL); err != nil {
+	if err = downloadProviderArchiveWithClientFactory(ctx, selected.DownloadURL, archivePath, cfg.RequestTimeoutSeconds, archiveClient, cfg.CurseForge.BaseURL); err != nil {
 		return createModpackRequest{}, fmt.Errorf("下载 CurseForge 整合包失败: %w", err)
 	}
 	var manifest curseForgePackManifest
@@ -400,10 +413,17 @@ func curseForgePackCompatibilities(manifest curseForgePackManifest, fallbackVers
 }
 
 func downloadProviderArchive(ctx context.Context, rawURL, destination string, timeoutSeconds int, trustedBaseURLs ...string) error {
+	return downloadProviderArchiveWithClientFactory(ctx, rawURL, destination, timeoutSeconds, newProviderDownloadHTTPClient, trustedBaseURLs...)
+}
+
+func downloadProviderArchiveWithClientFactory(ctx context.Context, rawURL, destination string, timeoutSeconds int, newClient modpackArchiveHTTPClientFactory, trustedBaseURLs ...string) error {
 	if !validProviderDownloadURL(rawURL) {
 		return errors.New("provider archive URL is not allowed")
 	}
-	client, err := newProviderDownloadHTTPClient(time.Duration(timeoutSeconds)*time.Second, rawURL, trustedBaseURLs...)
+	if newClient == nil {
+		return errors.New("provider archive client factory is required")
+	}
+	client, err := newClient(time.Duration(timeoutSeconds)*time.Second, rawURL, trustedBaseURLs...)
 	if err != nil {
 		return err
 	}

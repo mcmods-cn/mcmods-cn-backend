@@ -140,6 +140,10 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 // Keeping the dependency private and explicit lets integration tests observe
 // credentialed requests without a runtime setting, shared global, or real token.
 func (s *Server) runModMetadataImportWithProviderClientFactory(ctx context.Context, jobID string, newClient func(time.Duration, string) (*http.Client, error)) error {
+	return s.runModMetadataImportWithProviderClients(ctx, jobID, newClient, newProviderDownloadHTTPClient)
+}
+
+func (s *Server) runModMetadataImportWithProviderClients(ctx context.Context, jobID string, newClient func(time.Duration, string) (*http.Client, error), archiveClient modpackArchiveHTTPClientFactory) error {
 	var projectType, provider, sourceURL string
 	var userID int64
 	var startedAt time.Time
@@ -190,9 +194,9 @@ func (s *Server) runModMetadataImportWithProviderClientFactory(ctx context.Conte
 		var draft createModpackRequest
 		switch provider {
 		case "modrinth":
-			draft, err = importModrinthModpack(ctx, client, cfg, reference)
+			draft, err = importModrinthModpackWithArchiveClientFactory(ctx, client, cfg, reference, archiveClient)
 		case "curseforge":
-			draft, err = importCurseForgeModpack(ctx, client, cfg, reference)
+			draft, err = importCurseForgeModpackWithArchiveClientFactory(ctx, client, cfg, reference, archiveClient)
 		default:
 			err = errors.New("unsupported modpack import provider")
 		}
