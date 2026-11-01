@@ -57,7 +57,7 @@ func auditOSSByteMaintenanceRun(t *testing.T, f test037Fixture, pool *pgxpool.Po
 	return report.Results[0]
 }
 
-func auditOSSByteLegacyFile(t *testing.T, f test037Fixture, converted bool) (string, string, string, []byte, []byte) {
+func auditOSSByteLegacyFile(t *testing.T, f test037Fixture, converted bool, withActualGrant ...bool) (string, string, string, []byte, []byte) {
 	t.Helper()
 	source := []byte("owned synthetic old raw upload; one initial object only")
 	stored := source
@@ -79,11 +79,40 @@ func auditOSSByteLegacyFile(t *testing.T, f test037Fixture, converted bool) (str
 	if converted {
 		sourceKey = strings.TrimSuffix(key, ".webp") + ".png"
 	}
+	knownGrant := len(withActualGrant) > 0 && withActualGrant[0]
+	if knownGrant {
+		// Explicit old-storage setup: a real one-minute API ticket and one
+		// initial original PUT precede this synthetic legacy DB snapshot. This
+		// does not claim a normal HTTP completion or infer a historical grant.
+		sourceType := contentType
+		if converted {
+			sourceType = "image/png"
+		}
+		ticket := auditOSSByteOneMinuteTicket(t, f, sourceName, sourceType, source)
+		f.put(t, ticket, source)
+		if err := f.server.releaseUserOSSUploadQuotaReservation(f.ctx, f.userIDs[f.editor], ticket.ObjectKey); err != nil {
+			t.Fatal(err)
+		}
+		key, sourceKey = ticket.ObjectKey, ticket.ObjectKey
+		if converted {
+			key = persistedWebPObjectKey(sourceKey)
+			// The previous server conversion key also has an actual SDK-issued
+			// grant in this declared setup. Missing legacy grants stay unknown;
+			// a server-looking name alone cannot establish their expiry.
+			auditOSSByteIssueActualLegacyCapability(t, f, key)
+		}
+	}
 	// Initial owned old-storage fixture, not an upload mutation during any
 	// verification/registration. Bytes remain unchanged throughout promotion.
 	f.store.mu.Lock()
-	f.store.objects[key] = test036Object{data: bytes.Clone(stored), contentType: contentType, hash: strings.Repeat("e", 64)}
-	if sourceKey != key {
+	if !knownGrant || sourceKey != key {
+		if _, exists := f.store.objects[key]; exists {
+			f.store.mu.Unlock()
+			t.Fatal("initial legacy stored fixture key already exists; refusing replacement")
+		}
+		f.store.objects[key] = test036Object{data: bytes.Clone(stored), contentType: contentType, hash: strings.Repeat("e", 64)}
+	}
+	if sourceKey != key && !knownGrant {
 		f.store.objects[sourceKey] = test036Object{data: bytes.Clone(source), contentType: "image/png", hash: sha256Hex(source)}
 	}
 	f.store.mu.Unlock()
@@ -102,7 +131,7 @@ func TestAuditCMP005MaintenanceLegacyPromotionAndRawRetentionKeepPublicIdentityI
 	for _, converted := range []bool{false, true} {
 		t.Run(fmt.Sprint(converted), func(t *testing.T) {
 			f := newTEST037Fixture(t)
-			id, oldKey, sourceKey, source, stored := auditOSSByteLegacyFile(t, f, converted)
+			id, oldKey, sourceKey, source, stored := auditOSSByteLegacyFile(t, f, converted, true)
 			entry := OSSByteMaintenanceEntry{ActionID: newExportID(), Operation: "promote", FilePublicID: id, ExpectedDisplayEndpoint: f.cfg.displayEndpoint(), ExpectedSourceSHA: sha256Hex(source), ExpectedStoredSHA: sha256Hex(stored), ExpectedSourceSize: int64(len(source)), ExpectedStoredSize: int64(len(stored))}
 			if converted {
 				entry.OriginalSourceKey = sourceKey
@@ -153,7 +182,9 @@ func TestAuditCMP005MaintenanceLegacyPromotionAndRawRetentionKeepPublicIdentityI
 				t.Fatalf("same action accepted different reviewed global budgets: %+v", got)
 			}
 			// Backdate only this owned synthetic receipt to exercise the explicit
-			// seven-day retention guard. No real historical rows are modified.
+			// seven-day retention guard. Actual SDK deadlines are never changed;
+			// wait for them naturally before the original cleanup assertions.
+			auditOSSByteAwaitRealCapabilityExpiry(t, f, oldKey, sourceKey)
 			if _, err = f.db.Exec(f.ctx, `update oss_upload_byte_bindings set created_at=clock_timestamp()-interval '10 days' where id=$1::uuid`, bindingID); err != nil {
 				t.Fatal(err)
 			}

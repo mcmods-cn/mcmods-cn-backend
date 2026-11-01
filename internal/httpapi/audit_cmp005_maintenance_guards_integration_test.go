@@ -16,7 +16,7 @@ func auditOSSByteRawFixture(t *testing.T) (test037Fixture, test037Ticket, string
 	t.Helper()
 	f := newTEST037Fixture(t)
 	raw := []byte("ordinary retained upload; one client PUT only")
-	ticket := f.ticket(t, f.editor, "/api/v1/users/me/oss/uploads/presign", "guard.zip", "application/zip", "test037-maintenance", raw)
+	ticket := auditOSSByteOneMinuteTicket(t, f, "guard.zip", "application/zip", raw)
 	f.put(t, ticket, raw)
 	file := decodeTEST022Data[map[string]any](t, auditOSSRequire(t, f, f.editor, http.MethodPost, "/api/v1/users/me/oss/uploads/complete", ticket.completion(), 201))
 	var binding string
@@ -295,6 +295,7 @@ func TestAuditCMP005MaintenanceActionClockRejectsExpiryAcrossUnmodifiedRowWaitIn
 
 func TestAuditCMP005MaintenanceAlreadyAbsentInputIsRecordedAndSizePinsRemainExactIntegration(t *testing.T) {
 	f, ticket, bindingID, plan := auditOSSByteRawFixture(t)
+	auditOSSByteAwaitRealCapabilityExpiry(t, f, ticket.ObjectKey)
 	client, cfg, err := f.server.ossClient(f.ctx)
 	if err != nil {
 		t.Fatal(err)

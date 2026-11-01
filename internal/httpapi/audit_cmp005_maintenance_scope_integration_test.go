@@ -44,7 +44,8 @@ func TestAuditCMP005MaintenanceUncoveredTablesAndSchemaChangeHoldWithoutIntentIn
 }
 
 func TestAuditCMP005MaintenanceActualTableFenceAndDeclaredQuiescenceAreSeparateIntegration(t *testing.T) {
-	f, _, binding, plan := auditOSSByteRawFixture(t)
+	f, ticket, binding, plan := auditOSSByteRawFixture(t)
+	auditOSSByteAwaitRealCapabilityExpiry(t, f, ticket.ObjectKey)
 	if _, err := f.db.Exec(f.ctx, `create table audit_owned_quiesced(body text)`); err != nil {
 		t.Fatal(err)
 	}
