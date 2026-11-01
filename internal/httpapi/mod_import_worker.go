@@ -133,6 +133,13 @@ func (worker *ModMetadataImportWorker) handle(ctx context.Context, raw []byte) e
 }
 
 func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
+	return s.runModMetadataImportWithProviderClientFactory(ctx, jobID, newProviderHTTPClient)
+}
+
+// The production entry point above always uses the validated provider client.
+// Keeping the dependency private and explicit lets integration tests observe
+// credentialed requests without a runtime setting, shared global, or real token.
+func (s *Server) runModMetadataImportWithProviderClientFactory(ctx context.Context, jobID string, newClient func(time.Duration, string) (*http.Client, error)) error {
 	var projectType, provider, sourceURL string
 	var userID int64
 	var startedAt time.Time
@@ -172,7 +179,7 @@ func (s *Server) runModMetadataImport(ctx context.Context, jobID string) error {
 	} else if provider == "github" {
 		baseURL = cfg.GitHub.BaseURL
 	}
-	client, err := newProviderHTTPClient(time.Duration(cfg.RequestTimeoutSeconds)*time.Second, baseURL)
+	client, err := newClient(time.Duration(cfg.RequestTimeoutSeconds)*time.Second, baseURL)
 	if err != nil {
 		return fail(err)
 	}
