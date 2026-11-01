@@ -182,7 +182,40 @@ func (run *ossMaintenanceRun) rawGuards(ctx context.Context, tx pgx.Tx, file oss
 		return "RAW_MULTIPART_UNSETTLED", ossMaintenanceReferences{}, nil
 	}
 	refs, err := inspectOSSByteMaintenanceReferences(ctx, tx, file.ID, proof.Key, run.plan, false)
-	return ossMaintenanceReferencesStatus(refs, err), refs, err
+	if status := ossMaintenanceReferencesStatus(refs, err); status != "" {
+		return status, refs, err
+	}
+	status, err := ossMaintenanceRawCapabilityStatus(ctx, tx, cfg, proof.Key)
+	return status, refs, err
+}
+
+// The receipt's seven-day retention cutoff does not prove that an SDK-issued
+// write authorization expired. Unknown historical grants stay held. The apply
+// path calls this again under the same original-key mutex used by every issuer,
+// after its schema, action, receipt, file and reference-fence lock waits.
+func ossMaintenanceRawCapabilityStatus(ctx context.Context, tx pgx.Tx, cfg ossConfigPayload, key string) (string, error) {
+	var present bool
+	if err := tx.QueryRow(ctx, `select to_regclass('public.oss_upload_capabilities') is not null`).Scan(&present); err != nil {
+		return "", err
+	}
+	if !present {
+		return "RAW_CAPABILITY_UNKNOWN_HOLD", nil
+	}
+	var expiry *time.Time
+	if err := tx.QueryRow(ctx, `select max(max_expires_at) from public.oss_upload_capabilities where bucket=$1 and endpoint=$2 and object_key=$3`, cfg.Bucket, cfg.Endpoint, key).Scan(&expiry); err != nil {
+		return "", err
+	}
+	if expiry == nil {
+		return "RAW_CAPABILITY_UNKNOWN_HOLD", nil
+	}
+	var expired bool
+	if err := tx.QueryRow(ctx, `select clock_timestamp()>$1::timestamptz+interval '1 second'`, *expiry).Scan(&expired); err != nil {
+		return "", err
+	}
+	if !expired {
+		return "RAW_CAPABILITY_LIVE_HOLD", nil
+	}
+	return "", nil
 }
 
 // This is the dedicated executor for already journaled scoped cleanup intents.
@@ -236,6 +269,9 @@ func (run *ossMaintenanceRun) executeRawCleanup(ctx context.Context, e OSSByteMa
 		return err
 	}
 	if status != "" {
+		if status == "RAW_CAPABILITY_UNKNOWN_HOLD" || status == "RAW_CAPABILITY_LIVE_HOLD" {
+			return &ossMaintenanceScopeError{status}
+		}
 		return errOSSMaintenanceConflict
 	}
 	// Reference inventory has its own SQL deadline; provider IO gets a bounded

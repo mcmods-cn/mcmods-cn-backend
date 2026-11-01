@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"mcmods-cn-backend/internal/database"
 )
 
 type ossMaintenanceRowsQuery interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
 type OSSByteMaintenanceReferenceScope struct {
@@ -37,6 +39,26 @@ func ossMaintenanceReferenceColumns(ctx context.Context, q ossMaintenanceRowsQue
 	for table := range ossMaintenanceNonBindingTables {
 		excluded = append(excluded, table)
 	}
+	// Issued write deadlines are authorization control records, not asset
+	// bindings. Exclude only the exact expanded schema; a similarly named or
+	// incompatible table must never hide arbitrary reference-bearing columns.
+	var capabilities bool
+	if err := q.QueryRow(ctx, `select to_regclass('public.oss_upload_capabilities') is not null`).Scan(&capabilities); err != nil {
+		return nil, err
+	}
+	if capabilities {
+		if err := database.RequireOSSUploadByteBindingSchema(ctx, q); err != nil {
+			return nil, err
+		}
+		var exactColumns bool
+		if err := q.QueryRow(ctx, `select count(*)=10 from pg_attribute where attrelid='public.oss_upload_capabilities'::regclass and attnum>0 and not attisdropped`).Scan(&exactColumns); err != nil {
+			return nil, err
+		}
+		if !exactColumns {
+			return nil, errors.New("maintenance requires the reviewed issued-capability column inventory")
+		}
+		excluded = append(excluded, "oss_upload_capabilities")
+	}
 	sort.Strings(excluded)
 	rows, err := q.Query(ctx, `select c.relname,a.attname,format_type(a.atttypid,a.atttypmod),coalesce(pg_get_expr(d.adbin,d.adrelid),''),c.oid::text
  from pg_class c join pg_namespace n on n.oid=c.relnamespace join pg_attribute a on a.attrelid=c.oid join pg_type typ on typ.oid=a.atttypid left join pg_attrdef d on d.adrelid=a.attrelid and d.adnum=a.attnum
@@ -52,9 +74,7 @@ func ossMaintenanceReferenceColumns(ctx context.Context, q ossMaintenanceRowsQue
 		if err = rows.Scan(&col[0], &col[1], &col[2], &col[3], &col[4]); err != nil {
 			return nil, err
 		}
-		if !ossMaintenanceNonBindingTables[col[0]] {
-			columns = append(columns, col)
-		}
+		columns = append(columns, col)
 	}
 	return columns, rows.Err()
 }
