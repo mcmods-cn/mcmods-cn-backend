@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	appconfig "mcmods-cn-backend/internal/config"
@@ -312,30 +310,30 @@ func newTEST040IsolatedDatabase(t *testing.T, ctx context.Context) *pgxpool.Pool
 	if err != nil {
 		t.Fatal(err)
 	}
-	databaseName := fmt.Sprintf("test040_rating_%d", time.Now().UnixNano())
-	namePattern := regexp.MustCompile(`^test040_rating_[0-9]+$`)
-	if !namePattern.MatchString(databaseName) {
+	scope := auditT002DatabaseScope{Prefix: "test040_rating_"}
+	identity, err := createAuditT002OwnedDatabase(ctx, adminPool, scope)
+	if err != nil {
 		adminPool.Close()
-		t.Fatalf("refuse unsafe TEST040 database name %q", databaseName)
+		t.Fatalf("create isolated database %s: %v; no cleanup without original OID/owner/nonce", identity.Name, err)
 	}
-	quotedName := pgx.Identifier{databaseName}.Sanitize()
-	if _, err = adminPool.Exec(ctx, "create database "+quotedName); err != nil {
-		adminPool.Close()
-		t.Fatal(err)
-	}
+	databaseName := identity.Name
+	t.Logf("AUDIT_T002_OWNED_DATABASE name=%s oid=%d owner=%s nonce_marker=%s", identity.Name, identity.OID, identity.Owner, identity.Marker)
 	var pool *pgxpool.Pool
 	t.Cleanup(func() {
-		if pool != nil {
-			pool.Close()
-		}
+		defer adminPool.Close()
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cleanupCancel()
-		if !namePattern.MatchString(databaseName) {
-			t.Errorf("refuse unsafe TEST040 cleanup database name %q", databaseName)
-		} else if _, dropErr := adminPool.Exec(cleanupCtx, "drop database "+quotedName+" with (force)"); dropErr != nil {
-			t.Errorf("drop isolated TEST040 database: %v", dropErr)
+		if dropErr := cleanupAuditT002OwnedDatabase(cleanupCtx, adminPool, scope, identity, func(ctx context.Context) error {
+			if pool != nil {
+				if err := closeAuditT002OwnedPool(ctx, pool); err != nil {
+					return err
+				}
+				pool = nil
+			}
+			return nil
+		}); dropErr != nil {
+			t.Errorf("isolated database %s cleanup was not confirmed; retain scope for diagnosis: %v", identity.Name, dropErr)
 		}
-		adminPool.Close()
 	})
 	scopedConfig, err := pgxpool.ParseConfig(appconfig.Load().DB.ConnString())
 	if err != nil {
