@@ -1,0 +1,214 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"mcmods-cn-backend/internal/security"
+)
+
+// Ordinary HTTP authoring and independent moderation are data prerequisites.
+// A fixture's successful exit does not certify an external editor/browser or NATS.
+func TestAuditLiveCommunityEditorFixture20261101(t *testing.T) {
+	if os.Getenv("MCMODS_RUN_LIVE_COMMUNITY_EDITOR") != "1" {
+		t.Skip("opt-in task-owned actual community editor fixture")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	top, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	frontend := os.Getenv("MCMODS_AUDIT_FRONTEND_REPO")
+	if frontend == "" {
+		t.Fatal("declare exact clean frontend checkout")
+	}
+	revisions := map[string]any{}
+	for repo, path := range map[string]string{"mcmods-cn-backend": strings.TrimSpace(string(top)), "mcmods-cn-frontend": frontend, "mcmods_exporter": "/workspace/mcmods_exporter"} {
+		revision := auditJourneyRevision(path)
+		if revision["error"] != nil || revision["dirty"] != false {
+			t.Fatalf("clean checkout required: %s", repo)
+		}
+		revisions[repo] = revision
+	}
+	directory := os.Getenv("MCMODS_AUDIT_COMMUNITY_DIR")
+	if !filepath.IsAbs(directory) {
+		t.Fatal("new absolute evidence directory required")
+	}
+	if err = os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := os.OpenFile(filepath.Join(directory, "OWNER"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fmt.Fprintf(owner, "mcmods-live-community-editor pid=%d\n", os.Getpid())
+	owner.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	frontendOrigin := "http://127.0.0.1:3341"
+	t.Setenv("FRONTEND_ORIGIN", frontendOrigin)
+	unlockDDL := auditGlobalCatalogPGLock(t)
+	t.Cleanup(func() { unlockDDL() })
+	// Waiting for a shared schema-setup window consumes no browser/fixture TTL.
+	f := newAuditFixGRFixture(t, 45*time.Minute)
+	unlockDDL()
+	t.Cleanup(func() { unlockDDL = auditGlobalCatalogPGLock(t) })
+	f.origin.Close()
+	dbConfig := f.db.Config()
+	dbConfig.MaxConns = 6
+	dbConfig.MinConns = 1
+	db, err := pgxpool.NewWithConfig(f.ctx, dbConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+	caps := []string{"community.tutorial.create", "community.issue.create", "community.news.create", "community.discussion.create", "user.draft.retention_seconds.2592000"}
+	grantTEST044Permissions(t, f.ctx, db, f.userIDs[f.editor], caps...)
+	// Existing reviewer has only content.review; other editor keeps its unrelated
+	// project.edit capability. No community.edit, no-review or administrator grant.
+	cfg := f.server.cfg
+	cfg.FrontendOrigin = frontendOrigin
+	cfg.NATS.Enabled = false
+	private := map[string]any{"creatorToken": f.editor, "otherToken": f.otherEditor, "reviewerToken": f.reviewer, "ordinaryToken": f.denied}
+	actors := map[string]any{}
+	for role, token := range map[string]string{"creator": f.editor, "other": f.otherEditor, "reviewer": f.reviewer, "ordinary": f.denied} {
+		var publicID, username string
+		if err = db.QueryRow(f.ctx, `select public_id,username from users where id=$1`, f.userIDs[token]).Scan(&publicID, &username); err != nil {
+			t.Fatal(err)
+		}
+		actors[role] = map[string]any{"publicId": publicID, "username": username}
+		// Synthetic credentials support a later ordinary native login. Never log or
+		// publish the password/token; these accounts belong to this owned schema.
+		if role == "creator" || role == "other" {
+			password := "Audit-private-" + randomCatalogPublicID() + "-2026!"
+			hash, e := security.HashPassword(password)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if _, e = db.Exec(f.ctx, `update users set password_hash=$2 where id=$1`, f.userIDs[token], hash); e != nil {
+				t.Fatal(e)
+			}
+			private[role+"Account"] = username
+			private[role+"Password"] = password
+		}
+	}
+	api := NewServer(f.ctx, cfg, db, nil, nil, nil, nil)
+	origin := httptest.NewServer(api)
+	t.Cleanup(func() {
+		origin.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if e := api.Shutdown(ctx); e != nil {
+			t.Error(e)
+		}
+		api.cache.Close()
+	})
+	f.server, f.origin, f.db = api, origin, db
+	rows := []map[string]any{}
+	purposes := map[string]string{"tutorial": "Configure a supported client safely using a published community guide.", "issue": "Describe a reproducible menu rendering issue for the declared project.", "news": "Announce the next documented maintenance release with source references.", "discussion": "Discuss resource selection behavior and preserve author editing access."}
+	collections := map[string]string{"tutorial": "tutorials", "issue": "issues", "news": "news", "discussion": "discussions"}
+	for index, kind := range []string{"tutorial", "issue", "news", "discussion", "tutorial"} {
+		if index == 3 {
+			t.Log("community fixture waits for the original3/60s actor budgets")
+			select {
+			case <-time.After(61 * time.Second):
+			case <-f.ctx.Done():
+				t.Fatal(f.ctx.Err())
+			}
+		}
+		pending := index == 4
+		title := "Community editor " + kind
+		body := purposes[kind]
+		if pending {
+			title = "Queued author guide"
+			body = "A separate guide awaiting independent moderation must keep its editor locked."
+		}
+		snapshot := communityPostSnapshot{Kind: kind, Title: title, SourceLocale: "en-US", BodyMarkdown: body, MinecraftVersions: []string{}, Projects: []communityPostReference{}, Resources: []communityPostReference{}}
+		if kind == "issue" {
+			snapshot.Severity = "minor"
+			snapshot.MinecraftVersions = []string{"1.20.1"}
+			snapshot.Projects = []communityPostReference{{PublicID: f.modCode, Type: "mod"}}
+		}
+		item := decodeTEST022Data[test042Mutation](t, f.require(t, f.editor, http.MethodPost, "/api/v1/community/posts", communityPostMutationRequest{communityPostSnapshot: snapshot}, 201))
+		if item.ReviewStatus != "pending" || item.RevisionID == "" || item.ChangeRequestID == "" {
+			t.Fatal("ordinary author bypassed review or lost revision identity")
+		}
+		lockPath := "/api/v1/review-locks/community_post/" + item.ID
+		initial := decodeTEST022Data[reviewLockResponse](t, f.require(t, f.editor, http.MethodGet, lockPath, nil, 200))
+		if !initial.Locked || initial.RequestID != item.ChangeRequestID {
+			t.Fatal("pending source is not correctly locked")
+		}
+		for _, actor := range []string{f.otherEditor, f.reviewer, f.denied} {
+			f.require(t, actor, http.MethodGet, lockPath, nil, 403)
+		}
+		f.require(t, "", http.MethodGet, lockPath, nil, 401)
+		if !pending {
+			f.require(t, f.reviewer, http.MethodPatch, "/api/v1/content-revisions/"+item.RevisionID, map[string]string{"status": "approved", "note": "Independent ordinary community editor fixture precondition"}, 200)
+			unlocked := decodeTEST022Data[reviewLockResponse](t, f.require(t, f.editor, http.MethodGet, lockPath, nil, 200))
+			if unlocked.Locked {
+				t.Fatal("approved author remains locked")
+			}
+			detail := decodeTEST022Data[communityPostResponse](t, f.require(t, "", http.MethodGet, "/api/v1/community/posts/"+item.ID, nil, 200))
+			if detail.Title != title || detail.ReviewStatus != "approved" {
+				t.Fatal("independently approved source is not public")
+			}
+		}
+		rows = append(rows, map[string]any{"kind": kind, "id": item.ID, "revisionId": item.RevisionID, "changeRequestId": item.ChangeRequestID, "pending": pending, "title": title, "body": body, "editURL": "/" + collections[kind] + "/" + item.ID + "/edit", "reviewLockPath": lockPath})
+	}
+	snapshotFacts := func(name string) {
+		var facts []byte
+		err := db.QueryRow(f.ctx, `select jsonb_agg(jsonb_build_object('id',post.public_id,'kind',post.kind,'status',post.status,'reviewStatus',post.review_status,'authorId',actor.public_id,'publishedRevisionId',revision.public_id,'title',post.title) order by post.public_id) from community_posts post join users actor on actor.id=post.author_id left join content_revisions revision on revision.id=post.published_revision_id`).Scan(&facts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded any
+		if err = json.Unmarshal(facts, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		auditJourneyWriteJSON(t, filepath.Join(directory, name), map[string]any{"posts": decoded, "sourceRevisions": revisions, "capturedAt": time.Now().UTC().Format(time.RFC3339Nano)})
+	}
+	snapshotFacts("community-before-browser.json")
+	authFile := filepath.Join(directory, "auth.private.json")
+	auditJourneyWriteJSON(t, authFile, private)
+	var schema string
+	if err = db.QueryRow(f.ctx, "select current_schema()").Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	runtime := map[string]any{"owner": "mcmods-live-community-editor", "pid": os.Getpid(), "apiOrigin": origin.URL, "frontendOrigin": frontendOrigin, "repoRevisions": revisions, "authFile": authFile, "ownedSchema": schema, "actors": actors, "posts": rows, "stopPath": filepath.Join(directory, "STOP"), "createdAt": time.Now().UTC().Format(time.RFC3339Nano), "scope": "Ordinary HTTP creation and independent review prerequisites, actual PostgreSQL. External native browser still required. No queue, administrator or no-review claim."}
+	auditJourneyWriteJSON(t, filepath.Join(directory, "runtime.json"), runtime)
+	t.Logf("COMMUNITY_EDITOR_READY runtime=%s; private credentials omitted", filepath.Join(directory, "runtime.json"))
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-f.ctx.Done():
+			runtime["state"] = "EXPIRED"
+			auditJourneyWriteJSON(t, filepath.Join(directory, "runtime.json"), runtime)
+			t.Fatal("owned community fixture expired before normal STOP")
+		case <-ticker.C:
+			if _, e := os.Stat(filepath.Join(directory, "STOP")); e == nil {
+				snapshotFacts("community-after-browser.json")
+				runtime["state"] = "STOPPED"
+				runtime["stoppedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
+				auditJourneyWriteJSON(t, filepath.Join(directory, "runtime.json"), runtime)
+				return
+			} else if !os.IsNotExist(e) {
+				t.Fatal(e)
+			}
+		}
+	}
+}
