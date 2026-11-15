@@ -340,6 +340,45 @@ func TestSYS03MemberRoleRestoreRetainsAntiAbuseGatesHTTPPostgresRedisIntegration
 	}
 	metrics := server.cache.Metrics()
 	async := server.antiAbuse.AsyncMetrics()
+	// Preserve the exact snapshots used by the unchanged composite assertion.
+	// Only counters/booleans are recorded; do not infer an uncaptured earlier
+	// attempt's values or discard a failed condition to obtain a passing test.
+	sys03MemberAAPrivateReceipt(t, private, "nondegraded-metrics", map[string]any{
+		"schemaVersion": 1,
+		"counterValues": map[string]any{
+			"cache.RedisHits": metrics.RedisHits,
+			"cache.Errors": metrics.Errors,
+			"cache.LocalFallbacks": metrics.LocalFallbacks,
+			"cache.RateLimitFalls": metrics.RateLimitFalls,
+			"async.SuccessFailed": async.SuccessFailed,
+			"async.SuccessDropped": async.SuccessDropped,
+			"async.SuccessProcessed": async.SuccessProcessed,
+			"async.SuccessQueued": async.SuccessQueued,
+			"async.SuccessQueueDepth": async.SuccessQueueDepth,
+			"async.RiskDropped": async.RiskDropped,
+			"async.RiskEventFailed": async.RiskEventFailed,
+			"async.RiskDailyFailed": async.RiskDailyFailed,
+			"async.RestrictionFailed": async.RestrictionFailed,
+			"async.BotRuleLoadFailed": async.BotRuleLoadFailed,
+			"async.RiskQueueDepth": async.RiskQueueDepth,
+		},
+		"failedConditions": map[string]bool{
+			"cache.RedisHits == 0": metrics.RedisHits == 0,
+			"cache.Errors != 0": metrics.Errors != 0,
+			"cache.LocalFallbacks != 0": metrics.LocalFallbacks != 0,
+			"cache.RateLimitFalls != 0": metrics.RateLimitFalls != 0,
+			"async.SuccessFailed != 0": async.SuccessFailed != 0,
+			"async.SuccessDropped != 0": async.SuccessDropped != 0,
+			"async.SuccessProcessed != async.SuccessQueued": async.SuccessProcessed != async.SuccessQueued,
+			"async.SuccessQueueDepth != 0": async.SuccessQueueDepth != 0,
+			"async.RiskDropped != 0": async.RiskDropped != 0,
+			"async.RiskEventFailed != 0": async.RiskEventFailed != 0,
+			"async.RiskDailyFailed != 0": async.RiskDailyFailed != 0,
+			"async.RestrictionFailed != 0": async.RestrictionFailed != 0,
+			"async.BotRuleLoadFailed != 0": async.BotRuleLoadFailed != 0,
+			"async.RiskQueueDepth != 0": async.RiskQueueDepth != 0,
+		},
+	})
 	if metrics.RedisHits == 0 || metrics.Errors != 0 || metrics.LocalFallbacks != 0 || metrics.RateLimitFalls != 0 ||
 		async.SuccessFailed != 0 || async.SuccessDropped != 0 || async.SuccessProcessed != async.SuccessQueued || async.SuccessQueueDepth != 0 ||
 		async.RiskDropped != 0 || async.RiskEventFailed != 0 || async.RiskDailyFailed != 0 || async.RestrictionFailed != 0 || async.BotRuleLoadFailed != 0 || async.RiskQueueDepth != 0 {
