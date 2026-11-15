@@ -118,7 +118,7 @@ func TestSYS03MemberRoleRestoreRetainsAntiAbuseGatesHTTPPostgresRedisIntegration
 		var envelope struct { Code string `json:"code"` }
 		if json.Unmarshal(raw, &envelope) != nil { t.Fatal("owned API response was not a JSON envelope") }
 		safeCode := ""
-		for _, allowed := range []string{"duplicate_content", "challenge_required", "rate_limited", "CREATOR_CLAIM_INDEPENDENT_REVIEW_REQUIRED"} { if envelope.Code == allowed { safeCode = allowed } }
+		for _, allowed := range []string{"duplicate_content", "challenge_required", "rate_limited", "CREATOR_CLAIM_INDEPENDENT_REVIEW_REQUIRED", "HTTP_400", "HTTP_403"} { if envelope.Code == allowed { safeCode = allowed } }
 		if response.StatusCode != want || envelope.Code != wantCode {
 			digest := sha256.Sum256(raw)
 			t.Fatalf("owned HTTP status=%d want=%d stableCode=%s responseSHA256=%s (raw body/headers withheld)", response.StatusCode, want, safeCode, hex.EncodeToString(digest[:]))
@@ -156,9 +156,9 @@ func TestSYS03MemberRoleRestoreRetainsAntiAbuseGatesHTTPPostgresRedisIntegration
 	request(reviewer, http.MethodPatch, "/api/v1/admin/creator-claims/"+claim.ID, []byte(`{"status":"approved","note":"Independent synthetic ownership review"}`), 200, "")
 	beforeDenied := facts()
 	if beforeDenied.ClaimStatus != "approved" || beforeDenied.Derived != 0 || beforeDenied.Members != 0 { t.Fatal("approved claim alone must not grant team access") }
-	request(ordinary, http.MethodPut, path, membership, 403, "")
+	request(ordinary, http.MethodPut, path, membership, 403, "HTTP_403")
 	if facts() != beforeDenied { t.Fatal("ordinary member-management denial changed scoped business facts") }
-	request(ordinary, http.MethodGet, "/api/v1/mods/"+modSite+"/editor", nil, 403, "")
+	request(ordinary, http.MethodGet, "/api/v1/mods/"+modSite+"/editor", nil, 403, "HTTP_403")
 	// Cookie-origin protection runs before the same membership boundary and
 	// must still reject an unrelated origin without consuming a valid write.
 	csrfRequest, err := http.NewRequestWithContext(ctx, http.MethodPut, origin.URL+path, bytes.NewReader(membership))
@@ -183,7 +183,9 @@ func TestSYS03MemberRoleRestoreRetainsAntiAbuseGatesHTTPPostgresRedisIntegration
 		}
 		wantEditor := http.StatusForbidden
 		if step.derived == 1 { wantEditor = http.StatusOK }
-		request(ordinary, http.MethodGet, "/api/v1/mods/"+modSite+"/editor", nil, wantEditor, "")
+		wantEditorCode := "HTTP_403"
+		if wantEditor == http.StatusOK { wantEditorCode = "" }
+		request(ordinary, http.MethodGet, "/api/v1/mods/"+modSite+"/editor", nil, wantEditor, wantEditorCode)
 	}
 	// Same exact member, role, title and original JWT. The next request must
 	// hit the unchanged Redis rate limiter, rather than duplicate-content.
@@ -196,7 +198,7 @@ func TestSYS03MemberRoleRestoreRetainsAntiAbuseGatesHTTPPostgresRedisIntegration
 		`{"members":[{"creatorId":"`+authorPublic+`","roleId":"`+rolePublic+`","title":"`+strings.Repeat("界",54)+`"}]}`,
 		`{"members":[{"creatorId":"`+authorPublic+`","roleId":"`+rolePublic+`","title":42}]}`,
 	} {
-		request(invalidManager, http.MethodPut, path, []byte(invalid), 400, "")
+		request(invalidManager, http.MethodPut, path, []byte(invalid), 400, "HTTP_400")
 		if facts() != beforeRate { t.Fatal("unknown/client-flag/type/length payload changed restored relationship facts") }
 	}
 
