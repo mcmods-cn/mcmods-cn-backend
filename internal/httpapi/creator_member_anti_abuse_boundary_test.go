@@ -23,10 +23,12 @@ func TestCreatorTeamRoleMetadataRequiresExactServerRouteAndValidCurrentDTO(t *te
 		t.Fatal("encode bounded synthetic member payload")
 	}
 	maximum, err := json.Marshal(map[string]any{"members": tooMany[:maximumCreatorTeamMembers]})
-	if err != nil { t.Fatal("encode exact maximum synthetic member payload") }
+	if err != nil {
+		t.Fatal("encode exact maximum synthetic member payload")
+	}
 	cases := []struct {
 		name, method, path, body string
-		metadata bool
+		metadata                 bool
 	}{
 		{"role label", http.MethodPut, route, valid, true},
 		{"remove relationship", http.MethodPut, route, `{"members":[]}`, true},
