@@ -65,6 +65,16 @@ func DefaultSettings() Settings {
 	}
 }
 
+// ContentClass describes a server-owned typed payload. It changes only the
+// duplicate fingerprint projection; Content remains available to every other
+// risk check and to security event auditing. Unknown values retain body rules.
+type ContentClass uint8
+
+const (
+	ContentClassBody ContentClass = iota
+	ContentClassCreatorTeamRoleMetadata
+)
+
 type Evaluation struct {
 	UserID    int64
 	SessionID string
@@ -80,6 +90,7 @@ type Evaluation struct {
 	ObjectType       string
 	ObjectKey        string
 	Content          string
+	ContentClass     ContentClass
 	FormToken        string
 	Honeypot         string
 	ChallengeProof   string

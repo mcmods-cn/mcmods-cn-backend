@@ -279,7 +279,7 @@ func (s *Service) Evaluate(ctx context.Context, input Evaluation) (Decision, err
 		}
 	}
 
-	normalized := NormalizeContent(input.Content)
+	normalized := NormalizeContent(duplicateFingerprintContent(input))
 	if !challengePassed && normalized != "" && len([]rune(normalized)) >= 3 {
 		duplicateScore, duplicateRules, exactDuplicate, duplicateErr := s.duplicateRisk(ctx, input, normalized, ipHash, settings)
 		if duplicateErr == nil {
@@ -671,7 +671,7 @@ func (s *Service) recordSuccess(ctx context.Context, input Evaluation, decision 
 			resultErr = errors.Join(resultErr, err)
 		}
 	}
-	normalized := NormalizeContent(input.Content)
+	normalized := NormalizeContent(duplicateFingerprintContent(input))
 	if normalized != "" && contentAction(input.Action) {
 		_, err := s.db.Exec(ctx, `insert into anti_abuse_content_fingerprints(user_id,action,object_key,exact_hash,simhash,ip_hash,event_id)
 			values($1,$2,$3,$4,$5,$6,$7)`, input.UserID, input.Action, truncate(input.ObjectKey, 160), ContentHash(normalized), int64(SimHash(normalized)), s.privateHash("ip", input.IP), eventID)
@@ -1045,6 +1045,13 @@ func subnetForIP(value string) string {
 
 func contentAction(action string) bool {
 	return strings.HasPrefix(action, "comment.") || action == "message.send" || strings.Contains(action, "submit") || action == "report.create"
+}
+
+func duplicateFingerprintContent(input Evaluation) string {
+	if input.ContentClass == ContentClassCreatorTeamRoleMetadata {
+		return ""
+	}
+	return input.Content
 }
 
 func suspiciousUserAgent(value string) bool {

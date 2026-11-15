@@ -56,11 +56,15 @@ func (s *Server) serveProtectedMutation(w http.ResponseWriter, r *http.Request, 
 	if body != nil {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 	}
+	contentClass := antiabuse.ContentClassBody
+	if creatorTeamRoleMetadataRequest(r, body) {
+		contentClass = antiabuse.ContentClassCreatorTeamRoleMetadata
+	}
 	input := antiabuse.Evaluation{
 		UserID: claims.Subject, SessionID: claims.SessionID, IP: s.requestClientLocation(r).IP,
 		DeviceID: r.Header.Get("X-Client-ID"), UserAgent: r.UserAgent(), RequestID: r.Header.Get("X-Request-ID"),
 		Action: action, RateScope: antiAbuseRateScope(r), RateLimitPercent: antiAbuseRateLimitPercent(claims, action),
-		ObjectType: antiAbuseObjectType(r), ObjectKey: antiAbuseObjectKey(r), Content: content,
+		ObjectType: antiAbuseObjectType(r), ObjectKey: antiAbuseObjectKey(r), Content: content, ContentClass: contentClass,
 		FormToken: r.Header.Get("X-Anti-Abuse-Form"), Honeypot: r.Header.Get("X-Anti-Abuse-Trap"),
 		ChallengeProof: r.Header.Get("X-Anti-Abuse-Challenge"), IdempotencyKey: r.Header.Get("Idempotency-Key"), Administrator: claimsAllow(claims, "admin.*"),
 		CrawlerClass: crawlerClassFromRequest(r), Now: time.Now(),
@@ -238,6 +242,41 @@ func inspectAntiAbuseBody(r *http.Request) ([]byte, string) {
 		collectContentStrings(value, "", &parts)
 	}
 	return body, strings.Join(parts, "\n")
+}
+
+// A role title labels an existing relationship; restoring the same author and
+// role after removal does not publish the title as new text. Recognize only
+// this server route and its current DTO. The normal Content, action, risk,
+// quota, challenge, authentication and handler validation paths stay intact.
+func creatorTeamRoleMetadataRequest(r *http.Request, body []byte) bool {
+	const prefix = "/api/v1/creators/"
+	if r.Method != http.MethodPut || !strings.HasPrefix(r.URL.Path, prefix) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, prefix), "/")
+	if len(parts) != 2 || parts[1] != "members" || !validCatalogPublicID(strings.ToLower(parts[0])) {
+		return false
+	}
+	// Keep an explicit wire shape: a future narrative field must not silently
+	// inherit the relationship-metadata classification.
+	var input struct {
+		Members []struct {
+			CreatorID string `json:"creatorId"`
+			RoleID    string `json:"roleId"`
+			Title     string `json:"title"`
+		} `json:"members"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&input) != nil || input.Members == nil || decoder.Decode(new(any)) != io.EOF {
+		return false
+	}
+	members := make([]creatorMemberPayload, len(input.Members))
+	for index, member := range input.Members {
+		members[index] = creatorMemberPayload{CreatorID: member.CreatorID, RoleID: member.RoleID, Title: member.Title}
+	}
+	_, err := normalizeCreatorTeamMembers(members)
+	return err == nil
 }
 
 // Only this concrete DTO's top-level public avatar identity distinguishes a
