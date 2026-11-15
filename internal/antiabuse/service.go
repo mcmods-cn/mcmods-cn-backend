@@ -603,8 +603,12 @@ func (s *Service) Close(ctx context.Context) error {
 	case <-done:
 		// All accepted writes have finished or were accounted for. Cancel the
 		// remaining shared timer/context without leaving a background grace.
-		if s.cancelShutdown != nil { s.cancelShutdown() }
-		if s.cancelPersistence != nil { s.cancelPersistence() }
+		if s.cancelShutdown != nil {
+			s.cancelShutdown()
+		}
+		if s.cancelPersistence != nil {
+			s.cancelPersistence()
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -639,15 +643,24 @@ func (s *Service) writeRiskEvents(ctx context.Context) {
 	}
 	discard := func() {
 		s.discardRiskEvents()
-		if dropped := discardRiskAggregates(aggregates); dropped > 0 { s.riskDropped.Add(dropped) }
+		if dropped := discardRiskAggregates(aggregates); dropped > 0 {
+			s.riskDropped.Add(dropped)
+		}
 	}
 	drain := func(first *queuedRiskEvent) {
 		drainCtx := s.beginShutdown()
 		if first != nil {
-			if drainCtx.Err() != nil { s.riskDropped.Add(1) } else { handle(drainCtx, *first) }
+			if drainCtx.Err() != nil {
+				s.riskDropped.Add(1)
+			} else {
+				handle(drainCtx, *first)
+			}
 		}
 		for {
-			if drainCtx.Err() != nil { discard(); return }
+			if drainCtx.Err() != nil {
+				discard()
+				return
+			}
 			select {
 			case event := <-s.events:
 				handle(drainCtx, event)
@@ -667,13 +680,22 @@ func (s *Service) writeRiskEvents(ctx context.Context) {
 	for {
 		// Once stopping is observed, ready queue/ticker cases must not win a
 		// random select repeatedly or start a new normal persistence budget.
-		if ctx.Err() != nil || s.stopping.Load() { drain(nil); return }
+		if ctx.Err() != nil || s.stopping.Load() {
+			drain(nil)
+			return
+		}
 		select {
 		case event := <-s.events:
-			if ctx.Err() != nil || s.stopping.Load() { drain(&event); return }
+			if ctx.Err() != nil || s.stopping.Load() {
+				drain(&event)
+				return
+			}
 			handle(s.persistenceCtx, event)
 		case <-ticker.C:
-			if ctx.Err() != nil || s.stopping.Load() { drain(nil); return }
+			if ctx.Err() != nil || s.stopping.Load() {
+				drain(nil)
+				return
+			}
 			// Keep periodic aggregate failure/retention/retry semantics. A
 			// canceled flush leaves its map for the shared bounded drain.
 			flush(ctx)
@@ -740,10 +762,17 @@ func (s *Service) writeSuccessRecords(ctx context.Context) {
 	drain := func(first *queuedSuccessRecord) {
 		drainCtx := s.beginShutdown()
 		if first != nil {
-			if drainCtx.Err() != nil { s.successDropped.Add(1) } else { process(drainCtx, *first) }
+			if drainCtx.Err() != nil {
+				s.successDropped.Add(1)
+			} else {
+				process(drainCtx, *first)
+			}
 		}
 		for {
-			if drainCtx.Err() != nil { s.discardSuccessRecords(); return }
+			if drainCtx.Err() != nil {
+				s.discardSuccessRecords()
+				return
+			}
 			select {
 			case record := <-s.successes:
 				process(drainCtx, record)
@@ -756,10 +785,16 @@ func (s *Service) writeSuccessRecords(ctx context.Context) {
 		}
 	}
 	for {
-		if ctx.Err() != nil || s.stopping.Load() { drain(nil); return }
+		if ctx.Err() != nil || s.stopping.Load() {
+			drain(nil)
+			return
+		}
 		select {
 		case record := <-s.successes:
-			if ctx.Err() != nil || s.stopping.Load() { drain(&record); return }
+			if ctx.Err() != nil || s.stopping.Load() {
+				drain(&record)
+				return
+			}
 			process(s.persistenceCtx, record)
 		case <-ctx.Done():
 			drain(nil)
