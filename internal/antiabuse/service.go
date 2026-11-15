@@ -49,6 +49,11 @@ type Service struct {
 	successes         chan queuedSuccessRecord
 	workerCtx         context.Context
 	cancelWorkers     context.CancelFunc
+	persistenceCtx    context.Context
+	cancelPersistence context.CancelFunc
+	shutdownOnce      sync.Once
+	shutdownCtx       context.Context
+	cancelShutdown    context.CancelFunc
 	workerGroup       sync.WaitGroup
 	closeOnce         sync.Once
 	stopping          atomic.Bool
@@ -115,11 +120,17 @@ func New(ctx context.Context, cfg config.AntiAbuseConfig, db *pgxpool.Pool, cach
 		ctx = context.Background()
 	}
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
+	// Accepted persistence keeps the original values and its existing per-write
+	// bound. Normal worker cancellation starts one shared shutdown grace instead
+	// of immediately canceling a record already removed from either queue.
+	persistenceCtx, cancelPersistence := context.WithCancel(context.WithoutCancel(workerCtx))
 	service := &Service{
 		cfg: cfg, db: db, cache: cache, resolver: netResolver{net.DefaultResolver}, now: time.Now,
 		events: make(chan queuedRiskEvent, 2048), successes: make(chan queuedSuccessRecord, successQueueCapacity),
 		workerCtx: workerCtx, cancelWorkers: cancelWorkers,
+		persistenceCtx: persistenceCtx, cancelPersistence: cancelPersistence,
 	}
+	context.AfterFunc(workerCtx, func() { service.beginShutdown() })
 	if cfg.Enabled && db != nil {
 		service.workerGroup.Add(1 + successWorkerCount)
 		go service.writeRiskEvents(workerCtx)
@@ -560,12 +571,25 @@ func (s *Service) AsyncMetrics() AsyncRecorderMetrics {
 	}
 }
 
+// beginShutdown fixes one deadline for every worker, including writes already
+// in flight. Neither entering a drain later nor another Close resets the grace.
+func (s *Service) beginShutdown() context.Context {
+	s.shutdownOnce.Do(func() {
+		s.stopping.Store(true)
+		s.shutdownCtx, s.cancelShutdown = context.WithTimeout(context.Background(), asyncShutdownDrainTimeout)
+		if s.cancelPersistence != nil {
+			context.AfterFunc(s.shutdownCtx, s.cancelPersistence)
+		}
+	})
+	return s.shutdownCtx
+}
+
 func (s *Service) Close(ctx context.Context) error {
 	if s == nil {
 		return nil
 	}
 	s.closeOnce.Do(func() {
-		s.stopping.Store(true)
+		s.beginShutdown()
 		if s.cancelWorkers != nil {
 			s.cancelWorkers()
 		}
@@ -577,6 +601,10 @@ func (s *Service) Close(ctx context.Context) error {
 	}()
 	select {
 	case <-done:
+		// All accepted writes have finished or were accounted for. Cancel the
+		// remaining shared timer/context without leaving a background grace.
+		if s.cancelShutdown != nil { s.cancelShutdown() }
+		if s.cancelPersistence != nil { s.cancelPersistence() }
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -609,35 +637,49 @@ func (s *Service) writeRiskEvents(ctx context.Context) {
 		value.count++
 		aggregates[key] = value
 	}
+	discard := func() {
+		s.discardRiskEvents()
+		if dropped := discardRiskAggregates(aggregates); dropped > 0 { s.riskDropped.Add(dropped) }
+	}
+	drain := func(first *queuedRiskEvent) {
+		drainCtx := s.beginShutdown()
+		if first != nil {
+			if drainCtx.Err() != nil { s.riskDropped.Add(1) } else { handle(drainCtx, *first) }
+		}
+		for {
+			if drainCtx.Err() != nil { discard(); return }
+			select {
+			case event := <-s.events:
+				handle(drainCtx, event)
+			case <-drainCtx.Done():
+				discard()
+				return
+			default:
+				flush(drainCtx)
+				if dropped := discardRiskAggregates(aggregates); dropped > 0 {
+					s.riskDropped.Add(dropped)
+					log.Printf("discard anti-abuse daily aggregates after shutdown drain: events=%d", dropped)
+				}
+				return
+			}
+		}
+	}
 	for {
+		// Once stopping is observed, ready queue/ticker cases must not win a
+		// random select repeatedly or start a new normal persistence budget.
+		if ctx.Err() != nil || s.stopping.Load() { drain(nil); return }
 		select {
 		case event := <-s.events:
-			handle(ctx, event)
+			if ctx.Err() != nil || s.stopping.Load() { drain(&event); return }
+			handle(s.persistenceCtx, event)
 		case <-ticker.C:
+			if ctx.Err() != nil || s.stopping.Load() { drain(nil); return }
+			// Keep periodic aggregate failure/retention/retry semantics. A
+			// canceled flush leaves its map for the shared bounded drain.
 			flush(ctx)
 		case <-ctx.Done():
-			drainCtx, cancel := context.WithTimeout(context.Background(), asyncShutdownDrainTimeout)
-			for {
-				select {
-				case event := <-s.events:
-					handle(drainCtx, event)
-				case <-drainCtx.Done():
-					s.discardRiskEvents()
-					if dropped := discardRiskAggregates(aggregates); dropped > 0 {
-						s.riskDropped.Add(dropped)
-					}
-					cancel()
-					return
-				default:
-					flush(drainCtx)
-					if dropped := discardRiskAggregates(aggregates); dropped > 0 {
-						s.riskDropped.Add(dropped)
-						log.Printf("discard anti-abuse daily aggregates after shutdown drain: events=%d", dropped)
-					}
-					cancel()
-					return
-				}
-			}
+			drain(nil)
+			return
 		}
 	}
 }
@@ -695,25 +737,33 @@ func (s *Service) writeSuccessRecords(ctx context.Context) {
 			log.Printf("persist anti-abuse success telemetry action=%s: %v", record.input.Action, err)
 		}
 	}
+	drain := func(first *queuedSuccessRecord) {
+		drainCtx := s.beginShutdown()
+		if first != nil {
+			if drainCtx.Err() != nil { s.successDropped.Add(1) } else { process(drainCtx, *first) }
+		}
+		for {
+			if drainCtx.Err() != nil { s.discardSuccessRecords(); return }
+			select {
+			case record := <-s.successes:
+				process(drainCtx, record)
+			case <-drainCtx.Done():
+				s.discardSuccessRecords()
+				return
+			default:
+				return
+			}
+		}
+	}
 	for {
+		if ctx.Err() != nil || s.stopping.Load() { drain(nil); return }
 		select {
 		case record := <-s.successes:
-			process(ctx, record)
+			if ctx.Err() != nil || s.stopping.Load() { drain(&record); return }
+			process(s.persistenceCtx, record)
 		case <-ctx.Done():
-			drainCtx, cancel := context.WithTimeout(context.Background(), asyncShutdownDrainTimeout)
-			for {
-				select {
-				case record := <-s.successes:
-					process(drainCtx, record)
-				case <-drainCtx.Done():
-					s.discardSuccessRecords()
-					cancel()
-					return
-				default:
-					cancel()
-					return
-				}
-			}
+			drain(nil)
+			return
 		}
 	}
 }
