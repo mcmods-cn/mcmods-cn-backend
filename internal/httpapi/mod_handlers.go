@@ -633,12 +633,15 @@ func (s *Server) publicProjectIcon(w http.ResponseWriter, r *http.Request, proje
 		writeError(w, http.StatusBadRequest, projectKind+" site ID is invalid")
 		return
 	}
-	query := `select icon_url from mods where slug=$1 and (review_status='approved' or submitted_by=$2)`
+	query := `select icon_url,coalesce(review_status='approved' or submitted_by=0,false)
+		from mods where slug=$1 and (review_status='approved' or submitted_by=$2)`
 	if projectKind == "modpack" {
-		query = `select icon_url from modpacks where slug=$1 and (review_status='approved' or submitted_by=$2)`
+		query = `select icon_url,coalesce(review_status='approved' or submitted_by=0,false)
+			from modpacks where slug=$1 and (review_status='approved' or submitted_by=$2)`
 	}
 	var iconURL string
-	err := s.db.QueryRow(r.Context(), query, siteID, currentClaims(r).Subject).Scan(&iconURL)
+	var parentAllowsAnonymous bool
+	err := s.db.QueryRow(r.Context(), query, siteID, currentClaims(r).Subject).Scan(&iconURL, &parentAllowsAnonymous)
 	if errors.Is(err, pgx.ErrNoRows) || strings.TrimSpace(iconURL) == "" {
 		writeError(w, http.StatusNotFound, projectKind+" icon does not exist")
 		return
@@ -647,7 +650,7 @@ func (s *Server) publicProjectIcon(w http.ResponseWriter, r *http.Request, proje
 		writeError(w, http.StatusInternalServerError, "failed to load "+projectKind+" icon")
 		return
 	}
-	s.redirectStoredRasterURL(w, r, iconURL)
+	s.redirectStoredRasterURLWithPublicEmbedding(w, r, iconURL, parentAllowsAnonymous)
 }
 
 func (s *Server) modEditorDetail(w http.ResponseWriter, r *http.Request) {

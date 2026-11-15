@@ -332,9 +332,10 @@ func (s *Server) simpleProjectIcon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var iconURL string
-	err := s.db.QueryRow(r.Context(), `select icon_url from simple_projects
+	var parentAllowsAnonymous bool
+	err := s.db.QueryRow(r.Context(), `select icon_url,coalesce(review_status='approved' or submitted_by=0,false) from simple_projects
 		where project_type=$1 and slug=$2 and (review_status='approved' or submitted_by=$3)`,
-		projectType, siteID, currentClaims(r).Subject).Scan(&iconURL)
+		projectType, siteID, currentClaims(r).Subject).Scan(&iconURL, &parentAllowsAnonymous)
 	if errors.Is(err, pgx.ErrNoRows) || strings.TrimSpace(iconURL) == "" {
 		writeError(w, http.StatusNotFound, "project icon does not exist")
 		return
@@ -343,7 +344,7 @@ func (s *Server) simpleProjectIcon(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load project icon")
 		return
 	}
-	s.redirectStoredRasterURL(w, r, iconURL)
+	s.redirectStoredRasterURLWithPublicEmbedding(w, r, iconURL, parentAllowsAnonymous)
 }
 
 func (s *Server) simpleProjectEditor(w http.ResponseWriter, r *http.Request) {
@@ -1341,16 +1342,19 @@ func replaceSimpleProjectGalleryTx(ctx context.Context, tx pgx.Tx, projectID, re
 func (s *Server) simpleProjectGalleryImage(w http.ResponseWriter, r *http.Request) {
 	projectType := normalizeSimpleProjectType(r.PathValue("projectType"))
 	var objectKey, contentType string
-	err := s.db.QueryRow(r.Context(), `select file.object_key,file.content_type from simple_project_gallery_images gallery
+	var anonymousAllowed bool
+	err := s.db.QueryRow(r.Context(), `select file.object_key,file.content_type,
+		coalesce(project.review_status='approved' or project.submitted_by=0,false)
+		from simple_project_gallery_images gallery
 		join simple_projects project on project.id=gallery.project_id and project.project_type=$1 and project.slug=$2
 		join oss_files file on file.id=gallery.oss_file_id and file.status='active'
 		where gallery.public_id=$3 and (project.review_status='approved' or project.submitted_by=$4)`, projectType,
-		normalizeModSiteID(r.PathValue("siteId")), strings.ToLower(r.PathValue("publicId")), currentClaims(r).Subject).Scan(&objectKey, &contentType)
+		normalizeModSiteID(r.PathValue("siteId")), strings.ToLower(r.PathValue("publicId")), currentClaims(r).Subject).Scan(&objectKey, &contentType, &anonymousAllowed)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "project gallery image not found")
 		return
 	}
-	s.redirectCatalogOSSAsset(w, r, objectKey, contentType)
+	s.redirectCatalogOSSAsset(anonymousPublicRasterRedirect(w, anonymousAllowed), r, objectKey, contentType)
 }
 
 func (s *Server) simpleProjectHistory(w http.ResponseWriter, r *http.Request) {

@@ -13,6 +13,8 @@ import (
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 type ossObjectAccessOptions struct {
@@ -148,6 +150,10 @@ func (s *Server) resolveStoredOSSObjectAccessURLWithConfig(ctx context.Context, 
 }
 
 func (s *Server) redirectStoredRasterURL(w http.ResponseWriter, r *http.Request, storedURL string) {
+	s.redirectStoredRasterURLWithPublicEmbedding(w, r, storedURL, false)
+}
+
+func (s *Server) redirectStoredRasterURLWithPublicEmbedding(w http.ResponseWriter, r *http.Request, storedURL string, parentAllowsAnonymous bool) {
 	storedURL = strings.TrimSpace(storedURL)
 	if storedURL == "" {
 		writeError(w, http.StatusNotFound, "image does not exist")
@@ -163,6 +169,20 @@ func (s *Server) redirectStoredRasterURL(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusNotFound, "image does not exist")
 		return
 	}
+	if parentAllowsAnonymous && currentClaims(r).Subject != 0 {
+		// The uploader shortcut can authorize a private blob even when a
+		// legacy/malicious public parent points to it. Reuse the complete
+		// existing resolver with anonymous claims and the same exact config.
+		anonymousCtx := context.WithValue(r.Context(), claimsContextKey, security.Claims{})
+		anonymousURL, anonymousErr := s.resolveStoredOSSObjectAccessURLWithConfig(anonymousCtx, cfg, storedURL)
+		sameTarget := anonymousURL == resolved
+		if _, internal := storedOSSObjectKey(cfg, storedURL); internal && !sameTarget {
+			// Only signatures/expiry may differ for the same OSS target.
+			sameTarget = strings.SplitN(anonymousURL, "?", 2)[0] == strings.SplitN(resolved, "?", 2)[0]
+		}
+		parentAllowsAnonymous = anonymousErr == nil && validHTTPURL(anonymousURL) && sameTarget
+	}
+	w = anonymousPublicRasterRedirect(w, parentAllowsAnonymous)
 	w.Header().Set("Cache-Control", "private, no-store")
 	http.Redirect(w, r, resolved, http.StatusTemporaryRedirect)
 }

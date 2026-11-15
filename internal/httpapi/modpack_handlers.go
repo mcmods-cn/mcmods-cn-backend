@@ -1212,15 +1212,18 @@ func replaceModpackGalleryImagesTx(ctx context.Context, tx pgx.Tx, modpackID, re
 
 func (s *Server) modpackGalleryImage(w http.ResponseWriter, r *http.Request) {
 	var objectKey, contentType string
-	err := s.db.QueryRow(r.Context(), `select file.object_key,file.content_type from modpack_gallery_images gallery
+	var anonymousAllowed bool
+	err := s.db.QueryRow(r.Context(), `select file.object_key,file.content_type,
+		coalesce(pack.review_status='approved' or pack.submitted_by=0,false)
+		from modpack_gallery_images gallery
 		join modpacks pack on pack.id=gallery.modpack_id and pack.slug=$1
 		join oss_files file on file.id=gallery.oss_file_id and file.status='active'
-		where gallery.public_id=$2 and (pack.review_status='approved' or pack.submitted_by=$3)`, normalizeModSiteID(r.PathValue("siteId")), strings.ToLower(r.PathValue("publicId")), currentClaims(r).Subject).Scan(&objectKey, &contentType)
+		where gallery.public_id=$2 and (pack.review_status='approved' or pack.submitted_by=$3)`, normalizeModSiteID(r.PathValue("siteId")), strings.ToLower(r.PathValue("publicId")), currentClaims(r).Subject).Scan(&objectKey, &contentType, &anonymousAllowed)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "modpack gallery image not found")
 		return
 	}
-	s.redirectCatalogOSSAsset(w, r, objectKey, contentType)
+	s.redirectCatalogOSSAsset(anonymousPublicRasterRedirect(w, anonymousAllowed), r, objectKey, contentType)
 }
 
 func (s *Server) modpackHistory(w http.ResponseWriter, r *http.Request) {
