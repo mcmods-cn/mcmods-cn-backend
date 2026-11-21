@@ -37,11 +37,11 @@ const expected = fromSource(recipePath).recipes.find(recipe => recipe.recipe_id 
 const torch = fromSource("registries/items.json").entries.find(entry => entry.id === "minecraft:torch");
 const mesh = fromSource(meshPath);
 assert(expected && torch && mesh);
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: process.env.MCMODS_AUDIT_HEADED !== "1" });
 const report = {
   sourceCommits: Object.fromEntries(Object.entries(runtime.repoRevisions).map(([name, value]) => [name, value.commit])),
   sampleSha256: runtime.sampleSha256, sampleBytes: archive.length, browser: browser.version(),
-  jobId: transfer.jobId, statuses: [], transfer: { confirmed: transfer.confirmed, resumed: transfer.sentAfter, completion: transfer.statuses },
+  jobId: transfer.jobId, headed: process.env.MCMODS_AUDIT_HEADED === "1", statuses: [], transfer: { confirmed: transfer.confirmed, resumed: transfer.sentAfter, completion: transfer.statuses },
 };
 const pageErrors = [];
 const api = runtime.apiOrigin;
@@ -146,15 +146,43 @@ try {
   assert.equal(sign.blockEntityModel.blockId, "minecraft:acacia_hanging_sign");
   const variant = sign.blockEntityModel.variants.find(variant => variant.meshPath === meshPath);
   assert(variant && variant.vertexCount === mesh.vertex_count && variant.quadCount === mesh.quad_count);
-  assert.deepEqual(variant.mesh.faces, mesh.faces);
-  report.model = { block: sign.blockEntityModel.blockId, publicId: sign.publicId, mesh: meshPath, vertices: variant.vertexCount, quads: variant.quadCount, facesEqual: true };
+  // PostgreSQL jsonb emits numeric zero for both 0.0 and -0.0, including face normals.
+  let negativeZeros = 0, sourceNumbers = 0;
+  const expectedFaces = JSON.parse(JSON.stringify(mesh.faces, (_field, value) => {
+    if (typeof value === "number") {
+      assert(Number.isFinite(value), "Game mesh coordinates must be finite");
+      if (Object.is(value, -0)) negativeZeros++;
+      sourceNumbers++;
+    }
+    return value;
+  }));
+  assert.deepEqual(variant.mesh.faces, expectedFaces);
+  report.model = { block: sign.blockEntityModel.blockId, publicId: sign.publicId, mesh: meshPath, vertices: variant.vertexCount, quads: variant.quadCount, comparedNumbers: sourceNumbers, sourceNegativeZeros: negativeZeros, facesEqual: true };
   const publicPage = await anonymous.newPage();
   await publicPage.goto(runtime.frontendOrigin + "/mods/" + runtime.projectSiteId + "/resources/" + entry.publicId + "?version=" + runtime.targetVersionPublicId);
   await publicPage.getByRole("heading", { name: /^(Torch|minecraft:torch)$/i, exact: true }).waitFor({ timeout: 60_000 });
   await publicPage.screenshot({ path: join(directory, "vanilla-public-item.png") });
-  await publicPage.goto(runtime.frontendOrigin + "/recipe-types?recipePublicId=" + linked.entityId);
-  const image = publicPage.locator("#recipe-" + linked.entityId + " img").first();
-  await image.waitFor({ timeout: 60_000 });
+  const recipePage = await anonymous.newPage();
+  const limited = recipePage.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.origin === api && ["/api/v1/auth/me", "/api/v1/site/config"].includes(url.pathname) && response.status() === 429;
+  }, {timeout: 60_000}).catch(() => null);
+  await recipePage.goto(runtime.frontendOrigin + "/recipe-types?recipePublicId=" + linked.entityId);
+  const card = recipePage.locator("#recipe-" + linked.entityId);
+  const rateResponse = await Promise.race([card.waitFor({timeout: 60_000}).then(() => null), limited]);
+  if (rateResponse) {
+    const retryAfter = Number(rateResponse.headers()["retry-after"]);
+    const error = await rateResponse.json();
+    assert.equal(error.code, "crawler_rate_limited");
+    assert(Number.isSafeInteger(retryAfter) && retryAfter > 0 && retryAfter <= 120);
+    report.readCooldown = {status: 429, code: error.code, retryAfterSeconds: retryAfter};
+    await delay((retryAfter + 1) * 1000);
+    await recipePage.reload();
+  }
+  await card.waitFor({timeout: 60_000});
+  const image = card.locator('img[src*="torch.png"]').first();
+  await image.waitFor({ state: "attached", timeout: 60_000 });
+  await image.scrollIntoViewIfNeeded();
   const src = await image.evaluate(async img => { await img.decode(); return img.src; });
   const assetURL = new URL(src);
   assert.equal(assetURL.origin, api);
@@ -168,7 +196,7 @@ try {
   assert.equal(before.info.width, after.info.width);
   assert.equal(before.info.height, after.info.height);
   assert.deepEqual(before.data, after.data);
-  await publicPage.screenshot({ path: join(directory, "vanilla-public-recipe.png") });
+  await recipePage.screenshot({ path: join(directory, "vanilla-public-recipe.png") });
   assert.deepEqual(pageErrors, []);
   report.recipe = { id: expected.recipe_id, publicId: linked.entityId, itemPublicId: entry.publicId, slots: expected.bindings.length,
     ingredients: expected.bindings.filter(binding => binding.ingredient_present).map(binding => ({ role: binding.semantic_role, alternatives: sourceCandidates(binding) })),
