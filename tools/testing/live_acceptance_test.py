@@ -1,10 +1,13 @@
 """Fail-before-side-effect guards for the real API acceptance runner."""
+import ctypes
+import errno
 import importlib.util
 import json
 import os
 from pathlib import Path
 import secrets
 import selectors
+import signal
 import subprocess
 import sys
 import tempfile
@@ -260,21 +263,114 @@ class AcceptanceGuardTest(unittest.TestCase):
             start.assert_not_called()
 
     def test_reaped_session_leader_does_not_hide_its_live_child(self):
-        nonce = secrets.token_hex(16)
-        child_pid = self.root/"child.pid"
-        code = "import subprocess,sys;from pathlib import Path;p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);Path(sys.argv[1]).write_text(str(p.pid))"
-        leader = subprocess.Popen([sys.executable, "-c", code, str(child_pid)],
-                                  env=os.environ | {"MCMODS_LIVE_PROCESS_OWNER": nonce},
-                                  start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.assertEqual(signal.getsignal(signal.SIGCHLD), signal.SIG_DFL)
+        def require_no_children():
+            for _ in range(2):
+                with self.assertRaises(ChildProcessError) as missing:
+                    os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                self.assertEqual(missing.exception.errno, errno.ECHILD)
+        # Prove no previous children before changing the adoption boundary.
+        require_no_children()
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl.argtypes = [ctypes.c_int] + [ctypes.c_ulong] * 4
+        original_subreaper = ctypes.c_int()
+        self.assertEqual(libc.prctl(37, ctypes.addressof(original_subreaper), 0, 0, 0), 0)
+        leader = pid = handle = None
+        first_failure = None
+        def remember(error):
+            nonlocal first_failure
+            if first_failure is None:
+                first_failure = error
+        def drain_only_new_kernel_children():
+            empty = 0
+            while empty < 2:
+                try:
+                    terminal = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+                except ChildProcessError as error:
+                    if error.errno == errno.ECHILD:
+                        empty += 1
+                        continue
+                    remember(error)
+                    return
+                except OSError as error:
+                    remember(error)
+                    return
+                if terminal is None:
+                    remember(AssertionError("owned child remains live after scoped stop; cleanup HOLD"))
+                    return
+                empty = 0
+                # The pre-adoption baseline was empty. Reap only this exact
+                # kernel-named terminal; never retry a persistent syscall error.
+                try:
+                    waited, native = os.waitpid(terminal.si_pid, os.WNOHANG)
+                    expected = terminal.si_status if terminal.si_code == os.CLD_EXITED else -terminal.si_status
+                    self.assertEqual(waited, terminal.si_pid)
+                    self.assertEqual(os.waitstatus_to_exitcode(native), expected)
+                except BaseException as error:
+                    remember(error)
+                    return
+        self.assertEqual(libc.prctl(36, 1, 0, 0, 0), 0)
+        # Every fallible operation after successful PR_SET is protected.
         try:
+            nonce = secrets.token_hex(16)
+            child_pid = self.root/"child.pid"
+            code = "import subprocess,sys;from pathlib import Path;p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);Path(sys.argv[1]).write_text(str(p.pid))"
+            leader = subprocess.Popen([sys.executable, "-c", code, str(child_pid)],
+                                      env=os.environ | {"MCMODS_LIVE_PROCESS_OWNER": nonce},
+                                      start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.assertEqual(leader.wait(timeout=5), 0)
             pid = int(child_pid.read_text())
-            self.assertNotEqual((Path('/proc')/str(pid)/'stat').read_text().rsplit(')',1)[1].split()[0], 'Z')
+            handle = os.pidfd_open(pid)
+            process = Path('/proc')/str(pid)
+            birth = (process/'stat').read_text().rsplit(')', 1)[1].split()
+            self.assertEqual(process.stat().st_uid, os.getuid())
+            self.assertEqual(int(birth[1]), os.getpid(), "this original test must adopt its own child")
+            self.assertNotEqual(birth[0], 'Z')
             self.assertTrue(live.stop_owned_groups([leader], nonce, grace_seconds=1, force_seconds=1))
-            path = Path('/proc')/str(pid)/'stat'
-            self.assertTrue(not path.exists() or path.read_text().rsplit(')',1)[1].split()[0] == 'Z')
+            terminal = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+            waited_pid, raw_status = os.waitpid(pid, 0)
+            self.assertEqual((terminal.si_pid, terminal.si_uid, terminal.si_code, terminal.si_status),
+                             (pid, os.getuid(), os.CLD_KILLED, signal.SIGTERM))
+            self.assertEqual(waited_pid, pid)
+            self.assertTrue(os.WIFSIGNALED(raw_status))
+            self.assertEqual(os.WTERMSIG(raw_status), signal.SIGTERM)
+            self.assertEqual(raw_status, int(signal.SIGTERM))
+            self.assertEqual(os.waitstatus_to_exitcode(raw_status), -signal.SIGTERM)
+            with self.assertRaises(ChildProcessError) as consumed:
+                os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            self.assertEqual(consumed.exception.errno, errno.ECHILD)
+        except BaseException as error:
+            remember(error)
         finally:
-            live.stop_owned_groups([leader], nonce, grace_seconds=1, force_seconds=1)
+            if leader is not None:
+                try:
+                    self.assertTrue(live.stop_owned_groups([leader], nonce, grace_seconds=1, force_seconds=1))
+                except BaseException as error:
+                    remember(error)
+                try:
+                    self.assertEqual(leader.wait(timeout=5), 0)
+                except BaseException as error:
+                    remember(error)
+            try:
+                # Even missing child.pid or a stop error cannot skip reaping.
+                # Cleanup may wait normally after failure; it cannot erase it.
+                drain_only_new_kernel_children()
+            finally:
+                try:
+                    if handle is not None:
+                        os.close(handle)
+                except BaseException as error:
+                    remember(error)
+                finally:
+                    try:
+                        self.assertEqual(libc.prctl(36, original_subreaper.value, 0, 0, 0), 0)
+                        restored = ctypes.c_int()
+                        self.assertEqual(libc.prctl(37, ctypes.addressof(restored), 0, 0, 0), 0)
+                        self.assertEqual(restored.value, original_subreaper.value)
+                    except BaseException as error:
+                        remember(error)
+        if first_failure is not None:
+            raise first_failure.with_traceback(first_failure.__traceback__)
 
     def test_real_exit_between_pidfd_pin_and_environ_read_is_safe(self):
         owner = secrets.token_hex(16)
