@@ -139,11 +139,9 @@ func (s *Server) saveSiteGeneralConfig(ctx context.Context, payload siteGeneralC
 		return err
 	}
 	var previousRaw []byte
-	if err = tx.QueryRow(ctx, `select value from system_settings where key=$1 for update`, siteGeneralSettingKey).Scan(&previousRaw); err != nil {
-		return err
-	}
-	var previous siteGeneralConfig
-	if err = json.Unmarshal(previousRaw, &previous); err != nil {
+	err = tx.QueryRow(ctx, `select value from system_settings where key=$1 for update`, siteGeneralSettingKey).Scan(&previousRaw)
+	previous, err := decodeSiteGeneralSetting(previousRaw, err)
+	if err != nil {
 		return err
 	}
 	newID, oldID := siteLogoPublicID(payload.LogoURL), siteLogoPublicID(previous.LogoURL)

@@ -49,6 +49,17 @@ func TestAdminSettingsPanelsReadIndependentlyAndPreserveUnreadableSettingsIntegr
 	}
 	f.require(t, f.editor, http.MethodGet, root+"/features", nil, http.StatusOK)
 	f.require(t, "", http.MethodGet, "/api/v1/site/config", nil, http.StatusOK)
+	if _, err := f.db.Exec(f.ctx, `insert into system_settings(key,value) values('site.general','null')
+		on conflict(key) do update set value=excluded.value`); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, "", http.MethodGet, "/api/v1/site/config", nil, http.StatusServiceUnavailable)
+	f.require(t, f.editor, http.MethodPut, root+"/general", defaultSiteGeneralConfig(), http.StatusServiceUnavailable)
+	f.require(t, f.editor, http.MethodGet, root+"/mail", nil, http.StatusOK)
+	var unchanged bool
+	if err := f.db.QueryRow(f.ctx, `select value='null'::jsonb from system_settings where key='site.general'`).Scan(&unchanged); err != nil || !unchanged {
+		t.Fatalf("unreadable site settings were overwritten: %v", err)
+	}
 	fallback := decodeTEST022Data[markdownConfigPayload](t, f.require(t, "", http.MethodGet, "/api/v1/markdown/config", nil, http.StatusOK))
 	if fallback != defaultMarkdownConfig() {
 		t.Fatal("public renderer lost its safe fallback")

@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-
-	"github.com/jackc/pgx/v5"
 )
 
 const siteGeneralSettingKey = "site.general"
+
+var errSiteSettingsUnavailable = errors.New("stored site settings are unavailable")
 
 var publicSiteLogoPathPattern = regexp.MustCompile(`^/site-assets/site-logo-([a-z0-9]{9})\.png$`)
 
@@ -54,6 +54,10 @@ func (s *Server) updateSiteGeneralConfig(w http.ResponseWriter, r *http.Request)
 	}
 	err = s.saveSiteGeneralConfig(r.Context(), payload, raw, currentClaims(r).Subject)
 	if err != nil {
+		if errors.Is(err, errSiteSettingsUnavailable) {
+			writeAPIError(w, http.StatusServiceUnavailable, "SITE_SETTINGS_UNAVAILABLE", "site settings are temporarily unavailable", 0, nil)
+			return
+		}
 		if errors.Is(err, errSiteLogoUnavailable) {
 			writeAPIError(w, http.StatusUnprocessableEntity, "SITE_LOGO_UNAVAILABLE", "logo must reference an active safe shared site asset", 0, nil)
 			return
@@ -66,27 +70,25 @@ func (s *Server) updateSiteGeneralConfig(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) readSiteGeneralConfig(ctx context.Context) (siteGeneralConfig, error) {
-	config := defaultSiteGeneralConfig()
 	var raw []byte
 	// An infrequently changed brand is one small authoritative read. A cached
 	// old version on another replica must not point at a tombstoned old logo.
 	err := s.db.QueryRow(ctx, `select value from system_settings where key=$1`, siteGeneralSettingKey).Scan(&raw)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return config, nil
-	}
-	if err != nil {
-		return config, err
-	}
-	if err = json.Unmarshal(raw, &config); err != nil {
-		return config, err
+	return decodeSiteGeneralSetting(raw, err)
+}
+
+func decodeSiteGeneralSetting(raw []byte, readErr error) (siteGeneralConfig, error) {
+	config := defaultSiteGeneralConfig()
+	if err := decodeOptionalSetting(raw, readErr, siteGeneralSettingKey, &config); err != nil {
+		return config, errors.Join(errSiteSettingsUnavailable, err)
 	}
 	// Retain the configured name, but never use an obsolete instance-local
 	// filename or an arbitrary external URL as a shared asset authority.
 	if config.LogoURL != "" && !publicSiteLogoPathPattern.MatchString(strings.TrimSpace(config.LogoURL)) {
 		config.LogoURL = ""
 	}
-	if err = normalizeSiteGeneralConfig(&config); err != nil {
-		return defaultSiteGeneralConfig(), err
+	if err := normalizeSiteGeneralConfig(&config); err != nil {
+		return defaultSiteGeneralConfig(), errors.Join(errSiteSettingsUnavailable, err)
 	}
 	return config, nil
 }
