@@ -2,7 +2,7 @@ module mcmods-cn-backend
 
 go 1.26
 
-toolchain go1.26.6
+toolchain go1.26.11
 
 require (
 	github.com/Tnze/go-mc v1.20.2

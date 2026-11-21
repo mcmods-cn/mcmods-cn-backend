@@ -1,6 +1,7 @@
 package config
 
 import (
+	"go/version"
 	"os"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ func TestSEC002GoDependencyAuditIsAnArchivedReleaseGate(t *testing.T) {
 		"schedule:",
 		"govulncheck@v1.7.0",
 		"govulncheck -format json ./...",
+		"govulncheck -mode=convert < security-reports/govulncheck.json",
 		"continue-on-error: true",
 		"if: always()",
 		"steps.govulncheck.outcome != 'success'",
@@ -42,7 +44,13 @@ func TestSEC002GoDependencyAuditIsAnArchivedReleaseGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	module := string(moduleBytes)
-	if !strings.Contains(module, "toolchain go1.26.6") ||
+	var toolchain string
+	for line := range strings.SplitSeq(module, "\n") {
+		if value, ok := strings.CutPrefix(line, "toolchain "); ok {
+			toolchain = strings.TrimSpace(value)
+		}
+	}
+	if version.Compare(toolchain, "go1.26.11") < 0 ||
 		!strings.Contains(module, "golang.org/x/image v0.45.0") ||
 		!strings.Contains(module, "github.com/klauspost/compress v1.18.7") {
 		t.Error("go.mod must retain the toolchain, image decoder, and compression security floors established by SEC-002")

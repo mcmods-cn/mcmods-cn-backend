@@ -55,7 +55,12 @@ func TestBackendCIDeliveryContract(t *testing.T) {
 	}
 
 	dockerfile := read("Dockerfile")
-	for _, required := range []string{"golang:1.26.6-bookworm", "CGO_ENABLED=0", "distroless/static-debian12:nonroot", "USER nonroot:nonroot"} {
+	_, toolchainLine, ok := strings.Cut(read("go.mod"), "\ntoolchain go")
+	if !ok {
+		t.Fatal("go.mod must select the compiler used by the release image")
+	}
+	goVersion, _, _ := strings.Cut(toolchainLine, "\n")
+	for _, required := range []string{"FROM golang:" + goVersion + "-bookworm AS build", "CGO_ENABLED=0", "distroless/static-debian12:nonroot", "USER nonroot:nonroot"} {
 		if !strings.Contains(dockerfile, required) {
 			t.Errorf("backend Dockerfile is missing %q", required)
 		}

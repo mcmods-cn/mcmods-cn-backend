@@ -31,6 +31,8 @@ jobs:
         run: |
           mkdir -p security-reports
           govulncheck -format json ./... > security-reports/govulncheck.json
+          # The JSON encoder exits successfully even with reachable findings.
+          govulncheck -mode=convert < security-reports/govulncheck.json
 
       - name: Archive govulncheck report
         if: always()
