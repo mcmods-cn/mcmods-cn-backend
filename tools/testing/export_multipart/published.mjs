@@ -5,6 +5,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { verifyVanillaTorchSlots } from "./slot-pixels.mjs";
 
 const file = process.env.MCMODS_AUDIT_JOURNEY_RUNTIME;
 const frontend = process.env.MCMODS_AUDIT_FRONTEND_REPO;
@@ -30,8 +31,9 @@ const sharp = requireFrontend("sharp");
 const archive = await readFile(runtime.samplePath);
 assert.equal(createHash("sha256").update(archive).digest("hex"), runtime.sampleSha256);
 const recipePath = "recipes/jei/recipes/minecraft/crafting.json";
+const templatePath = "recipes/jei/templates/minecraft/crafting.json";
 const meshPath = "block_entities/models/minecraft/acacia_hanging_sign/default.mesh.json";
-const sources = unzipSync(archive, { filter: entry => [recipePath, meshPath, "registries/items.json"].includes(entry.name) });
+const sources = unzipSync(archive, { filter: entry => [recipePath, templatePath, meshPath, "registries/items.json"].includes(entry.name) });
 const fromSource = path => JSON.parse(new TextDecoder().decode(sources[path]));
 const expected = fromSource(recipePath).recipes.find(recipe => recipe.recipe_id === "minecraft:torch");
 const torch = fromSource("registries/items.json").entries.find(entry => entry.id === "minecraft:torch");
@@ -196,6 +198,12 @@ try {
   assert.equal(before.info.width, after.info.width);
   assert.equal(before.info.height, after.info.height);
   assert.deepEqual(before.data, after.data);
+  const originalFile = path => {
+    const bytes = unzipSync(archive, {filter: entry => entry.name === path})[path];
+    assert(bytes, "Every displayed ingredient needs an original game texture");
+    return Buffer.from(bytes);
+  };
+  report.slotPresentation = await verifyVanillaTorchSlots(card, rendered, fromSource(templatePath), originalFile, sharp);
   await recipePage.screenshot({ path: join(directory, "vanilla-public-recipe.png") });
   assert.deepEqual(pageErrors, []);
   report.recipe = { id: expected.recipe_id, publicId: linked.entityId, itemPublicId: entry.publicId, slots: expected.bindings.length,
