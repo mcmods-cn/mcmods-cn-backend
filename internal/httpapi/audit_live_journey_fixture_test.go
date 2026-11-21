@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -46,11 +47,11 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	backendCheckout := strings.TrimSpace(string(checkout))
 	frontendCheckout := os.Getenv("MCMODS_AUDIT_FRONTEND_REPO")
 	if frontendCheckout == "" {
-		frontendCheckout = "/workspace/mcmods-cn-frontend"
+		frontendCheckout = filepath.Join(filepath.Dir(backendCheckout), "mcmods-cn-frontend")
 	}
 	exporterCheckout := os.Getenv("MCMODS_AUDIT_EXPORTER_REPO")
 	if exporterCheckout == "" {
-		exporterCheckout = "/workspace/mcmods_exporter"
+		exporterCheckout = filepath.Join(filepath.Dir(backendCheckout), "mcmods_exporter")
 	}
 	revisions := map[string]any{}
 	for name, path := range map[string]string{"mcmods-cn-backend": backendCheckout, "mcmods-cn-frontend": frontendCheckout, "mcmods_exporter": exporterCheckout} {
@@ -79,26 +80,7 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	samplePath := os.Getenv("MCMODS_AUDIT_GAME_PACKAGE")
-	if samplePath == "" {
-		samplePath = "/workspace/audit-fixes-20261024/artifacts/exporter/game-fabric-final/auditfixture-20261024-101102-941.zip"
-	}
-	sample, err := os.ReadFile(samplePath)
-	if err != nil {
-		t.Fatal("unchanged real-game package is required:", err)
-	}
-	expectedSampleHash := os.Getenv("MCMODS_AUDIT_GAME_SHA256")
-	if expectedSampleHash == "" {
-		expectedSampleHash = "059b1c56921a3f70b934bd577fd940486982da03b24d2f6dca7c0efcfb5af2eb"
-	}
-	sampleProducer := os.Getenv("MCMODS_AUDIT_EXPORTER_COMMIT")
-	if sampleProducer == "" {
-		sampleProducer = "806214802c1e3447a9895fa5311e73f3be6edfcc"
-	}
-	sampleDigest := sha256.Sum256(sample)
-	if hex.EncodeToString(sampleDigest[:]) != expectedSampleHash {
-		t.Fatal("real-game package hash differs from the reviewed named sample")
-	}
+	sample := loadJourneyGameSample(t, packageDirectory, exporterCheckout)
 	frontendOrigin := os.Getenv("MCMODS_AUDIT_FRONTEND_ORIGIN")
 	if frontendOrigin == "" {
 		frontendOrigin = "http://127.0.0.1:3311"
@@ -125,10 +107,10 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(db.Close)
-	if _, err = db.Exec(f.ctx, `update mod_identifiers set identifier='auditfixture' where mod_id=$1 and identifier='example'`, f.modID); err != nil {
+	if _, err = db.Exec(f.ctx, `update mod_identifiers set identifier=$2 where mod_id=$1 and identifier='example'`, f.modID, sample.namespace); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.Exec(f.ctx, `update mod_content_versions set label='1.0.0',minecraft_versions=ARRAY['1.20.1'],loaders=ARRAY['fabric'] where id=$1`, f.versionID); err != nil {
+	if _, err = db.Exec(f.ctx, `update mod_content_versions set label=$2,minecraft_versions=ARRAY[$3]::text[],loaders=ARRAY[$4]::text[] where id=$1`, f.versionID, sample.modVersion, sample.minecraft, sample.loader); err != nil {
 		t.Fatal(err)
 	}
 	grantTEST044Permissions(t, f.ctx, db, f.userIDs[f.reviewer], "project.review")
@@ -230,7 +212,7 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	auditJourneyWriteJSON(t, authPath, map[string]any{"creatorToken": f.editor, "reviewerToken": f.reviewer, "otherEditorToken": f.otherEditor, "catalogReaderToken": f.otherEditor})
 	runtimePath := filepath.Join(directory, "runtime.json")
 	stopPath := filepath.Join(directory, "STOP")
-	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "sourceCheckoutPath": backendCheckout, "compilerSourceCheckoutPath": backendCheckout, "testPackageWorkingDirectory": packageDirectory, "apiOrigin": origin.URL, "ossOrigin": f.provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": "auditfixture", "minecraftVersion": "1.20.1", "loader": "fabric", "modVersion": "1.0.0", "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": expectedSampleHash, "sampleProducerCommit": sampleProducer, "samplePath": samplePath, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED", "catalogReader": map[string]any{"publicId": actorB, "permissions": []string{"global_resource.list", "global_resource.view"}, "assignedBeforeAPIExposure": true, "scope": "Distinct ordinary authorized selector reader; no admin, publication or review-bypass capability"}, "unreadBarrier": map[string]any{"enabled": unreadBarrierEnabled, "armPath": armPath, "startedPath": startedPath, "releasePath": releasePath, "actorAPublicId": actorA, "actorBPublicId": actorB, "initialUnreadA": seededUnreadA, "initialUnreadB": 0}}
+	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "sourceCheckoutPath": backendCheckout, "compilerSourceCheckoutPath": backendCheckout, "testPackageWorkingDirectory": packageDirectory, "apiOrigin": origin.URL, "ossOrigin": f.provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": sample.namespace, "minecraftVersion": sample.minecraft, "loader": sample.loader, "modVersion": sample.modVersion, "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": sample.digest, "sampleProducerCommit": sample.producer, "samplePath": sample.path, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED", "catalogReader": map[string]any{"publicId": actorB, "permissions": []string{"global_resource.list", "global_resource.view"}, "assignedBeforeAPIExposure": true, "scope": "Distinct ordinary authorized selector reader; no admin, publication or review-bypass capability"}, "unreadBarrier": map[string]any{"enabled": unreadBarrierEnabled, "armPath": armPath, "startedPath": startedPath, "releasePath": releasePath, "actorAPublicId": actorA, "actorBPublicId": actorB, "initialUnreadA": seededUnreadA, "initialUnreadB": 0}}
 	updateRuntime := func(state string) {
 		runtime["state"] = state
 		runtime["updatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
@@ -280,6 +262,110 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 			}
 			updateRuntime("READY")
 		}
+	}
+}
+
+type journeyGameSample struct {
+	path, digest, producer                   string
+	namespace, minecraft, loader, modVersion string
+}
+
+func loadJourneyGameSample(t *testing.T, packageDirectory, exporter string) journeyGameSample {
+	t.Helper()
+	const originalHash = "059b1c56921a3f70b934bd577fd940486982da03b24d2f6dca7c0efcfb5af2eb"
+	const originalProducer = "806214802c1e3447a9895fa5311e73f3be6edfcc"
+	sample := journeyGameSample{
+		path:     os.Getenv("MCMODS_AUDIT_GAME_PACKAGE"),
+		digest:   os.Getenv("MCMODS_AUDIT_GAME_SHA256"),
+		producer: os.Getenv("MCMODS_AUDIT_EXPORTER_COMMIT"),
+	}
+	if sample.path == "" {
+		sample.path = filepath.Join(packageDirectory, "testdata", "audit-20261024", "auditfixture-minecraft1201-fabric-jei1520-v7.zip")
+	}
+	if sample.digest == "" {
+		sample.digest = originalHash
+	}
+	if sample.digest == originalHash {
+		if sample.producer != "" && sample.producer != originalProducer {
+			t.Fatal("original game package has a different recorded producer")
+		}
+		sample.producer = originalProducer
+	} else {
+		if !auditChallengeHex(sample.digest, 64) || !auditChallengeHex(sample.producer, 40) {
+			t.Fatal("provide the recorded SHA256 and full exporter source commit for a new game package")
+		}
+		if err := exec.Command("git", "-C", exporter, "cat-file", "-e", sample.producer+"^{commit}").Run(); err != nil {
+			t.Fatal("recorded game package producer is absent from the exporter checkout")
+		}
+	}
+	if !filepath.IsAbs(sample.path) {
+		t.Fatal("game package path must be absolute")
+	}
+	// The synthetic provider accepts single PUT bodies up to 4 MiB.
+	f, err := os.Open(sample.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, (4<<20)+1))
+	if err != nil || len(raw) > 4<<20 {
+		t.Fatal("could not read the game package within the fixture upload limit")
+	}
+	digest := sha256.Sum256(raw)
+	if hex.EncodeToString(digest[:]) != sample.digest {
+		t.Fatal("real-game package hash differs from the recorded producer output")
+	}
+	archive, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := validateExportZIP(archive.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest modExportManifest
+	if err := json.Unmarshal(auditRecipeScopeRead(t, files, "manifest.json"), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateModExportManifest(manifest); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Configuration.Namespaces) != 1 || !validModIdentifier(manifest.Configuration.Namespaces[0]) || manifest.ErrorCount != 0 {
+		t.Fatal("a complete single-namespace game fixture is required")
+	}
+	sample.namespace, sample.minecraft, sample.loader = manifest.Configuration.Namespaces[0], manifest.MinecraftVersion, normalizeExportLoader(manifest.Loader)
+	var mods struct {
+		Entries []struct{ ID, Version string }
+	}
+	if err := json.Unmarshal(auditRecipeScopeRead(t, files, "registries/mods.json"), &mods); err != nil {
+		t.Fatal(err)
+	}
+	for _, mod := range mods.Entries {
+		if mod.ID == sample.namespace {
+			if sample.modVersion != "" || strings.TrimSpace(mod.Version) == "" {
+				t.Fatal("expected exactly one version for the game fixture namespace")
+			}
+			sample.modVersion = mod.Version
+		}
+	}
+	if sample.modVersion == "" || sample.minecraft != "1.20.1" || (sample.loader != "fabric" && sample.loader != "forge") {
+		t.Fatal("missing scoped mod version or unsupported game fixture environment")
+	}
+	return sample
+}
+
+// Exercise the default recorded sample independently of the long-lived fixture.
+func TestJourneyGameSampleUsesRecordedSource(t *testing.T) {
+	for _, key := range []string{"MCMODS_AUDIT_GAME_PACKAGE", "MCMODS_AUDIT_GAME_SHA256", "MCMODS_AUDIT_EXPORTER_COMMIT"} {
+		t.Setenv(key, "")
+	}
+	directory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sample := loadJourneyGameSample(t, directory, "")
+	if sample.namespace != "auditfixture" || sample.minecraft != "1.20.1" || sample.loader != "fabric" || sample.modVersion != "1.0.0" {
+		t.Fatalf("sample scope changed: %+v", sample)
 	}
 }
 
