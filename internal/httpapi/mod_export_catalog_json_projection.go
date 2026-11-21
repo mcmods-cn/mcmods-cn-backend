@@ -86,21 +86,3 @@ func registeredImportedCatalogJSONRule(code string) *exportJSONRule {
 	}
 	return nil
 }
-
-func exportLootJSONRule() *exportJSONRule {
-	rule := exportObjectRule(map[string]*exportJSONRule{})
-	rule.items = rule
-	rule.strings = true
-	rule.numbers = true
-	rule.booleans = true
-	// Vanilla loot condition/function/provider vocabulary. Mod codec properties
-	// outside this vocabulary require a registered adapter and golden sample.
-	exportFields(rule, "rolls bonus_rolls entries conditions functions children terms term condition function type name weight quality value min max n p count chance looting_multiplier unlooted looted levels enchantment enchantments treasure add formula parameters base multiplier limit damage destination source target tool predicate predicates items item tag nbt components duration effects effect amplifier ambient show_particles show_icon weather_check raining thundering time_check value period killed_by_player inverse explosion_decay random_chance random_chance_with_looting survives_explosion entity entity_properties entity_scores scores block_state_property block properties alternative alternatives sequence group location_check offsetX offsetY offsetZ offset_x offset_y offset_z location biome dimension smokey light sky block position x y z flags is_on_fire is_sneaking is_sprinting is_swimming is_baby is_projectile is_explosion is_magic is_fire is_lightning is_creative_player direct_entity damage_source food_level saturation will_drop head name_tag lore text translate extra with color bold italic underlined strikethrough obfuscated font text_component set_contents contents slot slots operation uuid amount attribute modifiers", rule)
-	exportFields(rule, "pool_index entry_index entry_type entry_kind item_id item_tag loot_table_id condition_types function_types entry_count child_count normalization_status possible_item_ids possible_item_tags possible_items_complete possible_items_analysis unsupported_entry_type source_table_id source_path source_kind", rule)
-	// Resource-keyed enchantment/score/property maps carry scalar business
-	// values, never arbitrary nested diagnostic objects.
-	for _, key := range []string{"enchantments", "scores", "properties"} {
-		rule.fields[key] = exportMapRule(exportScalarRule())
-	}
-	return rule
-}
