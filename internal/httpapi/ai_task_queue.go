@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/queue"
+	"mcmods-cn-backend/internal/security"
 )
 
 const (
@@ -31,6 +32,7 @@ type aiTaskExecution struct {
 }
 
 var errAITaskExecutionLost = errors.New("AI task execution was canceled or superseded")
+var errAIExecutionPolicy = errors.New("AI task requester or translation source is no longer eligible")
 
 func claimAITaskExecution(ctx context.Context, db *pgxpool.Pool, taskID int64) (aiTaskExecution, error) {
 	run := aiTaskExecution{ID: taskID}
@@ -40,22 +42,65 @@ func claimAITaskExecution(ctx context.Context, db *pgxpool.Pool, taskID int64) (
 	return run, err
 }
 
-// Lock the task while writing its business result, so recovery/cancellation
-// cannot replace the execution between the ownership check and its write.
-func lockAITaskExecutionTx(ctx context.Context, tx pgx.Tx) error {
+// The task lock fences recovery. Read current actor and RBAC on the same
+// transaction connection before reserving a supplier call or writing a result.
+func authorizeAITaskExecutionTx(ctx context.Context, tx pgx.Tx) (security.Claims, error) {
+	var actor security.Claims
 	run, ok := ctx.Value(aiTaskExecutionKey{}).(aiTaskExecution)
 	if !ok {
-		return nil // Isolated persistence callers without a claimed queue task.
+		return actor, nil // Synchronous crawler budget and direct persistence callers.
 	}
 	var started *time.Time
-	var status string
-	if err := tx.QueryRow(ctx, `select status,started_at from ai_tasks where id=$1 for update`, run.ID).Scan(&status, &started); err != nil {
-		return err
+	var status, taskType string
+	var reserved int64
+	if err := tx.QueryRow(ctx, `select status,started_at,task_type,quota_reserved_tokens,coalesce(created_by,0)
+		from ai_tasks where id=$1 for update`, run.ID).Scan(&status, &started, &taskType, &reserved, &actor.Subject); err != nil {
+		return actor, err
 	}
 	if status != "running" || started == nil || !started.Equal(run.Started) {
-		return errAITaskExecutionLost
+		return actor, errAITaskExecutionLost
 	}
-	return nil
+	err := tx.QueryRow(ctx, `select public_id from users where id=$1 and status='active' for share`, actor.Subject).Scan(&actor.PublicSubject)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return actor, errAIExecutionPolicy
+	}
+	if err != nil {
+		return actor, err
+	}
+	resolved, err := resolveUsersRootPermissionsQuery(ctx, tx, []int64{actor.Subject})
+	if err != nil {
+		return actor, err
+	}
+	actor.PermissionRules = resolved[actor.Subject].Permissions
+	if claimsExplicitlyAllow(actor, "account.banned") {
+		return actor, errAIExecutionPolicy
+	}
+	// User translation routes reserve a positive allowance in the task row.
+	// Generic admin tasks carry no user reservation and retain their enqueue gate.
+	if reserved == 0 && !claimsAllow(actor, "ai.task.enqueue") {
+		return actor, errAIExecutionPolicy
+	}
+	if reserved > 0 {
+		limit := int64(claimsNumericPermissionValue(actor, "user.ai.daily_token_limit"))
+		if limit != int64(maxPermissionValue) && reserved > limit {
+			return actor, errAIExecutionPolicy
+		}
+	}
+	switch taskType {
+	case aiTaskContentTranslation:
+		if !claimsAllow(actor, "content.translate") {
+			return actor, errAIExecutionPolicy
+		}
+	case aiTaskNotificationTranslation:
+		if !claimsAllow(actor, "notification.translate") {
+			return actor, errAIExecutionPolicy
+		}
+	default:
+		if !claimsAllow(actor, "ai.task.enqueue") {
+			return actor, errAIExecutionPolicy
+		}
+	}
+	return actor, nil
 }
 
 func enqueueAITaskTx(ctx context.Context, tx pgx.Tx, eventType string, taskID int64, taskUID, taskType, traceID string) error {

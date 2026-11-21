@@ -58,7 +58,8 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err = lockAITaskExecutionTx(ctx, tx); err != nil {
+	actor, err := authorizeAITaskExecutionTx(ctx, tx)
+	if err != nil {
 		return err
 	}
 	var taskUID string
@@ -87,14 +88,13 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 	if payload.EntityType != "" && payload.EntityType != entityType {
 		return errors.New("content translation subject type changed")
 	}
-	var currentSourceRevisionNo int64
-	if err = tx.QueryRow(ctx, `select revision_no from content_localizations
-		where subject_id=$1 and subject_type=$2 and locale=$3 and review_status='approved' for update`,
-		entityID, entityType, payload.SourceLocale).Scan(&currentSourceRevisionNo); err != nil {
-		return fmt.Errorf("load content translation source revision: %w", err)
+	if _, claimed := ctx.Value(aiTaskExecutionKey{}).(aiTaskExecution); claimed {
+		if _, err := verifyCatalogTranslationVisibilityTx(ctx, tx, actor, payload); err != nil {
+			return err
+		}
 	}
-	if currentSourceRevisionNo != payload.SourceRevisionNo {
-		return errors.New("content translation source changed while the task was running")
+	if err = verifyCatalogTranslationRevisionTx(ctx, tx, payload, entityType); err != nil {
+		return err
 	}
 	revisionEntityID := entityID
 	var baseRevisionID *int64
@@ -171,4 +171,21 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+func verifyCatalogTranslationRevisionTx(ctx context.Context, tx pgx.Tx, source contentTranslationTaskPayload, entityType string) error {
+	var revision int64
+	err := tx.QueryRow(ctx, `select revision_no from content_localizations
+		where subject_id=$1 and subject_type=$2 and locale=$3 and review_status='approved' for update`,
+		source.EntityID, entityType, source.SourceLocale).Scan(&revision)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errAIExecutionPolicy
+	}
+	if err != nil {
+		return err
+	}
+	if revision != source.SourceRevisionNo {
+		return errAIExecutionPolicy
+	}
+	return nil
 }

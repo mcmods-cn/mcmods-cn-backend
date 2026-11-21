@@ -1203,7 +1203,7 @@ func (s *Server) resolvePublicLink(w http.ResponseWriter, r *http.Request) {
 	}
 	switch entityType {
 	case "resource", "structure", "document", "recipe", "recipe_type", "tag", "recipe_template":
-		visible, visibilityErr := s.catalogEntityIsPublic(r.Context(), internalID, entityType)
+		visible, visibilityErr := catalogEntityIsPublic(r.Context(), s.db, internalID, entityType)
 		if visibilityErr != nil {
 			writeError(w, http.StatusInternalServerError, "解析短链接发布状态失败")
 			return

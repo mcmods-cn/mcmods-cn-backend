@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/security"
@@ -520,30 +521,12 @@ func (worker *AIWorker) persistNotificationTranslation(ctx context.Context, user
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err = lockAITaskExecutionTx(ctx, tx); err != nil {
+	if _, err = authorizeAITaskExecutionTx(ctx, tx); err != nil {
 		return err
 	}
 	if _, claimed := ctx.Value(aiTaskExecutionKey{}).(aiTaskExecution); claimed {
-		var source struct {
-			Items []struct {
-				Key  string `json:"key"`
-				Text string `json:"text"`
-			} `json:"items"`
-		}
-		if err = json.Unmarshal(rawPayload, &source); err != nil {
+		if err = verifyNotificationTranslationSourceTx(ctx, tx, userID, rawPayload); err != nil {
 			return err
-		}
-		fields := make(map[string]string, len(source.Items))
-		for _, item := range source.Items {
-			fields[item.Key] = item.Text
-		}
-		var title, body string
-		if err = tx.QueryRow(ctx, `select title,body from notifications
-			where id=$1 and (recipient_id is null or recipient_id=$2) and kind<>'system' for share`, payload.NotificationID, userID).Scan(&title, &body); err != nil {
-			return fmt.Errorf("load notification translation source: %w", err)
-		}
-		if fields["title"] != title || fields["body"] != body {
-			return errors.New("notification source changed while translation was running")
 		}
 	}
 	_, err = tx.Exec(
@@ -562,4 +545,28 @@ func (worker *AIWorker) persistNotificationTranslation(ctx context.Context, user
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// Both supplier admission and publication check the notification recipient,
+// kind and the actual source text. A forwarded task can outlive the notification.
+func verifyNotificationTranslationSourceTx(ctx context.Context, tx pgx.Tx, userID int64, raw []byte) error {
+	var source struct {
+		NotificationID int64  `json:"notificationId"`
+		SourceLocale   string `json:"sourceLocale"`
+	}
+	if err := json.Unmarshal(raw, &source); err != nil {
+		return err
+	}
+	fields, err := translationSourceFields(raw, "title", "body")
+	if err != nil {
+		return err
+	}
+	var matches bool
+	err = tx.QueryRow(ctx, `select title=$3 and body=$4 and ($5='' or source_locale=$5) from notifications
+		where id=$1 and (recipient_id is null or recipient_id=$2) and kind<>'system' for share`,
+		source.NotificationID, userID, fields["title"], fields["body"], source.SourceLocale).Scan(&matches)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !matches) {
+		return errAIExecutionPolicy
+	}
+	return err
 }

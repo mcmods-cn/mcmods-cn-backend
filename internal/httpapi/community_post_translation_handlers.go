@@ -192,6 +192,7 @@ func (s *Server) communityPostTranslationResult(w http.ResponseWriter, r *http.R
 
 type communityPostTranslationTaskPayload struct {
 	PostInternalID int64  `json:"postInternalId"`
+	SourceLocale   string `json:"sourceLocale"`
 	TargetLocale   string `json:"targetLocale"`
 	SourceRevision int64  `json:"sourceRevisionId"`
 }
@@ -225,15 +226,11 @@ func (worker *AIWorker) persistCommunityPostTranslation(ctx context.Context, tas
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err = lockAITaskExecutionTx(ctx, tx); err != nil {
+	if _, err = authorizeAITaskExecutionTx(ctx, tx); err != nil {
 		return err
 	}
-	var currentRevision int64
-	if err = tx.QueryRow(ctx, `select published_revision_id from community_posts where id=$1 and status='active' and review_status='approved' for update`, payload.PostInternalID).Scan(&currentRevision); err != nil {
-		return fmt.Errorf("load community post translation source revision: %w", err)
-	}
-	if currentRevision != payload.SourceRevision {
-		return errors.New("community post changed while translation was running")
+	if err = lockCommunityTranslationSourceTx(ctx, tx, payload, rawPayload); err != nil {
+		return err
 	}
 	_, err = tx.Exec(ctx, `insert into community_post_translations(post_id,locale,title,body_markdown,source_revision_id,ai_task_id)
 		values($1,$2,$3,$4,$5,$6) on conflict(post_id,locale) do update set title=excluded.title,
@@ -243,4 +240,19 @@ func (worker *AIWorker) persistCommunityPostTranslation(ctx context.Context, tas
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func lockCommunityTranslationSourceTx(ctx context.Context, tx pgx.Tx, payload communityPostTranslationTaskPayload, raw []byte) error {
+	fields, err := translationSourceFields(raw, "title", "bodyMarkdown")
+	if err != nil {
+		return err
+	}
+	var matches bool
+	err = tx.QueryRow(ctx, `select published_revision_id=$2 and title=$3 and body_markdown=$4 and ($5='' or source_locale=$5)
+		from community_posts where id=$1 and status='active' and review_status='approved' for update`,
+		payload.PostInternalID, payload.SourceRevision, fields["title"], fields["bodyMarkdown"], payload.SourceLocale).Scan(&matches)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !matches) {
+		return errAIExecutionPolicy
+	}
+	return err
 }

@@ -279,10 +279,12 @@ func (worker *AIWorker) failTask(ctx context.Context, taskID int64, cause error)
 	args := []any{taskID, message}
 	if run, ok := ctx.Value(aiTaskExecutionKey{}).(aiTaskExecution); ok {
 		query = `update ai_tasks set status='failed',error=$2,finished_at=now(),updated_at=now(),
-			quota_reserved_tokens=case when input_tokens+output_tokens>0 then 0 else quota_reserved_tokens end
+			quota_reserved_tokens=case when input_tokens+output_tokens>0 or ($4 and not exists(
+				select 1 from ai_task_logs where event=$5 and payload->>'taskId'=cast(ai_tasks.id as text)
+			)) then 0 else quota_reserved_tokens end
 			where id=$1 and status='running'`
 		query += " and started_at=$3"
-		args = append(args, run.Started)
+		args = append(args, run.Started, errors.Is(cause, errAIExecutionPolicy), aiRequestBudgetEvent)
 	}
 	tag, err := worker.db.Exec(
 		ctx,

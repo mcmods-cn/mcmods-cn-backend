@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/security"
 )
 
 func oct02AITestPool(t *testing.T) *pgxpool.Pool {
@@ -167,8 +168,29 @@ func TestOCT02AIUnknownUsageKeepsReservationIntegration(t *testing.T) {
 	}
 }
 
-func TestOCT02AIWorkerClaimAndNotificationPersistenceIntegration(t *testing.T) {
+func oct02AIWorkerTestPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
 	pool := oct02AITestPool(t)
+	if _, err := pool.Exec(context.Background(), `alter table users add column status text default 'active';
+		alter table notifications add column source_locale text default 'en-US';
+		alter table community_posts add column source_locale text, add column title text, add column body_markdown text;
+		create table roles(id bigint,code text,weight int,parents text[],status text);
+		create table role_permissions(role_id bigint,permission_id bigint,allow bool,expires_at timestamptz);
+		create table user_role_bindings(user_id bigint,role_id bigint,expires_at timestamptz);
+		create table effective_project_access(user_id bigint,access_level text,project_public_id text);
+		create table creator_claims(user_id bigint,creator_id bigint,status text);
+		create table creators(id bigint,public_id text,kind text);
+		create table permissions(id bigint,code text);
+		create table user_permissions(user_id bigint,permission_id bigint,allow bool,source text,expires_at timestamptz);
+		insert into permissions values(1,'notification.translate'),(2,'content.translate'),(3,'user.ai.daily_token_limit.100000');
+		insert into user_permissions select 42,id,true,'manual',null from permissions;`); err != nil {
+		t.Fatal(err)
+	}
+	return pool
+}
+
+func TestOCT02AIWorkerClaimAndNotificationPersistenceIntegration(t *testing.T) {
+	pool := oct02AIWorkerTestPool(t)
 	var calls atomic.Int64
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -228,8 +250,104 @@ func TestOCT02AIWorkerClaimAndNotificationPersistenceIntegration(t *testing.T) {
 	}
 }
 
-func TestOCT02AIExecutionFencingAndDeletedPostIntegration(t *testing.T) {
+func TestAIQueuedCatalogSourceChecksVisibilityRevisionAndTextIntegration(t *testing.T) {
 	pool := oct02AITestPool(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `alter table public_routes add column canonical_path text;
+		alter table content_localizations add column summary text default '',add column content_markdown text default '';
+		create table blueprints(id bigint,status text,review_status text);
+		create table skin_assets(id bigint,status text,review_status text,visibility text);
+		create table catalog_entities(id bigint,public_id text,status text,archived_at timestamptz);
+		create table recipe_layout_templates(entity_id bigint,recipe_type_id bigint);
+		create table recipes(entity_id bigint,recipe_type_id bigint);
+		insert into public_routes values(7,'s00000007','skin','/skins/s00000007');
+		insert into content_subjects values(7,'skin','en-US');
+		insert into skin_assets values(7,'active','approved','public');
+		insert into content_localizations(subject_id,subject_type,locale,revision_no,review_status,name)
+		values(7,'skin','en-US',3,'approved','Example skin')`); err != nil {
+		t.Fatal(err)
+	}
+	prepared := preparedAITask{taskType: aiTaskContentTranslation, rawPayload: []byte(`{
+		"publicId":"s00000007","internalEntityId":7,"entityType":"skin","sourceLocale":"en-US","targetLocale":"zh-CN","sourceRevisionNo":3,
+		"items":[{"key":"name","text":"Example skin"},{"key":"summary","text":""},{"key":"contentMarkdown","text":""}]}`)}
+	for _, test := range []struct{ name, change string }{
+		{"published source", ""},
+		{"private skin", "update skin_assets set visibility='private'"},
+		{"new source version", "update content_localizations set revision_no=4"},
+		{"different text", "update content_localizations set summary='Updated'"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			if test.change != "" {
+				if _, err := tx.Exec(ctx, test.change); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = verifyClaimedTranslationSourceTx(ctx, tx, security.Claims{Subject: 42}, prepared)
+			if test.change == "" && err != nil || test.change != "" && !errors.Is(err, errAIExecutionPolicy) {
+				t.Fatalf("translation source policy: %v", err)
+			}
+		})
+	}
+}
+
+func TestAINotificationWithdrawalPreservesUnknownUsageBeforePublicationIntegration(t *testing.T) {
+	pool := oct02AIWorkerTestPool(t)
+	ctx := context.Background()
+	worker := NewAIWorker(pool, nil, "")
+	if _, err := pool.Exec(ctx, `insert into notifications(id,recipient_id,title,body,kind)
+		values(17,42,'Hello','Example','reply_mention')`); err != nil {
+		t.Fatal(err)
+	}
+	var taskID int64
+	if err := pool.QueryRow(ctx, `insert into ai_tasks(task_uid,task_type) values('ai-withdraw',$1) returning id`,
+		aiTaskNotificationTranslation).Scan(&taskID); err != nil {
+		t.Fatal(err)
+	}
+	run, err := claimAITaskExecution(ctx, pool, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = context.WithValue(ctx, aiTaskExecutionKey{}, run)
+	raw := []byte(`{"notificationId":17,"sourceLocale":"en-US","targetLocale":"zh-CN","items":[{"key":"title","text":"Hello"},{"key":"body","text":"Example"}]}`)
+	prepared := preparedAITask{taskType: aiTaskNotificationTranslation, rawPayload: raw, reservationTokens: 100,
+		provider: aiProviderConfig{Code: "openai"}, model: aiModelConfig{Model: "fixture"}}
+	ledgerID, budget, err := worker.reserveProviderRequestBudget(ctx, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.settleProviderRequestBudget(ctx, ledgerID, budget, aiTaskUsage{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `update notifications set recipient_id=43 where id=17`); err != nil {
+		t.Fatal(err)
+	}
+	result := map[string]any{"items": []any{map[string]any{"key": "title", "text": "你好"}, map[string]any{"key": "body", "text": "示例"}}}
+	err = worker.persistNotificationTranslation(ctx, 42, raw, result)
+	if !errors.Is(err, errAIExecutionPolicy) {
+		t.Fatalf("publication after recipient change: %v", err)
+	}
+	if err := worker.failTask(ctx, taskID, err); err != nil {
+		t.Fatal(err)
+	}
+	var status, usageState string
+	var reserved, translations int
+	if err := pool.QueryRow(ctx, `select status,quota_reserved_tokens,
+		(select payload->>'state' from ai_task_logs where id=$2),(select count(*) from notification_translations)
+		from ai_tasks where id=$1`, taskID, ledgerID).Scan(&status, &reserved, &usageState, &translations); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || reserved != 100 || usageState != "usage_unknown" || translations != 0 {
+		t.Fatalf("task=%s reserved=%d supplier=%s translations=%d", status, reserved, usageState, translations)
+	}
+}
+
+func TestOCT02AIExecutionFencingAndDeletedPostIntegration(t *testing.T) {
+	pool := oct02AIWorkerTestPool(t)
 	ctx := context.Background()
 	worker := NewAIWorker(pool, nil, "")
 	var taskID int64
@@ -258,10 +376,10 @@ func TestOCT02AIExecutionFencingAndDeletedPostIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `insert into community_posts values(8,12,'deleted','approved')`); err != nil {
 		t.Fatal(err)
 	}
-	payload := []byte(`{"postInternalId":8,"sourceRevisionId":12,"targetLocale":"zh-CN"}`)
+	payload := []byte(`{"postInternalId":8,"sourceRevisionId":12,"targetLocale":"zh-CN","items":[{"key":"title","text":"title"},{"key":"bodyMarkdown","text":"body"}]}`)
 	result := map[string]any{"items": []any{map[string]any{"key": "title", "text": "title"}, map[string]any{"key": "bodyMarkdown", "text": "body"}}}
-	if err = worker.persistCommunityPostTranslation(context.WithValue(ctx, aiTaskExecutionKey{}, newRun), taskID, payload, result); err == nil {
-		t.Fatal("deleted community post received a late translation")
+	if err = worker.persistCommunityPostTranslation(context.WithValue(ctx, aiTaskExecutionKey{}, newRun), taskID, payload, result); !errors.Is(err, errAIExecutionPolicy) {
+		t.Fatalf("deleted community post eligibility error = %v", err)
 	}
 	var count int
 	if err = pool.QueryRow(ctx, `select count(*) from community_post_translations`).Scan(&count); err != nil || count != 0 {

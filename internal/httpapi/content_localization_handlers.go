@@ -472,9 +472,9 @@ func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *Server) loadCatalogEntityLocalizations(ctx context.Context, publicID string) (catalogEntityLocalizationSet, error) {
-	result := catalogEntityLocalizationSet{Localizations: map[string]catalogLocalizationPayload{}}
-	err := s.db.QueryRow(ctx, `
+func loadVisibleLocalizationSubject(ctx context.Context, query databaseQuery, publicID string) (catalogEntityLocalizationSet, error) {
+	var result catalogEntityLocalizationSet
+	err := query.QueryRow(ctx, `
 		select route.internal_id,route.public_id,route.entity_type,coalesce(route.canonical_path,''),subject.default_locale
 		from public_routes route
 		join content_subjects subject on subject.subject_id=route.internal_id and subject.subject_type=route.entity_type
@@ -512,7 +512,7 @@ func (s *Server) loadCatalogEntityLocalizations(ctx context.Context, publicID st
 	if !contentVisibilityBypassed(ctx) {
 		switch result.EntityType {
 		case "tag", "recipe_type", "recipe_template", "recipe":
-			visible, visibilityErr := s.catalogEntityIsPublic(ctx, result.EntityID, result.EntityType)
+			visible, visibilityErr := catalogEntityIsPublic(ctx, query, result.EntityID, result.EntityType)
 			if visibilityErr != nil {
 				return result, visibilityErr
 			}
@@ -521,6 +521,15 @@ func (s *Server) loadCatalogEntityLocalizations(ctx context.Context, publicID st
 			}
 		}
 	}
+	return result, nil
+}
+
+func (s *Server) loadCatalogEntityLocalizations(ctx context.Context, publicID string) (catalogEntityLocalizationSet, error) {
+	result, err := loadVisibleLocalizationSubject(ctx, s.db, publicID)
+	if err != nil {
+		return result, err
+	}
+	result.Localizations = map[string]catalogLocalizationPayload{}
 	if result.CanonicalPath == "" {
 		result.CanonicalPath = s.catalogContentCanonicalPath(ctx, result.EntityType, result.PublicID, result.EntityID)
 	}

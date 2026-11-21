@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -160,6 +161,40 @@ func TestTEST043ContentAIWorkerFailureSuccessAndDuplicateDeliveryIntegration(t *
 	if taskCount != 2 || translationCount != 1 || failureLogs != 1 || completionLogs != 1 {
 		t.Fatalf("final AI facts tasks/translations/failureLogs/completionLogs=%d/%d/%d/%d, want 2/1/1/1",
 			taskCount, translationCount, failureLogs, completionLogs)
+	}
+	for _, change := range []string{"withdraw source", "revoke permission"} {
+		t.Run(change, func(t *testing.T) {
+			nextPost, publicID, revision := createTEST043ApprovedCommunityPost(t, ctx, pool, authorID)
+			uid := requestTEST043Translation(t, ctx, translationHandler, token, publicID, http.StatusAccepted)
+			id := loadTEST043TaskID(t, ctx, pool, uid)
+			if change == "withdraw source" {
+				_, err = pool.Exec(ctx, `update community_posts set status='deleted' where id=$1`, nextPost)
+			} else {
+				_, err = pool.Exec(ctx, `update user_permissions set allow=false where user_id=$1 and permission_id=(
+					select id from permissions where code='content.translate')`, authorID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := providerCalls.Load()
+			msg := marshalTEST043TaskMessage(t, id, uid)
+			if err := worker.handleTask(ctx, msg); !errors.Is(err, errAIExecutionPolicy) {
+				t.Fatalf("worker eligibility error = %v", err)
+			}
+			if err := worker.handleTask(ctx, msg); err != nil {
+				t.Fatal(err)
+			}
+			var reserved, requestLedgerRows int
+			if err := pool.QueryRow(ctx, `select quota_reserved_tokens,(select count(*) from ai_task_logs
+				where event=$2 and payload->>'taskId'=task.id::text) from ai_tasks task where id=$1`,
+				id, aiRequestBudgetEvent).Scan(&reserved, &requestLedgerRows); err != nil {
+				t.Fatal(err)
+			}
+			if providerCalls.Load() != calls || reserved != 0 || requestLedgerRows != 0 {
+				t.Fatalf("calls=%d (was %d), user reservation=%d, supplier ledger rows=%d", providerCalls.Load(), calls, reserved, requestLedgerRows)
+			}
+			assertTEST043Translation(t, ctx, pool, nextPost, revision, false)
+		})
 	}
 }
 

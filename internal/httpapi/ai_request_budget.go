@@ -69,27 +69,24 @@ func (worker *AIWorker) reserveProviderRequestBudget(ctx context.Context, prepar
 		return 0, budget, err
 	}
 	defer tx.Rollback(ctx)
+	actor, err := authorizeAITaskExecutionTx(ctx, tx)
+	if err != nil {
+		return 0, budget, err
+	}
+	if run, claimed := ctx.Value(aiTaskExecutionKey{}).(aiTaskExecution); claimed {
+		budget.TaskID, budget.User = run.ID, actor.PublicSubject
+		if err = verifyClaimedTranslationSourceTx(ctx, tx, actor, prepared); err != nil {
+			return 0, budget, err
+		}
+	}
 	// All replicas use the same lock: budget admission and the ledger insert are
 	// atomic across overlapping site, provider, model and user limits.
 	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('ai-provider-request-budget'))`); err != nil {
 		return 0, budget, err
 	}
-	if err = lockAITaskExecutionTx(ctx, tx); err != nil {
-		return 0, budget, err
-	}
-	if run, ok := ctx.Value(aiTaskExecutionKey{}).(aiTaskExecution); ok {
-		budget.TaskID = run.ID
-		var actorID int64
-		if err = tx.QueryRow(ctx, `select coalesce(created_by,0) from ai_tasks where id=$1`, run.ID).Scan(&actorID); err != nil {
-			return 0, budget, err
-		}
-		if actorID > 0 {
-			if err = tx.QueryRow(ctx, `select public_id from users where id=$1`, actorID).Scan(&budget.User); err != nil {
-				return 0, budget, err
-			}
-		}
+	if budget.TaskID != 0 {
 		var attempts int64
-		if err = tx.QueryRow(ctx, `select count(*) from ai_task_logs where event=$1 and payload->>'taskId'=$2`, aiRequestBudgetEvent, strconv.FormatInt(run.ID, 10)).Scan(&attempts); err != nil {
+		if err = tx.QueryRow(ctx, `select count(*) from ai_task_logs where event=$1 and payload->>'taskId'=$2`, aiRequestBudgetEvent, strconv.FormatInt(budget.TaskID, 10)).Scan(&attempts); err != nil {
 			return 0, budget, err
 		}
 		if attempts >= 3 {

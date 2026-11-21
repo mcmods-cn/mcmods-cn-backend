@@ -20,16 +20,16 @@ func publicCatalogEntitySQL(alias, entityType string) string {
 	return catalogvisibility.EntitySQL(alias, entityType)
 }
 
-func (s *Server) catalogEntityIsPublic(ctx context.Context, entityID int64, entityType string) (bool, error) {
+func catalogEntityIsPublic(ctx context.Context, query databaseQuery, entityID int64, entityType string) (bool, error) {
 	var visible bool
-	err := s.db.QueryRow(ctx, `select exists(select 1 from catalog_entities public_entity
+	err := query.QueryRow(ctx, `select exists(select 1 from catalog_entities public_entity
 	 where public_entity.id=$1 and public_entity.status='active' and public_entity.archived_at is null
 	 and `+publicCatalogEntitySQL("public_entity", entityType)+`)`, entityID).Scan(&visible)
 	return visible, err
 }
 
 func (s *Server) requirePublicCatalogEntity(w http.ResponseWriter, r *http.Request, entity catalogEditorEntity) bool {
-	visible, err := s.catalogEntityIsPublic(r.Context(), entity.ID, entity.EntityType)
+	visible, err := catalogEntityIsPublic(r.Context(), s.db, entity.ID, entity.EntityType)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read catalog publication state")
 		return false
