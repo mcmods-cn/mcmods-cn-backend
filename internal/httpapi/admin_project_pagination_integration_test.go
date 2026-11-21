@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -102,6 +103,7 @@ func TestAdminProjectPaginationAndSearchStayIndexedAtScaleIntegration(t *testing
 		searchQuery, searchArguments := adminProjectPageSQL(search)
 		searchPlan, searchPlanWall := adminProjectScalePlan(t, ctx, pool, searchQuery, searchArguments...)
 		assertAdminProjectSearchScalePlan(t, scale, searchPlan)
+		assertAdminSearchResultIDs(t, ctx, pool, scale, deep.Cursor)
 		for label, elapsed := range map[string]time.Duration{
 			"first": firstPlanWall, "deep": deepPlanWall, "typed": typedPlanWall, "search": searchPlanWall,
 		} {
@@ -125,6 +127,39 @@ func TestAdminProjectPaginationAndSearchStayIndexedAtScaleIntegration(t *testing
 		t.Logf("PERF036 projects=%d first=%s deep=%s typed=%s search=%s loadAndPlans=%s",
 			scale, firstPlanWall, deepPlanWall, typedPlanWall, searchPlanWall, time.Since(started))
 		previousScale = scale
+	}
+}
+
+// Both the small matching set and the ordinary ordered search must retain the
+// same project scope, keyset, row limit and tie ordering as the unfiltered page.
+func assertAdminSearchResultIDs(t *testing.T, ctx context.Context, pool *pgxpool.Pool, scale int64, cursor *adminProjectPageCursor) {
+	t.Helper()
+	rare := []int64{}
+	for id := scale; id > 0 && len(rare) < 41; id -= 10_000 {
+		rare = append(rare, id)
+	}
+	common := []int64{}
+	for id := scale - 500; id > 0 && len(common) < 41; id -= 1_000 {
+		common = append(common, id)
+	}
+	for _, check := range []struct {
+		term, projectType string
+		cursor            *adminProjectPageCursor
+		want              []int64
+	}{
+		{"perf036needle", "mod", nil, rare},
+		{"perf036needle", "modpack", nil, nil},
+		{"p00000001", "", nil, []int64{1}},
+		{"project", "mod", cursor, common},
+	} {
+		query, arguments := adminProjectPageSQL(adminProjectPageRequest{
+			Query: check.term, ProjectType: check.projectType, Limit: 40, Cursor: check.cursor,
+		})
+		var ids []int64
+		err := pool.QueryRow(ctx, "select array(select object_route_id from ("+query+") page_rows)", arguments...).Scan(&ids)
+		if err != nil || !slices.Equal(ids, check.want) {
+			t.Fatalf("admin search %q/%q returned IDs %v, want %v: %v", check.term, check.projectType, ids, check.want, err)
+		}
 	}
 }
 

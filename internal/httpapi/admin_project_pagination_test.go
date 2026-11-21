@@ -72,8 +72,11 @@ func TestAdminProjectPageSQLUsesSearchAndCompositeKeyset(t *testing.T) {
 			t.Fatalf("query is missing %q: %s", required, query)
 		}
 	}
+	// Only the bounded sample can be counted. The listing API must never
+	// compute the total number of matching catalog entries for pagination.
+	fullCatalogSQL := strings.ReplaceAll(lower, "(select count(*) from search_sample)", "")
 	for _, forbidden := range []string{" count(", " ilike ", " offset "} {
-		if strings.Contains(lower, forbidden) {
+		if strings.Contains(fullCatalogSQL, forbidden) {
 			t.Fatalf("query retained %q: %s", forbidden, query)
 		}
 	}

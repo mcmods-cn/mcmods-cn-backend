@@ -150,12 +150,29 @@ func adminProjectPageSQL(request adminProjectPageRequest) (string, []any) {
 			len(arguments)-2, len(arguments)-1, len(arguments),
 		))
 	}
-	query := adminProjectPageSelect
+	filter := ""
 	if len(where) != 0 {
-		query += " where " + strings.Join(where, " and ")
+		filter = " where " + strings.Join(where, " and ")
 	}
 	arguments = append(arguments, request.Limit+1)
-	query += fmt.Sprintf(" order by project.heat_score desc,project.updated_at desc,project.object_route_id desc limit $%d", len(arguments))
+	order := fmt.Sprintf(" order by project.heat_score desc,project.updated_at desc,project.object_route_id desc limit $%d", len(arguments))
+	if request.Query == "" {
+		return adminProjectPageSelect + filter + order, arguments
+	}
+
+	// The heat index can visit the entire catalog to find a rare term among
+	// low-heat projects. Probe a bounded set of matching IDs first. If it
+	// fits, sort those matches; if it fills, paginate the full ordered search.
+	const keys = "project.heat_score,project.updated_at,project.object_route_id"
+	query := `with search_sample as materialized (
+		select ` + keys + ` from admin_project_catalog project` + filter + ` limit 256
+	), page as (
+		(select ` + keys + ` from search_sample project where (select count(*) from search_sample)<256` + order + `)
+		union all
+		(select ` + keys + ` from admin_project_catalog project` + filter + `
+			and (select count(*) from search_sample)=256` + order + `)
+	) ` + adminProjectPageSelect + ` join page on page.object_route_id=project.object_route_id
+		order by page.heat_score desc,page.updated_at desc,page.object_route_id desc`
 	return query, arguments
 }
 
