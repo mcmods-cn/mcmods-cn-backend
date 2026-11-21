@@ -25,7 +25,7 @@ func TestPersistedNATSConfigIsCompleteAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Enabled || decoded.OutboxEnabled || decoded.Realtime || decoded.JetStream.Enabled {
+	if decoded.Enabled || !decoded.OutboxEnabled || decoded.Realtime || decoded.JetStream.Enabled {
 		t.Fatalf("explicit false values were not preserved: %#v", decoded)
 	}
 	if decoded.Password != "" || decoded.Token != "" {

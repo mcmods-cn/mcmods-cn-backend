@@ -11,8 +11,8 @@ import (
 func TestNATSUpdateRequiresCompleteReliabilityConfig(t *testing.T) {
 	request := completeNATSUpdateRequest()
 	request.OutboxEnabled = nil
-	if _, err := request.config(config.NATSConfig{}); err == nil {
-		t.Fatal("expected an omitted outboxEnabled field to reject the complete PUT")
+	if cfg, err := request.config(config.NATSConfig{}); err != nil || !cfg.OutboxEnabled {
+		t.Fatalf("omitting the legacy field changed mandatory outbox delivery: enabled=%t err=%v", cfg.OutboxEnabled, err)
 	}
 	request = completeNATSUpdateRequest()
 	request.JetStream.PublishTimeoutSeconds = nil

@@ -173,7 +173,7 @@ func TestAuditLiveCMP007MixedModpackFixture(t *testing.T) {
 	if err = NewProjectUpdateNotificationWorker(db, q, api.cache).Start(workerContext); err != nil {
 		t.Fatal(err)
 	}
-	dispatcher := queue.NewOutboxDispatcher(db, q, true)
+	dispatcher := queue.NewOutboxDispatcher(db, q)
 	dispatcher.Start(workerContext)
 	observer, err := nats.Connect(broker.ClientURL())
 	if err != nil {

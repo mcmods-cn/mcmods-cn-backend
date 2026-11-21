@@ -212,7 +212,7 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	NewOSSRehomeWorker(cfg, db).Start(journeyCtx)
-	dispatcher := queue.NewOutboxDispatcher(db, q, true)
+	dispatcher := queue.NewOutboxDispatcher(db, q)
 	dispatcher.Start(journeyCtx)
 	observer, err := nats.Connect(broker.ClientURL())
 	if err != nil {

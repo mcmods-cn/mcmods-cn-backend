@@ -19,7 +19,7 @@ func LoadNATSConfig(ctx context.Context, db *pgxpool.Pool, fallback config.NATSC
 	if err == nil {
 		raw, err = security.DecryptSetting(settingsEncryptionKey, raw)
 		if err != nil {
-			return queue.NormalizeConfig(fallback), err
+			return config.NATSConfig{}, err
 		}
 		// A persisted record is the complete authority. In particular, false
 		// feature flags and empty credentials are intentional values rather than
@@ -30,7 +30,7 @@ func LoadNATSConfig(ctx context.Context, db *pgxpool.Pool, fallback config.NATSC
 	if errors.Is(err, pgx.ErrNoRows) {
 		return queue.NormalizeConfig(fallback), nil
 	}
-	return queue.NormalizeConfig(fallback), err
+	return config.NATSConfig{}, err
 }
 
 func decodeNATSConfig(raw []byte) (config.NATSConfig, error) {

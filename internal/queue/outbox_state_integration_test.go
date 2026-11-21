@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -98,7 +99,7 @@ func TestOutboxStaleLeaseRecoveryErrorsAreReturned(t *testing.T) {
 		t.Fatal(err)
 	}
 	dispatcher := &OutboxDispatcher{db: pool, workerID: "state-test"}
-	if _, err := dispatcher.claim(ctx, 10); err == nil {
+	if err := dispatcher.recoverStale(ctx, 10); err == nil {
 		t.Fatal("stale lease recovery persistence error was ignored")
 	}
 	assertOutboxStatus(t, ctx, pool, 10, "publishing")
@@ -116,7 +117,7 @@ func TestOutboxStaleLeaseIsRecoveredAfterDispatcherRestart(t *testing.T) {
 	if err := client.SubscribeTask("ai", func(context.Context, []byte) error { return nil }); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("expected local handler registration on disabled NATS, got %v", err)
 	}
-	dispatcher := NewOutboxDispatcher(pool, client, true)
+	dispatcher := NewOutboxDispatcher(pool, client)
 	if count, err := dispatcher.DispatchBatch(ctx, 1); err != nil || count != 1 {
 		t.Fatalf("restarted dispatcher recovered %d rows: %v", count, err)
 	}
@@ -152,8 +153,8 @@ func TestTwoOutboxDispatchersDoNotProcessTheSameClaim(t *testing.T) {
 	}); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("expected local handler registration on disabled NATS, got %v", err)
 	}
-	firstDispatcher := NewOutboxDispatcher(pool, client, true)
-	secondDispatcher := NewOutboxDispatcher(pool, client, true)
+	firstDispatcher := NewOutboxDispatcher(pool, client)
+	secondDispatcher := NewOutboxDispatcher(pool, client)
 	type dispatchResult struct {
 		count int
 		err   error
@@ -194,7 +195,7 @@ func TestOutboxPublishedMetricRequiresPersistedTransition(t *testing.T) {
 	}
 	client := New(ctx, config.NATSConfig{})
 	_ = client.SubscribeTask("ai", func(context.Context, []byte) error { return nil })
-	dispatcher := NewOutboxDispatcher(pool, client, true)
+	dispatcher := NewOutboxDispatcher(pool, client)
 	if count, err := dispatcher.DispatchBatch(ctx, 1); err == nil || count != 1 {
 		t.Fatalf("published persistence result = %d/%v, want one claimed row and an error", count, err)
 	}
@@ -247,4 +248,60 @@ func assertOutboxStatus(t *testing.T, ctx context.Context, pool *pgxpool.Pool, i
 	if status != want {
 		t.Fatalf("outbox %d status = %q, want %q", id, status, want)
 	}
+}
+
+func TestOutboxLeaseProtectsRunningWorkAndFencesSupersededAttempts(t *testing.T) {
+	pool := openOutboxStateTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	client := New(ctx, config.NATSConfig{})
+	defer client.Close()
+	start, release := make(chan struct{}), make(chan struct{})
+	var runs atomic.Int32
+	_ = client.SubscribeTask("ai", func(ctx context.Context, _ []byte) error {
+		if runs.Add(1) == 1 {
+			close(start)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	})
+	if _, err := pool.Exec(ctx, `insert into nats_outbox(id,event_id,event_type,subject,aggregate_type,aggregate_id,payload)
+		values(910,'owned-lease','test','ai','test','long','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	one, two := NewOutboxDispatcher(pool, client), NewOutboxDispatcher(pool, client)
+	one.lease, two.lease = 450*time.Millisecond, 450*time.Millisecond
+	firstResult := make(chan error, 1)
+	go func() { _, err := one.DispatchBatch(ctx, 1); firstResult <- err }()
+	select {
+	case <-start:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	time.Sleep(2 * one.lease)
+	if n, err := two.DispatchBatch(ctx, 1); err != nil || n != 0 || runs.Load() != 1 {
+		t.Fatalf("a healthy lease was reclaimed: rows=%d runs=%d err=%v", n, runs.Load(), err)
+	}
+	// Simulate a later claim by the same process identity. An old attempt
+	// may neither finish that new row nor write its retry/dead-letter state.
+	if _, err := pool.Exec(ctx, `update nats_outbox set attempts=2 where id=910`); err != nil {
+		t.Fatal(err)
+	}
+	if err := one.fail(ctx, outboxRecord{ID: 910, Attempts: 0, MaxAttempts: 1}, errors.New("late old attempt")); err == nil {
+		t.Fatal("superseded operation dead-lettered a newer claim")
+	}
+	select {
+	case err := <-firstResult:
+		if err == nil {
+			t.Fatal("lost heartbeat did not cancel the old attempt")
+		}
+	case <-ctx.Done():
+		t.Fatal("lost heartbeat did not stop the handler")
+	}
+	assertOutboxStatus(t, ctx, pool, 910, "publishing")
+	close(release)
 }

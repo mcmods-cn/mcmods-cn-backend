@@ -67,10 +67,21 @@ func TestLoadNATSConfigKeepsStoredFalseAndClearedSecretsIntegration(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Enabled || loaded.OutboxEnabled || loaded.Realtime || loaded.JetStream.Enabled || loaded.Password != "" || loaded.Token != "" {
+	if loaded.Enabled || !loaded.OutboxEnabled || loaded.Realtime || loaded.JetStream.Enabled || loaded.Password != "" || loaded.Token != "" {
 		t.Fatalf("stored authority was overwritten by fallback: %#v", loaded)
 	}
 	if loaded.JetStream.AckWait != 9*time.Second || loaded.JetStream.PublishTimeout != 2*time.Second {
 		t.Fatalf("stored JetStream durations changed: %#v", loaded.JetStream)
 	}
+	if unsafe, err := LoadNATSConfig(ctx, pool, fallback, "owned-different-settings-key-at-least-32-bytes"); err == nil || unsafe.Enabled || unsafe.URL != "" {
+		t.Fatalf("could not read saved settings but returned usable process defaults: enabled=%t err=%v", unsafe.Enabled, err)
+	}
+	if _, err := pool.Exec(ctx, `delete from pg_temp.system_settings where key='nats.config'`); err != nil {
+		t.Fatal(err)
+	}
+	fromEnv, err := LoadNATSConfig(ctx, pool, fallback, encryptionKey)
+	if err != nil || !fromEnv.Enabled || !fromEnv.Realtime || !fromEnv.OutboxEnabled {
+		t.Fatalf("an environment with no saved settings could not bootstrap: %v", err)
+	}
+
 }

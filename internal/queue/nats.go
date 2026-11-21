@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,8 +18,9 @@ import (
 )
 
 var (
-	ErrUnavailable  = errors.New("nats queue is unavailable")
-	ErrTaskDisabled = errors.New("nats task is disabled")
+	errDeliveryModeChanged = fmt.Errorf("%w: delivery mode changed", ErrUnavailable)
+	ErrUnavailable         = errors.New("nats queue is unavailable")
+	ErrTaskDisabled        = errors.New("nats task is disabled")
 )
 
 type Status struct {
@@ -93,15 +95,19 @@ type Client struct {
 	subscriptions          map[string]subscriptionDefinition
 	broadcastSubscriptions map[string]broadcastSubscriptionDefinition
 	deadLetterSink         DeadLetterSink
+	taskRuns               map[string]*taskRunCounters
+	capacityChanged        chan struct{}
 }
 
 func New(ctx context.Context, cfg config.NATSConfig) *Client {
 	clientCtx, cancel := context.WithCancel(ctx)
 	client := &Client{
-		cfg:                    NormalizeConfig(cfg),
-		ctx:                    clientCtx,
-		cancel:                 cancel,
-		done:                   make(chan struct{}),
+		cfg:      NormalizeConfig(cfg),
+		ctx:      clientCtx,
+		cancel:   cancel,
+		done:     make(chan struct{}),
+		taskRuns: make(map[string]*taskRunCounters),
+
 		liveTasks:              make(map[string]struct{}),
 		liveBroadcasts:         make(map[string]struct{}),
 		subscriptions:          make(map[string]subscriptionDefinition),
@@ -189,6 +195,8 @@ func DefaultTaskConfigs() []config.NATSTaskConfig {
 			MaxConcurrent:  8,
 			TimeoutSeconds: 300,
 		},
+		{Code: "favorite_modpack_export", Enabled: true, Subject: "favorite.modpack-export.tasks", QueueGroup: "mcmods-favorite-export-workers", MaxConcurrent: 2, TimeoutSeconds: 600},
+		{Code: "project_update_notifications", Enabled: true, Subject: "project.update.notifications", QueueGroup: "mcmods-project-update-workers", MaxConcurrent: 4, TimeoutSeconds: 300},
 		{
 			Code:           "mod_export_import",
 			Enabled:        true,
@@ -225,6 +233,9 @@ func DefaultTaskConfigs() []config.NATSTaskConfig {
 }
 
 func NormalizeConfig(cfg config.NATSConfig) config.NATSConfig {
+	// All business producers commit their dispatch intent in PostgreSQL.
+	// Older settings and clients may still supply this formerly editable field.
+	cfg.OutboxEnabled = true
 	cfg.URL = strings.TrimSpace(cfg.URL)
 	if cfg.URL == "" {
 		cfg.URL = nats.DefaultURL
@@ -327,12 +338,10 @@ func (c *Client) reconfigureLocked(cfg config.NATSConfig, persist func(config.NA
 		nextConn, connectErr = c.connect(cfg)
 	}
 	var nextJetStream nats.JetStreamContext
-	cleanupJetStream := func() error { return nil }
 	if connectErr == nil && nextConn != nil && cfg.JetStream.Enabled {
-		nextJetStream, cleanupJetStream, connectErr = initializeJetStream(nextConn, cfg)
+		nextJetStream, connectErr = initializeJetStream(nextConn, cfg)
 	}
 	if connectErr != nil {
-		connectErr = errors.Join(connectErr, cleanupJetStream())
 		if nextConn != nil {
 			nextConn.Close()
 		}
@@ -354,11 +363,10 @@ func (c *Client) reconfigureLocked(cfg config.NATSConfig, persist func(config.NA
 	gate := newActivationGate()
 	discard := func(cause error) error {
 		close(gate.canceled)
-		cleanupErr := cleanupJetStream()
 		if nextConn != nil {
 			nextConn.Close()
 		}
-		return errors.Join(cause, cleanupErr)
+		return cause
 	}
 	liveTasks := make(map[string]struct{}, len(definitions))
 	liveBroadcasts := make(map[string]struct{}, len(broadcastDefinitions))
@@ -399,6 +407,7 @@ func (c *Client) reconfigureLocked(cfg config.NATSConfig, persist func(config.NA
 	c.mu.Lock()
 	previousConn := c.conn
 	c.cfg = cfg
+	c.notifyCapacityLocked()
 	c.conn = nextConn
 	c.jetStream = nextJetStream
 	c.generation = nextGeneration
@@ -507,8 +516,14 @@ func (c *Client) PublishEvent(ctx context.Context, taskCode, eventID string, raw
 	conn, cfg, js := c.conn, c.cfg, c.jetStream
 	task, exists := findTask(cfg.Tasks, taskCode)
 	c.mu.RUnlock()
-	if !exists || !task.Enabled {
+	if !exists {
+		return errors.New("unknown outbox task code")
+	}
+	if !task.Enabled {
 		return ErrTaskDisabled
+	}
+	if js == nil {
+		return errDeliveryModeChanged
 	}
 	if conn == nil || !conn.IsConnected() {
 		return ErrUnavailable
@@ -516,18 +531,15 @@ func (c *Client) PublishEvent(ctx context.Context, taskCode, eventID string, raw
 	if strings.TrimSpace(eventID) == "" {
 		return errors.New("event ID is required")
 	}
-	if js != nil {
-		message := nats.NewMsg(fullSubject(cfg.SubjectPrefix, task.Subject))
-		message.Data = raw
-		message.Header.Set(nats.MsgIdHdr, eventID)
-		message.Header.Set("MCMods-Event-ID", eventID)
-		publishCtx, cancel := context.WithTimeout(ctx, cfg.JetStream.PublishTimeout)
-		defer cancel()
-		_, err := js.PublishMsg(message, nats.Context(publishCtx))
-		c.setLastError(err)
-		return err
-	}
-	return c.publishRaw(ctx, conn, cfg, task, eventID, raw)
+	message := nats.NewMsg(fullSubject(cfg.SubjectPrefix, task.Subject))
+	message.Data = raw
+	message.Header.Set(nats.MsgIdHdr, eventID)
+	message.Header.Set("MCMods-Event-ID", eventID)
+	publishCtx, cancel := context.WithTimeout(ctx, cfg.JetStream.PublishTimeout)
+	defer cancel()
+	_, err := js.PublishMsg(message, nats.Context(publishCtx))
+	c.setLastError(err)
+	return err
 }
 
 // HandleLocally is the reliable no-JetStream fallback used by the PostgreSQL
@@ -539,17 +551,28 @@ func (c *Client) HandleLocally(ctx context.Context, taskCode, eventID string, ra
 	}
 	c.mu.RLock()
 	definition, ok := c.subscriptions[cleanTaskCode(taskCode)]
-	closed := c.closed
+	closed, js := c.closed, c.jetStream
+	task, exists := findTask(c.cfg.Tasks, taskCode)
 	c.mu.RUnlock()
-	if closed || !ok {
+	if closed {
+		return ErrUnavailable
+	}
+	if exists && !task.Enabled {
+		return ErrTaskDisabled
+	}
+	if js != nil {
+		return errDeliveryModeChanged
+	}
+	if !ok || !exists {
 		return ErrUnavailable
 	}
 	payload, envelope, err := UnwrapEvent(raw)
 	if err != nil {
 		return err
 	}
-	eventID = envelope.EventID
-	return definition.handler(WithEventID(ctx, eventID), payload)
+	return c.RunTask(WithEventID(ctx, envelope.EventID), taskCode, func(work context.Context) error {
+		return definition.handler(work, payload)
+	})
 }
 
 func (c *Client) PublishBroadcast(ctx context.Context, subject string, payload any) error {
@@ -628,7 +651,7 @@ func (c *Client) subscribeBroadcastOn(conn *nats.Conn, cfg config.NATSConfig, de
 		if !gate.wait() || !c.isGenerationActive(generation) {
 			return
 		}
-		definition.handler(context.Background(), message.Subject, message.Data)
+		definition.handler(c.ctx, message.Subject, message.Data)
 	})
 	if err == nil {
 		err = conn.FlushTimeout(3 * time.Second)
@@ -640,21 +663,6 @@ func (c *Client) subscribeBroadcastOn(conn *nats.Conn, cfg config.NATSConfig, de
 		err = conn.LastError()
 	}
 	return err
-}
-
-func (c *Client) publishRaw(ctx context.Context, conn *nats.Conn, cfg config.NATSConfig, task config.NATSTaskConfig, eventID string, raw []byte) error {
-	message := nats.NewMsg(fullSubject(cfg.SubjectPrefix, task.Subject))
-	message.Data = raw
-	message.Header.Set("MCMods-Event-ID", eventID)
-	done := make(chan error, 1)
-	go func() { done <- conn.PublishMsg(message) }()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-done:
-		c.setLastError(err)
-		return err
-	}
 }
 
 func (c *Client) SubscribeTask(taskCode string, handler taskHandler) error {
@@ -697,155 +705,6 @@ func (c *Client) SubscribeTask(taskCode string, handler taskHandler) error {
 	}
 	c.mu.Unlock()
 	return err
-}
-
-func (c *Client) subscribeTaskOn(conn *nats.Conn, js nats.JetStreamContext, cfg config.NATSConfig, definition subscriptionDefinition, generation uint64, gate *activationGate) error {
-	task, exists := findTask(cfg.Tasks, definition.taskCode)
-	if !exists || !task.Enabled {
-		return ErrTaskDisabled
-	}
-	if conn == nil || !conn.IsConnected() {
-		return ErrUnavailable
-	}
-	sem := make(chan struct{}, task.MaxConcurrent)
-	handle := func(msg *nats.Msg) {
-		sem <- struct{}{}
-		go func() {
-			defer func() { <-sem }()
-			if !gate.wait() || !c.isGenerationActive(generation) {
-				if js != nil {
-					_ = msg.Nak()
-				}
-				return
-			}
-			ctx, cancel := context.WithTimeout(c.ctx, time.Duration(task.TimeoutSeconds)*time.Second)
-			defer cancel()
-			payload, envelope, handleErr := UnwrapEvent(msg.Data)
-			eventID := msg.Header.Get("MCMods-Event-ID")
-			if envelope != nil {
-				eventID = envelope.EventID
-			}
-			ctx = WithEventID(ctx, eventID)
-			if handleErr == nil {
-				handleErr = definition.handler(ctx, payload)
-			}
-			if handleErr != nil {
-				c.setGenerationError(generation, handleErr)
-				if js != nil {
-					metadata, _ := msg.Metadata()
-					if metadata != nil && int(metadata.NumDelivered) >= cfg.JetStream.MaxDeliver {
-						if eventID == "" {
-							eventID = cfg.JetStream.Stream + ":" + strconv.FormatUint(metadata.Sequence.Stream, 10)
-						}
-						eventType := definition.taskCode + ".failed"
-						if envelope != nil && envelope.EventType != "" {
-							eventType = envelope.EventType
-						}
-						aggregateType, aggregateID := "", ""
-						if envelope != nil {
-							aggregateType, aggregateID = envelope.AggregateType, envelope.AggregateID
-						}
-						letter := DeadLetter{
-							EventID: eventID, EventType: eventType, TaskCode: definition.taskCode,
-							FailureStage: "consumer:" + definition.taskCode, LastError: redactDiagnostic(handleErr.Error(), cfg),
-							AggregateType: aggregateType, AggregateID: aggregateID,
-							Payload: msg.Data, Attempts: int(metadata.NumDelivered),
-						}
-						// Persist to JetStream before terminating the exhausted task.
-						// Database recovery has its own consumer and never reruns the
-						// task handler (which may already have incurred provider fees).
-						if err := c.publishDeadLetter(js, cfg, letter); err != nil {
-							c.setGenerationError(generation, err)
-							return
-						}
-						if err := msg.Term(); err != nil {
-							c.setGenerationError(generation, err)
-						}
-					} else {
-						_ = msg.Nak()
-					}
-				}
-				return
-			}
-			if js != nil {
-				_ = msg.Ack()
-			}
-		}()
-	}
-	var err error
-	if js != nil {
-		durable := cleanDurable(task.QueueGroup)
-		_, err = js.QueueSubscribe(fullSubject(cfg.SubjectPrefix, task.Subject), task.QueueGroup, handle,
-			nats.Durable(durable), nats.ManualAck(), nats.AckExplicit(), nats.AckWait(cfg.JetStream.AckWait),
-			nats.MaxDeliver(cfg.JetStream.MaxDeliver), nats.BackOff(jetStreamBackoff(cfg.JetStream.AckWait, cfg.JetStream.MaxDeliver)),
-			nats.BindStream(cfg.JetStream.Stream))
-	} else {
-		_, err = conn.QueueSubscribe(fullSubject(cfg.SubjectPrefix, task.Subject), task.QueueGroup, handle)
-	}
-	if err != nil {
-		return err
-	}
-	if err := conn.FlushTimeout(3 * time.Second); err != nil {
-		return err
-	}
-	return conn.LastError()
-}
-
-func jetStreamBackoff(initial time.Duration, maxDeliver int) []time.Duration {
-	if initial <= 0 {
-		initial = time.Second
-	}
-	if maxDeliver < 1 {
-		maxDeliver = 1
-	}
-	const maximum = 30 * time.Minute
-	result := make([]time.Duration, maxDeliver)
-	delay := initial
-	for index := range result {
-		result[index] = delay
-		if delay >= maximum {
-			delay = maximum
-		} else if delay > maximum/2 {
-			delay = maximum
-		} else {
-			delay *= 2
-		}
-	}
-	return result
-}
-
-func initializeJetStream(conn *nats.Conn, cfg config.NATSConfig) (nats.JetStreamContext, func() error, error) {
-	js, err := conn.JetStream()
-	if err != nil {
-		return nil, func() error { return nil }, err
-	}
-	subject := fullSubject(cfg.SubjectPrefix, ">")
-	streamCfg := &nats.StreamConfig{Name: cfg.JetStream.Stream, Subjects: []string{subject}, Retention: nats.LimitsPolicy, Storage: nats.FileStorage, Duplicates: 10 * time.Minute}
-	var info *nats.StreamInfo
-	if info, err = js.StreamInfo(cfg.JetStream.Stream); errors.Is(err, nats.ErrStreamNotFound) {
-		_, err = js.AddStream(streamCfg)
-		if err != nil {
-			return nil, func() error { return nil }, err
-		}
-		cleanup := func() error { return js.DeleteStream(cfg.JetStream.Stream) }
-		return js, cleanup, nil
-	}
-	if err != nil {
-		return nil, func() error { return nil }, err
-	}
-	if !streamCoversSubject(info.Config.Subjects, subject) {
-		return nil, func() error { return nil }, errors.New("existing JetStream stream does not cover the configured NATS subject prefix")
-	}
-	return js, func() error { return nil }, nil
-}
-
-func streamCoversSubject(subjects []string, required string) bool {
-	for _, subject := range subjects {
-		if subject == required {
-			return true
-		}
-	}
-	return false
 }
 
 func randomEventID() string {

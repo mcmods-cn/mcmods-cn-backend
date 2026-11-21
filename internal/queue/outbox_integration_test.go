@@ -74,7 +74,7 @@ func TestTransactionalOutboxRollbackAndDispatchIntegration(t *testing.T) {
 	if err = tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	dispatcher := NewOutboxDispatcher(pool, client, true)
+	dispatcher := NewOutboxDispatcher(pool, client)
 	if count, dispatchErr := dispatcher.DispatchBatch(ctx, 16); dispatchErr != nil || count < 1 {
 		t.Fatalf("dispatch count=%d err=%v", count, dispatchErr)
 	}
@@ -149,7 +149,7 @@ func TestOutboxRetriesAfterJetStreamDisconnectIntegration(t *testing.T) {
 	}
 	harness.stop()
 	waitForNATSStatus(t, client, false)
-	dispatcher := NewOutboxDispatcher(pool, client, true)
+	dispatcher := NewOutboxDispatcher(pool, client)
 	if count, dispatchErr := dispatcher.DispatchBatch(ctx, 1); dispatchErr != nil || count != 1 {
 		t.Fatalf("disconnect dispatch result=%d/%v", count, dispatchErr)
 	}

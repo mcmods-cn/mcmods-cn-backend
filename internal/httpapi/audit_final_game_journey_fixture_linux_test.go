@@ -306,7 +306,7 @@ func TestAuditFinalGameJourneyFixture(t *testing.T) {
 	}
 	NewOSSRehomeWorker(cfg, db).Start(journeyCtx)
 	NewOSSDeletionWorker(cfg, db).Start(journeyCtx)
-	dispatcher := queue.NewOutboxDispatcher(db, q, true)
+	dispatcher := queue.NewOutboxDispatcher(db, q)
 	dispatcher.Start(journeyCtx)
 	observer, err := nats.Connect(broker.ClientURL())
 	if err != nil {

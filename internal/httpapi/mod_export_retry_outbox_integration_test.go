@@ -64,7 +64,7 @@ func TestModExportWorkerHasNoCoreNATSOrGoroutineTaskPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(runtimeSource), "queue.NewOutboxDispatcher(db, queueClient, true)") {
+	if !strings.Contains(string(runtimeSource), "queue.NewOutboxDispatcher(db, queueClient)") {
 		t.Fatal("application runtime can still disable the PostgreSQL outbox dispatcher")
 	}
 }

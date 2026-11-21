@@ -100,9 +100,6 @@ func (worker *FavoriteModpackExportWorker) Start(ctx context.Context) error {
 		subscribeErr = worker.queue.SubscribeTask(favoriteModpackExportTaskCode, worker.handle)
 	}
 	go worker.scan(ctx)
-	if worker.server.cfg.NATS.OutboxEnabled {
-		return nil
-	}
 	return subscribeErr
 }
 
@@ -158,7 +155,13 @@ func (worker *FavoriteModpackExportWorker) processPending(ctx context.Context) e
 	}
 	rows.Close()
 	for _, id := range ids {
-		if err = worker.process(ctx, id); err != nil {
+		err = runDatabaseRecoveryTask(ctx, worker.queue, favoriteModpackExportTaskCode, func(work context.Context) error {
+			return worker.process(work, id)
+		})
+		if errors.Is(err, queue.ErrTaskDisabled) {
+			break
+		}
+		if err != nil {
 			scanErrors = append(scanErrors, fmt.Errorf("process favorite export %s: %w", id, err))
 		}
 	}

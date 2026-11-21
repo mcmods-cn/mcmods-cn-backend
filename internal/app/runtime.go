@@ -23,6 +23,7 @@ type applicationRuntime struct {
 	db         *pgxpool.Pool
 	activityDB *pgxpool.Pool
 	queue      *queue.Client
+	outboxDone <-chan struct{}
 	activity   *activity.Monitor
 	search     *searchindex.Client
 	cache      *querycache.Cache
@@ -120,6 +121,11 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	if err = database.SeedRBAC(ctx, db); err != nil {
 		return nil, databaseInitializationError("seed permissions", err)
 	}
+	natsCfg, err := database.LoadNATSConfig(ctx, db, cfg.NATS, cfg.SettingsEncryptionKey)
+	if err != nil {
+		return nil, &runtimeInitializationError{Component: "nats", Code: "nats_configuration_unavailable",
+			PublicMessage: "queue settings are unavailable", Err: err}
+	}
 	activityDB, err = database.ConnectActivity(ctx, cfg)
 	if err != nil {
 		return nil, &runtimeInitializationError{
@@ -164,11 +170,6 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 		RetryMaxDelay: cfg.Activity.RetryMaxDelay, WriteTimeout: cfg.Activity.WriteTimeout,
 		DurableEnqueueTimeout: cfg.Activity.DurableEnqueueTimeout,
 	})
-	natsCfg, loadErr := database.LoadNATSConfig(ctx, db, cfg.NATS, cfg.SettingsEncryptionKey)
-	if loadErr != nil {
-		log.Printf("load NATS config: %v", loadErr)
-		natsCfg = cfg.NATS
-	}
 	queueClient := queue.New(ctx, natsCfg)
 	queueClient.SetDeadLetterSink(queue.NewPostgresDeadLetterSink(db))
 	aiWorker := httpapi.NewAIWorker(db, queueClient, cfg.SettingsEncryptionKey)
@@ -203,13 +204,13 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	if err = projectUpdateWorker.Start(ctx); err != nil {
 		log.Printf("project update notification queue unavailable; database scanner remains enabled: %v", err)
 	}
-	outboxDispatcher := queue.NewOutboxDispatcher(db, queueClient, true)
-	outboxDispatcher.Start(ctx)
+	outboxDispatcher := queue.NewOutboxDispatcher(db, queueClient)
+	outboxDone := outboxDispatcher.Start(ctx)
 	searchClient := searchindex.New(cfg.Typesense)
 	searchindex.NewWorker(db, searchClient).Start(ctx)
 
 	initialized = true
-	return &applicationRuntime{db: db, activityDB: activityDB, queue: queueClient, activity: activityMonitor, search: searchClient, cache: sharedCache}, nil
+	return &applicationRuntime{db: db, activityDB: activityDB, queue: queueClient, outboxDone: outboxDone, activity: activityMonitor, search: searchClient, cache: sharedCache}, nil
 }
 
 func databaseInitializationError(action string, err error) error {
@@ -301,6 +302,13 @@ func (runtime *applicationRuntime) close() {
 	}
 	if runtime.queue != nil {
 		runtime.queue.Close()
+	}
+	if runtime.outboxDone != nil {
+		select {
+		case <-runtime.outboxDone:
+		case <-shutdownCtx.Done():
+			log.Printf("outbox dispatcher shutdown: %v", shutdownCtx.Err())
+		}
 	}
 	if runtime.cache != nil {
 		runtime.cache.Close()

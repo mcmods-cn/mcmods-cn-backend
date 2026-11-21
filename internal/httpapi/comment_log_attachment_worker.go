@@ -261,8 +261,14 @@ func (worker *CommentLogAttachmentWorker) recoverDueJobs(ctx context.Context) (i
 		return 0, err
 	}
 	var recoveryErr error
-	for _, jobID := range jobIDs {
-		if err = worker.processJob(ctx, jobID); err != nil {
+	for i, jobID := range jobIDs {
+		err = runDatabaseRecoveryTask(ctx, worker.queue, "comment_log_attachment", func(work context.Context) error {
+			return worker.processJob(work, jobID)
+		})
+		if errors.Is(err, queue.ErrTaskDisabled) {
+			return i, recoveryErr
+		}
+		if err != nil {
 			recoveryErr = errors.Join(recoveryErr, fmt.Errorf("process comment log attachment job %d: %w", jobID, err))
 		}
 	}

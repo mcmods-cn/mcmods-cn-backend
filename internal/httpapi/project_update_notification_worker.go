@@ -82,10 +82,19 @@ func (worker *ProjectUpdateNotificationWorker) processPending(ctx context.Contex
 		return err
 	}
 	for _, id := range ids {
-		if err = worker.process(ctx, id); err != nil {
-			if retryErr := worker.retry(ctx, id, err); retryErr != nil {
-				return errors.Join(err, retryErr)
+		err = runDatabaseRecoveryTask(ctx, worker.queue, projectUpdateNotificationTaskCode, func(work context.Context) error {
+			if runErr := worker.process(work, id); runErr != nil {
+				if retryErr := worker.retry(ctx, id, runErr); retryErr != nil {
+					return errors.Join(runErr, retryErr)
+				}
 			}
+			return nil
+		})
+		if errors.Is(err, queue.ErrTaskDisabled) {
+			break
+		}
+		if err != nil {
+			return err
 		}
 	}
 	return nil

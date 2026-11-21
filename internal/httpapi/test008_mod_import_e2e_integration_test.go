@@ -161,7 +161,7 @@ func TestTEST008EmbeddedCatalogHTTPOutboxOSSWorkerLifecycleIntegration(t *testin
 	}
 	// Exercise the actual PostgreSQL dispatcher using its supported bounded
 	// local delivery path. JetStream transport has separate queue tests.
-	dispatcher := queue.NewOutboxDispatcher(pool, queueClient, true)
+	dispatcher := queue.NewOutboxDispatcher(pool, queueClient)
 	if count, dispatchErr := dispatcher.DispatchBatch(ctx, 1); dispatchErr != nil || count != 1 || dispatcher.Metrics().Published != 1 {
 		t.Fatalf("dispatch count=%d metrics=%+v error=%v", count, dispatcher.Metrics(), dispatchErr)
 	}

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -31,15 +32,20 @@ func (s *Server) infrastructureMetrics(w http.ResponseWriter, r *http.Request) {
 	realtimeRejected, realtimeDropped := s.realtime.deliveryStats()
 	queueStatus := s.queue.Status()
 	realtimeHealth := s.realtimeHealth(queueStatus)
+	pool := s.db.Stat()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"health":           map[string]any{"liveRequests": s.liveRequests.Load(), "readyRequests": s.readyRequests.Load(), "databasePings": s.databasePings.Load()},
 		"securityVersions": map[string]any{"refreshFailures": s.securityVersionRefreshFailures.Load()},
 		"redis":            s.cache.Metrics(),
 		"accessLogs":       s.accessLogs.Metrics(),
 		"antiAbuse":        s.antiAbuse.AsyncMetrics(),
-		"queue":            map[string]any{"enabled": queueStatus.Enabled, "connected": queueStatus.Connected, "jetStream": queueStatus.JetStream},
+		"queue": map[string]any{"enabled": queueStatus.Enabled, "connected": queueStatus.Connected, "jetStream": queueStatus.JetStream,
+			"stream": s.queue.StreamUsage(r.Context()), "taskRuns": s.queue.TaskRuns()},
+		"process": map[string]any{"goroutines": runtime.NumGoroutine(), "dbAcquired": pool.AcquiredConns(),
+			"dbTotal": pool.TotalConns(), "dbMax": pool.MaxConns()},
 		"outbox": map[string]any{
 			"pending": durable.PendingOutbox, "oldestSeconds": durable.OldestSeconds, "deadLetters": durable.DeadLetters,
+			"publishing": durable.Publishing, "awaitingRetry": durable.AwaitingRetry,
 		},
 		"ossDeletion":                map[string]any{"dead": durable.OSSDeletionDead},
 		"ossRehome":                  map[string]any{"dead": durable.OSSRehomeDead},
@@ -58,6 +64,8 @@ func (s *Server) infrastructureMetrics(w http.ResponseWriter, r *http.Request) {
 
 type infrastructureDurableMetrics struct {
 	PendingOutbox    int64
+	Publishing       int64
+	AwaitingRetry    int64
 	OldestSeconds    float64
 	DeadLetters      int64
 	OSSDeletionDead  int64
@@ -68,13 +76,14 @@ type infrastructureDurableMetrics struct {
 func (s *Server) loadInfrastructureDurableMetrics(ctx context.Context) (infrastructureDurableMetrics, error) {
 	var metrics infrastructureDurableMetrics
 	err := s.db.QueryRow(ctx, `select
-		(select count(*) from nats_outbox where published_at is null and status in ('pending','failed','publishing')),
-		coalesce((select extract(epoch from now()-min(created_at)) from nats_outbox where published_at is null and status in ('pending','failed','publishing')),0),
+		count(*),count(*) filter(where status='publishing'),count(*) filter(where status='failed'),
+		coalesce(extract(epoch from now()-min(created_at)),0),
 		(select count(*) from dead_letter_events where replayed_at is null),
 		(select count(*) from oss_object_deletion_outbox where status='dead'),
 		(select count(*) from oss_rehome_jobs where status='dead'),
-		(select count(*) from oss_multipart_sessions where status='dead')`).
-		Scan(&metrics.PendingOutbox, &metrics.OldestSeconds, &metrics.DeadLetters, &metrics.OSSDeletionDead, &metrics.OSSRehomeDead, &metrics.OSSMultipartDead)
+		(select count(*) from oss_multipart_sessions where status='dead')
+		from nats_outbox where published_at is null and status in ('pending','failed','publishing')`).
+		Scan(&metrics.PendingOutbox, &metrics.Publishing, &metrics.AwaitingRetry, &metrics.OldestSeconds, &metrics.DeadLetters, &metrics.OSSDeletionDead, &metrics.OSSRehomeDead, &metrics.OSSMultipartDead)
 	if err != nil {
 		return infrastructureDurableMetrics{}, fmt.Errorf("query durable infrastructure metrics: %w", err)
 	}

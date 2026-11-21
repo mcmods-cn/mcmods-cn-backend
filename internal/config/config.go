@@ -284,7 +284,7 @@ func Load() Config {
 			Password:      os.Getenv("NATS_PASSWORD"),
 			Token:         os.Getenv("NATS_TOKEN"),
 			SubjectPrefix: getenv("NATS_SUBJECT_PREFIX", "mcmods"),
-			OutboxEnabled: getenvBool("NATS_OUTBOX_ENABLED", true),
+			OutboxEnabled: true,
 			Realtime:      getenvBool("REALTIME_ENABLED", true),
 			JetStream: JetStreamConfig{
 				Enabled:        getenvBool("NATS_JETSTREAM_ENABLED", true),

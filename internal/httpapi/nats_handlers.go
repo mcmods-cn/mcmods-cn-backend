@@ -59,7 +59,7 @@ type natsConfigUpdateRequest struct {
 
 func (payload natsConfigUpdateRequest) config(current config.NATSConfig) (config.NATSConfig, error) {
 	if payload.Enabled == nil || payload.URL == nil || payload.Username == nil || payload.SubjectPrefix == nil ||
-		payload.Tasks == nil || payload.OutboxEnabled == nil || payload.Realtime == nil || payload.JetStream == nil ||
+		payload.Tasks == nil || payload.Realtime == nil || payload.JetStream == nil ||
 		payload.JetStream.Enabled == nil || payload.JetStream.Stream == nil || payload.JetStream.MaxDeliver == nil ||
 		payload.JetStream.AckWaitSeconds == nil || payload.JetStream.PublishTimeoutSeconds == nil {
 		return config.NATSConfig{}, errors.New("complete NATS configuration is required")
@@ -103,7 +103,7 @@ func (payload natsConfigUpdateRequest) config(current config.NATSConfig) (config
 		Token:         token,
 		SubjectPrefix: *payload.SubjectPrefix,
 		Tasks:         append([]config.NATSTaskConfig(nil), (*payload.Tasks)...),
-		OutboxEnabled: *payload.OutboxEnabled,
+		OutboxEnabled: true,
 		Realtime:      *payload.Realtime,
 		JetStream: config.JetStreamConfig{
 			Enabled:        *payload.JetStream.Enabled,

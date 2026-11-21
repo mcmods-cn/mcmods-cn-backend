@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/queue"
 )
 
 func TestCommentLogAttachmentJobsRollbackRetryAndRecoverIntegration(t *testing.T) {
@@ -209,6 +210,19 @@ func TestCommentLogAttachmentJobsRollbackRetryAndRecoverIntegration(t *testing.T
 	var restartJobID int64
 	if err = pool.QueryRow(ctx, `update comment_log_attachment_jobs set status='processing',attempts=1,
 		locked_by='crashed-worker',lease_expires_at=now()-interval '1 second' where comment_id=822 returning id`).Scan(&restartJobID); err != nil {
+		t.Fatal(err)
+	}
+	policy := config.NATSConfig{Tasks: []config.NATSTaskConfig{{Code: "comment_log_attachment", Enabled: false}}}
+	worker.queue = queue.New(ctx, policy)
+	defer worker.queue.Close()
+	if n, err := worker.recoverDueJobs(ctx); err != nil || n != 0 {
+		t.Fatalf("paused recovery started work: %d/%v", n, err)
+	}
+	if err := pool.QueryRow(ctx, `select attempts from comment_log_attachment_jobs where id=$1`, restartJobID).Scan(&attempts); err != nil || attempts != 1 {
+		t.Fatalf("paused recovery consumed an attempt: %d/%v", attempts, err)
+	}
+	policy.Tasks[0].Enabled = true
+	if err := worker.queue.Reconfigure(policy); err != nil {
 		t.Fatal(err)
 	}
 	recovered, recoveryErr := worker.recoverDueJobs(ctx)

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -105,7 +104,7 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 		}
 	}
 	t.Run("every reliability field is mandatory", func(t *testing.T) {
-		for _, field := range []string{"enabled", "url", "username", "subjectPrefix", "tasks", "outboxEnabled", "realtime", "jetStream"} {
+		for _, field := range []string{"enabled", "url", "username", "subjectPrefix", "tasks", "realtime", "jetStream"} {
 			raw, _ := json.Marshal(request)
 			var payload map[string]any
 			if err := json.Unmarshal(raw, &payload); err != nil {
@@ -188,8 +187,8 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err = js.StreamInfo("TEST027_DISCARDED"); !errors.Is(err, nats.ErrStreamNotFound) {
-			t.Fatalf("discarded candidate stream lookup error=%v, want StreamNotFound", err)
+		if _, err = js.StreamInfo("TEST027_DISCARDED"); err != nil {
+			t.Fatalf("rejected candidate lost its shareable stream: %v", err)
 		}
 		assertDelivery(t, "after-persistence-failure")
 		put(t, candidate, http.StatusOK)
@@ -241,7 +240,7 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 		disabled.ClearPassword, disabled.ClearToken, disabled.Token = true, true, nil
 		put(t, disabled, http.StatusOK)
 		loaded, err = database.LoadNATSConfig(ctx, pool, cfg.NATS, cfg.SettingsEncryptionKey)
-		if err != nil || loaded.Enabled || loaded.OutboxEnabled || loaded.Realtime || loaded.JetStream.Enabled || loaded.Password != "" || loaded.Token != "" || queueClient.Status().Connected {
+		if err != nil || loaded.Enabled || !loaded.OutboxEnabled || loaded.Realtime || loaded.JetStream.Enabled || loaded.Password != "" || loaded.Token != "" || queueClient.Status().Connected {
 			t.Fatalf("stored false/cleared secrets resurrected process fallback: err=%v", err)
 		}
 		body := get(t, token, http.StatusOK)

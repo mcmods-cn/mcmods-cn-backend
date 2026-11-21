@@ -35,7 +35,7 @@ func TestInfrastructureDurableMetricsFailInsteadOfReportingZeroIntegration(t *te
 		create temp table oss_object_deletion_outbox(status text not null);
 		create temp table oss_rehome_jobs(status text not null);
 		create temp table oss_multipart_sessions(status text not null);
-		insert into nats_outbox values(null,'pending',now()-interval '2 minutes'),(now(),'published',now()-interval '1 day');
+		insert into nats_outbox values(null,'pending',now()-interval '2 minutes'),(null,'failed',now()),(null,'publishing',now()),(now(),'published',now()-interval '1 day');
 		insert into dead_letter_events values(null),(now());
 		insert into oss_object_deletion_outbox values('dead'),('completed');
 		insert into oss_rehome_jobs values('dead'),('dead'),('completed');
@@ -47,7 +47,7 @@ func TestInfrastructureDurableMetricsFailInsteadOfReportingZeroIntegration(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metrics.PendingOutbox != 1 || metrics.OldestSeconds < 60 || metrics.DeadLetters != 1 ||
+	if metrics.PendingOutbox != 3 || metrics.AwaitingRetry != 1 || metrics.Publishing != 1 || metrics.OldestSeconds < 60 || metrics.DeadLetters != 1 ||
 		metrics.OSSDeletionDead != 1 || metrics.OSSRehomeDead != 2 || metrics.OSSMultipartDead != 3 {
 		t.Fatalf("unexpected durable metrics: %#v", metrics)
 	}

@@ -275,7 +275,7 @@ func TestAuditLiveTP008WorkerTransportFixture(t *testing.T) {
 	if err = NewProjectUpdateNotificationWorker(db, q, api.cache).Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	dispatcher := queue.NewOutboxDispatcher(db, q, true)
+	dispatcher := queue.NewOutboxDispatcher(db, q)
 	dispatcher.Start(ctx)
 	observer, err = nats.Connect(broker.ClientURL())
 	if err != nil {
