@@ -23,7 +23,7 @@ APP_ADDR=127.0.0.1:8081 FRONTEND_ORIGIN=http://127.0.0.1:3001 go run .
 | --- | --- |
 | 新增页面所需的 API | 在 `internal/httpapi/server.go` 找邻近路由和鉴权入口，依业务 ID 在事务内校验对象范围，复用对应领域的 DTO、持久化函数、响应格式与前端 `app/_lib` 客户端。 |
 | 增加一种目录资料或导入数据 | 对照 exporter 的 schema、真实包与 `catalog_import_*` 领域。将源观察与可编辑的站内定义分开，在相应业务层处理来源、版本、审核和派生呈现。[资料链与权限地图](docs/system-map.md) |
-| 增加后台任务 | 查 `internal/queue/events.go`、`internal/queue/nats.go`、`internal/config` 与 `internal/app/runtime.go`，随业务事务写入 `queue.EnqueueTx`，在消费端校验当前权限、状态和幂等键。先复用已有任务、恢复入口和指标。[任务配置](docs/task-configuration.md) · [恢复](docs/queue-recovery.md) |
+| 增加后台任务 | 查 `internal/queue/events.go`、`internal/queue/nats.go`、`internal/config` 与 `internal/app/runtime.go`，随业务事务写入 `queue.EnqueueTx`，在消费端校验当前权限、状态和幂等键。先复用已有任务、恢复入口和指标。[事件与发件箱](OUTBOX_JETSTREAM_DESIGN.md) · [恢复](docs/queue-recovery.md) |
 | 修改公开目录或缓存 | 在发布事务中更新 `catalog_dataset_state`，读取使用 `internal/catalogvisibility` 及 `writeCachedCatalog`。认证和用户私有数据走独立路径。[公开目录](docs/public-catalog-source-policy.md) · [缓存键](CACHE_KEYS_AND_INVALIDATION.md) |
 | 修改文件处理 | `internal/httpapi/oss_upload_byte_binding*.go` 处理拥有者、真实字节与完成语义。`oss_deletion_outbox.go` 负责登记删除和重试。导入原件、站内衍生媒体与公开文件有各自的读取条件。[字节绑定](docs/audit-oss-byte-binding-upgrade.md) · [存储布局](docs/oss-object-layout.md) |
 

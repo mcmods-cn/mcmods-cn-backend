@@ -263,7 +263,7 @@ func Migrate(ctx context.Context, db *pgxpool.Pool) error {
 		return fmt.Errorf("read schema generation: %w", err)
 	}
 	if currentGeneration != 0 && currentGeneration != schemaGeneration {
-		return fmt.Errorf("database schema generation %d is incompatible with generation %d; reset the development database", currentGeneration, schemaGeneration)
+		return fmt.Errorf("database schema generation %d is incompatible with generation %d. Use a matching release or a verified migration for this database", currentGeneration, schemaGeneration)
 	}
 	if currentGeneration == schemaGeneration {
 		if err = requireLogRedactionSchema(ctx, conn); err != nil {
