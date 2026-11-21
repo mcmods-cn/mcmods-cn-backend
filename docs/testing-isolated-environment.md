@@ -101,6 +101,41 @@ npm run test:browser
 Typesense 的真实回环服务是可选的单独测试，见 [搜索投影说明](typesense-search.md)。
 所有这些通过结果都不证明生产数据健康、备份可恢复或真实供应商语义质量。
 
+### 真实游戏包经浏览器和 JetStream 的验证
+
+使用已初始化的隔离环境、干净的三个仓库检出和已安装依赖的独立前端目录。
+后端仓库保留了原始 Fabric 游戏 ZIP 及生产提交记录，位于
+`internal/httpapi/testdata/audit-20261024/`。下列命令在后端根目录运行。
+将两个仓库变量指向本机检出目录，选用空闲的回环前端端口。
+
+```sh
+export MCMODS_AUDIT_FRONTEND_REPO="$(cd ../mcmods-cn-frontend && pwd)"
+export MCMODS_AUDIT_EXPORTER_REPO="$(cd ../mcmods_exporter && pwd)"
+export MCMODS_AUDIT_FRONTEND_ORIGIN=http://127.0.0.1:3341
+export MCMODS_AUDIT_JOURNEY_DIR="$(mktemp -d)"
+export MCMODS_AUDIT_GAME_PACKAGE="$PWD/internal/httpapi/testdata/audit-20261024/auditfixture-minecraft1201-fabric-jei1520-v7.zip"
+MCMODS_RUN_LIVE_GAME_JOURNEY=1 go test -count=1 -timeout=50m -v ./internal/httpapi -run '^TestAuditLiveGameJourneyFixture$'
+```
+
+夹具初始化和释放临时 schema 时用 `flock` 串行化 DDL。默认锁位于当前用户缓存目录
+的 `mcmods-cn/test-locks/postgres-ddl.lock`。多个进程共用测试库时，可给它们
+设置同一个绝对路径 `MCMODS_AUDIT_PG_LOCK`，父目录须已经存在并归本任务管理。
+
+等待日志出现 READY，在另一终端保留上面的目录和前端变量。
+读取 `runtime.json` 中的 `apiOrigin` 与 `ossOrigin` 配置 Next 开发实例，
+分别作为 `NEXT_PUBLIC_API_BASE_URL` 和 `NEXT_PUBLIC_CSP_CONNECT_ORIGINS`。
+`NEXT_PUBLIC_SITE_URL` 使用声明的前端 origin，在该端口启动前端。准备好
+Playwright Chromium 后，在对应前端根目录运行以下命令。
+
+```sh
+MCMODS_AUDIT_JOURNEY_RUNTIME="$MCMODS_AUDIT_JOURNEY_DIR/runtime.json" node --test browser-tests/audit-game-live.mts
+```
+
+检查浏览器报告、图片像素及任务、审核修订、JetStream ACK 状态。完成后
+`touch "$MCMODS_AUDIT_JOURNEY_DIR/STOP"` 并停止本次前端。该夹具使用回环 HTTP、
+真实 PostgreSQL 和文件型 JetStream、合成 OSS。请保管目录中的合成会话文件，
+仅交接脱敏后的结果。测试不会运行新的游戏客户端。
+
 ## 临时 schema 安装回归
 
 `InstallEphemeralSchema` 为每次安装编译函数资格化模式，ASCII 语句通过组合模式单次扫描，

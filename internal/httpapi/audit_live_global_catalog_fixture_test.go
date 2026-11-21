@@ -396,7 +396,23 @@ func auditGlobalCatalogBarrier(ctx context.Context, control, observer *pgxpool.P
 // child exits when its private stdin closes; it never owns the service lifetime.
 func auditGlobalCatalogPGLock(t *testing.T) func() {
 	t.Helper()
-	command := exec.Command("flock", "-x", "/workspace/audit-fixes-20261024/pg-test.lock", "sh", "-c", "printf 'locked\\n'; cat >/dev/null")
+	lockPath := os.Getenv("MCMODS_AUDIT_PG_LOCK")
+	if lockPath == "" {
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			t.Fatalf("locate PostgreSQL fixture lock directory: %v", err)
+		}
+		dir := filepath.Join(cache, "mcmods-cn", "test-locks")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		// A shared default also serializes independent checkouts of the same user.
+		lockPath = filepath.Join(dir, "postgres-ddl.lock")
+	}
+	if !filepath.IsAbs(lockPath) {
+		t.Fatal("MCMODS_AUDIT_PG_LOCK must be an absolute path")
+	}
+	command := exec.Command("flock", "-x", lockPath, "sh", "-c", "printf 'locked\\n'; cat >/dev/null")
 	input, err := command.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -409,7 +425,8 @@ func auditGlobalCatalogPGLock(t *testing.T) func() {
 		t.Fatal(err)
 	}
 	if line, e := bufio.NewReader(output).ReadString('\n'); e != nil || line != "locked\n" {
-		t.Fatal("owned DDL lock handshake failed")
+		_ = input.Close()
+		t.Fatalf("owned DDL lock handshake failed for %s: %v", lockPath, command.Wait())
 	}
 	closed := false
 	return func() {
@@ -421,5 +438,24 @@ func auditGlobalCatalogPGLock(t *testing.T) func() {
 		if err := command.Wait(); err != nil {
 			t.Error("owned DDL lock release failed:", err)
 		}
+	}
+}
+
+func TestCatalogFixtureDDLLockSerializesProcesses(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("requires flock")
+	}
+	path := filepath.Join(t.TempDir(), "postgres-ddl.lock")
+	t.Setenv("MCMODS_AUDIT_PG_LOCK", path)
+	release := auditGlobalCatalogPGLock(t)
+	t.Cleanup(release)
+	try := func() error { return exec.Command("flock", "-n", path, "true").Run() }
+	var busy *exec.ExitError
+	if err := try(); !errors.As(err, &busy) || busy.ExitCode() != 1 {
+		t.Fatalf("another process must see the acquired lock as busy, got %v", err)
+	}
+	release()
+	if err := try(); err != nil {
+		t.Fatalf("acquire released lock from another process: %v", err)
 	}
 }
