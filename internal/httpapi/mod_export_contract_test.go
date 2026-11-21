@@ -2,7 +2,10 @@ package httpapi
 
 import (
 	"archive/zip"
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -43,6 +46,63 @@ func TestExporterSamplePackageContracts(t *testing.T) {
 			}
 			checkExporterSamplePackage(t, files)
 		})
+	}
+}
+
+func TestExportersForSupportedLoadersMatchRecordedPackages(t *testing.T) {
+	const directory = "testdata/game-20261121"
+	raw, err := os.ReadFile(filepath.Join(directory, "provenance.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var provenance struct {
+		Minecraft, Namespace string
+		Samples              []struct {
+			Loader    string
+			ZIPHash   string `json:"zip_sha256"`
+			InputHash string `json:"input_sha256"`
+		}
+	}
+	if err := json.Unmarshal(raw, &provenance); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, sample := range provenance.Samples {
+		if (sample.Loader != "forge" && sample.Loader != "fabric") || seen[sample.Loader] {
+			t.Fatalf("unexpected game sample loader %q", sample.Loader)
+		}
+		seen[sample.Loader] = true
+		t.Run(sample.Loader, func(t *testing.T) {
+			readPinned := func(name, digest string) []byte {
+				t.Helper()
+				data, err := os.ReadFile(filepath.Join(directory, sample.Loader, name))
+				if err != nil || fmt.Sprintf("%x", sha256.Sum256(data)) != digest {
+					t.Fatalf("recorded %s does not match its game provenance: %v", name, err)
+				}
+				return data
+			}
+			readPinned("governancefixture.jar", sample.InputHash)
+			archive := readPinned("export.zip", sample.ZIPHash)
+			reader, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			files, err := validateExportZIP(reader.File)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var manifest modExportManifest
+			if err := json.Unmarshal(auditRecipeScopeRead(t, files, "manifest.json"), &manifest); err != nil {
+				t.Fatal(err)
+			}
+			if manifest.Loader != sample.Loader || manifest.MinecraftVersion != provenance.Minecraft || len(manifest.Configuration.Namespaces) != 1 || manifest.Configuration.Namespaces[0] != provenance.Namespace || manifest.Configuration.AllNamespaces {
+				t.Fatal("recorded game, loader or namespace disagrees with the package")
+			}
+			checkExporterSamplePackage(t, files)
+		})
+	}
+	if len(seen) != 2 {
+		t.Fatal("each supported loader must have a recorded game package")
 	}
 }
 
