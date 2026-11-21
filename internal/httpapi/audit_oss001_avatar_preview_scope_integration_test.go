@@ -39,9 +39,11 @@ func TestAuditOSS001AvatarPreviewRequiresCurrentPurposeOwnerAndMatchingPublicIde
 	auditOSS001PreviewWithinRateWindow(t, f, f.otherEditor, path, map[string]any{"fileId": fileID}, 403)
 	auditOSS001PreviewWithinRateWindow(t, f, f.reviewer, path, map[string]any{"fileId": fileID}, 403)
 	auditOSS001PreviewWithinRateWindow(t, f, f.editor, path, map[string]any{"fileId": otherFile}, 400)
-	if _, err := f.db.Exec(f.ctx, `update user_permissions own set allow=false from permissions definition where own.permission_id=definition.id and own.user_id=$1 and definition.code=$2`, f.userIDs[f.editor], "creator.edit."+id); err != nil {
-		t.Fatal(err)
+	revoke, err := f.db.Exec(f.ctx, `update user_permissions own set allow=false from permissions definition where own.permission_id=definition.id and own.user_id=$1 and definition.code=$2`, f.userIDs[f.editor], "creator.edit."+id)
+	if err != nil || revoke.RowsAffected() != 1 {
+		t.Fatalf("revoke fixture creator permission: rows=%d err=%v", revoke.RowsAffected(), err)
 	}
+	auditOSS001PublishFixturePermissions(t, f, f.editor)
 	auditOSS001PreviewWithinRateWindow(t, f, f.editor, path, map[string]any{"fileId": fileID}, 400)
 	var afterStats, afterOutbox int64
 	if err := f.db.QueryRow(f.ctx, `select coalesce((select downloads from oss_download_stats where object_key=$1),0),(select count(*) from activity_event_outbox)`, key).Scan(&afterStats, &afterOutbox); err != nil || afterStats != beforeStats || afterOutbox != beforeOutbox {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -85,9 +86,19 @@ func auditOSS001CreateReviewedCreator(t *testing.T, f auditFixGRFixture, kind st
 	return auditOSS001CreateReviewedCreatorWithAvatar(t, f, kind, "", "")
 }
 
+// Some avatar scenarios authenticate this actor before seeding a grant or
+// revoking it. Publish the committed versions as updateUserPermissions does.
+func auditOSS001PublishFixturePermissions(t *testing.T, f auditFixGRFixture, actor string) {
+	t.Helper()
+	if err := errors.Join(f.server.refreshPermissionVersion(f.ctx, f.userIDs[actor]), f.server.refreshRBACVersion(f.ctx)); err != nil {
+		t.Fatalf("publish fixture permission versions: %v", err)
+	}
+}
+
 func auditOSS001CreateReviewedCreatorWithAvatar(t *testing.T, f auditFixGRFixture, kind, fileID, stable string) string {
 	t.Helper()
 	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "creator.create")
+	auditOSS001PublishFixturePermissions(t, f, f.editor)
 	created := decodeTEST022Data[struct {
 		PublicID   string `json:"publicId"`
 		RevisionID string `json:"revisionId"`
@@ -102,6 +113,7 @@ func auditOSS001CreateReviewedCreatorWithAvatar(t *testing.T, f auditFixGRFixtur
 		t.Fatal("actual independent review did not publish exact creator", err)
 	}
 	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "creator.edit."+created.PublicID)
+	auditOSS001PublishFixturePermissions(t, f, f.editor)
 	return created.PublicID
 }
 
