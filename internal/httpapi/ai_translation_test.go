@@ -86,3 +86,39 @@ func TestCompletionEndpoint(t *testing.T) {
 		}
 	}
 }
+
+func TestTranslationProviderReceivesOnlyTranslationFields(t *testing.T) {
+	for _, taskType := range []string{aiTaskI18nTranslation, aiTaskPermissionTranslation, aiTaskContentTranslation, aiTaskNotificationTranslation} {
+		t.Run(taskType, func(t *testing.T) {
+			item := map[string]any{"key": "example", "text": "示例 {name}"}
+			if taskType == aiTaskPermissionTranslation {
+				item = map[string]any{"key": "example", "name": "示例", "description": "示例 {name}"}
+			}
+			sourceItem := make(map[string]any, len(item)+1)
+			for key, value := range item {
+				sourceItem[key] = value
+			}
+			sourceItem["editorNote"] = "fixture note"
+			stored, err := json.Marshal(map[string]any{
+				"sourceLocale": "zh-CN", "targetLocale": "en-US", "items": []any{sourceItem},
+				"notificationId": 17, "postInternalId": 31, "targetRevisionId": "old-revision", "quotaBacked": true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			prompt, err := buildTranslationPrompt(taskType, "", stored)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, raw, found := strings.Cut(prompt, " Input JSON: ")
+			var input map[string]any
+			if !found || json.Unmarshal([]byte(raw), &input) != nil {
+				t.Fatal("translation source was not supplied as JSON")
+			}
+			want := map[string]any{"sourceLocale": "zh-CN", "targetLocale": "en-US", "items": []any{item}}
+			if !reflect.DeepEqual(input, want) {
+				t.Errorf("provider input = %#v, want %#v", input, want)
+			}
+		})
+	}
+}

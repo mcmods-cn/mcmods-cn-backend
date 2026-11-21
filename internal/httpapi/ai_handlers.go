@@ -583,7 +583,6 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "创建 AI 任务失败")
 		return
 	}
-	message := aiTaskMessage{TaskID: taskID, TaskUID: taskUID, TaskType: req.TaskType}
 	if err = enqueueAITaskTx(r.Context(), tx, "ai.task.requested", taskID, taskUID, req.TaskType, r.Header.Get("X-Request-ID")); err != nil {
 		writeError(w, http.StatusInternalServerError, "AI 任务可靠入队失败")
 		return
@@ -596,7 +595,7 @@ func (s *Server) createAITask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "创建 AI 任务失败")
 		return
 	}
-	s.writeAITaskLog(r.Context(), taskID, "info", "task_queued", "AI task committed to the reliable outbox", message)
+	s.logQueuedAITask(r.Context(), taskID, taskUID, req.TaskType)
 	writeJSON(w, http.StatusCreated, map[string]any{"id": taskUID, "taskUid": taskUID, "status": "queued"})
 }
 
@@ -683,16 +682,13 @@ func (s *Server) aiConfigFromSettings(ctx context.Context) aiConfigPayload {
 	return payload
 }
 
-func (s *Server) writeAITaskLog(ctx context.Context, taskID int64, level string, event string, message string, payload any) {
-	raw, _ := json.Marshal(payload)
+func (s *Server) logQueuedAITask(ctx context.Context, taskID int64, taskUID, taskType string) {
+	raw, _ := json.Marshal(aiTaskMessage{TaskID: taskID, TaskUID: taskUID, TaskType: taskType})
 	_, _ = s.db.Exec(
 		ctx,
 		`insert into ai_task_logs (task_id, level, event, message, payload)
-		 values ($1, $2, $3, $4, $5::jsonb)`,
+		 values ($1, 'info', 'task_queued', 'AI task committed to the reliable outbox', $2::jsonb)`,
 		taskID,
-		level,
-		event,
-		message,
 		string(raw),
 	)
 }

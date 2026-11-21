@@ -90,6 +90,14 @@ func TestTEST043ContentAIWorkerFailureSuccessAndDuplicateDeliveryIntegration(t *
 
 	failedTaskUID := requestTEST043Translation(t, ctx, translationHandler, token, publicID, http.StatusAccepted)
 	failedTaskID := loadTEST043TaskID(t, ctx, pool, failedTaskUID)
+	var logMatchesTask, sourceRetained bool
+	err = pool.QueryRow(ctx, `select log.payload = jsonb_build_object('taskId', task.id, 'taskUid', task.task_uid, 'taskType', task.task_type),
+		task.payload->'items'->0->>'text' <> '' and task.payload ? 'postInternalId'
+		from ai_tasks task join ai_task_logs log on log.task_id = task.id and log.event = 'task_queued'
+		where task.id = $1`, failedTaskID).Scan(&logMatchesTask, &sourceRetained)
+	if err != nil || !logMatchesTask || !sourceRetained {
+		t.Fatalf("queued log contains task reference=%v, source retained in task=%v, err=%v", logMatchesTask, sourceRetained, err)
+	}
 	worker := NewAIWorker(pool, nil, cfg.SettingsEncryptionKey)
 	failedMessage := marshalTEST043TaskMessage(t, failedTaskID, failedTaskUID)
 	if err = worker.handleTask(ctx, failedMessage); err == nil || !strings.Contains(err.Error(), "HTTP 503") {

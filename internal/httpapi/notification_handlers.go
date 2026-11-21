@@ -351,7 +351,7 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "创建翻译任务失败")
 		return
 	}
-	s.writeAITaskLog(r.Context(), taskID, "info", "task_queued", "Notification translation committed to the reliable outbox", payload)
+	s.logQueuedAITask(r.Context(), taskID, taskUID, aiTaskNotificationTranslation)
 	writeJSON(w, http.StatusAccepted, map[string]any{"cached": false, "taskId": taskUID, "status": "queued"})
 }
 

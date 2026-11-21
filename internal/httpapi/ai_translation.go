@@ -222,23 +222,25 @@ func aiConfigFromDatabase(ctx context.Context, db *pgxpool.Pool, settingsEncrypt
 }
 
 func buildTranslationPrompt(taskType string, customPrompt string, rawPayload []byte) (string, error) {
-	var payload map[string]any
+	var payload struct {
+		SourceLocale string `json:"sourceLocale,omitempty"`
+		TargetLocale string `json:"targetLocale,omitempty"`
+		Items        []any  `json:"items"`
+	}
 	if err := json.Unmarshal(rawPayload, &payload); err != nil {
 		return "", errors.New("AI translation payload is invalid")
 	}
-	items, ok := payload["items"].([]any)
-	if !ok || len(items) == 0 {
+	if len(payload.Items) == 0 {
 		return "", errors.New("AI translation payload has no items")
 	}
-	if len(items) > 100 {
+	if len(payload.Items) > 100 {
 		return "", errors.New("AI translation batch cannot exceed 100 items")
 	}
-	validationItems := make([]any, len(items))
 	fields := []string{"key", "text"}
 	if taskType == aiTaskPermissionTranslation {
 		fields = []string{"key", "name", "description"}
 	}
-	for index, rawItem := range items {
+	for index, rawItem := range payload.Items {
 		item, ok := rawItem.(map[string]any)
 		if !ok {
 			return "", errors.New("AI translation source item is not an object")
@@ -247,9 +249,9 @@ func buildTranslationPrompt(taskType string, customPrompt string, rawPayload []b
 		for _, field := range fields {
 			projected[field] = item[field]
 		}
-		validationItems[index] = projected
+		payload.Items[index] = projected
 	}
-	if err := validateAITranslationResult(taskType, rawPayload, map[string]any{"items": validationItems}); err != nil {
+	if err := validateAITranslationResult(taskType, rawPayload, map[string]any{"items": payload.Items}); err != nil {
 		return "", err
 	}
 	payloadJSON, err := json.Marshal(payload)

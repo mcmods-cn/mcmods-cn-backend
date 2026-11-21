@@ -111,6 +111,8 @@ Community post 的源版本检查与译文写入在同一事务中锁定 active 
 
 ## 网络与错误
 
+发送给供应商的 JSON 只含源语言、目标语言和翻译条目。普通条目含 `key`、`text`，权限条目含 `key`、`name`、`description`。入队预留和执行都以这个投影计算 Token。原任务在 PostgreSQL 保留对象标识、修订、额度等字段，供权限、去重及发布核验使用。新写入的 `task_queued` 日志只记录任务标识和类型。既有任务可继续处理，历史日志沿用原保留策略。
+
 AI 端点仅支持 HTTP(S)，拒绝 URL 用户凭据、查询串和 fragment，拒绝私网 IP
 字面量，production 拒绝回环端点。共享供应商 HTTP 客户端负责解析地址、私网
 阻止和同源重定向。该专用客户端不继承 HTTP(S)_PROXY，受管网络需要供应商

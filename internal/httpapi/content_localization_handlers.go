@@ -730,7 +730,7 @@ func (s *Server) enqueueCatalogContentTranslation(
 	if err = tx.Commit(ctx); err != nil {
 		return enqueuedContentTranslation{}, err
 	}
-	s.writeAITaskLog(ctx, taskID, "info", "task_queued", "Catalog content translation queued", payload)
+	s.logQueuedAITask(ctx, taskID, taskUID, aiTaskContentTranslation)
 	return enqueuedContentTranslation{TaskUID: taskUID, Status: "queued"}, nil
 }
 
