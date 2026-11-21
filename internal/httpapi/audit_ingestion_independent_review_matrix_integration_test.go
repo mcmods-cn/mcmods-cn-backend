@@ -62,6 +62,11 @@ func TestAuditGR004IndependentQueueReadDecisionRoleMatrixHTTPPostgresIntegration
 			perms := map[string][]string{"readonly": {"global_resource.list", "global_resource.view"}, "content-review": {"content.review"}, "project-review": {"project.review"}, "scoped-project-review": {"project.review." + f.modCode}, "other-project-review": {"project.review." + f.otherModCode}, "scoped-self-review": {"project.review." + f.modCode}, "global-self-review": {"content.review"}, "admin": {"admin.*"}, "revoked-content-review": {"content.review"}}
 			if len(perms[role]) > 0 {
 				grantTEST044Permissions(t, f.ctx, f.db, actorID, perms[role]...)
+				// The creator authenticated during upload. Publish this grant just
+				// as the authorization endpoint does after its database commit.
+				if err := f.server.refreshPermissionVersion(f.ctx, actorID); err != nil {
+					t.Fatal(err)
+				}
 			}
 			canDecide := role == "content-review" || role == "project-review" || role == "scoped-project-review" || role == "global-self-review" || role == "admin" || role == "revoked-content-review"
 			canQueue := canDecide || role == "other-project-review" || role == "scoped-self-review"
