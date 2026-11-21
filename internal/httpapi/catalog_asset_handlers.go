@@ -91,7 +91,7 @@ func (s *Server) catalogResourceAsset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load catalog resource asset")
 		return
 	}
-	s.redirectCatalogOSSAsset(w, r, objectKey, contentType)
+	s.redirectCatalogOSSAsset(anonymousPublicRasterRedirect(w, true), r, objectKey, contentType)
 }
 
 func (s *Server) catalogRecipeTemplateBackground(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +135,7 @@ func (s *Server) catalogRecipeTemplateBackground(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusInternalServerError, "failed to load recipe template background")
 		return
 	}
-	s.redirectCatalogOSSAsset(w, r, objectKey, contentType)
+	s.redirectCatalogOSSAsset(anonymousPublicRasterRedirect(w, true), r, objectKey, contentType)
 }
 
 func (s *Server) redirectCatalogOSSAsset(w http.ResponseWriter, r *http.Request, objectKey, contentType string) {

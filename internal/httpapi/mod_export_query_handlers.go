@@ -790,7 +790,20 @@ func setPublicCacheControlIfAllowed(w http.ResponseWriter, value string) {
 func (s *Server) redirectModExportMedia(w http.ResponseWriter, r *http.Request, revisionID, assetPath string) {
 	var objectKey, contentType string
 	var byteLength int64
-	err := s.db.QueryRow(r.Context(), `select f.object_key,m.content_type,m.byte_length from catalog_import_media m join oss_files f on f.id=m.oss_file_id where m.revision_id=$1 and m.asset_path=$2 and f.status='active'`, revisionID, assetPath).Scan(&objectKey, &contentType, &byteLength)
+	// A reviewer can read pending media on this same route. Only mark a
+	// redirect embeddable when the exact derived PNG is also public on its own.
+	var publicPNG bool
+	err := s.db.QueryRow(r.Context(), `select f.object_key,m.content_type,m.byte_length,
+		(m.media_kind='png' and m.content_type='image/png' and f.content_type=m.content_type
+		 and f.scan_status in ('clean','trusted_generated') and f.sha256=m.sha256 and f.size_bytes=m.byte_length
+		 and revision.is_active and revision.status in ('ready','partial')
+		 and version.status='active' and mod.review_status='approved')
+		from catalog_import_media m join oss_files f on f.id=m.oss_file_id
+		join catalog_import_revisions revision on revision.id=m.revision_id
+		join mods mod on mod.id=revision.mod_id
+		join mod_content_versions version on version.id=revision.target_version_id and version.mod_id=mod.id
+		where m.revision_id=$1 and m.asset_path=$2 and f.status='active'`, revisionID, assetPath).
+		Scan(&objectKey, &contentType, &byteLength, &publicPNG)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "asset not found")
 		return
@@ -821,7 +834,7 @@ func (s *Server) redirectModExportMedia(w http.ResponseWriter, r *http.Request, 
 		_, _ = io.Copy(w, io.LimitReader(result.Body, byteLength+1))
 		return
 	}
-	s.redirectOSSObjectAccess(w, r, objectKey, ossObjectAccessOptions{})
+	s.redirectOSSObjectAccess(anonymousPublicRasterRedirect(w, publicPNG), r, objectKey, ossObjectAccessOptions{})
 }
 
 func isRendererTextureAsset(assetPath string) bool {

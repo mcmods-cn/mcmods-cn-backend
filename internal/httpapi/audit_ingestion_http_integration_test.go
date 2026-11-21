@@ -680,7 +680,7 @@ func TestAuditFixCONT002ManualAndMixedRecipeCatalogHTTPIntegration(t *testing.T)
 func TestAuditFixActualGamePackageHTTPWorkerIntegration(t *testing.T) {
 	path := os.Getenv("MCMODS_AUDIT_ACTUAL_GAME_ZIP")
 	if path == "" {
-		t.Skip("set MCMODS_AUDIT_ACTUAL_GAME_ZIP to the untouched real Minecraft package")
+		path = "testdata/audit-20261024/auditfixture-minecraft1201-fabric-jei1520-v7.zip"
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -697,7 +697,38 @@ func TestAuditFixActualGamePackageHTTPWorkerIntegration(t *testing.T) {
 	}
 	_, revision := f.imported(t, raw)
 	f.require(t, f.reviewer, "GET", "/api/v1/export-revisions/"+revision, nil, 200)
+	var pngPath string
+	if err := f.db.QueryRow(f.ctx, `select asset_path from catalog_import_media where revision_id=$1 and media_kind='png' order by asset_path limit 1`, revision).Scan(&pngPath); err != nil {
+		t.Fatal(err)
+	}
+	client := *f.origin.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	asset := f.origin.URL + "/api/v1/export-revisions/" + revision + "/assets/content?path=" + url.QueryEscape(pngPath)
+	checkPolicy := func(token string, status int, policy string) {
+		t.Helper()
+		req, err := http.NewRequestWithContext(f.ctx, http.MethodGet, asset, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatal("could not read local image response")
+		}
+		res.Body.Close()
+		if got := res.Header.Get("Cross-Origin-Resource-Policy"); res.StatusCode != status || got != policy {
+			t.Fatalf("image status/policy=%d/%q want %d/%q", res.StatusCode, got, status, policy)
+		}
+		if status == http.StatusTemporaryRedirect && res.Header.Get("Cache-Control") != "private, no-store" {
+			t.Fatal("signed redirect must retain its private cache policy")
+		}
+	}
+	checkPolicy("", http.StatusForbidden, "same-site")
+	checkPolicy(f.reviewer, http.StatusTemporaryRedirect, "same-site")
 	f.reviewGR(t, revision, "approved")
+	checkPolicy("", http.StatusTemporaryRedirect, "cross-origin")
 	if n := f.number(t, `select count(*) from recipe_import_snapshots where revision_id=$1`, revision); n != 2 {
 		t.Fatalf("actual game recipe snapshots=%d", n)
 	}
