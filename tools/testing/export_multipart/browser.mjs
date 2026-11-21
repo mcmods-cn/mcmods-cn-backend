@@ -150,7 +150,9 @@ try {
   const onPost = suffix => page.waitForResponse(r => r.url() === cfg.api + root + suffix && r.request().method() === "POST", { timeout: cfg.handoffDir && !suffix ? 180_000 : 40_000 });
   step = "open the real editor";
   await page.goto(path);
-  const input = page.locator('input[type="file"][accept=".zip,application/zip"]:visible').first();
+  // The editor shows its drop zone while it reads IndexedDB. A user can only
+  // select the file after that check enables the input.
+  const input = page.locator('input[type="file"][accept=".zip,application/zip"]:visible:enabled').first();
   await input.waitFor();
 
   step = "hash the file and get presigned parts";
