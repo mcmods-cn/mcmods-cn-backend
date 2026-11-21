@@ -17,7 +17,7 @@
 
 - 后端使用 Linux amd64、Go 1.26.11 和任务独占的 PostgreSQL 18.6、Redis。按[隔离测试说明](testing-isolated-environment.md)配置实例。用 `go test -count=1 ./internal/querycache`、`go test -count=1 ./internal/httpapi -run 'TestRBACCacheHonorsNaturalGrant|TestOCT02Logout|TestOCT02CreatorIdentityClaim'` 复查授权。两个 API 实例在同一测试进程，共享实际服务。
 - 用 `go test -count=1 ./internal/httpapi -run 'TestOCT02AI|TestAIQueuedCatalogSource|TestAINotificationWithdrawal|TestTEST043ContentAIWorker|TestTranslationProviderReceives'` 复查实际存储、任务领取、重投和明文投影。只有测试 HTTP 服务接收合成源文，收费供应商没有参与。可用 `-race` 复核进程内并发。
-- 独立交叉审查还在快照 `39c8cb2` 上执行 14 项带 `-race` 的策略/业务测试。13 项通过，覆盖后台面板、导入媒体、并行审核、短链、余额隐私、下载奖励、授权和 AI。其余一项 `TestOSSMultipartSessionBindingAndIdempotentSettlementIntegration` 两次在安装全量测试 schema 的 15 秒截止前未完成。没有执行到分片断言。
-- Go 使用 `govulncheck@v1.7.0 -format json ./...` 进行符号可达性检查，随后用同一工具 `-mode=convert` 读取报告作为门禁。2026-11-11 的漏洞库中，编译器 1.26.6 命中 11 个可调用的标准库通告，1.26.11 没有符号命中，另有 5 个仅出现在模块层的通告。静态可达性未验证任何线上利用条件。
+- 独立交叉审查还在快照 `39c8cb2` 上执行 14 项带 `-race` 的策略/业务测试。13 项通过，覆盖后台面板、导入媒体、并行审核、短链、余额隐私、下载奖励、授权和 AI。其余一项 `TestOSSMultipartSessionBindingAndIdempotentSettlementIntegration` 两次在安装全量测试 schema 的 15 秒截止前未完成。这两次没有执行到分片断言。同一源码与真实 PostgreSQL 随后单独运行常规 Go 测试通过，耗时 16.09 秒，覆盖分片绑定、重复完成和权限范围。
+- 用 `go install golang.org/x/vuln/cmd/govulncheck@v1.7.0` 安装工具，运行 `govulncheck -format json ./...` 进行符号可达性检查，随后用同一工具 `-mode=convert` 读取报告作为门禁。2026-11-11 的漏洞库中，编译器 1.26.6 命中 11 个可调用的标准库通告，1.26.11 没有符号命中，另有 5 个仅出现在模块层的通告。静态可达性未验证任何线上利用条件。
 - Gitleaks 8.30.1 对三仓本地治理分支的提交祖先运行 `gitleaks git --redact=100 --log-opts=HEAD`。初次扫描前端和 exporter 为零告警。后端的 31 条中，16 条是旧审计索引的 `baseline` 字段，都能解析为实际 Git 提交。15 条位于 `_test.go` 的合成口令、配置材料和测试值。未把匹配字符串复制入文档，未连接任何服务校验凭据。范围不含未提交文件、其它分叉及云端机密。
 - 前端 `npm run build` 后运行 `node --test --test-name-pattern='a draft sends only|draw.io accepts only' browser-tests/oct03-page-editor-acceptance.browser.mts`。真实 Chromium 与生产 Next 检查默认零外域帧、单图发送、编辑后重置、目标 origin 和 frame 限制。API 和远端图表页面由本地测试提供。
