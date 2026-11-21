@@ -7,7 +7,7 @@
 
 ## 前提与初始化
 
-需要 Python 3.9+、项目 `go.mod` 声明的 Go 1.26.6 和可用的本地 Docker daemon。
+需要 Python 3.9+、[go.mod](../go.mod) 声明的 Go 工具链 和可用的本地 Docker daemon。
 工具明确使用 `/var/run/docker.sock`，不使用继承的远程 Docker context/host。
 官方镜像固定 digest：PostgreSQL 18.6、Redis 7.4.11、NATS 2.11.17。
 镜像来自官方 Docker Library 的 ECR 公共镜像；首次运行需要下载权限和足够磁盘空间。
