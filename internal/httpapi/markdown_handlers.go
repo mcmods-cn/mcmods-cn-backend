@@ -1,13 +1,10 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
-
-	"github.com/jackc/pgx/v5"
 )
 
 const markdownConfigSettingKey = "markdown.rendering"
@@ -63,7 +60,21 @@ func defaultMarkdownConfig() markdownConfigPayload {
 }
 
 func (s *Server) markdownConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.markdownConfigFromSettings(r.Context()))
+	payload := defaultMarkdownConfig()
+	raw, err := s.loadCachedPublicSetting(r.Context(), markdownConfigSettingKey)
+	if decodeOptionalSetting(raw, err, markdownConfigSettingKey, &payload) != nil {
+		payload = defaultMarkdownConfig()
+	}
+	writeJSON(w, http.StatusOK, normalizeMarkdownConfig(payload))
+}
+
+func (s *Server) adminMarkdownConfig(w http.ResponseWriter, r *http.Request) {
+	payload := defaultMarkdownConfig()
+	if err := s.readEditableSetting(r.Context(), markdownConfigSettingKey, &payload); err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "MARKDOWN_SETTINGS_UNAVAILABLE", "Markdown settings are temporarily unavailable", 0, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, normalizeMarkdownConfig(payload))
 }
 
 func (s *Server) updateMarkdownConfig(w http.ResponseWriter, r *http.Request) {
@@ -83,7 +94,18 @@ func (s *Server) updateMarkdownConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
-	_, err = s.db.Exec(
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "Markdown settings are temporarily unavailable")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	current := defaultMarkdownConfig()
+	if err = checkEditableSettingTx(r.Context(), tx, markdownConfigSettingKey, &current); err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "MARKDOWN_SETTINGS_UNAVAILABLE", "Markdown settings are temporarily unavailable", 0, nil)
+		return
+	}
+	_, err = tx.Exec(
 		r.Context(),
 		`insert into system_settings (key, value, updated_by, updated_at)
 		 values ($1, $2::jsonb, $3, now())
@@ -97,25 +119,13 @@ func (s *Server) updateMarkdownConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存 Markdown 配置失败")
 		return
 	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存 Markdown 配置失败")
+		return
+	}
 	s.invalidateSettingsCache(r.Context())
 	s.writeAppLog(r.Context(), "admin_operation", "info", "update_markdown_config", "markdown.rendering", claims.Subject, r, http.StatusOK, 0, nil)
 	writeJSON(w, http.StatusOK, payload)
-}
-
-func (s *Server) markdownConfigFromSettings(ctx context.Context) markdownConfigPayload {
-	payload := defaultMarkdownConfig()
-	var raw []byte
-	raw, err := s.loadCachedPublicSetting(ctx, markdownConfigSettingKey)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return payload
-		}
-		return payload
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return defaultMarkdownConfig()
-	}
-	return normalizeMarkdownConfig(payload)
 }
 
 func normalizeMarkdownConfig(payload markdownConfigPayload) markdownConfigPayload {

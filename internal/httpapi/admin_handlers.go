@@ -77,6 +77,55 @@ type updateUserPermissionsRequest struct {
 var roleCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-zA-Z0-9_*:\[\]<>-]+)*$`)
 var permissionCodePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-zA-Z0-9_*:\[\]<>-]+)+$`)
 
+func (s *Server) adminFeatures() map[string]bool {
+	return map[string]bool{
+		"contentReview":  true,
+		"emailSystem":    true,
+		"permissionRBAC": true,
+		"oss":            true,
+		"logSystem":      true,
+		"ai":             true,
+		"redis":          s.cfg.Redis.Enabled,
+		"crawler":        false,
+	}
+}
+
+func (s *Server) adminFeatureConfig(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.adminFeatures())
+}
+
+func (s *Server) adminAuthMethods() map[string]any {
+	return map[string]any{
+		"allowRegistration":        true,
+		"emailPasswordLogin":       true,
+		"usernamePasswordLogin":    true,
+		"userIDPasswordLogin":      true,
+		"emailCodeLogin":           true,
+		"requireEmailVerification": false,
+		"passwordMinLength":        8,
+		"reservedUsernames":        []string{"admin", "root", "system", "api", "login", "register", "mods", "mod", "users", "settings"},
+		"tokenTTLHours":            int(s.cfg.JWTTTL.Hours()),
+	}
+}
+
+func (s *Server) adminAuthConfig(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.oauthConfig(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "OAUTH_SETTINGS_UNAVAILABLE", "third-party login settings are temporarily unavailable", 0, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"auth": s.adminAuthMethods(), "oauth": redactOAuthConfig(cfg)})
+}
+
+func (s *Server) adminMailConfig(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.mailConfigFromSettings(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "MAIL_SETTINGS_UNAVAILABLE", "mail settings are temporarily unavailable", 0, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, redactMailConfig(cfg))
+}
+
 func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 	mailCfg, err := s.mailConfigFromSettings(r.Context())
 	if err != nil {
@@ -98,24 +147,29 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "AI_SETTINGS_UNAVAILABLE", "AI settings are temporarily unavailable", 0, nil)
 		return
 	}
+	markdown := defaultMarkdownConfig()
+	if err = s.readEditableSetting(r.Context(), markdownConfigSettingKey, &markdown); err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "MARKDOWN_SETTINGS_UNAVAILABLE", "Markdown settings are temporarily unavailable", 0, nil)
+		return
+	}
+	profile := defaultProfileConfig()
+	if err = s.readEditableSetting(r.Context(), profileConfigSettingKey, &profile); err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "PROFILE_SETTINGS_UNAVAILABLE", "profile settings are temporarily unavailable", 0, nil)
+		return
+	}
+	oss, err := s.ossConfigFromSettingsStrictWithQueryer(r.Context(), s.db)
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "OSS_SETTINGS_UNAVAILABLE", "OSS settings are temporarily unavailable", 0, nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"general": general,
-		"auth": map[string]any{
-			"allowRegistration":        true,
-			"emailPasswordLogin":       true,
-			"usernamePasswordLogin":    true,
-			"userIDPasswordLogin":      true,
-			"emailCodeLogin":           true,
-			"requireEmailVerification": false,
-			"passwordMinLength":        8,
-			"reservedUsernames":        []string{"admin", "root", "system", "api", "login", "register", "mods", "mod", "users", "settings"},
-			"tokenTTLHours":            int(s.cfg.JWTTTL.Hours()),
-		},
+		"general":   general,
+		"auth":      s.adminAuthMethods(),
 		"oauth":     redactOAuthConfig(oauthCfg),
 		"mail":      redactMailConfig(mailCfg),
-		"oss":       redactOSSConfig(s.ossConfigFromSettings(r.Context())),
-		"markdown":  s.markdownConfigFromSettings(r.Context()),
-		"profile":   s.profileConfigFromSettings(r.Context()),
+		"oss":       redactOSSConfig(oss),
+		"markdown":  normalizeMarkdownConfig(markdown),
+		"profile":   normalizeProfileConfig(profile),
 		"yggdrasil": s.redactedYggdrasilConfig(),
 		"ai":        redactAIConfig(aiCfg),
 		"permissions": map[string]any{
@@ -132,16 +186,7 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 			"user":    s.cfg.DB.User,
 			"sslMode": s.cfg.DB.SSLMode,
 		},
-		"features": map[string]bool{
-			"contentReview":  true,
-			"emailSystem":    true,
-			"permissionRBAC": true,
-			"oss":            true,
-			"logSystem":      true,
-			"ai":             true,
-			"redis":          s.cfg.Redis.Enabled,
-			"crawler":        false,
-		},
+		"features": s.adminFeatures(),
 	})
 }
 

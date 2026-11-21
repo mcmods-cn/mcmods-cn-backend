@@ -50,6 +50,15 @@ type userProfileSettingsResponse struct {
 	CanUseAnimatedAvatar bool               `json:"canUseAnimatedAvatar"`
 }
 
+func (s *Server) adminProfileConfig(w http.ResponseWriter, r *http.Request) {
+	payload := defaultProfileConfig()
+	if err := s.readEditableSetting(r.Context(), profileConfigSettingKey, &payload); err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "PROFILE_SETTINGS_UNAVAILABLE", "profile settings are temporarily unavailable", 0, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, normalizeProfileConfig(payload))
+}
+
 func (s *Server) updateProfileConfig(w http.ResponseWriter, r *http.Request) {
 	var payload profileConfigPayload
 	if err := decodeJSON(r, &payload); err != nil {
@@ -68,6 +77,11 @@ func (s *Server) updateProfileConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	current := defaultProfileConfig()
+	if err = checkEditableSettingTx(r.Context(), tx, profileConfigSettingKey, &current); err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "PROFILE_SETTINGS_UNAVAILABLE", "profile settings are temporarily unavailable", 0, nil)
+		return
+	}
 	_, err = tx.Exec(
 		r.Context(),
 		`insert into system_settings (key, value, updated_by, updated_at)
@@ -110,7 +124,6 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	claims := currentClaims(r)
-	config := s.profileConfigFromSettings(r.Context())
 	if request.Username != nil {
 		value := strings.TrimSpace(*request.Username)
 		if err := validateUsername(value); err != nil {
@@ -120,6 +133,11 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 		request.Username = &value
 	}
 	if request.Signature != nil {
+		config, err := s.profileConfigFromSettings(r.Context())
+		if err != nil {
+			writeAPIError(w, http.StatusServiceUnavailable, "PROFILE_SETTINGS_UNAVAILABLE", "profile settings are temporarily unavailable", 0, nil)
+			return
+		}
 		value := strings.TrimSpace(*request.Signature)
 		if len([]byte(value)) > config.SignatureMaxBytes {
 			writeError(w, http.StatusBadRequest, "签名超过最大字节数限制")
@@ -361,7 +379,11 @@ func (s *Server) loadUserProfileSettings(ctx context.Context, userID int64) (use
 	if err != nil {
 		return response, err
 	}
-	response.SignatureMaxBytes = s.profileConfigFromSettings(ctx).SignatureMaxBytes
+	config, err := s.profileConfigFromSettings(ctx)
+	if err != nil {
+		return response, err
+	}
+	response.SignatureMaxBytes = config.SignatureMaxBytes
 	onlineActive := s.cache.UsersOnline(ctx, []int64{userID}, time.Now(), s.cache.Config().PresenceTTL)[userID]
 	response.OnlineStatus = mapPublicOnlineVisibility(response.ShowOnlineStatus, onlineActive)
 	response.CardStatisticOptions = append([]string(nil), publicCardStatisticOptionKeys...)
@@ -371,14 +393,13 @@ func (s *Server) loadUserProfileSettings(ctx context.Context, userID int64) (use
 	return response, nil
 }
 
-func (s *Server) profileConfigFromSettings(ctx context.Context) profileConfigPayload {
+func (s *Server) profileConfigFromSettings(ctx context.Context) (profileConfigPayload, error) {
 	payload := defaultProfileConfig()
-	var raw []byte
-	if cached, err := s.loadCachedPublicSetting(ctx, profileConfigSettingKey); err == nil {
-		raw = cached
-		_ = json.Unmarshal(raw, &payload)
+	raw, err := s.loadCachedPublicSetting(ctx, profileConfigSettingKey)
+	if err = decodeOptionalSetting(raw, err, profileConfigSettingKey, &payload); err != nil {
+		return profileConfigPayload{}, err
 	}
-	return normalizeProfileConfig(payload)
+	return normalizeProfileConfig(payload), nil
 }
 
 func defaultProfileConfig() profileConfigPayload {

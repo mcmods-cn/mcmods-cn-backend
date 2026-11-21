@@ -2,10 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 var redisPublicSettingKeys = map[string]bool{
@@ -30,6 +33,9 @@ func (s *Server) loadCachedPublicSetting(ctx context.Context, key string) ([]byt
 	versionRaw, err := s.cache.GetOrLoadTTL(ctx, "versions:settings", 10*time.Second, func(loadCtx context.Context) ([]byte, error) {
 		var version int64
 		if scanErr := s.db.QueryRow(loadCtx, `select version from runtime_versions where name='settings'`).Scan(&version); scanErr != nil {
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				return nil, errors.New("settings version is missing")
+			}
 			return nil, scanErr
 		}
 		return []byte(strconv.FormatInt(version, 10)), nil
@@ -51,4 +57,31 @@ func (s *Server) loadCachedPublicSetting(ctx context.Context, key string) ([]byt
 
 func (s *Server) invalidateSettingsCache(ctx context.Context) {
 	s.cache.Delete(ctx, "versions:settings")
+}
+
+// Existing installations can omit a setting or individual fields. A stored
+// value of the wrong type or a database error cannot supply an editable form.
+func decodeOptionalSetting(raw []byte, readErr error, key string, defaults any) error {
+	if errors.Is(readErr, pgx.ErrNoRows) {
+		return nil
+	}
+	if readErr != nil {
+		return readErr
+	}
+	if _, err := decodeStoredJSONObject(raw, key); err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, defaults)
+}
+
+func (s *Server) readEditableSetting(ctx context.Context, key string, defaults any) error {
+	var raw []byte
+	err := s.db.QueryRow(ctx, `select value from system_settings where key=$1`, key).Scan(&raw)
+	return decodeOptionalSetting(raw, err, key, defaults)
+}
+
+func checkEditableSettingTx(ctx context.Context, tx pgx.Tx, key string, defaults any) error {
+	var raw []byte
+	err := tx.QueryRow(ctx, `select value from system_settings where key=$1 for update`, key).Scan(&raw)
+	return decodeOptionalSetting(raw, err, key, defaults)
 }
