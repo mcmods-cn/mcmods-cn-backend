@@ -173,15 +173,10 @@ func exportWorldgenDataResourceID(file map[string]any) (string, error) {
 		}
 		resourceID = parts[1] + ":" + parts[2]
 	}
-	namespace, resourcePath, found := strings.Cut(resourceID, ":")
-	invalidPart := func(value string, allowSlash bool) bool {
-		return value == "" || strings.IndexFunc(value, func(character rune) bool {
-			return !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' || character == '-' || character == '.' || allowSlash && character == '/')
-		}) >= 0
-	}
-	if !found || invalidPart(namespace, false) || invalidPart(resourcePath, true) || strings.HasPrefix(resourcePath, "/") || path.Clean(resourcePath) != resourcePath || resourcePath == "." || resourcePath == ".." || strings.HasPrefix(resourcePath, "../") {
+	if !validExportResourceID(resourceID) {
 		return "", fmt.Errorf("invalid worldgen file resource identity %q", resourceID)
 	}
+	namespace, resourcePath, _ := strings.Cut(resourceID, ":")
 	if explicitID != "" && explicitID != resourceID {
 		return "", errors.New("worldgen file id conflicts with resource_id")
 	}
@@ -192,6 +187,18 @@ func exportWorldgenDataResourceID(file map[string]any) (string, error) {
 		return "", errors.New("worldgen file path conflicts with resource identity")
 	}
 	return resourceID, nil
+}
+
+func validExportResourceID(id string) bool {
+	namespace, resourcePath, found := strings.Cut(id, ":")
+	validPart := func(value string, allowSlash bool) bool {
+		return value != "" && strings.IndexFunc(value, func(character rune) bool {
+			return !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' || character == '-' || character == '.' || allowSlash && character == '/')
+		}) < 0
+	}
+	return found && validPart(namespace, false) && validPart(resourcePath, true) &&
+		!strings.HasPrefix(resourcePath, "/") && path.Clean(resourcePath) == resourcePath &&
+		resourcePath != "." && resourcePath != ".." && !strings.HasPrefix(resourcePath, "../")
 }
 
 func exportDocumentKind(assetPath string) string {

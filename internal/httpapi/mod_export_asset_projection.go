@@ -13,16 +13,17 @@ import (
 // a top-level JSON permission. Unknown business fields fail explicitly. Only
 // recognized unrelated diagnostic/identity metadata is removed.
 type exportJSONRule struct {
-	fields      map[string]*exportJSONRule
-	values      *exportJSONRule
-	items       *exportJSONRule
-	exactItems  int
-	strings     bool
-	numbers     bool
-	integers    bool
-	booleans    bool
-	key         func(string) bool
-	validString func(string) bool
+	fields       map[string]*exportJSONRule
+	values       *exportJSONRule
+	items        *exportJSONRule
+	exactItems   int
+	strings      bool
+	numbers      bool
+	integers     bool
+	booleans     bool
+	key          func(string) bool
+	validString  func(string) bool
+	afterProject func(map[string]any)
 }
 
 var errExportJSONPurpose = errors.New("unregistered JSON purpose")
@@ -93,6 +94,9 @@ func (rule *exportJSONRule) projectAtDepth(value any, depth int) (any, error) {
 			}
 			result[key] = projected
 		}
+		if rule.afterProject != nil {
+			rule.afterProject(result)
+		}
 		return result, nil
 	}
 	return nil, errExportJSONPurpose
@@ -143,10 +147,16 @@ func exportTextJSONRule() *exportJSONRule {
 }
 
 func exportDisplayJSONRule() *exportJSONRule {
+	icon := exportObjectRule(map[string]*exportJSONRule{
+		"item": exportStringRule(), "id": exportStringRule(), "count": exportNumberRule(),
+		"nbt": exportStringRule(), "has_stack_tag": exportBoolRule(),
+		"nbt_snbt": {strings: true, validString: func(value string) bool { return len(value) <= maxModContentJSONFieldBytes }},
+	})
+	icon.afterProject = projectAdvancementIconTag
 	rule := exportObjectRule(map[string]*exportJSONRule{
 		"title": exportTextJSONRule(), "description": exportTextJSONRule(),
 		"title_names": exportMapRule(exportStringRule()), "description_names": exportMapRule(exportStringRule()),
-		"icon": exportObjectRule(map[string]*exportJSONRule{"item": exportStringRule(), "id": exportStringRule(), "nbt": exportStringRule(), "count": exportNumberRule()}),
+		"icon": icon,
 	})
 	exportFields(rule, "frame background title_translation_key description_translation_key", exportStringRule())
 	exportFields(rule, "show_toast announce_chat announce_to_chat hidden", exportBoolRule())

@@ -14,6 +14,7 @@ import (
 )
 
 const modContentDefinitionSchemaVersion = 1
+const maxModContentJSONFieldBytes = 256 << 10
 
 type modContentTemplateRows interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
@@ -343,7 +344,7 @@ func normalizeModContentFieldValue(field modContentEntryTypeField, value any) (a
 			value = minimizeAdvancementDisplay(value)
 		}
 		encoded, err := json.Marshal(value)
-		if err != nil || len(encoded) > 256*1024 || catalogJSONDepth(value, 0) > 16 {
+		if err != nil || len(encoded) > maxModContentJSONFieldBytes || catalogJSONDepth(value, 0) > 16 {
 			return nil, false, errCatalogEditorInvalid
 		}
 		var normalized any

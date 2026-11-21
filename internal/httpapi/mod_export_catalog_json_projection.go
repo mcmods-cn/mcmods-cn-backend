@@ -1,6 +1,9 @@
 package httpapi
 
-import "strings"
+import (
+	"maps"
+	"strings"
+)
 
 // Only importer rows pass this boundary. Human-authored editor definitions
 // retain their separate explicit schema and authorization contract.
@@ -83,8 +86,27 @@ func registeredImportedCatalogJSONRule(code string) *exportJSONRule {
 		return exportLootJSONRule()
 	case "placement":
 		return naturalGenerationRules.placement
-	case "generatorSettings", "biomeSource", "outputs", "targets", "size", "biomeSelectors", "startHeight":
+	case "generatorSettings":
+		return exportGeneratorSettingsRule()
+	case "biomeSource", "outputs", "targets", "size", "biomeSelectors", "startHeight":
 		return exportWorldgenDefinitionJSONRule()
 	}
 	return nil
+}
+
+func exportGeneratorSettingsRule() *exportJSONRule {
+	worldgen := exportWorldgenDefinitionJSONRule()
+	// A flat generator's structure set is a registry tag or a list of IDs.
+	// Only the settings root has this field, not every nested worldgen codec.
+	settings := *worldgen
+	settings.fields = maps.Clone(worldgen.fields)
+	settings.fields["structure_overrides"] = &exportJSONRule{
+		items:   &exportJSONRule{strings: true, validString: validExportResourceID},
+		strings: true,
+		validString: func(value string) bool {
+			id, tagged := strings.CutPrefix(value, "#")
+			return tagged && validExportResourceID(id)
+		},
+	}
+	return &settings
 }

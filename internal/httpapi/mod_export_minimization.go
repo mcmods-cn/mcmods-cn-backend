@@ -126,7 +126,7 @@ func minimizeAdvancementDisplay(value any) any {
 	}
 	if icon, ok := source["icon"].(map[string]any); ok {
 		projected := map[string]any{}
-		for _, key := range []string{"item", "id", "count", "nbt"} {
+		for _, key := range []string{"item", "id", "count", "nbt", "nbt_snbt"} {
 			if v, exists := icon[key]; exists {
 				switch v.(type) {
 				case string, float64:
@@ -134,10 +134,24 @@ func minimizeAdvancementDisplay(value any) any {
 				}
 			}
 		}
+		if present, ok := icon["has_stack_tag"].(bool); ok {
+			projected["has_stack_tag"] = present
+		}
+		projectAdvancementIconTag(projected)
 		result["icon"] = projected
 	}
 	return result
 }
+
+// The advancement UI looks up the catalog item. An entire runtime item
+// stack can include block-entity or player data unrelated to that lookup.
+func projectAdvancementIconTag(icon map[string]any) {
+	if tag, ok := icon["nbt_snbt"].(string); ok {
+		icon["has_stack_tag"] = tag != ""
+	}
+	delete(icon, "nbt_snbt")
+}
+
 func minimizeMinecraftTextComponent(value any) any {
 	switch source := value.(type) {
 	case string:
