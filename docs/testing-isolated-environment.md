@@ -142,6 +142,11 @@ MCMODS_AUDIT_JOURNEY_RUNTIME="$MCMODS_AUDIT_JOURNEY_DIR/runtime.json" node --tes
 真实 PostgreSQL 和文件型 JetStream、合成 OSS。请保管目录中的合成会话文件，
 仅交接脱敏后的结果。测试不会运行新的游戏客户端。
 
+若开发页在加载中反复刷新，检查浏览器开发连接是否收到 Turbopack 的
+`reloadPage: HMR hash mismatch`。本轮更换检出提交和公开 API 地址后出现过这种情况。
+停止本次 Next 进程，在同一提交和配置下使用新的开发缓存重启，保留旧缓存与失败报告。
+重新操作前，检查浏览器报告和该项目的任务记录。已经得到 202 的上传可沿原任务 ID 查看进度和审核结果。
+
 ## 临时 schema 安装回归
 
 `InstallEphemeralSchema` 为每次安装编译函数资格化模式，ASCII 语句通过组合模式单次扫描，
