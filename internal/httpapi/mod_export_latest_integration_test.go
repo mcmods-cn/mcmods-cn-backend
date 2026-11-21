@@ -132,6 +132,10 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 	} else if lookupErr != pgx.ErrNoRows {
 		t.Fatal(lookupErr)
 	}
+	revisionID := "00000000-0000-4000-8000-000000000002"
+	// The worker prepares and compresses locale data before opening a write transaction.
+	supportedTranslations := prepareLatestExporterTranslations(t, files, revisionID)
+	mark("supported translations")
 	tx, err := pool.Begin(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +158,6 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	packageID := "00000000-0000-4000-8000-000000000001"
-	revisionID := "00000000-0000-4000-8000-000000000002"
 	jobID := "00000000-0000-4000-8000-000000000003"
 	archiveHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	var archiveFileID int64
@@ -210,56 +213,6 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	mark("recipe types and tags")
-	supportedTranslations := make(map[string]map[string]string, len(exportContentLocaleByCode))
-	seenLocales := make(map[string]string)
-	allLocaleCount := 0
-	expectedTranslationValues := 0
-	compressedTranslationBytes := int64(0)
-	for name, file := range files {
-		if !isExportTranslationFile(name) {
-			continue
-		}
-		sourceLocale := strings.TrimSuffix(path.Base(name), path.Ext(name))
-		if _, supported := canonicalExportLocaleTag(sourceLocale); !supported {
-			continue
-		}
-		value, readErr := readExportZIPFile(file, maxExportJSONSize)
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		translation, prepareErr := prepareExportTranslation(name, value)
-		if prepareErr != nil {
-			t.Fatal(prepareErr)
-		}
-		if previousFile, exists := seenLocales[translation.Locale]; exists {
-			t.Fatalf("translation files %s and %s resolve to the same locale %s", previousFile, name, translation.Locale)
-		}
-		seenLocales[translation.Locale] = name
-		allLocaleCount++
-		expectedTranslationValues += len(translation.Values)
-		if _, editable := supportedEditableContentLocales[translation.Locale]; editable {
-			supportedTranslations[translation.Locale] = translation.Values
-		}
-		bundles, compressed, bundleErr := prepareExportLocaleBundles(
-			ossConfigPayload{Prefix: "mcmods"},
-			"prj_test",
-			map[string]string{"minecraft": revisionID},
-			translation,
-		)
-		if bundleErr != nil || len(bundles) != 1 {
-			t.Fatalf("prepare locale bundle %s: bundles=%d error=%v", translation.Locale, len(bundles), bundleErr)
-		}
-		compressedTranslationBytes += int64(len(compressed))
-	}
-	if len(supportedTranslations) != len(exportContentLocaleByCode) {
-		t.Fatalf("expected %d supported in-memory locales, got %d", len(exportContentLocaleByCode), len(supportedTranslations))
-	}
-	if allLocaleCount <= len(supportedTranslations) {
-		t.Fatalf("expected cold locale bundles beyond the %d editable locales, got %d total", len(supportedTranslations), allLocaleCount)
-	}
-	t.Logf("exported_locales=%d in_memory_editable_locales=%d translation_values=%d compressed_bundle_bytes=%d",
-		allLocaleCount, len(supportedTranslations), expectedTranslationValues, compressedTranslationBytes)
-	mark("supported translations")
 	fallbackAssetPaths, err := normalizedExportFallbackAssetPaths(files)
 	if err != nil {
 		t.Fatal(err)
@@ -868,4 +821,58 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		t.Fatalf("global recipe type query returned %d types, expected at least %d", globalTypes, recipeTypes)
 	}
 	mark("assertions")
+}
+
+func prepareLatestExporterTranslations(t *testing.T, files map[string]*zip.File, revisionID string) map[string]map[string]string {
+	t.Helper()
+	supportedTranslations := make(map[string]map[string]string, len(exportContentLocaleByCode))
+	seenLocales := make(map[string]string)
+	allLocaleCount := 0
+	expectedTranslationValues := 0
+	compressedTranslationBytes := int64(0)
+	for name, file := range files {
+		if !isExportTranslationFile(name) {
+			continue
+		}
+		sourceLocale := strings.TrimSuffix(path.Base(name), path.Ext(name))
+		if _, supported := canonicalExportLocaleTag(sourceLocale); !supported {
+			continue
+		}
+		value, readErr := readExportZIPFile(file, maxExportJSONSize)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		translation, prepareErr := prepareExportTranslation(name, value)
+		if prepareErr != nil {
+			t.Fatal(prepareErr)
+		}
+		if previousFile, exists := seenLocales[translation.Locale]; exists {
+			t.Fatalf("translation files %s and %s resolve to the same locale %s", previousFile, name, translation.Locale)
+		}
+		seenLocales[translation.Locale] = name
+		allLocaleCount++
+		expectedTranslationValues += len(translation.Values)
+		if _, editable := supportedEditableContentLocales[translation.Locale]; editable {
+			supportedTranslations[translation.Locale] = translation.Values
+		}
+		bundles, compressed, bundleErr := prepareExportLocaleBundles(
+			ossConfigPayload{Prefix: "mcmods"},
+			"prj_test",
+			map[string]string{"minecraft": revisionID},
+			translation,
+		)
+		if bundleErr != nil || len(bundles) != 1 {
+			t.Fatalf("prepare locale bundle %s: bundles=%d error=%v", translation.Locale, len(bundles), bundleErr)
+		}
+		compressedTranslationBytes += int64(len(compressed))
+	}
+	if len(supportedTranslations) != len(exportContentLocaleByCode) {
+		t.Fatalf("expected %d supported in-memory locales, got %d", len(exportContentLocaleByCode), len(supportedTranslations))
+	}
+	if allLocaleCount <= len(supportedTranslations) {
+		t.Fatalf("expected cold locale bundles beyond the %d editable locales, got %d total", len(supportedTranslations), allLocaleCount)
+	}
+	t.Logf("exported_locales=%d in_memory_editable_locales=%d translation_values=%d compressed_bundle_bytes=%d",
+		allLocaleCount, len(supportedTranslations), expectedTranslationValues, compressedTranslationBytes)
+	return supportedTranslations
 }
