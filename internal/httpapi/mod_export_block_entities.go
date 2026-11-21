@@ -49,23 +49,11 @@ type exportBlockEntityTexture struct {
 }
 
 type exportUVQuadMesh struct {
-	SchemaVersion   string             `json:"schema_version"`
-	CoordinateSpace string             `json:"coordinate_space"`
-	UVSpace         string             `json:"uv_space"`
-	UVOrigin        string             `json:"uv_origin"`
-	VertexCount     int                `json:"vertex_count"`
-	QuadCount       int                `json:"quad_count"`
-	Faces           []exportUVQuadFace `json:"faces"`
-}
-
-type exportUVQuadFace struct {
-	Vertices []exportUVQuadVertex `json:"vertices"`
-}
-
-type exportUVQuadVertex struct {
-	Position []float64 `json:"position"`
-	UV       []float64 `json:"uv"`
-	Normal   []float64 `json:"normal"`
+	CoordinateSpace string
+	UVSpace         string
+	UVOrigin        string
+	VertexCount     int
+	QuadCount       int
 }
 
 type modExportBlockEntityModelRow struct {
@@ -198,31 +186,16 @@ func decodeExportBlockEntityVariant(files map[string]*zip.File, blockID string, 
 			return variant, nil, mesh, fmt.Errorf("block entity variant %s/%s references a missing texture", blockID, variant.VariantID)
 		}
 	}
-	meshRaw, err := readExportZIPFile(files[variant.MeshPath], maxExportJSONSize)
+	meshRaw, err := readExportZIPFile(files[variant.MeshPath], maxExportBlockEntityMeshBytes)
 	if err != nil {
 		return variant, nil, mesh, fmt.Errorf("read block entity mesh %s: %w", variant.MeshPath, err)
 	}
-	meshRaw, err = projectExportAsset(variant.MeshPath, meshRaw, exportAssetNormalized)
+	meshRaw, mesh, err = projectExportBlockEntityMesh(variant.MeshPath, meshRaw)
 	if err != nil {
 		return variant, nil, mesh, err
 	}
-	if err = json.Unmarshal(meshRaw, &mesh); err != nil {
-		return variant, nil, mesh, fmt.Errorf("decode block entity mesh %s: %w", variant.MeshPath, err)
-	}
-	if mesh.SchemaVersion != blockEntityMeshSchema || mesh.CoordinateSpace != "block_units" ||
-		mesh.QuadCount != len(mesh.Faces) || mesh.VertexCount != mesh.QuadCount*4 ||
-		mesh.VertexCount != variant.VertexCount || mesh.QuadCount != variant.QuadCount || mesh.UVSpace != variant.UVSpace {
-		return variant, nil, mesh, fmt.Errorf("invalid block entity mesh metadata: %s", variant.MeshPath)
-	}
-	for _, face := range mesh.Faces {
-		if len(face.Vertices) != 4 {
-			return variant, nil, mesh, fmt.Errorf("block entity mesh %s contains a non-quad face", variant.MeshPath)
-		}
-		for _, vertex := range face.Vertices {
-			if len(vertex.Position) != 3 || len(vertex.UV) != 2 || len(vertex.Normal) != 3 {
-				return variant, nil, mesh, fmt.Errorf("block entity mesh %s contains an invalid vertex", variant.MeshPath)
-			}
-		}
+	if mesh.VertexCount != variant.VertexCount || mesh.QuadCount != variant.QuadCount || mesh.UVSpace != variant.UVSpace {
+		return variant, nil, mesh, fmt.Errorf("block entity variant disagrees with mesh: %s", variant.MeshPath)
 	}
 	return variant, meshRaw, mesh, nil
 }

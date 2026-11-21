@@ -127,7 +127,14 @@ func exportResourceReferenceRule() *exportJSONRule {
 		if strings.HasPrefix(value, "#") {
 			value = strings.TrimPrefix(value, "#")
 		}
-		if strings.HasPrefix(value, "/") || strings.Contains(value, "..") {
+		resource := value
+		if namespace, local, qualified := strings.Cut(value, ":"); qualified {
+			if namespace == "" || strings.Contains(namespace, "/") || strings.Contains(local, ":") {
+				return false
+			}
+			resource = local
+		}
+		if resource == "" || strings.HasPrefix(resource, "/") || path.Clean(resource) != resource || strings.Contains(value, "..") {
 			return false
 		}
 		return strings.IndexFunc(value, func(r rune) bool {
@@ -187,19 +194,30 @@ func exportModelJSONRule() *exportJSONRule {
 	number := exportNumberRule()
 	vector := exportArrayRule(number)
 	transform := exportObjectRule(map[string]*exportJSONRule{"rotation": vector, "translation": vector, "scale": vector})
-	face := exportObjectRule(map[string]*exportJSONRule{"uv": vector, "texture": exportStringRule(), "cullface": exportStringRule(), "rotation": number, "tintindex": number})
+	face := exportObjectRule(map[string]*exportJSONRule{"uv": vector, "texture": exportResourceReferenceRule(), "cullface": exportStringRule(), "rotation": number, "tintindex": number})
 	element := exportObjectRule(map[string]*exportJSONRule{
 		"from": vector, "to": vector, "shade": exportBoolRule(),
 		"rotation": exportObjectRule(map[string]*exportJSONRule{"origin": vector, "axis": exportStringRule(), "angle": number, "rescale": exportBoolRule()}),
 		"faces":    exportObjectRule(map[string]*exportJSONRule{"down": face, "up": face, "north": face, "south": face, "west": face, "east": face}),
 	})
+	// Minecraft ignores these editor annotations. Validate only their known
+	// locations and omit their free text from the public render document.
+	exportFields(element, "name __comment", exportStringRule())
+	element.afterProject = func(projected map[string]any) {
+		delete(projected, "name")
+		delete(projected, "__comment")
+	}
+	group := exportObjectRule(map[string]*exportJSONRule{
+		"name": exportStringRule(), "origin": vector, "color": number, "children": exportArrayRule(number),
+	})
 	display := exportObjectRule(map[string]*exportJSONRule{})
 	exportFields(display, "thirdperson_righthand thirdperson_lefthand firstperson_righthand firstperson_lefthand gui ground fixed head", transform)
 	rule := exportObjectRule(map[string]*exportJSONRule{
 		"textures": exportMapRule(exportResourceReferenceRule()), "display": display, "elements": exportArrayRule(element),
-		"overrides": exportArrayRule(exportObjectRule(map[string]*exportJSONRule{"predicate": exportMapRule(number), "model": exportStringRule()})),
-		"transform": transform,
+		"overrides": exportArrayRule(exportObjectRule(map[string]*exportJSONRule{"predicate": exportMapRule(number), "model": exportResourceReferenceRule()})),
+		"transform": transform, "groups": exportArrayRule(group),
 	})
+	rule.afterProject = func(projected map[string]any) { delete(projected, "groups") }
 	exportFields(rule, "parent gui_light loader model render_type render_types", exportStringRule())
 	exportFields(rule, "parent loader model render_type", exportResourceReferenceRule())
 	exportFields(rule, "ambientocclusion flip_v detectCullableFaces diffuseLighting automaticCulling shadeQuads", exportBoolRule())
@@ -239,11 +257,6 @@ func exportBlockEntityIndexJSONRule() *exportJSONRule {
 	model := exportObjectRule(map[string]*exportJSONRule{"variants": exportArrayRule(variant), "model_available": exportBoolRule(), "variant_count": exportNumberRule()})
 	exportFields(model, "block_id block_entity_type_id model_source", exportStringRule())
 	return exportObjectRule(map[string]*exportJSONRule{"schema_version": exportStringRule(), "coordinate_space": exportStringRule(), "uv_representation": exportStringRule(), "count": exportNumberRule(), "block_entities": exportArrayRule(model)})
-}
-func exportBlockEntityMeshJSONRule() *exportJSONRule {
-	vector := exportArrayRule(exportNumberRule())
-	vertex := exportObjectRule(map[string]*exportJSONRule{"position": vector, "uv": vector, "normal": vector})
-	return exportObjectRule(map[string]*exportJSONRule{"schema_version": exportStringRule(), "coordinate_space": exportStringRule(), "uv_space": exportStringRule(), "uv_origin": exportStringRule(), "vertex_count": exportNumberRule(), "quad_count": exportNumberRule(), "faces": exportArrayRule(exportObjectRule(map[string]*exportJSONRule{"vertices": exportArrayRule(vertex)}))})
 }
 
 // Registered vanilla worldgen vocabulary is recursive because vanilla codecs

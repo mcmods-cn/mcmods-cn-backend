@@ -70,7 +70,11 @@ func buildExportAssetPlan(files map[string]*zip.File) (exportAssetPlan, error) {
 		if !exportPurposeRetainsText(purpose) && name != modExportBlockEntityIndexPath && !(strings.HasPrefix(name, "block_entities/models/") && strings.HasSuffix(name, ".mesh.json")) {
 			continue
 		}
-		data, err := readExportZIPFile(files[name], maxExportJSONSize)
+		limit := maxExportJSONSize
+		if purpose == exportAssetNormalized && strings.HasSuffix(name, ".mesh.json") {
+			limit = maxExportBlockEntityMeshBytes
+		}
+		data, err := readExportZIPFile(files[name], limit)
 		if err != nil {
 			return nil, fmt.Errorf("read registered asset: %w", err)
 		}
@@ -130,6 +134,10 @@ func projectExportAsset(name string, data []byte, purpose exportAssetPurpose) ([
 	if purpose == exportAssetOBJ || purpose == exportAssetMTL {
 		return projectExportWavefront(name, data, purpose)
 	}
+	if purpose == exportAssetNormalized && strings.HasSuffix(name, ".mesh.json") {
+		projected, _, err := projectExportBlockEntityMesh(name, data)
+		return projected, err
+	}
 	var value any
 	if err := json.Unmarshal(data, &value); err != nil {
 		return nil, exportAssetRegistrationError(purpose, name)
@@ -139,8 +147,6 @@ func projectExportAsset(name string, data []byte, purpose exportAssetPurpose) ([
 	case exportAssetNormalized:
 		if name == modExportBlockEntityIndexPath {
 			rule = exportBlockEntityIndexJSONRule()
-		} else if strings.HasSuffix(name, ".mesh.json") {
-			rule = exportBlockEntityMeshJSONRule()
 		}
 	case exportAssetModel:
 		rule = exportModelJSONRule()

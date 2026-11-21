@@ -10,10 +10,10 @@
 | --- | --- |
 | manifest / capabilities | 保留结构化版本/模块状态与有界诊断，丢弃异常正文和未注册 extras；不复制原文 |
 | registries、规范化目录、tags、JEI | 按已有业务投影；import-only JSON 字段另执行嵌套用途注册，数量、概率、业务 SNBT、引用保留 |
-| `assets/<namespace>/models/*.json` | Minecraft 模型元素、面、变换、材质、覆盖、Forge composite/OBJ 的明确字段；资源引用校验 |
+| `assets/<namespace>/models/*.json` | Minecraft 模型元素、面、变换、材质、覆盖和已注册的 Forge composite/OBJ 字段。纹理和模型引用限本地资源，元素编辑器名称、注释及已识别的模型分组不公开。 |
 | blockstates / texture `.png.mcmeta` | 变体、multipart、动画帧、纹理过滤字段 |
 | Wavefront OBJ/MTL | 保留数值几何、面索引、对象/材质名和同 namespace 内材质/纹理引用；删除注释。未注册指令及带额外选项的纹理 codec 明确报错 |
-| entity 模型 metadata / block-entity index、variant、UV mesh | 固定字段和顶点/UV/法线数组；嵌套 JSON 不再直接保存原文 |
+| entity 模型 metadata / block-entity index、variant、UV mesh | 按用途保存纹理引用和网格。v1 四边形保留面序号、方向、顶点、UV、法线及 UV 边界。每个网格上限 16 MiB、65,536 个面，末尾不足四个的顶点只计入声明数量。 |
 | PNG | 保留像素/alpha/palette 和必要颜色解释 chunk；删除 tEXt/iTXt/zTXt/EXIF/时间等不相关 ancillary 元数据；ICC 按颜色用途重建 profile，剥离名称/描述/设备/创建者/private tags，已注册矩阵/TRC/LUT 等颜色变换负载保留，未知 codec 明确注册错误；衍生哈希针对实际保存字节 |
 | partial advancement / vanilla worldgen definition | 只有明确 `raw_definition_path`、`definition_path`、`placed_feature_definition_path`、`configured_feature_definition_path(s)` 引用取得用途；再次执行已注册嵌套投影 |
 | `.log` | 仅为源包诊断，不复制入公开资产表 |
