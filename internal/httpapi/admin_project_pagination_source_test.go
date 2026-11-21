@@ -21,16 +21,13 @@ func TestAdminProjectListUsesSearchProjectionAndKeysetEnvelope(t *testing.T) {
 	if end <= 0 {
 		t.Fatal("could not isolate admin project list handler")
 	}
-	pagination, err := os.ReadFile("admin_project_pagination.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	handler := strings.ToLower(remainder[:end] + string(pagination))
+	// This gate verifies that the HTTP handler forwards pagination and keeps
+	// the keyset envelope. The query builder and PERF036 exercise actual
+	// filters, bounded search, ordered result IDs and index plans.
+	handler := strings.ToLower(remainder[:end])
 	for _, required := range []string{
 		"parseadminprojectpagerequest",
-		"admin_project_catalog",
-		"search_document @@ websearch_to_tsquery",
-		"project.heat_score,project.updated_at,project.object_route_id",
+		"adminprojectpagesql(",
 		"hasmore",
 		"nextcursor",
 	} {
