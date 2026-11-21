@@ -21,6 +21,8 @@
 
 `data/...json` 完整规范化源定义只存在于私有源包中；只有明确 partial 引用才生成公开回退投影。任意字符串碰巧等于 ZIP 路径不能授权保留该附件。独立 NBT/SNBT/schematic 附件没有现行 exporter 的公开资产用途：当前结构 v2 明确不导出内部 NBT 零件。物品字段 `nbt_snbt` 等仍是受支持业务字段。
 
+进度展示的物品图标按物品 ID 和数量匹配目录。`display.icon.nbt_snbt` 是游戏导出的完整栈标记，可能含方块实体数据。导入器校验字符串及大小，公开投影只保存 `has_stack_tag`。已有 `nbt` 兼容字段沿用原规则。超平坦维度的 `generatorSettings.structure_overrides` 接受一个带 `#` 的结构集合标签或一串结构集合 ID，空列表有独立含义。掉落池中的附魔谓词与附魔 ID 列表适用不同规则，见 `mod_export_loot_projection.go`。
+
 ## 自然生成 v2
 
 `WorldgenDataStage.normalizePlacement` 以 Mojang 的放置修饰器生成摘要。导入时，`mod_export_worldgen_placement.go` 同时约束资源快照的 `placement`、部分目录和其已声明的放置地物回退文件。带权列表保留原顺序、权重和零值，坐标偏移保留三个整数，相对高度保留原锚点。部分目录中的雕刻器可带生成阶段、概率和游戏用于可视化的方块状态。方块状态属性只接受属性名和枚举值。缺失的摘要字段保持缺失。
