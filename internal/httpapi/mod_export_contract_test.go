@@ -10,13 +10,18 @@ import (
 	"testing"
 )
 
-// This test is opt-in because the real exporter packages are large and live
-// outside the repository. It validates the package contract without requiring
-// PostgreSQL or OSS.
+// Exercise the public wire contract with the hash-pinned game outputs shipped
+// in this repository. Optional larger packages use the same import code.
 func TestExporterSamplePackageContracts(t *testing.T) {
+	t.Run("full", func(t *testing.T) {
+		checkExporterSamplePackage(t, auditRecipeScopePackage(t, false))
+	})
+	t.Run("templates-only", func(t *testing.T) {
+		checkExporterSamplePackage(t, auditRecipeScopePackage(t, true))
+	})
 	directory := strings.TrimSpace(os.Getenv("MCMODS_EXPORT_TEST_DIR"))
 	if directory == "" {
-		t.Skip("MCMODS_EXPORT_TEST_DIR is not configured")
+		return
 	}
 	archives, err := filepath.Glob(filepath.Join(directory, "*.zip"))
 	if err != nil {
@@ -26,180 +31,154 @@ func TestExporterSamplePackageContracts(t *testing.T) {
 		t.Fatal("no exporter ZIP packages found")
 	}
 	for _, archive := range archives {
-		archive := archive
 		t.Run(filepath.Base(archive), func(t *testing.T) {
-			reader, openErr := zip.OpenReader(archive)
-			if openErr != nil {
-				t.Fatal(openErr)
+			reader, err := zip.OpenReader(archive)
+			if err != nil {
+				t.Fatal(err)
 			}
 			defer reader.Close()
-			files, validateErr := validateExportZIP(reader.File)
-			if validateErr != nil {
-				t.Fatal(validateErr)
+			files, err := validateExportZIP(reader.File)
+			if err != nil {
+				t.Fatal(err)
 			}
-			manifestRaw, readErr := readExportZIPFile(files["manifest.json"], 4<<20)
-			if readErr != nil {
-				t.Fatal(readErr)
-			}
-			var manifest modExportManifest
-			if unmarshalErr := json.Unmarshal(manifestRaw, &manifest); unmarshalErr != nil {
-				t.Fatal(unmarshalErr)
-			}
-			if validateErr = validateModExportManifest(manifest); validateErr != nil {
-				t.Fatal(validateErr)
-			}
-			revisions := make(map[string]string)
-			for _, namespace := range normalizeExportNamespaces(manifest.Configuration.Namespaces) {
-				revisions[namespace] = "sample-revision-" + namespace
-			}
-			capabilityFile := files[modExportCapabilitiesPath]
-			if capabilityFile == nil {
-				t.Fatalf("%s is missing", modExportCapabilitiesPath)
-			}
-			capabilityRaw, readErr := readExportZIPFile(capabilityFile, 4<<20)
-			if readErr != nil {
-				t.Fatal(readErr)
-			}
-			if _, decodeErr := decodeModExportCapabilities(capabilityRaw, manifest); decodeErr != nil {
-				t.Fatal(decodeErr)
-			}
-			if files["registries/blocks.json"] != nil && files["registries/items.json"] != nil {
-				blocks, blockErr := readExportRegistryLinks(files["registries/blocks.json"])
-				if blockErr != nil {
-					t.Fatal(blockErr)
-				}
-				if len(revisions) == 0 {
-					for _, block := range blocks {
-						revisions[strings.ToLower(block.Namespace)] = "sample-revision-" + strings.ToLower(block.Namespace)
-					}
-				}
-				bindings, bindingErr := deriveModExportBlockBindings(files, catalogResourceIdentityResolver{}, revisions)
-				if bindingErr != nil {
-					t.Fatal(bindingErr)
-				}
-				expectedBindings := 0
-				for _, block := range blocks {
-					if revisions[strings.ToLower(block.Namespace)] != "" {
-						expectedBindings++
-					}
-				}
-				if len(bindings) != expectedBindings {
-					t.Fatalf("expected %d import-time block bindings, got %d", expectedBindings, len(bindings))
-				}
-			}
-			if files[modExportBlockEntityIndexPath] != nil {
-				models, modelErr := deriveModExportBlockEntityModels(files, catalogResourceIdentityResolver{}, revisions)
-				if modelErr != nil {
-					t.Fatal(modelErr)
-				}
-				if len(models) == 0 {
-					t.Fatal("block entity index contains no importable models")
-				}
-			}
-			baseRecipeFile := files["recipes/recipes.json"]
-			if baseRecipeFile == nil {
-				t.Fatal("package contains no base recipe v2 document")
-			}
-			baseRecipeRaw, readErr := readExportZIPFile(baseRecipeFile, maxExportJSONSize)
-			if readErr != nil {
-				t.Fatal(readErr)
-			}
-			if validateErr := validateExportBaseRecipeDocument(baseRecipeRaw); validateErr != nil {
-				t.Fatal(validateErr)
-			}
-
-			categoryFile := files["recipes/jei/categories.json"]
-			if categoryFile == nil {
-				t.Fatal("package contains no JEI v6 category index")
-			}
-			categoryRaw, readErr := readExportZIPFile(categoryFile, maxExportJSONSize)
-			if readErr != nil {
-				t.Fatal(readErr)
-			}
-			var categoryDocument exportJEICategoryDocument
-			if decodeErr := json.Unmarshal(categoryRaw, &categoryDocument); decodeErr != nil {
-				t.Fatal(decodeErr)
-			}
-			if categoryDocument.SchemaVersion != "mcmods-jei-categories/v6" {
-				t.Fatalf("unexpected JEI category schema %q", categoryDocument.SchemaVersion)
-			}
-			for _, recipe := range categoryDocument.Recipes {
-				if validateErr := validateExportRecipeSource(recipe.OriginKind, recipe.SourceModID, recipe.SourceModVersion, recipe.SourceModIDSource); validateErr != nil {
-					t.Fatalf("recipe index %s: %v", recipe.RecipeKey, validateErr)
-				}
-				if validateErr := validateExportRecipeLayoutKind(recipe.LayoutKind, recipe.Ordered); validateErr != nil {
-					t.Fatalf("recipe index %s: %v", recipe.RecipeKey, validateErr)
-				}
-			}
-			templatesByType := make(map[string]map[string]struct{})
-			templateFiles := 0
-			recipeFiles := 0
-			recipeRows := 0
-			recipeDocuments := make([]exportJEIRecipeCollection, 0)
-			for name, file := range files {
-				if file.FileInfo().IsDir() || !strings.HasSuffix(name, ".json") {
-					continue
-				}
-				if !strings.HasPrefix(name, "recipes/jei/templates/") &&
-					!strings.HasPrefix(name, "recipes/jei/recipes/") &&
-					!(strings.HasPrefix(name, "translations/") && path.Base(name) != "languages.json") {
-					continue
-				}
-				raw, fileErr := readExportZIPFile(file, maxExportJSONSize)
-				if fileErr != nil {
-					t.Fatalf("read %s: %v", name, fileErr)
-				}
-				if strings.HasPrefix(name, "translations/") {
-					if _, _, _, decodeErr := decodeExportTranslationValues(raw); decodeErr != nil {
-						t.Fatalf("decode %s: %v", name, decodeErr)
-					}
-					continue
-				}
-				if strings.HasPrefix(name, "recipes/jei/templates/") {
-					document, decodeErr := decodeExportJEITemplateCollection(raw)
-					if decodeErr != nil {
-						t.Fatalf("decode %s: %v", name, decodeErr)
-					}
-					ids := templatesByType[document.RecipeTypeID]
-					if ids == nil {
-						ids = make(map[string]struct{})
-						templatesByType[document.RecipeTypeID] = ids
-					}
-					for _, template := range document.Templates {
-						ids[template.TemplateID] = struct{}{}
-					}
-					templateFiles++
-					continue
-				}
-				document, decodeErr := decodeExportJEIRecipeCollection(raw)
-				if decodeErr != nil {
-					t.Fatalf("decode %s: %v", name, decodeErr)
-				}
-				recipeDocuments = append(recipeDocuments, document)
-				recipeFiles++
-				recipeRows += len(document.Recipes)
-			}
-			for _, document := range recipeDocuments {
-				for _, recipe := range document.Recipes {
-					if validateErr := validateExportRecipeSource(recipe.OriginKind, recipe.SourceModID, recipe.SourceModVersion, recipe.SourceModIDSource); validateErr != nil {
-						t.Fatalf("recipe %s: %v", recipe.RecipeKey, validateErr)
-					}
-					if validateErr := validateExportRecipeLayoutKind(recipe.LayoutKind, recipe.Ordered); validateErr != nil {
-						t.Fatalf("recipe %s: %v", recipe.RecipeKey, validateErr)
-					}
-					for _, binding := range recipe.Bindings {
-						if validateErr := validateExportRecipeChance(binding); validateErr != nil {
-							t.Fatalf("recipe %s slot %s: %v", recipe.RecipeKey, binding.SlotID, validateErr)
-						}
-					}
-					if _, exists := templatesByType[document.RecipeTypeID][recipe.TemplateID]; !exists {
-						t.Fatalf("recipe %s references missing template %s", recipe.RecipeKey, recipe.TemplateID)
-					}
-				}
-			}
-			if templateFiles == 0 || recipeFiles == 0 || recipeRows == 0 {
-				t.Fatalf("package contains no importable JEI v6 data: templates=%d recipe files=%d recipes=%d", templateFiles, recipeFiles, recipeRows)
-			}
+			checkExporterSamplePackage(t, files)
 		})
+	}
+}
+
+func checkExporterSamplePackage(t *testing.T, files map[string]*zip.File) {
+	t.Helper()
+	readMetadata := func(name string) []byte {
+		t.Helper()
+		if files[name] == nil {
+			t.Fatalf("missing %s", name)
+		}
+		raw, err := readExportZIPFile(files[name], 4<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	var manifest modExportManifest
+	if err := json.Unmarshal(readMetadata("manifest.json"), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateModExportManifest(manifest); err != nil {
+		t.Fatal(err)
+	}
+	revisions := make(map[string]string)
+	for _, namespace := range normalizeExportNamespaces(manifest.Configuration.Namespaces) {
+		revisions[namespace] = "sample-revision-" + namespace
+	}
+	if _, err := decodeModExportCapabilities(readMetadata(modExportCapabilitiesPath), manifest); err != nil {
+		t.Fatal(err)
+	}
+	if files["registries/blocks.json"] != nil && files["registries/items.json"] != nil {
+		blocks, err := readExportRegistryLinks(files["registries/blocks.json"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		bindings, err := deriveModExportBlockBindings(files, catalogResourceIdentityResolver{}, revisions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := 0
+		for _, block := range blocks {
+			if revisions[strings.ToLower(block.Namespace)] != "" {
+				expected++
+			}
+		}
+		if len(bindings) != expected {
+			t.Fatalf("expected %d import-time block bindings, got %d", expected, len(bindings))
+		}
+	}
+	if files[modExportBlockEntityIndexPath] != nil {
+		var index exportBlockEntityIndex
+		if err := json.Unmarshal(auditRecipeScopeRead(t, files, modExportBlockEntityIndexPath), &index); err != nil {
+			t.Fatal(err)
+		}
+		models, err := deriveModExportBlockEntityModels(files, catalogResourceIdentityResolver{}, revisions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(models) != index.Count {
+			t.Fatalf("block entity index declares %d models, derived %d", index.Count, len(models))
+		}
+	}
+	if err := validateExportBaseRecipeDocument(auditRecipeScopeRead(t, files, "recipes/recipes.json")); err != nil {
+		t.Fatal(err)
+	}
+	for name, file := range files {
+		if strings.HasPrefix(name, "translations/") && strings.HasSuffix(name, ".json") && path.Base(name) != "languages.json" && !file.FileInfo().IsDir() {
+			if _, _, _, err := decodeExportTranslationValues(auditRecipeScopeRead(t, files, name)); err != nil {
+				t.Fatalf("decode %s: %v", name, err)
+			}
+		}
+	}
+
+	scope, err := newExportRecipeImportScope(revisions, auditRecipeScopeRead(t, files, "recipes/jei/categories.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, recipe := range scope.document.Recipes {
+		if err := validateExportRecipeLayoutKind(recipe.LayoutKind, recipe.Ordered); err != nil {
+			t.Fatalf("recipe index %s: %v", recipe.RecipeKey, err)
+		}
+	}
+	declared := make(map[string]bool)
+	for _, category := range scope.document.Categories {
+		declared[category.TemplateCollection] = true
+		declared[category.RecipeCollection] = true
+		checkExporterCategoryCollections(t, files, scope, category)
+	}
+	for name := range files {
+		if (strings.HasPrefix(name, "recipes/jei/templates/") || strings.HasPrefix(name, "recipes/jei/recipes/")) && strings.HasSuffix(name, ".json") && !declared[name] {
+			t.Fatalf("undeclared JEI collection %s", name)
+		}
+	}
+}
+
+func checkExporterCategoryCollections(t *testing.T, files map[string]*zip.File, scope *exportRecipeImportScope, category exportJEICategory) {
+	t.Helper()
+	templates, err := decodeExportJEITemplateCollection(auditRecipeScopeRead(t, files, category.TemplateCollection))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes, err := decodeExportJEIRecipeCollection(auditRecipeScopeRead(t, files, category.RecipeCollection))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if templates.RecipeTypeID != category.RecipeTypeID || recipes.RecipeTypeID != category.RecipeTypeID || recipes.TemplateCollection != category.TemplateCollection {
+		t.Fatalf("%s: category, template and recipe collection references disagree", category.RecipeTypeID)
+	}
+	if len(templates.Templates) != category.TemplateCount || len(recipes.Recipes) != category.ExportedRecipeCount || (category.RecipesOmitted && len(recipes.Recipes) != 0) {
+		t.Fatalf("%s: template or recipe count disagrees with category index", category.RecipeTypeID)
+	}
+	batch := newModExportWriteBatch()
+	if err := scope.queueTemplates(batch, category.TemplateCollection, templates); err != nil {
+		t.Fatal(err)
+	}
+	if err := scope.queueRecipes(batch, catalogResourceIdentityResolver{}, "sample-package", category.RecipeCollection, recipes); err != nil {
+		t.Fatal(err)
+	}
+
+	slotsByTemplate := make(map[string]map[string]bool)
+	for _, template := range templates.Templates {
+		slots := make(map[string]bool)
+		for _, slot := range template.Slots {
+			slots[slot.SlotID] = true
+		}
+		slotsByTemplate[template.TemplateID] = slots
+	}
+	for _, recipe := range recipes.Recipes {
+		slots, ok := slotsByTemplate[recipe.TemplateID]
+		if !ok {
+			t.Fatalf("recipe %s references missing template %s", recipe.RecipeKey, recipe.TemplateID)
+		}
+		for _, binding := range recipe.Bindings {
+			if !slots[binding.SlotID] {
+				t.Fatalf("recipe %s references missing template slot %s", recipe.RecipeKey, binding.SlotID)
+			}
+		}
 	}
 }
