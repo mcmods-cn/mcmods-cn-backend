@@ -481,41 +481,20 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 		revisionIDs = append(revisionIDs, revisionID)
 	}
 	sort.Strings(revisionIDs)
-	canActivate := false
 	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
-		var policyErr error
-		canActivate, policyErr = catalogImportEligibilityTx(ctx, tx, jobID, runToken)
+		canActivate, policyErr := catalogImportEligibilityTx(ctx, tx, jobID, runToken)
 		if policyErr != nil {
 			return policyErr
 		}
 		if lockErr := lockCatalogImportAttemptTx(ctx, tx, jobID, runToken); lockErr != nil {
 			return lockErr
 		}
-		for _, revisionID := range revisionIDs {
-			if canActivate {
-				var namespace, revisionSource string
-				if queryErr := tx.QueryRow(ctx, `select source_namespace,source_kind from catalog_import_revisions
-					where id=$1 and import_run_token=$2`, revisionID, runToken).Scan(&namespace, &revisionSource); queryErr != nil {
-					return queryErr
-				}
-				if _, updateErr := tx.Exec(ctx, `update catalog_import_revisions set is_active=false,status='superseded'
-					where mod_id=$1 and target_version_id=$2 and source_namespace=$3 and source_kind=$4 and id<>$5 and is_active`,
-					modID, targetVersionID, namespace, revisionSource, revisionID); updateErr != nil {
-					return updateErr
-				}
-			}
-			if _, updateErr := tx.Exec(ctx, `update catalog_import_revisions set status='ready',is_active=$2,
-				activated_at=case when $2 then now() else null end where id=$1 and import_run_token=$3`,
-				revisionID, canActivate, runToken); updateErr != nil {
-				return updateErr
-			}
+		if err := finishStagedCatalogRevisionsTx(ctx, tx, jobID, runToken, "ready", revisionIDs); err != nil {
+			return err
 		}
 		if canActivate {
-			if syncErr := syncImportedResourcesToContentVersionTx(ctx, tx, revisionIDs, targetVersionID, overwrite, createdBy); syncErr != nil {
-				return syncErr
-			}
-			if versionErr := bumpCatalogDatasetVersionTx(ctx, tx); versionErr != nil {
-				return versionErr
+			if err := publishCatalogRevisionsTx(ctx, tx, revisionIDs, targetVersionID, overwrite, createdBy); err != nil {
+				return err
 			}
 		}
 		if statsErr := refreshModExportRevisionStats(ctx, tx, revisionIDs); statsErr != nil {

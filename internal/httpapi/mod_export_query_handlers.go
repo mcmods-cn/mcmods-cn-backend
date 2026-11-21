@@ -618,7 +618,11 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusNotFound, "export revision not found")
 		return
 	}
-	if err != nil || (status != "ready" && status != "partial") {
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read export revision")
+		return
+	}
+	if status != "ready" && status != "partial" {
 		writeError(w, http.StatusConflict, "export revision is not ready")
 		return
 	}
@@ -644,7 +648,12 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to lock target content version")
 		return
 	}
-	if err = tx.QueryRow(r.Context(), `select status,is_active from catalog_import_revisions where id=$1 for update`, revisionID).Scan(&status, &isActive); err != nil || (status != "ready" && status != "partial") {
+	err = tx.QueryRow(r.Context(), `select status,is_active from catalog_import_revisions where id=$1 for update`, revisionID).Scan(&status, &isActive)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to lock export revision")
+		return
+	}
+	if err != nil || (status != "ready" && status != "partial") {
 		writeError(w, http.StatusConflict, "export revision is not ready")
 		return
 	}
@@ -682,30 +691,21 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusOK, map[string]any{"id": revisionID, "status": "rejected", "isActive": false})
 		return
 	}
-	if _, err = tx.Exec(r.Context(), `update catalog_import_revisions set is_active=false,status='superseded' where mod_id=$1 and target_version_id=$2 and source_namespace=$3 and source_kind=$4 and id<>$5 and is_active`, modID, targetVersionID, namespace, sourceKind, revisionID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to supersede export revision")
+	if isActive {
+		// A lost HTTP response can lead to the same approval being submitted
+		// again. Preserve the original activation, projections and review audit.
+		skipRequestActivity(r)
+		writeJSON(w, http.StatusOK, map[string]any{"id": revisionID, "status": status, "isActive": true})
 		return
 	}
-	if _, err = tx.Exec(r.Context(), `update catalog_import_revisions set is_active=true,activated_at=now() where id=$1`, revisionID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to activate export revision")
-		return
-	}
-	if err = syncImportedResourcesToContentVersionTx(r.Context(), tx, []string{revisionID}, targetVersionID, overwriteExistingImportData, currentClaims(r).Subject); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to merge imported data into the selected content version")
-		return
-	}
-	if err = promoteImportedRecipeTemplatesTx(r.Context(), tx, revisionID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to promote imported recipe templates")
+	if err = publishCatalogRevisionsTx(r.Context(), tx, []string{revisionID}, targetVersionID, overwriteExistingImportData, currentClaims(r).Subject); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to publish export revision")
 		return
 	}
 	audit.AfterStatus = status
 	audit.AfterActive = true
 	if err = recordModExportRevisionReviewTx(r.Context(), tx, audit); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record export review")
-		return
-	}
-	if err = bumpCatalogDatasetVersionTx(r.Context(), tx); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update catalog version")
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {

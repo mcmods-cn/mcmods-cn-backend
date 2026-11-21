@@ -85,7 +85,7 @@ func TestAuditGR002WithdrawalCatalogGenerationFailureRollsBackDecisionHTTPPostgr
 
 // Exercise the supported withdrawal path: submit a version archive for an
 // independent review. Changing an approved import's status to rejected remains
-// invalid. A duplicate approval's audit policy is deliberately not decided here.
+// invalid. A repeated approval must preserve the original publication facts.
 func TestAuditGR002RepeatedReviewAndIndependentlyReviewedWithdrawalHTTPPostgresIntegration(t *testing.T) {
 	t.Run("approved-repeat-reject-withdraw", func(t *testing.T) {
 		f := newAuditFixGRFixture(t)
@@ -116,9 +116,22 @@ func TestAuditGR002RepeatedReviewAndIndependentlyReviewedWithdrawalHTTPPostgresI
 			}
 
 		}
+		generation := func() int {
+			return f.number(t, `select version from catalog_dataset_state where singleton`)
+		}
+		beforePublication := generation()
 		f.reviewGR(t, revision, "approved")
+		if generation() != beforePublication+1 {
+			t.Fatal("first approval did not invalidate the catalog exactly once")
+		}
 		public(t) // Warm the real server's catalog/render caches before transitions.
 		f.reviewGR(t, revision, "approved")
+		if got := generation(); got != beforePublication+1 {
+			t.Fatalf("repeated approval changed catalog generation from %d to %d", beforePublication+1, got)
+		}
+		if got := f.number(t, `select count(*) from audit_events where aggregate_key=$1 and action='review_approved'`, revision); got != 1 {
+			t.Fatalf("one publication recorded %d approval decisions", got)
+		}
 		if f.number(t, `select count(*) from catalog_import_revisions where target_version_id=$1 and is_active`, f.versionID) != 1 ||
 			f.number(t, `select count(*) from recipe_import_snapshots where revision_id=$1`, revision) != 1 {
 			t.Fatal("duplicate approval changed the effective import or recipe cardinality")

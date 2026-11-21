@@ -129,12 +129,16 @@ func TestAuditImportExecutionPolicyRechecksPublicationAndPreservesReviewModeInte
 				if strings.HasPrefix(change, "automatic_") {
 					grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "project.no-review."+f.modCode)
 				}
+				generation := func() int {
+					return f.number(t, `select version from catalog_dataset_state where singleton`)
+				}
 				var job modExportJobResponse
 				if format == "zip" {
 					job = f.job(t, f.upload(t, auditFixGRZip(t, nil)))
 				} else {
 					job = auditImportEmbeddedJob(t, f)
 				}
+				beforePublication := generation()
 				minimum := 96
 				if format == "embedded" {
 					minimum = 85
@@ -173,6 +177,13 @@ func TestAuditImportExecutionPolicyRechecksPublicationAndPreservesReviewModeInte
 					if change == "automatic_allowed" {
 						wantStage = "complete"
 						active = true
+					}
+					expected := beforePublication
+					if active {
+						expected++
+					}
+					if got := generation(); got != expected {
+						t.Fatalf("catalog generation=%d, want %d for %s", got, expected, change)
 					}
 					if status != "ready" || stage != wantStage || token != "" || code != "" {
 						t.Fatalf("allowed state=%s/%s/%s lease=%v", status, stage, code, token != "")

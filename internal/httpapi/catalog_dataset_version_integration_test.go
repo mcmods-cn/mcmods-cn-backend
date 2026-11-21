@@ -28,14 +28,14 @@ func TestCatalogDatasetVersionReplacesRevisionAggregation(t *testing.T) {
 	if !strings.Contains(cacheSource, "select version::text from catalog_dataset_state where singleton") {
 		t.Fatal("catalog cache does not read the singleton dataset version")
 	}
-	for _, filename := range []string{"catalog_editor_service.go", "mod_export_handlers.go", "mod_embedded_icon_import.go", "mod_export_query_handlers.go"} {
-		source, readErr := os.ReadFile(filename)
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		if !strings.Contains(string(source), "bumpCatalogDatasetVersionTx") {
-			t.Errorf("%s does not bump the catalog version in its publication transaction", filename)
-		}
+	// The import paths assert the generation at their actual database commit
+	// in the execution-policy and repeated-review integration tests.
+	editor, err := os.ReadFile("catalog_editor_service.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(editor), "bumpCatalogDatasetVersionTx") {
+		t.Error("catalog editor publication lost its dataset version invalidation")
 	}
 }
 

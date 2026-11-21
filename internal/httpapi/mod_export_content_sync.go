@@ -12,6 +12,54 @@ import (
 	"mcmods-cn-backend/internal/activity"
 )
 
+// A Worker holds the current job lease and the target version lock. Only that
+// attempt's staging rows may enter review or automatic publication.
+func finishStagedCatalogRevisionsTx(ctx context.Context, tx pgx.Tx, jobID, runToken, status string, revisionIDs []string) error {
+	tag, err := tx.Exec(ctx, `update catalog_import_revisions set status=$4
+		where id=any($1::text[]) and job_id=$2 and import_run_token=$3 and status='staging' and not is_active`,
+		revisionIDs, jobID, runToken, status)
+	if err != nil {
+		return err
+	}
+	if len(revisionIDs) == 0 || tag.RowsAffected() != int64(len(revisionIDs)) {
+		return fmt.Errorf("expected %d staging revisions for this import attempt, found %d", len(revisionIDs), tag.RowsAffected())
+	}
+	return nil
+}
+
+// Both automatic publication and human approval hold the target version lock
+// before entering here. The caller's transaction includes its decision audit
+// or job completion. Each source replaces only its own active observations.
+func publishCatalogRevisionsTx(ctx context.Context, tx pgx.Tx, revisionIDs []string, versionID int64, overwrite bool, actorID int64) error {
+	if _, err := tx.Exec(ctx, `update catalog_import_revisions previous set status='superseded',is_active=false
+		from catalog_import_revisions incoming
+		where incoming.id=any($1::text[]) and incoming.target_version_id=$2
+		  and incoming.status in ('ready','partial') and not incoming.is_active
+		  and previous.mod_id=incoming.mod_id and previous.target_version_id=incoming.target_version_id
+		  and previous.source_kind=incoming.source_kind and previous.source_namespace=incoming.source_namespace
+		  and previous.is_active`, revisionIDs, versionID); err != nil {
+		return fmt.Errorf("supersede imported revisions: %w", err)
+	}
+	tag, err := tx.Exec(ctx, `update catalog_import_revisions set is_active=true,activated_at=now()
+		where id=any($1::text[]) and target_version_id=$2 and status in ('ready','partial') and not is_active`,
+		revisionIDs, versionID)
+	if err != nil {
+		return err
+	}
+	if len(revisionIDs) == 0 || tag.RowsAffected() != int64(len(revisionIDs)) {
+		return fmt.Errorf("expected %d publishable revisions, found %d", len(revisionIDs), tag.RowsAffected())
+	}
+	for _, revisionID := range revisionIDs {
+		if err := promoteImportedRecipeTemplatesTx(ctx, tx, revisionID); err != nil {
+			return fmt.Errorf("promote imported recipe templates: %w", err)
+		}
+	}
+	if err := syncImportedResourcesToContentVersionTx(ctx, tx, revisionIDs, versionID, overwrite, actorID); err != nil {
+		return err
+	}
+	return bumpCatalogDatasetVersionTx(ctx, tx)
+}
+
 // syncImportedResourcesToContentVersionTx materializes importer-owned fields in
 // the selected, neutral content version. Human summaries and Markdown bodies
 // are intentionally stored in different columns and are never replaced here.

@@ -1293,13 +1293,10 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 		return err
 	}
 
-	revisionStatus := "ready"
 	jobStatus := "ready"
 	if partial {
-		revisionStatus = "partial"
 		jobStatus = "partial"
 	}
-	canActivate := false
 	jobDetail, _ := json.Marshal(map[string]int{
 		"translationValuesSkipped": translationValuesSkipped,
 		"manifestErrors":           manifest.ErrorCount,
@@ -1313,8 +1310,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}
 	sort.Strings(revisionIDs)
 	err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
-		var policyErr error
-		canActivate, policyErr = catalogImportEligibilityTx(ctx, tx, jobID, runToken)
+		canActivate, policyErr := catalogImportEligibilityTx(ctx, tx, jobID, runToken)
 		if policyErr != nil {
 			return policyErr
 		}
@@ -1327,32 +1323,12 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 		if bindingErr := persistModExportBlockBindings(ctx, tx, blockBindings); bindingErr != nil {
 			return bindingErr
 		}
-		for _, revisionID := range revisionIDs {
-			if canActivate {
-				var namespace string
-				var sourceKind string
-				if queryErr := tx.QueryRow(ctx, `select source_namespace,source_kind from catalog_import_revisions where id=$1 and import_run_token=$2`, revisionID, runToken).Scan(&namespace, &sourceKind); queryErr != nil {
-					return queryErr
-				}
-				if _, updateErr := tx.Exec(ctx, `update catalog_import_revisions set is_active=false,status='superseded' where mod_id=$1 and target_version_id=$2 and source_namespace=$3 and source_kind=$4 and id<>$5 and is_active`, modID, targetVersionID, namespace, sourceKind, revisionID); updateErr != nil {
-					return updateErr
-				}
-			}
-			if _, updateErr := tx.Exec(ctx, `update catalog_import_revisions set status=$2,is_active=$3,activated_at=case when $3 then now() else null end where id=$1 and import_run_token=$4`, revisionID, revisionStatus, canActivate, runToken); updateErr != nil {
-				return updateErr
-			}
-			if canActivate {
-				if promotionErr := promoteImportedRecipeTemplatesTx(ctx, tx, revisionID); promotionErr != nil {
-					return fmt.Errorf("promote imported recipe templates: %w", promotionErr)
-				}
-			}
+		if err := finishStagedCatalogRevisionsTx(ctx, tx, jobID, runToken, jobStatus, revisionIDs); err != nil {
+			return err
 		}
 		if canActivate {
-			if syncErr := syncImportedResourcesToContentVersionTx(ctx, tx, revisionIDs, targetVersionID, overwriteExistingImportData, createdBy); syncErr != nil {
-				return syncErr
-			}
-			if versionErr := bumpCatalogDatasetVersionTx(ctx, tx); versionErr != nil {
-				return versionErr
+			if err := publishCatalogRevisionsTx(ctx, tx, revisionIDs, targetVersionID, overwriteExistingImportData, createdBy); err != nil {
+				return err
 			}
 		}
 		if statsErr := refreshModExportRevisionStats(ctx, tx, revisionIDs); statsErr != nil {
