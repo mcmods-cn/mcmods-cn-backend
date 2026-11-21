@@ -211,9 +211,12 @@ func (s *Server) updateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "启用第三方登录前必须完整填写客户端和回调配置")
 			return
 		}
-		current.Providers[provider] = cfg
+		if err := current.setProvider(provider, cfg); err != nil {
+			writeAPIError(w, http.StatusServiceUnavailable, "OAUTH_SETTINGS_UNAVAILABLE", "third-party login settings are temporarily unavailable", 0, nil)
+			return
+		}
 	}
-	raw, err := s.sealSystemSetting(current)
+	raw, err := s.sealSystemSetting(current.document)
 	if err != nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "OAUTH_SETTINGS_UNAVAILABLE", "third-party login settings are temporarily unavailable", 0, nil)
 		return
@@ -236,7 +239,7 @@ func (s *Server) updateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存第三方登录配置失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, redactOAuthConfig(current))
+	writeJSON(w, http.StatusOK, redactOAuthConfig(current.oauthConfigPayload))
 }
 
 // PUT replaces the provider's public fields. PATCH applies only supplied fields
@@ -263,23 +266,21 @@ func applyOAuthProviderUpdate(raw json.RawMessage, current oauthProviderConfig, 
 }
 
 func (s *Server) oauthConfig(ctx context.Context) (oauthConfigPayload, error) {
-	return s.oauthConfigFromQuery(ctx, s.db)
+	stored, err := s.oauthConfigFromQuery(ctx, s.db)
+	return stored.oauthConfigPayload, err
 }
 
-func (s *Server) oauthConfigFromQuery(ctx context.Context, queryer oauthSettingsQueryRower) (oauthConfigPayload, error) {
-	var cfg oauthConfigPayload
+func (s *Server) oauthConfigFromQuery(ctx context.Context, queryer oauthSettingsQueryRower) (storedOAuthConfig, error) {
+	var cfg storedOAuthConfig
 	var raw []byte
 	err := queryer.QueryRow(ctx, `select value from system_settings where key = 'auth.oauth'`).Scan(&raw)
 	if errors.Is(err, pgx.ErrNoRows) {
-		cfg.Providers = map[string]oauthProviderConfig{}
+		cfg = newStoredOAuthConfig()
 	} else if err != nil {
-		return oauthConfigPayload{}, fmt.Errorf("%w: %w", errOAuthSettingsUnavailable, err)
+		return storedOAuthConfig{}, fmt.Errorf("%w: %w", errOAuthSettingsUnavailable, err)
 	} else {
 		if err = s.openSystemSetting(raw, &cfg); err != nil {
-			return oauthConfigPayload{}, fmt.Errorf("%w: %w", errOAuthSettingsUnavailable, err)
-		}
-		if cfg.Providers == nil {
-			return oauthConfigPayload{}, fmt.Errorf("%w: providers must be an object", errOAuthSettingsUnavailable)
+			return storedOAuthConfig{}, fmt.Errorf("%w: %w", errOAuthSettingsUnavailable, err)
 		}
 	}
 	for provider := range supportedOAuthProviders {

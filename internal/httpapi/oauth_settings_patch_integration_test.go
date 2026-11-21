@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"testing"
 )
@@ -57,5 +58,65 @@ func TestOAuthAdminPatchPreservesConcurrentFieldsAndStoredSecretIntegration(t *t
 	var unchanged bool
 	if err := f.db.QueryRow(f.ctx, `select value='null'::jsonb from system_settings where key='auth.oauth'`).Scan(&unchanged); err != nil || !unchanged {
 		t.Fatal("unreadable OAuth setting was overwritten", err)
+	}
+}
+
+func TestOAuthStoredProviderNullProtectsReadAndWriteIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	server := f.origin.Config.Handler.(*Server)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "admin.config.read", "admin.config.write")
+	const get, save = "/api/v1/admin/config/auth", "/api/v1/admin/config/oauth"
+	update := map[string]any{"providers": map[string]any{"github": map[string]any{"clientId": "changed"}}}
+	seed := func(doc any) string {
+		t.Helper()
+		sealed, err := server.sealSystemSetting(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = f.db.Exec(f.ctx, `insert into system_settings(key,value) values('auth.oauth',$1::jsonb)
+			on conflict(key) do update set value=excluded.value`, sealed); err != nil {
+			t.Fatal(err)
+		}
+		return oct02OAuthStored(t, f.ctx, server)
+	}
+	for _, fields := range []any{nil, map[string]any{"enabled": nil}, map[string]any{"clientId": nil}, map[string]any{"clientSecret": nil}, map[string]any{"redirectUri": nil}} {
+		before := seed(map[string]any{"providers": map[string]any{"github": fields}})
+		for _, action := range []struct {
+			method, path string
+			body         any
+		}{
+			{http.MethodGet, get, nil}, {http.MethodPut, save, update}, {http.MethodPatch, save, update},
+		} {
+			response := f.require(t, f.editor, action.method, action.path, action.body, http.StatusServiceUnavailable)
+			if !bytes.Contains(response, []byte("OAUTH_SETTINGS_UNAVAILABLE")) || oct02OAuthStored(t, f.ctx, server) != before {
+				t.Fatal("invalid stored provider must retain the original encrypted record and return the unavailable code")
+			}
+		}
+	}
+	const optional = `{"providers":{"github":{"clientId":"old","extension":{"marker":"private-extension"}},"other":{"futureNumber":9007199254740993}},"formatExtension":null}`
+	seed(json.RawMessage(optional))
+	for _, action := range []struct {
+		method, path string
+		body         any
+	}{
+		{http.MethodGet, get, nil}, {http.MethodPut, save, update}, {http.MethodPatch, save, update},
+	} {
+		response := f.require(t, f.editor, action.method, action.path, action.body, http.StatusOK)
+		if bytes.Contains(response, []byte("private-extension")) {
+			t.Fatal("stored extensions must not enter the redacted API projection")
+		}
+		var saved struct {
+			Providers map[string]struct {
+				Extension    struct{ Marker string }
+				FutureNumber json.Number
+			}
+			FormatExtension json.RawMessage
+		}
+		if err := server.openSystemSetting([]byte(oct02OAuthStored(t, f.ctx, server)), &saved); err != nil {
+			t.Fatal(err)
+		}
+		if string(saved.FormatExtension) != "null" || saved.Providers["github"].Extension.Marker != "private-extension" || saved.Providers["other"].FutureNumber.String() != "9007199254740993" {
+			t.Fatal("a supported setting update discarded stored extensions")
+		}
 	}
 }
