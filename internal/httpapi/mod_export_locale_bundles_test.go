@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -83,5 +84,27 @@ func TestPrepareExportLocaleBundlesKeepsRegionalLocalesDistinct(t *testing.T) {
 	if taiwanBundles[0].AssetPath != "_locales/zh-TW.json.gz" ||
 		hongKongBundles[0].AssetPath != "_locales/zh-HK.json.gz" {
 		t.Fatalf("unexpected regional asset paths: Taiwan=%s Hong Kong=%s", taiwanBundles[0].AssetPath, hongKongBundles[0].AssetPath)
+	}
+}
+
+func TestExportLocaleBundleByteBudgetMatchesStoredJSON(t *testing.T) {
+	for name, values := range map[string]map[string]string{
+		"nil map":                         nil,
+		"empty map":                       {},
+		"empty value and key":             {"": ""},
+		"reserved and control characters": {"a<&>\u2029": "\u0000\u001f\b\f\n\r\t\"\\&<>\u2028"},
+		"valid and invalid UTF-8":         {"normal": "世界🌍�", "invalid": "\xff\xe0"},
+		"split rune":                      {"source": strings.Repeat("a", (16<<10)-1) + "🌲雪<&>"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stored bytes.Buffer
+			if err := json.NewEncoder(&stored).Encode(values); err != nil {
+				t.Fatal(err)
+			}
+			size := int64(stored.Len())
+			if !exportLocaleBundleFits(values, size) || exportLocaleBundleFits(values, size-1) {
+				t.Fatalf("size check disagrees with the %d-byte stored JSON", size)
+			}
+		})
 	}
 }

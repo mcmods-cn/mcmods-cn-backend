@@ -11,6 +11,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/jackc/pgx/v5"
@@ -35,12 +36,64 @@ type modExportLocaleBundleMedia struct {
 	FileID           int64
 }
 
+// The stored payload is json.Encoder's sorted dictionary plus its newline.
+// Check its uncompressed representation before allocating the encoder buffer
+// or compressing. Ordinary small dictionaries fit even if every input byte
+// needs a six-byte JSON escape, so they need no extra encoding pass.
+func exportLocaleBundleFits(values map[string]string, limit int64) bool {
+	if values == nil {
+		return limit >= int64(len("null\n"))
+	}
+	if len(values) == 0 {
+		return limit >= int64(len("{}\n"))
+	}
+	// Braces and newline, four quotes and a colon per entry, and N-1 commas.
+	remaining := limit - 2 - 6*int64(len(values))
+	var plain int64
+	for key, value := range values {
+		plain += int64(len(key)) + int64(len(value))
+		if plain > remaining {
+			return false
+		}
+	}
+	if plain <= remaining/6 {
+		return true
+	}
+	for key, value := range values {
+		remaining = spendLocaleStringBytes(remaining, key)
+		remaining = spendLocaleStringBytes(remaining, value)
+		if remaining < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// Let encoding/json count escaped contents. Split long strings on UTF-8 rune
+// boundaries so the check itself never allocates an unbounded escaped string.
+func spendLocaleStringBytes(remaining int64, value string) int64 {
+	const chunkBytes = 16 << 10
+	for len(value) > 0 && remaining >= 0 {
+		end := min(len(value), chunkBytes)
+		for end < len(value) && end < chunkBytes+utf8.UTFMax-1 && !utf8.RuneStart(value[end]) {
+			end++
+		}
+		quoted, _ := json.Marshal(value[:end]) // a string always encodes
+		remaining -= int64(len(quoted) - 2)
+		value = value[end:]
+	}
+	return remaining
+}
+
 func prepareExportLocaleBundles(
 	cfg ossConfigPayload,
 	projectPublicID string,
 	revisions map[string]string,
 	translation preparedExportTranslation,
 ) ([]modExportLocaleBundleMedia, []byte, error) {
+	if !exportLocaleBundleFits(translation.Values, maxExportLocaleBundleSize) {
+		return nil, nil, fmt.Errorf("%s translations exceed the uncompressed JSON limit of %d MiB (%d bytes). Reduce this locale's dictionary and upload a new export", translation.Locale, maxExportLocaleBundleSize>>20, maxExportLocaleBundleSize)
+	}
 	var compressed bytes.Buffer
 	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
 	if err != nil {
@@ -184,7 +237,10 @@ func (s *Server) loadExportLocaleBundle(ctx context.Context, revisionID, locale 
 		if readErr != nil {
 			return nil, readErr
 		}
-		if int64(len(value)) > maxExportLocaleBundleSize || !json.Valid(value) {
+		if int64(len(value)) > maxExportLocaleBundleSize {
+			return nil, fmt.Errorf("stored translations for %s/%s exceed the %d-byte uncompressed JSON limit", revisionID, locale, maxExportLocaleBundleSize)
+		}
+		if !json.Valid(value) {
 			return nil, fmt.Errorf("invalid locale bundle %s/%s", revisionID, locale)
 		}
 		return value, nil

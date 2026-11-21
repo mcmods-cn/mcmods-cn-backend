@@ -31,6 +31,26 @@
 
 如需支持新的 Mod 放置规则，在对应的修饰器、数量提供器、高度提供器或方块谓词位置添加已核对的业务字段，用生产端的最小样例验证快照和部分目录。每个快照 JSON 字段的上限为 256 KiB 和 16 层，源 JSON 文件以 128 MiB 为上限，派生投影本身最多深入 24 层。未登记字段仍会返回 `unregistered_export_asset`。
 
+## 冷读翻译词典
+
+每个语言标签对应一个 gzip 词典。单个词典解压后的紧凑 JSON 上限为 **16 MiB（16,777,216 字节）**，计入键、字符串转义和末尾换行。生成端在压缩前校验，读取端据同一上限解压。词条数、原 ZIP 条目大小和压缩后大小都不能代替这项校验。超过上限的导入任务进入 `failed`，已登录的投稿者从任务的 `errorDetail.message` 获取语言、上限和重新导出的提示。现有活动修订仍可读取。
+
+较早的 Worker 可能存过超过上限的衍生词典。运维可按受影响的修订和语言核对 `catalog_import_locales`，按同一 `revision_id`、`asset_path='_locales/' || locale || '.json.gz'` 和 `media_kind='translation_bundle'` 关联 `catalog_import_media`，进而用 `oss_file_id` 找到对象。冷读会在本地缓存未命中时检查该对象。检查已经获准读取且已复制到本机的衍生文件时，可只统计字节，避免输出词条和签名链接。
+
+```sh
+python3 - "$bundle_file" <<'PYTHON'
+import gzip
+import sys
+
+limit = 16 << 20
+with gzip.open(sys.argv[1], "rb") as bundle:
+    size = len(bundle.read(limit + 1))
+print("over limit" if size > limit else f"{size} uncompressed bytes")
+PYTHON
+```
+
+先更新负责导入的 Worker。历史超限时，由有权限的投稿者调整该语言的导出范围或词典内容，用正常的上传、导入和审核流程提交新包。新的活动修订生效后复核相同语言的读取，保留原修订、包哈希和审核记录。回滚旧 Worker 会重新允许写入超限词典，恢复处理受影响的导入前须部署带写入校验的版本。此次无需数据库迁移或自动改动存量对象。
+
 ## 未注册扩展的可审查流程
 
 错误码文本 `unregistered_export_asset` 包含用途和 `path_sha256`，不记录未知字段值、异常正文或可能含身份信息的路径。普通资产的摘要输入是 ZIP 相对路径；`catalog_json_field` 的输入是 `<kindCode>/<fieldCode>`。创建者可以在自己的源包和字段清单中计算相同 SHA-256 来定位，不需要把私密正文复制到日志。
