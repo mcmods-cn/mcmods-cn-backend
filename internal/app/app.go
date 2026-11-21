@@ -49,9 +49,7 @@ func Run() {
 		return
 	}
 	apiServer := httpapi.NewServer(ctx, cfg, runtime.db, runtime.queue, runtime.cache, runtime.activity, runtime.search)
-	availability.setHandler(apiServer)
-	availability.resolveIssue("database")
-	availability.resolveIssue("startup")
+	availability.completeInitialization(apiServer)
 	log.Print("backend initialization completed; API traffic is enabled")
 	go monitorDatabase(ctx, runtime.db, availability)
 

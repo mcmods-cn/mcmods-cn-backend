@@ -45,9 +45,12 @@ func newAvailabilityHandler(cfg config.Config) *availabilityHandler {
 	return handler
 }
 
-func (h *availabilityHandler) setHandler(handler http.Handler) {
+// Called once, after all dependencies and startup workers initialized. Live
+// dependency monitoring starts after this transition.
+func (h *availabilityHandler) completeInitialization(handler http.Handler) {
 	h.mu.Lock()
 	h.handler = handler
+	clear(h.issues)
 	h.mu.Unlock()
 }
 

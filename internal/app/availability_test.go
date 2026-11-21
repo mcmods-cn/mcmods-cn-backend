@@ -43,11 +43,12 @@ func TestAvailabilityHandlerServesReadinessDuringStartup(t *testing.T) {
 func TestAvailabilityHandlerGatesTrafficAndRecovers(t *testing.T) {
 	forwarded := 0
 	handler := newAvailabilityHandler(config.Config{Env: "test"})
-	handler.setHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler.reportIssue("redis", "redis_required_unavailable", "required cache service is unavailable")
+	handler.reportIssue("nats", "nats_configuration_unavailable", "queue settings are unavailable")
+	handler.completeInitialization(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		forwarded++
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	handler.resolveIssue("startup")
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/mods", nil)
 	response := httptest.NewRecorder()
