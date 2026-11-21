@@ -21,6 +21,12 @@
 
 `data/...json` 完整规范化源定义只存在于私有源包中；只有明确 partial 引用才生成公开回退投影。任意字符串碰巧等于 ZIP 路径不能授权保留该附件。独立 NBT/SNBT/schematic 附件没有现行 exporter 的公开资产用途：当前结构 v2 明确不导出内部 NBT 零件。物品字段 `nbt_snbt` 等仍是受支持业务字段。
 
+## 自然生成 v2
+
+`WorldgenDataStage.normalizePlacement` 以 Mojang 的放置修饰器生成摘要。导入时，`mod_export_worldgen_placement.go` 同时约束资源快照的 `placement`、部分目录和其已声明的放置地物回退文件。带权列表保留原顺序、权重和零值，坐标偏移保留三个整数，相对高度保留原锚点。部分目录中的雕刻器可带生成阶段、概率和游戏用于可视化的方块状态。方块状态属性只接受属性名和枚举值。缺失的摘要字段保持缺失。
+
+如需支持新的 Mod 放置规则，在对应的修饰器、数量提供器、高度提供器或方块谓词位置添加已核对的业务字段，用生产端的最小样例验证快照和部分目录。每个快照 JSON 字段的上限为 256 KiB 和 16 层，源 JSON 文件以 128 MiB 为上限，派生投影本身最多深入 24 层。未登记字段仍会返回 `unregistered_export_asset`。
+
 ## 未注册扩展的可审查流程
 
 错误码文本 `unregistered_export_asset` 包含用途和 `path_sha256`，不记录未知字段值、异常正文或可能含身份信息的路径。普通资产的摘要输入是 ZIP 相对路径；`catalog_json_field` 的输入是 `<kindCode>/<fieldCode>`。创建者可以在自己的源包和字段清单中计算相同 SHA-256 来定位，不需要把私密正文复制到日志。

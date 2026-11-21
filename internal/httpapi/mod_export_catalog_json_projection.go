@@ -81,7 +81,9 @@ func registeredImportedCatalogJSONRule(code string) *exportJSONRule {
 		return rule
 	case "pools":
 		return exportLootJSONRule()
-	case "generatorSettings", "biomeSource", "outputs", "targets", "size", "placement", "biomeSelectors", "startHeight":
+	case "placement":
+		return naturalGenerationRules.placement
+	case "generatorSettings", "biomeSource", "outputs", "targets", "size", "biomeSelectors", "startHeight":
 		return exportWorldgenDefinitionJSONRule()
 	}
 	return nil

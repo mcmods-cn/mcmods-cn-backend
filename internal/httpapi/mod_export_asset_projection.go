@@ -16,8 +16,10 @@ type exportJSONRule struct {
 	fields      map[string]*exportJSONRule
 	values      *exportJSONRule
 	items       *exportJSONRule
+	exactItems  int
 	strings     bool
 	numbers     bool
+	integers    bool
 	booleans    bool
 	key         func(string) bool
 	validString func(string) bool
@@ -49,7 +51,7 @@ func (rule *exportJSONRule) projectAtDepth(value any, depth int) (any, error) {
 			return typed, nil
 		}
 	case float64:
-		if rule.numbers && !math.IsNaN(typed) && !math.IsInf(typed, 0) {
+		if (rule.numbers || (rule.integers && math.Trunc(typed) == typed)) && !math.IsNaN(typed) && !math.IsInf(typed, 0) {
 			return typed, nil
 		}
 	case bool:
@@ -57,7 +59,7 @@ func (rule *exportJSONRule) projectAtDepth(value any, depth int) (any, error) {
 			return typed, nil
 		}
 	case []any:
-		if rule.items == nil {
+		if rule.items == nil || (rule.exactItems > 0 && len(typed) != rule.exactItems) {
 			break
 		}
 		result := make([]any, len(typed))
@@ -264,7 +266,12 @@ func exportPartialCatalogJSONRule(name string) *exportJSONRule {
 		entry.fields["configured_feature_definition_paths"] = exportArrayRule(exportObjectRule(map[string]*exportJSONRule{"configured_feature_id": exportStringRule(), "path": exportStringRule()}))
 		entry.fields["translation_key"] = exportStringRule()
 		entry.fields["discard_chance_on_air_exposure"] = exportNumberRule()
-		exportFields(entry, "outputs targets size placement biome_selectors", exportWorldgenDefinitionJSONRule())
+		exportFields(entry, "outputs targets size biome_selectors", exportWorldgenDefinitionJSONRule())
+		entry.fields["generation_step"] = exportResourceReferenceRule()
+		entry.fields["placement"] = naturalGenerationRules.placement
+		for key, field := range naturalGenerationRules.carverFields {
+			entry.fields[key] = field
+		}
 		rule.fields["entries"] = exportArrayRule(entry)
 		rule.fields["counts_by_category"] = exportMapRule(exportNumberRule())
 		return rule

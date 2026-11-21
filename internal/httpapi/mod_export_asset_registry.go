@@ -154,6 +154,8 @@ func projectExportAsset(name string, data []byte, purpose exportAssetPurpose) ([
 		parts := strings.SplitN(name, "/", 4)
 		if len(parts) == 4 && (parts[2] == "advancement" || parts[2] == "advancements") {
 			rule = exportAdvancementJSONRule(false)
+		} else if len(parts) == 4 && parts[2] == "worldgen" && strings.HasPrefix(parts[3], "placed_feature/") {
+			rule = naturalGenerationRules.placedFeature
 		} else {
 			rule = exportWorldgenDefinitionJSONRule()
 		}
