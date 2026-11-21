@@ -112,14 +112,23 @@ export MCMODS_AUDIT_FRONTEND_REPO="$(cd ../mcmods-cn-frontend && pwd)"
 export MCMODS_AUDIT_EXPORTER_REPO="$(cd ../mcmods_exporter && pwd)"
 export MCMODS_AUDIT_FRONTEND_ORIGIN=http://127.0.0.1:3341
 export MCMODS_AUDIT_JOURNEY_DIR="$(mktemp -d)"
-export MCMODS_AUDIT_GAME_PACKAGE="$PWD/internal/httpapi/testdata/game-20261121/fabric/export.zip"
-export MCMODS_AUDIT_EXPORTER_COMMIT=1108a8eda82ce3912841bda20d182dda89ab16ea
-export MCMODS_AUDIT_GAME_SHA256=df72252ced1fa84035f4d95b5b56541188f2b5342b9f74fdfafdc14238814702
+sample_dir="$PWD/internal/httpapi/testdata/game-20261121"
+sample_loader=fabric
+export MCMODS_AUDIT_GAME_PACKAGE="$sample_dir/$sample_loader/export.zip"
+MCMODS_AUDIT_EXPORTER_COMMIT=$(python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1]))["exporter_commit"])
+' "$sample_dir/provenance.json")
+MCMODS_AUDIT_GAME_SHA256=$(python3 -c '
+import json, sys
+samples = json.load(open(sys.argv[1]))["samples"]
+print(next(sample["zip_sha256"] for sample in samples if sample["loader"] == sys.argv[2]))
+' "$sample_dir/provenance.json" "$sample_loader")
+export MCMODS_AUDIT_EXPORTER_COMMIT MCMODS_AUDIT_GAME_SHA256
 MCMODS_RUN_LIVE_GAME_JOURNEY=1 go test -count=1 -timeout=50m -v ./internal/httpapi -run '^TestAuditLiveGameJourneyFixture$'
 ```
 
-复跑同一生产提交的 Forge 包时，换用 `game-20261121/forge/export.zip`、哈希
-`694bb6554e24c30492d2c3fec8a40e0a3b95bcfec60a1ae2a92114564a1d8096` 和新建的测试目录。
+复跑 Forge 包时，将上例的 `sample_loader` 改为 `forge` 并使用新建的测试目录。
 历史 Fabric 包仍位于 `internal/httpapi/testdata/audit-20261024/`。使用其他原包时，填写其来源记录中的
 `MCMODS_AUDIT_GAME_SHA256` 和完整 40 位 `MCMODS_AUDIT_EXPORTER_COMMIT`。
 夹具核验原始字节和生产提交的存在，从 manifest 和模组注册表读取目标版本与命名空间。
