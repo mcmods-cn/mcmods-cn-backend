@@ -8,7 +8,7 @@ Mcmods-cn 的业务对象使用“数字内部 ID + 随机公开 ID”：
 - `public_id` 只能由 PostgreSQL 的 `new_public_id()` 或服务端 CSPRNG 生成，不能再由名称、Minecraft ID、时间戳或内容哈希推导；
 - 外部公开 ID 不是权限凭据，服务端解析后仍必须执行对象级权限检查。
 
-Schema generation 60 直接建立这套结构。开发数据不迁移；升级时必须重建开发数据库。
+现行空库由 generation 168 安装这套结构。已有数据的部署先核对 schema 代际和前向修复，再在副本上验证迁移与恢复。[维护入口](../README.md)
 
 ## 核心表约定
 
