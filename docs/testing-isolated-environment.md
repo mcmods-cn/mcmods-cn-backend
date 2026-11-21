@@ -132,8 +132,7 @@ MCMODS_RUN_LIVE_GAME_JOURNEY=1 go test -count=1 -timeout=50m -v ./internal/httpa
 历史 Fabric 包仍位于 `internal/httpapi/testdata/audit-20261024/`。使用其他原包时，填写其来源记录中的
 `MCMODS_AUDIT_GAME_SHA256` 和完整 40 位 `MCMODS_AUDIT_EXPORTER_COMMIT`。
 夹具核验原始字节和生产提交的存在，从 manifest 和模组注册表读取目标版本与命名空间。
-这条浏览器用例所用的合成 OSS 支持 4 MiB 以内的单次 PUT，样本须是单命名空间、完整导出，
-并包含该项目的实际 JEI 合成配方和可展示图片。保留该包及生产环境记录，供后续独立核对。
+仓库随附样本的合成 OSS 使用 4 MiB 以内的单次 PUT，样本须是单命名空间、完整导出，并包含该项目的实际 JEI 合成配方和可展示图片。有来源与哈希的真实大包另走[分片恢复及公开回放](../tools/testing/export_multipart/README.md)，使用同一上传会话继续导入。保留自有原包及生产环境记录供独立核对。
 
 夹具初始化和释放临时 schema 时用 `flock` 串行化 DDL。默认锁位于当前用户缓存目录
 的 `mcmods-cn/test-locks/postgres-ddl.lock`。多个进程共用测试库时，可给它们
