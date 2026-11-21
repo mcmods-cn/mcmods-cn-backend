@@ -67,6 +67,9 @@ func newAuditFixGRFixture(t *testing.T, durations ...time.Duration) auditFixGRFi
 	if _, err = db.Exec(ctx, "select setval(pg_get_serial_sequence('users','id'),$1,false)", time.Now().UnixNano()%500000000+1000000000); err != nil {
 		t.Fatal(err)
 	}
+	// Each fixture owns its database. Give its rate limits and projections the
+	// same boundary so another fixture on loopback cannot spend its IP budget.
+	cfg.Redis.Namespace += "-audit-import-" + randomCatalogPublicID()
 	server := NewServer(ctx, cfg, db, nil, nil, nil, nil)
 	t.Cleanup(func() {
 		c, stop := context.WithTimeout(context.Background(), 5*time.Second)
