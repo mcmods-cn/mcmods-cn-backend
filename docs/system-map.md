@@ -9,7 +9,7 @@
 3. `requireModEditor`、`createModExportJob` 检查项目编辑权限、目标版本、文件所有者、分类与来源。在同一事务内登记包、导入任务及出站事件。相同字节仍绑定到具体上传、项目和版本。Worker 重新读取字节计算哈希，校验 ZIP、schema、MODID、加载器及版本；需要确认时保存任务状态等待用户处理。
 4. `catalogImportEligibilityTx` 用事务当前账号、RBAC、目标版本及入队时记录的发布模式判断是否可执行。源快照、模板、槽位、素材按修订和执行租约分段落库。衍生对象先登记，后续尝试根据 `run_token` 激活或补偿。人工录入字段、来源和授权通过现有投影规则保留。
 5. `ready/partial` 描述导入结果；`current_stage=review` 表示等待审核。管理员路由下的 `activateModExportRevision` 同样接受持有适用审核权限的账号。通过审核或已有明确的自动发布授权后，生效修订、资源投影、JEI 模板和目录代数在同一事务提交。通过 `internal/catalogvisibility` 的公开来源才能进入目录、资源媒体或短链。[审核范围](game-import-review-scope.md) · [目录来源](public-catalog-source-policy.md)
-6. 前端从 `/api/v1/recipe-types`、`/api/v1/catalog/recipes/{publicId}/render` 和项目资料 API 读取投影，`UnifiedRecipeCard` 等呈现数量、单位、候选与几何区域。空槽不构成输入，缺失顺序、未知概率及已知零各有意义。类别 catalyst 与槽位角色独立；`rect` 用于交互，`visual_rect` 用于绘制。[有出处的消费端样包](../internal/httpapi/testdata/audit-20261024/auditfixture-v7-game-provenance.json)
+6. 前端从 `/api/v1/recipe-types`、`/api/v1/catalog/recipes/{publicId}/render` 和项目资料 API 读取投影，`UnifiedRecipeCard` 等呈现数量、单位、候选与几何区域。空槽不构成输入，缺失顺序、未知概率及已知零各有意义。类别 catalyst 与槽位角色独立；`rect` 用于交互，`visual_rect` 用于绘制。[Fabric 与 Forge 的真实重放包](../internal/httpapi/testdata/game-20261121/provenance.json) · [存量 JEI 几何的核对与重新审核](import-asset-registry.md)
 
 ## 其他业务的入口与边界
 
