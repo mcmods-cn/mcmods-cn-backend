@@ -147,8 +147,11 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateOAuthConfig(w http.ResponseWriter, r *http.Request) {
-	var payload oauthConfigPayload
-	if err := decodeJSON(r, &payload); err != nil {
+	var payload struct {
+		Providers map[string]json.RawMessage `json:"providers"`
+	}
+	patch := r.Method == http.MethodPatch
+	if err := decodeJSON(r, &payload); err != nil || (patch && len(payload.Providers) == 0) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
@@ -170,7 +173,7 @@ func (s *Server) updateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	seenProviders := make(map[string]struct{}, len(payload.Providers))
-	for provider, cfg := range payload.Providers {
+	for provider, fields := range payload.Providers {
 		provider = strings.ToLower(strings.TrimSpace(provider))
 		if _, duplicate := seenProviders[provider]; duplicate {
 			writeError(w, http.StatusBadRequest, "第三方登录配置包含重复提供商")
@@ -179,6 +182,11 @@ func (s *Server) updateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 		seenProviders[provider] = struct{}{}
 		if _, ok := supportedOAuthProviders[provider]; !ok {
 			writeError(w, http.StatusBadRequest, "不支持的第三方登录: "+provider)
+			return
+		}
+		cfg, err := applyOAuthProviderUpdate(fields, current.Providers[provider], patch)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "第三方登录配置字段无效")
 			return
 		}
 		cfg.ClientID = strings.TrimSpace(cfg.ClientID)
@@ -229,6 +237,29 @@ func (s *Server) updateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, redactOAuthConfig(current))
+}
+
+// PUT replaces the provider's public fields. PATCH applies only supplied fields
+// to the configuration read under the advisory lock. Both retain a hidden
+// secret if the form sends an empty secret.
+func applyOAuthProviderUpdate(raw json.RawMessage, current oauthProviderConfig, patch bool) (oauthProviderConfig, error) {
+	var next oauthProviderConfig
+	if patch {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil || len(fields) == 0 {
+			return next, errors.New("expected nonempty OAuth provider field update")
+		}
+		for _, value := range fields {
+			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return next, errors.New("OAuth provider fields cannot be null")
+			}
+		}
+		next = current
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(&next)
+	return next, err
 }
 
 func (s *Server) oauthConfig(ctx context.Context) (oauthConfigPayload, error) {

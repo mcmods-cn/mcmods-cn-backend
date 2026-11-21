@@ -472,6 +472,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/admin/config/minecraft-versions/sync", s.requirePermission("admin.config.write", s.syncMinecraftVersions))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/mail", s.requirePermission("mail.write", s.updateMailConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/oauth", s.requirePermission("admin.config.write", s.updateOAuthConfig))
+	s.mux.HandleFunc("PATCH /api/v1/admin/config/oauth", s.requirePermission("admin.config.write", s.updateOAuthConfig))
 	s.mux.HandleFunc("GET /api/v1/admin/config/nats", s.requirePermission("admin.config.read", s.getNATSConfig))
 	s.mux.HandleFunc("PUT /api/v1/admin/config/nats", s.requirePermission("admin.config.write", s.updateNATSConfig))
 	s.mux.HandleFunc("GET /api/v1/admin/config/mod-imports", s.requirePermission("admin.config.read", s.getModImportConfig))
