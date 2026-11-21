@@ -5,6 +5,7 @@ integration is a second gate: discover every top-level Test and Fuzz seed in
 `go list ./...`, invoke each name exactly once, and fail if any batch fails.
 Conditional skips are printed by Go; `invoked` is not a claim that skipped
 tests passed. Required external/live fixtures must be validated separately.
+When opting into [real Typesense tests](../../../docs/typesense-search.md), provide both the dedicated loopback service credentials and the absolute server executable path. The creator cursor test starts its own process. The Redis restart tests also take a separate `MCMODS_TEST_REDIS_BINARY` executable.
 Package discovery parses only `go list` stdout. Module-download diagnostics
 remain visible on stderr and cannot become test package names; a failed
 `go list` stops the runner instead of using a partial list.

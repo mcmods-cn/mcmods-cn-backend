@@ -44,9 +44,10 @@ API Key 仅保存在后端环境中，不应传给浏览器。该 Key 需要健�
 隔离环境使用真实 Typesense 29.0 验证过 schema、文档导入、多语言名称/正文检索和删除。
 这仅验证合成样本的搜索契约，不代表生产吞吐、相关性质量或线上索引健康。
 GR-R02 的 `TestAuditGRR02RealTypesenseRebuildRemovesLegacyNonapprovedTermsIntegration` 还通过真实 PostgreSQL 与实际业务 rebuild Worker 验证 v5→v6、别名切换、旧词移除、已批准名称保留及幂等重跑；它使用异常合成 projection，不证明普通用户写入可达。
-可选测试 `TestRealTypesenseImportsAndFindsLocalizedTextIntegration` 只接受明确的回环 HTTP 地址，
-需设置 `MCMODS_RUN_TYPESENSE_INTEGRATION=1`、`MCMODS_TEST_TYPESENSE_URL` 和专用随机
-`MCMODS_TEST_TYPESENSE_API_KEY`；未提供时明确跳过，不会使用运行配置中的搜索凭据。
+用 `MCMODS_RUN_TYPESENSE_INTEGRATION=1` 启用真实搜索测试。连接已有测试进程的用例从
+`MCMODS_TEST_TYPESENSE_URL` 读取 `http://127.0.0.1` 地址，从 `MCMODS_TEST_TYPESENSE_API_KEY` 读取专用随机密钥。
+作者目录游标用例会在临时目录和端口启动自己的服务，还需要 `MCMODS_TEST_TYPESENSE_BINARY` 指向本机可执行的
+`typesense-server` 绝对路径。本轮使用 Typesense 29.0。未启用真实搜索时这些用例跳过，启用后缺少相应输入会报错。
 
 当前投影覆盖模组、整合包、其他大型资源、作者/团队、社区文章、Minecraft 服务器和资料资源。筛选、审核可见性
 仍会在搜索层和最终 PostgreSQL 读取层同时校验，Typesense 只返回内部数字 ID 排序结果。

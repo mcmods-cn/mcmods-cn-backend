@@ -98,7 +98,7 @@ npm run test:browser
 不要用真实 API 地址构建同一个产物后，假定只拦截 `api.example.test` 的 SSR fixture 仍然生效。
 实际联通和 fixture 可用两个独立工作区运行，避免 dev/build 同时写同一个 `.next`。
 
-Typesense 的真实回环服务是可选的单独测试，见 [搜索投影说明](typesense-search.md)。
+启用真实 Typesense 的全仓回归要同时提供专用回环 URL、测试密钥和服务端可执行文件，因为作者目录测试会独立启动和停止一个进程。Redis 冷重启和 SSE 测试也要用 `MCMODS_TEST_REDIS_BINARY` 指向本任务可用的 `redis-server`。仅设置已运行的服务地址无法执行这两种进程测试。[搜索测试配置](typesense-search.md)
 所有这些通过结果都不证明生产数据健康、备份可恢复或真实供应商语义质量。
 
 ### 真实游戏包经浏览器和 JetStream 的验证
