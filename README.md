@@ -39,10 +39,10 @@ go run ./tools/testing/db_suite
 go test -race -p 1 ./internal/queue ./internal/querycache -count=1
 ```
 
-浏览器加真实后端的门禁位于前端 `test:live` 与本仓 `tools/testing`。生产浏览器 fixture、真实服务、游戏原包和本次治理的执行结果分别登记。[发现与验收台账](docs/governance.md)
+账号与收藏链使用前端 `test:live`。需要连同数据库和进程一并启动与回收时，用 [live_acceptance_v2.py](tools/testing/live_acceptance_v2.py) 创建新的测试范围。它在清理前重验创建时记录的数据库 OID、所有者和随机标记。旧版记录缺少这些字段时保留原状，按[历史所有权说明](docs/audit/t002-live-acceptance-v2.md)核对。游戏原包的端到端入口、加载器、预期配方和浏览器步骤见[隔离验证说明](docs/testing-isolated-environment.md#真实游戏包经浏览器和-jetstream-的验证)，本轮门禁结果见[治理台账](docs/governance.md)。
 
 ## 数据迁移、发布和恢复
 
-`internal/database/migrator.go` 在空库安装 generation 168。已有 168 库在启动时检查必要的前向修复。其他代际会停止初始化；保有业务数据的实例需要先备份和试恢复，再为该代际设计迁移。保持 `DB_RESET_ON_START=false`。既有数据库升级应根据目标缺项使用专用诊断或迁移工具。[数据库函数](docs/database-function-repair.md) · [资料发布策略](docs/audit-catalog-import-policy-upgrade.md) · [文件绑定](docs/audit-oss-byte-binding-upgrade.md)
+`internal/database/migrator.go` 在空库安装 generation 168。已有 168 库在启动时检查必要的前向修复。其他代际会停止初始化。保有业务数据的实例需要先备份和试恢复，再为该代际设计迁移。保持 `DB_RESET_ON_START=false`。既有数据库升级应根据目标缺项使用专用诊断或迁移工具。[数据库函数](docs/database-function-repair.md) · [资料发布策略](docs/audit-catalog-import-policy-upgrade.md) · [文件绑定](docs/audit-oss-byte-binding-upgrade.md)
 
 后端按数据库身份和 schema 就绪后才提供业务 API。`/live` 判断进程，`/ready` 返回依赖状态与初始化失败原因。队列积压或消费失败先查管理员基础设施指标、最老未交付事件和业务任务状态。按现有死信恢复流程处理，保留在途任务和对象的来源记录。发布顺序、回滚边界与这轮版本组合见[治理台账](docs/governance.md)。过去的压测、审计与整改可从[历史索引](docs/history/README.md)追溯。

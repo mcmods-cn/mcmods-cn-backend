@@ -104,20 +104,23 @@ Typesense 的真实回环服务是可选的单独测试，见 [搜索投影说�
 ### 真实游戏包经浏览器和 JetStream 的验证
 
 使用已初始化的隔离环境、干净的三个仓库检出和已安装依赖的独立前端目录。
-后端仓库保留了原始 Fabric 游戏 ZIP 及生产提交记录，位于
-`internal/httpapi/testdata/audit-20261024/`。下列命令在后端根目录运行。
-将两个仓库变量指向本机检出目录，选用空闲的回环前端端口。
+[本轮的两个原包及输入](../internal/httpapi/testdata/game-20261121/provenance.json)记录生产提交、加载器、输入模组、原包大小与哈希。
+下列命令在后端根目录运行。两个仓库变量指向本机检出目录，前端使用空闲的回环端口。
 
 ```sh
 export MCMODS_AUDIT_FRONTEND_REPO="$(cd ../mcmods-cn-frontend && pwd)"
 export MCMODS_AUDIT_EXPORTER_REPO="$(cd ../mcmods_exporter && pwd)"
 export MCMODS_AUDIT_FRONTEND_ORIGIN=http://127.0.0.1:3341
 export MCMODS_AUDIT_JOURNEY_DIR="$(mktemp -d)"
-export MCMODS_AUDIT_GAME_PACKAGE="$PWD/internal/httpapi/testdata/audit-20261024/auditfixture-minecraft1201-fabric-jei1520-v7.zip"
+export MCMODS_AUDIT_GAME_PACKAGE="$PWD/internal/httpapi/testdata/game-20261121/fabric/export.zip"
+export MCMODS_AUDIT_EXPORTER_COMMIT=0856ee5a6b8a8c466d3a19b47c7527f34d52bbfc
+export MCMODS_AUDIT_GAME_SHA256=05ee092f22081d7b244265ae1e3ce646af1ca71e91659a46eb4762b02e33ec6c
 MCMODS_RUN_LIVE_GAME_JOURNEY=1 go test -count=1 -timeout=50m -v ./internal/httpapi -run '^TestAuditLiveGameJourneyFixture$'
 ```
 
-也可将 `MCMODS_AUDIT_GAME_PACKAGE` 指向新取得的真实游戏 ZIP，同时设置生产记录中的
+复跑同一生产提交的 Forge 包时，换用 `game-20261121/forge/export.zip`、哈希
+`694bb6554e24c30492d2c3fec8a40e0a3b95bcfec60a1ae2a92114564a1d8096` 和新建的测试目录。
+历史 Fabric 包仍位于 `internal/httpapi/testdata/audit-20261024/`。使用其他原包时，填写其来源记录中的
 `MCMODS_AUDIT_GAME_SHA256` 和完整 40 位 `MCMODS_AUDIT_EXPORTER_COMMIT`。
 夹具核验原始字节和生产提交的存在，从 manifest 和模组注册表读取目标版本与命名空间。
 这条浏览器用例所用的合成 OSS 支持 4 MiB 以内的单次 PUT，样本须是单命名空间、完整导出，
@@ -137,7 +140,9 @@ Playwright Chromium 后，在对应前端根目录运行以下命令。
 MCMODS_AUDIT_JOURNEY_RUNTIME="$MCMODS_AUDIT_JOURNEY_DIR/runtime.json" node --test browser-tests/audit-game-live.mts
 ```
 
-检查浏览器报告、图片像素及任务、审核修订、JetStream ACK 状态。完成后
+浏览器报告中的四个阶段依次对应创建导入任务、Worker 就绪、另一账号审核成功、匿名页面像素核对。保留报告中的任务和修订 ID。
+在发出 STOP 前，读取同目录的 `runtime.json`，等待 `databaseSnapshotPending=false`。其 `jobs` 和 `importRevisions` 来自数据库，`workerConsumerState` 来自这个专用 JetStream 消费者。对本轮单次上传，核对仅有一个对应的 ready 任务和生效修订，`delivered=acknowledged=1`，`pending=ackPending=redelivered=0`。原包应归属上传账号，配方应为一块橡木木板产出两根木棍，未知概率保持为空。
+完成后
 `touch "$MCMODS_AUDIT_JOURNEY_DIR/STOP"` 并停止本次前端。该夹具使用回环 HTTP、
 真实 PostgreSQL 和文件型 JetStream、合成 OSS。请保管目录中的合成会话文件，
 仅交接脱敏后的结果。测试不会运行新的游戏客户端。
