@@ -113,8 +113,8 @@ export MCMODS_AUDIT_EXPORTER_REPO="$(cd ../mcmods_exporter && pwd)"
 export MCMODS_AUDIT_FRONTEND_ORIGIN=http://127.0.0.1:3341
 export MCMODS_AUDIT_JOURNEY_DIR="$(mktemp -d)"
 export MCMODS_AUDIT_GAME_PACKAGE="$PWD/internal/httpapi/testdata/game-20261121/fabric/export.zip"
-export MCMODS_AUDIT_EXPORTER_COMMIT=0856ee5a6b8a8c466d3a19b47c7527f34d52bbfc
-export MCMODS_AUDIT_GAME_SHA256=05ee092f22081d7b244265ae1e3ce646af1ca71e91659a46eb4762b02e33ec6c
+export MCMODS_AUDIT_EXPORTER_COMMIT=1108a8eda82ce3912841bda20d182dda89ab16ea
+export MCMODS_AUDIT_GAME_SHA256=df72252ced1fa84035f4d95b5b56541188f2b5342b9f74fdfafdc14238814702
 MCMODS_RUN_LIVE_GAME_JOURNEY=1 go test -count=1 -timeout=50m -v ./internal/httpapi -run '^TestAuditLiveGameJourneyFixture$'
 ```
 
