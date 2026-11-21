@@ -76,3 +76,21 @@ func completeNATSUpdateRequest() natsConfigUpdateRequest {
 }
 
 func natsPtr[T any](value T) *T { return &value }
+
+func TestNATSNewStreamBudgetIsPreservedForOlderClients(t *testing.T) {
+	request := completeNATSUpdateRequest()
+	current := config.NATSConfig{JetStream: config.JetStreamConfig{NewStreamMaxBytes: 64 << 20}}
+	next, err := request.config(current)
+	if err != nil || next.JetStream.NewStreamMaxBytes != current.JetStream.NewStreamMaxBytes {
+		t.Fatalf("old PUT lost creation-only budget: %d/%v", next.JetStream.NewStreamMaxBytes, err)
+	}
+	request.JetStream.NewStreamMaxBytes = natsPtr(int64(128 << 20))
+	next, err = request.config(current)
+	if err != nil || redactNATSConfig(next, queue.Status{}).JetStream.NewStreamMaxBytes != 128<<20 {
+		t.Fatalf("new stream budget did not round-trip: %v", err)
+	}
+	request.JetStream.NewStreamMaxBytes = natsPtr(int64(0))
+	if _, err = request.config(current); err == nil {
+		t.Fatal("accepted an unlimited new stream budget")
+	}
+}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"strings"
 
@@ -429,15 +428,13 @@ func (worker *NotificationWorker) sendUserEmail(ctx context.Context, userID int6
 	if err != nil {
 		return err
 	}
-	active, err := worker.activeMailer(ctx)
-	if err != nil {
-		return err
-	}
-	if err = active.Send(email, subject, body); err != nil {
-		slog.Warn("send notification email", "user_id", userID, "error", err)
-		return err
-	}
-	return nil
+	return deliverNotificationEmail(ctx, worker.db, func() error {
+		active, err := worker.activeMailer(ctx)
+		if err != nil {
+			return err
+		}
+		return active.SendEvent(ctx, email, subject, body, queue.EventIDFromContext(ctx))
+	})
 }
 
 func (worker *NotificationWorker) activeMailer(ctx context.Context) (mailer.Mailer, error) {

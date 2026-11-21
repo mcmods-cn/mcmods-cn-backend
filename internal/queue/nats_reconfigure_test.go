@@ -34,6 +34,11 @@ func TestReconfigureStagesAllSubscriptionsAndKeepsLastGoodRuntime(t *testing.T) 
 	if err := client.SubscribeBroadcast("user.*", func(context.Context, string, []byte) {}); err != nil {
 		t.Fatal(err)
 	}
+	// Core-only peers subscribe only to broadcasts. Exercise two independent
+	// registrations across both candidate failure and activation.
+	if err := client.SubscribeBroadcast("project.*", func(context.Context, string, []byte) {}); err != nil {
+		t.Fatal(err)
+	}
 	oldServer.waitForSubscriptions(t, 2)
 
 	persistCalled := false

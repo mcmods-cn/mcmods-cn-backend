@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -264,5 +265,61 @@ func TestPreprovisionedStreamRetainsItsLimitsAndReportsUsage(t *testing.T) {
 	sample := client.StreamUsage(ctx)
 	if sample == nil || sample.Messages != 1 || sample.MaxBytes != 32768 || sample.MaxMessages != 1 || sample.Discard != nats.DiscardNew.String() || sample.Bytes == 0 {
 		t.Fatalf("stream usage does not reflect broker state: %+v", sample)
+	}
+}
+
+func TestCoreOnlyPeerConsumesTasksExclusivelyFromPostgres(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cfg := reconfigureTestConfig(jetStreamIntegrationURL(t))
+	cfg.SubjectPrefix = "mixed-" + randomEventID()
+	local := New(ctx, cfg)
+	defer local.Close()
+	localCalls := make(chan string, 2)
+	if err := local.SubscribeTask("ai", func(ctx context.Context, _ []byte) error {
+		localCalls <- EventIDFromContext(ctx)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.JetStream.Enabled, cfg.JetStream.Stream = true, uniqueJetStreamName("MIXED_")
+	durable := New(ctx, cfg)
+	defer durable.Close()
+	if durable.jetStream == nil {
+		t.Fatal("owned JetStream unavailable")
+	}
+	defer durable.jetStream.DeleteStream(cfg.JetStream.Stream)
+	received := make(chan string, 1)
+	if err := durable.SubscribeTask("ai", func(ctx context.Context, _ []byte) error {
+		received <- EventIDFromContext(ctx)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	publishEnvelope(t, ctx, durable, "ai", "broker-event", `{}`)
+	select {
+	case got := <-received:
+		if !strings.HasPrefix(got, "broker-event-") {
+			t.Fatal(got)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	// The registered local operation must also remain usable for a database claim.
+	if err := local.HandleLocally(ctx, "ai", "owned-test", deliveryTestEnvelope(t)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-localCalls:
+		if got != "owned-test" {
+			t.Fatalf("Core-only peer also executed a JetStream task: %s", got)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	select {
+	case got := <-localCalls:
+		t.Fatalf("unexpected second local execution: %s", got)
+	case <-time.After(250 * time.Millisecond):
 	}
 }

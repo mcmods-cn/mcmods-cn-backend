@@ -116,12 +116,15 @@ type NATSConfig struct {
 	Realtime      bool             `json:"realtime"`
 }
 
+const DefaultNewStreamMaxBytes int64 = 256 << 20
+
 type JetStreamConfig struct {
-	Enabled        bool          `json:"enabled"`
-	Stream         string        `json:"stream"`
-	MaxDeliver     int           `json:"maxDeliver"`
-	AckWait        time.Duration `json:"ackWait"`
-	PublishTimeout time.Duration `json:"publishTimeout"`
+	NewStreamMaxBytes int64         `json:"newStreamMaxBytes"`
+	Enabled           bool          `json:"enabled"`
+	Stream            string        `json:"stream"`
+	MaxDeliver        int           `json:"maxDeliver"`
+	AckWait           time.Duration `json:"ackWait"`
+	PublishTimeout    time.Duration `json:"publishTimeout"`
 }
 
 type RedisConfig struct {
@@ -287,11 +290,12 @@ func Load() Config {
 			OutboxEnabled: true,
 			Realtime:      getenvBool("REALTIME_ENABLED", true),
 			JetStream: JetStreamConfig{
-				Enabled:        getenvBool("NATS_JETSTREAM_ENABLED", true),
-				Stream:         getenv("NATS_JETSTREAM_STREAM", "MCMODS_TASKS"),
-				MaxDeliver:     getenvInt("NATS_JETSTREAM_MAX_DELIVER", 8),
-				AckWait:        time.Duration(getenvInt("NATS_JETSTREAM_ACK_WAIT_SECONDS", 300)) * time.Second,
-				PublishTimeout: time.Duration(getenvInt("NATS_JETSTREAM_PUBLISH_TIMEOUT_SECONDS", 5)) * time.Second,
+				Enabled:           getenvBool("NATS_JETSTREAM_ENABLED", true),
+				Stream:            getenv("NATS_JETSTREAM_STREAM", "MCMODS_TASKS"),
+				NewStreamMaxBytes: int64(getenvInt("NATS_JETSTREAM_NEW_STREAM_MAX_BYTES", int(DefaultNewStreamMaxBytes))),
+				MaxDeliver:        getenvInt("NATS_JETSTREAM_MAX_DELIVER", 8),
+				AckWait:           time.Duration(getenvInt("NATS_JETSTREAM_ACK_WAIT_SECONDS", 300)) * time.Second,
+				PublishTimeout:    time.Duration(getenvInt("NATS_JETSTREAM_PUBLISH_TIMEOUT_SECONDS", 5)) * time.Second,
 			},
 			Tasks: []NATSTaskConfig{
 				{
@@ -504,6 +508,9 @@ func (cfg Config) Validate() error {
 		}) >= 0 {
 			problems = append(problems, errors.New("REDIS_NAMESPACE may only contain letters, numbers, underscores, and hyphens"))
 		}
+	}
+	if cfg.NATS.JetStream.NewStreamMaxBytes < 0 {
+		problems = append(problems, errors.New("JetStream new stream byte limit must be positive"))
 	}
 	if cfg.NATS.JetStream.Enabled {
 		if !cfg.NATS.Enabled {

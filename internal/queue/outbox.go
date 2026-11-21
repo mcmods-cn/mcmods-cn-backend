@@ -15,6 +15,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+var errStreamBackpressure = errors.New("JetStream capacity unavailable")
+
 type OutboxMetrics struct {
 	Published uint64
 	Failed    uint64
@@ -41,6 +43,7 @@ type outboxRecord struct {
 	ID, Attempts, MaxAttempts int64
 	Event                     EventEnvelope
 	TaskCode                  string
+	localConsumer             bool
 }
 
 func EnqueueTx(ctx context.Context, tx pgx.Tx, taskCode, eventType, aggregateType, aggregateID, traceID string, payload any) (string, error) {
@@ -171,6 +174,9 @@ func (dispatcher *OutboxDispatcher) dispatchAvailable(ctx context.Context, limit
 				return dispatcher.deliver(ctx, record, true)
 			})
 		} else if err := dispatcher.deliver(ctx, record, false); err != nil {
+			if errors.Is(err, errStreamBackpressure) {
+				return count + 1, nil // stop the pass after one confirmed capacity refusal
+			}
 			return count + 1, err
 		}
 	}
@@ -243,6 +249,23 @@ func (dispatcher *OutboxDispatcher) deliver(ctx context.Context, record outboxRe
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	if !local && streamCapacityExceeded(err) {
+		// The broker explicitly refused storage. The handler has never run.
+		// Preserve the original ID and attempt budget while operators restore capacity.
+		tag, updateErr := dispatcher.db.Exec(ctx, `update nats_outbox set status='failed',available_at=now()+interval '30 seconds',
+			last_error=$4,locked_at=null,locked_by='',attempts=attempts-1,updated_at=now()
+			where id=$1 and status='publishing' and locked_by=$2 and attempts=$3`, record.ID, dispatcher.workerID,
+			record.Attempts+1, errStreamBackpressure.Error())
+		if updateErr != nil {
+			return updateErr
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("outbox row %d lost publishing ownership under backpressure", record.ID)
+		}
+		dispatcher.failed.Add(1)
+		dispatcher.retried.Add(1)
+		return errStreamBackpressure
+	}
 	if errors.Is(err, ErrTaskDisabled) || errors.Is(err, errDeliveryModeChanged) {
 		// A hot reconfiguration raced the claim. Restore the attempt budget;
 		// a deliberate pause must not consume retries or create dead letters.
@@ -257,6 +280,9 @@ func (dispatcher *OutboxDispatcher) deliver(ctx context.Context, record outboxRe
 		return nil
 	}
 	if err != nil {
+		// Once the lease monitor has stopped, classify errors for audited replay.
+		// An unavailable local subscription never received the event.
+		record.localConsumer = local && !errors.Is(err, ErrUnavailable)
 		return dispatcher.fail(ctx, record, err)
 	}
 	result, err := dispatcher.db.Exec(ctx, `update nats_outbox set status='published',published_at=now(),locked_at=null,locked_by='',updated_at=now()
@@ -303,15 +329,25 @@ func (dispatcher *OutboxDispatcher) fail(ctx context.Context, record outboxRecor
 		errorText = errorText[:1000]
 	}
 	if attempts >= record.MaxAttempts {
+		stage := "publish"
+		var deadEnvelope any
+		if record.localConsumer {
+			stage = "consumer:" + record.TaskCode
+			raw, err := json.Marshal(record.Event)
+			if err != nil {
+				return err
+			}
+			deadEnvelope = string(raw)
+		}
 		result, err := dispatcher.db.Exec(ctx, `with moved as (
 			update nats_outbox set status='dead',last_error=$2,locked_at=null,locked_by='',updated_at=now()
 			where id=$1 and status='publishing' and locked_by=$3 and attempts=$4
 			returning event_id,event_type,subject,payload,aggregate_type,aggregate_id,attempts
 		) insert into dead_letter_events(event_id,event_type,subject,payload,failure_stage,aggregate_type,aggregate_id,attempts,last_error)
-		select event_id,event_type,subject,payload,'publish',aggregate_type,aggregate_id,attempts,$2 from moved
+		select event_id,event_type,subject,coalesce($6::jsonb,payload),$5,aggregate_type,aggregate_id,attempts,$2 from moved
 		on conflict(event_id,failure_stage) do update set
 		aggregate_type=excluded.aggregate_type,aggregate_id=excluded.aggregate_id,
-		attempts=excluded.attempts,last_error=excluded.last_error,failed_at=now(),replayed_at=null`, record.ID, errorText, dispatcher.workerID, attempts)
+		attempts=excluded.attempts,last_error=excluded.last_error,failed_at=now(),replayed_at=null`, record.ID, errorText, dispatcher.workerID, attempts, stage, deadEnvelope)
 		if err != nil {
 			return fmt.Errorf("mark outbox row %d dead: %w", record.ID, err)
 		}
@@ -322,7 +358,7 @@ func (dispatcher *OutboxDispatcher) fail(ctx context.Context, record outboxRecor
 		dispatcher.dead.Add(1)
 		return nil
 	}
-	backoff := time.Second * time.Duration(1<<min(attempts, int64(8)))
+	backoff := jitteredRetryDelay(time.Second * time.Duration(1<<min(attempts, int64(8))))
 	result, err := dispatcher.db.Exec(ctx, `update nats_outbox set status='failed',last_error=$2,available_at=now()+$3::interval,
 		locked_at=null,locked_by='',updated_at=now() where id=$1 and status='publishing' and locked_by=$4 and attempts=$5`, record.ID, errorText, fmt.Sprintf("%f seconds", backoff.Seconds()), dispatcher.workerID, attempts)
 	if err != nil {

@@ -1,6 +1,8 @@
 package mailer
 
 import (
+	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -8,11 +10,16 @@ import (
 	"net"
 	"net/mail"
 	"net/smtp"
+	"net/textproto"
 	"strings"
 	"time"
 
 	"mcmods-cn-backend/internal/config"
 )
+
+// ErrAcceptanceUnknown means the DATA terminator may have reached the peer
+// but its final reply was lost. The SMTP transaction cannot be retried safely.
+var ErrAcceptanceUnknown = errors.New("SMTP acceptance is unknown")
 
 type Mailer struct {
 	Config config.SMTPConfig
@@ -27,6 +34,10 @@ func (m Mailer) Enabled() bool {
 }
 
 func (m Mailer) Send(to string, subject string, body string) error {
+	return m.SendEvent(context.Background(), to, subject, body, "")
+}
+
+func (m Mailer) SendEvent(ctx context.Context, to, subject, body, eventID string) error {
 	if !m.Enabled() {
 		return fmt.Errorf("mail system is not configured")
 	}
@@ -49,13 +60,17 @@ func (m Mailer) Send(to string, subject string, body string) error {
 		"MIME-Version: 1.0",
 		`Content-Type: text/plain; charset="UTF-8"`,
 	}
+	if eventID != "" {
+		domain := fromAddress.Address[strings.LastIndexByte(fromAddress.Address, '@')+1:]
+		headers = append(headers, fmt.Sprintf("Message-ID: <mcmods.%x@%s>", sha256.Sum256([]byte(eventID)), domain))
+	}
 	message := strings.Join(headers, "\r\n") + "\r\n\r\n" + body
 
 	var auth smtp.Auth
 	if m.Config.Username != "" {
 		auth = smtp.PlainAuth("", m.Config.Username, m.Config.Password, m.Config.Host)
 	}
-	return sendSMTP(addr, m.Config.Host, auth, fromAddress.Address, []string{toAddress.Address}, []byte(message), m.Config.UseTLS)
+	return sendSMTP(ctx, addr, m.Config.Host, auth, fromAddress.Address, []string{toAddress.Address}, []byte(message), m.Config.UseTLS)
 }
 
 func parseMailbox(value string) (*mail.Address, error) {
@@ -69,11 +84,13 @@ func parseMailbox(value string) (*mail.Address, error) {
 	return address, nil
 }
 
-func sendSMTP(addr string, host string, auth smtp.Auth, from string, to []string, msg []byte, requireTLS bool) error {
-	connection, err := (&net.Dialer{Timeout: 15 * time.Second}).Dial("tcp", addr)
+func sendSMTP(ctx context.Context, addr string, host string, auth smtp.Auth, from string, to []string, msg []byte, requireTLS bool) error {
+	connection, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return err
 	}
+	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer stop()
 	if err = connection.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
 		_ = connection.Close()
 		return err
@@ -120,7 +137,14 @@ func sendSMTP(addr string, host string, auth smtp.Auth, from string, to []string
 		return err
 	}
 	if err := writer.Close(); err != nil {
-		return err
+		var reply *textproto.Error
+		if errors.As(err, &reply) && reply.Code >= 400 && reply.Code < 600 {
+			return err
+		}
+		return errors.Join(ErrAcceptanceUnknown, err)
 	}
-	return client.Quit()
+	// A successful final DATA reply transfers responsibility to the peer.
+	// Failure to close that session with QUIT cannot undo acceptance.
+	_ = client.Quit()
+	return nil
 }

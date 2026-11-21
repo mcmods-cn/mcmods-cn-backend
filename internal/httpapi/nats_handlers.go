@@ -13,6 +13,7 @@ import (
 )
 
 type natsJetStreamConfigDTO struct {
+	NewStreamMaxBytes     int64  `json:"newStreamMaxBytes"`
 	Enabled               bool   `json:"enabled"`
 	Stream                string `json:"stream"`
 	MaxDeliver            int    `json:"maxDeliver"`
@@ -35,6 +36,7 @@ type natsConfigResponse struct {
 }
 
 type natsJetStreamUpdateRequest struct {
+	NewStreamMaxBytes     *int64  `json:"newStreamMaxBytes,omitempty"`
 	Enabled               *bool   `json:"enabled"`
 	Stream                *string `json:"stream"`
 	MaxDeliver            *int    `json:"maxDeliver"`
@@ -79,6 +81,13 @@ func (payload natsConfigUpdateRequest) config(current config.NATSConfig) (config
 		return config.NATSConfig{}, errors.New("NATS must be enabled when JetStream is enabled")
 	}
 
+	streamBudget := current.JetStream.NewStreamMaxBytes
+	if value := payload.JetStream.NewStreamMaxBytes; value != nil {
+		if *value < 1 {
+			return config.NATSConfig{}, errors.New("new stream byte limit must be positive")
+		}
+		streamBudget = *value
+	}
 	password := current.Password
 	if payload.ClearPassword {
 		password = ""
@@ -106,11 +115,12 @@ func (payload natsConfigUpdateRequest) config(current config.NATSConfig) (config
 		OutboxEnabled: true,
 		Realtime:      *payload.Realtime,
 		JetStream: config.JetStreamConfig{
-			Enabled:        *payload.JetStream.Enabled,
-			Stream:         *payload.JetStream.Stream,
-			MaxDeliver:     *payload.JetStream.MaxDeliver,
-			AckWait:        time.Duration(*payload.JetStream.AckWaitSeconds) * time.Second,
-			PublishTimeout: time.Duration(*payload.JetStream.PublishTimeoutSeconds) * time.Second,
+			Enabled:           *payload.JetStream.Enabled,
+			Stream:            *payload.JetStream.Stream,
+			NewStreamMaxBytes: streamBudget,
+			MaxDeliver:        *payload.JetStream.MaxDeliver,
+			AckWait:           time.Duration(*payload.JetStream.AckWaitSeconds) * time.Second,
+			PublishTimeout:    time.Duration(*payload.JetStream.PublishTimeoutSeconds) * time.Second,
 		},
 	}, nil
 }
@@ -264,7 +274,7 @@ func redactNATSConfig(cfg config.NATSConfig, status queue.Status) natsConfigResp
 		HasPassword: cfg.Password != "" || urlPassword, HasToken: cfg.Token != "" || urlToken,
 		SubjectPrefix: cfg.SubjectPrefix, Tasks: cfg.Tasks, OutboxEnabled: cfg.OutboxEnabled, Realtime: cfg.Realtime,
 		JetStream: natsJetStreamConfigDTO{
-			Enabled: cfg.JetStream.Enabled, Stream: cfg.JetStream.Stream, MaxDeliver: cfg.JetStream.MaxDeliver,
+			NewStreamMaxBytes: cfg.JetStream.NewStreamMaxBytes, Enabled: cfg.JetStream.Enabled, Stream: cfg.JetStream.Stream, MaxDeliver: cfg.JetStream.MaxDeliver,
 			AckWaitSeconds: int(cfg.JetStream.AckWait / time.Second), PublishTimeoutSeconds: int(cfg.JetStream.PublishTimeout / time.Second),
 		},
 		Status: status,

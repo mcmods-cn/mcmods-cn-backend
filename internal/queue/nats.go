@@ -245,6 +245,9 @@ func NormalizeConfig(cfg config.NATSConfig) config.NATSConfig {
 	if strings.TrimSpace(cfg.JetStream.Stream) == "" {
 		cfg.JetStream.Stream = "MCMODS_TASKS"
 	}
+	if cfg.JetStream.NewStreamMaxBytes <= 0 {
+		cfg.JetStream.NewStreamMaxBytes = config.DefaultNewStreamMaxBytes
+	}
 	if cfg.JetStream.MaxDeliver <= 0 {
 		cfg.JetStream.MaxDeliver = 8
 	}
@@ -543,8 +546,7 @@ func (c *Client) PublishEvent(ctx context.Context, taskCode, eventID string, raw
 }
 
 // HandleLocally is the reliable no-JetStream fallback used by the PostgreSQL
-// outbox dispatcher. Core NATS may still be used as a wake-up signal, but the
-// task is processed from the claimed database row before it is marked sent.
+// outbox dispatcher. Core NATS is reserved for realtime broadcasts.
 func (c *Client) HandleLocally(ctx context.Context, taskCode, eventID string, raw []byte) error {
 	if c == nil {
 		return ErrUnavailable

@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"strconv"
 	"sync"
 	"time"
@@ -53,14 +54,16 @@ func (c *Client) subscribeTaskOn(conn *nats.Conn, js nats.JetStreamContext, cfg 
 	if conn == nil || !conn.IsConnected() {
 		return ErrUnavailable
 	}
+	// In Core-only mode, the PostgreSQL dispatcher invokes this registered
+	// handler. A Core task subscription would also receive another instance's
+	// JetStream publication on the same subject.
+	if js == nil {
+		return nil
+	}
 	var inbox taskInbox
 	// A push consumer can assign more messages than one instance has handler
 	// slots. Bound locally held deliveries, including those waiting for a slot.
-	window := task.MaxConcurrent
-	if js != nil {
-		window = max(window, 1024) // accommodates the broker default of 1000 outstanding ACKs
-	}
-	pending := make(chan struct{}, window)
+	pending := make(chan struct{}, 1024) // accommodates the broker default of 1000 outstanding ACKs
 	byteBudget := semaphore.NewWeighted(nats.DefaultSubPendingBytesLimit)
 	backoff := jetStreamBackoff(cfg.JetStream.AckWait, cfg.JetStream.MaxDeliver)
 	handle := func(msg *nats.Msg) {
@@ -74,22 +77,15 @@ func (c *Client) subscribeTaskOn(conn *nats.Conn, js nats.JetStreamContext, cfg 
 			<-pending
 			return
 		}
-		var stopProgress func()
-		if js != nil {
-			stopProgress = c.keepDeliveryAlive(msg, min(backoff[0], 30*time.Minute), generation)
-		}
+		stopProgress := c.keepDeliveryAlive(msg, min(backoff[0], 30*time.Minute), generation)
 		inbox.enqueue(task.MaxConcurrent, func() {
 			defer func() {
 				byteBudget.Release(size)
 				<-pending
 			}()
-			if stopProgress != nil {
-				defer stopProgress()
-			}
+			defer stopProgress()
 			if !gate.wait() || !c.isGenerationActive(generation) {
-				if js != nil {
-					_ = msg.Nak()
-				}
+				_ = msg.Nak()
 				return
 			}
 			payload, envelope, handleErr := UnwrapEvent(msg.Data)
@@ -106,9 +102,7 @@ func (c *Client) subscribeTaskOn(conn *nats.Conn, js nats.JetStreamContext, cfg 
 				})
 			}
 			if errors.Is(handleErr, ErrTaskDisabled) || errors.Is(handleErr, errDeliveryModeChanged) {
-				if js != nil {
-					_ = msg.NakWithDelay(backoff[0])
-				}
+				_ = msg.NakWithDelay(jitteredRetryDelay(backoff[0]))
 				return
 			}
 			if c.ctx.Err() != nil {
@@ -116,65 +110,56 @@ func (c *Client) subscribeTaskOn(conn *nats.Conn, js nats.JetStreamContext, cfg 
 			}
 			if handleErr != nil {
 				c.setGenerationError(generation, handleErr)
-				if js != nil {
-					metadata, _ := msg.Metadata()
-					if metadata != nil && int(metadata.NumDelivered) >= cfg.JetStream.MaxDeliver {
-						if eventID == "" {
-							eventID = cfg.JetStream.Stream + ":" + strconv.FormatUint(metadata.Sequence.Stream, 10)
-						}
-						eventType := definition.taskCode + ".failed"
-						if envelope != nil && envelope.EventType != "" {
-							eventType = envelope.EventType
-						}
-						aggregateType, aggregateID := "", ""
-						if envelope != nil {
-							aggregateType, aggregateID = envelope.AggregateType, envelope.AggregateID
-						}
-						letter := DeadLetter{
-							EventID: eventID, EventType: eventType, TaskCode: definition.taskCode,
-							FailureStage: "consumer:" + definition.taskCode, LastError: redactDiagnostic(handleErr.Error(), cfg),
-							AggregateType: aggregateType, AggregateID: aggregateID,
-							Payload: msg.Data, Attempts: int(metadata.NumDelivered),
-						}
-						// Persist to JetStream before terminating the exhausted task.
-						// Database recovery has its own consumer and never reruns the
-						// task handler (which may already have incurred provider fees).
-						if err := c.publishDeadLetter(js, cfg, letter); err != nil {
-							c.setGenerationError(generation, err)
-							return
-						}
-						if err := msg.Term(); err != nil {
-							c.setGenerationError(generation, err)
-						}
-					} else {
-						attempt := 1
-						if metadata != nil {
-							attempt = int(metadata.NumDelivered)
-						}
-						if err := msg.NakWithDelay(backoff[max(0, min(attempt-1, len(backoff)-1))]); err != nil {
-							c.setGenerationError(generation, err)
-						}
+				metadata, _ := msg.Metadata()
+				if metadata != nil && int(metadata.NumDelivered) >= cfg.JetStream.MaxDeliver {
+					if eventID == "" {
+						eventID = cfg.JetStream.Stream + ":" + strconv.FormatUint(metadata.Sequence.Stream, 10)
+					}
+					eventType := definition.taskCode + ".failed"
+					if envelope != nil && envelope.EventType != "" {
+						eventType = envelope.EventType
+					}
+					aggregateType, aggregateID := "", ""
+					if envelope != nil {
+						aggregateType, aggregateID = envelope.AggregateType, envelope.AggregateID
+					}
+					letter := DeadLetter{
+						EventID: eventID, EventType: eventType, TaskCode: definition.taskCode,
+						FailureStage: "consumer:" + definition.taskCode, LastError: redactDiagnostic(handleErr.Error(), cfg),
+						AggregateType: aggregateType, AggregateID: aggregateID,
+						Payload: msg.Data, Attempts: int(metadata.NumDelivered),
+					}
+					// Persist to JetStream before terminating the exhausted task.
+					// Database recovery has its own consumer and never reruns the
+					// task handler (which may already have incurred provider fees).
+					if err := c.publishDeadLetter(js, cfg, letter); err != nil {
+						c.setGenerationError(generation, err)
+						return
+					}
+					if err := msg.Term(); err != nil {
+						c.setGenerationError(generation, err)
+					}
+				} else {
+					attempt := 1
+					if metadata != nil {
+						attempt = int(metadata.NumDelivered)
+					}
+					if err := msg.NakWithDelay(jitteredRetryDelay(backoff[max(0, min(attempt-1, len(backoff)-1))])); err != nil {
+						c.setGenerationError(generation, err)
 					}
 				}
 				return
 			}
-			if js != nil {
-				if err := msg.Ack(); err != nil {
-					c.setGenerationError(generation, err)
-				}
+			if err := msg.Ack(); err != nil {
+				c.setGenerationError(generation, err)
 			}
 		})
 	}
-	var err error
-	if js != nil {
-		durable := cleanDurable(task.QueueGroup)
-		_, err = js.QueueSubscribe(fullSubject(cfg.SubjectPrefix, task.Subject), task.QueueGroup, handle,
-			nats.Durable(durable), nats.ManualAck(), nats.AckExplicit(), nats.AckWait(cfg.JetStream.AckWait),
-			nats.MaxDeliver(cfg.JetStream.MaxDeliver), nats.BackOff(backoff),
-			nats.BindStream(cfg.JetStream.Stream))
-	} else {
-		_, err = conn.QueueSubscribe(fullSubject(cfg.SubjectPrefix, task.Subject), task.QueueGroup, handle)
-	}
+	durable := cleanDurable(task.QueueGroup)
+	_, err := js.QueueSubscribe(fullSubject(cfg.SubjectPrefix, task.Subject), task.QueueGroup, handle,
+		nats.Durable(durable), nats.ManualAck(), nats.AckExplicit(), nats.AckWait(cfg.JetStream.AckWait),
+		nats.MaxDeliver(cfg.JetStream.MaxDeliver), nats.BackOff(backoff),
+		nats.BindStream(cfg.JetStream.Stream))
 	if err != nil {
 		return err
 	}
@@ -232,4 +217,14 @@ func jetStreamBackoff(initial time.Duration, maxDeliver int) []time.Duration {
 		}
 	}
 	return result
+}
+
+// Spread simultaneous retries across up to a tenth of the interval, keeping
+// the existing upper bound for both NAKs and database retry scheduling.
+func jitteredRetryDelay(delay time.Duration) time.Duration {
+	spread := int64(delay / 10)
+	if spread <= 0 {
+		return delay
+	}
+	return delay - time.Duration(rand.Int64N(spread+1))
 }

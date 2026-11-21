@@ -290,7 +290,7 @@ func TestTEST024CorruptMailAndBrandConfigurationCannotFallBackToEnabledSuccessIn
 		t.Fatal(err)
 	}
 	worker := NewNotificationWorker(f.db, nil, nil, f.cfg.SMTP, f.cfg.SettingsEncryptionKey)
-	if err = worker.sendUserEmail(f.ctx, f.actorID, "subject", "body"); !errors.Is(err, errMailSettingsUnavailable) {
+	if err = worker.sendUserEmail(queue.WithEventID(f.ctx, "smtp-settings-fixture"), f.actorID, "subject", "body"); !errors.Is(err, errMailSettingsUnavailable) {
 		t.Fatalf("eligible notification mail must propagate setting failure for durable retry: %v", err)
 	}
 	var email string

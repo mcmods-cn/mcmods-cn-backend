@@ -171,6 +171,9 @@ func newTEST024SMTP(t *testing.T, behavior test024SMTPBehavior) (int, <-chan tes
 				if report.err != nil {
 					return
 				}
+				if behavior.reject == "LOST_REPLY" {
+					return // peer received the terminator; sender cannot know the outcome
+				}
 				if behavior.reject == "COMMIT" {
 					if !write("451 not queued") {
 						return
@@ -256,7 +259,7 @@ func TestTEST024SMTPAuthenticatedDeliveryAndProtocolFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertTEST024SMTPMessage(t, receiveTEST024SMTP(t, result), false)
-	for _, stage := range []string{"AUTH", "MAIL", "RCPT", "DATA", "COMMIT", "QUIT"} {
+	for _, stage := range []string{"AUTH", "MAIL", "RCPT", "DATA", "COMMIT"} {
 		t.Run(stage, func(t *testing.T) {
 			port, result := newTEST024SMTP(t, test024SMTPBehavior{auth: true, reject: stage})
 			if err := New(test024SMTPConfig(port)).Send("recipient@example.test", "subject", "body"); err == nil {
@@ -269,6 +272,27 @@ func TestTEST024SMTPAuthenticatedDeliveryAndProtocolFailures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSMTPDistinguishesAcceptedAndUnknownQueueDelivery(t *testing.T) {
+	var messageID string
+	for _, stage := range []string{"QUIT", "LOST_REPLY"} {
+		port, result := newTEST024SMTP(t, test024SMTPBehavior{auth: true, reject: stage})
+		err := New(test024SMTPConfig(port)).SendEvent(context.Background(), "recipient@example.test", "subject", "body", "owned-event")
+		if (stage == "QUIT" && err != nil) || (stage == "LOST_REPLY" && !errors.Is(err, ErrAcceptanceUnknown)) {
+			t.Fatalf("%s result=%v", stage, err)
+		}
+		report := receiveTEST024SMTP(t, result)
+		msg, err := mail.ReadMessage(strings.NewReader(string(report.message)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := msg.Header.Get("Message-ID")
+		if id == "" || (messageID != "" && id != messageID) {
+			t.Fatalf("unstable event Message-ID: %q / %q", messageID, id)
+		}
+		messageID = id
 	}
 }
 
