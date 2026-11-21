@@ -101,6 +101,7 @@ func exportGeneratorSettingsRule() *exportJSONRule {
 	settings := *worldgen
 	settings.fields = maps.Clone(worldgen.fields)
 	settings.fields["structure_overrides"] = &exportJSONRule{
+		nonNull: true,
 		items:   &exportJSONRule{strings: true, validString: validExportResourceID},
 		strings: true,
 		validString: func(value string) bool {

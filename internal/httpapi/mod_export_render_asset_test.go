@@ -53,6 +53,8 @@ func TestExportBlockEntityMeshV1Projection(t *testing.T) {
 		t.Fatal("oversized mesh accepted")
 	}
 	for _, change := range [][2]string{
+		{`"quad_count":1`, `"quad_count":null`}, {`"index":0`, `"index":null`},
+		{`"direction":"up"`, `"direction":null`}, {`"u_min":0.25`, `"u_min":null`},
 		{`"mcmods-uv-quad-mesh/v1"`, `"mcmods-uv-quad-mesh/v2"`}, {`"block_units"`, `"voxels"`}, {`"bottom_left"`, `"top_left"`},
 		{`"direction":"up"`, `"direction":"unknown"`}, {`"index":0`, `"index":1`}, {`"vertex_count":5`, `"vertex_count":4`},
 		{`"uv":[0.25,0.75]`, `"uv":[0.25]`}, {`"uv":[0.25,0.75]`, `"uv":[null,0.75]`}, {`"u_max":0.25`, `"u_max":0.1`},

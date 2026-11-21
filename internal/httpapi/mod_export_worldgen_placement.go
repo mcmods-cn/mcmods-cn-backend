@@ -55,10 +55,13 @@ func newNaturalGenerationRules() naturalGenerationJSONRules {
 	exportFields(modifier, "noise_level noise_factor noise_offset", number)
 	exportFields(modifier, "xz_spread y_spread", count)
 	modifiers := exportArrayRule(modifier)
+	modifiers.nonNull = true // Also used directly by a raw placed_feature.
 	placement := exportObjectRule(map[string]*exportJSONRule{
 		"count": count, "rarity": integer, "height": height, "min_y": integer, "max_y": integer, "distribution": id,
 		"biome_filter": exportBoolRule(), "modifier_types": exportArrayRule(id), "modifiers": modifiers,
 	})
+
+	placement.nonNull = true
 
 	// A partial natural-generation catalog can also contain complete configured
 	// carvers. These states select in-game visualization blocks, not log data.

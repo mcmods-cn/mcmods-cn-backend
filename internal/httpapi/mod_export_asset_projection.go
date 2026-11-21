@@ -13,6 +13,9 @@ import (
 // a top-level JSON permission. Unknown business fields fail explicitly. Only
 // recognized unrelated diagnostic/identity metadata is removed.
 type exportJSONRule struct {
+	// This JSON codec rejects explicit null throughout its registered subtree.
+	// Optional fields can still be absent.
+	nonNull      bool
 	fields       map[string]*exportJSONRule
 	values       *exportJSONRule
 	items        *exportJSONRule
@@ -37,13 +40,17 @@ func exportPrivateMetadataKey(key string) bool {
 }
 
 func (rule *exportJSONRule) project(value any) (any, error) {
-	return rule.projectAtDepth(value, 0)
+	return rule.projectAtDepth(value, 0, false)
 }
-func (rule *exportJSONRule) projectAtDepth(value any, depth int) (any, error) {
+func (rule *exportJSONRule) projectAtDepth(value any, depth int, nonNull bool) (any, error) {
 	if depth > 24 {
 		return nil, errExportJSONPurpose
 	}
+	nonNull = nonNull || rule.nonNull
 	if value == nil {
+		if nonNull {
+			return nil, errExportJSONPurpose
+		}
 		return nil, nil
 	}
 	switch typed := value.(type) {
@@ -65,7 +72,7 @@ func (rule *exportJSONRule) projectAtDepth(value any, depth int) (any, error) {
 		}
 		result := make([]any, len(typed))
 		for index, item := range typed {
-			projected, err := rule.items.projectAtDepth(item, depth+1)
+			projected, err := rule.items.projectAtDepth(item, depth+1, nonNull)
 			if err != nil {
 				return nil, err
 			}
@@ -88,7 +95,7 @@ func (rule *exportJSONRule) projectAtDepth(value any, depth int) (any, error) {
 			if child == nil {
 				return nil, errExportJSONPurpose
 			}
-			projected, err := child.projectAtDepth(item, depth+1)
+			projected, err := child.projectAtDepth(item, depth+1, nonNull)
 			if err != nil {
 				return nil, err
 			}
@@ -156,8 +163,8 @@ func exportTextJSONRule() *exportJSONRule {
 func exportDisplayJSONRule() *exportJSONRule {
 	icon := exportObjectRule(map[string]*exportJSONRule{
 		"item": exportStringRule(), "id": exportStringRule(), "count": exportNumberRule(),
-		"nbt": exportStringRule(), "has_stack_tag": exportBoolRule(),
-		"nbt_snbt": {strings: true, validString: func(value string) bool { return len(value) <= maxModContentJSONFieldBytes }},
+		"nbt": exportStringRule(), "has_stack_tag": {booleans: true, nonNull: true},
+		"nbt_snbt": {nonNull: true, strings: true, validString: func(value string) bool { return len(value) <= maxModContentJSONFieldBytes }},
 	})
 	icon.afterProject = projectAdvancementIconTag
 	rule := exportObjectRule(map[string]*exportJSONRule{

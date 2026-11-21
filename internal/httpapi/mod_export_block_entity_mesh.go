@@ -20,6 +20,7 @@ func exportBlockEntityMeshJSONRule() *exportJSONRule {
 	exportFields(bounds, "u_min v_min u_max v_max", number)
 	face := exportObjectRule(map[string]*exportJSONRule{"index": number, "direction": exportStringRule(), "vertices": exportArrayRule(vertex), "uv_bounds": bounds})
 	mesh := exportObjectRule(map[string]*exportJSONRule{"faces": exportArrayRule(face)})
+	mesh.nonNull = true
 	exportFields(mesh, "schema_version coordinate_space uv_space uv_origin", exportStringRule())
 	exportFields(mesh, "quad_count vertex_count trailing_vertex_count", number)
 	return mesh
