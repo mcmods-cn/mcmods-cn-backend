@@ -11,7 +11,7 @@
 | 经济、内容修订与数据访问 | `economy_ledger_store.go` 和 `economy_handlers.go` 在行锁内变更余额、写流水。`economy_download_rewards.go` 以对象和所有者约束累加。`catalog_sort.go` 从代码内列名、方向及 ID 生成稳定排序。`content_localization_worker.go` 的源修订、人工目标保护及结果审查与项目发布分离。 | 对收款人余额的私密投影、下载奖励与计数的事务回滚做数据库抽查。有人工译文时迟到结果保留人工内容。不同历史规模的全部列表与项目间导出依赖图仍需负载数据核验。 |
 | Redis、队列及邮件 | `internal/querycache` 处理缓存失效与授权版本，`internal/queue` 的事务 outbox、执行令牌、重试/死信是异步入口。SSE 在每次事件前复核会话，20 秒心跳还会直接读取 PostgreSQL。AI 请求账目按供应商尝试保存，通知收件人与翻译权限在执行时核对。邮件与 PostgreSQL 间无法原子确认送达。 | 授权冷/热与跨实例测试、AI 重投、供应商返回未知用量与本地预算均有定向验证。队列真实 JetStream、多实例和投递窗口的故障证据单列于[队列恢复](queue-recovery.md)。外部邮件、AI、对象厂商的准确账单与多节点商业部署未试。 |
 | AI、配置及日志 | `ai_translation.go` 只向供应商发送语言及键值、名称和说明等所需条目。系统请求没有工具。结构、数量、占位符、链接和代码片段由 `ai_translation_validation.go` 核验。`ai_task_queue.go`、`ai_request_budget.go` 先检查当前操作者与可见源内容，再登记请求。`internal/security/settings.go` 使用 AEAD 封存敏感设置。后台读取使用各域脱敏投影。`redactLogText`、`upgradeLogShareRedaction` 处理共享日志。 | 本地替代供应商验证撤权、撤稿、皮肤转私有、通知变更收件人、未知用量及人工译文保护。词条翻译的语义质量和第三方保密性需另审。新入队日志只存任务标识与类型，已有任务原文和历史日志沿用现行访问与留存策略。[AI 执行与预算](ai-translation-reliability.md) |
-| 构建、依赖与历史凭据 | 后端 Go 编译器与容器构建改用 1.26.11，运行镜像指明非 root。依赖审查工作流只读、工件保留 30 天，发布容器仅在标签/手动发布流程授予 packages 写权限。exporter CI 固定 Actions、Gradle 发行文件和插件版本，运行时仍依赖实际安装的游戏与 Mod。 | Go、npm 与 Git 历史检查的范围见下。没有构建/发布生产镜像、审计云仓库权限或读取线上密钥。Java 运行时、第三方 Mod 全量依赖的漏洞可达性和镜像 OS 的 CVE 未独立判定。 |
+| 构建、依赖与历史凭据 | 后端 Go 编译器与容器构建改用 1.26.11，运行镜像指明非 root。依赖审查工作流只读、工件保留 30 天，发布容器仅在标签/手动发布流程授予 packages 写权限。exporter CI 固定 Actions、Gradle 发行文件和插件版本，运行时仍依赖实际安装的游戏与 Mod。 | Go、npm 与 Git 历史检查的范围见下。两个正式 Dockerfile 均在本机构建并启动，前端使用 UID 1001，后端使用 UID 65532。后端构建的可选代理 CA 只用于依赖下载，运行镜像未包含本次证书。云仓库权限、生产密钥与生产发布属于本轮以外的运维环境。Java 运行时、第三方 Mod 全量依赖的漏洞可达性和镜像 OS 的 CVE 未独立判定。 |
 
 ## 复跑与证据边界
 
