@@ -78,7 +78,7 @@ func newTEST037FixtureWithBase(t *testing.T, base test013Fixture) test037Fixture
 			_, _ = fmt.Fprintf(w, "<Error><Code>%s</Code><Message>owned TEST037 provider result</Message></Error>", code)
 		}
 		if r.Method == http.MethodGet && r.Header.Get("Authorization") == "" {
-			if !validTEST037DownloadSignature(r, key, f.cfg, time.Now()) {
+			if !validTEST037PresignedRequest(r, key, f.cfg, time.Now()) {
 				providerError(403, "SignatureDoesNotMatch")
 				return
 			}
@@ -246,7 +246,7 @@ func newTEST037FixtureWithBase(t *testing.T, base test013Fixture) test037Fixture
 	return f
 }
 
-func validTEST037DownloadSignature(r *http.Request, key string, cfg ossConfigPayload, now time.Time) bool {
+func validTEST037PresignedRequest(r *http.Request, key string, cfg ossConfigPayload, now time.Time) bool {
 	q := r.URL.Query()
 	started, err := time.Parse("20060102T150405Z", q.Get("x-oss-date"))
 	expires, expiryErr := strconv.ParseInt(q.Get("x-oss-expires"), 10, 64)

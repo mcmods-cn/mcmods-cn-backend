@@ -62,7 +62,7 @@ func newAuditTP008OwnedOSS(t *testing.T) *auditTP008OwnedOSS {
 			w.WriteHeader(status)
 			_, _ = fmt.Fprintf(w, "<Error><Code>%s</Code><Message>owned TP008 protocol fixture</Message></Error>", code)
 		}
-		if r.Method == http.MethodGet && r.Header.Get("Authorization") == "" && !validTEST037DownloadSignature(r, key, store.cfg, time.Now()) {
+		if r.Method == http.MethodGet && r.Header.Get("Authorization") == "" && !validTEST037PresignedRequest(r, key, store.cfg, time.Now()) {
 			failure(403, "SignatureDoesNotMatch")
 			return
 		}
