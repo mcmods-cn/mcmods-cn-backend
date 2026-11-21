@@ -120,12 +120,35 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	grantTEST044Permissions(t, f.ctx, db, f.userIDs[f.otherEditor], "global_resource.list", "global_resource.view")
 	// Only the synthetic OSS service gets this exact browser-origin response
 	// wrapper. Production API CORS, upload scanning and visibility are unchanged.
-	originalOSSHandler := f.provider.Config.Handler
-	f.provider.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	provider, objects, objectMu := f.provider, f.objects, f.objectMu
+	var multipart *test037Fixture
+	if sample.sizeBytes > 4<<20 {
+		// The basic fixture only accepts small single PUTs. TEST037 also
+		// implements actual multipart, sealed copies and signed downloads.
+		store := newTEST037FixtureWithBase(t, f.test013Fixture)
+		multipart = &store
+		provider, objects, objectMu = store.provider, store.store.objects, &store.store.mu
+		f.provider.Close()
+	}
+	originalOSSHandler := provider.Config.Handler
+	provider.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Origin") == frontendOrigin {
 			w.Header().Set("Access-Control-Allow-Origin", frontendOrigin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Expose-Headers", "ETag,Content-Length,x-oss-meta-sha256")
+			if r.Method == http.MethodOptions {
+				w.Header().Set("Access-Control-Allow-Methods", "PUT,GET,HEAD,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", r.Header.Get("Access-Control-Request-Headers"))
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		if multipart != nil && r.Method == http.MethodPut && r.URL.Query().Get("uploadId") != "" {
+			key := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/"), multipart.cfg.Bucket+"/")
+			if !validTEST037PresignedRequest(r, key, multipart.cfg, time.Now()) {
+				http.Error(w, "invalid multipart signature", http.StatusForbidden)
+				return
+			}
 		}
 		originalOSSHandler.ServeHTTP(w, r)
 	})
@@ -212,7 +235,7 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	auditJourneyWriteJSON(t, authPath, map[string]any{"creatorToken": f.editor, "reviewerToken": f.reviewer, "otherEditorToken": f.otherEditor, "catalogReaderToken": f.otherEditor})
 	runtimePath := filepath.Join(directory, "runtime.json")
 	stopPath := filepath.Join(directory, "STOP")
-	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "sourceCheckoutPath": backendCheckout, "compilerSourceCheckoutPath": backendCheckout, "testPackageWorkingDirectory": packageDirectory, "apiOrigin": origin.URL, "ossOrigin": f.provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": sample.namespace, "minecraftVersion": sample.minecraft, "loader": sample.loader, "modVersion": sample.modVersion, "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": sample.digest, "sampleProducerCommit": sample.producer, "samplePath": sample.path, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED", "catalogReader": map[string]any{"publicId": actorB, "permissions": []string{"global_resource.list", "global_resource.view"}, "assignedBeforeAPIExposure": true, "scope": "Distinct ordinary authorized selector reader; no admin, publication or review-bypass capability"}, "unreadBarrier": map[string]any{"enabled": unreadBarrierEnabled, "armPath": armPath, "startedPath": startedPath, "releasePath": releasePath, "actorAPublicId": actorA, "actorBPublicId": actorB, "initialUnreadA": seededUnreadA, "initialUnreadB": 0}}
+	runtime := map[string]any{"schemaVersion": 1, "pid": os.Getpid(), "sourceCheckoutPath": backendCheckout, "compilerSourceCheckoutPath": backendCheckout, "testPackageWorkingDirectory": packageDirectory, "apiOrigin": origin.URL, "ossOrigin": provider.URL, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "projectSiteId": "audit-gr-" + f.modCode, "projectPublicId": f.modCode, "targetVersionPublicId": f.versionPublic, "namespace": sample.namespace, "minecraftVersion": sample.minecraft, "loader": sample.loader, "modVersion": sample.modVersion, "postgresPoolMax": 12, "natsURL": broker.ClientURL(), "natsStream": queueConfig.JetStream.Stream, "workerConsumer": "mcmods-export-import-workers", "workerRegistration": "actual NewModExportWorker.Start subscription", "repoRevisions": revisions, "sampleSha256": sample.digest, "sampleProducerCommit": sample.producer, "samplePath": sample.path, "fixtureScope": "real API/PostgreSQL, official file-backed JetStream, actual business Worker, controlled synthetic OSS; external browser must upload unchanged real game package", "acceptance": "EXTERNAL_BROWSER_AND_POSTCONDITIONS_REQUIRED", "catalogReader": map[string]any{"publicId": actorB, "permissions": []string{"global_resource.list", "global_resource.view"}, "assignedBeforeAPIExposure": true, "scope": "Distinct ordinary authorized selector reader; no admin, publication or review-bypass capability"}, "unreadBarrier": map[string]any{"enabled": unreadBarrierEnabled, "armPath": armPath, "startedPath": startedPath, "releasePath": releasePath, "actorAPublicId": actorA, "actorBPublicId": actorB, "initialUnreadA": seededUnreadA, "initialUnreadB": 0}}
 	updateRuntime := func(state string) {
 		runtime["state"] = state
 		runtime["updatedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
@@ -234,14 +257,14 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 		} else {
 			runtime["databaseSnapshotPending"] = true
 		}
-		f.objectMu.Lock()
-		runtime["assetObjectCount"] = len(f.objects)
+		objectMu.Lock()
+		runtime["assetObjectCount"] = len(objects)
 		var assetBytes int
-		for _, object := range f.objects {
+		for _, object := range objects {
 			assetBytes += len(object.data)
 		}
 		runtime["assetBytes"] = assetBytes
-		f.objectMu.Unlock()
+		objectMu.Unlock()
 		auditJourneyWriteJSON(t, runtimePath, runtime)
 	}
 	updateRuntime("READY")
@@ -254,6 +277,9 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 			updateRuntime("EXPIRED")
 			t.Fatal("owned journey fixture expired before STOP")
 		case <-ticker.C:
+			if multipart != nil {
+				auditJourneyMultipartBinding(t, *multipart, directory, sample.digest, sample.sizeBytes)
+			}
 			if _, e := os.Stat(stopPath); e == nil {
 				updateRuntime("STOPPED")
 				return
@@ -266,6 +292,7 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 }
 
 type journeyGameSample struct {
+	sizeBytes                                int64
 	path, digest, producer                   string
 	namespace, minecraft, loader, modVersion string
 }
@@ -301,21 +328,21 @@ func loadJourneyGameSample(t *testing.T, packageDirectory, exporter string) jour
 	if !filepath.IsAbs(sample.path) {
 		t.Fatal("game package path must be absolute")
 	}
-	// The synthetic provider accepts single PUT bodies up to 4 MiB.
 	f, err := os.Open(sample.path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, (4<<20)+1))
-	if err != nil || len(raw) > 4<<20 {
-		t.Fatal("could not read the game package within the fixture upload limit")
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > maxOSSUploadBytes {
+		t.Fatal("game fixture must be a regular file within the OSS upload limit")
 	}
-	digest := sha256.Sum256(raw)
-	if hex.EncodeToString(digest[:]) != sample.digest {
-		t.Fatal("real-game package hash differs from the recorded producer output")
+	hash := sha256.New()
+	sample.sizeBytes, err = io.Copy(hash, io.LimitReader(f, maxOSSUploadBytes+1))
+	if err != nil || sample.sizeBytes != info.Size() || hex.EncodeToString(hash.Sum(nil)) != sample.digest {
+		t.Fatal("real-game package size or hash differs from the recorded producer output")
 	}
-	archive, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	archive, err := zip.NewReader(f, sample.sizeBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
