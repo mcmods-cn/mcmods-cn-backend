@@ -71,7 +71,7 @@ func TestOPS020MaintenanceTimeoutDoesNotStarveBansAndTTLIntegration(t *testing.T
 	if _, err = blocker.Exec(ctx, `lock table blueprints in access exclusive mode`); err != nil {
 		t.Fatal(err)
 	}
-	worker := &MaintenanceWorker{db: pool}
+	worker := NewMaintenanceWorker(&Server{db: pool})
 	worker.pruneWithTimeout(ctx, time.Second)
 	assertOPS020MaintenanceState(t, ctx, pool, originalAuthVersion, 5)
 	if err = blocker.Rollback(ctx); err != nil {
@@ -88,7 +88,7 @@ func TestOPS020MaintenanceTimeoutDoesNotStarveBansAndTTLIntegration(t *testing.T
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			(&MaintenanceWorker{db: pool}).pruneWithTimeout(ctx, 5*time.Second)
+			worker.pruneWithTimeout(ctx, 5*time.Second)
 		}()
 	}
 	workers.Wait()

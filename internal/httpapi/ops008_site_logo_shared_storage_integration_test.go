@@ -301,14 +301,14 @@ func testOPS008SharedLogoLifecycle(t *testing.T, deletionFailureDelay time.Durat
 	if _, err = pool.Exec(ctx, `alter table oss_object_deletion_outbox add constraint ops008_reject_expiry check(reason<>'site_logo_upload_expired') not valid`); err != nil {
 		t.Fatal(err)
 	}
-	NewMaintenanceWorker(pool, servers[0].cache).prune(ctx)
+	NewMaintenanceWorker(servers[0]).prune(ctx)
 	if err = pool.QueryRow(ctx, `select count(*) from oss_files where public_id=$1 and status='active'`, thirdID).Scan(&tombstones); err != nil || tombstones != 1 {
 		t.Fatalf("failed expiry must rollback tombstone: %d %v", tombstones, err)
 	}
 	if _, err = pool.Exec(ctx, `alter table oss_object_deletion_outbox drop constraint ops008_reject_expiry`); err != nil {
 		t.Fatal(err)
 	}
-	NewMaintenanceWorker(pool, servers[0].cache).prune(ctx)
+	NewMaintenanceWorker(servers[0]).prune(ctx)
 	if err = pool.QueryRow(ctx, `select count(*) from oss_files where public_id=$1 and status='deleted'`, thirdID).Scan(&tombstones); err != nil || tombstones != 1 {
 		t.Fatalf("abandoned shared logo remained active: count=%d err=%v", tombstones, err)
 	}

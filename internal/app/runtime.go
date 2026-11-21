@@ -152,7 +152,6 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	httpapi.StartPopularityRefreshScheduler(ctx, db)
 	httpapi.NewOSSDeletionWorker(cfg, db).Start(ctx)
 	httpapi.NewOSSRehomeWorker(cfg, db).Start(ctx)
-	httpapi.NewMaintenanceWorker(db, sharedCache).Start(ctx)
 	httpapi.NewLogRetentionWorker(db).Start(ctx)
 	httpapi.NewLevelRecalculationWorker(db).Start(ctx)
 	httpapi.NewSeedCrawlerWorker(cfg, db).Start(ctx)

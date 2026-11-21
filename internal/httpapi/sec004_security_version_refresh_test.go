@@ -33,7 +33,7 @@ func TestSEC004ProductionHandlersDoNotIgnoreSecurityVersionRefreshFailures(t *te
 	for file, required := range map[string][]string{
 		"auth_cache.go":                   {"DeleteShared", "SECURITY_VERSION_REFRESH_FAILED", "security version refresh failed after commit", `"committed": true`},
 		"infrastructure_metrics.go":       {`"securityVersions"`, `"refreshFailures"`},
-		"maintenance_worker.go":           {"DeleteShared", "publish expired ban permission version", "!worker.cache.SetShared"},
+		"maintenance_worker.go":           {"DeleteShared", "publish expired ban permission version", "!worker.server.cache.SetShared"},
 		"permission_defaults_handlers.go": {"refreshAuthVersionForIdentity", "refreshPermissionVersion", "requireSecurityVersionRefresh"},
 	} {
 		source, readErr := os.ReadFile(filepath.Clean(file))

@@ -218,7 +218,7 @@ func TestTEST048GovernanceHTTPPermissionsConcurrencyAndTransactionsIntegration(t
 			reopened <- reopenedResult{status, raw, requestErr}
 		}()
 		waitTEST048ReopenLock(t, ctx, pool)
-		worker := &MaintenanceWorker{db: pool, cache: server.cache}
+		worker := NewMaintenanceWorker(server)
 		worker.pruneReportEvidence(ctx)
 		assertCount(t, `select count(*) from report_evidence where public_id=$1 and status='deleted' and delete_attempts=1`, 1, evidence)
 		assertCount(t, `select count(*) from oss_files where object_key='test048/own.txt' and status='deleted'`, 1)
@@ -308,7 +308,7 @@ func TestTEST048GovernanceHTTPPermissionsConcurrencyAndTransactionsIntegration(t
 		if _, err := pool.Exec(ctx, `update ban_records set starts_at=now()-interval '2 hours',ends_at=now()-interval '1 hour' where id=$1`, banID); err != nil {
 			t.Fatal(err)
 		}
-		worker := &MaintenanceWorker{db: pool, cache: server.cache}
+		worker := NewMaintenanceWorker(server)
 		worker.expireBans(ctx)
 		worker.expireBans(ctx)
 		assertCount(t, `select count(*) from ban_records where id=$1 and status='expired'`, 1, banID)

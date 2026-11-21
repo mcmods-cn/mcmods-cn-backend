@@ -49,6 +49,7 @@ func Run() {
 		return
 	}
 	apiServer := httpapi.NewServer(ctx, cfg, runtime.db, runtime.queue, runtime.cache, runtime.activity, runtime.search)
+	maintenanceDone := httpapi.NewMaintenanceWorker(apiServer).Start(ctx)
 	availability.completeInitialization(apiServer)
 	log.Print("backend initialization completed; API traffic is enabled")
 	go monitorDatabase(ctx, runtime.db, availability)
@@ -58,6 +59,11 @@ func Run() {
 	workerShutdownCtx, workerShutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if err := apiServer.Shutdown(workerShutdownCtx); err != nil {
 		log.Printf("API worker shutdown: %v", err)
+	}
+	select {
+	case <-maintenanceDone:
+	case <-workerShutdownCtx.Done():
+		log.Print("maintenance worker shutdown timed out")
 	}
 	workerShutdownCancel()
 	runtime.close()

@@ -525,7 +525,7 @@ func TestTEST039ConcurrentReviewAndMissedCleanupRecoverUsingProductionWorkersFul
 	if _, err := f.db.Exec(f.ctx, "update skin_assets set status='deleted' where public_id=$1", asset.PublicID); err != nil {
 		t.Fatal(err)
 	}
-	maintenance := NewMaintenanceWorker(f.db, f.server.cache)
+	maintenance := NewMaintenanceWorker(f.server)
 	maintenance.pruneSkinTextureBlobs(f.ctx)
 	var key, status string
 	var refs, queued int

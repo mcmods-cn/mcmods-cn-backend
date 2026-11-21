@@ -395,11 +395,17 @@ func (s *Server) tombstoneOSSFileTx(ctx context.Context, tx pgx.Tx, fileID int64
 	if err != nil {
 		return err
 	}
+	if status == "deleted" {
+		return nil
+	}
 	if target.ObjectKey == "" {
 		return errors.New("OSS file object key is empty")
 	}
 	if target.Endpoint == "" || target.Bucket == "" || target.Region == "" {
-		cfg := s.ossConfigFromSettingsWithQueryer(ctx, tx)
+		cfg, err := s.ossConfigFromSettingsStrictWithQueryer(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("read legacy OSS deletion target: %w", err)
+		}
 		if target.Endpoint == "" {
 			target.Endpoint = cfg.Endpoint
 		}
@@ -411,9 +417,6 @@ func (s *Server) tombstoneOSSFileTx(ctx context.Context, tx pgx.Tx, fileID int64
 		}
 	}
 	target.UseCName = isCustomOSSEndpoint(target.Endpoint)
-	if status == "deleted" {
-		return nil
-	}
 	if _, err = tx.Exec(ctx, `update oss_files set status='deleted',updated_at=now() where id=$1`, fileID); err != nil {
 		return err
 	}

@@ -35,7 +35,7 @@ func TestAuditGR001ReportRetentionUsesSharedTerminalRawIntentIntegration(t *test
 			if _, err := f.db.Exec(f.ctx, `update report_evidence set cleanup_after=clock_timestamp() where public_id=$1 and status='temporary'`, evidence.ID); err != nil {
 				t.Fatal(err)
 			}
-			worker := NewMaintenanceWorker(f.db, f.server.cache)
+			worker := NewMaintenanceWorker(f.server)
 			if mode == "raw-intent-rollback" {
 				if _, err := f.db.Exec(f.ctx, `alter table oss_object_deletion_outbox add constraint reject_owned_report_raw check(reason<>'deleted-upload-original-input') not valid`); err != nil {
 					t.Fatal(err)

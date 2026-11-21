@@ -144,7 +144,7 @@ func TestTemporaryBanPersistenceAndExpirationLifecycleIntegration(t *testing.T) 
 		values(2,7,'governance_ban','20',now()-interval '1 hour')`); err != nil {
 		t.Fatal(err)
 	}
-	worker := &MaintenanceWorker{db: pool}
+	worker := NewMaintenanceWorker(&Server{db: pool})
 	worker.expireBans(ctx)
 	var expiredStatus string
 	if err = pool.QueryRow(ctx, `select status from ban_records where id=20`).Scan(&expiredStatus); err != nil {

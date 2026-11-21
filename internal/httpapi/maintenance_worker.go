@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"mcmods-cn-backend/internal/querycache"
 )
 
@@ -22,19 +20,22 @@ const stickerUploadRetention = time.Hour
 // transactions. Each delete is bounded so a large backlog cannot hold a long
 // table lock or delay API responses.
 type MaintenanceWorker struct {
-	db    *pgxpool.Pool
-	cache *querycache.Cache
+	server *Server
 }
 
-func NewMaintenanceWorker(db *pgxpool.Pool, cache *querycache.Cache) *MaintenanceWorker {
-	return &MaintenanceWorker{db: db, cache: cache}
+func NewMaintenanceWorker(server *Server) *MaintenanceWorker {
+	return &MaintenanceWorker{server: server}
 }
 
-func (worker *MaintenanceWorker) Start(ctx context.Context) {
-	if worker == nil || worker.db == nil {
-		return
-	}
-	go worker.run(ctx)
+func (worker *MaintenanceWorker) Start(ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if worker != nil && worker.server != nil && worker.server.db != nil {
+			worker.run(ctx)
+		}
+	}()
+	return done
 }
 
 func (worker *MaintenanceWorker) run(ctx context.Context) {
@@ -99,7 +100,7 @@ func (worker *MaintenanceWorker) pruneWithTimeout(ctx context.Context, timeout t
 		}
 		pruneCtx, cancel := context.WithTimeout(ctx, timeout)
 		for batch := 0; batch < maintenanceMaxBatches && pruneCtx.Err() == nil; batch++ {
-			command, err := worker.db.Exec(pruneCtx, statement, maintenanceBatchSize)
+			command, err := worker.server.db.Exec(pruneCtx, statement, maintenanceBatchSize)
 			if err != nil {
 				log.Printf("background expiration cleanup failed: %v", err)
 				break
@@ -113,9 +114,8 @@ func (worker *MaintenanceWorker) pruneWithTimeout(ctx context.Context, timeout t
 }
 
 func (worker *MaintenanceWorker) pruneCatalogImportArtifacts(ctx context.Context) {
-	server := &Server{db: worker.db}
 	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
-		recovered, err := server.recoverOrphanedCatalogImportArtifacts(ctx)
+		recovered, err := worker.server.recoverOrphanedCatalogImportArtifacts(ctx)
 		if err != nil {
 			log.Printf("recover orphaned catalog import artifacts: %v", err)
 			return
@@ -130,9 +130,8 @@ func (worker *MaintenanceWorker) pruneCatalogImportArtifacts(ctx context.Context
 // the skin history. idx_skin_texture_blobs_unreferenced keeps each batch on the
 // transactionally maintained active_reference_count=0 projection.
 func (worker *MaintenanceWorker) pruneSkinTextureBlobs(ctx context.Context) {
-	server := &Server{db: worker.db}
 	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
-		tx, err := worker.db.Begin(ctx)
+		tx, err := worker.server.db.Begin(ctx)
 		if err != nil {
 			log.Printf("begin unreferenced skin texture cleanup: %v", err)
 			return
@@ -163,7 +162,7 @@ func (worker *MaintenanceWorker) pruneSkinTextureBlobs(ctx context.Context) {
 			if err != nil {
 				break
 			}
-			err = server.tombstoneUnreferencedMinecraftTextureBlobTx(ctx, tx, hash, "unreferenced_minecraft_texture_blob")
+			err = worker.server.tombstoneUnreferencedMinecraftTextureBlobTx(ctx, tx, hash, "unreferenced_minecraft_texture_blob")
 		}
 		if err != nil {
 			tx.Rollback(ctx)
@@ -182,7 +181,7 @@ func (worker *MaintenanceWorker) pruneSkinTextureBlobs(ctx context.Context) {
 
 func (worker *MaintenanceWorker) pruneBlueprintUploads(ctx context.Context) {
 	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
-		tx, err := worker.db.Begin(ctx)
+		tx, err := worker.server.db.Begin(ctx)
 		if err != nil {
 			log.Printf("begin expired blueprint upload cleanup: %v", err)
 			return
@@ -226,9 +225,8 @@ func (worker *MaintenanceWorker) pruneBlueprintUploads(ctx context.Context) {
 }
 
 func (worker *MaintenanceWorker) pruneStickerUploads(ctx context.Context) {
-	server := &Server{db: worker.db}
 	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
-		tx, err := worker.db.Begin(ctx)
+		tx, err := worker.server.db.Begin(ctx)
 		if err != nil {
 			log.Printf("begin temporary sticker upload cleanup: %v", err)
 			return
@@ -261,7 +259,7 @@ func (worker *MaintenanceWorker) pruneStickerUploads(ctx context.Context) {
 			if err != nil {
 				break
 			}
-			err = server.tombstoneUnreferencedStickerFileTx(ctx, tx, fileID, "sticker_upload_expired")
+			err = worker.server.tombstoneUnreferencedStickerFileTx(ctx, tx, fileID, "sticker_upload_expired")
 		}
 		if err != nil {
 			tx.Rollback(ctx)
@@ -280,7 +278,7 @@ func (worker *MaintenanceWorker) pruneStickerUploads(ctx context.Context) {
 
 func (worker *MaintenanceWorker) expireBans(ctx context.Context) {
 	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
-		rows, err := worker.db.Query(ctx, `with candidates as (
+		rows, err := worker.server.db.Query(ctx, `with candidates as (
 			select id from ban_records where status='active' and ends_at is not null and ends_at<=now()
 			order by ends_at,id for update skip locked limit $1
 		), expired as (
@@ -313,15 +311,15 @@ func (worker *MaintenanceWorker) expireBans(ctx context.Context) {
 		for _, userID := range userIDs {
 			key := querycache.UserPermissionVersionKey(userID)
 			var invalidateErr error
-			if worker.cache != nil {
-				invalidateErr = worker.cache.DeleteShared(ctx, key)
+			if worker.server.cache != nil {
+				invalidateErr = worker.server.cache.DeleteShared(ctx, key)
 			}
 			var version int64
-			if err = worker.db.QueryRow(ctx, `select permission_version from users where id=$1`, userID).Scan(&version); err != nil {
+			if err = worker.server.db.QueryRow(ctx, `select permission_version from users where id=$1`, userID).Scan(&version); err != nil {
 				log.Printf("refresh expired ban permission version user_id=%d invalidate_error=%v query_error=%v", userID, invalidateErr, err)
 				continue
 			}
-			if worker.cache != nil && worker.cache.Enabled() && !worker.cache.SetShared(ctx, key, []byte(strconv.FormatInt(version, 10)), 10*time.Second) {
+			if worker.server.cache != nil && worker.server.cache.Enabled() && !worker.server.cache.SetShared(ctx, key, []byte(strconv.FormatInt(version, 10)), 10*time.Second) {
 				log.Printf("publish expired ban permission version user_id=%d invalidate_error=%v", userID, invalidateErr)
 			}
 		}
@@ -336,9 +334,8 @@ func (worker *MaintenanceWorker) expireBans(ctx context.Context) {
 // durable retries; marking the file deleted immediately also closes the access
 // path before physical deletion succeeds.
 func (worker *MaintenanceWorker) pruneReportEvidence(ctx context.Context) {
-	server := &Server{db: worker.db}
 	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
-		tx, err := worker.db.Begin(ctx)
+		tx, err := worker.server.db.Begin(ctx)
 		if err != nil {
 			log.Printf("begin report evidence cleanup: %v", err)
 			return
@@ -376,7 +373,7 @@ func (worker *MaintenanceWorker) pruneReportEvidence(ctx context.Context) {
 		}
 		for _, item := range items {
 			if item.fileID != nil {
-				if err = server.tombstoneOSSFileTx(ctx, tx, *item.fileID, "report_evidence_retention_expired"); err != nil {
+				if err = worker.server.tombstoneOSSFileTx(ctx, tx, *item.fileID, "report_evidence_retention_expired"); err != nil {
 					break
 				}
 			}

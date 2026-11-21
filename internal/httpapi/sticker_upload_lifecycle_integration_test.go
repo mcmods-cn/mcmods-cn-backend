@@ -41,7 +41,8 @@ func TestTemporaryStickerUploadsAreExplicitlyDiscardedOrExpiredIntegration(t *te
 	}
 	connection.Release()
 
-	worker := NewMaintenanceWorker(db, nil)
+	server := &Server{db: db}
+	worker := NewMaintenanceWorker(server)
 	worker.pruneStickerUploads(ctx)
 	assertTemporaryStickerFileStatus(t, ctx, db, 10, "deleted")
 	for _, fileID := range []int64{11, 12, 13, 16} {
@@ -53,7 +54,6 @@ func TestTemporaryStickerUploadsAreExplicitlyDiscardedOrExpiredIntegration(t *te
 		t.Fatalf("expired cleanup jobs=%d err=%v", expiredJobs, err)
 	}
 
-	server := &Server{db: db}
 	request := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/sticker-upload-files/f00000015", nil)
 	request.SetPathValue("fileId", "f00000015")
 	request = request.WithContext(context.WithValue(request.Context(), claimsContextKey, security.Claims{Subject: 7001}))

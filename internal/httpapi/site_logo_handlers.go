@@ -180,9 +180,8 @@ func (s *Server) saveSiteGeneralConfig(ctx context.Context, payload siteGeneralC
 }
 
 func (worker *MaintenanceWorker) pruneSiteLogoUploads(ctx context.Context) {
-	server := &Server{db: worker.db}
 	for batch := 0; batch < maintenanceMaxBatches && ctx.Err() == nil; batch++ {
-		tx, err := worker.db.Begin(ctx)
+		tx, err := worker.server.db.Begin(ctx)
 		if err != nil {
 			slog.Warn("begin shared logo cleanup failed", "error", err)
 			return
@@ -208,7 +207,7 @@ func (worker *MaintenanceWorker) pruneSiteLogoUploads(ctx context.Context) {
 		}
 		if err == nil {
 			for _, id := range ids {
-				if err = server.tombstoneOSSFileTx(ctx, tx, id, "site_logo_upload_expired"); err != nil {
+				if err = worker.server.tombstoneOSSFileTx(ctx, tx, id, "site_logo_upload_expired"); err != nil {
 					break
 				}
 			}

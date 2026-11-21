@@ -60,7 +60,7 @@ func TestExpiredBlueprintUploadsAndLocalizationsArePrunedIntegration(t *testing.
 	if err = server.discardPendingBlueprintUpload(ctx, 701, 796, ""); err != nil {
 		t.Fatalf("wrong-owner discard should be an idempotent no-op: %v", err)
 	}
-	NewMaintenanceWorker(pool, nil).prune(ctx)
+	NewMaintenanceWorker(server).prune(ctx)
 
 	var blueprintIDs, localizationIDs, subjectIDs []int64
 	if err = pool.QueryRow(ctx, `select coalesce(array_agg(id order by id),'{}') from blueprints`).Scan(&blueprintIDs); err != nil {
