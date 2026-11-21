@@ -1,7 +1,12 @@
 FROM golang:1.26.11-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=secret,id=proxy_ca --mount=type=tmpfs,target=/run/go-trust \
+    if [ -f /run/secrets/proxy_ca ]; then \
+        cat /etc/ssl/certs/ca-certificates.crt /run/secrets/proxy_ca > /run/go-trust/ca-bundle.crt && \
+        export SSL_CERT_FILE=/run/go-trust/ca-bundle.crt; \
+    fi && \
+    go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mcmods-cn-backend .
 
