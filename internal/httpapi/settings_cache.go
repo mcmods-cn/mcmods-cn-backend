@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -68,10 +70,42 @@ func decodeOptionalSetting(raw []byte, readErr error, key string, defaults any) 
 	if readErr != nil {
 		return readErr
 	}
-	if _, err := decodeStoredJSONObject(raw, key); err != nil {
+	fields, err := decodeStoredJSONObject(raw, key)
+	if err != nil {
 		return err
 	}
+	// The three editable settings use flat JSON objects. encoding/json
+	// otherwise accepts null for a scalar and leaves the prefilled value.
+	for name, value := range fields {
+		if value == nil && nonNullableSettingField(defaults, name) {
+			return fmt.Errorf("%s.%s cannot be null", key, name)
+		}
+	}
 	return json.Unmarshal(raw, defaults)
+}
+
+func nonNullableSettingField(config any, name string) bool {
+	t := reflect.TypeOf(config).Elem()
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		tag, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if !field.IsExported() || tag == "-" {
+			continue
+		}
+		if tag == "" {
+			tag = field.Name
+		}
+		if !strings.EqualFold(tag, name) {
+			continue
+		}
+		switch field.Type.Kind() {
+		case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface:
+			return false
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) readEditableSetting(ctx context.Context, key string, defaults any) error {
