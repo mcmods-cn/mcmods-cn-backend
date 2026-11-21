@@ -1,6 +1,6 @@
 {
-  "exporter_commit": "1108a8eda82ce3912841bda20d182dda89ab16ea",
-  "exporter_version": "0.10.0",
+  "exporter_commit": "b8c1b06a574ed3ac3bade52ba2661c0e444606e0",
+  "exporter_version": "0.10.1",
   "minecraft": "1.20.1",
   "jei": "15.20.0.133",
   "java": "17.0.21.1+2",
@@ -16,35 +16,53 @@
     {
       "loader": "fabric",
       "build": "Fabric0.16.14",
-      "zip_sha256": "df72252ced1fa84035f4d95b5b56541188f2b5342b9f74fdfafdc14238814702",
+      "zip_sha256": "53b0e622d68ee8c9cb54fac62413057008ec0025488836a992d761be9991aea7",
       "input_sha256": "0dd0f4ee322df5cd64f8d0206054e1f3fa4c2951363e1b910083fd1aa76e7b54",
-      "original_name": "governancefixture-20261122-002053-392.zip",
-      "bytes": 15243,
+      "original_name": "governancefixture-20261122-011827-626.zip",
+      "bytes": 15211,
       "command": "/mcmods_export governancefixture all"
     },
     {
       "loader": "forge",
       "build": "Forge47.4.21",
-      "zip_sha256": "1335cbfbbb9e6247673f251be290860ec8422308da3fcae7cc4ead13eb4cdb48",
+      "zip_sha256": "c4fc58928d86f473a0039f796d85de3008c19747586296c4d0223f9dabec28d0",
       "input_sha256": "fc2458e00ef71ef53869e90ddd0861f1a8140b980ef8ee06f3c3c255195b2ede",
-      "original_name": "governancefixture-20261122-002636-780.zip",
-      "bytes": 15305,
+      "original_name": "governancefixture-20261122-012306-711.zip",
+      "bytes": 15270,
       "command": "auto=true, namespaces=governancefixture, profile=all, tickBudgetMs=1, exit=false"
     }
   ],
-  "previous_samples": {
-    "exporter_commit": "0856ee5a6b8a8c466d3a19b47c7527f34d52bbfc",
-    "backend_commit": "0ada09fa365fbe89d72cc34f5418072443d40c32",
-    "same_directory": true,
-    "samples": [
-      {
-        "loader": "fabric",
-        "zip_sha256": "05ee092f22081d7b244265ae1e3ce646af1ca71e91659a46eb4762b02e33ec6c"
-      },
-      {
-        "loader": "forge",
-        "zip_sha256": "694bb6554e24c30492d2c3fec8a40e0a3b95bcfec60a1ae2a92114564a1d8096"
-      }
-    ]
-  }
+  "previous_samples": [
+    {
+      "exporter_commit": "0856ee5a6b8a8c466d3a19b47c7527f34d52bbfc",
+      "backend_commit": "0ada09fa365fbe89d72cc34f5418072443d40c32",
+      "same_directory": true,
+      "samples": [
+        {
+          "loader": "fabric",
+          "zip_sha256": "05ee092f22081d7b244265ae1e3ce646af1ca71e91659a46eb4762b02e33ec6c"
+        },
+        {
+          "loader": "forge",
+          "zip_sha256": "694bb6554e24c30492d2c3fec8a40e0a3b95bcfec60a1ae2a92114564a1d8096"
+        }
+      ]
+    },
+    {
+      "exporter_commit": "1108a8eda82ce3912841bda20d182dda89ab16ea",
+      "exporter_version": "0.10.0",
+      "backend_commit": "dd45f4d82eaa01e2d3f4f70718275595ae24390c",
+      "same_directory": true,
+      "samples": [
+        {
+          "loader": "fabric",
+          "zip_sha256": "df72252ced1fa84035f4d95b5b56541188f2b5342b9f74fdfafdc14238814702"
+        },
+        {
+          "loader": "forge",
+          "zip_sha256": "1335cbfbbb9e6247673f251be290860ec8422308da3fcae7cc4ead13eb4cdb48"
+        }
+      ]
+    }
+  ]
 }
