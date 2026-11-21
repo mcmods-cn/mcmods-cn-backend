@@ -10,7 +10,7 @@
 | `versions:rbac` | 持久全局 RBAC 版本 | 10s | 角色/权限/角色权限触发器递增 |
 | `versions:project-acl` | 持久项目关系 ACL 版本 | 10s | 作者/团队项目关系及团队成员关系变化 |
 | `authz:user-version:{id}` | 用户 permission_version | 10s | 用户角色、直接权限、作者认领和编辑员 assignment 变化 |
-| `authz:v{rbacVersion}:acl{projectACLVersion}:user:{id}:p{permissionVersion}` | 编译后的角色、管理员手工权限、派生项目权限和规则 | 120s | 任一授权版本变化自动换 Key，旧 Key 自然过期 |
+| `authz:2:v{rbacVersion}:acl{projectACLVersion}:user:{id}:p{permissionVersion}` | 有效来源均无到期时间的角色和权限结果 | 120s | 任一授权版本变化自动换 Key，涉及临时授权的结果每次访问回源 |
 | `limit:{action}:{dimensionHash}` | Lua 原子固定窗口计数 | 窗口长度 | 自动过期；Redis 故障用更严格本地额度 |
 | `presence:user:{id}:sessions` | sessionHash -> 过期时间的 ZSET | 150s 滑动 | 心跳清理过期成员；登出删除会话成员 |
 | `presence:users` | userId -> 最晚过期时间 ZSET | 成员分值 | 批量 ZMSCORE；不使用 KEYS/SCAN |

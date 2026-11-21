@@ -44,7 +44,7 @@ func userAuthVersionCacheKey(publicID string) string {
 }
 
 func rbacCacheKey(version, projectACLVersion, userID, permissionVersion int64) string {
-	return fmt.Sprintf("authz:v%d:acl%d:user:%d:p%d", version, projectACLVersion, userID, permissionVersion)
+	return fmt.Sprintf("authz:2:v%d:acl%d:user:%d:p%d", version, projectACLVersion, userID, permissionVersion)
 }
 
 func (s *Server) resolveCachedSessionSubject(ctx context.Context, claims security.Claims) (cachedSessionSubject, error) {

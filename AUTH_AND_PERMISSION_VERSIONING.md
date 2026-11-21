@@ -26,10 +26,12 @@ session:{fingerprint}
 实际 Key 为：
 
 ```text
-authz:v{rbacVersion}:acl{projectACLVersion}:user:{userId}:p{permissionVersion}
+authz:2:v{rbacVersion}:acl{projectACLVersion}:user:{userId}:p{permissionVersion}
 ```
 
 版本指针分别为 `versions:rbac`、`versions:project-acl` 和 `authz:user-version:{userId}`。旧版本 Key 自然过期，不使用 `SCAN + DEL`。权限解析合并普通角色、管理员手工直接权限，以及 `effective_project_access` 派生的编辑员/开发者变量角色。
+
+自然到期不会触发数据库写入或版本递增。用户存在有效的临时直接权限、仅由临时绑定授予的角色、或生效角色及父角色中的临时规则时，解析器在 PostgreSQL 按 `expires_at` 计算允许和拒绝，每次新查询重新读取。稳定授权继续使用两级缓存。键中的 `2` 隔离旧程序写入的权限结果。部署时更新所有鉴权实例；数据库无需迁移。
 
 ## 变化语义
 

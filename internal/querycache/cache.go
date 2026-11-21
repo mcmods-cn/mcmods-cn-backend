@@ -632,6 +632,15 @@ func (c *Cache) GetOrLoad(ctx context.Context, key string, loader func(context.C
 }
 
 func (c *Cache) GetOrLoadTTL(ctx context.Context, key string, ttl time.Duration, loader func(context.Context) ([]byte, error)) ([]byte, error) {
+	return c.GetOrLoadCacheableTTL(ctx, key, ttl, func(ctx context.Context) ([]byte, bool, error) {
+		value, err := loader(ctx)
+		return value, true, err
+	})
+}
+
+// GetOrLoadCacheableTTL shares a concurrent load. The loader may return a
+// result valid for that lookup only, which never enters the local or Redis cache.
+func (c *Cache) GetOrLoadCacheableTTL(ctx context.Context, key string, ttl time.Duration, loader func(context.Context) ([]byte, bool, error)) ([]byte, error) {
 	if ttl <= 0 {
 		ttl = c.ttl
 	}
@@ -662,9 +671,12 @@ func (c *Cache) GetOrLoadTTL(ctx context.Context, key string, ttl time.Duration,
 			return value, nil
 		}
 		c.metrics.postgresLoads.Add(1)
-		value, loadErr := loader(ctx)
+		value, cacheable, loadErr := loader(ctx)
 		if loadErr != nil {
 			return nil, loadErr
+		}
+		if !cacheable {
+			return value, nil
 		}
 		c.setLocalTTL(key, value, ttl)
 		if redisKey, valid := c.redisKey(key); c.redis != nil && valid {

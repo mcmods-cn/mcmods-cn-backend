@@ -19,10 +19,11 @@ type permissionQuery interface {
 }
 
 type permissionRole struct {
-	Code        string
-	Weight      int
-	Parents     []string
-	Permissions []domain.RolePermissionEntry
+	Code             string
+	Weight           int
+	Parents          []string
+	Permissions      []domain.RolePermissionEntry
+	hasExpiringRules bool
 }
 
 type permissionCandidate struct {
@@ -31,8 +32,9 @@ type permissionCandidate struct {
 }
 
 type resolvedUserRootPermissions struct {
-	Roles       []string
-	Permissions []security.PermissionRule
+	Roles               []string
+	Permissions         []security.PermissionRule
+	hasExpiringBindings bool
 }
 
 // resolveUserRootPermissions is the single source of truth for user
@@ -66,12 +68,14 @@ func (s *Server) resolveUserRootPermissionsAtVersion(ctx context.Context, userID
 		return nil, nil, err
 	}
 	key := rbacCacheKey(rbacVersion, projectACLVersion, userID, permissionVersion)
-	raw, err := s.cache.GetOrLoadTTL(ctx, key, s.cache.Config().RBACCacheTTL, func(loadCtx context.Context) ([]byte, error) {
-		roles, permissions, loadErr := s.resolveUserRootPermissionsUncached(loadCtx, userID)
+	raw, err := s.cache.GetOrLoadCacheableTTL(ctx, key, s.cache.Config().RBACCacheTTL, func(loadCtx context.Context) ([]byte, bool, error) {
+		users, loadErr := s.resolveUsersRootPermissions(loadCtx, []int64{userID})
 		if loadErr != nil {
-			return nil, loadErr
+			return nil, false, loadErr
 		}
-		return json.Marshal(resolvedUserRootPermissions{Roles: roles, Permissions: permissions})
+		user := users[userID]
+		raw, err := json.Marshal(user)
+		return raw, !user.hasExpiringBindings, err
 	})
 	if err != nil {
 		return nil, nil, err
@@ -112,11 +116,12 @@ func resolveUsersRootPermissionsQuery(ctx context.Context, query permissionQuery
 
 	roleRows, err := query.Query(
 		ctx,
-		`select distinct b.user_id, r.code
+		`select b.user_id, r.code, bool_and(b.expires_at is not null)
 		 from user_role_bindings b
 		 join roles r on r.id = b.role_id
 		 where b.user_id = any($1) and r.status = 'active'
 		   and (b.expires_at is null or b.expires_at > now())
+		 group by b.user_id, r.code
 		 order by b.user_id, r.code`,
 		userIDs,
 	)
@@ -124,14 +129,17 @@ func resolveUsersRootPermissionsQuery(ctx context.Context, query permissionQuery
 		return nil, err
 	}
 	assignedRoles := make(map[int64][]string, len(userIDs))
+	hasExpiry := make(map[int64]bool, len(userIDs))
 	for roleRows.Next() {
 		var userID int64
 		var code string
-		if err := roleRows.Scan(&userID, &code); err != nil {
+		var temporary bool
+		if err := roleRows.Scan(&userID, &code, &temporary); err != nil {
 			roleRows.Close()
 			return nil, err
 		}
 		assignedRoles[userID] = append(assignedRoles[userID], code)
+		hasExpiry[userID] = hasExpiry[userID] || temporary
 	}
 	if err := roleRows.Err(); err != nil {
 		roleRows.Close()
@@ -167,7 +175,8 @@ func resolveUsersRootPermissionsQuery(ctx context.Context, query permissionQuery
 	candidatesByUser := make(map[int64]map[string]permissionCandidate, len(userIDs))
 	for _, userID := range userIDs {
 		candidates := make(map[string]permissionCandidate)
-		applyPermissionRoles(candidates, assignedRoles[userID], rolesByCode, templates)
+		roleExpiry := applyPermissionRoles(candidates, assignedRoles[userID], rolesByCode, templates)
+		hasExpiry[userID] = hasExpiry[userID] || roleExpiry
 		candidatesByUser[userID] = candidates
 	}
 
@@ -196,7 +205,7 @@ func resolveUsersRootPermissionsQuery(ctx context.Context, query permissionQuery
 
 	directRows, err := query.Query(
 		ctx,
-		`select up.user_id,p.code,up.allow,up.source
+		`select up.user_id,p.code,up.allow,up.source,up.expires_at is not null
 		 from user_permissions up
 		 join permissions p on p.id = up.permission_id
 		 where up.user_id = any($1) and (up.expires_at is null or up.expires_at > now())
@@ -209,11 +218,12 @@ func resolveUsersRootPermissionsQuery(ctx context.Context, query permissionQuery
 	for directRows.Next() {
 		var userID int64
 		var code, source string
-		var allow bool
-		if err := directRows.Scan(&userID, &code, &allow, &source); err != nil {
+		var allow, temporary bool
+		if err := directRows.Scan(&userID, &code, &allow, &source, &temporary); err != nil {
 			directRows.Close()
 			return nil, err
 		}
+		hasExpiry[userID] = hasExpiry[userID] || temporary
 		applyPermissionCandidate(candidatesByUser[userID], permissionCandidate{
 			PermissionRule: security.PermissionRule{Code: code, Allow: allow, Priority: directUserPermissionPriority, Source: "user:" + source},
 			Depth:          -1,
@@ -231,14 +241,15 @@ func resolveUsersRootPermissionsQuery(ctx context.Context, query permissionQuery
 			roles = []string{}
 		}
 		result[userID] = resolvedUserRootPermissions{
-			Roles:       roles,
-			Permissions: permissionRulesFromCandidates(candidatesByUser[userID]),
+			Roles:               roles,
+			Permissions:         permissionRulesFromCandidates(candidatesByUser[userID]),
+			hasExpiringBindings: hasExpiry[userID],
 		}
 	}
 	return result, nil
 }
 
-func applyPermissionRoles(candidates map[string]permissionCandidate, roleCodes []string, rolesByCode map[string]permissionRole, templates []permissionRole) {
+func applyPermissionRoles(candidates map[string]permissionCandidate, roleCodes []string, rolesByCode map[string]permissionRole, templates []permissionRole) (hasExpiringRules bool) {
 	var applyRole func(string, int, map[string]bool)
 	applyRole = func(roleCode string, depth int, path map[string]bool) {
 		if path[roleCode] {
@@ -248,6 +259,7 @@ func applyPermissionRoles(candidates map[string]permissionCandidate, roleCodes [
 		if !ok {
 			return
 		}
+		hasExpiringRules = hasExpiringRules || role.hasExpiringRules
 		nextPath := make(map[string]bool, len(path)+1)
 		for code := range path {
 			nextPath[code] = true
@@ -267,6 +279,7 @@ func applyPermissionRoles(candidates map[string]permissionCandidate, roleCodes [
 	for _, roleCode := range roleCodes {
 		applyRole(roleCode, 0, map[string]bool{})
 	}
+	return hasExpiringRules
 }
 
 func permissionRulesFromCandidates(candidates map[string]permissionCandidate) []security.PermissionRule {
@@ -305,7 +318,7 @@ func loadPermissionRolesQuery(ctx context.Context, query permissionQuery) (map[s
 
 	permissionRows, err := query.Query(
 		ctx,
-		`select r.code, p.code, rp.allow
+		`select r.code, p.code, rp.allow, rp.expires_at is not null
 		 from role_permissions rp
 		 join roles r on r.id = rp.role_id
 		 join permissions p on p.id = rp.permission_id
@@ -318,12 +331,14 @@ func loadPermissionRolesQuery(ctx context.Context, query permissionQuery) (map[s
 	for permissionRows.Next() {
 		var roleCode string
 		var entry domain.RolePermissionEntry
-		if err := permissionRows.Scan(&roleCode, &entry.Code, &entry.Allow); err != nil {
+		var temporary bool
+		if err := permissionRows.Scan(&roleCode, &entry.Code, &entry.Allow, &temporary); err != nil {
 			permissionRows.Close()
 			return nil, nil, err
 		}
 		role := roles[roleCode]
 		role.Permissions = append(role.Permissions, entry)
+		role.hasExpiringRules = role.hasExpiringRules || temporary
 		roles[roleCode] = role
 	}
 	if err := permissionRows.Err(); err != nil {
