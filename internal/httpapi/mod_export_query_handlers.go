@@ -622,19 +622,39 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to read export revision")
 		return
 	}
-	if status != "ready" && status != "partial" {
-		writeError(w, http.StatusConflict, "export revision is not ready")
+	claims := currentClaims(r)
+	if !canReviewProjectSubmission(claims, projectID, submittedBy) {
+		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
-	if !canReviewProjectSubmission(currentClaims(r), projectID, submittedBy) {
-		writeError(w, http.StatusForbidden, "permission denied")
+	if status != "ready" && status != "partial" {
+		writeError(w, http.StatusConflict, "export revision is not ready")
 		return
 	}
 	// The actual Worker/publication path takes advisory -> version row. A
 	// reviewer must use the same order before locking a revision: row-first
 	// review can otherwise deadlock against a Worker already owning advisory.
-	if _, err = lockImportedContentVersionTx(r.Context(), tx, targetVersionID); errors.Is(err, pgx.ErrNoRows) {
-		if err = cancelArchivedImportReviewTx(r.Context(), tx, revisionID, currentClaims(r).Subject); err != nil {
+	_, err = lockImportedContentVersionTx(r.Context(), tx, targetVersionID)
+	archived := errors.Is(err, pgx.ErrNoRows)
+	if err != nil && !archived {
+		writeError(w, http.StatusInternalServerError, "failed to lock target content version")
+		return
+	}
+	allowed, err := catalogReviewerAllowedTx(r.Context(), tx, claims, projectID, submittedBy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusUnauthorized, "review session is no longer active")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "review permissions are temporarily unavailable")
+		return
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if archived {
+		if err = cancelArchivedImportReviewTx(r.Context(), tx, revisionID, claims.Subject); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to cancel import for archived target")
 			return
 		}
@@ -643,9 +663,6 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		writeError(w, http.StatusConflict, "target content version is no longer active; upload again after restoring it")
-		return
-	} else if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to lock target content version")
 		return
 	}
 	err = tx.QueryRow(r.Context(), `select status,is_active from catalog_import_revisions where id=$1 for update`, revisionID).Scan(&status, &isActive)
@@ -666,7 +683,7 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 	audit := modExportRevisionReviewAudit{
 		RevisionID: revisionID, Decision: request.Status, Note: request.Note,
 		BeforeStatus: status, BeforeActive: isActive, ModID: modID, TargetVersionID: targetVersionID,
-		Namespace: namespace, SourceKind: sourceKind, ActorID: currentClaims(r).Subject,
+		Namespace: namespace, SourceKind: sourceKind, ActorID: claims.Subject,
 		IP: s.requestClientLocation(r).IP, UserAgent: r.UserAgent(),
 	}
 	if request.Status == "rejected" {
@@ -698,7 +715,7 @@ func (s *Server) activateModExportRevision(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusOK, map[string]any{"id": revisionID, "status": status, "isActive": true})
 		return
 	}
-	if err = publishCatalogRevisionsTx(r.Context(), tx, []string{revisionID}, targetVersionID, overwriteExistingImportData, currentClaims(r).Subject); err != nil {
+	if err = publishCatalogRevisionsTx(r.Context(), tx, []string{revisionID}, targetVersionID, overwriteExistingImportData, claims.Subject); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to publish export revision")
 		return
 	}

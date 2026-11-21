@@ -134,14 +134,21 @@ func (s *Server) revokeSessionCache(ctx context.Context, claims security.Claims)
 }
 
 func (s *Server) loadSessionSubject(ctx context.Context, claims security.Claims) (cachedSessionSubject, error) {
-	record := cachedSessionSubject{SchemaVersion: authCacheSchemaVersion}
-	err := s.db.QueryRow(ctx, `select users.id,users.public_id,users.auth_version,extract(epoch from session.expires_at)::bigint
+	return readSessionSubject(ctx, s.db, claims, false)
+}
+
+func readSessionSubject(ctx context.Context, db databaseQuery, claims security.Claims, lock bool) (cachedSessionSubject, error) {
+	query := `select users.id,users.public_id,users.auth_version,extract(epoch from session.expires_at)::bigint
 		from auth_sessions session join users on users.id=session.user_id
-		where session.session_hash=$1 and session.revoked_at is null and session.expires_at>now()
+		where session.session_hash=$1 and session.revoked_at is null and session.expires_at>statement_timestamp()
 		  and session.auth_version=$2 and users.auth_version=$2
-		  and users.public_id=$3 and users.status='active'`,
-		security.SessionFingerprint(claims.SessionID), claims.AuthVersion, claims.PublicSubject,
-	).Scan(&record.UserID, &record.PublicID, &record.AuthVersion, &record.ExpiresAt)
+		  and users.public_id=$3 and users.status='active'`
+	if lock {
+		query += " for share of users,session"
+	}
+	record := cachedSessionSubject{SchemaVersion: authCacheSchemaVersion}
+	err := db.QueryRow(ctx, query, security.SessionFingerprint(claims.SessionID), claims.AuthVersion, claims.PublicSubject).
+		Scan(&record.UserID, &record.PublicID, &record.AuthVersion, &record.ExpiresAt)
 	return record, err
 }
 

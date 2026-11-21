@@ -3,9 +3,33 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/security"
 )
+
+// Review can wait behind another publisher. Resolve the session and its current
+// project-scoped rules on the transaction that now holds the target lock.
+func catalogReviewerAllowedTx(ctx context.Context, tx pgx.Tx, claims security.Claims, projectID string, submittedBy int64) (bool, error) {
+	if claims.ExpiresAt <= time.Now().Unix() {
+		return false, pgx.ErrNoRows
+	}
+	session, err := readSessionSubject(ctx, tx, claims, true)
+	if err != nil {
+		return false, err
+	}
+	if claims.Subject != session.UserID {
+		return false, pgx.ErrNoRows
+	}
+	resolved, err := resolveUsersRootPermissionsQuery(ctx, tx, []int64{session.UserID})
+	if err != nil {
+		return false, err
+	}
+	claims.PermissionRules = resolved[session.UserID].Permissions
+	return !claimsExplicitlyAllow(claims, "account.banned") && canReviewProjectSubmission(claims, projectID, submittedBy), nil
+}
 
 // The Worker may have completed before the target was archived. Ready-to-review
 // is still unpublished work: the user's confirmed archive policy cancels that

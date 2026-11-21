@@ -120,7 +120,7 @@ func resolveUsersRootPermissionsQuery(ctx context.Context, query permissionQuery
 		 from user_role_bindings b
 		 join roles r on r.id = b.role_id
 		 where b.user_id = any($1) and r.status = 'active'
-		   and (b.expires_at is null or b.expires_at > now())
+		   and (b.expires_at is null or b.expires_at > statement_timestamp())
 		 group by b.user_id, r.code
 		 order by b.user_id, r.code`,
 		userIDs,
@@ -208,7 +208,7 @@ func resolveUsersRootPermissionsQuery(ctx context.Context, query permissionQuery
 		`select up.user_id,p.code,up.allow,up.source,up.expires_at is not null
 		 from user_permissions up
 		 join permissions p on p.id = up.permission_id
-		 where up.user_id = any($1) and (up.expires_at is null or up.expires_at > now())
+		 where up.user_id = any($1) and (up.expires_at is null or up.expires_at > statement_timestamp())
 		 order by up.user_id, p.code`,
 		userIDs,
 	)
@@ -322,7 +322,7 @@ func loadPermissionRolesQuery(ctx context.Context, query permissionQuery) (map[s
 		 from role_permissions rp
 		 join roles r on r.id = rp.role_id
 		 join permissions p on p.id = rp.permission_id
-		 where r.status = 'active' and (rp.expires_at is null or rp.expires_at > now())
+		 where r.status = 'active' and (rp.expires_at is null or rp.expires_at > statement_timestamp())
 		 order by r.code, p.code`,
 	)
 	if err != nil {
