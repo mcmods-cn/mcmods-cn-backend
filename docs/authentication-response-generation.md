@@ -11,8 +11,10 @@ the new session even if the client correctly ignores the old invalid signal.
 The frontend must still check the request's authentication generation before
 acting on invalid signals or 401 responses. A genuinely invalid current session
 still receives the invalid signal on public reads and 401 on protected reads.
-Explicit logout continues to revoke the current server session and expire its
-cookie. Temporary authentication-storage errors remain 503 and do not expire
+Legacy explicit logout revokes the current server session and expires its
+cookie. The browser targets a specific session with `POST /api/v1/auth/logout/if-current`.
+That response omits Set-Cookie so late delivery preserves a subsequent login.
+See the [conditional logout contract](session-revocation.md). Temporary authentication-storage errors remain 503 and do not expire
 the cookie. No session or authorization check is relaxed.
 
 `TestAuditDGR002LateOptionalInvalidCookieCannotDeleteNewLoginHTTPPostgresIntegration`

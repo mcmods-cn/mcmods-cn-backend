@@ -186,13 +186,12 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
 		return
 	}
-	token, err := s.issueToken(r.Context(), user)
+	session, err := s.issueToken(r.Context(), user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "生成登录凭证失败")
 		return
 	}
-	s.setAuthSessionCookie(w, r, token)
-	writeJSON(w, http.StatusCreated, map[string]any{"user": authenticatedUser})
+	s.writeLoginResult(w, r, http.StatusCreated, session, authenticatedUser)
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -242,15 +241,14 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
 		return
 	}
-	token, err := s.issueToken(r.Context(), user)
+	session, err := s.issueToken(r.Context(), user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "生成登录凭证失败")
 		return
 	}
 	_, _ = s.db.Exec(r.Context(), `update users set last_login_at = now(), updated_at = now() where id = $1`, user.ID)
 	s.recordLogin(r.Context(), &user.ID, account, location, r.UserAgent(), true, "")
-	s.setAuthSessionCookie(w, r, token)
-	writeJSON(w, http.StatusOK, map[string]any{"user": authenticatedUser})
+	s.writeLoginResult(w, r, http.StatusOK, session, authenticatedUser)
 }
 
 func (s *Server) requestEmailCode(w http.ResponseWriter, r *http.Request) {
@@ -383,15 +381,14 @@ func (s *Server) emailLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
 		return
 	}
-	token, err := s.issueToken(r.Context(), user)
+	session, err := s.issueToken(r.Context(), user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "生成登录凭证失败")
 		return
 	}
 	_, _ = s.db.Exec(r.Context(), `update users set last_login_at = now(), updated_at = now() where id = $1`, user.ID)
 	s.recordLogin(r.Context(), &user.ID, req.Email, location, r.UserAgent(), true, "email_code")
-	s.setAuthSessionCookie(w, r, token)
-	writeJSON(w, http.StatusOK, map[string]any{"user": authenticatedUser})
+	s.writeLoginResult(w, r, http.StatusOK, session, authenticatedUser)
 }
 
 func (s *Server) consumeEmailLoginCode(ctx context.Context, email, code string) error {
@@ -447,7 +444,11 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
 		return
 	}
-	writeJSON(w, http.StatusOK, authenticatedUser)
+	w.Header().Set("Cache-Control", "private, no-store")
+	writeJSON(w, http.StatusOK, struct {
+		authenticatedUserResponse
+		SessionMarker string `json:"sessionMarker"`
+	}{authenticatedUser, browserSessionMarker(claims.SessionID)})
 }
 
 func (s *Server) evaluatePermission(w http.ResponseWriter, r *http.Request) {
@@ -466,6 +467,27 @@ func (s *Server) evaluatePermission(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	s.finishLogout(w, r, true)
+}
+
+func (s *Server) logoutIfCurrent(w http.ResponseWriter, r *http.Request) {
+	var condition struct {
+		SessionMarker string `json:"sessionMarker"`
+	}
+	if r.Body == nil || decodeJSON(r, &condition) != nil || strings.TrimSpace(condition.SessionMarker) == "" {
+		writeError(w, http.StatusBadRequest, "a session marker is required")
+		return
+	}
+	if condition.SessionMarker != browserSessionMarker(currentClaims(r).SessionID) {
+		writeAPIError(w, http.StatusConflict, "AUTH_SESSION_CHANGED", "the active session has changed", 0, nil)
+		return
+	}
+	// A browser may receive this response after a different session logged
+	// in. Expiring the shared cookie here could erase that newer credential.
+	s.finishLogout(w, r, false)
+}
+
+func (s *Server) finishLogout(w http.ResponseWriter, r *http.Request, expireCookie bool) {
 	claims := currentClaims(r)
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -491,29 +513,31 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.cache.RemoveUserPresence(r.Context(), claims.Subject, hex.EncodeToString(security.SessionFingerprint(claims.SessionID)), time.Now(), s.cache.Config().PresenceTTL)
-	s.clearAuthSessionCookie(w, r)
+	if expireCookie {
+		s.clearAuthSessionCookie(w, r)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Server) issueToken(ctx context.Context, user domain.User) (string, error) {
+func (s *Server) issueToken(ctx context.Context, user domain.User) (issuedAuthSession, error) {
 	var authVersion int64
 	if err := s.db.QueryRow(ctx, `select auth_version from users where id=$1 and status='active'`, user.ID).Scan(&authVersion); err != nil {
-		return "", err
+		return issuedAuthSession{}, err
 	}
 	claims, err := security.NewClaims(user.PublicID, user.Username, user.Email, authVersion, s.cfg.JWTTTL)
 	if err != nil {
-		return "", err
+		return issuedAuthSession{}, err
 	}
 	token, err := security.SignToken(s.cfg.JWTSecret, claims)
 	if err != nil {
-		return "", err
+		return issuedAuthSession{}, err
 	}
 	if _, err = s.db.Exec(ctx, `insert into auth_sessions(session_hash,user_id,auth_version,expires_at)
 		values($1,$2,$3,$4)`, security.SessionFingerprint(claims.SessionID), user.ID, authVersion, time.Unix(claims.ExpiresAt, 0)); err != nil {
-		return "", err
+		return issuedAuthSession{}, err
 	}
 	s.cacheIssuedSession(ctx, claims, user.ID)
-	return token, nil
+	return issuedAuthSession{token: token, marker: browserSessionMarker(claims.SessionID)}, nil
 }
 
 func (s *Server) findUserForLogin(ctx context.Context, account string) (domain.User, string, error) {

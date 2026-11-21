@@ -135,6 +135,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/review-locks/{entityType}/{publicId}", s.requireAuth(s.reviewLock))
 	s.mux.HandleFunc("POST /api/v1/review-locks/{entityType}/{publicId}/subscribe", s.requireAuth(s.subscribeReviewCompletion))
 	s.mux.HandleFunc("POST /api/v1/auth/logout", s.requireAuth(s.logout))
+	s.mux.HandleFunc("POST /api/v1/auth/logout/if-current", s.requireAuth(s.logoutIfCurrent))
 	s.mux.HandleFunc("GET /api/v1/location", s.visitorLocation)
 	s.mux.HandleFunc("GET /api/v1/markdown/config", s.markdownConfig)
 	s.mux.HandleFunc("GET /api/v1/site/config", s.publicSiteGeneralConfig)
