@@ -17,7 +17,7 @@ APP_ADDR=127.0.0.1:8081 FRONTEND_ORIGIN=http://127.0.0.1:3001 go run .
 
 在自管环境下从 [.env.example](.env.example) 配置数据库、JWT 签名、设置加密密钥与前端 origin。密钥在服务端注入，浏览器只读取前端的公开构建变量。启用反向代理时配置可信网段。多副本需要共享限流与 Redis 故障策略，管理员通过权限受控的设置接口管理供应商凭据。[认证撤销](docs/session-revocation.md) · [共享限流](docs/redis-rate-limiting.md) · [OAuth](docs/oauth-settings.md)
 
-默认使用 `docker build -t mcmods-backend .` 构建镜像。需要组织代理 CA 的环境可在构建命令中加入 `--secret id=proxy_ca,src=/path/to/approved-ca.pem`，仅在下载 Go 模块时将该证书追加到系统信任链。
+使用 Docker 的 BuildKit 构建器运行 `docker build -t mcmods-backend .`。需要组织代理 CA 的环境可在构建命令中加入 `--secret id=proxy_ca,src=/path/to/approved-ca.pem`，仅在下载 Go 模块时将该证书追加到系统信任链。
 
 ## 修改入口
 
