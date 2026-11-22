@@ -12,6 +12,7 @@ import (
 	"time"
 )
 
+const defaultDevelopmentJWTSecret = "change-this-in-production"
 const defaultDevelopmentSettingsEncryptionKey = "development-only-settings-encryption-key"
 const defaultDevelopmentAntiAbuseHMACSecret = "development-only-change-this-anti-abuse-hmac-secret"
 const defaultDevelopmentAntiAbuseIPSecret = "development-only-change-this-anti-abuse-ip-hash-secret"
@@ -213,7 +214,7 @@ func Load() Config {
 	if !getenvBool("MCMODS_SKIP_DOTENV", false) {
 		loadDotEnvUpwards(".env")
 	}
-	jwtSecret := getenv("JWT_SECRET", "change-this-in-production")
+	jwtSecret := getenv("JWT_SECRET", defaultDevelopmentJWTSecret)
 	replicaCount := getenvInt("APP_REPLICA_COUNT", 1)
 
 	cfg := Config{
@@ -550,14 +551,15 @@ func (cfg Config) Validate() error {
 	secret := strings.TrimSpace(cfg.JWTSecret)
 	settingsSecret := strings.TrimSpace(cfg.SettingsEncryptionKey)
 	if environment != "development" && environment != "test" {
-		if secret == "" || secret == "change-this-in-production" || len(secret) < 32 {
-			problems = append(problems, errors.New("JWT_SECRET must contain at least 32 characters outside development"))
+		if len(secret) < 32 || secret == defaultDevelopmentJWTSecret || secret == "change-this-to-a-long-random-string" {
+			problems = append(problems, errors.New("JWT_SECRET must contain at least 32 characters and differ from the published examples outside development"))
 		}
 	}
 	if settingsSecret == "" || len(settingsSecret) < 32 {
 		problems = append(problems, errors.New("SETTINGS_ENCRYPTION_KEY must contain at least 32 characters"))
-	} else if environment != "development" && environment != "test" && settingsSecret == defaultDevelopmentSettingsEncryptionKey {
-		problems = append(problems, errors.New("SETTINGS_ENCRYPTION_KEY must be changed outside development"))
+	} else if environment != "development" && environment != "test" &&
+		(settingsSecret == defaultDevelopmentSettingsEncryptionKey || settingsSecret == "change-this-to-a-different-long-random-string") {
+		problems = append(problems, errors.New("SETTINGS_ENCRYPTION_KEY must differ from the published examples outside development"))
 	}
 	if cfg.JWTTTL < 5*time.Minute || cfg.JWTTTL > 30*24*time.Hour {
 		problems = append(problems, errors.New("JWT_TTL_HOURS must produce a duration between 5 minutes and 30 days"))
