@@ -592,6 +592,10 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 		Source: "user", Status: status, Metadata: map[string]any{"projectType": projectType, "siteId": request.Snapshot.SiteID}, Request: r,
 	})
 	if err != nil {
+		if errors.Is(err, errProjectRevisionBaseChanged) {
+			writeError(w, http.StatusConflict, errProjectRevisionBaseChanged.Error())
+			return
+		}
 		if errors.Is(err, errReviewInProgress) {
 			writeError(w, http.StatusConflict, errReviewInProgress.Error())
 		} else {

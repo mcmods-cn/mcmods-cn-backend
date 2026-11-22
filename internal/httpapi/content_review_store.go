@@ -33,6 +33,7 @@ const contentChangeBatchInsertSQL = `insert into content_change_items(revision_i
 	from unnest($2::text[],$3::text[],$4::text[],$5::text[]) batch(path,operation,before_value,after_value)`
 
 var errReviewInProgress = errors.New("this project already has a pending review")
+var errProjectRevisionBaseChanged = errors.New("published project revision changed; reload the editor")
 
 type createContentRevisionParams struct {
 	EntityType    string
@@ -81,6 +82,20 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 	}
 	if params.Status == "" {
 		params.Status = "pending"
+	}
+
+	// Project creation and scheduled maintenance already own the project's row
+	// before they allocate a revision. Manual edits follow the same lock order.
+	switch params.AggregateType {
+	case "mod", modpackAggregate, simpleProjectAggregate:
+		target, err := lockProjectRevisionTargetTx(ctx, tx, params.AggregateType, params.EntityID)
+		if err != nil {
+			return result, fmt.Errorf("load project revision base: %w", err)
+		}
+		if target.publicID != params.AggregateKey || target.projectType != params.EntityType ||
+			!sameRevision(params.BaseRevision, target.publishedRevisionID) {
+			return result, errProjectRevisionBaseChanged
+		}
 	}
 
 	lockKey := params.AggregateType + ":" + params.AggregateKey

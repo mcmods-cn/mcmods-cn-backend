@@ -119,26 +119,8 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var publishedRevisionID *int64
-	if err = tx.QueryRow(r.Context(), `select published_revision_id from mods where id=$1 for update`, identity.ID).Scan(&publishedRevisionID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to lock mod")
-		return
-	}
 	requestedBaseRevisionID, resolveErr := resolveRevisionPublicID(r.Context(), tx, request.BaseRevisionID)
 	if resolveErr != nil {
-		writeError(w, http.StatusConflict, "the proposed base revision is no longer current")
-		return
-	}
-	if publishedRevisionID != nil {
-		if requestedBaseRevisionID == nil {
-			writeError(w, http.StatusConflict, "base revision is required; reload the editor")
-			return
-		}
-		if *requestedBaseRevisionID != *publishedRevisionID {
-			writeError(w, http.StatusConflict, "the mod changed while you were editing; reload and compare changes")
-			return
-		}
-	} else if requestedBaseRevisionID != nil {
 		writeError(w, http.StatusConflict, "the proposed base revision is no longer current")
 		return
 	}
@@ -156,7 +138,7 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		EntityID:      identity.ID,
 		AggregateType: "mod",
 		AggregateKey:  identity.UniqueID,
-		BaseRevision:  publishedRevisionID,
+		BaseRevision:  requestedBaseRevisionID,
 		Snapshot:      snapshot,
 		Reason:        request.ChangeReason,
 		ActorID:       claims.Subject,
@@ -166,6 +148,10 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		Request:       r,
 	})
 	if err != nil {
+		if errors.Is(err, errProjectRevisionBaseChanged) {
+			writeError(w, http.StatusConflict, errProjectRevisionBaseChanged.Error())
+			return
+		}
 		if errors.Is(err, errReviewInProgress) {
 			writeError(w, http.StatusConflict, errReviewInProgress.Error())
 			return

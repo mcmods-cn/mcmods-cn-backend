@@ -10,40 +10,52 @@ import (
 
 var errProjectModerationHidden = errors.New("project is hidden by moderation")
 
+type projectRevisionTarget struct {
+	publicID            string
+	projectType         string
+	reviewStatus        string
+	publishedRevisionID *int64
+}
+
+func lockProjectRevisionTargetTx(ctx context.Context, tx pgx.Tx, aggregateType string, projectID int64) (projectRevisionTarget, error) {
+	target := projectRevisionTarget{projectType: aggregateType}
+	var err error
+	switch aggregateType {
+	case "mod":
+		err = tx.QueryRow(ctx, `select project_code,review_status,published_revision_id from mods where id=$1 for update`, projectID).
+			Scan(&target.publicID, &target.reviewStatus, &target.publishedRevisionID)
+	case modpackAggregate:
+		err = tx.QueryRow(ctx, `select public_id,review_status,published_revision_id from modpacks where id=$1 for update`, projectID).
+			Scan(&target.publicID, &target.reviewStatus, &target.publishedRevisionID)
+	case simpleProjectAggregate:
+		err = tx.QueryRow(ctx, `select public_id,review_status,published_revision_id,project_type from simple_projects where id=$1 for update`, projectID).
+			Scan(&target.publicID, &target.reviewStatus, &target.publishedRevisionID, &target.projectType)
+	default:
+		return projectRevisionTarget{}, errors.New("unsupported project revision aggregate")
+	}
+	return target, err
+}
+
 // Check the governing record after locking the project row. A query begun
 // before the governing transaction commits may see the new locked row but
 // still have a snapshot that predates its moderation action.
 func checkProjectRevisionModerationTx(ctx context.Context, tx pgx.Tx, aggregateType string, projectID int64) error {
-	targetType := aggregateType
-	var publicID, reviewStatus string
-	var err error
-	switch aggregateType {
-	case "mod":
-		err = tx.QueryRow(ctx, `select project_code,review_status from mods where id=$1 for update`, projectID).
-			Scan(&publicID, &reviewStatus)
-	case modpackAggregate:
-		err = tx.QueryRow(ctx, `select public_id,review_status from modpacks where id=$1 for update`, projectID).
-			Scan(&publicID, &reviewStatus)
-	case simpleProjectAggregate:
-		err = tx.QueryRow(ctx, `select public_id,review_status,project_type from simple_projects where id=$1 for update`, projectID).
-			Scan(&publicID, &reviewStatus, &targetType)
-	default:
-		return errors.New("unsupported project revision aggregate")
-	}
+	target, err := lockProjectRevisionTargetTx(ctx, tx, aggregateType, projectID)
 	if err != nil {
 		return err
 	}
-	if reviewStatus != "rejected" {
+	if target.reviewStatus != "rejected" {
 		return nil
 	}
-	if targetType == "shader_pack" {
-		targetType = "shader"
+	reportTargetType := target.projectType
+	if reportTargetType == "shader_pack" {
+		reportTargetType = "shader"
 	}
 
 	var hidden bool
 	err = tx.QueryRow(ctx, `select exists(select 1 from moderation_actions
 		where action_type='delete' and target_type=$1 and target_public_id=$2
-		  and after_summary->>'visibility'='hidden_by_moderation')`, targetType, publicID).Scan(&hidden)
+		  and after_summary->>'visibility'='hidden_by_moderation')`, reportTargetType, target.publicID).Scan(&hidden)
 	if err != nil {
 		return err
 	}

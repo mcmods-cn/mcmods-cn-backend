@@ -578,6 +578,10 @@ func (s *Server) createModpackRevision(w http.ResponseWriter, r *http.Request, s
 		Source: "user", Status: status, Metadata: map[string]any{"siteId": request.Snapshot.SiteID}, Request: r,
 	})
 	if err != nil {
+		if errors.Is(err, errProjectRevisionBaseChanged) {
+			writeError(w, http.StatusConflict, errProjectRevisionBaseChanged.Error())
+			return
+		}
 		if errors.Is(err, errReviewInProgress) {
 			writeError(w, http.StatusConflict, errReviewInProgress.Error())
 			return
