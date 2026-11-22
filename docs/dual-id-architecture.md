@@ -8,7 +8,7 @@ Mcmods-cn 的业务对象使用“数字内部 ID + 随机公开 ID”：
 - `public_id` 只能由 PostgreSQL 的 `new_public_id()` 或服务端 CSPRNG 生成，不能再由名称、Minecraft ID、时间戳或内容哈希推导；
 - 外部公开 ID 不是权限凭据，服务端解析后仍必须执行对象级权限检查。
 
-现行空库由 generation 168 安装这套结构。已有数据的部署先核对 schema 代际和前向修复，再在副本上验证迁移与恢复。[维护入口](../README.md)
+现行空库通过 `go run ./cmd/db-initialize` 安装 generation 169。应用启动时核对代际和实际结构指纹。恢复已有数据时，先在隔离库核对快照、应用版本和公开 ID，再接入服务。[安装与恢复](../README.md#数据库安装发布和恢复)
 
 ## 核心表约定
 
