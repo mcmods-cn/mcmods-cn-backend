@@ -19,9 +19,9 @@ import (
 
 func TestModExportUploadRecoverySourcesCarryAuthenticatedOwner(t *testing.T) {
 	base := ossModImportCategory("example-project", "mcmods-exporter", "packages")
-	first := ossOwnerObjectCategory(base, 41)
-	second := ossOwnerObjectCategory(base, 42)
-	if first == second || !strings.HasSuffix(first, "/owners/41") || !strings.HasSuffix(second, "/owners/42") {
+	firstCategory, first := ossModExportUploadCategories("example-project", 41)
+	secondCategory, second := ossModExportUploadCategories("example-project", 42)
+	if firstCategory != base || secondCategory != base || first == second || !strings.HasSuffix(first, "/owners/41") || !strings.HasSuffix(second, "/owners/42") {
 		t.Fatalf("owner-scoped object categories are not isolated: first=%q second=%q", first, second)
 	}
 
@@ -33,12 +33,13 @@ func TestModExportUploadRecoverySourcesCarryAuthenticatedOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, source := range map[string]string{
-		"create": string(ossSource),
-		"resume": string(handlerSource),
+	for _, entry := range []struct{ name, source string }{
+		{"createOSSDirectUploadWithScope", string(ossSource)},
+		{"completeOSSDirectUploadWithScope", string(ossSource)},
+		{"resumeModExportUpload", string(handlerSource)},
 	} {
-		if !strings.Contains(source, "ossOwnerObjectCategory") {
-			t.Fatalf("%s upload path does not enforce the authenticated owner category", name)
+		if !strings.Contains(goFunctionBody(t, entry.source, entry.name), "ossModExportUploadCategories") {
+			t.Fatalf("%s does not use the common exporter upload category", entry.name)
 		}
 	}
 	if !strings.Contains(string(handlerSource), "job.created_by=$3") ||

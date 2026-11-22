@@ -113,6 +113,11 @@ func ossOwnerObjectCategory(category string, ownerID int64) string {
 	return path.Join(category, "owners", strconv.FormatInt(ownerID, 10))
 }
 
+func ossModExportUploadCategories(projectPublicID string, ownerID int64) (string, string) {
+	category := ossModImportCategory(projectPublicID, "mcmods-exporter", "packages")
+	return category, ossOwnerObjectCategory(category, ownerID)
+}
+
 func ossCategoryFromObjectKey(objectKey, prefix string) string {
 	root := ossRoot(prefix)
 	relative := strings.TrimPrefix(strings.TrimSpace(objectKey), root+"/")

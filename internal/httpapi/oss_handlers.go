@@ -297,8 +297,7 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 			objectCategory = category
 		}
 	} else if isModExport {
-		category = ossModImportCategory(modExportUniqueID, "mcmods-exporter", "packages")
-		objectCategory = ossOwnerObjectCategory(category, currentClaims(r).Subject)
+		category, objectCategory = ossModExportUploadCategories(modExportUniqueID, currentClaims(r).Subject)
 		objectPrefix = ossRoot(cfg.Prefix)
 	} else if isModCatalog {
 		category = ossModImportCategory(modCatalogUniqueID, source, "catalog")
@@ -614,8 +613,8 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 			req.Category = ossCategoryFromObjectKey(req.ObjectKey, cfg.Prefix)
 		}
 	} else if isModExport {
-		exportCategory := ossModImportCategory(modExportUniqueID, "mcmods-exporter", "packages")
-		exportPrefix := ossObjectPrefix(cfg.Prefix, exportCategory)
+		exportCategory, uploaderCategory := ossModExportUploadCategories(modExportUniqueID, currentClaims(r).Subject)
+		exportPrefix := ossObjectPrefix(cfg.Prefix, uploaderCategory)
 		if !isAllowedObjectKey(req.ObjectKey, exportPrefix) {
 			writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于模组导入临时目录")
 			return
