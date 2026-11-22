@@ -418,7 +418,7 @@ func (s *Server) catalogRecipeDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve published revision")
 		return
 	}
-	reviewStatus, reviewErr := s.catalogPendingReviewStatus(r.Context(), entity.ID)
+	reviewStatus, reviewErr := s.catalogPendingReviewStatus(r.Context(), entity)
 	if reviewErr != nil {
 		logCatalogEditorReadFailure("recipe review status", reviewErr)
 		writeError(w, http.StatusInternalServerError, "failed to read review status")
@@ -576,9 +576,11 @@ func (s *Server) catalogLocalizationRows(ctx context.Context, entityID int64) ([
 	return result, rows.Err()
 }
 
-func (s *Server) catalogPendingReviewStatus(ctx context.Context, entityID int64) (string, error) {
+func (s *Server) catalogPendingReviewStatus(ctx context.Context, entity catalogEditorEntity) (string, error) {
 	var status string
-	err := s.db.QueryRow(ctx, `select status from change_requests where entity_id=$1 order by id desc limit 1`, entityID).Scan(&status)
+	err := s.db.QueryRow(ctx, `select status from change_requests
+		where aggregate_type=$1 and aggregate_key=$2 order by id desc limit 1`,
+		catalogAggregateForKind(entity.EntityType), entity.PublicID).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "approved", nil
 	}

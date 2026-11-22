@@ -291,7 +291,7 @@ func (s *Server) writeCatalogResourceDetail(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "failed to resolve published revision")
 		return
 	}
-	reviewStatus, reviewErr := s.catalogPendingReviewStatus(r.Context(), entity.ID)
+	reviewStatus, reviewErr := s.catalogPendingReviewStatus(r.Context(), entity)
 	if reviewErr != nil {
 		logCatalogEditorReadFailure("resource review status", reviewErr)
 		writeError(w, http.StatusInternalServerError, "failed to read review status")
@@ -662,7 +662,7 @@ func (s *Server) catalogTagDetail(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to resolve published revision")
 			return
 		}
-		reviewStatus, reviewErr := s.catalogPendingReviewStatus(r.Context(), entity.ID)
+		reviewStatus, reviewErr := s.catalogPendingReviewStatus(r.Context(), entity)
 		if reviewErr != nil {
 			logCatalogEditorReadFailure("tag review status", reviewErr)
 			writeError(w, http.StatusInternalServerError, "failed to read review status")
@@ -813,7 +813,7 @@ func (s *Server) catalogRecipeTypeDetail(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to resolve published revision")
 		return
 	}
-	reviewStatus, reviewErr := s.catalogPendingReviewStatus(r.Context(), entity.ID)
+	reviewStatus, reviewErr := s.catalogPendingReviewStatus(r.Context(), entity)
 	if reviewErr != nil {
 		logCatalogEditorReadFailure("recipe type review status", reviewErr)
 		writeError(w, http.StatusInternalServerError, "failed to read review status")
@@ -1062,7 +1062,7 @@ func (s *Server) catalogRecipeTemplateDetail(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "failed to resolve published revision")
 		return
 	}
-	reviewStatus, reviewErr := s.catalogPendingReviewStatus(r.Context(), entity.ID)
+	reviewStatus, reviewErr := s.catalogPendingReviewStatus(r.Context(), entity)
 	if reviewErr != nil {
 		logCatalogEditorReadFailure("recipe template review status", reviewErr)
 		writeError(w, http.StatusInternalServerError, "failed to read review status")

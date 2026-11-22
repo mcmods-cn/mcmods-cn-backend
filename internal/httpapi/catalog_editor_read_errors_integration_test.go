@@ -55,7 +55,8 @@ func TestCatalogRecipeTypeDetailFailsOnEveryRequiredReadIntegration(t *testing.T
 	if status, body := invokeCatalogRecipeTypeDetail(t, server, publicID); status != http.StatusOK {
 		t.Fatalf("healthy detail status=%d body=%s", status, body)
 	}
-	if status, err := server.catalogPendingReviewStatus(ctx, entityID); err != nil || status != "approved" {
+	entity := catalogEditorEntity{ID: entityID, EntityType: "recipe_type", PublicID: publicID}
+	if status, err := server.catalogPendingReviewStatus(ctx, entity); err != nil || status != "approved" {
 		t.Fatalf("absent review status=(%q,%v), want approved/nil", status, err)
 	}
 
@@ -83,12 +84,80 @@ func TestCatalogRecipeTypeDetailFailsOnEveryRequiredReadIntegration(t *testing.T
 				t.Fatalf("detail with unavailable %s status=%d body=%s; want 500", testCase.table, status, body)
 			}
 			if testCase.table == "change_requests" {
-				if status, reviewErr := server.catalogPendingReviewStatus(ctx, entityID); reviewErr == nil || status != "" {
+				if status, reviewErr := server.catalogPendingReviewStatus(ctx, entity); reviewErr == nil || status != "" {
 					t.Fatalf("review database failure=(%q,%v), want empty/error", status, reviewErr)
 				}
 			}
 		})
 	}
+}
+
+func TestCatalogRecipeTypeDetailUsesItsOwnReviewHistoryIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "content.write", "project.create")
+
+	// The tables use independent ID sequences. Align their next values in this
+	// fixture's database so ordinary submissions exercise the collision.
+	var nextID int64
+	if err := f.db.QueryRow(f.ctx, `select greatest(
+		(select coalesce(max(id),0) from catalog_entities), (select coalesce(max(id),0) from mods)
+	)+1`).Scan(&nextID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `select
+		setval(pg_get_serial_sequence('catalog_entities','id'),$1,false),
+		setval(pg_get_serial_sequence('mods','id'),$1,false)`, nextID); err != nil {
+		t.Fatal(err)
+	}
+
+	const catalogPath = "/api/v1/recipe-types"
+	edit := map[string]any{
+		"canonicalId": "fixture:review-history", "defaultLocale": "en-US",
+		"localizations": []map[string]string{{"locale": "en-US", "name": "Review history"}},
+		"definition":    map[string]any{},
+	}
+	created := decodeTEST022Data[catalogEditResult](t, f.require(t, f.editor, http.MethodPost, catalogPath, edit, http.StatusAccepted))
+	reviewPath := "/api/v1/content-revisions/"
+	f.require(t, f.reviewer, http.MethodPatch, reviewPath+created.RevisionID, map[string]string{"status": "approved"}, http.StatusOK)
+	detailPath := catalogPath + "/" + created.ObjectPublicID
+	assertDetailStatus := func(want string) {
+		t.Helper()
+		detail := decodeTEST022Data[struct {
+			ReviewStatus string `json:"reviewStatus"`
+		}](t, f.require(t, "", http.MethodGet, detailPath, nil, http.StatusOK))
+		if detail.ReviewStatus != want {
+			t.Fatalf("catalog review status=%q, want %q", detail.ReviewStatus, want)
+		}
+	}
+	assertDetailStatus("approved")
+
+	project := decodeTEST022Data[modResponse](t, f.require(t, f.editor, http.MethodPost, "/api/v1/mods", createModRequest{
+		SiteID: "review-history-mod", PrimaryName: "Review history mod", DefaultLocale: "en-US",
+		Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "Review history mod", Summary: "Review history fixture"}},
+		Environment:   "bothRequired", PrimaryCategory: "utility", OfficialStatus: "active", SourceStatus: "open",
+		License: "MIT", SubmissionMethod: "manual", ModIDs: []modIdentifierPayload{{Identifier: "review_history_mod", Primary: true}},
+		Compatibilities: []modLoaderCompatibilityPayload{{Loader: "neoforge", Versions: []string{"1.21.1"}}},
+	}, http.StatusCreated))
+	var catalogID, projectID int64
+	var projectStatus string
+	if err := f.db.QueryRow(f.ctx, `select entity.id,mod.id,request.status from catalog_entities entity
+		cross join mods mod join change_requests request
+		  on request.aggregate_type='mod' and request.aggregate_key=mod.project_code
+		where entity.public_id=$1 and mod.project_code=$2`, created.ObjectPublicID, project.UniqueID).
+		Scan(&catalogID, &projectID, &projectStatus); err != nil {
+		t.Fatal(err)
+	}
+	if catalogID != nextID || projectID != nextID || projectStatus != "pending" {
+		t.Fatalf("expected independent records with one internal ID and a pending project review, got %d/%d %q", catalogID, projectID, projectStatus)
+	}
+	assertDetailStatus("approved")
+
+	edit["baseRevisionId"] = created.RevisionID
+	edit["localizations"] = []map[string]string{{"locale": "en-US", "name": "Revised review history"}}
+	pending := decodeTEST022Data[catalogEditResult](t, f.require(t, f.editor, http.MethodPut, detailPath, edit, http.StatusAccepted))
+	assertDetailStatus("pending")
+	f.require(t, f.reviewer, http.MethodPatch, reviewPath+pending.RevisionID, map[string]string{"status": "rejected"}, http.StatusOK)
+	assertDetailStatus("rejected")
 }
 
 func invokeCatalogRecipeTypeDetail(t *testing.T, server *Server, publicID string) (int, string) {
