@@ -511,7 +511,7 @@ func TestTEST038ActualUploadedLogAttachmentRollbackRetryLeaseRecoveryAndDeleteFu
 	if err := f.db.QueryRow(f.ctx, "select id from comment_log_attachment_jobs where comment_id=(select id from comments where public_id=$1)", root.ID).Scan(&jobID); err != nil {
 		t.Fatal(err)
 	}
-	worker := NewCommentLogAttachmentWorker(f.server.cfg, f.db, nil)
+	worker := NewCommentLogAttachmentWorker(f.server)
 	if _, err := f.db.Exec(f.ctx, "alter table log_shares add constraint test038_reject_log_share check(source_file_id is null)"); err != nil {
 		t.Fatal(err)
 	}
@@ -529,18 +529,37 @@ func TestTEST038ActualUploadedLogAttachmentRollbackRetryLeaseRecoveryAndDeleteFu
 	if _, err := f.db.Exec(f.ctx, "alter table log_shares drop constraint test038_reject_log_share; update comment_log_attachment_jobs set next_attempt_at=now()"); err != nil {
 		t.Fatal(err)
 	}
+	// A redacted share becomes readable by its public code. It must commit
+	// with the binding and lease, even when the later attachment write fails.
+	if _, err := f.db.Exec(f.ctx, "alter table comment_log_bindings add constraint test038_reject_binding check(log_share_id<0)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.processJob(f.ctx, jobID); err == nil {
+		t.Fatal("binding failure was swallowed")
+	}
+	var entries, bindings int
+	if err := f.db.QueryRow(f.ctx, `select status,attempts,(select count(*) from log_shares),(select count(*) from log_share_entries),
+		(select count(*) from comment_log_bindings) from comment_log_attachment_jobs where id=$1`, jobID).Scan(&status, &attempts, &shares, &entries, &bindings); err != nil {
+		t.Fatal(err)
+	}
+	if status != "queued" || attempts != 2 || shares != 0 || entries != 0 || bindings != 0 {
+		t.Fatalf("after failed binding: job=%s attempts=%d shares=%d entries=%d bindings=%d", status, attempts, shares, entries, bindings)
+	}
+	if _, err := f.db.Exec(f.ctx, "alter table comment_log_bindings drop constraint test038_reject_binding; update comment_log_attachment_jobs set next_attempt_at=now()"); err != nil {
+		t.Fatal(err)
+	}
 	stale, claimed, err := worker.claimJob(f.ctx, jobID)
-	if err != nil || !claimed || stale.attempts != 2 {
+	if err != nil || !claimed || stale.attempts != 3 {
 		t.Fatalf("second real claim=%v error=%v", claimed, err)
 	}
 	if _, err = f.db.Exec(f.ctx, "update comment_log_attachment_jobs set lease_expires_at=now()-interval '1 second' where id=$1", jobID); err != nil {
 		t.Fatal(err)
 	}
-	restarted := NewCommentLogAttachmentWorker(f.server.cfg, f.db, nil)
+	restarted := NewCommentLogAttachmentWorker(f.server)
 	if recovered, recoveryErr := restarted.recoverDueJobs(f.ctx); recoveryErr != nil || recovered != 1 {
 		t.Fatalf("actual worker restart recovered=%d error=%v", recovered, recoveryErr)
 	}
-	assertBUG082Completed(t, f.ctx, f.db, jobID, 3)
+	assertBUG082Completed(t, f.ctx, f.db, jobID, 4)
 	var code, text string
 	if err = f.db.QueryRow(f.ctx, "select share.public_code,entry.sanitized_text from log_shares share join log_share_entries entry on entry.log_share_id=share.id").Scan(&code, &text); err != nil {
 		t.Fatal(err)
@@ -549,7 +568,7 @@ func TestTEST038ActualUploadedLogAttachmentRollbackRetryLeaseRecoveryAndDeleteFu
 		t.Fatalf("actual redaction result=%q", text)
 	}
 	before = f.facts(t)
-	if err = worker.completeJob(f.ctx, stale, code); err == nil {
+	if err = worker.completeJob(f.ctx, stale, preparedFileLogShare{FileID: stale.fileID}); err == nil {
 		t.Fatal("stale log worker completed current incarnation")
 	}
 	if err = restarted.processJob(f.ctx, jobID); err != nil {

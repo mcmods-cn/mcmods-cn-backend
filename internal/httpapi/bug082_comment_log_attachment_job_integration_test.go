@@ -167,7 +167,7 @@ func TestCommentLogAttachmentJobsRollbackRetryAndRecoverIntegration(t *testing.T
 	if err = pool.QueryRow(ctx, `select id from comment_log_attachment_jobs where comment_id=820`).Scan(&jobID); err != nil {
 		t.Fatal(err)
 	}
-	worker := NewCommentLogAttachmentWorker(server.cfg, pool, nil)
+	worker := NewCommentLogAttachmentWorker(server)
 	if err = worker.processJob(ctx, jobID); err == nil {
 		t.Fatal("first provider failure unexpectedly completed the comment log job")
 	}

@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/queue"
 )
 
@@ -22,10 +21,10 @@ const (
 )
 
 type CommentLogAttachmentWorker struct {
-	db       *pgxpool.Pool
-	queue    *queue.Client
-	api      *Server
-	workerID string
+	db         *pgxpool.Pool
+	queue      *queue.Client
+	readSource logSourceReader
+	workerID   string
 }
 
 type claimedCommentLogAttachmentJob struct {
@@ -34,9 +33,9 @@ type claimedCommentLogAttachmentJob struct {
 	lockToken                          string
 }
 
-func NewCommentLogAttachmentWorker(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client) *CommentLogAttachmentWorker {
+func NewCommentLogAttachmentWorker(server *Server) *CommentLogAttachmentWorker {
 	return &CommentLogAttachmentWorker{
-		db: db, queue: queueClient, api: &Server{cfg: cfg, db: db, queue: queueClient},
+		db: server.db, queue: server.queue, readSource: server.readLogOSSObject,
 		workerID: "comment-log-worker-" + newExportID(),
 	}
 }
@@ -91,19 +90,12 @@ func (worker *CommentLogAttachmentWorker) processJob(ctx context.Context, jobID 
 		join comment_attachments attachment on attachment.comment_id=job.comment_id and attachment.attachment_file_id=job.attachment_file_id
 		join oss_files file on file.id=attachment.attachment_file_id
 		where job.id=$1 and job.status='processing' and job.locked_by=$2`, job.id, job.lockToken).Scan(&publicFileID)
-	var result map[string]any
+	var prepared preparedFileLogShare
 	if workErr == nil {
-		result, workErr = worker.api.createFileLogShare(ctx, job.requestedBy, publicFileID, time.Now().UTC().AddDate(1, 0, 0))
-	}
-	publicCode := ""
-	if workErr == nil {
-		publicCode, _ = result["publicCode"].(string)
-		if publicCode == "" {
-			workErr = errors.New("log share public code is missing")
-		}
+		prepared, workErr = prepareFileLogShare(ctx, worker.db, worker.readSource, job.requestedBy, publicFileID)
 	}
 	if workErr == nil {
-		workErr = worker.completeJob(ctx, job, publicCode)
+		workErr = worker.completeJob(ctx, job, prepared)
 	}
 	if workErr == nil {
 		return nil
@@ -133,24 +125,35 @@ func (worker *CommentLogAttachmentWorker) claimJob(ctx context.Context, jobID in
 	return job, true, nil
 }
 
-func (worker *CommentLogAttachmentWorker) completeJob(ctx context.Context, job claimedCommentLogAttachmentJob, publicCode string) error {
+func (worker *CommentLogAttachmentWorker) completeJob(ctx context.Context, job claimedCommentLogAttachmentJob, prepared preparedFileLogShare) error {
 	tx, err := worker.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var shareID int64
-	err = tx.QueryRow(ctx, `select share.id from log_shares share
-		where share.public_code=$1 and share.owner_user_id=$2 and share.source_file_id=$3
-		  and share.status='ready' and share.deleted_at is null and share.expires_at>now()
-		for update`, publicCode, job.requestedBy, job.fileID).Scan(&shareID)
+	// Serialize against deletion of the parent and attachment before creating
+	// a share. The row locks also prevent a new lease winning during commit.
+	var jobID int64
+	err = tx.QueryRow(ctx, `select job.id from comments parent
+		join comment_attachments attachment on attachment.comment_id=parent.id
+		join comment_log_attachment_jobs job on job.comment_id=attachment.comment_id and job.attachment_file_id=attachment.attachment_file_id
+		where parent.id=$1 and attachment.attachment_file_id=$2 and job.id=$3 and job.requested_by=$4
+		and job.status='processing' and job.locked_by=$5 and job.lease_expires_at>now()
+		for share of parent,attachment for update of job`, job.commentID, prepared.FileID, job.id, job.requestedBy, job.lockToken).Scan(&jobID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("comment log attachment job lease or attachment no longer exists")
+	}
+	if err != nil {
+		return err
+	}
+	share, err := publishFileLogShareTx(ctx, tx, job.requestedBy, prepared, time.Now().UTC().AddDate(1, 0, 0))
 	if err != nil {
 		return err
 	}
 	tag, err := tx.Exec(ctx, `insert into comment_log_bindings(comment_id,attachment_file_id,log_share_id)
 		values($1,$2,$3)
 		on conflict(comment_id,attachment_file_id) do update set log_share_id=excluded.log_share_id`,
-		job.commentID, job.fileID, shareID)
+		job.commentID, job.fileID, share.id)
 	if err != nil || tag.RowsAffected() != 1 {
 		return errors.Join(err, errors.New("comment log binding was not persisted"))
 	}

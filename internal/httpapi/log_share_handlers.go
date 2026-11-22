@@ -157,32 +157,6 @@ func (s *Server) createFileLogShares(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusMultiStatus, map[string]any{"items": items})
 }
 
-func (s *Server) createFileLogShare(ctx context.Context, userID int64, publicFileID string, expiresAt time.Time) (map[string]any, error) {
-	prepared, err := s.prepareFileLogShare(ctx, userID, publicFileID)
-	if err != nil {
-		return nil, err
-	}
-	if prepared.Ready != nil {
-		return prepared.Ready, nil
-	}
-	result, err := s.persistReadyLogShare(ctx, userID, "file", prepared.FileID, prepared.Name, prepared.Name, expiresAt, prepared.Counts, prepared.Entries)
-	var existingCode string
-	if err == nil {
-		return result, nil
-	}
-	if !isUniqueViolation(err) {
-		return nil, errors.New("保存脱敏日志失败，请稍后重试")
-	}
-	// The partial unique index is the concurrency authority. If another
-	// request sanitized the same source file first, return that share instead
-	// of surfacing a spurious batch failure.
-	if s.db.QueryRow(ctx, `select public_code from log_shares where source_file_id=$1 and redaction_version=$2
-		and status='ready' and deleted_at is null and expires_at>now()`, prepared.FileID, logRedactionVersion).Scan(&existingCode) == nil {
-		return map[string]any{"publicCode": existingCode, "url": "/log/s/" + existingCode, "status": "ready", "reused": true}, nil
-	}
-	return nil, errors.New("保存脱敏日志失败，请稍后重试")
-}
-
 func (s *Server) readLogOSSObject(ctx context.Context, objectKey string, expectedSize int64, expectedDigest string) ([]byte, error) {
 	client, cfg, err := s.ossClient(ctx)
 	if err != nil {
@@ -324,20 +298,20 @@ func (s *Server) persistReadyLogShare(ctx context.Context, ownerID int64, source
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	result, err := s.persistReadyLogShareTx(ctx, tx, ownerID, sourceType, sourceFileID, title, originalName, expiresAt, counts, entries)
+	result, err := persistReadyLogShareTx(ctx, tx, ownerID, sourceType, sourceFileID, title, originalName, expiresAt, counts, entries)
 	if err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return result, nil
+	return result.response, nil
 }
 
-func (s *Server) persistReadyLogShareTx(ctx context.Context, tx pgx.Tx, ownerID int64, sourceType string, sourceFileID int64, title, originalName string, expiresAt time.Time, counts map[string]int, entries []logShareEntryWrite) (map[string]any, error) {
+func persistReadyLogShareTx(ctx context.Context, tx pgx.Tx, ownerID int64, sourceType string, sourceFileID int64, title, originalName string, expiresAt time.Time, counts map[string]int, entries []logShareEntryWrite) (publishedLogShare, error) {
 	code, err := randomLogShareCode()
 	if err != nil {
-		return nil, err
+		return publishedLogShare{}, err
 	}
 	var shareID int64
 	var owner, sourceFile any
@@ -352,16 +326,16 @@ func (s *Server) persistReadyLogShareTx(ctx context.Context, tx pgx.Tx, ownerID 
 		values($1,$2,$3,$4,$5,$6,'ready',$7,$7,$8::jsonb,$9) returning id`, code, owner, sourceType, sourceFile,
 		truncateRunes(strings.TrimSpace(title), 200), filepath.Base(originalName), logRedactionVersion, countsJSON, expiresAt).Scan(&shareID)
 	if err != nil {
-		return nil, err
+		return publishedLogShare{}, err
 	}
 	for index, entry := range entries {
 		if _, err = tx.Exec(ctx, `insert into log_share_entries(log_share_id,entry_index,original_name,safe_display_name,content_type,sanitized_text,byte_size,line_count,checksum,status)
 			values($1,$2,$3,$3,$4,$5,$6,$7,$8,'ready')`, shareID, index, entry.Name, entry.ContentType, entry.Text, entry.Size, entry.Lines, entry.Checksum); err != nil {
-			return nil, err
+			return publishedLogShare{}, err
 		}
 	}
-	return map[string]any{"publicCode": code, "url": "/log/s/" + code, "status": "ready", "expiresAt": expiresAt,
-		"redactionVersion": logRedactionVersion, "redactionCounts": counts, "entryCount": len(entries)}, nil
+	return publishedLogShare{id: shareID, created: true, response: map[string]any{"publicCode": code, "url": "/log/s/" + code, "status": "ready", "expiresAt": expiresAt,
+		"redactionVersion": logRedactionVersion, "redactionCounts": counts, "entryCount": len(entries)}}, nil
 }
 
 func (s *Server) publicLogShare(w http.ResponseWriter, r *http.Request) {

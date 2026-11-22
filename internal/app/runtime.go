@@ -25,7 +25,7 @@ type applicationRuntime struct {
 	queue      *queue.Client
 	outboxDone <-chan struct{}
 	activity   *activity.Monitor
-	search     *searchindex.Client
+	api        *httpapi.Server
 	cache      *querycache.Cache
 }
 
@@ -192,7 +192,9 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	if err = blueprintWorker.Start(ctx); err != nil {
 		log.Printf("blueprint worker unavailable; queued jobs remain recoverable: %v", err)
 	}
-	commentLogWorker := httpapi.NewCommentLogAttachmentWorker(cfg, db, queueClient)
+	searchClient := searchindex.New(cfg.Typesense)
+	apiServer := httpapi.NewServer(ctx, cfg, db, queueClient, sharedCache, activityMonitor, searchClient)
+	commentLogWorker := httpapi.NewCommentLogAttachmentWorker(apiServer)
 	if err = commentLogWorker.Start(ctx); err != nil {
 		log.Printf("comment log attachment worker unavailable; queued jobs remain recoverable: %v", err)
 	}
@@ -206,11 +208,10 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 	}
 	outboxDispatcher := queue.NewOutboxDispatcher(db, queueClient)
 	outboxDone := outboxDispatcher.Start(ctx)
-	searchClient := searchindex.New(cfg.Typesense)
 	searchindex.NewWorker(db, searchClient).Start(ctx)
 
 	initialized = true
-	return &applicationRuntime{db: db, activityDB: activityDB, queue: queueClient, outboxDone: outboxDone, activity: activityMonitor, search: searchClient, cache: sharedCache}, nil
+	return &applicationRuntime{db: db, activityDB: activityDB, queue: queueClient, outboxDone: outboxDone, activity: activityMonitor, api: apiServer, cache: sharedCache}, nil
 }
 
 func databaseInitializationError(action string, err error) error {

@@ -48,7 +48,6 @@ func TestCommentLogAttachmentProcessingIsCommittedAsARecoverableJob(t *testing.T
 		"recoverDueJobs(",
 		"lease_expires_at",
 		"attempts<max_attempts",
-		"createFileLogShare(",
 		"insert into comment_log_bindings",
 	} {
 		if !strings.Contains(workerSource, required) {
@@ -60,7 +59,7 @@ func TestCommentLogAttachmentProcessingIsCommittedAsARecoverableJob(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(runtimeSource), "NewCommentLogAttachmentWorker(cfg, db, queueClient)") ||
+	if !strings.Contains(string(runtimeSource), "NewCommentLogAttachmentWorker(apiServer)") ||
 		!strings.Contains(string(runtimeSource), "commentLogWorker.Start(ctx)") {
 		t.Fatal("application runtime does not start the comment log attachment worker")
 	}

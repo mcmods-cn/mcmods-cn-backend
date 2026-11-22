@@ -48,7 +48,7 @@ func Run() {
 		shutdownHTTPServer(server)
 		return
 	}
-	apiServer := httpapi.NewServer(ctx, cfg, runtime.db, runtime.queue, runtime.cache, runtime.activity, runtime.search)
+	apiServer := runtime.api
 	maintenanceDone := httpapi.NewMaintenanceWorker(apiServer).Start(ctx)
 	availability.completeInitialization(apiServer)
 	log.Print("backend initialization completed; API traffic is enabled")
