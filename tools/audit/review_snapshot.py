@@ -30,7 +30,7 @@ def file_category(path):
         return "dependency-lock", "Provenance, dependency resolution and lock consistency"
     if name.name in {"gradlew", "gradlew.bat", "gradle-wrapper.jar"}:
         return "build-tool-distribution", "Upstream source, distribution checksum and executable entry point"
-    if suffix in IMAGE_SUFFIXES:
+    if suffix in IMAGE_SUFFIXES or (suffix == ".svg" and name.parts[:2] == ("public", "mc-icons")):
         return "image", "Source or fixture provenance, decode and dimensions"
     if suffix in ARCHIVE_SUFFIXES:
         return "archive-or-binary", "Provenance, digest and bounded format inspection"
