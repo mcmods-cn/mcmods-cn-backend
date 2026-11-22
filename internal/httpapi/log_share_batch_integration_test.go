@@ -41,15 +41,16 @@ func TestFileLogShareBatchReturnsEveryItemAndReusesCompletedSourcesIntegration(t
 			source_size_bytes bigint not null,sha256 text not null
 		);
 		create temporary table log_shares (
-			source_file_id bigint,redaction_version integer,status text,deleted_at timestamptz,
+			id bigint primary key,owner_user_id bigint not null,source_file_id bigint,
+			redaction_version integer,status text,deleted_at timestamptz,
 			expires_at timestamptz,public_code text,redaction_applied_version integer not null default 1
 		);
 		insert into oss_files values
 			(1,'filegood01',7001,'active','clean','log_share','logs/one.log','one.log','one.log','text/plain',10,''),
 			(2,'filegood02',7001,'active','clean','log_share','logs/two.log','two.log','two.log','text/plain',10,'');
-		insert into log_shares values
-			(1,2,'ready',null,now()+interval '1 day','sharegood01'),
-			(2,2,'ready',null,now()+interval '1 day','sharegood02')`); err != nil {
+		insert into log_shares(id,owner_user_id,source_file_id,redaction_version,status,expires_at,public_code) values
+			(101,7001,1,2,'ready',now()+interval '1 day','sharegood001'),
+			(102,7001,2,2,'ready',now()+interval '1 day','sharegood002')`); err != nil {
 		t.Fatal(err)
 	}
 	server := &Server{db: pool}
@@ -72,6 +73,7 @@ func TestFileLogShareBatchReturnsEveryItemAndReusesCompletedSourcesIntegration(t
 					PublicCode string `json:"publicCode"`
 					Status     string `json:"status"`
 					Error      string `json:"error"`
+					Reused     bool   `json:"reused"`
 				} `json:"items"`
 			} `json:"data"`
 		}
@@ -79,9 +81,9 @@ func TestFileLogShareBatchReturnsEveryItemAndReusesCompletedSourcesIntegration(t
 			t.Fatal(err)
 		}
 		items := envelope.Data.Items
-		if len(items) != 3 || items[0].FileID != "filegood01" || items[0].PublicCode != "sharegood01" || items[0].Status != "ready" ||
+		if len(items) != 3 || items[0].FileID != "filegood01" || items[0].PublicCode != "sharegood001" || items[0].Status != "ready" || !items[0].Reused ||
 			items[1].FileID != "missing001" || items[1].Status != "failed" || items[1].Error == "" ||
-			items[2].FileID != "filegood02" || items[2].PublicCode != "sharegood02" || items[2].Status != "ready" {
+			items[2].FileID != "filegood02" || items[2].PublicCode != "sharegood002" || items[2].Status != "ready" || !items[2].Reused {
 			t.Fatalf("attempt %d items=%+v", attempt, items)
 		}
 	}
