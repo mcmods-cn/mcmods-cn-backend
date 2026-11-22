@@ -57,6 +57,7 @@ class ReviewSnapshotTests(unittest.TestCase):
         self.assertTrue(item["inspected"])
         self.assertEqual(self.evaluate(evidence)["status"], "reviewing")
         self.assertEqual(file_category("package-lock.json")[0], "dependency-lock")
+        self.assertEqual(file_category("src/test/resources/vector.json")[0], "structured-fixture-data")
         self.assertEqual(file_category("tools/testing/example_test.py")[0], "test-or-fixture")
 
     def test_read_after_end_of_file_is_rejected(self):

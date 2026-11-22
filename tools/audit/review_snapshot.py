@@ -19,7 +19,7 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".avif"}
 ARCHIVE_SUFFIXES = {".zip", ".gz", ".jar", ".pdf", ".exe"}
 SOURCE_SUFFIXES = {".go", ".java", ".ts", ".tsx", ".mts", ".mjs", ".js", ".cjs", ".py", ".sh", ".sql", ".css", ".svg"}
 REVIEW_FIELDS = ("responsibility", "focus_symbols", "call_chain", "callers", "callees", "side_effects", "invariants", "findings", "decision", "validation")
-INSPECTION_CATEGORIES = {"dependency-lock", "build-tool-distribution", "image", "archive-or-binary", "vendored", "generated-evidence"}
+INSPECTION_CATEGORIES = {"dependency-lock", "build-tool-distribution", "image", "archive-or-binary", "vendored", "generated-evidence", "structured-fixture-data"}
 
 
 def file_category(path):
@@ -44,6 +44,8 @@ def file_category(path):
         return "documentation", "Read; confirm current setup, safety and cited entry points"
     if name.parts[0] == ".github" or suffix in {".gradle", ".properties", ".yaml", ".yml", ".toml"} or name.name in {"Dockerfile", "Makefile", ".env.example", "go.mod"}:
         return "build-or-configuration", "Read; trace inputs, side effects and deployment boundaries"
+    if suffix == ".json" and ("testdata" in name.parts or "fixtures" in name.parts or "test" in name.parts):
+        return "structured-fixture-data", "Parse and verify sample provenance, values and invariants"
     if ("testdata" in name.parts or "fixtures" in name.parts or "test" in name.parts or "browser-tests" in name.parts
             or "_test." in name.name or ".test." in name.name):
         return "test-or-fixture", "Read fixture and test logic or parse the data and check provenance"
