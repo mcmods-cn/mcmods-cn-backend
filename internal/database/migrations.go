@@ -1090,7 +1090,6 @@ func baselineSchemaStatements() []string {
 			check (submission_method in ('manual', 'modrinth', 'curseforge', 'github')),
 			check (review_status in ('pending', 'approved', 'rejected'))
 		)`,
-		`create unique index if not exists idx_mods_project_code on mods (project_code)`,
 		`create or replace function prevent_mod_unique_id_update() returns trigger as $$
 		begin
 			if new.project_code is distinct from old.project_code then
