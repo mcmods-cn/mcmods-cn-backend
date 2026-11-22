@@ -48,9 +48,6 @@ func catalogImportEligibilityTx(ctx context.Context, tx pgx.Tx, jobID, runToken 
 	} else if err != nil {
 		return false, err
 	}
-	if mode == "legacy_unknown" {
-		return false, catalogImportPolicyCancellation{"queue_mode_unknown_reupload_required"}
-	}
 	if mode != "review" && mode != "automatic" {
 		return false, catalogImportPolicyCancellation{"queue_mode_invalid_reupload_required"}
 	}

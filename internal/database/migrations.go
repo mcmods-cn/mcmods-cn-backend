@@ -1391,6 +1391,8 @@ func baselineSchemaStatements() []string {
 			package_id text not null references catalog_import_packages(id) on delete cascade,
 			target_version_id bigint not null,
 			overwrite_existing boolean not null default false,
+			requested_publication_mode text not null default 'review'
+				constraint catalog_import_jobs_publication_mode_check check (requested_publication_mode in ('review','automatic')),
 			importer_version text not null,
 			status text not null default 'queued',
 			progress smallint not null default 0 check (progress between 0 and 100),

@@ -519,7 +519,7 @@ func TestAuditFixGRR01ConcurrentWorkersProgressAtSupportedPoolSizesIntegration(t
 }
 
 func TestAuditFixExecutionPolicyCancelsInvalidQueuedRequirementsIntegration(t *testing.T) {
-	for _, scenario := range []string{"banned", "edit_revoked", "automatic_revoked", "archived", "legacy_unknown"} {
+	for _, scenario := range []string{"banned", "edit_revoked", "automatic_revoked", "archived"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newAuditFixGRFixture(t)
 			if scenario == "automatic_revoked" {
@@ -539,10 +539,6 @@ func TestAuditFixExecutionPolicyCancelsInvalidQueuedRequirementsIntegration(t *t
 				}
 			case "archived":
 				if _, err := f.db.Exec(f.ctx, `update mod_content_versions set status='archived' where id=$1`, f.versionID); err != nil {
-					t.Fatal(err)
-				}
-			case "legacy_unknown":
-				if _, err := f.db.Exec(f.ctx, `update catalog_import_jobs set requested_publication_mode='legacy_unknown' where id=$1`, job.ID); err != nil {
 					t.Fatal(err)
 				}
 			}
