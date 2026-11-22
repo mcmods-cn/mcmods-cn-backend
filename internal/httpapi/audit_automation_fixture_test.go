@@ -35,6 +35,23 @@ func seedAuthorizedAutomationFixture(t *testing.T, ctx context.Context, db *pgxp
 	return actor
 }
 
+// A fully initialized fixture already owns the real system actor. Select it
+// and set only the grants the caller needs for its enable/revoke scenarios.
+func configureSeededAutomationFixture(t *testing.T, ctx context.Context, db *pgxpool.Pool, permissions ...string) int64 {
+	t.Helper()
+	var id int64
+	if err := db.QueryRow(ctx, `select id from users where username=$1 and email=$2 and status=$3
+		and password_hash='password-login-disabled'`,
+		systemactor.AutobotUsername, systemactor.AutobotEmail, systemactor.AutobotStatus).Scan(&id); err != nil {
+		t.Fatalf("load installed system actor: %v", err)
+	}
+	if _, err := db.Exec(ctx, `delete from user_permissions where user_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	grantTEST044Permissions(t, ctx, db, id, permissions...)
+	return id
+}
+
 // The production HTTP creation handler intentionally hides DB errors. Capture
 // only the exact synthetic P0001 marker in this fixture's own connection tracer
 // so a different SQL/authentication failure cannot satisfy an injected-fault case.

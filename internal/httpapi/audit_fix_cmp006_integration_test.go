@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"fmt"
-	"mcmods-cn-backend/internal/systemactor"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,12 +15,8 @@ func TestAuditFixCMP006AutomationRevokedAuthorityIntegration(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			f := newTEST013Fixture(t)
 			s := f.origin.Config.Handler.(*Server)
-			var actorID int64
-			if err := f.db.QueryRow(f.ctx, "insert into users(username,email,password_hash,email_verified,status) values($1,$2,'login-disabled',true,$3) returning id", systemactor.AutobotUsername, systemactor.AutobotEmail, systemactor.AutobotStatus).Scan(&actorID); err != nil {
-				t.Fatal(err)
-			}
 			permissions := []string{"project.create", "project.edit", "project.no-review", "content.no-review"}
-			grantTEST044Permissions(t, f.ctx, f.db, actorID, permissions...)
+			actorID := configureSeededAutomationFixture(t, f.ctx, f.db, permissions...)
 			grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.reviewer], "*")
 			var calls atomic.Int32
 			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -137,11 +132,7 @@ func TestAuditFixCMP006CrawlerRevokedCreateAuthorityIntegration(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			f := newTEST013Fixture(t)
 			s := f.origin.Config.Handler.(*Server)
-			var actorID int64
-			if err := f.db.QueryRow(f.ctx, "insert into users(username,email,password_hash,email_verified,status) values($1,$2,'disabled-login',true,$3) returning id", systemactor.AutobotUsername, systemactor.AutobotEmail, systemactor.AutobotStatus).Scan(&actorID); err != nil {
-				t.Fatal(err)
-			}
-			grantTEST044Permissions(t, f.ctx, f.db, actorID, "project.create", "project.edit", "project.no-review", "content.no-review")
+			actorID := configureSeededAutomationFixture(t, f.ctx, f.db, "project.create", "project.edit", "project.no-review", "content.no-review")
 			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				switch r.URL.Path {
@@ -167,7 +158,8 @@ func TestAuditFixCMP006CrawlerRevokedCreateAuthorityIntegration(t *testing.T) {
 			if _, err = f.db.Exec(f.ctx, "insert into system_settings(key,value) values($1,$2::jsonb)", modImportConfigSettingKey, sealed); err != nil {
 				t.Fatal(err)
 			}
-			if _, err = f.db.Exec(f.ctx, "insert into seed_crawler_configs(id,enabled,project_types,batch_size,daily_limit,minimum_downloads,interval_seconds,max_concurrency,ai_daily_token_budget,auto_submit_review) values(true,false,array['mod'],1,10,0,3600,1,0,true)"); err != nil {
+			if _, err = f.db.Exec(f.ctx, `update seed_crawler_configs set enabled=false,project_types=array['mod'],batch_size=1,
+				daily_limit=10,minimum_downloads=0,interval_seconds=3600,max_concurrency=1,ai_daily_token_budget=0,auto_submit_review=true where id`); err != nil {
 				t.Fatal(err)
 			}
 			if mode == "disabled-subject" {

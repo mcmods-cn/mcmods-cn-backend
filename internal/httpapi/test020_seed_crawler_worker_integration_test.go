@@ -15,7 +15,6 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
-	"mcmods-cn-backend/internal/systemactor"
 )
 
 type test020ProviderControl struct {
@@ -89,23 +88,9 @@ func TestTEST020SeedCrawlerWorkerRetriesDegradesHonorsConcurrencyAndOwnsLeasesIn
 	if _, err = pool.Exec(ctx, `insert into system_settings(key,value) values($1,$2::jsonb)`, modImportConfigSettingKey, sealedImportConfig); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = pool.Exec(ctx, `with account as (
-		insert into users(username,email,password_hash,email_verified,status)
-		values($1,$2,'password-login-disabled',true,$3) returning id
-	), permission as (
-		insert into permissions(code,module,name,description,access_type)
-		select code,'test020',code,'TEST020 automation fixture','write'
-		from unnest(array['project.create','project.edit','project.no-review','content.no-review']) code
-		returning id
-	)
-	insert into user_permissions(user_id,permission_id,allow,source,source_key)
-	select account.id,permission.id,true,'system_seed','test020' from account cross join permission`,
-		systemactor.AutobotUsername, systemactor.AutobotEmail, systemactor.AutobotStatus); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = pool.Exec(ctx, `insert into seed_crawler_configs(id,enabled,project_types,batch_size,daily_limit,minimum_downloads,
-		interval_seconds,max_concurrency,ai_daily_token_budget,auto_submit_review)
-		values(true,false,array['mod','plugin'],1,20,0,3600,2,0,false)`); err != nil {
+	configureSeededAutomationFixture(t, ctx, pool, "project.create", "project.edit", "project.no-review", "content.no-review")
+	if _, err = pool.Exec(ctx, `update seed_crawler_configs set enabled=false,project_types=array['mod','plugin'],batch_size=1,
+		daily_limit=20,minimum_downloads=0,interval_seconds=3600,max_concurrency=2,ai_daily_token_budget=0,auto_submit_review=false where id`); err != nil {
 		t.Fatal(err)
 	}
 

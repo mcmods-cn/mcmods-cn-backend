@@ -12,8 +12,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"mcmods-cn-backend/internal/systemactor"
 )
 
 // The release synchronization fixture calls the real transaction worker; all
@@ -77,13 +75,7 @@ func (f test017Fixture) managed(t *testing.T, other bool) (string, *ProjectAutom
 	// Automated publication now enforces the same current service identity and
 	// RBAC as a queued run. The fixture must use that real identity rather than
 	// borrowing an interactive editor for a privileged worker call.
-	var actorID int64
-	if err := f.db.QueryRow(f.ctx, `insert into users(username,email,password_hash,email_verified,status)
-		values($1,$2,'login-disabled',true,$3) on conflict(username) do update set username=excluded.username returning id`,
-		systemactor.AutobotUsername, systemactor.AutobotEmail, systemactor.AutobotStatus).Scan(&actorID); err != nil {
-		t.Fatal(err)
-	}
-	grantTEST044Permissions(t, f.ctx, f.db, actorID, "project.edit", "project.no-review", "content.no-review")
+	actorID := configureSeededAutomationFixture(t, f.ctx, f.db, "project.edit", "project.no-review", "content.no-review")
 	var routeID int64
 	if err := f.db.QueryRow(f.ctx, `select id from public_routes where entity_type='mod' and internal_id=$1`, internalID).Scan(&routeID); err != nil {
 		t.Fatal(err)
