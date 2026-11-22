@@ -22,13 +22,23 @@ python3 -B tools/testing/isolated_environment.py --go "$(command -v go)" up
 . .audit-test-environment/activate.sh
 ```
 
-初始化调用项目自己的 `cmd/db-reset`，仅针对刚创建的数据库，且设置准确的 `RESET <database>` 确认。
-之后恢复 `APP_ENV=test`、`DB_RESET_ON_START=false`。PostgreSQL 为完整 schema 和并行临时 schema 测试设置
+工具先核对随机容器标签、回环端口与实际连接目标，再以 `APP_ENV=test` 调用 `cmd/db-initialize --bootstrap-admin`。合成管理员只创建在这套工具的主体库。PostgreSQL 为完整 schema 和并行临时 schema 测试设置
 `max_locks_per_transaction=512`；普通默认值在这类测试中可能不足。工具不会改变已有数据库服务器配置。
 
 `MCMODS_SKIP_DOTENV=true` 防止配置加载器从工作区祖先目录读取私有 `.env`。
 SMTP、Typesense 与外部供应商凭据被关闭或清空；AI 测试使用确定性 HTTP fixture。
 NATS 和 Redis 使用随机 namespace，不能连到生产服务。
+
+## 重建任务自有环境
+
+`rebuild` 对照旧状态中记录的本地容器、回环端口、PostgreSQL 库名与所有者。新环境使用另一状态目录，以及全新的数据库、Redis、JetStream 和可选 Typesense。核验后可显式清理旧状态。保存过备份的目录会留下备份文件。
+
+```sh
+python3 -B tools/testing/isolated_environment.py \
+  --state "$old_state" --replacement "$new_state" rebuild
+python3 -B tools/testing/isolated_environment.py --state "$new_state" run -- go test ./internal/database
+python3 -B tools/testing/isolated_environment.py --state "$old_state" down
+```
 
 ## 实际服务检查与测试
 
@@ -49,21 +59,20 @@ python3 -B tools/testing/isolated_environment.py run -- go run ./tools/testing/d
 并使专用测试URL与应用URL精确匹配。不要以RUN=0配合非空专用URL运行：旧opt-in测试
 可能因此被启用，再被schema安全守卫拒绝。
 
-五项会临时改动 public 对象或注入故障的回归另需显式独占目标：评论热度差分、日志前向升级、
-函数修复/恢复、收藏导出终态事务及库存工具的表/视图区分。先核对状态文件的随机所有权标签、实际回环端口和数据库身份，
+三项需要直接改变主测试库的 public 对象，分别是评论热度差分、收藏导出终态事务及库存工具的表/视图区分。先核对状态文件的随机所有权标签、实际回环端口和数据库身份，
 确认该库为本任务新建、可丢弃且没有其它测试/应用使用，再将
 `MCMODS_DB_FUNCTION_REPAIR_TEST_TARGET` 设置为该状态文件记录的精确数据库名。
 不能从继承的连接串或名称包含 test 推定这些权限。独占目标确认后可单独执行：
 
 ```sh
 python3 -B tools/testing/isolated_environment.py run -- go test -race -p 1 -parallel 1 ./internal/database ./internal/httpapi ./tools/audit/database_inventory \
-  -run '^(TestOCT02CommentPopularityStatementDeltas|TestOCT02LogRedactionForwardUpgradeIntegration|TestOCT02ProjectionFunctionForwardRepairAndRecovery|TestOCT02FavoriteExportTerminalStateAndNotificationCommitTogetherIntegration|TestInventoryColumnsExcludeViewsIntegration)$' \
+  -run '^(TestOCT02CommentPopularityStatementDeltas|TestOCT02FavoriteExportTerminalStateAndNotificationCommitTogetherIntegration|TestInventoryColumnsExcludeViewsIntegration)$' \
   -count=1 -v
 ```
 
-包及用例串行，避免临时 public 对象/元数据故障注入干扰其它回归。没有显式目标时五项会 SKIP；
+包及用例串行，避免临时 public 对象或元数据故障注入干扰其它回归。没有显式目标时三项会 SKIP；
 另一次独占命令的 PASS 不改变原整套命令的 SKIP 数。
-恢复步骤及测试角色要求见[函数修复说明](database-function-repair.md)和[日志升级说明](log-redaction-upgrade.md)。
+函数修复用例使用独立子库。恢复步骤及测试角色要求见[函数修复说明](database-function-repair.md)。
 
 初次应用当前 schema 后可启动真实后端：
 
