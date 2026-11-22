@@ -45,7 +45,8 @@ func TestDeletedCommentDetachesAttachmentsAtomicallyAndPreservesLogShareIntegrat
  insert into oss_files(id,object_key,content_type,status,scan_status) values(834,'bug083/latest.log','text/plain','active','clean');
 		insert into comments(id,public_id,author_id,body,target_type,target_id,status)
 		values(830,'b083c0001',831,'private crash path','mod',832,'published');
-		insert into log_shares(id,public_code,source_type,status,expires_at) values(833,'bug083_share01','paste','ready',now()+interval '1 day');
+		insert into log_shares(id,public_code,owner_user_id,source_type,source_file_id,comment_scope_id,status,expires_at)
+		values(833,'bug083_share01',831,'file',834,830,'ready',now()+interval '1 day');
 		insert into comment_attachments(comment_id,attachment_file_id,kind,processing_status) values(830,834,'log','ready');
 		insert into comment_log_bindings(comment_id,attachment_file_id,log_share_id) values(830,834,833);
 		insert into comment_log_attachment_jobs(id,comment_id,attachment_file_id,requested_by) values(835,830,834,831);

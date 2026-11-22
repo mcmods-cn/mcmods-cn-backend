@@ -17,6 +17,7 @@ import (
 
 type preparedFileLogShare struct {
 	FileID, SourceSize int64
+	CommentScopeID     *int64
 	Name, Digest       string
 	Counts             map[string]int
 	Entries            []logShareEntryWrite
@@ -42,8 +43,8 @@ const eligibleLogShareSourceSQL = `status='active' and (scan_status in ('clean',
 
 type logSourceReader func(context.Context, string, int64, string) ([]byte, error)
 
-func prepareFileLogShare(ctx context.Context, db logShareQueryRower, readSource logSourceReader, ownerID int64, publicID string) (preparedFileLogShare, error) {
-	var p preparedFileLogShare
+func prepareFileLogShare(ctx context.Context, db logShareQueryRower, readSource logSourceReader, ownerID int64, publicID string, commentScopeID *int64) (preparedFileLogShare, error) {
+	p := preparedFileLogShare{CommentScopeID: commentScopeID}
 	var objectKey, contentType string
 	err := db.QueryRow(ctx, `select id,object_key,coalesce(nullif(source_original_name,''),original_name),content_type,source_size_bytes,sha256
 		from oss_files where public_id=$1 and uploader_id=$2 and `+eligibleLogShareSourceSQL,
@@ -57,7 +58,7 @@ func prepareFileLogShare(ctx context.Context, db logShareQueryRower, readSource 
 	if p.SourceSize <= 0 || p.SourceSize > maxLogSourceBytes {
 		return p, fmt.Errorf("文件超过 %d MiB 限制", maxLogSourceBytes>>20)
 	}
-	_, err = readyLogShareForSource(ctx, db, ownerID, p.FileID)
+	_, err = readyLogShareForSource(ctx, db, ownerID, p.FileID, p.CommentScopeID)
 	if err == nil {
 		p.AlreadyReady = true
 		return p, nil
@@ -73,12 +74,13 @@ func prepareFileLogShare(ctx context.Context, db logShareQueryRower, readSource 
 	return p, err
 }
 
-func readyLogShareForSource(ctx context.Context, db logShareQueryRower, ownerID, fileID int64) (publishedLogShare, error) {
+func readyLogShareForSource(ctx context.Context, db logShareQueryRower, ownerID, fileID int64, commentScopeID *int64) (publishedLogShare, error) {
 	var share publishedLogShare
 	var code string
 	err := db.QueryRow(ctx, `select id,public_code from log_shares
 		where owner_user_id=$1 and source_file_id=$2 and redaction_version=$3 and status='ready'
-		and deleted_at is null and expires_at>now() for share`, ownerID, fileID, logRedactionVersion).Scan(&share.id, &code)
+		and comment_scope_id is not distinct from $4 and deleted_at is null and expires_at>now() for share`,
+		ownerID, fileID, logRedactionVersion, commentScopeID).Scan(&share.id, &code)
 	if err == nil {
 		share.response = map[string]any{"publicCode": code, "url": "/log/s/" + code, "status": "ready", "reused": true}
 	}
@@ -97,7 +99,7 @@ func publishFileLogShareTx(ctx context.Context, tx pgx.Tx, ownerID int64, p prep
 	if err != nil {
 		return publishedLogShare{}, err
 	}
-	share, err := readyLogShareForSource(ctx, tx, ownerID, p.FileID)
+	share, err := readyLogShareForSource(ctx, tx, ownerID, p.FileID, p.CommentScopeID)
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return share, err
 	}
@@ -112,7 +114,7 @@ func publishFileLogShareTx(ctx context.Context, tx pgx.Tx, ownerID int64, p prep
 	if err != nil {
 		return publishedLogShare{}, err
 	}
-	share, persistErr := persistReadyLogShareTx(ctx, savepoint, ownerID, "file", p.FileID, p.Name, p.Name, expiresAt, p.Counts, entries)
+	share, persistErr := persistReadyLogShareTx(ctx, savepoint, ownerID, "file", p.FileID, p.CommentScopeID, p.Name, p.Name, expiresAt, p.Counts, entries)
 	if persistErr == nil {
 		return share, savepoint.Commit(ctx)
 	}
@@ -124,7 +126,7 @@ func publishFileLogShareTx(ctx context.Context, tx pgx.Tx, ownerID int64, p prep
 	}
 	// Re-read the concurrent winner after rolling back the savepoint. The
 	// same unique index can be occupied by an elapsed or processing share.
-	share, err = readyLogShareForSource(ctx, tx, ownerID, p.FileID)
+	share, err = readyLogShareForSource(ctx, tx, ownerID, p.FileID, p.CommentScopeID)
 	if err == nil {
 		return share, nil
 	}

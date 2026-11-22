@@ -52,7 +52,7 @@ func (s *Server) createFileLogShareBatch(r *http.Request, publicIDs []string, ex
 	}()
 	for index, publicID := range publicIDs {
 		items[index] = map[string]any{"fileId": publicID, "status": "failed"}
-		p, err := prepareFileLogShare(r.Context(), s.db, s.readLogOSSObject, owner, publicID)
+		p, err := prepareFileLogShare(r.Context(), s.db, s.readLogOSSObject, owner, publicID, nil)
 		if err != nil {
 			items[index]["error"] = err.Error()
 			continue

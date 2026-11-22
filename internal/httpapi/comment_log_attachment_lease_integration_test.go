@@ -34,7 +34,7 @@ func TestCommentLogAttachmentLeaseExpiresDuringWriteIntegration(t *testing.T) {
 			if err != nil || !claimed {
 				t.Fatalf("claim=%v error=%v", claimed, err)
 			}
-			prepared, err := prepareFileLogShare(f.ctx, f.db, worker.readSource, job.requestedBy, file.ID)
+			prepared, err := prepareFileLogShare(f.ctx, f.db, worker.readSource, job.requestedBy, file.ID, &job.commentID)
 			if err != nil {
 				t.Fatal(err)
 			}

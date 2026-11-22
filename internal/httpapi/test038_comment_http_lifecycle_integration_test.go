@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -568,8 +569,8 @@ func TestTEST038ActualUploadedLogAttachmentRollbackRetryLeaseRecoveryAndDeleteFu
 		t.Fatalf("actual redaction result=%q", text)
 	}
 	before = f.facts(t)
-	if err = worker.completeJob(f.ctx, stale, preparedFileLogShare{FileID: stale.fileID}); err == nil {
-		t.Fatal("stale log worker completed current incarnation")
+	if err = worker.completeJob(f.ctx, stale, preparedFileLogShare{FileID: stale.fileID, CommentScopeID: &stale.commentID}); !errors.Is(err, errCommentLogAttachmentLeaseLost) {
+		t.Fatalf("stale log worker did not lose its lease: %v", err)
 	}
 	if err = restarted.processJob(f.ctx, jobID); err != nil {
 		t.Fatal(err)

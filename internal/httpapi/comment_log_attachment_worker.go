@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/queue"
+	"mcmods-cn-backend/internal/security"
 )
 
 const (
@@ -26,6 +27,11 @@ const (
 const liveCommentLogAttachmentLeaseSQL = `id=$1 and status='processing' and locked_by=$2 and lease_expires_at>clock_timestamp()`
 
 var errCommentLogAttachmentLeaseLost = errors.New("comment log attachment job lease is no longer current")
+var errCommentLogAttachmentUnavailable = errors.New("comment log attachment is no longer available for publication")
+
+// Pending comments may be prepared in their own scope before approval. A
+// hidden, deleted or spam comment cannot publish an attachment.
+const commentLogAttachmentEligibleSQL = `parent.status in ('pending','published') and author.status='active' and parent.author_id=job.requested_by`
 
 type CommentLogAttachmentWorker struct {
 	db         *pgxpool.Pool
@@ -92,14 +98,24 @@ func (worker *CommentLogAttachmentWorker) processJob(ctx context.Context, jobID 
 		return err
 	}
 	var publicFileID string
-	workErr := worker.db.QueryRow(ctx, `select file.public_id
+	var target commentTargetInfo
+	workErr := worker.db.QueryRow(ctx, `select file.public_id,parent.target_type,parent.target_id,parent.target_version_id
 		from comment_log_attachment_jobs job
+		join comments parent on parent.id=job.comment_id
+		join users author on author.id=parent.author_id
 		join comment_attachments attachment on attachment.comment_id=job.comment_id and attachment.attachment_file_id=job.attachment_file_id
 		join oss_files file on file.id=attachment.attachment_file_id
-		where job.id=$1 and job.status='processing' and job.locked_by=$2`, job.id, job.lockToken).Scan(&publicFileID)
+		where job.id=$1 and job.status='processing' and job.locked_by=$2 and `+commentLogAttachmentEligibleSQL, job.id, job.lockToken).
+		Scan(&publicFileID, &target.Type, &target.InternalID, &target.VersionID)
+	if errors.Is(workErr, pgx.ErrNoRows) {
+		workErr = errCommentLogAttachmentUnavailable
+	}
+	if workErr == nil {
+		workErr = requireCommentLogAttachmentTarget(ctx, worker.db, target, job.requestedBy)
+	}
 	var prepared preparedFileLogShare
 	if workErr == nil {
-		prepared, workErr = prepareFileLogShare(ctx, worker.db, worker.readSource, job.requestedBy, publicFileID)
+		prepared, workErr = prepareFileLogShare(ctx, worker.db, worker.readSource, job.requestedBy, publicFileID, &job.commentID)
 	}
 	if workErr == nil {
 		workErr = worker.completeJob(ctx, job, prepared)
@@ -109,6 +125,22 @@ func (worker *CommentLogAttachmentWorker) processJob(ctx context.Context, jobID 
 	}
 	persistErr := worker.failJob(ctx, job, workErr)
 	return errors.Join(workErr, persistErr)
+}
+
+func requireCommentLogAttachmentTarget(ctx context.Context, queryer permissionQuery, target commentTargetInfo, requester int64) error {
+	rules, err := resolveUsersRootPermissionsQuery(ctx, queryer, []int64{requester})
+	if err != nil {
+		return err
+	}
+	claims := security.Claims{Subject: requester, PermissionRules: rules[requester].Permissions}
+	if !claimsAllow(claims, "comment.create") || claimsExplicitlyAllow(claims, "account.banned") {
+		return errCommentLogAttachmentUnavailable
+	}
+	_, err = resolveCommentTargetByInternalWithQueryer(ctx, queryer, target.Type, target.InternalID, target.VersionID, claims)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errCommentLogAttachmentUnavailable
+	}
+	return err
 }
 
 func (worker *CommentLogAttachmentWorker) claimJob(ctx context.Context, jobID int64) (claimedCommentLogAttachmentJob, bool, error) {
@@ -133,26 +165,39 @@ func (worker *CommentLogAttachmentWorker) claimJob(ctx context.Context, jobID in
 }
 
 func (worker *CommentLogAttachmentWorker) completeJob(ctx context.Context, job claimedCommentLogAttachmentJob, prepared preparedFileLogShare) error {
+	if prepared.CommentScopeID == nil || *prepared.CommentScopeID != job.commentID || prepared.FileID != job.fileID {
+		return errCommentLogAttachmentUnavailable
+	}
 	tx, err := worker.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	// Serialize against deletion of the parent and attachment before creating
-	// a share. The row locks also prevent a new lease winning during commit.
-	var jobID int64
+	// Serialize against moderation, banning and attachment removal before
+	// creating a share. A new lease cannot win while these rows are locked.
+	var eligible bool
+	var target commentTargetInfo
 	err = tx.QueryRow(ctx, `with owned as materialized (
-		select job.id,job.lease_expires_at from comments parent
+		select job.lease_expires_at,parent.target_type,parent.target_id,parent.target_version_id,
+		       (`+commentLogAttachmentEligibleSQL+`) eligible from comments parent
+		join users author on author.id=parent.author_id
 		join comment_attachments attachment on attachment.comment_id=parent.id
 		join comment_log_attachment_jobs job on job.comment_id=attachment.comment_id and job.attachment_file_id=attachment.attachment_file_id
 		where parent.id=$1 and attachment.attachment_file_id=$2 and job.id=$3 and job.requested_by=$4
 		and job.status='processing' and job.locked_by=$5
-		for share of parent,attachment for update of job
-	) select id from owned where lease_expires_at>clock_timestamp()`, job.commentID, prepared.FileID, job.id, job.requestedBy, job.lockToken).Scan(&jobID)
+		for share of parent,attachment,author for update of job
+	) select eligible,target_type,target_id,target_version_id from owned where lease_expires_at>clock_timestamp()`,
+		job.commentID, prepared.FileID, job.id, job.requestedBy, job.lockToken).Scan(&eligible, &target.Type, &target.InternalID, &target.VersionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errCommentLogAttachmentLeaseLost
 	}
 	if err != nil {
+		return err
+	}
+	if !eligible {
+		return errCommentLogAttachmentUnavailable
+	}
+	if err = requireCommentLogAttachmentTarget(ctx, tx, target, job.requestedBy); err != nil {
 		return err
 	}
 	share, err := publishFileLogShareTx(ctx, tx, job.requestedBy, prepared, time.Now().UTC().AddDate(1, 0, 0))
@@ -170,6 +215,11 @@ func (worker *CommentLogAttachmentWorker) completeJob(ctx context.Context, job c
 		where comment_id=$1 and attachment_file_id=$2`, job.commentID, job.fileID)
 	if err != nil || tag.RowsAffected() != 1 {
 		return errors.Join(err, errors.New("comment log attachment was not finalized"))
+	}
+	// Reads or writes above can wait on another transaction. Recheck target
+	// visibility before making the scoped result and attachment ready together.
+	if err = requireCommentLogAttachmentTarget(ctx, tx, target, job.requestedBy); err != nil {
+		return err
 	}
 	tag, err = tx.Exec(ctx, `update comment_log_attachment_jobs set
 		status='completed',next_attempt_at=clock_timestamp(),lease_expires_at=null,locked_by='',last_error='',finished_at=clock_timestamp(),updated_at=clock_timestamp()

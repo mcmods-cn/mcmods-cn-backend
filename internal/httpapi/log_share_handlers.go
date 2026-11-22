@@ -298,7 +298,7 @@ func (s *Server) persistReadyLogShare(ctx context.Context, ownerID int64, source
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	result, err := persistReadyLogShareTx(ctx, tx, ownerID, sourceType, sourceFileID, title, originalName, expiresAt, counts, entries)
+	result, err := persistReadyLogShareTx(ctx, tx, ownerID, sourceType, sourceFileID, nil, title, originalName, expiresAt, counts, entries)
 	if err != nil {
 		return nil, err
 	}
@@ -308,7 +308,7 @@ func (s *Server) persistReadyLogShare(ctx context.Context, ownerID int64, source
 	return result.response, nil
 }
 
-func persistReadyLogShareTx(ctx context.Context, tx pgx.Tx, ownerID int64, sourceType string, sourceFileID int64, title, originalName string, expiresAt time.Time, counts map[string]int, entries []logShareEntryWrite) (publishedLogShare, error) {
+func persistReadyLogShareTx(ctx context.Context, tx pgx.Tx, ownerID int64, sourceType string, sourceFileID int64, commentScopeID *int64, title, originalName string, expiresAt time.Time, counts map[string]int, entries []logShareEntryWrite) (publishedLogShare, error) {
 	code, err := randomLogShareCode()
 	if err != nil {
 		return publishedLogShare{}, err
@@ -322,8 +322,8 @@ func persistReadyLogShareTx(ctx context.Context, tx pgx.Tx, ownerID int64, sourc
 		sourceFile = sourceFileID
 	}
 	countsJSON, _ := jsonMarshal(counts)
-	err = tx.QueryRow(ctx, `insert into log_shares(public_code,owner_user_id,source_type,source_file_id,title,original_name,status,redaction_version,redaction_applied_version,redaction_counts,expires_at)
-		values($1,$2,$3,$4,$5,$6,'ready',$7,$7,$8::jsonb,$9) returning id`, code, owner, sourceType, sourceFile,
+	err = tx.QueryRow(ctx, `insert into log_shares(public_code,owner_user_id,source_type,source_file_id,comment_scope_id,title,original_name,status,redaction_version,redaction_applied_version,redaction_counts,expires_at)
+		values($1,$2,$3,$4,$5,$6,$7,'ready',$8,$8,$9::jsonb,$10) returning id`, code, owner, sourceType, sourceFile, commentScopeID,
 		truncateRunes(strings.TrimSpace(title), 200), filepath.Base(originalName), logRedactionVersion, countsJSON, expiresAt).Scan(&shareID)
 	if err != nil {
 		return publishedLogShare{}, err
@@ -339,6 +339,7 @@ func persistReadyLogShareTx(ctx context.Context, tx pgx.Tx, ownerID int64, sourc
 }
 
 func (s *Server) publicLogShare(w http.ResponseWriter, r *http.Request) {
+	setPrivateLogShareReadHeaders(w)
 	if !s.allowLogShareRead(w, r, "log-share-metadata", 30) {
 		return
 	}
@@ -346,13 +347,11 @@ func (s *Server) publicLogShare(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "LOG_SHARE_METADATA_QUERY_INVALID", "log share metadata does not accept query parameters", 0, nil)
 		return
 	}
-	share, _, err := s.loadLogShareMetadata(r.Context(), r.PathValue("code"), false, currentClaims(r).Subject)
+	share, _, err := s.loadLogShareMetadata(r.Context(), r.PathValue("code"), currentClaims(r))
 	if err != nil {
 		writeLogShareReadError(w, err)
 		return
 	}
-	w.Header().Set("Cache-Control", "private, no-store")
-	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 	payload, err := json.Marshal(apiResponse{Data: share})
 	if err != nil || len(payload)+1 > maxLogShareMetadataResponseBytes {
 		writeAPIError(w, http.StatusRequestEntityTooLarge, "LOG_SHARE_METADATA_RESPONSE_BUDGET", "log share metadata exceeds response budget", 0, nil)
@@ -376,12 +375,13 @@ func writeLogShareReadError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) downloadLogShare(w http.ResponseWriter, r *http.Request) {
+	setPrivateLogShareReadHeaders(w)
 	release, ok := s.acquireLogShareBodyRead(w, r, "log-share-download", 5)
 	if !ok {
 		return
 	}
 	defer release()
-	share, record, err := s.loadLogShareMetadata(r.Context(), r.PathValue("code"), false, currentClaims(r).Subject)
+	share, record, err := s.loadLogShareMetadata(r.Context(), r.PathValue("code"), currentClaims(r))
 	if err != nil {
 		writeLogShareReadError(w, err)
 		return
@@ -390,8 +390,6 @@ func (s *Server) downloadLogShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "该日志不能下载")
 		return
 	}
-	w.Header().Set("Cache-Control", "private, no-store")
-	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 	name := record.OriginalName
 	if strings.EqualFold(filepath.Ext(name), ".zip") || len(share.Entries) > 1 {
 		rows, queryErr := s.db.Query(r.Context(), `select left(safe_display_name,512),sanitized_text

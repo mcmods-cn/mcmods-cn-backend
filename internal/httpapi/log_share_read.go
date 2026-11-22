@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 const (
@@ -53,6 +55,8 @@ type logShareChunkPage struct {
 type logShareRecord struct {
 	ID               int64
 	OwnerID          *int64
+	SourceFileID     *int64
+	CommentScopeID   *int64
 	PublicCode       string
 	SourceType       string
 	Title            string
@@ -132,19 +136,21 @@ func makeLogShareChunkPage(raw string, characterOffset int, scope string) logSha
 	return page
 }
 
-func (s *Server) loadLogShareRecord(ctx context.Context, code string, ownerOnly bool, viewerID int64) (logShareRecord, error) {
+func (s *Server) loadLogShareRecord(ctx context.Context, code string, viewer security.Claims) (logShareRecord, error) {
 	code = strings.TrimSpace(code)
 	var record logShareRecord
 	var counts []byte
-	err := s.db.QueryRow(ctx, `select id,owner_user_id,public_code,source_type,left(title,200),left(original_name,512),status,
+	err := s.db.QueryRow(ctx, `select id,owner_user_id,source_file_id,comment_scope_id,public_code,source_type,left(title,200),left(original_name,512),status,
 		greatest(redaction_version,redaction_applied_version),redaction_counts,created_at,expires_at from log_shares where public_code=$1 and deleted_at is null`, code).
-		Scan(&record.ID, &record.OwnerID, &record.PublicCode, &record.SourceType, &record.Title, &record.OriginalName,
+		Scan(&record.ID, &record.OwnerID, &record.SourceFileID, &record.CommentScopeID, &record.PublicCode, &record.SourceType, &record.Title, &record.OriginalName,
 			&record.Status, &record.RedactionVersion, &counts, &record.CreatedAt, &record.ExpiresAt)
 	if err != nil {
 		return logShareRecord{}, err
 	}
-	if ownerOnly && (record.OwnerID == nil || *record.OwnerID != viewerID) {
-		return logShareRecord{}, pgx.ErrNoRows
+	if record.CommentScopeID != nil {
+		if err = s.requireCommentLogShareVisibility(ctx, record, viewer); err != nil {
+			return logShareRecord{}, err
+		}
 	}
 	if record.Status != "ready" || !record.ExpiresAt.After(time.Now()) {
 		return logShareRecord{}, errLogShareGone
@@ -153,7 +159,7 @@ func (s *Server) loadLogShareRecord(ctx context.Context, code string, ownerOnly 
 		if err = s.upgradeLogShareRedaction(ctx, record.ID); err != nil {
 			return logShareRecord{}, err
 		}
-		return s.loadLogShareRecord(ctx, code, ownerOnly, viewerID)
+		return s.loadLogShareRecord(ctx, code, viewer)
 	}
 	if len(counts) > 16<<10 || json.Unmarshal(counts, &record.RedactionCounts) != nil {
 		return logShareRecord{}, errors.New("invalid log share redaction counts")
@@ -164,8 +170,32 @@ func (s *Server) loadLogShareRecord(ctx context.Context, code string, ownerOnly 
 	return record, nil
 }
 
-func (s *Server) loadLogShareMetadata(ctx context.Context, code string, ownerOnly bool, viewerID int64) (publicLogShareResponse, logShareRecord, error) {
-	record, err := s.loadLogShareRecord(ctx, code, ownerOnly, viewerID)
+func (s *Server) requireCommentLogShareVisibility(ctx context.Context, record logShareRecord, viewer security.Claims) error {
+	if record.OwnerID == nil || record.SourceFileID == nil {
+		return pgx.ErrNoRows
+	}
+	var target commentTargetInfo
+	err := s.db.QueryRow(ctx, `select parent.target_type,parent.target_id,parent.target_version_id
+		from comments parent
+		join users author on author.id=parent.author_id and author.status='active'
+		join comment_log_bindings binding on binding.comment_id=parent.id and binding.log_share_id=$2
+		join comment_attachments attachment on attachment.comment_id=binding.comment_id and attachment.attachment_file_id=binding.attachment_file_id
+		join oss_files file on file.id=attachment.attachment_file_id and file.status='active'
+		where parent.id=$1 and binding.attachment_file_id=$3 and parent.author_id=$4 and parent.status='published'
+		  and attachment.kind='log' and attachment.processing_status='ready'
+		  and ($5::bigint=0 or not exists(select 1 from user_blocks block
+			where block.blocker_id=$5 and block.blocked_id=parent.author_id))`,
+		*record.CommentScopeID, record.ID, *record.SourceFileID, *record.OwnerID, viewer.Subject).
+		Scan(&target.Type, &target.InternalID, &target.VersionID)
+	if err != nil {
+		return err
+	}
+	_, err = s.resolveCommentTargetByInternal(ctx, target.Type, target.InternalID, target.VersionID, viewer)
+	return err
+}
+
+func (s *Server) loadLogShareMetadata(ctx context.Context, code string, viewer security.Claims) (publicLogShareResponse, logShareRecord, error) {
+	record, err := s.loadLogShareRecord(ctx, code, viewer)
 	if err != nil {
 		return publicLogShareResponse{}, logShareRecord{}, err
 	}
@@ -198,6 +228,7 @@ func (s *Server) loadLogShareMetadata(ctx context.Context, code string, ownerOnl
 }
 
 func (s *Server) publicLogShareEntryContent(w http.ResponseWriter, r *http.Request) {
+	setPrivateLogShareReadHeaders(w)
 	release, ok := s.acquireLogShareBodyRead(w, r, "log-share-chunk", 60)
 	if !ok {
 		return
@@ -216,7 +247,7 @@ func (s *Server) publicLogShareEntryContent(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	code := strings.TrimSpace(r.PathValue("code"))
-	if _, err = s.loadLogShareRecord(r.Context(), code, false, currentClaims(r).Subject); err != nil {
+	if _, err = s.loadLogShareRecord(r.Context(), code, currentClaims(r)); err != nil {
 		writeLogShareReadError(w, err)
 		return
 	}
@@ -246,9 +277,12 @@ func (s *Server) publicLogShareEntryContent(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, http.StatusRequestEntityTooLarge, "LOG_SHARE_CHUNK_RESPONSE_BUDGET", "log share chunk exceeds response budget", 0, nil)
 		return
 	}
+	writeJSONBytes(w, http.StatusOK, append(payload, '\n'))
+}
+
+func setPrivateLogShareReadHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
-	writeJSONBytes(w, http.StatusOK, append(payload, '\n'))
 }
 
 func (s *Server) allowLogShareRead(w http.ResponseWriter, r *http.Request, scope string, anonymousLimit int) bool {
