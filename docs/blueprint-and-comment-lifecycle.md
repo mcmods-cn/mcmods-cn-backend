@@ -41,30 +41,29 @@ failed，并同步附件 failed；重复恢复不会重新执行已耗尽任务�
 
 文件日志分享由 `prepareFileLogShare` 在事务外读取 OSS、校验字节并脱敏。
 `publishFileLogShareTx` 在调用方的事务内核对来源所有者、状态、大小和摘要，
-同一来源与脱敏版本复用有效分享。批量分享 HTTP 在该事务内写入活动记录。
-评论 Worker 的 `completeJob` 先锁定评论、附件和当前有效租约，再一并提交分享、
+按源文件、脱敏版本及评论范围复用有效分享。批量分享 HTTP 在该事务内写入活动记录。
+评论 Worker 的 `completeJob` 锁定评论、作者、附件和当前有效租约并核对现时访问，再一并提交分享、
 脱敏条目、附件绑定、附件状态和任务完成。绑定失败时原评论和上传文件保留，
-任务按既有间隔重试。重复投递和已被接替的租约均不会创建第二份分享。
+任务按既有间隔重试。重复投递和已被接替的租约均不会在同范围创建第二份分享。
 
 完成、失败和重试以 PostgreSQL 的 `clock_timestamp()` 判定租约。先锁住相关行，
 再读取数据库实时时钟。分享、绑定和附件写入之后的最后一条任务状态更新再次校验
 同一 token 和截止时间。若等待锁期间过期，整份事务回滚。过期且仍有尝试次数的
 任务由恢复器重新领取，耗尽次数的任务由恢复器统一转为失败。
 
-发布不需要数据库迁移。需要对发布期间的每个任务启用上述原子性时，先排空或停止
-旧评论日志 Worker，再启动新版本消费现有任务。回滚到仅合并分享与绑定的版本，
-会恢复逾期尝试提交的窗口。退回更早的两次提交实现还可能留下独立分享。
-历史上没有评论绑定的分享也可能来自用户主动分享的文件。排查时结合源文件、
-附件任务、分享创建者和活动记录逐条核实，保留合法独立分享。
+空库安装包含评论日志的所有权范围与唯一约束。API 和 Worker 使用同一安装基线，
+按 [README](../README.md) 配置独立的数据库和任务命名空间。保留数据时，恢复与该数据同版本的应用及结构。
+短码可见性、受限目标例外及独立主动分享记录在 [日志分享安全设计](../LOG_SHARE_SECURITY.md)。
 
 插眼标记已读先在事务中取得其行锁，再读取新快照并同时更新回复 read_at 与
 未读计数，避免等待并发新回复时把未读数归零却留下未读回复。
-该恢复修复提供明确失败状态；本次没有新增管理员重试界面或放宽文件下载权限。
+
+评论直达与插眼通知的 outbox 只保存简短提醒与 `/comments/{commentId}`。通知 Worker 在写入前核对接收者、作者、屏蔽和评论目标的当前可见性。已失权的事件记为已处理，重复投递保持原结果。通知记录保留正常类型、聚合和已读状态。深链打开时仍通过评论权限，通知正文和外部翻译输入只包含中性提醒。
 
 验证：`go test ./internal/httpapi -run 'TestOCT02DeletedBlueprint|TestOCT02UploadCompletion|TestOCT02CommentLogLastAttemptCrash|TestOCT02CommentWatchRead|TestCommentLogAttachment' -count=1`。
 使用专用 PostgreSQL 随机私有 Schema，覆盖访客/所有者/管理员下载拒绝、实际
-advisory lock 等待期间删除及最后一次 attempt 崩溃。无需 Schema 迁移，部署后端
-即可生效。评论计数并发的 Schema 修复由对应前向迁移与数据库报告单独说明。
+advisory lock 等待期间删除及最后一次 attempt 崩溃。`TestCommentNotificationsUseCurrentRecipientVisibilityIntegration`
+通过真实 PostgreSQL、业务 HTTP 和定向投递实际 outbox 消息验证通知资格及重复投递。
 
 评论列表保留分页所选主评论，最多预览 64 条、深度不超过既有 3 层的回复。
 预览选择先应用作者屏蔽，再按 depth/created_at/id 排序限制数量；装饰与附件查询

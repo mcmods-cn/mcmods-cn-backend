@@ -500,7 +500,7 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		}
 	}
 	if request.Status == "published" {
-		if err = enqueueCommentDeliveryNotificationsTx(r.Context(), tx, claims.Subject, publicID, request.Body, target, parentID, directRecipientID, watchNotifications); err != nil {
+		if err = enqueueCommentDeliveryNotificationsTx(r.Context(), tx, claims.Subject, publicID, parentID, directRecipientID, watchNotifications); err != nil {
 			log.Printf("persist comment delivery comment_id=%d: %v", commentID, err)
 			writeError(w, http.StatusInternalServerError, "保存评论通知失败")
 			return

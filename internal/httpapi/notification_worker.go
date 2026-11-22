@@ -145,6 +145,19 @@ func (worker *NotificationWorker) createDirectNotification(ctx context.Context, 
 	}
 	defer tx.Rollback(ctx)
 	var notificationID int64
+	if event.Kind == commentReplyNoticeKind {
+		claimed, err := claimProcessedEventTx(ctx, tx, "notifications.comment_direct")
+		if err != nil || !claimed {
+			return err
+		}
+		allowed, err := commentNotificationRecipientAllowedTx(ctx, tx, event)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return tx.Commit(ctx)
+		}
+	}
 	if err = tx.QueryRow(
 		ctx,
 		`insert into notifications (recipient_id,kind,title,body,source_locale,data,source_event_id,template_key,template_version,template_params)
@@ -203,6 +216,15 @@ func (worker *NotificationWorker) aggregateCommentWatchNotification(ctx context.
 	}
 	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, event.RecipientID); err != nil {
 		return err
+	}
+	if event.Kind == commentWatchNoticeKind {
+		allowed, err := commentNotificationRecipientAllowedTx(ctx, tx, event)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return tx.Commit(ctx)
+		}
 	}
 	var notificationID int64
 	var replyCount int

@@ -157,7 +157,7 @@ func (s *Server) reviewPendingComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 403, "comment moderator required")
 		return
 	}
-	target, err := resolveCommentTargetByInternalWithQueryer(r.Context(), tx, targetType, targetID, targetVersionID, security.Claims{})
+	_, err = resolveCommentTargetByInternalWithQueryer(r.Context(), tx, targetType, targetID, targetVersionID, security.Claims{})
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 404, "comment target unavailable")
 		return
@@ -208,7 +208,7 @@ func (s *Server) reviewPendingComment(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if err = enqueueCommentDeliveryNotificationsTx(r.Context(), tx, authorID, publicID, body, target, parentID, recipientID, notifications); err != nil {
+		if err = enqueueCommentDeliveryNotificationsTx(r.Context(), tx, authorID, publicID, parentID, recipientID, notifications); err != nil {
 			writeError(w, 500, "failed to persist comment notification")
 			return
 		}
