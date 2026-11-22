@@ -38,7 +38,9 @@ authz:2:v{rbacVersion}:acl{projectACLVersion}:user:{userId}:p{permissionVersion}
 
 ## 部署与回滚
 
-本次无需数据库迁移。滚动发布期间保留既有版本提示和登出时的旧 Session 键清理。升级所有负责认证的 HTTP/SSE 实例以及发布安全版本的 Worker，检查 `securityVersions.refreshFailures`。旧实例仍可能接受过期的 Redis 正值，在所有鉴权流量切到新实例后才能确认上述撤权保证。回滚旧二进制将恢复此前的回填窗口，对要求立即撤权的流量应继续使用已修正实例。恢复 Redis 连接后应检查已提交操作的数据库状态。503 带 `committed=true` 时避免重复业务写入。所有读端升级且旧版回滚窗口关闭后，可集中移除旧 Session 键清理及版本提示发布。届时须同时调整承诺传播失败的 API、前端恢复逻辑和指标。
+当前 API 和 Worker 使用 generation 169。在同一套匹配的数据库结构下启动提供认证的 HTTP/SSE 实例和发布安全版本的 Worker，检查 `securityVersions.refreshFailures`。恢复 Redis 后先确认已经提交的操作在数据库中的状态，再决定是否重试。恢复或回滚时使用与二进制匹配的数据库快照。[数据库安装、发布和恢复](README.md#数据库安装发布和恢复)
+
+第二轮在既有数据库上切换认证读路径时，旧实例仍可能使用过期的 Redis 正值。该轮的滚动切换顺序及兼容键回收条件保留在原版本记录中。[第二轮部署记录](https://github.com/mcmods-cn/mcmods-cn-backend/blob/d14e10b4dcdeab3c7e2277dd371efa0249888eb8/AUTH_AND_PERMISSION_VERSIONING.md#部署与回滚)
 
 ## 前端同步
 
@@ -54,6 +56,6 @@ X-MCMods-Auth-State: invalid
 
 ## 启动种子与后台管理
 
-默认角色及其初始允许权限在同一事务中创建。角色已存在后，其名称、状态和允许权限由管理员维护；重启不会恢复已撤销的默认授权，也不会给已有角色自动追加未来新增的种子授权。如需调整，使用现有后台权限管理入口。
+首次安装时，默认角色、初始权限和系统任务身份与数据库结构在同一事务中创建。初始 `banned` 角色包含 `account.banned` 标记和通配拒绝。后续启动只校验已安装结构，角色与授权沿用数据库中的当前值。角色调整使用后台权限管理入口。
 
-`banned` 的内置通配拒绝仍在每次启动时保持为拒绝，保留封禁失败关闭边界。默认用户仍只在确认为首次空库初始化时创建，不重置已有密码或用户授权。
+系统任务身份禁用密码登录。交互式管理员由操作员显式运行 `go run ./cmd/db-initialize --bootstrap-admin` 创建，每套安装只允许成功一次。初始凭据由服务端环境提供，操作结束后应撤掉初始密码。[首次管理员设置](README.md#数据库安装发布和恢复)
