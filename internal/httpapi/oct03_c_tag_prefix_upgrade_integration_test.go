@@ -33,6 +33,10 @@ func oct03CRequirePrefixIndex(t *testing.T, f test013Fixture, present bool) {
 func TestOCT03CTagPrefixUpgradePreservesOldDataAndIndexesIntegration(t *testing.T) {
 	f := newTEST013Fixture(t)
 	oct03CRequirePrefixIndex(t, f, true)
+	var installedGeneration int
+	if err := f.db.QueryRow(f.ctx, `select generation from schema_metadata where singleton`).Scan(&installedGeneration); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := f.db.Exec(f.ctx, `with entity as (
 		insert into catalog_entities(identity_key,entity_type,status) values('oct03-upgrade:tag','tag','active') returning id)
 		insert into catalog_tags(entity_id,registry,canonical_id) select id,'minecraft:item','oct03:preserved' from entity`); err != nil {
@@ -41,16 +45,14 @@ func TestOCT03CTagPrefixUpgradePreservesOldDataAndIndexesIntegration(t *testing.
 	if _, err := f.db.Exec(f.ctx, `drop index concurrently public.idx_catalog_tags_canonical_prefix_registry`); err != nil {
 		t.Fatal(err)
 	}
-	// Existing generation 168 remains runnable, but startup is not a migration
-	// that silently applies this new concurrent index to an installed database.
-	if err := database.Initialize(f.ctx, f.db); err != nil {
-		t.Fatal(err)
+	if err := database.Initialize(f.ctx, f.db); err == nil || !strings.Contains(err.Error(), "database catalog differs") {
+		t.Fatalf("startup accepted the database with a missing index: %v", err)
 	}
 	oct03CRequirePrefixIndex(t, f, false)
 	name := f.db.Config().ConnConfig.Database
 	persisted := 0
 	persist := func(metadata database.CatalogTagPrefixIndexBackup) error {
-		if metadata.Change != "20261003_01" || metadata.Database != name || metadata.Generation != 168 || metadata.PriorState.Exists {
+		if metadata.Change != "20261003_01" || metadata.Database != name || metadata.Generation != installedGeneration || metadata.PriorState.Exists {
 			t.Fatalf("unexpected prior metadata: %+v", metadata)
 		}
 		persisted++
@@ -84,11 +86,11 @@ func TestOCT03CTagPrefixUpgradePreservesOldDataAndIndexesIntegration(t *testing.
 		 and (indexrelid='public.idx_catalog_tags_canonical_registry_folded'::regclass or indisunique))`).Scan(&afterOID, &rows, &generation, &retained); err != nil {
 		t.Fatal(err)
 	}
-	if persisted != 1 || beforeOID != afterOID || rows != 1 || generation != 168 || retained < 2 {
+	if persisted != 1 || beforeOID != afterOID || rows != 1 || generation != installedGeneration || retained < 2 {
 		t.Fatalf("repeat altered installation: metadata=%d sameOID=%v rows=%d generation=%d retained=%d", persisted, beforeOID == afterOID, rows, generation, retained)
 	}
 	// Generation mismatch must refuse even a valid named index, with no writes.
-	if _, err := f.db.Exec(f.ctx, `update schema_metadata set generation=167 where singleton`); err != nil {
+	if _, err := f.db.Exec(f.ctx, `update schema_metadata set generation=$1 where singleton`, installedGeneration-1); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.ApplyCatalogTagPrefixIndex(f.ctx, f.db, name, false, persist); err == nil || persisted != 1 {
@@ -204,6 +206,10 @@ func TestOCT03CTagPrefixUpgradeRefusesDriftAndRecoversInterruptedBuildIntegratio
 func TestOCT03CTagPrefixUpgradeCLIUsesExplicitTargetAndPrivateMetadataIntegration(t *testing.T) {
 	f := newTEST013Fixture(t)
 	name := f.db.Config().ConnConfig.Database
+	var installedGeneration int
+	if err := f.db.QueryRow(f.ctx, `select generation from schema_metadata where singleton`).Scan(&installedGeneration); err != nil {
+		t.Fatal(err)
+	}
 	binary := filepath.Join(t.TempDir(), "db-index-repair")
 	// ConnString preserves the original parsed text, while this fixture changes
 	// Config.Database to its nonce child. Build the explicit owned child target
@@ -259,7 +265,7 @@ func TestOCT03CTagPrefixUpgradeCLIUsesExplicitTargetAndPrivateMetadataIntegratio
 		t.Fatal(err)
 	}
 	var metadata database.CatalogTagPrefixIndexBackup
-	if err := json.Unmarshal(raw, &metadata); err != nil || metadata.Database != name || metadata.Generation != 168 || metadata.PriorState.Exists {
+	if err := json.Unmarshal(raw, &metadata); err != nil || metadata.Database != name || metadata.Generation != installedGeneration || metadata.PriorState.Exists {
 		t.Fatalf("CLI persisted wrong prior metadata: %+v err=%v", metadata, err)
 	}
 	oct03CRequirePrefixIndex(t, f, true)
