@@ -16,6 +16,8 @@
 
 应用初次创建的新 stream 用文件存储、LimitsPolicy、DiscardNew，默认 `MaxBytes=268435456`（256 MiB），没有按年龄或条数自动淘汰。该字节数是初始配置值，应按现场事件大小、流量、重放保留需求和磁盘配额选择。管理员可预置覆盖相应 subject prefix 的 stream。应用只读取已存在的 stream，无论重连、重新配置或候选配置回滚，都保留其历史、durable 和限制。
 
+在 JetStream 集群中，应用新建的 stream 仍采用 broker 默认的单副本。需要容忍节点丢失时，由运维按实际故障域和磁盘容量预置 stream 与副本数，再启动派发。已有 stream 的副本调整应就地评估，保留未处理事件和消费者进度。第二轮用同机三个文件存储节点验证三副本的 leader 停机与重连，跨主机网络分区和生产恢复还需部署验收。[实测边界](governance.md#第二轮真实运行)
+
 `queue.stream.capacityState` 按已配置的字节或条数配额占比中的较高者报告，80% 为 warning，95% 为 critical，达到上限为 full。无限字节且未跨其他阈值时为 no_byte_limit。将这些状态、主机剩余磁盘、JetStream 账号存储配额及 `outbox.oldestSeconds` 接到运维告警。单条新消息可能超出剩余空间，也可能先耗尽整个账号配额。
 
 1. 收到明确的 stream/账号存储容量拒绝时，Dispatcher 把该行退回 failed，保留 event ID 和尝试预算，30 秒后再试，并结束本轮领取。核对 outbox 的 `JetStream capacity unavailable` 错误、broker 已用/可用空间和当前流策略。
