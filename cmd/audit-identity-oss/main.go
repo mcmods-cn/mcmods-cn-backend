@@ -1,5 +1,4 @@
-// audit-identity-oss reports schema and legacy-hash counts. It never fetches
-// private bytes or adjusts data balances. Apply expands schema only.
+// Command audit-identity-oss reports OSS identity shape and unverified file counts.
 package main
 
 import (
@@ -10,59 +9,37 @@ import (
 	"os"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
 )
 
 func main() {
-	apply := flag.Bool("apply", false, "apply the additive identity/OSS schema expansion")
-	databaseName := flag.String("database", "", "exact database name required for apply")
-	metadataFile := flag.String("backup-metadata", "", "new private schema metadata backup file required for apply")
-	backupReference := flag.String("backup-reference", "", "operator's existing backup reference required for apply")
+	target := flag.String("database", "", "verify this exact database name before inspection")
 	flag.Parse()
-	if flag.NArg() != 0 || (*apply && (*databaseName == "" || *backupReference == "" || *metadataFile == "")) {
-		fmt.Fprintln(os.Stderr, "apply requires exact database, backup reference and new backup-metadata file")
-		os.Exit(1)
+	if flag.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "audit-identity-oss does not accept positional arguments")
+		os.Exit(2)
+	}
+	cfg := config.Load()
+	name, err := cfg.DB.EffectiveName()
+	if err != nil || (*target != "" && name != *target) {
+		fmt.Fprintln(os.Stderr, "database configuration does not match the requested audit target")
+		os.Exit(2)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, config.Load().DB.ConnString())
+	pool, err := database.Connect(ctx, cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "database configuration is invalid")
+		fmt.Fprintln(os.Stderr, "could not connect to the audit database")
 		os.Exit(1)
 	}
 	defer pool.Close()
-	var state database.AuditIdentityOSSState
-	if *apply {
-		before, inspectErr := database.InspectAuditIdentityOSS(ctx, pool)
-		if inspectErr != nil || before.Database != *databaseName {
-			fmt.Fprintln(os.Stderr, "inspection failed or database does not match explicit target")
-			os.Exit(1)
-		}
-		backup, backupErr := os.OpenFile(*metadataFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if backupErr != nil {
-			fmt.Fprintln(os.Stderr, "metadata backup must be a new private writable file")
-			os.Exit(1)
-		}
-		backupErr = json.NewEncoder(backup).Encode(before)
-		if backupErr == nil {
-			backupErr = backup.Sync()
-		}
-		closeErr := backup.Close()
-		if backupErr != nil || closeErr != nil {
-			fmt.Fprintln(os.Stderr, "cannot persist pre-change schema metadata")
-			os.Exit(1)
-		}
-		state, err = database.ApplyAuditIdentityOSSUpgrade(ctx, pool, *databaseName, *backupReference)
-	} else {
-		state, err = database.InspectAuditIdentityOSS(ctx, pool)
-	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "identity/OSS diagnosis or expansion failed:", err)
+	state, err := database.InspectAuditIdentityOSS(ctx, pool)
+	if err != nil || state.Database != name {
+		fmt.Fprintln(os.Stderr, "identity and OSS inspection failed or reached a different database:", err)
 		os.Exit(1)
 	}
-	if err = json.NewEncoder(os.Stdout).Encode(map[string]any{"applied": *apply, "state": state, "legacy_hash_action": "diagnose and independently verify source bytes; never infer verification from claimed metadata"}); err != nil {
+	if err = json.NewEncoder(os.Stdout).Encode(state); err != nil {
 		os.Exit(1)
 	}
 }

@@ -39,7 +39,6 @@ func schemaInstallationStatements() []string {
 	statements = append(statements, engagementExportSchemaStatements()...)
 	statements = append(statements, stickerReferenceSchemaStatements()...)
 	statements = append(statements, NotificationVisibilitySchemaStatements()...)
-	statements = append(statements, auditIdentityOSSSchemaStatements()...)
 	statements = append(statements, OSSUploadByteBindingSchemaStatements()...)
 	return append(statements, foreignKeyIndexStatement())
 }
