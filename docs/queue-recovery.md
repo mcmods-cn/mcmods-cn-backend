@@ -23,6 +23,16 @@
 3. 到期后原行以同一 ID 投递。核实 PubAck、outbox 状态、消费者进度、业务行及老任务年龄。等待空间期间允许意图积存在 PostgreSQL，同时监测数据库磁盘。若需释放历史占用，应先备份验证、核对所有消费者和死信恢复进度，单独审批保留范围与可恢复边界。换 stream、删除 durable 和全量 purge 都可能跨过尚待处理的任务。
 4. 旧流可能配置 DiscardOld、MaxAge 或无限容量，按其实际策略单独评估。队列应用不会迁移或清理旧流。候选连接失败后新建的空流也保留，先核验生产者、消息与 durable 再决定处置。
 
+## 已执行而发布回执未落库
+
+本地处理函数成功、或 JetStream 返回 PubAck 之后，如果 PostgreSQL 的
+`nats_outbox.status='published'` 写入失败，原行仍为 `publishing`。
+租约过期后另一个 dispatcher 会以同一 event ID 再投递；超过 broker 去重窗口后
+消费者仍可能再次运行。保留该行，按 event ID 核对业务记录、邮件回执或文件任务，
+让既有租约恢复。开发新的消费者时，把唯一业务键或任务租约与业务写入一起提交。
+`TestOutboxReplaysSameEventAfterDeliveryReceiptWriteFailsIntegration` 对两种传输都
+验证了两次处理、一个有唯一键的业务记录；每个真实消费者仍需验证自己的幂等语义。
+
 ## 死信和人工重放
 
 JetStream 达到 MaxDeliver 时先把原始 v1 envelope 和终态错误持久化到同一流的 `<subjectPrefix>.dead-letter.<taskCode>`，收到独立死信 Msg-Id 的 PubAck 后才 Term 原任务。每个 prefix 有专属 durable recovery consumer，同时最多一条未确认。恢复消费者只将终态证据写入 `dead_letter_events`，数据库操作有三秒截止时间，失败后按一至三十秒的有界退避重试。提交后 ACK。数据库唯一约束 `(event_id,failure_stage)` 保证重复补写保留人工重放记录。恢复数据库记录的过程不会调用任务 handler 或 AI 供应商。

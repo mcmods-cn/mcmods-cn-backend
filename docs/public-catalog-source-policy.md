@@ -13,3 +13,10 @@ Registration and content preference updates distinguish primary content language
 No schema migration or production data cleanup is required for these HTTP projection changes. Tests use synthetic data in actual isolated PostgreSQL databases, including pending/approved transitions, independent canonical fallback, private assets and short links, unresolved presentation fields and constant-query batched reads. They do not validate production cache topology, data quality or supplier translation quality.
 
 Legacy canonical references can resolve through the existing list APIs before navigating to a public ID: `GET /api/v1/tags?canonicalId=...&registry=...` filters both identity fields exactly, and `GET /api/v1/recipe-types?canonicalId=...` filters the recipe-type identity exactly. These optional parameters preserve the existing response envelope, pagination, fuzzy `q` behavior and public-source policy. Unknown identities return an empty list. The recipe-type cache includes the exact filter. Clients must URL-encode values and navigate only after matching the returned canonical identity and registry.
+
+### Revision registry reads
+
+Both revision registry routes check the same revision visibility before returning entries.
+Use `GET /api/v1/export-revisions/{revisionId}/registry-entries?registries=items&summary=1&limit=80&offset=0` for a list. The default page contains at most 80 rows, the maximum is 100, and the response includes `total`, `limit` and `offset`. Set `locale` for translated display names. With both `items` and `blocks`, the list suppresses item rows already represented by block bindings in that revision. Request each registry separately when counting its snapshots.
+
+Existing clients of `GET /api/v1/export-revisions/{revisionId}/registries/{registry}` receive the entire single registry ordered by canonical ID, including stored snapshot data and names. This response grows with the revision. The summary page omits entry data. The paged detail projection also processes names separately, so changing a caller requires checking its required fields.

@@ -175,3 +175,97 @@ func TestFullStreamPreservesOutboxUntilCapacityReturns(t *testing.T) {
 		t.Fatalf("original event identity lost after capacity recovery: %v", err)
 	}
 }
+
+// Publication and the PostgreSQL outbox receipt cannot commit atomically.
+// Exercise both sides of that boundary, including a retry after the broker's
+// duplicate window has elapsed. The handler models a transactional business
+// effect with a unique event ID, independently of transport deduplication.
+func TestOutboxReplaysSameEventAfterDeliveryReceiptWriteFailsIntegration(t *testing.T) {
+	for _, mode := range []string{"local", "jetstream"} {
+		t.Run(mode, func(t *testing.T) {
+			pool := openOutboxStateTestDB(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			cfg := config.NATSConfig{}
+			if mode == "jetstream" {
+				cfg = config.NATSConfig{Enabled: true, URL: jetStreamIntegrationURL(t), SubjectPrefix: "receipt-" + randomEventID(),
+					JetStream: config.JetStreamConfig{Enabled: true, Stream: uniqueJetStreamName("RECEIPT_")}}
+			}
+			client := New(ctx, cfg)
+			defer client.Close()
+			const duplicateWindow = 100 * time.Millisecond
+			if mode == "jetstream" {
+				js := client.jetStream
+				if js == nil {
+					t.Fatal("JetStream unavailable")
+				}
+				defer js.DeleteStream(cfg.JetStream.Stream)
+				info, err := js.StreamInfo(cfg.JetStream.Stream)
+				if err != nil {
+					t.Fatal(err)
+				}
+				info.Config.Duplicates = duplicateWindow
+				if _, err = js.UpdateStream(&info.Config); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := pool.Exec(ctx, `create temp table handled_business_events(event_id text primary key);
+				alter table nats_outbox add constraint temporarily_reject_outbox_receipt check(status <> 'published');
+				insert into nats_outbox(event_id,event_type,subject,aggregate_type,aggregate_id,payload)
+				values('receipt-retry','test.deliver','notifications','test','one','{}')`); err != nil {
+				t.Fatal(err)
+			}
+			deliveries := make(chan string, 4)
+			if err := client.SubscribeTask("notifications", func(work context.Context, _ []byte) error {
+				id := EventIDFromContext(work)
+				if _, err := pool.Exec(work, `insert into handled_business_events(event_id) values($1) on conflict do nothing`, id); err != nil {
+					return err
+				}
+				select {
+				case deliveries <- id:
+					return nil
+				case <-work.Done():
+					return work.Err()
+				}
+			}); err != nil && !(mode == "local" && errors.Is(err, ErrUnavailable)) {
+				t.Fatal(err)
+			}
+			waitHandled := func() {
+				t.Helper()
+				select {
+				case id := <-deliveries:
+					if id != "receipt-retry" {
+						t.Fatalf("delivery changed the persisted event identity: %q", id)
+					}
+				case <-ctx.Done():
+					t.Fatal("missing consumer delivery", ctx.Err())
+				}
+			}
+			before := NewOutboxDispatcher(pool, client)
+			if n, err := before.DispatchBatch(ctx, 1); err == nil || n != 1 || before.Metrics().Published != 0 {
+				t.Fatalf("receipt failure acknowledged by dispatcher: rows=%d err=%v metrics=%+v", n, err, before.Metrics())
+			}
+			waitHandled()
+			assertOutboxStatus(t, ctx, pool, 1, "publishing")
+			if _, err := pool.Exec(ctx, `alter table nats_outbox drop constraint temporarily_reject_outbox_receipt;
+				update nats_outbox set locked_at=now()-interval '1 hour' where event_id='receipt-retry'`); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "jetstream" {
+				// Redelivery must reach the consumer even when the transport can
+				// no longer recognize the first publication as a duplicate.
+				time.Sleep(3 * duplicateWindow)
+			}
+			after := NewOutboxDispatcher(pool, client)
+			if n, err := after.DispatchBatch(ctx, 1); err != nil || n != 1 || after.Metrics().Published != 1 {
+				t.Fatalf("stale lease recovery: rows=%d err=%v metrics=%+v", n, err, after.Metrics())
+			}
+			waitHandled()
+			var attempts, effects int
+			if err := pool.QueryRow(ctx, `select attempts,(select count(*) from handled_business_events) from nats_outbox
+				where event_id='receipt-retry' and status='published'`).Scan(&attempts, &effects); err != nil || attempts != 2 || effects != 1 {
+				t.Fatalf("recovery left attempts=%d effects=%d err=%v", attempts, effects, err)
+			}
+		})
+	}
+}
