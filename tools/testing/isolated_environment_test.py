@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -40,7 +41,7 @@ class EnvironmentOwnershipTests(unittest.TestCase):
             copied = []
 
             def fake_docker(*args, **options):
-                if args[0] == "run":
+                if args[0] == "create":
                     service = args[args.index("--name") + 1].split("-")[2]
                     owner_labels[service] = args[args.index("--label") + 1].split("=", 1)[1]
                     if service == "typesense":
@@ -82,6 +83,31 @@ class EnvironmentOwnershipTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 environment.up(Path(directory), "go")
             docker.assert_not_called()
+
+    def test_failed_port_binding_keeps_the_created_container_owned_and_recoverable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "failed-environment"
+            owner = None
+
+            def fake_docker(*args, **options):
+                nonlocal owner
+                if args[0] == "create":
+                    owner = args[args.index("--label") + 1].split("=", 1)[1]
+                    return "created-postgres"
+                if args[0] == "start":
+                    raise subprocess.CalledProcessError(125, "docker start")
+                if args[0] == "inspect":
+                    return json.dumps([{"Config": {"Labels": {environment.LABEL: owner}}}])
+
+            with patch.object(environment, "docker", side_effect=fake_docker) as docker:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    environment.up(state, "go")
+                record = json.loads((state / "resources.json").read_text())
+                self.assertEqual(record["containers"], {"postgres": "created-postgres"})
+                self.assertFalse((state / "environment.json").exists())
+                environment.down(state)
+                self.assertEqual(docker.call_args.args, ("rm", "-f", "-v", "created-postgres"))
+                self.assertFalse(state.exists())
 
     def test_owner_mismatch_prevents_any_removal(self):
         with tempfile.TemporaryDirectory() as directory:

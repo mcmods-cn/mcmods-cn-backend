@@ -123,7 +123,7 @@ def up(state, go_binary, real_services=False):
         typesense_key = secrets.token_hex(32)
     for service in ports:
         name = "mcmods-audit-" + service + "-" + owner[:12]
-        options = ["run", "-d", "--name", name, "--label", LABEL + "=" + owner,
+        options = ["create", "--name", name, "--label", LABEL + "=" + owner,
                    "-p", "127.0.0.1::" + str(ports[service])]
         credentials = {}
         if service == "postgres":
@@ -137,6 +137,7 @@ def up(state, go_binary, real_services=False):
                               environment_overlay=credentials).strip()
         record["containers"][service] = container_id
         write_private(state / "resources.json", json.dumps(record, indent=2) + "\n")
+        docker("start", container_id, capture=True)
         info = verify_container(container_id, owner)
         binding = info["NetworkSettings"]["Ports"][str(ports[service]) + "/tcp"][0]
         if binding["HostIp"] != "127.0.0.1":
