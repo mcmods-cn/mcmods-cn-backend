@@ -232,7 +232,7 @@ func (s *Server) resumeModExportUpload(w http.ResponseWriter, r *http.Request) {
 	request.ContentType = strings.TrimSpace(request.ContentType)
 	request.SHA256 = normalizeSHA256(request.SHA256)
 	request.MultipartUploadID = strings.TrimSpace(request.MultipartUploadID)
-	_, expectedObjectCategory := ossModExportUploadCategories(identity.UniqueID, currentClaims(r).Subject)
+	expectedCategory, expectedObjectCategory := ossModExportUploadCategories(identity.UniqueID, currentClaims(r).Subject)
 	client, cfg, err := s.ossClient(r.Context())
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
