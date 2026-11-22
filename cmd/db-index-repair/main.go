@@ -1,4 +1,4 @@
-// Command db-index-repair applies only forward change20261003_01. It reads an
+// Command db-index-repair restores the canonical tag prefix index. It reads an
 // explicit URL from the environment, never dotenv or deployment defaults.
 package main
 
@@ -26,7 +26,7 @@ func main() {
 }
 
 func run() error {
-	apply := flag.Bool("apply", false, "apply forward change 20261003_01 concurrently")
+	apply := flag.Bool("apply", false, "restore the canonical tag prefix index concurrently")
 	confirmed := flag.String("confirm-database", "", "exact database name required for apply")
 	repairInvalid := flag.Bool("repair-invalid", false, "rebuild only a reviewed invalid index with no active build")
 	backup := flag.String("backup", "", "new private metadata file required before an index change")
@@ -62,7 +62,7 @@ func run() error {
 		}); err != nil {
 			return err
 		}
-		fmt.Println("forward change 20261003_01 verified; existing indexes, business rows and generation 168 retained")
+		fmt.Println("canonical tag prefix index verified")
 		return nil
 	}
 	state, err := database.InspectCatalogTagPrefixIndex(ctx, pool)

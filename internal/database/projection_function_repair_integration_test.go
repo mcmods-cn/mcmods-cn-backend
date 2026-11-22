@@ -11,38 +11,19 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"mcmods-cn-backend/internal/config"
 )
 
 func TestOCT02ProjectionFunctionForwardRepairAndRecovery(t *testing.T) {
-	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" || os.Getenv("MCMODS_DB_FUNCTION_REPAIR_TEST_TARGET") == "" {
-		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 and the exact owned MCMODS_DB_FUNCTION_REPAIR_TEST_TARGET")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	pool, err := Connect(ctx, config.Load())
-	if err != nil {
+	pool := newBaselineTestDatabase(t, ctx)
+	if err := Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pool.Close)
 	original, _, err := InspectProjectionFunctions(ctx, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if original.Database != os.Getenv("MCMODS_DB_FUNCTION_REPAIR_TEST_TARGET") {
-		t.Fatal("test target is not the explicitly confirmed owned database")
-	}
-	t.Cleanup(func() {
-		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cleanupCancel()
-		if _, err := pool.Exec(cleanupContext, `update public.schema_metadata set generation=168 where singleton`); err != nil {
-			t.Errorf("restore owned test generation: %v", err)
-		}
-		if err := ChangeProjectionFunctions(cleanupContext, pool, original.Database, &original,
-			func(ProjectionFunctionBackup) error { return nil }); err != nil {
-			t.Errorf("restore original owned test definitions: %v", err)
-		}
-	})
 	legacySQL, err := os.ReadFile("testdata/oct02_legacy_functions.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -144,8 +125,11 @@ func TestOCT02ProjectionFunctionForwardRepairAndRecovery(t *testing.T) {
 		t.Fatal("repair did not preserve all original definitions")
 	}
 	current, changed, err := InspectProjectionFunctions(ctx, pool)
-	if err != nil || changed != 0 || current.Generation != 168 {
+	if err != nil || changed != 0 || current.Generation != schemaGeneration {
 		t.Fatalf("repaired inspection changes=%d generation=%d err=%v", changed, current.Generation, err)
+	}
+	if err := Initialize(ctx, pool); err != nil {
+		t.Fatalf("repair did not reinstate the installed schema: %v", err)
 	}
 	t.Run("repeat application is idempotent", func(t *testing.T) {
 		if err := ChangeProjectionFunctions(ctx, pool, original.Database, nil,
@@ -168,7 +152,7 @@ func TestOCT02ProjectionFunctionForwardRepairAndRecovery(t *testing.T) {
 		}
 	})
 	t.Run("wrong generation is refused", func(t *testing.T) {
-		if _, err := pool.Exec(ctx, `update public.schema_metadata set generation=167 where singleton`); err != nil {
+		if _, err := pool.Exec(ctx, `update public.schema_metadata set generation=$1 where singleton`, schemaGeneration-1); err != nil {
 			t.Fatal(err)
 		}
 		called := false
@@ -176,9 +160,6 @@ func TestOCT02ProjectionFunctionForwardRepairAndRecovery(t *testing.T) {
 			func(ProjectionFunctionBackup) error { called = true; return nil })
 		if err == nil || called {
 			t.Fatal("incompatible generation was not refused before backup or DDL")
-		}
-		if _, err := pool.Exec(ctx, `update public.schema_metadata set generation=168 where singleton`); err != nil {
-			t.Fatal(err)
 		}
 	})
 }

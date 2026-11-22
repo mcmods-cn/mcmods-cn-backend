@@ -315,10 +315,20 @@ func TestInitializeRejectsUnknownAndDriftedSchemasIntegration(t *testing.T) {
 	if err := Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `drop index idx_users_registration_ip_created`); err != nil {
+	if _, err := pool.Exec(ctx, `drop index `+CatalogTagPrefixIndexName); err != nil {
 		t.Fatal(err)
 	}
 	if err := Initialize(ctx, pool); err == nil || !strings.Contains(err.Error(), "catalog differs") {
 		t.Fatal("the recorded generation did not reject actual catalog drift")
+	}
+	var backedUp bool
+	if err := ApplyCatalogTagPrefixIndex(ctx, pool, pool.Config().ConnConfig.Database, false, func(prior CatalogTagPrefixIndexBackup) error {
+		backedUp = !prior.PriorState.Exists && prior.Generation == schemaGeneration
+		return nil
+	}); err != nil || !backedUp {
+		t.Fatalf("index repair did not restore the missing index from the current baseline: %v", err)
+	}
+	if err := Initialize(ctx, pool); err != nil {
+		t.Fatalf("repaired index did not reinstate the installed schema: %v", err)
 	}
 }

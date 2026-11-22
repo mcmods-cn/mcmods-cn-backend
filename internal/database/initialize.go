@@ -72,21 +72,9 @@ func initialize(ctx context.Context, db *pgxpool.Pool, bootstrapAdmin bool) erro
 }
 
 func checkInstalledSchema(ctx context.Context, tx pgx.Tx) error {
-	var generation int
-	err := tx.QueryRow(ctx, `select generation from public.schema_metadata
-		where singleton and (select count(*) from public.schema_metadata)=1`).Scan(&generation)
+	recorded, err := installedCatalogFingerprint(ctx, tx)
 	if err != nil {
-		return fmt.Errorf("read installed schema version: %w", err)
-	}
-	if generation != schemaGeneration {
-		return fmt.Errorf("database schema generation %d is incompatible with generation %d", generation, schemaGeneration)
-	}
-	var definition, recorded string
-	if err = tx.QueryRow(ctx, `select definition_fingerprint,catalog_fingerprint from public.schema_metadata where singleton`).Scan(&definition, &recorded); err != nil {
-		return fmt.Errorf("read installed schema fingerprint: %w", err)
-	}
-	if definition != definitionFingerprint(schemaInstallationStatements()) {
-		return errors.New("installed schema definition differs from the application's baseline")
+		return err
 	}
 	current, err := catalogFingerprint(ctx, tx, "public")
 	if err != nil {
@@ -96,6 +84,28 @@ func checkInstalledSchema(ctx context.Context, tx pgx.Tx) error {
 		return errors.New("database catalog differs from its installed baseline")
 	}
 	return nil
+}
+
+// Repair commands can verify the installed definition before looking at the
+// database objects they are meant to restore.
+func installedCatalogFingerprint(ctx context.Context, db schemaQueryer) (string, error) {
+	var generation int
+	err := db.QueryRow(ctx, `select generation from public.schema_metadata
+		where singleton and (select count(*) from public.schema_metadata)=1`).Scan(&generation)
+	if err != nil {
+		return "", fmt.Errorf("read installed schema version: %w", err)
+	}
+	if generation != schemaGeneration {
+		return "", fmt.Errorf("database schema generation %d is incompatible with generation %d", generation, schemaGeneration)
+	}
+	var definition, recorded string
+	if err = db.QueryRow(ctx, `select definition_fingerprint,catalog_fingerprint from public.schema_metadata where singleton`).Scan(&definition, &recorded); err != nil {
+		return "", fmt.Errorf("read installed schema fingerprint: %w", err)
+	}
+	if definition != definitionFingerprint(schemaInstallationStatements()) {
+		return "", errors.New("installed schema definition differs from the application's baseline")
+	}
+	return recorded, nil
 }
 
 func claimInitialAdmin(ctx context.Context, tx pgx.Tx) error {

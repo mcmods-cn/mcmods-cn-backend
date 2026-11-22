@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Forward change 20261003_01 adds a pattern-operator index without replacing
-// generation-168 data or indexes used by equality and collation-aware ordering.
+// The canonical prefix index is separate from the equality and collation-aware
+// ordering indexes on catalog tags.
 const CatalogTagPrefixIndexName = "idx_catalog_tags_canonical_prefix_registry"
 
 const catalogTagPrefixIndexSQL = `create index idx_catalog_tags_canonical_prefix_registry
@@ -36,11 +36,7 @@ func InspectCatalogTagPrefixIndex(ctx context.Context, pool *pgxpool.Pool) (Cata
 	return inspectCatalogTagPrefixIndex(ctx, pool)
 }
 
-type catalogIndexQuery interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
-func inspectCatalogTagPrefixIndex(ctx context.Context, db catalogIndexQuery) (CatalogTagPrefixIndexState, error) {
+func inspectCatalogTagPrefixIndex(ctx context.Context, db schemaQueryer) (CatalogTagPrefixIndexState, error) {
 	var state CatalogTagPrefixIndexState
 	err := db.QueryRow(ctx, `select true,coalesce(
 		idx.relkind='i' and tbl.relname='catalog_tags' and table_ns.nspname='public'
@@ -116,12 +112,14 @@ func ApplyCatalogTagPrefixIndex(ctx context.Context, pool *pgxpool.Pool, confirm
 		}
 	}()
 	var actualDatabase string
-	var generation int
-	if err := conn.QueryRow(ctx, `select current_database(),generation from public.schema_metadata where singleton`).Scan(&actualDatabase, &generation); err != nil {
+	if err := conn.QueryRow(ctx, `select current_database()`).Scan(&actualDatabase); err != nil {
 		return fmt.Errorf("read tag prefix index target: %w", err)
 	}
-	if actualDatabase != confirmedDatabase || generation != 168 {
-		return errors.New("tag prefix index change requires the confirmed database and generation 168")
+	if actualDatabase != confirmedDatabase {
+		return errors.New("tag prefix index change requires the confirmed database")
+	}
+	if _, err := installedCatalogFingerprint(ctx, conn); err != nil {
+		return err
 	}
 	state, err := inspectCatalogTagPrefixIndex(ctx, conn)
 	if err != nil {
@@ -146,7 +144,7 @@ func ApplyCatalogTagPrefixIndex(ctx context.Context, pool *pgxpool.Pool, confirm
 			return errors.New("tag prefix index still has an active build; no change applied")
 		}
 	}
-	if err := persistMetadata(CatalogTagPrefixIndexBackup{Change: "20261003_01", Database: actualDatabase, Generation: generation, PriorState: state}); err != nil {
+	if err := persistMetadata(CatalogTagPrefixIndexBackup{Change: "20261003_01", Database: actualDatabase, Generation: schemaGeneration, PriorState: state}); err != nil {
 		return fmt.Errorf("persist prior tag prefix index metadata: %w", err)
 	}
 	if state.Exists {

@@ -11,8 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const projectionRepairGeneration = 168
-
 var projectionFunctionNames = []string{
 	"enqueue_search_servers_for_mod",
 	"enqueue_search_servers_for_mod_parent",
@@ -56,11 +54,14 @@ func ChangeProjectionFunctions(ctx context.Context, pool *pgxpool.Pool, confirme
 	if confirmedDatabase == "" || persistBackup == nil {
 		return errors.New("function changes require an exact database confirmation and backup destination")
 	}
-	tx, err := pool.Begin(ctx)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("begin function repair: %w", err)
 	}
 	defer tx.Rollback(context.Background())
+	if _, err := tx.Exec(ctx, `select set_config('search_path',$1,true)`, applicationSearchPath); err != nil {
+		return fmt.Errorf("set repair schema: %w", err)
+	}
 	// Share the schema installation lock; this command does not increment or
 	// bypass generation, and cannot race a cooperating schema installation.
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('mcmods-cn-schema-migrations'))`); err != nil {
@@ -98,9 +99,6 @@ func ChangeProjectionFunctions(ctx context.Context, pool *pgxpool.Pool, confirme
 	if err := persistBackup(backup); err != nil {
 		return fmt.Errorf("persist original function definitions: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `set local search_path=public,pg_catalog`); err != nil {
-		return fmt.Errorf("set repair schema: %w", err)
-	}
 	for _, name := range projectionFunctionNames {
 		if _, err := tx.Exec(ctx, statements[name]); err != nil {
 			return fmt.Errorf("replace projection function %s: %w", name, err)
@@ -134,8 +132,8 @@ func inspectProjectionFunctions(ctx context.Context, tx pgx.Tx) (ProjectionFunct
 		Scan(&backup.Database, &backup.Generation); err != nil {
 		return backup, 0, fmt.Errorf("read function repair target and generation: %w", err)
 	}
-	if backup.Generation != projectionRepairGeneration {
-		return backup, 0, fmt.Errorf("function repair requires schema generation %d, found %d", projectionRepairGeneration, backup.Generation)
+	if _, err := installedCatalogFingerprint(ctx, tx); err != nil {
+		return backup, 0, err
 	}
 	desired := []string{searchServersForModFunctionSQL, searchServersForModParentFunctionSQL, changelogPopularityFunctionSQL,
 		contentPopularityCommentRefreshFunctionStatement()}
@@ -184,7 +182,7 @@ func inspectProjectionFunctions(ctx context.Context, tx pgx.Tx) (ProjectionFunct
 }
 
 func validateProjectionBackup(backup ProjectionFunctionBackup, databaseName string) error {
-	if backup.Version != 2 || backup.Generation != projectionRepairGeneration || backup.Database != databaseName {
+	if backup.Version != 2 || backup.Generation != schemaGeneration || backup.Database != databaseName {
 		return errors.New("restore backup format, generation or database does not match the connected target")
 	}
 	if len(backup.Functions) != len(projectionFunctionNames) {

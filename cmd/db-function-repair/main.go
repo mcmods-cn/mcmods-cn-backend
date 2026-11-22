@@ -1,5 +1,5 @@
 // Command db-function-repair inspects, explicitly repairs, or restores the
-// four generation-168 projection trigger functions. It never resets schema
+// four projection trigger functions in the current installation. It never resets schema
 // or modifies business rows. Apply and restore require an exact target and a
 // new, private backup file before any transaction can commit.
 package main

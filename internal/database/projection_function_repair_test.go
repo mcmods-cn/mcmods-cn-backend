@@ -6,7 +6,7 @@ import (
 )
 
 func TestProjectionRestoreRejectsUnrelatedOrAppendedSQL(t *testing.T) {
-	backup := ProjectionFunctionBackup{Version: 2, Database: "owned_fixture", Generation: 168, Functions: make(map[string]string), CommentTriggers: map[string]string{"trg_comments_popularity": legacyCommentPopularityTriggerSQL}}
+	backup := ProjectionFunctionBackup{Version: 2, Database: "owned_fixture", Generation: schemaGeneration, Functions: make(map[string]string), CommentTriggers: map[string]string{"trg_comments_popularity": legacyCommentPopularityTriggerSQL}}
 	for _, name := range projectionFunctionNames {
 		backup.Functions[name] = "CREATE OR REPLACE FUNCTION public." + name + "()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$begin return new; end$function$\n"
 	}
