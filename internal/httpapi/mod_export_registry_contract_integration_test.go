@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"testing"
@@ -21,11 +22,17 @@ func TestPublishedRegistryAndPagedListKeepDistinctContractsIntegration(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, revision := f.imported(t, auditFixGRZip(t, map[string]string{"registries/items.json": string(payload)}))
+	_, revision := f.imported(t, auditFixGRZip(t, map[string]string{
+		"registries/items.json": string(payload),
+		"registries/blocks.json": `{"registry":"blocks","entries":[
+			{"id":"example:small_block","namespace":"example","names":{"en-US":"Small block"},"hardness":1}
+		]}`,
+	}))
 	base := "/api/v1/export-revisions/" + revision
-	full := base + "/registries/items"
+	large := base + "/registries/items"
+	small := base + "/registries/blocks"
 	pages := base + "/registry-entries?registries=items"
-	for _, path := range []string{full, pages} {
+	for _, path := range []string{large, small, pages} {
 		f.require(t, "", http.MethodGet, path, nil, http.StatusForbidden)
 	}
 	f.reviewGR(t, revision, "approved")
@@ -52,9 +59,14 @@ func TestPublishedRegistryAndPagedListKeepDistinctContractsIntegration(t *testin
 		}
 		return result
 	}
-	all := read(full)
-	if all.Registry != "items" || !slices.Equal(ids(all.Items), want) {
-		t.Fatalf("full response registry=%q length=%d; expected all %d sorted items", all.Registry, len(all.Items), count)
+	assertLegacyRegistryLimit(t, f, large, pages)
+	all := read(small)
+	if all.Registry != "blocks" || !slices.Equal(ids(all.Items), []string{"example:small_block"}) {
+		t.Fatalf("small full response lost its complete stored membership: %#v", all)
+	}
+	empty := read(base + "/registries/unknown_fixture_registry")
+	if empty.Registry != "unknown_fixture_registry" || empty.Items == nil || len(empty.Items) != 0 {
+		t.Fatalf("small full response lost its empty list contract: %#v", empty)
 	}
 	first, second := read(pages+"&limit=101"), read(pages+"&limit=100&offset=100")
 	if first.Limit != 100 || first.Offset != 0 || first.Total != count || second.Offset != 100 || second.Total != count ||
@@ -63,7 +75,54 @@ func TestPublishedRegistryAndPagedListKeepDistinctContractsIntegration(t *testin
 	}
 	summary := read(pages + "&summary=1")
 	if summary.Limit != 80 || !slices.Equal(ids(summary.Items), want[:80]) || summary.Total != count ||
-		len(summary.Items[0].Data) != 0 || len(all.Items[0].Data) == 0 || all.Items[0].Names["en-US"] != "Example" {
+		len(summary.Items[0].Data) != 0 || len(all.Items[0].Data) == 0 || all.Items[0].Names["en-US"] != "Small block" {
 		t.Fatal("default summary or full snapshot projection changed")
+	}
+
+	// Put an oversized value into one fixture snapshot to exercise the byte
+	// budget independently of the row ceiling. The approved fixture scope is owned.
+	updated, err := f.db.Exec(f.ctx, `update resource_import_snapshots set
+		data = data || jsonb_build_object('fixtureDescription', repeat('x',$2::integer))
+		where revision_id=$1 and registry='blocks'`, revision, maxCatalogResponseBytes)
+	if err != nil || updated.RowsAffected() != 1 {
+		t.Fatalf("prepare registry byte-limit fixture: rows=%d err=%v", updated.RowsAffected(), err)
+	}
+	blockPages := base + "/registry-entries?registries=blocks"
+	assertLegacyRegistryLimit(t, f, small, blockPages)
+	blockSummaries := read(blockPages + "&summary=1")
+	if blockSummaries.Total != 1 || !slices.Equal(ids(blockSummaries.Items), []string{"example:small_block"}) {
+		t.Fatalf("paginated summaries could not read the large entry: %#v", blockSummaries)
+	}
+}
+
+func assertLegacyRegistryLimit(t *testing.T, f auditFixGRFixture, path, pageURL string) {
+	t.Helper()
+	request, err := http.NewRequestWithContext(f.ctx, http.MethodGet, f.origin.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := f.origin.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var problem struct {
+		Code    string          `json:"code"`
+		Data    json.RawMessage `json:"data"`
+		Details struct {
+			PageURL          string `json:"pageURL"`
+			MaxEntries       int    `json:"maxEntries"`
+			MaxResponseBytes int    `json:"maxResponseBytes"`
+		} `json:"details"`
+	}
+	if err = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&problem); err != nil {
+		t.Fatalf("read registry limit response: %v", err)
+	}
+	if response.StatusCode != http.StatusUnprocessableEntity || problem.Code != "registry_response_too_large" ||
+		len(problem.Data) != 0 || problem.Details.PageURL != pageURL ||
+		problem.Details.MaxEntries != 100 || problem.Details.MaxResponseBytes != maxCatalogResponseBytes ||
+		response.Header.Get("Link") != "<"+pageURL+`>; rel="alternate"` {
+		t.Fatalf("legacy registry must return an explicit pagination fallback: status=%d code=%q details=%#v",
+			response.StatusCode, problem.Code, problem.Details)
 	}
 }

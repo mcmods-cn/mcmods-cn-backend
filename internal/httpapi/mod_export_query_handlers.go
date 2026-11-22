@@ -101,19 +101,43 @@ func (s *Server) modExportDataSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+const maxLegacyExportRegistryEntries = 100
+
 func (s *Server) modExportRegistry(w http.ResponseWriter, r *http.Request) {
-	if !s.canReadModExportRevision(w, r, r.PathValue("revisionId")) {
+	revisionID := r.PathValue("revisionId")
+	if !s.canReadModExportRevision(w, r, revisionID) {
 		return
 	}
 	registry := strings.ToLower(strings.TrimSpace(r.PathValue("registry")))
-	rows, err := s.db.Query(r.Context(), `select entity.public_id,resource.canonical_id,
-		resource.namespace,resource.resource_path,snapshot.translation_key,snapshot.names,snapshot.data,
-		snapshot.icon_path,snapshot.preview_path
-		from resource_import_snapshots snapshot
+	// Using one extra ID establishes whether the complete registry fits
+	// without reading its JSON or counting the entire revision. PostgreSQL
+	// checks the selected values before sending them to the HTTP server.
+	rows, err := s.db.Query(r.Context(), `with candidate_ids as materialized (
+		select id from resource_import_snapshots where revision_id=$1 and registry=$2 limit $3
+	), candidate_count as materialized (
+		select count(*) total from candidate_ids
+	), entries as materialized (
+		select entity.public_id,resource.canonical_id,resource.namespace,resource.resource_path,
+		       snapshot.translation_key,snapshot.names,snapshot.data,snapshot.icon_path,snapshot.preview_path
+		from candidate_ids candidate
+		join resource_import_snapshots snapshot on snapshot.id=candidate.id
 		join game_resources resource on resource.entity_id=snapshot.resource_id
 		join catalog_entities entity on entity.id=resource.entity_id
-		where snapshot.revision_id=$1 and snapshot.registry=$2
-		order by resource.canonical_id`, r.PathValue("revisionId"), registry)
+		where (select total from candidate_count)<$3
+	), budget as (
+		select total >= $3 or coalesce((
+			select sum(octet_length(names::text)::bigint + octet_length(data::text)
+				+ octet_length(public_id) + octet_length(canonical_id) + octet_length(namespace)
+				+ octet_length(resource_path) + octet_length(translation_key) + octet_length(icon_path)
+				+ octet_length(preview_path))
+			from entries),0)>$4 exceeded from candidate_count
+	)
+	select budget.exceeded,coalesce(entry.public_id,''),coalesce(entry.canonical_id,''),
+	       coalesce(entry.namespace,''),coalesce(entry.resource_path,''),coalesce(entry.translation_key,''),
+	       coalesce(entry.names,'{}'::jsonb),coalesce(entry.data,'{}'::jsonb),
+	       coalesce(entry.icon_path,''),coalesce(entry.preview_path,'')
+	from budget left join entries entry on not budget.exceeded order by entry.canonical_id`,
+		revisionID, registry, maxLegacyExportRegistryEntries+1, maxCatalogResponseBytes)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read registry")
 		return
@@ -121,11 +145,19 @@ func (s *Server) modExportRegistry(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := make([]map[string]any, 0)
 	for rows.Next() {
+		var tooLarge bool
 		var publicID, objectID, namespace, objectPath, translationKey, iconPath, previewPath string
 		var names, data []byte
-		if err = rows.Scan(&publicID, &objectID, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); err != nil {
+		if err = rows.Scan(&tooLarge, &publicID, &objectID, &namespace, &objectPath, &translationKey, &names, &data, &iconPath, &previewPath); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode registry")
 			return
+		}
+		if tooLarge {
+			writeLegacyExportRegistryLimit(w, revisionID, registry)
+			return
+		}
+		if publicID == "" {
+			continue
 		}
 		namesValue, decodeErr := decodeModExportJSONObjectValue(names, "registry entry names")
 		if decodeErr != nil {
@@ -137,16 +169,33 @@ func (s *Server) modExportRegistry(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to decode registry")
 			return
 		}
-		item := map[string]any{"publicId": publicID, "id": objectID, "registry": registry,
+		items = append(items, map[string]any{"publicId": publicID, "id": objectID, "registry": registry,
 			"namespace": namespace, "path": objectPath, "translationKey": translationKey,
-			"iconPath": iconPath, "previewPath": previewPath, "names": namesValue, "data": dataValue}
-		items = append(items, item)
+			"iconPath": iconPath, "previewPath": previewPath, "names": namesValue, "data": dataValue})
 	}
 	if err = rows.Err(); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read registry")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"registry": registry, "items": items})
+	payload, err := json.Marshal(apiResponse{Data: map[string]any{"registry": registry, "items": items}})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to encode registry")
+		return
+	}
+	if len(payload) > maxCatalogResponseBytes {
+		writeLegacyExportRegistryLimit(w, revisionID, registry)
+		return
+	}
+	writeJSONBytes(w, http.StatusOK, payload)
+}
+
+func writeLegacyExportRegistryLimit(w http.ResponseWriter, revisionID, registry string) {
+	parameters := url.Values{"registries": {registry}}
+	pageURL := "/api/v1/export-revisions/" + url.PathEscape(revisionID) + "/registry-entries?" + parameters.Encode()
+	w.Header().Set("Link", "<"+pageURL+`>; rel="alternate"`)
+	writeAPIError(w, http.StatusUnprocessableEntity, "registry_response_too_large",
+		"registry exceeds the full response budget; use the paginated registry endpoint", 0,
+		map[string]any{"pageURL": pageURL, "maxEntries": maxLegacyExportRegistryEntries, "maxResponseBytes": maxCatalogResponseBytes})
 }
 
 func (s *Server) modExportRegistryEntries(w http.ResponseWriter, r *http.Request) {
