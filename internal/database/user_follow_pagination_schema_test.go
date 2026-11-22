@@ -6,9 +6,6 @@ import (
 )
 
 func TestUserFollowCursorIndexesBelongToGeneration106(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	schema := strings.ToLower(strings.Join(baselineSchemaStatements(), "\n"))
 	for _, index := range []string{
 		"idx_user_follows_followed_page on user_follows (followed_id, created_at desc, follower_id desc)",

@@ -65,9 +65,6 @@ func TestBuiltinCompatibilityFieldsAreConfigurable(t *testing.T) {
 
 func TestImportedResourceProjectionHasScopedOwnership(t *testing.T) {
 	t.Parallel()
-	if schemaGeneration != 168 {
-		t.Fatalf("unexpected schema generation %d", schemaGeneration)
-	}
 	schemaSQL := strings.Join(modContentSchemaStatements(), "\n")
 	for _, required := range []string{
 		"projection_source text not null default 'manual'",

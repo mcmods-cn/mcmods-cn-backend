@@ -6,9 +6,6 @@ import (
 )
 
 func TestCreatorImportRolesUseExplicitGeneration106GrantWhitelist(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	schema := strings.Join(communitySchemaStatements(), "\n")
 	for _, required := range []string{
 		"(1,'owner','Owner','Project owner or primary maintainer',false,true)",

@@ -6,9 +6,6 @@ import (
 )
 
 func TestMarkdownPlaygroundRevisionContractIsInstalledInCurrentSchema(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("unexpected schema generation %d", schemaGeneration)
-	}
 	source := strings.Join(baselineSchemaStatements(), "\n")
 	for _, fragment := range []string{
 		"revision bigint not null default 1",

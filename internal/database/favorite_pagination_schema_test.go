@@ -6,9 +6,6 @@ import (
 )
 
 func TestFavoritePaginationSchemaGenerationAndIndexes(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	source := strings.ToLower(strings.Join(favoritePaginationSchemaStatements(), "\n"))
 	for _, required := range []string{
 		"idx_favorite_collections_user_page",

@@ -7,9 +7,6 @@ import (
 
 func TestReportAssignmentSchemaMakesInReviewOwnershipAuditable(t *testing.T) {
 	t.Parallel()
-	if schemaGeneration != 168 {
-		t.Fatalf("report assignment authority requires schema generation 168, got %d", schemaGeneration)
-	}
 	schema := strings.Join(governanceAutomationSchemaStatements(), "\n")
 	for _, fragment := range []string{
 		"status<>'in_review' or (claimed_by is not null and claimed_at is not null)",

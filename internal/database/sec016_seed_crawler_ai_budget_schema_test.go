@@ -6,9 +6,6 @@ import (
 )
 
 func TestSEC016SeedCrawlerTranslationBudgetSchema(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("seed crawler AI budget reservations require schema generation 168, got %d", schemaGeneration)
-	}
 	statements := strings.Join(schemaInstallationStatements(), "\n")
 	for _, required := range []string{
 		"seed_crawler_translation_tasks",

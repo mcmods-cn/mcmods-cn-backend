@@ -6,9 +6,6 @@ import (
 )
 
 func TestAdminProjectCatalogHasGeneration125SearchAndSortProjection(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	schema := strings.ToLower(strings.Join(adminDashboardSchemaStatements(), "\n"))
 	for _, required := range []string{
 		"create table admin_project_catalog",

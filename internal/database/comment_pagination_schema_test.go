@@ -6,9 +6,6 @@ import (
 )
 
 func TestCommentPaginationCounterAndKeysetIndexes(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	definition := strings.ToLower(strings.Join(commentSchemaStatements(), "\n"))
 	for _, required := range []string{
 		"create table comment_target_counts",

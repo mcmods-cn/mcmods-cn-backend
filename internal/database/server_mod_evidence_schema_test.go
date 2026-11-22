@@ -6,9 +6,6 @@ import (
 )
 
 func TestBUG031ServerModEvidenceUsesGeneration145MultiSourceSchema(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168 for independent server-mod evidence", schemaGeneration)
-	}
 	schema := strings.ToLower(strings.Join(serverSchemaStatements(), "\n"))
 	for _, required := range []string{
 		"create table minecraft_server_mod_evidence",

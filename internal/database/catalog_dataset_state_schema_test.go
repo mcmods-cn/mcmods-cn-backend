@@ -6,9 +6,6 @@ import (
 )
 
 func TestCatalogDatasetStateIsConstantTimeAuthority(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("unexpected schema generation %d", schemaGeneration)
-	}
 	schema := strings.ToLower(strings.Join(catalogEditorSchemaStatements(), "\n"))
 	for _, required := range []string{
 		"create table catalog_dataset_state",

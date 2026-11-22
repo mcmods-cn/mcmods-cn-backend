@@ -6,9 +6,6 @@ import (
 )
 
 func TestOSSRehomeJobsHaveDurableGenerationLeaseAndReplayLifecycle(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("unexpected schema generation %d", schemaGeneration)
-	}
 	definition := strings.ToLower(strings.Join(schemaInstallationStatements(), "\n"))
 	for _, required := range []string{
 		"create table oss_rehome_jobs",

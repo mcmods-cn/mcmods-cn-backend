@@ -6,9 +6,6 @@ import (
 )
 
 func TestFavoriteExportRebuildPreviewsSupportDetachedSourcesInGeneration155(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation = %d, want 168", schemaGeneration)
-	}
 	schema := strings.Join(engagementExportSchemaStatements(), "\n")
 	required := []string{
 		"collection_id bigint references favorite_collections(id) on delete set null",

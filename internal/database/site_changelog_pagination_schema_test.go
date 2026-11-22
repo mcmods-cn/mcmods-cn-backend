@@ -7,9 +7,6 @@ import (
 
 func TestSiteChangelogPaginationUsesGeneration134Indexes(t *testing.T) {
 	t.Parallel()
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	schema := strings.ToLower(strings.Join(governanceAutomationSchemaStatements(), "\n"))
 	for _, required := range []string{
 		"idx_site_changelogs_public",

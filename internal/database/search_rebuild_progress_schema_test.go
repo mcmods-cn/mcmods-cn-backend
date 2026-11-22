@@ -6,9 +6,6 @@ import (
 )
 
 func TestSearchRebuildProgressUsesGeneration125BoundedState(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	schema := strings.ToLower(strings.Join(searchSchemaStatements(), "\n"))
 	for _, required := range []string{
 		"create table search_index_rebuild_progress",

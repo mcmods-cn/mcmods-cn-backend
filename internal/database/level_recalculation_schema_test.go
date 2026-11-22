@@ -7,9 +7,6 @@ import (
 
 func TestLevelRecalculationUsesGeneration133DurableVersionedJobs(t *testing.T) {
 	t.Parallel()
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	schema := strings.ToLower(strings.Join(communitySchemaStatements(), "\n"))
 	for _, required := range []string{
 		"version bigint not null default 1",

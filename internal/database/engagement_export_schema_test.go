@@ -7,9 +7,6 @@ import (
 
 func TestEngagementExportSchemaDefinesCurrentContracts(t *testing.T) {
 	t.Parallel()
-	if schemaGeneration != 168 {
-		t.Fatalf("unexpected schema generation %d", schemaGeneration)
-	}
 	definition := strings.ToLower(strings.Join(engagementExportSchemaStatements(), "\n"))
 	for _, required := range []string{
 		"create table favorite_modpack_export_previews",

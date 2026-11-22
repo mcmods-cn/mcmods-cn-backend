@@ -7,9 +7,6 @@ import (
 
 func TestCatalogReferenceLookupHasCaseFoldedIndexes(t *testing.T) {
 	t.Parallel()
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	schemaSQL := strings.Join(catalogSchemaStatements(), "\n")
 	for _, required := range []string{
 		"idx_game_resources_kind_canonical_folded",

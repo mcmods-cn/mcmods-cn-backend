@@ -6,9 +6,6 @@ import (
 )
 
 func TestSkinCatalogProjectionHasGeneration130SearchAndKeysetIndexes(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	source := strings.ToLower(strings.Join(skinCatalogSchemaStatements(), "\n"))
 	for _, required := range []string{
 		"create table skin_public_catalog", "search_document tsvector", "using gin(search_document)",

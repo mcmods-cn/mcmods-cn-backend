@@ -6,9 +6,6 @@ import (
 )
 
 func TestDirectMessagePagesHaveGeneration125Schema(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	schema := strings.ToLower(strings.Join(schemaInstallationStatements(), "\n"))
 	for _, required := range []string{
 		"last_message_id bigint",

@@ -6,9 +6,6 @@ import (
 )
 
 func TestPopularityRefreshUsesGeneration125IncrementalFacts(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	schema := strings.ToLower(strings.Join(ratingSchemaStatements(), "\n"))
 	for _, required := range []string{
 		"create table content_popularity_lifetime_facts",

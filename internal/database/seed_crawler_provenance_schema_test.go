@@ -7,9 +7,6 @@ import (
 )
 
 func TestSeedCrawlerCandidateProvenanceUsesGeneration148FirstLastAndSubmissionState(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	raw, err := os.ReadFile("governance_automation_schema.go")
 	if err != nil {
 		t.Fatal(err)

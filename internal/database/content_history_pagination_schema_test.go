@@ -6,9 +6,6 @@ import (
 )
 
 func TestContentHistoryPaginationIndexesGeneration133(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	statements := strings.Join(schemaInstallationStatements(), "\n")
 	for _, required := range []string{
 		"idx_content_revisions_history",

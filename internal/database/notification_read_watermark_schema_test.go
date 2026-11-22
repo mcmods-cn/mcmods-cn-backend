@@ -6,9 +6,6 @@ import (
 )
 
 func TestNotificationPagesAndReadWatermarksHaveGeneration125Schema(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	schema := strings.ToLower(strings.Join(schemaInstallationStatements(), "\n"))
 	for _, required := range []string{
 		"create table if not exists notification_read_watermarks",

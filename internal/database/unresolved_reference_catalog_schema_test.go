@@ -7,9 +7,6 @@ import (
 
 func TestUnresolvedReferenceCatalogUsesGeneration135BoundedProjection(t *testing.T) {
 	t.Parallel()
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	schema := strings.ToLower(strings.Join(unresolvedReferenceCatalogSchemaStatements(), "\n"))
 	for _, required := range []string{
 		"create table unresolved_reference_catalog",

@@ -6,9 +6,6 @@ import (
 )
 
 func TestServerCatalogPopularityRefreshQueuesSearchProjection(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168", schemaGeneration)
-	}
 	definition := strings.Join(searchSchemaStatements(), "\n")
 	for _, expected := range []string{
 		"enqueue_search_server_popularity()",

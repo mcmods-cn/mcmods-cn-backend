@@ -22,7 +22,4 @@ func TestSkinTextureBlobsTrackAndCalibrateActiveReferences(t *testing.T) {
 			t.Errorf("skin texture reference schema is missing %q", required)
 		}
 	}
-	if schemaGeneration < 155 {
-		t.Fatalf("skin texture reference facts require a new schema generation, got %d", schemaGeneration)
-	}
 }

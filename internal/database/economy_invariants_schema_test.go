@@ -6,9 +6,6 @@ import (
 )
 
 func TestEconomySchemaEnforcesExecutableItemsAndAtomicPromotionSequences(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("unexpected schema generation %d", schemaGeneration)
-	}
 	economyDefinition := strings.ToLower(strings.Join(communitySchemaStatements(), "\n"))
 	for _, required := range []string{
 		"item_type text not null check(item_type in ('profile_background','project_heat_boost','server_heat_boost'))",

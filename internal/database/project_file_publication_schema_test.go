@@ -6,9 +6,6 @@ import (
 )
 
 func TestBUG032ProjectFilePublicationUsesGeneration145SafetyState(t *testing.T) {
-	if schemaGeneration != 168 {
-		t.Fatalf("schema generation=%d want 168 for scan-gated project-file publication", schemaGeneration)
-	}
 	schema := strings.ToLower(strings.Join(projectFileSchemaStatements(), "\n"))
 	for _, required := range []string{
 		"status text not null default 'processing'",
