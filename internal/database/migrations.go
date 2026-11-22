@@ -523,6 +523,8 @@ func baselineSchemaStatements() []string {
 			last_replayed_at timestamptz,
 			last_replayed_by bigint references users(id) on delete set null,
 			unique(bucket,endpoint,object_key,upload_id),
+			abort_activity_intent jsonb not null default '{}'::jsonb,
+			` + ossMultipartAbortActivityConstraint + `,
 			check(size_bytes >= 0),
 			check(sha256 ~ '^[0-9a-f]{64}$'),
 			check(status in ('active','completing','cleanup_pending','aborting','completed','aborted','dead')),

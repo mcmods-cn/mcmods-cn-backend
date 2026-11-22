@@ -32,11 +32,10 @@ func OSSByteMaintenanceSchemaStatements() []string {
  constraint oss_upload_maintenance_shape check(oss_upload_maintenance_shape(operation,state,file_id,target_key,plan_sha256,backup_reference))
 )`,
 		`create index if not exists oss_upload_maintenance_raw_guard on oss_upload_maintenance_actions(target_key) where operation='cleanup_raw'`,
-		`alter table oss_upload_maintenance_actions add column if not exists reference_schema_sha256 text not null default '',add column if not exists quiescence_declared boolean not null default false,add column if not exists quiesced_reference_tables text[] not null default '{}'::text[],add column if not exists write_fence_tables text[] not null default '{}'::text[]`,
 	}
 }
 
-func inspectOSSByteMaintenanceSchema(ctx context.Context, q ossUploadByteBindingQuery) (bool, error) {
+func inspectOSSByteMaintenanceSchema(ctx context.Context, q schemaQueryer) (bool, error) {
 	var present bool
 	if err := q.QueryRow(ctx, `select to_regclass('public.oss_upload_maintenance_actions') is not null`).Scan(&present); err != nil || !present {
 		return false, err
@@ -97,13 +96,13 @@ func inspectOSSByteMaintenanceSchema(ctx context.Context, q ossUploadByteBinding
 	return scopeReady, nil
 }
 
-func RequireOSSByteMaintenanceSchema(ctx context.Context, q ossUploadByteBindingQuery) error {
+func RequireOSSByteMaintenanceSchema(ctx context.Context, q schemaQueryer) error {
 	ready, err := inspectOSSByteMaintenanceSchema(ctx, q)
 	if err != nil {
 		return err
 	}
 	if !ready {
-		return errors.New("OSS maintenance journal expansion required: explicitly apply cmd/db-oss-byte-binding-upgrade")
+		return errors.New("OSS maintenance journal is missing from the installed database baseline")
 	}
 	return nil
 }

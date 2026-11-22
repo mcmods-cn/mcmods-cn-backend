@@ -53,7 +53,6 @@ func OSSUploadByteBindingSchemaStatements() []string {
 		`create index if not exists oss_upload_byte_bindings_file on oss_upload_byte_bindings(file_id) where status='committed'`,
 		`create index if not exists oss_upload_byte_bindings_cleanup on oss_upload_byte_bindings(lease_expires_at,id) where status in ('preparing','cleanup_pending')`,
 		`create index if not exists oss_upload_byte_bindings_reconcile on oss_upload_byte_bindings(lease_expires_at,id) where status in ('cleanup_pending','discarded')`,
-		`alter table oss_upload_byte_bindings add column if not exists file_endpoint text not null default ''`,
 	}
 	statements = append(statements, OSSByteMaintenanceSchemaStatements()...)
 	return append(statements, OSSRawRetirementSchemaStatements()...)
@@ -73,22 +72,19 @@ type OSSUploadByteBindingState struct {
 	MaintenanceReady     bool   `json:"maintenance_ready"`
 	LegacyActiveFiles    int64  `json:"legacy_active_files_without_binding"`
 }
-type ossUploadByteBindingQuery interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
 type ossUploadBindingColumn struct {
 	Type    string `json:"type"`
 	NotNull bool   `json:"notNull"`
 	Default string `json:"default"`
 }
 
-func inspectOSSUploadByteBindings(ctx context.Context, q ossUploadByteBindingQuery, counts bool) (OSSUploadByteBindingState, error) {
+func inspectOSSUploadByteBindings(ctx context.Context, q schemaQueryer, counts bool) (OSSUploadByteBindingState, error) {
 	var state OSSUploadByteBindingState
 	if err := q.QueryRow(ctx, `select current_database(),generation from public.schema_metadata where singleton`).Scan(&state.Database, &state.Generation); err != nil {
 		return state, err
 	}
 	if state.Generation != schemaGeneration {
-		return state, errors.New("OSS byte binding expansion requires generation168")
+		return state, fmt.Errorf("OSS byte binding requires schema generation %d", schemaGeneration)
 	}
 	if err := q.QueryRow(ctx, `select to_regclass('public.oss_upload_byte_bindings') is not null`).Scan(&state.Present); err != nil {
 		return state, err
@@ -183,69 +179,13 @@ func InspectOSSUploadByteBindings(ctx context.Context, pool *pgxpool.Pool) (OSSU
 	}
 	return state, tx.Commit(ctx)
 }
-func RequireOSSUploadByteBindingSchema(ctx context.Context, q ossUploadByteBindingQuery) error {
+func RequireOSSUploadByteBindingSchema(ctx context.Context, q schemaQueryer) error {
 	state, err := inspectOSSUploadByteBindings(ctx, q, false)
 	if err != nil {
 		return err
 	}
 	if !state.Present || !state.ReconciliationReady || !state.EndpointMappingReady || !state.RawRetirementReady {
-		return errors.New("OSS upload byte binding expansion required: inspect and explicitly apply cmd/db-oss-byte-binding-upgrade")
+		return errors.New("OSS upload byte binding shape is missing from the installed database baseline")
 	}
 	return nil
-}
-func ApplyOSSUploadByteBindingUpgrade(ctx context.Context, pool *pgxpool.Pool, expectedDatabase, backupReference string) (OSSUploadByteBindingState, error) {
-	if strings.TrimSpace(expectedDatabase) == "" || strings.TrimSpace(backupReference) == "" {
-		return OSSUploadByteBindingState{}, errors.New("exact database and recorded backup reference are required")
-	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return OSSUploadByteBindingState{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `set local search_path=pg_catalog,public,pg_temp`); err != nil {
-		return OSSUploadByteBindingState{}, err
-	}
-	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('mcmods:oss-upload-byte-binding-v1'))`); err != nil {
-		return OSSUploadByteBindingState{}, err
-	}
-	before, err := inspectOSSUploadByteBindings(ctx, tx, true)
-	if err != nil {
-		return before, err
-	}
-	if before.Database != expectedDatabase {
-		return before, errors.New("database name does not match explicit confirmation")
-	}
-	for _, statement := range OSSUploadByteBindingSchemaStatements() {
-		// Installation statements follow the installation schema, including
-		// isolated test schemas. An explicit live expansion always targets
-		// public, independent of pg_temp and the connection search_path.
-		statement = strings.Replace(statement, "function oss_upload_byte_binding_shape(", "function public.oss_upload_byte_binding_shape(", 1)
-		statement = strings.Replace(statement, "table if not exists oss_upload_byte_bindings (", "table if not exists public.oss_upload_byte_bindings (", 1)
-		statement = strings.Replace(statement, "references oss_files(id)", "references public.oss_files(id)", 1)
-		statement = strings.Replace(statement, "check(oss_upload_byte_binding_shape(", "check(public.oss_upload_byte_binding_shape(", 1)
-		statement = strings.Replace(statement, "function oss_upload_maintenance_shape(", "function public.oss_upload_maintenance_shape(", 1)
-		statement = strings.Replace(statement, "table if not exists oss_upload_maintenance_actions (", "table if not exists public.oss_upload_maintenance_actions (", 1)
-		statement = strings.Replace(statement, "references oss_upload_byte_bindings(id)", "references public.oss_upload_byte_bindings(id)", 1)
-		statement = strings.Replace(statement, "check(oss_upload_maintenance_shape(", "check(public.oss_upload_maintenance_shape(", 1)
-		statement = strings.Replace(statement, "on oss_upload_maintenance_actions(", "on public.oss_upload_maintenance_actions(", 1)
-		statement = strings.Replace(statement, "alter table oss_upload_maintenance_actions ", "alter table public.oss_upload_maintenance_actions ", 1)
-		statement = strings.Replace(statement, "alter table oss_upload_byte_bindings ", "alter table public.oss_upload_byte_bindings ", 1)
-		statement = strings.Replace(statement, "on oss_upload_byte_bindings(", "on public.oss_upload_byte_bindings(", 1)
-		statement = strings.Replace(statement, "function oss_upload_capability_shape(", "function public.oss_upload_capability_shape(", 1)
-		statement = strings.Replace(statement, "table if not exists oss_upload_capabilities (", "table if not exists public.oss_upload_capabilities (", 1)
-		statement = strings.Replace(statement, "check(oss_upload_capability_shape(", "check(public.oss_upload_capability_shape(", 1)
-		statement = strings.Replace(statement, "alter table oss_object_deletion_outbox ", "alter table public.oss_object_deletion_outbox ", 1)
-		statement = strings.Replace(statement, "on oss_object_deletion_outbox(", "on public.oss_object_deletion_outbox(", 1)
-		if _, err = tx.Exec(ctx, statement); err != nil {
-			return before, fmt.Errorf("expand OSS byte binding schema: %w", err)
-		}
-	}
-	after, err := inspectOSSUploadByteBindings(ctx, tx, true)
-	if err != nil {
-		return after, err
-	}
-	if !after.Present || !after.ReconciliationReady || !after.EndpointMappingReady || !after.MaintenanceReady || !after.RawRetirementReady {
-		return after, errors.New("OSS upload byte binding expansion did not create the public receipt table, endpoint mapping and reconciliation index")
-	}
-	return after, tx.Commit(ctx)
 }

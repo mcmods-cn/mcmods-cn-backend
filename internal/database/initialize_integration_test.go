@@ -275,6 +275,9 @@ func TestInitializeRejectsUnknownAndDriftedSchemasIntegration(t *testing.T) {
 	if err := Initialize(ctx, shadowPool); err != nil {
 		t.Fatal(err)
 	}
+	if err := RequireOSSMultipartActivitySchema(ctx, pool); err != nil {
+		t.Fatalf("current multipart activity schema: %v", err)
+	}
 	var shadowColumns, shadowVersion int
 	if err := shadowPool.QueryRow(ctx, `select
 		(select count(*) from information_schema.columns where table_schema='audit_shadow' and table_name='notifications'),
