@@ -42,10 +42,11 @@ configuration or resolving avatar URLs. This allows the request to complete
 with a one-connection pool and prevents avatar lookups from waiting for the
 connection retained by the list itself.
 
-## Database and upgrade
+## Database setup and recovery
 
-The generation 168 empty-database schema contains the directional table,
-reverse lookup index, and unambiguous comment-route parameters. Other existing
-generations are rejected; development reset is not a data-preserving upgrade.
-The explicit generation-168 comment popularity function/binding repair and its
-backup/restore procedure are documented in `docs/database-function-repair.md`.
+Generation 169 installs the directional table and reverse lookup index. The
+current schema and metadata checks also apply when restoring block records from
+a backup. [Database setup and recovery](README.md#数据库安装发布和恢复)
+
+Use the generation 169 comment popularity function and trigger repair when its
+catalog objects need recovery. [Database function repair](docs/database-function-repair.md)

@@ -55,6 +55,6 @@ recipes(entity_id)
 
 ## 开发库与校验
 
-当前 generation 168 按开发期重置策略安装结构，没有旧库前向回填迁移。`recipe_definitions.source_mod_content_version_id` 和导入修订的目标资料版本可以提供来源信息；需要保留既有数据时，应先为真实 schema、现存绑定和剩余 provenance 制定单独升级方案，不能把这些来源字段的存在视为已经支持回填或执行 RESET。
+generation 169 安装配方版本绑定和现有的来源记录。`recipe_definitions.source_mod_content_version_id` 与导入修订的目标资料版本可用于核对来源。恢复配方时使用匹配的应用版本、关系和修订记录。需要保留旧数据的版本升级须另行验证其来源和绑定关系。[数据库安装、发布和恢复](README.md#数据库安装发布和恢复)
 
 应核对无空 code、无重复主键、发布后的合成表至少有一个版本绑定，以及不同入口的同一 recipe ID 返回一致版本数组。数据库 CHECK 只约束 code 非空和 `source` 枚举；版本是否仍在站内目录及至少一个绑定由应用发布链验证，不能从建库成功推断这些业务不变量全部通过。
