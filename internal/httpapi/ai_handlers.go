@@ -18,7 +18,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/queue"
-	"mcmods-cn-backend/internal/security"
 )
 
 const (
@@ -337,89 +336,6 @@ func (worker *AIWorker) writeAICallLog(ctx context.Context, taskID int64, taskTy
 	)
 }
 
-func (s *Server) getAIConfig(w http.ResponseWriter, r *http.Request) {
-	cfg, err := readAIConfigFromSettings(r.Context(), s.db, s.cfg.SettingsEncryptionKey)
-	if err != nil {
-		writeAPIError(w, http.StatusServiceUnavailable, "AI_SETTINGS_UNAVAILABLE", "AI settings are temporarily unavailable", 0, nil)
-		return
-	}
-	writeJSON(w, http.StatusOK, redactAIConfig(cfg))
-}
-
-func (s *Server) updateAIConfig(w http.ResponseWriter, r *http.Request) {
-	var payload aiConfigPayload
-	if err := decodeJSON(r, &payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求格式不正确")
-		return
-	}
-	payload = normalizeAIConfig(payload)
-	if err := validateAIQuotas(payload.Quotas); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	providerCodes := make(map[string]bool, len(payload.Providers))
-	for _, provider := range payload.Providers {
-		if provider.Code == "" || providerCodes[provider.Code] {
-			writeAPIError(w, http.StatusBadRequest, "AI_PROVIDER_CODE_INVALID", "provider codes must be nonempty and unique", 0, nil)
-			return
-		}
-		providerCodes[provider.Code] = true
-		if err := validateAIProviderEndpoint(provider.BaseURL); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-	for _, binding := range payload.TaskModels {
-		if binding.TimeoutSeconds > 600 {
-			writeError(w, http.StatusBadRequest, "AI task timeout cannot exceed 600 seconds")
-			return
-		}
-	}
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeAPIError(w, http.StatusServiceUnavailable, "AI_SETTINGS_UNAVAILABLE", "AI settings are temporarily unavailable", 0, nil)
-		return
-	}
-	defer tx.Rollback(r.Context())
-	if _, err = tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext('ai-config-settings-write'))`); err != nil {
-		writeAPIError(w, http.StatusServiceUnavailable, "AI_SETTINGS_UNAVAILABLE", "AI settings are temporarily unavailable", 0, nil)
-		return
-	}
-	current, err := readAIConfigFromSettings(r.Context(), tx, s.cfg.SettingsEncryptionKey)
-	if err != nil {
-		writeAPIError(w, http.StatusServiceUnavailable, "AI_SETTINGS_UNAVAILABLE", "AI settings are temporarily unavailable", 0, nil)
-		return
-	}
-	for index := range payload.Providers {
-		if payload.Providers[index].APIKey == "" {
-			payload.Providers[index].APIKey = providerAPIKey(current.Providers, payload.Providers[index].Code)
-		}
-	}
-	raw, err := s.sealSystemSetting(payload)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "AI 配置格式不正确")
-		return
-	}
-	_, err = tx.Exec(
-		r.Context(),
-		`insert into system_settings (key, value, updated_by, updated_at)
-		 values ('ai.config', $1::jsonb, $2, now())
-		 on conflict (key) do update
-		 set value = excluded.value, updated_by = excluded.updated_by, updated_at = now()`,
-		raw,
-		currentClaims(r).Subject,
-	)
-	if err != nil || tx.Commit(r.Context()) != nil {
-		writeError(w, http.StatusInternalServerError, "保存 AI 配置失败")
-		return
-	}
-	s.writeAppLog(r.Context(), "admin_operation", "info", "update_ai_config", "ai.config", currentClaims(r).Subject, r, http.StatusOK, 0, map[string]any{
-		"providers": len(payload.Providers),
-		"models":    len(payload.Models),
-	})
-	writeJSON(w, http.StatusOK, redactAIConfig(payload))
-}
-
 func (s *Server) adminAITasks(w http.ResponseWriter, r *http.Request) {
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	taskType := strings.TrimSpace(r.URL.Query().Get("taskType"))
@@ -647,43 +563,6 @@ func (s *Server) adminAIStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-type aiConfigQueryer interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
-func readAIConfigFromSettings(ctx context.Context, queryer aiConfigQueryer, encryptionKey string) (aiConfigPayload, error) {
-	payload := defaultAIConfig()
-	var raw []byte
-	err := queryer.QueryRow(ctx, `select value from system_settings where key = 'ai.config'`).Scan(&raw)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return payload, nil
-	}
-	if err != nil {
-		return aiConfigPayload{}, err
-	}
-	raw, err = security.DecryptSetting(encryptionKey, raw)
-	if err != nil {
-		return aiConfigPayload{}, err
-	}
-	if _, err = decodeStoredJSONObject(raw, "AI settings"); err != nil {
-		return aiConfigPayload{}, err
-	}
-	if err = json.Unmarshal(raw, &payload); err != nil {
-		return aiConfigPayload{}, err
-	}
-	return normalizeAIConfig(payload), nil
-}
-
-func (s *Server) aiConfigFromSettings(ctx context.Context) aiConfigPayload {
-	payload, err := readAIConfigFromSettings(ctx, s.db, s.cfg.SettingsEncryptionKey)
-	if err != nil {
-		// Execution-oriented callers fail closed with disabled providers. Admin
-		// reads/writes use the error-returning reader, never a successful fallback.
-		return defaultAIConfig()
-	}
-	return payload
-}
-
 func (s *Server) logQueuedAITask(ctx context.Context, taskID int64, taskUID, taskType string) {
 	raw, _ := json.Marshal(aiTaskMessage{TaskID: taskID, TaskUID: taskUID, TaskType: taskType})
 	_, _ = s.db.Exec(
@@ -831,16 +710,6 @@ func redactAIConfig(payload aiConfigPayload) aiConfigPayload {
 		payload.Providers[index].APIKey = ""
 	}
 	return payload
-}
-
-func providerAPIKey(providers []aiProviderConfig, code string) string {
-	code = normalizeAIToken(code)
-	for _, provider := range providers {
-		if provider.Code == code {
-			return provider.APIKey
-		}
-	}
-	return ""
 }
 
 func normalizeAIToken(value string) string {

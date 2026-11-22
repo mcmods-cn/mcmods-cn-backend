@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -44,7 +45,7 @@ func TestOCT02AISettingsReadFailureCannotReplaceEncryptedConfigurationIntegratio
 	getResponse := httptest.NewRecorder()
 	server.getAIConfig(getResponse, httptest.NewRequest(http.MethodGet, "/api/v1/admin/ai/config", nil))
 	cfg.Providers[0].APIKey = ""
-	body, err := json.Marshal(cfg)
+	body, err := json.Marshal(aiConfigUpdate{aiConfigPayload: cfg, Revision: (aiConfigSetting{encrypted: before}).revision()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,8 @@ func TestOCT02AISettingsDefaultsAndSavingStayWithinOneConnectionIntegration(t *t
 	cfg := defaultAIConfig()
 	cfg.Providers[0].APIKey = "synthetic-key"
 	for i := 0; i < 2; i++ {
-		body, err := json.Marshal(cfg)
+		revision := decodeTEST022Data[aiConfigView](t, response.Body.Bytes()).Revision
+		body, err := json.Marshal(aiConfigUpdate{aiConfigPayload: cfg, Revision: revision})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -107,7 +109,7 @@ func TestOCT02AISettingsRejectDuplicateNormalizedProviderCodesIntegration(t *tes
 	pool := oct02AITestPool(t)
 	cfg := defaultAIConfig()
 	cfg.Providers[1].Code = " OpenAI "
-	body, err := json.Marshal(cfg)
+	body, err := json.Marshal(aiConfigUpdate{aiConfigPayload: cfg, Revision: (aiConfigSetting{}).revision()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +138,77 @@ func TestOCT02AISettingsDatabaseFailureIsUnavailable(t *testing.T) {
 	}
 	if cfg := server.aiConfigFromSettings(context.Background()); cfg.Translation.Enabled || cfg.Providers[0].Enabled {
 		t.Fatal("execution fallback enabled external requests")
+	}
+}
+
+func TestOCT02AISettingsRejectNullQuotaInsteadOfInventingALimitIntegration(t *testing.T) {
+	pool := oct02AITestPool(t)
+	ctx := context.Background()
+	s := &Server{db: pool, cfg: config.Config{SettingsEncryptionKey: strings.Repeat("quota-fixture", 3)}}
+	cfg := defaultAIConfig()
+	cfg.Quotas[0].CostLimitCNY = 0
+	valid, err := s.sealSystemSetting(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `insert into system_settings(key,value) values('ai.config',$1)`, valid); err != nil {
+		t.Fatal(err)
+	}
+	get := func() *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		s.getAIConfig(response, httptest.NewRequest(http.MethodGet, aiConfigTestPath, nil))
+		return response
+	}
+	response := get()
+	if response.Code != http.StatusOK {
+		t.Fatalf("explicit zero quota was unavailable: %d", response.Code)
+	}
+	view := decodeTEST022Data[aiConfigView](t, response.Body.Bytes())
+	if view.Quotas[0].CostLimitCNY != 0 {
+		t.Fatal("explicit zero spending cap was replaced by a default")
+	}
+	invalidWrite := fmt.Sprintf(`{"revision":%q,"Quotas":[{"Scope":"site","Subject":"default","Period":"day","CostLimitCny":null}]}`, view.Revision)
+	response = httptest.NewRecorder()
+	s.updateAIConfig(response, httptest.NewRequest(http.MethodPut, aiConfigTestPath, strings.NewReader(invalidWrite)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("a null quota input returned %d", response.Code)
+	}
+	assertAIConfigErrorCode(t, response.Body.Bytes(), "AI_QUOTA_VALUE_INVALID")
+	response = get()
+	after := decodeTEST022Data[aiConfigView](t, response.Body.Bytes())
+	if response.Code != http.StatusOK || after.Revision != view.Revision || after.Quotas[0].CostLimitCNY != 0 {
+		t.Fatal("invalid input modified the stored quota")
+	}
+
+	malformed := json.RawMessage(`{"quotas":[{"scope":"site","subject":"default","period":"day","costLimitCny":null}]}`)
+	bad, err := s.sealSystemSetting(malformed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `update system_settings set value=$1 where key='ai.config'`, bad); err != nil {
+		t.Fatal(err)
+	}
+	response = get()
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stored null quota displayed an editable form: %d", response.Code)
+	}
+	assertAIConfigErrorCode(t, response.Body.Bytes(), "AI_SETTINGS_UNAVAILABLE")
+	body, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	s.updateAIConfig(response, httptest.NewRequest(http.MethodPut, aiConfigTestPath, bytes.NewReader(body)))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("save with an unreadable stored quota returned %d", response.Code)
+	}
+	var unchanged bool
+	if err = pool.QueryRow(ctx, `select value=$1::jsonb from system_settings where key='ai.config'`, bad).Scan(&unchanged); err != nil || !unchanged {
+		t.Fatalf("unreadable quota ciphertext was replaced: %v", err)
+	}
+	decoded := s.aiConfigFromSettings(ctx)
+	if decoded.Translation.Enabled || decoded.Providers[0].Enabled {
+		t.Fatal("unreadable quota enabled an external request")
 	}
 }
 
@@ -198,10 +271,16 @@ func TestOCT02AISettingsHiddenKeyMergeSerializesWithRotationIntegration(t *testi
 	if _, err = pool.Exec(ctx, `insert into system_settings(key,value) values('ai.config',$1)`, raw); err != nil {
 		t.Fatal(err)
 	}
-	invoke := func(ctx context.Context, key string, output chan<- int) {
-		cfg := defaultAIConfig()
-		cfg.Providers[0].APIKey = key
-		body, err := json.Marshal(cfg)
+	get := func() aiConfigView {
+		response := httptest.NewRecorder()
+		server.getAIConfig(response, httptest.NewRequest(http.MethodGet, "/api/v1/admin/ai/config", nil).WithContext(ctx))
+		if response.Code != http.StatusOK {
+			t.Fatalf("settings read failed: %d", response.Code)
+		}
+		return decodeTEST022Data[aiConfigView](t, response.Body.Bytes())
+	}
+	invoke := func(ctx context.Context, config aiConfigView, output chan<- int) {
+		body, err := json.Marshal(config)
 		if err != nil {
 			output <- 0
 			return
@@ -212,14 +291,17 @@ func TestOCT02AISettingsHiddenKeyMergeSerializesWithRotationIntegration(t *testi
 		server.updateAIConfig(response, request)
 		output <- response.Code
 	}
+	first, second := get(), get()
+	first.Providers[0].Notes = "metadata from the first administrator"
+	second.Providers[0].APIKey = "synthetic-rotated-key"
 	metadata, rotation := make(chan int, 1), make(chan int, 1)
-	go invoke(context.WithValue(ctx, oct02AISettingsMetadataKey{}, true), "", metadata)
+	go invoke(context.WithValue(ctx, oct02AISettingsMetadataKey{}, true), first, metadata)
 	select {
 	case <-barrier.loaded:
 	case <-ctx.Done():
 		t.Fatal("metadata configuration did not reach controlled read")
 	}
-	go invoke(ctx, "synthetic-rotated-key", rotation)
+	go invoke(ctx, second, rotation)
 	// Rotation must wait on the settings transaction while metadata holds the
 	// old snapshot. On the old implementation it commits and is then overwritten.
 	select {
@@ -228,18 +310,31 @@ func TestOCT02AISettingsHiddenKeyMergeSerializesWithRotationIntegration(t *testi
 	case <-time.After(150 * time.Millisecond):
 	}
 	close(barrier.resume)
-	for name, output := range map[string]<-chan int{"metadata": metadata, "rotation": rotation} {
+	for _, result := range []struct {
+		name   string
+		status <-chan int
+		want   int
+	}{{"metadata", metadata, http.StatusOK}, {"rotation", rotation, http.StatusConflict}} {
 		select {
-		case status := <-output:
-			if status != http.StatusOK {
-				t.Fatalf("%s update failed: %d", name, status)
+		case status := <-result.status:
+			if status != result.want {
+				t.Fatalf("%s status=%d want=%d", result.name, status, result.want)
 			}
 		case <-ctx.Done():
-			t.Fatalf("%s update did not finish", name)
+			t.Fatalf("%s update did not finish", result.name)
 		}
 	}
+	current := get()
+	if current.Providers[0].Notes != first.Providers[0].Notes || !current.Providers[0].HasAPIKey {
+		t.Fatal("the stale rotation replaced the accepted metadata or removed the hidden key")
+	}
+	current.Providers[0].APIKey = second.Providers[0].APIKey
+	invoke(ctx, current, rotation)
+	if status := <-rotation; status != http.StatusOK {
+		t.Fatalf("rotation with the current revision failed: %d", status)
+	}
 	stored, err := readAIConfigFromSettings(ctx, pool, server.cfg.SettingsEncryptionKey)
-	if err != nil || stored.Providers[0].APIKey != "synthetic-rotated-key" {
-		t.Fatalf("concurrent key rotation was overwritten: error=%v", err)
+	if err != nil || stored.Providers[0].APIKey != "synthetic-rotated-key" || stored.Providers[0].Notes != first.Providers[0].Notes {
+		t.Fatalf("refreshed key rotation did not retain the metadata: error=%v", err)
 	}
 }

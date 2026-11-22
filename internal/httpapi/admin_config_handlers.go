@@ -89,7 +89,7 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "OAUTH_SETTINGS_UNAVAILABLE", "third-party login settings are temporarily unavailable", 0, nil)
 		return
 	}
-	aiCfg, err := readAIConfigFromSettings(r.Context(), s.db, s.cfg.SettingsEncryptionKey)
+	aiCfg, err := readAIConfigSetting(r.Context(), s.db, s.cfg.SettingsEncryptionKey)
 	if err != nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "AI_SETTINGS_UNAVAILABLE", "AI settings are temporarily unavailable", 0, nil)
 		return
@@ -118,7 +118,7 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		"markdown":  normalizeMarkdownConfig(markdown),
 		"profile":   normalizeProfileConfig(profile),
 		"yggdrasil": s.redactedYggdrasilConfig(),
-		"ai":        redactAIConfig(aiCfg),
+		"ai":        aiCfg.view(),
 		"permissions": map[string]any{
 			"mode":              "RBAC + user override",
 			"temporaryGrant":    true,

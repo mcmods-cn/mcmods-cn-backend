@@ -16,9 +16,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-
-	"mcmods-cn-backend/internal/security"
 )
 
 const (
@@ -204,22 +201,6 @@ func aiTranslationTokenReservation(model aiModelConfig, prompt string) (int, int
 		return 0, 0, errors.New("AI model has no output capacity for the translation prompt")
 	}
 	return maxOutputTokens, inputReservation + int64(maxOutputTokens), nil
-}
-
-func aiConfigFromDatabase(ctx context.Context, db *pgxpool.Pool, settingsEncryptionKey string) aiConfigPayload {
-	payload := defaultAIConfig()
-	var raw []byte
-	if err := db.QueryRow(ctx, `select value from system_settings where key = 'ai.config'`).Scan(&raw); err != nil {
-		return payload
-	}
-	raw, err := security.DecryptSetting(settingsEncryptionKey, raw)
-	if err != nil {
-		return defaultAIConfig()
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return defaultAIConfig()
-	}
-	return normalizeAIConfig(payload)
 }
 
 func buildTranslationPrompt(taskType string, customPrompt string, rawPayload []byte) (string, error) {
