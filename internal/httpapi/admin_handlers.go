@@ -403,6 +403,11 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 	req.Email = normalizeEmail(req.Email)
 	req.Status = strings.TrimSpace(req.Status)
 	req.Roles = normalizeCodes(req.Roles)
+	claims := currentClaims(r)
+	if len(req.Roles) > 0 && !claimsAllow(claims, "permission.write") {
+		writeError(w, http.StatusForbidden, "permission to assign roles required")
+		return
+	}
 	if req.Status == "" {
 		req.Status = "active"
 	}
@@ -495,7 +500,7 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "分配默认权限组失败")
 		return
 	}
-	if err := s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &user.ID, "create_user", map[string]any{
+	if err := s.auditPermissionChangeTx(r.Context(), tx, claims.Subject, &user.ID, "create_user", map[string]any{
 		"username": user.Username,
 		"email":    user.Email,
 		"status":   user.Status,

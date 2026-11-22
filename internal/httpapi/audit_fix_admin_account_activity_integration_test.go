@@ -68,3 +68,45 @@ func TestAuditFixCMP003AdminAccountActivitySharesIdentityPermissionAndStatusTran
 		}
 	}
 }
+
+func TestAdminAccountCreationSeparatesRoleAssignmentIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "admin.access", "user.write")
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.reviewer], "admin.access", "user.write", "permission.write")
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "admin.access", "permission.write")
+	const role = "provisioning_test_member"
+	if _, err := f.db.Exec(f.ctx, `insert into roles(code,name) values($1,'Synthetic member')`, role); err != nil {
+		t.Fatal(err)
+	}
+	const path = "/api/v1/admin/users"
+	account := adminCreateUserRequest{
+		Username: "provisioned_default", Email: "provisioned-default@example.invalid", Password: "synthetic-provisioning-password",
+	}
+	f.require(t, f.editor, http.MethodPost, path, account, http.StatusCreated)
+
+	rolesFor := func(name string, wantManual int) {
+		t.Helper()
+		var defaults, manual int
+		if err := f.db.QueryRow(f.ctx, `select
+			count(*) filter(where binding.source='account_status' and binding.source_key='registered'),
+			count(*) filter(where binding.source='manual' and role.code=$2)
+			from users account join user_role_bindings binding on binding.user_id=account.id
+			join roles role on role.id=binding.role_id where account.username=$1`, name, role).Scan(&defaults, &manual); err != nil {
+			t.Fatal(err)
+		}
+		if defaults != 1 || manual != wantManual {
+			t.Errorf("account %s: default roles=%d; explicit roles=%d want=%d", name, defaults, manual, wantManual)
+		}
+	}
+	rolesFor(account.Username, 0)
+
+	account.Username, account.Email = "provisioned_member", "provisioned-member@example.invalid"
+	account.Roles = []string{role}
+	before := auditFixAdminAccountActivityFacts(t, f)
+	f.require(t, f.editor, http.MethodPost, path, account, http.StatusForbidden)
+	f.require(t, f.otherEditor, http.MethodPost, path, account, http.StatusForbidden)
+	auditFixRequireProjectFactsUnchanged(t, before, auditFixAdminAccountActivityFacts(t, f))
+
+	f.require(t, f.reviewer, http.MethodPost, path, account, http.StatusCreated)
+	rolesFor(account.Username, 1)
+}
