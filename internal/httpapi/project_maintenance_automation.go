@@ -105,6 +105,17 @@ func (worker *ProjectAutomationWorker) applyProjectMaintenancePolicy(
 	result.PreviousStatus = currentStatus
 	result.CurrentStatus = currentStatus
 
+	aggregateType := simpleProjectAggregate
+	if job.ProjectType == "mod" {
+		aggregateType = "mod"
+	}
+	if err = checkProjectRevisionModerationTx(ctx, tx, aggregateType, job.InternalID); errors.Is(err, errProjectModerationHidden) {
+		return result, nil
+	}
+	if err != nil {
+		return result, err
+	}
+
 	lastProjectChange := createdAt.UTC()
 	var automatedStatus *string
 	var statusBeforeAutomation string

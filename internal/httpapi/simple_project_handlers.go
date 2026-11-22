@@ -606,6 +606,10 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 			err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic approval", r)
 		}
 	}
+	if errors.Is(err, errProjectModerationHidden) {
+		writeError(w, http.StatusConflict, errProjectModerationHidden.Error())
+		return
+	}
 	if err == nil {
 		if intentErr := enqueueRequestActivityTx(r, tx); intentErr != nil {
 			writeError(w, http.StatusInternalServerError, "failed to persist project activity")
@@ -855,6 +859,9 @@ func writeSimpleProjectParentValidationError(w http.ResponseWriter, err error) {
 
 func applySimpleProjectSnapshotTx(ctx context.Context, tx pgx.Tx, projectID, revisionID, actorID int64,
 	canManageAuthors, canManageTeams bool, snapshot simpleProjectSnapshot) error {
+	if err := checkProjectRevisionModerationTx(ctx, tx, simpleProjectAggregate, projectID); err != nil {
+		return err
+	}
 	localization := defaultSimpleProjectLocalization(snapshot)
 	if _, err := tx.Exec(ctx, `update simple_projects set slug=$2,default_locale=$3,primary_name=$4,summary=$5,
 		body_markdown=$6,abbreviation=$7,minecraft_versions=$8,loaders=$9,categories=$10,features=$11,resolution=$12,

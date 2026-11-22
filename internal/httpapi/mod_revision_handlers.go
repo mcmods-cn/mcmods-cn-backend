@@ -177,6 +177,10 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
 		if err = applyModSnapshot(r.Context(), tx, identity.ID, created.RevisionID, claims.Subject,
 			canManageAuthors, canManageTeams, request.Snapshot); err != nil {
+			if errors.Is(err, errProjectModerationHidden) {
+				writeError(w, http.StatusConflict, errProjectModerationHidden.Error())
+				return
+			}
 			if errors.Is(err, errModSiteIDTaken) {
 				writeError(w, http.StatusConflict, "mod site ID is already in use")
 				return
@@ -401,6 +405,10 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 		canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
 		if err = applyModSnapshot(r.Context(), tx, modID, revisionID, claims.Subject,
 			canManageAuthors, canManageTeams, snapshot); err != nil {
+			if errors.Is(err, errProjectModerationHidden) {
+				writeProjectModerationConflict(w, r, tx, changeRequestID, claims.Subject)
+				return
+			}
 			if errors.Is(err, errModSiteIDTaken) {
 				writeError(w, http.StatusConflict, "mod site ID is already in use")
 				return
@@ -408,6 +416,8 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to publish revision")
 			return
 		}
+	} else if !allowProjectRevisionRejection(w, r, tx, "mod", modID, changeRequestID, claims.Subject) {
+		return
 	}
 	if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record review")
@@ -530,6 +540,9 @@ func scanModRevision(row scanner) (modRevisionResponse, error) {
 
 func applyModSnapshot(ctx context.Context, tx pgx.Tx, modID, revisionID, relationshipActorID int64,
 	canManageAuthors, canManageTeams bool, snapshot createModRequest) error {
+	if err := checkProjectRevisionModerationTx(ctx, tx, "mod", modID); err != nil {
+		return err
+	}
 	var projectCode, currentSiteID string
 	var revisionActorID *int64
 	if err := tx.QueryRow(ctx, `select project_code,slug from mods where id=$1`, modID).Scan(&projectCode, &currentSiteID); err != nil {

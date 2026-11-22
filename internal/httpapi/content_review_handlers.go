@@ -333,13 +333,22 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
 			if err = applyModpackSnapshotTx(r.Context(), tx, modpackID, revisionID, claims.Subject,
 				canManageAuthors, canManageTeams, snapshot); err != nil {
+				if errors.Is(err, errProjectModerationHidden) {
+					writeProjectModerationConflict(w, r, tx, changeRequestID, claims.Subject)
+					return
+				}
 				writeError(w, http.StatusInternalServerError, "failed to publish modpack")
 				return
 			}
-		} else if _, err = tx.Exec(r.Context(), `update modpacks set
-			review_status=case when published_revision_id is null then 'rejected' else 'approved' end,updated_at=now() where id=$1`, modpackID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to reject modpack")
-			return
+		} else {
+			if !allowProjectRevisionRejection(w, r, tx, modpackAggregate, modpackID, changeRequestID, claims.Subject) {
+				return
+			}
+			if _, err = tx.Exec(r.Context(), `update modpacks set
+				review_status=case when published_revision_id is null then 'rejected' else 'approved' end,updated_at=now() where id=$1`, modpackID); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to reject modpack")
+				return
+			}
 		}
 		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to record modpack review")
@@ -407,14 +416,23 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
 			if err = applySimpleProjectSnapshotTx(r.Context(), tx, projectID, revisionID, claims.Subject,
 				canManageAuthors, canManageTeams, snapshot); err != nil {
+				if errors.Is(err, errProjectModerationHidden) {
+					writeProjectModerationConflict(w, r, tx, changeRequestID, claims.Subject)
+					return
+				}
 				writeError(w, http.StatusInternalServerError, "failed to publish project")
 				return
 			}
-		} else if _, err = tx.Exec(r.Context(), `update simple_projects set
-			review_status=case when published_revision_id is null then 'rejected' else 'approved' end,updated_at=now()
-			where id=$1`, projectID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to reject project")
-			return
+		} else {
+			if !allowProjectRevisionRejection(w, r, tx, simpleProjectAggregate, projectID, changeRequestID, claims.Subject) {
+				return
+			}
+			if _, err = tx.Exec(r.Context(), `update simple_projects set
+				review_status=case when published_revision_id is null then 'rejected' else 'approved' end,updated_at=now()
+				where id=$1`, projectID); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to reject project")
+				return
+			}
 		}
 		if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to record project review")

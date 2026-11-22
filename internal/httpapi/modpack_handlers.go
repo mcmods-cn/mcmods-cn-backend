@@ -592,6 +592,10 @@ func (s *Server) createModpackRevision(w http.ResponseWriter, r *http.Request, s
 			err = appendReviewResolutionTx(r.Context(), tx, created.ChangeRequestID, "approved", claims.Subject, "automatic approval", r)
 		}
 	}
+	if errors.Is(err, errProjectModerationHidden) {
+		writeError(w, http.StatusConflict, errProjectModerationHidden.Error())
+		return
+	}
 	if err == nil {
 		if intentErr := enqueueRequestActivityTx(r, tx); intentErr != nil {
 			writeError(w, http.StatusInternalServerError, "failed to persist project activity")
@@ -776,6 +780,9 @@ func (s *Server) prepareImportedModpackAssets(ctx context.Context, snapshot *cre
 
 func applyModpackSnapshotTx(ctx context.Context, tx pgx.Tx, modpackID, revisionID, actorID int64,
 	canManageAuthors, canManageTeams bool, snapshot createModpackRequest) error {
+	if err := checkProjectRevisionModerationTx(ctx, tx, modpackAggregate, modpackID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `update modpacks set slug=$2,primary_name=$3,secondary_name=$4,abbreviation=$5,
 		summary=$6,default_locale=$7,environment=$8,primary_category=$9,pack_type=$10,packaging_method=$11,
 		official_status=$12,source_status=$13,license=$14,curseforge_project_id=$15,modrinth_project_id=$16,
