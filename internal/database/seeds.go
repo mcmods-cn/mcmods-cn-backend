@@ -2,11 +2,12 @@ package database
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
+	"net/mail"
 	"os"
 	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
 
 	"mcmods-cn-backend/internal/security"
 	"mcmods-cn-backend/internal/systemactor"
@@ -36,10 +37,7 @@ type seedRole struct {
 	Denials     []string
 }
 
-const (
-	defaultUsersBootstrapMarkerKey = "security.default_users_bootstrapped.v1"
-	defaultRolesSettingKey         = "permission.default_roles"
-)
+const defaultRolesSettingKey = "permission.default_roles"
 
 var seedPermissions = []seedPermission{
 	{Code: "*", Module: "security", Name: "All permissions", Description: "Internal wildcard used by fail-closed security roles.", AccessType: "security"},
@@ -236,272 +234,120 @@ var seedRoles = []seedRole{
 	{Code: "banned", Name: "Banned account", Description: "High-priority fail-closed denial role applied without removing existing roles.", Weight: 2_000_000_000, Permissions: []string{"account.banned"}, Denials: []string{"*"}},
 }
 
-var seedUsers = []seedUser{
-	{
-		Username: "admin",
-		Email:    "admin@mcmods.cn",
-		Status:   "active",
-		Permissions: []string{
-			"admin.*", "admin.access", "admin.config.read", "admin.config.write",
-			"user.read", "user.write", "permission.read", "permission.write",
-			"creator.create", "creator.edit", "creator.claim", "creator.claim.review", "creator.role.write",
-			"project.editor.apply", "project.editor.review", "project.authorship.manage", "project.team_relation.manage", "team.members.manage", "team.members.review",
-			"activity.read", "economy.read", "economy.write", "economy.balance.write", "economy.checkin", "economy.transfer",
-			"shop.read", "shop.write", "shop.purchase", "shop.use",
-			"shop.profile_background.purchase", "shop.profile_background.use",
-			"shop.project_heat_boost.purchase", "shop.project_heat_boost.use",
-			"shop.server_heat_boost.purchase", "shop.server_heat_boost.use",
-			"level.read", "level.write", "task.read", "task.write",
-			"mail.read", "mail.write", "oss.read", "oss.write", "log.read", "log.write",
-			"ai.read", "ai.write", "ai.task.enqueue", "ai.task.consume",
-			"notification.system.publish", "notification.translate", "notification.template.manage",
-			"favorite.modpack_export", "favorite.modpack_export.view_own", "sticker.view", "sticker.manage", "sticker.upload", "project.follow", "project.follow.view_own",
-			"content.review", "content.write", "content.no-review", "content.translate",
-			"global_resource.list", "global_resource.view", "global_resource.binding.view",
-			"log_share.list", "log_share.view", "log_share.moderate", "log_share.delete", "log_share.redaction_reprocess",
-			"reference.unresolved.read",
-			"server.create", "server.create.no-review", "server.review",
-			"project.create", "project.edit", "project.review",
-			"report.review", "report.snapshot.view", "report.evidence.view", "report.action.delete", "report.action.ban", "report.action.reopen", "report.action.takeover",
-			"ban.create", "ban.revoke", "ban.view_internal", "site_affairs.about.manage", "site_affairs.changelog.manage",
-			"seed_crawler.view", "seed_crawler.configure", "seed_crawler.run",
-			"project.auto_update.view", "project.auto_update.configure", "project.auto_update.run", "project.auto_update.view_logs", "project.auto_update.redistribution_override", "project.external_source.bind",
-		},
-	},
-	{
-		Username: systemactor.AutobotUsername,
-		Email:    systemactor.AutobotEmail,
-		Status:   systemactor.AutobotStatus,
-		Permissions: []string{
-			"project.create", "project.create.plugin", "project.create.map", "project.create.resource_pack",
-			"project.create.shader_pack", "project.create.datapack", "project.create.addon",
-			"project.edit", "project.no-review", "content.no-review",
-			"security.anti-abuse.rate_multiplier.1000",
-			"security.anti-abuse.rate_multiplier.review_submit.1000",
-		},
-	},
-	{
-		Username: "guest",
-		Email:    "guest@mcmods.cn",
-		Status:   "active",
-	},
-	{
-		Username: "deleted_user",
-		Email:    "deleted-user@mcmods.cn",
-		Status:   "deleted",
+var administratorSeed = seedUser{
+	Username: "admin",
+	Status:   "active",
+	Permissions: []string{
+		"admin.*", "admin.access", "admin.config.read", "admin.config.write",
+		"user.read", "user.write", "permission.read", "permission.write",
+		"creator.create", "creator.edit", "creator.claim", "creator.claim.review", "creator.role.write",
+		"project.editor.apply", "project.editor.review", "project.authorship.manage", "project.team_relation.manage", "team.members.manage", "team.members.review",
+		"activity.read", "economy.read", "economy.write", "economy.balance.write", "economy.checkin", "economy.transfer",
+		"shop.read", "shop.write", "shop.purchase", "shop.use",
+		"shop.profile_background.purchase", "shop.profile_background.use",
+		"shop.project_heat_boost.purchase", "shop.project_heat_boost.use",
+		"shop.server_heat_boost.purchase", "shop.server_heat_boost.use",
+		"level.read", "level.write", "task.read", "task.write",
+		"mail.read", "mail.write", "oss.read", "oss.write", "log.read", "log.write",
+		"ai.read", "ai.write", "ai.task.enqueue", "ai.task.consume",
+		"notification.system.publish", "notification.translate", "notification.template.manage",
+		"favorite.modpack_export", "favorite.modpack_export.view_own", "sticker.view", "sticker.manage", "sticker.upload", "project.follow", "project.follow.view_own",
+		"content.review", "content.write", "content.no-review", "content.translate",
+		"global_resource.list", "global_resource.view", "global_resource.binding.view",
+		"log_share.list", "log_share.view", "log_share.moderate", "log_share.delete", "log_share.redaction_reprocess",
+		"reference.unresolved.read",
+		"server.create", "server.create.no-review", "server.review",
+		"project.create", "project.edit", "project.review",
+		"report.review", "report.snapshot.view", "report.evidence.view", "report.action.delete", "report.action.ban", "report.action.reopen", "report.action.takeover",
+		"ban.create", "ban.revoke", "ban.view_internal", "site_affairs.about.manage", "site_affairs.changelog.manage",
+		"seed_crawler.view", "seed_crawler.configure", "seed_crawler.run",
+		"project.auto_update.view", "project.auto_update.configure", "project.auto_update.run", "project.auto_update.view_logs", "project.auto_update.redistribution_override", "project.external_source.bind",
 	},
 }
 
-func SeedRBAC(ctx context.Context, db *pgxpool.Pool) error {
+var autobotSeed = seedUser{
+	Username: systemactor.AutobotUsername,
+	Email:    systemactor.AutobotEmail,
+	Status:   systemactor.AutobotStatus,
+	Permissions: []string{
+		"project.create", "project.create.plugin", "project.create.map", "project.create.resource_pack",
+		"project.create.shader_pack", "project.create.datapack", "project.create.addon",
+		"project.edit", "project.no-review", "content.no-review",
+		"security.anti-abuse.rate_multiplier.1000",
+		"security.anti-abuse.rate_multiplier.review_submit.1000",
+	},
+}
+
+// seedNewDatabase runs inside Initialize's schema transaction. A later boot
+// never re-applies account, role, permission or policy defaults.
+func seedNewDatabase(ctx context.Context, tx pgx.Tx) error {
 	for _, permission := range seedPermissions {
-		_, err := db.Exec(
-			ctx,
-			`insert into permissions (code, module, name, description, access_type)
-			 values ($1, $2, $3, $4, $5)
-			 on conflict (code) do update
-			 set module = excluded.module, name = excluded.name, description = excluded.description, access_type=excluded.access_type`,
-			permission.Code,
-			permission.Module,
-			permission.Name,
-			permission.Description,
-			seedPermissionAccessType(permission),
-		)
-		if err != nil {
+		if _, err := tx.Exec(ctx, `insert into permissions(code,module,name,description,access_type) values($1,$2,$3,$4,$5)`,
+			permission.Code, permission.Module, permission.Name, permission.Description, seedPermissionAccessType(permission)); err != nil {
 			return err
 		}
 	}
-	if err := seedDefaultRoles(ctx, db); err != nil {
-		return err
-	}
-	// Default users must decide whether this is a pristine installation before
-	// the current process creates the legacy permission-defaults evidence.
-	if err := seedDefaultUsers(ctx, db); err != nil {
-		return err
-	}
-	if err := seedPermissionDefaults(ctx, db); err != nil {
-		return err
-	}
-	if err := seedGovernanceAutomationDefaults(ctx, db); err != nil {
-		return err
-	}
-	return migrateLegacyAutobotToSystemSubject(ctx, db)
-}
-
-func seedDefaultRoles(ctx context.Context, db *pgxpool.Pool) error {
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(context.Background())
-
 	for _, role := range seedRoles {
 		var roleID int64
-		created, err := tx.Exec(ctx, `insert into roles(code,name,description,weight,status,updated_at)
-			values($1,$2,$3,$4,'active',now())
-			on conflict(code) do nothing`, role.Code, role.Name, role.Description, role.Weight)
-		if err != nil {
+		if err := tx.QueryRow(ctx, `insert into roles(code,name,description,weight,status) values($1,$2,$3,$4,'active') returning id`,
+			role.Code, role.Name, role.Description, role.Weight).Scan(&roleID); err != nil {
 			return err
 		}
-		// Existing role definitions are operator-managed. Re-adding a removed
-		// grant on startup would undo an explicit permission revocation.
-		// Built-in denial rules remain fail-closed on every startup.
-		if created.RowsAffected() == 0 && len(role.Denials) == 0 {
-			continue
-		}
-		if err := tx.QueryRow(ctx, `select id from roles where code=$1`, role.Code).Scan(&roleID); err != nil {
-			return err
-		}
-		if created.RowsAffected() != 0 {
-			for _, permission := range role.Permissions {
-				if _, err := tx.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow,updated_at)
-					select $1,id,true,now() from permissions where code=$2
-					on conflict(role_id,permission_id) do nothing`, roleID, permission); err != nil {
-					return err
-				}
+		for _, permission := range role.Permissions {
+			if _, err := tx.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow) values($1,(select id from permissions where code=$2),true)`, roleID, permission); err != nil {
+				return err
 			}
 		}
 		for _, permission := range role.Denials {
-			if _, err := tx.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow,updated_at)
-				select $1,id,false,now() from permissions where code=$2
-				on conflict(role_id,permission_id) do update set allow=false,updated_at=now()`, roleID, permission); err != nil {
+			if _, err := tx.Exec(ctx, `insert into role_permissions(role_id,permission_id,allow) values($1,(select id from permissions where code=$2),false)`, roleID, permission); err != nil {
 				return err
 			}
 		}
 	}
-	return tx.Commit(ctx)
+	if _, err := tx.Exec(ctx, `insert into system_settings(key,value,updated_at)
+		values($1,'{"registeredRole":"registered"}'::jsonb,now())`, defaultRolesSettingKey); err != nil {
+		return err
+	}
+	if err := seedGovernanceAutomationDefaults(ctx, tx); err != nil {
+		return err
+	}
+	return insertSeedUser(ctx, tx, autobotSeed, "password-login-disabled", false)
 }
 
-func seedPermissionDefaults(ctx context.Context, db *pgxpool.Pool) error {
-	value, err := json.Marshal(map[string]string{
-		"registeredRole": "registered",
-	})
+func seedBootstrapAdmin(ctx context.Context, tx pgx.Tx) error {
+	password := os.Getenv("SEED_ADMIN_PASSWORD")
+	if !security.ValidPasswordLength(password) {
+		return errors.New("SEED_ADMIN_PASSWORD must contain 8 to 1024 bytes")
+	}
+	admin := administratorSeed
+	admin.Email = strings.ToLower(strings.TrimSpace(os.Getenv("SEED_ADMIN_EMAIL")))
+	emailVerified := admin.Email != ""
+	if emailVerified {
+		address, err := mail.ParseAddress(admin.Email)
+		if err != nil || address.Address != admin.Email || len(admin.Email) > 320 {
+			return errors.New("SEED_ADMIN_EMAIL must contain one email address")
+		}
+	} else {
+		admin.Email = "admin@mcmods.invalid"
+	}
+	hash, err := security.HashPassword(password)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(ctx, `insert into system_settings(key,value,updated_at)
-		values($1,$2::jsonb,now()) on conflict(key) do nothing`, defaultRolesSettingKey, string(value))
-	return err
+	return insertSeedUser(ctx, tx, admin, hash, emailVerified)
 }
 
-func seedDefaultUsers(ctx context.Context, db *pgxpool.Pool) error {
-	tx, err := db.Begin(ctx)
-	if err != nil {
+func insertSeedUser(ctx context.Context, tx pgx.Tx, user seedUser, passwordHash string, emailVerified bool) error {
+	var userID int64
+	if err := tx.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified,status)
+		values($1,$2,$3,$4,$5) returning id`, user.Username, user.Email, passwordHash, emailVerified, user.Status).Scan(&userID); err != nil {
 		return err
 	}
-	defer tx.Rollback(context.Background())
-
-	// The lock makes the empty-database decision atomic across concurrent
-	// application instances and blocks registrations until bootstrap commits.
-	if _, err = tx.Exec(ctx, `lock table users in share row exclusive mode`); err != nil {
-		return err
-	}
-	var usersExist bool
-	if err = tx.QueryRow(ctx, `select exists(select 1 from users)`).Scan(&usersExist); err != nil {
-		return err
-	}
-	var bootstrapRecorded, legacyBootstrapEvidence bool
-	if err = tx.QueryRow(ctx, `select
-		exists(select 1 from system_settings where key=$1),
-		exists(select 1 from system_settings where key=$2)`,
-		defaultUsersBootstrapMarkerKey, defaultRolesSettingKey).Scan(&bootstrapRecorded, &legacyBootstrapEvidence); err != nil {
-		return err
-	}
-	if usersExist || bootstrapRecorded || legacyBootstrapEvidence {
-		if _, err = tx.Exec(ctx, `insert into system_settings(key,value,updated_at)
-			values($1,'{"version":1}'::jsonb,now()) on conflict(key) do nothing`, defaultUsersBootstrapMarkerKey); err != nil {
+	for _, permission := range user.Permissions {
+		if _, err := tx.Exec(ctx, `insert into user_permissions(user_id,permission_id,allow,source,source_key,updated_at)
+		 values($1,(select id from permissions where code=$2),true,'system_seed','default_users',now())`, userID, permission); err != nil {
 			return err
 		}
-		return tx.Commit(ctx)
 	}
-
-	for _, user := range seedUsers {
-		passwordHash, err := seedPasswordHash(user.Username)
-		if err != nil {
-			return err
-		}
-
-		var userID int64
-		err = tx.QueryRow(
-			ctx,
-			`insert into users (username, email, password_hash, email_verified, status)
-			 values ($1, $2, $3, true, $4)
-			 returning id`,
-			user.Username,
-			user.Email,
-			passwordHash,
-			user.Status,
-		).Scan(&userID)
-		if err != nil {
-			return err
-		}
-
-		for _, permission := range user.Permissions {
-			_, err = tx.Exec(
-				ctx,
-				`insert into user_permissions (user_id, permission_id, allow, source, source_key, updated_at)
-				 select $1,id,true,'system_seed','default_users',now() from permissions where code=$2
-				 on conflict (user_id,permission_id,source,source_key) do nothing`,
-				userID,
-				permission,
-			)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	if _, err = tx.Exec(ctx, `insert into system_settings(key,value,updated_at)
-		values($1,'{"version":1}'::jsonb,now())`, defaultUsersBootstrapMarkerKey); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-// migrateLegacyAutobotToSystemSubject is a one-time compatibility transition
-// for databases created before the service identity had a dedicated status.
-// The durable marker ensures later operator-managed state is never rewritten.
-func migrateLegacyAutobotToSystemSubject(ctx context.Context, db *pgxpool.Pool) error {
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(context.Background())
-
-	var ownsMigration bool
-	if err = tx.QueryRow(ctx, `with marker as (
-		insert into system_settings(key,value,updated_at)
-		values('security.autobot_system_subject_migration.v1','{"version":1}'::jsonb,now())
-		on conflict(key) do nothing
-		returning 1
-	) select exists(select 1 from marker)`).Scan(&ownsMigration); err != nil {
-		return err
-	}
-	if !ownsMigration {
-		return tx.Commit(ctx)
-	}
-	if _, err = tx.Exec(ctx, `with transitioned as (
-		update users
-		set status=$3,auth_version=auth_version+1,updated_at=now()
-		where username=$1 and lower(email)=lower($2)
-			and status='active' and password_hash='password-login-disabled'
-		returning id
-	)
-	update auth_sessions set revoked_at=coalesce(revoked_at,now())
-	where user_id in (select id from transitioned)`,
-		systemactor.AutobotUsername, systemactor.AutobotEmail, systemactor.AutobotStatus); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-func seedPasswordHash(username string) (string, error) {
-	if username == systemactor.AutobotUsername {
-		return "password-login-disabled", nil
-	}
-	if username == "admin" {
-		if password := strings.TrimSpace(os.Getenv("SEED_ADMIN_PASSWORD")); password != "" {
-			hash, err := security.HashPassword(password)
-			return hash, err
-		}
-	}
-	return "password-login-disabled", nil
+	return nil
 }

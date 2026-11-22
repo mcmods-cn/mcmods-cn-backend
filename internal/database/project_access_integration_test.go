@@ -25,7 +25,7 @@ func TestDerivedProjectAccessIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err = Migrate(ctx, pool); err != nil {
+	if err = Initialize(ctx, pool); err != nil {
 		t.Fatalf("migrate current schema: %v", err)
 	}
 	tx, err := pool.Begin(ctx)
@@ -228,7 +228,7 @@ func TestConcurrentAuthorClaimApprovalIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err = Migrate(ctx, pool); err != nil {
+	if err = Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	var nonce string

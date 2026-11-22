@@ -83,7 +83,7 @@ func TestOCT02LogRedactionForwardUpgradeIntegration(t *testing.T) {
 		t.Fatalf("legacy schema was not reproduced: %v", err)
 	}
 	t.Run("old generation startup fails with explicit upgrade instruction", func(t *testing.T) {
-		if err := Migrate(ctx, pool); err == nil || !strings.Contains(err.Error(), "cmd/db-log-redaction-upgrade") {
+		if err := Initialize(ctx, pool); err == nil || !strings.Contains(err.Error(), "cmd/db-log-redaction-upgrade") {
 			t.Fatalf("missing schema did not produce an actionable upgrade instruction: %v", err)
 		}
 	})
@@ -164,7 +164,7 @@ func TestOCT02LogRedactionForwardUpgradeIntegration(t *testing.T) {
 		if err != nil || !current.Present || current.Validated {
 			t.Fatalf("interrupted validation did not leave resumable schema: %v", err)
 		}
-		if err := Migrate(ctx, pool); err == nil {
+		if err := Initialize(ctx, pool); err == nil {
 			t.Fatal("backend accepted an unvalidated schema extension")
 		}
 		remove()
@@ -195,7 +195,7 @@ func TestOCT02LogRedactionForwardUpgradeIntegration(t *testing.T) {
 		if err := ApplyLogRedactionSchemaUpgrade(ctx, pool, target, func(LogRedactionSchemaState) error { return nil }); err != nil {
 			t.Fatal(err)
 		}
-		if err := Migrate(ctx, pool); err != nil {
+		if err := Initialize(ctx, pool); err != nil {
 			t.Fatal(err)
 		}
 	})

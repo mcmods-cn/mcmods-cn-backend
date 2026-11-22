@@ -21,7 +21,7 @@ func TestCompatibleBuiltinModContentTemplatesIntegration(t *testing.T) {
 	}
 	defer pool.Close()
 
-	if err = Migrate(ctx, pool); err != nil {
+	if err = Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	var count int

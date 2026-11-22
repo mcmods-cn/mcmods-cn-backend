@@ -51,7 +51,7 @@ func TestAuditIdentityOSSFreshAndExistingUpgradeIntegration(t *testing.T) {
 			}
 		}
 	}()
-	if err = Migrate(ctx, pool); err != nil {
+	if err = Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	fresh, err := InspectAuditIdentityOSS(ctx, pool)
@@ -118,7 +118,7 @@ func TestAuditIdentityOSSFreshAndExistingUpgradeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err = Migrate(ctx, pool); err != nil {
+	if err = Initialize(ctx, pool); err != nil {
 		t.Fatalf("expanded old-generation startup: %v", err)
 	}
 }

@@ -23,6 +23,11 @@ const (
 	maxArgon2Parallelism = uint8(16)
 )
 
+// ValidPasswordLength is the byte-length policy for newly chosen passwords.
+func ValidPasswordLength(password string) bool {
+	return len(password) >= 8 && len(password) <= 1024
+}
+
 func HashPassword(password string) (string, error) {
 	salt := make([]byte, passwordSaltBytes)
 	if _, err := rand.Read(salt); err != nil {

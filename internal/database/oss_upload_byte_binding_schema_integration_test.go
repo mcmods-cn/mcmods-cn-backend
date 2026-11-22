@@ -67,7 +67,7 @@ func newOSSByteBindingSchemaTestDatabase(t *testing.T, ctx context.Context) *pgx
 			t.Error(err)
 		}
 	})
-	if err = Migrate(ctx, pool); err != nil {
+	if err = Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	return pool

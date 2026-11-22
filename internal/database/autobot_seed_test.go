@@ -7,18 +7,9 @@ import (
 )
 
 func TestAutobotSeedUsesNonLoginServiceIdentityAndTrustedAutomationPermissions(t *testing.T) {
-	var autobot *seedUser
-	for index := range seedUsers {
-		if seedUsers[index].Username == systemactor.AutobotUsername {
-			autobot = &seedUsers[index]
-			break
-		}
-	}
-	if autobot == nil {
-		t.Fatal("autobot seed user is missing")
-	}
+	autobot := autobotSeed
 	if autobot.Email != systemactor.AutobotEmail || autobot.Status != systemactor.AutobotStatus {
-		t.Fatalf("unexpected autobot identity: %+v", *autobot)
+		t.Fatalf("unexpected autobot identity: %+v", autobot)
 	}
 	permissions := make(map[string]bool, len(autobot.Permissions))
 	for _, permission := range autobot.Permissions {
@@ -33,10 +24,7 @@ func TestAutobotSeedUsesNonLoginServiceIdentityAndTrustedAutomationPermissions(t
 			t.Fatalf("autobot is missing permission %q", required)
 		}
 	}
-	hash, err := seedPasswordHash(autobot.Username)
-	if err != nil || hash != "password-login-disabled" {
-		t.Fatalf("autobot must not receive an interactive password: hash=%q err=%v", hash, err)
-	}
+
 }
 
 func TestAutobotNumericPermissionsHaveConcreteDefinitions(t *testing.T) {
