@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/queue"
@@ -19,6 +20,12 @@ const (
 	commentLogAttachmentRecoveryInterval = 30 * time.Second
 	commentLogAttachmentRecoveryBatch    = 100
 )
+
+// The last write of an attempt runs with the job row already locked. Each
+// transition checks the database wall clock after any publication/binding waits.
+const liveCommentLogAttachmentLeaseSQL = `id=$1 and status='processing' and locked_by=$2 and lease_expires_at>clock_timestamp()`
+
+var errCommentLogAttachmentLeaseLost = errors.New("comment log attachment job lease is no longer current")
 
 type CommentLogAttachmentWorker struct {
 	db         *pgxpool.Pool
@@ -134,14 +141,16 @@ func (worker *CommentLogAttachmentWorker) completeJob(ctx context.Context, job c
 	// Serialize against deletion of the parent and attachment before creating
 	// a share. The row locks also prevent a new lease winning during commit.
 	var jobID int64
-	err = tx.QueryRow(ctx, `select job.id from comments parent
+	err = tx.QueryRow(ctx, `with owned as materialized (
+		select job.id,job.lease_expires_at from comments parent
 		join comment_attachments attachment on attachment.comment_id=parent.id
 		join comment_log_attachment_jobs job on job.comment_id=attachment.comment_id and job.attachment_file_id=attachment.attachment_file_id
 		where parent.id=$1 and attachment.attachment_file_id=$2 and job.id=$3 and job.requested_by=$4
-		and job.status='processing' and job.locked_by=$5 and job.lease_expires_at>now()
-		for share of parent,attachment for update of job`, job.commentID, prepared.FileID, job.id, job.requestedBy, job.lockToken).Scan(&jobID)
+		and job.status='processing' and job.locked_by=$5
+		for share of parent,attachment for update of job
+	) select id from owned where lease_expires_at>clock_timestamp()`, job.commentID, prepared.FileID, job.id, job.requestedBy, job.lockToken).Scan(&jobID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return errors.New("comment log attachment job lease or attachment no longer exists")
+		return errCommentLogAttachmentLeaseLost
 	}
 	if err != nil {
 		return err
@@ -163,12 +172,9 @@ func (worker *CommentLogAttachmentWorker) completeJob(ctx context.Context, job c
 		return errors.Join(err, errors.New("comment log attachment was not finalized"))
 	}
 	tag, err = tx.Exec(ctx, `update comment_log_attachment_jobs set
-		status='completed',next_attempt_at=now(),lease_expires_at=null,locked_by='',last_error='',finished_at=now(),updated_at=now()
-		where id=$1 and status='processing' and locked_by=$2`, job.id, job.lockToken)
-	if err != nil || tag.RowsAffected() != 1 {
-		return errors.Join(err, errors.New("comment log attachment job lease was lost during completion"))
-	}
-	return tx.Commit(ctx)
+		status='completed',next_attempt_at=clock_timestamp(),lease_expires_at=null,locked_by='',last_error='',finished_at=clock_timestamp(),updated_at=clock_timestamp()
+		where `+liveCommentLogAttachmentLeaseSQL, job.id, job.lockToken)
+	return commitCommentLogAttachmentAttempt(ctx, tx, tag, err)
 }
 
 func (worker *CommentLogAttachmentWorker) failJob(ctx context.Context, job claimedCommentLogAttachmentJob, cause error) error {
@@ -178,32 +184,41 @@ func (worker *CommentLogAttachmentWorker) failJob(ctx context.Context, job claim
 	}
 	defer tx.Rollback(ctx)
 	var attempts, maxAttempts int
-	err = tx.QueryRow(ctx, `select attempts,max_attempts from comment_log_attachment_jobs
-		where id=$1 and status='processing' and locked_by=$2 for update`, job.id, job.lockToken).Scan(&attempts, &maxAttempts)
+	err = tx.QueryRow(ctx, `with owned as materialized (
+		select attempts,max_attempts,lease_expires_at from comment_log_attachment_jobs
+		where id=$1 and status='processing' and locked_by=$2 for update
+	) select attempts,max_attempts from owned where lease_expires_at>clock_timestamp()`, job.id, job.lockToken).Scan(&attempts, &maxAttempts)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
+		return errCommentLogAttachmentLeaseLost
 	}
 	if err != nil {
 		return err
 	}
 	lastError := truncateRunes(cause.Error(), 1000)
+	var tag pgconn.CommandTag
 	if attempts >= maxAttempts {
-		if _, err = tx.Exec(ctx, `update comment_log_attachment_jobs set
-			status='failed',lease_expires_at=null,locked_by='',last_error=$3,finished_at=now(),updated_at=now()
-			where id=$1 and status='processing' and locked_by=$2`, job.id, job.lockToken, lastError); err != nil {
-			return err
-		}
 		if _, err = tx.Exec(ctx, `update comment_attachments set kind='log',processing_status='failed'
 			where comment_id=$1 and attachment_file_id=$2`, job.commentID, job.fileID); err != nil {
 			return err
 		}
+		tag, err = tx.Exec(ctx, `update comment_log_attachment_jobs set
+			status='failed',lease_expires_at=null,locked_by='',last_error=$3,finished_at=clock_timestamp(),updated_at=clock_timestamp()
+			where `+liveCommentLogAttachmentLeaseSQL, job.id, job.lockToken, lastError)
 	} else {
 		delay := commentLogAttachmentRetryDelay(attempts)
-		if _, err = tx.Exec(ctx, `update comment_log_attachment_jobs set
-			status='queued',next_attempt_at=now()+$3::interval,lease_expires_at=null,locked_by='',last_error=$4,updated_at=now()
-			where id=$1 and status='processing' and locked_by=$2`, job.id, job.lockToken, pgInterval(delay), lastError); err != nil {
-			return err
-		}
+		tag, err = tx.Exec(ctx, `update comment_log_attachment_jobs set
+			status='queued',next_attempt_at=clock_timestamp()+$3::interval,lease_expires_at=null,locked_by='',last_error=$4,updated_at=clock_timestamp()
+			where `+liveCommentLogAttachmentLeaseSQL, job.id, job.lockToken, pgInterval(delay), lastError)
+	}
+	return commitCommentLogAttachmentAttempt(ctx, tx, tag, err)
+}
+
+func commitCommentLogAttachmentAttempt(ctx context.Context, tx pgx.Tx, tag pgconn.CommandTag, err error) error {
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errCommentLogAttachmentLeaseLost
 	}
 	return tx.Commit(ctx)
 }
