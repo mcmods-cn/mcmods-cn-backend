@@ -1,5 +1,7 @@
 # generation 168 日志脱敏版本扩展
 
+> 本文的一次性幂等升级适用于 generation 168，命令源码见 `d14e10b4`。当前安装与读取使用[日志安全规则](../LOG_SHARE_SECURITY.md)中的脱敏与父评论范围约定。
+
 `cmd/db-log-redaction-upgrade` 为已存在的 generation 168 库显式增加
 `log_shares.redaction_applied_version integer NOT NULL DEFAULT 1`，并验证值至少为 1
 的约束。新空库直接安装该列，不需要再执行工具；已有同代库不会在启动时自动 ALTER。

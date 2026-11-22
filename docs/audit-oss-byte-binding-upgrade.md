@@ -1,5 +1,7 @@
 # OSS upload byte binding and schema expansion (CMP-005)
 
+> 本文的升级步骤适用于 generation 168，命令源码见 `d14e10b4`。新库使用[当前安装入口](../README.md#数据库安装发布和恢复)及[对象生命周期说明](oss-object-layout.md)。
+
 New completions preserve the original incoming upload key as a stable alias and
 adopt a separate key under the reserved `_mcmods_sealed_v1/<attempt UUID>/`
 component. Client PUT and UploadPart signing refuse that component. A server

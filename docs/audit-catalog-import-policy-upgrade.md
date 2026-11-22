@@ -1,5 +1,7 @@
 # GR-Q03 / GR-Q04: queued import execution policy
 
+> 本文的升级步骤适用于 generation 168，命令源码见 `d14e10b4`。新库使用[当前安装入口](../README.md#数据库安装发布和恢复)，目前只接受审核或明确授权的自动发布模式。
+
 The current task's explicit product decisions are: cancel when the queued creator's current account or project edit authority is invalid; also cancel an originally automatic job that loses its exemption from review. An originally review-required job needs current edit authority and may finish awaiting an independent review. An archived target cancels the attempt and requires a new upload. Cancellation preserves the job, reason and audit; it compensates only this attempt's staged revisions/assets. It does not roll back a previously approved import or rewrite audit history.
 
 The same archive rule applies if the Worker finished and the target was then archived before independent review. A review request takes the common advisory lock before the target row, cancels the ready job's unpublished remainder and records one `execution_cancelled` policy audit, then returns 409. Unpublished revision rows become `rejected` so they cannot remain actionable in the review queue; this is explicitly a policy cancellation, not a fabricated human `review_rejected` decision. Already active revisions remain unchanged. Finalized source/asset evidence remains private under existing retention and access rules. Restoring the target cannot revive or retry this cancelled attempt. Reviewers and actual Workers use the same advisory → target row → revision ordering to avoid deadlocks.

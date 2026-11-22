@@ -1,5 +1,7 @@
 # MSG-001 / MSG-002 / MSG-003 / NEXT-001
 
+> 本文的升级步骤适用于 generation 168，命令源码见 `d14e10b4`。新库的通知约束随[当前基线](../README.md#数据库安装发布和恢复)安装。
+
 Notification read-all now captures a PostgreSQL `pg_snapshot`. Each notification
 revision records its top-level transaction as `xid8`; a single-item receipt
 records the exact observed revision. Sequence allocation and an update's wall

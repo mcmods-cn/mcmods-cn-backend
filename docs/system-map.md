@@ -26,6 +26,29 @@
 
 ## 数据标识、事务与缓存
 
+当前 schema 的安装顺序在 `internal/database/schema.go`，版本、定义和实库结构由 `initialize.go` 核对。资料、审核、日志短链和队列的关键持久关系如下。
+
+```mermaid
+flowchart LR
+  P[mods] --> V[mod_content_versions]
+  U[users] --> O[oss_files]
+  O --> X[catalog_import_packages]
+  X --> J[catalog_import_jobs]
+  V --> J
+  J --> R[catalog_import_revisions]
+  J --> Q[nats_outbox]
+  R --> E[catalog 实体与版本投影]
+  U --> C[comments]
+  C --> A[comment_attachments]
+  A --> O
+  A --> B[comment_log_bindings]
+  B --> L[log_shares]
+  C -->|父评论可见范围| L
+```
+
+- 普通项目修订共用 `createContentRevisionTx`。同一项目行锁确认类型、公开 ID 和基线，审核使用 `resolveCurrentReviewActorTx` 重新解析实际会话和审核权限。治理隐藏由 `checkProjectRevisionModerationTx` 约束普通批准、驳回及自动发布。资料目录继续由 `publishCatalogRevisionsTx` 统一应用审核和投影。
+- 评论衍生日志以 `comment_scope_id` 绑定父评论，准备工作在租约内读取自有文件。发布、绑定、附件就绪与租约终态在同一事务中完成。metadata、chunk、下载都检查当前父评论和目标范围。
+
 - 多数站内对象用 bigint 关联，用全局注册的随机 `public_id` 对外访问。项目路由可有 slug，技术字段另有 Minecraft 的 `namespace:path`、供应商 ID、包哈希、导入 UUID 和事件 ID。前端不得用导入源 ID 推导站内身份。[双 ID 架构](dual-id-architecture.md)
 - 导入修订唯一键含项目、目标版本、来源类型、命名空间和修订号，部分唯一索引约束同一范围的活动修订。批准前取版本 advisory lock，再锁版本行和修订；归档检查与审核事实共同提交。人工和导入内容在同一资料版本中按 provenance 决定覆盖范围。[执行策略](../internal/httpapi/catalog_import_execution_policy.go) · [投影规则](../internal/httpapi/mod_export_content_sync.go)
 - `queue.EnqueueTx` 与业务事实同事务，`nats_outbox` 保留分发意图。PubAck 与数据库标记之间可能重投。通知、消费去重、任务领取、外部交付分别依自己的持久状态；单一 broker ACK 无法证明供应商扣费结果。[任务恢复](queue-recovery.md) · [翻译预算与恢复](ai-translation-reliability.md)

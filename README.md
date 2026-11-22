@@ -27,12 +27,12 @@ APP_ADDR=127.0.0.1:8081 FRONTEND_ORIGIN=http://127.0.0.1:3001 go run .
 | 增加一种目录资料或导入数据 | 对照 exporter 的 schema、真实包与 `catalog_import_*` 领域。将源观察与可编辑的站内定义分开，在相应业务层处理来源、版本、审核和派生呈现。[资料链与权限地图](docs/system-map.md) |
 | 增加后台任务 | 查 `internal/queue/events.go`、`internal/queue/nats.go`、`internal/config` 与 `internal/app/runtime.go`，随业务事务写入 `queue.EnqueueTx`，在消费端校验当前权限、状态和幂等键。先复用已有任务、恢复入口和指标。[事件与发件箱](OUTBOX_JETSTREAM_DESIGN.md) · [恢复](docs/queue-recovery.md) |
 | 修改公开目录或缓存 | 在发布事务中更新 `catalog_dataset_state`，读取使用 `internal/catalogvisibility` 及 `writeCachedCatalog`。认证和用户私有数据走独立路径。[公开目录](docs/public-catalog-source-policy.md) · [缓存键](CACHE_KEYS_AND_INVALIDATION.md) |
-| 修改文件处理 | `internal/httpapi/oss_upload_byte_binding*.go` 处理拥有者、真实字节与完成语义。`oss_deletion_outbox.go` 负责登记删除和重试。导入原件、站内衍生媒体与公开文件有各自的读取条件。[字节绑定](docs/audit-oss-byte-binding-upgrade.md) · [存储布局](docs/oss-object-layout.md) |
+| 修改文件处理 | `internal/httpapi/oss_upload_byte_binding*.go` 处理拥有者、真实字节与完成语义。`oss_deletion_outbox.go` 负责登记删除和重试。导入原件、站内衍生媒体与公开文件有各自的读取条件。[存储布局与字节绑定](docs/oss-object-layout.md) |
 | 增加数据库实体 | 在 `internal/database/schema.go` 登记领域定义。测试用同一个 `database.Initialize` 安装空库，涉及约束和事务的行为在真实 PostgreSQL 验证。 |
 
 ## 验证
 
-从已经激活的专用测试环境分别运行基础门和数据库门。每个 opt-in 测试的 SKIP 含义见隔离环境说明。
+从已经激活的专用测试环境分别运行基础门和数据库门。基础门也使用该环境的 PostgreSQL，部分 HTTP 测试会创建独立子库。每个 opt-in 测试的 SKIP 含义见隔离环境说明。
 
 ```sh
 env -u MCMODS_TEST_DATABASE_URL MCMODS_RUN_DB_INTEGRATION=0 MCMODS_RUN_ACTIVITY_LOAD=0 go test -mod=readonly ./... -count=1
