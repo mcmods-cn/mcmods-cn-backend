@@ -126,8 +126,28 @@ func TestInitializeConcurrentAndRepeatableIntegration(t *testing.T) {
 		where r.code='banned' and p.code='*' and not b.allow) from schema_metadata where singleton`).Scan(&accounts, &roles, &version, &adminCreated, &bannedDeny); err != nil {
 		t.Fatal(err)
 	}
-	if accounts != 2 || roles != len(seedRoles) || version != schemaGeneration || !adminCreated || !bannedDeny {
+	if accounts != 1 || roles != len(seedRoles) || version != schemaGeneration || adminCreated || !bannedDeny {
 		t.Fatalf("initial identities or policy did not install once: accounts=%d roles=%d generation=%d admin=%v denial=%v", accounts, roles, version, adminCreated, bannedDeny)
+	}
+	start = make(chan struct{})
+	for _, installer := range []*pgxpool.Pool{pool, replica} {
+		go func() {
+			<-start
+			results <- BootstrapAdmin(ctx, installer)
+		}()
+	}
+	close(start)
+	var adminSuccesses int
+	for range 2 {
+		err := <-results
+		if err == nil {
+			adminSuccesses++
+		} else if !strings.Contains(err.Error(), "already been bootstrapped") {
+			t.Fatal(err)
+		}
+	}
+	if adminSuccesses != 1 {
+		t.Fatalf("%d simultaneous administrator requests succeeded; want exactly one", adminSuccesses)
 	}
 	var status, hash string
 	if err := pool.QueryRow(ctx, `select status,password_hash from users where username=$1 and email=$2`, systemactor.AutobotUsername, systemactor.AutobotEmail).Scan(&status, &hash); err != nil ||
@@ -183,7 +203,7 @@ func TestInitializeRollsBackAndSupportsExplicitAdminIntegration(t *testing.T) {
 	defer cancel()
 	pool := newBaselineTestDatabase(t, ctx)
 	t.Setenv("SEED_ADMIN_PASSWORD", "short")
-	if err := Initialize(ctx, pool); err == nil || !strings.Contains(err.Error(), "SEED_ADMIN_PASSWORD") {
+	if err := BootstrapAdmin(ctx, pool); err == nil || !strings.Contains(err.Error(), "SEED_ADMIN_PASSWORD") {
 		t.Fatal("invalid setup password did not fail installation")
 	}
 	var relations int

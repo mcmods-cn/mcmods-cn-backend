@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -63,7 +62,7 @@ func initialize(ctx context.Context, db *pgxpool.Pool, bootstrapAdmin bool) erro
 				return err
 			}
 		}
-	} else if err = installEmptySchema(ctx, tx, bootstrapAdmin || os.Getenv("SEED_ADMIN_PASSWORD") != ""); err != nil {
+	} else if err = installEmptySchema(ctx, tx, bootstrapAdmin); err != nil {
 		return err
 	}
 	if err = tx.Commit(ctx); err != nil {
