@@ -409,21 +409,23 @@ func (s *Server) modContentResource(w http.ResponseWriter, r *http.Request) {
 			order by localization.locale) from mod_resource_version_detail_localizations localization
 			where localization.resource_id=resource.entity_id and localization.version_id=version.id),'[]'::jsonb)) order by version.updated_at desc)
 			from mod_resource_version_details detail join mod_content_versions version on version.id=detail.version_id
+			join mods source_mod on source_mod.id=version.mod_id
 			where detail.resource_id=resource.entity_id
-			  and (detail.status='active' or ($3 and detail.status='pending'))
-			  and (version.status='active' or $3)),'[]'::jsonb)
+			  and ((detail.status='active' and version.status='active' and source_mod.review_status='approved')
+			    or ($3 and version.mod_id=$2 and detail.status in ('active','pending')))),'[]'::jsonb)
 			from mod_resource_bindings binding join game_resources resource on resource.entity_id=binding.resource_id
 			join catalog_entities entity on entity.id=resource.entity_id where entity.public_id=$1 and binding.mod_id=$2
 			  and ((entity.status='active' and entity.archived_at is null and exists(
 			    select 1 from mod_resource_version_details published_detail
 			    join mod_content_versions published_version on published_version.id=published_detail.version_id and published_version.status='active'
+			    join mods published_mod on published_mod.id=published_version.mod_id and published_mod.review_status='approved'
 			    where published_detail.resource_id=resource.entity_id and published_detail.status='active'
 			  )) or (entity.status='active' and entity.archived_at is null and exists(
 			    select 1 from resource_import_snapshots imported
 			    join catalog_import_revisions import_revision on import_revision.id=imported.revision_id and import_revision.is_active
 			    join mod_content_versions import_version on import_version.id=import_revision.target_version_id
 			      and import_version.status='active' and import_version.mod_id=binding.mod_id
-			    where imported.resource_id=resource.entity_id
+			    where imported.resource_id=resource.entity_id and import_revision.status in ('ready','partial')
 			  )) or $3)`, publicID, identity.ID, canPreviewInactive).
 			Scan(&entityID, &kindCode, &canonicalID, &details); err != nil {
 			writeError(w, http.StatusNotFound, "mod resource detail not found")

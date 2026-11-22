@@ -95,6 +95,65 @@ func TestOCT02CModContentReadsHonorProjectPublicationIntegration(t *testing.T) {
 	}
 }
 
+func TestResourceDetailsPreviewIsLimitedToTheRouteProjectIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	version := f.version(t, f.editor, "test013-mod", "Primary version")
+	section := f.section(t, version.PublicID, f.builtin(t, "advancement"))
+	resource := f.resource(t, version.PublicID, section.PublicID, "test013:shared_advancement", "minecraft.advancement", "advancement", map[string]any{})
+	f.review(t, resource, f.editor, "approved")
+	otherVersion := f.version(t, f.otherEditor, "test013-other", "Other version")
+	otherFixture := f
+	otherFixture.modID = f.otherModID
+	otherImport := oct02CInsertPublishedExportRevision(t, otherFixture, otherVersion.PublicID)
+	// Imports can project the shared identity into a version of another project.
+	inserted, err := f.db.Exec(f.ctx, `insert into mod_resource_version_details
+		(resource_id,version_id,projection_source,import_source_namespace,import_source_kind,import_revision_id)
+		select entity.id,version.id,'import','test013','game_export',$3 from catalog_entities entity
+		cross join mod_content_versions version where entity.public_id=$1 and version.public_id=$2`, resource.PublicID, otherVersion.PublicID, otherImport)
+	if err != nil || inserted.RowsAffected() != 1 {
+		t.Fatalf("fixture must contain another version's import projection: %v", err)
+	}
+	path := "/api/v1/mods/test013-mod/content-resources/" + resource.PublicID
+	check := func(token string, want ...string) {
+		t.Helper()
+		raw := f.require(t, token, http.MethodGet, path, nil, http.StatusOK)
+		var response struct {
+			Data struct {
+				Details []struct {
+					Version string `json:"versionPublicId"`
+				} `json:"details"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil {
+			t.Fatal(err)
+		}
+		included := make(map[string]bool)
+		for _, detail := range response.Data.Details {
+			included[detail.Version] = true
+		}
+		if len(included) != len(want) {
+			t.Fatalf("returned version details %v, wanted %v", included, want)
+		}
+		for _, id := range want {
+			if !included[id] {
+				t.Fatalf("missing authorized version %s", id)
+			}
+		}
+	}
+	check("", version.PublicID, otherVersion.PublicID)
+	if _, err := f.db.Exec(f.ctx, `update mods set review_status='pending' where id=$1`, f.otherModID); err != nil {
+		t.Fatal(err)
+	}
+	check("", version.PublicID)
+	check(f.editor, version.PublicID)
+	if _, err := f.db.Exec(f.ctx, `update mod_resource_version_details set status='pending'
+		where version_id=(select id from mod_content_versions where public_id=$1)`, version.PublicID); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, "", http.MethodGet, path, nil, http.StatusNotFound)
+	check(f.editor, version.PublicID)
+}
+
 func oct02CInsertPublishedExportRevision(t *testing.T, f test013Fixture, versionPublicID string) string {
 	t.Helper()
 	packageID, jobID, revisionID := newExportID(), newExportID(), newExportID()
