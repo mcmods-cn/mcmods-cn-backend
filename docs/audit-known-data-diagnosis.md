@@ -20,8 +20,7 @@ foreign-key references in the current schema. These are unknown hashes, not prov
 bad files. Do not delete or rewrite shared references. For immutable ordinary source
 objects, reverify bytes before setting any marker. For converted assets with a
 missing original source, `stored_sha256` cannot prove the original source hash.
-The companion `audit-identity-oss` tool expands schema only; it never marks legacy
-source hashes verified merely from metadata or a clean virus-scan result.
+The companion `go run ./cmd/audit-identity-oss` checks the current schema and reports counts. Optionally pass `--database EXACT` to verify the database name. Source-hash markers require verification of the original bytes.
 
 Private-skin rows and JSON sensitive-key matches are exposure candidates. JSON key
 matching is deliberately diagnostic: legitimate business values, unknown extensions,

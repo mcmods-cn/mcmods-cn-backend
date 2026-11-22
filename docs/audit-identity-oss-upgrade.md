@@ -1,5 +1,7 @@
 # FID-001 / FID-002 / CMP-005 identity and source-hash expansion
 
+> The expansion below applies to generation 168 and is preserved at `d14e10b4`. The current command is a [read-only diagnostic](audit-known-data-diagnosis.md). New installations receive the proof fields and queue public IDs through the [current baseline](../README.md#数据库安装发布和恢复).
+
 Deploy the additive database expansion before this backend version. On an owned
 copy, first run `go run ./cmd/audit-identity-oss` for read-only schema/legacy-row
 counts. Apply uses `--apply --database EXACT_DATABASE --backup-reference BACKUP_REFERENCE --backup-metadata NEW_PRIVATE_FILE`;
