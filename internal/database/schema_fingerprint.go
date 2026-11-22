@@ -9,6 +9,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+type schemaQueryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
 func definitionFingerprint(statements []string) string {
 	hash := sha256.New()
 	for _, statement := range statements {

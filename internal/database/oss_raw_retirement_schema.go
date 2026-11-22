@@ -34,7 +34,7 @@ func OSSRawRetirementSchemaStatements() []string {
 	}
 }
 
-func inspectOSSRawRetirementSchema(ctx context.Context, query logRedactionQueryer) (bool, error) {
+func inspectOSSRawRetirementSchema(ctx context.Context, query schemaQueryer) (bool, error) {
 	var present bool
 	if err := query.QueryRow(ctx, `select to_regclass('public.oss_upload_capabilities') is not null and exists(select 1 from information_schema.columns where table_schema='public' and table_name='oss_object_deletion_outbox' and column_name='raw_upload_binding_id') and exists(select 1 from information_schema.columns where table_schema='public' and table_name='oss_object_deletion_outbox' and column_name='raw_hold_reason')`).Scan(&present); err != nil || !present {
 		return false, err

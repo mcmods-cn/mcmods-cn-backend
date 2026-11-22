@@ -239,8 +239,27 @@ func TestInitializeRejectsUnknownAndDriftedSchemasIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `drop table operator_fact`); err != nil {
 		t.Fatal(err)
 	}
-	if err := Initialize(ctx, pool); err != nil {
+	if _, err := pool.Exec(ctx, `create schema audit_shadow;
+		create table audit_shadow.notifications(id bigint);
+		create table audit_shadow.schema_metadata(generation integer);
+		insert into audit_shadow.schema_metadata values(1)`); err != nil {
 		t.Fatal(err)
+	}
+	shadowConfig := pool.Config()
+	shadowConfig.ConnConfig.RuntimeParams["search_path"] = "audit_shadow, public"
+	shadowPool, err := pgxpool.NewWithConfig(ctx, shadowConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shadowPool.Close()
+	if err := Initialize(ctx, shadowPool); err != nil {
+		t.Fatal(err)
+	}
+	var shadowColumns, shadowVersion int
+	if err := shadowPool.QueryRow(ctx, `select
+		(select count(*) from information_schema.columns where table_schema='audit_shadow' and table_name='notifications'),
+		(select generation from audit_shadow.schema_metadata)`).Scan(&shadowColumns, &shadowVersion); err != nil || shadowColumns != 1 || shadowVersion != 1 {
+		t.Fatal("initialization modified an unrelated caller schema")
 	}
 	var definition string
 	if err := pool.QueryRow(ctx, `select definition_fingerprint from schema_metadata where singleton`).Scan(&definition); err != nil {
@@ -262,6 +281,18 @@ func TestInitializeRejectsUnknownAndDriftedSchemasIntegration(t *testing.T) {
 		t.Fatal("an obsolete database generation was accepted")
 	}
 	if _, err := pool.Exec(ctx, `update schema_metadata set generation=$1 where singleton`, schemaGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `alter table notifications disable trigger trg_notifications_revision`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Initialize(ctx, pool); err == nil || !strings.Contains(err.Error(), "catalog differs") {
+		t.Fatal("initialization did not detect a disabled notification revision trigger")
+	}
+	if _, err := pool.Exec(ctx, `alter table notifications enable trigger trg_notifications_revision`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `drop index idx_users_registration_ip_created`); err != nil {
