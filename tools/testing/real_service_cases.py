@@ -12,6 +12,9 @@ CASES = {
         "TestAuditMSG003OptionalRealRedisKeepsReadinessAndDurableAdmission",
         "TestOCT03PresenceMountedHTTPRejectsClientIdentityAndSourceBudgetBypass",
         "TestRBACCacheHonorsNaturalGrantAndDenyExpirationIntegration",
+        "TestSecurityVersionCommittedPropagationFailureAcrossReplicasIntegration",
+        "TestSecurityVersionDelayedRequestCannotAuthorizeNextRequestIntegration",
+        "TestSecurityVersionDelayedWriterAndColdRedisIntegration",
         "TestAuditP2NEXT002RealTypesenseStaleIndexHTTPPostgresIntegration",
         "TestAuditP2RPH003RealTypesenseImportedAndIndependentSourceVisibilityIntegration",
         "TestOCT03CreatorCatalogRealTypesenseCursorIntegration",
@@ -91,8 +94,11 @@ def main():
     # The same HTTP case compares both admission paths. A missing shared
     # subtest must not silently turn the live Redis check into a local-only run.
     presence = "TestOCT03PresenceMountedHTTPRejectsClientIdentityAndSourceBudgetBypass"
+    delayed = "TestSecurityVersionDelayedRequestCannotAuthorizeNextRequestIntegration"
     required = expected | {("mcmods-cn-backend/internal/httpapi", presence + "/" + mode)
                            for mode in ("shared-true", "shared-false")}
+    required.update(("mcmods-cn-backend/internal/httpapi", delayed + "/" + kind)
+                    for kind in ("permission", "rbac", "project-acl", "auth"))
     issues = verify((json.loads(line) for line in sys.stdin), required, sys.stdout)
     if issues:
         raise SystemExit("\n".join(issues))
