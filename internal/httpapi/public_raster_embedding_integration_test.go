@@ -90,7 +90,6 @@ func TestPublicRasterEmbeddingMatchesAnonymousAuthorizationIntegration(t *testin
 	t.Cleanup(external.Close)
 
 	cfg := config.Load()
-	cfg.DB.ResetOnStart = false
 	cfg.JWTSecret = "synthetic-public-raster-session-key-only"
 	cfg.SettingsEncryptionKey = "synthetic-public-raster-settings-key-only"
 	cfg.FrontendOrigin = "https://configured-frontend.example.test"

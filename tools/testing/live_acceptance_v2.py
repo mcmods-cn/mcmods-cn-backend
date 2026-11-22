@@ -376,7 +376,8 @@ def prepare():
         environment[key] = ''
     environment.update(DATABASE_URL=child_url, MCMODS_TEST_DATABASE_URL=child_url,
                        DB_NAME=database, APP_ENV='test',
-                       SEED_ADMIN_PASSWORD=secrets.token_urlsafe(32), JWT_SECRET=secrets.token_hex(32),
+                       SEED_ADMIN_PASSWORD=secrets.token_urlsafe(32), SEED_ADMIN_EMAIL='admin@example.invalid',
+                       JWT_SECRET=secrets.token_hex(32),
                        SETTINGS_ENCRYPTION_KEY=secrets.token_hex(32), ANTI_ABUSE_HMAC_SECRET=secrets.token_hex(32),
                        ANTI_ABUSE_IP_HASH_SECRET=secrets.token_hex(32), APP_REPLICA_COUNT='1',
                        REDIS_NAMESPACE='live_' + record['nonce_namespace'],

@@ -149,6 +149,7 @@ def up(state, go_binary, real_services=False):
         "MCMODS_TEST_DATABASE_URL": url,
         "JWT_SECRET": secrets.token_hex(32), "SETTINGS_ENCRYPTION_KEY": secrets.token_hex(32),
         "SEED_ADMIN_PASSWORD": secrets.token_urlsafe(32),
+        "SEED_ADMIN_EMAIL": "admin@example.invalid",
         "ANTI_ABUSE_HMAC_SECRET": secrets.token_hex(32), "ANTI_ABUSE_IP_HASH_SECRET": secrets.token_hex(32),
         "REDIS_ENABLED": "true", "REDIS_ADDR": f"127.0.0.1:{ports['redis']}", "REDIS_NAMESPACE": owner,
         "NATS_ENABLED": "true", "NATS_URL": f"nats://127.0.0.1:{ports['nats']}",
