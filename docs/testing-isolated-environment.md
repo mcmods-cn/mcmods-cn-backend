@@ -101,6 +101,35 @@ npm run test:browser
 启用真实 Typesense 的全仓回归要同时提供专用回环 URL、测试密钥和服务端可执行文件，因为作者目录测试会独立启动和停止一个进程。Redis 冷重启和 SSE 测试也要用 `MCMODS_TEST_REDIS_BINARY` 指向本任务可用的 `redis-server`。仅设置已运行的服务地址无法执行这两种进程测试。[搜索测试配置](typesense-search.md)
 所有这些通过结果都不证明生产数据健康、备份可恢复或真实供应商语义质量。
 
+### Redis、JetStream、Typesense 专项 CI
+
+在 Linux x86-64、Docker、Bash 和 `go.mod` 指定的工具链上，从后端根目录执行与
+[Real service integration](../.github/workflows/real-services.yml) 相同的门禁。
+`--real-services` 复用前述三个服务及 PostgreSQL 初始化，再启动固定摘要的 Typesense 29.0。
+工具从本次容器复制 `redis-server`、`typesense-server` 到私有目录，供控制进程停启的测试使用。
+
+```bash
+set -euo pipefail
+state="$(mktemp -d)/services"
+trap 'if test -f "$state/resources.json"; then python3 -B tools/testing/isolated_environment.py --state "$state" down; fi' EXIT
+python3 -B tools/testing/isolated_environment.py --state "$state" --real-services up
+cases=$(python3 -B tools/testing/real_service_cases.py pattern)
+python3 -B tools/testing/isolated_environment.py --state "$state" run -- \
+  go test -mod=readonly -race -count=1 -p=1 -parallel=1 -timeout=10m -json -run "$cases" \
+  ./internal/{httpapi,querycache,queue,searchindex} | \
+  python3 -B tools/testing/real_service_cases.py verify
+```
+
+| 服务 | 真实运行边界 |
+| --- | --- |
+| Redis | 共享服务测试限流、在线计数与跨实例 RBAC 到期。SSE 与可选 Redis 用例另启私有进程，实际停止或冷重启。在线状态 HTTP 用例同时运行本地回退和共享 Redis 两个子项。 |
+| NATS | 专用容器提供文件型 JetStream，覆盖发布确认、重投、去重、并发、积压、长任务、容量与死信。服务端重启用例在 Go 测试进程内启停真实 NATS 服务，保留其文件数据。 |
+| Typesense | 共享回环服务覆盖真实建库、检索、重建和从 PostgreSQL 重查公开状态。作者目录游标用例另起 Typesense 进程并独占子数据库。 |
+
+[用例清单](../tools/testing/real_service_cases.py) 同时生成筛选表达式并核对 Go 的逐项结果。
+每项都必须收到运行和通过事件。跳过、漏选、子项失败或包未正常结束都会使专项失败。
+CI 上传的 JSON Lines 仅含包、测试名、结果、秒数。私有鉴权环境和复制的二进制随服务清理。
+
 ### 真实游戏包经浏览器和 JetStream 的验证
 
 使用已初始化的隔离环境、干净的三个仓库检出和已安装依赖的独立前端目录。

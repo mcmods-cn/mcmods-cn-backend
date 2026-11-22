@@ -1,0 +1,52 @@
+name: Real service integration
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-services-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  redis-jetstream-typesense:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install project Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Initialize owned loopback services and copy native executables
+        run: |
+          test "$(go env GOVERSION)" = "$(awk '$1 == "toolchain" {print $2}' go.mod)"
+          python3 -B tools/testing/isolated_environment.py --state "$RUNNER_TEMP/mcmods-services" --real-services up
+      - name: Verify every selected case against the real services
+        shell: bash
+        run: |
+          set -o pipefail
+          cases=$(python3 -B tools/testing/real_service_cases.py pattern)
+          python3 -B tools/testing/isolated_environment.py --state "$RUNNER_TEMP/mcmods-services" run -- \
+            go test -mod=readonly -race -count=1 -p=1 -parallel=1 -timeout=10m -json -run "$cases" \
+            ./internal/{httpapi,querycache,queue,searchindex} | \
+            python3 -B tools/testing/real_service_cases.py verify | tee "$RUNNER_TEMP/real-service-results.jsonl"
+      - name: Archive test names, outcomes and durations
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: real-service-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/real-service-results.jsonl
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Remove owned services and temporary executables
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/mcmods-services/resources.json"; then
+            python3 -B tools/testing/isolated_environment.py --state "$RUNNER_TEMP/mcmods-services" down
+          fi

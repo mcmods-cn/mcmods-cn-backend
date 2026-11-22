@@ -9,6 +9,7 @@ import secrets
 import shlex
 import subprocess
 import time
+from urllib.request import ProxyHandler, build_opener
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 DEFAULT_STATE = REPOSITORY / ".audit-test-environment"
@@ -18,6 +19,8 @@ IMAGES = {
     "nats": "public.ecr.aws/docker/library/nats@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00",
 }
 LABEL = "mcmods.audit.owner"
+TYPESENSE_IMAGE = "typesense/typesense@sha256:316b7e71c21f7e5e5caa8daa150e1b3f2be8c876081ee1f77bc2d92cd7f137d0"
+NATIVE_BINARIES = {"redis": "/usr/local/bin/redis-server", "typesense": "/opt/typesense-server"}
 
 
 def docker(*arguments, capture=False, environment_overlay=None):
@@ -45,7 +48,20 @@ def verify_container(name, owner):
     return description
 
 
-def up(state, go_binary):
+def ready_typesense(address):
+    client = build_opener(ProxyHandler({}))
+    for _ in range(60):
+        try:
+            with client.open(address + "/health", timeout=1) as response:
+                if json.load(response).get("ok") is True:
+                    return
+        except (OSError, ValueError):
+            pass
+        time.sleep(1)
+    raise RuntimeError("owned Typesense service did not become ready")
+
+
+def up(state, go_binary, real_services=False):
     if state.exists():
         raise RuntimeError("state directory already exists; use run or down instead of overwriting it")
     docker("info", "--format", "{{.ServerVersion}}", capture=True)
@@ -56,17 +72,30 @@ def up(state, go_binary):
     record = {"owner": owner, "database": database, "containers": {}}
     write_private(state / "resources.json", json.dumps(record, indent=2) + "\n")
     ports = {"postgres": 5432, "redis": 6379, "nats": 4222}
+    images = dict(IMAGES)
+    commands = {"postgres": ["postgres", "-c", "max_locks_per_transaction=512"],
+                "redis": ["redis-server", "--save", "", "--appendonly", "no"],
+                "nats": ["--jetstream", "--store_dir", "/data"]}
+    typesense_key = None
+    if real_services:
+        ports["typesense"] = 8108
+        images["typesense"] = TYPESENSE_IMAGE
+        commands["typesense"] = ["--data-dir", "/data", "--thread-pool-size", "2", "--num-collections-parallel-load", "2"]
+        typesense_key = secrets.token_hex(32)
     for service in ports:
         name = "mcmods-audit-" + service + "-" + owner[:12]
         options = ["run", "-d", "--name", name, "--label", LABEL + "=" + owner,
                    "-p", "127.0.0.1::" + str(ports[service])]
+        credentials = {}
         if service == "postgres":
             options += ["-e", "POSTGRES_PASSWORD", "-e", "POSTGRES_USER=mcmods",
                         "-e", "POSTGRES_DB=" + database]
-        command = {"postgres": ["postgres", "-c", "max_locks_per_transaction=512"], "redis": ["redis-server", "--save", "", "--appendonly", "no"],
-                   "nats": ["--jetstream", "--store_dir", "/data"]}[service]
-        container_id = docker(*options, IMAGES[service], *command, capture=True,
-                              environment_overlay={"POSTGRES_PASSWORD": database_password} if service == "postgres" else None).strip()
+            credentials["POSTGRES_PASSWORD"] = database_password
+        elif service == "typesense":
+            options += ["-e", "TYPESENSE_API_KEY", "--tmpfs", "/data:rw,size=384m"]
+            credentials["TYPESENSE_API_KEY"] = typesense_key
+        container_id = docker(*options, images[service], *commands[service], capture=True,
+                              environment_overlay=credentials).strip()
         record["containers"][service] = container_id
         write_private(state / "resources.json", json.dumps(record, indent=2) + "\n")
         info = verify_container(container_id, owner)
@@ -94,6 +123,21 @@ def up(state, go_binary):
                 "SMTP_HOST", "REDIS_USERNAME", "REDIS_PASSWORD", "NATS_TOKEN", "NATS_USERNAME", "NATS_PASSWORD", "TYPESENSE_API_KEY",
                 "YGGDRASIL_PRIVATE_KEY_BASE64", "TURNSTILE_SECRET_KEY", "TURNSTILE_SITE_KEY"):
         environment[key] = ""
+    if real_services:
+        address = f"http://127.0.0.1:{ports['typesense']}"
+        ready_typesense(address)
+        for service, source in NATIVE_BINARIES.items():
+            executable = state / Path(source).name
+            docker("cp", f"{record['containers'][service]}:{source}", str(executable))
+            executable.chmod(0o700)
+            environment[f"MCMODS_TEST_{service.upper()}_BINARY"] = str(executable)
+        environment.update({
+            "MCMODS_AUDIT_PG_LOCK": str(state / "postgres-ddl.lock"),
+            "MCMODS_RUN_REDIS_INTEGRATION": "1",
+            "MCMODS_RUN_NATS_INTEGRATION": "1", "MCMODS_TEST_NATS_URL": environment["NATS_URL"],
+            "MCMODS_RUN_TYPESENSE_INTEGRATION": "1", "MCMODS_TEST_TYPESENSE_URL": address,
+            "MCMODS_TEST_TYPESENSE_API_KEY": typesense_key,
+        })
     write_private(state / "environment.json", json.dumps(environment, indent=2) + "\n")
     write_private(state / "activate.sh", "".join(f"export {key}={shlex.quote(value)}\n" for key, value in environment.items()))
     # The entrypoint's temporary initialization server uses a Unix socket only.
@@ -130,6 +174,10 @@ def down(state):
         verify_container(container_id, record["owner"])
     for container_id in record["containers"].values():
         docker("rm", "-f", "-v", container_id, capture=True)
+    if "typesense" in record["containers"]:
+        for source in NATIVE_BINARIES.values():
+            (state / Path(source).name).unlink(missing_ok=True)
+        (state / "postgres-ddl.lock").unlink(missing_ok=True)
     for filename in ("resources.json", "environment.json", "activate.sh"):
         path = state / filename
         if path.exists():
@@ -147,11 +195,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--go", default="go", help="installed project-compatible Go executable")
+    parser.add_argument("--real-services", action="store_true", help="also provision Typesense and native test executables on Linux")
     parser.add_argument("action", choices=("up", "run", "down"))
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.action == "up":
-        up(args.state.resolve(), args.go)
+        up(args.state.resolve(), args.go, args.real_services)
     elif args.action == "down":
         down(args.state.resolve())
     else:

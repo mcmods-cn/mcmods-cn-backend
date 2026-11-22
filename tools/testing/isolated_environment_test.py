@@ -8,6 +8,49 @@ import isolated_environment as environment
 
 
 class EnvironmentOwnershipTests(unittest.TestCase):
+    def test_real_service_profile_uses_owned_containers_for_endpoints_and_native_binaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "services"
+            owner_labels = {}
+            ports = {"postgres": 5432, "redis": 6379, "nats": 4222, "typesense": 8108}
+            copied = []
+
+            def fake_docker(*args, **options):
+                if args[0] == "run":
+                    service = args[args.index("--name") + 1].split("-")[2]
+                    owner_labels[service] = args[args.index("--label") + 1].split("=", 1)[1]
+                    if service == "typesense":
+                        self.assertIn(environment.TYPESENSE_IMAGE, args)
+                        self.assertNotIn(options["environment_overlay"]["TYPESENSE_API_KEY"], args)
+                    return service
+                if args[0] == "inspect":
+                    service = args[1]
+                    binding = {"HostIp": "127.0.0.1", "HostPort": str(10000 + ports[service])}
+                    return json.dumps([{"Config": {"Labels": {environment.LABEL: owner_labels[service]}},
+                                        "NetworkSettings": {"Ports": {f"{ports[service]}/tcp": [binding]}}}])
+                if args[0] == "cp":
+                    copied.append(args[1])
+                    Path(args[2]).write_text("synthetic executable")
+
+            with patch.object(environment, "docker", side_effect=fake_docker), \
+                    patch.object(environment, "ready_typesense") as ping, patch.object(environment.subprocess, "run"):
+                environment.up(state, "go", real_services=True)
+                values = json.loads((state / "environment.json").read_text())
+                ping.assert_called_once_with(values["MCMODS_TEST_TYPESENSE_URL"])
+                self.assertEqual(set(copied), {"redis:/usr/local/bin/redis-server", "typesense:/opt/typesense-server"})
+                self.assertEqual(values["MCMODS_TEST_NATS_URL"], values["NATS_URL"])
+                for service in ("REDIS", "NATS", "TYPESENSE"):
+                    self.assertEqual(values[f"MCMODS_RUN_{service}_INTEGRATION"], "1")
+                for service in ("REDIS", "TYPESENSE"):
+                    executable = Path(values[f"MCMODS_TEST_{service}_BINARY"])
+                    self.assertEqual(executable.parent, state)
+                    self.assertEqual(executable.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(values["TYPESENSE_API_KEY"], "")
+                self.assertTrue(values["MCMODS_TEST_TYPESENSE_API_KEY"])
+                (state / "keep.txt").write_text("operator backup")
+                environment.down(state)
+                self.assertEqual([p.name for p in state.iterdir()], ["keep.txt"])
+
     def test_refuses_existing_directory_before_touching_docker(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(environment, "docker") as docker:
             with self.assertRaises(RuntimeError):
