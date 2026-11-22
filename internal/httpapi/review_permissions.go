@@ -3,11 +3,60 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"mcmods-cn-backend/internal/security"
 )
+
+var errReviewAccountBanned = errors.New("review account is banned")
+
+// A decision can wait behind another publisher. Read the current session and
+// permission rules in the transaction after acquiring the publication locks.
+func resolveCurrentReviewActorTx(ctx context.Context, tx pgx.Tx, claims security.Claims) (security.Claims, error) {
+	if claims.ExpiresAt <= time.Now().Unix() {
+		return security.Claims{}, pgx.ErrNoRows
+	}
+	userID, err := readSessionSubject(ctx, tx, claims, true, nil)
+	if err != nil {
+		return security.Claims{}, err
+	}
+	if userID != claims.Subject {
+		return security.Claims{}, pgx.ErrNoRows
+	}
+	resolved, err := resolveUsersRootPermissionsQuery(ctx, tx, []int64{userID})
+	if err != nil {
+		return security.Claims{}, err
+	}
+	if claims.ExpiresAt <= time.Now().Unix() {
+		return security.Claims{}, pgx.ErrNoRows
+	}
+	claims.PermissionRules = resolved[userID].Permissions
+	if claimsExplicitlyAllow(claims, "account.banned") {
+		return security.Claims{}, errReviewAccountBanned
+	}
+	return claims, nil
+}
+
+func requireCurrentReviewActor(w http.ResponseWriter, r *http.Request, tx pgx.Tx) (security.Claims, bool) {
+	claims, err := resolveCurrentReviewActorTx(r.Context(), tx, currentClaims(r))
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		writeError(w, http.StatusUnauthorized, "review session is no longer active")
+	case errors.Is(err, errReviewAccountBanned):
+		writeError(w, http.StatusForbidden, "permission denied")
+	case err != nil:
+		writeError(w, http.StatusServiceUnavailable, "review permissions are temporarily unavailable")
+	default:
+		return claims, true
+	}
+	return security.Claims{}, false
+}
 
 func canReviewAllContent(claims security.Claims) bool {
 	return claimsAllow(claims, "admin.*") || claimsAllow(claims, "content.review")
@@ -129,8 +178,14 @@ func canReviewContentSubmission(
 	if canReviewAllContent(claims) {
 		return true
 	}
+	switch aggregateType {
+	case modpackAggregate, simpleProjectAggregate, projectChangelogAggregate, "catalog_resource",
+		modContentAggregateVersion, modContentAggregateTemplate, modContentAggregateSection, modContentAggregateResource:
+	default:
+		return false
+	}
 	projectID := reviewProjectID(ctx, query, entityType, entityID, aggregateType, aggregateKey, snapshotRaw, metadataRaw)
-	return canReviewProjectSubmission(claims, projectID, submittedBy)
+	return projectID != "" && canReviewProjectSubmission(claims, projectID, submittedBy)
 }
 
 func reviewProjectID(

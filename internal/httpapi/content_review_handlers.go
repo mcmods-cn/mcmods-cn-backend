@@ -63,10 +63,26 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "revision has already been reviewed")
 		return
 	}
-	claims := currentClaims(r)
-	if !canReviewContentSubmission(r.Context(), tx, claims, submittedBy, revisionEntityType, revisionEntityID, aggregateType, aggregateKey, snapshotRaw, metadataRaw) {
+	canReview := func(claims security.Claims) bool {
+		return canReviewContentSubmission(r.Context(), tx, claims, submittedBy,
+			revisionEntityType, revisionEntityID, aggregateType, aggregateKey, snapshotRaw, metadataRaw)
+	}
+	if !canReview(currentClaims(r)) {
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
+	}
+	var claims security.Claims
+	authorizeAfterLock := func() bool {
+		var active bool
+		claims, active = requireCurrentReviewActor(w, r, tx)
+		if !active {
+			return false
+		}
+		if !canReview(claims) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return false
+		}
+		return true
 	}
 	if aggregateType == projectChangelogAggregate {
 		var snapshot projectChangelogSnapshot
@@ -87,6 +103,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			where entry.public_id=$1 for update of entry`, aggregateKey).
 			Scan(&changelogID, &targetRouteID, &publishedRevisionID, &targetName, &targetURL); err != nil {
 			writeError(w, http.StatusNotFound, "changelog not found")
+			return
+		}
+		if !authorizeAfterLock() {
 			return
 		}
 		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
@@ -165,7 +184,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "mod content subject not found")
 			return
 		}
-		claims := currentClaims(r)
+		if !authorizeAfterLock() {
+			return
+		}
 		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
 			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to record mod content conflict")
@@ -218,7 +239,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "community post not found")
 			return
 		}
-		claims := currentClaims(r)
+		if !authorizeAfterLock() {
+			return
+		}
 		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
 			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err == nil {
 				err = tx.Commit(r.Context())
@@ -292,7 +315,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "modpack not found")
 			return
 		}
-		claims := currentClaims(r)
+		if !authorizeAfterLock() {
+			return
+		}
 		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
 			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err == nil {
 				err = tx.Commit(r.Context())
@@ -364,7 +389,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "project not found")
 			return
 		}
-		claims := currentClaims(r)
+		if !authorizeAfterLock() {
+			return
+		}
 		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
 			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err == nil {
 				err = tx.Commit(r.Context())
@@ -433,7 +460,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, catalogEditorHTTPStatus(publishedErr), catalogEditorErrorMessage(publishedErr))
 			return
 		}
-		claims := currentClaims(r)
+		if !authorizeAfterLock() {
+			return
+		}
 		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
 			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to record catalog conflict")
@@ -510,7 +539,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to read published localization")
 			return
 		}
-		claims := currentClaims(r)
+		if !authorizeAfterLock() {
+			return
+		}
 		if request.Status == "approved" && snapshot.Provenance == "ai" && snapshot.SourceRevisionNo > 0 {
 			var sourceRevisionNo int64
 			sourceErr := tx.QueryRow(r.Context(), `select revision_no from content_localizations
@@ -579,7 +610,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to load creator")
 			return
 		}
-		claims := currentClaims(r)
+		if !authorizeAfterLock() {
+			return
+		}
 		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
 			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to record creator conflict")
@@ -648,7 +681,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to load published blueprint")
 			return
 		}
-		claims := currentClaims(r)
+		if !authorizeAfterLock() {
+			return
+		}
 		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
 			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to record blueprint conflict")
@@ -708,7 +743,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to load published skin")
 			return
 		}
-		claims := currentClaims(r)
+		if !authorizeAfterLock() {
+			return
+		}
 		if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {
 			if err = markChangeRequestConflictedTx(r.Context(), tx, changeRequestID, claims.Subject, request.Note, r); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to record skin conflict")
@@ -780,6 +817,9 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 		publishedRevisionID = nil
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load published content")
+		return
+	}
+	if !authorizeAfterLock() {
 		return
 	}
 	if request.Status == "approved" && !sameRevision(baseRevisionID, publishedRevisionID) {

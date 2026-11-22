@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +16,7 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
+	"mcmods-cn-backend/internal/querycache"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -26,7 +26,8 @@ func TestBUG034ManualChangelogOverrideStartsOnlyAfterApprovalIntegration(t *test
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	poolConfig, err := pgxpool.ParseConfig(config.Load().DB.ConnString())
+	cfg := config.Load()
+	poolConfig, err := pgxpool.ParseConfig(cfg.DB.ConnString())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,24 +52,25 @@ func TestBUG034ManualChangelogOverrideStartsOnlyAfterApprovalIntegration(t *test
 		on conflict(key) do update set value=excluded.value`, minecraftVersionsSettingKey, catalog); err != nil {
 		t.Fatal(err)
 	}
-	userIDs := make([]int64, 2)
-	for index := range userIDs {
-		if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
-			values($1,$2,'bug034',true) returning id`, fmt.Sprintf("bug034-%d-%d", time.Now().UnixNano(), index),
-			fmt.Sprintf("bug034-%d-%d@example.invalid", time.Now().UnixNano(), index)).Scan(&userIDs[index]); err != nil {
-			t.Fatal(err)
-		}
+	var editorID int64
+	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
+		values('bug034-editor','bug034-editor@example.invalid','bug034',true) returning id`).Scan(&editorID); err != nil {
+		t.Fatal(err)
 	}
+	reviewerID, _, reviewerToken := createTEST044User(t, ctx, pool, cfg, "bug034-reviewer", "UTC")
+	grantTEST044Permissions(t, ctx, pool, reviewerID, "content.review")
 	var projectInternalID, routeID int64
 	const projectID = "b034m0001"
 	if err = pool.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,review_status,submitted_by)
-		values($1,'bug034-project','BUG034 project','approved',$2) returning id`, projectID, userIDs[0]).Scan(&projectInternalID); err != nil {
+		values($1,'bug034-project','BUG034 project','approved',$2) returning id`, projectID, editorID).Scan(&projectInternalID); err != nil {
 		t.Fatal(err)
 	}
 	if err = pool.QueryRow(ctx, `select id from public_routes where entity_type='mod' and internal_id=$1`, projectInternalID).Scan(&routeID); err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{db: pool}
+	cache := querycache.New(config.RedisConfig{})
+	defer cache.Close()
+	server := &Server{db: pool, cache: cache, cfg: cfg}
 	actor := seedAuthorizedAutomationFixture(t, ctx, pool, "project.edit.b034m0001", "project.no-review.b034m0001")
 	worker := &ProjectAutomationWorker{server: server}
 	job := projectAutomationJob{RouteID: routeID, InternalID: projectInternalID, ProjectType: "mod", ProjectPublicID: projectID,
@@ -90,9 +92,9 @@ func TestBUG034ManualChangelogOverrideStartsOnlyAfterApprovalIntegration(t *test
 			t.Fatalf("invalid override error=%v, want named 23514 provenance check", invalidErr)
 		}
 	}
-	rejectedRevisionID := invokeBUG034ManualChangelogEdit(t, ctx, server, userIDs[0], changelogPublicID, "Manual candidate to reject")
+	rejectedRevisionID := invokeBUG034ManualChangelogEdit(t, ctx, server, editorID, changelogPublicID, "Manual candidate to reject")
 	assertBUG034ManualOverride(t, ctx, pool, changelogPublicID, false)
-	invokeBUG034ChangelogReview(t, ctx, server, userIDs[1], rejectedRevisionID, "rejected")
+	invokeBUG034ChangelogReview(t, ctx, server, reviewerToken, rejectedRevisionID, "rejected")
 	assertBUG034ManualOverride(t, ctx, pool, changelogPublicID, false)
 
 	afterRejection := initial
@@ -103,9 +105,9 @@ func TestBUG034ManualChangelogOverrideStartsOnlyAfterApprovalIntegration(t *test
 	}
 	assertBUG034ChangelogBody(t, ctx, pool, changelogPublicID, afterRejection.Body)
 
-	approvedRevisionPublicID := invokeBUG034ManualChangelogEdit(t, ctx, server, userIDs[0], changelogPublicID, "Approved manual body")
+	approvedRevisionPublicID := invokeBUG034ManualChangelogEdit(t, ctx, server, editorID, changelogPublicID, "Approved manual body")
 	assertBUG034ManualOverride(t, ctx, pool, changelogPublicID, false)
-	invokeBUG034ChangelogReview(t, ctx, server, userIDs[1], approvedRevisionPublicID, "approved")
+	invokeBUG034ChangelogReview(t, ctx, server, reviewerToken, approvedRevisionPublicID, "approved")
 	var approvedRevisionID int64
 	if err = pool.QueryRow(ctx, `select id from content_revisions where public_id=$1`, approvedRevisionPublicID).Scan(&approvedRevisionID); err != nil {
 		t.Fatal(err)
@@ -160,15 +162,11 @@ func invokeBUG034ManualChangelogEdit(t *testing.T, ctx context.Context, server *
 	return revisionPublicID
 }
 
-func invokeBUG034ChangelogReview(t *testing.T, ctx context.Context, server *Server, reviewerID int64, revisionPublicID, status string) {
+func invokeBUG034ChangelogReview(t *testing.T, ctx context.Context, server *Server, reviewerToken, revisionPublicID, status string) {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/content-revisions/"+revisionPublicID+"/review",
-		bytes.NewBufferString(`{"status":"`+status+`","note":"BUG034 decision"}`))
-	request.SetPathValue("revisionId", revisionPublicID)
-	request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: reviewerID,
-		PermissionRules: []security.PermissionRule{{Code: "content.review", Allow: true, Priority: 100}}}))
-	response := httptest.NewRecorder()
-	server.reviewContentRevision(response, request)
+	response := performTEST044Request(ctx, server.requireAuth(server.reviewContentRevision), reviewerToken,
+		http.MethodPatch, "/api/v1/content-revisions/"+revisionPublicID,
+		`{"status":"`+status+`","note":"BUG034 decision"}`, map[string]string{"revisionId": revisionPublicID})
 	if response.Code != http.StatusOK {
 		t.Fatalf("%s changelog review status=%d body=%s", status, response.Code, response.Body.String())
 	}

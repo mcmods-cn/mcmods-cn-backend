@@ -366,7 +366,10 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "revision has already been reviewed")
 		return
 	}
-	claims := currentClaims(r)
+	claims, authorized := requireCurrentReviewActor(w, r, tx)
+	if !authorized {
+		return
+	}
 	if !canReviewProjectSubmission(claims, projectID, submittedBy) {
 		writeError(w, http.StatusForbidden, "permission denied")
 		return

@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -15,7 +14,6 @@ import (
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/querycache"
-	"mcmods-cn-backend/internal/security"
 )
 
 func TestModRevisionReviewReadbackFailureRollsBackIntegration(t *testing.T) {
@@ -24,7 +22,8 @@ func TestModRevisionReviewReadbackFailureRollsBackIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	poolConfig, err := pgxpool.ParseConfig(config.Load().DB.ConnString())
+	cfg := config.Load()
+	poolConfig, err := pgxpool.ParseConfig(cfg.DB.ConnString())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,15 +43,12 @@ func TestModRevisionReviewReadbackFailureRollsBackIntegration(t *testing.T) {
 		}
 	}()
 
-	var submitterID, reviewerID int64
+	var submitterID int64
 	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
 		values('readback_submitter','readback-submitter@example.invalid','test-only',true) returning id`).Scan(&submitterID); err != nil {
 		t.Fatal(err)
 	}
-	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
-		values('readback_reviewer','readback-reviewer@example.invalid','test-only',true) returning id`).Scan(&reviewerID); err != nil {
-		t.Fatal(err)
-	}
+	reviewerID, _, reviewerToken := createTEST044User(t, ctx, pool, cfg, "readback-reviewer", "UTC")
 
 	type fixture struct {
 		projectID       string
@@ -88,21 +84,13 @@ func TestModRevisionReviewReadbackFailureRollsBackIntegration(t *testing.T) {
 	// as NewServer; a nil cache deliberately reports an unavailable dependency.
 	cache := querycache.New(config.RedisConfig{})
 	defer cache.Close()
-	server := &Server{db: pool, cache: cache}
+	server := &Server{db: pool, cache: cache, cfg: cfg}
+	grantTEST044Permissions(t, ctx, pool, reviewerID, "project.review."+broken.projectID, "project.review."+valid.projectID)
 	review := func(target fixture) *httptest.ResponseRecorder {
 		t.Helper()
-		request := httptest.NewRequest(http.MethodPatch, "/api/v1/mods/revisions/"+target.revisionID,
-			bytes.NewBufferString(`{"status":"rejected","note":"readback check"}`))
-		request.SetPathValue("revisionId", target.revisionID)
-		request = request.WithContext(context.WithValue(request.Context(), claimsContextKey, security.Claims{
-			Subject: reviewerID,
-			PermissionRules: []security.PermissionRule{
-				{Code: "project.review." + target.projectID, Allow: true, Priority: 100},
-			},
-		}))
-		response := httptest.NewRecorder()
-		server.reviewModRevision(response, request)
-		return response
+		return performTEST044Request(ctx, server.requireAuth(server.reviewModRevision), reviewerToken,
+			http.MethodPatch, "/api/v1/mods/revisions/"+target.revisionID,
+			`{"status":"rejected","note":"readback check"}`, map[string]string{"revisionId": target.revisionID})
 	}
 
 	brokenResponse := review(broken)
