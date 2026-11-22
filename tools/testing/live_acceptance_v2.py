@@ -200,34 +200,7 @@ def private_json(path, value):
 
 
 def guarded_parent():
-    record = json.loads((STATE / 'resources.json').read_text())
-    environment = json.loads((STATE / 'environment.json').read_text())
-    if not re.fullmatch('[a-f0-9]{32}', record.get('owner', '')) or not re.fullmatch('test_mcmods_audit_[a-f0-9]{16}', record.get('database', '')):
-        raise RuntimeError('state is not an owned isolated_environment record')
-    infos = {name: owned.verify_container(identifier, record['owner'])
-             for name, identifier in record['containers'].items()}
-    connection = urllib.parse.urlsplit(environment['DATABASE_URL'])
-    binding = infos['postgres']['NetworkSettings']['Ports']['5432/tcp'][0]
-    if (connection.scheme != 'postgres' or connection.hostname != '127.0.0.1'
-            or connection.port != int(binding['HostPort']) or binding['HostIp'] != '127.0.0.1'
-            or connection.username != 'mcmods' or connection.fragment
-            or urllib.parse.parse_qsl(connection.query) != [('sslmode','disable')]
-            or connection.path != '/' + record['database']
-            or environment['DATABASE_URL'] != environment['MCMODS_TEST_DATABASE_URL']):
-        raise RuntimeError('owned parent identity mismatch; refusing child operations')
-    for name,port,key in [('redis','6379/tcp','REDIS_ADDR'),('nats','4222/tcp','NATS_URL')]:
-        binding = infos[name]['NetworkSettings']['Ports'][port][0]
-        wanted = '127.0.0.1:'+binding['HostPort']
-        if name == 'nats':
-            url = urllib.parse.urlsplit(environment[key])
-            if url.scheme != 'nats' or url.username or url.password or url.path or url.query or url.fragment:
-                raise RuntimeError('NATS target must be the plain owned loopback endpoint')
-            actual = url.netloc
-        else:
-            actual = environment[key]
-        if binding['HostIp'] != '127.0.0.1' or actual != wanted:
-            raise RuntimeError('owned service endpoint identity mismatch')
-    return record, environment
+    return owned.read_owned_state(STATE)
 
 
 def sql(record, database, text):

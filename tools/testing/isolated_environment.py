@@ -5,11 +5,13 @@ import errno
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shlex
 import subprocess
 import time
 from urllib.request import ProxyHandler, build_opener
+from urllib.parse import parse_qsl, urlsplit
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 DEFAULT_STATE = REPOSITORY / ".audit-test-environment"
@@ -21,6 +23,7 @@ IMAGES = {
 LABEL = "mcmods.audit.owner"
 TYPESENSE_IMAGE = "typesense/typesense@sha256:316b7e71c21f7e5e5caa8daa150e1b3f2be8c876081ee1f77bc2d92cd7f137d0"
 NATIVE_BINARIES = {"redis": "/usr/local/bin/redis-server", "typesense": "/opt/typesense-server"}
+SERVICE_PORTS = {"postgres": 5432, "redis": 6379, "nats": 4222, "typesense": 8108}
 
 
 def docker(*arguments, capture=False, environment_overlay=None):
@@ -48,6 +51,42 @@ def verify_container(name, owner):
     return description
 
 
+def read_owned_state(state):
+    record = json.loads((state / "resources.json").read_text())
+    environment = json.loads((state / "environment.json").read_text())
+    if not re.fullmatch(r"[a-f0-9]{32}", record.get("owner", "")) or not re.fullmatch(r"test_mcmods_audit_[a-f0-9]{16}", record.get("database", "")):
+        raise RuntimeError("state is not an owned isolated environment record")
+    containers = record["containers"]
+    if set(containers) not in ({"postgres", "redis", "nats"}, set(SERVICE_PORTS)):
+        raise RuntimeError("owned environment service inventory is incomplete")
+    endpoints = {}
+    for name, identifier in containers.items():
+        info = verify_container(identifier, record["owner"])
+        bindings = info["NetworkSettings"]["Ports"].get(f"{SERVICE_PORTS[name]}/tcp")
+        if not bindings or len(bindings) != 1 or bindings[0]["HostIp"] != "127.0.0.1":
+            raise RuntimeError("owned services must have one loopback binding per endpoint")
+        endpoints[name] = bindings[0]["HostPort"]
+    try:
+        database = urlsplit(environment["DATABASE_URL"])
+        same_database = (database.scheme == "postgres" and database.hostname == "127.0.0.1"
+                         and database.port == int(endpoints["postgres"]) and database.username == "mcmods"
+                         and database.path == "/" + record["database"] and not database.fragment
+                         and parse_qsl(database.query) == [("sslmode", "disable")]
+                         and environment["DATABASE_URL"] == environment["MCMODS_TEST_DATABASE_URL"])
+    except (KeyError, ValueError):
+        same_database = False
+    if not same_database:
+        raise RuntimeError("configured PostgreSQL target does not match the owned PostgreSQL endpoint")
+    if (environment.get("REDIS_ADDR") != "127.0.0.1:" + endpoints["redis"]
+            or environment.get("NATS_URL") != "nats://127.0.0.1:" + endpoints["nats"]
+            or environment.get("MCMODS_TEST_NATS_URL", environment["NATS_URL"]) != environment["NATS_URL"]):
+        raise RuntimeError("configured Redis or NATS target is outside the owned environment")
+    typesense = "http://127.0.0.1:" + endpoints["typesense"] if "typesense" in endpoints else None
+    if environment.get("MCMODS_TEST_TYPESENSE_URL") != typesense:
+        raise RuntimeError("configured Typesense target is outside the owned environment")
+    return record, environment
+
+
 def ready_typesense(address):
     client = build_opener(ProxyHandler({}))
     for _ in range(60):
@@ -71,7 +110,7 @@ def up(state, go_binary, real_services=False):
     database_password = secrets.token_urlsafe(32)
     record = {"owner": owner, "database": database, "containers": {}}
     write_private(state / "resources.json", json.dumps(record, indent=2) + "\n")
-    ports = {"postgres": 5432, "redis": 6379, "nats": 4222}
+    ports = {service: SERVICE_PORTS[service] for service in IMAGES}
     images = dict(IMAGES)
     commands = {"postgres": ["postgres", "-c", "max_locks_per_transaction=512"],
                 "redis": ["redis-server", "--save", "", "--appendonly", "no"],
@@ -159,11 +198,11 @@ def up(state, go_binary, real_services=False):
 def run(state, command):
     if not command:
         raise RuntimeError("run requires a command after --")
-    record = json.loads((state / "resources.json").read_text())
-    for container_id in record["containers"].values():
-        verify_container(container_id, record["owner"])
-    environment = json.loads((state / "environment.json").read_text())
-    return subprocess.run(command, cwd=REPOSITORY, env=os.environ | environment).returncode
+    _, environment = read_owned_state(state)
+    controlled = {"MCMODS_TEST_NATS_URL", "MCMODS_TEST_TYPESENSE_URL", "MCMODS_TEST_TYPESENSE_API_KEY",
+                  "MCMODS_TEST_REDIS_BINARY", "MCMODS_TEST_TYPESENSE_BINARY"}
+    inherited = {key: value for key, value in os.environ.items() if key not in controlled}
+    return subprocess.run(command, cwd=REPOSITORY, env=inherited | environment).returncode
 
 
 def down(state):

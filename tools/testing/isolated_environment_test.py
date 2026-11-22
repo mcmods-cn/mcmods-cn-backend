@@ -8,6 +8,30 @@ import isolated_environment as environment
 
 
 class EnvironmentOwnershipTests(unittest.TestCase):
+    def test_run_refuses_an_environment_pointing_outside_its_labelled_services(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            database = "test_mcmods_audit_0123456789abcdef"
+            (state / "resources.json").write_text(json.dumps({
+                "owner": "a" * 32, "database": database,
+                "containers": {"postgres": "p", "redis": "r", "nats": "n"},
+            }))
+            url = "postgres://mcmods:synthetic@not-the-owned-db.example.test:15432/" + database + "?sslmode=disable"
+            (state / "environment.json").write_text(json.dumps({
+                "DATABASE_URL": url, "MCMODS_TEST_DATABASE_URL": url,
+                "REDIS_ADDR": "127.0.0.1:16379", "NATS_URL": "nats://127.0.0.1:14222",
+            }))
+            def owned_container(name, owner):
+                port = {"p": 5432, "r": 6379, "n": 4222}[name]
+                binding = {"HostIp": "127.0.0.1", "HostPort": str(port + 10000)}
+                return {"NetworkSettings": {"Ports": {f"{port}/tcp": [binding]}}}
+
+            with patch.object(environment, "verify_container", side_effect=owned_container), \
+                    patch.object(environment.subprocess, "run") as command:
+                with self.assertRaisesRegex(RuntimeError, "owned PostgreSQL"):
+                    environment.run(state, ["synthetic-integration-command"])
+                command.assert_not_called()
+
     def test_real_service_profile_uses_owned_containers_for_endpoints_and_native_binaries(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "services"
