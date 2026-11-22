@@ -190,6 +190,16 @@ func (s *Server) requireCommentLogShareVisibility(ctx context.Context, record lo
 	if err != nil {
 		return err
 	}
+	// Governance bans can leave the account active. Resolve the author's
+	// current permissions so expiry takes effect without a cleanup job.
+	_, permissions, err := s.resolveUserRootPermissionsUncached(ctx, *record.OwnerID)
+	if err != nil {
+		return err
+	}
+	author := security.Claims{Subject: *record.OwnerID, PermissionRules: permissions}
+	if claimsExplicitlyAllow(author, "account.banned") {
+		return pgx.ErrNoRows
+	}
 	_, err = s.resolveCommentTargetByInternal(ctx, target.Type, target.InternalID, target.VersionID, viewer)
 	return err
 }

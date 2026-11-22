@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCommentLogAttachmentReadyShareRespectsCurrentVisibilityIntegration(t *testing.T) {
@@ -116,6 +117,39 @@ func TestStandaloneAndCommentLogShareHaveSeparateVisibilityIntegration(t *testin
 	if !found || code == "" {
 		t.Fatal("comment did not get its scoped short link")
 	}
+	assertTestCommentLogRead(t, f, "", code, http.StatusOK)
+
+	// A governance ban is an expiring role binding. The author remains active.
+	authorID := f.userIDs[f.editor]
+	var authorPublicID string
+	if err := f.db.QueryRow(f.ctx, `select public_id from users where id=$1`, authorID).Scan(&authorPublicID); err != nil {
+		t.Fatal(err)
+	}
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.reviewer], "ban.create")
+	endsAt := time.Now().Add(5 * time.Minute)
+	f.require(t, f.reviewer, http.MethodPost, "/api/v1/admin/bans", createBanRequest{
+		UserID: authorPublicID, ReasonCode: "malicious_spam", EndsAt: &endsAt,
+	}, http.StatusCreated)
+	var status string
+	if err := f.db.QueryRow(f.ctx, `select status from users where id=$1`, authorID).Scan(&status); err != nil || status != "active" {
+		t.Fatalf("governance ban should leave the fixture author's status active: %q, %v", status, err)
+	}
+	assertTestCommentLogRead(t, f, "", code, http.StatusNotFound)
+	assertTestCommentLogRead(t, f, "", standalone.Items[0].PublicCode, http.StatusOK)
+
+	// Move just this fixture's enforcement window into the past without
+	// running cleanup. Reads must observe expiry even with an active ban row.
+	tag, err := f.db.Exec(f.ctx, `with elapsed as (
+		update ban_records set starts_at=now()-interval '3 minutes',ends_at=now()-interval '1 minute'
+		where user_id=$1 and status='active' returning id,user_id,ends_at
+	) update user_role_bindings binding set expires_at=elapsed.ends_at from elapsed
+		where binding.user_id=elapsed.user_id and binding.source=$2 and binding.source_key=elapsed.id::text`,
+		authorID, authorizationSourceGovernanceBan)
+	if err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("move the owned fixture ban window into the past: %v, %v", tag, err)
+	}
+	assertTestCommentLogRead(t, f, "", code, http.StatusOK)
+
 	hideTestCommentLogTarget(t, f, "comment", comment.ID)
 	assertTestCommentLogRead(t, f, "", code, http.StatusNotFound)
 	assertTestCommentLogRead(t, f, "", standalone.Items[0].PublicCode, http.StatusOK)
