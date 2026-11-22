@@ -136,7 +136,7 @@ func openAccessOwnedMigratedFixture(t *testing.T, ctx context.Context, connectio
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = database.Migrate(ctx, pool); err != nil {
+	if err = database.Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("ACCESS_OWNED_FIXTURE_DATABASE name=%s oid=%d owner=%s nonce=%s maxConns=1", identity.Name, identity.OID, identity.Owner, identity.Marker)

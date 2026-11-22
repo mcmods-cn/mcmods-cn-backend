@@ -17,7 +17,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
-	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/queue"
 	"mcmods-cn-backend/internal/security"
 )
@@ -28,9 +27,6 @@ func TestTEST048GovernanceHTTPPermissionsConcurrencyAndTransactionsIntegration(t
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	pool := newTEST018IsolatedDatabase(t, ctx)
-	if err := database.SeedRBAC(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
 	cfg := config.Load()
 	cfg.JWTSecret = "test048-only-jwt-signing-secret"
 	cfg.SettingsEncryptionKey = "test048-only-encryption-key-32-bytes"

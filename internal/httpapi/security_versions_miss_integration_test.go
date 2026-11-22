@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"mcmods-cn-backend/internal/config"
-	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/querycache"
 )
 
@@ -45,9 +44,6 @@ func TestSecurityVersionDelayedRequestCannotAuthorizeNextRequestIntegration(t *t
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	db := newOCT02IsolatedDatabase(t, ctx)
-	if err := database.SeedRBAC(ctx, db); err != nil {
-		t.Fatal(err)
-	}
 	cfg := config.Load()
 	cfg.Redis = securityTestRedis(t)
 	operator, _, adminToken := createTEST044User(t, ctx, db, cfg, "version-manager", "UTC")

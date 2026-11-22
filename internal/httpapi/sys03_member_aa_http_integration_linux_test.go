@@ -21,7 +21,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/antiabuse"
-	"mcmods-cn-backend/internal/database"
 )
 
 // This is a focused production-boundary regression, not a replacement for the
@@ -37,9 +36,6 @@ func TestSYS03MemberRoleRestoreRetainsAntiAbuseGatesHTTPPostgresRedisIntegration
 	writersClosed := true
 	db := sys03MemberAAOwnedDatabase(t, ctx, cfg, private, &writersClosed)
 	sys03MemberAARedisScope(t, ctx, cfg.Redis, private, &writersClosed)
-	if err := database.SeedRBAC(ctx, db); err != nil {
-		sys03MemberAAFail(t, "production_rbac_seed", err)
-	}
 
 	type actor struct {
 		id    int64

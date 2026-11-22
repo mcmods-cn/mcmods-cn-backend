@@ -319,7 +319,7 @@ func newTEST031IsolatedDatabase(t *testing.T, ctx context.Context) *pgxpool.Pool
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = database.Migrate(ctx, pool); err != nil {
+	if err = database.Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	return pool

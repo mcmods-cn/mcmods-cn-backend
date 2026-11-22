@@ -21,9 +21,6 @@ func Run() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("invalid configuration: %v", err)
 	}
-	if cfg.DB.ResetOnStart && cfg.Env != "development" {
-		log.Fatal("DB_RESET_ON_START is only allowed when APP_ENV=development")
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

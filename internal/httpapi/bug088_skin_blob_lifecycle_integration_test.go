@@ -21,7 +21,7 @@ func TestSharedMinecraftTextureBlobOwnershipReferenceGCAndFreshKeyIntegration(t 
 	pool := openEconomySecurityTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := database.Migrate(ctx, pool); err != nil {
+	if err := database.Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 
@@ -136,7 +136,7 @@ func TestMinecraftTextureRollbackQueuesDurableCompensationIntegration(t *testing
 	pool := openEconomySecurityTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := database.Migrate(ctx, pool); err != nil {
+	if err := database.Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	var puts atomic.Int64
@@ -245,7 +245,7 @@ func TestMinecraftTexturePersistenceAndLastDeleteUseOneLockOrderIntegration(t *t
 	pool := openEconomySecurityTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := database.Migrate(ctx, pool); err != nil {
+	if err := database.Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	setupTx, err := pool.Begin(ctx)

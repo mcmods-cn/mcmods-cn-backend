@@ -102,7 +102,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "邮箱验证码格式不正确")
 		return
 	}
-	if len(req.Password) < 8 || len(req.Password) > 1024 {
+	if !security.ValidPasswordLength(req.Password) {
 		writeError(w, http.StatusBadRequest, "密码长度需要在 8 到 1024 字节之间")
 		return
 	}

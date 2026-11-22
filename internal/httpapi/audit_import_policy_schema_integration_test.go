@@ -40,7 +40,7 @@ func TestAuditImportPolicyFreshAndExistingMigrationIntegration(t *testing.T) {
 	if _, err := db.Exec(ctx, `alter table catalog_import_jobs drop column requested_publication_mode`); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.Migrate(ctx, db); err == nil || !strings.Contains(err.Error(), "catalog import policy extension required") {
+	if err := database.Initialize(ctx, db); err == nil || !strings.Contains(err.Error(), "catalog import policy extension required") {
 		t.Fatalf("old schema startup did not return the specific execution-policy preflight error: %v", err)
 	}
 	if _, err := db.Exec(ctx, `insert into catalog_import_jobs(id,mod_id,package_id,target_version_id,importer_version,created_by) values('legacy-policy-job',$1,'policy-package',$2,'fixture/v1',$3)`, mod, version, user); err != nil {
@@ -92,7 +92,7 @@ func TestAuditImportPolicyFreshAndExistingMigrationIntegration(t *testing.T) {
 			t.Fatalf("invalid mode returned unrelated error: %v", err)
 		}
 	}
-	if err := database.Migrate(ctx, db); err != nil {
+	if err := database.Initialize(ctx, db); err != nil {
 		t.Fatalf("upgraded schema startup: %v", err)
 	}
 	if _, err := db.Exec(ctx, `alter table catalog_import_jobs alter column requested_publication_mode drop not null`); err != nil {

@@ -109,17 +109,8 @@ func initializeApplicationRuntime(ctx context.Context, cfg config.Config) (*appl
 		}
 	}()
 
-	if cfg.DB.ResetOnStart {
-		if err = database.ResetDevelopmentSchema(ctx, db); err != nil {
-			return nil, databaseInitializationError("reset development database", err)
-		}
-		log.Print("development database schema reset completed")
-	}
-	if err = database.Migrate(ctx, db); err != nil {
-		return nil, databaseInitializationError("migrate database", err)
-	}
-	if err = database.SeedRBAC(ctx, db); err != nil {
-		return nil, databaseInitializationError("seed permissions", err)
+	if err = database.Initialize(ctx, db); err != nil {
+		return nil, databaseInitializationError("check application database baseline", err)
 	}
 	natsCfg, err := database.LoadNATSConfig(ctx, db, cfg.NATS, cfg.SettingsEncryptionKey)
 	if err != nil {

@@ -38,7 +38,7 @@ func TestBackendCIDeliveryContract(t *testing.T) {
 		}
 	}
 	initAction := read(".github/actions/initialize-test-database/action.yml")
-	for _, required := range []string{"APP_ENV: development", "DB_RESET_ON_START: \"true\"", "DB_RESET_CONFIRM: RESET mcmods_test", "go run ./cmd/db-reset"} {
+	for _, required := range []string{"APP_ENV: test", "MCMODS_SKIP_DOTENV: \"true\"", "go run ./cmd/db-initialize"} {
 		if !strings.Contains(initAction, required) {
 			t.Errorf("CI test initialization is missing %q", required)
 		}

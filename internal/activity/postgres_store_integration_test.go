@@ -155,7 +155,7 @@ func TestDurableOutboxSurvivesProducerAndDrainsExactlyOnceAcrossWorkers(t *testi
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err = database.Migrate(ctx, pool); err != nil {
+	if err = database.Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 
@@ -247,7 +247,7 @@ func TestDurableOutboxConcurrentLoadIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err = database.Migrate(ctx, pool); err != nil {
+	if err = database.Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 

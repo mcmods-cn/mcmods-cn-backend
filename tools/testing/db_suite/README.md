@@ -11,8 +11,8 @@ remain visible on stderr and cannot become test package names; a failed
 `go list` stops the runner instead of using a partial list.
 
 Use only an owned, fully initialized loopback test database. Initialize a new
-empty database with the guarded `cmd/db-reset` development workflow first,
-then clear both reset variables and set:
+empty database with `go run ./cmd/db-initialize` using the same configuration
+as the API and set:
 
 ```text
 APP_ENV=test

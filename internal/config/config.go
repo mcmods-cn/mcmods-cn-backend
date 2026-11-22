@@ -65,17 +65,15 @@ type StickerConfig struct {
 }
 
 type DBConfig struct {
-	Host         string
-	Port         string
-	Name         string
-	User         string
-	Password     string
-	SSLMode      string
-	URL          string
-	ResetOnStart bool
-	ResetConfirm string
-	MaxConns     int32
-	MinConns     int32
+	Host     string
+	Port     string
+	Name     string
+	User     string
+	Password string
+	SSLMode  string
+	URL      string
+	MaxConns int32
+	MinConns int32
 }
 
 // ActivityConfig controls the bounded best-effort view pipeline and the
@@ -227,17 +225,15 @@ func Load() Config {
 		SettingsEncryptionKey: getenv("SETTINGS_ENCRYPTION_KEY", defaultDevelopmentSettingsEncryptionKey),
 		JWTTTL:                time.Duration(getenvInt("JWT_TTL_HOURS", 24)) * time.Hour,
 		DB: DBConfig{
-			Host:         getenv("DB_HOST", "127.0.0.1"),
-			Port:         getenv("DB_PORT", "5432"),
-			Name:         getenv("DB_NAME", "mcmods"),
-			User:         getenv("DB_USER", "mcmods"),
-			Password:     os.Getenv("DB_PASSWORD"),
-			SSLMode:      getenv("DB_SSLMODE", "disable"),
-			URL:          os.Getenv("DATABASE_URL"),
-			ResetOnStart: getenvBool("DB_RESET_ON_START", false),
-			ResetConfirm: strings.TrimSpace(os.Getenv("DB_RESET_CONFIRM")),
-			MaxConns:     int32(getenvInt("DB_MAX_CONNS", 12)),
-			MinConns:     int32(getenvInt("DB_MIN_CONNS", 2)),
+			Host:     getenv("DB_HOST", "127.0.0.1"),
+			Port:     getenv("DB_PORT", "5432"),
+			Name:     getenv("DB_NAME", "mcmods"),
+			User:     getenv("DB_USER", "mcmods"),
+			Password: os.Getenv("DB_PASSWORD"),
+			SSLMode:  getenv("DB_SSLMODE", "disable"),
+			URL:      os.Getenv("DATABASE_URL"),
+			MaxConns: int32(getenvInt("DB_MAX_CONNS", 12)),
+			MinConns: int32(getenvInt("DB_MIN_CONNS", 2)),
 		},
 		Activity: ActivityConfig{
 			BatchSize:             getenvInt("ACTIVITY_BATCH_SIZE", 256),
@@ -422,8 +418,7 @@ func (db DBConfig) ConnString() string {
 }
 
 // EffectiveName returns the database name that the connection string will
-// actually use. Destructive development reset validation must not trust
-// DB_NAME when DATABASE_URL overrides it.
+// actually use, including the DATABASE_URL override.
 func (db DBConfig) EffectiveName() (string, error) {
 	if strings.TrimSpace(db.URL) == "" {
 		name := strings.TrimSpace(db.Name)
@@ -435,7 +430,7 @@ func (db DBConfig) EffectiveName() (string, error) {
 	parsed, err := url.Parse(db.URL)
 	if err != nil {
 		// URL parse errors can include the complete connection string. This
-		// diagnostic is included in startup/reset validation logs.
+		// diagnostic may be included in maintenance logs.
 		return "", errors.New("DATABASE_URL is not a valid URL")
 	}
 	name := strings.TrimPrefix(strings.TrimSpace(parsed.Path), "/")
@@ -452,23 +447,6 @@ func (cfg Config) Validate() error {
 	case "development", "test", "staging", "production":
 	default:
 		problems = append(problems, fmt.Errorf("unsupported APP_ENV %q", cfg.Env))
-	}
-	if cfg.DB.ResetOnStart && environment != "development" {
-		problems = append(problems, errors.New("DB_RESET_ON_START is only allowed in development"))
-	}
-	if cfg.DB.ResetOnStart {
-		databaseName, err := cfg.DB.EffectiveName()
-		if err != nil {
-			problems = append(problems, fmt.Errorf("cannot validate reset database name: %w", err))
-		} else {
-			lowerName := strings.ToLower(databaseName)
-			if strings.Contains(lowerName, "prod") || strings.Contains(lowerName, "production") {
-				problems = append(problems, errors.New("refusing to reset a database whose name contains prod or production"))
-			}
-			if cfg.DB.ResetConfirm != "RESET "+databaseName {
-				problems = append(problems, fmt.Errorf("DB_RESET_CONFIRM must equal %q", "RESET "+databaseName))
-			}
-		}
 	}
 	if cfg.ReplicaCount < 1 || cfg.ReplicaCount > 1000 {
 		problems = append(problems, errors.New("APP_REPLICA_COUNT must be between 1 and 1000"))

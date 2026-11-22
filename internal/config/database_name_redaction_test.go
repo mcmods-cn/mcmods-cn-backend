@@ -12,7 +12,7 @@ func TestInvalidDatabaseNameDoesNotExposeConnectionCredentials(t *testing.T) {
 	}
 	for _, secret := range []string{"synthetic-user", "synthetic-password", "synthetic-query-secret"} {
 		if strings.Contains(err.Error(), secret) {
-			t.Fatal("invalid connection URL was included in the reset validation diagnostic")
+			t.Fatal("invalid connection URL was included in the database name diagnostic")
 		}
 	}
 }

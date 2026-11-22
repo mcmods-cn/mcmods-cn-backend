@@ -111,7 +111,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err = database.Migrate(context.Background(), pool); err != nil {
+	if err = database.Initialize(context.Background(), pool); err != nil {
 		t.Fatal(err)
 	}
 	var existingRevisionID, existingItemID string

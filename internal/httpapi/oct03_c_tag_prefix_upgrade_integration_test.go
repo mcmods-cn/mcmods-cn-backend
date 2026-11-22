@@ -43,7 +43,7 @@ func TestOCT03CTagPrefixUpgradePreservesOldDataAndIndexesIntegration(t *testing.
 	}
 	// Existing generation 168 remains runnable, but startup is not a migration
 	// that silently applies this new concurrent index to an installed database.
-	if err := database.Migrate(f.ctx, f.db); err != nil {
+	if err := database.Initialize(f.ctx, f.db); err != nil {
 		t.Fatal(err)
 	}
 	oct03CRequirePrefixIndex(t, f, false)

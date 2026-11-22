@@ -15,7 +15,7 @@ func TestSkinCreationReviewPolicyPersistsPendingAndBypassRevisionsIntegration(t 
 	pool := openEconomySecurityTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := database.Migrate(ctx, pool); err != nil {
+	if err := database.Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	tx, err := pool.Begin(ctx)

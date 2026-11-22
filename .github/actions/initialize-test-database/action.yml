@@ -3,10 +3,9 @@ description: Install the complete schema and seeds only in the job-local test se
 runs:
   using: composite
   steps:
-    - name: Initialize schema and seeds with the guarded development reset
+    - name: Install the supported baseline in the job database
       shell: bash
       env:
-        APP_ENV: development
-        DB_RESET_ON_START: "true"
-        DB_RESET_CONFIRM: RESET mcmods_test
-      run: go run ./cmd/db-reset
+        APP_ENV: test
+        MCMODS_SKIP_DOTENV: "true"
+      run: go run ./cmd/db-initialize

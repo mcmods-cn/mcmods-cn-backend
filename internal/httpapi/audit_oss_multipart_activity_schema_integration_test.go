@@ -48,7 +48,7 @@ func TestAuditOSSMultipartActivityFreshExistingAndIdempotentMigrationIntegration
 	if _, err := db.Exec(ctx, `alter table oss_multipart_sessions drop column abort_activity_intent`); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.Migrate(ctx, db); err == nil || !strings.Contains(err.Error(), "OSS multipart activity extension required") {
+	if err := database.Initialize(ctx, db); err == nil || !strings.Contains(err.Error(), "OSS multipart activity extension required") {
 		t.Fatalf("old startup failed at wrong boundary: %v", err)
 	}
 	state, err := database.InspectOSSMultipartActivity(ctx, db)
@@ -83,7 +83,7 @@ func TestAuditOSSMultipartActivityFreshExistingAndIdempotentMigrationIntegration
 			t.Fatal("upgrade rewrote a legacy session")
 		}
 	}
-	if err = database.Migrate(ctx, db); err != nil {
+	if err = database.Initialize(ctx, db); err != nil {
 		t.Fatalf("upgraded startup: %v", err)
 	}
 	for _, raw := range []string{`[]`, `{"version":1}`, `{"version":1,"kind":"oss_multipart_abort","event":{},"id":"` + strings.Repeat("a", 5000) + `","queued":false}`} {

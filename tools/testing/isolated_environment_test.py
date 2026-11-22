@@ -57,9 +57,11 @@ class EnvironmentOwnershipTests(unittest.TestCase):
                     Path(args[2]).write_text("synthetic executable")
 
             with patch.object(environment, "docker", side_effect=fake_docker), \
-                    patch.object(environment, "ready_typesense") as ping, patch.object(environment.subprocess, "run"):
+                    patch.object(environment, "ready_typesense") as ping, patch.object(environment.subprocess, "run") as command:
                 environment.up(state, "go", real_services=True)
                 values = json.loads((state / "environment.json").read_text())
+                self.assertEqual(command.call_args.args[0], ["go", "run", "./cmd/db-initialize", "--bootstrap-admin"])
+                self.assertEqual(command.call_args.kwargs["env"]["DATABASE_URL"], values["DATABASE_URL"])
                 ping.assert_called_once_with(values["MCMODS_TEST_TYPESENSE_URL"])
                 self.assertEqual(set(copied), {"redis:/usr/local/bin/redis-server", "typesense:/opt/typesense-server"})
                 self.assertEqual(values["MCMODS_TEST_NATS_URL"], values["NATS_URL"])
@@ -111,6 +113,23 @@ class EnvironmentOwnershipTests(unittest.TestCase):
                 self.assertEqual(docker.call_args_list[-1].args, ("rm", "-f", "-v", "owned"))
             self.assertEqual(backup.read_text(), "preserved private repair backup")
             self.assertEqual(sorted(path.name for path in state.iterdir()), [backup.name])
+
+    def test_rebuild_provisions_an_independent_scope_after_checking_the_database_owner(self):
+        owner_db = "test_mcmods_audit_0123456789abcdef"
+        record = {"database": owner_db, "containers": {"postgres": "verified-pg", "typesense": "verified-search"}}
+        state, replacement = Path("existing"), Path("replacement")
+        with patch.object(environment, "read_owned_state", return_value=(record, {})) as verified, \
+                patch.object(environment, "docker", return_value=f"{owner_db}|another_role\n") as docker, \
+                patch.object(environment, "up") as up, patch.object(environment, "down") as down:
+            with self.assertRaisesRegex(RuntimeError, "database name or owner"):
+                environment.rebuild(state, replacement, "go")
+            up.assert_not_called()
+            docker.return_value = f"{owner_db}|mcmods\n"
+            environment.rebuild(state, replacement, "go")
+            self.assertEqual(verified.call_args.args, (state,))
+            self.assertEqual(docker.call_args.args[:7], ("exec", "verified-pg", "psql", "-XAt", "-U", "mcmods", "-d"))
+            up.assert_called_once_with(replacement, "go", real_services=True)
+            down.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ func TestInsertCommentTreeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if err = database.Migrate(ctx, db); err != nil {
+	if err = database.Initialize(ctx, db); err != nil {
 		t.Fatal(err)
 	}
 	var recentCommentIndex *string

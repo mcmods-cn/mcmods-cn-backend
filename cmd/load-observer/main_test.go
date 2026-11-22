@@ -155,7 +155,7 @@ func TestLoadObserverConfigurationAndFailureExitAreDocumented(t *testing.T) {
 			t.Fatalf(".env.example is missing %q", required)
 		}
 	}
-	for _, required := range []string{"DATABASE_URL", "DB_RESET_CONFIRM", "exit nonzero", "MCMODS_OBSERVER_OUTPUT"} {
+	for _, required := range []string{"DATABASE_URL", "read-only", "exit nonzero", "MCMODS_OBSERVER_OUTPUT"} {
 		if !bytes.Contains(documentation, []byte(required)) {
 			t.Fatalf("load observer documentation is missing %q", required)
 		}

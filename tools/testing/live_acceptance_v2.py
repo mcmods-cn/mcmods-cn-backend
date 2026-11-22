@@ -375,7 +375,7 @@ def prepare():
                 'TYPESENSE_API_KEY','YGGDRASIL_PRIVATE_KEY_BASE64','TURNSTILE_SECRET_KEY','TURNSTILE_SITE_KEY'):
         environment[key] = ''
     environment.update(DATABASE_URL=child_url, MCMODS_TEST_DATABASE_URL=child_url,
-                       DB_NAME=database, DB_RESET_ON_START='false', DB_RESET_CONFIRM='', APP_ENV='test',
+                       DB_NAME=database, APP_ENV='test',
                        SEED_ADMIN_PASSWORD=secrets.token_urlsafe(32), JWT_SECRET=secrets.token_hex(32),
                        SETTINGS_ENCRYPTION_KEY=secrets.token_hex(32), ANTI_ABUSE_HMAC_SECRET=secrets.token_hex(32),
                        ANTI_ABUSE_IP_HASH_SECRET=secrets.token_hex(32), APP_REPLICA_COUNT='1',
@@ -388,10 +388,9 @@ def prepare():
     record['environment_sha256'] = fingerprint(SCOPE/'environment.json')
     private_json(SCOPE/'scope.json',record)
     build_current()
-    init_env = os.environ | environment | {'GOMAXPROCS': '2', 'APP_ENV': 'development',
-               'DB_RESET_ON_START': 'true', 'DB_RESET_CONFIRM': 'RESET ' + database}
+    init_env = os.environ | environment | {'GOMAXPROCS': '2'}
     with (SCOPE / 'initialize.private.log').open('w') as output:
-        result = subprocess.run(['go', 'run', '-p', '1', './cmd/db-reset'], cwd=BE, env=init_env,
+        result = subprocess.run(['go', 'run', '-p', '1', './cmd/db-initialize', '--bootstrap-admin'], cwd=BE, env=init_env,
                                 stdout=output, stderr=subprocess.STDOUT, timeout=180)
     if result.returncode:
         raise RuntimeError('owned child initialization failed; see private log')
@@ -525,7 +524,7 @@ def guard_scope_environment(parent_environment, record, environment):
     parent_url = urllib.parse.urlsplit(parent_environment['DATABASE_URL'])
     expected_url = urllib.parse.urlunsplit(parent_url._replace(path='/'+record['database']))
     expected = {'DATABASE_URL':expected_url,'MCMODS_TEST_DATABASE_URL':expected_url,
-        'DB_NAME':record['database'],'DB_RESET_ON_START':'false','DB_RESET_CONFIRM':'',
+        'DB_NAME':record['database'],
         'APP_ENV':'test','MCMODS_SKIP_DOTENV':'true','SMTP_ENABLED':'false','TYPESENSE_ENABLED':'false',
         'REDIS_ADDR':parent_environment['REDIS_ADDR'],'REDIS_NAMESPACE':'live_'+nonce,
         'REDIS_ENABLED':'true','NATS_ENABLED':'true','NATS_JETSTREAM_ENABLED':'true',

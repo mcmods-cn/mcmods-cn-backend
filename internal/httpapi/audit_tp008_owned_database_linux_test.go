@@ -81,7 +81,7 @@ func newAuditTP008OwnedDatabase(t *testing.T, ctx context.Context) (*pgxpool.Poo
 		t.Fatal(err)
 	}
 	unlock = auditTP001CredentialDDLLock(t)
-	err = database.Migrate(ctx, pool)
+	err = database.Initialize(ctx, pool)
 	unlock()
 	if err != nil {
 		cleanup()

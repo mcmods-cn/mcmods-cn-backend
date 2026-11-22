@@ -230,7 +230,7 @@ func newTEST033IsolatedDatabase(t *testing.T, ctx context.Context) (*pgxpool.Poo
 		}
 	})
 	pool = newTEST033DatabasePool(t, ctx, databaseName)
-	if err = database.Migrate(ctx, pool); err != nil {
+	if err = database.Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	return pool, databaseName

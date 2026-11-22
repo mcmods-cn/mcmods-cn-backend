@@ -1,6 +1,8 @@
 # 当前 Go 与 Next dev 的真实前后端联通验收
 
-使用 [live_acceptance.py](../../../tools/testing/live_acceptance.py) 编译当前 Go，并将
+本文记录 generation 168 的历史验收。新环境使用[当前隔离验收工具](../../testing-isolated-environment.md)，旧范围缺少数据库创建时的所有权证明时保留供人工核对。
+
+当时使用的 [live_acceptance.py](https://github.com/mcmods-cn/mcmods-cn-backend/blob/d14e10b4dcdeab3c7e2277dd371efa0249888eb8/tools/testing/live_acceptance.py) 编译 Go，并将
 当前前端 app/components/lib/public 与运行配置（含根proxy.ts）复制到独立Next dev目录。统一输入常量同时用于拷贝和运行后校验。浏览器执行前端现有
 `browser-tests/live-backend.mts`，登录、收藏和退出的项目 API 均访问真实 Go 与
 完整 PostgreSQL 子库，没有替换项目 API 响应。此项与生产构建的受控 API 浏览器

@@ -15,7 +15,7 @@ import time
 import unittest
 from unittest import mock
 
-spec = importlib.util.spec_from_file_location("live_acceptance", Path(__file__).with_name("live_acceptance.py"))
+spec = importlib.util.spec_from_file_location("live_acceptance_v2", Path(__file__).with_name("live_acceptance_v2.py"))
 live = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(live)
 
@@ -44,6 +44,10 @@ class AcceptanceGuardTest(unittest.TestCase):
         (live.COPY / "node_modules").mkdir()
         (live.STATE / "resources.json").write_text(json.dumps(self.parent))
         self.write_environment()
+        self.child_identity = {}
+        read_child = mock.patch.object(live, "read_child_database_identity", return_value=self.child_identity)
+        read_child.start()
+        self.addCleanup(read_child.stop)
 
     def write_environment(self):
         (live.STATE / "environment.json").write_text(json.dumps(self.environment))
@@ -52,9 +56,9 @@ class AcceptanceGuardTest(unittest.TestCase):
         self.environment["DATABASE_URL"] = self.environment["DATABASE_URL"].replace("127.0.0.1", "public.invalid")
         self.environment["MCMODS_TEST_DATABASE_URL"] = self.environment["DATABASE_URL"]
         self.write_environment()
-        info = {"NetworkSettings": {"Ports": {"5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "15432"}]}}}
+        info = self.loopback_ports()
         with mock.patch.object(live.owned, "verify_container", return_value=info), mock.patch.object(live, "sql") as sql:
-            with self.assertRaisesRegex(RuntimeError, "identity mismatch"):
+            with self.assertRaisesRegex(RuntimeError, "owned PostgreSQL endpoint"):
                 live.guarded_parent()
             sql.assert_not_called()
 
@@ -68,22 +72,26 @@ class AcceptanceGuardTest(unittest.TestCase):
         self.environment["DATABASE_URL"] += "&host=public.invalid"
         self.environment["MCMODS_TEST_DATABASE_URL"] = self.environment["DATABASE_URL"]
         self.write_environment()
-        info = {"NetworkSettings": {"Ports": {"5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "15432"}]}}}
+        info = self.loopback_ports()
         with mock.patch.object(live.owned, "verify_container", return_value=info), mock.patch.object(live, "sql") as sql:
-            with self.assertRaisesRegex(RuntimeError, "identity mismatch"):
+            with self.assertRaisesRegex(RuntimeError, "owned PostgreSQL endpoint"):
                 live.guarded_parent()
             sql.assert_not_called()
 
     def test_redis_cannot_target_another_service_even_with_owned_pg(self):
         self.environment["REDIS_ADDR"] = "public.invalid:16379"
         self.write_environment()
-        info = {"NetworkSettings": {"Ports": {"5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "15432"}],
-                                               "6379/tcp": [{"HostIp": "127.0.0.1", "HostPort": "16379"}],
-                                               "4222/tcp": [{"HostIp": "127.0.0.1", "HostPort": "14222"}]}}}
+        info = self.loopback_ports()
         with mock.patch.object(live.owned, "verify_container", return_value=info), mock.patch.object(live, "sql") as sql:
-            with self.assertRaisesRegex(RuntimeError, "service endpoint identity mismatch"):
+            with self.assertRaisesRegex(RuntimeError, "outside the owned environment"):
                 live.guarded_parent()
             sql.assert_not_called()
+
+    def loopback_ports(self):
+        return {"NetworkSettings": {"Ports": {
+            f"{port}/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(10000 + port)}]
+            for port in (5432, 6379, 4222)
+        }}}
 
     def test_same_source_copy_is_refused_without_writing_owner_marker(self):
         live.COPY = live.FE
@@ -177,8 +185,7 @@ class AcceptanceGuardTest(unittest.TestCase):
 
     def test_live_runtime_cannot_be_cleaned_by_a_false_stopped_record(self):
         live.SCOPE.mkdir()
-        record = {"parent_owner": self.owner, "parent_container": self.parent["containers"]["postgres"],
-                  "database": "test_mcmods_live_" + secrets.token_hex(10), "created": True, "runtime_started": True}
+        record = self.create_scope_record(runtime_started=True)
         (live.SCOPE / "scope.json").write_text(json.dumps(record))
         (live.SCOPE / "backend-a-live-current-result.json").write_text(json.dumps({"own_process_groups_stopped": False}))
         with mock.patch.object(live, "guarded_parent", return_value=(self.parent, self.environment)), mock.patch.object(live, "sql") as sql, mock.patch.object(live.subprocess, "run") as run:
@@ -189,13 +196,11 @@ class AcceptanceGuardTest(unittest.TestCase):
 
     def scope_environment(self):
         live.SCOPE.mkdir()
-        record = {"parent_owner": self.owner, "parent_container": "owned-postgres",
-                  "database": "test_mcmods_live_" + secrets.token_hex(10), "created": True,
-                  "runtime_started": False, "nonce_namespace": secrets.token_hex(16)}
+        record = self.create_scope_record(runtime_started=False)
         nonce = record["nonce_namespace"]
         url = self.environment["DATABASE_URL"].replace(self.parent["database"], record["database"])
         environment = dict(self.environment, DATABASE_URL=url, MCMODS_TEST_DATABASE_URL=url,
-                           DB_NAME=record["database"], DB_RESET_ON_START="false", DB_RESET_CONFIRM="",
+                           DB_NAME=record["database"],
                            APP_ENV="test", MCMODS_SKIP_DOTENV="true", SMTP_ENABLED="false", TYPESENSE_ENABLED="false",
                            REDIS_ENABLED="true", REDIS_NAMESPACE="live_"+nonce,
                            NATS_ENABLED="true", NATS_JETSTREAM_ENABLED="true",
@@ -210,6 +215,14 @@ class AcceptanceGuardTest(unittest.TestCase):
         (live.SCOPE/"backend-source.json").write_text("{}")
         (live.SCOPE/"frontend-source.json").write_text("{}")
         return record, environment
+
+    def create_scope_record(self, runtime_started):
+        database = "test_mcmods_live_" + secrets.token_hex(10)
+        identity = {"name": database, "oid": 101, "owner": "mcmods", "marker": "mcmods-live-v2-owned:" + secrets.token_hex(16)}
+        self.child_identity.update(identity)
+        return {"parent_owner": self.owner, "parent_container": "owned-postgres", "database": database,
+                "created": True, "runtime_started": runtime_started, "nonce_namespace": secrets.token_hex(16),
+                "cleanup_version": live.CLEANUP_VERSION, "database_creation": dict(identity, proof_state="CONFIRMED")}
 
     def save_scope(self, record, environment):
         live.private_json(live.SCOPE/"environment.json", environment)

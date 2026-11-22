@@ -146,7 +146,7 @@ def up(state, go_binary, real_services=False):
     environment = {
         "MCMODS_SKIP_DOTENV": "true",
         "APP_ENV": "test", "APP_ADDR": "127.0.0.1:8080", "DATABASE_URL": url,
-        "MCMODS_TEST_DATABASE_URL": url, "DB_RESET_ON_START": "false", "DB_RESET_CONFIRM": "",
+        "MCMODS_TEST_DATABASE_URL": url,
         "JWT_SECRET": secrets.token_hex(32), "SETTINGS_ENCRYPTION_KEY": secrets.token_hex(32),
         "SEED_ADMIN_PASSWORD": secrets.token_urlsafe(32),
         "ANTI_ABUSE_HMAC_SECRET": secrets.token_hex(32), "ANTI_ABUSE_IP_HASH_SECRET": secrets.token_hex(32),
@@ -189,9 +189,9 @@ def up(state, go_binary, real_services=False):
             if attempt == 59:
                 raise
             time.sleep(1)
-    init_env = os.environ | environment | {"APP_ENV": "development", "DB_RESET_ON_START": "true",
-                                          "DB_RESET_CONFIRM": "RESET " + database}
-    subprocess.run([go_binary, "run", "./cmd/db-reset"], cwd=REPOSITORY, env=init_env, check=True)
+    _, verified_environment = read_owned_state(state)
+    subprocess.run([go_binary, "run", "./cmd/db-initialize", "--bootstrap-admin"],
+                   cwd=REPOSITORY, env=os.environ | verified_environment, check=True)
     print("Owned services and full schema initialized. Activate:", state / "activate.sh")
 
 
@@ -230,18 +230,36 @@ def down(state):
     print("Removed only this environment's labelled disposable resources.")
 
 
+def rebuild(state, replacement, go_binary):
+    record, _ = read_owned_state(state)
+    identity = docker(
+        "exec", record["containers"]["postgres"], "psql", "-XAt", "-U", "mcmods", "-d", record["database"],
+        "-c", "select current_database(),pg_get_userbyid(datdba) from pg_database where datname=current_database()",
+        capture=True,
+    ).strip()
+    if identity != record["database"] + "|mcmods":
+        raise RuntimeError("PostgreSQL database name or owner does not match the recorded test environment")
+    up(replacement, go_binary, real_services="typesense" in record["containers"])
+    print("The old environment and backups remain available until you run down on its state.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--go", default="go", help="installed project-compatible Go executable")
     parser.add_argument("--real-services", action="store_true", help="also provision Typesense and native test executables on Linux")
-    parser.add_argument("action", choices=("up", "run", "down"))
+    parser.add_argument("--replacement", type=Path, help="new state directory for a rebuilt empty environment")
+    parser.add_argument("action", choices=("up", "run", "down", "rebuild"))
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.action == "up":
         up(args.state.resolve(), args.go, args.real_services)
     elif args.action == "down":
         down(args.state.resolve())
+    elif args.action == "rebuild":
+        if not args.replacement:
+            parser.error("rebuild requires --replacement with an unused state directory")
+        rebuild(args.state.resolve(), args.replacement.resolve(), args.go)
     else:
         command = args.command[1:] if args.command[:1] == ["--"] else args.command
         raise SystemExit(run(args.state.resolve(), command))

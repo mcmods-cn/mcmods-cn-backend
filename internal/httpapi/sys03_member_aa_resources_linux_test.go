@@ -139,7 +139,7 @@ func sys03MemberAAOwnedDatabase(t *testing.T, ctx context.Context, cfg config.Co
 	if err != nil {
 		t.Fatal("owned child database pool unavailable")
 	}
-	if err := database.Migrate(ctx, pool); err != nil {
+	if err := database.Initialize(ctx, pool); err != nil {
 		sys03MemberAAFail(t, "owned_child_migration", err)
 	}
 	return pool
