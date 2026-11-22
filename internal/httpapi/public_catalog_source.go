@@ -8,6 +8,14 @@ import (
 	"mcmods-cn-backend/internal/security"
 )
 
+// publicImportRevisionSQL checks the exact fallback source, aliased as revision.
+// Callers allow independently authorized previews of the requested revision separately.
+const publicImportRevisionSQL = `revision.is_active and revision.status in ('ready','partial')
+	and exists(select 1 from mods source_mod
+		join mod_content_versions source_version on source_version.id=revision.target_version_id
+			and source_version.mod_id=source_mod.id and source_version.status='active'
+		where source_mod.id=revision.mod_id and source_mod.review_status='approved')`
+
 // publicCatalogContext prevents an editor's private project preview from being
 // reused by a public catalog response or its shared cache.
 func publicCatalogContext(ctx context.Context) context.Context {

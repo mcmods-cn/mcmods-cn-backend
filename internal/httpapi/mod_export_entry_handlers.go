@@ -351,7 +351,8 @@ func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID strin
 		join recipe_import_snapshots snapshot on snapshot.id=binding.recipe_snapshot_id
 		join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		cross join preferred
-		where alternative.resource_id=$2 and binding.ingredient_present and (snapshot.revision_id=$1 or revision.is_active)
+		where alternative.resource_id=$2 and binding.ingredient_present
+			and (snapshot.revision_id=$1 or (`+publicImportRevisionSQL+`))
 		group by binding.recipe_snapshot_id,snapshot.recipe_id,snapshot.revision_id,
 			revision.minecraft_version,revision.loader,preferred.minecraft_version,preferred.loader,
 			revision.activated_at,revision.created_at

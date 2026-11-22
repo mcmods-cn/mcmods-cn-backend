@@ -128,7 +128,9 @@ func loadModExportTagMemberPage(
 		left join game_resources resource on resource.entity_id=member.resource_id
 		left join catalog_entities entity on entity.id=resource.entity_id
 		left join lateral (select candidate.* from resource_import_snapshots candidate
+			join catalog_import_revisions revision on revision.id=candidate.revision_id
 			where candidate.resource_id=resource.entity_id
+				and (candidate.revision_id=$1 or (`+publicImportRevisionSQL+`))
 			order by (candidate.revision_id=$1) desc,candidate.created_at desc limit 1) snapshot on true
 		where tag_snapshot.revision_id=$1 and tag_snapshot.tag_id=$2 and ($3='' or member.raw_member_id>$3)
 		order by member.raw_member_id limit $4`, revisionID, tagInternalID, after, limit+1)
