@@ -111,6 +111,7 @@ func TestAuditMSG001And003RealRedisTwoHTTPInstancesColdRestart(t *testing.T) {
 		return response
 	}
 	request := func(index int, path string, want int) *http.Response {
+		t.Helper()
 		return requestWithToken(index, path, want, f.editor)
 	}
 	path := "/api/v1/realtime/events"
@@ -150,20 +151,24 @@ func TestAuditMSG001And003RealRedisTwoHTTPInstancesColdRestart(t *testing.T) {
 	// third/session and a fifth/user while all four established streams live.
 	stopRedis = startAuditRealRedis(t, port)
 	recoveryDeadline := time.Now().Add(5 * time.Second)
-	for {
-		response, err := origins[0].Client().Get(origins[0].URL + "/ready")
-		if err != nil {
-			t.Fatal(err)
+	// Each HTTP instance owns a Redis client. Until that client reconnects,
+	// a quota rejection can also mean its dependency is still unavailable.
+	for index, origin := range origins {
+		for {
+			response, err := origin.Client().Get(origin.URL + "/ready")
+			if err != nil {
+				t.Fatal(err)
+			}
+			status := response.StatusCode
+			response.Body.Close()
+			if status == http.StatusOK {
+				break
+			}
+			if status != http.StatusServiceUnavailable || time.Now().After(recoveryDeadline) {
+				t.Fatalf("replica %d readiness after owned Redis restart: %d", index, status)
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		status := response.StatusCode
-		response.Body.Close()
-		if status == 200 {
-			break
-		}
-		if status != 503 || time.Now().After(recoveryDeadline) {
-			t.Fatalf("readiness did not recover after owned Redis restart: %d", status)
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
 	assertDurableBudget(4, 2)
 	request(0, path, 429).Body.Close()
