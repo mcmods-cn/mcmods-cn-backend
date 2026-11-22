@@ -194,51 +194,7 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 		failureErr := worker.failTask(ctx, msg.TaskID, err)
 		return errors.Join(err, failureErr)
 	}
-	rawResult, err := json.Marshal(result)
-	if err != nil {
-		failureErr := worker.failTask(ctx, msg.TaskID, err)
-		return errors.Join(err, failureErr)
-	}
-	if taskType == aiTaskNotificationTranslation {
-		if err = worker.persistNotificationTranslation(ctx, createdBy, rawPayload, result); err != nil {
-			failureErr := worker.failTask(ctx, msg.TaskID, err)
-			return errors.Join(err, failureErr)
-		}
-	}
-	if taskType == aiTaskContentTranslation {
-		var scope string
-		scope, err = decodeAITaskContentScope(rawPayload)
-		if err == nil {
-			if scope == "community_post" {
-				err = worker.persistCommunityPostTranslation(ctx, msg.TaskID, rawPayload, result)
-			} else {
-				err = worker.persistCatalogContentTranslation(ctx, msg.TaskID, createdBy, rawPayload, result)
-			}
-		}
-		if err != nil {
-			failureErr := worker.failTask(ctx, msg.TaskID, err)
-			return errors.Join(err, failureErr)
-		}
-	}
-	tag, err := worker.db.Exec(
-		ctx,
-		`update ai_tasks
-		 set status = 'completed',
-		     result = $2::jsonb,
-		     quota_reserved_tokens = case when input_tokens+output_tokens>0 then 0 else quota_reserved_tokens end,
-		     finished_at = now(),
-		     updated_at = now()
-		 where id = $1 and status = 'running' and started_at=$3`,
-		msg.TaskID,
-		string(rawResult),
-		run.Started,
-	)
-	if err != nil {
-		failureErr := worker.failTask(ctx, msg.TaskID, err)
-		return errors.Join(err, failureErr)
-	}
-	if tag.RowsAffected() != 1 {
-		err = fmt.Errorf("complete AI task %d: expected one running task, updated %d", msg.TaskID, tag.RowsAffected())
+	if err = worker.completeAITask(ctx, run, taskType, createdBy, rawPayload, result); err != nil {
 		failureErr := worker.failTask(ctx, msg.TaskID, err)
 		return errors.Join(err, failureErr)
 	}
@@ -247,6 +203,50 @@ func (worker *AIWorker) handleTask(ctx context.Context, raw []byte) error {
 	})
 	worker.writeAICallLog(ctx, msg.TaskID, msg.TaskType, provider, model, time.Since(started))
 	return nil
+}
+
+// Complete while the business projection still holds the execution and source locks.
+func (worker *AIWorker) completeAITask(ctx context.Context, run aiTaskExecution, taskType string, createdBy int64, rawPayload []byte, result map[string]any) error {
+	rawResult, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	tx, err := worker.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	switch taskType {
+	case aiTaskNotificationTranslation:
+		if err = persistNotificationTranslationTx(ctx, tx, createdBy, rawPayload, result); err != nil {
+			return err
+		}
+	case aiTaskContentTranslation:
+		scope, err := decodeAITaskContentScope(rawPayload)
+		if err != nil {
+			return err
+		}
+		if scope == "community_post" {
+			err = persistCommunityPostTranslationTx(ctx, tx, run.ID, rawPayload, result)
+		} else {
+			err = persistCatalogContentTranslationTx(ctx, tx, run.ID, createdBy, rawPayload, result)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	tag, err := tx.Exec(ctx, `update ai_tasks
+		set status='completed',result=$2::jsonb,
+			quota_reserved_tokens=case when input_tokens+output_tokens>0 then 0 else quota_reserved_tokens end,
+			finished_at=now(),updated_at=now()
+		where id=$1 and status='running' and started_at=$3`, run.ID, string(rawResult), run.Started)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("complete AI task %d: expected one running task, updated %d", run.ID, tag.RowsAffected())
+	}
+	return tx.Commit(ctx)
 }
 
 func decodeAITaskContentScope(rawPayload []byte) (string, error) {

@@ -494,7 +494,7 @@ func decodeNotificationTranslation(rawPayload []byte, result map[string]any) (no
 	return payload, translated, nil
 }
 
-func (worker *AIWorker) persistNotificationTranslation(ctx context.Context, userID int64, rawPayload []byte, result map[string]any) error {
+func persistNotificationTranslationTx(ctx context.Context, tx pgx.Tx, userID int64, rawPayload []byte, result map[string]any) error {
 	if userID <= 0 {
 		return errors.New("notification translation user is invalid")
 	}
@@ -502,11 +502,6 @@ func (worker *AIWorker) persistNotificationTranslation(ctx context.Context, user
 	if err != nil {
 		return fmt.Errorf("validate notification translation: %w", err)
 	}
-	tx, err := worker.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
 	if _, err = authorizeAITaskExecutionTx(ctx, tx); err != nil {
 		return err
 	}
@@ -527,10 +522,7 @@ func (worker *AIWorker) persistNotificationTranslation(ctx context.Context, user
 		translated["title"],
 		translated["body"],
 	)
-	if err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return err
 }
 
 // Both supplier admission and publication check the notification recipient,

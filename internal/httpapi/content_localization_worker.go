@@ -33,8 +33,9 @@ func decodeContentTranslationTaskPayload(rawPayload []byte) (contentTranslationT
 	return payload, nil
 }
 
-func (worker *AIWorker) persistCatalogContentTranslation(
+func persistCatalogContentTranslationTx(
 	ctx context.Context,
+	tx pgx.Tx,
 	taskID int64,
 	createdBy int64,
 	rawPayload []byte,
@@ -51,13 +52,6 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 	if translated["name"] == "" && translated["summary"] == "" && translated["contentMarkdown"] == "" {
 		return errors.New("catalog translation result is empty")
 	}
-	reviewRequired := loadReviewConfig(ctx, worker.db).AITranslation
-
-	tx, err := worker.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
 	actor, err := authorizeAITaskExecutionTx(ctx, tx)
 	if err != nil {
 		return err
@@ -75,7 +69,7 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 		return err
 	}
 	if alreadyRecorded {
-		return tx.Commit(ctx)
+		return nil
 	}
 	entity, entityID, err := loadEditableContentSubjectTx(ctx, tx, payload.PublicID)
 	if err != nil {
@@ -114,7 +108,7 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 		return errors.New("target localization was edited while translation was running")
 	}
 	reviewStatus := "approved"
-	if reviewRequired {
+	if loadReviewConfig(ctx, tx).AITranslation {
 		reviewStatus = "pending"
 	}
 	taskIDCopy := taskID
@@ -170,7 +164,7 @@ func (worker *AIWorker) persistCatalogContentTranslation(
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func verifyCatalogTranslationRevisionTx(ctx context.Context, tx pgx.Tx, source contentTranslationTaskPayload, entityType string) error {

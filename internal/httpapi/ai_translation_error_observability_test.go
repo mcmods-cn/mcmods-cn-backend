@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestAITranslationsPersistValidatedBusinessResultsBeforeCompletion(t *testing.T) {
+func TestAITranslationReadAndWriteErrorsRemainObservable(t *testing.T) {
 	handlerRaw, err := os.ReadFile("ai_handlers.go")
 	if err != nil {
 		t.Fatal(err)
@@ -25,28 +25,7 @@ func TestAITranslationsPersistValidatedBusinessResultsBeforeCompletion(t *testin
 	}
 	handlers, translation, content, notification := string(handlerRaw), string(translationRaw), string(contentRaw), string(notificationRaw)
 
-	handle := goFunctionBody(t, handlers, "handleTask")
-	persistAt := strings.Index(handle, "persistNotificationTranslation")
-	completeAt := strings.Index(handle, "set status = 'completed'")
-	if persistAt < 0 || completeAt < 0 || persistAt > completeAt {
-		t.Fatal("AI worker still marks a task completed before persisting its business result")
-	}
-	for _, required := range []string{
-		"decodeAITaskContentScope(rawPayload)",
-		"if err = worker.persistNotificationTranslation",
-		"if err != nil",
-		"worker.failTask(ctx, msg.TaskID, err)",
-		"RowsAffected() != 1",
-	} {
-		if !strings.Contains(handle, required) {
-			t.Errorf("AI worker completion boundary is missing %q", required)
-		}
-	}
-	if strings.Contains(handle, "_ = json.Unmarshal") {
-		t.Fatal("AI worker still ignores content task scope JSON errors")
-	}
-
-	persistNotification := goFunctionBody(t, translation, "persistNotificationTranslation") +
+	persistNotification := goFunctionBody(t, translation, "persistNotificationTranslationTx") +
 		goFunctionBody(t, translation, "decodeNotificationTranslation")
 	for _, required := range []string{
 		") error",

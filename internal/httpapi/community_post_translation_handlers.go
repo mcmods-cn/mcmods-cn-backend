@@ -209,7 +209,7 @@ func decodeCommunityPostTranslationTaskPayload(raw []byte) (communityPostTransla
 	return payload, nil
 }
 
-func (worker *AIWorker) persistCommunityPostTranslation(ctx context.Context, taskID int64, rawPayload []byte, result map[string]any) error {
+func persistCommunityPostTranslationTx(ctx context.Context, tx pgx.Tx, taskID int64, rawPayload []byte, result map[string]any) error {
 	payload, err := decodeCommunityPostTranslationTaskPayload(rawPayload)
 	if err != nil {
 		return err
@@ -221,11 +221,6 @@ func (worker *AIWorker) persistCommunityPostTranslation(ctx context.Context, tas
 	if strings.TrimSpace(translated["title"]) == "" || strings.TrimSpace(translated["bodyMarkdown"]) == "" {
 		return errors.New("community post translation result is incomplete")
 	}
-	tx, err := worker.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
 	if _, err = authorizeAITaskExecutionTx(ctx, tx); err != nil {
 		return err
 	}
@@ -236,10 +231,7 @@ func (worker *AIWorker) persistCommunityPostTranslation(ctx context.Context, tas
 		values($1,$2,$3,$4,$5,$6) on conflict(post_id,locale) do update set title=excluded.title,
 		body_markdown=excluded.body_markdown,source_revision_id=excluded.source_revision_id,ai_task_id=excluded.ai_task_id,updated_at=now()`,
 		payload.PostInternalID, normalizeContentLocale(payload.TargetLocale), translated["title"], translated["bodyMarkdown"], payload.SourceRevision, taskID)
-	if err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return err
 }
 
 func lockCommunityTranslationSourceTx(ctx context.Context, tx pgx.Tx, payload communityPostTranslationTaskPayload, raw []byte) error {

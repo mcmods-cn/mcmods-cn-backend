@@ -21,6 +21,8 @@
 业务结果持久化都核验该代次，写业务结果期间持有任务行锁。恢复器把超过
 15 分钟的 running 任务转回 retrying；旧执行者的迟到写入不能覆盖新执行。
 任务超时最多 600 秒，实际 HTTP 请求遵守其 Context 截止时间。
+目录、社区帖子和通知的译文写入与任务结束状态在同一个事务中提交。任何一处写入失败都回滚
+业务结果。仍有有效执行代次时，Worker 单独登记失败；供应商已知用量或未知预留留在原预算账中。
 
 Worker 在预留供应商请求预算的事务中，用 PostgreSQL 当前记录重核请求者状态、封禁、权限及本任务的额度上限。通用后台任务仍要求 `ai.task.enqueue`。内容和通知还须满足各自的翻译权限。社区帖子须在审批通过且有效的版本，私信通知须属于当前请求者，资料对象须符合本地化读取入口的可见性规则。任务中的源文和版本须与当前可读记录一致。结果写回业务对象时再次核验权限与来源。
 
@@ -153,5 +155,9 @@ Community post 的源版本检查与译文写入在同一事务中锁定 active 
 与保护 Token、共享预算竞争、未知用量、任务争用、旧执行者写入、源文变化、
 人工译文保护与删除。仅 HTTP 供应商为确定性替代服务，数据库使用实际 PostgreSQL。
 没有使用生产数据库，没有执行真实付费 AI 请求。
+
+启用 `MCMODS_RUN_DB_INTEGRATION=1` 后，`TestAITranslationProjectionAndTaskCompletionCommitTogetherIntegration`
+使用当前建库入口、任务自有 PostgreSQL 和回环 TLS 服务。分别拒绝三类业务的完成状态写入，验证
+译文和目录审核记录回滚，已确认或未知用量仍留账。正常完成及终态重复投递各有断言。
 
 Content-translation deduplication includes the subject type as well as its internal ID, source language/version, target language and requesting actor. Mod, blueprint, skin and catalog tables have independent ID sequences, so an equal numeric ID cannot reuse another subject type's task. Existing queued tasks remain executable; during a rolling producer upgrade an old-format key and a new-format key may briefly coexist. Source/target publication fencing and quota reservation still apply, but supplier calls are not claimed to be strictly once-only. Draining already queued translations before upgrading producers reduces this compatibility window.
