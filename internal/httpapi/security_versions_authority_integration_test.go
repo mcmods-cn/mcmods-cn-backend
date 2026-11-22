@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/querycache"
@@ -36,14 +37,21 @@ func securityTestRedis(t *testing.T) config.RedisConfig {
 	return cfg
 }
 
-func securityTestReplica(t *testing.T, ctx context.Context, cfg config.Config, db *pgxpool.Pool) *Server {
+func securityTestReplica(t *testing.T, ctx context.Context, cfg config.Config, db *pgxpool.Pool, tracer pgx.QueryTracer) *Server {
 	t.Helper()
+	pc := db.Config()
+	pc.ConnConfig.Tracer = tracer
+	pool, err := pgxpool.NewWithConfig(ctx, pc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
 	cache := querycache.New(cfg.Redis)
 	t.Cleanup(func() { _ = cache.Close() })
 	if err := cache.Ping(ctx); err != nil {
 		t.Fatal(err)
 	}
-	return &Server{db: db, cache: cache, cfg: cfg}
+	return &Server{db: pool, cache: cache, cfg: cfg}
 }
 
 // An earlier refresh reads an old permission version and returns after another
@@ -54,7 +62,7 @@ func TestSecurityVersionDelayedWriterAndColdRedisIntegration(t *testing.T) {
 	db := newOCT02IsolatedDatabase(t, ctx)
 	cfg := config.Load()
 	cfg.Redis = securityTestRedis(t)
-	a, b := securityTestReplica(t, ctx, cfg, db), securityTestReplica(t, ctx, cfg, db)
+	a, b := securityTestReplica(t, ctx, cfg, db, nil), securityTestReplica(t, ctx, cfg, db, nil)
 	id, _, token := createTEST044User(t, ctx, db, cfg, "delayed-version", "UTC")
 	const permission = "fixture.security.read"
 	grantTEST044Permissions(t, ctx, db, id, permission)
@@ -118,17 +126,10 @@ func TestSecurityVersionWarmRequestCostIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	db := newOCT02IsolatedDatabase(t, ctx)
-	pc := db.Config()
 	counter := &integrationQueryCounter{}
-	pc.ConnConfig.Tracer = counter
-	traced, err := pgxpool.NewWithConfig(ctx, pc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(traced.Close)
 	cfg := config.Load()
 	cfg.Redis = securityTestRedis(t)
-	s := securityTestReplica(t, ctx, cfg, traced)
+	s := securityTestReplica(t, ctx, cfg, db, counter)
 	_, _, token := createTEST044User(t, ctx, db, cfg, "warm-request", "UTC")
 	claims, err := security.ParseToken(cfg.JWTSecret, token)
 	if err != nil {
@@ -163,7 +164,7 @@ func TestSecurityVersionCommittedPropagationFailureAcrossReplicasIntegration(t *
 	db := newOCT02IsolatedDatabase(t, ctx)
 	cfg := config.Load()
 	cfg.Redis = securityTestRedis(t)
-	a, b := securityTestReplica(t, ctx, cfg, db), securityTestReplica(t, ctx, cfg, db)
+	a, b := securityTestReplica(t, ctx, cfg, db, nil), securityTestReplica(t, ctx, cfg, db, nil)
 	manager, _, admin := createTEST044User(t, ctx, db, cfg, "asymmetric-manager", "UTC")
 	target, publicID, token := createTEST044User(t, ctx, db, cfg, "asymmetric-member", "UTC")
 	grantTEST044Permissions(t, ctx, db, manager, "permission.write")

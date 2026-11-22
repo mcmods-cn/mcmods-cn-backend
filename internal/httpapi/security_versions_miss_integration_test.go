@@ -57,7 +57,7 @@ func TestSecurityVersionDelayedRequestCannotAuthorizeNextRequestIntegration(t *t
 			id, publicID, token := createTEST044User(t, ctx, db, cfg, "miss-"+kind, "UTC")
 			cfg := cfg
 			cfg.Redis.Namespace += ":" + kind
-			b := securityTestReplica(t, ctx, cfg, db)
+			b := securityTestReplica(t, ctx, cfg, db, nil)
 			exec := func(sql string, args ...any) {
 				t.Helper()
 				if _, err := db.Exec(ctx, sql, args...); err != nil {
@@ -117,17 +117,10 @@ func TestSecurityVersionDelayedRequestCannotAuthorizeNextRequestIntegration(t *t
 				}
 			}
 			barrier := &securityReadBarrier{selectSQL: selectSQL, reached: make(chan struct{}), release: make(chan struct{})}
-			pc := db.Config()
-			pc.ConnConfig.Tracer = barrier
-			delayed, err := pgxpool.NewWithConfig(ctx, pc)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer delayed.Close()
 			var once sync.Once
 			release := func() { once.Do(func() { close(barrier.release) }) }
 			defer release()
-			a := securityTestReplica(t, ctx, cfg, delayed)
+			a := securityTestReplica(t, ctx, cfg, db, barrier)
 			// Register public guards before the schedule so no role metadata changes mid-test.
 			endpoint := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 			gateA, gateB := a.requirePermission(permission, endpoint), b.requirePermission(permission, endpoint)

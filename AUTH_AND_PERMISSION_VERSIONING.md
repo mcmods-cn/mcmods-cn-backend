@@ -15,7 +15,7 @@
 
 认证请求在 PostgreSQL 主库的一条语句内核对会话指纹、该会话的撤销及到期时间、账号状态和 `auth_version`，同时读取用户权限、全站 RBAC 和项目 ACL 的版本。密码重置或封禁会撤销旧令牌。单会话注销只影响该次登录。状态变更提交后才开始的请求能看到新状态。变更之前已开始的请求可能已使用旧快照，需要执行时再授权的操作仍须在业务事务中复核。
 
-成功读取的三个授权版本决定已解析权限的缓存键：
+三个授权版本和用户 ID 一起决定已解析权限的缓存键。
 
 ```text
 authz:2:v{rbacVersion}:acl{projectACLVersion}:user:{userId}:p{permissionVersion}
@@ -38,7 +38,7 @@ authz:2:v{rbacVersion}:acl{projectACLVersion}:user:{userId}:p{permissionVersion}
 
 ## 部署与回滚
 
-本次无需数据库迁移。滚动发布期间保留既有版本提示和登出时的旧 Session 键清理。升级所有负责认证的 HTTP/SSE 实例以及发布安全版本的 Worker，检查 `securityVersions.refreshFailures`。旧实例仍可能接受过期的 Redis 正值，在所有鉴权流量切到新实例后才能确认上述撤权保证。回滚旧二进制将恢复此前的回填窗口，对要求立即撤权的流量应继续使用已修正实例。恢复 Redis 连接后检查已提交操作的数据库状态；503 带 `committed=true` 时避免重复业务写入。
+本次无需数据库迁移。滚动发布期间保留既有版本提示和登出时的旧 Session 键清理。升级所有负责认证的 HTTP/SSE 实例以及发布安全版本的 Worker，检查 `securityVersions.refreshFailures`。旧实例仍可能接受过期的 Redis 正值，在所有鉴权流量切到新实例后才能确认上述撤权保证。回滚旧二进制将恢复此前的回填窗口，对要求立即撤权的流量应继续使用已修正实例。恢复 Redis 连接后应检查已提交操作的数据库状态。503 带 `committed=true` 时避免重复业务写入。所有读端升级且旧版回滚窗口关闭后，可集中移除旧 Session 键清理及版本提示发布。届时须同时调整承诺传播失败的 API、前端恢复逻辑和指标。
 
 ## 前端同步
 

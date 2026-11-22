@@ -14,7 +14,7 @@ func TestRBACCacheHonorsNaturalGrantAndDenyExpirationIntegration(t *testing.T) {
 	db := newOCT02IsolatedDatabase(t, ctx)
 	cfg := config.Load()
 	cfg.Redis = securityTestRedis(t)
-	replicas := []*Server{securityTestReplica(t, ctx, cfg, db), securityTestReplica(t, ctx, cfg, db)}
+	replicas := []*Server{securityTestReplica(t, ctx, cfg, db, nil), securityTestReplica(t, ctx, cfg, db, nil)}
 	if _, err := db.Exec(ctx, `
 		insert into permissions(code,module,name) values ('fixture.view','fixture','View fixture');
 		insert into roles(code,name,parents) values ('fixture_stable','Stable','{}'),
