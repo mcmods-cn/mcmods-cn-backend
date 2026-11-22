@@ -40,6 +40,7 @@ func featureUpdateSchemaStatements() []string {
 			owner_user_id bigint references users(id) on delete cascade,
 			source_type text not null,
 			source_file_id bigint references oss_files(id) on delete set null,
+			comment_scope_id bigint references comments(id) on delete cascade,
 			title text not null default '',
 			original_name text not null default '',
 			status text not null default 'processing',
@@ -51,6 +52,7 @@ func featureUpdateSchemaStatements() []string {
 			expires_at timestamptz not null,
 			deleted_at timestamptz,
 			check(source_type in ('file','paste')),
+			check(source_type='file' or comment_scope_id is null),
 			check(status in ('processing','ready','failed','expired','deleted','source_deleted')),
 			check((source_type='file' and owner_user_id is not null) or
 			      (source_type='paste' and source_file_id is null))
@@ -59,10 +61,12 @@ func featureUpdateSchemaStatements() []string {
 			on log_shares(owner_user_id,created_at desc,id desc) where owner_user_id is not null`,
 		`create index if not exists idx_log_shares_source_file_fk
 			on log_shares(source_file_id)`,
+		`create index if not exists idx_log_shares_comment_scope_fk
+			on log_shares(comment_scope_id) where comment_scope_id is not null`,
 		`create index if not exists idx_log_shares_expiry
 		 on log_shares(expires_at,id) where status in ('processing','ready')`,
 		`create unique index if not exists idx_log_shares_active_source_file
-		 on log_shares(source_file_id,redaction_version)
+		 on log_shares(source_file_id,redaction_version,comment_scope_id) nulls not distinct
 		 where source_file_id is not null and status in ('processing','ready') and deleted_at is null`,
 		`create table if not exists log_share_entries (
 			id bigserial primary key,
