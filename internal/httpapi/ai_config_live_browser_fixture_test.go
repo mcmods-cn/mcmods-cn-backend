@@ -48,6 +48,11 @@ func TestAIConfigLiveBrowserFixture(t *testing.T) {
 		case <-f.ctx.Done():
 			t.Fatal("AI configuration browser did not complete")
 		case <-timer.C:
+			if _, err := os.Stat(filepath.Join(directory, "stop.flag")); err == nil {
+				t.Fatal("browser requested cleanup after an unsuccessful run")
+			} else if !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
 			_, err := os.Stat(filepath.Join(directory, "done.flag"))
 			if os.IsNotExist(err) {
 				continue

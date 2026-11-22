@@ -130,6 +130,27 @@ python3 -B tools/testing/isolated_environment.py --state "$state" run -- \
 每项都必须收到运行和通过事件。跳过、漏选、子项失败或包未正常结束都会使专项失败。
 CI 上传的 JSON Lines 仅含包、测试名、结果、秒数。私有鉴权环境和复制的二进制随服务清理。
 
+### AI 配置的真实浏览器联调
+
+用上面的专用 PostgreSQL 环境，在后端创建新的运行目录。夹具自动创建三个合成身份。
+
+```sh
+export MCMODS_AI_CONFIG_BROWSER_DIR="$(mktemp -d)/run"
+MCMODS_RUN_DB_INTEGRATION=1 MCMODS_RUN_AI_CONFIG_BROWSER=1 \
+  go test -count=1 -timeout=13m -run '^TestAIConfigLiveBrowserFixture$' -v ./internal/httpapi
+```
+
+等待夹具就绪，从 `runtime.json` 取 `apiOrigin`。在前端目录安装锁文件依赖和 Playwright Chromium，
+以此为 `NEXT_PUBLIC_API_BASE_URL`，以 `http://127.0.0.1:3329` 为 `NEXT_PUBLIC_SITE_URL`，
+运行 `npm run dev -- --hostname 127.0.0.1 --port 3329`。生产构建继续要求 HTTPS。另一个终端在后端根运行实际浏览器驱动。
+
+```sh
+node tools/testing/ai_configuration_browser.mjs "$MCMODS_AI_CONFIG_BROWSER_DIR" /absolute/path/to/mcmods-cn-frontend
+```
+
+驱动核对读者零次 PUT、两位管理员同版本打开、写入 200、冲突 409、保留草稿并显式核对后保存 200。
+夹具最终确认 PostgreSQL 同时保留两次修改，AI 任务计数为零。只分发结果和截图，保留运行目录中的会话文件为私有。
+
 ### 真实游戏包经浏览器和 JetStream 的验证
 
 使用已初始化的隔离环境、干净的三个仓库检出和已安装依赖的独立前端目录。

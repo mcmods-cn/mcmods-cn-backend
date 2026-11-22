@@ -31,3 +31,21 @@ class RealServiceReceiptTests(unittest.TestCase):
                                        ("skip", "TestOwned/native"), ("pass", "TestOwned"), ("pass", None)])
         self.assertEqual(len(issues), 1)
         self.assertIn("TestOwned/native: skip", issues[0])
+
+    def test_failed_assertion_only_retains_locations_and_allowed_status_codes(self):
+        events = [
+            dict(Package="pkg", Action="run", Test="TestOwned"),
+            dict(Package="pkg", Action="output", Test="TestOwned",
+                 Output="    realtime_test.go:41: /ready=503 want200: private fixture data\n"),
+            dict(Package="pkg", Action="output", Test="TestOwned",
+                 Output="    realtime_test.go:42: private output: private fixture data\n"),
+            dict(Package="pkg", Action="fail", Test="TestOwned", Elapsed=0.2),
+            dict(Package="pkg", Action="fail"),
+        ]
+        receipt = io.StringIO()
+        self.assertTrue(verify(events, {("pkg", "TestOwned")}, receipt))
+        self.assertNotIn("private fixture data", receipt.getvalue())
+        self.assertEqual(json.loads(receipt.getvalue())["test_locations"], [
+            {"source": "realtime_test.go:41", "path": "/ready", "observed": 503, "expected": 200},
+            {"source": "realtime_test.go:42"},
+        ])

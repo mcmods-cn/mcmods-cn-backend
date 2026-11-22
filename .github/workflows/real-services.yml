@@ -36,7 +36,7 @@ jobs:
             go test -mod=readonly -race -count=1 -p=1 -parallel=1 -timeout=10m -json -run "$cases" \
             ./internal/{httpapi,querycache,queue,searchindex} | \
             python3 -B tools/testing/real_service_cases.py verify | tee "$RUNNER_TEMP/real-service-results.jsonl"
-      - name: Archive test names, outcomes and durations
+      - name: Archive test outcomes and sanitized failure locations
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -1,7 +1,9 @@
 """Select existing Go cases and check their go test -json terminal events."""
 import argparse
 import json
+import re
 import sys
+from collections import defaultdict, deque
 
 
 # These tests either connect to the owned endpoints or start and stop a real
@@ -47,6 +49,9 @@ CASES = {
     ),
 }
 
+ASSERTION_SITE = re.compile(r"^\s*([A-Za-z0-9_]+_test\.go:\d+): (.*)")
+REALTIME_STATUS = re.compile(r"^(/api/v1/realtime/events|/ready|/live)=(\d{3}) want(\d{3}):")
+
 
 def verify(events, expected, receipt):
     packages = {package for package, _ in expected}
@@ -54,6 +59,7 @@ def verify(events, expected, receipt):
     ended = set()
     completed_packages = set()
     issues = []
+    diagnostics = defaultdict(lambda: deque(maxlen=4))
     for event in events:
         action, package, name = event.get("Action"), event.get("Package"), event.get("Test")
         if package not in packages:
@@ -69,9 +75,21 @@ def verify(events, expected, receipt):
             continue
         if action == "run":
             started.add(case)
+        if action == "output":
+            match = ASSERTION_SITE.match(event.get("Output", ""))
+            if match:
+                entry = {"source": match[1]}
+                # Keep literal paths and numbers from the realtime fixture.
+                # Its HTTP response and all other free-form text stay private.
+                status = REALTIME_STATUS.match(match[2])
+                if status:
+                    entry.update(path=status[1], observed=int(status[2]), expected=int(status[3]))
+                diagnostics[case].append(entry)
         if action in ("pass", "fail", "skip"):
-            print(json.dumps({"package": package, "test": name, "action": action,
-                              "seconds": event.get("Elapsed")}), file=receipt)
+            result = {"package": package, "test": name, "action": action, "seconds": event.get("Elapsed")}
+            if action == "fail" and diagnostics[case]:
+                result["test_locations"] = list(diagnostics[case])
+            print(json.dumps(result), file=receipt)
             if case not in started or case in ended or action != "pass":
                 issues.append(f"{package}/{name}: {action} (started={case in started}, duplicate={case in ended})")
             ended.add(case)

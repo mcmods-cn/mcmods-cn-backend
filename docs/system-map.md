@@ -43,3 +43,19 @@
 | 管理员、自动化账号 | 管理动作由权限节点及审计保护。自动化任务用已配置身份，并在执行/发布处重新检查当前授权和状态。特定免审权限与仅可编辑的权限分开。 |
 
 完整角色来源、叠加与撤销见[项目权限](../PROJECT_PERMISSION_MODEL.md)，会话与 RBAC 的版本变化见[认证与授权版本](../AUTH_AND_PERMISSION_VERSIONING.md)。
+
+## 第二轮审查范围
+
+每行列出本轮追踪的用户操作、写入边界和实际检验。业务测试使用任务自有数据库和合成身份。端到端、定向实测与静态阅读的区别见[第二轮验收台账](governance.md)。
+
+| 业务与前端入口 | 后端权威入口、权限与副作用 | 本轮核对及处理 |
+| --- | --- | --- |
+| 创建、编辑、审核 Mod、整合包及六类简单项目，作者认领或团队关系。入口为 `app/mods`、`app/modpacks`、各简单项目目录及后台项目审核 | `createMod`、`createModpack` 和 `createSimpleProject` 写分域表及提交流水。按 `project.edit.<ID>` 等权限编辑。读了 `reviewModRevision` 的变更请求锁与基版检查，`reviewCreatorClaim` 的独立身份规则和 `reviewProjectAuthorshipRelation` 的关系授权。首发或审核变更在同一事务登记活动和所需异步对象处理。 | 真实 PG 回归验证创建或修订的活动回滚、作者独立审核和修订读回失败。目录资料批准在目标锁后另核对现时权限。一般项目修订使用进入请求时已校验的权限，锁等待期间的撤权语义仍应按该业务另验。 |
+| 登录、退出、撤权、OAuth、私有皮肤及启动器接口。入口为 `app/login`、`app/_lib/auth.ts` 和皮肤页 | `cookieRequestOrigin` 校验 Cookie 写入来源，OAuth 使用配对的 state Cookie，`readSessionSubject` 与权限版本同一主库查询。Yggdrasil 使用自己的令牌记录及签名。纹理改写在请求体读取后检查授权，私有图片必须通过所有权与资产可见性。 | 真实 PG/Redis 双实例逐项核对个人授权、RBAC、项目 ACL 和 auth version。真实 HTTP 验证错误的 OAuth 设置不会覆盖密钥、Yggdrasil 私有链和上传期间撤权。真实 OAuth 提供商、签名密钥迁移和启动器联网未执行。 |
+| 项目资料编辑、上传分片、恢复、提交审核、公开目录与游戏渲染。入口为 `app/mods/[siteId]/data`、`mod-export-api.ts` 和 `oss-upload.ts` | `createModExportJob` 在同一事务绑定上传用户、项目、版本、原包与 outbox。Worker 以 `run_token` 领取、续期、入库，批准通过 `publishCatalogRevisionsTx` 应用来源投影。分片完成核对字节与配额，公开读按 approved/active 和来源过滤。 | 实测账号隔离、分片幂等、审核回滚与目录布局。真实游戏包的 ZIP 哈希、实际投递和浏览器像素另列。旧整库 API 仍完整返回，默认 80、最多 100 条的分页入口用于新调用。它们通过同一公开性回归。 |
+| 社区教程、新闻、讨论、反馈，评论评分举报、私信和通知。入口为社区页面、评论控件、`app/messages` 与通知中心 | `createCommunityPost`、`applyCommunityPostSnapshotTx` 管理原文与修订。评论分页限定内容及作者状态。 `sendConversationMessage` 通过 `createDirectMessageTx` 写参与方、锚点和未读，`enqueueNotificationTaskTx` 登记投递。日志附件 Worker 使用原 lease 与发布事务。 | 回归覆盖四类社区创建/审核、成员与封锁、重复及活跃会话通知、入队失败回滚。修复评论附件失败时遗留已发布的脱敏分享。评分去重与举报可见性按既有数据模型核对，真实外部邮件未发。 |
+| 收藏、收藏夹详情、生成和下载 `.mrpack`。入口为 `favorite-api.ts` 的增量保存和账户收藏面板 | `persistFavoriteModpackExportPreview` 及 `loadFavoriteModpackExportPreviewForCreate` 绑定所有者、输入哈希、过期时间及一次消费。导出 Worker 重验 lease，`finalizeFavoriteExportArtifact` 在终态提交通知，未挂接对象有补偿。 | 真实 PG 核对成员变更原子性、过期租约、对象补偿与终态通知。移除一个前端无调用的整集覆盖函数，后端保留兼容 PUT。真实 CDN 流量与所有外部版本的依赖完整性未实测。 |
+| 余额、库存、转账、下载奖励及悬赏。入口为账户统计、悬赏和资料下载 | `lockCurrencyBalancesTx` 按用户 ID 取锁，`applyLockedCurrencyBalanceChangeTx` 同事务更新余额和流水。 `recordOwnedContentDownloadTx` 读取下载配置并同步登记经济事实。 | 定向 PG 核对库存与等级组合、撤销权限、并发悬赏和奖励回滚。现金对账、站点真实历史余额与高峰吞吐留给部署环境。 |
+| AI 配置、翻译、任务恢复和预算。入口为 `admin-ai-settings.tsx`、队列日志和翻译编辑器 | `readAIConfigSetting` 共用解封与数值校验。 `updateAIConfig` 使用 `ai.write` 和锁内版本比较。执行前授权与预算预留由 worker 事务复核，manual 翻译保持优先，重复投递沿现有任务代次。 | 两个真实 HTTP 管理员和只读身份验证预算及字段冲突、空值、密文保留、密钥换源和清理。浏览器验证相同能力。账单使用合成响应，未向供应商请求。供应商已受理但使用量不明时保留既有核对流程。 |
+| 外部项目导入、爬虫、自动更新、服务器探测和搜索。入口为项目编辑器、服务器目录和后台维护 | `ProjectAutomationWorker.processOne` 领取后由 `lockProjectAutomationRunTx` 复核租约、来源和设置。跨池镜像用 `acquireProjectAutomationMirrorSlot`。下载客户端要求受支持 URL，对重定向做同供应商核对和凭据剥离。搜索索引为派生结果，最终可见性回读 PostgreSQL。 | 实测迟到尝试、崩溃次数终止、爬虫心跳及真实 Typesense 的投影与游标。省去更改独立供应商策略。探测器、互联网 CDN、跨节点商业安装分别留验证边界，禁止用当前回环替身代表线上。 |
+| 后台配置、日志分享、蓝图和 Markdown，游戏资源与诊断。入口为 `app/admin`、`app/tools`、资料编辑器与 exporter | `admin-panels.tsx` 管理面板标识、能力和入口。Markdown 跳过原始 HTML，检查链接，draw.io 按用户选择发送，PlantUML 使用固定代理。后端私有原件保持所有权引用，日志共享仅发布脱敏条目。Java 私有诊断文件在导出树外，结构化 manifest 被单独读回。 | 核对设置失败和安全来源、布局重命名的语言字段、评论附件事务。真实 Chromium 实测读/写和移动状态。工具链、游戏样包及分阶段耗时有独立证据，未将弃用历史报告或删除代码量计作验收。 |
