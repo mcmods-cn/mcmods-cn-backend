@@ -736,10 +736,8 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 	var commentID, authorID int64
 	var projectID, targetKind, previousBody string
 	var targetAuthorID int64
-	var acceptedAnswer bool
 	if err := s.db.QueryRow(r.Context(), `select comment.id,comment.author_id,comment.body,
-		coalesce(direct_mod.project_code,direct_modpack.public_id,direct_simple.public_id,resource_mod.project_code,''),coalesce(post.author_id,0),coalesce(post.kind,''),
-		coalesce(post.accepted_comment_id=comment.id,false)
+		coalesce(direct_mod.project_code,direct_modpack.public_id,direct_simple.public_id,resource_mod.project_code,''),coalesce(post.author_id,0),coalesce(post.kind,'')
 		from comments comment
 		left join mods direct_mod on comment.target_type='mod' and direct_mod.id=comment.target_id
 		left join modpacks direct_modpack on comment.target_type='modpack' and direct_modpack.id=comment.target_id
@@ -748,7 +746,7 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 			on comment.target_type='mod_resource' and resource_version.id=comment.target_version_id
 		left join mods resource_mod on resource_mod.id=resource_version.mod_id
 		left join community_posts post on comment.target_type='community_post' and post.id=comment.target_id
-		where comment.id=$1`, visible.ID).Scan(&commentID, &authorID, &previousBody, &projectID, &targetAuthorID, &targetKind, &acceptedAnswer); err != nil {
+		where comment.id=$1`, visible.ID).Scan(&commentID, &authorID, &previousBody, &projectID, &targetAuthorID, &targetKind); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "评论不存在")
 		} else {
@@ -767,10 +765,6 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodDelete && !moderator && !postAuthorModerator &&
 		(authorID != claims.Subject || !claimsAllow(claims, "comment.delete.own")) {
 		writeError(w, http.StatusForbidden, "无权删除这条评论")
-		return
-	}
-	if r.Method == http.MethodDelete && acceptedAnswer {
-		writeError(w, http.StatusConflict, "an accepted answer cannot be deleted")
 		return
 	}
 	switch r.Method {
@@ -825,6 +819,14 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer tx.Rollback(r.Context())
+		// Answer settlement locks the question before the comment. Check the
+		// accepted answer in a fresh statement after acquiring the same lock.
+		if visible.Target.Type == "community_post" {
+			if _, err = tx.Exec(r.Context(), `select id from community_posts where id=$1 for update`, visible.Target.InternalID); err != nil {
+				writeError(w, http.StatusInternalServerError, "删除评论失败")
+				return
+			}
+		}
 		result, err := tx.Exec(r.Context(), `update comments set body='',status='deleted',deleted_at=now(),
 			pinned_at=null,pinned_by=null,updated_at=now()
 			where id=$1 and status<>'deleted'

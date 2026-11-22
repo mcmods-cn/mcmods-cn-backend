@@ -60,6 +60,8 @@ failed，并同步附件 failed；重复恢复不会重新执行已耗尽任务�
 
 评论直达与插眼通知的 outbox 只保存简短提醒与 `/comments/{commentId}`。通知 Worker 在写入前核对接收者、作者、屏蔽和评论目标的当前可见性。已失权的事件记为已处理，重复投递保持原结果。通知记录保留正常类型、聚合和已读状态。深链打开时仍通过评论权限，通知正文和外部翻译输入只包含中性提醒。
 
+处理讨论答案时，采纳和普通删除都先锁所属讨论，再处理评论。删除在取得锁后用新的数据库语句检查采纳结果。已采纳答案保留正文和赏金结算事实。 [评论与赏金回归](../internal/httpapi/community_answer_delete_integration_test.go)
+
 验证：`go test ./internal/httpapi -run 'TestOCT02DeletedBlueprint|TestOCT02UploadCompletion|TestOCT02CommentLogLastAttemptCrash|TestOCT02CommentWatchRead|TestCommentLogAttachment' -count=1`。
 使用专用 PostgreSQL 随机私有 Schema，覆盖访客/所有者/管理员下载拒绝、实际
 advisory lock 等待期间删除及最后一次 attempt 崩溃。`TestCommentNotificationsUseCurrentRecipientVisibilityIntegration`
