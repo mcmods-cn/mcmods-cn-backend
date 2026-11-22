@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -162,5 +163,44 @@ func assertPERF020AssociationWrites(t *testing.T, ctx context.Context, pool *pgx
 		if inserts != want || deletes != 0 {
 			t.Errorf("%s physical writes: inserts=%d want=%d deletes=%d want=0", tableName, inserts, want, deletes)
 		}
+	}
+}
+
+func TestModpackPublicationKeepsDistinctUnresolvedIdentifiersIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "modpack.create")
+	input := perf020ModpackSnapshot("distinct-unresolved-pack", 0)
+	input.Mods = []modpackModPayload{
+		{Provider: "manual", Identifier: "round3_unresolved_alpha", ModName: "Alpha", ClientRequired: true},
+		{Provider: "manual", Identifier: "round3_unresolved_beta", ModName: "Beta", ServerRequired: true},
+		{Provider: "manual", Identifier: "ROUND3_UNRESOLVED_ALPHA", ModName: "Duplicate alpha"},
+	}
+	submitted := decodeTEST022Data[modpackResponse](t, f.require(t, f.editor, http.MethodPost, "/api/v1/modpacks", input, http.StatusCreated))
+	f.require(t, f.reviewer, http.MethodPatch, "/api/v1/content-revisions/"+submitted.SubmissionRevisionID,
+		map[string]string{"status": "approved"}, http.StatusOK)
+	public := decodeTEST022Data[modpackResponse](t, f.require(t, "", http.MethodGet, "/api/v1/modpacks/"+submitted.SiteID, nil, http.StatusOK))
+	var stored []string
+	var references int
+	if err := f.db.QueryRow(f.ctx, `select
+		array_agg(entry.identifier order by entry.display_order),count(reference.id)::int
+		from modpacks pack join modpack_mods entry on entry.modpack_id=pack.id
+		left join unresolved_references reference on reference.source_type='modpack_mod' and reference.source_id=entry.id
+			and reference.status='pending' and reference.normalized_identifier=entry.identifier
+		where pack.public_id=$1`, submitted.PublicID).Scan(&stored, &references); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"round3_unresolved_alpha", "round3_unresolved_beta"}
+	got := make([]string, 0, len(public.Mods))
+	for _, item := range public.Mods {
+		if item.Resolved || item.ModPublicID != "" {
+			t.Fatalf("fixture reference became resolved: %#v", item)
+		}
+		got = append(got, item.Identifier)
+	}
+	if !slices.Equal(got, want) || !slices.Equal(stored, want) || references != len(want) {
+		t.Fatalf("reference list public=%v stored=%v pending=%d; want %v", got, stored, references, want)
+	}
+	if !public.Mods[0].ClientRequired || public.Mods[0].ModName != "Alpha" || !public.Mods[1].ServerRequired {
+		t.Fatalf("first occurrence metadata changed: %#v", public.Mods)
 	}
 }

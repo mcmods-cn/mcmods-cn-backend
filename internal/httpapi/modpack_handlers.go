@@ -722,8 +722,12 @@ func normalizeAndValidateModpackRequestMode(request *createModpackRequest, impor
 	if len(request.GalleryImages) > 32 || len(request.Mods) > 2000 {
 		return errors.New("modpack contains too many gallery images or mods")
 	}
+	type referenceKey struct {
+		modPublicID, provider, providerProjectID, providerVersionID, fileName string
+		fallbackIdentifier                                                    string
+	}
 	mods := make([]modpackModPayload, 0, len(request.Mods))
-	seenMods := map[string]bool{}
+	seenMods := make(map[referenceKey]bool, len(request.Mods))
 	for _, item := range request.Mods {
 		item.ModPublicID = strings.ToLower(strings.TrimSpace(item.ModPublicID))
 		item.Provider = strings.ToLower(strings.TrimSpace(item.Provider))
@@ -739,7 +743,13 @@ func normalizeAndValidateModpackRequestMode(request *createModpackRequest, impor
 			item.ModPublicID == "" && item.ProviderProjectID == "" && item.Identifier == "" {
 			return errors.New("invalid modpack mod reference")
 		}
-		key := item.ModPublicID + "\x00" + item.Provider + "\x00" + item.ProviderProjectID + "\x00" + item.ProviderVersionID + "\x00" + item.FileName
+		key := referenceKey{
+			modPublicID: item.ModPublicID, provider: item.Provider, providerProjectID: item.ProviderProjectID,
+			providerVersionID: item.ProviderVersionID, fileName: item.FileName,
+		}
+		if item.ModPublicID == "" && item.ProviderProjectID == "" {
+			key.fallbackIdentifier = strings.ToLower(item.Identifier)
+		}
 		if seenMods[key] {
 			continue
 		}
