@@ -417,13 +417,18 @@ func validateAIProviderEndpoint(endpoint string) error {
 	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return errors.New("AI provider endpoint must be an HTTP(S) URL without credentials, query, or fragment")
 	}
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production") {
-		address := net.ParseIP(parsed.Hostname())
-		if strings.EqualFold(parsed.Hostname(), "localhost") || (address != nil && address.IsLoopback()) {
-			return errors.New("AI provider loopback endpoints are unavailable in production")
+	hostname := parsed.Hostname()
+	address := net.ParseIP(hostname)
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV"))) {
+	case "production", "staging":
+		if parsed.Scheme != "https" {
+			return errors.New("AI provider endpoints require HTTPS in production and staging")
+		}
+		if strings.EqualFold(hostname, "localhost") || (address != nil && address.IsLoopback()) {
+			return errors.New("AI provider loopback endpoints are unavailable in production and staging")
 		}
 	}
-	if address := net.ParseIP(parsed.Hostname()); address != nil && !address.IsLoopback() &&
+	if address != nil && !address.IsLoopback() &&
 		(address.IsPrivate() || address.IsUnspecified() || address.IsLinkLocalUnicast() || address.IsMulticast()) {
 		return errors.New("AI provider private network endpoints are unavailable")
 	}

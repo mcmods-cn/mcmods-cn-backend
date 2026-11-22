@@ -114,14 +114,34 @@ func TestOCT02AIProviderTimeoutAndDisconnect(t *testing.T) {
 }
 
 func TestOCT02AIProviderEndpointProductionBoundary(t *testing.T) {
-	t.Setenv("APP_ENV", "production")
-	for _, endpoint := range []string{"http://localhost/v1/messages", "http://127.0.0.1/v1/messages", "https://user:password@example.test/v1", "https://example.test/v1?secret=fixture", "file:///etc/hosts"} {
-		if err := validateAIProviderEndpoint(endpoint); err == nil {
-			t.Errorf("unsafe endpoint was accepted: %q", endpoint)
-		}
+	for _, environment := range []string{"production", "staging"} {
+		t.Run(environment, func(t *testing.T) {
+			t.Setenv("APP_ENV", environment)
+			for _, endpoint := range []string{
+				"http://example.test/v1/messages",
+				"http://localhost/v1/messages",
+				"https://127.0.0.1/v1/messages",
+				"https://[::1]/v1/messages",
+				"https://user:password@example.test/v1",
+				"https://example.test/v1?secret=fixture",
+				"file:///etc/hosts",
+			} {
+				if err := validateAIProviderEndpoint(endpoint); err == nil {
+					t.Errorf("unsafe endpoint was accepted: %q", endpoint)
+				}
+			}
+			if err := validateAIProviderEndpoint("https://example.test/v1/messages"); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
-	if err := validateAIProviderEndpoint("https://example.test/v1/messages"); err != nil {
-		t.Fatal(err)
+	for _, environment := range []string{"development", "test"} {
+		t.Run(environment, func(t *testing.T) {
+			t.Setenv("APP_ENV", environment)
+			if err := validateAIProviderEndpoint("http://127.0.0.1:8000/v1/messages"); err != nil {
+				t.Fatalf("loopback provider should remain available: %v", err)
+			}
+		})
 	}
 }
 

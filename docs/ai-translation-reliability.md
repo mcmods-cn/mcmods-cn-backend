@@ -131,10 +131,12 @@ Community post 的源版本检查与译文写入在同一事务中锁定 active 
 
 发送给供应商的 JSON 只含源语言、目标语言和翻译条目。普通条目含 `key`、`text`，权限条目含 `key`、`name`、`description`。入队预留和执行都以这个投影计算 Token。原任务在 PostgreSQL 保留对象标识、修订、额度等字段，供权限、去重及发布核验使用。新写入的 `task_queued` 日志只记录任务标识和类型。既有任务可继续处理，历史日志沿用原保留策略。
 
-AI 端点仅支持 HTTP(S)，拒绝 URL 用户凭据、查询串和 fragment，拒绝私网 IP
-字面量，production 拒绝回环端点。共享供应商 HTTP 客户端负责解析地址、私网
-阻止和同源重定向。该专用客户端不继承 HTTP(S)_PROXY，受管网络需要供应商
-域名直连条件；详细网络边界见 [元数据导入说明](project-metadata-imports.md)。隔离测试的回环端点仅用于 test / development。
+`production` 和 `staging` 要求 AI 供应商使用 HTTPS 和非回环地址。配置保存和每次
+供应商请求都执行相同的端点校验。部署前把开发环境复制来的 HTTP 地址改为 HTTPS，
+并按上文的换源规则更新密钥。隔离测试与本地自托管开发可继续使用 HTTP 回环端点。
+端点拒绝 URL 用户凭据、查询串、片段和私网 IP 字面量。共享客户端负责 DNS、私网地址
+限制和同源重定向，不继承 `HTTP_PROXY` 或 `HTTPS_PROXY`。供应商域名需要可直连。
+[元数据导入的网络边界](project-metadata-imports.md)
 供应商非 2xx 响应仅记录状态码；网络错误剥离请求 URL，避免响应正文或 URL
 携带的敏感信息进入任务错误和日志。
 
