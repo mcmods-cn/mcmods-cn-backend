@@ -26,7 +26,7 @@ func (counter *integrationQueryCounter) TraceQueryStart(ctx context.Context, _ *
 }
 func (*integrationQueryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
-func TestSessionAndRBACCacheHitAvoidsDatabaseLoadersIntegration(t *testing.T) {
+func TestWarmAuthenticationReadsOneAuthorityRowAndReusesPermissionResultIntegration(t *testing.T) {
 	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
 		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1")
 	}
@@ -77,8 +77,8 @@ func TestSessionAndRBACCacheHitAvoidsDatabaseLoadersIntegration(t *testing.T) {
 	if err = server.resolveClaimsSubject(ctx, &second); err != nil {
 		t.Fatal(err)
 	}
-	if got := counter.queries.Load(); got != 0 {
-		t.Fatalf("warm session/RBAC request executed %d PostgreSQL queries", got)
+	if got := counter.queries.Load(); got != 1 {
+		t.Fatalf("warm session/RBAC request executed %d PostgreSQL queries, want one authority snapshot", got)
 	}
 	if got := cache.Metrics().PostgresLoads; got != loadsAfterFirst {
 		t.Fatalf("cache hit caused loader: before=%d after=%d", loadsAfterFirst, got)

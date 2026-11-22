@@ -2,40 +2,19 @@ package httpapi
 
 import (
 	"context"
-	"net"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
-
 	"mcmods-cn-backend/internal/config"
-	"mcmods-cn-backend/internal/querycache"
 )
 
 func TestRBACCacheHonorsNaturalGrantAndDenyExpirationIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	db := newOCT02IsolatedDatabase(t, ctx)
-	cfg := config.Load().Redis
-	if os.Getenv("MCMODS_RUN_REDIS_INTEGRATION") == "1" {
-		host, _, err := net.SplitHostPort(cfg.Addr)
-		if err != nil || !net.ParseIP(host).IsLoopback() {
-			t.Fatal("use an owned loopback Redis server")
-		}
-	} else {
-		cfg.Addr = miniredis.RunT(t).Addr()
-		cfg.Username, cfg.Password, cfg.DB = "", "", 0
-	}
-	cfg.Enabled, cfg.RBACCacheEnabled = true, true
-	cfg.RBACCacheTTL, cfg.Namespace = time.Minute, "rbac-expiry-"+randomHex(10)
-	replicas := []*Server{{db: db, cache: querycache.New(cfg)}, {db: db, cache: querycache.New(cfg)}}
-	for _, server := range replicas {
-		t.Cleanup(func() { _ = server.cache.Close() })
-		if err := server.cache.Ping(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
+	cfg := config.Load()
+	cfg.Redis = securityTestRedis(t)
+	replicas := []*Server{securityTestReplica(t, ctx, cfg, db), securityTestReplica(t, ctx, cfg, db)}
 	if _, err := db.Exec(ctx, `
 		insert into permissions(code,module,name) values ('fixture.view','fixture','View fixture');
 		insert into roles(code,name,parents) values ('fixture_stable','Stable','{}'),

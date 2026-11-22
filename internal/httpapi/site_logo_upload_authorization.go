@@ -89,10 +89,7 @@ func (s *Server) requireSiteLogoUploadPermission(next http.HandlerFunc) http.Han
 		}
 		// A short cross-host delegation checks the parent session directly on
 		// every use, so an out-of-process revocation cannot survive a warm TTL.
-		record, err := s.loadSessionSubject(r.Context(), claims)
-		if err == nil {
-			err = s.resolveClaimsAuthorization(r.Context(), &claims, record.UserID)
-		}
+		err = s.resolveClaimsSubject(r.Context(), &claims)
 		if err != nil {
 			status, code := http.StatusServiceUnavailable, "SITE_LOGO_AUTH_UNAVAILABLE"
 			if errors.Is(err, pgx.ErrNoRows) {

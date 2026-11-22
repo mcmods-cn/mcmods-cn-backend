@@ -98,30 +98,19 @@ func (s *Server) continueOptionalAuthAsGuest(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) resolveClaimsSubject(ctx context.Context, claims *security.Claims) error {
-	record, err := s.resolveCachedSessionSubject(ctx, *claims)
+	var versions permissionVersions
+	userID, err := s.resolveSessionSubject(ctx, *claims, &versions)
 	if err != nil {
 		return err
 	}
-	return s.resolveClaimsAuthorization(ctx, claims, record.UserID)
-}
-
-func (s *Server) resolveClaimsAuthorization(ctx context.Context, claims *security.Claims, userID int64) error {
+	_, rules, err := s.resolveUserRootPermissionsAtVersion(ctx, userID, versions)
+	if err != nil {
+		return err
+	}
 	claims.Subject = userID
-	permissionVersion, err := s.loadPermissionVersion(ctx, claims.Subject)
-	if err != nil {
-		return err
-	}
-	rbacVersion, err := s.loadRBACVersion(ctx)
-	if err != nil {
-		return err
-	}
-	_, permissionRules, err := s.resolveUserRootPermissionsAtVersion(ctx, claims.Subject, permissionVersion, rbacVersion)
-	if err != nil {
-		return err
-	}
-	claims.PermissionRules = permissionRules
-	claims.PermissionVersion = permissionVersion
-	claims.RBACVersion = rbacVersion
+	claims.PermissionRules = rules
+	claims.PermissionVersion = versions.User
+	claims.RBACVersion = versions.RBAC
 	return nil
 }
 

@@ -177,23 +177,22 @@ func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Event checks use the same session cache as ordinary authenticated requests.
-// Heartbeats also query PostgreSQL directly, bounding stale cache exposure after
-// a committed revocation whose cache invalidation failed to one heartbeat.
+// Events and heartbeats compare the live session with its account. Heartbeats
+// additionally bypass denial hints so database outages cannot look healthy.
 func (s *Server) realtimeSessionValid(ctx context.Context, claims security.Claims, authoritative bool) bool {
 	if claims.Subject <= 0 || claims.SessionID == "" || claims.ExpiresAt <= time.Now().Unix() {
 		return false
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	var record cachedSessionSubject
+	var userID int64
 	var err error
 	if authoritative {
-		record, err = s.loadSessionSubject(checkCtx, claims)
+		userID, err = readSessionSubject(checkCtx, s.db, claims, false, nil)
 	} else {
-		record, err = s.resolveCachedSessionSubject(checkCtx, claims)
+		userID, err = s.resolveSessionSubject(checkCtx, claims, nil)
 	}
-	return err == nil && record.UserID == claims.Subject && validCachedSession(record, claims)
+	return err == nil && userID == claims.Subject
 }
 
 func (s *Server) publishRealtimeUser(userID int64, eventType string, data any) {

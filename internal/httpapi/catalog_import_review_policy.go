@@ -16,18 +16,18 @@ func catalogReviewerAllowedTx(ctx context.Context, tx pgx.Tx, claims security.Cl
 	if claims.ExpiresAt <= time.Now().Unix() {
 		return false, pgx.ErrNoRows
 	}
-	session, err := readSessionSubject(ctx, tx, claims, true)
+	userID, err := readSessionSubject(ctx, tx, claims, true, nil)
 	if err != nil {
 		return false, err
 	}
-	if claims.Subject != session.UserID {
+	if claims.Subject != userID {
 		return false, pgx.ErrNoRows
 	}
-	resolved, err := resolveUsersRootPermissionsQuery(ctx, tx, []int64{session.UserID})
+	resolved, err := resolveUsersRootPermissionsQuery(ctx, tx, []int64{userID})
 	if err != nil {
 		return false, err
 	}
-	claims.PermissionRules = resolved[session.UserID].Permissions
+	claims.PermissionRules = resolved[userID].Permissions
 	return !claimsExplicitlyAllow(claims, "account.banned") && canReviewProjectSubmission(claims, projectID, submittedBy), nil
 }
 

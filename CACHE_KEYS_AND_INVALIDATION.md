@@ -4,12 +4,11 @@
 
 | Key（省略公共前缀） | 内容 | 默认 TTL | 失效/重建 |
 |---|---|---:|---|
-| `session:{sha256(sessionToken)}` | 最小 Session、用户状态、auth_version、过期时间 | 60s 且不超过 Session 剩余寿命 | 登出直接删；封禁/密码变更由 auth_version 最迟 10s 生效；未命中回源 PG |
-| `session-invalid:{sha256(token)}` | 无效 Session 负缓存 | 5s | 新建 Session 时清除；数据库故障不写负缓存 |
-| `auth:user-version:{publicId}` | 用户 auth_version | 10s | 密码、封禁、停用或强制退出等安全事实变化 |
-| `versions:rbac` | 持久全局 RBAC 版本 | 10s | 角色/权限/角色权限触发器递增 |
-| `versions:project-acl` | 持久项目关系 ACL 版本 | 10s | 作者/团队项目关系及团队成员关系变化 |
-| `authz:user-version:{id}` | 用户 permission_version | 10s | 用户角色、直接权限、作者认领和编辑员 assignment 变化 |
+| `session:{sha256(sessionToken)}` | 旧版写入的正缓存 | 旧条目的剩余 TTL | 当前鉴权读 PostgreSQL；登出清除此兼容键 |
+| `session-invalid:{sha256(token)}` | 无效 Session 短缓存 | 最长 5s | 上限同时受会话剩余时间与 Session TTL 配置限制，数据库故障不写入 |
+| `session-revoked:{sha256(token)}` | 已提交注销的会话指纹标记 | 至令牌到期 | 认证读库后检查此标记，已开始的旧读取也有机会观察并发注销 |
+| `auth:user-version:{publicId}`、`authz:user-version:{id}` | 用户认证及授权版本的兼容发布提示 | 10s | 凭据、账号状态或用户授权变化后由写者发布 |
+| `versions:rbac`、`versions:project-acl` | 全站权限及项目 ACL 版本的兼容发布提示 | 10s | 角色/权限或项目关系变化后由写者发布。当前鉴权从主库读取所有版本 |
 | `authz:2:v{rbacVersion}:acl{projectACLVersion}:user:{id}:p{permissionVersion}` | 有效来源均无到期时间的角色和权限结果 | 120s | 任一授权版本变化自动换 Key，涉及临时授权的结果每次访问回源 |
 | `limit:{action}:{dimensionHash}` | Lua 原子固定窗口计数 | 窗口长度 | 自动过期；Redis 故障用更严格本地额度 |
 | `presence:user:{id}:sessions` | sessionHash -> 过期时间的 ZSET | 150s 滑动 | 心跳清理过期成员；登出删除会话成员 |
@@ -29,11 +28,11 @@
 
 ## 故障降级
 
-- Session/RBAC/设置/卡片：回源 PostgreSQL，并用 singleflight 合并同进程热点回源。
+- 每次会话认证读取主库。稳定 RBAC 结果按当前版本共享，临时授权由当前调用单独核验。设置和卡片沿用各自的热点回源合并。
 - 认证限流：切换更严格的有界本地计数，记录 `rateLimitFallbacks`，不无限放行。
 - Presence：使用单机短期状态；不把每个心跳改写 PostgreSQL，对外遵守隐藏/安全降级。
 - 未读：短期进程缓存命中则使用；否则一次合并 PG 查询重建，禁止恢复成前端每 20 秒两个 COUNT；后台游标批次与管理员接口可主动校准。
-- Redis 清空：所有 Key 可由 PostgreSQL事实或新心跳自动重建。
+- Redis 重启后，从当前 PostgreSQL 事实重建可缓存结果。安全版本提示在后续成功发布时恢复，Presence 由新心跳形成。
 
 ## 指标
 

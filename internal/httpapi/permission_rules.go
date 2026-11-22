@@ -41,33 +41,21 @@ type resolvedUserRootPermissions struct {
 // authorization. It resolves active direct roles, inherited/template roles,
 // rule priority and direct user allow/deny overrides.
 func (s *Server) resolveUserRootPermissions(ctx context.Context, userID int64) ([]string, []security.PermissionRule, error) {
-	permissionVersion, err := s.loadPermissionVersion(ctx, userID)
-	if err != nil {
-		return nil, nil, err
-	}
-	return s.resolveUserRootPermissionsVersion(ctx, userID, permissionVersion)
-}
-
-func (s *Server) resolveUserRootPermissionsVersion(ctx context.Context, userID, permissionVersion int64) ([]string, []security.PermissionRule, error) {
 	if !s.cache.Config().RBACCacheEnabled {
 		return s.resolveUserRootPermissionsUncached(ctx, userID)
 	}
-	version, err := s.loadRBACVersion(ctx)
+	versions, err := s.permissionVersions(ctx, userID)
 	if err != nil {
 		return nil, nil, err
 	}
-	return s.resolveUserRootPermissionsAtVersion(ctx, userID, permissionVersion, version)
+	return s.resolveUserRootPermissionsAtVersion(ctx, userID, versions)
 }
 
-func (s *Server) resolveUserRootPermissionsAtVersion(ctx context.Context, userID, permissionVersion, rbacVersion int64) ([]string, []security.PermissionRule, error) {
+func (s *Server) resolveUserRootPermissionsAtVersion(ctx context.Context, userID int64, versions permissionVersions) ([]string, []security.PermissionRule, error) {
 	if !s.cache.Config().RBACCacheEnabled {
 		return s.resolveUserRootPermissionsUncached(ctx, userID)
 	}
-	projectACLVersion, err := s.loadProjectACLVersion(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	key := rbacCacheKey(rbacVersion, projectACLVersion, userID, permissionVersion)
+	key := rbacCacheKey(versions.RBAC, versions.ProjectACL, userID, versions.User)
 	raw, err := s.cache.GetOrLoadCacheableTTL(ctx, key, s.cache.Config().RBACCacheTTL, func(loadCtx context.Context) ([]byte, bool, error) {
 		users, loadErr := s.resolveUsersRootPermissions(loadCtx, []int64{userID})
 		if loadErr != nil {

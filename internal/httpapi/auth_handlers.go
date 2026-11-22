@@ -536,7 +536,6 @@ func (s *Server) issueToken(ctx context.Context, user domain.User) (issuedAuthSe
 		values($1,$2,$3,$4)`, security.SessionFingerprint(claims.SessionID), user.ID, authVersion, time.Unix(claims.ExpiresAt, 0)); err != nil {
 		return issuedAuthSession{}, err
 	}
-	s.cacheIssuedSession(ctx, claims, user.ID)
 	return issuedAuthSession{token: token, marker: browserSessionMarker(claims.SessionID)}, nil
 }
 
@@ -586,15 +585,11 @@ func (s *Server) findUserByID(ctx context.Context, id int64) (domain.User, error
 }
 
 func (s *Server) authenticatedUser(ctx context.Context, user domain.User) (authenticatedUserResponse, error) {
-	permissionVersion, err := s.loadPermissionVersion(ctx, user.ID)
+	versions, err := s.permissionVersions(ctx, user.ID)
 	if err != nil {
 		return authenticatedUserResponse{}, err
 	}
-	rbacVersion, err := s.loadRBACVersion(ctx)
-	if err != nil {
-		return authenticatedUserResponse{}, err
-	}
-	roleCodes, permissionRules, err := s.resolveUserRootPermissionsAtVersion(ctx, user.ID, permissionVersion, rbacVersion)
+	roleCodes, permissionRules, err := s.resolveUserRootPermissionsAtVersion(ctx, user.ID, versions)
 	if err != nil {
 		return authenticatedUserResponse{}, err
 	}
@@ -603,7 +598,7 @@ func (s *Server) authenticatedUser(ctx context.Context, user domain.User) (authe
 		return authenticatedUserResponse{}, err
 	}
 	user.RoleCodes = roleCodes
-	return authenticatedUserResponse{User: user, PermissionRules: permissionRules, PermissionVersion: permissionVersion, RBACVersion: rbacVersion}, nil
+	return authenticatedUserResponse{User: user, PermissionRules: permissionRules, PermissionVersion: versions.User, RBACVersion: versions.RBAC}, nil
 }
 
 func (s *Server) recordLogin(ctx context.Context, userID *int64, account string, location clientLocation, userAgent string, success bool, reason string) {

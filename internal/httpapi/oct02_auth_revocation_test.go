@@ -76,7 +76,7 @@ func TestOCT02LogoutDoesNotAllowInflightSessionCacheRepopulationIntegration(t *t
 	loading := &Server{db: loadingPool, cache: loadingCache}
 	done := make(chan error, 1)
 	go func() {
-		_, e := loading.resolveCachedSessionSubject(ctx, claims)
+		_, e := loading.resolveSessionSubject(ctx, claims, nil)
 		done <- e
 	}()
 	select {
@@ -94,7 +94,7 @@ func TestOCT02LogoutDoesNotAllowInflightSessionCacheRepopulationIntegration(t *t
 	if err := <-done; !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("inflight loader accepted session after logout: %v", err)
 	}
-	if _, err := loading.resolveCachedSessionSubject(ctx, claims); !errors.Is(err, pgx.ErrNoRows) {
+	if _, err := loading.resolveSessionSubject(ctx, claims, nil); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("late cache population accepted on next request: %v", err)
 	}
 }
@@ -137,7 +137,7 @@ func TestOCT02LogoutRevokesAcrossWarmAPIReplicasIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `insert into auth_sessions values($1,42,1,$2,null)`, security.SessionFingerprint(claims.SessionID), time.Unix(claims.ExpiresAt, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = second.resolveCachedSessionSubject(ctx, claims); err != nil {
+	if _, err = second.resolveSessionSubject(ctx, claims, nil); err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil).WithContext(context.WithValue(ctx, claimsContextKey, claims))
@@ -146,7 +146,7 @@ func TestOCT02LogoutRevokesAcrossWarmAPIReplicasIntegration(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("logout=%d %s", response.Code, response.Body.String())
 	}
-	if _, err = second.resolveCachedSessionSubject(ctx, claims); !errors.Is(err, pgx.ErrNoRows) {
+	if _, err = second.resolveSessionSubject(ctx, claims, nil); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("warm second replica accepted revoked session: %v", err)
 	}
 	if len(response.Result().Cookies()) != 1 || response.Result().Cookies()[0].MaxAge != -1 {

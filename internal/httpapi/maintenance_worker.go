@@ -3,10 +3,7 @@ package httpapi
 import (
 	"context"
 	"log"
-	"strconv"
 	"time"
-
-	"mcmods-cn-backend/internal/querycache"
 )
 
 const (
@@ -309,18 +306,8 @@ func (worker *MaintenanceWorker) expireBans(ctx context.Context) {
 			return
 		}
 		for _, userID := range userIDs {
-			key := querycache.UserPermissionVersionKey(userID)
-			var invalidateErr error
-			if worker.server.cache != nil {
-				invalidateErr = worker.server.cache.DeleteShared(ctx, key)
-			}
-			var version int64
-			if err = worker.server.db.QueryRow(ctx, `select permission_version from users where id=$1`, userID).Scan(&version); err != nil {
-				log.Printf("refresh expired ban permission version user_id=%d invalidate_error=%v query_error=%v", userID, invalidateErr, err)
-				continue
-			}
-			if worker.server.cache != nil && worker.server.cache.Enabled() && !worker.server.cache.SetShared(ctx, key, []byte(strconv.FormatInt(version, 10)), 10*time.Second) {
-				log.Printf("publish expired ban permission version user_id=%d invalidate_error=%v", userID, invalidateErr)
+			if err := worker.server.refreshPermissionVersion(ctx, userID); err != nil {
+				log.Printf("publish expired ban permission version user_id=%d: %v", userID, err)
 			}
 		}
 		if len(userIDs) < maintenanceBatchSize {

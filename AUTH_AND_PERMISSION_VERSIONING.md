@@ -11,27 +11,19 @@
 
 待审核或驳回且从未生效的作者认领/编辑员申请不会无意义增加用户权限版本。创建、提交或导入项目不改变任何权限版本。
 
-## Session 缓存
+## 请求如何确认当前权限
 
-Session Key 使用原始 Session ID 的不可逆 SHA-256 指纹：
+认证请求在 PostgreSQL 主库的一条语句内核对会话指纹、该会话的撤销及到期时间、账号状态和 `auth_version`，同时读取用户权限、全站 RBAC 和项目 ACL 的版本。密码重置或封禁会撤销旧令牌。单会话注销只影响该次登录。状态变更提交后才开始的请求能看到新状态。变更之前已开始的请求可能已使用旧快照，需要执行时再授权的操作仍须在业务事务中复核。
 
-```text
-session:{fingerprint}
-```
-
-缓存只保存 Session ID 对应用户、公开 ID、`auth_version`、真实到期时间和结构版本。每次仍核对共享用户认证版本指针；缓存损坏会删除缓存并回源 PostgreSQL，不会当作已认证。
-
-## RBAC 缓存
-
-实际 Key 为：
+成功读取的三个授权版本决定已解析权限的缓存键：
 
 ```text
 authz:2:v{rbacVersion}:acl{projectACLVersion}:user:{userId}:p{permissionVersion}
 ```
 
-版本指针分别为 `versions:rbac`、`versions:project-acl` 和 `authz:user-version:{userId}`。旧版本 Key 自然过期，不使用 `SCAN + DEL`。权限解析合并普通角色、管理员手工直接权限，以及 `effective_project_access` 派生的编辑员/开发者变量角色。
+稳定的权限结果可从进程缓存或 Redis 复用。权限解析合并普通角色、直接授予与拒绝及 `effective_project_access` 派生的项目角色。临时直接权限、临时角色绑定或继承的临时规则到期时没有新的数据库写入。它们的结果仅供发起这次查询的请求使用，其他并发等待者会各自重新读取。旧版本的稳定权限结果自然过期。
 
-自然到期不会触发数据库写入或版本递增。用户存在有效的临时直接权限、仅由临时绑定授予的角色、或生效角色及父角色中的临时规则时，解析器在 PostgreSQL 按 `expires_at` 计算允许和拒绝，每次新查询重新读取。稳定授权继续使用两级缓存。键中的 `2` 隔离旧程序写入的权限结果。部署时更新所有鉴权实例；数据库无需迁移。
+`REDIS_AUTH_SESSION_CACHE_ENABLED` 控制无效会话短缓存和读取后的注销标记检查。负缓存最长 5 秒，并受会话剩余时间与已配置的 `REDIS_AUTH_SESSION_TTL_SECONDS` 限制。有效登录每次均从主库核对。读取失败会区分凭据已失效（401）和存储暂不可用（503）。会话指纹用于构造缓存键，令牌原文留在认证边界内。
 
 ## 变化语义
 
@@ -40,9 +32,13 @@ authz:2:v{rbacVersion}:acl{projectACLVersion}:user:{userId}:p{permissionVersion}
 - 角色模板或角色权限定义变化：递增 `rbac_version`。
 - 只有安全凭据或账号安全状态变化才递增 `auth_version`。
 
-权限变化事务提交后，应用把数据库权威版本写入 Redis 共享指针。Redis 不可用时版本和权限回源 PostgreSQL；无法确认高风险权限时失败关闭。
+权限事务提交后仍发布兼容提示 `auth:user-version:{publicId}`、`authz:user-version:{userId}`、`versions:rbac` 或 `versions:project-acl`，保留原有 10 秒期限与传播失败信号。在同一个仍存在的键上，Redis 原子比较十进制 bigint，较晚到达的旧发布无法降低已有水位。键到期、驱逐或 Redis 重启可能丢失水位，当前程序从 PostgreSQL 选择权限结果，任何提示的值均不会授予权限。
 
 权限节点的创建或更新与 `permission_audit_logs` 在同一事务中提交。权限组、用户权限等事务内变更也显式检查审计写入；审计编码或存储失败返回 500 并回滚业务变更，不留下没有对应审计的授权事实。事务已成功提交后，版本指针刷新失败仍返回既有 503 和 `committed=true`，不能把该响应当作事务已经回滚。
+
+## 部署与回滚
+
+本次无需数据库迁移。滚动发布期间保留既有版本提示和登出时的旧 Session 键清理。升级所有负责认证的 HTTP/SSE 实例以及发布安全版本的 Worker，检查 `securityVersions.refreshFailures`。旧实例仍可能接受过期的 Redis 正值，在所有鉴权流量切到新实例后才能确认上述撤权保证。回滚旧二进制将恢复此前的回填窗口，对要求立即撤权的流量应继续使用已修正实例。恢复 Redis 连接后检查已提交操作的数据库状态；503 带 `committed=true` 时避免重复业务写入。
 
 ## 前端同步
 

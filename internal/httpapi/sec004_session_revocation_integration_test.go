@@ -72,7 +72,9 @@ func TestSEC004CommittedStatusChangeFailsClosedWhenVersionPublicationFailsIntegr
 		values($1,$2,$3,$4)`, security.SessionFingerprint(targetClaims.SessionID), targetID, authVersion, time.Unix(targetClaims.ExpiresAt, 0)); err != nil {
 		t.Fatal(err)
 	}
-	server.cacheIssuedSession(ctx, targetClaims, targetID)
+	if !cache.SetShared(ctx, userAuthVersionCacheKey(targetPublicID), []byte("1"), time.Minute) {
+		t.Fatal("failed to prewarm mixed-version publication hint")
+	}
 	warmed := targetClaims
 	if err = server.resolveClaimsSubject(ctx, &warmed); err != nil {
 		t.Fatalf("warm active session: %v", err)
@@ -83,7 +85,9 @@ func TestSEC004CommittedStatusChangeFailsClosedWhenVersionPublicationFailsIntegr
 	if redisServer.Exists("mcmods:sec004-session:" + userAuthVersionCacheKey(targetPublicID)) {
 		t.Fatal("stale auth-version pointer survived the refresh query failure")
 	}
-	server.cacheIssuedSession(ctx, targetClaims, targetID)
+	if !cache.SetShared(ctx, userAuthVersionCacheKey(targetPublicID), []byte("1"), time.Minute) {
+		t.Fatal("failed to prewarm mixed-version publication hint")
+	}
 	redisServer.Close()
 
 	request := httptest.NewRequest("PUT", "/api/v1/admin/users/"+targetPublicID+"/status", strings.NewReader(`{"status":"disabled"}`)).WithContext(ctx)

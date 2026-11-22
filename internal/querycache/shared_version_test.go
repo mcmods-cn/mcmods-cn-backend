@@ -10,56 +10,49 @@ import (
 	"mcmods-cn-backend/internal/config"
 )
 
-func TestSharedVersionPointersAreVisibleAcrossCacheInstances(t *testing.T) {
+func TestPublishedSecurityVersionDoesNotMoveBackwards(t *testing.T) {
 	redisServer := miniredis.RunT(t)
-	configuration := config.RedisConfig{
-		Enabled: true, Addr: redisServer.Addr(), Prefix: "mcmods", Namespace: "shared-version-test",
-		PoolSize: 2, MinIdleConns: 1, DialTimeout: time.Second, ReadTimeout: time.Second,
-		WriteTimeout: time.Second, TTL: time.Minute,
-	}
-	first := New(configuration)
-	second := New(configuration)
+	cfg := config.RedisConfig{Enabled: true, Addr: redisServer.Addr(), Prefix: "mcmods", Namespace: "two-publishers", PoolSize: 2, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second}
+	first, second := New(cfg), New(cfg)
 	defer first.Close()
 	defer second.Close()
+	const key = "versions:rbac"
 	ctx := context.Background()
-	key := UserPermissionVersionKey(42)
-	if !first.SetShared(ctx, key, []byte("2"), time.Minute) {
-		t.Fatal("failed to write shared permission version")
+	// Consecutive PostgreSQL bigints above the exact range of a Lua double.
+	const latest int64 = 9007199254740993
+	for _, write := range []struct {
+		cache   *Cache
+		version int64
+	}{{first, latest - 2}, {second, latest}, {first, latest - 1}, {second, latest}} {
+		if err := write.cache.PublishSecurityVersion(ctx, key, write.version, time.Minute); err != nil {
+			t.Fatal(err)
+		}
 	}
-	loaderCalled := false
-	value, err := second.GetSharedOrLoadTTL(ctx, key, time.Minute, func(context.Context) ([]byte, error) {
-		loaderCalled = true
-		return []byte("unexpected"), nil
-	})
-	if err != nil || string(value) != "2" || loaderCalled {
-		t.Fatalf("first shared read value=%q loader=%v err=%v", value, loaderCalled, err)
+	raw, err := redisServer.Get("mcmods:two-publishers:" + key)
+	if err != nil || raw != "9007199254740993" {
+		t.Fatalf("published version=%q err=%v", raw, err)
 	}
-	if !first.SetShared(ctx, key, []byte("3"), time.Minute) {
-		t.Fatal("failed to update shared permission version")
-	}
-	value, err = second.GetSharedOrLoadTTL(ctx, key, time.Minute, func(context.Context) ([]byte, error) {
-		return []byte("unexpected"), nil
-	})
-	if err != nil || string(value) != "3" {
-		t.Fatalf("updated shared value=%q err=%v", value, err)
+	redisServer.Close()
+	if err := first.PublishSecurityVersion(ctx, key, latest, time.Minute); err == nil {
+		t.Fatal("publication failure hidden")
 	}
 }
 
-func TestSharedVersionPointerFallsBackToAuthoritativeLoaderWithoutRedis(t *testing.T) {
-	cache := New(config.RedisConfig{})
-	defer cache.Close()
-	loads := 0
-	load := func(context.Context) ([]byte, error) {
-		loads++
-		return []byte("7"), nil
+func TestReadingShortDenialMarkerDoesNotExtendItInAnotherProcess(t *testing.T) {
+	store := miniredis.RunT(t)
+	cfg := config.RedisConfig{Enabled: true, Addr: store.Addr(), Prefix: "test", Namespace: "denial-marker", TTL: time.Hour}
+	a, b := New(cfg), New(cfg)
+	defer a.Close()
+	defer b.Close()
+	ctx := t.Context()
+	if !a.Set(ctx, "session-invalid:test", []byte("1"), time.Second) {
+		t.Fatal("failed to write short marker")
 	}
-	for range 2 {
-		value, err := cache.GetSharedOrLoadTTL(context.Background(), UserPermissionVersionKey(42), time.Minute, load)
-		if err != nil || string(value) != "7" {
-			t.Fatalf("fallback value=%q err=%v", value, err)
-		}
+	if !b.HasMarker(ctx, "session-invalid:test") {
+		t.Fatal("shared marker missing")
 	}
-	if loads != 2 {
-		t.Fatalf("disabled Redis reused unverified process-local version: loads=%d", loads)
+	store.FastForward(2 * time.Second)
+	if b.HasMarker(ctx, "session-invalid:test") {
+		t.Fatal("reader extended an expired shared marker")
 	}
 }

@@ -666,7 +666,10 @@ func (c *Cache) GetOrLoadCacheableTTL(ctx context.Context, key string, ttl time.
 		}
 	}
 	c.metrics.misses.Add(1)
+	type lookupOnly []byte
+	ranLoader := false
 	loaded, err, _ := c.group.Do(key, func() (any, error) {
+		ranLoader = true
 		if value, ok := c.getLocal(key); ok {
 			return value, nil
 		}
@@ -676,7 +679,7 @@ func (c *Cache) GetOrLoadCacheableTTL(ctx context.Context, key string, ttl time.
 			return nil, loadErr
 		}
 		if !cacheable {
-			return value, nil
+			return lookupOnly(value), nil
 		}
 		c.setLocalTTL(key, value, ttl)
 		if redisKey, valid := c.redisKey(key); c.redis != nil && valid {
@@ -689,60 +692,47 @@ func (c *Cache) GetOrLoadCacheableTTL(ctx context.Context, key string, ttl time.
 	if err != nil {
 		return nil, err
 	}
-	return loaded.([]byte), nil
-}
-
-// GetSharedOrLoadTTL reads a small cross-instance coordination value without
-// consulting the process-local cache. It is intended for authorization
-// version pointers: a role grant written by one API instance must not be
-// hidden by another instance's stale local entry. When Redis is disabled or
-// unavailable the authoritative loader is used, so authorization fails closed
-// to PostgreSQL rather than accepting an unverified cached version.
-func (c *Cache) GetSharedOrLoadTTL(ctx context.Context, key string, ttl time.Duration, loader func(context.Context) ([]byte, error)) ([]byte, error) {
-	if c == nil {
-		return loader(ctx)
-	}
-	if ttl <= 0 {
-		ttl = c.ttl
-	}
-	if redisKey, valid := c.redisKey(key); c.redis != nil && valid {
-		started := time.Now()
-		value, redisErr := c.redis.Get(ctx, redisKey).Bytes()
-		c.recordRedisResult(started, redisErr)
-		if redisErr == nil {
-			c.metrics.redisHits.Add(1)
-			c.metrics.hits.Add(1)
-			return value, nil
+	if one, ok := loaded.(lookupOnly); ok {
+		if ranLoader {
+			return one, nil
 		}
-		if errors.Is(redisErr, redis.Nil) {
-			c.metrics.redisMisses.Add(1)
-		} else {
-			c.metrics.localFallbacks.Add(1)
-		}
-	}
-	c.metrics.misses.Add(1)
-	loaded, err, _ := c.group.Do("shared:"+key, func() (any, error) {
+		// A result valid only for its originating request may have expired while
+		// this caller waited. Obtain a fresh answer outside that singleflight.
 		c.metrics.postgresLoads.Add(1)
-		value, loadErr := loader(ctx)
-		if loadErr != nil {
-			return nil, loadErr
-		}
-		if redisKey, valid := c.redisKey(key); c.redis != nil && valid {
-			started := time.Now()
-			setErr := c.redis.Set(context.Background(), redisKey, value, ttl).Err()
-			c.recordRedisResult(started, setErr)
-		}
-		return value, nil
-	})
-	if err != nil {
-		return nil, err
+		fresh, _, loadErr := loader(ctx)
+		return fresh, loadErr
 	}
 	return loaded.([]byte), nil
 }
 
-// SetShared updates Redis without creating a process-local copy. Readers of
-// version pointers deliberately bypass local state so every instance observes
-// the shared value on its next request.
+// PublishSecurityVersion updates the compatibility hint for a committed change.
+// PostgreSQL remains authoritative if a hint is absent, evicted, or unreachable.
+// Compare decimal strings since Redis Lua numbers cannot represent every bigint.
+func (c *Cache) PublishSecurityVersion(ctx context.Context, key string, version int64, ttl time.Duration) error {
+	if c == nil || c.redis == nil || version <= 0 || ttl <= 0 {
+		return errors.New("invalid security version publication")
+	}
+	redisKey, ok := c.redisKey(key)
+	if !ok {
+		return errors.New("invalid security version key")
+	}
+	value := strconv.FormatInt(version, 10)
+	started := time.Now()
+	err := c.redis.Eval(ctx, `
+        local old = redis.call('GET', KEYS[1])
+        local new = ARGV[1]
+        if old and old:match('^[1-9][0-9]*$') and
+          (#old < 19 or (#old == 19 and old <= '9223372036854775807')) and
+          (#old > #new or (#old == #new and old > new)) then
+            return 0
+        end
+        redis.call('SET', KEYS[1], new, 'PX', ARGV[2])
+        return 1`, []string{redisKey}, value, ttl.Milliseconds()).Err()
+	c.recordRedisResult(started, err)
+	return err
+}
+
+// SetShared updates an exact Redis value without creating a process-local copy.
 func (c *Cache) SetShared(ctx context.Context, key string, value []byte, ttl time.Duration) bool {
 	if c == nil || c.redis == nil {
 		return false
@@ -761,6 +751,17 @@ func (c *Cache) SetShared(ctx context.Context, key string, value []byte, ttl tim
 }
 
 func (c *Cache) Get(ctx context.Context, key string) ([]byte, bool) {
+	return c.get(ctx, key, true)
+}
+
+// HasMarker checks the shared marker without renewing its remaining lifetime
+// in a receiving process. A writer may reuse its own entry until its exact TTL.
+func (c *Cache) HasMarker(ctx context.Context, key string) bool {
+	_, found := c.get(ctx, key, false)
+	return found
+}
+
+func (c *Cache) get(ctx context.Context, key string, warmLocal bool) ([]byte, bool) {
 	if c == nil {
 		return nil, false
 	}
@@ -788,7 +789,9 @@ func (c *Cache) Get(ctx context.Context, key string) ([]byte, bool) {
 	}
 	c.metrics.redisHits.Add(1)
 	c.metrics.hits.Add(1)
-	c.setLocal(key, value)
+	if warmLocal {
+		c.setLocal(key, value)
+	}
 	return value, true
 }
 
