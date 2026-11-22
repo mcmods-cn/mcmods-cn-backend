@@ -279,6 +279,10 @@ func TestAuditMsgReviewTempCleanupDropsOwnedTempThenFreshSchemaIntegration(t *te
 	if body != "other own TEMP is retained" || trace.drops.Load() != 1 {
 		t.Fatalf("cleanup changed other own TEMP or wrong DROP count: %q/%d", body, trace.drops.Load())
 	}
+	var installedGeneration int
+	if err := conn.QueryRow(ctx, `select generation from public.schema_metadata where singleton`).Scan(&installedGeneration); err != nil {
+		t.Fatalf("read the current installed baseline: %v", err)
+	}
 	conn.Release()
 	conn = nil
 	pool.Close()
@@ -294,7 +298,7 @@ func TestAuditMsgReviewTempCleanupDropsOwnedTempThenFreshSchemaIntegration(t *te
 		}
 	}()
 	var generation int
-	if err := fresh.Pool.QueryRow(ctx, `select generation from schema_metadata where singleton`).Scan(&generation); err != nil || generation != 168 {
+	if err := fresh.Pool.QueryRow(ctx, `select generation from schema_metadata where singleton`).Scan(&generation); err != nil || generation != installedGeneration {
 		t.Fatalf("next actual schema generation=%d/%v", generation, err)
 	}
 }
