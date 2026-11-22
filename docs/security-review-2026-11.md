@@ -13,6 +13,15 @@
 | AI、配置及日志 | `ai_translation.go` 只向供应商发送语言及键值、名称和说明等所需条目。系统请求没有工具。结构、数量、占位符、链接和代码片段由 `ai_translation_validation.go` 核验。`ai_task_queue.go`、`ai_request_budget.go` 先检查当前操作者与可见源内容，再登记请求。`internal/security/settings.go` 使用 AEAD 封存敏感设置。后台读取使用各域脱敏投影。`redactLogText`、`upgradeLogShareRedaction` 处理共享日志。 | 本地替代供应商验证撤权、撤稿、皮肤转私有、通知变更收件人、未知用量及人工译文保护。词条翻译的语义质量和第三方保密性需另审。新入队日志只存任务标识与类型，已有任务原文和历史日志沿用现行访问与留存策略。[AI 执行与预算](ai-translation-reliability.md) |
 | 构建、依赖与历史凭据 | 后端 Go 编译器与容器构建改用 1.26.11，运行镜像指明非 root。依赖审查工作流只读、工件保留 30 天，发布容器仅在标签/手动发布流程授予 packages 写权限。exporter CI 固定 Actions、Gradle 发行文件和插件版本，运行时仍依赖实际安装的游戏与 Mod。 | Go、npm 与 Git 历史检查的范围见下。两个正式 Dockerfile 均在本机构建并启动，前端使用 UID 1001，后端使用 UID 65532。后端构建的可选代理 CA 只用于依赖下载，运行镜像未包含本次证书。云仓库权限、生产密钥与生产发布属于本轮以外的运维环境。Java 运行时、第三方 Mod 全量依赖的漏洞可达性和镜像 OS 的 CVE 未独立判定。 |
 
+## 第二轮复核
+
+| 边界 | 实际证据与处理 |
+| --- | --- |
+| 授权版本迟到回填 | 两个真实 API 实例和同一 PostgreSQL、Redis。旧版四项可确定调度的正常请求验证中，撤权完成后发起的新请求得到旧允许，个人权限、RBAC、项目 ACL 应为 403，旧会话应为 401。DB 提交后仅写者失去 Redis 的传播失败及 Redis 物理重启也已复现。现在一个主库快照同时核对会话和授权版本，版本化规则继续缓存在原入口。独立复跑含自然到期、单会话和条件共享加载。[版本与滚动发布](../AUTH_AND_PERMISSION_VERSIONING.md) |
+| 整份 AI 配置与密钥 | 两个真实管理员使用同版本时，旧版第二个保存把新预算恢复到旧数值。事务内版本校验拦截旧写。实际验证显式清除、替换、留空保留及不同来源的换钥要求，合法 0 保留。原版对配额 `null` 显示 10,000 的缺陷已关闭，非法存储拒绝读写。只读账号的旧页面会发送被后端拒绝的写入，新页面浏览器发出零次 PUT。[AI 设置与预算](ai-translation-reliability.md) |
+| 脱敏分享和任务租约 | 真实测试中，旧版评论日志绑定失败留下 ready 分享和脱敏内容。合并事务后两者随失败回滚。独立复核发现数据库锁等待跨过租约时，事务开始时间仍会允许旧持有者写。四种锁等待在候选红、修正后绿。匿名读取需要正确分享码、ready、未过期且未删除，正文读取脱敏条目。任务执行未将评论审核可见性与独立分享作强制联动，入队后封禁或隐藏是否应阻止生成分享仍需按产品语义验证。[附件与生命周期](blueprint-and-comment-lifecycle.md) |
+| 客户端资源和归档 | 独立复查看过 0.10.2 实际 Forge 的 ZIP 成员，诊断日志位于打包树外。正常 0600 文件可记录受限样本。Windows 有效 ACL、异常对象重写 `toString` 的运行时间及独立正式启动器入世界没有实机保证。 |
+
 ## 复跑与证据边界
 
 - 后端使用 Linux amd64、Go 1.26.11 和任务独占的 PostgreSQL 18.6、Redis。按[隔离测试说明](testing-isolated-environment.md)配置实例。用 `go test -count=1 ./internal/querycache`、`go test -count=1 ./internal/httpapi -run 'TestRBACCacheHonorsNaturalGrant|TestOCT02Logout|TestOCT02CreatorIdentityClaim'` 复查授权。两个 API 实例在同一测试进程，共享实际服务。
