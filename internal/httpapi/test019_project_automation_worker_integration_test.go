@@ -46,6 +46,7 @@ func TestTEST019ProjectAutomationWorkerRetriesCompletesIdempotentlyAndRecoversLe
 		}
 	}()
 
+	publishedAt := time.Now().UTC().Add(-30 * 24 * time.Hour).Truncate(time.Second)
 	var providerRequests atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/project/test019-project/version" {
@@ -59,10 +60,10 @@ func TestTEST019ProjectAutomationWorkerRetriesCompletesIdempotentlyAndRecoversLe
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `[{
-			"ID":"test019-release","Name":"TEST019 release","VersionNumber":"1.0.0",
-			"Changelog":"Reliable automated changelog","DatePublished":%q,"VersionType":"release",
+			"id":"test019-release","name":"TEST019 release","version_number":"1.0.0",
+			"changelog":"Reliable automated changelog","date_published":%q,"version_type":"release",
 			"game_versions":["1.21.1"],"loaders":["fabric"],"files":[]
-		}]`, time.Now().UTC().Add(-30*24*time.Hour).Format(time.RFC3339))
+		}]`, publishedAt.Format(time.RFC3339))
 	}))
 	defer provider.Close()
 
@@ -167,6 +168,15 @@ func TestTEST019ProjectAutomationWorkerRetriesCompletesIdempotentlyAndRecoversLe
 		t.Fatalf("completed state=%q attempts=%d created=%d code=%q", status, attempts, created, errorCode)
 	}
 	assertTEST019ChangelogArtifacts(t, ctx, pool, routeID, 1, 1)
+	var eventAt time.Time
+	var projectVersion string
+	if err = pool.QueryRow(ctx, `select event_at,project_version from project_changelogs where object_route_id=$1`, routeID).
+		Scan(&eventAt, &projectVersion); err != nil {
+		t.Fatal(err)
+	}
+	if !eventAt.Equal(publishedAt) || projectVersion != "1.0.0" {
+		t.Fatalf("published changelog date=%s version=%q, want date=%s version=1.0.0", eventAt, projectVersion, publishedAt)
+	}
 
 	if _, err = pool.Exec(ctx, `update project_auto_update_settings set next_run_at=now()-interval '1 second' where id=$1`, changelogSettingID); err != nil {
 		t.Fatal(err)

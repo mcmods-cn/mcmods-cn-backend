@@ -480,14 +480,8 @@ func (worker *ProjectAutomationWorker) loadReleases(ctx context.Context, job pro
 			return nil, err
 		}
 		var raw []struct {
-			ID, Name, VersionNumber, Changelog, DatePublished, VersionType string
-			GameVersions                                                   []string `json:"game_versions"`
-			Loaders                                                        []string `json:"loaders"`
-			Files                                                          []struct {
-				URL, Filename string
-				Size          int64
-				Hashes        map[string]string
-			} `json:"files"`
+			modrinthProjectVersion
+			Changelog string `json:"changelog"`
 		}
 		if err = getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(job.ExternalID)+"/version", providerCredentialHeaders(cfg.UserAgent, "modrinth", cfg.Modrinth.BaseURL, bearerAuthorization(cfg.Modrinth.Token), ""), &raw); err != nil {
 			return nil, err
@@ -498,8 +492,8 @@ func (worker *ProjectAutomationWorker) loadReleases(ctx context.Context, job pro
 			release := projectAutomationRelease{ID: item.ID, Version: firstNonEmpty(item.VersionNumber, item.Name, item.ID), Body: item.Changelog,
 				PublishedAt: published, GameVersions: item.GameVersions, Loaders: normalizeLoaders(item.Loaders), URL: "https://modrinth.com/project/" + job.ExternalID + "/version/" + item.ID}
 			for _, file := range item.Files {
-				release.Files = append(release.Files, providerProjectFile{ID: item.ID + ":" + file.Filename, Source: "modrinth", DisplayName: item.Name,
-					FileName: file.Filename, VersionName: release.Version, ReleaseChannel: normalizeReleaseChannel(item.VersionType), GameVersions: item.GameVersions,
+				release.Files = append(release.Files, providerProjectFile{ID: item.ID + ":" + file.FileName, Source: "modrinth", DisplayName: item.Name,
+					FileName: file.FileName, VersionName: release.Version, ReleaseChannel: normalizeReleaseChannel(item.VersionType), GameVersions: item.GameVersions,
 					Loaders: release.Loaders, PublishedAt: published, SizeBytes: file.Size, SHA1: file.Hashes["sha1"], SHA512: file.Hashes["sha512"], DirectURL: file.URL})
 			}
 			result = append(result, release)
