@@ -136,7 +136,7 @@ func queryCommentTargetsByInternalWithQueryer(ctx context.Context, queryer comme
 			join catalog_tags definition on definition.entity_id=entity.id
 			left join lateral (select name from content_localizations where catalog_entity_id=entity.id and review_status='approved' and name<>''
 				order by case locale when 'zh-CN' then 0 when 'en-US' then 1 else 2 end limit 1) localization on true
-			where entity.status='active'`)
+			where entity.status='active' and `+publicCatalogEntitySQL("entity", "tag"))
 	}
 	if targetTypes["recipe_type"] {
 		branches = append(branches, `select request.target_type,request.target_id,request.target_version_key,
@@ -147,7 +147,7 @@ func queryCommentTargetsByInternalWithQueryer(ctx context.Context, queryer comme
 			join recipe_types definition on definition.entity_id=entity.id
 			left join lateral (select name from content_localizations where catalog_entity_id=entity.id and review_status='approved' and name<>''
 				order by case locale when 'zh-CN' then 0 when 'en-US' then 1 else 2 end limit 1) localization on true
-			where entity.status='active'`)
+			where entity.status='active' and `+publicCatalogEntitySQL("entity", "recipe_type"))
 	}
 	if targetTypes["mod_resource"] {
 		branches = append(branches, `select request.target_type,request.target_id,request.target_version_key,

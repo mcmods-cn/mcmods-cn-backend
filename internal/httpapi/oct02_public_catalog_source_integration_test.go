@@ -96,6 +96,26 @@ func TestOCT02PublicCatalogOmitsUnpublishedImportSourcesIntegration(t *testing.T
 	for _, path := range paths {
 		f.require(t, "", http.MethodGet, path, nil, http.StatusOK)
 	}
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "comment.create")
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "comment.watch")
+	commentIDs := make([]string, 0, 2)
+	for kind, id := range map[string]string{"tag": tagPublicID, "recipe_type": typePublicID} {
+		comment := decodeTEST022Data[commentResponse](t, f.require(t, f.editor, http.MethodPost, "/api/v1/comment-targets/"+kind+"/"+id+"/comments",
+			createCommentRequest{Body: "A public catalog comment", IdempotencyKey: "catalog-source-watch-" + kind}, http.StatusCreated))
+		if comment.ID == "" {
+			t.Fatal("public catalog comment did not return a public ID")
+		}
+		commentIDs = append(commentIDs, comment.ID)
+		f.require(t, f.otherEditor, http.MethodPut, "/api/v1/comments/"+comment.ID+"/watch", nil, http.StatusOK)
+	}
+	assertWatches := func(want int) {
+		t.Helper()
+		page := decodeTEST022Data[struct{ Items []commentWatchListItem }](t, f.require(t, f.otherEditor, http.MethodGet, "/api/v1/users/me/comment-watches", nil, http.StatusOK))
+		if len(page.Items) != want {
+			t.Errorf("watched public-source comments=%d want=%d", len(page.Items), want)
+		}
+	}
+	assertWatches(2)
 	if _, err := f.db.Exec(f.ctx, `update mods set review_status='pending' where id=$1`, f.modID); err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +139,10 @@ func TestOCT02PublicCatalogOmitsUnpublishedImportSourcesIntegration(t *testing.T
 			}
 		}
 	}
+	for _, commentID := range commentIDs {
+		f.require(t, f.otherEditor, http.MethodGet, "/api/v1/comments/"+commentID+"/thread", nil, http.StatusNotFound)
+	}
+	assertWatches(0)
 	for _, id := range []string{typePublicID, tagPublicID, templatePublicID, recipePublicID} {
 		r := httptest.NewRequest(http.MethodPost, "/api/v1/content/"+id+"/translations", strings.NewReader(`{"targetLocale":"en-US"}`))
 		r.SetPathValue("publicId", id)
@@ -161,6 +185,7 @@ func TestOCT02PublicCatalogOmitsUnpublishedImportSourcesIntegration(t *testing.T
 	if _, err := f.db.Exec(f.ctx, `update catalog_dataset_state set version=version+1 where singleton`); err != nil {
 		t.Fatal(err)
 	}
+	assertWatches(2)
 	for _, path := range paths {
 		f.require(t, "", http.MethodGet, path, nil, http.StatusOK)
 	}
@@ -194,6 +219,7 @@ func TestOCT02PublicCatalogOmitsUnpublishedImportSourcesIntegration(t *testing.T
 	}
 	assertTotal(0)
 	f.require(t, "", http.MethodGet, "/api/v1/recipe-types/"+typePublicID, nil, http.StatusNotFound)
+	assertWatches(0)
 }
 
 func TestOCT02CommunityResourceReferencesRevalidatePublishedSourcesIntegration(t *testing.T) {
