@@ -33,6 +33,10 @@ type oauthProviderConfig struct {
 	RedirectURI  string `json:"redirectUri"`
 }
 
+func (cfg oauthProviderConfig) loginReady() bool {
+	return cfg.Enabled && cfg.ClientID != "" && cfg.ClientSecret != "" && cfg.RedirectURI != ""
+}
+
 type oauthProviderProfile struct {
 	Provider       string
 	ProviderUserID string
@@ -67,7 +71,7 @@ func (s *Server) oauthStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "不支持的第三方登录")
 		return
 	}
-	if !cfg.Enabled || cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURI == "" {
+	if !cfg.loginReady() {
 		writeError(w, http.StatusServiceUnavailable, "第三方登录尚未配置")
 		return
 	}
@@ -102,6 +106,10 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "不支持的第三方登录")
+		return
+	}
+	if !cfg.loginReady() {
+		writeError(w, http.StatusServiceUnavailable, "第三方登录尚未配置")
 		return
 	}
 	if r.URL.Query().Get("state") == "" || !validOAuthState(r, provider) {
@@ -207,7 +215,7 @@ func (s *Server) updateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if cfg.Enabled && (cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURI == "") {
+		if cfg.Enabled && !cfg.loginReady() {
 			writeError(w, http.StatusBadRequest, "启用第三方登录前必须完整填写客户端和回调配置")
 			return
 		}
