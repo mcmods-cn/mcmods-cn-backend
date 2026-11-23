@@ -149,6 +149,7 @@ type projectAutomationJob struct {
 	SourceType      string
 	ExternalID      string
 	Interval        string
+	ConfiguredAt    time.Time
 	ActorID         int64
 	LicenseOverride bool
 	OverrideReason  string
@@ -163,7 +164,7 @@ func (worker *ProjectAutomationWorker) processOne(ctx context.Context) (bool, er
 	defer tx.Rollback(ctx)
 	var job projectAutomationJob
 	err = tx.QueryRow(ctx, `select run.id,setting.id,route.id,route.internal_id,route.entity_type,route.public_id,
-		setting.update_kind,setting.source_type,source.external_project_id,setting.interval_code,
+		setting.update_kind,setting.source_type,source.external_project_id,setting.interval_code,setting.updated_at,
 		setting.license_override,setting.license_override_reason,setting.license_override_source
 		from project_auto_update_runs run
 		join project_auto_update_settings setting on setting.id=run.setting_id
@@ -172,7 +173,7 @@ func (worker *ProjectAutomationWorker) processOne(ctx context.Context) (bool, er
 		where run.status='pending' and run.next_attempt_at<=now()
 		order by run.created_at,run.id for update of run skip locked limit 1`).Scan(
 		&job.RunID, &job.SettingID, &job.RouteID, &job.InternalID, &job.ProjectType, &job.ProjectPublicID,
-		&job.Kind, &job.SourceType, &job.ExternalID, &job.Interval,
+		&job.Kind, &job.SourceType, &job.ExternalID, &job.Interval, &job.ConfiguredAt,
 		&job.LicenseOverride, &job.OverrideReason, &job.OverrideSource)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
@@ -203,7 +204,6 @@ func (worker *ProjectAutomationWorker) processOne(ctx context.Context) (bool, er
 	if runErr != nil {
 		return true, worker.fail(ctx, job, code, runErr, raw)
 	}
-	next := autoUpdateNextRun(job.Interval, time.Now().UTC())
 	tx, err = worker.server.db.Begin(ctx)
 	if err != nil {
 		return true, err
@@ -216,7 +216,7 @@ func (worker *ProjectAutomationWorker) processOne(ctx context.Context) (bool, er
 		lease_owner='',lease_expires_at=null,finished_at=now() where id=$1`, job.RunID, raw); err != nil {
 		return true, err
 	}
-	if _, err = tx.Exec(ctx, `update project_auto_update_settings set last_run_at=now(),last_status='completed',last_error_code='',last_error='',next_run_at=$2 where id=$1`, job.SettingID, next); err != nil {
+	if err = updateProjectAutomationRunSummaryTx(ctx, tx, job, "completed", "", "", true); err != nil {
 		return true, err
 	}
 	return true, tx.Commit(ctx)
@@ -249,9 +249,7 @@ func (worker *ProjectAutomationWorker) fail(ctx context.Context, job projectAuto
 		finished_at=case when $2='dead_letter' then now() else null end where id=$1`, job.RunID, status, result, code, message); err != nil {
 		return err
 	}
-	next := autoUpdateNextRun(job.Interval, time.Now().UTC())
-	if _, err = tx.Exec(ctx, `update project_auto_update_settings set last_run_at=now(),last_status=$2,last_error_code=$3,last_error=$4,
-		next_run_at=case when $2='dead_letter' then $5 else next_run_at end where id=$1`, job.SettingID, status, code, message, next); err != nil {
+	if err = updateProjectAutomationRunSummaryTx(ctx, tx, job, status, code, message, terminal); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

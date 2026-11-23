@@ -55,6 +55,17 @@ func (worker *ProjectAutomationWorker) mutateProjectAutomationRun(ctx context.Co
 	return tag, nil
 }
 
+func updateProjectAutomationRunSummaryTx(ctx context.Context, tx pgx.Tx, job projectAutomationJob, status, code, message string, advanceSchedule bool) error {
+	// A run can finish after an editor saves a new schedule. Its result still
+	// belongs to the setting, but only the configuration it leased may advance.
+	next := autoUpdateNextRun(job.Interval, time.Now().UTC())
+	_, err := tx.Exec(ctx, `update project_auto_update_settings set
+		last_run_at=now(),last_status=$2,last_error_code=$3,last_error=$4,
+		next_run_at=case when $5 and updated_at=$6 then $7 else next_run_at end
+		where id=$1`, job.SettingID, status, code, message, advanceSchedule, job.ConfiguredAt, next)
+	return err
+}
+
 func (worker *ProjectAutomationWorker) recoverExpiredLeases(ctx context.Context) error {
 	tx, err := worker.server.db.Begin(ctx)
 	if err != nil {
