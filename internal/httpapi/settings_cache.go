@@ -14,12 +14,8 @@ import (
 )
 
 var redisPublicSettingKeys = map[string]bool{
-	"site.general":             true,
-	"markdown.rendering":       true,
-	"profile.config":           true,
-	"minecraft.versions":       true,
-	"review.config":            true,
-	"permission.default_roles": true,
+	markdownConfigSettingKey: true,
+	profileConfigSettingKey:  true,
 }
 
 func settingsCacheKey(version int64, key string) string {

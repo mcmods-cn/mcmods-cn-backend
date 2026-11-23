@@ -45,32 +45,6 @@ func (s *Server) searchProjectPage(ctx context.Context, query, projectType, cate
 	}, projectType, claims.Subject, limit, offset)
 }
 
-func (s *Server) searchCommunityPage(ctx context.Context, query, kind, projectID, resourceID string,
-	claims security.Claims, moderator bool, limit, offset int) indexedSearchPage {
-	if strings.TrimSpace(query) == "" || !searchPageSupported(s.search, limit, offset) {
-		return indexedSearchPage{}
-	}
-	filters := []string{"kind:=" + typesenseFilterValue(kind), "status:=active"}
-	if !moderator {
-		filters = append(filters, projectVisibilityFilterWithField(claims.Subject, "author_id"))
-	}
-	if projectID != "" {
-		filters = append(filters, "project_ids:="+typesenseFilterValue(projectID))
-	}
-	if resourceID != "" {
-		filters = append(filters, "resource_ids:="+typesenseFilterValue(resourceID))
-	}
-	result, err := s.search.Search(ctx, searchindex.SearchRequest{
-		Collection: "community", Query: query, QueryBy: []string{"title", "body"}, Infix: []string{"fallback", "off"},
-		FilterBy: strings.Join(filters, " && "), SortBy: "_text_match:desc,published_at:desc",
-		Page: offset/limit + 1, PerPage: limit,
-	})
-	if err != nil {
-		return indexedSearchPage{}
-	}
-	return indexedSearchPage{IDs: result.IDs, Total: result.Found, Used: true}
-}
-
 func (s *Server) searchCreatorPage(ctx context.Context, query, kind string, claims security.Claims, admin bool, limit, offset int) indexedSearchPage {
 	if strings.TrimSpace(query) == "" || !searchPageSupported(s.search, limit, offset) {
 		return indexedSearchPage{}
@@ -172,17 +146,6 @@ func (s *Server) searchServerPage(ctx context.Context, request serverCatalogPage
 
 func searchPageSupported(client *searchindex.Client, limit, offset int) bool {
 	return client != nil && client.Ready() && limit > 0 && offset >= 0 && offset%limit == 0
-}
-
-func projectVisibilityFilter(userID int64) string {
-	return projectVisibilityFilterWithField(userID, "submitted_by")
-}
-
-func projectVisibilityFilterWithField(userID int64, ownerField string) string {
-	if userID <= 0 {
-		return "review_status:=approved"
-	}
-	return fmt.Sprintf("(review_status:=approved || %s:=%d)", ownerField, userID)
 }
 
 func typesenseFilterValue(value string) string {
