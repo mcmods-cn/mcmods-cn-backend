@@ -68,6 +68,7 @@ const outcomeSummary = summarizeLoadOutcomes({
   minimumRiskRejects,
   requiredCodes,
 });
+if (stopped) outcomeSummary.failureReasons.push("load test interrupted before all stages completed");
 const report = {
   generatedAt: new Date().toISOString(),
   startedAt: startedAt.toISOString(),
@@ -98,6 +99,7 @@ const report = {
   requestsByScenario: Object.fromEntries([...scenarioCounts.entries()].sort()),
   antiAbuseCodes: Object.fromEntries([...antiAbuseCodes.entries()].sort()),
   contract: {
+    interrupted: stopped,
     minimumSuccessfulResponses,
     minimumRiskRejects,
     requiredCodes,
@@ -131,6 +133,7 @@ async function worker(workerID, deadline) {
       const body = request.bodyFactory ? request.bodyFactory(workerID, sequence) : request.body;
       const response = await fetch(new URL(request.path, baseURL), {
         method: request.method ?? "GET",
+        redirect: "manual",
         headers: {
           ...(request.token ? { Authorization: `Bearer ${request.token}` } : {}),
           ...(authCookie ? { Cookie: authCookie } : {}),
@@ -220,7 +223,7 @@ function catalogRequests() {
     { name: "mods-version-heat", path: "/api/v1/mods?sort=heat&version=1.20.1&limit=20", token },
     { name: "plugins-heat", path: `/api/v1/content-projects/plugin?sort=heat&limit=20&offset=${(page - 1) * 20}`, token },
     { name: "maps-updated", path: "/api/v1/content-projects/map?sort=updated&limit=20", token },
-    { name: "servers-heat", path: `/api/v1/servers?sort=heat&limit=20&page=${page}`, token },
+    { name: "servers-heat", path: "/api/v1/servers?sort=heat&limit=20", token },
     { name: "tutorials", path: "/api/v1/community/posts?kind=tutorial&sort=latest&limit=20&offset=0", token },
   ];
 }
@@ -293,7 +296,7 @@ function antiAbuseRequests() {
   if (!enableMutations || !token || !commentTargetType || !commentTargetID) return [];
   const path = `/api/v1/comment-targets/${encodeURIComponent(commentTargetType)}/${encodeURIComponent(commentTargetID)}/comments`;
   const replayKey = fixedCommentIdempotencyKey || `replay-${startedAt.getTime()}`;
-  const expectedStatuses = [200, 201, 202, 403, 412, 429];
+  const expectedStatuses = [200, 201, 202, 403, 428, 429];
   const expectedRiskCodes = [
     "action_restricted",
     "challenge_required",

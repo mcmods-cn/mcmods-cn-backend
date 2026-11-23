@@ -1,25 +1,44 @@
--- Run with psql only against an isolated test/staging database after loading at
--- least 100k catalog rows, 1M activity rows, and one deliberately high-cardinality
--- user. Example:
--- psql ... -v representative_user_id=42 -v catalog_offset=10000 -v representative_action_id=3 -f scripts/query-analysis.sql
--- The DELETE plan executes inside an explicit transaction that is always rolled back.
+-- See docs/load-testing.md for the isolated dataset and required psql arguments.
+-- The activity-retention DELETE is executed in a transaction and rolled back.
+\set ON_ERROR_STOP on
+
+\if :{?expected_database}
+\else
+  do $$begin raise exception 'expected_database is required';end$$;
+\endif
 
 \if :{?representative_user_id}
 \else
-  \echo 'representative_user_id is required'
-  \quit
+  do $$begin raise exception 'representative_user_id is required';end$$;
 \endif
 \if :{?catalog_offset}
 \else
-  \echo 'catalog_offset is required (use a representative deep page such as 10000)'
-  \quit
+  do $$begin raise exception 'catalog_offset is required';end$$;
 \endif
 \if :{?representative_action_id}
 \else
-  \echo 'representative_action_id is required'
-  \quit
+  do $$begin raise exception 'representative_action_id is required';end$$;
 \endif
 
+select current_database()=:'expected_database' as expected_database_matches \gset
+\if :expected_database_matches
+\else
+  do $$begin raise exception 'connected database does not match expected_database';end$$;
+\endif
+set search_path to pg_catalog, public;
+set time zone 'UTC';
+
+select :'catalog_offset'::integer between 0 and 1000000
+  and exists(select 1 from users where id=:'representative_user_id'::bigint)
+  and exists(select 1 from activity_actions where id=:'representative_action_id'::smallint)
+  as plan_arguments_valid \gset
+\if :plan_arguments_valid
+\else
+  do $$begin raise exception 'choose an existing internal user and action, and a catalog offset from 0 to 1000000';end$$;
+\endif
+
+-- SQL ordering and pagination for anonymous Mod heat sorting. The API also
+-- reads the total, the card fields, and its associations.
 explain (analyze, buffers, format text)
 select project.id
 from mods project
@@ -27,27 +46,32 @@ left join public_routes route on route.entity_type='mod' and route.internal_id=p
 left join content_popularity_stats popularity on popularity.object_route_id=route.id
 where project.review_status='approved'
 order by coalesce(popularity.heat_score,0) desc,project.updated_at desc,project.id desc
-limit 20 offset :catalog_offset;
+limit 20 offset :'catalog_offset'::integer;
 
+-- Public Plugin heat sorting filtered by one Minecraft version and category.
 explain (analyze, buffers, format text)
 select project.id
 from simple_projects project
 left join public_routes route on route.entity_type=project.project_type and route.internal_id=project.id
 left join content_popularity_stats popularity on popularity.object_route_id=route.id
 where project.project_type='plugin' and project.review_status='approved'
-  and '1.20.1'=any(project.minecraft_versions)
+  and project.minecraft_versions && array['1.20.1']::text[]
   and 'utility'=any(project.categories)
 order by coalesce(popularity.heat_score,0) desc,project.updated_at desc,project.id desc
 limit 20;
 
+-- PostgreSQL server catalog first page, with the production online tie-breaker
+-- and the additional row used to signal a next cursor.
 explain (analyze, buffers, format text)
 select server.id
 from minecraft_servers server
 left join public_routes route on route.entity_type='minecraft_server' and route.internal_id=server.id
 left join content_popularity_stats popularity on popularity.object_route_id=route.id
 where server.review_status='approved'
-order by coalesce(popularity.heat_score,0) desc,server.updated_at desc,server.id desc
-limit 20;
+order by coalesce((popularity.heat_score*1000000)::bigint,0)*2
+           + case when server.last_online then 1 else 0 end desc,
+         server.updated_at desc,server.id desc
+limit 21;
 
 explain (analyze, buffers, format text)
 select stat_date,action_count,edit_count,markdown_added_bytes,markdown_deleted_bytes
@@ -63,20 +87,20 @@ group by content_type;
 
 explain (analyze, buffers, format text)
 select account.username,account.show_online_status,
-  exists(select 1 from user_presence_sessions presence
-    where presence.user_id=account.id and presence.last_active_at>=now()-interval '5 minutes'),
   account.public_card_stat_slots,
   coalesce(statistics.edit_count,0),coalesce(statistics.markdown_added_bytes+statistics.markdown_deleted_bytes,0)
 from users account
 left join user_statistics_totals statistics on statistics.user_id=account.id
 where account.id=:'representative_user_id'::bigint;
 
+-- Candidate lookup for pruning persisted authenticated-session snapshots.
+-- Live online status is resolved by the presence cache.
 explain (analyze, buffers, format text)
-select user_id,last_active_at
+select session_hash
 from user_presence_sessions
-where user_id=:'representative_user_id'::bigint
-  and last_active_at>=now()-interval '5 minutes'
-limit 1;
+where last_active_at<now()-interval '1 day'
+order by last_active_at
+limit 1000;
 
 explain (analyze, buffers, format text)
 select action_id,count(*)
@@ -110,7 +134,9 @@ where id in (
 rollback;
 
 explain (analyze, buffers, format text)
-select id,user_id,action_id,object_type_id,occurred_at
+select id,user_id,action_id,object_type_id,object_route_id,
+  object_public_id,object_entity_type,object_internal_id,markdown_added_bytes,
+  markdown_deleted_bytes,occurred_at
 from activity_event_outbox
 where available_at<=now()
 order by available_at,id

@@ -17,7 +17,7 @@ test("small real failure ratios never round to zero", () => {
 test("expected anti-abuse rejection is distinct from unexpected HTTP failure", () => {
   const request = {
     name: "spam-exact",
-    expectedStatuses: [201, 403, 412, 429],
+    expectedStatuses: [201, 403, 428, 429],
     expectedRiskCodes: ["duplicate_content", "challenge_required", "rate_limited"],
   };
   assert.deepEqual(classifyLoadResponse(request, 429, "rate_limited"), {
@@ -25,6 +25,10 @@ test("expected anti-abuse rejection is distinct from unexpected HTTP failure", (
     expectedReject: true,
   });
   assert.deepEqual(classifyLoadResponse(request, 429, "unknown_code"), {
+    expected: false,
+    expectedReject: false,
+  });
+  assert.deepEqual(classifyLoadResponse(request, 428, "unknown_code"), {
     expected: false,
     expectedReject: false,
   });
