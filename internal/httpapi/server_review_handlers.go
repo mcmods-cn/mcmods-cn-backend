@@ -231,7 +231,7 @@ func (s *Server) reviewMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "审核说明过长")
 		return
 	}
-	var submitterID int64
+	var serverID, submitterID int64
 	var name string
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -239,14 +239,8 @@ func (s *Server) reviewMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	err = tx.QueryRow(r.Context(), `update minecraft_servers set
-		review_status=$2,review_note=$3,reviewed_by=$4,reviewed_at=now(),
-		published_at=case when $2='approved' then coalesce(published_at,now()) else published_at end,
-		next_probe_at=case when $2='approved' then now() else next_probe_at end,
-		updated_at=now()
-		where public_id=$1 and review_status='pending'
-		returning submitted_by,name`, publicID, request.Status, request.Note,
-		currentClaims(r).Subject).Scan(&submitterID, &name)
+	err = tx.QueryRow(r.Context(), `select id,submitted_by,name from minecraft_servers
+		where public_id=$1 and review_status='pending' for update`, publicID).Scan(&serverID, &submitterID, &name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusConflict, "服务器不存在或已经审核")
 		return
@@ -255,12 +249,28 @@ func (s *Server) reviewMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存服务器审核结果失败")
 		return
 	}
+	claims, active := requireCurrentReviewActor(w, r, tx)
+	if !active {
+		return
+	}
+	if !claimsAllow(claims, "server.review") {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `update minecraft_servers set
+		review_status=$2,review_note=$3,reviewed_by=$4,reviewed_at=now(),
+		published_at=case when $2='approved' then coalesce(published_at,now()) else published_at end,
+		next_probe_at=case when $2='approved' then now() else next_probe_at end,
+		updated_at=now() where id=$1`, serverID, request.Status, request.Note, claims.Subject); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存服务器审核结果失败")
+		return
+	}
 	templateCode := "review_approved"
 	if request.Status == "rejected" {
 		templateCode = "review_rejected"
 	}
 	err = enqueueTemplatedNotificationTx(r.Context(), tx, "minecraft_server.review."+request.Status,
-		submitterID, currentClaims(r).Subject, templateCode, map[string]string{
+		submitterID, claims.Subject, templateCode, map[string]string{
 			"name": name, "reason": request.Note,
 		}, map[string]any{
 			"serverId": publicID, "reviewStatus": request.Status,
