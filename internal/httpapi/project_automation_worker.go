@@ -760,20 +760,20 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 			review++
 			continue
 		}
-		var currentSize int64
+		var mirrorID, currentSize int64
 		var currentStatus, currentFileStatus, currentScanStatus string
 		var currentMetadata []byte
-		err = worker.server.db.QueryRow(ctx, `select mirror.byte_size,mirror.status,mirror.metadata,
+		err = worker.server.db.QueryRow(ctx, `select mirror.id,mirror.byte_size,mirror.status,mirror.metadata,
 			coalesce(file.status,''),coalesce(file.scan_status,'')
 			from mirrored_project_files mirror left join oss_files file on file.id=mirror.oss_file_id
-			where mirror.source_type=$1 and mirror.external_file_id=$2`, job.SourceType, file.ID).
-			Scan(&currentSize, &currentStatus, &currentMetadata, &currentFileStatus, &currentScanStatus)
+			where mirror.project_route_id=$1 and mirror.source_type=$2 and mirror.external_file_id=$3`, job.RouteID, job.SourceType, file.ID).
+			Scan(&mirrorID, &currentSize, &currentStatus, &currentMetadata, &currentFileStatus, &currentScanStatus)
 		if err == nil {
 			existing++
 			var previous providerProjectFile
 			if decodeErr := json.Unmarshal(currentMetadata, &previous); decodeErr != nil {
 				if _, updateErr := worker.mutateProjectAutomationRun(ctx, job, `update mirrored_project_files set status='review'
-					where source_type=$1 and external_file_id=$2 and status<>'ready'`, job.SourceType, file.ID); updateErr != nil {
+					where id=$1 and status<>'ready'`, mirrorID); updateErr != nil {
 					return result(), fmt.Errorf("mark corrupt project mirror metadata for review: %w", updateErr)
 				}
 				review++
@@ -782,7 +782,7 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 			previousSignature, incomingSignature := providerFileHashSignature(previous), providerFileHashSignature(file)
 			if currentSize != file.SizeBytes || previousSignature != "" && incomingSignature != "" && previousSignature != incomingSignature {
 				if _, updateErr := worker.mutateProjectAutomationRun(ctx, job, `update mirrored_project_files set status='source_changed'
-					where source_type=$1 and external_file_id=$2`, job.SourceType, file.ID); updateErr != nil {
+					where id=$1`, mirrorID); updateErr != nil {
 					return result(), fmt.Errorf("mark changed project mirror source: %w", updateErr)
 				}
 				review++
@@ -797,14 +797,14 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 			case "scanning", "ready":
 				if currentScanStatus == "rejected" || currentFileStatus == "deleted" || currentFileStatus == "" {
 					if _, updateErr := worker.mutateProjectAutomationRun(ctx, job, `update mirrored_project_files set status='failed'
-						where source_type=$1 and external_file_id=$2 and status in ('scanning','ready')`, job.SourceType, file.ID); updateErr != nil {
+							where id=$1 and status in ('scanning','ready')`, mirrorID); updateErr != nil {
 						return result(), fmt.Errorf("mark rejected project mirror scan: %w", updateErr)
 					}
 					scanFailures++
 					review++
 				} else if currentScanStatus == "pending" {
 					if _, updateErr := worker.mutateProjectAutomationRun(ctx, job, `update mirrored_project_files set status='scanning'
-						where source_type=$1 and external_file_id=$2 and status='ready'`, job.SourceType, file.ID); updateErr != nil {
+							where id=$1 and status='ready'`, mirrorID); updateErr != nil {
 						return result(), fmt.Errorf("mark project mirror rescan pending: %w", updateErr)
 					}
 					awaitingScan++

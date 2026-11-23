@@ -81,20 +81,20 @@ func TestProjectMirrorIdentityAndUploadCompensationIntegration(t *testing.T) {
 		firstRouteID, firstOSSFileID, secondRouteID, secondOSSFileID); err != nil {
 		t.Fatalf("distinct provider files with identical bytes did not coexist: %v", err)
 	}
-	var mirrors, providerIdentityConstraints, contentConstraints int
+	var mirrors, providerIdentityConstraints, globalConstraints int
 	if err = pool.QueryRow(ctx, `select count(*)::int from mirrored_project_files
 		where source_type='modrinth' and file_sha256='same-content' and byte_size=4096`).Scan(&mirrors); err != nil || mirrors != 2 {
 		t.Fatalf("same-content mirror rows=%d err=%v", mirrors, err)
 	}
 	if err = pool.QueryRow(ctx, `select
-		count(*) filter(where pg_get_constraintdef(oid)='UNIQUE (source_type, external_file_id)')::int,
-		count(*) filter(where pg_get_constraintdef(oid)='UNIQUE (source_type, file_sha256, byte_size)')::int
+		count(*) filter(where pg_get_constraintdef(oid)='UNIQUE (project_route_id, source_type, external_file_id)')::int,
+		count(*) filter(where pg_get_constraintdef(oid) in ('UNIQUE (source_type, external_file_id)','UNIQUE (source_type, file_sha256, byte_size)'))::int
 		from pg_constraint where conrelid='mirrored_project_files'::regclass and contype='u'`).
-		Scan(&providerIdentityConstraints, &contentConstraints); err != nil {
+		Scan(&providerIdentityConstraints, &globalConstraints); err != nil {
 		t.Fatal(err)
 	}
-	if providerIdentityConstraints != 1 || contentConstraints != 0 {
-		t.Fatalf("provider identity constraints=%d content constraints=%d", providerIdentityConstraints, contentConstraints)
+	if providerIdentityConstraints != 1 || globalConstraints != 0 {
+		t.Fatalf("project-scoped provider identity constraints=%d global constraints=%d", providerIdentityConstraints, globalConstraints)
 	}
 
 	var requestMu sync.Mutex

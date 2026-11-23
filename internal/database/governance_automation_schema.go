@@ -378,7 +378,7 @@ func governanceAutomationSchemaStatements() []string {
 			metadata jsonb not null default '{}'::jsonb,
 			status text not null default 'pending',
 			created_at timestamptz not null default now(),
-			unique(source_type,external_file_id),
+			constraint mirrored_project_files_project_source_file_key unique(project_route_id,source_type,external_file_id),
 			check(status in ('pending','scanning','ready','review','failed','source_changed'))
 		)`,
 	}
