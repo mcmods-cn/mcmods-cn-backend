@@ -1,5 +1,8 @@
 # Mod 表单与修订的原生浏览器夹具
 
+> 本页保留当时的夹具、提交组合和固定端口。新验收按
+> [当前隔离环境说明](../testing-isolated-environment.md)建立专属运行范围。
+
 `TestAuditLiveModFormFixture` 仅在 `MCMODS_RUN_LIVE_MOD_FORM=1` 时运行。使用新的
 绝对 `MCMODS_AUDIT_MOD_FORM_DIR` 和实际提供页面的干净
 `MCMODS_AUDIT_FRONTEND_REPO`。前端网关固定为本任务的 `3531`，Next 使用 `3532`；

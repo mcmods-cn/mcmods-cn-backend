@@ -1,5 +1,9 @@
 # Deferred multipart cancellation activity upgrade
 
+> This note records the generation 168 expansion. Follow the
+> [current database initialization](../../README.md#数据库安装发布和恢复)
+> to install the complete multipart schema.
+
 A bounded typed `abort_activity_intent` on the upload session retains an original event across a process interruption before/after remote abort. A lease winner checks database-clock expiry and its token before work and again at the final write, then commits terminal state, quota/blueprint cleanup and exactly one activity enqueue together. The original stable event ID and delivered-to-outbox marker remain available for diagnosis; this marker does not claim downstream rewards completed. Provider failure retains retryable cleanup, and an unissued-ticket compensation has no activity intent. Older sessions default to no reconstructable event; they cannot acquire guessed rewards from this migration.
 
 Deployment order for that expansion: quiesce upload/complete/abort requests and stop every old API instance and multipart cleanup worker; back up generation168; inspect using `go run ./cmd/db-oss-multipart-activity-upgrade`; apply with `--apply --database <exact-name> --backup-reference <existing-backup> --backup-metadata <new-private-file>`; then start the new API/workers. The command defaults to diagnosis and never repairs data. It checks the actual PostgreSQL18.6 constraint expression, rejecting an identically named CHECK(true), and an explicit upgrade targets public even if a temporary table shadows the session table. Fresh installation includes the same additive statements; old startup rejects a missing extension with an actionable error. Applying twice preserves sessions and intents.

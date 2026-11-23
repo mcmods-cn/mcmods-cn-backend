@@ -1,5 +1,9 @@
 # Seven-day maintenance and issued write deadlines
 
+> The expansion steps below apply to generation 168. Current installations
+> use [database initialization](../../README.md#数据库安装发布和恢复).
+> See the [OSS maintenance guide](../audit-oss-byte-maintenance.md) for current operations.
+
 The terminal-file raw-retirement expansion adds `oss_upload_capabilities`.
 Its `object_key` records an SDK-issued authorization, rather than a business
 asset reference. The bounded maintenance inventory excludes this exact control

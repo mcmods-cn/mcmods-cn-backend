@@ -1,5 +1,9 @@
 # Notification visibility review, 2026-10-24
 
+> The upgrade below records the generation 168 rollout. The
+> [current database baseline](../../README.md#数据库安装发布和恢复) installs
+> the notification constraints, indexes and trigger as part of initialization.
+
 This is a named NEXT-001 / MSG-001 implementation and regression scope. It is
 not a whole-project release verdict. Production execution has not occurred.
 

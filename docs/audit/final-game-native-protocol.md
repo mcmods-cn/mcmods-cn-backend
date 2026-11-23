@@ -1,5 +1,8 @@
 # Final fixed-combination original059b journey
 
+> This record preserves a fixed historical commit combination and its ports.
+> For new runs, use the [current isolated game-package verification](../testing-isolated-environment.md#真实游戏包经浏览器和-jetstream-的验证).
+
 This is a new opt-in fixture and read-only observer. The earlier42b/bf6/8062
 journey and all its original results stay at their original source pins. A
 compile/SKIP result only prepares this fixture. Do not start its business run

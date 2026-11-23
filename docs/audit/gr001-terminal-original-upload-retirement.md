@@ -1,5 +1,9 @@
 # GR-001: terminal original-upload retirement
 
+> The expansion and rollback below describe the generation 168 rollout.
+> Use the [current installation baseline](../../README.md#数据库安装发布和恢复)
+> and the [OSS maintenance guide](../audit-oss-byte-maintenance.md) for new deployments.
+
 An ordinary successful completion copies and hashes the original input into a
 private server-owned key. Deleting or consuming that file previously queued
 only the stored object and any converted private source. Its client upload key
