@@ -26,6 +26,6 @@ CSS 使用 `--sticker-display-height: 2.2em`、自动宽度和 `max-width: 4.5em
 
 通用 `StickerPicker` 已接入顶级评论、回复以及站内共用 `ToolsPlayground` Markdown 编辑器，按包分类、搜索并在光标位置插入 Markdown Token，不插入 HTML。目录 Promise 只在每 locale 的 30 秒窗口内合并，失败立即可重试；后台成功新增、编辑、启停、换图或删除后主动失效当前进程缓存，其他打开页面最迟在 TTL 后观察新目录。后台可以创建/编辑包和表情的八语言名称、排序、图片、启用状态；换图和删除在事务内按确定顺序锁 OSS 行，复核新文件仍为 active，并且只在没有表情绑定时把旧对象送入删除 Outbox。
 
-所有名称以 `_markdown` 结尾的当前正文列、`comments.body` 和不可变 `content_revisions.snapshot` 都由 generation 90 数据库触发器解析到 `sticker_content_references`。引用写入和删除使用同一个按 Token 命名的 advisory transaction lock；后台删除在锁内走 `(pack_code,sticker_code)` 索引查询，仍被当前或历史内容引用时返回冲突并要求停用，不再对子串扫描事实表。
+所有名称以 `_markdown` 结尾的当前正文列、`comments.body` 和不可变 `content_revisions.snapshot` 都由当前数据库基线中的触发器解析到 `sticker_content_references`。引用写入和删除使用同一个按 Token 命名的 advisory transaction lock；后台删除在锁内走 `(pack_code,sticker_code)` 索引查询，仍被当前或历史内容引用时返回冲突并要求停用，不再对子串扫描事实表。
 
 创建表情与删除空包都会先锁同一个 `sticker_packs` 父行，再在事务内确认子项状态。并发创建要么先提交并使删包返回非空冲突，要么在删包提交后观察到父项不存在；不会再出现创建成功后被级联删除及遗留 active OSS 对象的窗口。

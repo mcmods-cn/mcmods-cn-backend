@@ -4,7 +4,7 @@
 
 权威动作来自 `activity_actions`：`edit/create/view/delete/claim/download/upload/purchase/transfer/checkin/use`。接口只接受该白名单，不接受任意字符串。
 
-升级后的全局自动清理默认关闭。默认策略是：
+全局自动清理默认关闭。默认策略是：
 
 - 全局 `enabled=false`，执行周期 60 分钟。
 - 未覆盖动作 `enabled=false`、`allowDelete=false`、365 天、每批 1000。
@@ -42,7 +42,7 @@
 4. 后端校验同一操作者、未过期、状态为 preview、常量时间 token hash、动作策略仍允许删除，以及成员版本、去重数量和确认数量一致。
 5. 仅从已保存成员集合按有限批次删除并持续更新独立审计记录；预览之后提交的事件（包括更低 sequence 和更旧 occurred_at）不进入本次范围。不提供 GET 删除接口。并发清理已移走部分成员时，返回真实删除数，不会以新事件补足确认数。
 
-权限使用现有 `log.read`/`log.write` 后端中间件。前端使用 Authorization Bearer token，不依赖跨站 cookie；既有 CORS/认证链继续阻止跨站伪造。对象和用户均由服务端重新解析，不能通过隐藏按钮或前端用户名越权。
+权限使用现有 `log.read` 和 `log.write` 后端中间件。浏览器遵循站点现有会话和请求来源规则。服务端根据公开 ID 重新解析对象和用户。
 
 ## 索引
 
@@ -52,7 +52,7 @@
 - `(object_type_id, object_route_id, occurred_at desc, id desc)`；
 - `BRIN(occurred_at)`。
 
-新增 `(action_id, occurred_at, id)` 支持动作级保留和预览。没有重复新增单列时间/用户索引。`scripts/query-analysis.sql` 提供真实数据环境的计划分析入口；只有执行计划证明需要时才继续加索引。
+`(action_id, occurred_at, id)` 支持动作级保留和预览。`scripts/query-analysis.sql` 提供真实数据环境的计划分析入口；只有执行计划证明需要时才继续加索引。
 
 ## 大数据量与恢复
 
@@ -61,7 +61,7 @@
 - 清理不可恢复；生产执行前应按现有备份策略保留数据库备份。
 - 用户累计统计、按日趋势、内容事实和经验交易不位于清理目标表，清理后无需扫描全量日志来维持正确性。
 
-## 动作摄取稳定性（generation 70）
+## 动作摄取
 
 - `view` 是 best-effort 信号：经五分钟共享节流后进入严格有界队列；队列满载时丢弃并计数，不阻塞业务请求，也不再创建无上限内存 overflow。
 - `create/edit/delete/claim/download/upload/purchase/transfer/checkin/use` 先写入 `activity_event_outbox`。只有数据库确认后才算成功入队，应用重启不会丢失已确认的 Outbox 事件。
@@ -73,10 +73,8 @@
 - 安全、权限、资金等权威审计仍在业务事务和专用审计表内完成；通用动作 Outbox 是活动/统计流，不替代领域账本。
 
 
-## 2026-10-24 手动预览成员格式兼容
+## 手动执行和恢复
 
-现有 `filters` JSON 存储新成员版本与内部数字 ID；不新增表、列或回填事件，不在公开预览响应暴露全部内部成员。旧的待确认预览没有精确成员，执行返回 `409 ACTIVITY_CLEANUP_PREVIEW_REFRESH_REQUIRED`，要求重新预览。旧的手动 `running` 清理没有精确成员时，恢复器保留已记录的删除计数并将其标为失败，停止扩大删除范围；不会重新按宽过滤器继续删除。自动保留任务继续采用自身保留策略，不借用手动确认数量。
-
-部署时先停止旧版本手动清理执行和恢复器，再启用新版本预览/执行。旧二进制会忽略新 JSON 成员字段，不能在仍有可执行新格式预览或可恢复的新格式 `running` 任务时回滚到旧执行器。回滚前应先停止手动执行和所有恢复器，使预览失效或等待其 15 分钟有效期结束；另须让所有新格式 `running` 任务完成，或按明确授权将其终止且保留原 `matched_count`、`deleted_count` 与审计历史。仅等待预览到期不能使 `running` 任务失去恢复资格，不构成安全回滚条件。生产未执行任何清理、失效或数据回填。
+`filters` 保存成员版本和所选事件的内部 ID。预览响应只返回统计与有限样例。成员缺失或与记录数量不符时，确认返回 `409 ACTIVITY_CLEANUP_PREVIEW_REFRESH_REQUIRED`。恢复器保留已记录的删除数，把无法确认成员的手动执行标记为失败。自动保留任务按自身策略选择每批事件。
 
 回归 `TestAuditCMPQ02CleanupDeletesOnlyPreviewedCommittedMembershipHTTPIntegration` 使用真实 HTTP/PostgreSQL 和显式提交屏障：预览只看到一行；低 sequence 的未提交旧事件随后提交，再插入另一旧时间事件。修复前原确认删除三行，修复后只删除预览行，两个迟到行保留，审计保持 matched=1/deleted=1，重复确认冲突。原审计恢复测试仍验证批次进度故障回滚、恢复和最终审计持久化；其夹具现在与真实新预览一样保存精确成员与 matched_count。

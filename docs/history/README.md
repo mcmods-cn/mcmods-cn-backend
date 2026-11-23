@@ -26,6 +26,8 @@
 | `cmd/db-oss-byte-binding-upgrade/main.go`、`cmd/db-oss-multipart-activity-upgrade/main.go` | `48f02aa` 保留安装定义和校验规则，移除一次性扩展命令。回收和对象证明仍由现行 OSS 入口维护。 |
 | `internal/config/database_reset_config_test.go` | `feb0176` 将测试环境准备改用当前安装入口。当前初始化测试验证已安装结构、不匹配代际和用户权限不被重置。 |
 
+2026-10-24 的手动活动清理成员升级与混版本回退步骤适用于当时的旧开发库。当前执行与恢复以同一安装代际下的精确预览成员为准。 [历史部署记录](https://github.com/mcmods-cn/mcmods-cn-backend/blob/d24c576536547fddb461fb7ee7008771c672c975/OPERATION_LOG_RETENTION.md#2026-10-24-手动预览成员格式兼容)
+
 ## 旧隔离夹具的观察工具
 
 - CONT-002 的人工邻接工具绑定 2026-10-24 专用容器、旧测试 schema 和已封存的游戏旅程。原记录保留 API 与数据库通过，以及首次浏览器观察中混合配方缺少数量标记的失败。现行配方目录夹具通过普通投稿与独立批准建立人工、导入和混合样本。 [历史源码与结果指针](https://github.com/mcmods-cn/mcmods-cn-backend/tree/bd1e27bf6354f44e93fb3f9ada3881de751caa3b/tools/audit/cont002) · [当前配方目录夹具](../../internal/httpapi/audit_live_recipe_catalog_fixture_test.go)
