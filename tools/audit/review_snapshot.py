@@ -21,6 +21,7 @@ SOURCE_SUFFIXES = {".go", ".java", ".ts", ".tsx", ".mts", ".mjs", ".js", ".cjs",
 REVIEW_FIELDS = ("responsibility", "focus_symbols", "call_chain", "callers", "callees", "side_effects", "invariants", "findings", "decision", "validation")
 INSPECTION_CATEGORIES = {"dependency-lock", "build-tool-distribution", "image", "archive-or-binary", "vendored", "generated-evidence", "structured-fixture-data"}
 GENERATED_EVIDENCE_PATHS = {
+    "docs/audit/20261002/findings.json",
     "docs/audit/20261002/FILE_REVIEW.md",
     "docs/audit/20261002/LEGACY_REVIEW.json",
     "docs/audit/20261002/file-review.json",
