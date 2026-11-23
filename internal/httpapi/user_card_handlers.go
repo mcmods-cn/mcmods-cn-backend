@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -45,8 +46,7 @@ type publicUserCard struct {
 }
 
 type cachedPublicUserCard struct {
-	Card       publicUserCard `json:"card"`
-	ShowOnline bool           `json:"showOnline"`
+	Card publicUserCard `json:"card"`
 }
 
 func publicUserCardCacheKey(userID int64) string {
@@ -76,21 +76,36 @@ func normalizePublicCardSlots(values []string) ([]string, error) {
 }
 
 func (s *Server) userCard(w http.ResponseWriter, r *http.Request) {
-	identity, ok := s.pathUserIdentity(w, r)
-	if !ok {
+	w.Header().Set("Cache-Control", "private, no-store")
+	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	var userID int64
+	var status string
+	var showOnline bool
+	err := s.db.QueryRow(r.Context(), `select account.id,account.status,account.show_online_status
+		from public_routes route join users account on account.id=route.internal_id
+		where route.public_id=$1 and route.entity_type='user'`, publicID).Scan(&userID, &status, &showOnline)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusBadRequest, "用户 ID 不正确")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load user card")
+		return
+	}
+	if status == "deleted" {
+		writeError(w, http.StatusNotFound, "user not found")
 		return
 	}
 	loader := func(ctx context.Context) ([]byte, error) {
-		cached, loadErr := s.loadPublicUserCard(ctx, identity.InternalID, identity.PublicID)
+		cached, loadErr := s.loadPublicUserCard(ctx, userID, publicID)
 		if loadErr != nil {
 			return nil, loadErr
 		}
 		return json.Marshal(cached)
 	}
 	var raw []byte
-	var err error
 	if s.cache.Config().UserCardCacheEnabled {
-		raw, err = s.cache.GetOrLoadTTL(r.Context(), publicUserCardCacheKey(identity.InternalID), s.cache.Config().UserCardTTL, loader)
+		raw, err = s.cache.GetOrLoadTTL(r.Context(), publicUserCardCacheKey(userID), s.cache.Config().UserCardTTL, loader)
 	} else {
 		raw, err = loader(r.Context())
 	}
@@ -104,13 +119,16 @@ func (s *Server) userCard(w http.ResponseWriter, r *http.Request) {
 	}
 	var cached cachedPublicUserCard
 	if err = json.Unmarshal(raw, &cached); err != nil {
-		s.cache.Delete(r.Context(), publicUserCardCacheKey(identity.InternalID))
+		s.cache.Delete(r.Context(), publicUserCardCacheKey(userID))
 		writeError(w, http.StatusServiceUnavailable, "failed to decode user card cache")
 		return
 	}
 	response := cached.Card
-	onlineActive := s.cache.UsersOnline(r.Context(), []int64{identity.InternalID}, time.Now(), s.cache.Config().PresenceTTL)[identity.InternalID]
-	response.OnlineStatus = mapPublicOnlineVisibility(cached.ShowOnline, onlineActive)
+	onlineActive := false
+	if showOnline {
+		onlineActive = s.cache.UsersOnline(r.Context(), []int64{userID}, time.Now(), s.cache.Config().PresenceTTL)[userID]
+	}
+	response.OnlineStatus = mapPublicOnlineVisibility(showOnline, onlineActive)
 	ossCfg := s.ossConfigFromSettings(r.Context())
 	response.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, response.AvatarURL)
 	if err != nil {
@@ -123,16 +141,12 @@ func (s *Server) userCard(w http.ResponseWriter, r *http.Request) {
 func (s *Server) loadPublicUserCard(ctx context.Context, userID int64, publicID string) (cachedPublicUserCard, error) {
 	var cached cachedPublicUserCard
 	var slots []string
-	var status string
 	cached.Card.ID = publicID
-	err := s.db.QueryRow(ctx, `select username,avatar_url,status,show_online_status,public_card_stat_slots
-		from users where id=$1`, userID).
-		Scan(&cached.Card.Username, &cached.Card.AvatarURL, &status, &cached.ShowOnline, &slots)
+	err := s.db.QueryRow(ctx, `select username,avatar_url,public_card_stat_slots
+		from users where id=$1 and status<>'deleted'`, userID).
+		Scan(&cached.Card.Username, &cached.Card.AvatarURL, &slots)
 	if err != nil {
 		return cached, err
-	}
-	if status == "deleted" {
-		return cached, pgx.ErrNoRows
 	}
 	cached.Card.Level, err = s.loadUserLevelSummary(ctx, userID)
 	if err != nil {
