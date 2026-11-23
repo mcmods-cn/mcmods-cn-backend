@@ -251,6 +251,7 @@ func (s *Server) skins(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listPublicSkins(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	request, err := parseSkinCatalogPageRequest(r.URL.Query())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -532,6 +533,7 @@ func (s *Server) skinDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getSkinDetail(w http.ResponseWriter, r *http.Request, publicID string) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	claims := currentClaims(r)
 	record, err := s.skinAssetByPublicID(r.Context(), publicID, claims.Subject)
 	if err != nil || !canReadSkinAsset(record, claims) {

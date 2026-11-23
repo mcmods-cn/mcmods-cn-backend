@@ -171,6 +171,7 @@ func parsePlayerTextureUpdates(request playerTextureRequest) ([]playerTextureUpd
 }
 
 func (s *Server) publicUserPlayerProfiles(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	identity, ok := s.pathUserIdentity(w, r)
 	if !ok {
 		return
@@ -187,6 +188,7 @@ func (s *Server) publicUserPlayerProfiles(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) playerProfileDetail(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	publicID := normalizedSkinPublicID(r.PathValue("publicId"))
 	claims := currentClaims(r)
 	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims.Subject)
