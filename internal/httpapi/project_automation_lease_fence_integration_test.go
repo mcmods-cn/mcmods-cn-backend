@@ -82,6 +82,77 @@ func TestOCT02ProjectAutomationLateAttemptCannotMutateCurrentRunIntegration(t *t
 			}
 		})
 	}
+	t.Run("deadline_while_waiting_for_run_lock", func(t *testing.T) {
+		workCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		var expiresAt time.Time
+		if err := pool.QueryRow(workCtx, `update project_auto_update_runs
+			set lease_expires_at=clock_timestamp()+interval '4 seconds' where id=$1 returning lease_expires_at`, run).Scan(&expiresAt); err != nil {
+			t.Fatal(err)
+		}
+		holder, err := pool.Begin(workCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rollbackIntegrationTransaction(holder)
+		var lockedID int64
+		if err = holder.QueryRow(workCtx, `select id from project_auto_update_runs where id=$1 for no key update`, run).Scan(&lockedID); err != nil {
+			t.Fatal(err)
+		}
+		blockerPID := int32(holder.Conn().PgConn().PID())
+		result := make(chan error, 1)
+		go func() {
+			_, mutateErr := worker.mutateProjectAutomationRun(workCtx, job,
+				`update project_auto_update_runs set result='{"late":true}' where id=$1`, lockedID)
+			result <- mutateErr
+		}()
+		poll := time.NewTicker(10 * time.Millisecond)
+		defer poll.Stop()
+		for {
+			var waiting, beforeDeadline bool
+			if err = pool.QueryRow(workCtx, `select exists(select 1 from pg_stat_activity
+				where datname=current_database() and wait_event_type='Lock' and $1=any(pg_blocking_pids(pid))),
+				clock_timestamp()<$2::timestamptz`, blockerPID, expiresAt).Scan(&waiting, &beforeDeadline); err != nil {
+				t.Fatal(err)
+			}
+			if !beforeDeadline {
+				t.Fatal("did not observe the running worker wait before its lease deadline")
+			}
+			if waiting {
+				break
+			}
+			select {
+			case early := <-result:
+				t.Fatalf("worker did not wait for the lock: %v", early)
+			case <-workCtx.Done():
+				t.Fatal(workCtx.Err())
+			case <-poll.C:
+			}
+		}
+		if _, err = pool.Exec(workCtx, `select pg_sleep_until($1::timestamptz)`, expiresAt.Add(time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+		if err = holder.Commit(workCtx); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err = <-result:
+			if !errors.Is(err, errProjectAutomationLeaseLost) {
+				t.Errorf("worker resumed after the deadline: error=%v", err)
+			}
+		case <-workCtx.Done():
+			t.Fatal(workCtx.Err())
+		}
+		var current bool
+		if err = pool.QueryRow(workCtx, `select coalesce((result->>'current')::boolean,false)
+			from project_auto_update_runs where id=$1`, run).Scan(&current); err != nil || !current {
+			t.Errorf("expired attempt changed result: current=%t error=%v", current, err)
+		}
+		if _, err = pool.Exec(workCtx, `update project_auto_update_runs
+			set result='{"current":true}',lease_expires_at=clock_timestamp()+interval '10 minutes' where id=$1`, run); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("current_claim", func(t *testing.T) {
 		if _, err := worker.mergeCompatibility(ctx, job, []providerProjectFile{{GameVersions: []string{"1.20.1"}, Loaders: []string{"forge"}}}); err != nil {
 			t.Fatal(err)

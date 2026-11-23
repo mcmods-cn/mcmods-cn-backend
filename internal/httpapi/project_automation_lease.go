@@ -18,14 +18,18 @@ func lockProjectAutomationRunTx(ctx context.Context, tx pgx.Tx, job projectAutom
 		return nil
 	}
 	var id int64
-	err := tx.QueryRow(ctx, `select run.id from project_auto_update_runs run
-	 join project_auto_update_settings setting on setting.id=run.setting_id
-	 join project_external_sources source on source.project_route_id=setting.project_route_id and source.source_type=setting.source_type
-	 where run.id=$1 and run.status='running' and run.lease_owner=$2 and run.lease_expires_at>now()
-	 and setting.id=$3 and setting.project_route_id=$4 and setting.update_kind=$5 and setting.source_type=$6
-	 and source.external_project_id=$7 and setting.license_override=$8
-	 and setting.license_override_reason=$9 and setting.license_override_source=$10
-	 for update of run for share of setting,source`, job.RunID, job.LeaseOwner, job.SettingID, job.RouteID, job.Kind, job.SourceType, job.ExternalID, job.LicenseOverride, job.OverrideReason, job.OverrideSource).Scan(&id)
+	// Read the deadline after PostgreSQL has acquired the run, settings and
+	// source locks. A transaction may have been waiting since before expiry.
+	err := tx.QueryRow(ctx, `with locked_run as materialized (
+		select run.id,run.lease_expires_at from project_auto_update_runs run
+		join project_auto_update_settings setting on setting.id=run.setting_id
+		join project_external_sources source on source.project_route_id=setting.project_route_id and source.source_type=setting.source_type
+		where run.id=$1 and run.status='running' and run.lease_owner=$2
+		and setting.id=$3 and setting.project_route_id=$4 and setting.update_kind=$5 and setting.source_type=$6
+		and source.external_project_id=$7 and setting.license_override=$8
+		and setting.license_override_reason=$9 and setting.license_override_source=$10
+		for update of run for share of setting,source
+	) select id from locked_run where lease_expires_at>clock_timestamp()`, job.RunID, job.LeaseOwner, job.SettingID, job.RouteID, job.Kind, job.SourceType, job.ExternalID, job.LicenseOverride, job.OverrideReason, job.OverrideSource).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errProjectAutomationLeaseLost
 	}
