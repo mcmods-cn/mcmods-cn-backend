@@ -1,10 +1,11 @@
 # Scoped OSS byte diagnosis, promotion and input retention (CMP-005)
 
-`cmd/oss-byte-maintenance` defaults to dry-run. It changes no schema, balances,
-permissions, review decisions, reward history or public file IDs. This task has
-not run it against production. Schema inspection/expansion is described in
-`audit-oss-byte-binding-upgrade.md`; apply also requires its additive typed
-maintenance journal. A missing journal is not created by a request or worker.
+`cmd/oss-byte-maintenance` defaults to dry-run. Apply uses the typed maintenance
+journal installed by the [current database baseline](../README.md#数据库安装发布和恢复).
+The tool keeps balances, permissions, review decisions, reward history and
+public file IDs intact. Follow the current database recovery procedure if the
+journal's structure is incomplete. The earlier extension applies to
+[generation 168](audit-oss-byte-binding-upgrade.md).
 
 Use a private regular JSON plan and a new private report file. The CLI refuses
 group/world-readable plans and creates reports exclusively with0600 permissions.
@@ -162,13 +163,10 @@ lock failures/timeouts hold or fail the action rather than broadening the lock
 scope or waiting forever. Unlocked writers must remain paused throughout.
 
 The journal records the reviewed fingerprint and operator pause assertion
-separately from `write_fence_tables`, the actual physical table locks completed
-by a successful final executor. Old journal rows gain blank/false/empty defaults
-only during explicit additive schema expansion; they acquire no inferred past
-pause or fence proof. Normal upload startup does not require this optional
-journal expansion. Old plan digests are preserved: do not silently reuse an old
-action ID with the new scope or discard its intent; review its state and use an
-explicit new action where appropriate.
+separately from `write_fence_tables`, the physical table locks completed by a
+successful final executor. The reviewed plan and executor fill the scope fields.
+Keep old plan digests and intents. Review the existing action state and use a
+new action ID for a different scope.
 
 A provider DELETE and a database transaction cannot be rolled back atomically.
 If DELETE succeeds but HEAD/commit fails, the durable intent remains failed or
