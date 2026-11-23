@@ -11,6 +11,7 @@ import (
 	"net/mail"
 	"net/smtp"
 	"net/textproto"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,7 +31,15 @@ func New(cfg config.SMTPConfig) Mailer {
 }
 
 func (m Mailer) Enabled() bool {
-	return m.Config.Enabled && strings.TrimSpace(m.Config.Host) != "" && strings.TrimSpace(m.Config.From) != "" && m.Config.Port > 0 && m.Config.Port <= 65535
+	return m.Config.Enabled && m.smtpHost() != "" && strings.TrimSpace(m.Config.From) != "" && m.Config.Port > 0 && m.Config.Port <= 65535
+}
+
+func (m Mailer) smtpHost() string {
+	host := strings.TrimSpace(m.Config.Host)
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		return host[1 : len(host)-1]
+	}
+	return host
 }
 
 func (m Mailer) Send(to string, subject string, body string) error {
@@ -52,7 +61,8 @@ func (m Mailer) SendEvent(ctx context.Context, to, subject, body, eventID string
 	if strings.ContainsAny(subject, "\r\n") {
 		return errors.New("mail subject contains a line break")
 	}
-	addr := fmt.Sprintf("%s:%d", m.Config.Host, m.Config.Port)
+	host := m.smtpHost()
+	addr := net.JoinHostPort(host, strconv.Itoa(m.Config.Port))
 	headers := []string{
 		fmt.Sprintf("From: %s", fromAddress.String()),
 		fmt.Sprintf("To: %s", toAddress.String()),
@@ -68,9 +78,9 @@ func (m Mailer) SendEvent(ctx context.Context, to, subject, body, eventID string
 
 	var auth smtp.Auth
 	if m.Config.Username != "" {
-		auth = smtp.PlainAuth("", m.Config.Username, m.Config.Password, m.Config.Host)
+		auth = smtp.PlainAuth("", m.Config.Username, m.Config.Password, host)
 	}
-	return sendSMTP(ctx, addr, m.Config.Host, auth, fromAddress.Address, []string{toAddress.Address}, []byte(message), m.Config.UseTLS)
+	return sendSMTP(ctx, addr, host, auth, fromAddress.Address, []string{toAddress.Address}, []byte(message), m.Config.UseTLS)
 }
 
 func parseMailbox(value string) (*mail.Address, error) {

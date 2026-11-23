@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -49,6 +50,11 @@ func newTEST024SMTP(t *testing.T, behavior test024SMTPBehavior) (int, <-chan tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	return serveTEST024SMTP(t, listener, behavior)
+}
+
+func serveTEST024SMTP(t *testing.T, listener net.Listener, behavior test024SMTPBehavior) (int, <-chan test024SMTPResult) {
+	t.Helper()
 	result := make(chan test024SMTPResult, 1)
 	done := make(chan struct{})
 	var lock sync.Mutex
@@ -271,6 +277,27 @@ func TestTEST024SMTPAuthenticatedDeliveryAndProtocolFailures(t *testing.T) {
 					t.Fatal("rejected transaction submitted message data")
 				}
 			}
+		})
+	}
+}
+
+func TestTEST024SMTPDeliversToIPv6Loopback(t *testing.T) {
+	for _, host := range []string{"::1", "[::1]"} {
+		t.Run(host, func(t *testing.T) {
+			listener, err := net.Listen("tcp6", "[::1]:0")
+			if errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EADDRNOTAVAIL) {
+				t.Skipf("IPv6 loopback is unavailable: %v", err)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			port, result := serveTEST024SMTP(t, listener, test024SMTPBehavior{auth: true})
+			cfg := test024SMTPConfig(port)
+			cfg.Host = host
+			if err := New(cfg).Send("Recipient <recipient@example.test>", "站点邮件测试", ".first\r\n第二行\r\n"); err != nil {
+				t.Fatal(err)
+			}
+			assertTEST024SMTPMessage(t, receiveTEST024SMTP(t, result), false)
 		})
 	}
 }
