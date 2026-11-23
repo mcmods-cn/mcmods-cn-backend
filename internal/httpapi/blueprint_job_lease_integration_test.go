@@ -304,6 +304,106 @@ func TestBlueprintJobLeaseOwnershipAndHeartbeatCASIntegration(t *testing.T) {
 	assertBlueprintJobLeaseState(t, ctx, pool, 30, "completed", "", nil, 2)
 }
 
+func TestBlueprintHeartbeatWaitingForRowLockRespectsDeadlineIntegration(t *testing.T) {
+	f := newTEST036Fixture(t)
+	raw, _, err := encodeBlueprint(test036Document(), "nbt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upload := f.upload(t, f.editor, "blueprint-lease-clock.nbt", raw)
+	worker := f.worker("lease-clock")
+	job, claimed, err := worker.claimBlueprintJob(f.ctx, upload.jobID)
+	if err != nil || !claimed {
+		t.Fatalf("claim=%t err=%v", claimed, err)
+	}
+	if err = worker.updateBlueprintJobProgress(f.ctx, job.id, job.runToken, 17); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(f.ctx, 12*time.Second)
+	defer cancel()
+	var deadline time.Time
+	var progress int
+	if err = f.db.QueryRow(ctx, `update blueprint_jobs set lease_expires_at=clock_timestamp()+interval '2 seconds'
+		where id=$1 returning lease_expires_at,progress`, job.id).Scan(&deadline, &progress); err != nil || progress != 17 {
+		t.Fatalf("record a normal attempt with progress=%d err=%v", progress, err)
+	}
+	before := f.facts(t)
+	holder, err := f.db.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rollbackIntegrationTransaction(holder)
+	if _, err = holder.Exec(ctx, `select id from blueprint_jobs where id=$1 for no key update`, job.id); err != nil {
+		t.Fatal(err)
+	}
+	blocker := int(holder.Conn().PgConn().PID())
+	result := make(chan error, 1)
+	go func() { result <- worker.renewBlueprintJobLease(ctx, job.id, job.runToken) }()
+	observedLiveWait := false
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waiting, expired bool
+		if err = f.db.QueryRow(ctx, `select exists(select 1 from pg_stat_activity
+			where datname=current_database() and wait_event_type='Lock' and $1=any(pg_blocking_pids(pid))),
+			clock_timestamp()>=$2`, blocker, deadline).Scan(&waiting, &expired); err != nil {
+			t.Fatal(err)
+		}
+		if expired {
+			if !observedLiveWait || !waiting {
+				t.Fatal("expected a heartbeat waiting on the unchanged row on both sides of its deadline")
+			}
+			break
+		}
+		observedLiveWait = observedLiveWait || waiting
+		select {
+		case early := <-result:
+			t.Fatalf("heartbeat returned before the row lock released: %v", early)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-ticker.C:
+		}
+	}
+
+	recovery := f.worker("lease-recovery")
+	if recovered, exhausted, recoverErr := recovery.recoverStaleBlueprintJobs(ctx); recovered != 0 || exhausted != 0 || recoverErr != nil {
+		t.Fatalf("recovery should skip the currently locked job: %d/%d %v", recovered, exhausted, recoverErr)
+	}
+	if err = holder.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err = <-result:
+		if !errors.Is(err, errBlueprintJobLeaseLost) {
+			t.Fatalf("late heartbeat result=%v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if err = worker.updateBlueprintJobProgress(ctx, job.id, job.runToken, 30); !errors.Is(err, errBlueprintJobLeaseLost) {
+		t.Fatalf("expired progress result=%v", err)
+	}
+	if err = worker.completeBlueprintJob(ctx, job.id, job.runToken); !errors.Is(err, errBlueprintJobLeaseLost) {
+		t.Fatalf("expired completion result=%v", err)
+	}
+	if _, err = worker.failBlueprintJob(ctx, job, errors.New("ordinary processing deadline")); !errors.Is(err, errBlueprintJobLeaseLost) {
+		t.Fatalf("expired failure result=%v", err)
+	}
+	f.unchanged(t, before)
+	if recovered, exhausted, recoverErr := recovery.recoverStaleBlueprintJobs(ctx); recovered != 1 || exhausted != 0 || recoverErr != nil {
+		t.Fatalf("unlocked recovery=%d/%d err=%v", recovered, exhausted, recoverErr)
+	}
+	if recovered, exhausted, recoverErr := recovery.recoverStaleBlueprintJobs(ctx); recovered != 0 || exhausted != 0 || recoverErr != nil {
+		t.Fatalf("repeated recovery=%d/%d err=%v", recovered, exhausted, recoverErr)
+	}
+	if err = recovery.processJob(f.ctx, job.id); err != nil {
+		t.Fatal(err)
+	}
+	assertBlueprintJobLeaseState(t, f.ctx, f.db, job.id, "completed", "", nil, 2)
+	assertBlueprintStatus(t, f.ctx, f.db, job.blueprintID, "ready")
+}
+
 func TestBlueprintJobRetryBudgetKeepsOptionalConversionAvailableIntegration(t *testing.T) {
 	pool := openBlueprintJobStateTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

@@ -15,7 +15,6 @@ import (
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/semaphore"
 
@@ -133,26 +132,23 @@ func (worker *BlueprintWorker) processJob(ctx context.Context, jobID int64) erro
 	}
 	heartbeatCause := context.Cause(workContext)
 	stopHeartbeat()
-	if heartbeatCause != nil {
-		workErr = errors.Join(workErr, heartbeatCause)
+	if workErr == nil {
+		// The business transaction has committed. A concurrent heartbeat may
+		// see the already completed job and report that the lease is gone.
+		return nil
 	}
-	if workErr != nil {
-		persistContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, persistErr := worker.failBlueprintJob(persistContext, job, workErr)
-		cancel()
-		if persistErr != nil {
-			return errors.Join(workErr, persistErr)
-		}
-		return workErr
-	}
-	return nil
+	workErr = errors.Join(workErr, heartbeatCause)
+	persistContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, persistErr := worker.failBlueprintJob(persistContext, job, workErr)
+	return errors.Join(workErr, persistErr)
 }
 
 func (worker *BlueprintWorker) claimBlueprintJob(ctx context.Context, jobID int64) (claimedBlueprintJob, bool, error) {
 	job := claimedBlueprintJob{id: jobID, runToken: worker.workerID + ":" + newExportID()}
 	err := worker.db.QueryRow(ctx, `update blueprint_jobs set
 		status='processing',progress=1,attempts=attempts+1,started_at=coalesce(started_at,now()),finished_at=null,
-		locked_by=$2,lease_expires_at=now()+$3::interval,updated_at=now()
+		locked_by=$2,lease_expires_at=clock_timestamp()+$3::interval,updated_at=now()
 		where id=$1 and attempts<max_attempts and (
 			status='queued' or (status='processing' and coalesce(lease_expires_at,updated_at)<=now())
 		)
@@ -208,21 +204,44 @@ func (worker *BlueprintWorker) startBlueprintJobHeartbeat(parent context.Context
 	}
 }
 
-func (worker *BlueprintWorker) renewBlueprintJobLease(ctx context.Context, jobID int64, runToken string) error {
-	tag, err := worker.db.Exec(ctx, `update blueprint_jobs set lease_expires_at=now()+$3::interval,updated_at=now()
-		where id=$1 and status='processing' and locked_by=$2`, jobID, runToken, pgInterval(blueprintLeaseTTL))
-	if err != nil {
-		return err
+// Materialize the locked row before checking time. An unchanged tuple can
+// remain locked until after the lease expires, even in a new SQL statement.
+const liveBlueprintJobSQL = `with locked_blueprint_job as materialized (
+	select id,blueprint_id,attempts,lease_expires_at from blueprint_jobs
+	where id=$1 and status='processing' and locked_by=$2 for no key update
+), live_blueprint_job as (
+	select id,blueprint_id,attempts from locked_blueprint_job where lease_expires_at>clock_timestamp()
+) `
+
+func lockLiveBlueprintJobTx(ctx context.Context, tx pgx.Tx, jobID int64, runToken string, attempt int) (int64, error) {
+	var blueprintID int64
+	err := tx.QueryRow(ctx, liveBlueprintJobSQL+`select blueprint_id from live_blueprint_job where attempts=$3`, jobID, runToken, attempt).Scan(&blueprintID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, errBlueprintJobLeaseLost
 	}
-	if tag.RowsAffected() != 1 {
+	return blueprintID, err
+}
+
+func requireLiveBlueprintJobTx(ctx context.Context, tx pgx.Tx, jobID int64, runToken string, attempt int, blueprintID int64) error {
+	lockedBlueprintID, err := lockLiveBlueprintJobTx(ctx, tx, jobID, runToken, attempt)
+	if err == nil && lockedBlueprintID != blueprintID {
 		return errBlueprintJobLeaseLost
 	}
-	return nil
+	return err
+}
+
+func (worker *BlueprintWorker) renewBlueprintJobLease(ctx context.Context, jobID int64, runToken string) error {
+	return worker.extendBlueprintJobLease(ctx, jobID, runToken, nil)
 }
 
 func (worker *BlueprintWorker) updateBlueprintJobProgress(ctx context.Context, jobID int64, runToken string, progress int) error {
-	tag, err := worker.db.Exec(ctx, `update blueprint_jobs set progress=$3,lease_expires_at=now()+$4::interval,updated_at=now()
-		where id=$1 and status='processing' and locked_by=$2`, jobID, runToken, progress, pgInterval(blueprintLeaseTTL))
+	return worker.extendBlueprintJobLease(ctx, jobID, runToken, &progress)
+}
+
+func (worker *BlueprintWorker) extendBlueprintJobLease(ctx context.Context, jobID int64, runToken string, progress *int) error {
+	tag, err := worker.db.Exec(ctx, liveBlueprintJobSQL+`update blueprint_jobs as job set
+		progress=coalesce($3::integer,job.progress),lease_expires_at=clock_timestamp()+$4::interval,updated_at=now()
+		from live_blueprint_job where job.id=live_blueprint_job.id`, jobID, runToken, progress, pgInterval(blueprintLeaseTTL))
 	if err != nil {
 		return err
 	}
@@ -245,8 +264,9 @@ func (worker *BlueprintWorker) completeBlueprintJob(ctx context.Context, jobID i
 }
 
 func completeBlueprintJobTx(ctx context.Context, tx pgx.Tx, jobID int64, runToken string) error {
-	tag, err := tx.Exec(ctx, `update blueprint_jobs set status='completed',progress=100,finished_at=now(),updated_at=now(),
-		last_error='',locked_by='',lease_expires_at=null where id=$1 and status='processing' and locked_by=$2`, jobID, runToken)
+	tag, err := tx.Exec(ctx, liveBlueprintJobSQL+`update blueprint_jobs as job set
+		status='completed',progress=100,finished_at=now(),updated_at=now(),last_error='',locked_by='',lease_expires_at=null
+		from live_blueprint_job where job.id=live_blueprint_job.id`, jobID, runToken)
 	if err != nil {
 		return err
 	}
@@ -262,6 +282,9 @@ func (worker *BlueprintWorker) failBlueprintJob(ctx context.Context, job claimed
 		return false, err
 	}
 	defer tx.Rollback(ctx)
+	if err = requireLiveBlueprintJobTx(ctx, tx, job.id, job.runToken, job.attempts, job.blueprintID); err != nil {
+		return false, err
+	}
 	terminal := job.attempts >= job.maxAttempts || errors.Is(cause, errBlueprintEntityDataWouldBeLost)
 	lastError := cause.Error()
 	if len(lastError) > 2000 {
@@ -270,29 +293,24 @@ func (worker *BlueprintWorker) failBlueprintJob(ctx context.Context, job claimed
 	if err = abandonBlueprintJobArtifactsTx(ctx, tx, job.id, job.attempts, "blueprint-job-failed"); err != nil {
 		return false, err
 	}
-	var tag pgconn.CommandTag
+	jobStatus := "queued"
 	if terminal {
-		tag, err = tx.Exec(ctx, `update blueprint_jobs set status='failed',progress=0,finished_at=now(),updated_at=now(),
-			last_error=$3,locked_by='',lease_expires_at=null where id=$1 and status='processing' and locked_by=$2`, job.id, job.runToken, lastError)
-	} else {
-		tag, err = tx.Exec(ctx, `update blueprint_jobs set status='queued',progress=0,finished_at=null,updated_at=now(),
-			last_error=$3,locked_by='',lease_expires_at=null where id=$1 and status='processing' and locked_by=$2`, job.id, job.runToken, lastError)
+		jobStatus = "failed"
 	}
+	if job.operation == "normalize" {
+		if _, err = tx.Exec(ctx, `update blueprints set status=$2,last_error=$3,updated_at=now()
+			where id=$1 and status in ('queued','processing')`, job.blueprintID, jobStatus, lastError); err != nil {
+			return false, err
+		}
+	}
+	tag, err := tx.Exec(ctx, liveBlueprintJobSQL+`update blueprint_jobs as job set status=$3,progress=0,
+		finished_at=case when $3='failed' then now() end,updated_at=now(),last_error=$4,locked_by='',lease_expires_at=null
+		from live_blueprint_job where job.id=live_blueprint_job.id`, job.id, job.runToken, jobStatus, lastError)
 	if err != nil {
 		return false, err
 	}
 	if tag.RowsAffected() != 1 {
 		return false, errBlueprintJobLeaseLost
-	}
-	if job.operation == "normalize" {
-		blueprintStatus := "queued"
-		if terminal {
-			blueprintStatus = "failed"
-		}
-		if _, err = tx.Exec(ctx, `update blueprints set status=$2,last_error=$3,updated_at=now()
-			where id=$1 and status in ('queued','processing')`, job.blueprintID, blueprintStatus, lastError); err != nil {
-			return false, err
-		}
 	}
 	if terminal {
 		if err = worker.notifyTemplateTx(ctx, tx, job.createdBy, "blueprint_conversion_failure", map[string]string{"error": cause.Error()}, job.blueprintID); err != nil {
@@ -308,15 +326,27 @@ func (worker *BlueprintWorker) failBlueprintJob(ctx context.Context, job claimed
 func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int64, attempt int, runToken string, blueprintID, createdBy int64) error {
 	var publicID, objectKey, sourceFormat, title, description, coverKey string
 	var coverFileID int64
-	if err := worker.db.QueryRow(ctx, `update blueprints set status='processing',last_error='',updated_at=now()
+	startTx, err := worker.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer startTx.Rollback(ctx)
+	if err = requireLiveBlueprintJobTx(ctx, startTx, jobID, runToken, attempt, blueprintID); err != nil {
+		return err
+	}
+	if err = startTx.QueryRow(ctx, `update blueprints set status='processing',last_error='',updated_at=now()
 		where id=$1 and status in ('queued','processing','failed')
-		and exists(select 1 from blueprint_jobs job where job.id=$2 and job.blueprint_id=$1
-			and job.status='processing' and job.attempts=$3 and job.locked_by=$4 for share)
-		returning public_id,original_object_key,source_format,title,description_markdown,coalesce(cover_file_id,0),cover_object_key`, blueprintID, jobID, attempt, runToken).
+		returning public_id,original_object_key,source_format,title,description_markdown,coalesce(cover_file_id,0),cover_object_key`, blueprintID).
 		Scan(&publicID, &objectKey, &sourceFormat, &title, &description, &coverFileID, &coverKey); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errBlueprintJobLeaseLost
 		}
+		return err
+	}
+	if err = requireLiveBlueprintJobTx(ctx, startTx, jobID, runToken, attempt, blueprintID); err != nil {
+		return err
+	}
+	if err = startTx.Commit(ctx); err != nil {
 		return err
 	}
 	raw, _, err := worker.readOSSObject(ctx, objectKey, maxBlueprintSourceBytes)
@@ -374,6 +404,10 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int
 		return err
 	}
 	defer tx.Rollback(ctx)
+	// Recovery also locks the job before any blueprint or artifact rows.
+	if err = requireLiveBlueprintJobTx(ctx, tx, jobID, runToken, attempt, blueprintID); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, "blueprint:"+publicID); err != nil {
 		return fmt.Errorf("lock blueprint revision: %w", err)
 	}
@@ -571,6 +605,9 @@ func (worker *BlueprintWorker) convertBlueprint(ctx context.Context, jobID int64
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = requireLiveBlueprintJobTx(ctx, tx, jobID, runToken, attempt, blueprintID); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `insert into blueprint_variants(blueprint_id,format,file_id,object_key,original,recommended,status,original_name,content_type,size_bytes,sha256,created_by)
 		values($1,$2,$3,$4,false,false,'ready',$5,$6,$7,$8,$9)`, blueprintID, extension, artifact.fileID, objectKey, filename, contentType, len(encoded), hex.EncodeToString(digest[:]), createdBy); err != nil {
 		return err
@@ -601,7 +638,7 @@ func (worker *BlueprintWorker) recoverStaleBlueprintJobs(ctx context.Context) (i
 	defer tx.Rollback(ctx)
 	rows, err := tx.Query(ctx, `select id,public_id,blueprint_id,operation,coalesce(created_by,0),attempts,max_attempts
 		from blueprint_jobs where status='processing' and coalesce(lease_expires_at,updated_at)<=now()
-		order by coalesce(lease_expires_at,updated_at),id for update skip locked limit $1`, blueprintRecoveryBatchLimit)
+		order by coalesce(lease_expires_at,updated_at),id for no key update skip locked limit $1`, blueprintRecoveryBatchLimit)
 	if err != nil {
 		return 0, 0, err
 	}

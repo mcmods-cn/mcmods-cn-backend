@@ -92,13 +92,8 @@ func (worker *BlueprintWorker) writePendingBlueprintArtifact(
 		return blueprintArtifact{}, err
 	}
 	defer tx.Rollback(ctx)
-	var ownedJobID, blueprintID int64
-	if err = tx.QueryRow(ctx, `select id,blueprint_id from blueprint_jobs
-		where id=$1 and status='processing' and attempts=$2 and locked_by=$3 for update`, jobID, attempt, runToken).
-		Scan(&ownedJobID, &blueprintID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return blueprintArtifact{}, errBlueprintJobLeaseLost
-		}
+	blueprintID, err := lockLiveBlueprintJobTx(ctx, tx, jobID, runToken, attempt)
+	if err != nil {
 		return blueprintArtifact{}, err
 	}
 	artifact := blueprintArtifact{jobID: jobID, attempt: attempt, role: role, objectKey: objectKey}
@@ -118,6 +113,9 @@ func (worker *BlueprintWorker) writePendingBlueprintArtifact(
 		jobID, blueprintID, attempt, role, artifact.fileID, cfg.Bucket, cfg.Endpoint, cfg.Region,
 		cfg.UseCName || isCustomOSSEndpoint(cfg.Endpoint), objectKey).Scan(&artifact.id)
 	if err != nil {
+		return blueprintArtifact{}, err
+	}
+	if err = requireLiveBlueprintJobTx(ctx, tx, jobID, runToken, attempt, blueprintID); err != nil {
 		return blueprintArtifact{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -153,7 +151,7 @@ func (worker *BlueprintWorker) verifyBlueprintArtifactUpload(ctx context.Context
 		where artifact.id=$1 and artifact.file_id=$2 and artifact.job_id=$3
 		and artifact.attempt=$4 and artifact.role=$5 and artifact.object_key=$6
 		and artifact.status='pending' and file.status='pending'
-		and job.status='processing' and job.attempts=$4 and job.locked_by=$7)`,
+		and job.status='processing' and job.attempts=$4 and job.locked_by=$7 and job.lease_expires_at>clock_timestamp())`,
 		artifact.id, artifact.fileID, artifact.jobID, artifact.attempt, artifact.role, artifact.objectKey, runToken).Scan(&owned)
 	if err != nil {
 		return fmt.Errorf("verify uploaded blueprint artifact ownership: %w", err)
