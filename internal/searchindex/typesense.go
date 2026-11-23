@@ -79,7 +79,11 @@ func New(cfg config.TypesenseConfig) *Client {
 	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
-	return &Client{config: cfg, http: &http.Client{Timeout: timeout}}
+	return &Client{config: cfg, http: &http.Client{
+		Timeout: timeout,
+		// The configured endpoint is the boundary for the Typesense API key.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
 }
 
 func (client *Client) Enabled() bool {
@@ -317,6 +321,10 @@ func (client *Client) requestWithContentType(ctx context.Context, method, path s
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		client.SetReady(false)
+		return fmt.Errorf("%w: Typesense returned an unexpected HTTP %d response", ErrUnavailable, response.StatusCode)
+	}
 	raw, readErr := io.ReadAll(io.LimitReader(response.Body, 8<<20))
 	if readErr != nil {
 		return readErr

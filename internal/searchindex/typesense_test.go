@@ -2,9 +2,11 @@ package searchindex
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,5 +87,24 @@ func TestSearchMarksClientUnavailableOnServerFailure(t *testing.T) {
 	_, err := client.Search(context.Background(), SearchRequest{Collection: "projects", Query: "test", QueryBy: []string{"names"}})
 	if err == nil || client.Ready() {
 		t.Fatalf("Search() error = %v, ready = %v", err, client.Ready())
+	}
+}
+
+func TestSearchRejectsRedirectFromConfiguredEndpoint(t *testing.T) {
+	var followed atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/collections/test_projects/documents/search" {
+			http.Redirect(w, r, "/next", http.StatusTemporaryRedirect)
+			return
+		}
+		followed.Store(true)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	client := New(config.TypesenseConfig{Enabled: true, URL: server.URL, CollectionPrefix: "test", Timeout: time.Second})
+	client.SetReady(true)
+	_, err := client.Search(context.Background(), SearchRequest{Collection: "projects", Query: "example", QueryBy: []string{"names"}})
+	if !errors.Is(err, ErrUnavailable) || client.Ready() || followed.Load() {
+		t.Fatalf("unexpected redirect result: error=%v ready=%v followed=%v", err, client.Ready(), followed.Load())
 	}
 }
