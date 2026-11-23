@@ -78,6 +78,13 @@ func TestTEST033MinecraftVersionSyncUsesCrossInstanceLeasePersistsProvenanceAndF
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		releaseCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if releaseErr := lease.Release(releaseCtx); releaseErr != nil {
+			t.Errorf("release version sync fixture lease: %v", releaseErr)
+		}
+	})
 	if _, err = syncMinecraftVersionCatalog(ctx, poolB); !errors.Is(err, errMinecraftVersionSyncInProgress) {
 		t.Fatalf("second instance synchronization error=%v want in-progress", err)
 	}
