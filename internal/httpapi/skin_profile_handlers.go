@@ -128,13 +128,13 @@ func (s *Server) setPlayerProfileTexture(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to persist skin library activity")
 		return
 	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update player texture")
-		return
-	}
-	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims.Subject)
+	profile, err := loadPlayerProfileByPublicIDForViewer(r.Context(), tx, publicID, claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load updated player profile")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update player texture")
 		return
 	}
 	writeJSON(w, http.StatusOK, profile)
@@ -447,8 +447,13 @@ func skinAssetScanDestinations(record *skinAssetRecord) []any {
 		&record.SizeBytes, &record.CreatedAt, &record.UpdatedAt, &record.InWardrobe}
 }
 
-func (s *Server) skinAssetByPublicID(ctx context.Context, publicID string, viewerID int64) (skinAssetRecord, error) {
-	return scanSkinAsset(s.db.QueryRow(ctx, skinAssetSelectSQL+` where asset.public_id=$2`, viewerID, publicID))
+type skinMetadataQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func skinAssetByPublicID(ctx context.Context, queryer skinMetadataQueryer, publicID string, viewerID int64) (skinAssetRecord, error) {
+	return scanSkinAsset(queryer.QueryRow(ctx, skinAssetSelectSQL+` where asset.public_id=$2`, viewerID, publicID))
 }
 
 func lockProfilesUsingAsset(ctx context.Context, tx pgx.Tx, assetID int64) ([]int64, error) {
@@ -845,15 +850,19 @@ func (s *Server) loadPlayerProfiles(ctx context.Context, userID int64, claims se
 	for index := range profiles {
 		profilePointers = append(profilePointers, &profiles[index])
 	}
-	if err = s.loadPlayerTexturesForProfiles(ctx, profilePointers, claims.Subject); err != nil {
+	if err = loadPlayerTexturesForProfiles(ctx, s.db, profilePointers, claims.Subject); err != nil {
 		return nil, err
 	}
 	return profiles, nil
 }
 
 func (s *Server) loadPlayerProfileByPublicIDForViewer(ctx context.Context, publicID string, viewerID int64) (playerProfileResponse, error) {
+	return loadPlayerProfileByPublicIDForViewer(ctx, s.db, publicID, viewerID)
+}
+
+func loadPlayerProfileByPublicIDForViewer(ctx context.Context, queryer skinMetadataQueryer, publicID string, viewerID int64) (playerProfileResponse, error) {
 	var profile playerProfileResponse
-	err := s.db.QueryRow(ctx, `select profile.public_id,profile.uuid::text,profile.name,profile.bio,
+	err := queryer.QueryRow(ctx, `select profile.public_id,profile.uuid::text,profile.name,profile.bio,
 		profile.visibility,profile.is_default,profile.status,profile.created_at,profile.updated_at,
 		owner.public_id,owner.username
 		from player_profiles profile join users owner on owner.id=profile.user_id where profile.public_id=$1`, publicID).
@@ -863,14 +872,11 @@ func (s *Server) loadPlayerProfileByPublicIDForViewer(ctx context.Context, publi
 	if err != nil {
 		return profile, err
 	}
-	return profile, s.loadPlayerTextures(ctx, &profile, viewerID)
+	err = loadPlayerTexturesForProfiles(ctx, queryer, []*playerProfileResponse{&profile}, viewerID)
+	return profile, err
 }
 
-func (s *Server) loadPlayerTextures(ctx context.Context, profile *playerProfileResponse, viewerID int64) error {
-	return s.loadPlayerTexturesForProfiles(ctx, []*playerProfileResponse{profile}, viewerID)
-}
-
-func (s *Server) loadPlayerTexturesForProfiles(ctx context.Context, profiles []*playerProfileResponse, viewerID int64) error {
+func loadPlayerTexturesForProfiles(ctx context.Context, queryer skinMetadataQueryer, profiles []*playerProfileResponse, viewerID int64) error {
 	profileIDs := make([]string, 0, len(profiles))
 	profilesByID := make(map[string]*playerProfileResponse, len(profiles))
 	for _, profile := range profiles {
@@ -888,7 +894,7 @@ func (s *Server) loadPlayerTexturesForProfiles(ctx context.Context, profiles []*
 	if len(profileIDs) == 0 {
 		return nil
 	}
-	rows, err := s.db.Query(ctx, `select profile.public_id,texture.kind,asset.model,asset.public_id,asset.display_name,
+	rows, err := queryer.Query(ctx, `select profile.public_id,texture.kind,asset.model,asset.public_id,asset.display_name,
 		asset.description,asset.tags,asset.visibility,asset.review_status,asset.status,asset.downloads,asset.blob_hash,
 		asset.created_at,asset.updated_at,owner.id,owner.public_id,owner.username,
 		exists(select 1 from skin_wardrobe wardrobe where wardrobe.user_id=$2 and wardrobe.asset_id=asset.id)

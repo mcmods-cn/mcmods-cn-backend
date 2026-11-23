@@ -441,16 +441,16 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to persist skin library activity")
 		return
 	}
+	record, err := skinAssetByPublicID(r.Context(), tx, created.PublicID, claims.Subject)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load created skin asset")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create skin asset")
 		return
 	}
 	pendingTextureUpload = nil
-	record, err := s.skinAssetByPublicID(r.Context(), created.PublicID, claims.Subject)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load created skin asset")
-		return
-	}
 	writeJSON(w, http.StatusCreated, skinAssetJSON(record, claims))
 }
 
@@ -535,7 +535,7 @@ func (s *Server) skinDetail(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getSkinDetail(w http.ResponseWriter, r *http.Request, publicID string) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	claims := currentClaims(r)
-	record, err := s.skinAssetByPublicID(r.Context(), publicID, claims.Subject)
+	record, err := skinAssetByPublicID(r.Context(), s.db, publicID, claims.Subject)
 	if err != nil || !canReadSkinAsset(record, claims) {
 		writeError(w, http.StatusNotFound, "skin asset was not found")
 		return
@@ -666,6 +666,13 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		writeError(w, http.StatusInternalServerError, "failed to persist skin library activity")
 		return
 	}
+	if !reviewRequired {
+		record, err = skinAssetByPublicID(r.Context(), tx, publicID, claims.Subject)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load updated skin asset")
+			return
+		}
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update skin asset")
 		return
@@ -674,11 +681,6 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		writeJSON(w, http.StatusOK, map[string]any{
 			"updated": false, "reviewRequired": true, "revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID,
 		})
-		return
-	}
-	record, err = s.skinAssetByPublicID(r.Context(), publicID, claims.Subject)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load updated skin asset")
 		return
 	}
 	writeJSON(w, http.StatusOK, skinAssetJSON(record, claims))
@@ -1106,13 +1108,13 @@ func (s *Server) createPlayerProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to persist skin library activity")
 		return
 	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create player profile")
-		return
-	}
-	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims.Subject)
+	profile, err := loadPlayerProfileByPublicIDForViewer(r.Context(), tx, publicID, claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load created player profile")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create player profile")
 		return
 	}
 	writeJSON(w, http.StatusCreated, profile)
@@ -1250,13 +1252,13 @@ func (s *Server) updatePlayerProfile(w http.ResponseWriter, r *http.Request, pub
 		writeError(w, http.StatusInternalServerError, "failed to persist skin library activity")
 		return
 	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update player profile")
-		return
-	}
-	profile, err := s.loadPlayerProfileByPublicIDForViewer(r.Context(), publicID, claims.Subject)
+	profile, err := loadPlayerProfileByPublicIDForViewer(r.Context(), tx, publicID, claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load updated player profile")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update player profile")
 		return
 	}
 	writeJSON(w, http.StatusOK, profile)
