@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/url"
 	"strings"
 	"testing"
@@ -14,18 +16,26 @@ func TestProjectChangelogCursorIsStrictAndScopeBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventAt := time.Date(2026, time.August, 22, 8, 30, 0, 0, time.UTC)
-	raw := encodeProjectChangelogPageCursor(projectChangelogPageCursor{
+	changelogCursor := projectChangelogPageCursor{
 		Version: projectChangelogCursorVersion, Scope: request.Scope, EventAt: eventAt, ID: 99,
-	})
+	}
+	raw := encodeProjectChangelogPageCursor(changelogCursor)
 	cursor, err := decodeProjectChangelogPageCursor(raw, request.Scope)
 	if err != nil || cursor.ID != 99 || !cursor.EventAt.Equal(eventAt) {
 		t.Fatalf("decode cursor: cursor=%+v err=%v", cursor, err)
 	}
+	withUnknownField, err := json.Marshal(struct {
+		projectChangelogPageCursor
+		Extra bool `json:"extra"`
+	}{projectChangelogPageCursor: changelogCursor, Extra: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changelogCursor.ID = 0
 	for name, invalid := range map[string]string{
-		"malformed": "not-base64!",
-		"unknown field": encodeProjectChangelogPageCursor(projectChangelogPageCursor{
-			Version: projectChangelogCursorVersion, Scope: request.Scope, EventAt: eventAt, ID: 0,
-		}),
+		"malformed":     "not-base64!",
+		"unknown field": base64.RawURLEncoding.EncodeToString(withUnknownField),
+		"zero row ID":   encodeProjectChangelogPageCursor(changelogCursor),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, decodeErr := decodeProjectChangelogPageCursor(invalid, request.Scope); decodeErr == nil {
