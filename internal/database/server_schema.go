@@ -1,12 +1,19 @@
 package database
 
+import "fmt"
+
+const (
+	MinecraftServerNameLimit    = 160
+	MinecraftServerSummaryLimit = 1000
+)
+
 // serverSchemaStatements installs the public Minecraft server catalog, its
 // review evidence, detected mod references, and five-minute status history as
 // part of the current development schema generation. Older development
 // databases are reset instead of migrated.
 func serverSchemaStatements() []string {
 	return []string{
-		`create table minecraft_servers (
+		fmt.Sprintf(`create table minecraft_servers (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
 			slug text not null unique,
@@ -15,8 +22,8 @@ func serverSchemaStatements() []string {
 			handshake_host text not null,
 			connect_host text not null,
 			connect_port integer not null check(connect_port between 1 and 65535),
-			name text not null check(char_length(name) between 1 and 80),
-			short_description text not null default '' check(char_length(short_description) <= 240),
+			name text not null check(char_length(name) between 1 and %d),
+			short_description text not null default '' check(char_length(short_description) <= %d),
 			body_markdown text not null default '' check(char_length(body_markdown) <= 100000),
 			minecraft_versions text[] not null default '{}'::text[],
 			dedicated_client boolean not null default false,
@@ -49,7 +56,7 @@ func serverSchemaStatements() []string {
 			published_at timestamptz,
 			check(primary_tag in ('survival','casual','adventure','creative','war','rpg','minigame','technology')),
 			check(review_status in ('pending','approved','rejected'))
-		)`,
+		)`, MinecraftServerNameLimit, MinecraftServerSummaryLimit),
 		`create index idx_minecraft_servers_catalog
 			on minecraft_servers(review_status,primary_tag,updated_at desc,id desc)`,
 		`create index idx_minecraft_servers_public_updated

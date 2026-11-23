@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"mcmods-cn-backend/internal/activity"
+	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/serverprobe"
 )
 
@@ -176,8 +177,8 @@ func loadServerCatalogSettings(ctx context.Context, query revisionQuery) (server
 func (settings serverCatalogSettings) valid() bool {
 	return settings.MaxProofFiles >= 1 && settings.MaxProofFiles <= 20 &&
 		settings.MaxProofTotalBytes >= 1<<20 && settings.MaxProofTotalBytes <= 100<<20 &&
-		settings.NameMaxLength >= 20 && settings.NameMaxLength <= 160 &&
-		settings.SummaryMaxLength >= 80 && settings.SummaryMaxLength <= 1000 &&
+		settings.NameMaxLength >= 20 && settings.NameMaxLength <= database.MinecraftServerNameLimit &&
+		settings.SummaryMaxLength >= 80 && settings.SummaryMaxLength <= database.MinecraftServerSummaryLimit &&
 		settings.HistoryDays >= 7 && settings.HistoryDays <= 90
 }
 
