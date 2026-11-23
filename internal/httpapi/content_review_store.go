@@ -98,8 +98,7 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 		}
 	}
 
-	lockKey := params.AggregateType + ":" + params.AggregateKey
-	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+	if err := lockContentAggregateTx(ctx, tx, params.AggregateType, params.AggregateKey); err != nil {
 		return result, fmt.Errorf("lock content aggregate: %w", err)
 	}
 	// The handler's initial read is only an early error check. Recheck the
@@ -196,6 +195,11 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 		annotateActivityID(params.Request, actionID, activityObjectTypeForEntityType(params.EntityType), params.EntityType, params.EntityID, 0)
 	}
 	return result, nil
+}
+
+func lockContentAggregateTx(ctx context.Context, tx pgx.Tx, aggregateType, aggregateKey string) error {
+	_, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, aggregateType+":"+aggregateKey)
+	return err
 }
 
 func checkContentRevisionBaseTx(ctx context.Context, tx pgx.Tx, params createContentRevisionParams) error {

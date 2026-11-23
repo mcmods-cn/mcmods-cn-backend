@@ -626,12 +626,7 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 			_ = tx.Rollback(ctx)
 			return nil, err
 		}
-		var changelogID *string
-		var previousHash string
-		var manual bool
-		err = tx.QueryRow(ctx, `select changelog_public_id,external_body_hash,manual_override from external_release_bindings
-			where project_route_id=$1 and source_type=$2 and external_release_id=$3 for update`,
-			job.RouteID, job.SourceType, release.ID).Scan(&changelogID, &previousHash, &manual)
+		binding, err := lockManagedChangelogReleaseTx(ctx, tx, job.RouteID, job.SourceType, release.ID, bodyHash)
 		if errors.Is(err, pgx.ErrNoRows) {
 			var internalID int64
 			var publicID string
@@ -661,9 +656,9 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 		} else if err != nil {
 			_ = tx.Rollback(ctx)
 			return nil, err
-		} else if previousHash == bodyHash {
+		} else if binding.bodyHash == bodyHash {
 			unchanged++
-		} else if manual || changelogID == nil {
+		} else if binding.manual || binding.publicID == nil {
 			manualConflicts++
 			metadata, _ := json.Marshal(map[string]any{"upstreamChanged": true, "latestHash": bodyHash, "externalURL": release.URL,
 				"minecraftVersions": release.GameVersions, "loaders": release.Loaders, "rawMinecraftVersions": rawMinecraftVersions,
@@ -672,23 +667,21 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 				where project_route_id=$1 and source_type=$2 and external_release_id=$3`,
 				job.RouteID, job.SourceType, release.ID, metadata, release.URL)
 		} else {
-			var internalID int64
-			var publishedRevisionID *int64
-			if err = tx.QueryRow(ctx, `select id,published_revision_id from project_changelogs where public_id=$1 and object_route_id=$2 and status='active' for update`, *changelogID, job.RouteID).Scan(&internalID, &publishedRevisionID); err != nil {
+			if binding.entryID == 0 {
 				_ = tx.Rollback(ctx)
-				return nil, err
+				return nil, pgx.ErrNoRows
 			}
 			snapshot := projectChangelogSnapshot{EventAt: release.PublishedAt, MinecraftVersions: uniqueTrimmed(release.GameVersions, 100), ProjectVersion: release.Version,
 				DefaultLocale: "en-US", Localizations: []projectChangelogLocalization{{Locale: "en-US", BodyMarkdown: body}}, Reason: "Automated external release synchronization"}
 			raw, _ := json.Marshal(snapshot)
-			revision, createErr := createContentRevisionTx(ctx, tx, createContentRevisionParams{EntityType: projectChangelogAggregate, EntityID: internalID,
-				AggregateType: projectChangelogAggregate, AggregateKey: *changelogID, BaseRevision: publishedRevisionID, Snapshot: raw, Reason: snapshot.Reason,
+			revision, createErr := createContentRevisionTx(ctx, tx, createContentRevisionParams{EntityType: projectChangelogAggregate, EntityID: binding.entryID,
+				AggregateType: projectChangelogAggregate, AggregateKey: *binding.publicID, BaseRevision: binding.publishedRevisionID, Snapshot: raw, Reason: snapshot.Reason,
 				ActorID: job.ActorID, Source: "auto_update", Status: "approved", Metadata: map[string]any{"source": job.SourceType, "externalReleaseId": release.ID, "externalURL": release.URL}})
 			if createErr != nil {
 				_ = tx.Rollback(ctx)
 				return nil, createErr
 			}
-			if err = applyProjectChangelogSnapshotTx(ctx, tx, internalID, job.RouteID, revision.RevisionID, job.ActorID, snapshot); err == nil {
+			if err = applyProjectChangelogSnapshotTx(ctx, tx, binding.entryID, job.RouteID, revision.RevisionID, job.ActorID, snapshot); err == nil {
 				metadata, _ := json.Marshal(releaseMetadata)
 				_, err = tx.Exec(ctx, `update external_release_bindings set external_body_hash=$4,external_url=$5,metadata=$6::jsonb,updated_at=now()
 					where project_route_id=$1 and source_type=$2 and external_release_id=$3`,
@@ -706,6 +699,46 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 	}
 	return map[string]any{"created": created, "updated": updated, "unchanged": unchanged, "manualOverrideConflicts": manualConflicts,
 		"skippedUnknownMinecraftVersions": skippedUnknownVersions}, nil
+}
+
+type managedChangelogRelease struct {
+	publicID            *string
+	entryID             int64
+	publishedRevisionID *int64
+	bodyHash            string
+	manual              bool
+}
+
+func lockManagedChangelogReleaseTx(ctx context.Context, tx pgx.Tx, routeID int64, sourceType, releaseID, bodyHash string) (managedChangelogRelease, error) {
+	var binding managedChangelogRelease
+	err := tx.QueryRow(ctx, `select changelog_public_id,external_body_hash,manual_override from external_release_bindings
+		where project_route_id=$1 and source_type=$2 and external_release_id=$3`,
+		routeID, sourceType, releaseID).Scan(&binding.publicID, &binding.bodyHash, &binding.manual)
+	if err != nil || binding.bodyHash == bodyHash {
+		return binding, err
+	}
+
+	// Editors lock the revision aggregate and its entry before marking a binding
+	// as manual. Keep the same order and reread the binding after waiting.
+	if binding.publicID != nil {
+		if err = lockContentAggregateTx(ctx, tx, projectChangelogAggregate, *binding.publicID); err != nil {
+			return binding, fmt.Errorf("lock content aggregate: %w", err)
+		}
+		err = tx.QueryRow(ctx, `select id,published_revision_id from project_changelogs
+			where public_id=$1 and object_route_id=$2 and status='active' for update`,
+			*binding.publicID, routeID).Scan(&binding.entryID, &binding.publishedRevisionID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return binding, fmt.Errorf("lock managed changelog: %w", err)
+		}
+	}
+	err = tx.QueryRow(ctx, `select external_body_hash,manual_override from external_release_bindings
+		where project_route_id=$1 and source_type=$2 and external_release_id=$3
+		and changelog_public_id is not distinct from $4::text for update`,
+		routeID, sourceType, releaseID, binding.publicID).Scan(&binding.bodyHash, &binding.manual)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return binding, errors.New("managed changelog binding changed while synchronizing release")
+	}
+	return binding, err
 }
 
 func (worker *ProjectAutomationWorker) currentProjectVersions(ctx context.Context, job projectAutomationJob) []string {
