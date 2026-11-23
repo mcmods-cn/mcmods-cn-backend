@@ -22,6 +22,9 @@ MCMODS_RUN_DB_INTEGRATION=1
 MCMODS_RUN_ACTIVITY_LOAD=1
 ```
 
+Use a single loopback endpoint with the host and any custom port in the URL authority,
+and the database in its path. Query options can set TLS and other connection behavior.
+
 ```sh
 go run ./tools/testing/db_suite
 go run ./tools/testing/db_suite -race

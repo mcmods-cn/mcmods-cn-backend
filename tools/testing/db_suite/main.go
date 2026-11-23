@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"mcmods-cn-backend/tools/testing/postgrestarget"
 )
 
 var testNamePattern = regexp.MustCompile(`^(Test|Fuzz)[A-Za-z0-9_]+$`)
@@ -116,12 +118,25 @@ func validateTestEnvironment(environment, databaseURL, integrationURL string) er
 	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
 		return errors.New("expected a PostgreSQL test URL")
 	}
-	if host := parsed.Hostname(); host != "127.0.0.1" && host != "localhost" && host != "::1" {
-		return errors.New("database batches only accept loopback PostgreSQL")
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return errors.New("invalid PostgreSQL URL options")
+	}
+	for _, option := range []string{"host", "port", "database", "dbname"} {
+		if query.Has(option) {
+			return errors.New("PostgreSQL host, port and database must be stated in the URL authority and path")
+		}
 	}
 	name := strings.TrimPrefix(parsed.Path, "/")
 	if !regexp.MustCompile(`^(test_[a-z0-9_]+|[a-z0-9_]+_test)$`).MatchString(name) {
 		return errors.New("database name must start with test_ or end with _test")
+	}
+	effective, err := postgrestarget.ParseSingleLoopback(databaseURL)
+	if err != nil {
+		return err
+	}
+	if effective.ConnConfig.Host != parsed.Hostname() || effective.ConnConfig.Database != name {
+		return errors.New("effective PostgreSQL target differs from the declared test URL")
 	}
 	return nil
 }

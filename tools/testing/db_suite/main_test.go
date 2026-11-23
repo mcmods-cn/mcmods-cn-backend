@@ -80,6 +80,10 @@ func TestDatabaseBatchesRejectMissingMismatchedRemoteAndNonTestTargets(t *testin
 		{"remote", "test", "postgres://postgres@database.example.test/mcmods_test", "postgres://postgres@database.example.test/mcmods_test", false},
 		{"shared", "test", "postgres://postgres@127.0.0.1/postgres", "postgres://postgres@127.0.0.1/postgres", false},
 		{"wrong protocol", "test", "https://localhost/mcmods_test", "https://localhost/mcmods_test", false},
+		{"host override", "test", local + "&host=database.example.invalid", local + "&host=database.example.invalid", false},
+		{"database override", "test", local + "&dbname=postgres", local + "&dbname=postgres", false},
+		{"conflicting database aliases", "test", local + "&database=mcmods_test&dbname=postgres", local + "&database=mcmods_test&dbname=postgres", false},
+		{"port override", "test", local + "&port=6432", local + "&port=6432", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := validateTestEnvironment(test.environment, test.primary, test.integration); (err == nil) != test.valid {

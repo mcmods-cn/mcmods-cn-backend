@@ -19,6 +19,7 @@ import (
 	appconfig "mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/querycache"
+	"mcmods-cn-backend/tools/testing/postgrestarget"
 )
 
 func TestTEST018ProjectUpdateWorkerBatchesFiltersRetriesAndRecoversIntegration(t *testing.T) {
@@ -354,7 +355,7 @@ func cleanupTEST018OwnedDatabase(ctx context.Context, admin test018DatabaseAdmin
 
 func newTEST018IsolatedDatabase(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	t.Helper()
-	baseConfig, err := pgxpool.ParseConfig(appconfig.Load().DB.ConnString())
+	baseConfig, err := postgrestarget.ParseSingleLoopback(appconfig.Load().DB.ConnString())
 	if err != nil {
 		t.Fatal(err)
 	}

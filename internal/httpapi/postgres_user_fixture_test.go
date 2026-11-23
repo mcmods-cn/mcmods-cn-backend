@@ -2,13 +2,13 @@ package httpapi
 
 import (
 	"context"
-	"errors"
 	"os"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/tools/testing/postgrestarget"
 )
 
 // These tests exercise writes, workers or locks on an otherwise empty schema.
@@ -23,7 +23,7 @@ func newPostgresUserFixture(t *testing.T, ctx context.Context, username string) 
 		}
 		target = testTarget
 	}
-	parsed, err := parsePostgresUserFixtureTarget(target)
+	parsed, err := postgrestarget.ParseSingleLoopback(target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,41 +34,4 @@ func newPostgresUserFixture(t *testing.T, ctx context.Context, username string) 
 		t.Fatalf("create fixture user: %v", err)
 	}
 	return pool, userID
-}
-
-func parsePostgresUserFixtureTarget(target string) (*pgxpool.Config, error) {
-	parsed, err := pgxpool.ParseConfig(target)
-	if err != nil {
-		return nil, errors.New("cannot parse PostgreSQL fixture target")
-	}
-	switch parsed.ConnConfig.Host {
-	case "127.0.0.1", "localhost", "::1":
-	default:
-		return nil, errors.New("PostgreSQL user fixture requires an owned loopback service")
-	}
-	for _, fallback := range parsed.ConnConfig.Fallbacks {
-		if fallback.Host != parsed.ConnConfig.Host || fallback.Port != parsed.ConnConfig.Port {
-			return nil, errors.New("PostgreSQL user fixture requires a single database endpoint")
-		}
-	}
-	return parsed, nil
-}
-
-func TestPostgresUserFixtureKeepsOneLoopbackTarget(t *testing.T) {
-	for _, scenario := range []struct {
-		name, target string
-		allowed      bool
-	}{
-		{"same endpoint TLS fallback", "127.0.0.1:5432", true},
-		{"different loopback service", "127.0.0.1:5432,127.0.0.1:5433", false},
-		{"non-loopback service", "database.example.invalid:5432", false},
-		{"non-loopback fallback", "127.0.0.1:5432,database.example.invalid:5432", false},
-	} {
-		t.Run(scenario.name, func(t *testing.T) {
-			_, err := parsePostgresUserFixtureTarget("postgres://test@" + scenario.target + "/test_fixture?sslmode=prefer")
-			if (err == nil) != scenario.allowed {
-				t.Fatalf("allowed=%v, error=%v", scenario.allowed, err)
-			}
-		})
-	}
 }
