@@ -146,13 +146,15 @@ func (worker *BlueprintWorker) processJob(ctx context.Context, jobID int64) erro
 
 func (worker *BlueprintWorker) claimBlueprintJob(ctx context.Context, jobID int64) (claimedBlueprintJob, bool, error) {
 	job := claimedBlueprintJob{id: jobID, runToken: worker.workerID + ":" + newExportID()}
-	err := worker.db.QueryRow(ctx, `update blueprint_jobs set
-		status='processing',progress=1,attempts=attempts+1,started_at=coalesce(started_at,now()),finished_at=null,
-		locked_by=$2,lease_expires_at=clock_timestamp()+$3::interval,updated_at=now()
-		where id=$1 and attempts<max_attempts and (
+	err := worker.db.QueryRow(ctx, `with candidate as materialized (
+		select id from blueprint_jobs where id=$1 and attempts<max_attempts and (
 			status='queued' or (status='processing' and coalesce(lease_expires_at,updated_at)<=now())
-		)
-		returning blueprint_id,operation,target_format,coalesce(created_by,0),attempts,max_attempts`,
+		) for no key update
+	) update blueprint_jobs as job set
+		status='processing',progress=1,attempts=job.attempts+1,started_at=coalesce(job.started_at,now()),finished_at=null,
+		locked_by=$2,lease_expires_at=clock_timestamp()+$3::interval,updated_at=now()
+		from candidate where job.id=candidate.id
+		returning job.blueprint_id,job.operation,job.target_format,coalesce(job.created_by,0),job.attempts,job.max_attempts`,
 		jobID, job.runToken, pgInterval(blueprintLeaseTTL)).Scan(
 		&job.blueprintID, &job.operation, &job.targetFormat, &job.createdBy, &job.attempts, &job.maxAttempts)
 	if err == nil {
@@ -303,6 +305,11 @@ func (worker *BlueprintWorker) failBlueprintJob(ctx context.Context, job claimed
 			return false, err
 		}
 	}
+	if terminal {
+		if err = worker.notifyTemplateTx(ctx, tx, job.createdBy, "blueprint_conversion_failure", map[string]string{"error": cause.Error()}, job.blueprintID); err != nil {
+			return false, err
+		}
+	}
 	tag, err := tx.Exec(ctx, liveBlueprintJobSQL+`update blueprint_jobs as job set status=$3,progress=0,
 		finished_at=case when $3='failed' then now() end,updated_at=now(),last_error=$4,locked_by='',lease_expires_at=null
 		from live_blueprint_job where job.id=live_blueprint_job.id`, job.id, job.runToken, jobStatus, lastError)
@@ -311,11 +318,6 @@ func (worker *BlueprintWorker) failBlueprintJob(ctx context.Context, job claimed
 	}
 	if tag.RowsAffected() != 1 {
 		return false, errBlueprintJobLeaseLost
-	}
-	if terminal {
-		if err = worker.notifyTemplateTx(ctx, tx, job.createdBy, "blueprint_conversion_failure", map[string]string{"error": cause.Error()}, job.blueprintID); err != nil {
-			return false, err
-		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return false, err
