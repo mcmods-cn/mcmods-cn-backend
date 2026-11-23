@@ -6,6 +6,7 @@ Legacy scopes lacking their creation proof are held, never adopted by name.
 import argparse
 import fcntl
 import hashlib
+from http.client import HTTPConnection, HTTPException
 import importlib.util
 import json
 import os
@@ -18,9 +19,7 @@ import socket
 import subprocess
 import tempfile
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
 BE = Path(__file__).resolve().parents[2]
 FE = STATE = SCOPE = COPY = BASE = None
@@ -425,16 +424,23 @@ def available_port():
 
 
 def wait_response(url, wanted, processes, seconds=90):
+    endpoint = urllib.parse.urlsplit(url)
+    if (endpoint.scheme != 'http' or endpoint.hostname != '127.0.0.1' or not endpoint.port
+            or endpoint.username is not None or endpoint.fragment):
+        raise RuntimeError('readiness probe requires the owned loopback HTTP endpoint')
+    path = urllib.parse.urlunsplit(('', '', endpoint.path or '/', endpoint.query, ''))
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
+        # Read the status from the exact service, without ambient proxies or redirects.
+        connection = HTTPConnection(endpoint.hostname, endpoint.port, timeout=2)
         try:
-            with urllib.request.urlopen(url, timeout=2) as response:
+            connection.request('GET', path)
+            with connection.getresponse() as response:
                 status = response.status
-        except urllib.error.HTTPError as error:
-            status = error.code
-            error.close()
-        except (urllib.error.URLError, TimeoutError, ConnectionError):
+        except (OSError, HTTPException):
             status = None
+        finally:
+            connection.close()
         if status == wanted:
             return
         if any(process.poll() is not None for process in processes):

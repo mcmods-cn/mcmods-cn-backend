@@ -1,6 +1,8 @@
 """Fail-before-side-effect guards for the real API acceptance runner."""
 import ctypes
+from contextlib import contextmanager
 import errno
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
 import os
@@ -11,6 +13,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -18,6 +21,31 @@ from unittest import mock
 spec = importlib.util.spec_from_file_location("live_acceptance_v2", Path(__file__).with_name("live_acceptance_v2.py"))
 live = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(live)
+
+
+@contextmanager
+def readiness_server(status, redirect=None):
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            self.send_response(status)
+            if redirect is not None:
+                self.send_header('Location', redirect)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    with ThreadingHTTPServer(('127.0.0.1', 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .01})
+        thread.start()
+        try:
+            yield 'http://127.0.0.1:' + str(server.server_port), seen
+        finally:
+            server.shutdown()
+            thread.join()
 
 
 class AcceptanceGuardTest(unittest.TestCase):
@@ -67,6 +95,20 @@ class AcceptanceGuardTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "owner mismatch"):
                 live.guarded_parent()
             sql.assert_not_called()
+
+    def test_readiness_uses_direct_loopback_request_even_if_proxy_is_set(self):
+        with readiness_server(200) as (origin, seen), mock.patch.dict(
+                os.environ, {'http_proxy': origin, 'no_proxy': ''}), mock.patch('urllib.request._opener', None):
+            live.wait_response(origin + '/ready', 200, [])
+        self.assertEqual(seen, ['/ready'])
+
+    def test_readiness_does_not_follow_an_unexpected_redirect(self):
+        process = mock.Mock()
+        process.poll.return_value = 1
+        with readiness_server(302, '/login') as (origin, seen):
+            with self.assertRaisesRegex(RuntimeError, 'terminated before readiness'):
+                live.wait_response(origin + '/ready', 200, [process])
+        self.assertEqual(seen, ['/ready'])
 
     def test_dsn_query_cannot_override_the_checked_host(self):
         self.environment["DATABASE_URL"] += "&host=public.invalid"
