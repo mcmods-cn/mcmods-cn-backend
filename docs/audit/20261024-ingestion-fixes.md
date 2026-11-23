@@ -1,7 +1,9 @@
-# 2026-10-24 ingestion repairs — current scope
+# 2026-10-24 ingestion repairs
 
 This change is an implementation batch, not a release approval. Original V2
 observations and the 175-scenario specification remain historical inputs.
+Use the current isolated environment guide for validation on a later source revision.
+[Current validation guide](../testing-isolated-environment.md)
 
 - GR-007: cancellation and retry use the original creator; deduplicated creation
   cannot take over another creator's task. Transactional outbox remains atomic.
@@ -47,7 +49,7 @@ Minecraft export. The isolated-schema helper installs the actual migration
 statements in an owned ordinary schema because PostgreSQL does not resolve
 unqualified functions from pg_temp. Cleanup checks both owner and random marker.
 
-Focused commands (set the isolated test DATABASE_URL and normal test secrets):
+Historical command from the isolated checkout used for this batch.
 
 ```sh
 source /workspace/.cloud-setup/activate.sh

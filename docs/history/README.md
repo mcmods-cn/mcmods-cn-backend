@@ -12,6 +12,8 @@
 
 基线 `21724a42fd0dd84935fa0b4b7cf75c123a191500` 仍可还原旧路径。删除的 `MCMods-full-project-audit-2026-08-21.zip` 内 17 个文件与 `docs/audit/full-project-audit/` 对应文件逐字节相同，ZIP 的 SHA-256 为 `8f1e45681736bb1fa0977c0e4cec0d87c3ad74d9bf42eb16d9c5807ab1a49500`。旧 `IMPLEMENTATION_PLAN.md` 记录 generation 71 的一次实施，压测和审核证据已分别归档。当前数据恢复遵循现行代际的专用文档。
 
+## 旧开发数据库入口
+
 第三轮开始时的旧开发数据库路径可通过以下变更追溯。当前安装只使用 [db-initialize](../../README.md#数据库安装发布和恢复)，当前测试入口见[隔离验证](../testing-isolated-environment.md)。
 
 | 原路径 | 对应变更及当前入口 |
@@ -23,3 +25,8 @@
 | `cmd/db-notification-visibility-upgrade/{main.go,audit_msg_review_cli_test.go}` | `782327d` 移除旧库升级。 `notification_visibility_schema.go` 保留当前通知读状态、事务标记和配置要求。 |
 | `cmd/db-oss-byte-binding-upgrade/main.go`、`cmd/db-oss-multipart-activity-upgrade/main.go` | `48f02aa` 保留安装定义和校验规则，移除一次性扩展命令。回收和对象证明仍由现行 OSS 入口维护。 |
 | `internal/config/database_reset_config_test.go` | `feb0176` 将测试环境准备改用当前安装入口。当前初始化测试验证已安装结构、不匹配代际和用户权限不被重置。 |
+
+## 旧隔离夹具的观察工具
+
+- CONT-002 的人工邻接工具绑定 2026-10-24 专用容器、旧测试 schema 和已封存的游戏旅程。原记录保留 API 与数据库通过，以及首次浏览器观察中混合配方缺少数量标记的失败。现行配方目录夹具通过普通投稿与独立批准建立人工、导入和混合样本。 [历史源码与结果指针](https://github.com/mcmods-cn/mcmods-cn-backend/tree/bd1e27bf6354f44e93fb3f9ada3881de751caa3b/tools/audit/cont002) · [当前配方目录夹具](../../internal/httpapi/audit_live_recipe_catalog_fixture_test.go)
+- GR-004 与 GR-008 的只读封存工具读取固定旧夹具中的待审任务、来源哈希、角色范围和零额外上传事实。历史适用范围及已观测的修复保留。当前回归使用真实 PostgreSQL、同项目与跨项目权限以及独立审核的 HTTP 夹具。 [历史源码](https://github.com/mcmods-cn/mcmods-cn-backend/tree/9634feb8792895d91776903d7fef0399d5412dcc/tools/audit/import-review) · [历史修复记录](../audit/20261024-ingestion-fixes.md) · [当前审核夹具](../../internal/httpapi/audit_import_review_wildcard_configuration_integration_test.go)
