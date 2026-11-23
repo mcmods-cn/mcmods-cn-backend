@@ -118,7 +118,7 @@ func parseUserStatisticsRange(value string, now time.Time) (userStatisticsRange,
 	}
 	result := userStatisticsRange{Code: value}
 	if days > 0 {
-		start := time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(days - 1))
+		start := now.UTC().Truncate(24*time.Hour).AddDate(0, 0, -(days - 1))
 		result.StartDate = &start
 	}
 	return result, nil
@@ -130,7 +130,7 @@ func activeStreaks(dates []time.Time, now time.Time) (current int, longest int) 
 	}
 	unique := make(map[int64]time.Time, len(dates))
 	for _, value := range dates {
-		day := time.Date(value.UTC().Year(), value.UTC().Month(), value.UTC().Day(), 0, 0, 0, 0, time.UTC)
+		day := value.UTC().Truncate(24 * time.Hour)
 		unique[day.Unix()] = day
 	}
 	dates = dates[:0]
@@ -149,7 +149,7 @@ func activeStreaks(dates []time.Time, now time.Time) (current int, longest int) 
 			longest = run
 		}
 	}
-	today := time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day(), 0, 0, 0, 0, time.UTC)
+	today := now.UTC().Truncate(24 * time.Hour)
 	last := dates[len(dates)-1]
 	if last.Equal(today) || last.Equal(today.AddDate(0, 0, -1)) {
 		current = 1
@@ -175,7 +175,8 @@ func (s *Server) publicUserStatistics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeUserStatistics(w http.ResponseWriter, r *http.Request, userID int64, publicID string, full bool) {
-	statisticsRange, err := parseUserStatisticsRange(r.URL.Query().Get("range"), time.Now().UTC())
+	now := time.Now().UTC()
+	statisticsRange, err := parseUserStatisticsRange(r.URL.Query().Get("range"), now)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -192,7 +193,7 @@ func (s *Server) writeUserStatistics(w http.ResponseWriter, r *http.Request, use
 	}
 	response := userStatisticsResponse{
 		UserID: publicID, Range: statisticsRange.Code, Full: full,
-		RegisteredDays:  max(int64(1), int64(time.Since(createdAt).Hours()/24)+1),
+		RegisteredDays:  max(int64(1), int64(now.Sub(createdAt).Hours()/24)+1),
 		ContentCreation: []userContentCreationStatistics{}, ExperienceSources: map[string]int64{},
 	}
 	response.Level, err = s.loadUserLevelSummary(r.Context(), userID)
@@ -214,7 +215,7 @@ func (s *Server) writeUserStatistics(w http.ResponseWriter, r *http.Request, use
 		return
 	}
 	response.LastLoginAt = lastLoginAt
-	if err = s.loadUserPrivateStatistics(r, userID, statisticsRange, &response); err != nil {
+	if err = s.loadUserPrivateStatistics(r, userID, statisticsRange, now, &response); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load private user statistics")
 		return
 	}
@@ -262,27 +263,28 @@ func (s *Server) loadUserPublicStatistics(r *http.Request, userID int64, full bo
 		&response.Community.LikesReceived, &response.Community.Favorites, &response.Community.Followers, &response.Community.Following)
 }
 
-func (s *Server) loadUserPrivateStatistics(r *http.Request, userID int64, statisticsRange userStatisticsRange, response *userStatisticsResponse) error {
+func (s *Server) loadUserPrivateStatistics(r *http.Request, userID int64, statisticsRange userStatisticsRange, now time.Time, response *userStatisticsResponse) error {
 	cumulative, err := s.queryUserActivityStatistics(r, userID, nil)
 	if err != nil {
 		return err
 	}
-	selected, err := s.queryUserActivityStatistics(r, userID, statisticsRange.StartDate)
-	if err != nil {
-		return err
-	}
 	response.Cumulative = &cumulative
-	response.SelectedRange = &selected
+	response.SelectedRange = &cumulative
+	if statisticsRange.StartDate != nil {
+		selected, err := s.queryUserActivityStatistics(r, userID, statisticsRange.StartDate)
+		if err != nil {
+			return err
+		}
+		response.SelectedRange = &selected
+	}
 	response.TotalActiveDays = cumulative.ActiveDays
-	var recent7, recent30 int64
-	if err = s.db.QueryRow(r.Context(), `select count(*) filter(where stat_date>=current_date-6),count(*) filter(where stat_date>=current_date-29)
-		from user_statistics_daily where user_id=$1 and action_count>0`, userID).Scan(&recent7, &recent30); err != nil {
+	today := now.UTC().Truncate(24 * time.Hour)
+	if err = s.db.QueryRow(r.Context(), `select count(*) filter(where stat_date>=$2::date-6),count(*)
+		from user_statistics_daily where user_id=$1 and stat_date between $2::date-29 and $2::date and action_count>0`,
+		userID, today).Scan(&response.Recent7ActiveDays, &response.Recent30ActiveDays); err != nil {
 		return err
 	}
-	response.Recent7ActiveDays, response.Recent30ActiveDays = recent7, recent30
-	response.CurrentActiveStreak, response.LongestActiveStreak, err = loadUserActiveStreaks(
-		r.Context(), s.db, userID, time.Now().UTC(),
-	)
+	response.CurrentActiveStreak, response.LongestActiveStreak, err = loadUserActiveStreaks(r.Context(), s.db, userID, now)
 	if err != nil {
 		return err
 	}
