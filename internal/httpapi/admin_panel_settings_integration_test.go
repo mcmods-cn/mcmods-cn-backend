@@ -121,3 +121,58 @@ func TestAdminSettingsPanelsReadIndependentlyAndPreserveUnreadableSettingsIntegr
 		t.Fatalf("recovered profile setting=%v want=%v", got, want)
 	}
 }
+
+func TestServerSettingsDistinguishUnconfiguredFromUnreadableIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "admin.config.read", "admin.config.write")
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.denied], "admin.config.read")
+	const adminPath = "/api/v1/admin/server-settings"
+	const publicPath = "/api/v1/servers/settings"
+	defaults := defaultServerCatalogSettings()
+	got := decodeTEST022Data[serverCatalogSettings](t, f.require(t, f.denied, http.MethodGet, adminPath, nil, http.StatusOK))
+	if got != defaults {
+		t.Fatalf("unconfigured settings = %+v, want %+v", got, defaults)
+	}
+	f.require(t, f.denied, http.MethodPut, adminPath, defaults, http.StatusForbidden)
+
+	store := func(t *testing.T, raw string) {
+		t.Helper()
+		if _, err := f.db.Exec(f.ctx, `insert into system_settings(key,value) values($1,$2::jsonb)
+			on conflict(key) do update set value=excluded.value`, serverSettingsKey, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store(t, `{"maxProofFiles":8,"historyDays":35}`)
+	want := defaults
+	want.MaxProofFiles = 8
+	want.HistoryDays = 35
+	got = decodeTEST022Data[serverCatalogSettings](t, f.require(t, f.editor, http.MethodGet, adminPath, nil, http.StatusOK))
+	public := decodeTEST022Data[serverSubmissionSettings](t, f.require(t, "", http.MethodGet, publicPath, nil, http.StatusOK))
+	if got != want || public.serverCatalogSettings != want {
+		t.Fatalf("stored settings = %+v/%+v, want %+v", got, public.serverCatalogSettings, want)
+	}
+
+	for _, test := range []struct{ name, raw string }{
+		{"wrong_type", `{"maxProofFiles":"unknown","historyDays":35}`},
+		{"null_field", `{"historyDays":null}`},
+		{"out_of_range", `{"historyDays":0}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store(t, test.raw)
+			f.require(t, f.editor, http.MethodGet, adminPath, nil, http.StatusServiceUnavailable)
+			f.require(t, "", http.MethodGet, publicPath, nil, http.StatusServiceUnavailable)
+			f.require(t, f.editor, http.MethodPut, adminPath, defaults, http.StatusServiceUnavailable)
+			var preserved bool
+			if err := f.db.QueryRow(f.ctx, `select value=$2::jsonb from system_settings where key=$1`,
+				serverSettingsKey, test.raw).Scan(&preserved); err != nil || !preserved {
+				t.Fatalf("unreadable server settings were overwritten: %v", err)
+			}
+		})
+	}
+	store(t, `{}`)
+	f.require(t, f.editor, http.MethodPut, adminPath, want, http.StatusOK)
+	got = decodeTEST022Data[serverCatalogSettings](t, f.require(t, f.editor, http.MethodGet, adminPath, nil, http.StatusOK))
+	if got != want {
+		t.Fatalf("recovered settings = %+v, want %+v", got, want)
+	}
+}

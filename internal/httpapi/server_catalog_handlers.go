@@ -160,37 +160,61 @@ func defaultServerCatalogSettings() serverCatalogSettings {
 	}
 }
 
-func loadServerCatalogSettings(ctx context.Context, query revisionQuery) serverCatalogSettings {
+func loadServerCatalogSettings(ctx context.Context, query revisionQuery) (serverCatalogSettings, error) {
 	settings := defaultServerCatalogSettings()
 	var raw []byte
-	if query.QueryRow(ctx, `select value from system_settings where key=$1`, serverSettingsKey).Scan(&raw) == nil {
-		_ = json.Unmarshal(raw, &settings)
+	err := query.QueryRow(ctx, `select value from system_settings where key=$1`, serverSettingsKey).Scan(&raw)
+	if err = decodeOptionalSetting(raw, err, serverSettingsKey, &settings); err != nil {
+		return serverCatalogSettings{}, err
 	}
-	settings.MaxProofFiles = min(max(settings.MaxProofFiles, 1), 20)
-	settings.MaxProofTotalBytes = min(max(settings.MaxProofTotalBytes, 1<<20), int64(100<<20))
-	settings.NameMaxLength = min(max(settings.NameMaxLength, 20), 160)
-	settings.SummaryMaxLength = min(max(settings.SummaryMaxLength, 80), 1000)
-	settings.HistoryDays = min(max(settings.HistoryDays, 7), 90)
-	return settings
+	if !settings.valid() {
+		return serverCatalogSettings{}, errors.New("stored server settings are outside supported ranges")
+	}
+	return settings, nil
+}
+
+func (settings serverCatalogSettings) valid() bool {
+	return settings.MaxProofFiles >= 1 && settings.MaxProofFiles <= 20 &&
+		settings.MaxProofTotalBytes >= 1<<20 && settings.MaxProofTotalBytes <= 100<<20 &&
+		settings.NameMaxLength >= 20 && settings.NameMaxLength <= 160 &&
+		settings.SummaryMaxLength >= 80 && settings.SummaryMaxLength <= 1000 &&
+		settings.HistoryDays >= 7 && settings.HistoryDays <= 90
+}
+
+func writeServerSettingsUnavailable(w http.ResponseWriter) {
+	writeAPIError(w, http.StatusServiceUnavailable, "SERVER_SETTINGS_UNAVAILABLE", "服务器设置暂时无法读取", 0, nil)
+}
+
+func (s *Server) serverCreationReviewRequired(r *http.Request) bool {
+	if antiAbuseModerationRequired(r) {
+		return true
+	}
+	claims := currentClaims(r)
+	return loadReviewConfig(r.Context(), s.db).ServerCreate &&
+		!claimsAllow(claims, "server.create.no-review") &&
+		!claimsAllow(claims, "admin.*")
 }
 
 func (s *Server) publicServerSettings(w http.ResponseWriter, r *http.Request) {
-	claims := currentClaims(r)
-	reviewRequired := loadReviewConfig(r.Context(), s.db).ServerCreate &&
-		!claimsAllow(claims, "server.create.no-review") &&
-		!claimsAllow(claims, "admin.*")
-	if antiAbuseModerationRequired(r) {
-		reviewRequired = true
+	settings, err := loadServerCatalogSettings(r.Context(), s.db)
+	if err != nil {
+		writeServerSettingsUnavailable(w)
+		return
 	}
 	writeJSON(w, http.StatusOK, serverSubmissionSettings{
-		serverCatalogSettings: loadServerCatalogSettings(r.Context(), s.db),
-		ReviewRequired:        reviewRequired,
+		serverCatalogSettings: settings,
+		ReviewRequired:        s.serverCreationReviewRequired(r),
 	})
 }
 
 func (s *Server) adminServerSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		writeJSON(w, http.StatusOK, loadServerCatalogSettings(r.Context(), s.db))
+		settings, err := loadServerCatalogSettings(r.Context(), s.db)
+		if err != nil {
+			writeServerSettingsUnavailable(w)
+			return
+		}
+		writeJSON(w, http.StatusOK, settings)
 		return
 	}
 	var request serverCatalogSettings
@@ -198,19 +222,31 @@ func (s *Server) adminServerSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	if request.MaxProofFiles < 1 || request.MaxProofFiles > 20 ||
-		request.MaxProofTotalBytes < 1<<20 || request.MaxProofTotalBytes > 100<<20 ||
-		request.NameMaxLength < 20 || request.NameMaxLength > 160 ||
-		request.SummaryMaxLength < 80 || request.SummaryMaxLength > 1000 ||
-		request.HistoryDays < 7 || request.HistoryDays > 90 {
+	if !request.valid() {
 		writeError(w, http.StatusBadRequest, "服务器设置超出允许范围")
 		return
 	}
+	ctx := r.Context()
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存服务器设置失败")
+		return
+	}
+	defer tx.Rollback(ctx)
+	current := defaultServerCatalogSettings()
+	if err = checkEditableSettingTx(ctx, tx, serverSettingsKey, &current); err != nil || !current.valid() {
+		writeServerSettingsUnavailable(w)
+		return
+	}
 	raw, _ := json.Marshal(request)
-	if _, err := s.db.Exec(r.Context(), `insert into system_settings(key,value,updated_by,updated_at)
+	if _, err = tx.Exec(ctx, `insert into system_settings(key,value,updated_by,updated_at)
 		values($1,$2::jsonb,$3,now()) on conflict(key) do update
 		set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`,
 		serverSettingsKey, string(raw), currentClaims(r).Subject); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存服务器设置失败")
+		return
+	}
+	if err = tx.Commit(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存服务器设置失败")
 		return
 	}
@@ -252,14 +288,13 @@ func (s *Server) createMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	settings := loadServerCatalogSettings(r.Context(), s.db)
-	claims := currentClaims(r)
-	reviewRequired := loadReviewConfig(r.Context(), s.db).ServerCreate &&
-		!claimsAllow(claims, "server.create.no-review") &&
-		!claimsAllow(claims, "admin.*")
-	if antiAbuseModerationRequired(r) {
-		reviewRequired = true
+	settings, err := loadServerCatalogSettings(r.Context(), s.db)
+	if err != nil {
+		writeServerSettingsUnavailable(w)
+		return
 	}
+	claims := currentClaims(r)
+	reviewRequired := s.serverCreationReviewRequired(r)
 	if err := normalizeAndValidateServerRequest(&request, settings, reviewRequired); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -378,7 +413,12 @@ func (s *Server) updateMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	if err := normalizeAndValidateServerUpdateRequest(&request, loadServerCatalogSettings(r.Context(), s.db)); err != nil {
+	settings, err := loadServerCatalogSettings(r.Context(), s.db)
+	if err != nil {
+		writeServerSettingsUnavailable(w)
+		return
+	}
+	if err := normalizeAndValidateServerUpdateRequest(&request, settings); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1026,7 +1066,11 @@ func (s *Server) minecraftServerHistory(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "查询时间范围不正确")
 		return
 	}
-	settings := loadServerCatalogSettings(r.Context(), s.db)
+	settings, err := loadServerCatalogSettings(r.Context(), s.db)
+	if err != nil {
+		writeServerSettingsUnavailable(w)
+		return
+	}
 	maxDuration := time.Duration(settings.HistoryDays) * 24 * time.Hour
 	if duration > maxDuration {
 		duration = maxDuration

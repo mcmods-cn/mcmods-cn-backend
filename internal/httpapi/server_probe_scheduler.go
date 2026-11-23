@@ -171,7 +171,11 @@ func persistMinecraftServerProbe(ctx context.Context, db *pgxpool.Pool, serverID
 }
 
 func cleanupMinecraftServerSamples(ctx context.Context, db *pgxpool.Pool) {
-	settings := loadServerCatalogSettings(ctx, db)
+	settings, err := loadServerCatalogSettings(ctx, db)
+	if err != nil {
+		log.Printf("load Minecraft server sample retention settings: %v", err)
+		return
+	}
 	cutoff := time.Now().Add(-time.Duration(settings.HistoryDays) * 24 * time.Hour)
 	if _, err := db.Exec(ctx, `delete from minecraft_server_status_samples
 		where checked_at<$1`, cutoff); err != nil {
