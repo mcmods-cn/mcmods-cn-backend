@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,7 +17,7 @@ import (
 	"mcmods-cn-backend/internal/config"
 )
 
-func TestSearchRebuildLeaseBlocksSecondWorkerQueueClaimIntegration(t *testing.T) {
+func TestSearchDrainDefersClaimWhileAnotherWorkerRebuildsIntegration(t *testing.T) {
 	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
 		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 to verify cross-instance search rebuild coordination")
 	}
@@ -90,9 +91,12 @@ func TestSearchRebuildLeaseBlocksSecondWorkerQueueClaimIntegration(t *testing.T)
 
 	rebuildEntered := make(chan struct{})
 	releaseRebuild := make(chan struct{})
+	var releaseOnce sync.Once
+	allowRebuild := func() { releaseOnce.Do(func() { close(releaseRebuild) }) }
+	defer allowRebuild()
 	rebuildDone := make(chan error, 1)
 	go func() {
-		rebuildDone <- workerA.withSearchProjectionLease(ctx, false, func(*Worker) error {
+		rebuildDone <- workerA.withSearchProjectionLease(ctx, true, func(*Worker) error {
 			close(rebuildEntered)
 			select {
 			case <-releaseRebuild:
@@ -112,8 +116,11 @@ func TestSearchRebuildLeaseBlocksSecondWorkerQueueClaimIntegration(t *testing.T)
 	go func() { drained <- workerB.drain(ctx) }()
 	select {
 	case drainErr := <-drained:
-		t.Fatalf("second worker drained during the rebuild lease: %v", drainErr)
-	case <-time.After(250 * time.Millisecond):
+		if drainErr != nil {
+			t.Fatal(drainErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("contending drain waited for the rebuild lease")
 	}
 	var attempts int
 	if err = pool.QueryRow(ctx, `select attempts from search_index_queue where document_type='creator' and document_id=58001`).Scan(&attempts); err != nil {
@@ -122,7 +129,7 @@ func TestSearchRebuildLeaseBlocksSecondWorkerQueueClaimIntegration(t *testing.T)
 	if attempts != 0 || deleted.Load() != 0 {
 		t.Fatalf("queue changed under rebuild lease: attempts=%d Typesense deletes=%d", attempts, deleted.Load())
 	}
-	close(releaseRebuild)
+	allowRebuild()
 	select {
 	case err = <-rebuildDone:
 		if err != nil {
@@ -131,13 +138,8 @@ func TestSearchRebuildLeaseBlocksSecondWorkerQueueClaimIntegration(t *testing.T)
 	case <-time.After(3 * time.Second):
 		t.Fatal("first worker did not release the rebuild lease")
 	}
-	select {
-	case err = <-drained:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("second worker did not resume after the rebuild lease was released")
+	if err := workerB.drain(ctx); err != nil {
+		t.Fatal(err)
 	}
 	var remaining int
 	if err = pool.QueryRow(ctx, `select count(*) from search_index_queue`).Scan(&remaining); err != nil {

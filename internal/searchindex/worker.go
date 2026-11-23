@@ -108,12 +108,11 @@ func waitSearchWorker(ctx context.Context, duration time.Duration) bool {
 	}
 }
 
-// withSearchProjectionLease coordinates every backend instance through one
-// PostgreSQL advisory lock. Rebuilds take the exclusive form while queue
-// drains take the shared form, so events committed after the snapshot starts
-// remain durable until the replacement aliases are active.
+// withSearchProjectionLease serializes writes to Typesense across instances.
+// Rebuilds wait for the lease. A competing drain tries again at the next poll.
+// Producer transactions continue to enqueue while either operation holds it.
 func (worker *Worker) withSearchProjectionLease(
-	ctx context.Context, shared bool, operation func(*Worker) error,
+	ctx context.Context, wait bool, operation func(*Worker) error,
 ) (operationErr error) {
 	if worker == nil || worker.pool == nil {
 		return errors.New("search projection lease requires a database pool")
@@ -122,16 +121,22 @@ func (worker *Worker) withSearchProjectionLease(
 	if err != nil {
 		return fmt.Errorf("acquire search projection lease connection: %w", err)
 	}
-	lockSQL := `select pg_advisory_lock(hashtext($1))`
-	if shared {
-		lockSQL = `select pg_advisory_lock_shared(hashtext($1))`
+	if wait {
+		_, err = connection.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, searchProjectionRebuildLock)
+	} else {
+		var acquired bool
+		err = connection.QueryRow(ctx, `select pg_try_advisory_lock(hashtext($1))`, searchProjectionRebuildLock).Scan(&acquired)
+		if err == nil && !acquired {
+			connection.Release()
+			return nil
+		}
 	}
-	if _, err = connection.Exec(ctx, lockSQL, searchProjectionRebuildLock); err != nil {
+	if err != nil {
 		closeSearchProjectionLeaseConnection(connection)
 		return fmt.Errorf("acquire search projection lease: %w", err)
 	}
 	defer func() {
-		if releaseErr := releaseSearchProjectionLease(connection, shared); operationErr == nil && releaseErr != nil {
+		if releaseErr := releaseSearchProjectionLease(connection); operationErr == nil && releaseErr != nil {
 			operationErr = releaseErr
 		}
 	}()
@@ -140,15 +145,11 @@ func (worker *Worker) withSearchProjectionLease(
 	return operation(&leasedWorker)
 }
 
-func releaseSearchProjectionLease(connection *pgxpool.Conn, shared bool) error {
+func releaseSearchProjectionLease(connection *pgxpool.Conn) error {
 	unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	unlockSQL := `select pg_advisory_unlock(hashtext($1))`
-	if shared {
-		unlockSQL = `select pg_advisory_unlock_shared(hashtext($1))`
-	}
 	var unlocked bool
-	err := connection.QueryRow(unlockCtx, unlockSQL, searchProjectionRebuildLock).Scan(&unlocked)
+	err := connection.QueryRow(unlockCtx, `select pg_advisory_unlock(hashtext($1))`, searchProjectionRebuildLock).Scan(&unlocked)
 	if err == nil && unlocked {
 		connection.Release()
 		return nil
@@ -177,7 +178,7 @@ func (worker *Worker) rebuild(ctx context.Context) error {
 	if current {
 		return worker.drain(ctx)
 	}
-	if err = worker.withSearchProjectionLease(ctx, false, func(leasedWorker *Worker) error {
+	if err = worker.withSearchProjectionLease(ctx, true, func(leasedWorker *Worker) error {
 		current, currentErr := leasedWorker.projectionsCurrent(ctx)
 		if currentErr != nil {
 			return currentErr
@@ -461,7 +462,7 @@ func (worker *Worker) projectionCurrent(
 }
 
 func (worker *Worker) drain(ctx context.Context) error {
-	return worker.withSearchProjectionLease(ctx, true, func(leasedWorker *Worker) error {
+	return worker.withSearchProjectionLease(ctx, false, func(leasedWorker *Worker) error {
 		return leasedWorker.drainWithLease(ctx)
 	})
 }
@@ -508,7 +509,7 @@ func (worker *Worker) drainWithLease(ctx context.Context) error {
 				found[id] = true
 			}
 		}
-		if loadErr = worker.client.ImportDocuments(ctx, worker.client.Alias(collection.kind), documents); loadErr != nil {
+		if _, loadErr = worker.importSearchDocumentBatches(ctx, worker.client.Alias(collection.kind), documents); loadErr != nil {
 			batchErrors = append(batchErrors, fmt.Errorf("import %s search queue documents: %w", documentType, loadErr))
 			if retryErr := worker.retry(ctx, typedJobs, loadErr); retryErr != nil {
 				batchErrors = append(batchErrors, retryErr)
