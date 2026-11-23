@@ -408,12 +408,13 @@ func (c *Cache) AdjustUnread(ctx context.Context, userID int64, field string, de
 		ttl = 5 * time.Minute
 	}
 	started := time.Now()
+	// A delta knows only one count and cannot rebuild a stale snapshot.
 	_, err := c.redis.Eval(ctx, `
 if redis.call('EXISTS',KEYS[1])==0 then return -1 end
 if redis.call('HGET',KEYS[1],'version')~='2' then return -1 end
+if redis.call('HGET',KEYS[1],'epoch')~=ARGV[3] then return -1 end
 local value=redis.call('HINCRBY',KEYS[1],ARGV[1],ARGV[2])
 if value<0 then value=0 redis.call('HSET',KEYS[1],ARGV[1],0) end
-redis.call('HSET',KEYS[1],'epoch',ARGV[3])
 redis.call('PEXPIRE',KEYS[1],ARGV[4])
 return value
 `, []string{key}, field, delta, epoch, ttl.Milliseconds()).Result()
