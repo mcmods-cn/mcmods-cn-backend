@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var roleTrackCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
@@ -71,7 +72,17 @@ func (s *Server) saveRoleTrack(w http.ResponseWriter, r *http.Request, currentCo
 			payload.Description,
 		)
 	} else {
-		if _, err := tx.Exec(r.Context(), `delete from permission_role_track_roles where track_code = $1`, currentCode); err != nil {
+		// Role application also locks the track before its members.
+		var lockedCode string
+		if err = tx.QueryRow(r.Context(), `select code from permission_role_tracks where code=$1 for update`, currentCode).Scan(&lockedCode); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "权限组线路不存在")
+			} else {
+				writeError(w, http.StatusInternalServerError, "读取权限组线路失败")
+			}
+			return
+		}
+		if _, err := tx.Exec(r.Context(), `delete from permission_role_track_roles where track_code = $1`, lockedCode); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存线路权限组失败")
 			return
 		}
@@ -85,11 +96,15 @@ func (s *Server) saveRoleTrack(w http.ResponseWriter, r *http.Request, currentCo
 		)
 	}
 	if err != nil {
-		writeError(w, http.StatusConflict, "线路代码已存在或线路不存在")
-		return
-	}
-	if _, err := tx.Exec(r.Context(), `delete from permission_role_track_roles where track_code = $1`, payload.Code); err != nil {
-		writeError(w, http.StatusInternalServerError, "保存线路权限组失败")
+		var databaseErr *pgconn.PgError
+		switch {
+		case isUniqueViolation(err):
+			writeError(w, http.StatusConflict, "线路代码已存在")
+		case errors.As(err, &databaseErr) && databaseErr.Code == "23503":
+			writeError(w, http.StatusConflict, "权限组线路正在使用，无法更改代码")
+		default:
+			writeError(w, http.StatusInternalServerError, "保存权限组线路失败")
+		}
 		return
 	}
 	for position, role := range payload.Roles {
