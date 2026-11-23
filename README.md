@@ -46,7 +46,7 @@ go test -race -p 1 ./internal/queue ./internal/querycache -count=1
 
 ## 数据库安装、发布和恢复
 
-在已确认用途的 PostgreSQL 18.6 空库配置服务端环境，安装 schema 后再启动 API 与 Worker。安装 DDL、必需权限和禁用密码登录的系统身份共用一个事务。进程启动时用同一入口核对版本、DDL 定义指纹和实际 catalog 指纹。当前基线为 generation 171。外部版本的更新日志绑定归属于站内项目，项目换来源后仍保留自己的历史和人工修订。版本或结构不符时拒绝启动。旧库用对应应用版本读取，只有已核实归属的开发库才可重建。[隔离环境重建](docs/testing-isolated-environment.md#重建任务自有环境)
+在已确认用途的 PostgreSQL 18.6 空库配置服务端环境，安装 schema 后再启动 API 与 Worker。安装 DDL、必需权限和禁用密码登录的系统身份共用一个事务。进程启动时用同一入口核对版本、DDL 定义指纹和实际 catalog 指纹。当前基线为 generation 171。外部更新日志和镜像下载分别以所属项目及供应商身份定键。项目换来源后仍保留自己的已发布内容和人工修订。版本或结构不符时拒绝启动。旧库用对应应用版本读取，只有已核实归属的开发库才可重建。[隔离环境重建](docs/testing-isolated-environment.md#重建任务自有环境)
 
 ```sh
 go run ./cmd/db-initialize
