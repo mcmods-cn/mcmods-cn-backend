@@ -358,6 +358,11 @@ func newTEST018IsolatedDatabase(t *testing.T, ctx context.Context) *pgxpool.Pool
 	if err != nil {
 		t.Fatal(err)
 	}
+	return newTEST018IsolatedDatabaseWithConfig(t, ctx, baseConfig)
+}
+
+func newTEST018IsolatedDatabaseWithConfig(t *testing.T, ctx context.Context, baseConfig *pgxpool.Config) *pgxpool.Pool {
+	t.Helper()
 	adminPool, err := pgxpool.NewWithConfig(ctx, baseConfig)
 	if err != nil {
 		t.Fatal(err)
@@ -385,10 +390,7 @@ func newTEST018IsolatedDatabase(t *testing.T, ctx context.Context) *pgxpool.Pool
 			t.Errorf("isolated TEST018 database %s cleanup was not confirmed; retain scope for diagnosis: %v", identity.Name, dropErr)
 		}
 	})
-	scopedConfig, err := pgxpool.ParseConfig(appconfig.Load().DB.ConnString())
-	if err != nil {
-		t.Fatal(err)
-	}
+	scopedConfig := baseConfig.Copy()
 	scopedConfig.ConnConfig.Database = identity.Name
 	scopedConfig.MaxConns, scopedConfig.MinConns = 8, 1
 	pool, err = pgxpool.NewWithConfig(ctx, scopedConfig)
