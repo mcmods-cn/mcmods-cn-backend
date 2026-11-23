@@ -80,15 +80,7 @@ func Inspect(ctx context.Context, pool *pgxpool.Pool, since, until time.Time, li
  select count(*) over(),jsonb_build_object('senderPublicId',sender_id,'actualRecipientPublicId',recipient_id,'possiblePublicIds',possible_ids) from candidates order by id limit $3`); err != nil {
 		return report, err
 	}
-	var marker bool
-	if err = tx.QueryRow(ctx, `select exists(select 1 from information_schema.columns where table_schema='public' and table_name='oss_files' and column_name='source_hash_verified')`).Scan(&marker); err != nil {
-		return report, err
-	}
-	unverified := "true"
-	if marker {
-		unverified = "not file.source_hash_verified"
-	}
-	fileScope := `file.status='active' and file.created_at>=$1 and file.created_at<$2 and ` + unverified
+	const fileScope = `file.status='active' and file.created_at>=$1 and file.created_at<$2 and not file.source_hash_verified`
 	if err = run("active_unverified_source_files", `select count(*) over(),to_jsonb(file.public_id) from oss_files file where `+fileScope+` order by file.id limit $3`); err != nil {
 		return report, err
 	}

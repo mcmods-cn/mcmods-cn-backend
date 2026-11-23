@@ -4,8 +4,10 @@
 uses a repeatable-read, read-only transaction and a 30-second statement budget.
 It returns counts and bounded samples of public IDs. It does not output balances,
 private JSON values, object keys, signed URLs, tokens or private titles. It does
-not fetch any object-storage body. Run against an authorized copy first. No
-production diagnosis or repair was executed by this task.
+not fetch any object-storage body. Run against an authorized copy that matches
+the [current installation baseline](../README.md#数据库安装发布和恢复). Missing
+required proof fields cause a query error and a nonzero exit. No production
+diagnosis or repair was executed by this task.
 
 The transfer section identifies actual ledger recipients whose internal numeric
 key could have collided with a different account's numeric public ID or username.
