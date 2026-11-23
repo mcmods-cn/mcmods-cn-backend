@@ -7,17 +7,19 @@ from unittest.mock import patch
 
 import isolated_environment as environment
 
+OWNER = "a" * 32
+DATABASE = "test_mcmods_audit_0123456789abcdef"
+
 
 class EnvironmentOwnershipTests(unittest.TestCase):
     def test_run_refuses_an_environment_pointing_outside_its_labelled_services(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
-            database = "test_mcmods_audit_0123456789abcdef"
             (state / "resources.json").write_text(json.dumps({
-                "owner": "a" * 32, "database": database,
+                "owner": OWNER, "database": DATABASE,
                 "containers": {"postgres": "p", "redis": "r", "nats": "n"},
             }))
-            url = "postgres://mcmods:synthetic@not-the-owned-db.example.test:15432/" + database + "?sslmode=disable"
+            url = "postgres://mcmods:synthetic@not-the-owned-db.example.test:15432/" + DATABASE + "?sslmode=disable"
             (state / "environment.json").write_text(json.dumps({
                 "DATABASE_URL": url, "MCMODS_TEST_DATABASE_URL": url,
                 "REDIS_ADDR": "127.0.0.1:16379", "NATS_URL": "nats://127.0.0.1:14222",
@@ -112,12 +114,30 @@ class EnvironmentOwnershipTests(unittest.TestCase):
     def test_owner_mismatch_prevents_any_removal(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
-            (state / "resources.json").write_text(json.dumps({"owner": "ours", "containers": {"postgres": "candidate"}}))
+            (state / "resources.json").write_text(json.dumps({
+                "owner": OWNER, "database": DATABASE, "containers": {"postgres": "candidate"},
+            }))
             with patch.object(environment, "docker", return_value=json.dumps([{"Config": {"Labels": {environment.LABEL: "theirs"}}}])) as docker:
                 with self.assertRaises(RuntimeError):
                     environment.down(state)
                 self.assertEqual([call.args[0] for call in docker.call_args_list], ["inspect"])
             self.assertTrue((state / "resources.json").exists())
+
+    def test_down_refuses_an_invalid_owner_before_inspection_or_removal(self):
+        for owner in (None, "", "not-an-owner-label"):
+            with self.subTest(owner=owner), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory)
+                recorded = state / "resources.json"
+                recorded.write_text(json.dumps({
+                    "owner": owner, "database": DATABASE,
+                    "containers": {"postgres": "not-owned"},
+                }))
+                unlabelled = json.dumps([{"Config": {"Labels": {"other.service": "unrelated"}}}])
+                with patch.object(environment, "docker", return_value=unlabelled) as docker:
+                    with self.assertRaisesRegex(RuntimeError, "owned isolated environment record"):
+                        environment.down(state)
+                    docker.assert_not_called()
+                self.assertTrue(recorded.is_file())
 
     def test_written_environment_files_are_private(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -128,12 +148,14 @@ class EnvironmentOwnershipTests(unittest.TestCase):
     def test_down_preserves_additional_backups_after_owned_resource_removal(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
-            (state / "resources.json").write_text(json.dumps({"owner": "ours", "containers": {"postgres": "owned"}}))
+            (state / "resources.json").write_text(json.dumps({
+                "owner": OWNER, "database": DATABASE, "containers": {"postgres": "owned"},
+            }))
             (state / "environment.json").write_text("{}")
             (state / "activate.sh").write_text("# synthetic fixture\n")
             backup = state / "function-repair-before.json"
             backup.write_text("preserved private repair backup")
-            with patch.object(environment, "docker", return_value=json.dumps([{"Config": {"Labels": {environment.LABEL: "ours"}}}])) as docker:
+            with patch.object(environment, "docker", return_value=json.dumps([{"Config": {"Labels": {environment.LABEL: OWNER}}}])) as docker:
                 environment.down(state)
                 self.assertEqual([call.args[0] for call in docker.call_args_list], ["inspect", "rm"])
                 self.assertEqual(docker.call_args_list[-1].args, ("rm", "-f", "-v", "owned"))

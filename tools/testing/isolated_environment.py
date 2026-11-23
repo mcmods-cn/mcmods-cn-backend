@@ -46,16 +46,29 @@ def write_private(path, value):
 
 def verify_container(name, owner):
     description = json.loads(docker("inspect", name, capture=True))[0]
-    if description["Config"].get("Labels", {}).get(LABEL) != owner:
+    if (description["Config"].get("Labels") or {}).get(LABEL) != owner:
         raise RuntimeError("refusing to operate on a container without this environment's owner label")
     return description
 
 
-def read_owned_state(state):
+def read_resource_record(state):
     record = json.loads((state / "resources.json").read_text())
-    environment = json.loads((state / "environment.json").read_text())
-    if not re.fullmatch(r"[a-f0-9]{32}", record.get("owner", "")) or not re.fullmatch(r"test_mcmods_audit_[a-f0-9]{16}", record.get("database", "")):
+    if not isinstance(record, dict):
         raise RuntimeError("state is not an owned isolated environment record")
+    owner, database, containers = record.get("owner"), record.get("database"), record.get("containers")
+    if (not isinstance(owner, str) or not re.fullmatch(r"[a-f0-9]{32}", owner)
+            or not isinstance(database, str) or not re.fullmatch(r"test_mcmods_audit_[a-f0-9]{16}", database)):
+        raise RuntimeError("state is not an owned isolated environment record")
+    if not isinstance(containers, dict) or any(
+            service not in SERVICE_PORTS or not isinstance(identifier, str) or not identifier
+            for service, identifier in containers.items()):
+        raise RuntimeError("owned environment resource list is invalid")
+    return record
+
+
+def read_owned_state(state):
+    record = read_resource_record(state)
+    environment = json.loads((state / "environment.json").read_text())
     containers = record["containers"]
     if set(containers) not in ({"postgres", "redis", "nats"}, set(SERVICE_PORTS)):
         raise RuntimeError("owned environment service inventory is incomplete")
@@ -208,7 +221,7 @@ def run(state, command):
 
 
 def down(state):
-    record = json.loads((state / "resources.json").read_text())
+    record = read_resource_record(state)
     # Check every resource before removing any. Remove only recorded container
     # IDs and their own anonymous volumes; never a user-supplied path or DB.
     for container_id in record["containers"].values():
