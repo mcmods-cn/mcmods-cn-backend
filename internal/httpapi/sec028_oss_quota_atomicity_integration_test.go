@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,206 +13,166 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/database"
+	"mcmods-cn-backend/tools/testing/postgrestarget"
 )
 
 func TestSEC028ConcurrentUploadSettlementsCannotOversubscribeIntegration(t *testing.T) {
-	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
-		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 to verify atomic upload quota settlement")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, cleanup := newSEC028QuotaPool(t, ctx)
-	defer cleanup()
+	pool, userID := newSEC028QuotaFixture(t, ctx)
+	limits := ossUserQuotaLimits{single: 1_000, daily: 1_000, total: 1_000}
+	settle := func(tx pgx.Tx, objectKey string) error {
+		if err := settleUserOSSUploadQuotaTx(ctx, tx, userID, objectKey, 600, 600, limits); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `insert into oss_files(object_key,size_bytes,source_size_bytes,uploader_id,status)
+			values($1,600,600,$2,'active')`, objectKey, userID)
+		return err
+	}
 
-	if _, err := pool.Exec(ctx, `create table oss_user_quota_usage(
-		user_id bigint primary key,active_source_bytes bigint not null default 0,active_stored_bytes bigint not null default 0,
-		reserved_source_bytes bigint not null default 0,reserved_stored_bytes bigint not null default 0,updated_at timestamptz not null default now());
-		create table oss_user_daily_quota_usage(
-		user_id bigint not null,usage_date date not null,active_source_bytes bigint not null default 0,active_stored_bytes bigint not null default 0,
-		reserved_source_bytes bigint not null default 0,reserved_stored_bytes bigint not null default 0,updated_at timestamptz not null default now(),
-		primary key(user_id,usage_date));
-		create table oss_user_upload_quota_reservations(
-		user_id bigint not null,object_key text not null,usage_date date not null,source_bytes bigint not null,stored_bytes bigint not null,
-		expires_at timestamptz not null,created_at timestamptz not null default now(),primary key(user_id,object_key));
-		create table oss_files(
-		id bigint generated always as identity primary key,object_key text not null unique,size_bytes bigint not null,
-		source_size_bytes bigint not null,uploader_id bigint not null,status text not null,created_at timestamptz not null default now());
-		create function maintain_sec028_quota_usage() returns trigger language plpgsql as $$
-		begin
-			if new.status='active' then
-				insert into oss_user_quota_usage(user_id,active_source_bytes,active_stored_bytes)
-				values(new.uploader_id,coalesce(nullif(new.source_size_bytes,0),new.size_bytes),new.size_bytes)
-				on conflict(user_id) do update set
-					active_source_bytes=oss_user_quota_usage.active_source_bytes+excluded.active_source_bytes,
-					active_stored_bytes=oss_user_quota_usage.active_stored_bytes+excluded.active_stored_bytes;
-				insert into oss_user_daily_quota_usage(user_id,usage_date,active_source_bytes,active_stored_bytes)
-				values(new.uploader_id,new.created_at::date,coalesce(nullif(new.source_size_bytes,0),new.size_bytes),new.size_bytes)
-				on conflict(user_id,usage_date) do update set
-					active_source_bytes=oss_user_daily_quota_usage.active_source_bytes+excluded.active_source_bytes,
-					active_stored_bytes=oss_user_daily_quota_usage.active_stored_bytes+excluded.active_stored_bytes;
-			end if;
-			return new;
-		end $$;
-		create trigger trg_sec028_quota_usage after insert on oss_files
-		for each row execute function maintain_sec028_quota_usage()`); err != nil {
+	first, err := pool.Begin(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	userID := time.Now().UnixNano() & 0x3fffffffffffffff
-	limits := ossUserQuotaLimits{single: 1_000, daily: 1_000, total: 1_000}
-	type settlementResult struct {
-		objectKey string
-		err       error
+	defer rollbackIntegrationTransaction(first)
+	if err = settle(first, "sec028/complete-a"); err != nil {
+		t.Fatal(err)
 	}
-	results := make(chan settlementResult, 2)
-	ready := make(chan struct{}, 2)
-	start := make(chan struct{})
-	for _, objectKey := range []string{"sec028/complete-a", "sec028/complete-b"} {
-		objectKey := objectKey
-		go func() {
-			tx, err := pool.Begin(ctx)
-			if err != nil {
-				results <- settlementResult{objectKey: objectKey, err: err}
-				return
-			}
-			defer tx.Rollback(ctx)
-			ready <- struct{}{}
-			<-start
-			if err = settleUserOSSUploadQuotaTx(ctx, tx, userID, objectKey, 600, 600, limits); err == nil {
-				_, err = tx.Exec(ctx, `insert into oss_files(object_key,size_bytes,source_size_bytes,uploader_id,status)
-					values($1,600,600,$2,'active')`, objectKey, userID)
-			}
-			if err == nil {
-				time.Sleep(50 * time.Millisecond)
-				err = tx.Commit(ctx)
-			}
-			results <- settlementResult{objectKey: objectKey, err: err}
-		}()
-	}
-	<-ready
-	<-ready
-	close(start)
+	holderPID := int32(first.Conn().PgConn().PID())
+	result := make(chan error, 1)
+	go func() {
+		second, err := pool.Begin(ctx)
+		if err != nil {
+			result <- err
+			return
+		}
+		defer rollbackIntegrationTransaction(second)
+		if err = settle(second, "sec028/complete-b"); err == nil {
+			err = second.Commit(ctx)
+		}
+		result <- err
+	}()
 
-	successes, quotaFailures := 0, 0
-	for range 2 {
-		result := <-results
-		if result.err == nil {
-			successes++
-			continue
+	// Observe actual contention before committing the first file and its quota
+	// counters. A failure to open the second transaction is reported directly.
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		var waiting bool
+		if err = pool.QueryRow(ctx, `select exists(select 1 from pg_stat_activity
+			where datname=current_database() and wait_event_type='Lock' and $1=any(pg_blocking_pids(pid)))`, holderPID).Scan(&waiting); err != nil {
+			t.Fatal(err)
 		}
-		var quotaErr *ossUserQuotaError
-		if errors.As(result.err, &quotaErr) {
-			quotaFailures++
-			continue
+		if waiting {
+			break
 		}
-		t.Fatalf("settlement %s failed unexpectedly: %v", result.objectKey, result.err)
+		select {
+		case early := <-result:
+			t.Fatalf("second settlement returned without waiting for the first transaction: %v", early)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-poll.C:
+		}
+	}
+	if err = first.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var quotaErr *ossUserQuotaError
+	select {
+	case err = <-result:
+		if !errors.As(err, &quotaErr) {
+			t.Fatalf("second settlement error = %v, want a quota rejection", err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
 	}
 	var files int
-	var totalSource, totalStored, dailySource, dailyStored int64
-	if err := pool.QueryRow(ctx, `select count(*) from oss_files`).Scan(&files); err != nil {
+	if err = pool.QueryRow(ctx, `select count(*) from oss_files where uploader_id=$1 and status='active'`, userID).Scan(&files); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `select active_source_bytes,active_stored_bytes
-		from oss_user_quota_usage where user_id=$1`, userID).Scan(&totalSource, &totalStored); err != nil {
-		t.Fatal(err)
+	if files != 1 {
+		t.Fatalf("settled files = %d, want one", files)
 	}
-	if err := pool.QueryRow(ctx, `select active_source_bytes,active_stored_bytes
-		from oss_user_daily_quota_usage where user_id=$1 and usage_date=current_date`, userID).Scan(&dailySource, &dailyStored); err != nil {
-		t.Fatal(err)
-	}
-	if successes != 1 || quotaFailures != 1 || files != 1 || totalSource != 600 || totalStored != 600 || dailySource != 600 || dailyStored != 600 {
-		t.Fatalf("concurrent completion = success %d quota %d files %d total %d/%d daily %d/%d, want 1/1/1 and 600/600",
-			successes, quotaFailures, files, totalSource, totalStored, dailySource, dailyStored)
-	}
+	assertOSSQuotaCounters(t, ctx, pool, userID, 600, 600, 0, 0)
 }
 
 func TestSEC028QuotaStorageFaultsFailClosedIntegration(t *testing.T) {
-	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
-		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 to verify quota storage failure semantics")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	pool, cleanup := newSEC028QuotaPool(t, ctx)
-	defer cleanup()
-
-	if _, err := pool.Exec(ctx, `create table oss_user_quota_usage(
-		user_id bigint primary key,active_source_bytes bigint not null default 0,active_stored_bytes bigint not null default 0,
-		reserved_source_bytes bigint not null default 0,reserved_stored_bytes bigint not null default 0,updated_at timestamptz not null default now())`); err != nil {
+	pool, userID := newSEC028QuotaFixture(t, ctx)
+	if _, err := pool.Exec(ctx, `alter table oss_user_daily_quota_usage
+		add constraint sec028_reject_daily_quota_write check(false) not valid`); err != nil {
 		t.Fatal(err)
 	}
 	server := &Server{db: pool}
-	userID := time.Now().UnixNano() & 0x3fffffffffffffff
 	limits := ossUserQuotaLimits{single: 1_000, daily: 1_000, total: 1_000}
+	before := accessFixtureBusinessRows(t, ctx, pool, "oss_user_quota_usage", "oss_user_daily_quota_usage", "oss_user_upload_quota_reservations")
 	reservationErr := server.reserveUserOSSUploadQuota(ctx, userID, "sec028/fault", 100, 100, time.Now().Add(time.Minute), limits)
-	if reservationErr == nil {
-		t.Fatal("missing daily quota storage was accepted as zero usage")
-	}
+	requireAccessFixturePGError(t, reservationErr, "23514", "sec028_reject_daily_quota_write", "")
 	var quotaErr *ossUserQuotaError
 	if errors.As(reservationErr, &quotaErr) {
 		t.Fatalf("storage fault was misclassified as an ordinary quota rejection: %v", reservationErr)
 	}
-	var totalRows int
-	if err := pool.QueryRow(ctx, `select count(*) from oss_user_quota_usage where user_id=$1`, userID).Scan(&totalRows); err != nil {
-		t.Fatal(err)
-	}
-	if totalRows != 0 {
-		t.Fatalf("failed reservation left %d quota rows, want transaction rollback", totalRows)
+	if after := accessFixtureBusinessRows(t, ctx, pool, "oss_user_quota_usage", "oss_user_daily_quota_usage", "oss_user_upload_quota_reservations"); after != before {
+		t.Fatal("failed reservation changed quota facts")
 	}
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer rollbackIntegrationTransaction(tx)
 	settlementErr := settleUserOSSUploadQuotaTx(ctx, tx, userID, "sec028/fault", 100, 100, limits)
-	_ = tx.Rollback(ctx)
-	if settlementErr == nil || errors.As(settlementErr, &quotaErr) {
-		t.Fatalf("storage-fault settlement error = %v, want fail-closed database error", settlementErr)
+	requireAccessFixturePGError(t, settlementErr, "23514", "sec028_reject_daily_quota_write", "")
+	if errors.As(settlementErr, &quotaErr) {
+		t.Fatalf("storage-fault settlement error = %v, want a database failure", settlementErr)
 	}
-
+	if err = tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if after := accessFixtureBusinessRows(t, ctx, pool, "oss_user_quota_usage", "oss_user_daily_quota_usage", "oss_user_upload_quota_reservations"); after != before {
+		t.Fatal("failed settlement changed quota facts")
+	}
 	recorder := httptest.NewRecorder()
 	writeOSSUserQuotaError(recorder, settlementErr)
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("storage-fault HTTP status = %d, want 500", recorder.Code)
 	}
+
+	if _, err = pool.Exec(ctx, `alter table oss_user_daily_quota_usage drop constraint sec028_reject_daily_quota_write`); err != nil {
+		t.Fatal(err)
+	}
+	if err = server.reserveUserOSSUploadQuota(ctx, userID, "sec028/fault", 100, 100, time.Now().Add(time.Minute), limits); err != nil {
+		t.Fatalf("reservation after storage recovered: %v", err)
+	}
+	assertOSSQuotaCounters(t, ctx, pool, userID, 0, 0, 100, 100)
 }
 
-func newSEC028QuotaPool(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
+func newSEC028QuotaFixture(t *testing.T, ctx context.Context) (*pgxpool.Pool, int64) {
 	t.Helper()
-	baseConfig, err := pgxpool.ParseConfig(config.Load().DB.ConnString())
+	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
+		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 to verify atomic PostgreSQL quota settlement")
+	}
+	databaseURL := config.Load().DB.ConnString()
+	if _, err := postgrestarget.ParseSingleLoopback(databaseURL); err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := database.NewIsolatedTestSchema(ctx, databaseURL, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	adminPool, err := pgxpool.NewWithConfig(ctx, baseConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	schemaName := fmt.Sprintf("sec028_quota_%d", time.Now().UnixNano())
-	quotedSchema := pgx.Identifier{schemaName}.Sanitize()
-	if _, err = adminPool.Exec(ctx, "create schema "+quotedSchema); err != nil {
-		adminPool.Close()
-		t.Fatal(err)
-	}
-	scopedConfig, err := pgxpool.ParseConfig(config.Load().DB.ConnString())
-	if err != nil {
-		adminPool.Close()
-		t.Fatal(err)
-	}
-	scopedConfig.MaxConns = 4
-	scopedConfig.ConnConfig.RuntimeParams["search_path"] = schemaName + ",pg_catalog"
-	pool, err := pgxpool.NewWithConfig(ctx, scopedConfig)
-	if err != nil {
-		_, _ = adminPool.Exec(context.Background(), "drop schema "+quotedSchema+" cascade")
-		adminPool.Close()
-		t.Fatal(err)
-	}
-	cleanup := func() {
-		pool.Close()
-		dropCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if _, dropErr := adminPool.Exec(dropCtx, "drop schema "+quotedSchema+" cascade"); dropErr != nil {
-			t.Errorf("drop isolated SEC028 quota schema: %v", dropErr)
+		if err := fixture.Close(cleanupCtx); err != nil {
+			t.Error(err)
 		}
-		adminPool.Close()
+	})
+	var userID int64
+	if err = fixture.Pool.QueryRow(ctx, `insert into users(username,email,password_hash,status)
+		values('sec028-quota','sec028-quota@example.invalid','synthetic','active') returning id`).Scan(&userID); err != nil {
+		t.Fatal(err)
 	}
-	return pool, cleanup
+	return fixture.Pool, userID
 }
