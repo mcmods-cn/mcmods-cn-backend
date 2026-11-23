@@ -58,6 +58,7 @@ class ReviewSnapshotTests(unittest.TestCase):
         self.assertEqual(self.evaluate(evidence)["status"], "reviewing")
         self.assertEqual(file_category("package-lock.json")[0], "dependency-lock")
         self.assertEqual(file_category("src/test/resources/vector.json")[0], "structured-fixture-data")
+        self.assertEqual(file_category("testdata/embedded-profile.icc")[0], "archive-or-binary")
         self.assertEqual(file_category("public/mc-icons/icon-exp.svg")[0], "image")
         self.assertEqual(file_category("app/interactive.svg")[0], "first-party-source")
         self.assertEqual(file_category("tools/testing/example_test.py")[0], "test-or-fixture")

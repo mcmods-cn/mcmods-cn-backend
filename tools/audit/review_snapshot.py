@@ -16,7 +16,7 @@ from review_ledger import covered, fingerprint, protected_input, read_json, read
 
 REPOSITORIES = {"mcmods-cn-backend", "mcmods-cn-frontend", "mcmods_exporter"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".avif"}
-ARCHIVE_SUFFIXES = {".zip", ".gz", ".jar", ".pdf", ".exe"}
+BINARY_FORMAT_SUFFIXES = {".zip", ".gz", ".jar", ".pdf", ".exe", ".icc"}
 SOURCE_SUFFIXES = {".go", ".java", ".ts", ".tsx", ".mts", ".mjs", ".js", ".cjs", ".py", ".sh", ".sql", ".css", ".svg"}
 REVIEW_FIELDS = ("responsibility", "focus_symbols", "call_chain", "callers", "callees", "side_effects", "invariants", "findings", "decision", "validation")
 INSPECTION_CATEGORIES = {"dependency-lock", "build-tool-distribution", "image", "archive-or-binary", "vendored", "generated-evidence", "structured-fixture-data"}
@@ -32,7 +32,7 @@ def file_category(path):
         return "build-tool-distribution", "Upstream source, distribution checksum and executable entry point"
     if suffix in IMAGE_SUFFIXES or (suffix == ".svg" and name.parts[:2] == ("public", "mc-icons")):
         return "image", "Source or fixture provenance, decode and dimensions"
-    if suffix in ARCHIVE_SUFFIXES:
+    if suffix in BINARY_FORMAT_SUFFIXES:
         return "archive-or-binary", "Provenance, digest and bounded format inspection"
     if name.parts[0] == "vendor":
         return "vendored", "Upstream dependency, license and vendoring integrity"
