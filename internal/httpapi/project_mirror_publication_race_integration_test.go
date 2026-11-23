@@ -17,7 +17,7 @@ type mirrorPromotionPause struct {
 }
 
 func (pause *mirrorPromotionPause) TraceQueryStart(ctx context.Context, _ *pgx.Conn, query pgx.TraceQueryStartData) context.Context {
-	if strings.Contains(query.SQL, "select status from mirrored_project_files where id=$1 for update") && pause.armed.CompareAndSwap(true, false) {
+	if strings.Contains(query.SQL, "select status,scan_status from oss_files where id=$1 for share") && pause.armed.CompareAndSwap(true, false) {
 		close(pause.reached)
 		select {
 		case <-pause.release:

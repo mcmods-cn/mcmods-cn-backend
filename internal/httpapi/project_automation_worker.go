@@ -1196,25 +1196,24 @@ func (worker *ProjectAutomationWorker) promoteCleanMirrors(ctx context.Context) 
 		if beginErr != nil {
 			return fmt.Errorf("begin project mirror promotion: %w", beginErr)
 		}
-		var lockedStatus string
-		if lockErr := tx.QueryRow(ctx, `select status from mirrored_project_files where id=$1 for update`, item.id).Scan(&lockedStatus); lockErr != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("lock project mirror promotion: %w", lockErr)
-		}
-		if lockedStatus != "scanning" && lockedStatus != "failed" {
-			_ = tx.Rollback(ctx)
-			continue
-		}
-		// The first scan is only a candidate list. Hold the actual bound file
-		// through publication so a concurrent rescan or tombstone cannot turn
-		// an obsolete clean result into an active downloadable file.
+		// Scan updates lock the stored file before updating its mirrors. Hold
+		// the same file first and verify the candidate binding again under lock.
 		var liveStatus, liveScan string
-		fileErr := tx.QueryRow(ctx, `select file.status,file.scan_status from oss_files file
-			join mirrored_project_files mirror on mirror.oss_file_id=file.id
-			where mirror.id=$1 and file.id=$2 for share of file`, item.id, item.ossID).Scan(&liveStatus, &liveScan)
+		fileErr := tx.QueryRow(ctx, `select status,scan_status from oss_files where id=$1 for share`, item.ossID).Scan(&liveStatus, &liveScan)
 		if fileErr != nil && !errors.Is(fileErr, pgx.ErrNoRows) {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("recheck bound project mirror scan: %w", fileErr)
+		}
+		var lockedStatus string
+		var lockedFileID *int64
+		if lockErr := tx.QueryRow(ctx, `select status,oss_file_id from mirrored_project_files where id=$1 for update`,
+			item.id).Scan(&lockedStatus, &lockedFileID); lockErr != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("lock project mirror promotion: %w", lockErr)
+		}
+		if (lockedStatus != "scanning" && lockedStatus != "failed") || lockedFileID == nil || *lockedFileID != item.ossID {
+			_ = tx.Rollback(ctx)
+			continue
 		}
 		if fileErr != nil || liveStatus != "active" || liveScan != "clean" && liveScan != "trusted_generated" {
 			status := "failed"
