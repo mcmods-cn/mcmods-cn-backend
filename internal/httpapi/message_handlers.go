@@ -53,6 +53,12 @@ const advanceDirectConversationSQL = `update direct_conversations set
 
 func createDirectMessageTx(ctx context.Context, tx pgx.Tx, conversationID, senderID, recipientID int64, body string, read bool, emailEvent *notificationEvent, traceID string) (directMessageItem, error) {
 	var item directMessageItem
+	// The incremental read cursor advances by message ID. Serialize sends in
+	// this conversation before allocating an ID so it cannot skip a late commit.
+	var id int64
+	if err := tx.QueryRow(ctx, `select id from direct_conversations where id=$1 for no key update`, conversationID).Scan(&id); err != nil {
+		return directMessageItem{}, err
+	}
 	var messageID int64
 	if err := tx.QueryRow(ctx, `insert into direct_messages(conversation_id,sender_id,recipient_id,body,read_at)
 		values($1,$2,$3,$4,case when $5 then now() else null end)
