@@ -35,7 +35,7 @@ func TestOPS007InitialFailureRecoversSubscriptionsWithoutReconfigure(t *testing.
 		t.Fatalf("offline task registration error = %v", err)
 	}
 	harness.start(t)
-	waitForNATSStatus(t, client, true)
+	waitForRealtimeBroadcastReady(t, client)
 	publisher := New(ctx, cfg)
 	defer publisher.Close()
 	assertOPS007Broadcast(t, ctx, publisher, broadcasts, "initial-recovery")
@@ -48,7 +48,7 @@ func TestOPS007InitialFailureRecoversSubscriptionsWithoutReconfigure(t *testing.
 	harness.stop()
 	waitForNATSStatus(t, client, false)
 	harness.start(t)
-	waitForNATSStatus(t, client, true)
+	waitForRealtimeBroadcastReady(t, client)
 	waitForNATSStatus(t, publisher, true)
 	assertOPS007Broadcast(t, ctx, publisher, broadcasts, "after-restart")
 	publishEnvelope(t, ctx, publisher, "ai", "reconnect-recovery", `{"ok":true}`)

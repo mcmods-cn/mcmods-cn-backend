@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -22,6 +23,8 @@ var (
 	ErrUnavailable         = errors.New("nats queue is unavailable")
 	ErrTaskDisabled        = errors.New("nats task is disabled")
 )
+
+const subscriptionFlushTimeout = 3 * time.Second
 
 type Status struct {
 	Enabled       bool                    `json:"enabled"`
@@ -46,6 +49,30 @@ type subscriptionDefinition struct {
 type broadcastSubscriptionDefinition struct {
 	subject string
 	handler broadcastHandler
+}
+
+// A connection can report CONNECTED while its replayed SUB commands are still
+// in transit. Keep the broker response tied to the physical connection epoch.
+type broadcastReplay struct {
+	result atomic.Pointer[broadcastReplayResult]
+}
+
+type broadcastReplayResult struct {
+	reconnects uint64
+	failed     bool
+}
+
+func (replay *broadcastReplay) confirmedOn(conn *nats.Conn) bool {
+	result := replay.result.Load()
+	if result == nil {
+		return conn.Stats().Reconnects == 0
+	}
+	return !result.failed && result.reconnects == conn.Stats().Reconnects
+}
+
+func (replay *broadcastReplay) failedOn(conn *nats.Conn) bool {
+	result := replay.result.Load()
+	return result != nil && result.failed && result.reconnects == conn.Stats().Reconnects
 }
 
 type activationGate struct {
@@ -82,6 +109,7 @@ type Client struct {
 	reconfigureMu          sync.Mutex
 	cfg                    config.NATSConfig
 	conn                   *nats.Conn
+	replay                 *broadcastReplay
 	jetStream              nats.JetStreamContext
 	generation             uint64
 	lastError              string
@@ -153,12 +181,12 @@ func (c *Client) recoverRuntime() error {
 	c.reconfigureMu.Lock()
 	defer c.reconfigureMu.Unlock()
 	c.mu.RLock()
-	cfg, conn, closed, pending := c.cfg, c.conn, c.closed, c.subscriptionsPending
+	cfg, conn, replay, closed, pending := c.cfg, c.conn, c.replay, c.closed, c.subscriptionsPending
 	c.mu.RUnlock()
 	if closed || !cfg.Enabled || c.ctx.Err() != nil {
 		return nil
 	}
-	if conn != nil && !conn.IsClosed() && (!conn.IsConnected() || !pending) {
+	if conn != nil && !conn.IsClosed() && (!conn.IsConnected() || !pending && !replay.failedOn(conn)) {
 		return nil // Do not compete with the library's active reconnect loop.
 	}
 	err := c.reconfigureLocked(cfg, nil)
@@ -336,9 +364,10 @@ func (c *Client) reconfigureLocked(cfg config.NATSConfig, persist func(config.NA
 
 	cfg = NormalizeConfig(cfg)
 	var nextConn *nats.Conn
+	var nextReplay *broadcastReplay
 	var connectErr error
 	if cfg.Enabled {
-		nextConn, connectErr = c.connect(cfg)
+		nextConn, nextReplay, connectErr = c.connect(cfg)
 	}
 	var nextJetStream nats.JetStreamContext
 	if connectErr == nil && nextConn != nil && cfg.JetStream.Enabled {
@@ -412,6 +441,7 @@ func (c *Client) reconfigureLocked(cfg config.NATSConfig, persist func(config.NA
 	c.cfg = cfg
 	c.notifyCapacityLocked()
 	c.conn = nextConn
+	c.replay = nextReplay
 	c.jetStream = nextJetStream
 	c.generation = nextGeneration
 	c.lastError = ""
@@ -428,7 +458,8 @@ func (c *Client) reconfigureLocked(cfg config.NATSConfig, persist func(config.NA
 	return nil
 }
 
-func (c *Client) connect(cfg config.NATSConfig) (*nats.Conn, error) {
+func (c *Client) connect(cfg config.NATSConfig) (*nats.Conn, *broadcastReplay, error) {
+	replay := &broadcastReplay{}
 	options := []nats.Option{
 		nats.Name("mcmods-cn-backend"),
 		nats.Timeout(3 * time.Second),
@@ -440,7 +471,13 @@ func (c *Client) connect(cfg config.NATSConfig) (*nats.Conn, error) {
 				c.setConnectionError(conn, err)
 			}
 		}),
-		nats.ReconnectHandler(func(conn *nats.Conn) { c.setConnectionError(conn, nil) }),
+		nats.ReconnectHandler(func(conn *nats.Conn) {
+			if cfg.Realtime {
+				c.confirmBroadcastReplay(conn, replay)
+				return
+			}
+			c.setConnectionError(conn, nil)
+		}),
 		nats.ClosedHandler(func(conn *nats.Conn) {
 			if err := conn.LastError(); err != nil {
 				c.setConnectionError(conn, err)
@@ -452,7 +489,29 @@ func (c *Client) connect(cfg config.NATSConfig) (*nats.Conn, error) {
 	} else if cfg.Username != "" || cfg.Password != "" {
 		options = append(options, nats.UserInfo(cfg.Username, cfg.Password))
 	}
-	return nats.Connect(cfg.URL, options...)
+	conn, err := nats.Connect(cfg.URL, options...)
+	return conn, replay, err
+}
+
+func (c *Client) confirmBroadcastReplay(conn *nats.Conn, replay *broadcastReplay) {
+	if !conn.IsConnected() {
+		return
+	}
+	reconnects := conn.Stats().Reconnects
+	ctx, cancel := context.WithTimeout(c.ctx, subscriptionFlushTimeout)
+	defer cancel()
+	err := conn.FlushWithContext(ctx)
+	// The broker processes the replayed SUB commands before replying to this
+	// PING. A rejection can already be in LastError while the asynchronous
+	// error callback is waiting for this reconnect callback to finish.
+	if lastErr := conn.LastError(); err == nil && isSubscriptionRejection(lastErr) {
+		err = lastErr
+	}
+	if c.ctx.Err() != nil || !conn.IsConnected() || reconnects != conn.Stats().Reconnects {
+		return
+	}
+	replay.result.Store(&broadcastReplayResult{reconnects: reconnects, failed: err != nil})
+	c.setConnectionError(conn, err)
 }
 
 func (c *Client) Close() {
@@ -475,6 +534,7 @@ func (c *Client) Close() {
 	}
 	conn := c.conn
 	c.conn = nil
+	c.replay = nil
 	c.jetStream = nil
 	c.liveTasks = nil
 	c.liveBroadcasts = nil
@@ -493,12 +553,14 @@ func (c *Client) Status() Status {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	connected := c.conn != nil && c.conn.IsConnected()
+	broadcastsConfigured := c.cfg.Realtime && len(c.broadcastSubscriptions) > 0
+	awaitingBroadcastReplay := connected && broadcastsConfigured && !c.replay.confirmedOn(c.conn)
 	return Status{
 		Enabled:       c.cfg.Enabled,
 		Connected:     connected,
 		Realtime:      c.cfg.Realtime,
-		RealtimeReady: connected && c.cfg.Enabled && c.cfg.Realtime && len(c.broadcastSubscriptions) > 0 && len(c.liveBroadcasts) == len(c.broadcastSubscriptions),
-		Recovering:    c.cfg.Enabled && !c.closed && (!connected || c.subscriptionsPending),
+		RealtimeReady: connected && c.cfg.Enabled && broadcastsConfigured && !awaitingBroadcastReplay && len(c.liveBroadcasts) == len(c.broadcastSubscriptions),
+		Recovering:    c.cfg.Enabled && !c.closed && (!connected || c.subscriptionsPending || awaitingBroadcastReplay),
 		URL:           RedactURL(c.cfg.URL),
 		SubjectPrefix: c.cfg.SubjectPrefix,
 		Tasks:         append([]config.NATSTaskConfig(nil), c.cfg.Tasks...),
@@ -619,13 +681,13 @@ func (c *Client) SubscribeBroadcast(subject string, handler broadcastHandler) er
 	_, alreadyRegistered := c.broadcastSubscriptions[subject]
 	_, live := c.liveBroadcasts[subject]
 	c.broadcastSubscriptions[subject] = definition
-	conn, cfg, generation := c.conn, c.cfg, c.generation
+	conn, replay, cfg, generation := c.conn, c.replay, c.cfg, c.generation
 	c.mu.Unlock()
 	if alreadyRegistered {
 		if !cfg.Enabled || !cfg.Realtime {
 			return ErrTaskDisabled
 		}
-		if !live || conn == nil || !conn.IsConnected() {
+		if !live || conn == nil || !conn.IsConnected() || !replay.confirmedOn(conn) {
 			return ErrUnavailable
 		}
 		return nil
@@ -656,7 +718,7 @@ func (c *Client) subscribeBroadcastOn(conn *nats.Conn, cfg config.NATSConfig, de
 		definition.handler(c.ctx, message.Subject, message.Data)
 	})
 	if err == nil {
-		err = conn.FlushTimeout(3 * time.Second)
+		err = conn.FlushTimeout(subscriptionFlushTimeout)
 	}
 	if err == nil {
 		// SUB permission errors are asynchronous and do not close the socket.
@@ -764,11 +826,16 @@ func (c *Client) setAsyncConnectionError(conn *nats.Conn, err error) {
 		return
 	}
 	c.lastError = err.Error()
-	if errors.Is(err, nats.ErrPermissionViolation) && strings.Contains(err.Error(), `Subscription to "`) {
+	if isSubscriptionRejection(err) {
 		c.subscriptionsPending = true
 		c.liveTasks = make(map[string]struct{})
 		c.liveBroadcasts = make(map[string]struct{})
 	}
+}
+
+func isSubscriptionRejection(err error) bool {
+	return errors.Is(err, nats.ErrMaxSubscriptionsExceeded) ||
+		errors.Is(err, nats.ErrPermissionViolation) && strings.Contains(err.Error(), `Subscription to "`)
 }
 
 func (c *Client) setGenerationError(generation uint64, err error) {

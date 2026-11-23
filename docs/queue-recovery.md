@@ -8,7 +8,8 @@
 | --- | --- |
 | `outbox.pending / publishing / awaitingRetry / oldestSeconds` | pending 是全部尚待交付的行数，包含正在投递和等待重试。结合最老任务年龄判断延迟。检查具体任务是否暂停，以及 `nats_outbox.available_at / locked_at / attempts / last_error`。 |
 | `outbox.deadLetters`、管理死信列表 | 未人工重放的条数。区分 publish 与 consumer 阶段，并确认业务任务的当前状态。 |
-| `queue.connected / jetStream / stream` | stream 给出消息总数、使用字节、实际上下限、保留/丢弃策略及消费者数。允许缺失的样本显示 null。LimitsPolicy 会保留已 ACK 消息，默认的 prefix 通配符也覆盖 realtime 广播。消费者的未交付/待确认数量应读取相应 durable 的 consumer info。 |
+| `queue.connected / jetStream / stream` | `connected` 表示 NATS 传输已连接。stream 给出消息总数、使用字节、实际上下限、保留/丢弃策略及消费者数。允许缺失的样本显示 null。LimitsPolicy 会保留已 ACK 消息，默认的 prefix 通配符也覆盖 realtime 广播。消费者的未交付/待确认数量应读取相应 durable 的 consumer info。 |
+| `queue.realtimeReady / recovering` | `realtimeReady` 等待本实例的广播订阅已被 broker 确认。重连时，SUB 重放后的 PONG 到达前保持恢复中。当前连接的重放确认失败时，沿用自动重试。 |
 | `queue.taskRuns[code]` | 每实例 active 是正在执行数，finished、failed、elapsedMillis 是进程内累计值。两个样本的时长差除以完成数差可估算这段时间完成任务的平均用时。进程重启会清零。 |
 | `process.goroutines / dbAcquired / dbTotal / dbMax`、`redis`、`projectUpdateNotifications` | 对照任务堆积、数据库池占用、缓存命中/降级，以及批量通知的结果。数据库读失败会让指标请求失败。 |
 
@@ -62,6 +63,8 @@ WHERE consumer = 'notification.email' AND event_id = $1;
 ## 停机及验证
 
 关闭 queue client 或父上下文会取消运行中的任务。等待本地分发协程完成后再关闭数据库。已建立 JetStream 暂时断连时按原配置重连，未获 PubAck 的行保留或按预算转发布死信。没有 JetStream 上下文时使用同一业务处理函数的本地模式。升级所有会运行 Dispatcher/Worker 的实例，使其均使用相同的任务开关、并发和邮件回执。回滚旧版前先停止接收新任务，核对正在执行的邮件、已接受和待核实回执，并确认不存在须由旧代码重新发送的任务。旧程序不能识别这些回执。本次调整没有数据库迁移。
+
+跨实例 realtime 广播采用 Core NATS 的即时语义。订阅恢复前错过的广播需通过业务状态查询确认。`/ready` 的 `realtimeBroadcast` 反映本实例当前连接的订阅确认情况。
 
 在隔离环境中执行以下门禁。数据库测试需要设置 `MCMODS_RUN_DB_INTEGRATION=1` 和专用 `MCMODS_TEST_DATABASE_URL`。外置 broker 测试使用 `MCMODS_RUN_NATS_INTEGRATION=1` 与回环 `MCMODS_TEST_NATS_URL`。未设置 opt-in 的 SKIP 不计作通过。部分测试自行启动真实 file-backed NATS 用于停机/重连。SMTP 协议测试使用回环接收器，邮件回执用真实数据库和可控发送函数。
 
