@@ -1195,6 +1195,7 @@ func moveModContentResourceToSectionTx(ctx context.Context, tx pgx.Tx, revisionI
 	if groupErr != nil && !errors.Is(groupErr, pgx.ErrNoRows) {
 		return groupErr
 	}
+	sharesItemBlockPlacement := kindCode == "minecraft.item" || kindCode == "minecraft.block"
 	deleteLogicalPlacement := func() error {
 		_, deleteErr := tx.Exec(ctx, `delete from mod_content_section_resources placement
 			using mod_content_sections section,game_resources candidate
@@ -1202,22 +1203,21 @@ func moveModContentResourceToSectionTx(ctx context.Context, tx pgx.Tx, revisionI
 			  and candidate.entity_id=placement.resource_id and placement.version_id=$2
 			  and (
 				candidate.entity_id in ($3,$4)
-				or (
-					candidate.kind_code in ('minecraft.item','minecraft.block')
-					and candidate.canonical_id=$5
-				)
-				or exists(
-					select 1
-					from game_resource_asset_bindings binding
-					join resource_import_snapshots block_snapshot on block_snapshot.id=binding.snapshot_id
-					join catalog_import_revisions revision on revision.id=block_snapshot.revision_id
-					where revision.target_version_id=$2 and revision.is_active
-					  and revision.status in ('ready','partial')
-					  and binding.block_resource_id=$4
-					  and candidate.entity_id in (binding.item_resource_id,binding.block_resource_id)
-				)
+					or ($6 and candidate.kind_code in ('minecraft.item','minecraft.block') and (
+						candidate.canonical_id=$5
+						or exists(
+							select 1
+							from game_resource_asset_bindings binding
+							join resource_import_snapshots block_snapshot on block_snapshot.id=binding.snapshot_id
+							join catalog_import_revisions revision on revision.id=block_snapshot.revision_id
+							where revision.target_version_id=$2 and revision.is_active
+							  and revision.status in ('ready','partial')
+							  and binding.block_resource_id=$4
+							  and candidate.entity_id in (binding.item_resource_id,binding.block_resource_id)
+						)
+					))
 			  )`,
-			modID, versionID, resourceID, placementResourceID, canonicalID)
+			modID, versionID, resourceID, placementResourceID, canonicalID, sharesItemBlockPlacement)
 		return deleteErr
 	}
 	if sectionPublicID == "" {
