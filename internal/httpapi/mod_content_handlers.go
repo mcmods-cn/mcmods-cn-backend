@@ -1313,7 +1313,7 @@ func (s *Server) modContentSectionResources(w http.ResponseWriter, r *http.Reque
 		 'parent',coalesce(effective.data->'parentId',effective.data->'parent'),'display',jsonb_strip_nulls(jsonb_build_object(
 		  'x',effective.data#>'{display,x}','y',effective.data#>'{display,y}','frame',effective.data#>'{display,frame}'))))
 		 when resource.kind_code='minecraft.loot_table' then jsonb_strip_nulls(jsonb_build_object(
-		 'possible_item_ids',effective.data->'possible_item_ids')) else '{}'::jsonb end,
+		 'possible_item_ids',coalesce(effective.data->'possibleItemIds',effective.data->'possible_item_ids'))) else '{}'::jsonb end,
 		subtree.sort_path,section_resource.resource_id
 		from subtree join mod_content_section_resources section_resource on section_resource.section_id=subtree.id
 		join catalog_entities entity on entity.id=section_resource.resource_id

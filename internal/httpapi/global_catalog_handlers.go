@@ -321,7 +321,6 @@ func (s *Server) globalRecipeRender(w http.ResponseWriter, r *http.Request) {
 func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[string]any, locales ...string) error {
 	keys := make([]exportResourceKey, 0, len(recipes)*8)
 	for _, recipe := range recipes {
-		revisionID, _ := recipe["revisionId"].(string)
 		layout, _ := recipe["layout"].(map[string]any)
 		slots, _ := layout["slots"].([]any)
 		for _, rawSlot := range slots {
@@ -329,8 +328,7 @@ func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[stri
 			alternatives, _ := slot["alternatives"].([]any)
 			for _, rawAlternative := range alternatives {
 				alternative, _ := rawAlternative.(map[string]any)
-				kind := firstCatalogString(alternative, slot, "ingredient_kind", "ingredient_type")
-				keys = append(keys, exportResourceKey{RevisionID: revisionID, ResourceID: recipeAlternativeItemID(alternative), Kind: kind})
+				keys = append(keys, recipeRenderResourceKey(recipe, slot, alternative))
 			}
 		}
 	}
@@ -339,7 +337,6 @@ func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[stri
 		return err
 	}
 	for _, recipe := range recipes {
-		revisionID, _ := recipe["revisionId"].(string)
 		layout, _ := recipe["layout"].(map[string]any)
 		slots, _ := layout["slots"].([]any)
 		for _, rawSlot := range slots {
@@ -347,16 +344,13 @@ func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[stri
 			alternatives, _ := slot["alternatives"].([]any)
 			for _, rawAlternative := range alternatives {
 				alternative, _ := rawAlternative.(map[string]any)
-				kind := firstCatalogString(alternative, slot, "ingredient_kind", "ingredient_type")
-				itemID := recipeAlternativeItemID(alternative)
-				normalizedKind := normalizeExportResourceKind(kind)
-				alternative["id"] = itemID
-				alternative["kind"] = normalizedKind
-				alternative["registry"] = resourceNamespace(itemID)
+				key := recipeRenderResourceKey(recipe, slot, alternative)
+				alternative["id"] = key.ResourceID
+				alternative["kind"] = key.Kind
+				alternative["registry"] = resourceNamespace(key.ResourceID)
 				for _, alias := range []string{"entityId", "item", "resource_location", "canonicalId", "kindCode", "sourceRegistry", "sourceObjectId"} {
 					delete(alternative, alias)
 				}
-				key := exportResourceKey{RevisionID: revisionID, ResourceID: itemID, Kind: normalizedKind}
 				for _, field := range []string{"publicId", "detailUrl", "names", "iconPath", "iconUrl", "iconURL", "previewPath", "previewUrl", "sourceRevisionId", "sourceModSiteId", "sourceVersionPublicId"} {
 					delete(alternative, field)
 				}
@@ -379,6 +373,21 @@ func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[stri
 		}
 	}
 	return nil
+}
+
+func recipeRenderResourceKey(recipe, slot, alternative map[string]any) exportResourceKey {
+	revisionID, _ := recipe["revisionId"].(string)
+	kind := firstCatalogString(alternative, slot, "ingredient_kind", "ingredient_type")
+	if authoritative, _ := recipe["_authoritative"].(bool); authoritative {
+		if canonicalKind, _ := alternative["kind"].(string); canonicalKind != "" {
+			kind = canonicalKind
+		}
+	}
+	return exportResourceKey{
+		RevisionID: revisionID,
+		ResourceID: recipeAlternativeItemID(alternative),
+		Kind:       normalizeExportResourceKind(kind),
+	}
 }
 
 func firstCatalogString(primary, fallback map[string]any, keys ...string) string {
