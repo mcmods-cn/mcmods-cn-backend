@@ -116,7 +116,7 @@ func TestMinecraftLoaderArtifactSnapshotsAreCatalogBoundAndOfflineReadable(t *te
 	if _, err = pool.Exec(ctx, `alter table minecraft_loader_artifact_versions rename column arch017_broken_source_url to source_url`); err != nil {
 		t.Fatal(err)
 	}
-	if err = saveMinecraftVersionConfig(ctx, pool, changed); err != nil {
+	if _, err = saveManualMinecraftVersionConfig(ctx, pool, changed); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = resolveSynchronizedMRPackLoaderVersion(ctx, pool, "1.20.1", "forge"); !errors.Is(err, errMinecraftLoaderArtifactUnavailable) {

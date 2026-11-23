@@ -19,7 +19,7 @@ func TestOCT03MinecraftSyncReleasesLeaseAfterFetchCancellationAndPersistenceFail
 			defer cancel()
 			poolA, databaseName := newTEST033IsolatedDatabase(t, ctx)
 			poolB := newTEST033DatabasePool(t, ctx, databaseName)
-			if err := saveMinecraftVersionConfig(ctx, poolA, minecraftVersionConfig{
+			if _, err := saveManualMinecraftVersionConfig(ctx, poolA, minecraftVersionConfig{
 				Versions: []minecraftVersionOption{{Code: "1.20.1", Type: "release"}},
 				Loaders:  []minecraftLoaderOption{{Code: "Fabric", Name: "Fabric", Versions: []string{"1.20.1"}}},
 			}); err != nil {

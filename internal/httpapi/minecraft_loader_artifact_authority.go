@@ -79,23 +79,40 @@ func normalizedMinecraftVersionConfigJSON(config minecraftVersionConfig) (minecr
 	return normalized, string(raw), hash, nil
 }
 
-func saveMinecraftVersionConfigAndInvalidateStaleArtifacts(ctx context.Context, db *pgxpool.Pool, config minecraftVersionConfig) error {
-	_, raw, catalogHash, err := normalizedMinecraftVersionConfigJSON(config)
-	if err != nil {
-		return err
-	}
+func saveManualMinecraftVersionConfig(ctx context.Context, db *pgxpool.Pool, config minecraftVersionConfig) (minecraftVersionConfig, error) {
 	tx, err := db.Begin(ctx)
 	if err != nil {
-		return err
+		return minecraftVersionConfig{}, err
 	}
 	defer tx.Rollback(ctx)
+	// Use the same key as the synchronizer's session lock so an in-flight
+	// refresh cannot overwrite a successful manual update with its old snapshot.
+	var acquired bool
+	if err = tx.QueryRow(ctx, `select pg_try_advisory_xact_lock($1)`, minecraftVersionSyncAdvisoryLockKey).Scan(&acquired); err != nil {
+		return minecraftVersionConfig{}, fmt.Errorf("lock Minecraft version configuration: %w", err)
+	}
+	if !acquired {
+		return minecraftVersionConfig{}, errMinecraftVersionSyncInProgress
+	}
+	current, err := loadMinecraftVersionConfig(ctx, tx)
+	if err != nil {
+		return minecraftVersionConfig{}, err
+	}
+	copyMinecraftSyncMetadata(&config, current)
+	normalized, raw, catalogHash, err := normalizedMinecraftVersionConfigJSON(config)
+	if err != nil {
+		return minecraftVersionConfig{}, err
+	}
 	if err = upsertMinecraftVersionConfig(ctx, tx, raw); err != nil {
-		return err
+		return minecraftVersionConfig{}, err
 	}
 	if _, err = tx.Exec(ctx, `delete from minecraft_loader_artifact_versions where catalog_hash<>$1`, catalogHash); err != nil {
-		return fmt.Errorf("invalidate stale Minecraft loader artifacts: %w", err)
+		return minecraftVersionConfig{}, fmt.Errorf("invalidate stale Minecraft loader artifacts: %w", err)
 	}
-	return tx.Commit(ctx)
+	if err = tx.Commit(ctx); err != nil {
+		return minecraftVersionConfig{}, err
+	}
+	return normalized, nil
 }
 
 type minecraftVersionTransactionStarter interface {

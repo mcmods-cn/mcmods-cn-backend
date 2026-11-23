@@ -47,7 +47,7 @@ func TestAuditFixCMP006AutomationRevokedAuthorityIntegration(t *testing.T) {
 			if _, err = f.db.Exec(f.ctx, "insert into system_settings(key,value) values($1,$2::jsonb) on conflict(key) do update set value=excluded.value", modImportConfigSettingKey, sealed); err != nil {
 				t.Fatal(err)
 			}
-			if err = saveMinecraftVersionConfigAndInvalidateStaleArtifacts(f.ctx, f.db, minecraftVersionConfig{Versions: []minecraftVersionOption{{Code: "1.21.1", Type: "release"}}, Loaders: []minecraftLoaderOption{{Code: "neoforge", Name: "NeoForge", Versions: []string{"1.21.1"}}}}); err != nil {
+			if _, err = saveManualMinecraftVersionConfig(f.ctx, f.db, minecraftVersionConfig{Versions: []minecraftVersionOption{{Code: "1.21.1", Type: "release"}}, Loaders: []minecraftLoaderOption{{Code: "neoforge", Name: "NeoForge", Versions: []string{"1.21.1"}}}}); err != nil {
 				t.Fatal(err)
 			}
 			var routeID, settingID, runID int64

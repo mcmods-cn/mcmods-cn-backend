@@ -17,7 +17,7 @@ func TestOCT02MinecraftSyncUsesItsSingleLeaseConnectionIntegration(t *testing.T)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	base := newOCT02IsolatedDatabase(t, ctx)
-	if err := saveMinecraftVersionConfigAndInvalidateStaleArtifacts(ctx, base, minecraftVersionConfig{
+	if _, err := saveManualMinecraftVersionConfig(ctx, base, minecraftVersionConfig{
 		Versions: []minecraftVersionOption{{Code: "1.20.1", Type: "release"}},
 		Loaders:  []minecraftLoaderOption{{Code: "Fabric", Name: "Fabric", Versions: []string{"1.20.1"}}},
 	}); err != nil {

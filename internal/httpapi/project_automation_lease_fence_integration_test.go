@@ -28,7 +28,7 @@ func TestOCT02ProjectAutomationLateAttemptCannotMutateCurrentRunIntegration(t *t
 	if err := pool.QueryRow(ctx, `insert into project_auto_update_runs(setting_id,status,lease_owner,lease_expires_at,attempts,result) values($1,'running','new-attempt',now()+interval '10 minutes',2,'{"current":true}') returning id`, setting).Scan(&run); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveMinecraftVersionConfigAndInvalidateStaleArtifacts(ctx, pool, minecraftVersionConfig{Versions: []minecraftVersionOption{{Code: "1.20.1", Type: "release"}}, Loaders: []minecraftLoaderOption{{Code: "forge", Name: "Forge", Versions: []string{"1.20.1"}}}}); err != nil {
+	if _, err := saveManualMinecraftVersionConfig(ctx, pool, minecraftVersionConfig{Versions: []minecraftVersionOption{{Code: "1.20.1", Type: "release"}}, Loaders: []minecraftLoaderOption{{Code: "forge", Name: "Forge", Versions: []string{"1.20.1"}}}}); err != nil {
 		t.Fatal(err)
 	}
 	job := projectAutomationJob{RunID: run, SettingID: setting, RouteID: route, InternalID: mod, ProjectType: "mod", ProjectPublicID: "autolease", Kind: "minecraft_versions", SourceType: "modrinth", ExternalID: "synthetic", Interval: "week"}

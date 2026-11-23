@@ -39,7 +39,7 @@ func TestOCT02MirrorPromotionRechecksCompletedSecurityScanIntegration(t *testing
 	if err := base.QueryRow(ctx, `select id from public_routes where entity_type='mod' and internal_id=$1`, mod).Scan(&route); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveMinecraftVersionConfigAndInvalidateStaleArtifacts(ctx, base, minecraftVersionConfig{Versions: []minecraftVersionOption{{Code: "1.21.1", Type: "release"}}, Loaders: []minecraftLoaderOption{{Code: "Fabric", Name: "Fabric", Versions: []string{"1.21.1"}}}}); err != nil {
+	if _, err := saveManualMinecraftVersionConfig(ctx, base, minecraftVersionConfig{Versions: []minecraftVersionOption{{Code: "1.21.1", Type: "release"}}, Loaders: []minecraftLoaderOption{{Code: "Fabric", Name: "Fabric", Versions: []string{"1.21.1"}}}}); err != nil {
 		t.Fatal(err)
 	}
 	insertBUG035CleanMirror(t, ctx, base, route, "security-race-file")

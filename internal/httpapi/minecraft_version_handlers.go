@@ -22,7 +22,7 @@ const (
 )
 
 var errMinecraftVersionConfigUnavailable = errors.New("Minecraft version configuration is unavailable")
-var errMinecraftVersionSyncInProgress = errors.New("Minecraft version synchronization is already in progress")
+var errMinecraftVersionSyncInProgress = errors.New("Minecraft version settings are being updated; retry after the update finishes")
 var errInvalidMinecraftVersionCodes = errors.New("invalid Minecraft version codes")
 var errUnknownMinecraftVersionCodes = errors.New("unknown Minecraft version codes")
 
@@ -97,18 +97,18 @@ func (s *Server) updateMinecraftVersions(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	current, err := loadMinecraftVersionConfig(r.Context(), s.db)
-	if err != nil {
+	saved, err := saveManualMinecraftVersionConfig(r.Context(), s.db, config)
+	switch {
+	case errors.Is(err, errMinecraftVersionSyncInProgress):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, errMinecraftVersionConfigUnavailable):
 		log.Printf("load Minecraft version configuration before update: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to load Minecraft version settings")
-		return
-	}
-	copyMinecraftSyncMetadata(&config, current)
-	if err = saveMinecraftVersionConfig(r.Context(), s.db, config); err != nil {
+	case err != nil:
 		writeError(w, http.StatusInternalServerError, "failed to save Minecraft version settings")
-		return
+	default:
+		writeJSON(w, http.StatusOK, saved)
 	}
-	writeJSON(w, http.StatusOK, config)
 }
 
 func (s *Server) syncMinecraftVersions(w http.ResponseWriter, r *http.Request) {
@@ -195,10 +195,6 @@ func authoritativeMinecraftVersionCodes(ctx context.Context, db minecraftVersion
 
 func validMinecraftVersionCode(value string) bool {
 	return value != "" && len(value) <= 80 && strings.TrimSpace(value) == value && minecraftVersionCodePattern.MatchString(value)
-}
-
-func saveMinecraftVersionConfig(ctx context.Context, db *pgxpool.Pool, config minecraftVersionConfig) error {
-	return saveMinecraftVersionConfigAndInvalidateStaleArtifacts(ctx, db, config)
 }
 
 func minecraftVersionType(value string, codes ...string) string {
