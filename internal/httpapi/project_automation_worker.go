@@ -628,12 +628,12 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 			_ = tx.Rollback(ctx)
 			return nil, err
 		}
-		var bindingID int64
 		var changelogID *string
 		var previousHash string
 		var manual bool
-		err = tx.QueryRow(ctx, `select id,changelog_public_id,external_body_hash,manual_override from external_release_bindings
-			where source_type=$1 and external_release_id=$2 for update`, job.SourceType, release.ID).Scan(&bindingID, &changelogID, &previousHash, &manual)
+		err = tx.QueryRow(ctx, `select changelog_public_id,external_body_hash,manual_override from external_release_bindings
+			where project_route_id=$1 and source_type=$2 and external_release_id=$3 for update`,
+			job.RouteID, job.SourceType, release.ID).Scan(&changelogID, &previousHash, &manual)
 		if errors.Is(err, pgx.ErrNoRows) {
 			var internalID int64
 			var publicID string
@@ -670,7 +670,9 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 			metadata, _ := json.Marshal(map[string]any{"upstreamChanged": true, "latestHash": bodyHash, "externalURL": release.URL,
 				"minecraftVersions": release.GameVersions, "loaders": release.Loaders, "rawMinecraftVersions": rawMinecraftVersions,
 				"unmappedMinecraftVersions": unmappedVersions})
-			_, err = tx.Exec(ctx, `update external_release_bindings set metadata=metadata||$2::jsonb,external_url=$3,updated_at=now() where id=$1`, bindingID, metadata, release.URL)
+			_, err = tx.Exec(ctx, `update external_release_bindings set metadata=metadata||$4::jsonb,external_url=$5,updated_at=now()
+				where project_route_id=$1 and source_type=$2 and external_release_id=$3`,
+				job.RouteID, job.SourceType, release.ID, metadata, release.URL)
 		} else {
 			var internalID int64
 			var publishedRevisionID *int64
@@ -690,8 +692,9 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 			}
 			if err = applyProjectChangelogSnapshotTx(ctx, tx, internalID, job.RouteID, revision.RevisionID, job.ActorID, snapshot); err == nil {
 				metadata, _ := json.Marshal(releaseMetadata)
-				_, err = tx.Exec(ctx, `update external_release_bindings set external_body_hash=$2,external_url=$3,metadata=$4::jsonb,updated_at=now() where id=$1`,
-					bindingID, bodyHash, release.URL, metadata)
+				_, err = tx.Exec(ctx, `update external_release_bindings set external_body_hash=$4,external_url=$5,metadata=$6::jsonb,updated_at=now()
+					where project_route_id=$1 and source_type=$2 and external_release_id=$3`,
+					job.RouteID, job.SourceType, release.ID, bodyHash, release.URL, metadata)
 			}
 			updated++
 		}

@@ -358,7 +358,7 @@ func governanceAutomationSchemaStatements() []string {
 			metadata jsonb not null default '{}'::jsonb,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
-			unique(source_type,external_release_id),
+			constraint external_release_bindings_project_source_release_key unique(project_route_id,source_type,external_release_id),
 			constraint external_release_bindings_manual_override_origin_check check(
 				(manual_override and manual_override_revision_id is not null and manual_override_source<>'') or
 				(not manual_override and manual_override_revision_id is null and manual_override_source='')

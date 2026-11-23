@@ -533,7 +533,8 @@ func recordApprovedChangelogManualOverrideTx(ctx context.Context, tx pgx.Tx, cha
 		from content_revisions revision,project_changelogs changelog
 		where changelog.id=$1 and revision.id=$2 and revision.aggregate_type=$3
 		  and revision.aggregate_key=changelog.public_id and revision.source='user'
-		  and binding.changelog_public_id=changelog.public_id and binding.source_managed and not binding.manual_override`,
+		  and binding.project_route_id=changelog.object_route_id and binding.changelog_public_id=changelog.public_id
+		  and binding.source_managed and not binding.manual_override`,
 		changelogID, revisionID, projectChangelogAggregate)
 	return err
 }
