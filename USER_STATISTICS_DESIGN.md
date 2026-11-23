@@ -2,13 +2,13 @@
 
 ## 总体原则
 
-原始 `user_activity_events` 可以按策略清理，因此它不是累计统计的唯一数据源。活动写入时由数据库触发器原子累加 `user_statistics_daily` 和 `user_statistics_totals`；内容创建、审核和存在状态由 `user_content_creation_facts` 持久保存。日志清理只删除原始事件，不修改这些投影、等级或经验交易。
+活动写入时由数据库触发器原子累加 `user_statistics_daily` 和 `user_statistics_totals`。按保留策略删除原始 `user_activity_events` 时，数据库将已删除事件按用户、UTC 日期和动作汇总到 `user_statistics_retained_actions`，累计投影、等级和经验交易保持原值。`user_content_creation_facts` 保存内容创建、审核和存在状态。
 
 ## 统计项与口径
 
 ### 编辑贡献
 
-- 总编辑次数：`action_id=edit` 的累计事件数。
+- 总编辑次数：动作代码为 `edit` 的累计事件数。
 - 有效/审核通过/待审核/驳回：以用户提交的 `change_requests.status` 为准；`conflicted/withdrawn` 归入其他。
 - 编辑项目数：变更请求中非空 `(entity_type, entity_id)` 去重数。
 - 修订数：`proposed_revision_id` 去重数。
@@ -69,10 +69,10 @@
 - 活动事件插入与日/累计投影更新在同一 PostgreSQL 语句事务的触发器中完成，计数使用原子 upsert，不会发生读改写丢失。
 - 原始日志删除不反向扣减累计统计。业务内容删除只调整 `current_exists`，历史 `total` 保留。
 - 审核状态变化覆盖事实表状态，不新增第二条事实。
-- 回填命令按用户加 advisory transaction lock；日统计用幂等 upsert，累计值只提升不降低。
-- 单用户校准：`go run ./cmd/user-statistics -user <publicId>`；全量分批校准省略 `-user`。
-- 回填不会在应用启动时自动执行，不会形成升级时长事务。
-- 迁移前已经被物理删除、且没有任何剩余业务事实的旧对象无法从数据库中重建；回填不会伪造这些历史创建数。迁移后的删除由事实触发器永久保留。
+- `internal/userstats.Reconcile` 在单用户事务内取得 advisory lock 和用户行锁。日统计从原始事件与保留汇总重建，累计统计按日汇总和最近事件计算。校准移除缺少对应事实的日统计，并纠正偏高或偏低的计数。
+- 用 `go run ./cmd/user-statistics -user <publicId>` 校准单个用户。省略 `-user` 时按用户 ID 分批执行。
+- 运维按需执行校准。应用启动只验证数据库基线。
+- 内容事实按当前业务记录校准。已物理删除的对象以删除时保存的事实为准。
 
 ## 隐私
 
