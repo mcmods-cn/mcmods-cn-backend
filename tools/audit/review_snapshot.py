@@ -20,6 +20,15 @@ BINARY_FORMAT_SUFFIXES = {".zip", ".gz", ".jar", ".pdf", ".exe", ".icc"}
 SOURCE_SUFFIXES = {".go", ".java", ".ts", ".tsx", ".mts", ".mjs", ".js", ".cjs", ".py", ".sh", ".sql", ".css", ".svg"}
 REVIEW_FIELDS = ("responsibility", "focus_symbols", "call_chain", "callers", "callees", "side_effects", "invariants", "findings", "decision", "validation")
 INSPECTION_CATEGORIES = {"dependency-lock", "build-tool-distribution", "image", "archive-or-binary", "vendored", "generated-evidence", "structured-fixture-data"}
+GENERATED_EVIDENCE_PATHS = {
+    "docs/audit/20261002/FILE_REVIEW.md",
+    "docs/audit/20261002/LEGACY_REVIEW.json",
+    "docs/audit/20261002/file-review.json",
+    "docs/audit/20261002/review-records.json",
+    "docs/audit/full-project-audit/database/SCHEMA_CATALOG.md",
+    "docs/audit/full-project-audit/modules/API_ROUTE_INVENTORY.md",
+    "docs/audit/full-project-audit/modules/FILE_COVERAGE_INVENTORY.md",
+}
 
 
 def file_category(path):
@@ -36,7 +45,7 @@ def file_category(path):
         return "archive-or-binary", "Provenance, digest and bounded format inspection"
     if name.parts[0] == "vendor":
         return "vendored", "Upstream dependency, license and vendoring integrity"
-    if path in {"docs/audit/20261002/file-review.json", "docs/audit/20261002/review-records.json", "docs/audit/20261002/FILE_REVIEW.md"}:
+    if path in GENERATED_EVIDENCE_PATHS:
         return "generated-evidence", "Trace the generator, input records and digest"
     if path.startswith(("docs/audit/", "docs/history/", "docs/remediation/")):
         return "historical-candidate", "Determine current authority before reviewing or archiving"

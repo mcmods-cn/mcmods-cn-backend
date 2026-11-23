@@ -1,6 +1,6 @@
 import unittest
 
-from review_snapshot import evaluate, file_category
+from review_snapshot import INSPECTION_CATEGORIES, evaluate, file_category
 
 
 COMMIT = "a" * 40
@@ -66,6 +66,26 @@ class ReviewSnapshotTests(unittest.TestCase):
     def test_read_after_end_of_file_is_rejected(self):
         with self.assertRaises(ValueError):
             self.evaluate([proof(read_ranges=[[1, 7]])])
+
+    def test_archived_inventory_inspection_does_not_replace_source_review(self):
+        declared = [proof(semantic_review="", inspection="Checked the producer, archive digest and structure.")]
+        for path, expected_inspection in (
+            ("docs/audit/20261002/LEGACY_REVIEW.json", True),
+            ("docs/audit/full-project-audit/database/SCHEMA_CATALOG.md", True),
+            ("docs/audit/full-project-audit/modules/API_ROUTE_INVENTORY.md", True),
+            ("docs/audit/full-project-audit/modules/FILE_COVERAGE_INVENTORY.md", True),
+            ("docs/audit/20261002/ISSUES.md", False),
+            ("docs/audit/full-project-audit/API_ROUTE_INVENTORY.md", False),
+            ("docs/audit/full-project-audit/modules/handler.go", False),
+            ("internal/httpapi/server.go", False),
+        ):
+            with self.subTest(path=path):
+                category, _ = file_category(path)
+                verdict = self.evaluate(declared, inspection_allowed=category in INSPECTION_CATEGORIES)
+                self.assertEqual(verdict["status"], "reviewed" if expected_inspection else "reviewing")
+                self.assertFalse(verdict["reading"]["complete"])
+                self.assertFalse(verdict["semantic"]["declared"])
+                self.assertEqual(verdict["inspected"], expected_inspection)
 
 
 if __name__ == "__main__":
