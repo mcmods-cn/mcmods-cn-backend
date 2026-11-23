@@ -116,7 +116,7 @@ func (s *Server) cancelCatalogImportForPolicy(ctx context.Context, jobID, runTok
 	if err = s.compensateCatalogImportArtifactsTx(ctx, tx, jobID, runToken, "catalog-import-policy-cancelled"); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `delete from catalog_import_revisions where job_id=$1 and status='staging' and import_run_token=$2`, jobID, runToken); err != nil {
+	if err = deleteCatalogImportStagingTx(ctx, tx, jobID, runToken); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `insert into catalog_import_job_logs(job_id,level,stage,message) values($1,'warn','cancelled',$2)`, jobID, policy.Code); err != nil {

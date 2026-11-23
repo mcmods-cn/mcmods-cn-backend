@@ -50,7 +50,7 @@ func TestOPS003CatalogImportArtifactsRegisterActivateAndCompensateAtomicallyInte
 			primary key(job_id,run_token,object_key)
 		);
 		create temp table catalog_import_revisions(
-			id text primary key,package_id text not null,mod_id bigint not null,status text not null,import_run_token text not null
+			id text primary key,job_id text not null,status text not null,import_run_token text not null
 		);
 		create temp table log_shares(source_file_id bigint,status text,deleted_at timestamptz);
 		insert into catalog_import_jobs(id,status,run_token,heartbeat_at)
@@ -92,7 +92,7 @@ func TestOPS003CatalogImportArtifactsRegisterActivateAndCompensateAtomicallyInte
 	if _, err = server.registerCatalogImportArtifacts(ctx, "failed-job", "failed-run", cfg, 7, "mcmods_exporter", []modExportUploadAsset{asset("failed")}); err != nil {
 		t.Fatal(err)
 	}
-	if err = server.cleanupModExportStaging(ctx, "failed-job", "package", 1, "failed-run"); err != nil {
+	if err = server.cleanupModExportStaging(ctx, "failed-job", "failed-run"); err != nil {
 		t.Fatal(err)
 	}
 	assertCatalogImportArtifactState(t, ctx, pool, "failed-job", "failed-run", "abandoned", "deleted", 1)
@@ -121,7 +121,7 @@ func TestOPS003CatalogImportArtifactsRegisterActivateAndCompensateAtomicallyInte
 		t.Fatal(err)
 	}
 	beforeFailure := accessFixtureBusinessRows(t, ctx, pool, "catalog_import_jobs", "catalog_import_job_artifacts", "catalog_import_revisions", "oss_files", "oss_object_deletion_outbox")
-	err = server.cleanupModExportStaging(ctx, "rollback-job", "package", 1, "rollback-run")
+	err = server.cleanupModExportStaging(ctx, "rollback-job", "rollback-run")
 	requireAccessFixturePGError(t, err, "23514", "reject_rollback_cleanup", "")
 	if after := accessFixtureBusinessRows(t, ctx, pool, "catalog_import_jobs", "catalog_import_job_artifacts", "catalog_import_revisions", "oss_files", "oss_object_deletion_outbox"); after != beforeFailure {
 		t.Fatal("specific catalog cleanup constraint changed business or compensation rows")

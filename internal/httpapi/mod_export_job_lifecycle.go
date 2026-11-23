@@ -243,25 +243,63 @@ func (s *Server) runModExportTransaction(ctx context.Context, action func(pgx.Tx
 	return tx.Commit(ctx)
 }
 
-func (s *Server) cleanupModExportStaging(ctx context.Context, jobID, packageID string, modID int64, runToken string) error {
+func (s *Server) runCatalogImportStagingTransaction(ctx context.Context, jobID, runToken string, action func(pgx.Tx) error) error {
+	return s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		if err := lockCatalogImportAttemptTx(ctx, tx, jobID, runToken); err != nil {
+			return err
+		}
+		return action(tx)
+	})
+}
+
+type catalogImportMetadata struct {
+	SchemaVersion    string
+	ExporterVersion  string
+	MinecraftVersion string
+	Loader           string
+	Manifest         json.RawMessage
+	Namespaces       []string
+	Profile          string
+}
+
+func (s *Server) startCatalogImportStaging(ctx context.Context, jobID, runToken string, metadata catalogImportMetadata, stage func(pgx.Tx) error) error {
+	return s.runCatalogImportStagingTransaction(ctx, jobID, runToken, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `update catalog_import_packages package set
+			schema_version=$2,exporter_version=$3,minecraft_version=$4,loader=$5,manifest=$6::jsonb,namespaces=$7,profile=$8
+			from catalog_import_jobs job where package.id=job.package_id and job.id=$1`,
+			jobID, metadata.SchemaVersion, metadata.ExporterVersion, metadata.MinecraftVersion, metadata.Loader,
+			metadata.Manifest, metadata.Namespaces, metadata.Profile); err != nil {
+			return err
+		}
+		// A replacement attempt can retire leftover rows while it owns the
+		// job lock. A worker that lost its lease cannot retire any rows here.
+		if _, err := tx.Exec(ctx, `delete from catalog_import_revisions
+			where job_id=$1 and status='staging' and import_run_token<>$2`, jobID, runToken); err != nil {
+			return err
+		}
+		return stage(tx)
+	})
+}
+
+func deleteCatalogImportStagingTx(ctx context.Context, tx pgx.Tx, jobID, runToken string) error {
+	if runToken == "" {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `delete from catalog_import_revisions
+		where job_id=$1 and status='staging' and import_run_token=$2`, jobID, runToken)
+	return err
+}
+
+func (s *Server) cleanupModExportStaging(ctx context.Context, jobID, runToken string) error {
 	if jobID == "" || runToken == "" {
 		return nil
 	}
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if err = s.compensateCatalogImportArtifactsTx(ctx, tx, jobID, runToken, "catalog-import-failed"); err != nil {
-		return err
-	}
-	if packageID != "" && modID > 0 {
-		if _, err = tx.Exec(ctx, `delete from catalog_import_revisions
-			where package_id=$1 and mod_id=$2 and status='staging' and import_run_token=$3`, packageID, modID, runToken); err != nil {
+	return s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		if err := s.compensateCatalogImportArtifactsTx(ctx, tx, jobID, runToken, "catalog-import-failed"); err != nil {
 			return err
 		}
-	}
-	return tx.Commit(ctx)
+		return deleteCatalogImportStagingTx(ctx, tx, jobID, runToken)
+	})
 }
 
 func (s *Server) compensateStaleCatalogImportArtifactsTx(ctx context.Context, tx pgx.Tx) error {
@@ -294,6 +332,9 @@ func (s *Server) compensateStaleCatalogImportArtifactsTx(ctx context.Context, tx
 		if err = s.compensateCatalogImportArtifactsTx(
 			ctx, tx, attempt.jobID, attempt.runToken, "catalog-import-stale-attempt",
 		); err != nil {
+			return err
+		}
+		if err = deleteCatalogImportStagingTx(ctx, tx, attempt.jobID, attempt.runToken); err != nil {
 			return err
 		}
 	}

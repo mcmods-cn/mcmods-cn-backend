@@ -284,7 +284,7 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 			return
 		}
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if cleanupErr := s.cleanupModExportStaging(cleanupContext, jobID, packageID, modID, runToken); cleanupErr != nil {
+		if cleanupErr := s.cleanupModExportStaging(cleanupContext, jobID, runToken); cleanupErr != nil {
 			resultErr = errors.Join(resultErr, fmt.Errorf("compensate catalog import artifacts: %w", cleanupErr))
 		}
 		cancel()
@@ -363,17 +363,13 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 	if loader == "" {
 		loader = "unknown"
 	}
-	if _, err = s.db.Exec(ctx, `update catalog_import_packages set schema_version=$2,exporter_version=$3,
-		minecraft_version=$4,loader=$5,manifest=$6::jsonb,namespaces=$7,profile='icons' where id=$1`,
-		packageID, importerVersion, source, minecraftVersion, loader, string(manifestJSON), namespaces); err != nil {
-		return err
+	metadata := catalogImportMetadata{
+		SchemaVersion: importerVersion, ExporterVersion: source,
+		MinecraftVersion: minecraftVersion, Loader: loader,
+		Manifest: manifestJSON, Namespaces: namespaces, Profile: "icons",
 	}
-	if _, err = s.db.Exec(ctx, `delete from catalog_import_revisions where job_id=$1 and mod_id=$2 and status='staging'`, jobID, modID); err != nil {
-		return err
-	}
-
 	revisions := make(map[string]string, len(namespaces))
-	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+	if err = s.startCatalogImportStaging(ctx, jobID, runToken, metadata, func(tx pgx.Tx) error {
 		for _, namespace := range namespaces {
 			lockKey := fmt.Sprintf("catalog-json:%d:%s:%s:%s", modID, targetVersionPublicID, source, namespace)
 			if _, lockErr := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1,0))`, lockKey); lockErr != nil {
@@ -461,7 +457,7 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 		if err = bindCatalogImportArtifactFileIDs(media, nil, artifactFileIDs); err != nil {
 			return err
 		}
-		if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		if err = s.runCatalogImportStagingTransaction(ctx, jobID, runToken, func(tx pgx.Tx) error {
 			if persistErr := persistExportPNGMedia(ctx, tx, media); persistErr != nil {
 				return persistErr
 			}

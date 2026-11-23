@@ -583,12 +583,9 @@ func (s *Server) cancelModExportJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "取消导入任务失败")
 		return
 	}
-	if runToken != "" {
-		if _, err = tx.Exec(r.Context(), `delete from catalog_import_revisions
-			where job_id=$1 and status='staging' and import_run_token=$2`, jobID, runToken); err != nil {
-			writeError(w, http.StatusInternalServerError, "取消导入任务失败")
-			return
-		}
+	if err = deleteCatalogImportStagingTx(r.Context(), tx, jobID, runToken); err != nil {
+		writeError(w, http.StatusInternalServerError, "取消导入任务失败")
+		return
 	}
 	tag, err := tx.Exec(r.Context(), `update catalog_import_jobs
 		set status='cancelled',progress=least(progress,99),current_stage='cancelled',
@@ -700,7 +697,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			return
 		}
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if cleanupErr := s.cleanupModExportStaging(cleanupContext, jobID, packageID, modID, runToken); cleanupErr != nil {
+		if cleanupErr := s.cleanupModExportStaging(cleanupContext, jobID, runToken); cleanupErr != nil {
 			resultErr = errors.Join(resultErr, fmt.Errorf("compensate catalog import artifacts: %w", cleanupErr))
 		}
 		cancel()
@@ -864,18 +861,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	if paused {
 		return nil
 	}
-	_, err = s.db.Exec(
-		ctx,
-		`update catalog_import_packages set schema_version=$2,exporter_version=$3,minecraft_version=$4,loader=$5,manifest=$6::jsonb,namespaces=$7,profile=$8 where id=$1`,
-		packageID, manifest.SchemaVersion, manifest.ExporterVersion, manifest.MinecraftVersion, normalizeExportLoader(manifest.Loader), string(manifestJSON), namespaces, manifest.Configuration.Profile,
-	)
-	if err != nil {
-		return err
-	}
 	if err = s.updateModExportJob(ctx, jobID, runToken, "importing", 20, "database"); err != nil {
-		return err
-	}
-	if _, err = s.db.Exec(ctx, `delete from catalog_import_revisions where job_id=$1 and mod_id=$2 and status='staging'`, jobID, modID); err != nil {
 		return err
 	}
 	categoryFile := files["recipes/jei/categories.json"]
@@ -897,7 +883,12 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	if scopeErr != nil {
 		return scopeErr
 	}
-	err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+	metadata := catalogImportMetadata{
+		SchemaVersion: manifest.SchemaVersion, ExporterVersion: manifest.ExporterVersion,
+		MinecraftVersion: manifest.MinecraftVersion, Loader: loader,
+		Manifest: manifestJSON, Namespaces: namespaces, Profile: manifest.Configuration.Profile,
+	}
+	err = s.startCatalogImportStaging(ctx, jobID, runToken, metadata, func(tx pgx.Tx) error {
 		for _, namespace := range namespaces {
 			lockKey := fmt.Sprintf("mod-export:%d:%s:%s:%s", modID, manifest.MinecraftVersion, loader, namespace)
 			if _, lockErr := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1,0))`, lockKey); lockErr != nil {
@@ -975,7 +966,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 				}
 			}
 		}
-		return s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		return s.runCatalogImportStagingTransaction(ctx, jobID, runToken, func(tx pgx.Tx) error {
 			observer := writeBatch.onStage
 			writeBatch.onStage = nil
 			defer func() { writeBatch.onStage = observer }()
@@ -993,7 +984,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	if err = validateExportBaseRecipeDocument(baseRecipeData); err != nil {
 		return err
 	}
-	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+	if err = s.runCatalogImportStagingTransaction(ctx, jobID, runToken, func(tx pgx.Tx) error {
 		return recipeScope.importTypes(ctx, tx, packageID)
 	}); err != nil {
 		return err
@@ -1107,7 +1098,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			}
 		}
 		if len(preparedNormalized) > 0 {
-			err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+			err = s.runCatalogImportStagingTransaction(ctx, jobID, runToken, func(tx pgx.Tx) error {
 				for _, prepared := range preparedNormalized {
 					switch {
 					case len(prepared.catalogRows) > 0:
@@ -1264,18 +1255,18 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}
 	for start := 0; start < len(pngMedia); start += maxExportWriteBatchRows {
 		end := min(start+maxExportWriteBatchRows, len(pngMedia))
-		if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+		if err = s.runCatalogImportStagingTransaction(ctx, jobID, runToken, func(tx pgx.Tx) error {
 			return persistExportPNGMedia(ctx, tx, pngMedia[start:end])
 		}); err != nil {
 			return err
 		}
 	}
-	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+	if err = s.runCatalogImportStagingTransaction(ctx, jobID, runToken, func(tx pgx.Tx) error {
 		return persistExportLocaleBundles(ctx, tx, localeBundles)
 	}); err != nil {
 		return fmt.Errorf("persist locale bundles: %w", err)
 	}
-	if err = s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
+	if err = s.runCatalogImportStagingTransaction(ctx, jobID, runToken, func(tx pgx.Tx) error {
 		return importExportIconCatalogResources(ctx, tx, resourceResolver, pngMedia, supportedTranslations)
 	}); err != nil {
 		return fmt.Errorf("import normalized icon catalogs: %w", err)
