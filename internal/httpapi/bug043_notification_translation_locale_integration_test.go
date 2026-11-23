@@ -9,9 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
-	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -21,25 +18,14 @@ func TestBUG043NotificationTranslationAcceptsOnlyCanonicalSiteLocalesIntegration
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, config.Load().DB.ConnString())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-
-	var userID, notificationID int64
+	pool, userID := newPostgresUserFixture(t, ctx, "bug043-notification-translation")
+	var notificationID int64
 	var publicID string
-	if err = pool.QueryRow(ctx, `select id from users where status='active' order by id limit 1`).Scan(&userID); err != nil {
-		t.Fatalf("load integration user: %v", err)
-	}
-	if err = pool.QueryRow(ctx, `insert into notifications(recipient_id,kind,title,body,source_locale)
+	if err := pool.QueryRow(ctx, `insert into notifications(recipient_id,kind,title,body,source_locale)
 		values($1,'review','待审核','请查看','zh-CN') returning id,public_id`, userID).Scan(&notificationID, &publicID); err != nil {
 		t.Fatalf("create notification: %v", err)
 	}
-	defer func() {
-		_, _ = pool.Exec(context.Background(), `delete from notifications where id=$1`, notificationID)
-	}()
-	if _, err = pool.Exec(ctx, `insert into notification_translations(notification_id,user_id,locale,title,body) values
+	if _, err := pool.Exec(ctx, `insert into notification_translations(notification_id,user_id,locale,title,body) values
 		($1,$2,'pt-BR','Inútil','Sem consumidor'),($1,$2,'en-US','Review','Please review')`, notificationID, userID); err != nil {
 		t.Fatalf("create translation cache controls: %v", err)
 	}

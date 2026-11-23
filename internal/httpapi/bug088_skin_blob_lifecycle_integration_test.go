@@ -9,6 +9,7 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -242,21 +243,18 @@ func TestMinecraftTextureGCCandidatesUseReferenceProjectionIndexIntegration(t *t
 }
 
 func TestMinecraftTexturePersistenceAndLastDeleteUseOneLockOrderIntegration(t *testing.T) {
-	pool := openEconomySecurityTestDB(t)
+	if os.Getenv("MCMODS_TEST_DATABASE_URL") == "" && os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
+		t.Skip("set MCMODS_TEST_DATABASE_URL or MCMODS_RUN_DB_INTEGRATION=1 to verify texture lock ordering")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := database.Initialize(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
+	pool, ownerID := newPostgresUserFixture(t, ctx, "bug088-lock-owner")
 	setupTx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ownerID, fileID, assetID int64
-	if err = setupTx.QueryRow(ctx, `select id from users where status='active' order by id limit 1`).Scan(&ownerID); err != nil {
-		setupTx.Rollback(ctx)
-		t.Fatal(err)
-	}
+	defer setupTx.Rollback(ctx)
+	var fileID, assetID int64
 	suffix := time.Now().UnixNano()
 	hash := fmt.Sprintf("%064x", suffix)
 	objectKey := fmt.Sprintf("bug088-lock/%d.png", suffix)
@@ -265,31 +263,19 @@ func TestMinecraftTexturePersistenceAndLastDeleteUseOneLockOrderIntegration(t *t
 		content_type,size_bytes,source_size_bytes,sha256,status,scan_status)
 		values('bug088','https://oss.example.test','cn-test',$1,$2,'minecraft_texture_derived','lock.png','lock.png',
 		'image/png',128,0,$3,'active','trusted_generated') returning id`, objectKey, ossSharedSkinTextureCategory(), hash).Scan(&fileID); err != nil {
-		setupTx.Rollback(ctx)
 		t.Fatal(err)
 	}
 	if _, err = setupTx.Exec(ctx, `insert into skin_texture_blobs(hash,oss_file_id,object_key,width,height,size_bytes)
 		values($1,$2,$3,64,64,128)`, hash, fileID, objectKey); err != nil {
-		setupTx.Rollback(ctx)
 		t.Fatal(err)
 	}
 	if err = setupTx.QueryRow(ctx, `insert into skin_assets(owner_id,blob_hash,kind,model,display_name,visibility,review_status,status)
 		values($1,$2,'skin','default','BUG-088 lock order','private','approved','active') returning id`, ownerID, hash).Scan(&assetID); err != nil {
-		setupTx.Rollback(ctx)
 		t.Fatal(err)
 	}
 	if err = setupTx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cleanupCancel()
-		_, _ = pool.Exec(cleanupCtx, `delete from skin_assets where id=$1;
-			delete from oss_object_deletion_outbox where oss_file_id=$2;
-			delete from skin_texture_blobs where hash=$3;
-			delete from oss_files where id=$2`, assetID, fileID, hash)
-	}()
-
 	persistTx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -298,7 +284,8 @@ func TestMinecraftTexturePersistenceAndLastDeleteUseOneLockOrderIntegration(t *t
 	if err = lockMinecraftTextureLifecycleStore(ctx, persistTx, hash); err != nil {
 		t.Fatal(err)
 	}
-	deleteStarted := make(chan struct{})
+	persistencePID := int32(persistTx.Conn().PgConn().PID())
+	deleteStarted := make(chan int32, 1)
 	deleteResult := make(chan error, 1)
 	go func() {
 		deleteTx, deleteErr := pool.Begin(ctx)
@@ -307,17 +294,44 @@ func TestMinecraftTexturePersistenceAndLastDeleteUseOneLockOrderIntegration(t *t
 			return
 		}
 		defer deleteTx.Rollback(ctx)
-		close(deleteStarted)
+		deleteStarted <- int32(deleteTx.Conn().PgConn().PID())
 		server := &Server{db: pool}
 		if deleteErr = server.softDeleteSkinAssetTx(ctx, deleteTx, assetID, hash, "bug088_lock_order"); deleteErr == nil {
 			deleteErr = deleteTx.Commit(ctx)
 		}
 		deleteResult <- deleteErr
 	}()
-	<-deleteStarted
-	time.Sleep(100 * time.Millisecond)
 	lockCtx, lockCancel := context.WithTimeout(ctx, 3*time.Second)
 	defer lockCancel()
+	var deletionPID int32
+	select {
+	case deletionPID = <-deleteStarted:
+	case err = <-deleteResult:
+		t.Fatalf("deletion stopped before reaching the lifecycle lock: %v", err)
+	case <-lockCtx.Done():
+		t.Fatal("deletion transaction did not start")
+	}
+	// At this point the persistence transaction only holds the lifecycle lock.
+	// Query PostgreSQL so the row-lock assertion runs after deletion is waiting.
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		var blocked bool
+		if err = pool.QueryRow(lockCtx, `select $1::integer = any(pg_blocking_pids($2))`,
+			persistencePID, deletionPID).Scan(&blocked); err != nil {
+			t.Fatalf("observe texture deletion lock wait: %v", err)
+		}
+		if blocked {
+			break
+		}
+		select {
+		case err = <-deleteResult:
+			t.Fatalf("deletion finished without waiting on texture persistence: %v", err)
+		case <-lockCtx.Done():
+			t.Fatal("PostgreSQL did not report deletion waiting on the lifecycle lock")
+		case <-poll.C:
+		}
+	}
 	var lockedFileID int64
 	if err = persistTx.QueryRow(lockCtx, `select oss_file_id from skin_texture_blobs where hash=$1 for update`, hash).Scan(&lockedFileID); err != nil {
 		t.Fatalf("persistence could not lock the blob while deletion waited behind its lifecycle lock: %v", err)

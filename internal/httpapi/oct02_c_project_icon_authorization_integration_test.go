@@ -64,11 +64,14 @@ func TestOCT02CProjectIconMutationRequiresAuthorizedRasterIntegration(t *testing
 				}
 				test014Approve(t, f, item.SubmissionRevisionID, f.editor)
 				grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "project.edit."+item.PublicID)
+				path := "/api/v1/content-projects/plugin/" + item.SiteID
 				snapshot.IconURL = cfg.Endpoint + "/private.png"
-				f.require(t, f.editor, http.MethodPut, "/api/v1/content-projects/plugin/"+item.SiteID, map[string]any{"snapshot": snapshot}, http.StatusBadRequest)
+				f.require(t, f.editor, http.MethodPut, path,
+					map[string]any{"snapshot": snapshot, "baseRevisionId": item.SubmissionRevisionID}, http.StatusBadRequest)
 				grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "project.edit."+item.PublicID)
 				snapshot.IconURL = cfg.Endpoint + "/owner.png"
-				f.require(t, f.otherEditor, http.MethodPut, "/api/v1/content-projects/plugin/"+item.SiteID, map[string]any{"snapshot": snapshot}, http.StatusCreated)
+				f.require(t, f.otherEditor, http.MethodPut, path,
+					map[string]any{"snapshot": snapshot, "baseRevisionId": item.SubmissionRevisionID}, http.StatusCreated)
 			} else {
 				snapshot := perf020ModpackSnapshot("oct02-icon-modpack", 0)
 				snapshot.IconURL = cfg.Endpoint + "/owner.png"
@@ -76,11 +79,14 @@ func TestOCT02CProjectIconMutationRequiresAuthorizedRasterIntegration(t *testing
 				f.require(t, f.reviewer, http.MethodPatch, "/api/v1/content-revisions/"+item.SubmissionRevisionID,
 					map[string]any{"status": "approved", "note": "owned icon publication"}, http.StatusOK)
 				grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "project.edit."+item.PublicID)
+				path := "/api/v1/modpacks/" + item.SiteID
 				snapshot.IconURL = cfg.Endpoint + "/private.png"
-				f.require(t, f.editor, http.MethodPut, "/api/v1/modpacks/"+item.SiteID, map[string]any{"snapshot": snapshot}, http.StatusBadRequest)
+				f.require(t, f.editor, http.MethodPut, path,
+					map[string]any{"snapshot": snapshot, "baseRevisionId": item.SubmissionRevisionID}, http.StatusBadRequest)
 				grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "project.edit."+item.PublicID)
 				snapshot.IconURL = cfg.Endpoint + "/owner.png"
-				f.require(t, f.otherEditor, http.MethodPut, "/api/v1/modpacks/"+item.SiteID, map[string]any{"snapshot": snapshot}, http.StatusCreated)
+				f.require(t, f.otherEditor, http.MethodPut, path,
+					map[string]any{"snapshot": snapshot, "baseRevisionId": item.SubmissionRevisionID}, http.StatusCreated)
 			}
 		})
 	}
