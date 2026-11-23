@@ -109,18 +109,25 @@ func TestAuditFixCMP006AutomationRevokedAuthorityIntegration(t *testing.T) {
 			}
 			actorMatches := recordedActor != nil && *recordedActor == actorID
 			t.Logf("mode=%s run=%s error=%s providerRequests=%d approvedLogs=%d actorIsAutobot=%v", mode, status, code, calls.Load(), published, actorMatches)
-			if mode == "enabled-control" {
+			switch mode {
+			case "enabled-control":
 				if status != "completed" || published != 1 || !actorMatches || calls.Load() != 1 {
 					t.Fatal("positive worker control did not publish once with actual system actor")
 				}
-			} else if mode == "disabled-subject" {
+			case "disabled-subject":
 				if status != "pending" || code != "automation_actor_unavailable" || published != 0 || calls.Load() != 0 || recordedActor != nil {
 					t.Fatal("disabled system actor was replaced by administrator or published")
 				}
-			} else if published != 0 || status == "completed" {
-				t.Error("explicitly revoked automation authority still published approved business data")
-			} else if strings.TrimSpace(code) == "" {
-				t.Error("denied worker lacks observable failure code")
+			case "revoked-during-provider":
+				if calls.Load() != 1 || status != "pending" || code != "automation_permission_denied" || published != 0 || !actorMatches {
+					t.Fatal("worker did not reject publication after the provider revoked the active system actor's permission")
+				}
+			default:
+				if published != 0 || status == "completed" {
+					t.Error("explicitly revoked automation authority still published approved business data")
+				} else if strings.TrimSpace(code) == "" {
+					t.Error("denied worker lacks observable failure code")
+				}
 			}
 
 		})
