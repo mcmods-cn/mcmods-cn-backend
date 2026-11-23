@@ -597,6 +597,14 @@ def run():
         key_match = re.search(r'minecraftVersionSyncAdvisoryLockKey\s+int64\s*=\s*(0x[0-9a-fA-F]+)',source)
         if not key_match:
             raise RuntimeError('cannot derive current startup scheduler lock key')
+        # Confirm that the scheduler skipped specifically because of our lease.
+        handlers = (BE/'internal/httpapi/minecraft_version_handlers.go').read_text()
+        busy_match = re.search(
+            r'^var errMinecraftVersionSyncInProgress\s*=\s*errors\.New\(("(?:[^"\\]|\\.)+")\)',
+            handlers, re.MULTILINE)
+        if not busy_match:
+            raise RuntimeError('cannot derive current startup scheduler busy error')
+        busy_notice = 'skip Minecraft version synchronization: ' + json.loads(busy_match.group(1))
         lease_log = (SCOPE/'scheduler-lease.private.log').open('w');outputs.append(lease_log)
         lease = subprocess.Popen(['docker','--host=unix:///var/run/docker.sock','exec','-i',parent['containers']['postgres'],
              'psql','-X','-qAt','-v','ON_ERROR_STOP=1','-U','mcmods','-d',record['database']],
@@ -642,7 +650,7 @@ def run():
             if any(value != 0 for value in outcome['post_journey_zero_counts'].values()):
                 raise RuntimeError('real journey persistence/session/no-provider postconditions failed')
         backend_log=(SCOPE/'backend.private.log').read_text()
-        outcome['startup_scheduler_skipped']= 'skip Minecraft version synchronization: Minecraft version synchronization is already in progress' in backend_log
+        outcome['startup_scheduler_skipped'] = busy_notice in backend_log
         if not outcome['startup_scheduler_skipped']:
             raise RuntimeError('startup scheduler skip evidence missing')
         original = json.loads((SCOPE/'backend-source.json').read_text())
