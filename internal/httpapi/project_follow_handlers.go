@@ -247,6 +247,11 @@ func (s *Server) unfollowProject(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// Seek to the cursor timestamp with the existing index, then skip earlier IDs
+// at that timestamp. A null timestamp covers the first page.
+const projectFollowPageCursorSQL = `follow.created_at <= coalesce($4::timestamptz, 'infinity'::timestamptz)
+	and (follow.created_at is distinct from $4::timestamptz or follow.project_route_id > $5)`
+
 func (s *Server) myProjectFollows(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	request, err := parseProjectFollowPageRequest(r.URL.Query(), claims.Subject)
@@ -254,10 +259,10 @@ func (s *Server) myProjectFollows(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var cursorCreatedAt time.Time
+	var cursorCreatedAt *time.Time
 	var cursorRouteID int64
 	if request.Cursor != nil {
-		cursorCreatedAt = request.Cursor.CreatedAt
+		cursorCreatedAt = &request.Cursor.CreatedAt
 		cursorRouteID = request.Cursor.RouteID
 	}
 	rows, err := s.db.Query(r.Context(), `select route.id,route.public_id,route.entity_type,
@@ -269,9 +274,9 @@ func (s *Server) myProjectFollows(w http.ResponseWriter, r *http.Request) {
 		cross join lateral(select (`+followProjectTargetPublicVisibilitySQL("route")+`) public) visibility
 		where follow.user_id=$1 and ($2='' or route.entity_type=$2)
 		and ($3='' or route.public_id=$3 or visibility.public and lower(coalesce(`+followProjectTargetNameSQL("route")+`,'')) like '%'||$3||'%')
-		and (not $4::boolean or follow.created_at<$5::timestamptz or (follow.created_at=$5::timestamptz and follow.project_route_id>$6))
-		order by follow.created_at desc,follow.project_route_id asc limit $7`, claims.Subject, request.TargetType, request.Query,
-		request.Cursor != nil, cursorCreatedAt, cursorRouteID, request.Limit+1)
+		and `+projectFollowPageCursorSQL+`
+		order by follow.created_at desc,follow.project_route_id asc limit $6`, claims.Subject, request.TargetType, request.Query,
+		cursorCreatedAt, cursorRouteID, request.Limit+1)
 	if err != nil {
 		writeError(w, 500, "failed to load followed projects")
 		return

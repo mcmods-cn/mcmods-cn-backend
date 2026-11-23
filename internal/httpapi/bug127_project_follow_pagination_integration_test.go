@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +18,10 @@ import (
 	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/security"
 )
+
+// The fixture ties timestamps in groups of five. Split a group at the page
+// boundary so the next page has to resume after the exact route ID.
+const bug127FollowPageSize = 41
 
 func TestProjectFollowKeysetTraversesPastLegacyWindowIntegration(t *testing.T) {
 	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
@@ -63,6 +66,14 @@ func TestProjectFollowKeysetTraversesPastLegacyWindowIntegration(t *testing.T) {
 	insert into project_follows(user_id,project_route_id,notifications_enabled,created_at,updated_at)
 	select $1,id,true,timestamptz '2026-08-24 12:00:00+00'-((ordinal-1)/5)*interval '1 minute',
 		timestamptz '2026-08-24 12:00:00+00' from followed`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `with other_user as (
+		insert into users(username,email,password_hash,email_verified)
+		values('bug127-other','bug127-other@example.invalid','bug127',true) returning id
+	) insert into project_follows(user_id,project_route_id,created_at)
+	select other_user.id,route.id,now() from other_user cross join public_routes route
+	where route.public_id='f12700001'`); err != nil {
 		t.Fatal(err)
 	}
 	var expected []string
@@ -110,7 +121,7 @@ func TestProjectFollowKeysetTraversesPastLegacyWindowIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		pageCount++
-		if envelope.Data.Limit != 40 || len(envelope.Data.Items) == 0 || len(envelope.Data.Items) > 40 {
+		if envelope.Data.Limit != bug127FollowPageSize || len(envelope.Data.Items) == 0 || len(envelope.Data.Items) > bug127FollowPageSize {
 			t.Fatalf("page %d payload=%+v", pageCount, envelope.Data)
 		}
 		for _, item := range envelope.Data.Items {
@@ -158,25 +169,51 @@ func TestProjectFollowKeysetUsesUserCreatedIndexAt100KIntegration(t *testing.T) 
 		create index bug127_follows_page on bug127_follows(user_id,created_at desc,project_route_id);
 		insert into bug127_follows select 1,value,timestamptz '2026-08-24 12:00:00+00'-(value/5)*interval '1 second'
 		from generate_series(1,100000) value;
-		analyze bug127_follows`); err != nil {
+		analyze bug127_follows;
+		set plan_cache_mode=force_generic_plan;
+		prepare bug127_page (bigint,text,text,timestamptz,bigint,integer) as
+		select follow.project_route_id,follow.created_at from bug127_follows follow
+		where follow.user_id=$1 and `+projectFollowPageCursorSQL+`
+		order by follow.created_at desc,follow.project_route_id asc limit $6`); err != nil {
 		t.Fatal(err)
 	}
-	var plan string
-	if err = pool.QueryRow(ctx, `explain(analyze,buffers,format json)
-		select project_route_id,created_at from bug127_follows
-		where user_id=1 and (created_at<timestamptz '2026-08-24 09:13:20+00'
-			or (created_at=timestamptz '2026-08-24 09:13:20+00' and project_route_id>50000))
-		order by created_at desc,project_route_id asc limit 40`).Scan(&plan); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(plan, "Index Only Scan") || strings.Contains(plan, `"Node Type": "Seq Scan"`) {
-		t.Fatalf("100k keyset plan did not use the page index: %s", plan)
+	for _, page := range []struct {
+		name, cursor string
+		wantRows     int
+	}{
+		{"first", "null,0", 40},
+		{"deep", "'2026-08-24 09:13:20+00',50000", 40},
+		{"exhausted", "'2026-08-24 06:26:40+00',100000", 0},
+	} {
+		t.Run(page.name, func(t *testing.T) {
+			var raw []byte
+			if err := pool.QueryRow(ctx, `explain(analyze,buffers,format json) execute bug127_page(1,'','',`+page.cursor+`,40)`).Scan(&raw); err != nil {
+				t.Fatal(err)
+			}
+			var analysis []struct {
+				Plan struct {
+					Plans []struct {
+						Type     string  `json:"Node Type"`
+						Index    string  `json:"Index Name"`
+						Rows     float64 `json:"Actual Rows"`
+						Filtered float64 `json:"Rows Removed by Filter"`
+					} `json:"Plans"`
+				} `json:"Plan"`
+			}
+			if err := json.Unmarshal(raw, &analysis); err != nil || len(analysis) != 1 || len(analysis[0].Plan.Plans) != 1 {
+				t.Fatalf("unexpected 100k keyset plan %s (%v)", raw, err)
+			}
+			scan := analysis[0].Plan.Plans[0]
+			if scan.Type != "Index Only Scan" || scan.Index != "bug127_follows_page" || scan.Rows != float64(page.wantRows) || scan.Filtered > 5 {
+				t.Fatalf("expected a bounded seek in the 100k keyset plan, got %s", raw)
+			}
+		})
 	}
 }
 
 func invokeBUG127ProjectFollows(t *testing.T, ctx context.Context, server *Server, claims security.Claims, cursor, query string) *httptest.ResponseRecorder {
 	t.Helper()
-	parameters := url.Values{"limit": {"40"}, "type": {"mod"}}
+	parameters := url.Values{"limit": {fmt.Sprint(bug127FollowPageSize)}, "type": {"mod"}}
 	if cursor != "" {
 		parameters.Set("cursor", cursor)
 	}
