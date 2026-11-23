@@ -27,7 +27,7 @@ cover the observed plans and sample data.
 
 ## Inspect and restore the index
 
-Generation 169 installs the index in the baseline transaction. On startup,
+The current baseline installs the index in the baseline transaction. On startup,
 the catalog fingerprint includes the index definition and its ready/valid
 flags. Use the repair tool when the index is missing or a build was interrupted
 in an otherwise matching installation. [Baseline installation](../README.md#数据库安装发布和恢复)
@@ -45,7 +45,7 @@ exact confirmed database name and a new metadata path:
 
 Inspection is read-only and reports `exists`, `matches`, `ready` and `valid`.
 Apply checks the exact configured and connected database names and the
-generation 169 installation marker against the current compiled DDL. The tool
+installed generation marker against the current compiled DDL. The tool
 shares the baseline installer’s PostgreSQL advisory lock, using a session lock
 because concurrent DDL runs outside a transaction.
 Before any DDL, the tool durably creates a new mode-0600 metadata file containing
@@ -91,7 +91,7 @@ remain in the [historical runbook](https://github.com/mcmods-cn/mcmods-cn-backen
 ## Reproducible validation
 
 The real PostgreSQL integration tests use nonce-owned child databases with the
-complete generation 169 schema. They cover fresh installation,
+complete current schema. They cover fresh installation,
 preservation of fixture rows and existing indexes, repeated application, exact-target
 and generation refusal, metadata failure before DDL, definition drift, an
 actual concurrent writer/build barrier, cancellation leaving an invalid index,

@@ -38,7 +38,7 @@ authz:2:v{rbacVersion}:acl{projectACLVersion}:user:{userId}:p{permissionVersion}
 
 ## 部署与回滚
 
-当前 API 和 Worker 使用 generation 169。在同一套匹配的数据库结构下启动提供认证的 HTTP/SSE 实例和发布安全版本的 Worker，检查 `securityVersions.refreshFailures`。恢复 Redis 后先确认已经提交的操作在数据库中的状态，再决定是否重试。恢复或回滚时使用与二进制匹配的数据库快照。[数据库安装、发布和恢复](README.md#数据库安装发布和恢复)
+API 和 Worker 共用当前数据库基线。在同一套匹配的数据库结构下启动提供认证的 HTTP/SSE 实例和发布安全版本的 Worker，检查 `securityVersions.refreshFailures`。恢复 Redis 后先确认已经提交的操作在数据库中的状态，再决定是否重试。恢复或回滚时使用与二进制匹配的数据库快照。[数据库安装、发布和恢复](README.md#数据库安装发布和恢复)
 
 第二轮在既有数据库上切换认证读路径时，旧实例仍可能使用过期的 Redis 正值。该轮的滚动切换顺序及兼容键回收条件保留在原版本记录中。[第二轮部署记录](https://github.com/mcmods-cn/mcmods-cn-backend/blob/d14e10b4dcdeab3c7e2277dd371efa0249888eb8/AUTH_AND_PERMISSION_VERSIONING.md#部署与回滚)
 

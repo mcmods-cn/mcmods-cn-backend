@@ -44,9 +44,9 @@ connection retained by the list itself.
 
 ## Database setup and recovery
 
-Generation 169 installs the directional table and reverse lookup index. The
+The current baseline installs the directional table and reverse lookup index. The
 current schema and metadata checks also apply when restoring block records from
 a backup. [Database setup and recovery](README.md#数据库安装发布和恢复)
 
-Use the generation 169 comment popularity function and trigger repair when its
+Use the current comment popularity function and trigger repair when its
 catalog objects need recovery. [Database function repair](docs/database-function-repair.md)

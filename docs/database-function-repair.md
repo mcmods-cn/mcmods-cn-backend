@@ -1,6 +1,6 @@
 # 派生投影函数修复与恢复
 
-`cmd/db-function-repair` 用于恢复 generation 169 库的四个投影函数及评论热度触发器。空库安装已经包含这些定义。已安装库启动时根据实际结构指纹检测漂移，日常发布和重启无需执行此命令。[空库安装与数据库恢复](../README.md#数据库安装发布和恢复)
+`cmd/db-function-repair` 用于恢复当前基线库的四个投影函数及评论热度触发器。空库安装已经包含这些定义。已安装库启动时根据实际结构指纹检测漂移，日常发布和重启无需执行此命令。[空库安装与数据库恢复](../README.md#数据库安装发布和恢复)
 
 此工具管理下列定义。
 
@@ -20,7 +20,7 @@ go build -o ./db-function-repair ./cmd/db-function-repair
 ./db-function-repair
 ```
 
-默认检查只读。输出中的 `generation=169 checked_functions=4` 确认安装代际及检查范围，`functions_requiring_repair` 统计函数体差异，`comment_bindings_require_repair` 反映绑定差异。写入时工具同时核对配置与实际库名，要求匹配当前编译定义的安装标记，并要求函数及评论触发器处于可恢复形态。
+默认检查只读。输出中的 `generation` 与 `checked_functions=4` 确认安装代际及检查范围，`functions_requiring_repair` 统计函数体差异，`comment_bindings_require_repair` 反映绑定差异。写入时工具同时核对配置与实际库名，要求匹配当前编译定义的安装标记，并要求函数及评论触发器处于可恢复形态。
 
 工具与初始化共享 PostgreSQL advisory lock。它先以 `0600` 独占创建原定义备份并同步文件及目录，再在一个事务内替换函数及绑定。备份失败或 DDL 失败会中止事务。中断后重新检查实际定义，重试时使用新的备份路径。备份含可执行函数体，须当作私有恢复材料并确认来源。
 
