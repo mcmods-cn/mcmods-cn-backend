@@ -47,14 +47,15 @@ func TestBUG031CompleteProbeReplacesOnlyMachineEvidenceIntegration(t *testing.T)
 		fmt.Sprintf("bug031-%d@example.invalid", suffix)).Scan(&actorID); err != nil {
 		t.Fatal(err)
 	}
-	var serverID int64
+	var claim minecraftServerProbeClaim
 	if err = pool.QueryRow(ctx, `insert into minecraft_servers(
 		slug,address,normalized_address,handshake_host,connect_host,connect_port,name,
-		minecraft_versions,languages,primary_tag,submitted_by
-	) values($1,$2,$2,$2,$2,25565,'BUG031 snapshot test',array['1.21.1'],array['zh-CN'],'survival',$3)
-	returning id`, fmt.Sprintf("bug031-%d", suffix), fmt.Sprintf("bug031-%d.invalid", suffix), actorID).Scan(&serverID); err != nil {
+		minecraft_versions,languages,primary_tag,submitted_by,review_status
+	) values($1,$2,$2,$2,$2,25565,'BUG031 snapshot test',array['1.21.1'],array['zh-CN'],'survival',$3,'approved')
+	returning id,next_probe_at`, fmt.Sprintf("bug031-%d", suffix), fmt.Sprintf("bug031-%d.invalid", suffix), actorID).Scan(&claim.id, &claim.nextProbeAt); err != nil {
 		t.Fatal(err)
 	}
+	serverID := claim.id
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -74,7 +75,7 @@ func TestBUG031CompleteProbeReplacesOnlyMachineEvidenceIntegration(t *testing.T)
 		t.Fatal(err)
 	}
 
-	if err = persistMinecraftServerProbe(ctx, pool, serverID, serverprobe.Result{
+	if err = persistMinecraftServerProbe(ctx, pool, claim, serverprobe.Result{
 		Online: true, Modded: true, ModListComplete: true,
 		Mods: []serverprobe.Mod{{ID: "current_machine_mod", Version: "new", Source: "agent", Confidence: "exact"}},
 	}, nil); err != nil {
@@ -108,7 +109,7 @@ func TestBUG031CompleteProbeReplacesOnlyMachineEvidenceIntegration(t *testing.T)
 	if err = tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err = persistMinecraftServerProbe(ctx, pool, serverID, serverprobe.Result{
+	if err = persistMinecraftServerProbe(ctx, pool, claim, serverprobe.Result{
 		Online: true, Modded: true, ModListComplete: false,
 		Mods: []serverprobe.Mod{{ID: "current_machine_mod", Version: "newer", Source: "agent", Confidence: "exact"}},
 	}, nil); err != nil {
@@ -143,8 +144,8 @@ func assertBUG031Evidence(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 		t.Fatalf("mod %q evidence=%v want %v", modID, got, want)
 	}
 	for source, version := range want {
-		if got[source] != version {
-			t.Fatalf("mod %q source %q version=%q want %q; all evidence=%v", modID, source, got[source], version, got)
+		if actual, found := got[source]; !found || actual != version {
+			t.Fatalf("mod %q source %q version=%q want %q; all evidence=%v", modID, source, actual, version, got)
 		}
 	}
 }

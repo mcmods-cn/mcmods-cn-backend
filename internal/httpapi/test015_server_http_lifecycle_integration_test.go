@@ -559,8 +559,12 @@ func TestTEST015SchedulerConcurrentClaimsPersistSnapshotsAndRespectConcurrencyIn
 func TestTEST015ProbePersistenceRollbackRetryIncompleteSnapshotAndRetentionIntegration(t *testing.T) {
 	f := newTEST015ServerFixture(t)
 	id := f.seedServer(t, "owned-persistence.invalid:25565", "approved")
+	claim := minecraftServerProbeClaim{id: id}
+	if err := f.db.QueryRow(f.ctx, `select next_probe_at from minecraft_servers where id=$1`, id).Scan(&claim.nextProbeAt); err != nil {
+		t.Fatal(err)
+	}
 	result := test015ProbeResult("owned-persistence.invalid:25565")
-	if err := persistMinecraftServerProbe(f.ctx, f.db, id, result, nil); err != nil {
+	if err := persistMinecraftServerProbe(f.ctx, f.db, claim, result, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Reconciliation fails after sample insert and latest-status update. Every
@@ -571,7 +575,7 @@ func TestTEST015ProbePersistenceRollbackRetryIncompleteSnapshotAndRetentionInteg
 	before := f.serverFacts(t)
 	result.PlayersOnline = 17
 	result.Mods[0].Version = "reject-observation"
-	if err := persistMinecraftServerProbe(f.ctx, f.db, id, result, nil); err == nil || !strings.Contains(err.Error(), "test015_reject_observation") {
+	if err := persistMinecraftServerProbe(f.ctx, f.db, claim, result, nil); err == nil || !strings.Contains(err.Error(), "test015_reject_observation") {
 		t.Fatalf("late persistence fault was swallowed: %v", err)
 	}
 	f.serverUnchanged(t, before)
@@ -579,13 +583,13 @@ func TestTEST015ProbePersistenceRollbackRetryIncompleteSnapshotAndRetentionInteg
 		t.Fatal(err)
 	}
 	result.Mods[0].Version = "recovered"
-	if err := persistMinecraftServerProbe(f.ctx, f.db, id, result, nil); err != nil {
+	if err := persistMinecraftServerProbe(f.ctx, f.db, claim, result, nil); err != nil {
 		t.Fatal(err)
 	}
 	assertBUG031Evidence(t, f.ctx, f.db, id, "test015_machine", map[string]string{"forge_status": "recovered"})
 	result.ModListComplete = false
 	result.Mods = []serverprobe.Mod{{ID: "test015_partial", Source: "configuration", Confidence: "inferred"}}
-	if err := persistMinecraftServerProbe(f.ctx, f.db, id, result, nil); err != nil {
+	if err := persistMinecraftServerProbe(f.ctx, f.db, claim, result, nil); err != nil {
 		t.Fatal(err)
 	}
 	assertBUG031Evidence(t, f.ctx, f.db, id, "test015_machine", map[string]string{"forge_status": "recovered"})

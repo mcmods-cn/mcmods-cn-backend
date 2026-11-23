@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/serverprobe"
@@ -16,6 +18,12 @@ const minecraftServerProbeInterval = 5 * time.Minute
 // All scheduler invocations in this process share the probe budget. Database
 // claims prevent duplicate work across instances; they do not limit concurrency.
 var minecraftServerProbeSlots = make(chan struct{}, 32)
+
+type minecraftServerProbeClaim struct {
+	id          int64
+	address     string
+	nextProbeAt time.Time
+}
 
 // StartMinecraftServerProbeScheduler records one status sample every five
 // minutes for approved servers. Work is claimed with SKIP LOCKED so multiple
@@ -70,24 +78,20 @@ func probeDueMinecraftServersWithProbe(ctx context.Context, db *pgxpool.Pool, pr
 	update minecraft_servers server
 	set next_probe_at=now()+interval '5 minutes'
 	from due where server.id=due.id
-	returning server.id,due.address`)
+	returning server.id,due.address,server.next_probe_at`)
 	if err != nil {
 		log.Printf("claim Minecraft server probes: %v", err)
 		return
 	}
-	type target struct {
-		id      int64
-		address string
-	}
-	targets := make([]target, 0)
+	claims := make([]minecraftServerProbeClaim, 0)
 	for rows.Next() {
-		var item target
-		if err = rows.Scan(&item.id, &item.address); err != nil {
+		var claim minecraftServerProbeClaim
+		if err = rows.Scan(&claim.id, &claim.address, &claim.nextProbeAt); err != nil {
 			rows.Close()
 			log.Printf("read Minecraft server probe claims: %v", err)
 			return
 		}
-		targets = append(targets, item)
+		claims = append(claims, claim)
 	}
 	if err = finishRows(rows); err != nil {
 		log.Printf("read Minecraft server probe claims: %v", err)
@@ -99,12 +103,12 @@ func probeDueMinecraftServersWithProbe(ctx context.Context, db *pgxpool.Pool, pr
 	}
 
 	var waitGroup sync.WaitGroup
-	for _, item := range targets {
+	for _, claim := range claims {
 		if ctx.Err() != nil {
 			break
 		}
 		waitGroup.Add(1)
-		go func(item target) {
+		go func() {
 			defer waitGroup.Done()
 			select {
 			case minecraftServerProbeSlots <- struct{}{}:
@@ -115,21 +119,33 @@ func probeDueMinecraftServersWithProbe(ctx context.Context, db *pgxpool.Pool, pr
 			if ctx.Err() != nil {
 				return
 			}
-			result, probeErr := probe(ctx, item.address)
-			if persistErr := persistMinecraftServerProbe(ctx, db, item.id, result, probeErr); persistErr != nil {
-				log.Printf("persist Minecraft server %d probe: %v", item.id, persistErr)
+			result, probeErr := probe(ctx, claim.address)
+			if persistErr := persistMinecraftServerProbe(ctx, db, claim, result, probeErr); persistErr != nil {
+				log.Printf("persist Minecraft server %d probe: %v", claim.id, persistErr)
 			}
-		}(item)
+		}()
 	}
 	waitGroup.Wait()
 }
 
-func persistMinecraftServerProbe(ctx context.Context, db *pgxpool.Pool, serverID int64, result serverprobe.Result, probeErr error) error {
+func persistMinecraftServerProbe(ctx context.Context, db *pgxpool.Pool, claim minecraftServerProbeClaim, result serverprobe.Result, probeErr error) error {
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	// The scheduled time also identifies the claim. Only the current claim on
+	// an approved server may publish samples and replace observed mod evidence.
+	var serverID int64
+	err = tx.QueryRow(ctx, `select id from minecraft_servers
+		where id=$1 and review_status='approved' and next_probe_at=$2 for update`,
+		claim.id, claim.nextProbeAt).Scan(&serverID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
 	if probeErr != nil {
 		message := probeErr.Error()
 		if len(message) > 2000 {
