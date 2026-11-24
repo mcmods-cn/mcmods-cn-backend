@@ -18,3 +18,10 @@ func decodeStoredJSONObject(raw []byte, label string) (map[string]any, error) {
 	}
 	return value, nil
 }
+
+func nonNilJSONObject(value map[string]any) map[string]any {
+	if value == nil {
+		return map[string]any{}
+	}
+	return value
+}

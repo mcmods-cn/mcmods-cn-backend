@@ -337,13 +337,6 @@ func validateCatalogRecipeBindings(edit *catalogRecipeEdit, slotRoles map[string
 	return nil
 }
 
-func nonNilJSONObject(value map[string]any) map[string]any {
-	if value == nil {
-		return map[string]any{}
-	}
-	return value
-}
-
 func catalogJSON(value any) []byte {
 	raw, _ := json.Marshal(value)
 	return raw

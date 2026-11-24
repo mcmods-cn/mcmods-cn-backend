@@ -420,6 +420,7 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request, currentPublicI
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	payload.Translations = nonNilJSONObject(payload.Translations)
 	translations, err := json.Marshal(payload.Translations)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "task translations are invalid")

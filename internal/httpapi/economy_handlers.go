@@ -832,6 +832,7 @@ func (s *Server) saveCurrency(w http.ResponseWriter, r *http.Request, currentPub
 		writeError(w, http.StatusInternalServerError, "failed to lock economy configuration")
 		return
 	}
+	payload.Translations = nonNilJSONObject(payload.Translations)
 	translations, err := json.Marshal(payload.Translations)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "currency translations are invalid")
@@ -938,11 +939,13 @@ func (s *Server) saveShopItem(w http.ResponseWriter, r *http.Request, currentPub
 		writeError(w, http.StatusBadRequest, "shop item fields are invalid")
 		return
 	}
+	payload.Translations = nonNilJSONObject(payload.Translations)
 	translations, err := json.Marshal(payload.Translations)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "shop item translations are invalid")
 		return
 	}
+	payload.Config = nonNilJSONObject(payload.Config)
 	config, err := json.Marshal(payload.Config)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "shop item configuration is invalid")
