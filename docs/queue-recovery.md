@@ -58,6 +58,12 @@ JetStream 达到 MaxDeliver 时先把原始 v1 envelope 和终态错误持久化
 - `POST /api/v1/admin/infrastructure/dead-letters/{id}/replay` 要求 `admin.config.write`。发布阶段只重排仍为 `dead` 的原 outbox 记录，保留 event ID。消费阶段核对完整 v1 信封、任务与事件身份后创建新 event ID。记录状态已改变或信封不完整时返回 409 并保留证据；存储失败返回 500。新意图、操作者以及新旧 ID 的审计记录同事务提交。响应 202 表示已入队。
 - 若 broker 也拒绝死信，原任务仍在 stream，已耗尽 MaxDeliver 的消息可能需要人工发现。恢复存储后，通过 consumer info 和 max-deliver advisories 核对这批原消息，检查数据库和死信 subject，保全原始信封再决定补录或授权重放。没有应用层自动重新执行这些耗尽的任务。
 
+## OSS 对象删除
+
+对象删除由 PostgreSQL 表 `oss_object_deletion_outbox` 记录。用 `admin.config.read` 读取 `GET /api/v1/admin/infrastructure/oss-deletions?status=dead&limit=50`，核对对象、失败分类和最后一次错误。列表默认展示最新死信，每次最多 100 条。重放前确认目标对象仍应删除，并先处理凭据、授权或存储配置故障。
+
+使用 `admin.config.write` 向 `POST /api/v1/admin/infrastructure/oss-deletions/{id}/replay` 提交工单的公开 ID。服务在锁定工单后重新确认当前操作权限，只允许重放仍为 `dead` 的工单。事务同时重置尝试次数并记录操作者、原失败分类和审计活动。202 表示重新排队，409 表示状态已变化。随后核对该工单是否进入 `completed`，确认 Worker 已完成删除处理。
+
 ## SMTP 已受理和状态不明
 
 站内通知和通知邮件使用不同的状态。自动发送通知邮件前，Worker 校验当前收件人状态、已验证邮箱及订阅偏好，在现有 `processed_events` 表预留 `('notification.email', event_id)`，再联系 SMTP。明确拒绝可按原预算重试。对端对 DATA 作出成功终态响应后，QUIT 失败仍算受理。接受状态保存在 `smtp.accepted`，相同 event ID 重投会跳过发送。
