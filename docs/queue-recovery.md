@@ -45,7 +45,7 @@ JetStream 达到 MaxDeliver 时先把原始 v1 envelope 和终态错误持久化
 本地 handler 耗尽尝试后由 PostgreSQL 原子保存完整信封和 `consumer:<taskCode>` 阶段。发布阶段失败可通过原 outbox 行恢复。旧版产生的历史记录保留原阶段。若旧 broker 死信缺少元数据，保留 stream 原件供核验，跳过该条自动恢复以便继续处理其他记录。无效 JSON 会以 `invalidEnvelope` 保存，无法通过管理 API 重放。
 
 - `GET /api/v1/admin/infrastructure/dead-letters` 要求 `admin.config.read`。按发布或消费阶段核对事件、对象的当前权限/状态、最近一次业务结果及可能已经完成的外部动作。
-- `POST /api/v1/admin/infrastructure/dead-letters/{id}/replay` 要求 `admin.config.write`。发布阶段重新排原 event ID，消费阶段创建新 event ID。新意图、操作者以及新旧 ID 的审计记录同事务提交。响应 202 表示已入队。
+- `POST /api/v1/admin/infrastructure/dead-letters/{id}/replay` 要求 `admin.config.write`。发布阶段只重排仍为 `dead` 的原 outbox 记录，保留 event ID。消费阶段核对完整 v1 信封、任务与事件身份后创建新 event ID。记录状态已改变或信封不完整时返回 409 并保留证据；存储失败返回 500。新意图、操作者以及新旧 ID 的审计记录同事务提交。响应 202 表示已入队。
 - 若 broker 也拒绝死信，原任务仍在 stream，已耗尽 MaxDeliver 的消息可能需要人工发现。恢复存储后，通过 consumer info 和 max-deliver advisories 核对这批原消息，检查数据库和死信 subject，保全原始信封再决定补录或授权重放。没有应用层自动重新执行这些耗尽的任务。
 
 ## SMTP 已受理和状态不明
