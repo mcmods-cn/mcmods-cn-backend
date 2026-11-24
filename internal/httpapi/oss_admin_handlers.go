@@ -111,6 +111,14 @@ func (s *Server) updateOSSFileScanStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// Evidence retention locks its metadata before retiring the file. Scans of
+	// that same attachment must take the two locks in the same order.
+	if _, err = tx.Exec(r.Context(), `select evidence.id from report_evidence evidence
+		join oss_files file on file.object_key=evidence.object_key
+		where file.public_id=$1 and evidence.status<>'deleted' for update of evidence`, publicID); err != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取举报附件扫描状态")
+		return
+	}
 	var internalID int64
 	var previousStatus, previousFileStatus string
 	err = tx.QueryRow(r.Context(), `select id,scan_status,status from oss_files where public_id=$1 for update`, publicID).
