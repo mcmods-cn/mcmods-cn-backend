@@ -129,3 +129,36 @@ func TestShowcaseImagesUsePublicMediaRoutesIntegration(t *testing.T) {
 		}
 	}
 }
+
+func TestFavoriteBlueprintCoverUsesItsGuardedMediaRouteIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	owner := f.userIDs[f.editor]
+	const key = "blueprints/example/cover/generated.png"
+	var ownerPublicID, blueprint, collection string
+	var fileID, blueprintID, collectionID int64
+	if err := f.db.QueryRow(f.ctx, `select public_id from users where id=$1`, owner).Scan(&ownerPublicID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRow(f.ctx, `insert into oss_files(bucket,endpoint,object_key,source,status,scan_status,content_type)
+		values('test','https://example.invalid',$1,'user','active','clean','image/png') returning id`, key).Scan(&fileID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRow(f.ctx, `insert into blueprints(owner_id,source_format,status,review_status,cover_file_id,cover_object_key,updated_at)
+		values($1,'nbt','ready','approved',$2,$3,to_timestamp(1730000000)) returning id,public_id`, owner, fileID, key).Scan(&blueprintID, &blueprint); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRow(f.ctx, `insert into favorite_collections(user_id,name,is_public) values($1,'public examples',true) returning id,public_id`, owner).Scan(&collectionID, &collection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `insert into favorite_collection_items(collection_id,entity_type,entity_id) values($1,'blueprint',$2)`, collectionID, blueprintID); err != nil {
+		t.Fatal(err)
+	}
+	const prefix = "/api/v1/users/"
+	for _, view := range []struct{ viewer, route string }{{f.editor, "me"}, {"", ownerPublicID}} {
+		response := f.require(t, view.viewer, "GET", prefix+view.route+"/favorite-collections/"+collection+"/items", nil, 200)
+		page := decodeTEST022Data[favoriteCollectionItemPageResponse](t, response)
+		if len(page.Items) != 1 || page.Items[0].EntityPublicID != blueprint || page.Items[0].Metadata["iconUrl"] != "/api/v1/blueprints/"+blueprint+"/cover?v=1730000000" {
+			t.Errorf("favorite blueprint cover: %s", response)
+		}
+	}
+}

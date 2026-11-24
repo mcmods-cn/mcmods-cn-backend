@@ -52,10 +52,12 @@ func TestAuditFixCMP003FavoritesActivitySharesMembershipQuotaAndProjectionTransa
 	recover(http.MethodPut, path, map[string]any{"name": "Atomic renamed", "isPublic": true}, 200)
 	body := map[string]any{"entityType": "mod", "entityPublicId": f.modCode, "collectionIds": []string{collection.ID}}
 	recover(http.MethodPut, "/api/v1/users/me/favorites", body, 200)
+	f.require(t, f.editor, http.MethodPut, "/api/v1/users/me/favorites", body, 200)
 	for _, operation := range []string{"remove", "add"} {
 		delta := map[string]any{"entityType": "mod", "entityPublicId": f.modCode, "addCollectionIds": []string{}, "removeCollectionIds": []string{}}
 		delta[operation+"CollectionIds"] = []string{collection.ID}
 		recover(http.MethodPatch, "/api/v1/users/me/favorites", delta, 200)
+		f.require(t, f.editor, http.MethodPatch, "/api/v1/users/me/favorites", delta, 200)
 	}
 	recover(http.MethodDelete, path, nil, 204)
 	var collections, items int
