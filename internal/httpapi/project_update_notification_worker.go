@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"mcmods-cn-backend/internal/diagnostic"
 	"mcmods-cn-backend/internal/querycache"
 	"mcmods-cn-backend/internal/queue"
 )
@@ -242,10 +243,7 @@ func updateProjectUpdateNotificationProgress(ctx context.Context, tx pgx.Tx, eve
 }
 
 func (worker *ProjectUpdateNotificationWorker) retry(ctx context.Context, eventID int64, cause error) error {
-	detail := cause.Error()
-	if len(detail) > 1000 {
-		detail = detail[:1000]
-	}
+	detail := diagnostic.Text(cause.Error(), 1000)
 	var attempts int
 	var status string
 	err := worker.db.QueryRow(ctx, `update project_update_notification_tasks set

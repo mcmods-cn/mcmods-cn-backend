@@ -246,7 +246,7 @@ func TestOPS010PopularityQueuesTerminateRecoverAndClaimOnceIntegration(t *testin
 	if _, err = pool.Exec(ctx, `alter table content_stats_refresh_queue drop constraint test029_reject_retry`); err != nil {
 		t.Fatal(err)
 	}
-	if err = retryContentStatsTask(ctx, pool, brokenRetryTasks[0], errors.New("release injected retry failure")); err != nil {
+	if err = retryContentStatsTask(ctx, pool, brokenRetryTasks[0], errors.New(strings.Repeat("错", 334))); err != nil {
 		t.Fatal(err)
 	}
 }

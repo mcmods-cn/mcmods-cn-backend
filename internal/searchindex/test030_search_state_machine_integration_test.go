@@ -158,6 +158,22 @@ func TestTEST030SearchRebuildRejectsDowngradesRecoversPoisonAndReportsPersistenc
 	if remaining != 0 {
 		t.Fatalf("search queue remaining=%d after recovery", remaining)
 	}
+	prefix := strings.Repeat("错", 666)
+	cause := errors.New(prefix + "误")
+	versionFourWorker.failSearchRebuildProgress(ctx, "creators", cause)
+	if err := pool.QueryRow(ctx, `select last_error from search_index_rebuild_progress where collection_kind='creators' and status='failed'`).Scan(&lastError); err != nil || lastError != prefix {
+		t.Errorf("rebuild diagnostic: bytes=%d, err=%v", len(lastError), err)
+	}
+	job := queueJob{DocumentType: "creator", DocumentID: 930032}
+	if err := pool.QueryRow(ctx, `insert into search_index_queue(document_type,document_id,operation) values($1,$2,'delete') returning updated_at`, job.DocumentType, job.DocumentID).Scan(&job.Token); err != nil {
+		t.Fatal(err)
+	}
+	if err := versionFourWorker.retry(ctx, []queueJob{job}, cause); err != nil {
+		t.Fatalf("record document retry: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `select last_error from search_index_queue where document_type=$1 and document_id=$2`, job.DocumentType, job.DocumentID).Scan(&lastError); err != nil || lastError != prefix {
+		t.Fatalf("document retry diagnostic: bytes=%d, err=%v", len(lastError), err)
+	}
 }
 
 func assertTEST030ProjectionState(t *testing.T, ctx context.Context, pool *pgxpool.Pool, version int) {

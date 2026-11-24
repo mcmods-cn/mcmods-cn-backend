@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"mcmods-cn-backend/internal/diagnostic"
 )
 
 type postgresStore struct {
@@ -143,10 +145,7 @@ func (store *postgresStore) markDurableFailure(ids []int64, cause error) {
 	if len(ids) == 0 || cause == nil {
 		return
 	}
-	message := cause.Error()
-	if len(message) > 1000 {
-		message = message[:1000]
-	}
+	message := diagnostic.Text(cause.Error(), 1000)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_, _ = store.db.Exec(ctx, `update activity_event_outbox

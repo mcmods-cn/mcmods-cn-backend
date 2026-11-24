@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
+
+	"mcmods-cn-backend/internal/diagnostic"
 )
 
 var errStreamBackpressure = errors.New("JetStream capacity unavailable")
@@ -74,7 +76,7 @@ func NewPostgresDeadLetterSink(db *pgxpool.Pool) DeadLetterSink {
 		if db == nil {
 			return errors.New("dead letter database is required")
 		}
-		lastError := boundedDiagnostic(dead.LastError)
+		lastError := diagnostic.Text(dead.LastError, 1000)
 		payload := dead.Payload
 		if !json.Valid(payload) {
 			// Keep malformed input inspectable without making the jsonb sink
@@ -321,7 +323,7 @@ func (dispatcher *OutboxDispatcher) renewLease(ctx context.Context, cancel conte
 
 func (dispatcher *OutboxDispatcher) fail(ctx context.Context, record outboxRecord, cause error) error {
 	attempts := record.Attempts + 1
-	errorText := boundedDiagnostic(cause.Error())
+	errorText := diagnostic.Text(cause.Error(), 1000)
 	if attempts >= record.MaxAttempts {
 		stage := "publish"
 		var deadEnvelope any

@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/diagnostic"
 	"mcmods-cn-backend/internal/queue"
 )
 
@@ -288,10 +289,7 @@ func (worker *BlueprintWorker) failBlueprintJob(ctx context.Context, job claimed
 		return false, err
 	}
 	terminal := job.attempts >= job.maxAttempts || errors.Is(cause, errBlueprintEntityDataWouldBeLost)
-	lastError := cause.Error()
-	if len(lastError) > 2000 {
-		lastError = lastError[:2000]
-	}
+	lastError := diagnostic.Text(cause.Error(), 2000)
 	if err = abandonBlueprintJobArtifactsTx(ctx, tx, job.id, job.attempts, "blueprint-job-failed"); err != nil {
 		return false, err
 	}
@@ -306,7 +304,7 @@ func (worker *BlueprintWorker) failBlueprintJob(ctx context.Context, job claimed
 		}
 	}
 	if terminal {
-		if err = worker.notifyTemplateTx(ctx, tx, job.createdBy, "blueprint_conversion_failure", map[string]string{"error": cause.Error()}, job.blueprintID); err != nil {
+		if err = worker.notifyTemplateTx(ctx, tx, job.createdBy, "blueprint_conversion_failure", map[string]string{"error": lastError}, job.blueprintID); err != nil {
 			return false, err
 		}
 	}

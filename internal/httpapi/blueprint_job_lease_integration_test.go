@@ -146,7 +146,7 @@ func TestBlueprintArtifactActivationCompletionAndFailureCompensationAreAtomicInt
 	worker := &BlueprintWorker{db: pool, api: &Server{db: pool}, workerID: "worker"}
 	terminal, err := worker.failBlueprintJob(ctx, claimedBlueprintJob{
 		id: 71, blueprintID: 51, operation: "normalize", attempts: 1, maxAttempts: 3, runToken: "worker:failure",
-	}, errors.New("business transaction failed"))
+	}, errors.New(strings.Repeat("错", 667)))
 	if err != nil || terminal {
 		t.Fatalf("failed artifact compensation = terminal %t/error %v", terminal, err)
 	}

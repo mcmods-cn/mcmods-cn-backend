@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"mcmods-cn-backend/internal/catalogvisibility"
+	"mcmods-cn-backend/internal/diagnostic"
 )
 
 const (
@@ -380,10 +381,7 @@ func (worker *Worker) recordSearchRebuildProgress(
 }
 
 func (worker *Worker) failSearchRebuildProgress(ctx context.Context, kind string, cause error) {
-	message := cause.Error()
-	if len(message) > 2000 {
-		message = message[:2000]
-	}
+	message := diagnostic.Text(cause.Error(), 2000)
 	_, _ = worker.db.Exec(ctx, `update search_index_rebuild_progress set status='failed',last_error=$2,updated_at=now()
 		where collection_kind=$1`, kind, message)
 }
@@ -617,10 +615,7 @@ func (worker *Worker) completeMod(ctx context.Context, job queueJob) error {
 }
 
 func (worker *Worker) retry(ctx context.Context, jobs []queueJob, cause error) error {
-	message := cause.Error()
-	if len(message) > 2000 {
-		message = message[:2000]
-	}
+	message := diagnostic.Text(cause.Error(), 2000)
 	retryErrors := make([]error, 0)
 	for _, job := range jobs {
 		if _, err := worker.db.Exec(ctx, `update search_index_queue set available_at=now()+

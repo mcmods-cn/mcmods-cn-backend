@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,7 +31,7 @@ func (processor *replayProjectionProcessor) ProcessActivityBatch(context.Context
 func (processor *replayProjectionProcessor) ProcessActivityBatchTx(ctx context.Context, tx pgx.Tx, events []Event) error {
 	processor.attempts++
 	if processor.fail {
-		return errors.New("injected progression failure")
+		return errors.New(strings.Repeat("错", 334))
 	}
 	for _, event := range events {
 		if _, err := tx.Exec(ctx, `insert into durable_projection_probe(user_id,projected)
@@ -103,6 +104,11 @@ func TestDurableOutboxProjectionFailureRollsBackAndReplaysIntegration(t *testing
 		t.Fatalf("transactional processor called %d times after failure; want 1", processor.attempts)
 	}
 
+	var detail string
+	var retried bool
+	if err := pool.QueryRow(ctx, `select last_error,attempts=1 and available_at>created_at from activity_event_outbox where user_id=$1`, userID).Scan(&detail, &retried); err != nil || detail != strings.Repeat("错", 333) || !retried {
+		t.Fatalf("failure did not preserve its diagnostic and backoff: bytes=%d, retried=%t, err=%v", len(detail), retried, err)
+	}
 	processor.fail = false
 	if _, err = pool.Exec(ctx, `update activity_event_outbox set available_at=clock_timestamp() where user_id=$1`, userID); err != nil {
 		t.Fatal(err)
@@ -146,7 +152,7 @@ func assertDurableProjectionState(t *testing.T, ctx context.Context, pool *pgxpo
 
 func TestDurableOutboxSurvivesProducerAndDrainsExactlyOnceAcrossWorkers(t *testing.T) {
 	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
-		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 with an isolated generation-70 PostgreSQL database")
+		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 with an isolated PostgreSQL test database")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

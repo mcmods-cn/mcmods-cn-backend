@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,7 +37,7 @@ func TestOPS004ProjectUpdateRetryPersistsTerminalAttemptsIntegration(t *testing.
 	}
 	worker := &ProjectUpdateNotificationWorker{db: pool}
 	for attempt := 1; attempt <= projectUpdateNotificationMaxAttempts; attempt++ {
-		if err = worker.retry(ctx, 42, errors.New("permanent template error")); err != nil {
+		if err = worker.retry(ctx, 42, errors.New(strings.Repeat("错", 334))); err != nil {
 			t.Fatal(err)
 		}
 		var gotAttempt int
@@ -56,8 +57,12 @@ func TestOPS004ProjectUpdateRetryPersistsTerminalAttemptsIntegration(t *testing.
 		t.Fatal(err)
 	}
 	var finalAttempt int
-	if err = pool.QueryRow(ctx, `select attempt_count from project_update_notification_tasks where event_id=42 and status='failed'`).Scan(&finalAttempt); err != nil {
+	var detail string
+	if err = pool.QueryRow(ctx, `select attempt_count,last_error from project_update_notification_tasks where event_id=42 and status='failed'`).Scan(&finalAttempt, &detail); err != nil {
 		t.Fatal(err)
+	}
+	if detail != strings.Repeat("错", 333) {
+		t.Fatalf("unexpected terminal diagnostic bytes=%d", len(detail))
 	}
 	if finalAttempt != projectUpdateNotificationMaxAttempts {
 		t.Fatalf("terminal retry changed attempt_count to %d", finalAttempt)

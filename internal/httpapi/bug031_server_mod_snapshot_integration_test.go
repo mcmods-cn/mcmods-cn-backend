@@ -2,8 +2,10 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +58,13 @@ func TestBUG031CompleteProbeReplacesOnlyMachineEvidenceIntegration(t *testing.T)
 		t.Fatal(err)
 	}
 	serverID := claim.id
+	if err := persistMinecraftServerProbe(ctx, pool, claim, serverprobe.Result{}, errors.New(strings.Repeat("错", 667))); err != nil {
+		t.Fatalf("record failed observation: %v", err)
+	}
+	var detail string
+	if err := pool.QueryRow(ctx, `select error from minecraft_server_status_samples where server_id=$1 and not online`, serverID).Scan(&detail); err != nil || detail != strings.Repeat("错", 666) {
+		t.Fatalf("unexpected failed observation: bytes=%d, err=%v", len(detail), err)
+	}
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {

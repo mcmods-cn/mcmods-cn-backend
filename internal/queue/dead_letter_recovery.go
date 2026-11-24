@@ -9,6 +9,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/diagnostic"
 )
 
 const deadLetterInfoHeader = "MCMods-Dead-Letter-Info"
@@ -27,7 +28,7 @@ type deadLetterInfo struct {
 
 func (c *Client) publishDeadLetter(js nats.JetStreamContext, cfg config.NATSConfig, letter DeadLetter) error {
 	info := deadLetterInfo{letter.EventID, letter.EventType, letter.TaskCode,
-		letter.AggregateType, letter.AggregateID, boundedDiagnostic(letter.LastError), letter.Attempts}
+		letter.AggregateType, letter.AggregateID, diagnostic.Text(letter.LastError, 1000), letter.Attempts}
 	raw, err := json.Marshal(info)
 	if err != nil {
 		return err

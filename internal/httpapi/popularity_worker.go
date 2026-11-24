@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"mcmods-cn-backend/internal/diagnostic"
 )
 
 const (
@@ -297,9 +299,5 @@ func truncateWorkerError(err error) string {
 	if err == nil {
 		return ""
 	}
-	message := fmt.Sprintf("%v", err)
-	if len(message) > 1000 {
-		return message[:1000]
-	}
-	return message
+	return diagnostic.Text(err.Error(), 1000)
 }

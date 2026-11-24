@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"mcmods-cn-backend/internal/diagnostic"
 	"mcmods-cn-backend/internal/serverprobe"
 )
 
@@ -147,10 +148,7 @@ func persistMinecraftServerProbe(ctx context.Context, db *pgxpool.Pool, claim mi
 		return err
 	}
 	if probeErr != nil {
-		message := probeErr.Error()
-		if len(message) > 2000 {
-			message = message[:2000]
-		}
+		message := diagnostic.Text(probeErr.Error(), 2000)
 		if _, err = tx.Exec(ctx, `insert into minecraft_server_status_samples(
 			server_id,online,error
 		) values($1,false,$2)`, serverID, message); err != nil {
