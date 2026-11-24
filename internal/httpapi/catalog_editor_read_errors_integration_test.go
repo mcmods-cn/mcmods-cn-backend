@@ -168,3 +168,46 @@ func invokeCatalogRecipeTypeDetail(t *testing.T, server *Server, publicID string
 	server.catalogRecipeTypeDetail(response, request)
 	return response.Code, response.Body.String()
 }
+
+func TestCatalogSubmissionUsesCurrentEditorialCapabilitiesAfterEntityLock(t *testing.T) {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "content.write", "content.no-review")
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "content.write")
+	const path = "/api/v1/recipe-types"
+	edit := map[string]any{
+		"canonicalId": "fixture:catalog-editor-current", "defaultLocale": "en-US",
+		"localizations": []map[string]string{{"locale": "en-US", "name": "Press"}},
+	}
+	first := decodeTEST022Data[catalogEditResult](t, f.require(t, f.otherEditor, http.MethodPost, path, edit, http.StatusAccepted))
+	if first.ReviewStatus != "approved" {
+		t.Fatalf("initial publication=%+v", first)
+	}
+	tx, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	if _, err = tx.Exec(f.ctx, `select id from catalog_entities where public_id=$1 for update`, first.ObjectPublicID); err != nil {
+		t.Fatal(err)
+	}
+	edit["baseRevisionId"] = first.RevisionID
+	result := auditCompletionAsyncJSON(f, f.editor, http.MethodPut, path+"/"+first.ObjectPublicID, edit)
+	auditCompletionAwaitLocks(t, f, 1)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "content.no-review")
+	if err = tx.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := <-result
+	if got.err != nil || got.status != http.StatusAccepted {
+		t.Fatalf("editing status=%d error=%v body=%s", got.status, got.err, got.raw)
+	}
+	second := decodeTEST022Data[catalogEditResult](t, got.raw)
+	var revision string
+	if err = f.db.QueryRow(f.ctx, `select revision.public_id from catalog_entities entity join content_revisions revision
+	on revision.id=entity.published_revision_id where entity.public_id=$1`, first.ObjectPublicID).Scan(&revision); err != nil {
+		t.Fatal(err)
+	}
+	if second.ReviewStatus != "approved" || revision != second.RevisionID || revision == first.RevisionID {
+		t.Fatalf("current editor status=%q response revision=%s published revision=%s", second.ReviewStatus, second.RevisionID, revision)
+	}
+}

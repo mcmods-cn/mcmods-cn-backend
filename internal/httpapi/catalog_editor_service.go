@@ -17,6 +17,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+var (
+	errCatalogEditorAuthorization = errors.New("catalog editor authorization unavailable")
+	errCatalogEditorPermission    = errors.New("catalog edit permission denied")
+)
+
 type catalogEditorEntity struct {
 	ID                  int64
 	IdentityKey         string
@@ -114,7 +119,13 @@ func (s *Server) submitCatalogEditorMutation(r *http.Request, snapshot catalogEd
 			return result, errCatalogEditorConflict
 		}
 	}
-	claims := currentClaims(r)
+	claims, err := resolveCurrentWriteActorTx(r.Context(), tx, currentClaims(r))
+	if err != nil {
+		return result, fmt.Errorf("%w: %w", errCatalogEditorAuthorization, err)
+	}
+	if !claimsAllow(claims, "content.write") {
+		return result, errCatalogEditorPermission
+	}
 	allowForeignFiles := claimsAllow(claims, "content.review") || claimsAllow(claims, "admin.*")
 	snapshot.AllowForeignFiles = allowForeignFiles
 	if err = validateCatalogSnapshotReferencesTx(r.Context(), tx, snapshot, claims.Subject, allowForeignFiles); err != nil {

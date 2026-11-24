@@ -497,6 +497,14 @@ func (s *Server) deleteCatalogEntity(w http.ResponseWriter, r *http.Request, ent
 }
 
 func writeCatalogMutationResult(w http.ResponseWriter, result catalogEditResult, err error) {
+	if errors.Is(err, errCatalogEditorAuthorization) {
+		writeCurrentWriteActorFailure(w, err)
+		return
+	}
+	if errors.Is(err, errCatalogEditorPermission) {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
 	if err != nil {
 		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return

@@ -184,11 +184,11 @@ func TestIndependentP1CONT001StaleBaselineConflictsWithoutPublication(t *testing
 				}
 			}
 			mutate := func(token, base string) catalogEditResult {
-				resolved, err := resolveUsersRootPermissionsQuery(f.ctx, f.db, []int64{f.userIDs[token]})
+				claims, err := security.ParseToken(s.cfg.JWTSecret, token)
 				if err != nil {
 					t.Fatal(err)
 				}
-				r := httptest.NewRequest(http.MethodPut, "/internal/independent-existing-history", nil).WithContext(context.WithValue(f.ctx, claimsContextKey, security.Claims{Subject: f.userIDs[token], PermissionRules: resolved[f.userIDs[token]].Permissions}))
+				r := httptest.NewRequest(http.MethodPut, "/internal/independent-existing-history", nil).WithContext(context.WithValue(f.ctx, claimsContextKey, claims))
 				got, err := s.submitCatalogEditorMutation(r, snapshot, &base)
 				if err != nil {
 					t.Fatal(err)
