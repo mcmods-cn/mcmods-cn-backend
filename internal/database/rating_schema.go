@@ -335,45 +335,28 @@ func ratingSchemaStatements() []string {
 		$$ language plpgsql`,
 		`create or replace function refresh_popularity_from_rating() returns trigger as $$
 		declare
-			route_id bigint; old_weight numeric:=0; new_weight numeric:=0;
-			old_metric boolean:=false; new_metric boolean:=false;
-			old_route_type text; new_route_type text;
+			route_id bigint:=coalesce(new.object_route_id,old.object_route_id);
+			rating_id bigint:=coalesce(new.id,old.id);
+			count_delta bigint:=0; score_delta bigint:=0; trend_delta numeric:=0;
+			route_kind text;
 		begin
-			route_id:=case when tg_op='DELETE' then old.object_route_id else new.object_route_id end;
-			if tg_op<>'INSERT' then select entity_type into old_route_type from public_routes where id=old.object_route_id; end if;
-			if tg_op<>'DELETE' then select entity_type into new_route_type from public_routes where id=new.object_route_id; end if;
-			if tg_op<>'INSERT' then old_weight:=old.trend_weight; end if;
-			if tg_op<>'DELETE' then new_weight:=new.trend_weight; end if;
-			old_metric:=tg_op<>'INSERT' and old.counted;
-			new_metric:=tg_op<>'DELETE' and new.counted;
-			if old_metric and new_metric and old.object_route_id=new.object_route_id then
-				perform adjust_content_popularity_lifetime_facts(
-					new.object_route_id,0,0,0,0,0,0,0,new.overall_score-old.overall_score);
-			elsif old_metric then
-				perform adjust_content_popularity_lifetime_facts(old.object_route_id,0,0,0,0,0,0,-1,-old.overall_score);
-				if new_metric then
-					perform adjust_content_popularity_lifetime_facts(new.object_route_id,0,0,0,0,0,0,1,new.overall_score);
+			if tg_op<>'INSERT' then
+				trend_delta:=-old.trend_weight;
+				if old.counted then count_delta:=-1; score_delta:=-old.overall_score; end if;
+			end if;
+			if tg_op<>'DELETE' then
+				trend_delta:=trend_delta+new.trend_weight;
+				if new.counted then count_delta:=count_delta+1; score_delta:=score_delta+new.overall_score; end if;
+			end if;
+			if count_delta<>0 or score_delta<>0 then
+				select entity_type into strict route_kind from public_routes where id=route_id;
+				perform adjust_content_popularity_lifetime_facts(route_id,0,0,0,0,0,0,count_delta,score_delta);
+				perform adjust_content_rating_global_stats(route_kind,count_delta,score_delta);
+				if count_delta<>0 then
+					perform adjust_content_popularity_rating_dimensions(route_id,rating_id,count_delta);
 				end if;
-			elsif new_metric then
-				perform adjust_content_popularity_lifetime_facts(new.object_route_id,0,0,0,0,0,0,1,new.overall_score);
 			end if;
-			if old_metric and new_metric and old_route_type=new_route_type then
-				perform adjust_content_rating_global_stats(new_route_type,0,new.overall_score-old.overall_score);
-			elsif old_metric then
-				perform adjust_content_rating_global_stats(old_route_type,-1,-old.overall_score);
-				if new_metric then
-					perform adjust_content_rating_global_stats(new_route_type,1,new.overall_score);
-				end if;
-			elsif new_metric then
-				perform adjust_content_rating_global_stats(new_route_type,1,new.overall_score);
-			end if;
-			if old_metric and (not new_metric or old.object_route_id is distinct from new.object_route_id) then
-				perform adjust_content_popularity_rating_dimensions(old.object_route_id,old.id,-1);
-			end if;
-			if new_metric and (not old_metric or old.object_route_id is distinct from new.object_route_id) then
-				perform adjust_content_popularity_rating_dimensions(new.object_route_id,new.id,1);
-			end if;
-			if old_weight<>new_weight then perform record_popularity_event(route_id,'rating',new_weight-old_weight); end if;
+			if trend_delta<>0 then perform record_popularity_event(route_id,'rating',trend_delta); end if;
 			perform enqueue_content_stats_refresh(route_id,true,true);
 			if tg_op='DELETE' then return old; end if; return new;
 		end;
@@ -382,6 +365,17 @@ func ratingSchemaStatements() []string {
 			for each row execute function refresh_popularity_from_rating()`,
 		`create trigger trg_content_ratings_remove_popularity before delete on content_ratings
 			for each row execute function refresh_popularity_from_rating()`,
+		`create function remove_project_ratings() returns trigger as $$
+		begin
+			-- FK cascade runs after the route is gone. Remove votes while their
+			-- category, dimensions and foreign-key targets are still available.
+			delete from content_ratings where object_route_id=old.id;
+			return old;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_public_routes_remove_ratings before delete on public_routes
+			for each row when (old.entity_type in ('mod','modpack','plugin','map','resource_pack','shader_pack','datapack','addon','minecraft_server'))
+			execute function remove_project_ratings()`,
 		contentPopularityCommentRefreshFunctionStatement(),
 		commentPopularityTriggerDefinitions["trg_comments_popularity_insert"],
 		commentPopularityTriggerDefinitions["trg_comments_popularity_update"],
