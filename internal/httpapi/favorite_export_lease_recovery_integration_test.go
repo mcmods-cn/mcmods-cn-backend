@@ -109,6 +109,10 @@ func TestFavoriteExportLeaseDuringNotificationIntegration(t *testing.T) {
 	pool, userID := newPostgresUserFixture(t, ctx, "favorite-notification-lease")
 	cfg := config.Load()
 	worker := NewFavoriteModpackExportWorker(cfg, pool, nil)
+	var collectionID string
+	if err := pool.QueryRow(ctx, `insert into favorite_collections(user_id,name) values($1,'Notifications') returning public_id`, userID).Scan(&collectionID); err != nil {
+		t.Fatal(err)
+	}
 	for _, terminal := range []string{"ready", "failed"} {
 		t.Run(terminal, func(t *testing.T) {
 			var taskID string
@@ -127,8 +131,8 @@ func TestFavoriteExportLeaseDuringNotificationIntegration(t *testing.T) {
 			}
 			if err = pool.QueryRow(ctx, `insert into favorite_modpack_export_tasks(owner_user_id,collection_public_id_snapshot,pack_name,pack_version_id,
 				minecraft_version,loader_type,loader_version,status,attempt_count,lease_token,lease_expires_at)
-				values($1,'snapshot','pack','1','1.20.1','fabric','0.16','processing',$2,'holder',clock_timestamp()+interval '3 seconds') returning public_id`,
-				userID, favoriteExportMaxAttempts(cfg.FavoriteExport.MaxBuildAttempts)).Scan(&taskID); err != nil {
+				values($1,$3,'pack','1','1.20.1','fabric','0.16','processing',$2,'holder',clock_timestamp()+interval '3 seconds') returning public_id`,
+				userID, favoriteExportMaxAttempts(cfg.FavoriteExport.MaxBuildAttempts), collectionID).Scan(&taskID); err != nil {
 				t.Fatal(err)
 			}
 			result := make(chan error, 1)
