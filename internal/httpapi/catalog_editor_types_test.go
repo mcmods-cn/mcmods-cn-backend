@@ -55,6 +55,16 @@ func TestValidateCatalogTemplateGeometry(t *testing.T) {
 	if err := validateCatalogTemplate(valid); err != nil {
 		t.Fatalf("valid template rejected: %v", err)
 	}
+	var outputIndex int
+	valid.Slots[1].OutputIndex = &outputIndex
+	if err := validateCatalogTemplate(valid); err != nil {
+		t.Fatalf("explicit output index zero should pass: %v", err)
+	}
+	outputIndex = -1
+	if err := validateCatalogTemplate(valid); !errors.Is(err, errCatalogEditorInvalid) {
+		t.Fatalf("negative output index should fail, got %v", err)
+	}
+	valid.Slots[1].OutputIndex = nil
 	invalid := *valid
 	invalid.Slots = append([]catalogTemplateSlotEdit(nil), valid.Slots...)
 	invalid.Slots[1].Rect.X = 170
