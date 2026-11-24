@@ -25,7 +25,8 @@ var ossMaintenanceNonBindingTables = map[string]bool{
 }
 
 func inspectOSSByteMaintenanceReferences(ctx context.Context, tx pgx.Tx, fileID int64, key string, plan OSSByteMaintenancePlan, includeFileFKs bool) (ossMaintenanceReferences, error) {
-	result := ossMaintenanceReferences{Complete: true}
+	var result ossMaintenanceReferences
+	withinBudget := true
 	if _, err := tx.Exec(ctx, `set local statement_timeout='2s'`); err != nil {
 		return result, err
 	}
@@ -58,7 +59,7 @@ func inspectOSSByteMaintenanceReferences(ctx context.Context, tx pgx.Tx, fileID 
 			}
 			result.Rows += n
 			if n > int64(plan.MaxReferenceRows) {
-				result.Complete = false
+				withinBudget = false
 			}
 		}
 	}
@@ -67,7 +68,6 @@ func inspectOSSByteMaintenanceReferences(ctx context.Context, tx pgx.Tx, fileID 
 		return result, err
 	}
 	if len(columns) > plan.MaxReferenceCols {
-		result.Complete = false
 		return result, nil
 	}
 	escapedPath := (&url.URL{Path: key}).EscapedPath()
@@ -83,9 +83,10 @@ func inspectOSSByteMaintenanceReferences(ctx context.Context, tx pgx.Tx, fileID 
 		}
 		result.Rows += matches
 		if n > int64(plan.MaxReferenceRows) || large > 0 {
-			result.Complete = false
+			withinBudget = false
 		}
 	}
+	result.Complete = withinBudget
 	return result, nil
 }
 

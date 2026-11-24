@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -259,6 +261,33 @@ func TestAuditCMP005MaintenanceMissingSourceWrongPinsAndReferencesRemainUnchange
 	var n int
 	if err := f.db.QueryRow(f.ctx, `select (select count(*) from oss_upload_byte_bindings)+(select count(*) from oss_upload_maintenance_actions)`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("rejected data repair created proofs/intents=%d err=%v", n, err)
+	}
+}
+
+func TestMaintenanceInterruptedReferenceScanIsIncompleteIntegration(t *testing.T) {
+	f := newTEST037Fixture(t)
+	id, key, _, _, _ := auditOSSByteLegacyFile(t, f, false)
+	file, err := (&ossMaintenanceRun{s: f.server}).loadFile(f.ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(f.ctx)
+	// Simulate table maintenance in another session. Readers retain the normal
+	// statement deadline and must report the interrupted inventory as unknown.
+	if _, err := blocker.Exec(f.ctx, "lock table public.notifications in access exclusive mode"); err != nil {
+		t.Fatal(err)
+	}
+	run := ossMaintenanceRun{s: f.server, plan: OSSByteMaintenancePlan{
+		MaxReferenceRows: 100, MaxReferenceCols: 2048, MaxReferenceBytes: 4096,
+	}}
+	refs, err := run.references(f.ctx, file, key, true)
+	var pgErr *pgconn.PgError
+	if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "57014" || refs.Complete {
+		t.Fatalf("expected an incomplete scan at the statement deadline, complete=%v err=%v", refs.Complete, err)
 	}
 }
 

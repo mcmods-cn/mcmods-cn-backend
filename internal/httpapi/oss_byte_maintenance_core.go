@@ -78,7 +78,10 @@ func (run *ossMaintenanceRun) references(ctx context.Context, file ossMaintenanc
 	if err != nil {
 		return refs, err
 	}
-	return refs, tx.Commit(ctx)
+	if err = tx.Commit(ctx); err != nil {
+		refs.Complete = false
+	}
+	return refs, err
 }
 
 func (run *ossMaintenanceRun) claimAction(ctx context.Context, cfg ossConfigPayload, e OSSByteMaintenanceEntry, file ossMaintenanceFile, targetKey, sourceKey, initialState string) (string, error) {
