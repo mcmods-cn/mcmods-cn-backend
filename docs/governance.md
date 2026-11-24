@@ -4,6 +4,17 @@
 
 ## 当前版本与验收
 
+2026-11-24 的复查起点为后端 `650a423d`、前端 `f7e2beed`、exporter `91b0fafe`。完整性检查按各仓实际 Git 树和内容哈希运行。新一轮逐行阅读、以前同哈希的记录、二进制与格式核验分别统计。发布时需配对实际验过的源码与产物。
+
+| 本次复查的业务链 | 复跑入口和验收范围 |
+| --- | --- |
+| 对象存储和项目媒体 | `TestPublicMediaReadFailureIsReported` 验证存储读取出错时的 HTTP 状态。`TestStoredOSSImagesDoNotSignUnboundPrivateFilesIntegration` 在真实 PostgreSQL 上核对权限及查询次数。32 名作者、64 名成员的同一页从 64 次查询减至 1 次。`TestAuditCMP003OSSUploadTicketCommitsReservationBlueprintSessionAndActivityHTTPIntegration` 包含协议替身中止超时后的持久化补偿和重试。 |
+| 资料导入与展示 | Fabric 开发客户端输出的 ZIP 的 SHA-256 为 `b0ade4147adc0f0b25632c6cd99464b31851ca57c29c621bb9e31657b34043b6`。同一份 ZIP 由 Chromium 续传，单节点 JetStream 投递，真实 PostgreSQL 存储，独立审核后匿名读取 5,830 项目录。此次 HTTP 联调使用受控对象存储。正式加载器入世界产包另行验收。 |
+| 当前数据库 | 安装入口 `cmd/db-initialize` 使用 generation 172。项目成员资格会影响评分、收藏、评论和浏览的统计。开发库版本不符时按[任务自有环境重建流程](testing-isolated-environment.md#重建任务自有环境)办理。已有 171 备份须用与其配对的应用读取。新代际首次安装、并发及最终综合测试各自绑定其运行版本。 |
+
+### 2026-11-23 冻结快照的验收
+
+
 2026-11-23 的验收绑定以下三个源码快照。核对镜像、JAR 和原包时使用各自产物所记录的源码提交。后端账号旅程使用单独验过的联调驱动 `2861d713be36521489c43c3836db3026c6625657`，该提交的差异是测试驱动读取调度器当前的忙状态说明。[受控账号联调入口](testing-isolated-environment.md#实际服务检查与测试)
 
 | 仓库 | 验收源码 | 当前维护入口 |
@@ -21,7 +32,7 @@
 | 前端及发行构建 | 前端通过类型检查、lint、418 项单元和 336 项 Chromium 测试。标准 Dockerfile 通过构建并以非 root 运行。Exporter 使用 JDK 17 与 Gradle 8.8，通过 77 项 JUnit、54 项真实包及合成契约检查和 Fabric、Forge 标准构建。两个干净加载器实例识别了对应 JAR。 |
 | 最新原包到匿名页面 | 使用 `5d058d3` 的 Fabric 开发客户端导出的原包。该原包 SHA-256 为 `31a50489c64c63ee843f350ad84a0c1668dffecd3229795b1389cdca651782e1`。真实 Chromium 经可信本地 HTTPS、真实 PostgreSQL、Redis、JetStream 和受控对象存储完成中止、续传、独立审核及匿名读取。一个生效修订，投递与 ACK 各一次，零重投。首次在已有 broker 的运行触及存储预留上限，数据库降级完成业务，真实 JetStream 验收在全新隔离服务复跑通过。 |
 
-首次部署可在 PostgreSQL 18.6 空库安装 generation 171，或从与该版本配对的备份恢复。已存在的目标库先核对代际和结构指纹。空库并发安装、重复启动、版本拒绝以及合成数据备份恢复均有真库结果。按业务数据和凭据的保留范围配对源码、镜像及数据库快照，部署后在目标反代核对就绪、Cookie、上传与消费者进度。[数据库安装与回退](../README.md#数据库安装发布和恢复) · [队列恢复](queue-recovery.md)
+该冻结版本曾在 PostgreSQL 18.6 空库安装 generation 171，并用与该版本配对的备份验证恢复。已存在的目标库先核对代际和结构指纹。空库并发安装、重复启动、版本拒绝以及合成数据备份恢复均有真库结果。按业务数据和凭据的保留范围配对源码、镜像及数据库快照，部署后在目标反代核对就绪、Cookie、上传与消费者进度。[数据库安装与回退](../README.md#数据库安装发布和恢复) · [队列恢复](queue-recovery.md)
 
 正式 Minecraft 会话中的发行 JAR 入世界和同包回放待验。目标 TLS、跨主机恢复、实体 GPU、Windows ACL 及启用的云 OSS、OAuth、SMTP、AI 供应商均按部署范围单独核验。本地结果使用隔离服务和合成账号。GitHub 主分支的执行状态以相应仓库的 Actions 为准。[后端 CI](https://github.com/mcmods-cn/mcmods-cn-backend/actions/workflows/ci.yml) · [真实服务工作流](https://github.com/mcmods-cn/mcmods-cn-backend/actions/workflows/real-services.yml) · [前端 CI](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/workflows/ci.yml) · [exporter 契约与构建](https://github.com/mcmods-cn/mcmods_exporter/actions/workflows/contracts.yml)
 
