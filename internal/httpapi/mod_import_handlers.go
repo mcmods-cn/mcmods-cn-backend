@@ -67,20 +67,7 @@ func (s *Server) getSimpleProjectMetadataImport(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusNotFound, "project type not found")
 		return
 	}
-	job, err := s.modMetadataImportJob(r.Context(), strings.TrimSpace(r.PathValue("jobId")), currentClaims(r).Subject)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "project import job not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "failed to load project import job")
-		return
-	}
-	if job.ProjectType != projectType {
-		writeError(w, http.StatusNotFound, "project import job not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, job)
+	s.writeProjectMetadataImportJob(w, r, projectType)
 }
 
 func (s *Server) createProjectMetadataImport(w http.ResponseWriter, r *http.Request, projectType string) {
@@ -104,7 +91,7 @@ func (s *Server) createProjectMetadataImport(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	userID := currentClaims(r).Subject
-	var jobID string
+	var job modMetadataImportJobResponse
 	tx, txErr := s.db.Begin(r.Context())
 	if txErr != nil {
 		writeError(w, http.StatusInternalServerError, "创建模组导入任务失败")
@@ -113,14 +100,15 @@ func (s *Server) createProjectMetadataImport(w http.ResponseWriter, r *http.Requ
 	defer tx.Rollback(r.Context())
 	if err = tx.QueryRow(r.Context(),
 		`insert into mod_metadata_import_jobs(user_id,project_type,provider,source_url,status,progress)
-		 values($1,$2,$3,$4,'queued',0) returning public_id`,
+		 values($1,$2,$3,$4,'queued',0)
+		 returning public_id,project_type,provider,source_url,status,progress,created_at,updated_at`,
 		userID, projectType, provider, sourceURL,
-	).Scan(&jobID); err != nil {
+	).Scan(&job.ID, &job.ProjectType, &job.Provider, &job.SourceURL, &job.Status, &job.Progress, &job.CreatedAt, &job.UpdatedAt); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建模组导入任务失败")
 		return
 	}
-	message := modMetadataImportMessage{JobID: jobID}
-	if _, err = queue.EnqueueTx(r.Context(), tx, modMetadataImportTaskCode, "mod.metadata.import.requested", "mod_metadata_import_job", jobID, r.Header.Get("X-Request-ID"), message); err != nil {
+	message := modMetadataImportMessage{JobID: job.ID}
+	if _, err = queue.EnqueueTx(r.Context(), tx, modMetadataImportTaskCode, "mod.metadata.import.requested", "mod_metadata_import_job", job.ID, r.Header.Get("X-Request-ID"), message); err != nil {
 		writeError(w, http.StatusInternalServerError, "模组导入任务可靠入队失败")
 		return
 	}
@@ -132,17 +120,20 @@ func (s *Server) createProjectMetadataImport(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "创建模组导入任务失败")
 		return
 	}
-	s.writeAppLog(r.Context(), "user_interaction", "info", "create_mod_metadata_import", provider, userID, r, http.StatusAccepted, 0, map[string]any{"jobId": jobID})
-	job, err := s.modMetadataImportJob(r.Context(), jobID, userID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取模组导入任务失败")
-		return
-	}
+	s.writeAppLog(r.Context(), "user_interaction", "info", "create_mod_metadata_import", provider, userID, r, http.StatusAccepted, 0, map[string]any{"jobId": job.ID})
 	writeJSON(w, http.StatusAccepted, job)
 }
 
 func (s *Server) getModMetadataImport(w http.ResponseWriter, r *http.Request) {
-	job, err := s.modMetadataImportJob(r.Context(), strings.TrimSpace(r.PathValue("jobId")), currentClaims(r).Subject)
+	s.writeProjectMetadataImportJob(w, r, "mod")
+}
+
+func (s *Server) getModpackMetadataImport(w http.ResponseWriter, r *http.Request) {
+	s.writeProjectMetadataImportJob(w, r, "modpack")
+}
+
+func (s *Server) writeProjectMetadataImportJob(w http.ResponseWriter, r *http.Request, projectType string) {
+	job, err := s.modMetadataImportJob(r.Context(), strings.TrimSpace(r.PathValue("jobId")), currentClaims(r).Subject, projectType)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "模组导入任务不存在")
 		return
@@ -158,13 +149,13 @@ func (s *Server) getModMetadataImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, job)
 }
 
-func (s *Server) modMetadataImportJob(ctx context.Context, jobID string, userID int64) (modMetadataImportJobResponse, error) {
+func (s *Server) modMetadataImportJob(ctx context.Context, jobID string, userID int64, projectType string) (modMetadataImportJobResponse, error) {
 	var job modMetadataImportJobResponse
 	var result []byte
 	err := s.db.QueryRow(ctx,
 		`select public_id,project_type,provider,source_url,status,progress,coalesce(result,'null'::jsonb),error,created_at,updated_at
-		 from mod_metadata_import_jobs where public_id=$1 and user_id=$2`,
-		jobID, userID,
+		 from mod_metadata_import_jobs where public_id=$1 and user_id=$2 and project_type=$3`,
+		jobID, userID, projectType,
 	).Scan(&job.ID, &job.ProjectType, &job.Provider, &job.SourceURL, &job.Status, &job.Progress, &result, &job.Error, &job.CreatedAt, &job.UpdatedAt)
 	if err != nil {
 		return modMetadataImportJobResponse{}, err

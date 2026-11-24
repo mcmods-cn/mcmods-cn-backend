@@ -306,7 +306,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/mod-imports", s.requirePermission("project.create", s.createModMetadataImport))
 	s.mux.HandleFunc("GET /api/v1/mod-imports/{jobId}", s.requirePermission("project.create", s.getModMetadataImport))
 	s.mux.HandleFunc("POST /api/v1/modpack-imports", s.requirePermission("modpack.create", s.createModpackMetadataImport))
-	s.mux.HandleFunc("GET /api/v1/modpack-imports/{jobId}", s.requirePermission("modpack.create", s.getModMetadataImport))
+	s.mux.HandleFunc("GET /api/v1/modpack-imports/{jobId}", s.requirePermission("modpack.create", s.getModpackMetadataImport))
 	s.mux.HandleFunc("POST /api/v1/content-project-imports/{projectType}", s.requireAuth(s.createSimpleProjectMetadataImport))
 	s.mux.HandleFunc("GET /api/v1/content-project-imports/{projectType}/{jobId}", s.requireAuth(s.getSimpleProjectMetadataImport))
 	s.mux.HandleFunc("GET /api/v1/mods/{siteId}/revisions", s.optionalAuth(s.modRevisionHistory))
