@@ -280,6 +280,9 @@ func validateCatalogTemplate(edit *catalogRecipeTemplateEdit) error {
 		if slot.Role != "output" && slot.OutputIndex != nil {
 			return fmt.Errorf("%w: only output slots may have outputIndex", errCatalogEditorInvalid)
 		}
+		if slot.OutputIndex != nil && *slot.OutputIndex < 0 {
+			return fmt.Errorf("%w: outputIndex must be non-negative", errCatalogEditorInvalid)
+		}
 	}
 	return nil
 }
