@@ -35,6 +35,8 @@ const (
 	projectAutomationMirrorGlobalConcurrency = 4
 )
 
+var errRedistributionNotAllowed = errors.New("license is not approved for redistribution")
+
 var errChangelogParentUnavailable = errors.New("changelog target is not approved")
 
 var errProjectMirrorScanRejected = errors.New("automated project mirror failed security scan")
@@ -302,7 +304,10 @@ func (worker *ProjectAutomationWorker) execute(ctx context.Context, job projectA
 		return result, "update_conflict", updateErr
 	case "site_downloads":
 		if err = worker.checkRedistribution(ctx, job); err != nil {
-			return nil, "license_denied", err
+			if errors.Is(err, errRedistributionNotAllowed) {
+				return nil, "license_denied", err
+			}
+			return nil, "configuration_error", err
 		}
 		files, loadErr := worker.loadProviderFiles(ctx, job, cfg)
 		if loadErr != nil {
@@ -591,9 +596,15 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 	if err != nil {
 		return nil, fmt.Errorf("load Minecraft version configuration for changelog synchronization: %w", err)
 	}
-	currentVersions, _, currentVersionErr := classifyMinecraftVersionCodes(catalog, worker.currentProjectVersions(ctx, job), 100)
-	if currentVersionErr != nil {
-		currentVersions = nil
+	var currentVersions []string
+	for _, release := range releases {
+		if len(release.GameVersions) == 0 {
+			currentVersions, err = worker.currentProjectVersions(ctx, job)
+			if err != nil {
+				return nil, fmt.Errorf("load project versions for changelog synchronization: %w", err)
+			}
+			break
+		}
 	}
 	for _, release := range releases {
 		if release.PublishedAt.IsZero() {
@@ -757,33 +768,27 @@ func lockManagedChangelogReleaseTx(ctx context.Context, tx pgx.Tx, routeID int64
 	return binding, err
 }
 
-func (worker *ProjectAutomationWorker) currentProjectVersions(ctx context.Context, job projectAutomationJob) []string {
+func (worker *ProjectAutomationWorker) currentProjectVersions(ctx context.Context, job projectAutomationJob) ([]string, error) {
 	var versions []string
+	var err error
 	if job.ProjectType == "mod" {
-		_ = worker.server.db.QueryRow(ctx, `select coalesce(array_agg(distinct minecraft_version order by minecraft_version),'{}'::text[])
+		err = worker.server.db.QueryRow(ctx, `select coalesce(array_agg(distinct minecraft_version order by minecraft_version),'{}'::text[])
 			from mod_loader_compatibilities where mod_id=$1`, job.InternalID).Scan(&versions)
 	} else {
-		_ = worker.server.db.QueryRow(ctx, `select minecraft_versions from simple_projects where id=$1 and project_type=$2`, job.InternalID, job.ProjectType).Scan(&versions)
+		err = worker.server.db.QueryRow(ctx, `select minecraft_versions from simple_projects where id=$1 and project_type=$2`, job.InternalID, job.ProjectType).Scan(&versions)
 	}
-	return versions
+	return versions, err
 }
 
 func (worker *ProjectAutomationWorker) checkRedistribution(ctx context.Context, job projectAutomationJob) error {
-	var license string
-	if job.ProjectType == "mod" {
-		_ = worker.server.db.QueryRow(ctx, `select license from mods where id=$1`, job.InternalID).Scan(&license)
-	} else {
-		_ = worker.server.db.QueryRow(ctx, `select license from simple_projects where id=$1 and project_type=$2`, job.InternalID, job.ProjectType).Scan(&license)
+	license, allowed, err := projectRedistributionPolicy(ctx, worker.server.db, job.ProjectType, job.InternalID)
+	if err != nil {
+		return fmt.Errorf("read project redistribution policy: %w", err)
 	}
-	var allowed bool
-	err := worker.server.db.QueryRow(ctx, `select redistribution_allowed from license_policies where lower(spdx_id)=lower($1)`, strings.TrimSpace(license)).Scan(&allowed)
-	if err == nil && allowed {
+	if allowed || job.LicenseOverride && strings.TrimSpace(job.OverrideReason) != "" && strings.TrimSpace(job.OverrideSource) != "" {
 		return nil
 	}
-	if job.LicenseOverride && strings.TrimSpace(job.OverrideReason) != "" && strings.TrimSpace(job.OverrideSource) != "" {
-		return nil
-	}
-	return fmt.Errorf("license %q is not approved for redistribution", license)
+	return fmt.Errorf("%w: %q", errRedistributionNotAllowed, license)
 }
 
 func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job projectAutomationJob, cfg modImportConfig, files []providerProjectFile) (map[string]any, error) {
@@ -874,7 +879,7 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 		metadata, _ := json.Marshal(file)
 		tx, txErr := worker.server.db.Begin(ctx)
 		if txErr != nil {
-			return nil, txErr
+			return nil, errors.Join(txErr, worker.cleanupUnregisteredProjectMirror(ctx, client, ossCfg, objectKey))
 		}
 		var ossFileID int64
 		txErr = lockProjectAutomationRunTx(ctx, tx, job)

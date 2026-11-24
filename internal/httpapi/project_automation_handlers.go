@@ -96,22 +96,20 @@ func (s *Server) projectAutomation(w http.ResponseWriter, r *http.Request) {
 			}
 			if item.Enabled {
 				var bound bool
-				if scanErr := tx.QueryRow(r.Context(), `select exists(select 1 from project_external_sources where project_route_id=$1 and source_type=$2)`, target.RouteID, item.SourceType).Scan(&bound); scanErr != nil || !bound {
+				if scanErr := tx.QueryRow(r.Context(), `select exists(select 1 from project_external_sources where project_route_id=$1 and source_type=$2)`, target.RouteID, item.SourceType).Scan(&bound); scanErr != nil {
+					writeError(w, http.StatusInternalServerError, "读取项目来源失败")
+					return
+				}
+				if !bound {
 					writeError(w, 400, "启用自动更新前必须绑定并验证对应来源")
 					return
 				}
 				if item.Kind == "site_downloads" && !item.LicenseOverride {
-					var allowed bool
-					var license string
-					licenseQuery := `select license from simple_projects where id=$1 and project_type=$2`
-					if target.ProjectType == "mod" {
-						licenseQuery = `select license from mods where id=$1`
-					}
-					if scanErr := tx.QueryRow(r.Context(), licenseQuery, projectAutomationLicenseArgs(target)...).Scan(&license); scanErr != nil {
-						writeError(w, 500, "读取项目许可证失败")
+					_, allowed, err := projectRedistributionPolicy(r.Context(), tx, target.ProjectType, target.InternalID)
+					if err != nil {
+						writeError(w, http.StatusInternalServerError, "读取项目许可证失败")
 						return
 					}
-					_ = tx.QueryRow(r.Context(), `select redistribution_allowed from license_policies where lower(spdx_id)=lower($1)`, strings.TrimSpace(license)).Scan(&allowed)
 					if !allowed {
 						writeError(w, 400, "当前项目许可证不允许自动建立站内下载源")
 						return
@@ -235,11 +233,19 @@ func completeProjectAutomationSettings(settings, sources []map[string]any) []map
 	return result
 }
 
-func projectAutomationLicenseArgs(target projectAutomationTarget) []any {
-	if target.ProjectType == "mod" {
-		return []any{target.InternalID}
+func projectRedistributionPolicy(ctx context.Context, db databaseQuery, projectType string, internalID int64) (string, bool, error) {
+	project := `select license from simple_projects where id=$1 and project_type=$2`
+	args := []any{internalID, projectType}
+	if projectType == "mod" {
+		project = `select license from mods where id=$1`
+		args = []any{internalID}
 	}
-	return []any{target.InternalID, target.ProjectType}
+	var license string
+	var allowed bool
+	err := db.QueryRow(ctx, `select project.license,exists(select 1 from license_policies policy
+		where lower(policy.spdx_id)=lower(btrim(project.license)) and policy.redistribution_allowed)
+		from (`+project+`) project`, args...).Scan(&license, &allowed)
+	return license, allowed, err
 }
 
 type bindProjectSourceRequest struct {
