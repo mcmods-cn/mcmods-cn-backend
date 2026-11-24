@@ -322,12 +322,8 @@ func (s *Server) modpackItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item, err := modpackBySiteID(r.Context(), s.db, siteID, claims.Subject, false)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "modpack not found")
-		return
-	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load modpack")
+		writeProjectReadError(w, err, "modpack")
 		return
 	}
 	item.CanEdit = canEditModpack(claims, item)
@@ -350,7 +346,7 @@ func (s *Server) modpackIcon(w http.ResponseWriter, r *http.Request) {
 func (s *Server) modpackEditor(w http.ResponseWriter, r *http.Request) {
 	item, err := modpackBySiteID(r.Context(), s.db, normalizeModSiteID(r.PathValue("siteId")), currentClaims(r).Subject, true)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "modpack not found")
+		writeProjectReadError(w, err, "modpack")
 		return
 	}
 	if !canEditModpack(currentClaims(r), item) {
@@ -492,7 +488,7 @@ func (s *Server) createModpackRevision(w http.ResponseWriter, r *http.Request, s
 	claims := currentClaims(r)
 	current, err := modpackBySiteID(r.Context(), s.db, siteID, claims.Subject, true)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "modpack not found")
+		writeProjectReadError(w, err, "modpack")
 		return
 	}
 	if !canEditModpack(claims, current) {
@@ -1210,47 +1206,19 @@ func (s *Server) modpackGalleryImage(w http.ResponseWriter, r *http.Request) {
 		join oss_files file on file.id=gallery.oss_file_id and file.status='active'
 		where gallery.public_id=$2 and (pack.review_status='approved' or pack.submitted_by=$3)`, normalizeModSiteID(r.PathValue("siteId")), strings.ToLower(r.PathValue("publicId")), currentClaims(r).Subject).Scan(&objectKey, &contentType, &anonymousAllowed)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "modpack gallery image not found")
+		writeProjectReadError(w, err, "modpack gallery image")
 		return
 	}
 	s.redirectCatalogOSSAsset(anonymousPublicRasterRedirect(w, anonymousAllowed), r, objectKey, contentType)
 }
 
 func (s *Server) modpackHistory(w http.ResponseWriter, r *http.Request) {
-	claims := currentClaims(r)
 	siteID := normalizeModSiteID(r.PathValue("siteId"))
-	pageRequest, err := parseContentHistoryPageRequest(r.URL.Query(), contentHistoryScope("modpack", siteID))
+	page, err := parseContentHistoryPageRequest(r.URL.Query(), contentHistoryScope("modpack", siteID))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	item, err := modpackBySiteID(r.Context(), s.db, siteID, claims.Subject, true)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "modpack not found")
-		return
-	}
-	canEdit := canEditModpack(claims, item)
-	visibility := projectPendingReviewVisibility(claims, item.PublicID, canEdit)
-	submittedBy := int64(0)
-	if item.SubmittedByInternal != nil {
-		submittedBy = *item.SubmittedByInternal
-	}
-	isSubmitter := submittedBy > 0 && submittedBy == claims.Subject
-	if item.ReviewStatus != "approved" && !isSubmitter && !visibility.allows(item.ReviewStatus, submittedBy) {
-		writeError(w, http.StatusNotFound, "modpack not found")
-		return
-	}
-	var published *int64
-	if item.PublishedRevisionID != nil {
-		var id int64
-		if s.db.QueryRow(r.Context(), `select id from content_revisions where public_id=$1`, *item.PublishedRevisionID).Scan(&id) == nil {
-			published = &id
-		}
-	}
-	items, err := contentRevisionHistoryPage(r.Context(), s.db, modpackAggregate, item.PublicID, published, visibility, pageRequest)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load modpack history")
-		return
-	}
-	writeJSON(w, http.StatusOK, mergeContentHistoryPage(items, nil, pageRequest))
+	parent := s.db.QueryRow(r.Context(), `select public_id,review_status,coalesce(submitted_by,0),published_revision_id from modpacks where slug=$1`, siteID)
+	s.writeProjectHistory(w, r, parent, "modpack", "modpack", modpackAggregate, page)
 }

@@ -28,6 +28,37 @@ type contentHistoryItem struct {
 	Current         bool      `json:"current"`
 }
 
+func writeProjectReadError(w http.ResponseWriter, err error, entity string) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, entity+" not found")
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "failed to load "+entity)
+}
+
+func (s *Server) writeProjectHistory(w http.ResponseWriter, r *http.Request, parent pgx.Row, entity, kind, aggregate string, page contentHistoryPageRequest) {
+	var publicID, status string
+	var submitter int64
+	var published *int64
+	if err := parent.Scan(&publicID, &status, &submitter, &published); err != nil {
+		writeProjectReadError(w, err, entity)
+		return
+	}
+	claims := currentClaims(r)
+	visibility := projectPendingReviewVisibility(claims, publicID, canEditProjectRevision(claims, kind, publicID))
+	isSubmitter := submitter > 0 && submitter == claims.Subject
+	if !isSubmitter && !visibility.allows(status, submitter) {
+		writeError(w, http.StatusNotFound, entity+" not found")
+		return
+	}
+	items, err := contentRevisionHistoryPage(r.Context(), s.db, aggregate, publicID, published, visibility, page)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load "+entity+" history")
+		return
+	}
+	writeJSON(w, http.StatusOK, mergeContentHistoryPage(items, nil, page))
+}
+
 func (s *Server) communityPostHistory(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
 	pageRequest, err := parseContentHistoryPageRequest(r.URL.Query(), contentHistoryScope("community", publicID))
