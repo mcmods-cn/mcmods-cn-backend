@@ -1,6 +1,9 @@
 package httpapi
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestSelectLoaderArtifactVersionIsStableAndDeterministic(t *testing.T) {
 	got, err := selectLoaderArtifactVersion([]string{
@@ -32,6 +35,25 @@ func TestNeoForgeArtifactPrefix(t *testing.T) {
 	for _, invalid := range []string{"25w14craftmine", "1.21.5-pre2", "26.2-rc-1", "1.19.4"} {
 		if prefix, err := neoForgeArtifactPrefix(invalid); err == nil || prefix != "" {
 			t.Errorf("neoForgeArtifactPrefix(%q)=(%q,%v); want empty/error", invalid, prefix, err)
+		}
+	}
+}
+
+func BenchmarkSelectLoaderArtifactVersion(b *testing.B) {
+	const count = 2048
+	versions := make([]string, count)
+	for i := range versions {
+		build := (i * 701) % count
+		version := fmt.Sprintf("1.20.1-47.%d.%d", build/64, build%64)
+		if build%4 == 0 {
+			version += "-beta"
+		}
+		versions[i] = version
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if got, err := selectLoaderArtifactVersion(versions, "1.20.1-"); err != nil || got != "47.31.63" {
+			b.Fatalf("selected %q: %v", got, err)
 		}
 	}
 }

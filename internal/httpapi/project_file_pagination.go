@@ -453,15 +453,12 @@ var errExternalProjectFileNotFound = errors.New("external project file not found
 func (s *Server) loadModrinthProjectFileByHash(ctx context.Context, projectID, fileID string, cfg modImportConfig) (providerProjectFile, error) {
 	fileID = strings.ToLower(strings.TrimSpace(fileID))
 	var algorithm string
-	switch len(fileID) {
-	case 40:
+	switch {
+	case validHexDigest(fileID, 40):
 		algorithm = "sha1"
-	case 128:
+	case validHexDigest(fileID, 128):
 		algorithm = "sha512"
 	default:
-		return providerProjectFile{}, errExternalProjectFileNotFound
-	}
-	if _, err := hex.DecodeString(fileID); err != nil {
 		return providerProjectFile{}, errExternalProjectFileNotFound
 	}
 	manifest, err := s.cachedModrinthProjectFileManifest(ctx, projectID, cfg)

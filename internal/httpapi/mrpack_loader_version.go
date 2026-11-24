@@ -3,7 +3,6 @@ package httpapi
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -47,17 +46,15 @@ func neoForgeArtifactPrefix(minecraftVersion string) (string, error) {
 }
 
 func selectLoaderArtifactVersion(versions []string, prefix string) (string, error) {
-	matches := make([]string, 0)
+	var selected string
 	for _, version := range versions {
-		if stableLoaderArtifactVersion(version, prefix) {
-			matches = append(matches, version)
+		if stableLoaderArtifactVersion(version, prefix) && (selected == "" || compareNumericVersion(version, selected) > 0) {
+			selected = version
 		}
 	}
-	if len(matches) == 0 {
+	if selected == "" {
 		return "", errors.New("loader metadata has no matching stable version")
 	}
-	sort.SliceStable(matches, func(i, j int) bool { return compareNumericVersion(matches[i], matches[j]) > 0 })
-	selected := matches[0]
 	if strings.Contains(selected, "-") && strings.HasPrefix(selected, prefix) {
 		selected = strings.TrimPrefix(selected, prefix)
 	}
