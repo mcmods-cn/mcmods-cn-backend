@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -89,4 +90,75 @@ func TestProfileRelationshipsReflectViewerAndStorageAvailabilityIntegration(t *t
 		t.Fatal(err)
 	}
 	f.require(t, f.reviewer, http.MethodPost, "/api/v1/users/"+target+"/follow", nil, http.StatusNotFound)
+}
+
+func TestProfileSettingsReadAndCommittedRefreshFailuresIntegration(t *testing.T) {
+	t.Run("permission projection", func(t *testing.T) {
+		f := newTEST013Fixture(t)
+		actor := f.userIDs[f.editor]
+		grantTEST044Permissions(t, f.ctx, f.db, actor, "user.message.receive", "user.avatar.update")
+		// Exercise the settings handler after authentication, with no cached roles.
+		cache := querycache.New(config.RedisConfig{})
+		defer cache.Close()
+		server := &Server{db: f.db, cache: cache}
+		read := func() *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/profile-settings", nil)
+			req = req.WithContext(context.WithValue(f.ctx, claimsContextKey, security.Claims{Subject: actor}))
+			w := httptest.NewRecorder()
+			server.getUserProfileSettings(w, req)
+			return w
+		}
+		before := read()
+		settings := decodeTEST022Data[userProfileSettingsResponse](t, before.Body.Bytes())
+		if before.Code != http.StatusOK || !settings.MessageReceive || !settings.CanUpdateAvatar {
+			t.Fatal("profile omitted current capabilities")
+		}
+		if _, err := f.db.Exec(f.ctx, "alter table user_role_bindings rename to unavailable_profile_bindings"); err != nil {
+			t.Fatal(err)
+		}
+		if got := read(); got.Code != http.StatusServiceUnavailable {
+			t.Errorf("unreadable profile permissions returned HTTP %d", got.Code)
+		}
+		if _, err := f.db.Exec(f.ctx, "alter table unavailable_profile_bindings rename to user_role_bindings"); err != nil {
+			t.Fatal(err)
+		}
+		after := read()
+		settings = decodeTEST022Data[userProfileSettingsResponse](t, after.Body.Bytes())
+		if after.Code != http.StatusOK || !settings.MessageReceive || !settings.CanUpdateAvatar {
+			t.Fatal("profile failed to recover its capabilities")
+		}
+	})
+	t.Run("committed preference", func(t *testing.T) {
+		f := newTEST013Fixture(t)
+		var initial bool
+		actor := f.userIDs[f.editor]
+		if err := f.db.QueryRow(f.ctx, "select show_online_status from users where id=$1", actor).Scan(&initial); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.db.Exec(f.ctx, `insert into system_settings(key,value) values('profile.config','{"signatureMaxBytes":"temporarily unavailable"}') on conflict(key) do update set value=excluded.value`); err != nil {
+			t.Fatal(err)
+		}
+		path := "/api/v1/users/me/profile-settings"
+		raw := f.require(t, f.editor, http.MethodPut, path, map[string]bool{"showOnlineStatus": !initial}, http.StatusServiceUnavailable)
+		var problem struct {
+			Code    string
+			Details struct{ Committed bool }
+		}
+		if err := json.Unmarshal(raw, &problem); err != nil || problem.Code != "PROFILE_SETTINGS_REFRESH_FAILED" || !problem.Details.Committed {
+			t.Fatal("failure did not distinguish committed change from unavailable read")
+		}
+		var saved bool
+		var revision int64
+		if err := f.db.QueryRow(f.ctx, "select show_online_status,profile_revision_id from users where id=$1", actor).Scan(&saved, &revision); err != nil || saved == initial || revision <= 0 {
+			t.Fatalf("saved %t revision %d err %v", saved, revision, err)
+		}
+		if _, err := f.db.Exec(f.ctx, `update system_settings set value='{"signatureMaxBytes":256}' where key='profile.config'`); err != nil {
+			t.Fatal(err)
+		}
+		f.origin.Config.Handler.(*Server).invalidateSettingsCache(f.ctx)
+		profile := decodeTEST022Data[userProfileSettingsResponse](t, f.require(t, f.editor, http.MethodGet, path, nil, http.StatusOK))
+		if profile.ShowOnlineStatus != saved {
+			t.Fatal("reloading did not return the committed change")
+		}
+	})
 }
