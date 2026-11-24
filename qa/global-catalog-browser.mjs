@@ -37,11 +37,35 @@ async function tab(role){
   }
   return page;
 }
+async function waitReadLimit(status,code,seconds,pathname){
+  if(status!==429)return false;
+  const window=Number(seconds);
+  assert.equal(code,'crawler_rate_limited','only the declared ordinary read budget is retried');
+  assert(Number.isInteger(window)&&window>0&&window<=120,'honour the service Retry-After');
+  const entry={path:pathname,code,status,seconds:window};
+  (report.readCooldowns??=[]).push(entry);await persist();
+  await delay((window+1)*1000);return true;
+}
 async function apiRead(page,url){
- return await page.evaluate(async url=>{
-   const res=await fetch(url,{cache:'no-store',credentials:'include'}); const result=await res.json();
-   return {http:res.status,data:result.data,code:result.code};
- },url);
+ for(let attempt=0;attempt<2;attempt++){
+  const value=await page.evaluate(async url=>{
+   const res=await fetch(url,{cache:'no-store',credentials:'include'});const result=await res.json();
+   return {http:res.status,data:result.data,code:result.code,retryAfter:res.headers.get('Retry-After')};
+  },url);
+  if(attempt===0 && await waitReadLimit(value.http,value.code,value.retryAfter,url.split('?')[0]))continue;
+  return value;
+ }
+}
+async function openReviewQueue(reviewer){
+ for(let attempt=0;attempt<2;attempt++){
+  const [queue]=await Promise.all([
+   reviewer.waitForResponse(r=>r.request().method()==='GET' && new URL(r.url()).pathname==='/api/v1/reviews/content'),
+   reviewer.goto(origin.origin+'/reviews')
+  ]);
+  const result=await queue.json();
+  if(attempt===0 && await waitReadLimit(queue.status(),result.code,queue.headers()['retry-after'],'/api/v1/reviews/content'))continue;
+  assert.equal(queue.status(),200,'reviewer can open the queue');return result.data.items;
+ }
 }
 async function populate(page,kind,reason,name,code){
  const loc=page.getByLabel('Localized name',{exact:true});
@@ -80,9 +104,10 @@ const cases=[
 ];
 try{
  for(const role of ['creator','reviewer','reader','anonymous'])pages[role]=await tab(role);
- let firstWrite=0;
+ let previousJourney=0;
  for(const [kind,editor,post,read,reader,button] of cases){
-  if(kind==='template' && Date.now()<firstWrite+61000)await delay(firstWrite+61000-Date.now());
+  if(previousJourney && Date.now()<previousJourney+61000)await delay(previousJourney+61000-Date.now());
+  previousJourney=Date.now();
   const page=pages.creator, reviewer=pages.reviewer, publicPage=pages[reader], name='Manual catalogue '+kind, reason='Document the standalone '+kind+' with independent editorial approval.';
   report.steps.push({kind,events:[]});const events=report.steps.at(-1).events;
   location=kind+' form fields';await persist();
@@ -91,7 +116,6 @@ try{
   location=kind+' submit';await persist();
   const trigger=page.getByRole('button',{name:button,exact:true}).first();
   const [response]=await Promise.all([page.waitForResponse(r=>new URL(r.url()).pathname===post && r.request().method()==='POST'),trigger.click()]);
-  if(firstWrite===0)firstWrite=Date.now();
   const reply=await response.json();
   assert.equal(response.status(),202,'manual creation returned '+reply.code);
   const receipt=reply.data;assert.equal(receipt.reviewStatus,'pending');
@@ -102,12 +126,7 @@ try{
   assert.equal(prior.http,404,'unpublished subject cannot be read by designated audience');
   events.push({action:'preapproval read',scope:reader,http:prior.http});
   location=kind+' independent queue';
-  const [queue]=await Promise.all([
-   reviewer.waitForResponse(r=>r.request().method()==='GET' && new URL(r.url()).pathname==='/api/v1/reviews/content'),
-   reviewer.goto(origin.origin+'/reviews')
-  ]);
-  assert.equal(queue.status(),200);
-  const candidates=(await queue.json()).data.items;
+  const candidates=await openReviewQueue(reviewer);
   const target=candidates.find(item=>item.id===receipt.revisionId);
   assert(target,'the submitted revision must appear in the reviewer queue');
   assert.equal(target.summary,reason);
@@ -116,6 +135,7 @@ try{
   await row.waitFor();
   await row.locator('textarea').fill('Independently verified '+kind+' catalogue contents.');
   const decisionPath='/api/v1/content-revisions/'+receipt.revisionId;
+  location=kind+' approval decision';await persist();
   const [reviewResponse]=await Promise.all([reviewer.waitForResponse(r=>new URL(r.url()).pathname===decisionPath && r.request().method()==='PATCH'),row.getByRole('button',{name:'Approve',exact:true}).click()]);
   assert.equal(reviewResponse.status(),200);
   events.push({action:'independent reviewer clicked approve',http:200,revisionId:receipt.revisionId});await persist();
