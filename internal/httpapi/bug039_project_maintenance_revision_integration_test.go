@@ -39,7 +39,7 @@ func TestBUG039AutomatedMaintenancePublishesAuditedRevisionAtomicallyIntegration
 		}
 	}()
 
-	actorID := configureSeededAutomationFixture(t, ctx, pool, "project.edit", "project.no-review")
+	actorID := seedAuthorizedAutomationFixture(t, ctx, pool, "project.edit", "project.no-review").Subject
 	now := time.Date(2026, time.August, 23, 12, 0, 0, 0, time.UTC)
 	projectCode := "b039m0001"
 	var modID int64
